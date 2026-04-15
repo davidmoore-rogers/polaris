@@ -5,11 +5,24 @@
  */
 
 import { PrismaClient } from "@prisma/client";
+import bcrypt from "bcrypt";
 
 const prisma = new PrismaClient();
 
 async function main() {
   console.log("Seeding database...");
+
+  // ─── Default Admin User ────────────────────────────────────────────────────
+
+  const adminHash = await bcrypt.hash("admin", 10);
+  await prisma.user.upsert({
+    where:  { username: "admin" },
+    update: {},
+    create: {
+      username:     "admin",
+      passwordHash: adminHash,
+    },
+  });
 
   // ─── IP Blocks ─────────────────────────────────────────────────────────────
 
@@ -144,6 +157,7 @@ async function main() {
   });
 
   console.log("Seed complete.");
+  console.log(`  Users:        ${await prisma.user.count()}`);
   console.log(`  Blocks:       ${await prisma.ipBlock.count()}`);
   console.log(`  Subnets:      ${await prisma.subnet.count()}`);
   console.log(`  Reservations: ${await prisma.reservation.count()}`);

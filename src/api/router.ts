@@ -3,14 +3,23 @@
  */
 
 import { Router } from "express";
+import authRouter from "./routes/auth.js";
 import blocksRouter from "./routes/blocks.js";
 import subnetsRouter from "./routes/subnets.js";
 import reservationsRouter from "./routes/reservations.js";
 import utilizationRouter from "./routes/utilization.js";
+import usersRouter from "./routes/users.js";
+import { requireAuth } from "./middleware/auth.js";
 
 export const router = Router();
 
+// Auth routes are public (login, logout, session check)
+router.use("/auth", authRouter);
+
+// Everything below requires an active session
+router.use(requireAuth);
 router.use("/blocks", blocksRouter);
 router.use("/subnets", subnetsRouter);
 router.use("/reservations", reservationsRouter);
 router.use("/utilization", utilizationRouter);
+router.use("/users", usersRouter);

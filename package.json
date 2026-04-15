@@ -19,8 +19,10 @@
   },
   "dependencies": {
     "@prisma/client": "^5.14.0",
+    "bcrypt": "^6.0.0",
     "cidr-tools": "^7.0.0",
     "express": "^5.0.0",
+    "express-session": "^1.19.0",
     "ip-cidr": "^3.1.0",
     "netmask": "^2.0.2",
     "pino": "^9.2.0",
@@ -28,8 +30,10 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
     "@types/express": "^5.0.0",
-    "@types/netmask": "^1.0.32",
+    "@types/express-session": "^1.18.2",
+    "@types/netmask": "^2.0.6",
     "@types/node": "^20.14.2",
     "@types/supertest": "^6.0.2",
     "@vitest/coverage-v8": "^1.6.0",

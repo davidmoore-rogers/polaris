@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login - IPAM</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <style>
+    .login-wrapper {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--color-bg-secondary);
+    }
+    .login-card {
+      background: var(--color-bg-primary);
+      border: 1px solid var(--color-border-light);
+      border-radius: var(--radius-lg);
+      padding: 2rem 2.5rem;
+      width: 100%;
+      max-width: 380px;
+      box-shadow: var(--shadow-md);
+    }
+    .login-card h2 { text-align: center; margin-bottom: 0.25rem; font-size: 1.25rem; }
+    .login-card .subtitle {
+      text-align: center;
+      color: var(--color-text-tertiary);
+      font-size: 0.85rem;
+      margin-bottom: 1.5rem;
+    }
+    .login-error {
+      background: #FEF2F2;
+      color: #991B1B;
+      border: 1px solid #FECACA;
+      border-radius: var(--radius-md);
+      padding: 0.5rem 0.75rem;
+      font-size: 0.85rem;
+      margin-bottom: 1rem;
+      display: none;
+    }
+    .login-card .btn-primary { width: 100%; justify-content: center; }
+    .login-logo {
+      display: block;
+      margin: 0 auto 1rem;
+      max-width: 160px;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-wrapper">
+    <div class="login-card">
+      <img src="/logo.png" alt="Rogers Group" class="login-logo">
+      <h2>IPAM Login</h2>
+      <p class="subtitle">IP Address Management</p>
+      <div class="login-error" id="login-error"></div>
+      <form id="login-form">
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username" required autofocus>
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Sign in</button>
+      </form>
+    </div>
+  </div>
+  <script>
+    document.getElementById("login-form").addEventListener("submit", async function (e) {
+      e.preventDefault();
+      var errEl = document.getElementById("login-error");
+      errEl.style.display = "none";
+
+      var username = document.getElementById("username").value.trim();
+      var password = document.getElementById("password").value;
+
+      try {
+        var res = await fetch("/api/v1/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: username, password: password }),
+        });
+        var data = await res.json();
+        if (!res.ok) {
+          errEl.textContent = data.error || "Login failed";
+          errEl.style.display = "block";
+          return;
+        }
+        window.location.href = "/";
+      } catch (err) {
+        errEl.textContent = "Network error — try again";
+        errEl.style.display = "block";
+      }
+    });
+  </script>
+</body>
+</html>

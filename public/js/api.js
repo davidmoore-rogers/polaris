@@ -14,6 +14,7 @@ async function request(method, path, body) {
   const res = await fetch(API_BASE + path, opts);
 
   if (res.status === 204) return null;
+  if (res.status === 401) { window.location.href = "/login.html"; return; }
 
   const data = await res.json();
   if (!res.ok) {
@@ -50,6 +51,12 @@ const api = {
     global:  ()   => request("GET", "/utilization"),
     block:   (id) => request("GET", `/utilization/blocks/${id}`),
     subnet:  (id) => request("GET", `/utilization/subnets/${id}`),
+  },
+  users: {
+    list:          ()       => request("GET", "/users"),
+    create:        (body)   => request("POST", "/users", body),
+    resetPassword: (id, b)  => request("PUT", `/users/${id}/password`, b),
+    delete:        (id)     => request("DELETE", `/users/${id}`),
   },
 };
 
