@@ -1,0 +1,101 @@
+// Prisma Schema — IP Address Management (IPAM)
+// Run: npx prisma migrate dev --env-file ip-management.env --name init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum IpVersion {
+  v4
+  v6
+}
+
+enum SubnetStatus {
+  available
+  reserved
+  deprecated
+}
+
+enum ReservationStatus {
+  active
+  expired
+  released
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+model IpBlock {
+  id          String    @id @default(uuid())
+  name        String
+  cidr        String    @unique
+  ipVersion   IpVersion
+  description String?   @db.NVarChar(Max)
+  // SQL Server has no native array type; tags are stored as a comma-separated string (e.g. "prod,internal")
+  tags        String    @default("")
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  subnets     Subnet[]
+
+  @@index([ipVersion])
+  @@map("ip_blocks")
+}
+
+model Subnet {
+  id          String       @id @default(uuid())
+  blockId     String
+  block       IpBlock      @relation(fields: [blockId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  cidr        String       @unique
+  name        String
+  purpose     String?      @db.NVarChar(Max)
+  status      SubnetStatus @default(available)
+  vlan        Int?
+  // SQL Server has no native array type; tags are stored as a comma-separated string
+  tags        String       @default("")
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  reservations Reservation[]
+
+  @@index([blockId])
+  @@index([status])
+  @@map("subnets")
+}
+
+model Reservation {
+  id         String            @id @default(uuid())
+  subnetId   String
+  subnet     Subnet            @relation(fields: [subnetId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  ipAddress  String?
+  hostname   String?
+  owner      String
+  projectRef String
+  expiresAt  DateTime?
+  notes      String?           @db.NVarChar(Max)
+  status     ReservationStatus @default(active)
+
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  // NOTE: SQL Server treats NULLs as distinct in unique indexes, so multiple
+  // full-subnet reservations (ipAddress = NULL) with the same subnetId+status
+  // could coexist. The service layer enforces the one-active-full-subnet rule.
+  @@unique([subnetId, ipAddress, status])
+  @@index([subnetId])
+  @@index([owner])
+  @@index([projectRef])
+  @@index([status])
+  @@index([expiresAt])
+  @@map("reservations")
+}

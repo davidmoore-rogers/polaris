@@ -1,0 +1,12 @@
+node_modules/
+dist/
+
+# Environment files with real credentials — never commit these
+.env
+ip-management.env
+
+# Prisma generated
+prisma/migrations/
+
+# Build artifacts
+*.js.map
