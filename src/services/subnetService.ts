@@ -15,9 +15,6 @@ import {
 
 const prisma = new PrismaClient();
 
-const tagsToDb = (tags?: string[]): string => (tags ?? []).join(",");
-const tagsFromDb = (tags: string): string[] => tags ? tags.split(",").filter(Boolean) : [];
-
 export interface CreateSubnetInput {
   blockId: string;
   cidr: string;
@@ -55,8 +52,7 @@ export async function listSubnets(filter: ListSubnetsFilter = {}) {
     },
     orderBy: { cidr: "asc" },
   });
-  const result = subnets.map((s) => ({ ...s, tags: tagsFromDb(s.tags) }));
-  return filter.tag ? result.filter((s) => s.tags.includes(filter.tag!)) : result;
+  return filter.tag ? subnets.filter((s) => s.tags.includes(filter.tag!)) : subnets;
 }
 
 // ─── Get ──────────────────────────────────────────────────────────────────────
@@ -118,7 +114,7 @@ export async function createSubnet(input: CreateSubnetInput) {
       name: input.name,
       purpose: input.purpose,
       vlan: input.vlan,
-      tags: tagsToDb(input.tags),
+      tags: input.tags ?? [],
       status: "available",
     },
   });
@@ -173,7 +169,7 @@ export async function updateSubnet(id: string, input: UpdateSubnetInput) {
       purpose: input.purpose,
       status: input.status,
       vlan: input.vlan,
-      tags: input.tags !== undefined ? tagsToDb(input.tags) : undefined,
+      tags: input.tags,
     },
   });
 }

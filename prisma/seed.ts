@@ -21,7 +21,7 @@ async function main() {
       cidr:        "10.0.0.0/8",
       ipVersion:   "v4",
       description: "Primary RFC-1918 space for internal infrastructure",
-      tags:        "datacenter,internal",
+      tags:        ["datacenter", "internal"],
     },
   });
 
@@ -33,7 +33,7 @@ async function main() {
       cidr:        "172.16.0.0/12",
       ipVersion:   "v4",
       description: "Out-of-band management and BMC access",
-      tags:        "management,oob",
+      tags:        ["management", "oob"],
     },
   });
 
@@ -49,7 +49,7 @@ async function main() {
       purpose:  "Production Kubernetes worker nodes",
       status:   "available",
       vlan:     100,
-      tags:     "kubernetes,prod",
+      tags:     ["kubernetes", "prod"],
     },
   });
 
@@ -63,7 +63,7 @@ async function main() {
       purpose:  "PostgreSQL and Redis clusters",
       status:   "available",
       vlan:     200,
-      tags:     "database,prod",
+      tags:     ["database", "prod"],
     },
   });
 
@@ -77,7 +77,7 @@ async function main() {
       purpose:  "Baseboard management controllers",
       status:   "available",
       vlan:     999,
-      tags:     "management,bmc",
+      tags:     ["management", "bmc"],
     },
   });
 

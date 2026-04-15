@@ -12,9 +12,6 @@ import {
 
 const prisma = new PrismaClient();
 
-const tagsToDb = (tags?: string[]): string => (tags ?? []).join(",");
-const tagsFromDb = (tags: string): string[] => tags ? tags.split(",").filter(Boolean) : [];
-
 export interface CreateBlockInput {
   name: string;
   cidr: string;
@@ -41,8 +38,7 @@ export async function listBlocks(filter: ListBlocksFilter = {}) {
     include: { _count: { select: { subnets: true } } },
     orderBy: { cidr: "asc" },
   });
-  const result = blocks.map((b) => ({ ...b, tags: tagsFromDb(b.tags) }));
-  return filter.tag ? result.filter((b) => b.tags.includes(filter.tag!)) : result;
+  return filter.tag ? blocks.filter((b) => b.tags.includes(filter.tag!)) : blocks;
 }
 
 // ─── Get ──────────────────────────────────────────────────────────────────────
@@ -58,11 +54,7 @@ export async function getBlock(id: string) {
     },
   });
   if (!block) throw new AppError(404, `IP Block ${id} not found`);
-  return {
-    ...block,
-    tags: tagsFromDb(block.tags),
-    subnets: block.subnets.map((s) => ({ ...s, tags: tagsFromDb(s.tags) })),
-  };
+  return block;
 }
 
 // ─── Create ───────────────────────────────────────────────────────────────────
@@ -86,7 +78,7 @@ export async function createBlock(input: CreateBlockInput) {
       cidr: normalizedCidr,
       ipVersion,
       description: input.description,
-      tags: tagsToDb(input.tags),
+      tags: input.tags ?? [],
     },
   });
 }
@@ -102,7 +94,7 @@ export async function updateBlock(id: string, input: UpdateBlockInput) {
     data: {
       name: input.name,
       description: input.description,
-      tags: input.tags !== undefined ? tagsToDb(input.tags) : undefined,
+      tags: input.tags,
     },
   });
 }
