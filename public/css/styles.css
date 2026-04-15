@@ -78,7 +78,7 @@ code {
   height: auto;
   display: block;
   margin-bottom: 6px;
-  filter: brightness(0) invert(1);
+  border-radius: 8px;
 }
 .sidebar-brand p {
   font-size: 0.7rem;
