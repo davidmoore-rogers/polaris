@@ -1,6 +1,6 @@
 # Shelob
 
-An IP management tool for reserving and tracking IPv4/IPv6 space across infrastructure projects. Named after Tolkien's great spider — because subnets are webs, and Shelob spins them.
+A network management tool for asset management and reserving and tracking IPv4/IPv6 space across infrastructure projects. 
 
 ## Prerequisites
 

@@ -2,14 +2,23 @@
  * public/js/assets.js — Asset management page
  */
 
+var _assetsPageSize = 15;
+var _assetsPage = 1;
+var _assetsData = [];
+
 document.addEventListener("DOMContentLoaded", function () {
   loadAssets();
 
   var addBtn = document.getElementById("btn-add-asset");
   if (addBtn) addBtn.addEventListener("click", openCreateModal);
-  document.getElementById("filter-status").addEventListener("change", loadAssets);
-  document.getElementById("filter-type").addEventListener("change", loadAssets);
-  document.getElementById("filter-search").addEventListener("input", debounce(loadAssets, 300));
+  document.getElementById("filter-status").addEventListener("change", function () { _assetsPage = 1; loadAssets(); });
+  document.getElementById("filter-type").addEventListener("change", function () { _assetsPage = 1; loadAssets(); });
+  document.getElementById("filter-search").addEventListener("input", debounce(function () { _assetsPage = 1; loadAssets(); }, 300));
+  document.getElementById("filter-pagesize").addEventListener("change", function () {
+    _assetsPageSize = parseInt(this.value, 10) || 15;
+    _assetsPage = 1;
+    renderAssetsPage();
+  });
 });
 
 var ASSET_TYPE_LABELS = {
@@ -31,34 +40,46 @@ async function loadAssets() {
       assetType: document.getElementById("filter-type").value || undefined,
       search: document.getElementById("filter-search").value || undefined,
     };
-    var assets = await api.assets.list(filters);
-    if (assets.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No assets found. Add one to get started.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = assets.map(function (a) {
-      return '<tr>' +
-        '<td><strong>' + escapeHtml(a.hostname || "-") + '</strong>' +
-          (a.assetTag ? '<br><span class="asset-tag-label">' + escapeHtml(a.assetTag) + '</span>' : '') +
-        '</td>' +
-        '<td class="mono">' + escapeHtml(a.ipAddress || "-") + '</td>' +
-        '<td class="mono" style="font-size:0.8rem">' + escapeHtml(a.macAddress || "-") + '</td>' +
-        '<td>' + escapeHtml(a.serialNumber || "-") + '</td>' +
-        '<td>' + escapeHtml(a.dnsName || "-") + '</td>' +
-        '<td>' + assetTypeBadge(a.assetType) + '</td>' +
-        '<td>' + assetStatusBadge(a.status) + '</td>' +
-        '<td>' + escapeHtml(a.location || "-") + '</td>' +
-        '<td>' + escapeHtml(a.assignedTo || "-") + '</td>' +
-        '<td>' + (a.acquiredAt ? formatDate(a.acquiredAt) : "-") + '</td>' +
-        '<td class="actions">' +
-          '<button class="btn btn-sm btn-secondary" onclick="openViewModal(\'' + a.id + '\')">View</button>' +
-          (isAdmin() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + a.id + '\')">Edit</button>' +
-          '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.assetTag || a.ipAddress || "this asset") + '\')">Del</button>' : '') +
-        '</td></tr>';
-    }).join("");
+    _assetsData = await api.assets.list(filters);
+    renderAssetsPage();
   } catch (err) {
     tbody.innerHTML = '<tr><td colspan="11" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
+}
+
+function renderAssetsPage() {
+  var tbody = document.getElementById("assets-tbody");
+  if (_assetsData.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No assets found. Add one to get started.</td></tr>';
+    document.getElementById("pagination").innerHTML = "";
+    return;
+  }
+  var start = (_assetsPage - 1) * _assetsPageSize;
+  var page = _assetsData.slice(start, start + _assetsPageSize);
+  tbody.innerHTML = page.map(function (a) {
+    return '<tr>' +
+      '<td><strong>' + escapeHtml(a.hostname || "-") + '</strong>' +
+        (a.assetTag ? '<br><span class="asset-tag-label">' + escapeHtml(a.assetTag) + '</span>' : '') +
+      '</td>' +
+      '<td class="mono">' + escapeHtml(a.ipAddress || "-") + '</td>' +
+      '<td class="mono" style="font-size:0.8rem">' + escapeHtml(a.macAddress || "-") + '</td>' +
+      '<td>' + escapeHtml(a.serialNumber || "-") + '</td>' +
+      '<td>' + escapeHtml(a.dnsName || "-") + '</td>' +
+      '<td>' + assetTypeBadge(a.assetType) + '</td>' +
+      '<td>' + assetStatusBadge(a.status) + '</td>' +
+      '<td>' + escapeHtml(a.location || "-") + '</td>' +
+      '<td>' + escapeHtml(a.assignedTo || "-") + '</td>' +
+      '<td>' + (a.acquiredAt ? formatDate(a.acquiredAt) : "-") + '</td>' +
+      '<td class="actions">' +
+        '<button class="btn btn-sm btn-secondary" onclick="openViewModal(\'' + a.id + '\')">View</button>' +
+        (isAdmin() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + a.id + '\')">Edit</button>' +
+        '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.assetTag || a.ipAddress || "this asset") + '\')">Del</button>' : '') +
+      '</td></tr>';
+  }).join("");
+  renderPageControls("pagination", _assetsData.length, _assetsPageSize, _assetsPage, function (p) {
+    _assetsPage = p;
+    renderAssetsPage();
+  });
 }
 
 function assetTypeBadge(type) {

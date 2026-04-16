@@ -21,7 +21,7 @@ function renderKPIs(data) {
   var grid = document.getElementById("kpi-grid");
   var items = [
     { label: "IP Blocks", value: data.totalBlocks },
-    { label: "Total Subnets", value: data.totalSubnets },
+    { label: "Total Networks", value: data.totalSubnets },
     { label: "Active Reservations", value: data.totalActiveReservations },
   ];
   grid.innerHTML = items.map(function (k) {
@@ -79,7 +79,7 @@ function renderBarChart(data) {
   container.innerHTML = data.blockUtilization.map(function (b) {
     var total = b.totalSubnets || 1;
     return '<div style="margin-bottom:10px">' +
-      '<div style="display:flex;justify-content:space-between;margin-bottom:3px"><span style="font-size:0.82rem;font-weight:450">' + escapeHtml(b.name) + '</span><span style="font-size:0.75rem;color:var(--color-text-tertiary)">' + b.totalSubnets + ' subnets</span></div>' +
+      '<div style="display:flex;justify-content:space-between;margin-bottom:3px"><span style="font-size:0.82rem;font-weight:450">' + escapeHtml(b.name) + '</span><span style="font-size:0.75rem;color:var(--color-text-tertiary)">' + b.totalSubnets + ' networks</span></div>' +
       '<div class="stacked-bar">' +
         '<div class="stacked-bar-segment" style="flex:' + b.availableSubnets + ';background:' + STATUS_COLORS.available + '"></div>' +
         '<div class="stacked-bar-segment" style="flex:' + b.reservedSubnets + ';background:' + STATUS_COLORS.reserved + '"></div>' +
@@ -101,7 +101,7 @@ function renderBlockUtil(data) {
     var pct = total === 0 ? 0 : Math.round((used / total) * 100);
     var color = pct > 75 ? "#ff1744" : pct > 50 ? "#ffd600" : "#4fc3f7";
     return '<div class="block-util-item">' +
-      '<div class="block-util-header"><div class="block-util-name"><span>' + escapeHtml(b.name) + '</span><code>' + escapeHtml(b.cidr) + '</code></div><span class="block-util-count">' + used + '/' + total + ' subnets</span></div>' +
+      '<div class="block-util-header"><div class="block-util-name"><span>' + escapeHtml(b.name) + '</span><code>' + escapeHtml(b.cidr) + '</code></div><span class="block-util-count">' + used + '/' + total + ' networks</span></div>' +
       '<div class="util-row"><div class="util-bar-track"><div class="util-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div><span style="font-size:0.82rem;color:var(--color-text-secondary);min-width:32px;text-align:right">' + pct + '%</span></div></div>';
   }).join("");
 }

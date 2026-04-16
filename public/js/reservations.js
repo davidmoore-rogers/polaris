@@ -3,27 +3,35 @@
  */
 
 var cachedSubnets = [];
+var _resPageSize = 15;
+var _resPage = 1;
+var _resData = [];
 
 document.addEventListener("DOMContentLoaded", async function () {
   await loadSubnetOptions();
   loadReservations();
 
   document.getElementById("btn-add-reservation").addEventListener("click", openCreateModal);
-  document.getElementById("filter-status").addEventListener("change", loadReservations);
-  document.getElementById("filter-owner").addEventListener("input", debounce(loadReservations, 300));
-  document.getElementById("filter-project").addEventListener("input", debounce(loadReservations, 300));
+  document.getElementById("filter-status").addEventListener("change", function () { _resPage = 1; loadReservations(); });
+  document.getElementById("filter-owner").addEventListener("input", debounce(function () { _resPage = 1; loadReservations(); }, 300));
+  document.getElementById("filter-project").addEventListener("input", debounce(function () { _resPage = 1; loadReservations(); }, 300));
+  document.getElementById("filter-pagesize").addEventListener("change", function () {
+    _resPageSize = parseInt(this.value, 10) || 15;
+    _resPage = 1;
+    renderReservationsPage();
+  });
 });
 
 async function loadSubnetOptions() {
   try {
     cachedSubnets = await api.subnets.list();
   } catch (err) {
-    showToast("Failed to load subnets: " + err.message, "error");
+    showToast("Failed to load networks: " + err.message, "error");
   }
 }
 
 function subnetSelectHTML(id) {
-  var opts = '<option value="">Select a subnet...</option>';
+  var opts = '<option value="">Select a network...</option>';
   cachedSubnets.forEach(function (s) {
     opts += '<option value="' + s.id + '">' + escapeHtml(s.name) + ' (' + escapeHtml(s.cidr) + ')</option>';
   });
@@ -38,38 +46,50 @@ async function loadReservations() {
       owner: document.getElementById("filter-owner").value || undefined,
       projectRef: document.getElementById("filter-project").value || undefined,
     };
-    var reservations = await api.reservations.list(filters);
-    if (reservations.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No reservations found. Create one to get started.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = reservations.map(function (r) {
-      var subnetLabel = r.subnet ? escapeHtml(r.subnet.name) + ' <code>' + escapeHtml(r.subnet.cidr) + '</code>' : escapeHtml(r.subnetId);
-      var ipLabel = r.ipAddress ? '<code>' + escapeHtml(r.ipAddress) + '</code>' : '<span style="color:var(--color-text-tertiary)">Full subnet</span>';
-      var expires = r.expiresAt ? formatDate(r.expiresAt) : '<span style="color:var(--color-text-tertiary)">Never</span>';
-      var actions = '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + r.id + '\')">Edit</button>';
-      if (r.status === "active") {
-        actions += '<button class="btn btn-sm btn-danger" onclick="confirmRelease(\'' + r.id + '\')">Release</button>';
-      }
-      return '<tr>' +
-        '<td>' + subnetLabel + '</td>' +
-        '<td>' + ipLabel + '</td>' +
-        '<td>' + escapeHtml(r.hostname || "-") + '</td>' +
-        '<td>' + escapeHtml(r.owner) + '</td>' +
-        '<td>' + escapeHtml(r.projectRef) + '</td>' +
-        '<td>' + statusBadge(r.status) + '</td>' +
-        '<td>' + expires + '</td>' +
-        '<td>' + formatDate(r.createdAt) + '</td>' +
-        '<td class="actions">' + actions + '</td></tr>';
-    }).join("");
+    _resData = await api.reservations.list(filters);
+    renderReservationsPage();
   } catch (err) {
     tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
+function renderReservationsPage() {
+  var tbody = document.getElementById("reservations-tbody");
+  if (_resData.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No reservations found. Create one to get started.</td></tr>';
+    document.getElementById("pagination").innerHTML = "";
+    return;
+  }
+  var start = (_resPage - 1) * _resPageSize;
+  var page = _resData.slice(start, start + _resPageSize);
+  tbody.innerHTML = page.map(function (r) {
+    var subnetLabel = r.subnet ? escapeHtml(r.subnet.name) + ' <code>' + escapeHtml(r.subnet.cidr) + '</code>' : escapeHtml(r.subnetId);
+    var ipLabel = r.ipAddress ? '<code>' + escapeHtml(r.ipAddress) + '</code>' : '<span style="color:var(--color-text-tertiary)">Full network</span>';
+    var expires = r.expiresAt ? formatDate(r.expiresAt) : '<span style="color:var(--color-text-tertiary)">Never</span>';
+    var actions = '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + r.id + '\')">Edit</button>';
+    if (r.status === "active") {
+      actions += '<button class="btn btn-sm btn-danger" onclick="confirmRelease(\'' + r.id + '\')">Release</button>';
+    }
+    return '<tr>' +
+      '<td>' + subnetLabel + '</td>' +
+      '<td>' + ipLabel + '</td>' +
+      '<td>' + escapeHtml(r.hostname || "-") + '</td>' +
+      '<td>' + escapeHtml(r.owner) + '</td>' +
+      '<td>' + escapeHtml(r.projectRef) + '</td>' +
+      '<td>' + statusBadge(r.status) + '</td>' +
+      '<td>' + expires + '</td>' +
+      '<td>' + formatDate(r.createdAt) + '</td>' +
+      '<td class="actions">' + actions + '</td></tr>';
+  }).join("");
+  renderPageControls("pagination", _resData.length, _resPageSize, _resPage, function (p) {
+    _resPage = p;
+    renderReservationsPage();
+  });
+}
+
 function openCreateModal() {
-  var body = '<div class="form-group"><label>Subnet *</label>' + subnetSelectHTML("f-subnetId") + '</div>' +
-    '<div class="form-group"><label>IP Address</label><input type="text" id="f-ipAddress" placeholder="Leave blank for full-subnet reservation"><p class="hint">e.g. 10.0.1.10</p></div>' +
+  var body = '<div class="form-group"><label>Network *</label>' + subnetSelectHTML("f-subnetId") + '</div>' +
+    '<div class="form-group"><label>IP Address</label><input type="text" id="f-ipAddress" placeholder="Leave blank for full-network reservation"><p class="hint">e.g. 10.0.1.10</p></div>' +
     '<div class="form-group"><label>Hostname</label><input type="text" id="f-hostname" placeholder="e.g. web-server-01"></div>' +
     '<div class="form-group"><label>Owner *</label><input type="text" id="f-owner" placeholder="e.g. platform-team"></div>' +
     '<div class="form-group"><label>Project Ref *</label><input type="text" id="f-projectRef" placeholder="e.g. INFRA-001"></div>' +
@@ -109,8 +129,8 @@ async function openEditModal(id) {
     var r = await api.reservations.get(id);
     var subnetLabel = r.subnet ? escapeHtml(r.subnet.name) + " (" + escapeHtml(r.subnet.cidr) + ")" : r.subnetId;
     var expiresVal = r.expiresAt ? toDatetimeLocal(r.expiresAt) : "";
-    var body = '<div class="form-group"><label>Subnet</label><input type="text" value="' + subnetLabel + '" disabled></div>' +
-      '<div class="form-group"><label>IP Address</label><input type="text" value="' + escapeHtml(r.ipAddress || "Full subnet") + '" disabled></div>' +
+    var body = '<div class="form-group"><label>Network</label><input type="text" value="' + subnetLabel + '" disabled></div>' +
+      '<div class="form-group"><label>IP Address</label><input type="text" value="' + escapeHtml(r.ipAddress || "Full network") + '" disabled></div>' +
       '<div class="form-group"><label>Status</label>' + statusBadge(r.status) + '</div>' +
       '<div class="form-group"><label>Hostname</label><input type="text" id="f-hostname" value="' + escapeHtml(r.hostname || "") + '"></div>' +
       '<div class="form-group"><label>Owner</label><input type="text" id="f-owner" value="' + escapeHtml(r.owner) + '"></div>' +
@@ -148,7 +168,7 @@ async function openEditModal(id) {
 }
 
 async function confirmRelease(id) {
-  var ok = await showConfirm("Release this reservation? This will free the IP/subnet.");
+  var ok = await showConfirm("Release this reservation? This will free the IP/network.");
   if (!ok) return;
   try {
     await api.reservations.release(id);

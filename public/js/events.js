@@ -133,6 +133,285 @@
 
   document.getElementById("btn-refresh").addEventListener("click", function () { loadEvents(); });
 
+  // Settings button
+  var settingsBtn = document.getElementById("btn-event-settings");
+  if (settingsBtn) settingsBtn.addEventListener("click", openEventSettingsModal);
+
   // Initial load
   loadEvents();
 })();
+
+// ─── Settings Modal (Tabbed) ────────────────────────────────────────────────
+
+var _activeSettingsTab = "archive";
+
+async function openEventSettingsModal() {
+  // Fetch both settings in parallel
+  var archiveDefaults = { enabled: false, protocol: "scp", host: "", port: 22, username: "", password: "", keyPath: "", remotePath: "/var/archive/shelob" };
+  var syslogDefaults = { enabled: false, protocol: "udp", host: "", port: 514, facility: "local0", severity: "info", format: "rfc5424", tlsCaPath: "", tlsCertPath: "", tlsKeyPath: "" };
+
+  try {
+    var results = await Promise.all([
+      api.events.getArchiveSettings().catch(function () { return null; }),
+      api.events.getSyslogSettings().catch(function () { return null; }),
+    ]);
+    if (results[0]) {
+      var s = results[0];
+      archiveDefaults.enabled = s.enabled || false;
+      archiveDefaults.protocol = s.protocol || "scp";
+      archiveDefaults.host = s.host || "";
+      archiveDefaults.port = s.port || 22;
+      archiveDefaults.username = s.username || "";
+      archiveDefaults.password = s.password || "";
+      archiveDefaults.keyPath = s.keyPath || "";
+      archiveDefaults.remotePath = s.remotePath || "/var/archive/shelob";
+    }
+    if (results[1]) {
+      var sl = results[1];
+      syslogDefaults.enabled = sl.enabled || false;
+      syslogDefaults.protocol = sl.protocol || "udp";
+      syslogDefaults.host = sl.host || "";
+      syslogDefaults.port = sl.port || 514;
+      syslogDefaults.facility = sl.facility || "local0";
+      syslogDefaults.severity = sl.severity || "info";
+      syslogDefaults.format = sl.format || "rfc5424";
+      syslogDefaults.tlsCaPath = sl.tlsCaPath || "";
+      syslogDefaults.tlsCertPath = sl.tlsCertPath || "";
+      syslogDefaults.tlsKeyPath = sl.tlsKeyPath || "";
+    }
+  } catch (_) {}
+
+  var body =
+    // Tabs
+    '<div class="settings-tabs">' +
+      '<button class="settings-tab' + (_activeSettingsTab === "archive" ? ' active' : '') + '" data-tab="archive">Archive Export</button>' +
+      '<button class="settings-tab' + (_activeSettingsTab === "syslog" ? ' active' : '') + '" data-tab="syslog">Syslog</button>' +
+    '</div>' +
+    // Archive tab panel
+    '<div class="settings-tab-panel' + (_activeSettingsTab === "archive" ? ' active' : '') + '" id="tab-archive">' +
+      archiveFormHTML(archiveDefaults) +
+    '</div>' +
+    // Syslog tab panel
+    '<div class="settings-tab-panel' + (_activeSettingsTab === "syslog" ? ' active' : '') + '" id="tab-syslog">' +
+      syslogFormHTML(syslogDefaults) +
+    '</div>';
+
+  var footer =
+    '<div id="settings-footer-left" style="margin-right:auto;display:flex;gap:8px">' +
+      '<button class="btn btn-secondary" id="btn-settings-test">Test Connection</button>' +
+    '</div>' +
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="btn-settings-save">Save</button>';
+
+  openModal("Event Settings", body, footer);
+
+  // Tab switching
+  document.querySelectorAll(".settings-tab").forEach(function (tab) {
+    tab.addEventListener("click", function () {
+      var target = tab.getAttribute("data-tab");
+      _activeSettingsTab = target;
+      document.querySelectorAll(".settings-tab").forEach(function (t) { t.classList.remove("active"); });
+      document.querySelectorAll(".settings-tab-panel").forEach(function (p) { p.classList.remove("active"); });
+      tab.classList.add("active");
+      document.getElementById("tab-" + target).classList.add("active");
+      updateSyslogTlsVisibility();
+    });
+  });
+
+  // Syslog protocol change → toggle TLS fields + default port
+  var sysProto = document.getElementById("f-syslog-protocol");
+  if (sysProto) {
+    sysProto.addEventListener("change", function () {
+      updateSyslogTlsVisibility();
+      var portEl = document.getElementById("f-syslog-port");
+      if (this.value === "tls" && portEl.value === "514") portEl.value = "6514";
+      if (this.value !== "tls" && portEl.value === "6514") portEl.value = "514";
+    });
+  }
+  updateSyslogTlsVisibility();
+
+  // Test Connection
+  document.getElementById("btn-settings-test").addEventListener("click", async function () {
+    var btn = this;
+    btn.disabled = true;
+    var resultId = _activeSettingsTab === "archive" ? "archive-test-result" : "syslog-test-result";
+    var resultEl = document.getElementById(resultId);
+    if (resultEl) resultEl.innerHTML = '<span style="color:var(--color-text-tertiary)">Testing connection...</span>';
+    try {
+      var result;
+      if (_activeSettingsTab === "archive") {
+        result = await api.events.testArchiveConnection(getArchiveFormData());
+      } else {
+        result = await api.events.testSyslogConnection(getSyslogFormData());
+      }
+      if (resultEl) {
+        resultEl.innerHTML = result.ok
+          ? '<span style="color:var(--color-success)">' + escapeHtml(result.message) + '</span>'
+          : '<span style="color:var(--color-danger)">' + escapeHtml(result.message) + '</span>';
+      }
+    } catch (err) {
+      if (resultEl) {
+        resultEl.innerHTML = err.name === "AbortError"
+          ? '<span style="color:var(--color-text-tertiary)">Test aborted</span>'
+          : '<span style="color:var(--color-danger)">' + escapeHtml(err.message) + '</span>';
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Save
+  document.getElementById("btn-settings-save").addEventListener("click", async function () {
+    var btn = this;
+    btn.disabled = true;
+    try {
+      if (_activeSettingsTab === "archive") {
+        await api.events.updateArchiveSettings(getArchiveFormData());
+        showToast("Archive settings saved");
+      } else {
+        await api.events.updateSyslogSettings(getSyslogFormData());
+        showToast("Syslog settings saved");
+      }
+      closeModal();
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+// ─── Archive Tab Form ───────────────────────────────────────────────────────
+
+function archiveFormHTML(d) {
+  return '<div class="form-group">' +
+    '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
+      '<input type="checkbox" id="f-archive-enabled"' + (d.enabled ? ' checked' : '') + '>' +
+      '<span>Enable automatic archive export</span>' +
+    '</label>' +
+    '<p class="hint">When enabled, events older than 7 days are archived and sent to the remote server before being pruned.</p>' +
+  '</div>' +
+  '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+  '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection</p>' +
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
+    '<div class="form-group"><label>Protocol</label>' +
+      '<select id="f-archive-protocol">' +
+        '<option value="scp"' + (d.protocol === "scp" ? ' selected' : '') + '>SCP</option>' +
+        '<option value="sftp"' + (d.protocol === "sftp" ? ' selected' : '') + '>SFTP</option>' +
+      '</select>' +
+    '</div>' +
+    '<div class="form-group"><label>Port</label><input type="number" id="f-archive-port" value="' + escapeHtml(String(d.port)) + '" min="1" max="65535"></div>' +
+  '</div>' +
+  '<div class="form-group"><label>Host / IP</label><input type="text" id="f-archive-host" value="' + escapeHtml(d.host) + '" placeholder="e.g. archive.corp.local or 10.0.5.100"></div>' +
+  '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+  '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Authentication</p>' +
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
+    '<div class="form-group"><label>Username</label><input type="text" id="f-archive-username" value="' + escapeHtml(d.username) + '" placeholder="e.g. shelob-svc"></div>' +
+    '<div class="form-group"><label>Password</label><input type="password" id="f-archive-password" value="' + escapeHtml(d.password) + '" placeholder="Leave blank for key auth"></div>' +
+  '</div>' +
+  '<div class="form-group"><label>SSH Key Path</label><input type="text" id="f-archive-keypath" value="' + escapeHtml(d.keyPath) + '" placeholder="e.g. /home/shelob/.ssh/id_rsa"><p class="hint">Path on the Shelob server. Used instead of password when provided.</p></div>' +
+  '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+  '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Destination</p>' +
+  '<div class="form-group"><label>Remote Path</label><input type="text" id="f-archive-remotepath" value="' + escapeHtml(d.remotePath) + '" placeholder="e.g. /var/archive/shelob"><p class="hint">Directory on the remote server where archive files will be stored.</p></div>' +
+  '<div id="archive-test-result" style="margin-top:0.5rem"></div>';
+}
+
+function getArchiveFormData() {
+  return {
+    enabled: document.getElementById("f-archive-enabled").checked,
+    protocol: document.getElementById("f-archive-protocol").value,
+    host: document.getElementById("f-archive-host").value.trim(),
+    port: parseInt(document.getElementById("f-archive-port").value, 10) || 22,
+    username: document.getElementById("f-archive-username").value.trim(),
+    password: document.getElementById("f-archive-password").value,
+    keyPath: document.getElementById("f-archive-keypath").value.trim(),
+    remotePath: document.getElementById("f-archive-remotepath").value.trim() || "/var/archive/shelob",
+  };
+}
+
+// ─── Syslog Tab Form ────────────────────────────────────────────────────────
+
+function syslogFormHTML(d) {
+  return '<div class="form-group">' +
+    '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
+      '<input type="checkbox" id="f-syslog-enabled"' + (d.enabled ? ' checked' : '') + '>' +
+      '<span>Enable syslog forwarding</span>' +
+    '</label>' +
+    '<p class="hint">When enabled, events are forwarded to a remote syslog server in real time.</p>' +
+  '</div>' +
+  '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+  '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection</p>' +
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
+    '<div class="form-group"><label>Protocol</label>' +
+      '<select id="f-syslog-protocol">' +
+        '<option value="udp"' + (d.protocol === "udp" ? ' selected' : '') + '>UDP</option>' +
+        '<option value="tcp"' + (d.protocol === "tcp" ? ' selected' : '') + '>TCP</option>' +
+        '<option value="tls"' + (d.protocol === "tls" ? ' selected' : '') + '>TLS (Secure)</option>' +
+      '</select>' +
+    '</div>' +
+    '<div class="form-group"><label>Port</label><input type="number" id="f-syslog-port" value="' + escapeHtml(String(d.port)) + '" min="1" max="65535"></div>' +
+  '</div>' +
+  '<div class="form-group"><label>Host / IP</label><input type="text" id="f-syslog-host" value="' + escapeHtml(d.host) + '" placeholder="e.g. syslog.corp.local or 10.0.5.200"></div>' +
+  '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+  '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Syslog Options</p>' +
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
+    '<div class="form-group"><label>Facility</label>' +
+      '<select id="f-syslog-facility">' +
+        syslogFacilityOptions(d.facility) +
+      '</select>' +
+    '</div>' +
+    '<div class="form-group"><label>Minimum Severity</label>' +
+      '<select id="f-syslog-severity">' +
+        '<option value="info"' + (d.severity === "info" ? ' selected' : '') + '>Info (all events)</option>' +
+        '<option value="warning"' + (d.severity === "warning" ? ' selected' : '') + '>Warning and above</option>' +
+        '<option value="error"' + (d.severity === "error" ? ' selected' : '') + '>Error only</option>' +
+      '</select>' +
+    '</div>' +
+  '</div>' +
+  '<div class="form-group"><label>Message Format</label>' +
+    '<select id="f-syslog-format">' +
+      '<option value="rfc5424"' + (d.format === "rfc5424" ? ' selected' : '') + '>RFC 5424 (modern)</option>' +
+      '<option value="rfc3164"' + (d.format === "rfc3164" ? ' selected' : '') + '>RFC 3164 (BSD/legacy)</option>' +
+    '</select>' +
+  '</div>' +
+  '<div id="syslog-tls-fields">' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">TLS Certificates</p>' +
+    '<div class="form-group"><label>CA Certificate Path</label><input type="text" id="f-syslog-tlsca" value="' + escapeHtml(d.tlsCaPath) + '" placeholder="e.g. /etc/shelob/ca.pem"><p class="hint">Certificate authority to verify the syslog server.</p></div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
+      '<div class="form-group"><label>Client Certificate</label><input type="text" id="f-syslog-tlscert" value="' + escapeHtml(d.tlsCertPath) + '" placeholder="Optional"></div>' +
+      '<div class="form-group"><label>Client Key</label><input type="text" id="f-syslog-tlskey" value="' + escapeHtml(d.tlsKeyPath) + '" placeholder="Optional"></div>' +
+    '</div>' +
+  '</div>' +
+  '<div id="syslog-test-result" style="margin-top:0.5rem"></div>';
+}
+
+function syslogFacilityOptions(selected) {
+  var facilities = ["local0","local1","local2","local3","local4","local5","local6","local7"];
+  return facilities.map(function (f) {
+    return '<option value="' + f + '"' + (selected === f ? ' selected' : '') + '>' + f.toUpperCase() + '</option>';
+  }).join("");
+}
+
+function updateSyslogTlsVisibility() {
+  var protoEl = document.getElementById("f-syslog-protocol");
+  var tlsFields = document.getElementById("syslog-tls-fields");
+  if (protoEl && tlsFields) {
+    tlsFields.style.display = protoEl.value === "tls" ? "block" : "none";
+  }
+}
+
+function getSyslogFormData() {
+  return {
+    enabled: document.getElementById("f-syslog-enabled").checked,
+    protocol: document.getElementById("f-syslog-protocol").value,
+    host: document.getElementById("f-syslog-host").value.trim(),
+    port: parseInt(document.getElementById("f-syslog-port").value, 10) || 514,
+    facility: document.getElementById("f-syslog-facility").value,
+    severity: document.getElementById("f-syslog-severity").value,
+    format: document.getElementById("f-syslog-format").value,
+    tlsCaPath: document.getElementById("f-syslog-tlsca").value.trim(),
+    tlsCertPath: document.getElementById("f-syslog-tlscert").value.trim(),
+    tlsKeyPath: document.getElementById("f-syslog-tlskey").value.trim(),
+  };
+}

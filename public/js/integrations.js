@@ -408,7 +408,7 @@ function showConflictModal(integrationId, conflicts) {
   var fieldLabels = {
     ipAddress: "IP Address", hostname: "Hostname", owner: "Owner",
     projectRef: "Project Ref", notes: "Notes", status: "Status",
-    subnetCidr: "Subnet",
+    subnetCidr: "Network",
   };
   var editableFields = ["hostname", "owner", "projectRef", "notes", "status"];
 

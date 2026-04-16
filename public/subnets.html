@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Shelob — Subnets</title>
+  <title>Shelob — Networks</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/css/styles.css">
@@ -13,10 +13,10 @@
     <aside class="sidebar" id="sidebar"></aside>
     <main class="main">
       <div class="page-header">
-        <h2>Subnets</h2>
+        <h2>Networks</h2>
         <div class="page-header-actions">
           <button class="btn btn-secondary" id="btn-auto-alloc" data-admin-only>Auto-Allocate Next</button>
-          <button class="btn btn-primary" id="btn-add-subnet" data-admin-only>+ Add Subnet</button>
+          <button class="btn btn-primary" id="btn-add-subnet" data-admin-only>+ Add Network</button>
         </div>
       </div>
 
@@ -32,6 +32,13 @@
         </select>
         <label>Tag</label>
         <input type="text" id="filter-tag" placeholder="e.g. prod" style="width:140px">
+        <label style="margin-left:auto">Show</label>
+        <select id="filter-pagesize" style="width:auto">
+          <option value="15" selected>15</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
       </div>
 
       <div class="table-wrapper">
@@ -39,7 +46,7 @@
           <thead>
             <tr>
               <th>Name</th>
-              <th>CIDR</th>
+              <th>Network</th>
               <th>Block</th>
               <th>Purpose</th>
               <th>VLAN</th>
@@ -56,6 +63,7 @@
           </tbody>
         </table>
       </div>
+      <div id="pagination" style="display:flex;align-items:center;gap:12px;justify-content:center;padding:1rem 0"></div>
     </main>
   </div>
 

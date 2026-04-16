@@ -4,6 +4,14 @@
 
 import { Router } from "express";
 import { prisma } from "../../db.js";
+import {
+  getArchiveSettings,
+  updateArchiveSettings,
+  testConnection,
+  getSyslogSettings,
+  updateSyslogSettings,
+  testSyslogConnection,
+} from "../../services/eventArchiveService.js";
 
 const router = Router();
 
@@ -33,6 +41,80 @@ router.get("/", async (req, res, next) => {
     ]);
 
     res.json({ events, total, limit, offset });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/events/archive-settings — get archive export settings
+router.get("/archive-settings", async (_req, res, next) => {
+  try {
+    const settings = await getArchiveSettings();
+    // Strip password from response
+    const safe = { ...settings };
+    if (safe.password) safe.password = "••••••••";
+    res.json(safe);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /api/v1/events/archive-settings — update archive export settings
+router.put("/archive-settings", async (req, res, next) => {
+  try {
+    const body = req.body;
+    // Don't overwrite password if placeholder was sent back
+    if (body.password === "••••••••") delete body.password;
+    const updated = await updateArchiveSettings(body);
+    const safe = { ...updated };
+    if (safe.password) safe.password = "••••••••";
+    res.json(safe);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/events/archive-test — test SFTP/SCP connection
+router.post("/archive-test", async (req, res, next) => {
+  try {
+    const settings = req.body;
+    // If password is placeholder, fetch the real one
+    if (settings.password === "••••••••") {
+      const current = await getArchiveSettings();
+      settings.password = current.password;
+    }
+    const result = await testConnection(settings);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/events/syslog-settings — get syslog forwarding settings
+router.get("/syslog-settings", async (_req, res, next) => {
+  try {
+    const settings = await getSyslogSettings();
+    res.json(settings);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /api/v1/events/syslog-settings — update syslog forwarding settings
+router.put("/syslog-settings", async (req, res, next) => {
+  try {
+    const updated = await updateSyslogSettings(req.body);
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/events/syslog-test — test syslog connection
+router.post("/syslog-test", async (req, res, next) => {
+  try {
+    const result = await testSyslogConnection(req.body);
+    res.json(result);
   } catch (err) {
     next(err);
   }

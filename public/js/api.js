@@ -110,11 +110,45 @@ const api = {
   },
   events: {
     list: (params) => request("GET", "/events" + toQuery(params)),
+    getArchiveSettings: () => request("GET", "/events/archive-settings"),
+    updateArchiveSettings: (body) => request("PUT", "/events/archive-settings", body),
+    testArchiveConnection: (body) => trackedRequest("Testing archive connection", "POST", "/events/archive-test", body),
+    getSyslogSettings: () => request("GET", "/events/syslog-settings"),
+    updateSyslogSettings: (body) => request("PUT", "/events/syslog-settings", body),
+    testSyslogConnection: (body) => trackedRequest("Testing syslog connection", "POST", "/events/syslog-test", body),
+  },
+  serverSettings: {
+    getNtp:      ()       => request("GET", "/server-settings/ntp"),
+    updateNtp:   (body)   => request("PUT", "/server-settings/ntp", body),
+    testNtp:     (body)   => trackedRequest("Testing NTP sync", "POST", "/server-settings/ntp/test", body),
+    listCerts:   ()       => request("GET", "/server-settings/certificates"),
+    uploadCert:  (category, file) => uploadFile("/server-settings/certificates", category, file),
+    deleteCert:  (id)     => request("DELETE", `/server-settings/certificates/${id}`),
+    generateCert:(body)   => request("POST", "/server-settings/certificates/generate", body),
+    getHttps:    ()       => request("GET", "/server-settings/https"),
+    updateHttps: (body)   => request("PUT", "/server-settings/https", body),
+    applyHttps:  ()       => request("POST", "/server-settings/https/apply"),
   },
   auth: {
     me: () => request("GET", "/auth/me"),
   },
 };
+
+async function uploadFile(path, category, file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("category", category);
+
+  const res = await fetch(API_BASE + path, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (res.status === 401) { window.location.href = "/login.html"; return; }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || "Upload failed");
+  return data;
+}
 
 function toQuery(params) {
   if (!params) return "";

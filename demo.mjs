@@ -6,8 +6,11 @@
  */
 
 import { createServer } from "node:http";
-import { readFileSync, existsSync } from "node:fs";
+import { createServer as createHttpsServer } from "node:https";
+import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdtempSync } from "node:fs";
 import { join, extname } from "node:path";
+import { tmpdir } from "node:os";
+import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -642,6 +645,86 @@ const EVENTS = [
   { id: "ev22", timestamp: "2026-04-16T14:30:00.000Z", level: "info", action: "integration.updated", resourceType: "integration", resourceId: INTEGRATIONS[0].id, resourceName: "Production FortiManager", actor: "admin", message: 'Integration "Production FortiManager" updated' },
 ];
 
+// ─── Archive Settings ──────────────────────────────────────────────────────
+
+let ARCHIVE_SETTINGS = {
+  enabled: false,
+  protocol: "scp",
+  host: "",
+  port: 22,
+  username: "",
+  password: "",
+  keyPath: "",
+  remotePath: "/var/archive/shelob",
+};
+
+let SYSLOG_SETTINGS = {
+  enabled: false,
+  protocol: "udp",
+  host: "",
+  port: 514,
+  facility: "local0",
+  severity: "info",
+  format: "rfc5424",
+  tlsCaPath: "",
+  tlsCertPath: "",
+  tlsKeyPath: "",
+};
+
+// ─── Server Settings (NTP + Certificates) ─────────────────────────────────
+
+let NTP_SETTINGS = {
+  enabled: false,
+  mode: "ntp",
+  servers: [],
+  timezoneOverride: null,
+};
+
+let CERTIFICATES = [];
+
+let HTTPS_SETTINGS = {
+  enabled: false,
+  port: 3443,
+  httpPort: 3000,
+  certId: null,
+  keyId: null,
+  redirectHttp: false,
+};
+let _httpsServer = null;
+
+function extractSubjectDemo(pem) {
+  const match = pem.match(/subject\s*[:=]\s*(.+)/i);
+  if (match) return match[1].trim();
+  if (pem.includes("CERTIFICATE")) return "X.509 Certificate";
+  if (pem.includes("PRIVATE KEY")) return "Private Key";
+  return null;
+}
+
+function parseMultipart(buf, contentType) {
+  const boundaryMatch = contentType.match(/boundary=(.+)/);
+  if (!boundaryMatch) return { fields: {}, file: null };
+  const boundary = boundaryMatch[1].replace(/^["']|["']$/g, "");
+  const raw = typeof buf === "string" ? buf : buf.toString("binary");
+  const parts = raw.split("--" + boundary).slice(1, -1);
+  const fields = {};
+  let file = null;
+
+  for (const part of parts) {
+    const headerEnd = part.indexOf("\r\n\r\n");
+    if (headerEnd === -1) continue;
+    const headers = part.substring(0, headerEnd);
+    const body = part.substring(headerEnd + 4).replace(/\r\n$/, "");
+    const nameMatch = headers.match(/name="([^"]+)"/);
+    const filenameMatch = headers.match(/filename="([^"]+)"/);
+    if (filenameMatch) {
+      file = { fieldname: nameMatch?.[1], originalname: filenameMatch[1], content: body };
+    } else if (nameMatch) {
+      fields[nameMatch[1]] = body.trim();
+    }
+  }
+  return { fields, file };
+}
+
 function logEventDemo(input) {
   EVENTS.push({
     id: crypto.randomUUID(),
@@ -960,19 +1043,47 @@ function serveStatic(res, urlPath) {
   res.end(readFileSync(filePath));
 }
 
-const server = createServer((req, res) => {
+let _httpPort = PORT;
+const _httpHandler = (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const path = url.pathname;
   const method = req.method;
 
+  // ── HTTP → HTTPS redirect (skip API so admin can still manage settings) ──
+  if (HTTPS_SETTINGS.redirectHttp && _httpsServer && _httpsServer.listening && !path.startsWith("/api/")) {
+    const host = (req.headers.host || "localhost").replace(/:\d+$/, "");
+    const httpsPort = HTTPS_SETTINGS.port;
+    const target = "https://" + host + (httpsPort === 443 ? "" : ":" + httpsPort) + req.url;
+    res.writeHead(301, { Location: target });
+    return res.end();
+  }
+
   // ── API routes ──
   if (path.startsWith("/api/v1/")) {
-    // Collect body for POST/PUT
+    const ct = req.headers["content-type"] || "";
+    if (ct.includes("multipart/form-data")) {
+      // Handle multipart file uploads (certificate upload)
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        try {
+          const buf = Buffer.concat(chunks).toString("binary");
+          routeMultipart(method, path, buf, ct, res);
+        } catch (err) {
+          json(res, { error: err.message }, 400);
+        }
+      });
+      return;
+    }
+    // Collect body for POST/PUT (JSON)
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       try {
-        routeAPI(method, path, url.searchParams, body ? JSON.parse(body) : {}, res);
+        const parsed = body ? JSON.parse(body) : {};
+        routeAPI(method, path, url.searchParams, parsed, res).catch((err) => {
+          json(res, { error: err.message }, 500);
+        });
       } catch (err) {
         json(res, { error: err.message }, 400);
       }
@@ -982,9 +1093,27 @@ const server = createServer((req, res) => {
 
   // ── Static files ──
   serveStatic(res, path);
-});
+};
+let server = createServer(_httpHandler);
 
-function routeAPI(method, path, params, body, res) {
+function restartDemoHttp(newPort) {
+  return new Promise((resolve) => {
+    server.close(() => {
+      _httpPort = newPort;
+      server = createServer(_httpHandler);
+      server.listen(_httpPort, () => {
+        console.log("  \x1b[32m✓\x1b[0m HTTP server restarted on \x1b[36mhttp://localhost:" + _httpPort + "\x1b[0m");
+        resolve({ ok: true, message: "HTTP server restarted on port " + _httpPort });
+      });
+      server.on("error", (err) => {
+        resolve({ ok: false, message: "Failed to restart HTTP: " + err.message });
+      });
+    });
+    setTimeout(() => server.closeAllConnections?.(), 1000);
+  });
+}
+
+async function routeAPI(method, path, params, body, res) {
   // Auth
   if (path === "/api/v1/auth/login" && method === "POST") {
     return json(res, { ok: true, username: "admin", role: "admin" });
@@ -1331,6 +1460,175 @@ function routeAPI(method, path, params, body, res) {
     return res.end();
   }
 
+  // Event archive settings
+  if (path === "/api/v1/events/archive-settings" && method === "GET") {
+    const safe = { ...ARCHIVE_SETTINGS };
+    if (safe.password) safe.password = "••••••••";
+    return json(res, safe);
+  }
+  if (path === "/api/v1/events/archive-settings" && method === "PUT") {
+    if (body.password === "••••••••") delete body.password;
+    ARCHIVE_SETTINGS = { ...ARCHIVE_SETTINGS, ...body };
+    const safe = { ...ARCHIVE_SETTINGS };
+    if (safe.password) safe.password = "••••••••";
+    return json(res, safe);
+  }
+  if (path === "/api/v1/events/archive-test" && method === "POST") {
+    const s = body;
+    if (!s.host || !s.username) {
+      return json(res, { ok: false, message: "Host and username are required" });
+    }
+    const delay = 600 + Math.random() * 400;
+    return setTimeout(() => {
+      json(res, { ok: true, message: "Connected to " + s.host + " via " + (s.protocol || "scp").toUpperCase() + " (demo)" });
+    }, delay);
+  }
+
+  // Syslog settings
+  if (path === "/api/v1/events/syslog-settings" && method === "GET") {
+    return json(res, { ...SYSLOG_SETTINGS });
+  }
+  if (path === "/api/v1/events/syslog-settings" && method === "PUT") {
+    SYSLOG_SETTINGS = { ...SYSLOG_SETTINGS, ...body };
+    return json(res, { ...SYSLOG_SETTINGS });
+  }
+  if (path === "/api/v1/events/syslog-test" && method === "POST") {
+    const s = body;
+    if (!s.host) {
+      return json(res, { ok: false, message: "Host is required" });
+    }
+    const delay = 400 + Math.random() * 300;
+    return setTimeout(() => {
+      json(res, { ok: true, message: "Test message sent to " + s.host + ":" + (s.port || 514) + " via " + (s.protocol || "udp").toUpperCase() + " (demo)" });
+    }, delay);
+  }
+
+  // Server Settings — NTP
+  if (path === "/api/v1/server-settings/ntp" && method === "GET") {
+    return json(res, { ...NTP_SETTINGS });
+  }
+  if (path === "/api/v1/server-settings/ntp" && method === "PUT") {
+    NTP_SETTINGS = { ...NTP_SETTINGS, ...body };
+    return json(res, { ...NTP_SETTINGS });
+  }
+  if (path === "/api/v1/server-settings/ntp/test" && method === "POST") {
+    const servers = body.servers || [];
+    if (servers.length === 0) {
+      return json(res, { ok: false, message: "No NTP servers configured" });
+    }
+    const delay = 500 + Math.random() * 500;
+    return setTimeout(() => {
+      json(res, { ok: true, message: "Synchronized with " + servers[0] + " (offset: +0.003s, " + (body.mode || "NTP").toUpperCase() + ")" });
+    }, delay);
+  }
+
+  // Server Settings — Certificates
+  if (path === "/api/v1/server-settings/certificates" && method === "GET") {
+    const strip = (c) => ({ ...c, pem: undefined });
+    return json(res, {
+      trustedCAs: CERTIFICATES.filter((c) => c.category === "ca").map(strip),
+      serverCerts: CERTIFICATES.filter((c) => c.category === "server").map(strip),
+    });
+  }
+  if (path === "/api/v1/server-settings/certificates/generate" && method === "POST") {
+    const cn = body.commonName || "localhost";
+    const days = Math.min(3650, Math.max(1, parseInt(body.days, 10) || 365));
+    const now = new Date().toISOString();
+    const expiry = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+
+    const tmp = mkdtempSync(join(tmpdir(), "shelob-cert-"));
+    const keyPath = join(tmp, "server.key");
+    const certPath = join(tmp, "server.crt");
+    try {
+      const subj = "/CN=" + cn.replace(/['"\\]/g, "");
+      const san = "subjectAltName=DNS:" + cn.replace(/['"\\]/g, "");
+      execSync(
+        'openssl req -x509 -newkey rsa:2048 -keyout "' + keyPath + '" -out "' + certPath +
+        '" -days ' + days + ' -nodes -subj "' + subj + '" -addext "' + san + '"',
+        { stdio: "pipe" },
+      );
+      const certPem = readFileSync(certPath, "utf-8");
+      const keyPem = readFileSync(keyPath, "utf-8");
+
+      const certRecord = {
+        id: crypto.randomUUID(), category: "server", type: "cert",
+        name: cn + ".crt", subject: "CN=" + cn, issuer: "CN=" + cn,
+        expiresAt: expiry, uploadedAt: now, pem: certPem,
+      };
+      const keyRecord = {
+        id: crypto.randomUUID(), category: "server", type: "key",
+        name: cn + ".key", subject: "Private Key", issuer: null,
+        expiresAt: null, uploadedAt: now, pem: keyPem,
+      };
+      CERTIFICATES.push(certRecord, keyRecord);
+      return json(res, {
+        cert: { ...certRecord, pem: undefined },
+        key: { ...keyRecord, pem: undefined },
+      }, 201);
+    } catch (err) {
+      return json(res, { error: "Failed to generate certificate: " + (err.message || err) }, 500);
+    } finally {
+      try { unlinkSync(keyPath); } catch (_) {}
+      try { unlinkSync(certPath); } catch (_) {}
+      try { unlinkSync(tmp); } catch (_) {}
+    }
+  }
+  if (path.match(/^\/api\/v1\/server-settings\/certificates\/[\w-]+$/) && method === "DELETE") {
+    const id = path.split("/").pop();
+    CERTIFICATES = CERTIFICATES.filter((c) => c.id !== id);
+    // If the deleted cert was selected for HTTPS, clear the reference
+    if (HTTPS_SETTINGS.certId === id) HTTPS_SETTINGS.certId = null;
+    if (HTTPS_SETTINGS.keyId === id) HTTPS_SETTINGS.keyId = null;
+    res.writeHead(204);
+    return res.end();
+  }
+
+  // Server Settings — HTTPS
+  if (path === "/api/v1/server-settings/https" && method === "GET") {
+    return json(res, { ...HTTPS_SETTINGS, running: !!(_httpsServer && _httpsServer.listening) });
+  }
+  if (path === "/api/v1/server-settings/https" && method === "PUT") {
+    HTTPS_SETTINGS = { ...HTTPS_SETTINGS, ...body };
+    return json(res, { ...HTTPS_SETTINGS, running: !!(_httpsServer && _httpsServer.listening) });
+  }
+  if (path === "/api/v1/server-settings/https/apply" && method === "POST") {
+    // Stop any existing HTTPS server first
+    await stopDemoHttps();
+
+    if (!HTTPS_SETTINGS.enabled) {
+      const result = { ok: true, message: "HTTPS disabled", running: false };
+      // Defer HTTP restart until after response is sent
+      const wantHttpPort = HTTPS_SETTINGS.httpPort || PORT;
+      if (wantHttpPort !== _httpPort) {
+        json(res, result);
+        setTimeout(() => restartDemoHttp(wantHttpPort), 200);
+        return;
+      }
+      return json(res, result);
+    }
+    if (!HTTPS_SETTINGS.certId || !HTTPS_SETTINGS.keyId) {
+      return json(res, { ok: false, message: "HTTPS enabled but certificate or key is missing", running: false });
+    }
+    const cert = CERTIFICATES.find((c) => c.id === HTTPS_SETTINGS.certId);
+    const key = CERTIFICATES.find((c) => c.id === HTTPS_SETTINGS.keyId);
+    if (!cert || !key) {
+      return json(res, { ok: false, message: "Selected certificate or key not found", running: false });
+    }
+    try {
+      const result = await startDemoHttps(cert.pem, key.pem, HTTPS_SETTINGS.port);
+      // Defer HTTP restart until after response is sent
+      const wantHttpPort = HTTPS_SETTINGS.httpPort || PORT;
+      if (wantHttpPort !== _httpPort) {
+        json(res, result);
+        setTimeout(() => restartDemoHttp(wantHttpPort), 200);
+        return;
+      }
+      return json(res, result);
+    } catch (err) {
+      return json(res, { ok: false, message: err.message || "Failed to start HTTPS", running: false });
+    }
+  }
+
   // Events
   if (path === "/api/v1/events" && method === "GET") {
     const limit = Math.min(parseInt(params.get("limit")) || 50, 200);
@@ -1354,6 +1652,111 @@ function routeAPI(method, path, params, body, res) {
   }
 
   json(res, { error: "Not found" }, 404);
+}
+
+// ─── Demo HTTPS Server ──────────────────────────────────────────────────────
+
+function handleDemoRequest(req, res) {
+  const url = new URL(req.url, `https://localhost:${HTTPS_SETTINGS.port}`);
+  const path = url.pathname;
+  const method = req.method;
+
+  if (path.startsWith("/api/v1/")) {
+    const ct = req.headers["content-type"] || "";
+    if (ct.includes("multipart/form-data")) {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        try {
+          const buf = Buffer.concat(chunks).toString("binary");
+          routeMultipart(method, path, buf, ct, res);
+        } catch (err) {
+          json(res, { error: err.message }, 400);
+        }
+      });
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      try {
+        const parsed = body ? JSON.parse(body) : {};
+        routeAPI(method, path, url.searchParams, parsed, res).catch((err) => {
+          json(res, { error: err.message }, 500);
+        });
+      } catch (err) {
+        json(res, { error: err.message }, 400);
+      }
+    });
+    return;
+  }
+  serveStatic(res, path);
+}
+
+function startDemoHttps(certPem, keyPem, port) {
+  return new Promise((resolve, reject) => {
+    try {
+      _httpsServer = createHttpsServer({ cert: certPem, key: keyPem }, handleDemoRequest);
+
+      _httpsServer.on("error", (err) => {
+        _httpsServer = null;
+        if (err.code === "EADDRINUSE") {
+          resolve({ ok: false, message: "Port " + port + " is already in use", running: false });
+        } else {
+          resolve({ ok: false, message: err.message || "HTTPS server error", running: false });
+        }
+      });
+
+      _httpsServer.listen(port, () => {
+        console.log("  \x1b[32m✓\x1b[0m HTTPS server listening on \x1b[36mhttps://localhost:" + port + "\x1b[0m");
+        resolve({ ok: true, message: "HTTPS server listening on port " + port, running: true });
+      });
+    } catch (err) {
+      _httpsServer = null;
+      resolve({ ok: false, message: err.message || "Failed to create HTTPS server", running: false });
+    }
+  });
+}
+
+function stopDemoHttps() {
+  return new Promise((resolve) => {
+    if (!_httpsServer) return resolve();
+    _httpsServer.close(() => {
+      console.log("  \x1b[33m⏹\x1b[0m HTTPS server stopped");
+      _httpsServer = null;
+      resolve();
+    });
+    setTimeout(() => {
+      if (_httpsServer) _httpsServer.closeAllConnections?.();
+    }, 1000);
+  });
+}
+
+function routeMultipart(method, path, rawBody, contentType, res) {
+  // Certificate upload
+  if (path === "/api/v1/server-settings/certificates" && method === "POST") {
+    const { fields, file } = parseMultipart(rawBody, contentType);
+    if (!file) {
+      return json(res, { error: "No file uploaded" }, 400);
+    }
+    const category = fields.category === "server" ? "server" : "ca";
+    const pem = file.content;
+    const isKey = file.originalname.endsWith(".key") || pem.includes("PRIVATE KEY");
+    const record = {
+      id: crypto.randomUUID(),
+      category,
+      type: isKey ? "key" : "cert",
+      name: file.originalname,
+      subject: extractSubjectDemo(pem),
+      issuer: null,
+      expiresAt: null,
+      uploadedAt: new Date().toISOString(),
+      pem,
+    };
+    CERTIFICATES.push(record);
+    return json(res, { ...record, pem: undefined }, 201);
+  }
+  return json(res, { error: "Not found" }, 404);
 }
 
 // ─── Start ───────────────────────────────────────────────────────────────────

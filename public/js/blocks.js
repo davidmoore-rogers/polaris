@@ -2,13 +2,22 @@
  * public/js/blocks.js — IP Blocks list + CRUD
  */
 
+var _blocksPageSize = 15;
+var _blocksPage = 1;
+var _blocksData = [];
+
 document.addEventListener("DOMContentLoaded", function () {
   loadBlocks();
 
   var addBtn = document.getElementById("btn-add-block");
   if (addBtn) addBtn.addEventListener("click", openCreateModal);
-  document.getElementById("filter-version").addEventListener("change", loadBlocks);
-  document.getElementById("filter-tag").addEventListener("input", debounce(loadBlocks, 300));
+  document.getElementById("filter-version").addEventListener("change", function () { _blocksPage = 1; loadBlocks(); });
+  document.getElementById("filter-tag").addEventListener("input", debounce(function () { _blocksPage = 1; loadBlocks(); }, 300));
+  document.getElementById("filter-pagesize").addEventListener("change", function () {
+    _blocksPageSize = parseInt(this.value, 10) || 15;
+    _blocksPage = 1;
+    renderBlocksPage();
+  });
 });
 
 async function loadBlocks() {
@@ -18,29 +27,41 @@ async function loadBlocks() {
       ipVersion: document.getElementById("filter-version").value || undefined,
       tag: document.getElementById("filter-tag").value || undefined,
     };
-    var blocks = await api.blocks.list(filters);
-    if (blocks.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No IP blocks found. Create one to get started.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = blocks.map(function (b) {
-      var tags = (b.tags || []).map(function (t) { return escapeHtml(t); }).join(", ");
-      return '<tr>' +
-        '<td><strong>' + escapeHtml(b.name) + '</strong></td>' +
-        '<td class="mono">' + escapeHtml(b.cidr) + '</td>' +
-        '<td>' + statusBadge(b.ipVersion) + '</td>' +
-        '<td>' + escapeHtml(b.description || "-") + '</td>' +
-        '<td>' + (tags || '<span style="color:var(--color-text-tertiary)">-</span>') + '</td>' +
-        '<td>' + (b._count ? b._count.subnets : 0) + '</td>' +
-        '<td>' + formatDate(b.createdAt) + '</td>' +
-        '<td class="actions">' +
-          (isAdmin() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + b.id + '\')">Edit</button>' +
-          '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + b.id + '\', \'' + escapeHtml(b.cidr) + '\')">Del</button>' : '') +
-        '</td></tr>';
-    }).join("");
+    _blocksData = await api.blocks.list(filters);
+    renderBlocksPage();
   } catch (err) {
     tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
+}
+
+function renderBlocksPage() {
+  var tbody = document.getElementById("blocks-tbody");
+  if (_blocksData.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No IP blocks found. Create one to get started.</td></tr>';
+    document.getElementById("pagination").innerHTML = "";
+    return;
+  }
+  var start = (_blocksPage - 1) * _blocksPageSize;
+  var page = _blocksData.slice(start, start + _blocksPageSize);
+  tbody.innerHTML = page.map(function (b) {
+    var tags = (b.tags || []).map(function (t) { return escapeHtml(t); }).join(", ");
+    return '<tr>' +
+      '<td><strong>' + escapeHtml(b.name) + '</strong></td>' +
+      '<td class="mono">' + escapeHtml(b.cidr) + '</td>' +
+      '<td>' + statusBadge(b.ipVersion) + '</td>' +
+      '<td>' + escapeHtml(b.description || "-") + '</td>' +
+      '<td>' + (tags || '<span style="color:var(--color-text-tertiary)">-</span>') + '</td>' +
+      '<td>' + (b._count ? b._count.subnets : 0) + '</td>' +
+      '<td>' + formatDate(b.createdAt) + '</td>' +
+      '<td class="actions">' +
+        (isAdmin() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + b.id + '\')">Edit</button>' +
+        '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + b.id + '\', \'' + escapeHtml(b.cidr) + '\')">Del</button>' : '') +
+      '</td></tr>';
+  }).join("");
+  renderPageControls("pagination", _blocksData.length, _blocksPageSize, _blocksPage, function (p) {
+    _blocksPage = p;
+    renderBlocksPage();
+  });
 }
 
 function openCreateModal() {

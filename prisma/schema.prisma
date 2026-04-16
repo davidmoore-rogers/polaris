@@ -204,3 +204,11 @@ model User {
 
   @@map("users")
 }
+
+model Setting {
+  key       String   @id
+  value     Json     @default("{}")
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}

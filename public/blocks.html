@@ -28,6 +28,13 @@
         </select>
         <label>Tag</label>
         <input type="text" id="filter-tag" placeholder="e.g. prod" style="width:140px">
+        <label style="margin-left:auto">Show</label>
+        <select id="filter-pagesize" style="width:auto">
+          <option value="15" selected>15</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
       </div>
 
       <div class="table-wrapper">
@@ -39,7 +46,7 @@
               <th>Version</th>
               <th>Description</th>
               <th>Tags</th>
-              <th>Subnets</th>
+              <th>Networks</th>
               <th>Created</th>
               <th style="width:90px">Actions</th>
             </tr>
@@ -49,6 +56,7 @@
           </tbody>
         </table>
       </div>
+      <div id="pagination" style="display:flex;align-items:center;gap:12px;justify-content:center;padding:1rem 0"></div>
     </main>
   </div>
 

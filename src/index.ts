@@ -8,9 +8,9 @@ import session from "express-session";
 import { router } from "./api/router.js";
 import { errorHandler } from "./api/middleware/errorHandler.js";
 import { logger } from "./utils/logger.js";
+import { initHttps, httpsRedirectMiddleware } from "./httpsManager.js";
+import { getHttpsSettings } from "./services/serverSettingsService.js";
 import "./jobs/pruneEvents.js";
-
-const PORT = process.env.PORT ?? 3000;
 
 const app = express();
 app.use(express.json());
@@ -29,9 +29,12 @@ app.use(
   })
 );
 
+// HTTP → HTTPS redirect (enabled dynamically via server settings)
+app.use(httpsRedirectMiddleware);
+
 // Protect dashboard pages — redirect unauthenticated users to login
-const protectedPages = ["/", "/index.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html"];
-const adminOnlyPages = ["/users.html", "/integrations.html"];
+const protectedPages = ["/", "/index.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/server-settings.html"];
+const adminOnlyPages = ["/users.html", "/integrations.html", "/server-settings.html"];
 app.use((req, res, next) => {
   if (!protectedPages.includes(req.path)) return next();
   if (!req.session?.userId) return res.redirect("/login.html");
@@ -47,8 +50,13 @@ app.get("/health", (_req, res) => res.json({ status: "ok" }));
 app.use("/api/v1", router);
 app.use(errorHandler);
 
-app.listen(PORT, () => {
-  logger.info({ port: PORT }, "Shelob server listening");
-});
+(async () => {
+  const httpsSettings = await getHttpsSettings().catch(() => null);
+  const PORT = process.env.PORT ?? httpsSettings?.httpPort ?? 3000;
+  app.listen(PORT, () => {
+    logger.info({ port: PORT }, "Shelob server listening");
+    initHttps(app);
+  });
+})();
 
 export { app };

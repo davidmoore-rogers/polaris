@@ -23,7 +23,7 @@ function isAdmin() { return currentUserRole === "admin"; }
 const NAV_ITEMS = [
   { href: "/",                label: "Dashboard",    icon: "grid" },
   { href: "/blocks.html",     label: "IP Blocks",    icon: "box" },
-  { href: "/subnets.html",    label: "Subnets",      icon: "layers" },
+  { href: "/subnets.html",    label: "Networks",     icon: "layers" },
   { href: "/reservations.html", label: "Reservations", icon: "bookmark" },
   { href: "/assets.html",         label: "Assets",       icon: "monitor" },
   { href: "/events.html",         label: "Events",       icon: "activity" },
@@ -41,6 +41,7 @@ const ICONS = {
   plug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 01-12 0V8h12z"/></svg>',
   users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>',
   logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>',
+  settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>',
 };
 
 function renderNav() {
@@ -66,8 +67,11 @@ function renderNav() {
     </ul>
     <div style="margin-top:auto">
       <div id="query-status" class="query-status" style="display:none"></div>
-      <div style="padding:0.75rem 0.5rem;border-top:1px solid var(--color-border-light)">
-        <a href="#" id="btn-logout" style="display:flex;align-items:center;gap:10px;padding:0.5rem 0.75rem;border-radius:var(--radius-md);color:var(--color-text-secondary);font-size:0.9rem;font-weight:450;text-decoration:none;transition:background 0.15s,color 0.15s" onmouseover="this.style.background='rgba(255,23,68,0.08)';this.style.color='#ff1744'" onmouseout="this.style.background='';this.style.color='var(--color-text-secondary)'">${ICONS.logout}<span>Logout</span></a>
+      ${isAdmin() ? `<div style="padding:0.5rem 0.5rem 0;border-top:1px solid var(--color-border-light)">
+        <a href="/server-settings.html" class="sidebar-bottom-link${current === '/server-settings.html' ? ' active' : ''}">${ICONS.settings}<span>Server Settings</span></a>
+      </div>` : ''}
+      <div style="padding:${isAdmin() ? '0.25rem' : '0.75rem'} 0.5rem 0.75rem;${isAdmin() ? '' : 'border-top:1px solid var(--color-border-light);'}">
+        <a href="#" id="btn-logout" class="sidebar-bottom-link sidebar-bottom-link-logout">${ICONS.logout}<span>Logout</span></a>
       </div>
     </div>
   `;
@@ -80,6 +84,9 @@ function renderNav() {
 
   // Wire up query status indicator
   _onQueriesChanged = renderQueryStatus;
+
+  // Demo: mock background query every 30s that runs for 10s
+  startMockHeartbeat();
 }
 
 function renderQueryStatus() {
@@ -125,6 +132,33 @@ function renderQueryStatus() {
   if (abortAllBtn) {
     abortAllBtn.addEventListener("click", abortAllQueries);
   }
+}
+
+// ─── Mock Heartbeat (demo only) ─────────────────────────────────────────────
+
+function startMockHeartbeat() {
+  var _mockIntegrations = null;
+
+  function runMock() {
+    if (!_mockIntegrations) return;
+    var enabled = _mockIntegrations.filter(function (i) { return i.enabled; });
+    if (!enabled.length) return;
+    enabled.forEach(function (intg) {
+      var controller = new AbortController();
+      var qid = _registerQuery("Polling " + intg.name, controller);
+      var duration = 5000 + Math.floor(Math.random() * 5000);
+      setTimeout(function () { _unregisterQuery(qid); }, duration);
+    });
+  }
+
+  // Fetch integrations list, then start the cycle
+  setTimeout(function () {
+    api.integrations.list().then(function (list) {
+      _mockIntegrations = list;
+      runMock();
+      setInterval(runMock, 30000);
+    }).catch(function () {});
+  }, 5000);
 }
 
 // ─── Toasts ───────────────────────────────────────────────────────────────────
@@ -189,6 +223,74 @@ function showConfirm(message) {
     openModal("Confirm", body, footer);
     document.getElementById("confirm-cancel").onclick = function () { closeModal(); resolve(false); };
     document.getElementById("confirm-ok").onclick = function () { closeModal(); resolve(true); };
+  });
+}
+
+function showFormModal(title, formHTML, confirmLabel) {
+  return new Promise(function (resolve) {
+    var footer = '<button class="btn btn-secondary" id="form-modal-cancel">Cancel</button>' +
+      '<button class="btn btn-primary" id="form-modal-ok">' + escapeHtml(confirmLabel || "OK") + '</button>';
+    openModal(title, formHTML, footer);
+    document.getElementById("form-modal-cancel").onclick = function () { closeModal(); resolve(false); };
+    document.getElementById("form-modal-ok").onclick = function () { closeModal(); resolve(true); };
+  });
+}
+
+// ─── Pagination Helper ───────────────────────────────────────────────────────
+
+/**
+ * Render page-size selector + numbered page buttons into a container.
+ * @param {string}   containerId   - ID of the pagination div
+ * @param {number}   total         - Total number of items
+ * @param {number}   pageSize      - Current page size
+ * @param {number}   currentPage   - Current 1-based page number
+ * @param {function} onPageChange  - Called with new page number (1-based)
+ * @param {function} onSizeChange  - Called with new page size
+ */
+function renderPageControls(containerId, total, pageSize, currentPage, onPageChange, onSizeChange) {
+  var container = document.getElementById(containerId);
+  if (!container) return;
+
+  var totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  // Page number buttons
+  var pageButtons = "";
+  var startPage = Math.max(1, currentPage - 2);
+  var endPage = Math.min(totalPages, startPage + 4);
+  if (endPage - startPage < 4) startPage = Math.max(1, endPage - 4);
+
+  if (startPage > 1) {
+    pageButtons += '<button class="btn btn-secondary btn-sm pg-btn" data-page="1">1</button>';
+    if (startPage > 2) pageButtons += '<span style="color:var(--color-text-tertiary)">...</span>';
+  }
+  for (var p = startPage; p <= endPage; p++) {
+    if (p === currentPage) {
+      pageButtons += '<button class="btn btn-primary btn-sm pg-btn" data-page="' + p + '" disabled>' + p + '</button>';
+    } else {
+      pageButtons += '<button class="btn btn-secondary btn-sm pg-btn" data-page="' + p + '">' + p + '</button>';
+    }
+  }
+  if (endPage < totalPages) {
+    if (endPage < totalPages - 1) pageButtons += '<span style="color:var(--color-text-tertiary)">...</span>';
+    pageButtons += '<button class="btn btn-secondary btn-sm pg-btn" data-page="' + totalPages + '">' + totalPages + '</button>';
+  }
+
+  container.innerHTML =
+    '<button class="btn btn-secondary btn-sm" id="' + containerId + '-prev" ' + (currentPage <= 1 ? 'disabled' : '') + '>&laquo; Prev</button>' +
+    pageButtons +
+    '<button class="btn btn-secondary btn-sm" id="' + containerId + '-next" ' + (currentPage >= totalPages ? 'disabled' : '') + '>Next &raquo;</button>' +
+    '<span style="font-size:0.82rem;color:var(--color-text-tertiary);margin-left:8px">' + total + ' items</span>';
+
+  document.getElementById(containerId + '-prev').addEventListener("click", function () {
+    if (currentPage > 1) onPageChange(currentPage - 1);
+  });
+  document.getElementById(containerId + '-next').addEventListener("click", function () {
+    if (currentPage < totalPages) onPageChange(currentPage + 1);
+  });
+  container.querySelectorAll(".pg-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      onPageChange(parseInt(btn.getAttribute("data-page"), 10));
+    });
   });
 }
 
