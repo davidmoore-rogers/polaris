@@ -15,6 +15,7 @@
     "db:studio": "prisma studio",
     "db:reset": "prisma migrate reset --force && npm run db:seed",
     "demo": "node demo.mjs",
+    "test:fmg": "node scripts/test-fmg.mjs",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"
   },

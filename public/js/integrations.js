@@ -36,9 +36,13 @@ async function loadIntegrations() {
         '</div>' +
         '<div class="integration-card-details">' +
           '<div class="detail-row"><span class="detail-label">Host</span><span class="detail-value mono">' + escapeHtml(config.host || "-") + ':' + (config.port || 443) + '</span></div>' +
-          '<div class="detail-row"><span class="detail-label">Username</span><span class="detail-value">' + escapeHtml(config.username || "-") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">API User</span><span class="detail-value">' + escapeHtml(config.apiUser || "-") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">API Token</span><span class="detail-value mono">' + escapeHtml(config.apiToken || "-") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">ADOM</span><span class="detail-value">' + escapeHtml(config.adom || "root") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">SSL Verify</span><span class="detail-value">' + (config.verifySsl ? "Yes" : "No") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Mgmt Interface</span><span class="detail-value mono">' + escapeHtml(config.mgmtInterface || "-") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">DHCP Include</span><span class="detail-value">' + ((config.dhcpInclude || []).length ? escapeHtml(config.dhcpInclude.join(", ")) : '<span style="color:var(--color-text-tertiary)">All</span>') + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">DHCP Exclude</span><span class="detail-value">' + ((config.dhcpExclude || []).length ? escapeHtml(config.dhcpExclude.join(", ")) : '<span style="color:var(--color-text-tertiary)">None</span>') + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Status</span><span class="detail-value">' + (intg.enabled ? '<span class="badge badge-active">Enabled</span>' : '<span class="badge badge-deprecated">Disabled</span>') + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Last Tested</span><span class="detail-value">' + lastTest + '</span></div>' +
         '</div>' +
@@ -58,8 +62,8 @@ function fortiManagerFormHTML(defaults) {
       '<div class="form-group"><label>Host / IP *</label><input type="text" id="f-host" value="' + escapeHtml(d.host || "") + '" placeholder="e.g. fmg.example.com"></div>' +
       '<div class="form-group"><label>Port</label><input type="number" id="f-port" value="' + (d.port || 443) + '" min="1" max="65535" style="width:90px"></div>' +
     '</div>' +
-    '<div class="form-group"><label>Username *</label><input type="text" id="f-username" value="' + escapeHtml(d.username || "") + '" placeholder="API user"></div>' +
-    '<div class="form-group"><label>Password *</label><input type="password" id="f-password" value="' + (d.passwordPlaceholder ? "" : escapeHtml(d.password || "")) + '" placeholder="' + (d.passwordPlaceholder || "API password") + '"></div>' +
+    '<div class="form-group"><label>API User</label><input type="text" id="f-apiUser" value="' + escapeHtml(d.apiUser || "") + '" placeholder="e.g. api-admin"></div>' +
+    '<div class="form-group"><label>API Token</label><input type="password" id="f-apiToken" value="' + (d.apiTokenPlaceholder ? "" : escapeHtml(d.apiToken || "")) + '" placeholder="' + (d.apiTokenPlaceholder || "Bearer token") + '"><p class="hint">Generate from FortiManager under System Settings &gt; Admin &gt; API Users</p></div>' +
     '<div class="form-group"><label>ADOM</label><input type="text" id="f-adom" value="' + escapeHtml(d.adom || "root") + '" placeholder="root"><p class="hint">Administrative Domain (leave as "root" for default)</p></div>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
       '<input type="checkbox" id="f-verifySsl" ' + (d.verifySsl ? "checked" : "") + ' style="width:auto">' +
@@ -68,7 +72,14 @@ function fortiManagerFormHTML(defaults) {
     '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
       '<input type="checkbox" id="f-enabled" ' + (d.enabled !== false ? "checked" : "") + ' style="width:auto">' +
       '<label for="f-enabled" style="margin:0">Enabled</label>' +
-    '</div>';
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">FortiGate Settings</p>' +
+    '<div class="form-group"><label>Management Interface</label><input type="text" id="f-mgmtInterface" value="' + escapeHtml(d.mgmtInterface || "") + '" placeholder="e.g. port1, mgmt, loopback0"><p class="hint">Interface name used for FortiGate management traffic</p></div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Server Scope</p>' +
+    '<div class="form-group"><label>Include DHCP Servers</label><textarea id="f-dhcpInclude" rows="2" placeholder="One per line — e.g. dhcp-server-01&#10;192.168.1.10">' + escapeHtml((d.dhcpInclude || []).join("\n")) + '</textarea><p class="hint">Only query these DHCP servers (leave empty to query all)</p></div>' +
+    '<div class="form-group"><label>Exclude DHCP Servers</label><textarea id="f-dhcpExclude" rows="2" placeholder="One per line — e.g. lab-dhcp&#10;test-server">' + escapeHtml((d.dhcpExclude || []).join("\n")) + '</textarea><p class="hint">Skip these DHCP servers when querying</p></div>';
 }
 
 function getFormConfig() {
@@ -76,11 +87,18 @@ function getFormConfig() {
   return {
     host: val("f-host"),
     port: port ? parseInt(port, 10) : 443,
-    username: val("f-username"),
-    password: val("f-password"),
+    apiUser: val("f-apiUser"),
+    apiToken: val("f-apiToken"),
     adom: val("f-adom") || "root",
     verifySsl: document.getElementById("f-verifySsl").checked,
+    mgmtInterface: val("f-mgmtInterface") || "",
+    dhcpInclude: linesToArray("f-dhcpInclude"),
+    dhcpExclude: linesToArray("f-dhcpExclude"),
   };
+}
+
+function linesToArray(id) {
+  return document.getElementById(id).value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
 }
 
 function openCreateModal() {
@@ -92,9 +110,8 @@ function openCreateModal() {
 
   document.getElementById("btn-test-new").addEventListener("click", async function () {
     var btn = this;
-    var pw = val("f-password");
-    if (!val("f-host") || !val("f-username") || !pw) {
-      showToast("Fill in host, username, and password first", "error");
+    if (!val("f-host") || !val("f-apiToken")) {
+      showToast("Fill in host and API token first", "error");
       return;
     }
     btn.disabled = true;
@@ -144,12 +161,15 @@ async function openEditModal(id) {
       name: intg.name,
       host: config.host,
       port: config.port,
-      username: config.username,
-      password: "",
-      passwordPlaceholder: "Leave blank to keep current password",
+      apiUser: config.apiUser,
+      apiToken: "",
+      apiTokenPlaceholder: "Leave blank to keep current token",
       adom: config.adom,
       verifySsl: config.verifySsl,
       enabled: intg.enabled,
+      mgmtInterface: config.mgmtInterface,
+      dhcpInclude: config.dhcpInclude || [],
+      dhcpExclude: config.dhcpExclude || [],
     };
     var body = fortiManagerFormHTML(defaults);
     var footer = '<button class="btn btn-secondary" id="btn-test-existing">Test Connection</button>' +
@@ -177,7 +197,7 @@ async function openEditModal(id) {
       btn.disabled = true;
       try {
         var formConfig = getFormConfig();
-        if (!formConfig.password) delete formConfig.password;
+        if (!formConfig.apiToken) delete formConfig.apiToken;
         var input = {
           name: val("f-name"),
           config: formConfig,

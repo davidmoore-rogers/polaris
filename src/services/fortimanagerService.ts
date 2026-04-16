@@ -1,5 +1,7 @@
 /**
  * src/services/fortimanagerService.ts — FortiManager JSON RPC API client
+ *
+ * Authenticates via bearer token (API key) rather than session-based login.
  */
 
 import { AppError } from "../utils/errors.js";
@@ -7,17 +9,19 @@ import { AppError } from "../utils/errors.js";
 export interface FortiManagerConfig {
   host: string;
   port?: number;
-  username: string;
-  password: string;
-  adom?: string;          // Administrative Domain (default: "root")
-  verifySsl?: boolean;    // Skip TLS verification (default: false)
+  apiUser: string;          // API user name (required by newer FMG versions)
+  apiToken: string;         // Bearer token for authentication
+  adom?: string;            // Administrative Domain (default: "root")
+  verifySsl?: boolean;      // Skip TLS verification (default: false)
+  mgmtInterface?: string;
+  dhcpInclude?: string[];
+  dhcpExclude?: string[];
 }
 
 interface JsonRpcRequest {
   id: number;
   method: string;
   params: unknown[];
-  session?: string;
 }
 
 interface JsonRpcResponse {
@@ -27,12 +31,11 @@ interface JsonRpcResponse {
     url: string;
     data?: unknown;
   }>;
-  session?: string;
 }
 
 /**
- * Test connectivity to a FortiManager by attempting a login + logout.
- * Returns { ok, message, version? }.
+ * Test connectivity to a FortiManager using bearer token auth.
+ * Calls /sys/status to verify access and retrieve version info.
  */
 export async function testConnection(config: FortiManagerConfig): Promise<{
   ok: boolean;
@@ -41,69 +44,26 @@ export async function testConnection(config: FortiManagerConfig): Promise<{
 }> {
   const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
 
-  let session: string | undefined;
-
   try {
-    // 1. Login
-    const loginPayload: JsonRpcRequest = {
+    const statusPayload: JsonRpcRequest = {
       id: 1,
-      method: "exec",
-      params: [
-        {
-          url: "/sys/login/user",
-          data: {
-            user: config.username,
-            passwd: config.password,
-          },
-        },
-      ],
+      method: "get",
+      params: [{ url: "/sys/status" }],
     };
 
-    const loginRes = await rpc(baseUrl, loginPayload, config.verifySsl);
+    const statusRes = await rpc(baseUrl, statusPayload, config.apiUser, config.apiToken, config.verifySsl);
 
-    if (!loginRes.session) {
-      const code = loginRes.result?.[0]?.status?.code;
+    const code = statusRes.result?.[0]?.status?.code;
+    if (code !== 0) {
+      const msg = statusRes.result?.[0]?.status?.message || "Request failed";
       if (code === -11) {
-        return { ok: false, message: "Invalid credentials" };
+        return { ok: false, message: "Invalid or expired API token" };
       }
-      return {
-        ok: false,
-        message: loginRes.result?.[0]?.status?.message || "Login failed (no session returned)",
-      };
+      return { ok: false, message: msg };
     }
 
-    session = loginRes.session;
-
-    // 2. Get system status (for version info)
-    let version: string | undefined;
-    try {
-      const statusPayload: JsonRpcRequest = {
-        id: 2,
-        method: "get",
-        params: [{ url: "/sys/status" }],
-        session,
-      };
-      const statusRes = await rpc(baseUrl, statusPayload, config.verifySsl);
-      const data = statusRes.result?.[0]?.data as Record<string, unknown> | undefined;
-      if (data?.Version) {
-        version = String(data.Version);
-      }
-    } catch {
-      // Non-fatal — version is optional
-    }
-
-    // 3. Logout
-    try {
-      const logoutPayload: JsonRpcRequest = {
-        id: 3,
-        method: "exec",
-        params: [{ url: "/sys/logout" }],
-        session,
-      };
-      await rpc(baseUrl, logoutPayload, config.verifySsl);
-    } catch {
-      // Non-fatal
-    }
+    const data = statusRes.result?.[0]?.data as Record<string, unknown> | undefined;
+    const version = data?.Version ? String(data.Version) : undefined;
 
     return {
       ok: true,
@@ -125,20 +85,28 @@ export async function testConnection(config: FortiManagerConfig): Promise<{
 }
 
 /**
- * Low-level JSON RPC call to FortiManager.
+ * Low-level JSON RPC call to FortiManager with bearer token auth.
  */
 async function rpc(
   url: string,
   payload: JsonRpcRequest,
+  apiUser: string,
+  apiToken: string,
   verifySsl?: boolean,
 ): Promise<JsonRpcResponse> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
 
   try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiToken}`,
+    };
+    if (apiUser) headers["access_user"] = apiUser;
+
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(payload),
       signal: controller.signal,
       // @ts-ignore — Node 20+ supports this for fetch
@@ -146,6 +114,10 @@ async function rpc(
         dispatcher: undefined, // handled by NODE_TLS_REJECT_UNAUTHORIZED at process level
       }),
     });
+
+    if (res.status === 401 || res.status === 403) {
+      throw new AppError(502, "Authentication failed — check your API token");
+    }
 
     if (!res.ok) {
       throw new AppError(502, `FortiManager returned HTTP ${res.status}`);

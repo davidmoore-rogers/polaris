@@ -17,12 +17,15 @@ router.use(requireAdmin);
 // ─── Zod Schemas ─────────────────────────────────────────────────────────────
 
 const FortiManagerConfigSchema = z.object({
-  host:      z.string().min(1, "Host is required"),
+  host:      z.string().optional().default(""),
   port:      z.number().int().min(1).max(65535).optional().default(443),
-  username:  z.string().min(1, "Username is required"),
-  password:  z.string().min(1, "Password is required"),
+  apiUser:   z.string().optional().default(""),
+  apiToken:  z.string().optional().default(""),
   adom:      z.string().optional().default("root"),
   verifySsl: z.boolean().optional().default(false),
+  mgmtInterface: z.string().optional().default(""),
+  dhcpInclude:   z.array(z.string()).optional().default([]),
+  dhcpExclude:   z.array(z.string()).optional().default([]),
 });
 
 const CreateIntegrationSchema = z.object({
@@ -98,10 +101,10 @@ router.put("/:id", async (req, res, next) => {
     if (input.name !== undefined) data.name = input.name;
     if (input.enabled !== undefined) data.enabled = input.enabled;
     if (input.config) {
-      // Merge config — if password is empty, keep the old one
+      // Merge config — if apiToken is empty, keep the old one
       const newConfig = { ...currentConfig, ...input.config };
-      if (!input.config.password) {
-        newConfig.password = currentConfig.password;
+      if (!input.config.apiToken) {
+        newConfig.apiToken = currentConfig.apiToken;
       }
       data.config = newConfig;
     }
@@ -179,8 +182,8 @@ router.post("/test", async (req, res, next) => {
 
 function stripSecret(integration: Record<string, any>) {
   const config = { ...(integration.config as Record<string, unknown>) };
-  if (config.password) {
-    config.password = "••••••••";
+  if (config.apiToken) {
+    config.apiToken = "••••••••";
   }
   return { ...integration, config };
 }

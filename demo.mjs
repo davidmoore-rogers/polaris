@@ -334,12 +334,15 @@ const INTEGRATIONS = [
     type: "fortimanager",
     name: "Production FortiManager",
     config: {
-      host: "fmg.rogersgroupinc.com",
+      host: "fmg.example.com",
       port: 443,
-      username: "api-readonly",
-      password: "••••••••",
+      apiUser: "api-readonly",
+      apiToken: "••••••••",
       adom: "root",
       verifySsl: true,
+      mgmtInterface: "port1",
+      dhcpInclude: ["dhcp-prod-01", "dhcp-prod-02"],
+      dhcpExclude: [],
     },
     enabled: true,
     lastTestAt: "2026-04-10T14:30:00.000Z",
@@ -354,10 +357,13 @@ const INTEGRATIONS = [
     config: {
       host: "192.168.100.10",
       port: 8443,
-      username: "admin",
-      password: "••••••••",
+      apiUser: "admin",
+      apiToken: "••••••••",
       adom: "lab",
       verifySsl: false,
+      mgmtInterface: "mgmt",
+      dhcpInclude: [],
+      dhcpExclude: ["lab-test-dhcp"],
     },
     enabled: false,
     lastTestAt: "2026-02-28T11:00:00.000Z",
@@ -373,7 +379,7 @@ const ASSETS = [
     ipAddress: "10.0.1.10",
     macAddress: "00:1A:2B:3C:4D:01",
     hostname: "k8s-worker-01",
-    dnsName: "k8s-worker-01.corp.rogersgroupinc.com",
+    dnsName: "k8s-worker-01.corp.example.com",
     assetTag: "RGI-00101",
     serialNumber: "SN-DELL-R740-001",
     manufacturer: "Dell",
@@ -397,7 +403,7 @@ const ASSETS = [
     ipAddress: "10.0.1.11",
     macAddress: "00:1A:2B:3C:4D:02",
     hostname: "k8s-worker-02",
-    dnsName: "k8s-worker-02.corp.rogersgroupinc.com",
+    dnsName: "k8s-worker-02.corp.example.com",
     assetTag: "RGI-00102",
     serialNumber: "SN-DELL-R740-002",
     manufacturer: "Dell",
@@ -421,7 +427,7 @@ const ASSETS = [
     ipAddress: "10.0.2.10",
     macAddress: "00:1A:2B:3C:4D:10",
     hostname: "postgres-primary",
-    dnsName: "postgres-primary.corp.rogersgroupinc.com",
+    dnsName: "postgres-primary.corp.example.com",
     assetTag: "RGI-00200",
     serialNumber: "SN-DELL-R750-010",
     manufacturer: "Dell",
@@ -445,7 +451,7 @@ const ASSETS = [
     ipAddress: "10.0.3.10",
     macAddress: "00:1A:2B:3C:4D:20",
     hostname: "grafana-01",
-    dnsName: "grafana-01.corp.rogersgroupinc.com",
+    dnsName: "grafana-01.corp.example.com",
     assetTag: "RGI-00305",
     serialNumber: "SN-HP-DL380-005",
     manufacturer: "HPE",
@@ -469,7 +475,7 @@ const ASSETS = [
     ipAddress: "172.16.0.1",
     macAddress: "00:50:56:AA:BB:01",
     hostname: "core-sw-01",
-    dnsName: "core-sw-01.mgmt.rogersgroupinc.com",
+    dnsName: "core-sw-01.mgmt.example.com",
     assetTag: "RGI-00500",
     serialNumber: "SN-CISCO-9300-001",
     manufacturer: "Cisco",
@@ -493,7 +499,7 @@ const ASSETS = [
     ipAddress: "192.168.1.1",
     macAddress: "00:50:56:CC:DD:01",
     hostname: "fw-edge-01",
-    dnsName: "fw-edge-01.mgmt.rogersgroupinc.com",
+    dnsName: "fw-edge-01.mgmt.example.com",
     assetTag: "RGI-00600",
     serialNumber: "SN-FG-3700F-001",
     manufacturer: "Fortinet",
@@ -517,7 +523,7 @@ const ASSETS = [
     ipAddress: "10.0.4.50",
     macAddress: "00:1A:2B:3C:4D:50",
     hostname: "ci-runner-old",
-    dnsName: "ci-runner-old.corp.rogersgroupinc.com",
+    dnsName: "ci-runner-old.corp.example.com",
     assetTag: "RGI-00410",
     serialNumber: "SN-DELL-R630-010",
     manufacturer: "Dell",
@@ -825,18 +831,17 @@ function routeAPI(method, path, params, body, res) {
     // Strip passwords from list response
     return json(res, INTEGRATIONS.map((i) => ({
       ...i,
-      config: { ...i.config, password: undefined },
+      config: { ...i.config, apiToken: undefined },
     })));
   }
   if (path === "/api/v1/integrations/test" && method === "POST") {
-    // Test a new (unsaved) integration config
+    // Mock test for demo — use scripts/test-fmg.mjs for real testing
     const delay = 800 + Math.random() * 400;
     return setTimeout(() => {
       json(res, { ok: true, message: "Connected — FortiManager v7.4.3 (demo)" });
     }, delay);
   }
   if (path.match(/^\/api\/v1\/integrations\/[\w-]+\/test$/) && method === "POST") {
-    // Test a saved integration
     const id = path.split("/")[4];
     const intg = INTEGRATIONS.find((i) => i.id === id);
     if (!intg) return json(res, { error: "Not found" }, 404);
@@ -855,7 +860,7 @@ function routeAPI(method, path, params, body, res) {
     const intg = INTEGRATIONS.find((i) => i.id === id);
     if (!intg) return json(res, { error: "Not found" }, 404);
     // Strip password from response
-    return json(res, { ...intg, config: { ...intg.config, password: undefined } });
+    return json(res, { ...intg, config: { ...intg.config, apiToken: undefined } });
   }
   if (path === "/api/v1/integrations" && method === "POST") {
     const now = new Date().toISOString();
@@ -863,7 +868,7 @@ function routeAPI(method, path, params, body, res) {
       id: crypto.randomUUID(),
       type: body.type || "fortimanager",
       name: body.name,
-      config: { ...body.config, password: undefined },
+      config: { ...body.config, apiToken: undefined },
       enabled: body.enabled !== false,
       lastTestAt: null,
       lastTestOk: null,
@@ -879,7 +884,7 @@ function routeAPI(method, path, params, body, res) {
     const updated = {
       ...intg,
       ...body,
-      config: { ...intg.config, ...(body.config || {}), password: undefined },
+      config: { ...intg.config, ...(body.config || {}), apiToken: undefined },
       updatedAt: new Date().toISOString(),
     };
     return json(res, updated);
