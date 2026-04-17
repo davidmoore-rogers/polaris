@@ -38,7 +38,7 @@ router.get("/", async (req, res, next) => {
 
 router.get("/:id", async (req, res, next) => {
   try {
-    res.json(await blockService.getBlock(req.params.id));
+    res.json(await blockService.getBlock(req.params.id as string));
   } catch (err) {
     next(err);
   }
@@ -57,9 +57,10 @@ router.post("/", requireNetworkAdmin, async (req, res, next) => {
 
 router.put("/:id", requireNetworkAdmin, async (req, res, next) => {
   try {
+    const id = req.params.id as string;
     const input = UpdateBlockSchema.parse(req.body);
-    const block = await blockService.updateBlock(req.params.id, input);
-    logEvent({ action: "block.updated", resourceType: "block", resourceId: req.params.id, resourceName: input.name || block.name, actor: (req as any).user?.username, message: `Block "${input.name || block.name}" updated` });
+    const block = await blockService.updateBlock(id, input);
+    logEvent({ action: "block.updated", resourceType: "block", resourceId: id, resourceName: input.name || block.name, actor: (req as any).user?.username, message: `Block "${input.name || block.name}" updated` });
     res.json(block);
   } catch (err) {
     next(err);
@@ -68,8 +69,9 @@ router.put("/:id", requireNetworkAdmin, async (req, res, next) => {
 
 router.delete("/:id", requireNetworkAdmin, async (req, res, next) => {
   try {
-    await blockService.deleteBlock(req.params.id);
-    logEvent({ action: "block.deleted", resourceType: "block", resourceId: req.params.id, actor: (req as any).user?.username, message: `Block deleted` });
+    const id = req.params.id as string;
+    await blockService.deleteBlock(id);
+    logEvent({ action: "block.deleted", resourceType: "block", resourceId: id, actor: (req as any).user?.username, message: `Block deleted` });
     res.status(204).send();
   } catch (err) {
     next(err);

@@ -205,13 +205,13 @@ export async function applyUpdate(): Promise<void> {
 
   const connUrl = process.env.DATABASE_URL || "";
 
-  const steps = [
-    { name: "Backup database", status: "pending" as const, message: "" },
-    { name: "Pull latest code", status: "pending" as const, message: "" },
-    { name: "Install dependencies", status: "pending" as const, message: "" },
-    { name: "Build TypeScript", status: "pending" as const, message: "" },
-    { name: "Run migrations", status: "pending" as const, message: "" },
-    { name: "Restart service", status: "pending" as const, message: "" },
+  const steps: NonNullable<UpdateStatus["steps"]> = [
+    { name: "Backup database", status: "pending", message: "" },
+    { name: "Pull latest code", status: "pending", message: "" },
+    { name: "Install dependencies", status: "pending", message: "" },
+    { name: "Build TypeScript", status: "pending", message: "" },
+    { name: "Run migrations", status: "pending", message: "" },
+    { name: "Restart service", status: "pending", message: "" },
   ];
 
   _status = {

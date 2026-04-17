@@ -48,8 +48,8 @@ export async function updateDnsSettings(settings: Partial<DnsSettings>): Promise
   };
   await prisma.setting.upsert({
     where: { key: "dnsSettings" },
-    update: { value },
-    create: { key: "dnsSettings", value },
+    update: { value: value as any },
+    create: { key: "dnsSettings", value: value as any },
   });
   return value;
 }

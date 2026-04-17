@@ -92,7 +92,7 @@ router.get("/", async (req, res, next) => {
 // GET /api/v1/assets/:id — get single asset (all authenticated users)
 router.get("/:id", async (req, res, next) => {
   try {
-    const asset = await prisma.asset.findUnique({ where: { id: req.params.id } });
+    const asset = await prisma.asset.findUnique({ where: { id: req.params.id as string } });
     if (!asset) throw new AppError(404, "Asset not found");
     res.json(asset);
   } catch (err) {
@@ -119,7 +119,8 @@ router.post("/", requireAssetsAdmin, async (req, res, next) => {
 // PUT /api/v1/assets/:id — update (assets admin)
 router.put("/:id", requireAssetsAdmin, async (req, res, next) => {
   try {
-    const existing = await prisma.asset.findUnique({ where: { id: req.params.id } });
+    const id = req.params.id as string;
+    const existing = await prisma.asset.findUnique({ where: { id } });
     if (!existing) throw new AppError(404, "Asset not found");
     const input = UpdateAssetSchema.parse(req.body);
     const data: Record<string, unknown> = { ...input };
@@ -128,8 +129,8 @@ router.put("/:id", requireAssetsAdmin, async (req, res, next) => {
     else if (input.acquiredAt === undefined) delete data.acquiredAt;
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
     else if (input.warrantyExpiry === undefined) delete data.warrantyExpiry;
-    const asset = await prisma.asset.update({ where: { id: req.params.id }, data: data as any });
-    logEvent({ action: "asset.updated", resourceType: "asset", resourceId: req.params.id, resourceName: asset.hostname || asset.ipAddress, actor: (req as any).user?.username, message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated` });
+    const asset = await prisma.asset.update({ where: { id }, data: data as any });
+    logEvent({ action: "asset.updated", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: (req as any).user?.username, message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated` });
     res.json(asset);
   } catch (err) {
     next(err);
@@ -176,7 +177,7 @@ router.post("/dns-lookup", requireAssetsAdmin, async (req, res, next) => {
 // POST /api/v1/assets/:id/dns-lookup — reverse DNS lookup for a single asset
 router.post("/:id/dns-lookup", requireAssetsAdmin, async (req, res, next) => {
   try {
-    const asset = await prisma.asset.findUnique({ where: { id: req.params.id } });
+    const asset = await prisma.asset.findUnique({ where: { id: req.params.id as string } });
     if (!asset) throw new AppError(404, "Asset not found");
     if (!asset.ipAddress) throw new AppError(400, "Asset has no IP address");
 
@@ -235,7 +236,7 @@ router.post("/oui-lookup", requireAssetsAdmin, async (req, res, next) => {
 // POST /api/v1/assets/:id/oui-lookup — OUI manufacturer lookup for a single asset
 router.post("/:id/oui-lookup", requireAssetsAdmin, async (req, res, next) => {
   try {
-    const asset = await prisma.asset.findUnique({ where: { id: req.params.id } });
+    const asset = await prisma.asset.findUnique({ where: { id: req.params.id as string } });
     if (!asset) throw new AppError(404, "Asset not found");
     if (!asset.macAddress) throw new AppError(400, "Asset has no MAC address");
 
@@ -245,7 +246,7 @@ router.post("/:id/oui-lookup", requireAssetsAdmin, async (req, res, next) => {
     }
 
     await prisma.asset.update({ where: { id: asset.id }, data: { manufacturer: vendor } });
-    logEvent({ action: "asset.oui.resolved", resourceType: "asset", resourceId: asset.id, resourceName: asset.hostname || asset.ipAddress, actor: (req as any).user?.username, message: `OUI resolved: ${asset.macAddress} → ${vendor}` });
+    logEvent({ action: "asset.oui.resolved", resourceType: "asset", resourceId: asset.id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: (req as any).user?.username, message: `OUI resolved: ${asset.macAddress} → ${vendor}` });
     res.json({ ok: true, manufacturer: vendor, message: `${asset.macAddress} → ${vendor}` });
   } catch (err) {
     next(err);
@@ -255,10 +256,11 @@ router.post("/:id/oui-lookup", requireAssetsAdmin, async (req, res, next) => {
 // DELETE /api/v1/assets/:id — delete (assets admin)
 router.delete("/:id", requireAssetsAdmin, async (req, res, next) => {
   try {
-    const existing = await prisma.asset.findUnique({ where: { id: req.params.id } });
+    const id = req.params.id as string;
+    const existing = await prisma.asset.findUnique({ where: { id } });
     if (!existing) throw new AppError(404, "Asset not found");
-    await prisma.asset.delete({ where: { id: req.params.id } });
-    logEvent({ action: "asset.deleted", resourceType: "asset", resourceId: req.params.id, resourceName: existing.hostname || existing.ipAddress, actor: (req as any).user?.username, message: `Asset "${existing.hostname || existing.ipAddress || "unknown"}" deleted` });
+    await prisma.asset.delete({ where: { id } });
+    logEvent({ action: "asset.deleted", resourceType: "asset", resourceId: id, resourceName: existing.hostname || existing.ipAddress || undefined, actor: (req as any).user?.username, message: `Asset "${existing.hostname || existing.ipAddress || "unknown"}" deleted` });
     res.status(204).send();
   } catch (err) {
     next(err);

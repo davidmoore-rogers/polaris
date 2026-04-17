@@ -72,7 +72,7 @@ export function cidrContains(outer: string, inner: string): boolean {
     // inner must start at or after outer's base and end at or before outer's broadcast
     return (
       outerBlock.contains(innerBlock.base) &&
-      outerBlock.contains(innerBlock.broadcast)
+      outerBlock.contains(innerBlock.broadcast!)
     );
   } catch {
     return false;
@@ -134,7 +134,7 @@ export function findNextAvailableSubnet(
 
   // Convert base IP to a 32-bit integer
   const baseInt = ipToInt(parent.base);
-  const endInt = ipToInt(parent.broadcast);
+  const endInt = ipToInt(parent.broadcast!);
 
   let candidate = baseInt;
 

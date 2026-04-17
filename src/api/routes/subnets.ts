@@ -69,7 +69,7 @@ router.post("/next-available", requireNetworkAdmin, async (req, res, next) => {
 // GET /subnets/:id
 router.get("/:id", async (req, res, next) => {
   try {
-    res.json(await subnetService.getSubnet(req.params.id));
+    res.json(await subnetService.getSubnet(req.params.id as string));
   } catch (err) {
     next(err);
   }
@@ -90,9 +90,10 @@ router.post("/", requireNetworkAdmin, async (req, res, next) => {
 // PUT /subnets/:id
 router.put("/:id", async (req, res, next) => {
   try {
+    const id = req.params.id as string;
     const input = UpdateSubnetSchema.parse(req.body);
-    const subnet = await subnetService.updateSubnet(req.params.id, input);
-    logEvent({ action: "subnet.updated", resourceType: "subnet", resourceId: req.params.id, resourceName: input.name || subnet.name, actor: (req as any).user?.username, message: `Subnet "${input.name || subnet.name}" updated` });
+    const subnet = await subnetService.updateSubnet(id, { ...input, vlan: input.vlan ?? undefined });
+    logEvent({ action: "subnet.updated", resourceType: "subnet", resourceId: id, resourceName: input.name || subnet.name, actor: (req as any).user?.username, message: `Subnet "${input.name || subnet.name}" updated` });
     res.json(subnet);
   } catch (err) {
     next(err);
@@ -102,8 +103,9 @@ router.put("/:id", async (req, res, next) => {
 // DELETE /subnets/:id
 router.delete("/:id", requireNetworkAdmin, async (req, res, next) => {
   try {
-    await subnetService.deleteSubnet(req.params.id);
-    logEvent({ action: "subnet.deleted", resourceType: "subnet", resourceId: req.params.id, actor: (req as any).user?.username, message: `Subnet deleted` });
+    const id = req.params.id as string;
+    await subnetService.deleteSubnet(id);
+    logEvent({ action: "subnet.deleted", resourceType: "subnet", resourceId: id, actor: (req as any).user?.username, message: `Subnet deleted` });
     res.status(204).send();
   } catch (err) {
     next(err);

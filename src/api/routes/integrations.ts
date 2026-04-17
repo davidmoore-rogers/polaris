@@ -443,7 +443,7 @@ async function registerFortiManager(host: string, integrationName: string, force
     owner: "network-team",
     projectRef: "FortiManager Integration",
     notes: `Auto-registered from FortiManager integration: ${integrationName}`,
-    status: "active",
+    status: "active" as const,
   };
 
   if (matchingSubnet) {

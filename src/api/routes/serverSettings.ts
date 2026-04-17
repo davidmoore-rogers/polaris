@@ -40,6 +40,7 @@ import {
 import { applyHttps, isHttpsRunning } from "../../httpsManager.js";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
+import { logger } from "../../utils/logger.js";
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 } });
