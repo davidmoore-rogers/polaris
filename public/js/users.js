@@ -6,6 +6,19 @@ document.addEventListener("DOMContentLoaded", function () {
   loadUsers();
   initAuthSettingsButton();
   document.getElementById("btn-add-user").addEventListener("click", openCreateModal);
+
+  // Event delegation for table action buttons
+  document.getElementById("users-tbody").addEventListener("click", function (e) {
+    var btn = e.target.closest("[data-action]");
+    if (!btn) return;
+    var action = btn.getAttribute("data-action");
+    var id = btn.getAttribute("data-id");
+    var username = btn.getAttribute("data-username");
+    var role = btn.getAttribute("data-role");
+    if (action === "role") openChangeRoleModal(id, username, role);
+    else if (action === "password") openResetPasswordModal(id, username);
+    else if (action === "delete") confirmDelete(id, username);
+  });
 });
 
 async function loadUsers() {
@@ -31,7 +44,7 @@ async function loadUsers() {
         : '<span style="color:var(--color-text-tertiary)">Never</span>';
       var displayName = u.displayName ? ' <span style="color:var(--color-text-tertiary);font-size:0.85em">(' + escapeHtml(u.displayName) + ')</span>' : '';
       var passwordBtn = u.authProvider === "azure" ? '' :
-        '<button class="btn btn-sm btn-secondary" onclick="openResetPasswordModal(\'' + u.id + '\', \'' + escapeHtml(u.username) + '\')">Password</button>';
+        '<button class="btn btn-sm btn-secondary" data-action="password" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '">Password</button>';
       return '<tr>' +
         '<td><strong>' + escapeHtml(u.username) + '</strong>' + displayName + '</td>' +
         '<td>' + authBadge + '</td>' +
@@ -39,13 +52,13 @@ async function loadUsers() {
         '<td>' + lastLogin + '</td>' +
         '<td>' + formatDate(u.createdAt) + '</td>' +
         '<td class="actions">' +
-          '<button class="btn btn-sm btn-secondary" onclick="openChangeRoleModal(\'' + u.id + '\', \'' + escapeHtml(u.username) + '\', \'' + u.role + '\')">Role</button>' +
+          '<button class="btn btn-sm btn-secondary" data-action="role" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '" data-role="' + escapeHtml(u.role) + '">Role</button>' +
           passwordBtn +
-          '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + u.id + '\', \'' + escapeHtml(u.username) + '\')">Delete</button>' +
+          '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '">Delete</button>' +
         '</td></tr>';
     }).join("");
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -53,9 +66,10 @@ function openCreateModal() {
   var body = '<div class="form-group"><label>Username *</label><input type="text" id="f-username" placeholder="e.g. jsmith"></div>' +
     '<div class="form-group"><label>Password *</label><input type="password" id="f-password" placeholder="Enter password">' + passwordChecksHTML("f-pw-checks") + '<p class="hint">The user can change this after first login.</p></div>' +
     '<div class="form-group"><label>Role</label><select id="f-role"><option value="readonly" selected>Read Only</option><option value="user">User</option><option value="networkadmin">Network Admin</option><option value="assetsadmin">Assets Admin</option><option value="admin">Admin</option></select></div>';
-  var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btn-save">Create User</button>';
+  var footer = '<button class="btn btn-secondary" id="btn-cancel">Cancel</button><button class="btn btn-primary" id="btn-save">Create User</button>';
   openModal("Add User", body, footer);
   wirePasswordChecks("f-password", "f-pw-checks");
+  document.getElementById("btn-cancel").addEventListener("click", closeModal);
 
   document.getElementById("btn-save").addEventListener("click", async function () {
     var btn = this;
@@ -95,8 +109,9 @@ function openChangeRoleModal(id, username, currentRole) {
       '<option value="assetsadmin"' + (currentRole === "assetsadmin" ? " selected" : "") + '>Assets Admin</option>' +
       '<option value="admin"' + (currentRole === "admin" ? " selected" : "") + '>Admin</option>' +
     '</select></div>';
-  var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btn-save">Update Role</button>';
+  var footer = '<button class="btn btn-secondary" id="btn-cancel">Cancel</button><button class="btn btn-primary" id="btn-save">Update Role</button>';
   openModal("Change Role", body, footer);
+  document.getElementById("btn-cancel").addEventListener("click", closeModal);
 
   document.getElementById("btn-save").addEventListener("click", async function () {
     var btn = this;
@@ -117,9 +132,10 @@ function openChangeRoleModal(id, username, currentRole) {
 function openResetPasswordModal(id, username) {
   var body = '<p style="font-size:0.9rem;color:var(--color-text-secondary);margin-bottom:1rem">Set a new password for <strong>' + escapeHtml(username) + '</strong></p>' +
     '<div class="form-group"><label>New Password *</label><input type="password" id="f-password" placeholder="Enter password">' + passwordChecksHTML("f-pw-checks") + '</div>';
-  var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btn-save">Reset Password</button>';
+  var footer = '<button class="btn btn-secondary" id="btn-cancel">Cancel</button><button class="btn btn-primary" id="btn-save">Reset Password</button>';
   openModal("Reset Password", body, footer);
   wirePasswordChecks("f-password", "f-pw-checks");
+  document.getElementById("btn-cancel").addEventListener("click", closeModal);
 
   document.getElementById("btn-save").addEventListener("click", async function () {
     var btn = this;
@@ -188,21 +204,21 @@ async function openAuthSettingsModal() {
       '<label>SP Entity ID</label>' +
       '<div style="display:flex;gap:0.5rem;align-items:center">' +
         '<input type="text" id="f-sp-entity-id" value="' + escapeHtml(spEntityId) + '" readonly style="background:var(--color-bg-secondary);cursor:default;flex:1">' +
-        '<button type="button" class="btn btn-sm btn-secondary" onclick="copyField(\'f-sp-entity-id\',this)" title="Copy">Copy</button>' +
+        '<button type="button" class="btn btn-sm btn-secondary" id="btn-copy-entity-id" title="Copy">Copy</button>' +
       '</div>' +
     '</div>' +
     '<div class="form-group">' +
       '<label>SP ACS (Login) URL</label>' +
       '<div style="display:flex;gap:0.5rem;align-items:center">' +
         '<input type="text" id="f-sp-acs-url" value="' + escapeHtml(spAcsUrl) + '" readonly style="background:var(--color-bg-secondary);cursor:default;flex:1">' +
-        '<button type="button" class="btn btn-sm btn-secondary" onclick="copyField(\'f-sp-acs-url\',this)" title="Copy">Copy</button>' +
+        '<button type="button" class="btn btn-sm btn-secondary" id="btn-copy-acs-url" title="Copy">Copy</button>' +
       '</div>' +
     '</div>' +
     '<div class="form-group">' +
       '<label>SP SLS (Logout) URL</label>' +
       '<div style="display:flex;gap:0.5rem;align-items:center">' +
         '<input type="text" id="f-sp-sls-url" value="' + escapeHtml(spSlsUrl) + '" readonly style="background:var(--color-bg-secondary);cursor:default;flex:1">' +
-        '<button type="button" class="btn btn-sm btn-secondary" onclick="copyField(\'f-sp-sls-url\',this)" title="Copy">Copy</button>' +
+        '<button type="button" class="btn btn-sm btn-secondary" id="btn-copy-sls-url" title="Copy">Copy</button>' +
       '</div>' +
     '</div>' +
 
@@ -246,11 +262,17 @@ async function openAuthSettingsModal() {
     '<div id="sso-test-results" style="display:none;margin-top:1rem;padding:0.75rem;border-radius:6px;font-size:0.85rem"></div>';
 
   var footer =
-    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-secondary" id="btn-cancel-auth">Cancel</button>' +
     '<button class="btn btn-secondary" id="btn-test-sso">Test</button>' +
     '<button class="btn btn-primary" id="btn-save-auth">Save</button>';
 
   openModal("Authentication Settings", body, footer);
+
+  // Copy buttons
+  document.getElementById("btn-copy-entity-id").addEventListener("click", function () { copyField("f-sp-entity-id", this); });
+  document.getElementById("btn-copy-acs-url").addEventListener("click", function () { copyField("f-sp-acs-url", this); });
+  document.getElementById("btn-copy-sls-url").addEventListener("click", function () { copyField("f-sp-sls-url", this); });
+  document.getElementById("btn-cancel-auth").addEventListener("click", closeModal);
 
   // Certificate file import
   document.getElementById("f-idp-cert-file").addEventListener("change", function () {
