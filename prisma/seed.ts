@@ -53,47 +53,44 @@ async function main() {
 
   // ─── Subnets ───────────────────────────────────────────────────────────────
 
-  const k8sSubnet = await prisma.subnet.upsert({
-    where:  { cidr: "10.0.1.0/24" },
-    update: {},
-    create: {
-      blockId:  corpBlock.id,
-      cidr:     "10.0.1.0/24",
-      name:     "K8s Node Pool",
-      purpose:  "Production Kubernetes worker nodes",
-      status:   "available",
-      vlan:     100,
-      tags:     ["kubernetes", "prod"],
-    },
-  });
+  const k8sSubnet = await prisma.subnet.findFirst({ where: { cidr: "10.0.1.0/24" } })
+    ?? await prisma.subnet.create({
+      data: {
+        blockId:  corpBlock.id,
+        cidr:     "10.0.1.0/24",
+        name:     "K8s Node Pool",
+        purpose:  "Production Kubernetes worker nodes",
+        status:   "available",
+        vlan:     100,
+        tags:     ["kubernetes", "prod"],
+      },
+    });
 
-  const dbSubnet = await prisma.subnet.upsert({
-    where:  { cidr: "10.0.2.0/24" },
-    update: {},
-    create: {
-      blockId:  corpBlock.id,
-      cidr:     "10.0.2.0/24",
-      name:     "Database Tier",
-      purpose:  "PostgreSQL and Redis clusters",
-      status:   "available",
-      vlan:     200,
-      tags:     ["database", "prod"],
-    },
-  });
+  const dbSubnet = await prisma.subnet.findFirst({ where: { cidr: "10.0.2.0/24" } })
+    ?? await prisma.subnet.create({
+      data: {
+        blockId:  corpBlock.id,
+        cidr:     "10.0.2.0/24",
+        name:     "Database Tier",
+        purpose:  "PostgreSQL and Redis clusters",
+        status:   "available",
+        vlan:     200,
+        tags:     ["database", "prod"],
+      },
+    });
 
-  const mgmtSubnet = await prisma.subnet.upsert({
-    where:  { cidr: "172.16.0.0/24" },
-    update: {},
-    create: {
-      blockId:  mgmtBlock.id,
-      cidr:     "172.16.0.0/24",
-      name:     "BMC / IPMI",
-      purpose:  "Baseboard management controllers",
-      status:   "available",
-      vlan:     999,
-      tags:     ["management", "bmc"],
-    },
-  });
+  const mgmtSubnet = await prisma.subnet.findFirst({ where: { cidr: "172.16.0.0/24" } })
+    ?? await prisma.subnet.create({
+      data: {
+        blockId:  mgmtBlock.id,
+        cidr:     "172.16.0.0/24",
+        name:     "BMC / IPMI",
+        purpose:  "Baseboard management controllers",
+        status:   "available",
+        vlan:     999,
+        tags:     ["management", "bmc"],
+      },
+    });
 
   // ─── Reservations ──────────────────────────────────────────────────────────
 
