@@ -13,7 +13,7 @@ import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps }
 import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
 import { logEvent } from "./events.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
-import { lookupOui } from "../../services/ouiService.js";
+import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 
 const router = Router();
 
@@ -1111,10 +1111,34 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   }
 
   // ══════════════════════════════════════════════════════════════════════════════
-  // Phase 9 — OUI manufacturer lookup for assets with MAC but no manufacturer
+  // Phase 9 — OUI manufacturer lookup & override application
   // ══════════════════════════════════════════════════════════════════════════════
 
   let ouiResolved = 0;
+  let ouiOverridden = 0;
+
+  // 9a — Apply OUI overrides to assets that already have a manufacturer
+  //       (e.g. "Fortinet" from FMG can be overridden to a custom name)
+  const assetsWithMacAndMfg = assetIdx.all().filter((a: any) => a.macAddress && a.manufacturer);
+  if (assetsWithMacAndMfg.length > 0) {
+    const overrideResults = await batchSettled(assetsWithMacAndMfg, async (asset: any) => {
+      const override = await lookupOuiOverride(asset.macAddress);
+      if (override && override !== asset.manufacturer) {
+        await prisma.asset.update({ where: { id: asset.id }, data: { manufacturer: override } });
+        asset.manufacturer = override;
+        return override;
+      }
+      return null;
+    });
+    for (const r of overrideResults) {
+      if (r.status === "fulfilled" && r.value) ouiOverridden++;
+    }
+    if (ouiOverridden > 0) {
+      syncLog("info", `OUI overrides: applied to ${ouiOverridden} assets`);
+    }
+  }
+
+  // 9b — OUI lookup for assets still missing a manufacturer
   const assetsNeedingOui = assetIdx.all().filter((a: any) => a.macAddress && !a.manufacturer);
   if (assetsNeedingOui.length > 0) {
     syncLog("info", `OUI lookup: resolving ${assetsNeedingOui.length} assets missing manufacturer`);
@@ -1135,7 +1159,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     }
   }
 
-  return { created, updated, skipped, deprecated, assets: assetNames, reservations: reservationNames, dhcpLeases: dhcpLeases.length, dhcpReservations: dhcpReservations.length, inventoryDevices: inventoryAssets.length, dnsResolved, ouiResolved };
+  return { created, updated, skipped, deprecated, assets: assetNames, reservations: reservationNames, dhcpLeases: dhcpLeases.length, dhcpReservations: dhcpReservations.length, inventoryDevices: inventoryAssets.length, dnsResolved, ouiResolved, ouiOverridden };
 }
 
 function stripSecret(integration: Record<string, any>) {

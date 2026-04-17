@@ -60,6 +60,17 @@ export async function lookupOuiBatch(macs: string[]): Promise<Map<string, string
 }
 
 /**
+ * Check only the override map for a MAC address. Returns the override
+ * manufacturer or null if no override exists. Does NOT fall back to the IEEE DB.
+ */
+export async function lookupOuiOverride(mac: string): Promise<string | null> {
+  await ensureOverridesLoaded();
+  const prefix = normalizeMacPrefix(mac);
+  if (!prefix) return null;
+  return _overridesMap.get(prefix) || null;
+}
+
+/**
  * Download the IEEE OUI database, parse it, and persist to the Setting table.
  * Returns the number of entries parsed.
  */
