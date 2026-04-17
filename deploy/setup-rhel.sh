@@ -56,6 +56,15 @@ else
   info "PostgreSQL installed"
 fi
 
+# ─── 2b. Install git ────────────────────────────────────────────────────────
+if command -v git &>/dev/null; then
+  info "Git already installed"
+else
+  info "Installing git..."
+  dnf install -y git
+  info "Git installed"
+fi
+
 # Enable and start PostgreSQL
 systemctl enable --now postgresql
 info "PostgreSQL is running"
@@ -71,6 +80,7 @@ fi
 
 # ─── 4. Create database and role ─────────────────────────────────────────────
 info "Setting up PostgreSQL database..."
+pushd /tmp >/dev/null
 sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1 || \
   sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';"
 
@@ -86,6 +96,7 @@ if ! grep -q "$DB_USER" "$PG_HBA" 2>/dev/null; then
   sed -i "/^# TYPE/a local   $DB_NAME   $DB_USER   md5\nhost    $DB_NAME   $DB_USER   127.0.0.1/32   md5\nhost    $DB_NAME   $DB_USER   ::1/128        md5" "$PG_HBA"
   systemctl reload postgresql
 fi
+popd >/dev/null
 
 # ─── 5. Deploy application ───────────────────────────────────────────────────
 if [[ -d "$APP_DIR/.git" ]]; then
@@ -135,7 +146,7 @@ info "Running database migrations..."
 sudo -u "$APP_USER" npx prisma migrate deploy
 
 # Only seed on first deploy (skip if users table already has rows)
-HAS_USERS=$(sudo -u postgres psql -tc "SELECT count(*) FROM ${DB_NAME}.public.users" 2>/dev/null | tr -d ' ')
+HAS_USERS=$(cd /tmp && sudo -u postgres psql -tc "SELECT count(*) FROM ${DB_NAME}.public.users" 2>/dev/null | tr -d ' ')
 if [[ "$HAS_USERS" == "" || "$HAS_USERS" == "0" ]]; then
   info "Seeding database (first deploy)..."
   sudo -u "$APP_USER" node --env-file=.env --import tsx/esm prisma/seed.ts
