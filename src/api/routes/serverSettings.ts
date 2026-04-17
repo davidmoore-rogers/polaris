@@ -546,7 +546,16 @@ router.post("/oui/overrides", async (req, res, next) => {
     const clean = prefix.replace(/[:\-.\s]/g, "").toUpperCase();
     if (!/^[0-9A-F]{6}$/.test(clean)) throw new AppError(400, "prefix must be 6 hex characters (e.g. AA:BB:CC)");
     const result = await setOuiOverride(prefix, manufacturer.trim());
-    res.json(result);
+
+    // Update matching assets — match MAC addresses starting with this prefix
+    // MAC format in DB is uppercase colon-separated: "AA:BB:CC:DD:EE:FF"
+    const macPrefix = clean.match(/.{2}/g)!.join(":");
+    const updated = await prisma.asset.updateMany({
+      where: { macAddress: { startsWith: macPrefix } },
+      data: { manufacturer: manufacturer.trim() },
+    });
+
+    res.json({ ...result, assetsUpdated: updated.count });
   } catch (err) {
     next(err);
   }

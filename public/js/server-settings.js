@@ -1428,7 +1428,9 @@ async function addOuiOverride() {
     if (idx >= 0) _ouiOverrides[idx] = result;
     else _ouiOverrides.push(result);
     _ouiOverrides.sort(function (a, b) { return a.prefix.localeCompare(b.prefix); });
-    showToast("OUI override added: " + result.prefix + " → " + result.manufacturer, "success");
+    var msg = "OUI override added: " + result.prefix + " → " + result.manufacturer;
+    if (result.assetsUpdated > 0) msg += " (" + result.assetsUpdated + " asset" + (result.assetsUpdated === 1 ? "" : "s") + " updated)";
+    showToast(msg, "success");
     renderIdentificationTab();
   } catch (err) {
     showToast(err.message, "error");

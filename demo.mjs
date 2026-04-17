@@ -2970,7 +2970,16 @@ async function routeAPI(method, path, params, body, res, req) {
     const existing = OUI_OVERRIDES.findIndex(o => o.prefix === formatted);
     if (existing >= 0) OUI_OVERRIDES[existing].manufacturer = body.manufacturer.trim();
     else OUI_OVERRIDES.push({ prefix: formatted, manufacturer: body.manufacturer.trim() });
-    return json(res, { prefix: formatted, manufacturer: body.manufacturer.trim() });
+    // Update matching assets in-memory
+    let assetsUpdated = 0;
+    ASSETS.forEach(a => {
+      if (a.macAddress && a.macAddress.toUpperCase().startsWith(formatted)) {
+        a.manufacturer = body.manufacturer.trim();
+        a.updatedAt = new Date().toISOString();
+        assetsUpdated++;
+      }
+    });
+    return json(res, { prefix: formatted, manufacturer: body.manufacturer.trim(), assetsUpdated });
   }
   if (path.match(/^\/api\/v1\/server-settings\/oui\/overrides\/[\w:%]+$/) && method === "DELETE") {
     const prefix = decodeURIComponent(path.split("/").pop());
