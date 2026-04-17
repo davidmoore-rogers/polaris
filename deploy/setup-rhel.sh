@@ -134,8 +134,14 @@ sudo -u "$APP_USER" npx tsc
 info "Running database migrations..."
 sudo -u "$APP_USER" npx prisma migrate deploy
 
-info "Seeding database..."
-sudo -u "$APP_USER" node --env-file=.env --import tsx/esm prisma/seed.ts
+# Only seed on first deploy (skip if users table already has rows)
+HAS_USERS=$(sudo -u postgres psql -tc "SELECT count(*) FROM ${DB_NAME}.public.users" 2>/dev/null | tr -d ' ')
+if [[ "$HAS_USERS" == "" || "$HAS_USERS" == "0" ]]; then
+  info "Seeding database (first deploy)..."
+  sudo -u "$APP_USER" node --env-file=.env --import tsx/esm prisma/seed.ts
+else
+  info "Database already seeded ($HAS_USERS users) — skipping"
+fi
 
 # ─── 8. Install systemd service ──────────────────────────────────────────────
 info "Installing systemd service..."
