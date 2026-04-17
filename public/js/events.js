@@ -16,6 +16,7 @@ var _eventsCurrentPage = [];
     var level = document.getElementById("filter-level").value;
     var resourceType = document.getElementById("filter-resource").value;
     var action = document.getElementById("filter-action").value.trim();
+    var actor = document.getElementById("filter-actor").value.trim();
 
     try {
       var data = await api.events.list({
@@ -24,6 +25,7 @@ var _eventsCurrentPage = [];
         level: level || undefined,
         resourceType: resourceType || undefined,
         action: action || undefined,
+        actor: actor || undefined,
       });
 
       var events = data.events || [];
@@ -138,6 +140,12 @@ var _eventsCurrentPage = [];
   document.getElementById("filter-action").addEventListener("input", function () {
     clearTimeout(actionTimer);
     actionTimer = setTimeout(function () { currentOffset = 0; loadEvents(); }, 400);
+  });
+
+  var actorTimer;
+  document.getElementById("filter-actor").addEventListener("input", function () {
+    clearTimeout(actorTimer);
+    actorTimer = setTimeout(function () { currentOffset = 0; loadEvents(); }, 400);
   });
 
   document.getElementById("btn-refresh").addEventListener("click", function () { loadEvents(); });
@@ -452,6 +460,7 @@ function _getEventFilters() {
     level: document.getElementById("filter-level").value || undefined,
     resourceType: document.getElementById("filter-resource").value || undefined,
     action: document.getElementById("filter-action").value.trim() || undefined,
+    actor: document.getElementById("filter-actor").value.trim() || undefined,
   };
 }
 
@@ -503,12 +512,12 @@ function generateEventPdf(events, label) {
 
   doc.setFontSize(16);
   doc.setTextColor(40, 40, 40);
-  doc.text("Shelob \u2014 Event Log", 40, 36);
+  doc.text((_branding ? _branding.appName : "Shelob") + " \u2014 Event Log", 40, 36);
   doc.setFontSize(9);
   doc.setTextColor(120, 120, 120);
   doc.text("Generated: " + timestamp + "  |  Scope: " + label + "  |  Count: " + events.length, 40, 52);
 
-  var head = [["Timestamp", "Level", "Action", "Resource", "Message", "Actor"]];
+  var head = [["Timestamp", "Level", "Action", "Resource", "Message", "User"]];
   var body = events.map(function (ev) {
     var ts = new Date(ev.timestamp);
     var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
@@ -546,7 +555,7 @@ function generateEventPdf(events, label) {
       doc.setFontSize(8);
       doc.setTextColor(150, 150, 150);
       doc.text(
-        "Page " + data.pageNumber + " of " + pageNum + "  |  Shelob Event Log",
+        "Page " + data.pageNumber + " of " + pageNum + "  |  " + (_branding ? _branding.appName : "Shelob") + " Event Log",
         doc.internal.pageSize.getWidth() / 2,
         doc.internal.pageSize.getHeight() - 20,
         { align: "center" }
@@ -560,7 +569,7 @@ function generateEventPdf(events, label) {
 }
 
 function generateEventCsv(events) {
-  var headers = ["Timestamp", "Level", "Action", "Resource Type", "Resource Name", "Message", "Actor"];
+  var headers = ["Timestamp", "Level", "Action", "Resource Type", "Resource Name", "Message", "User"];
   var rows = events.map(function (ev) {
     var ts = new Date(ev.timestamp);
     var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +

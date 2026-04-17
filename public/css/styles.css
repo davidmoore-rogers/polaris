@@ -67,6 +67,7 @@
 [data-theme="light"] .badge-v6         { background: rgba(245,127,23,0.10); border-color: rgba(245,127,23,0.30); }
 [data-theme="light"] .badge-vlan       { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
 [data-theme="light"] .badge-admin      { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
+[data-theme="light"] .badge-network-admin { background: rgba(230,126,0,0.10); color: #e67e00; border-color: rgba(230,126,0,0.30); }
 [data-theme="light"] .badge-maintenance    { background: rgba(245,127,23,0.10); border-color: rgba(245,127,23,0.30); }
 [data-theme="light"] .badge-decommissioned { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
 [data-theme="light"] .badge-storage        { background: rgba(156,39,176,0.10); color: #7b1fa2; border-color: rgba(156,39,176,0.30); }
@@ -632,6 +633,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .badge-v6         { background: rgba(255,214,0,0.12); color: var(--color-warning); border: 1px solid rgba(255,214,0,0.25); }
 .badge-vlan       { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); font-family: var(--font-mono); font-size: 0.72rem; }
 .badge-admin      { background: rgba(255,23,68,0.12); color: var(--color-danger); border: 1px solid rgba(255,23,68,0.25); }
+.badge-network-admin { background: rgba(255,152,0,0.12); color: #ff9800; border: 1px solid rgba(255,152,0,0.25); }
 
 /* ─── Utilization Bar ──────────────────────────────────────────────────────── */
 .util-bar-track {
@@ -1184,6 +1186,25 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 .upload-area input[type="file"] { display: none; }
 .upload-area p { color: var(--color-text-tertiary); font-size: 0.85rem; margin-top: 0.5rem; }
+
+/* ─── Logo Preview ────────────────────────────────────────────────────────── */
+.logo-preview-box {
+  width: 140px;
+  height: 140px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.logo-preview-box img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+}
 
 /* ─── Slide-Over Panel ───────────────────────────────────────────────────── */
 .slideover-overlay {

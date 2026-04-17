@@ -82,6 +82,26 @@
     </div>
   </div>
   <script>
+    // Apply branding
+    (async function () {
+      try {
+        var res = await fetch("/api/v1/server-settings/branding");
+        if (res.ok) {
+          var b = await res.json();
+          if (b.appName) {
+            document.querySelector(".login-card h2").textContent = b.appName;
+            document.title = b.appName + " \u2014 Login";
+          }
+          if (b.subtitle !== undefined) document.querySelector(".login-card .subtitle").textContent = b.subtitle;
+          if (b.logoUrl) {
+            document.querySelector(".login-logo").src = b.logoUrl;
+            var fav = document.querySelector('link[rel="icon"]');
+            if (fav) fav.href = b.logoUrl;
+          }
+        }
+      } catch (_) {}
+    })();
+
     document.getElementById("login-form").addEventListener("submit", async function (e) {
       e.preventDefault();
       var errEl = document.getElementById("login-error");

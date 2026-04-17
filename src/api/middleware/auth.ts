@@ -18,3 +18,10 @@ export function requireAdmin(req: Request, _res: Response, next: NextFunction) {
   }
   next(new AppError(403, "Forbidden — admin access required"));
 }
+
+export function requireNetworkAdmin(req: Request, _res: Response, next: NextFunction) {
+  if (req.session?.role === "admin" || req.session?.role === "networkadmin") {
+    return next();
+  }
+  next(new AppError(403, "Forbidden — network admin access required"));
+}

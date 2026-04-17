@@ -12,16 +12,21 @@ async function loadUsers() {
   try {
     var users = await api.users.list();
     if (users.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No users found.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No users found.</td></tr>';
       return;
     }
     tbody.innerHTML = users.map(function (u) {
-      var roleBadge = u.role === "admin"
-        ? '<span class="badge badge-admin">admin</span>'
-        : '<span class="badge badge-available">user</span>';
+      var roleBadge;
+      if (u.role === "admin") roleBadge = '<span class="badge badge-admin">admin</span>';
+      else if (u.role === "networkadmin") roleBadge = '<span class="badge badge-network-admin">network admin</span>';
+      else roleBadge = '<span class="badge badge-available">user</span>';
+      var lastLogin = u.lastLogin
+        ? '<span title="' + escapeHtml(new Date(u.lastLogin).toLocaleString()) + '">' + timeAgo(u.lastLogin) + '</span>'
+        : '<span style="color:var(--color-text-tertiary)">Never</span>';
       return '<tr>' +
         '<td><strong>' + escapeHtml(u.username) + '</strong></td>' +
         '<td>' + roleBadge + '</td>' +
+        '<td>' + lastLogin + '</td>' +
         '<td>' + formatDate(u.createdAt) + '</td>' +
         '<td class="actions">' +
           '<button class="btn btn-sm btn-secondary" onclick="openChangeRoleModal(\'' + u.id + '\', \'' + escapeHtml(u.username) + '\', \'' + u.role + '\')">Role</button>' +
@@ -30,14 +35,14 @@ async function loadUsers() {
         '</td></tr>';
     }).join("");
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
 function openCreateModal() {
   var body = '<div class="form-group"><label>Username *</label><input type="text" id="f-username" placeholder="e.g. jsmith"></div>' +
     '<div class="form-group"><label>Password *</label><input type="password" id="f-password" placeholder="Minimum 4 characters"><p class="hint">The user can change this after first login.</p></div>' +
-    '<div class="form-group"><label>Role</label><select id="f-role"><option value="user">User</option><option value="admin">Admin</option></select></div>';
+    '<div class="form-group"><label>Role</label><select id="f-role"><option value="user">User</option><option value="networkadmin">Network Admin</option><option value="admin">Admin</option></select></div>';
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btn-save">Create User</button>';
   openModal("Add User", body, footer);
 
@@ -66,6 +71,7 @@ function openChangeRoleModal(id, username, currentRole) {
   var body = '<p style="font-size:0.9rem;color:var(--color-text-secondary);margin-bottom:1rem">Change role for <strong>' + escapeHtml(username) + '</strong></p>' +
     '<div class="form-group"><label>Role</label><select id="f-role">' +
       '<option value="user"' + (currentRole === "user" ? " selected" : "") + '>User</option>' +
+      '<option value="networkadmin"' + (currentRole === "networkadmin" ? " selected" : "") + '>Network Admin</option>' +
       '<option value="admin"' + (currentRole === "admin" ? " selected" : "") + '>Admin</option>' +
     '</select></div>';
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btn-save">Update Role</button>';

@@ -135,6 +135,23 @@ const api = {
     deleteTag:   (id)     => request("DELETE", `/server-settings/tags/${id}`),
     getTagSettings: ()    => request("GET", "/server-settings/tags/settings"),
     updateTagSettings: (body) => request("PUT", "/server-settings/tags/settings", body),
+    getBranding:  ()       => request("GET", "/server-settings/branding"),
+    updateBranding: (body) => request("PUT", "/server-settings/branding", body),
+    uploadLogo: (file) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      return fetch(API_BASE + "/server-settings/branding/logo", {
+        method: "POST",
+        body: formData,
+      }).then(function (res) {
+        if (res.status === 401) { window.location.href = "/login.html"; return; }
+        return res.json().then(function (data) {
+          if (!res.ok) throw new Error(data?.error || "Upload failed");
+          return data;
+        });
+      });
+    },
+    deleteLogo: () => request("DELETE", "/server-settings/branding/logo"),
   },
   auth: {
     me: () => request("GET", "/auth/me"),

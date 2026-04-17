@@ -349,10 +349,10 @@ const RESERVATIONS = [
 ];
 
 const USERS = [
-  { id: "u1", username: "admin", role: "admin", createdAt: "2025-11-15T08:00:00.000Z", updatedAt: "2025-11-15T08:00:00.000Z" },
-  { id: "u2", username: "jsmith", role: "user", createdAt: "2026-01-10T09:00:00.000Z", updatedAt: "2026-01-10T09:00:00.000Z" },
-  { id: "u3", username: "kbrown", role: "user", createdAt: "2026-02-20T14:00:00.000Z", updatedAt: "2026-02-20T14:00:00.000Z" },
-  { id: "u4", username: "dmoore", role: "admin", createdAt: "2026-03-01T08:00:00.000Z", updatedAt: "2026-03-01T08:00:00.000Z" },
+  { id: "u1", username: "admin", role: "admin", createdAt: "2025-11-15T08:00:00.000Z", updatedAt: "2025-11-15T08:00:00.000Z", lastLogin: "2026-04-17T07:30:00.000Z" },
+  { id: "u2", username: "jsmith", role: "networkadmin", createdAt: "2026-01-10T09:00:00.000Z", updatedAt: "2026-01-10T09:00:00.000Z", lastLogin: "2026-04-16T12:00:00.000Z" },
+  { id: "u3", username: "kbrown", role: "user", createdAt: "2026-02-20T14:00:00.000Z", updatedAt: "2026-02-20T14:00:00.000Z", lastLogin: null },
+  { id: "u4", username: "dmoore", role: "admin", createdAt: "2026-03-01T08:00:00.000Z", updatedAt: "2026-03-01T08:00:00.000Z", lastLogin: "2026-04-17T08:15:00.000Z" },
 ];
 
 const INTEGRATIONS = [
@@ -769,6 +769,12 @@ let HTTPS_SETTINGS = {
   certId: null,
   keyId: null,
   redirectHttp: false,
+};
+
+let BRANDING = {
+  appName: "Shelob",
+  subtitle: "Network Management Tool",
+  logoUrl: "/logo.webp",
 };
 let _httpsServer = null;
 
@@ -1634,7 +1640,7 @@ const _httpHandler = (req, res) => {
     req.on("end", () => {
       try {
         const parsed = body ? JSON.parse(body) : {};
-        routeAPI(method, path, url.searchParams, parsed, res).catch((err) => {
+        routeAPI(method, path, url.searchParams, parsed, res, req).catch((err) => {
           json(res, { error: err.message }, 500);
         });
       } catch (err) {
@@ -1645,6 +1651,18 @@ const _httpHandler = (req, res) => {
   }
 
   // ── Static files ──
+  // Redirect unauthenticated users to login for HTML pages (except login itself)
+  if (path !== "/login.html" && (path === "/" || path.endsWith(".html"))) {
+    const cookies = (req.headers.cookie || "").split(";").reduce((m, c) => {
+      const [k, v] = c.trim().split("=");
+      if (k) m[k] = v;
+      return m;
+    }, {});
+    if (!cookies["shelob-session"] || !USERS.find((u) => u.username === decodeURIComponent(cookies["shelob-session"]))) {
+      res.writeHead(302, { Location: "/login.html" });
+      return res.end();
+    }
+  }
   serveStatic(res, path);
 };
 let server = createServer(_httpHandler);
@@ -1666,16 +1684,36 @@ function restartDemoHttp(newPort) {
   });
 }
 
-async function routeAPI(method, path, params, body, res) {
-  // Auth
+async function routeAPI(method, path, params, body, res, req) {
+  // ── Auth ──
+  // Simple cookie-based session so the login page actually works in demo
+  const cookies = (req.headers.cookie || "").split(";").reduce((m, c) => {
+    const [k, v] = c.trim().split("=");
+    if (k) m[k] = v;
+    return m;
+  }, {});
+  const sessionUser = cookies["shelob-session"] ? USERS.find((u) => u.username === cookies["shelob-session"]) : null;
+  const isLoggedIn = !!sessionUser;
+
   if (path === "/api/v1/auth/login" && method === "POST") {
-    return json(res, { ok: true, username: "admin", role: "admin" });
+    const loginUser = USERS.find((u) => u.username === (body.username || "admin")) || USERS[0];
+    loginUser.lastLogin = new Date().toISOString();
+    res.setHeader("Set-Cookie", "shelob-session=" + encodeURIComponent(loginUser.username) + "; Path=/; HttpOnly; SameSite=Lax");
+    return json(res, { ok: true, username: loginUser.username, role: loginUser.role });
   }
   if (path === "/api/v1/auth/logout" && method === "POST") {
+    res.setHeader("Set-Cookie", "shelob-session=; Path=/; HttpOnly; Max-Age=0");
     return json(res, { ok: true });
   }
   if (path === "/api/v1/auth/me") {
-    return json(res, { authenticated: true, username: "admin", role: "admin" });
+    if (!isLoggedIn) return json(res, { authenticated: false }, 401);
+    return json(res, { authenticated: true, username: sessionUser.username, role: sessionUser.role });
+  }
+  // Branding endpoint is public (login page needs it)
+  if (path.startsWith("/api/v1/server-settings/branding")) {
+    // fall through — handled below
+  } else if (!isLoggedIn) {
+    return json(res, { error: "Unauthorized" }, 401);
   }
 
   // Blocks
@@ -2245,6 +2283,22 @@ async function routeAPI(method, path, params, body, res) {
     return res.end();
   }
 
+  // Server Settings — Branding
+  if (path === "/api/v1/server-settings/branding" && method === "GET") {
+    return json(res, { ...BRANDING });
+  }
+  if (path === "/api/v1/server-settings/branding" && method === "PUT") {
+    if (body.appName !== undefined) BRANDING.appName = String(body.appName).trim() || "Shelob";
+    if (body.subtitle !== undefined) BRANDING.subtitle = String(body.subtitle).trim();
+    logEventDemo({ action: "branding.updated", resourceType: "settings", resourceId: "branding", resourceName: "Branding", message: `Branding updated: "${BRANDING.appName}"` });
+    return json(res, { ...BRANDING });
+  }
+  if (path === "/api/v1/server-settings/branding/logo" && method === "DELETE") {
+    BRANDING.logoUrl = "/logo.webp";
+    logEventDemo({ action: "branding.logo.reset", resourceType: "settings", resourceId: "branding", resourceName: "Logo", message: "Logo reset to default" });
+    return json(res, { ...BRANDING });
+  }
+
   // Server Settings — Certificates
   if (path === "/api/v1/server-settings/certificates" && method === "GET") {
     const strip = (c) => ({ ...c, pem: undefined });
@@ -2359,12 +2413,14 @@ async function routeAPI(method, path, params, body, res) {
     const level = params.get("level");
     const action = params.get("action");
     const resourceType = params.get("resourceType");
+    const actor = params.get("actor");
 
     const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     let filtered = EVENTS.filter((e) => e.timestamp >= cutoff);
     if (level) filtered = filtered.filter((e) => e.level === level);
     if (action) filtered = filtered.filter((e) => e.action && e.action.includes(action));
     if (resourceType) filtered = filtered.filter((e) => e.resourceType === resourceType);
+    if (actor) filtered = filtered.filter((e) => e.actor && e.actor.toLowerCase().includes(actor.toLowerCase()));
 
     // Sort newest first
     filtered.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -2404,7 +2460,7 @@ function handleDemoRequest(req, res) {
     req.on("end", () => {
       try {
         const parsed = body ? JSON.parse(body) : {};
-        routeAPI(method, path, url.searchParams, parsed, res).catch((err) => {
+        routeAPI(method, path, url.searchParams, parsed, res, req).catch((err) => {
           json(res, { error: err.message }, 500);
         });
       } catch (err) {
@@ -2456,6 +2512,16 @@ function stopDemoHttps() {
 }
 
 function routeMultipart(method, path, rawBody, contentType, res) {
+  // Logo upload
+  if (path === "/api/v1/server-settings/branding/logo" && method === "POST") {
+    const { file } = parseMultipart(rawBody, contentType);
+    if (!file) return json(res, { error: "No file uploaded" }, 400);
+    const mime = file.contentType || "image/png";
+    const b64 = Buffer.from(file.data, "binary").toString("base64");
+    BRANDING.logoUrl = "data:" + mime + ";base64," + b64;
+    logEventDemo({ action: "branding.logo.uploaded", resourceType: "settings", resourceId: "branding", resourceName: "Logo", message: "Custom logo uploaded" });
+    return json(res, { ...BRANDING });
+  }
   // Certificate upload
   if (path === "/api/v1/server-settings/certificates" && method === "POST") {
     const { fields, file } = parseMultipart(rawBody, contentType);

@@ -48,6 +48,8 @@ async function fetchCurrentUser() {
 }
 
 function isAdmin() { return currentUserRole === "admin"; }
+function isNetworkAdmin() { return currentUserRole === "networkadmin"; }
+function canManageNetworks() { return currentUserRole === "admin" || currentUserRole === "networkadmin"; }
 
 // ─── Sidebar Navigation ──────────────────────────────────────────────────────
 
@@ -57,7 +59,7 @@ const NAV_ITEMS = [
   { href: "/subnets.html",    label: "Networks",     icon: "layers" },
   { href: "/assets.html",         label: "Assets",       icon: "monitor" },
   { href: "/events.html",         label: "Events",       icon: "activity" },
-  { href: "/integrations.html",  label: "Integrations", icon: "plug", adminOnly: true },
+  { href: "/integrations.html",  label: "Integrations", icon: "plug", networkAdmin: true },
   { href: "/users.html",        label: "Users",        icon: "users", adminOnly: true },
 ];
 
@@ -80,7 +82,9 @@ function renderNav() {
   if (!sidebar) return;
 
   const visibleItems = NAV_ITEMS.filter(function (item) {
-    return !item.adminOnly || isAdmin();
+    if (item.adminOnly) return isAdmin();
+    if (item.networkAdmin) return canManageNetworks();
+    return true;
   });
 
   sidebar.innerHTML = `
@@ -124,6 +128,50 @@ function renderNav() {
 
   // Demo: mock background query every 30s that runs for 10s
   startMockHeartbeat();
+}
+
+// ─── Branding ──────────────────────────────────────────────────────────────
+
+var _branding = null;
+
+function applyBranding(b) {
+  if (!b) return;
+  _branding = b;
+
+  // Update sidebar logo + name
+  var sidebarLogo = document.querySelector(".sidebar-logo");
+  if (sidebarLogo) sidebarLogo.src = b.logoUrl || "/logo.webp";
+  var sidebarName = document.querySelector(".sidebar-brand h1");
+  if (sidebarName) sidebarName.textContent = b.appName || "Shelob";
+  var sidebarSub = document.querySelector(".sidebar-brand p");
+  if (sidebarSub) sidebarSub.textContent = b.subtitle || "";
+
+  // Update page title
+  var titleEl = document.querySelector("title");
+  if (titleEl) {
+    var current = titleEl.textContent;
+    // Replace "Shelob — X" or "AppName — X" pattern
+    var dashIdx = current.indexOf(" \u2014 ");
+    if (dashIdx === -1) dashIdx = current.indexOf(" — ");
+    if (dashIdx !== -1) {
+      titleEl.textContent = (b.appName || "Shelob") + current.substring(dashIdx);
+    } else {
+      titleEl.textContent = b.appName || "Shelob";
+    }
+  }
+
+  // Update favicon if custom logo
+  var favicon = document.querySelector('link[rel="icon"]');
+  if (favicon && b.logoUrl) {
+    favicon.href = b.logoUrl;
+  }
+}
+
+async function fetchBranding() {
+  try {
+    var b = await api.serverSettings.getBranding();
+    applyBranding(b);
+  } catch (_) {}
 }
 
 function renderQueryStatus() {
@@ -538,6 +586,9 @@ function hideAdminOnlyElements() {
   document.querySelectorAll("[data-admin-only]").forEach(function (el) {
     if (!isAdmin()) el.style.display = "none";
   });
+  document.querySelectorAll("[data-manage-networks]").forEach(function (el) {
+    if (!canManageNetworks()) el.style.display = "none";
+  });
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
@@ -546,4 +597,5 @@ document.addEventListener("DOMContentLoaded", async function () {
   await fetchCurrentUser();
   renderNav();
   hideAdminOnlyElements();
+  fetchBranding();
 });

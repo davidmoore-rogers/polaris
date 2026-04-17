@@ -511,7 +511,7 @@ function generateAssetPdf(assets, label) {
   // Title
   doc.setFontSize(16);
   doc.setTextColor(40, 40, 40);
-  doc.text("Shelob — Asset Report", 40, 36);
+  doc.text((_branding ? _branding.appName : "Shelob") + " \u2014 Asset Report", 40, 36);
   doc.setFontSize(9);
   doc.setTextColor(120, 120, 120);
   doc.text("Generated: " + timestamp + "  |  Scope: " + label + "  |  Count: " + assets.length, 40, 52);
@@ -545,7 +545,7 @@ function generateAssetPdf(assets, label) {
       doc.setFontSize(8);
       doc.setTextColor(150, 150, 150);
       doc.text(
-        "Page " + data.pageNumber + " of " + pageNum + "  |  Shelob Asset Report",
+        "Page " + data.pageNumber + " of " + pageNum + "  |  " + (_branding ? _branding.appName : "Shelob") + " Asset Report",
         doc.internal.pageSize.getWidth() / 2,
         doc.internal.pageSize.getHeight() - 20,
         { align: "center" }

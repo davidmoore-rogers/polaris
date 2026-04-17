@@ -13,7 +13,7 @@ const router = Router();
 const CreateUserSchema = z.object({
   username: z.string().min(1).max(64),
   password: z.string().min(4),
-  role:     z.enum(["admin", "user"]).optional(),
+  role:     z.enum(["admin", "networkadmin", "user"]).optional(),
 });
 
 const ResetPasswordSchema = z.object({
@@ -21,7 +21,7 @@ const ResetPasswordSchema = z.object({
 });
 
 const UpdateRoleSchema = z.object({
-  role: z.enum(["admin", "user"]),
+  role: z.enum(["admin", "networkadmin", "user"]),
 });
 
 // GET /api/v1/users

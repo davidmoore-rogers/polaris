@@ -401,7 +401,7 @@ async function confirmDelete(id, name) {
 }
 
 function showConflictModal(integrationId, conflicts) {
-  var admin = isAdmin();
+  var admin = canManageNetworks();
   var resConflicts = conflicts.filter(function (c) { return c.type === "reservation"; });
   if (!resConflicts.length) return;
 

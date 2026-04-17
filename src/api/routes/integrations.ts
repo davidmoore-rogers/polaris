@@ -6,7 +6,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
-import { requireAdmin } from "../middleware/auth.js";
+import { requireNetworkAdmin } from "../middleware/auth.js";
 import * as fortimanager from "../../services/fortimanagerService.js";
 import * as windowsServer from "../../services/windowsServerService.js";
 import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps } from "../../utils/cidr.js";
@@ -18,8 +18,8 @@ const router = Router();
 // Track in-flight DHCP discovery per integration — abort previous if re-saved
 const activeDiscovery = new Map<string, AbortController>();
 
-// All integration routes require admin
-router.use(requireAdmin);
+// All integration routes require network admin or admin
+router.use(requireNetworkAdmin);
 
 // ─── Zod Schemas ─────────────────────────────────────────────────────────────
 

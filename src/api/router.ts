@@ -13,7 +13,7 @@ import integrationsRouter from "./routes/integrations.js";
 import assetsRouter from "./routes/assets.js";
 import eventsRouter from "./routes/events.js";
 import serverSettingsRouter from "./routes/serverSettings.js";
-import { requireAuth, requireAdmin } from "./middleware/auth.js";
+import { requireAuth, requireAdmin, requireNetworkAdmin } from "./middleware/auth.js";
 
 export const router = Router();
 
@@ -27,7 +27,7 @@ router.use("/subnets", subnetsRouter);
 router.use("/reservations", reservationsRouter);
 router.use("/utilization", utilizationRouter);
 router.use("/users", requireAdmin, usersRouter);
-router.use("/integrations", integrationsRouter);
+router.use("/integrations", requireNetworkAdmin, integrationsRouter);
 router.use("/assets", assetsRouter);
 router.use("/events", eventsRouter);
 router.use("/server-settings", requireAdmin, serverSettingsRouter);

@@ -91,7 +91,7 @@ function _renderPanelHeader(data) {
         '<button data-fmt="csv">Export as CSV</button>' +
       '</div>' +
     '</div>' +
-    (isAdmin() ? '<button class="btn btn-sm btn-primary" id="ip-panel-reserve-btn">+ Reserve IP</button>' : '') +
+    (canManageNetworks() ? '<button class="btn btn-sm btn-primary" id="ip-panel-reserve-btn">+ Reserve IP</button>' : '') +
     '</span>';
   meta += headerBtns;
 
@@ -187,10 +187,10 @@ function _renderIpList(data) {
     } else if (r && r.status === "active") {
       actions =
         '<button class="btn btn-sm btn-secondary ip-edit-btn" data-rid="' + r.id + '" title="Edit">Edit</button>' +
-        (isAdmin() ? '<button class="btn btn-sm btn-danger ip-release-btn" data-rid="' + r.id + '" title="Release">Free</button>' : '');
+        (canManageNetworks() ? '<button class="btn btn-sm btn-danger ip-release-btn" data-rid="' + r.id + '" title="Release">Free</button>' : '');
     } else if (r && r.status === "expired") {
       actions = '<button class="btn btn-sm btn-secondary ip-edit-btn" data-rid="' + r.id + '" title="Edit">Edit</button>';
-    } else if (!r && isAdmin()) {
+    } else if (!r && canManageNetworks()) {
       actions = '<button class="btn btn-sm btn-primary ip-reserve-btn" data-ip="' + escapeHtml(ip.address) + '">Reserve</button>';
     }
 
@@ -421,7 +421,7 @@ function _generateIpPanelPdf(s, allIps) {
   // Header
   doc.setFontSize(16);
   doc.setTextColor(40, 40, 40);
-  doc.text("Shelob \u2014 Network Detail", 40, 36);
+  doc.text((_branding ? _branding.appName : "Shelob") + " \u2014 Network Detail", 40, 36);
   doc.setFontSize(9);
   doc.setTextColor(120, 120, 120);
   doc.text("Generated: " + timestamp, 40, 52);

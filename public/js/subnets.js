@@ -102,7 +102,7 @@ function renderSubnetsPage() {
       '<td>' + source + '</td>' +
       '<td>' + (s._count ? s._count.reservations : 0) + '</td>' +
       '<td class="actions">' +
-        (isAdmin() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + s.id + '\')">Edit</button>' +
+        (canManageNetworks() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + s.id + '\')">Edit</button>' +
         '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + s.id + '\', \'' + escapeHtml(s.cidr) + '\')">Del</button>' : '') +
       '</td></tr>';
   }).join("");
@@ -310,7 +310,7 @@ function generateNetworkPdf(networks, label) {
 
   doc.setFontSize(16);
   doc.setTextColor(40, 40, 40);
-  doc.text("Shelob \u2014 Network Report", 40, 36);
+  doc.text((_branding ? _branding.appName : "Shelob") + " \u2014 Network Report", 40, 36);
   doc.setFontSize(9);
   doc.setTextColor(120, 120, 120);
   doc.text("Generated: " + timestamp + "  |  Scope: " + label + "  |  Count: " + networks.length, 40, 52);
@@ -344,7 +344,7 @@ function generateNetworkPdf(networks, label) {
       doc.setFontSize(8);
       doc.setTextColor(150, 150, 150);
       doc.text(
-        "Page " + data.pageNumber + " of " + pageNum + "  |  Shelob Network Report",
+        "Page " + data.pageNumber + " of " + pageNum + "  |  " + (_branding ? _branding.appName : "Shelob") + " Network Report",
         doc.internal.pageSize.getWidth() / 2,
         doc.internal.pageSize.getHeight() - 20,
         { align: "center" }

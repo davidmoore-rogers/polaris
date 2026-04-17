@@ -54,7 +54,7 @@ function renderBlocksPage() {
       '<td>' + (b._count ? b._count.subnets : 0) + '</td>' +
       '<td>' + formatDate(b.createdAt) + '</td>' +
       '<td class="actions">' +
-        (isAdmin() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + b.id + '\')">Edit</button>' +
+        (canManageNetworks() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + b.id + '\')">Edit</button>' +
         '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + b.id + '\', \'' + escapeHtml(b.cidr) + '\')">Del</button>' : '') +
       '</td></tr>';
   }).join("");

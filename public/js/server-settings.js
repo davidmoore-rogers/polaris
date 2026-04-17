@@ -16,6 +16,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (target === "certificates" && !_certsLoaded) loadCertificates();
       if (target === "database" && !_dbLoaded) loadDatabaseInfo();
       if (target === "identification" && !_tagsLoaded) loadIdentificationTab();
+      if (target === "customization" && !_brandingLoaded) loadCustomizationTab();
     });
   });
 
@@ -565,6 +566,131 @@ function dbInfoRow(label, value) {
 function formatNumber(n) {
   if (n === undefined || n === null) return "-";
   return Number(n).toLocaleString();
+}
+
+// ─── Customization Tab ─────────────────────────────────────────────────────
+
+var _brandingLoaded = false;
+var _brandingData = { appName: "Shelob", subtitle: "Network Management Tool", logoUrl: "/logo.webp" };
+
+async function loadCustomizationTab() {
+  var container = document.getElementById("tab-customization");
+  container.innerHTML = '<div class="settings-card"><p class="empty-state">Loading...</p></div>';
+
+  try {
+    _brandingData = await api.serverSettings.getBranding();
+    _brandingLoaded = true;
+    renderCustomizationTab();
+  } catch (err) {
+    container.innerHTML = '<div class="settings-card"><p class="empty-state">Error: ' + escapeHtml(err.message) + '</p></div>';
+  }
+}
+
+function renderCustomizationTab() {
+  var container = document.getElementById("tab-customization");
+  var isCustomLogo = _brandingData.logoUrl && _brandingData.logoUrl !== "/logo.webp";
+
+  container.innerHTML =
+    '<div class="settings-card">' +
+      '<h4>Application Name</h4>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+        'Change the name shown in the sidebar, login page, browser tabs, and PDF exports.' +
+      '</p>' +
+      '<div class="form-group"><label>Application Name</label>' +
+        '<input type="text" id="f-brand-appname" value="' + escapeHtml(_brandingData.appName || "") + '" placeholder="e.g. Shelob">' +
+      '</div>' +
+      '<div class="form-group"><label>Subtitle</label>' +
+        '<input type="text" id="f-brand-subtitle" value="' + escapeHtml(_brandingData.subtitle || "") + '" placeholder="e.g. Network Management Tool">' +
+        '<p class="hint">Shown beneath the application name on the sidebar and login page.</p>' +
+      '</div>' +
+      '<button class="btn btn-primary" id="btn-brand-save">Save</button>' +
+    '</div>' +
+    '<div class="settings-card">' +
+      '<h4>Logo</h4>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+        'Upload a custom logo to replace the default. Recommended size: 280\u00d7280px or larger. Supported formats: PNG, JPEG, WebP, SVG.' +
+      '</p>' +
+      '<div style="display:flex;align-items:flex-start;gap:1.5rem;flex-wrap:wrap">' +
+        '<div style="flex-shrink:0">' +
+          '<div class="logo-preview-box">' +
+            '<img id="logo-preview" src="' + escapeHtml(_brandingData.logoUrl || "/logo.webp") + '" alt="Current logo">' +
+          '</div>' +
+          '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:0.5rem;text-align:center">' +
+            (isCustomLogo ? 'Custom logo' : 'Default logo') +
+          '</p>' +
+        '</div>' +
+        '<div style="flex:1;min-width:200px">' +
+          '<div class="upload-area" id="logo-upload-area">' +
+            '<input type="file" id="logo-file-input" accept="image/png,image/jpeg,image/webp,image/svg+xml">' +
+            '<strong style="color:var(--color-text-primary)">Upload New Logo</strong>' +
+            '<p>Click to select an image file</p>' +
+          '</div>' +
+          (isCustomLogo
+            ? '<button class="btn btn-secondary" id="btn-logo-reset" style="margin-top:0.75rem">Reset to Default</button>'
+            : '') +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  // Wire save button
+  document.getElementById("btn-brand-save").addEventListener("click", saveBranding);
+
+  // Wire logo upload
+  wireUploadArea("logo-upload-area", "logo-file-input", uploadLogo);
+
+  // Wire reset button
+  var resetBtn = document.getElementById("btn-logo-reset");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", resetLogo);
+  }
+}
+
+async function saveBranding() {
+  var btn = document.getElementById("btn-brand-save");
+  btn.disabled = true;
+  try {
+    var data = {
+      appName: document.getElementById("f-brand-appname").value.trim(),
+      subtitle: document.getElementById("f-brand-subtitle").value.trim(),
+    };
+    _brandingData = await api.serverSettings.updateBranding(data);
+    applyBranding(_brandingData);
+    showToast("Branding saved");
+  } catch (err) {
+    showToast(err.message, "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function uploadLogo(files) {
+  if (!files || files.length === 0) return;
+  var file = files[0];
+  if (!file.type.startsWith("image/")) {
+    showToast("Please select an image file", "error");
+    return;
+  }
+  try {
+    _brandingData = await api.serverSettings.uploadLogo(file);
+    applyBranding(_brandingData);
+    renderCustomizationTab();
+    showToast("Logo uploaded");
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function resetLogo() {
+  var ok = await showConfirm("Reset to the default logo?");
+  if (!ok) return;
+  try {
+    _brandingData = await api.serverSettings.deleteLogo();
+    applyBranding(_brandingData);
+    renderCustomizationTab();
+    showToast("Logo reset to default");
+  } catch (err) {
+    showToast(err.message, "error");
+  }
 }
 
 // ─── Identification Tab ────────────────────────────────────────────────────
