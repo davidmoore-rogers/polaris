@@ -569,6 +569,98 @@ code {
   margin: 4px 0;
 }
 
+/* ─── Searchable Select ───────────────────────────────────────────────────── */
+.search-select {
+  position: relative;
+}
+.search-select-input {
+  width: 100%;
+  padding: 0.5rem 2rem 0.5rem 0.65rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: 0.88rem;
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+.search-select-input:focus {
+  cursor: text;
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 25%, transparent);
+}
+.search-select-input::placeholder { color: var(--color-text-tertiary); }
+.search-select-arrow {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--color-text-tertiary);
+  font-size: 0.7rem;
+}
+.search-select-dropdown {
+  display: none;
+  position: absolute;
+  left: 0; right: 0;
+  top: calc(100% + 2px);
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  z-index: 300;
+  padding: 2px 0;
+}
+.search-select-dropdown.open { display: block; }
+.search-select-option {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.84rem;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search-select-option:hover,
+.search-select-option.highlighted {
+  background: var(--color-bg-secondary);
+}
+.search-select-option.selected {
+  font-weight: 600;
+  color: var(--color-primary);
+}
+.search-select-group {
+  padding: 0.35rem 0.75rem 0.15rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-tertiary);
+}
+.search-select-empty {
+  padding: 0.6rem 0.75rem;
+  font-size: 0.84rem;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+.search-select-clear {
+  position: absolute;
+  right: 26px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.search-select-clear:hover { color: var(--color-text-primary); }
+
 /* ─── Tables ───────────────────────────────────────────────────────────────── */
 .table-wrapper {
   background: var(--color-bg-primary);

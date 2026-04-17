@@ -73,7 +73,13 @@ async function loadNtpSettings() {
     '<div class="settings-card">' +
       '<h4>Timezone Override</h4>' +
       '<div class="form-group"><label>Timezone</label>' +
-        '<input type="text" id="f-ntp-timezone" value="' + escapeHtml(defaults.timezoneOverride) + '" placeholder="Leave blank to use system timezone">' +
+        '<div class="search-select" id="tz-select-wrap">' +
+          '<input type="text" class="search-select-input" id="f-ntp-timezone" autocomplete="off" placeholder="Search timezones... (blank = system timezone)">' +
+          '<input type="hidden" id="f-ntp-timezone-val" value="' + escapeHtml(defaults.timezoneOverride) + '">' +
+          '<button type="button" class="search-select-clear" id="tz-clear" title="Clear" style="display:none">&times;</button>' +
+          '<span class="search-select-arrow">&#9662;</span>' +
+          '<div class="search-select-dropdown" id="tz-dropdown"></div>' +
+        '</div>' +
         '<p class="hint">IANA timezone identifier (e.g. America/Chicago, UTC, Europe/London). Leave blank to use the server\'s OS timezone.</p>' +
       '</div>' +
       '<div id="ntp-current-time" style="font-size:0.82rem;color:var(--color-text-tertiary);margin-top:0.5rem"></div>' +
@@ -90,12 +96,14 @@ async function loadNtpSettings() {
 
   document.getElementById("btn-ntp-save").addEventListener("click", saveNtpSettings);
   document.getElementById("btn-ntp-test").addEventListener("click", testNtpSync);
+
+  initTimezoneDropdown(defaults.timezoneOverride);
 }
 
 function updateCurrentTime() {
   var el = document.getElementById("ntp-current-time");
   if (!el) return;
-  var tz = document.getElementById("f-ntp-timezone");
+  var tz = document.getElementById("f-ntp-timezone-val");
   var tzVal = tz ? tz.value.trim() : "";
   try {
     var opts = { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "short" };
@@ -116,7 +124,7 @@ async function saveNtpSettings() {
       enabled: document.getElementById("f-ntp-enabled").checked,
       mode: document.getElementById("f-ntp-mode").value,
       servers: servers,
-      timezoneOverride: document.getElementById("f-ntp-timezone").value.trim() || null,
+      timezoneOverride: document.getElementById("f-ntp-timezone-val").value.trim() || null,
     });
     showToast("NTP settings saved");
   } catch (err) {
@@ -146,6 +154,176 @@ async function testNtpSync() {
   } finally {
     btn.disabled = false;
   }
+}
+
+// ─── Timezone Searchable Dropdown ──────────────────────────────────────────
+
+function initTimezoneDropdown(currentValue) {
+  var input = document.getElementById("f-ntp-timezone");
+  var hidden = document.getElementById("f-ntp-timezone-val");
+  var dropdown = document.getElementById("tz-dropdown");
+  var clearBtn = document.getElementById("tz-clear");
+
+  // Build timezone list from Intl API
+  var allZones;
+  try {
+    allZones = Intl.supportedValuesOf("timeZone");
+  } catch (_) {
+    // Fallback for older browsers — populate a reasonable subset
+    allZones = [
+      "UTC",
+      "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
+      "America/Anchorage", "America/Phoenix", "America/Toronto", "America/Vancouver",
+      "America/Mexico_City", "America/Sao_Paulo", "America/Buenos_Aires", "America/Bogota",
+      "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid", "Europe/Rome",
+      "Europe/Amsterdam", "Europe/Moscow", "Europe/Istanbul", "Europe/Athens",
+      "Asia/Tokyo", "Asia/Shanghai", "Asia/Hong_Kong", "Asia/Singapore", "Asia/Seoul",
+      "Asia/Kolkata", "Asia/Dubai", "Asia/Bangkok", "Asia/Taipei", "Asia/Jakarta",
+      "Australia/Sydney", "Australia/Melbourne", "Australia/Perth", "Australia/Brisbane",
+      "Pacific/Auckland", "Pacific/Honolulu", "Pacific/Fiji",
+      "Africa/Cairo", "Africa/Johannesburg", "Africa/Lagos", "Africa/Nairobi",
+    ];
+  }
+
+  var highlightIdx = -1;
+
+  // Set initial display value
+  if (currentValue) {
+    input.value = currentValue;
+    clearBtn.style.display = "";
+  }
+
+  function renderOptions(filter) {
+    var html = "";
+    var count = 0;
+    var currentGroup = "";
+    var filterLower = (filter || "").toLowerCase();
+
+    // Group by region (part before /)
+    for (var i = 0; i < allZones.length; i++) {
+      var tz = allZones[i];
+      if (filterLower && tz.toLowerCase().indexOf(filterLower) === -1) continue;
+
+      var slash = tz.indexOf("/");
+      var group = slash > 0 ? tz.substring(0, slash) : "Other";
+      var label = slash > 0 ? tz.substring(slash + 1).replace(/_/g, " ") : tz;
+
+      if (group !== currentGroup) {
+        currentGroup = group;
+        html += '<div class="search-select-group">' + escapeHtml(group) + '</div>';
+      }
+
+      html += '<div class="search-select-option" data-value="' + escapeHtml(tz) + '"' +
+        (tz === hidden.value ? ' class="search-select-option selected"' : '') +
+        '>' + escapeHtml(label) + ' <span style="color:var(--color-text-tertiary);font-size:0.78rem">' + escapeHtml(tz) + '</span></div>';
+      count++;
+    }
+
+    if (count === 0) {
+      html = '<div class="search-select-empty">No timezones match "' + escapeHtml(filter) + '"</div>';
+    }
+
+    dropdown.innerHTML = html;
+    highlightIdx = -1;
+
+    // Wire click handlers
+    dropdown.querySelectorAll(".search-select-option").forEach(function (opt) {
+      opt.addEventListener("mousedown", function (e) {
+        e.preventDefault(); // prevent blur
+        selectTz(opt.getAttribute("data-value"));
+      });
+    });
+  }
+
+  function selectTz(value) {
+    hidden.value = value;
+    input.value = value;
+    clearBtn.style.display = value ? "" : "none";
+    closeDropdown();
+    updateCurrentTime();
+  }
+
+  function clearTz() {
+    hidden.value = "";
+    input.value = "";
+    clearBtn.style.display = "none";
+    closeDropdown();
+    updateCurrentTime();
+  }
+
+  function openDropdown() {
+    renderOptions(input.value === hidden.value ? "" : input.value);
+    dropdown.classList.add("open");
+
+    // Scroll to selected item
+    var sel = dropdown.querySelector(".selected");
+    if (sel) sel.scrollIntoView({ block: "nearest" });
+  }
+
+  function closeDropdown() {
+    dropdown.classList.remove("open");
+    highlightIdx = -1;
+    // Restore display value
+    input.value = hidden.value || "";
+  }
+
+  function getVisibleOptions() {
+    return dropdown.querySelectorAll(".search-select-option");
+  }
+
+  function updateHighlight(opts) {
+    opts.forEach(function (o, i) {
+      if (i === highlightIdx) {
+        o.classList.add("highlighted");
+        o.scrollIntoView({ block: "nearest" });
+      } else {
+        o.classList.remove("highlighted");
+      }
+    });
+  }
+
+  input.addEventListener("focus", function () {
+    input.select();
+    openDropdown();
+  });
+
+  input.addEventListener("input", function () {
+    renderOptions(input.value);
+    dropdown.classList.add("open");
+  });
+
+  input.addEventListener("blur", function () {
+    // Small delay to allow mousedown on option to fire first
+    setTimeout(closeDropdown, 150);
+  });
+
+  input.addEventListener("keydown", function (e) {
+    var opts = getVisibleOptions();
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (!dropdown.classList.contains("open")) { openDropdown(); return; }
+      highlightIdx = Math.min(highlightIdx + 1, opts.length - 1);
+      updateHighlight(opts);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      highlightIdx = Math.max(highlightIdx - 1, 0);
+      updateHighlight(opts);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (highlightIdx >= 0 && highlightIdx < opts.length) {
+        selectTz(opts[highlightIdx].getAttribute("data-value"));
+      }
+    } else if (e.key === "Escape") {
+      closeDropdown();
+      input.blur();
+    }
+  });
+
+  clearBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    clearTz();
+    input.focus();
+  });
 }
 
 // ─── DNS Settings ─────────────────────────────────────────────────────────

@@ -15,6 +15,7 @@ An IP address management (IPAM) tool for tracking and reserving IPv4/IPv6 space,
 - **HTTPS & TLS Hardening** — Built-in HTTPS with certificate management, TLS 1.2+ minimum, AEAD-only cipher suites
 - **Security Hardening** — Helmet CSP headers, rate limiting, session timeout, CSRF protection on SAML
 - **Database Management** — Backup/restore with optional encryption, scheduled backups
+- **MAC OUI Lookup** — Identify device manufacturers from MAC addresses using the IEEE OUI database, with admin-defined overrides
 - **PDF/CSV Export** — Export assets, networks, events, and IP panel data
 - **Light/Dark Theme** — User-selectable UI theme
 - **First-Run Setup Wizard** — Browser-based guided setup for database, admin account, and application configuration
@@ -194,11 +195,11 @@ SAML 2.0 integration with Azure AD / Microsoft Entra ID. Configure via Settings 
 - **SAML** — RelayState CSRF protection on SSO callbacks
 - **Body Limits** — 1 MB max request size
 
-## Production Deployment (RHEL / Rocky / Alma Linux)
+## Production Deployment
 
-An automated deployment script is included that sets up everything on a fresh RHEL 9 server.
+Automated deployment scripts are included for all supported platforms. Each script installs Node.js 20, PostgreSQL 15, creates the database, deploys the app, and registers a service.
 
-### Automated setup
+### RHEL / Rocky / Alma Linux 9
 
 ```bash
 # As root on the target server:
@@ -214,9 +215,37 @@ The script will:
 - Clone the repo to `/opt/shelob`, install dependencies, build, and migrate
 - Generate a random `SESSION_SECRET` in `.env`
 - Install and enable a systemd service with security hardening
-- Open port 3000 in the firewall
+- Open port 3000 in the firewall (`firewall-cmd`)
 
-After it finishes, the app is live at `http://<server-ip>:3000` — log in with `admin` / `admin`.
+### Ubuntu / Debian
+
+```bash
+# As root on the target server:
+git clone https://github.com/davidmoore-rogers/shelob.git
+cd shelob
+bash deploy/setup-ubuntu.sh
+```
+
+Same steps as the RHEL script, but uses `apt-get`, the NodeSource repository for Node.js, and `ufw` for the firewall rule.
+
+### Windows Server 2019 / 2022
+
+```powershell
+# As Administrator:
+git clone https://github.com/davidmoore-rogers/shelob.git
+cd shelob
+powershell -ExecutionPolicy Bypass -File deploy\setup-windows.ps1
+```
+
+The script will:
+- Install Node.js 20 and PostgreSQL 15 (via `winget` or direct installer)
+- Create the PostgreSQL database and role
+- Clone the repo to `C:\shelob`, install dependencies, build, and migrate
+- Generate a random `SESSION_SECRET` in `.env`
+- Install [NSSM](https://nssm.cc) and register Shelob as a Windows Service with log rotation
+- Open port 3000 in Windows Firewall (Domain + Private profiles)
+
+After any script finishes, the app is live at `http://<server-ip>:3000` — log in with `admin` / `admin`.
 
 ### Manual setup
 
@@ -250,6 +279,8 @@ systemctl enable --now shelob
 
 ### Managing the service
 
+**Linux (systemd):**
+
 ```bash
 systemctl status shelob          # check status
 systemctl restart shelob         # restart after config changes
@@ -257,7 +288,17 @@ journalctl -u shelob -f          # tail logs
 journalctl -u shelob --since today  # today's logs
 ```
 
+**Windows (NSSM):**
+
+```powershell
+nssm status Shelob               # check status
+nssm restart Shelob               # restart after config changes
+Get-Content C:\shelob\logs\service-stdout.log -Tail 50   # tail logs
+```
+
 ### Updating
+
+**Linux:**
 
 ```bash
 cd /opt/shelob
@@ -266,6 +307,17 @@ sudo -u shelob npm ci
 sudo -u shelob npx tsc
 sudo -u shelob npx prisma migrate deploy
 systemctl restart shelob
+```
+
+**Windows:**
+
+```powershell
+cd C:\shelob
+git pull --ff-only
+npm ci
+npx tsc
+npx prisma migrate deploy
+nssm restart Shelob
 ```
 
 ## Running Tests
