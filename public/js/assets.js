@@ -140,7 +140,7 @@ function renderAssetsPage() {
       '<td>' + _copyableCell(a.dnsName) + '</td>' +
       '<td>' + assetTypeBadge(a.assetType) + '</td>' +
       '<td>' + assetStatusBadge(a.status) + '</td>' +
-      '<td>' + escapeHtml(a.location || "-") + '</td>' +
+      '<td>' + escapeHtml(a.location || a.learnedLocation || "-") + '</td>' +
       '<td>' + escapeHtml(a.assignedTo || "-") + '</td>' +
       '<td>' + (a.acquiredAt ? formatDate(a.acquiredAt) : "-") + '</td>' +
       '<td class="actions">' +
@@ -240,7 +240,7 @@ function assetFormHTML(defaults) {
   '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
   '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Location & Ownership</p>' +
   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
-    '<div class="form-group"><label>Location</label><input type="text" id="f-location" value="' + escapeHtml(d.location || "") + '" placeholder="e.g. DC1 Rack A3"></div>' +
+    '<div class="form-group"><label>Location</label><input type="text" id="f-location" value="' + escapeHtml(d.location || "") + '" placeholder="e.g. DC1 Rack A3">' + (d.learnedLocation ? '<p class="hint">Learned: ' + escapeHtml(d.learnedLocation) + '</p>' : '') + '</div>' +
     '<div class="form-group"><label>Department</label><input type="text" id="f-department" value="' + escapeHtml(d.department || "") + '" placeholder="e.g. Infrastructure"></div>' +
     '<div class="form-group"><label>Assigned To</label><input type="text" id="f-assignedTo" value="' + escapeHtml(d.assignedTo || "") + '" placeholder="e.g. platform-team"></div>' +
     '<div class="form-group"><label>Operating System</label><input type="text" id="f-os" value="' + escapeHtml(d.os || "") + '" placeholder="e.g. RHEL 9, Windows Server 2022"></div>' +
@@ -353,6 +353,7 @@ async function openViewModal(id) {
       viewRow("Type", ASSET_TYPE_LABELS[a.assetType] || a.assetType) +
       viewRow("Status", a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-") +
       viewRow("Location", a.location) +
+      viewRow("Learned Location", a.learnedLocation) +
       viewRow("Department", a.department) +
       viewRow("Assigned To", a.assignedTo) +
       viewRow("OS / Firmware", a.osVersion || a.os) +
@@ -528,7 +529,7 @@ function generateAssetPdf(assets, label) {
       a.dnsName || "-",
       ASSET_TYPE_LABELS[a.assetType] || a.assetType || "-",
       a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-",
-      a.location || "-",
+      a.location || a.learnedLocation || "-",
       a.assignedTo || "-",
     ];
   });
@@ -567,7 +568,7 @@ function generateAssetCsv(assets) {
     return [
       a.hostname || "", a.ipAddress || "", a.macAddress || "", a.dnsName || "",
       ASSET_TYPE_LABELS[a.assetType] || a.assetType || "", a.status || "",
-      a.location || "", a.assignedTo || "", a.serialNumber || "",
+      a.location || a.learnedLocation || "", a.assignedTo || "", a.serialNumber || "",
       a.manufacturer || "", a.model || "", a.osVersion || a.os || "", a.assetTag || "",
     ];
   });

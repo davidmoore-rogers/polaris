@@ -470,6 +470,7 @@ const ASSETS = [
     assetType: "server",
     status: "active",
     location: "DC1 Rack A3",
+    learnedLocation: null,
     department: "Platform Engineering",
     assignedTo: "platform-team",
     os: "RHEL 9.3",
@@ -503,6 +504,7 @@ const ASSETS = [
     assetType: "server",
     status: "active",
     location: "DC1 Rack A3",
+    learnedLocation: null,
     department: "Platform Engineering",
     assignedTo: "platform-team",
     os: "RHEL 9.3",
@@ -535,6 +537,7 @@ const ASSETS = [
     assetType: "server",
     status: "active",
     location: "DC1 Rack B1",
+    learnedLocation: null,
     department: "Data Engineering",
     assignedTo: "data-team",
     os: "RHEL 9.3",
@@ -564,6 +567,7 @@ const ASSETS = [
     assetType: "server",
     status: "active",
     location: "DC1 Rack C2",
+    learnedLocation: null,
     department: "SRE",
     assignedTo: "sre-team",
     os: "Ubuntu 22.04 LTS",
@@ -597,6 +601,7 @@ const ASSETS = [
     assetType: "switch",
     status: "active",
     location: "DC1 MDF",
+    learnedLocation: null,
     department: "Network Operations",
     assignedTo: "network-team",
     os: "IOS-XE",
@@ -626,6 +631,7 @@ const ASSETS = [
     assetType: "firewall",
     status: "active",
     location: "DC1 Security Rack",
+    learnedLocation: null,
     department: "Network Security",
     assignedTo: "network-team",
     os: "FortiOS",
@@ -655,6 +661,7 @@ const ASSETS = [
     assetType: "server",
     status: "decommissioned",
     location: "DC1 Rack D4",
+    learnedLocation: null,
     department: "DevOps",
     assignedTo: "devops-team",
     os: "RHEL 8.6",
@@ -684,6 +691,7 @@ const ASSETS = [
     assetType: "server",
     status: "storage",
     location: "Warehouse B",
+    learnedLocation: null,
     department: "IT Operations",
     assignedTo: null,
     os: null,
@@ -990,7 +998,7 @@ function registerFortiManagerDemo(host, name, force, fields) {
     id: crypto.randomUUID(),
     ...proposed.asset,
     macAddress: null, dnsName: null, assetTag: null, serialNumber: null,
-    location: null, assignedTo: null, os: null, acquiredAt: null,
+    location: null, learnedLocation: null, assignedTo: null, os: null, acquiredAt: null,
     warrantyExpiry: null, purchaseOrder: null,
     tags: ["fortimanager", "auto-registered"],
     createdAt: now, updatedAt: now,
@@ -1348,6 +1356,7 @@ function syncDhcpSubnetsDemo(integrationId, integrationName, integrationType, re
           assetType: "firewall",
           status: "active",
           location: null,
+          learnedLocation: null,
           department: "Network Security",
           assignedTo: null,
           os: null,
@@ -1514,8 +1523,9 @@ function syncDhcpSubnetsDemo(integrationId, integrationName, integrationType, re
       // Update asset MAC list
       _addMacToAsset(asset, entry.macAddress, entry.type, now);
 
-      // Update asset IP address from DHCP entry and activate
+      // Update asset IP address, learned location, and activate
       asset.ipAddress = entry.ipAddress;
+      if (entry.device) asset.learnedLocation = entry.device;
       if (asset.status !== "active") {
         asset.status = "active";
       }
@@ -1612,6 +1622,7 @@ function syncDhcpSubnetsDemo(integrationId, integrationName, integrationType, re
           assetType: "other",
           status: "active",
           location: null,
+          learnedLocation: null,
           department: null,
           assignedTo: null,
           os: inv.os || null,

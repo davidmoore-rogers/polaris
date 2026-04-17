@@ -179,7 +179,8 @@ model Asset {
   model          String?
   assetType      AssetType   @default(other)
   status         AssetStatus @default(active)
-  location       String?                           // Building, rack, room
+  location       String?                           // User-set location (overrides learnedLocation)
+  learnedLocation String?                          // Auto-discovered from DHCP (FortiGate name)
   department     String?                           // Owning department or team
   assignedTo     String?                           // Person or team responsible
   os             String?                           // Operating system

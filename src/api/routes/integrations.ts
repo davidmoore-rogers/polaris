@@ -776,7 +776,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       macList.sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
 
       try {
-        // Update asset: MAC list + IP address from DHCP entry, activate if not already
+        // Update asset: MAC list, IP address, learned location, and activate
         await prisma.asset.update({
           where: { id: asset.id },
           data: {
@@ -784,6 +784,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             macAddresses: macList,
             ipAddress: entry.ipAddress,
             status: "active",
+            ...(entry.device ? { learnedLocation: entry.device } : {}),
           },
         });
 
