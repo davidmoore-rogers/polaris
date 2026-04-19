@@ -113,7 +113,13 @@ function renderNav() {
       <div style="padding:${isAdmin() ? '0.25rem' : '0.5rem'} 0.5rem 0;${isAdmin() ? '' : 'border-top:1px solid var(--color-border-light);'}">
         <button id="btn-theme-toggle" class="theme-toggle">${_getCurrentTheme() === 'dark' ? _sunIcon() : _moonIcon()}<span>${_getCurrentTheme() === 'dark' ? 'Light Mode' : 'Dark Mode'}</span></button>
       </div>
-      <div style="padding:0.25rem 0.5rem 0.75rem">
+      <div style="padding:0.25rem 0.5rem 0">
+        <div style="display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0.5rem;font-size:0.8rem;color:var(--color-text-secondary)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px;flex-shrink:0;opacity:0.6"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${currentUsername || ''}">${currentUsername || ''}</span>
+        </div>
+      </div>
+      <div style="padding:0.15rem 0.5rem 0.75rem">
         <a href="#" id="btn-logout" class="sidebar-bottom-link sidebar-bottom-link-logout">${ICONS.logout}<span>Logout</span></a>
       </div>
       <div id="sidebar-version" style="padding:0 0.75rem 0.75rem;text-align:center;font-size:0.7rem;color:var(--color-text-tertiary);letter-spacing:0.02em"></div>
