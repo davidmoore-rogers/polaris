@@ -467,9 +467,17 @@ async function testDnsLookup() {
     var form = collectDnsForm();
     form.testIp = document.getElementById("f-dns-test-ip").value.trim() || "8.8.8.8";
     var result = await api.serverSettings.testDns(form);
-    statusEl.innerHTML = result.ok
-      ? '<span style="color:var(--color-success)">' + escapeHtml(result.message) + '</span>'
-      : '<span style="color:var(--color-danger)">' + escapeHtml(result.message) + '</span>';
+    if (result.results && result.results.length > 1) {
+      statusEl.innerHTML = result.results.map(function (r) {
+        var color = r.ok ? "var(--color-success)" : "var(--color-danger)";
+        return '<div style="font-size:0.82rem;padding:2px 0"><span style="color:' + color + '">' +
+          (r.ok ? "&#10003;" : "&#10007;") + '</span> <strong>' + escapeHtml(r.server) + '</strong> — ' + escapeHtml(r.message) + '</div>';
+      }).join("");
+    } else {
+      statusEl.innerHTML = result.ok
+        ? '<span style="color:var(--color-success)">' + escapeHtml(result.message) + '</span>'
+        : '<span style="color:var(--color-danger)">' + escapeHtml(result.message) + '</span>';
+    }
   } catch (err) {
     statusEl.innerHTML = '<span style="color:var(--color-danger)">' + escapeHtml(err.message) + '</span>';
   } finally {

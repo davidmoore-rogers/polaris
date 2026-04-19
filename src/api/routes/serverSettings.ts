@@ -584,27 +584,35 @@ router.post("/dns/test", async (req, res, next) => {
     const testIp = req.body.testIp || "8.8.8.8";
 
     if (mode === "doh" && !dohUrl) {
-      return res.json({ ok: false, message: "No DoH URL configured" });
+      return res.json({ ok: false, message: "No DoH URL configured", results: [] });
     }
 
-    const resolver = await createResolver({ servers, mode, dohUrl });
-    const start = Date.now();
-    try {
-      const hostnames = await resolver.reverse(testIp);
-      const elapsed = Date.now() - start;
-      const via = mode === "doh" ? `DoH (${dohUrl})` : mode === "dot" ? `DoT (${servers[0]}:853)` : servers.length > 0 ? servers[0] : "system DNS";
-      res.json({
-        ok: true,
-        message: `Resolved ${testIp} → ${hostnames[0] || "(no PTR)"} in ${elapsed}ms via ${via}`,
-      });
-    } catch (dnsErr: any) {
-      const elapsed = Date.now() - start;
-      if (dnsErr.code === "ENOTFOUND" || dnsErr.code === "ENODATA") {
-        res.json({ ok: true, message: `Server reachable but no PTR record for ${testIp} (${elapsed}ms)` });
-      } else {
-        res.json({ ok: false, message: `DNS query failed: ${dnsErr.code || dnsErr.message} (${elapsed}ms)` });
+    const targets = mode === "doh"
+      ? [{ label: `DoH (${dohUrl})`, settings: { servers: [], mode, dohUrl } as DnsSettings }]
+      : mode === "dot"
+        ? servers.map((s) => ({ label: `DoT (${s}:853)`, settings: { servers: [s], mode, dohUrl: "" } as DnsSettings }))
+        : servers.length > 0
+          ? servers.map((s) => ({ label: s, settings: { servers: [s], mode: "standard" as const, dohUrl: "" } }))
+          : [{ label: "system DNS", settings: { servers: [], mode: "standard" as const, dohUrl: "" } }];
+
+    const results = await Promise.all(targets.map(async (t) => {
+      const resolver = await createResolver(t.settings);
+      const start = Date.now();
+      try {
+        const hostnames = await resolver.reverse(testIp);
+        const elapsed = Date.now() - start;
+        return { server: t.label, ok: true, message: `${testIp} → ${hostnames[0] || "(no PTR)"} in ${elapsed}ms` };
+      } catch (dnsErr: any) {
+        const elapsed = Date.now() - start;
+        if (dnsErr.code === "ENOTFOUND" || dnsErr.code === "ENODATA") {
+          return { server: t.label, ok: true, message: `Reachable but no PTR record for ${testIp} (${elapsed}ms)` };
+        }
+        return { server: t.label, ok: false, message: `${dnsErr.code || dnsErr.message} (${elapsed}ms)` };
       }
-    }
+    }));
+
+    const allOk = results.every((r) => r.ok);
+    res.json({ ok: allOk, message: results.map((r) => `${r.server}: ${r.message}`).join("; "), results });
   } catch (err) {
     next(err);
   }
