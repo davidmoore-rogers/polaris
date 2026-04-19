@@ -298,6 +298,7 @@ async function openAuthSettingsModal() {
 
 function getSamlFormData() {
   return {
+    enabled: document.getElementById("f-saml-enabled").checked,
     spEntityId: val("f-sp-entity-id"),
     idpEntityId: val("f-idp-entity-id"),
     idpLoginUrl: val("f-idp-login-url"),
@@ -340,6 +341,13 @@ function buildSamlTab(s) {
   var spSlsUrl = spEntityId.replace(/\/+$/, "") + "/login.html";
 
   return '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:1.25rem">Configure SAML 2.0 single sign-on with your identity provider.</p>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">' +
+        '<input type="checkbox" id="f-saml-enabled"' + (s.enabled ? ' checked' : '') + '>' +
+        '<span>Enable SAML authentication</span>' +
+      '</label>' +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<h4 style="font-size:0.88rem;font-weight:600;margin-bottom:0.75rem;color:var(--color-text-primary);border-bottom:1px solid var(--color-border);padding-bottom:0.4rem">Service Provider</h4>' +
     '<p style="font-size:0.8rem;color:var(--color-text-tertiary);margin-bottom:0.75rem">Copy these values into your identity provider\'s SAML configuration.</p>' +
     '<div class="form-group">' +

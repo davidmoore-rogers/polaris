@@ -14,6 +14,7 @@ import bcrypt from "bcrypt";
 // ─── SSO Settings (stored in Setting table) ─────────────────────────────────
 
 export interface SsoSettings {
+  enabled: boolean;
   spEntityId: string;
   idpEntityId: string;
   idpLoginUrl: string;
@@ -25,6 +26,7 @@ export interface SsoSettings {
 }
 
 const SSO_DEFAULTS: SsoSettings = {
+  enabled: false,
   spEntityId: "",
   idpEntityId: "",
   idpLoginUrl: "",
@@ -51,6 +53,7 @@ export async function getSsoSettings(): Promise<SsoSettings> {
 export async function updateSsoSettings(updates: Partial<SsoSettings>): Promise<SsoSettings> {
   const current = await getSsoSettings();
   const merged: SsoSettings = {
+    enabled: updates.enabled !== undefined ? updates.enabled : current.enabled,
     spEntityId: updates.spEntityId !== undefined ? updates.spEntityId.trim() : current.spEntityId,
     idpEntityId: updates.idpEntityId !== undefined ? updates.idpEntityId.trim() : current.idpEntityId,
     idpLoginUrl: updates.idpLoginUrl !== undefined ? updates.idpLoginUrl.trim() : current.idpLoginUrl,
@@ -81,14 +84,14 @@ export async function updateSsoSettings(updates: Partial<SsoSettings>): Promise<
 export function isAzureSsoConfigured(): boolean {
   if (_ssoCache && Date.now() < _ssoCache.expiry) {
     const s = _ssoCache.value;
-    return !!(s.idpEntityId && s.idpLoginUrl && s.idpCertificate);
+    return !!(s.enabled && s.idpEntityId && s.idpLoginUrl && s.idpCertificate);
   }
   return false;
 }
 
 export async function isAzureSsoConfiguredAsync(): Promise<boolean> {
   const s = await getSsoSettings();
-  return !!(s.idpEntityId && s.idpLoginUrl && s.idpCertificate);
+  return !!(s.enabled && s.idpEntityId && s.idpLoginUrl && s.idpCertificate);
 }
 
 // ─── SAML Client ─────────────────────────────────────────────────────────────

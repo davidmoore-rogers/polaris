@@ -80,7 +80,7 @@ router.get("/me", (req, res) => {
 // GET /api/v1/auth/azure/config — public, login page checks this
 router.get("/azure/config", async (_req, res) => {
   const settings = await getSsoSettings();
-  const enabled = !!(settings.idpEntityId && settings.idpLoginUrl && settings.idpCertificate);
+  const enabled = !!(settings.enabled && settings.idpEntityId && settings.idpLoginUrl && settings.idpCertificate);
   let brand = "generic";
   if (settings.idpLoginUrl && /microsoftonline\.com|login\.microsoft\.com/i.test(settings.idpLoginUrl)) {
     brand = "microsoft";
