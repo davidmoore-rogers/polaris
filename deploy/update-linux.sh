@@ -119,6 +119,9 @@ rollback() {
 # ─── 4. Install dependencies ────────────────────────────────────────────────
 step "4/7  Installing dependencies..."
 
+# Ensure Node.js can bind to privileged ports (80, 443) without root
+setcap cap_net_bind_service=+ep "$(which node)" 2>/dev/null || true
+
 sudo -u "$APP_USER" npm ci --production=false || rollback "npm ci"
 
 # Check for security vulnerabilities

@@ -46,6 +46,10 @@ else
   info "Node.js $(node -v) installed"
 fi
 
+# Allow Node.js to bind to privileged ports (80, 443) without root
+info "Granting Node.js low-port binding capability..."
+setcap cap_net_bind_service=+ep "$(which node)"
+
 # ─── 2. Install PostgreSQL 15 ────────────────────────────────────────────────
 if command -v psql &>/dev/null; then
   info "PostgreSQL already installed"
