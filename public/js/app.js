@@ -444,7 +444,9 @@ function openModal(title, bodyHTML, footerHTML, options) {
           if (!visible) {
             var hint = document.createElement("div");
             hint.className = "modal-close-hint";
-            hint.innerHTML = '<span class="modal-close-hint-x">&times;</span> Click <b>&times;</b> to close';
+            hint.innerHTML = "&times;";
+            var btnCenterX = rect.left + rect.width / 2;
+            hint.style.left = btnCenterX + "px";
             overlay.appendChild(hint);
             requestAnimationFrame(function () { hint.classList.add("show"); });
             setTimeout(function () {

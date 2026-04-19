@@ -311,7 +311,17 @@ async function openEditModal(id) {
       btn.disabled = true;
       btn.textContent = "Testing...";
       try {
-        var result = await api.integrations.test(id, intg.name);
+        var formConfig = isWin ? getWinFormConfig() : getFormConfig();
+        if (isWin) {
+          if (!formConfig.password) formConfig.password = config.password;
+        } else {
+          if (!formConfig.apiToken) formConfig.apiToken = config.apiToken;
+        }
+        var result = await api.integrations.testNew({
+          type: intg.type,
+          name: val("f-name") || intg.name,
+          config: formConfig,
+        });
         showToast(result.message, result.ok ? "success" : "error");
       } catch (err) {
         if (err.name === "AbortError") { showToast("Test aborted", "error"); }
