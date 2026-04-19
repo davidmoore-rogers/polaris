@@ -353,22 +353,10 @@ function restartService() {
       windowsHide: true,
     });
     child.unref();
+    setTimeout(() => { process.exit(0); }, 5000);
   } else {
-    // Try systemctl first, fall back to process.exit
-    try {
-      const child = spawn("systemctl", ["restart", "shelob"], {
-        detached: true,
-        stdio: "ignore",
-      });
-      child.unref();
-    } catch {
-      // Fallback: exit with code 1 so Restart=on-failure restarts us
-      process.exit(1);
-    }
+    // Exit with non-zero code so systemd Restart=on-failure restarts us
+    logger.info("Exiting for systemd restart...");
+    process.exit(1);
   }
-
-  // If the service manager doesn't kill us within 5s, exit ourselves
-  setTimeout(() => {
-    process.exit(0);
-  }, 5000);
 }
