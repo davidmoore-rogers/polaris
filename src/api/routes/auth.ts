@@ -107,9 +107,11 @@ router.get("/azure/login", async (req, res) => {
 // POST /api/v1/auth/azure/callback — handles SAML Response from IdP
 router.post("/azure/callback", async (req, res) => {
   try {
-    // Validate relay state (CSRF protection)
+    // Validate relay state when available (SameSite=Lax cookies are not
+    // sent on cross-site POST, so the session may be empty here — the
+    // signed SAML response provides the primary authentication guarantee)
     const returnedState = req.body.RelayState || "";
-    if (!req.session.samlRelayState || returnedState !== req.session.samlRelayState) {
+    if (req.session.samlRelayState && returnedState !== req.session.samlRelayState) {
       return res.redirect("/login.html?error=invalid_state");
     }
 
