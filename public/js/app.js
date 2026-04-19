@@ -438,22 +438,6 @@ function openModal(title, bodyHTML, footerHTML, options) {
         if (closeBtn) {
           closeBtn.classList.add("flash");
           setTimeout(function () { closeBtn.classList.remove("flash"); }, 600);
-
-          var rect = closeBtn.getBoundingClientRect();
-          var visible = rect.top >= 0 && rect.bottom <= window.innerHeight;
-          if (!visible) {
-            var hint = document.createElement("div");
-            hint.className = "modal-close-hint";
-            hint.innerHTML = "&times;";
-            var btnCenterX = rect.left + rect.width / 2;
-            hint.style.left = btnCenterX + "px";
-            overlay.appendChild(hint);
-            requestAnimationFrame(function () { hint.classList.add("show"); });
-            setTimeout(function () {
-              hint.classList.remove("show");
-              setTimeout(function () { if (hint.parentNode) hint.parentNode.removeChild(hint); }, 300);
-            }, 1500);
-          }
         }
       }
     });
