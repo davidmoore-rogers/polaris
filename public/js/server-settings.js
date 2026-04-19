@@ -1203,7 +1203,7 @@ async function loadBackupHistory() {
     }
     body.innerHTML =
       '<table class="ip-table"><thead><tr>' +
-        '<th>Date</th><th>Filename</th><th style="text-align:right">Size</th><th>Encrypted</th><th style="width:80px"></th>' +
+        '<th>Date</th><th>Filename</th><th style="text-align:right">Size</th><th>Encrypted</th><th style="width:140px"></th>' +
       '</tr></thead><tbody>' +
       history.slice(0, 20).map(function (b) {
         var dlBtn = b.downloadable !== false
@@ -1219,7 +1219,11 @@ async function loadBackupHistory() {
             ? '<span class="badge badge-warning" style="font-size:0.7rem">Encrypted</span>'
             : '<span class="badge badge-info" style="font-size:0.7rem">Plain</span>') +
           '</td>' +
-          '<td>' + dlBtn + '</td>' +
+          '<td style="display:flex;gap:4px">' + dlBtn +
+            '<button class="btn btn-danger btn-sm backup-del-btn" data-id="' + escapeHtml(b.id) + '" style="font-size:0.75rem;padding:2px 8px" title="Delete">' +
+              '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" style="vertical-align:-1px"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>' +
+            '</button>' +
+          '</td>' +
           '</tr>';
       }).join("") +
       '</tbody></table>';
@@ -1247,6 +1251,23 @@ async function loadBackupHistory() {
           btn.disabled = false;
           btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" style="vertical-align:-1px;margin-right:3px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Download';
         });
+      });
+    });
+
+    body.querySelectorAll(".backup-del-btn").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        var id = btn.getAttribute("data-id");
+        var ok = await showConfirm("Delete this backup? This cannot be undone.");
+        if (!ok) return;
+        btn.disabled = true;
+        try {
+          await api.serverSettings.deleteBackup(id);
+          showToast("Backup deleted");
+          loadBackupHistory();
+        } catch (err) {
+          showToast("Delete failed: " + err.message, "error");
+          btn.disabled = false;
+        }
       });
     });
   } catch {

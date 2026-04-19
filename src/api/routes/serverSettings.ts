@@ -265,6 +265,30 @@ router.get("/database/backups", async (_req, res, next) => {
   }
 });
 
+router.delete("/database/backups/:id", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
+    const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
+    const idx = history.findIndex((r: any) => r.id === id);
+    if (idx === -1) throw new AppError(404, "Backup not found");
+
+    history.splice(idx, 1);
+    await prisma.setting.upsert({
+      where: { key: "backup_history" },
+      update: { value: history },
+      create: { key: "backup_history", value: history },
+    });
+
+    const filePath = join(BACKUP_DIR, id);
+    if (existsSync(filePath)) unlinkSync(filePath);
+
+    res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/database/backups/:id/download", async (req, res, next) => {
   try {
     const id = req.params.id as string;

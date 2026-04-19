@@ -156,6 +156,7 @@ const api = {
       });
     },
     listBackups: () => request("GET", "/server-settings/database/backups"),
+    deleteBackup: (id) => request("DELETE", `/server-settings/database/backups/${id}`),
     downloadBackup: (id) => {
       return fetch(API_BASE + "/server-settings/database/backups/" + id + "/download").then(function (res) {
         if (res.status === 401) { window.location.href = "/login.html"; return; }
