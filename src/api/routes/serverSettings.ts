@@ -374,7 +374,8 @@ router.put("/tags/:id", async (req, res, next) => {
     const name = (req.body.name ?? existing.name).trim();
     if (!name) throw new AppError(400, "Tag name is required");
 
-    if (name !== existing.name) {
+    const renamed = name !== existing.name;
+    if (renamed) {
       const dupe = await prisma.tag.findUnique({ where: { name } });
       if (dupe) throw new AppError(409, `Tag "${name}" already exists`);
     }
@@ -387,6 +388,16 @@ router.put("/tags/:id", async (req, res, next) => {
         color: req.body.color ?? existing.color,
       },
     });
+
+    if (renamed) {
+      const oldName = existing.name;
+      await Promise.all([
+        prisma.$executeRaw`UPDATE ip_blocks SET tags = array_replace(tags, ${oldName}, ${name}) WHERE ${oldName} = ANY(tags)`,
+        prisma.$executeRaw`UPDATE subnets SET tags = array_replace(tags, ${oldName}, ${name}) WHERE ${oldName} = ANY(tags)`,
+        prisma.$executeRaw`UPDATE assets SET tags = array_replace(tags, ${oldName}, ${name}) WHERE ${oldName} = ANY(tags)`,
+      ]);
+    }
+
     res.json(tag);
   } catch (err) {
     next(err);
