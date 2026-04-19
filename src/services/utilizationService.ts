@@ -27,8 +27,8 @@ export interface RecentReservation {
   subnetPurpose: string | null;
   vlan: number | null;
   ipAddress: string | null;
-  owner: string;
-  projectRef: string;
+  owner: string | null;
+  projectRef: string | null;
   createdAt: Date;
   expiresAt: Date | null;
 }
