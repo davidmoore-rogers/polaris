@@ -323,7 +323,7 @@ router.get("/tags", async (_req, res, next) => {
 
 router.post("/tags", async (req, res, next) => {
   try {
-    const name = (req.body.name || "").trim().toLowerCase().replace(/\s+/g, "-");
+    const name = (req.body.name || "").trim();
     if (!name) throw new AppError(400, "Tag name is required");
 
     const existing = await prisma.tag.findUnique({ where: { name } });
