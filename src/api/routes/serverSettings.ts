@@ -133,17 +133,19 @@ router.get("/database", async (_req, res, next) => {
 
 // ─── Database Backup ──────────────────────────────────────────────────────
 
+const BACKUP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "data", "backups");
+mkdirSync(BACKUP_DIR, { recursive: true });
+
 router.post("/database/backup", async (req, res, next) => {
   try {
     const password: string | null = req.body?.password || null;
     const connUrl = process.env.DATABASE_URL || "";
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const backupId = `bk-${Date.now()}`;
     const filename = `shelob-backup-${APP_VERSION}-${ts}${password ? ".enc" : ""}.gz`;
     const tmpFile = join(tmpdir(), `shelob-dump-${Date.now()}.sql`);
 
     try {
-      // Use pg_dump to create a full SQL dump
-      // --clean --if-exists: DROP tables before CREATE so restore works on both fresh and existing databases
       execSync(`pg_dump "${connUrl}" --no-owner --no-acl --clean --if-exists -f "${tmpFile}"`, {
         timeout: 120000,
         stdio: ["pipe", "pipe", "pipe"],
@@ -155,10 +157,8 @@ router.post("/database/backup", async (req, res, next) => {
     let payload = readFileSync(tmpFile);
     try { unlinkSync(tmpFile); } catch {}
 
-    // Compress with gzip
     payload = gzipSync(payload);
 
-    // Encrypt if password provided
     if (password) {
       const salt = randomBytes(32);
       const key = scryptSync(password, salt, 32);
@@ -170,9 +170,10 @@ router.post("/database/backup", async (req, res, next) => {
       payload = Buffer.concat([magic, salt, iv, authTag, encrypted]);
     }
 
-    // Record backup in settings table
+    writeFileSync(join(BACKUP_DIR, backupId), payload);
+
     const backupRecord = {
-      id: `bk-${Date.now()}`,
+      id: backupId,
       filename,
       size: payload.length,
       encrypted: !!password,
@@ -259,6 +260,27 @@ router.get("/database/backups", async (_req, res, next) => {
     const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
     const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
     res.json(history.reverse());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/database/backups/:id/download", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
+    const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
+    const record = history.find((r: any) => r.id === id);
+    if (!record) throw new AppError(404, "Backup not found");
+
+    const filePath = join(BACKUP_DIR, id);
+    if (!existsSync(filePath)) throw new AppError(404, "Backup file no longer exists on disk");
+
+    const payload = readFileSync(filePath);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename="${record.filename}"`);
+    res.setHeader("Content-Length", payload.length);
+    res.end(payload);
   } catch (err) {
     next(err);
   }

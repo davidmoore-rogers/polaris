@@ -6,3 +6,6 @@ dist/
 
 # Build artifacts
 *.js.map
+
+# Database backups
+data/backups/
