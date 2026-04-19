@@ -152,8 +152,15 @@ function _getInitialsColor(username) {
 }
 
 function renderUserBadge() {
+  if (!currentUsername) return;
   var header = document.querySelector(".page-header-actions");
-  if (!header || !currentUsername) return;
+  if (!header) {
+    var pageHeader = document.querySelector(".page-header");
+    if (!pageHeader) return;
+    header = document.createElement("div");
+    header.className = "page-header-actions";
+    pageHeader.appendChild(header);
+  }
 
   var initials = _getUserInitials(currentUsername);
   var color = _getInitialsColor(currentUsername);

@@ -81,6 +81,13 @@ export async function testConnection(config: FortiManagerConfig): Promise<{
     if (err.cause?.code === "ETIMEDOUT" || err.name === "TimeoutError") {
       return { ok: false, message: `Connection timed out — ${config.host}:${config.port || 443}` };
     }
+    if (err.message === "fetch failed" && err.cause) {
+      const code = err.cause?.code;
+      if (code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" || code === "DEPTH_ZERO_SELF_SIGNED_CERT" || code === "CERT_HAS_EXPIRED" || code === "ERR_TLS_CERT_ALTNAME_INVALID") {
+        return { ok: false, message: `TLS certificate error (${code}) — try disabling SSL verification` };
+      }
+      return { ok: false, message: err.cause?.message || err.message };
+    }
     return { ok: false, message: err.message || "Unknown error" };
   }
 }
@@ -103,7 +110,10 @@ async function rpc(
   const onExternalAbort = () => controller.abort();
   externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
 
+  const prevTls = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
   try {
+    if (verifySsl === false) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${apiToken}`,
@@ -115,10 +125,6 @@ async function rpc(
       headers,
       body: JSON.stringify(payload),
       signal: controller.signal,
-      // @ts-ignore — Node 20+ supports this for fetch
-      ...(verifySsl === false && {
-        dispatcher: undefined, // handled by NODE_TLS_REJECT_UNAUTHORIZED at process level
-      }),
     });
 
     if (res.status === 401 || res.status === 403) {
@@ -131,6 +137,10 @@ async function rpc(
 
     return (await res.json()) as JsonRpcResponse;
   } finally {
+    if (verifySsl === false) {
+      if (prevTls === undefined) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+      else process.env.NODE_TLS_REJECT_UNAUTHORIZED = prevTls;
+    }
     clearTimeout(timeout);
     externalSignal?.removeEventListener("abort", onExternalAbort);
   }
