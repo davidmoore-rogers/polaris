@@ -20,6 +20,14 @@ export const router = Router();
 // Auth routes are public (login, logout, session check)
 router.use("/auth", authRouter);
 
+// Branding is public so the login page can display custom name/logo
+router.get("/server-settings/branding", async (_req, res, next) => {
+  try {
+    const { getBranding } = await import("./routes/serverSettings.js");
+    res.json(await getBranding());
+  } catch (err) { next(err); }
+});
+
 // Everything below requires an active session
 router.use(requireAuth);
 router.use("/blocks", blocksRouter);

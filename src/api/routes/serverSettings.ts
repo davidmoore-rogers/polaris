@@ -748,7 +748,7 @@ const BRANDING_DEFAULTS: BrandingSettings = {
   logoUrl: "/logo.webp",
 };
 
-async function getBranding(): Promise<BrandingSettings & { version: string }> {
+export async function getBranding(): Promise<BrandingSettings & { version: string }> {
   const row = await prisma.setting.findUnique({ where: { key: "branding" } });
   const saved = row ? (row.value as Record<string, unknown>) : {};
   return {
