@@ -609,7 +609,7 @@ function wireUploadArea(areaId, inputId, handler) {
   var input = document.getElementById(inputId);
   area.addEventListener("click", function () { input.click(); });
   input.addEventListener("change", function () {
-    if (input.files.length > 0) handler(input.files);
+    if (input.files.length > 0) handler(Array.from(input.files));
     input.value = "";
   });
 }
@@ -779,25 +779,32 @@ function renderServerCertList() {
     list.innerHTML = '<li class="cert-empty">No server certificate configured. The app is using its default configuration.</li>';
     return;
   }
-  list.innerHTML = _certData.serverCerts.map(function (cert) {
-    var typeBadge = cert.type === "key"
-      ? '<span class="badge badge-deprecated" style="margin-left:6px">KEY</span>'
-      : '<span class="badge badge-available" style="margin-left:6px">CERT</span>';
-    return '<li class="cert-item">' +
-      '<div class="cert-icon">' + certIconSvg() + '</div>' +
-      '<div class="cert-info">' +
-        '<div class="cert-name">' + escapeHtml(cert.name) + typeBadge + '</div>' +
-        '<div class="cert-meta">' +
-          (cert.subject ? escapeHtml(cert.subject) + ' &middot; ' : '') +
-          (cert.expiresAt ? 'Expires ' + formatDate(cert.expiresAt) + ' &middot; ' : '') +
-          'Uploaded ' + formatDate(cert.uploadedAt) +
-        '</div>' +
+  var certs = _certData.serverCerts.filter(function (c) { return c.type === "cert"; });
+  if (!certs.length) {
+    list.innerHTML = '<li class="cert-empty">No server certificate configured. The app is using its default configuration.</li>';
+    return;
+  }
+  list.innerHTML = certs.map(certItemHtml).join("");
+}
+
+function certItemHtml(cert) {
+  var typeBadge = cert.type === "key"
+    ? '<span class="badge badge-deprecated" style="margin-left:6px">KEY</span>'
+    : '<span class="badge badge-available" style="margin-left:6px">CERT</span>';
+  return '<li class="cert-item">' +
+    '<div class="cert-icon">' + certIconSvg() + '</div>' +
+    '<div class="cert-info">' +
+      '<div class="cert-name">' + escapeHtml(cert.name) + typeBadge + '</div>' +
+      '<div class="cert-meta">' +
+        (cert.subject ? escapeHtml(cert.subject) + ' &middot; ' : '') +
+        (cert.expiresAt ? 'Expires ' + formatDate(cert.expiresAt) + ' &middot; ' : '') +
+        'Uploaded ' + formatDate(cert.uploadedAt) +
       '</div>' +
-      '<div class="cert-actions">' +
-        '<button class="btn btn-sm btn-danger" onclick="deleteServerCert(\'' + cert.id + '\', \'' + escapeHtml(cert.name) + '\')">Remove</button>' +
-      '</div>' +
-    '</li>';
-  }).join("");
+    '</div>' +
+    '<div class="cert-actions">' +
+      '<button class="btn btn-sm btn-danger" onclick="deleteServerCert(\'' + cert.id + '\', \'' + escapeHtml(cert.name) + '\')">Remove</button>' +
+    '</div>' +
+  '</li>';
 }
 
 async function uploadCA(files) {

@@ -42,6 +42,17 @@ import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { logger } from "../../utils/logger.js";
 
+function bufferToPem(buf: Buffer, filename: string): string {
+  const text = buf.toString("utf-8");
+  if (text.includes("-----BEGIN ")) return text;
+
+  const isKey = filename.endsWith(".key");
+  const label = isKey ? "PRIVATE KEY" : "CERTIFICATE";
+  const b64 = buf.toString("base64");
+  const lines = b64.match(/.{1,64}/g) || [];
+  return `-----BEGIN ${label}-----\n${lines.join("\n")}\n-----END ${label}-----\n`;
+}
+
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 } });
 const restoreUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 512 * 1024 * 1024 } });
@@ -463,7 +474,7 @@ router.post("/certificates", upload.single("file"), async (req, res, next) => {
       return res.status(400).json({ error: "No file uploaded" });
     }
     const category = req.body.category === "server" ? "server" : "ca";
-    const pem = req.file.buffer.toString("utf-8");
+    const pem = bufferToPem(req.file.buffer, req.file.originalname);
     const record = await addCertificate(category as any, req.file.originalname, pem);
     res.status(201).json({ ...record, pem: undefined });
   } catch (err) {
