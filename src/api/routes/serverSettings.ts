@@ -77,9 +77,8 @@ router.get("/database", async (_req, res, next) => {
     const tablesResult = await prisma.$queryRawUnsafe<any[]>(`
       SELECT
         relname AS name,
-        n_live_tup AS rows,
-        pg_size_pretty(pg_total_relation_size(quote_ident(relname))) AS size,
-        pg_total_relation_size(quote_ident(relname)) AS size_bytes
+        n_live_tup::integer AS rows,
+        pg_size_pretty(pg_total_relation_size(quote_ident(relname))) AS size
       FROM pg_stat_user_tables
       ORDER BY pg_total_relation_size(quote_ident(relname)) DESC
     `);
@@ -91,14 +90,14 @@ router.get("/database", async (_req, res, next) => {
 
     const connResult = await prisma.$queryRawUnsafe<any[]>(`
       SELECT
-        (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()) AS active,
-        (SELECT setting::int FROM pg_settings WHERE name = 'max_connections') AS max
+        (SELECT count(*)::integer FROM pg_stat_activity WHERE datname = current_database()) AS active,
+        (SELECT setting::integer FROM pg_settings WHERE name = 'max_connections') AS max
     `);
     const activeConnections = Number(connResult[0]?.active || 0);
     const maxConnections = Number(connResult[0]?.max || 100);
 
     const uptimeResult = await prisma.$queryRawUnsafe<any[]>(
-      "SELECT date_trunc('second', current_timestamp - pg_postmaster_start_time()) AS uptime"
+      "SELECT date_trunc('second', current_timestamp - pg_postmaster_start_time())::text AS uptime"
     );
     const uptime = uptimeResult[0]?.uptime || "Unknown";
 
