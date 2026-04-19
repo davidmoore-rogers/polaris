@@ -1904,6 +1904,7 @@ function renderIdentificationTab() {
           var colorStyle = t.color ? ' style="background:' + escapeHtml(t.color) + '22;border-color:' + escapeHtml(t.color) + ';color:' + escapeHtml(t.color) + '"' : '';
           html += '<span class="tag-chip"' + colorStyle + '>' +
             escapeHtml(t.name) +
+            (isAdmin() ? '<button class="tag-chip-edit" data-tag-id="' + t.id + '" title="Edit" style="margin-left:4px;background:none;border:none;color:inherit;cursor:pointer;font-size:0.75rem;opacity:0.7;padding:0">&#9998;</button>' : '') +
             (isAdmin() ? '<button class="tag-chip-delete" data-tag-id="' + t.id + '" title="Delete">&times;</button>' : '') +
           '</span>';
         });
@@ -1940,6 +1941,13 @@ function renderIdentificationTab() {
 
   // Tags events
   document.getElementById("btn-add-tag").addEventListener("click", openAddTagModal);
+
+  container.querySelectorAll(".tag-chip-edit").forEach(function (btn) {
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      openEditTagModal(btn.getAttribute("data-tag-id"));
+    });
+  });
 
   container.querySelectorAll(".tag-chip-delete").forEach(function (btn) {
     btn.addEventListener("click", function (e) {
@@ -2092,6 +2100,99 @@ async function openAddTagModal() {
       showToast('Tag "' + name + '" created');
       // Remove from empty categories if a tag was added to it
       _emptyCategories = _emptyCategories.filter(function (c) { return c !== category; });
+      _tagsData = await api.serverSettings.listTags();
+      renderIdentificationTab();
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+async function openEditTagModal(id) {
+  var tag = _tagsData.find(function (t) { return t.id === id; });
+  if (!tag) return;
+
+  var existingCats = [];
+  _tagsData.forEach(function (t) {
+    var cat = t.category || "General";
+    if (existingCats.indexOf(cat) === -1) existingCats.push(cat);
+  });
+  _emptyCategories.forEach(function (cat) {
+    if (existingCats.indexOf(cat) === -1) existingCats.push(cat);
+  });
+  existingCats.sort();
+
+  var catOptions = '<option value="General"' + (tag.category === "General" ? ' selected' : '') + '>General</option>';
+  existingCats.forEach(function (c) {
+    if (c !== "General") {
+      catOptions += '<option value="' + escapeHtml(c) + '"' + (tag.category === c ? ' selected' : '') + '>' + escapeHtml(c) + '</option>';
+    }
+  });
+
+  var body =
+    '<div class="form-group"><label>Tag Name *</label>' +
+      '<input type="text" id="f-tag-name" value="' + escapeHtml(tag.name) + '">' +
+    '</div>' +
+    '<div class="form-group"><label>Category</label>' +
+      '<div style="display:flex;gap:8px">' +
+        '<select id="f-tag-category-select" style="flex:1">' + catOptions +
+          '<option value="__new__">+ New category...</option>' +
+        '</select>' +
+        '<input type="text" id="f-tag-category-new" placeholder="Category name" style="flex:1;display:none">' +
+      '</div>' +
+    '</div>' +
+    '<div class="form-group"><label>Color</label>' +
+      '<div style="display:flex;gap:8px;align-items:center">' +
+        '<input type="color" id="f-tag-color" value="' + escapeHtml(tag.color || "#4fc3f7") + '" style="width:40px;height:32px;padding:2px;border:1px solid var(--color-border);border-radius:4px;background:transparent;cursor:pointer">' +
+        '<span id="f-tag-color-hex" style="font-family:var(--font-mono);font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(tag.color || "#4fc3f7") + '</span>' +
+      '</div>' +
+    '</div>';
+
+  var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="btn-save-tag">Save Changes</button>';
+  openModal("Edit Tag", body, footer);
+
+  var catSelect = document.getElementById("f-tag-category-select");
+  var catNew = document.getElementById("f-tag-category-new");
+  catSelect.addEventListener("change", function () {
+    if (catSelect.value === "__new__") {
+      catNew.style.display = "";
+      catNew.focus();
+    } else {
+      catNew.style.display = "none";
+    }
+  });
+
+  var colorInput = document.getElementById("f-tag-color");
+  var hexLabel = document.getElementById("f-tag-color-hex");
+  colorInput.addEventListener("input", function () {
+    hexLabel.textContent = colorInput.value;
+  });
+
+  document.getElementById("btn-save-tag").addEventListener("click", async function () {
+    var btn = this;
+    var name = document.getElementById("f-tag-name").value.trim();
+    if (!name) { showToast("Tag name is required", "error"); return; }
+
+    var category;
+    if (catSelect.value === "__new__") {
+      category = catNew.value.trim() || "General";
+    } else {
+      category = catSelect.value || "General";
+    }
+
+    btn.disabled = true;
+    try {
+      await api.serverSettings.updateTag(id, {
+        name: name,
+        category: category,
+        color: colorInput.value,
+      });
+      closeModal();
+      showToast('Tag "' + name + '" updated');
+      if (typeof _tagCache !== "undefined") _tagCache.loaded = false;
       _tagsData = await api.serverSettings.listTags();
       renderIdentificationTab();
     } catch (err) {

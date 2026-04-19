@@ -365,6 +365,34 @@ router.put("/tags/settings", async (req, res, next) => {
   }
 });
 
+router.put("/tags/:id", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const existing = await prisma.tag.findUnique({ where: { id } });
+    if (!existing) throw new AppError(404, "Tag not found");
+
+    const name = (req.body.name ?? existing.name).trim();
+    if (!name) throw new AppError(400, "Tag name is required");
+
+    if (name !== existing.name) {
+      const dupe = await prisma.tag.findUnique({ where: { name } });
+      if (dupe) throw new AppError(409, `Tag "${name}" already exists`);
+    }
+
+    const tag = await prisma.tag.update({
+      where: { id },
+      data: {
+        name,
+        category: req.body.category ?? existing.category,
+        color: req.body.color ?? existing.color,
+      },
+    });
+    res.json(tag);
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.delete("/tags/:id", async (req, res, next) => {
   try {
     const tag = await prisma.tag.findUnique({ where: { id: req.params.id } });

@@ -169,6 +169,7 @@ const api = {
     },
     listTags:    ()       => request("GET", "/server-settings/tags"),
     createTag:   (body)   => request("POST", "/server-settings/tags", body),
+    updateTag:   (id, body) => request("PUT", `/server-settings/tags/${id}`, body),
     deleteTag:   (id)     => request("DELETE", `/server-settings/tags/${id}`),
     getTagSettings: ()    => request("GET", "/server-settings/tags/settings"),
     updateTagSettings: (body) => request("PUT", "/server-settings/tags/settings", body),
