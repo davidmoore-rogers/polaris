@@ -153,3 +153,18 @@ export async function logEvent(input: LogEventInput): Promise<void> {
     // Never let event logging break the main request
   }
 }
+
+export function buildChanges(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): Record<string, { from: unknown; to: unknown }> | undefined {
+  const changes: Record<string, { from: unknown; to: unknown }> = {};
+  for (const key of Object.keys(after)) {
+    const a = before[key];
+    const b = after[key];
+    const aStr = JSON.stringify(a ?? null);
+    const bStr = JSON.stringify(b ?? null);
+    if (aStr !== bStr) changes[key] = { from: a ?? null, to: b ?? null };
+  }
+  return Object.keys(changes).length ? changes : undefined;
+}

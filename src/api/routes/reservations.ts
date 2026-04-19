@@ -11,7 +11,7 @@ import { Router } from "express";
 import { z } from "zod";
 import * as reservationService from "../../services/reservationService.js";
 import { AppError } from "../../utils/errors.js";
-import { logEvent } from "./events.js";
+import { logEvent, buildChanges } from "./events.js";
 
 const router = Router();
 
@@ -97,16 +97,20 @@ router.put("/:id", async (req, res, next) => {
     if (!canWriteReservations(req)) {
       throw new AppError(403, "Forbidden — you do not have permission to edit reservations");
     }
+    const before = await reservationService.getReservation(req.params.id);
     // User role can only edit their own reservations
     if (!canWriteAny(req)) {
-      const existing = await reservationService.getReservation(req.params.id);
-      if (existing.createdBy !== req.session?.username) {
+      if (before.createdBy !== req.session?.username) {
         throw new AppError(403, "Forbidden — you can only edit reservations you created");
       }
     }
     const input = UpdateReservationSchema.parse(req.body);
     const reservation = await reservationService.updateReservation(req.params.id, input);
-    logEvent({ action: "reservation.updated", resourceType: "reservation", resourceId: req.params.id, resourceName: input.hostname, actor: req.session?.username, message: `Reservation updated` });
+    const changes = buildChanges(
+      { hostname: before.hostname, owner: before.owner, projectRef: before.projectRef, expiresAt: before.expiresAt, notes: before.notes },
+      { hostname: reservation.hostname, owner: reservation.owner, projectRef: reservation.projectRef, expiresAt: reservation.expiresAt, notes: reservation.notes },
+    );
+    logEvent({ action: "reservation.updated", resourceType: "reservation", resourceId: req.params.id, resourceName: input.hostname, actor: req.session?.username, message: `Reservation updated`, details: changes ? { changes } : undefined });
     res.json(reservation);
   } catch (err) {
     next(err);

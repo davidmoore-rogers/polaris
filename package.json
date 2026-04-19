@@ -1,6 +1,6 @@
 {
   "name": "shelob",
-  "version": "1.0.45",
+  "version": "1.0.46",
   "description": "Shelob — subnet & IP address management, spinning your network into a web",
   "type": "module",
   "main": "dist/index.js",

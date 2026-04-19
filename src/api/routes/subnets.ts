@@ -6,7 +6,7 @@ import { Router } from "express";
 import { z } from "zod";
 import * as subnetService from "../../services/subnetService.js";
 import { requireNetworkAdmin } from "../middleware/auth.js";
-import { logEvent } from "./events.js";
+import { logEvent, buildChanges } from "./events.js";
 
 const router = Router();
 
@@ -104,8 +104,13 @@ router.put("/:id", async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const input = UpdateSubnetSchema.parse(req.body);
+    const before = await subnetService.getSubnet(id);
     const subnet = await subnetService.updateSubnet(id, { ...input, vlan: input.vlan ?? undefined });
-    logEvent({ action: "subnet.updated", resourceType: "subnet", resourceId: id, resourceName: input.name || subnet.name, actor: req.session?.username, message: `Subnet "${input.name || subnet.name}" updated` });
+    const changes = buildChanges(
+      { name: before.name, purpose: before.purpose, status: before.status, vlan: before.vlan, tags: before.tags },
+      { name: subnet.name, purpose: subnet.purpose, status: subnet.status, vlan: subnet.vlan, tags: subnet.tags },
+    );
+    logEvent({ action: "subnet.updated", resourceType: "subnet", resourceId: id, resourceName: input.name || subnet.name, actor: req.session?.username, message: `Subnet "${input.name || subnet.name}" updated`, details: changes ? { changes } : undefined });
     res.json(subnet);
   } catch (err) {
     next(err);

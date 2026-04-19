@@ -6,7 +6,7 @@ import { Router } from "express";
 import { z } from "zod";
 import * as blockService from "../../services/blockService.js";
 import { requireNetworkAdmin } from "../middleware/auth.js";
-import { logEvent } from "./events.js";
+import { logEvent, buildChanges } from "./events.js";
 
 const router = Router();
 
@@ -59,8 +59,13 @@ router.put("/:id", requireNetworkAdmin, async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const input = UpdateBlockSchema.parse(req.body);
+    const before = await blockService.getBlock(id);
     const block = await blockService.updateBlock(id, input);
-    logEvent({ action: "block.updated", resourceType: "block", resourceId: id, resourceName: input.name || block.name, actor: req.session?.username, message: `Block "${input.name || block.name}" updated` });
+    const changes = buildChanges(
+      { name: before.name, description: before.description, tags: before.tags },
+      { name: block.name, description: block.description, tags: block.tags },
+    );
+    logEvent({ action: "block.updated", resourceType: "block", resourceId: id, resourceName: input.name || block.name, actor: req.session?.username, message: `Block "${input.name || block.name}" updated`, details: changes ? { changes } : undefined });
     res.json(block);
   } catch (err) {
     next(err);

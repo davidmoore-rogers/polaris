@@ -9,7 +9,7 @@ import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { requireAssetsAdmin } from "../middleware/auth.js";
-import { logEvent } from "./events.js";
+import { logEvent, buildChanges } from "./events.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui } from "../../services/ouiService.js";
 
@@ -130,7 +130,12 @@ router.put("/:id", requireAssetsAdmin, async (req, res, next) => {
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
     else if (input.warrantyExpiry === undefined) delete data.warrantyExpiry;
     const asset = await prisma.asset.update({ where: { id }, data: data as any });
-    logEvent({ action: "asset.updated", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: req.session?.username, message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated` });
+    const trackFields = ["hostname", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "notes", "dnsName"] as const;
+    const before: Record<string, unknown> = {};
+    const after: Record<string, unknown> = {};
+    for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }
+    const changes = buildChanges(before, after);
+    logEvent({ action: "asset.updated", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: req.session?.username, message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated`, details: changes ? { changes } : undefined });
     res.json(asset);
   } catch (err) {
     next(err);

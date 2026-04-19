@@ -38,18 +38,18 @@ var _eventsCurrentPage = [];
       renderPagination();
     } catch (err) {
       document.getElementById("events-tbody").innerHTML =
-        '<tr><td colspan="6" class="empty-state">Failed to load events</td></tr>';
+        '<tr><td colspan="7" class="empty-state">Failed to load events</td></tr>';
     }
   }
 
   function renderTable(events) {
     var tbody = document.getElementById("events-tbody");
     if (!events.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No events found</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No events found</td></tr>';
       return;
     }
 
-    tbody.innerHTML = events.map(function (ev) {
+    tbody.innerHTML = events.map(function (ev, idx) {
       var ts = new Date(ev.timestamp);
       var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
         " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -60,6 +60,10 @@ var _eventsCurrentPage = [];
       var resourceLabel = ev.resourceType || "-";
       var resourceName = ev.resourceName ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">(' + escapeHtml(ev.resourceName) + ')</span>' : "";
 
+      var detailBtn = ev.details && ev.details.changes
+        ? '<button class="btn btn-secondary btn-sm btn-event-detail" data-event-idx="' + idx + '" style="padding:2px 8px;font-size:0.75rem">Detail</button>'
+        : '';
+
       return '<tr>' +
         '<td style="font-family:var(--font-mono);font-size:0.82rem;white-space:nowrap">' + escapeHtml(timeStr) + '</td>' +
         '<td><span class="badge ' + levelClass + '">' + levelLabel + '</span></td>' +
@@ -67,8 +71,10 @@ var _eventsCurrentPage = [];
         '<td>' + escapeHtml(resourceLabel) + resourceName + '</td>' +
         '<td>' + escapeHtml(ev.message || "") + '</td>' +
         '<td>' + escapeHtml(ev.actor || "-") + '</td>' +
+        '<td>' + detailBtn + '</td>' +
         '</tr>';
     }).join("");
+
   }
 
   function renderPagination() {
@@ -149,6 +155,14 @@ var _eventsCurrentPage = [];
   });
 
   document.getElementById("btn-refresh").addEventListener("click", function () { loadEvents(); });
+
+  // Detail button delegation
+  document.getElementById("events-tbody").addEventListener("click", function (e) {
+    var btn = e.target.closest(".btn-event-detail");
+    if (!btn) return;
+    var idx = parseInt(btn.getAttribute("data-event-idx"), 10);
+    if (_eventsCurrentPage[idx]) showEventDetail(_eventsCurrentPage[idx]);
+  });
 
   // Settings button
   var settingsBtn = document.getElementById("btn-event-settings");
@@ -569,6 +583,53 @@ function generateEventPdf(events, label) {
   var filename = "shelob-events-" + now.toISOString().slice(0, 10) + ".pdf";
   doc.save(filename);
   showToast("Exported " + events.length + " events to " + filename);
+}
+
+function showEventDetail(ev) {
+  var changes = ev.details && ev.details.changes ? ev.details.changes : {};
+  var keys = Object.keys(changes);
+  if (!keys.length) return;
+
+  var rows = keys.map(function (field) {
+    var c = changes[field];
+    var from = c.from === null || c.from === "" ? '<span style="color:var(--color-text-tertiary);font-style:italic">empty</span>' : escapeHtml(formatDetailValue(c.from));
+    var to = c.to === null || c.to === "" ? '<span style="color:var(--color-text-tertiary);font-style:italic">empty</span>' : escapeHtml(formatDetailValue(c.to));
+    return '<tr>' +
+      '<td style="font-weight:500;white-space:nowrap">' + escapeHtml(formatFieldName(field)) + '</td>' +
+      '<td style="color:var(--color-danger)">' + from + '</td>' +
+      '<td style="color:var(--color-success)">' + to + '</td>' +
+      '</tr>';
+  }).join("");
+
+  var ts = new Date(ev.timestamp);
+  var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
+    " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  var body =
+    '<div style="margin-bottom:1rem;font-size:0.85rem;color:var(--color-text-secondary)">' +
+      '<span style="font-family:var(--font-mono)">' + escapeHtml(ev.action) + '</span> by <strong>' + escapeHtml(ev.actor || "unknown") + '</strong> at ' + escapeHtml(timeStr) +
+    '</div>' +
+    '<table style="width:100%">' +
+      '<thead><tr>' +
+        '<th style="width:120px">Field</th>' +
+        '<th>Before</th>' +
+        '<th>After</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>';
+
+  var title = "Change Detail" + (ev.resourceName ? " — " + ev.resourceName : "");
+  openModal(title, body, '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
+}
+
+function formatFieldName(field) {
+  return field.replace(/([A-Z])/g, " $1").replace(/^./, function (c) { return c.toUpperCase(); });
+}
+
+function formatDetailValue(val) {
+  if (Array.isArray(val)) return val.join(", ") || "none";
+  if (val instanceof Object) return JSON.stringify(val);
+  return String(val);
 }
 
 function generateEventCsv(events) {
