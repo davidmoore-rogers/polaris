@@ -546,10 +546,7 @@ async function loadCertificates() {
         '<select id="f-https-cert"><option value="">— Upload a certificate first —</option></select>' +
         '<p class="hint">Select the TLS certificate (.pem, .crt) to present to browsers.</p>' +
       '</div>' +
-      '<div class="form-group"><label>Private Key</label>' +
-        '<select id="f-https-key"><option value="">— Upload a private key first —</option></select>' +
-        '<p class="hint">Select the private key (.key) that matches the certificate above.</p>' +
-      '</div>' +
+      '<select id="f-https-key" style="display:none"></select>' +
       '<div class="form-group">' +
         '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
           '<input type="checkbox" id="f-https-redirect"' + (_httpsSettings.redirectHttp ? ' checked' : '') + '>' +
@@ -642,12 +639,49 @@ function populateHttpsDropdowns() {
     }).join("");
   if (certs.length === 0) certSelect.innerHTML = '<option value="">— Upload a certificate first —</option>';
 
-  keySelect.innerHTML = '<option value="">— Select private key —</option>' +
+  keySelect.innerHTML = '<option value=""></option>' +
     keys.map(function (c) {
-      var sel = _httpsSettings.keyId === c.id ? " selected" : "";
-      return '<option value="' + c.id + '"' + sel + '>' + escapeHtml(c.name) + '</option>';
+      return '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
     }).join("");
-  if (keys.length === 0) keySelect.innerHTML = '<option value="">— Upload a private key first —</option>';
+
+  autoPairKey();
+  certSelect.addEventListener("change", autoPairKey);
+}
+
+function autoPairKey() {
+  var certSelect = document.getElementById("f-https-cert");
+  var keySelect = document.getElementById("f-https-key");
+  if (!certSelect || !keySelect) return;
+
+  var certId = certSelect.value;
+  if (!certId) { keySelect.value = ""; return; }
+
+  if (_httpsSettings.certId === certId && _httpsSettings.keyId) {
+    keySelect.value = _httpsSettings.keyId;
+    return;
+  }
+
+  var cert = _certData.serverCerts.find(function (c) { return c.id === certId; });
+  if (!cert) return;
+
+  var keys = _certData.serverCerts.filter(function (c) { return c.type === "key"; });
+  if (keys.length === 0) return;
+
+  var baseName = cert.name.replace(/\.(pem|crt|cer|pfx|p12)$/i, "");
+  var matched = keys.find(function (k) {
+    return k.name.replace(/\.(key|pem)$/i, "") === baseName;
+  });
+
+  if (matched) {
+    keySelect.value = matched.id;
+  } else {
+    var certTime = new Date(cert.uploadedAt).getTime();
+    keys.sort(function (a, b) {
+      return Math.abs(new Date(a.uploadedAt).getTime() - certTime) -
+             Math.abs(new Date(b.uploadedAt).getTime() - certTime);
+    });
+    keySelect.value = keys[0].id;
+  }
 }
 
 function updateHttpsStatusBanner() {
