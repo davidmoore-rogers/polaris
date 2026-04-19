@@ -491,16 +491,13 @@ router.post("/dns/test", async (req, res, next) => {
     if (mode === "doh" && !dohUrl) {
       return res.json({ ok: false, message: "No DoH URL configured" });
     }
-    if (mode !== "doh" && servers.length === 0) {
-      return res.json({ ok: false, message: "No DNS servers configured" });
-    }
 
     const resolver = await createResolver({ servers, mode, dohUrl });
     const start = Date.now();
     try {
       const hostnames = await resolver.reverse(testIp);
       const elapsed = Date.now() - start;
-      const via = mode === "doh" ? `DoH (${dohUrl})` : mode === "dot" ? `DoT (${servers[0]}:853)` : servers[0];
+      const via = mode === "doh" ? `DoH (${dohUrl})` : mode === "dot" ? `DoT (${servers[0]}:853)` : servers.length > 0 ? servers[0] : "system DNS";
       res.json({
         ok: true,
         message: `Resolved ${testIp} → ${hostnames[0] || "(no PTR)"} in ${elapsed}ms via ${via}`,
