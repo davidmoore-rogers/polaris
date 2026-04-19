@@ -11,6 +11,7 @@
  */
 
 import dns from "node:dns/promises";
+import https from "node:https";
 import tls from "node:tls";
 import { prisma } from "../db.js";
 
@@ -151,49 +152,43 @@ async function dohReverse(ip: string, dohUrl: string): Promise<string[]> {
   const sep = dohUrl.includes("?") ? "&" : "?";
   const url = `${dohUrl}${sep}name=${encodeURIComponent(ptrName)}&type=PTR`;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
+  const body = await new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      req.destroy();
+      reject(Object.assign(new Error("DoH request timed out (5s)"), { code: "DOH_TIMEOUT" }));
+    }, 5000);
 
-  try {
-    const res = await fetch(url, {
-      headers: { Accept: "application/dns-json" },
-      signal: controller.signal,
+    const req = https.get(url, { headers: { Accept: "application/dns-json" }, rejectUnauthorized: false }, (res) => {
+      if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+        clearTimeout(timer);
+        res.resume();
+        reject(Object.assign(new Error(`DoH query failed (HTTP ${res.statusCode})`), { code: "DOH_HTTP_ERROR" }));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => { clearTimeout(timer); resolve(Buffer.concat(chunks).toString("utf-8")); });
     });
-    if (!res.ok) {
-      const err: any = new Error(`DoH query failed (HTTP ${res.status})`);
-      err.code = "DOH_HTTP_ERROR";
-      throw err;
-    }
-    let data: any;
-    try {
-      data = await res.json();
-    } catch {
-      const err: any = new Error("DoH server did not return JSON — check the URL uses the JSON API endpoint");
-      err.code = "DOH_PARSE_ERROR";
-      throw err;
-    }
-    if (!data.Answer || !Array.isArray(data.Answer)) return [];
-    return data.Answer
-      .filter((a: any) => a.type === 12) // PTR
-      .map((a: any) => (a.data || "").replace(/\.$/, ""));
-  } catch (err: any) {
-    if (err.name === "AbortError") {
-      const timeout: any = new Error("DoH request timed out (5s) — server may be unreachable");
-      timeout.code = "DOH_TIMEOUT";
-      throw timeout;
-    }
-    if (err.code?.startsWith?.("DOH_")) throw err;
-    const cause = err.cause || err;
-    const detail = cause.code === "ENOTFOUND" ? `Cannot resolve hostname in DoH URL`
-      : cause.code === "ECONNREFUSED" ? `Connection refused by DoH server`
-      : cause.code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" || cause.code === "CERT_HAS_EXPIRED" ? `TLS certificate error: ${cause.code}`
-      : cause.message || err.message || String(err);
-    const wrapped: any = new Error(detail);
-    wrapped.code = "DOH_CONNECT_ERROR";
-    throw wrapped;
-  } finally {
-    clearTimeout(timer);
+
+    req.on("error", (err: any) => {
+      clearTimeout(timer);
+      const detail = err.code === "ENOTFOUND" ? "Cannot resolve hostname in DoH URL"
+        : err.code === "ECONNREFUSED" ? "Connection refused by DoH server"
+        : err.message || String(err);
+      reject(Object.assign(new Error(detail), { code: "DOH_CONNECT_ERROR" }));
+    });
+  });
+
+  let data: any;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    throw Object.assign(new Error("DoH server did not return JSON — check the URL uses the JSON API endpoint"), { code: "DOH_PARSE_ERROR" });
   }
+  if (!data.Answer || !Array.isArray(data.Answer)) return [];
+  return data.Answer
+    .filter((a: any) => a.type === 12)
+    .map((a: any) => (a.data || "").replace(/\.$/, ""));
 }
 
 // ─── DNS over TLS (DoT) ────────────────────────────────────────────────────
