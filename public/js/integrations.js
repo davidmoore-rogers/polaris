@@ -55,14 +55,14 @@ async function loadIntegrations() {
           '</div>' +
           '<div class="integration-card-actions">' +
             '<button class="btn btn-sm btn-secondary" onclick="testConnection(\'' + intg.id + '\', this)">Test Connection</button>' +
-            '<button class="btn btn-sm btn-secondary" onclick="runDiscovery(\'' + intg.id + '\', this)">Discover</button>' +
+            '<button class="btn btn-sm btn-secondary" onclick="runDiscovery(\'' + intg.id + '\', this)"' + (intg.lastTestOk !== true ? ' disabled title="Run a successful test first"' : '') + '>Discover</button>' +
             '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + intg.id + '\')">Edit</button>' +
             '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + intg.id + '\', \'' + escapeHtml(intg.name) + '\')">Delete</button>' +
           '</div>' +
         '</div>' +
         '<div class="integration-card-details">' +
           detailRows +
-          '<div class="detail-row"><span class="detail-label">Auto-Discovery</span><span class="detail-value">Every ' + (intg.pollInterval || 4) + ' hour' + ((intg.pollInterval || 4) === 1 ? '' : 's') + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Auto-Discovery</span><span class="detail-value">' + (intg.lastTestOk === true ? 'Every ' + (intg.pollInterval || 4) + ' hour' + ((intg.pollInterval || 4) === 1 ? '' : 's') : '<span style="color:var(--color-text-tertiary)">Disabled until a successful connection test</span>') + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Status</span><span class="detail-value">' + (intg.enabled ? '<span class="badge badge-active">Enabled</span>' : '<span class="badge badge-deprecated">Disabled</span>') + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Last Tested</span><span class="detail-value">' + lastTest + '</span></div>' +
         '</div>' +
@@ -224,6 +224,7 @@ function openCreateModal(type) {
   document.getElementById("btn-save").addEventListener("click", async function () {
     var btn = this;
     btn.disabled = true;
+    btn.textContent = "Creating...";
     try {
       var input = {
         type: type,
@@ -243,6 +244,7 @@ function openCreateModal(type) {
       showToast(err.message, "error");
     } finally {
       btn.disabled = false;
+      btn.textContent = "Create";
     }
   });
 }
@@ -323,6 +325,7 @@ async function openEditModal(id) {
     document.getElementById("btn-save").addEventListener("click", async function () {
       var btn = this;
       btn.disabled = true;
+      btn.textContent = "Saving...";
       try {
         var input = {
           name: val("f-name"),
@@ -341,6 +344,7 @@ async function openEditModal(id) {
         showToast(err.message, "error");
       } finally {
         btn.disabled = false;
+        btn.textContent = "Save Changes";
       }
     });
   } catch (err) {

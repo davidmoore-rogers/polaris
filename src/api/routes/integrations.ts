@@ -134,12 +134,8 @@ router.post("/", async (req, res, next) => {
       }
     }
 
-    // DHCP discovery
-    const canDiscover =
-      input.enabled !== false &&
-      input.config.host &&
-      ((input.type === "fortimanager" && (input.config as any).apiToken) ||
-       (input.type === "windowsserver" && (input.config as any).username));
+    // Skip auto-discovery on create — require a successful test first
+    const canDiscover = false;
 
     if (canDiscover) {
       activeDiscovery.get(integration.id)?.abort();
@@ -216,8 +212,9 @@ router.put("/:id", async (req, res, next) => {
       }
     }
 
-    // DHCP discovery
+    // DHCP discovery — only if previously tested successfully
     const canDiscover =
+      updated.lastTestOk === true &&
       updated.enabled &&
       finalConfig.host &&
       ((existing.type === "fortimanager" && finalConfig.apiToken) ||
@@ -332,6 +329,9 @@ router.post("/:id/discover", async (req, res, next) => {
       where: { id: req.params.id },
     });
     if (!integration) throw new AppError(404, "Integration not found");
+    if (!integration.lastTestOk) {
+      throw new AppError(400, "Run a successful connection test before discovering");
+    }
 
     const config = integration.config as Record<string, unknown>;
     if (!config.host) {

@@ -1021,13 +1021,39 @@ let HTTPS_SETTINGS = {
 };
 
 let SSO_SETTINGS = {
+  enabled: false,
+  spEntityId: "",
   idpEntityId: "",
   idpLoginUrl: "",
   idpLogoutUrl: "",
   idpCertificate: "",
+  wantResponseSigned: false,
   skipLoginPage: false,
   autoLogoutMinutes: 0,
 };
+
+let OIDC_SETTINGS = {
+  enabled: false,
+  discoveryUrl: "",
+  clientId: "",
+  clientSecret: "",
+  scopes: "openid profile email",
+};
+
+let LDAP_SETTINGS = {
+  enabled: false,
+  url: "",
+  bindDn: "",
+  bindPassword: "",
+  searchBase: "",
+  searchFilter: "(sAMAccountName={{username}})",
+  tlsVerify: true,
+  displayNameAttr: "displayName",
+  emailAttr: "mail",
+};
+
+const TAG_COLORS = ["#4fc3f7","#4ade80","#f59e0b","#f472b6","#a78bfa","#fb923c","#38bdf8","#34d399","#e879f9","#facc15","#f87171","#2dd4bf","#818cf8","#c084fc"];
+function randomTagColor() { return TAG_COLORS[Math.floor(Math.random() * TAG_COLORS.length)]; }
 
 let PG_TUNING_SNOOZE = { until: null };
 
@@ -2156,22 +2182,57 @@ async function routeAPI(method, path, params, body, res, req) {
     return json(res, { authenticated: true, username: sessionUser.username, role: sessionUser.role, authProvider: sessionUser.authProvider || "local" });
   }
 
-  // Azure SAML SSO stubs
+  // SAML SSO stubs
   if (path === "/api/v1/auth/azure/config") {
-    const enabled = !!(SSO_SETTINGS.idpEntityId && SSO_SETTINGS.idpLoginUrl && SSO_SETTINGS.idpCertificate);
-    return json(res, { enabled, skipLoginPage: SSO_SETTINGS.skipLoginPage, autoLogoutMinutes: SSO_SETTINGS.autoLogoutMinutes });
+    const enabled = !!(SSO_SETTINGS.enabled && SSO_SETTINGS.idpEntityId && SSO_SETTINGS.idpLoginUrl && SSO_SETTINGS.idpCertificate);
+    let brand = "generic";
+    if (SSO_SETTINGS.idpLoginUrl && /microsoftonline\.com|login\.microsoft\.com/i.test(SSO_SETTINGS.idpLoginUrl)) brand = "microsoft";
+    else if (SSO_SETTINGS.idpLoginUrl && /accounts\.google\.com/i.test(SSO_SETTINGS.idpLoginUrl)) brand = "google";
+    else if (SSO_SETTINGS.idpLoginUrl && /okta\.com/i.test(SSO_SETTINGS.idpLoginUrl)) brand = "okta";
+    return json(res, { enabled, brand, skipLoginPage: SSO_SETTINGS.skipLoginPage, autoLogoutMinutes: SSO_SETTINGS.autoLogoutMinutes });
   }
   if (path === "/api/v1/auth/azure/settings" && method === "GET") {
     return json(res, { ...SSO_SETTINGS });
   }
   if (path === "/api/v1/auth/azure/settings" && method === "PUT") {
+    if (body.enabled !== undefined) SSO_SETTINGS.enabled = body.enabled;
+    if (body.spEntityId !== undefined) SSO_SETTINGS.spEntityId = body.spEntityId.trim();
     if (body.idpEntityId !== undefined) SSO_SETTINGS.idpEntityId = body.idpEntityId.trim();
     if (body.idpLoginUrl !== undefined) SSO_SETTINGS.idpLoginUrl = body.idpLoginUrl.trim();
     if (body.idpLogoutUrl !== undefined) SSO_SETTINGS.idpLogoutUrl = body.idpLogoutUrl.trim();
     if (body.idpCertificate !== undefined) SSO_SETTINGS.idpCertificate = body.idpCertificate.trim();
+    if (body.wantResponseSigned !== undefined) SSO_SETTINGS.wantResponseSigned = body.wantResponseSigned;
     if (body.skipLoginPage !== undefined) SSO_SETTINGS.skipLoginPage = body.skipLoginPage;
     if (body.autoLogoutMinutes !== undefined) SSO_SETTINGS.autoLogoutMinutes = Math.max(0, Math.min(1440, body.autoLogoutMinutes));
     return json(res, { ...SSO_SETTINGS });
+  }
+  // OIDC settings
+  if (path === "/api/v1/auth/oidc/settings" && method === "GET") {
+    return json(res, { ...OIDC_SETTINGS });
+  }
+  if (path === "/api/v1/auth/oidc/settings" && method === "PUT") {
+    OIDC_SETTINGS.enabled = !!body.enabled;
+    OIDC_SETTINGS.discoveryUrl = (body.discoveryUrl || "").trim();
+    OIDC_SETTINGS.clientId = (body.clientId || "").trim();
+    OIDC_SETTINGS.clientSecret = (body.clientSecret || "").trim();
+    OIDC_SETTINGS.scopes = (body.scopes || "openid profile email").trim();
+    return json(res, { ...OIDC_SETTINGS });
+  }
+  // LDAP settings
+  if (path === "/api/v1/auth/ldap/settings" && method === "GET") {
+    return json(res, { ...LDAP_SETTINGS, bindPassword: LDAP_SETTINGS.bindPassword ? "********" : "" });
+  }
+  if (path === "/api/v1/auth/ldap/settings" && method === "PUT") {
+    LDAP_SETTINGS.enabled = !!body.enabled;
+    LDAP_SETTINGS.url = (body.url || "").trim();
+    LDAP_SETTINGS.bindDn = (body.bindDn || "").trim();
+    LDAP_SETTINGS.bindPassword = body.bindPassword === "********" ? LDAP_SETTINGS.bindPassword : (body.bindPassword || "").trim();
+    LDAP_SETTINGS.searchBase = (body.searchBase || "").trim();
+    LDAP_SETTINGS.searchFilter = (body.searchFilter || "(sAMAccountName={{username}})").trim();
+    LDAP_SETTINGS.tlsVerify = body.tlsVerify !== false;
+    LDAP_SETTINGS.displayNameAttr = (body.displayNameAttr || "displayName").trim();
+    LDAP_SETTINGS.emailAttr = (body.emailAttr || "mail").trim();
+    return json(res, { ...LDAP_SETTINGS, bindPassword: LDAP_SETTINGS.bindPassword ? "********" : "" });
   }
   if (path === "/api/v1/auth/azure/test" && method === "POST") {
     const results = {
@@ -3246,6 +3307,17 @@ async function routeAPI(method, path, params, body, res, req) {
     return;
   }
 
+  // Server Settings — Delete a backup
+  if (path.match(/^\/api\/v1\/server-settings\/database\/backups\/[\w-]+$/) && method === "DELETE") {
+    const id = path.split("/").pop();
+    const idx = BACKUP_HISTORY.findIndex((b) => b.id === id);
+    if (idx === -1) return json(res, { error: "Backup not found" }, 404);
+    BACKUP_HISTORY.splice(idx, 1);
+    delete BACKUP_BLOBS[id];
+    res.writeHead(204);
+    return res.end();
+  }
+
   // Server Settings — Tags
   if (path === "/api/v1/server-settings/tags" && method === "GET") {
     return json(res, [...TAGS].sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name)));
@@ -3258,7 +3330,7 @@ async function routeAPI(method, path, params, body, res, req) {
       id: crypto.randomUUID(),
       name,
       category: body.category || "General",
-      color: body.color || "#4fc3f7",
+      color: body.color || randomTagColor(),
       createdAt: new Date().toISOString(),
     };
     TAGS.push(newTag);
@@ -3271,6 +3343,24 @@ async function routeAPI(method, path, params, body, res, req) {
   if (path === "/api/v1/server-settings/tags/settings" && method === "PUT") {
     TAG_SETTINGS.enforce = body.enforce === true;
     return json(res, TAG_SETTINGS);
+  }
+  if (path.match(/^\/api\/v1\/server-settings\/tags\/[\w-]+$/) && method === "PUT") {
+    const id = path.split("/").pop();
+    const tag = TAGS.find((t) => t.id === id);
+    if (!tag) return json(res, { error: "Tag not found" }, 404);
+    const oldName = tag.name;
+    if (body.name !== undefined) {
+      const newName = body.name.trim();
+      if (newName && newName !== oldName && TAGS.find((t) => t.name === newName)) return json(res, { error: `Tag "${newName}" already exists` }, 409);
+      if (newName) {
+        tag.name = newName;
+        [BLOCKS, SUBNETS, ASSETS].forEach((arr) => arr.forEach((r) => { if (r.tags) r.tags = r.tags.map((t) => t === oldName ? newName : t); }));
+      }
+    }
+    if (body.category !== undefined) tag.category = body.category.trim() || "General";
+    if (body.color !== undefined) tag.color = body.color;
+    logEventDemo({ action: "tag.updated", resourceType: "tag", resourceId: id, resourceName: tag.name, message: `Tag "${tag.name}" updated` });
+    return json(res, { ...tag });
   }
   if (path.match(/^\/api\/v1\/server-settings\/tags\/[\w-]+$/) && method === "DELETE") {
     const id = path.split("/").pop();
