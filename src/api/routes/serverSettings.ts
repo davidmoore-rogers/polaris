@@ -12,7 +12,7 @@ import {
   randomBytes,
   scryptSync,
 } from "node:crypto";
-import { existsSync, unlinkSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -733,6 +733,109 @@ router.post("/updates/apply", async (_req, res, next) => {
 router.post("/updates/dismiss", (_req, res) => {
   clearUpdateStatus();
   res.json({ ok: true });
+});
+
+// ─── Branding ─────────────────────────────────────────────────────────────
+
+interface BrandingSettings {
+  appName: string;
+  subtitle: string;
+  logoUrl: string;
+}
+
+const BRANDING_DEFAULTS: BrandingSettings = {
+  appName: "Shelob",
+  subtitle: "Network Management Tool",
+  logoUrl: "/logo.webp",
+};
+
+async function getBranding(): Promise<BrandingSettings & { version: string }> {
+  const row = await prisma.setting.findUnique({ where: { key: "branding" } });
+  const saved = row ? (row.value as Record<string, unknown>) : {};
+  return {
+    appName:  (saved.appName as string)  || BRANDING_DEFAULTS.appName,
+    subtitle: (saved.subtitle as string) || BRANDING_DEFAULTS.subtitle,
+    logoUrl:  (saved.logoUrl as string)  || BRANDING_DEFAULTS.logoUrl,
+    version:  APP_VERSION,
+  };
+}
+
+router.get("/branding", async (_req, res, next) => {
+  try {
+    res.json(await getBranding());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/branding", async (req, res, next) => {
+  try {
+    const current = await getBranding();
+    const updated: BrandingSettings = {
+      appName:  (req.body.appName  ?? current.appName).trim()  || BRANDING_DEFAULTS.appName,
+      subtitle: (req.body.subtitle ?? current.subtitle).trim(),
+      logoUrl:  current.logoUrl,
+    };
+    await prisma.setting.upsert({
+      where:  { key: "branding" },
+      update: { value: updated as any },
+      create: { key: "branding", value: updated as any },
+    });
+    res.json({ ...updated, version: APP_VERSION });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const LOGO_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "public", "uploads");
+const logoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+router.post("/branding/logo", logoUpload.single("file"), async (req, res, next) => {
+  try {
+    if (!req.file) throw new AppError(400, "No file uploaded");
+    const ext = req.file.mimetype === "image/svg+xml" ? ".svg"
+      : req.file.mimetype === "image/png" ? ".png"
+      : req.file.mimetype === "image/webp" ? ".webp"
+      : req.file.mimetype === "image/jpeg" ? ".jpg"
+      : null;
+    if (!ext) throw new AppError(400, "Unsupported image format");
+
+    mkdirSync(LOGO_DIR, { recursive: true });
+    const filename = `custom-logo${ext}`;
+    writeFileSync(join(LOGO_DIR, filename), req.file.buffer);
+    const logoUrl = `/uploads/${filename}`;
+
+    const current = await getBranding();
+    const updated: BrandingSettings = { appName: current.appName, subtitle: current.subtitle, logoUrl };
+    await prisma.setting.upsert({
+      where:  { key: "branding" },
+      update: { value: updated as any },
+      create: { key: "branding", value: updated as any },
+    });
+    res.json({ ...updated, version: APP_VERSION });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/branding/logo", async (_req, res, next) => {
+  try {
+    const current = await getBranding();
+    // Remove old custom logo file
+    if (current.logoUrl.startsWith("/uploads/")) {
+      const oldPath = join(LOGO_DIR, current.logoUrl.replace("/uploads/", ""));
+      if (existsSync(oldPath)) unlinkSync(oldPath);
+    }
+    const updated: BrandingSettings = { appName: current.appName, subtitle: current.subtitle, logoUrl: BRANDING_DEFAULTS.logoUrl };
+    await prisma.setting.upsert({
+      where:  { key: "branding" },
+      update: { value: updated as any },
+      create: { key: "branding", value: updated as any },
+    });
+    res.json({ ...updated, version: APP_VERSION });
+  } catch (err) {
+    next(err);
+  }
 });
 
 export default router;
