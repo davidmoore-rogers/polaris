@@ -272,6 +272,10 @@ export async function applyUpdate(): Promise<void> {
     // ── Step 2: Pull latest code ──
     setStep(1, "running");
     try {
+      await execAsync("git checkout -- package-lock.json", {
+        cwd: APP_DIR,
+        timeout: 10000,
+      }).catch(() => {});
       const { stdout } = await execAsync("git pull --ff-only", {
         cwd: APP_DIR,
         timeout: 60000,
