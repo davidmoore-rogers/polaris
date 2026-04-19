@@ -116,6 +116,7 @@ async function getSamlClient(): Promise<SAML> {
     idpIssuer: settings.idpEntityId,
     wantAssertionsSigned: true,
     wantAuthnResponseSigned: settings.wantResponseSigned,
+    disableRequestedAuthnContext: true,
     validateInResponseTo: ValidateInResponseTo.never,
   };
 
