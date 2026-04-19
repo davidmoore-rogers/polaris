@@ -159,12 +159,33 @@ async function dohReverse(ip: string, dohUrl: string): Promise<string[]> {
       headers: { Accept: "application/dns-json" },
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`DoH query failed (HTTP ${res.status})`);
-    const data: any = await res.json();
+    if (!res.ok) {
+      const err: any = new Error(`DoH query failed (HTTP ${res.status})`);
+      err.code = "DOH_HTTP_ERROR";
+      throw err;
+    }
+    let data: any;
+    try {
+      data = await res.json();
+    } catch {
+      const err: any = new Error("DoH server did not return JSON — check the URL uses the JSON API endpoint");
+      err.code = "DOH_PARSE_ERROR";
+      throw err;
+    }
     if (!data.Answer || !Array.isArray(data.Answer)) return [];
     return data.Answer
       .filter((a: any) => a.type === 12) // PTR
       .map((a: any) => (a.data || "").replace(/\.$/, ""));
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      const timeout: any = new Error("DoH request timed out (5s) — server may be unreachable");
+      timeout.code = "DOH_TIMEOUT";
+      throw timeout;
+    }
+    if (err.code?.startsWith?.("DOH_")) throw err;
+    const wrapped: any = new Error(`DoH connection failed: ${err.message || err}`);
+    wrapped.code = "DOH_CONNECT_ERROR";
+    throw wrapped;
   } finally {
     clearTimeout(timer);
   }

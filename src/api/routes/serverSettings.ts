@@ -607,7 +607,7 @@ router.post("/dns/test", async (req, res, next) => {
         if (dnsErr.code === "ENOTFOUND" || dnsErr.code === "ENODATA") {
           return { server: t.label, ok: true, message: `Reachable but no PTR record for ${testIp} (${elapsed}ms)` };
         }
-        return { server: t.label, ok: false, message: `${dnsErr.code || dnsErr.message} (${elapsed}ms)` };
+        return { server: t.label, ok: false, message: `${dnsErr.message || dnsErr.code || "Unknown error"} (${elapsed}ms)` };
       }
     }));
 
