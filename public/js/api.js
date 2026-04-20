@@ -97,6 +97,7 @@ const api = {
     create:    (body)   => request("POST", "/assets", body),
     update:    (id, b)  => request("PUT", `/assets/${id}`, b),
     delete:    (id)     => request("DELETE", `/assets/${id}`),
+    bulkDelete:(ids)    => request("DELETE", "/assets", { ids }),
     dnsLookup: (id)     => request("POST", `/assets/${id}/dns-lookup`),
     dnsLookupAll: ()    => trackedRequest("DNS Lookup", "POST", "/assets/dns-lookup"),
     ouiLookup: (id)     => request("POST", `/assets/${id}/oui-lookup`),

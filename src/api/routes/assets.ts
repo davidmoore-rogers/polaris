@@ -258,6 +258,20 @@ router.post("/:id/oui-lookup", requireAssetsAdmin, async (req, res, next) => {
   }
 });
 
+// DELETE /api/v1/assets — bulk delete (assets admin)
+router.delete("/", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const { ids } = req.body as { ids?: unknown };
+    if (!Array.isArray(ids) || ids.length === 0) throw new AppError(400, "ids must be a non-empty array");
+    if (ids.some((id) => typeof id !== "string")) throw new AppError(400, "All ids must be strings");
+    const { count } = await prisma.asset.deleteMany({ where: { id: { in: ids as string[] } } });
+    logEvent({ action: "asset.bulk_deleted", resourceType: "asset", actor: req.session?.username, message: `Bulk deleted ${count} asset(s)` });
+    res.json({ deleted: count });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // DELETE /api/v1/assets/:id — delete (assets admin)
 router.delete("/:id", requireAssetsAdmin, async (req, res, next) => {
   try {

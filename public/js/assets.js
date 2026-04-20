@@ -230,15 +230,15 @@ async function bulkDeleteAssets() {
   if (!ok) return;
   var btn = document.getElementById("assets-bulk-delete-btn");
   if (btn) btn.disabled = true;
-  var failed = 0;
-  for (var i = 0; i < ids.length; i++) {
-    try { await api.assets.delete(ids[i]); }
-    catch (e) { failed++; }
+  try {
+    var result = await api.assets.bulkDelete(ids);
+    _assetsSelected.clear();
+    showToast("Deleted " + (result.deleted || ids.length) + " asset" + (ids.length !== 1 ? "s" : ""));
+  } catch (e) {
+    showToast("Deletion failed", "error");
+  } finally {
+    if (btn) btn.disabled = false;
   }
-  _assetsSelected.clear();
-  if (btn) btn.disabled = false;
-  if (failed > 0) showToast(failed + " deletion(s) failed", "error");
-  else showToast("Deleted " + ids.length + " asset" + (ids.length !== 1 ? "s" : ""));
   loadAssets();
 }
 
