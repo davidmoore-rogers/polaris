@@ -208,6 +208,7 @@ export type DiscoveryProgressCallback = (
   step: string,
   level: "info" | "error",
   message: string,
+  device?: string,
 ) => void;
 
 /**
@@ -260,6 +261,8 @@ export async function discoverDhcpSubnets(
     // Stop early if the caller aborted (e.g. integration was re-saved)
     if (signal?.aborted) break;
 
+    log("discover.device.start", "info", `Starting discovery for ${deviceName}`, deviceName);
+
     // Capture device metadata for asset creation
     const mgmtIp = device.ip || "";
     devices.push({
@@ -293,7 +296,7 @@ export async function discoverDhcpSubnets(
       const dhcpRes = await rpc(baseUrl, dhcpPayload, apiUser, apiToken, verifySsl, signal);
       const dhcpData = dhcpRes.result?.[0]?.data;
       if (!Array.isArray(dhcpData)) {
-        log("discover.dhcp", "info", `${deviceName}: No DHCP servers configured`);
+        log("discover.dhcp", "info", `${deviceName}: No DHCP servers configured`, deviceName);
         continue;
       }
 
@@ -347,7 +350,7 @@ export async function discoverDhcpSubnets(
           }
         }
       }
-      log("discover.dhcp", "info", `${deviceName}: Found ${deviceSubnetCount} DHCP subnet(s) and ${deviceReservationCount} static reservation(s)`);
+      log("discover.dhcp", "info", `${deviceName}: Found ${deviceSubnetCount} DHCP subnet(s) and ${deviceReservationCount} static reservation(s)`, deviceName);
 
       // Step 3a: Query DHCP lease table for dynamic leases
       try {
@@ -400,9 +403,9 @@ export async function discoverDhcpSubnets(
             deviceLeaseCount++;
           }
         }
-        log("discover.leases", "info", `${deviceName}: Found ${deviceLeaseCount} dynamic DHCP lease(s)`);
+        log("discover.leases", "info", `${deviceName}: Found ${deviceLeaseCount} dynamic DHCP lease(s)`, deviceName);
       } catch (err: any) {
-        log("discover.leases", "error", `${deviceName}: Failed to query DHCP leases — ${err.message || "Unknown error"}`);
+        log("discover.leases", "error", `${deviceName}: Failed to query DHCP leases — ${err.message || "Unknown error"}`, deviceName);
       }
 
       // Step 3: Query interfaces to get IPs for DHCP-serving interfaces
@@ -435,9 +438,9 @@ export async function discoverDhcpSubnets(
               }
             }
           }
-          log("discover.interfaces", "info", `${deviceName}: Resolved ${ifaceIpCount} DHCP interface IP(s)`);
+          log("discover.interfaces", "info", `${deviceName}: Resolved ${ifaceIpCount} DHCP interface IP(s)`, deviceName);
         } catch (err: any) {
-          log("discover.interfaces", "error", `${deviceName}: Failed to query interfaces — ${err.message || "Unknown error"}`);
+          log("discover.interfaces", "error", `${deviceName}: Failed to query interfaces — ${err.message || "Unknown error"}`, deviceName);
         }
       }
 
@@ -489,12 +492,12 @@ export async function discoverDhcpSubnets(
             inventoryCount++;
           }
         }
-        log("discover.inventory", "info", `${deviceName}: Found ${inventoryCount} device inventory client(s)`);
+        log("discover.inventory", "info", `${deviceName}: Found ${inventoryCount} device inventory client(s)`, deviceName);
       } catch (err: any) {
-        log("discover.inventory", "error", `${deviceName}: Failed to query device inventory — ${err.message || "Unknown error"}`);
+        log("discover.inventory", "error", `${deviceName}: Failed to query device inventory — ${err.message || "Unknown error"}`, deviceName);
       }
     } catch (err: any) {
-      log("discover.device", "error", `${deviceName}: Failed to query device — ${err.message || "Unknown error"}`);
+      log("discover.device", "error", `${deviceName}: Failed to query device — ${err.message || "Unknown error"}`, deviceName);
     }
   }
 

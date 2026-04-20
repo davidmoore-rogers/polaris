@@ -306,9 +306,9 @@ function renderQueryStatus() {
         '</li>';
       }).join("") +
       serverDiscoveries.map(function (d) {
-        return '<li>' +
-          '<span class="query-status-name">Discovering ' + escapeHtml(d.name) + '</span>' +
-        '</li>';
+        var label = 'Discovering ' + escapeHtml(d.name);
+        if (d.currentDevice) label += ' \u2014 ' + escapeHtml(d.currentDevice);
+        return '<li><span class="query-status-name">' + label + '</span></li>';
       }).join("") +
     '</ul>' +
     (activeQueries.length > 1

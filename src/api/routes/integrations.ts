@@ -18,7 +18,7 @@ import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 const router = Router();
 
 // Track in-flight DHCP discovery per integration — abort previous if re-saved
-const activeDiscovery = new Map<string, { controller: AbortController; name: string }>();
+const activeDiscovery = new Map<string, { controller: AbortController; name: string; currentDevice?: string }>();
 
 // All integration routes require network admin or admin
 router.use(requireNetworkAdmin);
@@ -96,6 +96,12 @@ router.get("/", async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// GET /api/v1/integrations/discoveries — active background discoveries
+router.get("/discoveries", (req, res) => {
+  const running = Array.from(activeDiscovery.entries()).map(([id, { name, currentDevice }]) => ({ id, name, currentDevice }));
+  res.json({ discoveries: running });
 });
 
 // GET /api/v1/integrations/:id
@@ -360,9 +366,13 @@ router.post("/:id/discover", async (req, res, next) => {
     const actor = req.session?.username;
     logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `Manual DHCP discovery started for "${integrationName}"` });
 
-    // Progress callback — logs each Phase 2 step as an event
-    const onProgress: DiscoveryProgressCallback = (step, level, message) => {
+    // Progress callback — logs each Phase 2 step as an event and tracks the current device
+    const onProgress: DiscoveryProgressCallback = (step, level, message, device) => {
       logEvent({ action: `integration.${step}`, resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
+      if (device) {
+        const entry = activeDiscovery.get(integrationId);
+        if (entry) entry.currentDevice = device;
+      }
     };
 
     // Run discovery detached so client navigation doesn't kill it.
@@ -390,12 +400,6 @@ router.post("/:id/discover", async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
-
-// GET /api/v1/integrations/discoveries — active background discoveries
-router.get("/discoveries", (req, res) => {
-  const running = Array.from(activeDiscovery.entries()).map(([id, { name }]) => ({ id, name }));
-  res.json({ discoveries: running });
 });
 
 // POST /api/v1/integrations/test — test without saving (for the create form)
