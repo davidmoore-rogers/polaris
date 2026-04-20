@@ -379,38 +379,53 @@ export async function discoverDhcpSubnets(
         const leaseRes = await rpc(baseUrl, leasePayload, apiUser, apiToken, verifySsl, signal);
         const leaseData = leaseRes.result?.[0]?.data;
 
-        // FortiGate returns leases in data[0].response.results array
-        const results = Array.isArray(leaseData)
+        // FMG wraps the FortiGate response: data[0].response.results
+        const rawResults = Array.isArray(leaseData)
           ? leaseData[0]?.response?.results
           : (leaseData as any)?.response?.results;
 
-        let deviceLeaseCount = 0;
-        if (Array.isArray(results)) {
-          for (const lease of results) {
-            const leaseIp = lease.ip;
-            const leaseMac = lease.mac || "";
-            const leaseIface = lease.interface || "";
-            if (!leaseIp || leaseIp === "0.0.0.0") continue;
-
-            // Skip if already captured as a static reservation
-            const alreadyExists = dhcpEntries.some(
-              (e) => e.ipAddress === leaseIp && e.device === deviceName
-            );
-            if (alreadyExists) continue;
-
-            // Only include if interface is in our discovered DHCP interfaces
-            if (leaseIface && !dhcpInterfaceNames.includes(leaseIface)) continue;
-
-            dhcpEntries.push({
-              device: deviceName,
-              interfaceName: leaseIface || "unknown",
-              ipAddress: leaseIp,
-              macAddress: leaseMac,
-              hostname: lease.hostname || "",
-              type: "dhcp-lease",
-            });
-            deviceLeaseCount++;
+        // Some FortiOS versions return a nested structure where results[i] is a
+        // DHCP server entry with a "leases" sub-array. Others return a flat array
+        // where each item is a lease directly. Normalise to a flat list.
+        const flatLeases: any[] = [];
+        if (Array.isArray(rawResults)) {
+          for (const entry of rawResults) {
+            if (Array.isArray(entry.leases)) {
+              // Nested: carry the server-level interface name down to each lease
+              const serverIface = String(entry.server_interface || entry.interface || "");
+              for (const lease of entry.leases) {
+                flatLeases.push({ ...lease, _serverIface: serverIface });
+              }
+            } else {
+              flatLeases.push(entry);
+            }
           }
+        }
+
+        log("discover.leases", "info", `${deviceName}: Raw lease entries from API: ${flatLeases.length}`, deviceName);
+
+        let deviceLeaseCount = 0;
+        for (const lease of flatLeases) {
+          const leaseIp = lease.ip;
+          const leaseMac = lease.mac || "";
+          const leaseIface = lease.interface || lease._serverIface || "";
+          if (!leaseIp || leaseIp === "0.0.0.0") continue;
+
+          // Skip if already captured as a static reservation
+          const alreadyExists = dhcpEntries.some(
+            (e) => e.ipAddress === leaseIp && e.device === deviceName
+          );
+          if (alreadyExists) continue;
+
+          dhcpEntries.push({
+            device: deviceName,
+            interfaceName: leaseIface || "unknown",
+            ipAddress: leaseIp,
+            macAddress: leaseMac,
+            hostname: lease.hostname || "",
+            type: "dhcp-lease",
+          });
+          deviceLeaseCount++;
         }
         log("discover.leases", "info", `${deviceName}: Found ${deviceLeaseCount} dynamic DHCP lease(s)`, deviceName);
       } catch (err: any) {
