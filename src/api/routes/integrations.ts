@@ -1070,10 +1070,19 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
   if (result.deviceInventory && result.deviceInventory.length > 0) {
     const dhcpMacs = new Set<string>();
-    if (result.dhcpEntries) {
-      for (const e of result.dhcpEntries) {
-        if (e.macAddress) dhcpMacs.add(e.macAddress.toUpperCase().replace(/-/g, ":"));
+    const dhcpMacToIp = new Map<string, string>();
+    for (const e of result.dhcpEntries || []) {
+      if (e.macAddress) {
+        const m = e.macAddress.toUpperCase().replace(/-/g, ":");
+        dhcpMacs.add(m);
+        if (e.ipAddress && !dhcpMacToIp.has(m)) dhcpMacToIp.set(m, e.ipAddress);
       }
+    }
+
+    // Hostname → IP from existing reservations (fallback for inventory entries missing an IP)
+    const resHostnameToIp = new Map<string, string>();
+    for (const r of allReservationsRaw) {
+      if (r.hostname && r.ipAddress) resHostnameToIp.set(r.hostname.toLowerCase(), r.ipAddress);
     }
 
     for (const inv of result.deviceInventory) {
@@ -1146,6 +1155,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           }
         }
       } else {
+        // Only create new assets that have a MAC and a resolvable IP
+        if (!normalizedMac) continue;
+        let resolvedIp = inv.ipAddress || "";
+        if (!resolvedIp) resolvedIp = dhcpMacToIp.get(normalizedMac) || "";
+        if (!resolvedIp && inv.hostname) resolvedIp = resHostnameToIp.get(inv.hostname.toLowerCase()) || "";
+        if (!resolvedIp) continue;
+
         try {
           const userList: Array<{user: string; domain?: string; lastSeen: string; source: string}> = [];
           if (inv.user) {
@@ -1154,7 +1170,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           }
           const newAsset = await prisma.asset.create({
             data: {
-              ipAddress: inv.ipAddress || null,
+              ipAddress: resolvedIp,
               macAddress: normalizedMac || null,
               macAddresses: normalizedMac ? [{ mac: normalizedMac, lastSeen: now, source: "device-inventory" }] : [],
               hostname: inv.hostname || null,
