@@ -1375,6 +1375,13 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   margin-bottom: 1rem;
   box-shadow: var(--shadow-sm);
 }
+.settings-cards-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.settings-cards-row .settings-card { margin-bottom: 0; }
 .settings-card h4 {
   font-size: 0.9rem;
   font-weight: 600;

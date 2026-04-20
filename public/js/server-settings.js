@@ -83,6 +83,7 @@ async function loadNtpSettings() {
   } catch (_) {}
 
   container.innerHTML =
+    '<div class="settings-cards-row">' +
     '<div class="settings-card">' +
       '<h4>Time Synchronization</h4>' +
       '<div class="form-group">' +
@@ -118,6 +119,7 @@ async function loadNtpSettings() {
         '<p class="hint">IANA timezone identifier (e.g. America/Chicago, UTC, Europe/London). Leave blank to use the server\'s OS timezone.</p>' +
       '</div>' +
       '<div id="ntp-current-time" style="font-size:0.82rem;color:var(--color-text-tertiary);margin-top:0.5rem"></div>' +
+    '</div>' +
     '</div>' +
     '<div style="display:flex;gap:8px;align-items:center">' +
       '<button class="btn btn-primary" id="btn-ntp-save">Save NTP Settings</button>' +
@@ -366,7 +368,8 @@ function initTimezoneDropdown(currentValue) {
 var _dnsDefaults = { servers: [], mode: "standard", dohUrl: "" };
 
 function dnsCardsHTML() {
-  return '<div class="settings-card">' +
+  return '<div class="settings-cards-row">' +
+    '<div class="settings-card">' +
     '<h4>DNS Configuration</h4>' +
     '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
       'Configure custom DNS servers for reverse lookups (PTR records). These servers are used when resolving IP addresses ' +
@@ -414,6 +417,7 @@ function dnsCardsHTML() {
       '<p class="hint">Enter an IPv4 or IPv6 address to perform a test PTR lookup against the configured servers.</p>' +
       '<div id="dns-status" style="font-size:0.82rem;margin-top:0.4rem"></div>' +
     '</div>' +
+  '</div>' +
   '</div>';
 }
 
@@ -951,16 +955,32 @@ async function loadDatabaseInfo() {
           '</div>' +
         '</div>' +
       '</div>' +
-      '<div class="settings-card">' +
-        '<h4>Database Engine</h4>' +
-        '<div class="db-info-grid">' +
-          dbInfoRow("Type", db.type || "Unknown") +
-          dbInfoRow("Version", db.version || "Unknown") +
-          (db.host ? dbInfoRow("Host", db.host + (db.port ? ":" + db.port : "")) : "") +
-          (db.database ? dbInfoRow("Database", db.database) : "") +
-          (db.ssl ? dbInfoRow("SSL", db.ssl) : "") +
-        '</div>' +
-      '</div>' +
+      (function () {
+        var engineCard = '<div class="settings-card">' +
+          '<h4>Database Engine</h4>' +
+          '<div class="db-info-grid">' +
+            dbInfoRow("Type", db.type || "Unknown") +
+            dbInfoRow("Version", db.version || "Unknown") +
+            (db.host ? dbInfoRow("Host", db.host + (db.port ? ":" + db.port : "")) : "") +
+            (db.database ? dbInfoRow("Database", db.database) : "") +
+            (db.ssl ? dbInfoRow("SSL", db.ssl) : "") +
+          '</div>' +
+        '</div>';
+        var hasPool = db.uptime || db.activeConnections !== undefined || db.maxConnections !== undefined;
+        var poolCard = hasPool
+          ? '<div class="settings-card">' +
+              '<h4>Connection Pool</h4>' +
+              '<div class="db-info-grid">' +
+                (db.activeConnections !== undefined ? dbInfoRow("Active Connections", db.activeConnections) : "") +
+                (db.maxConnections !== undefined ? dbInfoRow("Max Connections", db.maxConnections) : "") +
+                (db.uptime ? dbInfoRow("Uptime", db.uptime) : "") +
+              '</div>' +
+            '</div>'
+          : '';
+        return hasPool
+          ? '<div class="settings-cards-row">' + engineCard + poolCard + '</div>'
+          : engineCard;
+      })() +
       '<div class="settings-card">' +
         '<h4>Storage</h4>' +
         '<div class="db-info-grid">' +
@@ -982,16 +1002,6 @@ async function loadDatabaseInfo() {
             '</tbody></table></div>'
           : '') +
       '</div>' +
-      (db.uptime || db.activeConnections !== undefined || db.maxConnections !== undefined
-        ? '<div class="settings-card">' +
-            '<h4>Connection Pool</h4>' +
-            '<div class="db-info-grid">' +
-              (db.activeConnections !== undefined ? dbInfoRow("Active Connections", db.activeConnections) : "") +
-              (db.maxConnections !== undefined ? dbInfoRow("Max Connections", db.maxConnections) : "") +
-              (db.uptime ? dbInfoRow("Uptime", db.uptime) : "") +
-            '</div>' +
-          '</div>'
-        : '') +
 
       // ── Backup Card ──
       '<div class="settings-card">' +
@@ -1746,6 +1756,7 @@ function renderCustomizationTab() {
   var isCustomLogo = _brandingData.logoUrl && _brandingData.logoUrl !== "/logo.webp";
 
   container.innerHTML =
+    '<div class="settings-cards-row">' +
     '<div class="settings-card">' +
       '<h4>Application Name</h4>' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
@@ -1785,6 +1796,7 @@ function renderCustomizationTab() {
             : '') +
         '</div>' +
       '</div>' +
+    '</div>' +
     '</div>';
 
   // Wire save button
