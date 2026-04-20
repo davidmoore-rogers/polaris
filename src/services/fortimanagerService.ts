@@ -513,23 +513,27 @@ export async function discoverDhcpSubnets(
 
     // Emit a filtered per-device result so the caller can sync incrementally
     if (onDeviceComplete) {
-      const devSubnets = discovered.slice(snBefore);
-      const filteredDevSubnets = filterDhcpResults(devSubnets, config.dhcpInclude, config.dhcpExclude);
-      const includedIfaces = new Set(filteredDevSubnets.map((s) => s.name));
-      const excludedDevIfaces = new Set(
-        devSubnets.filter((s) => !filteredDevSubnets.includes(s)).map((s) => `${s.fortigateDevice}/${s.name}`)
-      );
-      await onDeviceComplete({
-        subnets: filteredDevSubnets,
-        devices: devices.slice(devBefore),
-        interfaceIps: interfaceIps.slice(ifIpBefore).filter(
-          (ip) => ip.role === "management" || includedIfaces.has(ip.interfaceName)
-        ),
-        dhcpEntries: dhcpEntries.slice(entBefore).filter((e) => includedIfaces.has(e.interfaceName)),
-        deviceInventory: deviceInventory.slice(invBefore).filter(
-          (d) => !excludedDevIfaces.has(`${d.device}/${d.interfaceName}`)
-        ),
-      });
+      try {
+        const devSubnets = discovered.slice(snBefore);
+        const filteredDevSubnets = filterDhcpResults(devSubnets, config.dhcpInclude, config.dhcpExclude);
+        const includedIfaces = new Set(filteredDevSubnets.map((s) => s.name));
+        const excludedDevIfaces = new Set(
+          devSubnets.filter((s) => !filteredDevSubnets.includes(s)).map((s) => `${s.fortigateDevice}/${s.name}`)
+        );
+        await onDeviceComplete({
+          subnets: filteredDevSubnets,
+          devices: devices.slice(devBefore),
+          interfaceIps: interfaceIps.slice(ifIpBefore).filter(
+            (ip) => ip.role === "management" || includedIfaces.has(ip.interfaceName)
+          ),
+          dhcpEntries: dhcpEntries.slice(entBefore).filter((e) => includedIfaces.has(e.interfaceName)),
+          deviceInventory: deviceInventory.slice(invBefore).filter(
+            (d) => !excludedDevIfaces.has(`${d.device}/${d.interfaceName}`)
+          ),
+        });
+      } catch (err: any) {
+        log("discover.device", "error", `${deviceName}: Per-device sync failed — ${err.message || "Unknown error"}`, deviceName);
+      }
     }
   }
 
