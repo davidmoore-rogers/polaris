@@ -166,7 +166,7 @@ router.post("/", async (req, res, next) => {
         let discoveryResult: DiscoveryResult;
         if (input.type === "windowsserver") {
           const subnets = await windowsServer.discoverDhcpScopes(input.config as any, ac.signal);
-          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [] };
+          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [] };
         } else {
           discoveryResult = await fortimanager.discoverDhcpSubnets(input.config as any, ac.signal);
         }
@@ -251,7 +251,7 @@ router.put("/:id", async (req, res, next) => {
         let discoveryResult: DiscoveryResult;
         if (existing.type === "windowsserver") {
           const subnets = await windowsServer.discoverDhcpScopes(finalConfig as any, ac.signal);
-          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [] };
+          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [] };
         } else {
           discoveryResult = await fortimanager.discoverDhcpSubnets(finalConfig as any, ac.signal);
         }
@@ -401,7 +401,7 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
 
       if (integration.type === "windowsserver") {
         const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
-        discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [] };
+        discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [] };
         // Windows Server is a single host — no per-device iteration, sync the full result normally
         const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
         syncTotals.created.push(...r.created);
@@ -897,6 +897,156 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       assetNames.push(device.name);
     } catch (err: any) {
       syncLog("error", `Failed to create/update asset for device ${device.name}: ${err.message || "Unknown error"}`);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Phase 3b — Create/update FortiSwitch and FortiAP assets + reservations
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  for (const sw of result.fortiSwitches || []) {
+    try {
+      let existingAsset: any = sw.serial ? assetIdx.findBySerial(sw.serial) : null;
+      if (!existingAsset && sw.name) existingAsset = assetIdx.findByEntry(undefined, sw.name, sw.ipAddress || undefined);
+
+      if (existingAsset) {
+        await prisma.asset.update({
+          where: { id: existingAsset.id },
+          data: {
+            ipAddress: sw.ipAddress || existingAsset.ipAddress,
+            hostname: sw.name || existingAsset.hostname,
+            model: sw.model || existingAsset.model,
+            osVersion: sw.osVersion || existingAsset.osVersion,
+            learnedLocation: sw.device || existingAsset.learnedLocation,
+            lastSeen: new Date(now),
+          },
+        });
+        if (sw.ipAddress) existingAsset.ipAddress = sw.ipAddress;
+        assetIdx.reindex(existingAsset);
+        assetNames.push(`${sw.name} (updated)`);
+      } else {
+        const newAsset = await prisma.asset.create({
+          data: {
+            ipAddress: sw.ipAddress || null,
+            hostname: sw.name || null,
+            serialNumber: sw.serial || null,
+            manufacturer: "Fortinet",
+            model: sw.model || "FortiSwitch",
+            assetType: "switch",
+            status: "active",
+            osVersion: sw.osVersion || null,
+            learnedLocation: sw.device || null,
+            lastSeen: new Date(now),
+            notes: `Auto-discovered from FortiGate ${sw.device} via FortiManager`,
+            tags: ["fortiswitch", "auto-discovered"],
+          },
+        });
+        assetIdx.add(newAsset);
+        assetNames.push(sw.name || sw.serial);
+      }
+    } catch (err: any) {
+      syncLog("error", `Failed to create/update asset for FortiSwitch ${sw.name}: ${err.message || "Unknown error"}`);
+    }
+
+    if (sw.ipAddress) {
+      const matchingSubnet = findSubnetForIp(sw.ipAddress);
+      if (matchingSubnet) {
+        const key = reservationKey(matchingSubnet.id, sw.ipAddress);
+        if (!activeResMap.has(key)) {
+          try {
+            const newRes = await prisma.reservation.create({
+              data: {
+                subnetId: matchingSubnet.id,
+                ipAddress: sw.ipAddress,
+                hostname: sw.name || null,
+                owner: "network-team",
+                projectRef: "FortiManager Integration",
+                notes: `FortiSwitch managed by FortiGate ${sw.device}`,
+                status: "active",
+              },
+            });
+            activeResMap.set(key, newRes);
+            reservationNames.push(`${sw.ipAddress} (${sw.name})`);
+          } catch (err: any) {
+            syncLog("error", `Failed to create reservation for FortiSwitch ${sw.name} at ${sw.ipAddress}: ${err.message || "Unknown error"}`);
+          }
+        }
+      }
+    }
+  }
+
+  for (const ap of result.fortiAps || []) {
+    try {
+      const normalizedMac = ap.baseMac ? ap.baseMac.toUpperCase().replace(/-/g, ":") : null;
+      let existingAsset: any = ap.serial ? assetIdx.findBySerial(ap.serial) : null;
+      if (!existingAsset && normalizedMac) existingAsset = assetIdx.findByMac(normalizedMac);
+      if (!existingAsset && ap.name) existingAsset = assetIdx.findByEntry(undefined, ap.name, ap.ipAddress || undefined);
+
+      if (existingAsset) {
+        await prisma.asset.update({
+          where: { id: existingAsset.id },
+          data: {
+            ipAddress: ap.ipAddress || existingAsset.ipAddress,
+            hostname: ap.name || existingAsset.hostname,
+            model: ap.model || existingAsset.model,
+            osVersion: ap.osVersion || existingAsset.osVersion,
+            learnedLocation: ap.device || existingAsset.learnedLocation,
+            lastSeen: new Date(now),
+          },
+        });
+        if (ap.ipAddress) existingAsset.ipAddress = ap.ipAddress;
+        assetIdx.reindex(existingAsset);
+        assetNames.push(`${ap.name} (updated)`);
+      } else {
+        const newAsset = await prisma.asset.create({
+          data: {
+            ipAddress: ap.ipAddress || null,
+            macAddress: normalizedMac,
+            macAddresses: normalizedMac ? [{ mac: normalizedMac, lastSeen: now, source: "fmg-discovery" }] : [],
+            hostname: ap.name || null,
+            serialNumber: ap.serial || null,
+            manufacturer: "Fortinet",
+            model: ap.model || "FortiAP",
+            assetType: "access_point",
+            status: "active",
+            osVersion: ap.osVersion || null,
+            learnedLocation: ap.device || null,
+            lastSeen: new Date(now),
+            notes: `Auto-discovered from FortiGate ${ap.device} via FortiManager`,
+            tags: ["fortiap", "auto-discovered"],
+          },
+        });
+        assetIdx.add(newAsset);
+        assetNames.push(ap.name || ap.serial);
+      }
+    } catch (err: any) {
+      syncLog("error", `Failed to create/update asset for FortiAP ${ap.name}: ${err.message || "Unknown error"}`);
+    }
+
+    if (ap.ipAddress) {
+      const matchingSubnet = findSubnetForIp(ap.ipAddress);
+      if (matchingSubnet) {
+        const key = reservationKey(matchingSubnet.id, ap.ipAddress);
+        if (!activeResMap.has(key)) {
+          try {
+            const newRes = await prisma.reservation.create({
+              data: {
+                subnetId: matchingSubnet.id,
+                ipAddress: ap.ipAddress,
+                hostname: ap.name || null,
+                owner: "network-team",
+                projectRef: "FortiManager Integration",
+                notes: `FortiAP managed by FortiGate ${ap.device}`,
+                status: "active",
+              },
+            });
+            activeResMap.set(key, newRes);
+            reservationNames.push(`${ap.ipAddress} (${ap.name})`);
+          } catch (err: any) {
+            syncLog("error", `Failed to create reservation for FortiAP ${ap.name} at ${ap.ipAddress}: ${err.message || "Unknown error"}`);
+          }
+        }
+      }
     }
   }
 

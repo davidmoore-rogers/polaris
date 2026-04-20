@@ -1122,12 +1122,20 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 
 /* ─── Integration Cards ───────────────────────────────────────────────────── */
+#integrations-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+#integrations-list > p {
+  grid-column: 1 / -1;
+}
 .integration-card {
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   padding: 1.25rem;
-  margin-bottom: 12px;
   box-shadow: var(--shadow-sm);
 }
 .integration-card-header {
@@ -1182,7 +1190,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .dot-unknown { color: var(--color-text-tertiary); }
 .integration-card-details {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: 6px 24px;
 }
 .detail-row {

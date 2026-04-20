@@ -198,12 +198,35 @@ export interface DiscoveredInventoryDevice {
   lastSeen: string;         // ISO timestamp
 }
 
+export interface DiscoveredFortiSwitch {
+  device: string;      // FortiGate controller name
+  name: string;
+  serial: string;
+  model: string;
+  ipAddress: string;
+  status: string;
+  osVersion: string;
+}
+
+export interface DiscoveredFortiAP {
+  device: string;      // FortiGate controller name
+  name: string;
+  serial: string;
+  model: string;
+  ipAddress: string;
+  baseMac: string;
+  status: string;
+  osVersion: string;
+}
+
 export interface DiscoveryResult {
   subnets: DiscoveredSubnet[];
   devices: DiscoveredDevice[];
   interfaceIps: DiscoveredInterfaceIp[];
   dhcpEntries: DiscoveredDhcpEntry[];
   deviceInventory: DiscoveredInventoryDevice[];
+  fortiSwitches: DiscoveredFortiSwitch[];
+  fortiAps: DiscoveredFortiAP[];
 }
 
 export type DiscoveryProgressCallback = (
@@ -247,7 +270,7 @@ export async function discoverDhcpSubnets(
   const devicesData = devicesRes.result?.[0]?.data;
   if (!Array.isArray(devicesData) || devicesData.length === 0) {
     log("discover.devices", "info", `No managed devices found in ADOM "${adom}"`);
-    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [] };
+    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [] };
   }
   log("discover.devices", "info", `Found ${devicesData.length} managed device(s) in ADOM "${adom}"`);
 
@@ -256,6 +279,8 @@ export async function discoverDhcpSubnets(
   const interfaceIps: DiscoveredInterfaceIp[] = [];
   const dhcpEntries: DiscoveredDhcpEntry[] = [];
   const deviceInventory: DiscoveredInventoryDevice[] = [];
+  const fortiSwitches: DiscoveredFortiSwitch[] = [];
+  const fortiAps: DiscoveredFortiAP[] = [];
 
   // Step 2: For each device, query DHCP server configs + interfaces
   for (const device of devicesData) {
@@ -279,6 +304,8 @@ export async function discoverDhcpSubnets(
     const ifIpBefore = interfaceIps.length;
     const entBefore = dhcpEntries.length;
     const invBefore = deviceInventory.length;
+    const switchBefore = fortiSwitches.length;
+    const apBefore = fortiAps.length;
 
     log("discover.device.start", "info", `Starting discovery for ${deviceName}`, deviceName);
 
@@ -575,6 +602,85 @@ export async function discoverDhcpSubnets(
       } catch (err: any) {
         log("discover.inventory", "error", `${deviceName}: Failed to query device inventory — ${err.message || "Unknown error"}`, deviceName);
       }
+
+      // Step 3c: Query managed FortiSwitches via FMG proxy
+      try {
+        const switchPayload: JsonRpcRequest = {
+          id: 8,
+          method: "exec",
+          params: [{
+            url: `/sys/proxy/json`,
+            data: {
+              target: [`/adom/${adom}/device/${deviceName}`],
+              action: "get",
+              resource: "/api/v2/monitor/switch-controller/managed-switch",
+            },
+          }],
+        };
+        const switchRes = await rpc(baseUrl, switchPayload, apiUser, apiToken, verifySsl, signal);
+        const switchData = switchRes.result?.[0]?.data;
+        const switchResults = Array.isArray(switchData)
+          ? switchData[0]?.response?.results
+          : (switchData as any)?.response?.results;
+        let switchCount = 0;
+        if (Array.isArray(switchResults)) {
+          for (const sw of switchResults) {
+            fortiSwitches.push({
+              device: deviceName,
+              name: sw.name || sw.switch_id || "",
+              serial: sw.serial || sw.switch_id || "",
+              model: sw.hardware_version || sw.type || "",
+              ipAddress: sw.ip_address || sw.ip || "",
+              status: sw.status || sw.state || "",
+              osVersion: sw.os_version || sw.version || "",
+            });
+            switchCount++;
+          }
+        }
+        log("discover.fortiswitches", "info", `${deviceName}: Found ${switchCount} managed FortiSwitch(es)`, deviceName);
+      } catch (err: any) {
+        log("discover.fortiswitches", "error", `${deviceName}: Failed to query managed FortiSwitches — ${err.message || "Unknown error"}`, deviceName);
+      }
+
+      // Step 3d: Query managed FortiAPs via FMG proxy
+      try {
+        const apPayload: JsonRpcRequest = {
+          id: 9,
+          method: "exec",
+          params: [{
+            url: `/sys/proxy/json`,
+            data: {
+              target: [`/adom/${adom}/device/${deviceName}`],
+              action: "get",
+              resource: "/api/v2/monitor/wifi/managed_ap",
+            },
+          }],
+        };
+        const apRes = await rpc(baseUrl, apPayload, apiUser, apiToken, verifySsl, signal);
+        const apData = apRes.result?.[0]?.data;
+        const apResults = Array.isArray(apData)
+          ? apData[0]?.response?.results
+          : (apData as any)?.response?.results;
+        let apCount = 0;
+        if (Array.isArray(apResults)) {
+          for (const ap of apResults) {
+            fortiAps.push({
+              device: deviceName,
+              name: ap.name || ap.wtp_id || "",
+              serial: ap.serial || ap.wtp_id || "",
+              model: ap.model || ap.wtp_profile || "",
+              ipAddress: ap.ip_addr || ap.ip_address || ap.local_ipv4_address || "",
+              baseMac: ap.base_mac || ap.mac || "",
+              status: ap.status || ap.state || "",
+              osVersion: ap.version || ap.firmware_version || "",
+            });
+            apCount++;
+          }
+        }
+        log("discover.fortiaps", "info", `${deviceName}: Found ${apCount} managed FortiAP(s)`, deviceName);
+      } catch (err: any) {
+        log("discover.fortiaps", "error", `${deviceName}: Failed to query managed FortiAPs — ${err.message || "Unknown error"}`, deviceName);
+      }
     } catch (err: any) {
       log("discover.device", "error", `${deviceName}: Failed to query device — ${err.message || "Unknown error"}`, deviceName);
     }
@@ -601,6 +707,8 @@ export async function discoverDhcpSubnets(
                      (iface) => d.interfaceName.toLowerCase() === iface.toLowerCase()
                    )
           ),
+          fortiSwitches: fortiSwitches.slice(switchBefore),
+          fortiAps: fortiAps.slice(apBefore),
         });
       } catch (err: any) {
         log("discover.device", "error", `${deviceName}: Per-device sync failed — ${err.message || "Unknown error"}`, deviceName);
@@ -638,7 +746,7 @@ export async function discoverDhcpSubnets(
   const excluded = discovered.length - filteredSubnets.length;
   log("discover.filter", "info", `Filter complete: ${filteredSubnets.length} subnet(s) included, ${excluded} excluded, ${filteredDhcpEntries.length} DHCP entries, ${filteredInventory.length} inventory device(s)`);
 
-  return { subnets: filteredSubnets, devices, interfaceIps: filteredIps, dhcpEntries: filteredDhcpEntries, deviceInventory: filteredInventory };
+  return { subnets: filteredSubnets, devices, interfaceIps: filteredIps, dhcpEntries: filteredDhcpEntries, deviceInventory: filteredInventory, fortiSwitches, fortiAps };
 }
 
 function filterDhcpResults(
