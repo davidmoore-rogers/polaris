@@ -261,6 +261,14 @@ export async function discoverDhcpSubnets(
     const deviceName = device.name || device.hostname;
     if (!deviceName) continue;
 
+    // Skip devices that are not currently connected to FortiManager.
+    // conn_status 1 = UP; anything else (2=DOWN, 3=UNKNOWN) means the device
+    // is unreachable and its config data may be stale or unavailable.
+    if (device.conn_status !== undefined && device.conn_status !== 1) {
+      log("discover.device.skip", "info", `Skipping ${deviceName} — not connected to FortiManager (conn_status=${device.conn_status})`, deviceName);
+      continue;
+    }
+
     // Stop early if the caller aborted (e.g. integration was re-saved)
     if (signal?.aborted) break;
 
