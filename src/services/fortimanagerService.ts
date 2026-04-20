@@ -451,31 +451,42 @@ export async function discoverDhcpSubnets(
           ? leaseData[0]?.response?.results
           : (leaseData as any)?.response?.results;
 
-        // Some FortiOS versions return a nested structure where results[i] is a
-        // DHCP server entry with a "leases" sub-array. Others return a flat array
-        // where each item is a lease directly. Normalise to a flat list.
-        const flatLeases: any[] = [];
+        // FortiOS returns results in one of three formats:
+        //   1. Array of server objects, each with a "leases" sub-array (older FortiOS)
+        //   2. Object keyed by server mkey, each value having a "leases" sub-array (FortiOS 7.4+)
+        //   3. Flat array where each item is a lease directly
+        // Normalise all formats to a flat list with _serverIface carried down.
+        let resultsArray: any[] = [];
         if (Array.isArray(rawResults)) {
-          for (const entry of rawResults) {
-            if (Array.isArray(entry.leases)) {
-              // Nested: carry the server-level interface name down to each lease
-              const serverIface = String(entry.server_interface || entry.interface || "");
-              for (const lease of entry.leases) {
-                flatLeases.push({ ...lease, _serverIface: serverIface });
-              }
-            } else {
-              flatLeases.push(entry);
+          resultsArray = rawResults;
+        } else if (rawResults && typeof rawResults === "object") {
+          resultsArray = Object.values(rawResults);
+        }
+
+        const flatLeases: any[] = [];
+        for (const entry of resultsArray) {
+          if (Array.isArray(entry.leases)) {
+            // Nested format: carry server-level interface name down to each lease
+            const serverIface = String(entry.server_interface || entry.interface || "");
+            for (const lease of entry.leases) {
+              flatLeases.push({ ...lease, _serverIface: serverIface });
             }
+          } else if (entry.ip) {
+            // Flat format: entry is a lease directly
+            flatLeases.push(entry);
           }
         }
 
         log("discover.leases", "info", `${deviceName}: Raw lease entries from API: ${flatLeases.length}`, deviceName);
 
+        // Subnets discovered for this device (for interface inference below)
+        const deviceSubnets = discovered.slice(snBefore);
+
         let deviceLeaseCount = 0;
         for (const lease of flatLeases) {
           const leaseIp = lease.ip;
           const leaseMac = lease.mac || "";
-          const leaseIface = lease.interface || lease._serverIface || "";
+          let leaseIface = lease.interface || lease._serverIface || "";
           if (!leaseIp || leaseIp === "0.0.0.0") continue;
 
           // Skip if already captured as a static reservation
@@ -483,6 +494,15 @@ export async function discoverDhcpSubnets(
             (e) => e.ipAddress === leaseIp && e.device === deviceName
           );
           if (alreadyExists) continue;
+
+          // If no interface name came from the API, infer it from whichever
+          // discovered subnet on this device contains the lease IP
+          if (!leaseIface) {
+            const matched = deviceSubnets.find((s) => {
+              try { return new Netmask(s.cidr).contains(leaseIp); } catch { return false; }
+            });
+            leaseIface = matched?.name || "";
+          }
 
           dhcpEntries.push({
             device: deviceName,

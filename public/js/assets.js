@@ -230,7 +230,6 @@ function renderAssetsPage() {
       '<td class="mono">' + _copyableCell(a.ipAddress) + '</td>' +
       '<td class="mono" style="font-size:0.8rem">' + macCellHTML(a) + '</td>' +
       '<td>' + _copyableCell(a.serialNumber) + '</td>' +
-      '<td>' + _copyableCell(a.dnsName) + '</td>' +
       '<td>' + assetTypeBadge(a.assetType) + '</td>' +
       '<td>' + assetStatusBadge(a.status) + '</td>' +
       '<td>' + escapeHtml(a.location || a.learnedLocation || "-") + '</td>' +
