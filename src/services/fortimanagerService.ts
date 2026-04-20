@@ -312,7 +312,7 @@ export async function discoverDhcpSubnets(
       let deviceSubnetCount = 0;
       let deviceReservationCount = 0;
       for (const server of dhcpData) {
-        const iface = server.interface || "";
+        const iface = typeof server.interface === "string" ? server.interface : String(server.interface ?? "");
         const serverId = String(server.id || iface);
         const netmaskStr = server.netmask;
         const ranges = server["ip-range"];
@@ -577,8 +577,8 @@ function filterDhcpResults(
   if (include && include.length > 0) {
     result = result.filter((s) =>
       include.some((pattern) =>
-        s.name.toLowerCase().includes(pattern.toLowerCase()) ||
-        s.dhcpServerId.toLowerCase().includes(pattern.toLowerCase())
+        String(s.name).toLowerCase().includes(pattern.toLowerCase()) ||
+        String(s.dhcpServerId).toLowerCase().includes(pattern.toLowerCase())
       )
     );
   }
@@ -586,8 +586,8 @@ function filterDhcpResults(
   if (exclude && exclude.length > 0) {
     result = result.filter((s) =>
       !exclude.some((pattern) =>
-        s.name.toLowerCase().includes(pattern.toLowerCase()) ||
-        s.dhcpServerId.toLowerCase().includes(pattern.toLowerCase())
+        String(s.name).toLowerCase().includes(pattern.toLowerCase()) ||
+        String(s.dhcpServerId).toLowerCase().includes(pattern.toLowerCase())
       )
     );
   }
