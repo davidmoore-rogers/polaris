@@ -214,6 +214,7 @@ async function bulkDeleteSubnets() {
     catch (e) { failed++; }
   }
   _subnetsSelected.clear();
+  if (btn) btn.disabled = false;
   if (failed > 0) showToast(failed + " deletion(s) failed", "error");
   else showToast("Deleted " + ids.length + " network" + (ids.length !== 1 ? "s" : ""));
   loadSubnets();

@@ -236,6 +236,7 @@ async function bulkDeleteAssets() {
     catch (e) { failed++; }
   }
   _assetsSelected.clear();
+  if (btn) btn.disabled = false;
   if (failed > 0) showToast(failed + " deletion(s) failed", "error");
   else showToast("Deleted " + ids.length + " asset" + (ids.length !== 1 ? "s" : ""));
   loadAssets();

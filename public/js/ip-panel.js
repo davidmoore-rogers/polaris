@@ -349,6 +349,7 @@ async function _bulkReleaseFromPanel() {
     catch (e) { failed++; }
   }
   _panelSelected.clear();
+  if (btn) btn.disabled = false;
   _ipPanelDirty = true;
   if (failed > 0) showToast(failed + " release(s) failed", "error");
   else showToast("Released " + ids.length + " reservation" + (ids.length !== 1 ? "s" : ""));
