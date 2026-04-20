@@ -72,7 +72,10 @@ async function loadAssets() {
       limit: 10000,
     };
     var result = await api.assets.list(filters);
-    _assetsData = result.assets || result;
+    _assetsData = (result.assets || result).map(function (a) {
+      a._server = a.location || a.learnedLocation || "";
+      return a;
+    });
     if (statusVal === "hide-decommissioned") {
       _assetsData = _assetsData.filter(function (a) { return a.status !== "decommissioned"; });
     }
