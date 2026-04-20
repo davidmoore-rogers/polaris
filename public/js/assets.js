@@ -184,8 +184,8 @@ function renderAssetsPage() {
       '<td>' + assetTypeBadge(a.assetType) + '</td>' +
       '<td>' + assetStatusBadge(a.status) + '</td>' +
       '<td>' + escapeHtml(a.location || a.learnedLocation || "-") + '</td>' +
-      '<td>' + escapeHtml(a.assignedTo || "-") + '</td>' +
-      '<td>' + (a.acquiredAt ? formatDate(a.acquiredAt) : "-") + '</td>' +
+      '<td>' + (a.lastSeen ? formatDate(a.lastSeen) : "-") + '</td>' +
+      '<td>' + (a.createdAt ? formatDate(a.createdAt) : "-") + '</td>' +
       '<td class="actions">' +
         '<button class="btn btn-sm btn-secondary" onclick="openViewModal(\'' + a.id + '\')">View</button>' +
         (canManageAssets() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + a.id + '\')">Edit</button>' +
@@ -443,6 +443,8 @@ async function openViewModal(id) {
       viewRow("Last Seen Switch", a.lastSeenSwitch) +
       viewRow("Last Seen AP", a.lastSeenAp) +
       associatedUsersViewHTML(a.associatedUsers) +
+      viewRow("First Seen", a.createdAt ? formatDate(a.createdAt) : null) +
+      viewRow("Last Seen", a.lastSeen ? formatDate(a.lastSeen) : null) +
       viewRow("Acquired", a.acquiredAt ? formatDate(a.acquiredAt) : null) +
       viewRow("Warranty Expires", a.warrantyExpiry ? formatDate(a.warrantyExpiry) : null) +
       viewRow("Purchase Order", a.purchaseOrder) +
@@ -672,7 +674,7 @@ function generateAssetPdf(assets, label) {
   doc.setTextColor(120, 120, 120);
   doc.text("Generated: " + timestamp + "  |  Scope: " + label + "  |  Count: " + assets.length, 40, 52);
 
-  var head = [["Hostname", "IP Address", "MAC Address", "DNS Name", "Type", "Status", "Location", "Assigned To"]];
+  var head = [["Hostname", "IP Address", "MAC Address", "DNS Name", "Type", "Status", "Location", "Last Seen"]];
   var body = assets.map(function (a) {
     return [
       a.hostname || "-",
@@ -682,7 +684,7 @@ function generateAssetPdf(assets, label) {
       ASSET_TYPE_LABELS[a.assetType] || a.assetType || "-",
       a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-",
       a.location || a.learnedLocation || "-",
-      a.assignedTo || "-",
+      a.lastSeen ? formatDate(a.lastSeen) : "-",
     ];
   });
 
@@ -715,12 +717,12 @@ function generateAssetPdf(assets, label) {
 }
 
 function generateAssetCsv(assets) {
-  var headers = ["Hostname", "IP Address", "MAC Address", "DNS Name", "Type", "Status", "Location", "Assigned To", "Serial Number", "Manufacturer", "Model", "OS", "Asset Tag"];
+  var headers = ["Hostname", "IP Address", "MAC Address", "DNS Name", "Type", "Status", "Location", "Last Seen", "Serial Number", "Manufacturer", "Model", "OS", "Asset Tag"];
   var rows = assets.map(function (a) {
     return [
       a.hostname || "", a.ipAddress || "", a.macAddress || "", a.dnsName || "",
       ASSET_TYPE_LABELS[a.assetType] || a.assetType || "", a.status || "",
-      a.location || a.learnedLocation || "", a.assignedTo || "", a.serialNumber || "",
+      a.location || a.learnedLocation || "", (a.lastSeen ? formatDate(a.lastSeen) : ""), a.serialNumber || "",
       a.manufacturer || "", a.model || "", a.osVersion || a.os || "", a.assetTag || "",
     ];
   });

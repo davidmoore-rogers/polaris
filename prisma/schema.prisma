@@ -193,6 +193,7 @@ model Asset {
   osVersion      String?                           // OS or firmware version
   lastSeenSwitch String?                           // FortiSwitch name/port, e.g. "FS-248E-01/port15"
   lastSeenAp     String?                           // FortiAP name, e.g. "FAP-431F-01"
+  lastSeen       DateTime?                         // Most recent discovery sighting
   associatedUsers Json?     @default("[]")        // [{user, domain?, lastSeen, source?}] — logged-in / registered users
   acquiredAt     DateTime?                         // Acquisition / purchase date
   warrantyExpiry DateTime?                         // Warranty end date

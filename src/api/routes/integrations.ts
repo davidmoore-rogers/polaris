@@ -865,6 +865,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               ipAddress: device.mgmtIp || existingAsset.ipAddress,
               hostname: device.hostname || existingAsset.hostname,
               model: device.model || existingAsset.model,
+              lastSeen: new Date(now),
             },
           });
           // Update in-memory
@@ -887,6 +888,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           assetType: "firewall",
           status: "active",
           department: "Network Security",
+          lastSeen: new Date(now),
           notes: `Auto-discovered from FortiManager integration`,
           tags: ["fortigate", "auto-discovered"],
         },
@@ -1102,7 +1104,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const apConn = inv.apName || null;
 
       if (existingAsset) {
-        const updateData: Record<string, unknown> = {};
+        const updateData: Record<string, unknown> = { lastSeen: new Date(now) };
         if (!handledByDhcp && inv.ipAddress && inv.ipAddress !== existingAsset.ipAddress) {
           updateData.ipAddress = inv.ipAddress;
         }
@@ -1183,6 +1185,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               lastSeenSwitch: switchConn,
               lastSeenAp: apConn,
               associatedUsers: userList,
+              lastSeen: new Date(now),
               notes: `Auto-discovered from FortiGate device inventory (${inv.device})`,
               tags: ["device-inventory", "auto-discovered"],
             },
