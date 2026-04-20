@@ -1055,6 +1055,27 @@ async function loadDatabaseInfo() {
 
 // ─── Backup Logic ───────────────────────────────────────────────────────────
 
+// Returns true if the caller should proceed. If discoveries are running, prompts
+// the user to abort them first; aborts on confirmation, cancels on dismissal.
+async function warnIfDiscoveryRunning(actionLabel) {
+  var result;
+  try { result = await api.integrations.discoveries(); } catch (_) { return true; }
+  var running = (result && result.discoveries) || [];
+  if (running.length === 0) return true;
+
+  var names = running.map(function (d) { return d.name; }).join(", ");
+  var confirmed = await showConfirm(
+    'A discovery is currently running (' + names + ').\n\n' +
+    'Abort the discovery and continue with the ' + actionLabel + '?'
+  );
+  if (!confirmed) return false;
+
+  await Promise.allSettled(running.map(function (d) {
+    return api.integrations.abortDiscover(d.id);
+  }));
+  return true;
+}
+
 function initBackupControls() {
   var btnBackup = document.getElementById("btn-backup");
   btnBackup.addEventListener("click", async function () {
@@ -1066,6 +1087,8 @@ function initBackupControls() {
       statusEl.innerHTML = '<span class="badge badge-error">Passwords do not match</span>';
       return;
     }
+
+    if (!await warnIfDiscoveryRunning("backup")) return;
 
     btnBackup.disabled = true;
     btnBackup.textContent = "Creating backup...";
@@ -1141,6 +1164,8 @@ function initRestoreControls() {
     if (!_restoreFile) return;
     var pw = document.getElementById("restore-password")?.value || null;
     var statusEl = document.getElementById("restore-status");
+
+    if (!await warnIfDiscoveryRunning("restore")) return;
 
     var confirmed = await showConfirm("This will replace ALL current data with the backup contents. This cannot be undone. Continue?");
     if (!confirmed) return;
@@ -1441,6 +1466,8 @@ function renderUpdateAvailable(result) {
 }
 
 async function applyUpdateUI() {
+  if (!await warnIfDiscoveryRunning("update")) return;
+
   var confirmed = await showConfirm(
     "Apply this update? The server will restart automatically when complete. " +
     "A database backup will be created before updating."

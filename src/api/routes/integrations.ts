@@ -1222,4 +1222,8 @@ function stripSecret(integration: Record<string, any>) {
   return { ...integration, config };
 }
 
+export function hasActiveDiscoveries(): boolean {
+  return activeDiscovery.size > 0;
+}
+
 export default router;

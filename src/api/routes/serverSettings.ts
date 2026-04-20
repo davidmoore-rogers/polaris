@@ -40,6 +40,7 @@ import {
 import { applyHttps, isHttpsRunning } from "../../httpsManager.js";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
+import { hasActiveDiscoveries } from "./integrations.js";
 import { logger } from "../../utils/logger.js";
 
 const TAG_COLORS = ["#4fc3f7","#4ade80","#f59e0b","#f472b6","#a78bfa","#fb923c","#38bdf8","#34d399","#e879f9","#facc15","#f87171","#2dd4bf","#818cf8","#c084fc"];
@@ -215,6 +216,7 @@ router.post("/database/backup", async (req, res, next) => {
 router.post("/database/restore", restoreUpload.single("file"), async (req, res, next) => {
   try {
     if (!req.file) throw new AppError(400, "No backup file uploaded");
+    if (hasActiveDiscoveries()) throw new AppError(409, "A discovery is currently running — wait for it to finish or abort it before restoring");
     const password: string | null = req.body?.password || null;
     const connUrl = process.env.DATABASE_URL || "";
 
