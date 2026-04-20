@@ -7,6 +7,7 @@ var _ipPanelPage = 1;
 var _ipPanelPageSize = 256;
 var _ipPanelData = null;
 var _ipPanelDirty = false;
+var _panelSelected = new Set();
 
 // ─── Panel lifecycle ────────────────────────────────────────────────────────
 
@@ -42,6 +43,7 @@ function openIpPanel(subnetId) {
   _ipPanelSubnetId = subnetId;
   _ipPanelPage = 1;
   _ipPanelDirty = false;
+  _panelSelected.clear();
   document.getElementById("ip-panel-title").textContent = "Loading...";
   document.getElementById("ip-panel-meta").innerHTML = "";
   document.getElementById("ip-panel-body").innerHTML = '<p class="empty-state">Loading...</p>';
@@ -137,7 +139,20 @@ function _renderIpList(data) {
     return;
   }
 
-  var html = '<table class="ip-table"><thead><tr>' +
+  var hasReleasable = data.ips.some(function (ip) {
+    return !ip.type && ip.reservation && ip.reservation.status === "active" && canManageNetworks();
+  });
+
+  var html = '';
+  if (hasReleasable) {
+    html += '<div id="panel-bulk-bar" class="bulk-bar" style="display:none">' +
+      '<span class="bulk-bar-count">0 selected</span>' +
+      '<button class="btn btn-sm btn-danger" id="panel-bulk-release-btn">Release Selected</button>' +
+      '</div>';
+  }
+
+  html += '<table class="ip-table"><thead><tr>' +
+    '<th class="cb-col">' + (hasReleasable ? '<input type="checkbox" id="panel-select-all" title="Select all active">' : '') + '</th>' +
     '<th style="width:36px"></th>' +
     '<th>IP Address</th>' +
     '<th>Hostname</th>' +
@@ -214,7 +229,14 @@ function _renderIpList(data) {
       ? '<span style="font-size:0.75rem">' + escapeHtml(formatDate(r.expiresAt)) + '</span>'
       : '<span style="color:var(--color-text-tertiary)">-</span>';
 
+    var canRelease = !isSpecial && r && r.status === "active" && canManageNetworks();
+    var cbChecked = canRelease && _panelSelected.has(r.id) ? ' checked' : '';
+    var cbCell = canRelease
+      ? '<td class="cb-col"><input type="checkbox" class="panel-row-cb"' + cbChecked + ' data-rid="' + r.id + '"></td>'
+      : '<td class="cb-col"></td>';
+
     html += '<tr' + rowClass + '>' +
+      cbCell +
       '<td style="text-align:center"><span class="ip-status-dot ' + dotClass + '"></span></td>' +
       '<td class="mono" style="font-size:0.8rem">' + escapeHtml(ip.address) + '</td>' +
       '<td>' + hostname + '</td>' +
@@ -240,11 +262,41 @@ function _renderIpList(data) {
 
   body.innerHTML = html;
 
+  // Wire up bulk selection
+  var panelSelectAll = document.getElementById("panel-select-all");
+  if (panelSelectAll) {
+    panelSelectAll.addEventListener("change", function () {
+      var cbs = body.querySelectorAll(".panel-row-cb");
+      var chk = this.checked;
+      cbs.forEach(function (cb) {
+        cb.checked = chk;
+        if (chk) _panelSelected.add(cb.getAttribute("data-rid"));
+        else _panelSelected.delete(cb.getAttribute("data-rid"));
+      });
+      _panelUpdateBulkBar();
+    });
+  }
+  body.addEventListener("change", function (e) {
+    var cb = e.target;
+    if (!cb.classList.contains("panel-row-cb")) return;
+    var rid = cb.getAttribute("data-rid");
+    if (cb.checked) _panelSelected.add(rid);
+    else _panelSelected.delete(rid);
+    _panelUpdateSelectAll();
+    _panelUpdateBulkBar();
+  });
+  var panelBulkBtn = document.getElementById("panel-bulk-release-btn");
+  if (panelBulkBtn) {
+    panelBulkBtn.addEventListener("click", _bulkReleaseFromPanel);
+  }
+  _panelUpdateBulkBar();
+  _panelUpdateSelectAll();
+
   // Wire up pagination
   var prevBtn = document.getElementById("ip-pg-prev");
   var nextBtn = document.getElementById("ip-pg-next");
-  if (prevBtn) prevBtn.addEventListener("click", function () { _ipPanelPage--; _fetchIpPage(); });
-  if (nextBtn) nextBtn.addEventListener("click", function () { _ipPanelPage++; _fetchIpPage(); });
+  if (prevBtn) prevBtn.addEventListener("click", function () { _ipPanelPage--; _panelSelected.clear(); _fetchIpPage(); });
+  if (nextBtn) nextBtn.addEventListener("click", function () { _ipPanelPage++; _panelSelected.clear(); _fetchIpPage(); });
 
   // Wire up action buttons
   body.querySelectorAll(".ip-edit-btn").forEach(function (btn) {
@@ -262,6 +314,45 @@ function _renderIpList(data) {
       _openReserveModal(_ipPanelSubnetId, btn.getAttribute("data-ip"));
     });
   });
+}
+
+function _panelUpdateSelectAll() {
+  var body = document.getElementById("ip-panel-body");
+  if (!body) return;
+  var allCbs = body.querySelectorAll(".panel-row-cb");
+  var checked = Array.from(allCbs).filter(function (cb) { return cb.checked; }).length;
+  var sa = document.getElementById("panel-select-all");
+  if (!sa) return;
+  sa.checked = allCbs.length > 0 && checked === allCbs.length;
+  sa.indeterminate = checked > 0 && checked < allCbs.length;
+}
+
+function _panelUpdateBulkBar() {
+  var bar = document.getElementById("panel-bulk-bar");
+  if (!bar) return;
+  var count = _panelSelected.size;
+  bar.style.display = count > 0 ? "flex" : "none";
+  var el = bar.querySelector(".bulk-bar-count");
+  if (el) el.textContent = count + " selected";
+}
+
+async function _bulkReleaseFromPanel() {
+  var ids = Array.from(_panelSelected);
+  if (!ids.length) return;
+  var ok = await showConfirm("Release " + ids.length + " reservation" + (ids.length !== 1 ? "s" : "") + "? This will free those IPs.");
+  if (!ok) return;
+  var btn = document.getElementById("panel-bulk-release-btn");
+  if (btn) btn.disabled = true;
+  var failed = 0;
+  for (var i = 0; i < ids.length; i++) {
+    try { await api.reservations.release(ids[i]); }
+    catch (e) { failed++; }
+  }
+  _panelSelected.clear();
+  _ipPanelDirty = true;
+  if (failed > 0) showToast(failed + " release(s) failed", "error");
+  else showToast("Released " + ids.length + " reservation" + (ids.length !== 1 ? "s" : ""));
+  _fetchIpPage();
 }
 
 function _renderPanelFooter(data) {

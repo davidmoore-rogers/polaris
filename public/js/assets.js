@@ -6,10 +6,30 @@ var _assetsPageSize = 15;
 var _assetsPage = 1;
 var _assetsData = [];
 var _assetsSF = null;
+var _assetsSelected = new Set();
 
 document.addEventListener("DOMContentLoaded", function () {
   _assetsSF = new TableSF("assets-tbody", function () { _assetsPage = 1; renderAssetsPage(); });
   loadAssets();
+  document.getElementById("assets-select-all").addEventListener("change", function () {
+    var cbs = document.querySelectorAll("#assets-tbody input.row-cb");
+    var chk = this.checked;
+    cbs.forEach(function (cb) {
+      cb.checked = chk;
+      if (chk) _assetsSelected.add(cb.getAttribute("data-id"));
+      else _assetsSelected.delete(cb.getAttribute("data-id"));
+    });
+    _assetsUpdateBulkBar();
+  });
+  document.getElementById("assets-tbody").addEventListener("change", function (e) {
+    var cb = e.target;
+    if (!cb.classList.contains("row-cb")) return;
+    var id = cb.getAttribute("data-id");
+    if (cb.checked) _assetsSelected.add(id);
+    else _assetsSelected.delete(id);
+    _assetsUpdateSelectAll();
+    _assetsUpdateBulkBar();
+  });
 
   var addBtn = document.getElementById("btn-add-asset");
   if (addBtn) addBtn.addEventListener("click", openCreateModal);
@@ -39,6 +59,8 @@ var ASSET_TYPE_LABELS = {
 };
 
 async function loadAssets() {
+  _assetsSelected.clear();
+  _assetsUpdateBulkBar();
   var tbody = document.getElementById("assets-tbody");
   try {
     var statusVal = document.getElementById("filter-status").value;
@@ -56,7 +78,7 @@ async function loadAssets() {
     }
     renderAssetsPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -131,20 +153,24 @@ function renderAssetsPage() {
   tbody.removeEventListener("click", _handleCopyClick);
   tbody.addEventListener("click", _handleCopyClick);
   if (_assetsData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No assets found. Add one to get started.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No assets found. Add one to get started.</td></tr>';
     document.getElementById("pagination").innerHTML = "";
+    _assetsUpdateSelectAll();
     return;
   }
   var sfData = _assetsSF ? _assetsSF.apply(_assetsData) : _assetsData;
   if (sfData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No results match the current filters.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No results match the current filters.</td></tr>';
     document.getElementById("pagination").innerHTML = "";
+    _assetsUpdateSelectAll();
     return;
   }
   var start = (_assetsPage - 1) * _assetsPageSize;
   var page = sfData.slice(start, start + _assetsPageSize);
   tbody.innerHTML = page.map(function (a) {
+    var checked = _assetsSelected.has(a.id) ? ' checked' : '';
     return '<tr>' +
+      '<td class="cb-col"><input type="checkbox" class="row-cb"' + checked + ' data-id="' + a.id + '"></td>' +
       '<td><strong>' + escapeHtml(a.hostname || "-") + '</strong>' +
         (a.assetTag ? '<br><span class="asset-tag-label">' + escapeHtml(a.assetTag) + '</span>' : '') +
       '</td>' +
@@ -169,10 +195,47 @@ function renderAssetsPage() {
     el.addEventListener('mouseenter', _handleMacEnter);
     el.addEventListener('mouseleave', _handleMacLeave);
   });
+  _assetsUpdateSelectAll();
   renderPageControls("pagination", sfData.length, _assetsPageSize, _assetsPage, function (p) {
     _assetsPage = p;
     renderAssetsPage();
   });
+}
+
+function _assetsUpdateSelectAll() {
+  var allCbs = document.querySelectorAll("#assets-tbody input.row-cb");
+  var checked = Array.from(allCbs).filter(function (cb) { return cb.checked; }).length;
+  var sa = document.getElementById("assets-select-all");
+  if (!sa) return;
+  sa.checked = allCbs.length > 0 && checked === allCbs.length;
+  sa.indeterminate = checked > 0 && checked < allCbs.length;
+}
+
+function _assetsUpdateBulkBar() {
+  var bar = document.getElementById("assets-bulk-bar");
+  if (!bar) return;
+  var count = _assetsSelected.size;
+  bar.style.display = count > 0 ? "flex" : "none";
+  var el = bar.querySelector(".bulk-bar-count");
+  if (el) el.textContent = count + " selected";
+}
+
+async function bulkDeleteAssets() {
+  var ids = Array.from(_assetsSelected);
+  if (!ids.length) return;
+  var ok = await showConfirm("Delete " + ids.length + " asset" + (ids.length !== 1 ? "s" : "") + "? This cannot be undone.");
+  if (!ok) return;
+  var btn = document.getElementById("assets-bulk-delete-btn");
+  if (btn) btn.disabled = true;
+  var failed = 0;
+  for (var i = 0; i < ids.length; i++) {
+    try { await api.assets.delete(ids[i]); }
+    catch (e) { failed++; }
+  }
+  _assetsSelected.clear();
+  if (failed > 0) showToast(failed + " deletion(s) failed", "error");
+  else showToast("Deleted " + ids.length + " asset" + (ids.length !== 1 ? "s" : ""));
+  loadAssets();
 }
 
 function assetTypeBadge(type) {

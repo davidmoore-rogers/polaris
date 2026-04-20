@@ -864,6 +864,24 @@ th.sf-th { vertical-align: top; white-space: normal; padding-bottom: 6px; }
 .sf-filter:focus { border-color: var(--color-accent); }
 .sf-filter::placeholder { color: var(--color-text-tertiary); opacity: 0.6; }
 
+/* ─── Bulk Action Bar ──────────────────────────────────────────────────────── */
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+.bulk-bar-count {
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+  flex: 1;
+}
+th.cb-col, td.cb-col { width: 36px; text-align: center; padding: 0 4px; }
+
 /* ─── Filter Bar ───────────────────────────────────────────────────────────── */
 .filter-bar {
   display: flex;
