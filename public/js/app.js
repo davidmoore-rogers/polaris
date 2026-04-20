@@ -37,6 +37,8 @@ function _moonIcon() {
 
 var currentUserRole = null;
 var currentUsername = null;
+var _userReadyResolve = null;
+var userReady = new Promise(function (resolve) { _userReadyResolve = resolve; });
 
 async function fetchCurrentUser() {
   try {
@@ -46,6 +48,7 @@ async function fetchCurrentUser() {
       currentUsername = data.username;
     }
   } catch (_) {}
+  if (_userReadyResolve) { _userReadyResolve(); _userReadyResolve = null; }
   return currentUserRole;
 }
 

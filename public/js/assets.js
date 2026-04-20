@@ -8,8 +8,57 @@ var _assetsData = [];
 var _assetsSF = null;
 var _assetsSelected = new Set();
 
-document.addEventListener("DOMContentLoaded", function () {
-  _assetsSF = new TableSF("assets-tbody", function () { _assetsPage = 1; renderAssetsPage(); });
+function _saveAssetsPrefs() {
+  if (!currentUsername) return;
+  try {
+    localStorage.setItem("shelob-prefs-assets-" + currentUsername, JSON.stringify({
+      pageSize: _assetsPageSize,
+      status: document.getElementById("filter-status").value,
+      type: document.getElementById("filter-type").value,
+      search: document.getElementById("filter-search").value,
+      sortKey: _assetsSF ? _assetsSF._sortKey : null,
+      sortDir: _assetsSF ? _assetsSF._sortDir : "asc",
+      sfFilters: _assetsSF ? Object.assign({}, _assetsSF._filters) : {},
+    }));
+  } catch (_) {}
+}
+
+function _restoreAssetsPrefs() {
+  if (!currentUsername) return;
+  var raw;
+  try { raw = localStorage.getItem("shelob-prefs-assets-" + currentUsername); } catch (_) { return; }
+  if (!raw) return;
+  try {
+    var p = JSON.parse(raw);
+    if (p.pageSize) {
+      _assetsPageSize = p.pageSize;
+      var psSel = document.getElementById("filter-pagesize");
+      if (psSel) psSel.value = String(p.pageSize);
+    }
+    if (p.status) { var sSel = document.getElementById("filter-status"); if (sSel) sSel.value = p.status; }
+    if (p.type)   { var tSel = document.getElementById("filter-type");   if (tSel) tSel.value = p.type; }
+    if (p.search) { var sEl  = document.getElementById("filter-search"); if (sEl)  sEl.value  = p.search; }
+    if (_assetsSF) {
+      if (p.sortKey) _assetsSF._sortKey = p.sortKey;
+      if (p.sortDir) _assetsSF._sortDir = p.sortDir;
+      if (p.sfFilters) {
+        _assetsSF._filters = p.sfFilters;
+        if (_assetsSF._thead) {
+          _assetsSF._thead.querySelectorAll("th[data-sf-key]").forEach(function (th) {
+            var inp = th.querySelector(".sf-filter");
+            if (inp && p.sfFilters[th.getAttribute("data-sf-key")]) inp.value = p.sfFilters[th.getAttribute("data-sf-key")];
+          });
+        }
+      }
+      _assetsSF._updateIcons();
+    }
+  } catch (_) {}
+}
+
+document.addEventListener("DOMContentLoaded", async function () {
+  _assetsSF = new TableSF("assets-tbody", function () { _assetsPage = 1; renderAssetsPage(); _saveAssetsPrefs(); });
+  await userReady;
+  _restoreAssetsPrefs();
   loadAssets();
   document.getElementById("assets-select-all").addEventListener("change", function () {
     var cbs = document.querySelectorAll("#assets-tbody input.row-cb");
@@ -37,13 +86,14 @@ document.addEventListener("DOMContentLoaded", function () {
   if (dnsBtn) dnsBtn.addEventListener("click", bulkDnsLookup);
   var ouiBtn = document.getElementById("btn-oui-lookup");
   if (ouiBtn) ouiBtn.addEventListener("click", bulkOuiLookup);
-  document.getElementById("filter-status").addEventListener("change", function () { _assetsPage = 1; loadAssets(); });
-  document.getElementById("filter-type").addEventListener("change", function () { _assetsPage = 1; loadAssets(); });
-  document.getElementById("filter-search").addEventListener("input", debounce(function () { _assetsPage = 1; loadAssets(); }, 300));
+  document.getElementById("filter-status").addEventListener("change", function () { _assetsPage = 1; loadAssets(); _saveAssetsPrefs(); });
+  document.getElementById("filter-type").addEventListener("change", function () { _assetsPage = 1; loadAssets(); _saveAssetsPrefs(); });
+  document.getElementById("filter-search").addEventListener("input", debounce(function () { _assetsPage = 1; loadAssets(); _saveAssetsPrefs(); }, 300));
   document.getElementById("filter-pagesize").addEventListener("change", function () {
     _assetsPageSize = parseInt(this.value, 10) || 15;
     _assetsPage = 1;
     renderAssetsPage();
+    _saveAssetsPrefs();
   });
 });
 

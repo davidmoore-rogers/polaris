@@ -10,8 +10,61 @@ var _allSubnetsData = [];
 var _subnetsSF = null;
 var _subnetsSelected = new Set();
 
+function _saveSubnetsPrefs() {
+  if (!currentUsername) return;
+  try {
+    localStorage.setItem("shelob-prefs-subnets-" + currentUsername, JSON.stringify({
+      pageSize: _subnetsPageSize,
+      block: document.getElementById("filter-block").value,
+      status: document.getElementById("filter-status").value,
+      server: document.getElementById("filter-server").value,
+      integration: document.getElementById("filter-integration").value,
+      tag: document.getElementById("filter-tag").value,
+      sortKey: _subnetsSF ? _subnetsSF._sortKey : null,
+      sortDir: _subnetsSF ? _subnetsSF._sortDir : "asc",
+      sfFilters: _subnetsSF ? Object.assign({}, _subnetsSF._filters) : {},
+    }));
+  } catch (_) {}
+}
+
+function _restoreSubnetsPrefs() {
+  if (!currentUsername) return;
+  var raw;
+  try { raw = localStorage.getItem("shelob-prefs-subnets-" + currentUsername); } catch (_) { return; }
+  if (!raw) return;
+  try {
+    var p = JSON.parse(raw);
+    if (p.pageSize) {
+      _subnetsPageSize = p.pageSize;
+      var psSel = document.getElementById("filter-pagesize");
+      if (psSel) psSel.value = String(p.pageSize);
+    }
+    if (p.block)       { var bSel = document.getElementById("filter-block");       if (bSel) bSel.value = p.block; }
+    if (p.status)      { var sSel = document.getElementById("filter-status");      if (sSel) sSel.value = p.status; }
+    if (p.server)      { var svEl = document.getElementById("filter-server");      if (svEl) svEl.value = p.server; }
+    if (p.integration) { var iSel = document.getElementById("filter-integration"); if (iSel) iSel.value = p.integration; }
+    if (p.tag)         { var tEl  = document.getElementById("filter-tag");         if (tEl)  tEl.value  = p.tag; }
+    if (_subnetsSF) {
+      if (p.sortKey) _subnetsSF._sortKey = p.sortKey;
+      if (p.sortDir) _subnetsSF._sortDir = p.sortDir;
+      if (p.sfFilters) {
+        _subnetsSF._filters = p.sfFilters;
+        if (_subnetsSF._thead) {
+          _subnetsSF._thead.querySelectorAll("th[data-sf-key]").forEach(function (th) {
+            var inp = th.querySelector(".sf-filter");
+            if (inp && p.sfFilters[th.getAttribute("data-sf-key")]) inp.value = p.sfFilters[th.getAttribute("data-sf-key")];
+          });
+        }
+      }
+      _subnetsSF._updateIcons();
+    }
+  } catch (_) {}
+}
+
 document.addEventListener("DOMContentLoaded", async function () {
-  _subnetsSF = new TableSF("subnets-tbody", function () { _subnetsPage = 1; renderSubnetsPage(); });
+  _subnetsSF = new TableSF("subnets-tbody", function () { _subnetsPage = 1; renderSubnetsPage(); _saveSubnetsPrefs(); });
+  await userReady;
+  _restoreSubnetsPrefs();
   await loadBlockOptions();
   loadSubnets();
 
@@ -44,15 +97,16 @@ document.addEventListener("DOMContentLoaded", async function () {
     _subnetsUpdateSelectAll();
     _subnetsUpdateBulkBar();
   });
-  document.getElementById("filter-block").addEventListener("change", function () { _subnetsPage = 1; loadSubnets(); });
-  document.getElementById("filter-status").addEventListener("change", function () { _subnetsPage = 1; loadSubnets(); });
-  document.getElementById("filter-server").addEventListener("input", debounce(function () { _subnetsPage = 1; _applyLocalFilters(); renderSubnetsPage(); }, 300));
-  document.getElementById("filter-integration").addEventListener("change", function () { _subnetsPage = 1; _applyLocalFilters(); renderSubnetsPage(); });
-  document.getElementById("filter-tag").addEventListener("input", debounce(function () { _subnetsPage = 1; loadSubnets(); }, 300));
+  document.getElementById("filter-block").addEventListener("change", function () { _subnetsPage = 1; loadSubnets(); _saveSubnetsPrefs(); });
+  document.getElementById("filter-status").addEventListener("change", function () { _subnetsPage = 1; loadSubnets(); _saveSubnetsPrefs(); });
+  document.getElementById("filter-server").addEventListener("input", debounce(function () { _subnetsPage = 1; _applyLocalFilters(); renderSubnetsPage(); _saveSubnetsPrefs(); }, 300));
+  document.getElementById("filter-integration").addEventListener("change", function () { _subnetsPage = 1; _applyLocalFilters(); renderSubnetsPage(); _saveSubnetsPrefs(); });
+  document.getElementById("filter-tag").addEventListener("input", debounce(function () { _subnetsPage = 1; loadSubnets(); _saveSubnetsPrefs(); }, 300));
   document.getElementById("filter-pagesize").addEventListener("change", function () {
     _subnetsPageSize = parseInt(this.value, 10) || 15;
     _subnetsPage = 1;
     renderSubnetsPage();
+    _saveSubnetsPrefs();
   });
 });
 
