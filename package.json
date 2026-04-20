@@ -1,10 +1,11 @@
 {
   "name": "shelob",
-  "version": "0.9.68",
+  "version": "0.9.69",
   "description": "Shelob — subnet & IP address management, spinning your network into a web",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
+    "postinstall": "prisma generate",
     "dev": "node --env-file=.env --import tsx/esm --watch src/index.ts",
     "build": "tsc",
     "start": "node --env-file=.env dist/index.js",

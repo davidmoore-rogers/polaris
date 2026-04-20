@@ -679,6 +679,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   const dhcpLeases: string[] = [];
   const dhcpReservations: string[] = [];
   const inventoryAssets: string[] = [];
+  const deprecated: string[] = [];
+  let dnsResolved = 0;
+  let ouiResolved = 0;
+  let ouiOverridden = 0;
   const now = new Date().toISOString();
 
   // ── Pre-load all data in parallel (4 queries total) ──
@@ -818,7 +822,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // Phase 2 — Deprecate stale subnets (single updateMany)
   // ══════════════════════════════════════════════════════════════════════════════
 
-  const deprecated: string[] = [];
   if (discoveredDeviceNames.size > 0) {
     // Find stale subnets in-memory first (for the return value)
     const staleSubnets = allSubnets.filter(
@@ -1175,7 +1178,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // Phase 8 — DNS reverse lookup for assets missing dnsName
   // ══════════════════════════════════════════════════════════════════════════════
 
-  let dnsResolved = 0;
   const assetsNeedingDns = assetIdx.all().filter((a: any) => a.ipAddress && !a.dnsName);
   if (assetsNeedingDns.length > 0) {
     syncLog("info", `DNS lookup: resolving ${assetsNeedingDns.length} assets missing dnsName`);
@@ -1200,9 +1202,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // ══════════════════════════════════════════════════════════════════════════════
   // Phase 9 — OUI manufacturer lookup & override application
   // ══════════════════════════════════════════════════════════════════════════════
-
-  let ouiResolved = 0;
-  let ouiOverridden = 0;
 
   // 9a — Apply OUI overrides to assets that already have a manufacturer
   //       (e.g. "Fortinet" from FMG can be overridden to a custom name)
