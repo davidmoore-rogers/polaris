@@ -47,6 +47,7 @@ async function loadAssets() {
       status: apiStatus,
       assetType: document.getElementById("filter-type").value || undefined,
       search: document.getElementById("filter-search").value || undefined,
+      limit: 10000,
     };
     var result = await api.assets.list(filters);
     _assetsData = result.assets || result;

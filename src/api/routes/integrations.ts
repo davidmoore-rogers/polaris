@@ -761,7 +761,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     if (existing) {
       subnetUpdates.push({
         id: existing.id,
-        data: { discoveredBy: integrationId, fortigateDevice: entry.fortigateDevice },
+        data: {
+          discoveredBy: integrationId,
+          fortigateDevice: entry.fortigateDevice,
+          ...(entry.vlan != null ? { vlan: entry.vlan } : {}),
+        },
       });
       updated.push(cidr);
       continue;
@@ -794,6 +798,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           discoveredBy: integrationId,
           fortigateDevice: entry.fortigateDevice,
           tags: ["dhcp-discovered", integrationType],
+          ...(entry.vlan != null ? { vlan: entry.vlan } : {}),
         },
       });
       // Update in-memory state so later phases can find this subnet

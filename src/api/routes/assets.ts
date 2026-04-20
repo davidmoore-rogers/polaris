@@ -57,7 +57,7 @@ const UpdateAssetSchema = CreateAssetSchema.partial();
 // GET /api/v1/assets — list all assets (all authenticated users, paginated)
 router.get("/", async (req, res, next) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 200);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 10000);
     const offset = parseInt(req.query.offset as string, 10) || 0;
     const { status, assetType, department, search } = req.query as Record<string, string>;
     const where: Record<string, unknown> = {};

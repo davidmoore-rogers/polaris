@@ -46,7 +46,7 @@ export interface ListSubnetsFilter {
 // ─── List ─────────────────────────────────────────────────────────────────────
 
 export async function listSubnets(filter: ListSubnetsFilter = {}) {
-  const limit = Math.min(filter.limit || 50, 200);
+  const limit = Math.min(filter.limit || 50, 10000);
   const offset = filter.offset || 0;
 
   const where: Record<string, unknown> = {};

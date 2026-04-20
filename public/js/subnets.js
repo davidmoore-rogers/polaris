@@ -68,6 +68,7 @@ async function loadSubnets() {
       blockId: document.getElementById("filter-block").value || undefined,
       status: apiStatus,
       tag: document.getElementById("filter-tag").value || undefined,
+      limit: 10000,
     };
     var result = await api.subnets.list(filters);
     _allSubnetsData = result.subnets || result;

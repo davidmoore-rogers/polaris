@@ -153,6 +153,7 @@ export interface DiscoveredSubnet {
   name: string;           // DHCP server interface name
   fortigateDevice: string;
   dhcpServerId: string;
+  vlan?: number;          // 802.1Q VLAN ID from the interface, if present
 }
 
 export interface DiscoveredDevice {
@@ -443,13 +444,18 @@ export async function discoverDhcpSubnets(
 
           const ifaceRes = await rpc(baseUrl, ifacePayload, apiUser, apiToken, verifySsl, signal);
           const ifaceData = ifaceRes.result?.[0]?.data;
+          const ifaceVlanMap = new Map<string, number>();
           let ifaceIpCount = 0;
           if (Array.isArray(ifaceData)) {
             for (const iface of ifaceData) {
               const ifaceName = iface.name || "";
-              if (!dhcpInterfaceNames.includes(ifaceName)) continue;
 
-              // FMG returns ip as [address, netmask] array
+              // Collect VLAN ID for every interface (used to backfill discovered subnets)
+              const vid = typeof iface.vlanid === "number" ? iface.vlanid : parseInt(String(iface.vlanid ?? ""), 10);
+              if (!isNaN(vid) && vid > 0) ifaceVlanMap.set(ifaceName, vid);
+
+              // Collect IP only for DHCP-serving interfaces
+              if (!dhcpInterfaceNames.includes(ifaceName)) continue;
               const ipArr = iface.ip;
               if (Array.isArray(ipArr) && ipArr.length >= 1 && ipArr[0] && ipArr[0] !== "0.0.0.0") {
                 interfaceIps.push({
@@ -460,6 +466,14 @@ export async function discoverDhcpSubnets(
                 });
                 ifaceIpCount++;
               }
+            }
+          }
+
+          // Back-fill VLAN IDs onto discovered subnets for this device
+          for (const sub of discovered) {
+            if (sub.fortigateDevice === deviceName) {
+              const vid = ifaceVlanMap.get(sub.name);
+              if (vid) sub.vlan = vid;
             }
           }
           log("discover.interfaces", "info", `${deviceName}: Resolved ${ifaceIpCount} DHCP interface IP(s)`, deviceName);
