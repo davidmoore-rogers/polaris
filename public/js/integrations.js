@@ -105,7 +105,10 @@ function fortiManagerFormHTML(defaults) {
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Server Scope</p>' +
     '<div class="form-group"><label>Include DHCP Servers</label><textarea id="f-dhcpInclude" rows="2" placeholder="One per line — e.g. dhcp-server-01&#10;192.168.1.10">' + escapeHtml((d.dhcpInclude || []).join("\n")) + '</textarea><p class="hint">Only query these DHCP servers (leave empty to query all)</p></div>' +
-    '<div class="form-group"><label>Exclude DHCP Servers</label><textarea id="f-dhcpExclude" rows="2" placeholder="One per line — e.g. lab-dhcp&#10;test-server">' + escapeHtml((d.dhcpExclude || []).join("\n")) + '</textarea><p class="hint">Skip these DHCP servers when querying</p></div>';
+    '<div class="form-group"><label>Exclude DHCP Servers</label><textarea id="f-dhcpExclude" rows="2" placeholder="One per line — e.g. lab-dhcp&#10;test-server">' + escapeHtml((d.dhcpExclude || []).join("\n")) + '</textarea><p class="hint">Skip these DHCP servers when querying</p></div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Device Inventory</p>' +
+    '<div class="form-group"><label>Exclude Interfaces from Asset Discovery</label><textarea id="f-inventoryExclude" rows="2" placeholder="One per line — e.g. lan&#10;wifi&#10;guest">' + escapeHtml((d.inventoryExcludeInterfaces || []).join("\n")) + '</textarea><p class="hint">Devices seen only on these FortiGate interfaces will not be added to assets</p></div>';
 }
 
 function getFormConfig() {
@@ -120,6 +123,7 @@ function getFormConfig() {
     mgmtInterface: val("f-mgmtInterface") || "",
     dhcpInclude: linesToArray("f-dhcpInclude"),
     dhcpExclude: linesToArray("f-dhcpExclude"),
+    inventoryExcludeInterfaces: linesToArray("f-inventoryExclude"),
   };
 }
 
@@ -299,6 +303,7 @@ async function openEditModal(id) {
         mgmtInterface: config.mgmtInterface,
         dhcpInclude: config.dhcpInclude || [],
         dhcpExclude: config.dhcpExclude || [],
+        inventoryExcludeInterfaces: config.inventoryExcludeInterfaces || [],
       };
       body = fortiManagerFormHTML(defaults);
       formGetter = function () {

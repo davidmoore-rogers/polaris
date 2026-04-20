@@ -17,6 +17,7 @@ export interface FortiManagerConfig {
   mgmtInterface?: string;
   dhcpInclude?: string[];
   dhcpExclude?: string[];
+  inventoryExcludeInterfaces?: string[];
 }
 
 interface JsonRpcRequest {
@@ -595,7 +596,10 @@ export async function discoverDhcpSubnets(
           ),
           dhcpEntries: dhcpEntries.slice(entBefore).filter((e) => includedIfaces.has(e.interfaceName)),
           deviceInventory: deviceInventory.slice(invBefore).filter(
-            (d) => !excludedDevIfaces.has(`${d.device}/${d.interfaceName}`)
+            (d) => !excludedDevIfaces.has(`${d.device}/${d.interfaceName}`) &&
+                   !(config.inventoryExcludeInterfaces || []).some(
+                     (iface) => d.interfaceName.toLowerCase() === iface.toLowerCase()
+                   )
           ),
         });
       } catch (err: any) {
@@ -625,7 +629,10 @@ export async function discoverDhcpSubnets(
       .map((s) => `${s.fortigateDevice}/${s.name}`)
   );
   const filteredInventory = deviceInventory.filter(
-    (d) => !excludedIfaceNames.has(`${d.device}/${d.interfaceName}`)
+    (d) => !excludedIfaceNames.has(`${d.device}/${d.interfaceName}`) &&
+           !(config.inventoryExcludeInterfaces || []).some(
+             (iface) => d.interfaceName.toLowerCase() === iface.toLowerCase()
+           )
   );
 
   const excluded = discovered.length - filteredSubnets.length;
