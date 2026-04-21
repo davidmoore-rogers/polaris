@@ -65,10 +65,18 @@ const restoreUpload = multer({ storage: multer.memoryStorage(), limits: { fileSi
 const APP_VERSION: string = (() => {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
-    // Works from both src/ (dev) and dist/ (build)
     for (const rel of ["../../../package.json", "../../package.json"]) {
       const p = join(here, rel);
-      if (existsSync(p)) return JSON.parse(readFileSync(p, "utf-8")).version || "0.0.0";
+      if (!existsSync(p)) continue;
+      const pkg = JSON.parse(readFileSync(p, "utf-8"));
+      const [major, minor] = (pkg.version || "0.9.0").split(".");
+      try {
+        // Patch = git commit count, so version always matches the commit
+        const patch = execSync("git rev-list --count HEAD", { encoding: "utf-8" }).trim();
+        return `${major}.${minor}.${patch}`;
+      } catch {
+        return pkg.version || "0.0.0";
+      }
     }
     return "0.0.0";
   } catch { return "0.0.0"; }

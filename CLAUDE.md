@@ -4,7 +4,7 @@
 
 **Shelob** is an IP management tool that allows users to reserve and manage IP address space (IPv4 and IPv6) for use across other infrastructure projects. Named after Tolkien's great spider — because subnets are webs, and Shelob spins them. It provides a central registry for subnets, individual IPs, and reservations — preventing conflicts and giving teams visibility into IP utilization.
 
-Current version: **0.9.x** (pre-release; patch per push, minor per release). Version is shown in the sidebar and embedded in backup filenames.
+Current version: **0.9.x** (pre-release; patch = git commit count, minor per release). Version is shown in the sidebar and embedded in backup filenames. The patch is derived automatically at startup from `git rev-list --count HEAD` — never bump it manually.
 
 ---
 
@@ -546,7 +546,7 @@ npm run lint
 - **Keep CLAUDE.md current.** When you add a model, field, route, service, job, or env var — update the relevant section of this file in the same commit.
 - **Keep demo.mjs current.** When you add a significant new entity, field, or feature, update `demo.mjs` so it exercises the new capability.
 - **Commit after every change.** Each logical change (feature, fix, update) gets its own commit immediately — don't batch unrelated work.
-- **On push: bump the version.** When the user asks to push, increment the patch version in `package.json` (e.g. 0.9.101 → 0.9.102) and stage it alongside the other changes in the same commit. Do not create a separate commit for the version bump and do not mention it in the commit message.
+- **Version is automatic.** The patch number is derived at runtime from `git rev-list --count HEAD`. Do not touch `package.json` version for patch increments. Only bump the minor (e.g. `0.9.0` → `0.10.0`) when cutting a named release.
 
 ---
 
