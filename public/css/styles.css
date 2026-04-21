@@ -1457,6 +1457,13 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   grid-template-columns: 1fr 1.8fr;
   gap: 12px;
   margin-bottom: 1.5rem;
+  align-items: start;
+}
+.overview-grid-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  align-items: start;
 }
 .legend-item {
   display: flex;
@@ -2043,6 +2050,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 /* ─── Responsive ───────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
   .overview-grid { grid-template-columns: 1fr; }
+  .overview-grid-2col { grid-template-columns: 1fr; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 700px) {
