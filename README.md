@@ -20,6 +20,20 @@ An IP address management (IPAM) tool for tracking and reserving IPv4/IPv6 space,
 - **Light/Dark Theme** — User-selectable UI theme
 - **First-Run Setup Wizard** — Browser-based guided setup for database, admin account, and application configuration
 
+## Screenshots
+
+| Dashboard | IP Blocks |
+|-----------|-----------|
+| ![Dashboard](dashboard.png) | ![IP Blocks](ip_blocks.png) |
+
+| Networks | Reservations |
+|----------|--------------|
+| ![Networks](networks.png) | ![Reservations](reservations.png) |
+
+| Assets | Events |
+|--------|--------|
+| ![Assets](assets.png) | ![Events](events.png) |
+
 ## System Requirements
 
 ### Minimum (small deployments: <50 devices, <500 subnets)

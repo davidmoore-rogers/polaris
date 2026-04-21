@@ -797,7 +797,9 @@ export async function discoverDhcpSubnets(
           interfaceIps: interfaceIps.slice(ifIpBefore).filter(
             (ip) => ip.role === "management" || includedIfaces.has(ip.interfaceName)
           ),
-          dhcpEntries: dhcpEntries.slice(entBefore).filter((e) => includedIfaces.has(e.interfaceName)),
+          // Pass all DHCP entries (including from excluded interfaces) so that manually-created
+          // subnets matching an excluded network still get populated with reservations and leases.
+          dhcpEntries: dhcpEntries.slice(entBefore),
           deviceInventory: deviceInventory.slice(invBefore).filter(
             (d) => !excludedDevIfaces.has(`${d.device}/${d.interfaceName}`) &&
                    matchesInventoryFilter(d.interfaceName, config)
@@ -821,10 +823,11 @@ export async function discoverDhcpSubnets(
     (ip) => ip.role === "management" || includedIfaceNames.has(ip.interfaceName)
   );
 
-  // Filter DHCP entries to only include those from filtered DHCP interfaces
-  const filteredDhcpEntries = dhcpEntries.filter(
-    (e) => includedIfaceNames.has(e.interfaceName)
-  );
+  // Pass all DHCP entries (including from excluded interfaces) so that manually-created
+  // subnets matching an excluded network still get populated with reservations and leases.
+  // syncDhcpSubnets uses findSubnetForIp, which returns nothing if no subnet exists,
+  // so entries for fully-excluded networks with no matching subnet are silently skipped.
+  const filteredDhcpEntries = dhcpEntries;
 
   // Filter device inventory: drop devices connected to excluded DHCP interfaces
   const excludedIfaceNames = new Set(
