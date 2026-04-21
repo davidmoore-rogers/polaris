@@ -86,6 +86,28 @@ document.addEventListener("DOMContentLoaded", async function () {
   if (dnsBtn) dnsBtn.addEventListener("click", bulkDnsLookup);
   var ouiBtn = document.getElementById("btn-oui-lookup");
   if (ouiBtn) ouiBtn.addEventListener("click", bulkOuiLookup);
+  // ── Import dropdown wiring ──
+  (function () {
+    var importMenu = document.getElementById("import-menu");
+    var importBtn  = document.getElementById("btn-import");
+    if (importBtn && importMenu) {
+      importBtn.addEventListener("click", function (e) { e.stopPropagation(); importMenu.classList.toggle("open"); });
+      document.addEventListener("click", function () { importMenu.classList.remove("open"); });
+      importMenu.addEventListener("click", function (e) { e.stopPropagation(); });
+    }
+    var csvBtn   = document.getElementById("btn-import-csv");
+    var csvInput = document.getElementById("import-csv-input");
+    var pdfBtn   = document.getElementById("btn-import-pdf");
+    var pdfInput = document.getElementById("import-pdf-input");
+    if (csvBtn && csvInput) {
+      csvBtn.addEventListener("click", function () { importMenu && importMenu.classList.remove("open"); csvInput.value = ""; csvInput.click(); });
+      csvInput.addEventListener("change", function () { if (this.files[0]) openImportCsvModal(this.files[0]); });
+    }
+    if (pdfBtn && pdfInput) {
+      pdfBtn.addEventListener("click", function () { importMenu && importMenu.classList.remove("open"); pdfInput.value = ""; pdfInput.click(); });
+      pdfInput.addEventListener("change", function () { if (this.files[0]) openImportPdfModal(this.files[0]); });
+    }
+  })();
   document.getElementById("filter-status").addEventListener("change", function () { _assetsPage = 1; loadAssets(); _saveAssetsPrefs(); });
   document.getElementById("filter-type").addEventListener("change", function () { _assetsPage = 1; loadAssets(); _saveAssetsPrefs(); });
   document.getElementById("filter-search").addEventListener("input", debounce(function () { _assetsPage = 1; loadAssets(); _saveAssetsPrefs(); }, 300));
@@ -778,4 +800,494 @@ function generateAssetCsv(assets) {
   var filename = "shelob-assets-" + new Date().toISOString().slice(0, 10) + ".csv";
   downloadCsv(headers, rows, filename);
   showToast("Exported " + assets.length + " assets to " + filename);
+}
+
+/* ─── CSV Import ──────────────────────────────────────────────────────────── */
+
+function _parseCsv(text) {
+  var lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  return lines.filter(function (l) { return l.trim(); }).map(function (line) {
+    var fields = [];
+    var cur = "";
+    var inQuote = false;
+    for (var i = 0; i < line.length; i++) {
+      var ch = line[i];
+      if (ch === '"') { inQuote = !inQuote; }
+      else if (ch === "," && !inQuote) { fields.push(cur.trim()); cur = ""; }
+      else { cur += ch; }
+    }
+    fields.push(cur.trim());
+    return fields;
+  });
+}
+
+function _autoDetectCol(headers, patterns) {
+  for (var i = 0; i < headers.length; i++) {
+    var h = headers[i].toLowerCase().replace(/[\s_\-]+/g, "");
+    for (var j = 0; j < patterns.length; j++) {
+      if (h.includes(patterns[j])) return i;
+    }
+  }
+  return -1;
+}
+
+async function openImportCsvModal(file) {
+  var text = await file.text();
+  var parsed = _parseCsv(text);
+  if (parsed.length < 2) { showToast("CSV appears empty or has only a header row", "error"); return; }
+
+  var headers = parsed[0];
+  var dataRows = parsed.slice(1);
+
+  var serialIdx = _autoDetectCol(headers, ["serial", "sn", "serialnum", "serialnumber"]);
+  var dateIdx   = _autoDetectCol(headers, ["regdate", "registration", "purchasedate", "acquired", "date", "warranty"]);
+
+  function colOptions(selected) {
+    return headers.map(function (h, i) {
+      return '<option value="' + i + '"' + (i === selected ? " selected" : "") + '>' + escapeHtml(h) + '</option>';
+    }).join("");
+  }
+
+  var previewHtml = '<table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+    headers.map(function (h) { return '<th>' + escapeHtml(h) + '</th>'; }).join("") +
+    '</tr></thead><tbody>' +
+    dataRows.slice(0, 5).map(function (r) {
+      return '<tr>' + r.map(function (c) { return '<td>' + escapeHtml(c) + '</td>'; }).join("") + '</tr>';
+    }).join("") +
+    '</tbody></table>';
+
+  var body =
+    '<p style="color:var(--color-text-secondary);margin-bottom:1rem">' +
+      dataRows.length + ' data row(s) in <strong>' + escapeHtml(file.name) + '</strong>. ' +
+      'Map the columns below, then click Preview to see which assets will be updated.' +
+    '</p>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1rem">' +
+      '<div class="form-group"><label>Serial Number column</label>' +
+        '<select id="import-col-serial">' + colOptions(serialIdx) + '</select></div>' +
+      '<div class="form-group"><label>Registration Date column</label>' +
+        '<select id="import-col-date">' + colOptions(dateIdx) + '</select></div>' +
+    '</div>' +
+    '<details style="margin-bottom:1rem"><summary style="cursor:pointer;color:var(--color-text-secondary);font-size:0.85rem">Preview first 5 rows</summary>' +
+      '<div style="overflow-x:auto;margin-top:0.5rem">' + previewHtml + '</div>' +
+    '</details>' +
+    '<div id="import-preview-area"></div>';
+
+  var footer =
+    '<button class="btn btn-secondary" id="import-preview-btn">Preview Changes</button>' +
+    '<button class="btn btn-primary" id="import-apply-btn" style="display:none">Apply Changes</button>' +
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>';
+
+  openModal("Import CSV", body, footer, { wide: true });
+
+  var pendingRows = null;
+
+  document.getElementById("import-preview-btn").addEventListener("click", async function () {
+    var sIdx = parseInt(document.getElementById("import-col-serial").value, 10);
+    var dIdx = parseInt(document.getElementById("import-col-date").value, 10);
+
+    var rows = dataRows.map(function (r) {
+      return { serialNumber: r[sIdx] || "", date: r[dIdx] || "" };
+    }).filter(function (r) { return r.serialNumber && r.date; });
+
+    if (!rows.length) { showToast("No valid rows after column mapping", "error"); return; }
+
+    var btn = document.getElementById("import-preview-btn");
+    btn.disabled = true;
+    btn.textContent = "Loading…";
+
+    try {
+      var result = await api.assets.import(rows, true);
+      pendingRows = rows;
+
+      var updateRows = result.preview.filter(function (r) { return r.willUpdate; });
+      var skipRows   = result.preview.filter(function (r) { return !r.willUpdate; });
+
+      var html = "";
+      if (result.notFound > 0) {
+        html += '<p style="color:var(--color-text-secondary);font-size:0.85rem;margin-bottom:0.5rem">' +
+          result.notFound + ' serial number(s) not found in assets.</p>';
+      }
+      if (!updateRows.length) {
+        html += '<p style="color:var(--color-success)">No updates needed — all matched assets already have an earlier or equal first-seen date.</p>';
+        document.getElementById("import-apply-btn").style.display = "none";
+      } else {
+        html += '<p style="margin-bottom:0.5rem"><strong>' + updateRows.length + '</strong> asset(s) will have their first-seen date updated' +
+          (skipRows.length ? '; <strong>' + skipRows.length + '</strong> already have an earlier date and will be skipped' : '') + '.</p>' +
+          '<div style="overflow-x:auto"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+          '<th>Serial</th><th>Hostname</th><th>Current First Seen</th><th>New First Seen</th>' +
+          '</tr></thead><tbody>' +
+          updateRows.map(function (r) {
+            return '<tr><td class="mono">' + escapeHtml(r.serialNumber) + '</td>' +
+              '<td>' + escapeHtml(r.hostname || "-") + '</td>' +
+              '<td>' + formatDate(r.currentFirstSeen) + '</td>' +
+              '<td style="color:var(--color-success)">' + formatDate(r.importDate) + '</td></tr>';
+          }).join("") +
+          '</tbody></table></div>';
+        document.getElementById("import-apply-btn").style.display = "";
+      }
+      document.getElementById("import-preview-area").innerHTML = html;
+    } catch (e) {
+      showToast("Preview failed: " + e.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Preview Changes";
+    }
+  });
+
+  document.getElementById("import-apply-btn").addEventListener("click", async function () {
+    if (!pendingRows) return;
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = "Applying…";
+    try {
+      var result = await api.assets.import(pendingRows, false);
+      closeModal();
+      showToast("Updated first-seen date for " + result.updated + " asset(s)");
+      loadAssets();
+    } catch (e) {
+      showToast("Import failed: " + e.message, "error");
+      btn.disabled = false;
+      btn.textContent = "Apply Changes";
+    }
+  });
+}
+
+/* ─── PDF Invoice Import ──────────────────────────────────────────────────── */
+
+var _pdfJsLoaded = false;
+
+var _PDFJS_VERSION = "3.11.174";
+var _PDFJS_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/" + _PDFJS_VERSION;
+
+async function _loadPdfJs() {
+  if (_pdfJsLoaded) return;
+  return new Promise(function (resolve, reject) {
+    var umd = document.createElement("script");
+    umd.src = _PDFJS_CDN + "/pdf.min.js";
+    umd.onload = function () {
+      if (window.pdfjsLib) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = _PDFJS_CDN + "/pdf.worker.min.js";
+        _pdfJsLoaded = true;
+        resolve();
+      } else {
+        reject(new Error("PDF.js did not load correctly"));
+      }
+    };
+    umd.onerror = function () { reject(new Error("Failed to load PDF.js from CDN")); };
+    document.head.appendChild(umd);
+  });
+}
+
+async function _extractPdfPages(file) {
+  await _loadPdfJs();
+  var arrayBuffer = await file.arrayBuffer();
+  var pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  var pages = [];
+  for (var i = 1; i <= pdf.numPages; i++) {
+    var page = await pdf.getPage(i);
+    var content = await page.getTextContent();
+    var text = content.items.map(function (item) { return item.str; }).join(" ");
+    pages.push(text.replace(/\s{3,}/g, "\n").trim());
+  }
+  return pages;
+}
+
+var PDF_ASSET_FIELDS = [
+  { key: "hostname",      label: "Hostname" },
+  { key: "serialNumber",  label: "Serial Number" },
+  { key: "manufacturer",  label: "Manufacturer" },
+  { key: "model",         label: "Model" },
+  { key: "ipAddress",     label: "IP Address" },
+  { key: "macAddress",    label: "MAC Address" },
+  { key: "assetTag",      label: "Asset Tag" },
+  { key: "assignedTo",    label: "Assigned To" },
+  { key: "location",      label: "Location" },
+  { key: "notes",         label: "Notes" },
+];
+
+async function openImportPdfModal(file) {
+  var loadingBody = '<div style="padding:2rem;text-align:center;color:var(--color-text-secondary)">Extracting PDF text…</div>';
+  openModal("Import PDF Invoice", loadingBody, "", { xl: true });
+
+  var pages;
+  try {
+    pages = await _extractPdfPages(file);
+  } catch (err) {
+    document.querySelector("#modal-overlay .modal-body").innerHTML =
+      '<div style="padding:2rem;color:var(--color-danger)">Failed to read PDF: ' + escapeHtml(err.message) + '</div>';
+    return;
+  }
+
+  if (!pages.length || pages.every(function (p) { return !p.trim(); })) {
+    document.querySelector("#modal-overlay .modal-body").innerHTML =
+      '<div style="padding:2rem;color:var(--color-text-secondary)">No readable text found in this PDF. It may be a scanned image — try OCR first.</div>';
+    return;
+  }
+
+  var currentPage = 0;
+  var assetList = [];
+
+  function _getSelectedText() {
+    var sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return "";
+    var text = sel.toString().trim();
+    // Only allow selection from within our text area
+    var textArea = document.getElementById("pdf-text-area");
+    if (!textArea) return "";
+    var range = sel.getRangeAt(0);
+    if (!textArea.contains(range.commonAncestorContainer)) return "";
+    return text;
+  }
+
+  function _renderForm() {
+    return PDF_ASSET_FIELDS.map(function (f) {
+      var isTextarea = f.key === "notes";
+      var inputEl = isTextarea
+        ? '<textarea id="pdf-field-' + f.key + '" rows="2" style="font-size:0.82rem;padding:4px 8px;resize:vertical"></textarea>'
+        : '<input type="text" id="pdf-field-' + f.key + '" autocomplete="off">';
+      return '<div class="form-row">' +
+        '<div><label>' + escapeHtml(f.label) + '</label>' + inputEl + '</div>' +
+        '<button class="btn btn-secondary btn-use" data-field="' + f.key + '" title="Paste selected text from PDF">&#8599; Use</button>' +
+      '</div>';
+    }).join("") +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:0.5rem">' +
+      '<div><label style="font-size:0.78rem;color:var(--color-text-secondary)">Type</label>' +
+        '<select id="pdf-field-assetType" style="font-size:0.82rem;padding:4px 8px;height:30px">' +
+          '<option value="other">Other</option>' +
+          '<option value="server">Server</option>' +
+          '<option value="switch">Switch</option>' +
+          '<option value="router">Router</option>' +
+          '<option value="firewall">Firewall</option>' +
+          '<option value="workstation">Workstation</option>' +
+          '<option value="printer">Printer</option>' +
+          '<option value="access_point">Access Point</option>' +
+        '</select></div>' +
+      '<div><label style="font-size:0.78rem;color:var(--color-text-secondary)">Status</label>' +
+        '<select id="pdf-field-status" style="font-size:0.82rem;padding:4px 8px;height:30px">' +
+          '<option value="active">Active</option>' +
+          '<option value="storage">Storage</option>' +
+          '<option value="maintenance">Maintenance</option>' +
+          '<option value="decommissioned">Decommissioned</option>' +
+        '</select></div>' +
+    '</div>';
+  }
+
+  function _currentFields() {
+    var obj = {};
+    PDF_ASSET_FIELDS.forEach(function (f) {
+      var el = document.getElementById("pdf-field-" + f.key);
+      if (el && el.value.trim()) obj[f.key] = el.value.trim();
+    });
+    var typeEl   = document.getElementById("pdf-field-assetType");
+    var statusEl = document.getElementById("pdf-field-status");
+    if (typeEl)   obj.assetType = typeEl.value;
+    if (statusEl) obj.status    = statusEl.value;
+    return obj;
+  }
+
+  function _clearForm() {
+    PDF_ASSET_FIELDS.forEach(function (f) {
+      var el = document.getElementById("pdf-field-" + f.key);
+      if (el) el.value = "";
+    });
+    var typeEl   = document.getElementById("pdf-field-assetType");
+    var statusEl = document.getElementById("pdf-field-status");
+    if (typeEl)   typeEl.value   = "other";
+    if (statusEl) statusEl.value = "active";
+  }
+
+  function _renderAssetListTable() {
+    var listEl = document.getElementById("pdf-asset-list");
+    if (!listEl) return;
+    if (!assetList.length) {
+      listEl.innerHTML = '<p style="padding:0.5rem 1rem;font-size:0.8rem;color:var(--color-text-secondary)">No assets added yet.</p>';
+      return;
+    }
+    listEl.innerHTML =
+      '<table class="pdf-asset-list-table"><thead><tr>' +
+        '<th>Serial</th><th>Hostname</th><th>Manufacturer</th><th>Model</th><th>Type</th><th></th>' +
+      '</tr></thead><tbody>' +
+      assetList.map(function (a, i) {
+        return '<tr>' +
+          '<td class="mono">' + escapeHtml(a.serialNumber || "-") + '</td>' +
+          '<td>' + escapeHtml(a.hostname || "-") + '</td>' +
+          '<td>' + escapeHtml(a.manufacturer || "-") + '</td>' +
+          '<td>' + escapeHtml(a.model || "-") + '</td>' +
+          '<td>' + escapeHtml(a.assetType || "-") + '</td>' +
+          '<td><button class="btn btn-sm btn-danger" data-remove-idx="' + i + '" style="padding:1px 6px;font-size:0.72rem">✕</button></td>' +
+        '</tr>';
+      }).join("") +
+      '</tbody></table>';
+    listEl.querySelectorAll("[data-remove-idx]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var idx = parseInt(this.getAttribute("data-remove-idx"), 10);
+        assetList.splice(idx, 1);
+        _renderAssetListTable();
+        _updateApplyBtn();
+      });
+    });
+  }
+
+  function _updateApplyBtn() {
+    var applyBtn = document.getElementById("pdf-apply-btn");
+    if (applyBtn) {
+      applyBtn.disabled = assetList.length === 0;
+      applyBtn.textContent = assetList.length
+        ? "Preview & Apply (" + assetList.length + ")"
+        : "Preview & Apply";
+    }
+  }
+
+  function _renderPageText() {
+    var textArea = document.getElementById("pdf-text-area");
+    var pageInfo = document.getElementById("pdf-page-info");
+    if (textArea) textArea.textContent = pages[currentPage] || "(empty page)";
+    if (pageInfo) pageInfo.textContent = "Page " + (currentPage + 1) + " of " + pages.length;
+    var prevBtn = document.getElementById("pdf-prev-page");
+    var nextBtn = document.getElementById("pdf-next-page");
+    if (prevBtn) prevBtn.disabled = currentPage === 0;
+    if (nextBtn) nextBtn.disabled = currentPage === pages.length - 1;
+  }
+
+  var body =
+    '<div class="pdf-import-pane">' +
+      '<div class="pdf-import-left">' +
+        '<div class="pdf-import-toolbar">' +
+          '<strong style="color:var(--color-text-primary);font-size:0.82rem">' + escapeHtml(file.name) + '</strong>' +
+          '<span id="pdf-page-info" style="margin-left:auto"></span>' +
+          (pages.length > 1
+            ? '<button class="btn btn-sm btn-secondary" id="pdf-prev-page">&#8592;</button>' +
+              '<button class="btn btn-sm btn-secondary" id="pdf-next-page">&#8594;</button>'
+            : '') +
+        '</div>' +
+        '<div class="pdf-import-text-area" id="pdf-text-area" title="Select text then click ↗ Use next to a field"></div>' +
+      '</div>' +
+      '<div class="pdf-import-right">' +
+        '<div class="pdf-import-toolbar" style="justify-content:space-between">' +
+          '<span style="font-size:0.8rem;color:var(--color-text-secondary)">Fill fields &rarr; Add Asset &rarr; repeat</span>' +
+          '<button class="btn btn-sm btn-secondary" id="pdf-clear-btn">Clear</button>' +
+        '</div>' +
+        '<div class="pdf-import-form" id="pdf-form-area">' + _renderForm() + '</div>' +
+        '<div style="padding:0.5rem 1rem;border-top:1px solid var(--color-border);flex-shrink:0">' +
+          '<button class="btn btn-secondary" id="pdf-add-btn" style="width:100%">+ Add Asset to List</button>' +
+        '</div>' +
+        '<div class="pdf-asset-list" id="pdf-asset-list">' +
+          '<p style="padding:0.5rem 1rem;font-size:0.8rem;color:var(--color-text-secondary)">No assets added yet.</p>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  var footer =
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="pdf-apply-btn" disabled>Preview & Apply</button>';
+
+  openModal("Import PDF Invoice", body, footer, { xl: true });
+
+  _renderPageText();
+
+  document.getElementById("pdf-prev-page") && document.getElementById("pdf-prev-page").addEventListener("click", function () {
+    if (currentPage > 0) { currentPage--; _renderPageText(); }
+  });
+  document.getElementById("pdf-next-page") && document.getElementById("pdf-next-page").addEventListener("click", function () {
+    if (currentPage < pages.length - 1) { currentPage++; _renderPageText(); }
+  });
+
+  document.getElementById("pdf-clear-btn").addEventListener("click", _clearForm);
+
+  document.getElementById("pdf-form-area").addEventListener("click", function (e) {
+    var btn = e.target.closest("[data-field]");
+    if (!btn) return;
+    var field = btn.getAttribute("data-field");
+    var sel = _getSelectedText();
+    if (!sel) { showToast("Select some text in the PDF viewer first", "error"); return; }
+    var input = document.getElementById("pdf-field-" + field);
+    if (input) { input.value = sel; input.focus(); }
+  });
+
+  document.getElementById("pdf-add-btn").addEventListener("click", function () {
+    var fields = _currentFields();
+    if (!fields.hostname && !fields.serialNumber && !fields.ipAddress && !fields.macAddress) {
+      showToast("Enter at least one identifying field (hostname, serial, IP, or MAC)", "error");
+      return;
+    }
+    assetList.push(fields);
+    _renderAssetListTable();
+    _updateApplyBtn();
+    _clearForm();
+    showToast("Asset added to list", "success");
+  });
+
+  document.getElementById("pdf-apply-btn").addEventListener("click", async function () {
+    if (!assetList.length) return;
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = "Previewing…";
+
+    try {
+      var result = await api.assets.importPdf(assetList, true);
+      var creates = result.preview.filter(function (r) { return r.action === "create"; });
+      var updates = result.preview.filter(function (r) { return r.action === "update"; });
+
+      var previewHtml =
+        '<p style="margin-bottom:0.75rem">' +
+          (creates.length ? '<strong>' + creates.length + '</strong> will be <span style="color:var(--color-success)">created</span>' : '') +
+          (creates.length && updates.length ? ' · ' : '') +
+          (updates.length ? '<strong>' + updates.length + '</strong> will be <span style="color:var(--color-accent)">updated</span> (matched by serial number)' : '') +
+        '</p>' +
+        '<div style="overflow-x:auto"><table class="data-table" style="font-size:0.8rem"><thead><tr>' +
+          '<th>Action</th><th>Serial</th><th>Hostname</th><th>Manufacturer</th><th>Model</th><th>Type</th>' +
+        '</tr></thead><tbody>' +
+        result.preview.map(function (r) {
+          var actionBadge = r.action === "create"
+            ? '<span style="color:var(--color-success)">Create</span>'
+            : '<span style="color:var(--color-accent)">Update</span>';
+          return '<tr>' +
+            '<td>' + actionBadge + '</td>' +
+            '<td class="mono">' + escapeHtml(r.serialNumber || "-") + '</td>' +
+            '<td>' + escapeHtml(r.hostname || "-") + '</td>' +
+            '<td>' + escapeHtml(r.fields.manufacturer || "-") + '</td>' +
+            '<td>' + escapeHtml(r.fields.model || "-") + '</td>' +
+            '<td>' + escapeHtml(r.fields.assetType || "-") + '</td>' +
+          '</tr>';
+        }).join("") +
+        '</tbody></table></div>';
+
+      var prevBody =
+        '<div style="padding:1.25rem">' +
+          '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:1rem">Review the changes below, then confirm to apply.</p>' +
+          previewHtml +
+        '</div>';
+
+      var prevFooter =
+        '<button class="btn btn-secondary" id="pdf-preview-back">Back</button>' +
+        '<button class="btn btn-primary" id="pdf-preview-confirm">Apply Changes</button>';
+
+      openModal("PDF Import — Preview", prevBody, prevFooter, { wide: true });
+
+      document.getElementById("pdf-preview-back").addEventListener("click", function () {
+        openImportPdfModal._reopen && openImportPdfModal._reopen();
+      });
+
+      document.getElementById("pdf-preview-confirm").addEventListener("click", async function () {
+        var confirmBtn = this;
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = "Applying…";
+        try {
+          var applyResult = await api.assets.importPdf(assetList, false);
+          closeModal();
+          showToast("Created " + applyResult.created + ", updated " + applyResult.updated + " asset(s)", "success");
+          loadAssets();
+        } catch (e) {
+          showToast("Apply failed: " + e.message, "error");
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = "Apply Changes";
+        }
+      });
+
+    } catch (e) {
+      showToast("Preview failed: " + e.message, "error");
+      btn.disabled = false;
+      btn.textContent = "Preview & Apply (" + assetList.length + ")";
+    }
+  });
 }

@@ -1036,6 +1036,91 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 .modal-overlay.open .modal { transform: translateY(0); }
 .modal.modal-wide { max-width: 672px; }
+.modal.modal-xl { max-width: min(92vw, 1360px); width: min(92vw, 1360px); }
+.modal.modal-xl .modal-body { padding: 0; }
+
+/* PDF import split pane */
+.pdf-import-pane {
+  display: grid;
+  grid-template-columns: 55% 45%;
+  height: 68vh;
+  min-height: 480px;
+}
+.pdf-import-left {
+  border-right: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.pdf-import-right {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.pdf-import-text-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+}
+.pdf-import-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+  font-size: 0.82rem;
+  flex-shrink: 0;
+}
+.pdf-import-form {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+}
+.pdf-import-form .form-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  align-items: end;
+  margin-bottom: 0.5rem;
+}
+.pdf-import-form .form-row label {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  display: block;
+  margin-bottom: 2px;
+}
+.pdf-import-form .form-row input,
+.pdf-import-form .form-row select {
+  font-size: 0.82rem;
+  padding: 4px 8px;
+  height: 30px;
+}
+.btn-use {
+  font-size: 0.72rem;
+  padding: 2px 7px;
+  height: 30px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.pdf-asset-list {
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.pdf-asset-list table { width: 100%; font-size: 0.78rem; }
+.pdf-asset-list thead { position: sticky; top: 0; background: var(--color-bg-tertiary); }
+.pdf-asset-list th, .pdf-asset-list td { padding: 4px 8px; text-align: left; }
+.pdf-asset-list tr + tr { border-top: 1px solid var(--color-border); }
 .modal-header {
   display: flex;
   justify-content: space-between;

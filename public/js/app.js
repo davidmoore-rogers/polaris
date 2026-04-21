@@ -507,8 +507,9 @@ function openModal(title, bodyHTML, footerHTML, options) {
     overlay.querySelector(".modal-close").addEventListener("click", closeModal);
   }
   var modal = overlay.querySelector(".modal");
-  modal.classList.remove("modal-wide");
+  modal.classList.remove("modal-wide", "modal-xl");
   if (options && options.wide) modal.classList.add("modal-wide");
+  if (options && options.xl) modal.classList.add("modal-xl");
   overlay.querySelector(".modal-header h3").textContent = title;
   overlay.querySelector(".modal-body").innerHTML = bodyHTML;
   overlay.querySelector(".modal-footer").innerHTML = footerHTML || "";

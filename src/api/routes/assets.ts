@@ -258,6 +258,108 @@ router.post("/:id/oui-lookup", requireAssetsAdmin, async (req, res, next) => {
   }
 });
 
+// POST /api/v1/assets/import — CSV import: backdate createdAt from serial+date rows (assets admin)
+router.post("/import", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const { rows, dryRun } = req.body as { rows?: unknown; dryRun?: boolean };
+    if (!Array.isArray(rows) || rows.length === 0) throw new AppError(400, "rows must be a non-empty array");
+
+    const preview: Array<{ serialNumber: string; hostname: string | null; currentFirstSeen: string; importDate: string; willUpdate: boolean }> = [];
+    let updated = 0;
+    let notFound = 0;
+
+    for (const row of rows as any[]) {
+      const serial = String(row.serialNumber || "").trim();
+      const rawDate = String(row.date || "").trim();
+      if (!serial || !rawDate) continue;
+
+      const importDate = new Date(rawDate);
+      if (isNaN(importDate.getTime())) continue;
+
+      const asset = await prisma.asset.findFirst({ where: { serialNumber: serial } });
+      if (!asset) { notFound++; continue; }
+
+      const willUpdate = importDate < asset.createdAt;
+      preview.push({
+        serialNumber: serial,
+        hostname: asset.hostname,
+        currentFirstSeen: asset.createdAt.toISOString(),
+        importDate: importDate.toISOString(),
+        willUpdate,
+      });
+
+      if (willUpdate && !dryRun) {
+        await prisma.asset.update({ where: { id: asset.id }, data: { createdAt: importDate } });
+        updated++;
+      }
+    }
+
+    if (!dryRun && updated > 0) {
+      logEvent({ action: "asset.import", resourceType: "asset", actor: req.session?.username, message: `CSV import: updated first-seen date for ${updated} asset(s)` });
+    }
+
+    res.json({ preview, updated, notFound, dryRun: !!dryRun });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/assets/import-pdf — create/update assets from extracted PDF invoice data (assets admin)
+router.post("/import-pdf", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const { assets: rows, dryRun } = req.body as { assets?: unknown; dryRun?: boolean };
+    if (!Array.isArray(rows) || rows.length === 0) throw new AppError(400, "assets must be a non-empty array");
+
+    type PreviewRow = {
+      action: "create" | "update";
+      serialNumber: string | null;
+      hostname: string | null;
+      fields: Record<string, string>;
+      existingHostname?: string | null;
+    };
+    const preview: PreviewRow[] = [];
+    let created = 0;
+    let updated = 0;
+
+    for (const row of rows as any[]) {
+      const serial = row.serialNumber ? String(row.serialNumber).trim() : null;
+      const existing = serial ? await prisma.asset.findFirst({ where: { serialNumber: serial } }) : null;
+
+      const updateData: Record<string, unknown> = {};
+      const allowedFields = ["hostname", "ipAddress", "macAddress", "assetType", "status", "manufacturer", "model", "serialNumber", "location", "department", "assignedTo", "os", "notes", "assetTag"] as const;
+      for (const f of allowedFields) {
+        if (row[f] !== undefined && row[f] !== "") updateData[f] = String(row[f]).trim();
+      }
+      if (updateData.macAddress) updateData.macAddress = String(updateData.macAddress).toUpperCase().replace(/-/g, ":");
+
+      const fields: Record<string, string> = {};
+      for (const [k, v] of Object.entries(updateData)) fields[k] = String(v);
+
+      if (existing) {
+        preview.push({ action: "update", serialNumber: serial, hostname: row.hostname || null, existingHostname: existing.hostname, fields });
+        if (!dryRun) {
+          await prisma.asset.update({ where: { id: existing.id }, data: updateData as any });
+          updated++;
+        }
+      } else {
+        preview.push({ action: "create", serialNumber: serial, hostname: row.hostname || null, fields });
+        if (!dryRun) {
+          await prisma.asset.create({ data: { assetType: "other", status: "storage", ...updateData } as any });
+          created++;
+        }
+      }
+    }
+
+    if (!dryRun && (created + updated) > 0) {
+      logEvent({ action: "asset.import_pdf", resourceType: "asset", actor: req.session?.username, message: `PDF import: created ${created}, updated ${updated} asset(s)` });
+    }
+
+    res.json({ preview, created, updated, dryRun: !!dryRun });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // DELETE /api/v1/assets — bulk delete (assets admin)
 router.delete("/", requireAssetsAdmin, async (req, res, next) => {
   try {

@@ -32,6 +32,15 @@
           </div>
           <button class="btn btn-secondary" id="btn-oui-lookup" data-manage-assets title="OUI manufacturer lookup for all assets with a MAC but no manufacturer">OUI Lookup</button>
           <button class="btn btn-secondary" id="btn-dns-lookup" data-manage-assets title="Reverse DNS lookup for all assets missing a DNS name">DNS Lookup</button>
+          <div class="btn-dropdown-wrap" data-manage-assets>
+            <button class="btn btn-secondary" id="btn-import">Import &#9662;</button>
+            <div class="btn-dropdown-menu" id="import-menu">
+              <button id="btn-import-csv">From CSV (backdate first seen)</button>
+              <button id="btn-import-pdf">From PDF Invoice</button>
+            </div>
+          </div>
+          <input type="file" id="import-csv-input" accept=".csv" style="display:none">
+          <input type="file" id="import-pdf-input" accept=".pdf" style="display:none">
           <button class="btn btn-primary" id="btn-add-asset" data-manage-assets>+ Add Asset</button>
         </div>
       </div>
