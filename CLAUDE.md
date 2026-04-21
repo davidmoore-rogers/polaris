@@ -4,7 +4,7 @@
 
 **Shelob** is an IP management tool that allows users to reserve and manage IP address space (IPv4 and IPv6) for use across other infrastructure projects. Named after Tolkien's great spider — because subnets are webs, and Shelob spins them. It provides a central registry for subnets, individual IPs, and reservations — preventing conflicts and giving teams visibility into IP utilization.
 
-Current version: **0.9.x** (pre-release; patch per commit, minor per release). Version is shown in the sidebar and embedded in backup filenames.
+Current version: **0.9.x** (pre-release; patch per push, minor per release). Version is shown in the sidebar and embedded in backup filenames.
 
 ---
 
