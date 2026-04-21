@@ -11,7 +11,12 @@ import {
   getSyslogSettings,
   updateSyslogSettings,
   testSyslogConnection,
+  getRetentionSettings,
+  updateRetentionSettings,
+  getCachedRetentionSettings,
 } from "../../services/eventArchiveService.js";
+
+const LEVEL_ORDER: Record<string, number> = { info: 0, warning: 1, error: 2 };
 
 const router = Router();
 
@@ -24,7 +29,8 @@ router.get("/", async (req, res, next) => {
     const action = req.query.action as string | undefined;
     const resourceType = req.query.resourceType as string | undefined;
 
-    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const { retentionDays } = await getRetentionSettings();
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
     const where: Record<string, unknown> = { timestamp: { gte: cutoff } };
     if (level) where.level = level;
     if (action) where.action = { contains: action };
@@ -120,6 +126,24 @@ router.post("/syslog-test", async (req, res, next) => {
   }
 });
 
+// GET /api/v1/events/retention-settings
+router.get("/retention-settings", async (_req, res, next) => {
+  try {
+    res.json(await getRetentionSettings());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /api/v1/events/retention-settings
+router.put("/retention-settings", async (req, res, next) => {
+  try {
+    res.json(await updateRetentionSettings(req.body));
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;
 
 // ─── Shared Event Logger ────────────────────────────────────────────────────
@@ -137,6 +161,8 @@ export interface LogEventInput {
 
 export async function logEvent(input: LogEventInput): Promise<void> {
   try {
+    const { minLevel } = await getCachedRetentionSettings();
+    if ((LEVEL_ORDER[input.level ?? "info"] ?? 0) < (LEVEL_ORDER[minLevel] ?? 0)) return;
     await prisma.event.create({
       data: {
         action: input.action,

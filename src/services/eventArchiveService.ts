@@ -150,6 +150,65 @@ function buildTransferCommand(s: ArchiveSettings, localPath: string, filename: s
   return `scp ${opts} -P ${s.port} "${localPath}" ${s.username}@${s.host}:"${remoteDest}"`;
 }
 
+// ─── Retention Settings ──────────────────────────────────────────────────────
+
+export type EventLevel = "info" | "warning" | "error";
+
+export interface RetentionSettings {
+  retentionDays: number;
+  minLevel: EventLevel;
+}
+
+const RETENTION_KEY = "eventRetention";
+const DEFAULT_RETENTION: RetentionSettings = { retentionDays: 7, minLevel: "info" };
+const VALID_LEVELS: EventLevel[] = ["info", "warning", "error"];
+
+// Cache to avoid a DB read on every logEvent() call
+let _retentionCache: RetentionSettings | null = null;
+let _retentionCacheAt = 0;
+const RETENTION_CACHE_TTL = 60_000; // 1 minute
+
+export async function getRetentionSettings(): Promise<RetentionSettings> {
+  const row = await prisma.setting.findUnique({ where: { key: RETENTION_KEY } });
+  if (!row) return { ...DEFAULT_RETENTION };
+  const val = row.value as Record<string, unknown>;
+  const days = Number(val.retentionDays);
+  const level = val.minLevel as string;
+  return {
+    retentionDays: Number.isFinite(days) && days >= 1 ? Math.floor(days) : DEFAULT_RETENTION.retentionDays,
+    minLevel: VALID_LEVELS.includes(level as EventLevel) ? (level as EventLevel) : DEFAULT_RETENTION.minLevel,
+  };
+}
+
+export async function getCachedRetentionSettings(): Promise<RetentionSettings> {
+  if (_retentionCache && Date.now() - _retentionCacheAt < RETENTION_CACHE_TTL) {
+    return _retentionCache;
+  }
+  _retentionCache = await getRetentionSettings();
+  _retentionCacheAt = Date.now();
+  return _retentionCache;
+}
+
+export async function updateRetentionSettings(
+  settings: Partial<RetentionSettings>,
+): Promise<RetentionSettings> {
+  const current = await getRetentionSettings();
+  const days = Number(settings.retentionDays);
+  const level = settings.minLevel;
+  const merged: RetentionSettings = {
+    retentionDays: Number.isFinite(days) && days >= 1 ? Math.floor(days) : current.retentionDays,
+    minLevel: VALID_LEVELS.includes(level as EventLevel) ? (level as EventLevel) : current.minLevel,
+  };
+  await prisma.setting.upsert({
+    where: { key: RETENTION_KEY },
+    create: { key: RETENTION_KEY, value: merged as any },
+    update: { value: merged as any },
+  });
+  _retentionCache = merged;
+  _retentionCacheAt = Date.now();
+  return merged;
+}
+
 // ─── Syslog Settings ────────────────────────────────────────────────────────
 
 export interface SyslogSettings {

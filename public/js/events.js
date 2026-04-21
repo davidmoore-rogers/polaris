@@ -177,14 +177,15 @@ var _eventsCurrentPage = [];
 var _activeSettingsTab = "archive";
 
 async function openEventSettingsModal() {
-  // Fetch both settings in parallel
   var archiveDefaults = { enabled: false, protocol: "scp", host: "", port: 22, username: "", password: "", keyPath: "", remotePath: "/var/archive/shelob" };
   var syslogDefaults = { enabled: false, protocol: "udp", host: "", port: 514, facility: "local0", severity: "info", format: "rfc5424", tlsCaPath: "", tlsCertPath: "", tlsKeyPath: "" };
+  var retentionDefaults = { retentionDays: 7, minLevel: "info" };
 
   try {
     var results = await Promise.all([
       api.events.getArchiveSettings().catch(function () { return null; }),
       api.events.getSyslogSettings().catch(function () { return null; }),
+      api.events.getRetentionSettings().catch(function () { return null; }),
     ]);
     if (results[0]) {
       var s = results[0];
@@ -210,6 +211,10 @@ async function openEventSettingsModal() {
       syslogDefaults.tlsCertPath = sl.tlsCertPath || "";
       syslogDefaults.tlsKeyPath = sl.tlsKeyPath || "";
     }
+    if (results[2]) {
+      retentionDefaults.retentionDays = results[2].retentionDays || 7;
+      retentionDefaults.minLevel = results[2].minLevel || "info";
+    }
   } catch (_) {}
 
   var body =
@@ -217,6 +222,7 @@ async function openEventSettingsModal() {
     '<div class="settings-tabs">' +
       '<button class="settings-tab' + (_activeSettingsTab === "archive" ? ' active' : '') + '" data-tab="archive">Archive Export</button>' +
       '<button class="settings-tab' + (_activeSettingsTab === "syslog" ? ' active' : '') + '" data-tab="syslog">Syslog</button>' +
+      '<button class="settings-tab' + (_activeSettingsTab === "retention" ? ' active' : '') + '" data-tab="retention">Retention</button>' +
     '</div>' +
     // Archive tab panel
     '<div class="settings-tab-panel' + (_activeSettingsTab === "archive" ? ' active' : '') + '" id="tab-archive">' +
@@ -225,11 +231,15 @@ async function openEventSettingsModal() {
     // Syslog tab panel
     '<div class="settings-tab-panel' + (_activeSettingsTab === "syslog" ? ' active' : '') + '" id="tab-syslog">' +
       syslogFormHTML(syslogDefaults) +
+    '</div>' +
+    // Retention tab panel
+    '<div class="settings-tab-panel' + (_activeSettingsTab === "retention" ? ' active' : '') + '" id="tab-retention">' +
+      retentionFormHTML(retentionDefaults) +
     '</div>';
 
   var footer =
     '<div id="settings-footer-left" style="margin-right:auto;display:flex;gap:8px">' +
-      '<button class="btn btn-secondary" id="btn-settings-test">Test Connection</button>' +
+      '<button class="btn btn-secondary" id="btn-settings-test"' + (_activeSettingsTab === "retention" ? ' style="display:none"' : '') + '>Test Connection</button>' +
     '</div>' +
     '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-settings-save">Save</button>';
@@ -245,6 +255,8 @@ async function openEventSettingsModal() {
       document.querySelectorAll(".settings-tab-panel").forEach(function (p) { p.classList.remove("active"); });
       tab.classList.add("active");
       document.getElementById("tab-" + target).classList.add("active");
+      var testBtn = document.getElementById("btn-settings-test");
+      if (testBtn) testBtn.style.display = target === "retention" ? "none" : "";
       updateSyslogTlsVisibility();
     });
   });
@@ -299,9 +311,12 @@ async function openEventSettingsModal() {
       if (_activeSettingsTab === "archive") {
         await api.events.updateArchiveSettings(getArchiveFormData());
         showToast("Archive settings saved");
-      } else {
+      } else if (_activeSettingsTab === "syslog") {
         await api.events.updateSyslogSettings(getSyslogFormData());
         showToast("Syslog settings saved");
+      } else {
+        await api.events.updateRetentionSettings(getRetentionFormData());
+        showToast("Retention settings saved");
       }
       closeModal();
     } catch (err) {
@@ -320,7 +335,7 @@ function archiveFormHTML(d) {
       '<input type="checkbox" id="f-archive-enabled"' + (d.enabled ? ' checked' : '') + '>' +
       '<span>Enable automatic archive export</span>' +
     '</label>' +
-    '<p class="hint">When enabled, events older than 7 days are archived and sent to the remote server before being pruned.</p>' +
+    '<p class="hint">When enabled, events are archived and sent to the remote server before being pruned per the configured retention period.</p>' +
   '</div>' +
   '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
   '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection</p>' +
@@ -444,6 +459,34 @@ function getSyslogFormData() {
     tlsCaPath: document.getElementById("f-syslog-tlsca").value.trim(),
     tlsCertPath: document.getElementById("f-syslog-tlscert").value.trim(),
     tlsKeyPath: document.getElementById("f-syslog-tlskey").value.trim(),
+  };
+}
+
+// ─── Retention Tab Form ─────────────────────────────────────────────────────
+
+function retentionFormHTML(d) {
+  return '<div class="form-group">' +
+    '<label>Retention Period (days)</label>' +
+    '<input type="number" id="f-retention-days" value="' + escapeHtml(String(d.retentionDays)) + '" min="1" max="365" style="max-width:120px">' +
+    '<p class="hint">Events older than this many days are automatically deleted. ' +
+      'If archive export is enabled, events are archived before being removed. ' +
+      'Default is 7 days.</p>' +
+  '</div>' +
+  '<div class="form-group">' +
+    '<label>Minimum Event Level</label>' +
+    '<select id="f-retention-minlevel" style="max-width:200px">' +
+      '<option value="info"' + (d.minLevel === "info" ? ' selected' : '') + '>Info — store all events</option>' +
+      '<option value="warning"' + (d.minLevel === "warning" ? ' selected' : '') + '>Warning — skip info events</option>' +
+      '<option value="error"' + (d.minLevel === "error" ? ' selected' : '') + '>Error — skip info and warning events</option>' +
+    '</select>' +
+    '<p class="hint">Events below this level are not written to the log. Default is Info (all events stored).</p>' +
+  '</div>';
+}
+
+function getRetentionFormData() {
+  return {
+    retentionDays: Math.max(1, parseInt(document.getElementById("f-retention-days").value, 10) || 7),
+    minLevel: document.getElementById("f-retention-minlevel").value || "info",
   };
 }
 

@@ -1161,6 +1161,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               });
               existingRes.hostname = proposedHostname;
             }
+          } else if (existingRes.sourceType === "dhcp_reservation" || existingRes.sourceType === "dhcp_lease") {
+            // DHCP reservation takes precedence — store VIP metadata for display in the UI
+            const newVipInfo = { name: vip.name, device: vip.device, extip: vip.extip, role };
+            const cur = existingRes.vipInfo as any;
+            if (!cur || cur.name !== newVipInfo.name || cur.device !== newVipInfo.device || cur.role !== newVipInfo.role) {
+              await prisma.reservation.update({
+                where: { id: existingRes.id },
+                data: { vipInfo: newVipInfo },
+              });
+              existingRes.vipInfo = newVipInfo;
+            }
           }
           continue;
         }

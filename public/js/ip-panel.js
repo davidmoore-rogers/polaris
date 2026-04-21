@@ -199,7 +199,14 @@ function _renderIpList(data) {
       statusLabel = "Available";
     }
 
-    var hostname = r ? escapeHtml(r.hostname || "-") : '<span style="color:var(--color-text-tertiary)">-</span>';
+    var hostnameText = r ? escapeHtml(r.hostname || "-") : '<span style="color:var(--color-text-tertiary)">-</span>';
+    var vipBadge = "";
+    if (r && r.vipInfo) {
+      var vi = r.vipInfo;
+      var vipTip = "VIP: " + escapeHtml(vi.name || "") + " (" + escapeHtml(vi.role || "") + ") on " + escapeHtml(vi.device || "") + " — ext: " + escapeHtml(vi.extip || "");
+      vipBadge = ' <span class="vip-badge" title="' + vipTip + '">VIP</span>';
+    }
+    var hostname = hostnameText + vipBadge;
     var macMatch = r && r.notes ? r.notes.match(/MAC:\s*([\w:]+)/) : null;
     var macDisplay = macMatch
       ? '<span class="mono" style="font-size:0.75rem">' + escapeHtml(macMatch[1]) + '</span>'

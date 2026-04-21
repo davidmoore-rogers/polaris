@@ -1003,6 +1003,27 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .badge-assets-admin { background: rgba(0,188,212,0.12); color: #00bcd4; border: 1px solid rgba(0,188,212,0.25); }
 .badge-readonly { background: rgba(158,158,158,0.12); color: #9e9e9e; border: 1px solid rgba(158,158,158,0.25); }
 
+.vip-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  vertical-align: middle;
+  background: rgba(156,39,176,0.15);
+  color: #ce93d8;
+  border: 1px solid rgba(156,39,176,0.30);
+  cursor: default;
+  text-transform: uppercase;
+}
+[data-theme="light"] .vip-badge {
+  background: rgba(156,39,176,0.10);
+  color: #7b1fa2;
+  border-color: rgba(156,39,176,0.30);
+}
+
 /* ─── Utilization Bar ──────────────────────────────────────────────────────── */
 .util-bar-track {
   height: 6px;
@@ -1206,8 +1227,10 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   display: flex;
   flex-direction: column;
   gap: 8px;
+  pointer-events: none;
 }
 .toast {
+  pointer-events: auto;
   padding: 0.65rem 1rem;
   border-radius: var(--radius-md);
   font-size: 0.85rem;
@@ -1218,6 +1241,20 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 .toast-success { background: rgba(0,200,83,0.15); color: var(--color-success); border: 1px solid rgba(0,200,83,0.3); }
 .toast-error   { background: rgba(255,23,68,0.15); color: var(--color-danger); border: 1px solid rgba(255,23,68,0.3); }
+.toast { display: flex; align-items: center; gap: 0.5rem; }
+.toast-copy-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  opacity: 0.55;
+  color: inherit;
+  line-height: 0;
+  border-radius: 3px;
+  transition: opacity 0.15s;
+}
+.toast-copy-btn:hover { opacity: 1; }
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }

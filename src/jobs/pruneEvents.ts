@@ -11,14 +11,14 @@
 
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { archiveAndExport } from "../services/eventArchiveService.js";
+import { archiveAndExport, getRetentionSettings } from "../services/eventArchiveService.js";
 
 const INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-const RETENTION_DAYS = 7;
 
 async function pruneOldEvents(): Promise<void> {
   try {
-    const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const { retentionDays } = await getRetentionSettings();
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
 
     // Archive events before pruning (only if export is configured)
     try {
@@ -34,7 +34,7 @@ async function pruneOldEvents(): Promise<void> {
       where: { timestamp: { lt: cutoff } },
     });
     if (count > 0) {
-      logger.info({ count }, "Pruned old events (>7 days)");
+      logger.info({ count, retentionDays }, `Pruned old events (>${retentionDays} days)`);
     }
   } catch (err) {
     logger.error(err, "Error running event prune job");

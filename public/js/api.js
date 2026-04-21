@@ -133,6 +133,8 @@ const api = {
     getSyslogSettings: () => request("GET", "/events/syslog-settings"),
     updateSyslogSettings: (body) => request("PUT", "/events/syslog-settings", body),
     testSyslogConnection: (body) => trackedRequest("Testing syslog connection", "POST", "/events/syslog-test", body),
+    getRetentionSettings: () => request("GET", "/events/retention-settings"),
+    updateRetentionSettings: (body) => request("PUT", "/events/retention-settings", body),
   },
   serverSettings: {
     getNtp:      ()       => request("GET", "/server-settings/ntp"),
