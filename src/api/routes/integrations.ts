@@ -431,8 +431,8 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
         // FortiManager: onDeviceComplete fires after each managed FortiGate is queried,
         // syncing subnets/assets/reservations incrementally.
         discoveryResult = await fortimanager.discoverDhcpSubnets(config as any, ac.signal, onProgress, integration.pollInterval ?? 24, onDeviceComplete);
-        // Run stale deprecation once, now that the full device list is known.
-        await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "deprecation-only");
+        // Run deprecation + DNS/OUI lookups once, now that all devices have been synced.
+        await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "finalize");
       }
 
       // ── ORIGINAL BATCH SYNC (commented out — replaced by per-device callback above) ──
@@ -728,9 +728,10 @@ class AssetIndex {
  * in chunks of 50 via Promise.allSettled for throughput.
  */
 // "full"               — run all 9 phases (original batch behaviour, kept for reference)
-// "skip-deprecation"   — run phases 1, 3–9 but not phase 2 (used in per-device syncs)
-// "deprecation-only"   — run only phase 2 (used after all per-device syncs complete)
-type SyncMode = "full" | "skip-deprecation" | "deprecation-only";
+// "skip-deprecation"   — run phases 1, 3–7 only (used in per-device syncs; no deprecation or DNS/OUI)
+// "deprecation-only"   — run only phase 2 (legacy; prefer "finalize")
+// "finalize"           — run phase 2 + phases 8–9; called once after all per-device syncs complete
+type SyncMode = "full" | "skip-deprecation" | "deprecation-only" | "finalize";
 
 async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full") {
   const syncLog = (level: "info" | "error", message: string) => {
@@ -805,7 +806,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // Collect the set of FortiGate device names in this discovery
   const discoveredDeviceNames = new Set(result.devices.map((d) => d.name));
 
-  if (mode !== "deprecation-only") {
+  if (mode === "full" || mode === "skip-deprecation") {
   // ══════════════════════════════════════════════════════════════════════════════
   // Phase 1 — Sync subnets (in-memory lookups, individual creates)
   // ══════════════════════════════════════════════════════════════════════════════
@@ -886,7 +887,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       prisma.subnet.update({ where: { id: u.id }, data: u.data })
     );
   }
-  } // end mode !== "deprecation-only" (Phase 1)
+  } // end Phases 1 (full | skip-deprecation)
 
   if (mode !== "skip-deprecation") {
   // ══════════════════════════════════════════════════════════════════════════════
@@ -914,7 +915,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
   } // end mode !== "skip-deprecation" (Phase 2)
 
-  if (mode !== "deprecation-only") {
+  if (mode === "full" || mode === "skip-deprecation") {
   // ══════════════════════════════════════════════════════════════════════════════
   // Phase 3 — Create/update FortiGate device assets (in-memory serial lookup)
   // ══════════════════════════════════════════════════════════════════════════════
@@ -1547,6 +1548,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     }
   }
 
+  } // end Phases 3–7 (full | skip-deprecation)
+
+  if (mode === "full" || mode === "finalize") {
   // ══════════════════════════════════════════════════════════════════════════════
   // Phase 8 — DNS reverse lookup for assets missing dnsName
   // ══════════════════════════════════════════════════════════════════════════════
@@ -1618,7 +1622,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     }
   }
 
-  } // end mode !== "deprecation-only" (Phases 3–9)
+  } // end Phases 8–9 (full | finalize)
 
   return { created, updated, skipped, deprecated, assets: assetNames, reservations: reservationNames, vips: vipNames.length, dhcpLeases: dhcpLeases.length, dhcpReservations: dhcpReservations.length, inventoryDevices: inventoryAssets.length, dnsResolved, ouiResolved, ouiOverridden };
 }
