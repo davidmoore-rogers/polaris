@@ -58,6 +58,8 @@ function openIpPanel(subnetId) {
 function closeIpPanel() {
   var overlay = document.getElementById("ip-panel-overlay");
   if (overlay) overlay.classList.remove("open");
+  var activeRow = document.querySelector("tr.row-panel-active");
+  if (activeRow) activeRow.classList.remove("row-panel-active");
   if (_ipPanelDirty && typeof loadSubnets === "function") loadSubnets();
   _ipPanelSubnetId = null;
   _ipPanelData = null;

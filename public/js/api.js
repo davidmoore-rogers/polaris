@@ -118,6 +118,12 @@ const api = {
     discoveries:   ()    => request("GET", "/integrations/discoveries"),
     abortDiscover: (id)  => request("DELETE", `/integrations/${id}/discover`),
   },
+  conflicts: {
+    list:   (params) => request("GET", "/conflicts" + toQuery(params)),
+    count:  ()       => request("GET", "/conflicts/count"),
+    accept: (id)     => request("POST", `/conflicts/${id}/accept`),
+    reject: (id)     => request("POST", `/conflicts/${id}/reject`),
+  },
   events: {
     list: (params) => request("GET", "/events" + toQuery(params)),
     getArchiveSettings: () => request("GET", "/events/archive-settings"),

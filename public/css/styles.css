@@ -87,6 +87,8 @@
 [data-theme="light"] .sidebar-bottom-link-logout:hover { background: rgba(198,40,40,0.08); color: var(--color-danger); }
 [data-theme="light"] tbody tr:hover { background: rgba(2,136,209,0.04); }
 [data-theme="light"] .ip-table tbody tr:hover { background: rgba(2,136,209,0.04); }
+[data-theme="light"] tr.row-panel-active,
+[data-theme="light"] tr.row-panel-active:hover { background: rgba(2,136,209,0.08) !important; box-shadow: inset 3px 0 0 #0288d1; }
 [data-theme="light"] .toast-success { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
 [data-theme="light"] .toast-error   { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
 [data-theme="light"] input:focus, [data-theme="light"] select:focus, [data-theme="light"] textarea:focus {
@@ -813,6 +815,8 @@ tbody td {
 }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: rgba(79,195,247,0.04); }
+tr.row-panel-active,
+tr.row-panel-active:hover { background: rgba(79,195,247,0.08) !important; box-shadow: inset 3px 0 0 var(--color-accent); }
 td.mono { font-family: var(--font-mono); font-size: 0.82rem; }
 td.actions {
   display: flex;
@@ -1334,6 +1338,45 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .conflict-table .conflict-changed strong {
   color: var(--color-warning);
 }
+
+/* ─── Conflict Panel Cards ─────────────────────────────────────────────────── */
+.conflict-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  margin: 0.75rem 1rem;
+  overflow: hidden;
+}
+.conflict-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0.65rem 0.9rem;
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.88rem;
+}
+.conflict-card-header strong {
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  color: var(--color-text-primary);
+}
+.conflict-card-subnet {
+  color: var(--color-text-tertiary);
+  font-size: 0.78rem;
+  margin-left: auto;
+}
+.conflict-card-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 0.6rem 0.9rem;
+  background: var(--color-bg-secondary);
+  border-top: 1px solid var(--color-border);
+}
+.badge-source-vip        { background: rgba(156,39,176,0.12); color: #ce93d8; border: 1px solid rgba(156,39,176,0.25); }
+.badge-source-dhcp       { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); }
+.badge-source-interface  { background: rgba(255,152,0,0.12); color: #ff9800; border: 1px solid rgba(255,152,0,0.25); }
+.badge-source-device     { background: rgba(0,200,83,0.12); color: var(--color-success); border: 1px solid rgba(0,200,83,0.25); }
 
 /* ─── Asset Badges & Styles ───────────────────────────────────────────────── */
 .badge-asset-type {

@@ -219,6 +219,14 @@ export interface DiscoveredFortiAP {
   osVersion: string;
 }
 
+export interface DiscoveredVip {
+  device: string;      // FortiGate device name
+  name: string;        // VIP object name (used as hostname on reservations)
+  extip: string;       // External IP address
+  mappedips: string[]; // Internal mapped IP addresses
+  extintf: string;     // External interface name
+}
+
 export interface DiscoveryResult {
   subnets: DiscoveredSubnet[];
   devices: DiscoveredDevice[];
@@ -227,6 +235,7 @@ export interface DiscoveryResult {
   deviceInventory: DiscoveredInventoryDevice[];
   fortiSwitches: DiscoveredFortiSwitch[];
   fortiAps: DiscoveredFortiAP[];
+  vips: DiscoveredVip[];
 }
 
 export type DiscoveryProgressCallback = (
@@ -270,7 +279,7 @@ export async function discoverDhcpSubnets(
   const devicesData = devicesRes.result?.[0]?.data;
   if (!Array.isArray(devicesData) || devicesData.length === 0) {
     log("discover.devices", "info", `No managed devices found in ADOM "${adom}"`);
-    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [] };
+    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [], vips: [] };
   }
   log("discover.devices", "info", `Found ${devicesData.length} managed device(s) in ADOM "${adom}"`);
 
@@ -281,6 +290,7 @@ export async function discoverDhcpSubnets(
   const deviceInventory: DiscoveredInventoryDevice[] = [];
   const fortiSwitches: DiscoveredFortiSwitch[] = [];
   const fortiAps: DiscoveredFortiAP[] = [];
+  const vips: DiscoveredVip[] = [];
 
   // Step 2: For each device, query DHCP server configs + interfaces
   for (const device of devicesData) {
@@ -306,6 +316,7 @@ export async function discoverDhcpSubnets(
     const invBefore = deviceInventory.length;
     const switchBefore = fortiSwitches.length;
     const apBefore = fortiAps.length;
+    const vipBefore = vips.length;
 
     log("discover.device.start", "info", `Starting discovery for ${deviceName}`, deviceName);
 
@@ -704,6 +715,49 @@ export async function discoverDhcpSubnets(
       } catch (err: any) {
         log("discover.fortiaps", "error", `${deviceName}: Failed to query managed FortiAPs — ${err.message || "Unknown error"}`, deviceName);
       }
+
+      // Step 3e: Query firewall VIPs from FortiGate config via FMG
+      try {
+        const vipPayload: JsonRpcRequest = {
+          id: 11,
+          method: "get",
+          params: [{ url: `/pm/config/device/${deviceName}/vdom/root/firewall/vip` }],
+        };
+        const vipRes = await rpc(baseUrl, vipPayload, apiUser, apiToken, verifySsl, signal);
+        const vipData = vipRes.result?.[0]?.data;
+        let vipCount = 0;
+        if (Array.isArray(vipData)) {
+          for (const vip of vipData) {
+            const name = vip.name || "";
+            if (!name) continue;
+
+            // Parse extip — may be "1.2.3.4" or "1.2.3.4-1.2.3.5"
+            const extip = parseRangeFirstIp(String(vip.extip || ""));
+            if (!extip) continue;
+
+            // Parse mappedip array: [{range: "10.0.0.1-10.0.0.1"}, ...]
+            const mappedips: string[] = [];
+            if (Array.isArray(vip.mappedip)) {
+              for (const m of vip.mappedip) {
+                const ip = parseRangeFirstIp(String(m.range || ""));
+                if (ip) mappedips.push(ip);
+              }
+            }
+
+            vips.push({
+              device: deviceName,
+              name,
+              extip,
+              mappedips,
+              extintf: vip.extintf || "",
+            });
+            vipCount++;
+          }
+        }
+        log("discover.vips", "info", `${deviceName}: Found ${vipCount} firewall VIP(s)`, deviceName);
+      } catch (err: any) {
+        log("discover.vips", "error", `${deviceName}: Failed to query firewall VIPs — ${err.message || "Unknown error"}`, deviceName);
+      }
     } catch (err: any) {
       log("discover.device", "error", `${deviceName}: Failed to query device — ${err.message || "Unknown error"}`, deviceName);
     }
@@ -732,6 +786,7 @@ export async function discoverDhcpSubnets(
           ),
           fortiSwitches: fortiSwitches.slice(switchBefore),
           fortiAps: fortiAps.slice(apBefore),
+          vips: vips.slice(vipBefore),
         });
       } catch (err: any) {
         log("discover.device", "error", `${deviceName}: Per-device sync failed — ${err.message || "Unknown error"}`, deviceName);
@@ -769,7 +824,15 @@ export async function discoverDhcpSubnets(
   const excluded = discovered.length - filteredSubnets.length;
   log("discover.filter", "info", `Filter complete: ${filteredSubnets.length} subnet(s) included, ${excluded} excluded, ${filteredDhcpEntries.length} DHCP entries, ${filteredInventory.length} inventory device(s)`);
 
-  return { subnets: filteredSubnets, devices, interfaceIps: filteredIps, dhcpEntries: filteredDhcpEntries, deviceInventory: filteredInventory, fortiSwitches, fortiAps };
+  return { subnets: filteredSubnets, devices, interfaceIps: filteredIps, dhcpEntries: filteredDhcpEntries, deviceInventory: filteredInventory, fortiSwitches, fortiAps, vips };
+}
+
+/** Extract the first (start) IP from a range string like "1.2.3.4-1.2.3.5" or a plain IP. */
+function parseRangeFirstIp(rangeStr: string): string | null {
+  if (!rangeStr) return null;
+  const ip = rangeStr.split("-")[0].trim();
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip) && ip !== "0.0.0.0") return ip;
+  return null;
 }
 
 function filterDhcpResults(

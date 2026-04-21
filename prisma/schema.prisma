@@ -29,6 +29,23 @@ enum ReservationStatus {
   released
 }
 
+enum ReservationSourceType {
+  manual
+  dhcp_reservation
+  dhcp_lease
+  interface_ip
+  vip
+  fortiswitch
+  fortinap
+  fortimanager
+}
+
+enum ConflictStatus {
+  pending
+  accepted
+  rejected
+}
+
 enum UserRole {
   admin
   networkadmin
@@ -96,12 +113,15 @@ model Reservation {
   projectRef String?
   expiresAt  DateTime?
   notes      String?           @db.Text
-  status     ReservationStatus @default(active)
-  createdBy  String?                              // Username of the user who created this reservation
-  conflictMessage String?                         // Set by discovery when DHCP data conflicts with this reservation
+  status     ReservationStatus     @default(active)
+  sourceType ReservationSourceType @default(manual)
+  createdBy  String?
+  conflictMessage String?
 
   createdAt  DateTime          @default(now())
   updatedAt  DateTime          @updatedAt
+
+  conflicts  Conflict[]
 
   @@unique([subnetId, ipAddress, status])
   @@index([subnetId])
@@ -250,4 +270,31 @@ model Tag {
 
   @@index([category])
   @@map("tags")
+}
+
+model Conflict {
+  id                 String         @id @default(uuid())
+  reservationId      String
+  reservation        Reservation    @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  integrationId      String?
+
+  proposedHostname   String?
+  proposedOwner      String?
+  proposedProjectRef String?
+  proposedNotes      String?        @db.Text
+  proposedSourceType String
+
+  conflictFields     String[]
+
+  status             ConflictStatus @default(pending)
+  resolvedBy         String?
+  resolvedAt         DateTime?
+
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  @@index([reservationId])
+  @@index([status])
+  @@index([integrationId])
+  @@map("conflicts")
 }

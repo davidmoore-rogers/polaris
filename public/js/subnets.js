@@ -76,6 +76,10 @@ document.addEventListener("DOMContentLoaded", async function () {
     var link = e.target.closest(".subnet-name-link");
     if (!link) return;
     e.preventDefault();
+    var prev = document.querySelector("tr.row-panel-active");
+    if (prev) prev.classList.remove("row-panel-active");
+    var row = link.closest("tr");
+    if (row) row.classList.add("row-panel-active");
     openIpPanel(link.getAttribute("data-subnet-id"));
   });
   document.getElementById("subnets-select-all").addEventListener("change", function () {

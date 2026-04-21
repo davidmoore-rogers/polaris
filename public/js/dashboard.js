@@ -61,7 +61,7 @@ function renderDonut(data) {
     return '<div style="margin-bottom:6px"><div class="legend-item"><span class="legend-dot" style="background:' + d.color + '"></span>' + d.label + '</div><span style="font-size:1.2rem;font-weight:500">' + d.value + '</span></div>';
   }).join("");
 
-  container.innerHTML = '<div style="display:flex;align-items:center;gap:20px">' + svg + '<div>' + legend + '</div></div>';
+  container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;gap:20px">' + svg + '<div>' + legend + '</div></div>';
 }
 
 function renderBarChart(data) {

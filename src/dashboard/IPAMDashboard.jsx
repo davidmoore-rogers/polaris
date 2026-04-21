@@ -111,7 +111,7 @@ export default function IPAMDashboard() {
         {/* Donut */}
         <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: 12, padding: "1rem 1.25rem" }}>
           <p style={{ margin: "0 0 12px", fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)" }}>Subnet status</p>
-          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 16 }}>
             <svg width="140" height="140" viewBox="0 0 140 140" aria-label={`Donut chart: ${subnetsByStatus.available} available, ${subnetsByStatus.reserved} reserved, ${subnetsByStatus.deprecated} deprecated`} role="img">
               {arcs.map((arc, i) => (
                 <circle key={i} cx={cx} cy={cy} r={r}
@@ -166,66 +166,71 @@ export default function IPAMDashboard() {
         </div>
       </div>
 
-      {/* Block utilization list */}
-      <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: 12, padding: "1rem 1.25rem", marginBottom: "1.5rem" }}>
-        <p style={{ margin: "0 0 14px", fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)" }}>Block utilization</p>
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          {blockUtilization.map(b => (
-            <div key={b.id}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 13, fontWeight: 500 }}>{b.name}</span>
-                  <code style={{ fontSize: 11, color: "var(--color-text-tertiary)", background: "var(--color-background-secondary)", padding: "1px 6px", borderRadius: 4 }}>{b.cidr}</code>
-                </div>
-                <span style={{ fontSize: 12, color: "var(--color-text-tertiary)" }}>{b.reservedSubnets + b.deprecatedSubnets}/{b.totalSubnets} subnets</span>
-              </div>
-              <UtilBar
-                used={b.reservedSubnets + b.deprecatedSubnets}
-                total={b.totalSubnets}
-                color={b.usedPercent > 75 ? "#E24B4A" : b.usedPercent > 50 ? "#EF9F27" : "#378ADD"}
-              />
-            </div>
-          ))}
-        </div>
-      </div>
+      {/* Block utilization + Recent reservations */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
 
-      {/* Recent reservations */}
-      <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: 12, padding: "1rem 1.25rem" }}>
-        <p style={{ margin: "0 0 14px", fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)" }}>Recently reserved</p>
-        <div style={{ display: "flex", flexDirection: "column" }}>
-          {recentReservations.map((r, i) => (
-            <div key={r.id} style={{
-              display: "grid",
-              gridTemplateColumns: "1fr auto",
-              alignItems: "start",
-              gap: 12,
-              padding: "10px 0",
-              borderTop: i === 0 ? "none" : "0.5px solid var(--color-border-tertiary)",
-            }}>
-              <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-                  <span style={{ fontSize: 13, fontWeight: 500 }}>{r.subnetName}</span>
-                  <code style={{ fontSize: 11, color: "var(--color-text-tertiary)", background: "var(--color-background-secondary)", padding: "1px 6px", borderRadius: 4 }}>{r.subnetCidr}</code>
-                  {r.vlan && (
-                    <span style={{ fontSize: 11, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 4 }}>VLAN {r.vlan}</span>
-                  )}
-                  {r.ipAddress && (
-                    <span style={{ fontSize: 11, color: "#3B6D11", background: "#EAF3DE", padding: "1px 6px", borderRadius: 4 }}>{r.ipAddress}</span>
-                  )}
+        {/* Block utilization list */}
+        <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: 12, padding: "1rem 1.25rem" }}>
+          <p style={{ margin: "0 0 14px", fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)" }}>Block utilization</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {blockUtilization.map(b => (
+              <div key={b.id}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 13, fontWeight: 500 }}>{b.name}</span>
+                    <code style={{ fontSize: 11, color: "var(--color-text-tertiary)", background: "var(--color-background-secondary)", padding: "1px 6px", borderRadius: 4 }}>{b.cidr}</code>
+                  </div>
+                  <span style={{ fontSize: 12, color: "var(--color-text-tertiary)" }}>{b.reservedSubnets + b.deprecatedSubnets}/{b.totalSubnets} subnets</span>
                 </div>
-                {r.subnetPurpose && (
-                  <p style={{ margin: "0 0 4px", fontSize: 12, color: "var(--color-text-tertiary)" }}>{r.subnetPurpose}</p>
-                )}
-                <div style={{ display: "flex", gap: 12, fontSize: 12, color: "var(--color-text-secondary)" }}>
-                  <span>{r.owner}</span>
-                  <span style={{ color: "var(--color-text-tertiary)" }}>·</span>
-                  <span>{r.projectRef}</span>
-                </div>
+                <UtilBar
+                  used={b.reservedSubnets + b.deprecatedSubnets}
+                  total={b.totalSubnets}
+                  color={b.usedPercent > 75 ? "#E24B4A" : b.usedPercent > 50 ? "#EF9F27" : "#378ADD"}
+                />
               </div>
-              <span style={{ fontSize: 11, color: "var(--color-text-tertiary)", whiteSpace: "nowrap", paddingTop: 2 }}>{timeAgo(r.createdAt)}</span>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
+
+        {/* Recent reservations */}
+        <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: 12, padding: "1rem 1.25rem" }}>
+          <p style={{ margin: "0 0 14px", fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)" }}>Recently reserved</p>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {recentReservations.map((r, i) => (
+              <div key={r.id} style={{
+                display: "grid",
+                gridTemplateColumns: "1fr auto",
+                alignItems: "start",
+                gap: 12,
+                padding: "10px 0",
+                borderTop: i === 0 ? "none" : "0.5px solid var(--color-border-tertiary)",
+              }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 13, fontWeight: 500 }}>{r.subnetName}</span>
+                    <code style={{ fontSize: 11, color: "var(--color-text-tertiary)", background: "var(--color-background-secondary)", padding: "1px 6px", borderRadius: 4 }}>{r.subnetCidr}</code>
+                    {r.vlan && (
+                      <span style={{ fontSize: 11, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 4 }}>VLAN {r.vlan}</span>
+                    )}
+                    {r.ipAddress && (
+                      <span style={{ fontSize: 11, color: "#3B6D11", background: "#EAF3DE", padding: "1px 6px", borderRadius: 4 }}>{r.ipAddress}</span>
+                    )}
+                  </div>
+                  {r.subnetPurpose && (
+                    <p style={{ margin: "0 0 4px", fontSize: 12, color: "var(--color-text-tertiary)" }}>{r.subnetPurpose}</p>
+                  )}
+                  <div style={{ display: "flex", gap: 12, fontSize: 12, color: "var(--color-text-secondary)" }}>
+                    <span>{r.owner}</span>
+                    <span style={{ color: "var(--color-text-tertiary)" }}>·</span>
+                    <span>{r.projectRef}</span>
+                  </div>
+                </div>
+                <span style={{ fontSize: 11, color: "var(--color-text-tertiary)", whiteSpace: "nowrap", paddingTop: 2 }}>{timeAgo(r.createdAt)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
       </div>
     </div>
   );

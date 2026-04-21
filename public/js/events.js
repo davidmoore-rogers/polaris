@@ -447,6 +447,154 @@ function getSyslogFormData() {
   };
 }
 
+/* ─── Conflict Resolution Panel ──────────────────────────────────────────── */
+
+(function () {
+  var overlay = document.getElementById("conflict-overlay");
+  var panel = document.getElementById("conflict-panel");
+  var closeBtn = document.getElementById("conflict-panel-close");
+  var filterSel = document.getElementById("conflict-panel-filter");
+  var body = document.getElementById("conflict-panel-body");
+  var countEl = document.getElementById("conflict-panel-count");
+  var badge = document.getElementById("conflict-badge");
+  var btn = document.getElementById("btn-conflicts");
+  if (!btn || !overlay) return;
+
+  // Load pending count for badge on page load
+  async function refreshBadge() {
+    try {
+      var data = await api.conflicts.count();
+      var n = data.count || 0;
+      if (n > 0) {
+        badge.textContent = n > 99 ? "99+" : String(n);
+        badge.style.display = "block";
+      } else {
+        badge.style.display = "none";
+      }
+    } catch (_) {}
+  }
+  refreshBadge();
+
+  function openPanel() {
+    overlay.classList.add("open");
+    loadConflicts();
+  }
+
+  function closePanel() {
+    overlay.classList.remove("open");
+    refreshBadge();
+  }
+
+  btn.addEventListener("click", openPanel);
+  closeBtn.addEventListener("click", closePanel);
+  overlay.addEventListener("click", function (e) { if (e.target === overlay) closePanel(); });
+  filterSel.addEventListener("change", loadConflicts);
+
+  async function loadConflicts() {
+    body.innerHTML = '<div class="empty-state" style="padding:2rem">Loading...</div>';
+    try {
+      var status = filterSel.value;
+      var data = await api.conflicts.list({ status: status, limit: 200 });
+      var conflicts = data.conflicts || [];
+      countEl.textContent = conflicts.length + " conflict" + (conflicts.length !== 1 ? "s" : "") + (status !== "all" ? " (" + status + ")" : "");
+      if (!conflicts.length) {
+        body.innerHTML = '<div class="empty-state" style="padding:2rem">No conflicts found.</div>';
+        return;
+      }
+      body.innerHTML = conflicts.map(function (c) { return renderConflictCard(c); }).join("");
+
+      // Bind accept/reject buttons
+      body.querySelectorAll("[data-conflict-action]").forEach(function (el) {
+        el.addEventListener("click", async function () {
+          var id = el.getAttribute("data-conflict-id");
+          var action = el.getAttribute("data-conflict-action");
+          el.disabled = true;
+          try {
+            if (action === "accept") {
+              await api.conflicts.accept(id);
+              showToast("Conflict accepted — discovered values applied");
+            } else {
+              await api.conflicts.reject(id);
+              showToast("Conflict rejected — existing values kept");
+            }
+            loadConflicts();
+            refreshBadge();
+          } catch (err) {
+            showToast(err.message, "error");
+            el.disabled = false;
+          }
+        });
+      });
+    } catch (err) {
+      body.innerHTML = '<div class="empty-state" style="padding:2rem;color:var(--color-danger)">' + escapeHtml(err.message) + '</div>';
+    }
+  }
+
+  function sourceBadgeClass(sourceType) {
+    if (!sourceType) return "badge-source-device";
+    if (sourceType === "vip") return "badge-source-vip";
+    if (sourceType.startsWith("dhcp")) return "badge-source-dhcp";
+    if (sourceType === "interface_ip") return "badge-source-interface";
+    return "badge-source-device";
+  }
+
+  function sourceLabel(sourceType) {
+    var map = {
+      vip: "VIP", dhcp_reservation: "DHCP Reservation", dhcp_lease: "DHCP Lease",
+      interface_ip: "Interface IP", fortiswitch: "FortiSwitch", fortinap: "FortiAP",
+      fortimanager: "FortiManager", manual: "Manual",
+    };
+    return map[sourceType] || sourceType || "Unknown";
+  }
+
+  function renderConflictCard(c) {
+    var res = c.reservation || {};
+    var subnet = res.subnet || {};
+    var block = subnet.block || {};
+    var ip = res.ipAddress || "(full subnet)";
+    var subnetLabel = subnet.cidr || "";
+    if (subnet.name) subnetLabel += " — " + subnet.name;
+    var isResolved = c.status !== "pending";
+
+    var fields = ["hostname", "owner", "projectRef", "notes"];
+    var rows = fields.map(function (f) {
+      var existingVal = res[f] || null;
+      var proposedKey = "proposed" + f.charAt(0).toUpperCase() + f.slice(1);
+      var proposedVal = c[proposedKey] || null;
+      var changed = (c.conflictFields || []).includes(f);
+      return '<tr class="' + (changed ? "conflict-changed" : "") + '">' +
+        '<td class="conflict-field">' + formatFieldName(f) + '</td>' +
+        '<td>' + (existingVal ? escapeHtml(existingVal) : '<span style="color:var(--color-text-tertiary);font-style:italic">—</span>') + '</td>' +
+        '<td>' + (proposedVal ? (changed ? '<strong>' + escapeHtml(proposedVal) + '</strong>' : escapeHtml(proposedVal)) : '<span style="color:var(--color-text-tertiary);font-style:italic">—</span>') + '</td>' +
+        '</tr>';
+    }).join("");
+
+    var actions = isResolved
+      ? '<span class="badge badge-' + c.status + '" style="text-transform:capitalize">' + escapeHtml(c.status) + '</span>' +
+        (c.resolvedBy ? ' <span style="color:var(--color-text-tertiary);font-size:0.75rem">by ' + escapeHtml(c.resolvedBy) + '</span>' : '')
+      : '<button class="btn btn-secondary btn-sm" data-conflict-action="reject" data-conflict-id="' + c.id + '">Reject</button>' +
+        '<button class="btn btn-primary btn-sm" data-conflict-action="accept" data-conflict-id="' + c.id + '">Accept</button>';
+
+    return '<div class="conflict-card">' +
+      '<div class="conflict-card-header">' +
+        '<span class="badge ' + sourceBadgeClass(c.proposedSourceType) + '">' + escapeHtml(sourceLabel(c.proposedSourceType)) + '</span>' +
+        '<strong>' + escapeHtml(ip) + '</strong>' +
+        '<span class="conflict-card-subnet">' + escapeHtml(subnetLabel) + '</span>' +
+      '</div>' +
+      '<div class="conflict-table" style="padding:0">' +
+        '<table><thead><tr>' +
+          '<th class="conflict-field">Field</th>' +
+          '<th>Current (Manual)</th>' +
+          '<th>Discovered</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>' +
+      '</div>' +
+      '<div class="conflict-card-actions">' + actions + '</div>' +
+    '</div>';
+  }
+})();
+
 /* ─── PDF Export ──────────────────────────────────────────────────────────── */
 
 (function () {

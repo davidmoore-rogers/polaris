@@ -1095,7 +1095,7 @@ function _mockOuiLookup(mac) {
 let BRANDING = {
   appName: "Shelob",
   subtitle: "Network Management Tool",
-  logoUrl: "/logo.webp",
+  logoUrl: "/logo.png",
 };
 let _httpsServer = null;
 
@@ -3389,7 +3389,7 @@ async function routeAPI(method, path, params, body, res, req) {
     return json(res, { ...BRANDING });
   }
   if (path === "/api/v1/server-settings/branding/logo" && method === "DELETE") {
-    BRANDING.logoUrl = "/logo.webp";
+    BRANDING.logoUrl = "/logo.png";
     logEventDemo({ action: "branding.logo.reset", resourceType: "settings", resourceId: "branding", resourceName: "Logo", message: "Logo reset to default" });
     return json(res, { ...BRANDING });
   }

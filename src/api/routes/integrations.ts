@@ -10,7 +10,7 @@ import { requireNetworkAdmin } from "../middleware/auth.js";
 import * as fortimanager from "../../services/fortimanagerService.js";
 import * as windowsServer from "../../services/windowsServerService.js";
 import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps } from "../../utils/cidr.js";
-import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
+import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveredVip, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
 import { logEvent } from "./events.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
@@ -166,11 +166,11 @@ router.post("/", async (req, res, next) => {
         let discoveryResult: DiscoveryResult;
         if (input.type === "windowsserver") {
           const subnets = await windowsServer.discoverDhcpScopes(input.config as any, ac.signal);
-          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [] };
+          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [], vips: [] };
         } else {
           discoveryResult = await fortimanager.discoverDhcpSubnets(input.config as any, ac.signal);
         }
-        const syncResult = await syncDhcpSubnets(integration.id, input.name, input.type, discoveryResult, req.session?.username);
+        const syncResult = await syncDhcpSubnets(integration.id, input.name, input.type, discoveryResult, req.session?.username, "full");
         response.dhcpDiscovery = syncResult;
         logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integration.id, resourceName: input.name, actor: req.session?.username, message: `DHCP discovery completed for "${input.name}" — ${syncResult.created.length} created, ${syncResult.updated.length} updated, ${syncResult.skipped.length} skipped` });
       } catch (err: any) {
@@ -251,7 +251,7 @@ router.put("/:id", async (req, res, next) => {
         let discoveryResult: DiscoveryResult;
         if (existing.type === "windowsserver") {
           const subnets = await windowsServer.discoverDhcpScopes(finalConfig as any, ac.signal);
-          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [] };
+          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [], vips: [] };
         } else {
           discoveryResult = await fortimanager.discoverDhcpSubnets(finalConfig as any, ac.signal);
         }
@@ -401,7 +401,7 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
 
       if (integration.type === "windowsserver") {
         const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
-        discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [] };
+        discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [], vips: [] };
         // Windows Server is a single host — no per-device iteration, sync the full result normally
         const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
         syncTotals.created.push(...r.created);
@@ -521,6 +521,7 @@ async function registerFortiManager(host: string, integrationName: string, force
     projectRef: "FortiManager Integration",
     notes: `Auto-registered from FortiManager integration: ${integrationName}`,
     status: "active" as const,
+    sourceType: "fortimanager" as const,
   };
 
   if (matchingSubnet) {
@@ -586,6 +587,49 @@ async function registerFortiManager(host: string, integrationName: string, force
   created.push("asset");
 
   return { conflicts, created };
+}
+
+// ─── Conflict detection helper ────────────────────────────────────────────────
+
+interface ProposedReservationData {
+  hostname?: string | null;
+  owner?: string | null;
+  projectRef?: string | null;
+  notes?: string | null;
+  sourceType: string;
+}
+
+async function upsertConflict(
+  reservationId: string,
+  integrationId: string,
+  proposed: ProposedReservationData,
+  existing: { hostname?: string | null; owner?: string | null; projectRef?: string | null; notes?: string | null },
+): Promise<void> {
+  const conflictFields: string[] = [];
+  if ((proposed.hostname ?? null) !== (existing.hostname ?? null)) conflictFields.push("hostname");
+  if ((proposed.owner ?? null) !== (existing.owner ?? null)) conflictFields.push("owner");
+  if ((proposed.projectRef ?? null) !== (existing.projectRef ?? null)) conflictFields.push("projectRef");
+  if (conflictFields.length === 0) return;
+
+  const existingConflict = await prisma.conflict.findFirst({
+    where: { reservationId, status: "pending" },
+  });
+
+  const conflictData = {
+    integrationId,
+    proposedHostname: proposed.hostname ?? null,
+    proposedOwner: proposed.owner ?? null,
+    proposedProjectRef: proposed.projectRef ?? null,
+    proposedNotes: proposed.notes ?? null,
+    proposedSourceType: proposed.sourceType,
+    conflictFields,
+  };
+
+  if (existingConflict) {
+    await prisma.conflict.update({ where: { id: existingConflict.id }, data: conflictData });
+  } else {
+    await prisma.conflict.create({ data: { reservationId, ...conflictData } });
+  }
 }
 
 // ─── Batch helper ────────────────────────────────────────────────────────────
@@ -677,6 +721,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   const skipped: string[] = [];
   const assetNames: string[] = [];
   const reservationNames: string[] = [];
+  const vipNames: string[] = [];
   const dhcpLeases: string[] = [];
   const dhcpReservations: string[] = [];
   const inventoryAssets: string[] = [];
@@ -952,7 +997,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const matchingSubnet = findSubnetForIp(sw.ipAddress);
       if (matchingSubnet) {
         const key = reservationKey(matchingSubnet.id, sw.ipAddress);
-        if (!activeResMap.has(key)) {
+        const existingRes = activeResMap.get(key);
+        if (existingRes) {
+          if (existingRes.sourceType === "manual") {
+            await upsertConflict(existingRes.id, integrationId, { hostname: sw.name || null, owner: "network-team", projectRef: "FortiManager Integration", notes: `FortiSwitch managed by FortiGate ${sw.device}`, sourceType: "fortiswitch" }, existingRes);
+          }
+        } else {
           try {
             const newRes = await prisma.reservation.create({
               data: {
@@ -963,6 +1013,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
                 projectRef: "FortiManager Integration",
                 notes: `FortiSwitch managed by FortiGate ${sw.device}`,
                 status: "active",
+                sourceType: "fortiswitch",
               },
             });
             activeResMap.set(key, newRes);
@@ -1027,7 +1078,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const matchingSubnet = findSubnetForIp(ap.ipAddress);
       if (matchingSubnet) {
         const key = reservationKey(matchingSubnet.id, ap.ipAddress);
-        if (!activeResMap.has(key)) {
+        const existingRes = activeResMap.get(key);
+        if (existingRes) {
+          if (existingRes.sourceType === "manual") {
+            await upsertConflict(existingRes.id, integrationId, { hostname: ap.name || null, owner: "network-team", projectRef: "FortiManager Integration", notes: `FortiAP managed by FortiGate ${ap.device}`, sourceType: "fortinap" }, existingRes);
+          }
+        } else {
           try {
             const newRes = await prisma.reservation.create({
               data: {
@@ -1038,6 +1094,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
                 projectRef: "FortiManager Integration",
                 notes: `FortiAP managed by FortiGate ${ap.device}`,
                 status: "active",
+                sourceType: "fortinap",
               },
             });
             activeResMap.set(key, newRes);
@@ -1047,6 +1104,69 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           }
         }
       }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Phase 3c — Sync firewall VIP reservations
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  if (result.vips && result.vips.length > 0) {
+    for (const vip of result.vips) {
+      const ipsToReserve: Array<{ ip: string; role: "external" | "mapped" }> = [
+        { ip: vip.extip, role: "external" },
+        ...vip.mappedips.map((ip) => ({ ip, role: "mapped" as const })),
+      ];
+
+      for (const { ip, role } of ipsToReserve) {
+        const matchingSubnet = findSubnetForIp(ip);
+        if (!matchingSubnet) continue;
+
+        const key = reservationKey(matchingSubnet.id, ip);
+        const proposedHostname = vip.name;
+        const proposedOwner = "fortimanager-vip";
+        const proposedProjectRef = `VIP: ${vip.device}`;
+        const proposedNotes = `Firewall VIP "${vip.name}" (${role}) on ${vip.device} — ext: ${vip.extip}`;
+
+        const existingRes = activeResMap.get(key);
+        if (existingRes) {
+          if (existingRes.sourceType === "manual") {
+            await upsertConflict(existingRes.id, integrationId, { hostname: proposedHostname, owner: proposedOwner, projectRef: proposedProjectRef, notes: proposedNotes, sourceType: "vip" }, existingRes);
+          } else if (existingRes.sourceType === "vip") {
+            // Update existing VIP reservation if the name changed
+            if (existingRes.hostname !== proposedHostname || existingRes.notes !== proposedNotes) {
+              await prisma.reservation.update({
+                where: { id: existingRes.id },
+                data: { hostname: proposedHostname, owner: proposedOwner, notes: proposedNotes, projectRef: proposedProjectRef },
+              });
+              existingRes.hostname = proposedHostname;
+            }
+          }
+          continue;
+        }
+
+        try {
+          const newRes = await prisma.reservation.create({
+            data: {
+              subnetId: matchingSubnet.id,
+              ipAddress: ip,
+              hostname: proposedHostname,
+              owner: proposedOwner,
+              projectRef: proposedProjectRef,
+              notes: proposedNotes,
+              status: "active",
+              sourceType: "vip",
+            },
+          });
+          activeResMap.set(key, newRes);
+          vipNames.push(`${ip} (${vip.name}/${role})`);
+        } catch (err: any) {
+          syncLog("error", `Failed to create VIP reservation for ${ip} (${vip.name}): ${err.message || "Unknown error"}`);
+        }
+      }
+    }
+    if (vipNames.length > 0) {
+      syncLog("info", `VIP sync: created ${vipNames.length} VIP reservation(s)`);
     }
   }
 
@@ -1061,7 +1181,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     if (!matchingSubnet) continue;
 
     const key = reservationKey(matchingSubnet.id, ifaceIp.ipAddress);
-    if (activeResMap.has(key)) continue; // Already reserved
+    const existingRes = activeResMap.get(key);
+    if (existingRes) {
+      if (existingRes.sourceType === "manual") {
+        const proposed = { hostname: ifaceIp.device, owner: "network-team", projectRef: "FortiManager Integration", notes: `${ifaceIp.role === "management" ? "Management" : "DHCP server"} interface (${ifaceIp.interfaceName}) on ${ifaceIp.device}`, sourceType: "interface_ip" };
+        await upsertConflict(existingRes.id, integrationId, proposed, existingRes);
+      }
+      continue;
+    }
 
     try {
       const newRes = await prisma.reservation.create({
@@ -1073,9 +1200,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           projectRef: "FortiManager Integration",
           notes: `${ifaceIp.role === "management" ? "Management" : "DHCP server"} interface (${ifaceIp.interfaceName}) on ${ifaceIp.device}`,
           status: "active",
+          sourceType: "interface_ip",
         },
       });
-      activeResMap.set(key, newRes); // Track so DHCP phase doesn't duplicate
+      activeResMap.set(key, newRes);
       reservationNames.push(`${ifaceIp.ipAddress} (${ifaceIp.device}/${ifaceIp.interfaceName})`);
     } catch (err: any) {
       syncLog("error", `Failed to create reservation for interface IP ${ifaceIp.ipAddress} on ${ifaceIp.device}/${ifaceIp.interfaceName}: ${err.message || "Unknown error"}`);
@@ -1094,8 +1222,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (!matchingSubnet) continue;
 
       const key = reservationKey(matchingSubnet.id, entry.ipAddress);
-      if (activeResMap.has(key)) continue; // Already reserved
-
       const isDhcpReservation = entry.type === "dhcp-reservation";
 
       // Look up matching asset by MAC (in-memory)
@@ -1104,16 +1230,30 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         matchedAsset = assetIdx.findByMac(entry.macAddress.toUpperCase().replace(/-/g, ":"));
       }
 
+      const proposedHostname = (matchedAsset && matchedAsset.hostname) || entry.hostname || null;
+      const proposedOwner = (matchedAsset && matchedAsset.assignedTo) || (isDhcpReservation ? "dhcp-reservation" : "dhcp-lease");
+      const proposedNotes = `${isDhcpReservation ? "DHCP reservation" : "DHCP lease"} on ${entry.device} (${entry.interfaceName})${entry.macAddress ? " — MAC: " + entry.macAddress : ""}`;
+      const proposedSourceType = isDhcpReservation ? "dhcp_reservation" : "dhcp_lease";
+
+      const existingRes = activeResMap.get(key);
+      if (existingRes) {
+        if (existingRes.sourceType === "manual") {
+          await upsertConflict(existingRes.id, integrationId, { hostname: proposedHostname, owner: proposedOwner, projectRef: "FortiManager Integration", notes: proposedNotes, sourceType: proposedSourceType }, existingRes);
+        }
+        continue;
+      }
+
       try {
         const newRes = await prisma.reservation.create({
           data: {
             subnetId: matchingSubnet.id,
             ipAddress: entry.ipAddress,
-            hostname: (matchedAsset && matchedAsset.hostname) || entry.hostname || null,
-            owner: (matchedAsset && matchedAsset.assignedTo) || (isDhcpReservation ? "dhcp-reservation" : "dhcp-lease"),
+            hostname: proposedHostname,
+            owner: proposedOwner,
             projectRef: "FortiManager Integration",
-            notes: `${isDhcpReservation ? "DHCP reservation" : "DHCP lease"} on ${entry.device} (${entry.interfaceName})${entry.macAddress ? " — MAC: " + entry.macAddress : ""}`,
+            notes: proposedNotes,
             status: "active",
+            sourceType: proposedSourceType,
           },
         });
         activeResMap.set(key, newRes); // Track for MAC cross-update phase
@@ -1422,7 +1562,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
   } // end mode !== "deprecation-only" (Phases 3–9)
 
-  return { created, updated, skipped, deprecated, assets: assetNames, reservations: reservationNames, dhcpLeases: dhcpLeases.length, dhcpReservations: dhcpReservations.length, inventoryDevices: inventoryAssets.length, dnsResolved, ouiResolved, ouiOverridden };
+  return { created, updated, skipped, deprecated, assets: assetNames, reservations: reservationNames, vips: vipNames.length, dhcpLeases: dhcpLeases.length, dhcpReservations: dhcpReservations.length, inventoryDevices: inventoryAssets.length, dnsResolved, ouiResolved, ouiOverridden };
 }
 
 function stripSecret(integration: Record<string, any>) {
