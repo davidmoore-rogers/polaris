@@ -45,10 +45,11 @@ const UpdateSubnetSchema = z.object({
 // GET /subnets?blockId=&status=&tag=&limit=&offset=
 router.get("/", async (req, res, next) => {
   try {
-    const { blockId, status, tag } = req.query as Record<string, string>;
+    const { blockId, status, tag, createdBy } = req.query as Record<string, string>;
     const limit = parseInt(req.query.limit as string, 10) || undefined;
     const offset = parseInt(req.query.offset as string, 10) || undefined;
-    res.json(await subnetService.listSubnets({ blockId, status: status as any, tag, limit, offset }));
+    const resolvedCreatedBy = createdBy === "me" ? (req.session?.username ?? undefined) : (createdBy || undefined);
+    res.json(await subnetService.listSubnets({ blockId, status: status as any, tag, createdBy: resolvedCreatedBy, limit, offset }));
   } catch (err) {
     next(err);
   }
@@ -58,7 +59,7 @@ router.get("/", async (req, res, next) => {
 router.post("/next-available", requireNetworkAdmin, async (req, res, next) => {
   try {
     const { blockId, prefixLength, ...metadata } = AllocateNextSchema.parse(req.body);
-    const subnet = await subnetService.allocateNextSubnet(blockId, prefixLength, metadata);
+    const subnet = await subnetService.allocateNextSubnet(blockId, prefixLength, { ...metadata, createdBy: req.session?.username ?? undefined });
     logEvent({ action: "subnet.created", resourceType: "subnet", resourceId: subnet.id, resourceName: metadata.name, actor: req.session?.username, message: `Subnet "${metadata.name}" (${subnet.cidr}) auto-allocated` });
     res.status(201).json(subnet);
   } catch (err) {
@@ -91,7 +92,7 @@ router.get("/:id", async (req, res, next) => {
 router.post("/", requireNetworkAdmin, async (req, res, next) => {
   try {
     const input = CreateSubnetSchema.parse(req.body);
-    const subnet = await subnetService.createSubnet(input);
+    const subnet = await subnetService.createSubnet({ ...input, createdBy: req.session?.username ?? undefined });
     logEvent({ action: "subnet.created", resourceType: "subnet", resourceId: subnet.id, resourceName: input.name, actor: req.session?.username, message: `Subnet "${input.name}" (${input.cidr}) created` });
     res.status(201).json(subnet);
   } catch (err) {

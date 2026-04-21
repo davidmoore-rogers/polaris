@@ -16,6 +16,7 @@ function _saveAssetsPrefs() {
       status: document.getElementById("filter-status").value,
       type: document.getElementById("filter-type").value,
       search: document.getElementById("filter-search").value,
+      creator: document.getElementById("filter-creator").value,
       sortKey: _assetsSF ? _assetsSF._sortKey : null,
       sortDir: _assetsSF ? _assetsSF._sortDir : "asc",
       sfFilters: _assetsSF ? Object.assign({}, _assetsSF._filters) : {},
@@ -35,9 +36,10 @@ function _restoreAssetsPrefs() {
       var psSel = document.getElementById("filter-pagesize");
       if (psSel) psSel.value = String(p.pageSize);
     }
-    if (p.status) { var sSel = document.getElementById("filter-status"); if (sSel) sSel.value = p.status; }
-    if (p.type)   { var tSel = document.getElementById("filter-type");   if (tSel) tSel.value = p.type; }
-    if (p.search) { var sEl  = document.getElementById("filter-search"); if (sEl)  sEl.value  = p.search; }
+    if (p.status)  { var sSel = document.getElementById("filter-status");  if (sSel) sSel.value = p.status; }
+    if (p.type)    { var tSel = document.getElementById("filter-type");    if (tSel) tSel.value = p.type; }
+    if (p.search)  { var sEl  = document.getElementById("filter-search");  if (sEl)  sEl.value  = p.search; }
+    if (p.creator) { var cSel = document.getElementById("filter-creator"); if (cSel) cSel.value = p.creator; }
     if (_assetsSF) {
       if (p.sortKey) _assetsSF._sortKey = p.sortKey;
       if (p.sortDir) _assetsSF._sortDir = p.sortDir;
@@ -111,6 +113,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   document.getElementById("filter-status").addEventListener("change", function () { _assetsPage = 1; loadAssets(); _saveAssetsPrefs(); });
   document.getElementById("filter-type").addEventListener("change", function () { _assetsPage = 1; loadAssets(); _saveAssetsPrefs(); });
   document.getElementById("filter-search").addEventListener("input", debounce(function () { _assetsPage = 1; loadAssets(); _saveAssetsPrefs(); }, 300));
+  document.getElementById("filter-creator").addEventListener("change", function () { _assetsPage = 1; loadAssets(); _saveAssetsPrefs(); });
   document.getElementById("filter-pagesize").addEventListener("change", function () {
     _assetsPageSize = parseInt(this.value, 10) || 15;
     _assetsPage = 1;
@@ -141,6 +144,7 @@ async function loadAssets() {
       status: apiStatus,
       assetType: document.getElementById("filter-type").value || undefined,
       search: document.getElementById("filter-search").value || undefined,
+      createdBy: document.getElementById("filter-creator").value || undefined,
       limit: 10000,
     };
     var result = await api.assets.list(filters);

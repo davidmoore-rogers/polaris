@@ -100,6 +100,10 @@ async function loadIntegrations() {
 
 function fortiManagerFormHTML(defaults) {
   var d = defaults || {};
+  var dhcpMode = (d.dhcpInclude && d.dhcpInclude.length > 0) ? "include" : "exclude";
+  var dhcpIfaces = dhcpMode === "include" ? (d.dhcpInclude || []) : (d.dhcpExclude || []);
+  var invMode = (d.inventoryIncludeInterfaces && d.inventoryIncludeInterfaces.length > 0) ? "include" : "exclude";
+  var invIfaces = invMode === "include" ? (d.inventoryIncludeInterfaces || []) : (d.inventoryExcludeInterfaces || []);
   return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Production FortiManager"></div>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">This integration is for <strong style="color:var(--color-text-primary)">on-premise FortiManager</strong> only (not FortiManager Cloud). Requires version <strong style="color:var(--color-text-primary)">7.4.7+</strong> or <strong style="color:var(--color-text-primary)">7.6.2+</strong>. Older versions do not support bearer token authentication.</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
@@ -129,15 +133,38 @@ function fortiManagerFormHTML(defaults) {
     '<div class="form-group"><label>Management Interface</label><input type="text" id="f-mgmtInterface" value="' + escapeHtml(d.mgmtInterface || "") + '" placeholder="e.g. port1, mgmt, loopback0"><p class="hint">Interface name used for FortiGate management traffic</p></div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Server Scope</p>' +
-    '<div class="form-group"><label>Include DHCP Servers</label><textarea id="f-dhcpInclude" rows="2" placeholder="One per line — e.g. dhcp-server-01&#10;192.168.1.10">' + escapeHtml((d.dhcpInclude || []).join("\n")) + '</textarea><p class="hint">Only query these DHCP servers (leave empty to query all)</p></div>' +
-    '<div class="form-group"><label>Exclude DHCP Servers</label><textarea id="f-dhcpExclude" rows="2" placeholder="One per line — e.g. lab-dhcp&#10;test-server">' + escapeHtml((d.dhcpExclude || []).join("\n")) + '</textarea><p class="hint">Skip these DHCP servers when querying</p></div>' +
+    '<div class="form-group"><label>Interface Filter</label>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<select id="f-dhcpMode" style="width:auto">' +
+          '<option value="include"' + (dhcpMode === "include" ? " selected" : "") + '>Include only</option>' +
+          '<option value="exclude"' + (dhcpMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
+        '</select>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these interfaces when querying DHCP servers</span>' +
+      '</div>' +
+      '<textarea id="f-dhcpInterfaces" rows="2" placeholder="One per line — e.g. port1&#10;internal*&#10;*wan">' + escapeHtml(dhcpIfaces.join("\n")) + '</textarea>' +
+      '<p class="hint">Leave empty to query all interfaces. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
+    '</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Device Inventory</p>' +
-    '<div class="form-group"><label>Exclude Interfaces from Asset Discovery</label><textarea id="f-inventoryExclude" rows="2" placeholder="One per line — e.g. lan&#10;wifi&#10;guest">' + escapeHtml((d.inventoryExcludeInterfaces || []).join("\n")) + '</textarea><p class="hint">Devices seen only on these FortiGate interfaces will not be added to assets</p></div>';
+    '<div class="form-group"><label>Interface Filter</label>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<select id="f-inventoryMode" style="width:auto">' +
+          '<option value="exclude"' + (invMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
+          '<option value="include"' + (invMode === "include" ? " selected" : "") + '>Include only</option>' +
+        '</select>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">devices seen on these interfaces from asset discovery</span>' +
+      '</div>' +
+      '<textarea id="f-inventoryInterfaces" rows="2" placeholder="One per line — e.g. lan&#10;wifi*&#10;*guest">' + escapeHtml(invIfaces.join("\n")) + '</textarea>' +
+      '<p class="hint">Leave empty to include all interfaces. Wildcards supported: <code>port*</code>, <code>*lan</code>, <code>*mgmt*</code></p>' +
+    '</div>';
 }
 
 function getFormConfig() {
   var port = document.getElementById("f-port").value;
+  var dhcpMode = document.getElementById("f-dhcpMode").value;
+  var dhcpIfaces = linesToArray("f-dhcpInterfaces");
+  var invMode = document.getElementById("f-inventoryMode").value;
+  var invIfaces = linesToArray("f-inventoryInterfaces");
   return {
     host: val("f-host"),
     port: port ? parseInt(port, 10) : 443,
@@ -146,9 +173,10 @@ function getFormConfig() {
     adom: val("f-adom") || "root",
     verifySsl: document.getElementById("f-verifySsl").checked,
     mgmtInterface: val("f-mgmtInterface") || "",
-    dhcpInclude: linesToArray("f-dhcpInclude"),
-    dhcpExclude: linesToArray("f-dhcpExclude"),
-    inventoryExcludeInterfaces: linesToArray("f-inventoryExclude"),
+    dhcpInclude: dhcpMode === "include" ? dhcpIfaces : [],
+    dhcpExclude: dhcpMode === "exclude" ? dhcpIfaces : [],
+    inventoryExcludeInterfaces: invMode === "exclude" ? invIfaces : [],
+    inventoryIncludeInterfaces: invMode === "include" ? invIfaces : [],
   };
 }
 

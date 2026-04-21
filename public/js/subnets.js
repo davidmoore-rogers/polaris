@@ -20,6 +20,7 @@ function _saveSubnetsPrefs() {
       server: document.getElementById("filter-server").value,
       integration: document.getElementById("filter-integration").value,
       tag: document.getElementById("filter-tag").value,
+      creator: document.getElementById("filter-creator").value,
       sortKey: _subnetsSF ? _subnetsSF._sortKey : null,
       sortDir: _subnetsSF ? _subnetsSF._sortDir : "asc",
       sfFilters: _subnetsSF ? Object.assign({}, _subnetsSF._filters) : {},
@@ -44,6 +45,7 @@ function _restoreSubnetsPrefs() {
     if (p.server)      { var svEl = document.getElementById("filter-server");      if (svEl) svEl.value = p.server; }
     if (p.integration) { var iSel = document.getElementById("filter-integration"); if (iSel) iSel.value = p.integration; }
     if (p.tag)         { var tEl  = document.getElementById("filter-tag");         if (tEl)  tEl.value  = p.tag; }
+    if (p.creator)     { var cSel = document.getElementById("filter-creator");     if (cSel) cSel.value = p.creator; }
     if (_subnetsSF) {
       if (p.sortKey) _subnetsSF._sortKey = p.sortKey;
       if (p.sortDir) _subnetsSF._sortDir = p.sortDir;
@@ -106,6 +108,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   document.getElementById("filter-server").addEventListener("input", debounce(function () { _subnetsPage = 1; _applyLocalFilters(); renderSubnetsPage(); _saveSubnetsPrefs(); }, 300));
   document.getElementById("filter-integration").addEventListener("change", function () { _subnetsPage = 1; _applyLocalFilters(); renderSubnetsPage(); _saveSubnetsPrefs(); });
   document.getElementById("filter-tag").addEventListener("input", debounce(function () { _subnetsPage = 1; loadSubnets(); _saveSubnetsPrefs(); }, 300));
+  document.getElementById("filter-creator").addEventListener("change", function () { _subnetsPage = 1; loadSubnets(); _saveSubnetsPrefs(); });
   document.getElementById("filter-pagesize").addEventListener("change", function () {
     _subnetsPageSize = parseInt(this.value, 10) || 15;
     _subnetsPage = 1;
@@ -148,6 +151,7 @@ async function loadSubnets() {
       blockId: document.getElementById("filter-block").value || undefined,
       status: apiStatus,
       tag: document.getElementById("filter-tag").value || undefined,
+      createdBy: document.getElementById("filter-creator").value || undefined,
       limit: 10000,
     };
     var result = await api.subnets.list(filters);

@@ -23,6 +23,7 @@ export interface CreateSubnetInput {
   purpose?: string;
   vlan?: number;
   tags?: string[];
+  createdBy?: string;
 }
 
 export interface UpdateSubnetInput {
@@ -39,6 +40,7 @@ export interface ListSubnetsFilter {
   blockId?: string;
   status?: SubnetStatus;
   tag?: string;
+  createdBy?: string;
   limit?: number;
   offset?: number;
 }
@@ -52,6 +54,7 @@ export async function listSubnets(filter: ListSubnetsFilter = {}) {
   const where: Record<string, unknown> = {};
   if (filter.blockId) where.blockId = filter.blockId;
   if (filter.status) where.status = filter.status;
+  if (filter.createdBy) where.createdBy = filter.createdBy;
 
   const [subnets, total] = await Promise.all([
     prisma.subnet.findMany({
@@ -134,6 +137,7 @@ export async function createSubnet(input: CreateSubnetInput) {
       vlan: input.vlan,
       tags: input.tags ?? [],
       status: "available",
+      createdBy: input.createdBy,
     },
   });
 }

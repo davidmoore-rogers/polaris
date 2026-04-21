@@ -18,6 +18,7 @@ export interface FortiManagerConfig {
   dhcpInclude?: string[];
   dhcpExclude?: string[];
   inventoryExcludeInterfaces?: string[];
+  inventoryIncludeInterfaces?: string[];
 }
 
 interface JsonRpcRequest {
@@ -780,9 +781,7 @@ export async function discoverDhcpSubnets(
           dhcpEntries: dhcpEntries.slice(entBefore).filter((e) => includedIfaces.has(e.interfaceName)),
           deviceInventory: deviceInventory.slice(invBefore).filter(
             (d) => !excludedDevIfaces.has(`${d.device}/${d.interfaceName}`) &&
-                   !(config.inventoryExcludeInterfaces || []).some(
-                     (iface) => d.interfaceName.toLowerCase() === iface.toLowerCase()
-                   )
+                   matchesInventoryFilter(d.interfaceName, config)
           ),
           fortiSwitches: fortiSwitches.slice(switchBefore),
           fortiAps: fortiAps.slice(apBefore),
@@ -816,9 +815,7 @@ export async function discoverDhcpSubnets(
   );
   const filteredInventory = deviceInventory.filter(
     (d) => !excludedIfaceNames.has(`${d.device}/${d.interfaceName}`) &&
-           !(config.inventoryExcludeInterfaces || []).some(
-             (iface) => d.interfaceName.toLowerCase() === iface.toLowerCase()
-           )
+           matchesInventoryFilter(d.interfaceName, config)
   );
 
   const excluded = discovered.length - filteredSubnets.length;
@@ -835,6 +832,24 @@ function parseRangeFirstIp(rangeStr: string): string | null {
   return null;
 }
 
+function matchesWildcard(pattern: string, value: string): boolean {
+  const p = pattern.toLowerCase();
+  const v = value.toLowerCase();
+  if (p === "*") return true;
+  if (p.startsWith("*") && p.endsWith("*") && p.length > 2) return v.includes(p.slice(1, -1));
+  if (p.startsWith("*")) return v.endsWith(p.slice(1));
+  if (p.endsWith("*")) return v.startsWith(p.slice(0, -1));
+  return v === p;
+}
+
+function matchesInventoryFilter(interfaceName: string, config: FortiManagerConfig): boolean {
+  const includeList = config.inventoryIncludeInterfaces ?? [];
+  const excludeList = config.inventoryExcludeInterfaces ?? [];
+  if (includeList.length > 0) return includeList.some((p) => matchesWildcard(p, interfaceName));
+  if (excludeList.length > 0) return !excludeList.some((p) => matchesWildcard(p, interfaceName));
+  return true;
+}
+
 function filterDhcpResults(
   subnets: DiscoveredSubnet[],
   include?: string[],
@@ -845,8 +860,8 @@ function filterDhcpResults(
   if (include && include.length > 0) {
     result = result.filter((s) =>
       include.some((pattern) =>
-        String(s.name).toLowerCase().includes(pattern.toLowerCase()) ||
-        String(s.dhcpServerId).toLowerCase().includes(pattern.toLowerCase())
+        matchesWildcard(pattern, String(s.name)) ||
+        matchesWildcard(pattern, String(s.dhcpServerId))
       )
     );
   }
@@ -854,8 +869,8 @@ function filterDhcpResults(
   if (exclude && exclude.length > 0) {
     result = result.filter((s) =>
       !exclude.some((pattern) =>
-        String(s.name).toLowerCase().includes(pattern.toLowerCase()) ||
-        String(s.dhcpServerId).toLowerCase().includes(pattern.toLowerCase())
+        matchesWildcard(pattern, String(s.name)) ||
+        matchesWildcard(pattern, String(s.dhcpServerId))
       )
     );
   }

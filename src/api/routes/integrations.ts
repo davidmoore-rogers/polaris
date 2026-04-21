@@ -36,6 +36,7 @@ const FortiManagerConfigSchema = z.object({
   dhcpInclude:   z.array(z.string()).optional().default([]),
   dhcpExclude:   z.array(z.string()).optional().default([]),
   inventoryExcludeInterfaces: z.array(z.string()).optional().default([]),
+  inventoryIncludeInterfaces: z.array(z.string()).optional().default([]),
 });
 
 const WindowsServerConfigSchema = z.object({

@@ -88,6 +88,7 @@ model Subnet {
   discoveredBy    String?
   integration     Integration? @relation(fields: [discoveredBy], references: [id], onDelete: SetNull)
   fortigateDevice String?
+  createdBy       String?
 
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
@@ -99,6 +100,7 @@ model Subnet {
   @@index([cidr])
   @@index([status])
   @@index([discoveredBy])
+  @@index([createdBy])
   @@map("subnets")
 }
 
@@ -220,6 +222,7 @@ model Asset {
   purchaseOrder  String?                           // PO or invoice reference
   notes          String?     @db.Text
   tags           String[]    @default([])
+  createdBy      String?
 
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
@@ -232,6 +235,7 @@ model Asset {
   @@index([department])
   @@index([serialNumber])
   @@index([dnsName])
+  @@index([createdBy])
   @@map("assets")
 }
 

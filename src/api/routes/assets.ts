@@ -59,11 +59,13 @@ router.get("/", async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 10000);
     const offset = parseInt(req.query.offset as string, 10) || 0;
-    const { status, assetType, department, search } = req.query as Record<string, string>;
+    const { status, assetType, department, search, createdBy } = req.query as Record<string, string>;
     const where: Record<string, unknown> = {};
     if (status) where.status = status;
     if (assetType) where.assetType = assetType;
     if (department) where.department = { contains: department, mode: "insensitive" };
+    if (createdBy === "me") where.createdBy = req.session?.username ?? null;
+    else if (createdBy) where.createdBy = createdBy;
     if (search) {
       where.OR = [
         { hostname:  { contains: search, mode: "insensitive" } },
@@ -108,6 +110,7 @@ router.post("/", requireAssetsAdmin, async (req, res, next) => {
     if (input.macAddress) data.macAddress = input.macAddress.toUpperCase().replace(/-/g, ":");
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
+    data.createdBy = req.session?.username ?? null;
     const asset = await prisma.asset.create({ data: data as any });
     logEvent({ action: "asset.created", resourceType: "asset", resourceId: asset.id, resourceName: input.hostname || input.ipAddress, actor: req.session?.username, message: `Asset "${input.hostname || input.ipAddress || "unknown"}" created` });
     res.status(201).json(asset);
