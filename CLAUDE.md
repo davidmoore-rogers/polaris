@@ -496,6 +496,12 @@ Copy `.env.example` to `.env` before running.
 
 ---
 
+## Deployment & Updates
+
+The production instance is updated via the **in-app update mechanism** in **Server Settings → Database**. When pushing changes, the user applies the update through that UI rather than manually redeploying. Keep this in mind when giving deployment advice — do not suggest `git pull` or manual restart steps unless asked.
+
+---
+
 ## Getting Started
 
 ```bash
@@ -540,7 +546,7 @@ npm run lint
 - **Keep CLAUDE.md current.** When you add a model, field, route, service, job, or env var — update the relevant section of this file in the same commit.
 - **Keep demo.mjs current.** When you add a significant new entity, field, or feature, update `demo.mjs` so it exercises the new capability.
 - **Commit after every change.** Each logical change (feature, fix, update) gets its own commit immediately — don't batch unrelated work.
-- **On push: bump the version first.** When the user asks to push, increment the patch version in `package.json` (e.g. 0.9.101 → 0.9.102), commit that bump, then push both commits together.
+- **On push: bump the version.** When the user asks to push, increment the patch version in `package.json` (e.g. 0.9.101 → 0.9.102) and stage it alongside the other changes in the same commit. Do not create a separate commit for the version bump and do not mention it in the commit message.
 
 ---
 
