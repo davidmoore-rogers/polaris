@@ -1252,8 +1252,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
       const proposedHostname = (matchedAsset && matchedAsset.hostname) || entry.hostname || null;
       const proposedOwner = (matchedAsset && matchedAsset.assignedTo) || (isDhcpReservation ? "dhcp-reservation" : "dhcp-lease");
-      const proposedNotes = `${isDhcpReservation ? "DHCP reservation" : "DHCP lease"} on ${entry.device} (${entry.interfaceName})${entry.macAddress ? " — MAC: " + entry.macAddress : ""}`;
+      const proposedNotes = [
+        `${isDhcpReservation ? "DHCP reservation" : "DHCP lease"} on ${entry.device} (${entry.interfaceName})`,
+        entry.macAddress ? `MAC: ${entry.macAddress}` : null,
+        entry.ssid ? `SSID: ${entry.ssid}` : null,
+        entry.accessPoint ? `AP: ${entry.accessPoint}` : null,
+      ].filter(Boolean).join(" — ");
       const proposedSourceType = isDhcpReservation ? "dhcp_reservation" : "dhcp_lease";
+      const proposedExpiresAt = !isDhcpReservation && entry.expireTime ? new Date(entry.expireTime * 1000) : undefined;
 
       const existingRes = activeResMap.get(key);
       if (existingRes) {
@@ -1274,6 +1280,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             notes: proposedNotes,
             status: "active",
             sourceType: proposedSourceType,
+            expiresAt: proposedExpiresAt,
           },
         });
         activeResMap.set(key, newRes); // Track for MAC cross-update phase

@@ -193,6 +193,9 @@ export interface DiscoveredDhcpEntry {
   macAddress: string;       // Client MAC address
   hostname: string;         // Client hostname (if available)
   type: "dhcp-reservation" | "dhcp-lease"; // Static reservation vs dynamic lease
+  expireTime?: number;      // Unix timestamp from expire_time (dynamic leases only)
+  accessPoint?: string;     // AP name for wireless leases
+  ssid?: string;            // SSID for wireless leases
 }
 
 export interface DiscoveredInventoryDevice {
@@ -536,6 +539,9 @@ export async function discoverDhcpSubnets(
             macAddress: leaseMac,
             hostname: lease.hostname || "",
             type: "dhcp-lease",
+            expireTime: lease.expire_time || undefined,
+            accessPoint: lease.access_point || undefined,
+            ssid: lease.ssid || undefined,
           });
           deviceLeaseCount++;
         }
