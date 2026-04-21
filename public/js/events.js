@@ -491,8 +491,8 @@ function getSyslogFormData() {
   overlay.addEventListener("click", function (e) { if (e.target === overlay) closePanel(); });
   filterSel.addEventListener("change", loadConflicts);
 
-  async function loadConflicts() {
-    body.innerHTML = '<div class="empty-state" style="padding:2rem">Loading...</div>';
+  async function loadConflicts(silent) {
+    if (!silent) body.innerHTML = '<div class="empty-state" style="padding:2rem">Loading...</div>';
     try {
       var status = filterSel.value;
       var data = await api.conflicts.list({ status: status, limit: 200 });
@@ -519,7 +519,7 @@ function getSyslogFormData() {
               showToast("Conflict rejected — existing values kept");
             }
             var scrollTop = body.scrollTop;
-            await loadConflicts();
+            await loadConflicts(true);
             body.scrollTop = scrollTop;
             refreshBadge();
           } catch (err) {

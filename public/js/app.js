@@ -46,6 +46,11 @@ async function fetchCurrentUser() {
     if (data.authenticated) {
       currentUserRole = data.role;
       currentUsername = data.username;
+      try {
+        localStorage.setItem("shelob-user", JSON.stringify({ role: data.role, username: data.username }));
+      } catch (_) {}
+    } else {
+      try { localStorage.removeItem("shelob-user"); } catch (_) {}
     }
   } catch (_) {}
   if (_userReadyResolve) { _userReadyResolve(); _userReadyResolve = null; }
@@ -237,9 +242,12 @@ function renderUserBadge() {
 
 var _branding = null;
 
-function applyBranding(b) {
+function applyBranding(b, skipCache) {
   if (!b) return;
   _branding = b;
+  if (!skipCache) {
+    try { localStorage.setItem("shelob-branding", JSON.stringify(b)); } catch (_) {}
+  }
 
   // Update sidebar logo + name
   var sidebarLogo = document.querySelector(".sidebar-logo");
@@ -291,10 +299,14 @@ function applyBranding(b) {
 
 async function fetchBranding() {
   try {
+    var cached = JSON.parse(localStorage.getItem("shelob-branding") || "null");
+    if (cached) applyBranding(cached, true);
+  } catch (_) {}
+  try {
     var b = await api.serverSettings.getBranding();
     applyBranding(b);
   } catch (_) {
-    applyBranding({ appName: "Shelob", subtitle: "Network Management Tool", logoUrl: "/logo.png", version: "" });
+    if (!_branding) applyBranding({ appName: "Shelob", subtitle: "Network Management Tool", logoUrl: "/logo.png", version: "" });
   }
 }
 
@@ -964,9 +976,27 @@ function checkPgTuning() {
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", async function () {
+  // Render nav immediately from cache so the sidebar doesn't flash on navigation
+  var roleBeforeFetch = null;
+  try {
+    var cachedUser = JSON.parse(localStorage.getItem("shelob-user") || "null");
+    if (cachedUser && cachedUser.role) {
+      currentUserRole = cachedUser.role;
+      currentUsername = cachedUser.username;
+      roleBeforeFetch = cachedUser.role;
+      renderNav();
+      hideAdminOnlyElements();
+    }
+  } catch (_) {}
+
   await fetchCurrentUser();
-  renderNav();
-  hideAdminOnlyElements();
+
+  // Re-render if the cache was cold or the role changed (e.g. role was updated by admin)
+  if (!roleBeforeFetch || currentUserRole !== roleBeforeFetch) {
+    renderNav();
+    hideAdminOnlyElements();
+  }
+
   fetchBranding();
   initAutoLogout();
   checkPgTuning();
