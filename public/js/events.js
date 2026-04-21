@@ -518,7 +518,9 @@ function getSyslogFormData() {
               await api.conflicts.reject(id);
               showToast("Conflict rejected — existing values kept");
             }
-            loadConflicts();
+            var scrollTop = body.scrollTop;
+            await loadConflicts();
+            body.scrollTop = scrollTop;
             refreshBadge();
           } catch (err) {
             showToast(err.message, "error");
