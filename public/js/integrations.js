@@ -57,6 +57,14 @@ async function loadIntegrations() {
       var statusText = intg.lastTestOk === true ? "Connected" : intg.lastTestOk === false ? "Failed" : "Not tested";
       var lastTest = intg.lastTestAt ? formatDate(intg.lastTestAt) : "Never";
       var typeBadge = intg.type === "windowsserver" ? "Windows Server" : "FortiManager";
+
+      function filterRow(baseLabel, include, exclude) {
+        include = include || []; exclude = exclude || [];
+        var label = include.length > 0 ? baseLabel + ' Include' : baseLabel + ' Exclude';
+        var list = include.length > 0 ? include : exclude;
+        var value = list.length > 0 ? escapeHtml(list.join(", ")) : '<span style="color:var(--color-text-tertiary)">All</span>';
+        return '<div class="detail-row"><span class="detail-label">' + label + '</span><span class="detail-value">' + value + '</span></div>';
+      }
       var defaultPort = intg.type === "windowsserver" ? 5985 : 443;
 
       var detailRows;
@@ -67,8 +75,7 @@ async function loadIntegrations() {
           '<div class="detail-row"><span class="detail-label">Password</span><span class="detail-value mono">' + escapeHtml(config.password || "-") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Domain</span><span class="detail-value">' + escapeHtml(config.domain || "-") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Use SSL</span><span class="detail-value">' + (config.useSsl ? "Yes" : "No") + '</span></div>' +
-          '<div class="detail-row"><span class="detail-label">DHCP Include</span><span class="detail-value">' + ((config.dhcpInclude || []).length ? escapeHtml(config.dhcpInclude.join(", ")) : '<span style="color:var(--color-text-tertiary)">All</span>') + '</span></div>' +
-          '<div class="detail-row"><span class="detail-label">DHCP Exclude</span><span class="detail-value">' + ((config.dhcpExclude || []).length ? escapeHtml(config.dhcpExclude.join(", ")) : '<span style="color:var(--color-text-tertiary)">None</span>') + '</span></div>';
+          filterRow("DHCP", config.dhcpInclude, config.dhcpExclude);
       } else {
         detailRows =
           '<div class="detail-row"><span class="detail-label">Host</span><span class="detail-value mono">' + escapeHtml(config.host || "-") + ':' + (config.port || defaultPort) + '</span></div>' +
@@ -77,8 +84,8 @@ async function loadIntegrations() {
           '<div class="detail-row"><span class="detail-label">ADOM</span><span class="detail-value">' + escapeHtml(config.adom || "root") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">SSL Verify</span><span class="detail-value">' + (config.verifySsl ? "Yes" : "No") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Mgmt Interface</span><span class="detail-value mono">' + escapeHtml(config.mgmtInterface || "-") + '</span></div>' +
-          '<div class="detail-row"><span class="detail-label">DHCP Include</span><span class="detail-value">' + ((config.dhcpInclude || []).length ? escapeHtml(config.dhcpInclude.join(", ")) : '<span style="color:var(--color-text-tertiary)">All</span>') + '</span></div>' +
-          '<div class="detail-row"><span class="detail-label">DHCP Exclude</span><span class="detail-value">' + ((config.dhcpExclude || []).length ? escapeHtml(config.dhcpExclude.join(", ")) : '<span style="color:var(--color-text-tertiary)">None</span>') + '</span></div>';
+          filterRow("DHCP", config.dhcpInclude, config.dhcpExclude) +
+          filterRow("Inventory", config.inventoryIncludeInterfaces, config.inventoryExcludeInterfaces);
       }
 
       return '<div class="integration-card">' +
