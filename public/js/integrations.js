@@ -79,6 +79,23 @@ async function loadIntegrations() {
           filterRow("Inventory", config.inventoryIncludeInterfaces, config.inventoryExcludeInterfaces);
       }
 
+      var nextDiscoveryText;
+      if (!intg.enabled) {
+        nextDiscoveryText = '<span style="color:var(--color-text-tertiary)">Integration disabled</span>';
+      } else if (!intg.lastTestOk) {
+        nextDiscoveryText = '<span style="color:var(--color-text-tertiary)">—</span>';
+      } else if (intg.autoDiscover === false) {
+        nextDiscoveryText = '<span style="color:var(--color-text-tertiary)">—</span>';
+      } else {
+        var intervalMs = (intg.pollInterval || 4) * 3600000;
+        var nextRunMs = intg.lastDiscoveryAt ? new Date(intg.lastDiscoveryAt).getTime() + intervalMs : Date.now();
+        if (nextRunMs <= Date.now()) {
+          nextDiscoveryText = '<span style="color:var(--color-text-tertiary)">Pending next check (within 15 min)</span>';
+        } else {
+          nextDiscoveryText = escapeHtml(new Date(nextRunMs).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }));
+        }
+      }
+
       return '<div class="integration-card">' +
         '<div class="integration-card-header">' +
           '<div class="integration-card-header-top">' +
@@ -101,6 +118,7 @@ async function loadIntegrations() {
         '<div class="integration-card-details">' +
           detailRows +
           '<div class="detail-row"><span class="detail-label">Auto-Discovery</span><span class="detail-value">' + (!intg.lastTestOk ? '<span style="color:var(--color-text-tertiary)">Disabled until a successful connection test</span>' : intg.autoDiscover === false ? '<span style="color:var(--color-text-tertiary)">Disabled</span>' : 'Every ' + (intg.pollInterval || 4) + ' hour' + ((intg.pollInterval || 4) === 1 ? '' : 's')) + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Next Auto-Discovery</span><span class="detail-value">' + nextDiscoveryText + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Status</span><span class="detail-value">' + (intg.enabled ? '<span class="badge badge-active">Enabled</span>' : '<span class="badge badge-deprecated">Disabled</span>') + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Last Tested</span><span class="detail-value">' + lastTest + '</span></div>' +
         '</div>' +
