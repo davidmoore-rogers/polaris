@@ -181,8 +181,15 @@ function _showMacTooltip(trigger) {
   document.querySelectorAll('.mac-tooltip-visible').forEach(function (t) {
     t.classList.remove('mac-tooltip-visible');
   });
-  var tooltip = trigger.querySelector('.mac-tooltip');
+  // On first show, lift the tooltip out of its inline parent into <body>.
+  // Ancestors like .modal use transform/overflow, which would otherwise
+  // reparent position:fixed onto the modal and clip the tooltip.
+  var tooltip = trigger._tooltip || trigger.querySelector('.mac-tooltip');
   if (!tooltip) return;
+  if (tooltip.parentNode !== document.body) {
+    document.body.appendChild(tooltip);
+    trigger._tooltip = tooltip;
+  }
   // Measure offscreen
   tooltip.style.visibility = 'hidden';
   tooltip.style.display = 'block';
