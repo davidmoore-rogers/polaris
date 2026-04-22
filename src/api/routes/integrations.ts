@@ -443,7 +443,7 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
       let discoveryResult: DiscoveryResult;
 
       // Accumulate per-device sync totals for the completion log
-      const syncTotals = { created: [] as string[], updated: [] as string[], skipped: [] as string[] };
+      const syncTotals = { created: [] as string[], updated: [] as string[], skipped: [] as string[], deprecated: [] as string[] };
 
       // Per-device callback: sync each FortiGate's data as it arrives (phases 1, 3–9).
       // Phase 2 (stale deprecation) runs separately at the end once all devices are known.
@@ -462,18 +462,29 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
         syncTotals.created.push(...r.created);
         syncTotals.updated.push(...r.updated);
         syncTotals.skipped.push(...r.skipped);
+        syncTotals.deprecated.push(...r.deprecated);
       } else {
         // FortiManager: onDeviceComplete fires after each managed FortiGate is queried,
         // syncing subnets/assets/reservations incrementally.
         discoveryResult = await fortimanager.discoverDhcpSubnets(config as any, ac.signal, onProgress, integration.pollInterval ?? 24, onDeviceComplete);
-        // Run deprecation + DNS/OUI lookups once, now that all devices have been synced.
-        await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "finalize");
+        // Skip Phase 2 (stale deprecation) if the run was aborted — the discoveredDeviceNames
+        // set is incomplete, so subnets from devices that hadn't been polled yet would be
+        // incorrectly flagged as deprecated.
+        if (!ac.signal.aborted) {
+          // Run deprecation + DNS/OUI lookups once, now that all devices have been synced.
+          const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "finalize");
+          syncTotals.deprecated.push(...r.deprecated);
+        }
       }
 
       // ── ORIGINAL BATCH SYNC (commented out — replaced by per-device callback above) ──
       // const syncResult = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
 
-      logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} DHCP discovery completed for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped` });
+      if (ac.signal.aborted) {
+        logEvent({ action: "integration.discover.aborted", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "warning", message: `${label} DHCP discovery aborted for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped (stale-subnet deprecation skipped)` });
+      } else {
+        logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} DHCP discovery completed for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped, ${syncTotals.deprecated.length} deprecated` });
+      }
     } catch (err: any) {
       if (err.name !== "AbortError") {
         logEvent({ action: "integration.discover.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `${label} DHCP discovery failed for "${integrationName}": ${err.message || "Unknown error"}` });
@@ -944,6 +955,21 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       for (const s of staleSubnets) {
         deprecated.push(s.cidr);
         s.status = "deprecated"; // update in-memory
+        logEvent({
+          action: "subnet.deprecated",
+          resourceType: "subnet",
+          resourceId: s.id,
+          resourceName: s.name,
+          actor,
+          message: `Subnet "${s.name}" (${s.cidr}) deprecated — FortiGate "${s.fortigateDevice}" not seen in latest discovery from "${integrationName}"`,
+          details: {
+            reason: "device-not-discovered",
+            fortigateDevice: s.fortigateDevice,
+            integrationId,
+            integrationName,
+            cidr: s.cidr,
+          },
+        });
       }
     }
   }
