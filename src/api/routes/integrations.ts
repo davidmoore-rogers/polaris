@@ -202,7 +202,7 @@ router.post("/", async (req, res, next) => {
         let discoveryResult: DiscoveryResult;
         if (input.type === "windowsserver") {
           const subnets = await windowsServer.discoverDhcpScopes(input.config as any, ac.signal);
-          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [], vips: [] };
+          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], fortiSwitches: [], fortiAps: [], vips: [] };
         } else {
           discoveryResult = await fortimanager.discoverDhcpSubnets(input.config as any, ac.signal);
         }
@@ -441,7 +441,7 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
 
       if (integration.type === "windowsserver") {
         const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
-        discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [], vips: [] };
+        discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], fortiSwitches: [], fortiAps: [], vips: [] };
         // Windows Server is a single host — no per-device iteration, sync the full result normally
         const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
         syncTotals.created.push(...r.created);
@@ -1678,6 +1678,51 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           syncLog("error", `Failed to create inventory asset ${inv.hostname || normalizedMac || inv.ipAddress}: ${err.message || "Unknown error"}`);
         }
       }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Phase 7b — Clear stale `device` stamps on MAC entries
+  //            For every FortiGate whose inventory succeeded this run, any MAC
+  //            stamped with that FortiGate but not seen in the fresh inventory
+  //            has a stale attribution — clear `device` on that entry.
+  //            FortiGates whose inventory failed are left alone (we have no
+  //            fresh answer to compare against).
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  if (result.inventoryDevices && result.inventoryDevices.length > 0) {
+    const refreshedDevices = new Set(result.inventoryDevices);
+    const seenMacOnDevice = new Set<string>();
+    for (const inv of result.deviceInventory || []) {
+      if (!inv.macAddress || !inv.device) continue;
+      const mac = inv.macAddress.toUpperCase().replace(/-/g, ":");
+      seenMacOnDevice.add(`${mac}|${inv.device}`);
+    }
+
+    const staleSweepUpdates: Array<{ id: string; data: any }> = [];
+    for (const asset of assetIdx.all()) {
+      const macs = Array.isArray(asset.macAddresses) ? (asset.macAddresses as any[]) : [];
+      if (macs.length === 0) continue;
+      let mutated = false;
+      for (const m of macs) {
+        if (!m.device || !refreshedDevices.has(m.device)) continue;
+        const key = `${m.mac}|${m.device}`;
+        if (!seenMacOnDevice.has(key)) {
+          delete m.device;
+          mutated = true;
+        }
+      }
+      if (mutated) {
+        staleSweepUpdates.push({ id: asset.id, data: { macAddresses: macs } });
+        asset.macAddresses = macs;
+      }
+    }
+
+    if (staleSweepUpdates.length > 0) {
+      await batchSettled(staleSweepUpdates, (u) =>
+        prisma.asset.update({ where: { id: u.id }, data: u.data })
+      );
+      syncLog("info", `Cleared stale MAC device stamps on ${staleSweepUpdates.length} asset(s) across ${refreshedDevices.size} refreshed FortiGate(s)`);
     }
   }
 
