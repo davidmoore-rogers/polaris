@@ -100,6 +100,7 @@ function _renderPanelHeader(data) {
   if (data.ipv6) meta += '<span style="color:var(--color-warning);font-size:0.75rem">IPv6 — showing reservations only</span>';
 
   var headerBtns = '<span style="margin-left:auto;display:flex;gap:6px">' +
+    (canManageNetworks() && !data.ipv6 ? '<button class="btn btn-sm btn-danger" id="ip-panel-free-selected-btn" disabled>Free Selected</button>' : '') +
     '<div class="btn-dropdown-wrap">' +
       '<button class="btn btn-sm btn-secondary" id="ip-panel-export-btn">Export &#9662;</button>' +
       '<div class="btn-dropdown-menu" id="ip-panel-export-menu">' +
@@ -126,6 +127,9 @@ function _renderPanelHeader(data) {
       _openReserveModal(_ipPanelSubnetId, null);
     });
   }
+  var freeBtn = document.getElementById("ip-panel-free-selected-btn");
+  if (freeBtn) freeBtn.addEventListener("click", _bulkReleaseFromPanel);
+
   var exportBtn = document.getElementById("ip-panel-export-btn");
   var exportMenu = document.getElementById("ip-panel-export-menu");
   if (exportBtn && exportMenu) {
@@ -155,15 +159,7 @@ function _renderIpList(data) {
     return !ip.type && ip.reservation && ip.reservation.status === "active" && canManageNetworks();
   });
 
-  var html = '';
-  if (hasReleasable) {
-    html += '<div id="panel-bulk-bar" class="bulk-bar" style="display:none">' +
-      '<span class="bulk-bar-count">0 selected</span>' +
-      '<button class="btn btn-sm btn-danger" id="panel-bulk-release-btn">Release Selected</button>' +
-      '</div>';
-  }
-
-  html += '<table class="ip-table"><thead><tr>' +
+  var html = '<table class="ip-table"><thead><tr>' +
     '<th class="cb-col">' + (hasReleasable ? '<input type="checkbox" id="panel-select-all" title="Select all active">' : '') + '</th>' +
     '<th style="width:36px"></th>' +
     '<th>IP Address</th>' +
@@ -310,10 +306,6 @@ function _renderIpList(data) {
     _panelUpdateSelectAll();
     _panelUpdateBulkBar();
   });
-  var panelBulkBtn = document.getElementById("panel-bulk-release-btn");
-  if (panelBulkBtn) {
-    panelBulkBtn.addEventListener("click", _bulkReleaseFromPanel);
-  }
   _panelUpdateBulkBar();
   _panelUpdateSelectAll();
 
@@ -358,20 +350,19 @@ function _panelUpdateSelectAll() {
 }
 
 function _panelUpdateBulkBar() {
-  var bar = document.getElementById("panel-bulk-bar");
-  if (!bar) return;
+  var btn = document.getElementById("ip-panel-free-selected-btn");
+  if (!btn) return;
   var count = _panelSelected.size;
-  bar.style.display = count > 0 ? "flex" : "none";
-  var el = bar.querySelector(".bulk-bar-count");
-  if (el) el.textContent = count + " selected";
+  btn.disabled = count === 0;
+  btn.textContent = count > 0 ? "Free Selected (" + count + ")" : "Free Selected";
 }
 
 async function _bulkReleaseFromPanel() {
   var ids = Array.from(_panelSelected);
   if (!ids.length) return;
-  var ok = await showConfirm("Release " + ids.length + " reservation" + (ids.length !== 1 ? "s" : "") + "? This will free those IPs.");
+  var ok = await showConfirm("Free " + ids.length + " reservation" + (ids.length !== 1 ? "s" : "") + "? This will release those IPs.");
   if (!ok) return;
-  var btn = document.getElementById("panel-bulk-release-btn");
+  var btn = document.getElementById("ip-panel-free-selected-btn");
   if (btn) btn.disabled = true;
   var failed = 0;
   for (var i = 0; i < ids.length; i++) {
@@ -382,7 +373,7 @@ async function _bulkReleaseFromPanel() {
   if (btn) btn.disabled = false;
   _ipPanelDirty = true;
   if (failed > 0) showToast(failed + " release(s) failed", "error");
-  else showToast("Released " + ids.length + " reservation" + (ids.length !== 1 ? "s" : ""));
+  else showToast("Freed " + ids.length + " reservation" + (ids.length !== 1 ? "s" : ""));
   _fetchIpPage();
 }
 
