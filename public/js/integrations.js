@@ -630,6 +630,7 @@ function openApiQueryModal(id, adom) {
       '<label>Params <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(JSON array)</span></label>' +
       '<textarea id="fmg-params" rows="9" style="font-family:monospace;font-size:0.82rem">' + escapeHtml(defaultParams) + '</textarea>' +
     '</div>' +
+    '<div style="display:flex;justify-content:flex-end;margin-bottom:0.75rem"><button class="btn btn-primary" id="fmg-send">Send</button></div>' +
     '<div style="display:flex;gap:6px;align-items:center;margin-bottom:0.25rem">' +
       '<input type="text" id="fmg-save-name" placeholder="Name this query to save it…" style="flex:1;font-size:0.85rem">' +
       '<button class="btn btn-sm btn-secondary" id="fmg-save-btn">Save</button>' +
@@ -643,8 +644,7 @@ function openApiQueryModal(id, adom) {
     '</div>';
 
   var footer =
-    '<button class="btn btn-secondary" onclick="closeModal()">Close</button>' +
-    '<button class="btn btn-primary" id="fmg-send">Send</button>';
+    '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
 
   openModal("FortiManager API Query", body, footer, { wide: true });
 
