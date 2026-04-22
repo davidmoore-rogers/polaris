@@ -77,9 +77,52 @@ TableSF.prototype._val = function (row, key) {
 };
 
 TableSF.prototype._ipNum = function (ip) {
-  var p = String(ip || "").split(".");
-  if (p.length !== 4) return 0;
-  return p.reduce(function (n, o) { return n * 256 + (parseInt(o, 10) || 0); }, 0);
+  var s = String(ip || "").trim();
+  if (!s) return 0n;
+  var slash = s.indexOf("/");
+  if (slash >= 0) s = s.slice(0, slash);
+  if (s.indexOf(":") >= 0) return this._ipv6Num(s);
+  var p = s.split(".");
+  if (p.length !== 4) return 0n;
+  var n = 0n;
+  for (var i = 0; i < 4; i++) n = (n << 8n) | BigInt(parseInt(p[i], 10) || 0);
+  return n;
+};
+
+TableSF.prototype._ipv6Num = function (addr) {
+  // Convert a trailing dotted-quad (IPv4-mapped) into two hex groups.
+  var lastColon = addr.lastIndexOf(":");
+  var tail = addr.slice(lastColon + 1);
+  if (tail.indexOf(".") >= 0) {
+    var o = tail.split(".");
+    if (o.length === 4) {
+      var hi = ((parseInt(o[0], 10) || 0) << 8 | (parseInt(o[1], 10) || 0)).toString(16);
+      var lo = ((parseInt(o[2], 10) || 0) << 8 | (parseInt(o[3], 10) || 0)).toString(16);
+      addr = addr.slice(0, lastColon + 1) + hi + ":" + lo;
+    }
+  }
+
+  // Expand "::" shorthand into enough zero groups to reach 8 total.
+  var parts;
+  var dbl = addr.indexOf("::");
+  if (dbl >= 0) {
+    var leftStr  = addr.slice(0, dbl);
+    var rightStr = addr.slice(dbl + 2);
+    var left  = leftStr  ? leftStr.split(":")  : [];
+    var right = rightStr ? rightStr.split(":") : [];
+    var missing = 8 - left.length - right.length;
+    if (missing < 0) return 0n;
+    var middle = [];
+    for (var i = 0; i < missing; i++) middle.push("0");
+    parts = left.concat(middle).concat(right);
+  } else {
+    parts = addr.split(":");
+  }
+
+  if (parts.length !== 8) return 0n;
+  var n = 0n;
+  for (var j = 0; j < 8; j++) n = (n << 16n) | BigInt(parseInt(parts[j] || "0", 16) || 0);
+  return n;
 };
 
 TableSF.prototype.apply = function (data) {
@@ -109,7 +152,10 @@ TableSF.prototype.apply = function (data) {
       var av = self._val(a, k), bv = self._val(b, k);
       if (type === "number") return (parseFloat(av) - parseFloat(bv)) * dir;
       if (type === "date")   return (new Date(av)   - new Date(bv))   * dir;
-      if (type === "ip")     return (self._ipNum(av) - self._ipNum(bv)) * dir;
+      if (type === "ip") {
+        var ai = self._ipNum(av), bi = self._ipNum(bv);
+        return (ai < bi ? -1 : ai > bi ? 1 : 0) * dir;
+      }
       var as = String(av).toLowerCase(), bs = String(bv).toLowerCase();
       return (as < bs ? -1 : as > bs ? 1 : 0) * dir;
     });
