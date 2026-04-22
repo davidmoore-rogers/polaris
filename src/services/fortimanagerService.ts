@@ -284,7 +284,7 @@ export async function discoverDhcpSubnets(
   const devicesPayload: JsonRpcRequest = {
     id: 1,
     method: "get",
-    params: [{ url: `/dvmdb/adom/${adom}/device` }],
+    params: [{ url: `/dvmdb/adom/${adom}/device`, fields: ["name", "hostname", "sn", "platform_str", "ip", "conn_status"], filter: [["conn_status", "==", 1]] }],
   };
 
   let devicesRes: JsonRpcResponse;
@@ -366,7 +366,7 @@ export async function discoverDhcpSubnets(
       const mgmtIfacePayload: JsonRpcRequest = {
         id: 6,
         method: "get",
-        params: [{ url: `/pm/config/device/${deviceName}/global/system/interface` }],
+        params: [{ url: `/pm/config/device/${deviceName}/global/system/interface`, filter: [["name", "==", mgmtIfaceName]], fields: ["name", "ip"] }],
       };
       const mgmtIfaceRes = await rpc(baseUrl, mgmtIfacePayload, apiUser, apiToken, verifySsl, signal);
       const ifaceList = mgmtIfaceRes.result?.[0]?.data;
@@ -471,7 +471,7 @@ export async function discoverDhcpSubnets(
             data: {
               target: [`/adom/${adom}/device/${deviceName}`],
               action: "get",
-              resource: "/api/v2/monitor/system/dhcp",
+              resource: "/api/v2/monitor/system/dhcp?format=ip|mac|hostname|interface|reserved|expire_time|access_point|ssid|vci",
             },
           }],
         };
@@ -560,7 +560,7 @@ export async function discoverDhcpSubnets(
           const ifacePayload: JsonRpcRequest = {
             id: 3,
             method: "get",
-            params: [{ url: `/pm/config/device/${deviceName}/vdom/root/system/interface` }],
+            params: [{ url: `/pm/config/device/${deviceName}/vdom/root/system/interface`, fields: ["name", "ip", "vlanid", "switch-controller-mgmt-vlan"] }],
           };
 
           const ifaceRes = await rpc(baseUrl, ifacePayload, apiUser, apiToken, verifySsl, signal);
@@ -616,7 +616,7 @@ export async function discoverDhcpSubnets(
             data: {
               target: [`/adom/${adom}/device/${deviceName}`],
               action: "get",
-              resource: "/api/v2/monitor/user/device/query",
+              resource: "/api/v2/monitor/user/device/query?format=mac|ip|hostname|host|os|type|os_version|hardware_vendor|interface|switch_fortilink|fortiswitch|switch_port|ap_name|fortiap|user|detected_user|is_online|last_seen",
             },
           }],
         };
@@ -671,17 +671,20 @@ export async function discoverDhcpSubnets(
             data: {
               target: [`/adom/${adom}/device/${deviceName}`],
               action: "get",
-              resource: "/api/v2/monitor/switch-controller/managed-switch",
+              resource: "/api/v2/monitor/switch-controller/managed-switch?format=name|switch_id|serial|hardware_version|type|ip_address|ip|status|state|os_version|version",
             },
           }],
         };
         const switchRes = await rpc(baseUrl, switchPayload, apiUser, apiToken, verifySsl, signal);
         const switchData = switchRes.result?.[0]?.data;
-        const switchResults = Array.isArray(switchData)
-          ? switchData[0]?.response?.results
-          : (switchData as any)?.response?.results;
+        const switchProxyEntry = Array.isArray(switchData) ? switchData[0] : switchData as any;
+        const switchProxyStatus = switchProxyEntry?.status?.code ?? 0;
+        const switchHttpStatus = switchProxyEntry?.response?.http_status ?? 200;
+        const switchResults = switchProxyEntry?.response?.results;
         let switchCount = 0;
-        if (Array.isArray(switchResults)) {
+        if (switchProxyStatus !== 0 || switchHttpStatus === 404) {
+          log("discover.fortiswitches", "info", `${deviceName}: switch-controller not available (proxy status ${switchProxyStatus}, HTTP ${switchHttpStatus}) — skipping`, deviceName);
+        } else if (Array.isArray(switchResults)) {
           for (const sw of switchResults) {
             fortiSwitches.push({
               device: deviceName,
@@ -694,8 +697,10 @@ export async function discoverDhcpSubnets(
             });
             switchCount++;
           }
+          log("discover.fortiswitches", "info", `${deviceName}: Found ${switchCount} managed FortiSwitch(es)`, deviceName);
+        } else {
+          log("discover.fortiswitches", "info", `${deviceName}: Found 0 managed FortiSwitch(es)`, deviceName);
         }
-        log("discover.fortiswitches", "info", `${deviceName}: Found ${switchCount} managed FortiSwitch(es)`, deviceName);
       } catch (err: any) {
         log("discover.fortiswitches", "error", `${deviceName}: Failed to query managed FortiSwitches — ${err.message || "Unknown error"}`, deviceName);
       }
@@ -710,17 +715,20 @@ export async function discoverDhcpSubnets(
             data: {
               target: [`/adom/${adom}/device/${deviceName}`],
               action: "get",
-              resource: "/api/v2/monitor/wifi/managed_ap",
+              resource: "/api/v2/monitor/wifi/managed_ap?format=name|wtp_id|serial|model|wtp_profile|ip_addr|ip_address|local_ipv4_address|base_mac|mac|status|state|version|firmware_version",
             },
           }],
         };
         const apRes = await rpc(baseUrl, apPayload, apiUser, apiToken, verifySsl, signal);
         const apData = apRes.result?.[0]?.data;
-        const apResults = Array.isArray(apData)
-          ? apData[0]?.response?.results
-          : (apData as any)?.response?.results;
+        const apProxyEntry = Array.isArray(apData) ? apData[0] : apData as any;
+        const apProxyStatus = apProxyEntry?.status?.code ?? 0;
+        const apHttpStatus = apProxyEntry?.response?.http_status ?? 200;
+        const apResults = apProxyEntry?.response?.results;
         let apCount = 0;
-        if (Array.isArray(apResults)) {
+        if (apProxyStatus !== 0 || apHttpStatus === 404) {
+          log("discover.fortiaps", "info", `${deviceName}: wifi/managed_ap not available (proxy status ${apProxyStatus}, HTTP ${apHttpStatus}) — skipping`, deviceName);
+        } else if (Array.isArray(apResults)) {
           for (const ap of apResults) {
             const rawApIp = ap.ip_addr || ap.ip_address || ap.local_ipv4_address || "";
             const rawApMac = ap.base_mac || ap.mac || "";
@@ -736,8 +744,10 @@ export async function discoverDhcpSubnets(
             });
             apCount++;
           }
+          log("discover.fortiaps", "info", `${deviceName}: Found ${apCount} managed FortiAP(s)`, deviceName);
+        } else {
+          log("discover.fortiaps", "info", `${deviceName}: Found 0 managed FortiAP(s)`, deviceName);
         }
-        log("discover.fortiaps", "info", `${deviceName}: Found ${apCount} managed FortiAP(s)`, deviceName);
       } catch (err: any) {
         log("discover.fortiaps", "error", `${deviceName}: Failed to query managed FortiAPs — ${err.message || "Unknown error"}`, deviceName);
       }
@@ -747,7 +757,7 @@ export async function discoverDhcpSubnets(
         const vipPayload: JsonRpcRequest = {
           id: 11,
           method: "get",
-          params: [{ url: `/pm/config/device/${deviceName}/vdom/root/firewall/vip` }],
+          params: [{ url: `/pm/config/device/${deviceName}/vdom/root/firewall/vip`, fields: ["name", "extip", "mappedip", "extintf"] }],
         };
         const vipRes = await rpc(baseUrl, vipPayload, apiUser, apiToken, verifySsl, signal);
         const vipData = vipRes.result?.[0]?.data;
