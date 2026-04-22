@@ -269,7 +269,8 @@ router.put("/:id", async (req, res, next) => {
       }
     }
 
-    // DHCP discovery — only if previously tested successfully and auto-discover enabled
+    // DHCP discovery — fire detached so the save response returns immediately.
+    // triggerDiscovery revalidates credentials/config and logs its own start/error events.
     const canDiscover =
       updated.lastTestOk === true &&
       updated.enabled &&
@@ -279,28 +280,10 @@ router.put("/:id", async (req, res, next) => {
        (existing.type === "windowsserver" && finalConfig.username));
 
     if (canDiscover) {
-      activeDiscovery.get(req.params.id)?.controller.abort();
-      const ac = new AbortController();
-      activeDiscovery.set(req.params.id, { controller: ac, name: updated.name });
-      logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: req.params.id, resourceName: updated.name, actor: req.session?.username, message: `DHCP discovery started for "${updated.name}"` });
       try {
-        let discoveryResult: DiscoveryResult;
-        if (existing.type === "windowsserver") {
-          const subnets = await windowsServer.discoverDhcpScopes(finalConfig as any, ac.signal);
-          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], fortiSwitches: [], fortiAps: [], vips: [] };
-        } else {
-          discoveryResult = await fortimanager.discoverDhcpSubnets(finalConfig as any, ac.signal);
-        }
-        const syncResult = await syncDhcpSubnets(updated.id, updated.name, existing.type, discoveryResult, req.session?.username);
-        response.dhcpDiscovery = syncResult;
-        logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: req.params.id, resourceName: updated.name, actor: req.session?.username, message: `DHCP discovery completed for "${updated.name}" — ${syncResult.created.length} created, ${syncResult.updated.length} updated, ${syncResult.skipped.length} skipped` });
+        await triggerDiscovery(req.params.id, req.session?.username ?? "");
       } catch (err: any) {
-        if (err.name !== "AbortError") {
-          response.dhcpDiscoveryError = err.message || "DHCP discovery failed";
-          logEvent({ action: "integration.discover.error", resourceType: "integration", resourceId: req.params.id, resourceName: updated.name, actor: req.session?.username, level: "error", message: `DHCP discovery failed for "${updated.name}": ${err.message || "Unknown error"}` });
-        }
-      } finally {
-        activeDiscovery.delete(req.params.id);
+        logEvent({ action: "integration.discover.error", resourceType: "integration", resourceId: req.params.id, resourceName: updated.name, actor: req.session?.username, level: "error", message: `DHCP discovery failed to start for "${updated.name}": ${err.message || "Unknown error"}` });
       }
     }
 
