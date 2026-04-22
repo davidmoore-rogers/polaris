@@ -251,7 +251,7 @@ function renderAssetsPage() {
     _assetsUpdateSelectAll();
     return;
   }
-  if (!_assetsSF || !_assetsSF._sortKey) sfData = sortFavoritesFirst(sfData, "assets");
+  sfData = sortFavoritesFirst(sfData, "assets");
   var start = (_assetsPage - 1) * _assetsPageSize;
   var page = sfData.slice(start, start + _assetsPageSize);
   tbody.innerHTML = page.map(function (a) {

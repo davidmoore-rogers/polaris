@@ -212,7 +212,7 @@ function renderSubnetsPage() {
     _subnetsUpdateSelectAll();
     return;
   }
-  if (!_subnetsSF || !_subnetsSF._sortKey) sfData = sortFavoritesFirst(sfData, "subnets");
+  sfData = sortFavoritesFirst(sfData, "subnets");
   var start = (_subnetsPage - 1) * _subnetsPageSize;
   var page = sfData.slice(start, start + _subnetsPageSize);
   tbody.innerHTML = page.map(function (s) {

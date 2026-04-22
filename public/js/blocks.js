@@ -62,7 +62,7 @@ function renderBlocksPage() {
     clearPageControls("pagination");
     return;
   }
-  if (!_blocksSF || !_blocksSF._sortKey) sfData = sortFavoritesFirst(sfData, "blocks");
+  sfData = sortFavoritesFirst(sfData, "blocks");
   var start = (_blocksPage - 1) * _blocksPageSize;
   var page = sfData.slice(start, start + _blocksPageSize);
   tbody.innerHTML = page.map(function (b) {
