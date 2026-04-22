@@ -1605,13 +1605,19 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
 
         if (normalizedMac && !handledByDhcp) {
-          const macList: Array<{mac: string; lastSeen: string; source: string}> = Array.isArray(existingAsset.macAddresses) ? [...(existingAsset.macAddresses as any)] : [];
+          const macList: Array<{mac: string; lastSeen: string; source: string; device?: string}> = Array.isArray(existingAsset.macAddresses) ? [...(existingAsset.macAddresses as any)] : [];
           const existingMac = macList.find((m) => m.mac === normalizedMac);
           if (existingMac) {
             existingMac.lastSeen = now;
             existingMac.source = "device-inventory";
+            if (inv.device) existingMac.device = inv.device;
           } else {
-            macList.push({ mac: normalizedMac, lastSeen: now, source: "device-inventory" });
+            macList.push({
+              mac: normalizedMac,
+              lastSeen: now,
+              source: "device-inventory",
+              ...(inv.device ? { device: inv.device } : {}),
+            });
           }
           macList.sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
           updateData.macAddress = macList[0].mac;
@@ -1647,7 +1653,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             data: {
               ipAddress: resolvedIp,
               macAddress: normalizedMac || null,
-              macAddresses: normalizedMac ? [{ mac: normalizedMac, lastSeen: now, source: "device-inventory" }] : [],
+              macAddresses: normalizedMac ? [{ mac: normalizedMac, lastSeen: now, source: "device-inventory", ...(inv.device ? { device: inv.device } : {}) }] : [],
               hostname: inv.hostname || null,
               manufacturer: inv.hardwareVendor || null,
               assetType: inferAssetTypeFromOs(inv.os),

@@ -355,10 +355,14 @@ function macCellHTML(asset) {
       }
       subnetLine += '</span>';
     }
+    var deviceLine = m.device
+      ? '<span class="mac-tooltip-subnet">' + escapeHtml(m.device) + '</span>'
+      : '';
     return '<div class="mac-tooltip-row' + (isLatest ? ' mac-tooltip-latest' : '') + '">' +
       '<span class="mono copy-cell" title="Click to copy" data-copy="' + escapeHtml(m.mac) + '">' + escapeHtml(m.mac) + '</span>' +
       '<span class="mac-tooltip-meta">' +
         subnetLine +
+        deviceLine +
         '<span class="mac-tooltip-source">' + sourceLine + '</span>' +
       '</span>' +
     '</div>';
