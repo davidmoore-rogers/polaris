@@ -2043,15 +2043,18 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   background: rgba(2, 136, 209, 0.18) !important;
 }
 
-.subnet-name-link {
+.subnet-name-link,
+.asset-name-link {
   color: var(--color-accent);
   text-decoration: none;
   cursor: pointer;
 }
-.subnet-name-link:hover {
+.subnet-name-link:hover,
+.asset-name-link:hover {
   text-decoration: underline;
 }
-.subnet-name-link strong {
+.subnet-name-link strong,
+.asset-name-link strong {
   font-weight: 600;
   color: inherit;
 }

@@ -81,6 +81,12 @@ document.addEventListener("DOMContentLoaded", async function () {
     _assetsUpdateSelectAll();
     _assetsUpdateBulkBar();
   });
+  document.getElementById("assets-tbody").addEventListener("click", function (e) {
+    var link = e.target.closest(".asset-name-link");
+    if (!link) return;
+    e.preventDefault();
+    openViewModal(link.getAttribute("data-asset-id"));
+  });
 
   var addBtn = document.getElementById("btn-add-asset");
   if (addBtn) addBtn.addEventListener("click", openCreateModal);
@@ -250,7 +256,7 @@ function renderAssetsPage() {
     var checked = _assetsSelected.has(a.id) ? ' checked' : '';
     return '<tr>' +
       '<td class="cb-col"><input type="checkbox" class="row-cb"' + checked + ' data-id="' + a.id + '"></td>' +
-      '<td><strong>' + escapeHtml(a.hostname || "-") + '</strong>' +
+      '<td><a href="#" class="asset-name-link" data-asset-id="' + a.id + '"><strong>' + escapeHtml(a.hostname || "-") + '</strong></a>' +
         (a.assetTag ? '<br><span class="asset-tag-label">' + escapeHtml(a.assetTag) + '</span>' : '') +
       '</td>' +
       '<td class="mono">' + _copyableCell(a.ipAddress) + '</td>' +
@@ -262,7 +268,6 @@ function renderAssetsPage() {
       '<td>' + (a.lastSeen ? formatDate(a.lastSeen) : "-") + '</td>' +
       '<td>' + (a.createdAt ? formatDate(a.createdAt) : "-") + '</td>' +
       '<td class="actions">' +
-        '<button class="btn btn-sm btn-secondary" onclick="openViewModal(\'' + a.id + '\')">View</button>' +
         (canManageAssets() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + a.id + '\')">Edit</button>' +
         (a.ipAddress && !a.dnsName ? '<button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.ipAddress) + '\')" title="Reverse DNS lookup">DNS</button>' : '') +
         (a.macAddress && !a.manufacturer ? '<button class="btn btn-sm btn-secondary" onclick="singleOuiLookup(\'' + a.id + '\', \'' + escapeHtml(a.macAddress) + '\')" title="OUI manufacturer lookup">OUI</button>' : '') +
