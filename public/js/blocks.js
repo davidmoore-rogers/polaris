@@ -11,6 +11,17 @@ document.addEventListener("DOMContentLoaded", function () {
   _blocksSF = new TableSF("blocks-tbody", function () { _blocksPage = 1; renderBlocksPage(); });
   loadBlocks();
 
+  document.getElementById("blocks-tbody").addEventListener("click", function (e) {
+    var link = e.target.closest(".block-name-link");
+    if (!link) return;
+    e.preventDefault();
+    var prev = document.querySelector("tr.row-panel-active");
+    if (prev) prev.classList.remove("row-panel-active");
+    var row = link.closest("tr");
+    if (row) row.classList.add("row-panel-active");
+    openBlockPanel(link.getAttribute("data-block-id"));
+  });
+
   var addBtn = document.getElementById("btn-add-block");
   if (addBtn) addBtn.addEventListener("click", openCreateModal);
   document.getElementById("filter-version").addEventListener("change", function () { _blocksPage = 1; loadBlocks(); });
@@ -54,7 +65,7 @@ function renderBlocksPage() {
   tbody.innerHTML = page.map(function (b) {
     var tags = (b.tags || []).map(function (t) { return escapeHtml(t); }).join(", ");
     return '<tr>' +
-      '<td><strong>' + escapeHtml(b.name) + '</strong></td>' +
+      '<td><a href="#" class="block-name-link" data-block-id="' + b.id + '"><strong>' + escapeHtml(b.name) + '</strong></a></td>' +
       '<td class="mono">' + escapeHtml(b.cidr) + '</td>' +
       '<td>' + statusBadge(b.ipVersion) + '</td>' +
       '<td>' + escapeHtml(b.description || "-") + '</td>' +
