@@ -117,7 +117,9 @@ export async function getGlobalUtilization(): Promise<GlobalUtilization> {
     const deprecated = block.subnets.filter((s) => s.status === "deprecated").length;
 
     const blockAddresses = cidrAddressCount(block.cidr);
-    const allocatedAddresses = block.subnets.reduce((sum, s) => sum + cidrAddressCount(s.cidr), 0);
+    const allocatedAddresses = block.subnets
+      .filter((s) => s.status !== "deprecated")
+      .reduce((sum, s) => sum + cidrAddressCount(s.cidr), 0);
     const usedPercent = blockAddresses === 0 ? 0 : Math.round((allocatedAddresses / blockAddresses) * 100);
 
     return {
