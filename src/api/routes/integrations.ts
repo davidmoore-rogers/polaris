@@ -410,6 +410,8 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
   const integrationName = integration.name;
   activeDiscovery.set(integrationId, { controller: ac, name: integrationName });
 
+  await prisma.integration.update({ where: { id: integrationId }, data: { lastDiscoveryAt: new Date() } });
+
   const label = actor === "auto-discovery" ? "Scheduled" : "Manual";
   logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} DHCP discovery started for "${integrationName}"` });
 

@@ -5,8 +5,8 @@
  * enabled, respecting each integration's configured pollInterval (hours).
  * Checks every 15 minutes. Import from app.ts to activate.
  *
- * Last-triggered timestamps are kept in memory — on restart every eligible
- * integration will fire immediately, which is the desired behaviour.
+ * Gate state is persisted on Integration.lastDiscoveryAt so the interval is
+ * honoured across application restarts.
  */
 
 import { prisma } from "../db.js";
@@ -15,14 +15,12 @@ import { triggerDiscovery, isDiscoveryRunning } from "../api/routes/integrations
 
 const CHECK_INTERVAL_MS = 15 * 60 * 1000;
 
-const lastTriggeredAt = new Map<string, number>();
-
 async function runScheduledDiscoveries(): Promise<void> {
-  let integrations: { id: string; name: string; pollInterval: number }[];
+  let integrations: { id: string; name: string; pollInterval: number; lastDiscoveryAt: Date | null }[];
   try {
     integrations = await prisma.integration.findMany({
       where: { enabled: true, autoDiscover: true, lastTestOk: true },
-      select: { id: true, name: true, pollInterval: true },
+      select: { id: true, name: true, pollInterval: true, lastDiscoveryAt: true },
     });
   } catch (err) {
     logger.error(err, "Discovery scheduler: failed to query integrations");
@@ -34,11 +32,9 @@ async function runScheduledDiscoveries(): Promise<void> {
   for (const intg of integrations) {
     if (isDiscoveryRunning(intg.id)) continue;
 
-    const lastRun = lastTriggeredAt.get(intg.id);
     const intervalMs = (intg.pollInterval ?? 12) * 60 * 60 * 1000;
+    const lastRun = intg.lastDiscoveryAt?.getTime();
     if (lastRun !== undefined && now - lastRun < intervalMs) continue;
-
-    lastTriggeredAt.set(intg.id, now);
 
     triggerDiscovery(intg.id, "auto-discovery").catch((err) => {
       logger.error({ err, integrationId: intg.id, integrationName: intg.name }, "Discovery scheduler: failed to start discovery");

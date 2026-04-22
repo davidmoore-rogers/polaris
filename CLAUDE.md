@@ -204,6 +204,7 @@ Integration
   pollInterval  Int               @default(4)  -- Hours between auto-discovery runs (1–24)
   lastTestAt    DateTime?
   lastTestOk    Boolean?
+  lastDiscoveryAt DateTime?        -- Stamped at start of each run; used by scheduler to gate auto-runs across restarts
   subnets       Subnet[]
 
 Asset

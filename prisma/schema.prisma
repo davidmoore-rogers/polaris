@@ -148,6 +148,7 @@ model Integration {
   pollInterval  Int      @default(4)    // Auto-discovery interval in hours (1–24)
   lastTestAt    DateTime?
   lastTestOk    Boolean?
+  lastDiscoveryAt DateTime?              // Set at the start of each discovery run; used by the scheduler to gate auto-discovery across restarts
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
