@@ -239,12 +239,20 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
   });
 
   if (isIpv6) {
+    const ipv6Addrs = subnet.reservations.filter(r => r.ipAddress).map(r => r.ipAddress!);
+    const v6Assets = ipv6Addrs.length > 0
+      ? await prisma.asset.findMany({ where: { ipAddress: { in: ipv6Addrs } }, select: { id: true, ipAddress: true } })
+      : [];
+    const assetByIpV6 = new Map<string, string>();
+    for (const a of v6Assets) if (a.ipAddress) assetByIpV6.set(a.ipAddress, a.id);
+
     const ips = subnet.reservations
       .filter(r => r.ipAddress)
       .map(r => ({
         address: r.ipAddress!,
         type: "host" as const,
         reservation: toReservationDto(r),
+        assetId: assetByIpV6.get(r.ipAddress!) ?? null,
       }));
     return {
       subnet: subnetInfo,
@@ -268,12 +276,21 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
     }
   }
 
+  const pageAddrs = addresses.map(a => a.address);
+  const pageAssets = await prisma.asset.findMany({
+    where: { ipAddress: { in: pageAddrs } },
+    select: { id: true, ipAddress: true },
+  });
+  const assetByIp = new Map<string, string>();
+  for (const a of pageAssets) if (a.ipAddress) assetByIp.set(a.ipAddress, a.id);
+
   const ips = addresses.map(addr => {
     const r = reservationMap.get(addr.address);
     return {
       address: addr.address,
       type: addr.type,
       reservation: r ? toReservationDto(r) : null,
+      assetId: assetByIp.get(addr.address) ?? null,
     };
   });
 
