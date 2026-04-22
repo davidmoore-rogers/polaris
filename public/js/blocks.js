@@ -7,9 +7,11 @@ var _blocksPage = 1;
 var _blocksData = [];
 var _blocksSF = null;
 
-document.addEventListener("DOMContentLoaded", function () {
+document.addEventListener("DOMContentLoaded", async function () {
   _blocksSF = new TableSF("blocks-tbody", function () { _blocksPage = 1; renderBlocksPage(); });
+  await userReady;
   loadBlocks();
+  wireFavoriteClicks("blocks-tbody", function () { renderBlocksPage(); });
 
   document.getElementById("blocks-tbody").addEventListener("click", function (e) {
     var link = e.target.closest(".block-name-link");
@@ -43,28 +45,30 @@ async function loadBlocks() {
     _blocksData = await api.blocks.list(filters);
     renderBlocksPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
 function renderBlocksPage() {
   var tbody = document.getElementById("blocks-tbody");
   if (_blocksData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No IP blocks found. Create one to get started.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No IP blocks found. Create one to get started.</td></tr>';
     clearPageControls("pagination");
     return;
   }
   var sfData = _blocksSF ? _blocksSF.apply(_blocksData) : _blocksData;
   if (sfData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No results match the current filters.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No results match the current filters.</td></tr>';
     clearPageControls("pagination");
     return;
   }
+  if (!_blocksSF || !_blocksSF._sortKey) sfData = sortFavoritesFirst(sfData, "blocks");
   var start = (_blocksPage - 1) * _blocksPageSize;
   var page = sfData.slice(start, start + _blocksPageSize);
   tbody.innerHTML = page.map(function (b) {
     var tags = (b.tags || []).map(function (t) { return escapeHtml(t); }).join(", ");
     return '<tr>' +
+      starCellHTML("blocks", b.id) +
       '<td><a href="#" class="block-name-link" data-block-id="' + b.id + '"><strong>' + escapeHtml(b.name) + '</strong></a></td>' +
       '<td class="mono">' + escapeHtml(b.cidr) + '</td>' +
       '<td>' + statusBadge(b.ipVersion) + '</td>' +

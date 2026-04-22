@@ -87,6 +87,7 @@ document.addEventListener("DOMContentLoaded", async function () {
     e.preventDefault();
     openViewModal(link.getAttribute("data-asset-id"));
   });
+  wireFavoriteClicks("assets-tbody", function () { renderAssetsPage(); });
 
   var addBtn = document.getElementById("btn-add-asset");
   if (addBtn) addBtn.addEventListener("click", openCreateModal);
@@ -163,7 +164,7 @@ async function loadAssets() {
     }
     renderAssetsPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -238,24 +239,26 @@ function renderAssetsPage() {
   tbody.removeEventListener("click", _handleCopyClick);
   tbody.addEventListener("click", _handleCopyClick);
   if (_assetsData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No assets found. Add one to get started.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No assets found. Add one to get started.</td></tr>';
     clearPageControls("pagination");
     _assetsUpdateSelectAll();
     return;
   }
   var sfData = _assetsSF ? _assetsSF.apply(_assetsData) : _assetsData;
   if (sfData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No results match the current filters.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No results match the current filters.</td></tr>';
     clearPageControls("pagination");
     _assetsUpdateSelectAll();
     return;
   }
+  if (!_assetsSF || !_assetsSF._sortKey) sfData = sortFavoritesFirst(sfData, "assets");
   var start = (_assetsPage - 1) * _assetsPageSize;
   var page = sfData.slice(start, start + _assetsPageSize);
   tbody.innerHTML = page.map(function (a) {
     var checked = _assetsSelected.has(a.id) ? ' checked' : '';
     return '<tr>' +
       '<td class="cb-col"><input type="checkbox" class="row-cb"' + checked + ' data-id="' + a.id + '"></td>' +
+      starCellHTML("assets", a.id) +
       '<td><a href="#" class="asset-name-link" data-asset-id="' + a.id + '"><strong>' + escapeHtml(a.hostname || "-") + '</strong></a>' +
         (a.assetTag ? '<br><span class="asset-tag-label">' + escapeHtml(a.assetTag) + '</span>' : '') +
       '</td>' +

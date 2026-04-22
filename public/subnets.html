@@ -78,6 +78,7 @@
           <thead>
             <tr>
               <th class="cb-col"><input type="checkbox" id="subnets-select-all" title="Select all on this page"></th>
+              <th class="fav-col" title="Favorites pin to the top"></th>
               <th data-sf-key="name" data-sf-type="string">Name</th>
               <th data-sf-key="cidr" data-sf-type="ip">Network</th>
               <th data-sf-key="block.name" data-sf-type="string">Block</th>
@@ -92,7 +93,7 @@
             </tr>
           </thead>
           <tbody id="subnets-tbody">
-            <tr><td colspan="12" class="empty-state">Loading...</td></tr>
+            <tr><td colspan="13" class="empty-state">Loading...</td></tr>
           </tbody>
         </table>
       </div>
@@ -105,6 +106,7 @@
   <script src="/js/api.js"></script>
   <script src="/js/app.js"></script>
   <script src="/js/table-sf.js"></script>
+  <script src="/js/favorites.js"></script>
   <script src="/js/ip-panel.js"></script>
   <script src="/js/subnets.js"></script>
 </body>

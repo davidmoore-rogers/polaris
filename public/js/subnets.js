@@ -84,6 +84,7 @@ document.addEventListener("DOMContentLoaded", async function () {
     if (row) row.classList.add("row-panel-active");
     openIpPanel(link.getAttribute("data-subnet-id"));
   });
+  wireFavoriteClicks("subnets-tbody", function () { renderSubnetsPage(); });
   document.getElementById("subnets-select-all").addEventListener("change", function () {
     var cbs = document.querySelectorAll("#subnets-tbody input.row-cb");
     var chk = this.checked;
@@ -163,7 +164,7 @@ async function loadSubnets() {
     _applyLocalFilters();
     renderSubnetsPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -199,18 +200,19 @@ function _applyLocalFilters() {
 function renderSubnetsPage() {
   var tbody = document.getElementById("subnets-tbody");
   if (_subnetsData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No networks found. Create one to get started.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No networks found. Create one to get started.</td></tr>';
     clearPageControls("pagination");
     _subnetsUpdateSelectAll();
     return;
   }
   var sfData = _subnetsSF ? _subnetsSF.apply(_subnetsData) : _subnetsData;
   if (sfData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No results match the current filters.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No results match the current filters.</td></tr>';
     clearPageControls("pagination");
     _subnetsUpdateSelectAll();
     return;
   }
+  if (!_subnetsSF || !_subnetsSF._sortKey) sfData = sortFavoritesFirst(sfData, "subnets");
   var start = (_subnetsPage - 1) * _subnetsPageSize;
   var page = sfData.slice(start, start + _subnetsPageSize);
   tbody.innerHTML = page.map(function (s) {
@@ -223,6 +225,7 @@ function renderSubnetsPage() {
     var checked = _subnetsSelected.has(s.id) ? ' checked' : '';
     return '<tr>' +
       '<td class="cb-col"><input type="checkbox" class="row-cb"' + checked + ' data-id="' + s.id + '"></td>' +
+      starCellHTML("subnets", s.id) +
       '<td><a href="#" class="subnet-name-link" data-subnet-id="' + s.id + '"><strong>' + escapeHtml(s.name) + '</strong></a></td>' +
       '<td class="mono">' + escapeHtml(s.cidr) + '</td>' +
       '<td>' + blockName + '</td>' +

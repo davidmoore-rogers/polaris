@@ -899,6 +899,19 @@ th.sf-th { vertical-align: top; white-space: normal; padding-bottom: 6px; }
   flex: 1;
 }
 th.cb-col, td.cb-col { width: 36px; text-align: center; padding: 0 4px; }
+th.fav-col, td.fav-col { width: 32px; text-align: center; padding: 0 2px; }
+.fav-star {
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 2px 4px;
+  color: var(--color-text-tertiary);
+  transition: color 0.12s, transform 0.12s;
+}
+.fav-star:hover { color: #f5c518; transform: scale(1.15); }
+.fav-star.fav-on { color: #f5c518; }
 
 /* ─── Filter Bar ───────────────────────────────────────────────────────────── */
 .filter-bar {
