@@ -59,6 +59,9 @@ function _restoreAssetsPrefs() {
 
 document.addEventListener("DOMContentLoaded", async function () {
   _assetsSF = new TableSF("assets-tbody", function () { _assetsPage = 1; renderAssetsPage(); _saveAssetsPrefs(); });
+  // MAC tooltips are promoted to <body>, so delegate on document so the
+  // delete button works regardless of where the tooltip lives.
+  document.addEventListener("click", _handleMacDeleteClick);
   await userReady;
   _restoreAssetsPrefs();
   loadAssets();
@@ -266,8 +269,6 @@ function renderAssetsPage() {
   var tbody = document.getElementById("assets-tbody");
   tbody.removeEventListener("click", _handleCopyClick);
   tbody.addEventListener("click", _handleCopyClick);
-  tbody.removeEventListener("click", _handleMacDeleteClick);
-  tbody.addEventListener("click", _handleMacDeleteClick);
   if (_assetsData.length === 0) {
     tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No assets found. Add one to get started.</td></tr>';
     clearPageControls("pagination");
