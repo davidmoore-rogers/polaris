@@ -77,12 +77,37 @@ router.get("/", async (req, res, next) => {
         { assignedTo:{ contains: search, mode: "insensitive" } },
       ];
     }
+    // Trim list payload: omit heavy fields (notes, associatedUsers) and fields
+    // the list table + CSV export never reference. The single-asset GET /:id
+    // below still returns the full record for the view/edit modal.
     const [assets, total] = await Promise.all([
       prisma.asset.findMany({
         where,
         orderBy: { createdAt: "desc" },
         skip: offset,
         take: limit,
+        select: {
+          id: true,
+          hostname: true,
+          dnsName: true,
+          assetTag: true,
+          ipAddress: true,
+          macAddress: true,
+          macAddresses: true,
+          associatedIps: true,
+          serialNumber: true,
+          manufacturer: true,
+          model: true,
+          os: true,
+          osVersion: true,
+          assetType: true,
+          status: true,
+          location: true,
+          learnedLocation: true,
+          lastSeen: true,
+          acquiredAt: true,
+          createdAt: true,
+        },
       }),
       prisma.asset.count({ where }),
     ]);

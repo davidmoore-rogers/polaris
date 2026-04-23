@@ -11,6 +11,7 @@ import session from "express-session";
 import pgSession from "connect-pg-simple";
 import pg from "pg";
 import helmet from "helmet";
+import compression from "compression";
 import rateLimit from "express-rate-limit";
 import { router } from "./api/router.js";
 
@@ -52,6 +53,9 @@ app.use(
     referrerPolicy: { policy: "strict-origin-when-cross-origin" },
   })
 );
+
+// ─── Response compression ────────────────────────────────────────────────────
+app.use(compression());
 
 // ─── Body parsing with size limits ───────────────────────────────────────────
 app.use(express.json({ limit: "1mb" }));
