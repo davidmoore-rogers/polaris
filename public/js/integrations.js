@@ -85,6 +85,7 @@ async function loadIntegrations() {
           '<div class="detail-row"><span class="detail-label">ADOM</span><span class="detail-value">' + escapeHtml(config.adom || "root") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">SSL Verify</span><span class="detail-value">' + (config.verifySsl ? "Yes" : "No") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Mgmt Interface</span><span class="detail-value mono">' + escapeHtml(config.mgmtInterface || "-") + '</span></div>' +
+          filterRow("FortiGates", config.deviceInclude, config.deviceExclude) +
           filterRow("DHCP", config.dhcpInclude, config.dhcpExclude) +
           filterRow("Inventory", config.inventoryIncludeInterfaces, config.inventoryExcludeInterfaces);
       }
@@ -146,6 +147,8 @@ function fortiManagerFormHTML(defaults) {
   var dhcpIfaces = dhcpMode === "include" ? (d.dhcpInclude || []) : (d.dhcpExclude || []);
   var invMode = (d.inventoryIncludeInterfaces && d.inventoryIncludeInterfaces.length > 0) ? "include" : "exclude";
   var invIfaces = invMode === "include" ? (d.inventoryIncludeInterfaces || []) : (d.inventoryExcludeInterfaces || []);
+  var devMode = (d.deviceInclude && d.deviceInclude.length > 0) ? "include" : "exclude";
+  var devNames = devMode === "include" ? (d.deviceInclude || []) : (d.deviceExclude || []);
   return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Production FortiManager"></div>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">This integration is for <strong style="color:var(--color-text-primary)">on-premise FortiManager</strong> only (not FortiManager Cloud). Requires version <strong style="color:var(--color-text-primary)">7.4.7+</strong> or <strong style="color:var(--color-text-primary)">7.6.2+</strong>. Older versions do not support bearer token authentication.</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
@@ -173,6 +176,19 @@ function fortiManagerFormHTML(defaults) {
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">FortiGate Settings</p>' +
     '<div class="form-group"><label>Management Interface</label><input type="text" id="f-mgmtInterface" value="' + escapeHtml(d.mgmtInterface || "") + '" placeholder="e.g. port1, mgmt, loopback0"><p class="hint">Interface name used for FortiGate management traffic</p></div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">FortiGate Device Scope</p>' +
+    '<div class="form-group"><label>Device Filter</label>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<select id="f-deviceMode" style="width:auto">' +
+          '<option value="include"' + (devMode === "include" ? " selected" : "") + '>Include only</option>' +
+          '<option value="exclude"' + (devMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
+        '</select>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these managed FortiGates from all discovery queries</span>' +
+      '</div>' +
+      '<textarea id="f-deviceNames" rows="2" placeholder="One per line — e.g. FG-HQ-01&#10;FG-DC-*&#10;*-lab">' + escapeHtml(devNames.join("\n")) + '</textarea>' +
+      '<p class="hint">Leave empty to query all managed FortiGates. Matched against device name or hostname. Wildcards supported: <code>FG-*</code>, <code>*-lab</code>, <code>*dc*</code></p>' +
+    '</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Server Scope</p>' +
     '<div class="form-group"><label>Interface Filter</label>' +
@@ -207,6 +223,8 @@ function getFormConfig() {
   var dhcpIfaces = linesToArray("f-dhcpInterfaces");
   var invMode = document.getElementById("f-inventoryMode").value;
   var invIfaces = linesToArray("f-inventoryInterfaces");
+  var devMode = document.getElementById("f-deviceMode").value;
+  var devNames = linesToArray("f-deviceNames");
   return {
     host: val("f-host"),
     port: port ? parseInt(port, 10) : 443,
@@ -219,6 +237,8 @@ function getFormConfig() {
     dhcpExclude: dhcpMode === "exclude" ? dhcpIfaces : [],
     inventoryExcludeInterfaces: invMode === "exclude" ? invIfaces : [],
     inventoryIncludeInterfaces: invMode === "include" ? invIfaces : [],
+    deviceInclude: devMode === "include" ? devNames : [],
+    deviceExclude: devMode === "exclude" ? devNames : [],
   };
 }
 
@@ -528,7 +548,10 @@ async function openEditModal(id) {
         mgmtInterface: config.mgmtInterface,
         dhcpInclude: config.dhcpInclude || [],
         dhcpExclude: config.dhcpExclude || [],
+        inventoryIncludeInterfaces: config.inventoryIncludeInterfaces || [],
         inventoryExcludeInterfaces: config.inventoryExcludeInterfaces || [],
+        deviceInclude: config.deviceInclude || [],
+        deviceExclude: config.deviceExclude || [],
       };
       body = fortiManagerFormHTML(defaults);
       formGetter = function () {

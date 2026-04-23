@@ -19,6 +19,8 @@ export interface FortiManagerConfig {
   dhcpExclude?: string[];
   inventoryExcludeInterfaces?: string[];
   inventoryIncludeInterfaces?: string[];
+  deviceInclude?: string[];   // FortiGate device names to include (wildcards ok). Matched against name/hostname.
+  deviceExclude?: string[];   // FortiGate device names to exclude. Ignored if deviceInclude is non-empty.
 }
 
 interface JsonRpcRequest {
@@ -300,12 +302,24 @@ export async function discoverDhcpSubnets(
     log("discover.devices", "error", `Failed to list managed devices: ${err.message || "Unknown error"}`);
     throw err;
   }
-  const devicesData = devicesRes.result?.[0]?.data;
-  if (!Array.isArray(devicesData) || devicesData.length === 0) {
+  const devicesDataRaw = devicesRes.result?.[0]?.data;
+  if (!Array.isArray(devicesDataRaw) || devicesDataRaw.length === 0) {
     log("discover.devices", "info", `No managed devices found in ADOM "${adom}"`);
     return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], fortiSwitches: [], fortiAps: [], vips: [] };
   }
-  log("discover.devices", "info", `Found ${devicesData.length} managed device(s) in ADOM "${adom}"`);
+
+  // Apply device-level include/exclude filter (FortiGate names or hostnames).
+  // Include wins over exclude when both are set.
+  const devicesData = filterDevices(devicesDataRaw, config.deviceInclude, config.deviceExclude);
+  const filteredOut = devicesDataRaw.length - devicesData.length;
+  if (filteredOut > 0) {
+    log("discover.devices", "info", `Found ${devicesDataRaw.length} managed device(s) in ADOM "${adom}" — ${devicesData.length} included, ${filteredOut} filtered by device include/exclude`);
+  } else {
+    log("discover.devices", "info", `Found ${devicesData.length} managed device(s) in ADOM "${adom}"`);
+  }
+  if (devicesData.length === 0) {
+    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], fortiSwitches: [], fortiAps: [], vips: [] };
+  }
 
   const discovered: DiscoveredSubnet[] = [];
   const devices: DiscoveredDevice[] = [];
@@ -948,6 +962,26 @@ function matchesInventoryFilter(interfaceName: string, config: FortiManagerConfi
   if (includeList.length > 0) return includeList.some((p) => matches(p, interfaceName));
   if (excludeList.length > 0) return !excludeList.some((p) => matches(p, interfaceName));
   return true;
+}
+
+function filterDevices(
+  devices: any[],
+  include?: string[],
+  exclude?: string[],
+): any[] {
+  const matchDevice = (d: any, pattern: string): boolean => {
+    const name = String(d.name ?? "");
+    const hostname = String(d.hostname ?? "");
+    return matchesWildcard(pattern, name) || (hostname !== "" && matchesWildcard(pattern, hostname));
+  };
+
+  if (include && include.length > 0) {
+    return devices.filter((d) => include.some((p) => matchDevice(d, p)));
+  }
+  if (exclude && exclude.length > 0) {
+    return devices.filter((d) => !exclude.some((p) => matchDevice(d, p)));
+  }
+  return devices;
 }
 
 function filterDhcpResults(

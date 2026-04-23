@@ -73,6 +73,8 @@ const FortiManagerConfigSchema = z.object({
   dhcpExclude:   z.array(z.string()).optional().default([]),
   inventoryExcludeInterfaces: z.array(z.string()).optional().default([]),
   inventoryIncludeInterfaces: z.array(z.string()).optional().default([]),
+  deviceInclude: z.array(z.string()).optional().default([]),
+  deviceExclude: z.array(z.string()).optional().default([]),
 });
 
 const FortiGateConfigSchema = z.object({

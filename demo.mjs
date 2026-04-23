@@ -631,6 +631,8 @@ const INTEGRATIONS = [
       mgmtInterface: "mgmt",
       dhcpInclude: [],
       dhcpExclude: ["lab-test-dhcp"],
+      deviceInclude: [],
+      deviceExclude: ["FG-LAB-*"],
     },
     enabled: false,
     pollInterval: 12,
@@ -1447,8 +1449,23 @@ function discoverDhcpDemo(config, log) {
     );
   }
 
-  // Build device list
-  const devices = MOCK_DEVICES.map((d) => ({ ...d }));
+  // FortiGate-level filter — drop managed FortiGates entirely, then drop DHCP servers on them
+  let devices = MOCK_DEVICES.map((d) => ({ ...d }));
+  const devInclude = config.deviceInclude || [];
+  const devExclude = config.deviceExclude || [];
+  const matchDev = (d, p) => {
+    const name = String(d.name || "").toLowerCase();
+    const host = String(d.hostname || "").toLowerCase();
+    const pat = p.toLowerCase();
+    return name.includes(pat) || (host && host.includes(pat));
+  };
+  if (devInclude.length > 0) {
+    devices = devices.filter((d) => devInclude.some((p) => matchDev(d, p)));
+  } else if (devExclude.length > 0) {
+    devices = devices.filter((d) => !devExclude.some((p) => matchDev(d, p)));
+  }
+  const allowedDeviceNames = new Set(devices.map((d) => d.name));
+  servers = servers.filter((s) => allowedDeviceNames.has(s.device));
   log("discover.devices", "info", `Found ${devices.length} managed device(s) in ADOM "${config.adom || "root"}"`);
 
   const subnets = servers.map((s) => ({
