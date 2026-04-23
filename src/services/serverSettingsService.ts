@@ -2,7 +2,7 @@
  * src/services/serverSettingsService.ts — NTP and certificate management
  */
 
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { writeFileSync, readFileSync, unlinkSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -235,19 +235,33 @@ export async function generateSelfSignedCert(
   commonName: string,
   days: number = 365,
 ): Promise<{ cert: CertificateRecord; key: CertificateRecord }> {
+  // openssl's -subj uses "/" as a field separator, so allowing "/" in the CN
+  // would inject additional DN fields. Restrict to a DNS-safe character set.
+  if (!/^[A-Za-z0-9.*_-]+$/.test(commonName)) {
+    throw new Error("commonName must contain only letters, digits, dots, dashes, underscores, or asterisks");
+  }
+
   const tmp = mkdtempSync(join(tmpdir(), "shelob-cert-"));
   const keyPath = join(tmp, "server.key");
   const certPath = join(tmp, "server.crt");
 
   try {
-    // Use openssl to generate a self-signed certificate with SAN
-    const subj = `/CN=${commonName.replace(/['"\\]/g, "")}`;
-    const san = `subjectAltName=DNS:${commonName.replace(/['"\\]/g, "")}`;
-    execSync(
-      `openssl req -x509 -newkey rsa:2048 -keyout "${keyPath}" -out "${certPath}" ` +
-      `-days ${days} -nodes -subj "${subj}" -addext "${san}"`,
+    const result = spawnSync(
+      "openssl",
+      [
+        "req", "-x509", "-newkey", "rsa:2048",
+        "-keyout", keyPath,
+        "-out", certPath,
+        "-days", String(days),
+        "-nodes",
+        "-subj", `/CN=${commonName}`,
+        "-addext", `subjectAltName=DNS:${commonName}`,
+      ],
       { stdio: "pipe" },
     );
+    if (result.status !== 0) {
+      throw new Error(`openssl failed: ${result.stderr?.toString().trim() || `exit code ${result.status}`}`);
+    }
 
     const certPem = readFileSync(certPath, "utf-8");
     const keyPem = readFileSync(keyPath, "utf-8");

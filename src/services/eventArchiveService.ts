@@ -8,18 +8,62 @@
  * Archives are only generated when export settings are configured and enabled.
  */
 
-import { exec } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createSocket } from "node:dgram";
 import { createConnection, type Socket } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { readFileSync, writeFileSync, unlinkSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { promisify } from "node:util";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 
-const execAsync = promisify(exec);
+// Spawn a child process with an explicit argv — no shell — and resolve with
+// its stdout/stderr. Rejects on non-zero exit or timeout.
+function runCommand(
+  cmd: string,
+  args: string[],
+  opts: { timeoutMs: number; stdin?: string },
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(Object.assign(new Error(`${cmd} timed out after ${opts.timeoutMs}ms`), { killed: true }));
+    }, opts.timeoutMs);
+    child.stdout.on("data", (d) => { stdout += d.toString(); });
+    child.stderr.on("data", (d) => { stderr += d.toString(); });
+    child.on("error", (err) => { clearTimeout(timer); reject(err); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(Object.assign(new Error(stderr.trim() || `${cmd} exited with code ${code}`), { stderr, stdout, code }));
+    });
+    if (opts.stdin !== undefined) child.stdin.write(opts.stdin);
+    child.stdin.end();
+  });
+}
+
+function sshCommonOptions(keyPath?: string): string[] {
+  const opts = [
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "ConnectTimeout=10",
+    "-o", "BatchMode=yes",
+  ];
+  if (keyPath) opts.push("-i", keyPath);
+  return opts;
+}
+
+// Guard sftp batch-file injection: sftp parses "put" args on whitespace and
+// quotes, so an embedded quote or newline in the remote path would let an
+// admin smuggle extra sftp commands into the batch.
+function assertSafeSftpPath(p: string, label: string): void {
+  if (/["\n\r]/.test(p)) {
+    throw new Error(`${label} may not contain quotes or newlines`);
+  }
+}
 
 export interface ArchiveSettings {
   enabled: boolean;
@@ -67,7 +111,7 @@ export async function updateArchiveSettings(
 }
 
 /**
- * Test the SFTP/SCP connection by attempting a small file transfer.
+ * Test the SFTP/SCP connection by logging in and immediately disconnecting.
  */
 export async function testConnection(
   settings: ArchiveSettings,
@@ -76,26 +120,28 @@ export async function testConnection(
     return { ok: false, message: "Host and username are required" };
   }
 
+  const target = `${settings.username}@${settings.host}`;
+  const keyOpts = sshCommonOptions(settings.keyPath);
+
   try {
-    const cmd = buildTestCommand(settings);
-    await execAsync(cmd, { timeout: 15_000 });
+    if (settings.protocol === "sftp") {
+      await runCommand(
+        "sftp",
+        [...keyOpts, `-oPort=${settings.port}`, "-b", "-", target],
+        { timeoutMs: 15_000, stdin: "bye\n" },
+      );
+    } else {
+      await runCommand(
+        "ssh",
+        [...keyOpts, "-p", String(settings.port), target, "exit 0"],
+        { timeoutMs: 15_000 },
+      );
+    }
     return { ok: true, message: `Connected to ${settings.host} via ${settings.protocol.toUpperCase()}` };
   } catch (err: any) {
     const msg = err.stderr || err.message || "Connection failed";
     return { ok: false, message: msg.toString().trim().split("\n")[0] };
   }
-}
-
-function buildTestCommand(s: ArchiveSettings): string {
-  const portFlag = s.protocol === "sftp" ? `-oPort=${s.port}` : `-P ${s.port}`;
-  const keyFlag = s.keyPath ? `-i "${s.keyPath}"` : "";
-  const opts = `-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes ${keyFlag}`;
-
-  if (s.protocol === "sftp") {
-    return `echo "bye" | sftp ${opts} ${portFlag} ${s.username}@${s.host}`;
-  }
-  // SCP: try to list remote directory
-  return `ssh ${opts} -p ${s.port} ${s.username}@${s.host} "test -d '${s.remotePath}' && echo ok || mkdir -p '${s.remotePath}'"`;
 }
 
 /**
@@ -124,8 +170,28 @@ export async function archiveAndExport(cutoff: Date): Promise<number> {
   try {
     writeFileSync(localPath, JSON.stringify(events, null, 2), "utf-8");
 
-    const cmd = buildTransferCommand(settings, localPath, filename);
-    await execAsync(cmd, { timeout: 60_000 });
+    const target = `${settings.username}@${settings.host}`;
+    const remoteDest = `${settings.remotePath}/${filename}`;
+    const keyOpts = sshCommonOptions(settings.keyPath);
+
+    if (settings.protocol === "sftp") {
+      assertSafeSftpPath(localPath, "local archive path");
+      assertSafeSftpPath(remoteDest, "remote archive path");
+      await runCommand(
+        "sftp",
+        [...keyOpts, `-oPort=${settings.port}`, "-b", "-", target],
+        {
+          timeoutMs: 60_000,
+          stdin: `put "${localPath}" "${remoteDest}"\nbye\n`,
+        },
+      );
+    } else {
+      await runCommand(
+        "scp",
+        [...keyOpts, "-P", String(settings.port), localPath, `${target}:${remoteDest}`],
+        { timeoutMs: 60_000 },
+      );
+    }
 
     logger.info({ count: events.length, filename, host: settings.host }, "Event archive exported");
     return events.length;
@@ -135,19 +201,6 @@ export async function archiveAndExport(cutoff: Date): Promise<number> {
   } finally {
     try { unlinkSync(localPath); } catch { /* ignore cleanup errors */ }
   }
-}
-
-function buildTransferCommand(s: ArchiveSettings, localPath: string, filename: string): string {
-  const keyFlag = s.keyPath ? `-i "${s.keyPath}"` : "";
-  const opts = `-o StrictHostKeyChecking=no -o ConnectTimeout=10 ${keyFlag}`;
-  const remoteDest = `${s.remotePath}/${filename}`;
-
-  if (s.protocol === "sftp") {
-    const batchFile = localPath + ".batch";
-    writeFileSync(batchFile, `put "${localPath}" "${remoteDest}"\nbye\n`, "utf-8");
-    return `sftp ${opts} -oPort=${s.port} -b "${batchFile}" ${s.username}@${s.host}`;
-  }
-  return `scp ${opts} -P ${s.port} "${localPath}" ${s.username}@${s.host}:"${remoteDest}"`;
 }
 
 // ─── Retention Settings ──────────────────────────────────────────────────────
