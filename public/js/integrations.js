@@ -57,7 +57,7 @@ async function loadIntegrations() {
         include = include || []; exclude = exclude || [];
         var label = include.length > 0 ? baseLabel + ' Include' : baseLabel + ' Exclude';
         var list = include.length > 0 ? include : exclude;
-        var value = list.length > 0 ? escapeHtml(list.join(", ")) : '<span style="color:var(--color-text-tertiary)">All</span>';
+        var value = list.length > 0 ? escapeHtml(list.join(", ")) : '<span style="color:var(--color-text-tertiary)">None</span>';
         return '<div class="detail-row"><span class="detail-label">' + label + '</span><span class="detail-value">' + value + '</span></div>';
       }
       var defaultPort = intg.type === "windowsserver" ? 5985 : 443;
