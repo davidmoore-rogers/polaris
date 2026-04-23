@@ -253,7 +253,7 @@ export async function discoverDhcpSubnets(
 
   // Stop early if aborted
   if (signal?.aborted) {
-    return { subnets: [], devices, interfaceIps, dhcpEntries: [], deviceInventory: [], inventoryDevices: [], fortiSwitches: [], fortiAps: [], vips: [] };
+    return { subnets: [], devices, interfaceIps, dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [deviceName], fortiSwitches: [], fortiAps: [], vips: [] };
   }
 
   // Step 3: DHCP server configuration
@@ -592,6 +592,8 @@ export async function discoverDhcpSubnets(
     dhcpEntries,
     deviceInventory: filteredInventory,
     inventoryDevices: [...inventoryDevices],
+    // Standalone FortiGate: the one device we connected to is the entire roster.
+    knownDeviceNames: [deviceName],
     fortiSwitches,
     fortiAps,
     vips,

@@ -16,6 +16,7 @@ import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInt
 import { logEvent } from "./events.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
+import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
 
 const router = Router();
 
@@ -245,7 +246,10 @@ router.post("/", async (req, res, next) => {
         let discoveryResult: DiscoveryResult;
         if (input.type === "windowsserver") {
           const subnets = await windowsServer.discoverDhcpScopes(input.config as any, ac.signal);
-          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], fortiSwitches: [], fortiAps: [], vips: [] };
+          // Windows Server stamps subnets with config.host as their fortigateDevice,
+          // so the "known roster" is just the DHCP server host itself.
+          const wsHost = (input.config as any).host as string;
+          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [] };
         } else if (input.type === "fortigate") {
           discoveryResult = await fortigate.discoverDhcpSubnets(input.config as any, ac.signal);
         } else {
@@ -527,7 +531,8 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
         }
       } else if (integration.type === "windowsserver") {
         const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
-        discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], fortiSwitches: [], fortiAps: [], vips: [] };
+        const wsHost = (config as any).host as string;
+        discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [] };
         // Windows Server is a single host — no per-device iteration, sync the full result normally
         const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
         syncTotals.created.push(...r.created);
@@ -548,9 +553,9 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
         // FortiManager: onDeviceComplete fires after each managed FortiGate is queried,
         // syncing subnets/assets/reservations incrementally.
         discoveryResult = await fortimanager.discoverDhcpSubnets(config as any, ac.signal, onProgress, integration.pollInterval ?? 24, onDeviceComplete);
-        // Skip Phase 2 (stale deprecation) if the run was aborted — the discoveredDeviceNames
-        // set is incomplete, so subnets from devices that hadn't been polled yet would be
-        // incorrectly flagged as deprecated.
+        // Skip Phase 2 (stale deprecation) if the run was aborted — an aborted
+        // run shouldn't take destructive actions, even though the FMG device
+        // roster used for deprecation is captured up front (not per-device).
         if (!ac.signal.aborted) {
           // Run deprecation + DNS/OUI lookups once, now that all devices have been synced.
           const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "finalize");
@@ -950,8 +955,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     return allSubnets.find((s) => s.status !== "deprecated" && ipInCidr(ip, s.cidr));
   }
 
-  // Collect the set of FortiGate device names in this discovery
-  const discoveredDeviceNames = new Set(result.devices.map((d) => d.name));
+  // Roster of FortiGates currently configured in the upstream (FortiManager or
+  // the standalone FortiGate itself), regardless of online status or include/
+  // exclude filter. Phase 2 deprecates subnets whose owning device is NOT in
+  // this set — meaning the device was deleted from the upstream. Offline
+  // devices remain in the roster, so their subnets are left alone.
+  const knownDeviceNames = new Set(result.knownDeviceNames);
 
   if (mode === "full" || mode === "skip-deprecation") {
   // ══════════════════════════════════════════════════════════════════════════════
@@ -1041,11 +1050,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // Phase 2 — Deprecate stale subnets (single updateMany)
   // ══════════════════════════════════════════════════════════════════════════════
 
-  if (discoveredDeviceNames.size > 0) {
+  if (knownDeviceNames.size > 0) {
     // Find stale subnets in-memory first (for the return value)
     const staleSubnets = allSubnets.filter(
       (s) => s.discoveredBy === integrationId && s.status !== "deprecated" &&
-             s.fortigateDevice && !discoveredDeviceNames.has(s.fortigateDevice)
+             s.fortigateDevice && !knownDeviceNames.has(s.fortigateDevice)
     );
     if (staleSubnets.length > 0) {
       const staleIds = staleSubnets.map((s) => s.id);
@@ -1062,9 +1071,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           resourceId: s.id,
           resourceName: s.name,
           actor,
-          message: `Subnet "${s.name}" (${s.cidr}) deprecated — FortiGate "${s.fortigateDevice}" not seen in latest discovery from "${integrationName}"`,
+          message: `Subnet "${s.name}" (${s.cidr}) deprecated — FortiGate "${s.fortigateDevice}" no longer configured in "${integrationName}"`,
           details: {
-            reason: "device-not-discovered",
+            reason: "device-removed",
             fortigateDevice: s.fortigateDevice,
             integrationId,
             integrationName,
@@ -1088,16 +1097,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (device.serial) {
         const existingAsset = assetIdx.findBySerial(device.serial);
         if (existingAsset) {
-          await prisma.asset.update({
-            where: { id: existingAsset.id },
-            data: {
-              ipAddress: device.mgmtIp || existingAsset.ipAddress,
-              hostname: device.hostname || existingAsset.hostname,
-              model: device.model || existingAsset.model,
-              learnedLocation: existingAsset.learnedLocation || fgHostname,
-              lastSeen: new Date(now),
-            },
-          });
+          const updateData: Record<string, unknown> = {
+            ipAddress: device.mgmtIp || existingAsset.ipAddress,
+            hostname: device.hostname || existingAsset.hostname,
+            model: device.model || existingAsset.model,
+            learnedLocation: existingAsset.learnedLocation || fgHostname,
+            lastSeen: new Date(now),
+          };
+          clampAcquiredToLastSeen(updateData, existingAsset);
+          await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
           // Update in-memory
           if (device.mgmtIp) existingAsset.ipAddress = device.mgmtIp;
           if (device.hostname) existingAsset.hostname = device.hostname;

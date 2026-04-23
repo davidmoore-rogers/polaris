@@ -259,6 +259,11 @@ export interface DiscoveryResult {
   // Used to scope stale-device sweep: MAC stamps pointing to devices NOT in this
   // list are left alone (we didn't get a fresh answer).
   inventoryDevices: string[];
+  // All FortiGates configured in FortiManager, regardless of conn_status or
+  // include/exclude filter. A subnet's fortigateDevice missing from this set
+  // means the device was removed from FMG — safe to deprecate. An offline but
+  // still-configured device remains here, so its subnets are left alone.
+  knownDeviceNames: string[];
   fortiSwitches: DiscoveredFortiSwitch[];
   fortiAps: DiscoveredFortiAP[];
   vips: DiscoveredVip[];
@@ -288,11 +293,13 @@ export async function discoverDhcpSubnets(
   const { apiUser, apiToken, verifySsl } = config;
   const log = onProgress || (() => {});
 
-  // Step 1: List managed devices in the ADOM
+  // Step 1: List managed devices in the ADOM. We deliberately do NOT filter on
+  // conn_status server-side — we need the full roster (online + offline) so the
+  // stale-subnet sweep can distinguish "device offline" from "device removed."
   const devicesPayload: JsonRpcRequest = {
     id: 1,
     method: "get",
-    params: [{ url: `/dvmdb/adom/${adom}/device`, fields: ["name", "hostname", "sn", "platform_str", "ip", "conn_status"], filter: [["conn_status", "==", 1]] }],
+    params: [{ url: `/dvmdb/adom/${adom}/device`, fields: ["name", "hostname", "sn", "platform_str", "ip", "conn_status"] }],
   };
 
   let devicesRes: JsonRpcResponse;
@@ -305,8 +312,15 @@ export async function discoverDhcpSubnets(
   const devicesDataRaw = devicesRes.result?.[0]?.data;
   if (!Array.isArray(devicesDataRaw) || devicesDataRaw.length === 0) {
     log("discover.devices", "info", `No managed devices found in ADOM "${adom}"`);
-    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], fortiSwitches: [], fortiAps: [], vips: [] };
+    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [], fortiSwitches: [], fortiAps: [], vips: [] };
   }
+
+  // Capture the full roster of configured devices (pre-filter, any conn_status).
+  // Subnets whose fortigateDevice is NOT in this set were discovered from a
+  // device that has since been deleted from FMG — those are the ones to deprecate.
+  const knownDeviceNames: string[] = (devicesDataRaw as any[])
+    .map((d) => d.name || d.hostname)
+    .filter((n): n is string => typeof n === "string" && n.length > 0);
 
   // Apply device-level include/exclude filter (FortiGate names or hostnames).
   // Include wins over exclude when both are set.
@@ -318,7 +332,7 @@ export async function discoverDhcpSubnets(
     log("discover.devices", "info", `Found ${devicesData.length} managed device(s) in ADOM "${adom}"`);
   }
   if (devicesData.length === 0) {
-    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], fortiSwitches: [], fortiAps: [], vips: [] };
+    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames, fortiSwitches: [], fortiAps: [], vips: [] };
   }
 
   const discovered: DiscoveredSubnet[] = [];
@@ -869,6 +883,9 @@ export async function discoverDhcpSubnets(
                    matchesInventoryFilter(d.interfaceName, config)
           ),
           inventoryDevices: inventoryDevices.has(deviceName) ? [deviceName] : [],
+          // Per-device emissions don't carry the FMG-wide device roster — Phase 2
+          // stale deprecation only runs in the "finalize" pass.
+          knownDeviceNames: [],
           fortiSwitches: fortiSwitches.slice(switchBefore),
           fortiAps: fortiAps.slice(apBefore),
           vips: vips.slice(vipBefore),
@@ -926,7 +943,7 @@ export async function discoverDhcpSubnets(
   const excluded = discovered.length - filteredSubnets.length;
   log("discover.filter", "info", `Filter complete: ${filteredSubnets.length} subnet(s) included, ${excluded} excluded, ${filteredDhcpEntries.length} DHCP entries, ${filteredInventory.length} inventory device(s)`);
 
-  return { subnets: filteredSubnets, devices, interfaceIps: filteredIps, dhcpEntries: filteredDhcpEntries, deviceInventory: filteredInventory, inventoryDevices: [...inventoryDevices], fortiSwitches, fortiAps, vips };
+  return { subnets: filteredSubnets, devices, interfaceIps: filteredIps, dhcpEntries: filteredDhcpEntries, deviceInventory: filteredInventory, inventoryDevices: [...inventoryDevices], knownDeviceNames, fortiSwitches, fortiAps, vips };
 }
 
 /** Extract the first (start) IP from a range string like "1.2.3.4-1.2.3.5" or a plain IP. */
