@@ -178,6 +178,8 @@ function _copyableCell(value) {
 }
 
 var _macTooltipTimer = null;
+var _macTooltipShowTimer = null;
+var _MAC_TOOLTIP_SHOW_DELAY = 300;
 
 function _showMacTooltip(trigger) {
   clearTimeout(_macTooltipTimer);
@@ -226,11 +228,16 @@ function _scheduleMacHide(tooltip) {
 }
 
 function _handleMacEnter(e) {
-  _showMacTooltip(e.currentTarget);
+  clearTimeout(_macTooltipShowTimer);
+  var trigger = e.currentTarget;
+  _macTooltipShowTimer = setTimeout(function () {
+    _showMacTooltip(trigger);
+  }, _MAC_TOOLTIP_SHOW_DELAY);
 }
 
 function _handleMacLeave(e) {
-  var tooltip = e.currentTarget.querySelector('.mac-tooltip');
+  clearTimeout(_macTooltipShowTimer);
+  var tooltip = e.currentTarget._tooltip || e.currentTarget.querySelector('.mac-tooltip');
   if (tooltip) _scheduleMacHide(tooltip);
 }
 
