@@ -428,6 +428,16 @@ router.post("/:id/query", async (req, res, next) => {
       return;
     }
 
+    if (integration.type === "entraid") {
+      const { path, query } = z.object({
+        path: z.string().min(1),
+        query: z.record(z.string()).optional(),
+      }).parse(req.body);
+      const result = await entraId.proxyQuery(integration.config as any, path, query);
+      res.json(result);
+      return;
+    }
+
     throw new AppError(400, "API query is not supported for this integration type");
   } catch (err) {
     next(err);

@@ -250,6 +250,31 @@ export async function testConnection(config: EntraIdConfig): Promise<{
   }
 }
 
+// ─── Manual query (UI tool) ─────────────────────────────────────────────────
+
+/**
+ * Proxy an arbitrary GET against Microsoft Graph using stored credentials.
+ * Used by the manual API query tool in the UI. Path must begin with `/v1.0/`
+ * or `/beta/` — the host is fixed to graph.microsoft.com so credentials cannot
+ * be exfiltrated to an arbitrary endpoint.
+ */
+export async function proxyQuery(
+  config: EntraIdConfig,
+  path: string,
+  query?: Record<string, string>,
+): Promise<unknown> {
+  if (!path.startsWith("/v1.0/") && !path.startsWith("/beta/")) {
+    throw new AppError(400, "Path must begin with /v1.0/ or /beta/");
+  }
+  const url = new URL("https://graph.microsoft.com" + path);
+  if (query) {
+    for (const [k, v] of Object.entries(query)) {
+      if (k) url.searchParams.set(k, v);
+    }
+  }
+  return graphGet(config, url.toString());
+}
+
 // ─── Device discovery ───────────────────────────────────────────────────────
 
 const DEVICES_HARD_CAP = 10_000;

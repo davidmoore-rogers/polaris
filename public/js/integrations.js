@@ -133,6 +133,7 @@ async function loadIntegrations() {
           '<div class="integration-card-actions">' +
             (intg.type === "fortimanager" ? '<button class="btn btn-sm btn-secondary" onclick="openApiQueryModal(\'' + intg.id + '\', \'' + escapeHtml(config.adom || 'root') + '\')">Query API</button>' : '') +
             (intg.type === "fortigate" ? '<button class="btn btn-sm btn-secondary" onclick="openFgtApiQueryModal(\'' + intg.id + '\', \'' + escapeHtml(config.vdom || 'root') + '\')">Query API</button>' : '') +
+            (intg.type === "entraid" ? '<button class="btn btn-sm btn-secondary" onclick="openEntraApiQueryModal(\'' + intg.id + '\')">Query API</button>' : '') +
             '<button class="btn btn-sm btn-secondary" onclick="testConnection(\'' + intg.id + '\', this)">Test Connection</button>' +
             '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + intg.id + '\')">Edit</button>' +
             '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + intg.id + '\', \'' + escapeHtml(intg.name) + '\')">Delete</button>' +
@@ -1153,6 +1154,145 @@ function openFgtApiQueryModal(id, vdom) {
 
   document.getElementById("fgt-copy-btn").addEventListener("click", function () {
     var text = document.getElementById("fgt-response").textContent;
+    var btn = this;
+    navigator.clipboard.writeText(text).then(function () {
+      btn.textContent = "Copied!";
+      setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+    }).catch(function () { showToast("Copy failed", "error"); });
+  });
+}
+
+// ─── Entra ID API Query modal ───────────────────────────────────────────────
+
+function _entraLoadQueries() {
+  try { return JSON.parse(localStorage.getItem("shelob-entra-queries") || "[]"); } catch (_) { return []; }
+}
+
+function _entraPersistQueries(queries) {
+  localStorage.setItem("shelob-entra-queries", JSON.stringify(queries));
+}
+
+function _entraRenderSavedSelect(queries, selectValue) {
+  var sel = document.getElementById("entra-saved-select");
+  if (!sel) return;
+  sel.innerHTML = '<option value="">— load a saved query —</option>' +
+    queries.map(function (q, i) {
+      return '<option value="' + i + '"' + (String(i) === String(selectValue) ? " selected" : "") + '>' + escapeHtml(q.name) + '</option>';
+    }).join("");
+}
+
+function openEntraApiQueryModal(id) {
+  var body =
+    '<div style="margin-bottom:0.75rem">' +
+      '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.4rem">Saved Queries</p>' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<select id="entra-saved-select" style="flex:1"></select>' +
+        '<button class="btn btn-sm btn-secondary" id="entra-load-btn">Load</button>' +
+        '<button class="btn btn-sm btn-danger" id="entra-delete-btn">Delete</button>' +
+      '</div>' +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:0 0 0.75rem">' +
+    '<div class="form-group">' +
+      '<label>Path <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(GET only — must begin with <code>/v1.0/</code> or <code>/beta/</code>)</span></label>' +
+      '<input type="text" id="entra-path" value="/v1.0/devices" placeholder="/v1.0/deviceManagement/managedDevices" style="font-family:monospace;font-size:0.85rem">' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Query Parameters <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(one per line — <code>key=value</code>)</span></label>' +
+      '<textarea id="entra-query" rows="5" style="font-family:monospace;font-size:0.82rem" placeholder="$top=10&#10;$select=id,deviceId,displayName&#10;$filter=startswith(displayName,&apos;LAPTOP&apos;)"></textarea>' +
+      '<p class="hint">Common: <code>$select=…</code> to limit fields, <code>$filter=…</code> to narrow results, <code>$top=…</code> to cap rows. Host is fixed to <code>graph.microsoft.com</code>.</p>' +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;margin-bottom:0.75rem"><button class="btn btn-primary" id="entra-send">Send</button></div>' +
+    '<div style="display:flex;gap:6px;align-items:center;margin-bottom:0.25rem">' +
+      '<input type="text" id="entra-save-name" placeholder="Name this query to save it…" style="flex:1;font-size:0.85rem">' +
+      '<button class="btn btn-sm btn-secondary" id="entra-save-btn">Save</button>' +
+    '</div>' +
+    '<div id="entra-response-wrap" style="display:none;margin-top:1rem">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">' +
+        '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0">Response</p>' +
+        '<button class="btn btn-sm btn-secondary" id="entra-copy-btn" style="padding:2px 10px;font-size:0.75rem">Copy</button>' +
+      '</div>' +
+      '<pre id="entra-response" style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
+    '</div>';
+
+  var footer = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
+
+  openModal("Entra ID / Graph API Query", body, footer, { wide: true });
+
+  var savedQueries = _entraLoadQueries();
+  _entraRenderSavedSelect(savedQueries);
+
+  document.getElementById("entra-load-btn").addEventListener("click", function () {
+    var idx = parseInt(document.getElementById("entra-saved-select").value, 10);
+    if (isNaN(idx) || !savedQueries[idx]) return;
+    var q = savedQueries[idx];
+    document.getElementById("entra-path").value = q.path || "";
+    document.getElementById("entra-query").value = q.query || "";
+    document.getElementById("entra-save-name").value = q.name;
+  });
+
+  document.getElementById("entra-delete-btn").addEventListener("click", async function () {
+    var idx = parseInt(document.getElementById("entra-saved-select").value, 10);
+    if (isNaN(idx) || !savedQueries[idx]) return;
+    var ok = await showConfirm("Delete saved query \"" + savedQueries[idx].name + "\"?");
+    if (!ok) return;
+    savedQueries.splice(idx, 1);
+    _entraPersistQueries(savedQueries);
+    _entraRenderSavedSelect(savedQueries);
+  });
+
+  document.getElementById("entra-save-btn").addEventListener("click", function () {
+    var name = document.getElementById("entra-save-name").value.trim();
+    if (!name) { showToast("Enter a name for this query", "error"); return; }
+    var path = document.getElementById("entra-path").value.trim();
+    var query = document.getElementById("entra-query").value;
+    var existIdx = -1;
+    savedQueries.forEach(function (q, i) { if (q.name === name) existIdx = i; });
+    var entry = { name: name, path: path, query: query };
+    if (existIdx >= 0) {
+      savedQueries[existIdx] = entry;
+    } else {
+      savedQueries.push(entry);
+      existIdx = savedQueries.length - 1;
+    }
+    _entraPersistQueries(savedQueries);
+    _entraRenderSavedSelect(savedQueries, existIdx);
+    showToast("Query saved");
+  });
+
+  document.getElementById("entra-send").addEventListener("click", async function () {
+    var btn = this;
+    var path = document.getElementById("entra-path").value.trim();
+    if (!path) { showToast("Enter a path (e.g. /v1.0/devices)", "error"); return; }
+    var queryRaw = document.getElementById("entra-query").value;
+    var query = {};
+    queryRaw.split("\n").forEach(function (line) {
+      var trimmed = line.trim();
+      if (!trimmed) return;
+      var eq = trimmed.indexOf("=");
+      if (eq < 0) { query[trimmed] = ""; return; }
+      var key = trimmed.slice(0, eq).trim();
+      var value = trimmed.slice(eq + 1).trim();
+      if (key) query[key] = value;
+    });
+    btn.disabled = true;
+    btn.textContent = "Sending…";
+    var responseWrap = document.getElementById("entra-response-wrap");
+    var responsePre = document.getElementById("entra-response");
+    try {
+      var result = await api.integrations.query(id, { path: path, query: query });
+      responseWrap.style.display = "";
+      responsePre.textContent = JSON.stringify(result, null, 2);
+    } catch (err) {
+      responseWrap.style.display = "";
+      responsePre.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Send";
+    }
+  });
+
+  document.getElementById("entra-copy-btn").addEventListener("click", function () {
+    var text = document.getElementById("entra-response").textContent;
     var btn = this;
     navigator.clipboard.writeText(text).then(function () {
       btn.textContent = "Copied!";
