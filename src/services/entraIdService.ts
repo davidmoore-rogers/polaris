@@ -324,7 +324,6 @@ export async function discoverDevices(
       "manufacturer",
       "model",
       "userPrincipalName",
-      "chassisType",
       "complianceState",
       "lastSyncDateTime",
     ].join(",");
