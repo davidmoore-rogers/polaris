@@ -209,6 +209,40 @@ export async function updateRetentionSettings(
   return merged;
 }
 
+// ─── Asset Auto-Decommission Settings ───────────────────────────────────────
+
+export interface AssetDecommissionSettings {
+  inactivityMonths: number; // 0 = disabled
+}
+
+const ASSET_DECOMMISSION_KEY = "assetAutoDecommission";
+const DEFAULT_ASSET_DECOMMISSION: AssetDecommissionSettings = { inactivityMonths: 0 };
+
+export async function getAssetDecommissionSettings(): Promise<AssetDecommissionSettings> {
+  const row = await prisma.setting.findUnique({ where: { key: ASSET_DECOMMISSION_KEY } });
+  if (!row) return { ...DEFAULT_ASSET_DECOMMISSION };
+  const val = row.value as Record<string, unknown>;
+  const months = Number(val.inactivityMonths);
+  return {
+    inactivityMonths: Number.isFinite(months) && months >= 0 ? Math.floor(months) : 0,
+  };
+}
+
+export async function updateAssetDecommissionSettings(
+  settings: Partial<AssetDecommissionSettings>,
+): Promise<AssetDecommissionSettings> {
+  const months = Number(settings.inactivityMonths);
+  const merged: AssetDecommissionSettings = {
+    inactivityMonths: Number.isFinite(months) && months >= 0 ? Math.floor(months) : 0,
+  };
+  await prisma.setting.upsert({
+    where: { key: ASSET_DECOMMISSION_KEY },
+    create: { key: ASSET_DECOMMISSION_KEY, value: merged as any },
+    update: { value: merged as any },
+  });
+  return merged;
+}
+
 // ─── Syslog Settings ────────────────────────────────────────────────────────
 
 export interface SyslogSettings {

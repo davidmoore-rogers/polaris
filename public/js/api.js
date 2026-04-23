@@ -137,6 +137,8 @@ const api = {
     testSyslogConnection: (body) => trackedRequest("Testing syslog connection", "POST", "/events/syslog-test", body),
     getRetentionSettings: () => request("GET", "/events/retention-settings"),
     updateRetentionSettings: (body) => request("PUT", "/events/retention-settings", body),
+    getAssetDecommissionSettings: () => request("GET", "/events/asset-decommission-settings"),
+    updateAssetDecommissionSettings: (body) => request("PUT", "/events/asset-decommission-settings", body),
   },
   serverSettings: {
     getNtp:      ()       => request("GET", "/server-settings/ntp"),

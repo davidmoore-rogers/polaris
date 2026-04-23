@@ -14,6 +14,8 @@ import {
   getRetentionSettings,
   updateRetentionSettings,
   getCachedRetentionSettings,
+  getAssetDecommissionSettings,
+  updateAssetDecommissionSettings,
 } from "../../services/eventArchiveService.js";
 
 const LEVEL_ORDER: Record<string, number> = { info: 0, warning: 1, error: 2 };
@@ -139,6 +141,24 @@ router.get("/retention-settings", async (_req, res, next) => {
 router.put("/retention-settings", async (req, res, next) => {
   try {
     res.json(await updateRetentionSettings(req.body));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/events/asset-decommission-settings
+router.get("/asset-decommission-settings", async (_req, res, next) => {
+  try {
+    res.json(await getAssetDecommissionSettings());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /api/v1/events/asset-decommission-settings
+router.put("/asset-decommission-settings", async (req, res, next) => {
+  try {
+    res.json(await updateAssetDecommissionSettings(req.body));
   } catch (err) {
     next(err);
   }

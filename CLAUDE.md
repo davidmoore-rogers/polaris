@@ -97,7 +97,8 @@ shelob/
 │   │   ├── ouiRefresh.ts            # Refresh IEEE OUI database
 │   │   ├── pruneEvents.ts           # 7-day event log retention (nightly)
 │   │   ├── updateCheck.ts           # Software update notifications
-│   │   └── clampAssetAcquiredAt.ts  # One-shot startup fix: clamp acquiredAt to lastSeen
+│   │   ├── clampAssetAcquiredAt.ts  # One-shot startup fix: clamp acquiredAt to lastSeen
+│   │   └── decommissionStaleAssets.ts # Every 24h: decommission assets not seen in N months
 │   ├── setup/
 │   │   ├── setupRoutes.ts           # First-run setup wizard routes
 │   │   ├── setupServer.ts           # Setup server initialization
@@ -378,6 +379,8 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 - `GET    /events/syslog-settings`
 - `PUT    /events/syslog-settings`
 - `POST   /events/syslog-test`
+- `GET    /events/asset-decommission-settings`
+- `PUT    /events/asset-decommission-settings` — `{ inactivityMonths }`; 0 disables auto-decommission
 
 ### Conflicts — `requireAuth` (role-scoped list + resolve)
 - `GET    /conflicts`                           — List. Role-filtered: admin sees all; networkadmin sees reservation conflicts only; assetsadmin sees asset conflicts only; others see empty list.
@@ -503,6 +506,7 @@ Scope is the same as FMG (DHCP scopes + reservations + leases, interface IPs, VI
 | `pruneEvents` | Nightly | Delete Event records older than 7 days |
 | `updateCheck` | Periodic | Check for software updates |
 | `clampAssetAcquiredAt` | Once at startup | Clamp `acquiredAt` down to `lastSeen` on any Asset row where the invariant was violated |
+| `decommissionStaleAssets` | Every 24 hours | Move assets whose `lastSeen` is older than the configured inactivity threshold (months) to `decommissioned` status. Configured via Events → Settings → Assets tab; 0 disables. |
 
 ---
 

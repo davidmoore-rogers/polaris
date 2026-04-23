@@ -25,6 +25,7 @@ import "./jobs/ouiRefresh.js";
 import "./jobs/updateCheck.js";
 import "./jobs/discoveryScheduler.js";
 import "./jobs/clampAssetAcquiredAt.js";
+import "./jobs/decommissionStaleAssets.js";
 
 const app = express();
 
