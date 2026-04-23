@@ -358,7 +358,7 @@ async function openAllocateModal() {
   _allocSelectedTemplateId = "";
 
   var body =
-    '<div class="form-group"><label>Block *</label>' + blockSelectHTML("f-blockId", true) + '</div>' +
+    '<div class="form-group"><label>Block</label>' + blockSelectHTML("f-blockId", true) + '<p class="hint">Required to Allocate; not required to save a template.</p></div>' +
     '<div class="form-group">' +
       '<label>Template</label>' +
       '<div class="alloc-template-row">' +
