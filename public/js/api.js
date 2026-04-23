@@ -69,8 +69,15 @@ const api = {
     ips:           (id, params) => request("GET", `/subnets/${id}/ips` + toQuery(params)),
     create:        (body)   => request("POST", "/subnets", body),
     nextAvailable: (body)   => request("POST", "/subnets/next-available", body),
+    bulkAllocate:  (body)   => request("POST", "/subnets/bulk-allocate", body),
     update:        (id, b)  => request("PUT", `/subnets/${id}`, b),
     delete:        (id)     => request("DELETE", `/subnets/${id}`),
+  },
+  allocationTemplates: {
+    list:   ()        => request("GET",    "/allocation-templates"),
+    create: (body)    => request("POST",   "/allocation-templates", body),
+    update: (id, b)   => request("PUT",    `/allocation-templates/${id}`, b),
+    delete: (id)      => request("DELETE", `/allocation-templates/${id}`),
   },
   reservations: {
     list:          (params) => request("GET", "/reservations" + toQuery(params)),

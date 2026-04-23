@@ -178,6 +178,67 @@ export async function allocateNextSubnet(
   return createSubnet({ ...metadata, blockId, cidr: nextCidr });
 }
 
+// ─── Bulk allocation from a template ─────────────────────────────────────────
+
+export interface BulkAllocateEntry {
+  name: string;
+  prefixLength: number;
+  vlan?: number | null;
+}
+
+export interface BulkAllocateInput {
+  blockId: string;
+  prefix: string;
+  entries: BulkAllocateEntry[];
+  tags?: string[];
+  createdBy?: string;
+}
+
+export interface BulkAllocateResult {
+  created: Array<{ name: string; cidr: string; id: string }>;
+  failed: Array<{ name: string; prefixLength: number; error: string }>;
+}
+
+/**
+ * Allocate multiple subnets from one template invocation.
+ *
+ * Entries are processed in order. Each call to allocateNextSubnet re-queries
+ * the block's existing subnets, so later entries see the ones just created.
+ * Partial success is allowed: if an entry fails, earlier creations stay and
+ * the failure is reported in `failed`. The route layer decides how to surface.
+ */
+export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAllocateResult> {
+  if (!input.prefix || !input.prefix.trim()) {
+    throw new AppError(400, "A site/prefix name is required");
+  }
+  if (!Array.isArray(input.entries) || input.entries.length === 0) {
+    throw new AppError(400, "At least one entry is required");
+  }
+
+  const prefix = input.prefix.trim();
+  const tags = input.tags ?? [];
+  const created: BulkAllocateResult["created"] = [];
+  const failed: BulkAllocateResult["failed"] = [];
+
+  for (const entry of input.entries) {
+    const subnetName = `${prefix}_${entry.name}`;
+    try {
+      const subnet = await allocateNextSubnet(input.blockId, entry.prefixLength, {
+        name: subnetName,
+        vlan: entry.vlan ?? undefined,
+        tags,
+        createdBy: input.createdBy,
+      });
+      created.push({ id: subnet.id, name: subnet.name, cidr: subnet.cidr });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      failed.push({ name: subnetName, prefixLength: entry.prefixLength, error: msg });
+    }
+  }
+
+  return { created, failed };
+}
+
 // ─── Update ───────────────────────────────────────────────────────────────────
 
 export async function updateSubnet(id: string, input: UpdateSubnetInput) {

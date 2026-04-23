@@ -73,6 +73,7 @@ shelob/
 │   │       ├── events.ts            # Audit log, syslog, SFTP archival
 │   │       ├── conflicts.ts         # Discovery conflict review & resolution
 │   │       ├── search.ts            # Global typeahead search across all entity types
+│   │       ├── allocationTemplates.ts # CRUD for saved multi-subnet allocation templates
 │   │       └── serverSettings.ts    # HTTPS, branding, backup/restore
 │   ├── services/
 │   │   ├── ipService.ts             # Core IP math & validation
@@ -85,6 +86,7 @@ shelob/
 │   │   ├── windowsServerService.ts  # Windows Server WinRM DHCP discovery
 │   │   ├── entraIdService.ts        # Microsoft Entra ID + Intune device discovery via Graph
 │   │   ├── searchService.ts         # Global typeahead search (classifies IP/CIDR/MAC/text; parallel entity queries)
+│   │   ├── allocationTemplateService.ts # Saved multi-subnet allocation templates (Setting-backed)
 │   │   ├── azureAuthService.ts      # Azure AD/Entra SAML SSO, user provisioning
 │   │   ├── dnsService.ts            # Reverse DNS lookup for assets
 │   │   ├── ouiService.ts            # MAC OUI lookup with admin overrides
@@ -327,6 +329,7 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 - `PUT    /subnets/:id`
 - `DELETE /subnets/:id`                         — 409 if active reservations exist
 - `POST   /subnets/next-available`              — Auto-allocate next available subnet of given prefix length
+- `POST   /subnets/bulk-allocate`                — Allocate multiple subnets in one call from a template. Body: `{ blockId, prefix, entries: [{name, prefixLength, vlan?}], tags? }`. Each subnet is named `<prefix>_<entry.name>` (e.g. `Jefferson_RGIHardware`). Partial success is allowed; response is `{ created, failed }`.
 
 ### Reservations — `requireAuth`
 - `GET    /reservations`                        — List (filter by owner, projectRef, status, createdBy)
@@ -393,6 +396,12 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 
 ### Search — `requireAuth`
 - `GET    /search?q=<query>`                    — Global typeahead. Classifies input (IP, CIDR, MAC, or text), runs 4 parallel entity queries, returns grouped results (`blocks`, `subnets`, `reservations`, `assets`, `ips`) capped at 8 per group. The `ips` hit resolves the containing subnet and any active reservation. All authenticated roles can search; front-end edit modals render in view-only mode for users without write permission.
+
+### Allocation Templates — mixed scoping
+- `GET    /allocation-templates`                *(auth)* — List saved multi-subnet templates used by the Networks "Auto-Allocate Next" modal.
+- `POST   /allocation-templates`                *(networkadmin)* — Create a template. Body: `{ name, entries: [{name, prefixLength, vlan?}] }`.
+- `PUT    /allocation-templates/:id`            *(networkadmin)* — Update a template.
+- `DELETE /allocation-templates/:id`            *(networkadmin)* — Delete a template.
 
 ### Server Settings — `requireAdmin`
 - `GET    /server-settings`

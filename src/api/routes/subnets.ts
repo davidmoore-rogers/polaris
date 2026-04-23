@@ -30,6 +30,19 @@ const AllocateNextSchema = z.object({
   tags:         z.array(z.string()).optional(),
 });
 
+const BulkAllocateSchema = z.object({
+  blockId: z.string().uuid(),
+  prefix:  z.string().min(1, "Site/prefix name is required"),
+  entries: z.array(
+    z.object({
+      name:         z.string().min(1, "Entry name is required"),
+      prefixLength: z.number().int().min(8).max(32),
+      vlan:         z.number().int().min(1).max(4094).nullable().optional(),
+    })
+  ).min(1, "At least one entry is required"),
+  tags:    z.array(z.string()).optional(),
+});
+
 const UpdateSubnetSchema = z.object({
   name:    z.string().min(1, "Name is required").optional(),
   purpose: z.string().optional(),
@@ -62,6 +75,27 @@ router.post("/next-available", requireNetworkAdmin, async (req, res, next) => {
     const subnet = await subnetService.allocateNextSubnet(blockId, prefixLength, { ...metadata, createdBy: req.session?.username ?? undefined });
     logEvent({ action: "subnet.created", resourceType: "subnet", resourceId: subnet.id, resourceName: metadata.name, actor: req.session?.username, message: `Subnet "${metadata.name}" (${subnet.cidr}) auto-allocated` });
     res.status(201).json(subnet);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /subnets/bulk-allocate  (must come before /:id)
+router.post("/bulk-allocate", requireNetworkAdmin, async (req, res, next) => {
+  try {
+    const input = BulkAllocateSchema.parse(req.body);
+    const result = await subnetService.bulkAllocate({ ...input, createdBy: req.session?.username ?? undefined });
+    if (result.created.length > 0) {
+      const cidrs = result.created.map((s) => s.cidr).join(", ");
+      logEvent({
+        action: "subnet.bulk-allocated",
+        resourceType: "subnet",
+        actor: req.session?.username,
+        message: `Bulk-allocated ${result.created.length} subnet(s) with prefix "${input.prefix}": ${cidrs}`,
+        details: { created: result.created, failed: result.failed },
+      });
+    }
+    res.status(result.failed.length > 0 && result.created.length === 0 ? 409 : 201).json(result);
   } catch (err) {
     next(err);
   }

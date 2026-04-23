@@ -322,41 +322,269 @@ async function openCreateModal() {
   });
 }
 
+/* ─── Auto-Allocate: template-driven bulk modal ──────────────────────────── */
+
+var _allocTemplates = [];
+var _allocSelectedTemplateId = "";
+
 async function openAllocateModal() {
-  await _ensureTagCache();
-  var body = '<div class="form-group"><label>Block *</label>' + blockSelectHTML("f-blockId", true) + '</div>' +
-    '<div class="form-group"><label>Prefix Length *</label><input type="number" id="f-prefix" min="8" max="32" placeholder="e.g. 24"><p class="hint">/8 to /32</p></div>' +
-    '<div class="form-group"><label>Name *</label><input type="text" id="f-name" placeholder="e.g. New Subnet"></div>' +
-    '<div class="form-group"><label>Purpose</label><textarea id="f-purpose" placeholder="What is this network for?"></textarea></div>' +
-    '<div class="form-group"><label>VLAN</label><input type="number" id="f-vlan" min="1" max="4094" placeholder="1-4094"></div>' +
+  try {
+    var loaded = await Promise.all([api.allocationTemplates.list(), _ensureTagCache()]);
+    _allocTemplates = Array.isArray(loaded[0]) ? loaded[0] : [];
+  } catch (err) {
+    _allocTemplates = [];
+    showToast("Could not load templates: " + err.message, "error");
+  }
+  _allocSelectedTemplateId = "";
+
+  var body =
+    '<div class="form-group"><label>Block *</label>' + blockSelectHTML("f-blockId", true) + '</div>' +
+    '<div class="form-group">' +
+      '<label>Template</label>' +
+      '<div class="alloc-template-row">' +
+        '<select id="f-template"></select>' +
+        '<button type="button" class="btn btn-sm btn-danger" id="f-template-delete" title="Delete selected template" disabled>&times;</button>' +
+      '</div>' +
+      '<p class="hint">Pick a saved template to pre-fill the rows below, or build one from scratch.</p>' +
+    '</div>' +
+    '<div class="form-group"><label>Site Name *</label><input type="text" id="f-site" placeholder="e.g. Jefferson"><p class="hint">Prepended to each row name, separated by <code>_</code> (e.g. Jefferson_RGIHardware).</p></div>' +
+    '<div class="form-group">' +
+      '<label>Subnets *</label>' +
+      '<div class="alloc-entries-header"><span>Name</span><span>Prefix</span><span>VLAN</span><span></span></div>' +
+      '<div id="f-entries"></div>' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="f-add-row" style="margin-top:6px">+ Add Row</button>' +
+    '</div>' +
     tagFieldHTML([]);
-  var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btn-save">Allocate</button>';
-  openModal("Auto-Allocate Next Network", body, footer);
+
+  var footer =
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-secondary" id="btn-save-template">Save Template</button>' +
+    '<button class="btn btn-primary" id="btn-allocate">Allocate</button>';
+
+  openModal("Auto-Allocate Next Networks", body, footer, { wide: true });
   wireTagPicker();
 
-  document.getElementById("btn-save").addEventListener("click", async function () {
-    var btn = this;
-    btn.disabled = true;
-    try {
-      var vlan = document.getElementById("f-vlan").value;
-      var input = {
-        blockId: val("f-blockId"),
-        prefixLength: parseInt(val("f-prefix"), 10),
-        name: val("f-name"),
-        purpose: val("f-purpose") || undefined,
-        vlan: vlan ? parseInt(vlan, 10) : undefined,
-        tags: getTagFieldValue(),
-      };
-      var subnet = await api.subnets.nextAvailable(input);
-      closeModal();
-      showToast("Allocated " + subnet.cidr);
-      loadSubnets();
-    } catch (err) {
-      showToast(err.message, "error");
-    } finally {
-      btn.disabled = false;
+  _renderAllocTemplateOptions();
+  _addAllocEntryRow(); // start with one empty row
+
+  document.getElementById("f-template").addEventListener("change", _onAllocTemplateChange);
+  document.getElementById("f-template-delete").addEventListener("click", _onAllocTemplateDelete);
+  document.getElementById("f-add-row").addEventListener("click", function () { _addAllocEntryRow(); });
+  document.getElementById("f-entries").addEventListener("click", function (e) {
+    var rm = e.target.closest(".alloc-row-remove");
+    if (!rm) return;
+    var row = rm.closest(".alloc-entry-row");
+    if (!row) return;
+    var rows = document.querySelectorAll("#f-entries .alloc-entry-row");
+    if (rows.length <= 1) {
+      // Always keep at least one row — clear fields instead of removing the sole row
+      row.querySelectorAll("input").forEach(function (inp) { inp.value = ""; });
+      return;
     }
+    row.remove();
   });
+
+  document.getElementById("btn-save-template").addEventListener("click", _onAllocSaveTemplate);
+  document.getElementById("btn-allocate").addEventListener("click", _onAllocSubmit);
+}
+
+function _renderAllocTemplateOptions() {
+  var sel = document.getElementById("f-template");
+  if (!sel) return;
+  var html = '<option value="">— None (custom) —</option>';
+  _allocTemplates.forEach(function (t) {
+    html += '<option value="' + t.id + '"' + (t.id === _allocSelectedTemplateId ? " selected" : "") + '>' + escapeHtml(t.name) + '</option>';
+  });
+  sel.innerHTML = html;
+  var delBtn = document.getElementById("f-template-delete");
+  if (delBtn) delBtn.disabled = !_allocSelectedTemplateId;
+}
+
+function _addAllocEntryRow(entry) {
+  entry = entry || { name: "", prefixLength: "", vlan: "" };
+  var container = document.getElementById("f-entries");
+  if (!container) return;
+  var row = document.createElement("div");
+  row.className = "alloc-entry-row";
+  row.innerHTML =
+    '<input type="text" class="alloc-entry-name" placeholder="e.g. RGIHardware" value="' + escapeHtml(entry.name || "") + '">' +
+    '<input type="number" class="alloc-entry-prefix" min="8" max="32" placeholder="e.g. 25" value="' + (entry.prefixLength != null && entry.prefixLength !== "" ? entry.prefixLength : "") + '">' +
+    '<input type="number" class="alloc-entry-vlan" min="1" max="4094" placeholder="Optional" value="' + (entry.vlan != null && entry.vlan !== "" ? entry.vlan : "") + '">' +
+    '<button type="button" class="btn btn-sm btn-icon alloc-row-remove" title="Remove row">&times;</button>';
+  container.appendChild(row);
+}
+
+function _collectAllocEntries() {
+  var rows = document.querySelectorAll("#f-entries .alloc-entry-row");
+  var entries = [];
+  for (var i = 0; i < rows.length; i++) {
+    var name = rows[i].querySelector(".alloc-entry-name").value.trim();
+    var prefRaw = rows[i].querySelector(".alloc-entry-prefix").value.trim();
+    var vlanRaw = rows[i].querySelector(".alloc-entry-vlan").value.trim();
+    if (!name && !prefRaw && !vlanRaw) continue; // skip blank rows
+    if (!name) throw new Error("Row " + (i + 1) + ": name is required");
+    var pl = parseInt(prefRaw, 10);
+    if (!Number.isInteger(pl) || pl < 8 || pl > 32) throw new Error("Row " + (i + 1) + " (" + name + "): prefix length must be 8-32");
+    var entry = { name: name, prefixLength: pl };
+    if (vlanRaw) {
+      var v = parseInt(vlanRaw, 10);
+      if (!Number.isInteger(v) || v < 1 || v > 4094) throw new Error("Row " + (i + 1) + " (" + name + "): VLAN must be 1-4094");
+      entry.vlan = v;
+    }
+    entries.push(entry);
+  }
+  return entries;
+}
+
+function _onAllocTemplateChange(e) {
+  var id = e.target.value;
+  _allocSelectedTemplateId = id;
+  var delBtn = document.getElementById("f-template-delete");
+  if (delBtn) delBtn.disabled = !id;
+  if (!id) return;
+  var tpl = _allocTemplates.find(function (t) { return t.id === id; });
+  if (!tpl) return;
+  var container = document.getElementById("f-entries");
+  container.innerHTML = "";
+  (tpl.entries || []).forEach(function (entry) { _addAllocEntryRow(entry); });
+  if (!tpl.entries || tpl.entries.length === 0) _addAllocEntryRow();
+}
+
+async function _onAllocTemplateDelete() {
+  if (!_allocSelectedTemplateId) return;
+  var tpl = _allocTemplates.find(function (t) { return t.id === _allocSelectedTemplateId; });
+  if (!tpl) return;
+  var ok = await showConfirm('Delete template "' + tpl.name + '"? This cannot be undone.');
+  if (!ok) return;
+  try {
+    await api.allocationTemplates.delete(tpl.id);
+    _allocTemplates = _allocTemplates.filter(function (t) { return t.id !== tpl.id; });
+    _allocSelectedTemplateId = "";
+    _renderAllocTemplateOptions();
+    showToast("Template deleted");
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function _onAllocSaveTemplate() {
+  var entries;
+  try { entries = _collectAllocEntries(); }
+  catch (err) { showToast(err.message, "error"); return; }
+  if (entries.length === 0) { showToast("Add at least one subnet row before saving", "error"); return; }
+
+  var loaded = _allocSelectedTemplateId
+    ? _allocTemplates.find(function (t) { return t.id === _allocSelectedTemplateId; })
+    : null;
+
+  var choice = "new";
+  if (loaded) {
+    choice = await _promptSaveTemplateChoice(loaded.name);
+    if (!choice) return;
+  }
+
+  try {
+    if (choice === "update" && loaded) {
+      var updated = await api.allocationTemplates.update(loaded.id, { name: loaded.name, entries: entries });
+      var idx = _allocTemplates.findIndex(function (t) { return t.id === loaded.id; });
+      if (idx >= 0) _allocTemplates[idx] = updated;
+      showToast('Template "' + updated.name + '" updated');
+    } else {
+      var name = await _promptText(
+        "Save Template",
+        "Give this template a name:",
+        loaded ? loaded.name + " (copy)" : ""
+      );
+      if (!name) return;
+      var created = await api.allocationTemplates.create({ name: name, entries: entries });
+      _allocTemplates.push(created);
+      _allocSelectedTemplateId = created.id;
+      showToast('Template "' + created.name + '" saved');
+    }
+    _renderAllocTemplateOptions();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+function _promptSaveTemplateChoice(existingName) {
+  return new Promise(function (resolve) {
+    var body =
+      '<p style="font-size:0.9rem;color:var(--color-text-secondary)">Template <strong>' + escapeHtml(existingName) + '</strong> is currently loaded. What would you like to do?</p>';
+    var footer =
+      '<button class="btn btn-secondary" id="tpl-choice-cancel">Cancel</button>' +
+      '<button class="btn btn-secondary" id="tpl-choice-new">Save As New</button>' +
+      '<button class="btn btn-primary" id="tpl-choice-update">Update Existing</button>';
+    openModal("Save Template", body, footer);
+    document.getElementById("tpl-choice-cancel").onclick = function () { closeModal(); resolve(null); };
+    document.getElementById("tpl-choice-new").onclick = function () { closeModal(); resolve("new"); };
+    document.getElementById("tpl-choice-update").onclick = function () { closeModal(); resolve("update"); };
+  });
+}
+
+function _promptText(title, label, initial) {
+  return new Promise(function (resolve) {
+    var body =
+      '<div class="form-group"><label>' + escapeHtml(label) + '</label>' +
+      '<input type="text" id="prompt-text" value="' + escapeHtml(initial || "") + '"></div>';
+    var footer =
+      '<button class="btn btn-secondary" id="prompt-cancel">Cancel</button>' +
+      '<button class="btn btn-primary" id="prompt-ok">Save</button>';
+    openModal(title, body, footer);
+    var input = document.getElementById("prompt-text");
+    input.focus();
+    input.select();
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") document.getElementById("prompt-ok").click();
+    });
+    document.getElementById("prompt-cancel").onclick = function () { closeModal(); resolve(null); };
+    document.getElementById("prompt-ok").onclick = function () {
+      var v = input.value.trim();
+      if (!v) { input.focus(); return; }
+      closeModal();
+      resolve(v);
+    };
+  });
+}
+
+async function _onAllocSubmit() {
+  var btn = document.getElementById("btn-allocate");
+  var blockId = val("f-blockId");
+  if (!blockId) { showToast("Select a block", "error"); return; }
+  var site = val("f-site");
+  if (!site) { showToast("Enter a site name", "error"); return; }
+
+  var entries;
+  try { entries = _collectAllocEntries(); }
+  catch (err) { showToast(err.message, "error"); return; }
+  if (entries.length === 0) { showToast("Add at least one subnet row", "error"); return; }
+
+  var tags = getTagFieldValue();
+  btn.disabled = true;
+  try {
+    var result = await api.subnets.bulkAllocate({ blockId: blockId, prefix: site, entries: entries, tags: tags });
+    var createdN = result.created.length;
+    var failedN = result.failed.length;
+    if (createdN > 0 && failedN === 0) {
+      closeModal();
+      showToast("Allocated " + createdN + " network" + (createdN !== 1 ? "s" : ""));
+      loadSubnets();
+      return;
+    }
+    if (createdN === 0) {
+      var msg = failedN > 0 ? ("All allocations failed: " + result.failed[0].error) : "Nothing allocated";
+      showToast(msg, "error");
+      return;
+    }
+    // Partial success
+    loadSubnets();
+    var firstErr = result.failed[0] ? result.failed[0].error : "unknown";
+    showToast("Allocated " + createdN + ", " + failedN + " failed (" + firstErr + ")", "error");
+  } catch (err) {
+    showToast(err.message, "error");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function openEditModal(id) {

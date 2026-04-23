@@ -15,6 +15,7 @@ import eventsRouter from "./routes/events.js";
 import conflictsRouter from "./routes/conflicts.js";
 import serverSettingsRouter from "./routes/serverSettings.js";
 import searchRouter from "./routes/search.js";
+import allocationTemplatesRouter from "./routes/allocationTemplates.js";
 import { requireAuth, requireAdmin, requireNetworkAdmin } from "./middleware/auth.js";
 
 export const router = Router();
@@ -34,6 +35,7 @@ router.get("/server-settings/branding", async (_req, res, next) => {
 router.use(requireAuth);
 router.use("/blocks", blocksRouter);
 router.use("/subnets", subnetsRouter);
+router.use("/allocation-templates", allocationTemplatesRouter);
 router.use("/reservations", reservationsRouter);
 router.use("/utilization", utilizationRouter);
 router.use("/users", requireAdmin, usersRouter);

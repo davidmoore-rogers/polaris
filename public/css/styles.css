@@ -2225,3 +2225,44 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   .main { padding: 1rem; }
   .user-badge-name { display: none; }
 }
+
+/* ─── Auto-Allocate template modal ─────────────────────────────────────── */
+.alloc-template-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.alloc-template-row select {
+  flex: 1 1 auto;
+}
+.alloc-template-row .btn { flex: 0 0 auto; }
+
+.alloc-entries-header {
+  display: grid;
+  grid-template-columns: 1fr 100px 100px 32px;
+  gap: 6px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  padding: 0 4px 4px;
+}
+.alloc-entry-row {
+  display: grid;
+  grid-template-columns: 1fr 100px 100px 32px;
+  gap: 6px;
+  margin-bottom: 6px;
+  align-items: center;
+}
+.alloc-entry-row input { margin: 0; }
+.alloc-entry-row .alloc-row-remove {
+  padding: 4px 8px;
+  line-height: 1;
+  font-size: 1.05rem;
+  color: var(--color-text-tertiary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+}
+.alloc-entry-row .alloc-row-remove:hover {
+  color: var(--color-danger, #c44);
+  border-color: var(--color-danger, #c44);
+}

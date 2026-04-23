@@ -1,0 +1,93 @@
+/**
+ * src/api/routes/allocationTemplates.ts
+ *
+ * CRUD for saved multi-subnet allocation templates used by the
+ * Networks "Auto-Allocate Next" modal.
+ */
+
+import { Router } from "express";
+import { z } from "zod";
+import * as templateService from "../../services/allocationTemplateService.js";
+import { requireNetworkAdmin } from "../middleware/auth.js";
+import { logEvent } from "./events.js";
+
+const router = Router();
+
+const EntrySchema = z.object({
+  name:         z.string().min(1, "Entry name is required"),
+  prefixLength: z.number().int().min(8).max(32),
+  vlan:         z.number().int().min(1).max(4094).nullable().optional(),
+});
+
+const SaveTemplateSchema = z.object({
+  name:    z.string().min(1, "Template name is required"),
+  entries: z.array(EntrySchema).min(1, "Template must have at least one entry"),
+});
+
+// GET /allocation-templates — any authenticated caller can list templates
+router.get("/", async (_req, res, next) => {
+  try {
+    res.json(await templateService.listTemplates());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /allocation-templates
+router.post("/", requireNetworkAdmin, async (req, res, next) => {
+  try {
+    const input = SaveTemplateSchema.parse(req.body);
+    const saved = await templateService.saveTemplate(input);
+    logEvent({
+      action: "allocation-template.created",
+      resourceType: "allocation-template",
+      resourceId: saved.id,
+      resourceName: saved.name,
+      actor: req.session?.username,
+      message: `Allocation template "${saved.name}" created (${saved.entries.length} entries)`,
+    });
+    res.status(201).json(saved);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /allocation-templates/:id
+router.put("/:id", requireNetworkAdmin, async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const input = SaveTemplateSchema.parse(req.body);
+    const saved = await templateService.saveTemplate({ id, ...input });
+    logEvent({
+      action: "allocation-template.updated",
+      resourceType: "allocation-template",
+      resourceId: saved.id,
+      resourceName: saved.name,
+      actor: req.session?.username,
+      message: `Allocation template "${saved.name}" updated (${saved.entries.length} entries)`,
+    });
+    res.json(saved);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /allocation-templates/:id
+router.delete("/:id", requireNetworkAdmin, async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    await templateService.deleteTemplate(id);
+    logEvent({
+      action: "allocation-template.deleted",
+      resourceType: "allocation-template",
+      resourceId: id,
+      actor: req.session?.username,
+      message: `Allocation template ${id} deleted`,
+    });
+    res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+});
+
+export default router;
