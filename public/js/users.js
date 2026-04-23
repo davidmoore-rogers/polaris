@@ -43,10 +43,13 @@ async function loadUsers() {
         ? '<span title="' + escapeHtml(new Date(u.lastLogin).toLocaleString()) + '">' + timeAgo(u.lastLogin) + '</span>'
         : '<span style="color:var(--color-text-tertiary)">Never</span>';
       var displayName = u.displayName ? ' <span style="color:var(--color-text-tertiary);font-size:0.85em">(' + escapeHtml(u.displayName) + ')</span>' : '';
+      var onlineDot = u.isOnline
+        ? '<span class="ip-status-dot ip-dot-available" title="Currently logged in" style="margin-right:6px;vertical-align:middle"></span>'
+        : '';
       var passwordBtn = u.authProvider === "azure" ? '' :
         '<button class="btn btn-sm btn-secondary" data-action="password" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '">Password</button>';
       return '<tr>' +
-        '<td><strong>' + escapeHtml(u.username) + '</strong>' + displayName + '</td>' +
+        '<td>' + onlineDot + '<strong>' + escapeHtml(u.username) + '</strong>' + displayName + '</td>' +
         '<td>' + authBadge + '</td>' +
         '<td>' + roleBadge + '</td>' +
         '<td>' + lastLogin + '</td>' +

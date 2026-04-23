@@ -34,15 +34,37 @@ const UpdateRoleSchema = z.object({
 // GET /api/v1/users
 router.get("/", async (_req, res, next) => {
   try {
-    const users = await prisma.user.findMany({
-      select: { id: true, username: true, role: true, authProvider: true, displayName: true, email: true, lastLogin: true, createdAt: true, updatedAt: true },
-      orderBy: { username: "asc" },
-    });
-    res.json(users);
+    const [users, onlineUserIds] = await Promise.all([
+      prisma.user.findMany({
+        select: { id: true, username: true, role: true, authProvider: true, displayName: true, email: true, lastLogin: true, createdAt: true, updatedAt: true },
+        orderBy: { username: "asc" },
+      }),
+      getOnlineUserIds(),
+    ]);
+    res.json(users.map((u) => ({ ...u, isOnline: onlineUserIds.has(u.id) })));
   } catch (err) {
     next(err);
   }
 });
+
+// Query the connect-pg-simple session store for non-expired sessions and
+// extract their `userId`s. Returns an empty set if the session table does not
+// yet exist (e.g. first boot before anyone has logged in).
+async function getOnlineUserIds(): Promise<Set<string>> {
+  try {
+    const rows = await prisma.$queryRaw<{ sess: unknown }[]>`
+      SELECT sess FROM session WHERE expire > NOW()
+    `;
+    const ids = new Set<string>();
+    for (const row of rows) {
+      const sess = row.sess as { userId?: unknown } | null;
+      if (sess && typeof sess.userId === "string") ids.add(sess.userId);
+    }
+    return ids;
+  } catch {
+    return new Set();
+  }
+}
 
 // POST /api/v1/users
 router.post("/", async (req, res, next) => {
