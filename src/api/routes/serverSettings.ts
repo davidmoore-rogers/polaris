@@ -727,17 +727,14 @@ function buildPgRecommended(): Record<string, { min: number; unit: string; displ
   };
 }
 
-// Returns minimum host RAM (bytes) recommended for the given data volumes.
-// Scales at 1 GB per 1,000 assets / 10,000 subnets / 1M reservations, minimum 8 GB, rounded up to next power-of-2.
-function getMinRecommendedRamBytes(counts: { assets: number; subnets: number; reservations: number }): number {
+// Returns minimum host RAM (bytes) recommended for a database of the given size.
+// Target: ~2x the DB size (half as Postgres shared_buffers + OS page cache,
+// half as OS/application overhead), with a 4 GB floor. Rounded up to the next
+// power of two to match common server RAM sizes.
+function getMinRecommendedRamBytes(dbSizeBytes: number): number {
   const GB = 1024 * 1024 * 1024;
-  const loadFactor = Math.max(
-    counts.assets / 1000,
-    counts.subnets / 10000,
-    counts.reservations / 1000000,
-    8,
-  );
-  return Math.pow(2, Math.ceil(Math.log2(loadFactor))) * GB;
+  const target = Math.max(4 * GB, dbSizeBytes * 2);
+  return Math.pow(2, Math.ceil(Math.log2(target / GB))) * GB;
 }
 
 function parsePgBytes(val: string): number {
@@ -784,7 +781,11 @@ router.get("/pg-tuning", async (_req, res, next) => {
     );
 
     const counts = { assets: assetCount, subnets: subnetCount, reservations: reservationCount };
-    const minRam = getMinRecommendedRamBytes(counts);
+    const dbSizeResult = await prisma.$queryRawUnsafe<{ size: bigint }[]>(
+      "SELECT pg_database_size(current_database()) AS size"
+    );
+    const dbSizeBytes = Number(dbSizeResult[0]?.size ?? 0);
+    const minRam = getMinRecommendedRamBytes(dbSizeBytes);
     const currentRam = totalmem();
     const GB = 1024 * 1024 * 1024;
     const currentRamGb    = Math.round(currentRam / GB);
