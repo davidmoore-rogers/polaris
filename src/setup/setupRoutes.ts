@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import pg from "pg";
 import bcrypt from "bcrypt";
+import { markSetupComplete } from "./detectSetup.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -188,6 +189,10 @@ router.post("/finalize", async (req, res) => {
       [admin.username, passwordHash],
     );
     await appClient.end();
+
+    // Write the setup-complete marker so future boots refuse to show the
+    // wizard even if .env is deleted or DATABASE_URL is cleared.
+    markSetupComplete();
 
     res.json({ ok: true, message: "Setup complete. The application is restarting." });
 

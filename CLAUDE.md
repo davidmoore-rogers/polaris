@@ -102,7 +102,7 @@ shelob/
 │   ├── setup/
 │   │   ├── setupRoutes.ts           # First-run setup wizard routes
 │   │   ├── setupServer.ts           # Setup server initialization
-│   │   └── detectSetup.ts           # Detects if initial setup is complete
+│   │   └── detectSetup.ts           # Resolves setup state: configured / needs-setup / locked
 │   ├── models/
 │   │   └── types.ts                 # Shared TypeScript interfaces
 │   └── utils/
@@ -358,6 +358,7 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 - `POST   /integrations/:id/discover`           — Trigger full discovery run
 - `GET    /integrations/:id/discovery-status`   — Poll in-progress discovery
 - `POST   /integrations/:id/abort-discovery`
+- `POST   /integrations/:id/query`              — Manual API proxy. FortiManager: `{method, params}` (JSON-RPC). FortiGate: `{method, path, query?}` (REST). Entra ID: `{path, query?}` GET-only against `graph.microsoft.com`; path must begin with `/v1.0/` or `/beta/`.
 
 ### Assets — `requireAuth`
 - `GET    /assets`                              — List (filter by status, type, department, search, createdBy)
@@ -584,6 +585,16 @@ Copy `.env.example` to `.env` before running.
 ## Deployment & Updates
 
 The production instance is updated via the **in-app update mechanism** in **Server Settings → Database**. When pushing changes, the user applies the update through that UI rather than manually redeploying. Keep this in mind when giving deployment advice — do not suggest `git pull` or manual restart steps unless asked.
+
+### First-run setup lock
+
+The setup wizard is unauthenticated by design (the operator needs to reach it from a browser to provision the host). To stop a network attacker from re-running the wizard against an already-configured host whose `.env` got deleted/corrupted, finalize writes a `.setup-complete` marker at the project root. On every boot:
+
+- `DATABASE_URL` set → app boots normally; marker is back-filled if missing (covers existing installs).
+- `DATABASE_URL` missing AND no marker → wizard runs (fresh install).
+- `DATABASE_URL` missing AND marker present → process logs a recovery message and exits 1; the wizard never starts.
+
+To intentionally re-provision from scratch, an admin with shell access deletes both `.env` and `.setup-complete`.
 
 ---
 

@@ -9,3 +9,6 @@ dist/
 
 # Database backups
 data/backups/
+
+# First-run setup marker — written per-host after setup finalizes
+.setup-complete
