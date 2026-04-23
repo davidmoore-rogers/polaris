@@ -1453,7 +1453,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 
 /* ─── Conflict Comparison Table ───────────────────────────────────────────── */
-.conflict-table table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.conflict-table table { width: 100%; border-collapse: collapse; font-size: 0.82rem; table-layout: fixed; }
 .conflict-table th {
   text-align: left;
   padding: 6px 10px;
@@ -1468,11 +1468,18 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   padding: 5px 10px;
   border-bottom: 1px solid var(--color-border);
   color: var(--color-text-secondary);
+  word-break: break-word;
 }
 .conflict-table .conflict-field {
   color: var(--color-text-tertiary);
   font-size: 0.78rem;
   width: 100px;
+}
+.conflict-table th:nth-child(2),
+.conflict-table th:nth-child(3),
+.conflict-table td:nth-child(2),
+.conflict-table td:nth-child(3) {
+  width: calc((100% - 100px) / 2);
 }
 .conflict-table .conflict-changed td {
   background: rgba(255,214,0,0.05);
