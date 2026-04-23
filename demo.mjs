@@ -1518,6 +1518,10 @@ function discoverWinDhcpDemo(config) {
   return { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [] };
 }
 
+function _ipInCidrDemo(ip, cidr) {
+  try { return new Netmask(cidr).contains(ip); } catch { return false; }
+}
+
 function matchesWildcardDemo(pattern, value) {
   const p = String(pattern || "").toLowerCase();
   const v = String(value || "").toLowerCase();
@@ -2570,6 +2574,67 @@ async function routeAPI(method, path, params, body, res, req) {
     // fall through — handled below
   } else if (!isLoggedIn) {
     return json(res, { error: "Unauthorized" }, 401);
+  }
+
+  // Global search — mirrors /api/v1/search in the real service
+  if (path === "/api/v1/search" && method === "GET") {
+    const q = (params.get("q") || "").trim();
+    if (q.length < 2) {
+      return json(res, { query: q, blocks: [], subnets: [], reservations: [], assets: [], ips: [] });
+    }
+    const LIMIT = 8;
+    const lq = q.toLowerCase();
+    const compactMac = q.replace(/[\s:\-.]/g, "").toLowerCase();
+    const mac = /^[0-9a-f]{12}$/.test(compactMac) ? compactMac.toUpperCase().match(/.{2}/g).join(":") : null;
+    const contains = (v) => typeof v === "string" && v.toLowerCase().includes(lq);
+
+    const blocks = BLOCKS.filter((b) => contains(b.name) || contains(b.description) || contains(b.cidr)).slice(0, LIMIT)
+      .map((b) => ({ type: "block", id: b.id, title: b.name, subtitle: b.cidr + (b.description ? " — " + b.description : "") }));
+    const subnets = SUBNETS.filter((s) => contains(s.name) || contains(s.cidr) || contains(s.purpose) || contains(s.fortigateDevice)).slice(0, LIMIT)
+      .map((s) => ({ type: "subnet", id: s.id, title: s.name, subtitle: s.cidr + (s.purpose ? " — " + s.purpose : ""), context: { cidr: s.cidr } }));
+    const reservations = RESERVATIONS.filter((r) => r.status === "active" && (
+      contains(r.hostname) || contains(r.owner) || contains(r.projectRef) || contains(r.notes) || contains(r.ipAddress)
+    )).slice(0, LIMIT).map((r) => {
+      const sub = SUBNETS.find((s) => s.id === r.subnetId);
+      return {
+        type: "reservation",
+        id: r.id,
+        title: r.hostname || r.ipAddress || "reservation",
+        subtitle: [r.ipAddress, sub?.cidr, r.owner].filter(Boolean).join(" — "),
+        context: { subnetId: sub?.id || null, ipAddress: r.ipAddress },
+      };
+    });
+    const assets = ASSETS.filter((a) => {
+      if (mac && a.macAddress === mac) return true;
+      return contains(a.hostname) || contains(a.dnsName) || contains(a.assetTag) || contains(a.serialNumber) ||
+        contains(a.ipAddress) || contains(a.macAddress) || contains(a.manufacturer) || contains(a.model);
+    }).slice(0, LIMIT).map((a) => ({
+      type: "asset",
+      id: a.id,
+      title: a.hostname || a.assetTag || "asset",
+      subtitle: [a.ipAddress, a.macAddress, [a.manufacturer, a.model].filter(Boolean).join(" ")].filter(Boolean).join(" — ") || a.assetType,
+    }));
+
+    const ips = [];
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(q)) {
+      const containing = SUBNETS.find((s) => {
+        try { return _ipInCidrDemo(q, s.cidr); } catch { return false; }
+      });
+      if (containing) {
+        const r = RESERVATIONS.find((x) => x.subnetId === containing.id && x.ipAddress === q && x.status === "active");
+        ips.push({
+          type: "ip",
+          id: containing.id + "|" + q,
+          title: q,
+          subtitle: r
+            ? ((r.hostname || r.owner || "reserved") + " — in " + containing.cidr)
+            : ("free — in " + containing.cidr + " (" + containing.name + ")"),
+          context: { subnetId: containing.id, subnetCidr: containing.cidr, subnetName: containing.name, ipAddress: q, reservationId: r ? r.id : null },
+        });
+      }
+    }
+
+    return json(res, { query: q, blocks, subnets, reservations, assets, ips });
   }
 
   // Blocks

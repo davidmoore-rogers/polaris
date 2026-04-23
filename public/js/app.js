@@ -161,7 +161,8 @@ function renderNav() {
   // Expose for renderQueryStatus closure
   window._getServerDiscoveries = function () { return _serverDiscoveries; };
 
-  // Inject user badge into page header
+  // Inject global search bar + user badge into page header
+  renderGlobalSearch();
   renderUserBadge();
 
   // Conflict dot — poll every 30 s; also exposed so events.js can refresh on resolve
@@ -208,6 +209,259 @@ function _getRoleBadgeClass(role) {
     case "networkadmin": return "badge-network-admin";
     case "assetsadmin":  return "badge-assets-admin";
     default:             return "badge-readonly";
+  }
+}
+
+// ─── Global search ──────────────────────────────────────────────────────────
+// Injects a search input into .page-header on every authenticated page. Ctrl/Cmd+K
+// focuses it; typing queries /api/v1/search and renders a grouped dropdown.
+
+var _searchDebounceTimer = null;
+var _searchLastQuery = "";
+var _searchActiveResults = null;
+
+function _searchPlaceholder() {
+  var path = window.location.pathname;
+  if (path.indexOf("/assets.html") !== -1) return "Search assets, hostnames, MACs, serials…";
+  if (path.indexOf("/subnets.html") !== -1) return "Search networks, CIDRs, reservations, IPs…";
+  if (path.indexOf("/blocks.html") !== -1) return "Search blocks, CIDRs, networks…";
+  if (path.indexOf("/events.html") !== -1) return "Search everything — IPs, MACs, hosts, assets…";
+  return "Search IPs, CIDRs, hosts, MACs, assets… (Ctrl+K)";
+}
+
+function renderGlobalSearch() {
+  var pageHeader = document.querySelector(".page-header");
+  if (!pageHeader) return;
+  if (pageHeader.querySelector(".global-search")) return; // already mounted
+
+  var wrap = document.createElement("div");
+  wrap.className = "global-search";
+  wrap.innerHTML =
+    '<input type="search" id="global-search-input" autocomplete="off" spellcheck="false" placeholder="' + escapeHtml(_searchPlaceholder()) + '">' +
+    '<div id="global-search-dropdown" class="global-search-dropdown" style="display:none"></div>';
+
+  // Insert between h2 and page-header-actions (if present)
+  var actions = pageHeader.querySelector(".page-header-actions");
+  if (actions) pageHeader.insertBefore(wrap, actions);
+  else pageHeader.appendChild(wrap);
+
+  var input = document.getElementById("global-search-input");
+  var dropdown = document.getElementById("global-search-dropdown");
+
+  input.addEventListener("input", function () {
+    var q = input.value.trim();
+    clearTimeout(_searchDebounceTimer);
+    if (q.length < 2) {
+      dropdown.style.display = "none";
+      dropdown.innerHTML = "";
+      _searchLastQuery = "";
+      return;
+    }
+    _searchDebounceTimer = setTimeout(function () { _performSearch(q); }, 180);
+  });
+
+  input.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { input.blur(); _hideSearchDropdown(); return; }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Enter") {
+      _handleSearchKeyNav(e);
+    }
+  });
+
+  input.addEventListener("focus", function () {
+    if (_searchActiveResults) dropdown.style.display = "block";
+  });
+
+  document.addEventListener("click", function (e) {
+    if (!wrap.contains(e.target)) _hideSearchDropdown();
+  });
+
+  // Ctrl+K / Cmd+K — focus the search globally
+  document.addEventListener("keydown", function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      input.focus();
+      input.select();
+    }
+  });
+}
+
+async function _performSearch(q) {
+  var dropdown = document.getElementById("global-search-dropdown");
+  _searchLastQuery = q;
+  try {
+    var results = await api.search.query(q);
+    if (results.query !== _searchLastQuery) return; // stale response
+    _searchActiveResults = results;
+    _renderSearchDropdown(results);
+  } catch (err) {
+    dropdown.innerHTML = '<div class="global-search-empty">Search failed: ' + escapeHtml(err.message || "Unknown error") + '</div>';
+    dropdown.style.display = "block";
+  }
+}
+
+function _renderSearchDropdown(results) {
+  var dropdown = document.getElementById("global-search-dropdown");
+  var total = results.blocks.length + results.subnets.length + results.reservations.length + results.assets.length + results.ips.length;
+  if (total === 0) {
+    dropdown.innerHTML = '<div class="global-search-empty">No matches for "' + escapeHtml(results.query) + '"</div>';
+    dropdown.style.display = "block";
+    return;
+  }
+
+  var html = "";
+  function section(label, hits) {
+    if (!hits.length) return "";
+    var rows = hits.map(function (h) {
+      return '<div class="gs-item" data-type="' + h.type + '" data-id="' + escapeHtml(h.id) + '"' +
+        (h.context ? ' data-context=\'' + escapeHtml(JSON.stringify(h.context)) + '\'' : '') + '>' +
+        '<div class="gs-item-title">' + escapeHtml(h.title) + '</div>' +
+        (h.subtitle ? '<div class="gs-item-sub">' + escapeHtml(h.subtitle) + '</div>' : '') +
+      '</div>';
+    }).join("");
+    return '<div class="gs-group"><div class="gs-group-label">' + label + '</div>' + rows + '</div>';
+  }
+  html += section("IP", results.ips);
+  html += section("Blocks", results.blocks);
+  html += section("Networks", results.subnets);
+  html += section("Reservations", results.reservations);
+  html += section("Assets", results.assets);
+
+  dropdown.innerHTML = html;
+  dropdown.style.display = "block";
+
+  dropdown.querySelectorAll(".gs-item").forEach(function (el) {
+    el.addEventListener("click", function () {
+      var type = el.getAttribute("data-type");
+      var id = el.getAttribute("data-id");
+      var ctx = el.getAttribute("data-context");
+      openSearchResult({ type: type, id: id, context: ctx ? JSON.parse(ctx) : null });
+    });
+  });
+}
+
+function _hideSearchDropdown() {
+  var dropdown = document.getElementById("global-search-dropdown");
+  if (dropdown) dropdown.style.display = "none";
+}
+
+function _handleSearchKeyNav(e) {
+  var dropdown = document.getElementById("global-search-dropdown");
+  if (!dropdown || dropdown.style.display === "none") return;
+  var items = Array.from(dropdown.querySelectorAll(".gs-item"));
+  if (!items.length) return;
+  var idx = items.findIndex(function (el) { return el.classList.contains("active"); });
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    idx = (idx + 1) % items.length;
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    idx = (idx - 1 + items.length) % items.length;
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    var active = idx >= 0 ? items[idx] : items[0];
+    active.click();
+    return;
+  }
+  items.forEach(function (el) { el.classList.remove("active"); });
+  items[idx].classList.add("active");
+  items[idx].scrollIntoView({ block: "nearest" });
+}
+
+// Dispatch a search result to the right page + modal. Navigates via hash so
+// the target page's init code picks it up and opens the modal on load. If the
+// user is already on the target page, opens the modal directly.
+function openSearchResult(hit) {
+  _hideSearchDropdown();
+  var input = document.getElementById("global-search-input");
+  if (input) input.value = "";
+
+  var target = _searchTargetFor(hit);
+  if (!target) return;
+
+  if (window.location.pathname === target.page) {
+    target.handler();
+  } else {
+    window.location.href = target.page + target.hash;
+  }
+}
+
+function _searchTargetFor(hit) {
+  if (hit.type === "asset") {
+    return {
+      page: "/assets.html",
+      hash: "#view=asset:" + encodeURIComponent(hit.id),
+      handler: function () { if (typeof openViewModal === "function") openViewModal(hit.id); },
+    };
+  }
+  if (hit.type === "block") {
+    return {
+      page: "/blocks.html",
+      hash: "#view=block:" + encodeURIComponent(hit.id),
+      handler: function () { if (typeof openEditModal === "function") openEditModal(hit.id); },
+    };
+  }
+  if (hit.type === "subnet") {
+    return {
+      page: "/subnets.html",
+      hash: "#view=subnet:" + encodeURIComponent(hit.id),
+      handler: function () { if (typeof openEditModal === "function") openEditModal(hit.id); },
+    };
+  }
+  if (hit.type === "reservation") {
+    return {
+      page: "/subnets.html",
+      hash: "#view=reservation:" + encodeURIComponent(hit.id),
+      handler: function () { if (typeof openReservationModal === "function") openReservationModal(hit.id); },
+    };
+  }
+  if (hit.type === "ip") {
+    var ctx = hit.context || {};
+    if (ctx.reservationId) {
+      return {
+        page: "/subnets.html",
+        hash: "#view=reservation:" + encodeURIComponent(ctx.reservationId),
+        handler: function () { if (typeof openReservationModal === "function") openReservationModal(ctx.reservationId); },
+      };
+    }
+    if (ctx.subnetId) {
+      return {
+        page: "/subnets.html",
+        hash: "#ip=" + encodeURIComponent(ctx.subnetId) + "@" + encodeURIComponent(ctx.ipAddress || ""),
+        handler: function () { if (typeof openIpPanel === "function") openIpPanel(ctx.subnetId); },
+      };
+    }
+  }
+  return null;
+}
+
+// Called on init — inspects the URL hash and opens the referenced modal if
+// the current page matches the hash's entity type. No-op otherwise so we
+// don't mis-dispatch (e.g. calling Subnets' openEditModal on the Blocks page).
+function processSearchHash() {
+  var hash = window.location.hash || "";
+  var path = window.location.pathname;
+  var m = /^#view=(\w+):(.+)$/.exec(hash);
+  if (m) {
+    var type = m[1], id = decodeURIComponent(m[2]);
+    setTimeout(function () {
+      if (type === "asset" && path.indexOf("/assets.html") !== -1 && typeof openViewModal === "function") {
+        openViewModal(id);
+      } else if (type === "block" && path.indexOf("/blocks.html") !== -1 && typeof openEditModal === "function") {
+        openEditModal(id);
+      } else if (type === "subnet" && path.indexOf("/subnets.html") !== -1 && typeof openEditModal === "function") {
+        openEditModal(id);
+      } else if (type === "reservation" && path.indexOf("/subnets.html") !== -1 && typeof openReservationModal === "function") {
+        openReservationModal(id);
+      }
+    }, 150);
+    return;
+  }
+  var ipM = /^#ip=([^@]+)@(.+)$/.exec(hash);
+  if (ipM && path.indexOf("/subnets.html") !== -1) {
+    var subnetId = decodeURIComponent(ipM[1]);
+    setTimeout(function () {
+      if (typeof openIpPanel === "function") openIpPanel(subnetId);
+    }, 150);
   }
 }
 
@@ -755,8 +1009,25 @@ function _renderTagChips(selected) {
   return html;
 }
 
-function tagFieldHTML(selected) {
+function tagFieldHTML(selected, opts) {
   selected = selected || [];
+  opts = opts || {};
+
+  // Read-only: render selected tags as static badges, no checkboxes or "add new" row.
+  if (opts.readOnly) {
+    if (selected.length === 0) {
+      return '<div class="form-group"><label>Tags</label><p style="color:var(--color-text-tertiary);margin:0">—</p></div>';
+    }
+    var tagsByName = {};
+    _tagCache.tags.forEach(function (t) { tagsByName[t.name] = t; });
+    var chips = selected.map(function (name) {
+      var t = tagsByName[name];
+      var color = t && t.color ? t.color : '';
+      var style = color ? 'background:' + escapeHtml(color) + '44;border-color:' + escapeHtml(color) + ';color:' + escapeHtml(color) : '';
+      return '<span class="tag-picker-chip selected" style="' + style + '">' + escapeHtml(name) + '</span>';
+    }).join('');
+    return '<div class="form-group"><label>Tags</label><div class="tag-picker" style="pointer-events:none">' + chips + '</div></div>';
+  }
 
   var html = '<div class="form-group"><label>Tags</label>' +
     '<div class="tag-picker" id="f-tags-picker">' +
@@ -1069,4 +1340,8 @@ document.addEventListener("DOMContentLoaded", async function () {
   fetchBranding();
   initAutoLogout();
   checkPgTuning();
+
+  // Let each page's own DOMContentLoaded handler finish first, then consume
+  // any #view=<type>:<id> or #ip=... hash a search click-through left us.
+  setTimeout(processSearchHash, 0);
 });

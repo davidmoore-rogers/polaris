@@ -119,32 +119,42 @@ async function openEditModal(id) {
   try {
     var block = await api.blocks.get(id);
     await _ensureTagCache();
-    var body = '<div class="form-group"><label>Name</label><input type="text" id="f-name" value="' + escapeHtml(block.name) + '"></div>' +
+    var readOnly = !canManageNetworks();
+    var lock = readOnly ? ' disabled class="field-locked"' : '';
+    var banner = readOnly
+      ? '<p class="hint" style="margin-bottom:12px">View-only — you don\'t have permission to edit blocks.</p>'
+      : '';
+    var body = banner +
+      '<div class="form-group"><label>Name</label><input type="text" id="f-name" value="' + escapeHtml(block.name) + '"' + lock + '></div>' +
       '<div class="form-group"><label>CIDR</label><input type="text" value="' + escapeHtml(block.cidr) + '" disabled></div>' +
-      '<div class="form-group"><label>Description</label><textarea id="f-description">' + escapeHtml(block.description || "") + '</textarea></div>' +
-      tagFieldHTML(block.tags || []);
-    var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btn-save">Save Changes</button>';
-    openModal("Edit Block", body, footer);
-    wireTagPicker();
-    document.getElementById("btn-save").addEventListener("click", async function () {
-      var btn = this;
-      btn.disabled = true;
-      try {
-        var input = {
-          name: val("f-name") || undefined,
-          description: val("f-description") || undefined,
-          tags: getTagFieldValue(),
-        };
-        await api.blocks.update(id, input);
-        closeModal();
-        showToast("Block updated");
-        loadBlocks();
-      } catch (err) {
-        showToast(err.message, "error");
-      } finally {
-        btn.disabled = false;
-      }
-    });
+      '<div class="form-group"><label>Description</label><textarea id="f-description"' + lock + '>' + escapeHtml(block.description || "") + '</textarea></div>' +
+      tagFieldHTML(block.tags || [], { readOnly: readOnly });
+    var footer = readOnly
+      ? '<button class="btn btn-secondary" onclick="closeModal()">Close</button>'
+      : '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btn-save">Save Changes</button>';
+    openModal(readOnly ? "View Block" : "Edit Block", body, footer);
+    if (!readOnly) {
+      wireTagPicker();
+      document.getElementById("btn-save").addEventListener("click", async function () {
+        var btn = this;
+        btn.disabled = true;
+        try {
+          var input = {
+            name: val("f-name") || undefined,
+            description: val("f-description") || undefined,
+            tags: getTagFieldValue(),
+          };
+          await api.blocks.update(id, input);
+          closeModal();
+          showToast("Block updated");
+          loadBlocks();
+        } catch (err) {
+          showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    }
   } catch (err) {
     showToast(err.message, "error");
   }

@@ -519,6 +519,80 @@ code {
   align-items: center;
 }
 
+/* ─── Global Search ───────────────────────────────────────────────────────── */
+.global-search {
+  position: relative;
+  flex: 1;
+  max-width: 520px;
+  margin: 0 1rem;
+}
+.global-search input[type="search"] {
+  width: 100%;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.85rem;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.global-search input[type="search"]::-webkit-search-cancel-button { cursor: pointer; }
+.global-search input[type="search"]:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(79, 195, 247, 0.18);
+}
+.global-search-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 480px;
+  overflow-y: auto;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  z-index: 900;
+  padding: 4px 0;
+}
+.gs-group { padding: 4px 0; }
+.gs-group + .gs-group { border-top: 1px solid var(--color-border-light); }
+.gs-group-label {
+  padding: 6px 12px 2px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-tertiary);
+}
+.gs-item {
+  padding: 6px 12px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.gs-item:hover, .gs-item.active {
+  background: var(--color-bg-secondary);
+  border-left-color: var(--color-accent);
+}
+.gs-item-title {
+  font-size: 0.88rem;
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+.gs-item-sub {
+  font-size: 0.76rem;
+  color: var(--color-text-tertiary);
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.global-search-empty {
+  padding: 12px 14px;
+  font-size: 0.85rem;
+  color: var(--color-text-tertiary);
+}
+
 .user-badge {
   display: flex;
   align-items: center;

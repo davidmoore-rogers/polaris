@@ -72,6 +72,7 @@ shelob/
 │   │       ├── assets.ts            # Device inventory CRUD, PDF/CSV export
 │   │       ├── events.ts            # Audit log, syslog, SFTP archival
 │   │       ├── conflicts.ts         # Discovery conflict review & resolution
+│   │       ├── search.ts            # Global typeahead search across all entity types
 │   │       └── serverSettings.ts    # HTTPS, branding, backup/restore
 │   ├── services/
 │   │   ├── ipService.ts             # Core IP math & validation
@@ -83,6 +84,7 @@ shelob/
 │   │   ├── fortigateService.ts      # Standalone FortiGate REST API client & discovery
 │   │   ├── windowsServerService.ts  # Windows Server WinRM DHCP discovery
 │   │   ├── entraIdService.ts        # Microsoft Entra ID + Intune device discovery via Graph
+│   │   ├── searchService.ts         # Global typeahead search (classifies IP/CIDR/MAC/text; parallel entity queries)
 │   │   ├── azureAuthService.ts      # Azure AD/Entra SAML SSO, user provisioning
 │   │   ├── dnsService.ts            # Reverse DNS lookup for assets
 │   │   ├── ouiService.ts            # MAC OUI lookup with admin overrides
@@ -374,6 +376,9 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 - `GET    /conflicts/count`                     — Badge count for nav
 - `POST   /conflicts/:id/accept`                — Apply discovered values to reservation
 - `POST   /conflicts/:id/reject`                — Keep existing, dismiss conflict
+
+### Search — `requireAuth`
+- `GET    /search?q=<query>`                    — Global typeahead. Classifies input (IP, CIDR, MAC, or text), runs 4 parallel entity queries, returns grouped results (`blocks`, `subnets`, `reservations`, `assets`, `ips`) capped at 8 per group. The `ips` hit resolves the containing subnet and any active reservation. All authenticated roles can search; front-end edit modals render in view-only mode for users without write permission.
 
 ### Server Settings — `requireAdmin`
 - `GET    /server-settings`

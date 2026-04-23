@@ -363,14 +363,19 @@ async function openEditModal(id) {
   try {
     var results = await Promise.all([api.subnets.get(id), _ensureTagCache()]);
     var subnet = results[0];
+    var readOnly = !canManageNetworks();
     var isIntegration = !!subnet.discoveredBy;
     var isDeprecatedIntegration = isIntegration && subnet.status === "deprecated" && canManageNetworks();
-    var dis = isIntegration && !isDeprecatedIntegration ? ' disabled class="field-locked"' : '';
-    var statusDis = isIntegration && !isDeprecatedIntegration ? ' disabled class="field-locked"' : '';
-    var hasPendingMerge = !isIntegration && subnet.conflictMessage && subnet.pendingIntegration && canManageNetworks();
-    var hintMsg = isDeprecatedIntegration
-      ? '<p class="hint" style="margin-bottom:12px">This network was deprecated by an integration. Changing the status will convert it to a manual network.</p>'
-      : (isIntegration ? '<p class="hint" style="margin-bottom:12px">This network is managed by an integration. Only purpose and tags can be edited.</p>' : '');
+    var allLocked = readOnly ? ' disabled class="field-locked"' : '';
+    var dis = allLocked || (isIntegration && !isDeprecatedIntegration ? ' disabled class="field-locked"' : '');
+    var statusDis = allLocked || (isIntegration && !isDeprecatedIntegration ? ' disabled class="field-locked"' : '');
+    var purposeDis = allLocked;
+    var hasPendingMerge = !readOnly && !isIntegration && subnet.conflictMessage && subnet.pendingIntegration && canManageNetworks();
+    var hintMsg = readOnly
+      ? '<p class="hint" style="margin-bottom:12px">View-only — you don\'t have permission to edit networks.</p>'
+      : (isDeprecatedIntegration
+        ? '<p class="hint" style="margin-bottom:12px">This network was deprecated by an integration. Changing the status will convert it to a manual network.</p>'
+        : (isIntegration ? '<p class="hint" style="margin-bottom:12px">This network is managed by an integration. Only purpose and tags can be edited.</p>' : ''));
     if (hasPendingMerge) {
       var pi = subnet.pendingIntegration;
       var mergeDesc = pi.integrationType === "windowsserver"
@@ -384,13 +389,15 @@ async function openEditModal(id) {
     var body = hintMsg +
       '<div class="form-group"><label>CIDR</label><input type="text" value="' + escapeHtml(subnet.cidr) + '" disabled class="field-locked"></div>' +
       '<div class="form-group"><label>Name</label><input type="text" id="f-name" value="' + escapeHtml(subnet.name) + '"' + dis + '></div>' +
-      '<div class="form-group"><label>Purpose</label><textarea id="f-purpose">' + escapeHtml(subnet.purpose || "") + '</textarea></div>' +
+      '<div class="form-group"><label>Purpose</label><textarea id="f-purpose"' + purposeDis + '>' + escapeHtml(subnet.purpose || "") + '</textarea></div>' +
       '<div class="form-group"><label>Status</label><select id="f-status"' + statusDis + '><option value="available"' + (subnet.status === "available" ? " selected" : "") + '>Available</option><option value="reserved"' + (subnet.status === "reserved" ? " selected" : "") + '>Reserved</option><option value="deprecated"' + (subnet.status === "deprecated" ? " selected" : "") + '>Deprecated</option></select></div>' +
       '<div class="form-group"><label>VLAN</label><input type="number" id="f-vlan" min="1" max="4094" value="' + (subnet.vlan || "") + '" placeholder="Empty to clear"' + dis + '></div>' +
-      tagFieldHTML(subnet.tags || []);
-    var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btn-save">Save Changes</button>';
-    openModal("Edit Network", body, footer);
-    wireTagPicker();
+      tagFieldHTML(subnet.tags || [], { readOnly: readOnly });
+    var footer = readOnly
+      ? '<button class="btn btn-secondary" onclick="closeModal()">Close</button>'
+      : '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btn-save">Save Changes</button>';
+    openModal(readOnly ? "View Network" : "Edit Network", body, footer);
+    if (!readOnly) wireTagPicker();
 
     if (hasPendingMerge) {
       document.getElementById("btn-merge").addEventListener("click", async function () {
@@ -415,36 +422,38 @@ async function openEditModal(id) {
       });
     }
 
-    document.getElementById("btn-save").addEventListener("click", async function () {
-      var btn = this;
-      btn.disabled = true;
-      try {
-        var input = {
-          purpose: val("f-purpose") || undefined,
-          tags: getTagFieldValue(),
-        };
-        if (!isIntegration) {
-          var vlanVal = document.getElementById("f-vlan").value;
-          input.name = val("f-name") || undefined;
-          input.status = val("f-status");
-          input.vlan = vlanVal ? parseInt(vlanVal, 10) : null;
-        } else if (isDeprecatedIntegration) {
-          var newStatus = val("f-status");
-          input.status = newStatus;
-          if (newStatus !== "deprecated") {
-            input.convertToManual = true;
+    if (!readOnly) {
+      document.getElementById("btn-save").addEventListener("click", async function () {
+        var btn = this;
+        btn.disabled = true;
+        try {
+          var input = {
+            purpose: val("f-purpose") || undefined,
+            tags: getTagFieldValue(),
+          };
+          if (!isIntegration) {
+            var vlanVal = document.getElementById("f-vlan").value;
+            input.name = val("f-name") || undefined;
+            input.status = val("f-status");
+            input.vlan = vlanVal ? parseInt(vlanVal, 10) : null;
+          } else if (isDeprecatedIntegration) {
+            var newStatus = val("f-status");
+            input.status = newStatus;
+            if (newStatus !== "deprecated") {
+              input.convertToManual = true;
+            }
           }
+          await api.subnets.update(id, input);
+          closeModal();
+          showToast("Network updated");
+          loadSubnets();
+        } catch (err) {
+          showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
         }
-        await api.subnets.update(id, input);
-        closeModal();
-        showToast("Network updated");
-        loadSubnets();
-      } catch (err) {
-        showToast(err.message, "error");
-      } finally {
-        btn.disabled = false;
-      }
-    });
+      });
+    }
   } catch (err) {
     showToast(err.message, "error");
   }

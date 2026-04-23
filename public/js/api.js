@@ -221,6 +221,9 @@ const api = {
     applyUpdate:     () => request("POST", "/server-settings/updates/apply"),
     dismissUpdate:   () => request("POST", "/server-settings/updates/dismiss"),
   },
+  search: {
+    query: (q) => request("GET", `/search?q=${encodeURIComponent(q)}`),
+  },
   auth: {
     me: () => request("GET", "/auth/me"),
     azureConfig: () => request("GET", "/auth/azure/config"),

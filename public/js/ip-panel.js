@@ -493,48 +493,67 @@ function _openReserveModal(subnetId, ipAddress) {
 }
 
 function _openEditReservationModal(reservationId) {
+  // Owners of dhcp-reservation / dhcp-lease records can edit their own entries
+  // even without canManageNetworks. For simple read-only detection, we treat
+  // anything the user can't write as view-only.
   api.reservations.get(reservationId).then(function (r) {
+    var isOwner = currentUsername && r.owner === currentUsername;
+    var readOnly = !canManageNetworks() && !isOwner;
+    var lock = readOnly ? ' disabled class="field-locked"' : '';
     var subnetLabel = r.subnet ? escapeHtml(r.subnet.name) + " (" + escapeHtml(r.subnet.cidr) + ")" : r.subnetId;
     var expiresVal = r.expiresAt ? _toDatetimeLocal(r.expiresAt) : "";
-    var body =
+    var banner = readOnly
+      ? '<p class="hint" style="margin-bottom:12px">View-only — you don\'t have permission to edit this reservation.</p>'
+      : '';
+    var body = banner +
       '<div class="form-group"><label>Network</label><input type="text" value="' + subnetLabel + '" disabled></div>' +
       '<div class="form-group"><label>IP Address</label><input type="text" value="' + escapeHtml(r.ipAddress || "Full network") + '" disabled></div>' +
       '<div class="form-group"><label>Status</label>' + statusBadge(r.status) + '</div>' +
-      '<div class="form-group"><label>Hostname</label><input type="text" id="f-hostname" value="' + escapeHtml(r.hostname || "") + '"></div>' +
-      '<div class="form-group"><label>Owner</label><input type="text" id="f-owner" value="' + escapeHtml(r.owner) + '"></div>' +
-      '<div class="form-group"><label>Project Ref</label><input type="text" id="f-projectRef" value="' + escapeHtml(r.projectRef) + '"></div>' +
-      '<div class="form-group"><label>Expires At</label><input type="datetime-local" id="f-expiresAt" value="' + expiresVal + '"></div>' +
-      '<div class="form-group"><label>Notes</label><textarea id="f-notes">' + escapeHtml(r.notes || "") + '</textarea></div>';
-    var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-primary" id="btn-save">Save Changes</button>';
-    openModal("Edit Reservation", body, footer);
+      '<div class="form-group"><label>Hostname</label><input type="text" id="f-hostname" value="' + escapeHtml(r.hostname || "") + '"' + lock + '></div>' +
+      '<div class="form-group"><label>Owner</label><input type="text" id="f-owner" value="' + escapeHtml(r.owner) + '"' + lock + '></div>' +
+      '<div class="form-group"><label>Project Ref</label><input type="text" id="f-projectRef" value="' + escapeHtml(r.projectRef) + '"' + lock + '></div>' +
+      '<div class="form-group"><label>Expires At</label><input type="datetime-local" id="f-expiresAt" value="' + expiresVal + '"' + lock + '></div>' +
+      '<div class="form-group"><label>Notes</label><textarea id="f-notes"' + lock + '>' + escapeHtml(r.notes || "") + '</textarea></div>';
+    var footer = readOnly
+      ? '<button class="btn btn-secondary" onclick="closeModal()">Close</button>'
+      : '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+        '<button class="btn btn-primary" id="btn-save">Save Changes</button>';
+    openModal(readOnly ? "View Reservation" : "Edit Reservation", body, footer);
 
-    document.getElementById("btn-save").addEventListener("click", async function () {
-      var btn = this;
-      btn.disabled = true;
-      try {
-        var expiresVal = document.getElementById("f-expiresAt").value;
-        var input = {
-          hostname: document.getElementById("f-hostname").value.trim() || undefined,
-          owner: document.getElementById("f-owner").value.trim() || undefined,
-          projectRef: document.getElementById("f-projectRef").value.trim() || undefined,
-          expiresAt: expiresVal ? new Date(expiresVal).toISOString() : undefined,
-          notes: document.getElementById("f-notes").value.trim() || undefined,
-        };
-        await api.reservations.update(reservationId, input);
-        closeModal();
-        showToast("Reservation updated");
-        _ipPanelDirty = true;
-        _fetchIpPage();
-      } catch (err) {
-        showToast(err.message, "error");
-      } finally {
-        btn.disabled = false;
-      }
-    });
+    if (!readOnly) {
+      document.getElementById("btn-save").addEventListener("click", async function () {
+        var btn = this;
+        btn.disabled = true;
+        try {
+          var expiresVal = document.getElementById("f-expiresAt").value;
+          var input = {
+            hostname: document.getElementById("f-hostname").value.trim() || undefined,
+            owner: document.getElementById("f-owner").value.trim() || undefined,
+            projectRef: document.getElementById("f-projectRef").value.trim() || undefined,
+            expiresAt: expiresVal ? new Date(expiresVal).toISOString() : undefined,
+            notes: document.getElementById("f-notes").value.trim() || undefined,
+          };
+          await api.reservations.update(reservationId, input);
+          closeModal();
+          showToast("Reservation updated");
+          _ipPanelDirty = true;
+          _fetchIpPage();
+        } catch (err) {
+          showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    }
   }).catch(function (err) {
     showToast(err.message, "error");
   });
+}
+
+// Global alias so other scripts (e.g. search click-through) can open a
+// reservation without needing to know about the ip-panel internals.
+function openReservationModal(reservationId) {
+  _openEditReservationModal(reservationId);
 }
 
 async function _confirmReleaseFromPanel(reservationId) {
