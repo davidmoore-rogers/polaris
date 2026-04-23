@@ -1877,17 +1877,21 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // ══════════════════════════════════════════════════════════════════════════════
 
   // 9a — Apply OUI overrides to assets that already have a manufacturer
-  //       (e.g. "Fortinet" from FMG can be overridden to a custom name)
+  //       (e.g. "Fortinet" from FMG can be overridden to a custom name; an
+  //       optional device field overrides the asset's model too)
   const assetsWithMacAndMfg = assetIdx.all().filter((a: any) => a.macAddress && a.manufacturer);
   if (assetsWithMacAndMfg.length > 0) {
     const overrideResults = await batchSettled(assetsWithMacAndMfg, async (asset: any) => {
       const override = await lookupOuiOverride(asset.macAddress);
-      if (override && override !== asset.manufacturer) {
-        await prisma.asset.update({ where: { id: asset.id }, data: { manufacturer: override } });
-        asset.manufacturer = override;
-        return override;
-      }
-      return null;
+      if (!override) return null;
+      const data: { manufacturer?: string; model?: string } = {};
+      if (override.manufacturer !== asset.manufacturer) data.manufacturer = override.manufacturer;
+      if (override.device && override.device !== asset.model) data.model = override.device;
+      if (Object.keys(data).length === 0) return null;
+      await prisma.asset.update({ where: { id: asset.id }, data });
+      if (data.manufacturer) asset.manufacturer = data.manufacturer;
+      if (data.model) asset.model = data.model;
+      return data;
     });
     for (const r of overrideResults) {
       if (r.status === "fulfilled" && r.value) ouiOverridden++;
@@ -1897,18 +1901,22 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     }
   }
 
-  // 9b — OUI lookup for assets still missing a manufacturer
+  // 9b — OUI lookup for assets still missing a manufacturer.
+  //       Also pick up the override's device field when present (applies
+  //       even if asset already has a model — override wins by design).
   const assetsNeedingOui = assetIdx.all().filter((a: any) => a.macAddress && !a.manufacturer);
   if (assetsNeedingOui.length > 0) {
     syncLog("info", `OUI lookup: resolving ${assetsNeedingOui.length} assets missing manufacturer`);
     const ouiResults = await batchSettled(assetsNeedingOui, async (asset: any) => {
       const vendor = await lookupOui(asset.macAddress);
-      if (vendor) {
-        await prisma.asset.update({ where: { id: asset.id }, data: { manufacturer: vendor } });
-        asset.manufacturer = vendor;
-        return vendor;
-      }
-      return null;
+      if (!vendor) return null;
+      const override = await lookupOuiOverride(asset.macAddress);
+      const data: { manufacturer: string; model?: string } = { manufacturer: vendor };
+      if (override?.device && override.device !== asset.model) data.model = override.device;
+      await prisma.asset.update({ where: { id: asset.id }, data });
+      asset.manufacturer = vendor;
+      if (data.model) asset.model = data.model;
+      return vendor;
     });
     for (const r of ouiResults) {
       if (r.status === "fulfilled" && r.value) ouiResolved++;

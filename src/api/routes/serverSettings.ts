@@ -663,18 +663,21 @@ router.get("/oui/overrides", async (_req, res, next) => {
 
 router.post("/oui/overrides", async (req, res, next) => {
   try {
-    const { prefix, manufacturer } = req.body;
+    const { prefix, manufacturer, device } = req.body;
     if (!prefix || !manufacturer) throw new AppError(400, "prefix and manufacturer are required");
     const clean = prefix.replace(/[:\-.\s]/g, "").toUpperCase();
     if (!/^[0-9A-F]{6}$/.test(clean)) throw new AppError(400, "prefix must be 6 hex characters (e.g. AA:BB:CC)");
-    const result = await setOuiOverride(prefix, manufacturer.trim());
+    const deviceTrim = typeof device === "string" ? device.trim() : "";
+    const result = await setOuiOverride(prefix, manufacturer.trim(), deviceTrim || undefined);
 
     // Update matching assets — match MAC addresses starting with this prefix
     // MAC format in DB is uppercase colon-separated: "AA:BB:CC:DD:EE:FF"
     const macPrefix = clean.match(/.{2}/g)!.join(":");
+    const updateData: { manufacturer: string; model?: string } = { manufacturer: manufacturer.trim() };
+    if (deviceTrim) updateData.model = deviceTrim;
     const updated = await prisma.asset.updateMany({
       where: { macAddress: { startsWith: macPrefix } },
-      data: { manufacturer: manufacturer.trim() },
+      data: updateData,
     });
 
     res.json({ ...result, assetsUpdated: updated.count });

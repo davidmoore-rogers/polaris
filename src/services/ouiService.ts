@@ -19,8 +19,12 @@ const OVERRIDES_KEY = "oui_overrides";
 let _ouiMap: Map<string, string> | null = null;
 let _lastLoaded = 0;
 
-// In-memory overrides map: "AABBCC" → "Vendor Name" (takes priority over IEEE DB)
-let _overridesMap: Map<string, string> = new Map();
+// In-memory overrides map: "AABBCC" → { manufacturer, device? } (takes priority over IEEE DB)
+interface OverrideEntry {
+  manufacturer: string;
+  device?: string;
+}
+let _overridesMap: Map<string, OverrideEntry> = new Map();
 let _overridesLoaded = false;
 
 // ─── Public API ────────────────────────────────────────────────────────────
@@ -35,7 +39,8 @@ export async function lookupOui(mac: string): Promise<string | null> {
   const prefix = normalizeMacPrefix(mac);
   if (!prefix) return null;
   // Overrides take priority
-  if (_overridesMap.has(prefix)) return _overridesMap.get(prefix)!;
+  const ov = _overridesMap.get(prefix);
+  if (ov) return ov.manufacturer;
   if (!_ouiMap || _ouiMap.size === 0) return null;
   return _ouiMap.get(prefix) || null;
 }
@@ -50,8 +55,9 @@ export async function lookupOuiBatch(macs: string[]): Promise<Map<string, string
   for (const mac of macs) {
     const prefix = normalizeMacPrefix(mac);
     if (!prefix) continue;
-    if (_overridesMap.has(prefix)) {
-      results.set(mac, _overridesMap.get(prefix)!);
+    const ov = _overridesMap.get(prefix);
+    if (ov) {
+      results.set(mac, ov.manufacturer);
     } else if (_ouiMap && _ouiMap.has(prefix)) {
       results.set(mac, _ouiMap.get(prefix)!);
     }
@@ -60,10 +66,13 @@ export async function lookupOuiBatch(macs: string[]): Promise<Map<string, string
 }
 
 /**
- * Check only the override map for a MAC address. Returns the override
- * manufacturer or null if no override exists. Does NOT fall back to the IEEE DB.
+ * Check only the override map for a MAC address. Returns the override entry
+ * (manufacturer + optional device) or null if no override exists.
+ * Does NOT fall back to the IEEE DB.
  */
-export async function lookupOuiOverride(mac: string): Promise<string | null> {
+export async function lookupOuiOverride(
+  mac: string,
+): Promise<{ manufacturer: string; device?: string } | null> {
   await ensureOverridesLoaded();
   const prefix = normalizeMacPrefix(mac);
   if (!prefix) return null;
@@ -142,6 +151,7 @@ export async function getOuiStatus(): Promise<{
 export interface OuiOverride {
   prefix: string;      // "AA:BB:CC" display format
   manufacturer: string;
+  device?: string;
 }
 
 /**
@@ -150,8 +160,10 @@ export interface OuiOverride {
 export async function getOuiOverrides(): Promise<OuiOverride[]> {
   await ensureOverridesLoaded();
   const result: OuiOverride[] = [];
-  for (const [prefix, manufacturer] of _overridesMap) {
-    result.push({ prefix: formatPrefix(prefix), manufacturer });
+  for (const [prefix, entry] of _overridesMap) {
+    const row: OuiOverride = { prefix: formatPrefix(prefix), manufacturer: entry.manufacturer };
+    if (entry.device) row.device = entry.device;
+    result.push(row);
   }
   result.sort((a, b) => a.prefix.localeCompare(b.prefix));
   return result;
@@ -160,13 +172,21 @@ export async function getOuiOverrides(): Promise<OuiOverride[]> {
 /**
  * Add or update a static OUI override. Prefix can be in any format (AA:BB:CC, AABBCC, etc).
  */
-export async function setOuiOverride(prefixInput: string, manufacturer: string): Promise<OuiOverride> {
+export async function setOuiOverride(
+  prefixInput: string,
+  manufacturer: string,
+  device?: string,
+): Promise<OuiOverride> {
   const normalized = normalizeMacPrefix(prefixInput + ":00:00:00"); // pad so normalizer works
   if (!normalized) throw new Error("Invalid MAC prefix");
   await ensureOverridesLoaded();
-  _overridesMap.set(normalized, manufacturer);
+  const entry: OverrideEntry = { manufacturer };
+  if (device) entry.device = device;
+  _overridesMap.set(normalized, entry);
   await persistOverrides();
-  return { prefix: formatPrefix(normalized), manufacturer };
+  const out: OuiOverride = { prefix: formatPrefix(normalized), manufacturer };
+  if (device) out.device = device;
+  return out;
 }
 
 /**
@@ -186,7 +206,7 @@ function formatPrefix(hex: string): string {
 }
 
 async function persistOverrides(): Promise<void> {
-  const data: Record<string, string> = {};
+  const data: Record<string, OverrideEntry> = {};
   for (const [k, v] of _overridesMap) data[k] = v;
   await prisma.setting.upsert({
     where: { key: OVERRIDES_KEY },
@@ -199,8 +219,18 @@ async function ensureOverridesLoaded(): Promise<void> {
   if (_overridesLoaded) return;
   const row = await prisma.setting.findUnique({ where: { key: OVERRIDES_KEY } });
   if (row?.value && typeof row.value === "object") {
-    const data = row.value as Record<string, string>;
-    _overridesMap = new Map(Object.entries(data));
+    const data = row.value as Record<string, string | OverrideEntry>;
+    _overridesMap = new Map();
+    for (const [k, v] of Object.entries(data)) {
+      // Back-compat: legacy rows stored a bare manufacturer string.
+      if (typeof v === "string") {
+        _overridesMap.set(k, { manufacturer: v });
+      } else if (v && typeof v === "object" && typeof v.manufacturer === "string") {
+        const entry: OverrideEntry = { manufacturer: v.manufacturer };
+        if (v.device) entry.device = v.device;
+        _overridesMap.set(k, entry);
+      }
+    }
   }
   _overridesLoaded = true;
 }

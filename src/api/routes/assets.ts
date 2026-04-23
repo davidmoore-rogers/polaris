@@ -11,7 +11,7 @@ import { AppError } from "../../utils/errors.js";
 import { requireAssetsAdmin, requireNetworkAdmin } from "../middleware/auth.js";
 import { logEvent, buildChanges } from "./events.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
-import { lookupOui } from "../../services/ouiService.js";
+import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
 
 const router = Router();
@@ -229,7 +229,10 @@ router.post("/oui-lookup", requireAssetsAdmin, async (req, res, next) => {
       if (!asset.macAddress) continue;
       const vendor = await lookupOui(asset.macAddress);
       if (vendor) {
-        await prisma.asset.update({ where: { id: asset.id }, data: { manufacturer: vendor } });
+        const override = await lookupOuiOverride(asset.macAddress);
+        const data: { manufacturer: string; model?: string } = { manufacturer: vendor };
+        if (override?.device) data.model = override.device;
+        await prisma.asset.update({ where: { id: asset.id }, data });
         results.push({ id: asset.id, mac: asset.macAddress, manufacturer: vendor });
         resolved++;
       } else {
@@ -256,9 +259,15 @@ router.post("/:id/oui-lookup", requireAssetsAdmin, async (req, res, next) => {
       return res.json({ ok: false, message: `No OUI match for ${asset.macAddress}` });
     }
 
-    await prisma.asset.update({ where: { id: asset.id }, data: { manufacturer: vendor } });
-    logEvent({ action: "asset.oui.resolved", resourceType: "asset", resourceId: asset.id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: req.session?.username, message: `OUI resolved: ${asset.macAddress} → ${vendor}` });
-    res.json({ ok: true, manufacturer: vendor, message: `${asset.macAddress} → ${vendor}` });
+    const override = await lookupOuiOverride(asset.macAddress);
+    const data: { manufacturer: string; model?: string } = { manufacturer: vendor };
+    if (override?.device) data.model = override.device;
+    await prisma.asset.update({ where: { id: asset.id }, data });
+    const msg = data.model
+      ? `OUI resolved: ${asset.macAddress} → ${vendor} / ${data.model}`
+      : `OUI resolved: ${asset.macAddress} → ${vendor}`;
+    logEvent({ action: "asset.oui.resolved", resourceType: "asset", resourceId: asset.id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: req.session?.username, message: msg });
+    res.json({ ok: true, manufacturer: vendor, model: data.model, message: msg });
   } catch (err) {
     next(err);
   }

@@ -1918,12 +1918,13 @@ function renderIdentificationTab() {
 
   if (_ouiOverrides.length > 0) {
     html += '<table class="ip-table" style="margin-bottom:1rem"><thead><tr>' +
-      '<th>MAC Prefix</th><th>Manufacturer</th><th style="width:70px"></th>' +
+      '<th>MAC Prefix</th><th>Manufacturer</th><th>Device</th><th style="width:70px"></th>' +
     '</tr></thead><tbody>';
     _ouiOverrides.forEach(function (o) {
       html += '<tr>' +
         '<td class="mono" style="font-size:0.85rem">' + escapeHtml(o.prefix) + '</td>' +
         '<td>' + escapeHtml(o.manufacturer) + '</td>' +
+        '<td>' + escapeHtml(o.device || '') + '</td>' +
         '<td class="actions"><button class="btn btn-sm btn-danger oui-override-del" data-prefix="' + escapeHtml(o.prefix) + '">Del</button></td>' +
       '</tr>';
     });
@@ -1938,9 +1939,13 @@ function renderIdentificationTab() {
           '<label style="font-size:0.78rem;font-weight:500">MAC Prefix</label>' +
           '<input type="text" id="f-oui-prefix" placeholder="AA:BB:CC" style="font-family:var(--font-mono);font-size:0.85rem">' +
         '</div>' +
-        '<div style="flex:1;min-width:180px">' +
+        '<div style="flex:1;min-width:160px">' +
           '<label style="font-size:0.78rem;font-weight:500">Manufacturer</label>' +
           '<input type="text" id="f-oui-manufacturer" placeholder="e.g. Custom Switch Co.">' +
+        '</div>' +
+        '<div style="flex:1;min-width:160px">' +
+          '<label style="font-size:0.78rem;font-weight:500">Device <span style="color:var(--color-text-tertiary);font-weight:400">(optional)</span></label>' +
+          '<input type="text" id="f-oui-device" placeholder="e.g. PowerEdge R740">' +
         '</div>' +
         '<button class="btn btn-primary" id="btn-add-oui-override">Add Override</button>' +
       '</div>' +
@@ -2097,15 +2102,19 @@ function renderIdentificationTab() {
 async function addOuiOverride() {
   var prefix = document.getElementById("f-oui-prefix").value.trim();
   var manufacturer = document.getElementById("f-oui-manufacturer").value.trim();
+  var device = document.getElementById("f-oui-device").value.trim();
   if (!prefix || !manufacturer) { showToast("Both MAC prefix and manufacturer are required", "error"); return; }
   try {
-    var result = await api.serverSettings.addOuiOverride({ prefix: prefix, manufacturer: manufacturer });
+    var body = { prefix: prefix, manufacturer: manufacturer };
+    if (device) body.device = device;
+    var result = await api.serverSettings.addOuiOverride(body);
     // Update local cache
     var idx = _ouiOverrides.findIndex(function (o) { return o.prefix === result.prefix; });
     if (idx >= 0) _ouiOverrides[idx] = result;
     else _ouiOverrides.push(result);
     _ouiOverrides.sort(function (a, b) { return a.prefix.localeCompare(b.prefix); });
     var msg = "OUI override added: " + result.prefix + " → " + result.manufacturer;
+    if (result.device) msg += " / " + result.device;
     if (result.assetsUpdated > 0) msg += " (" + result.assetsUpdated + " asset" + (result.assetsUpdated === 1 ? "" : "s") + " updated)";
     showToast(msg, "success");
     renderIdentificationTab();
