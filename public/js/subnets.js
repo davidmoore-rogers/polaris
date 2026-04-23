@@ -367,8 +367,10 @@ async function openAllocateModal() {
       '</div>' +
       '<p class="hint">Pick a saved template to pre-fill the rows below, or build one from scratch.</p>' +
     '</div>' +
-    '<div class="form-group"><label>Site Name</label><input type="text" id="f-site" placeholder="e.g. Jefferson"><p class="hint">Required to Allocate; prepended to each row name (e.g. <code>Jefferson_RGIHardware</code>). Not required to save a template.</p></div>' +
-    '<div class="form-group"><label>Anchor Prefix</label><input type="number" id="f-anchor" min="8" max="32" value="' + _loadAllocAnchor() + '"><p class="hint">Minimum alignment for the group. Defaults to /24 and is remembered for you. If the template needs more space, a larger anchor is used automatically.</p></div>' +
+    '<div class="alloc-two-col">' +
+      '<div class="form-group"><label>Site Name</label><input type="text" id="f-site" placeholder="e.g. Jefferson"><p class="hint">Required to Allocate; prepended to each row name (e.g. <code>Jefferson_Hardware</code>). Not required to save a template.</p></div>' +
+      '<div class="form-group"><label>Anchor Prefix</label><input type="number" id="f-anchor" min="8" max="32" value="' + _loadAllocAnchor() + '"><p class="hint">Minimum alignment for the group. Defaults to /24 and is remembered for you. If the template needs more space, a larger anchor is used automatically.</p></div>' +
+    '</div>' +
     '<div class="form-group">' +
       '<label>Subnets</label>' +
       '<div class="alloc-entries-header"><span>Name</span><span>Prefix</span><span>VLAN</span><span></span></div>' +
@@ -378,6 +380,7 @@ async function openAllocateModal() {
         '<button type="button" class="btn btn-sm btn-secondary" id="f-add-skip">+ Add Skip</button>' +
       '</div>' +
       '<p class="hint">Skip rows reserve address space (aligned to their prefix) without creating a subnet, so you can leave gaps between allocations.</p>' +
+      '<div id="f-footprint" class="alloc-footprint" style="display:none"></div>' +
     '</div>' +
     tagFieldHTML([]);
 
@@ -391,11 +394,20 @@ async function openAllocateModal() {
 
   _renderAllocTemplateOptions();
   _addAllocEntryRow(); // start with one empty row
+  _refreshAllocHeaderBadge();
+  _scheduleAllocFootprintUpdate();
 
-  document.getElementById("f-template").addEventListener("change", _onAllocTemplateChange);
+  document.getElementById("f-blockId").addEventListener("change", function () {
+    _refreshAllocHeaderBadge();
+    _scheduleAllocFootprintUpdate();
+  });
+  document.getElementById("f-template").addEventListener("change", function (e) {
+    _onAllocTemplateChange(e);
+    _scheduleAllocFootprintUpdate();
+  });
   document.getElementById("f-template-delete").addEventListener("click", _onAllocTemplateDelete);
-  document.getElementById("f-add-row").addEventListener("click", function () { _addAllocEntryRow(); });
-  document.getElementById("f-add-skip").addEventListener("click", function () { _addAllocEntryRow({ skip: true }); });
+  document.getElementById("f-add-row").addEventListener("click", function () { _addAllocEntryRow(); _scheduleAllocFootprintUpdate(); });
+  document.getElementById("f-add-skip").addEventListener("click", function () { _addAllocEntryRow({ skip: true }); _scheduleAllocFootprintUpdate(); });
   document.getElementById("f-entries").addEventListener("click", function (e) {
     var rm = e.target.closest(".alloc-row-remove");
     if (!rm) return;
@@ -404,18 +416,111 @@ async function openAllocateModal() {
     var rows = document.querySelectorAll("#f-entries .alloc-entry-row");
     if (rows.length <= 1) {
       // Always keep at least one row — clear fields instead of removing the sole row
-      row.querySelectorAll("input").forEach(function (inp) { inp.value = ""; });
+      row.querySelectorAll("input").forEach(function (inp) { if (!inp.disabled) inp.value = ""; });
+      _scheduleAllocFootprintUpdate();
       return;
     }
     row.remove();
+    _scheduleAllocFootprintUpdate();
   });
+  document.getElementById("f-entries").addEventListener("input", _scheduleAllocFootprintUpdate);
 
   document.getElementById("btn-save-template").addEventListener("click", _onAllocSaveTemplate);
   document.getElementById("btn-allocate").addEventListener("click", _onAllocSubmit);
   document.getElementById("f-anchor").addEventListener("change", function () {
     var n = parseInt(this.value, 10);
     if (Number.isInteger(n) && n >= 8 && n <= 32) _saveAllocAnchor(n);
+    _scheduleAllocFootprintUpdate();
   });
+}
+
+function _refreshAllocHeaderBadge() {
+  var overlay = document.getElementById("modal-overlay");
+  if (!overlay) return;
+  var h3 = overlay.querySelector(".modal-header h3");
+  if (!h3) return;
+  var blockId = document.getElementById("f-blockId");
+  var blk = blockId ? cachedBlocks.find(function (b) { return b.id === blockId.value; }) : null;
+  var badge = blk ? " " + statusBadge(blk.ipVersion) : "";
+  // Re-render title with badge. Title text is trusted (literal); badge is safe HTML.
+  h3.innerHTML = escapeHtml("Auto-Allocate Next Networks") + badge;
+}
+
+var _allocFootprintTimer = null;
+var _allocFootprintSeq = 0;
+
+function _scheduleAllocFootprintUpdate() {
+  if (_allocFootprintTimer) clearTimeout(_allocFootprintTimer);
+  _allocFootprintTimer = setTimeout(_updateAllocFootprint, 200);
+}
+
+async function _updateAllocFootprint() {
+  var box = document.getElementById("f-footprint");
+  if (!box) return;
+  var entries;
+  try { entries = _collectAllocEntries(); }
+  catch (_) { entries = []; }
+
+  // Local footprint math (always shows, even without a block).
+  var span = 0;
+  for (var i = 0; i < entries.length; i++) {
+    span += Math.pow(2, 32 - entries[i].prefixLength);
+  }
+  if (span === 0) {
+    box.style.display = "none";
+    box.className = "alloc-footprint";
+    box.innerHTML = "";
+    return;
+  }
+  var slash24s = Math.ceil(span / 256);
+  var containingPrefix = 32 - Math.ceil(Math.log2(span));
+  var local = span.toLocaleString() + " addresses · " + slash24s + " /24-equivalent · needs /" + containingPrefix + " anchor";
+
+  // If a block is selected, ask the server if it actually fits.
+  var blockSel = document.getElementById("f-blockId");
+  var blockId = blockSel ? blockSel.value : "";
+  if (!blockId) {
+    box.style.display = "block";
+    box.className = "alloc-footprint alloc-footprint-info";
+    box.innerHTML = escapeHtml(local);
+    return;
+  }
+
+  var anchor = parseInt(document.getElementById("f-anchor").value, 10);
+  if (!Number.isInteger(anchor) || anchor < 8 || anchor > 32) anchor = 24;
+
+  var seq = ++_allocFootprintSeq;
+  box.style.display = "block";
+  box.className = "alloc-footprint alloc-footprint-info";
+  box.innerHTML = escapeHtml(local) + " · checking fit…";
+
+  try {
+    var preview = await api.subnets.bulkAllocatePreview({
+      blockId: blockId,
+      entries: entries,
+      anchorPrefix: anchor,
+    });
+    if (seq !== _allocFootprintSeq) return; // a newer update is in flight
+    var header = preview.totalAddresses.toLocaleString() + " addresses · " +
+      preview.slashTwentyFourCount + " /24-equivalent";
+    if (preview.error) {
+      box.className = "alloc-footprint alloc-footprint-warn";
+      box.innerHTML = escapeHtml(header + " · " + preview.error);
+      return;
+    }
+    if (preview.fits && preview.anchorCidr) {
+      box.className = "alloc-footprint alloc-footprint-ok";
+      box.innerHTML = escapeHtml(header) + ' · <strong>will land in ' + escapeHtml(preview.anchorCidr) + '</strong>';
+    } else {
+      box.className = "alloc-footprint alloc-footprint-warn";
+      box.innerHTML = escapeHtml(header) + ' · <strong>no free /' + (preview.effectiveAnchorPrefix || containingPrefix) +
+        '-aligned region in ' + escapeHtml(preview.blockCidr) + ' — create a new IP block</strong>';
+    }
+  } catch (err) {
+    if (seq !== _allocFootprintSeq) return;
+    box.className = "alloc-footprint alloc-footprint-warn";
+    box.innerHTML = escapeHtml(local + " · fit check failed: " + err.message);
+  }
 }
 
 function _renderAllocTemplateOptions() {

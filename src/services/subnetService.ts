@@ -324,6 +324,134 @@ export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAlloca
   });
 }
 
+// ─── Preview (read-only sibling of bulkAllocate) ─────────────────────────────
+
+export interface BulkAllocatePreviewInput {
+  blockId: string;
+  entries: BulkAllocateEntry[];
+  anchorPrefix?: number;
+}
+
+export interface BulkAllocatePreviewResult {
+  fits: boolean;
+  anchorCidr: string | null;
+  effectiveAnchorPrefix: number | null;
+  assignments: Array<{ name: string | null; skip: boolean; prefixLength: number; cidr: string | null }>;
+  totalAddresses: number;
+  slashTwentyFourCount: number;
+  blockCidr: string;
+  /** Surface any validation error reached before running the packer. */
+  error: string | null;
+}
+
+/**
+ * Non-mutating preview of bulkAllocate. Computes the packed assignments and
+ * whether they fit in the selected block, without creating any rows.
+ */
+export async function previewBulkAllocate(
+  input: BulkAllocatePreviewInput
+): Promise<BulkAllocatePreviewResult> {
+  const requestedAnchor = input.anchorPrefix ?? 24;
+  if (!Number.isInteger(requestedAnchor) || requestedAnchor < 8 || requestedAnchor > 32) {
+    throw new AppError(400, "Anchor prefix must be between /8 and /32");
+  }
+
+  const block = await prisma.ipBlock.findUnique({ where: { id: input.blockId } });
+  if (!block) throw new AppError(404, `IP Block ${input.blockId} not found`);
+
+  // Compute footprint numbers even if we bail early (so the UI can still show totals).
+  let totalAddresses = 0;
+  for (const e of input.entries) {
+    if (!Number.isInteger(e.prefixLength) || e.prefixLength < 8 || e.prefixLength > 32) {
+      // surface invalid entry but keep going — totals aren't meaningful yet
+      return {
+        fits: false,
+        anchorCidr: null,
+        effectiveAnchorPrefix: null,
+        assignments: [],
+        totalAddresses: 0,
+        slashTwentyFourCount: 0,
+        blockCidr: block.cidr,
+        error: `An entry has an invalid prefix length`,
+      };
+    }
+    totalAddresses += 2 ** (32 - e.prefixLength);
+  }
+  const slashTwentyFourCount = Math.ceil(totalAddresses / 256);
+
+  if (block.ipVersion !== "v4") {
+    return {
+      fits: false,
+      anchorCidr: null,
+      effectiveAnchorPrefix: null,
+      assignments: [],
+      totalAddresses,
+      slashTwentyFourCount,
+      blockCidr: block.cidr,
+      error: "Auto-allocation is currently only supported for IPv4 blocks",
+    };
+  }
+
+  if (input.entries.length === 0) {
+    return {
+      fits: false,
+      anchorCidr: null,
+      effectiveAnchorPrefix: null,
+      assignments: [],
+      totalAddresses,
+      slashTwentyFourCount,
+      blockCidr: block.cidr,
+      error: null,
+    };
+  }
+
+  const existing = await prisma.subnet.findMany({
+    where: { blockId: input.blockId },
+    select: { cidr: true },
+  });
+
+  const packed = packIntoAnchor(
+    block.cidr,
+    existing.map((s) => s.cidr),
+    input.entries,
+    requestedAnchor
+  );
+
+  if (!packed) {
+    return {
+      fits: false,
+      anchorCidr: null,
+      effectiveAnchorPrefix: null,
+      assignments: input.entries.map((e) => ({
+        name: e.skip ? null : e.name ?? null,
+        skip: !!e.skip,
+        prefixLength: e.prefixLength,
+        cidr: null,
+      })),
+      totalAddresses,
+      slashTwentyFourCount,
+      blockCidr: block.cidr,
+      error: null,
+    };
+  }
+
+  return {
+    fits: true,
+    anchorCidr: packed.anchorCidr,
+    effectiveAnchorPrefix: packed.effectiveAnchorPrefix,
+    assignments: packed.assignments.map((a) => ({
+      name: a.entry.skip ? null : a.entry.name ?? null,
+      skip: !!a.entry.skip,
+      prefixLength: a.entry.prefixLength,
+      cidr: a.cidr,
+    })),
+    totalAddresses,
+    slashTwentyFourCount,
+    blockCidr: block.cidr,
+    error: null,
+  };
+}
+
 // ─── Update ───────────────────────────────────────────────────────────────────
 
 export async function updateSubnet(id: string, input: UpdateSubnetInput) {

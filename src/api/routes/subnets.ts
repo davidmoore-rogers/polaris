@@ -84,6 +84,30 @@ router.post("/next-available", requireNetworkAdmin, async (req, res, next) => {
   }
 });
 
+// POST /subnets/bulk-allocate/preview  (must come before /:id)
+// Lenient about missing names so the UI can show running totals while the
+// user is still filling rows; the mutating /bulk-allocate endpoint enforces
+// names via BulkEntrySchema.
+const PreviewEntrySchema = z.object({
+  skip:         z.boolean().optional(),
+  name:         z.string().optional(),
+  prefixLength: z.number().int().min(8).max(32),
+  vlan:         z.number().int().min(1).max(4094).nullable().optional(),
+});
+router.post("/bulk-allocate/preview", requireNetworkAdmin, async (req, res, next) => {
+  try {
+    const schema = z.object({
+      blockId:      z.string().uuid(),
+      entries:      z.array(PreviewEntrySchema),
+      anchorPrefix: z.number().int().min(8).max(32).optional(),
+    });
+    const input = schema.parse(req.body);
+    res.json(await subnetService.previewBulkAllocate(input));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /subnets/bulk-allocate  (must come before /:id)
 router.post("/bulk-allocate", requireNetworkAdmin, async (req, res, next) => {
   try {
