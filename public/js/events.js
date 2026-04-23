@@ -580,7 +580,7 @@ function getAssetsFormData() {
     if (!silent) body.innerHTML = '<div class="empty-state" style="padding:2rem">Loading...</div>';
     try {
       var status = filterSel.value;
-      var data = await api.conflicts.list({ status: status, limit: 200 });
+      var data = await api.conflicts.list({ status: status, limit: 5000 });
       var conflicts = data.conflicts || [];
       countEl.textContent = conflicts.length + " conflict" + (conflicts.length !== 1 ? "s" : "") + (status !== "all" ? " (" + status + ")" : "");
       if (!conflicts.length) {

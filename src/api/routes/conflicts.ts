@@ -47,7 +47,7 @@ function canResolve(role: string | undefined, entityType: string): boolean {
 router.get("/", async (req, res, next) => {
   try {
     const status = (req.query.status as string) || "pending";
-    const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 500);
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 100, 5000);
     const offset = parseInt(req.query.offset as string, 10) || 0;
 
     const entityTypes = visibleEntityTypes(req.session?.role);
