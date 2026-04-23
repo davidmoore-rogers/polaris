@@ -397,7 +397,7 @@ function entraIdFormHTML(defaults) {
       '<input type="checkbox" id="f-enableIntune" ' + intuneChecked + ' style="width:auto">' +
       '<label for="f-enableIntune" style="margin:0">Enable Intune device sync</label>' +
     '</div>' +
-    '<p class="hint">When on, overlays richer data (serial, MAC, model, primary user, compliance) from <code>/deviceManagement/managedDevices</code> onto Entra devices. Requires an Intune license and the extra Graph permission above.</p>' +
+    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-top:0.5rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">When on, overlays richer data (serial, MAC, model, primary user, compliance) from <code>/deviceManagement/managedDevices</code> onto Entra devices. Requires an Intune license and the extra Graph permission above.</div>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
       '<input type="checkbox" id="f-enabled" ' + enabledChecked + ' style="width:auto">' +
       '<label for="f-enabled" style="margin:0">Enabled</label>' +
