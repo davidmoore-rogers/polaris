@@ -38,7 +38,7 @@ async function loadIntegrations() {
     var result = await api.integrations.list();
     var integrations = result.integrations || result;
     if (integrations.length === 0) {
-      container.innerHTML = '<div class="empty-state-card"><p>No integrations configured.</p><p style="color:var(--color-text-tertiary);font-size:0.85rem;margin-top:0.5rem">Add a FortiManager or Windows Server connection to get started.</p></div>';
+      container.innerHTML = '<div class="empty-state-card"><p>No integrations configured.</p><p style="color:var(--color-text-tertiary);font-size:0.85rem;margin-top:0.5rem">Add a FortiManager, FortiGate, Windows Server, or Microsoft Entra ID connection to get started.</p></div>';
       return;
     }
     var activeDiscoveries = (window._getServerDiscoveries && window._getServerDiscoveries()) || [];
@@ -47,7 +47,11 @@ async function loadIntegrations() {
       var statusDot = intg.lastTestOk === true ? "dot-ok" : intg.lastTestOk === false ? "dot-fail" : "dot-unknown";
       var statusText = intg.lastTestOk === true ? "Connected" : intg.lastTestOk === false ? "Failed" : "Not tested";
       var lastTest = intg.lastTestAt ? formatDate(intg.lastTestAt) : "Never";
-      var typeBadge = intg.type === "windowsserver" ? "Windows Server" : intg.type === "fortigate" ? "FortiGate" : "FortiManager";
+      var typeBadge =
+        intg.type === "windowsserver" ? "Windows Server" :
+        intg.type === "fortigate" ? "FortiGate" :
+        intg.type === "entraid" ? "Entra ID" :
+        "FortiManager";
 
       function filterRow(baseLabel, include, exclude) {
         include = include || []; exclude = exclude || [];
@@ -59,7 +63,14 @@ async function loadIntegrations() {
       var defaultPort = intg.type === "windowsserver" ? 5985 : 443;
 
       var detailRows;
-      if (intg.type === "windowsserver") {
+      if (intg.type === "entraid") {
+        detailRows =
+          '<div class="detail-row"><span class="detail-label">Tenant ID</span><span class="detail-value mono">' + escapeHtml(config.tenantId || "-") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Client ID</span><span class="detail-value mono">' + escapeHtml(config.clientId || "-") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Client Secret</span><span class="detail-value mono">' + escapeHtml(config.clientSecret || "-") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Intune Sync</span><span class="detail-value">' + (config.enableIntune ? "Enabled" : "Disabled") + '</span></div>' +
+          filterRow("Devices", config.deviceInclude, config.deviceExclude);
+      } else if (intg.type === "windowsserver") {
         detailRows =
           '<div class="detail-row"><span class="detail-label">Host</span><span class="detail-value mono">' + escapeHtml(config.host || "-") + ':' + (config.port || defaultPort) + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Username</span><span class="detail-value">' + escapeHtml(config.username || "-") + '</span></div>' +
@@ -368,6 +379,62 @@ function getWinFormConfig() {
   };
 }
 
+function entraIdFormHTML(defaults) {
+  var d = defaults || {};
+  var devMode = (d.deviceInclude && d.deviceInclude.length > 0) ? "include" : "exclude";
+  var devNames = devMode === "include" ? (d.deviceInclude || []) : (d.deviceExclude || []);
+  var intuneChecked = d.enableIntune ? "checked" : "";
+  var enabledChecked = d.enabled !== false ? "checked" : "";
+  var autoChecked = d.autoDiscover !== false ? "checked" : "";
+  return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Corporate Entra ID"></div>' +
+    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">Connects to <strong style="color:var(--color-text-primary)">Microsoft Entra ID</strong> (Azure AD) via an app registration with client-credentials flow. Requires <strong style="color:var(--color-text-primary)">Device.Read.All</strong> (application); add <strong style="color:var(--color-text-primary)">DeviceManagementManagedDevices.Read.All</strong> if Intune sync is enabled. Grant admin consent in the Azure portal.</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
+    '<div class="form-group"><label>Tenant ID *</label><input type="text" id="f-tenantId" value="' + escapeHtml(d.tenantId || "") + '" placeholder="e.g. 00000000-0000-0000-0000-000000000000"><p class="hint">Directory (tenant) ID from Azure portal &gt; Entra ID &gt; Overview</p></div>' +
+    '<div class="form-group"><label>Client ID *</label><input type="text" id="f-clientId" value="' + escapeHtml(d.clientId || "") + '" placeholder="e.g. 00000000-0000-0000-0000-000000000000"><p class="hint">Application (client) ID from App Registrations &gt; Overview</p></div>' +
+    '<div class="form-group"><label>Client Secret *</label><input type="password" id="f-clientSecret" value="' + (d.clientSecretPlaceholder ? "" : escapeHtml(d.clientSecret || "")) + '" placeholder="' + (d.clientSecretPlaceholder || "Secret value") + '"><p class="hint">Generate under App Registrations &gt; Certificates &amp; secrets &gt; New client secret (save the Value, not the ID)</p></div>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-enableIntune" ' + intuneChecked + ' style="width:auto">' +
+      '<label for="f-enableIntune" style="margin:0">Enable Intune device sync</label>' +
+    '</div>' +
+    '<p class="hint">When on, overlays richer data (serial, MAC, model, primary user, compliance) from <code>/deviceManagement/managedDevices</code> onto Entra devices. Requires an Intune license and the extra Graph permission above.</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-enabled" ' + enabledChecked + ' style="width:auto">' +
+      '<label for="f-enabled" style="margin:0">Enabled</label>' +
+    '</div>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-autoDiscover" ' + autoChecked + ' style="width:auto">' +
+      '<label for="f-autoDiscover" style="margin:0">Enable auto-discovery</label>' +
+    '</div>' +
+    '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to automatically query Graph for device updates (1–24 hours)</p></div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Device Scope</p>' +
+    '<div class="form-group"><label>Device Filter</label>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<select id="f-deviceMode" style="width:auto">' +
+          '<option value="include"' + (devMode === "include" ? " selected" : "") + '>Include only</option>' +
+          '<option value="exclude"' + (devMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
+        '</select>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these devices by display name</span>' +
+      '</div>' +
+      '<textarea id="f-deviceNames" rows="2" placeholder="One per line — e.g. LAPTOP-*&#10;SRV-HQ-*&#10;*-lab">' + escapeHtml(devNames.join("\n")) + '</textarea>' +
+      '<p class="hint">Leave empty to sync every device. Wildcards supported: <code>LAPTOP-*</code>, <code>*-lab</code>, <code>*pc*</code></p>' +
+    '</div>';
+}
+
+function getEntraFormConfig() {
+  var devMode = document.getElementById("f-deviceMode").value;
+  var devNames = linesToArray("f-deviceNames");
+  return {
+    tenantId: val("f-tenantId"),
+    clientId: val("f-clientId"),
+    clientSecret: val("f-clientSecret"),
+    enableIntune: document.getElementById("f-enableIntune").checked,
+    deviceInclude: devMode === "include" ? devNames : [],
+    deviceExclude: devMode === "exclude" ? devNames : [],
+  };
+}
+
 function linesToArray(id) {
   return document.getElementById(id).value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
 }
@@ -375,7 +442,7 @@ function linesToArray(id) {
 function showTypePicker() {
   var body =
     '<p style="font-size:0.9rem;color:var(--color-text-secondary);margin-bottom:1rem">Select the type of integration to add:</p>' +
-    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
       '<button class="btn btn-secondary" id="pick-fmg" style="padding:1.2rem;font-size:0.95rem;display:flex;flex-direction:column;align-items:center;gap:6px">' +
         '<strong>FortiManager</strong>' +
         '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">Multi-FortiGate via JSON-RPC</span>' +
@@ -388,23 +455,30 @@ function showTypePicker() {
         '<strong>Windows Server</strong>' +
         '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">DHCP scopes via WinRM</span>' +
       '</button>' +
+      '<button class="btn btn-secondary" id="pick-entra" style="padding:1.2rem;font-size:0.95rem;display:flex;flex-direction:column;align-items:center;gap:6px">' +
+        '<strong>Microsoft Entra ID</strong>' +
+        '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">Devices via Microsoft Graph</span>' +
+      '</button>' +
     '</div>';
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>';
   openModal("Add Integration", body, footer);
   document.getElementById("pick-fmg").addEventListener("click", function () { closeModal(); openCreateModal("fortimanager"); });
   document.getElementById("pick-fgt").addEventListener("click", function () { closeModal(); openCreateModal("fortigate"); });
   document.getElementById("pick-win").addEventListener("click", function () { closeModal(); openCreateModal("windowsserver"); });
+  document.getElementById("pick-entra").addEventListener("click", function () { closeModal(); openCreateModal("entraid"); });
 }
 
 function _formHTMLForType(type, defaults) {
   if (type === "windowsserver") return windowsServerFormHTML(defaults);
   if (type === "fortigate") return fortiGateFormHTML(defaults);
+  if (type === "entraid") return entraIdFormHTML(defaults);
   return fortiManagerFormHTML(defaults);
 }
 
 function _formConfigForType(type) {
   if (type === "windowsserver") return getWinFormConfig();
   if (type === "fortigate") return getFgtFormConfig();
+  if (type === "entraid") return getEntraFormConfig();
   return getFormConfig();
 }
 
@@ -484,9 +558,30 @@ async function openEditModal(id) {
     var config = intg.config || {};
     var isWin = intg.type === "windowsserver";
     var isFgt = intg.type === "fortigate";
+    var isEntra = intg.type === "entraid";
     var body, formGetter;
 
-    if (isWin) {
+    if (isEntra) {
+      var defaults = {
+        name: intg.name,
+        tenantId: config.tenantId,
+        clientId: config.clientId,
+        clientSecret: "",
+        clientSecretPlaceholder: "Leave blank to keep current secret",
+        enableIntune: config.enableIntune,
+        enabled: intg.enabled,
+        autoDiscover: intg.autoDiscover !== false,
+        pollInterval: intg.pollInterval,
+        deviceInclude: config.deviceInclude || [],
+        deviceExclude: config.deviceExclude || [],
+      };
+      body = entraIdFormHTML(defaults);
+      formGetter = function () {
+        var fc = getEntraFormConfig();
+        if (!fc.clientSecret) delete fc.clientSecret;
+        return fc;
+      };
+    } else if (isWin) {
       var defaults = {
         name: intg.name,
         host: config.host,
@@ -574,6 +669,7 @@ async function openEditModal(id) {
         var formConfig = _formConfigForType(intg.type);
         // Strip blank secrets so the server fills them in from the stored config.
         if (isWin) { if (!formConfig.password) delete formConfig.password; }
+        else if (isEntra) { if (!formConfig.clientSecret) delete formConfig.clientSecret; }
         else { if (!formConfig.apiToken) delete formConfig.apiToken; }
         var result = await api.integrations.testNew({
           id: id,

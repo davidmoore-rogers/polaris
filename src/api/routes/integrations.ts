@@ -10,6 +10,7 @@ import { requireNetworkAdmin } from "../middleware/auth.js";
 import * as fortimanager from "../../services/fortimanagerService.js";
 import * as fortigate from "../../services/fortigateService.js";
 import * as windowsServer from "../../services/windowsServerService.js";
+import * as entraId from "../../services/entraIdService.js";
 import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps } from "../../utils/cidr.js";
 import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveredVip, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
 import { logEvent } from "./events.js";
@@ -102,6 +103,15 @@ const WindowsServerConfigSchema = z.object({
   dhcpExclude: z.array(z.string()).optional().default([]),
 });
 
+const EntraIdConfigSchema = z.object({
+  tenantId:      z.string().optional().default(""),
+  clientId:      z.string().optional().default(""),
+  clientSecret:  z.string().optional().default(""),
+  enableIntune:  z.boolean().optional().default(false),
+  deviceInclude: z.array(z.string()).optional().default([]),
+  deviceExclude: z.array(z.string()).optional().default([]),
+});
+
 const CreateIntegrationSchema = z.discriminatedUnion("type", [
   z.object({
     type:         z.literal("fortimanager"),
@@ -126,6 +136,14 @@ const CreateIntegrationSchema = z.discriminatedUnion("type", [
     enabled:      z.boolean().optional().default(true),
     autoDiscover: z.boolean().optional().default(true),
     pollInterval: z.number().int().min(1).max(24).optional().default(4),
+  }),
+  z.object({
+    type:         z.literal("entraid"),
+    name:         z.string().min(1, "Name is required"),
+    config:       EntraIdConfigSchema,
+    enabled:      z.boolean().optional().default(true),
+    autoDiscover: z.boolean().optional().default(true),
+    pollInterval: z.number().int().min(1).max(24).optional().default(12),
   }),
 ]);
 
@@ -275,6 +293,9 @@ router.put("/:id", async (req, res, next) => {
       if (!input.config.password) {
         newConfig.password = currentConfig.password;
       }
+      if (!input.config.clientSecret) {
+        newConfig.clientSecret = currentConfig.clientSecret;
+      }
       data.config = newConfig;
     }
 
@@ -302,10 +323,13 @@ router.put("/:id", async (req, res, next) => {
       updated.lastTestOk === true &&
       updated.enabled &&
       updated.autoDiscover &&
-      finalConfig.host &&
-      ((existing.type === "fortimanager" && finalConfig.apiToken) ||
-       (existing.type === "fortigate" && finalConfig.apiToken) ||
-       (existing.type === "windowsserver" && finalConfig.username));
+      (
+        (finalConfig.host &&
+          ((existing.type === "fortimanager" && finalConfig.apiToken) ||
+           (existing.type === "fortigate" && finalConfig.apiToken) ||
+           (existing.type === "windowsserver" && finalConfig.username))) ||
+        (existing.type === "entraid" && finalConfig.tenantId && finalConfig.clientId && finalConfig.clientSecret)
+      );
 
     if (canDiscover) {
       try {
@@ -353,6 +377,8 @@ router.post("/:id/test", async (req, res, next) => {
       result = await fortigate.testConnection(config as any);
     } else if (integration.type === "windowsserver") {
       result = await windowsServer.testConnection(config as any);
+    } else if (integration.type === "entraid") {
+      result = await entraId.testConnection(config as any);
     } else {
       result = { ok: false, message: `Unknown integration type: ${integration.type}` };
     }
@@ -445,10 +471,16 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
   if (!integration.lastTestOk) throw new AppError(400, "Run a successful connection test before discovering");
 
   const config = integration.config as Record<string, unknown>;
-  if (!config.host) throw new AppError(400, "Integration has no host configured");
-  if (integration.type === "fortimanager" && !config.apiToken) throw new AppError(400, "Integration has no API token configured");
-  if (integration.type === "fortigate" && !config.apiToken) throw new AppError(400, "Integration has no API token configured");
-  if (integration.type === "windowsserver" && !config.username) throw new AppError(400, "Integration has no username configured");
+  if (integration.type === "entraid") {
+    if (!config.tenantId) throw new AppError(400, "Integration has no tenant ID configured");
+    if (!config.clientId) throw new AppError(400, "Integration has no client ID configured");
+    if (!config.clientSecret) throw new AppError(400, "Integration has no client secret configured");
+  } else {
+    if (!config.host) throw new AppError(400, "Integration has no host configured");
+    if (integration.type === "fortimanager" && !config.apiToken) throw new AppError(400, "Integration has no API token configured");
+    if (integration.type === "fortigate" && !config.apiToken) throw new AppError(400, "Integration has no API token configured");
+    if (integration.type === "windowsserver" && !config.username) throw new AppError(400, "Integration has no username configured");
+  }
 
   activeDiscovery.get(integrationId)?.controller.abort();
   const ac = new AbortController();
@@ -484,7 +516,16 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
         syncTotals.skipped.push(...r.skipped);
       };
 
-      if (integration.type === "windowsserver") {
+      if (integration.type === "entraid") {
+        // Entra ID discovery produces assets only — no subnets, reservations, or VIPs.
+        const result = await entraId.discoverDevices(config as any, ac.signal, onProgress);
+        if (!ac.signal.aborted) {
+          const r = await syncEntraDevices(integrationId, integrationName, result, actor);
+          syncTotals.created.push(...r.created);
+          syncTotals.updated.push(...r.updated);
+          syncTotals.skipped.push(...r.skipped);
+        }
+      } else if (integration.type === "windowsserver") {
         const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
         discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], fortiSwitches: [], fortiAps: [], vips: [] };
         // Windows Server is a single host — no per-device iteration, sync the full result normally
@@ -565,6 +606,9 @@ router.post("/test", async (req, res, next) => {
         if (input.type === "windowsserver" && (!cfg.password || typeof cfg.password !== "string")) {
           cfg.password = stored.password;
         }
+        if (input.type === "entraid" && (!cfg.clientSecret || typeof cfg.clientSecret !== "string")) {
+          cfg.clientSecret = stored.clientSecret;
+        }
       }
     }
 
@@ -574,6 +618,8 @@ router.post("/test", async (req, res, next) => {
       result = await fortigate.testConnection(input.config);
     } else if (input.type === "windowsserver") {
       result = await windowsServer.testConnection(input.config);
+    } else if (input.type === "entraid") {
+      result = await entraId.testConnection(input.config);
     } else {
       result = { ok: false, message: `Unknown integration type: ${(input as any).type}` };
     }
@@ -1870,6 +1916,147 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   return { created, updated, skipped, deprecated, assets: assetNames, reservations: reservationNames, vips: vipNames.length, dhcpLeases: dhcpLeases.length, dhcpReservations: dhcpReservations.length, inventoryDevices: inventoryAssets.length, dnsResolved, ouiResolved, ouiOverridden };
 }
 
+// ─── Entra ID asset sync ─────────────────────────────────────────────────────
+
+const ENTRA_ASSET_TAG_PREFIX = "entra:";
+
+function inferAssetTypeFromChassis(
+  chassisType: string | undefined,
+  operatingSystem: string | undefined,
+): "workstation" | "server" | "other" {
+  const chassis = (chassisType || "").toLowerCase();
+  if (["desktop", "laptop", "convertible", "detachable"].includes(chassis)) return "workstation";
+  if (["tablet", "phone"].includes(chassis)) return "other";
+
+  // Fall back to OS inference (Entra-only devices have no chassisType).
+  // Intune doesn't report servers in practice, but a future change could.
+  const inferred = inferAssetTypeFromOs(operatingSystem);
+  if (inferred === "server") return "server";
+  if (inferred === "workstation") return "workstation";
+  return "workstation"; // Entra/Intune devices default to workstation
+}
+
+async function syncEntraDevices(
+  integrationId: string,
+  integrationName: string,
+  result: { devices: entraId.DiscoveredEntraDevice[] },
+  actor?: string,
+): Promise<{ created: string[]; updated: string[]; skipped: string[] }> {
+  const syncLog = (level: "info" | "error" | "warning", message: string) => {
+    logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
+  };
+  const created: string[] = [];
+  const updated: string[] = [];
+  const skipped: string[] = [];
+  const now = new Date();
+
+  // Load the full asset table so we can index by (Entra) assetTag and by hostname
+  const allAssets = await prisma.asset.findMany();
+  const assetByEntraId = new Map<string, any>();       // deviceId → asset
+  const assetByHostnameNoTag = new Map<string, any>(); // hostname → asset (only those without an assetTag)
+  for (const a of allAssets) {
+    const tag = a.assetTag ?? "";
+    if (tag.startsWith(ENTRA_ASSET_TAG_PREFIX)) {
+      assetByEntraId.set(tag.slice(ENTRA_ASSET_TAG_PREFIX.length).toLowerCase(), a);
+    } else if (!tag && a.hostname) {
+      assetByHostnameNoTag.set(a.hostname.toLowerCase(), a);
+    }
+  }
+
+  for (const dev of result.devices) {
+    const deviceIdKey = dev.deviceId.toLowerCase();
+    if (!deviceIdKey) {
+      skipped.push(`${dev.displayName || "<unnamed>"} (missing deviceId)`);
+      continue;
+    }
+
+    const assetType = inferAssetTypeFromChassis(dev.chassisType, dev.operatingSystem);
+
+    const tags: string[] = ["entraid", "auto-discovered"];
+    if (dev.trustType) tags.push(dev.trustType.toLowerCase());
+    if (dev.complianceState) tags.push(`intune-${dev.complianceState.toLowerCase()}`);
+    else if (dev.isCompliant === true) tags.push("compliant");
+    else if (dev.isCompliant === false) tags.push("noncompliant");
+
+    // Prefer Intune's lastSync (freshest hands-on-device signal) over Entra's sign-in time
+    const lastSeenIso = dev.lastSyncDateTime || dev.approximateLastSignInDateTime;
+    const lastSeen = lastSeenIso ? new Date(lastSeenIso) : null;
+    const acquiredAt = dev.registrationDateTime ? new Date(dev.registrationDateTime) : null;
+
+    const existing = assetByEntraId.get(deviceIdKey);
+    if (existing) {
+      // Update the existing Entra-sourced asset
+      const updateData: Record<string, unknown> = {
+        hostname: dev.displayName || existing.hostname,
+        os: dev.operatingSystem || existing.os,
+        osVersion: dev.operatingSystemVersion || existing.osVersion,
+        lastSeen: lastSeen || existing.lastSeen,
+      };
+      if (dev.serialNumber) updateData.serialNumber = dev.serialNumber;
+      if (dev.macAddress) updateData.macAddress = dev.macAddress;
+      if (dev.manufacturer) updateData.manufacturer = dev.manufacturer;
+      if (dev.model) updateData.model = dev.model;
+      if (dev.userPrincipalName) updateData.assignedTo = dev.userPrincipalName;
+      if (acquiredAt && (!existing.acquiredAt || acquiredAt < new Date(existing.acquiredAt))) {
+        updateData.acquiredAt = acquiredAt;
+      }
+      // Only overwrite assetType if the existing one is "other" (default) — respect manual recategorization
+      if (existing.assetType === "other") updateData.assetType = assetType;
+      // Merge tags: keep any manual tags, replace the auto-discovery set
+      const preserved = (existing.tags as string[] || []).filter((t) => !t.startsWith("entra") && !["auto-discovered", "compliant", "noncompliant", "azuread", "workplace", "serverad"].includes(t) && !t.startsWith("intune-"));
+      updateData.tags = [...preserved, ...tags];
+
+      try {
+        await prisma.asset.update({ where: { id: existing.id }, data: updateData });
+        updated.push(dev.displayName || dev.deviceId);
+      } catch (err: any) {
+        syncLog("error", `Failed to update asset for Entra device ${dev.displayName || dev.deviceId}: ${err.message || "Unknown error"}`);
+      }
+      continue;
+    }
+
+    // No existing assetTag match — check for hostname collision with a non-tagged asset
+    if (dev.displayName) {
+      const collision = assetByHostnameNoTag.get(dev.displayName.toLowerCase());
+      if (collision) {
+        syncLog("warning", `Hostname collision — Entra device "${dev.displayName}" (${dev.deviceId}) matches existing asset ${collision.id} with no assetTag. Skipped to avoid duplicate; merge manually by setting that asset's assetTag to "${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}".`);
+        skipped.push(`${dev.displayName} (hostname collision)`);
+        continue;
+      }
+    }
+
+    // Create a new asset
+    try {
+      const newAsset = await prisma.asset.create({
+        data: {
+          assetTag: `${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}`,
+          hostname: dev.displayName || null,
+          serialNumber: dev.serialNumber || null,
+          macAddress: dev.macAddress || null,
+          manufacturer: dev.manufacturer || null,
+          model: dev.model || null,
+          assetType,
+          status: "active",
+          os: dev.operatingSystem || null,
+          osVersion: dev.operatingSystemVersion || null,
+          assignedTo: dev.userPrincipalName || null,
+          lastSeen,
+          acquiredAt,
+          notes: `Auto-discovered from Entra ID integration "${integrationName}"${dev.trustType ? ` (trust: ${dev.trustType})` : ""}`,
+          tags,
+        },
+      });
+      assetByEntraId.set(deviceIdKey, newAsset);
+      created.push(dev.displayName || dev.deviceId);
+    } catch (err: any) {
+      syncLog("error", `Failed to create asset for Entra device ${dev.displayName || dev.deviceId}: ${err.message || "Unknown error"}`);
+    }
+  }
+
+  syncLog("info", `Entra ID sync: ${created.length} created, ${updated.length} updated, ${skipped.length} skipped`);
+  return { created, updated, skipped };
+}
+
 function stripSecret(integration: Record<string, any>) {
   const config = { ...(integration.config as Record<string, unknown>) };
   if (config.apiToken) {
@@ -1877,6 +2064,9 @@ function stripSecret(integration: Record<string, any>) {
   }
   if (config.password) {
     config.password = "••••••••";
+  }
+  if (config.clientSecret) {
+    config.clientSecret = "••••••••";
   }
   return { ...integration, config };
 }

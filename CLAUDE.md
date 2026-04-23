@@ -68,7 +68,7 @@ shelob/
 │   │       ├── reservations.ts      # Reservation CRUD
 │   │       ├── utilization.ts       # Reporting endpoints
 │   │       ├── users.ts             # User CRUD & role management
-│   │       ├── integrations.ts      # FMG / FortiGate / Windows Server config & discovery
+│   │       ├── integrations.ts      # FMG / FortiGate / Windows Server / Entra ID config & discovery
 │   │       ├── assets.ts            # Device inventory CRUD, PDF/CSV export
 │   │       ├── events.ts            # Audit log, syslog, SFTP archival
 │   │       ├── conflicts.ts         # Discovery conflict review & resolution
@@ -82,6 +82,7 @@ shelob/
 │   │   ├── fortimanagerService.ts   # FMG JSON-RPC client & discovery orchestration
 │   │   ├── fortigateService.ts      # Standalone FortiGate REST API client & discovery
 │   │   ├── windowsServerService.ts  # Windows Server WinRM DHCP discovery
+│   │   ├── entraIdService.ts        # Microsoft Entra ID + Intune device discovery via Graph
 │   │   ├── azureAuthService.ts      # Azure AD/Entra SAML SSO, user provisioning
 │   │   ├── dnsService.ts            # Reverse DNS lookup for assets
 │   │   ├── ouiService.ts            # MAC OUI lookup with admin overrides
@@ -459,12 +460,28 @@ Scope is the same as FMG (DHCP scopes + reservations + leases, interface IPs, VI
 
 ---
 
+## Entra ID / Intune Discovery Workflow
+
+`entraIdService.ts` queries Microsoft Graph via OAuth2 client-credentials flow to sync registered devices as assets. **Produces assets only** — no subnets, reservations, or VIPs — so it uses a dedicated `syncEntraDevices` path in `integrations.ts` rather than the shared `syncDhcpSubnets` pipeline.
+
+- **Auth** — `POST https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token` with `grant_type=client_credentials`, scope `https://graph.microsoft.com/.default`. Tokens are cached in-memory by `tenantId:clientId` until expiry.
+- **Endpoints** —
+  - Always: `GET /v1.0/devices` (paged via `@odata.nextLink`, `$top=999`, hard cap 10,000). Requires `Device.Read.All` (application permission, admin consent).
+  - When `enableIntune=true`: `GET /v1.0/deviceManagement/managedDevices`. Requires `DeviceManagementManagedDevices.Read.All`. Merged onto Entra devices via `azureADDeviceId ↔ deviceId`; Intune data wins on any shared field.
+- **Device identity** — the Entra `deviceId` (GUID) is the stable key. Persisted on `Asset.assetTag` as `entra:{deviceId}`.
+- **Re-discovery** — Assets are matched first by that prefixed assetTag. If no match but the hostname collides with an existing asset that has no assetTag, a warning `Event` is written and the device is skipped (no duplicate, no overwrite); an admin can merge by setting the existing asset's `assetTag` to `entra:{deviceId}`.
+- **Asset type** — inferred from Intune `chassisType` (`desktop/laptop/convertible/detachable` → `workstation`; `tablet/phone` → `other`); Entra-only devices default to `workstation`. Admins can recategorize via the asset edit UI; re-discovery only overwrites `assetType` if it is still `other`.
+- **User** — Intune `userPrincipalName` → `Asset.assignedTo`. Entra-only runs do not populate this field.
+- **Filters** — `deviceInclude` / `deviceExclude` arrays match against `displayName` with wildcard support (`LAPTOP-*`, `*-lab`).
+
+---
+
 ## Background Jobs
 
 | Job | Schedule | Purpose |
 |-----|----------|---------|
 | `expireReservations` | Every 15 min | Mark reservations past `expiresAt` as `expired` |
-| `discoveryScheduler` | Per-integration `pollInterval` | Auto-trigger FMG / Windows Server discovery |
+| `discoveryScheduler` | Per-integration `pollInterval` | Auto-trigger FMG / FortiGate / Windows Server / Entra ID discovery |
 | `ouiRefresh` | Periodic | Refresh IEEE OUI database for MAC vendor lookup |
 | `pruneEvents` | Nightly | Delete Event records older than 7 days |
 | `updateCheck` | Periodic | Check for software updates |

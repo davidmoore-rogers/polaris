@@ -686,6 +686,93 @@ const INTEGRATIONS = [
     createdAt: "2026-04-01T09:00:00.000Z",
     updatedAt: "2026-04-12T10:00:00.000Z",
   },
+  {
+    id: "i5000000-0000-0000-0000-000000000005",
+    type: "entraid",
+    name: "Corporate Entra ID",
+    config: {
+      tenantId: "00000000-0000-0000-0000-000000000000",
+      clientId: "11111111-1111-1111-1111-111111111111",
+      clientSecret: "••••••••",
+      enableIntune: true,
+      deviceInclude: [],
+      deviceExclude: [],
+    },
+    enabled: true,
+    pollInterval: 12,
+    lastTestAt: "2026-04-20T09:00:00.000Z",
+    lastTestOk: true,
+    createdAt: "2026-04-10T09:00:00.000Z",
+    updatedAt: "2026-04-20T09:00:00.000Z",
+  },
+];
+
+// Mock Entra ID / Intune devices — exercised by demo discover handler below
+const MOCK_ENTRA_DEVICES = [
+  {
+    deviceId: "e1111111-1111-1111-1111-aaaaaaaaaaaa",
+    displayName: "LAPTOP-JDOE",
+    operatingSystem: "Windows",
+    operatingSystemVersion: "10.0.22631",
+    trustType: "AzureAd",
+    serialNumber: "5CD12345AB",
+    macAddress: "AA:BB:CC:11:22:33",
+    manufacturer: "Dell",
+    model: "Latitude 7440",
+    userPrincipalName: "jdoe@corp.example.com",
+    chassisType: "laptop",
+    complianceState: "compliant",
+    lastSyncDateTime: "2026-04-22T13:45:00.000Z",
+    registrationDateTime: "2025-09-12T14:00:00.000Z",
+  },
+  {
+    deviceId: "e2222222-2222-2222-2222-bbbbbbbbbbbb",
+    displayName: "LAPTOP-ASMITH",
+    operatingSystem: "Windows",
+    operatingSystemVersion: "10.0.22631",
+    trustType: "AzureAd",
+    serialNumber: "5CD67890CD",
+    macAddress: "AA:BB:CC:44:55:66",
+    manufacturer: "Lenovo",
+    model: "ThinkPad X1 Carbon Gen 11",
+    userPrincipalName: "asmith@corp.example.com",
+    chassisType: "laptop",
+    complianceState: "compliant",
+    lastSyncDateTime: "2026-04-22T10:20:00.000Z",
+    registrationDateTime: "2025-11-03T09:30:00.000Z",
+  },
+  {
+    deviceId: "e3333333-3333-3333-3333-cccccccccccc",
+    displayName: "DESK-RECEPTION",
+    operatingSystem: "Windows",
+    operatingSystemVersion: "10.0.19045",
+    trustType: "Workplace",
+    serialNumber: "HP-DESK-7410",
+    macAddress: "AA:BB:CC:77:88:99",
+    manufacturer: "HP",
+    model: "EliteDesk 800 G9",
+    userPrincipalName: "reception@corp.example.com",
+    chassisType: "desktop",
+    complianceState: "noncompliant",
+    lastSyncDateTime: "2026-04-19T16:00:00.000Z",
+    registrationDateTime: "2024-07-22T11:00:00.000Z",
+  },
+  {
+    deviceId: "e4444444-4444-4444-4444-dddddddddddd",
+    displayName: "IPAD-FIELD-03",
+    operatingSystem: "iOS",
+    operatingSystemVersion: "17.4",
+    trustType: "AzureAd",
+    serialNumber: "DNPC12AABC",
+    macAddress: "",
+    manufacturer: "Apple",
+    model: "iPad Air (5th generation)",
+    userPrincipalName: "field-tech3@corp.example.com",
+    chassisType: "tablet",
+    complianceState: "compliant",
+    lastSyncDateTime: "2026-04-21T08:15:00.000Z",
+    registrationDateTime: "2025-01-15T10:00:00.000Z",
+  },
 ];
 
 const ASSETS = [
@@ -1429,6 +1516,152 @@ function discoverWinDhcpDemo(config) {
   }));
 
   return { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [] };
+}
+
+function matchesWildcardDemo(pattern, value) {
+  const p = String(pattern || "").toLowerCase();
+  const v = String(value || "").toLowerCase();
+  if (p === "*") return true;
+  if (p.startsWith("*") && p.endsWith("*") && p.length > 2) return v.includes(p.slice(1, -1));
+  if (p.startsWith("*")) return v.endsWith(p.slice(1));
+  if (p.endsWith("*")) return v.startsWith(p.slice(0, -1));
+  return v === p;
+}
+
+function discoverEntraDevicesDemo(config, log) {
+  if (!log) log = () => {};
+  let devices = MOCK_ENTRA_DEVICES.map((d) => ({ ...d }));
+
+  // If Intune sync is off, clear Intune-only fields to mirror real behaviour
+  if (!config.enableIntune) {
+    devices = devices.map((d) => ({
+      deviceId: d.deviceId,
+      displayName: d.displayName,
+      operatingSystem: d.operatingSystem,
+      operatingSystemVersion: d.operatingSystemVersion,
+      trustType: d.trustType,
+      registrationDateTime: d.registrationDateTime,
+      approximateLastSignInDateTime: d.lastSyncDateTime,
+    }));
+  }
+
+  // Apply include/exclude filter on displayName
+  const include = config.deviceInclude || [];
+  const exclude = config.deviceExclude || [];
+  if (include.length > 0) {
+    devices = devices.filter((d) => include.some((p) => matchesWildcardDemo(p, d.displayName)));
+  } else if (exclude.length > 0) {
+    devices = devices.filter((d) => !exclude.some((p) => matchesWildcardDemo(p, d.displayName)));
+  }
+
+  log("discover.entra.devices", "info", `Entra ID (demo): retrieved ${MOCK_ENTRA_DEVICES.length} device(s)`);
+  if (config.enableIntune) {
+    log("discover.intune.devices", "info", `Intune (demo): retrieved ${MOCK_ENTRA_DEVICES.filter((d) => d.chassisType).length} managed device(s)`);
+  }
+  log("discover.filter", "info", `Merged total: ${devices.length} device(s)`);
+
+  return { devices };
+}
+
+const ENTRA_ASSET_TAG_PREFIX_DEMO = "entra:";
+
+function entraAssetTypeDemo(chassis, os) {
+  const c = String(chassis || "").toLowerCase();
+  if (["desktop", "laptop", "convertible", "detachable"].includes(c)) return "workstation";
+  if (["tablet", "phone"].includes(c)) return "other";
+  const lower = String(os || "").toLowerCase();
+  if (lower.includes("ios") || lower.includes("android")) return "other";
+  return "workstation";
+}
+
+function syncEntraDevicesDemo(integrationId, integrationName, result, syncLog) {
+  const log = syncLog || (() => {});
+  const created = [];
+  const updated = [];
+  const skipped = [];
+  const now = new Date().toISOString();
+
+  const byTag = new Map();
+  const byHostnameNoTag = new Map();
+  for (const a of ASSETS) {
+    const tag = a.assetTag || "";
+    if (tag.startsWith(ENTRA_ASSET_TAG_PREFIX_DEMO)) {
+      byTag.set(tag.slice(ENTRA_ASSET_TAG_PREFIX_DEMO.length).toLowerCase(), a);
+    } else if (!tag && a.hostname) {
+      byHostnameNoTag.set(a.hostname.toLowerCase(), a);
+    }
+  }
+
+  for (const dev of result.devices) {
+    const key = String(dev.deviceId || "").toLowerCase();
+    if (!key) { skipped.push(`${dev.displayName || "<unnamed>"} (missing deviceId)`); continue; }
+    const tags = ["entraid", "auto-discovered"];
+    if (dev.trustType) tags.push(dev.trustType.toLowerCase());
+    if (dev.complianceState) tags.push(`intune-${dev.complianceState.toLowerCase()}`);
+
+    const existing = byTag.get(key);
+    if (existing) {
+      existing.hostname = dev.displayName || existing.hostname;
+      existing.os = dev.operatingSystem || existing.os;
+      existing.osVersion = dev.operatingSystemVersion || existing.osVersion;
+      existing.lastSeen = dev.lastSyncDateTime || dev.approximateLastSignInDateTime || existing.lastSeen;
+      if (dev.serialNumber) existing.serialNumber = dev.serialNumber;
+      if (dev.macAddress) existing.macAddress = dev.macAddress;
+      if (dev.manufacturer) existing.manufacturer = dev.manufacturer;
+      if (dev.model) existing.model = dev.model;
+      if (dev.userPrincipalName) existing.assignedTo = dev.userPrincipalName;
+      existing.updatedAt = now;
+      existing.tags = tags;
+      updated.push(dev.displayName || dev.deviceId);
+      continue;
+    }
+
+    if (dev.displayName) {
+      const collision = byHostnameNoTag.get(dev.displayName.toLowerCase());
+      if (collision) {
+        log("warning", `Hostname collision — Entra device "${dev.displayName}" matches existing asset ${collision.id}. Skipped.`);
+        skipped.push(`${dev.displayName} (hostname collision)`);
+        continue;
+      }
+    }
+
+    const newAsset = {
+      id: crypto.randomUUID(),
+      ipAddress: null,
+      macAddress: dev.macAddress || null,
+      macAddresses: [],
+      hostname: dev.displayName || null,
+      dnsName: null,
+      assetTag: `${ENTRA_ASSET_TAG_PREFIX_DEMO}${dev.deviceId}`,
+      serialNumber: dev.serialNumber || null,
+      manufacturer: dev.manufacturer || null,
+      model: dev.model || null,
+      assetType: entraAssetTypeDemo(dev.chassisType, dev.operatingSystem),
+      status: "active",
+      location: null,
+      learnedLocation: null,
+      department: null,
+      assignedTo: dev.userPrincipalName || null,
+      os: dev.operatingSystem || null,
+      osVersion: dev.operatingSystemVersion || null,
+      lastSeenSwitch: null,
+      lastSeenAp: null,
+      associatedUsers: [],
+      acquiredAt: dev.registrationDateTime || null,
+      warrantyExpiry: null,
+      purchaseOrder: null,
+      notes: `Auto-discovered from Entra ID integration "${integrationName}"`,
+      tags,
+      lastSeen: dev.lastSyncDateTime || dev.approximateLastSignInDateTime || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    ASSETS.push(newAsset);
+    byTag.set(key, newAsset);
+    created.push(dev.displayName || dev.deviceId);
+  }
+
+  return { created, updated, skipped };
 }
 
 function discoverDhcpDemo(config, log) {
@@ -2731,6 +2964,7 @@ async function routeAPI(method, path, params, body, res, req) {
       const c = { ...i.config };
       if (c.apiToken) c.apiToken = "••••••••";
       if (c.password) c.password = "••••••••";
+      if (c.clientSecret) c.clientSecret = "••••••••";
       return { ...i, config: c };
     });
     const total = safe.length;
@@ -2740,6 +2974,16 @@ async function routeAPI(method, path, params, body, res, req) {
   }
   if (path === "/api/v1/integrations/test" && method === "POST") {
     const isWin = body.type === "windowsserver";
+    const isEntra = body.type === "entraid";
+    if (isEntra) {
+      const delay = 700 + Math.random() * 300;
+      return setTimeout(() => {
+        const ok = !!(body.config?.tenantId && body.config?.clientId && body.config?.clientSecret);
+        const msg = ok ? 'Connected — tenant "Corporate Demo" (demo)' : "Tenant ID, Client ID, and Client Secret are required";
+        logEventDemo({ action: "integration.test.completed", resourceType: "integration", resourceName: body.name, level: ok ? "info" : "warning", message: `Connection test ${ok ? "succeeded" : "failed"} for "${body.name || "new integration"}": ${msg}` });
+        json(res, { ok, message: msg });
+      }, delay);
+    }
     // Real FortiManager test for non-mock hosts
     if (!isWin && !_isMockFmg(body.config)) {
       logEventDemo({ action: "integration.test.started", resourceType: "integration", resourceName: body.name, message: `Connection test started for "${body.name || "new integration"}"` });
@@ -2766,6 +3010,19 @@ async function routeAPI(method, path, params, body, res, req) {
     const intg = INTEGRATIONS.find((i) => i.id === id);
     if (!intg) return json(res, { error: "Not found" }, 404);
     const isWin = intg.type === "windowsserver";
+    const isEntra = intg.type === "entraid";
+    if (isEntra) {
+      const delay = 700 + Math.random() * 300;
+      logEventDemo({ action: "integration.test.started", resourceType: "integration", resourceId: id, resourceName: intg.name, message: `Connection test started for "${intg.name}"` });
+      return setTimeout(() => {
+        const ok = intg.enabled && !!(intg.config?.tenantId && intg.config?.clientId && intg.config?.clientSecret);
+        const msg = ok ? 'Connected — tenant "Corporate Demo" (demo)' : "Connection failed — check tenant/client/secret configuration";
+        intg.lastTestOk = ok;
+        intg.lastTestAt = new Date().toISOString();
+        logEventDemo({ action: "integration.test.completed", resourceType: "integration", resourceId: id, resourceName: intg.name, level: ok ? "info" : "warning", message: `Connection test ${ok ? "succeeded" : "failed"} for "${intg.name}": ${msg}` });
+        json(res, { ok, message: msg });
+      }, delay);
+    }
     // Real FortiManager test for non-mock hosts
     if (!isWin && !_isMockFmg(intg.config)) {
       logEventDemo({ action: "integration.test.started", resourceType: "integration", resourceId: id, resourceName: intg.name, message: `Connection test started for "${intg.name}"` });
@@ -2809,6 +3066,23 @@ async function routeAPI(method, path, params, body, res, req) {
     const id = path.split("/")[4];
     const intg = INTEGRATIONS.find((i) => i.id === id);
     if (!intg) return json(res, { error: "Not found" }, 404);
+    if (intg.type === "entraid") {
+      if (!intg.config?.tenantId || !intg.config?.clientId || !intg.config?.clientSecret) {
+        return json(res, { error: "Entra ID integration is missing tenantId, clientId, or clientSecret" }, 400);
+      }
+      logEventDemo({ action: "integration.discover.started", resourceType: "integration", resourceId: id, resourceName: intg.name, message: `Manual Entra ID discovery started for "${intg.name}"` });
+      const pLog = (step, level, message) => {
+        logEventDemo({ action: "integration." + step, resourceType: "integration", resourceId: id, resourceName: intg.name, level, message: "[" + intg.name + "] " + message });
+      };
+      const sLog = (level, message) => {
+        logEventDemo({ action: "integration.sync", resourceType: "integration", resourceId: id, resourceName: intg.name, level, message: "[" + intg.name + "] " + message });
+      };
+      const discovered = discoverEntraDevicesDemo(intg.config, pLog);
+      const result = syncEntraDevicesDemo(intg.id, intg.name, discovered, sLog);
+      logEventDemo({ action: "integration.discover.completed", resourceType: "integration", resourceId: id, resourceName: intg.name, message: `Entra ID discovery completed for "${intg.name}" — ${result.created.length} created, ${result.updated.length} updated, ${result.skipped.length} skipped` });
+      intg.lastDiscoveryAt = new Date().toISOString();
+      return json(res, result);
+    }
     if (!intg.config?.host) return json(res, { error: "Integration has no host configured" }, 400);
     logEventDemo({ action: "integration.discover.started", resourceType: "integration", resourceId: id, resourceName: intg.name, message: `Manual DHCP discovery started for "${intg.name}"` });
     const progressLog = (step, level, message) => {
@@ -2843,6 +3117,7 @@ async function routeAPI(method, path, params, body, res, req) {
     const c = { ...intg.config };
     if (c.apiToken) c.apiToken = "••••••••";
     if (c.password) c.password = "••••••••";
+    if (c.clientSecret) c.clientSecret = "••••••••";
     return json(res, { ...intg, config: c });
   }
   if (path === "/api/v1/integrations" && method === "POST") {
@@ -2852,6 +3127,7 @@ async function routeAPI(method, path, params, body, res, req) {
     const safeConfig = { ...body.config };
     if (safeConfig.apiToken) safeConfig.apiToken = "••••••••";
     if (safeConfig.password) safeConfig.password = "••••••••";
+    if (safeConfig.clientSecret) safeConfig.clientSecret = "••••••••";
     const pollInterval = Math.min(24, Math.max(1, parseInt(body.pollInterval, 10) || 4));
     const newIntg = {
       id: crypto.randomUUID(),
@@ -2910,9 +3186,11 @@ async function routeAPI(method, path, params, body, res, req) {
     // Preserve secrets if not re-submitted
     if (!body.config?.apiToken && intg.config.apiToken) mergedConfig.apiToken = intg.config.apiToken;
     if (!body.config?.password && intg.config.password) mergedConfig.password = intg.config.password;
+    if (!body.config?.clientSecret && intg.config.clientSecret) mergedConfig.clientSecret = intg.config.clientSecret;
     const safeConfig = { ...mergedConfig };
     if (safeConfig.apiToken) safeConfig.apiToken = "••••••••";
     if (safeConfig.password) safeConfig.password = "••••••••";
+    if (safeConfig.clientSecret) safeConfig.clientSecret = "••••••••";
     const updated = {
       ...intg,
       ...body,

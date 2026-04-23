@@ -1,14 +1,16 @@
 # Shelob
 
-An IP address management (IPAM) tool for tracking and reserving IPv4/IPv6 space, managing network assets, and auto-discovering DHCP infrastructure from FortiManager and Windows Server.
+An IP address management (IPAM) tool for tracking and reserving IPv4/IPv6 space, managing network assets, and auto-discovering devices from FortiManager, standalone FortiGate, Windows Server DHCP, and Microsoft Entra ID / Intune.
 
 ## Features
 
 - **IP Block & Subnet Management** — Create top-level IP blocks, carve subnets manually or auto-allocate by prefix length, track VLAN assignments
 - **Reservation Tracking** — Reserve individual IPs or entire subnets with owner, project, expiry, and conflict detection
 - **Asset Management** — Track servers, switches, firewalls, APs, and other devices with MAC history, serial numbers, warranty dates, and procurement info
-- **FortiManager Integration** — Auto-discover DHCP scopes, interface IPs, device inventory, and DHCP leases from on-premise FortiManager (7.4.7+ / 7.6.2+) via JSON-RPC
+- **FortiManager Integration** — Auto-discover DHCP scopes, interface IPs, device inventory, VIPs, FortiSwitches, FortiAPs, and DHCP leases from on-premise FortiManager (7.4.7+ / 7.6.2+) via JSON-RPC
+- **Standalone FortiGate Integration** — Same discovery scope as FortiManager against a single FortiGate via its REST API, for deployments not managed by FortiManager
 - **Windows Server Integration** — Auto-discover DHCP scopes from Windows Server DHCP via WinRM (PowerShell remoting)
+- **Microsoft Entra ID / Intune Integration** — Auto-discover registered devices (hostname, OS, trust type, compliance) via Microsoft Graph; with Intune toggle, overlays serial, MAC, model, manufacturer, and primary user
 - **Azure SAML SSO** — SAML 2.0 single sign-on with Azure AD / Entra ID, with auto-provisioning and single logout
 - **Role-Based Access** — Admin, Network Admin, Assets Admin, User, and Read-Only roles
 - **Event Logging** — Audit trail with syslog forwarding, SFTP/SCP archival, and 7-day rolling retention
@@ -174,9 +176,17 @@ Connects to on-premise FortiManager via JSON-RPC API to discover:
 - FortiGate device inventory (creates assets)
 - Interface IPs (creates reservations)
 - DHCP leases and static reservations
+- Virtual IPs (VIPs)
+- Managed FortiSwitches and FortiAPs
 - Device inventory with MAC/IP/switch/AP tracking
 
-Requires FortiManager **7.4.7+** or **7.6.2+** with a bearer API token. Default poll interval: 12 hours.
+Requires FortiManager **7.4.7+** or **7.6.2+** with a bearer API token. Default poll interval: 12 hours. Optional device-level include/exclude filter skips specific FortiGates from all queries.
+
+### Standalone FortiGate
+
+Connects directly to a single FortiGate via its REST API — for deployments not managed by FortiManager. Same discovery scope as the FortiManager integration (DHCP, interfaces, VIPs, managed FortiSwitches/FortiAPs, device inventory).
+
+Requires an API administrator token created under **System > Administrators > REST API Admin**. Default poll interval: 12 hours.
 
 ### Windows Server
 
@@ -184,6 +194,15 @@ Connects to Windows Server DHCP via WinRM (PowerShell remoting) to discover:
 - DHCP v4 scopes (creates subnets)
 
 Requires WinRM enabled on the target server (port 5985 HTTP or 5986 HTTPS). Default poll interval: 4 hours.
+
+### Microsoft Entra ID / Intune
+
+Connects to Microsoft Graph via OAuth2 client-credentials to discover registered devices as assets. Produces assets only — no subnets or reservations.
+
+- **Entra ID** (always queried): hostname, OS, OS version, trust type, compliance, last sign-in
+- **Intune** (optional toggle): serial number, MAC address, manufacturer, model, primary user, compliance state, last sync — merged onto Entra devices via `azureADDeviceId ↔ deviceId`
+
+Requires an App Registration with `Device.Read.All` (application permission, admin consent); add `DeviceManagementManagedDevices.Read.All` when Intune sync is enabled. The `deviceId` is stored on `Asset.assetTag` as `entra:{deviceId}` and is the correlation key on re-discovery. Default poll interval: 12 hours.
 
 ## Authentication
 
