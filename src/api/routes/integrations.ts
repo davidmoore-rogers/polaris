@@ -504,7 +504,8 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
   await prisma.integration.update({ where: { id: integrationId }, data: { lastDiscoveryAt: new Date() } });
 
   const label = actor === "auto-discovery" ? "Scheduled" : "Manual";
-  logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} DHCP discovery started for "${integrationName}"` });
+  const kindLabel = integration.type === "entraid" ? "device discovery" : "DHCP discovery";
+  logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} started for "${integrationName}"` });
 
   const onProgress: DiscoveryProgressCallback = (step, level, message, device) => {
     logEvent({ action: `integration.${step}`, resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
@@ -577,13 +578,15 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
       // const syncResult = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
 
       if (ac.signal.aborted) {
-        logEvent({ action: "integration.discover.aborted", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "warning", message: `${label} DHCP discovery aborted for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped (stale-subnet deprecation skipped)` });
+        const abortSuffix = integration.type === "entraid" ? "" : " (stale-subnet deprecation skipped)";
+        logEvent({ action: "integration.discover.aborted", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "warning", message: `${label} ${kindLabel} aborted for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${abortSuffix}` });
       } else {
-        logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} DHCP discovery completed for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped, ${syncTotals.deprecated.length} deprecated` });
+        const deprecatedSuffix = integration.type === "entraid" ? "" : `, ${syncTotals.deprecated.length} deprecated`;
+        logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} completed for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${deprecatedSuffix}` });
       }
     } catch (err: any) {
       if (err.name !== "AbortError") {
-        logEvent({ action: "integration.discover.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `${label} DHCP discovery failed for "${integrationName}": ${err.message || "Unknown error"}` });
+        logEvent({ action: "integration.discover.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `${label} ${kindLabel} failed for "${integrationName}": ${err.message || "Unknown error"}` });
       }
     } finally {
       activeDiscovery.delete(integrationId);
