@@ -327,6 +327,26 @@ async function openCreateModal() {
 var _allocTemplates = [];
 var _allocSelectedTemplateId = "";
 
+function _allocAnchorKey() {
+  return currentUsername ? "shelob-prefs-alloc-anchor-" + currentUsername : null;
+}
+function _loadAllocAnchor() {
+  var key = _allocAnchorKey();
+  if (!key) return 24;
+  try {
+    var raw = localStorage.getItem(key);
+    if (!raw) return 24;
+    var n = parseInt(raw, 10);
+    if (!Number.isInteger(n) || n < 8 || n > 32) return 24;
+    return n;
+  } catch (_) { return 24; }
+}
+function _saveAllocAnchor(prefix) {
+  var key = _allocAnchorKey();
+  if (!key) return;
+  try { localStorage.setItem(key, String(prefix)); } catch (_) {}
+}
+
 async function openAllocateModal() {
   try {
     var loaded = await Promise.all([api.allocationTemplates.list(), _ensureTagCache()]);
@@ -348,6 +368,7 @@ async function openAllocateModal() {
       '<p class="hint">Pick a saved template to pre-fill the rows below, or build one from scratch.</p>' +
     '</div>' +
     '<div class="form-group"><label>Site Name *</label><input type="text" id="f-site" placeholder="e.g. Jefferson"><p class="hint">Prepended to each row name, separated by <code>_</code> (e.g. Jefferson_RGIHardware).</p></div>' +
+    '<div class="form-group"><label>Anchor Prefix</label><input type="number" id="f-anchor" min="8" max="32" value="' + _loadAllocAnchor() + '"><p class="hint">Minimum alignment for the group. Defaults to /24 and is remembered for you. If the template needs more space, a larger anchor is used automatically.</p></div>' +
     '<div class="form-group">' +
       '<label>Subnets *</label>' +
       '<div class="alloc-entries-header"><span>Name</span><span>Prefix</span><span>VLAN</span><span></span></div>' +
@@ -386,6 +407,10 @@ async function openAllocateModal() {
 
   document.getElementById("btn-save-template").addEventListener("click", _onAllocSaveTemplate);
   document.getElementById("btn-allocate").addEventListener("click", _onAllocSubmit);
+  document.getElementById("f-anchor").addEventListener("change", function () {
+    var n = parseInt(this.value, 10);
+    if (Number.isInteger(n) && n >= 8 && n <= 32) _saveAllocAnchor(n);
+  });
 }
 
 function _renderAllocTemplateOptions() {
@@ -554,6 +579,14 @@ async function _onAllocSubmit() {
   var site = val("f-site");
   if (!site) { showToast("Enter a site name", "error"); return; }
 
+  var anchorRaw = document.getElementById("f-anchor").value;
+  var anchor = parseInt(anchorRaw, 10);
+  if (!Number.isInteger(anchor) || anchor < 8 || anchor > 32) {
+    showToast("Anchor prefix must be /8 to /32", "error");
+    return;
+  }
+  _saveAllocAnchor(anchor);
+
   var entries;
   try { entries = _collectAllocEntries(); }
   catch (err) { showToast(err.message, "error"); return; }
@@ -562,24 +595,18 @@ async function _onAllocSubmit() {
   var tags = getTagFieldValue();
   btn.disabled = true;
   try {
-    var result = await api.subnets.bulkAllocate({ blockId: blockId, prefix: site, entries: entries, tags: tags });
+    var result = await api.subnets.bulkAllocate({
+      blockId: blockId,
+      prefix: site,
+      entries: entries,
+      tags: tags,
+      anchorPrefix: anchor,
+    });
+    closeModal();
     var createdN = result.created.length;
-    var failedN = result.failed.length;
-    if (createdN > 0 && failedN === 0) {
-      closeModal();
-      showToast("Allocated " + createdN + " network" + (createdN !== 1 ? "s" : ""));
-      loadSubnets();
-      return;
-    }
-    if (createdN === 0) {
-      var msg = failedN > 0 ? ("All allocations failed: " + result.failed[0].error) : "Nothing allocated";
-      showToast(msg, "error");
-      return;
-    }
-    // Partial success
+    var anchorNote = result.anchorCidr ? " in " + result.anchorCidr : "";
+    showToast("Allocated " + createdN + " network" + (createdN !== 1 ? "s" : "") + anchorNote);
     loadSubnets();
-    var firstErr = result.failed[0] ? result.failed[0].error : "unknown";
-    showToast("Allocated " + createdN + ", " + failedN + " failed (" + firstErr + ")", "error");
   } catch (err) {
     showToast(err.message, "error");
   } finally {

@@ -13,6 +13,8 @@ import {
   usableHostCount,
   findNextAvailableSubnet,
   detectIpVersion,
+  packTemplateEntries,
+  packIntoAnchor,
 } from "../../src/utils/cidr.js";
 
 describe("normalizeCidr", () => {
@@ -99,5 +101,100 @@ describe("findNextAvailableSubnet", () => {
   it("returns null when no space remains", () => {
     const allocated = ["10.0.0.0/24"];
     expect(findNextAvailableSubnet("10.0.0.0/24", allocated, 24)).toBeNull();
+  });
+});
+
+describe("packTemplateEntries", () => {
+  it("packs the Jefferson template into a /23 span", () => {
+    const result = packTemplateEntries([
+      { prefixLength: 25 }, // RGIHardware 128
+      { prefixLength: 25 }, // RGIUsers    128
+      { prefixLength: 26 }, // RGIVoice     64
+      { prefixLength: 26 }, // fortilink    64
+      { prefixLength: 26 }, // RGIPlant     64
+    ]);
+    expect(result.packed.map((p) => p.offset)).toEqual([0, 128, 256, 320, 384]);
+    expect(result.totalSpan).toBe(448);
+    expect(result.containingPrefix).toBe(23); // 512 addrs
+  });
+
+  it("pads offsets when a larger subnet follows a smaller one", () => {
+    const result = packTemplateEntries([
+      { prefixLength: 26 }, // size 64 at offset 0
+      { prefixLength: 25 }, // size 128 needs /25 alignment -> skips to 128
+    ]);
+    expect(result.packed.map((p) => p.offset)).toEqual([0, 128]);
+    expect(result.totalSpan).toBe(256);
+  });
+});
+
+describe("packIntoAnchor (bulk allocation)", () => {
+  const jefferson = [
+    { name: "RGIHardware", prefixLength: 25 },
+    { name: "RGIUsers",    prefixLength: 25 },
+    { name: "RGIVoice",    prefixLength: 26 },
+    { name: "fortilink",   prefixLength: 26 },
+    { name: "RGIPlant",    prefixLength: 26 },
+  ];
+
+  it("places the first site at the start of the block", () => {
+    const result = packIntoAnchor("172.23.0.0/16", [], jefferson, 24);
+    expect(result).not.toBeNull();
+    expect(result!.effectiveAnchorPrefix).toBe(23); // template needs /23
+    expect(result!.anchorCidr).toBe("172.23.0.0/23");
+    expect(result!.assignments.map((a) => a.cidr)).toEqual([
+      "172.23.0.0/25",
+      "172.23.0.128/25",
+      "172.23.1.0/26",
+      "172.23.1.64/26",
+      "172.23.1.128/26",
+    ]);
+  });
+
+  it("skips past an earlier Jefferson-shaped allocation to the next /23", () => {
+    // Jefferson occupies 172.23.0.0/23 (with a stray /26 hole at .1.64).
+    // Smith should land in the next /23, not fill Jefferson's gap.
+    const existing = [
+      "172.23.0.0/25",
+      "172.23.0.128/25",
+      "172.23.1.0/26",
+      "172.23.1.128/26",
+      "172.23.1.192/26",
+    ];
+    const result = packIntoAnchor("172.23.0.0/16", existing, jefferson, 24);
+    expect(result).not.toBeNull();
+    expect(result!.anchorCidr).toBe("172.23.2.0/23");
+    expect(result!.assignments[0].cidr).toBe("172.23.2.0/25");
+    expect(result!.assignments[4].cidr).toBe("172.23.3.128/26");
+  });
+
+  it("honors a larger user anchor when the template would fit in less space", () => {
+    // One /26 entry would only need /26, but user asks for /24 alignment.
+    const result = packIntoAnchor(
+      "10.0.0.0/16",
+      [],
+      [{ name: "voice", prefixLength: 26 }],
+      24
+    );
+    expect(result!.effectiveAnchorPrefix).toBe(24);
+    expect(result!.anchorCidr).toBe("10.0.0.0/24");
+    expect(result!.assignments[0].cidr).toBe("10.0.0.0/26");
+  });
+
+  it("uses a larger effective anchor when the template exceeds the requested one", () => {
+    // User asks for /24 anchor but template needs /23.
+    const result = packIntoAnchor("10.0.0.0/16", [], jefferson, 24);
+    expect(result!.effectiveAnchorPrefix).toBe(23);
+  });
+
+  it("returns null when no anchor-aligned region is free", () => {
+    // Fill 10.0.0.0/24 so a /24 anchor can't fit.
+    const result = packIntoAnchor(
+      "10.0.0.0/24",
+      ["10.0.0.0/25", "10.0.0.128/25"],
+      [{ name: "x", prefixLength: 26 }],
+      24
+    );
+    expect(result).toBeNull();
   });
 });

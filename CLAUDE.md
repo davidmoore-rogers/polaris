@@ -329,7 +329,7 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 - `PUT    /subnets/:id`
 - `DELETE /subnets/:id`                         — 409 if active reservations exist
 - `POST   /subnets/next-available`              — Auto-allocate next available subnet of given prefix length
-- `POST   /subnets/bulk-allocate`                — Allocate multiple subnets in one call from a template. Body: `{ blockId, prefix, entries: [{name, prefixLength, vlan?}], tags? }`. Each subnet is named `<prefix>_<entry.name>` (e.g. `Jefferson_RGIHardware`). Partial success is allowed; response is `{ created, failed }`.
+- `POST   /subnets/bulk-allocate`                — Allocate multiple subnets in one call from a template. Body: `{ blockId, prefix, entries: [{name, prefixLength, vlan?}], tags?, anchorPrefix? }`. Each subnet is named `<prefix>_<entry.name>` (e.g. `Jefferson_RGIHardware`). **Anchor-based, all-or-nothing:** entries are packed into a single contiguous region aligned to `max(anchorPrefix, smallest-block-containing-the-group)`; `anchorPrefix` defaults to 24 if omitted. The whole call happens in one transaction — either every subnet is created or none are. Response: `{ created, anchorCidr, effectiveAnchorPrefix }`.
 
 ### Reservations — `requireAuth`
 - `GET    /reservations`                        — List (filter by owner, projectRef, status, createdBy)

@@ -40,7 +40,8 @@ const BulkAllocateSchema = z.object({
       vlan:         z.number().int().min(1).max(4094).nullable().optional(),
     })
   ).min(1, "At least one entry is required"),
-  tags:    z.array(z.string()).optional(),
+  tags:         z.array(z.string()).optional(),
+  anchorPrefix: z.number().int().min(8).max(32).optional(),
 });
 
 const UpdateSubnetSchema = z.object({
@@ -85,17 +86,15 @@ router.post("/bulk-allocate", requireNetworkAdmin, async (req, res, next) => {
   try {
     const input = BulkAllocateSchema.parse(req.body);
     const result = await subnetService.bulkAllocate({ ...input, createdBy: req.session?.username ?? undefined });
-    if (result.created.length > 0) {
-      const cidrs = result.created.map((s) => s.cidr).join(", ");
-      logEvent({
-        action: "subnet.bulk-allocated",
-        resourceType: "subnet",
-        actor: req.session?.username,
-        message: `Bulk-allocated ${result.created.length} subnet(s) with prefix "${input.prefix}": ${cidrs}`,
-        details: { created: result.created, failed: result.failed },
-      });
-    }
-    res.status(result.failed.length > 0 && result.created.length === 0 ? 409 : 201).json(result);
+    const cidrs = result.created.map((s) => s.cidr).join(", ");
+    logEvent({
+      action: "subnet.bulk-allocated",
+      resourceType: "subnet",
+      actor: req.session?.username,
+      message: `Bulk-allocated ${result.created.length} subnet(s) with prefix "${input.prefix}" inside anchor ${result.anchorCidr}: ${cidrs}`,
+      details: { created: result.created, anchorCidr: result.anchorCidr, effectiveAnchorPrefix: result.effectiveAnchorPrefix },
+    });
+    res.status(201).json(result);
   } catch (err) {
     next(err);
   }

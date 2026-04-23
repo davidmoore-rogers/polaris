@@ -12,6 +12,7 @@ import {
   findNextAvailableSubnet,
   detectIpVersion,
   enumerateSubnetIps,
+  packIntoAnchor,
 } from "../utils/cidr.js";
 
 const prisma = new PrismaClient();
@@ -191,21 +192,31 @@ export interface BulkAllocateInput {
   prefix: string;
   entries: BulkAllocateEntry[];
   tags?: string[];
+  /**
+   * Minimum alignment granularity for the group. If the template's combined
+   * footprint needs a larger region, that larger prefix is used instead.
+   * Defaults to 24 if omitted.
+   */
+  anchorPrefix?: number;
   createdBy?: string;
 }
 
 export interface BulkAllocateResult {
   created: Array<{ name: string; cidr: string; id: string }>;
-  failed: Array<{ name: string; prefixLength: number; error: string }>;
+  anchorCidr: string;
+  effectiveAnchorPrefix: number;
 }
 
 /**
- * Allocate multiple subnets from one template invocation.
+ * Allocate multiple subnets from one template invocation, anchor-aligned.
  *
- * Entries are processed in order. Each call to allocateNextSubnet re-queries
- * the block's existing subnets, so later entries see the ones just created.
- * Partial success is allowed: if an entry fails, earlier creations stay and
- * the failure is reported in `failed`. The route layer decides how to surface.
+ * All entries are placed inside a single contiguous region aligned to the
+ * effective anchor prefix (= the larger of the requested anchor and the
+ * smallest block that contains the group's packed footprint). Entries are
+ * packed in caller order with per-entry prefix alignment padding.
+ *
+ * All-or-nothing: either every subnet is created in one transaction, or the
+ * call throws and nothing changes.
  */
 export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAllocateResult> {
   if (!input.prefix || !input.prefix.trim()) {
@@ -215,28 +226,81 @@ export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAlloca
     throw new AppError(400, "At least one entry is required");
   }
 
-  const prefix = input.prefix.trim();
-  const tags = input.tags ?? [];
-  const created: BulkAllocateResult["created"] = [];
-  const failed: BulkAllocateResult["failed"] = [];
+  const requestedAnchor = input.anchorPrefix ?? 24;
+  if (!Number.isInteger(requestedAnchor) || requestedAnchor < 8 || requestedAnchor > 32) {
+    throw new AppError(400, "Anchor prefix must be between /8 and /32");
+  }
 
-  for (const entry of input.entries) {
-    const subnetName = `${prefix}_${entry.name}`;
-    try {
-      const subnet = await allocateNextSubnet(input.blockId, entry.prefixLength, {
-        name: subnetName,
-        vlan: entry.vlan ?? undefined,
-        tags,
-        createdBy: input.createdBy,
-      });
-      created.push({ id: subnet.id, name: subnet.name, cidr: subnet.cidr });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      failed.push({ name: subnetName, prefixLength: entry.prefixLength, error: msg });
+  for (const e of input.entries) {
+    if (!Number.isInteger(e.prefixLength) || e.prefixLength < 8 || e.prefixLength > 32) {
+      throw new AppError(400, `Entry "${e.name}" has an invalid prefix length`);
     }
   }
 
-  return { created, failed };
+  const block = await prisma.ipBlock.findUnique({ where: { id: input.blockId } });
+  if (!block) throw new AppError(404, `IP Block ${input.blockId} not found`);
+  if (block.ipVersion !== "v4") {
+    throw new AppError(400, "Auto-allocation is currently only supported for IPv4 blocks");
+  }
+
+  const prefix = input.prefix.trim();
+  const tags = input.tags ?? [];
+
+  // Compute the packed CIDRs under a transaction. Re-query existing subnets
+  // inside the transaction so concurrent allocations don't race with us.
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.subnet.findMany({
+      where: { blockId: input.blockId },
+      select: { cidr: true },
+    });
+
+    const packed = packIntoAnchor(
+      block.cidr,
+      existing.map((s) => s.cidr),
+      input.entries,
+      requestedAnchor
+    );
+    if (!packed) {
+      throw new AppError(
+        409,
+        `No free /${requestedAnchor}-aligned region in block ${block.cidr} large enough to hold the template`
+      );
+    }
+
+    // Defence in depth: double-check each individual assignment against the
+    // existing set. packIntoAnchor already guarantees the anchor region is
+    // clear, but this catches any logic bug.
+    for (const a of packed.assignments) {
+      const overlap = existing.find((s) => cidrOverlaps(s.cidr, a.cidr));
+      if (overlap) {
+        throw new AppError(409, `Computed subnet ${a.cidr} overlaps existing ${overlap.cidr}`);
+      }
+    }
+
+    const created: BulkAllocateResult["created"] = [];
+    for (const a of packed.assignments) {
+      const subnetName = `${prefix}_${a.entry.name}`;
+      const normalized = normalizeCidr(a.cidr);
+      const row = await tx.subnet.create({
+        data: {
+          blockId: input.blockId,
+          cidr: normalized,
+          name: subnetName,
+          vlan: a.entry.vlan ?? undefined,
+          tags,
+          status: "available",
+          createdBy: input.createdBy,
+        },
+      });
+      created.push({ id: row.id, name: row.name, cidr: row.cidr });
+    }
+
+    return {
+      created,
+      anchorCidr: packed.anchorCidr,
+      effectiveAnchorPrefix: packed.effectiveAnchorPrefix,
+    };
+  });
 }
 
 // ─── Update ───────────────────────────────────────────────────────────────────

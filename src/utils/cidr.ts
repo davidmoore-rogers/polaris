@@ -195,6 +195,113 @@ export function enumerateSubnetIps(
 
 // ─── Conversion Utilities ─────────────────────────────────────────────────────
 
+// ─── Template packing / anchor allocation ───────────────────────────────────
+
+export interface PackedEntry<T> {
+  /** Caller-supplied source entry. */
+  entry: T;
+  /** Byte offset (relative to anchor start) where this subnet begins. */
+  offset: number;
+  /** The prefix length of the packed subnet. */
+  prefixLength: number;
+}
+
+export interface PackResult<T> {
+  packed: PackedEntry<T>[];
+  /** Total span from offset 0 to end of last entry (in addresses). */
+  totalSpan: number;
+  /** Smallest prefix length whose block fully contains all packed entries. */
+  containingPrefix: number;
+}
+
+/**
+ * Pack a series of subnet sizes sequentially, padding each entry's offset
+ * up to its own prefix boundary. Returns per-entry offsets plus the smallest
+ * prefix length whose block fully contains the whole group.
+ *
+ * The packer preserves caller order; put larger subnets (smaller prefix
+ * numbers) first to avoid alignment padding holes.
+ */
+export function packTemplateEntries<T extends { prefixLength: number }>(
+  entries: T[]
+): PackResult<T> {
+  if (!entries.length) return { packed: [], totalSpan: 0, containingPrefix: 32 };
+
+  let cursor = 0;
+  const packed: PackedEntry<T>[] = [];
+  for (const e of entries) {
+    const size = 2 ** (32 - e.prefixLength);
+    // Align cursor up to the next multiple of size (prefix alignment).
+    if (cursor % size !== 0) cursor = Math.ceil(cursor / size) * size;
+    packed.push({ entry: e, offset: cursor, prefixLength: e.prefixLength });
+    cursor += size;
+  }
+  const totalSpan = cursor;
+  // Smallest block that fully contains totalSpan addresses.
+  const containingSize = 2 ** Math.ceil(Math.log2(totalSpan));
+  const containingPrefix = 32 - Math.log2(containingSize);
+  return { packed, totalSpan, containingPrefix };
+}
+
+export interface AnchoredPackResult<T> {
+  /** Absolute CIDRs for each packed entry, in caller order. */
+  assignments: Array<{ entry: T; cidr: string }>;
+  /** The anchor CIDR the group was placed into. */
+  anchorCidr: string;
+  /** The effective anchor prefix actually used (may be smaller-number than requested). */
+  effectiveAnchorPrefix: number;
+}
+
+/**
+ * Pack a template's worth of entries into a single anchor-aligned region of
+ * the parent block.
+ *
+ * - Entries are packed in caller order, each aligned to its own prefix.
+ * - The effective anchor prefix = `min(requestedAnchorPrefix, smallest-prefix-that-contains-the-group)`.
+ *   (i.e. whichever block is larger). This guarantees all entries fit.
+ * - The first anchor-aligned region inside `parentCidr` that has no overlap
+ *   with any `allocatedCidrs` is chosen.
+ *
+ * Returns null if no free region is available (caller should surface a
+ * "no room" error).
+ */
+export function packIntoAnchor<T extends { prefixLength: number }>(
+  parentCidr: string,
+  allocatedCidrs: string[],
+  entries: T[],
+  requestedAnchorPrefix: number
+): AnchoredPackResult<T> | null {
+  if (!entries.length) {
+    return { assignments: [], anchorCidr: parentCidr, effectiveAnchorPrefix: requestedAnchorPrefix };
+  }
+
+  const parent = new Netmask(parentCidr);
+  const packed = packTemplateEntries(entries);
+
+  // Effective anchor is the larger of (requested, containing) — i.e. smaller prefix number.
+  let effectiveAnchorPrefix = Math.min(requestedAnchorPrefix, packed.containingPrefix);
+  if (effectiveAnchorPrefix < parent.bitmask) effectiveAnchorPrefix = parent.bitmask;
+
+  const anchorSize = 2 ** (32 - effectiveAnchorPrefix);
+  const baseInt = ipToInt(parent.base);
+  const endInt = ipToInt(parent.broadcast!);
+
+  let candidate = baseInt;
+  while (candidate + anchorSize - 1 <= endInt) {
+    const anchorCidr = `${intToIp(candidate)}/${effectiveAnchorPrefix}`;
+    const hasOverlap = allocatedCidrs.some((existing) => cidrOverlaps(anchorCidr, existing));
+    if (!hasOverlap) {
+      const assignments = packed.packed.map((p) => ({
+        entry: p.entry,
+        cidr: `${intToIp(candidate + p.offset)}/${p.prefixLength}`,
+      }));
+      return { assignments, anchorCidr, effectiveAnchorPrefix };
+    }
+    candidate += anchorSize;
+  }
+  return null;
+}
+
 function ipToInt(ip: string): number {
   return ip
     .split(".")
