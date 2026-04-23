@@ -30,16 +30,19 @@ const AllocateNextSchema = z.object({
   tags:         z.array(z.string()).optional(),
 });
 
+const BulkEntrySchema = z.object({
+  skip:         z.boolean().optional(),
+  name:         z.string().optional(),
+  prefixLength: z.number().int().min(8).max(32),
+  vlan:         z.number().int().min(1).max(4094).nullable().optional(),
+}).refine((e) => e.skip === true || (typeof e.name === "string" && e.name.trim().length > 0), {
+  message: "Each entry needs a name unless it is marked as a skip row",
+});
+
 const BulkAllocateSchema = z.object({
   blockId: z.string().uuid(),
   prefix:  z.string().min(1, "Site/prefix name is required"),
-  entries: z.array(
-    z.object({
-      name:         z.string().min(1, "Entry name is required"),
-      prefixLength: z.number().int().min(8).max(32),
-      vlan:         z.number().int().min(1).max(4094).nullable().optional(),
-    })
-  ).min(1, "At least one entry is required"),
+  entries: z.array(BulkEntrySchema).min(1, "At least one entry is required"),
   tags:         z.array(z.string()).optional(),
   anchorPrefix: z.number().int().min(8).max(32).optional(),
 });

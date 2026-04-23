@@ -2266,3 +2266,10 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   color: var(--color-danger, #c44);
   border-color: var(--color-danger, #c44);
 }
+.alloc-entry-row.alloc-entry-skip .alloc-entry-name,
+.alloc-entry-row.alloc-entry-skip .alloc-entry-vlan {
+  color: var(--color-text-tertiary);
+  font-style: italic;
+  background: var(--color-surface);
+  text-align: center;
+}

@@ -367,13 +367,17 @@ async function openAllocateModal() {
       '</div>' +
       '<p class="hint">Pick a saved template to pre-fill the rows below, or build one from scratch.</p>' +
     '</div>' +
-    '<div class="form-group"><label>Site Name *</label><input type="text" id="f-site" placeholder="e.g. Jefferson"><p class="hint">Prepended to each row name, separated by <code>_</code> (e.g. Jefferson_RGIHardware).</p></div>' +
+    '<div class="form-group"><label>Site Name</label><input type="text" id="f-site" placeholder="e.g. Jefferson"><p class="hint">Required to Allocate; prepended to each row name (e.g. <code>Jefferson_RGIHardware</code>). Not required to save a template.</p></div>' +
     '<div class="form-group"><label>Anchor Prefix</label><input type="number" id="f-anchor" min="8" max="32" value="' + _loadAllocAnchor() + '"><p class="hint">Minimum alignment for the group. Defaults to /24 and is remembered for you. If the template needs more space, a larger anchor is used automatically.</p></div>' +
     '<div class="form-group">' +
-      '<label>Subnets *</label>' +
+      '<label>Subnets</label>' +
       '<div class="alloc-entries-header"><span>Name</span><span>Prefix</span><span>VLAN</span><span></span></div>' +
       '<div id="f-entries"></div>' +
-      '<button type="button" class="btn btn-sm btn-secondary" id="f-add-row" style="margin-top:6px">+ Add Row</button>' +
+      '<div style="display:flex;gap:6px;margin-top:6px">' +
+        '<button type="button" class="btn btn-sm btn-secondary" id="f-add-row">+ Add Row</button>' +
+        '<button type="button" class="btn btn-sm btn-secondary" id="f-add-skip">+ Add Skip</button>' +
+      '</div>' +
+      '<p class="hint">Skip rows reserve address space (aligned to their prefix) without creating a subnet, so you can leave gaps between allocations.</p>' +
     '</div>' +
     tagFieldHTML([]);
 
@@ -391,6 +395,7 @@ async function openAllocateModal() {
   document.getElementById("f-template").addEventListener("change", _onAllocTemplateChange);
   document.getElementById("f-template-delete").addEventListener("click", _onAllocTemplateDelete);
   document.getElementById("f-add-row").addEventListener("click", function () { _addAllocEntryRow(); });
+  document.getElementById("f-add-skip").addEventListener("click", function () { _addAllocEntryRow({ skip: true }); });
   document.getElementById("f-entries").addEventListener("click", function (e) {
     var rm = e.target.closest(".alloc-row-remove");
     if (!rm) return;
@@ -430,12 +435,23 @@ function _addAllocEntryRow(entry) {
   var container = document.getElementById("f-entries");
   if (!container) return;
   var row = document.createElement("div");
-  row.className = "alloc-entry-row";
-  row.innerHTML =
-    '<input type="text" class="alloc-entry-name" placeholder="e.g. RGIHardware" value="' + escapeHtml(entry.name || "") + '">' +
-    '<input type="number" class="alloc-entry-prefix" min="8" max="32" placeholder="e.g. 25" value="' + (entry.prefixLength != null && entry.prefixLength !== "" ? entry.prefixLength : "") + '">' +
-    '<input type="number" class="alloc-entry-vlan" min="1" max="4094" placeholder="Optional" value="' + (entry.vlan != null && entry.vlan !== "" ? entry.vlan : "") + '">' +
-    '<button type="button" class="btn btn-sm btn-icon alloc-row-remove" title="Remove row">&times;</button>';
+  var isSkip = entry.skip === true;
+  row.className = "alloc-entry-row" + (isSkip ? " alloc-entry-skip" : "");
+  if (isSkip) row.setAttribute("data-skip", "true");
+  var prefixVal = entry.prefixLength != null && entry.prefixLength !== "" ? entry.prefixLength : "";
+  if (isSkip) {
+    row.innerHTML =
+      '<input type="text" class="alloc-entry-name" value="— skip —" disabled>' +
+      '<input type="number" class="alloc-entry-prefix" min="8" max="32" placeholder="e.g. 26" value="' + prefixVal + '">' +
+      '<input type="text" class="alloc-entry-vlan" value="—" disabled>' +
+      '<button type="button" class="btn btn-sm btn-icon alloc-row-remove" title="Remove row">&times;</button>';
+  } else {
+    row.innerHTML =
+      '<input type="text" class="alloc-entry-name" placeholder="e.g. RGIHardware" value="' + escapeHtml(entry.name || "") + '">' +
+      '<input type="number" class="alloc-entry-prefix" min="8" max="32" placeholder="e.g. 25" value="' + prefixVal + '">' +
+      '<input type="number" class="alloc-entry-vlan" min="1" max="4094" placeholder="Optional" value="' + (entry.vlan != null && entry.vlan !== "" ? entry.vlan : "") + '">' +
+      '<button type="button" class="btn btn-sm btn-icon alloc-row-remove" title="Remove row">&times;</button>';
+  }
   container.appendChild(row);
 }
 
@@ -443,10 +459,20 @@ function _collectAllocEntries() {
   var rows = document.querySelectorAll("#f-entries .alloc-entry-row");
   var entries = [];
   for (var i = 0; i < rows.length; i++) {
-    var name = rows[i].querySelector(".alloc-entry-name").value.trim();
+    var isSkip = rows[i].getAttribute("data-skip") === "true";
     var prefRaw = rows[i].querySelector(".alloc-entry-prefix").value.trim();
+
+    if (isSkip) {
+      if (!prefRaw) continue; // empty skip row — just ignore
+      var plSkip = parseInt(prefRaw, 10);
+      if (!Number.isInteger(plSkip) || plSkip < 8 || plSkip > 32) throw new Error("Row " + (i + 1) + " (skip): prefix length must be 8-32");
+      entries.push({ skip: true, prefixLength: plSkip });
+      continue;
+    }
+
+    var name = rows[i].querySelector(".alloc-entry-name").value.trim();
     var vlanRaw = rows[i].querySelector(".alloc-entry-vlan").value.trim();
-    if (!name && !prefRaw && !vlanRaw) continue; // skip blank rows
+    if (!name && !prefRaw && !vlanRaw) continue; // blank row
     if (!name) throw new Error("Row " + (i + 1) + ": name is required");
     var pl = parseInt(prefRaw, 10);
     if (!Number.isInteger(pl) || pl < 8 || pl > 32) throw new Error("Row " + (i + 1) + " (" + name + "): prefix length must be 8-32");

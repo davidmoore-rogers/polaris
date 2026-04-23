@@ -329,7 +329,7 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 - `PUT    /subnets/:id`
 - `DELETE /subnets/:id`                         — 409 if active reservations exist
 - `POST   /subnets/next-available`              — Auto-allocate next available subnet of given prefix length
-- `POST   /subnets/bulk-allocate`                — Allocate multiple subnets in one call from a template. Body: `{ blockId, prefix, entries: [{name, prefixLength, vlan?}], tags?, anchorPrefix? }`. Each subnet is named `<prefix>_<entry.name>` (e.g. `Jefferson_RGIHardware`). **Anchor-based, all-or-nothing:** entries are packed into a single contiguous region aligned to `max(anchorPrefix, smallest-block-containing-the-group)`; `anchorPrefix` defaults to 24 if omitted. The whole call happens in one transaction — either every subnet is created or none are. Response: `{ created, anchorCidr, effectiveAnchorPrefix }`.
+- `POST   /subnets/bulk-allocate`                — Allocate multiple subnets in one call from a template. Body: `{ blockId, prefix, entries: [{name, prefixLength, vlan?} | {skip: true, prefixLength}], tags?, anchorPrefix? }`. Each non-skip entry becomes a subnet named `<prefix>_<entry.name>` (e.g. `Jefferson_RGIHardware`). **Skip entries** reserve address space inside the packed region without creating a subnet — used to leave gaps between allocations. **Anchor-based, all-or-nothing:** entries are packed into a single contiguous region aligned to `max(anchorPrefix, smallest-block-containing-the-group)`; `anchorPrefix` defaults to 24 if omitted. The whole call happens in one transaction — either every subnet is created or none are. Response: `{ created, anchorCidr, effectiveAnchorPrefix }`.
 
 ### Reservations — `requireAuth`
 - `GET    /reservations`                        — List (filter by owner, projectRef, status, createdBy)
@@ -399,7 +399,7 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 
 ### Allocation Templates — mixed scoping
 - `GET    /allocation-templates`                *(auth)* — List saved multi-subnet templates used by the Networks "Auto-Allocate Next" modal.
-- `POST   /allocation-templates`                *(networkadmin)* — Create a template. Body: `{ name, entries: [{name, prefixLength, vlan?}] }`.
+- `POST   /allocation-templates`                *(networkadmin)* — Create a template. Body: `{ name, entries: [{name, prefixLength, vlan?} | {skip: true, prefixLength}] }`.
 - `PUT    /allocation-templates/:id`            *(networkadmin)* — Update a template.
 - `DELETE /allocation-templates/:id`            *(networkadmin)* — Delete a template.
 

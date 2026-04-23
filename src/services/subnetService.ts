@@ -181,8 +181,18 @@ export async function allocateNextSubnet(
 
 // ─── Bulk allocation from a template ─────────────────────────────────────────
 
+/**
+ * A row in a bulk-allocate template.
+ *
+ * A regular entry has a name and optional VLAN and produces a subnet.
+ * A skip entry (`skip: true`) reserves address space inside the packed
+ * anchor region without creating a subnet — used to leave gaps between
+ * allocations so later templates land on a clean boundary. The route layer
+ * validates that `name` is present whenever `skip` is not true.
+ */
 export interface BulkAllocateEntry {
-  name: string;
+  skip?: boolean;
+  name?: string;
   prefixLength: number;
   vlan?: number | null;
 }
@@ -233,8 +243,17 @@ export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAlloca
 
   for (const e of input.entries) {
     if (!Number.isInteger(e.prefixLength) || e.prefixLength < 8 || e.prefixLength > 32) {
-      throw new AppError(400, `Entry "${e.name}" has an invalid prefix length`);
+      const label = e.skip ? "skip" : e.name ?? "unnamed";
+      throw new AppError(400, `Entry "${label}" has an invalid prefix length`);
     }
+    if (!e.skip && (!e.name || !e.name.trim())) {
+      throw new AppError(400, "Every non-skip entry must have a name");
+    }
+  }
+
+  const hasCreatable = input.entries.some((e) => !e.skip);
+  if (!hasCreatable) {
+    throw new AppError(400, "At least one non-skip entry is required");
   }
 
   const block = await prisma.ipBlock.findUnique({ where: { id: input.blockId } });
@@ -267,10 +286,11 @@ export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAlloca
       );
     }
 
-    // Defence in depth: double-check each individual assignment against the
+    // Defence in depth: double-check each creatable assignment against the
     // existing set. packIntoAnchor already guarantees the anchor region is
-    // clear, but this catches any logic bug.
+    // clear; skip entries reserve space but don't get created.
     for (const a of packed.assignments) {
+      if (a.entry.skip) continue;
       const overlap = existing.find((s) => cidrOverlaps(s.cidr, a.cidr));
       if (overlap) {
         throw new AppError(409, `Computed subnet ${a.cidr} overlaps existing ${overlap.cidr}`);
@@ -279,6 +299,7 @@ export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAlloca
 
     const created: BulkAllocateResult["created"] = [];
     for (const a of packed.assignments) {
+      if (a.entry.skip) continue;
       const subnetName = `${prefix}_${a.entry.name}`;
       const normalized = normalizeCidr(a.cidr);
       const row = await tx.subnet.create({

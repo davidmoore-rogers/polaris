@@ -17,7 +17,10 @@ const prisma = new PrismaClient();
 const SETTING_KEY = "networkAllocationTemplates";
 
 export interface TemplateEntry {
-  name: string;
+  /** True if this row only reserves space (no subnet created). */
+  skip?: boolean;
+  /** Required unless `skip` is true. */
+  name?: string;
   prefixLength: number;
   vlan?: number | null;
 }
@@ -35,6 +38,9 @@ export interface SaveTemplateInput {
 }
 
 function normalizeEntry(e: TemplateEntry): TemplateEntry {
+  if (e.skip === true) {
+    return { skip: true, prefixLength: Number(e.prefixLength) };
+  }
   const out: TemplateEntry = {
     name: String(e.name || "").trim(),
     prefixLength: Number(e.prefixLength),
@@ -53,17 +59,20 @@ function validateTemplate(input: SaveTemplateInput): void {
     throw new AppError(400, "Template must have at least one entry");
   }
   for (const e of input.entries) {
-    if (!e.name || !String(e.name).trim()) {
-      throw new AppError(400, "Every template entry must have a name");
-    }
     const pl = Number(e.prefixLength);
     if (!Number.isInteger(pl) || pl < 8 || pl > 32) {
-      throw new AppError(400, `Entry "${e.name}" has an invalid prefix length (must be 8-32)`);
+      const label = e.skip ? "skip" : e.name ?? "unnamed";
+      throw new AppError(400, `Entry "${label}" has an invalid prefix length (must be 8-32)`);
     }
-    if (e.vlan !== undefined && e.vlan !== null) {
-      const v = Number(e.vlan);
-      if (!Number.isInteger(v) || v < 1 || v > 4094) {
-        throw new AppError(400, `Entry "${e.name}" has an invalid VLAN (must be 1-4094)`);
+    if (!e.skip) {
+      if (!e.name || !String(e.name).trim()) {
+        throw new AppError(400, "Every non-skip entry must have a name");
+      }
+      if (e.vlan !== undefined && e.vlan !== null) {
+        const v = Number(e.vlan);
+        if (!Number.isInteger(v) || v < 1 || v > 4094) {
+          throw new AppError(400, `Entry "${e.name}" has an invalid VLAN (must be 1-4094)`);
+        }
       }
     }
   }

@@ -14,9 +14,12 @@ import { logEvent } from "./events.js";
 const router = Router();
 
 const EntrySchema = z.object({
-  name:         z.string().min(1, "Entry name is required"),
+  skip:         z.boolean().optional(),
+  name:         z.string().optional(),
   prefixLength: z.number().int().min(8).max(32),
   vlan:         z.number().int().min(1).max(4094).nullable().optional(),
+}).refine((e) => e.skip === true || (typeof e.name === "string" && e.name.trim().length > 0), {
+  message: "Each entry needs a name unless it is marked as a skip row",
 });
 
 const SaveTemplateSchema = z.object({

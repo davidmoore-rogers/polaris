@@ -187,6 +187,31 @@ describe("packIntoAnchor (bulk allocation)", () => {
     expect(result!.effectiveAnchorPrefix).toBe(23);
   });
 
+  it("reserves space for skip entries in the packed layout", () => {
+    // RGIVoice /26, skip /26, fortilink /26, RGIPlant /26 — the skip row
+    // should push fortilink to 172.23.101.128/26 instead of .64/26.
+    const result = packIntoAnchor(
+      "172.23.0.0/16",
+      [],
+      [
+        { name: "RGIVoice",  prefixLength: 26 },
+        { skip: true,        prefixLength: 26 },
+        { name: "fortilink", prefixLength: 26 },
+        { name: "RGIPlant",  prefixLength: 26 },
+      ],
+      24
+    );
+    expect(result).not.toBeNull();
+    expect(result!.assignments.map((a) => a.cidr)).toEqual([
+      "172.23.0.0/26",
+      "172.23.0.64/26",   // skip — reserved, no subnet will be created
+      "172.23.0.128/26",
+      "172.23.0.192/26",
+    ]);
+    const skipped = result!.assignments.find((a) => (a.entry as { skip?: boolean }).skip === true);
+    expect(skipped?.cidr).toBe("172.23.0.64/26");
+  });
+
   it("returns null when no anchor-aligned region is free", () => {
     // Fill 10.0.0.0/24 so a /24 anchor can't fit.
     const result = packIntoAnchor(
