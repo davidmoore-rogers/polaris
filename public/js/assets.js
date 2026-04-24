@@ -98,8 +98,6 @@ document.addEventListener("DOMContentLoaded", async function () {
 
   var addBtn = document.getElementById("btn-add-asset");
   if (addBtn) addBtn.addEventListener("click", openCreateModal);
-  var dnsBtn = document.getElementById("btn-dns-lookup");
-  if (dnsBtn) dnsBtn.addEventListener("click", bulkDnsLookup);
   var ouiBtn = document.getElementById("btn-oui-lookup");
   if (ouiBtn) ouiBtn.addEventListener("click", bulkOuiLookup);
   // ── Import dropdown wiring ──
@@ -315,7 +313,8 @@ function renderAssetsPage() {
       '<td>' + (a._acquired ? formatDate(a._acquired) : "-") + '</td>' +
       '<td class="actions">' +
         (canManageAssets() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + a.id + '\')">Edit</button>' +
-        (a.ipAddress && !a.dnsName ? '<button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.ipAddress) + '\')" title="Reverse DNS lookup">DNS</button>' : '') +
+        (a.ipAddress && !a.dnsName ? '<button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.ipAddress) + '\')" title="Reverse DNS lookup (IP → hostname)">DNS</button>' : '') +
+        (!a.ipAddress && (a.dnsName || a.hostname) ? '<button class="btn btn-sm btn-secondary" onclick="singleForwardLookup(\'' + a.id + '\', \'' + escapeHtml(a.dnsName || a.hostname) + '\')" title="Forward DNS lookup (hostname → IP)">PTR</button>' : '') +
         (a.macAddress && !a.manufacturer ? '<button class="btn btn-sm btn-secondary" onclick="singleOuiLookup(\'' + a.id + '\', \'' + escapeHtml(a.macAddress) + '\')" title="OUI manufacturer lookup">OUI</button>' : '') +
         '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.assetTag || a.ipAddress || "this asset") + '\')">Del</button>' : '') +
       '</td></tr>';
@@ -889,27 +888,23 @@ function debounce(fn, ms) {
 
 /* ─── DNS Lookup ─────────────────────────────────────────────────────────── */
 
-async function bulkDnsLookup() {
-  var missing = _assetsData.filter(function (a) { return a.ipAddress && !a.dnsName; });
-  if (missing.length === 0) {
-    showToast("All assets with IPs already have DNS names", "success");
-    return;
-  }
-  var ok = await showConfirm("Run reverse DNS lookup for " + missing.length + " assets missing a DNS name?");
-  if (!ok) return;
-
+async function singleDnsLookup(id, name) {
   try {
-    var result = await api.assets.dnsLookupAll();
-    showToast("DNS resolved " + result.resolved + " of " + result.total + " assets", "success");
-    if (result.resolved > 0) loadAssets();
+    var result = await api.assets.dnsLookup(id);
+    if (result.ok) {
+      showToast(result.message, "success");
+      loadAssets();
+    } else {
+      showToast(result.message, "error");
+    }
   } catch (err) {
     showToast(err.message, "error");
   }
 }
 
-async function singleDnsLookup(id, name) {
+async function singleForwardLookup(id, name) {
   try {
-    var result = await api.assets.dnsLookup(id);
+    var result = await api.assets.forwardLookup(id);
     if (result.ok) {
       showToast(result.message, "success");
       loadAssets();

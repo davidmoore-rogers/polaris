@@ -345,6 +345,34 @@ router.post("/:id/dns-lookup", requireAssetsAdmin, async (req, res, next) => {
   }
 });
 
+// POST /api/v1/assets/:id/forward-lookup — A/AAAA lookup from hostname/dnsName → fills ipAddress
+router.post("/:id/forward-lookup", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const asset = await prisma.asset.findUnique({ where: { id: req.params.id as string } });
+    if (!asset) throw new AppError(404, "Asset not found");
+    if (asset.ipAddress) throw new AppError(400, "Asset already has an IP address");
+    const lookupName = asset.dnsName || asset.hostname;
+    if (!lookupName) throw new AppError(400, "Asset has no hostname or DNS name to look up");
+
+    const resolver = await getConfiguredResolver();
+    const start = Date.now();
+    const records = await resolver.lookup(lookupName);
+    const elapsed = Date.now() - start;
+
+    if (records.length === 0) {
+      return res.json({ ok: false, message: `No A/AAAA records found for ${lookupName}` });
+    }
+
+    const ip = records[0].address;
+    await prisma.asset.update({ where: { id: asset.id }, data: { ipAddress: ip, ipSource: "dns" } });
+
+    logEvent({ action: "asset.dns.forward_resolved", resourceType: "asset", resourceId: asset.id, resourceName: asset.hostname || asset.dnsName || undefined, actor: req.session?.username, message: `Forward DNS: ${lookupName} → ${ip} in ${elapsed}ms` });
+    res.json({ ok: true, ipAddress: ip, message: `${lookupName} → ${ip} in ${elapsed}ms` });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/v1/assets/oui-lookup — bulk OUI manufacturer lookup
 router.post("/oui-lookup", requireAssetsAdmin, async (req, res, next) => {
   try {

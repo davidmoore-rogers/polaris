@@ -33,8 +33,15 @@ export interface PtrRecord {
   ttl: number | null;
 }
 
+/** A single A/AAAA answer from a forward lookup. */
+export interface ARecord {
+  address: string;
+  family: 4 | 6;
+}
+
 export interface ResolverLike {
   reverse(ip: string): Promise<PtrRecord[]>;
+  lookup(hostname: string): Promise<ARecord[]>;
 }
 
 // ─── Settings CRUD ─────────────────────────────────────────────────────────
@@ -102,11 +109,16 @@ async function resolveServerNames(servers: string[]): Promise<string[]> {
  */
 export async function createResolver(settings: DnsSettings): Promise<ResolverLike> {
   if (settings.mode === "doh" && settings.dohUrl) {
-    return { reverse: (ip: string) => dohReverse(ip, settings.dohUrl) };
+    return {
+      reverse: (ip: string) => dohReverse(ip, settings.dohUrl),
+      lookup: (hostname: string) => dohLookup(hostname, settings.dohUrl),
+    };
   }
   if (settings.mode === "dot" && settings.servers.length > 0) {
-    // DoT: tls.connect() resolves hostnames natively — pass through as-is
-    return { reverse: (ip: string) => dotReverse(ip, settings.servers) };
+    return {
+      reverse: (ip: string) => dotReverse(ip, settings.servers),
+      lookup: (hostname: string) => dotLookup(hostname, settings.servers),
+    };
   }
   // Standard mode — setServers() requires IPs, so resolve any hostnames first.
   // Node's dns.Resolver.reverse() does not expose TTL, so we wrap it and return ttl: null.
@@ -119,6 +131,15 @@ export async function createResolver(settings: DnsSettings): Promise<ResolverLik
     reverse: async (ip: string): Promise<PtrRecord[]> => {
       const names = await resolver.reverse(ip);
       return names.map((name) => ({ name, ttl: null }));
+    },
+    lookup: async (hostname: string): Promise<ARecord[]> => {
+      try {
+        const addrs = await resolver.resolve4(hostname);
+        return addrs.map((a) => ({ address: a, family: 4 as const }));
+      } catch {
+        const addrs = await resolver.resolve6(hostname);
+        return addrs.map((a) => ({ address: a, family: 6 as const }));
+      }
     },
   };
 }
@@ -163,11 +184,7 @@ function expandIpv6(ip: string): string {
 // append ?name=<ptr>&type=PTR with Accept: application/dns-json.
 // ────────────────────────────────────────────────────────────────────────────
 
-async function dohReverse(ip: string, dohUrl: string): Promise<PtrRecord[]> {
-  const ptrName = ipToPtrName(ip);
-  const sep = dohUrl.includes("?") ? "&" : "?";
-  const url = `${dohUrl}${sep}ct=application/dns-json&name=${encodeURIComponent(ptrName)}&type=PTR`;
-
+async function dohFetchJson(url: string): Promise<any> {
   const body = await new Promise<string>((resolve, reject) => {
     const timer = setTimeout(() => {
       req.destroy();
@@ -195,12 +212,18 @@ async function dohReverse(ip: string, dohUrl: string): Promise<PtrRecord[]> {
     });
   });
 
-  let data: any;
   try {
-    data = JSON.parse(body);
+    return JSON.parse(body);
   } catch {
     throw Object.assign(new Error("DoH server did not return JSON — check the URL uses the JSON API endpoint"), { code: "DOH_PARSE_ERROR" });
   }
+}
+
+async function dohReverse(ip: string, dohUrl: string): Promise<PtrRecord[]> {
+  const ptrName = ipToPtrName(ip);
+  const sep = dohUrl.includes("?") ? "&" : "?";
+  const url = `${dohUrl}${sep}ct=application/dns-json&name=${encodeURIComponent(ptrName)}&type=PTR`;
+  const data = await dohFetchJson(url);
   if (!data.Answer || !Array.isArray(data.Answer)) return [];
   return data.Answer
     .filter((a: any) => a.type === 12)
@@ -208,6 +231,23 @@ async function dohReverse(ip: string, dohUrl: string): Promise<PtrRecord[]> {
       name: (a.data || "").replace(/\.$/, ""),
       ttl: typeof a.TTL === "number" ? a.TTL : null,
     }));
+}
+
+async function dohLookup(hostname: string, dohUrl: string): Promise<ARecord[]> {
+  const sep = dohUrl.includes("?") ? "&" : "?";
+  const results: ARecord[] = [];
+  for (const [type, typeNum, family] of [["A", 1, 4], ["AAAA", 28, 6]] as [string, number, 4 | 6][]) {
+    try {
+      const url = `${dohUrl}${sep}ct=application/dns-json&name=${encodeURIComponent(hostname)}&type=${type}`;
+      const data = await dohFetchJson(url);
+      if (data.Answer && Array.isArray(data.Answer)) {
+        for (const a of data.Answer) {
+          if (a.type === typeNum && a.data) results.push({ address: a.data, family });
+        }
+      }
+    } catch { /* skip this record type on error */ }
+  }
+  return results;
 }
 
 // ─── DNS over TLS (DoT) ────────────────────────────────────────────────────
@@ -232,6 +272,26 @@ async function dotReverse(ip: string, servers: string[]): Promise<PtrRecord[]> {
     }
   }
   throw lastErr || new Error("No DoT servers available");
+}
+
+async function dotLookup(hostname: string, servers: string[]): Promise<ARecord[]> {
+  // Try A (type 1) first, then AAAA (type 28)
+  for (const [qtype, family] of [[1, 4], [28, 6]] as [number, 4 | 6][]) {
+    let lastErr: Error | null = null;
+    for (const server of servers) {
+      try {
+        const { host, port } = parseDotServer(server);
+        const query = buildDnsQuery(hostname, qtype);
+        const response = await sendTlsQuery(host, port, query);
+        const addrs = parseDnsAResponse(response, qtype, family);
+        if (addrs.length > 0) return addrs;
+      } catch (err: any) {
+        lastErr = err;
+      }
+    }
+    if (lastErr) continue; // try next record type
+  }
+  return [];
 }
 
 function parseDotServer(server: string): { host: string; port: number } {
@@ -359,6 +419,41 @@ function parseDnsResponse(buf: Buffer): PtrRecord[] {
     if (rtype === 12) { // PTR record
       const name = readDnsName(buf, offset);
       if (name) results.push({ name, ttl });
+    }
+    offset += rdlength;
+  }
+  return results;
+}
+
+function parseDnsAResponse(buf: Buffer, qtype: number, family: 4 | 6): ARecord[] {
+  if (buf.length < 12) return [];
+  const ancount = buf.readUInt16BE(6);
+  if (ancount === 0) return [];
+
+  let offset = 12;
+  const qdcount = buf.readUInt16BE(4);
+  for (let i = 0; i < qdcount; i++) {
+    offset = skipDnsName(buf, offset);
+    offset += 4;
+  }
+
+  const results: ARecord[] = [];
+  for (let i = 0; i < ancount; i++) {
+    if (offset >= buf.length) break;
+    offset = skipDnsName(buf, offset);
+    if (offset + 10 > buf.length) break;
+    const rtype = buf.readUInt16BE(offset);
+    const rdlength = buf.readUInt16BE(offset + 8);
+    offset += 10;
+    if (rtype === qtype) {
+      if (family === 4 && rdlength === 4) {
+        const address = `${buf[offset]}.${buf[offset+1]}.${buf[offset+2]}.${buf[offset+3]}`;
+        results.push({ address, family: 4 });
+      } else if (family === 6 && rdlength === 16) {
+        const groups: string[] = [];
+        for (let g = 0; g < 8; g++) groups.push(buf.readUInt16BE(offset + g * 2).toString(16));
+        results.push({ address: groups.join(":"), family: 6 });
+      }
     }
     offset += rdlength;
   }
