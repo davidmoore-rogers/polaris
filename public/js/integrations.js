@@ -1004,8 +1004,63 @@ function showConflictModal(integrationId, conflicts) {
 
 function val(id) { return document.getElementById(id).value.trim(); }
 
+var _FMG_PRESET_QUERIES = [
+  {
+    name: "System status",
+    method: "get",
+    params: '[\n  { "url": "/sys/status" }\n]',
+  },
+  {
+    name: "List ADOMs",
+    method: "get",
+    params: '[\n  {\n    "url": "/dvmdb/adom",\n    "data": { "fields": ["name", "state", "os_ver"] }\n  }\n]',
+  },
+  {
+    name: "List devices in ADOM",
+    method: "get",
+    params: '[\n  {\n    "url": "/dvmdb/adom/<adom>/device",\n    "data": { "fields": ["name", "ip", "os_ver", "conn_status", "ha_mode"] }\n  }\n]',
+  },
+  {
+    name: "DHCP servers on device",
+    method: "exec",
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/system.dhcp/server"\n    }\n  }\n]',
+  },
+  {
+    name: "DHCP leases on device",
+    method: "exec",
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/system/dhcp"\n    }\n  }\n]',
+  },
+  {
+    name: "Interface IPs on device",
+    method: "exec",
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/system/interface",\n      "params": [{ "fields": ["name", "ip", "vdom", "type", "status"] }]\n    }\n  }\n]',
+  },
+  {
+    name: "Managed FortiSwitches on device",
+    method: "exec",
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/switch-controller/managed-switch/status?format=switch-id|serial|connecting_from|state|status|os_version"\n    }\n  }\n]',
+  },
+  {
+    name: "Managed FortiAPs on device",
+    method: "exec",
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/wifi/managed_ap"\n    }\n  }\n]',
+  },
+  {
+    name: "Firewall VIPs on device",
+    method: "exec",
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/firewall/vip"\n    }\n  }\n]',
+  },
+];
+
 function _fmgLoadQueries() {
-  try { return JSON.parse(localStorage.getItem("shelob-fmg-queries") || "[]"); } catch (_) { return []; }
+  try {
+    var stored = JSON.parse(localStorage.getItem("shelob-fmg-queries") || "null");
+    if (!stored) {
+      localStorage.setItem("shelob-fmg-queries", JSON.stringify(_FMG_PRESET_QUERIES));
+      return _FMG_PRESET_QUERIES.slice();
+    }
+    return stored;
+  } catch (_) { return []; }
 }
 
 function _fmgPersistQueries(queries) {
@@ -1152,8 +1207,72 @@ function openApiQueryModal(id, adom) {
 
 // ─── FortiGate API Query modal ──────────────────────────────────────────────
 
+var _FGT_PRESET_QUERIES = [
+  {
+    name: "System status",
+    method: "GET",
+    path: "/api/v2/monitor/system/status",
+    query: "vdom=root",
+  },
+  {
+    name: "DHCP servers",
+    method: "GET",
+    path: "/api/v2/cmdb/system.dhcp/server",
+    query: "vdom=root",
+  },
+  {
+    name: "DHCP leases",
+    method: "GET",
+    path: "/api/v2/monitor/system/dhcp",
+    query: "vdom=root",
+  },
+  {
+    name: "Interface IPs",
+    method: "GET",
+    path: "/api/v2/cmdb/system/interface",
+    query: "vdom=root\nformat=name|ip|type|status|vdom",
+  },
+  {
+    name: "Firewall VIPs",
+    method: "GET",
+    path: "/api/v2/cmdb/firewall/vip",
+    query: "vdom=root",
+  },
+  {
+    name: "Managed FortiSwitches",
+    method: "GET",
+    path: "/api/v2/monitor/switch-controller/managed-switch/status",
+    query: "vdom=root\nformat=switch-id|serial|connecting_from|state|status|os_version",
+  },
+  {
+    name: "Managed FortiAPs",
+    method: "GET",
+    path: "/api/v2/monitor/wifi/managed_ap",
+    query: "vdom=root",
+  },
+  {
+    name: "ARP table",
+    method: "GET",
+    path: "/api/v2/monitor/system/arp",
+    query: "vdom=root",
+  },
+  {
+    name: "Routing table (IPv4)",
+    method: "GET",
+    path: "/api/v2/monitor/router/ipv4",
+    query: "vdom=root",
+  },
+];
+
 function _fgtLoadQueries() {
-  try { return JSON.parse(localStorage.getItem("shelob-fgt-queries") || "[]"); } catch (_) { return []; }
+  try {
+    var stored = JSON.parse(localStorage.getItem("shelob-fgt-queries") || "null");
+    if (!stored) {
+      localStorage.setItem("shelob-fgt-queries", JSON.stringify(_FGT_PRESET_QUERIES));
+      return _FGT_PRESET_QUERIES.slice();
+    }
+    return stored;
+  } catch (_) { return []; }
 }
 
 function _fgtPersistQueries(queries) {
@@ -1305,8 +1424,58 @@ function openFgtApiQueryModal(id, vdom) {
 
 // ─── Entra ID API Query modal ───────────────────────────────────────────────
 
+var _ENTRA_PRESET_QUERIES = [
+  {
+    name: "All registered devices",
+    path: "/v1.0/devices",
+    query: "$top=25\n$select=id,deviceId,displayName,operatingSystem,operatingSystemVersion,trustType,approximateLastSignInDateTime",
+  },
+  {
+    name: "All managed devices (Intune)",
+    path: "/v1.0/deviceManagement/managedDevices",
+    query: "$top=25\n$select=id,azureADDeviceId,deviceName,operatingSystem,osVersion,complianceState,lastSyncDateTime,userPrincipalName,chassisType",
+  },
+  {
+    name: "Windows devices only",
+    path: "/v1.0/devices",
+    query: "$top=25\n$filter=operatingSystem eq 'Windows'\n$select=id,deviceId,displayName,operatingSystem,operatingSystemVersion,trustType,approximateLastSignInDateTime",
+  },
+  {
+    name: "Device by display name prefix (edit startswith value)",
+    path: "/v1.0/devices",
+    query: "$filter=startswith(displayName,'LAPTOP')\n$select=id,deviceId,displayName,operatingSystem,operatingSystemVersion,trustType",
+  },
+  {
+    name: "Non-compliant devices (Intune)",
+    path: "/v1.0/deviceManagement/managedDevices",
+    query: "$filter=complianceState eq 'noncompliant'\n$select=id,deviceName,operatingSystem,complianceState,lastSyncDateTime,userPrincipalName\n$top=25",
+  },
+  {
+    name: "Hybrid-joined devices",
+    path: "/v1.0/devices",
+    query: "$filter=trustType eq 'ServerAd'\n$top=25\n$select=id,deviceId,displayName,operatingSystem,operatingSystemVersion,onPremisesSecurityIdentifier,approximateLastSignInDateTime",
+  },
+  {
+    name: "Users (summary)",
+    path: "/v1.0/users",
+    query: "$top=25\n$select=id,displayName,userPrincipalName,accountEnabled,jobTitle,department",
+  },
+  {
+    name: "Groups",
+    path: "/v1.0/groups",
+    query: "$top=25\n$select=id,displayName,groupTypes,membershipRule,mail",
+  },
+];
+
 function _entraLoadQueries() {
-  try { return JSON.parse(localStorage.getItem("shelob-entra-queries") || "[]"); } catch (_) { return []; }
+  try {
+    var stored = JSON.parse(localStorage.getItem("shelob-entra-queries") || "null");
+    if (!stored) {
+      localStorage.setItem("shelob-entra-queries", JSON.stringify(_ENTRA_PRESET_QUERIES));
+      return _ENTRA_PRESET_QUERIES.slice();
+    }
+    return stored;
+  } catch (_) { return []; }
 }
 
 function _entraPersistQueries(queries) {
