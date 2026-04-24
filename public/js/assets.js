@@ -63,6 +63,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   // delete button works regardless of where the tooltip lives.
   document.addEventListener("click", _handleMacDeleteClick);
   document.getElementById("assets-bulk-delete-btn").addEventListener("click", bulkDeleteAssets);
+  document.getElementById("assets-bulk-edit-btn").addEventListener("click", openBulkEditModal);
   await userReady;
   _restoreAssetsPrefs();
   loadAssets();
@@ -363,6 +364,99 @@ async function bulkDeleteAssets() {
     if (btn) btn.disabled = false;
   }
   loadAssets();
+}
+
+async function openBulkEditModal() {
+  var ids = Array.from(_assetsSelected);
+  if (!ids.length) return;
+  await _ensureTagCache();
+
+  var typeOptions = '<option value="">— no change —</option>' +
+    '<option value="server">Server</option>' +
+    '<option value="switch">Switch</option>' +
+    '<option value="router">Router</option>' +
+    '<option value="firewall">Firewall</option>' +
+    '<option value="workstation">Workstation</option>' +
+    '<option value="printer">Printer</option>' +
+    '<option value="access_point">Access Point</option>' +
+    '<option value="other">Other</option>';
+
+  var body =
+    '<p style="color:var(--color-text-secondary);margin-bottom:1.25rem">Editing <strong>' + ids.length + '</strong> asset' + (ids.length !== 1 ? 's' : '') + '. Leave a field at its default to skip it.</p>' +
+    '<div class="form-group"><label>Asset Type</label>' +
+      '<select id="bulk-f-type">' + typeOptions + '</select>' +
+    '</div>' +
+    '<div class="form-group"><label>Tags</label>' +
+      '<div style="display:flex;gap:16px;margin-bottom:0.5rem">' +
+        '<label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:normal"><input type="radio" name="bulk-tag-mode" value="none" checked> No change</label>' +
+        '<label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:normal"><input type="radio" name="bulk-tag-mode" value="add"> Add tags</label>' +
+        '<label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:normal"><input type="radio" name="bulk-tag-mode" value="replace"> Replace tags</label>' +
+      '</div>' +
+      '<div id="bulk-tag-picker-wrap" style="display:none">' + tagFieldHTML([]) + '</div>' +
+    '</div>';
+
+  var footer =
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="bulk-edit-save-btn">Apply to ' + ids.length + ' Asset' + (ids.length !== 1 ? 's' : '') + '</button>';
+
+  openModal("Edit Selected Assets", body, footer);
+  wireTagPicker();
+
+  document.querySelectorAll('input[name="bulk-tag-mode"]').forEach(function (radio) {
+    radio.addEventListener("change", function () {
+      var wrap = document.getElementById("bulk-tag-picker-wrap");
+      if (wrap) wrap.style.display = this.value !== "none" ? "" : "none";
+    });
+  });
+
+  document.getElementById("bulk-edit-save-btn").addEventListener("click", async function () {
+    var btn = this;
+    var typeVal = document.getElementById("bulk-f-type").value;
+    var tagModeEl = document.querySelector('input[name="bulk-tag-mode"]:checked');
+    var tagMode = tagModeEl ? tagModeEl.value : "none";
+    var selectedTags = tagMode !== "none" ? getTagFieldValue() : null;
+
+    if (!typeVal && tagMode === "none") {
+      showToast("No changes selected", "error");
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = "Applying…";
+
+    var successCount = 0;
+    var errorCount = 0;
+
+    for (var i = 0; i < ids.length; i++) {
+      var id = ids[i];
+      var payload = {};
+      if (typeVal) payload.assetType = typeVal;
+      if (tagMode !== "none") {
+        if (tagMode === "add") {
+          var existing = _assetsData.find(function (a) { return a.id === id; });
+          var existingTags = existing && existing.tags ? existing.tags : [];
+          payload.tags = Array.from(new Set(existingTags.concat(selectedTags)));
+        } else {
+          payload.tags = selectedTags;
+        }
+      }
+      try {
+        await api.assets.update(id, payload);
+        successCount++;
+      } catch (_e) {
+        errorCount++;
+      }
+    }
+
+    closeModal();
+    if (errorCount === 0) {
+      showToast("Updated " + successCount + " asset" + (successCount !== 1 ? "s" : ""));
+    } else {
+      showToast("Updated " + successCount + ", " + errorCount + " failed", errorCount === ids.length ? "error" : "");
+    }
+    _assetsSelected.clear();
+    loadAssets();
+  });
 }
 
 function assetTypeBadge(type) {
