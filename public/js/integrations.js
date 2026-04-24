@@ -1014,6 +1014,8 @@ function showConflictModal(integrationId, conflicts) {
 
 function val(id) { return document.getElementById(id).value.trim(); }
 
+// Preset queries use "<adom>" as a placeholder — substituted with the integration's
+// configured ADOM when loaded into the form. Only "<device-name>" needs user input.
 var _FMG_PRESET_QUERIES = [
   {
     name: "System status",
@@ -1028,46 +1030,50 @@ var _FMG_PRESET_QUERIES = [
   {
     name: "List devices in ADOM",
     method: "get",
-    params: '[\n  {\n    "url": "/dvmdb/adom/<adom>/device",\n    "data": { "fields": ["name", "ip", "os_ver", "conn_status", "ha_mode"] }\n  }\n]',
+    params: '[\n  {\n    "url": "/dvmdb/adom/<adom>/device",\n    "data": { "fields": ["name", "sn", "ip", "os_ver", "platform_str", "ha_mode", "conn_status", "last_checked"] }\n  }\n]',
   },
   {
     name: "DHCP servers on device",
     method: "exec",
-    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/system.dhcp/server"\n    }\n  }\n]',
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/system.dhcp/server"\n    }\n  }\n]',
   },
   {
     name: "DHCP leases on device",
     method: "exec",
-    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/system/dhcp"\n    }\n  }\n]',
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/system/dhcp?format=ip|mac|hostname|interface|reserved|expire_time|access_point|ssid|vci"\n    }\n  }\n]',
   },
   {
     name: "Interface IPs on device",
     method: "exec",
-    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/system/interface",\n      "params": [{ "fields": ["name", "ip", "vdom", "type", "status"] }]\n    }\n  }\n]',
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/system/interface",\n      "params": [{ "fields": ["name", "ip", "vdom", "type", "status"] }]\n    }\n  }\n]',
   },
   {
     name: "Managed FortiSwitches on device",
     method: "exec",
-    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/switch-controller/managed-switch/status?format=switch-id|serial|connecting_from|state|status|os_version"\n    }\n  }\n]',
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/switch-controller/managed-switch/status?format=connecting_from|fgt_peer_intf_name|join_time|os_version|serial|switch-id|state|status"\n    }\n  }\n]',
   },
   {
     name: "Managed FortiAPs on device",
     method: "exec",
-    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/wifi/managed_ap"\n    }\n  }\n]',
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/wifi/managed_ap?format=name|wtp_id|serial|model|wtp_profile|ip_addr|ip_address|local_ipv4_address|base_mac|mac|status|state|version|firmware_version"\n    }\n  }\n]',
   },
   {
     name: "Firewall VIPs on device",
     method: "exec",
-    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/firewall/vip"\n    }\n  }\n]',
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/firewall/vip"\n    }\n  }\n]',
   },
   {
-    name: "Device inventory (ADOM)",
-    method: "get",
-    params: '[\n  {\n    "url": "/dvmdb/adom/<adom>/device",\n    "data": { "fields": ["name", "sn", "ip", "os_ver", "platform_str", "ha_mode", "conn_status", "last_checked"] }\n  }\n]',
+    name: "Endpoint devices on device",
+    method: "exec",
+    params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/user/device/query?format=mac|ip|hostname|host|os|type|os_version|hardware_vendor|interface|switch_fortilink|fortiswitch|switch_port|ap_name|fortiap|user|detected_user|is_online|last_seen"\n    }\n  }\n]',
   },
 ];
 
-var _FMG_QUERIES_VERSION = 2;
+var _FMG_QUERIES_VERSION = 3;
+
+function _substituteFmgAdom(paramsStr, adom) {
+  return String(paramsStr).replace(/<adom>/g, adom || "root");
+}
 
 function _fmgLoadQueries() {
   try {
@@ -1152,7 +1158,7 @@ function openApiQueryModal(id, adom) {
     if (isNaN(idx) || !savedQueries[idx]) return;
     var q = savedQueries[idx];
     document.getElementById("fmg-method").value = q.method;
-    document.getElementById("fmg-params").value = q.params;
+    document.getElementById("fmg-params").value = _substituteFmgAdom(q.params, adom);
     document.getElementById("fmg-save-name").value = q.name;
   });
 
