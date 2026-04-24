@@ -20,12 +20,10 @@ export interface FortiManagerConfig {
   adom?: string;            // Administrative Domain (default: "root")
   verifySsl?: boolean;      // Skip TLS verification (default: false)
   mgmtInterface?: string;
-  interfaceInclude?: string[];  // Interfaces to include for DHCP scope + interface IP discovery
-  interfaceExclude?: string[];  // Interfaces to exclude. Ignored if interfaceInclude is non-empty.
-  /** @deprecated use interfaceInclude */
-  dhcpInclude?: string[];
-  /** @deprecated use interfaceExclude */
-  dhcpExclude?: string[];
+  interfaceInclude?: string[];  // Interfaces to include for interface IP discovery
+  interfaceExclude?: string[];  // Interfaces to exclude from interface IP discovery. Ignored if interfaceInclude is non-empty.
+  dhcpInclude?: string[];       // Interfaces to include for DHCP subnet discovery
+  dhcpExclude?: string[];       // Interfaces to exclude from DHCP subnet discovery. Ignored if dhcpInclude is non-empty.
   inventoryExcludeInterfaces?: string[];
   inventoryIncludeInterfaces?: string[];
   deviceInclude?: string[];   // FortiGate device names to include (wildcards ok). Matched against name/hostname.
@@ -628,8 +626,8 @@ export async function discoverDhcpSubnets(
         vdom: "root",
         verifySsl: config.fortigateVerifySsl === true,
         mgmtInterface: config.mgmtInterface,
-        dhcpInclude: config.interfaceInclude ?? config.dhcpInclude,
-        dhcpExclude: config.interfaceExclude ?? config.dhcpExclude,
+        dhcpInclude: config.dhcpInclude,
+        dhcpExclude: config.dhcpExclude,
         inventoryIncludeInterfaces: config.inventoryIncludeInterfaces,
         inventoryExcludeInterfaces: config.inventoryExcludeInterfaces,
       };
@@ -1222,8 +1220,8 @@ export async function discoverDhcpSubnets(
 
       const filteredDevSubnets = filterDhcpResults(
         chunk.subnets,
-        config.interfaceInclude ?? config.dhcpInclude,
-        config.interfaceExclude ?? config.dhcpExclude,
+        config.dhcpInclude,
+        config.dhcpExclude,
       );
       const excludedDevIfaces = new Set(
         chunk.subnets
@@ -1297,8 +1295,8 @@ function matchesWildcard(pattern: string, value: string): boolean {
 }
 
 function matchesInterfaceFilter(interfaceName: string, config: FortiManagerConfig): boolean {
-  const includeList = config.interfaceInclude ?? config.dhcpInclude ?? [];
-  const excludeList = config.interfaceExclude ?? config.dhcpExclude ?? [];
+  const includeList = config.interfaceInclude ?? [];
+  const excludeList = config.interfaceExclude ?? [];
   if (includeList.length > 0) return includeList.some((p) => matchesWildcard(p, interfaceName));
   if (excludeList.length > 0) return !excludeList.some((p) => matchesWildcard(p, interfaceName));
   return true;

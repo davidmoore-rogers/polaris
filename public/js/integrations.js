@@ -212,13 +212,14 @@ async function loadIntegrations() {
 
 function fortiManagerFormHTML(defaults) {
   var d = defaults || {};
-  // Prefer the current field names; fall back to the legacy dhcp* names ONLY
-  // when the current field is entirely absent. An empty array is an explicit
-  // "no filters" from a previous save and must not re-summon the legacy list.
-  var ifaceInclude = Array.isArray(d.interfaceInclude) ? d.interfaceInclude : (d.dhcpInclude || []);
-  var ifaceExclude = Array.isArray(d.interfaceExclude) ? d.interfaceExclude : (d.dhcpExclude || []);
-  var dhcpMode = ifaceInclude.length > 0 ? "include" : "exclude";
-  var dhcpIfaces = dhcpMode === "include" ? ifaceInclude : ifaceExclude;
+  var ifaceInclude = d.interfaceInclude || [];
+  var ifaceExclude = d.interfaceExclude || [];
+  var ifaceMode = ifaceInclude.length > 0 ? "include" : "exclude";
+  var ifaceList = ifaceMode === "include" ? ifaceInclude : ifaceExclude;
+  var dhcpIncludeList = d.dhcpInclude || [];
+  var dhcpExcludeList = d.dhcpExclude || [];
+  var dhcpMode = dhcpIncludeList.length > 0 ? "include" : "exclude";
+  var dhcpIfaces = dhcpMode === "include" ? dhcpIncludeList : dhcpExcludeList;
   var invMode = (d.inventoryIncludeInterfaces && d.inventoryIncludeInterfaces.length > 0) ? "include" : "exclude";
   var invIfaces = invMode === "include" ? (d.inventoryIncludeInterfaces || []) : (d.inventoryExcludeInterfaces || []);
   var devMode = (d.deviceInclude && d.deviceInclude.length > 0) ? "include" : "exclude";
@@ -282,17 +283,30 @@ function fortiManagerFormHTML(defaults) {
       '<p class="hint">Leave empty to query all managed FortiGates. Matched against device name or hostname. Wildcards supported: <code>FG-*</code>, <code>*-lab</code>, <code>*dc*</code></p>' +
     '</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Scope</p>' +
-    '<div class="form-group"><label>Interface Filter</label>' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Scope</p>' +
+    '<div class="form-group"><label>DHCP Filter</label>' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-dhcpMode" style="width:auto">' +
           '<option value="include"' + (dhcpMode === "include" ? " selected" : "") + '>Include only</option>' +
           '<option value="exclude"' + (dhcpMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
         '</select>' +
-        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these interfaces for DHCP scope and interface IP discovery</span>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these interfaces from DHCP server scope discovery</span>' +
       '</div>' +
       '<textarea id="f-dhcpInterfaces" rows="2" placeholder="One per line — e.g. port1&#10;internal*&#10;*wan">' + escapeHtml(dhcpIfaces.join("\n")) + '</textarea>' +
-      '<p class="hint">Leave empty to include all interfaces. Applies to DHCP server scope discovery and interface IP reservation. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
+      '<p class="hint">Leave empty to include all interfaces. Applies to DHCP server scope discovery only. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Scope</p>' +
+    '<div class="form-group"><label>Interface Filter</label>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<select id="f-ifaceMode" style="width:auto">' +
+          '<option value="include"' + (ifaceMode === "include" ? " selected" : "") + '>Include only</option>' +
+          '<option value="exclude"' + (ifaceMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
+        '</select>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these interfaces from interface IP discovery</span>' +
+      '</div>' +
+      '<textarea id="f-ifaceInterfaces" rows="2" placeholder="One per line — e.g. port1&#10;internal*&#10;*wan">' + escapeHtml(ifaceList.join("\n")) + '</textarea>' +
+      '<p class="hint">Leave empty to include all interfaces. Applies to interface IP reservations only. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
     '</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Device Inventory</p>' +
@@ -313,6 +327,8 @@ function getFormConfig() {
   var port = document.getElementById("f-port").value;
   var dhcpMode = document.getElementById("f-dhcpMode").value;
   var dhcpIfaces = linesToArray("f-dhcpInterfaces");
+  var ifaceMode = document.getElementById("f-ifaceMode").value;
+  var ifaceIfaces = linesToArray("f-ifaceInterfaces");
   var invMode = document.getElementById("f-inventoryMode").value;
   var invIfaces = linesToArray("f-inventoryInterfaces");
   var devMode = document.getElementById("f-deviceMode").value;
@@ -326,8 +342,10 @@ function getFormConfig() {
     adom: val("f-adom") || "root",
     verifySsl: document.getElementById("f-verifySsl").checked,
     mgmtInterface: val("f-mgmtInterface") || "",
-    interfaceInclude: dhcpMode === "include" ? dhcpIfaces : [],
-    interfaceExclude: dhcpMode === "exclude" ? dhcpIfaces : [],
+    dhcpInclude: dhcpMode === "include" ? dhcpIfaces : [],
+    dhcpExclude: dhcpMode === "exclude" ? dhcpIfaces : [],
+    interfaceInclude: ifaceMode === "include" ? ifaceIfaces : [],
+    interfaceExclude: ifaceMode === "exclude" ? ifaceIfaces : [],
     inventoryExcludeInterfaces: invMode === "exclude" ? invIfaces : [],
     inventoryIncludeInterfaces: invMode === "include" ? invIfaces : [],
     deviceInclude: devMode === "include" ? devNames : [],
@@ -861,8 +879,8 @@ async function openEditModal(id) {
         autoDiscover: intg.autoDiscover !== false,
         pollInterval: intg.pollInterval,
         mgmtInterface: config.mgmtInterface,
-        interfaceInclude: Array.isArray(config.interfaceInclude) ? config.interfaceInclude : undefined,
-        interfaceExclude: Array.isArray(config.interfaceExclude) ? config.interfaceExclude : undefined,
+        interfaceInclude: config.interfaceInclude || [],
+        interfaceExclude: config.interfaceExclude || [],
         dhcpInclude: config.dhcpInclude || [],
         dhcpExclude: config.dhcpExclude || [],
         inventoryIncludeInterfaces: config.inventoryIncludeInterfaces || [],

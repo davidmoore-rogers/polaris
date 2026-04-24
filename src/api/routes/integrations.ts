@@ -107,9 +107,8 @@ const FortiManagerConfigSchema = z.object({
   mgmtInterface: z.string().optional().default(""),
   interfaceInclude: z.array(z.string()).optional().default([]),
   interfaceExclude: z.array(z.string()).optional().default([]),
-  // Legacy field names accepted on write; service reads both with fallback
-  dhcpInclude:   z.array(z.string()).optional(),
-  dhcpExclude:   z.array(z.string()).optional(),
+  dhcpInclude:   z.array(z.string()).optional().default([]),
+  dhcpExclude:   z.array(z.string()).optional().default([]),
   inventoryExcludeInterfaces: z.array(z.string()).optional().default([]),
   inventoryIncludeInterfaces: z.array(z.string()).optional().default([]),
   deviceInclude: z.array(z.string()).optional().default([]),
@@ -391,14 +390,6 @@ router.put("/:id", async (req, res, next) => {
       }
       if (!input.config.bindPassword) {
         newConfig.bindPassword = currentConfig.bindPassword;
-      }
-      // FMG renamed dhcpInclude/dhcpExclude → interfaceInclude/interfaceExclude.
-      // Whenever the UI submits the new names, drop any stale legacy fields so
-      // they can't shadow a later edit — e.g. clearing interfaceExclude to []
-      // must not leave the old dhcpExclude list lying around.
-      if (existing.type === "fortimanager") {
-        if ("interfaceInclude" in input.config) delete (newConfig as any).dhcpInclude;
-        if ("interfaceExclude" in input.config) delete (newConfig as any).dhcpExclude;
       }
       data.config = newConfig;
     }
