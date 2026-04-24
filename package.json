@@ -25,7 +25,6 @@
     "@node-rs/argon2": "^2.0.2",
     "@node-saml/node-saml": "^5.1.0",
     "@prisma/client": "^5.14.0",
-    "bcrypt": "^6.0.0",
     "cidr-tools": "^7.0.0",
     "compression": "^1.8.1",
     "connect-pg-simple": "^10.0.0",
@@ -45,7 +44,6 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@types/bcrypt": "^6.0.0",
     "@types/compression": "^1.8.1",
     "@types/connect-pg-simple": "^7.0.3",
     "@types/express": "^5.0.0",

@@ -1,19 +1,12 @@
 /**
  * src/utils/password.ts — Password hashing + verification helpers
  *
- * Argon2id is the OWASP-recommended default for new hashes. Legacy bcrypt
- * hashes are still accepted on login for backward compatibility; a successful
- * login against a bcrypt hash flags the account for silent rehash on the
- * same request (see `needsRehash` in the return value of `verifyPassword`).
- *
  * Call sites:
  *   - hashPassword() — every place a new/updated password is stored
  *   - verifyPassword() — every place a stored password is checked
- *   - isLegacyHash() — audit/reporting only
  */
 
 import { hash as argonHash, verify as argonVerify, Algorithm } from "@node-rs/argon2";
-import bcrypt from "bcrypt";
 
 // OWASP 2024 second-option params — ~50ms/login on commodity hardware, good
 // GPU resistance via 19 MiB of memory per hash. Bump memoryCost to 65536 and
@@ -37,15 +30,13 @@ export async function hashPassword(plaintext: string): Promise<string> {
 }
 
 /**
- * Verify a plaintext password against a stored hash.
+ * Verify a plaintext password against a stored argon2id hash.
  *
- * Supports both legacy bcrypt ($2a$/$2b$/$2y$) and argon2id ($argon2id$).
  * Pass `stored = null` when the user lookup missed — we still burn the CPU
  * time of a real verify to keep the endpoint's response time constant.
  *
- * `needsRehash` is true when the caller should re-hash and persist on
- * successful auth: the stored hash is bcrypt, or is argon2id with weaker
- * params than our current target.
+ * `needsRehash` is true when the stored argon2id hash uses weaker params
+ * than the current target (e.g. after a params upgrade).
  */
 export async function verifyPassword(
   plaintext: string,
@@ -63,19 +54,8 @@ export async function verifyPassword(
     return { valid, needsRehash };
   }
 
-  if (/^\$2[aby]\$/.test(stored)) {
-    const valid = await bcrypt.compare(plaintext, stored);
-    return { valid, needsRehash: valid };
-  }
-
-  // Unknown format — fail closed. Don't leak timing: we've already spent
-  // non-trivial CPU above on the two known paths when they matched.
+  // Unknown format — fail closed
   return { valid: false, needsRehash: false };
-}
-
-/** True if the hash is a legacy bcrypt hash (used for migration reporting). */
-export function isLegacyHash(stored: string | null | undefined): boolean {
-  return !!stored && /^\$2[aby]\$/.test(stored);
 }
 
 // Parse the PHC-format argon2 string and return true when any stored parameter

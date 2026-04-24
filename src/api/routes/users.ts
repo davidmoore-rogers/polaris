@@ -6,7 +6,8 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
-import { hashPassword, isLegacyHash } from "../../utils/password.js";
+import { hashPassword } from "../../utils/password.js";
+import { clearLockout } from "../../utils/loginLockout.js";
 
 const router = Router();
 
@@ -29,27 +30,6 @@ const ResetPasswordSchema = z.object({
 
 const UpdateRoleSchema = z.object({
   role: z.enum(["admin", "networkadmin", "assetsadmin", "user", "readonly"]),
-});
-
-// GET /api/v1/users/legacy-hashes
-// Lists local users whose password is still stored as a legacy bcrypt hash.
-// Consumed by the Server Settings page banner. Returns only local users —
-// SAML/Azure users have throwaway placeholder hashes that aren't used for
-// authentication, so they don't need migration.
-router.get("/legacy-hashes", async (_req, res, next) => {
-  try {
-    const locals = await prisma.user.findMany({
-      where: { authProvider: "local" },
-      select: { id: true, username: true, passwordHash: true, lastLogin: true },
-      orderBy: { username: "asc" },
-    });
-    const legacy = locals
-      .filter((u) => isLegacyHash(u.passwordHash))
-      .map((u) => ({ id: u.id, username: u.username, lastLogin: u.lastLogin }));
-    res.json({ count: legacy.length, users: legacy });
-  } catch (err) {
-    next(err);
-  }
 });
 
 // GET /api/v1/users
@@ -120,6 +100,7 @@ router.put("/:id/password", async (req, res, next) => {
       where: { id },
       data: { passwordHash },
     });
+    clearLockout(user.username);
     res.json({ ok: true });
   } catch (err) {
     next(err);

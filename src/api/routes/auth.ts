@@ -6,6 +6,7 @@ import { Router, type Request } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { hashPassword, verifyPassword } from "../../utils/password.js";
+import { isLocked, recordFailure, clearLockout } from "../../utils/loginLockout.js";
 import { AppError } from "../../utils/errors.js";
 import { requireAuth, requireAdmin } from "../middleware/auth.js";
 import {
@@ -40,22 +41,59 @@ const LoginSchema = z.object({
 router.post("/login", async (req, res, next) => {
   try {
     const { username, password } = LoginSchema.parse(req.body);
+
+    // Per-username lockout check — runs before the DB lookup so a locked
+    // account short-circuits without the caller learning anything else.
+    const lock = isLocked(username);
+    if (lock.locked) {
+      logEvent({
+        action: "auth.login.locked",
+        resourceType: "user",
+        resourceName: username,
+        level: "warning",
+        message: `Login attempt on locked account "${username}"`,
+        details: { ip: req.ip, lockedUntil: lock.until?.toISOString() },
+      });
+      throw new AppError(
+        423,
+        `Account temporarily locked due to too many failed attempts. Try again after ${lock.until?.toLocaleTimeString() ?? "later"}.`,
+      );
+    }
+
     const user = await prisma.user.findUnique({ where: { username } });
 
     // Constant-time verify: passing null stored hash still runs a dummy
     // argon2 verify so response time is identical for unknown usernames.
     const { valid, needsRehash } = await verifyPassword(password, user?.passwordHash ?? null);
     if (!user || !valid) {
+      const tripped = recordFailure(username);
+      if (tripped.lockedNow) {
+        logEvent({
+          action: "auth.login.lockout",
+          resourceType: "user",
+          resourceName: username,
+          level: "warning",
+          message: `Account "${username}" locked after ${tripped.failures} failed attempts`,
+          details: { ip: req.ip, lockedUntil: tripped.until?.toISOString() },
+        });
+      }
       logEvent({
         action: "auth.login.failed",
         resourceType: "user",
         resourceName: username,
         level: "warning",
         message: `Failed local login for "${username}"`,
-        details: { ip: req.ip, userAgent: req.get("user-agent") || undefined },
+        details: {
+          ip: req.ip,
+          userAgent: req.get("user-agent") || undefined,
+          failures: tripped.failures,
+        },
       });
       throw new AppError(401, "Invalid username or password");
     }
+
+    // Good login — clear any accumulated failure counter
+    clearLockout(username);
 
     await regenerateSession(req);
     req.session.userId = user.id;
@@ -64,9 +102,7 @@ router.post("/login", async (req, res, next) => {
     req.session.authProvider = user.authProvider || "local";
     req.session.lastActivity = Date.now();
 
-    // Silent hash migration: legacy bcrypt hashes (or argon2 hashes with
-    // weaker params than the current target) get upgraded on successful
-    // login without disturbing the user.
+    // Re-hash on successful login if stored params are weaker than current target.
     const updateData: { lastLogin: Date; passwordHash?: string } = { lastLogin: new Date() };
     if (needsRehash) {
       updateData.passwordHash = await hashPassword(password);

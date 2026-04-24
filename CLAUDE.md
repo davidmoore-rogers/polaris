@@ -137,7 +137,7 @@ shelob/
 | Sessions | express-session + connect-pg-simple (PostgreSQL store) |
 | Validation | Zod |
 | Logging | Pino + pino-pretty |
-| Auth | argon2id via @node-rs/argon2 (legacy bcrypt hashes still verified and silently rehashed to argon2id on next successful login), @node-saml/node-saml (Azure SAML SSO) |
+| Auth | argon2id via @node-rs/argon2, @node-saml/node-saml (Azure SAML SSO) |
 | IP Math | ip-cidr + netmask + cidr-tools |
 | Security | helmet, express-rate-limit |
 | File uploads | multer |
@@ -347,7 +347,6 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 
 ### Users — `requireAdmin`
 - `GET    /users`
-- `GET    /users/legacy-hashes`                  — Local users still on bcrypt; surfaces the migration banner on the Server Settings page. Returns `{ count, users: [{id, username, lastLogin}] }`.
 - `POST   /users`
 - `GET    /users/:id`
 - `PUT    /users/:id`
