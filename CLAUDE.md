@@ -23,7 +23,8 @@ shelob/
 │   └── seed.ts
 ├── scripts/
 │   ├── test-fmg.mjs                 # FortiManager integration test harness
-│   └── audit-multi-mac-assets.mjs   # One-off: unstitch assets cross-stapled by old IP-fallback bug
+│   ├── audit-multi-mac-assets.mjs   # One-off: unstitch assets cross-stapled by old IP-fallback bug
+│   └── check-fmg-tokens.mjs         # One-off: print stored FMG/FortiGate token length/prefix to diagnose token corruption
 ├── public/                          # Vanilla JS frontend (served statically)
 │   ├── index.html                   # Dashboard
 │   ├── login.html
