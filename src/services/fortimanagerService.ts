@@ -117,9 +117,21 @@ export async function testConnection(config: FortiManagerConfig): Promise<{
  * FortiLink/mgmt-tunnel address that isn't reachable from outside the
  * FMG↔FortiGate path. For direct transport we need the IP the gate
  * actually listens on for REST API traffic, which lives in the
- * interface config. Returns null if the interface has no usable v4 IP
- * configured.
+ * interface config.
+ *
+ * Strategy: try a filtered `filter: [["name","==",mgmt]]` query first
+ * (small response). FMG's filter evaluator sporadically returns an
+ * empty array even when the interface exists — so if the filtered
+ * response comes back empty, fall back to fetching the full interface
+ * list and matching client-side. Returns null only if the interface
+ * genuinely has no usable v4 IP configured on either pass.
  */
+function _extractV4(raw: unknown): string | null {
+  const ip = Array.isArray(raw) ? raw[0] : (raw as string | null | undefined);
+  if (!ip || ip === "0.0.0.0" || !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) return null;
+  return ip;
+}
+
 async function resolveDeviceMgmtIp(
   baseUrl: string,
   config: FortiManagerConfig,
@@ -127,23 +139,36 @@ async function resolveDeviceMgmtIp(
   mgmtIfaceName: string,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  const ifacePayload: JsonRpcRequest = {
-    id: 2,
-    method: "get",
-    params: [{
-      url: `/pm/config/device/${deviceName}/global/system/interface`,
-      filter: [["name", "==", mgmtIfaceName]],
-      fields: ["name", "ip"],
-    }],
-  };
-  const ifaceRes = await rpc(baseUrl, ifacePayload, config.apiUser, config.apiToken, config.verifySsl, signal);
-  const list = ifaceRes.result?.[0]?.data;
-  if (!Array.isArray(list)) return null;
-  const found = (list as any[]).find((i) => i.name === mgmtIfaceName);
-  if (!found) return null;
-  const rawIp = Array.isArray(found.ip) ? found.ip[0] : (found.ip as string | null);
-  if (!rawIp || rawIp === "0.0.0.0" || !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rawIp)) return null;
-  return rawIp;
+  const url = `/pm/config/device/${deviceName}/global/system/interface`;
+
+  // Fast path — filtered query.
+  try {
+    const filteredRes = await rpc(
+      baseUrl,
+      { id: 2, method: "get", params: [{ url, filter: [["name", "==", mgmtIfaceName]], fields: ["name", "ip"] }] },
+      config.apiUser, config.apiToken, config.verifySsl, signal,
+    );
+    const list = filteredRes.result?.[0]?.data;
+    if (Array.isArray(list) && list.length > 0) {
+      const found = (list as any[]).find((i) => i.name === mgmtIfaceName);
+      const ip = found ? _extractV4(found.ip) : null;
+      if (ip) return ip;
+    }
+  } catch { /* fall through to unfiltered fetch */ }
+
+  // Fallback — unfiltered fetch, client-side match. FMG's filter evaluator
+  // sometimes returns an empty list under load even when the interface
+  // exists; pulling every interface avoids that failure mode at the cost
+  // of one larger response.
+  const fullRes = await rpc(
+    baseUrl,
+    { id: 2, method: "get", params: [{ url, fields: ["name", "ip"] }] },
+    config.apiUser, config.apiToken, config.verifySsl, signal,
+  );
+  const all = fullRes.result?.[0]?.data;
+  if (!Array.isArray(all)) return null;
+  const match = (all as any[]).find((i) => i.name === mgmtIfaceName);
+  return match ? _extractV4(match.ip) : null;
 }
 
 /**
