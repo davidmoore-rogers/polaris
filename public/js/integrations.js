@@ -809,6 +809,7 @@ async function openEditModal(id) {
         inventoryExcludeInterfaces: config.inventoryExcludeInterfaces || [],
         deviceInclude: config.deviceInclude || [],
         deviceExclude: config.deviceExclude || [],
+        discoveryParallelism: config.discoveryParallelism,
       };
       body = fortiManagerFormHTML(defaults);
       formGetter = function () {
