@@ -7,18 +7,20 @@ document.addEventListener("DOMContentLoaded", function () {
   document.getElementById("btn-add-integration").addEventListener("click", showTypePicker);
 });
 
-// Fan out a test-connection result into one toast per step when the server
-// returns a `notifications` array (e.g. FMG + randomly-selected FortiGate).
-// Falls back to the single `message` field for older shapes.
-function _showTestResultToasts(result) {
-  if (!result) return;
-  if (Array.isArray(result.notifications) && result.notifications.length > 0) {
-    result.notifications.forEach(function (n) {
-      showToast(n.message, n.ok ? "success" : "error");
+// Kick off the direct-transport sanity check after a successful FMG test and
+// surface its result as its own toast. Intentionally fire-and-forget so the
+// FMG success toast isn't delayed by the FortiGate probe, which can be slow
+// if the randomly chosen gate is unreachable.
+function _runFortigateSampleProbe(runner) {
+  runner()
+    .then(function (r) {
+      showToast(r.message, r.ok ? "success" : "error");
+      loadIntegrations();
+    })
+    .catch(function (err) {
+      if (err && err.name === "AbortError") return;
+      showToast("Random FortiGate test failed: " + (err && err.message ? err.message : "unknown error"), "error");
     });
-    return;
-  }
-  showToast(result.message, result.ok ? "success" : "error");
 }
 
 // Toggle FMG integration form between proxy and direct modes.
@@ -170,7 +172,8 @@ async function loadIntegrations() {
         }
       }
 
-      return '<div class="integration-card">' +
+      var isFmgDirect = intg.type === "fortimanager" && config.useProxy === false;
+      return '<div class="integration-card"' + (isFmgDirect ? ' data-fmg-direct="1"' : '') + '>' +
         '<div class="integration-card-header">' +
           '<div class="integration-card-header-top">' +
             '<div class="integration-card-title">' +
@@ -902,8 +905,20 @@ async function openEditModal(id) {
           name: val("f-name") || intg.name,
           config: formConfig,
         });
-        _showTestResultToasts(result);
+        showToast(result.message, result.ok ? "success" : "error");
         if (result.ok) loadIntegrations();
+        // Direct-transport sanity check: run asynchronously so the FMG
+        // toast appears immediately rather than waiting on the FortiGate
+        // probe (which can take 10s if the random gate is unreachable).
+        if (result.ok && intg.type === "fortimanager" && formConfig && formConfig.useProxy === false) {
+          var probeBody = {
+            id: id,
+            type: intg.type,
+            name: val("f-name") || intg.name,
+            config: formConfig,
+          };
+          _runFortigateSampleProbe(function () { return api.integrations.testFortigateSampleNew(probeBody); });
+        }
       } catch (err) {
         if (err.name === "AbortError") { showToast("Test aborted", "error"); }
         else { showToast(err.message, "error"); }
@@ -948,11 +963,16 @@ async function openEditModal(id) {
 async function testConnection(id, btn) {
   btn.disabled = true;
   btn.textContent = "Testing...";
-  var name = btn.closest(".integration-card").querySelector("strong").textContent;
+  var card = btn.closest(".integration-card");
+  var name = card.querySelector("strong").textContent;
+  var isFmgDirect = card.getAttribute("data-fmg-direct") === "1";
   try {
     var result = await api.integrations.test(id, name);
-    _showTestResultToasts(result);
+    showToast(result.message, result.ok ? "success" : "error");
     loadIntegrations();
+    if (result.ok && isFmgDirect) {
+      _runFortigateSampleProbe(function () { return api.integrations.testFortigateSample(id); });
+    }
   } catch (err) {
     if (err.name === "AbortError") { showToast("Test aborted", "error"); }
     else { showToast(err.message, "error"); }

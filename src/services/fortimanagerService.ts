@@ -60,7 +60,6 @@ export async function testConnection(config: FortiManagerConfig): Promise<{
   ok: boolean;
   message: string;
   version?: string;
-  notifications?: Array<{ ok: boolean; message: string }>;
 }> {
   const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
 
@@ -84,33 +83,10 @@ export async function testConnection(config: FortiManagerConfig): Promise<{
 
     const data = statusRes.result?.[0]?.data as Record<string, unknown> | undefined;
     const version = data?.Version ? String(data.Version) : undefined;
-    const fmgLabel = version ? `FortiManager ${version}` : "FortiManager";
-
-    // Direct-transport sanity check: when per-device queries bypass FMG's
-    // proxy, the FortiGate credentials must actually work against a real
-    // managed FortiGate — not just against FMG itself. Pull the device
-    // roster, pick one at random, and run a FortiGate test against it.
-    if (config.useProxy === false) {
-      const fgResult = await testRandomFortiGate(config);
-      const fmgMsg = `Connected — ${fmgLabel}`;
-      const fgMsg = fgResult.ok
-        ? `Randomly selected FortiGate "${fgResult.deviceName}" reachable${fgResult.version ? ` (FortiOS ${fgResult.version})` : ""}`
-        : `Randomly selected FortiGate "${fgResult.deviceName}" failed: ${fgResult.message}`;
-      return {
-        ok: fgResult.ok,
-        // Overall summary — kept for older clients that only show `message`.
-        message: fgResult.ok ? `${fmgMsg}; ${fgMsg}` : `${fmgLabel} reachable, but ${fgMsg.charAt(0).toLowerCase() + fgMsg.slice(1)}`,
-        version,
-        notifications: [
-          { ok: true, message: fmgMsg },
-          { ok: fgResult.ok, message: fgMsg },
-        ],
-      };
-    }
 
     return {
       ok: true,
-      message: `Connected — ${fmgLabel}`,
+      message: version ? `Connected — FortiManager ${version}` : "Connected successfully",
       version,
     };
   } catch (err: any) {
@@ -137,9 +113,10 @@ export async function testConnection(config: FortiManagerConfig): Promise<{
 /**
  * Pick a random managed FortiGate from the FMG device list and run a
  * FortiGate-side connection test against it using the direct-transport
- * credentials. Only invoked by testConnection when useProxy is false.
+ * credentials. Exposed as a standalone call so the UI can stream its
+ * result independently of the FMG connection test.
  */
-async function testRandomFortiGate(config: FortiManagerConfig): Promise<{
+export async function testRandomFortiGate(config: FortiManagerConfig): Promise<{
   ok: boolean;
   message: string;
   deviceName: string;

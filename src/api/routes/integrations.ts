@@ -464,7 +464,7 @@ router.post("/:id/test", async (req, res, next) => {
     if (!integration) throw new AppError(404, "Integration not found");
 
     const config = integration.config as Record<string, unknown>;
-    let result: { ok: boolean; message: string; version?: string; notifications?: Array<{ ok: boolean; message: string }> };
+    let result: { ok: boolean; message: string; version?: string };
 
     logEvent({ action: "integration.test.started", resourceType: "integration", resourceId: req.params.id, resourceName: integration.name, actor: req.session?.username, message: `Connection test started for "${integration.name}"` });
 
@@ -491,6 +491,82 @@ router.post("/:id/test", async (req, res, next) => {
     logEvent({ action: "integration.test.completed", resourceType: "integration", resourceId: req.params.id, resourceName: integration.name, actor: req.session?.username, level: result.ok ? "info" : "warning", message: `Connection test ${result.ok ? "succeeded" : "failed"} for "${integration.name}": ${result.message}` });
 
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/integrations/:id/test/fortigate-sample — direct-transport sanity check
+// Pulls the FMG device list, picks a random managed FortiGate, and runs a
+// FortiGate connection test against it using the stored direct-mode creds.
+// Only valid for type=fortimanager integrations with useProxy=false; the
+// client only invokes it after the main /:id/test call has succeeded.
+router.post("/:id/test/fortigate-sample", async (req, res, next) => {
+  try {
+    const integration = await prisma.integration.findUnique({ where: { id: req.params.id } });
+    if (!integration) throw new AppError(404, "Integration not found");
+    if (integration.type !== "fortimanager") throw new AppError(400, "FortiGate sample test is only valid for FortiManager integrations");
+
+    const cfg = integration.config as Record<string, unknown>;
+    if (cfg.useProxy !== false) throw new AppError(400, "FortiGate sample test is only valid when the FMG proxy is disabled");
+
+    const fgResult = await fortimanager.testRandomFortiGate(cfg as any);
+    const message = fgResult.ok
+      ? `Randomly selected FortiGate "${fgResult.deviceName}" reachable${fgResult.version ? ` (FortiOS ${fgResult.version})` : ""}`
+      : `Randomly selected FortiGate "${fgResult.deviceName}" failed: ${fgResult.message}`;
+
+    // If the random FortiGate can't be reached, the direct-transport path
+    // won't work — discovery would fail. Flip lastTestOk so the Discover
+    // button reflects the real readiness, and stamp the timestamp.
+    if (!fgResult.ok) {
+      await prisma.integration.update({
+        where: { id: req.params.id },
+        data: { lastTestAt: new Date(), lastTestOk: false },
+      }).catch(() => {});
+    }
+
+    logEvent({ action: "integration.test.fortigate-sample", resourceType: "integration", resourceId: req.params.id, resourceName: integration.name, actor: req.session?.username, level: fgResult.ok ? "info" : "warning", message: `FortiGate sample test ${fgResult.ok ? "succeeded" : "failed"} for "${integration.name}" on ${fgResult.deviceName}: ${fgResult.message}` });
+
+    res.json({ ok: fgResult.ok, message, deviceName: fgResult.deviceName });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/integrations/test/fortigate-sample — pre-save variant of the above.
+// Used by the edit modal so the random-FortiGate check runs against the
+// unsaved form config. If an existingId is supplied, blank secrets are
+// merged from the stored config (same rule as /test).
+router.post("/test/fortigate-sample", async (req, res, next) => {
+  try {
+    const input = CreateIntegrationSchema.parse(req.body);
+    if (input.type !== "fortimanager") throw new AppError(400, "FortiGate sample test is only valid for FortiManager integrations");
+    const cfg = input.config as Record<string, unknown>;
+    if (cfg.useProxy !== false) throw new AppError(400, "FortiGate sample test is only valid when the FMG proxy is disabled");
+
+    const existingId = typeof req.body?.id === "string" ? req.body.id : null;
+    if (existingId) {
+      const existing = await prisma.integration.findUnique({ where: { id: existingId } });
+      if (existing) {
+        const stored = existing.config as Record<string, unknown>;
+        if (!cfg.apiToken || typeof cfg.apiToken !== "string") cfg.apiToken = stored.apiToken;
+        if (!cfg.fortigateApiToken || typeof cfg.fortigateApiToken !== "string") cfg.fortigateApiToken = stored.fortigateApiToken;
+      }
+    }
+
+    const fgResult = await fortimanager.testRandomFortiGate(cfg as any);
+    const message = fgResult.ok
+      ? `Randomly selected FortiGate "${fgResult.deviceName}" reachable${fgResult.version ? ` (FortiOS ${fgResult.version})` : ""}`
+      : `Randomly selected FortiGate "${fgResult.deviceName}" failed: ${fgResult.message}`;
+
+    if (existingId && !fgResult.ok) {
+      await prisma.integration.update({
+        where: { id: existingId },
+        data: { lastTestAt: new Date(), lastTestOk: false },
+      }).catch(() => {});
+    }
+
+    res.json({ ok: fgResult.ok, message, deviceName: fgResult.deviceName });
   } catch (err) {
     next(err);
   }
@@ -858,7 +934,7 @@ router.post("/:id/discover", async (req, res, next) => {
 router.post("/test", async (req, res, next) => {
   try {
     const input = CreateIntegrationSchema.parse(req.body);
-    let result: { ok: boolean; message: string; version?: string; notifications?: Array<{ ok: boolean; message: string }> };
+    let result: { ok: boolean; message: string; version?: string };
 
     // If an existing integration id is provided, merge unmasked secrets
     // from the stored config when the form fields were left blank.
