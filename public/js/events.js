@@ -189,14 +189,14 @@ async function openEventSettingsModal() {
   var archiveDefaults = { enabled: false, protocol: "scp", host: "", port: 22, username: "", password: "", keyPath: "", remotePath: "/var/archive/shelob" };
   var syslogDefaults = { enabled: false, protocol: "udp", host: "", port: 514, facility: "local0", severity: "info", format: "rfc5424", tlsCaPath: "", tlsCertPath: "", tlsKeyPath: "" };
   var retentionDefaults = { retentionDays: 7, minLevel: "info" };
-  var assetsDefaults = { inactivityMonths: 0 };
+
+  if (_activeSettingsTab === "assets") _activeSettingsTab = "archive";
 
   try {
     var results = await Promise.all([
       api.events.getArchiveSettings().catch(function () { return null; }),
       api.events.getSyslogSettings().catch(function () { return null; }),
       api.events.getRetentionSettings().catch(function () { return null; }),
-      api.events.getAssetDecommissionSettings().catch(function () { return null; }),
     ]);
     if (results[0]) {
       var s = results[0];
@@ -226,10 +226,6 @@ async function openEventSettingsModal() {
       retentionDefaults.retentionDays = results[2].retentionDays || 7;
       retentionDefaults.minLevel = results[2].minLevel || "info";
     }
-    if (results[3]) {
-      var m = Number(results[3].inactivityMonths);
-      assetsDefaults.inactivityMonths = Number.isFinite(m) && m >= 0 ? Math.floor(m) : 0;
-    }
   } catch (_) {}
 
   var body =
@@ -238,7 +234,6 @@ async function openEventSettingsModal() {
       '<button class="settings-tab' + (_activeSettingsTab === "archive" ? ' active' : '') + '" data-tab="archive">Archive Export</button>' +
       '<button class="settings-tab' + (_activeSettingsTab === "syslog" ? ' active' : '') + '" data-tab="syslog">Syslog</button>' +
       '<button class="settings-tab' + (_activeSettingsTab === "retention" ? ' active' : '') + '" data-tab="retention">Retention</button>' +
-      '<button class="settings-tab' + (_activeSettingsTab === "assets" ? ' active' : '') + '" data-tab="assets">Assets</button>' +
     '</div>' +
     // Archive tab panel
     '<div class="settings-tab-panel' + (_activeSettingsTab === "archive" ? ' active' : '') + '" id="tab-archive">' +
@@ -251,13 +246,9 @@ async function openEventSettingsModal() {
     // Retention tab panel
     '<div class="settings-tab-panel' + (_activeSettingsTab === "retention" ? ' active' : '') + '" id="tab-retention">' +
       retentionFormHTML(retentionDefaults) +
-    '</div>' +
-    // Assets tab panel
-    '<div class="settings-tab-panel' + (_activeSettingsTab === "assets" ? ' active' : '') + '" id="tab-assets">' +
-      assetsFormHTML(assetsDefaults) +
     '</div>';
 
-  var noTestTab = _activeSettingsTab === "retention" || _activeSettingsTab === "assets";
+  var noTestTab = _activeSettingsTab === "retention";
   var footer =
     '<div id="settings-footer-left" style="margin-right:auto;display:flex;gap:8px">' +
       '<button class="btn btn-secondary" id="btn-settings-test"' + (noTestTab ? ' style="display:none"' : '') + '>Test Connection</button>' +
@@ -277,7 +268,7 @@ async function openEventSettingsModal() {
       tab.classList.add("active");
       document.getElementById("tab-" + target).classList.add("active");
       var testBtn = document.getElementById("btn-settings-test");
-      if (testBtn) testBtn.style.display = (target === "retention" || target === "assets") ? "none" : "";
+      if (testBtn) testBtn.style.display = target === "retention" ? "none" : "";
       updateSyslogTlsVisibility();
     });
   });
@@ -338,9 +329,6 @@ async function openEventSettingsModal() {
       } else if (_activeSettingsTab === "retention") {
         await api.events.updateRetentionSettings(getRetentionFormData());
         showToast("Retention settings saved");
-      } else {
-        await api.events.updateAssetDecommissionSettings(getAssetsFormData());
-        showToast("Asset settings saved");
       }
       closeModal();
     } catch (err) {
@@ -511,24 +499,6 @@ function getRetentionFormData() {
   return {
     retentionDays: Math.max(1, parseInt(document.getElementById("f-retention-days").value, 10) || 7),
     minLevel: document.getElementById("f-retention-minlevel").value || "info",
-  };
-}
-
-// ─── Assets Tab Form ────────────────────────────────────────────────────────
-
-function assetsFormHTML(d) {
-  return '<div class="form-group">' +
-    '<label>Auto-Decommission Threshold (months)</label>' +
-    '<input type="number" id="f-assets-inactivity-months" value="' + escapeHtml(String(d.inactivityMonths)) + '" min="0" max="120" style="max-width:120px">' +
-    '<p class="hint">Assets whose <strong>Last Seen</strong> date is older than this many months are automatically moved to <strong>decommissioned</strong> status. ' +
-      'Set to <strong>0</strong> to disable. The job runs every 24 hours.</p>' +
-  '</div>';
-}
-
-function getAssetsFormData() {
-  var v = parseInt(document.getElementById("f-assets-inactivity-months").value, 10);
-  return {
-    inactivityMonths: Number.isFinite(v) && v >= 0 ? v : 0,
   };
 }
 
