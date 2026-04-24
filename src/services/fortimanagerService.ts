@@ -111,6 +111,42 @@ export async function testConnection(config: FortiManagerConfig): Promise<{
 }
 
 /**
+ * Resolve a FortiGate's real management-interface IP via FMG.
+ *
+ * FMG's own `device.ip` field is FMG's view of the gate — frequently a
+ * FortiLink/mgmt-tunnel address that isn't reachable from outside the
+ * FMG↔FortiGate path. For direct transport we need the IP the gate
+ * actually listens on for REST API traffic, which lives in the
+ * interface config. Returns null if the interface has no usable v4 IP
+ * configured.
+ */
+async function resolveDeviceMgmtIp(
+  baseUrl: string,
+  config: FortiManagerConfig,
+  deviceName: string,
+  mgmtIfaceName: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const ifacePayload: JsonRpcRequest = {
+    id: 2,
+    method: "get",
+    params: [{
+      url: `/pm/config/device/${deviceName}/global/system/interface`,
+      filter: [["name", "==", mgmtIfaceName]],
+      fields: ["name", "ip"],
+    }],
+  };
+  const ifaceRes = await rpc(baseUrl, ifacePayload, config.apiUser, config.apiToken, config.verifySsl, signal);
+  const list = ifaceRes.result?.[0]?.data;
+  if (!Array.isArray(list)) return null;
+  const found = (list as any[]).find((i) => i.name === mgmtIfaceName);
+  if (!found) return null;
+  const rawIp = Array.isArray(found.ip) ? found.ip[0] : (found.ip as string | null);
+  if (!rawIp || rawIp === "0.0.0.0" || !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rawIp)) return null;
+  return rawIp;
+}
+
+/**
  * Pick a random managed FortiGate from the FMG device list and run a
  * FortiGate-side connection test against it using the direct-transport
  * credentials. Exposed as a standalone call so the UI can stream its
@@ -150,30 +186,62 @@ export async function testRandomFortiGate(config: FortiManagerConfig): Promise<{
     return { ok: false, message: `No managed devices found in ADOM "${adom}"`, deviceName: "(none)" };
   }
 
-  // Apply the same include/exclude filters the discovery run would use, then
-  // require an IP since we need to reach the FortiGate directly.
-  const filtered = filterDevices(raw as any[], config.deviceInclude, config.deviceExclude)
-    .filter((d: any) => typeof d.ip === "string" && d.ip.length > 0);
+  // Apply the same include/exclude filters the discovery run would use. We
+  // don't require FMG's `device.ip` here — that field is FMG's own view of
+  // the gate (often a FortiLink/mgmt-tunnel address) and isn't reachable
+  // from Shelob. The real management IP comes from the gate's interface
+  // config, resolved below.
+  const filtered = filterDevices(raw as any[], config.deviceInclude, config.deviceExclude);
 
   if (filtered.length === 0) {
     return {
       ok: false,
-      message: "No managed FortiGate with a recorded management IP is available to test against — adjust device include/exclude or make sure the gate is online in FMG",
+      message: "No managed FortiGate is available to test against — adjust device include/exclude or make sure at least one gate is online in FMG",
       deviceName: "(none)",
     };
   }
 
   const pick = filtered[Math.floor(Math.random() * filtered.length)];
-  const deviceName = String(pick.name || pick.hostname || pick.ip);
+  const deviceName = String(pick.name || pick.hostname || pick.ip || "(unknown)");
+
+  // Resolve the real management IP from the FortiGate's interface config via
+  // FMG. The discovery path does the same thing — same FMG call, same filter.
+  const mgmtIfaceName = config.mgmtInterface?.trim();
+  if (!mgmtIfaceName) {
+    return {
+      ok: false,
+      message: 'FortiGate mgmt interface is not configured on the integration — set "Management Interface" before testing direct transport',
+      deviceName,
+    };
+  }
+
+  let mgmtIp: string | null;
+  try {
+    mgmtIp = await resolveDeviceMgmtIp(baseUrl, config, deviceName, mgmtIfaceName);
+  } catch (err: any) {
+    return {
+      ok: false,
+      message: `Failed to resolve management IP for "${deviceName}" via FMG (${mgmtIfaceName}): ${err.message || "Unknown error"}`,
+      deviceName,
+    };
+  }
+
+  if (!mgmtIp) {
+    return {
+      ok: false,
+      message: `Could not resolve a management IP for "${deviceName}" on interface "${mgmtIfaceName}"`,
+      deviceName,
+    };
+  }
 
   const fgConfig: FortiGateConfig = {
-    host: String(pick.ip),
+    host: mgmtIp,
     port: 443,
     apiUser: config.fortigateApiUser || "",
     apiToken: config.fortigateApiToken,
     vdom: "root",
     verifySsl: config.fortigateVerifySsl === true,
-    mgmtInterface: config.mgmtInterface,
+    mgmtInterface: mgmtIfaceName,
   };
 
   const fgResult = await fgTestConnection(fgConfig);
@@ -463,22 +531,32 @@ export async function discoverDhcpSubnets(
 
     log("discover.device.start", "info", `Starting discovery for ${deviceName}`, deviceName);
 
-    // Direct mode: skip FMG entirely for per-device calls. Use the FortiGate's own
-    // REST API at the mgmt IP reported by FMG's device DB. All discovery steps are
-    // handled by fortigateService.discoverDhcpSubnets so there's a single source of
-    // truth for the FortiGate-side discovery shape.
+    // Direct mode: skip FMG entirely for per-device calls. Use the FortiGate's
+    // real management-interface IP (resolved through FMG's interface config —
+    // NOT FMG's own device.ip, which is often a FortiLink/mgmt-tunnel address
+    // we can't reach). All discovery steps are handled by
+    // fortigateService.discoverDhcpSubnets so there's a single source of truth
+    // for the FortiGate-side discovery shape.
     if (!useProxy) {
-      if (!rawDevice.ip) {
-        log("discover.device.skip", "error", `Skipping ${deviceName} — direct mode needs FMG to know the device's management IP, but no IP is recorded for this device`, deviceName);
-        return null;
-      }
       if (!config.fortigateApiToken) {
         log("discover.device.skip", "error", `Skipping ${deviceName} — direct mode requires "FortiGate API Token" to be set on the integration`, deviceName);
         return null;
       }
 
+      let directHost: string | null = null;
+      try {
+        directHost = await resolveDeviceMgmtIp(baseUrl, config, deviceName, mgmtIfaceName, signal);
+      } catch (err: any) {
+        log("discover.device.skip", "error", `Skipping ${deviceName} — failed to resolve management IP via FMG (${mgmtIfaceName}): ${err.message || "Unknown error"}`, deviceName);
+        return null;
+      }
+      if (!directHost) {
+        log("discover.device.skip", "error", `Skipping ${deviceName} — no management IP configured on interface "${mgmtIfaceName}"`, deviceName);
+        return null;
+      }
+
       const fgConfig: FortiGateConfig = {
-        host: rawDevice.ip,
+        host: directHost,
         port: 443,
         apiUser: config.fortigateApiUser || "",
         apiToken: config.fortigateApiToken,
@@ -511,7 +589,7 @@ export async function discoverDhcpSubnets(
           hostname: rawDevice.hostname || deviceName,
           serial:   rawDevice.sn || fgResult.devices[0]?.serial || "",
           model:    rawDevice.platform_str || fgResult.devices[0]?.model || "",
-          mgmtIp:   rawDevice.ip,
+          mgmtIp:   directHost,
         };
 
         log("discover.device.complete", "info", `Completed direct discovery for ${deviceName}`, deviceName);
