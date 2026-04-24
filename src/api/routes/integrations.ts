@@ -1360,7 +1360,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (existingAsset) {
           const updateData: Record<string, unknown> = {
             ipAddress: device.mgmtIp || existingAsset.ipAddress,
-            ...(device.mgmtIp ? { ipSource: integrationType } : {}),
+            ...(device.mgmtIp ? { ipSource: fgHostname || integrationType } : {}),
             hostname: device.hostname || existingAsset.hostname,
             model: device.model || existingAsset.model,
             learnedLocation: existingAsset.learnedLocation || fgHostname,
@@ -1384,7 +1384,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const newAsset = await prisma.asset.create({
         data: {
           ipAddress: device.mgmtIp || null,
-          ...(device.mgmtIp ? { ipSource: integrationType } : {}),
+          ...(device.mgmtIp ? { ipSource: fgHostname || integrationType } : {}),
           hostname: fgHostname,
           serialNumber: device.serial || null,
           manufacturer: "Fortinet",
@@ -1425,7 +1425,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           ? swJoinDate : undefined;
         const updateData: Record<string, unknown> = {
           ipAddress: sw.ipAddress || existingAsset.ipAddress,
-          ...(sw.ipAddress ? { ipSource: integrationType } : {}),
+          ...(sw.ipAddress ? { ipSource: sw.device || integrationType } : {}),
           hostname: sw.name || existingAsset.hostname,
           osVersion: sw.osVersion || existingAsset.osVersion,
           learnedLocation: sw.device || existingAsset.learnedLocation,
@@ -1442,7 +1442,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       } else {
         const createData: Record<string, unknown> = {
           ipAddress: sw.ipAddress || null,
-          ...(sw.ipAddress ? { ipSource: integrationType } : {}),
+          ...(sw.ipAddress ? { ipSource: sw.device || integrationType } : {}),
           hostname: sw.name || null,
           serialNumber: sw.serial || null,
           manufacturer: "Fortinet",
@@ -1523,7 +1523,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (existingAsset) {
         const updateData: Record<string, unknown> = {
           ipAddress: resolvedIp || existingAsset.ipAddress,
-          ...(resolvedIp ? { ipSource: integrationType } : {}),
+          ...(resolvedIp ? { ipSource: ap.device || integrationType } : {}),
           hostname: ap.name || existingAsset.hostname,
           model: ap.model || existingAsset.model,
           osVersion: ap.osVersion || existingAsset.osVersion,
@@ -1541,7 +1541,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         const newAsset = await prisma.asset.create({
           data: {
             ipAddress: resolvedIp || null,
-            ...(resolvedIp ? { ipSource: integrationType } : {}),
+            ...(resolvedIp ? { ipSource: ap.device || integrationType } : {}),
             macAddress: normalizedMac,
             macAddresses: normalizedMac ? [{ mac: normalizedMac, lastSeen: now, source: "fmg-discovery" }] : [],
             hostname: ap.name || null,
@@ -1880,7 +1880,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           macAddress: macList[0].mac,
           macAddresses: macList,
           ipAddress: entry.ipAddress,
-          ipSource: integrationType,
+          ipSource: entry.device || integrationType,
           status: "active",
           ...(asset.status !== "active" ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
           lastSeen: new Date(now),
@@ -2060,6 +2060,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           const newAsset = await prisma.asset.create({
             data: {
               ipAddress: resolvedIp,
+              ipSource: inv.device || integrationType,
               macAddress: normalizedMac || null,
               macAddresses: normalizedMac ? [{ mac: normalizedMac, lastSeen: now, source: "device-inventory", ...(inv.device ? { device: inv.device } : {}) }] : [],
               hostname: inv.hostname || null,
