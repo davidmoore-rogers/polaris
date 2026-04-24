@@ -316,7 +316,12 @@ export async function discoverDhcpSubnets(
   }
   const devicesDataRaw = devicesRes.result?.[0]?.data;
   if (!Array.isArray(devicesDataRaw) || devicesDataRaw.length === 0) {
-    log("discover.devices", "info", `No managed devices found in ADOM "${adom}"`);
+    const status = devicesRes.result?.[0]?.status;
+    if (status && status.code !== undefined && status.code !== 0) {
+      log("discover.devices", "error", `Device list query returned status ${status.code}: ${status.message || "(no message)"} for ADOM "${adom}" — check that the ADOM name is exact and the API user has read access to /dvmdb/adom/${adom}/device`);
+    } else {
+      log("discover.devices", "info", `No managed devices found in ADOM "${adom}"`);
+    }
     return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [], fortiSwitches: [], fortiAps: [], vips: [] };
   }
 
