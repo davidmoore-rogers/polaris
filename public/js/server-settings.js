@@ -33,7 +33,32 @@ document.addEventListener("DOMContentLoaded", function () {
 
   loadIdentificationTab();
   checkRamBanner();
+  checkLegacyHashBanner();
 });
+
+function checkLegacyHashBanner() {
+  if (typeof api === "undefined" || !api.users) return;
+  api.users.legacyHashes().then(function (data) {
+    var banner = document.getElementById("legacy-hash-banner");
+    if (!banner || !data || !data.count) {
+      if (banner) banner.style.display = "none";
+      return;
+    }
+    var names = (data.users || []).map(function (u) { return u.username; });
+    var preview = names.slice(0, 6).join(", ");
+    var more = names.length > 6 ? " and " + (names.length - 6) + " more" : "";
+    banner.className = "ram-banner ram-banner--warning";
+    banner.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="ram-banner-icon"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
+      '<div class="ram-banner-body">' +
+        '<div class="ram-banner-title">' + data.count + ' account' + (data.count === 1 ? '' : 's') + ' still using legacy password hashes</div>' +
+        'The following local user' + (data.count === 1 ? '' : 's') + ' ' + (data.count === 1 ? 'is' : 'are') + ' stored with bcrypt and will be upgraded to argon2id automatically on next successful login: ' +
+        '<strong>' + escapeHtml(preview) + '</strong>' + escapeHtml(more) + '. ' +
+        'To migrate immediately, reset the password from the Users page.' +
+      '</div>';
+    banner.style.display = "flex";
+  }).catch(function () { /* non-critical */ });
+}
 
 function checkRamBanner() {
   if (typeof api === "undefined" || !api.serverSettings) return;

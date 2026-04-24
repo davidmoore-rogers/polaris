@@ -95,6 +95,7 @@ const api = {
   },
   users: {
     list:          ()       => request("GET", "/users"),
+    legacyHashes:  ()       => request("GET", "/users/legacy-hashes"),
     create:        (body)   => request("POST", "/users", body),
     resetPassword: (id, b)  => request("PUT", `/users/${id}/password`, b),
     updateRole:    (id, b)  => request("PUT", `/users/${id}/role`, b),

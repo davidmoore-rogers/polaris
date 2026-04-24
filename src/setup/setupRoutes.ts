@@ -10,8 +10,8 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import pg from "pg";
-import bcrypt from "bcrypt";
 import { markSetupComplete } from "./detectSetup.js";
+import { hashPassword } from "../utils/password.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -181,7 +181,7 @@ router.post("/finalize", async (req, res) => {
     const appClient = new pg.Client({ connectionString: databaseUrl, connectionTimeoutMillis: 8000 });
     await appClient.connect();
 
-    const passwordHash = await bcrypt.hash(admin.password, 10);
+    const passwordHash = await hashPassword(admin.password);
     await appClient.query(
       `INSERT INTO users (id, username, password_hash, role, auth_provider, created_at, updated_at)
        VALUES (gen_random_uuid(), $1, $2, 'admin', 'local', NOW(), NOW())

@@ -4,8 +4,8 @@
 
 import { Router, type Request } from "express";
 import { z } from "zod";
-import bcrypt from "bcrypt";
 import { prisma } from "../../db.js";
+import { hashPassword, verifyPassword } from "../../utils/password.js";
 import { AppError } from "../../utils/errors.js";
 import { requireAuth, requireAdmin } from "../middleware/auth.js";
 import {
@@ -42,7 +42,18 @@ router.post("/login", async (req, res, next) => {
     const { username, password } = LoginSchema.parse(req.body);
     const user = await prisma.user.findUnique({ where: { username } });
 
-    if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+    // Constant-time verify: passing null stored hash still runs a dummy
+    // argon2 verify so response time is identical for unknown usernames.
+    const { valid, needsRehash } = await verifyPassword(password, user?.passwordHash ?? null);
+    if (!user || !valid) {
+      logEvent({
+        action: "auth.login.failed",
+        resourceType: "user",
+        resourceName: username,
+        level: "warning",
+        message: `Failed local login for "${username}"`,
+        details: { ip: req.ip, userAgent: req.get("user-agent") || undefined },
+      });
       throw new AppError(401, "Invalid username or password");
     }
 
@@ -53,8 +64,24 @@ router.post("/login", async (req, res, next) => {
     req.session.authProvider = user.authProvider || "local";
     req.session.lastActivity = Date.now();
 
-    // Update last login
-    await prisma.user.update({ where: { id: user.id }, data: { lastLogin: new Date() } });
+    // Silent hash migration: legacy bcrypt hashes (or argon2 hashes with
+    // weaker params than the current target) get upgraded on successful
+    // login without disturbing the user.
+    const updateData: { lastLogin: Date; passwordHash?: string } = { lastLogin: new Date() };
+    if (needsRehash) {
+      updateData.passwordHash = await hashPassword(password);
+    }
+    await prisma.user.update({ where: { id: user.id }, data: updateData });
+
+    logEvent({
+      action: "auth.login.local",
+      resourceType: "user",
+      resourceId: user.id,
+      resourceName: user.username,
+      actor: user.username,
+      message: `Local login: ${user.username}`,
+      details: { ip: req.ip, userAgent: req.get("user-agent") || undefined, rehashed: needsRehash || undefined },
+    });
 
     res.json({ ok: true, username: user.username, role: user.role });
   } catch (err) {

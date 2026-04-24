@@ -9,7 +9,7 @@
 import { SAML, type SamlConfig, type Profile, ValidateInResponseTo } from "@node-saml/node-saml";
 import { randomBytes } from "node:crypto";
 import { prisma } from "../db.js";
-import bcrypt from "bcrypt";
+import { hashPassword } from "../utils/password.js";
 
 // ─── SSO Settings (stored in Setting table) ─────────────────────────────────
 
@@ -204,7 +204,7 @@ export async function findOrProvisionSamlUser(profile: Profile) {
   }
 
   // Create with a random password hash (SAML users never use it)
-  const placeholderHash = await bcrypt.hash(randomBytes(32).toString("hex"), 10);
+  const placeholderHash = await hashPassword(randomBytes(32).toString("hex"));
 
   return prisma.user.create({
     data: {

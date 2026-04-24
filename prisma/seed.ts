@@ -5,16 +5,28 @@
  */
 
 import { PrismaClient } from "@prisma/client";
-import bcrypt from "bcrypt";
+import { hashPassword } from "../src/utils/password.js";
 
 const prisma = new PrismaClient();
 
 async function main() {
+  // Refuse to run in production. This script creates a default `admin`/`admin`
+  // account — acceptable for local dev, catastrophic if it lands in prod.
+  if (process.env.NODE_ENV === "production") {
+    console.error("");
+    console.error("  Refusing to seed: NODE_ENV=production.");
+    console.error("  This script creates a default admin/admin account and is");
+    console.error("  intended for local development only. Use the first-run");
+    console.error("  setup wizard to provision a production install.");
+    console.error("");
+    process.exit(1);
+  }
+
   console.log("Seeding database...");
 
   // ─── Default Admin User ────────────────────────────────────────────────────
 
-  const adminHash = await bcrypt.hash("admin", 10);
+  const adminHash = await hashPassword("admin");
   await prisma.user.upsert({
     where:  { username: "admin" },
     update: { role: "admin" },

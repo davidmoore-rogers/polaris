@@ -30,6 +30,32 @@ import "./jobs/decommissionStaleAssets.js";
 
 const app = express();
 
+// ─── Trust proxy (opt-in) ────────────────────────────────────────────────────
+// Only enable when running behind a reverse proxy that sets X-Forwarded-For.
+// Enabling this on a direct-to-internet deployment lets clients spoof their IP
+// and bypass the login rate limiter, so it stays off unless TRUST_PROXY is set.
+// Accepts a hop count (e.g. "1"), "loopback"/"linklocal"/"uniquelocal", or a
+// CIDR list — see https://expressjs.com/en/guide/behind-proxies.html
+const trustProxy = process.env.TRUST_PROXY;
+if (trustProxy) {
+  app.set("trust proxy", /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
+}
+
+// ─── Session secret ──────────────────────────────────────────────────────────
+// Hard-fail in production if SESSION_SECRET is unset; a predictable fallback
+// lets attackers forge session cookies. Dev keeps a fallback for convenience.
+function resolveSessionSecret(): string {
+  const secret = process.env.SESSION_SECRET;
+  if (secret && secret.length > 0) return secret;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "SESSION_SECRET is required when NODE_ENV=production. Set a long random value in .env before starting the server."
+    );
+  }
+  return "shelob-dev-secret-change-in-production";
+}
+const SESSION_SECRET = resolveSessionSecret();
+
 // ─── Security headers ────────────────────────────────────────────────────────
 app.use(
   helmet({
@@ -71,7 +97,7 @@ app.use(
       pool: sessionPool,
       createTableIfMissing: true,
     }),
-    secret: process.env.SESSION_SECRET || "shelob-dev-secret-change-in-production",
+    secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: {

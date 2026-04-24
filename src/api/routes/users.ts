@@ -4,9 +4,9 @@
 
 import { Router } from "express";
 import { z } from "zod";
-import bcrypt from "bcrypt";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
+import { hashPassword, isLegacyHash } from "../../utils/password.js";
 
 const router = Router();
 
@@ -29,6 +29,27 @@ const ResetPasswordSchema = z.object({
 
 const UpdateRoleSchema = z.object({
   role: z.enum(["admin", "networkadmin", "assetsadmin", "user", "readonly"]),
+});
+
+// GET /api/v1/users/legacy-hashes
+// Lists local users whose password is still stored as a legacy bcrypt hash.
+// Consumed by the Server Settings page banner. Returns only local users —
+// SAML/Azure users have throwaway placeholder hashes that aren't used for
+// authentication, so they don't need migration.
+router.get("/legacy-hashes", async (_req, res, next) => {
+  try {
+    const locals = await prisma.user.findMany({
+      where: { authProvider: "local" },
+      select: { id: true, username: true, passwordHash: true, lastLogin: true },
+      orderBy: { username: "asc" },
+    });
+    const legacy = locals
+      .filter((u) => isLegacyHash(u.passwordHash))
+      .map((u) => ({ id: u.id, username: u.username, lastLogin: u.lastLogin }));
+    res.json({ count: legacy.length, users: legacy });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // GET /api/v1/users
@@ -74,7 +95,7 @@ router.post("/", async (req, res, next) => {
     const existing = await prisma.user.findUnique({ where: { username } });
     if (existing) throw new AppError(409, `User "${username}" already exists`);
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await hashPassword(password);
     const user = await prisma.user.create({
       data: { username, passwordHash, role: role || "readonly", authProvider: "local" },
       select: { id: true, username: true, role: true, authProvider: true, createdAt: true },
@@ -94,7 +115,7 @@ router.put("/:id/password", async (req, res, next) => {
     if (!user) throw new AppError(404, "User not found");
     if (user.authProvider === "azure") throw new AppError(400, "Cannot reset password for Azure SSO users");
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await hashPassword(password);
     await prisma.user.update({
       where: { id },
       data: { passwordHash },

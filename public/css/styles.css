@@ -492,6 +492,20 @@ code {
   background: rgba(198,40,40,0.06);
 }
 
+/* Warning variant — reuses .ram-banner layout with amber/yellow tones. */
+.ram-banner.ram-banner--warning {
+  border-color: rgba(255,214,0,0.35);
+  background: rgba(255,214,0,0.07);
+}
+.ram-banner.ram-banner--warning .ram-banner-icon,
+.ram-banner.ram-banner--warning .ram-banner-title {
+  color: var(--color-warning);
+}
+[data-theme="light"] .ram-banner.ram-banner--warning {
+  border-color: rgba(245,127,23,0.35);
+  background: rgba(245,127,23,0.08);
+}
+
 /* ─── Main Content ─────────────────────────────────────────────────────────── */
 .main {
   flex: 1;
