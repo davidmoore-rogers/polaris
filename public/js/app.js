@@ -486,6 +486,13 @@ function renderUserBadge() {
     pageHeader.appendChild(header);
   }
 
+  // Idempotent: drop any previously-rendered badge. renderNav (and hence this)
+  // can fire more than once per page load (cache-warm-then-server path in
+  // app.js; page-specific DOMContentLoaded handlers like map.js that re-run
+  // renderNav after their own fetchCurrentUser).
+  var existing = header.querySelectorAll(".user-badge");
+  for (var i = 0; i < existing.length; i++) existing[i].remove();
+
   var initials = _getUserInitials(currentUsername);
   var color = _getInitialsColor(currentUsername);
 
