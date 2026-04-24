@@ -1778,7 +1778,7 @@ function renderCustomizationTab() {
     '<div class="settings-card">' +
       '<h4>Logo</h4>' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
-        'Upload a custom logo to replace the default. Recommended size: 280\u00d7280px or larger. Supported formats: PNG, JPEG, WebP, SVG.' +
+        'Upload a custom logo to replace the default. Recommended size: 280\u00d7280px or larger. Supported formats: PNG, JPEG, WebP.' +
       '</p>' +
       '<div style="display:flex;align-items:flex-start;gap:1.5rem;flex-wrap:wrap">' +
         '<div style="flex-shrink:0">' +
