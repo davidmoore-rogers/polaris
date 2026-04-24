@@ -225,6 +225,7 @@ Integration
 Asset
   id              UUID PK
   ipAddress       String?
+  ipSource        String?         -- Where ipAddress was last set from: "manual", "fortimanager", "fortigate", etc.
   macAddress      String?         -- Most recently seen MAC
   macAddresses    Json            -- [{mac, lastSeen, source?}] — full MAC history
   hostname        String?
@@ -244,7 +245,7 @@ Asset
   lastSeenSwitch  String?         -- e.g. "FS-248E-01/port15"
   lastSeenAp      String?         -- FortiAP name
   lastSeen        DateTime?
-  associatedIps   Json            -- [{ip, interfaceName?, source?, lastSeen?}] — additional IPs; source="manual" preserved across discovery
+  associatedIps   Json            -- [{ip, interfaceName?, source?, lastSeen?, ptrName?}] — additional IPs; source="manual" preserved across discovery
   associatedUsers Json            -- [{user, domain?, lastSeen, source?}]
   acquiredAt      DateTime?
   warrantyExpiry  DateTime?
