@@ -810,12 +810,24 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
     if (device) {
       const entry = activeDiscovery.get(integrationId);
       if (entry) {
-        if (step === "discover.device.complete") {
+        // Any terminal per-device event clears the device from the active
+        // set. `discover.device.complete` is the happy path; `.skip` and
+        // the error-level `discover.device` event both also end per-device
+        // work and must release the slot — otherwise devices that time out
+        // or error accumulate in activeDevices and the UI shows far more
+        // gates "in flight" than the concurrency cap actually allows.
+        const isTerminal =
+          step === "discover.device.complete" ||
+          step === "discover.device.skip" ||
+          (step === "discover.device" && level === "error");
+        if (isTerminal) {
           const start = entry.deviceStartedAt.get(device);
           entry.deviceStartedAt.delete(device);
           entry.activeDevices.delete(device);
           entry.slowAlertedDevices.delete(device);
-          if (start !== undefined) {
+          // Only record a timing sample for successful completions — skips
+          // and failures shouldn't influence the slow-run baseline.
+          if (step === "discover.device.complete" && start !== undefined) {
             const unitKey = `${integrationId}:${device}`;
             recordSample(unitKey, Date.now() - start).catch(() => {});
           }
