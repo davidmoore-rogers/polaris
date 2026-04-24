@@ -24,6 +24,26 @@ const router = Router();
 // Track in-flight DHCP discovery per integration — abort previous if re-saved
 const activeDiscovery = new Map<string, { controller: AbortController; name: string; currentDevice?: string }>();
 
+// Safely stringify a proxy-query response, converting v8 string-limit and oversized
+// payloads into a helpful 413 instead of an opaque 500.
+const PROXY_RESPONSE_MAX_BYTES = 25 * 1024 * 1024;
+function sendProxyJson(res: import("express").Response, result: unknown): void {
+  let body: string;
+  try {
+    body = JSON.stringify(result);
+  } catch (e) {
+    if (e instanceof RangeError) {
+      throw new AppError(413, "Response too large to return — narrow the query with filter= or format= parameters");
+    }
+    throw e;
+  }
+  if (body.length > PROXY_RESPONSE_MAX_BYTES) {
+    const mb = (body.length / 1024 / 1024).toFixed(1);
+    throw new AppError(413, `Response is ${mb} MB — narrow the query with filter= or format= parameters`);
+  }
+  res.type("application/json").send(body);
+}
+
 function inferAssetTypeFromOs(os: string | null | undefined): "workstation" | "server" | "other" {
   if (!os) return "other";
   const lower = os.toLowerCase();
@@ -442,7 +462,7 @@ router.post("/:id/query", async (req, res, next) => {
         params: z.array(z.unknown()),
       }).parse(req.body);
       const result = await fortimanager.proxyQuery(integration.config as any, method, params);
-      res.json(result);
+      sendProxyJson(res, result);
       return;
     }
 
@@ -453,7 +473,7 @@ router.post("/:id/query", async (req, res, next) => {
         query: z.record(z.string()).optional(),
       }).parse(req.body);
       const result = await fortigate.proxyQuery(integration.config as any, method, path, query);
-      res.json(result);
+      sendProxyJson(res, result);
       return;
     }
 
@@ -463,7 +483,7 @@ router.post("/:id/query", async (req, res, next) => {
         query: z.record(z.string()).optional(),
       }).parse(req.body);
       const result = await entraId.proxyQuery(integration.config as any, path, query);
-      res.json(result);
+      sendProxyJson(res, result);
       return;
     }
 
@@ -476,7 +496,7 @@ router.post("/:id/query", async (req, res, next) => {
         sizeLimit:  z.number().int().min(1).max(500).optional(),
       }).parse(req.body);
       const result = await activeDirectory.proxyQuery(integration.config as any, body);
-      res.json(result);
+      sendProxyJson(res, result);
       return;
     }
 
