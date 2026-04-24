@@ -229,7 +229,9 @@ Asset
   macAddress      String?         -- Most recently seen MAC
   macAddresses    Json            -- [{mac, lastSeen, source?}] — full MAC history
   hostname        String?
-  dnsName         String?         -- FQDN
+  dnsName         String?         -- FQDN from PTR lookup
+  dnsNameFetchedAt DateTime?      -- When the last PTR lookup ran (success or failure)
+  dnsNameTtl      Int?            -- TTL (seconds) from the PTR record; null = unknown (standard mode falls back to 3600s)
   assetTag        String? @unique -- Internal tracking tag
   serialNumber    String?
   manufacturer    String?

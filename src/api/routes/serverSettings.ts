@@ -654,9 +654,11 @@ router.post("/dns/test", async (req, res, next) => {
       const resolver = await createResolver(t.settings);
       const start = Date.now();
       try {
-        const hostnames = await resolver.reverse(testIp);
+        const records = await resolver.reverse(testIp);
         const elapsed = Date.now() - start;
-        return { server: t.label, ok: true, message: `${testIp} → ${hostnames[0] || "(no PTR)"} in ${elapsed}ms` };
+        const name = records[0]?.name || "(no PTR)";
+        const ttlNote = records[0]?.ttl != null ? ` TTL ${records[0].ttl}s` : "";
+        return { server: t.label, ok: true, message: `${testIp} → ${name}${ttlNote} in ${elapsed}ms` };
       } catch (dnsErr: any) {
         const elapsed = Date.now() - start;
         if (dnsErr.code === "ENOTFOUND" || dnsErr.code === "ENODATA") {

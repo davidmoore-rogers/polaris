@@ -1963,17 +1963,27 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // Phase 8 — DNS reverse lookup for assets missing dnsName
   // ══════════════════════════════════════════════════════════════════════════════
 
-  const assetsNeedingDns = assetIdx.all().filter((a: any) => a.ipAddress && !a.dnsName);
+  const DEFAULT_PTR_TTL_S = 3600;
+  const nowMs = Date.now();
+  const assetsNeedingDns = assetIdx.all().filter((a: any) => {
+    if (!a.ipAddress) return false;
+    if (!a.dnsNameFetchedAt) return true;
+    const fetchedMs = new Date(a.dnsNameFetchedAt).getTime();
+    const ttlMs = ((a.dnsNameTtl ?? DEFAULT_PTR_TTL_S) * 1000);
+    return (nowMs - fetchedMs) > ttlMs;
+  });
   if (assetsNeedingDns.length > 0) {
-    syncLog("info", `DNS lookup: resolving ${assetsNeedingDns.length} assets missing dnsName`);
+    syncLog("info", `DNS lookup: resolving ${assetsNeedingDns.length} assets with expired/missing PTR`);
     const dnsResolver = await getConfiguredResolver();
     const dnsResults = await batchSettled(assetsNeedingDns, async (asset: any) => {
-      const hostnames = await dnsResolver.reverse(asset.ipAddress);
-      if (hostnames.length > 0) {
-        await prisma.asset.update({ where: { id: asset.id }, data: { dnsName: hostnames[0] } });
-        asset.dnsName = hostnames[0];
-        return hostnames[0];
+      const fetchedAt = new Date();
+      const records = await dnsResolver.reverse(asset.ipAddress);
+      if (records.length > 0) {
+        await prisma.asset.update({ where: { id: asset.id }, data: { dnsName: records[0].name, dnsNameFetchedAt: fetchedAt, dnsNameTtl: records[0].ttl } });
+        asset.dnsName = records[0].name;
+        return records[0].name;
       }
+      await prisma.asset.update({ where: { id: asset.id }, data: { dnsNameFetchedAt: fetchedAt, dnsNameTtl: null } });
       return null;
     });
     for (const r of dnsResults) {

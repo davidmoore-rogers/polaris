@@ -8,6 +8,10 @@
  *
  * Uses an isolated resolver so custom servers don't affect the rest of
  * the process's DNS resolution.
+ *
+ * All resolvers return PtrRecord[] so callers can cache results with TTL.
+ * Standard mode cannot retrieve TTL from Node's built-in API and returns
+ * ttl: null — callers should apply a sensible default (e.g. 3600s).
  */
 
 import dns from "node:dns/promises";
@@ -23,8 +27,14 @@ export interface DnsSettings {
   dohUrl: string;
 }
 
+/** A single PTR answer. ttl is null when the resolver cannot retrieve it (standard mode). */
+export interface PtrRecord {
+  name: string;
+  ttl: number | null;
+}
+
 export interface ResolverLike {
-  reverse(ip: string): Promise<string[]>;
+  reverse(ip: string): Promise<PtrRecord[]>;
 }
 
 // ─── Settings CRUD ─────────────────────────────────────────────────────────
@@ -98,13 +108,19 @@ export async function createResolver(settings: DnsSettings): Promise<ResolverLik
     // DoT: tls.connect() resolves hostnames natively — pass through as-is
     return { reverse: (ip: string) => dotReverse(ip, settings.servers) };
   }
-  // Standard mode — setServers() requires IPs, so resolve any hostnames first
+  // Standard mode — setServers() requires IPs, so resolve any hostnames first.
+  // Node's dns.Resolver.reverse() does not expose TTL, so we wrap it and return ttl: null.
   const resolver = new dns.Resolver();
   if (settings.servers.length > 0) {
     const ips = await resolveServerNames(settings.servers);
     if (ips.length > 0) resolver.setServers(ips);
   }
-  return resolver;
+  return {
+    reverse: async (ip: string): Promise<PtrRecord[]> => {
+      const names = await resolver.reverse(ip);
+      return names.map((name) => ({ name, ttl: null }));
+    },
+  };
 }
 
 /**
@@ -147,7 +163,7 @@ function expandIpv6(ip: string): string {
 // append ?name=<ptr>&type=PTR with Accept: application/dns-json.
 // ────────────────────────────────────────────────────────────────────────────
 
-async function dohReverse(ip: string, dohUrl: string): Promise<string[]> {
+async function dohReverse(ip: string, dohUrl: string): Promise<PtrRecord[]> {
   const ptrName = ipToPtrName(ip);
   const sep = dohUrl.includes("?") ? "&" : "?";
   const url = `${dohUrl}${sep}ct=application/dns-json&name=${encodeURIComponent(ptrName)}&type=PTR`;
@@ -188,7 +204,10 @@ async function dohReverse(ip: string, dohUrl: string): Promise<string[]> {
   if (!data.Answer || !Array.isArray(data.Answer)) return [];
   return data.Answer
     .filter((a: any) => a.type === 12)
-    .map((a: any) => (a.data || "").replace(/\.$/, ""));
+    .map((a: any) => ({
+      name: (a.data || "").replace(/\.$/, ""),
+      ttl: typeof a.TTL === "number" ? a.TTL : null,
+    }));
 }
 
 // ─── DNS over TLS (DoT) ────────────────────────────────────────────────────
@@ -198,7 +217,7 @@ async function dohReverse(ip: string, dohUrl: string): Promise<string[]> {
 // Falls through to the next server on failure.
 // ────────────────────────────────────────────────────────────────────────────
 
-async function dotReverse(ip: string, servers: string[]): Promise<string[]> {
+async function dotReverse(ip: string, servers: string[]): Promise<PtrRecord[]> {
   const ptrName = ipToPtrName(ip);
   const query = buildDnsQuery(ptrName, 12); // QTYPE 12 = PTR
 
@@ -311,7 +330,7 @@ function sendTlsQuery(host: string, port: number, query: Buffer): Promise<Buffer
 
 // ─── DNS Response Parser ────────────────────────────────────────────────────
 
-function parseDnsResponse(buf: Buffer): string[] {
+function parseDnsResponse(buf: Buffer): PtrRecord[] {
   if (buf.length < 12) return [];
 
   const ancount = buf.readUInt16BE(6);
@@ -326,18 +345,20 @@ function parseDnsResponse(buf: Buffer): string[] {
   }
 
   // Parse answer records
-  const results: string[] = [];
+  // RR layout after name: TYPE(2) CLASS(2) TTL(4) RDLENGTH(2) RDATA(rdlength)
+  const results: PtrRecord[] = [];
   for (let i = 0; i < ancount; i++) {
     if (offset >= buf.length) break;
     offset = skipDnsName(buf, offset);
     if (offset + 10 > buf.length) break;
     const rtype = buf.readUInt16BE(offset);
+    const ttl = buf.readUInt32BE(offset + 4);
     const rdlength = buf.readUInt16BE(offset + 8);
     offset += 10;
 
     if (rtype === 12) { // PTR record
       const name = readDnsName(buf, offset);
-      if (name) results.push(name);
+      if (name) results.push({ name, ttl });
     }
     offset += rdlength;
   }
