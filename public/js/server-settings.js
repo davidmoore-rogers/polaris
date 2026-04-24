@@ -597,11 +597,11 @@ async function loadCertificates() {
         '<span id="https-status" style="font-size:0.82rem;margin-left:8px"></span>' +
       '</div>' +
     '</div>' +
-    '<div class="settings-card">' +
+    '<div class="settings-card" style="display:flex;flex-direction:column">' +
       '<h4>Trusted Certificate Authorities</h4>' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">CA certificates used to verify remote servers when Shelob connects to integrations, syslog, and archive targets. These are also included in the HTTPS trust chain.</p>' +
       '<ul class="cert-list" id="ca-list"><li class="cert-empty">Loading...</li></ul>' +
-      '<div style="margin-top:1rem">' +
+      '<div style="margin-top:auto;padding-top:1rem">' +
         '<div class="upload-area" id="ca-upload-area">' +
           '<input type="file" id="ca-file-input" accept=".pem,.crt,.cer,.der">' +
           '<strong style="color:var(--color-text-primary)">Upload CA Certificate</strong>' +
@@ -609,19 +609,21 @@ async function loadCertificates() {
         '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="settings-card">' +
+    '<div class="settings-card" style="display:flex;flex-direction:column">' +
       '<h4>Server Certificates</h4>' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">TLS certificate and private key used for HTTPS. Upload a matched certificate and key pair, then select them in the HTTPS Configuration above.</p>' +
       '<ul class="cert-list" id="server-cert-list"><li class="cert-empty">Loading...</li></ul>' +
-      '<div style="margin-top:1rem;display:flex;gap:12px;flex-wrap:wrap">' +
+      '<div style="margin-top:auto;padding-top:1rem;display:flex;gap:12px;flex-wrap:wrap">' +
         '<div class="upload-area" id="cert-upload-area" style="flex:1;min-width:200px">' +
           '<input type="file" id="cert-file-input" accept=".pem,.crt,.cer,.pfx,.p12,.key" multiple>' +
           '<strong style="color:var(--color-text-primary)">Upload Certificate / Key</strong>' +
           '<p>Click to select certificate (.pem, .crt) and/or key (.key, .pem) files</p>' +
         '</div>' +
         '<div class="upload-area" id="generate-cert-area" style="flex:1;min-width:200px">' +
-          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:28px;height:28px;margin-bottom:4px;opacity:0.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/><line x1="12" y1="15" x2="12" y2="19"/></svg>' +
-          '<strong style="color:var(--color-text-primary)">Generate Self-Signed</strong>' +
+          '<div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:6px">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:22px;height:22px;flex-shrink:0;opacity:0.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/><line x1="12" y1="15" x2="12" y2="19"/></svg>' +
+            '<strong style="color:var(--color-text-primary)">Generate Self-Signed</strong>' +
+          '</div>' +
           '<p>Create a new self-signed certificate for testing or internal use</p>' +
         '</div>' +
       '</div>' +
