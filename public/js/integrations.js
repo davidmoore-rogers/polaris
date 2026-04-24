@@ -234,7 +234,6 @@ function fortiManagerFormHTML(defaults) {
           '<input type="checkbox" id="f-fortigateVerifySsl" ' + (d.fortigateVerifySsl ? "checked" : "") + ' style="width:auto">' +
           '<label for="f-fortigateVerifySsl" style="margin:0">Verify SSL certificate on FortiGates</label>' +
         '</div>' +
-        '<p class="hint" style="margin-top:0.25rem;margin-bottom:0">Leave unchecked to accept self-signed certs on managed FortiGates. Separate from the FortiManager verify-SSL setting above.</p>' +
       '</div>' +
     '</div>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
