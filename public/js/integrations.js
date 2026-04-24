@@ -149,6 +149,7 @@ async function loadIntegrations() {
             (intg.type === "fortimanager" ? '<button class="btn btn-sm btn-secondary" onclick="openApiQueryModal(\'' + intg.id + '\', \'' + escapeHtml(config.adom || 'root') + '\')">Query API</button>' : '') +
             (intg.type === "fortigate" ? '<button class="btn btn-sm btn-secondary" onclick="openFgtApiQueryModal(\'' + intg.id + '\', \'' + escapeHtml(config.vdom || 'root') + '\')">Query API</button>' : '') +
             (intg.type === "entraid" ? '<button class="btn btn-sm btn-secondary" onclick="openEntraApiQueryModal(\'' + intg.id + '\')">Query API</button>' : '') +
+            (intg.type === "activedirectory" ? '<button class="btn btn-sm btn-secondary" onclick="openAdApiQueryModal(\'' + intg.id + '\')">Query API</button>' : '') +
             '<button class="btn btn-sm btn-secondary" onclick="testConnection(\'' + intg.id + '\', this)">Test Connection</button>' +
             '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + intg.id + '\')">Edit</button>' +
             '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + intg.id + '\', \'' + escapeHtml(intg.name) + '\')">Delete</button>' +
@@ -1433,6 +1434,221 @@ function openEntraApiQueryModal(id) {
 
   document.getElementById("entra-copy-btn").addEventListener("click", function () {
     var text = document.getElementById("entra-response").textContent;
+    var btn = this;
+    navigator.clipboard.writeText(text).then(function () {
+      btn.textContent = "Copied!";
+      setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+    }).catch(function () { showToast("Copy failed", "error"); });
+  });
+}
+
+// ─── Active Directory LDAP Query modal ──────────────────────────────────────
+
+var _AD_PRESET_QUERIES = [
+  {
+    name: "All computers (summary)",
+    filter: "(&(objectCategory=computer)(objectClass=computer))",
+    attributes: "cn, dNSHostName, operatingSystem, operatingSystemVersion, userAccountControl, lastLogonTimestamp",
+    sizeLimit: "50",
+  },
+  {
+    name: "Servers (by OS)",
+    filter: "(&(objectCategory=computer)(objectClass=computer)(operatingSystem=*Server*))",
+    attributes: "cn, dNSHostName, operatingSystem, operatingSystemVersion, lastLogonTimestamp, whenCreated",
+    sizeLimit: "50",
+  },
+  {
+    name: "Workstations (non-server OS)",
+    filter: "(&(objectCategory=computer)(objectClass=computer)(!(operatingSystem=*Server*)))",
+    attributes: "cn, dNSHostName, operatingSystem, operatingSystemVersion, lastLogonTimestamp",
+    sizeLimit: "50",
+  },
+  {
+    name: "Disabled computer accounts",
+    filter: "(&(objectCategory=computer)(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=2))",
+    attributes: "cn, dNSHostName, operatingSystem, userAccountControl, whenCreated, distinguishedName",
+    sizeLimit: "50",
+  },
+  {
+    name: "Never logged on computers",
+    filter: "(&(objectCategory=computer)(objectClass=computer)(!(lastLogonTimestamp=*)))",
+    attributes: "cn, dNSHostName, operatingSystem, whenCreated, distinguishedName",
+    sizeLimit: "50",
+  },
+  {
+    name: "Computer by hostname (edit CN=)",
+    filter: "(&(objectCategory=computer)(cn=HOSTNAME*))",
+    attributes: "cn, dNSHostName, distinguishedName, operatingSystem, operatingSystemVersion, objectGUID, objectSid, userAccountControl, lastLogonTimestamp, whenCreated, description",
+    sizeLimit: "10",
+  },
+  {
+    name: "All OUs (directory structure)",
+    filter: "(objectClass=organizationalUnit)",
+    attributes: "ou, distinguishedName, description",
+    sizeLimit: "200",
+  },
+  {
+    name: "User accounts (summary)",
+    filter: "(&(objectCategory=person)(objectClass=user))",
+    attributes: "sAMAccountName, displayName, mail, userAccountControl, lastLogon, distinguishedName",
+    sizeLimit: "50",
+  },
+];
+
+function _adLoadQueries() {
+  try {
+    var stored = JSON.parse(localStorage.getItem("shelob-ad-queries") || "null");
+    if (!stored) {
+      localStorage.setItem("shelob-ad-queries", JSON.stringify(_AD_PRESET_QUERIES));
+      return _AD_PRESET_QUERIES.slice();
+    }
+    return stored;
+  } catch (_) { return []; }
+}
+
+function _adPersistQueries(queries) {
+  localStorage.setItem("shelob-ad-queries", JSON.stringify(queries));
+}
+
+function _adRenderSavedSelect(queries, selectValue) {
+  var sel = document.getElementById("ad-saved-select");
+  if (!sel) return;
+  sel.innerHTML = '<option value="">— load a saved query —</option>' +
+    queries.map(function (q, i) {
+      return '<option value="' + i + '"' + (String(i) === String(selectValue) ? " selected" : "") + '>' + escapeHtml(q.name) + '</option>';
+    }).join("");
+}
+
+function openAdApiQueryModal(id) {
+  var body =
+    '<div style="margin-bottom:0.75rem">' +
+      '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.4rem">Saved Queries</p>' +
+      '<div style="display:flex;gap:6px;align-items:center">' +
+        '<select id="ad-saved-select" style="flex:1"></select>' +
+        '<button class="btn btn-sm btn-secondary" id="ad-load-btn">Load</button>' +
+        '<button class="btn btn-sm btn-danger" id="ad-delete-btn">Delete</button>' +
+      '</div>' +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:0 0 0.75rem">' +
+    '<div class="form-group">' +
+      '<label>Filter <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(LDAP search filter)</span></label>' +
+      '<input type="text" id="ad-filter" value="(&(objectCategory=computer)(objectClass=computer))" style="font-family:monospace;font-size:0.85rem">' +
+      '<p class="hint">Examples: <code>(&(objectCategory=computer)(operatingSystem=*Server*))</code> &nbsp;·&nbsp; <code>(&(objectCategory=person)(objectClass=user))</code></p>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Attributes <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(comma-separated; leave empty for all)</span></label>' +
+      '<input type="text" id="ad-attributes" value="cn, dNSHostName, operatingSystem, operatingSystemVersion, userAccountControl, lastLogonTimestamp" style="font-family:monospace;font-size:0.85rem">' +
+    '</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end">' +
+      '<div class="form-group" style="margin-bottom:0">' +
+        '<label>Base DN override <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(optional)</span></label>' +
+        '<input type="text" id="ad-basedn" placeholder="Defaults to integration base DN" style="font-family:monospace;font-size:0.85rem">' +
+      '</div>' +
+      '<div class="form-group" style="margin-bottom:0">' +
+        '<label>Scope</label>' +
+        '<select id="ad-scope" style="width:auto">' +
+          '<option value="sub" selected>Subtree (recursive)</option>' +
+          '<option value="one">One level</option>' +
+          '<option value="base">Base only</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="form-group" style="margin-bottom:0">' +
+        '<label>Limit</label>' +
+        '<input type="number" id="ad-sizelimit" value="50" min="1" max="500" style="width:70px">' +
+      '</div>' +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;margin:0.75rem 0"><button class="btn btn-primary" id="ad-send">Send</button></div>' +
+    '<div style="display:flex;gap:6px;align-items:center;margin-bottom:0.25rem">' +
+      '<input type="text" id="ad-save-name" placeholder="Name this query to save it…" style="flex:1;font-size:0.85rem">' +
+      '<button class="btn btn-sm btn-secondary" id="ad-save-btn">Save</button>' +
+    '</div>' +
+    '<div id="ad-response-wrap" style="display:none;margin-top:1rem">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">' +
+        '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0">Response</p>' +
+        '<button class="btn btn-sm btn-secondary" id="ad-copy-btn" style="padding:2px 10px;font-size:0.75rem">Copy</button>' +
+      '</div>' +
+      '<pre id="ad-response" style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
+    '</div>';
+
+  var footer = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
+
+  openModal("Active Directory LDAP Query", body, footer, { wide: true });
+
+  var savedQueries = _adLoadQueries();
+  _adRenderSavedSelect(savedQueries);
+
+  document.getElementById("ad-load-btn").addEventListener("click", function () {
+    var idx = parseInt(document.getElementById("ad-saved-select").value, 10);
+    if (isNaN(idx) || !savedQueries[idx]) return;
+    var q = savedQueries[idx];
+    document.getElementById("ad-filter").value = q.filter || "";
+    document.getElementById("ad-attributes").value = q.attributes || "";
+    if (q.sizeLimit) document.getElementById("ad-sizelimit").value = q.sizeLimit;
+    document.getElementById("ad-save-name").value = q.name;
+  });
+
+  document.getElementById("ad-delete-btn").addEventListener("click", async function () {
+    var idx = parseInt(document.getElementById("ad-saved-select").value, 10);
+    if (isNaN(idx) || !savedQueries[idx]) return;
+    var ok = await showConfirm("Delete saved query \"" + savedQueries[idx].name + "\"?");
+    if (!ok) return;
+    savedQueries.splice(idx, 1);
+    _adPersistQueries(savedQueries);
+    _adRenderSavedSelect(savedQueries);
+  });
+
+  document.getElementById("ad-save-btn").addEventListener("click", function () {
+    var name = document.getElementById("ad-save-name").value.trim();
+    if (!name) { showToast("Enter a name for this query", "error"); return; }
+    var filter = document.getElementById("ad-filter").value.trim();
+    var attributes = document.getElementById("ad-attributes").value;
+    var sizeLimit = document.getElementById("ad-sizelimit").value;
+    var existIdx = -1;
+    savedQueries.forEach(function (q, i) { if (q.name === name) existIdx = i; });
+    var entry = { name: name, filter: filter, attributes: attributes, sizeLimit: sizeLimit };
+    if (existIdx >= 0) {
+      savedQueries[existIdx] = entry;
+    } else {
+      savedQueries.push(entry);
+      existIdx = savedQueries.length - 1;
+    }
+    _adPersistQueries(savedQueries);
+    _adRenderSavedSelect(savedQueries, existIdx);
+    showToast("Query saved");
+  });
+
+  document.getElementById("ad-send").addEventListener("click", async function () {
+    var btn = this;
+    var filter = document.getElementById("ad-filter").value.trim();
+    if (!filter) { showToast("Enter a filter (e.g. (&(objectCategory=computer)(objectClass=computer)))", "error"); return; }
+    var attrsRaw = document.getElementById("ad-attributes").value;
+    var attrs = attrsRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    var baseDn = document.getElementById("ad-basedn").value.trim() || undefined;
+    var scope = document.getElementById("ad-scope").value;
+    var sizeLimit = parseInt(document.getElementById("ad-sizelimit").value, 10) || 50;
+
+    btn.disabled = true;
+    btn.textContent = "Sending…";
+    var responseWrap = document.getElementById("ad-response-wrap");
+    var responsePre = document.getElementById("ad-response");
+    try {
+      var body = { filter: filter, scope: scope, sizeLimit: sizeLimit };
+      if (attrs.length > 0) body.attributes = attrs;
+      if (baseDn) body.baseDn = baseDn;
+      var result = await api.integrations.query(id, body);
+      responseWrap.style.display = "";
+      responsePre.textContent = JSON.stringify(result, null, 2);
+    } catch (err) {
+      responseWrap.style.display = "";
+      responsePre.textContent = "Error: " + err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Send";
+    }
+  });
+
+  document.getElementById("ad-copy-btn").addEventListener("click", function () {
+    var text = document.getElementById("ad-response").textContent;
     var btn = this;
     navigator.clipboard.writeText(text).then(function () {
       btn.textContent = "Copied!";
