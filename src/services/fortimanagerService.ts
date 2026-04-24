@@ -6,6 +6,7 @@
 
 import { Netmask } from "netmask";
 import { AppError } from "../utils/errors.js";
+import { discoverDhcpSubnets as discoverViaFortigate, type FortiGateConfig } from "./fortigateService.js";
 
 export interface FortiManagerConfig {
   host: string;
@@ -25,7 +26,10 @@ export interface FortiManagerConfig {
   inventoryIncludeInterfaces?: string[];
   deviceInclude?: string[];   // FortiGate device names to include (wildcards ok). Matched against name/hostname.
   deviceExclude?: string[];   // FortiGate device names to exclude. Ignored if deviceInclude is non-empty.
-  discoveryParallelism?: number; // Max concurrent FortiGates during discovery (default 5).
+  discoveryParallelism?: number; // Max concurrent FortiGates during discovery (default 5). Forced to 1 when useProxy is true.
+  useProxy?: boolean;         // If true (default), all per-device queries go through FMG's /sys/proxy/json and /pm/config. If false, queries go direct to each FortiGate's management IP using fortigateApiUser + fortigateApiToken.
+  fortigateApiUser?: string;  // Only used when useProxy is false — REST API admin username configured on each managed FortiGate.
+  fortigateApiToken?: string; // Only used when useProxy is false — Bearer token for the REST API admin on each managed FortiGate.
 }
 
 interface JsonRpcRequest {
@@ -368,6 +372,7 @@ export async function discoverDhcpSubnets(
   };
 
   const mgmtIfaceName = config.mgmtInterface || "mgmt";
+  const useProxy = config.useProxy !== false; // default true
 
   // Per-device discovery: runs all 8 RPC steps and returns local result arrays.
   // Isolated from shared state — safe to run concurrently across devices.
@@ -382,6 +387,75 @@ export async function discoverDhcpSubnets(
     if (signal?.aborted) return null;
 
     log("discover.device.start", "info", `Starting discovery for ${deviceName}`, deviceName);
+
+    // Direct mode: skip FMG entirely for per-device calls. Use the FortiGate's own
+    // REST API at the mgmt IP reported by FMG's device DB. All discovery steps are
+    // handled by fortigateService.discoverDhcpSubnets so there's a single source of
+    // truth for the FortiGate-side discovery shape.
+    if (!useProxy) {
+      if (!rawDevice.ip) {
+        log("discover.device.skip", "error", `Skipping ${deviceName} — direct mode needs FMG to know the device's management IP, but no IP is recorded for this device`, deviceName);
+        return null;
+      }
+      if (!config.fortigateApiToken) {
+        log("discover.device.skip", "error", `Skipping ${deviceName} — direct mode requires "FortiGate API Token" to be set on the integration`, deviceName);
+        return null;
+      }
+
+      const fgConfig: FortiGateConfig = {
+        host: rawDevice.ip,
+        port: 443,
+        apiUser: config.fortigateApiUser || "",
+        apiToken: config.fortigateApiToken,
+        vdom: "root",
+        verifySsl: config.verifySsl === true,
+        mgmtInterface: config.mgmtInterface,
+        dhcpInclude: config.interfaceInclude ?? config.dhcpInclude,
+        dhcpExclude: config.interfaceExclude ?? config.dhcpExclude,
+        inventoryIncludeInterfaces: config.inventoryIncludeInterfaces,
+        inventoryExcludeInterfaces: config.inventoryExcludeInterfaces,
+      };
+
+      try {
+        const fgResult = await discoverViaFortigate(fgConfig, signal, log, inventoryMaxAgeHours);
+        // fortigateService reports one "device" keyed by the FortiGate's own
+        // hostname/serial. Remap every cross-reference to FMG's canonical
+        // deviceName so the downstream sync pipeline treats this as one device
+        // belonging to the FMG integration.
+        const fgDeviceName = fgResult.devices[0]?.name || rawDevice.ip;
+        for (const s of fgResult.subnets)         s.fortigateDevice = s.fortigateDevice === fgDeviceName ? deviceName : s.fortigateDevice;
+        for (const i of fgResult.interfaceIps)    i.device          = i.device === fgDeviceName ? deviceName : i.device;
+        for (const e of fgResult.dhcpEntries)     e.device          = e.device === fgDeviceName ? deviceName : e.device;
+        for (const v of fgResult.vips)            v.device          = v.device === fgDeviceName ? deviceName : v.device;
+        for (const sw of fgResult.fortiSwitches)  sw.device         = sw.device === fgDeviceName ? deviceName : sw.device;
+        for (const ap of fgResult.fortiAps)       ap.device         = ap.device === fgDeviceName ? deviceName : ap.device;
+        for (const inv of fgResult.deviceInventory) inv.device      = inv.device === fgDeviceName ? deviceName : inv.device;
+
+        const localDev: DiscoveredDevice = {
+          name: deviceName,
+          hostname: rawDevice.hostname || deviceName,
+          serial:   rawDevice.sn || fgResult.devices[0]?.serial || "",
+          model:    rawDevice.platform_str || fgResult.devices[0]?.model || "",
+          mgmtIp:   rawDevice.ip,
+        };
+
+        log("discover.device.complete", "info", `Completed direct discovery for ${deviceName}`, deviceName);
+        return {
+          device: localDev,
+          subnets: fgResult.subnets,
+          interfaceIps: fgResult.interfaceIps,
+          dhcpEntries: fgResult.dhcpEntries,
+          deviceInventory: fgResult.deviceInventory,
+          didInventory: fgResult.inventoryDevices.length > 0,
+          fortiSwitches: fgResult.fortiSwitches,
+          fortiAps: fgResult.fortiAps,
+          vips: fgResult.vips,
+        };
+      } catch (err: any) {
+        log("discover.device", "error", `${deviceName}: Direct discovery failed — ${err.message || "Unknown error"}`, deviceName);
+        return null;
+      }
+    }
 
     const localDevice: DiscoveredDevice = {
       name: deviceName,
@@ -794,7 +868,11 @@ export async function discoverDhcpSubnets(
 
   // Process up to `concurrency` FortiGates in parallel.
   // Merging into shared arrays is a synchronous block — no interleaving possible.
-  const concurrency = Math.max(1, config.discoveryParallelism ?? 5);
+  // When useProxy is true (default), all per-device calls funnel through FMG and
+  // concurrency is forced to 1 — FMG drops parallel /sys/proxy/json connections
+  // past very low parallelism, producing sporadic `fetch failed` errors. Direct
+  // mode talks to each FortiGate independently so parallelism is safe there.
+  const concurrency = useProxy ? 1 : Math.max(1, config.discoveryParallelism ?? 5);
   const executing = new Set<Promise<void>>();
 
   for (const rawDevice of devicesData) {

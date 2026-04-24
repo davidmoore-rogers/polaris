@@ -472,6 +472,10 @@ Azure SAML SSO is optional; users are auto-provisioned on first login with a def
 
 **FMG auth note:** FortiManager 7.4.7+ / 7.6.2+ removed `access_token` query string support. The service uses the Bearer `Authorization` header exclusively. The standalone FortiGate integration (`fortigateService.ts`) uses the same Bearer header pattern against a REST API Admin token.
 
+**Per-device transport (`useProxy` toggle):** The FMG integration has two per-device query transports, selectable in the integration edit modal:
+- **Proxy mode** (default, `useProxy: true`): all per-device queries funnel through FMG's `/sys/proxy/json` (monitor endpoints) and `/pm/config/device/<name>/...` (CMDB). Parallelism is force-clamped to 1 because FMG drops parallel connections past very low parallelism, surfacing as `fetch failed` on random calls.
+- **Direct mode** (`useProxy: false`): FMG is only used to enumerate the managed FortiGate roster; per-device calls go direct to each FortiGate's management IP (the `ip` field on the FMG `/dvmdb/adom/<adom>/device` response) using shared REST API credentials stored in `config.fortigateApiUser` / `config.fortigateApiToken`. Each managed FortiGate must have the same REST API admin provisioned with a trusthost that includes Shelob. Delegates per-device work to `fortigateService.discoverDhcpSubnets` and remaps the device name back to FMG's label. Unlocks `discoveryParallelism` (up to 20).
+
 ---
 
 ## FMG Discovery Workflow

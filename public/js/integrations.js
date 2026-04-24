@@ -7,6 +7,22 @@ document.addEventListener("DOMContentLoaded", function () {
   document.getElementById("btn-add-integration").addEventListener("click", showTypePicker);
 });
 
+// Toggle FMG integration form between proxy and direct modes.
+// Shows/hides the FortiGate credentials block and locks the parallelism input.
+function _fmgToggleProxyMode(useProxy) {
+  var credsBlock = document.getElementById("f-fgt-creds-block");
+  var parallelInput = document.getElementById("f-discoveryParallelism");
+  var parallelNote = document.getElementById("f-parallelism-note");
+  if (credsBlock) credsBlock.style.display = useProxy ? "none" : "";
+  if (parallelInput) {
+    parallelInput.disabled = !!useProxy;
+    if (useProxy) parallelInput.value = 1;
+  }
+  if (parallelNote) {
+    parallelNote.textContent = useProxy ? "locked to 1 when proxy is enabled" : "gates at once";
+  }
+}
+
 function _discoverBtnHTML(id, name, discovery, disabled) {
   if (discovery) {
     var isSlow = discovery.slow || (discovery.slowDevices && discovery.slowDevices.length > 0);
@@ -202,6 +218,17 @@ function fortiManagerFormHTML(defaults) {
       '<input type="checkbox" id="f-verifySsl" ' + (d.verifySsl ? "checked" : "") + ' style="width:auto">' +
       '<label for="f-verifySsl" style="margin:0">Verify SSL certificate</label>' +
     '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Per-Device Query Transport</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-useProxy" ' + (d.useProxy !== false ? "checked" : "") + ' style="width:auto" onchange="_fmgToggleProxyMode(this.checked)">' +
+      '<label for="f-useProxy" style="margin:0">Use FortiManager proxy for per-device queries</label>' +
+    '</div>' +
+    '<p class="hint" style="margin-top:-0.25rem">When checked (default), all per-device DHCP/interface/switch/AP/VIP queries are proxied through FortiManager. When unchecked, Shelob talks directly to each FortiGate\'s management IP using the REST API credentials below — bypasses FMG\'s proxy entirely and supports higher parallelism.</p>' +
+    '<div id="f-fgt-creds-block" style="' + (d.useProxy !== false ? "display:none;" : "") + 'background:rgba(79,195,247,0.05);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;margin-top:0.5rem">' +
+      '<div class="form-group"><label>FortiGate API User</label><input type="text" id="f-fortigateApiUser" value="' + escapeHtml(d.fortigateApiUser || "") + '" placeholder="e.g. shelob-ro"><p class="hint">REST API admin username configured on each managed FortiGate</p></div>' +
+      '<div class="form-group"><label>FortiGate API Token</label><input type="password" id="f-fortigateApiToken" value="' + (d.fortigateApiTokenPlaceholder ? "" : escapeHtml(d.fortigateApiToken || "")) + '" placeholder="' + (d.fortigateApiTokenPlaceholder || "Bearer token") + '"><p class="hint">Bearer token for the above admin. Must be the same across all managed FortiGates.</p></div>' +
+    '</div>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
       '<input type="checkbox" id="f-enabled" ' + (d.enabled !== false ? "checked" : "") + ' style="width:auto">' +
       '<label for="f-enabled" style="margin:0">Enabled</label>' +
@@ -227,7 +254,7 @@ function fortiManagerFormHTML(defaults) {
       '<textarea id="f-deviceNames" rows="2" placeholder="One per line — e.g. FG-HQ-01&#10;FG-DC-*&#10;*-lab">' + escapeHtml(devNames.join("\n")) + '</textarea>' +
       '<p class="hint">Leave empty to query all managed FortiGates. Matched against device name or hostname. Wildcards supported: <code>FG-*</code>, <code>*-lab</code>, <code>*dc*</code></p>' +
     '</div>' +
-    '<div class="form-group"><label>Parallel FortiGate Queries</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-discoveryParallelism" value="' + (d.discoveryParallelism || 5) + '" min="1" max="20" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">gates at once</span></div><p class="hint">Maximum number of FortiGates to query simultaneously during discovery (1–20, default 5). Higher values speed up discovery but increase load on FortiManager.</p></div>' +
+    '<div class="form-group"><label>Parallel FortiGate Queries</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-discoveryParallelism" value="' + (d.useProxy !== false ? 1 : (d.discoveryParallelism || 5)) + '" min="1" max="20" style="width:80px"' + (d.useProxy !== false ? " disabled" : "") + '><span id="f-parallelism-note" style="color:var(--color-text-tertiary);font-size:0.85rem">' + (d.useProxy !== false ? "locked to 1 when proxy is enabled" : "gates at once") + '</span></div><p class="hint">With proxy enabled this is forced to 1 (FortiManager drops parallel connections past very low parallelism). Disable proxy to query up to 20 FortiGates concurrently.</p></div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Scope</p>' +
     '<div class="form-group"><label>Interface Filter</label>' +
@@ -264,6 +291,7 @@ function getFormConfig() {
   var invIfaces = linesToArray("f-inventoryInterfaces");
   var devMode = document.getElementById("f-deviceMode").value;
   var devNames = linesToArray("f-deviceNames");
+  var useProxy = document.getElementById("f-useProxy").checked;
   return {
     host: val("f-host"),
     port: port ? parseInt(port, 10) : 443,
@@ -278,7 +306,10 @@ function getFormConfig() {
     inventoryIncludeInterfaces: invMode === "include" ? invIfaces : [],
     deviceInclude: devMode === "include" ? devNames : [],
     deviceExclude: devMode === "exclude" ? devNames : [],
-    discoveryParallelism: (function () { var v = parseInt(val("f-discoveryParallelism"), 10); return Number.isFinite(v) && v >= 1 && v <= 20 ? v : 5; })(),
+    discoveryParallelism: (function () { var v = parseInt(val("f-discoveryParallelism"), 10); return Number.isFinite(v) && v >= 1 && v <= 20 ? v : (useProxy ? 1 : 5); })(),
+    useProxy: useProxy,
+    fortigateApiUser: val("f-fortigateApiUser"),
+    fortigateApiToken: val("f-fortigateApiToken"),
   };
 }
 
@@ -810,11 +841,16 @@ async function openEditModal(id) {
         deviceInclude: config.deviceInclude || [],
         deviceExclude: config.deviceExclude || [],
         discoveryParallelism: config.discoveryParallelism,
+        useProxy: config.useProxy !== false,
+        fortigateApiUser: config.fortigateApiUser,
+        fortigateApiToken: "",
+        fortigateApiTokenPlaceholder: "Leave blank to keep current token",
       };
       body = fortiManagerFormHTML(defaults);
       formGetter = function () {
         var fc = getFormConfig();
         if (!fc.apiToken) delete fc.apiToken;
+        if (!fc.fortigateApiToken) delete fc.fortigateApiToken;
         return fc;
       };
     }
@@ -834,7 +870,10 @@ async function openEditModal(id) {
         if (isWin) { if (!formConfig.password) delete formConfig.password; }
         else if (isEntra) { if (!formConfig.clientSecret) delete formConfig.clientSecret; }
         else if (isAd) { if (!formConfig.bindPassword) delete formConfig.bindPassword; }
-        else { if (!formConfig.apiToken) delete formConfig.apiToken; }
+        else {
+          if (!formConfig.apiToken) delete formConfig.apiToken;
+          if (!formConfig.fortigateApiToken) delete formConfig.fortigateApiToken;
+        }
         var result = await api.integrations.testNew({
           id: id,
           type: intg.type,

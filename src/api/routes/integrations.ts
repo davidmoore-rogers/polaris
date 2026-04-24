@@ -115,6 +115,9 @@ const FortiManagerConfigSchema = z.object({
   deviceInclude: z.array(z.string()).optional().default([]),
   deviceExclude: z.array(z.string()).optional().default([]),
   discoveryParallelism: z.number().int().min(1).max(20).optional().default(5),
+  useProxy: z.boolean().optional().default(true),
+  fortigateApiUser:  z.string().optional().default(""),
+  fortigateApiToken: z.string().optional().default(""),
 });
 
 const FortiGateConfigSchema = z.object({
@@ -375,6 +378,9 @@ router.put("/:id", async (req, res, next) => {
       const newConfig = { ...currentConfig, ...input.config };
       if (!input.config.apiToken) {
         newConfig.apiToken = currentConfig.apiToken;
+      }
+      if (!input.config.fortigateApiToken) {
+        newConfig.fortigateApiToken = currentConfig.fortigateApiToken;
       }
       if (!input.config.password) {
         newConfig.password = currentConfig.password;
@@ -863,6 +869,9 @@ router.post("/test", async (req, res, next) => {
         const cfg = input.config as Record<string, unknown>;
         if ((input.type === "fortimanager" || input.type === "fortigate") && (!cfg.apiToken || typeof cfg.apiToken !== "string")) {
           cfg.apiToken = stored.apiToken;
+        }
+        if (input.type === "fortimanager" && (!cfg.fortigateApiToken || typeof cfg.fortigateApiToken !== "string")) {
+          cfg.fortigateApiToken = stored.fortigateApiToken;
         }
         if (input.type === "windowsserver" && (!cfg.password || typeof cfg.password !== "string")) {
           cfg.password = stored.password;
@@ -2682,6 +2691,9 @@ function stripSecret(integration: Record<string, any>) {
   const config = { ...(integration.config as Record<string, unknown>) };
   if (config.apiToken) {
     config.apiToken = "••••••••";
+  }
+  if (config.fortigateApiToken) {
+    config.fortigateApiToken = "••••••••";
   }
   if (config.password) {
     config.password = "••••••••";

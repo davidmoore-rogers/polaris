@@ -85,8 +85,10 @@ export async function testConnection(config: FortiGateConfig): Promise<{
 /**
  * Low-level FortiOS REST request with bearer token auth.
  * Returns the decoded JSON body on success, or throws AppError on auth/HTTP failures.
+ * Exported so fortimanagerService can reuse this when `useProxy` is disabled on
+ * an FMG integration — FMG enumerates the devices, per-device REST calls go direct.
  */
-async function fgRequest<T>(
+export async function fgRequest<T>(
   config: FortiGateConfig,
   method: "GET" | "POST",
   path: string,
