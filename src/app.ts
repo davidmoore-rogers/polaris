@@ -77,7 +77,16 @@ app.use(
         scriptSrcAttr: ["'unsafe-inline'"],
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
-        imgSrc: ["'self'", "data:", "blob:"],
+        // OpenStreetMap tile servers are whitelisted here so the Fortinet Map
+        // page can render a real geographic basemap. Tiles load as <img>, not
+        // fetch, so connectSrc stays 'self'-only.
+        imgSrc: [
+          "'self'",
+          "data:",
+          "blob:",
+          "https://*.tile.openstreetmap.org",
+          "https://tile.openstreetmap.org",
+        ],
         connectSrc: ["'self'"],
         frameSrc: ["'none'"],
         objectSrc: ["'none'"],
@@ -168,7 +177,7 @@ app.use(async (req, res, next) => {
 });
 
 // Protect dashboard pages — redirect unauthenticated users to login
-const protectedPages = ["/", "/index.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/server-settings.html"];
+const protectedPages = ["/", "/index.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/server-settings.html", "/map.html"];
 const adminOnlyPages = ["/users.html", "/integrations.html", "/server-settings.html"];
 app.use(async (req, res, next) => {
   if (!protectedPages.includes(req.path)) return next();

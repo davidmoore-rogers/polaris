@@ -271,6 +271,11 @@ const api = {
   search: {
     query: (q) => request("GET", `/search?q=${encodeURIComponent(q)}`),
   },
+  map: {
+    sites:    ()        => request("GET", "/map/sites"),
+    search:   (q)       => request("GET", `/map/search?q=${encodeURIComponent(q)}`),
+    topology: (id)      => request("GET", `/map/sites/${id}/topology`),
+  },
   auth: {
     me: () => request("GET", "/auth/me"),
     azureConfig: () => request("GET", "/auth/azure/config"),

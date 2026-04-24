@@ -1464,6 +1464,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   for (const device of result.devices) {
     try {
       const fgHostname = device.hostname || device.name;
+      const topology = { role: "fortigate" as const };
       if (device.serial) {
         const existingAsset = assetIdx.findBySerial(device.serial);
         if (existingAsset) {
@@ -1474,6 +1475,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             model: device.model || existingAsset.model,
             learnedLocation: existingAsset.learnedLocation || fgHostname,
             lastSeen: new Date(now),
+            fortinetTopology: topology,
+            // Only overwrite coords when discovery actually returned them — do not
+            // wipe a previously-set value with undefined on a FortiOS that omits
+            // longitude/latitude from system/global.
+            ...(Number.isFinite(device.latitude) && Number.isFinite(device.longitude)
+              ? { latitude: device.latitude, longitude: device.longitude }
+              : {}),
             ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
           };
           clampAcquiredToLastSeen(updateData, existingAsset);
@@ -1490,12 +1498,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
       }
 
+      // New FortiGate — set the Fortinet Map tag (fgt:<serial>) so the map endpoint
+      // can find this device by a stable key even if hostname/model changes later.
+      const fgTag = device.serial ? `fgt:${device.serial}` : null;
       const newAsset = await prisma.asset.create({
         data: {
           ipAddress: device.mgmtIp || null,
           ...(device.mgmtIp ? { ipSource: fgHostname || integrationType } : {}),
           hostname: fgHostname,
           serialNumber: device.serial || null,
+          assetTag: fgTag,
           manufacturer: "Fortinet",
           model: device.model || "FortiGate",
           assetType: "firewall",
@@ -1505,6 +1517,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           department: "Network Security",
           learnedLocation: fgHostname,
           lastSeen: new Date(now),
+          ...(Number.isFinite(device.latitude) && Number.isFinite(device.longitude)
+            ? { latitude: device.latitude, longitude: device.longitude }
+            : {}),
+          fortinetTopology: topology,
           notes: `Auto-discovered from ${integrationLabel} integration`,
           tags: ["fortigate", "auto-discovered"],
         },
@@ -1529,6 +1545,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       let existingAsset: any = sw.serial ? assetIdx.findBySerial(sw.serial) : null;
       if (!existingAsset && sw.name) existingAsset = assetIdx.findByEntry(undefined, sw.name, sw.ipAddress || undefined);
 
+      const swTopology = {
+        role: "fortiswitch" as const,
+        controllerFortigate: sw.device || null,
+        uplinkInterface: sw.fgtInterface || null,
+      };
       if (existingAsset) {
         const acquiredAtUpdate = swJoinDate && (!existingAsset.acquiredAt || swJoinDate < new Date(existingAsset.acquiredAt))
           ? swJoinDate : undefined;
@@ -1541,6 +1562,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           status: swStatus,
           ...(swStatus !== existingAsset.status ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
           lastSeen: new Date(now),
+          fortinetTopology: swTopology,
           ...(acquiredAtUpdate ? { acquiredAt: acquiredAtUpdate } : {}),
         };
         clampAcquiredToLastSeen(updateData, existingAsset);
@@ -1564,6 +1586,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           learnedLocation: sw.device || null,
           acquiredAt: swJoinDate,
           lastSeen: new Date(now),
+          fortinetTopology: swTopology,
           notes: swNotes,
           tags: ["fortiswitch", "auto-discovered"],
         };
@@ -1629,6 +1652,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (!existingAsset && normalizedMac) existingAsset = assetIdx.findByMac(normalizedMac);
       if (!existingAsset && ap.name) existingAsset = assetIdx.findByEntry(undefined, ap.name, resolvedIp || undefined);
 
+      const apTopology = {
+        role: "fortiap" as const,
+        controllerFortigate: ap.device || null,
+        parentSwitch: ap.peerSwitch || null,
+        parentPort: ap.peerPort || null,
+        parentVlan: ap.peerVlan ?? null,
+      };
       if (existingAsset) {
         const updateData: Record<string, unknown> = {
           ipAddress: resolvedIp || existingAsset.ipAddress,
@@ -1638,6 +1668,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           osVersion: ap.osVersion || existingAsset.osVersion,
           learnedLocation: ap.device || existingAsset.learnedLocation,
           lastSeen: new Date(now),
+          fortinetTopology: apTopology,
           ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
         };
         clampAcquiredToLastSeen(updateData, existingAsset);
@@ -1664,6 +1695,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             osVersion: ap.osVersion || null,
             learnedLocation: ap.device || null,
             lastSeen: new Date(now),
+            fortinetTopology: apTopology,
             notes: `Auto-discovered from FortiGate ${ap.device} via ${integrationLabel}`,
             tags: ["fortiap", "auto-discovered"],
           },

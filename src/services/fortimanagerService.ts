@@ -356,6 +356,8 @@ export interface DiscoveredDevice {
   serial: string;
   model: string;
   mgmtIp: string;        // management IP from device list
+  latitude?: number;     // decimal degrees, from config system global (Fortinet Map)
+  longitude?: number;    // decimal degrees
 }
 
 export interface DiscoveredInterfaceIp {
@@ -416,6 +418,9 @@ export interface DiscoveredFortiAP {
   baseMac: string;
   status: string;
   osVersion: string;
+  peerSwitch?: string; // FortiSwitch name this AP's MAC was learned on (from switch-controller/detected-device)
+  peerPort?: string;   // Port on peerSwitch where the AP's MAC was last seen
+  peerVlan?: number;   // VLAN tag of that port
 }
 
 export interface DiscoveredVip {
@@ -615,6 +620,8 @@ export async function discoverDhcpSubnets(
           serial:   rawDevice.sn || fgResult.devices[0]?.serial || "",
           model:    rawDevice.platform_str || fgResult.devices[0]?.model || "",
           mgmtIp:   directHost,
+          latitude:  fgResult.devices[0]?.latitude,
+          longitude: fgResult.devices[0]?.longitude,
         };
 
         log("discover.device.complete", "info", `Completed direct discovery for ${deviceName}`, deviceName);
@@ -990,6 +997,94 @@ export async function discoverDhcpSubnets(
       }
     } catch (err: any) {
       log("discover.fortiaps", "error", `${deviceName}: Failed to query managed FortiAPs — ${err.message || "Unknown error"}`, deviceName);
+    }
+
+    // Step 3d.5: FortiAP → FortiSwitch port mapping via detected-device MAC table
+    // Pulls all switch port MAC learnings in one shot and matches each AP's base_mac
+    // to its switch + port. APs not seen on any managed switch stay un-peered and
+    // will render as hanging off the FortiGate directly in the topology graph.
+    try {
+      const detectedPayload: JsonRpcRequest = {
+        id: 12,
+        method: "exec",
+        params: [{
+          url: `/sys/proxy/json`,
+          data: {
+            target: [`/adom/${adom}/device/${deviceName}`],
+            action: "get",
+            resource: "/api/v2/monitor/switch-controller/detected-device?format=mac|switch_id|port_name|vlan_id|last_seen",
+          },
+        }],
+      };
+      const detRes = await rpc(baseUrl, detectedPayload, apiUser, apiToken, verifySsl, signal);
+      const detData = detRes.result?.[0]?.data;
+      const detEntry = Array.isArray(detData) ? detData[0] : detData as any;
+      const detStatus = detEntry?.status?.code ?? 0;
+      const detResults = detEntry?.response?.results;
+      if (detStatus === 0 && Array.isArray(detResults)) {
+        const macMap = new Map<string, { switchId: string; portName: string; vlan?: number }>();
+        for (const d of detResults) {
+          const mac = String(d.mac || "").toUpperCase().replace(/-/g, ":");
+          if (!mac) continue;
+          const existing = macMap.get(mac);
+          if (!existing) {
+            macMap.set(mac, {
+              switchId: String(d.switch_id || ""),
+              portName: String(d.port_name || ""),
+              vlan: Number.isFinite(d.vlan_id) ? Number(d.vlan_id) : undefined,
+            });
+          }
+        }
+        let pairedCount = 0;
+        for (const ap of localAps) {
+          if (!ap.baseMac) continue;
+          const norm = ap.baseMac.toUpperCase().replace(/-/g, ":");
+          const hit = macMap.get(norm);
+          if (hit) {
+            ap.peerSwitch = hit.switchId;
+            ap.peerPort = hit.portName;
+            ap.peerVlan = hit.vlan;
+            pairedCount++;
+          }
+        }
+        log("discover.ap-uplinks", "info", `${deviceName}: Resolved ${pairedCount}/${localAps.length} AP→switch-port uplinks`, deviceName);
+      }
+    } catch (err: any) {
+      log("discover.ap-uplinks", "info", `${deviceName}: detected-device query skipped — ${err.message || "Unknown error"}`, deviceName);
+    }
+
+    // Step 3d.6: Geo coordinates from `config system global` (FortiGate's location config)
+    // Proxies a live CMDB read to each FortiGate so we pick up changes without waiting for
+    // FMG's config sync. Silently no-ops on older FortiOS that doesn't expose the fields.
+    try {
+      const geoPayload: JsonRpcRequest = {
+        id: 13,
+        method: "exec",
+        params: [{
+          url: `/sys/proxy/json`,
+          data: {
+            target: [`/adom/${adom}/device/${deviceName}`],
+            action: "get",
+            resource: "/api/v2/cmdb/system/global?format=longitude|latitude|alias|hostname",
+          },
+        }],
+      };
+      const geoRes = await rpc(baseUrl, geoPayload, apiUser, apiToken, verifySsl, signal);
+      const geoData = geoRes.result?.[0]?.data;
+      const geoEntry = Array.isArray(geoData) ? geoData[0] : geoData as any;
+      const geoStatus = geoEntry?.status?.code ?? 0;
+      const geoResults = geoEntry?.response?.results;
+      if (geoStatus === 0 && geoResults && typeof geoResults === "object" && !Array.isArray(geoResults)) {
+        const lat = parseFloat(String(geoResults.latitude ?? ""));
+        const lng = parseFloat(String(geoResults.longitude ?? ""));
+        if (Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0)) {
+          localDevice.latitude = lat;
+          localDevice.longitude = lng;
+          log("discover.geo", "info", `${deviceName}: Resolved coordinates ${lat.toFixed(4)}, ${lng.toFixed(4)}`, deviceName);
+        }
+      }
+    } catch (err: any) {
+      log("discover.geo", "info", `${deviceName}: Geo lookup skipped — ${err.message || "Unknown error"}`, deviceName);
     }
 
     // Step 3e: Firewall VIPs

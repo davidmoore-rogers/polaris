@@ -519,6 +519,67 @@ export async function discoverDhcpSubnets(
     log("discover.fortiaps", isNotFound ? "info" : "error", `${deviceHostname}: ${isNotFound ? "wifi/managed_ap not available — skipping" : `Failed to query managed FortiAPs — ${err.message || "Unknown error"}`}`, deviceHostname);
   }
 
+  // Step 3e.5: FortiAP → FortiSwitch port mapping via detected-device MAC table
+  try {
+    const detected = await fgRequest<any[]>(config, "GET", "/api/v2/monitor/switch-controller/detected-device", {
+      query: { ...queryBase, format: "mac|switch_id|port_name|vlan_id|last_seen" },
+      signal,
+    });
+    if (Array.isArray(detected)) {
+      const macMap = new Map<string, { switchId: string; portName: string; vlan?: number }>();
+      for (const d of detected) {
+        const mac = String(d.mac || "").toUpperCase().replace(/-/g, ":");
+        if (!mac) continue;
+        if (!macMap.has(mac)) {
+          macMap.set(mac, {
+            switchId: String(d.switch_id || ""),
+            portName: String(d.port_name || ""),
+            vlan: Number.isFinite(d.vlan_id) ? Number(d.vlan_id) : undefined,
+          });
+        }
+      }
+      let pairedCount = 0;
+      for (const ap of fortiAps) {
+        if (!ap.baseMac) continue;
+        const norm = ap.baseMac.toUpperCase().replace(/-/g, ":");
+        const hit = macMap.get(norm);
+        if (hit) {
+          ap.peerSwitch = hit.switchId;
+          ap.peerPort = hit.portName;
+          ap.peerVlan = hit.vlan;
+          pairedCount++;
+        }
+      }
+      log("discover.ap-uplinks", "info", `${deviceHostname}: Resolved ${pairedCount}/${fortiAps.length} AP→switch-port uplinks`, deviceHostname);
+    }
+  } catch (err: any) {
+    const isNotFound = err instanceof AppError && err.httpStatus === 404;
+    log("discover.ap-uplinks", "info", `${deviceHostname}: ${isNotFound ? "detected-device not available — skipping" : `AP uplink query skipped — ${err.message || "Unknown error"}`}`, deviceHostname);
+  }
+
+  // Step 3e.6: Geo coordinates from `config system global`
+  try {
+    const sysGlobal = await fgRequest<any>(config, "GET", "/api/v2/cmdb/system/global", {
+      query: { ...queryBase, format: "longitude|latitude|alias|hostname" },
+      signal,
+    });
+    // CMDB single-object responses can come back either as a bare object or wrapped in results
+    const globalObj = sysGlobal && typeof sysGlobal === "object" && !Array.isArray(sysGlobal)
+      ? sysGlobal
+      : null;
+    if (globalObj) {
+      const lat = parseFloat(String(globalObj.latitude ?? ""));
+      const lng = parseFloat(String(globalObj.longitude ?? ""));
+      if (Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0) && devices[0]) {
+        devices[0].latitude = lat;
+        devices[0].longitude = lng;
+        log("discover.geo", "info", `${deviceHostname}: Resolved coordinates ${lat.toFixed(4)}, ${lng.toFixed(4)}`, deviceHostname);
+      }
+    }
+  } catch (err: any) {
+    log("discover.geo", "info", `${deviceHostname}: Geo lookup skipped — ${err.message || "Unknown error"}`, deviceHostname);
+  }
+
   // Step 3f: Firewall VIPs
   try {
     const vipData = await fgRequest<any[]>(config, "GET", "/api/v2/cmdb/firewall/vip", { query: queryBase, signal });

@@ -227,6 +227,9 @@ model Asset {
   lastSeen       DateTime?                         // Most recent discovery sighting
   associatedIps  Json?      @default("[]")        // [{ip, interfaceName?, source?, lastSeen?, ptrName?}] — additional interface IPs (e.g. firewall ports)
   associatedUsers Json?     @default("[]")        // [{user, domain?, lastSeen, source?}] — logged-in / registered users
+  latitude       Float?                            // FortiGate geo coordinate (decimal degrees); populated from `config system global` on discovery
+  longitude      Float?                            // FortiGate geo coordinate (decimal degrees)
+  fortinetTopology Json?                           // { role: "fortigate" | "fortiswitch" | "fortiap", controllerFortigate?, uplinkInterface?, parentSwitch?, parentPort?, parentVlan? } — real connection graph from FMG/FortiGate discovery
   acquiredAt     DateTime?                         // Acquisition / purchase date
   warrantyExpiry DateTime?                         // Warranty end date
   purchaseOrder  String?                           // PO or invoice reference

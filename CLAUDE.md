@@ -37,7 +37,11 @@ shelob/
 │   ├── users.html
 │   ├── server-settings.html
 │   ├── logo.png
-│   ├── css/styles.css
+│   ├── map.html                     # Fortinet Map page (Leaflet basemap + Cytoscape topology modal)
+│   ├── css/
+│   │   ├── styles.css
+│   │   ├── map.css                  # Fortinet Map styles (marker icons, topology modal grid)
+│   │   └── vendor/leaflet/          # Leaflet + markercluster CSS + marker PNGs (bundled; CSP blocks external CDN)
 │   └── js/
 │       ├── api.js                   # HTTP client with auth/error handling
 │       ├── app.js                   # Navigation, layout, theme switching
@@ -49,8 +53,9 @@ shelob/
 │       ├── events.js                # Audit log viewer, syslog/SFTP settings
 │       ├── users.js
 │       ├── ip-panel.js
+│       ├── map.js                   # Fortinet Map: Leaflet markers, autocomplete search, Cytoscape topology modal
 │       ├── table-sf.js
-│       └── vendor/
+│       └── vendor/                  # Bundled: jspdf, leaflet/, cytoscape, dagre, cytoscape-dagre
 ├── src/
 │   ├── index.ts                     # Entry point
 │   ├── config.ts                    # App config / env vars
@@ -72,6 +77,7 @@ shelob/
 │   │       ├── users.ts             # User CRUD & role management
 │   │       ├── integrations.ts      # FMG / FortiGate / Windows Server / Entra ID config & discovery
 │   │       ├── assets.ts            # Device inventory CRUD, PDF/CSV export
+│   │       ├── map.ts               # Fortinet Map: site list, search, per-FortiGate topology graph
 │   │       ├── events.ts            # Audit log, syslog, SFTP archival
 │   │       ├── conflicts.ts         # Discovery conflict review & resolution
 │   │       ├── search.ts            # Global typeahead search across all entity types
@@ -151,6 +157,8 @@ shelob/
 | Security | helmet, express-rate-limit |
 | File uploads | multer |
 | PDF export | jspdf + jspdf-autotable |
+| Mapping | Leaflet + leaflet.markercluster + OpenStreetMap tiles (bundled under `public/css/vendor/leaflet/` and `public/js/vendor/leaflet/`) |
+| Graph layout | Cytoscape.js + dagre + cytoscape-dagre (bundled under `public/js/vendor/`) for the Fortinet Map topology modal |
 | Testing | Vitest + Supertest |
 | Frontend | Vanilla JavaScript + HTML (served from /public) |
 
@@ -253,6 +261,9 @@ Asset
   lastSeen        DateTime?
   associatedIps   Json            -- [{ip, interfaceName?, source?, lastSeen?, ptrName?}] — additional IPs; source="manual" preserved across discovery
   associatedUsers Json            -- [{user, domain?, lastSeen, source?}]
+  latitude        Float?          -- FortiGate geo coord from `config system global` (decimal degrees); drives Fortinet Map pins
+  longitude       Float?
+  fortinetTopology Json?           -- { role: "fortigate" | "fortiswitch" | "fortiap", controllerFortigate?, uplinkInterface?, parentSwitch?, parentPort?, parentVlan? } — real connection graph from FMG/FortiGate discovery
   acquiredAt      DateTime?
   warrantyExpiry  DateTime?
   purchaseOrder   String?
@@ -436,6 +447,11 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 ### Search — `requireAuth`
 - `GET    /search?q=<query>`                    — Global typeahead. Classifies input (IP, CIDR, MAC, or text), runs 4 parallel entity queries, returns grouped results (`blocks`, `subnets`, `reservations`, `assets`, `ips`) capped at 8 per group. The `ips` hit resolves the containing subnet and any active reservation. All authenticated roles can search; front-end edit modals render in view-only mode for users without write permission.
 
+### Fortinet Map — `requireAuth`
+- `GET    /map/sites`                           — Every firewall Asset with non-null lat/lng. Includes subnet count (via `Subnet.fortigateDevice` match) and last-seen status. Sidebar page entry: "Fortinet Map" (below Dashboard).
+- `GET    /map/search?q=<query>`                — Autocomplete over firewall hostnames + serials, capped at 12. Only returns sites that have coordinates (a pinless FortiGate can't be navigated to).
+- `GET    /map/sites/:id/topology`              — Graph payload for the click-through modal. Returns `{ fortigate, switches[], aps[], subnets[], edges[] }`. Every edge id references a node in the same payload. FortiGate→Switch edges are derived from `Asset.fortinetTopology.uplinkInterface` (the FortiLink interface from `managed-switch/status.fgt_peer_intf_name`). AP→Switch edges come from `switch-controller/detected-device` MAC learnings matched against AP base_mac during discovery; APs with no peer switch fall back to a direct FortiGate→AP edge.
+
 ### Allocation Templates — mixed scoping
 - `GET    /allocation-templates`                *(auth)* — List saved multi-subnet templates used by the Networks "Auto-Allocate Next" modal.
 - `POST   /allocation-templates`                *(networkadmin)* — Create a template. Body: `{ name, entries: [{name, prefixLength, vlan?} | {skip: true, prefixLength}] }`.
@@ -487,8 +503,9 @@ Azure SAML SSO is optional; users are auto-provisioned on first login with a def
 - **DHCP leases** → Reservations (`sourceType: dhcp_lease`); captures `expire_time`, `access_point`, `ssid`
 - **Interface IPs** → Reservations (`sourceType: interface_ip`)
 - **Virtual IPs (VIPs)** → Reservations (`sourceType: vip`)
-- **FortiSwitch devices** → Asset records (`assetType: switch`); via FMG proxy to `/api/v2/monitor/switch-controller/managed-switch/status`
-- **FortiAP devices** → Asset records (`assetType: access_point`); via FMG proxy to `/api/v2/monitor/wifi/managed_ap`
+- **FortiSwitch devices** → Asset records (`assetType: switch`); via FMG proxy to `/api/v2/monitor/switch-controller/managed-switch/status`. `fortinetTopology` stamped with `{ role: "fortiswitch", controllerFortigate, uplinkInterface }` so the Fortinet Map renders the FortiLink uplink as an edge.
+- **FortiAP devices** → Asset records (`assetType: access_point`); via FMG proxy to `/api/v2/monitor/wifi/managed_ap`. `fortinetTopology` stamped with `{ role: "fortiap", controllerFortigate, parentSwitch, parentPort, parentVlan }`; the switch-port attribution comes from matching AP `base_mac` against `/api/v2/monitor/switch-controller/detected-device` during discovery (falls back to a direct FortiGate edge if the AP's MAC is not on any managed switch port).
+- **FortiGate geo coordinates** → `Asset.latitude` / `Asset.longitude` on the firewall Asset, pulled from `/api/v2/cmdb/system/global` (`longitude`, `latitude` fields of `config system global`). Feeds the Fortinet Map. Discovery silently skips this step on FortiOS versions that don't expose the fields — existing coords are never blanked.
 - **FortiSwitch / FortiAP MACs** → Updates Asset `lastSeenSwitch` / `lastSeenAp`
 
 ### FMG proxy field filtering

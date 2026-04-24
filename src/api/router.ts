@@ -15,6 +15,7 @@ import eventsRouter from "./routes/events.js";
 import conflictsRouter from "./routes/conflicts.js";
 import serverSettingsRouter from "./routes/serverSettings.js";
 import searchRouter from "./routes/search.js";
+import mapRouter from "./routes/map.js";
 import allocationTemplatesRouter from "./routes/allocationTemplates.js";
 import { requireAuth, requireAdmin, requireNetworkAdmin } from "./middleware/auth.js";
 
@@ -43,5 +44,6 @@ router.use("/integrations", requireNetworkAdmin, integrationsRouter);
 router.use("/assets", assetsRouter);
 router.use("/events", eventsRouter);
 router.use("/search", searchRouter);
+router.use("/map", mapRouter);
 router.use("/conflicts", conflictsRouter);
 router.use("/server-settings", requireAdmin, serverSettingsRouter);

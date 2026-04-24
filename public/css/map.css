@@ -1,0 +1,198 @@
+/* ─── Fortinet Map page ────────────────────────────────────────────────────── */
+
+.map-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.map-search {
+  position: relative;
+  display: flex;
+  gap: 0.5rem;
+  flex: 1 1 auto;
+  max-width: 640px;
+}
+
+.map-search-input {
+  flex: 1 1 auto;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  border-radius: var(--radius-md);
+  font: inherit;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.map-search-input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 20%, transparent);
+}
+
+.map-search-btn { white-space: nowrap; }
+
+.map-search-suggest {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 400;
+  list-style: none;
+  margin: 0;
+  padding: 0.25rem 0;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.map-search-suggest[hidden] { display: none; }
+.map-search-suggest li {
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.9rem;
+}
+.map-search-suggest li:hover,
+.map-search-suggest li[aria-selected="true"] {
+  background: var(--color-bg-secondary);
+}
+.map-search-suggest .suggest-sub {
+  color: var(--color-text-tertiary);
+  font-family: "Roboto Mono", monospace;
+  font-size: 0.78rem;
+}
+
+.map-status {
+  font-size: 0.85rem;
+  color: var(--color-text-tertiary);
+}
+
+.map-canvas {
+  width: 100%;
+  height: calc(100vh - 200px);
+  min-height: 520px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--color-bg-secondary);
+}
+
+/* Leaflet tweaks for dark theme */
+[data-theme="dark"] .leaflet-control-attribution {
+  background: rgba(0,0,0,0.6);
+  color: #bbb;
+}
+[data-theme="dark"] .leaflet-control-attribution a {
+  color: #7ab8ff;
+}
+
+/* Custom FortiGate marker (built from a div icon so we don't need PNG sprites) */
+.fg-marker {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.72rem;
+  color: #fff;
+  background: #d32f2f;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4), 0 0 0 3px rgba(255,255,255,0.85);
+  cursor: pointer;
+}
+.fg-marker.status-decommissioned { background: #607d8b; }
+.fg-marker.status-maintenance    { background: #f9a825; color: #222; }
+.fg-marker.status-storage        { background: #9e9e9e; }
+
+/* ─── Topology modal layout ─────────────────────────────────────────────────── */
+.topology-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  height: 80vh;
+  min-height: 520px;
+}
+.topology-graph {
+  width: 100%;
+  height: 100%;
+  background: var(--color-bg-secondary);
+  border-right: 1px solid var(--color-border);
+}
+.topology-info {
+  padding: 1rem 1.25rem;
+  overflow-y: auto;
+  font-size: 0.88rem;
+  color: var(--color-text-primary);
+}
+.topology-info h4 {
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem;
+  color: var(--color-text-primary);
+}
+.topology-info .detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.topology-info .detail-row:last-child { border-bottom: 0; }
+.topology-info .detail-row .label {
+  color: var(--color-text-tertiary);
+  font-size: 0.8rem;
+}
+.topology-info .detail-row .value {
+  font-family: "Roboto Mono", monospace;
+  font-size: 0.82rem;
+  text-align: right;
+  word-break: break-all;
+}
+.topology-info .topology-section {
+  margin-top: 1.25rem;
+}
+.topology-info .topology-section h5 {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-tertiary);
+  margin: 0 0 0.5rem;
+}
+.topology-info .topology-section ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.topology-info .topology-section li {
+  font-size: 0.82rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.topology-info .topology-section li .meta {
+  color: var(--color-text-tertiary);
+  font-family: "Roboto Mono", monospace;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 960px) {
+  .topology-layout {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 0;
+  }
+  .topology-graph {
+    height: 60vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+}
