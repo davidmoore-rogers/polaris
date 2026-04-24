@@ -18,11 +18,24 @@ import { logEvent } from "./events.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
+import { recordSample, getBaselines, type Baseline } from "../../services/discoveryDurationService.js";
 
 const router = Router();
 
-// Track in-flight DHCP discovery per integration — abort previous if re-saved
-const activeDiscovery = new Map<string, { controller: AbortController; name: string; activeDevices: Set<string> }>();
+// Track in-flight DHCP discovery per integration — abort previous if re-saved.
+// Carries per-run timing so we can detect "taking longer than normal" and
+// emit `integration.discover.slow` events without double-firing.
+interface ActiveDiscoveryEntry {
+  controller: AbortController;
+  name: string;
+  type: string;                           // e.g. "fortimanager", "fortigate"
+  startedAt: number;                      // Date.now() at run start
+  activeDevices: Set<string>;             // FMG: currently-running FortiGate names
+  deviceStartedAt: Map<string, number>;   // FMG: per-FortiGate start timestamps
+  slowAlerted: boolean;                   // overall-run slow event already emitted
+  slowAlertedDevices: Set<string>;        // per-FortiGate slow event already emitted
+}
+const activeDiscovery = new Map<string, ActiveDiscoveryEntry>();
 
 // Safely stringify a proxy-query response, converting v8 string-limit and oversized
 // payloads into a helpful 413 instead of an opaque 500.
@@ -226,12 +239,21 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// GET /api/v1/integrations/discoveries — active background discoveries
-router.get("/discoveries", (req, res) => {
-  const running = Array.from(activeDiscovery.entries()).map(([id, { name, activeDevices }]) => ({
+// GET /api/v1/integrations/discoveries — active background discoveries.
+// Also runs slow-detection inline so the UI sees amber within one poll cycle
+// of a run exceeding its baseline, without waiting for the 30s background job.
+router.get("/discoveries", async (req, res) => {
+  await checkForSlowRuns().catch(() => {});
+  const now = Date.now();
+  const running = Array.from(activeDiscovery.entries()).map(([id, entry]) => ({
     id,
-    name,
-    activeDevices: [...activeDevices],
+    name: entry.name,
+    type: entry.type,
+    startedAt: entry.startedAt,
+    elapsedMs: now - entry.startedAt,
+    activeDevices: [...entry.activeDevices],
+    slow: entry.slowAlerted,
+    slowDevices: [...entry.slowAlertedDevices],
   }));
   res.json({ discoveries: running });
 });
@@ -291,7 +313,16 @@ router.post("/", async (req, res, next) => {
     if (canDiscover) {
       activeDiscovery.get(integration.id)?.controller.abort();
       const ac = new AbortController();
-      activeDiscovery.set(integration.id, { controller: ac, name: input.name, activeDevices: new Set() });
+      activeDiscovery.set(integration.id, {
+        controller: ac,
+        name: input.name,
+        type: input.type,
+        startedAt: Date.now(),
+        activeDevices: new Set(),
+        deviceStartedAt: new Map(),
+        slowAlerted: false,
+        slowAlertedDevices: new Set(),
+      });
       logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integration.id, resourceName: input.name, actor: req.session?.username, message: `DHCP discovery started for "${input.name}"` });
       try {
         let discoveryResult: DiscoveryResult;
@@ -543,6 +574,104 @@ export function isDiscoveryRunning(integrationId: string): boolean {
 }
 
 /**
+ * Iterate all in-flight discoveries; for each, compare elapsed time against
+ * the rolling baseline from `discoveryDurationService`. If a run exceeds its
+ * threshold and hasn't been flagged yet, emit a single
+ * `integration.discover.slow` event (per run, per FortiGate). Deduplicated
+ * via `slowAlerted` / `slowAlertedDevices` on the activeDiscovery entry —
+ * those flags are cleared when the run completes (or the device finishes).
+ *
+ * Called by the 30s background job and inline on the /discoveries poll, so
+ * the UI flips to amber promptly without waiting on the slower timer.
+ */
+export async function checkForSlowRuns(): Promise<void> {
+  if (activeDiscovery.size === 0) return;
+
+  // Gather all (integration, device) unit keys we need baselines for.
+  const unitKeys: string[] = [];
+  for (const [id, entry] of activeDiscovery.entries()) {
+    if (!entry.slowAlerted) unitKeys.push(id);
+    if (entry.type === "fortimanager") {
+      for (const dev of entry.deviceStartedAt.keys()) {
+        if (!entry.slowAlertedDevices.has(dev)) unitKeys.push(`${id}:${dev}`);
+      }
+    }
+  }
+  if (unitKeys.length === 0) return;
+
+  let baselines: Map<string, Baseline | null>;
+  try {
+    baselines = await getBaselines(unitKeys);
+  } catch {
+    return;
+  }
+
+  const now = Date.now();
+  for (const [id, entry] of activeDiscovery.entries()) {
+    // Overall-run threshold — applies to every integration type.
+    if (!entry.slowAlerted) {
+      const bl = baselines.get(id) ?? null;
+      const elapsed = now - entry.startedAt;
+      if (bl && elapsed > bl.thresholdMs) {
+        entry.slowAlerted = true;
+        logEvent({
+          action: "integration.discover.slow",
+          resourceType: "integration",
+          resourceId: id,
+          resourceName: entry.name,
+          level: "warning",
+          message: `Discovery for "${entry.name}" is running longer than normal — ${fmtSec(elapsed)} elapsed vs typical ${fmtSec(bl.avgMs)} (threshold ${fmtSec(bl.thresholdMs)}, ${bl.sampleCount} samples)`,
+          details: {
+            scope: "integration",
+            integrationId: id,
+            elapsedMs: elapsed,
+            avgMs: bl.avgMs,
+            stddevMs: bl.stddevMs,
+            thresholdMs: bl.thresholdMs,
+            sampleCount: bl.sampleCount,
+          },
+        });
+      }
+    }
+
+    // Per-FortiGate threshold — FMG only.
+    if (entry.type === "fortimanager") {
+      for (const [dev, devStart] of entry.deviceStartedAt.entries()) {
+        if (entry.slowAlertedDevices.has(dev)) continue;
+        const key = `${id}:${dev}`;
+        const bl = baselines.get(key) ?? null;
+        const elapsed = now - devStart;
+        if (bl && elapsed > bl.thresholdMs) {
+          entry.slowAlertedDevices.add(dev);
+          logEvent({
+            action: "integration.discover.slow",
+            resourceType: "integration",
+            resourceId: id,
+            resourceName: entry.name,
+            level: "warning",
+            message: `Discovery on FortiGate "${dev}" via "${entry.name}" is running longer than normal — ${fmtSec(elapsed)} elapsed vs typical ${fmtSec(bl.avgMs)} (threshold ${fmtSec(bl.thresholdMs)}, ${bl.sampleCount} samples)`,
+            details: {
+              scope: "fortigate",
+              integrationId: id,
+              device: dev,
+              elapsedMs: elapsed,
+              avgMs: bl.avgMs,
+              stddevMs: bl.stddevMs,
+              thresholdMs: bl.thresholdMs,
+              sampleCount: bl.sampleCount,
+            },
+          });
+        }
+      }
+    }
+  }
+}
+
+function fmtSec(ms: number): string {
+  return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+}
+
+/**
  * Validates the integration, registers it in activeDiscovery, and fires the
  * discovery pipeline detached (returns before it completes). Throws AppError
  * on validation failure so callers can handle it appropriately.
@@ -574,7 +703,18 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
   activeDiscovery.get(integrationId)?.controller.abort();
   const ac = new AbortController();
   const integrationName = integration.name;
-  activeDiscovery.set(integrationId, { controller: ac, name: integrationName, activeDevices: new Set() });
+  const integrationType = integration.type;
+  const runStartedAt = Date.now();
+  activeDiscovery.set(integrationId, {
+    controller: ac,
+    name: integrationName,
+    type: integrationType,
+    startedAt: runStartedAt,
+    activeDevices: new Set(),
+    deviceStartedAt: new Map(),
+    slowAlerted: false,
+    slowAlertedDevices: new Set(),
+  });
 
   await prisma.integration.update({ where: { id: integrationId }, data: { lastDiscoveryAt: new Date() } });
 
@@ -588,8 +728,16 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
       const entry = activeDiscovery.get(integrationId);
       if (entry) {
         if (step === "discover.device.complete") {
+          const start = entry.deviceStartedAt.get(device);
+          entry.deviceStartedAt.delete(device);
           entry.activeDevices.delete(device);
+          entry.slowAlertedDevices.delete(device);
+          if (start !== undefined) {
+            const unitKey = `${integrationId}:${device}`;
+            recordSample(unitKey, Date.now() - start).catch(() => {});
+          }
         } else if (step === "discover.device.start") {
+          entry.deviceStartedAt.set(device, Date.now());
           entry.activeDevices.add(device);
         }
       }
@@ -674,6 +822,10 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
       } else {
         const deprecatedSuffix = assetsOnly ? "" : `, ${syncTotals.deprecated.length} deprecated`;
         logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} completed for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${deprecatedSuffix}` });
+        // Record overall duration sample for slow-run detection. Aborts and
+        // errors are intentionally not recorded — a failed run would poison
+        // the rolling average used to compute the "slow" threshold.
+        recordSample(integrationId, Date.now() - runStartedAt).catch(() => {});
       }
     } catch (err: any) {
       if (err.name !== "AbortError") {

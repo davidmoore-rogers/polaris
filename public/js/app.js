@@ -622,9 +622,17 @@ function renderQueryStatus() {
         '</li>';
       }).join("") +
       serverDiscoveries.map(function (d) {
+        var slowSet = {};
+        if (d.slowDevices) d.slowDevices.forEach(function (name) { slowSet[name] = true; });
+        var nameClass = d.slow ? 'query-status-name query-status-name-slow' : 'query-status-name';
+        var nameTitle = d.slow ? ' title="This discovery is running longer than normal"' : '';
         return '<li><div style="min-width:0;flex:1">' +
-          '<span class="query-status-name">Discovering ' + escapeHtml(d.name) + '</span>' +
-          (d.activeDevices && d.activeDevices.length ? d.activeDevices.map(function (dev) { return '<span class="query-status-device">' + escapeHtml(dev) + '</span>'; }).join('') : '') +
+          '<span class="' + nameClass + '"' + nameTitle + '>Discovering ' + escapeHtml(d.name) + (d.slow ? ' — slow' : '') + '</span>' +
+          (d.activeDevices && d.activeDevices.length ? d.activeDevices.map(function (dev) {
+            var cls = slowSet[dev] ? 'query-status-device query-status-device-slow' : 'query-status-device';
+            var t = slowSet[dev] ? ' title="This FortiGate is taking longer than normal"' : '';
+            return '<span class="' + cls + '"' + t + '>' + escapeHtml(dev) + '</span>';
+          }).join('') : '') +
           '</div>' +
           '<button class="query-abort-btn" data-discovery-id="' + escapeHtml(d.id) + '" data-discovery-name="' + escapeHtml(d.name) + '" title="Abort">&#x2715;</button>' +
           '</li>';

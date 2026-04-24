@@ -9,9 +9,15 @@ document.addEventListener("DOMContentLoaded", function () {
 
 function _discoverBtnHTML(id, name, discovery, disabled) {
   if (discovery) {
-    return '<span style="display:inline-flex;align-items:center;gap:6px;font-size:0.78rem;padding:0.3rem 0.6rem;border-radius:var(--radius-md);background:rgba(79,195,247,0.1);border:1px solid rgba(79,195,247,0.25);color:var(--color-accent);font-weight:500">' +
+    var isSlow = discovery.slow || (discovery.slowDevices && discovery.slowDevices.length > 0);
+    var style = isSlow
+      ? 'background:rgba(255,214,0,0.12);border:1px solid rgba(255,214,0,0.35);color:var(--color-warning)'
+      : 'background:rgba(79,195,247,0.1);border:1px solid rgba(79,195,247,0.25);color:var(--color-accent)';
+    var label = isSlow ? 'Discovering — slow' : 'Discovering…';
+    var title = isSlow ? ' title="This discovery is running longer than normal"' : '';
+    return '<span' + title + ' style="display:inline-flex;align-items:center;gap:6px;font-size:0.78rem;padding:0.3rem 0.6rem;border-radius:var(--radius-md);font-weight:500;' + style + '">' +
       '<span class="query-spinner"></span>' +
-      '<span>Discovering…</span>' +
+      '<span>' + label + '</span>' +
       '<button class="query-abort-btn" style="margin-left:2px" onclick="abortIntegrationDiscovery(\'' + id + '\',\'' + escapeHtml(name) + '\')" title="Abort">&#x2715;</button>' +
     '</span>';
   }

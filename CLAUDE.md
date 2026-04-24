@@ -90,6 +90,7 @@ shelob/
 │   │   ├── searchService.ts         # Global typeahead search (classifies IP/CIDR/MAC/text; parallel entity queries)
 │   │   ├── allocationTemplateService.ts # Saved multi-subnet allocation templates (Setting-backed)
 │   │   ├── assetIpHistoryService.ts # Asset IP history reads, retention settings, pruning (Setting-backed)
+│   │   ├── discoveryDurationService.ts # Rolling discovery-duration samples + "slow-run" threshold (Setting-backed)
 │   │   ├── azureAuthService.ts      # Azure AD/Entra SAML SSO, user provisioning
 │   │   ├── totpService.ts           # RFC 6238 TOTP secret / code / backup-code helpers
 │   │   ├── dnsService.ts            # Reverse DNS lookup for assets
@@ -100,6 +101,7 @@ shelob/
 │   ├── jobs/
 │   │   ├── expireReservations.ts    # Mark past-TTL reservations as expired (every 15 min)
 │   │   ├── discoveryScheduler.ts    # FMG/Windows Server auto-discovery polling
+│   │   ├── discoverySlowCheck.ts    # 30s tick: flag in-flight discoveries that exceed their rolling-duration baseline
 │   │   ├── ouiRefresh.ts            # Refresh IEEE OUI database
 │   │   ├── pruneEvents.ts           # 7-day event log retention (nightly)
 │   │   ├── updateCheck.ts           # Software update notifications
@@ -390,8 +392,8 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 - `DELETE /integrations/:id`
 - `POST   /integrations/:id/test-connection`
 - `POST   /integrations/:id/discover`           — Trigger full discovery run
-- `GET    /integrations/:id/discovery-status`   — Poll in-progress discovery
-- `POST   /integrations/:id/abort-discovery`
+- `GET    /integrations/discoveries`            — List in-flight discoveries. Each entry: `{ id, name, type, startedAt, elapsedMs, activeDevices: string[], slow: boolean, slowDevices: string[] }`. `slow` flips true when the overall run exceeds its rolling-duration baseline; `slowDevices` lists FortiGates (FMG-only) whose per-device elapsed exceeds that device's baseline. This endpoint also calls the slow-run checker inline, so the UI sees amber within one 4 s poll cycle. See `discoveryDurationService` + the `discoverySlowCheck` job.
+- `DELETE /integrations/:id/discover`            — Abort an in-flight discovery
 - `POST   /integrations/:id/query`              — Manual API proxy. FortiManager: `{method, params}` (JSON-RPC). FortiGate: `{method, path, query?}` (REST). Entra ID: `{path, query?}` GET-only against `graph.microsoft.com`; path must begin with `/v1.0/` or `/beta/`. Active Directory: `{filter?, baseDn?, scope?, attributes?, sizeLimit?}` LDAP search; baseDn defaults to the integration's configured base DN.
 
 ### Assets — `requireAuth`
@@ -582,6 +584,7 @@ Active Directory and Entra ID identify the same hybrid-joined device with two un
 | `updateCheck` | Periodic | Check for software updates |
 | `clampAssetAcquiredAt` | Once at startup | Clamp `acquiredAt` down to `lastSeen` on any Asset row where the invariant was violated |
 | `decommissionStaleAssets` | Every 24 hours | Move assets whose `lastSeen` is older than the configured inactivity threshold (months) to `decommissioned` status. Configured via Events → Settings → Assets tab; 0 disables. |
+| `discoverySlowCheck` | Every 30 s | Compares each in-flight discovery's elapsed time to its rolling-duration baseline (`discoveryDurationService`). Emits one `integration.discover.slow` event per run (and one per FortiGate inside an FMG run) when elapsed exceeds `max(avg + 2σ, avg × 1.5, avg + 60 s)`; baseline requires ≥3 prior successful runs. The `/integrations/discoveries` endpoint also calls the same checker inline so the sidebar and Integrations page flip amber within one 4 s poll cycle. |
 
 ---
 

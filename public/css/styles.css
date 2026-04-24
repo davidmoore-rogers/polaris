@@ -353,6 +353,14 @@ code {
   opacity: 0.7;
   min-width: 0;
 }
+.query-status-name-slow {
+  color: var(--color-warning);
+}
+.query-status-device-slow {
+  color: var(--color-warning);
+  opacity: 1;
+  font-weight: 500;
+}
 .query-abort-btn {
   background: none;
   border: 1px solid rgba(255,23,68,0.3);
