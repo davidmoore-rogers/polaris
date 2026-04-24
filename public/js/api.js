@@ -99,6 +99,13 @@ const api = {
     resetPassword: (id, b)  => request("PUT", `/users/${id}/password`, b),
     updateRole:    (id, b)  => request("PUT", `/users/${id}/role`, b),
     delete:        (id)     => request("DELETE", `/users/${id}`),
+    resetTotp:     (id)     => request("DELETE", `/users/${id}/totp`),
+  },
+  totp: {
+    status:     ()     => request("GET",    "/auth/totp/status"),
+    enroll:     ()     => request("POST",   "/auth/totp/enroll"),
+    confirm:    (body) => request("POST",   "/auth/totp/confirm", body),
+    disable:    (body) => request("DELETE", "/auth/totp", body),
   },
   assets: {
     list:      (params) => request("GET", "/assets" + toQuery(params)),

@@ -89,6 +89,7 @@ shelob/
 │   │   ├── searchService.ts         # Global typeahead search (classifies IP/CIDR/MAC/text; parallel entity queries)
 │   │   ├── allocationTemplateService.ts # Saved multi-subnet allocation templates (Setting-backed)
 │   │   ├── azureAuthService.ts      # Azure AD/Entra SAML SSO, user provisioning
+│   │   ├── totpService.ts           # RFC 6238 TOTP secret / code / backup-code helpers
 │   │   ├── dnsService.ts            # Reverse DNS lookup for assets
 │   │   ├── ouiService.ts            # MAC OUI lookup with admin overrides
 │   │   ├── eventArchiveService.ts   # Syslog (CEF) + SFTP/SCP event archival
@@ -112,7 +113,10 @@ shelob/
 │       ├── cidr.ts                  # CIDR parsing, contains(), overlap()
 │       ├── errors.ts                # AppError class with httpStatus
 │       ├── logger.ts                # Structured logging (pino)
-│       └── assetInvariants.ts       # Write-time clamp: acquiredAt <= lastSeen
+│       ├── assetInvariants.ts       # Write-time clamp: acquiredAt <= lastSeen
+│       ├── loginLockout.ts          # Per-username login-failure counter + temporary lockout
+│       ├── mfaPending.ts            # Short-lived pending-MFA tokens for two-phase login
+│       └── password.ts              # argon2id hash/verify helpers (with legacy bcrypt detection off)
 └── tests/
     ├── unit/
     │   ├── cidr.test.ts
@@ -137,7 +141,7 @@ shelob/
 | Sessions | express-session + connect-pg-simple (PostgreSQL store) |
 | Validation | Zod |
 | Logging | Pino + pino-pretty |
-| Auth | argon2id via @node-rs/argon2, @node-saml/node-saml (Azure SAML SSO) |
+| Auth | argon2id via @node-rs/argon2, @node-saml/node-saml (Azure SAML SSO), otpauth + qrcode (optional TOTP second factor for local accounts) |
 | IP Math | ip-cidr + netmask + cidr-tools |
 | Security | helmet, express-rate-limit |
 | File uploads | multer |
@@ -258,6 +262,9 @@ User
   displayName   String?
   email         String?
   lastLogin     DateTime?
+  totpSecret      String?       -- Base32 TOTP secret (null = not enrolled)
+  totpEnabledAt   DateTime?     -- Null = not enabled; set on first valid confirm code
+  totpBackupCodes String[]      -- argon2id-hashed single-use recovery codes
 
 Event                           -- Audit log, 7-day rolling retention
   id            UUID PK
@@ -315,6 +322,13 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 - `GET    /auth/azure/config`                   — Azure SSO feature flag
 - `GET    /auth/azure/login`                    — Initiate Azure SAML login
 - `POST   /auth/azure/callback`                 — SAML assertion callback
+- `POST   /auth/login/totp`                     — Second step of two-phase login when TOTP is enabled. Body: `{ pendingToken, code, isBackupCode? }`. `pendingToken` is returned by `POST /auth/login` whenever the caller's account has `totpEnabledAt` set — until this endpoint consumes it, the session is not issued.
+
+### TOTP self-management — `requireAuth`
+- `GET    /auth/totp/status`                    — `{ authProvider, enabled, enrolling, backupCodesRemaining }`
+- `POST   /auth/totp/enroll`                    — Starts enrollment for the current user. Returns `{ secret, otpauthUri, qrSvg }`. Only allowed on `authProvider = "local"` accounts that are not already fully enrolled.
+- `POST   /auth/totp/confirm`                   — Finalize enrollment by verifying the first 6-digit code. Body: `{ code }`. Returns `{ ok, backupCodes: string[] }` — shown once.
+- `DELETE /auth/totp`                           — Self-disable. Requires a current TOTP or backup code. Body: `{ code, isBackupCode? }`.
 
 ### IP Blocks — `requireAuth`
 - `GET    /blocks`                              — List (filter by tag, ipVersion)
@@ -352,6 +366,7 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 - `PUT    /users/:id`
 - `DELETE /users/:id`
 - `PUT    /users/:id/role`
+- `DELETE /users/:id/totp`                      — Admin-initiated TOTP reset (for "lost device" recovery). Clears the secret and backup codes so the user can re-enroll on next login.
 
 ### Integrations — `requireNetworkAdmin`
 - `GET    /integrations`

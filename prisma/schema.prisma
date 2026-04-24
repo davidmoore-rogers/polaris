@@ -256,6 +256,14 @@ model User {
   email        String?
   lastLogin    DateTime? @map("last_login")
 
+  // TOTP (second-factor) — local accounts only. An enrollment is in progress
+  // when totpSecret is set but totpEnabledAt is null; verification of the
+  // first 6-digit code finalizes it. Backup codes are stored as argon2id
+  // hashes so they're verified the same way passwords are.
+  totpSecret      String?   @map("totp_secret")
+  totpEnabledAt   DateTime? @map("totp_enabled_at")
+  totpBackupCodes String[]  @default([]) @map("totp_backup_codes")
+
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

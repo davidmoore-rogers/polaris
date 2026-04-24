@@ -18,6 +18,8 @@ document.addEventListener("DOMContentLoaded", function () {
     if (action === "role") openChangeRoleModal(id, username, role);
     else if (action === "password") openResetPasswordModal(id, username);
     else if (action === "delete") confirmDelete(id, username);
+    else if (action === "totp-self") openTotpSelfModal();
+    else if (action === "totp-reset") confirmTotpReset(id, username);
   });
 });
 
@@ -48,20 +50,39 @@ async function loadUsers() {
         : '';
       var passwordBtn = u.authProvider === "azure" ? '' :
         '<button class="btn btn-sm btn-secondary" data-action="password" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '">Password</button>';
+      var totpCell;
+      if (u.authProvider === "azure") {
+        totpCell = '<span style="color:var(--color-text-tertiary);font-size:0.85em" title="Handled by your identity provider">IdP-managed</span>';
+      } else if (u.totpEnabled) {
+        totpCell = '<span class="badge" style="background:rgba(76,175,80,0.15);color:var(--color-success,#4caf50)">Enabled</span>';
+      } else {
+        totpCell = '<span style="color:var(--color-text-tertiary)">Not set</span>';
+      }
+      var isSelf = currentUsername === u.username;
+      var totpBtn = "";
+      if (u.authProvider !== "azure") {
+        if (isSelf) {
+          totpBtn = '<button class="btn btn-sm btn-secondary" data-action="totp-self" title="Manage your two-factor authentication">2FA</button>';
+        } else if (u.totpEnabled) {
+          totpBtn = '<button class="btn btn-sm btn-secondary" data-action="totp-reset" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '" title="Reset 2FA (e.g. lost device)">Reset 2FA</button>';
+        }
+      }
       return '<tr>' +
         '<td>' + onlineDot + '<strong>' + escapeHtml(u.username) + '</strong>' + displayName + '</td>' +
         '<td>' + authBadge + '</td>' +
         '<td>' + roleBadge + '</td>' +
+        '<td>' + totpCell + '</td>' +
         '<td>' + lastLogin + '</td>' +
         '<td>' + formatDate(u.createdAt) + '</td>' +
         '<td class="actions">' +
           '<button class="btn btn-sm btn-secondary" data-action="role" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '" data-role="' + escapeHtml(u.role) + '">Role</button>' +
           passwordBtn +
+          totpBtn +
           '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '">Delete</button>' +
         '</td></tr>';
     }).join("");
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -173,6 +194,137 @@ async function confirmDelete(id, username) {
 }
 
 function val(id) { return document.getElementById(id).value.trim(); }
+
+// ─── Self-service TOTP ─────────────────────────────────────────────────────
+
+async function openTotpSelfModal() {
+  var status;
+  try { status = await api.totp.status(); }
+  catch (err) { showToast(err.message, "error"); return; }
+  if (status.enabled) openTotpDisableModal();
+  else openTotpEnrollModal();
+}
+
+async function openTotpEnrollModal() {
+  var enrollment;
+  try { enrollment = await api.totp.enroll(); }
+  catch (err) { showToast(err.message, "error"); return; }
+
+  var body =
+    '<p style="font-size:0.9rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+      'Scan the QR code with an authenticator app (Google Authenticator, 1Password, Bitwarden, Authy, Microsoft Authenticator, etc.), then enter the current 6-digit code to finish enrollment.' +
+    '</p>' +
+    '<div style="display:flex;justify-content:center;margin-bottom:1rem;background:#fff;padding:1rem;border-radius:8px">' +
+      enrollment.qrSvg +
+    '</div>' +
+    '<details style="margin-bottom:1rem;font-size:0.85rem">' +
+      '<summary style="cursor:pointer;color:var(--color-text-secondary)">Can\'t scan? Enter the secret manually</summary>' +
+      '<p style="margin-top:0.5rem;padding:0.5rem;background:var(--color-bg-secondary);border-radius:4px;font-family:monospace;font-size:0.8rem;word-break:break-all">' +
+        escapeHtml(enrollment.secret) +
+      '</p>' +
+    '</details>' +
+    '<div class="form-group">' +
+      '<label for="f-totp-code">Verification code</label>' +
+      '<input type="text" id="f-totp-code" inputmode="numeric" maxlength="6" placeholder="123456" autocomplete="one-time-code" autofocus>' +
+    '</div>';
+  var footer =
+    '<button class="btn btn-secondary" id="btn-totp-cancel">Cancel</button>' +
+    '<button class="btn btn-primary" id="btn-totp-confirm">Enable 2FA</button>';
+  openModal("Enable Two-Factor Auth", body, footer);
+
+  document.getElementById("btn-totp-cancel").addEventListener("click", closeModal);
+  document.getElementById("btn-totp-confirm").addEventListener("click", async function () {
+    var btn = this;
+    var code = val("f-totp-code");
+    if (!/^\d{6}$/.test(code)) { showToast("Enter the 6-digit code from your authenticator app", "error"); return; }
+    btn.disabled = true;
+    try {
+      var result = await api.totp.confirm({ code: code });
+      closeModal();
+      showBackupCodesModal(result.backupCodes);
+      loadUsers();
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function showBackupCodesModal(codes) {
+  var listHtml = codes.map(function (c) {
+    return '<li style="font-family:monospace;font-size:0.95rem;padding:0.2rem 0">' + escapeHtml(c) + '</li>';
+  }).join("");
+  var body =
+    '<p style="margin-bottom:0.75rem">Two-factor auth is now enabled. <strong>Save these backup codes somewhere safe</strong> — each works once and can be used in place of a code from your authenticator app if you lose your device.</p>' +
+    '<div style="background:var(--color-bg-secondary);border:1px solid var(--color-border);border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.75rem">' +
+      '<ol style="margin:0;padding-left:1.5rem;columns:2;gap:1rem">' + listHtml + '</ol>' +
+    '</div>' +
+    '<p style="font-size:0.85rem;color:var(--color-text-tertiary)">These codes will not be shown again.</p>';
+  var footer =
+    '<button class="btn btn-secondary" id="btn-copy-backup">Copy to clipboard</button>' +
+    '<button class="btn btn-primary" id="btn-backup-done">I\'ve saved them</button>';
+  openModal("Backup Codes", body, footer);
+  document.getElementById("btn-copy-backup").addEventListener("click", function () {
+    navigator.clipboard.writeText(codes.join("\n")).then(function () {
+      showToast("Backup codes copied");
+    }).catch(function () {
+      showToast("Copy failed — select the codes manually", "error");
+    });
+  });
+  document.getElementById("btn-backup-done").addEventListener("click", closeModal);
+}
+
+function openTotpDisableModal() {
+  var body =
+    '<p style="margin-bottom:1rem">Enter a current code from your authenticator app (or a backup code) to turn off two-factor authentication for <strong>' + escapeHtml(currentUsername) + '</strong>.</p>' +
+    '<div class="form-group">' +
+      '<label for="f-totp-disable-code">Verification code</label>' +
+      '<input type="text" id="f-totp-disable-code" inputmode="numeric" maxlength="9" placeholder="123456" autocomplete="one-time-code" autofocus>' +
+    '</div>' +
+    '<label style="display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;cursor:pointer">' +
+      '<input type="checkbox" id="f-totp-backup-check"> I\'m using a backup code' +
+    '</label>';
+  var footer =
+    '<button class="btn btn-secondary" id="btn-totp-cancel">Cancel</button>' +
+    '<button class="btn btn-danger" id="btn-totp-disable">Disable 2FA</button>';
+  openModal("Disable Two-Factor Auth", body, footer);
+
+  document.getElementById("btn-totp-cancel").addEventListener("click", closeModal);
+  document.getElementById("btn-totp-disable").addEventListener("click", async function () {
+    var btn = this;
+    var code = val("f-totp-disable-code");
+    var isBackup = document.getElementById("f-totp-backup-check").checked;
+    if (!code) { showToast("Enter a code to continue", "error"); return; }
+    btn.disabled = true;
+    try {
+      await api.totp.disable({ code: code, isBackupCode: isBackup });
+      closeModal();
+      showToast("Two-factor auth disabled");
+      loadUsers();
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+async function confirmTotpReset(id, username) {
+  var ok = await showConfirm(
+    'Reset two-factor auth for "' + username + '"?\n\n' +
+    'Use this only when the user has lost access to their authenticator app and their backup codes. ' +
+    'They will be able to log in with just their password on the next attempt, and should re-enroll immediately.',
+  );
+  if (!ok) return;
+  try {
+    await api.users.resetTotp(id);
+    showToast("2FA reset for " + username);
+    loadUsers();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
 
 // ─── Authentication Settings ───────────────────────────────────────────────
 

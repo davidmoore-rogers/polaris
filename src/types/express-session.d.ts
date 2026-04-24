@@ -10,5 +10,6 @@ declare module "express-session" {
     samlNameID: string;       // SAML NameID for logout
     samlSessionIndex: string; // SAML SessionIndex for logout
     lastActivity: number;     // Timestamp for inactivity tracking
+    mfaVerified: boolean;     // True when the session has cleared TOTP (local accounts only)
   }
 }

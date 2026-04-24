@@ -7,6 +7,14 @@ import { z } from "zod";
 import { prisma } from "../../db.js";
 import { hashPassword, verifyPassword } from "../../utils/password.js";
 import { isLocked, recordFailure, clearLockout } from "../../utils/loginLockout.js";
+import * as mfaPending from "../../utils/mfaPending.js";
+import {
+  verifyCode as verifyTotpCode,
+  consumeBackupCode,
+  generateSecret as generateTotpSecret,
+  generateBackupCodes,
+  buildEnrollment,
+} from "../../services/totpService.js";
 import { AppError } from "../../utils/errors.js";
 import { requireAuth, requireAdmin } from "../middleware/auth.js";
 import {
@@ -92,15 +100,9 @@ router.post("/login", async (req, res, next) => {
       throw new AppError(401, "Invalid username or password");
     }
 
-    // Good login — clear any accumulated failure counter
+    // Good password — clear the failure counter now; if TOTP fails later,
+    // recordFailure() on the /login/totp path will start the counter fresh.
     clearLockout(username);
-
-    await regenerateSession(req);
-    req.session.userId = user.id;
-    req.session.username = user.username;
-    req.session.role = user.role;
-    req.session.authProvider = user.authProvider || "local";
-    req.session.lastActivity = Date.now();
 
     // Re-hash on successful login if stored params are weaker than current target.
     const updateData: { lastLogin: Date; passwordHash?: string } = { lastLogin: new Date() };
@@ -108,6 +110,31 @@ router.post("/login", async (req, res, next) => {
       updateData.passwordHash = await hashPassword(password);
     }
     await prisma.user.update({ where: { id: user.id }, data: updateData });
+
+    // If TOTP is enabled on this (local) account, don't issue the session
+    // yet — hand the caller an opaque pending-MFA token instead and wait
+    // for the second-step /login/totp call.
+    if (user.authProvider === "local" && user.totpEnabledAt) {
+      const pendingToken = mfaPending.issue(user.id, user.username);
+      logEvent({
+        action: "auth.login.password_ok",
+        resourceType: "user",
+        resourceId: user.id,
+        resourceName: user.username,
+        actor: user.username,
+        message: `Password accepted for ${user.username}; awaiting TOTP`,
+        details: { ip: req.ip },
+      });
+      return res.json({ mfaRequired: true, pendingToken });
+    }
+
+    await regenerateSession(req);
+    req.session.userId = user.id;
+    req.session.username = user.username;
+    req.session.role = user.role;
+    req.session.authProvider = user.authProvider || "local";
+    req.session.mfaVerified = false;
+    req.session.lastActivity = Date.now();
 
     logEvent({
       action: "auth.login.local",
@@ -117,6 +144,120 @@ router.post("/login", async (req, res, next) => {
       actor: user.username,
       message: `Local login: ${user.username}`,
       details: { ip: req.ip, userAgent: req.get("user-agent") || undefined, rehashed: needsRehash || undefined },
+    });
+
+    res.json({ ok: true, username: user.username, role: user.role });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const TotpLoginSchema = z.object({
+  pendingToken: z.string().min(1),
+  code:         z.string().min(1),
+  isBackupCode: z.boolean().optional(),
+});
+
+// POST /api/v1/auth/login/totp — second-step of the two-phase login
+router.post("/login/totp", async (req, res, next) => {
+  try {
+    const { pendingToken, code, isBackupCode } = TotpLoginSchema.parse(req.body);
+
+    // Peek first so we can correctly attribute failures to the right user
+    // without prematurely consuming a token that might still be valid.
+    const pending = mfaPending.peek(pendingToken);
+    if (!pending) {
+      throw new AppError(401, "Session expired — please sign in again.");
+    }
+
+    // Apply the shared login lockout here too, so an attacker can't grind
+    // codes after a stolen password without hitting the same 5-failure ceiling.
+    const lock = isLocked(pending.username);
+    if (lock.locked) {
+      logEvent({
+        action: "auth.login.locked",
+        resourceType: "user",
+        resourceId: pending.userId,
+        resourceName: pending.username,
+        level: "warning",
+        message: `TOTP attempt on locked account "${pending.username}"`,
+        details: { ip: req.ip, lockedUntil: lock.until?.toISOString() },
+      });
+      throw new AppError(
+        423,
+        `Account temporarily locked due to too many failed attempts. Try again after ${lock.until?.toLocaleTimeString() ?? "later"}.`,
+      );
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: pending.userId } });
+    if (!user || !user.totpSecret || !user.totpEnabledAt) {
+      // User or their TOTP config disappeared between steps — fail closed.
+      mfaPending.consume(pendingToken);
+      throw new AppError(401, "Session expired — please sign in again.");
+    }
+
+    let verified = false;
+    let remainingBackupCodes: string[] | null = null;
+
+    if (isBackupCode) {
+      const remaining = await consumeBackupCode(user.totpBackupCodes, code);
+      if (remaining !== null) {
+        verified = true;
+        remainingBackupCodes = remaining;
+      }
+    } else {
+      verified = verifyTotpCode(user.totpSecret, code);
+    }
+
+    if (!verified) {
+      const tripped = recordFailure(pending.username);
+      logEvent({
+        action: "auth.login.totp_failed",
+        resourceType: "user",
+        resourceId: user.id,
+        resourceName: user.username,
+        level: "warning",
+        message: `Failed ${isBackupCode ? "backup-code" : "TOTP"} attempt for ${user.username}`,
+        details: { ip: req.ip, failures: tripped.failures },
+      });
+      if (tripped.lockedNow) {
+        // Drop the pending token so they can't keep trying to grind codes
+        // against the same password-verified state after the lockout expires.
+        mfaPending.consume(pendingToken);
+      }
+      throw new AppError(401, "Invalid verification code");
+    }
+
+    // Success: consume the pending token, persist any backup-code removal,
+    // issue the real session, clear failure counter.
+    mfaPending.consume(pendingToken);
+    clearLockout(pending.username);
+
+    const postVerifyData: { lastLogin: Date; totpBackupCodes?: string[] } = { lastLogin: new Date() };
+    if (remainingBackupCodes) postVerifyData.totpBackupCodes = remainingBackupCodes;
+    await prisma.user.update({ where: { id: user.id }, data: postVerifyData });
+
+    await regenerateSession(req);
+    req.session.userId = user.id;
+    req.session.username = user.username;
+    req.session.role = user.role;
+    req.session.authProvider = user.authProvider || "local";
+    req.session.mfaVerified = true;
+    req.session.lastActivity = Date.now();
+
+    logEvent({
+      action: "auth.login.local",
+      resourceType: "user",
+      resourceId: user.id,
+      resourceName: user.username,
+      actor: user.username,
+      message: `Local login (with TOTP): ${user.username}`,
+      details: {
+        ip: req.ip,
+        userAgent: req.get("user-agent") || undefined,
+        method: isBackupCode ? "backup_code" : "totp",
+        backupCodesRemaining: remainingBackupCodes ? remainingBackupCodes.length : undefined,
+      },
     });
 
     res.json({ ok: true, username: user.username, role: user.role });
@@ -207,6 +348,9 @@ router.post("/azure/callback", async (req, res) => {
     req.session.username = user.username;
     req.session.role = user.role;
     req.session.authProvider = "azure";
+    // IdP is responsible for MFA on Azure SAML users; their session is
+    // implicitly "mfa-verified" as far as Shelob is concerned.
+    req.session.mfaVerified = true;
     req.session.lastActivity = Date.now();
     req.session.samlNameID = profile.nameID;
     req.session.samlSessionIndex = profile.sessionIndex;
@@ -428,6 +572,143 @@ router.put("/ldap/settings", requireAuth, requireAdmin, async (req, res, next) =
     });
     res.json({ ...value, bindPassword: value.bindPassword ? "********" : "" });
   } catch (err) { next(err); }
+});
+
+// ─── TOTP self-management ───────────────────────────────────────────────────
+// Endpoints for the logged-in user to enroll / confirm / disable their own
+// second factor. Admin-initiated reset for *another* user lives under
+// /users/:id/totp (see routes/users.ts).
+
+const TotpConfirmSchema = z.object({ code: z.string().min(1) });
+const TotpDisableSchema = z.object({ code: z.string().min(1), isBackupCode: z.boolean().optional() });
+
+// POST /api/v1/auth/totp/enroll — start enrollment for the current user
+router.post("/totp/enroll", requireAuth, async (req, res, next) => {
+  try {
+    const userId = req.session.userId!;
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new AppError(404, "User not found");
+    if (user.authProvider !== "local") {
+      throw new AppError(400, "Two-factor auth is managed by your identity provider for SSO accounts.");
+    }
+
+    // Starting fresh enrollment always discards any half-configured state.
+    // If TOTP is already fully enabled, the caller must disable it first —
+    // we don't silently replace a working setup.
+    if (user.totpEnabledAt) {
+      throw new AppError(409, "Two-factor auth is already enabled. Disable it before re-enrolling.");
+    }
+
+    const secret = generateTotpSecret();
+    const { otpauthUri, qrSvg } = await buildEnrollment(secret, user.username);
+    await prisma.user.update({ where: { id: userId }, data: { totpSecret: secret } });
+
+    res.json({ secret, otpauthUri, qrSvg });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/auth/totp/confirm — finalize enrollment by proving the user
+// configured their authenticator correctly (verify first 6-digit code)
+router.post("/totp/confirm", requireAuth, async (req, res, next) => {
+  try {
+    const { code } = TotpConfirmSchema.parse(req.body);
+    const userId = req.session.userId!;
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.totpSecret) {
+      throw new AppError(400, "No enrollment in progress — start by generating a QR code.");
+    }
+    if (user.totpEnabledAt) {
+      throw new AppError(409, "Two-factor auth is already enabled.");
+    }
+    if (!verifyTotpCode(user.totpSecret, code)) {
+      throw new AppError(401, "Invalid code. Try again with a fresh value from your authenticator app.");
+    }
+
+    const { plaintext, hashes } = await generateBackupCodes();
+    await prisma.user.update({
+      where: { id: userId },
+      data: { totpEnabledAt: new Date(), totpBackupCodes: hashes },
+    });
+
+    // Mark the current session mfa-verified so the user doesn't have to
+    // log out and back in just because they enrolled.
+    req.session.mfaVerified = true;
+
+    logEvent({
+      action: "auth.totp.enrolled",
+      resourceType: "user",
+      resourceId: user.id,
+      resourceName: user.username,
+      actor: user.username,
+      message: `TOTP enabled for ${user.username}`,
+    });
+
+    res.json({ ok: true, backupCodes: plaintext });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/v1/auth/totp — self-disable. Requires a valid current TOTP or
+// backup code so a stolen session can't silently drop MFA.
+router.delete("/totp", requireAuth, async (req, res, next) => {
+  try {
+    const { code, isBackupCode } = TotpDisableSchema.parse(req.body);
+    const userId = req.session.userId!;
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new AppError(404, "User not found");
+    if (!user.totpEnabledAt || !user.totpSecret) {
+      throw new AppError(400, "Two-factor auth is not currently enabled.");
+    }
+
+    let verified = false;
+    if (isBackupCode) {
+      const remaining = await consumeBackupCode(user.totpBackupCodes, code);
+      verified = remaining !== null;
+    } else {
+      verified = verifyTotpCode(user.totpSecret, code);
+    }
+    if (!verified) throw new AppError(401, "Invalid code.");
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { totpSecret: null, totpEnabledAt: null, totpBackupCodes: [] },
+    });
+
+    logEvent({
+      action: "auth.totp.disabled",
+      resourceType: "user",
+      resourceId: user.id,
+      resourceName: user.username,
+      actor: user.username,
+      message: `TOTP disabled for ${user.username} (self)`,
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/auth/totp/status — current user's enrollment state
+router.get("/totp/status", requireAuth, async (req, res, next) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.session.userId! },
+      select: { authProvider: true, totpSecret: true, totpEnabledAt: true, totpBackupCodes: true },
+    });
+    if (!user) throw new AppError(404, "User not found");
+    res.json({
+      authProvider: user.authProvider,
+      enabled: !!user.totpEnabledAt,
+      enrolling: !!user.totpSecret && !user.totpEnabledAt,
+      backupCodesRemaining: user.totpBackupCodes?.length ?? 0,
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 export default router;

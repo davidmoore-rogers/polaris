@@ -138,6 +138,19 @@
           View Setup Wizard
         </button>
       </div>
+      <div id="mfa-section" style="display:none">
+        <form id="mfa-form">
+          <div class="form-group">
+            <label for="mfa-code" id="mfa-code-label">Verification code</label>
+            <input type="text" id="mfa-code" name="mfa-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" data-mode="totp" required autofocus>
+            <p class="hint" id="mfa-hint">Enter the 6-digit code from your authenticator app.</p>
+          </div>
+          <button type="submit" class="btn btn-primary">Verify</button>
+          <p style="text-align:center;margin-top:0.75rem;font-size:0.8rem">
+            <a href="#" id="btn-use-backup" style="color:var(--color-primary,#4a9eff)">Use a backup code</a>
+          </p>
+        </form>
+      </div>
     </div>
   </div>
   <script src="/js/login.js"></script>

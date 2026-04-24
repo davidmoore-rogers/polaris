@@ -37,12 +37,20 @@ router.get("/", async (_req, res, next) => {
   try {
     const [users, onlineUserIds] = await Promise.all([
       prisma.user.findMany({
-        select: { id: true, username: true, role: true, authProvider: true, displayName: true, email: true, lastLogin: true, createdAt: true, updatedAt: true },
+        select: {
+          id: true, username: true, role: true, authProvider: true,
+          displayName: true, email: true, lastLogin: true,
+          createdAt: true, updatedAt: true,
+          totpEnabledAt: true,
+        },
         orderBy: { username: "asc" },
       }),
       getOnlineUserIds(),
     ]);
-    res.json(users.map((u) => ({ ...u, isOnline: onlineUserIds.has(u.id) })));
+    res.json(users.map((u) => {
+      const { totpEnabledAt, ...rest } = u;
+      return { ...rest, isOnline: onlineUserIds.has(u.id), totpEnabled: !!totpEnabledAt };
+    }));
   } catch (err) {
     next(err);
   }
@@ -125,6 +133,29 @@ router.put("/:id/role", async (req, res, next) => {
       data: { role },
     });
     res.json({ ok: true, role });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/v1/users/:id/totp — admin-initiated TOTP reset
+// Used when a user lost their device and can't produce a backup code.
+// Clears the secret + backup codes so the user can re-enroll on next login.
+router.delete("/:id/totp", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const user = await prisma.user.findUnique({ where: { id } });
+    if (!user) throw new AppError(404, "User not found");
+    if (!user.totpEnabledAt && !user.totpSecret) {
+      throw new AppError(400, "Two-factor auth is not configured for this user.");
+    }
+
+    await prisma.user.update({
+      where: { id },
+      data: { totpSecret: null, totpEnabledAt: null, totpBackupCodes: [] },
+    });
+
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

@@ -79,10 +79,32 @@ document.getElementById("btn-demo-setup").addEventListener("click", function () 
   window.location.href = "/setup.html";
 });
 
+// Two-phase login state — pendingToken is set after a correct password
+// when the server requires a second factor. The rest of the flow is the
+// same async/await shape as before.
+var _mfaPendingToken = null;
+
+function showError(msg) {
+  var errEl = document.getElementById("login-error");
+  errEl.textContent = msg;
+  errEl.style.display = "block";
+}
+
+function clearError() {
+  document.getElementById("login-error").style.display = "none";
+}
+
+function showMfaStep() {
+  document.getElementById("local-login-section").style.display = "none";
+  document.getElementById("sso-section").style.display = "none";
+  document.getElementById("demo-setup-section").style.display = "none";
+  document.getElementById("mfa-section").style.display = "block";
+  setTimeout(function () { document.getElementById("mfa-code").focus(); }, 30);
+}
+
 document.getElementById("login-form").addEventListener("submit", async function (e) {
   e.preventDefault();
-  var errEl = document.getElementById("login-error");
-  errEl.style.display = "none";
+  clearError();
 
   var username = document.getElementById("username").value.trim();
   var password = document.getElementById("password").value;
@@ -95,13 +117,73 @@ document.getElementById("login-form").addEventListener("submit", async function 
     });
     var data = await res.json();
     if (!res.ok) {
-      errEl.textContent = data.error || "Login failed";
-      errEl.style.display = "block";
+      showError(data.error || "Login failed");
+      return;
+    }
+    if (data.mfaRequired) {
+      _mfaPendingToken = data.pendingToken;
+      showMfaStep();
       return;
     }
     window.location.href = "/";
   } catch (err) {
-    errEl.textContent = "Network error — try again";
-    errEl.style.display = "block";
+    showError("Network error — try again");
+  }
+});
+
+// Toggle between TOTP code and backup code
+document.getElementById("btn-use-backup").addEventListener("click", function (e) {
+  e.preventDefault();
+  var input = document.getElementById("mfa-code");
+  var label = document.getElementById("mfa-code-label");
+  var hint  = document.getElementById("mfa-hint");
+  var link  = document.getElementById("btn-use-backup");
+  var usingBackup = input.dataset.mode === "backup";
+  if (usingBackup) {
+    input.dataset.mode = "totp";
+    input.type = "text";
+    input.maxLength = 6;
+    input.placeholder = "123456";
+    input.value = "";
+    label.textContent = "Verification code";
+    hint.textContent  = "Enter the 6-digit code from your authenticator app.";
+    link.textContent  = "Use a backup code";
+  } else {
+    input.dataset.mode = "backup";
+    input.type = "text";
+    input.maxLength = 9;
+    input.placeholder = "XXXX-XXXX";
+    input.value = "";
+    label.textContent = "Backup code";
+    hint.textContent  = "Enter one of the backup codes you saved when enabling 2FA.";
+    link.textContent  = "Use the authenticator app instead";
+  }
+  input.focus();
+});
+
+document.getElementById("mfa-form").addEventListener("submit", async function (e) {
+  e.preventDefault();
+  clearError();
+
+  var input = document.getElementById("mfa-code");
+  var code = input.value.trim();
+  var isBackupCode = input.dataset.mode === "backup";
+  if (!code) return;
+
+  try {
+    var res = await fetch("/api/v1/auth/login/totp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pendingToken: _mfaPendingToken, code: code, isBackupCode: isBackupCode }),
+    });
+    var data = await res.json();
+    if (!res.ok) {
+      showError(data.error || "Invalid code");
+      input.select();
+      return;
+    }
+    window.location.href = "/";
+  } catch (err) {
+    showError("Network error — try again");
   }
 });
