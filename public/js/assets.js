@@ -792,8 +792,8 @@ async function openViewModal(id) {
       viewRow("Acquired", (a.acquiredAt || a.createdAt) ? formatDate(a.acquiredAt || a.createdAt) : null) +
       viewRow("Warranty Expires", a.warrantyExpiry ? formatDate(a.warrantyExpiry) : null) +
       viewRow("Purchase Order", a.purchaseOrder) +
-      viewRow("Tags", (a.tags || []).join(", ") || null) +
-      viewRow("Notes", a.notes) +
+      viewRow("Tags", (a.tags || []).join(", ") || null, false, true) +
+      viewRow("Notes", a.notes, false, true) +
       viewRow("Created", formatDate(a.createdAt)) +
       viewRow("Updated", formatDate(a.updatedAt)) +
     '</div>';
@@ -988,9 +988,10 @@ function ipViewRow(asset) {
     '<span class="detail-value mono">' + ipCellHTML(asset) + src + '</span></div>';
 }
 
-function viewRow(label, value, mono) {
+function viewRow(label, value, mono, alignRight) {
+  var style = alignRight ? ' style="text-align:right"' : '';
   return '<div class="detail-row"><span class="detail-label">' + escapeHtml(label) + '</span>' +
-    '<span class="detail-value' + (mono ? ' mono' : '') + '">' + escapeHtml(value || "-") + '</span></div>';
+    '<span class="detail-value' + (mono ? ' mono' : '') + '"' + style + '>' + escapeHtml(value || "-") + '</span></div>';
 }
 
 function disabledInHTML(tags) {
