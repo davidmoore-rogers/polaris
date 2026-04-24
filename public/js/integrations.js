@@ -861,6 +861,8 @@ async function openEditModal(id) {
         autoDiscover: intg.autoDiscover !== false,
         pollInterval: intg.pollInterval,
         mgmtInterface: config.mgmtInterface,
+        interfaceInclude: Array.isArray(config.interfaceInclude) ? config.interfaceInclude : undefined,
+        interfaceExclude: Array.isArray(config.interfaceExclude) ? config.interfaceExclude : undefined,
         dhcpInclude: config.dhcpInclude || [],
         dhcpExclude: config.dhcpExclude || [],
         inventoryIncludeInterfaces: config.inventoryIncludeInterfaces || [],
