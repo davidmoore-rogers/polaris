@@ -1,7 +1,10 @@
 // public/js/login.js — Login page logic (extracted from login.html inline
 // script so we can drop 'unsafe-inline' from the script CSP).
 
-// Show any error from query string (e.g. SSO errors)
+// Show any error from query string (e.g. SSO errors). MUST use textContent,
+// never innerHTML — the error value originates from the server redirecting
+// back here with ?error=<message>, which can be influenced by an attacker
+// (e.g. a crafted SAML response). textContent is XSS-safe; innerHTML is not.
 (function () {
   var params = new URLSearchParams(window.location.search);
   var err = params.get("error");

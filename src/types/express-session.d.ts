@@ -11,5 +11,6 @@ declare module "express-session" {
     samlSessionIndex: string; // SAML SessionIndex for logout
     lastActivity: number;     // Timestamp for inactivity tracking
     mfaVerified: boolean;     // True when the session has cleared TOTP (local accounts only)
+    csrfToken: string;        // Synchronizer token for state-changing requests
   }
 }

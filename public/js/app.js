@@ -137,7 +137,7 @@ function renderNav() {
 
   document.getElementById("btn-logout").addEventListener("click", async function (e) {
     e.preventDefault();
-    try { await fetch("/api/v1/auth/logout", { method: "POST" }); } catch (_) {}
+    try { await fetch("/api/v1/auth/logout", { method: "POST", headers: _csrfHeaders() }); } catch (_) {}
     window.location.href = "/login.html";
   });
 
@@ -787,6 +787,8 @@ function showToast(message, type) {
 
 // ─── Modal ────────────────────────────────────────────────────────────────────
 
+var _modalDrag = { active: false, startX: 0, startY: 0, offsetX: 0, offsetY: 0 };
+
 function openModal(title, bodyHTML, footerHTML, options) {
   let overlay = document.getElementById("modal-overlay");
   if (!overlay) {
@@ -805,8 +807,33 @@ function openModal(title, bodyHTML, footerHTML, options) {
       }
     });
     overlay.querySelector(".modal-close").addEventListener("click", closeModal);
+    var modalEl = overlay.querySelector(".modal");
+    var headerEl = overlay.querySelector(".modal-header");
+    headerEl.addEventListener("mousedown", function (e) {
+      if (e.target.closest(".modal-close")) return;
+      _modalDrag.active = true;
+      _modalDrag.startX = e.clientX - _modalDrag.offsetX;
+      _modalDrag.startY = e.clientY - _modalDrag.offsetY;
+      document.body.style.userSelect = "none";
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", function (e) {
+      if (!_modalDrag.active) return;
+      _modalDrag.offsetX = e.clientX - _modalDrag.startX;
+      _modalDrag.offsetY = e.clientY - _modalDrag.startY;
+      modalEl.style.transform = "translate(" + _modalDrag.offsetX + "px, " + _modalDrag.offsetY + "px)";
+    });
+    document.addEventListener("mouseup", function () {
+      if (_modalDrag.active) {
+        _modalDrag.active = false;
+        document.body.style.userSelect = "";
+      }
+    });
   }
   var modal = overlay.querySelector(".modal");
+  _modalDrag.offsetX = 0;
+  _modalDrag.offsetY = 0;
+  modal.style.transform = "";
   modal.classList.remove("modal-wide", "modal-xl");
   if (options && options.wide) modal.classList.add("modal-wide");
   if (options && options.xl) modal.classList.add("modal-xl");
@@ -1188,7 +1215,7 @@ function _resetAutoLogoutTimer() {
   if (_autoLogoutMs <= 0) return;
   _autoLogoutTimer = setTimeout(function () {
     // Session expired client-side — logout
-    fetch("/api/v1/auth/logout", { method: "POST" }).catch(function () {});
+    fetch("/api/v1/auth/logout", { method: "POST", headers: _csrfHeaders() }).catch(function () {});
     window.location.href = "/login.html";
   }, _autoLogoutMs);
 }

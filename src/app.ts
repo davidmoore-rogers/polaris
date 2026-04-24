@@ -17,6 +17,7 @@ import { router } from "./api/router.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { errorHandler } from "./api/middleware/errorHandler.js";
+import { csrfMiddleware } from "./api/middleware/csrf.js";
 import { logger } from "./utils/logger.js";
 import { initHttps, httpsRedirectMiddleware } from "./httpsManager.js";
 import { getHttpsSettings } from "./services/serverSettingsService.js";
@@ -84,7 +85,12 @@ app.use(
         upgradeInsecureRequests: null,
       },
     },
-    hsts: { maxAge: 31536000, includeSubDomains: true, preload: false },
+    // preload: true signals browser preload-list maintainers that we're OK
+    // being included. The header alone is harmless; actual inclusion still
+    // requires a separate submission to https://hstspreload.org/. Safe to
+    // leave on as long as every subdomain served from this origin is also
+    // HTTPS-only (includeSubDomains above makes that a hard requirement).
+    hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
     referrerPolicy: { policy: "strict-origin-when-cross-origin" },
   })
 );
@@ -111,12 +117,20 @@ app.use(
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: process.env.FORCE_HTTPS === "true",
+      // "auto" sets Secure when the request is HTTPS (including behind a
+      // reverse proxy when TRUST_PROXY is set so X-Forwarded-Proto is
+      // believed). Removes the need for a FORCE_HTTPS override.
+      secure: "auto",
       sameSite: "lax",
       maxAge: 8 * 60 * 60 * 1000, // 8 hours
     },
   })
 );
+
+// ─── CSRF protection ─────────────────────────────────────────────────────────
+// Must come after session middleware (reads/writes req.session) and before
+// any route handler that performs writes.
+app.use(csrfMiddleware);
 
 // ─── Rate limiting ───────────────────────────────────────────────────────────
 const loginLimiter = rateLimit({
@@ -175,7 +189,22 @@ app.use(async (req, res, next) => {
 
 app.use(express.static(path.resolve(__dirname, "..", "public")));
 
-app.get("/health", (_req, res) => res.json({ status: "ok" }));
+// Health check. Open by default because the first-run setup wizard polls
+// this endpoint (from localhost) to detect when the main app has come up.
+// Set HEALTH_TOKEN=<string> in .env to require `Authorization: Bearer <token>`
+// on the endpoint — useful when Shelob is public-facing and you want to
+// limit health pings to your own monitoring system.
+app.get("/health", (req, res) => {
+  const expected = process.env.HEALTH_TOKEN;
+  if (expected) {
+    const auth = req.get("authorization") || "";
+    const supplied = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    if (supplied !== expected) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+  }
+  res.json({ status: "ok" });
+});
 app.use("/api/v1", router);
 app.use(errorHandler);
 

@@ -27,6 +27,23 @@ function abortAllQueries() {
   if (_onQueriesChanged) _onQueriesChanged();
 }
 
+// Read a cookie by name. Used to pull the CSRF token the server sets
+// via the synchronizer-token middleware.
+function _readCookie(name) {
+  var m = document.cookie.match(new RegExp("(?:^|; )" + name.replace(/[.$?*|{}()[\]\\\/+^]/g, "\\$&") + "=([^;]+)"));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+// Build a headers object prefilled with the CSRF token. Use for direct
+// fetch() calls that bypass the shared `request()` helper (file uploads,
+// blob downloads, etc).
+function _csrfHeaders(extra) {
+  var headers = extra ? Object.assign({}, extra) : {};
+  var csrf = _readCookie("shelob_csrf");
+  if (csrf) headers["X-CSRF-Token"] = csrf;
+  return headers;
+}
+
 async function request(method, path, body, signal) {
   const opts = {
     method,
@@ -34,6 +51,13 @@ async function request(method, path, body, signal) {
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
   if (signal) opts.signal = signal;
+
+  // Attach CSRF token on state-changing methods. GETs are exempt.
+  var upper = method.toUpperCase();
+  if (upper !== "GET" && upper !== "HEAD" && upper !== "OPTIONS") {
+    var csrf = _readCookie("shelob_csrf");
+    if (csrf) opts.headers["X-CSRF-Token"] = csrf;
+  }
 
   const res = await fetch(API_BASE + path, opts);
 
@@ -168,7 +192,7 @@ const api = {
     applyHttps:  ()       => request("POST", "/server-settings/https/apply"),
     getDatabase: ()       => request("GET", "/server-settings/database"),
     backupDatabase: (password) => {
-      var opts = { method: "POST", headers: { "Content-Type": "application/json" } };
+      var opts = { method: "POST", headers: _csrfHeaders({ "Content-Type": "application/json" }) };
       if (password) opts.body = JSON.stringify({ password: password });
       return fetch(API_BASE + "/server-settings/database/backup", opts).then(function (res) {
         if (res.status === 401) { window.location.href = "/login.html"; return; }
@@ -183,7 +207,7 @@ const api = {
       var formData = new FormData();
       formData.append("file", file);
       if (password) formData.append("password", password);
-      return fetch(API_BASE + "/server-settings/database/restore", { method: "POST", body: formData }).then(function (res) {
+      return fetch(API_BASE + "/server-settings/database/restore", { method: "POST", headers: _csrfHeaders(), body: formData }).then(function (res) {
         if (res.status === 401) { window.location.href = "/login.html"; return; }
         return res.json().then(function (data) { if (!res.ok) throw new Error(data.error || "Restore failed"); return data; });
       });
@@ -213,6 +237,7 @@ const api = {
       formData.append("file", file);
       return fetch(API_BASE + "/server-settings/branding/logo", {
         method: "POST",
+        headers: _csrfHeaders(),
         body: formData,
       }).then(function (res) {
         if (res.status === 401) { window.location.href = "/login.html"; return; }
@@ -261,6 +286,7 @@ async function uploadFile(path, category, file) {
 
   const res = await fetch(API_BASE + path, {
     method: "POST",
+    headers: _csrfHeaders(),
     body: formData,
   });
 

@@ -59,6 +59,7 @@ shelob/
 │   │   ├── router.ts                # Express router aggregator + auth guards
 │   │   ├── middleware/
 │   │   │   ├── auth.ts              # Session auth + RBAC middleware
+│   │   │   ├── csrf.ts              # Synchronizer-token CSRF protection (`shelob_csrf` cookie + `X-CSRF-Token` header)
 │   │   │   ├── validate.ts          # Zod request validation middleware
 │   │   │   └── errorHandler.ts      # Global error handler
 │   │   └── routes/
@@ -603,8 +604,18 @@ PORT=3000
 NODE_ENV=development
 LOG_LEVEL=info
 
-# Session
+# Session — required in production; server refuses to boot without it
 SESSION_SECRET=changeme
+
+# Reverse-proxy trust — leave unset on direct-to-internet deployments; set
+# to a hop count ("1"), "loopback", or CIDR only when behind a real proxy.
+# Setting it without a proxy lets clients spoof X-Forwarded-For and bypass
+# the login rate limiter.
+TRUST_PROXY=
+
+# Health check bearer token — optional. When set, /health requires
+# `Authorization: Bearer <token>`. Leave unset on private deployments.
+HEALTH_TOKEN=
 
 # HTTPS (optional)
 HTTPS_CERT_PATH=
