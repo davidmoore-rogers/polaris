@@ -212,9 +212,11 @@ async function loadIntegrations() {
 
 function fortiManagerFormHTML(defaults) {
   var d = defaults || {};
-  // Support both new field names and legacy dhcpInclude/dhcpExclude from saved configs
-  var ifaceInclude = d.interfaceInclude && d.interfaceInclude.length > 0 ? d.interfaceInclude : (d.dhcpInclude || []);
-  var ifaceExclude = d.interfaceExclude && d.interfaceExclude.length > 0 ? d.interfaceExclude : (d.dhcpExclude || []);
+  // Prefer the current field names; fall back to the legacy dhcp* names ONLY
+  // when the current field is entirely absent. An empty array is an explicit
+  // "no filters" from a previous save and must not re-summon the legacy list.
+  var ifaceInclude = Array.isArray(d.interfaceInclude) ? d.interfaceInclude : (d.dhcpInclude || []);
+  var ifaceExclude = Array.isArray(d.interfaceExclude) ? d.interfaceExclude : (d.dhcpExclude || []);
   var dhcpMode = ifaceInclude.length > 0 ? "include" : "exclude";
   var dhcpIfaces = dhcpMode === "include" ? ifaceInclude : ifaceExclude;
   var invMode = (d.inventoryIncludeInterfaces && d.inventoryIncludeInterfaces.length > 0) ? "include" : "exclude";

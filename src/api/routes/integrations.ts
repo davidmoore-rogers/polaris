@@ -392,6 +392,14 @@ router.put("/:id", async (req, res, next) => {
       if (!input.config.bindPassword) {
         newConfig.bindPassword = currentConfig.bindPassword;
       }
+      // FMG renamed dhcpInclude/dhcpExclude → interfaceInclude/interfaceExclude.
+      // Whenever the UI submits the new names, drop any stale legacy fields so
+      // they can't shadow a later edit — e.g. clearing interfaceExclude to []
+      // must not leave the old dhcpExclude list lying around.
+      if (existing.type === "fortimanager") {
+        if ("interfaceInclude" in input.config) delete (newConfig as any).dhcpInclude;
+        if ("interfaceExclude" in input.config) delete (newConfig as any).dhcpExclude;
+      }
       data.config = newConfig;
     }
 
@@ -413,28 +421,11 @@ router.put("/:id", async (req, res, next) => {
       }
     }
 
-    // DHCP discovery — fire detached so the save response returns immediately.
-    // triggerDiscovery revalidates credentials/config and logs its own start/error events.
-    const canDiscover =
-      updated.lastTestOk === true &&
-      updated.enabled &&
-      updated.autoDiscover &&
-      (
-        (finalConfig.host &&
-          ((existing.type === "fortimanager" && finalConfig.apiToken) ||
-           (existing.type === "fortigate" && finalConfig.apiToken) ||
-           (existing.type === "windowsserver" && finalConfig.username) ||
-           (existing.type === "activedirectory" && finalConfig.bindDn && finalConfig.bindPassword && finalConfig.baseDn))) ||
-        (existing.type === "entraid" && finalConfig.tenantId && finalConfig.clientId && finalConfig.clientSecret)
-      );
-
-    if (canDiscover) {
-      try {
-        await triggerDiscovery(req.params.id, req.session?.username ?? "");
-      } catch (err: any) {
-        logEvent({ action: "integration.discover.error", resourceType: "integration", resourceId: req.params.id, resourceName: updated.name, actor: req.session?.username, level: "error", message: `DHCP discovery failed to start for "${updated.name}": ${err.message || "Unknown error"}` });
-      }
-    }
+    // Discovery is NOT auto-triggered on save — the operator starts it
+    // explicitly from the Discover button, or the scheduler picks it up on
+    // the next polling tick. Previously Save kicked off a run, which made
+    // editing noisy (a filter tweak would block the next discovery slot
+    // with a full run the operator didn't ask for).
 
     res.json(response);
   } catch (err) {
