@@ -1678,6 +1678,19 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   margin-bottom: 1rem;
 }
 .settings-cards-row .settings-card { margin-bottom: 0; }
+.settings-cards-row-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  align-items: start;
+}
+.settings-cards-row-3 .settings-card { margin-bottom: 0; }
+@media (max-width: 1000px) {
+  .settings-cards-row-3 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
 .settings-card h4 {
   font-size: 0.9rem;
   font-weight: 600;

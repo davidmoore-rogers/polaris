@@ -561,6 +561,7 @@ async function loadCertificates() {
   } catch (_) {}
 
   container.innerHTML =
+    '<div class="settings-cards-row-3">' +
     '<div class="settings-card">' +
       '<h4>HTTPS Configuration</h4>' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">Enable HTTPS to encrypt browser connections. Select a server certificate and key from the uploaded certificates below.</p>' +
@@ -624,6 +625,7 @@ async function loadCertificates() {
           '<p>Create a new self-signed certificate for testing or internal use</p>' +
         '</div>' +
       '</div>' +
+    '</div>' +
     '</div>';
 
   // Wire upload areas
