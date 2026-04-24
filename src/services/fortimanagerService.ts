@@ -481,10 +481,16 @@ export async function discoverDhcpSubnets(
   const devicesPayload: JsonRpcRequest = {
     id: 1,
     method: "get",
-    // `latitude`/`longitude` live on each FMG device record when "Geographical
-    // Location" is set in Device Manager — cheaper than a per-device CMDB call
-    // and matches where most users actually configure coordinates.
-    params: [{ url: `/dvmdb/adom/${adom}/device`, fields: ["name", "hostname", "sn", "platform_str", "ip", "conn_status", "latitude", "longitude"] }],
+    // Ask FMG for the full device record instead of a hand-picked `fields`
+    // list. Explicitly naming fields like `latitude`/`longitude` causes FMG
+    // to authorize each one individually and fail the entire query with
+    // status -11 ("No permission for the resource") when the API user's
+    // profile doesn't grant a specific field — which happens on older FMG
+    // versions that don't expose coords at all. Without a filter the query
+    // returns whatever the user already has access to, so lat/lng show up
+    // when they exist and are silently absent otherwise (the per-device
+    // CMDB fallback picks them up from the FortiGate itself in that case).
+    params: [{ url: `/dvmdb/adom/${adom}/device` }],
   };
 
   let devicesRes: JsonRpcResponse;
