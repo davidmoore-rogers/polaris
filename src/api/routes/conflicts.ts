@@ -246,7 +246,11 @@ async function acceptAssetConflict(conflict: any, actor?: string) {
     update.acquiredAt = new Date(proposed.registrationDateTime);
   }
   if (existing.assetType === "other" && proposed.assetType) update.assetType = proposed.assetType;
-  if (isAd && proposed.disabled === true) update.status = "decommissioned";
+  if (isAd && proposed.disabled === true) {
+    update.status = "decommissioned";
+    update.statusChangedAt = new Date();
+    update.statusChangedBy = actor ?? "system";
+  }
 
   // Merge tags — keep existing manual tags, add source-specific tags and
   // cross-integration identity tags (sid: for hybrid-join, ad-guid: for AD).
@@ -314,6 +318,8 @@ async function rejectAssetConflict(conflict: any, actor?: string) {
     model: proposed.model || null,
     assetType: proposed.assetType || (isAd ? "other" : "workstation"),
     status: proposed.status || defaultStatus,
+    statusChangedAt: new Date(),
+    statusChangedBy: actor ?? "system",
     os: proposed.os || null,
     osVersion: proposed.osVersion || null,
     assignedTo: proposed.assignedTo || null,

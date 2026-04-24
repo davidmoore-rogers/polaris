@@ -309,7 +309,7 @@ function renderAssetsPage() {
       '<td class="mono" style="font-size:0.8rem">' + macCellHTML(a) + '</td>' +
       '<td>' + _copyableCell(a.serialNumber) + '</td>' +
       '<td>' + assetTypeBadge(a.assetType) + '</td>' +
-      '<td>' + assetStatusBadge(a.status) + '</td>' +
+      '<td>' + assetStatusBadge(a) + '</td>' +
       '<td>' + escapeHtml(a.location || a.learnedLocation || "-") + '</td>' +
       '<td>' + (a.lastSeen ? formatDate(a.lastSeen) : "-") + '</td>' +
       '<td>' + (a._acquired ? formatDate(a._acquired) : "-") + '</td>' +
@@ -506,10 +506,21 @@ function assetTypeBadge(type) {
   return '<span class="badge badge-asset-type">' + escapeHtml(label) + '</span>';
 }
 
-function assetStatusBadge(status) {
+function assetStatusBadge(asset) {
+  var status = typeof asset === "string" ? asset : (asset.status || "");
   var cls = "badge-" + status;
   var label = status.charAt(0).toUpperCase() + status.slice(1);
-  return '<span class="badge ' + cls + '">' + escapeHtml(label) + '</span>';
+  var title = "";
+  if (typeof asset === "object" && asset) {
+    var parts = [];
+    if (asset.statusChangedBy) parts.push("Changed by: " + asset.statusChangedBy);
+    if (asset.statusChangedAt) {
+      var d = new Date(asset.statusChangedAt);
+      parts.push(d.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }));
+    }
+    if (parts.length) title = ' title="' + parts.join("\n") + '"';
+  }
+  return '<span class="badge ' + cls + '"' + title + '>' + escapeHtml(label) + '</span>';
 }
 
 function ipCellHTML(asset) {

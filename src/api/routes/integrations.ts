@@ -1202,7 +1202,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             model: device.model || existingAsset.model,
             learnedLocation: existingAsset.learnedLocation || fgHostname,
             lastSeen: new Date(now),
-            ...(existingAsset.status === "decommissioned" ? { status: "active" } : {}),
+            ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
           };
           clampAcquiredToLastSeen(updateData, existingAsset);
           await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
@@ -1228,6 +1228,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           model: device.model || "FortiGate",
           assetType: "firewall",
           status: "active",
+          statusChangedAt: new Date(now),
+          statusChangedBy: integrationLabel,
           department: "Network Security",
           learnedLocation: fgHostname,
           lastSeen: new Date(now),
@@ -1265,6 +1267,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           osVersion: sw.osVersion || existingAsset.osVersion,
           learnedLocation: sw.device || existingAsset.learnedLocation,
           status: swStatus,
+          ...(swStatus !== existingAsset.status ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
           lastSeen: new Date(now),
           ...(acquiredAtUpdate ? { acquiredAt: acquiredAtUpdate } : {}),
         };
@@ -1283,6 +1286,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           model: "FortiSwitch",
           assetType: "switch",
           status: swStatus,
+          statusChangedAt: new Date(now),
+          statusChangedBy: integrationLabel,
           osVersion: sw.osVersion || null,
           learnedLocation: sw.device || null,
           acquiredAt: swJoinDate,
@@ -1361,7 +1366,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           osVersion: ap.osVersion || existingAsset.osVersion,
           learnedLocation: ap.device || existingAsset.learnedLocation,
           lastSeen: new Date(now),
-          ...(existingAsset.status === "decommissioned" ? { status: "active" } : {}),
+          ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
         };
         clampAcquiredToLastSeen(updateData, existingAsset);
         await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
@@ -1382,6 +1387,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             model: ap.model || "FortiAP",
             assetType: "access_point",
             status: "active",
+            statusChangedAt: new Date(now),
+            statusChangedBy: integrationLabel,
             osVersion: ap.osVersion || null,
             learnedLocation: ap.device || null,
             lastSeen: new Date(now),
@@ -1712,6 +1719,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           ipAddress: entry.ipAddress,
           ipSource: integrationType,
           status: "active",
+          ...(asset.status !== "active" ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
           lastSeen: new Date(now),
           ...(entry.device ? { learnedLocation: entry.device } : {}),
         },
@@ -1805,7 +1813,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
       if (existingAsset) {
         const updateData: Record<string, unknown> = { lastSeen: new Date(now) };
-        if (existingAsset.status === "decommissioned") updateData.status = "active";
+        if (existingAsset.status === "decommissioned") {
+        updateData.status = "active";
+        updateData.statusChangedAt = new Date(now);
+        updateData.statusChangedBy = integrationLabel;
+      }
         if (!handledByDhcp && inv.ipAddress && inv.ipAddress !== existingAsset.ipAddress) {
           updateData.ipAddress = inv.ipAddress;
         }
@@ -1891,6 +1903,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               manufacturer: inv.hardwareVendor || null,
               assetType: inferAssetTypeFromOs(inv.os),
               status: "active",
+              statusChangedAt: new Date(now),
+              statusChangedBy: integrationLabel,
               os: inv.os || null,
               osVersion: inv.osVersion || null,
               learnedLocation: inv.device || null,
@@ -2172,6 +2186,7 @@ async function syncEntraDevices(
         osVersion: dev.operatingSystemVersion || existing.osVersion,
         lastSeen: lastSeen || existing.lastSeen,
         status,
+        ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
       };
       if (takingOver) {
         // Priority rule: Entra's assetTag always wins. AD guid is preserved
@@ -2274,6 +2289,8 @@ async function syncEntraDevices(
         model: dev.model || null,
         assetType,
         status,
+        statusChangedAt: now,
+        statusChangedBy: integrationName,
         os: dev.operatingSystem || null,
         osVersion: dev.operatingSystemVersion || null,
         assignedTo: dev.userPrincipalName || null,
@@ -2370,6 +2387,7 @@ async function syncActiveDirectoryDevices(
         os: dev.operatingSystem || existing.os,
         osVersion: dev.operatingSystemVersion || existing.osVersion,
         status,
+        ...(status !== existing.status ? { statusChangedAt: new Date(), statusChangedBy: integrationName } : {}),
       };
       // Hostname: prefer dnsHostName if present; otherwise cn; never blank out a
       // human-entered hostname with the empty string.
@@ -2472,6 +2490,8 @@ async function syncActiveDirectoryDevices(
         dnsName: dev.dnsHostName || null,
         assetType,
         status,
+        statusChangedAt: new Date(),
+        statusChangedBy: integrationName,
         os: dev.operatingSystem || null,
         osVersion: dev.operatingSystemVersion || null,
         learnedLocation: dev.ouPath || null,

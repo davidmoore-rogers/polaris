@@ -790,7 +790,20 @@ async function _openAssetViewModal(assetId) {
       _assetViewRow("Manufacturer", a.manufacturer) +
       _assetViewRow("Model", a.model) +
       _assetViewRow("Type", _ASSET_TYPE_LABELS[a.assetType] || a.assetType) +
-      _assetViewRow("Status", a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-") +
+      (function() {
+        var statusVal = a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-";
+        var sub = "";
+        if (a.statusChangedBy || a.statusChangedAt) {
+          var parts = [];
+          if (a.statusChangedBy) parts.push(escapeHtml(a.statusChangedBy));
+          if (a.statusChangedAt) {
+            var d = new Date(a.statusChangedAt);
+            parts.push(d.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }));
+          }
+          sub = '<br><span style="font-size:0.75rem;color:var(--color-text-tertiary)">' + parts.join(" · ") + '</span>';
+        }
+        return '<div class="detail-row"><span class="detail-label">Status</span><span class="detail-value">' + escapeHtml(statusVal) + sub + '</span></div>';
+      })() +
       _assetViewRow("Location", a.location) +
       _assetViewRow("Learned Location", a.learnedLocation) +
       _assetViewRow("Department", a.department) +

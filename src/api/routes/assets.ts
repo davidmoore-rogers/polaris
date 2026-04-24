@@ -102,6 +102,8 @@ router.get("/", async (req, res, next) => {
           osVersion: true,
           assetType: true,
           status: true,
+          statusChangedAt: true,
+          statusChangedBy: true,
           location: true,
           learnedLocation: true,
           lastSeen: true,
@@ -137,6 +139,9 @@ router.post("/", requireAssetsAdmin, async (req, res, next) => {
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
     if (input.ipAddress) data.ipSource = "manual";
+    // Always stamp status tracking on creation (status is always set here)
+    data.statusChangedAt = new Date();
+    data.statusChangedBy = req.session?.username ?? "manual";
     data.createdBy = req.session?.username ?? null;
     clampAcquiredToLastSeen(data);
     const asset = await prisma.asset.create({ data: data as any });
@@ -161,6 +166,10 @@ router.put("/:id", requireAssetsAdmin, async (req, res, next) => {
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
     else if (input.warrantyExpiry === undefined) delete data.warrantyExpiry;
     if (input.ipAddress) data.ipSource = "manual";
+    if (input.status !== undefined) {
+      data.statusChangedAt = new Date();
+      data.statusChangedBy = req.session?.username ?? "manual";
+    }
     clampAcquiredToLastSeen(data, existing);
     const asset = await prisma.asset.update({ where: { id }, data: data as any });
     const trackFields = ["hostname", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "notes", "dnsName"] as const;
@@ -476,13 +485,18 @@ router.post("/import-pdf", requireAssetsAdmin, async (req, res, next) => {
       if (existing) {
         preview.push({ action: "update", serialNumber: serial, hostname: row.hostname || null, existingHostname: existing.hostname, fields });
         if (!dryRun) {
-          await prisma.asset.update({ where: { id: existing.id }, data: updateData as any });
+          const importUpdateData: Record<string, unknown> = { ...updateData };
+          if (importUpdateData.status !== undefined) {
+            importUpdateData.statusChangedAt = new Date();
+            importUpdateData.statusChangedBy = req.session?.username ?? "manual";
+          }
+          await prisma.asset.update({ where: { id: existing.id }, data: importUpdateData as any });
           updated++;
         }
       } else {
         preview.push({ action: "create", serialNumber: serial, hostname: row.hostname || null, fields });
         if (!dryRun) {
-          await prisma.asset.create({ data: { assetType: "other", status: "storage", ...updateData } as any });
+          await prisma.asset.create({ data: { assetType: "other", status: "storage", statusChangedAt: new Date(), statusChangedBy: req.session?.username ?? "manual", ...updateData } as any });
           created++;
         }
       }

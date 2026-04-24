@@ -36,7 +36,7 @@ async function decommissionStaleAssets(): Promise<void> {
     const ids = stale.map((a) => a.id);
     const result = await prisma.asset.updateMany({
       where: { id: { in: ids } },
-      data: { status: "decommissioned" },
+      data: { status: "decommissioned", statusChangedAt: new Date(), statusChangedBy: "system" },
     });
 
     logger.info(
