@@ -804,7 +804,7 @@ function _promptText(title, label, initial) {
 function _showAllocResults(result) {
   var n = result.created.length;
   var rows = result.created.map(function (s) {
-    return '<tr><td>' + escapeHtml(s.name) + '</td><td><code>' + escapeHtml(s.cidr) + '</code></td></tr>';
+    return '<tr><td>' + escapeHtml(s.name) + '</td><td><code style="font-size:1.05rem">' + escapeHtml(s.cidr) + '</code></td></tr>';
   }).join("");
 
   var anchorNote = result.anchorCidr
@@ -815,9 +815,107 @@ function _showAllocResults(result) {
     '<table class="table" style="margin:0"><thead><tr><th>Name</th><th>CIDR</th></tr></thead>' +
     '<tbody>' + rows + '</tbody></table>';
 
-  var footer = '<button type="button" class="btn btn-primary" onclick="closeModal()">Done</button>';
+  var footer =
+    '<button type="button" class="btn btn-secondary" id="btn-alloc-screenshot">Screenshot</button>' +
+    '<button type="button" class="btn btn-secondary" id="btn-alloc-copy">Copy</button>' +
+    '<button type="button" class="btn btn-primary" onclick="closeModal()">Done</button>';
 
   openModal(n + ' Network' + (n !== 1 ? 's' : '') + ' Allocated', body, footer);
+
+  document.getElementById("btn-alloc-copy").addEventListener("click", function () {
+    var text = result.created.map(function (s) { return s.name + "\t" + s.cidr; }).join("\n");
+    navigator.clipboard.writeText(text).then(function () { showToast("Copied to clipboard"); });
+  });
+
+  document.getElementById("btn-alloc-screenshot").addEventListener("click", function () {
+    _screenshotAllocResults(result);
+  });
+}
+
+function _screenshotAllocResults(result) {
+  var cs = getComputedStyle(document.documentElement);
+  var bgPrimary  = cs.getPropertyValue("--color-bg-primary").trim();
+  var bgSecondary = cs.getPropertyValue("--color-bg-secondary").trim();
+  var bgSurface  = cs.getPropertyValue("--color-surface").trim();
+  var clrBorder  = cs.getPropertyValue("--color-border").trim();
+  var clrText    = cs.getPropertyValue("--color-text-primary").trim();
+  var clrMuted   = cs.getPropertyValue("--color-text-secondary").trim();
+  var clrAccent  = cs.getPropertyValue("--color-accent").trim();
+
+  var rows = result.created;
+  var n = rows.length;
+  var title = n + " Network" + (n !== 1 ? "s" : "") + " Allocated";
+  var anchorNote = result.anchorCidr ? "All allocated inside " + result.anchorCidr : "";
+
+  var scale = 2;
+  var pad = 24, titleH = 56, anchorH = anchorNote ? 32 : 0;
+  var headerH = 36, rowH = 36, colNameW = 300, colCidrW = 160;
+  var tableW = colNameW + colCidrW;
+  var w = tableW + pad * 2;
+  var h = titleH + anchorH + headerH + n * rowH + pad;
+
+  var canvas = document.createElement("canvas");
+  canvas.width  = w * scale;
+  canvas.height = h * scale;
+  var ctx = canvas.getContext("2d");
+  ctx.scale(scale, scale);
+
+  ctx.fillStyle = bgPrimary;
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.fillStyle = clrText;
+  ctx.font = "bold 17px system-ui,-apple-system,sans-serif";
+  ctx.fillText(title, pad, 36);
+
+  if (anchorNote) {
+    ctx.fillStyle = clrMuted;
+    ctx.font = "13px system-ui,-apple-system,sans-serif";
+    ctx.fillText(anchorNote, pad, titleH + 20);
+  }
+
+  var tableY = titleH + anchorH;
+
+  ctx.fillStyle = bgSecondary;
+  ctx.fillRect(pad, tableY, tableW, headerH);
+
+  ctx.fillStyle = clrMuted;
+  ctx.font = "bold 11px system-ui,-apple-system,sans-serif";
+  ctx.fillText("NAME", pad + 10, tableY + 23);
+  ctx.fillText("CIDR", pad + colNameW + 10, tableY + 23);
+
+  ctx.fillStyle = clrBorder;
+  ctx.fillRect(pad + colNameW, tableY, 1, headerH);
+
+  rows.forEach(function (s, i) {
+    var y = tableY + headerH + i * rowH;
+    ctx.fillStyle = i % 2 === 0 ? bgPrimary : bgSurface;
+    ctx.fillRect(pad, y, tableW, rowH);
+
+    ctx.fillStyle = clrText;
+    ctx.font = "14px system-ui,-apple-system,sans-serif";
+    ctx.fillText(s.name, pad + 10, y + 23);
+
+    ctx.fillStyle = clrAccent;
+    ctx.font = "14px \"Courier New\",Courier,monospace";
+    ctx.fillText(s.cidr, pad + colNameW + 10, y + 23);
+
+    ctx.fillStyle = clrBorder;
+    ctx.fillRect(pad + colNameW, y, 1, rowH);
+    ctx.fillRect(pad, y + rowH - 1, tableW, 1);
+  });
+
+  ctx.strokeStyle = clrBorder;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(pad + 0.5, tableY + 0.5, tableW - 1, headerH + n * rowH - 1);
+
+  canvas.toBlob(function (blob) {
+    if (!blob) { showToast("Screenshot failed", "error"); return; }
+    navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
+      showToast("Screenshot copied to clipboard");
+    }).catch(function () {
+      showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+    });
+  }, "image/png");
 }
 
 async function _onAllocSubmit() {
