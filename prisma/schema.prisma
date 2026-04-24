@@ -214,6 +214,8 @@ model Asset {
   model          String?
   assetType      AssetType   @default(other)
   status         AssetStatus @default(active)
+  statusChangedAt DateTime?                        // When status was last changed
+  statusChangedBy String?                          // Who/what changed it: username, integration name, or "system"
   location       String?                           // User-set location (overrides learnedLocation)
   learnedLocation String?                          // Auto-discovered from DHCP (FortiGate name)
   department     String?                           // Owning department or team
