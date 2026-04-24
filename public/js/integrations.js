@@ -172,8 +172,11 @@ async function loadIntegrations() {
 
 function fortiManagerFormHTML(defaults) {
   var d = defaults || {};
-  var dhcpMode = (d.dhcpInclude && d.dhcpInclude.length > 0) ? "include" : "exclude";
-  var dhcpIfaces = dhcpMode === "include" ? (d.dhcpInclude || []) : (d.dhcpExclude || []);
+  // Support both new field names and legacy dhcpInclude/dhcpExclude from saved configs
+  var ifaceInclude = d.interfaceInclude && d.interfaceInclude.length > 0 ? d.interfaceInclude : (d.dhcpInclude || []);
+  var ifaceExclude = d.interfaceExclude && d.interfaceExclude.length > 0 ? d.interfaceExclude : (d.dhcpExclude || []);
+  var dhcpMode = ifaceInclude.length > 0 ? "include" : "exclude";
+  var dhcpIfaces = dhcpMode === "include" ? ifaceInclude : ifaceExclude;
   var invMode = (d.inventoryIncludeInterfaces && d.inventoryIncludeInterfaces.length > 0) ? "include" : "exclude";
   var invIfaces = invMode === "include" ? (d.inventoryIncludeInterfaces || []) : (d.inventoryExcludeInterfaces || []);
   var devMode = (d.deviceInclude && d.deviceInclude.length > 0) ? "include" : "exclude";
@@ -219,17 +222,17 @@ function fortiManagerFormHTML(defaults) {
       '<p class="hint">Leave empty to query all managed FortiGates. Matched against device name or hostname. Wildcards supported: <code>FG-*</code>, <code>*-lab</code>, <code>*dc*</code></p>' +
     '</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Server Scope</p>' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Scope</p>' +
     '<div class="form-group"><label>Interface Filter</label>' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-dhcpMode" style="width:auto">' +
           '<option value="include"' + (dhcpMode === "include" ? " selected" : "") + '>Include only</option>' +
           '<option value="exclude"' + (dhcpMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
         '</select>' +
-        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these interfaces when querying DHCP servers</span>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these interfaces for DHCP scope and interface IP discovery</span>' +
       '</div>' +
       '<textarea id="f-dhcpInterfaces" rows="2" placeholder="One per line — e.g. port1&#10;internal*&#10;*wan">' + escapeHtml(dhcpIfaces.join("\n")) + '</textarea>' +
-      '<p class="hint">Leave empty to query all interfaces. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
+      '<p class="hint">Leave empty to include all interfaces. Applies to DHCP server scope discovery and interface IP reservation. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
     '</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Device Inventory</p>' +
@@ -262,8 +265,8 @@ function getFormConfig() {
     adom: val("f-adom") || "root",
     verifySsl: document.getElementById("f-verifySsl").checked,
     mgmtInterface: val("f-mgmtInterface") || "",
-    dhcpInclude: dhcpMode === "include" ? dhcpIfaces : [],
-    dhcpExclude: dhcpMode === "exclude" ? dhcpIfaces : [],
+    interfaceInclude: dhcpMode === "include" ? dhcpIfaces : [],
+    interfaceExclude: dhcpMode === "exclude" ? dhcpIfaces : [],
     inventoryExcludeInterfaces: invMode === "exclude" ? invIfaces : [],
     inventoryIncludeInterfaces: invMode === "include" ? invIfaces : [],
     deviceInclude: devMode === "include" ? devNames : [],

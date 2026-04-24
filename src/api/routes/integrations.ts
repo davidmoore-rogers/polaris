@@ -92,8 +92,11 @@ const FortiManagerConfigSchema = z.object({
   adom:      z.string().optional().default("root"),
   verifySsl: z.boolean().optional().default(false),
   mgmtInterface: z.string().optional().default(""),
-  dhcpInclude:   z.array(z.string()).optional().default([]),
-  dhcpExclude:   z.array(z.string()).optional().default([]),
+  interfaceInclude: z.array(z.string()).optional().default([]),
+  interfaceExclude: z.array(z.string()).optional().default([]),
+  // Legacy field names accepted on write; service reads both with fallback
+  dhcpInclude:   z.array(z.string()).optional(),
+  dhcpExclude:   z.array(z.string()).optional(),
   inventoryExcludeInterfaces: z.array(z.string()).optional().default([]),
   inventoryIncludeInterfaces: z.array(z.string()).optional().default([]),
   deviceInclude: z.array(z.string()).optional().default([]),
@@ -1504,7 +1507,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     const existingRes = activeResMap.get(key);
     if (existingRes) {
       if (existingRes.sourceType === "manual") {
-        const proposed = { hostname: ifaceIp.device, owner: "network-team", projectRef: projectRefLabel, notes: `${ifaceIp.role === "management" ? "Management" : "DHCP server"} interface (${ifaceIp.interfaceName}) on ${ifaceIp.device}`, sourceType: "interface_ip" };
+        const proposed = { hostname: ifaceIp.device, owner: "network-team", projectRef: projectRefLabel, notes: `${ifaceIp.role === "management" ? "Management interface" : "Interface"} (${ifaceIp.interfaceName}) on ${ifaceIp.device}`, sourceType: "interface_ip" };
         await upsertConflict(existingRes.id, integrationId, proposed, existingRes);
       }
       continue;
@@ -1518,7 +1521,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           hostname: ifaceIp.device,
           owner: "network-team",
           projectRef: projectRefLabel,
-          notes: `${ifaceIp.role === "management" ? "Management" : "DHCP server"} interface (${ifaceIp.interfaceName}) on ${ifaceIp.device}`,
+          notes: `${ifaceIp.role === "management" ? "Management interface" : "Interface"} (${ifaceIp.interfaceName}) on ${ifaceIp.device}`,
           status: "active",
           sourceType: "interface_ip",
         },

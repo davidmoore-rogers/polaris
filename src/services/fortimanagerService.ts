@@ -15,7 +15,11 @@ export interface FortiManagerConfig {
   adom?: string;            // Administrative Domain (default: "root")
   verifySsl?: boolean;      // Skip TLS verification (default: false)
   mgmtInterface?: string;
+  interfaceInclude?: string[];  // Interfaces to include for DHCP scope + interface IP discovery
+  interfaceExclude?: string[];  // Interfaces to exclude. Ignored if interfaceInclude is non-empty.
+  /** @deprecated use interfaceInclude */
   dhcpInclude?: string[];
+  /** @deprecated use interfaceExclude */
   dhcpExclude?: string[];
   inventoryExcludeInterfaces?: string[];
   inventoryIncludeInterfaces?: string[];
@@ -185,7 +189,7 @@ export interface DiscoveredInterfaceIp {
   device: string;         // FortiGate device name
   interfaceName: string;  // interface name (e.g. "port5")
   ipAddress: string;      // IP address of the interface
-  role: string;           // "dhcp-server" or "management"
+  role: string;           // "interface" or "management"
 }
 
 export interface DiscoveredDhcpEntry {
@@ -589,59 +593,61 @@ export async function discoverDhcpSubnets(
         log("discover.leases", "error", `${deviceName}: Failed to query DHCP monitor — ${err.message || "Unknown error"}`, deviceName);
       }
 
-      // Step 3: Query interfaces to get IPs for DHCP-serving interfaces
-      if (dhcpInterfaceNames.length > 0) {
-        try {
-          const ifacePayload: JsonRpcRequest = {
-            id: 3,
-            method: "get",
-            params: [{ url: `/pm/config/device/${deviceName}/vdom/root/system/interface`, fields: ["name", "ip", "vlanid", "switch-controller-mgmt-vlan"] }],
-          };
+      // Step 3: Query all interfaces to capture VLAN IDs (for DHCP subnet backfill) and
+      // record IPs for any interface matching the interface filter.
+      try {
+        const ifacePayload: JsonRpcRequest = {
+          id: 3,
+          method: "get",
+          params: [{ url: `/pm/config/device/${deviceName}/vdom/root/system/interface`, fields: ["name", "ip", "vlanid", "switch-controller-mgmt-vlan"] }],
+        };
 
-          const ifaceRes = await rpc(baseUrl, ifacePayload, apiUser, apiToken, verifySsl, signal);
-          const ifaceData = ifaceRes.result?.[0]?.data;
-          const ifaceVlanMap = new Map<string, number>();
-          let ifaceIpCount = 0;
-          if (Array.isArray(ifaceData)) {
-            for (const iface of ifaceData) {
-              const ifaceName = iface.name || "";
+        const ifaceRes = await rpc(baseUrl, ifacePayload, apiUser, apiToken, verifySsl, signal);
+        const ifaceData = ifaceRes.result?.[0]?.data;
+        const ifaceVlanMap = new Map<string, number>();
+        let ifaceIpCount = 0;
+        if (Array.isArray(ifaceData)) {
+          for (const iface of ifaceData) {
+            const ifaceName = iface.name || "";
 
-              // Collect VLAN ID for every interface (used to backfill discovered subnets).
-              // FortiLink interfaces report vlanid=0 and carry the real VLAN in
-              // switch-controller-mgmt-vlan, so `??` fallback won't work (0 isn't nullish).
-              const parseVid = (v: unknown): number => {
-                const n = typeof v === "number" ? v : parseInt(String(v ?? ""), 10);
-                return !isNaN(n) && n > 0 ? n : 0;
-              };
-              const vid = parseVid(iface.vlanid) || parseVid(iface["switch-controller-mgmt-vlan"]);
-              if (vid > 0) ifaceVlanMap.set(ifaceName, vid);
+            // Collect VLAN ID for every interface (used to backfill discovered subnets).
+            // FortiLink interfaces report vlanid=0 and carry the real VLAN in
+            // switch-controller-mgmt-vlan, so `??` fallback won't work (0 isn't nullish).
+            const parseVid = (v: unknown): number => {
+              const n = typeof v === "number" ? v : parseInt(String(v ?? ""), 10);
+              return !isNaN(n) && n > 0 ? n : 0;
+            };
+            const vid = parseVid(iface.vlanid) || parseVid(iface["switch-controller-mgmt-vlan"]);
+            if (vid > 0) ifaceVlanMap.set(ifaceName, vid);
 
-              // Collect IP only for DHCP-serving interfaces
-              if (!dhcpInterfaceNames.includes(ifaceName)) continue;
-              const ipArr = iface.ip;
-              if (Array.isArray(ipArr) && ipArr.length >= 1 && ipArr[0] && ipArr[0] !== "0.0.0.0") {
-                interfaceIps.push({
-                  device: deviceName,
-                  interfaceName: ifaceName,
-                  ipAddress: ipArr[0],
-                  role: "dhcp-server",
-                });
-                ifaceIpCount++;
-              }
+            // Skip the management interface — already handled above with role "management"
+            if (ifaceName === mgmtIfaceName) continue;
+
+            // Collect IP for all interfaces matching the interface filter
+            if (!matchesInterfaceFilter(ifaceName, config)) continue;
+            const ipArr = iface.ip;
+            if (Array.isArray(ipArr) && ipArr.length >= 1 && ipArr[0] && ipArr[0] !== "0.0.0.0") {
+              interfaceIps.push({
+                device: deviceName,
+                interfaceName: ifaceName,
+                ipAddress: ipArr[0],
+                role: "interface",
+              });
+              ifaceIpCount++;
             }
           }
-
-          // Back-fill VLAN IDs onto discovered subnets for this device
-          for (const sub of discovered) {
-            if (sub.fortigateDevice === deviceName) {
-              const vid = ifaceVlanMap.get(sub.name);
-              if (vid) sub.vlan = vid;
-            }
-          }
-          log("discover.interfaces", "info", `${deviceName}: Resolved ${ifaceIpCount} DHCP interface IP(s)`, deviceName);
-        } catch (err: any) {
-          log("discover.interfaces", "error", `${deviceName}: Failed to query interfaces — ${err.message || "Unknown error"}`, deviceName);
         }
+
+        // Back-fill VLAN IDs onto discovered subnets for this device
+        for (const sub of discovered) {
+          if (sub.fortigateDevice === deviceName) {
+            const vid = ifaceVlanMap.get(sub.name);
+            if (vid) sub.vlan = vid;
+          }
+        }
+        log("discover.interfaces", "info", `${deviceName}: Resolved ${ifaceIpCount} interface IP(s)`, deviceName);
+      } catch (err: any) {
+        log("discover.interfaces", "error", `${deviceName}: Failed to query interfaces — ${err.message || "Unknown error"}`, deviceName);
       }
 
       // Step 3b: Query device inventory (detected clients) via FMG proxy
@@ -846,8 +852,7 @@ export async function discoverDhcpSubnets(
     if (onDeviceComplete) {
       try {
         const devSubnets = discovered.slice(snBefore);
-        const filteredDevSubnets = filterDhcpResults(devSubnets, config.dhcpInclude, config.dhcpExclude);
-        const includedIfaces = new Set(filteredDevSubnets.map((s) => s.name));
+        const filteredDevSubnets = filterDhcpResults(devSubnets, config.interfaceInclude ?? config.dhcpInclude, config.interfaceExclude ?? config.dhcpExclude);
         const excludedDevIfaces = new Set(
           devSubnets.filter((s) => !filteredDevSubnets.includes(s)).map((s) => `${s.fortigateDevice}/${s.name}`)
         );
@@ -872,9 +877,8 @@ export async function discoverDhcpSubnets(
         await onDeviceComplete({
           subnets: filteredDevSubnets,
           devices: devices.slice(devBefore),
-          interfaceIps: interfaceIps.slice(ifIpBefore).filter(
-            (ip) => ip.role === "management" || includedIfaces.has(ip.interfaceName)
-          ),
+          // interfaceIps were already filtered by matchesInterfaceFilter at collection time
+          interfaceIps: interfaceIps.slice(ifIpBefore),
           // Pass all DHCP entries (including from excluded interfaces) so that manually-created
           // subnets matching an excluded network still get populated with reservations and leases.
           dhcpEntries: devDhcpEntries,
@@ -896,14 +900,11 @@ export async function discoverDhcpSubnets(
     }
   }
 
-  // Step 4: Filter subnets by dhcpInclude / dhcpExclude
-  const filteredSubnets = filterDhcpResults(discovered, config.dhcpInclude, config.dhcpExclude);
+  // Step 4: Filter subnets by interfaceInclude / interfaceExclude (or legacy dhcpInclude / dhcpExclude)
+  const filteredSubnets = filterDhcpResults(discovered, config.interfaceInclude ?? config.dhcpInclude, config.interfaceExclude ?? config.dhcpExclude);
 
-  // Also filter interface IPs to only include those from filtered (included) DHCP interfaces
-  const includedIfaceNames = new Set(filteredSubnets.map((s) => s.name));
-  const filteredIps = interfaceIps.filter(
-    (ip) => ip.role === "management" || includedIfaceNames.has(ip.interfaceName)
-  );
+  // interfaceIps were already filtered by matchesInterfaceFilter at collection time; pass through as-is
+  const filteredIps = interfaceIps;
 
   // Pass all DHCP entries (including from excluded interfaces) so that manually-created
   // subnets matching an excluded network still get populated with reservations and leases.
@@ -962,6 +963,14 @@ function matchesWildcard(pattern: string, value: string): boolean {
   if (p.startsWith("*")) return v.endsWith(p.slice(1));
   if (p.endsWith("*")) return v.startsWith(p.slice(0, -1));
   return v === p;
+}
+
+function matchesInterfaceFilter(interfaceName: string, config: FortiManagerConfig): boolean {
+  const includeList = config.interfaceInclude ?? config.dhcpInclude ?? [];
+  const excludeList = config.interfaceExclude ?? config.dhcpExclude ?? [];
+  if (includeList.length > 0) return includeList.some((p) => matchesWildcard(p, interfaceName));
+  if (excludeList.length > 0) return !excludeList.some((p) => matchesWildcard(p, interfaceName));
+  return true;
 }
 
 function matchesInventoryFilter(interfaceName: string, config: FortiManagerConfig): boolean {
