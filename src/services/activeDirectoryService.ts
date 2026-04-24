@@ -22,8 +22,8 @@ export interface ActiveDirectoryConfig {
   bindPassword: string;
   baseDn: string;
   searchScope?: "sub" | "one";
-  deviceInclude?: string[];   // Wildcards match against cn
-  deviceExclude?: string[];
+  ouInclude?: string[];   // Wildcards match against distinguishedName (e.g. *OU=Servers*)
+  ouExclude?: string[];
   includeDisabled?: boolean;  // Default true — disabled accounts become `decommissioned` assets
 }
 
@@ -242,7 +242,7 @@ export async function discoverDevices(
 
   log("discover.ad.search", "info", `Active Directory: retrieved ${devices.length} computer object(s)`);
 
-  const filtered = filterDevices(devices, config.deviceInclude, config.deviceExclude);
+  const filtered = filterDevices(devices, config.ouInclude, config.ouExclude);
   const dropped = devices.length - filtered.length;
   if (dropped > 0) {
     log("discover.filter", "info", `Device filter: ${filtered.length} included, ${dropped} excluded`);
@@ -382,10 +382,10 @@ function filterDevices(
   exclude?: string[],
 ): DiscoveredAdDevice[] {
   if (include && include.length > 0) {
-    return devices.filter((d) => include.some((p) => matchesWildcard(p, d.cn)));
+    return devices.filter((d) => include.some((p) => matchesWildcard(p, d.distinguishedName)));
   }
   if (exclude && exclude.length > 0) {
-    return devices.filter((d) => !exclude.some((p) => matchesWildcard(p, d.cn)));
+    return devices.filter((d) => !exclude.some((p) => matchesWildcard(p, d.distinguishedName)));
   }
   return devices;
 }

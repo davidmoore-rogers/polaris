@@ -143,8 +143,8 @@ const ActiveDirectoryConfigSchema = z.object({
   bindPassword:    z.string().optional().default(""),
   baseDn:          z.string().optional().default(""),
   searchScope:     z.enum(["sub", "one"]).optional().default("sub"),
-  deviceInclude:   z.array(z.string()).optional().default([]),
-  deviceExclude:   z.array(z.string()).optional().default([]),
+  ouInclude:       z.array(z.string()).optional().default([]),
+  ouExclude:       z.array(z.string()).optional().default([]),
   includeDisabled: z.boolean().optional().default(true),
 });
 

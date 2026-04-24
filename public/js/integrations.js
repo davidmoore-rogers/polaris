@@ -77,7 +77,7 @@ async function loadIntegrations() {
           '<div class="detail-row"><span class="detail-label">Search Scope</span><span class="detail-value">' + escapeHtml(config.searchScope || "sub") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Verify TLS</span><span class="detail-value">' + (config.verifyTls ? "Yes" : "No") + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Include Disabled</span><span class="detail-value">' + (config.includeDisabled === false ? "No (skipped)" : "Yes (as decommissioned)") + '</span></div>' +
-          filterRow("Computers", config.deviceInclude, config.deviceExclude);
+          filterRow("OUs", config.ouInclude, config.ouExclude);
       } else if (intg.type === "entraid") {
         detailRows =
           '<div class="detail-row"><span class="detail-label">Tenant ID</span><span class="detail-value mono">' + escapeHtml(config.tenantId || "-") + '</span></div>' +
@@ -460,8 +460,8 @@ function activeDirectoryFormHTML(defaults) {
   var autoChecked = d.autoDiscover !== false ? "checked" : "";
   var scope = d.searchScope || "sub";
   var includeDisabled = d.includeDisabled !== false;
-  var devMode = (d.deviceInclude && d.deviceInclude.length > 0) ? "include" : "exclude";
-  var devNames = devMode === "include" ? (d.deviceInclude || []) : (d.deviceExclude || []);
+  var devMode = (d.ouInclude && d.ouInclude.length > 0) ? "include" : "exclude";
+  var devNames = devMode === "include" ? (d.ouInclude || []) : (d.ouExclude || []);
   var defaultPort = useLdaps ? 636 : 389;
   return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Corp AD — DC01"></div>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">Connects to an <strong style="color:var(--color-text-primary)">on-premise Active Directory</strong> domain controller via LDAP simple bind. Produces assets only. Hybrid-joined devices are cross-linked to the Entra ID integration via on-prem SID, so the same device never appears twice.</div>' +
@@ -503,16 +503,16 @@ function activeDirectoryFormHTML(defaults) {
     '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to re-query AD for device updates (1–24 hours)</p></div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Computer Scope</p>' +
-    '<div class="form-group"><label>Computer Filter</label>' +
+    '<div class="form-group"><label>OU Filter</label>' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-deviceMode" style="width:auto">' +
           '<option value="include"' + (devMode === "include" ? " selected" : "") + '>Include only</option>' +
           '<option value="exclude"' + (devMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
         '</select>' +
-        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these computers by common name (cn)</span>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these OUs (matched against distinguished name)</span>' +
       '</div>' +
-      '<textarea id="f-deviceNames" rows="2" placeholder="One per line — e.g. DESKTOP-*&#10;SRV-HQ-*&#10;*-lab">' + escapeHtml(devNames.join("\n")) + '</textarea>' +
-      '<p class="hint">Leave empty to sync every computer in the base DN. Wildcards: <code>DESKTOP-*</code>, <code>*-lab</code>, <code>*pc*</code></p>' +
+      '<textarea id="f-deviceNames" rows="3" placeholder="One per line — e.g.&#10;*OU=Workstations*&#10;*OU=Servers,OU=HQ*">' + escapeHtml(devNames.join("\n")) + '</textarea>' +
+      '<p class="hint">Leave empty to sync all computers under the base DN. Each line is matched against the computer\'s full distinguished name. Wildcards: <code>*OU=Workstations*</code>, <code>*OU=Servers,OU=HQ*</code></p>' +
     '</div>';
 }
 
@@ -530,8 +530,8 @@ function getAdFormConfig() {
     baseDn: val("f-baseDn"),
     searchScope: document.getElementById("f-searchScope").value === "one" ? "one" : "sub",
     includeDisabled: document.getElementById("f-includeDisabled").checked,
-    deviceInclude: devMode === "include" ? devNames : [],
-    deviceExclude: devMode === "exclude" ? devNames : [],
+    ouInclude: devMode === "include" ? devNames : [],
+    ouExclude: devMode === "exclude" ? devNames : [],
   };
 }
 
@@ -696,8 +696,8 @@ async function openEditModal(id) {
         enabled: intg.enabled,
         autoDiscover: intg.autoDiscover !== false,
         pollInterval: intg.pollInterval,
-        deviceInclude: config.deviceInclude || [],
-        deviceExclude: config.deviceExclude || [],
+        ouInclude: config.ouInclude || [],
+        ouExclude: config.ouExclude || [],
       };
       body = activeDirectoryFormHTML(defaults);
       formGetter = function () {
