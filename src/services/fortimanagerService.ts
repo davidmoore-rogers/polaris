@@ -6,7 +6,11 @@
 
 import { Netmask } from "netmask";
 import { AppError } from "../utils/errors.js";
-import { discoverDhcpSubnets as discoverViaFortigate, type FortiGateConfig } from "./fortigateService.js";
+import {
+  discoverDhcpSubnets as discoverViaFortigate,
+  testConnection as fgTestConnection,
+  type FortiGateConfig,
+} from "./fortigateService.js";
 
 export interface FortiManagerConfig {
   host: string;
@@ -30,6 +34,7 @@ export interface FortiManagerConfig {
   useProxy?: boolean;         // If true (default), all per-device queries go through FMG's /sys/proxy/json and /pm/config. If false, queries go direct to each FortiGate's management IP using fortigateApiUser + fortigateApiToken.
   fortigateApiUser?: string;  // Only used when useProxy is false — REST API admin username configured on each managed FortiGate.
   fortigateApiToken?: string; // Only used when useProxy is false — Bearer token for the REST API admin on each managed FortiGate.
+  fortigateVerifySsl?: boolean; // Only used when useProxy is false — whether to verify TLS certs on direct FortiGate connections (default false).
 }
 
 interface JsonRpcRequest {
@@ -78,10 +83,32 @@ export async function testConnection(config: FortiManagerConfig): Promise<{
 
     const data = statusRes.result?.[0]?.data as Record<string, unknown> | undefined;
     const version = data?.Version ? String(data.Version) : undefined;
+    const fmgLabel = version ? `FortiManager ${version}` : "FortiManager";
+
+    // Direct-transport sanity check: when per-device queries bypass FMG's
+    // proxy, the FortiGate credentials must actually work against a real
+    // managed FortiGate — not just against FMG itself. Pull the device
+    // roster, pick one at random, and run a FortiGate test against it.
+    if (config.useProxy === false) {
+      const fgResult = await testRandomFortiGate(config);
+      if (!fgResult.ok) {
+        return {
+          ok: false,
+          message: `${fmgLabel} reachable, but randomly selected FortiGate "${fgResult.deviceName}" failed: ${fgResult.message}`,
+          version,
+        };
+      }
+      const fgSuffix = fgResult.version ? ` (FortiOS ${fgResult.version})` : "";
+      return {
+        ok: true,
+        message: `Connected — ${fmgLabel}; randomly selected FortiGate "${fgResult.deviceName}" reachable${fgSuffix}`,
+        version,
+      };
+    }
 
     return {
       ok: true,
-      message: version ? `Connected — FortiManager ${version}` : "Connected successfully",
+      message: `Connected — ${fmgLabel}`,
       version,
     };
   } catch (err: any) {
@@ -103,6 +130,75 @@ export async function testConnection(config: FortiManagerConfig): Promise<{
     }
     return { ok: false, message: err.message || "Unknown error" };
   }
+}
+
+/**
+ * Pick a random managed FortiGate from the FMG device list and run a
+ * FortiGate-side connection test against it using the direct-transport
+ * credentials. Only invoked by testConnection when useProxy is false.
+ */
+async function testRandomFortiGate(config: FortiManagerConfig): Promise<{
+  ok: boolean;
+  message: string;
+  deviceName: string;
+  version?: string;
+}> {
+  if (!config.fortigateApiToken) {
+    return {
+      ok: false,
+      message: 'FortiGate API Token is required when the FortiManager proxy is disabled',
+      deviceName: "(none)",
+    };
+  }
+
+  const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
+  const adom = config.adom || "root";
+  const devicesPayload: JsonRpcRequest = {
+    id: 1,
+    method: "get",
+    params: [{ url: `/dvmdb/adom/${adom}/device`, fields: ["name", "hostname", "ip"] }],
+  };
+
+  let devicesRes: JsonRpcResponse;
+  try {
+    devicesRes = await rpc(baseUrl, devicesPayload, config.apiUser, config.apiToken, config.verifySsl);
+  } catch (err: any) {
+    return { ok: false, message: `Failed to fetch device list from FMG: ${err.message || "Unknown error"}`, deviceName: "(none)" };
+  }
+
+  const raw = devicesRes.result?.[0]?.data;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return { ok: false, message: `No managed devices found in ADOM "${adom}"`, deviceName: "(none)" };
+  }
+
+  // Apply the same include/exclude filters the discovery run would use, then
+  // require an IP since we need to reach the FortiGate directly.
+  const filtered = filterDevices(raw as any[], config.deviceInclude, config.deviceExclude)
+    .filter((d: any) => typeof d.ip === "string" && d.ip.length > 0);
+
+  if (filtered.length === 0) {
+    return {
+      ok: false,
+      message: "No managed FortiGate with a recorded management IP is available to test against — adjust device include/exclude or make sure the gate is online in FMG",
+      deviceName: "(none)",
+    };
+  }
+
+  const pick = filtered[Math.floor(Math.random() * filtered.length)];
+  const deviceName = String(pick.name || pick.hostname || pick.ip);
+
+  const fgConfig: FortiGateConfig = {
+    host: String(pick.ip),
+    port: 443,
+    apiUser: config.fortigateApiUser || "",
+    apiToken: config.fortigateApiToken,
+    vdom: "root",
+    verifySsl: config.fortigateVerifySsl === true,
+    mgmtInterface: config.mgmtInterface,
+  };
+
+  const fgResult = await fgTestConnection(fgConfig);
+  return { ok: fgResult.ok, message: fgResult.message, version: fgResult.version, deviceName };
 }
 
 /**
@@ -408,7 +504,7 @@ export async function discoverDhcpSubnets(
         apiUser: config.fortigateApiUser || "",
         apiToken: config.fortigateApiToken,
         vdom: "root",
-        verifySsl: config.verifySsl === true,
+        verifySsl: config.fortigateVerifySsl === true,
         mgmtInterface: config.mgmtInterface,
         dhcpInclude: config.interfaceInclude ?? config.dhcpInclude,
         dhcpExclude: config.interfaceExclude ?? config.dhcpExclude,

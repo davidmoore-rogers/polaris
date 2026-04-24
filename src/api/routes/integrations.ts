@@ -118,6 +118,7 @@ const FortiManagerConfigSchema = z.object({
   useProxy: z.boolean().optional().default(true),
   fortigateApiUser:  z.string().optional().default(""),
   fortigateApiToken: z.string().optional().default(""),
+  fortigateVerifySsl: z.boolean().optional().default(false),
 });
 
 const FortiGateConfigSchema = z.object({
@@ -897,6 +898,17 @@ router.post("/test", async (req, res, next) => {
       result = await activeDirectory.testConnection(input.config);
     } else {
       result = { ok: false, message: `Unknown integration type: ${(input as any).type}` };
+    }
+
+    // If this test was tied to an existing integration and passed, stamp the
+    // card's last-tested fields so the UI and the discovery gate see the
+    // success. We only persist on success — a failing draft-form test should
+    // not tear down a previously-working integration's "ok" status.
+    if (existingId && result.ok) {
+      await prisma.integration.update({
+        where: { id: existingId },
+        data: { lastTestAt: new Date(), lastTestOk: true },
+      }).catch(() => {});
     }
 
     res.json(result);

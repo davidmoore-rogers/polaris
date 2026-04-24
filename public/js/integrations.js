@@ -229,7 +229,12 @@ function fortiManagerFormHTML(defaults) {
       '<div class="form-group" style="margin-bottom:0"><label>Parallel FortiGate Queries</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-discoveryParallelism" value="' + (d.useProxy !== false ? 1 : (d.discoveryParallelism || 5)) + '" min="1" max="20" style="width:80px"' + (d.useProxy !== false ? " disabled" : "") + '><span id="f-parallelism-note" style="color:var(--color-text-tertiary);font-size:0.85rem">' + (d.useProxy !== false ? "locked to 1 when proxy is enabled" : "gates at once") + '</span></div><p class="hint">With proxy enabled this is forced to 1 (FortiManager drops parallel connections past very low parallelism). Disable proxy to query up to 20 FortiGates concurrently.</p></div>' +
       '<div id="f-fgt-creds-block" style="' + (d.useProxy !== false ? "display:none;" : "") + 'border-top:1px solid rgba(79,195,247,0.2);padding-top:0.75rem;margin-top:0.5rem">' +
         '<div class="form-group"><label>FortiGate API User</label><input type="text" id="f-fortigateApiUser" value="' + escapeHtml(d.fortigateApiUser || "") + '" placeholder="e.g. shelob-ro"><p class="hint">REST API admin username configured on each managed FortiGate</p></div>' +
-        '<div class="form-group" style="margin-bottom:0"><label>FortiGate API Token</label><input type="password" id="f-fortigateApiToken" value="' + (d.fortigateApiTokenPlaceholder ? "" : escapeHtml(d.fortigateApiToken || "")) + '" placeholder="' + (d.fortigateApiTokenPlaceholder || "Bearer token") + '"><p class="hint">Bearer token for the above admin. Must be the same across all managed FortiGates.</p></div>' +
+        '<div class="form-group"><label>FortiGate API Token</label><input type="password" id="f-fortigateApiToken" value="' + (d.fortigateApiTokenPlaceholder ? "" : escapeHtml(d.fortigateApiToken || "")) + '" placeholder="' + (d.fortigateApiTokenPlaceholder || "Bearer token") + '"><p class="hint">Bearer token for the above admin. Must be the same across all managed FortiGates.</p></div>' +
+        '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0">' +
+          '<input type="checkbox" id="f-fortigateVerifySsl" ' + (d.fortigateVerifySsl ? "checked" : "") + ' style="width:auto">' +
+          '<label for="f-fortigateVerifySsl" style="margin:0">Verify SSL certificate on FortiGates</label>' +
+        '</div>' +
+        '<p class="hint" style="margin-top:0.25rem;margin-bottom:0">Leave unchecked to accept self-signed certs on managed FortiGates. Separate from the FortiManager verify-SSL setting above.</p>' +
       '</div>' +
     '</div>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
@@ -312,6 +317,7 @@ function getFormConfig() {
     useProxy: useProxy,
     fortigateApiUser: val("f-fortigateApiUser"),
     fortigateApiToken: val("f-fortigateApiToken"),
+    fortigateVerifySsl: (function () { var el = document.getElementById("f-fortigateVerifySsl"); return el ? el.checked : false; })(),
   };
 }
 
@@ -847,6 +853,7 @@ async function openEditModal(id) {
         fortigateApiUser: config.fortigateApiUser,
         fortigateApiToken: "",
         fortigateApiTokenPlaceholder: "Leave blank to keep current token",
+        fortigateVerifySsl: config.fortigateVerifySsl === true,
       };
       body = fortiManagerFormHTML(defaults);
       formGetter = function () {
@@ -883,6 +890,7 @@ async function openEditModal(id) {
           config: formConfig,
         });
         showToast(result.message, result.ok ? "success" : "error");
+        if (result.ok) loadIntegrations();
       } catch (err) {
         if (err.name === "AbortError") { showToast("Test aborted", "error"); }
         else { showToast(err.message, "error"); }
