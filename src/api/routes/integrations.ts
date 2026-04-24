@@ -22,7 +22,7 @@ import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
 const router = Router();
 
 // Track in-flight DHCP discovery per integration — abort previous if re-saved
-const activeDiscovery = new Map<string, { controller: AbortController; name: string; currentDevice?: string }>();
+const activeDiscovery = new Map<string, { controller: AbortController; name: string; activeDevices: Set<string> }>();
 
 // Safely stringify a proxy-query response, converting v8 string-limit and oversized
 // payloads into a helpful 413 instead of an opaque 500.
@@ -227,7 +227,11 @@ router.get("/", async (req, res, next) => {
 
 // GET /api/v1/integrations/discoveries — active background discoveries
 router.get("/discoveries", (req, res) => {
-  const running = Array.from(activeDiscovery.entries()).map(([id, { name, currentDevice }]) => ({ id, name, currentDevice }));
+  const running = Array.from(activeDiscovery.entries()).map(([id, { name, activeDevices }]) => ({
+    id,
+    name,
+    activeDevices: [...activeDevices],
+  }));
   res.json({ discoveries: running });
 });
 
@@ -286,7 +290,7 @@ router.post("/", async (req, res, next) => {
     if (canDiscover) {
       activeDiscovery.get(integration.id)?.controller.abort();
       const ac = new AbortController();
-      activeDiscovery.set(integration.id, { controller: ac, name: input.name });
+      activeDiscovery.set(integration.id, { controller: ac, name: input.name, activeDevices: new Set() });
       logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integration.id, resourceName: input.name, actor: req.session?.username, message: `DHCP discovery started for "${input.name}"` });
       try {
         let discoveryResult: DiscoveryResult;
@@ -569,7 +573,7 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
   activeDiscovery.get(integrationId)?.controller.abort();
   const ac = new AbortController();
   const integrationName = integration.name;
-  activeDiscovery.set(integrationId, { controller: ac, name: integrationName });
+  activeDiscovery.set(integrationId, { controller: ac, name: integrationName, activeDevices: new Set() });
 
   await prisma.integration.update({ where: { id: integrationId }, data: { lastDiscoveryAt: new Date() } });
 
@@ -581,7 +585,13 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
     logEvent({ action: `integration.${step}`, resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
     if (device) {
       const entry = activeDiscovery.get(integrationId);
-      if (entry) entry.currentDevice = device;
+      if (entry) {
+        if (step === "discover.device.complete") {
+          entry.activeDevices.delete(device);
+        } else if (step === "discover.device.start") {
+          entry.activeDevices.add(device);
+        }
+      }
     }
   };
 

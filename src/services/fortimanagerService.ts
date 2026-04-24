@@ -25,6 +25,7 @@ export interface FortiManagerConfig {
   inventoryIncludeInterfaces?: string[];
   deviceInclude?: string[];   // FortiGate device names to include (wildcards ok). Matched against name/hostname.
   deviceExclude?: string[];   // FortiGate device names to exclude. Ignored if deviceInclude is non-empty.
+  discoveryParallelism?: number; // Max concurrent FortiGates during discovery (default 5).
 }
 
 interface JsonRpcRequest {
@@ -349,58 +350,55 @@ export async function discoverDhcpSubnets(
   const fortiAps: DiscoveredFortiAP[] = [];
   const vips: DiscoveredVip[] = [];
 
-  // Step 2: For each device, query DHCP server configs + interfaces
-  for (const device of devicesData) {
-    const deviceName = device.name || device.hostname;
-    if (!deviceName) continue;
+  type DeviceChunk = {
+    device: DiscoveredDevice;
+    subnets: DiscoveredSubnet[];
+    interfaceIps: DiscoveredInterfaceIp[];
+    dhcpEntries: DiscoveredDhcpEntry[];
+    deviceInventory: DiscoveredInventoryDevice[];
+    didInventory: boolean;
+    fortiSwitches: DiscoveredFortiSwitch[];
+    fortiAps: DiscoveredFortiAP[];
+    vips: DiscoveredVip[];
+  };
 
-    // Skip devices that are not currently connected to FortiManager.
-    // conn_status 1 = UP; anything else (2=DOWN, 3=UNKNOWN) means the device
-    // is unreachable and its config data may be stale or unavailable.
-    if (device.conn_status !== undefined && device.conn_status !== 1) {
-      log("discover.device.skip", "info", `Skipping ${deviceName} — not connected to FortiManager (conn_status=${device.conn_status})`, deviceName);
-      continue;
+  const mgmtIfaceName = config.mgmtInterface || "mgmt";
+
+  // Per-device discovery: runs all 8 RPC steps and returns local result arrays.
+  // Isolated from shared state — safe to run concurrently across devices.
+  async function processDevice(rawDevice: any): Promise<DeviceChunk | null> {
+    const deviceName: string = rawDevice.name || rawDevice.hostname;
+    if (!deviceName) return null;
+
+    if (rawDevice.conn_status !== undefined && rawDevice.conn_status !== 1) {
+      log("discover.device.skip", "info", `Skipping ${deviceName} — not connected to FortiManager (conn_status=${rawDevice.conn_status})`);
+      return null;
     }
-
-    // Stop early if the caller aborted (e.g. integration was re-saved)
-    if (signal?.aborted) break;
-
-    // Capture array lengths before this device so we can slice a per-device result
-    const snBefore = discovered.length;
-    const devBefore = devices.length;
-    const ifIpBefore = interfaceIps.length;
-    const entBefore = dhcpEntries.length;
-    const invBefore = deviceInventory.length;
-    const switchBefore = fortiSwitches.length;
-    const apBefore = fortiAps.length;
-    const vipBefore = vips.length;
+    if (signal?.aborted) return null;
 
     log("discover.device.start", "info", `Starting discovery for ${deviceName}`, deviceName);
 
-    // Capture device metadata for asset creation
-    const mgmtIp = device.ip || "";
-    devices.push({
+    const localDevice: DiscoveredDevice = {
       name: deviceName,
-      hostname: device.hostname || deviceName,
-      serial: device.sn || "",
-      model: device.platform_str || "",
-      mgmtIp,
-    });
+      hostname: rawDevice.hostname || deviceName,
+      serial: rawDevice.sn || "",
+      model: rawDevice.platform_str || "",
+      mgmtIp: rawDevice.ip || "",
+    };
+    const localSubnets: DiscoveredSubnet[] = [];
+    const localInterfaceIps: DiscoveredInterfaceIp[] = [];
+    const localDhcpEntries: DiscoveredDhcpEntry[] = [];
+    const localInventory: DiscoveredInventoryDevice[] = [];
+    let didInventory = false;
+    const localSwitches: DiscoveredFortiSwitch[] = [];
+    const localAps: DiscoveredFortiAP[] = [];
+    const localVips: DiscoveredVip[] = [];
 
-    // If device has a management IP, record it as a placeholder (may be updated below)
-    if (mgmtIp && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(mgmtIp)) {
-      interfaceIps.push({
-        device: deviceName,
-        interfaceName: config.mgmtInterface || "mgmt",
-        ipAddress: mgmtIp,
-        role: "management",
-      });
+    if (localDevice.mgmtIp && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(localDevice.mgmtIp)) {
+      localInterfaceIps.push({ device: deviceName, interfaceName: mgmtIfaceName, ipAddress: localDevice.mgmtIp, role: "management" });
     }
 
-    // Resolve the FortiGate's actual management interface IP from its own config.
-    // device.ip from the FMG device DB reflects the FMG's own management address,
-    // not the FortiGate's interface IP.
-    const mgmtIfaceName = config.mgmtInterface || "mgmt";
+    // Step 1: Resolve management interface IP from device config
     try {
       const mgmtIfacePayload: JsonRpcRequest = {
         id: 6,
@@ -415,536 +413,443 @@ export async function discoverDhcpSubnets(
           ? (Array.isArray(found.ip) ? found.ip[0] : (found.ip as string | null))
           : null;
         if (rawIp && rawIp !== "0.0.0.0" && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rawIp)) {
-          devices[devices.length - 1].mgmtIp = rawIp;
-          const ifEntry = interfaceIps.find((e) => e.device === deviceName && e.role === "management");
-          if (ifEntry) {
-            ifEntry.ipAddress = rawIp;
-          } else {
-            interfaceIps.push({ device: deviceName, interfaceName: mgmtIfaceName, ipAddress: rawIp, role: "management" });
-          }
+          localDevice.mgmtIp = rawIp;
+          const ifEntry = localInterfaceIps.find((e) => e.role === "management");
+          if (ifEntry) ifEntry.ipAddress = rawIp;
+          else localInterfaceIps.push({ device: deviceName, interfaceName: mgmtIfaceName, ipAddress: rawIp, role: "management" });
           log("discover.device.mgmtip", "info", `${deviceName}: Resolved management IP from ${mgmtIfaceName}: ${rawIp}`, deviceName);
         }
       }
     } catch { /* best-effort; keep device.ip as fallback */ }
 
-    // Track which interface names serve DHCP so we can look up their IPs
-    const dhcpInterfaceNames: string[] = [];
-    // Record start index so the monitor phase can replace config reservations with richer data
-    const configResStart = dhcpEntries.length;
-
     try {
+      // Step 2: DHCP server config — subnets and static reservations
       const dhcpPayload: JsonRpcRequest = {
         id: 2,
         method: "get",
         params: [{ url: `/pm/config/device/${deviceName}/vdom/root/system/dhcp/server` }],
       };
-
       const dhcpRes = await rpc(baseUrl, dhcpPayload, apiUser, apiToken, verifySsl, signal);
       const dhcpData = dhcpRes.result?.[0]?.data;
       if (!Array.isArray(dhcpData)) {
         log("discover.dhcp", "info", `${deviceName}: No DHCP servers configured`, deviceName);
-        continue;
-      }
+      } else {
+        let deviceSubnetCount = 0;
+        let deviceReservationCount = 0;
+        for (const server of dhcpData) {
+          const iface = typeof server.interface === "string" ? server.interface : String(server.interface ?? "");
+          const serverId = String(server.id || iface);
+          const netmaskStr = server.netmask;
+          const ranges = server["ip-range"];
+          if (!netmaskStr || !Array.isArray(ranges) || ranges.length === 0) continue;
+          const startIp = ranges[0]["start-ip"];
+          if (!startIp) continue;
+          try {
+            const block = new Netmask(`${startIp}/${netmaskStr}`);
+            const cidr = `${block.base}/${block.bitmask}`;
+            localSubnets.push({ cidr, name: iface || `dhcp-${serverId}`, fortigateDevice: deviceName, dhcpServerId: serverId });
+            deviceSubnetCount++;
+          } catch { /* skip invalid netmask/IP */ }
 
-      let deviceSubnetCount = 0;
-      let deviceReservationCount = 0;
-      for (const server of dhcpData) {
-        const iface = typeof server.interface === "string" ? server.interface : String(server.interface ?? "");
-        const serverId = String(server.id || iface);
-        const netmaskStr = server.netmask;
-        const ranges = server["ip-range"];
-
-        if (!netmaskStr || !Array.isArray(ranges) || ranges.length === 0) continue;
-
-        const startIp = ranges[0]["start-ip"];
-        if (!startIp) continue;
-
-        // Derive CIDR from start-ip + netmask
-        try {
-          const block = new Netmask(`${startIp}/${netmaskStr}`);
-          const cidr = `${block.base}/${block.bitmask}`;
-
-          discovered.push({
-            cidr,
-            name: iface || `dhcp-${serverId}`,
-            fortigateDevice: deviceName,
-            dhcpServerId: serverId,
-          });
-
-          deviceSubnetCount++;
-          if (iface) dhcpInterfaceNames.push(iface);
-        } catch {
-          // Skip entries with invalid netmask/IP combinations
-        }
-
-        // Extract DHCP reserved addresses as fallback — replaced below if system/dhcp succeeds
-        const reservedAddrs = server["reserved-address"];
-        if (Array.isArray(reservedAddrs)) {
-          for (const entry of reservedAddrs) {
-            const rIp = entry.ip;
-            const rMac = entry.mac || "";
-            if (!rIp || rIp === "0.0.0.0") continue;
-            dhcpEntries.push({
-              device: deviceName,
-              interfaceName: iface || `dhcp-${serverId}`,
-              ipAddress: rIp,
-              macAddress: rMac,
-              hostname: entry.description || entry.action === 6 ? (entry.description || "") : "",
-              type: "dhcp-reservation",
-            });
-            deviceReservationCount++;
-          }
-        }
-      }
-      log("discover.dhcp", "info", `${deviceName}: Found ${deviceSubnetCount} DHCP subnet(s) and ${deviceReservationCount} static reservation(s)`, deviceName);
-
-      // Step 3a: Query live DHCP table (reservations + leases) via system/dhcp monitor endpoint.
-      // If successful, replace the config-based reservation fallback entries with this richer data
-      // which includes vci (device model), access_point, ssid, and the reserved flag.
-      try {
-        const leasePayload: JsonRpcRequest = {
-          id: 4,
-          method: "exec",
-          params: [{
-            url: `/sys/proxy/json`,
-            data: {
-              target: [`/adom/${adom}/device/${deviceName}`],
-              action: "get",
-              resource: "/api/v2/monitor/system/dhcp?format=ip|mac|hostname|interface|reserved|expire_time|access_point|ssid|vci",
-            },
-          }],
-        };
-
-        const leaseRes = await rpc(baseUrl, leasePayload, apiUser, apiToken, verifySsl, signal);
-        const leaseData = leaseRes.result?.[0]?.data;
-        const monitorStatus = Array.isArray(leaseData) ? leaseData[0]?.status?.code : undefined;
-
-        // FMG wraps the FortiGate response: data[0].response.results
-        const rawResults = Array.isArray(leaseData)
-          ? leaseData[0]?.response?.results
-          : (leaseData as any)?.response?.results;
-
-        // system/dhcp returns a flat array of all current entries (both reserved and dynamic).
-        // Older endpoints may return nested formats; normalise all to a flat list.
-        let resultsArray: any[] = [];
-        if (Array.isArray(rawResults)) {
-          resultsArray = rawResults;
-        } else if (rawResults && typeof rawResults === "object") {
-          resultsArray = Object.values(rawResults);
-        }
-
-        const flatLeases: any[] = [];
-        for (const entry of resultsArray) {
-          if (Array.isArray(entry.leases)) {
-            // Nested format: carry server-level interface name down to each lease
-            const serverIface = String(entry.server_interface || entry.interface || "");
-            for (const lease of entry.leases) {
-              flatLeases.push({ ...lease, _serverIface: serverIface });
-            }
-          } else if (entry.ip) {
-            flatLeases.push(entry);
-          }
-        }
-
-        log("discover.leases", "info", `${deviceName}: Raw DHCP entries from monitor: ${flatLeases.length}`, deviceName);
-
-        if (monitorStatus === 0 && flatLeases.length > 0) {
-          // Monitor succeeded — replace config-based reservation fallback entries with monitor data
-          dhcpEntries.splice(configResStart, dhcpEntries.length - configResStart);
-        }
-
-        // Subnets discovered for this device (for interface inference below)
-        const deviceSubnets = discovered.slice(snBefore);
-
-        let deviceEntryCount = 0;
-        for (const lease of flatLeases) {
-          const leaseIp = lease.ip;
-          const leaseMac = lease.mac || "";
-          let leaseIface = lease.interface || lease._serverIface || "";
-          if (!leaseIp || leaseIp === "0.0.0.0") continue;
-
-          // Skip duplicates (can occur when monitor and config fallback both run)
-          if (dhcpEntries.some((e) => e.ipAddress === leaseIp && e.device === deviceName)) continue;
-
-          // If no interface name came from the API, infer from whichever discovered subnet contains it
-          if (!leaseIface) {
-            const matched = deviceSubnets.find((s) => {
-              try { return new Netmask(s.cidr).contains(leaseIp); } catch { return false; }
-            });
-            leaseIface = matched?.name || "";
-          }
-
-          dhcpEntries.push({
-            device: deviceName,
-            interfaceName: leaseIface || "unknown",
-            ipAddress: leaseIp,
-            macAddress: leaseMac,
-            hostname: lease.hostname || "",
-            type: lease.reserved === true ? "dhcp-reservation" : "dhcp-lease",
-            expireTime: lease.expire_time || undefined,
-            accessPoint: lease.access_point || undefined,
-            ssid: lease.ssid || undefined,
-            vci: lease.vci || undefined,
-          });
-          deviceEntryCount++;
-        }
-        log("discover.leases", "info", `${deviceName}: Found ${deviceEntryCount} DHCP entry/entries from monitor`, deviceName);
-      } catch (err: any) {
-        log("discover.leases", "error", `${deviceName}: Failed to query DHCP monitor — ${err.message || "Unknown error"}`, deviceName);
-      }
-
-      // Step 3: Query all interfaces to capture VLAN IDs (for DHCP subnet backfill) and
-      // record IPs for any interface matching the interface filter.
-      try {
-        const ifacePayload: JsonRpcRequest = {
-          id: 3,
-          method: "get",
-          params: [{ url: `/pm/config/device/${deviceName}/vdom/root/system/interface`, fields: ["name", "ip", "vlanid", "switch-controller-mgmt-vlan"] }],
-        };
-
-        const ifaceRes = await rpc(baseUrl, ifacePayload, apiUser, apiToken, verifySsl, signal);
-        const ifaceData = ifaceRes.result?.[0]?.data;
-        const ifaceVlanMap = new Map<string, number>();
-        let ifaceIpCount = 0;
-        if (Array.isArray(ifaceData)) {
-          for (const iface of ifaceData) {
-            const ifaceName = iface.name || "";
-
-            // Collect VLAN ID for every interface (used to backfill discovered subnets).
-            // FortiLink interfaces report vlanid=0 and carry the real VLAN in
-            // switch-controller-mgmt-vlan, so `??` fallback won't work (0 isn't nullish).
-            const parseVid = (v: unknown): number => {
-              const n = typeof v === "number" ? v : parseInt(String(v ?? ""), 10);
-              return !isNaN(n) && n > 0 ? n : 0;
-            };
-            const vid = parseVid(iface.vlanid) || parseVid(iface["switch-controller-mgmt-vlan"]);
-            if (vid > 0) ifaceVlanMap.set(ifaceName, vid);
-
-            // Skip the management interface — already handled above with role "management"
-            if (ifaceName === mgmtIfaceName) continue;
-
-            // Collect IP for all interfaces matching the interface filter
-            if (!matchesInterfaceFilter(ifaceName, config)) continue;
-            const ipArr = iface.ip;
-            if (Array.isArray(ipArr) && ipArr.length >= 1 && ipArr[0] && ipArr[0] !== "0.0.0.0") {
-              interfaceIps.push({
+          const reservedAddrs = server["reserved-address"];
+          if (Array.isArray(reservedAddrs)) {
+            for (const entry of reservedAddrs) {
+              const rIp = entry.ip;
+              const rMac = entry.mac || "";
+              if (!rIp || rIp === "0.0.0.0") continue;
+              localDhcpEntries.push({
                 device: deviceName,
-                interfaceName: ifaceName,
-                ipAddress: ipArr[0],
-                role: "interface",
+                interfaceName: iface || `dhcp-${serverId}`,
+                ipAddress: rIp,
+                macAddress: rMac,
+                hostname: entry.description || entry.action === 6 ? (entry.description || "") : "",
+                type: "dhcp-reservation",
               });
-              ifaceIpCount++;
+              deviceReservationCount++;
             }
           }
         }
+        log("discover.dhcp", "info", `${deviceName}: Found ${deviceSubnetCount} DHCP subnet(s) and ${deviceReservationCount} static reservation(s)`, deviceName);
 
-        // Back-fill VLAN IDs onto discovered subnets for this device
-        for (const sub of discovered) {
-          if (sub.fortigateDevice === deviceName) {
+        // Step 3a: Live DHCP monitor — replaces config-based reservation fallback if successful
+        try {
+          const leasePayload: JsonRpcRequest = {
+            id: 4,
+            method: "exec",
+            params: [{
+              url: `/sys/proxy/json`,
+              data: {
+                target: [`/adom/${adom}/device/${deviceName}`],
+                action: "get",
+                resource: "/api/v2/monitor/system/dhcp?format=ip|mac|hostname|interface|reserved|expire_time|access_point|ssid|vci",
+              },
+            }],
+          };
+          const leaseRes = await rpc(baseUrl, leasePayload, apiUser, apiToken, verifySsl, signal);
+          const leaseData = leaseRes.result?.[0]?.data;
+          const monitorStatus = Array.isArray(leaseData) ? leaseData[0]?.status?.code : undefined;
+          const rawResults = Array.isArray(leaseData)
+            ? leaseData[0]?.response?.results
+            : (leaseData as any)?.response?.results;
+
+          let resultsArray: any[] = [];
+          if (Array.isArray(rawResults)) resultsArray = rawResults;
+          else if (rawResults && typeof rawResults === "object") resultsArray = Object.values(rawResults);
+
+          const flatLeases: any[] = [];
+          for (const entry of resultsArray) {
+            if (Array.isArray(entry.leases)) {
+              const serverIface = String(entry.server_interface || entry.interface || "");
+              for (const lease of entry.leases) flatLeases.push({ ...lease, _serverIface: serverIface });
+            } else if (entry.ip) {
+              flatLeases.push(entry);
+            }
+          }
+          log("discover.leases", "info", `${deviceName}: Raw DHCP entries from monitor: ${flatLeases.length}`, deviceName);
+
+          if (monitorStatus === 0 && flatLeases.length > 0) {
+            localDhcpEntries.length = 0; // discard config-based fallback; monitor data wins
+          }
+
+          let deviceEntryCount = 0;
+          for (const lease of flatLeases) {
+            const leaseIp = lease.ip;
+            const leaseMac = lease.mac || "";
+            let leaseIface = lease.interface || lease._serverIface || "";
+            if (!leaseIp || leaseIp === "0.0.0.0") continue;
+            if (localDhcpEntries.some((e) => e.ipAddress === leaseIp)) continue;
+            if (!leaseIface) {
+              const matched = localSubnets.find((s) => {
+                try { return new Netmask(s.cidr).contains(leaseIp); } catch { return false; }
+              });
+              leaseIface = matched?.name || "";
+            }
+            localDhcpEntries.push({
+              device: deviceName,
+              interfaceName: leaseIface || "unknown",
+              ipAddress: leaseIp,
+              macAddress: leaseMac,
+              hostname: lease.hostname || "",
+              type: lease.reserved === true ? "dhcp-reservation" : "dhcp-lease",
+              expireTime: lease.expire_time || undefined,
+              accessPoint: lease.access_point || undefined,
+              ssid: lease.ssid || undefined,
+              vci: lease.vci || undefined,
+            });
+            deviceEntryCount++;
+          }
+          log("discover.leases", "info", `${deviceName}: Found ${deviceEntryCount} DHCP entry/entries from monitor`, deviceName);
+        } catch (err: any) {
+          log("discover.leases", "error", `${deviceName}: Failed to query DHCP monitor — ${err.message || "Unknown error"}`, deviceName);
+        }
+
+        // Step 3: Interface IPs + VLAN backfill onto local subnets
+        try {
+          const ifacePayload: JsonRpcRequest = {
+            id: 3,
+            method: "get",
+            params: [{ url: `/pm/config/device/${deviceName}/vdom/root/system/interface`, fields: ["name", "ip", "vlanid", "switch-controller-mgmt-vlan"] }],
+          };
+          const ifaceRes = await rpc(baseUrl, ifacePayload, apiUser, apiToken, verifySsl, signal);
+          const ifaceData = ifaceRes.result?.[0]?.data;
+          const ifaceVlanMap = new Map<string, number>();
+          let ifaceIpCount = 0;
+          if (Array.isArray(ifaceData)) {
+            for (const iface of ifaceData) {
+              const ifaceName = iface.name || "";
+              const parseVid = (v: unknown): number => {
+                const n = typeof v === "number" ? v : parseInt(String(v ?? ""), 10);
+                return !isNaN(n) && n > 0 ? n : 0;
+              };
+              const vid = parseVid(iface.vlanid) || parseVid(iface["switch-controller-mgmt-vlan"]);
+              if (vid > 0) ifaceVlanMap.set(ifaceName, vid);
+              if (ifaceName === mgmtIfaceName) continue;
+              if (!matchesInterfaceFilter(ifaceName, config)) continue;
+              const ipArr = iface.ip;
+              if (Array.isArray(ipArr) && ipArr.length >= 1 && ipArr[0] && ipArr[0] !== "0.0.0.0") {
+                localInterfaceIps.push({ device: deviceName, interfaceName: ifaceName, ipAddress: ipArr[0], role: "interface" });
+                ifaceIpCount++;
+              }
+            }
+          }
+          for (const sub of localSubnets) {
             const vid = ifaceVlanMap.get(sub.name);
             if (vid) sub.vlan = vid;
           }
+          log("discover.interfaces", "info", `${deviceName}: Resolved ${ifaceIpCount} interface IP(s)`, deviceName);
+        } catch (err: any) {
+          log("discover.interfaces", "error", `${deviceName}: Failed to query interfaces — ${err.message || "Unknown error"}`, deviceName);
         }
-        log("discover.interfaces", "info", `${deviceName}: Resolved ${ifaceIpCount} interface IP(s)`, deviceName);
-      } catch (err: any) {
-        log("discover.interfaces", "error", `${deviceName}: Failed to query interfaces — ${err.message || "Unknown error"}`, deviceName);
-      }
 
-      // Step 3b: Query device inventory (detected clients) via FMG proxy
-      try {
-        const inventoryPayload: JsonRpcRequest = {
-          id: 5,
-          method: "exec",
-          params: [{
-            url: `/sys/proxy/json`,
-            data: {
-              target: [`/adom/${adom}/device/${deviceName}`],
-              action: "get",
-              resource: "/api/v2/monitor/user/device/query?format=mac|ip|hostname|host|os|type|os_version|hardware_vendor|interface|switch_fortilink|fortiswitch|switch_port|ap_name|fortiap|user|detected_user|is_online|last_seen",
-            },
-          }],
-        };
-
-        const inventoryRes = await rpc(baseUrl, inventoryPayload, apiUser, apiToken, verifySsl, signal);
-        const inventoryData = inventoryRes.result?.[0]?.data;
-
-        const results = Array.isArray(inventoryData)
-          ? inventoryData[0]?.response?.results
-          : (inventoryData as any)?.response?.results;
-
-        const inventoryCutoffMs = Date.now() - inventoryMaxAgeHours * 60 * 60 * 1000;
-        let inventoryCount = 0;
-        if (Array.isArray(results)) {
-          for (const client of results) {
-            const mac = client.mac || "";
-            const ip = client.ip || "";
-            if (!mac && !ip) continue;
-            // Treat missing last_seen as stale: FMG holds historical entries
-            // without a timestamp and we don't want them overwriting fresh
-            // DHCP attribution on assets.
-            if (!client.last_seen || client.last_seen * 1000 < inventoryCutoffMs) continue;
-
-            deviceInventory.push({
-              device: deviceName,
-              macAddress: mac,
-              ipAddress: ip,
-              hostname: client.hostname || client.host || "",
-              os: client.os || client.type || "",
-              osVersion: client.os_version || "",
-              hardwareVendor: client.hardware_vendor || "",
-              interfaceName: client.interface || "",
-              switchName: client.switch_fortilink || client.fortiswitch || "",
-              switchPort: client.switch_port != null ? String(client.switch_port) : "",
-              apName: client.ap_name || client.fortiap || "",
-              user: client.user || client.detected_user || "",
-              isOnline: !!client.is_online,
-              lastSeen: new Date(client.last_seen * 1000).toISOString(),
-            });
-            inventoryCount++;
-          }
-        }
-        inventoryDevices.add(deviceName);
-        log("discover.inventory", "info", `${deviceName}: Found ${inventoryCount} device inventory client(s)`, deviceName);
-      } catch (err: any) {
-        log("discover.inventory", "error", `${deviceName}: Failed to query device inventory — ${err.message || "Unknown error"}`, deviceName);
-      }
-
-      // Step 3c: Query managed FortiSwitches via FMG proxy
-      try {
-        const switchPayload: JsonRpcRequest = {
-          id: 8,
-          method: "exec",
-          params: [{
-            url: `/sys/proxy/json`,
-            data: {
-              target: [`/adom/${adom}/device/${deviceName}`],
-              action: "get",
-              resource: "/api/v2/monitor/switch-controller/managed-switch/status?format=connecting_from|fgt_peer_intf_name|join_time|os_version|serial|switch-id|state|status",
-            },
-          }],
-        };
-        const switchRes = await rpc(baseUrl, switchPayload, apiUser, apiToken, verifySsl, signal);
-        const switchData = switchRes.result?.[0]?.data;
-        const switchProxyEntry = Array.isArray(switchData) ? switchData[0] : switchData as any;
-        const switchProxyStatus = switchProxyEntry?.status?.code ?? 0;
-        const switchHttpStatus = switchProxyEntry?.response?.http_status ?? 200;
-        const switchResults = switchProxyEntry?.response?.results;
-        let switchCount = 0;
-        if (switchProxyStatus !== 0 || switchHttpStatus === 404) {
-          log("discover.fortiswitches", "info", `${deviceName}: switch-controller not available (proxy status ${switchProxyStatus}, HTTP ${switchHttpStatus}) — skipping`, deviceName);
-        } else if (Array.isArray(switchResults)) {
-          for (const sw of switchResults) {
-            fortiSwitches.push({
-              device: deviceName,
-              name: sw["switch-id"] || "",
-              serial: sw.serial || "",
-              ipAddress: sw.connecting_from || "",
-              fgtInterface: sw.fgt_peer_intf_name || "",
-              osVersion: sw.os_version || "",
-              joinTime: Number.isFinite(sw.join_time) && sw.join_time > 0 ? sw.join_time : undefined,
-              state: sw.state || "",
-              connected: sw.status === "Connected",
-            });
-            switchCount++;
-          }
-          log("discover.fortiswitches", "info", `${deviceName}: Found ${switchCount} managed FortiSwitch(es)`, deviceName);
-        } else {
-          log("discover.fortiswitches", "info", `${deviceName}: Found 0 managed FortiSwitch(es)`, deviceName);
-        }
-      } catch (err: any) {
-        log("discover.fortiswitches", "error", `${deviceName}: Failed to query managed FortiSwitches — ${err.message || "Unknown error"}`, deviceName);
-      }
-
-      // Step 3d: Query managed FortiAPs via FMG proxy
-      try {
-        const apPayload: JsonRpcRequest = {
-          id: 9,
-          method: "exec",
-          params: [{
-            url: `/sys/proxy/json`,
-            data: {
-              target: [`/adom/${adom}/device/${deviceName}`],
-              action: "get",
-              resource: "/api/v2/monitor/wifi/managed_ap?format=name|wtp_id|serial|model|wtp_profile|ip_addr|ip_address|local_ipv4_address|base_mac|mac|status|state|version|firmware_version",
-            },
-          }],
-        };
-        const apRes = await rpc(baseUrl, apPayload, apiUser, apiToken, verifySsl, signal);
-        const apData = apRes.result?.[0]?.data;
-        const apProxyEntry = Array.isArray(apData) ? apData[0] : apData as any;
-        const apProxyStatus = apProxyEntry?.status?.code ?? 0;
-        const apHttpStatus = apProxyEntry?.response?.http_status ?? 200;
-        const apResults = apProxyEntry?.response?.results;
-        let apCount = 0;
-        if (apProxyStatus !== 0 || apHttpStatus === 404) {
-          log("discover.fortiaps", "info", `${deviceName}: wifi/managed_ap not available (proxy status ${apProxyStatus}, HTTP ${apHttpStatus}) — skipping`, deviceName);
-        } else if (Array.isArray(apResults)) {
-          for (const ap of apResults) {
-            const rawApIp = ap.ip_addr || ap.ip_address || ap.local_ipv4_address || "";
-            const rawApMac = ap.base_mac || ap.mac || "";
-            fortiAps.push({
-              device: deviceName,
-              name: ap.name || ap.wtp_id || "",
-              serial: ap.serial || ap.wtp_id || "",
-              model: ap.model || ap.wtp_profile || "",
-              ipAddress: rawApIp === "0.0.0.0" ? "" : rawApIp,
-              baseMac: /^0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}$/i.test(rawApMac) ? "" : rawApMac,
-              status: ap.status || ap.state || "",
-              osVersion: ap.version || ap.firmware_version || "",
-            });
-            apCount++;
-          }
-          log("discover.fortiaps", "info", `${deviceName}: Found ${apCount} managed FortiAP(s)`, deviceName);
-        } else {
-          log("discover.fortiaps", "info", `${deviceName}: Found 0 managed FortiAP(s)`, deviceName);
-        }
-      } catch (err: any) {
-        log("discover.fortiaps", "error", `${deviceName}: Failed to query managed FortiAPs — ${err.message || "Unknown error"}`, deviceName);
-      }
-
-      // Step 3e: Query firewall VIPs from FortiGate config via FMG
-      try {
-        const vipPayload: JsonRpcRequest = {
-          id: 11,
-          method: "get",
-          params: [{ url: `/pm/config/device/${deviceName}/vdom/root/firewall/vip`, fields: ["name", "extip", "mappedip", "extintf"] }],
-        };
-        const vipRes = await rpc(baseUrl, vipPayload, apiUser, apiToken, verifySsl, signal);
-        const vipData = vipRes.result?.[0]?.data;
-        let vipCount = 0;
-        if (Array.isArray(vipData)) {
-          for (const vip of vipData) {
-            const name = vip.name || "";
-            if (!name) continue;
-
-            // Parse extip — may be "1.2.3.4" or "1.2.3.4-1.2.3.5"
-            const extip = parseRangeFirstIp(String(vip.extip || ""));
-            if (!extip) continue;
-
-            // Parse mappedip array: [{range: "10.0.0.1-10.0.0.1"}, ...]
-            const mappedips: string[] = [];
-            if (Array.isArray(vip.mappedip)) {
-              for (const m of vip.mappedip) {
-                const ip = parseRangeFirstIp(String(m.range || ""));
-                if (ip) mappedips.push(ip);
-              }
+        // Step 3b: Device inventory
+        try {
+          const inventoryPayload: JsonRpcRequest = {
+            id: 5,
+            method: "exec",
+            params: [{
+              url: `/sys/proxy/json`,
+              data: {
+                target: [`/adom/${adom}/device/${deviceName}`],
+                action: "get",
+                resource: "/api/v2/monitor/user/device/query?format=mac|ip|hostname|host|os|type|os_version|hardware_vendor|interface|switch_fortilink|fortiswitch|switch_port|ap_name|fortiap|user|detected_user|is_online|last_seen",
+              },
+            }],
+          };
+          const inventoryRes = await rpc(baseUrl, inventoryPayload, apiUser, apiToken, verifySsl, signal);
+          const inventoryData = inventoryRes.result?.[0]?.data;
+          const results = Array.isArray(inventoryData)
+            ? inventoryData[0]?.response?.results
+            : (inventoryData as any)?.response?.results;
+          const inventoryCutoffMs = Date.now() - inventoryMaxAgeHours * 60 * 60 * 1000;
+          let inventoryCount = 0;
+          if (Array.isArray(results)) {
+            for (const client of results) {
+              const mac = client.mac || "";
+              const ip = client.ip || "";
+              if (!mac && !ip) continue;
+              if (!client.last_seen || client.last_seen * 1000 < inventoryCutoffMs) continue;
+              localInventory.push({
+                device: deviceName,
+                macAddress: mac,
+                ipAddress: ip,
+                hostname: client.hostname || client.host || "",
+                os: client.os || client.type || "",
+                osVersion: client.os_version || "",
+                hardwareVendor: client.hardware_vendor || "",
+                interfaceName: client.interface || "",
+                switchName: client.switch_fortilink || client.fortiswitch || "",
+                switchPort: client.switch_port != null ? String(client.switch_port) : "",
+                apName: client.ap_name || client.fortiap || "",
+                user: client.user || client.detected_user || "",
+                isOnline: !!client.is_online,
+                lastSeen: new Date(client.last_seen * 1000).toISOString(),
+              });
+              inventoryCount++;
             }
-
-            vips.push({
-              device: deviceName,
-              name,
-              extip,
-              mappedips,
-              extintf: vip.extintf || "",
-            });
-            vipCount++;
           }
+          didInventory = true;
+          log("discover.inventory", "info", `${deviceName}: Found ${inventoryCount} device inventory client(s)`, deviceName);
+        } catch (err: any) {
+          log("discover.inventory", "error", `${deviceName}: Failed to query device inventory — ${err.message || "Unknown error"}`, deviceName);
         }
-        log("discover.vips", "info", `${deviceName}: Found ${vipCount} firewall VIP(s)`, deviceName);
-      } catch (err: any) {
-        log("discover.vips", "error", `${deviceName}: Failed to query firewall VIPs — ${err.message || "Unknown error"}`, deviceName);
+
+        // Step 3c: Managed FortiSwitches
+        try {
+          const switchPayload: JsonRpcRequest = {
+            id: 8,
+            method: "exec",
+            params: [{
+              url: `/sys/proxy/json`,
+              data: {
+                target: [`/adom/${adom}/device/${deviceName}`],
+                action: "get",
+                resource: "/api/v2/monitor/switch-controller/managed-switch/status?format=connecting_from|fgt_peer_intf_name|join_time|os_version|serial|switch-id|state|status",
+              },
+            }],
+          };
+          const switchRes = await rpc(baseUrl, switchPayload, apiUser, apiToken, verifySsl, signal);
+          const switchData = switchRes.result?.[0]?.data;
+          const switchProxyEntry = Array.isArray(switchData) ? switchData[0] : switchData as any;
+          const switchProxyStatus = switchProxyEntry?.status?.code ?? 0;
+          const switchHttpStatus = switchProxyEntry?.response?.http_status ?? 200;
+          const switchResults = switchProxyEntry?.response?.results;
+          let switchCount = 0;
+          if (switchProxyStatus !== 0 || switchHttpStatus === 404) {
+            log("discover.fortiswitches", "info", `${deviceName}: switch-controller not available (proxy status ${switchProxyStatus}, HTTP ${switchHttpStatus}) — skipping`, deviceName);
+          } else if (Array.isArray(switchResults)) {
+            for (const sw of switchResults) {
+              localSwitches.push({
+                device: deviceName,
+                name: sw["switch-id"] || "",
+                serial: sw.serial || "",
+                ipAddress: sw.connecting_from || "",
+                fgtInterface: sw.fgt_peer_intf_name || "",
+                osVersion: sw.os_version || "",
+                joinTime: Number.isFinite(sw.join_time) && sw.join_time > 0 ? sw.join_time : undefined,
+                state: sw.state || "",
+                connected: sw.status === "Connected",
+              });
+              switchCount++;
+            }
+            log("discover.fortiswitches", "info", `${deviceName}: Found ${switchCount} managed FortiSwitch(es)`, deviceName);
+          } else {
+            log("discover.fortiswitches", "info", `${deviceName}: Found 0 managed FortiSwitch(es)`, deviceName);
+          }
+        } catch (err: any) {
+          log("discover.fortiswitches", "error", `${deviceName}: Failed to query managed FortiSwitches — ${err.message || "Unknown error"}`, deviceName);
+        }
+
+        // Step 3d: Managed FortiAPs
+        try {
+          const apPayload: JsonRpcRequest = {
+            id: 9,
+            method: "exec",
+            params: [{
+              url: `/sys/proxy/json`,
+              data: {
+                target: [`/adom/${adom}/device/${deviceName}`],
+                action: "get",
+                resource: "/api/v2/monitor/wifi/managed_ap?format=name|wtp_id|serial|model|wtp_profile|ip_addr|ip_address|local_ipv4_address|base_mac|mac|status|state|version|firmware_version",
+              },
+            }],
+          };
+          const apRes = await rpc(baseUrl, apPayload, apiUser, apiToken, verifySsl, signal);
+          const apData = apRes.result?.[0]?.data;
+          const apProxyEntry = Array.isArray(apData) ? apData[0] : apData as any;
+          const apProxyStatus = apProxyEntry?.status?.code ?? 0;
+          const apHttpStatus = apProxyEntry?.response?.http_status ?? 200;
+          const apResults = apProxyEntry?.response?.results;
+          let apCount = 0;
+          if (apProxyStatus !== 0 || apHttpStatus === 404) {
+            log("discover.fortiaps", "info", `${deviceName}: wifi/managed_ap not available (proxy status ${apProxyStatus}, HTTP ${apHttpStatus}) — skipping`, deviceName);
+          } else if (Array.isArray(apResults)) {
+            for (const ap of apResults) {
+              const rawApIp = ap.ip_addr || ap.ip_address || ap.local_ipv4_address || "";
+              const rawApMac = ap.base_mac || ap.mac || "";
+              localAps.push({
+                device: deviceName,
+                name: ap.name || ap.wtp_id || "",
+                serial: ap.serial || ap.wtp_id || "",
+                model: ap.model || ap.wtp_profile || "",
+                ipAddress: rawApIp === "0.0.0.0" ? "" : rawApIp,
+                baseMac: /^0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}$/i.test(rawApMac) ? "" : rawApMac,
+                status: ap.status || ap.state || "",
+                osVersion: ap.version || ap.firmware_version || "",
+              });
+              apCount++;
+            }
+            log("discover.fortiaps", "info", `${deviceName}: Found ${apCount} managed FortiAP(s)`, deviceName);
+          } else {
+            log("discover.fortiaps", "info", `${deviceName}: Found 0 managed FortiAP(s)`, deviceName);
+          }
+        } catch (err: any) {
+          log("discover.fortiaps", "error", `${deviceName}: Failed to query managed FortiAPs — ${err.message || "Unknown error"}`, deviceName);
+        }
+
+        // Step 3e: Firewall VIPs
+        try {
+          const vipPayload: JsonRpcRequest = {
+            id: 11,
+            method: "get",
+            params: [{ url: `/pm/config/device/${deviceName}/vdom/root/firewall/vip`, fields: ["name", "extip", "mappedip", "extintf"] }],
+          };
+          const vipRes = await rpc(baseUrl, vipPayload, apiUser, apiToken, verifySsl, signal);
+          const vipData = vipRes.result?.[0]?.data;
+          let vipCount = 0;
+          if (Array.isArray(vipData)) {
+            for (const vip of vipData) {
+              const name = vip.name || "";
+              if (!name) continue;
+              const extip = parseRangeFirstIp(String(vip.extip || ""));
+              if (!extip) continue;
+              const mappedips: string[] = [];
+              if (Array.isArray(vip.mappedip)) {
+                for (const m of vip.mappedip) {
+                  const ip = parseRangeFirstIp(String(m.range || ""));
+                  if (ip) mappedips.push(ip);
+                }
+              }
+              localVips.push({ device: deviceName, name, extip, mappedips, extintf: vip.extintf || "" });
+              vipCount++;
+            }
+          }
+          log("discover.vips", "info", `${deviceName}: Found ${vipCount} firewall VIP(s)`, deviceName);
+        } catch (err: any) {
+          log("discover.vips", "error", `${deviceName}: Failed to query firewall VIPs — ${err.message || "Unknown error"}`, deviceName);
+        }
       }
     } catch (err: any) {
       log("discover.device", "error", `${deviceName}: Failed to query device — ${err.message || "Unknown error"}`, deviceName);
     }
 
-    // Emit a filtered per-device result so the caller can sync incrementally
-    if (onDeviceComplete) {
-      try {
-        const devSubnets = discovered.slice(snBefore);
-        const filteredDevSubnets = filterDhcpResults(devSubnets, config.interfaceInclude ?? config.dhcpInclude, config.interfaceExclude ?? config.dhcpExclude);
-        const excludedDevIfaces = new Set(
-          devSubnets.filter((s) => !filteredDevSubnets.includes(s)).map((s) => `${s.fortigateDevice}/${s.name}`)
-        );
-        // Enrich blank interfaceNames in this device's inventory slice using DHCP data
-        const devDhcpEntries = dhcpEntries.slice(entBefore);
-        const devMacToIface = new Map<string, string>();
-        for (const e of devDhcpEntries) {
-          if (e.macAddress && e.interfaceName) {
-            const norm = e.macAddress.toUpperCase().replace(/-/g, ":");
-            if (!devMacToIface.has(norm)) devMacToIface.set(norm, e.interfaceName);
-          }
-        }
-        const devInventory = deviceInventory.slice(invBefore);
-        for (const inv of devInventory) {
-          if (!inv.interfaceName && inv.macAddress) {
-            const norm = inv.macAddress.toUpperCase().replace(/-/g, ":");
-            const iface = devMacToIface.get(norm);
-            if (iface) inv.interfaceName = iface;
-          }
-        }
-
-        await onDeviceComplete({
-          subnets: filteredDevSubnets,
-          devices: devices.slice(devBefore),
-          // interfaceIps were already filtered by matchesInterfaceFilter at collection time
-          interfaceIps: interfaceIps.slice(ifIpBefore),
-          // Pass all DHCP entries (including from excluded interfaces) so that manually-created
-          // subnets matching an excluded network still get populated with reservations and leases.
-          dhcpEntries: devDhcpEntries,
-          deviceInventory: devInventory.filter(
-            (d) => !excludedDevIfaces.has(`${d.device}/${d.interfaceName}`) &&
-                   matchesInventoryFilter(d.interfaceName, config)
-          ),
-          inventoryDevices: inventoryDevices.has(deviceName) ? [deviceName] : [],
-          // Per-device emissions don't carry the FMG-wide device roster — Phase 2
-          // stale deprecation only runs in the "finalize" pass.
-          knownDeviceNames: [],
-          fortiSwitches: fortiSwitches.slice(switchBefore),
-          fortiAps: fortiAps.slice(apBefore),
-          vips: vips.slice(vipBefore),
-        });
-      } catch (err: any) {
-        log("discover.device", "error", `${deviceName}: Per-device sync failed — ${err.message || "Unknown error"}`, deviceName);
+    // Enrich inventory: fill blank interfaceNames from this device's own DHCP data
+    const macToIface = new Map<string, string>();
+    for (const e of localDhcpEntries) {
+      if (e.macAddress && e.interfaceName) {
+        const norm = e.macAddress.toUpperCase().replace(/-/g, ":");
+        if (!macToIface.has(norm)) macToIface.set(norm, e.interfaceName);
       }
     }
-  }
-
-  // Step 4: Filter subnets by interfaceInclude / interfaceExclude (or legacy dhcpInclude / dhcpExclude)
-  const filteredSubnets = filterDhcpResults(discovered, config.interfaceInclude ?? config.dhcpInclude, config.interfaceExclude ?? config.dhcpExclude);
-
-  // interfaceIps were already filtered by matchesInterfaceFilter at collection time; pass through as-is
-  const filteredIps = interfaceIps;
-
-  // Pass all DHCP entries (including from excluded interfaces) so that manually-created
-  // subnets matching an excluded network still get populated with reservations and leases.
-  // syncDhcpSubnets uses findSubnetForIp, which returns nothing if no subnet exists,
-  // so entries for fully-excluded networks with no matching subnet are silently skipped.
-  const filteredDhcpEntries = dhcpEntries;
-
-  // Enrich inventory entries whose interfaceName is blank by matching them to a DHCP entry
-  // with the same MAC. FortiGate sometimes omits client.interface for wireless clients;
-  // the DHCP entry for the same device carries the correct interface (DHCP server interface).
-  const macToDhcpIface = new Map<string, string>();
-  for (const e of dhcpEntries) {
-    if (e.macAddress && e.interfaceName) {
-      const norm = e.macAddress.toUpperCase().replace(/-/g, ":");
-      if (!macToDhcpIface.has(norm)) macToDhcpIface.set(norm, e.interfaceName);
+    for (const inv of localInventory) {
+      if (!inv.interfaceName && inv.macAddress) {
+        const norm = inv.macAddress.toUpperCase().replace(/-/g, ":");
+        const iface = macToIface.get(norm);
+        if (iface) inv.interfaceName = iface;
+      }
     }
-  }
-  for (const inv of deviceInventory) {
-    if (!inv.interfaceName && inv.macAddress) {
-      const norm = inv.macAddress.toUpperCase().replace(/-/g, ":");
-      const iface = macToDhcpIface.get(norm);
-      if (iface) inv.interfaceName = iface;
-    }
+
+    log("discover.device.complete", "info", `Completed discovery for ${deviceName}`, deviceName);
+    return { device: localDevice, subnets: localSubnets, interfaceIps: localInterfaceIps, dhcpEntries: localDhcpEntries, deviceInventory: localInventory, didInventory, fortiSwitches: localSwitches, fortiAps: localAps, vips: localVips };
   }
 
-  // Filter device inventory: drop devices connected to excluded DHCP interfaces
-  const excludedIfaceNames = new Set(
-    discovered
-      .filter((s) => !filteredSubnets.includes(s))
-      .map((s) => `${s.fortigateDevice}/${s.name}`)
-  );
-  const filteredInventory = deviceInventory.filter(
-    (d) => !excludedIfaceNames.has(`${d.device}/${d.interfaceName}`) &&
-           matchesInventoryFilter(d.interfaceName, config)
-  );
+  // Process up to `concurrency` FortiGates in parallel.
+  // Merging into shared arrays is a synchronous block — no interleaving possible.
+  const concurrency = Math.max(1, config.discoveryParallelism ?? 5);
+  const executing = new Set<Promise<void>>();
 
-  const excluded = discovered.length - filteredSubnets.length;
-  log("discover.filter", "info", `Filter complete: ${filteredSubnets.length} subnet(s) included, ${excluded} excluded, ${filteredDhcpEntries.length} DHCP entries, ${filteredInventory.length} inventory device(s)`);
+  for (const rawDevice of devicesData) {
+    if (signal?.aborted) break;
 
-  return { subnets: filteredSubnets, devices, interfaceIps: filteredIps, dhcpEntries: filteredDhcpEntries, deviceInventory: filteredInventory, inventoryDevices: [...inventoryDevices], knownDeviceNames, fortiSwitches, fortiAps, vips };
+    const task: Promise<void> = (async () => {
+      const chunk = await processDevice(rawDevice);
+      if (!chunk) return;
+
+      const filteredDevSubnets = filterDhcpResults(
+        chunk.subnets,
+        config.interfaceInclude ?? config.dhcpInclude,
+        config.interfaceExclude ?? config.dhcpExclude,
+      );
+      const excludedDevIfaces = new Set(
+        chunk.subnets
+          .filter((s) => !filteredDevSubnets.includes(s))
+          .map((s) => `${s.fortigateDevice}/${s.name}`)
+      );
+      const filteredDevInventory = chunk.deviceInventory.filter(
+        (d) => !excludedDevIfaces.has(`${d.device}/${d.interfaceName}`) &&
+                matchesInventoryFilter(d.interfaceName, config)
+      );
+
+      // Atomic merge into shared arrays (synchronous — no await between here and end of block)
+      discovered.push(...filteredDevSubnets);
+      devices.push(chunk.device);
+      interfaceIps.push(...chunk.interfaceIps);
+      dhcpEntries.push(...chunk.dhcpEntries);
+      deviceInventory.push(...filteredDevInventory);
+      if (chunk.didInventory) inventoryDevices.add(chunk.device.name);
+      fortiSwitches.push(...chunk.fortiSwitches);
+      fortiAps.push(...chunk.fortiAps);
+      vips.push(...chunk.vips);
+
+      if (onDeviceComplete) {
+        try {
+          await onDeviceComplete({
+            subnets: filteredDevSubnets,
+            devices: [chunk.device],
+            interfaceIps: chunk.interfaceIps,
+            dhcpEntries: chunk.dhcpEntries,
+            deviceInventory: filteredDevInventory,
+            inventoryDevices: chunk.didInventory ? [chunk.device.name] : [],
+            knownDeviceNames: [],
+            fortiSwitches: chunk.fortiSwitches,
+            fortiAps: chunk.fortiAps,
+            vips: chunk.vips,
+          });
+        } catch (err: any) {
+          log("discover.device", "error", `${chunk.device.name}: Per-device sync failed — ${err.message || "Unknown error"}`, chunk.device.name);
+        }
+      }
+    })().catch(() => {});
+
+    executing.add(task);
+    task.then(() => executing.delete(task), () => executing.delete(task));
+    if (executing.size >= concurrency) await Promise.race(executing);
+  }
+  await Promise.all(executing);
+
+  // Step 4: Filtering was applied per-device during collection; log summary and return.
+  log("discover.filter", "info", `Filter complete: ${discovered.length} subnet(s) included, ${dhcpEntries.length} DHCP entries, ${deviceInventory.length} inventory device(s)`);
+
+  return { subnets: discovered, devices, interfaceIps, dhcpEntries, deviceInventory, inventoryDevices: [...inventoryDevices], knownDeviceNames, fortiSwitches, fortiAps, vips };
 }
 
 /** Extract the first (start) IP from a range string like "1.2.3.4-1.2.3.5" or a plain IP. */

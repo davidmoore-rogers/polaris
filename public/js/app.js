@@ -617,7 +617,7 @@ function renderQueryStatus() {
       serverDiscoveries.map(function (d) {
         return '<li><div style="min-width:0;flex:1">' +
           '<span class="query-status-name">Discovering ' + escapeHtml(d.name) + '</span>' +
-          (d.currentDevice ? '<span class="query-status-device">' + escapeHtml(d.currentDevice) + '</span>' : '') +
+          (d.activeDevices && d.activeDevices.length ? '<span class="query-status-device">' + d.activeDevices.map(escapeHtml).join(', ') + '</span>' : '') +
           '</div>' +
           '<button class="query-abort-btn" data-discovery-id="' + escapeHtml(d.id) + '" data-discovery-name="' + escapeHtml(d.name) + '" title="Abort">&#x2715;</button>' +
           '</li>';
