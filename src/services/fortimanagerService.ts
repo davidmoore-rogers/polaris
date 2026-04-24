@@ -556,6 +556,34 @@ export async function discoverDhcpSubnets(
   const mgmtIfaceName = config.mgmtInterface || "mgmt";
   const useProxy = config.useProxy !== false; // default true
 
+  // Pre-resolve every FortiGate's management IP against FMG SERIALLY when
+  // we're in direct mode. FMG only handles one request at a time for this
+  // API user (see project memo "FMG concurrency limit"), so even though
+  // the per-device FortiGate work runs N-wide below, the FMG-side lookup
+  // that feeds it must be one-at-a-time to avoid locking the account.
+  //
+  // Proxy mode skips this pass entirely — processDevice still calls
+  // resolveDeviceMgmtIp inline there, but with concurrency forced to 1.
+  const mgmtIpByDevice = new Map<string, string>();
+  if (!useProxy) {
+    const connectedDevices = devicesData.filter(
+      (d) => d.conn_status === undefined || d.conn_status === 1,
+    );
+    log("discover.mgmtip.pre", "info", `Pre-resolving management IPs for ${connectedDevices.length} device(s) (serial, to protect FMG)`);
+    for (const raw of connectedDevices) {
+      if (signal?.aborted) break;
+      const name: string = raw.name || raw.hostname;
+      if (!name) continue;
+      try {
+        const ip = await resolveDeviceMgmtIp(baseUrl, config, name, mgmtIfaceName, signal);
+        if (ip) mgmtIpByDevice.set(name, ip);
+      } catch (err: any) {
+        log("discover.mgmtip.pre", "error", `${name}: Failed to resolve management IP — ${err.message || "Unknown error"}`, name);
+      }
+    }
+    log("discover.mgmtip.pre", "info", `Pre-resolved ${mgmtIpByDevice.size} of ${connectedDevices.length} management IP(s)`);
+  }
+
   // Per-device discovery: runs all 8 RPC steps and returns local result arrays.
   // Isolated from shared state — safe to run concurrently across devices.
   async function processDevice(rawDevice: any): Promise<DeviceChunk | null> {
@@ -582,15 +610,13 @@ export async function discoverDhcpSubnets(
         return null;
       }
 
-      let directHost: string | null = null;
-      try {
-        directHost = await resolveDeviceMgmtIp(baseUrl, config, deviceName, mgmtIfaceName, signal);
-      } catch (err: any) {
-        log("discover.device.skip", "error", `Skipping ${deviceName} — failed to resolve management IP via FMG (${mgmtIfaceName}): ${err.message || "Unknown error"}`, deviceName);
-        return null;
-      }
+      // Direct mode uses the management IP resolved upfront by the serial
+      // pre-pass (see mgmtIpByDevice above) — we must NOT call
+      // resolveDeviceMgmtIp here, because this function runs in parallel
+      // workers and FMG can only service one request at a time.
+      const directHost = mgmtIpByDevice.get(deviceName) ?? null;
       if (!directHost) {
-        log("discover.device.skip", "error", `Skipping ${deviceName} — no management IP configured on interface "${mgmtIfaceName}"`, deviceName);
+        log("discover.device.skip", "error", `Skipping ${deviceName} — no management IP configured on interface "${mgmtIfaceName}" (pre-resolve missed or failed)`, deviceName);
         return null;
       }
 
