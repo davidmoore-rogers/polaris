@@ -101,6 +101,7 @@ const FortiManagerConfigSchema = z.object({
   inventoryIncludeInterfaces: z.array(z.string()).optional().default([]),
   deviceInclude: z.array(z.string()).optional().default([]),
   deviceExclude: z.array(z.string()).optional().default([]),
+  discoveryParallelism: z.number().int().min(1).max(20).optional().default(5),
 });
 
 const FortiGateConfigSchema = z.object({

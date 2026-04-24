@@ -221,6 +221,7 @@ function fortiManagerFormHTML(defaults) {
       '<textarea id="f-deviceNames" rows="2" placeholder="One per line — e.g. FG-HQ-01&#10;FG-DC-*&#10;*-lab">' + escapeHtml(devNames.join("\n")) + '</textarea>' +
       '<p class="hint">Leave empty to query all managed FortiGates. Matched against device name or hostname. Wildcards supported: <code>FG-*</code>, <code>*-lab</code>, <code>*dc*</code></p>' +
     '</div>' +
+    '<div class="form-group"><label>Parallel FortiGate Queries</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-discoveryParallelism" value="' + (d.discoveryParallelism || 5) + '" min="1" max="20" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">gates at once</span></div><p class="hint">Maximum number of FortiGates to query simultaneously during discovery (1–20, default 5). Higher values speed up discovery but increase load on FortiManager.</p></div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Scope</p>' +
     '<div class="form-group"><label>Interface Filter</label>' +
@@ -271,6 +272,7 @@ function getFormConfig() {
     inventoryIncludeInterfaces: invMode === "include" ? invIfaces : [],
     deviceInclude: devMode === "include" ? devNames : [],
     deviceExclude: devMode === "exclude" ? devNames : [],
+    discoveryParallelism: (function () { var v = parseInt(val("f-discoveryParallelism"), 10); return Number.isFinite(v) && v >= 1 && v <= 20 ? v : 5; })(),
   };
 }
 
