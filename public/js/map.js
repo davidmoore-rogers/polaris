@@ -274,9 +274,13 @@
   // ─── Topology modal ───────────────────────────────────────────────────────
   function wireModal() {
     var overlay = document.getElementById("topology-overlay");
-    document.getElementById("topology-close").addEventListener("click", closeTopology);
+    var closeBtn = document.getElementById("topology-close");
+    closeBtn.addEventListener("click", closeTopology);
     overlay.addEventListener("click", function (e) {
-      if (e.target === overlay) closeTopology();
+      if (e.target === overlay) {
+        closeBtn.classList.add("flash");
+        setTimeout(function () { closeBtn.classList.remove("flash"); }, 600);
+      }
     });
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape" && overlay.classList.contains("open")) closeTopology();
