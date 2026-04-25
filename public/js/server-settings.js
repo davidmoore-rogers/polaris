@@ -959,6 +959,10 @@ async function loadDatabaseInfo() {
             '<span id="update-check-status" style="font-size:0.82rem"></span>' +
           '</div>' +
         '</div>' +
+        '<details id="update-history" style="margin-top:1rem">' +
+          '<summary style="cursor:pointer;font-size:0.82rem;color:var(--color-text-secondary);user-select:none">Recent updates</summary>' +
+          '<div id="update-history-body" style="margin-top:0.6rem;font-size:0.82rem;color:var(--color-text-tertiary)">Loading...</div>' +
+        '</details>' +
       '</div>' +
       (function () {
         var engineCard = '<div class="settings-card">' +
@@ -1414,6 +1418,16 @@ var _updatePollTimer = null;
 function initUpdateControls() {
   document.getElementById("btn-check-updates").addEventListener("click", checkForUpdatesUI);
 
+  var historyEl = document.getElementById("update-history");
+  if (historyEl) {
+    var historyLoaded = false;
+    historyEl.addEventListener("toggle", function () {
+      if (!historyEl.open || historyLoaded) return;
+      historyLoaded = true;
+      loadUpdateHistory();
+    });
+  }
+
   // Check if there's a pending notification from a background check or previous restart
   api.serverSettings.getUpdateStatus().then(function (status) {
     if (status.state === "complete") {
@@ -1428,6 +1442,30 @@ function initUpdateControls() {
       startUpdatePolling();
     }
   }).catch(function () {});
+}
+
+async function loadUpdateHistory() {
+  var body = document.getElementById("update-history-body");
+  if (!body) return;
+  try {
+    var commits = await api.serverSettings.getUpdateHistory(20);
+    if (!commits || commits.length === 0) {
+      body.innerHTML = '<span>No commit history available.</span>';
+      return;
+    }
+    var html = '<div style="border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-bg-secondary);max-height:280px;overflow-y:auto">';
+    commits.forEach(function (c, i) {
+      html += '<div style="padding:0.35rem 0.6rem;' + (i < commits.length - 1 ? 'border-bottom:1px solid var(--color-border);' : '') + 'display:flex;gap:10px;align-items:baseline">' +
+        '<span class="mono" style="color:var(--color-text-tertiary);flex-shrink:0">' + escapeHtml(c.hash) + '</span>' +
+        (c.date ? '<span style="color:var(--color-text-tertiary);font-size:0.78rem;flex-shrink:0">' + escapeHtml(c.date) + '</span>' : '') +
+        '<span style="color:var(--color-text-primary)">' + escapeHtml(c.subject) + '</span>' +
+      '</div>';
+    });
+    html += '</div>';
+    body.innerHTML = html;
+  } catch (err) {
+    body.innerHTML = '<span style="color:var(--color-danger)">Failed to load history: ' + escapeHtml(err.message || String(err)) + '</span>';
+  }
 }
 
 async function checkForUpdatesUI() {

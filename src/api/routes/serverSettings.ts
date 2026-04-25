@@ -39,6 +39,7 @@ import {
   getUpdateStatus,
   clearUpdateStatus,
   initUpdateStatus,
+  getRecentCommits,
 } from "../../services/updateService.js";
 import { applyHttps, isHttpsRunning } from "../../httpsManager.js";
 import { prisma } from "../../db.js";
@@ -943,6 +944,15 @@ router.post("/updates/apply", async (_req, res, next) => {
 router.post("/updates/dismiss", (_req, res) => {
   clearUpdateStatus();
   res.json({ ok: true });
+});
+
+router.get("/updates/history", async (req, res, next) => {
+  try {
+    const limit = parseInt(String(req.query.limit || ""), 10) || 20;
+    res.json(await getRecentCommits(limit));
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ─── Branding ─────────────────────────────────────────────────────────────

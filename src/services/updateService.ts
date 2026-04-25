@@ -136,6 +136,37 @@ export function clearUpdateStatus() {
 }
 
 /**
+ * Return the most recent commits on the installed code (`git log` on HEAD).
+ * Used by the Application Updates card to show "what's been applied" history.
+ */
+export async function getRecentCommits(
+  limit = 20
+): Promise<{ hash: string; date: string; subject: string }[]> {
+  const n = Math.max(1, Math.min(100, Math.floor(limit) || 20));
+  try {
+    const { stdout } = await execAsync(
+      `git log -n ${n} --pretty=format:%h%x09%ad%x09%s --date=short`,
+      { cwd: APP_DIR, timeout: 10000, maxBuffer: 4 * 1024 * 1024 }
+    );
+    return stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const t1 = line.indexOf("\t");
+        const t2 = line.indexOf("\t", t1 + 1);
+        if (t1 === -1 || t2 === -1) return { hash: line, date: "", subject: "" };
+        return {
+          hash: line.slice(0, t1),
+          date: line.slice(t1 + 1, t2),
+          subject: line.slice(t2 + 1),
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Check if a newer version is available on the remote.
  */
 export async function checkForUpdates(): Promise<UpdateStatus> {
