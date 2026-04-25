@@ -1577,6 +1577,14 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .badge-decommissioned { background: rgba(117,117,117,0.12); color: var(--color-deprecated); border: 1px solid rgba(117,117,117,0.25); }
 .badge-disabled       { background: rgba(211,47,47,0.12); color: #ef9a9a; border: 1px solid rgba(211,47,47,0.25); }
 .badge-storage        { background: rgba(156,39,176,0.12); color: #ce93d8; border: 1px solid rgba(156,39,176,0.25); }
+.badge-monitored        { background: rgba(0,200,83,0.12);   color: var(--color-success);    border: 1px solid rgba(0,200,83,0.25); }
+.badge-unmonitored      { background: rgba(117,117,117,0.12); color: var(--color-deprecated); border: 1px solid rgba(117,117,117,0.25); }
+.badge-monitor-down     { background: rgba(211,47,47,0.18);  color: #ef9a9a;                 border: 1px solid rgba(211,47,47,0.30); }
+.badge-monitor-pending  { background: rgba(79,195,247,0.12); color: var(--color-accent);     border: 1px solid rgba(79,195,247,0.25); }
+[data-theme="light"] .badge-monitored        { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
+[data-theme="light"] .badge-unmonitored      { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
+[data-theme="light"] .badge-monitor-down     { background: rgba(211,47,47,0.10); color: #c62828; border-color: rgba(211,47,47,0.30); }
+[data-theme="light"] .badge-monitor-pending  { background: rgba(79,195,247,0.10); border-color: rgba(79,195,247,0.30); }
 
 /* Event level badges */
 .badge-level-info    { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); font-size: 0.7rem; letter-spacing: 0.5px; }

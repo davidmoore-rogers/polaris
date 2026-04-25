@@ -1485,6 +1485,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             learnedLocation: existingAsset.learnedLocation || fgHostname,
             lastSeen: new Date(now),
             fortinetTopology: topology,
+            // Stamp the discovering integration so the Monitoring tab can lock
+            // the type dropdown for FMG/FortiGate-discovered firewalls and
+            // probe via the integration's stored API token.
+            discoveredByIntegrationId: integrationId,
+            monitorType: integrationType === "fortigate" ? "fortigate" : "fortimanager",
             // Only overwrite coords when discovery actually returned them — do not
             // wipe a previously-set value with undefined on a FortiOS that omits
             // longitude/latitude from system/global.
@@ -1526,6 +1531,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           department: "Network Security",
           learnedLocation: fgHostname,
           lastSeen: new Date(now),
+          // Lock monitoring source to the discovering integration. The
+          // Asset Monitoring tab grays out the type dropdown for these and
+          // routes probes through the integration's stored API token.
+          discoveredByIntegrationId: integrationId,
+          monitorType: integrationType === "fortigate" ? "fortigate" : "fortimanager",
           ...(Number.isFinite(device.latitude) && Number.isFinite(device.longitude)
             ? { latitude: device.latitude, longitude: device.longitude }
             : {}),

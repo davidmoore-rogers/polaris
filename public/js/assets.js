@@ -64,6 +64,8 @@ document.addEventListener("DOMContentLoaded", async function () {
   document.addEventListener("click", _handleMacDeleteClick);
   document.getElementById("assets-bulk-delete-btn").addEventListener("click", bulkDeleteAssets);
   document.getElementById("assets-bulk-edit-btn").addEventListener("click", openBulkEditModal);
+  var bm = document.getElementById("assets-bulk-monitor-btn");
+  if (bm) bm.addEventListener("click", openBulkMonitorModal);
   var settingsBtn = document.getElementById("btn-asset-settings");
   if (settingsBtn) settingsBtn.addEventListener("click", openAssetSettingsModal);
   await userReady;
@@ -308,6 +310,7 @@ function renderAssetsPage() {
       '<td>' + _copyableCell(a.serialNumber) + '</td>' +
       '<td>' + assetTypeBadge(a.assetType) + '</td>' +
       '<td>' + assetStatusBadge(a) + '</td>' +
+      '<td>' + assetMonitorBadge(a) + '</td>' +
       '<td>' + escapeHtml(a.location || a.learnedLocation || "-") + '</td>' +
       '<td>' + (a.lastSeen ? formatDate(a.lastSeen) : "-") + '</td>' +
       '<td>' + (a._acquired ? formatDate(a._acquired) : "-") + '</td>' +
@@ -539,6 +542,26 @@ function assetStatusBadge(asset) {
   return '<span class="badge ' + cls + '"' + title + '>' + escapeHtml(label) + '</span>';
 }
 
+// Three-state monitoring pill matching the user-facing taxonomy:
+//   monitored=false                     → grey  "Unmonitored"
+//   monitored=true, no probe yet        → blue  "Pending"
+//   monitored=true, status="up"         → green "Monitored"
+//   monitored=true, status="down"       → red   "Down"
+function assetMonitorBadge(asset) {
+  if (!asset || asset.monitored === false || asset.monitored == null) {
+    return '<span class="badge badge-unmonitored">Unmonitored</span>';
+  }
+  var s = asset.monitorStatus || "unknown";
+  var bits = [];
+  if (asset.monitorType) bits.push("Type: " + asset.monitorType);
+  if (typeof asset.lastResponseTimeMs === "number") bits.push("Last RTT: " + asset.lastResponseTimeMs + " ms");
+  if (asset.lastMonitorAt) bits.push("Last poll: " + new Date(asset.lastMonitorAt).toLocaleString());
+  var title = bits.length ? ' title="' + escapeHtml(bits.join("\n")) + '"' : "";
+  if (s === "up")   return '<span class="badge badge-monitored"' + title + '>Monitored</span>';
+  if (s === "down") return '<span class="badge badge-monitor-down"' + title + '>Down</span>';
+  return '<span class="badge badge-monitor-pending"' + title + '>Pending</span>';
+}
+
 function ipCellHTML(asset) {
   var primary = asset.ipAddress;
   var ips = Array.isArray(asset.associatedIps) ? asset.associatedIps : [];
@@ -708,16 +731,141 @@ function getAssetFormData() {
   if (document.getElementById("f-ipAddress"))    data.ipAddress    = val("f-ipAddress") || undefined;
   if (document.getElementById("f-macAddress"))   data.macAddress   = val("f-macAddress") || undefined;
   if (document.getElementById("f-serialNumber")) data.serialNumber = val("f-serialNumber") || undefined;
+
+  // Monitoring fields (only present when the Monitoring tab is rendered)
+  var mon = document.getElementById("f-monitored");
+  if (mon) {
+    data.monitored = mon.checked;
+    var typeSel = document.getElementById("f-monitorType");
+    // Locked dropdowns are disabled; their value is still readable via .value.
+    if (typeSel) data.monitorType = typeSel.value || null;
+    var credSel = document.getElementById("f-monitorCredential");
+    if (credSel) data.monitorCredentialId = credSel.value || null;
+    var ivEl = document.getElementById("f-monitorInterval");
+    if (ivEl) {
+      var iv = parseInt(ivEl.value, 10);
+      data.monitorIntervalSec = Number.isFinite(iv) && iv >= 5 ? iv : null;
+    }
+  }
   return data;
+}
+
+// ─── Tabbed asset modal scaffolding ────────────────────────────────────────
+
+function _isMonitorIntegrationLocked(asset) {
+  return !!(asset && asset.discoveredByIntegrationId &&
+    (asset.monitorType === "fortimanager" || asset.monitorType === "fortigate"));
+}
+
+function assetMonitoringFormHTML(asset) {
+  var locked = _isMonitorIntegrationLocked(asset);
+  var integrationName = (asset && asset.discoveredByIntegration && asset.discoveredByIntegration.name) || "";
+  var monitorType = asset && asset.monitorType ? asset.monitorType : "";
+  var credId = asset && asset.monitorCredentialId ? asset.monitorCredentialId : "";
+  var interval = asset && asset.monitorIntervalSec != null ? asset.monitorIntervalSec : "";
+  var monitored = asset && asset.monitored ? " checked" : "";
+
+  var typeSelect;
+  if (locked) {
+    var lockedLabel = (monitorType === "fortigate" ? "FortiGate: " : "FortiManager: ") + (integrationName || "(unknown)");
+    typeSelect =
+      '<select id="f-monitorType" disabled>' +
+        '<option value="' + escapeHtml(monitorType) + '" selected>' + escapeHtml(lockedLabel) + '</option>' +
+      '</select>' +
+      '<p class="hint">Monitoring source is locked because this firewall was discovered by ' +
+        escapeHtml(integrationName || "an integration") + '. Probes go through the integration’s direct-mode API token.</p>';
+  } else {
+    typeSelect =
+      '<select id="f-monitorType">' +
+        '<option value=""'      + (monitorType === ""      ? " selected" : "") + '>— none —</option>' +
+        '<option value="icmp"'  + (monitorType === "icmp"  ? " selected" : "") + '>ICMP (no credentials)</option>' +
+        '<option value="snmp"'  + (monitorType === "snmp"  ? " selected" : "") + '>SNMP</option>' +
+        '<option value="winrm"' + (monitorType === "winrm" ? " selected" : "") + '>WinRM</option>' +
+        '<option value="ssh"'   + (monitorType === "ssh"   ? " selected" : "") + '>SSH</option>' +
+      '</select>';
+  }
+
+  return (
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
+        '<input type="checkbox" id="f-monitored"' + monitored + '>' +
+        '<span>Enable monitoring for this asset</span>' +
+      '</label>' +
+      '<p class="hint">A successful probe means the credential authenticated. Probes write a sample row each cycle; failed probes count as packet loss.</p>' +
+    '</div>' +
+    '<div class="form-group"><label>Monitor Type</label>' + typeSelect + '</div>' +
+    '<div class="form-group" id="f-monitorCredential-wrap"' + (locked ? ' style="display:none"' : '') + '>' +
+      '<label>Credential</label>' +
+      '<select id="f-monitorCredential" data-current-id="' + escapeHtml(credId) + '">' +
+        '<option value="">— none —</option>' +
+      '</select>' +
+      '<p class="hint">Add credentials in <a href="/server-settings.html?tab=credentials">Server Settings → Credentials</a>.</p>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Poll Interval Override (seconds)</label>' +
+      '<input type="number" id="f-monitorInterval" min="5" max="86400" value="' + escapeHtml(String(interval)) + '" placeholder="leave blank for global default" style="max-width:240px">' +
+      '<p class="hint">Default is set in <a href="/events.html?tab=settings">Events → Settings</a>. Minimum 5 seconds.</p>' +
+    '</div>'
+  );
+}
+
+async function _wireMonitorEditTab(asset) {
+  await _ensureCredentials();
+  var typeSel = document.getElementById("f-monitorType");
+  var credWrap = document.getElementById("f-monitorCredential-wrap");
+  var credSel = document.getElementById("f-monitorCredential");
+
+  function refresh() {
+    var t = typeSel ? typeSel.value : "";
+    var needsCred = (t === "snmp" || t === "winrm" || t === "ssh");
+    if (credWrap) credWrap.style.display = needsCred ? "block" : "none";
+    if (needsCred && credSel) {
+      var current = credSel.getAttribute("data-current-id") || "";
+      credSel.innerHTML = _credentialOptionsFor(t, current);
+    }
+  }
+  if (typeSel && !typeSel.disabled) typeSel.addEventListener("change", refresh);
+  refresh();
+}
+
+function _renderTabbedBody(prefix, tabs) {
+  // tabs: [{key, label, html}]
+  var tabBar = '<div class="page-tabs" id="' + prefix + '-tabs" style="margin-bottom:1rem">' +
+    tabs.map(function (t, i) {
+      return '<button type="button" class="page-tab' + (i === 0 ? " active" : "") + '" data-tab="' + t.key + '">' + escapeHtml(t.label) + '</button>';
+    }).join("") +
+    '</div>';
+  var panels = tabs.map(function (t, i) {
+    return '<div class="page-tab-panel' + (i === 0 ? " active" : "") + '" id="' + prefix + '-tab-' + t.key + '">' + t.html + '</div>';
+  }).join("");
+  return tabBar + panels;
+}
+
+function _wireModalTabs(prefix) {
+  document.querySelectorAll("#" + prefix + "-tabs .page-tab").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var key = btn.getAttribute("data-tab");
+      document.querySelectorAll("#" + prefix + "-tabs .page-tab").forEach(function (b) { b.classList.remove("active"); });
+      document.querySelectorAll('[id^="' + prefix + '-tab-"]').forEach(function (p) { p.classList.remove("active"); });
+      btn.classList.add("active");
+      var panel = document.getElementById(prefix + "-tab-" + key);
+      if (panel) panel.classList.add("active");
+    });
+  });
 }
 
 async function openCreateModal() {
   await _ensureTagCache();
-  var body = assetFormHTML({});
+  var body = _renderTabbedBody("asset-edit", [
+    { key: "general",    label: "General",    html: assetFormHTML({}) },
+    { key: "monitoring", label: "Monitoring", html: assetMonitoringFormHTML({}) },
+  ]);
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-save">Create Asset</button>';
   openModal("Add Asset", body, footer);
+  _wireModalTabs("asset-edit");
   wireTagPicker();
+  _wireMonitorEditTab({});
   document.getElementById("btn-save").addEventListener("click", async function () {
     var btn = this;
     btn.disabled = true;
@@ -739,12 +887,17 @@ async function openEditModal(id) {
     var results = await Promise.all([api.assets.get(id), _ensureTagCache()]);
     var asset = results[0];
     asset._editing = true;
-    var body = assetFormHTML(asset);
+    var body = _renderTabbedBody("asset-edit", [
+      { key: "general",    label: "General",    html: assetFormHTML(asset) },
+      { key: "monitoring", label: "Monitoring", html: assetMonitoringFormHTML(asset) },
+    ]);
     var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
       '<button class="btn btn-primary" id="btn-save">Save Changes</button>';
     var title = "Edit Asset" + (asset.hostname ? " — " + asset.hostname : "");
     openModal(title, body, footer);
+    _wireModalTabs("asset-edit");
     wireTagPicker();
+    _wireMonitorEditTab(asset);
     document.getElementById("btn-save").addEventListener("click", async function () {
       var btn = this;
       btn.disabled = true;
@@ -767,7 +920,7 @@ async function openEditModal(id) {
 async function openViewModal(id) {
   try {
     var a = await api.assets.get(id);
-    var body = '<div class="asset-view-grid">' +
+    var generalHTML = '<div class="asset-view-grid">' +
       viewRow("Hostname", a.hostname) +
       viewRow("DNS Name", a.dnsName) +
       ipViewRow(a) +
@@ -797,6 +950,13 @@ async function openViewModal(id) {
       viewRow("Created", formatDate(a.createdAt)) +
       viewRow("Updated", formatDate(a.updatedAt)) +
     '</div>';
+
+    var monitoringHTML = assetMonitoringViewHTML(a);
+    var body = _renderTabbedBody("asset-view", [
+      { key: "general",    label: "General",    html: generalHTML },
+      { key: "monitoring", label: "Monitoring", html: monitoringHTML },
+    ]);
+
     var histLabel = escapeHtml(a.hostname || a.ipAddress || a.id);
     var historyBtn = '<button class="btn btn-secondary" onclick="openIpHistoryModal(\'' + a.id + '\',\'' + histLabel + '\')">History</button>';
     var copyBtns =
@@ -806,14 +966,162 @@ async function openViewModal(id) {
       ? historyBtn + '<button class="btn btn-secondary" onclick="closeModal()">Close</button>' + copyBtns + '<button class="btn btn-primary" onclick="closeModal();openEditModal(\'' + a.id + '\')">Edit</button>'
       : historyBtn + '<button class="btn btn-secondary" onclick="closeModal()">Close</button>' + copyBtns;
     openModal("Asset Details", body, footer, { wide: true });
+    _wireModalTabs("asset-view");
     _wireHoverTriggersIn(document.querySelector('#modal-overlay .modal-body'));
     document.getElementById("btn-asset-copy").addEventListener("click", _copyAssetDetails);
     document.getElementById("btn-asset-screenshot").addEventListener("click", function () {
       _screenshotAssetDetails(a);
     });
+    if (a.monitored) _loadMonitorHistoryFor(a.id, "24h");
+    var probeBtn = document.getElementById("btn-asset-probe-now");
+    if (probeBtn) {
+      probeBtn.addEventListener("click", async function () {
+        probeBtn.disabled = true;
+        try {
+          var r = await api.assets.probeNow(a.id);
+          showToast(r.success ? ("Probe ok — " + r.responseTimeMs + " ms") : ("Probe failed: " + (r.error || "unknown")), r.success ? "success" : "error");
+          _loadMonitorHistoryFor(a.id, "24h");
+        } catch (err) {
+          showToast(err.message, "error");
+        } finally {
+          probeBtn.disabled = false;
+        }
+      });
+    }
+    document.querySelectorAll(".asset-monitor-range-btn").forEach(function (b) {
+      b.addEventListener("click", function () {
+        document.querySelectorAll(".asset-monitor-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+        b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+        _loadMonitorHistoryFor(a.id, b.getAttribute("data-range"));
+      });
+    });
   } catch (err) {
     showToast(err.message, "error");
   }
+}
+
+function assetMonitoringViewHTML(a) {
+  if (!a) return '<p class="empty-state">No data.</p>';
+  var pill = assetMonitorBadge(a);
+  if (!a.monitored) {
+    return '<div style="padding:1rem 0">' +
+      pill + ' &nbsp; ' +
+      '<span style="color:var(--color-text-secondary)">Monitoring is disabled for this asset. Enable it from the Edit modal’s Monitoring tab.</span>' +
+    '</div>';
+  }
+  var sourceLabel = a.monitorType || "—";
+  if (_isMonitorIntegrationLocked(a) && a.discoveredByIntegration) {
+    sourceLabel = (a.monitorType === "fortigate" ? "FortiGate: " : "FortiManager: ") + a.discoveredByIntegration.name;
+  } else if (a.monitorType === "snmp" || a.monitorType === "winrm" || a.monitorType === "ssh") {
+    if (a.monitorCredential) sourceLabel = a.monitorType.toUpperCase() + " · " + a.monitorCredential.name;
+  } else if (a.monitorType === "icmp") {
+    sourceLabel = "ICMP";
+  }
+  var lastRtt = (typeof a.lastResponseTimeMs === "number") ? (a.lastResponseTimeMs + " ms") : "—";
+  var lastPoll = a.lastMonitorAt ? formatDate(a.lastMonitorAt) : "—";
+  var consec = a.consecutiveFailures || 0;
+  var probeBtn = canManageAssets()
+    ? '<button class="btn btn-sm btn-secondary" id="btn-asset-probe-now">Probe now</button>'
+    : '';
+  var rangeBtns =
+    '<button class="btn btn-sm btn-primary asset-monitor-range-btn" data-range="24h">24h</button>' +
+    '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="7d">7d</button>' +
+    '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="30d">30d</button>';
+  return (
+    '<div class="asset-view-grid">' +
+      viewRow("Status", pill) +
+      viewRow("Source", sourceLabel) +
+      viewRow("Last Response Time", lastRtt) +
+      viewRow("Last Poll", lastPoll) +
+      viewRow("Consecutive Failures", String(consec)) +
+    '</div>' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin:1.5rem 0 0.5rem">' +
+      '<h4 style="margin:0">Response time</h4>' +
+      '<div style="display:flex;gap:6px">' + rangeBtns + ' ' + probeBtn + '</div>' +
+    '</div>' +
+    '<div id="asset-monitor-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:160px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
+      'Loading samples…' +
+    '</div>' +
+    '<div id="asset-monitor-stats" style="margin-top:0.5rem;font-size:0.85rem;color:var(--color-text-secondary)"></div>'
+  );
+}
+
+async function _loadMonitorHistoryFor(assetId, range) {
+  var chart = document.getElementById("asset-monitor-chart");
+  var stats = document.getElementById("asset-monitor-stats");
+  if (!chart) return;
+  chart.textContent = "Loading samples…";
+  if (stats) stats.textContent = "";
+  try {
+    var data = await api.assets.monitorHistory(assetId, range || "24h");
+    _renderMonitorChart(chart, data);
+    if (stats && data.stats) {
+      var s = data.stats;
+      var loss = s.packetLossRate != null ? (s.packetLossRate * 100).toFixed(1) + "%" : "—";
+      var avg  = s.avgMs != null ? s.avgMs + " ms" : "—";
+      var min  = s.minMs != null ? s.minMs + " ms" : "—";
+      var max  = s.maxMs != null ? s.maxMs + " ms" : "—";
+      stats.textContent = s.total + " samples · avg " + avg + " · min " + min + " · max " + max + " · packet loss " + loss;
+    }
+  } catch (err) {
+    chart.textContent = "Error: " + (err.message || "failed to load history");
+  }
+}
+
+function _renderMonitorChart(container, data) {
+  var samples = (data && data.samples) || [];
+  if (samples.length === 0) {
+    container.textContent = "No samples in this range yet.";
+    return;
+  }
+  var W = container.clientWidth || 600;
+  var H = 160;
+  var padL = 38, padR = 8, padT = 10, padB = 22;
+  var innerW = W - padL - padR;
+  var innerH = H - padT - padB;
+
+  var t0 = new Date(samples[0].timestamp).getTime();
+  var t1 = new Date(samples[samples.length - 1].timestamp).getTime();
+  if (t1 === t0) t1 = t0 + 1;
+
+  var oks = samples.filter(function (s) { return s.success && typeof s.responseTimeMs === "number"; });
+  var maxRtt = oks.length ? Math.max.apply(null, oks.map(function (s) { return s.responseTimeMs; })) : 100;
+  if (maxRtt < 50) maxRtt = 50;
+  // round up to a tidy ceiling
+  var step = maxRtt > 1000 ? 250 : maxRtt > 200 ? 50 : 10;
+  var ceil = Math.ceil(maxRtt / step) * step;
+
+  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
+  function yFor(ms) { return padT + innerH - (ms / ceil) * innerH; }
+
+  var pointsAttr = oks.map(function (s) { return xFor(s.timestamp) + "," + yFor(s.responseTimeMs); }).join(" ");
+  var failureLines = samples.filter(function (s) { return !s.success; }).map(function (s) {
+    var x = xFor(s.timestamp);
+    return '<line x1="' + x + '" y1="' + padT + '" x2="' + x + '" y2="' + (padT + innerH) + '" stroke="rgba(211,47,47,0.35)" stroke-width="1"/>';
+  }).join("");
+
+  // Y-axis ticks
+  var ticks = "";
+  for (var i = 0; i <= 4; i++) {
+    var v = (ceil * i / 4);
+    var y = padT + innerH - (v / ceil) * innerH;
+    ticks +=
+      '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
+      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + Math.round(v) + '</text>';
+  }
+
+  var svg =
+    '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      ticks +
+      failureLines +
+      (pointsAttr ? '<polyline points="' + pointsAttr + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' : '') +
+      oks.map(function (s) {
+        return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.responseTimeMs) + '" r="1.5" fill="var(--color-accent)"/>';
+      }).join("") +
+    '</svg>';
+  container.innerHTML = svg;
+  container.style.alignItems = "stretch";
+  container.style.justifyContent = "flex-start";
 }
 
 async function openIpHistoryModal(assetId, label) {
@@ -1753,6 +2061,120 @@ async function openImportPdfModal(file) {
       showToast("Preview failed: " + e.message, "error");
       btn.disabled = false;
       btn.textContent = "Preview & Apply (" + assetList.length + ")";
+    }
+  });
+}
+
+// ─── Monitoring (bulk + credential picker helpers) ─────────────────────────
+
+var _credentialCache = { loaded: false, list: [] };
+
+async function _ensureCredentials(force) {
+  if (_credentialCache.loaded && !force) return _credentialCache.list;
+  try {
+    _credentialCache.list = await api.credentials.list();
+    _credentialCache.loaded = true;
+  } catch (_) {
+    _credentialCache.list = [];
+  }
+  return _credentialCache.list;
+}
+
+function _credentialOptionsFor(type, selectedId) {
+  var opts = '<option value="">— select credential —</option>';
+  _credentialCache.list
+    .filter(function (c) { return c.type === type; })
+    .forEach(function (c) {
+      opts += '<option value="' + escapeHtml(c.id) + '"' + (selectedId === c.id ? " selected" : "") + '>' + escapeHtml(c.name) + '</option>';
+    });
+  return opts;
+}
+
+async function openBulkMonitorModal() {
+  var ids = Array.from(_assetsSelected);
+  if (!ids.length) return;
+  await _ensureCredentials();
+
+  var typeOptions =
+    '<option value="icmp">ICMP (no credentials)</option>' +
+    '<option value="snmp">SNMP</option>' +
+    '<option value="winrm">WinRM</option>' +
+    '<option value="ssh">SSH</option>';
+
+  var body =
+    '<p style="color:var(--color-text-secondary);margin-bottom:1rem">' +
+      'Updating monitoring on <strong>' + ids.length + '</strong> asset' + (ids.length !== 1 ? 's' : '') + '. ' +
+      'FortiManager-discovered firewalls keep their integration-locked monitoring source — the chosen type is ignored for those rows.' +
+    '</p>' +
+    '<div class="form-group"><label>Action</label>' +
+      '<select id="bulk-mon-action">' +
+        '<option value="enable">Enable monitoring</option>' +
+        '<option value="disable">Disable monitoring</option>' +
+      '</select>' +
+    '</div>' +
+    '<div id="bulk-mon-enable-fields">' +
+      '<div class="form-group"><label>Monitor Type</label>' +
+        '<select id="bulk-mon-type">' + typeOptions + '</select>' +
+      '</div>' +
+      '<div class="form-group" id="bulk-mon-cred-wrap" style="display:none">' +
+        '<label>Credential</label>' +
+        '<select id="bulk-mon-cred"></select>' +
+        '<p class="hint">Need a credential? Add one in <a href="/server-settings.html?tab=credentials">Server Settings → Credentials</a>.</p>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Override poll interval (seconds, optional)</label>' +
+        '<input type="number" id="bulk-mon-interval" min="5" max="86400" placeholder="leave blank for global default" style="max-width:240px">' +
+      '</div>' +
+    '</div>';
+  var footer =
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="bulk-mon-apply">Apply</button>';
+  openModal("Bulk Monitoring", body, footer);
+
+  function refreshTypeFields() {
+    var action = document.getElementById("bulk-mon-action").value;
+    var enableFields = document.getElementById("bulk-mon-enable-fields");
+    enableFields.style.display = action === "enable" ? "block" : "none";
+    var t = document.getElementById("bulk-mon-type").value;
+    var credWrap = document.getElementById("bulk-mon-cred-wrap");
+    var needsCred = (t === "snmp" || t === "winrm" || t === "ssh");
+    credWrap.style.display = needsCred ? "block" : "none";
+    if (needsCred) {
+      document.getElementById("bulk-mon-cred").innerHTML = _credentialOptionsFor(t);
+    }
+  }
+  document.getElementById("bulk-mon-action").addEventListener("change", refreshTypeFields);
+  document.getElementById("bulk-mon-type").addEventListener("change", refreshTypeFields);
+  refreshTypeFields();
+
+  document.getElementById("bulk-mon-apply").addEventListener("click", async function () {
+    var btn = this;
+    btn.disabled = true;
+    var action = document.getElementById("bulk-mon-action").value;
+    var payload = { ids: ids, monitored: action === "enable" };
+    if (action === "enable") {
+      payload.monitorType = document.getElementById("bulk-mon-type").value;
+      var credSel = document.getElementById("bulk-mon-cred");
+      if (credSel && credSel.value) payload.monitorCredentialId = credSel.value;
+      var iv = parseInt(document.getElementById("bulk-mon-interval").value, 10);
+      if (Number.isFinite(iv) && iv >= 5) payload.monitorIntervalSec = iv;
+      else payload.monitorIntervalSec = null;
+    }
+    try {
+      var result = await api.assets.bulkMonitor(payload);
+      closeModal();
+      var msg = (action === "enable" ? "Enabled" : "Disabled") + " monitoring on " + result.updated + " asset" + (result.updated !== 1 ? "s" : "");
+      if (result.errors && result.errors.length) {
+        msg += " — " + result.errors.length + " skipped";
+        showToast(msg, "error");
+      } else {
+        showToast(msg);
+      }
+      _assetsSelected.clear();
+      loadAssets();
+    } catch (err) {
+      showToast(err.message, "error");
+      btn.disabled = false;
     }
   });
 }

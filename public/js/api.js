@@ -104,6 +104,13 @@ const api = {
     update: (id, b)   => request("PUT",    `/allocation-templates/${id}`, b),
     delete: (id)      => request("DELETE", `/allocation-templates/${id}`),
   },
+  credentials: {
+    list:   ()        => request("GET",    "/credentials"),
+    get:    (id)      => request("GET",    `/credentials/${id}`),
+    create: (body)    => request("POST",   "/credentials", body),
+    update: (id, b)   => request("PUT",    `/credentials/${id}`, b),
+    delete: (id)      => request("DELETE", `/credentials/${id}`),
+  },
   reservations: {
     list:          (params) => request("GET", "/reservations" + toQuery(params)),
     get:           (id)     => request("GET", `/reservations/${id}`),
@@ -148,6 +155,11 @@ const api = {
     getIpHistory:         (id)  => request("GET",  `/assets/${id}/ip-history`),
     getHistorySettings:   ()    => request("GET",  "/assets/ip-history-settings"),
     updateHistorySettings:(body) => request("PUT",  "/assets/ip-history-settings", body),
+    getMonitorSettings:   ()    => request("GET",  "/assets/monitor-settings"),
+    updateMonitorSettings:(body) => request("PUT", "/assets/monitor-settings", body),
+    bulkMonitor:          (body) => request("POST", "/assets/bulk-monitor", body),
+    monitorHistory:       (id, range) => request("GET", `/assets/${id}/monitor-history` + (range ? `?range=${encodeURIComponent(range)}` : "")),
+    probeNow:             (id)  => request("POST", `/assets/${id}/probe-now`),
   },
   integrations: {
     list:   ()       => request("GET", "/integrations"),

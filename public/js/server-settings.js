@@ -17,6 +17,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (target === "database" && !_dbLoaded) loadDatabaseInfo();
       if (target === "identification" && !_tagsLoaded) loadIdentificationTab();
       if (target === "customization" && !_brandingLoaded) loadCustomizationTab();
+      if (target === "credentials" && !_credsLoaded) loadCredentialsTab();
     });
   });
 
@@ -2353,6 +2354,311 @@ async function deleteTag(id) {
     });
 
     renderIdentificationTab();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+// ─── Credentials Tab ───────────────────────────────────────────────────────
+
+var _credsLoaded = false;
+var _credsData = [];
+// Mask sentinel must match the server's credentialService.MASK. Secrets
+// arrive pre-masked from GET; the server preserves the real value on PUT
+// whenever the mask (or an empty string) is resubmitted.
+var _credMask = "••••••••";
+
+async function loadCredentialsTab() {
+  var container = document.getElementById("tab-credentials");
+  container.innerHTML = '<div class="settings-card"><p class="empty-state">Loading...</p></div>';
+  try {
+    _credsData = await api.credentials.list();
+    _credsLoaded = true;
+    renderCredentialsTab();
+  } catch (err) {
+    container.innerHTML = '<div class="settings-card"><p class="empty-state">Error: ' + escapeHtml(err.message) + '</p></div>';
+  }
+}
+
+function credTypeLabel(t) {
+  if (t === "snmp") return "SNMP";
+  if (t === "winrm") return "WinRM";
+  if (t === "ssh") return "SSH";
+  return t;
+}
+
+function credSummary(c) {
+  var cfg = c.config || {};
+  if (c.type === "snmp") {
+    if (cfg.version === "v3") return "v3 · " + escapeHtml(cfg.username || "") + " · " + escapeHtml(cfg.securityLevel || "");
+    return "v2c · community set";
+  }
+  if (c.type === "winrm") {
+    return escapeHtml(cfg.username || "") + (cfg.useHttps ? " · HTTPS" : "");
+  }
+  if (c.type === "ssh") {
+    var auth = (typeof cfg.privateKey === "string" && cfg.privateKey) ? "private key" : "password";
+    return escapeHtml(cfg.username || "") + " · " + auth;
+  }
+  return "";
+}
+
+function renderCredentialsTab() {
+  var container = document.getElementById("tab-credentials");
+  var rows = _credsData.map(function (c) {
+    return '<tr>' +
+      '<td>' + escapeHtml(c.name) + '</td>' +
+      '<td>' + credTypeLabel(c.type) + '</td>' +
+      '<td style="color:var(--color-text-secondary);font-size:0.85rem">' + credSummary(c) + '</td>' +
+      '<td style="text-align:right">' +
+        '<button class="btn btn-sm btn-secondary" data-action="edit" data-id="' + escapeHtml(c.id) + '">Edit</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + escapeHtml(c.id) + '" data-name="' + escapeHtml(c.name) + '">Delete</button>' +
+      '</td>' +
+    '</tr>';
+  }).join("");
+
+  container.innerHTML =
+    '<div class="settings-card">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">' +
+        '<h4 style="margin:0">Stored Credentials</h4>' +
+        '<button class="btn btn-primary btn-sm" id="btn-cred-new">Add Credential</button>' +
+      '</div>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+        'Named credentials for asset monitoring probes. ' +
+        'SNMP (v2c/v3), WinRM, and SSH credentials can be reused across assets. ' +
+        'ICMP needs no credentials, and FortiManager-discovered firewalls reuse the direct-mode API token configured on their integration.' +
+      '</p>' +
+      (_credsData.length === 0
+        ? '<p class="empty-state">No credentials yet. Click "Add Credential" to create one.</p>'
+        : '<table class="data-table"><thead><tr><th>Name</th><th>Type</th><th>Details</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>') +
+    '</div>';
+
+  document.getElementById("btn-cred-new").addEventListener("click", function () { openCredentialModal(null); });
+  container.querySelectorAll('button[data-action="edit"]').forEach(function (btn) {
+    btn.addEventListener("click", function () { openCredentialModal(btn.getAttribute("data-id")); });
+  });
+  container.querySelectorAll('button[data-action="delete"]').forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      deleteCredential(btn.getAttribute("data-id"), btn.getAttribute("data-name"));
+    });
+  });
+}
+
+async function openCredentialModal(id) {
+  var cred = null;
+  if (id) {
+    try { cred = await api.credentials.get(id); }
+    catch (err) { showToast(err.message, "error"); return; }
+  }
+  var isNew = !cred;
+  var type = cred ? cred.type : "snmp";
+  var title = isNew ? "Add Credential" : ("Edit Credential — " + cred.name);
+  var body =
+    '<div class="form-group"><label>Name</label>' +
+      '<input type="text" id="f-cred-name" value="' + escapeHtml(cred ? cred.name : "") + '" placeholder="e.g. Core SNMP v2c">' +
+    '</div>' +
+    '<div class="form-group"><label>Type</label>' +
+      '<select id="f-cred-type"' + (isNew ? '' : ' disabled') + '>' +
+        '<option value="snmp"'  + (type === "snmp"  ? ' selected' : '') + '>SNMP</option>' +
+        '<option value="winrm"' + (type === "winrm" ? ' selected' : '') + '>WinRM</option>' +
+        '<option value="ssh"'   + (type === "ssh"   ? ' selected' : '') + '>SSH</option>' +
+      '</select>' +
+      (isNew ? '<p class="hint">Type cannot be changed after creation.</p>' : '') +
+    '</div>' +
+    '<div id="cred-type-fields"></div>';
+  var footer =
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="btn-cred-save">Save</button>';
+  openModal(title, body, footer);
+
+  function renderTypeFields() {
+    var t = document.getElementById("f-cred-type").value;
+    var cfg = (cred && cred.config) || {};
+    var host = document.getElementById("cred-type-fields");
+    if (t === "snmp") host.innerHTML = credSnmpForm(cfg);
+    else if (t === "winrm") host.innerHTML = credWinrmForm(cfg);
+    else host.innerHTML = credSshForm(cfg);
+    wireSnmpVersionToggle();
+  }
+  document.getElementById("f-cred-type").addEventListener("change", renderTypeFields);
+  renderTypeFields();
+
+  document.getElementById("btn-cred-save").addEventListener("click", async function () {
+    var name = (document.getElementById("f-cred-name").value || "").trim();
+    if (!name) { showToast("Name is required", "error"); return; }
+    var selectedType = document.getElementById("f-cred-type").value;
+    var config = readCredentialForm(selectedType);
+    try {
+      if (isNew) await api.credentials.create({ name: name, type: selectedType, config: config });
+      else await api.credentials.update(id, { name: name, config: config });
+      closeModal();
+      showToast("Credential saved");
+      await loadCredentialsTab();
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+  });
+}
+
+function credSnmpForm(cfg) {
+  var version = cfg.version === "v3" ? "v3" : "v2c";
+  var community = cfg.community || "";
+  var port = cfg.port || "";
+  var v3 = {
+    username: cfg.username || "",
+    securityLevel: cfg.securityLevel || "authPriv",
+    authProtocol: cfg.authProtocol || "SHA",
+    authKey: cfg.authKey || "",
+    privProtocol: cfg.privProtocol || "AES",
+    privKey: cfg.privKey || "",
+  };
+  return (
+    '<div class="form-group"><label>Version</label>' +
+      '<select id="f-snmp-version">' +
+        '<option value="v2c"' + (version === "v2c" ? " selected" : "") + '>v2c</option>' +
+        '<option value="v3"'  + (version === "v3"  ? " selected" : "") + '>v3</option>' +
+      '</select>' +
+    '</div>' +
+    '<div id="snmp-v2c-fields" style="display:' + (version === "v2c" ? "block" : "none") + '">' +
+      '<div class="form-group"><label>Community</label>' +
+        '<input type="password" id="f-snmp-community" value="' + escapeHtml(community) + '" placeholder="public">' +
+      '</div>' +
+    '</div>' +
+    '<div id="snmp-v3-fields" style="display:' + (version === "v3" ? "block" : "none") + '">' +
+      '<div class="form-group"><label>Username</label>' +
+        '<input type="text" id="f-snmp-user" value="' + escapeHtml(v3.username) + '">' +
+      '</div>' +
+      '<div class="form-group"><label>Security Level</label>' +
+        '<select id="f-snmp-seclevel">' +
+          '<option value="noAuthNoPriv"' + (v3.securityLevel === "noAuthNoPriv" ? " selected" : "") + '>noAuthNoPriv</option>' +
+          '<option value="authNoPriv"'   + (v3.securityLevel === "authNoPriv"   ? " selected" : "") + '>authNoPriv</option>' +
+          '<option value="authPriv"'     + (v3.securityLevel === "authPriv"     ? " selected" : "") + '>authPriv</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="form-group"><label>Auth Protocol</label>' +
+        '<select id="f-snmp-authproto">' +
+          '<option value="SHA"' + (v3.authProtocol === "SHA" ? " selected" : "") + '>SHA</option>' +
+          '<option value="MD5"' + (v3.authProtocol === "MD5" ? " selected" : "") + '>MD5</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="form-group"><label>Auth Key</label>' +
+        '<input type="password" id="f-snmp-authkey" value="' + escapeHtml(v3.authKey) + '">' +
+      '</div>' +
+      '<div class="form-group"><label>Priv Protocol</label>' +
+        '<select id="f-snmp-privproto">' +
+          '<option value="AES"' + (v3.privProtocol === "AES" ? " selected" : "") + '>AES</option>' +
+          '<option value="DES"' + (v3.privProtocol === "DES" ? " selected" : "") + '>DES</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="form-group"><label>Priv Key</label>' +
+        '<input type="password" id="f-snmp-privkey" value="' + escapeHtml(v3.privKey) + '">' +
+      '</div>' +
+    '</div>' +
+    '<div class="form-group"><label>Port</label>' +
+      '<input type="number" id="f-snmp-port" value="' + escapeHtml(String(port)) + '" placeholder="161" min="1" max="65535">' +
+    '</div>'
+  );
+}
+
+function wireSnmpVersionToggle() {
+  var sel = document.getElementById("f-snmp-version");
+  if (!sel) return;
+  sel.addEventListener("change", function () {
+    var v = sel.value;
+    var v2 = document.getElementById("snmp-v2c-fields");
+    var v3 = document.getElementById("snmp-v3-fields");
+    if (v2) v2.style.display = v === "v2c" ? "block" : "none";
+    if (v3) v3.style.display = v === "v3"  ? "block" : "none";
+  });
+}
+
+function credWinrmForm(cfg) {
+  return (
+    '<div class="form-group"><label>Username</label>' +
+      '<input type="text" id="f-winrm-user" value="' + escapeHtml(cfg.username || "") + '" placeholder="Administrator">' +
+    '</div>' +
+    '<div class="form-group"><label>Password</label>' +
+      '<input type="password" id="f-winrm-pass" value="' + escapeHtml(cfg.password || "") + '">' +
+    '</div>' +
+    '<div class="form-group"><label>Port</label>' +
+      '<input type="number" id="f-winrm-port" value="' + escapeHtml(String(cfg.port || "")) + '" placeholder="5986" min="1" max="65535">' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
+        '<input type="checkbox" id="f-winrm-https"' + (cfg.useHttps ? " checked" : "") + '>' +
+        '<span>Use HTTPS</span>' +
+      '</label>' +
+    '</div>'
+  );
+}
+
+function credSshForm(cfg) {
+  return (
+    '<div class="form-group"><label>Username</label>' +
+      '<input type="text" id="f-ssh-user" value="' + escapeHtml(cfg.username || "") + '">' +
+    '</div>' +
+    '<div class="form-group"><label>Password</label>' +
+      '<input type="password" id="f-ssh-pass" value="' + escapeHtml(cfg.password || "") + '">' +
+      '<p class="hint">Provide either a password or a private key.</p>' +
+    '</div>' +
+    '<div class="form-group"><label>Private Key</label>' +
+      '<textarea id="f-ssh-key" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----">' + escapeHtml(cfg.privateKey || "") + '</textarea>' +
+    '</div>' +
+    '<div class="form-group"><label>Port</label>' +
+      '<input type="number" id="f-ssh-port" value="' + escapeHtml(String(cfg.port || "")) + '" placeholder="22" min="1" max="65535">' +
+    '</div>'
+  );
+}
+
+function readCredentialForm(type) {
+  function num(v) { v = (v || "").trim(); return v ? Number(v) : undefined; }
+  if (type === "snmp") {
+    var version = document.getElementById("f-snmp-version").value;
+    var port = num(document.getElementById("f-snmp-port").value);
+    if (version === "v2c") {
+      var cfg = { version: "v2c", community: document.getElementById("f-snmp-community").value };
+      if (port !== undefined) cfg.port = port;
+      return cfg;
+    }
+    var v3 = {
+      version: "v3",
+      username: document.getElementById("f-snmp-user").value,
+      securityLevel: document.getElementById("f-snmp-seclevel").value,
+      authProtocol: document.getElementById("f-snmp-authproto").value,
+      authKey: document.getElementById("f-snmp-authkey").value,
+      privProtocol: document.getElementById("f-snmp-privproto").value,
+      privKey: document.getElementById("f-snmp-privkey").value,
+    };
+    if (port !== undefined) v3.port = port;
+    return v3;
+  }
+  if (type === "winrm") {
+    var w = {
+      username: document.getElementById("f-winrm-user").value,
+      password: document.getElementById("f-winrm-pass").value,
+      useHttps: document.getElementById("f-winrm-https").checked,
+    };
+    var wp = num(document.getElementById("f-winrm-port").value);
+    if (wp !== undefined) w.port = wp;
+    return w;
+  }
+  var s = {
+    username: document.getElementById("f-ssh-user").value,
+    password: document.getElementById("f-ssh-pass").value,
+    privateKey: document.getElementById("f-ssh-key").value,
+  };
+  var sp = num(document.getElementById("f-ssh-port").value);
+  if (sp !== undefined) s.port = sp;
+  return s;
+}
+
+async function deleteCredential(id, name) {
+  var ok = await showConfirm('Delete credential "' + name + '"?');
+  if (!ok) return;
+  try {
+    await api.credentials.delete(id);
+    showToast("Credential deleted");
+    await loadCredentialsTab();
   } catch (err) {
     showToast(err.message, "error");
   }

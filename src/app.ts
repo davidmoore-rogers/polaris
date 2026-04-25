@@ -29,6 +29,7 @@ import "./jobs/discoveryScheduler.js";
 import "./jobs/discoverySlowCheck.js";
 import "./jobs/clampAssetAcquiredAt.js";
 import "./jobs/decommissionStaleAssets.js";
+import "./jobs/monitorAssets.js";
 
 const app = express();
 

@@ -153,11 +153,37 @@ model Integration {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  subnets   Subnet[]
+  subnets         Subnet[]
+  discoveredAssets Asset[]               // Assets stamped with this integration's id (back-relation)
 
   @@index([type])
   @@index([enabled])
   @@map("integrations")
+}
+
+// Credential store for monitoring probes (SNMP, WinRM, SSH).
+// Single discriminator table; type-specific fields live in `config` JSON
+// following the same plaintext-at-rest + mask-on-API-read pattern as Integration.
+//
+// config shapes:
+//   snmp (v2c):   { version: "v2c", community: string, port?: number }
+//   snmp (v3):    { version: "v3", username, authProtocol: "MD5"|"SHA",
+//                   authKey, privProtocol: "DES"|"AES"|"none",
+//                   privKey?, securityLevel: "noAuthNoPriv"|"authNoPriv"|"authPriv", port?: number }
+//   winrm:        { username, password, port?: number, useHttps?: boolean }
+//   ssh:          { username, password?, privateKey?, port?: number }
+model Credential {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  type      String                         // "snmp" | "winrm" | "ssh"
+  config    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  assets    Asset[]                        // Back-relation: assets using this credential for monitoring
+
+  @@index([type])
+  @@map("credentials")
 }
 
 model Event {
@@ -237,11 +263,33 @@ model Asset {
   tags           String[]    @default([])
   createdBy      String?
 
+  // Stamped during discovery so the Monitoring tab can display the
+  // originating integration's name and lock it for FMG/FortiGate-discovered
+  // firewalls. Null for manually-created assets.
+  discoveredByIntegrationId String?
+  discoveredByIntegration   Integration? @relation(fields: [discoveredByIntegrationId], references: [id], onDelete: SetNull)
+
+  // Monitoring. `monitored` toggles whether the monitor job probes this
+  // asset; `monitorType` chooses the probe method; `monitorCredentialId`
+  // points at a Credential row for snmp/winrm/ssh. For fortimanager/fortigate
+  // probes the credential is pulled from the discovering integration, so the
+  // credential FK stays null.
+  monitored           Boolean     @default(false)
+  monitorType         String?     // "fortimanager" | "fortigate" | "snmp" | "winrm" | "ssh" | "icmp"
+  monitorCredentialId String?
+  monitorCredential   Credential? @relation(fields: [monitorCredentialId], references: [id], onDelete: SetNull)
+  monitorIntervalSec  Int?        // Per-asset override; falls back to the global default when null
+  monitorStatus       String?     // "up" | "down" | "unknown"
+  lastMonitorAt       DateTime?
+  lastResponseTimeMs  Int?
+  consecutiveFailures Int         @default(0)
+
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
   conflicts      Conflict[]
   ipHistory      AssetIpHistory[]
+  monitorSamples AssetMonitorSample[]
 
   @@index([ipAddress])
   @@index([macAddress])
@@ -252,7 +300,25 @@ model Asset {
   @@index([serialNumber])
   @@index([dnsName])
   @@index([createdBy])
+  @@index([discoveredByIntegrationId])
+  @@index([monitored])
+  @@index([monitored, lastMonitorAt])
   @@map("assets")
+}
+
+// Rolling time-series of monitoring probe results. One row per probe;
+// `responseTimeMs` is null on failure (used as the "packet loss" signal).
+model AssetMonitorSample {
+  id             String   @id @default(uuid())
+  assetId        String
+  asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  timestamp      DateTime @default(now())
+  success        Boolean
+  responseTimeMs Int?
+  error          String?  @db.Text
+
+  @@index([assetId, timestamp])
+  @@map("asset_monitor_samples")
 }
 
 model AssetIpHistory {

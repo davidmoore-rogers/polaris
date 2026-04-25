@@ -82,6 +82,7 @@ shelob/
 │   │       ├── conflicts.ts         # Discovery conflict review & resolution
 │   │       ├── search.ts            # Global typeahead search across all entity types
 │   │       ├── allocationTemplates.ts # CRUD for saved multi-subnet allocation templates
+│   │       ├── credentials.ts       # CRUD for the named-credential store used by monitoring probes (SNMP / WinRM / SSH)
 │   │       └── serverSettings.ts    # HTTPS, branding, backup/restore
 │   ├── services/
 │   │   ├── ipService.ts             # Core IP math & validation
@@ -104,6 +105,8 @@ shelob/
 │   │   ├── ouiService.ts            # MAC OUI lookup with admin overrides
 │   │   ├── eventArchiveService.ts   # Syslog (CEF) + SFTP/SCP event archival
 │   │   ├── serverSettingsService.ts # HTTPS, branding, backup/restore
+│   │   ├── credentialService.ts     # Named credential store (SNMP / WinRM / SSH) with masking + secret-preservation merge
+│   │   ├── monitoringService.ts     # Authenticated probes for fortimanager/fortigate/snmp/winrm/ssh/icmp; settings; runMonitorPass + sample retention
 │   │   └── updateService.ts         # Software update checking
 │   ├── jobs/
 │   │   ├── expireReservations.ts    # Mark past-TTL reservations as expired (every 15 min)
@@ -113,7 +116,8 @@ shelob/
 │   │   ├── pruneEvents.ts           # 7-day event log retention (nightly)
 │   │   ├── updateCheck.ts           # Software update notifications
 │   │   ├── clampAssetAcquiredAt.ts  # One-shot startup fix: clamp acquiredAt to lastSeen
-│   │   └── decommissionStaleAssets.ts # Every 24h: decommission assets not seen in N months
+│   │   ├── decommissionStaleAssets.ts # Every 24h: decommission assets not seen in N months
+│   │   └── monitorAssets.ts          # 5s tick: probe due assets via runMonitorPass; daily sample-retention prune
 │   ├── setup/
 │   │   ├── setupRoutes.ts           # First-run setup wizard routes
 │   │   ├── setupServer.ts           # Setup server initialization
@@ -159,6 +163,7 @@ shelob/
 | PDF export | jspdf + jspdf-autotable |
 | Mapping | Leaflet + leaflet.markercluster + OpenStreetMap tiles (bundled under `public/css/vendor/leaflet/` and `public/js/vendor/leaflet/`) |
 | Graph layout | Cytoscape.js + dagre + cytoscape-dagre (bundled under `public/js/vendor/`) for the Device Map topology modal |
+| Asset monitoring | net-snmp (SNMP v2c/v3 authenticated GETs against `sysUpTime`); ssh2 (SSH connect+authenticate); built-in `node:https` (FortiOS REST + WinRM SOAP Identify); spawn the system `ping` for ICMP |
 | Testing | Vitest + Supertest |
 | Frontend | Vanilla JavaScript + HTML (served from /public) |
 
@@ -270,6 +275,15 @@ Asset
   notes           String?
   tags            String[]
   createdBy       String?
+  discoveredByIntegrationId UUID? FK → Integration (set null on delete) -- Stamped on FortiGate firewall asset writes (FMG + standalone) so the Monitoring tab can lock the type to the discovering integration
+  monitored       Boolean         @default(false)
+  monitorType     String?         -- "fortimanager" | "fortigate" | "snmp" | "winrm" | "ssh" | "icmp"
+  monitorCredentialId UUID? FK → Credential (set null on delete) -- Used for snmp/winrm/ssh; null for icmp and integration-locked fortinet probes
+  monitorIntervalSec Int?         -- Per-asset poll interval override; null falls back to monitor.intervalSeconds
+  monitorStatus   String?         -- "up" | "down" | "unknown"
+  lastMonitorAt   DateTime?
+  lastResponseTimeMs Int?         -- Most recent successful probe RTT; null while pending or after a failure
+  consecutiveFailures Int         @default(0)
 
 AssetIpHistory                  -- Auto-populated log of every IP each asset has held
   id            UUID PK
@@ -279,6 +293,27 @@ AssetIpHistory                  -- Auto-populated log of every IP each asset has
   firstSeen     DateTime
   lastSeen      DateTime
   @@unique([assetId, ip])       -- one row per (asset, ip); lastSeen and source update on re-sighting
+
+AssetMonitorSample              -- Time-series of monitoring probe results; written by the monitorAssets job
+  id            UUID PK
+  assetId       UUID FK → Asset (cascade delete)
+  timestamp     DateTime        @default(now())
+  success       Boolean
+  responseTimeMs Int?           -- Round-trip in ms on success; null on failure (the "packet loss" signal)
+  error         String?
+  @@index([assetId, timestamp])
+
+Credential                      -- Named credentials for monitoring probes (SNMP / WinRM / SSH)
+  id            UUID PK
+  name          String @unique
+  type          String          -- "snmp" | "winrm" | "ssh"
+  config        Json            -- Type-specific:
+                                --   snmp v2c: { version: "v2c", community, port? }
+                                --   snmp v3:  { version: "v3", username, securityLevel, authProtocol?, authKey?, privProtocol?, privKey?, port? }
+                                --   winrm:    { username, password, port?, useHttps? }
+                                --   ssh:      { username, password? | privateKey?, port? }
+  -- Sensitive fields (community, authKey, privKey, password, privateKey) are stored plaintext and masked
+  -- on every GET; PUT preserves the stored value when the caller resubmits the mask sentinel.
 
 User
   id            UUID PK
@@ -424,6 +459,18 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 - `GET    /assets/:id/ip-history`               — List IP history entries for an asset (filtered by retention days). Auto-populated by the Prisma query extension in `src/db.ts` whenever any `asset.create` / `asset.update` writes an `ipAddress`, so discovery-sourced IPs are captured without changes to integration services.
 - `GET    /assets/ip-history-settings`          — `{ retentionDays }`; 0 = keep forever (default).
 - `PUT    /assets/ip-history-settings`          *(assets admin)* — `{ retentionDays }`; saving immediately prunes any history rows with `lastSeen` older than the new cutoff.
+- `GET    /assets/monitor-settings`             — Global monitor defaults: `{ intervalSeconds, failureThreshold, sampleRetentionDays }`.
+- `PUT    /assets/monitor-settings`             *(assets admin)* — Update global monitor defaults.
+- `POST   /assets/bulk-monitor`                 *(assets admin)* — `{ ids, monitored, monitorType?, monitorCredentialId?, monitorIntervalSec? }`. Applies one type+credential to every selected row; FMG/FortiGate-discovered firewalls keep their integration-locked type (request type ignored for those rows). Returns `{ updated, errors: [{id, error}] }`.
+- `GET    /assets/:id/monitor-history?range=1h|24h|7d|30d`  — Sample stream for the chart. Returns `{ range, since, samples, stats: { total, failed, successRate, packetLossRate, avgMs, minMs, maxMs } }`. `responseTimeMs` is null on failed samples (the "packet loss" signal).
+- `POST   /assets/:id/probe-now`                *(assets admin)* — Run an immediate probe and persist the result; returns `{ success, responseTimeMs, error? }`.
+
+### Credentials — mixed scoping
+- `GET    /credentials`                         *(auth)* — List stored credentials with secrets masked. Read-open so any role's Asset Monitoring tab can render the credential picker.
+- `GET    /credentials/:id`                     *(auth)* — Single credential, masked.
+- `POST   /credentials`                         *(admin)* — Create. Body: `{ name, type: "snmp"|"winrm"|"ssh", config }`. Type-specific config is validated server-side.
+- `PUT    /credentials/:id`                     *(admin)* — Update. Type cannot be changed after creation. Resubmitting the mask sentinel for a secret field preserves the stored value.
+- `DELETE /credentials/:id`                     *(admin)* — 409 if any asset still references the credential as `monitorCredentialId`.
 
 ### Events — mixed scoping
 - `GET    /events`                              *(auth)* — Audit log (filter by level, action, resourceType, message — message is case-insensitive substring)
@@ -607,6 +654,7 @@ Active Directory and Entra ID identify the same hybrid-joined device with two un
 | `clampAssetAcquiredAt` | Once at startup | Clamp `acquiredAt` down to `lastSeen` on any Asset row where the invariant was violated |
 | `decommissionStaleAssets` | Every 24 hours | Move assets whose `lastSeen` is older than the configured inactivity threshold (months) to `decommissioned` status. Configured via Events → Settings → Assets tab; 0 disables. |
 | `discoverySlowCheck` | Every 30 s | Compares each in-flight discovery's elapsed time to its rolling-duration baseline (`discoveryDurationService`). Emits one `integration.discover.slow` event per run (and one per FortiGate inside an FMG run) when elapsed exceeds `max(avg + 2σ, avg × 1.5, avg + 60 s)`; baseline requires ≥3 prior successful runs. The `/integrations/discoveries` endpoint also calls the same checker inline so the sidebar and Integrations page flip amber within one 4 s poll cycle. |
+| `monitorAssets` | Every 5 s | Probes any monitored assets whose `lastMonitorAt + (Asset.monitorIntervalSec ?? monitor.intervalSeconds)` has elapsed. Each probe is authenticated end-to-end (FortiOS REST GET, SNMP `sysUpTime` GET, WinRM SOAP Identify, SSH connect+auth, ICMP ping) so a successful sample means the credential worked. Writes one `AssetMonitorSample` per probe (`responseTimeMs` null = packet loss), updates `Asset.monitorStatus` / `lastResponseTimeMs` / `consecutiveFailures`, and emits one `monitor.status_changed` Event on `up ↔ down` transitions (threshold is `monitor.failureThreshold`). Once a day the same job prunes samples older than `monitor.sampleRetentionDays`. |
 
 ---
 
@@ -635,6 +683,9 @@ Vanilla JavaScript SPA served from `/public/`. No build step — plain ES module
 - PDF and CSV asset export
 - Conflict resolution slide-over panel (Events page)
 - First-run setup wizard (`setup.html`) backed by `src/setup/`
+- Asset list shows a Monitor pill column (Monitored / Pending / Down / Unmonitored). The bulk-action toolbar opens a Monitoring modal that applies one type + credential to every selected row.
+- Asset edit and details modals are tab-based (General + Monitoring). The Monitoring tab on the edit modal grays out the type dropdown for FMG/FortiGate-discovered firewalls; the details modal renders an SVG response-time chart (24h / 7d / 30d) plus a "Probe now" button for assets admins.
+- Server Settings → **Credentials** tab manages the stored SNMP / WinRM / SSH credentials (admin-only). Secrets are masked in every GET; resubmitting the mask preserves the stored value on PUT.
 
 ---
 

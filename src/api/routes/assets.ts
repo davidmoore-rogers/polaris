@@ -14,6 +14,7 @@ import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
 import { getIpHistory, getHistorySettings, updateHistorySettings, pruneOldHistory } from "../../services/assetIpHistoryService.js";
+import { getMonitorSettings, updateMonitorSettings, probeAsset, recordProbeResult } from "../../services/monitoringService.js";
 
 const router = Router();
 
@@ -52,7 +53,59 @@ const CreateAssetSchema = z.object({
   tags:          z.array(z.string()).optional(),
 });
 
-const UpdateAssetSchema = CreateAssetSchema.partial();
+const MonitorTypeEnum = z.enum(["fortimanager", "fortigate", "snmp", "winrm", "ssh", "icmp"]);
+
+const UpdateAssetSchema = CreateAssetSchema.partial().extend({
+  monitored:           z.boolean().optional(),
+  monitorType:         MonitorTypeEnum.nullable().optional(),
+  monitorCredentialId: z.string().uuid().nullable().optional(),
+  monitorIntervalSec:  z.number().int().min(5).max(86400).nullable().optional(),
+});
+
+/**
+ * Asserts the requested monitoring config is internally consistent.
+ * Mutates `data` in place to clear conflicting columns so a stale FK
+ * or stale type can't survive the save.
+ */
+function validateMonitorConfig(data: Record<string, unknown>, existing: { discoveredByIntegrationId?: string | null; monitorType?: string | null; monitorCredentialId?: string | null }): void {
+  const monitored = data.monitored === undefined ? undefined : Boolean(data.monitored);
+  const monitorType =
+    data.monitorType === undefined ? existing.monitorType : (data.monitorType as string | null);
+  const monitorCredentialId =
+    data.monitorCredentialId === undefined
+      ? existing.monitorCredentialId
+      : (data.monitorCredentialId as string | null);
+
+  // Lock monitorType for FMG/FortiGate-discovered firewalls — the discovering
+  // integration owns it and the UI mirrors that by graying out the dropdown.
+  const integrationLocked =
+    existing.discoveredByIntegrationId &&
+    (existing.monitorType === "fortimanager" || existing.monitorType === "fortigate");
+  if (integrationLocked && data.monitorType !== undefined && data.monitorType !== existing.monitorType) {
+    throw new AppError(400, "Monitoring source for this asset is locked to its discovering integration");
+  }
+
+  if (monitored === false) {
+    // Clear consec failures so the next enable starts clean; keep type/cred selection.
+    data.consecutiveFailures = 0;
+    return;
+  }
+  if (monitored === true || monitorType) {
+    if (!monitorType) {
+      throw new AppError(400, "Monitoring requires a monitor type");
+    }
+    if (monitorType === "snmp" || monitorType === "winrm" || monitorType === "ssh") {
+      if (!monitorCredentialId) {
+        throw new AppError(400, `Monitoring with ${monitorType} requires a credential`);
+      }
+    } else {
+      // ICMP / fortinet probes don't use the credential FK; clear it.
+      if (data.monitorCredentialId === undefined && existing.monitorCredentialId) {
+        data.monitorCredentialId = null;
+      }
+    }
+  }
+}
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
@@ -110,6 +163,11 @@ router.get("/", async (req, res, next) => {
           lastSeen: true,
           acquiredAt: true,
           createdAt: true,
+          monitored: true,
+          monitorType: true,
+          monitorStatus: true,
+          lastMonitorAt: true,
+          lastResponseTimeMs: true,
         },
       }),
       prisma.asset.count({ where }),
@@ -143,10 +201,93 @@ router.put("/ip-history-settings", requireAssetsAdmin, async (req, res, next) =>
   }
 });
 
+// GET /api/v1/assets/monitor-settings — global monitor defaults (any authed user)
+// Defined before /:id to avoid route shadowing.
+router.get("/monitor-settings", async (_req, res, next) => {
+  try {
+    res.json(await getMonitorSettings());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /api/v1/assets/monitor-settings — update global monitor defaults (admin)
+router.put("/monitor-settings", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const body = z.object({
+      intervalSeconds:     z.number().int().min(5).max(86400).optional(),
+      failureThreshold:    z.number().int().min(1).max(100).optional(),
+      sampleRetentionDays: z.number().int().min(0).max(3650).optional(),
+    }).parse(req.body);
+    const next = await updateMonitorSettings(body);
+    logEvent({ action: "monitor.settings.updated", actor: req.session?.username, message: `Monitor settings updated (interval ${next.intervalSeconds}s, threshold ${next.failureThreshold}, retention ${next.sampleRetentionDays}d)` });
+    res.json(next);
+  } catch (err) { next(err); }
+});
+
+// POST /api/v1/assets/bulk-monitor — enable/disable monitoring on a set of assets.
+// Body: { ids, monitored, monitorType?, monitorCredentialId?, monitorIntervalSec? }.
+// On enable: applies the same monitorType + credential to every selected asset
+// (FMG-discovered firewalls keep their integration-locked type — request type is ignored
+// for those rows). Returns per-id error list for any rejected rows.
+router.post("/bulk-monitor", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const body = z.object({
+      ids:                 z.array(z.string().uuid()).min(1),
+      monitored:           z.boolean(),
+      monitorType:         MonitorTypeEnum.nullable().optional(),
+      monitorCredentialId: z.string().uuid().nullable().optional(),
+      monitorIntervalSec:  z.number().int().min(5).max(86400).nullable().optional(),
+    }).parse(req.body);
+
+    const assets = await prisma.asset.findMany({
+      where: { id: { in: body.ids } },
+      select: { id: true, hostname: true, discoveredByIntegrationId: true, monitorType: true, monitorCredentialId: true },
+    });
+    const byId = new Map(assets.map((a) => [a.id, a]));
+    const updated: string[] = [];
+    const errors: Array<{ id: string; error: string }> = [];
+
+    for (const id of body.ids) {
+      const a = byId.get(id);
+      if (!a) { errors.push({ id, error: "Asset not found" }); continue; }
+      const data: Record<string, unknown> = { monitored: body.monitored };
+      const integrationLocked =
+        a.discoveredByIntegrationId &&
+        (a.monitorType === "fortimanager" || a.monitorType === "fortigate");
+      if (!integrationLocked && body.monitorType !== undefined) data.monitorType = body.monitorType;
+      if (body.monitorCredentialId !== undefined) data.monitorCredentialId = body.monitorCredentialId;
+      if (body.monitorIntervalSec !== undefined) data.monitorIntervalSec = body.monitorIntervalSec;
+      try {
+        validateMonitorConfig(data, a);
+        await prisma.asset.update({ where: { id }, data: data as any });
+        updated.push(id);
+      } catch (err: any) {
+        errors.push({ id, error: err?.message || "Update failed" });
+      }
+    }
+
+    logEvent({
+      action: body.monitored ? "monitor.bulk_enabled" : "monitor.bulk_disabled",
+      resourceType: "asset",
+      actor: req.session?.username,
+      message: `Bulk ${body.monitored ? "enabled" : "disabled"} monitoring on ${updated.length} asset(s)` + (errors.length ? `; ${errors.length} error(s)` : ""),
+      details: errors.length ? { errors } : undefined,
+    });
+    res.json({ updated: updated.length, errors });
+  } catch (err) { next(err); }
+});
+
 // GET /api/v1/assets/:id — get single asset (all authenticated users)
 router.get("/:id", async (req, res, next) => {
   try {
-    const asset = await prisma.asset.findUnique({ where: { id: req.params.id as string } });
+    const asset = await prisma.asset.findUnique({
+      where: { id: req.params.id as string },
+      include: {
+        discoveredByIntegration: { select: { id: true, name: true, type: true } },
+        monitorCredential:       { select: { id: true, name: true, type: true } },
+      },
+    });
     if (!asset) throw new AppError(404, "Asset not found");
     res.json(asset);
   } catch (err) {
@@ -163,6 +304,53 @@ router.get("/:id/ip-history", async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// GET /api/v1/assets/:id/monitor-history?range=1h|24h|7d — response-time samples
+router.get("/:id/monitor-history", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const range = String(req.query.range || "24h");
+    const windowMs =
+      range === "1h"  ?  1 * 60 * 60 * 1000 :
+      range === "7d"  ?  7 * 24 * 60 * 60 * 1000 :
+      range === "30d" ? 30 * 24 * 60 * 60 * 1000 :
+                          24 * 60 * 60 * 1000;
+    const since = new Date(Date.now() - windowMs);
+    const samples = await prisma.assetMonitorSample.findMany({
+      where: { assetId: id, timestamp: { gte: since } },
+      orderBy: { timestamp: "asc" },
+      select: { timestamp: true, success: true, responseTimeMs: true, error: true },
+    });
+    const total = samples.length;
+    const failed = samples.filter((s) => !s.success).length;
+    const okSamples = samples.filter((s) => s.success && typeof s.responseTimeMs === "number").map((s) => s.responseTimeMs as number);
+    const avgMs = okSamples.length ? Math.round(okSamples.reduce((a, b) => a + b, 0) / okSamples.length) : null;
+    const minMs = okSamples.length ? Math.min(...okSamples) : null;
+    const maxMs = okSamples.length ? Math.max(...okSamples) : null;
+    res.json({
+      range,
+      since,
+      samples,
+      stats: {
+        total,
+        failed,
+        successRate: total ? (total - failed) / total : null,
+        packetLossRate: total ? failed / total : null,
+        avgMs, minMs, maxMs,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/v1/assets/:id/probe-now — run a one-off probe immediately (assets admin)
+router.post("/:id/probe-now", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const result = await probeAsset(id);
+    await recordProbeResult(id, result);
+    res.json(result);
+  } catch (err) { next(err); }
 });
 
 // POST /api/v1/assets — create (assets admin)
@@ -205,6 +393,7 @@ router.put("/:id", requireAssetsAdmin, async (req, res, next) => {
       data.statusChangedAt = new Date();
       data.statusChangedBy = req.session?.username ?? "manual";
     }
+    validateMonitorConfig(data, existing);
     clampAcquiredToLastSeen(data, existing);
     const asset = await prisma.asset.update({ where: { id }, data: data as any });
     const trackFields = ["hostname", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "notes", "dnsName"] as const;
