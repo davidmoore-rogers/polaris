@@ -1294,8 +1294,13 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   padding: 0.75rem 1.25rem;
   border-top: 1px solid var(--color-border);
 }
-.modal-close { color: var(--color-text-tertiary); transition: color 0.5s, background 0.5s, transform 0.5s; font-size: 1.25rem; line-height: 1; }
-.modal-close:hover { color: var(--color-text-primary); }
+.modal-close { color: var(--color-text-tertiary); transition: color 0.15s, background 0.15s, transform 0.15s; font-size: 1.25rem; line-height: 1; }
+.modal-close:hover,
+.slideover-header-top .btn-icon:hover {
+  color: #ff4d6d;
+  background: rgba(255,77,109,0.25);
+  transform: scale(1.25);
+}
 .modal-close.flash {
   color: #ff4d6d;
   background: rgba(255,77,109,0.25);
