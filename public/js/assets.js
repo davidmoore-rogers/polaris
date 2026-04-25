@@ -812,20 +812,28 @@ function assetMonitoringFormHTML(asset) {
 
 async function _wireMonitorEditTab(asset) {
   await _ensureCredentials();
+  var locked = _isMonitorIntegrationLocked(asset);
+  var monChk = document.getElementById("f-monitored");
   var typeSel = document.getElementById("f-monitorType");
   var credWrap = document.getElementById("f-monitorCredential-wrap");
   var credSel = document.getElementById("f-monitorCredential");
+  var intervalEl = document.getElementById("f-monitorInterval");
 
   function refresh() {
+    var enabled = !!(monChk && monChk.checked);
     var t = typeSel ? typeSel.value : "";
     var needsCred = (t === "snmp" || t === "winrm" || t === "ssh");
-    if (credWrap) credWrap.style.display = needsCred ? "block" : "none";
-    if (needsCred && credSel) {
+    if (typeSel) typeSel.disabled = locked || !enabled;
+    if (intervalEl) intervalEl.disabled = !enabled;
+    if (credWrap) credWrap.style.display = (enabled && needsCred && !locked) ? "block" : "none";
+    if (credSel) credSel.disabled = !enabled;
+    if (enabled && needsCred && credSel) {
       var current = credSel.getAttribute("data-current-id") || "";
       credSel.innerHTML = _credentialOptionsFor(t, current);
     }
   }
-  if (typeSel && !typeSel.disabled) typeSel.addEventListener("change", refresh);
+  if (typeSel && !locked) typeSel.addEventListener("change", refresh);
+  if (monChk) monChk.addEventListener("change", refresh);
   refresh();
 }
 
