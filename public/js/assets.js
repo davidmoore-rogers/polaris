@@ -1041,7 +1041,7 @@ async function openViewModal(id) {
         try {
           var r = await api.assets.probeNow(a.id);
           showToast(r.success ? ("Probe ok — " + r.responseTimeMs + " ms") : ("Probe failed: " + (r.error || "unknown")), r.success ? "success" : "error");
-          _loadMonitorHistoryFor(a.id, "24h");
+          _loadMonitorHistoryFor(a.id, _currentMonitorSelection());
         } catch (err) {
           showToast(err.message, "error");
         } finally {
@@ -1051,11 +1051,41 @@ async function openViewModal(id) {
     }
     document.querySelectorAll(".asset-monitor-range-btn").forEach(function (b) {
       b.addEventListener("click", function () {
+        var range = b.getAttribute("data-range");
+        var panel = document.getElementById("asset-monitor-custom-panel");
+        if (range === "custom") {
+          if (!panel) return;
+          var willOpen = panel.style.display === "none";
+          panel.style.display = willOpen ? "flex" : "none";
+          if (willOpen) {
+            var toInput = document.getElementById("asset-monitor-to");
+            var fromInput = document.getElementById("asset-monitor-from");
+            if (toInput && !toInput.value) toInput.value = _toLocalDatetimeInput(new Date());
+            if (fromInput && !fromInput.value) fromInput.value = _toLocalDatetimeInput(new Date(Date.now() - 24 * 3600 * 1000));
+          }
+          return;
+        }
+        if (panel) panel.style.display = "none";
         document.querySelectorAll(".asset-monitor-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
         b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
-        _loadMonitorHistoryFor(a.id, b.getAttribute("data-range"));
+        _loadMonitorHistoryFor(a.id, range);
       });
     });
+    var applyBtn = document.getElementById("btn-asset-monitor-custom-apply");
+    if (applyBtn) {
+      applyBtn.addEventListener("click", function () {
+        var fromInput = document.getElementById("asset-monitor-from");
+        var toInput   = document.getElementById("asset-monitor-to");
+        if (!fromInput.value || !toInput.value) { showToast("Enter both From and To", "error"); return; }
+        var fromIso = new Date(fromInput.value).toISOString();
+        var toIso   = new Date(toInput.value).toISOString();
+        if (new Date(fromIso) >= new Date(toIso)) { showToast("From must be before To", "error"); return; }
+        document.querySelectorAll(".asset-monitor-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+        var customBtn = document.getElementById("btn-asset-monitor-custom");
+        if (customBtn) { customBtn.classList.remove("btn-secondary"); customBtn.classList.add("btn-primary"); }
+        _loadMonitorHistoryFor(a.id, { from: fromIso, to: toIso });
+      });
+    }
   } catch (err) {
     showToast(err.message, "error");
     closeAssetPanel();
@@ -1088,7 +1118,14 @@ function assetMonitoringViewHTML(a) {
   var rangeBtns =
     '<button class="btn btn-sm btn-primary asset-monitor-range-btn" data-range="24h">24h</button>' +
     '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="7d">7d</button>' +
-    '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="30d">30d</button>';
+    '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="30d">30d</button>' +
+    '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="custom" id="btn-asset-monitor-custom">Custom…</button>';
+  var customPanel =
+    '<div id="asset-monitor-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
+      '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="asset-monitor-from" class="form-input" style="padding:2px 6px"></label>' +
+      '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="asset-monitor-to" class="form-input" style="padding:2px 6px"></label>' +
+      '<button class="btn btn-sm btn-primary" id="btn-asset-monitor-custom-apply">Apply</button>' +
+    '</div>';
   return (
     '<div class="asset-view-grid">' +
       // Status uses a raw-HTML row because viewRow() escapes its value and
@@ -1104,21 +1141,33 @@ function assetMonitoringViewHTML(a) {
       '<h4 style="margin:0">Response time</h4>' +
       '<div style="display:flex;gap:6px">' + rangeBtns + ' ' + probeBtn + '</div>' +
     '</div>' +
-    '<div id="asset-monitor-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:160px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
+    customPanel +
+    '<div id="asset-monitor-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
       'Loading samples…' +
     '</div>' +
     '<div id="asset-monitor-stats" style="margin-top:0.5rem;font-size:0.85rem;color:var(--color-text-secondary)"></div>'
   );
 }
 
-async function _loadMonitorHistoryFor(assetId, range) {
+async function _loadMonitorHistoryFor(assetId, selection) {
   var chart = document.getElementById("asset-monitor-chart");
   var stats = document.getElementById("asset-monitor-stats");
   if (!chart) return;
   chart.textContent = "Loading samples…";
   if (stats) stats.textContent = "";
+  var opts = (typeof selection === "string" || !selection) ? { range: selection || "24h" } : selection;
+  // Persist selection so probe-now can refresh the same view.
+  if (opts.from && opts.to) {
+    chart.dataset.from = opts.from;
+    chart.dataset.to = opts.to;
+    delete chart.dataset.range;
+  } else {
+    chart.dataset.range = opts.range || "24h";
+    delete chart.dataset.from;
+    delete chart.dataset.to;
+  }
   try {
-    var data = await api.assets.monitorHistory(assetId, range || "24h");
+    var data = await api.assets.monitorHistory(assetId, opts);
     _renderMonitorChart(chart, data);
     if (stats && data.stats) {
       var s = data.stats;
@@ -1133,6 +1182,22 @@ async function _loadMonitorHistoryFor(assetId, range) {
   }
 }
 
+function _currentMonitorSelection() {
+  var chart = document.getElementById("asset-monitor-chart");
+  if (!chart) return "24h";
+  if (chart.dataset.from && chart.dataset.to) {
+    return { from: chart.dataset.from, to: chart.dataset.to };
+  }
+  return chart.dataset.range || "24h";
+}
+
+function _toLocalDatetimeInput(d) {
+  // Render a Date as "YYYY-MM-DDTHH:MM" in the user's local time zone for <input type="datetime-local">.
+  function pad(n) { return n < 10 ? "0" + n : String(n); }
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+    "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+
 function _renderMonitorChart(container, data) {
   var samples = (data && data.samples) || [];
   if (samples.length === 0) {
@@ -1140,14 +1205,22 @@ function _renderMonitorChart(container, data) {
     return;
   }
   var W = container.clientWidth || 600;
-  var H = 160;
-  var padL = 38, padR = 8, padT = 10, padB = 22;
+  var H = 200;
+  var padL = 56, padR = 10, padT = 10, padB = 44;
   var innerW = W - padL - padR;
   var innerH = H - padT - padB;
 
   var t0 = new Date(samples[0].timestamp).getTime();
   var t1 = new Date(samples[samples.length - 1].timestamp).getTime();
   if (t1 === t0) t1 = t0 + 1;
+  var spanMs = t1 - t0;
+  var oneDayMs = 24 * 60 * 60 * 1000;
+  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  function fmtTick(ts) {
+    var d = new Date(ts);
+    if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+    return (d.getMonth() + 1) + "/" + d.getDate();
+  }
 
   var oks = samples.filter(function (s) { return s.success && typeof s.responseTimeMs === "number"; });
   var maxRtt = oks.length ? Math.max.apply(null, oks.map(function (s) { return s.responseTimeMs; })) : 100;
@@ -1175,9 +1248,29 @@ function _renderMonitorChart(container, data) {
       '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + Math.round(v) + '</text>';
   }
 
+  // X-axis tick labels
+  var xTicks = "";
+  var xTickCount = 5;
+  for (var j = 0; j <= xTickCount; j++) {
+    var tsTick = t0 + (t1 - t0) * (j / xTickCount);
+    var xPos = padL + (j / xTickCount) * innerW;
+    xTicks +=
+      '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
+      '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
+  }
+
+  // Axis titles
+  var yTitleX = 14;
+  var yTitleY = padT + innerH / 2;
+  var yTitle = '<text x="' + yTitleX + '" y="' + yTitleY + '" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.85" transform="rotate(-90 ' + yTitleX + ' ' + yTitleY + ')">Response time (ms)</text>';
+  var xTitle = '<text x="' + (padL + innerW / 2) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.85">Time</text>';
+
   var svg =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       ticks +
+      xTicks +
+      yTitle +
+      xTitle +
       failureLines +
       (pointsAttr ? '<polyline points="' + pointsAttr + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' : '') +
       oks.map(function (s) {

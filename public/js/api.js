@@ -158,7 +158,19 @@ const api = {
     getMonitorSettings:   ()    => request("GET",  "/assets/monitor-settings"),
     updateMonitorSettings:(body) => request("PUT", "/assets/monitor-settings", body),
     bulkMonitor:          (body) => request("POST", "/assets/bulk-monitor", body),
-    monitorHistory:       (id, range) => request("GET", `/assets/${id}/monitor-history` + (range ? `?range=${encodeURIComponent(range)}` : "")),
+    monitorHistory:       (id, opts) => {
+      // Accepts a range string ("24h") or { range } / { from, to } object.
+      if (typeof opts === "string") opts = { range: opts };
+      opts = opts || {};
+      var qs = [];
+      if (opts.from && opts.to) {
+        qs.push("from=" + encodeURIComponent(opts.from));
+        qs.push("to="   + encodeURIComponent(opts.to));
+      } else if (opts.range) {
+        qs.push("range=" + encodeURIComponent(opts.range));
+      }
+      return request("GET", `/assets/${id}/monitor-history` + (qs.length ? "?" + qs.join("&") : ""));
+    },
     probeNow:             (id)  => request("POST", `/assets/${id}/probe-now`),
   },
   integrations: {

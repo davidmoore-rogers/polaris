@@ -306,19 +306,37 @@ router.get("/:id/ip-history", async (req, res, next) => {
   }
 });
 
-// GET /api/v1/assets/:id/monitor-history?range=1h|24h|7d — response-time samples
+// GET /api/v1/assets/:id/monitor-history?range=1h|24h|7d|30d OR ?from=ISO&to=ISO
 router.get("/:id/monitor-history", async (req, res, next) => {
   try {
     const id = req.params.id as string;
-    const range = String(req.query.range || "24h");
-    const windowMs =
-      range === "1h"  ?  1 * 60 * 60 * 1000 :
-      range === "7d"  ?  7 * 24 * 60 * 60 * 1000 :
-      range === "30d" ? 30 * 24 * 60 * 60 * 1000 :
-                          24 * 60 * 60 * 1000;
-    const since = new Date(Date.now() - windowMs);
+    const fromQ = req.query.from ? String(req.query.from) : null;
+    const toQ   = req.query.to   ? String(req.query.to)   : null;
+    let since: Date;
+    let until: Date;
+    let rangeLabel: string;
+    if (fromQ && toQ) {
+      const f = new Date(fromQ), t = new Date(toQ);
+      if (isNaN(+f) || isNaN(+t)) throw new AppError(400, "Invalid from/to date");
+      if (+f >= +t) throw new AppError(400, "from must be before to");
+      const oneYearMs = 365 * 24 * 60 * 60 * 1000;
+      if (+t - +f > oneYearMs) throw new AppError(400, "Custom range cannot exceed 1 year");
+      since = f;
+      until = t;
+      rangeLabel = "custom";
+    } else {
+      const range = String(req.query.range || "24h");
+      const windowMs =
+        range === "1h"  ?  1 * 60 * 60 * 1000 :
+        range === "7d"  ?  7 * 24 * 60 * 60 * 1000 :
+        range === "30d" ? 30 * 24 * 60 * 60 * 1000 :
+                            24 * 60 * 60 * 1000;
+      until = new Date();
+      since = new Date(+until - windowMs);
+      rangeLabel = range;
+    }
     const samples = await prisma.assetMonitorSample.findMany({
-      where: { assetId: id, timestamp: { gte: since } },
+      where: { assetId: id, timestamp: { gte: since, lte: until } },
       orderBy: { timestamp: "asc" },
       select: { timestamp: true, success: true, responseTimeMs: true, error: true },
     });
@@ -329,8 +347,9 @@ router.get("/:id/monitor-history", async (req, res, next) => {
     const minMs = okSamples.length ? Math.min(...okSamples) : null;
     const maxMs = okSamples.length ? Math.max(...okSamples) : null;
     res.json({
-      range,
+      range: rangeLabel,
       since,
+      until,
       samples,
       stats: {
         total,
