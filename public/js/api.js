@@ -210,6 +210,19 @@ const api = {
       }
       return request("GET", `/assets/${id}/storage-history?` + qs.join("&"));
     },
+    temperatureHistory:   (id, opts) => {
+      if (typeof opts === "string") opts = { range: opts };
+      opts = opts || {};
+      var qs = [];
+      if (opts.sensorName) qs.push("sensorName=" + encodeURIComponent(opts.sensorName));
+      if (opts.from && opts.to) {
+        qs.push("from=" + encodeURIComponent(opts.from));
+        qs.push("to="   + encodeURIComponent(opts.to));
+      } else if (opts.range) {
+        qs.push("range=" + encodeURIComponent(opts.range));
+      }
+      return request("GET", `/assets/${id}/temperature-history` + (qs.length ? "?" + qs.join("&") : ""));
+    },
   },
   integrations: {
     list:   ()       => request("GET", "/integrations"),

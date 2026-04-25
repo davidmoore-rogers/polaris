@@ -74,6 +74,10 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // monitor.telemetryIntervalSeconds / systemInfoIntervalSeconds.
   telemetryIntervalSec:  z.number().int().min(15).max(86400).nullable().optional(),
   systemInfoIntervalSec: z.number().int().min(60).max(86400).nullable().optional(),
+  // ifNames the operator pinned for fast-cadence polling on the System tab.
+  // Cap at 64 so an accidental "select-all on a 200-port chassis" can't
+  // saturate the device every probe interval.
+  monitoredInterfaces:   z.array(z.string().min(1)).max(64).optional(),
 });
 
 /**
@@ -489,11 +493,11 @@ router.get("/:id/system-info", async (req, res, next) => {
     const id = req.params.id as string;
     const asset = await prisma.asset.findUnique({
       where: { id },
-      select: { id: true, monitored: true, monitorType: true, lastTelemetryAt: true, lastSystemInfoAt: true },
+      select: { id: true, monitored: true, monitorType: true, lastTelemetryAt: true, lastSystemInfoAt: true, monitoredInterfaces: true },
     });
     if (!asset) throw new AppError(404, "Asset not found");
 
-    const [latestTelemetry, latestIfaceMeta, latestStorageMeta] = await Promise.all([
+    const [latestTelemetry, latestIfaceMeta, latestStorageMeta, latestTempMeta] = await Promise.all([
       prisma.assetTelemetrySample.findFirst({
         where: { assetId: id },
         orderBy: { timestamp: "desc" },
@@ -504,6 +508,11 @@ router.get("/:id/system-info", async (req, res, next) => {
         select: { timestamp: true },
       }),
       prisma.assetStorageSample.findFirst({
+        where: { assetId: id },
+        orderBy: { timestamp: "desc" },
+        select: { timestamp: true },
+      }),
+      prisma.assetTemperatureSample.findFirst({
         where: { assetId: id },
         orderBy: { timestamp: "desc" },
         select: { timestamp: true },
@@ -520,6 +529,12 @@ router.get("/:id/system-info", async (req, res, next) => {
       ? await prisma.assetStorageSample.findMany({
           where: { assetId: id, timestamp: latestStorageMeta.timestamp },
           orderBy: { mountPath: "asc" },
+        })
+      : [];
+    const temperatures = latestTempMeta
+      ? await prisma.assetTemperatureSample.findMany({
+          where: { assetId: id, timestamp: latestTempMeta.timestamp },
+          orderBy: { sensorName: "asc" },
         })
       : [];
 
@@ -545,6 +560,8 @@ router.get("/:id/system-info", async (req, res, next) => {
         macAddress:  i.macAddress,
         inOctets:    bigIntToNumber(i.inOctets),
         outOctets:   bigIntToNumber(i.outOctets),
+        inErrors:    bigIntToNumber(i.inErrors),
+        outErrors:   bigIntToNumber(i.outErrors),
       })),
       storage: storage.map((s) => ({
         timestamp:  s.timestamp,
@@ -552,6 +569,12 @@ router.get("/:id/system-info", async (req, res, next) => {
         totalBytes: bigIntToNumber(s.totalBytes),
         usedBytes:  bigIntToNumber(s.usedBytes),
       })),
+      temperatures: temperatures.map((t) => ({
+        timestamp:  t.timestamp,
+        sensorName: t.sensorName,
+        celsius:    t.celsius,
+      })),
+      monitoredInterfaces: (asset.monitoredInterfaces ?? []) as string[],
     });
   } catch (err) { next(err); }
 });
@@ -581,7 +604,40 @@ router.get("/:id/interface-history", async (req, res, next) => {
         macAddress:  s.macAddress,
         inOctets:    bigIntToNumber(s.inOctets),
         outOctets:   bigIntToNumber(s.outOctets),
+        inErrors:    bigIntToNumber(s.inErrors),
+        outErrors:   bigIntToNumber(s.outErrors),
       })),
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/temperature-history?range=... [&sensorName=...] — per-sensor temperatures
+router.get("/:id/temperature-history", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const sensorName = req.query.sensorName ? String(req.query.sensorName) : null;
+    const { since, until, rangeLabel } = resolveRange(req);
+    const samples = await prisma.assetTemperatureSample.findMany({
+      where: { assetId: id, timestamp: { gte: since, lte: until }, ...(sensorName ? { sensorName } : {}) },
+      orderBy: { timestamp: "asc" },
+    });
+    const cs = samples.map((s) => s.celsius).filter((x): x is number => typeof x === "number");
+    res.json({
+      range: rangeLabel,
+      sensorName,
+      since,
+      until,
+      samples: samples.map((s) => ({
+        timestamp:  s.timestamp,
+        sensorName: s.sensorName,
+        celsius:    s.celsius,
+      })),
+      stats: {
+        total:      samples.length,
+        avgCelsius: cs.length ? cs.reduce((a, b) => a + b, 0) / cs.length : null,
+        maxCelsius: cs.length ? Math.max(...cs) : null,
+        minCelsius: cs.length ? Math.min(...cs) : null,
+      },
     });
   } catch (err) { next(err); }
 });

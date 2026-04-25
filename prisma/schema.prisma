@@ -292,6 +292,12 @@ model Asset {
   lastTelemetryAt        DateTime?
   lastSystemInfoAt       DateTime?
 
+  // ifNames the operator pinned for fast-cadence polling. Each name in this
+  // array is also scraped on the response-time interval (default 60s) so that
+  // chosen uplinks/critical ports get sub-minute throughput + error history.
+  // The full system-info scrape (every ~10 min) still covers all interfaces.
+  monitoredInterfaces    String[]    @default([])
+
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
@@ -301,6 +307,7 @@ model Asset {
   telemetrySamples AssetTelemetrySample[]
   interfaceSamples AssetInterfaceSample[]
   storageSamples   AssetStorageSample[]
+  temperatureSamples AssetTemperatureSample[]
 
   @@index([ipAddress])
   @@index([macAddress])
@@ -372,10 +379,31 @@ model AssetInterfaceSample {
   macAddress     String?
   inOctets       BigInt?
   outOctets      BigInt?
+  // Cumulative error counters (IF-MIB ifInErrors / ifOutErrors, FortiOS
+  // errors_in / errors_out). Subtract consecutive samples for an error rate.
+  inErrors       BigInt?
+  outErrors      BigInt?
 
   @@index([assetId, timestamp])
   @@index([assetId, ifName, timestamp])
   @@map("asset_interface_samples")
+}
+
+// Per-sensor temperature snapshot, written alongside telemetry. FortiOS exposes
+// these via /api/v2/monitor/system/sensor-info (filtered to type "temperature").
+// SNMP via ENTITY-SENSOR-MIB (entPhySensorType=8/celsius). Hosts that don't
+// publish either get no rows; the System tab simply hides the section.
+model AssetTemperatureSample {
+  id             String   @id @default(uuid())
+  assetId        String
+  asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  timestamp      DateTime @default(now())
+  sensorName     String
+  celsius        Float?
+
+  @@index([assetId, timestamp])
+  @@index([assetId, sensorName, timestamp])
+  @@map("asset_temperature_samples")
 }
 
 // Per-mountpoint storage snapshot, written alongside interface samples.

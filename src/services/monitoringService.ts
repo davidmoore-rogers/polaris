@@ -497,6 +497,8 @@ export interface TelemetrySample {
   memPct?:        number | null;
   memUsedBytes?:  number | null;
   memTotalBytes?: number | null;
+  /** One entry per sensor; empty/undefined when the device doesn't expose temperatures. Persisted as AssetTemperatureSample rows. */
+  temperatures?:  TemperatureSample[];
 }
 
 export interface InterfaceSample {
@@ -508,12 +510,22 @@ export interface InterfaceSample {
   macAddress?:  string | null;
   inOctets?:    number | null;
   outOctets?:   number | null;
+  /** Cumulative IF-MIB ifInErrors / FortiOS errors_in. */
+  inErrors?:    number | null;
+  /** Cumulative IF-MIB ifOutErrors / FortiOS errors_out. */
+  outErrors?:   number | null;
 }
 
 export interface StorageSample {
   mountPath:   string;
   totalBytes?: number | null;
   usedBytes?:  number | null;
+}
+
+/** One row per temperature sensor reported by the device. Celsius is null when the sensor is non-readable / not-present. */
+export interface TemperatureSample {
+  sensorName: string;
+  celsius:    number | null;
 }
 
 export interface SystemInfoSample {
@@ -565,6 +577,77 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
     return { supported: false };
   } catch (err: any) {
     return { supported: true, error: err?.message || "Telemetry collection failed" };
+  }
+}
+
+/**
+ * Light variant of collectSystemInfo that only returns the interfaces the
+ * operator pinned via Asset.monitoredInterfaces. Used by the fast cadence so
+ * a heavy 30-port switch isn't fully re-walked once a minute.
+ */
+export async function collectInterfacesFiltered(assetId: string): Promise<CollectionResult<SystemInfoSample>> {
+  const asset = await prisma.asset.findUnique({
+    where: { id: assetId },
+    include: { monitorCredential: true, discoveredByIntegration: true },
+  });
+  if (!asset)            return { supported: false, error: "Asset not found" };
+  if (!asset.monitored)  return { supported: false };
+  if (!asset.monitorType) return { supported: false };
+  const wanted = (asset.monitoredInterfaces || []) as string[];
+  if (wanted.length === 0) return { supported: false };
+  const type = asset.monitorType as MonitorType;
+  const targetIp =
+    asset.ipAddress ||
+    (type === "activedirectory" ? (asset.dnsName || asset.hostname) : null);
+  if (!targetIp) return { supported: false, error: "Asset has no IP address" };
+
+  try {
+    let full: SystemInfoSample;
+    if (type === "fortimanager" || type === "fortigate") {
+      if (!asset.discoveredByIntegration) return { supported: true, error: "Originating integration not found" };
+      full = await collectSystemInfoFortinet(targetIp, asset.discoveredByIntegration as any);
+    } else if (type === "snmp") {
+      if (!asset.monitorCredential) return { supported: true, error: "No SNMP credential selected" };
+      full = await collectSystemInfoSnmp(targetIp, asset.monitorCredential.config as Record<string, unknown>);
+    } else {
+      return { supported: false };
+    }
+    const want = new Set(wanted);
+    const interfaces = full.interfaces.filter((i) => want.has(i.ifName));
+    // Pinned interfaces should produce frequent counter samples but we don't
+    // want to spam the per-mountpoint storage table, so storage is dropped.
+    return { supported: true, data: { interfaces, storage: [] } };
+  } catch (err: any) {
+    return { supported: true, error: err?.message || "Fast-cadence interface scrape failed" };
+  }
+}
+
+/**
+ * Persist a fast-cadence scrape. Same shape as recordSystemInfoResult for the
+ * interface side, but it does NOT touch Asset.associatedIps (that is owned by
+ * the full system-info pass) and only stamps lastSystemInfoAt when actual rows
+ * came back so the next full scrape isn't deferred by a partial pull.
+ */
+export async function recordFastInterfaceResult(assetId: string, result: CollectionResult<SystemInfoSample>): Promise<void> {
+  if (!result.supported) return;
+  const now = new Date();
+  if (result.data && result.data.interfaces.length > 0) {
+    await prisma.assetInterfaceSample.createMany({
+      data: result.data.interfaces.map((i) => ({
+        assetId,
+        timestamp: now,
+        ifName:      i.ifName,
+        adminStatus: i.adminStatus ?? null,
+        operStatus:  i.operStatus ?? null,
+        speedBps:    i.speedBps != null ? BigInt(Math.round(i.speedBps)) : null,
+        ipAddress:   i.ipAddress ?? null,
+        macAddress:  i.macAddress ?? null,
+        inOctets:    i.inOctets  != null ? BigInt(Math.round(i.inOctets))  : null,
+        outOctets:   i.outOctets != null ? BigInt(Math.round(i.outOctets)) : null,
+        inErrors:    i.inErrors  != null ? BigInt(Math.round(i.inErrors))  : null,
+        outErrors:   i.outErrors != null ? BigInt(Math.round(i.outErrors)) : null,
+      })),
+    });
   }
 }
 
@@ -641,7 +724,30 @@ async function collectTelemetryFortinet(host: string, integration: { type: strin
   const res = await fgRequest<any>(fg, "GET", "/api/v2/monitor/system/resource/usage", { query: { scope: "global" } });
   const cpuPct = pickFortinetUsage(res?.cpu);
   const memPct = pickFortinetUsage(res?.mem ?? res?.memory);
-  return { cpuPct, memPct, memUsedBytes: null, memTotalBytes: null };
+  const temperatures = await collectTemperaturesFortinet(fg).catch(() => [] as TemperatureSample[]);
+  return { cpuPct, memPct, memUsedBytes: null, memTotalBytes: null, temperatures };
+}
+
+// FortiOS exposes temperature, fan, and power sensors at one endpoint. We
+// filter to type === "temperature" and keep only readable sensors. Older
+// FortiOS firmwares 404 this endpoint — caller swallows the failure.
+async function collectTemperaturesFortinet(fg: FortiGateConfig): Promise<TemperatureSample[]> {
+  const res = await fgRequest<any>(fg, "GET", "/api/v2/monitor/system/sensor-info", {});
+  const list: TemperatureSample[] = [];
+  const arr = Array.isArray(res) ? res : (Array.isArray(res?.results) ? res.results : []);
+  for (const s of arr) {
+    if (!s || typeof s !== "object") continue;
+    const type = String((s as any).type || "").toLowerCase();
+    if (type && type !== "temperature") continue;
+    // Older firmwares omit `type` entirely; treat names that look like temp sensors as temperature.
+    const name = String((s as any).name || "").trim();
+    if (!type && !/temp|cpu|board|chassis|°c/i.test(name)) continue;
+    if (!name) continue;
+    const value = (s as any).value;
+    const n = typeof value === "number" ? value : (typeof value === "string" ? Number(value) : NaN);
+    list.push({ sensorName: name, celsius: Number.isFinite(n) ? Math.round(n * 10) / 10 : null });
+  }
+  return list;
 }
 
 function pickFortinetUsage(node: unknown): number | null {
@@ -723,6 +829,8 @@ async function collectSystemInfoFortinet(host: string, integration: { type: stri
         macAddress:  typeof i.mac === "string" ? i.mac.toUpperCase() : null,
         inOctets:    pickFiniteNumber(i.rx_bytes),
         outOctets:   pickFiniteNumber(i.tx_bytes),
+        inErrors:    pickFiniteNumber(i.rx_errors  ?? i.errors_in),
+        outErrors:   pickFiniteNumber(i.tx_errors  ?? i.errors_out),
       });
     }
   } catch (err: any) {
@@ -762,12 +870,25 @@ const OID = {
   ifAdminStatus:  "1.3.6.1.2.1.2.2.1.7",
   ifOperStatus:   "1.3.6.1.2.1.2.2.1.8",
   ifInOctets:     "1.3.6.1.2.1.2.2.1.10",
+  ifInErrors:     "1.3.6.1.2.1.2.2.1.14",
   ifOutOctets:    "1.3.6.1.2.1.2.2.1.16",
+  ifOutErrors:    "1.3.6.1.2.1.2.2.1.20",
   ifName:         "1.3.6.1.2.1.31.1.1.1.1",
   ifHCInOctets:   "1.3.6.1.2.1.31.1.1.1.6",
   ifHCOutOctets:  "1.3.6.1.2.1.31.1.1.1.10",
   ifHighSpeed:    "1.3.6.1.2.1.31.1.1.1.15",
   ipAdEntIfIndex: "1.3.6.1.2.1.4.20.1.2",
+  // ENTITY-MIB / ENTITY-SENSOR-MIB (RFC 4133 / 3433). For temperature
+  // sensors, entPhySensorType=8 (celsius). entPhySensorScale + Precision tell
+  // us how to scale entPhySensorValue back to a real number; entPhysicalDescr
+  // (indexed by the same physical-entity index) gives the operator-friendly
+  // sensor name.
+  entPhysicalDescr:       "1.3.6.1.2.1.47.1.1.1.1.2",
+  entPhySensorType:       "1.3.6.1.2.1.99.1.1.1.1",
+  entPhySensorScale:      "1.3.6.1.2.1.99.1.1.1.2",
+  entPhySensorPrecision:  "1.3.6.1.2.1.99.1.1.1.3",
+  entPhySensorValue:      "1.3.6.1.2.1.99.1.1.1.4",
+  entPhySensorOperStatus: "1.3.6.1.2.1.99.1.1.1.5",
 };
 
 function buildSnmpSession(host: string, config: Record<string, unknown>): any {
@@ -913,8 +1034,52 @@ async function collectTelemetrySnmp(host: string, config: Record<string, unknown
       }
     } catch { /* fall through */ }
 
-    return { cpuPct, memPct, memUsedBytes, memTotalBytes };
+    // Temperatures: walk ENTITY-SENSOR-MIB and pick rows with type=8 (celsius)
+    // and operStatus=1 (ok). entPhysicalDescr (ENTITY-MIB) keyed by the same
+    // physical-entity index gives the friendly name. Devices that don't
+    // implement the MIB just return nothing.
+    const temperatures = await collectTemperaturesSnmp(session).catch(() => [] as TemperatureSample[]);
+
+    return { cpuPct, memPct, memUsedBytes, memTotalBytes, temperatures };
   });
+}
+
+async function collectTemperaturesSnmp(session: any): Promise<TemperatureSample[]> {
+  const [types, values, scales, precisions, opers, descrs] = await Promise.all([
+    snmpWalk(session, OID.entPhySensorType).catch(() => new Map()),
+    snmpWalk(session, OID.entPhySensorValue).catch(() => new Map()),
+    snmpWalk(session, OID.entPhySensorScale).catch(() => new Map()),
+    snmpWalk(session, OID.entPhySensorPrecision).catch(() => new Map()),
+    snmpWalk(session, OID.entPhySensorOperStatus).catch(() => new Map()),
+    snmpWalk(session, OID.entPhysicalDescr).catch(() => new Map()),
+  ]);
+  const out: TemperatureSample[] = [];
+  for (const [idx, typeRaw] of types.entries()) {
+    const t = snmpVbToNumber(typeRaw);
+    if (t !== 8) continue; // RFC 3433: 8 = celsius
+    const oper = snmpVbToNumber(opers.get(idx));
+    // 1 = ok, 2 = unavailable, 3 = nonoperational. Skip non-ok rows.
+    if (oper != null && oper !== 1) continue;
+    const raw = snmpVbToNumber(values.get(idx));
+    if (raw == null) continue;
+    const scale = snmpVbToNumber(scales.get(idx));   // SI prefix code
+    const prec  = snmpVbToNumber(precisions.get(idx)); // decimal-point shift
+    const celsius = scaleEntitySensor(raw, scale, prec);
+    out.push({
+      sensorName: snmpVbToString(descrs.get(idx)) || `sensor-${idx}`,
+      celsius:    Number.isFinite(celsius) ? Math.round(celsius * 10) / 10 : null,
+    });
+  }
+  return out;
+}
+
+// Apply ENTITY-SENSOR-MIB scale + precision to a raw integer reading. Scale is
+// the SI-prefix code (1=10^-24 ... 9=10^0 ... 17=10^24); precision is a signed
+// shift of the decimal point. Both default to "no scaling" when omitted.
+function scaleEntitySensor(raw: number, scale: number | null, precision: number | null): number {
+  const sExp = scale != null ? (scale - 9) * 3 : 0;
+  const pExp = precision != null ? -precision : 0;
+  return raw * Math.pow(10, sExp) * Math.pow(10, pExp);
 }
 
 async function collectSystemInfoSnmp(host: string, config: Record<string, unknown>): Promise<SystemInfoSample> {
@@ -954,7 +1119,7 @@ async function collectSystemInfoSnmp(host: string, config: Record<string, unknow
     try {
       const [
         names, descrs, admin, oper, speeds, hiSpeeds, mac,
-        in32, out32, inHC, outHC, ipMap,
+        in32, out32, inHC, outHC, ipMap, inErr, outErr,
       ] = await Promise.all([
         snmpWalk(session, OID.ifName).catch(() => new Map()),
         snmpWalk(session, OID.ifDescr).catch(() => new Map()),
@@ -968,6 +1133,8 @@ async function collectSystemInfoSnmp(host: string, config: Record<string, unknow
         snmpWalk(session, OID.ifHCInOctets).catch(() => new Map()),
         snmpWalk(session, OID.ifHCOutOctets).catch(() => new Map()),
         snmpWalk(session, OID.ipAdEntIfIndex).catch(() => new Map()),
+        snmpWalk(session, OID.ifInErrors).catch(() => new Map()),
+        snmpWalk(session, OID.ifOutErrors).catch(() => new Map()),
       ]);
 
       // Build ifIndex → first IP map by inverting ipAdEntIfIndex (suffix is the IP itself).
@@ -999,6 +1166,8 @@ async function collectSystemInfoSnmp(host: string, config: Record<string, unknow
           macAddress:  snmpMacFromBuffer(mac.get(idx)),
           inOctets:    inHi != null  ? inHi  : snmpVbToNumber(in32.get(idx)),
           outOctets:   outHi != null ? outHi : snmpVbToNumber(out32.get(idx)),
+          inErrors:    snmpVbToNumber(inErr.get(idx)),
+          outErrors:   snmpVbToNumber(outErr.get(idx)),
         });
       }
     } catch { /* fall through */ }
@@ -1037,6 +1206,16 @@ export async function recordTelemetryResult(assetId: string, result: CollectionR
         memTotalBytes: d.memTotalBytes != null ? BigInt(Math.round(d.memTotalBytes)) : null,
       },
     });
+    if (Array.isArray(d.temperatures) && d.temperatures.length > 0) {
+      await prisma.assetTemperatureSample.createMany({
+        data: d.temperatures.map((t) => ({
+          assetId,
+          timestamp: now,
+          sensorName: t.sensorName,
+          celsius:    t.celsius,
+        })),
+      });
+    }
   }
   // Always advance the cadence stamp so a transient failure doesn't make us
   // hammer the device every 5 s.
@@ -1061,6 +1240,8 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
           macAddress:  i.macAddress ?? null,
           inOctets:    i.inOctets  != null ? BigInt(Math.round(i.inOctets))  : null,
           outOctets:   i.outOctets != null ? BigInt(Math.round(i.outOctets)) : null,
+          inErrors:    i.inErrors  != null ? BigInt(Math.round(i.inErrors))  : null,
+          outErrors:   i.outErrors != null ? BigInt(Math.round(i.outErrors)) : null,
         })),
       });
     }
@@ -1204,6 +1385,7 @@ interface RunStats {
   /** System tab cadences. Tallied separately so a slow telemetry call doesn't look like a probe failure. */
   telemetry:  { collected: number; failed: number };
   systemInfo: { collected: number; failed: number };
+  fastIfaces: { collected: number; failed: number };
 }
 
 /**
@@ -1224,6 +1406,7 @@ export async function runMonitorPass(opts?: { concurrency?: number }): Promise<R
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, telemetryIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
+      monitoredInterfaces: true,
     },
   });
 
@@ -1236,21 +1419,31 @@ export async function runMonitorPass(opts?: { concurrency?: number }): Promise<R
 
   type Work = {
     id: string;
-    probe:      boolean;
-    telemetry:  boolean;
-    systemInfo: boolean;
+    probe:          boolean;
+    telemetry:      boolean;
+    systemInfo:     boolean;
+    fastInterfaces: boolean;
   };
-  const work: Work[] = candidates.map((a) => ({
-    id: a.id,
-    probe:      isDue(a.lastMonitorAt,    a.monitorIntervalSec,    settings.intervalSeconds),
-    telemetry:  isDue(a.lastTelemetryAt,  a.telemetryIntervalSec,  settings.telemetryIntervalSeconds),
-    systemInfo: isDue(a.lastSystemInfoAt, a.systemInfoIntervalSec, settings.systemInfoIntervalSeconds),
-  })).filter((w) => w.probe || w.telemetry || w.systemInfo);
+  const work: Work[] = candidates.map((a) => {
+    const probe = isDue(a.lastMonitorAt, a.monitorIntervalSec, settings.intervalSeconds);
+    return {
+      id: a.id,
+      probe,
+      telemetry:      isDue(a.lastTelemetryAt,  a.telemetryIntervalSec,  settings.telemetryIntervalSeconds),
+      systemInfo:     isDue(a.lastSystemInfoAt, a.systemInfoIntervalSec, settings.systemInfoIntervalSeconds),
+      // Pinned interfaces ride the response-time cadence — the user asked for
+      // "every minute based on the global settings", and intervalSeconds is
+      // exactly that. The full systemInfo pass at 10 min still covers all
+      // interfaces, so this only adds work for the pinned subset.
+      fastInterfaces: probe && Array.isArray(a.monitoredInterfaces) && a.monitoredInterfaces.length > 0,
+    };
+  }).filter((w) => w.probe || w.telemetry || w.systemInfo || w.fastInterfaces);
 
   const stats: RunStats = {
     probed: 0, succeeded: 0, failed: 0,
     telemetry:  { collected: 0, failed: 0 },
     systemInfo: { collected: 0, failed: 0 },
+    fastIfaces: { collected: 0, failed: 0 },
   };
   if (work.length === 0) return stats;
 
@@ -1298,6 +1491,22 @@ export async function runMonitorPass(opts?: { concurrency?: number }): Promise<R
           stats.systemInfo.failed++;
         }
       }
+      // Skip the fast scrape when the full one already ran this tick — they'd
+      // hit the same endpoint twice. The full scrape already wrote rows for
+      // every interface, including the pinned ones.
+      if (w.fastInterfaces && !w.systemInfo) {
+        try {
+          const fr = await collectInterfacesFiltered(w.id);
+          await recordFastInterfaceResult(w.id, fr);
+          if (fr.supported) {
+            if (fr.data) stats.fastIfaces.collected++;
+            else stats.fastIfaces.failed++;
+          }
+        } catch (err) {
+          logger.error({ err, assetId: w.id }, "Fast interface scrape crashed");
+          stats.fastIfaces.failed++;
+        }
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, work.length) }, () => worker()));
@@ -1319,16 +1528,20 @@ export async function pruneMonitorSamples(): Promise<number> {
 }
 
 /**
- * Trim AssetTelemetrySample rows older than the telemetry retention window.
+ * Trim AssetTelemetrySample + AssetTemperatureSample rows older than the
+ * telemetry retention window. Temperatures share telemetry's retention because
+ * they're collected on the same cadence and we never want one to outlive the
+ * other when stitching them onto the same chart.
  */
 export async function pruneTelemetrySamples(): Promise<number> {
   const { telemetryRetentionDays } = await getMonitorSettings();
   if (!telemetryRetentionDays || telemetryRetentionDays <= 0) return 0;
   const cutoff = new Date(Date.now() - telemetryRetentionDays * 24 * 3600 * 1000);
-  const { count } = await prisma.assetTelemetrySample.deleteMany({
-    where: { timestamp: { lt: cutoff } },
-  });
-  return count;
+  const [tel, temps] = await Promise.all([
+    prisma.assetTelemetrySample.deleteMany({   where: { timestamp: { lt: cutoff } } }),
+    prisma.assetTemperatureSample.deleteMany({ where: { timestamp: { lt: cutoff } } }),
+  ]);
+  return tel.count + temps.count;
 }
 
 /**
