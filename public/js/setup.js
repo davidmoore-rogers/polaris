@@ -62,8 +62,10 @@ document.getElementById("btn-test-conn").addEventListener("click", async functio
   var resultEl = document.getElementById("test-result");
   btn.disabled = true;
   btn.textContent = "Testing...";
+  // Reset to base class — visibility comes from .success / .error in CSS.
+  // Don't set inline display:none here, or it'll override the class-based rule.
   resultEl.className = "test-result";
-  resultEl.style.display = "none";
+  resultEl.textContent = "";
 
   try {
     var db = getDbConfig();
@@ -105,7 +107,7 @@ document.getElementById("btn-test-conn").addEventListener("click", async functio
     document.getElementById("btn-next-1").disabled = true;
     var r = document.getElementById("test-result");
     r.className = "test-result";
-    r.style.display = "none";
+    r.textContent = "";
   });
 });
 
