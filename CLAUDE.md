@@ -106,7 +106,7 @@ shelob/
 │   │   ├── eventArchiveService.ts   # Syslog (CEF) + SFTP/SCP event archival
 │   │   ├── serverSettingsService.ts # HTTPS, branding, backup/restore
 │   │   ├── credentialService.ts     # Named credential store (SNMP / WinRM / SSH) with masking + secret-preservation merge
-│   │   ├── monitoringService.ts     # Authenticated probes for fortimanager/fortigate/snmp/winrm/ssh/icmp; settings; runMonitorPass + sample retention
+│   │   ├── monitoringService.ts     # Authenticated response-time probes (fortimanager/fortigate/snmp/winrm/ssh/icmp) + System tab telemetry (CPU/memory) + system-info (interfaces/storage) collection. runMonitorPass dispatches all three cadences; per-stream retention prune helpers.
 │   │   └── updateService.ts         # Software update checking
 │   ├── jobs/
 │   │   ├── expireReservations.ts    # Mark past-TTL reservations as expired (every 15 min)
@@ -279,11 +279,20 @@ Asset
   monitored       Boolean         @default(false)
   monitorType     String?         -- "fortimanager" | "fortigate" | "activedirectory" | "snmp" | "winrm" | "ssh" | "icmp"
   monitorCredentialId UUID? FK → Credential (set null on delete) -- Used for snmp/winrm/ssh; null for icmp, integration-locked fortinet probes, and AD-locked WinRM probes (those reuse the AD integration's bindDn/bindPassword)
-  monitorIntervalSec Int?         -- Per-asset poll interval override; null falls back to monitor.intervalSeconds
+  monitorIntervalSec Int?         -- Per-asset response-time probe interval; null falls back to monitor.intervalSeconds
   monitorStatus   String?         -- "up" | "down" | "unknown"
   lastMonitorAt   DateTime?
   lastResponseTimeMs Int?         -- Most recent successful probe RTT; null while pending or after a failure
   consecutiveFailures Int         @default(0)
+  -- System tab cadences (asset details modal). Same monitorAssets job, but
+  -- on independent timers from the response-time probe. Telemetry =
+  -- CPU+memory snapshot (~60s default); systemInfo = full interface +
+  -- storage scrape (~600s default). Per-asset *IntervalSec columns override
+  -- the global telemetryIntervalSeconds / systemInfoIntervalSeconds settings.
+  telemetryIntervalSec  Int?
+  systemInfoIntervalSec Int?
+  lastTelemetryAt       DateTime?
+  lastSystemInfoAt      DateTime?
 
 AssetIpHistory                  -- Auto-populated log of every IP each asset has held
   id            UUID PK
@@ -302,6 +311,41 @@ AssetMonitorSample              -- Time-series of monitoring probe results; writ
   responseTimeMs Int?           -- Round-trip in ms on success; null on failure (the "packet loss" signal)
   error         String?
   @@index([assetId, timestamp])
+
+AssetTelemetrySample            -- System tab CPU+memory snapshot (~60s cadence). Populated by monitoringService.collectTelemetry for FortiOS- and SNMP-monitored assets; ICMP/SSH cannot deliver this data; WinRM/AD return supported=false until WMI Enumerate-over-WS-Management lands.
+  id            UUID PK
+  assetId       UUID FK → Asset (cascade delete)
+  timestamp     DateTime        @default(now())
+  cpuPct        Float?
+  memPct        Float?          -- Set when the source reports memory only as a percentage (FortiOS)
+  memUsedBytes  BigInt?         -- Set when the source reports absolute bytes (SNMP HOST-RESOURCES-MIB hrStorageRam, WMI)
+  memTotalBytes BigInt?
+  @@index([assetId, timestamp])
+
+AssetInterfaceSample            -- System tab per-interface scrape (~600s cadence). Many rows per scrape (one per interface). recordSystemInfoResult also mirrors {ip, interfaceName, mac} into Asset.associatedIps with source "monitor-system-info" — manual entries are preserved.
+  id            UUID PK
+  assetId       UUID FK → Asset (cascade delete)
+  timestamp     DateTime        @default(now())
+  ifName        String
+  adminStatus   String?         -- "up" | "down" | "testing" | ...
+  operStatus    String?         -- ditto
+  speedBps      BigInt?         -- Bits per second; from ifHighSpeed*1e6 or ifSpeed
+  ipAddress     String?
+  macAddress    String?
+  inOctets      BigInt?         -- Cumulative counter; subtract consecutive samples for throughput
+  outOctets     BigInt?
+  @@index([assetId, timestamp])
+  @@index([assetId, ifName, timestamp])
+
+AssetStorageSample              -- System tab per-mountpoint storage snapshot. SNMP only — FortiOS doesn't expose mountable storage and WinRM is not yet supported.
+  id            UUID PK
+  assetId       UUID FK → Asset (cascade delete)
+  timestamp     DateTime        @default(now())
+  mountPath     String          -- hrStorageDescr (e.g. "/", "C:")
+  totalBytes    BigInt?
+  usedBytes     BigInt?
+  @@index([assetId, timestamp])
+  @@index([assetId, mountPath, timestamp])
 
 Credential                      -- Named credentials for monitoring probes (SNMP / WinRM / SSH)
   id            UUID PK
@@ -461,11 +505,15 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 - `GET    /assets/:id/ip-history`               — List IP history entries for an asset (filtered by retention days). Auto-populated by the Prisma query extension in `src/db.ts` whenever any `asset.create` / `asset.update` writes an `ipAddress`, so discovery-sourced IPs are captured without changes to integration services.
 - `GET    /assets/ip-history-settings`          — `{ retentionDays }`; 0 = keep forever (default).
 - `PUT    /assets/ip-history-settings`          *(assets admin)* — `{ retentionDays }`; saving immediately prunes any history rows with `lastSeen` older than the new cutoff.
-- `GET    /assets/monitor-settings`             — Global monitor defaults: `{ intervalSeconds, failureThreshold, sampleRetentionDays }`.
-- `PUT    /assets/monitor-settings`             *(assets admin)* — Update global monitor defaults.
+- `GET    /assets/monitor-settings`             — Global monitor defaults: `{ intervalSeconds, failureThreshold, sampleRetentionDays, telemetryIntervalSeconds, systemInfoIntervalSeconds, telemetryRetentionDays, systemInfoRetentionDays }`. Defaults: 30s / 3 / 30d / 60s / 600s / 30d / 30d.
+- `PUT    /assets/monitor-settings`             *(assets admin)* — Update any of the above. Telemetry minimum 15s, systemInfo minimum 60s.
 - `POST   /assets/bulk-monitor`                 *(assets admin)* — `{ ids, monitored, monitorType?, monitorCredentialId?, monitorIntervalSec? }`. Applies one type+credential to every selected row; integration-owned assets (FMG/FortiGate firewalls, AD-discovered Windows hosts) keep their integration-locked type — request type is ignored for those rows. Returns `{ updated, errors: [{id, error}] }`.
 - `GET    /assets/:id/monitor-history?range=1h|24h|7d|30d` *or* `?from=ISO&to=ISO`  — Sample stream for the chart. With `range`, the window ends at *now*; with `from`/`to`, both bounds come from the query (span capped at 1 year). Returns `{ range, since, until, samples, stats: { total, failed, successRate, packetLossRate, avgMs, minMs, maxMs } }`; `range` is `"custom"` when `from`/`to` was used. `responseTimeMs` is null on failed samples (the "packet loss" signal).
-- `POST   /assets/:id/probe-now`                *(assets admin)* — Run an immediate probe and persist the result; returns `{ success, responseTimeMs, error? }`.
+- `POST   /assets/:id/probe-now`                *(assets admin)* — Run an immediate response-time probe AND a telemetry + system-info pull; returns `{ success, responseTimeMs, error? }` for the response-time probe (telemetry/system-info errors are swallowed and visible only via the next System tab refresh).
+- `GET    /assets/:id/system-info`              — Asset details System tab: latest interface + storage + telemetry snapshot. Returns `{ monitored, monitorType, lastTelemetryAt, lastSystemInfoAt, telemetry: {...}|null, interfaces: [...], storage: [...] }`. Empty arrays when no scrape has run yet.
+- `GET    /assets/:id/telemetry-history?range=1h|24h|7d|30d` *or* `?from&to`  — CPU/memory time-series. Returns `{ range, since, until, samples, stats: { total, avgCpuPct, maxCpuPct, avgMemPct, maxMemPct } }`. memPct is computed from `memUsedBytes / memTotalBytes` if the source supplied bytes only.
+- `GET    /assets/:id/interface-history?ifName=...&range=...`  — Per-interface counter samples; sized by interface (a 30-port switch with one row per 10 min ≈ 4,300 samples per 30-day range).
+- `GET    /assets/:id/storage-history?mountPath=...&range=...`  — Per-mountpoint usage samples. SNMP-monitored assets only.
 
 ### Credentials — mixed scoping
 - `GET    /credentials`                         *(auth)* — List stored credentials with secrets masked. Read-open so any role's Asset Monitoring tab can render the credential picker.
@@ -550,7 +598,7 @@ Azure SAML SSO is optional; users are auto-provisioned on first login with a def
 - **DHCP scopes** → Subnet records (`discoveredBy`, `fortigateDevice`)
 - **DHCP reservations** → Reservations (`sourceType: dhcp_reservation`)
 - **DHCP leases** → Reservations (`sourceType: dhcp_lease`); captures `expire_time`, `access_point`, `ssid`
-- **Interface IPs** → Reservations (`sourceType: interface_ip`)
+- **Interface IPs** → Reservations (`sourceType: interface_ip`) — note: discovery no longer mirrors these into `Asset.associatedIps`. The System tab's interface scrape (run on the monitoring cadence once monitoring is enabled on the firewall asset) is the single source for `Asset.associatedIps` per-interface entries.
 - **Virtual IPs (VIPs)** → Reservations (`sourceType: vip`)
 - **FortiSwitch devices** → Asset records (`assetType: switch`); via FMG proxy to `/api/v2/monitor/switch-controller/managed-switch/status`. `fortinetTopology` stamped with `{ role: "fortiswitch", controllerFortigate, uplinkInterface }` so the Device Map renders the FortiLink uplink as an edge.
 - **FortiAP devices** → Asset records (`assetType: access_point`); via FMG proxy to `/api/v2/monitor/wifi/managed_ap`. `fortinetTopology` stamped with `{ role: "fortiap", controllerFortigate, parentSwitch, parentPort, parentVlan }`; the switch-port attribution comes from matching AP `base_mac` against `/api/v2/monitor/switch-controller/detected-device` during discovery (falls back to a direct FortiGate edge if the AP's MAC is not on any managed switch port).
@@ -657,7 +705,7 @@ Active Directory and Entra ID identify the same hybrid-joined device with two un
 | `clampAssetAcquiredAt` | Once at startup | Clamp `acquiredAt` down to `lastSeen` on any Asset row where the invariant was violated |
 | `decommissionStaleAssets` | Every 24 hours | Move assets whose `lastSeen` is older than the configured inactivity threshold (months) to `decommissioned` status. Configured via Events → Settings → Assets tab; 0 disables. |
 | `discoverySlowCheck` | Every 30 s | Compares each in-flight discovery's elapsed time to its rolling-duration baseline (`discoveryDurationService`). Emits one `integration.discover.slow` event per run (and one per FortiGate inside an FMG run) when elapsed exceeds `max(avg + 2σ, avg × 1.5, avg + 60 s)`; baseline requires ≥3 prior successful runs. The `/integrations/discoveries` endpoint also calls the same checker inline so the sidebar and Integrations page flip amber within one 4 s poll cycle. |
-| `monitorAssets` | Every 5 s | Probes any monitored assets whose `lastMonitorAt + (Asset.monitorIntervalSec ?? monitor.intervalSeconds)` has elapsed. Each probe is authenticated end-to-end (FortiOS REST GET, SNMP `sysUpTime` GET, WinRM SOAP Identify, SSH connect+auth, ICMP ping). The `activedirectory` monitor type dispatches to WinRM for Windows or SSH for realm-joined Linux, both reusing the AD integration's bind credentials. A successful sample means the credential worked. Writes one `AssetMonitorSample` per probe (`responseTimeMs` null = packet loss), updates `Asset.monitorStatus` / `lastResponseTimeMs` / `consecutiveFailures`, and emits one `monitor.status_changed` Event on `up ↔ down` transitions (threshold is `monitor.failureThreshold`). Once a day the same job prunes samples older than `monitor.sampleRetentionDays`. |
+| `monitorAssets` | Every 5 s | Handles three independent cadences per monitored asset: **(1) response-time probe** when `lastMonitorAt + (Asset.monitorIntervalSec ?? monitor.intervalSeconds)` has elapsed (FortiOS REST, SNMP `sysUpTime`, WinRM SOAP Identify, SSH connect+auth, ICMP ping). The `activedirectory` monitor type dispatches to WinRM for Windows or SSH for realm-joined Linux, both reusing the AD integration's bind credentials. Writes one `AssetMonitorSample` per probe (`responseTimeMs` null = packet loss), updates `Asset.monitorStatus` / `lastResponseTimeMs` / `consecutiveFailures`, and emits one `monitor.status_changed` Event on `up ↔ down` transitions (threshold is `monitor.failureThreshold`). **(2) Telemetry pull** when `lastTelemetryAt + (telemetryIntervalSec ?? monitor.telemetryIntervalSeconds)` has elapsed — CPU% + memory snapshot via FortiOS `/api/v2/monitor/system/resource/usage` or SNMP HOST-RESOURCES-MIB. Writes one `AssetTelemetrySample`. **(3) System info pull** when `lastSystemInfoAt + (systemInfoIntervalSec ?? monitor.systemInfoIntervalSeconds)` has elapsed — interfaces (FortiOS `/monitor/system/interface` or SNMP IF-MIB) + storage (SNMP HOST-RESOURCES-MIB only). Writes N `AssetInterfaceSample` rows + M `AssetStorageSample` rows; also mirrors per-interface IP+MAC into `Asset.associatedIps` (preserving manual entries). ICMP/SSH cannot deliver telemetry/system-info; WinRM/AD return supported=false until WMI Enumerate-over-WS-Management lands. Once a day the job prunes each of the three sample tables independently using `monitor.sampleRetentionDays` / `telemetryRetentionDays` / `systemInfoRetentionDays`. |
 
 ---
 
@@ -687,7 +735,7 @@ Vanilla JavaScript SPA served from `/public/`. No build step — plain ES module
 - Conflict resolution slide-over panel (Events page)
 - First-run setup wizard (`setup.html`) backed by `src/setup/`
 - Asset list shows a Monitor pill column (Monitored / Pending / Down / Unmonitored). The bulk-action toolbar opens a Monitoring modal that applies one type + credential to every selected row.
-- Asset edit and details modals are tab-based (General + Monitoring). The Monitoring tab on the edit modal grays out the type dropdown for integration-owned assets (FMG/FortiGate-discovered firewalls and AD-discovered Windows hosts); the details modal renders an SVG response-time chart (24h / 7d / 30d) plus a "Probe now" button for assets admins.
+- Asset edit modal is tab-based (General + Monitoring). The details modal has three tabs (General + System + Monitoring). The Monitoring tab on the edit modal grays out the type dropdown for integration-owned assets (FMG/FortiGate-discovered firewalls and AD-discovered Windows hosts); the Monitoring details tab renders an SVG response-time chart (24h / 7d / 30d) plus a "Probe now" button for assets admins. The **System** tab shows a CPU+memory dual-line chart (1h / 24h / 7d / 30d), an Interfaces table (admin/oper status, speed, IP, MAC, in/out octets), and a Storage table (mount, used, total, %); empty-state messages render for unmonitored assets, ICMP/SSH-monitored assets, and WinRM/AD-monitored assets (the last is a placeholder until WMI Enumerate-over-WS-Management lands).
 - Server Settings → **Credentials** tab manages the stored SNMP / WinRM / SSH credentials (admin-only). Secrets are masked in every GET; resubmitting the mask preserves the stored value on PUT.
 
 ---
