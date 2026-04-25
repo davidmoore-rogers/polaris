@@ -172,6 +172,44 @@ const api = {
       return request("GET", `/assets/${id}/monitor-history` + (qs.length ? "?" + qs.join("&") : ""));
     },
     probeNow:             (id)  => request("POST", `/assets/${id}/probe-now`),
+    // System tab — telemetry, system-info snapshot, per-interface counters, per-mountpoint storage.
+    systemInfo:           (id)  => request("GET", `/assets/${id}/system-info`),
+    telemetryHistory:     (id, opts) => {
+      if (typeof opts === "string") opts = { range: opts };
+      opts = opts || {};
+      var qs = [];
+      if (opts.from && opts.to) {
+        qs.push("from=" + encodeURIComponent(opts.from));
+        qs.push("to="   + encodeURIComponent(opts.to));
+      } else if (opts.range) {
+        qs.push("range=" + encodeURIComponent(opts.range));
+      }
+      return request("GET", `/assets/${id}/telemetry-history` + (qs.length ? "?" + qs.join("&") : ""));
+    },
+    interfaceHistory:     (id, ifName, opts) => {
+      if (typeof opts === "string") opts = { range: opts };
+      opts = opts || {};
+      var qs = ["ifName=" + encodeURIComponent(ifName)];
+      if (opts.from && opts.to) {
+        qs.push("from=" + encodeURIComponent(opts.from));
+        qs.push("to="   + encodeURIComponent(opts.to));
+      } else if (opts.range) {
+        qs.push("range=" + encodeURIComponent(opts.range));
+      }
+      return request("GET", `/assets/${id}/interface-history?` + qs.join("&"));
+    },
+    storageHistory:       (id, mountPath, opts) => {
+      if (typeof opts === "string") opts = { range: opts };
+      opts = opts || {};
+      var qs = ["mountPath=" + encodeURIComponent(mountPath)];
+      if (opts.from && opts.to) {
+        qs.push("from=" + encodeURIComponent(opts.from));
+        qs.push("to="   + encodeURIComponent(opts.to));
+      } else if (opts.range) {
+        qs.push("range=" + encodeURIComponent(opts.range));
+      }
+      return request("GET", `/assets/${id}/storage-history?` + qs.join("&"));
+    },
   },
   integrations: {
     list:   ()       => request("GET", "/integrations"),

@@ -14,7 +14,12 @@ import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
 import { getIpHistory, getHistorySettings, updateHistorySettings, pruneOldHistory } from "../../services/assetIpHistoryService.js";
-import { getMonitorSettings, updateMonitorSettings, probeAsset, recordProbeResult } from "../../services/monitoringService.js";
+import {
+  getMonitorSettings, updateMonitorSettings,
+  probeAsset, recordProbeResult,
+  collectTelemetry, recordTelemetryResult,
+  collectSystemInfo, recordSystemInfoResult,
+} from "../../services/monitoringService.js";
 
 const router = Router();
 
@@ -61,10 +66,14 @@ function isIntegrationLockedType(t: string | null | undefined): boolean {
 }
 
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
-  monitored:           z.boolean().optional(),
-  monitorType:         MonitorTypeEnum.nullable().optional(),
-  monitorCredentialId: z.string().uuid().nullable().optional(),
-  monitorIntervalSec:  z.number().int().min(5).max(86400).nullable().optional(),
+  monitored:             z.boolean().optional(),
+  monitorType:           MonitorTypeEnum.nullable().optional(),
+  monitorCredentialId:   z.string().uuid().nullable().optional(),
+  monitorIntervalSec:    z.number().int().min(5).max(86400).nullable().optional(),
+  // Per-asset cadence overrides for the System tab. Null falls back to
+  // monitor.telemetryIntervalSeconds / systemInfoIntervalSeconds.
+  telemetryIntervalSec:  z.number().int().min(15).max(86400).nullable().optional(),
+  systemInfoIntervalSec: z.number().int().min(60).max(86400).nullable().optional(),
 });
 
 /**
@@ -220,12 +229,23 @@ router.get("/monitor-settings", async (_req, res, next) => {
 router.put("/monitor-settings", requireAssetsAdmin, async (req, res, next) => {
   try {
     const body = z.object({
-      intervalSeconds:     z.number().int().min(5).max(86400).optional(),
-      failureThreshold:    z.number().int().min(1).max(100).optional(),
-      sampleRetentionDays: z.number().int().min(0).max(3650).optional(),
+      intervalSeconds:           z.number().int().min(5).max(86400).optional(),
+      failureThreshold:          z.number().int().min(1).max(100).optional(),
+      sampleRetentionDays:       z.number().int().min(0).max(3650).optional(),
+      // System tab cadences. Telemetry minimum 15s (anything faster wastes
+      // probes; the data only changes meaningfully every minute or so).
+      // System info minimum 60s (interface scrapes are heavier).
+      telemetryIntervalSeconds:  z.number().int().min(15).max(86400).optional(),
+      systemInfoIntervalSeconds: z.number().int().min(60).max(86400).optional(),
+      telemetryRetentionDays:    z.number().int().min(0).max(3650).optional(),
+      systemInfoRetentionDays:   z.number().int().min(0).max(3650).optional(),
     }).parse(req.body);
     const next = await updateMonitorSettings(body);
-    logEvent({ action: "monitor.settings.updated", actor: req.session?.username, message: `Monitor settings updated (interval ${next.intervalSeconds}s, threshold ${next.failureThreshold}, retention ${next.sampleRetentionDays}d)` });
+    logEvent({
+      action: "monitor.settings.updated",
+      actor: req.session?.username,
+      message: `Monitor settings updated (probe ${next.intervalSeconds}s/threshold ${next.failureThreshold}/retain ${next.sampleRetentionDays}d, telemetry ${next.telemetryIntervalSeconds}s/retain ${next.telemetryRetentionDays}d, sysinfo ${next.systemInfoIntervalSeconds}s/retain ${next.systemInfoRetentionDays}d)`,
+    });
     res.json(next);
   } catch (err) { next(err); }
 });
@@ -367,13 +387,227 @@ router.get("/:id/monitor-history", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/v1/assets/:id/probe-now — run a one-off probe immediately (assets admin)
+// POST /api/v1/assets/:id/probe-now — run a one-off probe immediately (assets admin).
+// Triggers all three cadences (response-time, telemetry, system info) so the
+// asset details panel refreshes everything at once instead of waiting for the
+// scheduler to come around.
 router.post("/:id/probe-now", requireAssetsAdmin, async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const result = await probeAsset(id);
     await recordProbeResult(id, result);
+    // Telemetry + system info on best-effort — failures don't fail the probe.
+    try {
+      const tr = await collectTelemetry(id);
+      await recordTelemetryResult(id, tr);
+    } catch { /* ignore */ }
+    try {
+      const sr = await collectSystemInfo(id);
+      await recordSystemInfoResult(id, sr);
+    } catch { /* ignore */ }
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// ─── System tab endpoints ──────────────────────────────────────────────────
+//
+// Telemetry, interface, and storage histories live on /assets/:id/... and
+// share the same range/from-to query semantics as /monitor-history. BigInt
+// columns are coerced to Number on the way out — interface octets up to
+// 2^53-1 (≈9 PB) fit safely.
+
+const RANGE_MS: Record<string, number> = {
+  "1h":  1 * 60 * 60 * 1000,
+  "24h": 24 * 60 * 60 * 1000,
+  "7d":  7  * 24 * 60 * 60 * 1000,
+  "30d": 30 * 24 * 60 * 60 * 1000,
+};
+
+function resolveRange(req: any): { since: Date; until: Date; rangeLabel: string } {
+  const fromQ = req.query.from ? String(req.query.from) : null;
+  const toQ   = req.query.to   ? String(req.query.to)   : null;
+  if (fromQ && toQ) {
+    const f = new Date(fromQ), t = new Date(toQ);
+    if (isNaN(+f) || isNaN(+t)) throw new AppError(400, "Invalid from/to date");
+    if (+f >= +t) throw new AppError(400, "from must be before to");
+    if (+t - +f > 365 * 24 * 60 * 60 * 1000) throw new AppError(400, "Custom range cannot exceed 1 year");
+    return { since: f, until: t, rangeLabel: "custom" };
+  }
+  const range = String(req.query.range || "24h");
+  const windowMs = RANGE_MS[range] ?? RANGE_MS["24h"];
+  const until = new Date();
+  return { since: new Date(+until - windowMs), until, rangeLabel: range };
+}
+
+function bigIntToNumber(v: bigint | null | undefined): number | null {
+  if (v == null) return null;
+  return Number(v);
+}
+
+// GET /assets/:id/telemetry-history?range=...|from=...&to=... — CPU+memory time series
+router.get("/:id/telemetry-history", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const { since, until, rangeLabel } = resolveRange(req);
+    const samples = await prisma.assetTelemetrySample.findMany({
+      where: { assetId: id, timestamp: { gte: since, lte: until } },
+      orderBy: { timestamp: "asc" },
+      select: { timestamp: true, cpuPct: true, memPct: true, memUsedBytes: true, memTotalBytes: true },
+    });
+    const rows = samples.map((s) => ({
+      timestamp:     s.timestamp,
+      cpuPct:        s.cpuPct,
+      memPct:        s.memPct,
+      memUsedBytes:  bigIntToNumber(s.memUsedBytes),
+      memTotalBytes: bigIntToNumber(s.memTotalBytes),
+    }));
+    const cpus = rows.map((r) => r.cpuPct).filter((x): x is number => typeof x === "number");
+    const mems = rows.map((r) => r.memPct ?? (r.memTotalBytes && r.memUsedBytes ? (r.memUsedBytes / r.memTotalBytes) * 100 : null))
+                     .filter((x): x is number => typeof x === "number");
+    res.json({
+      range: rangeLabel,
+      since,
+      until,
+      samples: rows,
+      stats: {
+        total:     rows.length,
+        avgCpuPct: cpus.length ? cpus.reduce((a, b) => a + b, 0) / cpus.length : null,
+        maxCpuPct: cpus.length ? Math.max(...cpus) : null,
+        avgMemPct: mems.length ? mems.reduce((a, b) => a + b, 0) / mems.length : null,
+        maxMemPct: mems.length ? Math.max(...mems) : null,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/system-info — latest interface + storage snapshot. Returns
+// every interface row tied to the most-recent system-info scrape timestamp,
+// plus the most-recent telemetry row. Used to populate the System tab grid
+// without requiring the client to make three separate calls.
+router.get("/:id/system-info", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: { id: true, monitored: true, monitorType: true, lastTelemetryAt: true, lastSystemInfoAt: true },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+
+    const [latestTelemetry, latestIfaceMeta, latestStorageMeta] = await Promise.all([
+      prisma.assetTelemetrySample.findFirst({
+        where: { assetId: id },
+        orderBy: { timestamp: "desc" },
+      }),
+      prisma.assetInterfaceSample.findFirst({
+        where: { assetId: id },
+        orderBy: { timestamp: "desc" },
+        select: { timestamp: true },
+      }),
+      prisma.assetStorageSample.findFirst({
+        where: { assetId: id },
+        orderBy: { timestamp: "desc" },
+        select: { timestamp: true },
+      }),
+    ]);
+
+    const interfaces = latestIfaceMeta
+      ? await prisma.assetInterfaceSample.findMany({
+          where: { assetId: id, timestamp: latestIfaceMeta.timestamp },
+          orderBy: { ifName: "asc" },
+        })
+      : [];
+    const storage = latestStorageMeta
+      ? await prisma.assetStorageSample.findMany({
+          where: { assetId: id, timestamp: latestStorageMeta.timestamp },
+          orderBy: { mountPath: "asc" },
+        })
+      : [];
+
+    res.json({
+      monitored: asset.monitored,
+      monitorType: asset.monitorType,
+      lastTelemetryAt: asset.lastTelemetryAt,
+      lastSystemInfoAt: asset.lastSystemInfoAt,
+      telemetry: latestTelemetry ? {
+        timestamp:     latestTelemetry.timestamp,
+        cpuPct:        latestTelemetry.cpuPct,
+        memPct:        latestTelemetry.memPct,
+        memUsedBytes:  bigIntToNumber(latestTelemetry.memUsedBytes),
+        memTotalBytes: bigIntToNumber(latestTelemetry.memTotalBytes),
+      } : null,
+      interfaces: interfaces.map((i) => ({
+        timestamp:   i.timestamp,
+        ifName:      i.ifName,
+        adminStatus: i.adminStatus,
+        operStatus:  i.operStatus,
+        speedBps:    bigIntToNumber(i.speedBps),
+        ipAddress:   i.ipAddress,
+        macAddress:  i.macAddress,
+        inOctets:    bigIntToNumber(i.inOctets),
+        outOctets:   bigIntToNumber(i.outOctets),
+      })),
+      storage: storage.map((s) => ({
+        timestamp:  s.timestamp,
+        mountPath:  s.mountPath,
+        totalBytes: bigIntToNumber(s.totalBytes),
+        usedBytes:  bigIntToNumber(s.usedBytes),
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/interface-history?ifName=...&range=... — per-interface counters
+router.get("/:id/interface-history", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const ifName = req.query.ifName ? String(req.query.ifName) : null;
+    if (!ifName) throw new AppError(400, "ifName query parameter is required");
+    const { since, until, rangeLabel } = resolveRange(req);
+    const samples = await prisma.assetInterfaceSample.findMany({
+      where: { assetId: id, ifName, timestamp: { gte: since, lte: until } },
+      orderBy: { timestamp: "asc" },
+    });
+    res.json({
+      range: rangeLabel,
+      ifName,
+      since,
+      until,
+      samples: samples.map((s) => ({
+        timestamp:   s.timestamp,
+        adminStatus: s.adminStatus,
+        operStatus:  s.operStatus,
+        speedBps:    bigIntToNumber(s.speedBps),
+        ipAddress:   s.ipAddress,
+        macAddress:  s.macAddress,
+        inOctets:    bigIntToNumber(s.inOctets),
+        outOctets:   bigIntToNumber(s.outOctets),
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/storage-history?mountPath=...&range=... — per-mountpoint usage
+router.get("/:id/storage-history", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const mountPath = req.query.mountPath ? String(req.query.mountPath) : null;
+    if (!mountPath) throw new AppError(400, "mountPath query parameter is required");
+    const { since, until, rangeLabel } = resolveRange(req);
+    const samples = await prisma.assetStorageSample.findMany({
+      where: { assetId: id, mountPath, timestamp: { gte: since, lte: until } },
+      orderBy: { timestamp: "asc" },
+    });
+    res.json({
+      range: rangeLabel,
+      mountPath,
+      since,
+      until,
+      samples: samples.map((s) => ({
+        timestamp:  s.timestamp,
+        totalBytes: bigIntToNumber(s.totalBytes),
+        usedBytes:  bigIntToNumber(s.usedBytes),
+      })),
+    });
   } catch (err) { next(err); }
 });
 
