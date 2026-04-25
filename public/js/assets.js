@@ -306,7 +306,6 @@ function renderAssetsPage() {
         (a.assetTag ? '<br><span class="asset-tag-label">' + escapeHtml(a.assetTag) + '</span>' : '') +
       '</td>' +
       '<td class="mono">' + ipCellHTML(a) + '</td>' +
-      '<td class="mono" style="font-size:0.8rem">' + macCellHTML(a) + '</td>' +
       '<td>' + _copyableCell(a.serialNumber) + '</td>' +
       '<td>' + assetTypeBadge(a.assetType) + '</td>' +
       '<td>' + assetStatusBadge(a) + '</td>' +
