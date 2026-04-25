@@ -1019,9 +1019,11 @@ async function openViewModal(id) {
       viewRow("Updated", formatDate(a.updatedAt)) +
     '</div>';
 
+    var systemHTML     = assetSystemViewHTML(a);
     var monitoringHTML = assetMonitoringViewHTML(a);
     var tabsHTML = _renderTabbedBody("asset-view", [
       { key: "general",    label: "General",    html: generalHTML },
+      { key: "system",     label: "System",     html: systemHTML },
       { key: "monitoring", label: "Monitoring", html: monitoringHTML },
     ]);
     bodyEl.innerHTML = '<div class="asset-panel-content">' + tabsHTML + '</div>';
@@ -1055,6 +1057,30 @@ async function openViewModal(id) {
       });
     }
     if (a.monitored) _loadMonitorHistoryFor(a.id, "24h");
+    if (a.monitored) _loadSystemTabFor(a.id, "24h");
+    var sysProbeBtn = document.getElementById("btn-asset-system-probe");
+    if (sysProbeBtn) {
+      sysProbeBtn.addEventListener("click", async function () {
+        sysProbeBtn.disabled = true;
+        try {
+          await api.assets.probeNow(a.id);
+          await _loadSystemTabFor(a.id, _currentSystemTabRange());
+          showToast("System info refreshed");
+        } catch (err) {
+          showToast(err.message || "Probe failed", "error");
+        } finally {
+          sysProbeBtn.disabled = false;
+        }
+      });
+    }
+    document.querySelectorAll(".asset-system-range-btn").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var range = b.getAttribute("data-range");
+        document.querySelectorAll(".asset-system-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+        b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+        _loadSystemTabFor(a.id, range);
+      });
+    });
     var probeBtn = document.getElementById("btn-asset-probe-now");
     if (probeBtn) {
       probeBtn.addEventListener("click", async function () {
@@ -1111,6 +1137,261 @@ async function openViewModal(id) {
     showToast(err.message, "error");
     closeAssetPanel();
   }
+}
+
+// ─── System tab ────────────────────────────────────────────────────────────
+//
+// Renders three sections: CPU/memory time-series charts, an interfaces table,
+// and a storage table. Telemetry is collected every ~60s, system info every
+// ~10min, so the charts are sparse compared to the response-time chart on
+// the Monitoring tab. ICMP/SSH-monitored assets render an empty-state message
+// because those probes can't deliver this data.
+
+function assetSystemViewHTML(a) {
+  if (!a) return '<p class="empty-state">No data.</p>';
+  if (!a.monitored) {
+    return '<div style="padding:1rem 0;color:var(--color-text-secondary)">' +
+      'Enable monitoring on this asset (Monitoring tab → Edit) to start collecting CPU/memory and interface data.' +
+    '</div>';
+  }
+  var t = a.monitorType;
+  if (t === "icmp" || t === "ssh") {
+    return '<div style="padding:1rem 0;color:var(--color-text-secondary)">' +
+      'System metrics are not available for ' + escapeHtml(t.toUpperCase()) + '-monitored assets — switch to SNMP, FortiOS, or WinRM to see CPU, memory, interfaces, and storage.' +
+    '</div>';
+  }
+  if (t === "winrm" || t === "activedirectory") {
+    return '<div style="padding:1rem 0;color:var(--color-text-secondary)">' +
+      'WinRM telemetry collection is not yet implemented. Use SNMP if you need CPU, memory, and interface metrics for this host today.' +
+    '</div>';
+  }
+  var rangeBtns =
+    '<button class="btn btn-sm btn-primary asset-system-range-btn" data-range="1h">1h</button>' +
+    '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="24h">24h</button>' +
+    '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="7d">7d</button>' +
+    '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="30d">30d</button>';
+  var probeBtn = canManageAssets()
+    ? '<button class="btn btn-sm btn-secondary" id="btn-asset-system-probe">Probe now</button>'
+    : '';
+  return (
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin:0.25rem 0 0.5rem">' +
+      '<h4 style="margin:0">CPU &amp; Memory</h4>' +
+      '<div style="display:flex;gap:6px">' + rangeBtns + ' ' + probeBtn + '</div>' +
+    '</div>' +
+    '<div id="asset-system-summary" style="display:flex;gap:1.25rem;flex-wrap:wrap;font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">' +
+      '<span>Loading…</span>' +
+    '</div>' +
+    '<div id="asset-system-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
+      'Loading samples…' +
+    '</div>' +
+    '<h4 style="margin:1.25rem 0 0.5rem">Interfaces</h4>' +
+    '<div id="asset-system-interfaces"><span class="empty-state">Loading…</span></div>' +
+    '<h4 style="margin:1.25rem 0 0.5rem">Storage</h4>' +
+    '<div id="asset-system-storage"><span class="empty-state">Loading…</span></div>'
+  );
+}
+
+function _currentSystemTabRange() {
+  var chart = document.getElementById("asset-system-chart");
+  return (chart && chart.dataset.range) || "24h";
+}
+
+async function _loadSystemTabFor(assetId, range) {
+  var chart   = document.getElementById("asset-system-chart");
+  var summary = document.getElementById("asset-system-summary");
+  var ifaces  = document.getElementById("asset-system-interfaces");
+  var storage = document.getElementById("asset-system-storage");
+  if (!chart) return;
+  chart.dataset.range = range || "24h";
+  chart.textContent = "Loading samples…";
+  if (summary) summary.innerHTML = "<span>Loading…</span>";
+  if (ifaces)  ifaces.innerHTML  = '<span class="empty-state">Loading…</span>';
+  if (storage) storage.innerHTML = '<span class="empty-state">Loading…</span>';
+
+  try {
+    var results = await Promise.all([
+      api.assets.telemetryHistory(assetId, range || "24h"),
+      api.assets.systemInfo(assetId),
+    ]);
+    var tel = results[0];
+    var si  = results[1];
+
+    _renderSystemChart(chart, tel);
+    _renderSystemSummary(summary, tel, si);
+    _renderInterfacesTable(ifaces, si);
+    _renderStorageTable(storage, si);
+  } catch (err) {
+    chart.textContent = "Error: " + (err.message || "failed to load");
+    if (summary) summary.innerHTML = "";
+    if (ifaces)  ifaces.innerHTML  = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
+    if (storage) storage.innerHTML = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
+  }
+}
+
+function _renderSystemSummary(container, tel, si) {
+  if (!container) return;
+  var parts = [];
+  var latest = (si && si.telemetry) || null;
+  if (latest) {
+    if (typeof latest.cpuPct === "number") parts.push('<span><strong>CPU:</strong> ' + latest.cpuPct.toFixed(1) + '%</span>');
+    if (typeof latest.memPct === "number") parts.push('<span><strong>Memory:</strong> ' + latest.memPct.toFixed(1) + '%</span>');
+    if (typeof latest.memUsedBytes === "number" && typeof latest.memTotalBytes === "number" && latest.memTotalBytes > 0) {
+      parts.push('<span>(' + _fmtBytes(latest.memUsedBytes) + ' / ' + _fmtBytes(latest.memTotalBytes) + ')</span>');
+    }
+    if (latest.timestamp) parts.push('<span style="opacity:0.7">as of ' + escapeHtml(formatDate(latest.timestamp)) + '</span>');
+  }
+  if (tel && tel.stats) {
+    var s = tel.stats;
+    var cpu = s.avgCpuPct != null ? ('avg ' + s.avgCpuPct.toFixed(1) + '%, max ' + s.maxCpuPct.toFixed(1) + '%') : '—';
+    var mem = s.avgMemPct != null ? ('avg ' + s.avgMemPct.toFixed(1) + '%, max ' + s.maxMemPct.toFixed(1) + '%') : '—';
+    parts.push('<span style="opacity:0.7">window: CPU ' + cpu + ' · Mem ' + mem + ' (' + s.total + ' samples)</span>');
+  }
+  container.innerHTML = parts.join("") || '<span>No telemetry samples yet.</span>';
+}
+
+function _renderInterfacesTable(container, si) {
+  if (!container) return;
+  var rows = (si && si.interfaces) || [];
+  if (rows.length === 0) {
+    container.innerHTML = '<p class="empty-state">No interface data yet — system info is collected every ~10 minutes after monitoring is enabled.</p>';
+    return;
+  }
+  var body = rows.map(function (i) {
+    var oper = i.operStatus  ? '<span class="status-pill status-pill-' + (i.operStatus  === "up" ? "active" : "decommissioned") + '">' + escapeHtml(i.operStatus) + '</span>' : '—';
+    var admin= i.adminStatus ? escapeHtml(i.adminStatus) : '—';
+    var speed = i.speedBps != null ? _fmtSpeed(i.speedBps) : '—';
+    return '<tr>' +
+      '<td class="mono">' + escapeHtml(i.ifName) + '</td>' +
+      '<td>' + admin + '</td>' +
+      '<td>' + oper + '</td>' +
+      '<td>' + speed + '</td>' +
+      '<td class="mono">' + escapeHtml(i.ipAddress || "—") + '</td>' +
+      '<td class="mono">' + escapeHtml(i.macAddress || "—") + '</td>' +
+      '<td>' + (i.inOctets  != null ? _fmtBytes(i.inOctets)  : '—') + '</td>' +
+      '<td>' + (i.outOctets != null ? _fmtBytes(i.outOctets) : '—') + '</td>' +
+    '</tr>';
+  }).join("");
+  container.innerHTML =
+    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+      '<th>Interface</th><th>Admin</th><th>Oper</th><th>Speed</th><th>IP</th><th>MAC</th><th>In</th><th>Out</th>' +
+    '</tr></thead><tbody>' + body + '</tbody></table></div>';
+}
+
+function _renderStorageTable(container, si) {
+  if (!container) return;
+  var rows = (si && si.storage) || [];
+  if (rows.length === 0) {
+    container.innerHTML = '<p class="empty-state">No storage data yet — only available for SNMP-monitored assets exposing HOST-RESOURCES-MIB.</p>';
+    return;
+  }
+  var body = rows.map(function (s) {
+    var pct = (s.totalBytes && s.usedBytes != null && s.totalBytes > 0) ? ((s.usedBytes / s.totalBytes) * 100) : null;
+    var pctStr = pct != null ? pct.toFixed(1) + '%' : '—';
+    return '<tr>' +
+      '<td class="mono">' + escapeHtml(s.mountPath) + '</td>' +
+      '<td>' + (s.usedBytes  != null ? _fmtBytes(s.usedBytes)  : '—') + '</td>' +
+      '<td>' + (s.totalBytes != null ? _fmtBytes(s.totalBytes) : '—') + '</td>' +
+      '<td>' + pctStr + '</td>' +
+    '</tr>';
+  }).join("");
+  container.innerHTML =
+    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+      '<th>Mount</th><th>Used</th><th>Total</th><th>Used %</th>' +
+    '</tr></thead><tbody>' + body + '</tbody></table></div>';
+}
+
+function _fmtBytes(n) {
+  if (n == null || isNaN(n)) return "—";
+  var units = ["B","KB","MB","GB","TB","PB"];
+  var i = 0, v = Math.abs(n);
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return (v < 10 && i > 0 ? v.toFixed(2) : v.toFixed(0)) + " " + units[i];
+}
+
+function _fmtSpeed(bps) {
+  if (bps == null || isNaN(bps)) return "—";
+  if (bps >= 1_000_000_000) return (bps / 1_000_000_000) + " Gbps";
+  if (bps >= 1_000_000)     return (bps / 1_000_000)     + " Mbps";
+  if (bps >= 1_000)         return (bps / 1_000)         + " Kbps";
+  return bps + " bps";
+}
+
+// Two-line CPU+Memory chart over the telemetry time window.
+function _renderSystemChart(container, data) {
+  var samples = (data && data.samples) || [];
+  if (samples.length === 0) {
+    container.textContent = "No telemetry samples in this range yet.";
+    return;
+  }
+  var W = container.clientWidth || 600;
+  var H = 200;
+  var padL = 44, padR = 10, padT = 10, padB = 36;
+  var innerW = W - padL - padR;
+  var innerH = H - padT - padB;
+
+  var t0 = new Date(samples[0].timestamp).getTime();
+  var t1 = new Date(samples[samples.length - 1].timestamp).getTime();
+  if (t1 === t0) t1 = t0 + 1;
+  var spanMs = t1 - t0;
+  var oneDayMs = 24 * 60 * 60 * 1000;
+  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  function fmtTick(ts) {
+    var d = new Date(ts);
+    if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+    return (d.getMonth() + 1) + "/" + d.getDate();
+  }
+
+  function pctFromSample(s) {
+    if (typeof s.memPct === "number") return s.memPct;
+    if (typeof s.memUsedBytes === "number" && typeof s.memTotalBytes === "number" && s.memTotalBytes > 0) {
+      return (s.memUsedBytes / s.memTotalBytes) * 100;
+    }
+    return null;
+  }
+  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
+  function yFor(p)  { return padT + innerH - (p / 100) * innerH; }
+
+  var cpuPts = samples.filter(function (s) { return typeof s.cpuPct === "number"; })
+                      .map(function (s) { return xFor(s.timestamp) + "," + yFor(s.cpuPct); }).join(" ");
+  var memPts = samples.map(function (s) { return { ts: s.timestamp, p: pctFromSample(s) }; })
+                      .filter(function (e) { return e.p != null; })
+                      .map(function (e) { return xFor(e.ts) + "," + yFor(e.p); }).join(" ");
+
+  var ticks = "";
+  for (var i = 0; i <= 4; i++) {
+    var v = 25 * i;
+    var y = padT + innerH - (v / 100) * innerH;
+    ticks +=
+      '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
+      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + v + '%</text>';
+  }
+  var xTicks = "";
+  var xTickCount = 5;
+  for (var j = 0; j <= xTickCount; j++) {
+    var tsTick = t0 + (t1 - t0) * (j / xTickCount);
+    var xPos = padL + (j / xTickCount) * innerW;
+    xTicks +=
+      '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
+      '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
+  }
+
+  var legend =
+    '<g font-size="10" fill="currentColor">' +
+      '<rect x="' + (W - padR - 110) + '" y="' + padT + '" width="10" height="10" fill="var(--color-accent)"/>' +
+      '<text x="' + (W - padR - 96) + '" y="' + (padT + 9) + '">CPU</text>' +
+      '<rect x="' + (W - padR - 60) + '" y="' + padT + '" width="10" height="10" fill="#f4a261"/>' +
+      '<text x="' + (W - padR - 46) + '" y="' + (padT + 9) + '">Memory</text>' +
+    '</g>';
+
+  container.innerHTML =
+    '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      ticks + xTicks +
+      (cpuPts ? '<polyline points="' + cpuPts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' : '') +
+      (memPts ? '<polyline points="' + memPts + '" fill="none" stroke="#f4a261" stroke-width="1.5"/>' : '') +
+      legend +
+    '</svg>';
+  container.style.alignItems = "stretch";
+  container.style.justifyContent = "flex-start";
 }
 
 function assetMonitoringViewHTML(a) {
