@@ -92,12 +92,33 @@
     setStatus(siteCache.length + " FortiGate" + (siteCache.length === 1 ? "" : "s") + " on the map");
   }
 
+  function monitorClass(site) {
+    if (!site.monitored) return "monitor-unmonitored";
+    switch (site.monitorHealth) {
+      case "up":       return "monitor-up";
+      case "degraded": return "monitor-degraded";
+      case "down":     return "monitor-down";
+      default:         return "monitor-unknown";
+    }
+  }
+
+  function monitorTooltipLine(site) {
+    if (!site.monitored) return "Unmonitored";
+    var samples = site.monitorRecentSamples || 0;
+    var failures = site.monitorRecentFailures || 0;
+    switch (site.monitorHealth) {
+      case "up":       return "Up — last " + samples + " samples ok";
+      case "degraded": return "Packet loss — " + failures + "/" + samples + " recent samples failed";
+      case "down":     return "Down — " + failures + "/" + samples + " samples failed";
+      default:         return "Monitored — no samples yet";
+    }
+  }
+
   function makeMarker(site) {
-    var statusClass = " status-" + (site.status || "active");
     var label = (site.hostname || "FG").slice(0, 3).toUpperCase();
     var icon = L.divIcon({
       className: "",
-      html: '<div class="fg-marker' + statusClass + '" aria-hidden="true">' + escapeHtml(label) + "</div>",
+      html: '<div class="fg-marker ' + monitorClass(site) + '" aria-hidden="true">' + escapeHtml(label) + "</div>",
       iconSize: [34, 34],
       iconAnchor: [17, 17],
     });
@@ -108,6 +129,7 @@
     marker.bindTooltip(
       '<strong>' + escapeHtml(site.hostname || "(unnamed)") + '</strong>' +
       (site.model ? '<br><span style="opacity:.8">' + escapeHtml(site.model) + '</span>' : "") +
+      '<br><span style="opacity:.8">' + escapeHtml(monitorTooltipLine(site)) + '</span>' +
       (site.subnetCount ? '<br>' + site.subnetCount + ' subnet' + (site.subnetCount === 1 ? '' : 's') : ''),
       { direction: "top", offset: [0, -12] }
     );
@@ -315,11 +337,26 @@
     }
   }
 
+  function fortigateNodeColor(fg) {
+    if (!fg.monitored) return "#757575"; // gray — unmonitored
+    switch (fg.monitorHealth) {
+      case "up":       return "#2e7d32"; // green
+      case "degraded": return "#f9a825"; // amber
+      case "down":     return "#c62828"; // red
+      default:         return "#9e9e9e"; // unknown — light gray
+    }
+  }
+
   function renderTopologyGraph(data) {
     var elements = [];
 
     elements.push({
-      data: { id: data.fortigate.id, label: data.fortigate.hostname || "FortiGate", role: "fortigate" },
+      data: {
+        id: data.fortigate.id,
+        label: data.fortigate.hostname || "FortiGate",
+        role: "fortigate",
+        nodeColor: fortigateNodeColor(data.fortigate),
+      },
     });
     (data.switches || []).forEach(function (s) {
       elements.push({
@@ -381,9 +418,14 @@
             "border-opacity": 0.85,
           },
         },
-        { selector: 'node[role="fortigate"]',   style: { "background-color": "#d32f2f", width: 64, height: 64, "font-weight": 700 } },
-        { selector: 'node[role="fortiswitch"]', style: { "background-color": "#1976d2" } },
-        { selector: 'node[role="fortiap"]',     style: { "background-color": "#388e3c", width: 36, height: 36 } },
+        // FortiGate node color is driven by its monitor health (computed
+        // server-side from the last 10 AssetMonitorSample rows).
+        { selector: 'node[role="fortigate"]',   style: { "background-color": "data(nodeColor)", width: 64, height: 64, "font-weight": 700 } },
+        // FortiSwitches and FortiAPs always render as dark gray: they sit
+        // behind the FortiGate, so Shelob can't independently verify their
+        // reachability — coloring them green/red would be misleading.
+        { selector: 'node[role="fortiswitch"]', style: { "background-color": "#37474f" } },
+        { selector: 'node[role="fortiap"]',     style: { "background-color": "#37474f", width: 36, height: 36 } },
         {
           selector: "edge",
           style: {

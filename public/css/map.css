@@ -93,7 +93,10 @@
   color: #7ab8ff;
 }
 
-/* Custom FortiGate marker (built from a div icon so we don't need PNG sprites) */
+/* Custom FortiGate marker (built from a div icon so we don't need PNG sprites).
+   Color is driven by monitor health, computed server-side from the last 10
+   AssetMonitorSample rows: gray when unmonitored, green when all 10 succeed,
+   amber when any failed, red when all 10 failed (= device down). */
 .fg-marker {
   width: 34px;
   height: 34px;
@@ -104,13 +107,15 @@
   font-weight: 700;
   font-size: 0.72rem;
   color: #fff;
-  background: #d32f2f;
+  background: #757575;
   box-shadow: 0 2px 6px rgba(0,0,0,0.4), 0 0 0 3px rgba(255,255,255,0.85);
   cursor: pointer;
 }
-.fg-marker.status-decommissioned { background: #607d8b; }
-.fg-marker.status-maintenance    { background: #f9a825; color: #222; }
-.fg-marker.status-storage        { background: #9e9e9e; }
+.fg-marker.monitor-unmonitored { background: #757575; }
+.fg-marker.monitor-unknown     { background: #9e9e9e; }
+.fg-marker.monitor-up          { background: #2e7d32; }
+.fg-marker.monitor-degraded    { background: #f9a825; color: #222; }
+.fg-marker.monitor-down        { background: #c62828; }
 
 /* ─── Topology modal layout ─────────────────────────────────────────────────── */
 .topology-layout {

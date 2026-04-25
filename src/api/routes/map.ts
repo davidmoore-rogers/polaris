@@ -32,6 +32,47 @@ function readTopology(raw: unknown): TopologyMeta {
   return {};
 }
 
+type MonitorHealth = "up" | "degraded" | "down" | "unknown";
+
+// Map view's traffic-light: examines the last 10 AssetMonitorSample rows for
+// the asset (independent of the global failureThreshold used by the rest of
+// the app — the map intentionally uses a fixed 10-sample window for a stable
+// at-a-glance signal).
+//   - all 10 failed                → down (red)
+//   - some failed, not all         → degraded (amber, "packet loss")
+//   - all succeeded                → up (green)
+//   - no samples or fewer than 10  → degraded if any failed, up if all good,
+//                                    unknown if zero samples
+function computeMonitorHealth(samples: { success: boolean }[]): MonitorHealth {
+  if (samples.length === 0) return "unknown";
+  const failed = samples.reduce((n, s) => n + (s.success ? 0 : 1), 0);
+  if (samples.length >= 10 && failed === samples.length) return "down";
+  if (failed === 0) return "up";
+  return "degraded";
+}
+
+// Fetch last-10 samples per asset and return a Map keyed by assetId. Issued
+// in parallel — N round-trips, but N is the FortiGate count and the endpoint
+// is rarely hit (one call per map page load).
+async function fetchRecentSampleStats(
+  assetIds: string[],
+): Promise<Map<string, { samples: number; failures: number; health: MonitorHealth }>> {
+  const out = new Map<string, { samples: number; failures: number; health: MonitorHealth }>();
+  await Promise.all(
+    assetIds.map(async (id) => {
+      const rows = await prisma.assetMonitorSample.findMany({
+        where: { assetId: id },
+        orderBy: { timestamp: "desc" },
+        take: 10,
+        select: { success: true },
+      });
+      const failures = rows.reduce((n, s) => n + (s.success ? 0 : 1), 0);
+      out.set(id, { samples: rows.length, failures, health: computeMonitorHealth(rows) });
+    }),
+  );
+  return out;
+}
+
 // ─── GET /map/sites ────────────────────────────────────────────────────────────
 // Every firewall asset with non-null lat/lng — one pin per managed FortiGate.
 router.get("/sites", async (_req, res, next) => {
@@ -53,9 +94,14 @@ router.get("/sites", async (_req, res, next) => {
         status: true,
         lastSeen: true,
         learnedLocation: true,
+        monitored: true,
       },
       orderBy: { hostname: "asc" },
     });
+
+    const monitorStats = await fetchRecentSampleStats(
+      sites.filter((s) => s.monitored).map((s) => s.id),
+    );
 
     // Subnet counts per FortiGate — the `fortigateDevice` column on Subnet
     // stores the FMG-side device name, which (for auto-discovered FortiGates)
@@ -74,10 +120,16 @@ router.get("/sites", async (_req, res, next) => {
     }
 
     res.json(
-      sites.map((s) => ({
-        ...s,
-        subnetCount: s.hostname ? countByName.get(s.hostname) ?? 0 : 0,
-      })),
+      sites.map((s) => {
+        const stats = s.monitored ? monitorStats.get(s.id) : null;
+        return {
+          ...s,
+          subnetCount: s.hostname ? countByName.get(s.hostname) ?? 0 : 0,
+          monitorHealth: s.monitored ? stats?.health ?? "unknown" : null,
+          monitorRecentSamples: stats?.samples ?? 0,
+          monitorRecentFailures: stats?.failures ?? 0,
+        };
+      }),
     );
   } catch (err) {
     next(err);
@@ -150,11 +202,16 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         longitude: true,
         assetType: true,
         fortinetTopology: true,
+        monitored: true,
       },
     });
     if (!fg || fg.assetType !== "firewall") {
       throw new AppError(404, "FortiGate not found");
     }
+
+    const fgMonitorStats = fg.monitored
+      ? (await fetchRecentSampleStats([fg.id])).get(fg.id) ?? null
+      : null;
 
     const fgHostname = fg.hostname || "";
 
@@ -261,6 +318,10 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         lastSeen: fg.lastSeen,
         latitude: fg.latitude,
         longitude: fg.longitude,
+        monitored: fg.monitored,
+        monitorHealth: fg.monitored ? fgMonitorStats?.health ?? "unknown" : null,
+        monitorRecentSamples: fgMonitorStats?.samples ?? 0,
+        monitorRecentFailures: fgMonitorStats?.failures ?? 0,
       },
       switches,
       aps,
