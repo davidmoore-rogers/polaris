@@ -298,21 +298,38 @@ export async function applyUpdate(): Promise<void> {
 
   try {
     // ── Step 1: Backup database ──
+    // Stream pg_dump → gzip → file so backup size isn't bounded by an
+    // in-memory buffer (we used to execAsync with maxBuffer=100MB and
+    // silently skip the backup once the dump exceeded that).
     setStep(0, "running");
     try {
       mkdirSync(BACKUP_DIR, { recursive: true });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       const backupFile = join(BACKUP_DIR, `shelob-pre-update-${readCurrentVersion()}-${ts}.sql.gz`);
 
-      await execAsync(
-        `pg_dump "${connUrl}" --no-owner --no-acl --clean --if-exists`,
-        { cwd: APP_DIR, timeout: 120000, maxBuffer: 100 * 1024 * 1024 }
-      ).then(async ({ stdout }) => {
-        // gzip the output
-        const { gzipSync } = await import("node:zlib");
-        const compressed = gzipSync(Buffer.from(stdout));
-        writeFileSync(backupFile, compressed);
+      const { createGzip } = await import("node:zlib");
+      const { createWriteStream } = await import("node:fs");
+      const { pipeline } = await import("node:stream/promises");
+
+      const dump = spawn(
+        "pg_dump",
+        [connUrl, "--no-owner", "--no-acl", "--clean", "--if-exists"],
+        { cwd: APP_DIR }
+      );
+      let dumpStderr = "";
+      dump.stderr.on("data", (chunk) => { dumpStderr += chunk.toString(); });
+      const dumpExit = new Promise<void>((resolve, reject) => {
+        dump.on("error", reject);
+        dump.on("close", (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`pg_dump exited with code ${code}: ${dumpStderr.trim() || "no stderr"}`));
+        });
       });
+
+      await Promise.all([
+        pipeline(dump.stdout, createGzip(), createWriteStream(backupFile)),
+        dumpExit,
+      ]);
 
       _status.backupFile = backupFile;
       const sizeKb = Math.round(
