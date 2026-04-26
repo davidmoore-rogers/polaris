@@ -1372,6 +1372,9 @@ function _renderInterfacesTable(container, si, asset) {
     container.innerHTML = '<p class="empty-state">No interface data yet — system info is collected every ~10 minutes after monitoring is enabled.</p>';
     return;
   }
+  rows = rows.slice().sort(function (a, b) {
+    return String(a.ifName || "").localeCompare(String(b.ifName || ""), undefined, { numeric: true, sensitivity: "base" });
+  });
   var monitored = new Set(((si && si.monitoredInterfaces) || (asset && asset.monitoredInterfaces) || []));
   var canEdit = canManageAssets();
   var body = rows.map(function (i) {
