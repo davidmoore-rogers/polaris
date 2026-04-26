@@ -214,6 +214,19 @@ async function probeFortinet(
   start: number,
 ): Promise<ProbeResult> {
   const cfg = integration.config || {};
+
+  // Optional SNMP override: when the integration has `monitorCredentialId`
+  // set to a stored SNMP credential, run sysUpTime via SNMP instead of the
+  // FortiOS REST API. SNMP typically responds in <50 ms vs hundreds of ms
+  // for the API path, which is the whole point of the override.
+  const credId = cfg.monitorCredentialId;
+  if (credId && typeof credId === "string") {
+    const cred = await prisma.credential.findUnique({ where: { id: credId } });
+    if (!cred) return finish(start, false, "Integration's monitor credential not found");
+    if (cred.type !== "snmp") return finish(start, false, `Integration's monitor credential must be SNMP (got "${cred.type}")`);
+    return await probeSnmp(host, cred.config as Record<string, unknown>, start);
+  }
+
   let apiUser  = "";
   let apiToken = "";
   if (integration.type === "fortimanager") {
@@ -528,9 +541,24 @@ export interface TemperatureSample {
   celsius:    number | null;
 }
 
+/**
+ * One row per FortiOS phase-1 IPsec tunnel. `status` rolls phase-2 selectors up
+ * to "up" / "down" / "partial". Bytes are summed across every phase-2 selector
+ * under this phase-1 and are cumulative — FortiOS resets when phase-1 renegotiates.
+ */
+export interface IpsecTunnelSample {
+  tunnelName:     string;
+  remoteGateway:  string | null;
+  status:         "up" | "down" | "partial";
+  incomingBytes:  number | null;
+  outgoingBytes:  number | null;
+  proxyIdCount:   number | null;
+}
+
 export interface SystemInfoSample {
-  interfaces: InterfaceSample[];
-  storage:    StorageSample[];
+  interfaces:    InterfaceSample[];
+  storage:       StorageSample[];
+  ipsecTunnels?: IpsecTunnelSample[];
 }
 
 export interface CollectionResult<T> {
@@ -668,7 +696,7 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
   try {
     if (type === "fortimanager" || type === "fortigate") {
       if (!asset.discoveredByIntegration) return { supported: true, error: "Originating integration not found" };
-      const data = await collectSystemInfoFortinet(targetIp, asset.discoveredByIntegration as any);
+      const data = await collectSystemInfoFortinet(targetIp, asset.discoveredByIntegration as any, { includeIpsec: true });
       return { supported: true, data };
     }
     if (type === "snmp") {
@@ -799,7 +827,11 @@ function clampPct(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-async function collectSystemInfoFortinet(host: string, integration: { type: string; config: Record<string, unknown> }): Promise<SystemInfoSample> {
+async function collectSystemInfoFortinet(
+  host: string,
+  integration: { type: string; config: Record<string, unknown> },
+  opts: { includeIpsec?: boolean } = {},
+): Promise<SystemInfoSample> {
   const fg = buildFortinetConfig(host, integration);
   if ("error" in fg) throw new Error(fg.error);
 
@@ -838,7 +870,67 @@ async function collectSystemInfoFortinet(host: string, integration: { type: stri
     // means the call genuinely failed.
     if (interfaces.length === 0) throw err;
   }
-  return { interfaces, storage: [] };
+  // IPsec tunnels are best-effort: older FortiOS firmwares 404 the endpoint,
+  // and a FortiGate without IPsec configured returns an empty list. Either
+  // way we should not fail the whole system-info pass — the System tab simply
+  // hides the section when the array is empty. Skipped entirely on the fast
+  // (per-minute) cadence so we don't hammer the endpoint.
+  const ipsecTunnels = opts.includeIpsec
+    ? await collectIpsecTunnelsFortinet(fg).catch(() => [] as IpsecTunnelSample[])
+    : undefined;
+  return { interfaces, storage: [], ipsecTunnels };
+}
+
+/**
+ * FortiOS exposes IPsec tunnels at /api/v2/monitor/vpn/ipsec. Each entry has
+ * a `proxyid` array of phase-2 selectors with their own status + byte
+ * counters; we roll them up into a single row per phase-1 tunnel for the
+ * System tab. Older firmwares 404 this endpoint — caller swallows the failure.
+ */
+async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTunnelSample[]> {
+  const res = await fgRequest<any>(fg, "GET", "/api/v2/monitor/vpn/ipsec", { query: { scope: "vdom" } });
+  const arr = Array.isArray(res?.results) ? res.results : (Array.isArray(res) ? res : []);
+  const out: IpsecTunnelSample[] = [];
+  for (const t of arr) {
+    if (!t || typeof t !== "object") continue;
+    const name = String((t as any).name || "").trim();
+    if (!name) continue;
+    const proxyArr = Array.isArray((t as any).proxyid) ? (t as any).proxyid : [];
+    let upCount = 0;
+    let downCount = 0;
+    let inBytes = 0;
+    let outBytes = 0;
+    let anyBytes = false;
+    for (const p of proxyArr) {
+      if (!p || typeof p !== "object") continue;
+      const s = String((p as any).status || "").toLowerCase();
+      if (s === "up") upCount++; else downCount++;
+      const ib = pickFiniteNumber((p as any).incoming_bytes);
+      const ob = pickFiniteNumber((p as any).outgoing_bytes);
+      if (ib != null) { inBytes  += ib; anyBytes = true; }
+      if (ob != null) { outBytes += ob; anyBytes = true; }
+    }
+    let status: "up" | "down" | "partial";
+    if (proxyArr.length === 0) {
+      // No phase-2 selectors reported — fall back to the phase-1 connect_count
+      // (>0 = up). Some FortiOS releases omit `proxyid` entirely on dial-up
+      // tunnels with no active children.
+      const cc = pickFiniteNumber((t as any).connect_count);
+      status = cc != null && cc > 0 ? "up" : "down";
+    } else if (downCount === 0) status = "up";
+    else if (upCount === 0)     status = "down";
+    else                        status = "partial";
+    const rgwy = (t as any).rgwy ?? (t as any).tun_id ?? null;
+    out.push({
+      tunnelName:    name,
+      remoteGateway: typeof rgwy === "string" && rgwy ? rgwy : null,
+      status,
+      incomingBytes: anyBytes ? inBytes  : null,
+      outgoingBytes: anyBytes ? outBytes : null,
+      proxyIdCount:  proxyArr.length || null,
+    });
+  }
+  return out;
 }
 
 function pickFiniteNumber(v: unknown): number | null {
@@ -1256,6 +1348,20 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
         })),
       });
     }
+    if (Array.isArray(d.ipsecTunnels) && d.ipsecTunnels.length > 0) {
+      await prisma.assetIpsecTunnelSample.createMany({
+        data: d.ipsecTunnels.map((t) => ({
+          assetId,
+          timestamp: now,
+          tunnelName:    t.tunnelName,
+          remoteGateway: t.remoteGateway,
+          status:        t.status,
+          incomingBytes: t.incomingBytes != null ? BigInt(Math.round(t.incomingBytes)) : null,
+          outgoingBytes: t.outgoingBytes != null ? BigInt(Math.round(t.outgoingBytes)) : null,
+          proxyIdCount:  t.proxyIdCount,
+        })),
+      });
+    }
     // Mirror per-interface IPs+MACs into Asset.associatedIps. Replaces what
     // the old FMG/FortiGate Phase 4b used to write — discovery no longer
     // populates interface IPs, so the System tab is the single source for
@@ -1545,16 +1651,17 @@ export async function pruneTelemetrySamples(): Promise<number> {
 }
 
 /**
- * Trim AssetInterfaceSample + AssetStorageSample rows older than the system
- * info retention window. Returns total rows removed across both tables.
+ * Trim AssetInterfaceSample + AssetStorageSample + AssetIpsecTunnelSample rows
+ * older than the system info retention window. Returns total rows removed.
  */
 export async function pruneSystemInfoSamples(): Promise<number> {
   const { systemInfoRetentionDays } = await getMonitorSettings();
   if (!systemInfoRetentionDays || systemInfoRetentionDays <= 0) return 0;
   const cutoff = new Date(Date.now() - systemInfoRetentionDays * 24 * 3600 * 1000);
-  const [ifaces, storage] = await Promise.all([
-    prisma.assetInterfaceSample.deleteMany({ where: { timestamp: { lt: cutoff } } }),
-    prisma.assetStorageSample.deleteMany({   where: { timestamp: { lt: cutoff } } }),
+  const [ifaces, storage, ipsec] = await Promise.all([
+    prisma.assetInterfaceSample.deleteMany({    where: { timestamp: { lt: cutoff } } }),
+    prisma.assetStorageSample.deleteMany({      where: { timestamp: { lt: cutoff } } }),
+    prisma.assetIpsecTunnelSample.deleteMany({  where: { timestamp: { lt: cutoff } } }),
   ]);
-  return ifaces.count + storage.count;
+  return ifaces.count + storage.count + ipsec.count;
 }

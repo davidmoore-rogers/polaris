@@ -308,6 +308,7 @@ model Asset {
   interfaceSamples AssetInterfaceSample[]
   storageSamples   AssetStorageSample[]
   temperatureSamples AssetTemperatureSample[]
+  ipsecTunnelSamples AssetIpsecTunnelSample[]
 
   @@index([ipAddress])
   @@index([macAddress])
@@ -404,6 +405,31 @@ model AssetTemperatureSample {
   @@index([assetId, timestamp])
   @@index([assetId, sensorName, timestamp])
   @@map("asset_temperature_samples")
+}
+
+// Per-tunnel IPsec snapshot, written on the system-info cadence. FortiOS only
+// (read from /api/v2/monitor/vpn/ipsec). One row per phase-1 tunnel; status
+// rolls phase-2 selectors up to "up" / "down" / "partial". Bytes are
+// cumulative — subtracting consecutive samples gives tunnel throughput.
+model AssetIpsecTunnelSample {
+  id             String   @id @default(uuid())
+  assetId        String
+  asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  timestamp      DateTime @default(now())
+  tunnelName     String
+  remoteGateway  String?
+  // "up" = every phase-2 selector is up; "down" = every selector down; "partial" = mix.
+  status         String
+  // Sum of incoming/outgoing bytes across every phase-2 selector under this
+  // phase-1. FortiOS resets the counter when phase-1 renegotiates, so the UI
+  // must treat decreases as a counter reset rather than negative throughput.
+  incomingBytes  BigInt?
+  outgoingBytes  BigInt?
+  proxyIdCount   Int?
+
+  @@index([assetId, timestamp])
+  @@index([assetId, tunnelName, timestamp])
+  @@map("asset_ipsec_tunnel_samples")
 }
 
 // Per-mountpoint storage snapshot, written alongside interface samples.

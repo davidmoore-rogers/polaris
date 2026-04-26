@@ -497,7 +497,7 @@ router.get("/:id/system-info", async (req, res, next) => {
     });
     if (!asset) throw new AppError(404, "Asset not found");
 
-    const [latestTelemetry, latestIfaceMeta, latestStorageMeta, latestTempMeta] = await Promise.all([
+    const [latestTelemetry, latestIfaceMeta, latestStorageMeta, latestTempMeta, latestIpsecMeta] = await Promise.all([
       prisma.assetTelemetrySample.findFirst({
         where: { assetId: id },
         orderBy: { timestamp: "desc" },
@@ -513,6 +513,11 @@ router.get("/:id/system-info", async (req, res, next) => {
         select: { timestamp: true },
       }),
       prisma.assetTemperatureSample.findFirst({
+        where: { assetId: id },
+        orderBy: { timestamp: "desc" },
+        select: { timestamp: true },
+      }),
+      prisma.assetIpsecTunnelSample.findFirst({
         where: { assetId: id },
         orderBy: { timestamp: "desc" },
         select: { timestamp: true },
@@ -539,6 +544,12 @@ router.get("/:id/system-info", async (req, res, next) => {
       ? await prisma.assetTemperatureSample.findMany({
           where: { assetId: id, timestamp: latestTempMeta.timestamp },
           orderBy: { sensorName: "asc" },
+        })
+      : [];
+    const ipsecTunnels = latestIpsecMeta
+      ? await prisma.assetIpsecTunnelSample.findMany({
+          where: { assetId: id, timestamp: latestIpsecMeta.timestamp },
+          orderBy: { tunnelName: "asc" },
         })
       : [];
 
@@ -577,6 +588,15 @@ router.get("/:id/system-info", async (req, res, next) => {
         timestamp:  t.timestamp,
         sensorName: t.sensorName,
         celsius:    t.celsius,
+      })),
+      ipsecTunnels: ipsecTunnels.map((t) => ({
+        timestamp:     t.timestamp,
+        tunnelName:    t.tunnelName,
+        remoteGateway: t.remoteGateway,
+        status:        t.status,
+        incomingBytes: bigIntToNumber(t.incomingBytes),
+        outgoingBytes: bigIntToNumber(t.outgoingBytes),
+        proxyIdCount:  t.proxyIdCount,
       })),
       monitoredInterfaces: (asset.monitoredInterfaces ?? []) as string[],
     });
@@ -642,6 +662,34 @@ router.get("/:id/temperature-history", async (req, res, next) => {
         maxCelsius: cs.length ? Math.max(...cs) : null,
         minCelsius: cs.length ? Math.min(...cs) : null,
       },
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/ipsec-history?tunnelName=...&range=... — per-tunnel state + bytes
+router.get("/:id/ipsec-history", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const tunnelName = req.query.tunnelName ? String(req.query.tunnelName) : null;
+    if (!tunnelName) throw new AppError(400, "tunnelName query parameter is required");
+    const { since, until, rangeLabel } = resolveRange(req);
+    const samples = await prisma.assetIpsecTunnelSample.findMany({
+      where: { assetId: id, tunnelName, timestamp: { gte: since, lte: until } },
+      orderBy: { timestamp: "asc" },
+    });
+    res.json({
+      range: rangeLabel,
+      tunnelName,
+      since,
+      until,
+      samples: samples.map((s) => ({
+        timestamp:     s.timestamp,
+        status:        s.status,
+        remoteGateway: s.remoteGateway,
+        incomingBytes: bigIntToNumber(s.incomingBytes),
+        outgoingBytes: bigIntToNumber(s.outgoingBytes),
+        proxyIdCount:  s.proxyIdCount,
+      })),
     });
   } catch (err) { next(err); }
 });

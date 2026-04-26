@@ -1997,6 +1997,28 @@ function _renderTelemetrySubChart(container, samples, opts) {
   _observeChartResize(container, function (c) { _renderTelemetrySubChart(c, samples, opts); });
 }
 
+// Human-readable label for the probe method behind the response-time chart.
+// Mirrors the routing in monitoringService.probeAsset / getAdMonitorProtocol so
+// the chart self-describes (FortiOS REST vs SNMP vs ICMP vs WinRM vs SSH).
+// AD-locked assets are split into AD-WinRM (Windows hosts) and AD-SSH (realm-
+// joined Linux) since the probe path differs.
+function _probeMethodLabel(a) {
+  if (!a) return "—";
+  var t = a.monitorType;
+  if (t === "fortimanager" || t === "fortigate") return "FortiOS REST API";
+  if (t === "snmp") return "SNMP GET";
+  if (t === "winrm") return "WinRM";
+  if (t === "ssh") return "SSH";
+  if (t === "icmp") return "ICMP ping";
+  if (t === "activedirectory") {
+    var os = (a.os || "").toLowerCase();
+    if (os.indexOf("linux") >= 0) return "AD-locked SSH";
+    if (os.indexOf("windows") >= 0) return "AD-locked WinRM";
+    return "Active Directory";
+  }
+  return t || "—";
+}
+
 function assetMonitoringViewHTML(a) {
   if (!a) return '<p class="empty-state">No data.</p>';
   var pill = assetMonitorBadge(a);
@@ -2047,7 +2069,12 @@ function assetMonitoringViewHTML(a) {
       viewRow("Consecutive Failures", String(consec)) +
     '</div>' +
     '<div style="display:flex;align-items:center;justify-content:space-between;margin:1.5rem 0 0.5rem">' +
-      '<h4 style="margin:0">Response time</h4>' +
+      '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +
+        '<h4 style="margin:0">Response time</h4>' +
+        '<span title="Probe method used to measure response time" style="font-size:0.75rem;padding:2px 6px;border-radius:10px;background:var(--color-bg-elevated);border:1px solid var(--color-border);color:var(--color-text-secondary)">' +
+          escapeHtml(_probeMethodLabel(a)) +
+        '</span>' +
+      '</div>' +
       '<div style="display:flex;gap:6px">' + rangeBtns + ' ' + probeBtn + '</div>' +
     '</div>' +
     customPanel +
@@ -2598,6 +2625,307 @@ function _renderIfaceErrorChart(container, derived) {
   });
   _addChartScreenshotButton(container, "Interface errors");
   _observeChartResize(container, function (c) { _renderIfaceErrorChart(c, derived); });
+}
+
+// ─── IPsec tunnel slide-over ───────────────────────────────────────────────
+//
+// Sits on top of the asset details panel like the interface slide-over does.
+// Shows a status timeline (each sample colored up/partial/down) and per-
+// interval throughput derived from the cumulative byte counters. No auto-
+// refresh because IPsec rides the system-info cadence (~10 min) — closing
+// and reopening the panel is fast enough.
+
+function _ensureIpsecPanelDOM() {
+  if (document.getElementById("ipsec-panel-overlay")) return;
+  var overlay = document.createElement("div");
+  overlay.id = "ipsec-panel-overlay";
+  overlay.className = "slideover-overlay slideover-nested";
+  overlay.style.zIndex = "1099";
+  overlay.innerHTML =
+    '<div class="slideover" id="ipsec-panel" style="z-index:1100">' +
+      '<div class="slideover-resize-handle"></div>' +
+      '<div class="slideover-header">' +
+        '<div class="slideover-header-top">' +
+          '<h3 id="ipsec-panel-title">IPsec tunnel</h3>' +
+          '<button class="btn-icon" id="ipsec-panel-close" title="Close">&times;</button>' +
+        '</div>' +
+        '<div class="slideover-meta" id="ipsec-panel-meta"></div>' +
+      '</div>' +
+      '<div class="slideover-body" id="ipsec-panel-body"><p class="empty-state" style="padding:1rem 1.25rem">Loading…</p></div>' +
+      '<div class="slideover-footer" id="ipsec-panel-footer"></div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener("click", function (e) {
+    if (e.target === overlay) closeIpsecPanel();
+  });
+  document.getElementById("ipsec-panel-close").addEventListener("click", closeIpsecPanel);
+  initSlideoverResize(document.getElementById("ipsec-panel"), "shelob.panel.width.ipsec");
+}
+
+function closeIpsecPanel() {
+  var ov = document.getElementById("ipsec-panel-overlay");
+  if (ov) ov.classList.remove("open");
+}
+
+async function openIpsecTunnelDetailPanel(asset, tunnelName) {
+  if (!asset || !tunnelName) return;
+  _ensureIpsecPanelDOM();
+  var titleEl  = document.getElementById("ipsec-panel-title");
+  var metaEl   = document.getElementById("ipsec-panel-meta");
+  var bodyEl   = document.getElementById("ipsec-panel-body");
+  var footerEl = document.getElementById("ipsec-panel-footer");
+  titleEl.textContent = "IPsec — " + tunnelName;
+  metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
+  bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 1.25rem">Loading…</p>';
+  footerEl.innerHTML =
+    '<button class="btn btn-sm btn-secondary" id="btn-ipsec-panel-close-btn">Close</button>';
+  requestAnimationFrame(function () {
+    document.getElementById("ipsec-panel-overlay").classList.add("open");
+  });
+  document.getElementById("btn-ipsec-panel-close-btn").addEventListener("click", closeIpsecPanel);
+
+  var rangeBtns =
+    '<button class="btn btn-sm btn-primary ipsec-range-btn" data-range="24h">24h</button>' +
+    '<button class="btn btn-sm btn-secondary ipsec-range-btn" data-range="7d">7d</button>' +
+    '<button class="btn btn-sm btn-secondary ipsec-range-btn" data-range="30d">30d</button>';
+
+  bodyEl.innerHTML =
+    '<div style="padding:1rem 1.25rem">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
+        '<h4 style="margin:0">Tunnel state &amp; throughput</h4>' +
+        '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
+      '</div>' +
+      '<div id="ipsec-stats" style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
+      '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Status</h5>' +
+      '<div id="ipsec-status-chart" class="ipsec-chart-box"></div>' +
+      '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Incoming (bps)</h5>' +
+      '<div id="ipsec-in-chart" class="ipsec-chart-box"></div>' +
+      '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Outgoing (bps)</h5>' +
+      '<div id="ipsec-out-chart" class="ipsec-chart-box"></div>' +
+    '</div>';
+  document.querySelectorAll(".ipsec-chart-box").forEach(function (el) {
+    el.style.background = "var(--color-bg-elevated)";
+    el.style.border = "1px solid var(--color-border)";
+    el.style.borderRadius = "6px";
+    el.style.padding = "0.5rem";
+    el.style.minHeight = "140px";
+    el.style.display = "flex";
+    el.style.alignItems = "center";
+    el.style.justifyContent = "center";
+    el.style.color = "var(--color-text-secondary)";
+    el.style.fontSize = "0.85rem";
+  });
+
+  await _loadIpsecHistoryFor(asset.id, tunnelName, "24h");
+  document.querySelectorAll(".ipsec-range-btn").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var range = b.getAttribute("data-range");
+      document.querySelectorAll(".ipsec-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+      b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+      _loadIpsecHistoryFor(asset.id, tunnelName, range);
+    });
+  });
+}
+
+async function _loadIpsecHistoryFor(assetId, tunnelName, range) {
+  var statusEl = document.getElementById("ipsec-status-chart");
+  var inEl     = document.getElementById("ipsec-in-chart");
+  var outEl    = document.getElementById("ipsec-out-chart");
+  var stats    = document.getElementById("ipsec-stats");
+  if (!statusEl) return;
+  statusEl.textContent = inEl.textContent = outEl.textContent = "Loading samples…";
+  if (stats) stats.textContent = "Loading…";
+  try {
+    var data = await api.assets.ipsecHistory(assetId, tunnelName, range || "24h");
+    var samples = data.samples || [];
+    var derived = _deriveIpsecThroughput(samples);
+    if (stats) stats.textContent = _ipsecStatsLabel(samples, derived);
+    _renderIpsecStatusChart(statusEl, samples);
+    _renderIpsecBpsChart(inEl,  derived, "in");
+    _renderIpsecBpsChart(outEl, derived, "out");
+  } catch (err) {
+    statusEl.textContent = inEl.textContent = outEl.textContent = "Error: " + (err.message || "failed to load");
+    if (stats) stats.textContent = "";
+  }
+}
+
+// FortiOS resets phase-1 byte counters when the SA renegotiates, so a
+// negative delta is treated as a counter reset (skipped) rather than negative
+// throughput. Same convention as _derivePerIntervalSeries for interfaces.
+function _deriveIpsecThroughput(samples) {
+  var out = [];
+  for (var i = 1; i < samples.length; i++) {
+    var prev = samples[i - 1];
+    var cur  = samples[i];
+    var dtMs = new Date(cur.timestamp) - new Date(prev.timestamp);
+    if (dtMs <= 0) continue;
+    var dtSec = dtMs / 1000;
+    function delta(a, b) {
+      if (typeof a !== "number" || typeof b !== "number") return null;
+      var d = b - a;
+      return d < 0 ? null : d;
+    }
+    var inB  = delta(prev.incomingBytes, cur.incomingBytes);
+    var outB = delta(prev.outgoingBytes, cur.outgoingBytes);
+    out.push({
+      timestamp: cur.timestamp,
+      inBps:  inB  != null ? (inB  * 8) / dtSec : null,
+      outBps: outB != null ? (outB * 8) / dtSec : null,
+    });
+  }
+  return out;
+}
+
+function _ipsecStatsLabel(samples, derived) {
+  if (samples.length === 0) return "No samples in this range yet.";
+  var up = 0, down = 0, partial = 0;
+  samples.forEach(function (s) {
+    if (s.status === "up") up++;
+    else if (s.status === "down") down++;
+    else partial++;
+  });
+  var inMax = 0, outMax = 0, inSum = 0, outSum = 0, inN = 0, outN = 0;
+  derived.forEach(function (d) {
+    if (typeof d.inBps  === "number") { inSum  += d.inBps;  inN++;  if (d.inBps  > inMax)  inMax  = d.inBps; }
+    if (typeof d.outBps === "number") { outSum += d.outBps; outN++; if (d.outBps > outMax) outMax = d.outBps; }
+  });
+  return samples.length + " samples · " + up + " up / " + partial + " partial / " + down + " down · " +
+    "in avg " + _fmtBitsPerSec(inN ? inSum / inN : 0) +
+    " · in peak " + _fmtBitsPerSec(inMax) +
+    " · out avg " + _fmtBitsPerSec(outN ? outSum / outN : 0) +
+    " · out peak " + _fmtBitsPerSec(outMax);
+}
+
+function _renderIpsecStatusChart(container, samples) {
+  if (samples.length === 0) {
+    container.textContent = "No samples in this range yet.";
+    return;
+  }
+  var W = container.clientWidth || 600, H = 60;
+  var padL = 56, padR = 10, padT = 8, padB = 22;
+  var innerW = W - padL - padR, innerH = H - padT - padB;
+  var t0 = new Date(samples[0].timestamp).getTime();
+  var t1 = new Date(samples[samples.length - 1].timestamp).getTime();
+  if (t1 === t0) t1 = t0 + 1;
+  var spanMs = t1 - t0, oneDayMs = 86400000;
+  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  function fmtTick(ts) {
+    var d = new Date(ts);
+    if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+    return (d.getMonth() + 1) + "/" + d.getDate();
+  }
+  function colorFor(s) {
+    if (s === "up") return "#2a9d8f";
+    if (s === "down") return "#d32f2f";
+    return "#f4a261";
+  }
+  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
+  // Each sample covers from its own x to the next sample's x (or the chart edge).
+  var bars = samples.map(function (s, i) {
+    var x  = xFor(s.timestamp);
+    var x2 = i + 1 < samples.length ? xFor(samples[i + 1].timestamp) : padL + innerW;
+    var w = Math.max(1, x2 - x);
+    return '<rect class="chart-hit" x="' + x + '" y="' + padT + '" width="' + w + '" height="' + innerH + '" fill="' + colorFor(s.status) + '" opacity="0.85" style="cursor:crosshair"' +
+      ' data-ts="' + escapeHtml(String(s.timestamp)) + '"' +
+      ' data-status="' + escapeHtml(s.status) + '"/>';
+  }).join("");
+  var xTicks = "";
+  for (var j = 0; j <= 5; j++) {
+    var tsTick = t0 + (t1 - t0) * (j / 5);
+    var xPos = padL + (j / 5) * innerW;
+    xTicks +=
+      '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
+      '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
+  }
+  var legend =
+    '<g font-size="10" fill="currentColor">' +
+      '<rect x="' + padL + '" y="2" width="10" height="6" fill="#2a9d8f"/><text x="' + (padL + 14) + '" y="8">up</text>' +
+      '<rect x="' + (padL + 50) + '" y="2" width="10" height="6" fill="#f4a261"/><text x="' + (padL + 64) + '" y="8">partial</text>' +
+      '<rect x="' + (padL + 110) + '" y="2" width="10" height="6" fill="#d32f2f"/><text x="' + (padL + 124) + '" y="8">down</text>' +
+    '</g>';
+  container.innerHTML =
+    '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      bars + xTicks + legend +
+    '</svg>' + CHART_TOOLTIP_HTML;
+  container.style.position = "relative";
+  container.style.alignItems = "stretch";
+  container.style.justifyContent = "flex-start";
+  _wireChartTooltip(container, function (target) {
+    return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+      '<div>Status: ' + escapeHtml(target.getAttribute("data-status")) + '</div>';
+  });
+  _addChartScreenshotButton(container, "IPsec status");
+  _observeChartResize(container, function (c) { _renderIpsecStatusChart(c, samples); });
+}
+
+function _renderIpsecBpsChart(container, derived, side) {
+  var values = derived.map(function (d) { return { ts: d.timestamp, v: side === "in" ? d.inBps : d.outBps }; })
+                     .filter(function (e) { return typeof e.v === "number"; });
+  if (values.length === 0) {
+    container.textContent = "No throughput samples yet — IPsec data is collected on the system-info cadence (~10 min).";
+    return;
+  }
+  var W = container.clientWidth || 600, H = 160;
+  var padL = 56, padR = 10, padT = 10, padB = 28;
+  var innerW = W - padL - padR, innerH = H - padT - padB;
+  var t0 = new Date(values[0].ts).getTime();
+  var t1 = new Date(values[values.length - 1].ts).getTime();
+  if (t1 === t0) t1 = t0 + 1;
+  var spanMs = t1 - t0, oneDayMs = 86400000;
+  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  function fmtTick(ts) {
+    var d = new Date(ts);
+    if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+    return (d.getMonth() + 1) + "/" + d.getDate();
+  }
+  var maxV = Math.max.apply(null, values.map(function (e) { return e.v; }));
+  if (maxV < 1000) maxV = 1000;
+  function tidyCeil(n) {
+    var exp = Math.pow(10, Math.floor(Math.log10(n)));
+    var mant = n / exp;
+    var step = mant <= 1 ? 1 : mant <= 2 ? 2 : mant <= 5 ? 5 : 10;
+    return step * exp;
+  }
+  var ceil = tidyCeil(maxV);
+  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
+  function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
+  var pts = values.map(function (e) { return xFor(e.ts) + "," + yFor(e.v); }).join(" ");
+  var hits = values.map(function (e) {
+    return '<circle class="chart-hit" cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="6" fill="transparent" style="cursor:crosshair"' +
+      ' data-ts="' + escapeHtml(String(e.ts)) + '" data-v="' + e.v + '"/>';
+  }).join("");
+  var ticks = "";
+  for (var i = 0; i <= 4; i++) {
+    var v = ceil * i / 4;
+    var y = padT + innerH - (i / 4) * innerH;
+    ticks +=
+      '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
+      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + _fmtBitsPerSec(v) + '</text>';
+  }
+  var xTicks = "";
+  for (var j = 0; j <= 5; j++) {
+    var tsTick = t0 + (t1 - t0) * (j / 5);
+    var xPos = padL + (j / 5) * innerW;
+    xTicks +=
+      '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
+      '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
+  }
+  var color = side === "in" ? "var(--color-accent)" : "#f4a261";
+  container.innerHTML =
+    '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      ticks + xTicks +
+      '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>' +
+      hits +
+    '</svg>' + CHART_TOOLTIP_HTML;
+  container.style.position = "relative";
+  container.style.alignItems = "stretch";
+  container.style.justifyContent = "flex-start";
+  _wireChartTooltip(container, function (target) {
+    return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+      '<div>' + (side === "in" ? "Incoming" : "Outgoing") + ': ' + _fmtBitsPerSec(Number(target.getAttribute("data-v"))) + '</div>';
+  });
+  _addChartScreenshotButton(container, side === "in" ? "IPsec incoming" : "IPsec outgoing");
+  _observeChartResize(container, function (c) { _renderIpsecBpsChart(c, derived, side); });
 }
 
 async function openIpHistoryModal(assetId, label) {

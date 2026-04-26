@@ -223,6 +223,18 @@ const api = {
       }
       return request("GET", `/assets/${id}/temperature-history` + (qs.length ? "?" + qs.join("&") : ""));
     },
+    ipsecHistory:         (id, tunnelName, opts) => {
+      if (typeof opts === "string") opts = { range: opts };
+      opts = opts || {};
+      var qs = ["tunnelName=" + encodeURIComponent(tunnelName)];
+      if (opts.from && opts.to) {
+        qs.push("from=" + encodeURIComponent(opts.from));
+        qs.push("to="   + encodeURIComponent(opts.to));
+      } else if (opts.range) {
+        qs.push("range=" + encodeURIComponent(opts.range));
+      }
+      return request("GET", `/assets/${id}/ipsec-history?` + qs.join("&"));
+    },
   },
   integrations: {
     list:   ()       => request("GET", "/integrations"),
