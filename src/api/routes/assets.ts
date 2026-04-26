@@ -519,9 +519,13 @@ router.get("/:id/system-info", async (req, res, next) => {
       }),
     ]);
 
-    const interfaces = latestIfaceMeta
+    // Prefer the full system-info pass timestamp so the table renders every
+    // interface — the fast cadence only writes pinned ones, and ordering by
+    // raw timestamp would otherwise hide unpinned interfaces.
+    const ifaceTimestamp = asset.lastSystemInfoAt ?? latestIfaceMeta?.timestamp ?? null;
+    const interfaces = ifaceTimestamp
       ? await prisma.assetInterfaceSample.findMany({
-          where: { assetId: id, timestamp: latestIfaceMeta.timestamp },
+          where: { assetId: id, timestamp: ifaceTimestamp },
           orderBy: { ifName: "asc" },
         })
       : [];
