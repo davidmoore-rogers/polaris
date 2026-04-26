@@ -1276,7 +1276,6 @@ function assetSystemViewHTML(a) {
     '</div>' +
     '<h4 style="margin:1.25rem 0 0.5rem">Temperatures</h4>' +
     '<div id="asset-system-temps"><span class="empty-state">Loading…</span></div>' +
-    '<div id="asset-system-temp-chart" style="display:none;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;margin-top:0.5rem;min-height:160px"></div>' +
     '<h4 style="margin:1.25rem 0 0.5rem">Interfaces</h4>' +
     '<div id="asset-system-interfaces"><span class="empty-state">Loading…</span></div>' +
     '<h4 style="margin:1.25rem 0 0.5rem">Storage</h4>' +
@@ -1300,7 +1299,6 @@ async function _loadSystemTabFor(assetId, range, asset) {
   var ifaces  = document.getElementById("asset-system-interfaces");
   var storage = document.getElementById("asset-system-storage");
   var temps   = document.getElementById("asset-system-temps");
-  var tempChart = document.getElementById("asset-system-temp-chart");
   var ipsec   = document.getElementById("asset-system-ipsec");
   if (!chart) return;
   chart.dataset.range = range || "24h";
@@ -1315,17 +1313,15 @@ async function _loadSystemTabFor(assetId, range, asset) {
     var results = await Promise.all([
       api.assets.telemetryHistory(assetId, range || "24h"),
       api.assets.systemInfo(assetId),
-      api.assets.temperatureHistory(assetId, range || "24h").catch(function () { return { samples: [] }; }),
     ]);
     var tel    = results[0];
     var si     = results[1];
-    var tempH  = results[2];
 
     _renderSystemChart(chart, tel);
     _renderSystemSummary(summary, tel, si);
     _renderInterfacesTable(ifaces, si, asset);
-    _renderStorageTable(storage, si);
-    _renderTemperatures(temps, tempChart, si, tempH);
+    _renderStorageTable(storage, si, asset);
+    _renderTemperatures(temps, si, asset);
     _renderIpsecTunnels(ipsec, si, asset);
   } catch (err) {
     chart.textContent = "Error: " + (err.message || "failed to load");
@@ -1457,12 +1453,20 @@ function _renderIpsecTunnels(container, si, asset) {
     }
     return;
   }
+  var monitored = new Set(((si && si.monitoredIpsecTunnels) || (asset && asset.monitoredIpsecTunnels) || []));
+  var canEdit = canManageAssets();
   var body = rows.map(function (t) {
     var pillClass = t.status === "up" ? "active" : t.status === "down" ? "decommissioned" : "maintenance";
     var pill = '<span class="status-pill status-pill-' + pillClass + '">' + escapeHtml(t.status) + '</span>';
     var name = '<a href="#" class="asset-ipsec-link" data-name="' + escapeHtml(t.tunnelName) + '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(t.tunnelName) + '</a>';
     var p2 = t.proxyIdCount != null ? String(t.proxyIdCount) : '—';
+    var checked = monitored.has(t.tunnelName) ? ' checked' : '';
+    var disabled = canEdit ? '' : ' disabled';
+    var checkbox =
+      '<input type="checkbox" class="asset-ipsec-toggle" data-name="' + escapeHtml(t.tunnelName) + '"' + checked + disabled +
+      ' title="Poll this tunnel every minute (response-time cadence)">';
     return '<tr>' +
+      '<td style="text-align:center;width:1%">' + checkbox + '</td>' +
       '<td class="mono">' + name + '</td>' +
       '<td>' + pill + '</td>' +
       '<td class="mono">' + escapeHtml(t.remoteGateway || '—') + '</td>' +
@@ -1473,9 +1477,32 @@ function _renderIpsecTunnels(container, si, asset) {
   }).join("");
   container.innerHTML =
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+      '<th title="Pin this tunnel for fast-cadence polling">Poll 1m</th>' +
       '<th>Tunnel</th><th>Status</th><th>Remote gateway</th><th>In (cumulative)</th><th>Out (cumulative)</th><th>P2</th>' +
     '</tr></thead><tbody>' + body + '</tbody></table></div>';
 
+  if (canEdit && asset) {
+    container.querySelectorAll(".asset-ipsec-toggle").forEach(function (cb) {
+      cb.addEventListener("change", async function () {
+        var name = cb.getAttribute("data-name");
+        var current = new Set(monitored);
+        if (cb.checked) current.add(name); else current.delete(name);
+        cb.disabled = true;
+        try {
+          await api.assets.update(asset.id, { monitoredIpsecTunnels: Array.from(current) });
+          monitored = current;
+          if (si) si.monitoredIpsecTunnels = Array.from(current);
+          if (asset) asset.monitoredIpsecTunnels = Array.from(current);
+          showToast(cb.checked ? ("Polling " + name + " every minute") : ("Stopped fast-polling " + name));
+        } catch (err) {
+          cb.checked = !cb.checked;
+          showToast(err.message || "Failed to update", "error");
+        } finally {
+          cb.disabled = false;
+        }
+      });
+    });
+  }
   container.querySelectorAll(".asset-ipsec-link").forEach(function (link) {
     link.addEventListener("click", function (e) {
       e.preventDefault();
@@ -1484,18 +1511,27 @@ function _renderIpsecTunnels(container, si, asset) {
   });
 }
 
-function _renderStorageTable(container, si) {
+function _renderStorageTable(container, si, asset) {
   if (!container) return;
   var rows = (si && si.storage) || [];
   if (rows.length === 0) {
     container.innerHTML = '<p class="empty-state">No storage data yet — only available for SNMP-monitored assets exposing HOST-RESOURCES-MIB.</p>';
     return;
   }
+  var monitored = new Set(((si && si.monitoredStorage) || (asset && asset.monitoredStorage) || []));
+  var canEdit = canManageAssets();
   var body = rows.map(function (s) {
     var pct = (s.totalBytes && s.usedBytes != null && s.totalBytes > 0) ? ((s.usedBytes / s.totalBytes) * 100) : null;
     var pctStr = pct != null ? pct.toFixed(1) + '%' : '—';
+    var checked = monitored.has(s.mountPath) ? ' checked' : '';
+    var disabled = canEdit ? '' : ' disabled';
+    var checkbox =
+      '<input type="checkbox" class="asset-storage-toggle" data-mount="' + escapeHtml(s.mountPath) + '"' + checked + disabled +
+      ' title="Poll this mountpoint every minute (response-time cadence)">';
+    var nameCell = '<a href="#" class="asset-storage-link" data-mount="' + escapeHtml(s.mountPath) + '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(s.mountPath) + '</a>';
     return '<tr>' +
-      '<td class="mono">' + escapeHtml(s.mountPath) + '</td>' +
+      '<td style="text-align:center;width:1%">' + checkbox + '</td>' +
+      '<td class="mono">' + nameCell + '</td>' +
       '<td>' + (s.usedBytes  != null ? _fmtBytes(s.usedBytes)  : '—') + '</td>' +
       '<td>' + (s.totalBytes != null ? _fmtBytes(s.totalBytes) : '—') + '</td>' +
       '<td>' + pctStr + '</td>' +
@@ -1503,48 +1539,73 @@ function _renderStorageTable(container, si) {
   }).join("");
   container.innerHTML =
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+      '<th title="Pin this mountpoint for fast-cadence polling">Poll 1m</th>' +
       '<th>Mount</th><th>Used</th><th>Total</th><th>Used %</th>' +
     '</tr></thead><tbody>' + body + '</tbody></table></div>';
+
+  if (canEdit && asset) {
+    container.querySelectorAll(".asset-storage-toggle").forEach(function (cb) {
+      cb.addEventListener("change", async function () {
+        var mount = cb.getAttribute("data-mount");
+        var current = new Set(monitored);
+        if (cb.checked) current.add(mount); else current.delete(mount);
+        cb.disabled = true;
+        try {
+          await api.assets.update(asset.id, { monitoredStorage: Array.from(current) });
+          monitored = current;
+          if (si) si.monitoredStorage = Array.from(current);
+          if (asset) asset.monitoredStorage = Array.from(current);
+          showToast(cb.checked ? ("Polling " + mount + " every minute") : ("Stopped fast-polling " + mount));
+        } catch (err) {
+          cb.checked = !cb.checked;
+          showToast(err.message || "Failed to update", "error");
+        } finally {
+          cb.disabled = false;
+        }
+      });
+    });
+  }
+  container.querySelectorAll(".asset-storage-link").forEach(function (link) {
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      openStorageDetailPanel(asset, link.getAttribute("data-mount"));
+    });
+  });
 }
 
-// Renders the latest-snapshot temperature table and a shared time-series
-// chart underneath. Hides both sections cleanly when the device exposes no
-// temperature sensors. The chart groups samples by `sensorName`; each sensor
-// gets its own color.
-function _renderTemperatures(container, chartContainer, si, history) {
+// Latest-snapshot temperature table. Each sensor name is a clickable link
+// that opens the per-sensor history slide-over (see openSensorDetailPanel).
+// We dropped the shared multi-sensor chart this section used to render — too
+// many sensors on one chart was unreadable; one sensor per modal is clearer.
+function _renderTemperatures(container, si, asset) {
+  if (!container) return;
   var latest = (si && si.temperatures) || [];
   if (latest.length === 0) {
-    if (container) container.innerHTML = '<p class="empty-state">No temperature sensors reported by this device.</p>';
-    if (chartContainer) chartContainer.style.display = "none";
+    container.innerHTML = '<p class="empty-state">No temperature sensors reported by this device.</p>';
     return;
   }
-  if (container) {
-    var rows = latest.map(function (t) {
-      var c = (typeof t.celsius === "number") ? t.celsius.toFixed(1) + ' °C' : '—';
-      var f = (typeof t.celsius === "number") ? (t.celsius * 9 / 5 + 32).toFixed(1) + ' °F' : '—';
-      return '<tr>' +
-        '<td>' + escapeHtml(t.sensorName) + '</td>' +
-        '<td class="mono">' + c + '</td>' +
-        '<td class="mono" style="color:var(--color-text-secondary)">' + f + '</td>' +
-      '</tr>';
-    }).join("");
-    container.innerHTML =
-      '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-        '<th>Sensor</th><th>Celsius</th><th>Fahrenheit</th>' +
-      '</tr></thead><tbody>' + rows + '</tbody></table></div>';
-  }
-  if (chartContainer && history && Array.isArray(history.samples) && history.samples.length > 0) {
-    chartContainer.style.display = "block";
-    _renderTemperatureChart(chartContainer, history);
-  } else if (chartContainer) {
-    chartContainer.style.display = "none";
-  }
-}
+  var rows = latest.map(function (t) {
+    var c = (typeof t.celsius === "number") ? t.celsius.toFixed(1) + ' °C' : '—';
+    var f = (typeof t.celsius === "number") ? (t.celsius * 9 / 5 + 32).toFixed(1) + ' °F' : '—';
+    var name = '<a href="#" class="asset-temp-link" data-name="' + escapeHtml(t.sensorName) + '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(t.sensorName) + '</a>';
+    return '<tr>' +
+      '<td>' + name + '</td>' +
+      '<td class="mono">' + c + '</td>' +
+      '<td class="mono" style="color:var(--color-text-secondary)">' + f + '</td>' +
+    '</tr>';
+  }).join("");
+  container.innerHTML =
+    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+      '<th>Sensor</th><th>Celsius</th><th>Fahrenheit</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>';
 
-var TEMP_PALETTE = [
-  "var(--color-accent)", "#f4a261", "#2a9d8f", "#e76f51",
-  "#9b5de5", "#80b918", "#f15bb5", "#3a86ff",
-];
+  container.querySelectorAll(".asset-temp-link").forEach(function (link) {
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      openSensorDetailPanel(asset, link.getAttribute("data-name"));
+    });
+  });
+}
 
 // Bound a chart's X axis to the *requested* time window (since/until from the
 // *History API) rather than the data's first/last timestamp. Without this,
@@ -1566,34 +1627,145 @@ function _chartTimeBounds(samples, since, until) {
   return { t0: t0, t1: t1 };
 }
 
-function _renderTemperatureChart(container, history) {
-  var samples = history.samples || [];
-  if (samples.length === 0) {
-    container.innerHTML = '<div style="color:var(--color-text-secondary);padding:0.75rem">No temperature samples in this range yet.</div>';
-    return;
-  }
-  // Group by sensor; preserve first-seen order for stable colors.
-  var groups = new Map();
-  samples.forEach(function (s) {
-    if (!groups.has(s.sensorName)) groups.set(s.sensorName, []);
-    if (typeof s.celsius === "number") groups.get(s.sensorName).push(s);
+// ─── Per-sensor temperature slide-over ─────────────────────────────────────
+//
+// Sits on top of the asset details panel like the interface and IPsec slide-
+// overs. One sensor per modal — the old shared chart was unreadable when a
+// device exposed dozens of sensors.
+
+function _ensureSensorPanelDOM() {
+  if (document.getElementById("sensor-panel-overlay")) return;
+  var overlay = document.createElement("div");
+  overlay.id = "sensor-panel-overlay";
+  overlay.className = "slideover-overlay slideover-nested";
+  overlay.style.zIndex = "1099";
+  overlay.innerHTML =
+    '<div class="slideover" id="sensor-panel" style="z-index:1100">' +
+      '<div class="slideover-resize-handle"></div>' +
+      '<div class="slideover-header">' +
+        '<div class="slideover-header-top">' +
+          '<h3 id="sensor-panel-title">Sensor</h3>' +
+          '<button class="btn-icon" id="sensor-panel-close" title="Close">&times;</button>' +
+        '</div>' +
+        '<div class="slideover-meta" id="sensor-panel-meta"></div>' +
+      '</div>' +
+      '<div class="slideover-body" id="sensor-panel-body"><p class="empty-state" style="padding:1rem 1.25rem">Loading…</p></div>' +
+      '<div class="slideover-footer" id="sensor-panel-footer"></div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener("click", function (e) {
+    if (e.target === overlay) closeSensorPanel();
   });
-  var sensors = Array.from(groups.keys());
-  if (sensors.length === 0) {
-    container.innerHTML = '<div style="color:var(--color-text-secondary);padding:0.75rem">No readable temperature samples.</div>';
-    return;
+  document.getElementById("sensor-panel-close").addEventListener("click", closeSensorPanel);
+  initSlideoverResize(document.getElementById("sensor-panel"), "shelob.panel.width.sensor");
+}
+
+function closeSensorPanel() {
+  var ov = document.getElementById("sensor-panel-overlay");
+  if (ov) ov.classList.remove("open");
+}
+
+async function openSensorDetailPanel(asset, sensorName) {
+  if (!asset || !sensorName) return;
+  _ensureSensorPanelDOM();
+  var titleEl  = document.getElementById("sensor-panel-title");
+  var metaEl   = document.getElementById("sensor-panel-meta");
+  var bodyEl   = document.getElementById("sensor-panel-body");
+  var footerEl = document.getElementById("sensor-panel-footer");
+  titleEl.textContent = "Temperature — " + sensorName;
+  metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
+  bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 1.25rem">Loading…</p>';
+  footerEl.innerHTML =
+    '<button class="btn btn-sm btn-secondary" id="btn-sensor-panel-close-btn">Close</button>';
+  requestAnimationFrame(function () {
+    document.getElementById("sensor-panel-overlay").classList.add("open");
+  });
+  document.getElementById("btn-sensor-panel-close-btn").addEventListener("click", closeSensorPanel);
+
+  var rangeBtns =
+    '<button class="btn btn-sm btn-primary sensor-range-btn" data-range="24h">24h</button>' +
+    '<button class="btn btn-sm btn-secondary sensor-range-btn" data-range="7d">7d</button>' +
+    '<button class="btn btn-sm btn-secondary sensor-range-btn" data-range="30d">30d</button>';
+
+  bodyEl.innerHTML =
+    '<div style="padding:1rem 1.25rem">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
+        '<h4 style="margin:0">' + escapeHtml(sensorName) + '</h4>' +
+        '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
+      '</div>' +
+      '<div id="sensor-stats" style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
+      '<div id="sensor-chart" class="sensor-chart-box"></div>' +
+    '</div>';
+  var box = document.getElementById("sensor-chart");
+  if (box) {
+    box.style.background = "var(--color-bg-elevated)";
+    box.style.border = "1px solid var(--color-border)";
+    box.style.borderRadius = "6px";
+    box.style.padding = "0.5rem";
+    box.style.minHeight = "240px";
+    box.style.display = "flex";
+    box.style.alignItems = "center";
+    box.style.justifyContent = "center";
+    box.style.color = "var(--color-text-secondary)";
+    box.style.fontSize = "0.85rem";
   }
 
-  var W = container.clientWidth || 600;
-  var H = 200;
-  var padL = 44, padR = 10, padT = 10, padB = 36;
-  var innerW = W - padL - padR;
-  var innerH = H - padT - padB;
+  await _loadSensorHistoryFor(asset.id, sensorName, "24h");
+  document.querySelectorAll(".sensor-range-btn").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var range = b.getAttribute("data-range");
+      document.querySelectorAll(".sensor-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+      b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+      _loadSensorHistoryFor(asset.id, sensorName, range);
+    });
+  });
+}
 
-  var bounds = _chartTimeBounds(samples, history && history.since, history && history.until);
+async function _loadSensorHistoryFor(assetId, sensorName, range) {
+  var chartEl = document.getElementById("sensor-chart");
+  var stats   = document.getElementById("sensor-stats");
+  if (!chartEl) return;
+  chartEl.textContent = "Loading samples…";
+  if (stats) stats.textContent = "Loading…";
+  try {
+    var data = await api.assets.temperatureHistory(assetId, { sensorName: sensorName, range: range || "24h" });
+    var samples = (data.samples || []).filter(function (s) { return typeof s.celsius === "number"; });
+    if (stats) {
+      if (samples.length === 0) {
+        stats.textContent = "No samples in this range yet.";
+      } else {
+        var st = data.stats || {};
+        var avg = (typeof st.avgCelsius === "number") ? st.avgCelsius.toFixed(1) : "—";
+        var mn  = (typeof st.minCelsius === "number") ? st.minCelsius.toFixed(1) : "—";
+        var mx  = (typeof st.maxCelsius === "number") ? st.maxCelsius.toFixed(1) : "—";
+        stats.textContent = samples.length + " samples · avg " + avg + " °C · min " + mn + " °C · max " + mx + " °C";
+      }
+    }
+    _renderSensorChart(chartEl, samples, {
+      since:   data.since,
+      until:   data.until,
+      subject: sensorName,
+    });
+  } catch (err) {
+    chartEl.textContent = "Error: " + (err.message || "failed to load");
+    if (stats) stats.textContent = "";
+  }
+}
+
+function _renderSensorChart(container, samples, opts) {
+  opts = opts || {};
+  if (samples.length === 0) {
+    container.textContent = "No temperature samples in this range yet.";
+    return;
+  }
+  var W = container.clientWidth || 600, H = 240;
+  // Extra left/bottom/top padding for the rotated Y-axis label, X-axis label, and chart title.
+  var padL = 64, padR = 14, padT = 28, padB = 52;
+  var innerW = W - padL - padR, innerH = H - padT - padB;
+
+  var bounds = _chartTimeBounds(samples, opts.since, opts.until);
   var t0 = bounds.t0, t1 = bounds.t1;
-  var spanMs = t1 - t0;
-  var oneDayMs = 24 * 60 * 60 * 1000;
+  var spanMs = t1 - t0, oneDayMs = 86400000;
   function pad2(n) { return n < 10 ? "0" + n : String(n); }
   function fmtTick(ts) {
     var d = new Date(ts);
@@ -1601,10 +1773,9 @@ function _renderTemperatureChart(container, history) {
     return (d.getMonth() + 1) + "/" + d.getDate();
   }
 
-  var allCs = [];
-  groups.forEach(function (rs) { rs.forEach(function (r) { allCs.push(r.celsius); }); });
-  var minC = Math.min.apply(null, allCs);
-  var maxC = Math.max.apply(null, allCs);
+  var allC = samples.map(function (s) { return s.celsius; });
+  var minC = Math.min.apply(null, allC);
+  var maxC = Math.max.apply(null, allC);
   if (minC === maxC) { minC -= 1; maxC += 1; }
   // 5° padding so a rock-steady sensor still gets a visible band
   minC = Math.floor((minC - 2) / 5) * 5;
@@ -1613,15 +1784,10 @@ function _renderTemperatureChart(container, history) {
   function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
   function yFor(c)  { return padT + innerH - ((c - minC) / (maxC - minC)) * innerH; }
 
-  var lines = sensors.map(function (name, i) {
-    var color = TEMP_PALETTE[i % TEMP_PALETTE.length];
-    var pts = groups.get(name).map(function (r) { return xFor(r.timestamp) + "," + yFor(r.celsius); }).join(" ");
-    return pts ? '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>' : '';
-  }).join("");
-  var hits = samples.filter(function (s) { return typeof s.celsius === "number"; }).map(function (s) {
+  var pts = samples.map(function (s) { return xFor(s.timestamp) + "," + yFor(s.celsius); }).join(" ");
+  var hits = samples.map(function (s) {
     return '<circle class="chart-hit" cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.celsius) + '" r="6" fill="transparent" style="cursor:crosshair"' +
       ' data-ts="' + escapeHtml(String(s.timestamp)) + '"' +
-      ' data-name="' + escapeHtml(s.sensorName) + '"' +
       ' data-c="' + s.celsius + '"/>';
   }).join("");
 
@@ -1631,7 +1797,7 @@ function _renderTemperatureChart(container, history) {
     var y = padT + innerH - (i / 4) * innerH;
     ticks +=
       '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
-      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + v.toFixed(0) + '°C</text>';
+      '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + v.toFixed(0) + '°C</text>';
   }
   var xTicks = "";
   for (var j = 0; j <= 5; j++) {
@@ -1641,26 +1807,36 @@ function _renderTemperatureChart(container, history) {
       '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
       '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
   }
-  var legend = sensors.slice(0, 6).map(function (name, idx) {
-    var color = TEMP_PALETTE[idx % TEMP_PALETTE.length];
-    return '<g font-size="10" fill="currentColor"><rect x="' + (padL + idx * 110) + '" y="2" width="10" height="10" fill="' + color + '"/>' +
-      '<text x="' + (padL + idx * 110 + 14) + '" y="11">' + escapeHtml(name).slice(0, 14) + '</text></g>';
-  }).join("");
+
+  var titleY = 14;
+  var xLabelY = padT + innerH + 38;
+  var yLabelX = 14;
+  var yLabelY = padT + innerH / 2;
+  var labels =
+    '<text x="' + (W / 2) + '" y="' + titleY + '" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">' +
+      escapeHtml(opts.subject || "Temperature") +
+    '</text>' +
+    '<text x="' + (padL + innerW / 2) + '" y="' + xLabelY + '" text-anchor="middle" font-size="11" fill="currentColor">Time</text>' +
+    '<text x="' + yLabelX + '" y="' + yLabelY + '" text-anchor="middle" font-size="11" fill="currentColor"' +
+      ' transform="rotate(-90 ' + yLabelX + ' ' + yLabelY + ')">Temperature (°C)</text>';
 
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
-      ticks + xTicks + lines + legend + hits +
+      labels + ticks + xTicks +
+      '<polyline points="' + pts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
+      hits +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
+  container.style.alignItems = "stretch";
+  container.style.justifyContent = "flex-start";
 
   _wireChartTooltip(container, function (target) {
+    var c = Number(target.getAttribute("data-c"));
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
-      '<div>' + escapeHtml(target.getAttribute("data-name")) + '</div>' +
-      '<div>' + Number(target.getAttribute("data-c")).toFixed(1) + ' °C / ' +
-      (Number(target.getAttribute("data-c")) * 9 / 5 + 32).toFixed(1) + ' °F</div>';
+      '<div>' + c.toFixed(1) + ' °C / ' + (c * 9 / 5 + 32).toFixed(1) + ' °F</div>';
   });
-  _addChartScreenshotButton(container, "Temperature", { yAxis: "Temperature (°C)" });
-  _observeChartResize(container, function (c) { _renderTemperatureChart(c, history); });
+  _addChartScreenshotButton(container, "Temperature", { yAxis: "Temperature (°C)", subject: opts.subject });
+  _observeChartResize(container, function (c) { _renderSensorChart(c, samples, opts); });
 }
 
 function _fmtBytes(n) {
@@ -3040,6 +3216,300 @@ function _renderIpsecBpsChart(container, derived, side, opts) {
   });
   _addChartScreenshotButton(container, side === "in" ? "IPsec incoming" : "IPsec outgoing", { yAxis: "Throughput (bps)", subject: opts.subject });
   _observeChartResize(container, function (c) { _renderIpsecBpsChart(c, derived, side, opts); });
+}
+
+// ─── Storage mountpoint slide-over ─────────────────────────────────────────
+//
+// Sits on top of the asset details panel like the interface and IPsec slide-
+// overs. Shows used / total bytes over time and used % over time. SNMP only
+// — the table renderer already gates the slide-in to mountpoints that came
+// back in the last system-info pass, so we don't need to re-check here.
+
+function _ensureStoragePanelDOM() {
+  if (document.getElementById("storage-panel-overlay")) return;
+  var overlay = document.createElement("div");
+  overlay.id = "storage-panel-overlay";
+  overlay.className = "slideover-overlay slideover-nested";
+  overlay.style.zIndex = "1099";
+  overlay.innerHTML =
+    '<div class="slideover" id="storage-panel" style="z-index:1100">' +
+      '<div class="slideover-resize-handle"></div>' +
+      '<div class="slideover-header">' +
+        '<div class="slideover-header-top">' +
+          '<h3 id="storage-panel-title">Storage</h3>' +
+          '<button class="btn-icon" id="storage-panel-close" title="Close">&times;</button>' +
+        '</div>' +
+        '<div class="slideover-meta" id="storage-panel-meta"></div>' +
+      '</div>' +
+      '<div class="slideover-body" id="storage-panel-body"><p class="empty-state" style="padding:1rem 1.25rem">Loading…</p></div>' +
+      '<div class="slideover-footer" id="storage-panel-footer"></div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener("click", function (e) {
+    if (e.target === overlay) closeStoragePanel();
+  });
+  document.getElementById("storage-panel-close").addEventListener("click", closeStoragePanel);
+  initSlideoverResize(document.getElementById("storage-panel"), "shelob.panel.width.storage");
+}
+
+function closeStoragePanel() {
+  var ov = document.getElementById("storage-panel-overlay");
+  if (ov) ov.classList.remove("open");
+}
+
+async function openStorageDetailPanel(asset, mountPath) {
+  if (!asset || !mountPath) return;
+  _ensureStoragePanelDOM();
+  var titleEl  = document.getElementById("storage-panel-title");
+  var metaEl   = document.getElementById("storage-panel-meta");
+  var bodyEl   = document.getElementById("storage-panel-body");
+  var footerEl = document.getElementById("storage-panel-footer");
+  titleEl.textContent = "Storage — " + mountPath;
+  metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
+  bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 1.25rem">Loading…</p>';
+  footerEl.innerHTML =
+    '<button class="btn btn-sm btn-secondary" id="btn-storage-panel-close-btn">Close</button>';
+  requestAnimationFrame(function () {
+    document.getElementById("storage-panel-overlay").classList.add("open");
+  });
+  document.getElementById("btn-storage-panel-close-btn").addEventListener("click", closeStoragePanel);
+
+  var rangeBtns =
+    '<button class="btn btn-sm btn-primary storage-range-btn" data-range="1h">1h</button>' +
+    '<button class="btn btn-sm btn-secondary storage-range-btn" data-range="24h">24h</button>' +
+    '<button class="btn btn-sm btn-secondary storage-range-btn" data-range="7d">7d</button>' +
+    '<button class="btn btn-sm btn-secondary storage-range-btn" data-range="30d">30d</button>';
+
+  bodyEl.innerHTML =
+    '<div style="padding:1rem 1.25rem">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
+        '<h4 style="margin:0">Usage history</h4>' +
+        '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
+      '</div>' +
+      '<div id="storage-stats" style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
+      '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Used vs total (bytes)</h5>' +
+      '<div id="storage-bytes-chart" class="storage-chart-box"></div>' +
+      '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Used %</h5>' +
+      '<div id="storage-pct-chart" class="storage-chart-box"></div>' +
+    '</div>';
+  document.querySelectorAll(".storage-chart-box").forEach(function (el) {
+    el.style.background = "var(--color-bg-elevated)";
+    el.style.border = "1px solid var(--color-border)";
+    el.style.borderRadius = "6px";
+    el.style.padding = "0.5rem";
+    el.style.minHeight = "180px";
+    el.style.display = "flex";
+    el.style.alignItems = "center";
+    el.style.justifyContent = "center";
+    el.style.color = "var(--color-text-secondary)";
+    el.style.fontSize = "0.85rem";
+  });
+
+  await _loadStorageHistoryFor(asset.id, mountPath, "1h");
+  document.querySelectorAll(".storage-range-btn").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var range = b.getAttribute("data-range");
+      document.querySelectorAll(".storage-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+      b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+      _loadStorageHistoryFor(asset.id, mountPath, range);
+    });
+  });
+}
+
+async function _loadStorageHistoryFor(assetId, mountPath, range) {
+  var bytesEl = document.getElementById("storage-bytes-chart");
+  var pctEl   = document.getElementById("storage-pct-chart");
+  var stats   = document.getElementById("storage-stats");
+  if (!bytesEl) return;
+  bytesEl.textContent = pctEl.textContent = "Loading samples…";
+  if (stats) stats.textContent = "Loading…";
+  try {
+    var data = await api.assets.storageHistory(assetId, mountPath, range || "1h");
+    var samples = (data && data.samples) || [];
+    if (stats) stats.textContent = _storageStatsLabel(samples);
+    var opts = { since: data.since, until: data.until, subject: mountPath };
+    _renderStorageBytesChart(bytesEl, samples, opts);
+    _renderStoragePctChart(pctEl, samples, opts);
+  } catch (err) {
+    bytesEl.textContent = pctEl.textContent = "Error: " + (err.message || "failed to load");
+    if (stats) stats.textContent = "";
+  }
+}
+
+function _storageStatsLabel(samples) {
+  if (!samples.length) return "No samples in this range yet.";
+  var pcts = [];
+  var latest = samples[samples.length - 1];
+  samples.forEach(function (s) {
+    if (s.totalBytes && s.usedBytes != null && s.totalBytes > 0) {
+      pcts.push((s.usedBytes / s.totalBytes) * 100);
+    }
+  });
+  var minP = pcts.length ? Math.min.apply(null, pcts) : null;
+  var maxP = pcts.length ? Math.max.apply(null, pcts) : null;
+  var avgP = pcts.length ? pcts.reduce(function (a, b) { return a + b; }, 0) / pcts.length : null;
+  var latestPct = (latest && latest.totalBytes && latest.usedBytes != null && latest.totalBytes > 0)
+    ? ((latest.usedBytes / latest.totalBytes) * 100)
+    : null;
+  return samples.length + " samples · latest " +
+    (latestPct != null ? latestPct.toFixed(1) + "%" : "—") +
+    (latest && latest.usedBytes != null && latest.totalBytes != null
+      ? " (" + _fmtBytes(latest.usedBytes) + " / " + _fmtBytes(latest.totalBytes) + ")"
+      : "") +
+    " · avg " + (avgP != null ? avgP.toFixed(1) + "%" : "—") +
+    " · min " + (minP != null ? minP.toFixed(1) + "%" : "—") +
+    " · max " + (maxP != null ? maxP.toFixed(1) + "%" : "—");
+}
+
+function _renderStorageBytesChart(container, samples, opts) {
+  opts = opts || {};
+  var used  = samples.map(function (s) { return { ts: s.timestamp, v: s.usedBytes }; }).filter(function (e) { return typeof e.v === "number"; });
+  var total = samples.map(function (s) { return { ts: s.timestamp, v: s.totalBytes }; }).filter(function (e) { return typeof e.v === "number"; });
+  if (used.length === 0 && total.length === 0) {
+    container.textContent = "No usage samples in this range yet.";
+    return;
+  }
+  var W = container.clientWidth || 600, H = 180;
+  var padL = 64, padR = 10, padT = 10, padB = 32;
+  var innerW = W - padL - padR, innerH = H - padT - padB;
+  var bounds = _chartTimeBounds(samples, opts.since, opts.until);
+  var t0 = bounds.t0, t1 = bounds.t1;
+  var spanMs = t1 - t0, oneDayMs = 86400000;
+  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  function fmtTick(ts) {
+    var d = new Date(ts);
+    if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+    return (d.getMonth() + 1) + "/" + d.getDate();
+  }
+  var maxV = 0;
+  used.concat(total).forEach(function (e) { if (e.v > maxV) maxV = e.v; });
+  if (maxV <= 0) maxV = 1;
+  function tidyCeil(n) {
+    var exp = Math.pow(10, Math.floor(Math.log10(n)));
+    var mant = n / exp;
+    var step = mant <= 1 ? 1 : mant <= 2 ? 2 : mant <= 5 ? 5 : 10;
+    return step * exp;
+  }
+  var ceil = tidyCeil(maxV);
+  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
+  function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
+  var usedPts  = used.map(function (e)  { return xFor(e.ts) + "," + yFor(e.v); }).join(" ");
+  var totalPts = total.map(function (e) { return xFor(e.ts) + "," + yFor(e.v); }).join(" ");
+  var hits = samples.map(function (s) {
+    var y = padT + innerH;
+    if (typeof s.usedBytes  === "number") y = Math.min(y, yFor(s.usedBytes));
+    if (typeof s.totalBytes === "number") y = Math.min(y, yFor(s.totalBytes));
+    return '<circle class="chart-hit" cx="' + xFor(s.timestamp) + '" cy="' + y + '" r="6" fill="transparent" style="cursor:crosshair"' +
+      ' data-ts="' + escapeHtml(String(s.timestamp)) + '"' +
+      ' data-used="'  + (typeof s.usedBytes  === "number" ? s.usedBytes  : "") + '"' +
+      ' data-total="' + (typeof s.totalBytes === "number" ? s.totalBytes : "") + '"/>';
+  }).join("");
+  var ticks = "";
+  for (var i = 0; i <= 4; i++) {
+    var v = ceil * i / 4;
+    var y = padT + innerH - (i / 4) * innerH;
+    ticks +=
+      '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
+      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + _fmtBytes(v) + '</text>';
+  }
+  var xTicks = "";
+  for (var j = 0; j <= 5; j++) {
+    var tsTick = t0 + (t1 - t0) * (j / 5);
+    var xPos = padL + (j / 5) * innerW;
+    xTicks +=
+      '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
+      '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
+  }
+  var legend =
+    '<g font-size="10" fill="currentColor">' +
+      '<rect x="' + (padL + 10) + '" y="2" width="10" height="10" fill="var(--color-accent)"/>' +
+      '<text x="' + (padL + 24) + '" y="11">Used</text>' +
+      '<rect x="' + (padL + 80) + '" y="2" width="10" height="10" fill="#9b5de5"/>' +
+      '<text x="' + (padL + 94) + '" y="11">Total</text>' +
+    '</g>';
+  container.innerHTML =
+    '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      ticks + xTicks +
+      (totalPts ? '<polyline points="' + totalPts + '" fill="none" stroke="#9b5de5" stroke-width="1.5" stroke-dasharray="4 3"/>' : '') +
+      (usedPts  ? '<polyline points="' + usedPts  + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' : '') +
+      legend + hits +
+    '</svg>' + CHART_TOOLTIP_HTML;
+  container.style.position = "relative";
+  container.style.alignItems = "stretch";
+  container.style.justifyContent = "flex-start";
+  _wireChartTooltip(container, function (target) {
+    var u = target.getAttribute("data-used");
+    var t = target.getAttribute("data-total");
+    return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+      '<div>Used: '  + (u !== "" ? _fmtBytes(Number(u)) : "—") + '</div>' +
+      '<div>Total: ' + (t !== "" ? _fmtBytes(Number(t)) : "—") + '</div>';
+  });
+  _addChartScreenshotButton(container, "Storage usage (bytes)", { yAxis: "Bytes", subject: opts.subject });
+  _observeChartResize(container, function (c) { _renderStorageBytesChart(c, samples, opts); });
+}
+
+function _renderStoragePctChart(container, samples, opts) {
+  opts = opts || {};
+  var values = samples.map(function (s) {
+    var pct = (s.totalBytes && s.usedBytes != null && s.totalBytes > 0) ? (s.usedBytes / s.totalBytes) * 100 : null;
+    return { ts: s.timestamp, v: pct };
+  }).filter(function (e) { return typeof e.v === "number"; });
+  if (values.length === 0) {
+    container.textContent = "No usage % samples in this range yet.";
+    return;
+  }
+  var W = container.clientWidth || 600, H = 180;
+  var padL = 44, padR = 10, padT = 10, padB = 32;
+  var innerW = W - padL - padR, innerH = H - padT - padB;
+  var bounds = _chartTimeBounds(samples, opts.since, opts.until);
+  var t0 = bounds.t0, t1 = bounds.t1;
+  var spanMs = t1 - t0, oneDayMs = 86400000;
+  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  function fmtTick(ts) {
+    var d = new Date(ts);
+    if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+    return (d.getMonth() + 1) + "/" + d.getDate();
+  }
+  // Y axis fixed at 0–100% so charts comparing two mountpoints feel consistent.
+  var ceil = 100;
+  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
+  function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
+  var pts = values.map(function (e) { return xFor(e.ts) + "," + yFor(e.v); }).join(" ");
+  var hits = values.map(function (e) {
+    return '<circle class="chart-hit" cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="6" fill="transparent" style="cursor:crosshair"' +
+      ' data-ts="' + escapeHtml(String(e.ts)) + '" data-v="' + e.v + '"/>';
+  }).join("");
+  var ticks = "";
+  for (var i = 0; i <= 4; i++) {
+    var v = ceil * i / 4;
+    var y = padT + innerH - (i / 4) * innerH;
+    ticks +=
+      '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
+      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + v.toFixed(0) + '%</text>';
+  }
+  var xTicks = "";
+  for (var j = 0; j <= 5; j++) {
+    var tsTick = t0 + (t1 - t0) * (j / 5);
+    var xPos = padL + (j / 5) * innerW;
+    xTicks +=
+      '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
+      '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
+  }
+  container.innerHTML =
+    '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      ticks + xTicks +
+      '<polyline points="' + pts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
+      hits +
+    '</svg>' + CHART_TOOLTIP_HTML;
+  container.style.position = "relative";
+  container.style.alignItems = "stretch";
+  container.style.justifyContent = "flex-start";
+  _wireChartTooltip(container, function (target) {
+    return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+      '<div>Used: ' + Number(target.getAttribute("data-v")).toFixed(2) + '%</div>';
+  });
+  _addChartScreenshotButton(container, "Storage usage %", { yAxis: "Used %", subject: opts.subject });
+  _observeChartResize(container, function (c) { _renderStoragePctChart(c, samples, opts); });
 }
 
 async function openIpHistoryModal(assetId, label) {

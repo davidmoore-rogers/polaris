@@ -609,11 +609,16 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
 }
 
 /**
- * Light variant of collectSystemInfo that only returns the interfaces the
- * operator pinned via Asset.monitoredInterfaces. Used by the fast cadence so
- * a heavy 30-port switch isn't fully re-walked once a minute.
+ * Light variant of collectSystemInfo that only returns the interfaces, storage
+ * mountpoints, and IPsec tunnels the operator pinned for fast-cadence polling
+ * (Asset.monitoredInterfaces / monitoredStorage / monitoredIpsecTunnels). The
+ * underlying fetch still walks the full set on each protocol (one SNMP session
+ * or one FortiOS round-trip), but the filter keeps us from writing noisy rows
+ * for everything else once per minute. IPsec is only fetched from FortiOS when
+ * tunnels are pinned — the endpoint can be slow on busy gateways and we don't
+ * want to hammer it from the fast cadence unless asked.
  */
-export async function collectInterfacesFiltered(assetId: string): Promise<CollectionResult<SystemInfoSample>> {
+export async function collectFastFiltered(assetId: string): Promise<CollectionResult<SystemInfoSample>> {
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
     include: { monitorCredential: true, discoveredByIntegration: true },
@@ -621,8 +626,12 @@ export async function collectInterfacesFiltered(assetId: string): Promise<Collec
   if (!asset)            return { supported: false, error: "Asset not found" };
   if (!asset.monitored)  return { supported: false };
   if (!asset.monitorType) return { supported: false };
-  const wanted = (asset.monitoredInterfaces || []) as string[];
-  if (wanted.length === 0) return { supported: false };
+  const wantedIfaces  = (asset.monitoredInterfaces   || []) as string[];
+  const wantedStorage = (asset.monitoredStorage      || []) as string[];
+  const wantedTunnels = (asset.monitoredIpsecTunnels || []) as string[];
+  if (wantedIfaces.length === 0 && wantedStorage.length === 0 && wantedTunnels.length === 0) {
+    return { supported: false };
+  }
   const type = asset.monitorType as MonitorType;
   const targetIp =
     asset.ipAddress ||
@@ -633,35 +642,43 @@ export async function collectInterfacesFiltered(assetId: string): Promise<Collec
     let full: SystemInfoSample;
     if (type === "fortimanager" || type === "fortigate") {
       if (!asset.discoveredByIntegration) return { supported: true, error: "Originating integration not found" };
-      full = await collectSystemInfoFortinet(targetIp, asset.discoveredByIntegration as any);
+      // Only ask FortiOS for IPsec when we actually have a pinned tunnel —
+      // /api/v2/monitor/vpn/ipsec is the slow endpoint we're trying to avoid
+      // on the fast cadence.
+      full = await collectSystemInfoFortinet(targetIp, asset.discoveredByIntegration as any, { includeIpsec: wantedTunnels.length > 0 });
     } else if (type === "snmp") {
       if (!asset.monitorCredential) return { supported: true, error: "No SNMP credential selected" };
       full = await collectSystemInfoSnmp(targetIp, asset.monitorCredential.config as Record<string, unknown>);
     } else {
       return { supported: false };
     }
-    const want = new Set(wanted);
-    const interfaces = full.interfaces.filter((i) => want.has(i.ifName));
-    // Pinned interfaces should produce frequent counter samples but we don't
-    // want to spam the per-mountpoint storage table, so storage is dropped.
-    return { supported: true, data: { interfaces, storage: [] } };
+    const wantIf = new Set(wantedIfaces);
+    const wantSt = new Set(wantedStorage);
+    const wantTn = new Set(wantedTunnels);
+    const interfaces = wantedIfaces.length  ? full.interfaces.filter((i) => wantIf.has(i.ifName)) : [];
+    const storage    = wantedStorage.length ? full.storage.filter((s) => wantSt.has(s.mountPath)) : [];
+    const ipsecTunnels = (wantedTunnels.length && Array.isArray(full.ipsecTunnels))
+      ? full.ipsecTunnels.filter((t) => wantTn.has(t.tunnelName))
+      : undefined;
+    return { supported: true, data: { interfaces, storage, ipsecTunnels } };
   } catch (err: any) {
-    return { supported: true, error: err?.message || "Fast-cadence interface scrape failed" };
+    return { supported: true, error: err?.message || "Fast-cadence scrape failed" };
   }
 }
 
 /**
- * Persist a fast-cadence scrape. Same shape as recordSystemInfoResult for the
- * interface side, but it does NOT touch Asset.associatedIps (that is owned by
- * the full system-info pass) and only stamps lastSystemInfoAt when actual rows
- * came back so the next full scrape isn't deferred by a partial pull.
+ * Persist a fast-cadence scrape. Mirrors recordSystemInfoResult for the three
+ * sample tables, but does NOT touch Asset.associatedIps (that is owned by the
+ * full system-info pass) and does NOT advance lastSystemInfoAt — the fast pass
+ * is supplementary and the next full scrape is still gated on its own cadence.
  */
-export async function recordFastInterfaceResult(assetId: string, result: CollectionResult<SystemInfoSample>): Promise<void> {
-  if (!result.supported) return;
+export async function recordFastFilteredResult(assetId: string, result: CollectionResult<SystemInfoSample>): Promise<void> {
+  if (!result.supported || !result.data) return;
+  const d = result.data;
   const now = new Date();
-  if (result.data && result.data.interfaces.length > 0) {
+  if (d.interfaces.length > 0) {
     await prisma.assetInterfaceSample.createMany({
-      data: result.data.interfaces.map((i) => ({
+      data: d.interfaces.map((i) => ({
         assetId,
         timestamp: now,
         ifName:      i.ifName,
@@ -674,6 +691,31 @@ export async function recordFastInterfaceResult(assetId: string, result: Collect
         outOctets:   i.outOctets != null ? BigInt(Math.round(i.outOctets)) : null,
         inErrors:    i.inErrors  != null ? BigInt(Math.round(i.inErrors))  : null,
         outErrors:   i.outErrors != null ? BigInt(Math.round(i.outErrors)) : null,
+      })),
+    });
+  }
+  if (d.storage.length > 0) {
+    await prisma.assetStorageSample.createMany({
+      data: d.storage.map((s) => ({
+        assetId,
+        timestamp: now,
+        mountPath:  s.mountPath,
+        totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
+        usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
+      })),
+    });
+  }
+  if (Array.isArray(d.ipsecTunnels) && d.ipsecTunnels.length > 0) {
+    await prisma.assetIpsecTunnelSample.createMany({
+      data: d.ipsecTunnels.map((t) => ({
+        assetId,
+        timestamp: now,
+        tunnelName:    t.tunnelName,
+        remoteGateway: t.remoteGateway,
+        status:        t.status,
+        incomingBytes: t.incomingBytes != null ? BigInt(Math.round(t.incomingBytes)) : null,
+        outgoingBytes: t.outgoingBytes != null ? BigInt(Math.round(t.outgoingBytes)) : null,
+        proxyIdCount:  t.proxyIdCount,
       })),
     });
   }
@@ -886,6 +928,12 @@ async function collectSystemInfoFortinet(
  * a `proxyid` array of phase-2 selectors with their own status + byte
  * counters; we roll them up into a single row per phase-1 tunnel for the
  * System tab. Older firmwares 404 this endpoint — caller swallows the failure.
+ *
+ * ADVPN shortcut tunnels (dynamic spoke-to-spoke SAs created on demand) are
+ * filtered out: they idle in and out as traffic flows, polluting the table
+ * with ephemeral rows that aren't pinnable for fast polling. FortiOS marks
+ * them with a non-empty `parent` field pointing back at the configured
+ * template tunnel; the template itself has no `parent`.
  */
 async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTunnelSample[]> {
   const res = await fgRequest<any>(fg, "GET", "/api/v2/monitor/vpn/ipsec", { query: { scope: "vdom" } });
@@ -895,6 +943,8 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTu
     if (!t || typeof t !== "object") continue;
     const name = String((t as any).name || "").trim();
     if (!name) continue;
+    const parent = (t as any).parent;
+    if (typeof parent === "string" && parent.trim()) continue;
     const proxyArr = Array.isArray((t as any).proxyid) ? (t as any).proxyid : [];
     let upCount = 0;
     let downCount = 0;
@@ -1489,9 +1539,9 @@ interface RunStats {
   succeeded: number;
   failed:    number;
   /** System tab cadences. Tallied separately so a slow telemetry call doesn't look like a probe failure. */
-  telemetry:  { collected: number; failed: number };
-  systemInfo: { collected: number; failed: number };
-  fastIfaces: { collected: number; failed: number };
+  telemetry:    { collected: number; failed: number };
+  systemInfo:   { collected: number; failed: number };
+  fastFiltered: { collected: number; failed: number };
 }
 
 /**
@@ -1513,6 +1563,8 @@ export async function runMonitorPass(opts?: { concurrency?: number }): Promise<R
       lastTelemetryAt: true, telemetryIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
       monitoredInterfaces: true,
+      monitoredStorage: true,
+      monitoredIpsecTunnels: true,
     },
   });
 
@@ -1525,31 +1577,34 @@ export async function runMonitorPass(opts?: { concurrency?: number }): Promise<R
 
   type Work = {
     id: string;
-    probe:          boolean;
-    telemetry:      boolean;
-    systemInfo:     boolean;
-    fastInterfaces: boolean;
+    probe:        boolean;
+    telemetry:    boolean;
+    systemInfo:   boolean;
+    fastFiltered: boolean;
   };
   const work: Work[] = candidates.map((a) => {
     const probe = isDue(a.lastMonitorAt, a.monitorIntervalSec, settings.intervalSeconds);
+    const hasFastPin =
+      (Array.isArray(a.monitoredInterfaces)   && a.monitoredInterfaces.length   > 0) ||
+      (Array.isArray(a.monitoredStorage)      && a.monitoredStorage.length      > 0) ||
+      (Array.isArray(a.monitoredIpsecTunnels) && a.monitoredIpsecTunnels.length > 0);
     return {
       id: a.id,
       probe,
-      telemetry:      isDue(a.lastTelemetryAt,  a.telemetryIntervalSec,  settings.telemetryIntervalSeconds),
-      systemInfo:     isDue(a.lastSystemInfoAt, a.systemInfoIntervalSec, settings.systemInfoIntervalSeconds),
-      // Pinned interfaces ride the response-time cadence — the user asked for
-      // "every minute based on the global settings", and intervalSeconds is
-      // exactly that. The full systemInfo pass at 10 min still covers all
-      // interfaces, so this only adds work for the pinned subset.
-      fastInterfaces: probe && Array.isArray(a.monitoredInterfaces) && a.monitoredInterfaces.length > 0,
+      telemetry:    isDue(a.lastTelemetryAt,  a.telemetryIntervalSec,  settings.telemetryIntervalSeconds),
+      systemInfo:   isDue(a.lastSystemInfoAt, a.systemInfoIntervalSec, settings.systemInfoIntervalSeconds),
+      // Pinned interfaces / storage / tunnels ride the response-time cadence —
+      // intervalSeconds defaults to 60s. The full systemInfo pass at ~10 min
+      // still covers everything, so this only adds work for the pinned subset.
+      fastFiltered: probe && hasFastPin,
     };
-  }).filter((w) => w.probe || w.telemetry || w.systemInfo || w.fastInterfaces);
+  }).filter((w) => w.probe || w.telemetry || w.systemInfo || w.fastFiltered);
 
   const stats: RunStats = {
     probed: 0, succeeded: 0, failed: 0,
     telemetry:  { collected: 0, failed: 0 },
     systemInfo: { collected: 0, failed: 0 },
-    fastIfaces: { collected: 0, failed: 0 },
+    fastFiltered: { collected: 0, failed: 0 },
   };
   if (work.length === 0) return stats;
 
@@ -1599,18 +1654,18 @@ export async function runMonitorPass(opts?: { concurrency?: number }): Promise<R
       }
       // Skip the fast scrape when the full one already ran this tick — they'd
       // hit the same endpoint twice. The full scrape already wrote rows for
-      // every interface, including the pinned ones.
-      if (w.fastInterfaces && !w.systemInfo) {
+      // every interface / mountpoint / tunnel, including the pinned ones.
+      if (w.fastFiltered && !w.systemInfo) {
         try {
-          const fr = await collectInterfacesFiltered(w.id);
-          await recordFastInterfaceResult(w.id, fr);
+          const fr = await collectFastFiltered(w.id);
+          await recordFastFilteredResult(w.id, fr);
           if (fr.supported) {
-            if (fr.data) stats.fastIfaces.collected++;
-            else stats.fastIfaces.failed++;
+            if (fr.data) stats.fastFiltered.collected++;
+            else stats.fastFiltered.failed++;
           }
         } catch (err) {
-          logger.error({ err, assetId: w.id }, "Fast interface scrape crashed");
-          stats.fastIfaces.failed++;
+          logger.error({ err, assetId: w.id }, "Fast-cadence scrape crashed");
+          stats.fastFiltered.failed++;
         }
       }
     }

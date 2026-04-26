@@ -298,6 +298,18 @@ model Asset {
   // The full system-info scrape (every ~10 min) still covers all interfaces.
   monitoredInterfaces    String[]    @default([])
 
+  // Storage mountPaths pinned for fast-cadence polling. Same model as
+  // monitoredInterfaces — the response-time tick re-walks just these
+  // hrStorage rows so the operator gets sub-minute disk-usage history for
+  // chosen volumes without re-walking the full storage table.
+  monitoredStorage       String[]    @default([])
+
+  // Phase-1 tunnel names pinned for fast-cadence IPsec polling. The full
+  // /api/v2/monitor/vpn/ipsec endpoint can be slow on busy gateways so it
+  // is not re-walked every minute by default; pinning a tunnel here issues
+  // a targeted scrape that filters down to just that phase-1.
+  monitoredIpsecTunnels  String[]    @default([])
+
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 

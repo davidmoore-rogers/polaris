@@ -78,6 +78,14 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // Cap at 64 so an accidental "select-all on a 200-port chassis" can't
   // saturate the device every probe interval.
   monitoredInterfaces:   z.array(z.string().min(1)).max(64).optional(),
+  // hrStorage mountPaths pinned for fast-cadence polling. Same model + cap as
+  // monitoredInterfaces — keeps a server with hundreds of mountpoints from
+  // re-walking the full storage table once per minute by accident.
+  monitoredStorage:      z.array(z.string().min(1)).max(64).optional(),
+  // Phase-1 IPsec tunnel names pinned for fast-cadence polling. The full
+  // /api/v2/monitor/vpn/ipsec endpoint can be slow on busy gateways so it's
+  // skipped on the fast cadence by default; pinning issues a targeted scrape.
+  monitoredIpsecTunnels: z.array(z.string().min(1)).max(64).optional(),
 });
 
 /**
@@ -493,7 +501,13 @@ router.get("/:id/system-info", async (req, res, next) => {
     const id = req.params.id as string;
     const asset = await prisma.asset.findUnique({
       where: { id },
-      select: { id: true, monitored: true, monitorType: true, lastTelemetryAt: true, lastSystemInfoAt: true, monitoredInterfaces: true },
+      select: {
+        id: true, monitored: true, monitorType: true,
+        lastTelemetryAt: true, lastSystemInfoAt: true,
+        monitoredInterfaces: true,
+        monitoredStorage: true,
+        monitoredIpsecTunnels: true,
+      },
     });
     if (!asset) throw new AppError(404, "Asset not found");
 
@@ -598,7 +612,9 @@ router.get("/:id/system-info", async (req, res, next) => {
         outgoingBytes: bigIntToNumber(t.outgoingBytes),
         proxyIdCount:  t.proxyIdCount,
       })),
-      monitoredInterfaces: (asset.monitoredInterfaces ?? []) as string[],
+      monitoredInterfaces:   (asset.monitoredInterfaces   ?? []) as string[],
+      monitoredStorage:      (asset.monitoredStorage      ?? []) as string[],
+      monitoredIpsecTunnels: (asset.monitoredIpsecTunnels ?? []) as string[],
     });
   } catch (err) { next(err); }
 });
