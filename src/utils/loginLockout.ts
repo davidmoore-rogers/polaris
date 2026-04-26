@@ -7,7 +7,7 @@
  * which matters because distributed botnets trivially bypass IP throttling.
  *
  * Storage is process-local — a restart clears all lockouts. That is fine for
- * a single-instance deployment. If Shelob ever runs multi-replica, swap the
+ * a single-instance deployment. If Polaris ever runs multi-replica, swap the
  * Map for a Redis-backed implementation with the same interface.
  */
 

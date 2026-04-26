@@ -623,7 +623,7 @@ function _generateIpPanelPdf(s, allIps) {
   // Header
   doc.setFontSize(16);
   doc.setTextColor(40, 40, 40);
-  doc.text((_branding ? _branding.appName : "Shelob") + " \u2014 Network Detail", 40, 36);
+  doc.text((_branding ? _branding.appName : "Polaris") + " \u2014 Network Detail", 40, 36);
   doc.setFontSize(9);
   doc.setTextColor(120, 120, 120);
   doc.text("Generated: " + timestamp, 40, 52);
@@ -707,7 +707,7 @@ function _generateIpPanelPdf(s, allIps) {
     },
   });
 
-  var filename = "shelob-network-" + s.cidr.replace(/[\/]/g, "_") + "-" + now.toISOString().slice(0, 10) + ".pdf";
+  var filename = "polaris-network-" + s.cidr.replace(/[\/]/g, "_") + "-" + now.toISOString().slice(0, 10) + ".pdf";
   doc.save(filename);
   showToast("Exported " + allIps.length + " IPs to " + filename);
 }
@@ -857,7 +857,7 @@ function _generateIpPanelCsv(s, allIps) {
     var expiry = r && r.expiresAt ? formatDate(r.expiresAt) : "";
     return [ip.address, r ? (r.hostname || "") : "", mac, owner, expiry, statusLabel];
   });
-  var filename = "shelob-network-" + s.cidr.replace(/[\/]/g, "_") + "-" + new Date().toISOString().slice(0, 10) + ".csv";
+  var filename = "polaris-network-" + s.cidr.replace(/[\/]/g, "_") + "-" + new Date().toISOString().slice(0, 10) + ".csv";
   downloadCsv(headers, rows, filename);
   showToast("Exported " + allIps.length + " IPs to " + filename);
 }

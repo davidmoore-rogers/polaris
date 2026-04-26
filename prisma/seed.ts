@@ -44,7 +44,7 @@ async function main() {
     update: {},
     create: {
       key:   "branding",
-      value: { appName: "Shelob", subtitle: "Network Management Tool", logoUrl: "/logo.png" },
+      value: { appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/logo.png" },
     },
   });
 

@@ -194,7 +194,7 @@ var _eventsCurrentPage = [];
 var _activeSettingsTab = "archive";
 
 async function openEventSettingsModal() {
-  var archiveDefaults = { enabled: false, protocol: "scp", host: "", port: 22, username: "", password: "", keyPath: "", remotePath: "/var/archive/shelob" };
+  var archiveDefaults = { enabled: false, protocol: "scp", host: "", port: 22, username: "", password: "", keyPath: "", remotePath: "/var/archive/polaris" };
   var syslogDefaults = { enabled: false, protocol: "udp", host: "", port: 514, facility: "local0", severity: "info", format: "rfc5424", tlsCaPath: "", tlsCertPath: "", tlsKeyPath: "" };
   var retentionDefaults = { retentionDays: 7, minLevel: "info" };
 
@@ -215,7 +215,7 @@ async function openEventSettingsModal() {
       archiveDefaults.username = s.username || "";
       archiveDefaults.password = s.password || "";
       archiveDefaults.keyPath = s.keyPath || "";
-      archiveDefaults.remotePath = s.remotePath || "/var/archive/shelob";
+      archiveDefaults.remotePath = s.remotePath || "/var/archive/polaris";
     }
     if (results[1]) {
       var sl = results[1];
@@ -372,13 +372,13 @@ function archiveFormHTML(d) {
   '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
   '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Authentication</p>' +
   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
-    '<div class="form-group"><label>Username</label><input type="text" id="f-archive-username" value="' + escapeHtml(d.username) + '" placeholder="e.g. shelob-svc"></div>' +
+    '<div class="form-group"><label>Username</label><input type="text" id="f-archive-username" value="' + escapeHtml(d.username) + '" placeholder="e.g. polaris-svc"></div>' +
     '<div class="form-group"><label>Password</label><input type="password" id="f-archive-password" value="' + escapeHtml(d.password) + '" placeholder="Leave blank for key auth"></div>' +
   '</div>' +
-  '<div class="form-group"><label>SSH Key Path</label><input type="text" id="f-archive-keypath" value="' + escapeHtml(d.keyPath) + '" placeholder="e.g. /home/shelob/.ssh/id_rsa"><p class="hint">Path on the Shelob server. Used instead of password when provided.</p></div>' +
+  '<div class="form-group"><label>SSH Key Path</label><input type="text" id="f-archive-keypath" value="' + escapeHtml(d.keyPath) + '" placeholder="e.g. /home/polaris/.ssh/id_rsa"><p class="hint">Path on the Polaris server. Used instead of password when provided.</p></div>' +
   '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
   '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Destination</p>' +
-  '<div class="form-group"><label>Remote Path</label><input type="text" id="f-archive-remotepath" value="' + escapeHtml(d.remotePath) + '" placeholder="e.g. /var/archive/shelob"><p class="hint">Directory on the remote server where archive files will be stored.</p></div>' +
+  '<div class="form-group"><label>Remote Path</label><input type="text" id="f-archive-remotepath" value="' + escapeHtml(d.remotePath) + '" placeholder="e.g. /var/archive/polaris"><p class="hint">Directory on the remote server where archive files will be stored.</p></div>' +
   '<div id="archive-test-result" style="margin-top:0.5rem"></div>';
 }
 
@@ -391,7 +391,7 @@ function getArchiveFormData() {
     username: document.getElementById("f-archive-username").value.trim(),
     password: document.getElementById("f-archive-password").value,
     keyPath: document.getElementById("f-archive-keypath").value.trim(),
-    remotePath: document.getElementById("f-archive-remotepath").value.trim() || "/var/archive/shelob",
+    remotePath: document.getElementById("f-archive-remotepath").value.trim() || "/var/archive/polaris",
   };
 }
 
@@ -443,7 +443,7 @@ function syslogFormHTML(d) {
   '<div id="syslog-tls-fields">' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">TLS Certificates</p>' +
-    '<div class="form-group"><label>CA Certificate Path</label><input type="text" id="f-syslog-tlsca" value="' + escapeHtml(d.tlsCaPath) + '" placeholder="e.g. /etc/shelob/ca.pem"><p class="hint">Certificate authority to verify the syslog server.</p></div>' +
+    '<div class="form-group"><label>CA Certificate Path</label><input type="text" id="f-syslog-tlsca" value="' + escapeHtml(d.tlsCaPath) + '" placeholder="e.g. /etc/polaris/ca.pem"><p class="hint">Certificate authority to verify the syslog server.</p></div>' +
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
       '<div class="form-group"><label>Client Certificate</label><input type="text" id="f-syslog-tlscert" value="' + escapeHtml(d.tlsCertPath) + '" placeholder="Optional"></div>' +
       '<div class="form-group"><label>Client Key</label><input type="text" id="f-syslog-tlskey" value="' + escapeHtml(d.tlsKeyPath) + '" placeholder="Optional"></div>' +
@@ -808,7 +808,7 @@ function generateEventPdf(events, label) {
 
   doc.setFontSize(16);
   doc.setTextColor(40, 40, 40);
-  doc.text((_branding ? _branding.appName : "Shelob") + " \u2014 Event Log", 40, 36);
+  doc.text((_branding ? _branding.appName : "Polaris") + " \u2014 Event Log", 40, 36);
   doc.setFontSize(9);
   doc.setTextColor(120, 120, 120);
   doc.text("Generated: " + timestamp + "  |  Scope: " + label + "  |  Count: " + events.length, 40, 52);
@@ -851,7 +851,7 @@ function generateEventPdf(events, label) {
       doc.setFontSize(8);
       doc.setTextColor(150, 150, 150);
       doc.text(
-        "Page " + data.pageNumber + " of " + pageNum + "  |  " + (_branding ? _branding.appName : "Shelob") + " Event Log",
+        "Page " + data.pageNumber + " of " + pageNum + "  |  " + (_branding ? _branding.appName : "Polaris") + " Event Log",
         doc.internal.pageSize.getWidth() / 2,
         doc.internal.pageSize.getHeight() - 20,
         { align: "center" }
@@ -859,7 +859,7 @@ function generateEventPdf(events, label) {
     },
   });
 
-  var filename = "shelob-events-" + now.toISOString().slice(0, 10) + ".pdf";
+  var filename = "polaris-events-" + now.toISOString().slice(0, 10) + ".pdf";
   doc.save(filename);
   showToast("Exported " + events.length + " events to " + filename);
 }
@@ -922,7 +922,7 @@ function generateEventCsv(events) {
       ev.resourceType || "", ev.resourceName || "", ev.message || "", ev.actor || "",
     ];
   });
-  var filename = "shelob-events-" + new Date().toISOString().slice(0, 10) + ".csv";
+  var filename = "polaris-events-" + new Date().toISOString().slice(0, 10) + ".csv";
   downloadCsv(headers, rows, filename);
   showToast("Exported " + events.length + " events to " + filename);
 }

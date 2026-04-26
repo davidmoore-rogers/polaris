@@ -38,7 +38,7 @@ export function startSetupServer(): void {
     console.log("");
     console.log("  ┌─────────────────────────────────────────────┐");
     console.log("  │                                             │");
-    console.log("  │   Shelob — First-Run Setup                  │");
+    console.log("  │   Polaris — First-Run Setup                 │");
     console.log("  │                                             │");
     console.log(`  │   Open \x1b[36mhttp://localhost:${PORT}/setup.html\x1b[0m    │`);
     console.log("  │   to configure the application.             │");

@@ -241,7 +241,7 @@ export async function generateSelfSignedCert(
     throw new Error("commonName must contain only letters, digits, dots, dashes, underscores, or asterisks");
   }
 
-  const tmp = mkdtempSync(join(tmpdir(), "shelob-cert-"));
+  const tmp = mkdtempSync(join(tmpdir(), "polaris-cert-"));
   const keyPath = join(tmp, "server.key");
   const certPath = join(tmp, "server.crt");
 

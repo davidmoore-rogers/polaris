@@ -3317,7 +3317,7 @@ function generateAssetPdf(assets, label) {
   // Title
   doc.setFontSize(16);
   doc.setTextColor(40, 40, 40);
-  doc.text((_branding ? _branding.appName : "Shelob") + " \u2014 Asset Report", 40, 36);
+  doc.text((_branding ? _branding.appName : "Polaris") + " \u2014 Asset Report", 40, 36);
   doc.setFontSize(9);
   doc.setTextColor(120, 120, 120);
   doc.text("Generated: " + timestamp + "  |  Scope: " + label + "  |  Count: " + assets.length, 40, 52);
@@ -3351,7 +3351,7 @@ function generateAssetPdf(assets, label) {
       doc.setFontSize(8);
       doc.setTextColor(150, 150, 150);
       doc.text(
-        "Page " + data.pageNumber + " of " + pageNum + "  |  " + (_branding ? _branding.appName : "Shelob") + " Asset Report",
+        "Page " + data.pageNumber + " of " + pageNum + "  |  " + (_branding ? _branding.appName : "Polaris") + " Asset Report",
         doc.internal.pageSize.getWidth() / 2,
         doc.internal.pageSize.getHeight() - 20,
         { align: "center" }
@@ -3359,7 +3359,7 @@ function generateAssetPdf(assets, label) {
     },
   });
 
-  var filename = "shelob-assets-" + now.toISOString().slice(0, 10) + ".pdf";
+  var filename = "polaris-assets-" + now.toISOString().slice(0, 10) + ".pdf";
   doc.save(filename);
   showToast("Exported " + assets.length + " assets to " + filename);
 }
@@ -3374,7 +3374,7 @@ function generateAssetCsv(assets) {
       a.manufacturer || "", a.model || "", a.osVersion || a.os || "", a.assetTag || "",
     ];
   });
-  var filename = "shelob-assets-" + new Date().toISOString().slice(0, 10) + ".csv";
+  var filename = "polaris-assets-" + new Date().toISOString().slice(0, 10) + ".csv";
   downloadCsv(headers, rows, filename);
   showToast("Exported " + assets.length + " assets to " + filename);
 }

@@ -113,7 +113,7 @@ function renderNav() {
   sidebar.innerHTML = `
     <div class="sidebar-brand">
       <img src="/logo.png" alt="" class="sidebar-logo" style="visibility:hidden">
-      <h1 style="font-size:1.1rem;font-weight:600;margin:0.5rem 0 0;color:var(--color-text-primary);text-align:center;visibility:hidden">Shelob</h1>
+      <h1 style="font-size:1.1rem;font-weight:600;margin:0.5rem 0 0;color:var(--color-text-primary);text-align:center;visibility:hidden">Polaris</h1>
       <p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.15rem 0 0;text-align:center;visibility:hidden">Network Management Tool</p>
     </div>
     <ul class="sidebar-nav">
@@ -528,7 +528,7 @@ function applyBranding(b, skipCache) {
   }
   var sidebarName = document.querySelector(".sidebar-brand h1");
   if (sidebarName) {
-    sidebarName.textContent = b.appName || "Shelob";
+    sidebarName.textContent = b.appName || "Polaris";
     sidebarName.style.visibility = "";
   }
   var sidebarSub = document.querySelector(".sidebar-brand p");
@@ -542,13 +542,13 @@ function applyBranding(b, skipCache) {
   var titleEl = document.querySelector("title");
   if (titleEl) {
     var current = titleEl.textContent;
-    // Replace "Shelob — X" or "AppName — X" pattern
+    // Replace "Polaris — X" or "AppName — X" pattern
     var dashIdx = current.indexOf(" \u2014 ");
     if (dashIdx === -1) dashIdx = current.indexOf(" — ");
     if (dashIdx !== -1) {
-      titleEl.textContent = (b.appName || "Shelob") + current.substring(dashIdx);
+      titleEl.textContent = (b.appName || "Polaris") + current.substring(dashIdx);
     } else {
-      titleEl.textContent = b.appName || "Shelob";
+      titleEl.textContent = b.appName || "Polaris";
     }
   }
 
@@ -577,7 +577,7 @@ async function fetchBranding() {
     var b = await api.serverSettings.getBranding();
     applyBranding(b);
   } catch (_) {
-    if (!_branding) applyBranding({ appName: "Shelob", subtitle: "Network Management Tool", logoUrl: "/logo.png", version: "" });
+    if (!_branding) applyBranding({ appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/logo.png", version: "" });
   }
 }
 

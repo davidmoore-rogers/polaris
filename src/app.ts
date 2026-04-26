@@ -55,7 +55,7 @@ function resolveSessionSecret(): string {
       "SESSION_SECRET is required when NODE_ENV=production. Set a long random value in .env before starting the server."
     );
   }
-  return "shelob-dev-secret-change-in-production";
+  return "polaris-dev-secret-change-in-production";
 }
 const SESSION_SECRET = resolveSessionSecret();
 
@@ -203,7 +203,7 @@ app.use(express.static(path.resolve(__dirname, "..", "public")));
 // Health check. Open by default because the first-run setup wizard polls
 // this endpoint (from localhost) to detect when the main app has come up.
 // Set HEALTH_TOKEN=<string> in .env to require `Authorization: Bearer <token>`
-// on the endpoint — useful when Shelob is public-facing and you want to
+// on the endpoint — useful when Polaris is public-facing and you want to
 // limit health pings to your own monitoring system.
 app.get("/health", (req, res) => {
   const expected = process.env.HEALTH_TOKEN;
@@ -223,7 +223,7 @@ export async function startApp(): Promise<void> {
   const httpsSettings = await getHttpsSettings().catch(() => null);
   const PORT = process.env.PORT ?? httpsSettings?.httpPort ?? 3000;
   app.listen(PORT, () => {
-    logger.info({ port: PORT }, "Shelob server listening");
+    logger.info({ port: PORT }, "Polaris server listening");
     initHttps(app);
   });
 }

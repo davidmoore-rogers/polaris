@@ -600,7 +600,7 @@ async function loadCertificates() {
     '</div>' +
     '<div class="settings-card" style="display:flex;flex-direction:column">' +
       '<h4>Trusted Certificate Authorities</h4>' +
-      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">CA certificates used to verify remote servers when Shelob connects to integrations, syslog, and archive targets. These are also included in the HTTPS trust chain.</p>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">CA certificates used to verify remote servers when Polaris connects to integrations, syslog, and archive targets. These are also included in the HTTPS trust chain.</p>' +
       '<ul class="cert-list" id="ca-list"><li class="cert-empty">Loading...</li></ul>' +
       '<div style="margin-top:auto;padding-top:1rem">' +
         '<div class="upload-area" id="ca-upload-area">' +
@@ -792,7 +792,7 @@ async function applyHttpsSettings() {
 async function openGenerateCertModal() {
   var html =
     '<div class="form-group"><label>Common Name (CN)</label>' +
-      '<input type="text" id="f-gen-cn" value="localhost" placeholder="e.g. localhost, shelob.example.com">' +
+      '<input type="text" id="f-gen-cn" value="localhost" placeholder="e.g. localhost, polaris.example.com">' +
       '<p class="hint">The hostname that will appear in the certificate subject. Use the hostname clients will connect to.</p>' +
     '</div>' +
     '<div class="form-group"><label>Validity (days)</label>' +
@@ -828,7 +828,7 @@ function certIconSvg() {
 function renderCAList() {
   var list = document.getElementById("ca-list");
   if (!_certData.trustedCAs.length) {
-    list.innerHTML = '<li class="cert-empty">No trusted CAs uploaded. Shelob will use the system trust store.</li>';
+    list.innerHTML = '<li class="cert-empty">No trusted CAs uploaded. Polaris will use the system trust store.</li>';
     return;
   }
   list.innerHTML = _certData.trustedCAs.map(function (cert) {
@@ -1053,7 +1053,7 @@ async function loadDatabaseInfo() {
           '</div>' +
           '<div id="restore-version-warning" style="display:none;margin-bottom:0.75rem;padding:0.6rem 0.75rem;border-radius:6px;background:color-mix(in srgb, var(--color-warning) 12%, transparent);border:1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);font-size:0.82rem;color:var(--color-text-primary)">' +
             '<strong style="color:var(--color-warning)">Version mismatch</strong> — ' +
-            'This backup was created with a different version of Shelob. ' +
+            'This backup was created with a different version of Polaris. ' +
             'Restoring a backup from a different version may fail or cause issues if the database schema has changed. ' +
             'For best results, ensure the application version matches the backup version before restoring.' +
           '</div>' +
@@ -1257,8 +1257,8 @@ function selectRestoreFile(file) {
   document.getElementById("restore-filename").textContent = file.name;
   document.getElementById("restore-filesize").textContent = formatFileSize(file.size);
 
-  // Extract version from filename: shelob-backup-1.0.0-2026-...gz
-  var versionMatch = file.name.match(/shelob-backup-(\d+\.\d+\.\d+)-/);
+  // Extract version from filename: polaris-backup-1.0.0-2026-...gz (or legacy shelob-backup-*)
+  var versionMatch = file.name.match(/(?:polaris|shelob)-backup-(\d+\.\d+\.\d+)-/);
   var backupVersion = versionMatch ? versionMatch[1] : null;
   var currentVersion = _branding && _branding.version ? _branding.version : null;
   var versionEl = document.getElementById("restore-version");
@@ -1283,7 +1283,7 @@ function selectRestoreFile(file) {
     warningEl.innerHTML =
       '<strong style="color:var(--color-warning)">Unknown version</strong> — ' +
       'Could not determine the application version from this backup file. ' +
-      'Ensure this backup was created by a compatible version of Shelob before restoring.';
+      'Ensure this backup was created by a compatible version of Polaris before restoring.';
   }
 
   var isEncrypted = file.name.includes(".enc");
@@ -1798,7 +1798,7 @@ function renderUpdateFailed(status) {
 // ─── Customization Tab ─────────────────────────────────────────────────────
 
 var _brandingLoaded = false;
-var _brandingData = { appName: "Shelob", subtitle: "Network Management Tool", logoUrl: "/logo.png" };
+var _brandingData = { appName: "Polaris", subtitle: "Network Management Tool", logoUrl: "/logo.png" };
 
 async function loadCustomizationTab() {
   var container = document.getElementById("tab-customization");
@@ -1825,7 +1825,7 @@ function renderCustomizationTab() {
         'Change the name shown in the sidebar, login page, browser tabs, and PDF exports.' +
       '</p>' +
       '<div class="form-group"><label>Application Name</label>' +
-        '<input type="text" id="f-brand-appname" value="' + escapeHtml(_brandingData.appName || "") + '" placeholder="e.g. Shelob">' +
+        '<input type="text" id="f-brand-appname" value="' + escapeHtml(_brandingData.appName || "") + '" placeholder="e.g. Polaris">' +
       '</div>' +
       '<div class="form-group"><label>Subtitle</label>' +
         '<input type="text" id="f-brand-subtitle" value="' + escapeHtml(_brandingData.subtitle || "") + '" placeholder="e.g. Network Management Tool">' +

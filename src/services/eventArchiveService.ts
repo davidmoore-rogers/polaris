@@ -86,7 +86,7 @@ const DEFAULT_SETTINGS: ArchiveSettings = {
   username: "",
   password: "",
   keyPath: "",
-  remotePath: "/var/archive/shelob",
+  remotePath: "/var/archive/polaris",
 };
 
 export async function getArchiveSettings(): Promise<ArchiveSettings> {
@@ -162,8 +162,8 @@ export async function archiveAndExport(cutoff: Date): Promise<number> {
   if (events.length === 0) return 0;
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const filename = `shelob-events-${timestamp}.json`;
-  const tempDir = join(tmpdir(), "shelob-archives");
+  const filename = `polaris-events-${timestamp}.json`;
+  const tempDir = join(tmpdir(), "polaris-archives");
   if (!existsSync(tempDir)) mkdirSync(tempDir, { recursive: true });
   const localPath = join(tempDir, filename);
 
@@ -357,7 +357,7 @@ export async function testSyslogConnection(
     return { ok: false, message: "Host is required" };
   }
 
-  const testMsg = "<134>1 " + new Date().toISOString() + " shelob test - - - Shelob syslog connection test";
+  const testMsg = "<134>1 " + new Date().toISOString() + " polaris test - - - Polaris syslog connection test";
 
   try {
     if (settings.protocol === "udp") {

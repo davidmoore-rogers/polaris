@@ -213,7 +213,7 @@ export async function testRandomFortiGate(config: FortiManagerConfig): Promise<{
   // Apply the same include/exclude filters the discovery run would use. We
   // don't require FMG's `device.ip` here — that field is FMG's own view of
   // the gate (often a FortiLink/mgmt-tunnel address) and isn't reachable
-  // from Shelob. The real management IP comes from the gate's interface
+  // from Polaris. The real management IP comes from the gate's interface
   // config, resolved below.
   const filtered = filterDevices(raw as any[], config.deviceInclude, config.deviceExclude);
 

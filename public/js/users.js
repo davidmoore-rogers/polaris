@@ -613,7 +613,7 @@ function buildLdapTab(s) {
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Bind Credentials</p>' +
     '<div class="form-group">' +
       '<label>Bind DN</label>' +
-      '<input type="text" id="f-ldap-bind-dn" value="' + escapeHtml(s.bindDn || "") + '" placeholder="e.g. CN=svc-shelob,OU=Service Accounts,DC=corp,DC=local">' +
+      '<input type="text" id="f-ldap-bind-dn" value="' + escapeHtml(s.bindDn || "") + '" placeholder="e.g. CN=svc-polaris,OU=Service Accounts,DC=corp,DC=local">' +
       '<p class="hint">Distinguished name of the service account used to search the directory.</p>' +
     '</div>' +
     '<div class="form-group">' +

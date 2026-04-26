@@ -353,11 +353,11 @@ function fortiManagerFormHTML(defaults) {
         '<input type="checkbox" id="f-useDirect" ' + (d.useProxy === false ? "checked" : "") + ' style="width:auto" onchange="_fmgToggleDirectMode(this.checked)">' +
         '<label for="f-useDirect" style="margin:0;font-weight:500">Query each FortiGate directly (bypass FortiManager proxy)</label>' +
       '</div>' +
-      '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.75rem 0">When checked, Shelob skips FortiManager\'s <code>/sys/proxy/json</code> and talks straight to each managed FortiGate\'s management IP using the REST API credentials below — supports up to 20 parallel queries. When unchecked (default), all per-device DHCP/interface/switch/AP/VIP queries are proxied through FortiManager, which serializes them to one at a time.</p>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.75rem 0">When checked, Polaris skips FortiManager\'s <code>/sys/proxy/json</code> and talks straight to each managed FortiGate\'s management IP using the REST API credentials below — supports up to 20 parallel queries. When unchecked (default), all per-device DHCP/interface/switch/AP/VIP queries are proxied through FortiManager, which serializes them to one at a time.</p>' +
       '<p style="font-size:0.82rem;color:var(--color-warning);line-height:1.5;margin:0 0 0.75rem 0;background:rgba(255,214,0,0.08);border:1px solid rgba(255,214,0,0.25);border-radius:4px;padding:0.5rem 0.65rem"><strong>Tip:</strong> If your environment has more than 20 managed FortiGates, switching to direct queries is strongly recommended — proxy mode polls them one at a time, so a full discovery run scales linearly with device count.</p>' +
       '<div class="form-group" style="margin-bottom:0"><label>Parallel FortiGate Queries</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-discoveryParallelism" value="' + (d.useProxy === false ? (d.discoveryParallelism || 5) : 1) + '" min="1" max="20" style="width:80px"' + (d.useProxy === false ? "" : " disabled") + '><span id="f-parallelism-note" style="color:var(--color-text-tertiary);font-size:0.85rem">' + (d.useProxy === false ? "gates at once" : "locked to 1 when proxy is enabled") + '</span></div><p class="hint">With proxy enabled this is forced to 1 (FortiManager drops parallel connections past very low parallelism). Enable direct queries to use up to 20 FortiGates concurrently.</p></div>' +
       '<div id="f-fgt-creds-block" style="' + (d.useProxy === false ? "" : "display:none;") + 'border-top:1px solid rgba(79,195,247,0.2);padding-top:0.75rem;margin-top:0.5rem">' +
-        '<div class="form-group"><label>FortiGate API User</label><input type="text" id="f-fortigateApiUser" value="' + escapeHtml(d.fortigateApiUser || "") + '" placeholder="e.g. shelob-ro"><p class="hint">REST API admin username configured on each managed FortiGate</p></div>' +
+        '<div class="form-group"><label>FortiGate API User</label><input type="text" id="f-fortigateApiUser" value="' + escapeHtml(d.fortigateApiUser || "") + '" placeholder="e.g. polaris-ro"><p class="hint">REST API admin username configured on each managed FortiGate</p></div>' +
         '<div class="form-group"><label>FortiGate API Token</label><input type="password" id="f-fortigateApiToken" value="' + (d.fortigateApiTokenPlaceholder ? "" : escapeHtml(d.fortigateApiToken || "")) + '" placeholder="' + (d.fortigateApiTokenPlaceholder || "Bearer token") + '"><p class="hint">Bearer token for the above admin. Must be the same across all managed FortiGates.</p></div>' +
         '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0">' +
           '<input type="checkbox" id="f-fortigateVerifySsl" ' + (d.fortigateVerifySsl ? "checked" : "") + ' style="width:auto">' +
@@ -683,7 +683,7 @@ function activeDirectoryFormHTML(defaults) {
       '<input type="checkbox" id="f-verifyTls" ' + (verifyTls ? "checked" : "") + ' style="width:auto">' +
       '<label for="f-verifyTls" style="margin:0">Verify TLS certificate</label>' +
     '</div>' +
-    '<div class="form-group"><label>Bind DN *</label><input type="text" id="f-bindDn" value="' + escapeHtml(d.bindDn || "") + '" placeholder="e.g. CN=shelob-svc,OU=Service Accounts,DC=corp,DC=local"><p class="hint">Distinguished name of the bind account. A read-only domain user is sufficient.</p></div>' +
+    '<div class="form-group"><label>Bind DN *</label><input type="text" id="f-bindDn" value="' + escapeHtml(d.bindDn || "") + '" placeholder="e.g. CN=polaris-svc,OU=Service Accounts,DC=corp,DC=local"><p class="hint">Distinguished name of the bind account. A read-only domain user is sufficient.</p></div>' +
     '<div class="form-group"><label>Bind Password *</label><input type="password" id="f-bindPassword" value="' + (d.bindPasswordPlaceholder ? "" : escapeHtml(d.bindPassword || "")) + '" placeholder="' + (d.bindPasswordPlaceholder || "Password") + '"></div>' +
     '<div class="form-group"><label>Base DN *</label><input type="text" id="f-baseDn" value="' + escapeHtml(d.baseDn || "") + '" placeholder="e.g. DC=corp,DC=local"><p class="hint">Subtree to search for computer objects. Narrow this (e.g. <code>OU=Workstations,DC=corp,DC=local</code>) if you only want part of the directory.</p></div>' +
     '<div class="form-group"><label>Search Scope</label>' +
@@ -1456,7 +1456,7 @@ function openApiQueryModal(id, adom, useProxy) {
       '<div class="form-group" style="margin-top:0.75rem">' +
         '<label>Target FortiGate</label>' +
         '<input type="text" id="fmg-fgt-device" placeholder="FMG device name — e.g. FG-HQ-01">' +
-        '<p class="hint">Name as it appears in FortiManager. Shelob resolves the management IP via FMG, then sends the REST call directly using the integration\'s FortiGate API token.</p>' +
+        '<p class="hint">Name as it appears in FortiManager. Polaris resolves the management IP via FMG, then sends the REST call directly using the integration\'s FortiGate API token.</p>' +
       '</div>' +
       '<div class="form-group">' +
         '<label>Query Parameters <span style="font-size:0.8rem;color:var(--color-text-tertiary)">(one per line — <code>key=value</code>)</span></label>' +

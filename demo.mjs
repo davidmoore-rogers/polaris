@@ -1138,7 +1138,7 @@ let ARCHIVE_SETTINGS = {
   username: "",
   password: "",
   keyPath: "",
-  remotePath: "/var/archive/shelob",
+  remotePath: "/var/archive/polaris",
 };
 
 let SYSLOG_SETTINGS = {
@@ -1249,7 +1249,7 @@ function _mockOuiLookup(mac) {
 }
 
 let BRANDING = {
-  appName: "Shelob",
+  appName: "Polaris",
   subtitle: "Network Management Tool",
   logoUrl: "/logo.png",
 };
@@ -2457,7 +2457,7 @@ const _httpHandler = (req, res) => {
       if (k) m[k] = v;
       return m;
     }, {});
-    if (!cookies["shelob-session"] || !USERS.find((u) => u.username === decodeURIComponent(cookies["shelob-session"]))) {
+    if (!cookies["polaris-session"] || !USERS.find((u) => u.username === decodeURIComponent(cookies["polaris-session"]))) {
       res.writeHead(302, { Location: "/login.html" });
       return res.end();
     }
@@ -2491,17 +2491,17 @@ async function routeAPI(method, path, params, body, res, req) {
     if (k) m[k] = v;
     return m;
   }, {});
-  const sessionUser = cookies["shelob-session"] ? USERS.find((u) => u.username === cookies["shelob-session"]) : null;
+  const sessionUser = cookies["polaris-session"] ? USERS.find((u) => u.username === cookies["polaris-session"]) : null;
   const isLoggedIn = !!sessionUser;
 
   if (path === "/api/v1/auth/login" && method === "POST") {
     const loginUser = USERS.find((u) => u.username === (body.username || "admin")) || USERS[0];
     loginUser.lastLogin = new Date().toISOString();
-    res.setHeader("Set-Cookie", "shelob-session=" + encodeURIComponent(loginUser.username) + "; Path=/; HttpOnly; SameSite=Lax");
+    res.setHeader("Set-Cookie", "polaris-session=" + encodeURIComponent(loginUser.username) + "; Path=/; HttpOnly; SameSite=Lax");
     return json(res, { ok: true, username: loginUser.username, role: loginUser.role });
   }
   if (path === "/api/v1/auth/logout" && method === "POST") {
-    res.setHeader("Set-Cookie", "shelob-session=; Path=/; HttpOnly; Max-Age=0");
+    res.setHeader("Set-Cookie", "polaris-session=; Path=/; HttpOnly; Max-Age=0");
     return json(res, { ok: true });
   }
   if (path === "/api/v1/auth/me") {
@@ -3722,7 +3722,7 @@ async function routeAPI(method, path, params, body, res, req) {
       version: "15.4",
       host: "localhost",
       port: 5432,
-      database: "shelob",
+      database: "polaris",
       ssl: "Disabled",
       databaseSize: _formatBytes(totalSize),
       tableCount: tables.length,
@@ -3738,11 +3738,11 @@ async function routeAPI(method, path, params, body, res, req) {
     const password = body?.password || null;
     const now = new Date();
     const ts = now.toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const filename = `shelob-backup-${APP_VERSION}-${ts}${password ? ".enc" : ""}.gz`;
+    const filename = `polaris-backup-${APP_VERSION}-${ts}${password ? ".enc" : ""}.gz`;
 
     // Serialize all in-memory data
     const snapshot = {
-      _shelob_backup: true,
+      _polaris_backup: true,
       version: "1.0",
       createdAt: now.toISOString(),
       data: {
@@ -3913,7 +3913,7 @@ async function routeAPI(method, path, params, body, res, req) {
     return json(res, { ...BRANDING, version: APP_VERSION });
   }
   if (path === "/api/v1/server-settings/branding" && method === "PUT") {
-    if (body.appName !== undefined) BRANDING.appName = String(body.appName).trim() || "Shelob";
+    if (body.appName !== undefined) BRANDING.appName = String(body.appName).trim() || "Polaris";
     if (body.subtitle !== undefined) BRANDING.subtitle = String(body.subtitle).trim();
     logEventDemo({ action: "branding.updated", resourceType: "settings", resourceId: "branding", resourceName: "Branding", message: `Branding updated: "${BRANDING.appName}"` });
     return json(res, { ...BRANDING });
@@ -3938,7 +3938,7 @@ async function routeAPI(method, path, params, body, res, req) {
     const now = new Date().toISOString();
     const expiry = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 
-    const tmp = mkdtempSync(join(tmpdir(), "shelob-cert-"));
+    const tmp = mkdtempSync(join(tmpdir(), "polaris-cert-"));
     const keyPath = join(tmp, "server.key");
     const certPath = join(tmp, "server.crt");
     try {
@@ -4191,8 +4191,8 @@ function routeMultipart(method, path, rawBody, contentType, res) {
         return json(res, { error: "Invalid backup file — could not parse JSON data" }, 400);
       }
 
-      if (!snapshot._shelob_backup) {
-        return json(res, { error: "Invalid backup file — not a Shelob backup" }, 400);
+      if (!snapshot._polaris_backup && !snapshot._shelob_backup) {
+        return json(res, { error: "Invalid backup file — not a Polaris backup" }, 400);
       }
 
       const d = snapshot.data;
@@ -4244,7 +4244,7 @@ function routeMultipart(method, path, rawBody, contentType, res) {
 
 server.listen(PORT, () => {
   console.log("");
-  console.log("  \x1b[32m✓\x1b[0m Shelob demo server running");
+  console.log("  \x1b[32m✓\x1b[0m Polaris demo server running");
   console.log("");
   console.log("    \x1b[36mhttp://localhost:" + PORT + "\x1b[0m");
   console.log("");

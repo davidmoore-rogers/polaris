@@ -10,7 +10,7 @@ import QRCode from "qrcode";
 import { randomBytes } from "node:crypto";
 import { hashPassword, verifyPassword } from "../utils/password.js";
 
-const TOTP_ISSUER = "Shelob";
+const TOTP_ISSUER = "Polaris";
 const BACKUP_CODE_COUNT = 10;
 
 // Build a TOTP handle for a specific account. All our codes use the default

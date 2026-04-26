@@ -289,7 +289,7 @@ const api = {
       return fetch(API_BASE + "/server-settings/database/backup", opts).then(function (res) {
         if (res.status === 401) { window.location.href = "/login.html"; return; }
         if (!res.ok) return res.json().then(function (d) { throw new Error(d.error || "Backup failed"); });
-        var filename = "shelob-backup.gz";
+        var filename = "polaris-backup.gz";
         var cd = res.headers.get("Content-Disposition");
         if (cd) { var m = cd.match(/filename="?([^"]+)"?/); if (m) filename = m[1]; }
         return res.blob().then(function (blob) { return { blob: blob, filename: filename }; });

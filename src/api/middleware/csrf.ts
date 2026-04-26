@@ -5,7 +5,7 @@
  * store (HttpOnly). The same value is exposed in a readable cookie so
  * same-origin JavaScript in our own pages can echo it in an `X-CSRF-Token`
  * header on state-changing requests. A cross-origin attacker can forge a
- * POST to Shelob but has no way to read the token cookie (Same-Origin
+ * POST to Polaris but has no way to read the token cookie (Same-Origin
  * Policy) and therefore can't put a valid value in the header.
  *
  * This is defense-in-depth on top of `SameSite=Lax` + strict JSON content

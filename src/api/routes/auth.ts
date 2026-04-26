@@ -349,7 +349,7 @@ router.post("/azure/callback", async (req, res) => {
     req.session.role = user.role;
     req.session.authProvider = "azure";
     // IdP is responsible for MFA on Azure SAML users; their session is
-    // implicitly "mfa-verified" as far as Shelob is concerned.
+    // implicitly "mfa-verified" as far as Polaris is concerned.
     req.session.mfaVerified = true;
     req.session.lastActivity = Date.now();
     req.session.samlNameID = profile.nameID;

@@ -24,8 +24,8 @@
     var res = await fetch("/api/v1/server-settings/branding");
     if (res.ok) {
       var b = await res.json();
-      h2.textContent = b.appName || "Shelob";
-      document.title = (b.appName || "Shelob") + " — Login";
+      h2.textContent = b.appName || "Polaris";
+      document.title = (b.appName || "Polaris") + " — Login";
       subEl.textContent = b.subtitle || "";
       subEl.style.display = b.subtitle ? "" : "none";
       if (b.logoUrl) {

@@ -1,8 +1,10 @@
-# Shelob — Claude Code Project
+# Polaris — Claude Code Project
 
 ## Project Overview
 
-**Shelob** is an IP management tool that allows users to reserve and manage IP address space (IPv4 and IPv6) for use across other infrastructure projects. Named after Tolkien's great spider — because subnets are webs, and Shelob spins them. It provides a central registry for subnets, individual IPs, and reservations — preventing conflicts and giving teams visibility into IP utilization.
+**Polaris** is an IP management tool that allows users to reserve and manage IP address space (IPv4 and IPv6) for use across other infrastructure projects. Named after the North Star — a fixed reference point operators can navigate by when wiring up everything else. It provides a central registry for subnets, individual IPs, and reservations — preventing conflicts and giving teams visibility into IP utilization.
+
+> **Legacy identifiers:** several internal names (`shelob_csrf` cookie, `shelob-*` localStorage keys, `SHELOB1\0` backup magic bytes, `deploy/shelob.service`, `/opt/shelob` install path, the `shelob` Postgres database/user, the `__shelob_timing_dummy__` argon2 constant) are intentionally kept under the project's previous name to avoid logging users out, invalidating preferences, breaking encrypted backup restores, or requiring host-level migrations. Treat them as fixed identifiers, not branding.
 
 Current version: **0.9.x** (pre-release; patch = git commit count, minor per release). Version is shown in the sidebar and embedded in backup filenames. The patch is derived automatically at startup from `git rev-list --count HEAD` — never bump it manually.
 
@@ -11,7 +13,7 @@ Current version: **0.9.x** (pre-release; patch = git commit count, minor per rel
 ## Architecture
 
 ```
-shelob/
+polaris/
 ├── CLAUDE.md
 ├── README.md
 ├── .env.example
@@ -579,7 +581,7 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 ### Device Map — `requireAuth`
 - `GET    /map/sites`                           — Every firewall Asset with non-null lat/lng. Includes subnet count (via `Subnet.fortigateDevice` match), last-seen status, and a monitor health snapshot: `monitored`, `monitorHealth` (`"up" | "degraded" | "down" | "unknown"`, `null` when unmonitored), `monitorRecentSamples`, `monitorRecentFailures`. Health is computed from the last 10 `AssetMonitorSample` rows per asset — all 10 ok → `up` (green pin), any failed → `degraded` (amber, "packet loss"), 10/10 failed → `down` (red). The map intentionally uses this fixed 10-sample window rather than the global `monitor.failureThreshold`. Sidebar page entry: "Device Map" (below Dashboard).
 - `GET    /map/search?q=<query>`                — Autocomplete over firewall hostnames + serials, capped at 12. Only returns sites that have coordinates (a pinless FortiGate can't be navigated to).
-- `GET    /map/sites/:id/topology`              — Graph payload for the click-through modal. Returns `{ fortigate, switches[], aps[], subnets[], edges[] }`. The `fortigate` object carries the same `monitored` / `monitorHealth` / `monitorRecentSamples` / `monitorRecentFailures` fields as `/map/sites` so the modal's root node color matches the pin. Every edge id references a node in the same payload. FortiGate→Switch edges are derived from `Asset.fortinetTopology.uplinkInterface` (the FortiLink interface from `managed-switch/status.fgt_peer_intf_name`). AP→Switch edges come from `switch-controller/detected-device` MAC learnings matched against AP base_mac during discovery; APs with no peer switch fall back to a direct FortiGate→AP edge. FortiSwitch and FortiAP nodes are always rendered dark gray in the topology — Shelob can't independently probe devices behind the FortiGate, so no monitor color is reported for them.
+- `GET    /map/sites/:id/topology`              — Graph payload for the click-through modal. Returns `{ fortigate, switches[], aps[], subnets[], edges[] }`. The `fortigate` object carries the same `monitored` / `monitorHealth` / `monitorRecentSamples` / `monitorRecentFailures` fields as `/map/sites` so the modal's root node color matches the pin. Every edge id references a node in the same payload. FortiGate→Switch edges are derived from `Asset.fortinetTopology.uplinkInterface` (the FortiLink interface from `managed-switch/status.fgt_peer_intf_name`). AP→Switch edges come from `switch-controller/detected-device` MAC learnings matched against AP base_mac during discovery; APs with no peer switch fall back to a direct FortiGate→AP edge. FortiSwitch and FortiAP nodes are always rendered dark gray in the topology — Polaris can't independently probe devices behind the FortiGate, so no monitor color is reported for them.
 
 ### Allocation Templates — mixed scoping
 - `GET    /allocation-templates`                *(auth)* — List saved multi-subnet templates used by the Networks "Auto-Allocate Next" modal.
@@ -621,7 +623,7 @@ Azure SAML SSO is optional; users are auto-provisioned on first login with a def
 
 **Per-device transport (`useProxy` toggle):** The FMG integration has two per-device query transports, selectable in the integration edit modal. The UI checkbox is labeled "Query each FortiGate directly (bypass FortiManager proxy)" — *checked = direct, unchecked = proxy*. The on-disk field is still `useProxy` (true=proxy); the UI just inverts the semantics so the more aggressive option (direct) is the explicit affirmative action. The modal also surfaces a "more than 20 FortiGates → switch to direct" recommendation since proxy mode polls one device at a time.
 - **Proxy mode** (default, `useProxy: true`): all per-device queries funnel through FMG's `/sys/proxy/json` (monitor endpoints) and `/pm/config/device/<name>/...` (CMDB). Parallelism is force-clamped to 1 because FMG drops parallel connections past very low parallelism, surfacing as `fetch failed` on random calls.
-- **Direct mode** (`useProxy: false`): FMG is only used to enumerate the managed FortiGate roster; per-device calls go direct to each FortiGate's management IP (the `ip` field on the FMG `/dvmdb/adom/<adom>/device` response) using shared REST API credentials stored in `config.fortigateApiUser` / `config.fortigateApiToken`. Each managed FortiGate must have the same REST API admin provisioned with a trusthost that includes Shelob. Delegates per-device work to `fortigateService.discoverDhcpSubnets` and remaps the device name back to FMG's label. Unlocks `discoveryParallelism` (up to 20).
+- **Direct mode** (`useProxy: false`): FMG is only used to enumerate the managed FortiGate roster; per-device calls go direct to each FortiGate's management IP (the `ip` field on the FMG `/dvmdb/adom/<adom>/device` response) using shared REST API credentials stored in `config.fortigateApiUser` / `config.fortigateApiToken`. Each managed FortiGate must have the same REST API admin provisioned with a trusthost that includes Polaris. Delegates per-device work to `fortigateService.discoverDhcpSubnets` and remaps the device name back to FMG's label. Unlocks `discoveryParallelism` (up to 20).
 
 ---
 

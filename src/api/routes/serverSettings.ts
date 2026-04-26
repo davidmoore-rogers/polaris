@@ -189,8 +189,8 @@ router.post("/database/backup", async (req, res, next) => {
     const connUrl = process.env.DATABASE_URL || "";
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const backupId = `bk-${Date.now()}`;
-    const filename = `shelob-backup-${APP_VERSION}-${ts}${password ? ".enc" : ""}.gz`;
-    const tmpFile = join(tmpdir(), `shelob-dump-${Date.now()}.sql`);
+    const filename = `polaris-backup-${APP_VERSION}-${ts}${password ? ".enc" : ""}.gz`;
+    const tmpFile = join(tmpdir(), `polaris-dump-${Date.now()}.sql`);
 
     try {
       execSync(`pg_dump "${connUrl}" --no-owner --no-acl --clean --if-exists -f "${tmpFile}"`, {
@@ -300,7 +300,7 @@ router.post("/database/restore", restoreUpload.single("file"), async (req, res, 
     }
 
     // Write SQL to temp file and restore with psql
-    const tmpFile = join(tmpdir(), `shelob-restore-${Date.now()}.sql`);
+    const tmpFile = join(tmpdir(), `polaris-restore-${Date.now()}.sql`);
     writeFileSync(tmpFile, payload);
 
     try {
@@ -964,7 +964,7 @@ interface BrandingSettings {
 }
 
 const BRANDING_DEFAULTS: BrandingSettings = {
-  appName: "Shelob",
+  appName: "Polaris",
   subtitle: "Network Management Tool",
   logoUrl: "/logo.png",
 };

@@ -8,7 +8,7 @@
  *
  * Storage is process-local — a restart drops all pending MFA challenges,
  * forcing users to redo their password. Acceptable for single-instance
- * deployment; swap for Redis if Shelob ever goes multi-replica.
+ * deployment; swap for Redis if Polaris ever goes multi-replica.
  */
 
 import { randomBytes } from "node:crypto";

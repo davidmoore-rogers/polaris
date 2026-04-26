@@ -480,7 +480,7 @@
         // server-side from the last 10 AssetMonitorSample rows).
         { selector: 'node[role="fortigate"]',   style: { "background-color": "data(nodeColor)", width: 64, height: 64, "font-weight": 700 } },
         // FortiSwitches and FortiAPs always render as dark gray: they sit
-        // behind the FortiGate, so Shelob can't independently verify their
+        // behind the FortiGate, so Polaris can't independently verify their
         // reachability — coloring them green/red would be misleading.
         { selector: 'node[role="fortiswitch"]', style: { "background-color": "#37474f" } },
         { selector: 'node[role="fortiap"]',     style: { "background-color": "#37474f", width: 36, height: 36 } },

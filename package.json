@@ -1,7 +1,7 @@
 {
-  "name": "shelob",
+  "name": "polaris",
   "version": "1.0.0",
-  "description": "Shelob — subnet & IP address management, spinning your network into a web",
+  "description": "Polaris — subnet & IP address management, the fixed reference point for your network",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
