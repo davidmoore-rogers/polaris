@@ -90,10 +90,12 @@ async function loadUsers() {
 function openCreateModal() {
   var body = '<div class="form-group"><label>Username *</label><input type="text" id="f-username" placeholder="e.g. jsmith"></div>' +
     '<div class="form-group"><label>Password *</label><input type="password" id="f-password" placeholder="Enter password">' + passwordChecksHTML("f-pw-checks") + '<p class="hint">The user can change this after first login.</p></div>' +
+    '<div class="form-group"><label>Confirm Password *</label><input type="password" id="f-password-confirm" placeholder="Re-enter password">' + passwordMatchHTML("f-pw-match") + '</div>' +
     '<div class="form-group"><label>Role</label><select id="f-role"><option value="readonly" selected>Read Only</option><option value="user">User</option><option value="networkadmin">Network Admin</option><option value="assetsadmin">Assets Admin</option><option value="admin">Admin</option></select></div>';
   var footer = '<button class="btn btn-secondary" id="btn-cancel">Cancel</button><button class="btn btn-primary" id="btn-save">Create User</button>';
   openModal("Add User", body, footer);
   wirePasswordChecks("f-password", "f-pw-checks");
+  wirePasswordMatch("f-password", "f-password-confirm", "f-pw-match");
   document.getElementById("btn-cancel").addEventListener("click", closeModal);
 
   document.getElementById("btn-save").addEventListener("click", async function () {
@@ -104,6 +106,10 @@ function openCreateModal() {
     }
     if (!checkPasswordField(val("f-password"), "f-pw-checks")) {
       showToast("Password does not meet complexity requirements", "error");
+      return;
+    }
+    if (val("f-password") !== val("f-password-confirm")) {
+      showToast("Passwords do not match", "error");
       return;
     }
     btn.disabled = true;
@@ -713,4 +719,27 @@ function checkPasswordField(pw, containerId) {
     }
   });
   return allPassed;
+}
+
+function passwordMatchHTML(containerId) {
+  return '<div id="' + containerId + '" style="margin-top:0.4rem;font-size:0.8rem;line-height:1.6;color:var(--color-text-tertiary)">' +
+    '<span class="pw-icon">&#9675;</span> Matches password' +
+    '</div>';
+}
+
+function wirePasswordMatch(passwordId, confirmId, containerId) {
+  function update() {
+    checkPasswordMatch(document.getElementById(passwordId).value, document.getElementById(confirmId).value, containerId);
+  }
+  document.getElementById(passwordId).addEventListener("input", update);
+  document.getElementById(confirmId).addEventListener("input", update);
+}
+
+function checkPasswordMatch(pw, confirm, containerId) {
+  var el = document.getElementById(containerId);
+  if (!el) return false;
+  var matched = confirm.length > 0 && pw === confirm;
+  el.querySelector(".pw-icon").innerHTML = matched ? "&#10003;" : "&#9675;";
+  el.style.color = matched ? "var(--color-success, #4caf50)" : "var(--color-text-tertiary)";
+  return matched;
 }
