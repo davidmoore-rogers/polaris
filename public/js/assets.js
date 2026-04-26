@@ -936,6 +936,83 @@ async function openEditModal(id) {
   }
 }
 
+// ─── Asset details panel auto-refresh ──────────────────────────────────────
+//
+// Three independent self-rescheduling setTimeout chains keep the panel's
+// charts current without polling when nothing is visible:
+//   • Response-time chart (Monitoring tab)  — response-time cadence
+//   • System tab (CPU/Mem, temps, ifaces, storage) — telemetry cadence
+//   • Per-interface slide-over charts        — response-time cadence
+// Each tick checks that the relevant overlay is still open before fetching
+// and defers (re-checks in 30 s) when the browser tab is hidden so we don't
+// hammer the API for a panel the user can't see. Custom date ranges on the
+// Monitoring tab opt out of refresh entirely (the user picked a fixed window).
+
+var _assetMonitorRefreshTimer = null;
+var _assetSystemRefreshTimer  = null;
+var _ifaceRefreshTimer        = null;
+var _monitorSettingsCache     = null;  // global monitor settings, fetched once per session
+var _currentAssetForRefresh   = null;  // asset object cached so refresh schedulers can read its per-asset intervals
+
+function _refreshIntervalMs(perAssetSec, globalSec, defaultSec) {
+  var s = (typeof perAssetSec === "number" && perAssetSec > 0) ? perAssetSec
+        : (typeof globalSec   === "number" && globalSec   > 0) ? globalSec
+        : defaultSec;
+  return Math.max(15, Math.floor(s)) * 1000;
+}
+
+function _isOverlayOpen(id) {
+  var el = document.getElementById(id);
+  return !!(el && el.classList.contains("open"));
+}
+
+function _clearAssetRefreshTimers() {
+  if (_assetMonitorRefreshTimer) { clearTimeout(_assetMonitorRefreshTimer); _assetMonitorRefreshTimer = null; }
+  if (_assetSystemRefreshTimer)  { clearTimeout(_assetSystemRefreshTimer);  _assetSystemRefreshTimer  = null; }
+  if (_ifaceRefreshTimer)        { clearTimeout(_ifaceRefreshTimer);        _ifaceRefreshTimer        = null; }
+}
+
+function _clearIfaceRefreshTimer() {
+  if (_ifaceRefreshTimer) { clearTimeout(_ifaceRefreshTimer); _ifaceRefreshTimer = null; }
+}
+
+function _isCurrentAsset(assetId) {
+  return !!(_currentAssetForRefresh && _currentAssetForRefresh.id === assetId);
+}
+
+function _scheduleAssetMonitorRefresh(assetId, ms) {
+  if (_assetMonitorRefreshTimer) clearTimeout(_assetMonitorRefreshTimer);
+  _assetMonitorRefreshTimer = setTimeout(function tick() {
+    if (!_isOverlayOpen("asset-panel-overlay") || !_isCurrentAsset(assetId)) { _assetMonitorRefreshTimer = null; return; }
+    if (document.hidden) { _assetMonitorRefreshTimer = setTimeout(tick, 30000); return; }
+    _loadMonitorHistoryFor(assetId, _currentMonitorSelection());
+  }, ms);
+}
+
+function _scheduleAssetSystemRefresh(assetId, asset, ms) {
+  if (_assetSystemRefreshTimer) clearTimeout(_assetSystemRefreshTimer);
+  _assetSystemRefreshTimer = setTimeout(function tick() {
+    if (!_isOverlayOpen("asset-panel-overlay") || !_isCurrentAsset(assetId)) { _assetSystemRefreshTimer = null; return; }
+    if (document.hidden) { _assetSystemRefreshTimer = setTimeout(tick, 30000); return; }
+    _loadSystemTabFor(assetId, _currentSystemTabRange(), asset);
+  }, ms);
+}
+
+function _scheduleIfaceRefresh(assetId, ifName, ms) {
+  if (_ifaceRefreshTimer) clearTimeout(_ifaceRefreshTimer);
+  _ifaceRefreshTimer = setTimeout(function tick() {
+    // The iface slide-over is anchored to the current asset; if either is gone we drop the chain.
+    if (!_isOverlayOpen("iface-panel-overlay") || !_isCurrentAsset(assetId)) { _ifaceRefreshTimer = null; return; }
+    if (document.hidden) { _ifaceRefreshTimer = setTimeout(tick, 30000); return; }
+    _loadInterfaceHistoryFor(assetId, ifName, _currentIfaceRange());
+  }, ms);
+}
+
+function _currentIfaceRange() {
+  var btn = document.querySelector(".iface-range-btn.btn-primary");
+  return (btn && btn.getAttribute("data-range")) || "1h";
+}
+
 function _ensureAssetPanelDOM() {
   if (document.getElementById("asset-panel-overlay")) return;
   var overlay = document.createElement("div");
@@ -967,6 +1044,8 @@ function _ensureAssetPanelDOM() {
 function closeAssetPanel() {
   var overlay = document.getElementById("asset-panel-overlay");
   if (overlay) overlay.classList.remove("open");
+  _clearAssetRefreshTimers();
+  _currentAssetForRefresh = null;
 }
 
 async function openViewModal(id) {
@@ -984,7 +1063,18 @@ async function openViewModal(id) {
   });
 
   try {
-    var a = await api.assets.get(id);
+    // Fetch the asset and (once per session) the global monitor settings in parallel.
+    // _monitorSettingsCache feeds the auto-refresh schedulers — without it we'd
+    // fall back to a hardcoded 60s default even when the admin has tuned the
+    // global cadence higher.
+    var fetches = [api.assets.get(id)];
+    if (!_monitorSettingsCache) {
+      fetches.push(api.assets.getMonitorSettings().catch(function () { return null; }));
+    }
+    var fetched = await Promise.all(fetches);
+    var a = fetched[0];
+    if (fetched[1]) _monitorSettingsCache = fetched[1];
+    _currentAssetForRefresh = a;
     var generalHTML = '<div class="asset-view-grid">' +
       viewRow("Hostname", a.hostname) +
       viewRow("DNS Name", a.dnsName) +
@@ -1190,7 +1280,9 @@ function assetSystemViewHTML(a) {
     '<h4 style="margin:1.25rem 0 0.5rem">Interfaces</h4>' +
     '<div id="asset-system-interfaces"><span class="empty-state">Loading…</span></div>' +
     '<h4 style="margin:1.25rem 0 0.5rem">Storage</h4>' +
-    '<div id="asset-system-storage"><span class="empty-state">Loading…</span></div>'
+    '<div id="asset-system-storage"><span class="empty-state">Loading…</span></div>' +
+    '<h4 style="margin:1.25rem 0 0.5rem">IPsec Tunnels</h4>' +
+    '<div id="asset-system-ipsec"><span class="empty-state">Loading…</span></div>'
   );
 }
 
@@ -1200,12 +1292,16 @@ function _currentSystemTabRange() {
 }
 
 async function _loadSystemTabFor(assetId, range, asset) {
+  // Cancel any pending auto-refresh — a manual range change, probe-now, or
+  // re-render shouldn't race a scheduled tick.
+  if (_assetSystemRefreshTimer) { clearTimeout(_assetSystemRefreshTimer); _assetSystemRefreshTimer = null; }
   var chart   = document.getElementById("asset-system-chart");
   var summary = document.getElementById("asset-system-summary");
   var ifaces  = document.getElementById("asset-system-interfaces");
   var storage = document.getElementById("asset-system-storage");
   var temps   = document.getElementById("asset-system-temps");
   var tempChart = document.getElementById("asset-system-temp-chart");
+  var ipsec   = document.getElementById("asset-system-ipsec");
   if (!chart) return;
   chart.dataset.range = range || "24h";
   chart.textContent = "Loading samples…";
@@ -1213,6 +1309,7 @@ async function _loadSystemTabFor(assetId, range, asset) {
   if (ifaces)  ifaces.innerHTML  = '<span class="empty-state">Loading…</span>';
   if (storage) storage.innerHTML = '<span class="empty-state">Loading…</span>';
   if (temps)   temps.innerHTML   = '<span class="empty-state">Loading…</span>';
+  if (ipsec)   ipsec.innerHTML   = '<span class="empty-state">Loading…</span>';
 
   try {
     var results = await Promise.all([
@@ -1229,13 +1326,22 @@ async function _loadSystemTabFor(assetId, range, asset) {
     _renderInterfacesTable(ifaces, si, asset);
     _renderStorageTable(storage, si);
     _renderTemperatures(temps, tempChart, si, tempH);
+    _renderIpsecTunnels(ipsec, si, asset);
   } catch (err) {
     chart.textContent = "Error: " + (err.message || "failed to load");
     if (summary) summary.innerHTML = "";
     if (ifaces)  ifaces.innerHTML  = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
     if (storage) storage.innerHTML = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
     if (temps)   temps.innerHTML   = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
+    if (ipsec)   ipsec.innerHTML   = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
   }
+  // Schedule next auto-refresh on the telemetry cadence (the fastest of the
+  // three System-tab streams). Keep going on error so a transient blip doesn't
+  // disable the chain.
+  var settings = _monitorSettingsCache || {};
+  var refAsset = asset || _currentAssetForRefresh;
+  var ms = _refreshIntervalMs(refAsset && refAsset.telemetryIntervalSec, settings.telemetryIntervalSeconds, 60);
+  _scheduleAssetSystemRefresh(assetId, refAsset, ms);
 }
 
 function _renderSystemSummary(container, tel, si) {
@@ -1329,6 +1435,48 @@ function _renderInterfacesTable(container, si, asset) {
       e.preventDefault();
       var name = link.getAttribute("data-ifname");
       openInterfaceDetailPanel(asset, name);
+    });
+  });
+}
+
+// IPsec tunnel snapshot — FortiOS-only. The backend leaves the array empty
+// for SNMP/WinRM/AD assets and for FortiGates with no tunnels configured;
+// either way render an explanatory empty-state instead of an empty table.
+function _renderIpsecTunnels(container, si, asset) {
+  if (!container) return;
+  var rows = (si && si.ipsecTunnels) || [];
+  var t = (si && si.monitorType) || (asset && asset.monitorType) || "";
+  if (rows.length === 0) {
+    if (t === "fortigate" || t === "fortimanager") {
+      container.innerHTML = '<p class="empty-state">No IPsec tunnels reported by this FortiGate (or none configured yet).</p>';
+    } else {
+      container.innerHTML = '<p class="empty-state">IPsec tunnel data is only collected for FortiOS-monitored devices.</p>';
+    }
+    return;
+  }
+  var body = rows.map(function (t) {
+    var pillClass = t.status === "up" ? "active" : t.status === "down" ? "decommissioned" : "maintenance";
+    var pill = '<span class="status-pill status-pill-' + pillClass + '">' + escapeHtml(t.status) + '</span>';
+    var name = '<a href="#" class="asset-ipsec-link" data-name="' + escapeHtml(t.tunnelName) + '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(t.tunnelName) + '</a>';
+    var p2 = t.proxyIdCount != null ? String(t.proxyIdCount) : '—';
+    return '<tr>' +
+      '<td class="mono">' + name + '</td>' +
+      '<td>' + pill + '</td>' +
+      '<td class="mono">' + escapeHtml(t.remoteGateway || '—') + '</td>' +
+      '<td>' + (t.incomingBytes != null ? _fmtBytes(t.incomingBytes) : '—') + '</td>' +
+      '<td>' + (t.outgoingBytes != null ? _fmtBytes(t.outgoingBytes) : '—') + '</td>' +
+      '<td title="Phase-2 selector count">' + p2 + '</td>' +
+    '</tr>';
+  }).join("");
+  container.innerHTML =
+    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+      '<th>Tunnel</th><th>Status</th><th>Remote gateway</th><th>In (cumulative)</th><th>Out (cumulative)</th><th>P2</th>' +
+    '</tr></thead><tbody>' + body + '</tbody></table></div>';
+
+  container.querySelectorAll(".asset-ipsec-link").forEach(function (link) {
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      openIpsecTunnelDetailPanel(asset, link.getAttribute("data-name"));
     });
   });
 }
@@ -1911,6 +2059,9 @@ function assetMonitoringViewHTML(a) {
 }
 
 async function _loadMonitorHistoryFor(assetId, selection) {
+  // Cancel any pending auto-refresh — a manual range change or probe-now click
+  // shouldn't race against an in-flight scheduled tick.
+  if (_assetMonitorRefreshTimer) { clearTimeout(_assetMonitorRefreshTimer); _assetMonitorRefreshTimer = null; }
   var chart = document.getElementById("asset-monitor-chart");
   var stats = document.getElementById("asset-monitor-stats");
   if (!chart) return;
@@ -1941,6 +2092,12 @@ async function _loadMonitorHistoryFor(assetId, selection) {
   } catch (err) {
     chart.textContent = "Error: " + (err.message || "failed to load history");
   }
+  // Custom date ranges are fixed historical windows — do not auto-refresh.
+  if (opts.from && opts.to) return;
+  var settings = _monitorSettingsCache || {};
+  var asset = _currentAssetForRefresh;
+  var ms = _refreshIntervalMs(asset && asset.monitorIntervalSec, settings.intervalSeconds, 60);
+  _scheduleAssetMonitorRefresh(assetId, ms);
 }
 
 function _currentMonitorSelection() {
@@ -2143,6 +2300,7 @@ function _ensureIfacePanelDOM() {
 function closeIfacePanel() {
   var ov = document.getElementById("iface-panel-overlay");
   if (ov) ov.classList.remove("open");
+  _clearIfaceRefreshTimer();
 }
 
 async function openInterfaceDetailPanel(asset, ifName) {
@@ -2207,6 +2365,8 @@ async function openInterfaceDetailPanel(asset, ifName) {
 }
 
 async function _loadInterfaceHistoryFor(assetId, ifName, range) {
+  // Cancel any pending auto-refresh — manual range change shouldn't race a tick.
+  if (_ifaceRefreshTimer) { clearTimeout(_ifaceRefreshTimer); _ifaceRefreshTimer = null; }
   var inEl = document.getElementById("iface-in-chart");
   var outEl = document.getElementById("iface-out-chart");
   var errEl = document.getElementById("iface-err-chart");
@@ -2225,6 +2385,12 @@ async function _loadInterfaceHistoryFor(assetId, ifName, range) {
     inEl.textContent = outEl.textContent = errEl.textContent = "Error: " + (err.message || "failed to load");
     if (stats) stats.textContent = "";
   }
+  // Schedule next auto-refresh on the response-time cadence — pinned interfaces
+  // ride that cadence on the backend (collectInterfacesFiltered).
+  var settings = _monitorSettingsCache || {};
+  var asset = _currentAssetForRefresh;
+  var ms = _refreshIntervalMs(asset && asset.monitorIntervalSec, settings.intervalSeconds, 60);
+  _scheduleIfaceRefresh(assetId, ifName, ms);
 }
 
 // Convert cumulative octet/error counters to per-interval bps and per-interval
