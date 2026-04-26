@@ -1543,6 +1543,26 @@ var TEMP_PALETTE = [
   "#9b5de5", "#80b918", "#f15bb5", "#3a86ff",
 ];
 
+// Bound a chart's X axis to the *requested* time window (since/until from the
+// *History API) rather than the data's first/last timestamp. Without this,
+// switching range from 24h to 7d on a host with only 24h of data leaves the
+// X axis at 24h — the user can't see "no past data" because the data is
+// re-stretched to fill the chart. Falls back to sample-derived bounds when no
+// window is supplied.
+function _chartTimeBounds(samples, since, until) {
+  function ms(v) {
+    if (v == null) return null;
+    return typeof v === "number" ? v : new Date(v).getTime();
+  }
+  var t0 = ms(since);
+  var t1 = ms(until);
+  if (t0 == null && samples && samples.length) t0 = new Date(samples[0].timestamp).getTime();
+  if (t1 == null && samples && samples.length) t1 = new Date(samples[samples.length - 1].timestamp).getTime();
+  if (t0 == null) t0 = 0;
+  if (t1 == null || t1 <= t0) t1 = t0 + 1;
+  return { t0: t0, t1: t1 };
+}
+
 function _renderTemperatureChart(container, history) {
   var samples = history.samples || [];
   if (samples.length === 0) {
@@ -1567,9 +1587,8 @@ function _renderTemperatureChart(container, history) {
   var innerW = W - padL - padR;
   var innerH = H - padT - padB;
 
-  var t0 = new Date(samples[0].timestamp).getTime();
-  var t1 = new Date(samples[samples.length - 1].timestamp).getTime();
-  if (t1 === t0) t1 = t0 + 1;
+  var bounds = _chartTimeBounds(samples, history && history.since, history && history.until);
+  var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0;
   var oneDayMs = 24 * 60 * 60 * 1000;
   function pad2(n) { return n < 10 ? "0" + n : String(n); }
@@ -1637,7 +1656,7 @@ function _renderTemperatureChart(container, history) {
       '<div>' + Number(target.getAttribute("data-c")).toFixed(1) + ' °C / ' +
       (Number(target.getAttribute("data-c")) * 9 / 5 + 32).toFixed(1) + ' °F</div>';
   });
-  _addChartScreenshotButton(container, "Temperature");
+  _addChartScreenshotButton(container, "Temperature", { yAxis: "Temperature (°C)" });
   _observeChartResize(container, function (c) { _renderTemperatureChart(c, history); });
 }
 
@@ -1734,8 +1753,11 @@ function _observeChartResize(container, rerender) {
 // rasterizer can't resolve currentColor or var(--color-*), so we substitute
 // the resolved values into the serialized SVG before drawing. The hit-target
 // circles and tooltip element are stripped — they're interactive scaffolding,
-// not part of the visual.
-function _captureChartAsPng(container, callback) {
+// not part of the visual. `meta` adds a header (title / subject / asset) and
+// axis labels (xAxis / yAxis) drawn in canvas margins around the chart so the
+// screenshot is self-identifying once it leaves the page.
+function _captureChartAsPng(container, meta, callback) {
+  meta = meta || {};
   // Skip any svg that lives inside the screenshot button itself (its camera icon).
   var svgEl = null;
   if (container && container.querySelectorAll) {
@@ -1757,6 +1779,7 @@ function _captureChartAsPng(container, callback) {
   };
   var bgElevated = pickVar("--color-bg-elevated", "#ffffff");
   var accent     = pickVar("--color-accent", "#4fc3f7");
+  var textSec    = pickVar("--color-text-secondary", "#666666");
   var resolvedText = getComputedStyle(svgEl).color || pickVar("--color-text", "#111111");
 
   var clone = svgEl.cloneNode(true);
@@ -1782,15 +1805,72 @@ function _captureChartAsPng(container, callback) {
   var img = new Image();
   img.onload = function () {
     var scale = 2;
+
+    // Build header. Line 1 is "<Title> — <Subject>" (subject = interface or
+    // tunnel name when the chart is in a sub-panel). Line 2 is the asset.
+    var titleParts = [];
+    if (meta.title)   titleParts.push(meta.title);
+    if (meta.subject) titleParts.push(meta.subject);
+    var headerLine1 = titleParts.join(" — ");
+    var headerLine2 = meta.asset || "";
+    var headerH = 0;
+    if (headerLine1 && headerLine2) headerH = 40;
+    else if (headerLine1 || headerLine2) headerH = 24;
+
+    var footerH  = meta.xAxis ? 22 : 0;
+    var leftPadW = meta.yAxis ? 22 : 0;
+    var totalW = leftPadW + width;
+    var totalH = headerH + height + footerH;
+
     var canvas = document.createElement("canvas");
-    canvas.width = width * scale;
-    canvas.height = height * scale;
+    canvas.width  = totalW * scale;
+    canvas.height = totalH * scale;
     var ctx = canvas.getContext("2d");
     ctx.fillStyle = bgElevated;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.scale(scale, scale);
-    ctx.drawImage(img, 0, 0, width, height);
+
+    var fontFamily = "system-ui, -apple-system, 'Segoe UI', sans-serif";
+
+    if (headerH > 0) {
+      ctx.textBaseline = "top";
+      ctx.textAlign = "left";
+      var headerX = leftPadW + 8;
+      if (headerLine1) {
+        ctx.fillStyle = resolvedText;
+        ctx.font = "600 13px " + fontFamily;
+        ctx.fillText(headerLine1, headerX, 8);
+      }
+      if (headerLine2) {
+        ctx.fillStyle = textSec;
+        ctx.font = "11px " + fontFamily;
+        ctx.fillText(headerLine2, headerX, headerLine1 ? 24 : 8);
+      }
+    }
+
+    ctx.drawImage(img, leftPadW, headerH, width, height);
     URL.revokeObjectURL(url);
+
+    if (leftPadW > 0) {
+      ctx.save();
+      ctx.fillStyle = resolvedText;
+      ctx.font = "600 11px " + fontFamily;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.translate(11, headerH + height / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText(meta.yAxis, 0, 0);
+      ctx.restore();
+    }
+
+    if (footerH > 0) {
+      ctx.fillStyle = resolvedText;
+      ctx.font = "600 11px " + fontFamily;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(meta.xAxis, leftPadW + width / 2, headerH + height + footerH / 2);
+    }
+
     canvas.toBlob(function (b) { callback(b); }, "image/png");
   };
   img.onerror = function () { URL.revokeObjectURL(url); callback(null); };
@@ -1799,9 +1879,13 @@ function _captureChartAsPng(container, callback) {
 
 // Inject a small camera button at the top-right of a chart container. The
 // button copies the rendered chart to the clipboard as a PNG, mirroring the
-// asset-details screenshot UX.
-function _addChartScreenshotButton(container, label) {
+// asset-details screenshot UX. `axisOpts` carries metadata that gets stamped
+// onto the screenshot so it self-identifies after copy/paste:
+//   { xAxis: "Time", yAxis: "Response time (ms)", subject?: "port15" }
+// The asset name is resolved from `_currentAssetForRefresh` at click time.
+function _addChartScreenshotButton(container, label, axisOpts) {
   if (!container) return;
+  axisOpts = axisOpts || {};
   var existing = container.querySelector(".chart-screenshot-btn");
   if (existing) existing.parentNode.removeChild(existing);
 
@@ -1823,7 +1907,16 @@ function _addChartScreenshotButton(container, label) {
   btn.addEventListener("click", function (e) {
     e.preventDefault();
     e.stopPropagation();
-    _captureChartAsPng(container, function (blob) {
+    var a = _currentAssetForRefresh;
+    var assetName = a ? (a.hostname || a.dnsName || a.ipAddress || a.id || "") : "";
+    var meta = {
+      title: label,
+      asset: assetName,
+      subject: axisOpts.subject || "",
+      xAxis: axisOpts.xAxis || "Time",
+      yAxis: axisOpts.yAxis || label,
+    };
+    _captureChartAsPng(container, meta, function (blob) {
       if (!blob) { showToast("Screenshot failed", "error"); return; }
       if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
         showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
@@ -1868,6 +1961,8 @@ function _renderSystemChart(container, data) {
   container.style.flexDirection = "column";
 
   var subs = container.querySelectorAll(".asset-system-subchart");
+  var since = data && data.since;
+  var until = data && data.until;
   _renderTelemetrySubChart(subs[0], samples, {
     label: "CPU",
     color: "var(--color-accent)",
@@ -1875,6 +1970,8 @@ function _renderSystemChart(container, data) {
     pickValue: function (s) { return typeof s.cpuPct === "number" ? s.cpuPct : null; },
     yMin: 0,
     yMax: 100,
+    since: since,
+    until: until,
     tooltip: function (s, v) {
       return '<div>CPU: ' + (v != null ? v.toFixed(1) + "%" : "—") + '</div>';
     },
@@ -1885,6 +1982,8 @@ function _renderSystemChart(container, data) {
     yFmt: function (v) { return v.toFixed(0) + "%"; },
     pickValue: memPctFromSample,
     autoscale: true,
+    since: since,
+    until: until,
     tooltip: function (s, v) {
       var line = '<div>Memory: ' + (v != null ? v.toFixed(1) + "%" : "—");
       if (typeof s.memUsedBytes === "number" && typeof s.memTotalBytes === "number") {
@@ -1905,9 +2004,8 @@ function _renderTelemetrySubChart(container, samples, opts) {
   var innerW = W - padL - padR;
   var innerH = H - padT - padB;
 
-  var t0 = new Date(samples[0].timestamp).getTime();
-  var t1 = new Date(samples[samples.length - 1].timestamp).getTime();
-  if (t1 === t0) t1 = t0 + 1;
+  var bounds = _chartTimeBounds(samples, opts.since, opts.until);
+  var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0;
   var oneDayMs = 24 * 60 * 60 * 1000;
   function pad2(n) { return n < 10 ? "0" + n : String(n); }
@@ -1993,7 +2091,7 @@ function _renderTelemetrySubChart(container, samples, opts) {
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(ts)) + '</div>' +
       opts.tooltip(sample, v);
   });
-  _addChartScreenshotButton(container, opts.label);
+  _addChartScreenshotButton(container, opts.label, { yAxis: opts.label + " (%)" });
   _observeChartResize(container, function (c) { _renderTelemetrySubChart(c, samples, opts); });
 }
 
@@ -2155,9 +2253,8 @@ function _renderMonitorChart(container, data) {
   var innerW = W - padL - padR;
   var innerH = H - padT - padB;
 
-  var t0 = new Date(samples[0].timestamp).getTime();
-  var t1 = new Date(samples[samples.length - 1].timestamp).getTime();
-  if (t1 === t0) t1 = t0 + 1;
+  var bounds = _chartTimeBounds(samples, data && data.since, data && data.until);
+  var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0;
   var oneDayMs = 24 * 60 * 60 * 1000;
   function pad2(n) { return n < 10 ? "0" + n : String(n); }
@@ -2284,7 +2381,7 @@ function _renderMonitorChart(container, data) {
     }
   });
   svgEl.addEventListener("mouseleave", function () { tip.style.display = "none"; });
-  _addChartScreenshotButton(container, "Response time");
+  _addChartScreenshotButton(container, "Response time", { yAxis: "Response time (ms)" });
   _observeChartResize(container, function (c) { _renderMonitorChart(c, data); });
 }
 
@@ -2405,9 +2502,10 @@ async function _loadInterfaceHistoryFor(assetId, ifName, range) {
     var data = await api.assets.interfaceHistory(assetId, ifName, range || "1h");
     var derived = _derivePerIntervalSeries(data.samples || []);
     if (stats) stats.textContent = _ifaceStatsLabel(data.samples || [], derived);
-    _renderIfaceCounterChart(inEl,  derived, "in");
-    _renderIfaceCounterChart(outEl, derived, "out");
-    _renderIfaceErrorChart(errEl, derived);
+    var ifaceOpts = { since: data.since, until: data.until, subject: ifName };
+    _renderIfaceCounterChart(inEl,  derived, "in",  ifaceOpts);
+    _renderIfaceCounterChart(outEl, derived, "out", ifaceOpts);
+    _renderIfaceErrorChart(errEl, derived, ifaceOpts);
   } catch (err) {
     inEl.textContent = outEl.textContent = errEl.textContent = "Error: " + (err.message || "failed to load");
     if (stats) stats.textContent = "";
@@ -2466,7 +2564,8 @@ function _ifaceStatsLabel(rawSamples, derived) {
     " · errors " + errIn + " in / " + errOut + " out";
 }
 
-function _renderIfaceCounterChart(container, derived, side) {
+function _renderIfaceCounterChart(container, derived, side, opts) {
+  opts = opts || {};
   var values = derived.map(function (d) { return { ts: d.timestamp, v: side === "in" ? d.inBps : d.outBps }; })
                      .filter(function (e) { return typeof e.v === "number"; });
   if (values.length === 0) {
@@ -2476,9 +2575,9 @@ function _renderIfaceCounterChart(container, derived, side) {
   var W = container.clientWidth || 600, H = 180;
   var padL = 56, padR = 10, padT = 10, padB = 32;
   var innerW = W - padL - padR, innerH = H - padT - padB;
-  var t0 = new Date(values[0].ts).getTime();
-  var t1 = new Date(values[values.length - 1].ts).getTime();
-  if (t1 === t0) t1 = t0 + 1;
+  var samplesForBounds = values.map(function (e) { return { timestamp: e.ts }; });
+  var bounds = _chartTimeBounds(samplesForBounds, opts.since, opts.until);
+  var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0, oneDayMs = 86400000;
   function pad2(n) { return n < 10 ? "0" + n : String(n); }
   function fmtTick(ts) {
@@ -2534,11 +2633,12 @@ function _renderIfaceCounterChart(container, derived, side) {
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
       '<div>' + (side === "in" ? "Input" : "Output") + ': ' + _fmtBitsPerSec(Number(target.getAttribute("data-v"))) + '</div>';
   });
-  _addChartScreenshotButton(container, side === "in" ? "Input throughput" : "Output throughput");
-  _observeChartResize(container, function (c) { _renderIfaceCounterChart(c, derived, side); });
+  _addChartScreenshotButton(container, side === "in" ? "Input throughput" : "Output throughput", { yAxis: "Throughput (bps)", subject: opts.subject });
+  _observeChartResize(container, function (c) { _renderIfaceCounterChart(c, derived, side, opts); });
 }
 
-function _renderIfaceErrorChart(container, derived) {
+function _renderIfaceErrorChart(container, derived, opts) {
+  opts = opts || {};
   var inSeries  = derived.filter(function (d) { return typeof d.inErr  === "number"; });
   var outSeries = derived.filter(function (d) { return typeof d.outErr === "number"; });
   if (inSeries.length === 0 && outSeries.length === 0) {
@@ -2548,10 +2648,8 @@ function _renderIfaceErrorChart(container, derived) {
   var W = container.clientWidth || 600, H = 180;
   var padL = 44, padR = 10, padT = 10, padB = 32;
   var innerW = W - padL - padR, innerH = H - padT - padB;
-  var all = derived;
-  var t0 = new Date(all[0].timestamp).getTime();
-  var t1 = new Date(all[all.length - 1].timestamp).getTime();
-  if (t1 === t0) t1 = t0 + 1;
+  var bounds = _chartTimeBounds(derived, opts.since, opts.until);
+  var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0, oneDayMs = 86400000;
   function pad2(n) { return n < 10 ? "0" + n : String(n); }
   function fmtTick(ts) {
@@ -2623,8 +2721,8 @@ function _renderIfaceErrorChart(container, derived) {
       '<div>In errors: ' + (inE  !== "" ? inE  : "—") + '</div>' +
       '<div>Out errors: ' + (outE !== "" ? outE : "—") + '</div>';
   });
-  _addChartScreenshotButton(container, "Interface errors");
-  _observeChartResize(container, function (c) { _renderIfaceErrorChart(c, derived); });
+  _addChartScreenshotButton(container, "Interface errors", { yAxis: "Errors per interval", subject: opts.subject });
+  _observeChartResize(container, function (c) { _renderIfaceErrorChart(c, derived, opts); });
 }
 
 // ─── IPsec tunnel slide-over ───────────────────────────────────────────────
@@ -2740,9 +2838,10 @@ async function _loadIpsecHistoryFor(assetId, tunnelName, range) {
     var samples = data.samples || [];
     var derived = _deriveIpsecThroughput(samples);
     if (stats) stats.textContent = _ipsecStatsLabel(samples, derived);
-    _renderIpsecStatusChart(statusEl, samples);
-    _renderIpsecBpsChart(inEl,  derived, "in");
-    _renderIpsecBpsChart(outEl, derived, "out");
+    var ipsecOpts = { since: data.since, until: data.until, subject: tunnelName };
+    _renderIpsecStatusChart(statusEl, samples, ipsecOpts);
+    _renderIpsecBpsChart(inEl,  derived, "in",  ipsecOpts);
+    _renderIpsecBpsChart(outEl, derived, "out", ipsecOpts);
   } catch (err) {
     statusEl.textContent = inEl.textContent = outEl.textContent = "Error: " + (err.message || "failed to load");
     if (stats) stats.textContent = "";
@@ -2796,7 +2895,8 @@ function _ipsecStatsLabel(samples, derived) {
     " · out peak " + _fmtBitsPerSec(outMax);
 }
 
-function _renderIpsecStatusChart(container, samples) {
+function _renderIpsecStatusChart(container, samples, opts) {
+  opts = opts || {};
   if (samples.length === 0) {
     container.textContent = "No samples in this range yet.";
     return;
@@ -2804,9 +2904,14 @@ function _renderIpsecStatusChart(container, samples) {
   var W = container.clientWidth || 600, H = 60;
   var padL = 56, padR = 10, padT = 8, padB = 22;
   var innerW = W - padL - padR, innerH = H - padT - padB;
-  var t0 = new Date(samples[0].timestamp).getTime();
-  var t1 = new Date(samples[samples.length - 1].timestamp).getTime();
-  if (t1 === t0) t1 = t0 + 1;
+  var bounds = _chartTimeBounds(samples, opts.since, opts.until);
+  var t0 = bounds.t0, t1 = bounds.t1;
+  // Width of the trailing status bar — without this, the last sample stretches
+  // to the right edge of the chart, which is misleading when the requested
+  // window extends past the last sample.
+  var lastStepMs = samples.length > 1
+    ? (new Date(samples[samples.length - 1].timestamp).getTime() - new Date(samples[samples.length - 2].timestamp).getTime())
+    : 600000;
   var spanMs = t1 - t0, oneDayMs = 86400000;
   function pad2(n) { return n < 10 ? "0" + n : String(n); }
   function fmtTick(ts) {
@@ -2823,7 +2928,12 @@ function _renderIpsecStatusChart(container, samples) {
   // Each sample covers from its own x to the next sample's x (or the chart edge).
   var bars = samples.map(function (s, i) {
     var x  = xFor(s.timestamp);
-    var x2 = i + 1 < samples.length ? xFor(samples[i + 1].timestamp) : padL + innerW;
+    var x2;
+    if (i + 1 < samples.length) {
+      x2 = xFor(samples[i + 1].timestamp);
+    } else {
+      x2 = Math.min(padL + innerW, xFor(new Date(s.timestamp).getTime() + lastStepMs));
+    }
     var w = Math.max(1, x2 - x);
     return '<rect class="chart-hit" x="' + x + '" y="' + padT + '" width="' + w + '" height="' + innerH + '" fill="' + colorFor(s.status) + '" opacity="0.85" style="cursor:crosshair"' +
       ' data-ts="' + escapeHtml(String(s.timestamp)) + '"' +
@@ -2854,11 +2964,12 @@ function _renderIpsecStatusChart(container, samples) {
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
       '<div>Status: ' + escapeHtml(target.getAttribute("data-status")) + '</div>';
   });
-  _addChartScreenshotButton(container, "IPsec status");
-  _observeChartResize(container, function (c) { _renderIpsecStatusChart(c, samples); });
+  _addChartScreenshotButton(container, "IPsec status", { yAxis: "Status", subject: opts.subject });
+  _observeChartResize(container, function (c) { _renderIpsecStatusChart(c, samples, opts); });
 }
 
-function _renderIpsecBpsChart(container, derived, side) {
+function _renderIpsecBpsChart(container, derived, side, opts) {
+  opts = opts || {};
   var values = derived.map(function (d) { return { ts: d.timestamp, v: side === "in" ? d.inBps : d.outBps }; })
                      .filter(function (e) { return typeof e.v === "number"; });
   if (values.length === 0) {
@@ -2868,9 +2979,9 @@ function _renderIpsecBpsChart(container, derived, side) {
   var W = container.clientWidth || 600, H = 160;
   var padL = 56, padR = 10, padT = 10, padB = 28;
   var innerW = W - padL - padR, innerH = H - padT - padB;
-  var t0 = new Date(values[0].ts).getTime();
-  var t1 = new Date(values[values.length - 1].ts).getTime();
-  if (t1 === t0) t1 = t0 + 1;
+  var samplesForBounds = values.map(function (e) { return { timestamp: e.ts }; });
+  var bounds = _chartTimeBounds(samplesForBounds, opts.since, opts.until);
+  var t0 = bounds.t0, t1 = bounds.t1;
   var spanMs = t1 - t0, oneDayMs = 86400000;
   function pad2(n) { return n < 10 ? "0" + n : String(n); }
   function fmtTick(ts) {
@@ -2924,8 +3035,8 @@ function _renderIpsecBpsChart(container, derived, side) {
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
       '<div>' + (side === "in" ? "Incoming" : "Outgoing") + ': ' + _fmtBitsPerSec(Number(target.getAttribute("data-v"))) + '</div>';
   });
-  _addChartScreenshotButton(container, side === "in" ? "IPsec incoming" : "IPsec outgoing");
-  _observeChartResize(container, function (c) { _renderIpsecBpsChart(c, derived, side); });
+  _addChartScreenshotButton(container, side === "in" ? "IPsec incoming" : "IPsec outgoing", { yAxis: "Throughput (bps)", subject: opts.subject });
+  _observeChartResize(container, function (c) { _renderIpsecBpsChart(c, derived, side, opts); });
 }
 
 async function openIpHistoryModal(assetId, label) {
