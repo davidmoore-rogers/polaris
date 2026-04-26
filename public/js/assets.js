@@ -1866,8 +1866,8 @@ function _renderSensorChart(container, samples, opts) {
     '<text x="' + (W / 2) + '" y="' + titleY + '" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">' +
       escapeHtml(opts.subject || "Temperature") +
     '</text>' +
-    '<text x="' + (padL + innerW / 2) + '" y="' + xLabelY + '" text-anchor="middle" font-size="11" fill="currentColor">Time</text>' +
-    '<text x="' + yLabelX + '" y="' + yLabelY + '" text-anchor="middle" font-size="11" fill="currentColor"' +
+    '<text class="chart-axis-title" x="' + (padL + innerW / 2) + '" y="' + xLabelY + '" text-anchor="middle" font-size="11" fill="currentColor">Time</text>' +
+    '<text class="chart-axis-title" x="' + yLabelX + '" y="' + yLabelY + '" text-anchor="middle" font-size="11" fill="currentColor"' +
       ' transform="rotate(-90 ' + yLabelX + ' ' + yLabelY + ')">Temperature (°C)</text>';
 
   container.innerHTML =
@@ -2006,10 +2006,13 @@ function _captureChartAsPng(container, meta, callback) {
     var v = rootCs.getPropertyValue(name).trim();
     return v || fallback;
   };
-  var bgElevated = pickVar("--color-bg-elevated", "#ffffff");
+  // Background matches the page so the screenshot blends with the live UI.
+  // (`--color-bg-elevated` was used previously but isn't defined in the CSS,
+  // so it always fell back to white regardless of theme.)
+  var bgPrimary  = pickVar("--color-bg-primary", "#ffffff");
   var accent     = pickVar("--color-accent", "#4fc3f7");
   var textSec    = pickVar("--color-text-secondary", "#666666");
-  var resolvedText = getComputedStyle(svgEl).color || pickVar("--color-text", "#111111");
+  var resolvedText = getComputedStyle(svgEl).color || pickVar("--color-text-primary", "#111111");
 
   var clone = svgEl.cloneNode(true);
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
@@ -2021,7 +2024,9 @@ function _captureChartAsPng(container, meta, callback) {
     clone.setAttribute("viewBox", "0 0 " + width + " " + height);
   }
   // Drop transparent hit targets — they don't affect the picture but inflate it.
-  Array.prototype.forEach.call(clone.querySelectorAll(".chart-hit, .monitor-hit"), function (n) {
+  // Also strip in-SVG axis titles: the canvas wrapper redraws them in the margins,
+  // so leaving them in produces duplicates in the screenshot.
+  Array.prototype.forEach.call(clone.querySelectorAll(".chart-hit, .monitor-hit, .chart-axis-title"), function (n) {
     n.parentNode.removeChild(n);
   });
 
@@ -2055,7 +2060,7 @@ function _captureChartAsPng(container, meta, callback) {
     canvas.width  = totalW * scale;
     canvas.height = totalH * scale;
     var ctx = canvas.getContext("2d");
-    ctx.fillStyle = bgElevated;
+    ctx.fillStyle = bgPrimary;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.scale(scale, scale);
 
@@ -2478,7 +2483,7 @@ function _renderMonitorChart(container, data) {
   }
   var W = container.clientWidth || 600;
   var H = 200;
-  var padL = 56, padR = 10, padT = 10, padB = 44;
+  var padL = 56, padR = 10, padT = 10, padB = 56;
   var innerW = W - padL - padR;
   var innerH = H - padT - padB;
 
@@ -2491,6 +2496,14 @@ function _renderMonitorChart(container, data) {
     var d = new Date(ts);
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
     return (d.getMonth() + 1) + "/" + d.getDate();
+  }
+  function fmtDate(ts) {
+    var d = new Date(ts);
+    return (d.getMonth() + 1) + "/" + d.getDate();
+  }
+  function dayKey(ts) {
+    var d = new Date(ts);
+    return d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate();
   }
 
   var oks = samples.filter(function (s) { return s.success && typeof s.responseTimeMs === "number"; });
@@ -2538,22 +2551,35 @@ function _renderMonitorChart(container, data) {
       '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + Math.round(v) + '</text>';
   }
 
-  // X-axis tick labels
+  // X-axis tick labels. When the window is ≤24h the time-only label loses the
+  // date — render the date underneath the first tick and any tick whose day
+  // differs from the previous one, so a window that crosses midnight is
+  // unambiguous.
   var xTicks = "";
   var xTickCount = 5;
+  var dateLabelMode = spanMs <= oneDayMs;
+  var prevDayKey = null;
   for (var j = 0; j <= xTickCount; j++) {
     var tsTick = t0 + (t1 - t0) * (j / xTickCount);
     var xPos = padL + (j / xTickCount) * innerW;
     xTicks +=
       '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
       '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
+    if (dateLabelMode) {
+      var k = dayKey(tsTick);
+      if (k !== prevDayKey) {
+        xTicks +=
+          '<text x="' + xPos + '" y="' + (padT + innerH + 26) + '" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.7">' + fmtDate(tsTick) + '</text>';
+        prevDayKey = k;
+      }
+    }
   }
 
   // Axis titles
   var yTitleX = 14;
   var yTitleY = padT + innerH / 2;
-  var yTitle = '<text x="' + yTitleX + '" y="' + yTitleY + '" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.85" transform="rotate(-90 ' + yTitleX + ' ' + yTitleY + ')">Response time (ms)</text>';
-  var xTitle = '<text x="' + (padL + innerW / 2) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.85">Time</text>';
+  var yTitle = '<text class="chart-axis-title" x="' + yTitleX + '" y="' + yTitleY + '" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.85" transform="rotate(-90 ' + yTitleX + ' ' + yTitleY + ')">Response time (ms)</text>';
+  var xTitle = '<text class="chart-axis-title" x="' + (padL + innerW / 2) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.85">Time</text>';
 
   var svg =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
