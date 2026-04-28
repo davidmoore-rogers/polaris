@@ -516,6 +516,31 @@ router.post("/:id/probe-now", requireUserOrAbove, async (req, res, next) => {
       systemInfo = { supported: true, collected: false, error: err?.message || "System info collection failed" };
     }
 
+    // Audit the manual refresh. The periodic monitorAssets job only writes
+    // events on up/down transitions; this endpoint is operator-initiated, so
+    // each click should leave a trace regardless of status change.
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: { hostname: true, ipAddress: true },
+    });
+    const label = asset?.hostname || asset?.ipAddress || id;
+    const ok = probe.success;
+    const streamSummary: string[] = [];
+    streamSummary.push(`probe ${ok ? probe.responseTimeMs + " ms" : "failed: " + (probe.error || "unknown")}`);
+    streamSummary.push(`telemetry ${telemetry.collected ? "ok" : (telemetry.supported ? "failed: " + (telemetry.error || "no data") : "n/a")}`);
+    streamSummary.push(`interfaces ${systemInfo.collected ? "ok" : (systemInfo.supported ? "failed: " + (systemInfo.error || "no data") : "n/a")}`);
+    const anyFail = !ok || (telemetry.supported && !telemetry.collected) || (systemInfo.supported && !systemInfo.collected);
+    logEvent({
+      action: "asset.refresh",
+      resourceType: "asset",
+      resourceId: id,
+      resourceName: asset?.hostname || asset?.ipAddress || undefined,
+      actor: req.session?.username,
+      level: anyFail ? "warning" : "info",
+      message: `Refresh: ${label} — ${streamSummary.join("; ")}`,
+      details: { probe, telemetry, systemInfo },
+    });
+
     res.json({ ...probe, telemetry, systemInfo });
   } catch (err) { next(err); }
 });
