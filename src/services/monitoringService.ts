@@ -987,6 +987,36 @@ async function collectSystemInfoFortinet(
     // means the call genuinely failed.
     if (interfaces.length === 0) throw err;
   }
+  // Apply the integration's interfaceInclude / interfaceExclude — same filter
+  // discovery uses to decide which interfaces' IPs become reservations. The
+  // System tab table should mirror that scope so a refresh doesn't reintroduce
+  // interfaces the operator has already excluded from inventory. Tunnel /
+  // loopback / aggregate parent rows survive the filter even when their name
+  // wouldn't match, because hiding them would orphan the children that do —
+  // we just hide the parent's children alongside.
+  const cfg = integration.config || {};
+  const ifInclude = Array.isArray((cfg as any).interfaceInclude) ? (cfg as any).interfaceInclude as string[] : [];
+  const ifExclude = Array.isArray((cfg as any).interfaceExclude) ? (cfg as any).interfaceExclude as string[] : [];
+  if (ifInclude.length > 0 || ifExclude.length > 0) {
+    const allowed = (name: string): boolean => {
+      if (ifInclude.length > 0) return ifInclude.some((p) => fortiInterfaceWildcardMatch(p, name));
+      return !ifExclude.some((p) => fortiInterfaceWildcardMatch(p, name));
+    };
+    // First pass: compute the survivor set. A child whose own name doesn't
+    // match the filter still survives if its parent does — that mirrors how
+    // VLAN sub-interfaces are typically managed (the parent decides scope).
+    const survives = new Set<string>();
+    for (const i of interfaces) {
+      if (allowed(i.ifName)) survives.add(i.ifName);
+    }
+    for (const i of interfaces) {
+      if (!survives.has(i.ifName) && i.ifParent && survives.has(i.ifParent)) survives.add(i.ifName);
+    }
+    // Drop everything else.
+    for (let k = interfaces.length - 1; k >= 0; k--) {
+      if (!survives.has(interfaces[k]!.ifName)) interfaces.splice(k, 1);
+    }
+  }
   // IPsec tunnels are best-effort: older FortiOS firmwares 404 the endpoint,
   // and a FortiGate without IPsec configured returns an empty list. Either
   // way we should not fail the whole system-info pass — the System tab simply
@@ -1061,6 +1091,21 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTu
 function pickFiniteNumber(v: unknown): number | null {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Wildcard match used by the FMG/FortiGate integration's interface filter.
+ * Mirrors src/services/fortimanagerService.ts:matchesWildcard so the System
+ * tab applies the exact rule discovery uses.
+ */
+function fortiInterfaceWildcardMatch(pattern: string, value: string): boolean {
+  const p = pattern.toLowerCase();
+  const v = value.toLowerCase();
+  if (p === "*") return true;
+  if (p.startsWith("*") && p.endsWith("*") && p.length > 2) return v.includes(p.slice(1, -1));
+  if (p.startsWith("*")) return v.endsWith(p.slice(1));
+  if (p.endsWith("*")) return v.startsWith(p.slice(0, -1));
+  return v === p;
 }
 
 function normalizeFortiIfType(raw: unknown): string | null {
