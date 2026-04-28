@@ -894,6 +894,33 @@ async function collectSystemInfoFortinet(
   const fg = buildFortinetConfig(host, integration);
   if ("error" in fg) throw new Error(fg.error);
 
+  // /api/v2/monitor/system/interface returns runtime stats but only includes
+  // `type` / `vlanid` / `interface` (parent) sporadically depending on FortiOS
+  // version — many 7.x firmwares omit them entirely. The CMDB endpoint is the
+  // canonical source for type metadata, so we fetch it alongside the monitor
+  // payload and merge. CMDB failure is non-fatal (e.g. token without cmdb
+  // permission): we still get flat interface stats, just no nesting.
+  const cmdbByName = new Map<string, { type: string | null; parent: string | null; vlanId: number | null; members: string[] }>();
+  try {
+    const cmdb = await fgRequest<any>(fg, "GET", "/api/v2/cmdb/system/interface", { query: { vdom: "root" } });
+    const arr = Array.isArray(cmdb) ? cmdb : (Array.isArray(cmdb?.results) ? cmdb.results : []);
+    for (const c of arr) {
+      if (!c || typeof c !== "object" || typeof c.name !== "string") continue;
+      const t = typeof c.type === "string" ? c.type : null;
+      // CMDB `member` is an array of { interface_name } entries on aggregate
+      // and hard-switch / vap-switch interfaces.
+      const members: string[] = Array.isArray(c.member)
+        ? c.member.map((m: any) => (typeof m === "string" ? m : (typeof m?.interface_name === "string" ? m.interface_name : null))).filter(Boolean)
+        : [];
+      cmdbByName.set(c.name, {
+        type:    t,
+        parent:  t === "vlan" && typeof c.interface === "string" ? c.interface : null,
+        vlanId:  t === "vlan" && typeof c.vlanid === "number" ? c.vlanid : null,
+        members,
+      });
+    }
+  } catch { /* tokens without cmdb scope — fall back to monitor-only types */ }
+
   const interfaces: InterfaceSample[] = [];
   try {
     // The interface monitor returns a results object keyed by interface name.
@@ -917,6 +944,12 @@ async function collectSystemInfoFortinet(
         ip = i.ip.split(" ")[0];
       }
       const speedMbps = typeof i.speed === "number" ? i.speed : null;
+      // Prefer CMDB type/parent/vlanid; fall back to whatever the monitor
+      // payload happened to include.
+      const cmdbEntry = cmdbByName.get(name);
+      const rawType   = cmdbEntry?.type ?? (typeof i.type === "string" ? i.type : null);
+      const rawParent = cmdbEntry?.parent ?? (i.type === "vlan" && typeof i.interface === "string" ? i.interface : null);
+      const rawVlanId = cmdbEntry?.vlanId ?? (i.type === "vlan" && typeof i.vlanid === "number" ? i.vlanid : null);
       interfaces.push({
         ifName:      name,
         adminStatus: i.status === "down" ? "down" : i.status === "up" ? "up" : (i.status ?? null),
@@ -928,22 +961,25 @@ async function collectSystemInfoFortinet(
         outOctets:   pickFiniteNumber(i.tx_bytes),
         inErrors:    pickFiniteNumber(i.rx_errors  ?? i.errors_in),
         outErrors:   pickFiniteNumber(i.tx_errors  ?? i.errors_out),
-        ifType:      normalizeFortiIfType(i.type),
-        ifParent:    i.type === "vlan" ? (typeof i.interface === "string" ? i.interface : null) : null,
-        vlanId:      i.type === "vlan" ? (typeof i.vlanid === "number" ? i.vlanid : null) : null,
+        ifType:      normalizeFortiIfType(rawType),
+        ifParent:    rawParent,
+        vlanId:      rawVlanId,
       });
     }
-    // Back-fill ifParent on member ports of aggregate interfaces. The aggregate
-    // row carries a `member` array of port names; those ports have no parent set yet.
+    // Back-fill ifParent on member ports of aggregate / hard-switch /
+    // vap-switch interfaces. CMDB carries the canonical `member` array; we
+    // also accept the monitor-side `member` array as a fallback.
     const ifMap = new Map(interfaces.map((s) => [s.ifName, s]));
-    for (const [name, info] of Object.entries(obj)) {
-      if (!info || typeof info !== "object") continue;
-      const i = info as any;
-      if (normalizeFortiIfType(i.type) === "aggregate" && Array.isArray(i.member)) {
-        for (const memberName of i.member) {
-          const member = ifMap.get(String(memberName));
-          if (member && !member.ifParent) member.ifParent = name;
-        }
+    for (const iface of interfaces) {
+      if (iface.ifType !== "aggregate") continue;
+      const cmdbEntry = cmdbByName.get(iface.ifName);
+      const monitorEntry = obj[iface.ifName] as any;
+      const members =
+        cmdbEntry?.members.length ? cmdbEntry.members :
+        Array.isArray(monitorEntry?.member) ? monitorEntry.member.map(String) : [];
+      for (const memberName of members) {
+        const member = ifMap.get(String(memberName));
+        if (member && !member.ifParent) member.ifParent = iface.ifName;
       }
     }
   } catch (err: any) {
