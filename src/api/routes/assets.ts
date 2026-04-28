@@ -487,22 +487,36 @@ router.get("/:id/monitor-history", async (req, res, next) => {
 // POST /api/v1/assets/:id/probe-now — run a one-off probe immediately (user or above).
 // Triggers all three cadences (response-time, telemetry, system info) so the
 // asset details panel refreshes everything at once instead of waiting for the
-// scheduler to come around.
+// scheduler to come around. Returns a per-stream status so the UI can tell
+// the operator which streams refreshed and which failed (and why) — silent
+// failures used to leave the System tab stale with no explanation.
 router.post("/:id/probe-now", requireUserOrAbove, async (req, res, next) => {
   try {
     const id = req.params.id as string;
-    const result = await probeAsset(id);
-    await recordProbeResult(id, result);
-    // Telemetry + system info on best-effort — failures don't fail the probe.
+    // Keep flat response-time fields at the root for back-compat with anything
+    // that still reads `success` / `responseTimeMs` directly.
+    const probe = await probeAsset(id);
+    await recordProbeResult(id, probe);
+
+    let telemetry: { supported: boolean; collected: boolean; error?: string };
     try {
       const tr = await collectTelemetry(id);
       await recordTelemetryResult(id, tr);
-    } catch { /* ignore */ }
+      telemetry = { supported: tr.supported, collected: !!tr.data, error: tr.error };
+    } catch (err: any) {
+      telemetry = { supported: true, collected: false, error: err?.message || "Telemetry collection failed" };
+    }
+
+    let systemInfo: { supported: boolean; collected: boolean; error?: string };
     try {
       const sr = await collectSystemInfo(id);
       await recordSystemInfoResult(id, sr);
-    } catch { /* ignore */ }
-    res.json(result);
+      systemInfo = { supported: sr.supported, collected: !!sr.data, error: sr.error };
+    } catch (err: any) {
+      systemInfo = { supported: true, collected: false, error: err?.message || "System info collection failed" };
+    }
+
+    res.json({ ...probe, telemetry, systemInfo });
   } catch (err) { next(err); }
 });
 

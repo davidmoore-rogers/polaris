@@ -1244,20 +1244,43 @@ async function openViewModal(id) {
     if (probeBtn) {
       probeBtn.addEventListener("click", async function () {
         probeBtn.disabled = true;
-        probeBtn.textContent = "Probing…";
+        probeBtn.textContent = "Refreshing…";
         try {
           var r = await api.assets.probeNow(a.id);
-          var msg = r.success ? ("Probe ok — " + r.responseTimeMs + " ms") : ("Probe failed: " + (r.error || "unknown"));
-          showToast(msg, r.success ? "success" : "error");
+          // Build a per-stream summary so the toast names exactly which streams
+          // refreshed and which failed (and why). The probe-now endpoint returns:
+          //   { success, responseTimeMs, error?, telemetry: {supported,collected,error?}, systemInfo: {…} }
+          var parts = [];
+          var failures = [];
+          if (r.success) parts.push("probe " + r.responseTimeMs + " ms");
+          else failures.push("probe: " + (r.error || "unknown"));
+
+          var tel = r.telemetry || {};
+          if (tel.collected) parts.push("telemetry");
+          else if (tel.supported && tel.error) failures.push("telemetry: " + tel.error);
+
+          var si = r.systemInfo || {};
+          if (si.collected) parts.push("interfaces");
+          else if (si.supported && si.error) failures.push("interfaces: " + si.error);
+
+          var anyFail = failures.length > 0;
+          var label = anyFail ? "Refresh partial" : "Refreshed";
+          var msg = label + (parts.length ? " (" + parts.join(" · ") + ")" : "");
+          if (anyFail) msg += " — " + failures.join("; ");
+          // No "warning" toast class exists — fall back to "error" on any
+          // failure so the user sees the red treatment they expect.
+          var kind = anyFail ? "error" : "success";
+          showToast(msg, kind);
+
           await Promise.all([
             _loadMonitorHistoryFor(a.id, _currentMonitorSelection(), { silent: true }),
             _loadSystemTabFor(a.id, _currentSystemTabRange(), a, { silent: true }),
           ]);
         } catch (err) {
-          showToast(err.message || "Probe failed", "error");
+          showToast(err.message || "Refresh failed", "error");
         } finally {
           probeBtn.disabled = false;
-          probeBtn.textContent = "Probe Now";
+          probeBtn.textContent = "Refresh";
         }
       });
     }
@@ -2609,7 +2632,7 @@ function assetMonitoringViewHTML(a) {
   var lastPoll = a.lastMonitorAt ? formatDate(a.lastMonitorAt) : "—";
   var consec = a.consecutiveFailures || 0;
   var probeBtn = isUserOrAbove()
-    ? '<button class="btn btn-sm btn-primary" id="btn-asset-probe-now" style="margin-right:6px">Probe Now</button>'
+    ? '<button class="btn btn-sm btn-primary" id="btn-asset-probe-now" style="margin-right:6px" title="Run a response-time probe and pull fresh telemetry + interface data">Refresh</button>'
     : '';
   var rangeBtns =
     '<button class="btn btn-sm btn-primary asset-monitor-range-btn" data-range="24h">24h</button>' +
