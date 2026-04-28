@@ -2383,10 +2383,22 @@ function _renderTelemetrySubChart(container, samples, opts) {
 // the chart self-describes (FortiOS REST vs SNMP vs ICMP vs WinRM vs SSH).
 // AD-locked assets are split into AD-WinRM (Windows hosts) and AD-SSH (realm-
 // joined Linux) since the probe path differs.
+//
+// FMG/FortiGate-locked assets honor the per-integration response-time probe
+// override: when the integration has a `monitorCredentialId` set to a stored
+// SNMP credential, the actual probe runs SNMP `sysUpTime` instead of the
+// FortiOS REST API. The label reflects that so the chart isn't lying about
+// what generated the samples.
 function _probeMethodLabel(a) {
   if (!a) return "—";
   var t = a.monitorType;
-  if (t === "fortimanager" || t === "fortigate") return "FortiOS REST API";
+  if (t === "fortimanager" || t === "fortigate") {
+    var override = a.integrationMonitorCredential;
+    if (override && override.type === "snmp") {
+      return "SNMP GET · " + override.name;
+    }
+    return "FortiOS REST API";
+  }
   if (t === "snmp") return "SNMP GET";
   if (t === "winrm") return "WinRM";
   if (t === "ssh") return "SSH";

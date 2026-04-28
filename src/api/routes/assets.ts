@@ -392,7 +392,7 @@ router.get("/:id", async (req, res, next) => {
     const asset = await prisma.asset.findUnique({
       where: { id: req.params.id as string },
       include: {
-        discoveredByIntegration: { select: { id: true, name: true, type: true } },
+        discoveredByIntegration: { select: { id: true, name: true, type: true, config: true } },
         monitorCredential:       { select: { id: true, name: true, type: true } },
       },
     });
@@ -400,7 +400,32 @@ router.get("/:id", async (req, res, next) => {
     const ipCtx = asset.ipAddress
       ? (await buildIpContexts([asset.ipAddress])).get(asset.ipAddress) || null
       : null;
-    res.json({ ...asset, ipContext: ipCtx });
+
+    // Resolve the integration's response-time probe override so the details
+    // panel can label the chart with the actual probe method (SNMP via the
+    // override credential, vs. the default FortiOS REST API path). The
+    // integration's full `config` is not safe to leak to the client (it
+    // contains API tokens), so strip it after extracting the credential id.
+    let integrationMonitorCredential: { id: string; name: string; type: string } | null = null;
+    if (asset.discoveredByIntegration) {
+      const cfg = (asset.discoveredByIntegration.config as Record<string, unknown> | null) || {};
+      const credId = typeof cfg.monitorCredentialId === "string" ? cfg.monitorCredentialId : null;
+      if (credId) {
+        const cred = await prisma.credential.findUnique({
+          where: { id: credId },
+          select: { id: true, name: true, type: true },
+        });
+        if (cred) integrationMonitorCredential = cred;
+      }
+    }
+    const { config: _omit, ...integrationLite } = (asset.discoveredByIntegration as { config?: unknown } | null) || {};
+    const safeAsset = {
+      ...asset,
+      discoveredByIntegration: asset.discoveredByIntegration ? integrationLite : null,
+      integrationMonitorCredential,
+    };
+
+    res.json({ ...safeAsset, ipContext: ipCtx });
   } catch (err) {
     next(err);
   }
