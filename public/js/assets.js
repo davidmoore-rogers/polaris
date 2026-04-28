@@ -1677,6 +1677,35 @@ function _chartTimeBounds(samples, since, until) {
   return { t0: t0, t1: t1 };
 }
 
+// Vertical dashed indicator at each local-midnight inside (t0, t1). The
+// time-only tick labels on ≤24h ranges hide the day boundary, so without
+// this the reader can't tell where the calendar date changes. Beyond 4d
+// the tick labels themselves already encode the date, so the per-line
+// "M/D" label is suppressed but the dashed line stays as a day separator.
+function _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) {
+  var first = new Date(t0);
+  first.setHours(0, 0, 0, 0);
+  if (first.getTime() <= t0) first.setDate(first.getDate() + 1);
+  var withLabel = (t1 - t0) <= 4 * 86400000;
+  var out = "";
+  var d = first;
+  var safety = 0;
+  while (d.getTime() < t1 && safety++ < 64) {
+    var x = padL + ((d.getTime() - t0) / (t1 - t0)) * innerW;
+    out +=
+      '<line x1="' + x + '" y1="' + padT + '" x2="' + x + '" y2="' + (padT + innerH) +
+      '" stroke="rgba(127,127,127,0.55)" stroke-width="1" stroke-dasharray="3,3"/>';
+    if (withLabel) {
+      var label = (d.getMonth() + 1) + "/" + d.getDate();
+      out +=
+        '<text x="' + (x + 4) + '" y="' + (padT + 11) +
+        '" font-size="10" fill="currentColor" opacity="0.7">' + label + '</text>';
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
 // ─── Per-sensor temperature slide-over ─────────────────────────────────────
 //
 // Sits on top of the asset details panel like the interface and IPsec slide-
@@ -1873,6 +1902,7 @@ function _renderSensorChart(container, samples, opts) {
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       labels + ticks + xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       '<polyline points="' + pts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
       hits +
     '</svg>' + CHART_TOOLTIP_HTML;
@@ -2308,6 +2338,7 @@ function _renderTelemetrySubChart(container, samples, opts) {
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       ticks + xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       (pts ? '<polyline points="' + pts + '" fill="none" stroke="' + opts.color + '" stroke-width="1.5"/>' : '') +
       legend + hits +
     '</svg>' + CHART_TOOLTIP_HTML;
@@ -2585,6 +2616,7 @@ function _renderMonitorChart(container, data) {
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       ticks +
       xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       yTitle +
       xTitle +
       failureLines +
@@ -2878,6 +2910,7 @@ function _renderIfaceCounterChart(container, derived, side, opts) {
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       ticks + xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>' +
       hits +
     '</svg>' + CHART_TOOLTIP_HTML;
@@ -2962,6 +2995,7 @@ function _renderIfaceErrorChart(container, derived, opts) {
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       ticks + xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       (inPts  ? '<polyline points="' + inPts  + '" fill="none" stroke="#d32f2f" stroke-width="1.5"/>' : '') +
       (outPts ? '<polyline points="' + outPts + '" fill="none" stroke="#9b5de5" stroke-width="1.5"/>' : '') +
       legend + hits +
@@ -3210,7 +3244,9 @@ function _renderIpsecStatusChart(container, samples, opts) {
     '</g>';
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
-      bars + xTicks + legend +
+      bars + xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      legend +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
   container.style.alignItems = "stretch";
@@ -3280,6 +3316,7 @@ function _renderIpsecBpsChart(container, derived, side, opts) {
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       ticks + xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>' +
       hits +
     '</svg>' + CHART_TOOLTIP_HTML;
@@ -3506,6 +3543,7 @@ function _renderStorageBytesChart(container, samples, opts) {
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       ticks + xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       (totalPts ? '<polyline points="' + totalPts + '" fill="none" stroke="#9b5de5" stroke-width="1.5" stroke-dasharray="4 3"/>' : '') +
       (usedPts  ? '<polyline points="' + usedPts  + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' : '') +
       legend + hits +
@@ -3574,6 +3612,7 @@ function _renderStoragePctChart(container, samples, opts) {
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       ticks + xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       '<polyline points="' + pts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
       hits +
     '</svg>' + CHART_TOOLTIP_HTML;
