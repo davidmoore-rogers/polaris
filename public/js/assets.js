@@ -1159,12 +1159,15 @@ async function openViewModal(id) {
       viewRow("Updated", formatDate(a.updatedAt)) +
     '</div>';
 
-    var systemHTML     = assetSystemViewHTML(a);
     var monitoringHTML = assetMonitoringViewHTML(a);
+    var systemHTML     = a.monitored
+      ? monitoringHTML +
+        '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
+        assetSystemViewHTML(a)
+      : monitoringHTML;
     var tabsHTML = _renderTabbedBody("asset-view", [
-      { key: "general",    label: "General",    html: generalHTML },
-      { key: "system",     label: "System",     html: systemHTML },
-      { key: "monitoring", label: "Monitoring", html: monitoringHTML },
+      { key: "general", label: "General", html: generalHTML },
+      { key: "system",  label: "System",  html: systemHTML },
     ]);
     bodyEl.innerHTML = '<div class="asset-panel-content">' + tabsHTML + '</div>';
 
@@ -1280,19 +1283,23 @@ async function openViewModal(id) {
   }
 }
 
-// ─── System tab ────────────────────────────────────────────────────────────
+// ─── System tab (system info section) ──────────────────────────────────────
 //
-// Renders three sections: CPU/memory time-series charts, an interfaces table,
-// and a storage table. Telemetry is collected every ~60s, system info every
-// ~10min, so the charts are sparse compared to the response-time chart on
-// the Monitoring tab. ICMP/SSH-monitored assets render an empty-state message
-// because those probes can't deliver this data.
+// Renders the CPU/memory chart, temperatures, interfaces, storage, and IPsec
+// tables. Telemetry is collected every ~60s, system info every ~10min, so
+// these are sparse compared to the response-time chart that sits above it
+// (rendered by assetMonitoringViewHTML). ICMP/SSH-monitored assets render an
+// empty-state message because those probes can't deliver this data.
+//
+// Callers (openViewModal) only invoke this function when the asset is
+// monitored — the not-monitored case is handled by the monitoring section
+// above. The early-return below is defensive.
 
 function assetSystemViewHTML(a) {
   if (!a) return '<p class="empty-state">No data.</p>';
   if (!a.monitored) {
     return '<div style="padding:1rem 0;color:var(--color-text-secondary)">' +
-      'Enable monitoring on this asset (Monitoring tab → Edit) to start collecting CPU/memory and interface data.' +
+      'Enable monitoring on this asset (Edit → Monitoring tab) to start collecting CPU/memory and interface data.' +
     '</div>';
   }
   var t = a.monitorType;
