@@ -1504,6 +1504,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (device.serial) {
         const existingAsset = assetIdx.findBySerial(device.serial);
         if (existingAsset) {
+          // Stamp the discovering integration so the Monitoring tab can render
+          // the integration's name as the default probe path. monitorType
+          // defaults to the integration's native type, but is *not* re-stamped
+          // when the operator has explicitly overridden it (e.g. switched a
+          // small-branch FortiGate whose REST sensor endpoint 404s to SNMP).
+          // Detect override by anything other than the two firewall defaults.
+          const integrationDefaultType = integrationType === "fortigate" ? "fortigate" : "fortimanager";
+          const isOperatorOverride =
+            existingAsset.monitorType !== null &&
+            existingAsset.monitorType !== "fortimanager" &&
+            existingAsset.monitorType !== "fortigate";
           const updateData: Record<string, unknown> = {
             ipAddress: device.mgmtIp || existingAsset.ipAddress,
             ...(device.mgmtIp ? { ipSource: fgHostname || integrationType } : {}),
@@ -1512,11 +1523,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             learnedLocation: existingAsset.learnedLocation || fgHostname,
             lastSeen: new Date(now),
             fortinetTopology: topology,
-            // Stamp the discovering integration so the Monitoring tab can lock
-            // the type dropdown for FMG/FortiGate-discovered firewalls and
-            // probe via the integration's stored API token.
             discoveredByIntegrationId: integrationId,
-            monitorType: integrationType === "fortigate" ? "fortigate" : "fortimanager",
+            ...(isOperatorOverride ? {} : { monitorType: integrationDefaultType }),
             // Only overwrite coords when discovery actually returned them — do not
             // wipe a previously-set value with undefined on a FortiOS that omits
             // longitude/latitude from system/global.
@@ -1558,9 +1566,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           department: "Network Security",
           learnedLocation: fgHostname,
           lastSeen: new Date(now),
-          // Lock monitoring source to the discovering integration. The
-          // Asset Monitoring tab grays out the type dropdown for these and
-          // routes probes through the integration's stored API token.
+          // Default monitoring source to the discovering integration. Probes
+          // route through the integration's stored API token; operators can
+          // override the type later from the asset's Monitoring tab.
           discoveredByIntegrationId: integrationId,
           monitorType: integrationType === "fortigate" ? "fortigate" : "fortimanager",
           ...(Number.isFinite(device.latitude) && Number.isFinite(device.longitude)
@@ -2742,18 +2750,26 @@ async function syncActiveDirectoryDevices(
       );
       updateData.tags = [...preserved, ...tags.filter((t) => !preserved.includes(t))];
 
-      // Lock monitoring source to this AD integration for realm-monitorable
-      // hosts. Skip if the asset is already locked to a different integration
-      // (e.g. an FMG-discovered firewall — defensive, shouldn't happen).
-      const alreadyLockedToOtherIntegration =
+      // Default monitoring source to this AD integration for realm-monitorable
+      // hosts. Skip if the asset is already discovered by a different
+      // integration (e.g. an FMG-discovered firewall — defensive, shouldn't
+      // happen). Also skip the type+credential reset when the operator has
+      // explicitly overridden monitorType (anything other than null or the AD
+      // default) — preserve their choice across re-runs.
+      const alreadyOwnedByOtherIntegration =
         existing.discoveredByIntegrationId &&
         existing.discoveredByIntegrationId !== integrationId &&
         (existing.monitorType === "fortimanager" || existing.monitorType === "fortigate");
-      if (adMonitorable && !alreadyLockedToOtherIntegration) {
+      if (adMonitorable && !alreadyOwnedByOtherIntegration) {
         updateData.discoveredByIntegrationId = integrationId;
-        updateData.monitorType = "activedirectory";
-        // WinRM/SSH use the integration's bindDn/bindPassword, not a Credential row.
-        updateData.monitorCredentialId = null;
+        const isOperatorOverride =
+          existing.monitorType !== null &&
+          existing.monitorType !== "activedirectory";
+        if (!isOperatorOverride) {
+          updateData.monitorType = "activedirectory";
+          // WinRM/SSH use the integration's bindDn/bindPassword, not a Credential row.
+          updateData.monitorCredentialId = null;
+        }
       }
 
       try {

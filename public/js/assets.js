@@ -788,7 +788,6 @@ function getAssetFormData() {
   if (mon) {
     data.monitored = mon.checked;
     var typeSel = document.getElementById("f-monitorType");
-    // Locked dropdowns are disabled; their value is still readable via .value.
     if (typeSel) data.monitorType = typeSel.value || null;
     var credSel = document.getElementById("f-monitorCredential");
     if (credSel) data.monitorCredentialId = credSel.value || null;
@@ -803,48 +802,71 @@ function getAssetFormData() {
 
 // ─── Tabbed asset modal scaffolding ────────────────────────────────────────
 
-function _isMonitorIntegrationLocked(asset) {
-  return !!(asset && asset.discoveredByIntegrationId &&
-    (asset.monitorType === "fortimanager" ||
-     asset.monitorType === "fortigate" ||
-     asset.monitorType === "activedirectory"));
+// Returns the integration-default monitor type for an asset (the type stamped
+// by the discovering integration), or null if the asset is not integration-
+// discovered. Operators can override the running monitorType to a generic
+// type (snmp/icmp/winrm/ssh); the override is preserved across re-discovery.
+function _assetIntegrationDefault(asset) {
+  if (!asset || !asset.discoveredByIntegrationId) return null;
+  var integrationType = asset.discoveredByIntegration && asset.discoveredByIntegration.type;
+  if (integrationType === "fortimanager")  return "fortimanager";
+  if (integrationType === "fortigate")     return "fortigate";
+  if (integrationType === "activedirectory") return "activedirectory";
+  return null;
+}
+
+// True when this integration-discovered asset is still running on its
+// discovery-stamped default monitor type (i.e. the operator hasn't switched
+// it to a generic snmp/icmp/winrm/ssh probe). Drives view-only rendering of
+// the Source label and probe-method label.
+function _isMonitorOnIntegrationDefault(asset) {
+  var def = _assetIntegrationDefault(asset);
+  return !!def && asset.monitorType === def;
 }
 
 function assetMonitoringFormHTML(asset) {
-  var locked = _isMonitorIntegrationLocked(asset);
+  var integrationDefault = _assetIntegrationDefault(asset);
   var integrationName = (asset && asset.discoveredByIntegration && asset.discoveredByIntegration.name) || "";
   var monitorType = asset && asset.monitorType ? asset.monitorType : "";
   var credId = asset && asset.monitorCredentialId ? asset.monitorCredentialId : "";
   var interval = asset && asset.monitorIntervalSec != null ? asset.monitorIntervalSec : "";
   var monitored = asset && asset.monitored ? " checked" : "";
 
-  var typeSelect;
-  if (locked) {
-    var sourcePrefix =
-      monitorType === "fortigate"        ? "FortiGate: " :
-      monitorType === "activedirectory"  ? "Active Directory: " :
-                                            "FortiManager: ";
-    var lockedLabel = sourcePrefix + (integrationName || "(unknown)");
-    var lockedHint = monitorType === "activedirectory"
-      ? 'Monitoring source is locked because this host was discovered by ' +
-        escapeHtml(integrationName || "an integration") + '. Probes reuse the integration’s bind credentials — WinRM for Windows hosts, SSH for realm-joined Linux hosts. Bind DN must be in UPN form, e.g. <code>user@domain.com</code>.'
-      : 'Monitoring source is locked because this firewall was discovered by ' +
-        escapeHtml(integrationName || "an integration") + '. Probes go through the integration’s direct-mode API token.';
-    typeSelect =
-      '<select id="f-monitorType" disabled>' +
-        '<option value="' + escapeHtml(monitorType) + '" selected>' + escapeHtml(lockedLabel) + '</option>' +
-      '</select>' +
-      '<p class="hint">' + lockedHint + '</p>';
-  } else {
-    typeSelect =
-      '<select id="f-monitorType">' +
-        '<option value=""'      + (monitorType === ""      ? " selected" : "") + '>— none —</option>' +
-        '<option value="icmp"'  + (monitorType === "icmp"  ? " selected" : "") + '>ICMP (no credentials)</option>' +
-        '<option value="snmp"'  + (monitorType === "snmp"  ? " selected" : "") + '>SNMP</option>' +
-        '<option value="winrm"' + (monitorType === "winrm" ? " selected" : "") + '>WinRM</option>' +
-        '<option value="ssh"'   + (monitorType === "ssh"   ? " selected" : "") + '>SSH</option>' +
-      '</select>';
+  // Build the dropdown. When the asset is integration-discovered we add an
+  // extra option representing the integration's native type, labeled with the
+  // integration name so it's clear this is the "default" path. Operators can
+  // pick any option — there is no hard lock.
+  var defaultOptionHtml = "";
+  var defaultHintHtml = "";
+  if (integrationDefault) {
+    var defaultLabel =
+      integrationDefault === "fortigate"        ? "FortiGate: " :
+      integrationDefault === "activedirectory"  ? "Active Directory: " :
+                                                    "FortiManager: ";
+    defaultLabel += (integrationName || "(unknown)") + " (default)";
+    defaultOptionHtml =
+      '<option value="' + escapeHtml(integrationDefault) + '"' +
+        (monitorType === integrationDefault ? " selected" : "") + '>' +
+        escapeHtml(defaultLabel) +
+      '</option>';
+    defaultHintHtml = integrationDefault === "activedirectory"
+      ? '<p class="hint">Default routes probes through ' + escapeHtml(integrationName || "this integration") +
+        '’s bind credentials (WinRM for Windows, SSH for Linux; bind DN must be UPN form, e.g. <code>user@domain.com</code>). ' +
+        'Switch to SNMP/WinRM/SSH/ICMP if you want to probe the host directly.</p>'
+      : '<p class="hint">Default routes probes through ' + escapeHtml(integrationName || "this integration") +
+        '’s API token (FortiOS REST). Switch to SNMP for small-branch FortiGates whose REST sensor endpoint 404s, or to ICMP for plain reachability checks.</p>';
   }
+
+  var typeSelect =
+    '<select id="f-monitorType">' +
+      '<option value=""'      + (monitorType === ""      ? " selected" : "") + '>— none —</option>' +
+      defaultOptionHtml +
+      '<option value="icmp"'  + (monitorType === "icmp"  ? " selected" : "") + '>ICMP (no credentials)</option>' +
+      '<option value="snmp"'  + (monitorType === "snmp"  ? " selected" : "") + '>SNMP</option>' +
+      '<option value="winrm"' + (monitorType === "winrm" ? " selected" : "") + '>WinRM</option>' +
+      '<option value="ssh"'   + (monitorType === "ssh"   ? " selected" : "") + '>SSH</option>' +
+    '</select>' +
+    defaultHintHtml;
 
   return (
     '<div class="form-group">' +
@@ -855,7 +877,7 @@ function assetMonitoringFormHTML(asset) {
       '<p class="hint">A successful probe means the credential authenticated. Probes write a sample row each cycle; failed probes count as packet loss.</p>' +
     '</div>' +
     '<div class="form-group"><label>Monitor Type</label>' + typeSelect + '</div>' +
-    '<div class="form-group" id="f-monitorCredential-wrap"' + (locked ? ' style="display:none"' : '') + '>' +
+    '<div class="form-group" id="f-monitorCredential-wrap" style="display:none">' +
       '<label>Credential</label>' +
       '<select id="f-monitorCredential" data-current-id="' + escapeHtml(credId) + '">' +
         '<option value="">— none —</option>' +
@@ -870,9 +892,8 @@ function assetMonitoringFormHTML(asset) {
   );
 }
 
-async function _wireMonitorEditTab(asset) {
+async function _wireMonitorEditTab(_asset) {
   await _ensureCredentials();
-  var locked = _isMonitorIntegrationLocked(asset);
   var monChk = document.getElementById("f-monitored");
   var typeSel = document.getElementById("f-monitorType");
   var credWrap = document.getElementById("f-monitorCredential-wrap");
@@ -883,16 +904,16 @@ async function _wireMonitorEditTab(asset) {
     var enabled = !!(monChk && monChk.checked);
     var t = typeSel ? typeSel.value : "";
     var needsCred = (t === "snmp" || t === "winrm" || t === "ssh");
-    if (typeSel) typeSel.disabled = locked || !enabled;
+    if (typeSel) typeSel.disabled = !enabled;
     if (intervalEl) intervalEl.disabled = !enabled;
-    if (credWrap) credWrap.style.display = (enabled && needsCred && !locked) ? "block" : "none";
+    if (credWrap) credWrap.style.display = (enabled && needsCred) ? "block" : "none";
     if (credSel) credSel.disabled = !enabled;
     if (enabled && needsCred && credSel) {
       var current = credSel.getAttribute("data-current-id") || "";
       credSel.innerHTML = _credentialOptionsFor(t, current);
     }
   }
-  if (typeSel && !locked) typeSel.addEventListener("change", refresh);
+  if (typeSel) typeSel.addEventListener("change", refresh);
   if (monChk) monChk.addEventListener("change", refresh);
   refresh();
 }
@@ -2439,12 +2460,12 @@ function assetMonitoringViewHTML(a) {
     '</div>';
   }
   var sourceLabel = a.monitorType || "—";
-  if (_isMonitorIntegrationLocked(a) && a.discoveredByIntegration) {
-    var lockedPrefix =
+  if (_isMonitorOnIntegrationDefault(a) && a.discoveredByIntegration) {
+    var integrationPrefix =
       a.monitorType === "fortigate"       ? "FortiGate: " :
       a.monitorType === "activedirectory" ? "Active Directory: " :
                                             "FortiManager: ";
-    sourceLabel = lockedPrefix + a.discoveredByIntegration.name;
+    sourceLabel = integrationPrefix + a.discoveredByIntegration.name;
   } else if (a.monitorType === "snmp" || a.monitorType === "winrm" || a.monitorType === "ssh") {
     if (a.monitorCredential) sourceLabel = a.monitorType.toUpperCase() + " · " + a.monitorCredential.name;
   } else if (a.monitorType === "icmp") {
@@ -4657,10 +4678,11 @@ function _credentialOptionsFor(type, selectedId) {
   return opts;
 }
 
-// One-click bulk monitoring toggle. Defaults to ICMP for assets that aren't
-// integration-locked; integration-owned assets (FMG/FortiGate firewalls,
-// AD-discovered Windows hosts) keep their locked `monitorType` because the
-// backend's bulk-monitor route ignores incoming `monitorType` for those rows.
+// One-click bulk monitoring toggle. The backend now applies the requested
+// monitorType uniformly — including to integration-discovered firewalls and
+// AD hosts. Sending "icmp" here means *every* selected row gets ICMP; pick a
+// more refined per-asset type via the Edit modal's Monitoring tab if that's
+// not what you want.
 async function bulkSetMonitoring(monitored) {
   var ids = Array.from(_assetsSelected);
   if (!ids.length) return;

@@ -62,11 +62,6 @@ const CreateAssetSchema = z.object({
 
 const MonitorTypeEnum = z.enum(["fortimanager", "fortigate", "activedirectory", "snmp", "winrm", "ssh", "icmp"]);
 
-const INTEGRATION_LOCKED_MONITOR_TYPES = ["fortimanager", "fortigate", "activedirectory"] as const;
-function isIntegrationLockedType(t: string | null | undefined): boolean {
-  return !!t && (INTEGRATION_LOCKED_MONITOR_TYPES as readonly string[]).includes(t);
-}
-
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   monitored:             z.boolean().optional(),
   monitorType:           MonitorTypeEnum.nullable().optional(),
@@ -95,7 +90,7 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
  * Mutates `data` in place to clear conflicting columns so a stale FK
  * or stale type can't survive the save.
  */
-function validateMonitorConfig(data: Record<string, unknown>, existing: { discoveredByIntegrationId?: string | null; monitorType?: string | null; monitorCredentialId?: string | null }): void {
+function validateMonitorConfig(data: Record<string, unknown>, existing: { monitorType?: string | null; monitorCredentialId?: string | null }): void {
   const monitored = data.monitored === undefined ? undefined : Boolean(data.monitored);
   const monitorType =
     data.monitorType === undefined ? existing.monitorType : (data.monitorType as string | null);
@@ -103,15 +98,6 @@ function validateMonitorConfig(data: Record<string, unknown>, existing: { discov
     data.monitorCredentialId === undefined
       ? existing.monitorCredentialId
       : (data.monitorCredentialId as string | null);
-
-  // Lock monitorType for assets owned by their discovering integration —
-  // FMG/FortiGate firewalls and AD-discovered Windows hosts. The UI mirrors
-  // this by graying out the dropdown.
-  const integrationLocked =
-    !!existing.discoveredByIntegrationId && isIntegrationLockedType(existing.monitorType);
-  if (integrationLocked && data.monitorType !== undefined && data.monitorType !== existing.monitorType) {
-    throw new AppError(400, "Monitoring source for this asset is locked to its discovering integration");
-  }
 
   if (monitored === false) {
     // Clear consec failures so the next enable starts clean; keep type/cred selection.
@@ -335,10 +321,12 @@ router.put("/monitor-settings", requireAssetsAdmin, async (req, res, next) => {
 
 // POST /api/v1/assets/bulk-monitor — enable/disable monitoring on a set of assets.
 // Body: { ids, monitored, monitorType?, monitorCredentialId?, monitorIntervalSec? }.
-// On enable: applies the same monitorType + credential to every selected asset
-// (assets locked to a discovering integration — FMG/FortiGate firewalls, AD-discovered
-// Windows hosts — keep their integration-locked type; request type is ignored for those
-// rows). Returns per-id error list for any rejected rows.
+// On enable: applies the same monitorType + credential to every selected asset.
+// Discovery-stamped defaults (fortimanager / fortigate / activedirectory) are no
+// longer "locked" — operators can bulk-flip integration-discovered firewalls or
+// AD hosts to snmp/icmp/winrm/ssh from the toolbar; subsequent discovery runs
+// preserve the override.
+// Returns per-id error list for any rejected rows.
 router.post("/bulk-monitor", requireAssetsAdmin, async (req, res, next) => {
   try {
     const body = z.object({
@@ -351,7 +339,7 @@ router.post("/bulk-monitor", requireAssetsAdmin, async (req, res, next) => {
 
     const assets = await prisma.asset.findMany({
       where: { id: { in: body.ids } },
-      select: { id: true, hostname: true, discoveredByIntegrationId: true, monitorType: true, monitorCredentialId: true },
+      select: { id: true, hostname: true, monitorType: true, monitorCredentialId: true },
     });
     const byId = new Map(assets.map((a) => [a.id, a]));
     const updated: string[] = [];
@@ -361,9 +349,7 @@ router.post("/bulk-monitor", requireAssetsAdmin, async (req, res, next) => {
       const a = byId.get(id);
       if (!a) { errors.push({ id, error: "Asset not found" }); continue; }
       const data: Record<string, unknown> = { monitored: body.monitored };
-      const integrationLocked =
-        !!a.discoveredByIntegrationId && isIntegrationLockedType(a.monitorType);
-      if (!integrationLocked && body.monitorType !== undefined) data.monitorType = body.monitorType;
+      if (body.monitorType !== undefined) data.monitorType = body.monitorType;
       if (body.monitorCredentialId !== undefined) data.monitorCredentialId = body.monitorCredentialId;
       if (body.monitorIntervalSec !== undefined) data.monitorIntervalSec = body.monitorIntervalSec;
       try {
