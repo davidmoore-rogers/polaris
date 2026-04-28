@@ -604,6 +604,7 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
         targetIp,
         asset.monitorCredential.config as Record<string, unknown>,
         asset.manufacturer,
+        asset.model,
         asset.os,
       );
       return { supported: true, data };
@@ -1152,12 +1153,14 @@ async function collectTelemetrySnmp(
   host: string,
   config: Record<string, unknown>,
   manufacturer?: string | null,
+  model?: string | null,
   os?: string | null,
 ): Promise<TelemetrySample> {
   // Make sure the symbol table is populated before we try to resolve any
   // vendor symbols. ensureRegistryLoaded short-circuits after the first call.
   await ensureRegistryLoaded();
   const profile = pickVendorProfile(manufacturer, os);
+  const scope = { manufacturer, model };
 
   return await withSnmpSession(host, config, async (session) => {
     let cpuPct: number | null = null;
@@ -1171,7 +1174,7 @@ async function collectTelemetrySnmp(
     // expose the OID), fall back to HOST-RESOURCES-MIB so a stock SNMP host
     // still gets coverage.
     if (profile?.cpu) {
-      cpuPct = await collectCpuVendor(session, profile, profile.cpu).catch(() => null);
+      cpuPct = await collectCpuVendor(session, profile, profile.cpu, scope).catch(() => null);
     }
     if (cpuPct == null) {
       cpuPct = await collectCpuHostResources(session).catch(() => null);
@@ -1179,7 +1182,7 @@ async function collectTelemetrySnmp(
 
     // ── Memory ──
     if (profile?.memory) {
-      const m = await collectMemoryVendor(session, profile, profile.memory).catch(() => null);
+      const m = await collectMemoryVendor(session, profile, profile.memory, scope).catch(() => null);
       if (m) {
         memUsedBytes  = m.memUsedBytes  ?? memUsedBytes;
         memTotalBytes = m.memTotalBytes ?? memTotalBytes;
@@ -1251,10 +1254,11 @@ async function collectCpuVendor(
   session: any,
   profile: VendorTelemetryProfile,
   cpu: NonNullable<VendorTelemetryProfile["cpu"]>,
+  scope: { manufacturer?: string | null; model?: string | null },
 ): Promise<number | null> {
-  const oid = resolveOidSync(cpu.symbol);
+  const oid = resolveOidSync(cpu.symbol, scope);
   if (!oid) {
-    logger.debug({ vendor: profile.vendor, symbol: cpu.symbol }, "vendor CPU symbol unresolved — upload its MIB to enable");
+    logger.debug({ vendor: profile.vendor, symbol: cpu.symbol, scope }, "vendor CPU symbol unresolved — upload its MIB to enable");
     return null;
   }
   if (cpu.mode === "scalar") {
@@ -1277,13 +1281,14 @@ async function collectMemoryVendor(
   session: any,
   profile: VendorTelemetryProfile,
   mem: NonNullable<VendorTelemetryProfile["memory"]>,
+  scope: { manufacturer?: string | null; model?: string | null },
 ): Promise<{ memUsedBytes: number | null; memTotalBytes: number | null; memPct: number | null } | null> {
   // Prefer byte-form pairs (used + free or used + total). When both are
   // missing fall back to a single percent symbol.
-  const usedOid  = mem.usedBytesSymbol  ? resolveOidSync(mem.usedBytesSymbol)  : null;
-  const freeOid  = mem.freeBytesSymbol  ? resolveOidSync(mem.freeBytesSymbol)  : null;
-  const totalOid = mem.totalBytesSymbol ? resolveOidSync(mem.totalBytesSymbol) : null;
-  const pctOid   = mem.pctSymbol        ? resolveOidSync(mem.pctSymbol)        : null;
+  const usedOid  = mem.usedBytesSymbol  ? resolveOidSync(mem.usedBytesSymbol,  scope) : null;
+  const freeOid  = mem.freeBytesSymbol  ? resolveOidSync(mem.freeBytesSymbol,  scope) : null;
+  const totalOid = mem.totalBytesSymbol ? resolveOidSync(mem.totalBytesSymbol, scope) : null;
+  const pctOid   = mem.pctSymbol        ? resolveOidSync(mem.pctSymbol,        scope) : null;
 
   const sumWalk = async (oid: string): Promise<number | null> => {
     if (mem.walkSubtree) {

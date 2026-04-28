@@ -14,7 +14,8 @@
  */
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
-import { refreshRegistry } from "./oidRegistry.js";
+import { refreshRegistry, resolveSymbolAtVendorScope, listModelOverrides } from "./oidRegistry.js";
+import { VENDOR_TELEMETRY_PROFILES } from "./vendorTelemetryProfiles.js";
 
 const MAX_BYTES = 1024 * 1024; // 1 MB — MIBs are normally <100 KB
 
@@ -324,4 +325,119 @@ export async function getMibFacets(): Promise<{
     manufacturers: Array.from(manufacturers).sort(),
     modelsByManufacturer,
   };
+}
+
+// ─── Vendor profile status ────────────────────────────────────────────────
+//
+// Used by the MIB Database card to show, per built-in vendor profile, whether
+// the symbols it queries can be resolved at the **universal** scope (i.e. by
+// generic + manufacturer-wide MIBs alone, without any model-specific upload).
+// Each profile also reports any model-specific MIBs that were layered on top
+// for the same manufacturer — those are device overrides, not part of the
+// universal floor.
+
+export interface ProfileSymbolStatus {
+  metric: "cpu" | "memory.used" | "memory.free" | "memory.total" | "memory.pct";
+  symbol: string;
+  resolved: boolean;
+  fromModuleName: string | null;
+  fromScope: "device" | "vendor" | "generic" | "seed" | null;
+}
+
+export interface ProfileStatus {
+  vendor: string;
+  matchPattern: string;
+  example: string;            // first manufacturer string that matches the regex (or "" if none)
+  symbols: ProfileSymbolStatus[];
+  ready: boolean;             // true if every symbol declared by the profile resolves
+  partial: boolean;           // true if at least one (but not all) resolve
+  modelOverrides: { model: string; mibCount: number }[];
+}
+
+/**
+ * Pick a representative manufacturer string for a profile. The match regex
+ * is what determines applicability at probe time; for the UI we want a real
+ * manufacturer string we've seen on assets or in MIB rows so the resolver can
+ * compute against the same scope key the probe will use. Falls back to the
+ * profile's first regex alternative when nothing matches yet.
+ */
+async function exampleManufacturerForProfile(match: RegExp): Promise<string> {
+  const [mibRows, assetRows] = await Promise.all([
+    prisma.mibFile.findMany({
+      where: { manufacturer: { not: null } },
+      select: { manufacturer: true },
+      distinct: ["manufacturer"],
+    }),
+    prisma.asset.findMany({
+      where: { manufacturer: { not: null } },
+      select: { manufacturer: true },
+      distinct: ["manufacturer"],
+    }),
+  ]);
+  const candidates = new Set<string>();
+  for (const r of [...mibRows, ...assetRows]) {
+    if (r.manufacturer) candidates.add(r.manufacturer.trim());
+  }
+  for (const c of candidates) {
+    if (match.test(c)) return c;
+  }
+  // Fallback: first alternative in the regex source. Crude but readable —
+  // strips flags, anchors, and alternation pipes.
+  const src = match.source.replace(/^[\\^?(]+|[\\$?)]+$/g, "");
+  const first = src.split("|")[0].replace(/[^A-Za-z0-9-]/g, "");
+  return first || "(any)";
+}
+
+export async function getProfileStatus(): Promise<ProfileStatus[]> {
+  const out: ProfileStatus[] = [];
+
+  for (const profile of VENDOR_TELEMETRY_PROFILES) {
+    const example = await exampleManufacturerForProfile(profile.match);
+    const symbols: ProfileSymbolStatus[] = [];
+
+    if (profile.cpu) {
+      const r = await resolveSymbolAtVendorScope(example, profile.cpu.symbol);
+      symbols.push({
+        metric: "cpu",
+        symbol: profile.cpu.symbol,
+        resolved: r.resolved,
+        fromModuleName: r.fromModuleName,
+        fromScope: r.fromScope,
+      });
+    }
+    if (profile.memory?.usedBytesSymbol) {
+      const r = await resolveSymbolAtVendorScope(example, profile.memory.usedBytesSymbol);
+      symbols.push({ metric: "memory.used", symbol: profile.memory.usedBytesSymbol, resolved: r.resolved, fromModuleName: r.fromModuleName, fromScope: r.fromScope });
+    }
+    if (profile.memory?.freeBytesSymbol) {
+      const r = await resolveSymbolAtVendorScope(example, profile.memory.freeBytesSymbol);
+      symbols.push({ metric: "memory.free", symbol: profile.memory.freeBytesSymbol, resolved: r.resolved, fromModuleName: r.fromModuleName, fromScope: r.fromScope });
+    }
+    if (profile.memory?.totalBytesSymbol) {
+      const r = await resolveSymbolAtVendorScope(example, profile.memory.totalBytesSymbol);
+      symbols.push({ metric: "memory.total", symbol: profile.memory.totalBytesSymbol, resolved: r.resolved, fromModuleName: r.fromModuleName, fromScope: r.fromScope });
+    }
+    if (profile.memory?.pctSymbol) {
+      const r = await resolveSymbolAtVendorScope(example, profile.memory.pctSymbol);
+      symbols.push({ metric: "memory.pct", symbol: profile.memory.pctSymbol, resolved: r.resolved, fromModuleName: r.fromModuleName, fromScope: r.fromScope });
+    }
+
+    const resolvedCount = symbols.filter((s) => s.resolved).length;
+    const ready = symbols.length > 0 && resolvedCount === symbols.length;
+    const partial = resolvedCount > 0 && !ready;
+
+    const modelOverrides = example !== "(any)" ? await listModelOverrides(example) : [];
+
+    out.push({
+      vendor: profile.vendor,
+      matchPattern: profile.match.source,
+      example,
+      symbols,
+      ready,
+      partial,
+      modelOverrides,
+    });
+  }
+
+  return out;
 }

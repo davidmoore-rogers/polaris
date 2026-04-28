@@ -2076,6 +2076,7 @@ var _ouiOverrides = [];
 var _mibsData = [];
 var _mibFacets = { manufacturers: [], modelsByManufacturer: {} };
 var _mibFilter = { manufacturer: "", model: "", scope: "all" };
+var _mibProfileStatus = [];
 
 async function loadIdentificationTab() {
   var container = document.getElementById("tab-identification");
@@ -2089,6 +2090,7 @@ async function loadIdentificationTab() {
       api.serverSettings.getOuiOverrides().catch(function () { return []; }),
       api.serverSettings.listMibs().catch(function () { return []; }),
       api.serverSettings.getMibFacets().catch(function () { return { manufacturers: [], modelsByManufacturer: {} }; }),
+      api.serverSettings.getMibProfileStatus().catch(function () { return []; }),
     ]);
     _tagsData = results[0];
     _tagSettings = results[1] || { enforce: false };
@@ -2100,6 +2102,7 @@ async function loadIdentificationTab() {
     _ouiOverrides = results[3] || [];
     _mibsData = results[4] || [];
     _mibFacets = results[5] || { manufacturers: [], modelsByManufacturer: {} };
+    _mibProfileStatus = results[6] || [];
     _tagsLoaded = true;
     renderIdentificationTab();
   } catch (err) {
@@ -2388,9 +2391,12 @@ function mibCardHTML() {
     '<h4>MIB Database</h4>' +
     '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
       'SNMP MIB modules used to resolve vendor-specific OIDs during monitoring. ' +
-      'Generic MIBs (no manufacturer) are loaded for every probe; vendor MIBs only when probing matching assets. ' +
+      'Vendor profiles (Cisco, Juniper, Fortinet, …) are <b>universal</b> per-manufacturer, but you can also upload a <b>device-specific</b> MIB that overrides the vendor MIB for one model only. Resolution priority at probe time is <i>device → vendor → generic → built-in seed</i>. ' +
       'Files are validated as ASN.1/SMI on upload — anything else is rejected.' +
     '</p>';
+
+  // Vendor Profile Status pill
+  html += mibProfileStatusHTML();
 
   // Filter row
   html +=
@@ -2461,11 +2467,18 @@ function mibCardHTML() {
       '<datalist id="' + mfrListId + '">' + mfrOpts + '</datalist>' +
       '<datalist id="' + modelListId + '">' + modelOpts + '</datalist>' +
       '<div class="form-group" style="margin-bottom:0.75rem">' +
-        '<label style="display:inline-flex;align-items:center;gap:6px;margin-right:1rem">' +
-          '<input type="radio" name="mib-scope-up" value="device" checked> Device-specific' +
+        '<label style="font-size:0.78rem;font-weight:500;display:block;margin-bottom:0.25rem">Scope</label>' +
+        '<label style="display:block;margin-bottom:0.25rem;cursor:pointer">' +
+          '<input type="radio" name="mib-scope-up" value="vendor" checked> ' +
+          '<b>Manufacturer-wide</b> &mdash; covers every model from this vendor (most common)' +
         '</label>' +
-        '<label style="display:inline-flex;align-items:center;gap:6px">' +
-          '<input type="radio" name="mib-scope-up" value="generic"> Generic (shared across all devices)' +
+        '<label style="display:block;margin-bottom:0.25rem;cursor:pointer">' +
+          '<input type="radio" name="mib-scope-up" value="device"> ' +
+          '<b>Device-specific</b> &mdash; overrides the manufacturer-wide MIB for one model only' +
+        '</label>' +
+        '<label style="display:block;cursor:pointer">' +
+          '<input type="radio" name="mib-scope-up" value="generic"> ' +
+          '<b>Generic</b> &mdash; shared across all vendors (e.g. SNMPv2-SMI, IF-MIB)' +
         '</label>' +
       '</div>' +
       '<div id="mib-upload-vendor-fields" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:0.75rem">' +
@@ -2473,8 +2486,8 @@ function mibCardHTML() {
           '<label style="font-size:0.78rem;font-weight:500">Manufacturer *</label>' +
           '<input type="text" id="f-mib-up-mfr" list="' + mfrListId + '" placeholder="e.g. Cisco">' +
         '</div>' +
-        '<div style="flex:1;min-width:160px">' +
-          '<label style="font-size:0.78rem;font-weight:500">Model <span style="color:var(--color-text-tertiary);font-weight:400">(optional — blank applies to all models)</span></label>' +
+        '<div id="mib-upload-model-field" style="flex:1;min-width:160px;display:none">' +
+          '<label style="font-size:0.78rem;font-weight:500">Model *</label>' +
           '<input type="text" id="f-mib-up-model" list="' + modelListId + '" placeholder="e.g. Catalyst 9300">' +
         '</div>' +
       '</div>' +
@@ -2523,8 +2536,15 @@ function wireMibControls() {
   document.querySelectorAll("input[name='mib-scope-up']").forEach(function (r) {
     r.addEventListener("change", function () {
       var fields = document.getElementById("mib-upload-vendor-fields");
-      if (!fields) return;
-      fields.style.display = r.value === "generic" && r.checked ? "none" : "flex";
+      var modelField = document.getElementById("mib-upload-model-field");
+      if (!fields || !modelField) return;
+      if (!r.checked) return;
+      if (r.value === "generic") {
+        fields.style.display = "none";
+      } else {
+        fields.style.display = "flex";
+        modelField.style.display = r.value === "device" ? "block" : "none";
+      }
     });
   });
 
@@ -2547,14 +2567,17 @@ async function uploadMibUI() {
     return;
   }
   var scopeRadio = document.querySelector("input[name='mib-scope-up']:checked");
-  var scope = scopeRadio ? scopeRadio.value : "device";
+  var scope = scopeRadio ? scopeRadio.value : "vendor";
   var fields = {};
-  if (scope === "device") {
+  if (scope === "vendor" || scope === "device") {
     var mfr = (document.getElementById("f-mib-up-mfr").value || "").trim();
-    if (!mfr) { showToast("Manufacturer is required for device-specific MIBs", "error"); return; }
+    if (!mfr) { showToast("Manufacturer is required for manufacturer-wide and device-specific MIBs", "error"); return; }
     fields.manufacturer = mfr;
+  }
+  if (scope === "device") {
     var model = (document.getElementById("f-mib-up-model").value || "").trim();
-    if (model) fields.model = model;
+    if (!model) { showToast("Model is required for device-specific MIBs", "error"); return; }
+    fields.model = model;
   }
   var notes = (document.getElementById("f-mib-up-notes").value || "").trim();
   if (notes) fields.notes = notes;
@@ -2565,13 +2588,15 @@ async function uploadMibUI() {
     var created = await api.serverSettings.uploadMib(fileInput.files[0], fields);
     showToast("MIB uploaded: " + created.moduleName, "success");
     if (statusEl) statusEl.innerHTML = "";
-    // Refresh list + facets
-    var [list, facets] = await Promise.all([
+    // Refresh list + facets + profile status
+    var [list, facets, status] = await Promise.all([
       api.serverSettings.listMibs(),
       api.serverSettings.getMibFacets(),
+      api.serverSettings.getMibProfileStatus(),
     ]);
     _mibsData = list || [];
     _mibFacets = facets || { manufacturers: [], modelsByManufacturer: {} };
+    _mibProfileStatus = status || [];
     renderIdentificationTab();
   } catch (err) {
     showToast(err.message, "error");
@@ -2587,11 +2612,77 @@ async function deleteMibUI(id, name) {
   try {
     await api.serverSettings.deleteMib(id);
     _mibsData = _mibsData.filter(function (m) { return m.id !== id; });
+    // Refresh profile status — deleting a MIB can drop a vendor profile
+    // back to "MIB needed" or remove a model override row.
+    _mibProfileStatus = await api.serverSettings.getMibProfileStatus().catch(function () { return _mibProfileStatus; });
     showToast("MIB deleted");
     renderIdentificationTab();
   } catch (err) {
     showToast(err.message, "error");
   }
+}
+
+function mibProfileStatusHTML() {
+  if (!_mibProfileStatus || _mibProfileStatus.length === 0) return "";
+
+  var html = '<div style="background:var(--color-bg-secondary,rgba(0,0,0,0.04));border:1px solid var(--color-border);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem">' +
+    '<div style="font-size:0.85rem;font-weight:600;margin-bottom:0.5rem">Vendor Profile Status</div>' +
+    '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-bottom:0.5rem">' +
+      'Each profile is universal &mdash; it applies to every asset whose <code>manufacturer</code> matches the regex. The columns below show whether the underlying MIBs have been uploaded so the probe can resolve the profile\'s symbolic OIDs. Model overrides layer on top of the universal coverage for one product only.' +
+    '</div>';
+
+  _mibProfileStatus.forEach(function (p) {
+    var statusBadge;
+    if (p.ready) {
+      statusBadge = '<span style="background:rgba(34,197,94,0.15);color:#16a34a;padding:1px 6px;border-radius:3px;font-size:0.72rem">READY</span>';
+    } else if (p.partial) {
+      statusBadge = '<span style="background:rgba(245,158,11,0.15);color:#d97706;padding:1px 6px;border-radius:3px;font-size:0.72rem">PARTIAL</span>';
+    } else {
+      statusBadge = '<span style="background:rgba(148,163,184,0.18);color:var(--color-text-secondary);padding:1px 6px;border-radius:3px;font-size:0.72rem">MIB NEEDED</span>';
+    }
+
+    html += '<div style="border-top:1px solid var(--color-border);padding-top:0.5rem;margin-top:0.5rem">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.25rem">' +
+        '<span style="font-weight:500">' + escapeHtml(p.vendor) + '</span>' +
+        statusBadge +
+        '<span style="font-size:0.72rem;color:var(--color-text-tertiary);font-family:var(--font-mono)">match: /' + escapeHtml(p.matchPattern) + '/i</span>' +
+      '</div>';
+
+    if (p.symbols && p.symbols.length > 0) {
+      html += '<table style="font-size:0.78rem;margin-left:0.5rem"><tbody>';
+      p.symbols.forEach(function (s) {
+        var icon = s.resolved
+          ? '<span style="color:#16a34a">&#x2713;</span>'
+          : '<span style="color:#d97706">&#x26A0;</span>';
+        var fromText = s.resolved && s.fromModuleName
+          ? '<span style="color:var(--color-text-secondary)">from <span class="mono">' + escapeHtml(s.fromModuleName) + '</span>' +
+              (s.fromScope && s.fromScope !== "seed" ? ' (' + escapeHtml(s.fromScope) + ')' : '') +
+            '</span>'
+          : '<span style="color:#d97706">unresolved &mdash; upload the MIB defining <span class="mono">' + escapeHtml(s.symbol) + '</span></span>';
+        html += '<tr>' +
+          '<td style="padding:1px 8px 1px 0">' + icon + '</td>' +
+          '<td style="padding:1px 8px 1px 0;color:var(--color-text-secondary)">' + escapeHtml(s.metric) + '</td>' +
+          '<td class="mono" style="padding:1px 8px 1px 0">' + escapeHtml(s.symbol) + '</td>' +
+          '<td style="padding:1px 0">' + fromText + '</td>' +
+        '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+
+    if (p.modelOverrides && p.modelOverrides.length > 0) {
+      var pieces = p.modelOverrides.map(function (o) {
+        return escapeHtml(o.model) + ' (' + o.mibCount + ' MIB' + (o.mibCount === 1 ? '' : 's') + ')';
+      }).join(', ');
+      html += '<div style="font-size:0.75rem;color:var(--color-text-secondary);margin-top:0.25rem;margin-left:0.5rem">' +
+        '<b>Model overrides:</b> ' + pieces +
+      '</div>';
+    }
+
+    html += '</div>';
+  });
+
+  html += '</div>';
+  return html;
 }
 
 async function openAddTagModal() {

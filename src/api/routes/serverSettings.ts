@@ -39,6 +39,7 @@ import {
   createMib,
   deleteMib,
   getMibFacets,
+  getProfileStatus,
 } from "../../services/mibService.js";
 import { logEvent } from "./events.js";
 import {
@@ -753,6 +754,14 @@ router.delete("/oui/overrides/:prefix", async (req, res, next) => {
 router.get("/mibs/facets", async (_req, res, next) => {
   try {
     res.json(await getMibFacets());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/mibs/profile-status", async (_req, res, next) => {
+  try {
+    res.json(await getProfileStatus());
   } catch (err) {
     next(err);
   }
