@@ -804,7 +804,7 @@ function _promptText(title, label, initial) {
 function _showAllocResults(result) {
   var n = result.created.length;
   var rows = result.created.map(function (s) {
-    return '<tr><td>' + escapeHtml(s.name) + '</td><td><code style="font-size:1.05rem">' + escapeHtml(s.cidr) + '</code></td></tr>';
+    return '<tr><td>' + escapeHtml(s.name) + '</td><td><code class="alloc-cidr-copy" data-cidr="' + escapeHtml(s.cidr) + '" style="font-size:1.05rem;cursor:pointer" title="Click to copy">' + escapeHtml(s.cidr) + '</code></td></tr>';
   }).join("");
 
   var anchorNote = result.anchorCidr
@@ -825,6 +825,13 @@ function _showAllocResults(result) {
   document.getElementById("btn-alloc-copy").addEventListener("click", function () {
     var text = result.created.map(function (s) { return s.name + "\t" + s.cidr; }).join("\n");
     navigator.clipboard.writeText(text).then(function () { showToast("Copied to clipboard"); });
+  });
+
+  document.querySelectorAll(".alloc-cidr-copy").forEach(function (el) {
+    el.addEventListener("click", function () {
+      var cidr = el.getAttribute("data-cidr");
+      navigator.clipboard.writeText(cidr).then(function () { showToast("Copied " + cidr); });
+    });
   });
 
   document.getElementById("btn-alloc-screenshot").addEventListener("click", function () {
