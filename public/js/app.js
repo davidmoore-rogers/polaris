@@ -1101,7 +1101,7 @@ function tagFieldHTML(selected, opts) {
       '<input type="text" id="f-tag-new-cat" list="f-tag-cat-list" placeholder="Category" style="width:120px">' +
       '<datalist id="f-tag-cat-list">' + catOptions + '</datalist>' +
       '<input type="color" id="f-tag-new-color" value="' + randomTagColor() + '" title="Tag color" style="width:36px;height:36px;padding:2px;border:1px solid var(--color-border);border-radius:var(--radius-md);cursor:pointer">' +
-      '<button type="button" class="btn btn-sm btn-secondary" id="f-tag-add-btn">Add</button>' +
+      '<button type="button" class="btn btn-sm btn-primary" id="f-tag-add-btn">+ Add Tag</button>' +
       '</div>' +
       '<p class="hint">Select tags above or add new ones</p>';
   }
