@@ -688,16 +688,21 @@ function _onAllocTemplateChange(e) {
   _allocSelectedTemplateId = id;
   var delBtn = document.getElementById("f-template-delete");
   if (delBtn) delBtn.disabled = !id;
-  if (!id) return;
+  var anchorEl = document.getElementById("f-anchor");
+  if (!id) {
+    if (anchorEl) anchorEl.value = _loadAllocAnchor();
+    return;
+  }
   var tpl = _allocTemplates.find(function (t) { return t.id === id; });
   if (!tpl) return;
   var container = document.getElementById("f-entries");
   container.innerHTML = "";
   (tpl.entries || []).forEach(function (entry) { _addAllocEntryRow(entry); });
   if (!tpl.entries || tpl.entries.length === 0) _addAllocEntryRow();
-  if (tpl.anchorPrefix) {
-    var anchorEl = document.getElementById("f-anchor");
-    if (anchorEl) { anchorEl.value = tpl.anchorPrefix; _saveAllocAnchor(tpl.anchorPrefix); }
+  if (anchorEl) {
+    var next = (tpl.anchorPrefix != null) ? tpl.anchorPrefix : _loadAllocAnchor();
+    anchorEl.value = next;
+    if (tpl.anchorPrefix != null) _saveAllocAnchor(tpl.anchorPrefix);
   }
 }
 
