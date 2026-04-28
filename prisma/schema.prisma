@@ -318,6 +318,7 @@ model Asset {
   monitorSamples AssetMonitorSample[]
   telemetrySamples AssetTelemetrySample[]
   interfaceSamples AssetInterfaceSample[]
+  interfaceOverrides AssetInterfaceOverride[]
   storageSamples   AssetStorageSample[]
   temperatureSamples AssetTemperatureSample[]
   ipsecTunnelSamples AssetIpsecTunnelSample[]
@@ -413,6 +414,26 @@ model AssetInterfaceSample {
   @@index([assetId, timestamp])
   @@index([assetId, ifName, timestamp])
   @@map("asset_interface_samples")
+}
+
+// Operator-typed override for an interface's "Interface Comments" text box.
+// Takes priority over the discovered AssetInterfaceSample.description (FortiOS
+// CMDB `description`) for display only — Polaris never pushes this back to the
+// device. One row per (assetId, ifName); a null/empty `description` clears the
+// override and the discovered comment shows through again.
+model AssetInterfaceOverride {
+  id          String   @id @default(uuid())
+  assetId     String
+  asset       Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  ifName      String
+  description String?  @db.VarChar(255)
+  updatedBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([assetId, ifName])
+  @@index([assetId])
+  @@map("asset_interface_overrides")
 }
 
 // Per-sensor temperature snapshot, written alongside telemetry. FortiOS exposes

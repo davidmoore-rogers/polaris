@@ -2982,9 +2982,27 @@ async function openInterfaceDetailPanel(asset, ifName) {
     '<button class="btn btn-sm btn-secondary iface-range-btn" data-range="7d">7d</button>' +
     '<button class="btn btn-sm btn-secondary iface-range-btn" data-range="30d">30d</button>';
 
+  var canEditComment = canManageAssets();
   bodyEl.innerHTML =
     '<div style="padding:1rem 1.25rem">' +
-      '<div id="iface-comment" style="display:none;margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem;color:var(--color-text-secondary);white-space:pre-wrap"></div>' +
+      '<div id="iface-comment-block" style="margin-bottom:0.75rem">' +
+        '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem">' +
+          '<label for="iface-comment-input" style="font-size:0.8rem;font-weight:600;color:var(--color-text-secondary)">Interface Comments</label>' +
+          '<span id="iface-comment-count" style="font-size:0.75rem;color:var(--color-text-secondary)"></span>' +
+        '</div>' +
+        '<textarea id="iface-comment-input" rows="2" maxlength="255" placeholder="' +
+          (canEditComment ? 'Add a comment for this interface (max 255 chars). Polaris-local — not pushed to the device.' : 'Read-only — requires Assets Admin to edit.') +
+          '" style="width:100%;box-sizing:border-box;padding:0.4rem 0.5rem;font-size:0.85rem;font-family:inherit;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;color:var(--color-text);resize:vertical"' +
+          (canEditComment ? '' : ' disabled') +
+          '></textarea>' +
+        '<div id="iface-comment-source" style="margin-top:0.25rem;font-size:0.75rem;color:var(--color-text-secondary)"></div>' +
+        (canEditComment
+          ? '<div style="display:flex;justify-content:flex-end;gap:6px;margin-top:0.4rem">' +
+              '<button class="btn btn-sm btn-secondary" id="btn-iface-comment-revert" disabled>Revert</button>' +
+              '<button class="btn btn-sm btn-primary" id="btn-iface-comment-save" disabled>Save</button>' +
+            '</div>'
+          : '') +
+      '</div>' +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
         '<h4 style="margin:0">Throughput &amp; errors</h4>' +
         '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
@@ -3043,16 +3061,7 @@ async function _loadInterfaceHistoryFor(assetId, ifName, range, callOpts) {
     if (titleEl) {
       titleEl.textContent = "Interface — " + (data.alias && data.alias.trim() ? data.alias.trim() + " (" + ifName + ")" : ifName);
     }
-    var commentEl = document.getElementById("iface-comment");
-    if (commentEl) {
-      if (data.description && data.description.trim()) {
-        commentEl.textContent = data.description.trim();
-        commentEl.style.display = "";
-      } else {
-        commentEl.textContent = "";
-        commentEl.style.display = "none";
-      }
-    }
+    _populateInterfaceCommentEditor(assetId, ifName, data, { silent: silent });
     var ifaceOpts = { since: data.since, until: data.until, subject: ifName };
     _renderIfaceThroughputChart(tputEl, derived, ifaceOpts);
     _renderIfaceErrorChart(errEl, derived, ifaceOpts);
@@ -3075,6 +3084,138 @@ async function _loadInterfaceHistoryFor(assetId, ifName, range, callOpts) {
   var asset = _currentAssetForRefresh;
   var ms = _refreshIntervalMs(asset && asset.monitorIntervalSec, settings.intervalSeconds, 60);
   _scheduleIfaceRefresh(assetId, ifName, ms);
+}
+
+// Per-panel state for the Interface Comments editor. Tracks the saved value
+// so we can detect dirty edits, and the discovered description so the source
+// label below the textarea reflects whether the override is hiding a CMDB
+// description. Cleared on every panel open.
+var _ifaceCommentState = null;
+
+function _populateInterfaceCommentEditor(assetId, ifName, data, opts) {
+  var input = document.getElementById("iface-comment-input");
+  if (!input) return;
+  var countEl  = document.getElementById("iface-comment-count");
+  var saveBtn  = document.getElementById("btn-iface-comment-save");
+  var revertBtn = document.getElementById("btn-iface-comment-revert");
+  var silent = !!(opts && opts.silent);
+
+  var savedValue = (data && typeof data.overrideDescription === "string")
+    ? data.overrideDescription
+    : (data && typeof data.description === "string" && data.overrideDescription == null
+        ? "" /* discovered-only, override is empty */
+        : "");
+  var discoveredDescription = (data && data.discoveredDescription) || "";
+
+  // Don't clobber in-progress typing on auto-refresh ticks. Range changes
+  // (silent=false) always re-populate so the user sees the latest value.
+  var stateMatches = _ifaceCommentState
+    && _ifaceCommentState.assetId === assetId
+    && _ifaceCommentState.ifName === ifName;
+  var isDirty = stateMatches && _ifaceCommentState.dirty;
+
+  if (silent && isDirty) {
+    // Refresh the discovered description hint silently; leave input alone.
+    _ifaceCommentState.savedValue = savedValue;
+    _ifaceCommentState.discoveredDescription = discoveredDescription;
+    _renderIfaceCommentSource(_ifaceCommentState);
+    return;
+  }
+
+  _ifaceCommentState = {
+    assetId: assetId,
+    ifName: ifName,
+    savedValue: savedValue,
+    discoveredDescription: discoveredDescription,
+    dirty: false,
+  };
+  input.value = savedValue;
+  // Show the device-reported description as ghost text when no override is
+  // set, so the operator can see what's currently being shown in lists
+  // before deciding to type over it.
+  if (!input.disabled) {
+    input.placeholder = discoveredDescription
+      ? "Device says: " + discoveredDescription
+      : "Add a comment for this interface (max 255 chars). Polaris-local — not pushed to the device.";
+  }
+  if (countEl) countEl.textContent = input.value.length + " / 255";
+  if (saveBtn) saveBtn.disabled = true;
+  if (revertBtn) revertBtn.disabled = true;
+  _renderIfaceCommentSource(_ifaceCommentState);
+
+  if (!input._ifaceCommentWired) {
+    input._ifaceCommentWired = true;
+    input.addEventListener("input", function () {
+      if (!_ifaceCommentState) return;
+      _ifaceCommentState.dirty = input.value !== _ifaceCommentState.savedValue;
+      if (countEl) countEl.textContent = input.value.length + " / 255";
+      if (saveBtn) saveBtn.disabled = !_ifaceCommentState.dirty;
+      if (revertBtn) revertBtn.disabled = !_ifaceCommentState.dirty;
+    });
+    if (saveBtn) {
+      saveBtn.addEventListener("click", _saveIfaceComment);
+    }
+    if (revertBtn) {
+      revertBtn.addEventListener("click", function () {
+        if (!_ifaceCommentState) return;
+        input.value = _ifaceCommentState.savedValue;
+        _ifaceCommentState.dirty = false;
+        if (countEl) countEl.textContent = input.value.length + " / 255";
+        if (saveBtn) saveBtn.disabled = true;
+        if (revertBtn) revertBtn.disabled = true;
+        _renderIfaceCommentSource(_ifaceCommentState);
+      });
+    }
+  }
+}
+
+function _renderIfaceCommentSource(state) {
+  var sourceEl = document.getElementById("iface-comment-source");
+  if (!sourceEl || !state) return;
+  if (state.savedValue) {
+    if (state.discoveredDescription && state.discoveredDescription !== state.savedValue) {
+      sourceEl.textContent = "Override active. Device reports: " + state.discoveredDescription;
+    } else {
+      sourceEl.textContent = "Polaris-local override (not pushed to device).";
+    }
+  } else if (state.discoveredDescription) {
+    sourceEl.textContent = "Showing device-reported description. Type here to override (Polaris-local only).";
+  } else {
+    sourceEl.textContent = "No comment set on this interface.";
+  }
+}
+
+async function _saveIfaceComment() {
+  if (!_ifaceCommentState) return;
+  var input = document.getElementById("iface-comment-input");
+  var saveBtn = document.getElementById("btn-iface-comment-save");
+  var revertBtn = document.getElementById("btn-iface-comment-revert");
+  if (!input) return;
+  var value = input.value;
+  if (value.length > 255) {
+    showToast("Interface Comments must be 255 characters or fewer", "error");
+    return;
+  }
+  var assetId = _ifaceCommentState.assetId;
+  var ifName  = _ifaceCommentState.ifName;
+  var prevDisabled = saveBtn ? saveBtn.disabled : false;
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
+  try {
+    var resp = await api.assets.setInterfaceComment(assetId, ifName, value);
+    var newSaved = (resp && typeof resp.description === "string") ? resp.description : (value.trim() ? value : "");
+    if (_ifaceCommentState && _ifaceCommentState.assetId === assetId && _ifaceCommentState.ifName === ifName) {
+      _ifaceCommentState.savedValue = newSaved;
+      _ifaceCommentState.dirty = input.value !== newSaved;
+      input.value = newSaved;
+      if (revertBtn) revertBtn.disabled = !_ifaceCommentState.dirty;
+      _renderIfaceCommentSource(_ifaceCommentState);
+    }
+    showToast("Interface comment saved", "success");
+  } catch (err) {
+    showToast("Save failed: " + (err && err.message ? err.message : "unknown error"), "error");
+  } finally {
+    if (saveBtn) { saveBtn.textContent = "Save"; saveBtn.disabled = _ifaceCommentState ? !_ifaceCommentState.dirty : prevDisabled; }
+  }
 }
 
 // Convert cumulative octet/error counters to per-interval bps and per-interval

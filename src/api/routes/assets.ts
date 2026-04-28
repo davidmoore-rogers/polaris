@@ -888,19 +888,31 @@ router.get("/:id/interface-history", async (req, res, next) => {
     const ifName = req.query.ifName ? String(req.query.ifName) : null;
     if (!ifName) throw new AppError(400, "ifName query parameter is required");
     const { since, until, rangeLabel } = resolveRange(req);
-    const samples = await prisma.assetInterfaceSample.findMany({
-      where: { assetId: id, ifName, timestamp: { gte: since, lte: until } },
-      orderBy: { timestamp: "asc" },
-    });
+    const [samples, override] = await Promise.all([
+      prisma.assetInterfaceSample.findMany({
+        where: { assetId: id, ifName, timestamp: { gte: since, lte: until } },
+        orderBy: { timestamp: "asc" },
+      }),
+      prisma.assetInterfaceOverride.findUnique({
+        where: { assetId_ifName: { assetId: id, ifName } },
+      }),
+    ]);
     // The slide-over header shows the alias label and operator comment from the
     // most recent sample so the panel reflects the current configured values
-    // even when the operator is looking at an older time window.
+    // even when the operator is looking at an older time window. The Polaris
+    // operator-typed comment override (AssetInterfaceOverride.description) wins
+    // over the discovered FortiOS CMDB description; the discovered value is
+    // returned as `discoveredDescription` so the UI can show it as a hint.
     const latest = samples.length > 0 ? samples[samples.length - 1] : null;
+    const discoveredDescription = latest?.description ?? null;
+    const overrideDescription = override?.description ?? null;
     res.json({
       range: rangeLabel,
       ifName,
       alias:       latest?.alias       ?? null,
-      description: latest?.description ?? null,
+      description: overrideDescription ?? discoveredDescription,
+      discoveredDescription,
+      overrideDescription,
       since,
       until,
       samples: samples.map((s) => ({
@@ -916,6 +928,58 @@ router.get("/:id/interface-history", async (req, res, next) => {
         outErrors:   bigIntToNumber(s.outErrors),
       })),
     });
+  } catch (err) { next(err); }
+});
+
+// PUT /assets/:id/interfaces/:ifName/comment — operator-typed override for the
+// interface's "Interface Comments" text box. Polaris-local only — never pushed
+// back to the device. Empty string or null clears the override (the discovered
+// FortiOS CMDB description shows through again).
+const InterfaceCommentSchema = z.object({
+  description: z.string().max(255, "Interface Comments may be at most 255 characters").nullable().optional(),
+});
+router.put("/:id/interfaces/:ifName/comment", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const ifName = String(req.params.ifName || "");
+    if (!ifName) throw new AppError(400, "ifName path parameter is required");
+
+    const parsed = InterfaceCommentSchema.parse(req.body || {});
+    const raw = parsed.description == null ? "" : String(parsed.description);
+    const trimmed = raw.trim();
+    const actor = req.session?.username;
+
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: { id: true, hostname: true, ipAddress: true },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+
+    if (trimmed.length === 0) {
+      // Clear override — fall back to discovered description
+      await prisma.assetInterfaceOverride.deleteMany({ where: { assetId: id, ifName } });
+    } else {
+      await prisma.assetInterfaceOverride.upsert({
+        where: { assetId_ifName: { assetId: id, ifName } },
+        create: { assetId: id, ifName, description: trimmed, updatedBy: actor },
+        update: { description: trimmed, updatedBy: actor },
+      });
+    }
+
+    logEvent({
+      action: "asset.interface.comment_updated",
+      resourceType: "asset",
+      resourceId: id,
+      resourceName: asset.hostname || asset.ipAddress || undefined,
+      actor,
+      level: "info",
+      message: trimmed.length === 0
+        ? `Cleared interface comment override on ${asset.hostname || asset.ipAddress || id} / ${ifName}`
+        : `Updated interface comment override on ${asset.hostname || asset.ipAddress || id} / ${ifName}`,
+      details: { ifName, length: trimmed.length },
+    });
+
+    res.json({ ok: true, ifName, description: trimmed.length === 0 ? null : trimmed });
   } catch (err) { next(err); }
 });
 

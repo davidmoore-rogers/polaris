@@ -200,6 +200,8 @@ const api = {
       }
       return request("GET", `/assets/${id}/interface-history?` + qs.join("&"));
     },
+    setInterfaceComment:  (id, ifName, description) =>
+      request("PUT", `/assets/${id}/interfaces/${encodeURIComponent(ifName)}/comment`, { description: description }),
     storageHistory:       (id, mountPath, opts) => {
       if (typeof opts === "string") opts = { range: opts };
       opts = opts || {};
