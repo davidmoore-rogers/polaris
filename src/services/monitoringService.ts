@@ -981,8 +981,16 @@ async function collectSystemInfoFortinet(
     // Back-fill ifParent on member ports of aggregate / hard-switch /
     // vap-switch interfaces. CMDB carries the canonical `member` array; we
     // also accept the monitor-side `member` array as a fallback.
+    //
+    // Member ports owned by an aggregate (the `set members "port15" "port16"`
+    // ports under FortiLink) are typically *omitted* from the monitor
+    // endpoint — FortiOS treats them as subordinate to the aggregate and
+    // doesn't surface them as standalone interfaces. CMDB still lists them.
+    // For those, synthesize a row from CMDB metadata so the System tab tree
+    // can render them nested under their aggregate; runtime fields stay null
+    // because the monitor endpoint never returned counters for them.
     const ifMap = new Map(interfaces.map((s) => [s.ifName, s]));
-    for (const iface of interfaces) {
+    for (const iface of interfaces.slice()) {
       if (iface.ifType !== "aggregate") continue;
       const cmdbEntry = cmdbByName.get(iface.ifName);
       const monitorEntry = obj[iface.ifName] as any;
@@ -990,8 +998,32 @@ async function collectSystemInfoFortinet(
         cmdbEntry?.members.length ? cmdbEntry.members :
         Array.isArray(monitorEntry?.member) ? monitorEntry.member.map(String) : [];
       for (const memberName of members) {
-        const member = ifMap.get(String(memberName));
-        if (member && !member.ifParent) member.ifParent = iface.ifName;
+        const memberStr = String(memberName);
+        const existing = ifMap.get(memberStr);
+        if (existing) {
+          if (!existing.ifParent) existing.ifParent = iface.ifName;
+          continue;
+        }
+        const memberCmdb = cmdbByName.get(memberStr);
+        const synthetic: InterfaceSample = {
+          ifName:      memberStr,
+          adminStatus: null,
+          operStatus:  null,
+          speedBps:    null,
+          ipAddress:   null,
+          macAddress:  null,
+          inOctets:    null,
+          outOctets:   null,
+          inErrors:    null,
+          outErrors:   null,
+          ifType:      memberCmdb?.type ? normalizeFortiIfType(memberCmdb.type) : "physical",
+          ifParent:    iface.ifName,
+          vlanId:      memberCmdb?.vlanId ?? null,
+          alias:       memberCmdb?.alias ?? null,
+          description: memberCmdb?.description ?? null,
+        };
+        interfaces.push(synthetic);
+        ifMap.set(memberStr, synthetic);
       }
     }
   } catch (err: any) {
