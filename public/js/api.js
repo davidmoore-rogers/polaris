@@ -350,6 +350,30 @@ const api = {
     getOuiOverrides:()       => request("GET", "/server-settings/oui/overrides"),
     addOuiOverride: (body)   => request("POST", "/server-settings/oui/overrides", body),
     deleteOuiOverride:(pfx)  => request("DELETE", `/server-settings/oui/overrides/${encodeURIComponent(pfx)}`),
+    listMibs: (params) => request("GET", "/server-settings/mibs" + toQuery(params)),
+    getMibFacets: () => request("GET", "/server-settings/mibs/facets"),
+    uploadMib: (file, fields) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      if (fields) {
+        if (fields.manufacturer) formData.append("manufacturer", fields.manufacturer);
+        if (fields.model) formData.append("model", fields.model);
+        if (fields.notes) formData.append("notes", fields.notes);
+      }
+      return fetch(API_BASE + "/server-settings/mibs", {
+        method: "POST",
+        headers: _csrfHeaders(),
+        body: formData,
+      }).then(function (res) {
+        if (res.status === 401) { window.location.href = "/login.html"; return; }
+        return res.json().then(function (data) {
+          if (!res.ok) throw new Error(data?.error || "MIB upload failed");
+          return data;
+        });
+      });
+    },
+    deleteMib: (id) => request("DELETE", `/server-settings/mibs/${id}`),
+    downloadMibUrl: (id) => API_BASE + "/server-settings/mibs/" + encodeURIComponent(id) + "/download",
     getPgTuning: () => request("GET", "/server-settings/pg-tuning"),
     snoozePgTuning: (days) => request("POST", "/server-settings/pg-tuning/snooze", { days: days || 7 }),
     checkForUpdates: () => request("GET", "/server-settings/updates/check"),

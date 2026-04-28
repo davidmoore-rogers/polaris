@@ -518,6 +518,35 @@ model Tag {
   @@map("tags")
 }
 
+// SNMP MIB modules uploaded by an admin from Server Settings → Identification.
+// Used to resolve vendor-specific OIDs during monitoring. MIB text is stored
+// inline (MIBs are small — typically <100 KB) and validated on upload by a
+// minimal SMI parser that extracts the module name + IMPORTS dependencies.
+// Anything that doesn't match the SMI grammar is rejected, which also rules
+// out arbitrary text or binary uploads.
+//
+// scope = "generic" when manufacturer is null (loaded for every probe);
+// scope = "device"  when manufacturer is set (loaded only for matching assets).
+// model = null means "applies to all models from this manufacturer".
+model MibFile {
+  id           String   @id @default(uuid())
+  filename     String                              // original upload filename, e.g. "CISCO-PROCESS-MIB.txt"
+  moduleName   String                              // parsed from "<NAME> DEFINITIONS ::= BEGIN"
+  manufacturer String?                             // null = generic/shared MIB
+  model        String?                             // null = applies to all models from manufacturer
+  contents     String   @db.Text                   // raw MIB text
+  imports      String[] @default([])               // module names referenced via IMPORTS ... FROM
+  size         Int                                 // byte length of contents
+  notes        String?  @db.Text
+  uploadedBy   String?
+  uploadedAt   DateTime @default(now())
+
+  @@unique([manufacturer, model, moduleName])
+  @@index([manufacturer, model])
+  @@index([moduleName])
+  @@map("mib_files")
+}
+
 model Conflict {
   id                 String         @id @default(uuid())
   entityType         String         @default("reservation")  // "reservation" | "asset"

@@ -2073,6 +2073,9 @@ var _tagsData = [];
 var _emptyCategories = [];
 var _tagSettings = { enforce: false };
 var _ouiOverrides = [];
+var _mibsData = [];
+var _mibFacets = { manufacturers: [], modelsByManufacturer: {} };
+var _mibFilter = { manufacturer: "", model: "", scope: "all" };
 
 async function loadIdentificationTab() {
   var container = document.getElementById("tab-identification");
@@ -2084,6 +2087,8 @@ async function loadIdentificationTab() {
       api.serverSettings.getTagSettings(),
       api.serverSettings.getDns().catch(function () { return null; }),
       api.serverSettings.getOuiOverrides().catch(function () { return []; }),
+      api.serverSettings.listMibs().catch(function () { return []; }),
+      api.serverSettings.getMibFacets().catch(function () { return { manufacturers: [], modelsByManufacturer: {} }; }),
     ]);
     _tagsData = results[0];
     _tagSettings = results[1] || { enforce: false };
@@ -2093,6 +2098,8 @@ async function loadIdentificationTab() {
       _dnsDefaults.dohUrl = results[2].dohUrl || "";
     }
     _ouiOverrides = results[3] || [];
+    _mibsData = results[4] || [];
+    _mibFacets = results[5] || { manufacturers: [], modelsByManufacturer: {} };
     _tagsLoaded = true;
     renderIdentificationTab();
   } catch (err) {
@@ -2176,7 +2183,10 @@ function renderIdentificationTab() {
       '</div>' +
     '</div>';
 
-  // ── 4. Tags (bottom) ──
+  // ── 4. MIB Database ──
+  html += mibCardHTML();
+
+  // ── 5. Tags (bottom) ──
   // Group tags by category
   var categories = {};
   _tagsData.forEach(function (t) {
@@ -2250,6 +2260,7 @@ function renderIdentificationTab() {
 
   wireDnsControls();
   loadOuiStatus();
+  wireMibControls();
 
   // OUI override events
   document.getElementById("btn-add-oui-override").addEventListener("click", addOuiOverride);
@@ -2336,6 +2347,247 @@ async function deleteOuiOverrideUI(prefix) {
     await api.serverSettings.deleteOuiOverride(prefix);
     _ouiOverrides = _ouiOverrides.filter(function (o) { return o.prefix !== prefix; });
     showToast("Override removed");
+    renderIdentificationTab();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+// ─── MIB Database card ─────────────────────────────────────────────────────
+
+function _mibFilteredRows() {
+  return _mibsData.filter(function (m) {
+    if (_mibFilter.scope === "generic" && m.manufacturer) return false;
+    if (_mibFilter.scope === "device" && !m.manufacturer) return false;
+    if (_mibFilter.manufacturer && (m.manufacturer || "").toLowerCase() !== _mibFilter.manufacturer.toLowerCase()) return false;
+    if (_mibFilter.model && (m.model || "").toLowerCase() !== _mibFilter.model.toLowerCase()) return false;
+    return true;
+  });
+}
+
+function _mibManufacturerOptions(selected) {
+  var opts = '<option value=""' + (!selected ? ' selected' : '') + '>All manufacturers</option>';
+  (_mibFacets.manufacturers || []).forEach(function (m) {
+    opts += '<option value="' + escapeHtml(m) + '"' + (selected === m ? ' selected' : '') + '>' + escapeHtml(m) + '</option>';
+  });
+  return opts;
+}
+
+function _mibModelOptions(manufacturer, selected) {
+  var models = (_mibFacets.modelsByManufacturer || {})[manufacturer] || [];
+  var opts = '<option value=""' + (!selected ? ' selected' : '') + '>All models</option>';
+  models.forEach(function (m) {
+    opts += '<option value="' + escapeHtml(m) + '"' + (selected === m ? ' selected' : '') + '>' + escapeHtml(m) + '</option>';
+  });
+  return opts;
+}
+
+function mibCardHTML() {
+  var rows = _mibFilteredRows();
+  var html = '<div class="settings-card">' +
+    '<h4>MIB Database</h4>' +
+    '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+      'SNMP MIB modules used to resolve vendor-specific OIDs during monitoring. ' +
+      'Generic MIBs (no manufacturer) are loaded for every probe; vendor MIBs only when probing matching assets. ' +
+      'Files are validated as ASN.1/SMI on upload — anything else is rejected.' +
+    '</p>';
+
+  // Filter row
+  html +=
+    '<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:1rem">' +
+      '<div style="flex:1;min-width:160px">' +
+        '<label style="font-size:0.78rem;font-weight:500">Manufacturer</label>' +
+        '<select id="f-mib-filter-mfr">' + _mibManufacturerOptions(_mibFilter.manufacturer) + '</select>' +
+      '</div>' +
+      '<div style="flex:1;min-width:160px">' +
+        '<label style="font-size:0.78rem;font-weight:500">Model</label>' +
+        '<select id="f-mib-filter-model"' + (_mibFilter.manufacturer ? '' : ' disabled') + '>' +
+          _mibModelOptions(_mibFilter.manufacturer, _mibFilter.model) +
+        '</select>' +
+      '</div>' +
+      '<div style="flex:0 0 auto">' +
+        '<label style="font-size:0.78rem;font-weight:500">Scope</label>' +
+        '<select id="f-mib-filter-scope">' +
+          '<option value="all"' + (_mibFilter.scope === "all" ? " selected" : "") + '>All</option>' +
+          '<option value="device"' + (_mibFilter.scope === "device" ? " selected" : "") + '>Device-specific</option>' +
+          '<option value="generic"' + (_mibFilter.scope === "generic" ? " selected" : "") + '>Generic only</option>' +
+        '</select>' +
+      '</div>' +
+    '</div>';
+
+  // List
+  if (rows.length > 0) {
+    html += '<table class="ip-table" style="margin-bottom:1rem"><thead><tr>' +
+      '<th>Module</th><th>Manufacturer</th><th>Model</th><th>Imports</th><th style="width:90px;text-align:right">Size</th><th style="width:130px">Uploaded</th><th style="width:120px"></th>' +
+    '</tr></thead><tbody>';
+    rows.forEach(function (m) {
+      var sizeKb = (m.size / 1024).toFixed(1) + " KB";
+      var importsText = (m.imports && m.imports.length > 0) ? m.imports.length + " ref" + (m.imports.length === 1 ? "" : "s") : "—";
+      var importsTitle = (m.imports && m.imports.length > 0) ? m.imports.join(", ") : "";
+      html += '<tr>' +
+        '<td class="mono" style="font-size:0.85rem">' + escapeHtml(m.moduleName) + '</td>' +
+        '<td>' + (m.manufacturer ? escapeHtml(m.manufacturer) : '<span style="color:var(--color-text-tertiary);font-style:italic">generic</span>') + '</td>' +
+        '<td>' + (m.model ? escapeHtml(m.model) : '<span style="color:var(--color-text-tertiary)">—</span>') + '</td>' +
+        '<td' + (importsTitle ? ' title="' + escapeHtml(importsTitle) + '"' : '') + ' style="font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(importsText) + '</td>' +
+        '<td style="text-align:right;font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(sizeKb) + '</td>' +
+        '<td style="font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(formatDate(m.uploadedAt)) + '</td>' +
+        '<td class="actions" style="white-space:nowrap">' +
+          '<a class="btn btn-sm btn-secondary" href="' + api.serverSettings.downloadMibUrl(m.id) + '" download="' + escapeHtml(m.filename) + '">Download</a> ' +
+          '<button class="btn btn-sm btn-danger mib-del" data-id="' + escapeHtml(m.id) + '" data-name="' + escapeHtml(m.moduleName) + '">Del</button>' +
+        '</td>' +
+      '</tr>';
+    });
+    html += '</tbody></table>';
+  } else if (_mibsData.length === 0) {
+    html += '<p class="empty-state" style="margin-bottom:1rem">No MIBs uploaded yet. Add one below to start.</p>';
+  } else {
+    html += '<p class="empty-state" style="margin-bottom:1rem">No MIBs match the current filter.</p>';
+  }
+
+  // Upload form
+  var mfrListId = "mib-mfr-datalist";
+  var modelListId = "mib-model-datalist";
+  var mfrOpts = (_mibFacets.manufacturers || []).map(function (m) { return '<option value="' + escapeHtml(m) + '"></option>'; }).join("");
+  var modelOpts = "";
+  Object.keys(_mibFacets.modelsByManufacturer || {}).forEach(function (mfr) {
+    (_mibFacets.modelsByManufacturer[mfr] || []).forEach(function (md) {
+      modelOpts += '<option value="' + escapeHtml(md) + '"></option>';
+    });
+  });
+
+  html +=
+    '<div style="border-top:1px solid var(--color-border);padding-top:1rem">' +
+      '<h5 style="margin:0 0 0.75rem;font-size:0.9rem">Upload MIB</h5>' +
+      '<datalist id="' + mfrListId + '">' + mfrOpts + '</datalist>' +
+      '<datalist id="' + modelListId + '">' + modelOpts + '</datalist>' +
+      '<div class="form-group" style="margin-bottom:0.75rem">' +
+        '<label style="display:inline-flex;align-items:center;gap:6px;margin-right:1rem">' +
+          '<input type="radio" name="mib-scope-up" value="device" checked> Device-specific' +
+        '</label>' +
+        '<label style="display:inline-flex;align-items:center;gap:6px">' +
+          '<input type="radio" name="mib-scope-up" value="generic"> Generic (shared across all devices)' +
+        '</label>' +
+      '</div>' +
+      '<div id="mib-upload-vendor-fields" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:0.75rem">' +
+        '<div style="flex:1;min-width:160px">' +
+          '<label style="font-size:0.78rem;font-weight:500">Manufacturer *</label>' +
+          '<input type="text" id="f-mib-up-mfr" list="' + mfrListId + '" placeholder="e.g. Cisco">' +
+        '</div>' +
+        '<div style="flex:1;min-width:160px">' +
+          '<label style="font-size:0.78rem;font-weight:500">Model <span style="color:var(--color-text-tertiary);font-weight:400">(optional — blank applies to all models)</span></label>' +
+          '<input type="text" id="f-mib-up-model" list="' + modelListId + '" placeholder="e.g. Catalyst 9300">' +
+        '</div>' +
+      '</div>' +
+      '<div class="form-group" style="margin-bottom:0.75rem">' +
+        '<label style="font-size:0.78rem;font-weight:500">MIB file *</label>' +
+        '<input type="file" id="f-mib-up-file" accept=".mib,.txt,.my,.smi,text/plain">' +
+      '</div>' +
+      '<div class="form-group" style="margin-bottom:0.75rem">' +
+        '<label style="font-size:0.78rem;font-weight:500">Notes <span style="color:var(--color-text-tertiary);font-weight:400">(optional)</span></label>' +
+        '<input type="text" id="f-mib-up-notes" placeholder="Source URL, version, anything you want to remember">' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;align-items:center">' +
+        '<button class="btn btn-primary" id="btn-mib-upload">Upload MIB</button>' +
+        '<span id="mib-upload-status" style="font-size:0.82rem"></span>' +
+      '</div>' +
+    '</div>';
+
+  html += '</div>';
+  return html;
+}
+
+function wireMibControls() {
+  var mfr = document.getElementById("f-mib-filter-mfr");
+  var model = document.getElementById("f-mib-filter-model");
+  var scope = document.getElementById("f-mib-filter-scope");
+  if (mfr) {
+    mfr.addEventListener("change", function () {
+      _mibFilter.manufacturer = mfr.value || "";
+      _mibFilter.model = ""; // reset model when manufacturer changes
+      renderIdentificationTab();
+    });
+  }
+  if (model) {
+    model.addEventListener("change", function () {
+      _mibFilter.model = model.value || "";
+      renderIdentificationTab();
+    });
+  }
+  if (scope) {
+    scope.addEventListener("change", function () {
+      _mibFilter.scope = scope.value || "all";
+      renderIdentificationTab();
+    });
+  }
+
+  document.querySelectorAll("input[name='mib-scope-up']").forEach(function (r) {
+    r.addEventListener("change", function () {
+      var fields = document.getElementById("mib-upload-vendor-fields");
+      if (!fields) return;
+      fields.style.display = r.value === "generic" && r.checked ? "none" : "flex";
+    });
+  });
+
+  var btn = document.getElementById("btn-mib-upload");
+  if (btn) btn.addEventListener("click", uploadMibUI);
+
+  document.querySelectorAll(".mib-del").forEach(function (b) {
+    b.addEventListener("click", function () {
+      deleteMibUI(b.getAttribute("data-id"), b.getAttribute("data-name"));
+    });
+  });
+}
+
+async function uploadMibUI() {
+  var fileInput = document.getElementById("f-mib-up-file");
+  var statusEl = document.getElementById("mib-upload-status");
+  var btn = document.getElementById("btn-mib-upload");
+  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+    showToast("Choose a MIB file first", "error");
+    return;
+  }
+  var scopeRadio = document.querySelector("input[name='mib-scope-up']:checked");
+  var scope = scopeRadio ? scopeRadio.value : "device";
+  var fields = {};
+  if (scope === "device") {
+    var mfr = (document.getElementById("f-mib-up-mfr").value || "").trim();
+    if (!mfr) { showToast("Manufacturer is required for device-specific MIBs", "error"); return; }
+    fields.manufacturer = mfr;
+    var model = (document.getElementById("f-mib-up-model").value || "").trim();
+    if (model) fields.model = model;
+  }
+  var notes = (document.getElementById("f-mib-up-notes").value || "").trim();
+  if (notes) fields.notes = notes;
+
+  btn.disabled = true;
+  if (statusEl) statusEl.innerHTML = '<span style="color:var(--color-text-tertiary)">Uploading…</span>';
+  try {
+    var created = await api.serverSettings.uploadMib(fileInput.files[0], fields);
+    showToast("MIB uploaded: " + created.moduleName, "success");
+    if (statusEl) statusEl.innerHTML = "";
+    // Refresh list + facets
+    var [list, facets] = await Promise.all([
+      api.serverSettings.listMibs(),
+      api.serverSettings.getMibFacets(),
+    ]);
+    _mibsData = list || [];
+    _mibFacets = facets || { manufacturers: [], modelsByManufacturer: {} };
+    renderIdentificationTab();
+  } catch (err) {
+    showToast(err.message, "error");
+    if (statusEl) statusEl.innerHTML = '<span style="color:var(--color-danger)">' + escapeHtml(err.message) + '</span>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deleteMibUI(id, name) {
+  var ok = await showConfirm('Delete MIB module "' + name + '"?');
+  if (!ok) return;
+  try {
+    await api.serverSettings.deleteMib(id);
+    _mibsData = _mibsData.filter(function (m) { return m.id !== id; });
+    showToast("MIB deleted");
     renderIdentificationTab();
   } catch (err) {
     showToast(err.message, "error");

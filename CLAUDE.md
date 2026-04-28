@@ -108,6 +108,7 @@ polaris/
 │   │   ├── eventArchiveService.ts   # Syslog (CEF) + SFTP/SCP event archival
 │   │   ├── serverSettingsService.ts # HTTPS, branding, backup/restore
 │   │   ├── credentialService.ts     # Named credential store (SNMP / WinRM / SSH) with masking + secret-preservation merge
+│   │   ├── mibService.ts            # SNMP MIB module storage + minimal SMI parser (validates uploads, extracts moduleName + IMPORTS)
 │   │   ├── monitoringService.ts     # Authenticated response-time probes (fortimanager/fortigate/snmp/winrm/ssh/icmp) + System tab telemetry (CPU/memory) + system-info (interfaces/storage) collection. runMonitorPass dispatches all three cadences; per-stream retention prune helpers.
 │   │   ├── capacityService.ts       # Capacity snapshot: host (cpu/ram/disk), DB sample-table breakdown, monitoring workload + steady-state size projection, severity grading (ok/amber/red). Feeds the Maintenance tab Capacity card and the sidebar critical alert via the /server-settings/pg-tuning endpoint.
 │   │   └── updateService.ts         # Software update checking
@@ -461,6 +462,20 @@ Tag
   name          String @unique
   category      String @default("General")
   color         String @default("#4fc3f7")
+
+MibFile                         -- Admin-uploaded SNMP MIB modules used to resolve vendor-specific OIDs during monitoring
+  id            UUID PK
+  filename      String           -- original upload filename
+  moduleName    String           -- parsed from "<NAME> DEFINITIONS ::= BEGIN" (validated as a real SMI module on upload — non-MIB text or binaries are rejected)
+  manufacturer  String?          -- null = generic/shared MIB (loaded for every probe)
+  model         String?          -- null = applies to all models from this manufacturer
+  contents      String           -- raw MIB text, stored inline (MIBs are normally <100 KB; cap = 1 MB)
+  imports       String[]         -- module names referenced via IMPORTS ... FROM (used to surface missing dependencies in the UI)
+  size          Int              -- byte length of contents
+  notes         String?
+  uploadedBy    String?
+  uploadedAt    DateTime
+  @@unique([manufacturer, model, moduleName])  -- Postgres treats NULLs as distinct, so the service layer also rejects duplicate generic MIBs
 ```
 
 ---
@@ -615,6 +630,12 @@ Both endpoints rely on the synthesized `ipContext` field that the assets list an
 - `POST   /server-settings/database/restore`
 - `GET    /server-settings/pg-tuning`           — Capacity + tuning health check. Returns the legacy `{needed, triggered, counts, thresholds, settings, snoozedUntil, ramInsufficient, currentRamGb, recommendedRamGb}` payload **plus** `capacity: CapacitySnapshot` from `capacityService.getCapacitySnapshot()`. The capacity payload exposes overall `severity` (`ok` | `amber` | `red`), an array of `reasons` ({severity, code, message, suggestion}), `appHost` (cpu/ram/disk), `database.sampleTables[]` (rows, bytes, deadTupRatio, lastAutovacuum), and `workload.steadyStateSizeBytes` — the projected DB size at current monitored-asset count × cadences × retention. Severity tiering: **red** (disk free <10%, DB > 50% of free disk, autovacuum stale >7d on a populated sample table, projected size > 8× host RAM) drives the non-dismissible sidebar alert; **amber** (disk 10–20%, dead-tup >20%, projected > 4× RAM, plus the legacy ramInsufficient/pgTuningNeeded signals) drives the existing snoozable PG-tuning + RAM-warning alerts.
 - `POST   /server-settings/pg-tuning/snooze`    — Snooze the **amber** PG-tuning recommendation banner for N days (1–30, default 7). Red capacity alerts are not snoozable from the UI.
+- `GET    /server-settings/mibs?manufacturer=&model=&scope=all|device|generic` — List uploaded MIBs (filters: manufacturer + model exact match, scope filters generic vs device-specific).
+- `GET    /server-settings/mibs/facets`         — `{ manufacturers: [], modelsByManufacturer: { mfr: [models] } }` — distinct values from already-uploaded MIBs **plus** the asset inventory, so the upload-form datalists aren't empty before the first vendor MIB is uploaded.
+- `GET    /server-settings/mibs/:id`            — Full record including raw `contents`.
+- `GET    /server-settings/mibs/:id/download`   — `text/plain` download with the original filename.
+- `POST   /server-settings/mibs`                — `multipart/form-data` upload. Fields: `file` (required), `manufacturer?`, `model?`, `notes?`. The body is parsed by a minimal SMI validator (`mibService.parseMib`) before insert: rejects empty files, files containing NUL/control bytes, anything missing the `<NAME> DEFINITIONS ::= BEGIN ... END` envelope, or files exceeding 1 MB. `moduleName` and `imports` are extracted from the parse and stored on the row. Duplicate `(manufacturer, model, moduleName)` returns 409. Setting `model` without `manufacturer` is a 400 (generic MIBs can't be model-scoped).
+- `DELETE /server-settings/mibs/:id`            — Remove a stored MIB.
 
 ---
 
@@ -793,6 +814,7 @@ Vanilla JavaScript SPA served from `/public/`. No build step — plain ES module
 - Each asset row's Actions cell renders a per-IP Reserve / Unreserve button (visible to any user-or-above) when the asset has an `ipAddress` and the row's `ipContext` resolves a non-deprecated containing subnet. If `ipContext.reservation` is non-null the button is **Unreserve** — disabled for non-network-admins whose username doesn't match `reservation.createdBy` (with a tooltip naming the owner). If null the button is **Reserve**. The backend re-checks the same rules in `POST /assets/:id/{reserve,unreserve}`; the frontend disable is purely a UX hint.
 - Asset edit modal is tab-based (General + Monitoring). The details modal has two tabs (General + System). The Monitoring tab on the edit modal grays out the type dropdown for integration-owned assets (FMG/FortiGate-discovered firewalls and AD-discovered Windows hosts); the **System** details tab leads with the monitoring section — status pill, source, last RTT/poll/consecutive failures, and an SVG response-time chart (24h / 7d / 30d / Custom) plus a "Probe now" button for assets admins — then a horizontal divider, then a CPU+memory dual-line chart with hover tooltips (1h / 24h / 7d / 30d), a Temperatures section (current sensor table — hidden when the device exposes no sensors — with each sensor name clickable to open a per-sensor slide-over chart), an Interfaces table with a "Poll 1m" checkbox column + clickable interface name + cumulative errors column, a Storage table (Poll 1m checkbox, mount, used, total, %), and an **IPsec Tunnels** table (FortiOS-monitored only — Poll 1m checkbox, tunnel name, status pill, remote gateway, in/out cumulative bytes, phase-2 count); empty-state messages render for unmonitored assets, ICMP/SSH-monitored assets, and WinRM/AD-monitored assets (the last is a placeholder until WMI Enumerate-over-WS-Management lands). The Poll 1m checkboxes on all three tables write to `Asset.monitoredInterfaces` / `monitoredStorage` / `monitoredIpsecTunnels` and pin the row for sub-minute polling on the response-time cadence. Clicking an interface name opens a **nested slide-over** with three charts (input bps, output bps, in/out errors per interval); clicking a mountpoint name opens a slide-over with a Used vs Total bytes chart and a Used % chart (1h / 24h / 7d / 30d); clicking a tunnel name opens a similar nested slide-over with a status timeline (24h / 7d / 30d) and per-interval throughput charts; clicking a sensor name opens a per-sensor temperature slide-over (24h / 7d / 30d) with axis labels and a chart title. Closing only that panel returns to the asset details panel underneath. All charts share `_wireChartTooltip` for hover behaviour.
 - Server Settings → **Credentials** tab manages the stored SNMP / WinRM / SSH credentials (admin-only). Secrets are masked in every GET; resubmitting the mask preserves the stored value on PUT.
+- Server Settings → **Identification** tab has a **MIB Database** card (admin-only) for managing SNMP MIB modules. Uploads are validated by `mibService.parseMib` (rejects anything that isn't a real ASN.1/SMI module — including binaries and arbitrary text). The form has a **Generic / Device-specific** scope toggle: device-specific requires a manufacturer (model optional, blank means "all models from this vendor"); generic mode hides those fields and stores the MIB with `manufacturer = null` for shared use. The list above the form supports manufacturer + model + scope filters and shows module name, manufacturer/model, IMPORTS dependency count (hover to see the list), size, and an upload date — each row has Download (`text/plain`) and Delete actions.
 - Server Settings → **Maintenance** tab (formerly "Database") groups everything operational: capacity grading, in-app updates, database engine info, storage breakdown, backups, restore, and backup history. The first card on the tab is **Capacity** — a status pill (`Healthy` / `Action recommended` / `Critical`) plus a list of reasons with suggestions, then three side-by-side cards for App host (cpu/ram/disk + DB co-located flag), Database (current size, steady-state size, sample-table breakdown with dead-tuple % per table), and Workload (monitored asset count, cadences, retention). Driven by `GET /server-settings/pg-tuning`'s `capacity` payload. Back-compat: `?tab=database` deep links automatically map to `?tab=maintenance`. The sidebar on every page shows a non-dismissible **red** alert when capacity severity is critical (replaces no existing alert — sits above the existing snoozable PG-tuning + RAM-warning alerts).
 
 ---
