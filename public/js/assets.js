@@ -2146,6 +2146,20 @@ function _fmtBitsPerSec(bps) {
   if (bps >= 1_000)         return (bps / 1_000).toFixed(2)         + " Kbps";
   return Math.round(bps) + " bps";
 }
+// Compact variant for chart y-axis ticks. Drops trailing ".00" on whole-unit
+// values (so "100 Mbps" instead of "100.00 Mbps") and uses one decimal under
+// 10 so labels still show enough resolution at small ceilings.
+function _fmtBitsPerSecAxis(bps) {
+  if (bps == null || isNaN(bps)) return "—";
+  function pick(n, unit) {
+    var s = n >= 10 ? Math.round(n).toString() : n.toFixed(1).replace(/\.0$/, "");
+    return s + " " + unit;
+  }
+  if (bps >= 1_000_000_000) return pick(bps / 1_000_000_000, "Gbps");
+  if (bps >= 1_000_000)     return pick(bps / 1_000_000,     "Mbps");
+  if (bps >= 1_000)         return pick(bps / 1_000,         "Kbps");
+  return Math.round(bps) + " bps";
+}
 function _fmtTooltipTs(ts) {
   function p(n) { return n < 10 ? "0" + n : String(n); }
   var d = new Date(ts);
@@ -3169,7 +3183,7 @@ function _renderIfaceThroughputChart(container, derived, opts) {
     var y = padT + innerH - (i / 4) * innerH;
     ticks +=
       '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
-      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + _fmtBitsPerSec(v) + '</text>';
+      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + _fmtBitsPerSecAxis(v) + '</text>';
   }
   var xTicks = "";
   for (var j = 0; j <= 5; j++) {
