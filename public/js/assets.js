@@ -1432,8 +1432,19 @@ function _renderInterfacesTable(container, si, asset) {
   var monitored = new Set(((si && si.monitoredInterfaces) || (asset && asset.monitoredInterfaces) || []));
   var canEdit = canManageAssets();
   var body = rows.map(function (i) {
-    var oper = i.operStatus  ? '<span class="status-pill status-pill-' + (i.operStatus  === "up" ? "active" : "decommissioned") + '">' + escapeHtml(i.operStatus) + '</span>' : '—';
-    var admin= i.adminStatus ? escapeHtml(i.adminStatus) : '—';
+    var statusLabel, statusKind;
+    if (i.adminStatus && String(i.adminStatus).toLowerCase() === "down") {
+      statusLabel = "admin shut"; statusKind = "decommissioned";
+    } else if (i.operStatus) {
+      statusLabel = String(i.operStatus).toLowerCase();
+      statusKind = statusLabel === "up" ? "active" : "decommissioned";
+    } else if (i.adminStatus) {
+      statusLabel = String(i.adminStatus).toLowerCase();
+      statusKind = statusLabel === "up" ? "active" : "decommissioned";
+    }
+    var status = statusLabel
+      ? '<span class="status-pill status-pill-' + statusKind + '">' + escapeHtml(statusLabel) + '</span>'
+      : '—';
     var speed = i.speedBps != null ? _fmtSpeed(i.speedBps) : '—';
     var checked = monitored.has(i.ifName) ? ' checked' : '';
     var disabled = canEdit ? '' : ' disabled';
@@ -1447,8 +1458,7 @@ function _renderInterfacesTable(container, si, asset) {
     return '<tr>' +
       '<td style="text-align:center;width:1%">' + checkbox + '</td>' +
       '<td class="mono">' + nameCell + '</td>' +
-      '<td>' + admin + '</td>' +
-      '<td>' + oper + '</td>' +
+      '<td>' + status + '</td>' +
       '<td>' + speed + '</td>' +
       '<td class="mono">' + escapeHtml(i.ipAddress || "—") + '</td>' +
       '<td class="mono">' + escapeHtml(i.macAddress || "—") + '</td>' +
@@ -1460,7 +1470,7 @@ function _renderInterfacesTable(container, si, asset) {
   container.innerHTML =
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
       '<th title="Pin this interface for fast-cadence polling">Poll 1m</th>' +
-      '<th>Interface</th><th>Admin</th><th>Oper</th><th>Speed</th><th>IP</th><th>MAC</th><th>In</th><th>Out</th><th>Errors (in/out)</th>' +
+      '<th>Interface</th><th>Status</th><th>Speed</th><th>IP</th><th>MAC</th><th>In</th><th>Out</th><th>Errors (in/out)</th>' +
     '</tr></thead><tbody>' + body + '</tbody></table></div>';
 
   // Toggle handler — POSTs the new monitoredInterfaces array.
