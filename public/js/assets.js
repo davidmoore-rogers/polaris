@@ -1126,13 +1126,13 @@ async function openViewModal(id) {
     if (fetched[1]) _monitorSettingsCache = fetched[1];
     _currentAssetForRefresh = a;
     var generalHTML = '<div class="asset-view-grid">' +
-      viewRow("Hostname", a.hostname) +
-      viewRow("DNS Name", a.dnsName) +
+      viewRow("Hostname", a.hostname, false, false, true) +
+      viewRow("DNS Name", a.dnsName, false, false, true) +
       ipViewRow(a) +
-      viewRow("MAC Address", a.macAddress, true) +
+      viewRow("MAC Address", a.macAddress, true, false, true) +
       macAddressesViewHTML(a.macAddresses) +
       viewRow("Asset Tag", a.assetTag) +
-      viewRow("Serial Number", a.serialNumber) +
+      viewRow("Serial Number", a.serialNumber, false, false, true) +
       viewRow("Manufacturer", a.manufacturer) +
       viewRow("Model", a.model) +
       viewRow("Type", ASSET_TYPE_LABELS[a.assetType] || a.assetType) +
@@ -1184,6 +1184,7 @@ async function openViewModal(id) {
 
     _wireModalTabs("asset-view");
     _wireHoverTriggersIn(bodyEl);
+    bodyEl.addEventListener("click", _handleCopyClick);
     document.getElementById("btn-asset-copy").addEventListener("click", _copyAssetDetails);
     document.getElementById("btn-asset-screenshot").addEventListener("click", function () {
       _screenshotAssetDetails(a);
@@ -3800,10 +3801,14 @@ function ipViewRow(asset) {
     '<span class="detail-value mono">' + ipCellHTML(asset) + src + '</span></div>';
 }
 
-function viewRow(label, value, mono, alignRight) {
+function viewRow(label, value, mono, alignRight, copy) {
   var style = alignRight ? ' style="text-align:right"' : '';
+  var inner = escapeHtml(value || "-");
+  if (copy && value) {
+    inner = '<span class="copy-cell" title="Click to copy" data-copy="' + escapeHtml(value) + '">' + inner + '</span>';
+  }
   return '<div class="detail-row"><span class="detail-label">' + escapeHtml(label) + '</span>' +
-    '<span class="detail-value' + (mono ? ' mono' : '') + '"' + style + '>' + escapeHtml(value || "-") + '</span></div>';
+    '<span class="detail-value' + (mono ? ' mono' : '') + '"' + style + '>' + inner + '</span></div>';
 }
 
 function disabledInHTML(tags) {
