@@ -2075,6 +2075,7 @@ var _tagSettings = { enforce: false };
 var _ouiOverrides = [];
 var _mibsData = [];
 var _mibFacets = { manufacturers: [], modelsByManufacturer: {} };
+var _manufacturerAliases = [];
 var _mibFilter = { manufacturer: "", model: "", scope: "all" };
 var _mibProfileStatus = [];
 
@@ -2091,6 +2092,7 @@ async function loadIdentificationTab() {
       api.serverSettings.listMibs().catch(function () { return []; }),
       api.serverSettings.getMibFacets().catch(function () { return { manufacturers: [], modelsByManufacturer: {} }; }),
       api.serverSettings.getMibProfileStatus().catch(function () { return []; }),
+      api.serverSettings.listManufacturerAliases().catch(function () { return []; }),
     ]);
     _tagsData = results[0];
     _tagSettings = results[1] || { enforce: false };
@@ -2103,6 +2105,7 @@ async function loadIdentificationTab() {
     _mibsData = results[4] || [];
     _mibFacets = results[5] || { manufacturers: [], modelsByManufacturer: {} };
     _mibProfileStatus = results[6] || [];
+    _manufacturerAliases = results[7] || [];
     _tagsLoaded = true;
     renderIdentificationTab();
   } catch (err) {
@@ -2166,6 +2169,9 @@ function renderIdentificationTab() {
         '<button class="btn btn-primary" id="btn-add-oui-override">Add Override</button>' +
       '</div>' +
     '</div>';
+
+  // ── 2b. Manufacturer Aliases ──
+  html += manufacturerAliasesCardHTML();
 
   // ── 3. OUI Database ──
   html +=
@@ -2276,6 +2282,9 @@ function renderIdentificationTab() {
   // OUI database refresh
   document.getElementById("btn-oui-refresh").addEventListener("click", refreshOuiDatabase);
 
+  // Manufacturer alias events
+  wireManufacturerAliasControls();
+
   // Tags events
   document.getElementById("btn-add-tag").addEventListener("click", openAddTagModal);
 
@@ -2383,6 +2392,159 @@ function _mibModelOptions(manufacturer, selected) {
     opts += '<option value="' + escapeHtml(m) + '"' + (selected === m ? ' selected' : '') + '>' + escapeHtml(m) + '</option>';
   });
   return opts;
+}
+
+// ─── Manufacturer Aliases card ─────────────────────────────────────────────
+
+function manufacturerAliasesCardHTML() {
+  var html = '<div class="settings-card">' +
+    '<h4>Manufacturer Aliases</h4>' +
+    '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+      'Map vendor name variants to a single canonical form so the same vendor doesn\'t split into multiple entries. ' +
+      'Each <b>alias</b> (e.g. <code>Fortinet, Inc.</code>) is rewritten to its <b>canonical</b> name (e.g. <code>Fortinet</code>) on every asset and MIB write. ' +
+      'Aliases are matched case-insensitively. Saving an alias also rewrites any existing asset and MIB rows that match.' +
+    '</p>';
+
+  if (_manufacturerAliases.length > 0) {
+    // Group by canonical so admins can see "all the things that map to Fortinet" together.
+    var groups = {};
+    _manufacturerAliases.forEach(function (a) {
+      var key = a.canonical;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(a);
+    });
+    var canonicalNames = Object.keys(groups).sort(function (a, b) {
+      return a.localeCompare(b);
+    });
+
+    html += '<table class="ip-table" style="margin-bottom:1rem"><thead><tr>' +
+      '<th style="width:40%">Alias (input string)</th>' +
+      '<th>Canonical (stored value)</th>' +
+      '<th style="width:140px"></th>' +
+    '</tr></thead><tbody>';
+    canonicalNames.forEach(function (canonical) {
+      groups[canonical].forEach(function (a) {
+        html += '<tr data-alias-id="' + escapeHtml(a.id) + '">' +
+          '<td><span class="alias-text mono" style="font-size:0.85rem">' + escapeHtml(a.alias) + '</span></td>' +
+          '<td><span class="canonical-text">' + escapeHtml(a.canonical) + '</span></td>' +
+          '<td class="actions">' +
+            '<button class="btn btn-sm alias-edit" data-id="' + escapeHtml(a.id) + '">Edit</button> ' +
+            '<button class="btn btn-sm btn-danger alias-del" data-id="' + escapeHtml(a.id) + '">Del</button>' +
+          '</td>' +
+        '</tr>';
+      });
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<p class="empty-state" style="margin-bottom:1rem">No aliases defined.</p>';
+  }
+
+  html +=
+    '<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">' +
+      '<div style="flex:2;min-width:200px">' +
+        '<label style="font-size:0.78rem;font-weight:500">Alias <span style="color:var(--color-text-tertiary);font-weight:400">(input string to rewrite)</span></label>' +
+        '<input type="text" id="f-alias-input" placeholder="e.g. Fortinet, Inc.">' +
+      '</div>' +
+      '<div style="flex:1;min-width:160px">' +
+        '<label style="font-size:0.78rem;font-weight:500">Canonical <span style="color:var(--color-text-tertiary);font-weight:400">(stored value)</span></label>' +
+        '<input type="text" id="f-alias-canonical" placeholder="e.g. Fortinet">' +
+      '</div>' +
+      '<button class="btn btn-primary" id="btn-add-alias">Add Alias</button>' +
+    '</div>' +
+  '</div>';
+
+  return html;
+}
+
+function wireManufacturerAliasControls() {
+  var addBtn = document.getElementById("btn-add-alias");
+  if (addBtn) addBtn.addEventListener("click", addManufacturerAlias);
+
+  var container = document.getElementById("tab-identification");
+  container.querySelectorAll(".alias-del").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      deleteManufacturerAliasUI(btn.getAttribute("data-id"));
+    });
+  });
+  container.querySelectorAll(".alias-edit").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      editManufacturerAliasUI(btn.getAttribute("data-id"));
+    });
+  });
+}
+
+async function addManufacturerAlias() {
+  var aliasInput = document.getElementById("f-alias-input");
+  var canonicalInput = document.getElementById("f-alias-canonical");
+  var alias = (aliasInput.value || "").trim();
+  var canonical = (canonicalInput.value || "").trim();
+  if (!alias || !canonical) {
+    showToast("Both alias and canonical are required", "error");
+    return;
+  }
+  try {
+    await api.serverSettings.createManufacturerAlias({ alias: alias, canonical: canonical });
+    aliasInput.value = "";
+    canonicalInput.value = "";
+    showToast('Alias "' + alias + '" → "' + canonical + '" added', "success");
+    await loadIdentificationTab();
+  } catch (err) {
+    showToast(err.message || "Failed to add alias", "error");
+  }
+}
+
+async function deleteManufacturerAliasUI(id) {
+  var existing = _manufacturerAliases.find(function (a) { return a.id === id; });
+  var label = existing ? '"' + existing.alias + '" → "' + existing.canonical + '"' : "this alias";
+  var ok = await showConfirm("Delete alias " + label + "?");
+  if (!ok) return;
+  try {
+    await api.serverSettings.deleteManufacturerAlias(id);
+    showToast("Alias deleted", "success");
+    await loadIdentificationTab();
+  } catch (err) {
+    showToast(err.message || "Failed to delete alias", "error");
+  }
+}
+
+function editManufacturerAliasUI(id) {
+  var existing = _manufacturerAliases.find(function (a) { return a.id === id; });
+  if (!existing) return;
+
+  var body =
+    '<div class="form-group"><label>Alias *</label>' +
+      '<input type="text" id="f-edit-alias" value="' + escapeHtml(existing.alias) + '">' +
+      '<div style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:4px">Stored lowercased; matched case-insensitively against incoming manufacturer strings.</div>' +
+    '</div>' +
+    '<div class="form-group"><label>Canonical *</label>' +
+      '<input type="text" id="f-edit-canonical" value="' + escapeHtml(existing.canonical) + '">' +
+      '<div style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:4px">Saving will rewrite existing assets and MIBs already stored under the previous canonical value.</div>' +
+    '</div>';
+
+  var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="btn-save-alias">Save Changes</button>';
+  openModal("Edit Manufacturer Alias", body, footer);
+
+  document.getElementById("btn-save-alias").addEventListener("click", async function () {
+    var btn = this;
+    var alias = document.getElementById("f-edit-alias").value.trim();
+    var canonical = document.getElementById("f-edit-canonical").value.trim();
+    if (!alias || !canonical) {
+      showToast("Both alias and canonical are required", "error");
+      return;
+    }
+    btn.disabled = true;
+    try {
+      await api.serverSettings.updateManufacturerAlias(id, { alias: alias, canonical: canonical });
+      closeModal();
+      showToast("Alias updated", "success");
+      await loadIdentificationTab();
+    } catch (err) {
+      showToast(err.message || "Failed to update alias", "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 function mibCardHTML() {

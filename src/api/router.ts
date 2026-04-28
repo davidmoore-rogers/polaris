@@ -18,6 +18,7 @@ import searchRouter from "./routes/search.js";
 import mapRouter from "./routes/map.js";
 import allocationTemplatesRouter from "./routes/allocationTemplates.js";
 import credentialsRouter from "./routes/credentials.js";
+import manufacturerAliasesRouter from "./routes/manufacturerAliases.js";
 import { requireAuth, requireAdmin, requireNetworkAdmin } from "./middleware/auth.js";
 
 export const router = Router();
@@ -48,4 +49,5 @@ router.use("/search", searchRouter);
 router.use("/map", mapRouter);
 router.use("/conflicts", conflictsRouter);
 router.use("/credentials", credentialsRouter);
+router.use("/manufacturer-aliases", requireAdmin, manufacturerAliasesRouter);
 router.use("/server-settings", requireAdmin, serverSettingsRouter);

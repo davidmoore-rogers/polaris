@@ -518,6 +518,24 @@ model Tag {
   @@map("tags")
 }
 
+// Manufacturer alias map. Normalizes inbound manufacturer strings (from OUI
+// lookups, discovery, manual entry, MIB upload) to a single canonical form so
+// "Fortinet, Inc." and "Fortinet" don't split into two entries everywhere.
+// `alias` is stored lowercased+trimmed for case-insensitive match; `canonical`
+// is stored as-typed and is what gets written into Asset.manufacturer /
+// MibFile.manufacturer at every write site (via the Prisma extension in db.ts).
+// Admin-editable from Server Settings → Identification → Manufacturer Aliases.
+model ManufacturerAlias {
+  id        String   @id @default(uuid())
+  alias     String   @unique           // lowercased + trimmed input string
+  canonical String                      // canonical manufacturer name (as-typed)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([canonical])
+  @@map("manufacturer_aliases")
+}
+
 // SNMP MIB modules uploaded by an admin from Server Settings → Identification.
 // Used to resolve vendor-specific OIDs during monitoring. MIB text is stored
 // inline (MIBs are small — typically <100 KB) and validated on upload by a
