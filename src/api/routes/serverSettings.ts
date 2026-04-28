@@ -4,7 +4,7 @@
 
 import { Router } from "express";
 import multer from "multer";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { gzipSync, createGunzip } from "node:zlib";
 import {
   createCipheriv,
@@ -14,7 +14,8 @@ import {
   X509Certificate,
   createPrivateKey,
 } from "node:crypto";
-import { existsSync, unlinkSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, unlinkSync, readFileSync, writeFileSync, mkdirSync, createReadStream, openSync, readSync, closeSync } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { totalmem } from "node:os";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -93,7 +94,13 @@ function detectImageMagic(buf: Buffer): ".png" | ".jpg" | ".webp" | null {
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 } });
-const restoreUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 512 * 1024 * 1024 } });
+// Disk storage so large backups aren't buffered in memory
+const restoreUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, tmpdir()),
+    filename: (_req, _file, cb) => cb(null, `polaris-restore-upload-${Date.now()}`),
+  }),
+});
 
 const APP_VERSION: string = (() => {
   try {
@@ -256,20 +263,29 @@ router.post("/database/backup", async (req, res, next) => {
 });
 
 router.post("/database/restore", restoreUpload.single("file"), async (req, res, next) => {
+  // Track upload temp file for cleanup regardless of outcome
+  const uploadedPath: string | undefined = (req.file as any)?.path;
+  let decryptedTempPath: string | null = null;
+
   try {
     if (!req.file) throw new AppError(400, "No backup file uploaded");
     if (hasActiveDiscoveries()) throw new AppError(409, "A discovery is currently running — wait for it to finish or abort it before restoring");
     const password: string | null = req.body?.password || null;
     const connUrl = process.env.DATABASE_URL || "";
 
-    let payload = req.file.buffer;
-
-    // Check if encrypted
+    // Check magic bytes from disk to detect encryption without loading the whole file
     const magic = Buffer.from("SHELOB1\0");
-    const isEncrypted = payload.length > 72 && payload.subarray(0, 8).equals(magic);
+    const headerBuf = Buffer.alloc(8);
+    const fd = openSync(uploadedPath!, "r");
+    try { readSync(fd, headerBuf, 0, 8, 0); } finally { closeSync(fd); }
+    const isEncrypted = req.file.size > 72 && headerBuf.equals(magic);
+
+    // gzipSourcePath points to the (possibly decrypted) gzip file to stream into psql
+    let gzipSourcePath = uploadedPath!;
 
     if (isEncrypted) {
       if (!password) throw new AppError(400, "This backup is encrypted — a password is required to restore it");
+      const payload = readFileSync(uploadedPath!);
       const salt = payload.subarray(8, 40);
       const iv = payload.subarray(40, 56);
       const authTag = payload.subarray(56, 72);
@@ -277,57 +293,50 @@ router.post("/database/restore", restoreUpload.single("file"), async (req, res, 
       const key = scryptSync(password, salt, 32);
       const decipher = createDecipheriv("aes-256-gcm", key, iv);
       decipher.setAuthTag(authTag);
+      let decrypted: Buffer;
       try {
-        payload = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+        decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
       } catch {
         throw new AppError(400, "Decryption failed — incorrect password or corrupted file");
       }
+      decryptedTempPath = join(tmpdir(), `polaris-restore-dec-${Date.now()}.gz`);
+      writeFileSync(decryptedTempPath, decrypted);
+      gzipSourcePath = decryptedTempPath;
     }
 
-    // Decompress — streaming so we can enforce a decompressed-size cap (zip bomb guard)
-    const MAX_DECOMPRESSED = 4 * 1024 * 1024 * 1024;
-    try {
-      payload = await new Promise<Buffer>((resolve, reject) => {
-        const gunzip = createGunzip();
-        const chunks: Buffer[] = [];
-        let total = 0;
-        gunzip.on("data", (chunk: Buffer) => {
-          total += chunk.length;
-          if (total > MAX_DECOMPRESSED) {
-            gunzip.destroy();
-            reject(new AppError(400, "Backup exceeds maximum decompressed size (4 GB)"));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        gunzip.on("end", () => resolve(Buffer.concat(chunks)));
-        gunzip.on("error", () => reject(new AppError(400, "Decompression failed — file is not a valid gzip archive")));
-        gunzip.end(payload);
-      });
-    } catch (err) {
-      if (err instanceof AppError) throw err;
-      throw new AppError(400, "Decompression failed — file is not a valid gzip archive");
-    }
+    // Stream: gzip file → gunzip → psql stdin
+    // No decompressed-size cap or upload-size cap — handles arbitrarily large databases.
+    const psql = spawn("psql", [connUrl, "--single-transaction"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    if (!psql.stdin) throw new AppError(500, "Failed to open psql stdin");
 
-    // Write SQL to temp file and restore with psql
-    const tmpFile = join(tmpdir(), `polaris-restore-${Date.now()}.sql`);
-    writeFileSync(tmpFile, payload);
+    let psqlStderr = "";
+    psql.stderr.on("data", (chunk: Buffer) => { psqlStderr += chunk.toString(); });
+
+    const psqlExit = new Promise<void>((resolve, reject) => {
+      psql.on("error", reject);
+      psql.on("close", (code: number) => {
+        if (code === 0) resolve();
+        else reject(new AppError(500, `psql restore failed (exit ${code}): ${psqlStderr.slice(-500) || "no output"}`));
+      });
+    });
 
     try {
-      // --single-transaction: rollback everything if any statement fails
-      execSync(`psql "${connUrl}" --single-transaction -f "${tmpFile}"`, {
-        timeout: 120000,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      await pipeline(createReadStream(gzipSourcePath), createGunzip(), psql.stdin);
+      await psqlExit;
     } catch (err: any) {
-      throw new AppError(500, "psql restore failed: " + (err.stderr?.toString() || err.message));
-    } finally {
-      try { unlinkSync(tmpFile); } catch {}
+      psql.kill();
+      if (err instanceof AppError) throw err;
+      throw new AppError(500, "Restore failed: " + (err.message || String(err)));
     }
 
     res.json({ ok: true, message: "Database restored successfully" });
   } catch (err) {
     next(err);
+  } finally {
+    if (decryptedTempPath) { try { unlinkSync(decryptedTempPath); } catch {} }
+    if (uploadedPath) { try { unlinkSync(uploadedPath); } catch {} }
   }
 });
 

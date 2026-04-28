@@ -19,13 +19,14 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, spawn } from "node:child_process";
 import { logger } from "../utils/logger.js";
+import { prisma } from "../db.js";
 
 const execAsync = promisify(exec);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_DIR = join(__dirname, "..", "..");
 const STATUS_FILE = join(APP_DIR, ".update-status.json");
-const BACKUP_DIR = join(APP_DIR, "backups");
+const BACKUP_DIR = join(APP_DIR, "data", "backups");
 
 export interface UpdateStatus {
   state:
@@ -299,13 +300,16 @@ export async function applyUpdate(): Promise<void> {
   try {
     // ── Step 1: Backup database ──
     // Stream pg_dump → gzip → file so backup size isn't bounded by an
-    // in-memory buffer (we used to execAsync with maxBuffer=100MB and
-    // silently skip the backup once the dump exceeded that).
+    // in-memory buffer. Saved to data/backups/ so it appears in the
+    // Backup History list and can be downloaded from the Maintenance tab.
     setStep(0, "running");
     try {
       mkdirSync(BACKUP_DIR, { recursive: true });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      const backupFile = join(BACKUP_DIR, `shelob-pre-update-${readCurrentVersion()}-${ts}.sql.gz`);
+      const version = readCurrentVersion();
+      const backupId = `bk-pre-update-${Date.now()}`;
+      const filename = `polaris-pre-update-${version}-${ts}.sql.gz`;
+      const backupFile = join(BACKUP_DIR, backupId);
 
       const { createGzip } = await import("node:zlib");
       const { createWriteStream } = await import("node:fs");
@@ -331,10 +335,25 @@ export async function applyUpdate(): Promise<void> {
         dumpExit,
       ]);
 
-      _status.backupFile = backupFile;
-      const sizeKb = Math.round(
-        (existsSync(backupFile) ? readFileSync(backupFile).length : 0) / 1024
-      );
+      const sizeBytes = existsSync(backupFile) ? readFileSync(backupFile).length : 0;
+      const sizeKb = Math.round(sizeBytes / 1024);
+
+      // Register in backup_history so the Maintenance tab shows it with a Download button
+      try {
+        const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
+        const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
+        history.push({ id: backupId, filename, size: sizeBytes, encrypted: false, preUpdate: true, createdAt: new Date().toISOString() });
+        if (history.length > 50) history.splice(0, history.length - 50);
+        await prisma.setting.upsert({
+          where: { key: "backup_history" },
+          update: { value: history },
+          create: { key: "backup_history", value: history },
+        });
+      } catch (dbErr) {
+        logger.warn({ err: dbErr }, "Pre-update backup created but failed to register in backup_history");
+      }
+
+      _status.backupFile = filename;
       setStep(0, "done", `Backup created (${sizeKb} KB)`);
     } catch (err: any) {
       // Non-fatal — warn but continue

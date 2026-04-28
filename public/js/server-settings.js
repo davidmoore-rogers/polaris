@@ -1472,9 +1472,12 @@ async function loadBackupHistory() {
               '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" style="vertical-align:-1px;margin-right:3px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
               'Download</button>'
           : '<span style="font-size:0.75rem;color:var(--color-text-tertiary)">Unavailable</span>';
+        var preUpdateBadge = b.preUpdate
+          ? ' <span class="badge" style="font-size:0.7rem;background:color-mix(in srgb, var(--color-warning) 15%, transparent);color:var(--color-warning);border:1px solid color-mix(in srgb, var(--color-warning) 40%, transparent)">Pre-update</span>'
+          : '';
         return '<tr>' +
           '<td style="font-size:0.82rem;white-space:nowrap">' + escapeHtml(formatDate(b.createdAt)) + '</td>' +
-          '<td class="mono" style="font-size:0.82rem">' + escapeHtml(b.filename) + '</td>' +
+          '<td class="mono" style="font-size:0.82rem">' + escapeHtml(b.filename) + preUpdateBadge + '</td>' +
           '<td style="text-align:right;font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(b.size || formatFileSize(b.sizeBytes || 0)) + '</td>' +
           '<td>' + (b.encrypted
             ? '<span class="badge badge-warning" style="font-size:0.7rem">Encrypted</span>'
@@ -1918,6 +1921,35 @@ function renderUpdateFailed(status) {
     stepsHtml += '</div>';
   }
 
+  var recoveryHtml = '';
+  if (status.backupFile) {
+    var cmd = 'gunzip -c ' + status.backupFile + ' | psql "DATABASE_URL"';
+    recoveryHtml =
+      '<div style="margin-top:1rem;background:color-mix(in srgb, var(--color-warning) 8%, transparent);border:1px solid color-mix(in srgb, var(--color-warning) 35%, transparent);border-radius:6px;padding:1rem">' +
+        '<div style="font-weight:600;font-size:0.88rem;margin-bottom:0.5rem">Pre-update backup available</div>' +
+        '<p style="font-size:0.82rem;margin:0 0 0.75rem">A backup was created before the update started. Download it from <strong>Backup History</strong> below before attempting any recovery.</p>' +
+        '<details>' +
+          '<summary style="cursor:pointer;font-size:0.82rem;color:var(--color-text-secondary);user-select:none">Manual restore instructions (if the app is unavailable)</summary>' +
+          '<ol style="font-size:0.82rem;margin:0.6rem 0 0.5rem;padding-left:1.4rem;line-height:1.7">' +
+            '<li>Download the pre-update backup from <strong>Backup History</strong> below.</li>' +
+            '<li>Stop the Polaris service on the server:<br>' +
+              '<code style="font-size:0.8rem;background:var(--color-bg-secondary);padding:1px 5px;border-radius:3px">sudo systemctl stop polaris</code>' +
+              ' &nbsp;(Linux) &nbsp;or&nbsp; ' +
+              '<code style="font-size:0.8rem;background:var(--color-bg-secondary);padding:1px 5px;border-radius:3px">nssm stop Shelob</code>' +
+              ' (Windows)</li>' +
+            '<li>Restore the database — replace <code style="font-size:0.8rem">DATABASE_URL</code> with the value from your <code style="font-size:0.8rem">.env</code> file:<br>' +
+              '<code style="display:block;margin-top:0.3rem;font-size:0.8rem;background:var(--color-bg-secondary);padding:4px 8px;border-radius:3px;white-space:nowrap;overflow-x:auto">' + escapeHtml(cmd) + '</code>' +
+            '</li>' +
+            '<li>Restart the service:<br>' +
+              '<code style="font-size:0.8rem;background:var(--color-bg-secondary);padding:1px 5px;border-radius:3px">sudo systemctl start polaris</code>' +
+              ' &nbsp;(Linux) &nbsp;or&nbsp; ' +
+              '<code style="font-size:0.8rem;background:var(--color-bg-secondary);padding:1px 5px;border-radius:3px">nssm start Shelob</code>' +
+              ' (Windows)</li>' +
+          '</ol>' +
+        '</details>' +
+      '</div>';
+  }
+
   area.innerHTML =
     '<div style="background:color-mix(in srgb, var(--color-danger) 10%, transparent);border:1px solid var(--color-danger);border-radius:6px;padding:1rem;margin-bottom:1rem">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
@@ -1926,10 +1958,14 @@ function renderUpdateFailed(status) {
       '<p style="font-size:0.85rem;margin:0.5rem 0">' + escapeHtml(status.error || 'Unknown error') + '</p>' +
       stepsHtml +
     '</div>' +
-    '<div style="display:flex;gap:8px;align-items:center">' +
+    recoveryHtml +
+    '<div style="display:flex;gap:8px;align-items:center;margin-top:1rem">' +
       '<button class="btn btn-secondary" id="btn-dismiss-update">Dismiss</button>' +
       '<button class="btn btn-secondary" id="btn-check-updates">Check Again</button>' +
     '</div>';
+
+  // Reload backup history so the pre-update backup entry is visible immediately
+  if (status.backupFile) loadBackupHistory();
 
   document.getElementById("btn-dismiss-update").addEventListener("click", async function () {
     await api.serverSettings.dismissUpdate();
