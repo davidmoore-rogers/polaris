@@ -68,6 +68,13 @@ document.addEventListener("DOMContentLoaded", async function () {
   var bmOff = document.getElementById("assets-bulk-monitor-off-btn");
   if (bmOn)  bmOn.addEventListener("click",  function () { bulkSetMonitoring(true); });
   if (bmOff) bmOff.addEventListener("click", function () { bulkSetMonitoring(false); });
+  var bDeselect = document.getElementById("assets-bulk-deselect-btn");
+  if (bDeselect) bDeselect.addEventListener("click", function () {
+    _assetsSelected.clear();
+    document.querySelectorAll("#assets-tbody input.row-cb").forEach(function (cb) { cb.checked = false; });
+    _assetsUpdateSelectAll();
+    _assetsUpdateBulkBar();
+  });
   var settingsBtn = document.getElementById("btn-asset-settings");
   if (settingsBtn) settingsBtn.addEventListener("click", openAssetSettingsModal);
   await userReady;
