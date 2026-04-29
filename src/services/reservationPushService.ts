@@ -124,16 +124,22 @@ export function normalizeMac(mac: string): string {
 
 function buildDescription(
   hostname: string | null | undefined,
-  owner: string | null | undefined,
+  createdBy: string | null | undefined,
   fallback: string,
 ): string {
-  const parts: string[] = [];
-  if (hostname) parts.push(hostname);
-  if (owner && owner !== hostname) parts.push(`(${owner})`);
-  const candidate = parts.length > 0 ? parts.join(" ") : fallback;
-  // FortiOS reserved-address description has a 35-char limit on most versions.
-  // Truncate conservatively rather than have the device reject the write.
-  return candidate.length > 35 ? candidate.slice(0, 35) : candidate;
+  // Format: "Polaris/<user>: <hostname>" — origin first so a FortiGate admin
+  // looking at the device immediately sees this entry was written by Polaris,
+  // followed by who pushed it and what it's for. Falls back to "Polaris: …"
+  // when no authenticated user is available.
+  const name = (hostname && hostname.trim()) || fallback || "(unnamed)";
+  const prefix = createdBy && createdBy.trim()
+    ? `Polaris/${createdBy.trim()}: `
+    : `Polaris: `;
+  const candidate = prefix + name;
+  // FortiOS 7.x accepts up to ~255 chars for reserved-address description,
+  // but 6.2 and older capped at 35. Cap at 64 to keep the field readable
+  // across versions while still fitting prefix + a typical hostname.
+  return candidate.length > 64 ? candidate.slice(0, 64) : candidate;
 }
 
 async function findScopeIdForCidr(
@@ -205,7 +211,9 @@ export interface PushReservationParams {
   ip: string;
   mac: string;
   hostname?: string | null;
-  owner?: string | null;
+  // Username of the operator who created the reservation. Stamped into the
+  // FortiGate description so the device-side row identifies who pushed it.
+  createdBy?: string | null;
   fmgConfig: FortiManagerConfig;
   deviceName: string;
 }
@@ -247,7 +255,7 @@ export async function pushReservation(
 
   const description = buildDescription(
     params.hostname,
-    params.owner,
+    params.createdBy,
     params.ip,
   );
 

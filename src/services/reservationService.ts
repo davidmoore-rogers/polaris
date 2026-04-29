@@ -233,7 +233,7 @@ export async function createReservation(input: CreateReservationInput) {
       ip: input.ipAddress,
       mac: macClean,
       hostname: input.hostname ?? null,
-      owner: input.owner ?? null,
+      createdBy: input.createdBy ?? null,
       fmgConfig: push.fmgConfig,
       deviceName: push.deviceName,
     });

@@ -479,7 +479,10 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
   const subnet = await prisma.subnet.findUnique({
     where: { id },
     include: {
-      integration: { select: { id: true, name: true, type: true } },
+      // config is included so the response can derive `pushEligible` for the
+      // reserve modals — the Reservation Push toggle on the integration
+      // determines whether MAC becomes required at create time.
+      integration: { select: { id: true, name: true, type: true, config: true } },
       reservations: true,
     },
   });
@@ -487,14 +490,29 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
 
   const isIpv6 = detectIpVersion(subnet.cidr) === "v6";
 
+  // Push eligibility: only manual per-IP reservations on subnets discovered
+  // by an FMG integration with pushReservations=true are pushed. The frontend
+  // uses this to mark the MAC field required and validate before submitting.
+  const integrationConfig = (subnet.integration?.config ?? {}) as Record<string, unknown>;
+  const pushEligible =
+    !isIpv6 &&
+    subnet.integration?.type === "fortimanager" &&
+    integrationConfig.pushReservations === true &&
+    !!subnet.fortigateDevice;
+
   const subnetInfo = {
     name: subnet.name,
     cidr: subnet.cidr,
     status: subnet.status,
     vlan: subnet.vlan,
     purpose: subnet.purpose,
-    integration: subnet.integration,
+    // Strip config off the integration object before returning — it can hold
+    // sensitive fields and the frontend only needs id/name/type.
+    integration: subnet.integration
+      ? { id: subnet.integration.id, name: subnet.integration.name, type: subnet.integration.type }
+      : null,
     fortigateDevice: subnet.fortigateDevice,
+    pushEligible,
     hasConflict: subnet.reservations.some(r => r.conflictMessage),
     conflictMessage: subnet.reservations.some(r => r.conflictMessage)
       ? "One or more IPs have conflicts"

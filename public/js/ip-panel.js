@@ -407,12 +407,17 @@ function _renderPanelFooter(data) {
 function _openAutoAllocateModal(subnetId) {
   var s = _ipPanelData ? _ipPanelData.subnet : null;
   var subnetLabel = s ? escapeHtml(s.name) + ' (' + escapeHtml(s.cidr) + ')' : subnetId;
+  var pushEligible = !!(s && s.pushEligible);
 
+  var macLabel = pushEligible ? 'MAC Address *' : 'MAC Address';
+  var macHint = pushEligible
+    ? 'Required &mdash; this network is configured to push reservations to FortiGate "' + escapeHtml((s && s.fortigateDevice) || '') + '". DHCP reservations are MAC&rarr;IP.'
+    : 'Optional unless this network\'s integration pushes reservations to a FortiGate.';
   var body =
     '<div class="form-group"><label>Network</label><input type="text" value="' + subnetLabel + '" disabled></div>' +
     '<p class="hint" style="margin-bottom:12px">The next available host IP will be reserved automatically.</p>' +
     '<div class="form-group"><label>Hostname *</label><input type="text" id="f-hostname" placeholder="e.g. web-server-01"></div>' +
-    '<div class="form-group"><label>MAC Address</label><input type="text" id="f-macAddress" placeholder="aa:bb:cc:dd:ee:ff"><p class="hint">Required when this network\'s integration is configured to push reservations to a FortiGate (DHCP reservations are MAC&rarr;IP).</p></div>' +
+    '<div class="form-group"><label>' + macLabel + '</label><input type="text" id="f-macAddress" placeholder="aa:bb:cc:dd:ee:ff"><p class="hint">' + macHint + '</p></div>' +
     '<div class="form-group"><label>Owner</label><input type="text" id="f-owner" placeholder="e.g. platform-team"></div>' +
     '<div class="form-group"><label>Project Ref</label><input type="text" id="f-projectRef" placeholder="e.g. INFRA-001"></div>' +
     '<div class="form-group"><label>Expires At</label><input type="datetime-local" id="f-expiresAt"><p class="hint">Optional TTL</p></div>' +
@@ -427,6 +432,11 @@ function _openAutoAllocateModal(subnetId) {
     try {
       var expiresVal = document.getElementById("f-expiresAt").value;
       var macVal = document.getElementById("f-macAddress").value.trim();
+      if (pushEligible && !macVal) {
+        showToast("MAC address is required for reservations on this network", "error");
+        btn.disabled = false;
+        return;
+      }
       var input = {
         subnetId: subnetId,
         hostname: document.getElementById("f-hostname").value.trim(),
@@ -455,7 +465,12 @@ function _openAutoAllocateModal(subnetId) {
 function _openReserveModal(subnetId, ipAddress) {
   var s = _ipPanelData ? _ipPanelData.subnet : null;
   var subnetLabel = s ? escapeHtml(s.name) + ' (' + escapeHtml(s.cidr) + ')' : subnetId;
+  var pushEligible = !!(s && s.pushEligible);
 
+  var macLabel = pushEligible ? 'MAC Address *' : 'MAC Address';
+  var macHint = pushEligible
+    ? 'Required &mdash; this network is configured to push reservations to FortiGate "' + escapeHtml((s && s.fortigateDevice) || '') + '". DHCP reservations are MAC&rarr;IP.'
+    : 'Optional unless this network\'s integration pushes reservations to a FortiGate.';
   var body =
     '<div class="form-group"><label>Network</label><input type="text" value="' + subnetLabel + '" disabled></div>' +
     '<div class="form-group"><label>IP Address' + (ipAddress ? '' : ' *') + '</label>' +
@@ -464,7 +479,7 @@ function _openReserveModal(subnetId, ipAddress) {
         : '<input type="text" id="f-ipAddress" placeholder="e.g. ' + (s ? escapeHtml(s.cidr.replace(/\/.*/, '').replace(/\.0$/, '.10')) : '10.0.1.10') + '">') +
     '</div>' +
     '<div class="form-group"><label>Hostname *</label><input type="text" id="f-hostname" placeholder="e.g. web-server-01"></div>' +
-    '<div class="form-group"><label>MAC Address</label><input type="text" id="f-macAddress" placeholder="aa:bb:cc:dd:ee:ff"><p class="hint">Required when this network\'s integration is configured to push reservations to a FortiGate (DHCP reservations are MAC&rarr;IP).</p></div>' +
+    '<div class="form-group"><label>' + macLabel + '</label><input type="text" id="f-macAddress" placeholder="aa:bb:cc:dd:ee:ff"><p class="hint">' + macHint + '</p></div>' +
     '<div class="form-group"><label>Owner</label><input type="text" id="f-owner" placeholder="e.g. platform-team"></div>' +
     '<div class="form-group"><label>Project Ref</label><input type="text" id="f-projectRef" placeholder="e.g. INFRA-001"></div>' +
     '<div class="form-group"><label>Expires At</label><input type="datetime-local" id="f-expiresAt"><p class="hint">Optional TTL</p></div>' +
@@ -480,6 +495,11 @@ function _openReserveModal(subnetId, ipAddress) {
       var ipEl = document.getElementById("f-ipAddress");
       var expiresVal = document.getElementById("f-expiresAt").value;
       var macVal = document.getElementById("f-macAddress").value.trim();
+      if (pushEligible && !macVal) {
+        showToast("MAC address is required for reservations on this network", "error");
+        btn.disabled = false;
+        return;
+      }
       var input = {
         subnetId: subnetId,
         ipAddress: ipAddress || (ipEl ? ipEl.value.trim() : undefined) || undefined,
