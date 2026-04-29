@@ -76,6 +76,7 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   monitorResponseTimeSource: MonitorTransportEnum.nullable().optional(),
   monitorTelemetrySource:    MonitorTransportEnum.nullable().optional(),
   monitorInterfacesSource:   MonitorTransportEnum.nullable().optional(),
+  monitorLldpSource:         MonitorTransportEnum.nullable().optional(),
   // Per-asset cadence overrides for the System tab. Null falls back to
   // monitor.telemetryIntervalSeconds / systemInfoIntervalSeconds.
   telemetryIntervalSec:  z.number().int().min(15).max(86400).nullable().optional(),
@@ -405,7 +406,7 @@ router.get("/:id", async (req, res, next) => {
     // integration's full `config` is not safe to leak to the client (it
     // contains API tokens), so strip it after extracting the credential id.
     let integrationMonitorCredential: { id: string; name: string; type: string } | null = null;
-    let integrationTransportSources: { responseTime: "rest" | "snmp"; telemetry: "rest" | "snmp"; interfaces: "rest" | "snmp" } | null = null;
+    let integrationTransportSources: { responseTime: "rest" | "snmp"; telemetry: "rest" | "snmp"; interfaces: "rest" | "snmp"; lldp: "rest" | "snmp" } | null = null;
     if (asset.discoveredByIntegration) {
       const cfg = (asset.discoveredByIntegration.config as Record<string, unknown> | null) || {};
       const credId = typeof cfg.monitorCredentialId === "string" ? cfg.monitorCredentialId : null;
@@ -424,6 +425,7 @@ router.get("/:id", async (req, res, next) => {
         responseTime: norm(cfg.monitorResponseTimeSource),
         telemetry:    norm(cfg.monitorTelemetrySource),
         interfaces:   norm(cfg.monitorInterfacesSource),
+        lldp:         norm(cfg.monitorLldpSource),
       };
     }
     const { config: _omit, ...integrationLite } = (asset.discoveredByIntegration as { config?: unknown } | null) || {};

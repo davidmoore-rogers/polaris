@@ -245,18 +245,19 @@ function _intWireModalTabs(prefix) {
 
 // Per-integration monitoring transport block rendered at the top of the
 // FortiGates subtab on the Monitoring tab. Renders an SNMP credential picker
-// plus three checkboxes that decide which streams (response-time, telemetry,
-// interfaces) ride SNMP vs the default FortiOS REST API. IPsec is always REST
-// regardless — SNMP has no equivalent.
+// plus four checkboxes that decide which streams (response-time, telemetry,
+// interfaces, LLDP) ride SNMP vs the default FortiOS REST API. IPsec is always
+// REST regardless — SNMP has no equivalent.
 //
 // `sources` is the integration's current transport config:
-//   { responseTime: "rest"|"snmp", telemetry: "rest"|"snmp", interfaces: "rest"|"snmp" }
+//   { responseTime: "rest"|"snmp", telemetry: ..., interfaces: ..., lldp: ... }
 // All default to "rest".
 function integrationMonitorOverrideHTML(credentials, selectedId, sources) {
   sources = sources || {};
   var rt = sources.responseTime === "snmp";
   var tl = sources.telemetry    === "snmp";
   var iv = sources.interfaces   === "snmp";
+  var ll = sources.lldp         === "snmp";
   var snmp = (credentials || []).filter(function (c) { return c.type === "snmp"; });
   var options = '<option value="">— none —</option>' +
     snmp.map(function (c) {
@@ -289,6 +290,9 @@ function integrationMonitorOverrideHTML(credentials, selectedId, sources) {
     row("f-mon-src-interfaces",   "Interfaces (and storage)",
         iv,
         'IF-MIB + HOST-RESOURCES instead of FortiOS REST <code>/system/interface</code>. IPsec tunnels stay on REST regardless — SNMP has no equivalent.') +
+    row("f-mon-src-lldp",         "LLDP neighbor discovery",
+        ll,
+        'LLDP-MIB walk (<code>lldpRemTable</code>) instead of FortiOS REST <code>/system/interface/lldp-neighbors</code>. Useful when the REST endpoint 404s on a given firmware but LLDP-MIB still reports neighbors. Decoupled from "Interfaces" so the operator can pick the working source per-stream.') +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
 }
 
@@ -976,17 +980,19 @@ function _readMonitorCredentialId() {
 }
 
 // Reads the per-stream transport checkboxes from the FortiGates subtab.
-// Returns { responseTime, telemetry, interfaces } as "rest" | "snmp", or
-// null when the subtab isn't on screen — caller leaves the existing config.
+// Returns { responseTime, telemetry, interfaces, lldp } as "rest" | "snmp",
+// or null when the subtab isn't on screen — caller leaves the existing config.
 function _readMonitorTransportSources() {
   var rt = document.getElementById("f-mon-src-responseTime");
   var tl = document.getElementById("f-mon-src-telemetry");
   var iv = document.getElementById("f-mon-src-interfaces");
-  if (!rt && !tl && !iv) return null;
+  var ll = document.getElementById("f-mon-src-lldp");
+  if (!rt && !tl && !iv && !ll) return null;
   return {
     monitorResponseTimeSource: rt && rt.checked ? "snmp" : "rest",
     monitorTelemetrySource:    tl && tl.checked ? "snmp" : "rest",
     monitorInterfacesSource:   iv && iv.checked ? "snmp" : "rest",
+    monitorLldpSource:         ll && ll.checked ? "snmp" : "rest",
   };
 }
 
@@ -1077,6 +1083,7 @@ async function openCreateModal(type) {
           createConfig.monitorResponseTimeSource = transports.monitorResponseTimeSource;
           createConfig.monitorTelemetrySource    = transports.monitorTelemetrySource;
           createConfig.monitorInterfacesSource   = transports.monitorInterfacesSource;
+          createConfig.monitorLldpSource         = transports.monitorLldpSource;
         }
         var fgBlockNew = _readFortigateMonitorBlock("f-mon-fortigate-");
         var swBlockNew = _readClassMonitorBlock("f-mon-fortiswitch-");
@@ -1272,6 +1279,7 @@ async function openEditModal(id) {
             responseTime: config.monitorResponseTimeSource || "rest",
             telemetry:    config.monitorTelemetrySource    || "rest",
             interfaces:   config.monitorInterfacesSource   || "rest",
+            lldp:         config.monitorLldpSource         || "rest",
           },
           fortigateMonitor:   config.fortigateMonitor   || null,
           fortiswitchMonitor: config.fortiswitchMonitor || null,

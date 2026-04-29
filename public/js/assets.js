@@ -815,9 +815,11 @@ function getAssetFormData() {
     var rt = readTransport("f-monitorResponseTimeSource");
     var tl = readTransport("f-monitorTelemetrySource");
     var iv2 = readTransport("f-monitorInterfacesSource");
+    var ll = readTransport("f-monitorLldpSource");
     if (rt !== undefined) data.monitorResponseTimeSource = rt;
     if (tl !== undefined) data.monitorTelemetrySource    = tl;
     if (iv2 !== undefined) data.monitorInterfacesSource  = iv2;
+    if (ll !== undefined) data.monitorLldpSource         = ll;
   }
   return data;
 }
@@ -930,6 +932,10 @@ function assetMonitoringFormHTML(asset) {
         '<div class="form-group" style="display:flex;align-items:center;gap:1rem">' +
           '<label style="margin:0;min-width:160px">Interfaces</label>' +
           transportSelect("f-monitorInterfacesSource", asset && asset.monitorInterfacesSource, "interfaces") +
+        '</div>' +
+        '<div class="form-group" style="display:flex;align-items:center;gap:1rem">' +
+          '<label style="margin:0;min-width:160px">LLDP neighbors</label>' +
+          transportSelect("f-monitorLldpSource", asset && asset.monitorLldpSource, "lldp") +
         '</div>' +
         '<p class="hint">SNMP uses this asset\'s credential when set; otherwise the integration\'s. IPsec tunnels always stay on REST.</p>' +
       '</div>';

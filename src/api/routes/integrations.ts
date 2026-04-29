@@ -158,6 +158,11 @@ const FortiManagerConfigSchema = z.object({
   monitorResponseTimeSource: MonitorTransportSchema,
   monitorTelemetrySource:    MonitorTransportSchema,
   monitorInterfacesSource:   MonitorTransportSchema,
+  // LLDP runs on the system-info cadence. Decoupled from the interfaces
+  // toggle because the FortiOS LLDP REST endpoint and SNMP LLDP-MIB don't
+  // always agree on coverage — branch-class FortiGates sometimes 404 the
+  // REST endpoint while still publishing LLDP-MIB, and vice-versa.
+  monitorLldpSource:         MonitorTransportSchema,
   // Per-class auto-monitor settings for assets discovered through this
   // integration. fortigateMonitor only carries `addAsMonitored` since
   // FortiGates always get a monitorType stamped at discovery; the switch /
@@ -190,6 +195,7 @@ const FortiGateConfigSchema = z.object({
   monitorResponseTimeSource: MonitorTransportSchema,
   monitorTelemetrySource:    MonitorTransportSchema,
   monitorInterfacesSource:   MonitorTransportSchema,
+  monitorLldpSource:         MonitorTransportSchema,
   fortigateMonitor:   FortiGateClassMonitorSchema,
   fortiswitchMonitor: FortinetClassMonitorSchema,
   fortiapMonitor:     FortinetClassMonitorSchema,
@@ -363,6 +369,7 @@ router.post("/", async (req, res, next) => {
       if (cfg.monitorResponseTimeSource === "snmp") snmpStreams.push("Response time");
       if (cfg.monitorTelemetrySource    === "snmp") snmpStreams.push("Telemetry");
       if (cfg.monitorInterfacesSource   === "snmp") snmpStreams.push("Interfaces");
+      if (cfg.monitorLldpSource         === "snmp") snmpStreams.push("LLDP");
       if (snmpStreams.length > 0 && !credId) {
         throw new AppError(400, `Select an SNMP credential to route ${snmpStreams.join(", ")} via SNMP`);
       }
@@ -504,6 +511,7 @@ router.put("/:id", async (req, res, next) => {
         if (newConfig.monitorResponseTimeSource === "snmp") snmpStreams.push("Response time");
         if (newConfig.monitorTelemetrySource    === "snmp") snmpStreams.push("Telemetry");
         if (newConfig.monitorInterfacesSource   === "snmp") snmpStreams.push("Interfaces");
+        if (newConfig.monitorLldpSource         === "snmp") snmpStreams.push("LLDP");
         if (snmpStreams.length > 0 && !newConfig.monitorCredentialId) {
           throw new AppError(400, `Select an SNMP credential to route ${snmpStreams.join(", ")} via SNMP`);
         }

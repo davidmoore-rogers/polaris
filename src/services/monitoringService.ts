@@ -240,12 +240,13 @@ function toPositiveInt(v: unknown, fallback: number): number {
 // don't want toggling "interfaces" off REST to silently kill IPsec history.
 
 export type MonitorTransport = "rest" | "snmp";
-export type MonitorTransportStream = "responseTime" | "telemetry" | "interfaces";
+export type MonitorTransportStream = "responseTime" | "telemetry" | "interfaces" | "lldp";
 
 interface MonitorTransportSources {
   monitorResponseTimeSource?: string | null;
   monitorTelemetrySource?:    string | null;
   monitorInterfacesSource?:   string | null;
+  monitorLldpSource?:         string | null;
 }
 
 function normalizeTransport(v: unknown): MonitorTransport | null {
@@ -262,9 +263,10 @@ export function resolveMonitorTransport(
     : {};
   let assetVal: string | null | undefined;
   let intVal:   unknown;
-  if (stream === "responseTime") { assetVal = asset.monitorResponseTimeSource; intVal = intCfg.monitorResponseTimeSource; }
-  else if (stream === "telemetry") { assetVal = asset.monitorTelemetrySource; intVal = intCfg.monitorTelemetrySource; }
-  else { assetVal = asset.monitorInterfacesSource; intVal = intCfg.monitorInterfacesSource; }
+  if      (stream === "responseTime") { assetVal = asset.monitorResponseTimeSource; intVal = intCfg.monitorResponseTimeSource; }
+  else if (stream === "telemetry")    { assetVal = asset.monitorTelemetrySource;    intVal = intCfg.monitorTelemetrySource; }
+  else if (stream === "interfaces")   { assetVal = asset.monitorInterfacesSource;   intVal = intCfg.monitorInterfacesSource; }
+  else                                { assetVal = asset.monitorLldpSource;         intVal = intCfg.monitorLldpSource; }
   return normalizeTransport(assetVal) ?? normalizeTransport(intVal) ?? "rest";
 }
 
@@ -878,7 +880,9 @@ export async function collectFastFiltered(assetId: string): Promise<CollectionRe
       const transport = resolveMonitorTransport(asset, asset.discoveredByIntegration, "interfaces");
       if (transport === "snmp") {
         const credConfig = await loadSnmpCredentialConfigForFortinetAsset(asset, asset.discoveredByIntegration);
-        full = await collectSystemInfoSnmp(targetIp, credConfig);
+        // Fast cadence skips LLDP — neighbors don't change between system-info
+        // passes often enough to be worth re-walking the table once a minute.
+        full = await collectSystemInfoSnmp(targetIp, credConfig, { includeLldp: false });
         applyFortiInterfaceFilter(full.interfaces, asset.discoveredByIntegration as any);
         // IPsec always on REST. Only fetch when a tunnel is actually pinned —
         // /api/v2/monitor/vpn/ipsec is slow and we don't want to hit it on
@@ -890,12 +894,15 @@ export async function collectFastFiltered(assetId: string): Promise<CollectionRe
       } else {
         // Only ask FortiOS for IPsec when we actually have a pinned tunnel —
         // /api/v2/monitor/vpn/ipsec is the slow endpoint we're trying to avoid
-        // on the fast cadence.
-        full = await collectSystemInfoFortinet(targetIp, asset.discoveredByIntegration as any, { includeIpsec: wantedTunnels.length > 0 });
+        // on the fast cadence. Fast cadence skips LLDP for the same reason.
+        full = await collectSystemInfoFortinet(targetIp, asset.discoveredByIntegration as any, {
+          includeIpsec: wantedTunnels.length > 0,
+          includeLldp:  false,
+        });
       }
     } else if (type === "snmp") {
       if (!asset.monitorCredential) return { supported: true, error: "No SNMP credential selected" };
-      full = await collectSystemInfoSnmp(targetIp, asset.monitorCredential.config as Record<string, unknown>);
+      full = await collectSystemInfoSnmp(targetIp, asset.monitorCredential.config as Record<string, unknown>, { includeLldp: false });
     } else {
       return { supported: false };
     }
@@ -988,19 +995,46 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
   try {
     if (type === "fortimanager" || type === "fortigate") {
       if (!asset.discoveredByIntegration) return { supported: true, error: "Originating integration not found" };
-      const transport = resolveMonitorTransport(asset, asset.discoveredByIntegration, "interfaces");
-      if (transport === "snmp") {
-        const credConfig = await loadSnmpCredentialConfigForFortinetAsset(asset, asset.discoveredByIntegration);
-        const data = await collectSystemInfoSnmp(targetIp, credConfig);
-        // Apply the FMG/FortiGate interfaceInclude/Exclude filter so the System
-        // tab still mirrors discovery's scope when interfaces ride SNMP.
-        applyFortiInterfaceFilter(data.interfaces, asset.discoveredByIntegration as any);
+      const integration = asset.discoveredByIntegration;
+      const interfacesTransport = resolveMonitorTransport(asset, integration, "interfaces");
+      const lldpTransport       = resolveMonitorTransport(asset, integration, "lldp");
+      // LLDP can be toggled independently of interfaces. Pre-load the SNMP
+      // credential lazily — only if either stream actually needs it.
+      let snmpCfg: Record<string, unknown> | null = null;
+      const needSnmp = interfacesTransport === "snmp" || lldpTransport === "snmp";
+      if (needSnmp) snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(asset, integration);
+
+      let data: SystemInfoSample;
+      if (interfacesTransport === "snmp") {
+        // SNMP-path interfaces+storage. Fetch LLDP via the same session iff
+        // the LLDP toggle agrees; otherwise leave it out and overlay below.
+        data = await collectSystemInfoSnmp(targetIp, snmpCfg!, { includeLldp: lldpTransport === "snmp" });
+        applyFortiInterfaceFilter(data.interfaces, integration as any);
         // IPsec always on REST regardless of toggle — SNMP has no equivalent.
-        const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, asset.discoveredByIntegration as any);
+        const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any);
         if (ipsec !== undefined) data.ipsecTunnels = ipsec;
-        return { supported: true, data };
+      } else {
+        // FortiOS-path. Skip the FortiOS LLDP call when LLDP is on SNMP.
+        data = await collectSystemInfoFortinet(targetIp, integration as any, {
+          includeIpsec: true,
+          includeLldp:  lldpTransport === "rest",
+        });
       }
-      const data = await collectSystemInfoFortinet(targetIp, asset.discoveredByIntegration as any, { includeIpsec: true });
+      // Cross-transport LLDP overlay: when the chosen LLDP source differs
+      // from the interfaces source we already used above.
+      if (lldpTransport === "snmp" && interfacesTransport === "rest") {
+        const neighbors = await collectLldpOnlySnmp(targetIp, snmpCfg!).catch(() => undefined);
+        if (neighbors !== undefined) {
+          data.lldpNeighbors = neighbors;
+          data.lldpSource    = "snmp";
+        }
+      } else if (lldpTransport === "rest" && interfacesTransport === "snmp") {
+        const neighbors = await collectLldpOnlyFortinet(targetIp, integration as any).catch(() => undefined);
+        if (neighbors !== undefined) {
+          data.lldpNeighbors = neighbors;
+          data.lldpSource    = "fortios";
+        }
+      }
       return { supported: true, data };
     }
     if (type === "snmp") {
@@ -1134,7 +1168,7 @@ function clampPct(n: number): number {
 async function collectSystemInfoFortinet(
   host: string,
   integration: { type: string; config: Record<string, unknown> },
-  opts: { includeIpsec?: boolean } = {},
+  opts: { includeIpsec?: boolean; includeLldp?: boolean } = {},
 ): Promise<SystemInfoSample> {
   const fg = buildFortinetConfig(host, integration);
   if ("error" in fg) throw new Error(fg.error);
@@ -1285,9 +1319,28 @@ async function collectSystemInfoFortinet(
   // empty array — we still treat that as "queried successfully" so the
   // persistence layer wipes any stale neighbors. A genuine failure (404,
   // network error, no permissions) leaves `lldpNeighbors` undefined so the
-  // persistence layer leaves existing rows alone.
-  const lldpNeighbors = await collectLldpNeighborsFortinet(fg).catch(() => undefined);
-  return { interfaces, storage: [], ipsecTunnels, lldpNeighbors, lldpSource: "fortios" };
+  // persistence layer leaves existing rows alone. `includeLldp` lets the
+  // caller skip this when the operator routed LLDP to SNMP — the caller
+  // then overlays the SNMP result onto the returned sample.
+  const lldpNeighbors = opts.includeLldp !== false
+    ? await collectLldpNeighborsFortinet(fg).catch(() => undefined)
+    : undefined;
+  return { interfaces, storage: [], ipsecTunnels, lldpNeighbors, lldpSource: opts.includeLldp !== false ? "fortios" : undefined };
+}
+
+/**
+ * Standalone FortiOS LLDP query for the cross-transport case (interfaces ride
+ * SNMP but LLDP rides REST). Same wire format as collectLldpNeighborsFortinet
+ * but builds its own FortiGateConfig from the integration so the caller
+ * doesn't have to.
+ */
+export async function collectLldpOnlyFortinet(
+  host: string,
+  integration: { type: string; config: Record<string, unknown> },
+): Promise<LldpNeighborSample[] | undefined> {
+  const fg = buildFortinetConfig(host, integration);
+  if ("error" in fg) throw new Error(fg.error);
+  return await collectLldpNeighborsFortinet(fg).catch(() => undefined);
 }
 
 /**
@@ -2061,7 +2114,11 @@ function scaleEntitySensor(raw: number, scale: number | null, precision: number 
   return raw * Math.pow(10, sExp) * Math.pow(10, pExp);
 }
 
-async function collectSystemInfoSnmp(host: string, config: Record<string, unknown>): Promise<SystemInfoSample> {
+async function collectSystemInfoSnmp(
+  host: string,
+  config: Record<string, unknown>,
+  opts: { includeLldp?: boolean } = {},
+): Promise<SystemInfoSample> {
   return await withSnmpSession(host, config, async (session) => {
     // Storage: walk hrStorage and pick rows tagged as fixed/removable disk.
     const storage: StorageSample[] = [];
@@ -2161,13 +2218,36 @@ async function collectSystemInfoSnmp(host: string, config: Record<string, unknow
     // walks (we treat that as "unsupported" so we don't wipe stored rows on
     // every scrape). A device with LLDP enabled but zero current neighbors
     // returns lldpLocPortTable rows but an empty lldpRemTable, and we
-    // correctly persist that as "queried, no neighbors" → wipe.
+    // correctly persist that as "queried, no neighbors" → wipe. `includeLldp`
+    // false lets the caller skip this when the operator routed LLDP to REST.
     let lldpNeighbors: LldpNeighborSample[] | undefined;
-    try {
-      lldpNeighbors = await collectLldpNeighborsSnmp(session);
-    } catch { /* leave undefined; persist layer leaves stored rows alone */ }
+    if (opts.includeLldp !== false) {
+      try {
+        lldpNeighbors = await collectLldpNeighborsSnmp(session);
+      } catch { /* leave undefined; persist layer leaves stored rows alone */ }
+    }
 
-    return { interfaces, storage, lldpNeighbors, lldpSource: "snmp" };
+    return {
+      interfaces,
+      storage,
+      lldpNeighbors,
+      lldpSource: opts.includeLldp !== false ? "snmp" : undefined,
+    };
+  });
+}
+
+/**
+ * Standalone LLDP-MIB walk for the cross-transport case. Used when the caller
+ * has already pulled interfaces+storage via FortiOS REST but the operator
+ * routed LLDP to SNMP. Opens its own SNMP session — cheap enough; LLDP walks
+ * are normally ~6 columns and finish in a few hundred ms.
+ */
+export async function collectLldpOnlySnmp(
+  host: string,
+  config: Record<string, unknown>,
+): Promise<LldpNeighborSample[] | undefined> {
+  return await withSnmpSession(host, config, async (session) => {
+    return await collectLldpNeighborsSnmp(session);
   });
 }
 
