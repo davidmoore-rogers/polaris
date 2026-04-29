@@ -1681,7 +1681,13 @@ function _renderInterfacesTable(container, si, asset) {
           escapeHtml(tn.tunnelName) +
         '</a>' + ipsecBadge +
       "</td>";
-    var pillKind = tn.status === "up" ? "active" : tn.status === "down" ? "decommissioned" : "maintenance";
+    // "dynamic" = FortiOS phase1-interface type "dynamic" (dial-up server
+    // template). Render as a neutral storage-style pill — not red, since the
+    // tunnel is working as configured even when no client is connected.
+    var pillKind = tn.status === "up" ? "active"
+                 : tn.status === "down" ? "decommissioned"
+                 : tn.status === "dynamic" ? "storage"
+                 : "maintenance";
     var statusPill = '<span class="status-pill status-pill-' + pillKind + '">' + escapeHtml(tn.status) + "</span>";
     var rowAttr = opts.collapseGroupName
       ? ' class="iface-child" data-parent="' + escapeHtml(opts.collapseGroupName) + '"'
@@ -3947,10 +3953,11 @@ function _deriveIpsecThroughput(samples) {
 
 function _ipsecStatsLabel(samples, derived) {
   if (samples.length === 0) return "No samples in this range yet.";
-  var up = 0, down = 0, partial = 0;
+  var up = 0, down = 0, partial = 0, dynamic = 0;
   samples.forEach(function (s) {
     if (s.status === "up") up++;
     else if (s.status === "down") down++;
+    else if (s.status === "dynamic") dynamic++;
     else partial++;
   });
   var inMax = 0, outMax = 0, inSum = 0, outSum = 0, inN = 0, outN = 0;
@@ -3958,7 +3965,19 @@ function _ipsecStatsLabel(samples, derived) {
     if (typeof d.inBps  === "number") { inSum  += d.inBps;  inN++;  if (d.inBps  > inMax)  inMax  = d.inBps; }
     if (typeof d.outBps === "number") { outSum += d.outBps; outN++; if (d.outBps > outMax) outMax = d.outBps; }
   });
-  return samples.length + " samples · " + up + " up / " + partial + " partial / " + down + " down · " +
+  // Dial-up server template — phase-2 children appear as separate `parent`-
+  // bearing tunnels that we filter out, so the rollup is meaningless. Skip
+  // up/partial/down counts and label the throughput line only.
+  if (dynamic > 0 && up === 0 && down === 0 && partial === 0) {
+    return samples.length + " samples · dial-up server (dynamic) · " +
+      "in avg " + _fmtBitsPerSec(inN ? inSum / inN : 0) +
+      " · in peak " + _fmtBitsPerSec(inMax) +
+      " · out avg " + _fmtBitsPerSec(outN ? outSum / outN : 0) +
+      " · out peak " + _fmtBitsPerSec(outMax);
+  }
+  var counts = up + " up / " + partial + " partial / " + down + " down";
+  if (dynamic > 0) counts += " / " + dynamic + " dynamic";
+  return samples.length + " samples · " + counts + " · " +
     "in avg " + _fmtBitsPerSec(inN ? inSum / inN : 0) +
     " · in peak " + _fmtBitsPerSec(inMax) +
     " · out avg " + _fmtBitsPerSec(outN ? outSum / outN : 0) +
@@ -3992,6 +4011,7 @@ function _renderIpsecStatusChart(container, samples, opts) {
   function colorFor(s) {
     if (s === "up") return "#2a9d8f";
     if (s === "down") return "#d32f2f";
+    if (s === "dynamic") return "#7b8794"; // dial-up server template — neutral gray
     return "#f4a261";
   }
   function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
@@ -4017,11 +4037,13 @@ function _renderIpsecStatusChart(container, samples, opts) {
       '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
       '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
   }
+  var hasDynamic = samples.some(function (s) { return s.status === "dynamic"; });
   var legend =
     '<g font-size="10" fill="currentColor">' +
       '<rect x="' + padL + '" y="2" width="10" height="6" fill="#2a9d8f"/><text x="' + (padL + 14) + '" y="8">up</text>' +
       '<rect x="' + (padL + 50) + '" y="2" width="10" height="6" fill="#f4a261"/><text x="' + (padL + 64) + '" y="8">partial</text>' +
       '<rect x="' + (padL + 110) + '" y="2" width="10" height="6" fill="#d32f2f"/><text x="' + (padL + 124) + '" y="8">down</text>' +
+      (hasDynamic ? '<rect x="' + (padL + 160) + '" y="2" width="10" height="6" fill="#7b8794"/><text x="' + (padL + 174) + '" y="8">dynamic</text>' : '') +
     '</g>';
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +

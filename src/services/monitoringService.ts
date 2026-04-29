@@ -731,13 +731,17 @@ export interface TemperatureSample {
  * One row per FortiOS phase-1 IPsec tunnel. `status` rolls phase-2 selectors up
  * to "up" / "down" / "partial". Bytes are summed across every phase-2 selector
  * under this phase-1 and are cumulative — FortiOS resets when phase-1 renegotiates.
+ *
+ * Dial-up server templates (CMDB `type: "dynamic"`) report status `"dynamic"`
+ * regardless of phase-2 state — these are templates that accept connections
+ * from dynamic peers, so a "down" rollup at scrape time is misleading.
  */
 export interface IpsecTunnelSample {
   tunnelName:      string;
   /** Parent interface from `config vpn ipsec phase1-interface`; null when the CMDB lookup fails or the phase-1 isn't found. */
   parentInterface: string | null;
   remoteGateway:   string | null;
-  status:          "up" | "down" | "partial";
+  status:          "up" | "down" | "partial" | "dynamic";
   incomingBytes:   number | null;
   outgoingBytes:   number | null;
   proxyIdCount:    number | null;
@@ -1262,13 +1266,15 @@ async function collectSystemInfoFortinet(
  * template tunnel; the template itself has no `parent`.
  */
 async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTunnelSample[]> {
-  // Build a tunnel→interface map up front from the CMDB so each sample can
-  // carry the parent interface (the FortiOS CLI `set interface` value under
-  // `config vpn ipsec phase1-interface`). The System tab uses this to nest
-  // tunnel rows under their parent in the Interfaces table. Best-effort:
-  // tokens without cmdb scope just leave parentInterface null on every row,
-  // which renders as an "Unbound IPsec Tunnels" group at the bottom.
-  const phase1Map = new Map<string, string>();
+  // Build a tunnel→{interface,type} map up front from the CMDB so each sample
+  // can carry the parent interface (the FortiOS CLI `set interface` value
+  // under `config vpn ipsec phase1-interface`) and the phase-1 type. The
+  // System tab uses parentInterface to nest tunnel rows under their parent in
+  // the Interfaces table; type lets dial-up server templates report status
+  // "dynamic" instead of rolling phase-2 selectors up to "down" when no
+  // client happens to be connected at scrape time. Best-effort: tokens
+  // without cmdb scope just leave both null on every row.
+  const phase1Map = new Map<string, { iface: string | null; type: string | null }>();
   try {
     const cmdb = await fgRequest<any>(fg, "GET", "/api/v2/cmdb/vpn.ipsec/phase1-interface", { query: { vdom: "root" } });
     const cmdbArr = Array.isArray(cmdb?.results) ? cmdb.results : (Array.isArray(cmdb) ? cmdb : []);
@@ -1276,7 +1282,8 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTu
       if (!p || typeof p !== "object") continue;
       const name  = typeof (p as any).name      === "string" ? (p as any).name.trim()      : "";
       const iface = typeof (p as any).interface === "string" ? (p as any).interface.trim() : "";
-      if (name && iface) phase1Map.set(name, iface);
+      const type  = typeof (p as any).type      === "string" ? (p as any).type.trim().toLowerCase() : "";
+      if (name) phase1Map.set(name, { iface: iface || null, type: type || null });
     }
   } catch { /* tokens without cmdb scope — fall through with an empty map */ }
 
@@ -1304,8 +1311,15 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTu
       if (ib != null) { inBytes  += ib; anyBytes = true; }
       if (ob != null) { outBytes += ob; anyBytes = true; }
     }
-    let status: "up" | "down" | "partial";
-    if (proxyArr.length === 0) {
+    const phase1 = phase1Map.get(name) ?? null;
+    let status: "up" | "down" | "partial" | "dynamic";
+    if (phase1?.type === "dynamic") {
+      // Dial-up server template — accepts connections from dynamic peers, so
+      // "up/down" against a single rollup is misleading. Phase-2 children of
+      // active sessions appear as separate entries with `parent` set and are
+      // already filtered out above.
+      status = "dynamic";
+    } else if (proxyArr.length === 0) {
       // No phase-2 selectors reported — fall back to the phase-1 connect_count
       // (>0 = up). Some FortiOS releases omit `proxyid` entirely on dial-up
       // tunnels with no active children.
@@ -1317,7 +1331,7 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTu
     const rgwy = (t as any).rgwy ?? (t as any).tun_id ?? null;
     out.push({
       tunnelName:      name,
-      parentInterface: phase1Map.get(name) ?? null,
+      parentInterface: phase1?.iface ?? null,
       remoteGateway:   typeof rgwy === "string" && rgwy ? rgwy : null,
       status,
       incomingBytes:   anyBytes ? inBytes  : null,
