@@ -375,7 +375,7 @@ function _reserveActionHTML(a) {
     var title = canUnreserve
       ? 'Release this reservation'
       : 'Reserved by ' + (ctx.reservation.createdBy || 'system') + ' — only they (or a network admin) can release it';
-    return '<button class="btn btn-sm btn-secondary" onclick="unreserveAssetIp(\'' + a.id + '\')" title="' + escapeHtml(title) + '"' + (canUnreserve ? '' : ' disabled') + '>Unreserve</button>';
+    return '<button class="btn btn-sm btn-danger" onclick="unreserveAssetIp(\'' + a.id + '\')" title="' + escapeHtml(title) + '"' + (canUnreserve ? '' : ' disabled') + '>Unreserve</button>';
   }
   var reserveTitle = ctx.reservation && ctx.reservation.sourceType === 'dhcp_lease'
     ? 'Promote DHCP lease to a manual reservation in ' + (ctx.subnetCidr || '')
