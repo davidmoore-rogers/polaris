@@ -1018,9 +1018,16 @@ export async function discoverDhcpSubnets(
       }
       log("discover.leases", "info", `${deviceName}: Raw DHCP entries from monitor: ${flatLeases.length}`, deviceName);
 
-      if (monitorStatus === 0 && flatLeases.length > 0) {
-        localDhcpEntries.length = 0; // discard config-based fallback; monitor data wins
-      }
+      // Merge monitor data INTO the CMDB-derived list rather than wiping it.
+      // /api/v2/monitor/system/dhcp only returns reservations whose target
+      // client is currently online and holding a lease — a static reservation
+      // for a device that's powered off doesn't appear in the monitor results.
+      // Wiping CMDB and trusting only monitor would silently drop those
+      // offline-target reservations from discovery. Now: CMDB is the base set,
+      // and the monitor pass below adds anything not already covered (live
+      // leases for IPs CMDB doesn't have a static reservation for). The dedup
+      // by-ip below means CMDB wins on overlap, which is the right call for
+      // static reservations — CMDB is the configured truth.
 
       let deviceEntryCount = 0;
       for (const lease of flatLeases) {

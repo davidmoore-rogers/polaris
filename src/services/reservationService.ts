@@ -241,6 +241,13 @@ export async function createReservation(input: CreateReservationInput) {
     const stamped = await prisma.reservation.update({
       where: { id: reservation.id },
       data: {
+        // Once the entry is on the device, it really is a DHCP reservation —
+        // flip the source type so the UI badges it accordingly AND so the
+        // next discovery run sees a matching dhcp_reservation row (not a
+        // manual one) and doesn't raise a spurious conflict against our
+        // own echo. pushedToId remains the audit trail of "Polaris pushed
+        // this," which is the source-of-truth answer to the origin question.
+        sourceType: "dhcp_reservation",
         pushedToId: subnet.discoveredBy,
         pushedScopeId: pushed.scopeId,
         pushedEntryId: pushed.entryId,
