@@ -98,14 +98,26 @@ router.use(requireNetworkAdmin);
 
 // ─── Zod Schemas ─────────────────────────────────────────────────────────────
 
-// Per-integration switch/AP monitor stamping. When enabled, discovery sets
-// each newly-found FortiSwitch/FortiAP's monitorType to "snmp" with the
-// chosen credential — but only when the asset has no operator override.
-// Disabled or no credential → discovery leaves monitor fields alone.
+// Per-integration switch/AP monitor stamping. When `enabled` is true,
+// discovery sets each newly-found FortiSwitch/FortiAP's monitorType to
+// "snmp" with the chosen credential — but only when the asset has no
+// operator override. `addAsMonitored` controls whether `monitored=true`
+// is also stamped on those new assets; without it they're created with
+// monitorType configured but `monitored=false`, so operators can opt in
+// asset-by-asset later. `addAsMonitored` requires `enabled` to be true
+// (a switch/AP can't be monitored without a monitorType).
 const FortinetClassMonitorSchema = z.object({
   enabled:          z.boolean().optional().default(false),
   snmpCredentialId: z.string().uuid().nullable().optional(),
-}).optional().default({ enabled: false, snmpCredentialId: null });
+  addAsMonitored:   z.boolean().optional().default(false),
+}).optional().default({ enabled: false, snmpCredentialId: null, addAsMonitored: false });
+
+// FortiGate-class equivalent. FortiGates always get a monitorType stamped
+// at discovery (the integration's native type), so this block only carries
+// the `addAsMonitored` flag — no credential/enabled toggle needed.
+const FortiGateClassMonitorSchema = z.object({
+  addAsMonitored: z.boolean().optional().default(false),
+}).optional().default({ addAsMonitored: false });
 
 const FortiManagerConfigSchema = z.object({
   host:      z.string().optional().default(""),
@@ -132,8 +144,11 @@ const FortiManagerConfigSchema = z.object({
   // to this integration uses the named SNMP credential instead of the
   // FortiOS REST API. SNMP sysUpTime is dramatically faster than the API.
   monitorCredentialId: z.string().uuid().nullable().optional(),
-  // Per-class auto-monitor settings for managed FortiSwitches / FortiAPs
-  // discovered through this integration. See FortinetClassMonitorSchema.
+  // Per-class auto-monitor settings for assets discovered through this
+  // integration. fortigateMonitor only carries `addAsMonitored` since
+  // FortiGates always get a monitorType stamped at discovery; the switch /
+  // AP blocks also carry the SNMP-direct-polling toggle + credential.
+  fortigateMonitor:   FortiGateClassMonitorSchema,
   fortiswitchMonitor: FortinetClassMonitorSchema,
   fortiapMonitor:     FortinetClassMonitorSchema,
 });
@@ -151,6 +166,7 @@ const FortiGateConfigSchema = z.object({
   inventoryExcludeInterfaces: z.array(z.string()).optional().default([]),
   inventoryIncludeInterfaces: z.array(z.string()).optional().default([]),
   monitorCredentialId: z.string().uuid().nullable().optional(),
+  fortigateMonitor:   FortiGateClassMonitorSchema,
   fortiswitchMonitor: FortinetClassMonitorSchema,
   fortiapMonitor:     FortinetClassMonitorSchema,
 });
@@ -318,9 +334,8 @@ router.post("/", async (req, res, next) => {
         if (cred.type !== "snmp") throw new AppError(400, "Monitor credential override must be SNMP");
       }
       // Validate the per-class FortiSwitch / FortiAP monitor credentials.
-      // These are SNMP-only — discovery stamps monitorType="snmp" on each
-      // discovered switch/AP, so any other type would land assets in a
-      // permanently-down state.
+      // Direct-polling SNMP requires a credential; ICMP fallback (when
+      // addAsMonitored=true and direct polling is off) doesn't.
       for (const [field, label] of [
         ["fortiswitchMonitor", "FortiSwitch monitor credential"],
         ["fortiapMonitor",     "FortiAP monitor credential"],
@@ -1369,21 +1384,34 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   let ouiOverridden = 0;
   const now = new Date().toISOString();
 
-  // Per-class auto-monitor settings (FortiSwitch/FortiAP). Read from the
-  // integration's config so the discovery sync knows whether to stamp
-  // monitorType/monitorCredentialId on each freshly-discovered switch/AP.
-  // FMG and standalone FortiGate share the same config keys; other
-  // integration types simply have no fortiswitchMonitor/fortiapMonitor
-  // entry, in which case the helpers below resolve to disabled.
-  let switchMonitorCfg: { enabled: boolean; snmpCredentialId: string | null } = { enabled: false, snmpCredentialId: null };
-  let apMonitorCfg:     { enabled: boolean; snmpCredentialId: string | null } = { enabled: false, snmpCredentialId: null };
+  // Per-class auto-monitor settings (FortiGate / FortiSwitch / FortiAP).
+  // Read from the integration's config so the discovery sync knows whether
+  // to stamp monitorType/monitorCredentialId/monitored on each freshly-
+  // discovered asset. FMG and standalone FortiGate share the same config
+  // keys; other integration types simply have no fortigateMonitor /
+  // fortiswitchMonitor / fortiapMonitor entry, in which case the helpers
+  // below resolve to "do nothing".
+  type ClassMonCfg = { enabled: boolean; snmpCredentialId: string | null; addAsMonitored: boolean };
+  let switchMonitorCfg: ClassMonCfg = { enabled: false, snmpCredentialId: null, addAsMonitored: false };
+  let apMonitorCfg:     ClassMonCfg = { enabled: false, snmpCredentialId: null, addAsMonitored: false };
+  let fortigateAddAsMonitored = false;
   if (integrationType === "fortimanager" || integrationType === "fortigate") {
     const integ = await prisma.integration.findUnique({ where: { id: integrationId }, select: { config: true } });
     const cfg = (integ?.config as Record<string, unknown>) || {};
     const sw = (cfg.fortiswitchMonitor as Record<string, unknown> | undefined) || {};
     const ap = (cfg.fortiapMonitor     as Record<string, unknown> | undefined) || {};
-    switchMonitorCfg = { enabled: sw.enabled === true, snmpCredentialId: typeof sw.snmpCredentialId === "string" ? sw.snmpCredentialId : null };
-    apMonitorCfg     = { enabled: ap.enabled === true, snmpCredentialId: typeof ap.snmpCredentialId === "string" ? ap.snmpCredentialId : null };
+    const fg = (cfg.fortigateMonitor   as Record<string, unknown> | undefined) || {};
+    switchMonitorCfg = {
+      enabled: sw.enabled === true,
+      snmpCredentialId: typeof sw.snmpCredentialId === "string" ? sw.snmpCredentialId : null,
+      addAsMonitored: sw.addAsMonitored === true,
+    };
+    apMonitorCfg = {
+      enabled: ap.enabled === true,
+      snmpCredentialId: typeof ap.snmpCredentialId === "string" ? ap.snmpCredentialId : null,
+      addAsMonitored: ap.addAsMonitored === true,
+    };
+    fortigateAddAsMonitored = fg.addAsMonitored === true;
   }
 
   // Sighting sets for the FortiSwitch / FortiAP decommission sweep below.
@@ -1721,6 +1749,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // override the type later from the asset's Monitoring tab.
           discoveredByIntegrationId: integrationId,
           monitorType: integrationType === "fortigate" ? "fortigate" : "fortimanager",
+          // Auto-Monitored is opt-in via the integration's "Add Discovered
+          // FortiGates as Monitored" checkbox. Existing FortiGates are not
+          // touched — only fresh creates get the flag flipped.
+          ...(fortigateAddAsMonitored ? { monitored: true } : {}),
           ...(Number.isFinite(device.latitude) && Number.isFinite(device.longitude)
             ? { latitude: device.latitude, longitude: device.longitude }
             : {}),
@@ -1740,36 +1772,52 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // Phase 3b — Create/update FortiSwitch and FortiAP assets + reservations
   // ══════════════════════════════════════════════════════════════════════════════
 
-  // Auto-stamping policy for managed FortiSwitch / FortiAP:
-  //   - When the integration's per-class monitor config is enabled AND a
-  //     credential is set, freshly-created assets are stamped with
-  //     monitored=true / monitorType="snmp" / monitorCredentialId=<id>.
-  //   - Existing assets are *only* re-stamped when the operator hasn't set
-  //     a custom monitorType. Detected by: monitorType is null, or it's
-  //     "snmp" against this same integration's credentialId. Anything else
-  //     (icmp, winrm, ssh, fortinet defaults, an SNMP cred we didn't pick)
-  //     counts as an operator override and is preserved.
+  // Auto-stamping policy for managed FortiSwitch / FortiAP. Two independent
+  // toggles drive four cases:
+  //
+  //   enabled=false, addAsMonitored=false  → no-op (legacy default)
+  //   enabled=false, addAsMonitored=true   → stamp monitored=true,
+  //                                          monitorType="icmp" (fallback
+  //                                          when no SNMP credential is yet
+  //                                          configured for this class)
+  //   enabled=true,  addAsMonitored=false  → stamp monitorType="snmp" +
+  //                                          credential, leave monitored
+  //                                          as-is so operators opt-in
+  //                                          per-asset later
+  //   enabled=true,  addAsMonitored=true   → stamp everything (the original
+  //                                          behaviour)
+  //
+  // Operator override detection compares the existing asset's monitorType +
+  // credential against either of the integration's two possible defaults
+  // (snmp+integration-credential, or icmp+null). Anything else (winrm, ssh,
+  // a different SNMP credential, the fortimanager/fortigate defaults) means
+  // the operator chose something custom and we leave it alone.
   function buildClassMonitorStamp(
-    cfg: { enabled: boolean; snmpCredentialId: string | null },
+    cfg: ClassMonCfg,
     existing?: { monitorType?: string | null; monitorCredentialId?: string | null; monitored?: boolean | null },
   ): Record<string, unknown> {
-    if (!cfg.enabled || !cfg.snmpCredentialId) {
-      // Discovery is opt-in for switches/APs — don't *unset* anything when
-      // disabled, just leave the existing monitor config alone.
-      return {};
+    if (!cfg.enabled && !cfg.addAsMonitored) return {};
+
+    const wantSnmp = cfg.enabled && !!cfg.snmpCredentialId;
+    const stampedType = wantSnmp ? "snmp" : "icmp";
+    const stampedCred = wantSnmp ? cfg.snmpCredentialId : null;
+
+    if (existing && existing.monitorType != null) {
+      const matchesSnmpDefault = existing.monitorType === "snmp" && existing.monitorCredentialId === cfg.snmpCredentialId;
+      const matchesIcmpDefault = existing.monitorType === "icmp" && existing.monitorCredentialId == null;
+      if (!matchesSnmpDefault && !matchesIcmpDefault) return {};
     }
-    if (existing) {
-      const isOperatorOverride =
-        existing.monitorType != null &&
-        !(existing.monitorType === "snmp" && existing.monitorCredentialId === cfg.snmpCredentialId);
-      if (isOperatorOverride) return {};
-    }
-    return {
+
+    const stamp: Record<string, unknown> = {
       discoveredByIntegrationId: integrationId,
-      monitored: true,
-      monitorType: "snmp",
-      monitorCredentialId: cfg.snmpCredentialId,
+      monitorType: stampedType,
+      monitorCredentialId: stampedCred,
     };
+    // Only flip `monitored` when the operator opted into auto-Monitored.
+    // Otherwise leave the existing value alone (newly-created assets fall
+    // back to the Prisma default of false).
+    if (cfg.addAsMonitored) stamp.monitored = true;
+    return stamp;
   }
 
   for (const sw of result.fortiSwitches || []) {

@@ -295,9 +295,10 @@ function _classTimerFieldsHTML(idPrefix, s, defaults) {
 }
 
 // Picker block for the FortiSwitch / FortiAP subtab — "enable direct polling"
-// checkbox + SNMP credential dropdown. id prefix collides if you instantiate
-// twice on the same page; we use distinct prefixes per class.
-function _classDirectPollHTML(idPrefix, kindLabel, snmpCredentials, currentEnabled, currentCredId) {
+// checkbox + SNMP credential dropdown + "Add as Monitored" checkbox. id
+// prefix collides if you instantiate twice on the same page; we use distinct
+// prefixes per class.
+function _classDirectPollHTML(idPrefix, kindLabel, snmpCredentials, currentEnabled, currentCredId, currentAddAsMonitored) {
   var snmp = (snmpCredentials || []).filter(function (c) { return c.type === "snmp"; });
   var options = '<option value="">— select credential —</option>' +
     snmp.map(function (c) {
@@ -305,7 +306,7 @@ function _classDirectPollHTML(idPrefix, kindLabel, snmpCredentials, currentEnabl
       return '<option value="' + escapeHtml(c.id) + '"' + sel + '>' + escapeHtml(c.name) + '</option>';
     }).join("");
   var emptyHint = snmp.length === 0
-    ? '<p class="hint" style="color:var(--color-warning)">No SNMP credentials defined yet — add one under Server Settings &gt; Credentials before enabling direct polling.</p>'
+    ? '<p class="hint" style="color:var(--color-warning)">No SNMP credentials defined yet — add one under Server Settings &gt; Credentials, or leave direct polling off and Polaris will fall back to ICMP when "Add as Monitored" is checked below.</p>'
     : '<p class="hint">Discovery stamps each newly-found ' + escapeHtml(kindLabel) + ' with this credential. Operator overrides on existing assets are preserved.</p>';
   return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Direct polling</p>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
@@ -320,6 +321,29 @@ function _classDirectPollHTML(idPrefix, kindLabel, snmpCredentials, currentEnabl
         emptyHint +
       '</div>' +
     '</div>' +
+    // "Add as Monitored" checkbox — independent of direct polling. When on,
+    // each newly-discovered switch/AP is created with monitored=true and
+    // either monitorType="snmp" (when direct polling is configured) or
+    // monitorType="icmp" (fallback when no SNMP credential is wired up yet).
+    // Existing assets are not touched — operator stays in charge of those.
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Auto-monitoring</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
+      '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (currentAddAsMonitored ? "checked" : "") + ' style="width:auto">' +
+      '<label for="' + idPrefix + 'addAsMonitored" style="margin:0;font-weight:500">Add discovered ' + escapeHtml(kindLabel) + 's to Assets as Monitored</label>' +
+    '</div>' +
+    '<p class="hint" style="margin-bottom:1rem">When checked, newly-discovered ' + escapeHtml(kindLabel) + 's land in Assets with monitoring enabled. Without an SNMP credential above, monitorType falls back to <code>icmp</code>. Existing assets are unchanged — flip them individually from the asset modal.</p>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
+}
+
+// FortiGate subtab variant — only "Add as Monitored" since FortiGates always
+// get a monitorType stamped at discovery (the integration's native type).
+function _fortigateAddMonitoredHTML(idPrefix, currentAddAsMonitored) {
+  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Auto-monitoring</p>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
+      '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (currentAddAsMonitored ? "checked" : "") + ' style="width:auto">' +
+      '<label for="' + idPrefix + 'addAsMonitored" style="margin:0;font-weight:500">Add discovered FortiGates to Assets as Monitored</label>' +
+    '</div>' +
+    '<p class="hint" style="margin-bottom:1rem">When checked, newly-discovered FortiGates land in Assets with monitoring enabled (the integration\'s API token already provides the probe path). Existing FortiGates are unchanged — flip them individually from the asset modal.</p>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
 }
 
@@ -346,10 +370,12 @@ function monitorSettingsFormHTML(s, opts) {
   };
   var fsClass = s.fortiswitch || {};
   var faClass = s.fortiap     || {};
-  var fwSwCfg = opts.fortiswitchMonitor || { enabled: false, snmpCredentialId: null };
-  var fwApCfg = opts.fortiapMonitor     || { enabled: false, snmpCredentialId: null };
+  var fwSwCfg = opts.fortiswitchMonitor || { enabled: false, snmpCredentialId: null, addAsMonitored: false };
+  var fwApCfg = opts.fortiapMonitor     || { enabled: false, snmpCredentialId: null, addAsMonitored: false };
+  var fwFgCfg = opts.fortigateMonitor   || { addAsMonitored: false };
 
   var fortigatePanel =
+    _fortigateAddMonitoredHTML("f-mon-fortigate-", fwFgCfg.addAsMonitored === true) +
     integrationMonitorOverrideHTML(opts.snmpCredentials, opts.monitorCredentialId) +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">' +
       'These timers apply <strong style="color:var(--color-text-primary)">globally</strong> to every monitored asset that isn\'t a Fortinet switch or AP — Cisco SNMP, Windows WinRM, Linux SSH, ICMP, etc. Switches and APs use the values on their own subtabs.' +
@@ -357,14 +383,14 @@ function monitorSettingsFormHTML(s, opts) {
     _classTimerFieldsHTML("f-mon-", s, {});
 
   var switchPanel =
-    _classDirectPollHTML("f-mon-fortiswitch-", "FortiSwitch", opts.snmpCredentials, fwSwCfg.enabled === true, fwSwCfg.snmpCredentialId || null) +
+    _classDirectPollHTML("f-mon-fortiswitch-", "FortiSwitch", opts.snmpCredentials, fwSwCfg.enabled === true, fwSwCfg.snmpCredentialId || null, fwSwCfg.addAsMonitored === true) +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">' +
       'These timers apply <strong style="color:var(--color-text-primary)">globally</strong> to every monitored Fortinet FortiSwitch — across all integrations, not just this one. Empty fields fall back to the values on the FortiGates subtab.' +
     '</div>' +
     _classTimerFieldsHTML("f-mon-fortiswitch-", fsClass, classDefaults);
 
   var apPanel =
-    _classDirectPollHTML("f-mon-fortiap-", "FortiAP", opts.snmpCredentials, fwApCfg.enabled === true, fwApCfg.snmpCredentialId || null) +
+    _classDirectPollHTML("f-mon-fortiap-", "FortiAP", opts.snmpCredentials, fwApCfg.enabled === true, fwApCfg.snmpCredentialId || null, fwApCfg.addAsMonitored === true) +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">' +
       'These timers apply <strong style="color:var(--color-text-primary)">globally</strong> to every monitored Fortinet FortiAP — across all integrations, not just this one. Empty fields fall back to the values on the FortiGates subtab.' +
     '</div>' +
@@ -414,16 +440,27 @@ function getMonitorSettingsFromForm() {
   return out;
 }
 
-// Reads the "enable direct polling" + SNMP credential picker for one class
-// (FortiSwitch or FortiAP). Returns null when the subtab didn't render.
+// Reads the "enable direct polling" + SNMP credential picker + the auto-Monitor
+// flag for one class (FortiSwitch or FortiAP). Returns null when the subtab
+// didn't render.
 function _readClassMonitorBlock(prefix) {
-  var enabledEl = document.getElementById(prefix + "enabled");
-  var credEl    = document.getElementById(prefix + "credentialId");
+  var enabledEl    = document.getElementById(prefix + "enabled");
+  var credEl       = document.getElementById(prefix + "credentialId");
+  var addMonEl     = document.getElementById(prefix + "addAsMonitored");
   if (!enabledEl || !credEl) return null;
   return {
     enabled: enabledEl.checked === true,
     snmpCredentialId: credEl.value || null,
+    addAsMonitored: addMonEl ? addMonEl.checked === true : false,
   };
+}
+
+// FortiGate variant — only the auto-Monitor flag (no direct-polling toggle
+// since FortiGates always have a monitorType stamped at discovery).
+function _readFortigateMonitorBlock(prefix) {
+  var addMonEl = document.getElementById(prefix + "addAsMonitored");
+  if (!addMonEl) return null;
+  return { addAsMonitored: addMonEl.checked === true };
 }
 
 function fortiManagerFormHTML(defaults) {
@@ -994,8 +1031,10 @@ async function openCreateModal(type) {
       if (isFmg || isFgt) {
         var credId = _readMonitorCredentialId();
         if (credId) createConfig.monitorCredentialId = credId;
+        var fgBlockNew = _readFortigateMonitorBlock("f-mon-fortigate-");
         var swBlockNew = _readClassMonitorBlock("f-mon-fortiswitch-");
         var apBlockNew = _readClassMonitorBlock("f-mon-fortiap-");
+        if (fgBlockNew) createConfig.fortigateMonitor   = fgBlockNew;
         if (swBlockNew) createConfig.fortiswitchMonitor = swBlockNew;
         if (apBlockNew) createConfig.fortiapMonitor     = apBlockNew;
       }
@@ -1182,6 +1221,7 @@ async function openEditModal(id) {
         { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, {
           snmpCredentials: creds,
           monitorCredentialId: config.monitorCredentialId || null,
+          fortigateMonitor:   config.fortigateMonitor   || null,
           fortiswitchMonitor: config.fortiswitchMonitor || null,
           fortiapMonitor:     config.fortiapMonitor     || null,
         }) },
@@ -1251,12 +1291,13 @@ async function openEditModal(id) {
           // Always send the picker value so an explicit clear (back to "FortiOS REST API")
           // round-trips. Empty string is normalized to null on the server.
           editConfig.monitorCredentialId = _readMonitorCredentialId() || null;
-          // Per-class FortiSwitch / FortiAP direct-poll blocks. _readClassMonitorBlock
-          // returns null when the subtab didn't render (e.g. modal opened on a tab
-          // that wasn't switched to) — in that case leave the existing config
-          // alone rather than wiping it.
+          // Per-class FortiGate / FortiSwitch / FortiAP blocks. The reader
+          // returns null when its subtab didn't render — in that case leave
+          // the existing config alone rather than wiping it.
+          var fgBlock = _readFortigateMonitorBlock("f-mon-fortigate-");
           var swBlock = _readClassMonitorBlock("f-mon-fortiswitch-");
           var apBlock = _readClassMonitorBlock("f-mon-fortiap-");
+          if (fgBlock) editConfig.fortigateMonitor   = fgBlock;
           if (swBlock) editConfig.fortiswitchMonitor = swBlock;
           if (apBlock) editConfig.fortiapMonitor     = apBlock;
         }
