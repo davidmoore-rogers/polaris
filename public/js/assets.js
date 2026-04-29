@@ -1195,10 +1195,17 @@ async function openViewModal(id) {
         '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
         assetSystemViewHTML(a)
       : monitoringHTML;
-    var tabsHTML = _renderTabbedBody("asset-view", [
+    var tabs = [
       { key: "general", label: "General", html: generalHTML },
       { key: "system",  label: "System",  html: systemHTML },
-    ]);
+    ];
+    // SNMP Walk tab — admin-only, mirrors the backend gate. Loads credentials
+    // before render so the picker isn't empty on first paint.
+    if (isAdmin()) {
+      await _ensureCredentials();
+      tabs.push({ key: "snmp", label: "SNMP Walk", html: assetSnmpWalkViewHTML(a) });
+    }
+    var tabsHTML = _renderTabbedBody("asset-view", tabs);
     bodyEl.innerHTML = '<div class="asset-panel-content">' + tabsHTML + '</div>';
 
     titleEl.innerHTML = 'Asset Details' + (a.hostname
@@ -1216,6 +1223,7 @@ async function openViewModal(id) {
     footerEl.innerHTML = leftBtns + '<span style="flex:1"></span>' + rightBtns;
 
     _wireModalTabs("asset-view");
+    if (isAdmin()) _wireSnmpWalkTab(a);
     _wireHoverTriggersIn(bodyEl);
     bodyEl.addEventListener("click", _handleCopyClick);
     document.getElementById("btn-asset-copy").addEventListener("click", _copyAssetDetails);
@@ -1329,8 +1337,9 @@ async function openViewModal(id) {
 
 // ─── System tab (system info section) ──────────────────────────────────────
 //
-// Renders the CPU/memory chart, temperatures, interfaces, storage, and IPsec
-// tables. Telemetry is collected every ~60s, system info every ~10min, so
+// Renders the CPU/memory chart, temperatures, interfaces (with IPsec tunnels
+// nested under the FortiOS phase1-interface they're bound to), and storage.
+// Telemetry is collected every ~60s, system info every ~10min, so
 // these are sparse compared to the response-time chart that sits above it
 // (rendered by assetMonitoringViewHTML). ICMP/SSH-monitored assets render an
 // empty-state message because those probes can't deliver this data.
@@ -1378,9 +1387,7 @@ function assetSystemViewHTML(a) {
     '<h4 style="margin:1.25rem 0 0.5rem">Interfaces</h4>' +
     '<div id="asset-system-interfaces"><span class="empty-state">Loading…</span></div>' +
     '<h4 style="margin:1.25rem 0 0.5rem">Storage</h4>' +
-    '<div id="asset-system-storage"><span class="empty-state">Loading…</span></div>' +
-    '<h4 style="margin:1.25rem 0 0.5rem">IPsec Tunnels</h4>' +
-    '<div id="asset-system-ipsec"><span class="empty-state">Loading…</span></div>'
+    '<div id="asset-system-storage"><span class="empty-state">Loading…</span></div>'
   );
 }
 
@@ -1399,7 +1406,6 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
   var ifaces  = document.getElementById("asset-system-interfaces");
   var storage = document.getElementById("asset-system-storage");
   var temps   = document.getElementById("asset-system-temps");
-  var ipsec   = document.getElementById("asset-system-ipsec");
   if (!chart) return;
   chart.dataset.range = range || "24h";
   if (!silent) {
@@ -1408,7 +1414,6 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
     if (ifaces)  ifaces.innerHTML  = '<span class="empty-state">Loading…</span>';
     if (storage) storage.innerHTML = '<span class="empty-state">Loading…</span>';
     if (temps)   temps.innerHTML   = '<span class="empty-state">Loading…</span>';
-    if (ipsec)   ipsec.innerHTML   = '<span class="empty-state">Loading…</span>';
   }
 
   var panelBody = silent ? document.getElementById("asset-panel-body") : null;
@@ -1427,7 +1432,6 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
     _renderInterfacesTable(ifaces, si, asset);
     _renderStorageTable(storage, si, asset);
     _renderTemperatures(temps, si, asset);
-    _renderIpsecTunnels(ipsec, si, asset);
   } catch (err) {
     if (!silent) {
       chart.textContent = "Error: " + (err.message || "failed to load");
@@ -1435,7 +1439,6 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
       if (ifaces)  ifaces.innerHTML  = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
       if (storage) storage.innerHTML = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
       if (temps)   temps.innerHTML   = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
-      if (ipsec)   ipsec.innerHTML   = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
     }
     // On silent-refresh failure leave the stale content alone so the user
     // doesn't see a transient blip blow away the panel they were reading.
@@ -1479,11 +1482,13 @@ function _renderSystemSummary(container, tel, si) {
 function _renderInterfacesTable(container, si, asset) {
   if (!container) return;
   var rows = (si && si.interfaces) || [];
-  if (rows.length === 0) {
+  var tunnelsAll = (si && si.ipsecTunnels) || [];
+  if (rows.length === 0 && tunnelsAll.length === 0) {
     container.innerHTML = '<p class="empty-state">No interface data yet — system info is collected every ~10 minutes after monitoring is enabled.</p>';
     return;
   }
-  var monitored = new Set(((si && si.monitoredInterfaces) || (asset && asset.monitoredInterfaces) || []));
+  var monitored        = new Set(((si && si.monitoredInterfaces)   || (asset && asset.monitoredInterfaces)   || []));
+  var monitoredTunnels = new Set(((si && si.monitoredIpsecTunnels) || (asset && asset.monitoredIpsecTunnels) || []));
   var canEdit = canManageAssets();
   var COLS = 9;
 
@@ -1578,6 +1583,50 @@ function _renderInterfacesTable(container, si, asset) {
     "</td></tr>";
   }
 
+  // IPsec tunnel row, rendered inline with the interfaces table. depth=0 →
+  // top-level (orphan/unbound), depth=1 → nested under a top-level interface,
+  // depth=2 → nested under a VLAN/aggregate child. `collapseGroupName`, when
+  // set, ties the row to a top-level parent's expand/collapse toggle.
+  function buildTunnelRow(tn, opts) {
+    opts = opts || {};
+    var depth = opts.depth || 0;
+    var pad = depth > 0 ? "padding-left:" + (1.4 * depth) + "rem;" : "";
+    var bullet = depth > 0
+      ? '<span style="color:var(--color-text-secondary);opacity:0.5;margin-right:3px;font-size:0.8rem">└</span>'
+      : "";
+    var checked  = monitoredTunnels.has(tn.tunnelName) ? " checked" : "";
+    var disabled = canEdit ? "" : " disabled";
+    var checkbox =
+      '<input type="checkbox" class="asset-ipsec-toggle" data-name="' + escapeHtml(tn.tunnelName) + '"' + checked + disabled +
+      ' title="Poll this tunnel every minute (response-time cadence)">';
+    var p2title = tn.proxyIdCount != null ? (tn.proxyIdCount + " phase-2 selector(s)") : "IPsec phase-1 tunnel";
+    var ipsecBadge =
+      '<span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#f59e0b18;color:#f59e0b;border:1px solid #f59e0b30;margin-left:5px;white-space:nowrap" title="' +
+        escapeHtml(p2title) + '">IPsec</span>';
+    var nameCell =
+      '<td class="mono" style="' + pad + '" title="' + escapeHtml(tn.tunnelName) + '">' + bullet +
+        '<a href="#" class="asset-ipsec-link" data-name="' + escapeHtml(tn.tunnelName) + '" style="color:var(--color-accent);text-decoration:none">' +
+          escapeHtml(tn.tunnelName) +
+        '</a>' + ipsecBadge +
+      "</td>";
+    var pillKind = tn.status === "up" ? "active" : tn.status === "down" ? "decommissioned" : "maintenance";
+    var statusPill = '<span class="status-pill status-pill-' + pillKind + '">' + escapeHtml(tn.status) + "</span>";
+    var rowAttr = opts.collapseGroupName
+      ? ' class="iface-child" data-parent="' + escapeHtml(opts.collapseGroupName) + '"'
+      : "";
+    return "<tr" + rowAttr + ">" +
+      '<td style="text-align:center;width:1%">' + checkbox + "</td>" +
+      nameCell +
+      "<td>" + statusPill + "</td>" +
+      "<td>—</td>" +
+      '<td class="mono">' + escapeHtml(tn.remoteGateway || "—") + "</td>" +
+      '<td class="mono">—</td>' +
+      "<td>" + (tn.incomingBytes != null ? _fmtBytes(tn.incomingBytes) : "—") + "</td>" +
+      "<td>" + (tn.outgoingBytes != null ? _fmtBytes(tn.outgoingBytes) : "—") + "</td>" +
+      "<td>—</td>" +
+    "</tr>";
+  }
+
   // ── build tree ─────────────────────────────────────────────────────────────
   // childMap: parentIfName -> sorted [child interfaces]  (members first, VLANs after)
   var childMap = {};
@@ -1594,6 +1643,52 @@ function _renderInterfacesTable(container, si, asset) {
       return String(a.ifName).localeCompare(String(b.ifName), undefined, { numeric: true, sensitivity: "base" });
     });
   });
+
+  // tunnelMap: parentInterface -> sorted [tunnels]; orphanTunnels covers
+  // tunnels with no parentInterface OR whose parent isn't in the interface
+  // list (CMDB scope mismatch, filtered-out interface, etc.).
+  var ifaceNameSet = new Set(rows.map(function (r) { return r.ifName; }));
+  var tunnelMap = {};
+  var orphanTunnels = [];
+  tunnelsAll.forEach(function (tn) {
+    if (tn.parentInterface && ifaceNameSet.has(tn.parentInterface)) {
+      if (!tunnelMap[tn.parentInterface]) tunnelMap[tn.parentInterface] = [];
+      tunnelMap[tn.parentInterface].push(tn);
+    } else {
+      orphanTunnels.push(tn);
+    }
+  });
+  function _byTunnelName(a, b) {
+    return String(a.tunnelName).localeCompare(String(b.tunnelName), undefined, { numeric: true, sensitivity: "base" });
+  }
+  Object.keys(tunnelMap).forEach(function (k) { tunnelMap[k].sort(_byTunnelName); });
+  orphanTunnels.sort(_byTunnelName);
+
+  // Render an interface plus its VLAN/aggregate children plus any IPsec
+  // tunnels nested at either level. Tunnel rows reuse the iface-child class
+  // and the top-level's data-parent so they collapse together with the
+  // existing toggle handler.
+  function renderCluster(iface) {
+    var kids = childMap[iface.ifName] || [];
+    var directTunnels = tunnelMap[iface.ifName] || [];
+    var nestedTunnelsCount = directTunnels.length;
+    kids.forEach(function (child) {
+      nestedTunnelsCount += (tunnelMap[child.ifName] || []).length;
+    });
+    var hasNested = kids.length > 0 || nestedTunnelsCount > 0;
+    var collapseGroup = iface.ifName;
+    var out = buildRow(iface, { isParent: hasNested });
+    kids.forEach(function (child) {
+      out += buildRow(child, { isChild: true, parentName: collapseGroup });
+      (tunnelMap[child.ifName] || []).forEach(function (tn) {
+        out += buildTunnelRow(tn, { collapseGroupName: collapseGroup, depth: 2 });
+      });
+    });
+    directTunnels.forEach(function (tn) {
+      out += buildTunnelRow(tn, { collapseGroupName: collapseGroup, depth: 1 });
+    });
+    return out;
+  }
 
   // Top-level: no ifParent set
   var topLevel = rows.filter(function (r) { return !r.ifParent; });
@@ -1613,31 +1708,24 @@ function _renderInterfacesTable(container, si, asset) {
 
   if (aggGroup.length > 0) {
     html += sectionRow("Aggregate Interfaces", aggGroup.length);
-    aggGroup.forEach(function (agg) {
-      var kids = childMap[agg.ifName] || [];
-      html += buildRow(agg, { isParent: kids.length > 0 });
-      kids.forEach(function (child) {
-        html += buildRow(child, { isChild: true, parentName: agg.ifName });
-      });
-    });
+    aggGroup.forEach(function (agg) { html += renderCluster(agg); });
   }
 
   if (physGroup.length > 0) {
     html += sectionRow("Physical Interfaces", physGroup.length);
-    physGroup.forEach(function (phys) {
-      var kids = childMap[phys.ifName] || [];
-      html += buildRow(phys, { isParent: kids.length > 0 });
-      kids.forEach(function (child) {
-        html += buildRow(child, { isChild: true, parentName: phys.ifName });
-      });
-    });
+    physGroup.forEach(function (phys) { html += renderCluster(phys); });
   }
 
   if (otherGroup.length > 0) {
     html += sectionRow("Other Interfaces", otherGroup.length);
-    otherGroup.forEach(function (iface) {
-      html += buildRow(iface, {});
-    });
+    otherGroup.forEach(function (iface) { html += renderCluster(iface); });
+  }
+
+  // Tunnels with no resolvable parent interface (CMDB unreachable, parent
+  // filtered out, etc.) get their own section so they're not lost.
+  if (orphanTunnels.length > 0) {
+    html += sectionRow("IPsec Tunnels (unbound)", orphanTunnels.length);
+    orphanTunnels.forEach(function (tn) { html += buildTunnelRow(tn, { depth: 0 }); });
   }
 
   container.innerHTML =
@@ -1691,62 +1779,19 @@ function _renderInterfacesTable(container, si, asset) {
       openInterfaceDetailPanel(asset, link.getAttribute("data-ifname"));
     });
   });
-}
 
-// IPsec tunnel snapshot — FortiOS-only. The backend leaves the array empty
-// for SNMP/WinRM/AD assets and for FortiGates with no tunnels configured;
-// either way render an explanatory empty-state instead of an empty table.
-function _renderIpsecTunnels(container, si, asset) {
-  if (!container) return;
-  var rows = (si && si.ipsecTunnels) || [];
-  var t = (si && si.monitorType) || (asset && asset.monitorType) || "";
-  if (rows.length === 0) {
-    if (t === "fortigate" || t === "fortimanager") {
-      container.innerHTML = '<p class="empty-state">No IPsec tunnels reported by this FortiGate (or none configured yet).</p>';
-    } else {
-      container.innerHTML = '<p class="empty-state">IPsec tunnel data is only collected for FortiOS-monitored devices.</p>';
-    }
-    return;
-  }
-  var monitored = new Set(((si && si.monitoredIpsecTunnels) || (asset && asset.monitoredIpsecTunnels) || []));
-  var canEdit = canManageAssets();
-  var body = rows.map(function (t) {
-    var pillClass = t.status === "up" ? "active" : t.status === "down" ? "decommissioned" : "maintenance";
-    var pill = '<span class="status-pill status-pill-' + pillClass + '">' + escapeHtml(t.status) + '</span>';
-    var name = '<a href="#" class="asset-ipsec-link" data-name="' + escapeHtml(t.tunnelName) + '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(t.tunnelName) + '</a>';
-    var p2 = t.proxyIdCount != null ? String(t.proxyIdCount) : '—';
-    var checked = monitored.has(t.tunnelName) ? ' checked' : '';
-    var disabled = canEdit ? '' : ' disabled';
-    var checkbox =
-      '<input type="checkbox" class="asset-ipsec-toggle" data-name="' + escapeHtml(t.tunnelName) + '"' + checked + disabled +
-      ' title="Poll this tunnel every minute (response-time cadence)">';
-    return '<tr>' +
-      '<td style="text-align:center;width:1%">' + checkbox + '</td>' +
-      '<td class="mono">' + name + '</td>' +
-      '<td>' + pill + '</td>' +
-      '<td class="mono">' + escapeHtml(t.remoteGateway || '—') + '</td>' +
-      '<td>' + (t.incomingBytes != null ? _fmtBytes(t.incomingBytes) : '—') + '</td>' +
-      '<td>' + (t.outgoingBytes != null ? _fmtBytes(t.outgoingBytes) : '—') + '</td>' +
-      '<td title="Phase-2 selector count">' + p2 + '</td>' +
-    '</tr>';
-  }).join("");
-  container.innerHTML =
-    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th title="Pin this tunnel for fast-cadence polling">Poll 1m</th>' +
-      '<th>Tunnel</th><th>Status</th><th>Remote gateway</th><th>In (cumulative)</th><th>Out (cumulative)</th><th>P2</th>' +
-    '</tr></thead><tbody>' + body + '</tbody></table></div>';
-
+  // Poll 1m checkbox for nested tunnel rows — writes monitoredIpsecTunnels
   if (canEdit && asset) {
     container.querySelectorAll(".asset-ipsec-toggle").forEach(function (cb) {
       cb.addEventListener("change", async function () {
         var name = cb.getAttribute("data-name");
-        var current = new Set(monitored);
+        var current = new Set(monitoredTunnels);
         if (cb.checked) current.add(name); else current.delete(name);
         cb.disabled = true;
         try {
           await api.assets.update(asset.id, { monitoredIpsecTunnels: Array.from(current) });
-          monitored = current;
-          if (si) si.monitoredIpsecTunnels = Array.from(current);
+          monitoredTunnels = current;
+          if (si)    si.monitoredIpsecTunnels    = Array.from(current);
           if (asset) asset.monitoredIpsecTunnels = Array.from(current);
           showToast(cb.checked ? ("Polling " + name + " every minute") : ("Stopped fast-polling " + name));
         } catch (err) {
@@ -1758,6 +1803,8 @@ function _renderIpsecTunnels(container, si, asset) {
       });
     });
   }
+
+  // Tunnel name click — opens per-tunnel history panel
   container.querySelectorAll(".asset-ipsec-link").forEach(function (link) {
     link.addEventListener("click", function (e) {
       e.preventDefault();
@@ -5233,6 +5280,149 @@ async function openImportPdfModal(file) {
       btn.textContent = "Preview & Apply (" + assetList.length + ")";
     }
   });
+}
+
+// ─── SNMP Walk tab (admin only) ────────────────────────────────────────────
+//
+// Operator-driven snmpwalk against the asset's IP. Admin-only on both the
+// frontend (the tab is omitted) and the backend (POST /assets/:id/snmp-walk
+// is gated on requireAdmin). Pick any stored SNMP credential — not just the
+// asset's monitor credential — so an admin can spot-check a host that isn't
+// yet monitored, or use a different community than the one the monitor uses.
+
+var _snmpWalkLastOid = "1.3.6.1.2.1.1";
+var _snmpWalkLastCredId = null;
+
+function _snmpCredentialOptions(selectedId) {
+  var snmpCreds = (_credentialCache.list || []).filter(function (c) { return c.type === "snmp"; });
+  if (!snmpCreds.length) return '<option value="">(no SNMP credentials defined)</option>';
+  var defaultId = selectedId || _snmpWalkLastCredId || snmpCreds[0].id;
+  var opts = "";
+  snmpCreds.forEach(function (c) {
+    opts += '<option value="' + escapeHtml(c.id) + '"' + (defaultId === c.id ? " selected" : "") + '>' + escapeHtml(c.name) + '</option>';
+  });
+  return opts;
+}
+
+function assetSnmpWalkViewHTML(a) {
+  if (!a.ipAddress) {
+    return '<div style="padding:1rem 0;color:var(--color-text-secondary)">' +
+      'SNMP walks need an IP address — assign one to this asset before running a walk.' +
+    '</div>';
+  }
+  var seedCredId = (a.monitorType === "snmp" && a.monitorCredentialId) ? a.monitorCredentialId : null;
+  return (
+    '<div style="display:flex;flex-direction:column;gap:0.75rem">' +
+      '<div style="font-size:0.85rem;color:var(--color-text-secondary)">' +
+        'Walks <code>' + escapeHtml(a.ipAddress) + '</code> using the selected SNMP credential. Admin-only — every walk is audited. Walks are capped at 5,000 rows.' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:0.5rem;align-items:end">' +
+        '<div>' +
+          '<label class="form-label" for="snmp-walk-oid" style="font-size:0.8rem">Base OID</label>' +
+          '<input class="form-control" id="snmp-walk-oid" type="text" value="' + escapeHtml(_snmpWalkLastOid) + '" placeholder="1.3.6.1.2.1.1">' +
+        '</div>' +
+        '<div>' +
+          '<label class="form-label" for="snmp-walk-cred" style="font-size:0.8rem">Credential</label>' +
+          '<select class="form-control" id="snmp-walk-cred">' + _snmpCredentialOptions(seedCredId) + '</select>' +
+        '</div>' +
+        '<div>' +
+          '<label class="form-label" for="snmp-walk-max" style="font-size:0.8rem">Max rows</label>' +
+          '<input class="form-control" id="snmp-walk-max" type="number" min="1" max="5000" value="500" style="width:100px">' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:0.5rem;align-items:center">' +
+        '<button type="button" class="btn btn-primary btn-sm" id="btn-snmp-walk">Walk</button>' +
+        '<button type="button" class="btn btn-secondary btn-sm" id="btn-snmp-walk-copy" disabled>Copy results</button>' +
+        '<span id="snmp-walk-status" style="font-size:0.8rem;color:var(--color-text-secondary)"></span>' +
+      '</div>' +
+      '<div id="snmp-walk-results"></div>' +
+    '</div>'
+  );
+}
+
+function _renderSnmpWalkRows(result) {
+  var container = document.getElementById("snmp-walk-results");
+  if (!container) return;
+  if (!result.rows.length) {
+    container.innerHTML = '<p class="empty-state" style="padding:0.75rem 0">No varbinds returned.</p>';
+    return;
+  }
+  var truncated = result.truncated
+    ? '<div style="font-size:0.8rem;color:var(--color-warning,#d4a23a);margin-bottom:0.4rem">Truncated at ' + result.rows.length + ' rows — narrow the OID or raise Max rows to see more.</div>'
+    : "";
+  var rowsHtml = result.rows.map(function (r) {
+    return '<tr>' +
+      '<td style="font-family:var(--font-mono,monospace);font-size:0.78rem;white-space:nowrap">' + escapeHtml(r.oid) + '</td>' +
+      '<td style="font-size:0.78rem;color:var(--color-text-secondary);white-space:nowrap">' + escapeHtml(r.type) + '</td>' +
+      '<td style="font-family:var(--font-mono,monospace);font-size:0.78rem;word-break:break-all">' + escapeHtml(r.value) + '</td>' +
+    '</tr>';
+  }).join("");
+  container.innerHTML = truncated +
+    '<div class="table-wrapper" style="max-height:60vh;overflow:auto">' +
+      '<table class="data-table" style="font-size:0.82rem">' +
+        '<thead><tr><th>OID</th><th>Type</th><th>Value</th></tr></thead>' +
+        '<tbody>' + rowsHtml + '</tbody>' +
+      '</table>' +
+    '</div>';
+}
+
+function _wireSnmpWalkTab(a) {
+  var walkBtn = document.getElementById("btn-snmp-walk");
+  if (!walkBtn) return; // tab not rendered (e.g. asset has no IP)
+  var copyBtn = document.getElementById("btn-snmp-walk-copy");
+  var statusEl = document.getElementById("snmp-walk-status");
+  var lastResult = null;
+
+  walkBtn.addEventListener("click", async function () {
+    var oid = (document.getElementById("snmp-walk-oid").value || "").trim();
+    var credId = document.getElementById("snmp-walk-cred").value;
+    var maxRows = parseInt(document.getElementById("snmp-walk-max").value, 10) || 500;
+    if (!oid) { showToast("Enter a base OID", "error"); return; }
+    if (!credId) { showToast("Select an SNMP credential", "error"); return; }
+    if (!/^\d+(\.\d+)*$/.test(oid)) { showToast("OID must be numeric (e.g. 1.3.6.1.2.1.1)", "error"); return; }
+
+    _snmpWalkLastOid = oid;
+    _snmpWalkLastCredId = credId;
+    walkBtn.disabled = true;
+    walkBtn.textContent = "Walking…";
+    if (copyBtn) copyBtn.disabled = true;
+    statusEl.textContent = "Walking " + a.ipAddress + " " + oid + "…";
+    document.getElementById("snmp-walk-results").innerHTML = "";
+
+    try {
+      var result = await api.assets.snmpWalk(a.id, { credentialId: credId, oid: oid, maxRows: maxRows });
+      lastResult = result;
+      statusEl.textContent = result.rows.length + " row(s) in " + result.durationMs + " ms" + (result.truncated ? " (truncated)" : "");
+      _renderSnmpWalkRows(result);
+      if (copyBtn) copyBtn.disabled = !result.rows.length;
+    } catch (err) {
+      lastResult = null;
+      statusEl.textContent = "";
+      showToast(err.message || "SNMP walk failed", "error");
+      document.getElementById("snmp-walk-results").innerHTML =
+        '<p class="empty-state" style="padding:0.75rem 0;color:var(--color-danger,#c0392b)">' +
+          escapeHtml(err.message || "SNMP walk failed") +
+        '</p>';
+    } finally {
+      walkBtn.disabled = false;
+      walkBtn.textContent = "Walk";
+    }
+  });
+
+  if (copyBtn) {
+    copyBtn.addEventListener("click", async function () {
+      if (!lastResult || !lastResult.rows.length) return;
+      var text = lastResult.rows.map(function (r) {
+        return r.oid + " = " + r.type + ": " + r.value;
+      }).join("\n");
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast("Copied " + lastResult.rows.length + " row(s)", "success");
+      } catch (_) {
+        showToast("Copy failed", "error");
+      }
+    });
+  }
 }
 
 // ─── Monitoring (bulk + credential picker helpers) ─────────────────────────

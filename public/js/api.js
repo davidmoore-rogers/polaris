@@ -172,6 +172,7 @@ const api = {
       return request("GET", `/assets/${id}/monitor-history` + (qs.length ? "?" + qs.join("&") : ""));
     },
     probeNow:             (id)  => request("POST", `/assets/${id}/probe-now`),
+    snmpWalk:             (id, body) => request("POST", `/assets/${id}/snmp-walk`, body),
     reserve:              (id)  => request("POST", `/assets/${id}/reserve`),
     unreserve:            (id)  => request("POST", `/assets/${id}/unreserve`),
     // System tab — telemetry, system-info snapshot, per-interface counters, per-mountpoint storage.

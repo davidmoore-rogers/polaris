@@ -8,7 +8,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
-import { requireAssetsAdmin, requireNetworkAdmin, requireUserOrAbove, isNetworkAdminOrAbove } from "../middleware/auth.js";
+import { requireAdmin, requireAssetsAdmin, requireNetworkAdmin, requireUserOrAbove, isNetworkAdminOrAbove } from "../middleware/auth.js";
 import { logEvent, buildChanges } from "./events.js";
 import { assetMatchesIntegrationFilter } from "../../utils/integrationFilter.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
@@ -22,7 +22,9 @@ import {
   probeAsset, recordProbeResult,
   collectTelemetry, recordTelemetryResult,
   collectSystemInfo, recordSystemInfoResult,
+  snmpWalkRaw,
 } from "../../services/monitoringService.js";
+import { getCredential } from "../../services/credentialService.js";
 
 const router = Router();
 
@@ -588,6 +590,71 @@ router.post("/:id/probe-now", requireUserOrAbove, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/v1/assets/:id/snmp-walk — operator-driven SNMP walk used by the
+// asset details "SNMP Walk" tab. Admin-only because the response includes raw
+// device data that the integration filter doesn't touch (e.g. tunnel names,
+// configured users) — read-only but high-fidelity. Walks `oid` against the
+// asset's `ipAddress` using the supplied credentialId (any stored SNMP
+// credential, not necessarily the asset's monitor credential), capped at
+// `maxRows` (1..5000, default 500).
+const SnmpWalkSchema = z.object({
+  credentialId: z.string().uuid("credentialId must be a UUID"),
+  oid:          z.string().regex(/^\d+(\.\d+)*$/, "OID must be numeric (e.g. 1.3.6.1.2.1.1)").optional().default("1.3.6.1.2.1.1"),
+  maxRows:      z.number().int().min(1).max(5000).optional().default(500),
+});
+
+router.post("/:id/snmp-walk", requireAdmin, async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const parsed = SnmpWalkSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new AppError(400, parsed.error.issues.map(e => e.message).join("; "));
+    }
+    const { credentialId, oid, maxRows } = parsed.data;
+
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: { id: true, hostname: true, ipAddress: true },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+    if (!asset.ipAddress) throw new AppError(400, "Asset has no IP address to walk");
+
+    const cred = await getCredential(credentialId, { revealSecrets: true });
+    if (cred.type !== "snmp") {
+      throw new AppError(400, `Credential "${cred.name}" is type "${cred.type}", expected "snmp"`);
+    }
+
+    const label = asset.hostname || asset.ipAddress;
+    try {
+      const result = await snmpWalkRaw(asset.ipAddress, cred.config as Record<string, unknown>, oid, maxRows);
+      logEvent({
+        action: "asset.snmp_walk",
+        resourceType: "asset",
+        resourceId: id,
+        resourceName: asset.hostname || asset.ipAddress || undefined,
+        actor: req.session?.username,
+        level: "info",
+        message: `SNMP walk: ${label} — ${oid} → ${result.rows.length} row(s)${result.truncated ? " (truncated)" : ""}`,
+        details: { oid, credentialName: cred.name, rows: result.rows.length, truncated: result.truncated, durationMs: result.durationMs },
+      });
+      res.json({ ...result, oid, host: asset.ipAddress });
+    } catch (err: any) {
+      const message = err?.message || "SNMP walk failed";
+      logEvent({
+        action: "asset.snmp_walk",
+        resourceType: "asset",
+        resourceId: id,
+        resourceName: asset.hostname || asset.ipAddress || undefined,
+        actor: req.session?.username,
+        level: "warning",
+        message: `SNMP walk failed: ${label} — ${oid} — ${message}`,
+        details: { oid, credentialName: cred.name, error: message },
+      });
+      throw new AppError(502, message);
+    }
+  } catch (err) { next(err); }
+});
+
 // POST /api/v1/assets/:id/reserve — reserve the asset's IP in its containing
 // subnet. Any user-or-above can reserve; readonly is rejected by middleware.
 router.post("/:id/reserve", requireUserOrAbove, async (req, res, next) => {
@@ -866,13 +933,14 @@ router.get("/:id/system-info", async (req, res, next) => {
         celsius:    t.celsius,
       })),
       ipsecTunnels: ipsecTunnels.map((t) => ({
-        timestamp:     t.timestamp,
-        tunnelName:    t.tunnelName,
-        remoteGateway: t.remoteGateway,
-        status:        t.status,
-        incomingBytes: bigIntToNumber(t.incomingBytes),
-        outgoingBytes: bigIntToNumber(t.outgoingBytes),
-        proxyIdCount:  t.proxyIdCount,
+        timestamp:       t.timestamp,
+        tunnelName:      t.tunnelName,
+        parentInterface: t.parentInterface,
+        remoteGateway:   t.remoteGateway,
+        status:          t.status,
+        incomingBytes:   bigIntToNumber(t.incomingBytes),
+        outgoingBytes:   bigIntToNumber(t.outgoingBytes),
+        proxyIdCount:    t.proxyIdCount,
       })),
       monitoredInterfaces:   (asset.monitoredInterfaces   ?? []) as string[],
       monitoredStorage:      (asset.monitoredStorage      ?? []) as string[],

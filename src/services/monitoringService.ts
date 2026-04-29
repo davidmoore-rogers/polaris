@@ -562,12 +562,14 @@ export interface TemperatureSample {
  * under this phase-1 and are cumulative — FortiOS resets when phase-1 renegotiates.
  */
 export interface IpsecTunnelSample {
-  tunnelName:     string;
-  remoteGateway:  string | null;
-  status:         "up" | "down" | "partial";
-  incomingBytes:  number | null;
-  outgoingBytes:  number | null;
-  proxyIdCount:   number | null;
+  tunnelName:      string;
+  /** Parent interface from `config vpn ipsec phase1-interface`; null when the CMDB lookup fails or the phase-1 isn't found. */
+  parentInterface: string | null;
+  remoteGateway:   string | null;
+  status:          "up" | "down" | "partial";
+  incomingBytes:   number | null;
+  outgoingBytes:   number | null;
+  proxyIdCount:    number | null;
 }
 
 export interface SystemInfoSample {
@@ -733,12 +735,13 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
       data: d.ipsecTunnels.map((t) => ({
         assetId,
         timestamp: now,
-        tunnelName:    t.tunnelName,
-        remoteGateway: t.remoteGateway,
-        status:        t.status,
-        incomingBytes: t.incomingBytes != null ? BigInt(Math.round(t.incomingBytes)) : null,
-        outgoingBytes: t.outgoingBytes != null ? BigInt(Math.round(t.outgoingBytes)) : null,
-        proxyIdCount:  t.proxyIdCount,
+        tunnelName:      t.tunnelName,
+        parentInterface: t.parentInterface,
+        remoteGateway:   t.remoteGateway,
+        status:          t.status,
+        incomingBytes:   t.incomingBytes != null ? BigInt(Math.round(t.incomingBytes)) : null,
+        outgoingBytes:   t.outgoingBytes != null ? BigInt(Math.round(t.outgoingBytes)) : null,
+        proxyIdCount:    t.proxyIdCount,
       })),
     });
   }
@@ -1085,6 +1088,24 @@ async function collectSystemInfoFortinet(
  * template tunnel; the template itself has no `parent`.
  */
 async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTunnelSample[]> {
+  // Build a tunnel→interface map up front from the CMDB so each sample can
+  // carry the parent interface (the FortiOS CLI `set interface` value under
+  // `config vpn ipsec phase1-interface`). The System tab uses this to nest
+  // tunnel rows under their parent in the Interfaces table. Best-effort:
+  // tokens without cmdb scope just leave parentInterface null on every row,
+  // which renders as an "Unbound IPsec Tunnels" group at the bottom.
+  const phase1Map = new Map<string, string>();
+  try {
+    const cmdb = await fgRequest<any>(fg, "GET", "/api/v2/cmdb/vpn.ipsec/phase1-interface", { query: { vdom: "root" } });
+    const cmdbArr = Array.isArray(cmdb?.results) ? cmdb.results : (Array.isArray(cmdb) ? cmdb : []);
+    for (const p of cmdbArr) {
+      if (!p || typeof p !== "object") continue;
+      const name  = typeof (p as any).name      === "string" ? (p as any).name.trim()      : "";
+      const iface = typeof (p as any).interface === "string" ? (p as any).interface.trim() : "";
+      if (name && iface) phase1Map.set(name, iface);
+    }
+  } catch { /* tokens without cmdb scope — fall through with an empty map */ }
+
   const res = await fgRequest<any>(fg, "GET", "/api/v2/monitor/vpn/ipsec", { query: { scope: "vdom" } });
   const arr = Array.isArray(res?.results) ? res.results : (Array.isArray(res) ? res : []);
   const out: IpsecTunnelSample[] = [];
@@ -1121,12 +1142,13 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTu
     else                        status = "partial";
     const rgwy = (t as any).rgwy ?? (t as any).tun_id ?? null;
     out.push({
-      tunnelName:    name,
-      remoteGateway: typeof rgwy === "string" && rgwy ? rgwy : null,
+      tunnelName:      name,
+      parentInterface: phase1Map.get(name) ?? null,
+      remoteGateway:   typeof rgwy === "string" && rgwy ? rgwy : null,
       status,
-      incomingBytes: anyBytes ? inBytes  : null,
-      outgoingBytes: anyBytes ? outBytes : null,
-      proxyIdCount:  proxyArr.length || null,
+      incomingBytes:   anyBytes ? inBytes  : null,
+      outgoingBytes:   anyBytes ? outBytes : null,
+      proxyIdCount:    proxyArr.length || null,
     });
   }
   return out;
@@ -1314,6 +1336,99 @@ async function withSnmpSession<T>(host: string, config: Record<string, unknown>,
   } finally {
     try { session.close?.(); } catch {}
   }
+}
+
+export interface SnmpWalkRow {
+  oid: string;
+  type: string;
+  value: string;
+}
+
+export interface SnmpWalkResult {
+  rows: SnmpWalkRow[];
+  truncated: boolean;
+  durationMs: number;
+}
+
+/**
+ * Operator-facing snmpwalk for the asset details SNMP Walk tab.
+ *
+ * Unlike the internal `snmpWalk()` above (which keys results by index suffix
+ * and discards type info), this returns the full OID, the symbolic ASN.1 type
+ * name (Counter32, OctetString, OID, ...), and a printable value. Hard-capped
+ * at SNMP_WALK_HARD_MAX rows so an accidental walk of a huge subtree on a
+ * busy device can't run away.
+ */
+const SNMP_WALK_HARD_MAX = 5000;
+
+function snmpTypeName(t: unknown): string {
+  if (typeof t !== "number") return "Unknown";
+  return (snmp.ObjectType as Record<number, string>)[t] || `Type(${t})`;
+}
+
+function snmpVarbindToPrintable(vb: { type: number; value: unknown }): string {
+  const t = vb.type;
+  const v = vb.value;
+  if (v == null) return "";
+  // OctetString: try utf8, fall back to hex when it isn't printable.
+  if (Buffer.isBuffer(v)) {
+    if (t === snmp.ObjectType.IpAddress && v.length === 4) {
+      return `${v[0]}.${v[1]}.${v[2]}.${v[3]}`;
+    }
+    const text = v.toString("utf8");
+    // eslint-disable-next-line no-control-regex
+    if (/^[\x09\x0a\x0d\x20-\x7e]*$/.test(text)) return text.replace(/ +$/, "");
+    return v.toString("hex").match(/.{1,2}/g)?.join(" ").toUpperCase() || "";
+  }
+  if (typeof v === "bigint") return v.toString();
+  return String(v);
+}
+
+export async function snmpWalkRaw(
+  host: string,
+  config: Record<string, unknown>,
+  baseOid: string,
+  maxRows: number,
+): Promise<SnmpWalkResult> {
+  const cap = Math.max(1, Math.min(maxRows | 0, SNMP_WALK_HARD_MAX));
+  const start = Date.now();
+  return await withSnmpSession(host, config, (session) => {
+    return new Promise<SnmpWalkResult>((resolve, reject) => {
+      const rows: SnmpWalkRow[] = [];
+      let truncated = false;
+      let done = false;
+      const finish = (err?: Error) => {
+        if (done) return;
+        done = true;
+        if (err) reject(err);
+        else resolve({ rows, truncated, durationMs: Date.now() - start });
+      };
+      try {
+        session.subtree(
+          baseOid,
+          20, // maxRepetitions
+          (varbinds: any[]) => {
+            for (const vb of varbinds) {
+              if (snmp.isVarbindError(vb)) continue;
+              if (typeof vb.oid !== "string") continue;
+              rows.push({
+                oid: vb.oid,
+                type: snmpTypeName(vb.type),
+                value: snmpVarbindToPrintable(vb),
+              });
+              if (rows.length >= cap) {
+                truncated = true;
+                return finish();
+              }
+            }
+          },
+          (err?: Error) => finish(err),
+        );
+      } catch (err: any) {
+        finish(err);
+      }
+    });
+  });
 }
 
 async function collectTelemetrySnmp(
@@ -1765,12 +1880,13 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
         data: d.ipsecTunnels.map((t) => ({
           assetId,
           timestamp: now,
-          tunnelName:    t.tunnelName,
-          remoteGateway: t.remoteGateway,
-          status:        t.status,
-          incomingBytes: t.incomingBytes != null ? BigInt(Math.round(t.incomingBytes)) : null,
-          outgoingBytes: t.outgoingBytes != null ? BigInt(Math.round(t.outgoingBytes)) : null,
-          proxyIdCount:  t.proxyIdCount,
+          tunnelName:      t.tunnelName,
+          parentInterface: t.parentInterface,
+          remoteGateway:   t.remoteGateway,
+          status:          t.status,
+          incomingBytes:   t.incomingBytes != null ? BigInt(Math.round(t.incomingBytes)) : null,
+          outgoingBytes:   t.outgoingBytes != null ? BigInt(Math.round(t.outgoingBytes)) : null,
+          proxyIdCount:    t.proxyIdCount,
         })),
       });
     }
