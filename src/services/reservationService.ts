@@ -188,6 +188,20 @@ export async function releaseReservation(id: string) {
     throw new AppError(409, `Reservation is already ${reservation.status}`);
 
   return prisma.$transaction(async (tx) => {
+    // The @@unique([subnetId, ipAddress, status]) constraint means we can't
+    // have two released rows for the same IP. Reserve→unreserve→reserve→
+    // unreserve cycles would otherwise collide on the second release. The
+    // historical released row carries no information not already captured in
+    // the audit log (reservation.released Event), so dropping it is safe.
+    await tx.reservation.deleteMany({
+      where: {
+        id: { not: id },
+        subnetId: reservation.subnetId,
+        ipAddress: reservation.ipAddress,
+        status: "released",
+      },
+    });
+
     const released = await tx.reservation.update({
       where: { id },
       data: { status: "released" },
