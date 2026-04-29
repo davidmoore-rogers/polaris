@@ -131,6 +131,25 @@ function _extractV4(raw: unknown): string | null {
   return ip;
 }
 
+/**
+ * Resolve the management IP of a managed FortiGate by reading its interface
+ * config through FMG. Returns the IP that direct-mode REST calls should
+ * target, or null if the configured management interface has no usable IP.
+ *
+ * Exposed so reservationPushService can build a per-device FortiGateConfig
+ * when the integration is in direct (`useProxy=false`) mode.
+ */
+export async function resolveDeviceMgmtIpViaFmg(
+  config: FortiManagerConfig,
+  deviceName: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const mgmtIfaceName = config.mgmtInterface?.trim();
+  if (!mgmtIfaceName) return null;
+  const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
+  return resolveDeviceMgmtIp(baseUrl, config, deviceName, mgmtIfaceName, signal);
+}
+
 async function resolveDeviceMgmtIp(
   baseUrl: string,
   config: FortiManagerConfig,
@@ -337,6 +356,83 @@ export async function proxyQuery(
 ): Promise<unknown> {
   const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
   return rpc(baseUrl, { id: 1, method, params }, config.apiUser, config.apiToken, config.verifySsl);
+}
+
+/**
+ * Run an arbitrary FortiOS REST call against a managed FortiGate by wrapping
+ * it in FortiManager's `/sys/proxy/json` endpoint. Used by the reservation
+ * push path when the integration has `useProxy=true` — the call lands on the
+ * FortiGate's running config in real time, with FortiManager forwarding using
+ * its own stored device credentials.
+ *
+ * `method` maps to the proxy `action`: "GET" → "get", "POST" → "post", etc.
+ * `body` is forwarded as the proxy `payload` for POST/PUT.
+ *
+ * Returns the FortiOS body's `results` field on success. The wrapper unpacks
+ * both the FMG-level status (`result[0].status.code === 0`) and the
+ * FortiOS-level HTTP status (`data[0].status.code` 2xx); either non-success
+ * throws AppError(502).
+ */
+export async function fmgProxyRest<T = unknown>(
+  config: FortiManagerConfig,
+  deviceName: string,
+  method: "GET" | "POST" | "PUT" | "DELETE",
+  resource: string,
+  opts: { body?: unknown; signal?: AbortSignal } = {},
+): Promise<T> {
+  const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
+  const adom = config.adom || "root";
+  const action = method.toLowerCase();
+
+  const data: Record<string, unknown> = {
+    target: [`/adom/${adom}/device/${deviceName}`],
+    action,
+    resource,
+  };
+  if (opts.body !== undefined && (method === "POST" || method === "PUT")) {
+    data.payload = opts.body;
+  }
+
+  const payload: JsonRpcRequest = {
+    id: 1,
+    method: "exec",
+    params: [{ url: "/sys/proxy/json", data }],
+  };
+
+  const res = await rpc(baseUrl, payload, config.apiUser, config.apiToken, config.verifySsl, opts.signal);
+
+  const fmgCode = res.result?.[0]?.status?.code;
+  if (fmgCode !== 0) {
+    const msg = res.result?.[0]?.status?.message || "FortiManager rejected the request";
+    if (fmgCode === -11) throw new AppError(502, "FortiManager: invalid or expired API token");
+    throw new AppError(502, `FortiManager proxy error: ${msg}`);
+  }
+
+  // The proxy response wraps each target's reply. Single target → single entry.
+  const proxyData = res.result?.[0]?.data as any;
+  const entry = Array.isArray(proxyData) ? proxyData[0] : proxyData;
+  if (!entry) throw new AppError(502, "FortiManager proxy returned no response payload");
+
+  // FortiOS HTTP status (separate from the FMG envelope status above)
+  const httpStatus =
+    entry?.status?.code ??
+    entry?.http_status ??
+    entry?.response?.http_status ??
+    200;
+  if (httpStatus < 200 || httpStatus >= 300) {
+    const msg =
+      entry?.status?.message ||
+      entry?.response?.error ||
+      entry?.response?.message ||
+      `FortiGate returned HTTP ${httpStatus}`;
+    throw new AppError(502, `FortiGate (via FMG proxy) error: ${msg}`);
+  }
+
+  // FortiOS REST envelope wraps real data under `response.results`. Some
+  // monitor endpoints set the body directly on `response`; CMDB writes
+  // typically echo `mkey` at the top level of the response.
+  const inner = entry?.response ?? entry;
+  return (inner?.results ?? inner) as T;
 }
 
 /**

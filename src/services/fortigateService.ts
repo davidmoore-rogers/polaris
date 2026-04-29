@@ -89,12 +89,17 @@ export async function testConnection(config: FortiGateConfig): Promise<{
  * Returns the decoded JSON body on success, or throws AppError on auth/HTTP failures.
  * Exported so fortimanagerService can reuse this when `useProxy` is disabled on
  * an FMG integration — FMG enumerates the devices, per-device REST calls go direct.
+ *
+ * Method support: GET / POST / PUT / DELETE. POST and PUT may carry a JSON
+ * body via `opts.body`; the body is JSON-stringified before send. GET and
+ * DELETE ignore the body field. Used by reservation push to write
+ * /api/v2/cmdb/system.dhcp/server/<id>/reserved-address.
  */
 export async function fgRequest<T>(
   config: FortiGateConfig,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
-  opts: { query?: Record<string, string>; signal?: AbortSignal } = {},
+  opts: { query?: Record<string, string>; body?: unknown; signal?: AbortSignal } = {},
 ): Promise<T> {
   const port = config.port || 443;
   const qs = new URLSearchParams(opts.query || {});
@@ -117,11 +122,11 @@ export async function fgRequest<T>(
     // but some admin/audit configurations log this header.
     if (config.apiUser) headers["access_user"] = config.apiUser;
 
-    const res = await fetch(url, {
-      method,
-      headers,
-      signal: controller.signal,
-    });
+    const init: RequestInit = { method, headers, signal: controller.signal };
+    if (opts.body !== undefined && (method === "POST" || method === "PUT")) {
+      init.body = JSON.stringify(opts.body);
+    }
+    const res = await fetch(url, init);
 
     if (res.status === 401 || res.status === 403) {
       throw new AppError(502, "Authentication failed — check your API token");
@@ -158,11 +163,12 @@ export async function fgRequest<T>(
  */
 export async function proxyQuery(
   config: FortiGateConfig,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   query?: Record<string, string>,
+  body?: unknown,
 ): Promise<unknown> {
-  return fgRequest(config, method, path, { query });
+  return fgRequest(config, method, path, { query, body });
 }
 
 // ─── Discovery ──────────────────────────────────────────────────────────────
