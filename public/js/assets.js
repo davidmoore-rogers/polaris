@@ -896,10 +896,19 @@ function assetMonitoringFormHTML(asset) {
   // manually-created assets. Refresh hook in _wireMonitorEditTab toggles
   // visibility live as the operator changes monitorType.
   var canShowTransport = (integrationDefault === "fortimanager" || integrationDefault === "fortigate");
-  function transportSelect(id, currentVal) {
+  // Resolve the integration's actual default for each stream so the dropdown
+  // can label "Integration default (REST)" or "Integration default (SNMP)"
+  // — surfaces the inherited value without making the operator click into
+  // the integration to check.
+  var integTransports = (asset && asset.integrationTransportSources) || {};
+  function defaultLabelFor(stream) {
+    var v = integTransports[stream];
+    return v === "snmp" ? "Integration default (SNMP)" : "Integration default (REST)";
+  }
+  function transportSelect(id, currentVal, stream) {
     var v = currentVal || "";
     return '<select id="' + id + '">' +
-        '<option value=""'      + (v === ""      ? " selected" : "") + '>Integration default</option>' +
+        '<option value=""'      + (v === ""      ? " selected" : "") + '>' + escapeHtml(defaultLabelFor(stream)) + '</option>' +
         '<option value="rest"'  + (v === "rest"  ? " selected" : "") + '>REST</option>' +
         '<option value="snmp"'  + (v === "snmp"  ? " selected" : "") + '>SNMP</option>' +
       '</select>';
@@ -909,18 +918,18 @@ function assetMonitoringFormHTML(asset) {
     transportBlockHtml =
       '<div id="f-transport-wrap" style="margin-top:0.5rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
         '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.5rem">Per-stream transport overrides</p>' +
-        '<p class="hint" style="margin-bottom:0.75rem">Inherit pulls from the integration\'s Monitoring tab. Per-asset overrides win when set.</p>' +
+        '<p class="hint" style="margin-bottom:0.75rem">Integration default pulls from the integration\'s Monitoring tab. Per-asset overrides win when set.</p>' +
         '<div class="form-group" style="display:flex;align-items:center;gap:1rem">' +
           '<label style="margin:0;min-width:160px">Response time</label>' +
-          transportSelect("f-monitorResponseTimeSource", asset && asset.monitorResponseTimeSource) +
+          transportSelect("f-monitorResponseTimeSource", asset && asset.monitorResponseTimeSource, "responseTime") +
         '</div>' +
         '<div class="form-group" style="display:flex;align-items:center;gap:1rem">' +
           '<label style="margin:0;min-width:160px">Telemetry</label>' +
-          transportSelect("f-monitorTelemetrySource", asset && asset.monitorTelemetrySource) +
+          transportSelect("f-monitorTelemetrySource", asset && asset.monitorTelemetrySource, "telemetry") +
         '</div>' +
         '<div class="form-group" style="display:flex;align-items:center;gap:1rem">' +
           '<label style="margin:0;min-width:160px">Interfaces</label>' +
-          transportSelect("f-monitorInterfacesSource", asset && asset.monitorInterfacesSource) +
+          transportSelect("f-monitorInterfacesSource", asset && asset.monitorInterfacesSource, "interfaces") +
         '</div>' +
         '<p class="hint">SNMP uses this asset\'s credential when set; otherwise the integration\'s. IPsec tunnels always stay on REST.</p>' +
       '</div>';

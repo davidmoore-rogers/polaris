@@ -405,6 +405,7 @@ router.get("/:id", async (req, res, next) => {
     // integration's full `config` is not safe to leak to the client (it
     // contains API tokens), so strip it after extracting the credential id.
     let integrationMonitorCredential: { id: string; name: string; type: string } | null = null;
+    let integrationTransportSources: { responseTime: "rest" | "snmp"; telemetry: "rest" | "snmp"; interfaces: "rest" | "snmp" } | null = null;
     if (asset.discoveredByIntegration) {
       const cfg = (asset.discoveredByIntegration.config as Record<string, unknown> | null) || {};
       const credId = typeof cfg.monitorCredentialId === "string" ? cfg.monitorCredentialId : null;
@@ -415,12 +416,22 @@ router.get("/:id", async (req, res, next) => {
         });
         if (cred) integrationMonitorCredential = cred;
       }
+      // Extract the integration's per-stream transport toggles so the asset
+      // edit modal can show the actual default ("Integration default (REST)"
+      // / "Integration default (SNMP)") in the dropdown.
+      const norm = (v: unknown): "rest" | "snmp" => (v === "snmp" ? "snmp" : "rest");
+      integrationTransportSources = {
+        responseTime: norm(cfg.monitorResponseTimeSource),
+        telemetry:    norm(cfg.monitorTelemetrySource),
+        interfaces:   norm(cfg.monitorInterfacesSource),
+      };
     }
     const { config: _omit, ...integrationLite } = (asset.discoveredByIntegration as { config?: unknown } | null) || {};
     const safeAsset = {
       ...asset,
       discoveredByIntegration: asset.discoveredByIntegration ? integrationLite : null,
       integrationMonitorCredential,
+      integrationTransportSources,
     };
 
     res.json({ ...safeAsset, ipContext: ipCtx });
