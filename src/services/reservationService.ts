@@ -5,6 +5,14 @@
 import { PrismaClient, ReservationStatus } from "@prisma/client";
 import { AppError } from "../utils/errors.js";
 import { ipInCidr, isValidIpAddress, enumerateSubnetIps, detectIpVersion } from "../utils/cidr.js";
+import {
+  pushReservation,
+  unpushReservation,
+  normalizeMac,
+  type PushReservationResult,
+} from "./reservationPushService.js";
+import type { FortiManagerConfig } from "./fortimanagerService.js";
+import { logEvent } from "../api/routes/events.js";
 
 const prisma = new PrismaClient();
 
@@ -17,6 +25,11 @@ export interface CreateReservationInput {
   expiresAt?: Date;
   notes?: string;
   createdBy?: string;
+  // MAC address for the reservation. Required when the target subnet was
+  // discovered by an FMG integration that has pushReservations=true — DHCP
+  // reservations on the FortiGate are MAC→IP, so a missing MAC aborts the
+  // create. Optional for everything else.
+  macAddress?: string;
 }
 
 export interface UpdateReservationInput {
@@ -80,9 +93,39 @@ export async function getReservation(id: string) {
 
 // ─── Create ───────────────────────────────────────────────────────────────────
 
+/**
+ * Push eligibility for a reservation. Only manual per-IP reservations on
+ * subnets discovered by an FMG integration with pushReservations=true are
+ * pushed. Full-subnet reservations (ipAddress=null) and subnets without a
+ * discovering integration are unaffected.
+ */
+function resolvePushEligibility(
+  subnet: { discoveredBy: string | null; fortigateDevice: string | null; cidr: string },
+  integration: { type: string; config: unknown } | null,
+  ipAddress: string | null,
+): { eligible: boolean; fmgConfig: FortiManagerConfig | null; deviceName: string } {
+  if (!ipAddress) return { eligible: false, fmgConfig: null, deviceName: "" };
+  if (!integration || integration.type !== "fortimanager") {
+    return { eligible: false, fmgConfig: null, deviceName: "" };
+  }
+  const cfg = (integration.config ?? {}) as Record<string, unknown>;
+  if (cfg.pushReservations !== true) {
+    return { eligible: false, fmgConfig: null, deviceName: "" };
+  }
+  const deviceName = subnet.fortigateDevice || "";
+  return {
+    eligible: true,
+    fmgConfig: cfg as unknown as FortiManagerConfig,
+    deviceName,
+  };
+}
+
 export async function createReservation(input: CreateReservationInput) {
-  // 1. Load the target subnet
-  const subnet = await prisma.subnet.findUnique({ where: { id: input.subnetId } });
+  // 1. Load the target subnet (with integration for push eligibility)
+  const subnet = await prisma.subnet.findUnique({
+    where: { id: input.subnetId },
+    include: { integration: true },
+  });
   if (!subnet) throw new AppError(404, `Subnet ${input.subnetId} not found`);
   if (subnet.status === "deprecated")
     throw new AppError(409, `Subnet ${subnet.cidr} is deprecated and cannot accept new reservations`);
@@ -123,7 +166,30 @@ export async function createReservation(input: CreateReservationInput) {
       );
   }
 
-  // 3. Create the reservation & mark subnet as reserved if full-subnet
+  // 3. Resolve push eligibility BEFORE creating the row so we can fail fast
+  //    on missing MAC without leaving a half-created reservation behind.
+  const push = resolvePushEligibility(
+    subnet,
+    subnet.integration,
+    input.ipAddress ?? null,
+  );
+  if (push.eligible) {
+    if (!input.macAddress || !input.macAddress.trim()) {
+      throw new AppError(
+        400,
+        "MAC address is required — this subnet's integration is configured to push reservations to the FortiGate, and DHCP reservations are MAC→IP",
+      );
+    }
+    if (!push.deviceName) {
+      throw new AppError(
+        409,
+        `Subnet ${subnet.cidr} has no fortigateDevice — the integration discovered the subnet without a device name, so push cannot resolve a target FortiGate`,
+      );
+    }
+  }
+
+  // 4. Create the reservation & mark subnet as reserved if full-subnet
+  const macClean = input.macAddress ? normalizeMac(input.macAddress) : null;
   const reservation = await prisma.$transaction(async (tx) => {
     const res = await tx.reservation.create({
       data: {
@@ -136,6 +202,7 @@ export async function createReservation(input: CreateReservationInput) {
         notes: input.notes,
         status: "active",
         createdBy: input.createdBy ?? null,
+        macAddress: macClean,
       } as any,
     });
 
@@ -149,7 +216,82 @@ export async function createReservation(input: CreateReservationInput) {
     return res;
   });
 
-  return reservation;
+  // 5. If push isn't eligible, we're done.
+  if (!push.eligible || !push.fmgConfig || !input.ipAddress || !macClean) {
+    return reservation;
+  }
+
+  // 6. Push to FortiGate. On any failure we delete the Polaris row so the
+  //    create reads as atomic from the operator's perspective. We accept the
+  //    rare case where the FortiOS write succeeded but verify failed (the
+  //    push function throws inside verify) — those orphans on the device
+  //    will be reconciled by the next discovery run via Drift detection.
+  try {
+    const pushed: PushReservationResult = await pushReservation({
+      reservationId: reservation.id,
+      subnetCidr: subnet.cidr,
+      ip: input.ipAddress,
+      mac: macClean,
+      hostname: input.hostname ?? null,
+      owner: input.owner ?? null,
+      fmgConfig: push.fmgConfig,
+      deviceName: push.deviceName,
+    });
+
+    const stamped = await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: {
+        pushedToId: subnet.discoveredBy,
+        pushedScopeId: pushed.scopeId,
+        pushedEntryId: pushed.entryId,
+        pushStatus: "synced",
+        pushedAt: new Date(),
+        pushError: null,
+      },
+    });
+
+    void logEvent({
+      action: "reservation.push.succeeded",
+      level: "info",
+      resourceType: "reservation",
+      resourceId: stamped.id,
+      resourceName: stamped.hostname || stamped.ipAddress || undefined,
+      actor: input.createdBy ?? undefined,
+      message: `Reservation pushed to FortiGate "${push.deviceName}" (scope ${pushed.scopeId}, entry ${pushed.entryId})`,
+      details: {
+        deviceName: push.deviceName,
+        scopeId: pushed.scopeId,
+        entryId: pushed.entryId,
+        serverInterface: pushed.serverInterface,
+        ip: input.ipAddress,
+        mac: macClean,
+      },
+    });
+
+    return stamped;
+  } catch (err: any) {
+    // Roll back: push failed (or verify failed). Don't leave a Polaris ghost.
+    try {
+      await prisma.reservation.delete({ where: { id: reservation.id } });
+    } catch {
+      // Swallow rollback failure — the original push error is more useful.
+    }
+    void logEvent({
+      action: "reservation.push.failed",
+      level: "warning",
+      resourceType: "reservation",
+      resourceName: input.hostname || input.ipAddress || undefined,
+      actor: input.createdBy ?? undefined,
+      message: `Reservation push to FortiGate "${push.deviceName}" failed — reservation aborted: ${err?.message || "Unknown error"}`,
+      details: {
+        deviceName: push.deviceName,
+        ip: input.ipAddress,
+        mac: macClean,
+        error: err?.message || String(err),
+      },
+    });
+    throw err;
+  }
 }
 
 // ─── Update ───────────────────────────────────────────────────────────────────
@@ -180,12 +322,71 @@ export async function updateReservation(
 export async function releaseReservation(id: string) {
   const reservation = await prisma.reservation.findUnique({
     where: { id },
-    include: { subnet: true },
+    include: {
+      subnet: true,
+      pushedTo: true,
+    },
   });
 
   if (!reservation) throw new AppError(404, `Reservation ${id} not found`);
   if (reservation.status !== "active")
     throw new AppError(409, `Reservation is already ${reservation.status}`);
+
+  // Best-effort unpush from the FortiGate before flipping Polaris state.
+  // We tolerate device-side failures (offline, missing entry, etc.) so an
+  // unreachable FortiGate doesn't block the operator from releasing — but
+  // we surface the failure as a `reservation.unpush.failed` Event so the
+  // orphan is auditable.
+  if (
+    reservation.pushedTo &&
+    reservation.pushedScopeId !== null &&
+    reservation.pushedEntryId !== null
+  ) {
+    const fmgConfig = reservation.pushedTo.config as unknown as FortiManagerConfig;
+    const deviceName = reservation.subnet.fortigateDevice || "";
+    if (deviceName) {
+      try {
+        const result = await unpushReservation({
+          reservationId: id,
+          scopeId: reservation.pushedScopeId,
+          entryId: reservation.pushedEntryId,
+          fmgConfig,
+          deviceName,
+        });
+        void logEvent({
+          action: "reservation.unpush.succeeded",
+          level: "info",
+          resourceType: "reservation",
+          resourceId: id,
+          resourceName: reservation.hostname || reservation.ipAddress || undefined,
+          message: result.alreadyAbsent
+            ? `Reservation unpush — entry was already absent on FortiGate "${deviceName}" (scope ${reservation.pushedScopeId}, entry ${reservation.pushedEntryId})`
+            : `Reservation unpushed from FortiGate "${deviceName}" (scope ${reservation.pushedScopeId}, entry ${reservation.pushedEntryId})`,
+          details: {
+            deviceName,
+            scopeId: reservation.pushedScopeId,
+            entryId: reservation.pushedEntryId,
+            alreadyAbsent: result.alreadyAbsent,
+          },
+        });
+      } catch (err: any) {
+        void logEvent({
+          action: "reservation.unpush.failed",
+          level: "warning",
+          resourceType: "reservation",
+          resourceId: id,
+          resourceName: reservation.hostname || reservation.ipAddress || undefined,
+          message: `Reservation unpush from FortiGate "${deviceName}" failed — Polaris release proceeded but the device entry may be orphaned: ${err?.message || "Unknown error"}`,
+          details: {
+            deviceName,
+            scopeId: reservation.pushedScopeId,
+            entryId: reservation.pushedEntryId,
+            error: err?.message || String(err),
+          },
+        });
+      }
+    }
+  }
 
   return prisma.$transaction(async (tx) => {
     // The @@unique([subnetId, ipAddress, status]) constraint means we can't
@@ -204,7 +405,16 @@ export async function releaseReservation(id: string) {
 
     const released = await tx.reservation.update({
       where: { id },
-      data: { status: "released" },
+      data: {
+        status: "released",
+        // Clear push pointers — the device entry is gone (or orphaned and
+        // logged) and a future re-reservation should make its own push.
+        pushedToId: null,
+        pushedScopeId: null,
+        pushedEntryId: null,
+        pushStatus: null,
+        pushedAt: null,
+      },
     });
 
     // If it was a full-subnet reservation, set subnet back to available
@@ -229,6 +439,7 @@ export interface NextAvailableReservationInput {
   expiresAt?: Date;
   notes?: string;
   createdBy?: string;
+  macAddress?: string;
 }
 
 export async function nextAvailableReservation(input: NextAvailableReservationInput) {

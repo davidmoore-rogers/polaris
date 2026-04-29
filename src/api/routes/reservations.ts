@@ -18,6 +18,15 @@ const router = Router();
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
+const MacAddressSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (s) => /^[0-9a-f]{12}$|^([0-9a-f]{2}[:\-]){5}[0-9a-f]{2}$|^([0-9a-f]{4}\.){2}[0-9a-f]{4}$/i.test(s),
+    "MAC address must be 12 hex chars (with optional :, -, or . separators)",
+  )
+  .optional();
+
 const CreateReservationSchema = z.object({
   subnetId: z.string().uuid(),
   ipAddress: z.string().optional(),
@@ -26,6 +35,7 @@ const CreateReservationSchema = z.object({
   projectRef: z.string().optional(),
   expiresAt: z.coerce.date().optional(),
   notes: z.string().optional(),
+  macAddress: MacAddressSchema,
 });
 
 const NextAvailableSchema = z.object({
@@ -35,6 +45,7 @@ const NextAvailableSchema = z.object({
   projectRef: z.string().optional(),
   expiresAt: z.coerce.date().optional(),
   notes: z.string().optional(),
+  macAddress: MacAddressSchema,
 });
 
 const UpdateReservationSchema = z.object({
@@ -55,7 +66,10 @@ router.post("/next-available", requireUserOrAbove, async (req, res, next) => {
       ...input,
       createdBy: req.session?.username,
     });
-    logEvent({ action: "reservation.created", resourceType: "reservation", resourceId: reservation.id, resourceName: reservation.hostname || reservation.ipAddress || undefined, actor: req.session?.username, message: `Reservation auto-allocated for ${reservation.ipAddress} (${input.owner || "no owner"})` });
+    const pushedSuffix = reservation.pushStatus === "synced"
+      ? ` and pushed to FortiGate`
+      : "";
+    logEvent({ action: "reservation.created", resourceType: "reservation", resourceId: reservation.id, resourceName: reservation.hostname || reservation.ipAddress || undefined, actor: req.session?.username, message: `Reservation auto-allocated for ${reservation.ipAddress} (${input.owner || "no owner"})${pushedSuffix}` });
     res.status(201).json(reservation);
   } catch (err) {
     next(err);
@@ -95,7 +109,10 @@ router.post("/", requireUserOrAbove, async (req, res, next) => {
       ...input,
       createdBy: req.session?.username,
     });
-    logEvent({ action: "reservation.created", resourceType: "reservation", resourceId: reservation.id, resourceName: input.hostname || input.ipAddress, actor: req.session?.username, message: `Reservation created for ${input.ipAddress || "subnet"} (${input.owner})` });
+    const pushedSuffix = reservation.pushStatus === "synced"
+      ? ` and pushed to FortiGate`
+      : "";
+    logEvent({ action: "reservation.created", resourceType: "reservation", resourceId: reservation.id, resourceName: input.hostname || input.ipAddress, actor: req.session?.username, message: `Reservation created for ${input.ipAddress || "subnet"} (${input.owner})${pushedSuffix}` });
     res.status(201).json(reservation);
   } catch (err) {
     next(err);
