@@ -463,6 +463,12 @@ model AssetIpsecTunnelSample {
   asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   timestamp      DateTime @default(now())
   tunnelName     String
+  // Parent interface from `config vpn ipsec phase1-interface` (the FortiOS
+  // CMDB `interface` field — typically the WAN port the tunnel rides, e.g.
+  // "wan1" or a VLAN sub-interface). The System tab uses this to nest tunnel
+  // rows under their parent in the Interfaces table. Null when the CMDB
+  // endpoint is unreachable or returns no matching phase-1.
+  parentInterface String?
   remoteGateway  String?
   // "up" = every phase-2 selector is up; "down" = every selector down; "partial" = mix.
   status         String
