@@ -92,6 +92,7 @@ polaris/
 │   │   ├── blockService.ts          # Block business logic
 │   │   ├── subnetService.ts         # Subnet allocation logic
 │   │   ├── reservationService.ts    # Reservation business logic
+│   │   ├── reservationPushService.ts # Push manual DHCP reservations to FortiGate via an FMG integration (proxy or direct realtime, with read-back verify); used by reservationService on create + release
 │   │   ├── utilizationService.ts    # Utilization reporting
 │   │   ├── fortimanagerService.ts   # FMG JSON-RPC client & discovery orchestration
 │   │   ├── fortigateService.ts      # Standalone FortiGate REST API client & discovery
@@ -234,6 +235,24 @@ Reservation
   sourceType      ReservationSourceType @default(manual)
   createdBy       String?
   conflictMessage String?         -- human-readable conflict summary
+  -- DHCP reservation push to FortiGate. Populated only when the subnet was
+  -- discovered by an FMG integration with `pushReservations=true` AND the
+  -- reservation is sourceType=manual + per-IP (full-subnet reservations are
+  -- never pushed). pushedScopeId / pushedEntryId pin the device-side row so
+  -- unpush hits the exact entry without re-resolving by IP. macAddress is the
+  -- MAC sent to the device — DHCP reservations are MAC→IP, so a missing MAC
+  -- on a push-eligible subnet aborts the create with 400. pushStatus values:
+  -- "synced" (verified on device); "drift" (was synced, missing on a later
+  -- discovery — operator deleted on the device). On create-time push failure
+  -- the entire reservation create aborts and no row is persisted, so "failed"
+  -- is not a stored state. See `reservationPushService.ts`.
+  macAddress      String?
+  pushedToId      UUID? FK → Integration (set null on delete)
+  pushedScopeId   Int?            -- FortiOS DHCP server `id`
+  pushedEntryId   Int?            -- reserved-address row id under that scope
+  pushStatus      String?         -- "synced" | "drift"
+  pushedAt        DateTime?
+  pushError       String?
   conflicts       Conflict[]
   @@unique([subnetId, ipAddress, status])
 
@@ -579,10 +598,10 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 
 ### Reservations — `requireAuth`
 - `GET    /reservations`                        — List (filter by owner, projectRef, status, createdBy)
-- `POST   /reservations`
+- `POST   /reservations`                        — Create. Body accepts an optional `macAddress` (12 hex with optional `:`, `-`, or `.` separators). When the target subnet was discovered by an FMG integration with `pushReservations=true`, MAC becomes **required** and the create is atomic with a write+verify against the FortiGate — see `reservationPushService.ts`. Push success returns the reservation with `pushStatus="synced"` and the device-side `pushedScopeId`/`pushedEntryId` stamped; any device-side failure aborts the create with a clear 4xx/5xx (no Polaris ghost). Writes `reservation.push.succeeded` (info) on success, `reservation.push.failed` (warning) on failure in addition to the usual `reservation.created` Event. The same MAC + push behavior applies to `POST /reservations/next-available` and `POST /assets/:id/reserve`.
 - `GET    /reservations/:id`
 - `PUT    /reservations/:id`
-- `DELETE /reservations/:id`                    — Release
+- `DELETE /reservations/:id`                    — Release. Best-effort unpush from the FortiGate before flipping the row to `released`. Device-side failure does **not** block the release — Polaris release proceeds and writes `reservation.unpush.failed` (warning) so the orphan on the device is auditable. "Already absent" (operator deleted on the device) writes `reservation.unpush.succeeded` with `alreadyAbsent: true`.
 
 ### Utilization — `requireAuth`
 - `GET    /utilization`
@@ -768,6 +787,14 @@ For **FortiGates**, the integration always stamps `monitorType="fortimanager"` o
 **Per-device transport (`useProxy` toggle):** The FMG integration has two per-device query transports, selectable in the integration edit modal. The UI checkbox is labeled "Query each FortiGate directly (bypass FortiManager proxy)" — *checked = direct, unchecked = proxy*. The on-disk field is still `useProxy` (true=proxy); the UI just inverts the semantics so the more aggressive option (direct) is the explicit affirmative action. The modal also surfaces a "more than 20 FortiGates → switch to direct" recommendation since proxy mode polls one device at a time.
 - **Proxy mode** (default, `useProxy: true`): all per-device queries funnel through FMG's `/sys/proxy/json` (monitor endpoints) and `/pm/config/device/<name>/...` (CMDB). Parallelism is force-clamped to 1 because FMG drops parallel connections past very low parallelism, surfacing as `fetch failed` on random calls.
 - **Direct mode** (`useProxy: false`): FMG is only used to enumerate the managed FortiGate roster; per-device calls go direct to each FortiGate's management IP (the `ip` field on the FMG `/dvmdb/adom/<adom>/device` response) using shared REST API credentials stored in `config.fortigateApiUser` / `config.fortigateApiToken`. Each managed FortiGate must have the same REST API admin provisioned with a trusthost that includes Polaris. Delegates per-device work to `fortigateService.discoverDhcpSubnets` and remaps the device name back to FMG's label. Unlocks `discoveryParallelism` (up to 20).
+
+**Reservation push (`pushReservations` toggle):** The FMG integration's `config` JSON has a `pushReservations: boolean` flag (default `false`), edited from the **Reservation Push** tab on the integration's Add/Edit modal. When enabled, every manual reservation created on a subnet that this integration discovered is written to the FortiGate at create time, and the Polaris row only commits if the device write succeeds and verifies on read-back. A push or verify failure aborts the reservation create entirely — no Polaris ghost when the device write didn't land. Transport follows `useProxy`:
+- **Proxy realtime** (`useProxy: true`): the reserved-address row is written via FMG's `/sys/proxy/json` endpoint (`fmgProxyRest()` in `fortimanagerService.ts`) — FMG forwards the call to the FortiGate using its own stored device credentials. Lands on the FortiGate's running config in real time; FMG sees the change on its next config sync.
+- **Direct realtime** (`useProxy: false`): the device's management IP is resolved via FMG (`resolveDeviceMgmtIpViaFmg()`), then the write goes straight to the FortiGate's REST API using `config.fortigateApiUser` / `config.fortigateApiToken`.
+
+Push scope resolution: `reservationPushService.findScopeIdForCidr` matches the subnet's CIDR against the FortiGate's `system.dhcp.server` table by reconstructing each scope's network from `default-gateway` + `netmask` (fall back: `ip-range[0].start-ip` inside the subnet). The matched `scopeId` and the new entry's `entryId` are stamped on the Reservation as `pushedScopeId` / `pushedEntryId` so unpush hits the exact device-side row without re-resolving. **Required FortiManager admin profile changes:** `Device Manager → Manage Device Configurations → Read-Write` is the only sub-permission that needs to flip from the existing read-only baseline; all other Device Manager and Policy & Objects sub-items can stay where they are. Importantly, `Install Policy Package or Device Configuration` should remain **None** — Polaris never triggers installs in this path. The blast radius warning surfaced in the modal is real: FMG profiles have no per-object DHCP-reservation knob, so granting Manage Device Configurations write enables write across every CMDB tree on every FortiGate in the ADOM. The modal also recommends direct mode + a per-FortiGate Custom profile (`Network → Custom → Configuration → Read/Write`) for shops that want least-privilege.
+
+Release-time unpush is best-effort — a device-side failure logs `reservation.unpush.failed` (warning) but does not block the Polaris release, so an offline FortiGate doesn't stop operators from letting go of an IP. **Update of pushed reservations is not in scope for v1**: the reservation update endpoint only allows hostname/owner/projectRef/expiresAt/notes (none of which would change the device-side entry's MAC or IP), so re-push on update is a no-op. Operators who need to change the MAC/IP on a pushed reservation must release and recreate.
 
 ---
 
