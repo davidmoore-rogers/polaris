@@ -1307,6 +1307,14 @@ const OID = {
   entPhySensorPrecision:  "1.3.6.1.2.1.99.1.1.1.3",
   entPhySensorValue:      "1.3.6.1.2.1.99.1.1.1.4",
   entPhySensorOperStatus: "1.3.6.1.2.1.99.1.1.1.5",
+  // FORTINET-FORTIGATE-MIB::fgHwSensorTable. Branch-class FortiGates
+  // (40F/60F/61F/91G/101F) don't populate ENTITY-SENSOR-MIB and 404 the
+  // FortiOS REST sensor-info endpoint, but they do publish hardware sensors
+  // here. The table mixes temperature, fan, and voltage sensors — there is
+  // no type column, so callers must filter by name. fgHwSensorEntValue is a
+  // DisplayString carrying a decimal value (e.g. "44.5").
+  fgHwSensorEntName:  "1.3.6.1.4.1.12356.101.4.3.2.1.2",
+  fgHwSensorEntValue: "1.3.6.1.4.1.12356.101.4.3.2.1.3",
 };
 
 function buildSnmpSession(host: string, config: Record<string, unknown>): any {
@@ -1562,7 +1570,7 @@ async function collectTelemetrySnmp(
     // and operStatus=1 (ok). entPhysicalDescr (ENTITY-MIB) keyed by the same
     // physical-entity index gives the friendly name. Devices that don't
     // implement the MIB just return nothing.
-    const temperatures = await collectTemperaturesSnmp(session).catch(() => [] as TemperatureSample[]);
+    const temperatures = await collectTemperaturesSnmp(session, manufacturer).catch(() => [] as TemperatureSample[]);
 
     return { cpuPct, memPct, memUsedBytes, memTotalBytes, temperatures };
   });
@@ -1714,7 +1722,7 @@ function snmpGetScalar(session: any, oid: string): Promise<unknown> {
   });
 }
 
-async function collectTemperaturesSnmp(session: any): Promise<TemperatureSample[]> {
+async function collectTemperaturesSnmp(session: any, manufacturer?: string | null): Promise<TemperatureSample[]> {
   const [types, values, scales, precisions, opers, descrs] = await Promise.all([
     snmpWalk(session, OID.entPhySensorType).catch(() => new Map()),
     snmpWalk(session, OID.entPhySensorValue).catch(() => new Map()),
@@ -1738,6 +1746,40 @@ async function collectTemperaturesSnmp(session: any): Promise<TemperatureSample[
     out.push({
       sensorName: snmpVbToString(descrs.get(idx)) || `sensor-${idx}`,
       celsius:    Number.isFinite(celsius) ? Math.round(celsius * 10) / 10 : null,
+    });
+  }
+  if (out.length === 0 && manufacturer && /fortinet/i.test(manufacturer)) {
+    return await collectTemperaturesFortinetSnmp(session);
+  }
+  return out;
+}
+
+// FORTINET-FORTIGATE-MIB::fgHwSensorTable fallback for branch FortiGates that
+// don't implement ENTITY-SENSOR-MIB. The table has no sensor-type column, so
+// we keep rows whose name looks like a temperature sensor and whose value
+// parses to a plausible Celsius reading. Common temp sensor names: "DTS CPU0",
+// "ADT7490 ...", "LM75 ...", "MB Temp", "CPU Temp"; we exclude obvious
+// fan/voltage/power rows.
+async function collectTemperaturesFortinetSnmp(session: any): Promise<TemperatureSample[]> {
+  const [names, values] = await Promise.all([
+    snmpWalk(session, OID.fgHwSensorEntName).catch(() => new Map()),
+    snmpWalk(session, OID.fgHwSensorEntValue).catch(() => new Map()),
+  ]);
+  const out: TemperatureSample[] = [];
+  const TEMP_NAME = /temp|dts|adt\d|lm7\d|tmp\d|°c|thermal/i;
+  const NON_TEMP  = /\bfan\b|rpm|\bvolt|^[+-]?\d+(\.\d+)?\s*v\b|vcc|vdd|vrm|psu|power|current|amp/i;
+  for (const [idx, nameRaw] of names.entries()) {
+    const name = snmpVbToString(nameRaw).trim();
+    if (!name) continue;
+    if (NON_TEMP.test(name)) continue;
+    if (!TEMP_NAME.test(name)) continue;
+    const valStr = snmpVbToString(values.get(idx)).trim();
+    const n = Number(valStr);
+    if (!Number.isFinite(n)) continue;
+    if (n < -40 || n > 200) continue; // sane Celsius range; rejects RPM/voltage caught by name
+    out.push({
+      sensorName: name,
+      celsius:    Math.round(n * 10) / 10,
     });
   }
   return out;
