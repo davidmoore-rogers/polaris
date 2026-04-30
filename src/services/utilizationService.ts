@@ -4,10 +4,8 @@
  * Aggregates subnet usage statistics for the dashboard.
  */
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../db.js";
 import { usableHostCount } from "../utils/cidr.js";
-
-const prisma = new PrismaClient();
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

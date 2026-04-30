@@ -8,11 +8,9 @@
  * Stored as a single JSON blob in the Setting table under SETTING_KEY.
  */
 
-import { PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
+import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
-
-const prisma = new PrismaClient();
 
 const SETTING_KEY = "networkAllocationTemplates";
 

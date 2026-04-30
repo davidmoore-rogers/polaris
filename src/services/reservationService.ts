@@ -2,7 +2,8 @@
  * src/services/reservationService.ts
  */
 
-import { PrismaClient, ReservationStatus } from "@prisma/client";
+import type { ReservationStatus } from "../generated/prisma/client.js";
+import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { ipInCidr, isValidIpAddress, enumerateSubnetIps, detectIpVersion } from "../utils/cidr.js";
 import {
@@ -14,8 +15,6 @@ import {
 } from "./reservationPushService.js";
 import type { FortiManagerConfig } from "./fortimanagerService.js";
 import { logEvent } from "../api/routes/events.js";
-
-const prisma = new PrismaClient();
 
 export interface CreateReservationInput {
   subnetId: string;

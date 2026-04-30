@@ -7,20 +7,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { AppError } from "../../src/utils/errors.js";
 
-// Mock PrismaClient before importing the service
-vi.mock("@prisma/client", () => {
-  const prisma = {
-    ipBlock:     { findUnique: vi.fn(), findMany: vi.fn() },
-    subnet:      { create: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(), update: vi.fn(), delete: vi.fn() },
-    reservation: { count: vi.fn() },
-  };
-  return { PrismaClient: vi.fn(function () { return prisma; }), SubnetStatus: {} };
-});
+// Mock the prisma singleton before importing the service
+const prisma = {
+  ipBlock:     { findUnique: vi.fn(), findMany: vi.fn() },
+  subnet:      { create: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(), update: vi.fn(), delete: vi.fn() },
+  reservation: { count: vi.fn() },
+};
+vi.mock("../../src/db.js", () => ({ prisma }));
 
-import { PrismaClient } from "@prisma/client";
-import { createSubnet, deleteSubnet } from "../../src/services/subnetService.js";
-
-const prisma = new (PrismaClient as any)();
+const { createSubnet, deleteSubnet } = await import("../../src/services/subnetService.js");
 
 beforeEach(() => vi.clearAllMocks());
 

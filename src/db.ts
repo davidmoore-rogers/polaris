@@ -20,10 +20,16 @@
  * circular import with assetIpHistoryService.
  */
 
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "./generated/prisma/client.js";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { normalizeManufacturer } from "./utils/manufacturerNormalize.js";
 
 const g = globalThis as unknown as { prisma: any; _prismaBase: PrismaClient };
+
+function buildBaseClient(): PrismaClient {
+  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL ?? "" });
+  return new PrismaClient({ adapter });
+}
 
 async function recordIpHistory(base: PrismaClient, assetId: string, ip: string, src: string) {
   const now = new Date();
@@ -123,7 +129,7 @@ function _buildClient(base: PrismaClient) {
   });
 }
 
-const _base: PrismaClient = g._prismaBase ?? new PrismaClient();
+const _base: PrismaClient = g._prismaBase ?? buildBaseClient();
 export const prisma: ReturnType<typeof _buildClient> = g.prisma ?? _buildClient(_base);
 
 if (process.env.NODE_ENV !== "production") {

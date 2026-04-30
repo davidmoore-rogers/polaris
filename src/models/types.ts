@@ -2,7 +2,6 @@
  * src/models/types.ts — Shared TypeScript interfaces
  *
  * Application-level types that layer on top of Prisma's generated types.
- * Import Prisma base types from @prisma/client; augmented shapes from here.
  */
 
 import type {
@@ -12,7 +11,7 @@ import type {
   IpVersion,
   SubnetStatus,
   ReservationStatus,
-} from "@prisma/client";
+} from "../generated/prisma/client.js";
 
 // Re-export Prisma enums for convenience
 export type { IpVersion, SubnetStatus, ReservationStatus };

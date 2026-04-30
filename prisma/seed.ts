@@ -4,10 +4,8 @@
  * Run with: npm run db:seed
  */
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../src/db.js";
 import { hashPassword } from "../src/utils/password.js";
-
-const prisma = new PrismaClient();
 
 async function main() {
   // Refuse to run in production. This script creates a default `admin`/`admin`

@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 /**
- * scripts/audit-multi-mac-assets.mjs
+ * scripts/audit-multi-mac-assets.ts
  *
  * Finds assets whose macAddresses list looks cross-stapled — i.e. MACs from
  * different DHCP subnets that were merged onto one asset by the old
  * findByEntry IP-fallback (fixed in commits 2ac0361 / e6096f7).
  *
  * Default: dry-run report.
- *   node scripts/audit-multi-mac-assets.mjs
+ *   node --env-file=.env --import tsx/esm scripts/audit-multi-mac-assets.ts
  *
  * Apply mode: for each flagged asset, keep only MACs whose subnetCidr
  * contains the asset's primary ipAddress, and drop the rest. The dropped
  * devices will be re-created as fresh assets on the next discovery run.
- *   node --env-file=.env scripts/audit-multi-mac-assets.mjs --apply
+ *   node --env-file=.env --import tsx/esm scripts/audit-multi-mac-assets.ts --apply
  *
  * Heuristic: MAC entries on 2+ distinct subnetCidrs. A single endpoint's
  * wifi + ethernet MACs normally share one subnet; multi-subnet membership
@@ -21,23 +21,30 @@
  * names across interfaces.)
  */
 
-import { PrismaClient } from "@prisma/client";
 import { Netmask } from "netmask";
+import { prisma } from "../src/db.js";
+
+interface MacEntry {
+  mac: string;
+  subnetCidr?: string;
+  device?: string;
+  source?: string;
+  lastSeen?: string;
+}
 
 const APPLY = process.argv.includes("--apply");
-const prisma = new PrismaClient();
 
-function containsIp(cidr, ip) {
+function containsIp(cidr: string | undefined, ip: string | null): boolean {
   if (!cidr || !ip) return false;
   try { return new Netmask(cidr).contains(ip); } catch { return false; }
 }
 
-function distinctSubnets(macs) {
-  return new Set(macs.map((m) => m.subnetCidr).filter(Boolean));
+function distinctSubnets(macs: MacEntry[]): Set<string> {
+  return new Set(macs.map((m) => m.subnetCidr).filter((c): c is string => Boolean(c)));
 }
 
-function fmtMac(m) {
-  const parts = [m.mac];
+function fmtMac(m: MacEntry): string {
+  const parts: string[] = [m.mac];
   if (m.subnetCidr) parts.push(m.subnetCidr);
   if (m.device) parts.push(`dev=${m.device}`);
   if (m.source) parts.push(m.source);
@@ -50,20 +57,23 @@ async function main() {
     select: { id: true, hostname: true, ipAddress: true, macAddress: true, macAddresses: true },
   });
 
-  const multi = all.filter((a) => Array.isArray(a.macAddresses) && a.macAddresses.length >= 2);
-  const flagged = multi.filter((a) => distinctSubnets(a.macAddresses).size >= 2);
+  const multi = all.filter((a) => Array.isArray(a.macAddresses) && (a.macAddresses as MacEntry[]).length >= 2);
+  const flagged = multi.filter((a) => distinctSubnets(a.macAddresses as MacEntry[]).size >= 2);
 
   console.log(`Scanned ${all.length} assets. ${multi.length} have 2+ MACs. ${flagged.length} span 2+ subnets (suspicious).\n`);
 
-  const actions = [];
+  type Action =
+    | { id: string; label: string; kind: "manual" }
+    | { id: string; label: string; kind: "prune"; kept: MacEntry[]; dropped: MacEntry[] };
+
+  const actions: Action[] = [];
   for (const a of flagged) {
-    const macs = a.macAddresses;
+    const macs = a.macAddresses as MacEntry[];
     const label = a.hostname || a.id;
     console.log(`— ${label}  (primary IP: ${a.ipAddress || "n/a"})`);
     for (const m of macs) console.log(`    ${fmtMac(m)}`);
 
-    // Decide what apply would do
-    let kept = a.ipAddress ? macs.filter((m) => containsIp(m.subnetCidr, a.ipAddress)) : [];
+    const kept = a.ipAddress ? macs.filter((m) => containsIp(m.subnetCidr, a.ipAddress)) : [];
     if (kept.length === 0) {
       console.log(`    → no MAC's subnet contains the asset's primary IP; MANUAL REVIEW\n`);
       actions.push({ id: a.id, label, kind: "manual" });
@@ -95,7 +105,7 @@ async function main() {
     const newPrimary = act.kept[0].mac;
     await prisma.asset.update({
       where: { id: act.id },
-      data: { macAddress: newPrimary, macAddresses: act.kept },
+      data: { macAddress: newPrimary, macAddresses: act.kept as never },
     });
     await prisma.event.create({
       data: {

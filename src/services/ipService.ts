@@ -5,7 +5,7 @@
  * All low-level address arithmetic lives in src/utils/cidr.ts.
  */
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import {
   isValidIpAddress,
@@ -15,8 +15,6 @@ import {
   detectIpVersion,
   usableHostCount,
 } from "../utils/cidr.js";
-
-const prisma = new PrismaClient();
 
 // ─── Validation helpers ───────────────────────────────────────────────────────
 

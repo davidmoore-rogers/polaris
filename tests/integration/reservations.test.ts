@@ -8,9 +8,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
 import { app } from "../../src/index.js";
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "../../src/db.js";
 
 beforeAll(async () => {
   await prisma.$connect();

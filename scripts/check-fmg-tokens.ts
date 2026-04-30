@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * scripts/check-fmg-tokens.mjs
+ * scripts/check-fmg-tokens.ts
  *
  * Prints the stored apiToken length and first-few characters for every
  * FortiManager/FortiGate integration. Used to diagnose "token expired again"
@@ -9,12 +9,10 @@
  * the rotation is happening on the FMG side.
  *
  * Run from the project root:
- *   node --env-file=.env scripts/check-fmg-tokens.mjs
+ *   node --env-file=.env --import tsx/esm scripts/check-fmg-tokens.ts
  */
 
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "../src/db.js";
 
 try {
   const rows = await prisma.integration.findMany({
@@ -30,11 +28,10 @@ try {
   console.log("");
   for (const r of rows) {
     const token = (r.config && typeof r.config === "object" && "apiToken" in r.config)
-      ? String(r.config.apiToken ?? "")
+      ? String((r.config as Record<string, unknown>).apiToken ?? "")
       : "";
     const len = token.length;
     const prefix = token.slice(0, 8);
-    // Distinguish real token (hex-ish) from the mask character repeated
     const looksMasked = /^[•*●]+$/.test(token);
     const looksEmpty = len === 0;
     const verdict = looksEmpty

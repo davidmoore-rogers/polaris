@@ -2,7 +2,8 @@
  * src/services/subnetService.ts
  */
 
-import { PrismaClient, SubnetStatus } from "@prisma/client";
+import type { SubnetStatus } from "../generated/prisma/client.js";
+import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import {
   normalizeCidr,
@@ -14,8 +15,6 @@ import {
   enumerateSubnetIps,
   packIntoAnchor,
 } from "../utils/cidr.js";
-
-const prisma = new PrismaClient();
 
 export interface CreateSubnetInput {
   blockId: string;

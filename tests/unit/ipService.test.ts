@@ -12,12 +12,10 @@ import { AppError } from "../../src/utils/errors.js";
 
 // Mock PrismaClient — DB-backed functions (isIpAvailable, subnetCapacity) are
 // covered by integration tests.
-vi.mock("@prisma/client", () => ({
-  PrismaClient: vi.fn(function () {
-    return {
-      reservation: { findFirst: vi.fn(), count: vi.fn() },
-    };
-  }),
+vi.mock("../../src/db.js", () => ({
+  prisma: {
+    reservation: { findFirst: vi.fn(), count: vi.fn() },
+  },
 }));
 
 describe("assertValidIp", () => {

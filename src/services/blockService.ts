@@ -2,15 +2,13 @@
  * src/services/blockService.ts
  */
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import {
   normalizeCidr,
   isValidCidr,
   detectIpVersion,
 } from "../utils/cidr.js";
-
-const prisma = new PrismaClient();
 
 export interface CreateBlockInput {
   name: string;
