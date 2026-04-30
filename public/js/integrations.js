@@ -422,6 +422,264 @@ function _classDirectPollHTML(idPrefix, kindLabel, snmpCredentials, currentEnabl
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
 }
 
+// ─── Auto-Monitor Interfaces card ──────────────────────────────────────────
+// Three selection modes; defaults differ per class (FortiGates → names,
+// FortiSwitches → wildcard, FortiAPs → type). On the Create modal we don't
+// have an integrationId yet, so the live preview + aggregate list are
+// suppressed (operator still picks a mode and sets values; the first preview
+// happens after Save + first discovery).
+
+// Rough threshold above which Save warns about pin volume. Per-asset isn't
+// the issue — the worst case is "type=physical, onlyUp=false" on a fleet of
+// 48-port FortiSwitches, which can pin thousands of interfaces all polled
+// every ~60s. Tune after observing real DBs.
+var AUTO_MONITOR_INTERFACE_WARN_THRESHOLD = 500;
+
+function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, defaultMode, hasIntegrationId) {
+  var sel = currentSelection || null;
+  var mode = sel ? sel.mode : "off";
+  // Card always renders all four mode panels; visibility is toggled on change.
+  function modeRadio(value, label, hint) {
+    var checked = (mode === value) ? " checked" : "";
+    return '<label style="display:block;margin-bottom:0.35rem;font-weight:500">' +
+             '<input type="radio" name="' + idPrefix + 'mode" value="' + value + '"' + checked + ' style="width:auto;margin-right:6px"> ' + escapeHtml(label) +
+             (hint ? ' <span style="color:var(--color-text-tertiary);font-weight:400;font-size:0.82rem">— ' + escapeHtml(hint) + '</span>' : '') +
+           '</label>';
+  }
+  // Names panel — populated by /interface-aggregate when first shown.
+  var namesPanel = '<div id="' + idPrefix + 'panel-names" style="display:none;margin-top:0.6rem">' +
+    (hasIntegrationId
+      ? '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">' +
+          '<button type="button" class="btn btn-secondary" id="' + idPrefix + 'reload" style="font-size:0.78rem;padding:4px 10px">Refresh from latest discovery</button>' +
+          '<span class="hint" id="' + idPrefix + 'names-counter" style="margin:0">Selected: 0</span>' +
+        '</div>' +
+        '<div id="' + idPrefix + 'names-list" style="max-height:280px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
+          '<p class="hint" style="margin:0">Loading…</p>' +
+        '</div>'
+      : '<p class="hint" style="margin:0;color:var(--color-warning)">Save the integration and run discovery first — interface names are aggregated from already-discovered devices.</p>'
+    ) +
+  '</div>';
+  // Wildcard panel — textarea + onlyUp checkbox.
+  var wildcardPatterns = (sel && sel.mode === "wildcard") ? sel.patterns.join("\n") : "";
+  var wildcardOnlyUp = (sel && sel.mode === "wildcard") ? sel.onlyUp === true : false;
+  var wildcardPanel = '<div id="' + idPrefix + 'panel-wildcard" style="display:none;margin-top:0.6rem">' +
+    '<div class="form-group" style="margin-bottom:0.6rem">' +
+      '<label>Patterns (one per line — <code>*</code> matches any chars, <code>?</code> matches one)</label>' +
+      '<textarea id="' + idPrefix + 'patterns" rows="4" style="font-family:monospace;font-size:0.85rem;width:100%" placeholder="wan*&#10;port4?">' + escapeHtml(wildcardPatterns) + '</textarea>' +
+    '</div>' +
+    '<label style="display:flex;align-items:center;gap:6px;font-size:0.88rem">' +
+      '<input type="checkbox" id="' + idPrefix + 'wildcard-onlyUp"' + (wildcardOnlyUp ? " checked" : "") + ' style="width:auto"> Only currently up' +
+      ' <span class="hint" style="margin:0">(skips administratively-disabled and disconnected ports)</span>' +
+    '</label>' +
+  '</div>';
+  // Type panel — five fixed checkboxes + onlyUp.
+  var typeSet = (sel && sel.mode === "type") ? new Set(sel.types) : new Set();
+  var typeOnlyUp = (sel && sel.mode === "type") ? sel.onlyUp !== false : true; // default true
+  function typeBox(name) {
+    var on = typeSet.has(name) ? " checked" : "";
+    return '<label style="display:flex;align-items:center;gap:6px;font-size:0.88rem;margin-bottom:0.25rem">' +
+             '<input type="checkbox" data-type-checkbox="1" id="' + idPrefix + 'type-' + name + '" value="' + name + '"' + on + ' style="width:auto"> ' + name +
+           '</label>';
+  }
+  var typePanel = '<div id="' + idPrefix + 'panel-type" style="display:none;margin-top:0.6rem">' +
+    typeBox("physical") + typeBox("aggregate") + typeBox("vlan") + typeBox("loopback") + typeBox("tunnel") +
+    '<label style="display:flex;align-items:center;gap:6px;font-size:0.88rem;margin-top:0.5rem">' +
+      '<input type="checkbox" id="' + idPrefix + 'type-onlyUp"' + (typeOnlyUp ? " checked" : "") + ' style="width:auto"> Only currently up' +
+      ' <span class="hint" style="margin:0">(skips administratively-disabled and disconnected ports)</span>' +
+    '</label>' +
+  '</div>';
+  // Preview block — filled by the wiring code on every change.
+  var previewPanel = '<div id="' + idPrefix + 'preview" class="form-group" style="margin-top:0.8rem;padding:0.5rem 0.7rem;background:var(--color-bg-tertiary);border-radius:var(--radius-sm);border:1px solid var(--color-border);font-size:0.84rem;color:var(--color-text-secondary);min-height:1.4em">' +
+    (hasIntegrationId ? '<em>Pick a mode to preview matches.</em>' : '<em>Preview becomes available after the integration is saved and discovery has run at least once.</em>') +
+  '</div>';
+  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Auto-monitor interfaces</p>' +
+    '<div style="background:rgba(79,195,247,0.06);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.7rem 0">Pin interfaces on every ' + escapeHtml(kindLabel) + ' discovered by this integration. Selected interfaces are added to each device\'s "Poll 1m" list and scraped on the response-time cadence (~60s). Operator-pinned interfaces on individual assets are preserved.</p>' +
+      '<div class="form-group" style="margin-bottom:0.6rem">' +
+        modeRadio("off",      "Disabled",                       "no auto-pinning") +
+        modeRadio("names",    "By name",                        "aggregated from devices") +
+        modeRadio("wildcard", "By pattern",                     "wildcard match (* and ?)") +
+        modeRadio("type",     "By interface type",              "physical / aggregate / vlan / ...") +
+      '</div>' +
+      namesPanel + wildcardPanel + typePanel + previewPanel +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
+}
+
+// Reads the auto-monitor card into a server-shaped AutoMonitorSelection or null.
+// Returns undefined when the card didn't render (subtab never opened).
+function _readAutoMonitorInterfaces(idPrefix) {
+  var radios = document.getElementsByName(idPrefix + "mode");
+  if (!radios || radios.length === 0) return undefined;
+  var mode = "off";
+  for (var i = 0; i < radios.length; i++) { if (radios[i].checked) { mode = radios[i].value; break; } }
+  if (mode === "off") return null;
+  if (mode === "names") {
+    var checks = document.querySelectorAll('input[data-name-checkbox="1"][data-prefix="' + idPrefix + '"]:checked');
+    var names = [];
+    for (var j = 0; j < checks.length; j++) names.push(checks[j].value);
+    if (names.length === 0) return null;
+    return { mode: "names", names: names };
+  }
+  if (mode === "wildcard") {
+    var ta = document.getElementById(idPrefix + "patterns");
+    var raw = ta ? String(ta.value || "") : "";
+    var patterns = raw.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+    if (patterns.length === 0) return null;
+    var ouEl = document.getElementById(idPrefix + "wildcard-onlyUp");
+    return { mode: "wildcard", patterns: patterns, onlyUp: ouEl ? ouEl.checked === true : false };
+  }
+  if (mode === "type") {
+    var typeChecks = document.querySelectorAll('input[data-type-checkbox="1"][id^="' + idPrefix + 'type-"]:checked');
+    var types = [];
+    for (var k = 0; k < typeChecks.length; k++) {
+      var v = typeChecks[k].value;
+      if (v === "physical" || v === "aggregate" || v === "vlan" || v === "loopback" || v === "tunnel") types.push(v);
+    }
+    if (types.length === 0) return null;
+    var ou2El = document.getElementById(idPrefix + "type-onlyUp");
+    return { mode: "type", types: types, onlyUp: ou2El ? ou2El.checked === true : true };
+  }
+  return null;
+}
+
+// Wires change-listeners on a freshly-rendered auto-monitor card. Toggles
+// panel visibility + fetches the aggregate list lazily on first "names" view
+// + debounces a preview call into the preview block. Safe to call after the
+// card's HTML has been inserted into the DOM.
+function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
+  var radios = document.getElementsByName(idPrefix + "mode");
+  if (!radios || radios.length === 0) return;
+  var panels = {
+    names:    document.getElementById(idPrefix + "panel-names"),
+    wildcard: document.getElementById(idPrefix + "panel-wildcard"),
+    type:     document.getElementById(idPrefix + "panel-type"),
+  };
+  var preview = document.getElementById(idPrefix + "preview");
+  var namesLoaded = false;
+
+  function showPanel(mode) {
+    panels.names.style.display    = (mode === "names")    ? "" : "none";
+    panels.wildcard.style.display = (mode === "wildcard") ? "" : "none";
+    panels.type.style.display     = (mode === "type")     ? "" : "none";
+    if (mode === "names" && !namesLoaded && integrationId) loadNamesList();
+    schedulePreview();
+  }
+
+  function loadNamesList(force) {
+    if (!integrationId) return;
+    var listEl = document.getElementById(idPrefix + "names-list");
+    if (!listEl) return;
+    if (!force && namesLoaded) return;
+    listEl.innerHTML = '<p class="hint" style="margin:0">Loading…</p>';
+    api.integrations.interfaceAggregate(integrationId, klass).then(function (resp) {
+      namesLoaded = true;
+      var rows = (resp && resp.rows) || [];
+      // Preserve any names the operator already checked from a prior selection.
+      var existingChecked = new Set();
+      var existing = document.querySelectorAll('input[data-name-checkbox="1"][data-prefix="' + idPrefix + '"]:checked');
+      for (var i = 0; i < existing.length; i++) existingChecked.add(existing[i].value);
+      // ALSO seed with the original currentSelection.names so "By name" remembers
+      // the saved selection even when it doesn't match anything in the latest aggregate.
+      if (window["__autoMon_seed_" + idPrefix]) {
+        window["__autoMon_seed_" + idPrefix].forEach(function (n) { existingChecked.add(n); });
+      }
+      if (rows.length === 0) {
+        listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-warning)">No interface samples yet. Once monitoring runs at least one System Info pass on each discovered device, names will appear here.</p>';
+      } else {
+        listEl.innerHTML = rows.map(function (r) {
+          var checked = existingChecked.has(r.ifName) ? " checked" : "";
+          var typeTag = r.ifType ? '<span class="hint" style="margin:0 0 0 6px;font-size:0.78rem">[' + escapeHtml(r.ifType) + ']</span>' : "";
+          return '<label style="display:flex;align-items:center;gap:6px;padding:2px 0;font-size:0.86rem">' +
+                   '<input type="checkbox" data-name-checkbox="1" data-prefix="' + idPrefix + '" value="' + escapeHtml(r.ifName) + '"' + checked + ' style="width:auto">' +
+                   '<span style="font-family:monospace">' + escapeHtml(r.ifName) + '</span>' +
+                   typeTag +
+                   '<span class="hint" style="margin:0 0 0 auto;font-size:0.78rem">' + r.deviceCount + ' device' + (r.deviceCount === 1 ? "" : "s") + '</span>' +
+                 '</label>';
+        }).join("");
+      }
+      // Hand-roll the change listener — fires the preview + selected counter.
+      var boxes = listEl.querySelectorAll('input[data-name-checkbox="1"]');
+      for (var b = 0; b < boxes.length; b++) {
+        boxes[b].addEventListener("change", function () { updateNamesCounter(); schedulePreview(); });
+      }
+      updateNamesCounter();
+      schedulePreview();
+    }).catch(function (err) {
+      listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-error)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
+    });
+  }
+
+  function updateNamesCounter() {
+    var counter = document.getElementById(idPrefix + "names-counter");
+    if (!counter) return;
+    var total = document.querySelectorAll('input[data-name-checkbox="1"][data-prefix="' + idPrefix + '"]').length;
+    var picked = document.querySelectorAll('input[data-name-checkbox="1"][data-prefix="' + idPrefix + '"]:checked').length;
+    counter.textContent = "Selected: " + picked + " / " + total;
+  }
+
+  // Debounced preview fetch.
+  var previewTimer = null;
+  function schedulePreview() {
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(runPreview, 250);
+  }
+
+  function runPreview() {
+    if (!preview) return;
+    if (!integrationId) {
+      preview.innerHTML = '<em>Preview becomes available after the integration is saved and discovery has run at least once.</em>';
+      return;
+    }
+    var selection = _readAutoMonitorInterfaces(idPrefix);
+    if (!selection) {
+      preview.innerHTML = '<em>Pick a mode and at least one value to preview matches.</em>';
+      preview.style.borderColor = "";
+      return;
+    }
+    api.integrations.interfaceAggregatePreview(integrationId, { class: klass, selection: selection }).then(function (r) {
+      var warn = r.interfaceCount > AUTO_MONITOR_INTERFACE_WARN_THRESHOLD;
+      var sample = (r.sampleDevices || []).slice(0, 5).map(function (d) {
+        return escapeHtml(d.hostname || "(unnamed)") + ' <span class="hint" style="margin:0;font-size:0.78rem">(' + d.pinNames.length + ')</span>';
+      }).join(" · ");
+      preview.innerHTML =
+        '<div><strong>' + r.interfaceCount + '</strong> interface' + (r.interfaceCount === 1 ? "" : "s") +
+        ' on <strong>' + r.deviceCount + '</strong> device' + (r.deviceCount === 1 ? "" : "s") +
+        ' (max ' + r.perDeviceMax + '/device)' +
+        (warn ? ' <span style="color:var(--color-warning);margin-left:6px">⚠ above warn threshold (' + AUTO_MONITOR_INTERFACE_WARN_THRESHOLD + ')</span>' : '') +
+        '</div>' +
+        (sample ? '<div style="margin-top:0.3rem;font-size:0.82rem">First matches: ' + sample + '</div>' : '');
+      preview.style.borderColor = warn ? "var(--color-warning)" : "";
+      // Cache the latest interface count on the card for the Save handler to read.
+      preview.dataset.interfaceCount = String(r.interfaceCount);
+    }).catch(function (err) {
+      preview.innerHTML = '<span style="color:var(--color-error)">Preview failed: ' + escapeHtml(err.message || "unknown error") + '</span>';
+    });
+  }
+
+  // Wire mode radios.
+  for (var i = 0; i < radios.length; i++) {
+    radios[i].addEventListener("change", function (e) { showPanel(e.target.value); });
+  }
+  // Wire wildcard + type changes (debounced preview).
+  var wildcardEls = [
+    document.getElementById(idPrefix + "patterns"),
+    document.getElementById(idPrefix + "wildcard-onlyUp"),
+    document.getElementById(idPrefix + "type-onlyUp"),
+  ];
+  wildcardEls.forEach(function (el) { if (el) el.addEventListener("input", schedulePreview); if (el) el.addEventListener("change", schedulePreview); });
+  var typeBoxes = document.querySelectorAll('input[data-type-checkbox="1"][id^="' + idPrefix + 'type-"]');
+  for (var t = 0; t < typeBoxes.length; t++) typeBoxes[t].addEventListener("change", schedulePreview);
+  // Reload button.
+  var reload = document.getElementById(idPrefix + "reload");
+  if (reload) reload.addEventListener("click", function () { namesLoaded = false; loadNamesList(true); });
+
+  // Initial state — show whichever panel matches the current mode.
+  var initialMode = "off";
+  for (var r2 = 0; r2 < radios.length; r2++) { if (radios[r2].checked) { initialMode = radios[r2].value; break; } }
+  showPanel(initialMode);
+}
+
 // FortiGate subtab variant — only "Add as Monitored" since FortiGates always
 // get a monitorType stamped at discovery (the integration's native type).
 function _fortigateAddMonitoredHTML(idPrefix, currentAddAsMonitored) {
@@ -457,13 +715,23 @@ function monitorSettingsFormHTML(s, opts) {
   };
   var fsClass = s.fortiswitch || {};
   var faClass = s.fortiap     || {};
-  var fwSwCfg = opts.fortiswitchMonitor || { enabled: false, snmpCredentialId: null, addAsMonitored: false };
-  var fwApCfg = opts.fortiapMonitor     || { enabled: false, snmpCredentialId: null, addAsMonitored: false };
-  var fwFgCfg = opts.fortigateMonitor   || { addAsMonitored: false };
+  var fwSwCfg = opts.fortiswitchMonitor || { enabled: false, snmpCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
+  var fwApCfg = opts.fortiapMonitor     || { enabled: false, snmpCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
+  var fwFgCfg = opts.fortigateMonitor   || { addAsMonitored: false, autoMonitorInterfaces: null };
+  var hasId = !!opts.integrationId;
+  // Stash the originally-saved name selection so the lazy-loaded checklist can
+  // re-tick checkboxes that match the saved selection — even if an interface
+  // name has gone missing from the latest discovery.
+  if (typeof window !== "undefined") {
+    window["__autoMon_seed_f-mon-fortigate-amon-"]   = (fwFgCfg.autoMonitorInterfaces && fwFgCfg.autoMonitorInterfaces.mode === "names") ? fwFgCfg.autoMonitorInterfaces.names.slice() : [];
+    window["__autoMon_seed_f-mon-fortiswitch-amon-"] = (fwSwCfg.autoMonitorInterfaces && fwSwCfg.autoMonitorInterfaces.mode === "names") ? fwSwCfg.autoMonitorInterfaces.names.slice() : [];
+    window["__autoMon_seed_f-mon-fortiap-amon-"]     = (fwApCfg.autoMonitorInterfaces && fwApCfg.autoMonitorInterfaces.mode === "names") ? fwApCfg.autoMonitorInterfaces.names.slice() : [];
+  }
 
   var fortigatePanel =
     _fortigateAddMonitoredHTML("f-mon-fortigate-", fwFgCfg.addAsMonitored === true) +
     integrationMonitorOverrideHTML(opts.snmpCredentials, opts.monitorCredentialId, opts.transportSources || {}) +
+    _autoMonitorInterfacesHTML("f-mon-fortigate-amon-", "FortiGate", fwFgCfg.autoMonitorInterfaces || null, "names", hasId) +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">' +
       'These timers apply <strong style="color:var(--color-text-primary)">globally</strong> to every monitored asset that isn\'t a Fortinet switch or AP — Cisco SNMP, Windows WinRM, Linux SSH, ICMP, etc. Switches and APs use the values on their own subtabs.' +
     '</div>' +
@@ -471,6 +739,7 @@ function monitorSettingsFormHTML(s, opts) {
 
   var switchPanel =
     _classDirectPollHTML("f-mon-fortiswitch-", "FortiSwitch", opts.snmpCredentials, fwSwCfg.enabled === true, fwSwCfg.snmpCredentialId || null, fwSwCfg.addAsMonitored === true) +
+    _autoMonitorInterfacesHTML("f-mon-fortiswitch-amon-", "FortiSwitch", fwSwCfg.autoMonitorInterfaces || null, "wildcard", hasId) +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">' +
       'These timers apply <strong style="color:var(--color-text-primary)">globally</strong> to every monitored Fortinet FortiSwitch — across all integrations, not just this one. Empty fields fall back to the values on the FortiGates subtab.' +
     '</div>' +
@@ -478,6 +747,7 @@ function monitorSettingsFormHTML(s, opts) {
 
   var apPanel =
     _classDirectPollHTML("f-mon-fortiap-", "FortiAP", opts.snmpCredentials, fwApCfg.enabled === true, fwApCfg.snmpCredentialId || null, fwApCfg.addAsMonitored === true) +
+    _autoMonitorInterfacesHTML("f-mon-fortiap-amon-", "FortiAP", fwApCfg.autoMonitorInterfaces || null, "type", hasId) +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">' +
       'These timers apply <strong style="color:var(--color-text-primary)">globally</strong> to every monitored Fortinet FortiAP — across all integrations, not just this one. Empty fields fall back to the values on the FortiGates subtab.' +
     '</div>' +
@@ -490,6 +760,16 @@ function monitorSettingsFormHTML(s, opts) {
     { key: "fortiswitches", label: "FortiSwitches", html: switchPanel },
     { key: "fortiaps",      label: "FortiAPs",      html: apPanel },
   ]);
+}
+
+// Call after monitorSettingsFormHTML() has been inserted into the DOM. Wires
+// each subtab's auto-monitor card. Safe to call when integrationId is null
+// (Create modal) — the cards still render but the live preview + aggregate
+// list are suppressed inside the wiring helper.
+function wireAutoMonitorCards(integrationId) {
+  _wireAutoMonitorCard("f-mon-fortigate-amon-",   "fortigate",   integrationId || null);
+  _wireAutoMonitorCard("f-mon-fortiswitch-amon-", "fortiswitch", integrationId || null);
+  _wireAutoMonitorCard("f-mon-fortiap-amon-",     "fortiap",     integrationId || null);
 }
 
 // Reads one class's timer block (FortiGate / FortiSwitch / FortiAP) and
@@ -528,26 +808,33 @@ function getMonitorSettingsFromForm() {
 }
 
 // Reads the "enable direct polling" + SNMP credential picker + the auto-Monitor
-// flag for one class (FortiSwitch or FortiAP). Returns null when the subtab
-// didn't render.
+// flag + the auto-monitor-interfaces selection for one class (FortiSwitch or
+// FortiAP). Returns null when the subtab didn't render.
 function _readClassMonitorBlock(prefix) {
   var enabledEl    = document.getElementById(prefix + "enabled");
   var credEl       = document.getElementById(prefix + "credentialId");
   var addMonEl     = document.getElementById(prefix + "addAsMonitored");
   if (!enabledEl || !credEl) return null;
+  var ami = _readAutoMonitorInterfaces(prefix + "amon-");
   return {
     enabled: enabledEl.checked === true,
     snmpCredentialId: credEl.value || null,
     addAsMonitored: addMonEl ? addMonEl.checked === true : false,
+    autoMonitorInterfaces: ami === undefined ? null : ami,
   };
 }
 
 // FortiGate variant — only the auto-Monitor flag (no direct-polling toggle
-// since FortiGates always have a monitorType stamped at discovery).
+// since FortiGates always have a monitorType stamped at discovery) plus the
+// auto-monitor-interfaces selection.
 function _readFortigateMonitorBlock(prefix) {
   var addMonEl = document.getElementById(prefix + "addAsMonitored");
   if (!addMonEl) return null;
-  return { addAsMonitored: addMonEl.checked === true };
+  var ami = _readAutoMonitorInterfaces(prefix + "amon-");
+  return {
+    addAsMonitored: addMonEl.checked === true,
+    autoMonitorInterfaces: ami === undefined ? null : ami,
+  };
 }
 
 function fortiManagerFormHTML(defaults) {
@@ -1081,7 +1368,7 @@ async function openCreateModal(type) {
     try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; } catch (e) { /* picker just shows defaults */ }
     var addTabs = [
       { key: "general",    label: "General",    html: _formHTMLForType(type, {}) },
-      { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, { snmpCredentials: creds, monitorCredentialId: null }) },
+      { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, { snmpCredentials: creds, monitorCredentialId: null, integrationId: null }) },
     ];
     // FMG only: third tab for the Reservation Push toggle. Defaults to off.
     // useProxy on a fresh integration defaults to true (the FMG proxy path).
@@ -1100,6 +1387,7 @@ async function openCreateModal(type) {
     _intWireModalTabs("intg-edit");
     // Inner sub-tabs inside the Monitoring tab (FortiGates / FortiSwitches / FortiAPs).
     _intWireModalTabs("intg-mon");
+    wireAutoMonitorCards(null);
   }
 
   document.getElementById("btn-test-new").addEventListener("click", async function () {
@@ -1351,6 +1639,7 @@ async function openEditModal(id) {
           fortigateMonitor:   config.fortigateMonitor   || null,
           fortiswitchMonitor: config.fortiswitchMonitor || null,
           fortiapMonitor:     config.fortiapMonitor     || null,
+          integrationId:      id,
         }) },
       ];
       // FMG only: third tab for the Reservation Push toggle. The body uses
@@ -1367,11 +1656,13 @@ async function openEditModal(id) {
 
     var footer = '<button class="btn btn-secondary" id="btn-test-existing">Test Connection</button>' +
       '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+      (isFmgOrFgt ? '<button class="btn btn-secondary" id="btn-save-apply" title="Save changes, then immediately apply Auto-Monitor Interfaces selections to existing assets (without waiting for the next discovery cycle).">Save and apply now</button>' : '') +
       '<button class="btn btn-primary" id="btn-save">Save Changes</button>';
     openModal("Edit Integration", body, footer);
     if (isFmgOrFgt) {
       _intWireModalTabs("intg-edit");
       _intWireModalTabs("intg-mon");
+      wireAutoMonitorCards(id);
     }
 
     document.getElementById("btn-test-existing").addEventListener("click", async function () {
@@ -1417,60 +1708,68 @@ async function openEditModal(id) {
       }
     });
 
+    // The save handler builds the request body (the same way for both
+    // "Save Changes" and "Save and apply now"), PUTs it, and then optionally
+    // runs the auto-monitor apply pass for any subtab that has a non-null
+    // selection. Returns the editConfig used so the caller can decide which
+    // classes to apply.
+    async function performSave() {
+      var autoDiscoverEl = document.getElementById("f-autoDiscover");
+      var editConfig = formGetter();
+      if (isFmgOrFgt) {
+        // Always send the picker value so an explicit clear round-trips.
+        // Empty string is normalized to null on the server.
+        editConfig.monitorCredentialId = _readMonitorCredentialId() || null;
+        // Per-stream transport toggles. Reader returns null when the subtab
+        // didn't render — leave the existing config alone in that case.
+        var transports = _readMonitorTransportSources();
+        if (transports) {
+          editConfig.monitorResponseTimeSource = transports.monitorResponseTimeSource;
+          editConfig.monitorTelemetrySource    = transports.monitorTelemetrySource;
+          editConfig.monitorInterfacesSource   = transports.monitorInterfacesSource;
+        }
+        // Per-class FortiGate / FortiSwitch / FortiAP blocks. The reader
+        // returns null when its subtab didn't render — in that case leave
+        // the existing config alone rather than wiping it.
+        var fgBlock = _readFortigateMonitorBlock("f-mon-fortigate-");
+        var swBlock = _readClassMonitorBlock("f-mon-fortiswitch-");
+        var apBlock = _readClassMonitorBlock("f-mon-fortiap-");
+        if (fgBlock) editConfig.fortigateMonitor   = fgBlock;
+        if (swBlock) editConfig.fortiswitchMonitor = swBlock;
+        if (apBlock) editConfig.fortiapMonitor     = apBlock;
+        // FMG-only push toggle. Reader returns undefined when the tab
+        // didn't render (FortiGate-type integration); leave unchanged.
+        if (intg.type === "fortimanager") {
+          var pushToggle = _readPushReservationsToggle();
+          if (pushToggle !== undefined) editConfig.pushReservations = pushToggle;
+        }
+      }
+      var input = {
+        name: val("f-name"),
+        config: editConfig,
+        enabled: document.getElementById("f-enabled").checked,
+        autoDiscover: autoDiscoverEl ? autoDiscoverEl.checked : true,
+        pollInterval: parseInt(document.getElementById("f-pollInterval").value, 10) || 4,
+      };
+      var result = await api.integrations.update(id, input);
+      if (isFmgOrFgt) {
+        try { await api.assets.updateMonitorSettings(getMonitorSettingsFromForm()); }
+        catch (e) { showToast("Integration updated, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
+      }
+      return { result: result, editConfig: editConfig };
+    }
+
     document.getElementById("btn-save").addEventListener("click", async function () {
       var btn = this;
       btn.disabled = true;
       btn.textContent = "Saving...";
       try {
-        var autoDiscoverEl = document.getElementById("f-autoDiscover");
-        var editConfig = formGetter();
-        if (isFmgOrFgt) {
-          // Always send the picker value so an explicit clear round-trips.
-          // Empty string is normalized to null on the server.
-          editConfig.monitorCredentialId = _readMonitorCredentialId() || null;
-          // Per-stream transport toggles. Reader returns null when the subtab
-          // didn't render — leave the existing config alone in that case.
-          var transports = _readMonitorTransportSources();
-          if (transports) {
-            editConfig.monitorResponseTimeSource = transports.monitorResponseTimeSource;
-            editConfig.monitorTelemetrySource    = transports.monitorTelemetrySource;
-            editConfig.monitorInterfacesSource   = transports.monitorInterfacesSource;
-          }
-          // Per-class FortiGate / FortiSwitch / FortiAP blocks. The reader
-          // returns null when its subtab didn't render — in that case leave
-          // the existing config alone rather than wiping it.
-          var fgBlock = _readFortigateMonitorBlock("f-mon-fortigate-");
-          var swBlock = _readClassMonitorBlock("f-mon-fortiswitch-");
-          var apBlock = _readClassMonitorBlock("f-mon-fortiap-");
-          if (fgBlock) editConfig.fortigateMonitor   = fgBlock;
-          if (swBlock) editConfig.fortiswitchMonitor = swBlock;
-          if (apBlock) editConfig.fortiapMonitor     = apBlock;
-          // FMG-only push toggle. Reader returns undefined when the tab
-          // didn't render (FortiGate-type integration); leave unchanged.
-          if (intg.type === "fortimanager") {
-            var pushToggle = _readPushReservationsToggle();
-            if (pushToggle !== undefined) editConfig.pushReservations = pushToggle;
-          }
-        }
-        var input = {
-          name: val("f-name"),
-          config: editConfig,
-          enabled: document.getElementById("f-enabled").checked,
-          autoDiscover: autoDiscoverEl ? autoDiscoverEl.checked : true,
-          pollInterval: parseInt(document.getElementById("f-pollInterval").value, 10) || 4,
-        };
-        var result = await api.integrations.update(id, input);
-        // Persist the global monitor settings if the Monitoring tab was rendered.
-        // Failures here aren't fatal — the integration is already updated.
-        if (isFmgOrFgt) {
-          try { await api.assets.updateMonitorSettings(getMonitorSettingsFromForm()); }
-          catch (e) { showToast("Integration updated, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
-        }
+        var saved = await performSave();
         closeModal();
         showToast("Integration updated");
         loadIntegrations();
-        if (result && result.conflicts && result.conflicts.length) {
-          showConflictModal(result.id || id, result.conflicts);
+        if (saved.result && saved.result.conflicts && saved.result.conflicts.length) {
+          showConflictModal(saved.result.id || id, saved.result.conflicts);
         }
       } catch (err) {
         showToast(err.message, "error");
@@ -1479,6 +1778,79 @@ async function openEditModal(id) {
         btn.textContent = "Save Changes";
       }
     });
+
+    var saveApplyBtn = document.getElementById("btn-save-apply");
+    if (saveApplyBtn) {
+      saveApplyBtn.addEventListener("click", async function () {
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = "Saving...";
+        try {
+          var saved = await performSave();
+          // Capacity guard: warn before applying selections that would pin
+          // a large number of interfaces. We sniff the cached count from
+          // each preview block; missing/stale values just skip the warning.
+          var totalEstimate = 0;
+          ["f-mon-fortigate-amon-", "f-mon-fortiswitch-amon-", "f-mon-fortiap-amon-"].forEach(function (p) {
+            var el = document.getElementById(p + "preview");
+            var n = el && el.dataset && parseInt(el.dataset.interfaceCount || "0", 10);
+            if (Number.isFinite(n)) totalEstimate += n;
+          });
+          if (totalEstimate > AUTO_MONITOR_INTERFACE_WARN_THRESHOLD) {
+            var ok = window.confirm(
+              "Auto-Monitor will pin approximately " + totalEstimate + " interfaces across the discovered devices.\n\n" +
+              "Each pin gets scraped on the response-time cadence (default 60s). Large pin counts add load to the database and to the monitored devices.\n\n" +
+              "Continue applying now?"
+            );
+            if (!ok) {
+              btn.textContent = "Save and apply now";
+              btn.disabled = false;
+              closeModal();
+              showToast("Integration updated; auto-monitor not applied");
+              loadIntegrations();
+              return;
+            }
+          }
+          // Apply each class whose selection is non-null.
+          btn.textContent = "Applying...";
+          var classes = [
+            ["fortigate",   saved.editConfig.fortigateMonitor],
+            ["fortiswitch", saved.editConfig.fortiswitchMonitor],
+            ["fortiap",     saved.editConfig.fortiapMonitor],
+          ];
+          var totalDevices = 0;
+          var totalIfaces = 0;
+          var failures = [];
+          for (var c = 0; c < classes.length; c++) {
+            var klass = classes[c][0];
+            var block = classes[c][1];
+            if (!block || !block.autoMonitorInterfaces) continue;
+            try {
+              var r = await api.integrations.interfaceAggregateApply(id, klass);
+              totalDevices += r.devices || 0;
+              totalIfaces  += r.interfacesAdded || 0;
+            } catch (err) {
+              failures.push(klass + ": " + (err.message || "failed"));
+            }
+          }
+          closeModal();
+          if (failures.length === 0) {
+            showToast("Integration updated · pinned " + totalIfaces + " interface(s) on " + totalDevices + " device(s)", "success");
+          } else {
+            showToast("Saved, but apply had errors — " + failures.join("; "), "error");
+          }
+          loadIntegrations();
+          if (saved.result && saved.result.conflicts && saved.result.conflicts.length) {
+            showConflictModal(saved.result.id || id, saved.result.conflicts);
+          }
+        } catch (err) {
+          showToast(err.message, "error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "Save and apply now";
+        }
+      });
+    }
   } catch (err) {
     showToast(err.message, "error");
   }
