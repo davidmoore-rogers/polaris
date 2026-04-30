@@ -19,9 +19,14 @@ import mapRouter from "./routes/map.js";
 import allocationTemplatesRouter from "./routes/allocationTemplates.js";
 import credentialsRouter from "./routes/credentials.js";
 import manufacturerAliasesRouter from "./routes/manufacturerAliases.js";
-import { requireAuth, requireAdmin, requireNetworkAdmin } from "./middleware/auth.js";
+import apiTokensRouter from "./routes/apiTokens.js";
+import { requireAuth, requireAdmin, requireNetworkAdmin, attachApiToken } from "./middleware/auth.js";
 
 export const router = Router();
+
+// Resolve any presented bearer token before any auth gate runs. Sets
+// req.apiToken when valid; never enforces on its own.
+router.use(attachApiToken);
 
 // Auth routes are public (login, logout, session check)
 router.use("/auth", authRouter);
@@ -34,7 +39,10 @@ router.get("/server-settings/branding", async (_req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Everything below requires an active session
+// Everything below requires an active session OR a valid bearer token.
+// Token callers reach further role gates only when a route opts in via
+// requireSessionOrTokenScope; the legacy session-only guards (requireAdmin
+// etc.) will 403 a token caller because req.session.role is undefined.
 router.use(requireAuth);
 router.use("/blocks", blocksRouter);
 router.use("/subnets", subnetsRouter);
@@ -50,4 +58,5 @@ router.use("/map", mapRouter);
 router.use("/conflicts", conflictsRouter);
 router.use("/credentials", credentialsRouter);
 router.use("/manufacturer-aliases", requireAdmin, manufacturerAliasesRouter);
+router.use("/api-tokens", requireAdmin, apiTokensRouter);
 router.use("/server-settings", requireAdmin, serverSettingsRouter);

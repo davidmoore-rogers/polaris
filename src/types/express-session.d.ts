@@ -14,3 +14,14 @@ declare module "express-session" {
     csrfToken: string;        // Synchronizer token for state-changing requests
   }
 }
+
+declare global {
+  namespace Express {
+    interface Request {
+      // Set by apiTokenAuth middleware when the request presented a valid
+      // bearer token. Mutually exclusive with req.session.userId in
+      // practice — token callers don't get a session.
+      apiToken?: { id: string; name: string; scopes: string[] };
+    }
+  }
+}

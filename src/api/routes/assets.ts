@@ -8,7 +8,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
-import { requireAdmin, requireAssetsAdmin, requireNetworkAdmin, requireUserOrAbove, isNetworkAdminOrAbove } from "../middleware/auth.js";
+import { requireAdmin, requireAssetsAdmin, requireNetworkAdmin, requireUserOrAbove, isNetworkAdminOrAbove, requireSessionOrTokenScope } from "../middleware/auth.js";
 import { logEvent, buildChanges } from "./events.js";
 import { assetMatchesIntegrationFilter } from "../../utils/integrationFilter.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
@@ -1813,15 +1813,16 @@ router.get("/:id/quarantine-status", async (req, res, next) => {
   }
 });
 
-// POST /api/v1/assets/:id/quarantine — admin or assets admin only
-router.post("/:id/quarantine", requireAssetsAdmin, async (req, res, next) => {
+// POST /api/v1/assets/:id/quarantine — admin, assets admin, or token with assets:quarantine scope
+router.post("/:id/quarantine", requireSessionOrTokenScope(["admin", "assetsadmin"], "assets:quarantine"), async (req, res, next) => {
   try {
     const Schema = z.object({ reason: z.string().max(500).optional() });
     const input = Schema.parse(req.body ?? {});
     const id = req.params.id as string;
+    const actor = req.apiToken ? `api:${req.apiToken.name}` : `user:${req.session?.username || "unknown"}`;
     const result = await quarantineAsset({
       assetId: id,
-      actor: `user:${req.session?.username || "unknown"}`,
+      actor,
       reason: input.reason,
     });
     res.json(result);
@@ -1830,13 +1831,14 @@ router.post("/:id/quarantine", requireAssetsAdmin, async (req, res, next) => {
   }
 });
 
-// DELETE /api/v1/assets/:id/quarantine — admin or assets admin only
-router.delete("/:id/quarantine", requireAssetsAdmin, async (req, res, next) => {
+// DELETE /api/v1/assets/:id/quarantine — admin, assets admin, or token with assets:quarantine scope
+router.delete("/:id/quarantine", requireSessionOrTokenScope(["admin", "assetsadmin"], "assets:quarantine"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
+    const actor = req.apiToken ? `api:${req.apiToken.name}` : `user:${req.session?.username || "unknown"}`;
     const result = await releaseQuarantine({
       assetId: id,
-      actor: `user:${req.session?.username || "unknown"}`,
+      actor,
     });
     res.json(result);
   } catch (err) {
@@ -1844,8 +1846,8 @@ router.delete("/:id/quarantine", requireAssetsAdmin, async (req, res, next) => {
   }
 });
 
-// POST /api/v1/assets/:id/quarantine/verify — read-back drift check (admin or assets admin)
-router.post("/:id/quarantine/verify", requireAssetsAdmin, async (req, res, next) => {
+// POST /api/v1/assets/:id/quarantine/verify — read-back drift check (admin, assets admin, or token)
+router.post("/:id/quarantine/verify", requireSessionOrTokenScope(["admin", "assetsadmin"], "assets:quarantine"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const verifyResult = await verifyAssetQuarantine(id);
@@ -1856,12 +1858,13 @@ router.post("/:id/quarantine/verify", requireAssetsAdmin, async (req, res, next)
         data: { quarantineTargets: verifyResult.targets as any },
       });
       const asset = await prisma.asset.findUnique({ where: { id }, select: { hostname: true, ipAddress: true } });
+      const actor = req.apiToken ? req.apiToken.name : req.session?.username;
       logEvent({
         action: "asset.quarantine.drift_detected",
         resourceType: "asset",
         resourceId: id,
         resourceName: asset?.hostname || asset?.ipAddress || undefined,
-        actor: req.session?.username,
+        actor,
         level: "warning",
         message: `Quarantine drift detected on ${asset?.hostname || id} — one or more FortiGate targets are missing or incomplete`,
         details: { targets: verifyResult.targets },
@@ -1873,15 +1876,15 @@ router.post("/:id/quarantine/verify", requireAssetsAdmin, async (req, res, next)
   }
 });
 
-// POST /api/v1/assets/bulk-quarantine — admin or assets admin only
-router.post("/bulk-quarantine", requireAssetsAdmin, async (req, res, next) => {
+// POST /api/v1/assets/bulk-quarantine — admin, assets admin, or token with assets:quarantine scope
+router.post("/bulk-quarantine", requireSessionOrTokenScope(["admin", "assetsadmin"], "assets:quarantine"), async (req, res, next) => {
   try {
     const Schema = z.object({
       ids: z.array(z.string()).min(1),
       reason: z.string().max(500).optional(),
     });
     const input = Schema.parse(req.body);
-    const actor = `user:${req.session?.username || "unknown"}`;
+    const actor = req.apiToken ? `api:${req.apiToken.name}` : `user:${req.session?.username || "unknown"}`;
     const results: Array<{ id: string; ok: boolean; message: string; succeededCount?: number; failedCount?: number }> = [];
     for (const id of input.ids) {
       try {
@@ -1897,12 +1900,12 @@ router.post("/bulk-quarantine", requireAssetsAdmin, async (req, res, next) => {
   }
 });
 
-// POST /api/v1/assets/bulk-quarantine/release — admin or assets admin only
-router.post("/bulk-quarantine/release", requireAssetsAdmin, async (req, res, next) => {
+// POST /api/v1/assets/bulk-quarantine/release — admin, assets admin, or token with assets:quarantine scope
+router.post("/bulk-quarantine/release", requireSessionOrTokenScope(["admin", "assetsadmin"], "assets:quarantine"), async (req, res, next) => {
   try {
     const Schema = z.object({ ids: z.array(z.string()).min(1) });
     const input = Schema.parse(req.body);
-    const actor = `user:${req.session?.username || "unknown"}`;
+    const actor = req.apiToken ? `api:${req.apiToken.name}` : `user:${req.session?.username || "unknown"}`;
     const results: Array<{ id: string; ok: boolean; message: string }> = [];
     for (const id of input.ids) {
       try {
