@@ -148,8 +148,8 @@ sudo -u "$APP_USER" npx prisma migrate deploy
 # Only seed on first deploy (skip if users table already has rows)
 HAS_USERS=$(sudo -u postgres psql -tc "SELECT count(*) FROM ${DB_NAME}.public.users" 2>/dev/null | tr -d ' ')
 if [[ "$HAS_USERS" == "" || "$HAS_USERS" == "0" ]]; then
-  info "Seeding database (first deploy)..."
-  sudo -u "$APP_USER" node --env-file=.env --import tsx/esm prisma/seed.ts
+  info "Seeding default admin (skipped in production — use the first-run wizard or restore from backup)..."
+  sudo -u "$APP_USER" node --env-file=.env --import tsx/esm prisma/seed.ts || true
 else
   info "Database already seeded ($HAS_USERS users) — skipping"
 fi

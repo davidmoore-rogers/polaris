@@ -240,8 +240,9 @@ if ($LASTEXITCODE -ne 0) { Write-Err "Prisma migration failed" }
 $hasUsers = & psql -U postgres -tc "SELECT count(*) FROM ${DbName}.public.users" 2>$null
 $hasUsers = if ($hasUsers) { $hasUsers.Trim() } else { "0" }
 if ($hasUsers -eq "" -or $hasUsers -eq "0") {
-    Write-Info "Seeding database (first deploy)..."
+    Write-Info "Seeding default admin (skipped in production — use the first-run wizard or restore from backup)..."
     & node --env-file=.env --import tsx/esm prisma/seed.ts
+    $LASTEXITCODE = 0  # seed.ts refuses in production; treat as success so the script continues
 } else {
     Write-Info "Database already seeded ($hasUsers users) — skipping"
 }

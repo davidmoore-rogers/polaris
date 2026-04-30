@@ -179,8 +179,8 @@ HAS_USERS=$(sudo -u "$APP_USER" node --env-file=.env -e "
 " 2>/dev/null || echo "0")
 HAS_USERS=$(echo "$HAS_USERS" | tr -d '[:space:]')
 if [[ "$HAS_USERS" == "" || "$HAS_USERS" == "0" ]]; then
-  info "Seeding database (first deploy)..."
-  sudo -u "$APP_USER" node --env-file=.env --import tsx/esm prisma/seed.ts
+  info "Seeding default admin (skipped in production — use the first-run wizard or restore from backup)..."
+  sudo -u "$APP_USER" node --env-file=.env --import tsx/esm prisma/seed.ts || true
 else
   info "Database already seeded ($HAS_USERS users) — skipping"
 fi
