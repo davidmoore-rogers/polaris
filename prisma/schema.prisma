@@ -194,7 +194,8 @@ model Integration {
 
   subnets             Subnet[]
   discoveredAssets    Asset[] // Assets stamped with this integration's id (back-relation)
-  pushedReservations  Reservation[] @relation("ReservationPushedTo")
+  pushedReservations  Reservation[]            @relation("ReservationPushedTo")
+  fortigateSightings  AssetFortigateSighting[] // Back-relation: sightings recorded against this integration's discovered FortiGates
 
   @@index([type])
   @@index([enabled])
@@ -251,6 +252,7 @@ enum AssetStatus {
   decommissioned
   storage
   disabled
+  quarantined
 }
 
 enum AssetType {
@@ -361,11 +363,32 @@ model Asset {
   // a targeted scrape that filters down to just that phase-1.
   monitoredIpsecTunnels String[] @default([])
 
+  // Quarantine. When non-null the asset is currently quarantined on one or
+  // more FortiGates (per quarantineTargets). statusBeforeQuarantine stores
+  // the prior AssetStatus so release can pop it back; null pops to active.
+  // quarantinedBy records the actor that initiated: "user:<username>" for a
+  // session-auth caller, "api:<token-name>" for an API-token caller, or
+  // "system:auto-quarantine" when the discovery sync auto-extends an existing
+  // quarantine to a newly-sighted FortiGate.
+  // quarantineTargets is a JSON array of per-FortiGate push records:
+  //   [{ fortigateDevice, integrationId, pushedMacs: string[], pushedAt,
+  //      status: "synced"|"failed"|"drift", error? }]
+  // The asset's status is set to AssetStatus.quarantined on any successful
+  // push (partial-across-fortigates is allowed; per-FortiGate is all-or-
+  // nothing). Release best-efforts an unpush from each target before flipping
+  // status back; per-target failure does not block the release.
+  statusBeforeQuarantine AssetStatus?
+  quarantineReason       String?     @db.Text
+  quarantinedAt          DateTime?
+  quarantinedBy          String?
+  quarantineTargets      Json        @default("[]")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   conflicts           Conflict[]
   ipHistory           AssetIpHistory[]
+  fortigateSightings  AssetFortigateSighting[]
   monitorSamples      AssetMonitorSample[]
   telemetrySamples    AssetTelemetrySample[]
   interfaceSamples    AssetInterfaceSample[]
@@ -746,4 +769,60 @@ model Conflict {
   @@index([integrationId])
   @@index([proposedDeviceId])
   @@map("conflicts")
+}
+
+// Sighting log: every (asset, FortiGate) pair where the FortiGate has handed
+// out a DHCP lease/reservation to the asset, attributed an interface IP, or
+// owned a VIP that points at the asset's IP. Populated during the FMG /
+// FortiGate discovery sync — only DHCP-level evidence is recorded (transit
+// sightings via monitor-system-info are intentionally excluded). Drives the
+// quarantine fan-out: pushing a quarantine on an asset writes the asset's
+// MACs to every FortiGate in this list whose lastSeen falls within the
+// configured `quarantine.sightingMaxAgeDays` setting.
+model AssetFortigateSighting {
+  id              String       @id @default(uuid())
+  assetId         String
+  asset           Asset        @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  integrationId   String?
+  integration     Integration? @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+  fortigateDevice String // matches Subnet.fortigateDevice / Asset.learnedLocation
+  source          String // "dhcp_lease" | "dhcp_reservation" | "interface_ip" | "vip"
+  firstSeen       DateTime     @default(now())
+  lastSeen        DateTime     @default(now())
+
+  @@unique([assetId, fortigateDevice])
+  @@index([assetId])
+  @@index([assetId, lastSeen])
+  @@index([integrationId])
+  @@index([fortigateDevice])
+  @@map("asset_fortigate_sightings")
+}
+
+// Bearer-token authentication for external callers (e.g. SIEM systems) that
+// need to invoke specific Polaris endpoints without a UI session. Tokens are
+// scoped to a fixed list of capabilities (currently: "assets:quarantine",
+// "assets:read") so a leaked token can't be elevated into a full admin login.
+//
+// The raw token is only ever shown once at creation; tokenHash is argon2id
+// of the raw token, and tokenPrefix stores the first 8 chars for display in
+// the management UI ("polaris_xxxxxxxx…"). revokedAt soft-deletes the row
+// (preferred over hard-delete so audit history points at a real id even
+// after revocation). Optional expiresAt enforces server-side expiry.
+model ApiToken {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  tokenHash   String // argon2id hash of the raw token
+  tokenPrefix String // first 8 chars of the raw token for UI display
+  scopes      String[]  @default([]) // e.g. ["assets:quarantine", "assets:read"]
+  createdBy   String // username of the admin who minted the token
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime?
+  lastUsedAt  DateTime?
+  lastUsedIp  String?
+  revokedAt   DateTime?
+  revokedBy   String?
+
+  @@index([revokedAt])
+  @@index([expiresAt])
+  @@map("api_tokens")
 }
