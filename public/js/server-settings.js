@@ -955,7 +955,7 @@ function _capacitySeverityLabel(s) {
   return "Healthy";
 }
 
-function renderCapacityCard(capacity) {
+function renderCapacityCard(capacity, dbInfo) {
   if (!capacity) return "";
 
   var severity = capacity.severity || "ok";
@@ -1005,13 +1005,23 @@ function renderCapacityCard(capacity) {
         : '<p class="hint" style="margin-top:0.5rem">Disk free is measured on the Polaris install volume. PostgreSQL is on a separate host — its data volume is not visible here.</p>') +
     '</div>';
 
-  var sampleTablesHtml = (db.sampleTables || []).map(function (t) {
-    var deadPct = t.deadTupRatio != null ? (t.deadTupRatio * 100).toFixed(0) + "%" : "—";
-    var deadCls = t.deadTupRatio > 0.20 ? ' style="color:var(--color-warning)"' : '';
+  // Index dead-tup% by table name from the capacity sample-tables payload —
+  // only the 6 high-volume sample tables carry this stat. All other rows
+  // render the dead column blank.
+  var deadByName = {};
+  (db.sampleTables || []).forEach(function (t) {
+    deadByName[t.name] = t.deadTupRatio;
+  });
+
+  var allTables = (dbInfo && dbInfo.tables) || [];
+  var tablesHtml = allTables.map(function (t) {
+    var dead = deadByName[t.name];
+    var deadPct = dead != null ? (dead * 100).toFixed(0) + "%" : "—";
+    var deadCls = dead != null && dead > 0.20 ? ' style="color:var(--color-warning)"' : '';
     return '<tr>' +
       '<td class="mono" style="font-size:0.78rem">' + escapeHtml(t.name) + '</td>' +
       '<td style="text-align:right">' + formatNumber(t.rows) + '</td>' +
-      '<td style="text-align:right;font-size:0.82rem;color:var(--color-text-secondary)">' + _capacityFormatBytes(t.bytes) + '</td>' +
+      '<td style="text-align:right;font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(t.size) + '</td>' +
       '<td style="text-align:right;font-size:0.82rem"' + deadCls + '>' + deadPct + '</td>' +
       '</tr>';
   }).join("");
@@ -1022,15 +1032,16 @@ function renderCapacityCard(capacity) {
       '<div class="db-info-grid">' +
         dbInfoRow("Current size", _capacityFormatBytes(db.sizeBytes)) +
         dbInfoRow("Steady-state at current settings", _capacityFormatBytes(work.steadyStateSizeBytes)) +
+        (allTables.length ? dbInfoRow("Tables", allTables.length) : "") +
       '</div>' +
-      (sampleTablesHtml
-        ? '<div style="margin-top:0.75rem">' +
+      (tablesHtml
+        ? '<div style="margin-top:0.75rem;max-height:200px;overflow-y:auto">' +
             '<table class="ip-table"><thead><tr>' +
-              '<th>Sample table</th>' +
+              '<th>Table</th>' +
               '<th style="text-align:right">Rows</th>' +
               '<th style="text-align:right">Size</th>' +
-              '<th style="text-align:right" title="Dead-tuple ratio — how far autovacuum is behind">Dead</th>' +
-            '</tr></thead><tbody>' + sampleTablesHtml + '</tbody></table>' +
+              '<th style="text-align:right" title="Dead-tuple ratio — how far autovacuum is behind. Tracked on high-volume sample tables only.">Dead</th>' +
+            '</tr></thead><tbody>' + tablesHtml + '</tbody></table>' +
           '</div>'
         : '') +
     '</div>';
@@ -1086,7 +1097,7 @@ async function loadDatabaseInfo() {
     _dbLoaded = true;
 
     container.innerHTML =
-      renderCapacityCard(capacity) +
+      renderCapacityCard(capacity, db) +
       // ── Application Updates card ──
       '<div class="settings-card" id="update-card">' +
         '<h4>Application Updates</h4>' +
@@ -1142,28 +1153,6 @@ async function loadDatabaseInfo() {
           : engineCard;
       })() +
       // ── Storage (left, half) + Backup/Restore/History (right column) ──
-      '<div class="settings-cards-row" style="align-items:start">' +
-      '<div class="settings-card">' +
-        '<h4>Storage</h4>' +
-        '<div class="db-info-grid">' +
-          dbInfoRow("Database Size", db.databaseSize || "Unknown") +
-          (db.tableCount !== undefined ? dbInfoRow("Tables", db.tableCount) : "") +
-        '</div>' +
-        (db.tables && db.tables.length > 0
-          ? '<div style="margin-top:1rem">' +
-              '<table class="ip-table"><thead><tr>' +
-                '<th>Table</th><th style="text-align:right">Rows</th><th style="text-align:right">Size</th>' +
-              '</tr></thead><tbody>' +
-              db.tables.map(function (t) {
-                return '<tr>' +
-                  '<td class="mono" style="font-size:0.82rem">' + escapeHtml(t.name) + '</td>' +
-                  '<td style="text-align:right">' + formatNumber(t.rows) + '</td>' +
-                  '<td style="text-align:right;font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(t.size) + '</td>' +
-                '</tr>';
-              }).join("") +
-            '</tbody></table></div>'
-          : '') +
-      '</div>' +
       '<div style="display:flex;flex-direction:column;gap:1rem">' +
 
       // ── Backup Card ──
@@ -1231,8 +1220,7 @@ async function loadDatabaseInfo() {
         '<div id="backup-history-body"><p class="empty-state">Loading...</p></div>' +
       '</div>' +
 
-      '</div>' + // close right column
-      '</div>' + // close .settings-cards-row
+      '</div>' + // close vertical stack of Backup/Restore/History cards
 
       '<div style="display:flex;gap:8px;align-items:center">' +
         '<button class="btn btn-secondary" id="btn-db-refresh">Refresh</button>' +
