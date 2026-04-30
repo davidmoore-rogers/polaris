@@ -382,7 +382,7 @@ export async function getCapacitySnapshot(opts: {
     prisma.asset.count({ where: { monitored: true } }),
     prisma.$queryRawUnsafe<{ count: bigint }[]>(
       `SELECT COALESCE(SUM(COALESCE(array_length("monitoredInterfaces", 1), 0)), 0)::bigint AS count
-         FROM "Asset"
+         FROM "assets"
         WHERE monitored = true`,
     ),
     getDiskStats(),
