@@ -186,10 +186,10 @@ function _renderIpList(data) {
       dotClass = "ip-dot-conflict";
       statusLabel = "Conflict";
       statusTooltip = r.conflictMessage;
-    } else if (r && r.status === "active" && r.owner === "dhcp-reservation") {
+    } else if (r && r.status === "active" && (r.sourceType === "dhcp_reservation" || r.owner === "dhcp-reservation")) {
       dotClass = "ip-dot-dhcp-reservation";
       statusLabel = "DHCP Reservation";
-    } else if (r && r.status === "active" && r.owner === "dhcp-lease") {
+    } else if (r && r.status === "active" && (r.sourceType === "dhcp_lease" || r.owner === "dhcp-lease")) {
       dotClass = "ip-dot-dhcp-lease";
       statusLabel = "DHCP Lease";
     } else if (r && r.status === "active") {
@@ -685,9 +685,9 @@ function _generateIpPanelPdf(s, allIps) {
       statusLabel = ip.type === "network" ? "Network" : "Broadcast";
     } else if (r && r.conflictMessage) {
       statusLabel = "Conflict: " + r.conflictMessage;
-    } else if (r && r.status === "active" && r.owner === "dhcp-reservation") {
+    } else if (r && r.status === "active" && (r.sourceType === "dhcp_reservation" || r.owner === "dhcp-reservation")) {
       statusLabel = "DHCP Reservation";
-    } else if (r && r.status === "active" && r.owner === "dhcp-lease") {
+    } else if (r && r.status === "active" && (r.sourceType === "dhcp_lease" || r.owner === "dhcp-lease")) {
       statusLabel = "DHCP Lease";
     } else if (r && r.status === "active") {
       statusLabel = "Active";
@@ -870,9 +870,9 @@ function _generateIpPanelCsv(s, allIps) {
       statusLabel = ip.type === "network" ? "Network" : "Broadcast";
     } else if (r && r.conflictMessage) {
       statusLabel = "Conflict: " + r.conflictMessage;
-    } else if (r && r.status === "active" && r.owner === "dhcp-reservation") {
+    } else if (r && r.status === "active" && (r.sourceType === "dhcp_reservation" || r.owner === "dhcp-reservation")) {
       statusLabel = "DHCP Reservation";
-    } else if (r && r.status === "active" && r.owner === "dhcp-lease") {
+    } else if (r && r.status === "active" && (r.sourceType === "dhcp_lease" || r.owner === "dhcp-lease")) {
       statusLabel = "DHCP Lease";
     } else if (r && r.status === "active") {
       statusLabel = "Active";

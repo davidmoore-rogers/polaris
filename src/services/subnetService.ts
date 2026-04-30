@@ -524,19 +524,40 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
     hostname: r.hostname,
     owner: r.owner,
     status: r.status,
+    sourceType: r.sourceType,
     notes: r.notes,
     expiresAt: r.expiresAt,
     createdBy: r.createdBy,
     conflictMessage: r.conflictMessage,
   });
 
+  // DHCP discovery commonly produces multiple reservations for the same host
+  // (one per interface MAC), but Asset.ipAddress only points at the most
+  // recent primary IP — so direct ipAddress lookup links just one row to the
+  // asset. Fall back to hostname matching for the remaining rows so every
+  // reservation that came from the same asset gets the Asset button.
   if (isIpv6) {
     const ipv6Addrs = subnet.reservations.filter(r => r.ipAddress).map(r => r.ipAddress!);
-    const v6Assets = ipv6Addrs.length > 0
-      ? await prisma.asset.findMany({ where: { ipAddress: { in: ipv6Addrs } }, select: { id: true, ipAddress: true } })
+    const ipv6Hostnames = Array.from(new Set(
+      subnet.reservations.map(r => r.hostname).filter((h): h is string => !!h),
+    ));
+    const v6Assets = (ipv6Addrs.length > 0 || ipv6Hostnames.length > 0)
+      ? await prisma.asset.findMany({
+          where: {
+            OR: [
+              ...(ipv6Addrs.length > 0 ? [{ ipAddress: { in: ipv6Addrs } }] : []),
+              ...(ipv6Hostnames.length > 0 ? [{ hostname: { in: ipv6Hostnames } }] : []),
+            ],
+          },
+          select: { id: true, ipAddress: true, hostname: true },
+        })
       : [];
     const assetByIpV6 = new Map<string, string>();
-    for (const a of v6Assets) if (a.ipAddress) assetByIpV6.set(a.ipAddress, a.id);
+    const assetByHostnameV6 = new Map<string, string>();
+    for (const a of v6Assets) {
+      if (a.ipAddress) assetByIpV6.set(a.ipAddress, a.id);
+      if (a.hostname && !assetByHostnameV6.has(a.hostname)) assetByHostnameV6.set(a.hostname, a.id);
+    }
 
     const ips = subnet.reservations
       .filter(r => r.ipAddress)
@@ -544,7 +565,9 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
         address: r.ipAddress!,
         type: "host" as const,
         reservation: toReservationDto(r),
-        assetId: assetByIpV6.get(r.ipAddress!) ?? null,
+        assetId:
+          assetByIpV6.get(r.ipAddress!) ??
+          (r.hostname ? assetByHostnameV6.get(r.hostname) ?? null : null),
       }));
     return {
       subnet: subnetInfo,
@@ -569,12 +592,28 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
   }
 
   const pageAddrs = addresses.map(a => a.address);
-  const pageAssets = await prisma.asset.findMany({
-    where: { ipAddress: { in: pageAddrs } },
-    select: { id: true, ipAddress: true },
-  });
+  const pageHostnames = Array.from(new Set(
+    pageAddrs
+      .map(a => reservationMap.get(a)?.hostname)
+      .filter((h): h is string => !!h),
+  ));
+  const pageAssets = (pageAddrs.length > 0 || pageHostnames.length > 0)
+    ? await prisma.asset.findMany({
+        where: {
+          OR: [
+            ...(pageAddrs.length > 0 ? [{ ipAddress: { in: pageAddrs } }] : []),
+            ...(pageHostnames.length > 0 ? [{ hostname: { in: pageHostnames } }] : []),
+          ],
+        },
+        select: { id: true, ipAddress: true, hostname: true },
+      })
+    : [];
   const assetByIp = new Map<string, string>();
-  for (const a of pageAssets) if (a.ipAddress) assetByIp.set(a.ipAddress, a.id);
+  const assetByHostname = new Map<string, string>();
+  for (const a of pageAssets) {
+    if (a.ipAddress) assetByIp.set(a.ipAddress, a.id);
+    if (a.hostname && !assetByHostname.has(a.hostname)) assetByHostname.set(a.hostname, a.id);
+  }
 
   const ips = addresses.map(addr => {
     const r = reservationMap.get(addr.address);
@@ -582,7 +621,9 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
       address: addr.address,
       type: addr.type,
       reservation: r ? toReservationDto(r) : null,
-      assetId: assetByIp.get(addr.address) ?? null,
+      assetId:
+        assetByIp.get(addr.address) ??
+        (r?.hostname ? assetByHostname.get(r.hostname) ?? null : null),
     };
   });
 
