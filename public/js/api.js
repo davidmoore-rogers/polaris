@@ -111,6 +111,12 @@ const api = {
     update: (id, b)   => request("PUT",    `/credentials/${id}`, b),
     delete: (id)      => request("DELETE", `/credentials/${id}`),
   },
+  apiTokens: {
+    list:   ()        => request("GET",    "/api-tokens"),
+    create: (body)    => request("POST",   "/api-tokens", body),
+    revoke: (id)      => request("POST",   `/api-tokens/${id}/revoke`),
+    delete: (id)      => request("DELETE", `/api-tokens/${id}`),
+  },
   reservations: {
     list:          (params) => request("GET", "/reservations" + toQuery(params)),
     get:           (id)     => request("GET", `/reservations/${id}`),
@@ -184,6 +190,14 @@ const api = {
     snmpWalk:             (id, body, signal) => request("POST", `/assets/${id}/snmp-walk`, body, signal),
     reserve:              (id)  => request("POST", `/assets/${id}/reserve`),
     unreserve:            (id)  => request("POST", `/assets/${id}/unreserve`),
+    quarantine:           (id, reason) => request("POST", `/assets/${id}/quarantine`, reason !== undefined ? { reason } : {}),
+    unquarantine:         (id)  => request("DELETE", `/assets/${id}/quarantine`),
+    verifyQuarantine:     (id)  => request("POST", `/assets/${id}/quarantine/verify`),
+    getSightings:         (id)  => request("GET", `/assets/${id}/sightings`),
+    bulkQuarantine:       (ids, reason) => request("POST", "/assets/bulk-quarantine", reason !== undefined ? { ids, reason } : { ids }),
+    bulkUnquarantine:     (ids) => request("POST", "/assets/bulk-quarantine/release", { ids }),
+    getSightingSettings:  ()    => request("GET", "/assets/sighting-settings"),
+    updateSightingSettings: (body) => request("PUT", "/assets/sighting-settings", body),
     // System tab — telemetry, system-info snapshot, per-interface counters, per-mountpoint storage.
     systemInfo:           (id)  => request("GET", `/assets/${id}/system-info`),
     telemetryHistory:     (id, opts) => {

@@ -90,6 +90,8 @@
         <button class="btn btn-sm btn-secondary" id="assets-bulk-edit-btn" data-manage-assets style="margin-left:auto">Edit Type &amp; Tags</button>
         <button class="btn btn-sm btn-secondary" id="assets-bulk-monitor-on-btn" data-manage-assets title="Enable ICMP monitoring on the selected assets. FortiManager-discovered firewalls keep their integration-locked monitoring source.">Enable Monitoring</button>
         <button class="btn btn-sm btn-secondary" id="assets-bulk-monitor-off-btn" data-manage-assets>Disable Monitoring</button>
+        <button class="btn btn-sm btn-danger" id="assets-bulk-quarantine-btn" data-manage-assets title="Quarantine selected assets — pushes MAC block to FortiGate(s) that have seen each asset" style="display:none">Quarantine</button>
+        <button class="btn btn-sm btn-secondary" id="assets-bulk-unquarantine-btn" data-manage-assets title="Release quarantine on selected assets" style="display:none">Release Quarantine</button>
         <button class="btn btn-sm btn-danger" id="assets-bulk-delete-btn" data-manage-assets>Delete Selected</button>
       </div>
 
@@ -105,7 +107,7 @@
               <th data-sf-key="ipAddress" data-sf-type="ip">IP Address</th>
               <th data-sf-key="serialNumber" data-sf-type="string">Serial Number</th>
               <th data-sf-key="assetType" data-sf-type="string" data-sf-options="server|switch|router|firewall|workstation|printer|access_point=Access Point|other">Type</th>
-              <th data-sf-key="status" data-sf-type="string" data-sf-options="active|maintenance|storage|decommissioned|disabled">Status</th>
+              <th data-sf-key="status" data-sf-type="string" data-sf-options="active|maintenance|storage|decommissioned|disabled|quarantined">Status</th>
               <th data-sf-key="_monitor" data-sf-type="string" data-sf-options="Monitored|Pending|Down|Unmonitored">Monitor</th>
               <th data-sf-key="_server" data-sf-type="string">Server</th>
               <th data-sf-key="lastSeen" data-sf-type="date">Last Seen</th>

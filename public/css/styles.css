@@ -75,6 +75,7 @@
 [data-theme="light"] .badge-decommissioned { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
 [data-theme="light"] .badge-disabled       { background: rgba(211,47,47,0.10); color: #c62828; border-color: rgba(211,47,47,0.30); }
 [data-theme="light"] .badge-storage        { background: rgba(156,39,176,0.10); color: #7b1fa2; border-color: rgba(156,39,176,0.30); }
+[data-theme="light"] .badge-quarantined    { background: rgba(183,28,28,0.12); color: #b71c1c; border-color: rgba(183,28,28,0.35); }
 [data-theme="light"] .badge-level-info    { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
 [data-theme="light"] .badge-level-warning { background: rgba(245,127,23,0.10); border-color: rgba(245,127,23,0.30); }
 [data-theme="light"] .badge-level-error   { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
@@ -1770,6 +1771,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .badge-decommissioned { background: rgba(117,117,117,0.12); color: var(--color-deprecated); border: 1px solid rgba(117,117,117,0.25); }
 .badge-disabled       { background: rgba(211,47,47,0.12); color: #ef9a9a; border: 1px solid rgba(211,47,47,0.25); }
 .badge-storage        { background: rgba(156,39,176,0.12); color: #ce93d8; border: 1px solid rgba(156,39,176,0.25); }
+.badge-quarantined    { background: rgba(183,28,28,0.18); color: #ff8a80; border: 1px solid rgba(183,28,28,0.40); }
 .badge-monitored        { background: rgba(0,200,83,0.12);   color: var(--color-success);    border: 1px solid rgba(0,200,83,0.25); }
 .badge-unmonitored      { background: rgba(117,117,117,0.12); color: var(--color-deprecated); border: 1px solid rgba(117,117,117,0.25); }
 .badge-monitor-down     { background: rgba(211,47,47,0.18);  color: #ef9a9a;                 border: 1px solid rgba(211,47,47,0.30); }

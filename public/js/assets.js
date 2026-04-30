@@ -63,6 +63,10 @@ document.addEventListener("DOMContentLoaded", async function () {
   var bmOff = document.getElementById("assets-bulk-monitor-off-btn");
   if (bmOn)  bmOn.addEventListener("click",  function () { bulkSetMonitoring(true); });
   if (bmOff) bmOff.addEventListener("click", function () { bulkSetMonitoring(false); });
+  var bQuarantine   = document.getElementById("assets-bulk-quarantine-btn");
+  var bUnquarantine = document.getElementById("assets-bulk-unquarantine-btn");
+  if (bQuarantine)   bQuarantine.addEventListener("click", bulkQuarantineAssets);
+  if (bUnquarantine) bUnquarantine.addEventListener("click", bulkUnquarantineAssets);
   var bDeselect = document.getElementById("assets-bulk-deselect-btn");
   if (bDeselect) bDeselect.addEventListener("click", function () {
     _assetsSelected.clear();
@@ -325,6 +329,7 @@ function renderAssetsPage() {
       '<td>' + (a.lastSeen ? formatDate(a.lastSeen) : "-") + '</td>' +
       '<td class="actions">' +
         _reserveActionHTML(a) +
+        _quarantineActionHTML(a) +
         (canManageAssets() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + a.id + '\')">Edit</button>' +
         (a.ipAddress && !a.dnsName ? '<button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.ipAddress) + '\')" title="Reverse DNS lookup (IP → hostname)">DNS</button>' : '') +
         (!a.ipAddress && (a.dnsName || a.hostname) ? '<button class="btn btn-sm btn-secondary" onclick="singleForwardLookup(\'' + a.id + '\', \'' + escapeHtml(a.dnsName || a.hostname) + '\')" title="Forward DNS lookup (hostname → IP)">PTR</button>' : '') +
@@ -359,6 +364,20 @@ function _assetsUpdateBulkBar() {
   bar.style.display = count > 0 ? "flex" : "none";
   var el = bar.querySelector(".bulk-bar-count");
   if (el) el.textContent = count + " selected";
+
+  // Show quarantine/release buttons only for assets-admins. Determine which
+  // buttons are relevant based on the statuses of the selected assets.
+  if (canManageAssets() && sfData) {
+    var selectedStatuses = sfData
+      .filter(function (a) { return _assetsSelected.has(a.id); })
+      .map(function (a) { return a.status; });
+    var hasNonQuarantined = selectedStatuses.some(function (s) { return s !== "quarantined"; });
+    var hasQuarantined    = selectedStatuses.some(function (s) { return s === "quarantined"; });
+    var bQ  = document.getElementById("assets-bulk-quarantine-btn");
+    var bUQ = document.getElementById("assets-bulk-unquarantine-btn");
+    if (bQ)  bQ.style.display  = count > 0 && hasNonQuarantined ? "" : "none";
+    if (bUQ) bUQ.style.display = count > 0 && hasQuarantined    ? "" : "none";
+  }
 }
 
 // Reserve / Unreserve cell. Returns "" when there's nothing to render so the
@@ -410,6 +429,75 @@ async function unreserveAssetIp(id) {
     loadAssets();
   } catch (err) {
     showToast(err.message || 'Release failed', 'error');
+  }
+}
+
+// Quarantine action button in asset row. Only shown to assets-admins; only
+// shown when the asset has a MAC (no MAC → no FortiGate target to push).
+function _quarantineActionHTML(a) {
+  if (!canManageAssets()) return '';
+  if (!a.macAddress && (!a.macAddresses || !a.macAddresses.length)) return '';
+  if (a.status === 'quarantined') {
+    return '<button class="btn btn-sm btn-secondary" onclick="releaseAssetQuarantine(\'' + a.id + '\')" title="Release quarantine — removes MAC block from FortiGate(s)">Release Quarantine</button>';
+  }
+  return '<button class="btn btn-sm btn-danger" onclick="quarantineAssetRow(\'' + a.id + '\')" title="Quarantine — push MAC block to FortiGate(s) that have seen this asset">Quarantine</button>';
+}
+
+async function quarantineAssetRow(id) {
+  var reason = window.prompt('Reason for quarantine (optional):');
+  if (reason === null) return; // cancelled
+  try {
+    var result = await api.assets.quarantine(id, reason || undefined);
+    showToast(result.message || 'Asset quarantined');
+    loadAssets();
+  } catch (err) {
+    showToast(err.message || 'Quarantine failed', 'error');
+  }
+}
+
+async function releaseAssetQuarantine(id) {
+  var ok = await showConfirm('Release quarantine on this asset?');
+  if (!ok) return;
+  try {
+    var result = await api.assets.unquarantine(id);
+    showToast(result.message || 'Quarantine released');
+    loadAssets();
+  } catch (err) {
+    showToast(err.message || 'Release failed', 'error');
+  }
+}
+
+async function bulkQuarantineAssets() {
+  var ids = Array.from(_assetsSelected);
+  if (!ids.length) return;
+  var reason = window.prompt('Reason for quarantine (optional, applies to all selected):');
+  if (reason === null) return;
+  try {
+    var r = await api.assets.bulkQuarantine(ids, reason || undefined);
+    var ok = r.results.filter(function (x) { return x.ok; }).length;
+    var fail = r.results.length - ok;
+    showToast('Quarantined ' + ok + ' asset(s)' + (fail ? '; ' + fail + ' failed' : ''), fail ? 'warning' : 'success');
+    _assetsSelected.clear();
+    loadAssets();
+  } catch (err) {
+    showToast(err.message || 'Bulk quarantine failed', 'error');
+  }
+}
+
+async function bulkUnquarantineAssets() {
+  var ids = Array.from(_assetsSelected);
+  if (!ids.length) return;
+  var ok2 = await showConfirm('Release quarantine on ' + ids.length + ' asset(s)?');
+  if (!ok2) return;
+  try {
+    var r = await api.assets.bulkUnquarantine(ids);
+    var ok = r.results.filter(function (x) { return x.ok; }).length;
+    var fail = r.results.length - ok;
+    showToast('Released ' + ok + ' quarantine(s)' + (fail ? '; ' + fail + ' failed' : ''), fail ? 'warning' : 'success');
+    _assetsSelected.clear();
+    loadAssets();
+  } catch (err) {
+    showToast(err.message || 'Bulk release failed', 'error');
   }
 }
 
@@ -1284,6 +1372,10 @@ async function openViewModal(id) {
       await _ensureCredentials();
       tabs.push({ key: "snmp", label: "SNMP Walk", html: assetSnmpWalkViewHTML(a) });
     }
+    // Quarantine tab — assets-admin only, shown for any asset that has MACs or is quarantined.
+    if (canManageAssets() && (a.status === "quarantined" || a.macAddress || (a.macAddresses && a.macAddresses.length))) {
+      tabs.push({ key: "quarantine", label: a.status === "quarantined" ? "Quarantine ⚠" : "Quarantine", html: _assetQuarantineTabHTML(a) });
+    }
     var tabsHTML = _renderTabbedBody("asset-view", tabs);
     bodyEl.innerHTML = '<div class="asset-panel-content">' + tabsHTML + '</div>';
 
@@ -1303,6 +1395,7 @@ async function openViewModal(id) {
 
     _wireModalTabs("asset-view");
     if (isAdmin()) _wireSnmpWalkTab(a);
+    if (canManageAssets()) _wireQuarantineTab(a);
     _wireHoverTriggersIn(bodyEl);
     bodyEl.addEventListener("click", _handleCopyClick);
     document.getElementById("btn-asset-copy").addEventListener("click", _copyAssetDetails);
@@ -5653,6 +5746,172 @@ function _wireSnmpWalkTab(a) {
         showToast("Copied " + lastResult.rows.length + " row(s)", "success");
       } catch (_) {
         showToast("Copy failed", "error");
+      }
+    });
+  }
+}
+
+// ─── Quarantine tab ─────────────────────────────────────────────────────────
+
+function _assetQuarantineTabHTML(a) {
+  var isQ = a.status === "quarantined";
+  var macs = [];
+  if (Array.isArray(a.macAddresses)) {
+    macs = a.macAddresses.map(function (m) { return typeof m === "object" ? (m.mac || "") : m; }).filter(Boolean);
+  } else if (a.macAddress) {
+    macs = [a.macAddress];
+  }
+
+  var statusSection = '';
+  if (isQ) {
+    var targets = Array.isArray(a.quarantineTargets) ? a.quarantineTargets : [];
+    var targetsHtml = targets.length
+      ? '<table class="data-table" style="font-size:0.82rem;margin-top:0.5rem"><thead><tr><th>FortiGate</th><th>Status</th><th>Pushed MACs</th><th>Pushed At</th></tr></thead><tbody>' +
+          targets.map(function (t) {
+            var statusCls = t.status === "synced" ? "badge-active" : t.status === "drift" ? "badge-maintenance" : "badge-disabled";
+            return '<tr>' +
+              '<td>' + escapeHtml(t.fortigateDevice || "?") + '</td>' +
+              '<td><span class="badge ' + statusCls + '">' + escapeHtml(t.status || "?") + '</span></td>' +
+              '<td class="mono" style="font-size:0.78rem">' + escapeHtml((t.pushedMacs || []).join(", ") || "—") + '</td>' +
+              '<td>' + (t.pushedAt ? formatDate(t.pushedAt) : "—") + '</td>' +
+            '</tr>';
+          }).join("") +
+        '</tbody></table>'
+      : '<p class="empty-state" style="margin:0.5rem 0 0">No push targets recorded.</p>';
+
+    statusSection =
+      '<div class="section-block" style="margin-bottom:1rem">' +
+        '<div class="section-label" style="margin-bottom:0.25rem">Quarantine Status</div>' +
+        (a.quarantineReason ? '<p style="margin:0 0 0.5rem;color:var(--color-text-secondary)">Reason: ' + escapeHtml(a.quarantineReason) + '</p>' : '') +
+        (a.quarantinedAt ? '<p style="margin:0 0 0.5rem;font-size:0.82rem;color:var(--color-text-secondary)">Quarantined ' + formatDate(a.quarantinedAt) + (a.quarantinedBy ? ' by ' + escapeHtml(a.quarantinedBy) : '') + '</p>' : '') +
+        '<div class="section-label" style="margin:0.75rem 0 0.25rem">FortiGate Push Targets</div>' +
+        targetsHtml +
+      '</div>';
+  }
+
+  var macsHtml = macs.length
+    ? '<div class="mono" style="font-size:0.82rem">' + escapeHtml(macs.join(", ")) + '</div>'
+    : '<em style="color:var(--color-text-secondary)">No MACs on record — quarantine push requires at least one MAC.</em>';
+
+  var sightingsSection =
+    '<div class="section-block" style="margin-bottom:1rem">' +
+      '<div class="section-label" style="margin-bottom:0.25rem">DHCP Sightings</div>' +
+      '<div id="asset-sightings-container"><em style="color:var(--color-text-secondary)">Loading…</em></div>' +
+    '</div>';
+
+  var actionBtn = isQ
+    ? '<button class="btn btn-secondary" id="btn-qtn-release">Release Quarantine</button>'
+    : (macs.length ? '<button class="btn btn-danger" id="btn-qtn-quarantine">Quarantine This Asset</button>' : '');
+  var verifyBtn = isQ ? '<button class="btn btn-secondary" id="btn-qtn-verify">Verify Push</button>' : '';
+
+  return '<div style="padding:0.5rem 0">' +
+    statusSection +
+    '<div class="section-block" style="margin-bottom:1rem">' +
+      '<div class="section-label" style="margin-bottom:0.25rem">Associated MACs</div>' +
+      macsHtml +
+    '</div>' +
+    sightingsSection +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">' + actionBtn + verifyBtn + '</div>' +
+  '</div>';
+}
+
+function _wireQuarantineTab(a) {
+  var tabPanel = document.getElementById("asset-view-tab-quarantine");
+  if (!tabPanel) return;
+
+  // Load sightings async when the tab is visible.
+  function _loadSightings() {
+    var container = document.getElementById("asset-sightings-container");
+    if (!container) return;
+    api.assets.getSightings(a.id).then(function (data) {
+      var rows = Array.isArray(data) ? data : (data.sightings || []);
+      if (!rows.length) {
+        container.innerHTML = '<p class="empty-state" style="margin:0">No DHCP sightings recorded yet.</p>';
+        return;
+      }
+      container.innerHTML =
+        '<table class="data-table" style="font-size:0.82rem"><thead><tr><th>FortiGate</th><th>Source</th><th>Last Seen</th></tr></thead><tbody>' +
+        rows.map(function (s) {
+          return '<tr>' +
+            '<td>' + escapeHtml(s.fortigateDevice || "?") + '</td>' +
+            '<td><span class="badge badge-type">' + escapeHtml(s.source || "?") + '</span></td>' +
+            '<td>' + (s.lastSeen ? formatDate(s.lastSeen) : "—") + '</td>' +
+          '</tr>';
+        }).join("") +
+        '</tbody></table>';
+    }).catch(function () {
+      var container2 = document.getElementById("asset-sightings-container");
+      if (container2) container2.innerHTML = '<p class="empty-state" style="color:var(--color-danger,#c0392b)">Failed to load sightings.</p>';
+    });
+  }
+
+  // Load sightings immediately if the quarantine tab is active, otherwise on click.
+  var tabBtn = document.querySelector('#asset-view-tabs [data-tab="quarantine"]');
+  if (tabBtn) {
+    if (tabBtn.classList.contains("active")) {
+      _loadSightings();
+    } else {
+      tabBtn.addEventListener("click", function handler() {
+        tabBtn.removeEventListener("click", handler);
+        _loadSightings();
+      });
+    }
+  }
+
+  var quarantineBtn = tabPanel.querySelector("#btn-qtn-quarantine");
+  if (quarantineBtn) {
+    quarantineBtn.addEventListener("click", async function () {
+      var reason = window.prompt("Reason for quarantine (optional):");
+      if (reason === null) return;
+      quarantineBtn.disabled = true;
+      try {
+        var result = await api.assets.quarantine(a.id, reason || undefined);
+        showToast(result.message || "Asset quarantined");
+        closeAssetPanel();
+        loadAssets();
+      } catch (err) {
+        showToast(err.message || "Quarantine failed", "error");
+        quarantineBtn.disabled = false;
+      }
+    });
+  }
+
+  var releaseBtn = tabPanel.querySelector("#btn-qtn-release");
+  if (releaseBtn) {
+    releaseBtn.addEventListener("click", async function () {
+      var ok = await showConfirm("Release quarantine on this asset?");
+      if (!ok) return;
+      releaseBtn.disabled = true;
+      try {
+        var result = await api.assets.unquarantine(a.id);
+        showToast(result.message || "Quarantine released");
+        closeAssetPanel();
+        loadAssets();
+      } catch (err) {
+        showToast(err.message || "Release failed", "error");
+        releaseBtn.disabled = false;
+      }
+    });
+  }
+
+  var verifyBtn = tabPanel.querySelector("#btn-qtn-verify");
+  if (verifyBtn) {
+    verifyBtn.addEventListener("click", async function () {
+      verifyBtn.disabled = true;
+      verifyBtn.textContent = "Verifying…";
+      try {
+        var result = await api.assets.verifyQuarantine(a.id);
+        if (result.driftDetected) {
+          showToast("Drift detected — one or more targets were out of sync. Updated.", "warning");
+        } else {
+          showToast("All quarantine targets verified OK", "success");
+        }
+        openViewModal(a.id);
+      } catch (err) {
+        showToast(err.message || "Verify failed", "error");
+      } finally {
+        verifyBtn.disabled = false;
+        verifyBtn.textContent = "Verify Push";
       }
     });
   }

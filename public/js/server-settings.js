@@ -18,6 +18,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (target === "identification" && !_tagsLoaded) loadIdentificationTab();
       if (target === "customization" && !_brandingLoaded) loadCustomizationTab();
       if (target === "credentials" && !_credsLoaded) loadCredentialsTab();
+      if (target === "api-tokens" && !_apiTokensLoaded) loadApiTokensTab();
     });
   });
 
@@ -3502,5 +3503,158 @@ async function deleteCredential(id, name) {
     await loadCredentialsTab();
   } catch (err) {
     showToast(err.message, "error");
+  }
+}
+
+// ─── API Tokens tab ────────────────────────────────────────────────────────
+
+var _apiTokensLoaded = false;
+
+async function loadApiTokensTab() {
+  var container = document.getElementById("tab-api-tokens");
+  if (!container) return;
+  _apiTokensLoaded = true;
+  container.innerHTML = '<p class="empty-state" style="padding:2rem">Loading…</p>';
+  try {
+    var data = await api.apiTokens.list();
+    renderApiTokensTab(data.tokens || [], data.knownScopes || []);
+  } catch (err) {
+    container.innerHTML = '<p class="empty-state" style="color:var(--color-danger,#c0392b);padding:2rem">' + escapeHtml(err.message || "Failed to load API tokens") + '</p>';
+  }
+}
+
+function renderApiTokensTab(tokens, knownScopes) {
+  var container = document.getElementById("tab-api-tokens");
+  if (!container) return;
+
+  var tableHtml = tokens.length
+    ? '<div class="table-wrapper"><table class="data-table"><thead><tr>' +
+        '<th>Name</th><th>Prefix</th><th>Scopes</th><th>Created By</th><th>Last Used</th><th>Expires</th><th>Status</th><th>Actions</th>' +
+      '</tr></thead><tbody>' +
+      tokens.map(function (t) {
+        var statusBadge = t.revokedAt
+          ? '<span class="badge badge-disabled">Revoked</span>'
+          : t.expiresAt && new Date(t.expiresAt) <= new Date()
+            ? '<span class="badge badge-decommissioned">Expired</span>'
+            : '<span class="badge badge-active">Active</span>';
+        var actions = t.revokedAt
+          ? '<button class="btn btn-sm btn-danger" onclick="deleteApiToken(\'' + t.id + '\',\'' + escapeHtml(t.name) + '\')">Delete</button>'
+          : '<button class="btn btn-sm btn-secondary" onclick="revokeApiToken(\'' + t.id + '\',\'' + escapeHtml(t.name) + '\')">Revoke</button>' +
+            '<button class="btn btn-sm btn-danger" onclick="deleteApiToken(\'' + t.id + '\',\'' + escapeHtml(t.name) + '\')">Delete</button>';
+        return '<tr>' +
+          '<td><strong>' + escapeHtml(t.name) + '</strong></td>' +
+          '<td class="mono">' + escapeHtml(t.tokenPrefix || "—") + '…</td>' +
+          '<td>' + (t.scopes || []).map(function (s) { return '<span class="badge badge-type">' + escapeHtml(s) + '</span> '; }).join("") + '</td>' +
+          '<td>' + escapeHtml(t.createdBy || "—") + '</td>' +
+          '<td>' + (t.lastUsedAt ? formatDate(t.lastUsedAt) + (t.lastUsedIp ? ' <span class="mono" style="font-size:0.78rem;color:var(--color-text-secondary)">(' + escapeHtml(t.lastUsedIp) + ')</span>' : '') : "—") + '</td>' +
+          '<td>' + (t.expiresAt ? formatDate(t.expiresAt) : "Never") + '</td>' +
+          '<td>' + statusBadge + '</td>' +
+          '<td class="actions">' + actions + '</td>' +
+        '</tr>';
+      }).join("") +
+      '</tbody></table></div>'
+    : '<p class="empty-state" style="padding:1.5rem 0">No API tokens yet.</p>';
+
+  var scopeOpts = (knownScopes || []).map(function (s) {
+    return '<label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="scope" value="' + escapeHtml(s) + '"> ' + escapeHtml(s) + '</label>';
+  }).join(" ");
+
+  container.innerHTML =
+    '<div class="settings-section">' +
+      '<h3 class="settings-section-title">API Tokens</h3>' +
+      '<p style="color:var(--color-text-secondary);margin:0 0 1rem">Bearer tokens for external systems (e.g. SIEM) to call the Polaris API. ' +
+        'The raw token value is shown <strong>once</strong> at creation and cannot be recovered.</p>' +
+      tableHtml +
+    '</div>' +
+    '<div class="settings-section" style="margin-top:1.5rem">' +
+      '<h4 style="margin:0 0 0.75rem">Create New Token</h4>' +
+      '<div style="display:grid;gap:0.75rem;max-width:480px">' +
+        '<div>' +
+          '<label class="form-label" for="f-token-name">Name <span style="color:var(--color-danger,#c0392b)">*</span></label>' +
+          '<input type="text" id="f-token-name" class="form-input" placeholder="e.g. SIEM Quarantine" maxlength="80">' +
+        '</div>' +
+        '<div>' +
+          '<label class="form-label">Scopes <span style="color:var(--color-danger,#c0392b)">*</span></label>' +
+          '<div style="display:flex;gap:1rem;flex-wrap:wrap">' + scopeOpts + '</div>' +
+        '</div>' +
+        '<div>' +
+          '<label class="form-label" for="f-token-expires">Expires (optional)</label>' +
+          '<input type="datetime-local" id="f-token-expires" class="form-input">' +
+        '</div>' +
+        '<div><button class="btn btn-primary" id="btn-create-api-token">Create Token</button></div>' +
+      '</div>' +
+    '</div>';
+
+  document.getElementById("btn-create-api-token").addEventListener("click", createApiToken);
+}
+
+async function createApiToken() {
+  var name = (document.getElementById("f-token-name").value || "").trim();
+  if (!name) { showToast("Token name is required", "error"); return; }
+  var scopes = Array.from(document.querySelectorAll('input[name="scope"]:checked')).map(function (cb) { return cb.value; });
+  if (!scopes.length) { showToast("Select at least one scope", "error"); return; }
+  var expiresAt = document.getElementById("f-token-expires").value;
+  var body = { name: name, scopes: scopes };
+  if (expiresAt) body.expiresAt = new Date(expiresAt).toISOString();
+
+  var btn = document.getElementById("btn-create-api-token");
+  btn.disabled = true;
+  try {
+    var result = await api.apiTokens.create(body);
+    // Show the raw token in a modal — the only time the caller ever sees it.
+    _showRawTokenModal(result.token.name, result.rawToken);
+    _apiTokensLoaded = false;
+    await loadApiTokensTab();
+  } catch (err) {
+    showToast(err.message || "Create failed", "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function _showRawTokenModal(name, rawToken) {
+  var body =
+    '<p style="margin:0 0 0.75rem">Token <strong>' + escapeHtml(name) + '</strong> created. Copy the token below — it will <strong>never be shown again</strong>.</p>' +
+    '<div style="background:var(--color-surface-alt,#1a1a1a);border:1px solid var(--color-border);border-radius:6px;padding:0.75rem;font-family:monospace;font-size:0.9rem;word-break:break-all;user-select:all" id="raw-token-display">' +
+      escapeHtml(rawToken) +
+    '</div>' +
+    '<div style="margin-top:0.75rem">' +
+      '<button class="btn btn-secondary" id="btn-copy-raw-token">Copy to clipboard</button>' +
+    '</div>';
+  openModal("Token Created — Save Now", body,
+    '<button class="btn btn-primary" onclick="closeModal()">I have saved it</button>');
+  document.getElementById("btn-copy-raw-token").addEventListener("click", async function () {
+    try {
+      await navigator.clipboard.writeText(rawToken);
+      showToast("Token copied");
+    } catch (_) {
+      showToast("Copy failed — select the token text manually", "error");
+    }
+  });
+}
+
+async function revokeApiToken(id, name) {
+  var ok = await showConfirm('Revoke token "' + name + '"? It will stop working immediately.');
+  if (!ok) return;
+  try {
+    await api.apiTokens.revoke(id);
+    showToast('Token "' + name + '" revoked');
+    _apiTokensLoaded = false;
+    await loadApiTokensTab();
+  } catch (err) {
+    showToast(err.message || "Revoke failed", "error");
+  }
+}
+
+async function deleteApiToken(id, name) {
+  var ok = await showConfirm('Permanently delete token "' + name + '"? This cannot be undone.');
+  if (!ok) return;
+  try {
+    await api.apiTokens.delete(id);
+    showToast('Token "' + name + '" deleted');
+    _apiTokensLoaded = false;
+    await loadApiTokensTab();
+  } catch (err) {
+    showToast(err.message || "Delete failed", "error");
   }
 }
