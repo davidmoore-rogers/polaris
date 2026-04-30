@@ -780,6 +780,9 @@ function getAlertsFormData() {
       } else {
         badge.style.display = "none";
       }
+      // Refresh the sidebar Networks dot in lockstep so the Alerts button
+      // and the global indicator never disagree after an operator action.
+      if (typeof window.refreshAlertsDot === "function") window.refreshAlertsDot();
     } catch (_) { /* badge stays hidden if request fails */ }
   }
   refreshBadge();

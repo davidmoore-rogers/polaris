@@ -120,7 +120,16 @@ function renderNav() {
     <ul class="sidebar-nav">
       ${visibleItems.map(item => {
         const isActive = current === item.href || (item.href === "/" && (current === "/index.html" || current === "/"));
-        const dot = item.href === "/events.html" ? '<span class="nav-conflict-dot" id="nav-conflict-dot" style="display:none"></span>' : "";
+        let dot = "";
+        if (item.href === "/events.html") {
+          dot = '<span class="nav-conflict-dot" id="nav-conflict-dot" style="display:none"></span>';
+        } else if (item.href === "/subnets.html") {
+          // Stale-reservation alert indicator — sourced from
+          // /api/v1/reservations/alerts/count. Polled in lockstep with the
+          // conflict dot below; refreshed after operator actions on the
+          // Alerts panel via window.refreshAlertsDot().
+          dot = '<span class="nav-alerts-dot" id="nav-alerts-dot" style="display:none"></span>';
+        }
         return `<li><a href="${item.href}" class="${isActive ? "active" : ""}">${ICONS[item.icon]}<span>${item.label}</span>${dot}</a></li>`;
       }).join("")}
     </ul>
@@ -189,6 +198,23 @@ function renderNav() {
   refreshConflictDot();
   setInterval(refreshConflictDot, 30000);
   window.refreshConflictDot = refreshConflictDot;
+
+  // Alerts dot on Networks — same 30 s polling, same flashing-red pattern
+  // as the conflict dot. Sources from /reservations/alerts/count which
+  // returns just the active (non-ignored, non-snoozed) stale-reservation
+  // count. Exposed on window so the Events page Alerts panel can refresh
+  // it immediately after Snooze / Free / Ignore / Un-ignore actions.
+  async function refreshAlertsDot() {
+    var dot = document.getElementById("nav-alerts-dot");
+    if (!dot) return;
+    try {
+      var data = await api.reservations.alertsCount();
+      dot.style.display = (data && data.count > 0) ? "inline-block" : "none";
+    } catch (_) {}
+  }
+  refreshAlertsDot();
+  setInterval(refreshAlertsDot, 30000);
+  window.refreshAlertsDot = refreshAlertsDot;
 }
 
 function _getUserInitials(username) {
