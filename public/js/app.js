@@ -498,8 +498,21 @@ function processSearchHash() {
   var ipM = /^#ip=([^@]+)@(.+)$/.exec(hash);
   if (ipM && path.indexOf("/subnets.html") !== -1) {
     var subnetId = decodeURIComponent(ipM[1]);
+    var focusIp = decodeURIComponent(ipM[2]);
     setTimeout(function () {
-      if (typeof openIpPanel === "function") openIpPanel(subnetId);
+      if (typeof openIpPanel !== "function") return;
+      // Fetch the subnet metadata first so the panel can compute which page
+      // contains focusIp before the initial render — avoids opening on page 1
+      // and then re-fetching when the IP lives further into a large subnet.
+      if (focusIp && typeof api !== "undefined" && api.subnets && typeof api.subnets.get === "function") {
+        api.subnets.get(subnetId).then(function (s) {
+          openIpPanel(subnetId, { focusIp: focusIp, subnetCidr: s && s.cidr });
+        }, function () {
+          openIpPanel(subnetId, { focusIp: focusIp });
+        });
+      } else {
+        openIpPanel(subnetId);
+      }
     }, 150);
   }
 }

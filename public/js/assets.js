@@ -336,7 +336,7 @@ function renderAssetsPage() {
       '<td>' + escapeHtml(a.location || a.learnedLocation || "-") + '</td>' +
       '<td>' + (a.lastSeen ? formatDate(a.lastSeen) : "-") + '</td>' +
       '<td class="actions">' +
-        _reserveActionHTML(a) +
+        _viewLeaseActionHTML(a) +
         _quarantineActionHTML(a) +
         (canManageAssets() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + a.id + '\')">Edit</button>' +
         (a.ipAddress && !a.dnsName ? '<button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.ipAddress) + '\')" title="Reverse DNS lookup (IP → hostname)">DNS</button>' : '') +
@@ -394,56 +394,23 @@ function _assetsUpdateBulkBar() {
   }
 }
 
-// Reserve / Unreserve cell. Returns "" when there's nothing to render so the
-// caller can splat it inside the Actions cell unconditionally. The visibility
-// rules:
-//   - readonly users see no button
-//   - asset must have an IP and a non-deprecated containing subnet
-//   - if there's already an active reservation, render Unreserve; networkadmin+
-//     can release any reservation, everyone else only their own (the backend
-//     re-checks this — the disabled state is just a UX hint)
-//   - dhcp_lease reservations are treated as "no real reservation" — leases
-//     roll over, so the user should be able to promote one into a manual
-//     reservation. The reserve endpoint releases the lease in-place.
-function _reserveActionHTML(a) {
-  if (!canReserveIps()) return '';
+// View Lease cell. Renders a button that jumps to the asset's IP in the
+// network slide-over on the Networks page (the same panel used for IP-level
+// reservation editing). Hidden when the asset has no IP or no non-deprecated
+// containing subnet — there is nothing to navigate to.
+function _viewLeaseActionHTML(a) {
   if (!a.ipAddress) return '';
   var ctx = a.ipContext;
   if (!ctx || !ctx.subnetId) return '';
-  if (ctx.reservation && ctx.reservation.sourceType !== 'dhcp_lease') {
-    var canUnreserve = canManageNetworks() || ctx.reservation.createdBy === currentUsername;
-    var title = canUnreserve
-      ? 'Release this reservation'
-      : 'Reserved by ' + (ctx.reservation.createdBy || 'system') + ' — only they (or a network admin) can release it';
-    return '<button class="btn btn-sm btn-danger" onclick="unreserveAssetIp(\'' + a.id + '\')" title="' + escapeHtml(title) + '"' + (canUnreserve ? '' : ' disabled') + '>Unreserve</button>';
-  }
-  var reserveTitle = ctx.reservation && ctx.reservation.sourceType === 'dhcp_lease'
-    ? 'Promote DHCP lease to a manual reservation in ' + (ctx.subnetCidr || '')
-    : 'Reserve this IP in ' + (ctx.subnetCidr || '');
-  return '<button class="btn btn-sm btn-secondary" onclick="reserveAssetIp(\'' + a.id + '\')" title="' + escapeHtml(reserveTitle) + '">Reserve</button>';
+  var title = 'View this IP in ' + (ctx.subnetCidr || 'its network');
+  return '<button class="btn btn-sm btn-secondary" onclick="viewAssetLease(\'' + a.id + '\')" title="' + escapeHtml(title) + '">View Lease</button>';
 }
 
-async function reserveAssetIp(id) {
-  try {
-    var reservation = await api.assets.reserve(id);
-    var pushed = reservation && reservation.pushStatus === "synced";
-    showToast(pushed ? 'Reservation created and pushed to FortiGate' : 'Reservation created');
-    loadAssets();
-  } catch (err) {
-    showToast(err.message || 'Reservation failed', 'error');
-  }
-}
-
-async function unreserveAssetIp(id) {
-  var ok = await showConfirm('Release this reservation?');
-  if (!ok) return;
-  try {
-    await api.assets.unreserve(id);
-    showToast('Reservation released');
-    loadAssets();
-  } catch (err) {
-    showToast(err.message || 'Release failed', 'error');
-  }
+function viewAssetLease(id) {
+  var a = (_assetsData || []).find(function (x) { return x.id === id; });
+  if (!a || !a.ipAddress || !a.ipContext || !a.ipContext.subnetId) return;
+  var hash = '#ip=' + encodeURIComponent(a.ipContext.subnetId) + '@' + encodeURIComponent(a.ipAddress);
+  window.location.href = '/subnets.html' + hash;
 }
 
 // Quarantine action button in asset row. Only shown to assets-admins; only

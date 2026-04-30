@@ -188,8 +188,6 @@ const api = {
     },
     probeNow:             (id)  => request("POST", `/assets/${id}/probe-now`),
     snmpWalk:             (id, body, signal) => request("POST", `/assets/${id}/snmp-walk`, body, signal),
-    reserve:              (id)  => request("POST", `/assets/${id}/reserve`),
-    unreserve:            (id)  => request("POST", `/assets/${id}/unreserve`),
     quarantine:           (id, reason) => request("POST", `/assets/${id}/quarantine`, reason !== undefined ? { reason } : {}),
     unquarantine:         (id)  => request("DELETE", `/assets/${id}/quarantine`),
     verifyQuarantine:     (id)  => request("POST", `/assets/${id}/quarantine/verify`),

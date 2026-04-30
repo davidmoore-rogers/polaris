@@ -8,6 +8,10 @@ var _ipPanelPageSize = 256;
 var _ipPanelData = null;
 var _ipPanelDirty = false;
 var _panelSelected = new Set();
+// When set, _renderIpList scrolls to and highlights the row whose IP matches.
+// Cleared after a single render so subsequent page navigations don't keep
+// re-scrolling.
+var _ipPanelFocusIp = null;
 
 // ─── Panel lifecycle ────────────────────────────────────────────────────────
 
@@ -41,12 +45,21 @@ function _ensurePanelDOM() {
   initSlideoverResize(document.getElementById("ip-panel"), "polaris.panel.width.ip");
 }
 
-function openIpPanel(subnetId) {
+function openIpPanel(subnetId, opts) {
   _ensurePanelDOM();
   _ipPanelSubnetId = subnetId;
-  _ipPanelPage = 1;
   _ipPanelDirty = false;
   _panelSelected.clear();
+  // Optional focus: when an IP is supplied, jump to the page that contains
+  // it so the subsequent render can scroll the row into view. Falls back to
+  // page 1 for IPv6 (panel only lists existing reservations) or unparseable
+  // CIDRs.
+  var focusIp = opts && opts.focusIp ? String(opts.focusIp) : null;
+  var subnetCidr = opts && opts.subnetCidr ? String(opts.subnetCidr) : null;
+  _ipPanelFocusIp = focusIp;
+  _ipPanelPage = focusIp && subnetCidr
+    ? _ipv4PageForIp(subnetCidr, focusIp, _ipPanelPageSize)
+    : 1;
   document.getElementById("ip-panel-title").textContent = "Loading...";
   document.getElementById("ip-panel-meta").innerHTML = "";
   document.getElementById("ip-panel-body").innerHTML = '<p class="empty-state">Loading...</p>';
@@ -57,11 +70,39 @@ function openIpPanel(subnetId) {
   _fetchIpPage();
 }
 
+// Compute which page of the IP list contains `ip` for an IPv4 subnet.
+// Returns 1 for unparseable input or non-IPv4 (IPv6 panel doesn't paginate
+// by host offset — it only lists reservations).
+function _ipv4PageForIp(subnetCidr, ip, pageSize) {
+  var slash = subnetCidr.indexOf('/');
+  if (slash < 0) return 1;
+  var network = subnetCidr.slice(0, slash);
+  var netInt = _ipv4ToInt(network);
+  var ipInt = _ipv4ToInt(ip);
+  if (netInt == null || ipInt == null) return 1;
+  var offset = ipInt - netInt;
+  if (offset < 0) return 1;
+  return Math.floor(offset / pageSize) + 1;
+}
+
+function _ipv4ToInt(ip) {
+  var parts = String(ip).split('.');
+  if (parts.length !== 4) return null;
+  var n = 0;
+  for (var i = 0; i < 4; i++) {
+    var p = parseInt(parts[i], 10);
+    if (isNaN(p) || p < 0 || p > 255 || String(p) !== parts[i]) return null;
+    n = n * 256 + p;
+  }
+  return n;
+}
+
 function closeIpPanel() {
   var overlay = document.getElementById("ip-panel-overlay");
   if (overlay) overlay.classList.remove("open");
-  var activeRow = document.querySelector("tr.row-panel-active");
-  if (activeRow) activeRow.classList.remove("row-panel-active");
+  document.querySelectorAll("tr.row-panel-active").forEach(function (r) {
+    r.classList.remove("row-panel-active");
+  });
   if (_ipPanelDirty && typeof loadSubnets === "function") loadSubnets();
   _ipPanelSubnetId = null;
   _ipPanelData = null;
@@ -227,7 +268,7 @@ function _renderIpList(data) {
     var isOwner = r && r.createdBy === currentUsername;
     var canEditThis = canManageNetworks() || isOwner;
     var assetBtn = ip.assetId
-      ? '<button class="btn btn-sm btn-secondary ip-asset-btn" data-aid="' + escapeHtml(ip.assetId) + '" title="View asset record">Asset</button>'
+      ? '<button class="btn btn-sm btn-secondary ip-asset-btn" data-aid="' + escapeHtml(ip.assetId) + '" title="Open asset details">View Asset</button>'
       : '';
     if (isSpecial) {
       actions = "";
@@ -258,7 +299,7 @@ function _renderIpList(data) {
       ? '<td class="cb-col"><input type="checkbox" class="panel-row-cb"' + cbChecked + ' data-rid="' + r.id + '"></td>'
       : '<td class="cb-col"></td>';
 
-    html += '<tr' + rowClass + '>' +
+    html += '<tr' + rowClass + ' data-ip="' + escapeHtml(ip.address) + '">' +
       cbCell +
       '<td style="text-align:center"><span class="ip-status-dot ' + dotClass + '"></span></td>' +
       '<td class="mono" style="font-size:0.8rem">' + escapeHtml(ip.address) + '</td>' +
@@ -335,9 +376,21 @@ function _renderIpList(data) {
   });
   body.querySelectorAll(".ip-asset-btn").forEach(function (btn) {
     btn.addEventListener("click", function () {
-      _openAssetViewModal(btn.getAttribute("data-aid"));
+      var aid = btn.getAttribute("data-aid");
+      window.location.href = '/assets.html#view=asset:' + encodeURIComponent(aid);
     });
   });
+
+  // Scroll-to-row on focus IP. Cleared after one render so paginating away
+  // doesn't snap back to the original IP.
+  if (_ipPanelFocusIp) {
+    var target = body.querySelector('tr[data-ip="' + _ipPanelFocusIp.replace(/"/g, '\\"') + '"]');
+    if (target) {
+      target.classList.add("row-panel-active");
+      target.scrollIntoView({ block: "center", behavior: "auto" });
+    }
+    _ipPanelFocusIp = null;
+  }
 }
 
 function _panelUpdateSelectAll() {
@@ -740,123 +793,6 @@ function _generateIpPanelPdf(s, allIps) {
   var filename = "polaris-network-" + s.cidr.replace(/[\/]/g, "_") + "-" + now.toISOString().slice(0, 10) + ".pdf";
   doc.save(filename);
   showToast("Exported " + allIps.length + " IPs to " + filename);
-}
-
-/* ─── Asset view modal (self-contained; no dep on assets.js) ─────────────────*/
-
-var _ASSET_TYPE_LABELS = {
-  server: "Server", switch: "Switch", router: "Router", firewall: "Firewall",
-  workstation: "Workstation", printer: "Printer", access_point: "AP", other: "Other",
-};
-
-function _assetViewRow(label, value, mono) {
-  return '<div class="detail-row"><span class="detail-label">' + escapeHtml(label) + '</span>' +
-    '<span class="detail-value' + (mono ? ' mono' : '') + '">' + escapeHtml(value || "-") + '</span></div>';
-}
-
-function _assetMacAddressesHTML(macs) {
-  if (!Array.isArray(macs) || macs.length <= 1) return '';
-  var rows = macs.map(function (m) {
-    return '<div style="display:flex;gap:12px;align-items:center;padding:3px 0">' +
-      '<code style="font-size:0.82rem">' + escapeHtml(m.mac) + '</code>' +
-      '<span style="font-size:0.75rem;color:var(--color-text-tertiary)">' +
-        escapeHtml(m.source || "") + (m.lastSeen ? ' &middot; ' + formatDate(m.lastSeen) : '') +
-      '</span></div>';
-  }).join("");
-  return '<div class="detail-row"><span class="detail-label">All MACs (' + macs.length + ')</span>' +
-    '<span class="detail-value">' + rows + '</span></div>';
-}
-
-function _assetAssocIpsHTML(ips) {
-  if (!Array.isArray(ips) || ips.length === 0) return '';
-  var rows = ips.map(function (entry) {
-    var meta = [];
-    if (entry.ptrName) meta.push(escapeHtml(entry.ptrName));
-    if (entry.interfaceName) meta.push(escapeHtml(entry.interfaceName));
-    if (entry.source) meta.push(escapeHtml(entry.source));
-    if (entry.lastSeen) meta.push(formatDate(entry.lastSeen));
-    return '<div style="display:flex;gap:12px;align-items:center;padding:3px 0">' +
-      '<code style="font-size:0.82rem">' + escapeHtml(entry.ip) + '</code>' +
-      (meta.length > 0
-        ? '<span style="font-size:0.75rem;color:var(--color-text-tertiary)">' + meta.join(' &middot; ') + '</span>'
-        : '') +
-    '</div>';
-  }).join("");
-  return '<div class="detail-row"><span class="detail-label">Associated IPs (' + ips.length + ')</span>' +
-    '<span class="detail-value">' + rows + '</span></div>';
-}
-
-function _assetAssocUsersHTML(users) {
-  if (!Array.isArray(users) || users.length === 0) return '';
-  var rows = users.map(function (u) {
-    var display = u.domain ? escapeHtml(u.domain) + '\\' + escapeHtml(u.user) : escapeHtml(u.user);
-    return '<div style="display:flex;gap:12px;align-items:center;padding:3px 0">' +
-      '<span style="font-size:0.85rem">' + display + '</span>' +
-      '<span style="font-size:0.75rem;color:var(--color-text-tertiary)">' +
-        (u.source ? escapeHtml(u.source) : '') +
-        (u.lastSeen ? ' &middot; ' + formatDate(u.lastSeen) : '') +
-      '</span></div>';
-  }).join("");
-  return '<div class="detail-row"><span class="detail-label">Associated Users (' + users.length + ')</span>' +
-    '<span class="detail-value">' + rows + '</span></div>';
-}
-
-async function _openAssetViewModal(assetId) {
-  try {
-    var a = await api.assets.get(assetId);
-    var body = '<div class="asset-view-grid">' +
-      _assetViewRow("Hostname", a.hostname) +
-      _assetViewRow("DNS Name", a.dnsName) +
-      (function() {
-        var ipVal = a.ipAddress || '-';
-        var src = a.ipSource ? '<span style="font-size:0.75rem;color:var(--color-text-tertiary);margin-left:8px">' + escapeHtml(a.ipSource) + '</span>' : '';
-        return '<div class="detail-row"><span class="detail-label">IP Address</span><span class="detail-value mono">' + escapeHtml(ipVal) + src + '</span></div>';
-      })() +
-      _assetAssocIpsHTML(a.associatedIps) +
-      _assetViewRow("MAC Address", a.macAddress, true) +
-      _assetMacAddressesHTML(a.macAddresses) +
-      _assetViewRow("Asset Tag", a.assetTag) +
-      _assetViewRow("Serial Number", a.serialNumber) +
-      _assetViewRow("Manufacturer", a.manufacturer) +
-      _assetViewRow("Model", a.model) +
-      _assetViewRow("Type", _ASSET_TYPE_LABELS[a.assetType] || a.assetType) +
-      (function() {
-        var statusVal = a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-";
-        var sub = "";
-        if (a.statusChangedBy || a.statusChangedAt) {
-          var parts = [];
-          if (a.statusChangedBy) parts.push(escapeHtml(a.statusChangedBy));
-          if (a.statusChangedAt) {
-            var d = new Date(a.statusChangedAt);
-            parts.push(d.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }));
-          }
-          sub = '<br><span style="font-size:0.75rem;color:var(--color-text-tertiary)">' + parts.join(" · ") + '</span>';
-        }
-        return '<div class="detail-row"><span class="detail-label">Status</span><span class="detail-value">' + escapeHtml(statusVal) + sub + '</span></div>';
-      })() +
-      _assetViewRow("Location", a.location) +
-      _assetViewRow("Learned Location", a.learnedLocation) +
-      _assetViewRow("Department", a.department) +
-      _assetViewRow("Assigned To", a.assignedTo) +
-      _assetViewRow("OS / Firmware", a.osVersion || a.os) +
-      _assetViewRow("Last Seen Switch", a.lastSeenSwitch) +
-      _assetViewRow("Last Seen AP", a.lastSeenAp) +
-      _assetAssocUsersHTML(a.associatedUsers) +
-      _assetViewRow("First Seen", a.createdAt ? formatDate(a.createdAt) : null) +
-      _assetViewRow("Last Seen", a.lastSeen ? formatDate(a.lastSeen) : null) +
-      _assetViewRow("Acquired", a.acquiredAt ? formatDate(a.acquiredAt) : null) +
-      _assetViewRow("Warranty Expires", a.warrantyExpiry ? formatDate(a.warrantyExpiry) : null) +
-      _assetViewRow("Purchase Order", a.purchaseOrder) +
-      _assetViewRow("Tags", (a.tags || []).join(", ") || null) +
-      _assetViewRow("Notes", a.notes) +
-      _assetViewRow("Created", formatDate(a.createdAt)) +
-      _assetViewRow("Updated", formatDate(a.updatedAt)) +
-    '</div>';
-    var footer = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
-    openModal("Asset Details", body, footer, { wide: true });
-  } catch (err) {
-    showToast(err.message, "error");
-  }
 }
 
 function _generateIpPanelCsv(s, allIps) {
