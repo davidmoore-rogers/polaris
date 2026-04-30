@@ -898,6 +898,8 @@ Frontend MAC enforcement: the subnet IPs endpoint (`GET /subnets/:id/ips`) attac
 
 Release-time unpush is best-effort — a device-side failure logs `reservation.unpush.failed` (warning) but does not block the Polaris release, so an offline FortiGate doesn't stop operators from letting go of an IP. **Update of pushed reservations is not in scope for v1**: the reservation update endpoint only allows hostname/owner/projectRef/expiresAt/notes (none of which would change the device-side entry's MAC or IP), so re-push on update is a no-op. Operators who need to change the MAC/IP on a pushed reservation must release and recreate.
 
+**Quarantine push (`pushQuarantine` toggle):** The FMG integration's `config` JSON has a `pushQuarantine: boolean` flag (default `false`), edited from the **Quarantine Push** tab on the integration's Add/Edit modal (alongside the Reservation Push tab). When enabled, `quarantineAsset()` pushes MAC-based address-group entries to every FortiGate sighted by this integration within the `quarantine.sightingMaxAgeDays` window. If the toggle is `false` (or absent), quarantine push is skipped entirely for that integration's sightings — the asset's `quarantineTargets` array is left empty (or only populated from integrations that do have the toggle enabled). Release-time unpush iterates the recorded `quarantineTargets` directly (which only contain integrations that were enabled at push time) — toggling off `pushQuarantine` after quarantine has been pushed does not prevent unpush on release. Transport follows `useProxy` (same as reservation push).
+
 ---
 
 ## FMG Discovery Workflow

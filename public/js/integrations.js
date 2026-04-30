@@ -295,6 +295,50 @@ function _readPushReservationsToggle() {
   return !!el.checked;
 }
 
+// Quarantine Push tab body. Renders the master toggle plus transport-mode
+// guidance. When enabled, quarantining an asset pushes MAC-based
+// address-group entries to every FortiGate sighted by this integration.
+// `pushQuarantine` is the current toggle value; `useProxy` drives the
+// transport mode label.
+function quarantinePushFormHTML(pushQuarantine, useProxy) {
+  var checked = pushQuarantine === true ? "checked" : "";
+  var modeLabel = (useProxy === false)
+    ? "Direct to each FortiGate"
+    : "Proxy through FortiManager to each FortiGate";
+  var modeBody = (useProxy === false)
+    ? "Quarantine entries are written to each FortiGate's REST API using the per-device API token configured on the Settings tab."
+    : "Quarantine entries are written through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials.";
+  return '<div class="form-section">' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+      '<input type="checkbox" id="f-pushQuarantine" ' + checked + ' style="width:auto">' +
+      '<label for="f-pushQuarantine" style="margin:0;font-weight:500">Push asset quarantine entries from Polaris back to FortiGate</label>' +
+    '</div>' +
+    '<p class="hint" style="margin-bottom:1rem">When checked, quarantining an asset adds its MAC addresses to the FortiGate quarantine address-group on every device that has recently sighted the asset. Releasing quarantine removes the entries from the device.</p>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.4rem">Push transport (current setting)</p>' +
+    '<p style="margin:0 0 0.4rem 0;font-weight:500">' + escapeHtml(modeLabel) + '</p>' +
+    '<p class="hint" style="margin-bottom:1rem">' + modeBody + '</p>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.4rem">Required FortiManager admin profile changes</p>' +
+    '<ul style="margin:0 0 0.5rem 1.2rem;padding:0;font-size:0.85rem">' +
+      '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
+      '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write</li>' +
+      '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
+    '</ul>' +
+    '<div class="form-group" style="background:var(--color-warning-bg, rgba(255,193,7,0.08));border:1px solid var(--color-warning, #ffc107);border-radius:4px;padding:0.6rem 0.8rem;margin-top:0.6rem">' +
+      '<p style="margin:0 0 0.4rem 0;font-weight:500;color:var(--color-warning, #ffc107)">&#9888; Blast radius</p>' +
+      '<p class="hint" style="margin:0">FortiManager admin profiles do not have a per-object permission for quarantine. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.</p>' +
+    '</div>' +
+  '</div>';
+}
+
+// Read the quarantine push toggle. Returns undefined when the tab didn't render.
+function _readPushQuarantineToggle() {
+  var el = document.getElementById("f-pushQuarantine");
+  if (!el) return undefined;
+  return !!el.checked;
+}
+
 // Per-integration monitoring transport block rendered at the top of the
 // FortiGates subtab on the Monitoring tab. Renders an SNMP credential picker
 // plus four checkboxes that decide which streams (response-time, telemetry,
@@ -1377,10 +1421,11 @@ async function openCreateModal(type) {
       addTabs.push({ key: "filters", label: "Filters", html: fortiManagerFiltersHTML({}) });
     }
     addTabs.push({ key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, { snmpCredentials: creds, monitorCredentialId: null, integrationId: null }) });
-    // FMG only: tab for the Reservation Push toggle. Defaults to off.
-    // useProxy on a fresh integration defaults to true (the FMG proxy path).
+    // FMG only: tabs for the Reservation Push and Quarantine Push toggles.
+    // Both default to off; useProxy on a fresh integration defaults to true.
     if (isFmg) {
       addTabs.push({ key: "push", label: "Reservation Push", html: reservationPushFormHTML(false, true) });
+      addTabs.push({ key: "quarantine-push", label: "Quarantine Push", html: quarantinePushFormHTML(false, true) });
     }
     body = _intRenderTabbedBody("intg-edit", addTabs);
   } else {
@@ -1453,6 +1498,8 @@ async function openCreateModal(type) {
       if (isFmg) {
         var pushToggleNew = _readPushReservationsToggle();
         if (pushToggleNew !== undefined) createConfig.pushReservations = pushToggleNew;
+        var quarantinePushToggleNew = _readPushQuarantineToggle();
+        if (quarantinePushToggleNew !== undefined) createConfig.pushQuarantine = quarantinePushToggleNew;
       }
       var input = {
         type: type,
@@ -1655,13 +1702,18 @@ async function openEditModal(id) {
           integrationId:      id,
         }) },
       );
-      // FMG only: third tab for the Reservation Push toggle. The body uses
-      // the integration's current useProxy setting to label the active mode.
+      // FMG only: tabs for Reservation Push and Quarantine Push toggles.
+      // Body uses the integration's current useProxy to label the active mode.
       if (intg.type === "fortimanager") {
         editTabs.push({
           key: "push",
           label: "Reservation Push",
           html: reservationPushFormHTML(config.pushReservations === true, config.useProxy !== false),
+        });
+        editTabs.push({
+          key: "quarantine-push",
+          label: "Quarantine Push",
+          html: quarantinePushFormHTML(config.pushQuarantine === true, config.useProxy !== false),
         });
       }
       body = _intRenderTabbedBody("intg-edit", editTabs);
@@ -1747,11 +1799,13 @@ async function openEditModal(id) {
         if (fgBlock) editConfig.fortigateMonitor   = fgBlock;
         if (swBlock) editConfig.fortiswitchMonitor = swBlock;
         if (apBlock) editConfig.fortiapMonitor     = apBlock;
-        // FMG-only push toggle. Reader returns undefined when the tab
+        // FMG-only push toggles. Readers return undefined when the tabs
         // didn't render (FortiGate-type integration); leave unchanged.
         if (intg.type === "fortimanager") {
           var pushToggle = _readPushReservationsToggle();
           if (pushToggle !== undefined) editConfig.pushReservations = pushToggle;
+          var quarantinePushToggle = _readPushQuarantineToggle();
+          if (quarantinePushToggle !== undefined) editConfig.pushQuarantine = quarantinePushToggle;
         }
       }
       var input = {

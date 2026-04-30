@@ -455,6 +455,10 @@ export async function quarantineAsset(
     const integration = integrationById.get(sighting.integrationId);
     if (!integration) continue; // disabled or deleted; skip silently
 
+    // Skip integrations where the operator has not enabled quarantine push.
+    const intgCfg = integration.config as Record<string, unknown>;
+    if (intgCfg.pushQuarantine !== true) continue;
+
     let transport: Transport;
     try {
       transport = await buildTransportForIntegration(

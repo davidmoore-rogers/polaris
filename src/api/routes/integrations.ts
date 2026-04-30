@@ -231,6 +231,12 @@ const FortiManagerConfigSchema = z.object({
   // push is verified by reading the entry back; any failure aborts the
   // reservation create entirely (no row persisted).
   pushReservations: z.boolean().optional().default(false),
+  // When true, quarantining an asset will push MAC-based address-group
+  // entries to every FortiGate seen by this integration that has sighted the
+  // asset within the sightingMaxAgeDays window. Default false; operators must
+  // opt in explicitly because quarantine push requires write access to the
+  // FortiGate's address-group configuration.
+  pushQuarantine: z.boolean().optional().default(false),
 });
 
 const FortiGateConfigSchema = z.object({
