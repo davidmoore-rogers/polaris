@@ -944,8 +944,9 @@ router.get("/pg-tuning", async (_req, res, next) => {
 
     // 3. Query current PostgreSQL settings
     const pgSettings = await prisma.$queryRawUnsafe<{ name: string; setting: string; unit: string | null }[]>(
-      `SELECT name, setting, unit FROM pg_settings WHERE name IN ('shared_buffers', 'work_mem', 'effective_cache_size', 'random_page_cost')`
+      `SELECT name, setting, unit FROM pg_settings WHERE name IN ('shared_buffers', 'work_mem', 'effective_cache_size', 'random_page_cost', 'config_file')`
     );
+    const pgConfigFile = pgSettings.find((s) => s.name === "config_file")?.setting || null;
 
     const counts = { assets: assetCount, subnets: subnetCount, reservations: reservationCount };
     const dbSizeResult = await prisma.$queryRawUnsafe<{ size: bigint }[]>(
@@ -962,6 +963,7 @@ router.get("/pg-tuning", async (_req, res, next) => {
 
     const PG_RECOMMENDED = buildPgRecommended();
     const settings = pgSettings.map((s) => {
+      if (s.name === "config_file") return null;
       const rec = PG_RECOMMENDED[s.name];
       if (!rec) return null;
 
@@ -1008,6 +1010,7 @@ router.get("/pg-tuning", async (_req, res, next) => {
       counts,
       thresholds: PG_TUNING_THRESHOLDS,
       settings,
+      pgConfigFile,
       snoozedUntil: isSnoozed ? snoozedUntil : null,
       ramInsufficient,
       currentRamGb,

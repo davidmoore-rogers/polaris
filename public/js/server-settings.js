@@ -967,6 +967,7 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
   var badPgSettings = (pgTuning && Array.isArray(pgTuning.settings))
     ? pgTuning.settings.filter(function (s) { return !s.ok; })
     : [];
+  var pgConfigFile = pgTuning && pgTuning.pgConfigFile ? pgTuning.pgConfigFile : null;
   var pgSettingsRowsHtml = badPgSettings.length
     ? '<div class="capacity-reason-pg-settings">' +
         badPgSettings.map(function (s) {
@@ -975,6 +976,9 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
             '<span class="pg-tuning-values">' + escapeHtml(s.current) + ' &rarr; ' + escapeHtml(s.recommended) + '</span>' +
           '</div>';
         }).join("") +
+        (pgConfigFile
+          ? '<div class="capacity-reason-pg-path">Edit in <code>' + escapeHtml(pgConfigFile) + '</code> and restart PostgreSQL.</div>'
+          : '') +
       '</div>'
     : '';
 

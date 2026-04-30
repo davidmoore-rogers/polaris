@@ -605,7 +605,25 @@ code {
 .capacity-reason-pg-settings {
   margin-top: 6px;
   padding-left: calc(40px + 8px); /* align with suggestion text */
+}
+.capacity-reason-pg-settings .pg-tuning-row {
   max-width: 360px; /* keep param/value pair readable on a wide card */
+}
+.capacity-reason-pg-path {
+  margin-top: 6px;
+  font-size: 0.76rem;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+.capacity-reason-pg-path code {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  word-break: break-all;
 }
 
 .capacity-grid {
