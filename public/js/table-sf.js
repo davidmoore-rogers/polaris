@@ -428,6 +428,11 @@ TableSF.prototype.restoreFilterUI = function () {
   });
 };
 
+TableSF.prototype.clearFilters = function () {
+  this._filters = {};
+  this.restoreFilterUI();
+};
+
 TableSF.prototype._updateIcons = function () {
   var self = this;
   this._thead.querySelectorAll("th[data-sf-key]").forEach(function (th) {

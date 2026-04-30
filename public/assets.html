@@ -47,35 +47,7 @@
       </div>
 
       <div class="filter-bar">
-        <label>Status</label>
-        <select id="filter-status" style="width:auto">
-          <option value="hide-decommissioned" selected>Active / Maintenance / Storage</option>
-          <option value="">All</option>
-          <option value="active">Active</option>
-          <option value="maintenance">Maintenance</option>
-          <option value="storage">Storage</option>
-          <option value="decommissioned">Decommissioned</option>
-          <option value="disabled">Disabled</option>
-        </select>
-        <label>Type</label>
-        <select id="filter-type" style="width:auto">
-          <option value="">All</option>
-          <option value="server">Server</option>
-          <option value="switch">Switch</option>
-          <option value="router">Router</option>
-          <option value="firewall">Firewall</option>
-          <option value="workstation">Workstation</option>
-          <option value="printer">Printer</option>
-          <option value="access_point">Access Point</option>
-          <option value="other">Other</option>
-        </select>
-        <label>Search</label>
-        <input type="text" id="filter-search" placeholder="hostname, IP, MAC, tag..." style="width:200px">
-        <label>Creator</label>
-        <select id="filter-creator" style="width:auto">
-          <option value="">All</option>
-          <option value="me">Mine</option>
-        </select>
+        <button class="btn btn-secondary btn-sm" id="btn-clear-filters">Clear Filters</button>
         <label style="margin-left:auto">Show</label>
         <select id="filter-pagesize" style="width:auto">
           <option value="15" selected>15</option>
