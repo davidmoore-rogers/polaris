@@ -1026,7 +1026,7 @@ code {
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  overflow: hidden;
+  overflow-x: auto;
   box-shadow: var(--shadow-sm);
 }
 table {
@@ -1044,12 +1044,15 @@ thead th {
   letter-spacing: 1px;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-bg-tertiary);
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 tbody td {
   padding: 0.6rem 1rem;
   border-bottom: 1px solid var(--color-border-light);
   vertical-align: middle;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: rgba(79,195,247,0.04); }
