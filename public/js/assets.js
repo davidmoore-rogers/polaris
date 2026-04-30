@@ -367,15 +367,21 @@ function _assetsUpdateBulkBar() {
 
   // Show quarantine/release buttons only for assets-admins. Determine which
   // buttons are relevant based on the statuses of the selected assets.
+  // Infrastructure types (firewall/switch/access_point) are excluded from the
+  // Quarantine button — they can't be quarantined — but stay eligible for
+  // Release in case one was quarantined before this guard was added.
   if (canManageAssets() && _assetsData && _assetsData.length) {
-    var selectedStatuses = _assetsData
-      .filter(function (a) { return _assetsSelected.has(a.id); })
-      .map(function (a) { return a.status; });
-    var hasNonQuarantined = selectedStatuses.some(function (s) { return s !== "quarantined"; });
-    var hasQuarantined    = selectedStatuses.some(function (s) { return s === "quarantined"; });
+    var selected = _assetsData.filter(function (a) { return _assetsSelected.has(a.id); });
+    var hasQuarantineable = selected.some(function (a) {
+      return a.status !== "quarantined"
+        && a.assetType !== "firewall"
+        && a.assetType !== "switch"
+        && a.assetType !== "access_point";
+    });
+    var hasQuarantined = selected.some(function (a) { return a.status === "quarantined"; });
     var bQ  = document.getElementById("assets-bulk-quarantine-btn");
     var bUQ = document.getElementById("assets-bulk-unquarantine-btn");
-    if (bQ)  bQ.style.display  = count > 0 && hasNonQuarantined ? "" : "none";
+    if (bQ)  bQ.style.display  = count > 0 && hasQuarantineable ? "" : "none";
     if (bUQ) bUQ.style.display = count > 0 && hasQuarantined    ? "" : "none";
   }
 }
@@ -434,12 +440,18 @@ async function unreserveAssetIp(id) {
 
 // Quarantine action button in asset row. Only shown to assets-admins; only
 // shown when the asset has a MAC (no MAC → no FortiGate target to push).
+// Infrastructure assets (firewalls, switches, access points) cannot be
+// quarantined — quarantining the device that does the quarantining would
+// lock the operator out of the network. Release stays available for assets
+// already in the quarantined state regardless of type, so a misclassified
+// quarantine can still be undone.
 function _quarantineActionHTML(a) {
   if (!canManageAssets()) return '';
   if (!a.macAddress && (!a.macAddresses || !a.macAddresses.length)) return '';
   if (a.status === 'quarantined') {
     return '<button class="btn btn-sm btn-secondary" onclick="releaseAssetQuarantine(\'' + a.id + '\')" title="Release quarantine — removes MAC block from FortiGate(s)">Release Quarantine</button>';
   }
+  if (a.assetType === 'firewall' || a.assetType === 'switch' || a.assetType === 'access_point') return '';
   return '<button class="btn btn-sm btn-danger" onclick="quarantineAssetRow(\'' + a.id + '\')" title="Quarantine — push MAC block to FortiGate(s) that have seen this asset">Quarantine</button>';
 }
 
@@ -1373,7 +1385,11 @@ async function openViewModal(id) {
       tabs.push({ key: "snmp", label: "SNMP Walk", html: assetSnmpWalkViewHTML(a) });
     }
     // Quarantine tab — assets-admin only, shown for any asset that has MACs or is quarantined.
-    if (canManageAssets() && (a.status === "quarantined" || a.macAddress || (a.macAddresses && a.macAddresses.length))) {
+    // Infrastructure assets (firewall/switch/access_point) only get the tab if they're
+    // already quarantined (so Release stays reachable); they can't be newly quarantined.
+    var isInfraQ = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
+    var hasMac = !!(a.macAddress || (a.macAddresses && a.macAddresses.length));
+    if (canManageAssets() && (a.status === "quarantined" || (hasMac && !isInfraQ))) {
       tabs.push({ key: "quarantine", label: a.status === "quarantined" ? "Quarantine ⚠" : "Quarantine", html: _assetQuarantineTabHTML(a) });
     }
     var tabsHTML = _renderTabbedBody("asset-view", tabs);
@@ -5799,9 +5815,10 @@ function _assetQuarantineTabHTML(a) {
       '<div id="asset-sightings-container"><em style="color:var(--color-text-secondary)">Loading…</em></div>' +
     '</div>';
 
+  var isInfra = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
   var actionBtn = isQ
     ? '<button class="btn btn-secondary" id="btn-qtn-release">Release Quarantine</button>'
-    : (macs.length ? '<button class="btn btn-danger" id="btn-qtn-quarantine">Quarantine This Asset</button>' : '');
+    : (macs.length && !isInfra ? '<button class="btn btn-danger" id="btn-qtn-quarantine">Quarantine This Asset</button>' : '');
   var verifyBtn = isQ ? '<button class="btn btn-secondary" id="btn-qtn-verify">Verify Push</button>' : '';
 
   return '<div style="padding:0.5rem 0">' +

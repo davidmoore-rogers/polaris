@@ -425,6 +425,16 @@ export async function quarantineAsset(
   const asset = await prisma.asset.findUnique({ where: { id: params.assetId } });
   if (!asset) throw new AppError(404, `Asset ${params.assetId} not found`);
 
+  // Infrastructure assets discovered from FMG/FortiGate (firewalls, switches,
+  // access points) cannot be quarantined — quarantining the device that does
+  // the quarantining would lock the operator out of the network.
+  if (asset.assetType === "firewall" || asset.assetType === "switch" || asset.assetType === "access_point") {
+    throw new AppError(
+      400,
+      `Asset ${asset.hostname || asset.id} is a ${asset.assetType} and cannot be quarantined`,
+    );
+  }
+
   const macs = macsForAsset(asset);
   if (macs.length === 0) {
     throw new AppError(
