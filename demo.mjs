@@ -1179,6 +1179,7 @@ let NTP_SETTINGS = {
 
 let CERTIFICATES = [];
 let BACKUP_HISTORY = [];
+const API_TOKENS = [];  // in-memory for demo; reset on server restart
 let BACKUP_BLOBS = {};  // id → Buffer, kept in memory for demo re-downloads
 
 let HTTPS_SETTINGS = {
@@ -3178,6 +3179,130 @@ async function routeAPI(method, path, params, body, res, req) {
     const id = path.split("/").pop();
     const asset = ASSETS.find((a) => a.id === id);
     logEventDemo({ action: "asset.deleted", resourceType: "asset", resourceId: id, resourceName: asset?.hostname || asset?.ipAddress, message: `Asset "${asset?.hostname || asset?.ipAddress || "unknown"}" deleted` });
+    res.writeHead(204);
+    return res.end();
+  }
+
+  // ── Quarantine sighting settings ──────────────────────────────────────────
+  if (path === "/api/v1/assets/sighting-settings") {
+    if (method === "GET") return json(res, { sightingMaxAgeDays: 180 });
+    if (method === "PUT") return json(res, { sightingMaxAgeDays: body.sightingMaxAgeDays ?? 180 });
+  }
+  // ── Quarantine sightings (per asset) ──────────────────────────────────────
+  if (path.match(/^\/api\/v1\/assets\/[\w-]+\/sightings$/) && method === "GET") {
+    return json(res, { sightings: [] });
+  }
+  // ── Quarantine status (per asset) ─────────────────────────────────────────
+  if (path.match(/^\/api\/v1\/assets\/[\w-]+\/quarantine-status$/) && method === "GET") {
+    const id = path.split("/")[4];
+    const asset = ASSETS.find((a) => a.id === id);
+    if (!asset) return json(res, { error: "Not found" }, 404);
+    return json(res, {
+      status: asset.status,
+      quarantineReason: asset.quarantineReason || null,
+      quarantinedAt: asset.quarantinedAt || null,
+      quarantinedBy: asset.quarantinedBy || null,
+      quarantineTargets: asset.quarantineTargets || [],
+    });
+  }
+  // ── Quarantine push ────────────────────────────────────────────────────────
+  if (path.match(/^\/api\/v1\/assets\/[\w-]+\/quarantine$/) && method === "POST") {
+    const id = path.split("/")[4];
+    const asset = ASSETS.find((a) => a.id === id);
+    if (!asset) return json(res, { error: "Not found" }, 404);
+    if (!asset.macAddress) return json(res, { error: "Asset has no MAC address" }, 400);
+    asset.statusBeforeQuarantine = asset.status;
+    asset.status = "quarantined";
+    asset.quarantineReason = body.reason || null;
+    asset.quarantinedAt = new Date().toISOString();
+    asset.quarantinedBy = "demo";
+    asset.quarantineTargets = [];
+    asset.updatedAt = new Date().toISOString();
+    logEventDemo({ action: "asset.quarantined", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress, message: `Asset "${asset.hostname || id}" quarantined (demo — no FortiGate push)` });
+    return json(res, { message: "Asset quarantined (demo — no FortiGate push)", succeededCount: 0, failedCount: 0, targets: [] });
+  }
+  // ── Quarantine release ─────────────────────────────────────────────────────
+  if (path.match(/^\/api\/v1\/assets\/[\w-]+\/quarantine$/) && method === "DELETE") {
+    const id = path.split("/")[4];
+    const asset = ASSETS.find((a) => a.id === id);
+    if (!asset) return json(res, { error: "Not found" }, 404);
+    asset.status = asset.statusBeforeQuarantine || "active";
+    asset.quarantineReason = null;
+    asset.quarantinedAt = null;
+    asset.quarantinedBy = null;
+    asset.quarantineTargets = [];
+    asset.updatedAt = new Date().toISOString();
+    logEventDemo({ action: "asset.quarantine_released", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress, message: `Quarantine released on "${asset.hostname || id}" (demo)` });
+    return json(res, { message: "Quarantine released (demo — no FortiGate unpush)" });
+  }
+  // ── Quarantine verify ─────────────────────────────────────────────────────
+  if (path.match(/^\/api\/v1\/assets\/[\w-]+\/quarantine\/verify$/) && method === "POST") {
+    return json(res, { driftDetected: false, targets: [] });
+  }
+  // ── Bulk quarantine ────────────────────────────────────────────────────────
+  if (path === "/api/v1/assets/bulk-quarantine" && method === "POST") {
+    const ids = Array.isArray(body.ids) ? body.ids : [];
+    const results = ids.map((id) => {
+      const asset = ASSETS.find((a) => a.id === id);
+      if (!asset) return { id, ok: false, message: "Not found" };
+      asset.statusBeforeQuarantine = asset.status;
+      asset.status = "quarantined";
+      asset.quarantineReason = body.reason || null;
+      asset.quarantinedAt = new Date().toISOString();
+      asset.quarantinedBy = "demo";
+      asset.quarantineTargets = [];
+      asset.updatedAt = new Date().toISOString();
+      return { id, ok: true, message: "Quarantined (demo)", succeededCount: 0, failedCount: 0 };
+    });
+    return json(res, { results });
+  }
+  if (path === "/api/v1/assets/bulk-quarantine/release" && method === "POST") {
+    const ids = Array.isArray(body.ids) ? body.ids : [];
+    const results = ids.map((id) => {
+      const asset = ASSETS.find((a) => a.id === id);
+      if (!asset) return { id, ok: false, message: "Not found" };
+      asset.status = asset.statusBeforeQuarantine || "active";
+      asset.quarantineTargets = [];
+      asset.updatedAt = new Date().toISOString();
+      return { id, ok: true, message: "Released (demo)" };
+    });
+    return json(res, { results });
+  }
+
+  // ── API Tokens ─────────────────────────────────────────────────────────────
+  if (path === "/api/v1/api-tokens" && method === "GET") {
+    return json(res, { tokens: API_TOKENS, knownScopes: ["assets:quarantine", "assets:read"] });
+  }
+  if (path === "/api/v1/api-tokens" && method === "POST") {
+    const token = {
+      id: crypto.randomUUID(),
+      name: body.name,
+      tokenPrefix: "polaris_demoXXXX",
+      scopes: body.scopes || [],
+      createdBy: "demo",
+      createdAt: new Date().toISOString(),
+      expiresAt: body.expiresAt || null,
+      lastUsedAt: null,
+      lastUsedIp: null,
+      revokedAt: null,
+      revokedBy: null,
+    };
+    API_TOKENS.push(token);
+    return json(res, { token, rawToken: "polaris_demoXXXXXXXXXXXXXXXXXXXXXXXX" }, 201);
+  }
+  if (path.match(/^\/api\/v1\/api-tokens\/[\w-]+\/revoke$/) && method === "POST") {
+    const id = path.split("/")[4];
+    const t = API_TOKENS.find((x) => x.id === id);
+    if (!t) return json(res, { error: "Not found" }, 404);
+    t.revokedAt = new Date().toISOString();
+    t.revokedBy = "demo";
+    return json(res, { ok: true });
+  }
+  if (path.match(/^\/api\/v1\/api-tokens\/[\w-]+$/) && method === "DELETE") {
+    const id = path.split("/")[4];
+    const idx = API_TOKENS.findIndex((x) => x.id === id);
+    if (idx === -1) return json(res, { error: "Not found" }, 404);
+    API_TOKENS.splice(idx, 1);
     res.writeHead(204);
     return res.end();
   }
