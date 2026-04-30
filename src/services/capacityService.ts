@@ -64,6 +64,14 @@ export interface CapacitySnapshot {
   };
   workload: {
     monitoredAssetCount: number;
+    /**
+     * Total operator-pinned interfaces being polled on the response-time
+     * cadence — sum of `Asset.monitoredInterfaces` array lengths across every
+     * monitored asset. Independent of the ~20-iface-per-asset default the
+     * steady-state projection assumes for the full system-info pass; this is
+     * just the fast-poll subset operators have explicitly opted into.
+     */
+    monitoredInterfaceCount: number;
     cadences: { responseTimeSec: number; telemetrySec: number; systemInfoSec: number };
     retention: { monitorDays: number; telemetryDays: number; systemInfoDays: number };
     /**
@@ -365,18 +373,26 @@ export async function getCapacitySnapshot(opts: {
   const [
     monitor,
     monitoredCount,
+    monitoredInterfaceRow,
     diskStats,
     dbSizeRow,
     sampleTables,
   ] = await Promise.all([
     getMonitorSettings(),
     prisma.asset.count({ where: { monitored: true } }),
+    prisma.$queryRawUnsafe<{ count: bigint }[]>(
+      `SELECT COALESCE(SUM(COALESCE(array_length("monitoredInterfaces", 1), 0)), 0)::bigint AS count
+         FROM "Asset"
+        WHERE monitored = true`,
+    ),
     getDiskStats(),
     prisma.$queryRawUnsafe<{ size: bigint }[]>(
       "SELECT pg_database_size(current_database()) AS size",
     ),
     getSampleTableStats(),
   ]);
+
+  const monitoredInterfaceCount = Number(monitoredInterfaceRow[0]?.count ?? 0);
 
   const dbSizeBytes = Number(dbSizeRow[0]?.size ?? 0);
 
@@ -418,6 +434,7 @@ export async function getCapacitySnapshot(opts: {
     },
     workload: {
       monitoredAssetCount: monitoredCount,
+      monitoredInterfaceCount,
       cadences,
       retention,
       steadyStateSizeBytes,

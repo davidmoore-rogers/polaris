@@ -956,8 +956,47 @@ function _capacitySeverityLabel(s) {
   return "Healthy";
 }
 
+function renderEngineStatHtml(db) {
+  if (!db) return "";
+  return '<div class="capacity-stat-card">' +
+    '<h5>Database engine</h5>' +
+    '<div class="db-info-grid">' +
+      dbInfoRow("Type", db.type || "Unknown") +
+      dbInfoRow("Version", db.version || "Unknown") +
+      (db.host ? dbInfoRow("Host", db.host + (db.port ? ":" + db.port : "")) : "") +
+      (db.database ? dbInfoRow("Database", db.database) : "") +
+      (db.ssl ? dbInfoRow("SSL", db.ssl) : "") +
+    '</div>' +
+  '</div>';
+}
+
+function renderPoolStatHtml(db) {
+  if (!db) return "";
+  var hasPool = db.uptime || db.activeConnections !== undefined || db.maxConnections !== undefined;
+  if (!hasPool) return "";
+  return '<div class="capacity-stat-card">' +
+    '<h5>Connection pool</h5>' +
+    '<div class="db-info-grid">' +
+      (db.activeConnections !== undefined ? dbInfoRow("Active connections", db.activeConnections) : "") +
+      (db.maxConnections !== undefined ? dbInfoRow("Max connections", db.maxConnections) : "") +
+      (db.uptime ? dbInfoRow("Uptime", db.uptime) : "") +
+    '</div>' +
+  '</div>';
+}
+
 function renderCapacityCard(capacity, dbInfo, pgTuning) {
-  if (!capacity) return "";
+  if (!capacity) {
+    // Capacity grading unavailable (e.g. statfs not supported) — still render
+    // the engine + pool stats under a plain Database header so operators
+    // don't lose visibility into the database connection.
+    var engineOnly = renderEngineStatHtml(dbInfo);
+    var poolOnly = renderPoolStatHtml(dbInfo);
+    if (!engineOnly && !poolOnly) return "";
+    return '<div class="settings-card">' +
+      '<h4>Database</h4>' +
+      '<div class="capacity-grid">' + engineOnly + poolOnly + '</div>' +
+    '</div>';
+  }
 
   var severity = capacity.severity || "ok";
   var pillClass = "capacity-pill capacity-pill-" + severity;
@@ -1062,6 +1101,7 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
       '<h5>Monitoring workload</h5>' +
       '<div class="db-info-grid">' +
         dbInfoRow("Monitored assets", formatNumber(work.monitoredAssetCount || 0)) +
+        dbInfoRow("Monitored interfaces", formatNumber(work.monitoredInterfaceCount || 0)) +
         (work.cadences
           ? dbInfoRow("Cadences",
               work.cadences.responseTimeSec + "s response · " +
@@ -1078,13 +1118,16 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
       '<p class="hint" style="margin-top:0.5rem">Steady-state size is what the database grows to if monitoring settings stay as they are. Reduce retention or cadence to lower it.</p>' +
     '</div>';
 
+  var engineHtml = renderEngineStatHtml(dbInfo);
+  var poolHtml = renderPoolStatHtml(dbInfo);
+
   return '<div class="settings-card capacity-card capacity-card-' + severity + '" id="capacity-card">' +
     '<div class="capacity-header">' +
-      '<h4 style="margin:0">Capacity</h4>' +
+      '<h4 style="margin:0">Database</h4>' +
       '<span class="' + pillClass + '">' + _capacitySeverityLabel(severity) + '</span>' +
     '</div>' +
     reasonsHtml +
-    '<div class="capacity-grid">' + hostHtml + dbHtml + workHtml + '</div>' +
+    '<div class="capacity-grid">' + hostHtml + dbHtml + engineHtml + poolHtml + workHtml + '</div>' +
     '<p class="hint" style="margin-top:0.75rem;font-size:0.78rem">Last computed ' + escapeHtml(capacity.computedAt || "") + '</p>' +
   '</div>';
 }
@@ -1138,32 +1181,6 @@ async function loadDatabaseInfo() {
           '<div id="update-history-body" style="margin-top:0.6rem;font-size:0.82rem;color:var(--color-text-tertiary)">Loading...</div>' +
         '</details>' +
       '</div>' +
-      (function () {
-        var engineCard = '<div class="settings-card">' +
-          '<h4>Database Engine</h4>' +
-          '<div class="db-info-grid">' +
-            dbInfoRow("Type", db.type || "Unknown") +
-            dbInfoRow("Version", db.version || "Unknown") +
-            (db.host ? dbInfoRow("Host", db.host + (db.port ? ":" + db.port : "")) : "") +
-            (db.database ? dbInfoRow("Database", db.database) : "") +
-            (db.ssl ? dbInfoRow("SSL", db.ssl) : "") +
-          '</div>' +
-        '</div>';
-        var hasPool = db.uptime || db.activeConnections !== undefined || db.maxConnections !== undefined;
-        var poolCard = hasPool
-          ? '<div class="settings-card">' +
-              '<h4>Connection Pool</h4>' +
-              '<div class="db-info-grid">' +
-                (db.activeConnections !== undefined ? dbInfoRow("Active Connections", db.activeConnections) : "") +
-                (db.maxConnections !== undefined ? dbInfoRow("Max Connections", db.maxConnections) : "") +
-                (db.uptime ? dbInfoRow("Uptime", db.uptime) : "") +
-              '</div>' +
-            '</div>'
-          : '';
-        return hasPool
-          ? '<div class="settings-cards-row">' + engineCard + poolCard + '</div>'
-          : engineCard;
-      })() +
       // ── Backup / Restore / History — three columns ──
       '<div class="settings-cards-row-3">' +
 
