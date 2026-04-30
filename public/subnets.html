@@ -38,20 +38,6 @@
       <div class="filter-bar">
         <label>Block</label>
         <select id="filter-block" style="width:auto"><option value="">All blocks</option></select>
-        <label>Status</label>
-        <select id="filter-status" style="width:auto">
-          <option value="hide-deprecated" selected>Available / Reserved</option>
-          <option value="">All</option>
-          <option value="available">Available</option>
-          <option value="reserved">Reserved</option>
-          <option value="deprecated">Deprecated</option>
-        </select>
-        <label>Server</label>
-        <input type="text" id="filter-server" placeholder="All servers" style="width:140px">
-        <label>Integration</label>
-        <select id="filter-integration" style="width:auto"><option value="">All integrations</option></select>
-        <label>Tag</label>
-        <input type="text" id="filter-tag" placeholder="e.g. prod" style="width:140px">
         <label>Creator</label>
         <select id="filter-creator" style="width:auto">
           <option value="">All</option>
@@ -88,7 +74,7 @@
               <th data-sf-key="status" data-sf-type="string" data-sf-options="available|reserved|deprecated">Status</th>
               <th data-sf-key="tags" data-sf-type="array">Tags</th>
               <th data-sf-key="fortigateDevice" data-sf-type="string">Server</th>
-              <th data-sf-key="integration.name" data-sf-type="string">Integration</th>
+              <th data-sf-key="_integration" data-sf-type="string" data-sf-options="">Integration</th>
               <th data-sf-key="_count.reservations" data-sf-type="number">Reservations</th>
               <th style="width:90px">Actions</th>
             </tr>

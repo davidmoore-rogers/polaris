@@ -42,17 +42,12 @@ TableSF.prototype._setup = function () {
         '<span class="sf-sort-icon">⇅</span>' +
       '</div>';
 
-    if (optsRaw) {
-      var opts = optsRaw.split("|").map(function (raw) {
-        var idx = raw.indexOf("=");
-        if (idx >= 0) return { value: raw.slice(0, idx), label: raw.slice(idx + 1) };
-        return { value: raw, label: raw.charAt(0).toUpperCase() + raw.slice(1).replace(/_/g, " ") };
-      });
-      var checks = opts.map(function (o) {
-        return '<label class="sf-multi-option">' +
-          '<input type="checkbox" value="' + escapeHtml(o.value) + '">' +
-          '<span>' + escapeHtml(o.label) + '</span></label>';
-      }).join("");
+    if (optsRaw != null) {
+      // Empty data-sf-options="" marks the column as a dynamic multi-select;
+      // setColumnOptions() will populate the checkbox list once data loads.
+      var checks = optsRaw.trim()
+        ? self._renderOptionList(self._parseOptions(optsRaw))
+        : "";
       th.innerHTML = headerHtml +
         '<div class="sf-filter-multi">' +
           '<button type="button" class="sf-filter sf-multi-button" title="Filter by value">All</button>' +
@@ -75,7 +70,7 @@ TableSF.prototype._setup = function () {
       self._onChange();
     });
 
-    if (optsRaw) {
+    if (optsRaw != null) {
       var wrap = th.querySelector(".sf-filter-multi");
       var btn  = wrap.querySelector(".sf-multi-button");
       var pop  = wrap.querySelector(".sf-multi-popover");
@@ -127,6 +122,56 @@ TableSF.prototype._setup = function () {
       if (e.key === "Escape") closeAll();
     });
   }
+};
+
+TableSF.prototype._parseOptions = function (raw) {
+  return String(raw || "").split("|").filter(function (s) { return s.length > 0; }).map(function (entry) {
+    var idx = entry.indexOf("=");
+    if (idx >= 0) return { value: entry.slice(0, idx), label: entry.slice(idx + 1) };
+    return { value: entry, label: entry.charAt(0).toUpperCase() + entry.slice(1).replace(/_/g, " ") };
+  });
+};
+
+TableSF.prototype._renderOptionList = function (opts) {
+  return opts.map(function (o) {
+    return '<label class="sf-multi-option">' +
+      '<input type="checkbox" value="' + escapeHtml(o.value) + '">' +
+      '<span>' + escapeHtml(o.label) + '</span></label>';
+  }).join("");
+};
+
+// Repopulate a multi-select column's checkbox list at runtime. Used when
+// options are derived from the loaded data (e.g. integration names). Existing
+// checked values are preserved if they still exist in the new option set.
+TableSF.prototype.setColumnOptions = function (key, options) {
+  if (!this._thead) return;
+  var th = this._thead.querySelector('th[data-sf-key="' + key + '"]');
+  if (!th) return;
+  var pop = th.querySelector(".sf-multi-popover");
+  if (!pop) return;
+  var prevChecked = Array.prototype.slice.call(
+    pop.querySelectorAll('input[type="checkbox"]:checked')
+  ).map(function (cb) { return cb.value; });
+  // Accept either an array of strings or { value, label } objects.
+  var normalized = (options || []).map(function (o) {
+    if (typeof o === "string") return { value: o, label: o };
+    return { value: String(o.value), label: String(o.label != null ? o.label : o.value) };
+  });
+  pop.innerHTML = this._renderOptionList(normalized);
+  var preserved = [];
+  pop.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+    if (prevChecked.indexOf(cb.value) >= 0) { cb.checked = true; preserved.push(cb.value); }
+  });
+  // Also preserve any saved-pref values that aren't in the live DOM yet.
+  var saved = this._filters[key];
+  if (Array.isArray(saved)) {
+    pop.querySelectorAll('input[type="checkbox"]').forEach(function (cb) {
+      if (!cb.checked && saved.indexOf(cb.value) >= 0) { cb.checked = true; preserved.push(cb.value); }
+    });
+  }
+  if (preserved.length) this._filters[key] = preserved;
+  else delete this._filters[key];
+  this._updateMultiButtonLabel(th);
 };
 
 TableSF.prototype._positionPopover = function (btn, pop) {

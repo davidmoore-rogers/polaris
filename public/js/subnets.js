@@ -16,10 +16,6 @@ function _saveSubnetsPrefs() {
     localStorage.setItem("shelob-prefs-subnets-" + currentUsername, JSON.stringify({
       pageSize: _subnetsPageSize,
       block: document.getElementById("filter-block").value,
-      status: document.getElementById("filter-status").value,
-      server: document.getElementById("filter-server").value,
-      integration: document.getElementById("filter-integration").value,
-      tag: document.getElementById("filter-tag").value,
       creator: document.getElementById("filter-creator").value,
       sortKey: _subnetsSF ? _subnetsSF._sortKey : null,
       sortDir: _subnetsSF ? _subnetsSF._sortDir : "asc",
@@ -41,10 +37,6 @@ function _restoreSubnetsPrefs() {
       if (psSel) psSel.value = String(p.pageSize);
     }
     if (p.block)       { var bSel = document.getElementById("filter-block");       if (bSel) bSel.value = p.block; }
-    if (p.status)      { var sSel = document.getElementById("filter-status");      if (sSel) sSel.value = p.status; }
-    if (p.server)      { var svEl = document.getElementById("filter-server");      if (svEl) svEl.value = p.server; }
-    if (p.integration) { var iSel = document.getElementById("filter-integration"); if (iSel) iSel.value = p.integration; }
-    if (p.tag)         { var tEl  = document.getElementById("filter-tag");         if (tEl)  tEl.value  = p.tag; }
     if (p.creator)     { var cSel = document.getElementById("filter-creator");     if (cSel) cSel.value = p.creator; }
     if (_subnetsSF) {
       if (p.sortKey) _subnetsSF._sortKey = p.sortKey;
@@ -102,10 +94,6 @@ document.addEventListener("DOMContentLoaded", async function () {
     _subnetsUpdateBulkBar();
   });
   document.getElementById("filter-block").addEventListener("change", function () { _subnetsPage = 1; loadSubnets(); _saveSubnetsPrefs(); });
-  document.getElementById("filter-status").addEventListener("change", function () { _subnetsPage = 1; loadSubnets(); _saveSubnetsPrefs(); });
-  document.getElementById("filter-server").addEventListener("input", debounce(function () { _subnetsPage = 1; _applyLocalFilters(); renderSubnetsPage(); _saveSubnetsPrefs(); }, 300));
-  document.getElementById("filter-integration").addEventListener("change", function () { _subnetsPage = 1; _applyLocalFilters(); renderSubnetsPage(); _saveSubnetsPrefs(); });
-  document.getElementById("filter-tag").addEventListener("input", debounce(function () { _subnetsPage = 1; loadSubnets(); _saveSubnetsPrefs(); }, 300));
   document.getElementById("filter-creator").addEventListener("change", function () { _subnetsPage = 1; loadSubnets(); _saveSubnetsPrefs(); });
   document.getElementById("filter-pagesize").addEventListener("change", function () {
     _subnetsPageSize = parseInt(this.value, 10) || 15;
@@ -143,55 +131,35 @@ async function loadSubnets() {
   _subnetsUpdateBulkBar();
   var tbody = document.getElementById("subnets-tbody");
   try {
-    var statusVal = document.getElementById("filter-status").value;
-    var apiStatus = (statusVal === "hide-deprecated" || !statusVal) ? undefined : statusVal;
     var filters = {
       blockId: document.getElementById("filter-block").value || undefined,
-      status: apiStatus,
-      tag: document.getElementById("filter-tag").value || undefined,
       createdBy: document.getElementById("filter-creator").value || undefined,
       limit: 10000,
     };
     var result = await api.subnets.list(filters);
-    _allSubnetsData = result.subnets || result;
-    if (statusVal === "hide-deprecated") {
-      _allSubnetsData = _allSubnetsData.filter(function (s) { return s.status !== "deprecated"; });
-    }
-    _rebuildServerIntegrationFilters();
-    _applyLocalFilters();
+    _allSubnetsData = (result.subnets || result).map(function (s) {
+      s._integration = s.integration ? s.integration.name : "Manual";
+      return s;
+    });
+    _rebuildIntegrationColumnOptions();
+    _subnetsData = _allSubnetsData;
     renderSubnetsPage();
   } catch (err) {
     tbody.innerHTML = '<tr><td colspan="13" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
-function _rebuildServerIntegrationFilters() {
-  var integrations = new Map(); // id → name
+function _rebuildIntegrationColumnOptions() {
+  if (!_subnetsSF) return;
+  var seen = new Set();
+  var hasManual = false;
   _allSubnetsData.forEach(function (s) {
-    if (s.integration) integrations.set(s.integration.id, s.integration.name);
+    if (s.integration) seen.add(s.integration.name);
+    else hasManual = true;
   });
-
-  var intSel = document.getElementById("filter-integration");
-  var prevInt = intSel.value;
-  intSel.innerHTML = '<option value="">All integrations</option><option value="__manual__">Manual</option>';
-  integrations.forEach(function (name, id) {
-    var opt = document.createElement("option");
-    opt.value = id;
-    opt.textContent = name;
-    intSel.appendChild(opt);
-  });
-  intSel.value = prevInt;
-}
-
-function _applyLocalFilters() {
-  var serverVal = document.getElementById("filter-server").value;
-  var intVal = document.getElementById("filter-integration").value;
-  _subnetsData = _allSubnetsData.filter(function (s) {
-    if (serverVal && !(s.fortigateDevice || "").toLowerCase().includes(serverVal.toLowerCase())) return false;
-    if (intVal === "__manual__" && s.integration) return false;
-    if (intVal && intVal !== "__manual__" && (!s.integration || s.integration.id !== intVal)) return false;
-    return true;
-  });
+  var options = Array.from(seen).sort(function (a, b) { return a.localeCompare(b); });
+  if (hasManual) options.unshift("Manual");
+  _subnetsSF.setColumnOptions("_integration", options);
 }
 
 function renderSubnetsPage() {
@@ -204,10 +172,7 @@ function renderSubnetsPage() {
   }
   var sfData = _subnetsSF ? _subnetsSF.apply(_subnetsData) : _subnetsData;
   if (sfData.length === 0) {
-    var _statusHint = document.getElementById("filter-status").value === "hide-deprecated"
-      ? '<br><small style="font-weight:normal;opacity:0.75">Deprecated networks are hidden by default — try changing Status to "All".</small>'
-      : '';
-    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No results match the current filters.' + _statusHint + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No results match the current filters.</td></tr>';
     clearPageControls("pagination");
     _subnetsUpdateSelectAll();
     return;
@@ -1152,11 +1117,12 @@ function debounce(fn, ms) {
 async function handleNetworkExport(mode, fmt) {
   var networks, label, ok;
 
+  var filteredData = _subnetsSF ? _subnetsSF.apply(_subnetsData) : _subnetsData;
   if (mode === "page") {
-    networks = _subnetsData.slice((_subnetsPage - 1) * _subnetsPageSize, _subnetsPage * _subnetsPageSize);
+    networks = filteredData.slice((_subnetsPage - 1) * _subnetsPageSize, _subnetsPage * _subnetsPageSize);
     label = "page " + _subnetsPage;
   } else if (mode === "filtered") {
-    networks = _subnetsData;
+    networks = filteredData;
     label = networks.length + " filtered networks";
     if (networks.length > 100) {
       ok = await showConfirm("This will export " + networks.length + " networks. Continue?");
