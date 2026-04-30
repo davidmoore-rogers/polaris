@@ -3058,6 +3058,37 @@ function lookupHostname(map: Map<string, any>, hostname: string): { asset: any; 
   return null;
 }
 
+// Write (or update-to-accepted) a tombstone Conflict so upsertAssetConflict's
+// "already resolved" guard fires on subsequent runs and never re-queues the pair.
+async function tombstoneConflict(proposedDeviceId: string, assetId: string, integrationId: string): Promise<void> {
+  const row = await prisma.conflict.findFirst({
+    where: { entityType: "asset", proposedDeviceId, assetId },
+  });
+  if (row) {
+    if (row.status === "pending") {
+      await prisma.conflict.update({
+        where: { id: row.id },
+        data: { status: "accepted", resolvedBy: "system", resolvedAt: new Date() },
+      });
+    }
+    // already accepted/rejected — leave as-is
+  } else {
+    await prisma.conflict.create({
+      data: {
+        entityType: "asset",
+        assetId,
+        integrationId,
+        proposedDeviceId,
+        proposedAssetFields: {} as any,
+        conflictFields: ["hostname"],
+        status: "accepted",
+        resolvedBy: "system",
+        resolvedAt: new Date(),
+      },
+    });
+  }
+}
+
 // Upsert a pending hostname-collision conflict, deduped on proposedDeviceId.
 async function upsertAssetConflict(args: {
   collisionAssetId: string;
@@ -3121,6 +3152,7 @@ function isMeaningfulSid(sid: string | undefined | null): boolean {
 // before re-adding the fresh set). Cross-integration identity tags (sid:*,
 // ad-guid:*) are NOT in this list — they must be preserved.
 function isEntraManagedTag(t: string): boolean {
+  if (t.startsWith("prev-entra:")) return false; // breadcrumb — preserve forever
   if (t.startsWith("entra")) return true;
   if (t.startsWith("intune-")) return true;
   return ["auto-discovered", "compliant", "noncompliant", "azuread", "workplace", "serverad"].includes(t);
@@ -3351,17 +3383,32 @@ async function syncEntraDevices(
         }
         const dupEntraSibling = lookupHostname(assetByHostnameEntraTagged, dev.displayName);
         if (dupEntraSibling && dupEntraSibling.asset.id !== existing.id) {
+          // Auto-resolve by lastSeen: newer activity wins; loser's ID is noted
+          // as a prev-entra: breadcrumb tag on the winner. Tombstone conflict
+          // records prevent re-queuing on subsequent runs.
+          const siblingId = (dupEntraSibling.asset.assetTag || "").slice(ENTRA_ASSET_TAG_PREFIX.length);
+          const siblingLastSeen = dupEntraSibling.asset.lastSeen ? new Date(dupEntraSibling.asset.lastSeen as any) : null;
+          const incomingWins = lastSeen != null && (siblingLastSeen == null || lastSeen > siblingLastSeen);
           try {
-            await upsertAssetConflict({
-              collisionAssetId: dupEntraSibling.asset.id,
-              integrationId,
-              proposedDeviceId: dev.deviceId,
-              proposedAssetFields: buildProposed("duplicate-registration", dupEntraSibling.via),
-            });
-            const siblingTag = (dupEntraSibling.asset.assetTag || "").slice(ENTRA_ASSET_TAG_PREFIX.length) || "<unknown>";
-            syncLog("warning", `Sibling duplicate-registration — "${dev.displayName}" (${dev.deviceId}) and existing Entra device ${siblingTag} share a hostname${dupEntraSibling.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
+            if (incomingWins) {
+              const prevTag = `prev-${ENTRA_ASSET_TAG_PREFIX}${siblingId}`;
+              const currentTags = (existing.tags as string[] | null) || [];
+              if (!currentTags.includes(prevTag)) {
+                await prisma.asset.update({ where: { id: existing.id }, data: { tags: { push: prevTag } } });
+              }
+              syncLog("info", `Auto-resolved sibling duplicate Entra registration "${dev.displayName}" — incoming ${dev.deviceId} (${lastSeen?.toISOString()}) newer than sibling ${siblingId} (${siblingLastSeen?.toISOString() ?? "never"}). Sibling ID noted on winner.`);
+            } else {
+              const prevTag = `prev-${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}`;
+              const siblingTags = (dupEntraSibling.asset.tags as string[] | null) || [];
+              if (!siblingTags.includes(prevTag)) {
+                await prisma.asset.update({ where: { id: dupEntraSibling.asset.id }, data: { tags: { push: prevTag } } });
+              }
+              syncLog("info", `Auto-resolved sibling duplicate Entra registration "${dev.displayName}" — sibling ${siblingId} (${siblingLastSeen?.toISOString() ?? "never"}) is same/newer than incoming ${dev.deviceId} (${lastSeen?.toISOString() ?? "never"}). Incoming ID noted on winner.`);
+            }
+            await tombstoneConflict(dev.deviceId, dupEntraSibling.asset.id, integrationId);
+            await tombstoneConflict(siblingId, existing.id, integrationId);
           } catch (err: any) {
-            syncLog("error", `Failed to queue sibling duplicate-registration conflict for "${dev.displayName}": ${err.message || "Unknown error"}`);
+            syncLog("error", `Failed to auto-resolve sibling duplicate Entra registration for "${dev.displayName}": ${err.message || "Unknown error"}`);
           }
         }
       }
@@ -3404,19 +3451,65 @@ async function syncEntraDevices(
 
       const dupEntra = lookupHostname(assetByHostnameEntraTagged, dev.displayName);
       if (dupEntra) {
+        // Auto-resolve by lastSeen: newer activity wins.
+        // If incoming wins: take over the existing Polaris row (stamp new entra
+        // tag, apply incoming fields, note old ID as prev-entra: breadcrumb).
+        // If existing wins: note incoming ID as prev-entra: on existing row.
+        // Tombstone conflict records in both directions prevent re-queuing.
+        const existingEntraId = (dupEntra.asset.assetTag || "").slice(ENTRA_ASSET_TAG_PREFIX.length);
+        const existingLastSeen = dupEntra.asset.lastSeen ? new Date(dupEntra.asset.lastSeen as any) : null;
+        const incomingWins = lastSeen != null && (existingLastSeen == null || lastSeen > existingLastSeen);
         try {
-          await upsertAssetConflict({
-            collisionAssetId: dupEntra.asset.id,
-            integrationId,
-            proposedDeviceId: dev.deviceId,
-            proposedAssetFields: buildProposed("duplicate-registration", dupEntra.via),
-          });
-          const existingTag = (dupEntra.asset.assetTag || "").slice(ENTRA_ASSET_TAG_PREFIX.length) || "<unknown>";
-          syncLog("warning", `Duplicate Entra registration queued for review — "${dev.displayName}" (${dev.deviceId}) shares hostname with existing Entra device ${existingTag}${dupEntra.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
+          if (incomingWins) {
+            const preserved = ((dupEntra.asset.tags as string[]) || []).filter((t) => !isEntraManagedTag(t));
+            const prevTag = `prev-${ENTRA_ASSET_TAG_PREFIX}${existingEntraId}`;
+            const newTags = [...preserved, ...tags.filter((t) => !preserved.includes(t))];
+            if (!newTags.includes(prevTag)) newTags.push(prevTag);
+            const updateFields: Record<string, unknown> = {
+              assetTag: `${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}`,
+              hostname: dev.displayName || dupEntra.asset.hostname,
+              os: dev.operatingSystem || dupEntra.asset.os,
+              osVersion: dev.operatingSystemVersion || dupEntra.asset.osVersion,
+              lastSeen,
+              status,
+              ...(status !== dupEntra.asset.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
+              tags: newTags,
+            };
+            if (dev.serialNumber) updateFields.serialNumber = dev.serialNumber;
+            if (dev.manufacturer) updateFields.manufacturer = dev.manufacturer;
+            if (dev.model) updateFields.model = dev.model;
+            if (dev.userPrincipalName) updateFields.assignedTo = dev.userPrincipalName;
+            if (intuneMacEntries.length > 0) {
+              const { primary, merged } = mergeIntuneMacs(dupEntra.asset.macAddresses as any[]);
+              updateFields.macAddresses = merged;
+              if (primary) updateFields.macAddress = primary;
+            }
+            if (acquiredAt && (!dupEntra.asset.acquiredAt || acquiredAt < new Date(dupEntra.asset.acquiredAt as any))) {
+              updateFields.acquiredAt = acquiredAt;
+            }
+            if (dupEntra.asset.assetType === "other") updateFields.assetType = assetType;
+            clampAcquiredToLastSeen(updateFields, dupEntra.asset);
+            await prisma.asset.update({ where: { id: dupEntra.asset.id }, data: updateFields });
+            // Update in-memory index so further iterations find the asset by its new ID.
+            assetByEntraId.delete(existingEntraId.toLowerCase());
+            assetByEntraId.set(deviceIdKey, { ...dupEntra.asset, assetTag: `${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}` });
+            updated.push(dev.displayName || dev.deviceId);
+            syncLog("info", `Auto-resolved duplicate Entra registration "${dev.displayName}" — incoming ${dev.deviceId} (${lastSeen?.toISOString()}) newer than existing ${existingEntraId} (${existingLastSeen?.toISOString() ?? "never"}). Asset updated; old ID preserved as prev-entra: tag.`);
+          } else {
+            const prevTag = `prev-${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}`;
+            const existingTags = (dupEntra.asset.tags as string[] | null) || [];
+            if (!existingTags.includes(prevTag)) {
+              await prisma.asset.update({ where: { id: dupEntra.asset.id }, data: { tags: { push: prevTag } } });
+            }
+            skipped.push(`${dev.displayName} (duplicate Entra registration — auto-resolved, existing ${existingEntraId} is same/newer)`);
+            syncLog("info", `Auto-resolved duplicate Entra registration "${dev.displayName}" — existing ${existingEntraId} (${existingLastSeen?.toISOString() ?? "never"}) same/newer than incoming ${dev.deviceId} (${lastSeen?.toISOString() ?? "never"}). Incoming ID noted as prev-entra: tag.`);
+          }
+          await tombstoneConflict(dev.deviceId, dupEntra.asset.id, integrationId);
+          await tombstoneConflict(existingEntraId, dupEntra.asset.id, integrationId);
         } catch (err: any) {
-          syncLog("error", `Failed to queue duplicate-Entra-registration conflict for "${dev.displayName}": ${err.message || "Unknown error"}`);
+          syncLog("error", `Failed to auto-resolve duplicate Entra registration for "${dev.displayName}": ${err.message || "Unknown error"}`);
+          skipped.push(`${dev.displayName} (duplicate Entra registration — error during auto-resolve)`);
         }
-        skipped.push(`${dev.displayName} (duplicate Entra registration — pending review)`);
         continue;
       }
     }
