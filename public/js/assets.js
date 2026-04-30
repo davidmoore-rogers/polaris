@@ -163,8 +163,19 @@ async function loadAssets() {
   _assetsUpdateBulkBar();
   var tbody = document.getElementById("assets-tbody");
   try {
-    var result = await api.assets.list({ limit: 10000 });
-    _assetsData = (result.assets || result).map(function (a) {
+    var PAGE = 10000;
+    var first = await api.assets.list({ limit: PAGE, offset: 0 });
+    var all = first.assets || first;
+    var total = first.total || all.length;
+    if (total > PAGE) {
+      var pages = [];
+      for (var off = PAGE; off < total; off += PAGE) {
+        pages.push(api.assets.list({ limit: PAGE, offset: off }));
+      }
+      var rest = await Promise.all(pages);
+      rest.forEach(function (r) { all = all.concat(r.assets || r); });
+    }
+    function _mapAsset(a) {
       a._server = a.location || a.learnedLocation || "";
       a._monitor = (!a.monitored)
         ? "Unmonitored"
@@ -172,7 +183,8 @@ async function loadAssets() {
         :  a.monitorStatus === "down" ? "Down"
         :                                "Pending");
       return a;
-    });
+    }
+    _assetsData = all.map(_mapAsset);
     renderAssetsPage();
   } catch (err) {
     tbody.innerHTML = '<tr><td colspan="11" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
