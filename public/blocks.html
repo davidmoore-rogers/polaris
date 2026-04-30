@@ -16,6 +16,7 @@
       <div class="page-header">
         <h2>IP Blocks</h2>
         <div class="page-header-actions">
+          <button class="btn btn-secondary" id="btn-blocks-columns" title="Show or hide columns">Columns &#9662;</button>
           <button class="btn btn-primary" id="btn-add-block" data-manage-networks>+ Add Block</button>
         </div>
       </div>
@@ -52,7 +53,7 @@
               <th data-sf-key="tags" data-sf-type="array">Tags</th>
               <th data-sf-key="_count.subnets" data-sf-type="number">Networks</th>
               <th data-sf-key="createdAt" data-sf-type="date">Created</th>
-              <th style="width:90px">Actions</th>
+              <th style="width:90px" data-col-id="actions" data-col-required="true">Actions</th>
             </tr>
           </thead>
           <tbody id="blocks-tbody">

@@ -341,3 +341,246 @@ TableSF.prototype.apply = function (data) {
 
   return result;
 };
+
+/**
+ * setupColumnLayout(tableEl, options) — Resizable column widths + show/hide
+ * column chooser. Independent of TableSF (works on any <table>) so the Events
+ * page (which doesn't use TableSF) can use it too.
+ *
+ * Each <th> is given a stable column id derived from data-sf-key, then
+ * data-col-id, then "__col<index>". Columns marked data-col-required="true"
+ * (or with class "cb-col" / "fav-col") cannot be hidden via the chooser.
+ *
+ * options:
+ *   chooserButton  — element; clicking it toggles the column chooser popover
+ *   onChange       — callback invoked when widths or hidden cols change
+ *   labelFor       — fn(thEl) -> string label override for the chooser entry
+ *
+ * Returns { getPrefs, setPrefs, openChooser, refresh } so callers can persist
+ * { widths, hidden } themselves alongside their other prefs.
+ */
+function setupColumnLayout(tableEl, options) {
+  options = options || {};
+  if (!tableEl) return null;
+  var thead = tableEl.querySelector("thead");
+  if (!thead) return null;
+  var headerRow = thead.querySelector("tr");
+  if (!headerRow) return null;
+  var ths = Array.prototype.slice.call(headerRow.children);
+  if (!ths.length) return null;
+
+  var colIds = ths.map(function (th, i) {
+    var id = th.getAttribute("data-sf-key") ||
+             th.getAttribute("data-col-id") ||
+             ("__col" + i);
+    th.setAttribute("data-col-id", id);
+    return id;
+  });
+
+  var required = {};
+  ths.forEach(function (th, i) {
+    if (th.classList.contains("cb-col") || th.classList.contains("fav-col")) required[colIds[i]] = true;
+    if (th.getAttribute("data-col-required") === "true") required[colIds[i]] = true;
+  });
+
+  // Inject a colgroup so widths apply consistently to header + body.
+  var colgroup = tableEl.querySelector("colgroup");
+  if (!colgroup) {
+    colgroup = document.createElement("colgroup");
+    ths.forEach(function () { colgroup.appendChild(document.createElement("col")); });
+    tableEl.insertBefore(colgroup, thead);
+  } else {
+    while (colgroup.children.length < ths.length) colgroup.appendChild(document.createElement("col"));
+  }
+  var cols = Array.prototype.slice.call(colgroup.children).slice(0, ths.length);
+
+  // Per-table <style> block holding hide rules. Targeted by data-sf-table-id
+  // so multiple tables on the same page don't collide.
+  var tableId = tableEl.getAttribute("data-sf-table-id");
+  if (!tableId) {
+    tableId = "sftbl-" + Math.random().toString(36).slice(2, 9);
+    tableEl.setAttribute("data-sf-table-id", tableId);
+  }
+  var styleEl = document.getElementById("sf-style-" + tableId);
+  if (!styleEl) {
+    styleEl = document.createElement("style");
+    styleEl.id = "sf-style-" + tableId;
+    document.head.appendChild(styleEl);
+  }
+
+  var widths = {};
+  var hidden = {};
+
+  function rewriteHideStyle() {
+    var rules = [];
+    var sel = 'table[data-sf-table-id="' + tableId + '"]';
+    Object.keys(hidden).forEach(function (id) {
+      var idx = colIds.indexOf(id);
+      if (idx < 0) return;
+      var n = idx + 1;
+      rules.push(sel + ' > thead > tr > :nth-child(' + n + ') { display: none; }');
+      rules.push(sel + ' > tbody > tr > :nth-child(' + n + ') { display: none; }');
+      rules.push(sel + ' > colgroup > col:nth-child(' + n + ') { display: none; }');
+    });
+    styleEl.textContent = rules.join("\n");
+  }
+
+  function applyWidths() {
+    var anyWidth = false;
+    colIds.forEach(function (id, i) {
+      var w = widths[id];
+      if (typeof w === "number" && w > 0) {
+        cols[i].style.width = w + "px";
+        anyWidth = true;
+      } else {
+        cols[i].style.width = "";
+      }
+    });
+    tableEl.style.tableLayout = anyWidth ? "fixed" : "";
+  }
+
+  function ensureAllWidthsMeasured() {
+    // Capture rendered widths on first resize so switching to fixed layout
+    // doesn't collapse the columns the user hasn't touched yet.
+    colIds.forEach(function (id, i) {
+      if (widths[id] != null) return;
+      var rect = ths[i].getBoundingClientRect();
+      if (rect.width > 0) widths[id] = Math.round(rect.width);
+    });
+  }
+
+  ths.forEach(function (th, i) {
+    if (th.querySelector(".sf-resize-handle")) return;
+    if (!th.style.position) th.style.position = "relative";
+    var handle = document.createElement("span");
+    handle.className = "sf-resize-handle";
+    handle.title = "Drag to resize";
+    th.appendChild(handle);
+    handle.addEventListener("click", function (e) { e.stopPropagation(); });
+    handle.addEventListener("mousedown", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      ensureAllWidthsMeasured();
+      var id = colIds[i];
+      var startX = e.clientX;
+      var startW = widths[id] || ths[i].getBoundingClientRect().width;
+      function onMove(ev) {
+        var w = Math.max(40, Math.round(startW + (ev.clientX - startX)));
+        widths[id] = w;
+        applyWidths();
+      }
+      function onUp() {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.classList.remove("sf-resizing");
+        if (typeof options.onChange === "function") options.onChange();
+      }
+      document.body.classList.add("sf-resizing");
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  });
+
+  var chooserPop = null;
+  function buildChooser() {
+    if (chooserPop) return chooserPop;
+    chooserPop = document.createElement("div");
+    chooserPop.className = "sf-col-chooser sf-multi-popover";
+    chooserPop.setAttribute("hidden", "");
+    chooserPop.addEventListener("click", function (e) { e.stopPropagation(); });
+    chooserPop.addEventListener("change", function (e) {
+      if (!e.target || e.target.type !== "checkbox") return;
+      var id = e.target.getAttribute("data-col-id");
+      if (!id) return;
+      if (e.target.checked) delete hidden[id];
+      else hidden[id] = true;
+      rewriteHideStyle();
+      if (typeof options.onChange === "function") options.onChange();
+    });
+    document.body.appendChild(chooserPop);
+    return chooserPop;
+  }
+
+  function renderChooser() {
+    buildChooser();
+    var html = '<div class="sf-col-chooser-title">Show columns</div>';
+    var any = false;
+    ths.forEach(function (th, i) {
+      var id = colIds[i];
+      if (required[id]) return;
+      any = true;
+      var label = (typeof options.labelFor === "function" ? options.labelFor(th) : null);
+      if (!label) {
+        var labelEl = th.querySelector(".sf-label");
+        label = labelEl ? labelEl.textContent.trim() : th.textContent.trim();
+      }
+      if (!label) label = id;
+      var checked = hidden[id] ? "" : "checked";
+      html += '<label class="sf-col-chooser-row sf-multi-option">' +
+        '<input type="checkbox" data-col-id="' + escapeHtml(id) + '" ' + checked + '>' +
+        '<span>' + escapeHtml(label) + '</span></label>';
+    });
+    if (!any) html += '<div class="sf-col-chooser-empty">No optional columns.</div>';
+    chooserPop.innerHTML = html;
+  }
+
+  function openChooser(triggerEl) {
+    renderChooser();
+    document.querySelectorAll(".sf-multi-popover").forEach(function (p) { p.setAttribute("hidden", ""); });
+    chooserPop.removeAttribute("hidden");
+    var anchor = triggerEl || options.chooserButton || tableEl;
+    var r = anchor.getBoundingClientRect();
+    chooserPop.style.position = "fixed";
+    chooserPop.style.top  = (r.bottom + 4) + "px";
+    chooserPop.style.left = Math.max(8, r.right - 240) + "px";
+    chooserPop.style.minWidth = "220px";
+  }
+
+  if (options.chooserButton) {
+    options.chooserButton.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var willOpen = !chooserPop || chooserPop.hasAttribute("hidden");
+      document.querySelectorAll(".sf-multi-popover").forEach(function (p) { p.setAttribute("hidden", ""); });
+      if (willOpen) openChooser(options.chooserButton);
+    });
+  }
+
+  // Reuse the doc-wide popover-close wiring TableSF._setup installs. If no
+  // TableSF has been instantiated on the page (e.g. Events), install it here.
+  if (!TableSF._docWired) {
+    TableSF._docWired = true;
+    var closeAll = function () {
+      document.querySelectorAll(".sf-multi-popover").forEach(function (p) { p.setAttribute("hidden", ""); });
+    };
+    document.addEventListener("click", closeAll);
+    window.addEventListener("scroll", closeAll, true);
+    window.addEventListener("resize", closeAll);
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closeAll();
+    });
+  }
+
+  return {
+    getPrefs: function () {
+      return { widths: Object.assign({}, widths), hidden: Object.keys(hidden) };
+    },
+    setPrefs: function (p) {
+      if (!p) return;
+      if (p.widths && typeof p.widths === "object") {
+        Object.keys(p.widths).forEach(function (id) {
+          var v = p.widths[id];
+          if (typeof v === "number" && v > 0) widths[id] = v;
+        });
+      }
+      if (Array.isArray(p.hidden)) {
+        p.hidden.forEach(function (id) {
+          if (!required[id]) hidden[id] = true;
+        });
+      }
+      applyWidths();
+      rewriteHideStyle();
+    },
+    openChooser: openChooser,
+    refresh: function () { applyWidths(); rewriteHideStyle(); },
+  };
+}

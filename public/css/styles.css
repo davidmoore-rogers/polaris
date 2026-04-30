@@ -1164,6 +1164,42 @@ th.sf-th { vertical-align: top; white-space: normal; padding-bottom: 6px; }
   cursor: pointer;
 }
 
+/* ─── Column resize + visibility chooser ──────────────────────────────────── */
+.sf-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  z-index: 5;
+  background: transparent;
+}
+.sf-resize-handle:hover,
+body.sf-resizing .sf-resize-handle { background: var(--color-accent); opacity: 0.4; }
+body.sf-resizing { cursor: col-resize !important; user-select: none; }
+body.sf-resizing * { user-select: none !important; }
+
+.sf-col-chooser { padding: 4px 0; max-height: 70vh; }
+.sf-col-chooser-title {
+  font-weight: 600;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+  padding: 4px 10px 6px;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 2px;
+}
+.sf-col-chooser-empty {
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+.sf-col-chooser-row { padding: 4px 10px; }
+
 /* ─── Bulk Action Bar ──────────────────────────────────────────────────────── */
 .bulk-bar {
   display: flex;

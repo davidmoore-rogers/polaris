@@ -6,6 +6,7 @@ var _assetsPageSize = 15;
 var _assetsPage = 1;
 var _assetsData = [];
 var _assetsSF = null;
+var _assetsLayout = null;
 var _assetsSelected = new Set();
 
 function _saveAssetsPrefs() {
@@ -20,6 +21,7 @@ function _saveAssetsPrefs() {
       sortKey: _assetsSF ? _assetsSF._sortKey : null,
       sortDir: _assetsSF ? _assetsSF._sortDir : "asc",
       sfFilters: _assetsSF ? Object.assign({}, _assetsSF._filters) : {},
+      layout: _assetsLayout ? _assetsLayout.getPrefs() : null,
     }));
   } catch (_) {}
 }
@@ -49,11 +51,17 @@ function _restoreAssetsPrefs() {
       }
       _assetsSF._updateIcons();
     }
+    if (_assetsLayout && p.layout) _assetsLayout.setPrefs(p.layout);
   } catch (_) {}
 }
 
 document.addEventListener("DOMContentLoaded", async function () {
   _assetsSF = new TableSF("assets-tbody", function () { _assetsPage = 1; renderAssetsPage(); _saveAssetsPrefs(); });
+  var assetsTable = document.querySelector("#assets-tbody").closest("table");
+  _assetsLayout = setupColumnLayout(assetsTable, {
+    chooserButton: document.getElementById("btn-assets-columns"),
+    onChange: _saveAssetsPrefs,
+  });
   // MAC tooltips are promoted to <body>, so delegate on document so the
   // delete button works regardless of where the tooltip lives.
   document.addEventListener("click", _handleMacDeleteClick);

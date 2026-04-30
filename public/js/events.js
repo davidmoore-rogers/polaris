@@ -6,11 +6,49 @@ var _eventsPageSize = 15;
 var _eventsCurrentOffset = 0;
 var _eventsCurrentTotal = 0;
 var _eventsCurrentPage = [];
+var _eventsLayout = null;
 
 (function () {
   var pageSize = _eventsPageSize;
   var currentOffset = 0;
   var currentTotal = 0;
+
+  function _saveEventsPrefs() {
+    if (typeof currentUsername === "undefined" || !currentUsername) return;
+    try {
+      localStorage.setItem("polaris-prefs-events-" + currentUsername, JSON.stringify({
+        pageSize: pageSize,
+        layout: _eventsLayout ? _eventsLayout.getPrefs() : null,
+      }));
+    } catch (_) {}
+  }
+  function _restoreEventsPrefs() {
+    if (typeof currentUsername === "undefined" || !currentUsername) return;
+    var raw;
+    try { raw = localStorage.getItem("polaris-prefs-events-" + currentUsername); } catch (_) { return; }
+    if (!raw) return;
+    try {
+      var p = JSON.parse(raw);
+      if (p.pageSize) {
+        pageSize = p.pageSize;
+        _eventsPageSize = p.pageSize;
+        var psSel = document.getElementById("filter-pagesize");
+        if (psSel) psSel.value = String(p.pageSize);
+      }
+      if (_eventsLayout && p.layout) _eventsLayout.setPrefs(p.layout);
+    } catch (_) {}
+  }
+
+  var eventsTable = document.querySelector("#events-tbody").closest("table");
+  _eventsLayout = setupColumnLayout(eventsTable, {
+    chooserButton: document.getElementById("btn-events-columns"),
+    onChange: _saveEventsPrefs,
+  });
+  if (typeof userReady !== "undefined" && userReady && typeof userReady.then === "function") {
+    userReady.then(_restoreEventsPrefs);
+  } else {
+    _restoreEventsPrefs();
+  }
 
   async function loadEvents() {
     var level = document.getElementById("filter-level").value;
@@ -149,8 +187,10 @@ var _eventsCurrentPage = [];
   document.getElementById("filter-resource").addEventListener("change", function () { currentOffset = 0; loadEvents(); });
   document.getElementById("filter-pagesize").addEventListener("change", function () {
     pageSize = parseInt(this.value, 10) || 15;
+    _eventsPageSize = pageSize;
     currentOffset = 0;
     loadEvents();
+    _saveEventsPrefs();
   });
 
   var actionTimer;

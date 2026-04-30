@@ -8,6 +8,7 @@ var _subnetsPage = 1;
 var _subnetsData = [];
 var _allSubnetsData = [];
 var _subnetsSF = null;
+var _subnetsLayout = null;
 var _subnetsSelected = new Set();
 
 function _saveSubnetsPrefs() {
@@ -20,6 +21,7 @@ function _saveSubnetsPrefs() {
       sortKey: _subnetsSF ? _subnetsSF._sortKey : null,
       sortDir: _subnetsSF ? _subnetsSF._sortDir : "asc",
       sfFilters: _subnetsSF ? Object.assign({}, _subnetsSF._filters) : {},
+      layout: _subnetsLayout ? _subnetsLayout.getPrefs() : null,
     }));
   } catch (_) {}
 }
@@ -47,11 +49,17 @@ function _restoreSubnetsPrefs() {
       }
       _subnetsSF._updateIcons();
     }
+    if (_subnetsLayout && p.layout) _subnetsLayout.setPrefs(p.layout);
   } catch (_) {}
 }
 
 document.addEventListener("DOMContentLoaded", async function () {
   _subnetsSF = new TableSF("subnets-tbody", function () { _subnetsPage = 1; renderSubnetsPage(); _saveSubnetsPrefs(); });
+  var subnetsTable = document.querySelector("#subnets-tbody").closest("table");
+  _subnetsLayout = setupColumnLayout(subnetsTable, {
+    chooserButton: document.getElementById("btn-subnets-columns"),
+    onChange: _saveSubnetsPrefs,
+  });
   document.getElementById("subnets-bulk-edit-btn").addEventListener("click", openBulkEditSubnetsModal);
   document.getElementById("subnets-bulk-delete-btn").addEventListener("click", bulkDeleteSubnets);
   await userReady;
