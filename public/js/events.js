@@ -197,6 +197,7 @@ async function openEventSettingsModal() {
   var archiveDefaults = { enabled: false, protocol: "scp", host: "", port: 22, username: "", password: "", keyPath: "", remotePath: "/var/archive/polaris" };
   var syslogDefaults = { enabled: false, protocol: "udp", host: "", port: 514, facility: "local0", severity: "info", format: "rfc5424", tlsCaPath: "", tlsCertPath: "", tlsKeyPath: "" };
   var retentionDefaults = { retentionDays: 7, minLevel: "info" };
+  var alertsDefaults = { staleAfterDays: 60 };
 
   if (_activeSettingsTab === "assets") _activeSettingsTab = "archive";
 
@@ -205,6 +206,7 @@ async function openEventSettingsModal() {
       api.events.getArchiveSettings().catch(function () { return null; }),
       api.events.getSyslogSettings().catch(function () { return null; }),
       api.events.getRetentionSettings().catch(function () { return null; }),
+      api.reservations.getStaleSettings().catch(function () { return null; }),
     ]);
     if (results[0]) {
       var s = results[0];
@@ -234,6 +236,9 @@ async function openEventSettingsModal() {
       retentionDefaults.retentionDays = results[2].retentionDays || 7;
       retentionDefaults.minLevel = results[2].minLevel || "info";
     }
+    if (results[3]) {
+      alertsDefaults.staleAfterDays = typeof results[3].staleAfterDays === "number" ? results[3].staleAfterDays : 60;
+    }
   } catch (_) {}
 
   var body =
@@ -242,6 +247,7 @@ async function openEventSettingsModal() {
       '<button class="settings-tab' + (_activeSettingsTab === "archive" ? ' active' : '') + '" data-tab="archive">Archive Export</button>' +
       '<button class="settings-tab' + (_activeSettingsTab === "syslog" ? ' active' : '') + '" data-tab="syslog">Syslog</button>' +
       '<button class="settings-tab' + (_activeSettingsTab === "retention" ? ' active' : '') + '" data-tab="retention">Retention</button>' +
+      '<button class="settings-tab' + (_activeSettingsTab === "alerts" ? ' active' : '') + '" data-tab="alerts">Alerts</button>' +
     '</div>' +
     // Archive tab panel
     '<div class="settings-tab-panel' + (_activeSettingsTab === "archive" ? ' active' : '') + '" id="tab-archive">' +
@@ -254,9 +260,13 @@ async function openEventSettingsModal() {
     // Retention tab panel
     '<div class="settings-tab-panel' + (_activeSettingsTab === "retention" ? ' active' : '') + '" id="tab-retention">' +
       retentionFormHTML(retentionDefaults) +
+    '</div>' +
+    // Alerts tab panel
+    '<div class="settings-tab-panel' + (_activeSettingsTab === "alerts" ? ' active' : '') + '" id="tab-alerts">' +
+      alertsFormHTML(alertsDefaults) +
     '</div>';
 
-  var noTestTab = _activeSettingsTab === "retention";
+  var noTestTab = _activeSettingsTab === "retention" || _activeSettingsTab === "alerts";
   var footer =
     '<div id="settings-footer-left" style="margin-right:auto;display:flex;gap:8px">' +
       '<button class="btn btn-secondary" id="btn-settings-test"' + (noTestTab ? ' style="display:none"' : '') + '>Test Connection</button>' +
@@ -276,7 +286,7 @@ async function openEventSettingsModal() {
       tab.classList.add("active");
       document.getElementById("tab-" + target).classList.add("active");
       var testBtn = document.getElementById("btn-settings-test");
-      if (testBtn) testBtn.style.display = target === "retention" ? "none" : "";
+      if (testBtn) testBtn.style.display = (target === "retention" || target === "alerts") ? "none" : "";
       updateSyslogTlsVisibility();
     });
   });
@@ -337,6 +347,9 @@ async function openEventSettingsModal() {
       } else if (_activeSettingsTab === "retention") {
         await api.events.updateRetentionSettings(getRetentionFormData());
         showToast("Retention settings saved");
+      } else if (_activeSettingsTab === "alerts") {
+        await api.reservations.updateStaleSettings(getAlertsFormData());
+        showToast("Alert settings saved");
       }
       closeModal();
     } catch (err) {
@@ -507,6 +520,25 @@ function getRetentionFormData() {
   return {
     retentionDays: Math.max(1, parseInt(document.getElementById("f-retention-days").value, 10) || 7),
     minLevel: document.getElementById("f-retention-minlevel").value || "info",
+  };
+}
+
+// ─── Alerts Tab Form ────────────────────────────────────────────────────────
+
+function alertsFormHTML(d) {
+  return '<div class="form-group">' +
+    '<label>Stale DHCP reservation threshold (days)</label>' +
+    '<input type="number" id="f-alerts-staleAfterDays" value="' + escapeHtml(String(d.staleAfterDays)) + '" min="0" max="3650" style="max-width:120px">' +
+    '<p class="hint">Polaris flags a discovered <code>dhcp_reservation</code> as stale when its target client has not been seen actively holding the IP within this many days. ' +
+      'When that happens the row appears in the Alerts panel and a one-time <code>reservation.stale</code> Event is written to the audit log. ' +
+      'Set to <strong>0</strong> to disable stale-reservation detection entirely. Default is 60 days.</p>' +
+    '<p class="hint" style="color:var(--color-text-tertiary)">A reservation re-arms automatically: if discovery sees the IP active again, the alert is cleared and a future stretch of inactivity will fire one fresh notification rather than being suppressed by the prior one.</p>' +
+  '</div>';
+}
+
+function getAlertsFormData() {
+  return {
+    staleAfterDays: Math.max(0, parseInt(document.getElementById("f-alerts-staleAfterDays").value, 10) || 0),
   };
 }
 
@@ -719,6 +751,170 @@ function getRetentionFormData() {
         '</tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
         '</table>' +
+      '</div>' +
+      '<div class="conflict-card-actions">' + actions + '</div>' +
+    '</div>';
+  }
+})();
+
+/* ─── Alerts Panel (stale DHCP reservations) ─────────────────────────────── */
+
+(function () {
+  var overlay = document.getElementById("alerts-overlay");
+  var panel = document.getElementById("alerts-panel");
+  var closeBtn = document.getElementById("alerts-panel-close");
+  var filterSel = document.getElementById("alerts-panel-filter");
+  var body = document.getElementById("alerts-panel-body");
+  var countEl = document.getElementById("alerts-panel-count");
+  var badge = document.getElementById("alerts-badge");
+  var btn = document.getElementById("btn-alerts");
+  if (!btn || !overlay) return;
+
+  async function refreshBadge() {
+    try {
+      var data = await api.reservations.alertsCount();
+      var n = (data && data.count) || 0;
+      if (n > 0) {
+        badge.textContent = n > 99 ? "99+" : String(n);
+        badge.style.display = "block";
+      } else {
+        badge.style.display = "none";
+      }
+    } catch (_) { /* badge stays hidden if request fails */ }
+  }
+  refreshBadge();
+
+  function openPanel() {
+    overlay.classList.add("open");
+    loadAlerts();
+  }
+  function closePanel() {
+    overlay.classList.remove("open");
+    refreshBadge();
+  }
+
+  btn.addEventListener("click", openPanel);
+  closeBtn.addEventListener("click", closePanel);
+  overlay.addEventListener("click", function (e) { if (e.target === overlay) closePanel(); });
+  if (filterSel) filterSel.addEventListener("change", loadAlerts);
+
+  async function loadAlerts() {
+    body.innerHTML = '<div class="empty-state" style="padding:2rem">Loading...</div>';
+    var show = (filterSel && filterSel.value === "ignored") ? "ignored" : "active";
+    try {
+      // Pull settings alongside the list so the Snooze button label can show
+      // the actual snooze duration ("Snooze 60d") rather than a generic verb.
+      var both = await Promise.all([
+        api.reservations.listAlerts(show),
+        api.reservations.getStaleSettings().catch(function () { return { staleAfterDays: 60 }; }),
+      ]);
+      var data = both[0];
+      var settings = both[1] || { staleAfterDays: 60 };
+      var alerts = (data && data.alerts) || [];
+      var label = show === "ignored" ? "ignored" : "stale";
+      countEl.textContent = alerts.length + " " + label + " reservation" + (alerts.length !== 1 ? "s" : "");
+      if (!alerts.length) {
+        var empty = show === "ignored"
+          ? 'No reservations are currently set to ignore stale alerts.'
+          : 'No stale reservations.<br><span style="color:var(--color-text-tertiary);font-size:0.85rem">A reservation is flagged when its target client has not been seen actively holding the IP within the configured threshold (Settings &rarr; Alerts).</span>';
+        body.innerHTML = '<div class="empty-state" style="padding:2rem">' + empty + '</div>';
+        return;
+      }
+      var canIgnore = canManageNetworks();
+      body.innerHTML = alerts.map(function (a) { return renderAlertCard(a, settings, show, canIgnore); }).join("");
+
+      // Bind Snooze / Free / Ignore / Un-ignore buttons
+      body.querySelectorAll("[data-alert-action]").forEach(function (el) {
+        el.addEventListener("click", async function () {
+          var id = el.getAttribute("data-alert-id");
+          var action = el.getAttribute("data-alert-action");
+          var name = el.getAttribute("data-alert-name") || id;
+          el.disabled = true;
+          try {
+            if (action === "snooze") {
+              var r = await api.reservations.snoozeAlert(id);
+              showToast("Snoozed for " + r.daysAdded + " day" + (r.daysAdded === 1 ? "" : "s"));
+            } else if (action === "free") {
+              var ok = await showConfirm("Release reservation " + name + "? If it was pushed to a FortiGate, the device entry will also be removed.");
+              if (!ok) { el.disabled = false; return; }
+              await api.reservations.release(id);
+              showToast("Reservation released");
+            } else if (action === "ignore") {
+              var ok2 = await showConfirm("Permanently ignore stale alerts for " + name + "? The row will never appear in the Alerts panel again until an admin un-ignores it. The reservation itself stays active.");
+              if (!ok2) { el.disabled = false; return; }
+              await api.reservations.ignoreAlert(id);
+              showToast("Alert ignored");
+            } else if (action === "unignore") {
+              await api.reservations.unignoreAlert(id);
+              showToast("Alert un-ignored");
+            }
+            await loadAlerts();
+            refreshBadge();
+          } catch (err) {
+            showToast(err.message, "error");
+            el.disabled = false;
+          }
+        });
+      });
+    } catch (err) {
+      body.innerHTML = '<div class="empty-state" style="padding:2rem;color:var(--color-danger)">' + escapeHtml(err.message) + '</div>';
+    }
+  }
+
+  // canManageNetworks() is the same role gate the rest of the Events page
+  // uses for admin-only buttons; defined in app.js. Falls back to false if
+  // the helper isn't loaded yet so the Ignore button is hidden, not broken.
+  function canManageNetworks() {
+    return typeof window.canManageNetworks === "function" ? !!window.canManageNetworks() : false;
+  }
+
+  function renderAlertCard(a, settings, show, canIgnore) {
+    var ip = a.ipAddress || "(no IP)";
+    var hostname = a.hostname || "(no hostname)";
+    var mac = a.macAddress || "—";
+    var subnet = (a.subnetName ? escapeHtml(a.subnetName) + " — " : "") + escapeHtml(a.subnetCidr);
+    var device = a.fortigateDevice ? '<div><strong>FortiGate:</strong> ' + escapeHtml(a.fortigateDevice) + '</div>' : "";
+    var pushed = a.pushedToName ? '<div><strong>Pushed by:</strong> ' + escapeHtml(a.pushedToName) + '</div>' : "";
+    var lastSeen = a.lastSeenLeased
+      ? '<div><strong>Last seen leased:</strong> ' + new Date(a.lastSeenLeased).toLocaleString() + '</div>'
+      : '<div><strong>Last seen leased:</strong> <span style="color:var(--color-text-tertiary)">never</span></div>';
+    var sinceLine = '<div style="color:var(--color-warning, #ffc107);font-weight:500;margin-top:4px">' + a.daysSinceSeen + ' day' + (a.daysSinceSeen === 1 ? "" : "s") + ' without an active lease</div>';
+    var labelName = (a.hostname || ip).replace(/"/g, "&quot;");
+    var snoozeDays = (settings && settings.staleAfterDays) || 60;
+    var snoozeLabel = "Snooze " + snoozeDays + "d";
+    var actions;
+    if (show === "ignored") {
+      // Ignored view — only un-ignore is meaningful (snooze/free still
+      // possible but redundant for a row that's already silenced). Keep
+      // un-ignore admin-gated so non-admins can't reactivate alerts.
+      actions = canIgnore
+        ? '<button class="btn btn-sm btn-secondary" data-alert-action="unignore" data-alert-id="' + escapeHtml(a.id) + '" data-alert-name="' + escapeHtml(labelName) + '" title="Resume stale-alerting on this reservation">Un-ignore</button>'
+        : '<span class="hint" style="color:var(--color-text-tertiary)">Admin only</span>';
+    } else {
+      var ignoreBtn = canIgnore
+        ? ' <button class="btn btn-sm btn-secondary" data-alert-action="ignore" data-alert-id="' + escapeHtml(a.id) + '" data-alert-name="' + escapeHtml(labelName) + '" title="Permanently ignore stale alerts on this reservation (admin/networkadmin only). The reservation itself stays active.">Ignore</button>'
+        : "";
+      actions =
+        '<button class="btn btn-sm btn-secondary" data-alert-action="snooze" data-alert-id="' + escapeHtml(a.id) + '" data-alert-name="' + escapeHtml(labelName) + '" title="Hide this alert for ' + snoozeDays + ' more day(s); will refire if still stale after that, or clear automatically if the IP comes back online">' + escapeHtml(snoozeLabel) + '</button>' +
+        ignoreBtn +
+        ' <button class="btn btn-sm btn-danger" data-alert-action="free" data-alert-id="' + escapeHtml(a.id) + '" data-alert-name="' + escapeHtml(labelName) + '" title="Release this reservation entirely (also removes it from the FortiGate if pushed)">Free</button>';
+    }
+    var borderColor = show === "ignored" ? "var(--color-text-tertiary)" : "var(--color-warning, #ffc107)";
+    return '<div class="conflict-card" style="border-left:4px solid ' + borderColor + '">' +
+      '<div class="conflict-card-header">' +
+        '<div>' +
+          '<div style="font-weight:600">' + escapeHtml(ip) + ' &mdash; ' + escapeHtml(hostname) + '</div>' +
+          '<div style="color:var(--color-text-tertiary);font-size:0.82rem">' + subnet + '</div>' +
+        '</div>' +
+        '<span class="badge badge-source-dhcp">DHCP Reservation</span>' +
+      '</div>' +
+      '<div class="conflict-card-body" style="font-size:0.85rem;line-height:1.6">' +
+        '<div><strong>MAC:</strong> ' + escapeHtml(mac) + '</div>' +
+        device +
+        pushed +
+        lastSeen +
+        '<div><strong>Created:</strong> ' + new Date(a.createdAt).toLocaleString() + '</div>' +
+        sinceLine +
       '</div>' +
       '<div class="conflict-card-actions">' + actions + '</div>' +
     '</div>';

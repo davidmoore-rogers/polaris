@@ -12,7 +12,7 @@ import { z } from "zod";
 import * as reservationService from "../../services/reservationService.js";
 import * as staleService from "../../services/reservationStaleService.js";
 import { AppError } from "../../utils/errors.js";
-import { requireAdmin, requireUserOrAbove, isNetworkAdminOrAbove } from "../middleware/auth.js";
+import { requireAdmin, requireNetworkAdmin, requireUserOrAbove, isNetworkAdminOrAbove } from "../middleware/auth.js";
 import { logEvent, buildChanges } from "./events.js";
 
 const router = Router();
@@ -89,17 +89,72 @@ router.put("/stale-settings", requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.get("/alerts", async (_req, res, next) => {
+router.get("/alerts", async (req, res, next) => {
   try {
-    const alerts = await staleService.listStaleReservations();
-    res.json({ alerts, total: alerts.length });
+    const show = req.query.show === "ignored" ? "ignored" : "active";
+    const alerts = await staleService.listStaleReservations(show);
+    res.json({ alerts, total: alerts.length, show });
   } catch (err) { next(err); }
 });
 
+// Badge count is always the active list — ignored rows are silenced by the
+// operator and shouldn't drive a sidebar badge.
 router.get("/alerts/count", async (_req, res, next) => {
   try {
-    const alerts = await staleService.listStaleReservations();
+    const alerts = await staleService.listStaleReservations("active");
     res.json({ count: alerts.length });
+  } catch (err) { next(err); }
+});
+
+// Snooze a stale-reservation alert by `staleAfterDays` more days. Sets
+// staleSnoozedUntil = now + staleAfterDays so the row is suppressed from the
+// alert list and the job won't re-fire until the snooze expires (or until
+// discovery sees the IP active again, which clears the snooze automatically).
+// Open to any user-or-above so operators can quiet noise without admin escalation.
+router.post("/:id/snooze", requireUserOrAbove, async (req, res, next) => {
+  try {
+    const result = await staleService.snoozeReservation(req.params.id as string);
+    logEvent({
+      action: "reservation.stale.snoozed",
+      resourceType: "reservation",
+      resourceId: result.reservationId,
+      actor: req.session?.username,
+      message: `Stale-reservation alert snoozed for ${result.daysAdded} day(s); next alert eligibility ${result.snoozedUntil.toISOString()}`,
+      details: { snoozedUntil: result.snoozedUntil.toISOString(), daysAdded: result.daysAdded },
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// Permanently ignore a stale-reservation alert (admin / network-admin). The
+// row is suppressed from the active alert list and the job won't ever
+// re-fire on it, even if it later goes online and offline again — operator's
+// intent is durable. Reachable via the admin filter view in the Alerts panel.
+router.post("/:id/stale-ignore", requireNetworkAdmin, async (req, res, next) => {
+  try {
+    const result = await staleService.setStaleIgnored(req.params.id as string, true);
+    logEvent({
+      action: "reservation.stale.ignored",
+      resourceType: "reservation",
+      resourceId: result.reservationId,
+      actor: req.session?.username,
+      message: `Stale-reservation alert permanently ignored — operator opted out of future notifications for this row`,
+    });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+router.delete("/:id/stale-ignore", requireNetworkAdmin, async (req, res, next) => {
+  try {
+    const result = await staleService.setStaleIgnored(req.params.id as string, false);
+    logEvent({
+      action: "reservation.stale.unignored",
+      resourceType: "reservation",
+      resourceId: result.reservationId,
+      actor: req.session?.username,
+      message: `Stale-reservation alert un-ignored — row will alert again on the next stale crossing`,
+    });
+    res.json(result);
   } catch (err) { next(err); }
 });
 

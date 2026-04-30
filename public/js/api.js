@@ -118,6 +118,15 @@ const api = {
     nextAvailable: (body)   => request("POST", "/reservations/next-available", body),
     update:        (id, b)  => request("PUT", `/reservations/${id}`, b),
     release:       (id)     => request("DELETE", `/reservations/${id}`),
+    // Stale-reservation alerts. Settings are admin-only writes; reads are
+    // open so the Events-page badge count works for every authenticated user.
+    getStaleSettings:    ()      => request("GET", "/reservations/stale-settings"),
+    updateStaleSettings: (body)  => request("PUT", "/reservations/stale-settings", body),
+    listAlerts:          (show)  => request("GET", "/reservations/alerts" + (show ? "?show=" + encodeURIComponent(show) : "")),
+    alertsCount:         ()      => request("GET", "/reservations/alerts/count"),
+    snoozeAlert:         (id)    => request("POST", `/reservations/${id}/snooze`),
+    ignoreAlert:         (id)    => request("POST", `/reservations/${id}/stale-ignore`),
+    unignoreAlert:       (id)    => request("DELETE", `/reservations/${id}/stale-ignore`),
   },
   utilization: {
     global:  ()   => request("GET", "/utilization"),

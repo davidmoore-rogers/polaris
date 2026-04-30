@@ -2254,12 +2254,20 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         } else if (entry.seenLeased && isDhcpReservation) {
           // Static reservation we already know about; bump the
           // last-seen-leased timestamp so the stale-reservation job knows
-          // its target was online at this discovery run. Cleared
-          // staleNotifiedAt so a freshly-online reservation re-arms the
-          // alert if it goes silent again later.
+          // its target was online at this discovery run. Cleared both
+          // staleNotifiedAt (so a freshly-online reservation re-arms the
+          // alert if it goes silent again later) and staleSnoozedUntil (so
+          // an operator snooze on a now-online reservation doesn't linger).
+          // staleIgnored is intentionally NOT cleared — that flag is the
+          // operator's deliberate "stop alerting on this forever," and we
+          // honor it across online/offline cycles until they un-ignore.
           await prisma.reservation.update({
             where: { id: existingRes.id },
-            data: { lastSeenLeased: new Date(), staleNotifiedAt: null },
+            data: {
+              lastSeenLeased: new Date(),
+              staleNotifiedAt: null,
+              staleSnoozedUntil: null,
+            },
           });
         }
         continue;

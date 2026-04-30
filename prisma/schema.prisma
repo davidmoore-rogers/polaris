@@ -145,8 +145,20 @@ model Reservation {
   // most recent time the flagStaleReservations job emitted a `reservation.stale`
   // Event for this row, so the next nightly run doesn't re-fire the same
   // alert until the threshold is recrossed (lastSeenLeased advances).
-  lastSeenLeased   DateTime?
-  staleNotifiedAt  DateTime?
+  // staleSnoozedUntil is set by the operator-driven Snooze action on the
+  // Alerts panel; while it is in the future, the row is suppressed from the
+  // alert list and the job won't re-fire. Cleared when discovery sees the IP
+  // active again so a re-snoozed reservation that comes back online
+  // re-arms cleanly.
+  // staleIgnored is the network-admin/admin-driven "permanently ignore"
+  // action — when true, the row is suppressed from the alert list and the
+  // job won't re-fire forever, until an admin explicitly un-ignores. Unlike
+  // snooze, this flag is NOT cleared by discovery seeing the IP active
+  // again; the operator's intent is durable across online/offline cycles.
+  lastSeenLeased    DateTime?
+  staleNotifiedAt   DateTime?
+  staleSnoozedUntil DateTime?
+  staleIgnored      Boolean   @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
