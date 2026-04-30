@@ -15,6 +15,8 @@ import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
 import { getIpHistory, getHistorySettings, updateHistorySettings, pruneOldHistory } from "../../services/assetIpHistoryService.js";
+import { getSightingsForAsset, getSightingSettings, updateSightingSettings } from "../../services/assetSightingService.js";
+import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
 import { ipInCidr, isValidIpAddress } from "../../utils/cidr.js";
 import * as reservationService from "../../services/reservationService.js";
 import {
@@ -36,7 +38,7 @@ const AssetTypeEnum = z.enum([
 ]);
 
 const AssetStatusEnum = z.enum([
-  "active", "maintenance", "decommissioned", "storage", "disabled",
+  "active", "maintenance", "decommissioned", "storage", "disabled", "quarantined",
 ]);
 
 const macRegex = /^([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}$/;
@@ -1265,6 +1267,16 @@ router.put("/:id", requireAssetsAdmin, async (req, res, next) => {
     const existing = await prisma.asset.findUnique({ where: { id } });
     if (!existing) throw new AppError(404, "Asset not found");
     const input = UpdateAssetSchema.parse(req.body);
+    // Quarantine status is owned by the dedicated quarantine endpoints —
+    // setting it via the generic asset PUT would skip the FortiGate push
+    // (or skip the device-side unpush on release), creating divergence
+    // between Polaris's view and the FortiGate's enforcement state.
+    if (input.status === "quarantined" && existing.status !== "quarantined") {
+      throw new AppError(400, "Use POST /assets/:id/quarantine to quarantine an asset");
+    }
+    if (input.status !== undefined && input.status !== "quarantined" && existing.status === "quarantined") {
+      throw new AppError(400, "Use DELETE /assets/:id/quarantine to release the quarantine before changing status");
+    }
     const data: Record<string, unknown> = { ...input };
     if (input.macAddress) data.macAddress = input.macAddress.toUpperCase().replace(/-/g, ":");
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
@@ -1702,6 +1714,17 @@ router.delete("/", requireAssetsAdmin, async (req, res, next) => {
     const { ids } = req.body as { ids?: unknown };
     if (!Array.isArray(ids) || ids.length === 0) throw new AppError(400, "ids must be a non-empty array");
     if (ids.some((id) => typeof id !== "string")) throw new AppError(400, "All ids must be strings");
+    // Refuse to bulk-delete any quarantined asset — the operator must release
+    // the quarantine first so the device-side targets get cleaned up.
+    const quarantined = await prisma.asset.findMany({
+      where: { id: { in: ids as string[] }, status: "quarantined" },
+      select: { id: true, hostname: true, ipAddress: true },
+    });
+    if (quarantined.length > 0) {
+      const names = quarantined.map((a) => a.hostname || a.ipAddress || a.id).slice(0, 5);
+      const more = quarantined.length > 5 ? ` (+${quarantined.length - 5} more)` : "";
+      throw new AppError(409, `Cannot delete quarantined asset(s): ${names.join(", ")}${more}. Release the quarantine first.`);
+    }
     const { count } = await prisma.asset.deleteMany({ where: { id: { in: ids as string[] } } });
     logEvent({ action: "asset.bulk_deleted", resourceType: "asset", actor: req.session?.username, message: `Bulk deleted ${count} asset(s)` });
     res.json({ deleted: count });
@@ -1716,9 +1739,180 @@ router.delete("/:id", requireAssetsAdmin, async (req, res, next) => {
     const id = req.params.id as string;
     const existing = await prisma.asset.findUnique({ where: { id } });
     if (!existing) throw new AppError(404, "Asset not found");
+    if (existing.status === "quarantined") {
+      throw new AppError(409, `Cannot delete quarantined asset "${existing.hostname || existing.ipAddress || id}". Release the quarantine first.`);
+    }
     await prisma.asset.delete({ where: { id } });
     logEvent({ action: "asset.deleted", resourceType: "asset", resourceId: id, resourceName: existing.hostname || existing.ipAddress || undefined, actor: req.session?.username, message: `Asset "${existing.hostname || existing.ipAddress || "unknown"}" deleted` });
     res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Quarantine + sightings ─────────────────────────────────────────────
+
+// GET /api/v1/assets/sighting-settings — current settings
+router.get("/sighting-settings", async (_req, res, next) => {
+  try {
+    res.json(await getSightingSettings());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /api/v1/assets/sighting-settings — admin or assets admin
+router.put("/sighting-settings", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const Schema = z.object({ sightingMaxAgeDays: z.number().int().min(0).max(3650) });
+    const input = Schema.parse(req.body);
+    await updateSightingSettings(input);
+    logEvent({
+      action: "asset.sighting_settings_updated",
+      actor: req.session?.username,
+      message: `Quarantine sighting max-age set to ${input.sightingMaxAgeDays} day(s)`,
+    });
+    res.json(input);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/assets/:id/sightings — DHCP sighting history (any auth user)
+router.get("/:id/sightings", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const exists = await prisma.asset.findUnique({ where: { id }, select: { id: true } });
+    if (!exists) throw new AppError(404, "Asset not found");
+    res.json(await getSightingsForAsset(id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/assets/:id/quarantine-status — current quarantine state + recorded targets
+router.get("/:id/quarantine-status", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        status: true,
+        statusBeforeQuarantine: true,
+        quarantineReason: true,
+        quarantinedAt: true,
+        quarantinedBy: true,
+        quarantineTargets: true,
+      },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+    res.json(asset);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/assets/:id/quarantine — admin or assets admin only
+router.post("/:id/quarantine", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const Schema = z.object({ reason: z.string().max(500).optional() });
+    const input = Schema.parse(req.body ?? {});
+    const id = req.params.id as string;
+    const result = await quarantineAsset({
+      assetId: id,
+      actor: `user:${req.session?.username || "unknown"}`,
+      reason: input.reason,
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/v1/assets/:id/quarantine — admin or assets admin only
+router.delete("/:id/quarantine", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const result = await releaseQuarantine({
+      assetId: id,
+      actor: `user:${req.session?.username || "unknown"}`,
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/assets/:id/quarantine/verify — read-back drift check (admin or assets admin)
+router.post("/:id/quarantine/verify", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const verifyResult = await verifyAssetQuarantine(id);
+    if (verifyResult.driftDetected) {
+      // Persist the drift flip + log the event so the operator has an audit trail.
+      await prisma.asset.update({
+        where: { id },
+        data: { quarantineTargets: verifyResult.targets as any },
+      });
+      const asset = await prisma.asset.findUnique({ where: { id }, select: { hostname: true, ipAddress: true } });
+      logEvent({
+        action: "asset.quarantine.drift_detected",
+        resourceType: "asset",
+        resourceId: id,
+        resourceName: asset?.hostname || asset?.ipAddress || undefined,
+        actor: req.session?.username,
+        level: "warning",
+        message: `Quarantine drift detected on ${asset?.hostname || id} — one or more FortiGate targets are missing or incomplete`,
+        details: { targets: verifyResult.targets },
+      });
+    }
+    res.json(verifyResult);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/assets/bulk-quarantine — admin or assets admin only
+router.post("/bulk-quarantine", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const Schema = z.object({
+      ids: z.array(z.string()).min(1),
+      reason: z.string().max(500).optional(),
+    });
+    const input = Schema.parse(req.body);
+    const actor = `user:${req.session?.username || "unknown"}`;
+    const results: Array<{ id: string; ok: boolean; message: string; succeededCount?: number; failedCount?: number }> = [];
+    for (const id of input.ids) {
+      try {
+        const r = await quarantineAsset({ assetId: id, actor, reason: input.reason });
+        results.push({ id, ok: true, message: r.message, succeededCount: r.succeededCount, failedCount: r.failedCount });
+      } catch (err: any) {
+        results.push({ id, ok: false, message: err?.message || "Quarantine failed" });
+      }
+    }
+    res.json({ results });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/assets/bulk-quarantine/release — admin or assets admin only
+router.post("/bulk-quarantine/release", requireAssetsAdmin, async (req, res, next) => {
+  try {
+    const Schema = z.object({ ids: z.array(z.string()).min(1) });
+    const input = Schema.parse(req.body);
+    const actor = `user:${req.session?.username || "unknown"}`;
+    const results: Array<{ id: string; ok: boolean; message: string }> = [];
+    for (const id of input.ids) {
+      try {
+        const r = await releaseQuarantine({ assetId: id, actor });
+        results.push({ id, ok: true, message: r.message });
+      } catch (err: any) {
+        results.push({ id, ok: false, message: err?.message || "Release failed" });
+      }
+    }
+    res.json({ results });
   } catch (err) {
     next(err);
   }
