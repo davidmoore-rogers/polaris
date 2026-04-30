@@ -4968,13 +4968,25 @@ function disabledInHTML(tags) {
   return '<div class="detail-row"><span class="detail-label">Disabled In</span><span class="detail-value">' + badges + '</span></div>';
 }
 
+function formatMacSource(source) {
+  switch (source) {
+    case "intune-ethernet": return "Intune — Ethernet";
+    case "intune-wifi":     return "Intune — Wi-Fi";
+    case "dhcp_reservation":return "DHCP reservation";
+    case "dhcp_lease":      return "DHCP lease";
+    case "device-inventory":return "Device inventory";
+    case "fmg-discovery":   return "FortiManager discovery";
+    default: return source || "";
+  }
+}
+
 function macAddressesViewHTML(macAddresses) {
   if (!macAddresses || macAddresses.length <= 1) return '';
   var rows = macAddresses.map(function (m) {
     return '<div style="display:flex;gap:12px;align-items:center;padding:3px 0">' +
       '<code style="font-size:0.82rem">' + escapeHtml(m.mac) + '</code>' +
       '<span style="font-size:0.75rem;color:var(--color-text-tertiary)">' +
-        escapeHtml(m.source || "") +
+        escapeHtml(formatMacSource(m.source)) +
         (m.lastSeen ? ' &middot; ' + formatDate(m.lastSeen) : '') +
       '</span>' +
     '</div>';

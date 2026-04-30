@@ -4,10 +4,19 @@
  * Two entityType variants share this route and UI:
  *   • "reservation" — discovery proposes changes to a manually-created reservation.
  *     Accept applies the proposed values; reject dismisses.
- *   • "asset" — discovery proposes a new Entra/Intune-sourced asset whose hostname
- *     collides with an existing untagged asset. Accept adopts the existing asset
- *     (sets its assetTag to `entra:{deviceId}` and overlays Entra fields); reject
- *     creates a separate asset with the entra: tag (admin confirmed they're
+ *   • "asset" — discovery proposes a new Entra/Intune- or AD-sourced asset
+ *     whose hostname collides with another asset. Three flavours, distinguished
+ *     by `proposedAssetFields.collisionReason`:
+ *       - "untagged-collision"     — collides with an untagged asset
+ *       - "duplicate-registration" — collides with another asset already
+ *         tagged by the same source (different deviceId / objectGUID for the
+ *         same hostname — re-enrol, re-image, dual-boot, re-domain-join)
+ *     `proposedAssetFields.matchedVia` is "exact" or "netbios" (the latter
+ *     when matching required truncating one side to the 15-char NetBIOS
+ *     limit). Accept adopts the existing asset (sets assetTag to
+ *     `entra:{deviceId}` / `ad:{guid}` and overlays empty fields; on a
+ *     netbios match the longer canonical hostname replaces the truncated
+ *     one); reject creates a separate asset (admin confirmed they're
  *     different devices).
  *
  * Role-based access:
@@ -230,7 +239,21 @@ async function acceptAssetConflict(conflict: any, actor?: string) {
   const update: Record<string, unknown> = {
     assetTag: `${prefix}${conflict.proposedDeviceId}`,
   };
-  if (!existing.hostname && proposed.hostname) update.hostname = proposed.hostname;
+  // Hostname has one extra rule: when the conflict was raised via 15-char
+  // NetBIOS truncation (e.g. AD `cn` = "GORDONSVILLE-PL" matched against
+  // Entra displayName = "GORDONSVILLE-PLANT"), prefer the longer canonical
+  // form even if the existing hostname is non-empty — the truncated form is
+  // a quirk of the legacy NetBIOS limit, not a deliberate choice.
+  const existingHostLower = (existing.hostname || "").toLowerCase();
+  const proposedHostLower = (proposed.hostname || "").toLowerCase();
+  const isNetbiosUpgrade =
+    proposed.matchedVia === "netbios" &&
+    proposedHostLower.length > existingHostLower.length &&
+    existingHostLower.length > 0 &&
+    proposedHostLower.startsWith(existingHostLower);
+  if ((!existing.hostname && proposed.hostname) || isNetbiosUpgrade) {
+    update.hostname = proposed.hostname;
+  }
   if (!existing.serialNumber && proposed.serialNumber) update.serialNumber = proposed.serialNumber;
   if (!existing.macAddress && proposed.macAddress) update.macAddress = proposed.macAddress;
   if (!existing.manufacturer && proposed.manufacturer) update.manufacturer = proposed.manufacturer;
@@ -263,6 +286,15 @@ async function acceptAssetConflict(conflict: any, actor?: string) {
     if (proposed.trustType) sourceTags.push(String(proposed.trustType).toLowerCase());
     if (proposed.complianceState) sourceTags.push(`intune-${String(proposed.complianceState).toLowerCase()}`);
     if (proposed.onPremisesSecurityIdentifier) sourceTags.push(`${SID_TAG_PREFIX}${String(proposed.onPremisesSecurityIdentifier).toUpperCase()}`);
+  }
+  // Breadcrumb: when the existing asset already has a source assetTag and we're
+  // overwriting it with a new one (duplicate-registration merge — same hostname,
+  // different deviceId/objectGUID), stash the prior assetTag as a `prev-…` tag
+  // so the original ID stays findable in audit/search after the merge.
+  const priorTag = existing.assetTag || "";
+  if (priorTag && priorTag !== update.assetTag &&
+      (priorTag.startsWith(ENTRA_ASSET_TAG_PREFIX) || priorTag.startsWith(AD_ASSET_TAG_PREFIX))) {
+    sourceTags.push(`prev-${priorTag}`);
   }
   const existingTags = (existing.tags as string[] | null) || [];
   const merged = [...existingTags];

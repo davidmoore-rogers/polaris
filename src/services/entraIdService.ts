@@ -37,7 +37,13 @@ export interface DiscoveredEntraDevice {
   isManaged?: boolean;
   // Intune-only fields (present only when enableIntune and a matching managed device was found)
   serialNumber?: string;
+  // Primary MAC for back-compat callers — populated as ethernetMacAddress preferred,
+  // falling back to wifiMacAddress. Prefer reading the typed fields below when
+  // wiring new behaviour (e.g. cross-asset merging should use Ethernet only,
+  // since WiFi MAC randomizes on modern Windows/iOS/Android).
   macAddress?: string;
+  wifiMacAddress?: string;       // Intune `wiFiMacAddress`
+  ethernetMacAddress?: string;   // Intune `ethernetMacAddress`
   manufacturer?: string;
   model?: string;
   userPrincipalName?: string;
@@ -360,6 +366,8 @@ export async function discoverDevices(
     seenDeviceIds.add(deviceId);
 
     const intune = intuneByDeviceId.get(deviceId);
+    const wifi = formatMac(intune?.wiFiMacAddress);
+    const eth = formatMac(intune?.ethernetMacAddress);
     merged.push({
       deviceId,
       displayName: (intune?.deviceName || e.displayName || "") as string,
@@ -373,7 +381,9 @@ export async function discoverDevices(
       isCompliant: typeof e.isCompliant === "boolean" ? e.isCompliant : undefined,
       isManaged: typeof e.isManaged === "boolean" ? e.isManaged : undefined,
       serialNumber: intune?.serialNumber || undefined,
-      macAddress: pickMac(intune) || undefined,
+      macAddress: (eth || wifi) || undefined,
+      wifiMacAddress: wifi || undefined,
+      ethernetMacAddress: eth || undefined,
       manufacturer: intune?.manufacturer || undefined,
       model: intune?.model || undefined,
       userPrincipalName: intune?.userPrincipalName || undefined,
@@ -390,6 +400,8 @@ export async function discoverDevices(
       nullIdSkipped++;
       continue;
     }
+    const wifi = formatMac(intune.wiFiMacAddress);
+    const eth = formatMac(intune.ethernetMacAddress);
     merged.push({
       deviceId,
       displayName: String(intune.deviceName || ""),
@@ -398,7 +410,9 @@ export async function discoverDevices(
       trustType: "",
       accountEnabled: true, // Intune-only devices have no Entra accountEnabled — assume active
       serialNumber: intune.serialNumber || undefined,
-      macAddress: pickMac(intune) || undefined,
+      macAddress: (eth || wifi) || undefined,
+      wifiMacAddress: wifi || undefined,
+      ethernetMacAddress: eth || undefined,
       manufacturer: intune.manufacturer || undefined,
       model: intune.model || undefined,
       userPrincipalName: intune.userPrincipalName || undefined,
@@ -443,11 +457,10 @@ function isMeaningfulDeviceId(id: string): boolean {
   return id.replace(/[-0]/g, "").length > 0;
 }
 
-function pickMac(intune: any): string {
-  if (!intune) return "";
-  const mac = intune.wiFiMacAddress || intune.ethernetMacAddress || "";
+// Normalize a single MAC value from Intune (returned without separators, e.g.
+// "A0B1C2D3E4F5") into Polaris's storage convention: colon-separated uppercase.
+function formatMac(mac: unknown): string {
   if (!mac) return "";
-  // Intune returns MACs without separators, e.g. "A0B1C2D3E4F5" — normalize to colon form
   const compact = String(mac).replace(/[^0-9A-Fa-f]/g, "").toUpperCase();
   if (compact.length !== 12) return String(mac).toUpperCase();
   return compact.match(/.{2}/g)!.join(":");

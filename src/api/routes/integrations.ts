@@ -3004,6 +3004,80 @@ const AD_ASSET_TAG_PREFIX = "ad:";
 const SID_TAG_PREFIX = "sid:";
 const AD_GUID_TAG_PREFIX = "ad-guid:";
 
+// Strip every non-hex character and uppercase, so "00:1A:2B:3C:4D:5E",
+// "001A2B-3C4D5E", "00-1A-2B-3C-4D-5E" all collapse to the same key. Used
+// only for cross-asset MAC matching during discovery; storage convention
+// elsewhere keeps colon-separated uppercase form.
+function normalizeMacKey(mac: string | null | undefined): string {
+  if (!mac) return "";
+  const hex = mac.toUpperCase().replace(/[^0-9A-F]/g, "");
+  return hex.length === 12 ? hex : "";
+}
+
+// NetBIOS / pre-Windows-2000 computer-name limit. AD's `cn` is often the
+// truncated form when the device's full name exceeds 15 chars, while Entra's
+// displayName carries the full name. We index both forms so a hostname
+// collision check finds the match regardless of which side was truncated.
+const NETBIOS_LIMIT = 15;
+
+// Index a hostname under its full lowercase form, plus its 15-char prefix
+// when the full form is longer (so a future shorter lookup can still find it).
+function indexHostname(map: Map<string, any>, hostname: string, asset: any): void {
+  const lower = hostname.toLowerCase();
+  if (!map.has(lower)) map.set(lower, asset);
+  if (lower.length > NETBIOS_LIMIT) {
+    const truncated = lower.slice(0, NETBIOS_LIMIT);
+    if (!map.has(truncated)) map.set(truncated, asset);
+  }
+}
+
+// Look up `hostname` in a map populated via indexHostname. Returns the matched
+// asset and how the match was made: "exact" (full hostnames are equal) or
+// "netbios" (matched only after truncating one side to 15 chars).
+function lookupHostname(map: Map<string, any>, hostname: string): { asset: any; via: "exact" | "netbios" } | null {
+  const lower = hostname.toLowerCase();
+  const direct = map.get(lower);
+  if (direct) {
+    const storedLower = (direct.hostname || "").toLowerCase();
+    return { asset: direct, via: storedLower === lower ? "exact" : "netbios" };
+  }
+  if (lower.length >= NETBIOS_LIMIT) {
+    const truncated = map.get(lower.slice(0, NETBIOS_LIMIT));
+    if (truncated) return { asset: truncated, via: "netbios" };
+  }
+  return null;
+}
+
+// Upsert a pending hostname-collision conflict, deduped on proposedDeviceId.
+async function upsertAssetConflict(args: {
+  collisionAssetId: string;
+  integrationId: string;
+  proposedDeviceId: string;
+  proposedAssetFields: Record<string, any>;
+}): Promise<void> {
+  const existing = await prisma.conflict.findFirst({
+    where: { entityType: "asset", status: "pending", proposedDeviceId: args.proposedDeviceId },
+  });
+  if (existing) {
+    await prisma.conflict.update({
+      where: { id: existing.id },
+      data: { proposedAssetFields: args.proposedAssetFields as any, assetId: args.collisionAssetId },
+    });
+  } else {
+    await prisma.conflict.create({
+      data: {
+        entityType: "asset",
+        assetId: args.collisionAssetId,
+        integrationId: args.integrationId,
+        proposedDeviceId: args.proposedDeviceId,
+        proposedAssetFields: args.proposedAssetFields as any,
+        conflictFields: ["hostname"],
+        status: "pending",
+      },
+    });
+  }
+}
+
 function sidTag(sid: string): string {
   return `${SID_TAG_PREFIX}${sid.toUpperCase()}`;
 }
@@ -3063,19 +3137,31 @@ async function syncEntraDevices(
   // and by hostname. SID index catches hybrid-joined devices that the on-prem
   // AD integration discovered first (assetTag = "ad:{guid}").
   const allAssets = await prisma.asset.findMany();
-  const assetByEntraId = new Map<string, any>();       // deviceId → asset
-  const assetBySid = new Map<string, any>();           // uppercase SID → asset
-  const assetByHostnameNoTag = new Map<string, any>(); // hostname → asset (only those without an assetTag)
+  const assetByEntraId = new Map<string, any>();              // deviceId → asset
+  const assetBySid = new Map<string, any>();                  // uppercase SID → asset
+  const assetByHostnameNoTag = new Map<string, any>();        // hostname → asset (untagged only)
+  const assetByHostnameEntraTagged = new Map<string, any>();  // hostname → asset (entra-tagged; for duplicate-registration detection)
+  const assetByMac = new Map<string, any>();                  // normalized MAC → asset (any source; for mac-collision detection)
   for (const a of allAssets) {
     const tag = a.assetTag ?? "";
     if (tag.startsWith(ENTRA_ASSET_TAG_PREFIX)) {
       assetByEntraId.set(tag.slice(ENTRA_ASSET_TAG_PREFIX.length).toLowerCase(), a);
+      if (a.hostname) indexHostname(assetByHostnameEntraTagged, a.hostname, a);
     } else if (!tag && a.hostname) {
-      assetByHostnameNoTag.set(a.hostname.toLowerCase(), a);
+      indexHostname(assetByHostnameNoTag, a.hostname, a);
     }
     for (const t of (a.tags as string[] | null) || []) {
       if (t.startsWith(SID_TAG_PREFIX)) {
         assetBySid.set(t.slice(SID_TAG_PREFIX.length).toUpperCase(), a);
+      }
+    }
+    // Index every MAC ever seen on this asset — primary + history.
+    const primaryKey = normalizeMacKey(a.macAddress);
+    if (primaryKey && !assetByMac.has(primaryKey)) assetByMac.set(primaryKey, a);
+    if (Array.isArray(a.macAddresses)) {
+      for (const m of a.macAddresses as any[]) {
+        const k = normalizeMacKey(m?.mac);
+        if (k && !assetByMac.has(k)) assetByMac.set(k, a);
       }
     }
   }
@@ -3090,6 +3176,33 @@ async function syncEntraDevices(
     const assetType = inferAssetTypeFromChassis(dev.chassisType, dev.operatingSystem);
     const disabled = !dev.accountEnabled;
     const status: "active" | "disabled" = disabled ? "disabled" : "active";
+
+    // Both Intune MACs (when present), labeled by source so the Asset details
+    // panel can show "Intune Wi-Fi" vs "Intune Ethernet" rows. Ethernet first
+    // so it ends up as the asset's primary `macAddress` after the lastSeen-
+    // based sort below — Ethernet is the more stable identifier (WiFi MAC
+    // randomizes on modern Windows/iOS/Android).
+    const intuneMacEntries: { mac: string; source: string }[] = [];
+    if (dev.ethernetMacAddress) intuneMacEntries.push({ mac: dev.ethernetMacAddress, source: "intune-ethernet" });
+    if (dev.wifiMacAddress) intuneMacEntries.push({ mac: dev.wifiMacAddress, source: "intune-wifi" });
+
+    const nowIso = now.toISOString();
+    const mergeIntuneMacs = (existing: any[]): { primary: string | null; merged: any[] } => {
+      const merged = Array.isArray(existing) ? [...existing] : [];
+      for (const e of intuneMacEntries) {
+        const key = normalizeMacKey(e.mac);
+        const hit = merged.find((m: any) => normalizeMacKey(m?.mac) === key);
+        if (hit) {
+          hit.lastSeen = nowIso;
+          hit.source = e.source;
+        } else {
+          merged.push({ mac: e.mac, lastSeen: nowIso, source: e.source });
+        }
+      }
+      merged.sort((a: any, b: any) => new Date(b.lastSeen || 0).getTime() - new Date(a.lastSeen || 0).getTime());
+      const primary = merged[0]?.mac ?? null;
+      return { primary, merged };
+    };
 
     const tags: string[] = ["entraid", "auto-discovered"];
     if (disabled) tags.push("entra-disabled");
@@ -3136,7 +3249,11 @@ async function syncEntraDevices(
         updateData.assetTag = `${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}`;
       }
       if (dev.serialNumber) updateData.serialNumber = dev.serialNumber;
-      if (dev.macAddress) updateData.macAddress = dev.macAddress;
+      if (intuneMacEntries.length > 0) {
+        const { primary, merged } = mergeIntuneMacs(existing.macAddresses as any[]);
+        updateData.macAddresses = merged;
+        if (primary) updateData.macAddress = primary;
+      }
       if (dev.manufacturer) updateData.manufacturer = dev.manufacturer;
       if (dev.model) updateData.model = dev.model;
       if (dev.userPrincipalName) updateData.assignedTo = dev.userPrincipalName;
@@ -3161,72 +3278,120 @@ async function syncEntraDevices(
       continue;
     }
 
-    // No existing assetTag or SID match — check for hostname collision with a non-tagged asset.
-    // If one exists, create (or refresh) a pending Conflict so an admin can decide
-    // whether to merge (accept) or create a duplicate (reject). Skip the
-    // create-path so we don't accidentally produce the duplicate yet.
+    // No existing assetTag or SID match — check for hostname or MAC collision.
+    // Three flavours, in order of decreasing confidence:
+    //   (a) hostname collision with an untagged asset
+    //   (b) duplicate Entra registration where another entra-tagged asset shares
+    //       the hostname (Entra returned two distinct deviceIds for the same
+    //       display name — re-enrol, re-image, dual-boot, etc.)
+    //   (c) MAC collision against any existing asset (Intune-supplied MAC
+    //       matches a MAC ever seen on another asset). Weaker signal than
+    //       hostname because of MAC randomization on modern Windows/iOS — only
+    //       runs when no hostname collision was raised.
+    // Each flavour raises a pending Conflict so an admin can decide whether to
+    // merge (accept) or keep separate (reject). Hostname matching tolerates
+    // 15-char NetBIOS truncation so an AD `cn`-derived hostname can match the
+    // full Entra displayName and vice versa.
+    const buildProposed = (
+      collisionReason: "untagged-collision" | "duplicate-registration" | "mac-collision",
+      matchedVia: "exact" | "netbios" | "mac",
+    ) => ({
+      sourceType: "entraid",
+      assetTagPrefix: ENTRA_ASSET_TAG_PREFIX,
+      deviceId: dev.deviceId,
+      hostname: dev.displayName,
+      serialNumber: dev.serialNumber || null,
+      macAddress: dev.macAddress || null,
+      manufacturer: dev.manufacturer || null,
+      model: dev.model || null,
+      os: dev.operatingSystem || null,
+      osVersion: dev.operatingSystemVersion || null,
+      assignedTo: dev.userPrincipalName || null,
+      chassisType: dev.chassisType || null,
+      complianceState: dev.complianceState || null,
+      trustType: dev.trustType || null,
+      onPremisesSecurityIdentifier: dev.onPremisesSecurityIdentifier || null,
+      assetType,
+      lastSeen: dev.lastSyncDateTime || dev.approximateLastSignInDateTime || null,
+      registrationDateTime: dev.registrationDateTime || null,
+      collisionReason,
+      matchedVia,
+    });
+
     if (dev.displayName) {
-      const collision = assetByHostnameNoTag.get(dev.displayName.toLowerCase());
-      if (collision) {
+      const untagged = lookupHostname(assetByHostnameNoTag, dev.displayName);
+      if (untagged) {
         try {
-          const existingConflict = await prisma.conflict.findFirst({
-            where: { entityType: "asset", status: "pending", proposedDeviceId: dev.deviceId },
+          await upsertAssetConflict({
+            collisionAssetId: untagged.asset.id,
+            integrationId,
+            proposedDeviceId: dev.deviceId,
+            proposedAssetFields: buildProposed("untagged-collision", untagged.via),
           });
-          const proposedFields = {
-            sourceType: "entraid",
-            assetTagPrefix: ENTRA_ASSET_TAG_PREFIX,
-            deviceId: dev.deviceId,
-            hostname: dev.displayName,
-            serialNumber: dev.serialNumber || null,
-            macAddress: dev.macAddress || null,
-            manufacturer: dev.manufacturer || null,
-            model: dev.model || null,
-            os: dev.operatingSystem || null,
-            osVersion: dev.operatingSystemVersion || null,
-            assignedTo: dev.userPrincipalName || null,
-            chassisType: dev.chassisType || null,
-            complianceState: dev.complianceState || null,
-            trustType: dev.trustType || null,
-            onPremisesSecurityIdentifier: dev.onPremisesSecurityIdentifier || null,
-            assetType,
-            lastSeen: dev.lastSyncDateTime || dev.approximateLastSignInDateTime || null,
-            registrationDateTime: dev.registrationDateTime || null,
-          };
-          if (existingConflict) {
-            // Refresh the snapshot so the admin sees the latest Entra values
-            await prisma.conflict.update({
-              where: { id: existingConflict.id },
-              data: { proposedAssetFields: proposedFields as any, assetId: collision.id },
-            });
-          } else {
-            await prisma.conflict.create({
-              data: {
-                entityType: "asset",
-                assetId: collision.id,
-                integrationId,
-                proposedDeviceId: dev.deviceId,
-                proposedAssetFields: proposedFields as any,
-                conflictFields: ["hostname"],
-                status: "pending",
-              },
-            });
-          }
-          syncLog("warning", `Hostname collision queued for review — Entra device "${dev.displayName}" (${dev.deviceId}) matches existing asset ${collision.id}.`);
+          syncLog("warning", `Hostname collision queued for review — Entra device "${dev.displayName}" (${dev.deviceId}) matches untagged asset ${untagged.asset.id}${untagged.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
         } catch (err: any) {
           syncLog("error", `Failed to queue hostname-collision conflict for "${dev.displayName}": ${err.message || "Unknown error"}`);
         }
         skipped.push(`${dev.displayName} (hostname collision — pending review)`);
         continue;
       }
+
+      const dupEntra = lookupHostname(assetByHostnameEntraTagged, dev.displayName);
+      if (dupEntra) {
+        try {
+          await upsertAssetConflict({
+            collisionAssetId: dupEntra.asset.id,
+            integrationId,
+            proposedDeviceId: dev.deviceId,
+            proposedAssetFields: buildProposed("duplicate-registration", dupEntra.via),
+          });
+          const existingTag = (dupEntra.asset.assetTag || "").slice(ENTRA_ASSET_TAG_PREFIX.length) || "<unknown>";
+          syncLog("warning", `Duplicate Entra registration queued for review — "${dev.displayName}" (${dev.deviceId}) shares hostname with existing Entra device ${existingTag}${dupEntra.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
+        } catch (err: any) {
+          syncLog("error", `Failed to queue duplicate-Entra-registration conflict for "${dev.displayName}": ${err.message || "Unknown error"}`);
+        }
+        skipped.push(`${dev.displayName} (duplicate Entra registration — pending review)`);
+        continue;
+      }
+    }
+
+    // (c) MAC collision — runs only when no hostname collision was raised, and
+    // only against the Ethernet MAC. WiFi MAC randomization on modern Windows
+    // / iOS / Android makes the WiFi MAC unreliable as a cross-asset identity
+    // key (the same physical box gets a different WiFi MAC per network), so
+    // we never raise MAC-collision conflicts on it. The WiFi MAC is still
+    // stored in `Asset.macAddresses[]` with `source: "intune-wifi"` for
+    // visibility and for FortiGate DHCP-discovery's MAC-based asset matching.
+    const macKey = normalizeMacKey(dev.ethernetMacAddress);
+    if (macKey) {
+      const macHit = assetByMac.get(macKey);
+      if (macHit) {
+        try {
+          await upsertAssetConflict({
+            collisionAssetId: macHit.id,
+            integrationId,
+            proposedDeviceId: dev.deviceId,
+            proposedAssetFields: buildProposed("mac-collision", "mac"),
+          });
+          const targetLabel = macHit.hostname || macHit.assetTag || macHit.id;
+          syncLog("warning", `MAC collision queued for review — Entra device "${dev.displayName || dev.deviceId}" Ethernet MAC ${dev.ethernetMacAddress} matches existing asset ${targetLabel}.`);
+        } catch (err: any) {
+          syncLog("error", `Failed to queue MAC-collision conflict for "${dev.displayName || dev.deviceId}": ${err.message || "Unknown error"}`);
+        }
+        skipped.push(`${dev.displayName || dev.deviceId} (MAC collision — pending review)`);
+        continue;
+      }
     }
 
     // Create a new asset
     try {
+      const seeded = mergeIntuneMacs([]);
       const createData: Record<string, unknown> = {
         assetTag: `${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}`,
         hostname: dev.displayName || null,
         serialNumber: dev.serialNumber || null,
-        macAddress: dev.macAddress || null,
+        macAddress: seeded.primary || dev.macAddress || null,
+        macAddresses: seeded.merged,
         manufacturer: dev.manufacturer || null,
         model: dev.model || null,
         assetType,
@@ -3246,6 +3411,13 @@ async function syncEntraDevices(
       assetByEntraId.set(deviceIdKey, newAsset);
       if (dev.onPremisesSecurityIdentifier) {
         assetBySid.set(dev.onPremisesSecurityIdentifier.toUpperCase(), newAsset);
+      }
+      // Index the freshly-created asset by every MAC we just stored so a later
+      // device in this same run reporting any of those MACs raises a
+      // mac-collision conflict instead of creating a third duplicate row.
+      for (const e of intuneMacEntries) {
+        const k = normalizeMacKey(e.mac);
+        if (k && !assetByMac.has(k)) assetByMac.set(k, newAsset);
       }
       created.push(dev.displayName || dev.deviceId);
     } catch (err: any) {
@@ -3280,12 +3452,17 @@ async function syncActiveDirectoryDevices(
 
   // Load the full asset table so we can index by AD assetTag, AD-guid tag, SID tag, and hostname.
   const allAssets = await prisma.asset.findMany();
-  const assetByAdGuidTag = new Map<string, any>();         // guid → asset (works even after Entra took over assetTag)
-  const assetBySid = new Map<string, any>();               // uppercase SID → asset
-  const assetByHostnameNoTag = new Map<string, any>();     // hostname → asset (untagged only)
+  const assetByAdGuidTag = new Map<string, any>();          // guid → asset (works even after Entra took over assetTag)
+  const assetBySid = new Map<string, any>();                // uppercase SID → asset
+  const assetByHostnameNoTag = new Map<string, any>();      // hostname → asset (untagged only)
+  const assetByHostnameAdTagged = new Map<string, any>();   // hostname → asset (ad-tagged; for duplicate-registration detection)
   for (const a of allAssets) {
     const tag = a.assetTag ?? "";
-    if (!tag && a.hostname) assetByHostnameNoTag.set(a.hostname.toLowerCase(), a);
+    if (!tag && a.hostname) {
+      indexHostname(assetByHostnameNoTag, a.hostname, a);
+    } else if (tag.startsWith(AD_ASSET_TAG_PREFIX) && a.hostname) {
+      indexHostname(assetByHostnameAdTagged, a.hostname, a);
+    }
     if (tag.startsWith(AD_ASSET_TAG_PREFIX)) {
       assetByAdGuidTag.set(tag.slice(AD_ASSET_TAG_PREFIX.length).toLowerCase(), a);
     }
@@ -3398,54 +3575,65 @@ async function syncActiveDirectoryDevices(
       continue;
     }
 
-    // No guid or SID match — check hostname collision against untagged assets.
-    if (hostLookupKey) {
-      const collision = assetByHostnameNoTag.get(hostLookupKey);
-      if (collision) {
+    // No guid or SID match — check hostname collision. Two flavours:
+    // (a) collision with an untagged asset, (b) duplicate AD registration
+    // where another ad-tagged asset shares the hostname (rare — same computer
+    // re-joined the domain with a different objectGUID — but worth catching).
+    // Hostname matching tolerates 15-char NetBIOS truncation so AD's `cn`
+    // form can match an Entra-sourced full displayName and vice versa.
+    if (hostLookupKey && displayName) {
+      const buildProposed = (collisionReason: "untagged-collision" | "duplicate-registration", matchedVia: "exact" | "netbios") => ({
+        sourceType: "activedirectory",
+        assetTagPrefix: AD_ASSET_TAG_PREFIX,
+        deviceId: dev.objectGuid,
+        hostname: displayName,
+        dnsName: dev.dnsHostName || null,
+        os: dev.operatingSystem || null,
+        osVersion: dev.operatingSystemVersion || null,
+        notes: dev.description || null,
+        learnedLocation: dev.ouPath || null,
+        objectSid: dev.objectSid || null,
+        status,
+        assetType,
+        lastSeen: dev.lastLogonTimestamp || null,
+        registrationDateTime: dev.whenCreated || null,
+        disabled: dev.disabled,
+        collisionReason,
+        matchedVia,
+      });
+
+      const untagged = lookupHostname(assetByHostnameNoTag, displayName);
+      if (untagged) {
         try {
-          const existingConflict = await prisma.conflict.findFirst({
-            where: { entityType: "asset", status: "pending", proposedDeviceId: dev.objectGuid },
+          await upsertAssetConflict({
+            collisionAssetId: untagged.asset.id,
+            integrationId,
+            proposedDeviceId: dev.objectGuid,
+            proposedAssetFields: buildProposed("untagged-collision", untagged.via),
           });
-          const proposedFields = {
-            sourceType: "activedirectory",
-            assetTagPrefix: AD_ASSET_TAG_PREFIX,
-            deviceId: dev.objectGuid,
-            hostname: displayName,
-            dnsName: dev.dnsHostName || null,
-            os: dev.operatingSystem || null,
-            osVersion: dev.operatingSystemVersion || null,
-            notes: dev.description || null,
-            learnedLocation: dev.ouPath || null,
-            objectSid: dev.objectSid || null,
-            status,
-            assetType,
-            lastSeen: dev.lastLogonTimestamp || null,
-            registrationDateTime: dev.whenCreated || null,
-            disabled: dev.disabled,
-          };
-          if (existingConflict) {
-            await prisma.conflict.update({
-              where: { id: existingConflict.id },
-              data: { proposedAssetFields: proposedFields as any, assetId: collision.id },
-            });
-          } else {
-            await prisma.conflict.create({
-              data: {
-                entityType: "asset",
-                assetId: collision.id,
-                integrationId,
-                proposedDeviceId: dev.objectGuid,
-                proposedAssetFields: proposedFields as any,
-                conflictFields: ["hostname"],
-                status: "pending",
-              },
-            });
-          }
-          syncLog("warning", `Hostname collision queued for review — AD computer "${displayName}" (${dev.objectGuid}) matches existing asset ${collision.id}.`);
+          syncLog("warning", `Hostname collision queued for review — AD computer "${displayName}" (${dev.objectGuid}) matches untagged asset ${untagged.asset.id}${untagged.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
         } catch (err: any) {
           syncLog("error", `Failed to queue hostname-collision conflict for "${displayName}": ${err.message || "Unknown error"}`);
         }
         skipped.push(`${displayName} (hostname collision — pending review)`);
+        continue;
+      }
+
+      const dupAd = lookupHostname(assetByHostnameAdTagged, displayName);
+      if (dupAd) {
+        try {
+          await upsertAssetConflict({
+            collisionAssetId: dupAd.asset.id,
+            integrationId,
+            proposedDeviceId: dev.objectGuid,
+            proposedAssetFields: buildProposed("duplicate-registration", dupAd.via),
+          });
+          const existingTag = (dupAd.asset.assetTag || "").slice(AD_ASSET_TAG_PREFIX.length) || "<unknown>";
+          syncLog("warning", `Duplicate AD registration queued for review — "${displayName}" (${dev.objectGuid}) shares hostname with existing AD computer ${existingTag}${dupAd.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
+        } catch (err: any) {
+          syncLog("error", `Failed to queue duplicate-AD-registration conflict for "${displayName}": ${err.message || "Unknown error"}`);
+        }
+        skipped.push(`${displayName} (duplicate AD registration — pending review)`);
         continue;
       }
     }

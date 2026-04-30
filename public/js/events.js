@@ -765,29 +765,68 @@ function getAlertsFormData() {
         '</tr>';
     }).join("");
 
+    // Source-aware labels (Entra vs AD) — older Entra-only conflicts predate
+    // assetTagPrefix and default to Entra in the backend, so the same default
+    // applies here.
+    var isAd = proposed.assetTagPrefix === "ad:";
+    var sourceLabel = isAd ? "Active Directory" : "Entra ID";
+    var sourceShort = isAd ? "AD computer" : "Entra device";
+    var rightColLabel = isAd ? "Active Directory" : "Entra / Intune";
+
+    // Collision reason + match mechanism shape the explainer copy.
+    var reason = proposed.collisionReason || "untagged-collision";
+    var via = proposed.matchedVia === "netbios" ? "netbios" : "exact";
+
+    var explainer;
+    if (reason === "duplicate-registration") {
+      explainer = "Duplicate registration — another " + sourceShort + " with a different ID already exists under this hostname. <strong>Accept</strong> to merge into the existing record (replaces its assetTag with the new ID; the prior ID is preserved as a <code>prev-…</code> tag); <strong>Reject</strong> to keep them as separate assets.";
+    } else if (reason === "mac-collision") {
+      explainer = "MAC collision — the MAC reported by this " + sourceShort + " matches a MAC ever seen on an existing asset. <strong>Note:</strong> MAC randomization on modern Windows/iOS makes this a softer signal than hostname — confirm before accepting. <strong>Accept</strong> to merge into the existing record; <strong>Reject</strong> to keep them separate.";
+    } else {
+      explainer = "Hostname collision — this " + sourceShort + " shares a name with an existing asset that has no " + sourceLabel + " link. <strong>Accept</strong> to adopt the existing asset; <strong>Reject</strong> to create a separate asset for the " + sourceShort + ".";
+    }
+    if (via === "netbios") {
+      explainer += ' <span style="color:var(--color-text-tertiary)">(matched via 15-char NetBIOS truncation — the longer canonical name will replace the truncated one on Accept.)</span>';
+    }
+
     var badges = [];
+    if (reason === "duplicate-registration") {
+      badges.push('<span class="badge badge-warning">Duplicate registration</span>');
+    } else if (reason === "mac-collision") {
+      badges.push('<span class="badge" style="background:rgba(255,152,0,0.12);color:#ff9800;border:1px solid rgba(255,152,0,0.3)">MAC collision</span>');
+    }
+    if (via === "netbios") {
+      badges.push('<span class="badge" style="background:rgba(255,193,7,0.12);color:#ffc107;border:1px solid rgba(255,193,7,0.3)">NetBIOS-truncated match</span>');
+    }
     if (proposed.trustType) badges.push('<span class="badge" style="background:rgba(79,195,247,0.1);color:var(--color-accent);border:1px solid rgba(79,195,247,0.2)">' + escapeHtml(proposed.trustType) + '</span>');
     if (proposed.complianceState) badges.push('<span class="badge ' + (proposed.complianceState === "compliant" ? "badge-active" : "badge-warning") + '">' + escapeHtml(proposed.complianceState) + '</span>');
+
+    var rejectTitle = reason === "duplicate-registration"
+      ? "Create a separate asset for this " + sourceShort
+      : "Create a separate asset for this " + sourceShort;
+    var acceptTitle = reason === "duplicate-registration"
+      ? "Merge into the existing " + sourceShort
+      : "Adopt the existing asset as this " + sourceShort;
 
     var actions = isResolved
       ? '<span class="badge badge-' + c.status + '" style="text-transform:capitalize">' + escapeHtml(c.status) + '</span>' +
         (c.resolvedBy ? ' <span style="color:var(--color-text-tertiary);font-size:0.75rem">by ' + escapeHtml(c.resolvedBy) + '</span>' : '')
-      : '<button class="btn btn-secondary btn-sm" data-conflict-action="reject" data-conflict-id="' + c.id + '" title="Create a separate asset for this Entra device">Reject (keep separate)</button>' +
-        '<button class="btn btn-primary btn-sm" data-conflict-action="accept" data-conflict-id="' + c.id + '" title="Adopt the existing asset as this Entra device">Accept (merge)</button>';
+      : '<button class="btn btn-secondary btn-sm" data-conflict-action="reject" data-conflict-id="' + c.id + '" title="' + escapeHtml(rejectTitle) + '">Reject (keep separate)</button>' +
+        '<button class="btn btn-primary btn-sm" data-conflict-action="accept" data-conflict-id="' + c.id + '" title="' + escapeHtml(acceptTitle) + '">Accept (merge)</button>';
 
     return '<div class="conflict-card">' +
       '<div class="conflict-card-header">' +
-        '<span class="badge" style="background:rgba(79,195,247,0.12);color:var(--color-accent);border:1px solid rgba(79,195,247,0.3)">Entra ID</span>' +
+        '<span class="badge" style="background:rgba(79,195,247,0.12);color:var(--color-accent);border:1px solid rgba(79,195,247,0.3)">' + escapeHtml(sourceLabel) + '</span>' +
         '<strong>' + escapeHtml(existing.hostname || proposed.hostname || "(asset)") + '</strong>' +
         '<span class="conflict-card-subnet" style="font-family:var(--font-mono);font-size:0.78rem">' + escapeHtml(c.proposedDeviceId || "") + '</span>' +
         (badges.length ? '<span style="margin-left:auto;display:flex;gap:4px">' + badges.join("") + '</span>' : '') +
       '</div>' +
-      '<div style="padding:6px 14px;font-size:0.78rem;color:var(--color-text-secondary)">Hostname collision — this Entra device shares a name with an existing asset that has no Entra link. <strong>Accept</strong> to adopt the existing asset; <strong>Reject</strong> to create a separate asset for the Entra device.</div>' +
+      '<div style="padding:6px 14px;font-size:0.78rem;color:var(--color-text-secondary)">' + explainer + '</div>' +
       '<div class="conflict-table" style="padding:0">' +
         '<table><thead><tr>' +
           '<th class="conflict-field">Field</th>' +
           '<th>Existing Asset</th>' +
-          '<th>Entra / Intune</th>' +
+          '<th>' + escapeHtml(rightColLabel) + '</th>' +
         '</tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
         '</table>' +
