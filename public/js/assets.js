@@ -367,8 +367,8 @@ function _assetsUpdateBulkBar() {
 
   // Show quarantine/release buttons only for assets-admins. Determine which
   // buttons are relevant based on the statuses of the selected assets.
-  if (canManageAssets() && sfData) {
-    var selectedStatuses = sfData
+  if (canManageAssets() && _assetsData && _assetsData.length) {
+    var selectedStatuses = _assetsData
       .filter(function (a) { return _assetsSelected.has(a.id); })
       .map(function (a) { return a.status; });
     var hasNonQuarantined = selectedStatuses.some(function (s) { return s !== "quarantined"; });
