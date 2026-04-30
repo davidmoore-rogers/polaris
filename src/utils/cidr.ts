@@ -32,10 +32,10 @@ export function detectIpVersion(cidr: string): IpVersion {
  */
 export function isValidCidr(cidr: string): boolean {
   try {
+    if (!cidr.includes("/")) return false;
     if (detectIpVersion(cidr) === "v4") {
       new Netmask(cidr); // throws on invalid
     } else {
-      // Basic IPv6 CIDR check
       const [addr, prefix] = cidr.split("/");
       if (!addr || !prefix) return false;
       const prefixNum = parseInt(prefix, 10);

@@ -14,7 +14,7 @@ vi.mock("@prisma/client", () => {
     subnet:      { create: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(), update: vi.fn(), delete: vi.fn() },
     reservation: { count: vi.fn() },
   };
-  return { PrismaClient: vi.fn(() => prisma), SubnetStatus: {} };
+  return { PrismaClient: vi.fn(function () { return prisma; }), SubnetStatus: {} };
 });
 
 import { PrismaClient } from "@prisma/client";
