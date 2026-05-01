@@ -92,8 +92,9 @@ app.use(
         scriptSrcAttr: ["'unsafe-inline'"],
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
-        // OpenStreetMap tile servers are whitelisted here so the Device Map
-        // page can render a real geographic basemap. Tiles load as <img>, not
+        // OpenStreetMap tile servers (light theme) AND CartoDB Dark Matter
+        // (dark theme) are whitelisted here so the Device Map page can render
+        // a real geographic basemap in both themes. Tiles load as <img>, not
         // fetch, so connectSrc stays 'self'-only.
         imgSrc: [
           "'self'",
@@ -101,6 +102,7 @@ app.use(
           "blob:",
           "https://*.tile.openstreetmap.org",
           "https://tile.openstreetmap.org",
+          "https://*.basemaps.cartocdn.com",
         ],
         connectSrc: ["'self'"],
         frameSrc: ["'none'"],

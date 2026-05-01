@@ -76,11 +76,13 @@ export async function inferInterfaceTopology(
 
   // Latest AssetInterfaceSample per (assetId, ifName) for the seed set.
   // DISTINCT ON requires the ORDER BY to start with the same columns.
+  // The Prisma model name is `AssetInterfaceSample` but the underlying
+  // table is `asset_interface_samples` via the @@map in schema.prisma.
   const interfaceRows = await prisma.$queryRaw<
     Array<{ assetId: string; ifName: string; ifType: string | null }>
   >`
     SELECT DISTINCT ON ("assetId", "ifName") "assetId", "ifName", "ifType"
-    FROM "AssetInterfaceSample"
+    FROM asset_interface_samples
     WHERE "assetId" = ANY(${seedAssetIds}::uuid[])
     ORDER BY "assetId", "ifName", "timestamp" DESC
   `;
