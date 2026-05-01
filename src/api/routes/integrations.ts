@@ -3588,11 +3588,10 @@ async function upsertEntraIntuneSources(
     },
   });
 
-  // Phase 3b.0 shadow drift detection. The kind passed here reflects which
-  // upsert path triggered the check — for hybrid devices, this fires under
-  // both "entra" and "intune" depending on which sources contributed,
-  // which is fine: drift detection is idempotent.
-  detectAndLogDrift(assetId, wantsEntra ? "entra" : "intune");
+  // Phase 3b.1 cutover: drift detection no longer fires on Entra/Intune
+  // writes — the syncEntraDevices caller projects from sources and uses
+  // the result as the Asset write payload, so the Asset row matches the
+  // projection by construction.
 
   // Belt-and-suspenders: if Entra didn't actually contribute to this device
   // (Intune-only) but a phase-1-backfilled entra source row exists with the
@@ -3821,28 +3820,53 @@ async function syncEntraDevices(
     });
 
     if (existing) {
+      // Phase 3b.1 cutover: discovery-owned fields come from the projection
+      // layer. Same shape as the AD cutover — upsert sources first, fetch
+      // all sources for this asset (may include AD on hybrid devices),
+      // compute projection, single Asset.update with projected + non-
+      // projected fields.
+      try {
+        await upsertEntraIntuneSources(existing.id, integrationId, dev, now, lastSeen ?? now);
+      } catch (err: any) {
+        syncLog("warning", `Failed to upsert Entra/Intune AssetSource row(s) for ${dev.displayName || dev.deviceId}: ${err.message || "Unknown error"}`);
+      }
+      const sourceRows = await prisma.assetSource.findMany({
+        where: { assetId: existing.id },
+        select: { sourceKind: true, inferred: true, observed: true },
+      });
+      const { projected } = projectAssetFromSources(
+        sourceRows.map((s) => ({
+          sourceKind: s.sourceKind,
+          inferred: s.inferred,
+          observed: s.observed as Record<string, unknown> | null,
+        })),
+      );
+
       // Update the existing asset (either Entra-sourced, or SID-matched take-over)
       const updateData: Record<string, unknown> = {
-        hostname: dev.displayName || existing.hostname,
-        os: dev.operatingSystem || existing.os,
-        osVersion: dev.operatingSystemVersion || existing.osVersion,
         lastSeen: lastSeen || existing.lastSeen,
         status,
         ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
       };
+      // Discovery-owned fields from the projection.
+      if (projected.hostname !== null) updateData.hostname = projected.hostname;
+      if (projected.os !== null) updateData.os = projected.os;
+      if (projected.osVersion !== null) updateData.osVersion = projected.osVersion;
+      if (projected.serialNumber !== null) updateData.serialNumber = projected.serialNumber;
+      if (projected.manufacturer !== null) updateData.manufacturer = projected.manufacturer;
+      if (projected.model !== null) updateData.model = projected.model;
+      if (projected.learnedLocation !== null) updateData.learnedLocation = projected.learnedLocation;
       if (takingOver) {
         // Priority rule: Entra's assetTag always wins. AD guid is preserved
         // via ad-guid:{guid} tag so AD sync can still find this asset later.
         updateData.assetTag = `${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}`;
       }
-      if (dev.serialNumber) updateData.serialNumber = dev.serialNumber;
+      // Operator-owned / non-projected fields.
       if (intuneMacEntries.length > 0) {
         const { primary, merged } = mergeIntuneMacs(existing.macAddresses as any[]);
         updateData.macAddresses = merged;
         if (primary) updateData.macAddress = primary;
       }
-      if (dev.manufacturer) updateData.manufacturer = dev.manufacturer;
-      if (dev.model) updateData.model = dev.model;
       if (dev.userPrincipalName) updateData.assignedTo = dev.userPrincipalName;
       if (acquiredAt && (!existing.acquiredAt || acquiredAt < new Date(existing.acquiredAt))) {
         updateData.acquiredAt = acquiredAt;
@@ -3858,14 +3882,7 @@ async function syncEntraDevices(
       try {
         clampAcquiredToLastSeen(updateData, existing);
         await prisma.asset.update({ where: { id: existing.id }, data: updateData });
-        // Explicit AssetSource upsert(s) — the entra and (when intune
-        // contributed) intune source rows own their rich observed blobs.
-        // The shadow-write extension's UPDATE branch leaves observed alone.
-        try {
-          await upsertEntraIntuneSources(existing.id, integrationId, dev, now, lastSeen ?? now);
-        } catch (err: any) {
-          syncLog("warning", `Updated asset for Entra device ${dev.displayName || dev.deviceId} but failed to upsert AssetSource row(s): ${err.message || "Unknown error"}`);
-        }
+        // (AssetSource rows already upserted above the projection step.)
         updated.push(dev.displayName || dev.deviceId);
       } catch (err: any) {
         syncLog("error", `Failed to update asset for Entra device ${dev.displayName || dev.deviceId}: ${err.message || "Unknown error"}`);
@@ -3972,23 +3989,48 @@ async function syncEntraDevices(
         const incomingWins = lastSeen != null && (existingLastSeen == null || lastSeen > existingLastSeen);
         try {
           if (incomingWins) {
+            // Phase 3b.1 cutover: same projection-driven write pattern as
+            // the primary update path. Upsert sources first (the helper
+            // also sweeps the old (entra,oldDeviceId)/(intune,oldDeviceId)
+            // rows so the prior identity can't re-link), then project, then
+            // single Asset.update.
+            try {
+              await upsertEntraIntuneSources(dupEntra.asset.id, integrationId, dev, now, lastSeen ?? now);
+            } catch (err: any) {
+              syncLog("warning", `Failed to upsert Entra/Intune AssetSource row(s) during duplicate-resolve for ${dev.displayName || dev.deviceId}: ${err.message || "Unknown error"}`);
+            }
+            const dupSourceRows = await prisma.assetSource.findMany({
+              where: { assetId: dupEntra.asset.id },
+              select: { sourceKind: true, inferred: true, observed: true },
+            });
+            const { projected: dupProjected } = projectAssetFromSources(
+              dupSourceRows.map((s) => ({
+                sourceKind: s.sourceKind,
+                inferred: s.inferred,
+                observed: s.observed as Record<string, unknown> | null,
+              })),
+            );
+
             const preserved = ((dupEntra.asset.tags as string[]) || []).filter((t) => !isEntraManagedTag(t));
             const prevTag = `prev-${ENTRA_ASSET_TAG_PREFIX}${existingEntraId}`;
             const newTags = [...preserved, ...tags.filter((t) => !preserved.includes(t))];
             if (!newTags.includes(prevTag)) newTags.push(prevTag);
             const updateFields: Record<string, unknown> = {
               assetTag: `${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}`,
-              hostname: dev.displayName || dupEntra.asset.hostname,
-              os: dev.operatingSystem || dupEntra.asset.os,
-              osVersion: dev.operatingSystemVersion || dupEntra.asset.osVersion,
               lastSeen,
               status,
               ...(status !== dupEntra.asset.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
               tags: newTags,
             };
-            if (dev.serialNumber) updateFields.serialNumber = dev.serialNumber;
-            if (dev.manufacturer) updateFields.manufacturer = dev.manufacturer;
-            if (dev.model) updateFields.model = dev.model;
+            // Discovery-owned fields from projection.
+            if (dupProjected.hostname !== null) updateFields.hostname = dupProjected.hostname;
+            if (dupProjected.os !== null) updateFields.os = dupProjected.os;
+            if (dupProjected.osVersion !== null) updateFields.osVersion = dupProjected.osVersion;
+            if (dupProjected.serialNumber !== null) updateFields.serialNumber = dupProjected.serialNumber;
+            if (dupProjected.manufacturer !== null) updateFields.manufacturer = dupProjected.manufacturer;
+            if (dupProjected.model !== null) updateFields.model = dupProjected.model;
+            if (dupProjected.learnedLocation !== null) updateFields.learnedLocation = dupProjected.learnedLocation;
+            // Operator-owned / non-projected fields.
             if (dev.userPrincipalName) updateFields.assignedTo = dev.userPrincipalName;
             if (intuneMacEntries.length > 0) {
               const { primary, merged } = mergeIntuneMacs(dupEntra.asset.macAddresses as any[]);
@@ -4001,17 +4043,10 @@ async function syncEntraDevices(
             if (dupEntra.asset.assetType === "other") updateFields.assetType = assetType;
             clampAcquiredToLastSeen(updateFields, dupEntra.asset);
             await prisma.asset.update({ where: { id: dupEntra.asset.id }, data: updateFields });
-            // Replace the asset's entra/intune source rows with the new
-            // deviceId. upsertEntraIntuneSources also sweeps stale entra/
-            // intune rows on this asset whose externalId differs from the
-            // new deviceId, so the old (entra, oldDeviceId) and (intune,
-            // oldDeviceId) rows go away — preventing them from re-linking
-            // a future discovery to this asset under the prior identity.
-            try {
-              await upsertEntraIntuneSources(dupEntra.asset.id, integrationId, dev, now, lastSeen ?? now);
-            } catch (err: any) {
-              syncLog("warning", `Auto-resolved duplicate Entra registration "${dev.displayName}" but failed to upsert AssetSource row(s): ${err.message || "Unknown error"}`);
-            }
+            // (AssetSource rows were already upserted above the projection
+            // step, including the stale-deviceId sweep that removes the
+            // old (entra,oldDeviceId)/(intune,oldDeviceId) rows so the
+            // prior identity can't re-link a future discovery.)
             // Update in-memory index so further iterations find the asset by its new ID.
             assetByEntraDeviceId.delete(existingEntraId.toLowerCase());
             assetByEntraDeviceId.set(deviceIdKey, { ...dupEntra.asset, assetTag: `${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}` });
@@ -4066,21 +4101,36 @@ async function syncEntraDevices(
 
     // Create a new asset
     try {
+      // Phase 3b.1 cutover: project from a synthetic source array built
+      // from this just-discovered Entra device. dev.sources determines
+      // which source kinds to seed (entra-only vs entra+intune vs
+      // intune-only). Pure projection — no DB roundtrip — because the
+      // new asset has no other sources yet.
+      const synthSources: Array<{ sourceKind: string; inferred: boolean; observed: Record<string, unknown> }> = [];
+      if (dev.sources?.includes("entra")) {
+        synthSources.push({ sourceKind: "entra", inferred: false, observed: buildEntraObservedBlob(dev, now) });
+      }
+      if (dev.sources?.includes("intune")) {
+        synthSources.push({ sourceKind: "intune", inferred: false, observed: buildIntuneObservedBlob(dev, now) });
+      }
+      const { projected } = projectAssetFromSources(synthSources);
+
       const seeded = mergeIntuneMacs([]);
       const createData: Record<string, unknown> = {
         assetTag: `${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}`,
-        hostname: dev.displayName || null,
-        serialNumber: dev.serialNumber || null,
+        hostname: projected.hostname,
+        serialNumber: projected.serialNumber,
         macAddress: seeded.primary || dev.macAddress || null,
         macAddresses: seeded.merged,
-        manufacturer: dev.manufacturer || null,
-        model: dev.model || null,
+        manufacturer: projected.manufacturer,
+        model: projected.model,
         assetType,
         status,
         statusChangedAt: now,
         statusChangedBy: integrationName,
-        os: dev.operatingSystem || null,
-        osVersion: dev.operatingSystemVersion || null,
+        os: projected.os,
+        osVersion: projected.osVersion,
+        learnedLocation: projected.learnedLocation,
         assignedTo: dev.userPrincipalName || null,
         lastSeen,
         acquiredAt,
@@ -4089,10 +4139,10 @@ async function syncEntraDevices(
       };
       clampAcquiredToLastSeen(createData);
       const newAsset = await prisma.asset.create({ data: createData as any });
-      // Explicit AssetSource upsert(s) with rich observed blobs. The
-      // Asset.create already triggered the shadow-write extension which
-      // laid down a skeleton entra row from the assetTag — this overwrites
-      // it with truth and adds the intune row when intune contributed.
+      // Persist the entra (and intune, when intune contributed) source
+      // rows. The shadow-write extension already laid down a skeleton row
+      // from the assetTag during Asset.create — this overwrites it with
+      // the rich observed blobs the projection just used.
       try {
         await upsertEntraIntuneSources(newAsset.id, integrationId, dev, now, lastSeen ?? now);
       } catch (err: any) {
