@@ -891,3 +891,32 @@ model AssetSource {
   @@index([integrationId])
   @@map("asset_sources")
 }
+
+// Operator-uploaded device icons used by the Device Map's topology graph
+// (and potentially other render surfaces in the future) to represent
+// specific hardware models or asset types. Resolution priority at render
+// time is most-specific-wins:
+//   1. scope="model" key="<manufacturer>/<model>" — e.g. "Fortinet/FortiGate-91G"
+//   2. scope="model" key="<model>"                — manufacturer-agnostic match
+//   3. scope="type"  key=<assetType>              — type-level fallback
+//   4. no row → frontend falls back to the default node style.
+//
+// Image bytes are stored inline (one-request fetch via the dedicated
+// /device-icons/:id/image endpoint, which serves the raw bytes with
+// proper Content-Type + Cache-Control). Hard cap on size is enforced at
+// upload time in deviceIconService — keeps backups bounded.
+model DeviceIcon {
+  id         String   @id @default(uuid())
+  scope      String
+  key        String
+  filename   String
+  mimeType   String
+  data       Bytes
+  size       Int
+  uploadedBy String?
+  uploadedAt DateTime @default(now())
+
+  @@unique([scope, key])
+  @@index([scope])
+  @@map("device_icons")
+}

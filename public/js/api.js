@@ -117,6 +117,29 @@ const api = {
     revoke: (id)      => request("POST",   `/api-tokens/${id}/revoke`),
     delete: (id)      => request("DELETE", `/api-tokens/${id}`),
   },
+  // Operator-uploaded device icons used by the Device Map's topology
+  // graph. Admin-only writes; image-serve is auth-only and cacheable.
+  deviceIcons: {
+    list:   ()        => request("GET",    "/device-icons"),
+    upload: (scope, key, file) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("scope", scope);
+      formData.append("key", key);
+      return fetch(API_BASE + "/device-icons", {
+        method: "POST",
+        headers: _csrfHeaders(),
+        body: formData,
+      }).then(function (res) {
+        if (res.status === 401) { window.location.href = "/login.html"; return; }
+        return res.json().then(function (data) {
+          if (!res.ok) throw new Error(data?.error || "Icon upload failed");
+          return data;
+        });
+      });
+    },
+    delete: (id)      => request("DELETE", `/device-icons/${id}`),
+  },
   reservations: {
     list:          (params) => request("GET", "/reservations" + toQuery(params)),
     get:           (id)     => request("GET", `/reservations/${id}`),

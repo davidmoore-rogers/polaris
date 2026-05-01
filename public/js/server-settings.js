@@ -2216,6 +2216,7 @@ var _ouiOverrides = [];
 var _mibsData = [];
 var _mibFacets = { manufacturers: [], modelsByManufacturer: {} };
 var _manufacturerAliases = [];
+var _deviceIcons = [];
 var _mibFilter = { manufacturer: "", model: "", scope: "all" };
 var _mibProfileStatus = [];
 
@@ -2233,6 +2234,7 @@ async function loadIdentificationTab() {
       api.serverSettings.getMibFacets().catch(function () { return { manufacturers: [], modelsByManufacturer: {} }; }),
       api.serverSettings.getMibProfileStatus().catch(function () { return []; }),
       api.serverSettings.listManufacturerAliases().catch(function () { return []; }),
+      api.deviceIcons.list().catch(function () { return []; }),
     ]);
     _tagsData = results[0];
     _tagSettings = results[1] || { enforce: false };
@@ -2246,6 +2248,7 @@ async function loadIdentificationTab() {
     _mibFacets = results[5] || { manufacturers: [], modelsByManufacturer: {} };
     _mibProfileStatus = results[6] || [];
     _manufacturerAliases = results[7] || [];
+    _deviceIcons = results[8] || [];
     _tagsLoaded = true;
     renderIdentificationTab();
   } catch (err) {
@@ -2400,6 +2403,9 @@ function renderIdentificationTab() {
   // ── 4. MIB Database ──
   html += mibCardHTML();
 
+  // ── 4b. Device Icons ──
+  html += deviceIconsCardHTML();
+
   // ── 5. Tags (bottom) ──
   // Group tags by category
   var categories = {};
@@ -2475,6 +2481,7 @@ function renderIdentificationTab() {
   wireDnsControls();
   loadOuiStatus();
   wireMibControls();
+  wireDeviceIconHandlers();
 
   // OUI override events
   document.getElementById("btn-add-oui-override").addEventListener("click", addOuiOverride);
@@ -2925,6 +2932,156 @@ async function deleteMibUI(id, name) {
     // back to "MIB needed" or remove a model override row.
     _mibProfileStatus = await api.serverSettings.getMibProfileStatus().catch(function () { return _mibProfileStatus; });
     showToast("MIB deleted");
+    renderIdentificationTab();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+// ─── Device Icons ──────────────────────────────────────────────────────────
+//
+// Operator-uploaded images that override generic node shapes on the Device
+// Map's topology graph. Resolution at render time is most-specific-wins:
+// model-with-manufacturer → model-alone → assetType. Storage is bytes-in-DB
+// behind the /api/v1/device-icons endpoints; admin-only CRUD; image-serve
+// is auth-only with HTTP cache headers so the topology modal doesn't refetch
+// on every render.
+
+var _deviceIconAssetTypes = [
+  "firewall", "switch", "access_point", "router",
+  "server", "workstation", "printer", "other",
+];
+
+function deviceIconsCardHTML() {
+  var byScope = { type: [], model: [] };
+  _deviceIcons.forEach(function (i) {
+    if (i.scope === "type" || i.scope === "model") byScope[i.scope].push(i);
+  });
+  var html = '<div class="settings-card">' +
+    '<h4>Device Icons</h4>' +
+    '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+      'Upload PNG / JPEG / WebP images (max 256 KB) to render specific hardware models or asset types on the Device Map\'s topology graph. ' +
+      'Resolution priority: <strong>manufacturer/model</strong> exact match → <strong>model</strong> alone → <strong>assetType</strong> fallback. ' +
+      'Re-uploading replaces the existing image for that scope+key.' +
+    '</p>';
+
+  // Upload form
+  html += '<div class="form-row" style="display:grid;grid-template-columns:140px 1fr 1fr auto;gap:8px;align-items:flex-end;margin-bottom:1rem">' +
+    '<div class="form-group" style="margin:0">' +
+      '<label style="font-size:0.78rem">Scope</label>' +
+      '<select id="f-icon-scope">' +
+        '<option value="type">Asset type</option>' +
+        '<option value="model">Model</option>' +
+      '</select>' +
+    '</div>' +
+    '<div class="form-group" style="margin:0">' +
+      '<label style="font-size:0.78rem">Key</label>' +
+      '<input type="text" id="f-icon-key" placeholder="firewall  OR  Fortinet/FortiGate-91G">' +
+    '</div>' +
+    '<div class="form-group" style="margin:0">' +
+      '<label style="font-size:0.78rem">Image file</label>' +
+      '<input type="file" id="f-icon-file" accept="image/png,image/jpeg,image/webp">' +
+    '</div>' +
+    '<button class="btn btn-primary" id="btn-icon-upload" style="height:34px">Upload</button>' +
+  '</div>' +
+  '<p id="icon-upload-status" style="margin:0 0 1rem;font-size:0.82rem"></p>';
+
+  // List by scope
+  function renderScopeList(scope, label) {
+    var list = byScope[scope];
+    var s = '<h5 class="mac-id-section-heading">' + escapeHtml(label) + ' (' + list.length + ')</h5>';
+    if (list.length === 0) {
+      s += '<p class="empty-state" style="padding:0.5rem 0;margin:0 0 1rem">No ' + scope + '-scoped icons uploaded yet.</p>';
+      return s;
+    }
+    s += '<table class="data-table" style="font-size:0.85rem;margin-bottom:1rem"><thead><tr>' +
+      '<th style="width:60px">Preview</th><th>Key</th><th>Filename</th><th style="width:120px">Size</th><th style="width:160px">Uploaded</th><th style="width:80px"></th>' +
+    '</tr></thead><tbody>';
+    list.forEach(function (i) {
+      s += '<tr>' +
+        '<td><img src="' + escapeHtml(i.url) + '" alt="" style="width:40px;height:40px;object-fit:contain;background:#1c2029;border:1px solid var(--color-border);border-radius:4px"></td>' +
+        '<td><code class="mono" style="font-size:0.78rem">' + escapeHtml(i.key) + '</code></td>' +
+        '<td>' + escapeHtml(i.filename) + '</td>' +
+        '<td>' + escapeHtml(formatBytesShort(i.size)) + '</td>' +
+        '<td style="font-size:0.78rem;color:var(--color-text-secondary)">' + escapeHtml(formatDate(i.uploadedAt)) + (i.uploadedBy ? ' by ' + escapeHtml(i.uploadedBy) : '') + '</td>' +
+        '<td><button class="btn btn-sm btn-danger icon-del" data-id="' + escapeHtml(i.id) + '" data-key="' + escapeHtml(i.scope + ':' + i.key) + '">Delete</button></td>' +
+      '</tr>';
+    });
+    s += '</tbody></table>';
+    return s;
+  }
+  html += renderScopeList("type", "By asset type");
+  html += renderScopeList("model", "By model");
+
+  html += '</div>';
+  return html;
+}
+
+function formatBytesShort(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(2) + " MB";
+}
+
+function wireDeviceIconHandlers() {
+  var btn = document.getElementById("btn-icon-upload");
+  if (btn) btn.addEventListener("click", uploadIconUI);
+  document.querySelectorAll(".icon-del").forEach(function (b) {
+    b.addEventListener("click", function () {
+      deleteIconUI(b.getAttribute("data-id"), b.getAttribute("data-key"));
+    });
+  });
+
+  // Hint dynamic placeholder for the key field based on scope.
+  var scopeSel = document.getElementById("f-icon-scope");
+  var keyInput = document.getElementById("f-icon-key");
+  if (scopeSel && keyInput) {
+    var refreshHint = function () {
+      keyInput.placeholder = scopeSel.value === "type"
+        ? "firewall | switch | access_point | server | workstation | printer | router | other"
+        : "Fortinet/FortiGate-91G  (or just FortiGate-91G to match any vendor)";
+    };
+    scopeSel.addEventListener("change", refreshHint);
+    refreshHint();
+  }
+}
+
+async function uploadIconUI() {
+  var scopeEl = document.getElementById("f-icon-scope");
+  var keyEl = document.getElementById("f-icon-key");
+  var fileEl = document.getElementById("f-icon-file");
+  var statusEl = document.getElementById("icon-upload-status");
+  var btn = document.getElementById("btn-icon-upload");
+  if (!scopeEl || !keyEl || !fileEl) return;
+  var scope = scopeEl.value;
+  var key = (keyEl.value || "").trim();
+  if (!key) { showToast("Key is required", "error"); return; }
+  if (!fileEl.files || fileEl.files.length === 0) { showToast("Choose an image file first", "error"); return; }
+  btn.disabled = true;
+  if (statusEl) statusEl.innerHTML = '<span style="color:var(--color-text-tertiary)">Uploading…</span>';
+  try {
+    var created = await api.deviceIcons.upload(scope, key, fileEl.files[0]);
+    showToast("Icon uploaded for " + created.scope + ":" + created.key, "success");
+    if (statusEl) statusEl.innerHTML = "";
+    keyEl.value = "";
+    fileEl.value = "";
+    _deviceIcons = await api.deviceIcons.list();
+    renderIdentificationTab();
+  } catch (err) {
+    showToast(err.message, "error");
+    if (statusEl) statusEl.innerHTML = '<span style="color:var(--color-danger)">' + escapeHtml(err.message) + '</span>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deleteIconUI(id, label) {
+  var ok = await showConfirm('Delete device icon "' + label + '"?');
+  if (!ok) return;
+  try {
+    await api.deviceIcons.delete(id);
+    _deviceIcons = _deviceIcons.filter(function (i) { return i.id !== id; });
+    showToast("Icon deleted");
     renderIdentificationTab();
   } catch (err) {
     showToast(err.message, "error");

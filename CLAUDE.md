@@ -110,6 +110,7 @@ polaris/
 │   │   ├── totpService.ts           # RFC 6238 TOTP secret / code / backup-code helpers
 │   │   ├── dnsService.ts            # Reverse DNS lookup for assets
 │   │   ├── ouiService.ts            # MAC OUI lookup with admin overrides
+│   │   ├── deviceIconService.ts     # Operator-uploaded device icons. Validates uploads (PNG/JPEG/WebP only, 256 KB cap, magic-byte check), stores bytes in the DeviceIcon model, exposes resolveIconUrl(asset, cache) for the topology endpoint to stamp `iconUrl` on each node.
 │   │   ├── eventArchiveService.ts   # Syslog (CEF) + SFTP/SCP event archival
 │   │   ├── projectionDriftService.ts # Phase 3b.0 shadow projection drift detection. After every successful AssetSource upsert, compares projectAssetFromSources output against current Asset values; logs disagreements to pino with `event: "asset.projection.drift"`. Best-effort and fire-and-forget.
 │   │   ├── serverSettingsService.ts # HTTPS, branding, backup/restore
@@ -838,6 +839,13 @@ The assets list and single-GET attach a synthesized `ipContext` field to each ro
 - `POST   /server-settings/mibs`                — `multipart/form-data` upload. Fields: `file` (required), `manufacturer?`, `model?`, `notes?`. The body is parsed by a minimal SMI validator (`mibService.parseMib`) before insert: rejects empty files, files containing NUL/control bytes, anything missing the `<NAME> DEFINITIONS ::= BEGIN ... END` envelope, or files exceeding 1 MB. `moduleName` and `imports` are extracted from the parse and stored on the row. Duplicate `(manufacturer, model, moduleName)` returns 409. Setting `model` without `manufacturer` is a 400 (generic MIBs can't be model-scoped).
 - `DELETE /server-settings/mibs/:id`            — Remove a stored MIB.
 - `GET    /server-settings/mibs/profile-status` — Returns one entry per built-in vendor telemetry profile (`{ vendor, matchPattern, example, symbols: [{metric, symbol, resolved, fromModuleName, fromScope}], ready, partial, modelOverrides: [{model, mibCount}] }`). The MIB Database card uses this to render the **Vendor Profile Status** pill. `fromScope` is `"device" | "vendor" | "generic" | "seed"` and reflects which layer of `oidRegistry`'s scoped resolver provided the symbol.
+
+### Device Icons — mixed scoping
+Operator-uploaded images that override generic node shapes on the Device Map's topology graph. Resolution priority at render time is most-specific-wins: `manufacturer/model` exact match → `model` alone → `assetType` fallback. Storage is bytes-in-DB (`DeviceIcon` model). Allowed formats: PNG / JPEG / WebP only (SVG excluded for v1 — embedded scripts are an attack surface and Cytoscape's raster rendering is fine for any zoom level). 256 KB hard cap. Magic-byte check at upload validates declared mimeType matches actual content.
+- `GET    /device-icons`                         *(admin)* — List uploaded icons. Each row carries `{ id, scope, key, filename, mimeType, size, uploadedBy, uploadedAt, url }` where `url` points at the image-serve endpoint below for thumbnail previews.
+- `POST   /device-icons`                         *(admin)* — `multipart/form-data` upload. Fields: `file` (required), `scope` ("type"|"model"), `key`. Re-uploading the same `(scope, key)` pair replaces the existing image atomically.
+- `DELETE /device-icons/:id`                     *(admin)* — Remove an uploaded icon.
+- `GET    /device-icons/:id/image`               *(auth)* — Serves raw bytes with the stored `Content-Type` and `Cache-Control: private, max-age=3600`. Topology endpoint embeds this URL in each node's `iconUrl` so Cytoscape's `background-image` renders the uploaded icon directly. Browser HTTP cache deduplicates fetches across re-renders.
 
 ---
 

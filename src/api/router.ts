@@ -14,6 +14,7 @@ import assetsRouter from "./routes/assets.js";
 import eventsRouter from "./routes/events.js";
 import conflictsRouter from "./routes/conflicts.js";
 import serverSettingsRouter from "./routes/serverSettings.js";
+import deviceIconsRouter from "./routes/deviceIcons.js";
 import searchRouter from "./routes/search.js";
 import mapRouter from "./routes/map.js";
 import allocationTemplatesRouter from "./routes/allocationTemplates.js";
@@ -60,3 +61,5 @@ router.use("/credentials", credentialsRouter);
 router.use("/manufacturer-aliases", requireAdmin, manufacturerAliasesRouter);
 router.use("/api-tokens", requireAdmin, apiTokensRouter);
 router.use("/server-settings", requireAdmin, serverSettingsRouter);
+// device-icons applies its own per-route guards (admin for CRUD, auth for image-serve)
+router.use("/device-icons", deviceIconsRouter);

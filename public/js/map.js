@@ -414,6 +414,8 @@
         label: data.fortigate.hostname || "FortiGate",
         role: "fortigate",
         nodeColor: fortigateNodeColor(data.fortigate),
+        iconUrl: data.fortigate.iconUrl || null,
+        hasIcon: data.fortigate.iconUrl ? 1 : 0,
       },
     });
     (data.switches || []).forEach(function (s) {
@@ -422,6 +424,8 @@
           id: s.id,
           label: (s.hostname || "FortiSwitch") + (s.uplinkInterface ? "\n↥ " + s.uplinkInterface : ""),
           role: "fortiswitch",
+          iconUrl: s.iconUrl || null,
+          hasIcon: s.iconUrl ? 1 : 0,
         },
       });
     });
@@ -431,6 +435,8 @@
           id: a.id,
           label: (a.hostname || "FortiAP") + (a.peerPort ? "\n" + a.peerPort : ""),
           role: "fortiap",
+          iconUrl: a.iconUrl || null,
+          hasIcon: a.iconUrl ? 1 : 0,
         },
       });
     });
@@ -456,7 +462,11 @@
       var label = n.hostname || n.ipAddress || n.id;
       if (n.ipAddress && n.hostname) label += "\n" + n.ipAddress;
       elements.push({
-        data: { id: n.id, label: label, role: "remote-asset", assetId: n.id, assetType: n.assetType || null },
+        data: {
+          id: n.id, label: label, role: "remote-asset",
+          assetId: n.id, assetType: n.assetType || null,
+          iconUrl: n.iconUrl || null, hasIcon: n.iconUrl ? 1 : 0,
+        },
       });
     });
     (data.lldpEdges || []).forEach(function (e, i) {
@@ -536,6 +546,25 @@
             "border-width": 2,
             width: 44,
             height: 44,
+          },
+        },
+        // Operator-uploaded device icon. Overrides the role-color with the
+        // uploaded image when an icon was resolved for this node's
+        // (manufacturer, model, assetType) combo. Sized larger so the icon
+        // is legible. Selected with `hasIcon = 1` (Cytoscape doesn't allow
+        // boolean property selectors directly, so the data field stamps an
+        // integer).
+        {
+          selector: 'node[hasIcon = 1]',
+          style: {
+            "background-image": "data(iconUrl)",
+            "background-fit": "contain",
+            "background-clip": "node",
+            "background-color": "#ffffff", // contrast layer behind translucent icons
+            "background-opacity": 0.95,
+            width: 56,
+            height: 56,
+            "border-width": 1,
           },
         },
         {

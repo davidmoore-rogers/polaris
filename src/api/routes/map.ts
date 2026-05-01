@@ -15,6 +15,7 @@
 import { Router } from "express";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
+import { loadIconResolutionCache, resolveIconUrl } from "../../services/deviceIconService.js";
 
 const router = Router();
 
@@ -194,6 +195,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         id: true,
         hostname: true,
         serialNumber: true,
+        manufacturer: true,
         model: true,
         ipAddress: true,
         status: true,
@@ -213,6 +215,10 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       ? (await fetchRecentSampleStats([fg.id])).get(fg.id) ?? null
       : null;
 
+    // Pre-load every uploaded device icon once so per-node resolution
+    // below is sync + cache-hit (no per-asset DB roundtrip).
+    const iconCache = await loadIconResolutionCache();
+
     const fgHostname = fg.hostname || "";
 
     // Siblings: every FortiSwitch + FortiAP whose fortinetTopology points at
@@ -229,6 +235,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
             id: true,
             hostname: true,
             serialNumber: true,
+            manufacturer: true,
             model: true,
             ipAddress: true,
             status: true,
@@ -253,6 +260,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           status: s.status,
           lastSeen: s.lastSeen,
           uplinkInterface: t.uplinkInterface ?? null,
+          iconUrl: resolveIconUrl({ manufacturer: s.manufacturer, model: s.model, assetType: "switch" }, iconCache),
         };
       });
 
@@ -278,6 +286,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           peerSwitchId: peerAssetId,
           peerPort: t.parentPort ?? null,
           peerVlan: t.parentVlan ?? null,
+          iconUrl: resolveIconUrl({ manufacturer: s.manufacturer, model: s.model, assetType: "access_point" }, iconCache),
         };
       });
 
@@ -322,7 +331,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       where: { assetId: { in: siteAssetIds } },
       include: {
         matchedAsset: {
-          select: { id: true, hostname: true, ipAddress: true, assetType: true, model: true },
+          select: { id: true, hostname: true, ipAddress: true, assetType: true, manufacturer: true, model: true },
         },
       },
     });
@@ -350,6 +359,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       ipAddress: string | null;
       assetType: string | null;
       model: string | null;
+      iconUrl: string | null;
     };
     const remoteAssetNodes = new Map<string, RemoteAssetNode>();
     const siblingIds = new Set(siteAssetIds);
@@ -391,6 +401,10 @@ router.get("/sites/:id/topology", async (req, res, next) => {
             ipAddress: n.matchedAsset.ipAddress,
             assetType: n.matchedAsset.assetType,
             model: n.matchedAsset.model,
+            iconUrl: resolveIconUrl(
+              { manufacturer: n.matchedAsset.manufacturer, model: n.matchedAsset.model, assetType: n.matchedAsset.assetType },
+              iconCache,
+            ),
           });
         }
       } else {
@@ -441,6 +455,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         monitorHealth: fg.monitored ? fgMonitorStats?.health ?? "unknown" : null,
         monitorRecentSamples: fgMonitorStats?.samples ?? 0,
         monitorRecentFailures: fgMonitorStats?.failures ?? 0,
+        iconUrl: resolveIconUrl({ manufacturer: fg.manufacturer, model: fg.model, assetType: "firewall" }, iconCache),
       },
       switches,
       aps,
