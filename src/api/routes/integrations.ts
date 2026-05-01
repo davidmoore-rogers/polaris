@@ -1859,6 +1859,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // Asset index with multi-key lookups
   const assetIdx = new AssetIndex(allAssetsRaw);
 
+  // Phase-4 follow-up: track every endpoint asset this sync touched so we
+  // can stamp a `fortigate-endpoint` AssetSource row on each at the end.
+  // Populated from device-inventory creates/updates, switch-port + ARP
+  // enrichment, and DHCP sightings. Excludes infrastructure assets
+  // (firewall/switch/access_point) — those have dedicated source kinds.
+  const fortigateEndpointAssetIds = new Set<string>();
+
   // Blocks sorted by prefix length descending (most specific first) for matching
   const blocksSorted = [...blocks].sort((a, b) => {
     const pa = parseInt(a.cidr.split("/")[1], 10);
@@ -2893,6 +2900,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           integrationId,
           ipAddress: entry.ipAddress,
         });
+        // Stamp this asset as a fortigate-endpoint source target — every
+        // DHCP sighting counts even if the asset wasn't created via
+        // device-inventory. End-of-sync flush below upserts the row.
+        if (asset.assetType !== "firewall" && asset.assetType !== "switch" && asset.assetType !== "access_point") {
+          fortigateEndpointAssetIds.add(asset.id);
+        }
       }
 
       // Resolve subnet up-front so we can stamp it on the MAC entry
@@ -3140,6 +3153,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             Object.assign(existingAsset, updateData);
             assetIdx.reindex(existingAsset);
             inventoryAssets.push(`${existingAsset.hostname || normalizedMac} (updated)`);
+            if (existingAsset.assetType !== "firewall" && existingAsset.assetType !== "switch" && existingAsset.assetType !== "access_point") {
+              fortigateEndpointAssetIds.add(existingAsset.id);
+            }
           } catch (err: any) {
             syncLog("error", `Failed to update inventory asset ${existingAsset.hostname || normalizedMac}: ${err.message || "Unknown error"}`);
           }
@@ -3183,6 +3199,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           });
           assetIdx.add(newAsset);
           inventoryAssets.push(inv.hostname || normalizedMac || inv.ipAddress);
+          if (newAsset.assetType !== "firewall" && newAsset.assetType !== "switch" && newAsset.assetType !== "access_point") {
+            fortigateEndpointAssetIds.add(newAsset.id);
+          }
         } catch (err: any) {
           syncLog("error", `Failed to create inventory asset ${inv.hostname || normalizedMac || inv.ipAddress}: ${err.message || "Unknown error"}`);
         }
@@ -3310,6 +3329,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         queueUpdate(assetId, { lastSeenSwitch: pick.portLabel });
         asset.lastSeenSwitch = pick.portLabel;
       }
+      // Switch-port attribution counts as a fortigate-endpoint touch
+      // even when no DHCP sighting fired — the asset was seen on a
+      // managed switch's port.
+      if (asset.assetType !== "firewall" && asset.assetType !== "switch" && asset.assetType !== "access_point") {
+        fortigateEndpointAssetIds.add(asset.id);
+      }
     }
 
     // ARP enrichment — fill empty ipAddress only.
@@ -3321,6 +3346,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       queueUpdate(asset.id, { ipAddress: row.ip, ipSource: `${row.fortigateDevice}:arp` });
       asset.ipAddress = row.ip;
       assetIdx.reindex(asset);
+      if (asset.assetType !== "firewall" && asset.assetType !== "switch" && asset.assetType !== "access_point") {
+        fortigateEndpointAssetIds.add(asset.id);
+      }
     }
 
     if (enrichmentUpdates.size > 0) {
@@ -3428,7 +3456,36 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
   } // end Phases 8–9 (full | finalize)
 
-  return { created, updated, skipped, deprecated, assets: assetNames, reservations: reservationNames, vips: vipNames.length, dhcpLeases: dhcpLeases.length, dhcpReservations: dhcpReservations.length, inventoryDevices: inventoryAssets.length, dnsResolved, ouiResolved, ouiOverridden, decommissionedSwitches, decommissionedAps };
+  // Phase 10 — fortigate-endpoint AssetSource flush. Stamp every endpoint
+  // asset this sync touched with a fortigate-endpoint source row so the
+  // operator's asset-detail Sources tab reflects "this device was
+  // discovered/seen by FortiManager X" alongside any entra/ad/intune
+  // sources the device already has. Runs on every mode (full /
+  // skip-deprecation / finalize) — touch-tracking captured the assets
+  // each pathway hit. Best-effort per asset; failures are logged but
+  // don't block the sync.
+  let endpointSourcesStamped = 0;
+  if (fortigateEndpointAssetIds.size > 0) {
+    const flushedAt = new Date(now);
+    const results = await batchSettled(
+      Array.from(fortigateEndpointAssetIds),
+      async (assetId: string) => {
+        const asset = assetIdx.findById(assetId);
+        if (!asset || !asset.macAddress) return false;
+        await upsertFortigateEndpointSource(assetId, integrationId, asset, integrationType, asset.lastSeen ?? flushedAt);
+        return true;
+      },
+    );
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value === true) endpointSourcesStamped++;
+    }
+    const failed = results.filter((r) => r.status === "rejected").length;
+    if (failed > 0) {
+      syncLog("error", `fortigate-endpoint AssetSource: stamped ${endpointSourcesStamped}, ${failed} failed`);
+    }
+  }
+
+  return { created, updated, skipped, deprecated, assets: assetNames, reservations: reservationNames, vips: vipNames.length, dhcpLeases: dhcpLeases.length, dhcpReservations: dhcpReservations.length, inventoryDevices: inventoryAssets.length, dnsResolved, ouiResolved, ouiOverridden, decommissionedSwitches, decommissionedAps, endpointSourcesStamped };
 }
 
 // ─── Entra ID asset sync ─────────────────────────────────────────────────────
@@ -4383,6 +4440,95 @@ async function upsertAdAssetSource(
   // the result as the Asset write payload). Drift detection still runs on
   // integrations that haven't cut over yet (Entra, FortiGate-firewall,
   // FortiSwitch, FortiAP) via their own upsert helpers.
+}
+
+/**
+ * Build the observed blob for a `fortigate-endpoint` AssetSource row.
+ *
+ * Unified source kind covering every endpoint discovery pathway the
+ * FortiManager / FortiGate sync uses — DHCP reservations, DHCP leases,
+ * device-inventory (FortiOS `device/list` with hardware/OS/user
+ * fingerprinting), switch-port MAC table, ARP enrichment. Whichever
+ * pathways found the device contribute their fields; pathways that
+ * didn't run for this device leave their fields null. The asset itself
+ * is the authoritative merged view; this blob is what THIS source last
+ * told us about it.
+ *
+ * externalId is the asset's primary MAC, normalized to colon-separated
+ * uppercase. Without a MAC we can't dedupe across discovery cycles
+ * (FortiGate doesn't supply a stable per-device ID), so the upsert
+ * helper skips assets without one.
+ */
+function buildFortigateEndpointObservedBlob(asset: any, integrationType: "fortimanager" | "fortigate" | string): Record<string, unknown> {
+  return {
+    mac: typeof asset.macAddress === "string" ? asset.macAddress.toUpperCase() : null,
+    hostname: asset.hostname ?? null,
+    ipAddress: asset.ipAddress ?? null,
+    ipSource: asset.ipSource ?? null,
+    os: asset.os ?? null,
+    osVersion: asset.osVersion ?? null,
+    hardwareVendor: asset.manufacturer ?? null,
+    model: asset.model ?? null,
+    learnedLocation: asset.learnedLocation ?? null,
+    lastSeenSwitch: asset.lastSeenSwitch ?? null,
+    lastSeenAp: asset.lastSeenAp ?? null,
+    discoveredVia: integrationType, // "fortimanager" | "fortigate"
+  };
+}
+
+/**
+ * Upsert the `fortigate-endpoint` AssetSource row tying the given asset
+ * to the FMG/FortiGate integration that just sighted it. Idempotent on
+ * the (sourceKind, externalId=mac) unique key.
+ *
+ * After upserting, sweep any "manual" source row from the same asset —
+ * those are Phase 1 backfill placeholders for assets that didn't match
+ * a tag prefix at the time. With a real fortigate-endpoint source now
+ * present, the placeholder is no longer correct.
+ */
+async function upsertFortigateEndpointSource(
+  assetId: string,
+  integrationId: string,
+  asset: any,
+  integrationType: string,
+  lastSeen: Date,
+): Promise<void> {
+  if (!asset?.macAddress) return;
+  const externalId = String(asset.macAddress).trim().toUpperCase();
+  if (!externalId) return;
+  const observed = buildFortigateEndpointObservedBlob(asset, integrationType);
+  const now = new Date();
+  await prisma.assetSource.upsert({
+    where: { sourceKind_externalId: { sourceKind: "fortigate-endpoint", externalId } },
+    create: {
+      assetId,
+      sourceKind: "fortigate-endpoint",
+      externalId,
+      integrationId,
+      observed: observed as any,
+      inferred: false,
+      syncedAt: now,
+      firstSeen: lastSeen,
+      lastSeen,
+    },
+    update: {
+      assetId,
+      integrationId,
+      observed: observed as any,
+      syncedAt: now,
+      lastSeen,
+    },
+  });
+  // Manual-source sweep: the Phase 1 backfill placeholder for this
+  // asset is now superseded by a real source. Best-effort.
+  try {
+    await prisma.assetSource.deleteMany({
+      where: { assetId, sourceKind: "manual" },
+    });
+  } catch {
+    // Sweep failure is non-fatal — the manual row just lingers; UI
+    // shows both source cards, which is mildly redundant but harmless.
+  }
 }
 
 // Build the AD sync's lookup index from AssetSource rows. Replaces the legacy

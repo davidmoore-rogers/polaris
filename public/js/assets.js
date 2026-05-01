@@ -6129,6 +6129,7 @@ var _assetSourceLabels = {
   "fortigate-firewall": "FortiGate (firewall)",
   "fortiswitch":        "FortiSwitch",
   "fortiap":            "FortiAP",
+  "fortigate-endpoint": "FortiGate / FortiManager (endpoint)",
   "manual":             "Manual / other",
 };
 

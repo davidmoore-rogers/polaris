@@ -37,6 +37,7 @@ import "./jobs/flagStaleReservations.js";
 import "./jobs/resolvePolarisPushedConflicts.js";
 import "./jobs/resolveStaleReservationConflicts.js";
 import "./jobs/scrubLegacySidGuidTags.js";
+import "./jobs/backfillFortigateEndpointSources.js";
 import { ensureRegistryLoaded } from "./services/oidRegistry.js";
 
 // Warm the symbolic-OID registry once at startup so the first monitor tick

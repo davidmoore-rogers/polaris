@@ -1763,6 +1763,7 @@ router.get("/:id/sources", async (req, res, next) => {
       "fortigate-firewall": 4,
       "fortiswitch": 5,
       "fortiap": 6,
+      "fortigate-endpoint": 7,
       "manual": 99,
     };
     rows.sort((a, b) => {
