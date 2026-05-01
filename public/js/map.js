@@ -474,10 +474,11 @@
       },
     });
     (data.switches || []).forEach(function (s) {
+      var uplink = displayableUplink(s.uplinkInterface);
       elements.push({
         data: {
           id: s.id,
-          label: (s.hostname || "FortiSwitch") + (s.uplinkInterface ? "\n↥ " + s.uplinkInterface : ""),
+          label: (s.hostname || "FortiSwitch") + (uplink ? "\n↥ " + uplink : ""),
           role: "fortiswitch",
           iconUrl: s.iconUrl || null,
           hasIcon: s.iconUrl ? 1 : 0,
@@ -497,7 +498,7 @@
     });
     (data.edges || []).forEach(function (e, i) {
       elements.push({
-        data: { id: "e" + i, source: e.source, target: e.target, label: e.label || "" },
+        data: { id: "e" + i, source: e.source, target: e.target, label: displayableUplink(e.label) || "" },
       });
     });
     // LLDP-derived ghost nodes for non-Polaris neighbors. The dashed border
@@ -714,7 +715,7 @@
       data.switches.forEach(function (s) {
         parts.push(
           '<li><a href="/assets.html#asset=' + encodeURIComponent(s.id) + '">' + escapeHtml(s.hostname || "(unnamed)") + '</a>' +
-          '<span class="meta">' + escapeHtml(s.uplinkInterface || "—") + '</span></li>'
+          '<span class="meta">' + escapeHtml(displayableUplink(s.uplinkInterface) || "—") + '</span></li>'
         );
       });
       parts.push('</ul></div>');
@@ -803,5 +804,16 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  // Filter out FortiOS meta-interface names that don't add useful
+  // information to the topology view. "fortilink" is the software-managed
+  // FortiLink interface on the FortiGate side; the relationship it
+  // represents is already encoded in the FG→switch edge itself, so
+  // displaying it as a label is redundant. Real port names like "port49"
+  // or aggregate serial-fragments like "8FFTV23025884-0" still pass through.
+  function displayableUplink(name) {
+    if (!name) return "";
+    return String(name).toLowerCase() === "fortilink" ? "" : name;
   }
 })();
