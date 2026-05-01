@@ -132,7 +132,7 @@ async function loadLatestInterfaces(
     SELECT DISTINCT ON ("assetId", "ifName")
       "assetId", "ifName", "ifType", "operStatus"
     FROM asset_interface_samples
-    WHERE "assetId" = ANY(${assetIds}::uuid[])
+    WHERE "assetId" = ANY(${assetIds}::text[])
     ORDER BY "assetId", "ifName", "timestamp" DESC
   `;
   for (const r of rows) {

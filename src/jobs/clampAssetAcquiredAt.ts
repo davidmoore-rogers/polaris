@@ -16,8 +16,10 @@ import { logger } from "../utils/logger.js";
 
 async function clampExistingAssetAcquiredAt(): Promise<void> {
   try {
+    // The Prisma model is `Asset` but the on-disk table is `assets`
+    // (via the @@map in schema.prisma).
     const count = await prisma.$executeRaw`
-      UPDATE "Asset"
+      UPDATE assets
       SET "acquiredAt" = "lastSeen"
       WHERE "acquiredAt" IS NOT NULL
         AND "lastSeen" IS NOT NULL

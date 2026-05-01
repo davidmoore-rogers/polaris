@@ -78,12 +78,15 @@ export async function inferInterfaceTopology(
   // DISTINCT ON requires the ORDER BY to start with the same columns.
   // The Prisma model name is `AssetInterfaceSample` but the underlying
   // table is `asset_interface_samples` via the @@map in schema.prisma.
+  // assetId is `String` in the schema → TEXT in Postgres (the
+  // @default(uuid()) only affects the value generator, not the column
+  // type), so the ANY cast must be text[] to match.
   const interfaceRows = await prisma.$queryRaw<
     Array<{ assetId: string; ifName: string; ifType: string | null }>
   >`
     SELECT DISTINCT ON ("assetId", "ifName") "assetId", "ifName", "ifType"
     FROM asset_interface_samples
-    WHERE "assetId" = ANY(${seedAssetIds}::uuid[])
+    WHERE "assetId" = ANY(${seedAssetIds}::text[])
     ORDER BY "assetId", "ifName", "timestamp" DESC
   `;
 
