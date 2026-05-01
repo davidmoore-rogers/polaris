@@ -2599,7 +2599,15 @@ async function persistLldpNeighbors(
       if (m && m !== assetId) return m;
     }
     if (n.systemName) {
-      const m = matchIndex.byHostname.get(n.systemName.toLowerCase());
+      const lower = n.systemName.toLowerCase();
+      let m = matchIndex.byHostname.get(lower);
+      // Belt-and-suspenders: if LLDP reports FQDN ("device.contoso.com")
+      // and the index only has the short form, try the leftmost label too.
+      // The index builder already adds short forms when it sees FQDNs, but
+      // both directions defended.
+      if (!m && lower.includes(".")) {
+        m = matchIndex.byHostname.get(lower.split(".")[0]);
+      }
       if (m && m !== assetId) return m;
     }
     return null;
@@ -2666,11 +2674,28 @@ async function buildLldpAssetMatchIndex(): Promise<{
   byHostname: Map<string, string>;
 }> {
   const rows = await prisma.asset.findMany({
-    select: { id: true, ipAddress: true, macAddress: true, macAddresses: true, associatedIps: true, hostname: true },
+    select: { id: true, ipAddress: true, macAddress: true, macAddresses: true, associatedIps: true, hostname: true, dnsName: true },
   });
   const byIp = new Map<string, string>();
   const byMac = new Map<string, string>();
   const byHostname = new Map<string, string>();
+  // Helper: index a hostname-shaped string under the asset id, including
+  // the leftmost label when it's an FQDN. Symmetric coverage matters for
+  // LLDP matching: a FortiGate's `Asset.hostname` is "PEORIA-61F-1" (short
+  // form, set by the fortigate-firewall source) but the device advertises
+  // itself via LLDP as "PEORIA-61F-1.rogersgroupinc.com" (FQDN). The
+  // lookup side already lowercases; we just need both forms in the index.
+  const idxHostname = (raw: string | null, assetId: string) => {
+    if (!raw) return;
+    const lower = raw.toLowerCase().trim();
+    if (!lower) return;
+    if (!byHostname.has(lower)) byHostname.set(lower, assetId);
+    const dotIdx = lower.indexOf(".");
+    if (dotIdx > 0) {
+      const shortForm = lower.slice(0, dotIdx);
+      if (!byHostname.has(shortForm)) byHostname.set(shortForm, assetId);
+    }
+  };
   for (const a of rows) {
     if (a.ipAddress && !byIp.has(a.ipAddress)) byIp.set(a.ipAddress, a.id);
     if (Array.isArray(a.associatedIps)) {
@@ -2692,10 +2717,11 @@ async function buildLldpAssetMatchIndex(): Promise<{
         }
       }
     }
-    if (a.hostname) {
-      const h = a.hostname.toLowerCase();
-      if (!byHostname.has(h)) byHostname.set(h, a.id);
-    }
+    idxHostname(a.hostname, a.id);
+    // Also index dnsName when set — covers AD-discovered hosts where the
+    // FQDN lives on dnsName separately, and LLDP advertises the hostname
+    // form which might differ.
+    idxHostname(a.dnsName, a.id);
   }
   return { byIp, byMac, byHostname };
 }
