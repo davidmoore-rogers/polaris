@@ -248,6 +248,16 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         })
       : [];
 
+    type EndpointSummary = {
+      id: string;
+      hostname: string | null;
+      ipAddress: string | null;
+      macAddress: string | null;
+      assetType: string | null;
+      assignedTo: string | null;
+      port: string;
+      lastSeen: Date | null;
+    };
     const switches = siblings
       .filter((s) => s.assetType === "switch")
       .map((s) => {
@@ -262,12 +272,81 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           lastSeen: s.lastSeen,
           uplinkInterface: t.uplinkInterface ?? null,
           iconUrl: resolveIconUrl({ manufacturer: s.manufacturer, model: s.model, assetType: "switch" }, iconCache),
+          endpointCount: 0,
+          endpoints: [] as EndpointSummary[],
         };
       });
 
     const switchByName = new Map<string, string /* assetId */>();
     for (const s of switches) {
       if (s.hostname) switchByName.set(s.hostname, s.id);
+    }
+
+    // Endpoints attached to any of this site's FortiSwitches. We populate
+    // `Asset.lastSeenSwitch = "<switchHostname>/<portName>"` from the
+    // FortiSwitch MAC table during discovery (see Phase 7.5 in the FMG
+    // sync), so prefix-matching against each switch hostname yields every
+    // endpoint currently learned on that switch's ports. Returns top-25
+    // by recency per switch + the total count, so the modal info panel
+    // can show "12 endpoints" with a sample list while the search
+    // endpoint (slice 2) handles wildcards over the full set.
+    const switchHostnames = switches.map((s) => s.hostname).filter((h): h is string => !!h);
+    if (switchHostnames.length > 0) {
+      const [endpointSamples, countRows] = await Promise.all([
+        prisma.asset.findMany({
+          where: {
+            assetType: { notIn: ["firewall", "switch", "access_point"] },
+            OR: switchHostnames.map((h) => ({ lastSeenSwitch: { startsWith: `${h}/` } })),
+          },
+          select: {
+            id: true,
+            hostname: true,
+            ipAddress: true,
+            macAddress: true,
+            assetType: true,
+            assignedTo: true,
+            lastSeenSwitch: true,
+            lastSeen: true,
+          },
+          orderBy: { lastSeen: "desc" },
+          take: switchHostnames.length * 25,
+        }),
+        prisma.$queryRaw<Array<{ swhost: string; cnt: bigint }>>`
+          SELECT split_part("lastSeenSwitch", '/', 1) AS swhost, COUNT(*)::bigint AS cnt
+          FROM assets
+          WHERE "lastSeenSwitch" IS NOT NULL
+            AND "assetType" NOT IN ('firewall', 'switch', 'access_point')
+            AND split_part("lastSeenSwitch", '/', 1) = ANY(${switchHostnames}::text[])
+          GROUP BY swhost
+        `,
+      ]);
+      const countByHost = new Map<string, number>();
+      for (const r of countRows) countByHost.set(r.swhost, Number(r.cnt));
+      const switchByHost = new Map<string, typeof switches[number]>();
+      for (const s of switches) if (s.hostname) switchByHost.set(s.hostname, s);
+      for (const ep of endpointSamples) {
+        const lss = ep.lastSeenSwitch || "";
+        const slashIdx = lss.indexOf("/");
+        if (slashIdx <= 0) continue;
+        const swHost = lss.slice(0, slashIdx);
+        const port = lss.slice(slashIdx + 1);
+        const sw = switchByHost.get(swHost);
+        if (!sw) continue;
+        if (sw.endpoints.length >= 25) continue; // per-switch cap
+        sw.endpoints.push({
+          id: ep.id,
+          hostname: ep.hostname,
+          ipAddress: ep.ipAddress,
+          macAddress: ep.macAddress,
+          assetType: String(ep.assetType),
+          assignedTo: ep.assignedTo,
+          port,
+          lastSeen: ep.lastSeen,
+        });
+      }
+      for (const s of switches) {
+        s.endpointCount = s.hostname ? (countByHost.get(s.hostname) ?? 0) : 0;
+      }
     }
 
     const aps = siblings
@@ -634,6 +713,94 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       remoteAssetNodes: Array.from(remoteAssetNodes.values()),
       lldpEdges,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /map/sites/:id/topology/search?q=<query> ──────────────────────────────
+// Site-scoped endpoint search for the topology modal. Matches the query as a
+// case-insensitive substring of hostname / IP / MAC / assignedTo, scoped to
+// endpoints whose `lastSeenSwitch` references one of THIS site's switches
+// (or LLDP-confirmed neighbors of those switches via the existing matched
+// asset cross-link). Returns the matching endpoint + which switch it's on
+// so the frontend can pulse-highlight that switch on the graph and pivot
+// to asset details on click.
+router.get("/sites/:id/topology/search", async (req, res, next) => {
+  try {
+    const id = req.params.id;
+    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    if (!q) return res.json({ q: "", results: [] });
+
+    const fg = await prisma.asset.findUnique({
+      where: { id },
+      select: { id: true, hostname: true, assetType: true },
+    });
+    if (!fg || fg.assetType !== "firewall") throw new AppError(404, "FortiGate not found");
+
+    const fgHostname = fg.hostname || "";
+    const siblingSwitches = fgHostname
+      ? await prisma.asset.findMany({
+          where: {
+            assetType: "switch",
+            fortinetTopology: { path: ["controllerFortigate"], equals: fgHostname },
+          },
+          select: { id: true, hostname: true },
+        })
+      : [];
+    const switchHostnames = siblingSwitches.map((s) => s.hostname).filter((h): h is string => !!h);
+    if (switchHostnames.length === 0) return res.json({ q, results: [] });
+
+    // Anchored prefix-OR for switch attribution AND substring match across
+    // common identity fields. Capped at 25 results — search is for finding
+    // a specific endpoint, not for browsing.
+    const matches = await prisma.asset.findMany({
+      where: {
+        assetType: { notIn: ["firewall", "switch", "access_point"] },
+        OR: switchHostnames.map((h) => ({ lastSeenSwitch: { startsWith: `${h}/` } })),
+        AND: [
+          {
+            OR: [
+              { hostname:    { contains: q, mode: "insensitive" } },
+              { ipAddress:   { contains: q, mode: "insensitive" } },
+              { macAddress:  { contains: q, mode: "insensitive" } },
+              { assignedTo:  { contains: q, mode: "insensitive" } },
+              { dnsName:     { contains: q, mode: "insensitive" } },
+            ],
+          },
+        ],
+      },
+      select: {
+        id: true, hostname: true, ipAddress: true, macAddress: true,
+        assetType: true, assignedTo: true, lastSeenSwitch: true, lastSeen: true,
+      },
+      orderBy: { lastSeen: "desc" },
+      take: 25,
+    });
+
+    const switchIdByHost = new Map<string, string>();
+    for (const s of siblingSwitches) {
+      if (s.hostname) switchIdByHost.set(s.hostname, s.id);
+    }
+    const results = matches.map((m) => {
+      const lss = m.lastSeenSwitch || "";
+      const slashIdx = lss.indexOf("/");
+      const swHost  = slashIdx > 0 ? lss.slice(0, slashIdx) : "";
+      const port    = slashIdx > 0 ? lss.slice(slashIdx + 1) : "";
+      return {
+        id:         m.id,
+        hostname:   m.hostname,
+        ipAddress:  m.ipAddress,
+        macAddress: m.macAddress,
+        assetType:  String(m.assetType),
+        assignedTo: m.assignedTo,
+        switchId:   switchIdByHost.get(swHost) ?? null,
+        switchHostname: swHost || null,
+        port,
+        lastSeen:   m.lastSeen,
+      };
+    });
+    res.json({ q, results });
   } catch (err) {
     next(err);
   }

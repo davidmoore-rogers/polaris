@@ -448,6 +448,7 @@ const api = {
     sites:    ()        => request("GET", "/map/sites"),
     search:   (q)       => request("GET", `/map/search?q=${encodeURIComponent(q)}`),
     topology: (id)      => request("GET", `/map/sites/${id}/topology`),
+    topologySearch: (id, q) => request("GET", `/map/sites/${id}/topology/search?q=${encodeURIComponent(q)}`),
   },
   auth: {
     me: () => request("GET", "/auth/me"),

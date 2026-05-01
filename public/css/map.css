@@ -224,6 +224,85 @@
   }
 }
 
+/* Topology modal — search box + results dropdown in the header */
+.topology-search-input {
+  width: 100%;
+  padding: 0.4rem 0.65rem;
+  font-size: 0.85rem;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+}
+.topology-search-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+.topology-search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  max-height: 360px;
+  overflow-y: auto;
+  z-index: 30;
+}
+.topology-search-results li {
+  padding: 0.5rem 0.65rem;
+  cursor: pointer;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.82rem;
+}
+.topology-search-results li:last-child { border-bottom: 0; }
+.topology-search-results li:hover,
+.topology-search-results li.active {
+  background: var(--color-bg-secondary);
+}
+.topology-search-results li .meta {
+  font-size: 0.74rem;
+  color: var(--color-text-tertiary);
+  font-family: "Roboto Mono", monospace;
+  display: block;
+  margin-top: 2px;
+}
+.topology-search-results .empty {
+  padding: 0.5rem 0.65rem;
+  font-size: 0.82rem;
+  color: var(--color-text-tertiary);
+  cursor: default;
+}
+
+/* Endpoint list nested under each switch in the right-hand info panel. */
+.topology-info .switch-endpoints {
+  margin-top: 0.35rem;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--color-border);
+}
+.topology-info .switch-endpoints summary {
+  cursor: pointer;
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+  user-select: none;
+  list-style-position: outside;
+}
+.topology-info .switch-endpoints ul {
+  margin-top: 0.25rem;
+}
+.topology-info .switch-endpoints li {
+  font-size: 0.78rem;
+}
+
+/* Visual pulse used to draw the eye to a search-matched switch on the
+   Cytoscape graph. Cytoscape itself sets the actual node style; this is
+   here only for documentation symmetry. */
+
 /* Topology fullscreen — covers BOTH the native Fullscreen API (`:fullscreen`
    pseudo-class on the .modal element) AND the CSS-class fallback for older
    browsers (`.modal.topology-fullscreen`). Without these overrides, the

@@ -16,6 +16,13 @@
   var siteCache = [];                    // last /map/sites payload
   var suggestState = { open: false, items: [], index: -1 };
   var searchDebounce = null;
+  // Currently-open topology modal state. siteId drives Refresh + position
+  // persistence; data is the latest /topology payload (used for endpoint
+  // pivots from search results without a re-fetch).
+  var topoState = { siteId: null, hostname: null, data: null };
+  var topoSearchDebounce = null;
+  var topoSuggestState  = { open: false, items: [], index: -1 };
+  var POSITION_STORAGE_PREFIX = "polaris.topology.positions:";
 
   // Register cytoscape-dagre once. Both globals are populated by the UMD builds
   // loaded in map.html. Guarded so hot-reload doesn't throw.
@@ -353,9 +360,13 @@
     var closeBtn = document.getElementById("topology-close");
     var screenshotBtn = document.getElementById("topology-screenshot");
     var fullscreenBtn = document.getElementById("topology-fullscreen");
+    var refreshBtn = document.getElementById("topology-refresh");
+    var searchInput = document.getElementById("topology-search-input");
     closeBtn.addEventListener("click", closeTopology);
     if (screenshotBtn) screenshotBtn.addEventListener("click", screenshotTopology);
     if (fullscreenBtn) fullscreenBtn.addEventListener("click", toggleFullscreenTopology);
+    if (refreshBtn) refreshBtn.addEventListener("click", refreshTopology);
+    if (searchInput) wireTopologySearch(searchInput);
     overlay.addEventListener("click", function (e) {
       if (e.target === overlay) {
         closeBtn.classList.add("flash");
@@ -427,11 +438,18 @@
     document.getElementById("topology-title").textContent = hostname || "Site topology";
     document.getElementById("topology-graph").innerHTML = "";
     document.getElementById("topology-info").innerHTML = '<p class="muted">Loading…</p>';
+    var searchInput = document.getElementById("topology-search-input");
+    if (searchInput) searchInput.value = "";
+    closeTopologySearchResults();
     overlay.classList.add("open");
     overlay.setAttribute("aria-hidden", "false");
+    topoState.siteId = id;
+    topoState.hostname = hostname || null;
+    topoState.data = null;
 
     try {
       var data = await api.map.topology(id);
+      topoState.data = data;
       renderTopologyGraph(data);
       renderTopologyInfo(data);
     } catch (err) {
@@ -440,7 +458,172 @@
     }
   }
 
+  // Re-fetch + re-render WITHOUT destroying the cytoscape instance up
+  // front. We capture current node positions before tear-down so the new
+  // graph keeps the operator's manual layout where possible.
+  async function refreshTopology() {
+    if (!topoState.siteId) return;
+    var btn = document.getElementById("topology-refresh");
+    if (btn) btn.disabled = true;
+    try {
+      // Snapshot positions for any nodes that survive the refresh.
+      if (cyInstance) saveNodePositions(topoState.siteId);
+      var data = await api.map.topology(topoState.siteId);
+      topoState.data = data;
+      renderTopologyGraph(data);
+      renderTopologyInfo(data);
+      if (typeof showToast === "function") showToast("Topology refreshed");
+    } catch (err) {
+      if (typeof showToast === "function") {
+        showToast("Refresh failed — " + (err && err.message ? err.message : String(err)), "error");
+      }
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // ── Position persistence ───────────────────────────────────────────────────
+  // localStorage-backed per-site node positions. Keyed by site id; value is
+  // a map of nodeId → {x, y}. Persisted browser-side only — operator-owned
+  // mental layout, not shared across users. Stale entries (nodes that no
+  // longer appear in the topology) are silently dropped on next save.
+  function saveNodePositions(siteId) {
+    if (!cyInstance || !siteId) return;
+    var out = {};
+    cyInstance.nodes().forEach(function (n) {
+      var p = n.position();
+      if (p && typeof p.x === "number" && typeof p.y === "number") {
+        out[n.id()] = { x: p.x, y: p.y };
+      }
+    });
+    try { localStorage.setItem(POSITION_STORAGE_PREFIX + siteId, JSON.stringify(out)); }
+    catch (e) { /* quota / private mode — silently skip */ }
+  }
+  function loadNodePositions(siteId) {
+    if (!siteId) return null;
+    try {
+      var raw = localStorage.getItem(POSITION_STORAGE_PREFIX + siteId);
+      if (!raw) return null;
+      var parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch (e) { return null; }
+  }
+
+  // ── Topology search (slice 2) ──────────────────────────────────────────────
+  function wireTopologySearch(input) {
+    input.addEventListener("input", function () {
+      if (topoSearchDebounce) { clearTimeout(topoSearchDebounce); topoSearchDebounce = null; }
+      var q = input.value.trim();
+      if (!q) { closeTopologySearchResults(); return; }
+      topoSearchDebounce = setTimeout(function () { runTopologySearch(q); }, 200);
+    });
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") { closeTopologySearchResults(); input.blur(); return; }
+      if (!topoSuggestState.open) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        topoSuggestState.index = Math.min(topoSuggestState.items.length - 1, topoSuggestState.index + 1);
+        paintTopologySearchResults();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        topoSuggestState.index = Math.max(0, topoSuggestState.index - 1);
+        paintTopologySearchResults();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        var pick = topoSuggestState.items[topoSuggestState.index];
+        if (pick) handleTopologySearchPick(pick);
+      }
+    });
+    document.addEventListener("click", function (e) {
+      var box = document.getElementById("topology-search-results");
+      if (!box) return;
+      if (e.target === input || (box.contains && box.contains(e.target))) return;
+      closeTopologySearchResults();
+    });
+  }
+
+  async function runTopologySearch(q) {
+    if (!topoState.siteId) return;
+    try {
+      var resp = await api.map.topologySearch(topoState.siteId, q);
+      topoSuggestState.items = (resp && resp.results) || [];
+      topoSuggestState.index = topoSuggestState.items.length > 0 ? 0 : -1;
+      topoSuggestState.open = true;
+      paintTopologySearchResults();
+    } catch (err) {
+      topoSuggestState.items = [];
+      topoSuggestState.index = -1;
+      topoSuggestState.open = true;
+      paintTopologySearchResults();
+    }
+  }
+
+  function paintTopologySearchResults() {
+    var box = document.getElementById("topology-search-results");
+    if (!box) return;
+    box.innerHTML = "";
+    box.hidden = !topoSuggestState.open;
+    if (!topoSuggestState.open) return;
+    if (topoSuggestState.items.length === 0) {
+      var li = document.createElement("li");
+      li.className = "empty";
+      li.textContent = "No endpoints matched in this site.";
+      box.appendChild(li);
+      return;
+    }
+    topoSuggestState.items.forEach(function (item, i) {
+      var li = document.createElement("li");
+      li.setAttribute("role", "option");
+      if (i === topoSuggestState.index) li.classList.add("active");
+      var primary = item.hostname || item.ipAddress || item.macAddress || "(unnamed)";
+      var bits = [];
+      if (item.ipAddress)   bits.push(item.ipAddress);
+      if (item.macAddress)  bits.push(item.macAddress);
+      if (item.assignedTo)  bits.push(item.assignedTo);
+      bits.push(item.switchHostname + (item.port ? "/" + item.port : ""));
+      li.innerHTML =
+        '<div>' + escapeHtml(primary) + '</div>' +
+        '<span class="meta">' + escapeHtml(bits.join(" · ")) + '</span>';
+      li.addEventListener("mousedown", function (e) {
+        e.preventDefault();
+        handleTopologySearchPick(item);
+      });
+      box.appendChild(li);
+    });
+  }
+
+  // Pulse the matched endpoint's switch on the graph + scroll the info
+  // panel to its row. Click an item to navigate to the asset details.
+  function handleTopologySearchPick(item) {
+    closeTopologySearchResults();
+    if (cyInstance && item.switchId) {
+      var node = cyInstance.getElementById(item.switchId);
+      if (node && node.length > 0) {
+        cyInstance.animate({ center: { eles: node }, zoom: 1.4, duration: 350 });
+        node.addClass("topology-pulse");
+        setTimeout(function () { try { node.removeClass("topology-pulse"); } catch (e) {} }, 1500);
+      }
+    }
+    // Pivot to the endpoint's asset details page.
+    if (item.id) window.location.href = "/assets.html#view=asset:" + item.id;
+  }
+
+  function closeTopologySearchResults() {
+    topoSuggestState.open = false;
+    topoSuggestState.items = [];
+    topoSuggestState.index = -1;
+    var box = document.getElementById("topology-search-results");
+    if (box) { box.hidden = true; box.innerHTML = ""; }
+  }
+
   function closeTopology() {
+    // Persist current node positions before tear-down so reopening the
+    // same site restores the operator's manual layout.
+    if (topoState.siteId && cyInstance) saveNodePositions(topoState.siteId);
+    closeTopologySearchResults();
+    topoState.siteId = null;
+    topoState.hostname = null;
+    topoState.data = null;
     // Exit native fullscreen first — otherwise the browser stays in
     // fullscreen mode showing nothing after the modal hides, and the user
     // has to hit Esc / their OS gesture to recover.
@@ -555,6 +738,20 @@
     var isDark = theme === "dark";
     var textColor = isDark ? "#eef0f4" : "#1a1a1a";
     var edgeColor = isDark ? "#6a7388" : "#9aa2b1";
+
+    // Refresh path: tear down the previous cytoscape before mounting the
+    // new one. Without this, a Refresh click stacks two graphs and the
+    // canvas leaks.
+    if (cyInstance) {
+      try { cyInstance.destroy(); } catch (e) {}
+      cyInstance = null;
+    }
+
+    // Restore manually-dragged node positions from localStorage if any
+    // are saved for this site. We use the dagre layout as the base
+    // (handles new nodes that didn't exist last time), then snap saved
+    // nodes to their stored positions in a layoutstop hook below.
+    var savedPositions = topoState.siteId ? loadNodePositions(topoState.siteId) : null;
 
     cyInstance = cytoscape({
       container: document.getElementById("topology-graph"),
@@ -694,7 +891,46 @@
             width: 2.4,
           },
         },
+        // Pulse style applied transiently to a node that the topology
+        // search just located. Bright accent ring draws the eye; class
+        // is removed after ~1.5s by the pick handler.
+        {
+          selector: 'node.topology-pulse',
+          style: {
+            "border-color": "#22d3ee",
+            "border-width": 4,
+            "border-opacity": 1,
+          },
+        },
       ],
+    });
+
+    // Restore saved positions AFTER the dagre layout finishes so any
+    // brand-new nodes get a sensible default placement and only the ones
+    // the operator dragged previously snap to their stored coordinates.
+    cyInstance.one("layoutstop", function () {
+      if (!savedPositions) return;
+      cyInstance.batch(function () {
+        cyInstance.nodes().forEach(function (n) {
+          var p = savedPositions[n.id()];
+          if (p && typeof p.x === "number" && typeof p.y === "number") {
+            n.position({ x: p.x, y: p.y });
+          }
+        });
+      });
+      try { cyInstance.fit(undefined, 30); } catch (e) {}
+    });
+
+    // Persist node position on every drag-stop so a refresh / reopen
+    // restores the operator's manual layout. Debounced via the timer
+    // below so a long drag doesn't write per-tick.
+    var saveTimer = null;
+    cyInstance.on("dragfree", "node", function () {
+      if (!topoState.siteId) return;
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(function () {
+        saveNodePositions(topoState.siteId);
+      }, 250);
     });
 
     // Click-through on cross-site Polaris asset nodes — navigate to that
@@ -727,10 +963,34 @@
     if ((data.switches || []).length > 0) {
       parts.push('<div class="topology-section"><h5>FortiSwitches (' + data.switches.length + ')</h5><ul>');
       data.switches.forEach(function (s) {
+        var endpointCount = s.endpointCount || 0;
+        var endpoints = s.endpoints || [];
         parts.push(
           '<li><a href="/assets.html#asset=' + encodeURIComponent(s.id) + '">' + escapeHtml(s.hostname || "(unnamed)") + '</a>' +
           '<span class="meta">' + escapeHtml(displayableUplink(s.uplinkInterface) || "—") + '</span></li>'
         );
+        if (endpointCount > 0) {
+          var samplesShown = Math.min(endpoints.length, 25);
+          var heading = "Endpoints (" + endpointCount + ")";
+          if (samplesShown < endpointCount) heading += " — showing " + samplesShown;
+          parts.push(
+            '<li class="switch-endpoints"><details>' +
+            '<summary>' + escapeHtml(heading) + '</summary><ul>'
+          );
+          endpoints.forEach(function (ep) {
+            var primary = ep.hostname || ep.ipAddress || ep.macAddress || "(unnamed)";
+            var bits = [];
+            if (ep.port) bits.push(ep.port);
+            if (ep.ipAddress)  bits.push(ep.ipAddress);
+            if (ep.assignedTo) bits.push(ep.assignedTo);
+            parts.push(
+              '<li><a href="/assets.html#view=asset:' + encodeURIComponent(ep.id) + '">' +
+              escapeHtml(primary) + '</a>' +
+              '<span class="meta">' + escapeHtml(bits.join(" · ")) + '</span></li>'
+            );
+          });
+          parts.push('</ul></details></li>');
+        }
       });
       parts.push('</ul></div>');
     }

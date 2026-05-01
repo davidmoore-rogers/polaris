@@ -47,7 +47,26 @@
     <div class="modal modal-xl" role="dialog" aria-modal="true" aria-labelledby="topology-title">
       <div class="modal-header">
         <h3 id="topology-title">Site topology</h3>
-        <div style="display:flex;align-items:center;gap:8px">
+        <div style="display:flex;align-items:center;gap:8px;flex:1;justify-content:flex-end">
+          <div class="topology-search-wrap" style="position:relative;flex:0 1 320px;max-width:320px">
+            <input
+              type="search"
+              id="topology-search-input"
+              class="topology-search-input"
+              placeholder="Find endpoint by hostname / IP / MAC / user…"
+              aria-label="Search endpoints in this site"
+              autocomplete="off"
+              spellcheck="false"
+            >
+            <ul id="topology-search-results" class="topology-search-results" role="listbox" hidden></ul>
+          </div>
+          <button type="button" class="btn-icon" id="topology-refresh" aria-label="Refresh topology" title="Refresh topology" style="line-height:0">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="23 4 23 10 17 10"/>
+              <polyline points="1 20 1 14 7 14"/>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+            </svg>
+          </button>
           <button type="button" class="btn-icon" id="topology-fullscreen" aria-label="Toggle full screen" title="Toggle full screen (Esc to exit)" style="line-height:0">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M8 3H5a2 2 0 0 0-2 2v3"/>
