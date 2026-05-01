@@ -587,6 +587,44 @@ export interface DiscoveredVip {
   extintf: string;     // External interface name
 }
 
+// Per-port MAC learnings from each managed FortiSwitch under this FortiGate's
+// switch-controller (`/api/v2/monitor/switch-controller/detected-device`).
+// One row per (switch, port, MAC) entry. Captures the full FortiSwitch L2
+// view, not just FortiAP MACs — so endpoint assets (workstations, printers,
+// servers) can be attributed to their access port.
+//
+// Device Detection-derived fields (ipv4Address, deviceName, deviceType,
+// osName, hostSrc) are populated only when `config switch-controller
+// network-monitor-settings` has device detection enabled on the FortiSwitch
+// — they may be empty even when MAC + switch + port are known.
+export interface DiscoveredSwitchMacEntry {
+  fortigateDevice: string;
+  switchId: string;
+  portName: string;
+  mac: string;                 // Normalized: uppercase, colon-separated
+  vlanId?: number;
+  lastSeen?: number;           // FortiOS Unix epoch
+  ipv4Address?: string;
+  ipv6Address?: string;
+  deviceName?: string;
+  deviceType?: string;
+  osName?: string;
+  hostSrc?: string;
+  isFortilinkPeer?: boolean;
+}
+
+// FortiGate ARP entries (`/api/v2/monitor/network/arp`). Authoritative L3
+// MAC↔IP binding per FortiGate-managed subnet. Used to enrich endpoint
+// asset records when discovery sees a known MAC but a fresher IP than
+// what's currently on the asset row.
+export interface DiscoveredArpEntry {
+  fortigateDevice: string;
+  ip: string;
+  mac: string;                 // Normalized: uppercase, colon-separated
+  interface: string;           // FortiGate interface name (e.g. "internal3")
+  age?: number;                // seconds (when FortiOS exposes it)
+}
+
 export interface DiscoveryResult {
   subnets: DiscoveredSubnet[];
   devices: DiscoveredDevice[];
@@ -605,6 +643,14 @@ export interface DiscoveryResult {
   fortiSwitches: DiscoveredFortiSwitch[];
   fortiAps: DiscoveredFortiAP[];
   vips: DiscoveredVip[];
+  // Full per-port MAC table from every managed FortiSwitch's
+  // detected-device endpoint, plus the FortiGate's own ARP table. Used by
+  // the sync pipeline to enrich existing assets with their L2 location
+  // (lastSeenSwitch) and a fresh IP from L3 ARP. The legacy AP→switch
+  // attribution loop (now LLDP-first) still consumes the raw rows
+  // internally; these arrays expose the same data to the sync layer.
+  switchMacTable: DiscoveredSwitchMacEntry[];
+  arpTable: DiscoveredArpEntry[];
   // Devices whose managed-switch query returned successfully (including
   // empty results, which mean "no managed switches" rather than "query
   // failed"). Used by the sync pass to decommission switches whose
@@ -672,7 +718,7 @@ export async function discoverDhcpSubnets(
     } else {
       log("discover.devices", "info", `No managed devices found in ADOM "${adom}"`);
     }
-    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [], fortiSwitches: [], fortiAps: [], vips: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
+    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
   }
 
   // Capture the full roster of configured devices (pre-filter, any conn_status).
@@ -692,7 +738,7 @@ export async function discoverDhcpSubnets(
     log("discover.devices", "info", `Found ${devicesData.length} managed device(s) in ADOM "${adom}"`);
   }
   if (devicesData.length === 0) {
-    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames, fortiSwitches: [], fortiAps: [], vips: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
+    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames, fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
   }
 
   const discovered: DiscoveredSubnet[] = [];
@@ -704,6 +750,8 @@ export async function discoverDhcpSubnets(
   const fortiSwitches: DiscoveredFortiSwitch[] = [];
   const fortiAps: DiscoveredFortiAP[] = [];
   const vips: DiscoveredVip[] = [];
+  const switchMacTable: DiscoveredSwitchMacEntry[] = [];
+  const arpTable: DiscoveredArpEntry[] = [];
 
   type DeviceChunk = {
     device: DiscoveredDevice;
@@ -715,6 +763,8 @@ export async function discoverDhcpSubnets(
     fortiSwitches: DiscoveredFortiSwitch[];
     fortiAps: DiscoveredFortiAP[];
     vips: DiscoveredVip[];
+    switchMacTable: DiscoveredSwitchMacEntry[];
+    arpTable: DiscoveredArpEntry[];
     // Whether each per-device inventory query returned a usable response.
     // The decommission sweep keys off these flags so a controller whose
     // switch-controller endpoint timed out doesn't take its switches down
@@ -873,6 +923,8 @@ export async function discoverDhcpSubnets(
           fortiSwitches: fgResult.fortiSwitches,
           fortiAps: fgResult.fortiAps,
           vips: fgResult.vips,
+          switchMacTable: fgResult.switchMacTable,
+          arpTable: fgResult.arpTable,
           // Direct mode delegates inventory to fortigateService — surface the
           // same per-device "did this query succeed" flags it returns so the
           // decommission sweep behaves identically across transport modes.
@@ -910,6 +962,8 @@ export async function discoverDhcpSubnets(
     let didInventory = false;
     const localSwitches: DiscoveredFortiSwitch[] = [];
     const localAps: DiscoveredFortiAP[] = [];
+    const localSwitchMacTable: DiscoveredSwitchMacEntry[] = [];
+    const localArpTable: DiscoveredArpEntry[] = [];
     const localVips: DiscoveredVip[] = [];
     // Track whether each inventory query returned a usable response so the
     // sync's decommission pass can distinguish "controller offline" (don't
@@ -1311,7 +1365,7 @@ export async function discoverDhcpSubnets(
           data: {
             target: [`/adom/${adom}/device/${deviceName}`],
             action: "get",
-            resource: "/api/v2/monitor/switch-controller/detected-device?format=mac|switch_id|port_name|vlan_id|last_seen",
+            resource: "/api/v2/monitor/switch-controller/detected-device?format=mac|switch_id|port_name|vlan_id|last_seen|ipv4_address|ipv6_address|device_name|host_src|device_type|os_name|is_fortilink_peer",
           },
         }],
       };
@@ -1325,13 +1379,33 @@ export async function discoverDhcpSubnets(
         for (const d of detResults) {
           const mac = String(d.mac || "").toUpperCase().replace(/-/g, ":");
           if (!mac) continue;
+          const switchId = String(d.switch_id || "");
+          const portName = String(d.port_name || "");
+          const vlanId = Number.isFinite(d.vlan_id) ? Number(d.vlan_id) : undefined;
+          const isFortilinkPeer = d.is_fortilink_peer === true || d.is_fortilink_peer === 1;
+          // Surface every learned MAC to the sync layer for endpoint-asset
+          // attribution. FortiLink-peer rows are flagged so the consumer
+          // can skip the FortiGate's own MAC seen on managed-switch uplinks.
+          localSwitchMacTable.push({
+            fortigateDevice: deviceName,
+            switchId,
+            portName,
+            mac,
+            vlanId,
+            lastSeen: Number.isFinite(d.last_seen) ? Number(d.last_seen) : undefined,
+            ipv4Address: typeof d.ipv4_address === "string" && d.ipv4_address ? d.ipv4_address : undefined,
+            ipv6Address: typeof d.ipv6_address === "string" && d.ipv6_address ? d.ipv6_address : undefined,
+            deviceName: typeof d.device_name === "string" && d.device_name ? d.device_name : undefined,
+            deviceType: typeof d.device_type === "string" && d.device_type ? d.device_type : undefined,
+            osName: typeof d.os_name === "string" && d.os_name ? d.os_name : undefined,
+            hostSrc: typeof d.host_src === "string" && d.host_src ? d.host_src : undefined,
+            isFortilinkPeer,
+          });
+          // The legacy AP-attribution loop only needs (switchId, portName,
+          // vlan) per MAC. First-seen wins (matches prior behaviour).
           const existing = macMap.get(mac);
           if (!existing) {
-            macMap.set(mac, {
-              switchId: String(d.switch_id || ""),
-              portName: String(d.port_name || ""),
-              vlan: Number.isFinite(d.vlan_id) ? Number(d.vlan_id) : undefined,
-            });
+            macMap.set(mac, { switchId, portName, vlan: vlanId });
           }
         }
         let pairedCount = 0;
@@ -1361,6 +1435,51 @@ export async function discoverDhcpSubnets(
       }
     } catch (err: any) {
       log("discover.ap-uplinks", "info", `${deviceName}: detected-device query skipped — ${err.message || "Unknown error"}`, deviceName);
+    }
+
+    // Step 3d.55: FortiGate ARP table. Authoritative IP↔MAC binding for any
+    // subnet the FortiGate routes for. Pairs with the macmap above —
+    // detected-device tells us "MAC X is on FortiSwitch Y / port Z," ARP
+    // tells us "MAC X has IP A right now." Together they let the sync
+    // pipeline enrich existing endpoint assets with both location + IP.
+    try {
+      const arpPayload: JsonRpcRequest = {
+        id: 14,
+        method: "exec",
+        params: [{
+          url: `/sys/proxy/json`,
+          data: {
+            target: [`/adom/${adom}/device/${deviceName}`],
+            action: "get",
+            resource: "/api/v2/monitor/network/arp",
+          },
+        }],
+      };
+      const arpRes = await rpc(baseUrl, arpPayload, apiUser, apiToken, verifySsl, signal);
+      const arpData = arpRes.result?.[0]?.data;
+      const arpEntry = Array.isArray(arpData) ? arpData[0] : arpData as any;
+      const arpStatus = arpEntry?.status?.code ?? 0;
+      const arpResults = arpEntry?.response?.results;
+      if (arpStatus === 0 && Array.isArray(arpResults)) {
+        for (const a of arpResults) {
+          const ip = typeof a.ip === "string" ? a.ip.trim() : "";
+          const macRaw = typeof a.mac === "string" ? a.mac.trim() : "";
+          if (!ip || !macRaw) continue;
+          const mac = macRaw.toUpperCase().replace(/-/g, ":");
+          // Skip the all-zero MAC (incomplete ARP entries) and broadcast.
+          if (mac === "00:00:00:00:00:00" || mac === "FF:FF:FF:FF:FF:FF") continue;
+          localArpTable.push({
+            fortigateDevice: deviceName,
+            ip,
+            mac,
+            interface: typeof a.interface === "string" ? a.interface : "",
+            age: Number.isFinite(a.age) ? Number(a.age) : undefined,
+          });
+        }
+        log("discover.arp", "info", `${deviceName}: ARP table — ${localArpTable.length} entries`, deviceName);
+      }
+    } catch (err: any) {
+      log("discover.arp", "info", `${deviceName}: ARP query skipped — ${err.message || "Unknown error"}`, deviceName);
     }
 
     // Step 3d.6: Geo coordinates fallback — only runs when FMG's device record
@@ -1456,7 +1575,7 @@ export async function discoverDhcpSubnets(
     }
 
     log("discover.device.complete", "info", `Completed discovery for ${deviceName}`, deviceName);
-    return { device: localDevice, subnets: localSubnets, interfaceIps: localInterfaceIps, dhcpEntries: localDhcpEntries, deviceInventory: localInventory, didInventory, fortiSwitches: localSwitches, fortiAps: localAps, vips: localVips, didSwitchQuery, didApQuery };
+    return { device: localDevice, subnets: localSubnets, interfaceIps: localInterfaceIps, dhcpEntries: localDhcpEntries, deviceInventory: localInventory, didInventory, fortiSwitches: localSwitches, fortiAps: localAps, vips: localVips, switchMacTable: localSwitchMacTable, arpTable: localArpTable, didSwitchQuery, didApQuery };
   }
 
   // Process up to `concurrency` FortiGates in parallel.
@@ -1500,6 +1619,8 @@ export async function discoverDhcpSubnets(
       fortiSwitches.push(...chunk.fortiSwitches);
       fortiAps.push(...chunk.fortiAps);
       vips.push(...chunk.vips);
+      switchMacTable.push(...chunk.switchMacTable);
+      arpTable.push(...chunk.arpTable);
       if (chunk.didSwitchQuery) switchInventoriedDevices.add(chunk.device.name);
       if (chunk.didApQuery)     apInventoriedDevices.add(chunk.device.name);
 
@@ -1516,6 +1637,8 @@ export async function discoverDhcpSubnets(
             fortiSwitches: chunk.fortiSwitches,
             fortiAps: chunk.fortiAps,
             vips: chunk.vips,
+            switchMacTable: chunk.switchMacTable,
+            arpTable: chunk.arpTable,
             switchInventoriedDevices: chunk.didSwitchQuery ? [chunk.device.name] : [],
             apInventoriedDevices:     chunk.didApQuery     ? [chunk.device.name] : [],
           });
@@ -1545,6 +1668,8 @@ export async function discoverDhcpSubnets(
     fortiSwitches,
     fortiAps,
     vips,
+    switchMacTable,
+    arpTable,
     switchInventoriedDevices: [...switchInventoriedDevices],
     apInventoriedDevices:     [...apInventoriedDevices],
   };

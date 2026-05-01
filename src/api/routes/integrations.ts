@@ -501,7 +501,7 @@ router.post("/", async (req, res, next) => {
           // Windows Server stamps subnets with config.host as their fortigateDevice,
           // so the "known roster" is just the DHCP server host itself.
           const wsHost = (input.config as any).host as string;
-          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
+          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
         } else if (input.type === "fortigate") {
           discoveryResult = await fortigate.discoverDhcpSubnets(input.config as any, ac.signal);
         } else {
@@ -1186,7 +1186,7 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
       } else if (integration.type === "windowsserver") {
         const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
         const wsHost = (config as any).host as string;
-        discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
+        discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
         // Windows Server is a single host — no per-device iteration, sync the full result normally
         const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
         syncTotals.created.push(...r.created);
@@ -3149,6 +3149,68 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         prisma.asset.update({ where: { id: u.id }, data: u.data })
       );
       syncLog("info", `Cleared stale MAC device stamps on ${staleSweepUpdates.length} asset(s) across ${refreshedDevices.size} refreshed FortiGate(s)`);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Phase 7.5 — Enrich existing assets from FortiSwitch MAC table + FortiGate ARP
+  //              (full macmap + ARP path; non-asset-creating)
+  //
+  // For every (mac → switchId/portName) row from each managed FortiSwitch's
+  // detected-device table, stamp the matched asset's `lastSeenSwitch` so the
+  // operator can see where each endpoint is plugged in. For every (mac → ip)
+  // entry from each FortiGate's ARP table, fill an asset's `ipAddress` when
+  // it's empty (conservative: don't overwrite already-populated IPs to avoid
+  // IP-recycling churn). FortiLink-peer rows are skipped — those are the
+  // FortiGate's own MAC seen on managed-switch uplinks.
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  if ((result.switchMacTable && result.switchMacTable.length > 0) ||
+      (result.arpTable && result.arpTable.length > 0)) {
+    const enrichmentUpdates = new Map<string, Record<string, unknown>>();
+
+    const queueUpdate = (assetId: string, data: Record<string, unknown>) => {
+      const existing = enrichmentUpdates.get(assetId);
+      enrichmentUpdates.set(assetId, existing ? { ...existing, ...data } : data);
+    };
+
+    // Switch-port enrichment.
+    for (const row of result.switchMacTable || []) {
+      if (row.isFortilinkPeer) continue;
+      if (!row.mac || !row.switchId || !row.portName) continue;
+      const asset = assetIdx.findByMac(row.mac);
+      if (!asset) continue;
+      // Skip Fortinet infrastructure assets — their topology already lives
+      // on `fortinetTopology` (parentSwitch/parentPort for APs, FortiLink
+      // uplinkInterface for switches). Stamping lastSeenSwitch on a
+      // managed switch or FortiGate would conflate roles.
+      if (asset.assetType === "switch" || asset.assetType === "firewall") continue;
+      const portLabel = `${row.switchId}/${row.portName}`;
+      if (asset.lastSeenSwitch !== portLabel) {
+        queueUpdate(asset.id, { lastSeenSwitch: portLabel });
+        asset.lastSeenSwitch = portLabel;
+      }
+    }
+
+    // ARP enrichment — fill empty ipAddress only.
+    for (const row of result.arpTable || []) {
+      if (!row.mac || !row.ip) continue;
+      const asset = assetIdx.findByMac(row.mac);
+      if (!asset) continue;
+      if (asset.ipAddress) continue; // conservative: don't overwrite
+      queueUpdate(asset.id, { ipAddress: row.ip, ipSource: `${row.fortigateDevice}:arp` });
+      asset.ipAddress = row.ip;
+      assetIdx.reindex(asset);
+    }
+
+    if (enrichmentUpdates.size > 0) {
+      const updates = Array.from(enrichmentUpdates, ([id, data]) => ({ id, data }));
+      const results = await batchSettled(updates, (u) =>
+        prisma.asset.update({ where: { id: u.id }, data: u.data })
+      );
+      let okCount = 0;
+      for (const r of results) if (r.status === "fulfilled") okCount++;
+      syncLog("info", `Enriched ${okCount} asset(s) from FortiSwitch macmap + FortiGate ARP (switch-port + IP)`);
     }
   }
 

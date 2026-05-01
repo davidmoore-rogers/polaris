@@ -22,6 +22,8 @@ import type {
   DiscoveredFortiSwitch,
   DiscoveredFortiAP,
   DiscoveredVip,
+  DiscoveredSwitchMacEntry,
+  DiscoveredArpEntry,
   DiscoveryResult,
   DiscoveryProgressCallback,
 } from "./fortimanagerService.js";
@@ -219,6 +221,8 @@ export async function discoverDhcpSubnets(
   const fortiSwitches: DiscoveredFortiSwitch[] = [];
   const fortiAps: DiscoveredFortiAP[] = [];
   const vips: DiscoveredVip[] = [];
+  const switchMacTable: DiscoveredSwitchMacEntry[] = [];
+  const arpTable: DiscoveredArpEntry[] = [];
   // "Did the inventory query land successfully?" flags — see fortimanagerService
   // for why we track these separately from the result arrays. A 404 (feature
   // not licensed) counts as success because the controller is reachable.
@@ -270,7 +274,7 @@ export async function discoverDhcpSubnets(
 
   // Stop early if aborted
   if (signal?.aborted) {
-    return { subnets: [], devices, interfaceIps, dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [deviceName], fortiSwitches: [], fortiAps: [], vips: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
+    return { subnets: [], devices, interfaceIps, dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [deviceName], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
   }
 
   // Step 3: DHCP server configuration
@@ -572,7 +576,7 @@ export async function discoverDhcpSubnets(
   // Step 3e.5: FortiAP → FortiSwitch port mapping via detected-device MAC table
   try {
     const detected = await fgRequest<any[]>(config, "GET", "/api/v2/monitor/switch-controller/detected-device", {
-      query: { ...queryBase, format: "mac|switch_id|port_name|vlan_id|last_seen" },
+      query: { ...queryBase, format: "mac|switch_id|port_name|vlan_id|last_seen|ipv4_address|ipv6_address|device_name|host_src|device_type|os_name|is_fortilink_peer" },
       signal,
     });
     if (Array.isArray(detected)) {
@@ -580,12 +584,29 @@ export async function discoverDhcpSubnets(
       for (const d of detected) {
         const mac = String(d.mac || "").toUpperCase().replace(/-/g, ":");
         if (!mac) continue;
+        const switchId = String(d.switch_id || "");
+        const portName = String(d.port_name || "");
+        const vlanId = Number.isFinite(d.vlan_id) ? Number(d.vlan_id) : undefined;
+        const isFortilinkPeer = d.is_fortilink_peer === true || d.is_fortilink_peer === 1;
+        // Surface every learned MAC to the sync layer for endpoint-asset
+        // attribution (mirrors the fortimanagerService implementation).
+        switchMacTable.push({
+          fortigateDevice: deviceName,
+          switchId,
+          portName,
+          mac,
+          vlanId,
+          lastSeen: Number.isFinite(d.last_seen) ? Number(d.last_seen) : undefined,
+          ipv4Address: typeof d.ipv4_address === "string" && d.ipv4_address ? d.ipv4_address : undefined,
+          ipv6Address: typeof d.ipv6_address === "string" && d.ipv6_address ? d.ipv6_address : undefined,
+          deviceName: typeof d.device_name === "string" && d.device_name ? d.device_name : undefined,
+          deviceType: typeof d.device_type === "string" && d.device_type ? d.device_type : undefined,
+          osName: typeof d.os_name === "string" && d.os_name ? d.os_name : undefined,
+          hostSrc: typeof d.host_src === "string" && d.host_src ? d.host_src : undefined,
+          isFortilinkPeer,
+        });
         if (!macMap.has(mac)) {
-          macMap.set(mac, {
-            switchId: String(d.switch_id || ""),
-            portName: String(d.port_name || ""),
-            vlan: Number.isFinite(d.vlan_id) ? Number(d.vlan_id) : undefined,
-          });
+          macMap.set(mac, { switchId, portName, vlan: vlanId });
         }
       }
       let pairedCount = 0;
@@ -615,6 +636,34 @@ export async function discoverDhcpSubnets(
   } catch (err: any) {
     const isNotFound = err instanceof AppError && err.httpStatus === 404;
     log("discover.ap-uplinks", "info", `${deviceHostname}: ${isNotFound ? "detected-device not available — skipping" : `AP uplink query skipped — ${err.message || "Unknown error"}`}`, deviceHostname);
+  }
+
+  // Step 3e.55: FortiGate ARP table (mirrors fortimanagerService).
+  try {
+    const arpResults = await fgRequest<any[]>(config, "GET", "/api/v2/monitor/network/arp", {
+      query: queryBase,
+      signal,
+    });
+    if (Array.isArray(arpResults)) {
+      for (const a of arpResults) {
+        const ip = typeof a.ip === "string" ? a.ip.trim() : "";
+        const macRaw = typeof a.mac === "string" ? a.mac.trim() : "";
+        if (!ip || !macRaw) continue;
+        const mac = macRaw.toUpperCase().replace(/-/g, ":");
+        if (mac === "00:00:00:00:00:00" || mac === "FF:FF:FF:FF:FF:FF") continue;
+        arpTable.push({
+          fortigateDevice: deviceName,
+          ip,
+          mac,
+          interface: typeof a.interface === "string" ? a.interface : "",
+          age: Number.isFinite(a.age) ? Number(a.age) : undefined,
+        });
+      }
+      log("discover.arp", "info", `${deviceHostname}: ARP table — ${arpTable.length} entries`, deviceHostname);
+    }
+  } catch (err: any) {
+    const isNotFound = err instanceof AppError && err.httpStatus === 404;
+    log("discover.arp", "info", `${deviceHostname}: ${isNotFound ? "ARP endpoint not available — skipping" : `ARP query skipped — ${err.message || "Unknown error"}`}`, deviceHostname);
   }
 
   // Step 3e.6: Geo coordinates from `config system global`.
@@ -734,6 +783,8 @@ export async function discoverDhcpSubnets(
     fortiSwitches,
     fortiAps,
     vips,
+    switchMacTable,
+    arpTable,
     switchInventoriedDevices: didSwitchQuery ? [deviceName] : [],
     apInventoriedDevices:     didApQuery     ? [deviceName] : [],
   };
