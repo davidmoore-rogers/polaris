@@ -18,6 +18,7 @@ import { getIpHistory, getHistorySettings, updateHistorySettings, pruneOldHistor
 import { getSightingsForAsset, getSightingSettings, updateSightingSettings } from "../../services/assetSightingService.js";
 import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
 import { isValidIpAddress, cidrContains } from "../../utils/cidr.js";
+import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import {
   getMonitorSettings, updateMonitorSettings,
   probeAsset, recordProbeResult,
@@ -1784,6 +1785,152 @@ router.get("/:id/sources", async (req, res, next) => {
         lastSeen: r.lastSeen,
       })),
     );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/assets/:id/sources/:sourceId/split — admin recovery action
+// (Phase 3a of the multi-source asset model). Detaches one AssetSource row
+// from this asset and binds it to a freshly-created Asset, with the new
+// Asset's discovery-owned fields seeded from the source's `observed` blob.
+//
+// Use case: a phase-1 backfill or hostname-collision conflict accept merged
+// two devices into one Asset by mistake; the operator pulls the wrong source
+// off and now has two correctly-separated Assets. Today's only fix without
+// this endpoint is hand-editing the assetSources table.
+//
+// Refusal rules:
+//   - Source not found, or doesn't belong to this asset → 404
+//   - Source is the asset's only source — splitting would leave the original
+//     Asset orphaned with no sources → 409. Operator should delete the
+//     misclassified Asset instead and let the next discovery recreate it.
+//   - Source is a "manual" source kind — that's a phase-1 backfill marker,
+//     not a real discovery source; nothing useful to detach → 409.
+//
+// Asset-row FKs (monitoring samples, IP history, sightings, quarantine,
+// conflicts) all stay on the *original* Asset.id. Only the AssetSource row
+// moves; the new Asset starts clean (operator can configure monitoring etc.
+// on it from scratch).
+const splitSourceParamsSchema = z.object({
+  id: z.string().min(1),
+  sourceId: z.string().min(1),
+});
+router.post("/:id/sources/:sourceId/split", requireAdmin, async (req, res, next) => {
+  try {
+    const { id, sourceId } = splitSourceParamsSchema.parse(req.params);
+    const originalAsset = await prisma.asset.findUnique({ where: { id }, select: { id: true, hostname: true } });
+    if (!originalAsset) throw new AppError(404, "Asset not found");
+
+    const allSources = await prisma.assetSource.findMany({ where: { assetId: id } });
+    const target = allSources.find((s) => s.id === sourceId);
+    if (!target) throw new AppError(404, "Source not found on this asset");
+    if (target.sourceKind === "manual") {
+      throw new AppError(409, "Cannot split a manual source — it's a backfill marker, not a discovery source");
+    }
+    if (allSources.length <= 1) {
+      throw new AppError(409, "Cannot split the asset's only source. Delete the asset instead and let discovery recreate it.");
+    }
+
+    // Project the discovery-owned fields from the moved source alone — that's
+    // the new Asset's seed data.
+    const { projected } = projectAssetFromSources([
+      { sourceKind: target.sourceKind, inferred: target.inferred, observed: target.observed as Record<string, unknown> | null },
+    ]);
+
+    // Asset-tag + assetType per source kind. Mirrors the discovery code's
+    // create-time conventions so the rest of the codebase finds the new
+    // Asset via legacy tag-based lookups during the Phase 4 transition.
+    let assetTag: string | null = null;
+    let assetType: "firewall" | "switch" | "access_point" | "workstation" | "other" = "other";
+    const tagSet = new Set<string>(["split-from-asset", "auto-discovered"]);
+    if (target.sourceKind === "entra") {
+      assetTag = `entra:${target.externalId}`;
+      assetType = "workstation";
+      tagSet.add("entraid");
+    } else if (target.sourceKind === "intune") {
+      assetTag = `entra:${target.externalId}`; // intune devices share the entra namespace
+      assetType = "workstation";
+      tagSet.add("entraid");
+      tagSet.add("intune");
+    } else if (target.sourceKind === "ad") {
+      assetTag = `ad:${target.externalId}`;
+      assetType = "workstation";
+      tagSet.add("activedirectory");
+      tagSet.add(`ad-guid:${target.externalId}`);
+    } else if (target.sourceKind === "fortigate-firewall") {
+      assetTag = `fgt:${target.externalId}`;
+      assetType = "firewall";
+      tagSet.add("fortigate");
+    } else if (target.sourceKind === "fortiswitch") {
+      assetType = "switch";
+      tagSet.add("fortiswitch");
+    } else if (target.sourceKind === "fortiap") {
+      assetType = "access_point";
+      tagSet.add("fortiap");
+    }
+
+    // Manufacturer fallback — projection only gives "Fortinet" for fortinet
+    // sources; AD/Entra don't carry hardware vendor on their own.
+    const manufacturer = projected.manufacturer ?? (assetType === "firewall" || assetType === "switch" || assetType === "access_point" ? "Fortinet" : null);
+
+    const newAssetData: Record<string, unknown> = {
+      hostname: projected.hostname,
+      assetTag,
+      assetType,
+      status: "active",
+      statusChangedAt: new Date(),
+      statusChangedBy: req.session?.username || "system",
+      os: projected.os,
+      osVersion: projected.osVersion,
+      serialNumber: projected.serialNumber,
+      manufacturer,
+      model: projected.model,
+      learnedLocation: projected.learnedLocation,
+      ipAddress: projected.ipAddress,
+      latitude: projected.latitude,
+      longitude: projected.longitude,
+      tags: Array.from(tagSet),
+      notes: `Split from asset ${originalAsset.hostname || originalAsset.id} — ${target.sourceKind} source detached on ${new Date().toISOString()}`,
+      ...(target.integrationId ? { discoveredByIntegrationId: target.integrationId } : {}),
+      createdBy: req.session?.username || null,
+    };
+
+    // Two-step: create the new Asset, then re-bind the source row. Done in a
+    // transaction so we never leave an orphan AssetSource pointing at a
+    // never-created Asset on partial failure.
+    const result = await prisma.$transaction(async (tx) => {
+      const newAsset = await tx.asset.create({ data: newAssetData as any });
+      await tx.assetSource.update({
+        where: { id: target.id },
+        data: { assetId: newAsset.id },
+      });
+      return { newAsset };
+    });
+
+    logEvent({
+      action: "asset.split",
+      resourceType: "asset",
+      resourceId: id,
+      resourceName: originalAsset.hostname || undefined,
+      actor: req.session?.username,
+      level: "info",
+      message: `Split ${target.sourceKind} source (externalId ${target.externalId}) off asset ${originalAsset.hostname || id} → new asset ${result.newAsset.id}`,
+      details: {
+        originalAssetId: id,
+        newAssetId: result.newAsset.id,
+        sourceId: target.id,
+        sourceKind: target.sourceKind,
+        externalId: target.externalId,
+      },
+    });
+
+    res.json({
+      originalAssetId: id,
+      newAssetId: result.newAsset.id,
+      movedSourceId: target.id,
+      newAsset: result.newAsset,
+    });
   } catch (err) {
     next(err);
   }

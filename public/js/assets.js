@@ -563,6 +563,32 @@ async function releaseAssetQuarantine(id) {
   }
 }
 
+// Phase 3a recovery action — admin-only Split button on each Sources card.
+// Detaches the chosen source onto a freshly-created asset; downstream FKs
+// (monitoring, IP history, sightings, quarantine) stay on the original.
+async function splitAssetSource(assetId, sourceId, sourceLabel) {
+  var ok = await showConfirm(
+    'Split "' + sourceLabel + '" off onto a new asset?\n\n' +
+    'A new asset will be created with this source\'s data only. ' +
+    'Monitoring, IP history, sightings, and quarantine settings stay on the current asset.\n\n' +
+    'Use this to undo a bad merge — the new asset starts clean.'
+  );
+  if (!ok) return;
+  try {
+    var result = await api.assets.splitSource(assetId, sourceId);
+    showToast('Source split — new asset created');
+    // Refresh the assets table and re-open the asset details modal so the
+    // operator can verify the moved source landed on the new row.
+    await loadAssets();
+    if (result && result.newAssetId) {
+      window.location.hash = 'view=asset:' + result.newAssetId;
+      openViewModal(result.newAssetId);
+    }
+  } catch (err) {
+    showToast(err.message || 'Split failed', 'error');
+  }
+}
+
 async function bulkQuarantineAssets() {
   var ids = Array.from(_assetsSelected);
   if (!ids.length) return;
@@ -1471,7 +1497,7 @@ async function openViewModal(id) {
     } catch (err) {
       console.warn("Failed to load asset sources", err);
     }
-    tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources) });
+    tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id) });
     // SNMP Walk tab — admin-only, mirrors the backend gate. Loads credentials
     // before render so the picker isn't empty on first paint.
     if (isAdmin()) {
@@ -6064,10 +6090,14 @@ function _formatSourceObservedValue(v) {
   return '<code class="mono" style="font-size:0.78rem">' + escapeHtml(JSON.stringify(v)) + '</code>';
 }
 
-function _assetSourcesTabHTML(sources) {
+function _assetSourcesTabHTML(sources, assetId) {
   if (!Array.isArray(sources) || sources.length === 0) {
     return '<div class="empty-state" style="padding:1rem">No source rows on file for this asset. Phase-1 backfill runs at startup; check the Events log if you expected entries here.</div>';
   }
+  // Split is admin-only and only meaningful when there's more than one
+  // source on the asset (the backend rejects splitting the only source).
+  // Manual sources can never be split (backend also rejects those).
+  var canSplit = isAdmin() && sources.length > 1;
   return sources.map(function (s) {
     var label = _assetSourceLabels[s.sourceKind] || s.sourceKind;
     var badges = [];
@@ -6077,7 +6107,13 @@ function _assetSourcesTabHTML(sources) {
     if (s.integration) {
       badges.push('<span class="badge badge-active" title="' + escapeHtml(s.integration.type) + '">' + escapeHtml(s.integration.name) + '</span>');
     }
-    var headerRight = badges.length ? '<div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center">' + badges.join("") + '</div>' : '';
+    var splitButton = "";
+    if (canSplit && s.sourceKind !== "manual") {
+      splitButton = '<button class="btn btn-sm btn-secondary" onclick="splitAssetSource(\'' + assetId + '\', \'' + s.id + '\', \'' + escapeHtml(label).replace(/'/g, "&#39;") + '\')" title="Detach this source onto a new asset (recovery action for bad merges)">Split</button>';
+    }
+    var headerRight = (badges.length || splitButton)
+      ? '<div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center">' + badges.join("") + splitButton + '</div>'
+      : '';
 
     var meta = [];
     if (s.syncedAt) meta.push("Synced " + escapeHtml(formatDate(s.syncedAt)));

@@ -193,6 +193,7 @@ const api = {
     verifyQuarantine:     (id)  => request("POST", `/assets/${id}/quarantine/verify`),
     getSightings:         (id)  => request("GET", `/assets/${id}/sightings`),
     getSources:           (id)  => request("GET", `/assets/${id}/sources`),
+    splitSource:          (id, sourceId) => request("POST", `/assets/${id}/sources/${sourceId}/split`),
     bulkQuarantine:       (ids, reason) => request("POST", "/assets/bulk-quarantine", reason !== undefined ? { ids, reason } : { ids }),
     bulkUnquarantine:     (ids) => request("POST", "/assets/bulk-quarantine/release", { ids }),
     getSightingSettings:  ()    => request("GET", "/assets/sighting-settings"),
