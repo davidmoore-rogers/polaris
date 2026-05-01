@@ -111,6 +111,7 @@ polaris/
 │   │   ├── dnsService.ts            # Reverse DNS lookup for assets
 │   │   ├── ouiService.ts            # MAC OUI lookup with admin overrides
 │   │   ├── eventArchiveService.ts   # Syslog (CEF) + SFTP/SCP event archival
+│   │   ├── projectionDriftService.ts # Phase 3b.0 shadow projection drift detection. After every successful AssetSource upsert, compares projectAssetFromSources output against current Asset values; logs disagreements to pino with `event: "asset.projection.drift"`. Best-effort and fire-and-forget.
 │   │   ├── serverSettingsService.ts # HTTPS, branding, backup/restore
 │   │   ├── credentialService.ts     # Named credential store (SNMP / WinRM / SSH) with masking + secret-preservation merge
 │   │   ├── manufacturerAliasService.ts # Manufacturer alias map: CRUD + cache + idempotent default seed + backfill of existing Asset/MibFile rows
@@ -151,6 +152,7 @@ polaris/
 │       ├── loginLockout.ts          # Per-username login-failure counter + temporary lockout
 │       ├── manufacturerNormalize.ts # Pure (no DB) cache + sync normalizeManufacturer(); imported by db.ts Prisma extension to canonicalize every Asset/MibFile manufacturer write
 │       ├── assetSourceDerivation.ts # Pure (no DB) deriveAssetSources(): turns an Asset row's legacy assetTag / `sid:` / `ad-guid:` tag conventions into the AssetSource rows it should own. Shared by the shadow-write Prisma extension in src/db.ts and the backfillAssetSources startup job.
+│       ├── assetProjection.ts       # Pure (no DB) projectAssetFromSources(): deterministic priority-driven projection of an asset's discovery-owned fields (hostname, serialNumber, manufacturer, model, os, osVersion, learnedLocation, ipAddress, latitude, longitude) from its AssetSource rows. Phase 3b.0: shadow-only (drift logged for analysis); Phase 3b.1 will cut Asset writes to use the projection as source of truth.
 │       ├── mfaPending.ts            # Short-lived pending-MFA tokens for two-phase login
 │       └── password.ts              # argon2id hash/verify helpers (with legacy bcrypt detection off)
 └── tests/

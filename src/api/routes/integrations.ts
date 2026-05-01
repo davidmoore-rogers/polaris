@@ -14,6 +14,7 @@ import * as entraId from "../../services/entraIdService.js";
 import * as activeDirectory from "../../services/activeDirectoryService.js";
 import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps } from "../../utils/cidr.js";
 import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveredVip, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
+import { detectAndLogDrift } from "../../services/projectionDriftService.js";
 import { logEvent } from "./events.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
@@ -1570,6 +1571,9 @@ async function upsertFortigateFirewallAssetSource(
   await prisma.assetSource.deleteMany({
     where: { assetId, sourceKind: "manual", externalId: assetId },
   });
+  // Phase 3b.0 shadow drift detection — non-blocking. See
+  // src/services/projectionDriftService.ts.
+  detectAndLogDrift(assetId, "fortigate-firewall");
 }
 
 // Source-shaped observed blob for managed FortiSwitch assets. Mirrors the
@@ -1637,6 +1641,8 @@ async function upsertFortinetInfraAssetSource(
   await prisma.assetSource.deleteMany({
     where: { assetId, sourceKind: "manual", externalId: assetId },
   });
+  // Phase 3b.0 shadow drift detection.
+  detectAndLogDrift(assetId, sourceKind);
 }
 
 // ─── Asset index — multi-key lookup for MAC, serial, hostname, IP ───────────
@@ -3479,6 +3485,12 @@ async function upsertEntraIntuneSources(
     },
   });
 
+  // Phase 3b.0 shadow drift detection. The kind passed here reflects which
+  // upsert path triggered the check — for hybrid devices, this fires under
+  // both "entra" and "intune" depending on which sources contributed,
+  // which is fine: drift detection is idempotent.
+  detectAndLogDrift(assetId, wantsEntra ? "entra" : "intune");
+
   // Belt-and-suspenders: if Entra didn't actually contribute to this device
   // (Intune-only) but a phase-1-backfilled entra source row exists with the
   // current deviceId — created because the legacy assetTag namespace lumped
@@ -4078,6 +4090,8 @@ async function upsertAdAssetSource(
       lastSeen,
     },
   });
+  // Phase 3b.0 shadow drift detection.
+  detectAndLogDrift(assetId, "ad");
 }
 
 // Build the AD sync's lookup index from AssetSource rows. Replaces the legacy
