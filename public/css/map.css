@@ -224,11 +224,20 @@
   }
 }
 
-/* CSS fallback for the topology fullscreen toggle when the browser doesn't
-   support the Fullscreen API (older Safari / iframe contexts). When native
-   fullscreen IS available, the browser already covers the viewport and
-   this class is unused. */
-.modal.topology-fullscreen {
+/* Topology fullscreen — covers BOTH the native Fullscreen API (`:fullscreen`
+   pseudo-class on the .modal element) AND the CSS-class fallback for older
+   browsers (`.modal.topology-fullscreen`). Without these overrides, the
+   base .modal rules (max-width: min(92vw, 1360px), max-height: 85vh) and
+   the topology-layout height (80vh) keep the modal capped to its windowed
+   size even when the browser swaps to fullscreen, leaving black bars
+   around it.
+
+   Padded with the modal-xl selector to win specificity against
+   `.modal.modal-xl { width: min(92vw, 1360px); }`. */
+.modal:fullscreen,
+.modal.modal-xl:fullscreen,
+.modal.topology-fullscreen,
+.modal.modal-xl.topology-fullscreen {
   position: fixed;
   inset: 0;
   width: 100vw;
@@ -236,4 +245,14 @@
   max-width: none;
   max-height: none;
   border-radius: 0;
+}
+.modal:fullscreen .modal-body,
+.modal.topology-fullscreen .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.modal:fullscreen .topology-layout,
+.modal.topology-fullscreen .topology-layout {
+  height: 100%;
+  min-height: 0;
 }

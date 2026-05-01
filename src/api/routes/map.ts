@@ -442,10 +442,43 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     };
     const lldpEdges: LldpEdge[] = [];
 
+    // Render-time fallback for stale LLDP rows whose `matchedAssetId` is
+    // null but whose `systemName` actually corresponds to a sibling we
+    // already have on the graph. The persist-time match in
+    // `monitoringService.persistLldpNeighbors` resolves these via an
+    // FQDN/short-form-aware index, but rows persisted before that fix
+    // landed will keep showing as ghost nodes until the next system-info
+    // pass overwrites them. This map covers the gap so a duplicate-named
+    // sibling is dropped instead of double-rendered as an orange ghost.
+    const siblingByHostname = new Map<string, string /* assetId */>();
+    const idxSibling = (raw: string | null | undefined, assetId: string) => {
+      if (!raw) return;
+      const lower = raw.toLowerCase().trim();
+      if (!lower) return;
+      if (!siblingByHostname.has(lower)) siblingByHostname.set(lower, assetId);
+      const dotIdx = lower.indexOf(".");
+      if (dotIdx > 0) {
+        const shortForm = lower.slice(0, dotIdx);
+        if (!siblingByHostname.has(shortForm)) siblingByHostname.set(shortForm, assetId);
+      }
+    };
+    idxSibling(fg.hostname, fg.id);
+    for (const s of switches) idxSibling(s.hostname, s.id);
+    for (const a of aps) idxSibling(a.hostname, a.id);
+
     for (const n of lldpRows) {
       let targetId: string;
       let targetLabel: string;
       let targetIsAsset: boolean;
+      // Stale-row fallback: persist-time match returned null, but the
+      // systemName resolves to a sibling now (FQDN ↔ short-form). Treat
+      // exactly like a sibling-match — controller data has the edge.
+      if (!(n.matchedAsset && n.matchedAsset.id) && n.systemName) {
+        const lower = n.systemName.toLowerCase().trim();
+        const siblingId = siblingByHostname.get(lower)
+          ?? (lower.includes(".") ? siblingByHostname.get(lower.split(".")[0]) : undefined);
+        if (siblingId) continue;
+      }
       if (n.matchedAsset && n.matchedAsset.id) {
         // Skip neighbors that resolve back to a sibling node — fortinetTopology
         // has already drawn that edge from authoritative controller data, so a

@@ -441,7 +441,18 @@
   }
 
   function closeTopology() {
+    // Exit native fullscreen first — otherwise the browser stays in
+    // fullscreen mode showing nothing after the modal hides, and the user
+    // has to hit Esc / their OS gesture to recover.
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      var exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (exit) {
+        try { exit.call(document); } catch (e) {}
+      }
+    }
     var overlay = document.getElementById("topology-overlay");
+    var modal = overlay && overlay.querySelector(".modal");
+    if (modal) modal.classList.remove("topology-fullscreen");
     overlay.classList.remove("open");
     overlay.setAttribute("aria-hidden", "true");
     if (cyInstance) {
