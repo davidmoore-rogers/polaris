@@ -1700,6 +1700,8 @@ class AssetIndex {
 
   findByMac(mac: string) { return this.byMac.get(mac.toUpperCase()); }
 
+  findById(id: string) { return this.byId.get(id); }
+
   /**
    * Broad match: MAC → hostname → IP.
    * Pass `{ allowIpFallback: false }` for ephemeral-identity sources (DHCP leases)
@@ -3253,7 +3255,35 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       enrichmentUpdates.set(assetId, existing ? { ...existing, ...data } : data);
     };
 
-    // Switch-port enrichment.
+    // Switch-port enrichment with port-rank attribution.
+    //
+    // The same MAC commonly appears on multiple switch ports because
+    // FortiSwitches learn it on every port that observed traffic from the
+    // device — typically the access port the device is plugged into AND
+    // every upstream trunk between that switch and the FortiGate. Stamping
+    // the LAST row seen would put endpoints on whichever upstream port
+    // happened to come last in the iteration, which is wrong. Instead we
+    // rank ports by their MAC count (cardinality of unique MACs learned
+    // on the port across the whole site) and pick the LOWEST-rank port
+    // for each asset — fewer MACs = closer to the leaf = real attachment
+    // point. An access port with one device sees 1 MAC; an uplink trunk
+    // with 50 devices behind it sees 50. `isFortilinkPeer` rows are
+    // filtered out earlier as a separate "this is a FortiLink uplink"
+    // signal, but the rank logic catches every other trunk-vs-access
+    // ambiguity uniformly.
+    const portMacCounts = new Map<string /* switchId/port */, Set<string /* mac */>>();
+    for (const row of result.switchMacTable || []) {
+      if (row.isFortilinkPeer) continue;
+      if (!row.mac || !row.switchId || !row.portName) continue;
+      const portKey = `${row.switchId}/${row.portName}`;
+      let bucket = portMacCounts.get(portKey);
+      if (!bucket) { bucket = new Set(); portMacCounts.set(portKey, bucket); }
+      bucket.add(row.mac.toUpperCase());
+    }
+    // Walk again, picking the lowest-rank port per asset. lastSeen-style
+    // tiebreaker isn't applied — when two ports tie, the first to win
+    // sticks (deterministic from row order).
+    const assetBestPort = new Map<string /* assetId */, { portLabel: string; rank: number }>();
     for (const row of result.switchMacTable || []) {
       if (row.isFortilinkPeer) continue;
       if (!row.mac || !row.switchId || !row.portName) continue;
@@ -3265,9 +3295,18 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // managed switch or FortiGate would conflate roles.
       if (asset.assetType === "switch" || asset.assetType === "firewall") continue;
       const portLabel = `${row.switchId}/${row.portName}`;
-      if (asset.lastSeenSwitch !== portLabel) {
-        queueUpdate(asset.id, { lastSeenSwitch: portLabel });
-        asset.lastSeenSwitch = portLabel;
+      const rank = portMacCounts.get(portLabel)?.size ?? 1;
+      const best = assetBestPort.get(asset.id);
+      if (!best || rank < best.rank) {
+        assetBestPort.set(asset.id, { portLabel, rank });
+      }
+    }
+    for (const [assetId, pick] of assetBestPort) {
+      const asset = assetIdx.findById(assetId);
+      if (!asset) continue;
+      if (asset.lastSeenSwitch !== pick.portLabel) {
+        queueUpdate(assetId, { lastSeenSwitch: pick.portLabel });
+        asset.lastSeenSwitch = pick.portLabel;
       }
     }
 
