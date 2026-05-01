@@ -26,6 +26,8 @@ export type DerivedSourceKind =
   | "entra"
   | "ad"
   | "fortigate-firewall"
+  | "fortiswitch"
+  | "fortiap"
   | "manual";
 
 export interface DerivedSource {
@@ -106,25 +108,44 @@ export function deriveAssetSources(asset: AssetSnapshot): DerivedSource[] {
     }
   }
 
-  // Fallback path for pre-`fgt:`-tag firewalls: any asset whose discovery
-  // signature reads as a Fortinet firewall with a non-empty serialNumber.
-  // The `fgt:` assetTag was added later, so there are existing firewalls in
-  // the wild without it. The next FMG/FortiGate discovery run will stamp
-  // the tag for forward compatibility; this fallback covers the gap so
-  // backfill produces a proper fortigate-firewall source row immediately.
+  // Fallback path for Fortinet infrastructure assets that don't carry an
+  // assetTag prefix today. FortiGate firewalls have the `fgt:` tag (added
+  // later, so pre-tag firewalls also rely on this fallback); managed
+  // FortiSwitch and FortiAP assets have no tag at all and identify via
+  // `assetType` + `manufacturer="Fortinet"` + `serialNumber`. Each maps to
+  // its own sourceKind. The next FMG/FortiGate discovery run writes the
+  // explicit AssetSource row with the rich observed blob; this fallback
+  // covers the gap so backfill produces the right source row immediately.
   if (
     out.length === 0 &&
-    asset.assetType === "firewall" &&
     (asset.manufacturer || "").toLowerCase() === "fortinet" &&
     asset.serialNumber
   ) {
-    out.push({
-      sourceKind: "fortigate-firewall",
-      externalId: asset.serialNumber,
-      integrationId: asset.discoveredByIntegrationId,
-      inferred: false,
-      observed: buildFortigateFirewallObserved(asset, asset.serialNumber),
-    });
+    if (asset.assetType === "firewall") {
+      out.push({
+        sourceKind: "fortigate-firewall",
+        externalId: asset.serialNumber,
+        integrationId: asset.discoveredByIntegrationId,
+        inferred: false,
+        observed: buildFortigateFirewallObserved(asset, asset.serialNumber),
+      });
+    } else if (asset.assetType === "switch") {
+      out.push({
+        sourceKind: "fortiswitch",
+        externalId: asset.serialNumber,
+        integrationId: asset.discoveredByIntegrationId,
+        inferred: false,
+        observed: buildFortiswitchObserved(asset, asset.serialNumber),
+      });
+    } else if (asset.assetType === "access_point") {
+      out.push({
+        sourceKind: "fortiap",
+        externalId: asset.serialNumber,
+        integrationId: asset.discoveredByIntegrationId,
+        inferred: false,
+        observed: buildFortiapObserved(asset, asset.serialNumber),
+      });
+    }
   }
 
   // 2. Recover an AD source when Entra has taken over the assetTag but a
@@ -212,5 +233,27 @@ function buildFortigateFirewallObserved(asset: AssetSnapshot, serial: string): R
     mgmtIp: asset.ipAddress,
     latitude: asset.latitude,
     longitude: asset.longitude,
+  };
+}
+
+function buildFortiswitchObserved(asset: AssetSnapshot, serial: string): Record<string, unknown> {
+  return {
+    serial,
+    switchId: asset.hostname,
+    model: asset.model,
+    osVersion: asset.osVersion,
+    mgmtIp: asset.ipAddress,
+    controllerFortigate: asset.learnedLocation,
+  };
+}
+
+function buildFortiapObserved(asset: AssetSnapshot, serial: string): Record<string, unknown> {
+  return {
+    serial,
+    name: asset.hostname,
+    model: asset.model,
+    osVersion: asset.osVersion,
+    mgmtIp: asset.ipAddress,
+    controllerFortigate: asset.learnedLocation,
   };
 }

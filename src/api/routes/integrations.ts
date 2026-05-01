@@ -1572,6 +1572,73 @@ async function upsertFortigateFirewallAssetSource(
   });
 }
 
+// Source-shaped observed blob for managed FortiSwitch assets. Mirrors the
+// per-source JSON shape sketched in CLAUDE.md ("Per-source observed shapes
+// / sourceKind: fortiswitch"). Companion to the firewall blob above.
+function buildFortiswitchObservedBlob(
+  sw: { device?: string; name?: string; serial?: string; ipAddress?: string; fgtInterface?: string; osVersion?: string; joinTime?: number; state?: string; connected?: boolean },
+  syncedAt: Date,
+): Record<string, unknown> {
+  return {
+    kind: "fortiswitch",
+    syncedAt: syncedAt.toISOString(),
+    serial: sw.serial || null,
+    switchId: sw.name || null,
+    model: "FortiSwitch",
+    osVersion: sw.osVersion || null,
+    mgmtIp: sw.ipAddress || null,
+    controllerFortigate: sw.device || null,
+    uplinkInterface: sw.fgtInterface || null,
+    state: sw.state || null,
+    connected: typeof sw.connected === "boolean" ? sw.connected : null,
+    joinTime: Number.isFinite(sw.joinTime) && sw.joinTime ? new Date(sw.joinTime * 1000).toISOString() : null,
+  };
+}
+
+// Source-shaped observed blob for managed FortiAP assets.
+function buildFortiapObservedBlob(
+  ap: { device?: string; name?: string; serial?: string; model?: string; ipAddress?: string; baseMac?: string; status?: string; osVersion?: string; peerSwitch?: string; peerPort?: string; peerVlan?: number },
+  syncedAt: Date,
+): Record<string, unknown> {
+  return {
+    kind: "fortiap",
+    syncedAt: syncedAt.toISOString(),
+    serial: ap.serial || null,
+    name: ap.name || null,
+    model: ap.model || null,
+    osVersion: ap.osVersion || null,
+    mgmtIp: ap.ipAddress || null,
+    baseMac: ap.baseMac || null,
+    status: ap.status || null,
+    controllerFortigate: ap.device || null,
+    parentSwitch: ap.peerSwitch || null,
+    parentPort: ap.peerPort || null,
+    parentVlan: typeof ap.peerVlan === "number" ? ap.peerVlan : null,
+  };
+}
+
+// Generic upsert for the fortiswitch/fortiap source kinds. Same shape as the
+// firewall helper — best-effort, sweeps any phantom "manual" source row that
+// the phase-1 backfill may have produced before this sourceKind was wired.
+async function upsertFortinetInfraAssetSource(
+  sourceKind: "fortiswitch" | "fortiap",
+  assetId: string,
+  integrationId: string,
+  serial: string,
+  observed: Record<string, unknown>,
+  syncedAt: Date,
+  lastSeen: Date,
+): Promise<void> {
+  await prisma.assetSource.upsert({
+    where: { sourceKind_externalId: { sourceKind, externalId: serial } },
+    create: { assetId, sourceKind, externalId: serial, integrationId, observed: observed as any, inferred: false, syncedAt, firstSeen: lastSeen, lastSeen },
+    update: { assetId, integrationId, observed: observed as any, inferred: false, syncedAt, lastSeen },
+  });
+  await prisma.assetSource.deleteMany({
+    where: { assetId, sourceKind: "manual", externalId: assetId },
+  });
+}
+
 // ─── Asset index — multi-key lookup for MAC, serial, hostname, IP ───────────
 class AssetIndex {
   private byId = new Map<string, any>();
@@ -2212,6 +2279,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         };
         clampAcquiredToLastSeen(updateData, existingAsset);
         await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
+        // Explicit fortiswitch AssetSource upsert with rich observed blob.
+        if (sw.serial) {
+          try {
+            const syncedAt = new Date(now);
+            const observed = buildFortiswitchObservedBlob(sw, syncedAt);
+            await upsertFortinetInfraAssetSource("fortiswitch", existingAsset.id, integrationId, sw.serial, observed, syncedAt, syncedAt);
+          } catch (err: any) {
+            syncLog("error", `Updated FortiSwitch asset ${sw.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
+          }
+        }
         if (sw.ipAddress) existingAsset.ipAddress = sw.ipAddress;
         if (reactivate) existingAsset.status = swStatus;
         assetIdx.reindex(existingAsset);
@@ -2239,6 +2316,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         };
         clampAcquiredToLastSeen(createData);
         const newAsset = await prisma.asset.create({ data: createData as any });
+        // Explicit fortiswitch AssetSource upsert.
+        if (sw.serial) {
+          try {
+            const syncedAt = new Date(now);
+            const observed = buildFortiswitchObservedBlob(sw, syncedAt);
+            await upsertFortinetInfraAssetSource("fortiswitch", newAsset.id, integrationId, sw.serial, observed, syncedAt, syncedAt);
+          } catch (err: any) {
+            syncLog("error", `Created FortiSwitch asset ${sw.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
+          }
+        }
         assetIdx.add(newAsset);
         assetNames.push(sw.name || sw.serial);
       }
@@ -2321,6 +2408,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         };
         clampAcquiredToLastSeen(updateData, existingAsset);
         await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
+        // Explicit fortiap AssetSource upsert.
+        if (ap.serial) {
+          try {
+            const syncedAt = new Date(now);
+            const observed = buildFortiapObservedBlob(ap, syncedAt);
+            await upsertFortinetInfraAssetSource("fortiap", existingAsset.id, integrationId, ap.serial, observed, syncedAt, syncedAt);
+          } catch (err: any) {
+            syncLog("error", `Updated FortiAP asset ${ap.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
+          }
+        }
         if (resolvedIp) existingAsset.ipAddress = resolvedIp;
         if (existingAsset.status === "decommissioned") existingAsset.status = "active";
         assetIdx.reindex(existingAsset);
@@ -2349,6 +2446,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             tags: ["fortiap", "auto-discovered"],
           },
         });
+        // Explicit fortiap AssetSource upsert.
+        if (ap.serial) {
+          try {
+            const syncedAt = new Date(now);
+            const observed = buildFortiapObservedBlob(ap, syncedAt);
+            await upsertFortinetInfraAssetSource("fortiap", newAsset.id, integrationId, ap.serial, observed, syncedAt, syncedAt);
+          } catch (err: any) {
+            syncLog("error", `Created FortiAP asset ${ap.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
+          }
+        }
         assetIdx.add(newAsset);
         assetNames.push(ap.name || ap.serial);
       }
