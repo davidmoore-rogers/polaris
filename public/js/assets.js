@@ -331,13 +331,13 @@ function renderAssetsPage() {
       '<td>' + escapeHtml(a.location || a.learnedLocation || "-") + '</td>' +
       '<td>' + (a.lastSeen ? formatDate(a.lastSeen) : "-") + '</td>' +
       '<td class="actions">' +
+        (canManageAssets() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + a.id + '\')">Edit</button>' : '') +
         _viewLeaseActionHTML(a) +
         _quarantineActionHTML(a) +
-        (canManageAssets() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + a.id + '\')">Edit</button>' +
-        (a.ipAddress && !a.dnsName ? '<button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.ipAddress) + '\')" title="Reverse DNS lookup (IP → hostname)">DNS</button>' : '') +
-        (!a.ipAddress && (a.dnsName || a.hostname) ? '<button class="btn btn-sm btn-secondary" onclick="singleForwardLookup(\'' + a.id + '\', \'' + escapeHtml(a.dnsName || a.hostname) + '\')" title="Forward DNS lookup (hostname → IP)">PTR</button>' : '') +
-        (a.macAddress && !a.manufacturer ? '<button class="btn btn-sm btn-secondary" onclick="singleOuiLookup(\'' + a.id + '\', \'' + escapeHtml(a.macAddress) + '\')" title="OUI manufacturer lookup">OUI</button>' : '') +
-        '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.assetTag || a.ipAddress || "this asset") + '\')">Del</button>' : '') +
+        (canManageAssets() ?
+          (a.macAddress && !a.manufacturer ? '<button class="btn btn-sm btn-secondary" onclick="singleOuiLookup(\'' + a.id + '\', \'' + escapeHtml(a.macAddress) + '\')" title="OUI manufacturer lookup">OUI</button>' : '') +
+          '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.assetTag || a.ipAddress || "this asset") + '\')">Del</button>'
+        : '') +
       '</td></tr>';
   }).join("");
   tbody.querySelectorAll('.mac-hover-trigger').forEach(function (el) {
