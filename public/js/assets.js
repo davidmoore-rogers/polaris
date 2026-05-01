@@ -6090,12 +6090,18 @@ function _assetSourcesTabHTML(sources) {
       .filter(function (k) { return !_assetSourceHiddenObservedKeys[k]; })
       .map(function (k) {
         return '<tr>' +
-          '<th style="text-align:left;padding:0.25rem 0.6rem 0.25rem 0;color:var(--color-text-secondary);font-weight:500;white-space:nowrap;vertical-align:top">' + escapeHtml(_humanizeSourceObservedKey(k)) + '</th>' +
-          '<td style="padding:0.25rem 0">' + _formatSourceObservedValue(observed[k]) + '</td>' +
+          '<th style="text-align:left;padding:0.25rem 0.6rem 0.25rem 0;color:var(--color-text-secondary);font-weight:500;vertical-align:top;word-break:break-word">' + escapeHtml(_humanizeSourceObservedKey(k)) + '</th>' +
+          '<td style="padding:0.25rem 0;vertical-align:top;word-break:break-word">' + _formatSourceObservedValue(observed[k]) + '</td>' +
         '</tr>';
       }).join("");
+    // table-layout:fixed + an explicit colgroup makes the label column the
+    // same width on every card, so values align vertically across sources
+    // even when the longest label in each source differs.
     var observedTable = rows
-      ? '<table style="width:100%;font-size:0.85rem;border-collapse:collapse">' + rows + '</table>'
+      ? '<table style="width:100%;font-size:0.85rem;border-collapse:collapse;table-layout:fixed">' +
+          '<colgroup><col style="width:220px"><col></colgroup>' +
+          rows +
+        '</table>'
       : '<em style="color:var(--color-text-secondary)">No observed fields recorded.</em>';
 
     return (
