@@ -1483,43 +1483,42 @@ export async function discoverDhcpSubnets(
     }
 
     // Step 3d.6: Geo coordinates fallback — only runs when FMG's device record
-    // didn't already provide coords (see `fmgCoordsOk` above). Reads the live
-    // FortiGate `config system global` via FMG's proxy. CMDB endpoints filter
-    // with `?fields=` (not `?format=`, which is monitor-only); passing the
-    // wrong param on older FortiOS silently returns the whole object anyway.
+    // didn't already provide coords (see `fmgCoordsOk` above). Reads the
+    // FortiGate's `config system global` from FMG's CMDB **natively**
+    // (`/pm/config/device/<name>/global/system/global`) — no `/sys/proxy/json`
+    // wrapper. config system global is a CMDB object so FMG already has it
+    // in sync with the device; querying natively avoids the proxy mode's
+    // forced concurrency=1 and removes one round-trip per device per
+    // discovery cycle.
     if (localDevice.latitude === undefined || localDevice.longitude === undefined) {
       try {
-        const geoPayload: JsonRpcRequest = {
-          id: 13,
-          method: "exec",
-          params: [{
-            url: `/sys/proxy/json`,
-            data: {
-              target: [`/adom/${adom}/device/${deviceName}`],
-              action: "get",
-              resource: "/api/v2/cmdb/system/global",
-            },
-          }],
-        };
-        const geoRes = await rpc(baseUrl, geoPayload, apiUser, apiToken, verifySsl, signal);
-        const geoData = geoRes.result?.[0]?.data;
-        const geoEntry = Array.isArray(geoData) ? geoData[0] : geoData as any;
-        const geoStatus = geoEntry?.status?.code ?? 0;
-        const geoResults = geoEntry?.response?.results;
-        if (geoStatus === 0 && geoResults && typeof geoResults === "object" && !Array.isArray(geoResults)) {
-          const lat = parseFloat(String(geoResults["gui-device-latitude"] ?? geoResults.latitude ?? ""));
-          const lng = parseFloat(String(geoResults["gui-device-longitude"] ?? geoResults.longitude ?? ""));
+        const geoRes = await rpc(
+          baseUrl,
+          {
+            id: 13,
+            method: "get",
+            params: [{
+              url: `/pm/config/device/${deviceName}/global/system/global`,
+              fields: ["gui-device-latitude", "gui-device-longitude", "latitude", "longitude"],
+            }],
+          },
+          apiUser, apiToken, verifySsl, signal,
+        );
+        const geoResults = geoRes.result?.[0]?.data;
+        if (geoResults && typeof geoResults === "object" && !Array.isArray(geoResults)) {
+          const lat = parseFloat(String((geoResults as any)["gui-device-latitude"] ?? (geoResults as any).latitude ?? ""));
+          const lng = parseFloat(String((geoResults as any)["gui-device-longitude"] ?? (geoResults as any).longitude ?? ""));
           if (Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0)) {
             localDevice.latitude = lat;
             localDevice.longitude = lng;
-            log("discover.geo", "info", `${deviceName}: Resolved coordinates from system/global: ${lat.toFixed(4)}, ${lng.toFixed(4)}`, deviceName);
+            log("discover.geo", "info", `${deviceName}: Resolved coordinates from FMG CMDB: ${lat.toFixed(4)}, ${lng.toFixed(4)}`, deviceName);
           } else {
             // Surface where coords are (or aren't) so the operator can locate them
             const keys = Object.keys(geoResults).slice(0, 30).join(", ");
-            log("discover.geo", "info", `${deviceName}: No latitude/longitude in system/global (keys: ${keys || "(empty)"})`, deviceName);
+            log("discover.geo", "info", `${deviceName}: No latitude/longitude in FMG CMDB system/global (keys: ${keys || "(empty)"})`, deviceName);
           }
         } else {
-          log("discover.geo", "info", `${deviceName}: system/global proxy returned status ${geoStatus} — check API admin trusthost/scope`, deviceName);
+          log("discover.geo", "info", `${deviceName}: FMG CMDB system/global returned no usable result — check FMG's CMDB sync state for this device`, deviceName);
         }
       } catch (err: any) {
         log("discover.geo", "info", `${deviceName}: Geo lookup skipped — ${err.message || "Unknown error"}`, deviceName);
