@@ -135,6 +135,7 @@ polaris/
 │   │   ├── monitorAssets.ts          # 5s tick: probe due assets via runMonitorPass; daily sample-retention prune
 │   │   ├── normalizeManufacturers.ts # One-shot startup: seed default aliases, load cache, backfill existing Asset/MibFile rows
 │   │   ├── migrateMonitorTransport.ts # One-shot startup: back-fill Integration.config.monitorResponseTimeSource=snmp where legacy monitorCredentialId implied SNMP
+│   │   ├── backfillAssetSources.ts  # One-shot startup (Phase 1 of multi-source asset model): walks every Asset and upserts AssetSource rows from the legacy `assetTag` / `sid:` / `ad-guid:` tag conventions. Idempotent; pairs with the shadow-write extension in src/db.ts.
 │   │   └── resolveStaleReservationConflicts.ts # One-shot startup: auto-reject pending reservation Conflict rows whose proposed values now match the live Reservation (legacy lingering conflicts)
 │   ├── setup/
 │   │   ├── setupRoutes.ts           # First-run setup wizard routes
@@ -149,6 +150,7 @@ polaris/
 │       ├── assetInvariants.ts       # Write-time clamp: acquiredAt <= lastSeen
 │       ├── loginLockout.ts          # Per-username login-failure counter + temporary lockout
 │       ├── manufacturerNormalize.ts # Pure (no DB) cache + sync normalizeManufacturer(); imported by db.ts Prisma extension to canonicalize every Asset/MibFile manufacturer write
+│       ├── assetSourceDerivation.ts # Pure (no DB) deriveAssetSources(): turns an Asset row's legacy assetTag / `sid:` / `ad-guid:` tag conventions into the AssetSource rows it should own. Shared by the shadow-write Prisma extension in src/db.ts and the backfillAssetSources startup job.
 │       ├── mfaPending.ts            # Short-lived pending-MFA tokens for two-phase login
 │       └── password.ts              # argon2id hash/verify helpers (with legacy bcrypt detection off)
 └── tests/
@@ -422,6 +424,20 @@ AssetIpHistory                  -- Auto-populated log of every IP each asset has
   firstSeen     DateTime
   lastSeen      DateTime
   @@unique([assetId, ip])       -- one row per (asset, ip); lastSeen and source update on re-sighting
+
+AssetSource                     -- Per-discovery-source view of an asset (Phase 1 of the multi-source asset model)
+  id            UUID PK
+  assetId       UUID FK → Asset (cascade delete)
+  sourceKind    String          -- Phase 1: "entra" | "ad" | "fortigate-firewall" | "manual". Phase 2 cutover adds "intune" | "fortiswitch" | "fortiap" | "fortigate-dhcp-host" | ...
+  externalId    String          -- Source-natural identity: entra.deviceId / ad.objectGUID / fortigate-firewall.serial. Manual sources use Asset.id itself.
+  integrationId UUID? FK → Integration (set null on delete) -- null for "manual" rows and for inferred rows where the integration linkage couldn't be reconstructed
+  observed      Json            -- Source-shaped raw observation blob (see "Per-source observed shapes" below). Stays as the source said it; the Asset row is the merged projection across sources.
+  inferred      Boolean         @default(false) -- true when the row was synthesized by the Phase-1 backfill from legacy assetTag / sid: / ad-guid: tags rather than discovered fresh; cleared on next real run
+  syncedAt      DateTime?       -- last successful refresh from this source (drives staleness)
+  firstSeen     DateTime        -- when Polaris first recorded this source
+  lastSeen      DateTime        -- last time this source reported the device as active
+  @@unique([sourceKind, externalId]) -- (sourceKind, externalId) is the dedupe key — re-runs upsert in place
+  -- Phase 1 populates this from existing assetTag / "sid:" / "ad-guid:" tags via the shadow-write Prisma extension in src/db.ts plus the one-shot backfillAssetSources startup job. Discovery still writes to Asset directly; AssetSource is shadowed alongside until Phase 2 cuts integrations over to write here as the source of truth. The unified Asset row stays the stable FK target for everything downstream (monitoring, ip-history, sightings, quarantine).
 
 AssetMonitorSample              -- Time-series of monitoring probe results; written by the monitorAssets job
   id            UUID PK
@@ -1029,6 +1045,7 @@ Active Directory and Entra ID identify the same hybrid-joined device with two un
 | `clampAssetAcquiredAt` | Once at startup | Clamp `acquiredAt` down to `lastSeen` on any Asset row where the invariant was violated |
 | `normalizeManufacturers` | Once at startup | Idempotent: seed default manufacturer aliases on a fresh install, load the in-memory cache used by the Prisma extension in `src/db.ts`, and rewrite any existing `Asset.manufacturer` / `MibFile.manufacturer` values that the alias map canonicalizes to something different. Mutations to the alias map at runtime (`POST/PUT /manufacturer-aliases`) re-run `applyAliasesToExistingRows()` in the background so admin edits propagate to historical data without a restart. |
 | `migrateMonitorTransport` | Once at startup | Idempotent back-fill of `Integration.config.monitorResponseTimeSource = "snmp"` for any FMG/FortiGate integration that has `monitorCredentialId` set but no explicit `monitorResponseTimeSource` toggle yet. Preserves the legacy implicit-SNMP-probe behaviour after upgrading to the explicit per-stream transport toggles. |
+| `backfillAssetSources` | Once at startup | Idempotent. Phase 1 of the multi-source asset model. Walks every Asset row and upserts `AssetSource` rows derived from the legacy `assetTag` / `sid:` / `ad-guid:` tag conventions (entra → "entra:" tag; ad → "ad:" tag; fortigate firewall → "fortigate:" tag; ad-guid breadcrumbs become `inferred=true` AD recovery rows; otherwise a single "manual" row keyed on Asset.id). Pairs with the shadow-write Prisma extension in `src/db.ts` which keeps the table fresh between restarts whenever an asset's `assetTag`, `tags`, or `discoveredByIntegrationId` change. Phase 2 will cut discovery over to write `AssetSource` directly as the source of truth. |
 | `resolveStaleReservationConflicts` | Once at startup | Idempotent cleanup. Auto-rejects pending reservation Conflict rows whose stored proposed values now match the live Reservation values on every field listed in `conflictFields` — i.e. conflicts that were raised by an old discovery run but where the values have since come back into sync. Pairs with the inline fix in `upsertConflict` that prevents new lingering conflicts going forward. |
 | `decommissionStaleAssets` | Every 24 hours | Move assets whose `lastSeen` is older than the configured inactivity threshold (months) to `decommissioned` status. Configured via Events → Settings → Assets tab; 0 disables. |
 | `flagStaleReservations` | Every 6 hours (and 30 s after startup) | Scans active `dhcp_reservation` rows for ones whose target client hasn't been seen actively holding the IP within the configured threshold (`reservation.staleAfterDays`, default 60, 0 disables). For each fresh transition into "stale," writes one `reservation.stale` Event at warning level and stamps `staleNotifiedAt` so the alert doesn't refire. The discovery sync clears `staleNotifiedAt` (and `staleSnoozedUntil`) when the IP is seen active again, so a reservation that comes back online and goes silent later re-arms cleanly. Cold-start safety: a `reservationStaleDetectionStartedAt` Setting is stamped on first run and used as a per-row baseline floor (`max(createdAt, detectionStartedAt)`) so the first scan after migration doesn't flood every existing dhcp_reservation row before discovery has had time to populate `lastSeenLeased`. Rows with `staleIgnored=true` are excluded permanently until an admin un-ignores. |

@@ -196,6 +196,7 @@ model Integration {
   discoveredAssets    Asset[] // Assets stamped with this integration's id (back-relation)
   pushedReservations  Reservation[]            @relation("ReservationPushedTo")
   fortigateSightings  AssetFortigateSighting[] // Back-relation: sightings recorded against this integration's discovered FortiGates
+  assetSources        AssetSource[] // Back-relation: per-source asset rows attributed to this integration
 
   @@index([type])
   @@index([enabled])
@@ -398,6 +399,7 @@ model Asset {
   ipsecTunnelSamples  AssetIpsecTunnelSample[]
   lldpNeighbors       AssetLldpNeighbor[]      @relation("AssetLldpNeighbors")
   lldpNeighborMatches AssetLldpNeighbor[]      @relation("AssetLldpNeighborMatch")
+  sources             AssetSource[]
 
   @@index([ipAddress])
   @@index([macAddress])
@@ -832,4 +834,60 @@ model ApiToken {
   @@index([revokedAt])
   @@index([expiresAt])
   @@map("api_tokens")
+}
+
+// Per-discovery-source view of an asset. The unified `Asset` row remains the
+// stable id everything else FKs to (monitoring, ip-history, sightings,
+// quarantine); AssetSource rows hang off Asset and capture what each source
+// independently said about the device. The merged display fields on Asset are
+// a projection across these rows — phase 1 just shadow-writes them from the
+// existing assetTag / "sid:" / "ad-guid:" tags so the table is populated and
+// shaped before discovery cutover (phase 2).
+//
+// Phase-1 sourceKind values: "entra" | "ad" | "fortigate-firewall" | "manual"
+// Future values (phase 2 cutover): "intune" | "fortiswitch" | "fortiap"
+//                                  | "fortigate-dhcp-host" | ...
+//
+// `(sourceKind, externalId)` is the natural dedupe key — entra.deviceId,
+// ad.objectGUID, fortigate-firewall.serial. Manual sources use the Asset.id
+// itself as externalId so they don't collide.
+model AssetSource {
+  id            String       @id @default(uuid())
+  assetId       String
+  asset         Asset        @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  sourceKind    String
+  externalId    String
+
+  // Originating integration. Null for "manual" rows and for phase-1 inferred
+  // rows (e.g. an AD source recovered from an "ad-guid:" tag where the AD
+  // integration linkage is no longer reconstructable).
+  integrationId String?
+  integration   Integration? @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+
+  // Source-shaped raw observation blob — see CLAUDE.md "Per-source observed
+  // shapes." Stays as the source said it; the Asset row is the merged
+  // projection across all sources.
+  observed      Json         @default("{}")
+
+  // True when synthesized by the phase-1 backfill from legacy assetTag /
+  // "sid:" / "ad-guid:" tags rather than discovered fresh. Cleared when the
+  // next real discovery run replaces the row with truth.
+  inferred      Boolean      @default(false)
+
+  // syncedAt  = last successful refresh from this source (drives staleness)
+  // lastSeen  = last time this source reported the device as active
+  // firstSeen = when Polaris first recorded this source
+  syncedAt      DateTime?
+  firstSeen     DateTime     @default(now())
+  lastSeen      DateTime     @default(now())
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([sourceKind, externalId])
+  @@index([assetId])
+  @@index([sourceKind])
+  @@index([integrationId])
+  @@map("asset_sources")
 }

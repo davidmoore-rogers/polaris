@@ -32,6 +32,7 @@ import "./jobs/decommissionStaleAssets.js";
 import "./jobs/monitorAssets.js";
 import "./jobs/normalizeManufacturers.js";
 import "./jobs/migrateMonitorTransport.js";
+import "./jobs/backfillAssetSources.js";
 import "./jobs/flagStaleReservations.js";
 import "./jobs/resolvePolarisPushedConflicts.js";
 import "./jobs/resolveStaleReservationConflicts.js";
