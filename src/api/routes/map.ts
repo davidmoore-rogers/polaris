@@ -366,6 +366,11 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           peerSwitchId: peerAssetId,
           peerPort: t.parentPort ?? null,
           peerVlan: t.parentVlan ?? null,
+          // peerSource: "lldp" if the AP itself reported its uplink via
+          // LLDP on its lan1 interface; "detected-device" if resolved
+          // via the FortiSwitch MAC-table fallback. Drives the
+          // edge-tooltip wording on the topology graph.
+          peerSource: (t as any).peerSource ?? null,
           iconUrl: resolveIconUrl({ manufacturer: s.manufacturer, model: s.model, assetType: "access_point" }, iconCache),
         };
       });
@@ -383,16 +388,59 @@ router.get("/sites/:id/topology", async (req, res, next) => {
 
     // Edges — FG→switch by uplinkInterface, AP→switch by peerPort, AP→FG for
     // unpaired APs. Uplink label is the interface name; AP label is the port.
-    type Edge = { source: string; target: string; label?: string };
+    // `reason` populates the hover tooltip on the topology graph so the
+    // operator can see EXACTLY which rule + which evidence drew each edge.
+    // If an edge is wrong, the tooltip should be enough to point at either
+    // the bad data (FortiOS reported X but reality is Y) or the bad rule
+    // (the matcher is too loose / too strict).
+    type Edge = { source: string; target: string; label?: string; reason?: string };
     let edges: Edge[] = [];
+    const switchHostById = new Map<string, string | null>();
+    for (const s of switches) switchHostById.set(s.id, s.hostname);
+    const apHostById = new Map<string, string | null>();
+    for (const a of aps) apHostById.set(a.id, a.hostname);
     for (const s of switches) {
-      edges.push({ source: fg.id, target: s.id, label: s.uplinkInterface || undefined });
+      const ifLabel = s.uplinkInterface || "fortilink";
+      const swLabel = s.hostname || s.id;
+      const fgLabel = fg.hostname || fg.id;
+      edges.push({
+        source: fg.id,
+        target: s.id,
+        label: s.uplinkInterface || undefined,
+        reason:
+          `Rule: controller-data FG→switch edge.\n` +
+          `Evidence: switch ${swLabel} carries Asset.fortinetTopology.controllerFortigate = "${fgLabel}" ` +
+          `and uplinkInterface = "${ifLabel}" (sourced from managed-switch/status.fgt_peer_intf_name during discovery).\n` +
+          `Caveat: FortiOS reports "fortilink" on every managed switch — direct or chained — so this signal alone over-connects multi-switch fleets. ` +
+          `If a more specific signal (interface-name peer-aggregate, see teal edges) marks a different switch as the direct uplink, this edge is demoted automatically.`,
+      });
     }
     for (const ap of aps) {
+      const apLabel = ap.hostname || ap.id;
       if (ap.peerSwitchId) {
-        edges.push({ source: ap.peerSwitchId, target: ap.id, label: ap.peerPort || undefined });
+        const peerSwLabel = switchHostById.get(ap.peerSwitchId) || ap.peerSwitchId;
+        edges.push({
+          source: ap.peerSwitchId,
+          target: ap.id,
+          label: ap.peerPort || undefined,
+          reason:
+            `Rule: AP→switch edge from FortiSwitch MAC learning.\n` +
+            `Evidence: AP ${apLabel}'s base MAC was seen on switch ${peerSwLabel} port "${ap.peerPort || "?"}" ` +
+            `(switch-controller/detected-device, learned at discovery). ` +
+            (ap.peerSource === "lldp"
+              ? `Confirmed by LLDP advertisement on the AP's lan1 interface.`
+              : `Resolved via the detected-device MAC table fallback path.`),
+        });
       } else {
-        edges.push({ source: fg.id, target: ap.id });
+        edges.push({
+          source: fg.id,
+          target: ap.id,
+          reason:
+            `Rule: AP→FortiGate fallback edge.\n` +
+            `Evidence: AP ${apLabel}'s base MAC was NOT found on any managed FortiSwitch's MAC table at last discovery, ` +
+            `and no LLDP neighbor was reported on its lan1 interface. ` +
+            `Drawing a direct AP→FG edge so the AP still appears on the graph; real attachment unknown.`,
+        });
       }
     }
 
@@ -464,6 +512,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       label: string;
       via: "interface";
       matchVia: "serial" | "hostname";
+      reason: string;
     };
     const interfaceEdges: InterfaceEdge[] = [];
     const seenIfacePair = new Set<string>();
@@ -482,6 +531,20 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           (g.source === e.targetAssetId && g.target === e.sourceAssetId),
       );
       if (dup) continue;
+      const sourceLabel =
+        switchHostById.get(e.sourceAssetId) ||
+        apHostById.get(e.sourceAssetId) ||
+        (e.sourceAssetId === fg.id ? (fg.hostname || fg.id) : e.sourceAssetId);
+      const reason = e.matchVia === "serial"
+        ? `Rule: interface-name peer-serial match (interfaceTopologyService).\n` +
+          `Evidence: device ${sourceLabel} has interface "${e.sourceIfName}". ` +
+          `The pattern matches FortiOS's auto-named peer aggregate (uppercase alnum, optional trailing -<digits>). ` +
+          `Stripping any "-N" aggregate suffix gives the peer-fragment, which case-insensitively matches the END of the target asset's serial number.\n` +
+          `Skipped if multiple inventory assets end with the same fragment (ambiguous) or if the match is the source asset itself.`
+        : `Rule: interface-name peer-hostname match (interfaceTopologyService, fallback when serial match yielded nothing).\n` +
+          `Evidence: device ${sourceLabel} has interface "${e.sourceIfName}" — uppercase with internal dashes (operator-typed, not FortiOS-auto). ` +
+          `Hostname match: target asset's hostname equals the fragment exactly OR starts with "${e.sourceIfName}-" / "${e.sourceIfName}.".\n` +
+          `Skipped if multiple inventory hostnames qualify (ambiguous prefix collision).`;
       seenIfacePair.add(key);
       interfaceEdges.push({
         source: e.sourceAssetId,
@@ -490,6 +553,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         label: e.sourceIfName,
         via: "interface",
         matchVia: e.matchVia,
+        reason,
       });
     }
 
@@ -571,6 +635,8 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       targetLabel: string;
       /** True when target is a Polaris asset (clickable); false for ghost neighbors. */
       targetIsAsset: boolean;
+      /** Operator-readable explanation of why this LLDP edge was drawn. */
+      reason: string;
     };
     const lldpEdges: LldpEdge[] = [];
 
@@ -661,6 +727,28 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       const reverseKey = `${targetId}|${n.assetId}`;
       if (existingEdge.has(key) || existingEdge.has(reverseKey)) continue;
       existingEdge.add(key);
+      const sourceLabel =
+        switchHostById.get(n.assetId) ||
+        apHostById.get(n.assetId) ||
+        (n.assetId === fg.id ? (fg.hostname || fg.id) : n.assetId);
+      const matchBy = n.matchedAsset
+        ? (n.managementIp ? `management IP ${n.managementIp}` :
+           (n.chassisIdSubtype === "macAddress" && n.chassisId) ? `chassis MAC ${n.chassisId}` :
+           n.systemName ? `system name "${n.systemName}"` :
+           "stored matchedAssetId")
+        : "no Polaris asset matched";
+      const lldpReason = n.matchedAsset
+        ? `Rule: LLDP edge — observed advertisement, matched to a Polaris asset.\n` +
+          `Evidence: ${sourceLabel} received an LLDP frame on local port "${n.localIfName || "?"}". ` +
+          `Remote chassis-id ${n.chassisId || "(unknown)"}, port-id ${n.portId || "(unknown)"}, system name "${n.systemName || "?"}", management IP ${n.managementIp || "?"}.\n` +
+          `Match resolved at persist time via ${matchBy}.\n` +
+          `Source transport: ${n.source || "?"} (FortiOS REST or SNMP LLDP-MIB walk).\n` +
+          `Sibling-match LLDP edges are skipped — controller-data already covers them.`
+        : `Rule: LLDP edge — observed advertisement, no matching Polaris asset (rendered as a ghost node).\n` +
+          `Evidence: ${sourceLabel} received an LLDP frame on local port "${n.localIfName || "?"}". ` +
+          `Remote chassis-id ${n.chassisId || "(unknown)"}, port-id ${n.portId || "(unknown)"}, system name "${n.systemName || "?"}", management IP ${n.managementIp || "?"}.\n` +
+          `No asset in the inventory matched by management IP, chassis MAC, or hostname (case-insensitive, FQDN-aware).\n` +
+          `Source transport: ${n.source || "?"}.`;
       lldpEdges.push({
         source: n.assetId,
         target: targetId,
@@ -668,6 +756,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         via:    "lldp",
         targetLabel,
         targetIsAsset,
+        reason: lldpReason,
       });
     }
 

@@ -692,7 +692,11 @@
     });
     (data.edges || []).forEach(function (e, i) {
       elements.push({
-        data: { id: "e" + i, source: e.source, target: e.target, label: displayableUplink(e.label) || "" },
+        data: {
+          id: "e" + i, source: e.source, target: e.target,
+          label: displayableUplink(e.label) || "",
+          reason: e.reason || "",
+        },
       });
     });
     // LLDP-derived ghost nodes for non-Polaris neighbors. The dashed border
@@ -721,7 +725,11 @@
     });
     (data.lldpEdges || []).forEach(function (e, i) {
       elements.push({
-        data: { id: "le" + i, source: e.source, target: e.target, label: e.label || "", isLldp: 1 },
+        data: {
+          id: "le" + i, source: e.source, target: e.target,
+          label: e.label || "", isLldp: 1,
+          reason: e.reason || "",
+        },
       });
     });
     // Interface-inferred edges — CMDB-stamped peer aggregates (FortiOS auto
@@ -730,7 +738,11 @@
     // LLDP edges and the muted gray controller-data edges.
     (data.interfaceEdges || []).forEach(function (e, i) {
       elements.push({
-        data: { id: "ie" + i, source: e.source, target: e.target, label: e.label || "", isIface: 1 },
+        data: {
+          id: "ie" + i, source: e.source, target: e.target,
+          label: e.label || "", isIface: 1,
+          reason: e.reason || "",
+        },
       });
     });
 
@@ -942,6 +954,69 @@
         window.location.href = "/assets.html#view=asset:" + assetId;
       }
     });
+
+    // Hover tooltip on edges — explains the rule + evidence behind each
+    // connection. Backend stamps a `reason` data field on every edge
+    // (controller, interface-inferred, LLDP). The tooltip lets the
+    // operator audit the topology layer without reading code.
+    cyInstance.on("mouseover", "edge", function (evt) {
+      var reason = evt.target.data("reason");
+      if (!reason) return;
+      var orig = evt.originalEvent;
+      var x = orig && typeof orig.clientX === "number" ? orig.clientX : 0;
+      var y = orig && typeof orig.clientY === "number" ? orig.clientY : 0;
+      showEdgeTooltip(reason, x, y);
+    });
+    cyInstance.on("mousemove", "edge", function (evt) {
+      // Track the cursor so the tooltip follows the edge as the operator
+      // sweeps along it.
+      var orig = evt.originalEvent;
+      if (!orig) return;
+      moveEdgeTooltip(orig.clientX, orig.clientY);
+    });
+    cyInstance.on("mouseout", "edge", function () { hideEdgeTooltip(); });
+  }
+
+  // ── Edge hover tooltip ─────────────────────────────────────────────────────
+  // Rendered as a fixed-position div appended to <body> (not the modal) so
+  // it doesn't get clipped by the modal's overflow rules and stays visible
+  // when the modal is fullscreen. Single instance reused for every edge.
+  var _edgeTooltipEl = null;
+  function ensureEdgeTooltip() {
+    if (_edgeTooltipEl) return _edgeTooltipEl;
+    var el = document.createElement("div");
+    el.id = "topology-edge-tooltip";
+    el.setAttribute("role", "tooltip");
+    document.body.appendChild(el);
+    _edgeTooltipEl = el;
+    return el;
+  }
+  function showEdgeTooltip(text, clientX, clientY) {
+    var el = ensureEdgeTooltip();
+    // Preserve newlines from the backend reason — pre-wrap renders them
+    // and CSS clamps the width.
+    el.textContent = text;
+    el.classList.add("visible");
+    moveEdgeTooltip(clientX, clientY);
+  }
+  function moveEdgeTooltip(clientX, clientY) {
+    var el = _edgeTooltipEl;
+    if (!el || !el.classList.contains("visible")) return;
+    // Anchor below-right of the cursor, but flip to above-left near the
+    // viewport edge so the tooltip never escapes the screen.
+    var pad = 14;
+    var rect = el.getBoundingClientRect();
+    var maxX = window.innerWidth - rect.width - 6;
+    var maxY = window.innerHeight - rect.height - 6;
+    var x = clientX + pad; if (x > maxX) x = clientX - rect.width - pad;
+    var y = clientY + pad; if (y > maxY) y = clientY - rect.height - pad;
+    if (x < 6) x = 6;
+    if (y < 6) y = 6;
+    el.style.left = x + "px";
+    el.style.top  = y + "px";
+  }
+  function hideEdgeTooltip() {
+    if (_edgeTooltipEl) _edgeTooltipEl.classList.remove("visible");
   }
 
   function renderTopologyInfo(data) {
