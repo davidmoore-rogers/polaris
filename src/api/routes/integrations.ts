@@ -14,7 +14,6 @@ import * as entraId from "../../services/entraIdService.js";
 import * as activeDirectory from "../../services/activeDirectoryService.js";
 import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps } from "../../utils/cidr.js";
 import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveredVip, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
-import { detectAndLogDrift } from "../../services/projectionDriftService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { logEvent } from "./events.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
@@ -1572,9 +1571,10 @@ async function upsertFortigateFirewallAssetSource(
   await prisma.assetSource.deleteMany({
     where: { assetId, sourceKind: "manual", externalId: assetId },
   });
-  // Phase 3b.0 shadow drift detection — non-blocking. See
-  // src/services/projectionDriftService.ts.
-  detectAndLogDrift(assetId, "fortigate-firewall");
+  // Phase 3b.1 cutover: drift detection no longer fires — the
+  // syncDhcpSubnets caller projects from sources and uses the result as
+  // the Asset write payload, so the Asset row matches the projection by
+  // construction.
 }
 
 // Source-shaped observed blob for managed FortiSwitch assets. Mirrors the
@@ -1664,8 +1664,8 @@ async function upsertFortinetInfraAssetSource(
   await prisma.assetSource.deleteMany({
     where: { assetId, sourceKind: "manual", externalId: assetId },
   });
-  // Phase 3b.0 shadow drift detection.
-  detectAndLogDrift(assetId, sourceKind);
+  // Phase 3b.1 cutover: drift detection no longer fires (see
+  // upsertFortigateFirewallAssetSource for rationale).
 }
 
 // ─── Asset index — multi-key lookup for MAC, serial, hostname, IP ───────────
@@ -2126,39 +2126,57 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             existingAsset.monitorType !== null &&
             existingAsset.monitorType !== "fortimanager" &&
             existingAsset.monitorType !== "fortigate";
-          const updateData: Record<string, unknown> = {
-            ipAddress: device.mgmtIp || existingAsset.ipAddress,
-            ...(device.mgmtIp ? { ipSource: fgHostname || integrationType } : {}),
-            hostname: device.hostname || existingAsset.hostname,
-            model: device.model || existingAsset.model,
-            learnedLocation: existingAsset.learnedLocation || fgHostname,
-            lastSeen: new Date(now),
-            fortinetTopology: topology,
-            discoveredByIntegrationId: integrationId,
-            ...(isOperatorOverride ? {} : { monitorType: integrationDefaultType }),
-            // Only overwrite coords when discovery actually returned them — do not
-            // wipe a previously-set value with undefined on a FortiOS that omits
-            // longitude/latitude from system/global.
-            ...(Number.isFinite(device.latitude) && Number.isFinite(device.longitude)
-              ? { latitude: device.latitude, longitude: device.longitude }
-              : {}),
-            ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
-          };
-          clampAcquiredToLastSeen(updateData, existingAsset);
-          await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
-          // Explicit fortigate-firewall AssetSource upsert. Lookup index for
-          // re-discovery still uses Asset.serialNumber (stable column,
-          // findBySerial), so the source row exists for the per-source view
-          // rather than for primary lookup.
+
+          // Phase 3b.1 cutover: discovery-owned fields come from projection.
+          // Same shape as AD/Entra cutovers — upsert source first, fetch all
+          // sources, project, single Asset.update.
           if (device.serial) {
             try {
               const syncedAt = new Date(now);
               const observed = buildFortigateFirewallObservedBlob(device, integrationType as "fortimanager" | "fortigate", syncedAt);
               await upsertFortigateFirewallAssetSource(existingAsset.id, integrationId, device.serial, observed, syncedAt, syncedAt);
             } catch (err: any) {
-              syncLog("error", `Updated FortiGate asset ${device.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
+              syncLog("error", `Failed to upsert fortigate-firewall AssetSource for ${device.name}: ${err?.message || "Unknown error"}`);
             }
           }
+          const fwSourceRows = await prisma.assetSource.findMany({
+            where: { assetId: existingAsset.id },
+            select: { sourceKind: true, inferred: true, observed: true },
+          });
+          const { projected: fwProjected } = projectAssetFromSources(
+            fwSourceRows.map((s) => ({
+              sourceKind: s.sourceKind,
+              inferred: s.inferred,
+              observed: s.observed as Record<string, unknown> | null,
+            })),
+          );
+
+          const updateData: Record<string, unknown> = {
+            // learnedLocation for firewalls is the firewall's own hostname
+            // (operator-readable site label). Projection deliberately leaves
+            // this null for firewall sources (the hostname's already on
+            // Asset.hostname). Keep the legacy "set when null" rule.
+            learnedLocation: existingAsset.learnedLocation || fgHostname,
+            lastSeen: new Date(now),
+            fortinetTopology: topology,
+            discoveredByIntegrationId: integrationId,
+            ...(isOperatorOverride ? {} : { monitorType: integrationDefaultType }),
+            ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
+          };
+          // Discovery-owned fields from projection.
+          if (fwProjected.hostname !== null) updateData.hostname = fwProjected.hostname;
+          if (fwProjected.model !== null) updateData.model = fwProjected.model;
+          if (fwProjected.osVersion !== null) updateData.osVersion = fwProjected.osVersion;
+          if (fwProjected.manufacturer !== null) updateData.manufacturer = fwProjected.manufacturer;
+          if (fwProjected.serialNumber !== null) updateData.serialNumber = fwProjected.serialNumber;
+          if (fwProjected.ipAddress !== null) {
+            updateData.ipAddress = fwProjected.ipAddress;
+            updateData.ipSource = fgHostname || integrationType;
+          }
+          if (fwProjected.latitude !== null) updateData.latitude = fwProjected.latitude;
+          if (fwProjected.longitude !== null) updateData.longitude = fwProjected.longitude;
+          clampAcquiredToLastSeen(updateData, existingAsset);
+          await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
           // Update in-memory
           if (device.mgmtIp) existingAsset.ipAddress = device.mgmtIp;
           if (device.hostname) existingAsset.hostname = device.hostname;
@@ -2174,21 +2192,33 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // New FortiGate — set the Device Map tag (fgt:<serial>) so the map endpoint
       // can find this device by a stable key even if hostname/model changes later.
       const fgTag = device.serial ? `fgt:${device.serial}` : null;
+      // Phase 3b.1 cutover: project from a synthetic single-source array
+      // built directly from this just-discovered firewall's observed blob.
+      // Pure projection, no DB roundtrip — new asset has no other sources.
+      const fwSyncedAt = new Date(now);
+      const fwObserved = buildFortigateFirewallObservedBlob(device, integrationType as "fortimanager" | "fortigate", fwSyncedAt);
+      const { projected: fwCreateProjected } = projectAssetFromSources([
+        { sourceKind: "fortigate-firewall", inferred: false, observed: fwObserved },
+      ]);
       const newAsset = await prisma.asset.create({
         data: {
-          ipAddress: device.mgmtIp || null,
-          ...(device.mgmtIp ? { ipSource: fgHostname || integrationType } : {}),
-          hostname: fgHostname,
-          serialNumber: device.serial || null,
+          ipAddress: fwCreateProjected.ipAddress,
+          ...(fwCreateProjected.ipAddress ? { ipSource: fgHostname || integrationType } : {}),
+          hostname: fwCreateProjected.hostname || fgHostname,
+          serialNumber: fwCreateProjected.serialNumber,
           assetTag: fgTag,
-          manufacturer: "Fortinet",
-          model: device.model || "FortiGate",
+          manufacturer: fwCreateProjected.manufacturer || "Fortinet",
+          model: fwCreateProjected.model || "FortiGate",
           assetType: "firewall",
           status: "active",
           statusChangedAt: new Date(now),
           statusChangedBy: integrationLabel,
           department: "Network Security",
+          // learnedLocation for firewalls = the firewall's own hostname
+          // (site label). Projection leaves this null for firewall
+          // sources by design — set explicitly here.
           learnedLocation: fgHostname,
+          osVersion: fwCreateProjected.osVersion,
           lastSeen: new Date(now),
           // Default monitoring source to the discovering integration. Probes
           // route through the integration's stored API token; operators can
@@ -2199,9 +2229,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // FortiGates as Monitored" checkbox. Existing FortiGates are not
           // touched — only fresh creates get the flag flipped.
           ...(fortigateAddAsMonitored ? { monitored: true } : {}),
-          ...(Number.isFinite(device.latitude) && Number.isFinite(device.longitude)
-            ? { latitude: device.latitude, longitude: device.longitude }
-            : {}),
+          ...(fwCreateProjected.latitude !== null ? { latitude: fwCreateProjected.latitude } : {}),
+          ...(fwCreateProjected.longitude !== null ? { longitude: fwCreateProjected.longitude } : {}),
           fortinetTopology: topology,
           notes: `Auto-discovered from ${integrationLabel} integration`,
           tags: ["fortigate", "auto-discovered"],
@@ -2300,12 +2329,30 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // its current FortiOS-reported state (active or storage). Mirrors
         // the FortiAP path right below.
         const reactivate = existingAsset.status === "decommissioned";
+
+        // Phase 3b.1 cutover: projection-driven discovery fields.
+        if (sw.serial) {
+          try {
+            const syncedAt = new Date(now);
+            const observed = buildFortiswitchObservedBlob(sw, syncedAt);
+            await upsertFortinetInfraAssetSource("fortiswitch", existingAsset.id, integrationId, sw.serial, observed, syncedAt, syncedAt);
+          } catch (err: any) {
+            syncLog("error", `Failed to upsert fortiswitch AssetSource for ${sw.name}: ${err?.message || "Unknown error"}`);
+          }
+        }
+        const swSourceRows = await prisma.assetSource.findMany({
+          where: { assetId: existingAsset.id },
+          select: { sourceKind: true, inferred: true, observed: true },
+        });
+        const { projected: swProjected } = projectAssetFromSources(
+          swSourceRows.map((s) => ({
+            sourceKind: s.sourceKind,
+            inferred: s.inferred,
+            observed: s.observed as Record<string, unknown> | null,
+          })),
+        );
+
         const updateData: Record<string, unknown> = {
-          ipAddress: sw.ipAddress || existingAsset.ipAddress,
-          ...(sw.ipAddress ? { ipSource: sw.device || integrationType } : {}),
-          hostname: sw.name || existingAsset.hostname,
-          osVersion: sw.osVersion || existingAsset.osVersion,
-          learnedLocation: sw.device || existingAsset.learnedLocation,
           status: swStatus,
           ...(swStatus !== existingAsset.status ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
           lastSeen: new Date(now),
@@ -2313,37 +2360,45 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           ...(acquiredAtUpdate ? { acquiredAt: acquiredAtUpdate } : {}),
           ...buildClassMonitorStamp(switchMonitorCfg, existingAsset),
         };
+        if (swProjected.hostname !== null) updateData.hostname = swProjected.hostname;
+        if (swProjected.osVersion !== null) updateData.osVersion = swProjected.osVersion;
+        if (swProjected.manufacturer !== null) updateData.manufacturer = swProjected.manufacturer;
+        if (swProjected.serialNumber !== null) updateData.serialNumber = swProjected.serialNumber;
+        if (swProjected.learnedLocation !== null) updateData.learnedLocation = swProjected.learnedLocation;
+        if (swProjected.ipAddress !== null) {
+          updateData.ipAddress = swProjected.ipAddress;
+          updateData.ipSource = sw.device || integrationType;
+        }
         clampAcquiredToLastSeen(updateData, existingAsset);
         await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
-        // Explicit fortiswitch AssetSource upsert with rich observed blob.
-        if (sw.serial) {
-          try {
-            const syncedAt = new Date(now);
-            const observed = buildFortiswitchObservedBlob(sw, syncedAt);
-            await upsertFortinetInfraAssetSource("fortiswitch", existingAsset.id, integrationId, sw.serial, observed, syncedAt, syncedAt);
-          } catch (err: any) {
-            syncLog("error", `Updated FortiSwitch asset ${sw.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
-          }
-        }
         if (sw.ipAddress) existingAsset.ipAddress = sw.ipAddress;
         if (reactivate) existingAsset.status = swStatus;
         assetIdx.reindex(existingAsset);
         assetNames.push(`${sw.name} (updated${reactivate ? " — reactivated" : ""})`);
       } else {
+        // Phase 3b.1 cutover: project from a synthetic single-source array.
+        const swSyncedAt = new Date(now);
+        const swObserved = buildFortiswitchObservedBlob(sw, swSyncedAt);
+        const { projected: swCreateProjected } = projectAssetFromSources([
+          { sourceKind: "fortiswitch", inferred: false, observed: swObserved },
+        ]);
         const createData: Record<string, unknown> = {
-          ipAddress: sw.ipAddress || null,
-          ...(sw.ipAddress ? { ipSource: sw.device || integrationType } : {}),
-          hostname: sw.name || null,
-          serialNumber: sw.serial || null,
-          manufacturer: "Fortinet",
+          ipAddress: swCreateProjected.ipAddress,
+          ...(swCreateProjected.ipAddress ? { ipSource: sw.device || integrationType } : {}),
+          hostname: swCreateProjected.hostname,
+          serialNumber: swCreateProjected.serialNumber,
+          manufacturer: swCreateProjected.manufacturer || "Fortinet",
+          // FortiSwitch's observed.model is always literally "FortiSwitch"
+          // and the projection skips it as too generic. Keep the legacy
+          // literal here so the create row gets a non-null model.
           model: "FortiSwitch",
           assetType: "switch",
           status: swStatus,
           statusChangedAt: new Date(now),
           statusChangedBy: integrationLabel,
-          osVersion: sw.osVersion || null,
+          osVersion: swCreateProjected.osVersion,
           ...buildClassMonitorStamp(switchMonitorCfg),
-          learnedLocation: sw.device || null,
+          learnedLocation: swCreateProjected.learnedLocation,
           acquiredAt: swJoinDate,
           lastSeen: new Date(now),
           fortinetTopology: swTopology,
@@ -2352,12 +2407,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         };
         clampAcquiredToLastSeen(createData);
         const newAsset = await prisma.asset.create({ data: createData as any });
-        // Explicit fortiswitch AssetSource upsert.
         if (sw.serial) {
           try {
-            const syncedAt = new Date(now);
-            const observed = buildFortiswitchObservedBlob(sw, syncedAt);
-            await upsertFortinetInfraAssetSource("fortiswitch", newAsset.id, integrationId, sw.serial, observed, syncedAt, syncedAt);
+            await upsertFortinetInfraAssetSource("fortiswitch", newAsset.id, integrationId, sw.serial, swObserved, swSyncedAt, swSyncedAt);
           } catch (err: any) {
             syncLog("error", `Created FortiSwitch asset ${sw.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
           }
@@ -2441,51 +2493,73 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         parentApSerial: ap.parentApSerial ?? null,
       };
       if (existingAsset) {
-        const updateData: Record<string, unknown> = {
-          ipAddress: resolvedIp || existingAsset.ipAddress,
-          ...(resolvedIp ? { ipSource: ap.device || integrationType } : {}),
-          hostname: ap.name || existingAsset.hostname,
-          model: ap.model || existingAsset.model,
-          osVersion: ap.osVersion || existingAsset.osVersion,
-          learnedLocation: ap.device || existingAsset.learnedLocation,
-          lastSeen: new Date(now),
-          fortinetTopology: apTopology,
-          ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
-          ...buildClassMonitorStamp(apMonitorCfg, existingAsset),
-        };
-        clampAcquiredToLastSeen(updateData, existingAsset);
-        await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
-        // Explicit fortiap AssetSource upsert.
+        // Phase 3b.1 cutover: projection-driven discovery fields.
         if (ap.serial) {
           try {
             const syncedAt = new Date(now);
             const observed = buildFortiapObservedBlob(ap, syncedAt);
             await upsertFortinetInfraAssetSource("fortiap", existingAsset.id, integrationId, ap.serial, observed, syncedAt, syncedAt);
           } catch (err: any) {
-            syncLog("error", `Updated FortiAP asset ${ap.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
+            syncLog("error", `Failed to upsert fortiap AssetSource for ${ap.name}: ${err?.message || "Unknown error"}`);
           }
         }
+        const apSourceRows = await prisma.assetSource.findMany({
+          where: { assetId: existingAsset.id },
+          select: { sourceKind: true, inferred: true, observed: true },
+        });
+        const { projected: apProjected } = projectAssetFromSources(
+          apSourceRows.map((s) => ({
+            sourceKind: s.sourceKind,
+            inferred: s.inferred,
+            observed: s.observed as Record<string, unknown> | null,
+          })),
+        );
+
+        const updateData: Record<string, unknown> = {
+          lastSeen: new Date(now),
+          fortinetTopology: apTopology,
+          ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
+          ...buildClassMonitorStamp(apMonitorCfg, existingAsset),
+        };
+        if (apProjected.hostname !== null) updateData.hostname = apProjected.hostname;
+        if (apProjected.model !== null) updateData.model = apProjected.model;
+        if (apProjected.osVersion !== null) updateData.osVersion = apProjected.osVersion;
+        if (apProjected.manufacturer !== null) updateData.manufacturer = apProjected.manufacturer;
+        if (apProjected.serialNumber !== null) updateData.serialNumber = apProjected.serialNumber;
+        if (apProjected.learnedLocation !== null) updateData.learnedLocation = apProjected.learnedLocation;
+        if (apProjected.ipAddress !== null) {
+          updateData.ipAddress = apProjected.ipAddress;
+          updateData.ipSource = ap.device || integrationType;
+        }
+        clampAcquiredToLastSeen(updateData, existingAsset);
+        await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
         if (resolvedIp) existingAsset.ipAddress = resolvedIp;
         if (existingAsset.status === "decommissioned") existingAsset.status = "active";
         assetIdx.reindex(existingAsset);
         assetNames.push(`${ap.name} (updated)`);
       } else {
+        // Phase 3b.1 cutover: project from a synthetic single-source array.
+        const apSyncedAt = new Date(now);
+        const apObserved = buildFortiapObservedBlob(ap, apSyncedAt);
+        const { projected: apCreateProjected } = projectAssetFromSources([
+          { sourceKind: "fortiap", inferred: false, observed: apObserved },
+        ]);
         const newAsset = await prisma.asset.create({
           data: {
-            ipAddress: resolvedIp || null,
-            ...(resolvedIp ? { ipSource: ap.device || integrationType } : {}),
+            ipAddress: apCreateProjected.ipAddress,
+            ...(apCreateProjected.ipAddress ? { ipSource: ap.device || integrationType } : {}),
             macAddress: normalizedMac,
             macAddresses: normalizedMac ? [{ mac: normalizedMac, lastSeen: now, source: "fmg-discovery" }] : [],
-            hostname: ap.name || null,
-            serialNumber: ap.serial || null,
-            manufacturer: "Fortinet",
-            model: ap.model || "FortiAP",
+            hostname: apCreateProjected.hostname,
+            serialNumber: apCreateProjected.serialNumber,
+            manufacturer: apCreateProjected.manufacturer || "Fortinet",
+            model: apCreateProjected.model || "FortiAP",
             assetType: "access_point",
             status: "active",
             statusChangedAt: new Date(now),
             statusChangedBy: integrationLabel,
-            osVersion: ap.osVersion || null,
-            learnedLocation: ap.device || null,
+            osVersion: apCreateProjected.osVersion,
+            learnedLocation: apCreateProjected.learnedLocation,
             lastSeen: new Date(now),
             fortinetTopology: apTopology,
             ...buildClassMonitorStamp(apMonitorCfg),
@@ -2493,12 +2567,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             tags: ["fortiap", "auto-discovered"],
           },
         });
-        // Explicit fortiap AssetSource upsert.
         if (ap.serial) {
           try {
-            const syncedAt = new Date(now);
-            const observed = buildFortiapObservedBlob(ap, syncedAt);
-            await upsertFortinetInfraAssetSource("fortiap", newAsset.id, integrationId, ap.serial, observed, syncedAt, syncedAt);
+            await upsertFortinetInfraAssetSource("fortiap", newAsset.id, integrationId, ap.serial, apObserved, apSyncedAt, apSyncedAt);
           } catch (err: any) {
             syncLog("error", `Created FortiAP asset ${ap.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
           }
