@@ -1695,7 +1695,9 @@ function assetSystemViewHTML(a) {
     '<h4 style="margin:1.25rem 0 0.5rem">Interfaces</h4>' +
     '<div id="asset-system-interfaces"><span class="empty-state">Loading…</span></div>' +
     '<h4 style="margin:1.25rem 0 0.5rem">Storage</h4>' +
-    '<div id="asset-system-storage"><span class="empty-state">Loading…</span></div>'
+    '<div id="asset-system-storage"><span class="empty-state">Loading…</span></div>' +
+    '<h4 style="margin:1.25rem 0 0.5rem">LLDP Neighbors</h4>' +
+    '<div id="asset-system-lldp"><span class="empty-state">Loading…</span></div>'
   );
 }
 
@@ -1714,6 +1716,7 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
   var ifaces  = document.getElementById("asset-system-interfaces");
   var storage = document.getElementById("asset-system-storage");
   var temps   = document.getElementById("asset-system-temps");
+  var lldp    = document.getElementById("asset-system-lldp");
   if (!chart) return;
   chart.dataset.range = range || "24h";
   if (!silent) {
@@ -1722,6 +1725,7 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
     if (ifaces)  ifaces.innerHTML  = '<span class="empty-state">Loading…</span>';
     if (storage) storage.innerHTML = '<span class="empty-state">Loading…</span>';
     if (temps)   temps.innerHTML   = '<span class="empty-state">Loading…</span>';
+    if (lldp)    lldp.innerHTML    = '<span class="empty-state">Loading…</span>';
   }
 
   var panelBody = silent ? document.getElementById("asset-panel-body") : null;
@@ -1740,6 +1744,7 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
     _renderInterfacesTable(ifaces, si, asset);
     _renderStorageTable(storage, si, asset);
     _renderTemperatures(temps, si, asset);
+    _renderLldpNeighborsCard(lldp, si);
   } catch (err) {
     if (!silent) {
       chart.textContent = "Error: " + (err.message || "failed to load");
@@ -1747,6 +1752,7 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
       if (ifaces)  ifaces.innerHTML  = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
       if (storage) storage.innerHTML = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
       if (temps)   temps.innerHTML   = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
+      if (lldp)    lldp.innerHTML    = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
     }
     // On silent-refresh failure leave the stale content alone so the user
     // doesn't see a transient blip blow away the panel they were reading.
@@ -2266,6 +2272,67 @@ function _renderTemperatures(container, si, asset) {
     link.addEventListener("click", function (e) {
       e.preventDefault();
       openSensorDetailPanel(asset, link.getAttribute("data-name"));
+    });
+  });
+}
+
+// Standalone LLDP Neighbors roll-up card on the System tab — sits below
+// Storage. Same data the per-interface inline column already shows on
+// the Interfaces table, but in one consolidated view so operators can
+// scan every neighbor without scrolling the interface table. Each row
+// shows the local port, the neighbor's chassis/system identity, and a
+// click-through to the matched Polaris asset (if the LLDP collector
+// resolved one) or a plain label for non-Polaris ghost neighbors.
+function _renderLldpNeighborsCard(container, si) {
+  if (!container) return;
+  var neighbors = (si && si.lldpNeighbors) || [];
+  if (neighbors.length === 0) {
+    container.innerHTML = '<p class="empty-state">' +
+      'No LLDP neighbors collected. Either the device isn’t advertising LLDP, ' +
+      'the monitoring transport doesn’t support it, or the FortiOS REST endpoint ' +
+      'returned 404 — try flipping the integration’s LLDP transport to SNMP.' +
+      '</p>';
+    return;
+  }
+  // Stable presentation: sort by local port, then chassis id.
+  neighbors.sort(function (a, b) {
+    var la = String(a.localIfName || ""), lb = String(b.localIfName || "");
+    if (la !== lb) return la.localeCompare(lb);
+    return String(a.chassisId || "").localeCompare(String(b.chassisId || ""));
+  });
+  var rows = neighbors.map(function (n) {
+    var primary = n.systemName || n.managementIp || n.chassisId || "(unknown)";
+    var primaryHtml = (n.matchedAsset && n.matchedAsset.id)
+      ? '<a href="#" class="asset-lldp-link" data-asset-id="' + escapeHtml(n.matchedAsset.id) +
+        '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(primary) + '</a>'
+      : escapeHtml(primary);
+    var idBits = [];
+    if (n.chassisId)    idBits.push("chassis " + n.chassisId);
+    if (n.portId)       idBits.push("port "    + n.portId);
+    if (n.managementIp) idBits.push("mgmt "    + n.managementIp);
+    var caps = (Array.isArray(n.capabilities) && n.capabilities.length > 0)
+      ? n.capabilities.join(", ")
+      : "—";
+    return '<tr>' +
+      '<td class="mono">' + escapeHtml(n.localIfName || "—") + '</td>' +
+      '<td>' + primaryHtml +
+        (idBits.length ? '<div class="mono" style="font-size:0.72rem;color:var(--color-text-tertiary);margin-top:2px">' + escapeHtml(idBits.join(" · ")) + '</div>' : '') +
+      '</td>' +
+      '<td style="font-size:0.78rem;color:var(--color-text-secondary)">' + escapeHtml(caps) + '</td>' +
+    '</tr>';
+  }).join("");
+  container.innerHTML =
+    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+      '<th>Local Port</th><th>Neighbor</th><th>Capabilities</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+
+  // Click-through on matched-asset links pivots to that asset's details
+  // page — same pattern the inline interface-table neighbor column uses.
+  container.querySelectorAll(".asset-lldp-link").forEach(function (link) {
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      var assetId = link.getAttribute("data-asset-id");
+      if (assetId) window.location.href = "/assets.html#view=asset:" + assetId;
     });
   });
 }
