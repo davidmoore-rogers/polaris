@@ -223,3 +223,17 @@
     border-bottom: 1px solid var(--color-border);
   }
 }
+
+/* CSS fallback for the topology fullscreen toggle when the browser doesn't
+   support the Fullscreen API (older Safari / iframe contexts). When native
+   fullscreen IS available, the browser already covers the viewport and
+   this class is unused. */
+.modal.topology-fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  max-height: none;
+  border-radius: 0;
+}

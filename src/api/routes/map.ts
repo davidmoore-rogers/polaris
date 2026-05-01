@@ -16,6 +16,7 @@ import { Router } from "express";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { loadIconResolutionCache, resolveIconUrl } from "../../services/deviceIconService.js";
+import { inferInterfaceTopology } from "../../services/interfaceTopologyService.js";
 
 const router = Router();
 
@@ -316,6 +317,76 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       }
     }
 
+    const siteAssetIds = [fg.id, ...switches.map((s) => s.id), ...aps.map((a) => a.id)];
+
+    // CMDB-inferred edges from FortiOS interface naming conventions —
+    // peer-serial aggregates (FortiLink-auto) plus operator-named
+    // hostname aggregates (custom MCLAG between non-stacked pairs). Run
+    // first so interface edges populate `existingEdge` before LLDP de-dup
+    // and so the LLDP path can reuse the same dedupe set.
+    const ifaceInference = await inferInterfaceTopology(siteAssetIds);
+    type InterfaceEdge = {
+      source: string;
+      target: string;
+      sourceIfName: string;
+      label: string;
+      via: "interface";
+      matchVia: "serial" | "hostname";
+    };
+    const interfaceEdges: InterfaceEdge[] = [];
+    const seenIfacePair = new Set<string>();
+    for (const e of ifaceInference.edges) {
+      // Don't redraw an edge that fortinetTopology already covered.
+      const key = `${e.sourceAssetId}|${e.targetAssetId}`;
+      const reverseKey = `${e.targetAssetId}|${e.sourceAssetId}`;
+      if (seenIfacePair.has(key) || seenIfacePair.has(reverseKey)) continue;
+      // Skip if controller-data already gave us this pair (FortiLink uplink
+      // covered by `edges` above). The interface name still appears in the
+      // edge's label there, just from a different code path.
+      // existingEdge isn't built yet at this point — check `edges` directly.
+      const dup = edges.some(
+        (g) =>
+          (g.source === e.sourceAssetId && g.target === e.targetAssetId) ||
+          (g.source === e.targetAssetId && g.target === e.sourceAssetId),
+      );
+      if (dup) continue;
+      seenIfacePair.add(key);
+      interfaceEdges.push({
+        source: e.sourceAssetId,
+        target: e.targetAssetId,
+        sourceIfName: e.sourceIfName,
+        label: e.sourceIfName,
+        via: "interface",
+        matchVia: e.matchVia,
+      });
+    }
+
+    // Cross-site assets matched via interface name — registered as
+    // remoteAssetNodes (same surface used for cross-site LLDP matches) so
+    // the frontend has a real node to draw the edge to.
+    type RemoteAssetNode = {
+      id: string;
+      hostname: string | null;
+      ipAddress: string | null;
+      assetType: string | null;
+      model: string | null;
+      iconUrl: string | null;
+    };
+    const remoteAssetNodes = new Map<string, RemoteAssetNode>();
+    for (const r of ifaceInference.remoteAssets.values()) {
+      remoteAssetNodes.set(r.id, {
+        id: r.id,
+        hostname: r.hostname,
+        ipAddress: r.ipAddress,
+        assetType: r.assetType,
+        model: r.model,
+        iconUrl: resolveIconUrl(
+          { manufacturer: r.manufacturer, model: r.model, assetType: r.assetType },
+          iconCache,
+        ),
+      });
+    }
+
     // LLDP-derived neighbors. We pull neighbors for the FortiGate plus every
     // switch in this site, then build:
     //   - A "ghost" node for any neighbor that did NOT match a Polaris asset
@@ -323,10 +394,10 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     //     are uniquely identified by chassisId; multiple ports onto the same
     //     remote chassis collapse to a single node.
     //   - One LLDP edge per neighbor row, source = local asset, target =
-    //     matched asset OR the ghost node. Edges are de-duped against the
-    //     fortinetTopology edges already added above so a FortiLink uplink
-    //     also confirmed by LLDP only renders once.
-    const siteAssetIds = [fg.id, ...switches.map((s) => s.id), ...aps.map((a) => a.id)];
+    //     matched asset OR the ghost node. Edges are de-duped against
+    //     fortinetTopology edges AND interface-inferred edges so a peer
+    //     link confirmed by both signals only renders once (the
+    //     authoritative one wins).
     const lldpRows = await prisma.assetLldpNeighbor.findMany({
       where: { assetId: { in: siteAssetIds } },
       include: {
@@ -348,22 +419,17 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     // ids prefixed with `lldp:` so they don't collide with real asset
     // UUIDs, and dedup'd by chassisId so multi-link aggregates collapse.
     const lldpNodes = new Map<string, LldpNode>();
-    // Cross-site LLDP-matched Polaris assets — separate from ghost nodes
-    // because they ARE real assets, just at a different site. Need their
-    // own node entries in the topology payload so the frontend Cytoscape
-    // graph doesn't choke on edges with no target node, AND their own
-    // visual style + click-through to the asset details page.
-    type RemoteAssetNode = {
-      id: string;             // Asset.id (UUID)
-      hostname: string | null;
-      ipAddress: string | null;
-      assetType: string | null;
-      model: string | null;
-      iconUrl: string | null;
-    };
-    const remoteAssetNodes = new Map<string, RemoteAssetNode>();
+    // Cross-site LLDP-matched Polaris assets are added to `remoteAssetNodes`
+    // (declared above alongside interface-inferred remotes) so cross-site
+    // assets matched by EITHER pathway end up in the same node list.
     const siblingIds = new Set(siteAssetIds);
-    const existingEdge = new Set(edges.map((e) => `${e.source}|${e.target}`));
+    // Seed the LLDP dedupe set with both controller edges AND interface-
+    // inferred edges so a peer link confirmed by multiple signals only
+    // renders once (interface > LLDP because interface is CMDB-stamped).
+    const existingEdge = new Set([
+      ...edges.map((e) => `${e.source}|${e.target}`),
+      ...interfaceEdges.map((e) => `${e.source}|${e.target}`),
+    ]);
     type LldpEdge = {
       source: string;
       target: string;
@@ -461,16 +527,24 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       aps,
       subnets,
       edges,
+      // CMDB-inferred edges from FortiOS interface naming conventions —
+      // peer-serial aggregates (FortiLink-auto) plus operator-named
+      // hostname aggregates. Authoritative because they're stamped by
+      // FortiOS itself; rendered with their own visual style on the
+      // topology graph. Each edge references nodes already in this
+      // payload (siblings or `remoteAssetNodes`).
+      interfaceEdges,
       // LLDP additions: rendered separately by the topology modal so the
       // styling can distinguish authoritative fortinetTopology edges from
       // observed LLDP edges. `lldpNodes` is the array form of the Map above.
       lldpNodes: Array.from(lldpNodes.values()),
-      // Cross-site Polaris assets observed via LLDP from this site —
-      // separate from `lldpNodes` (ghost neighbors) so the frontend can
-      // render them with a "real asset, just elsewhere" style and a
-      // click-through to the asset details page. Without this, edges in
-      // `lldpEdges` whose target is a cross-site asset id would reference
-      // nonexistent Cytoscape nodes and the graph would error out on load.
+      // Cross-site Polaris assets observed via LLDP OR via interface-name
+      // inference from this site — separate from `lldpNodes` (ghost
+      // neighbors) so the frontend can render them with a "real asset,
+      // just elsewhere" style and a click-through to the asset details
+      // page. Without this, edges in `lldpEdges` / `interfaceEdges` whose
+      // target is a cross-site asset id would reference nonexistent
+      // Cytoscape nodes and the graph would error out on load.
       remoteAssetNodes: Array.from(remoteAssetNodes.values()),
       lldpEdges,
     });

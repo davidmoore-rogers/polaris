@@ -54,10 +54,18 @@
     // path so PNG URLs resolve correctly.
     L.Icon.Default.imagePath = "/css/vendor/leaflet/images/";
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: "© <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a> contributors",
-    }).addTo(map);
+    // Theme-aware basemap. OpenStreetMap for light theme, CartoDB Dark
+    // Matter for dark. Both are free and don't require API keys; CartoDB
+    // is documented as fair-use friendly. Tile layer is swapped in place
+    // when the document's data-theme attribute changes (the rest of the
+    // app's theme toggle).
+    applyBasemapTheme();
+    var themeObserver = new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        if (muts[i].attributeName === "data-theme") { applyBasemapTheme(); break; }
+      }
+    });
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
     markerCluster = L.markerClusterGroup({
       showCoverageOnHover: false,
@@ -68,6 +76,23 @@
       iconCreateFunction: clusterIcon,
     });
     map.addLayer(markerCluster);
+  }
+
+  // Active basemap tile layer; swapped in place when the document theme
+  // changes. Holding the reference here so the MutationObserver in initMap
+  // can remove the previous layer cleanly.
+  var basemapLayer = null;
+  function applyBasemapTheme() {
+    if (!map) return;
+    var isDark = (document.documentElement.getAttribute("data-theme") || "dark") === "dark";
+    var url = isDark
+      ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+      : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+    var attribution = isDark
+      ? "© <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a> contributors © <a href=\"https://carto.com/attributions\">CARTO</a>"
+      : "© <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a> contributors";
+    if (basemapLayer) map.removeLayer(basemapLayer);
+    basemapLayer = L.tileLayer(url, { maxZoom: 19, attribution: attribution }).addTo(map);
   }
 
   function clusterIcon(cluster) {
@@ -327,8 +352,10 @@
     var overlay = document.getElementById("topology-overlay");
     var closeBtn = document.getElementById("topology-close");
     var screenshotBtn = document.getElementById("topology-screenshot");
+    var fullscreenBtn = document.getElementById("topology-fullscreen");
     closeBtn.addEventListener("click", closeTopology);
     if (screenshotBtn) screenshotBtn.addEventListener("click", screenshotTopology);
+    if (fullscreenBtn) fullscreenBtn.addEventListener("click", toggleFullscreenTopology);
     overlay.addEventListener("click", function (e) {
       if (e.target === overlay) {
         closeBtn.classList.add("flash");
@@ -338,6 +365,34 @@
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape" && overlay.classList.contains("open")) closeTopology();
     });
+    // When the browser exits fullscreen via Esc / OS gesture, drop the
+    // fullscreen class so the modal styling reverts cleanly.
+    document.addEventListener("fullscreenchange", function () {
+      var modal = overlay && overlay.querySelector(".modal");
+      if (!document.fullscreenElement && modal) modal.classList.remove("topology-fullscreen");
+      // Cytoscape needs a resize hint when the container size changes.
+      if (cyInstance) { try { cyInstance.resize(); cyInstance.fit(undefined, 30); } catch (e) {} }
+    });
+  }
+
+  // Toggle native browser fullscreen on the topology modal element. Falls
+  // back to a CSS-driven "occupy the whole viewport" mode when the
+  // Fullscreen API isn't available (older Safari / iframe contexts).
+  function toggleFullscreenTopology() {
+    var overlay = document.getElementById("topology-overlay");
+    var modal = overlay && overlay.querySelector(".modal");
+    if (!modal) return;
+    var nativeAvailable = !!(modal.requestFullscreen || modal.webkitRequestFullscreen);
+    if (nativeAvailable) {
+      if (document.fullscreenElement) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      } else {
+        (modal.requestFullscreen || modal.webkitRequestFullscreen).call(modal);
+      }
+    } else {
+      modal.classList.toggle("topology-fullscreen");
+      if (cyInstance) { try { cyInstance.resize(); cyInstance.fit(undefined, 30); } catch (e) {} }
+    }
   }
 
   // Cytoscape ships a built-in cy.png() that respects the current layout/colors
@@ -474,6 +529,15 @@
         data: { id: "le" + i, source: e.source, target: e.target, label: e.label || "", isLldp: 1 },
       });
     });
+    // Interface-inferred edges — CMDB-stamped peer aggregates (FortiOS auto
+    // serial-named or operator-named hostname-named). Authoritative, so
+    // rendered with a solid teal line to contrast with the dashed orange
+    // LLDP edges and the muted gray controller-data edges.
+    (data.interfaceEdges || []).forEach(function (e, i) {
+      elements.push({
+        data: { id: "ie" + i, source: e.source, target: e.target, label: e.label || "", isIface: 1 },
+      });
+    });
 
     var theme = document.documentElement.getAttribute("data-theme") || "dark";
     var isDark = theme === "dark";
@@ -483,6 +547,12 @@
     cyInstance = cytoscape({
       container: document.getElementById("topology-graph"),
       elements: elements,
+      // Box-select: shift+drag on background draws a selection rectangle;
+      // selected nodes can be dragged together to rearrange. Multi-node
+      // selection is also addable via shift-click on individual nodes.
+      // Pan stays as plain drag on background (Cytoscape default).
+      boxSelectionEnabled: true,
+      selectionType: "additive",
       layout: {
         name: "dagre",
         rankDir: "TB",
@@ -596,6 +666,19 @@
             "target-arrow-color": "#f59e0b",
           },
         },
+        // Interface-inferred edges (peer aggregates whose name encodes the
+        // peer's serial fragment or hostname). These are CMDB-stamped, so
+        // a confident solid teal line — distinct from both the muted
+        // gray controller-data edges and the dashed orange LLDP edges.
+        {
+          selector: 'edge[isIface = 1]',
+          style: {
+            "line-style": "solid",
+            "line-color": "#14b8a6",
+            "target-arrow-color": "#14b8a6",
+            width: 2.4,
+          },
+        },
       ],
     });
 
@@ -653,6 +736,31 @@
         parts.push(
           '<li><a href="/subnets.html#subnet=' + encodeURIComponent(n.id) + '">' + escapeHtml(n.cidr) + '</a>' +
           '<span class="meta">' + (n.vlan ? 'VLAN ' + n.vlan : (n.name ? escapeHtml(n.name) : '—')) + '</span></li>'
+        );
+      });
+      parts.push('</ul></div>');
+    }
+
+    // CMDB-inferred peers from interface naming conventions (FortiOS-auto
+    // serial aggregates + operator-named hostname aggregates). These map
+    // back to the solid teal edges in the graph. Built from the inventory
+    // we already loaded; sourceIfName tells the operator which local
+    // aggregate carries the link.
+    var interfaceEdges = data.interfaceEdges || [];
+    var remoteLookup = {};
+    (data.remoteAssetNodes || []).forEach(function (n) { remoteLookup[n.id] = n; });
+    var siblingLookup = {};
+    (data.switches || []).forEach(function (s) { siblingLookup[s.id] = s; });
+    (data.aps || []).forEach(function (a) { siblingLookup[a.id] = a; });
+    if (interfaceEdges.length > 0) {
+      parts.push('<div class="topology-section"><h5>Interface-inferred peers (' + interfaceEdges.length + ')</h5><ul>');
+      interfaceEdges.forEach(function (e) {
+        var target = remoteLookup[e.target] || siblingLookup[e.target] || null;
+        var label = target ? (target.hostname || target.ipAddress || target.id) : e.target;
+        var hrefId = e.target;
+        parts.push(
+          '<li><a href="/assets.html#asset=' + encodeURIComponent(hrefId) + '">' + escapeHtml(label) + '</a>' +
+          '<span class="meta">' + escapeHtml((e.sourceIfName || "") + (e.matchVia === "hostname" ? " · hostname" : "")) + '</span></li>'
         );
       });
       parts.push('</ul></div>');
