@@ -3174,6 +3174,156 @@ function inferAssetTypeFromChassis(
   return "workstation"; // Entra/Intune devices default to workstation
 }
 
+// Build the source-shaped observed blob for the "entra" AssetSource row.
+// Only the entra-side fields land here — intune-overridden values stay in
+// the separate "intune" source row so admins can see what each Graph
+// endpoint independently said. `entraDisplayName` is the original entra
+// displayName (vs the merged `displayName` which intune may have overridden).
+function buildEntraObservedBlob(
+  dev: entraId.DiscoveredEntraDevice,
+  syncedAt: Date,
+): Record<string, unknown> {
+  return {
+    kind: "entra",
+    syncedAt: syncedAt.toISOString(),
+    deviceId: dev.deviceId.toLowerCase(),
+    displayName: dev.entraDisplayName ?? null,
+    operatingSystem: dev.operatingSystem || null,
+    operatingSystemVersion: dev.operatingSystemVersion || null,
+    trustType: dev.trustType || null,
+    accountEnabled: !!dev.accountEnabled,
+    isCompliant: typeof dev.isCompliant === "boolean" ? dev.isCompliant : null,
+    isManaged: typeof dev.isManaged === "boolean" ? dev.isManaged : null,
+    registrationDateTime: dev.registrationDateTime || null,
+    approximateLastSignInDateTime: dev.approximateLastSignInDateTime || null,
+    onPremisesSecurityIdentifier: dev.onPremisesSecurityIdentifier || null,
+  };
+}
+
+// Build the source-shaped observed blob for the "intune" AssetSource row.
+// Hardware identity (serial / MACs / manufacturer / model), assigned user,
+// chassis form factor, and compliance state — fields Entra alone doesn't
+// expose. Lives separately from the "entra" row so a tenant where Intune
+// permission was added later still sees the entra row with its own history.
+function buildIntuneObservedBlob(
+  dev: entraId.DiscoveredEntraDevice,
+  syncedAt: Date,
+): Record<string, unknown> {
+  return {
+    kind: "intune",
+    syncedAt: syncedAt.toISOString(),
+    azureADDeviceId: dev.deviceId.toLowerCase(),
+    deviceName: dev.intuneDeviceName ?? null,
+    operatingSystem: dev.operatingSystem || null,
+    osVersion: dev.operatingSystemVersion || null,
+    serialNumber: dev.serialNumber || null,
+    manufacturer: dev.manufacturer || null,
+    model: dev.model || null,
+    ethernetMacAddress: dev.ethernetMacAddress || null,
+    wiFiMacAddress: dev.wifiMacAddress || null,
+    userPrincipalName: dev.userPrincipalName || null,
+    chassisType: dev.chassisType || null,
+    complianceState: dev.complianceState || null,
+    lastSyncDateTime: dev.lastSyncDateTime || null,
+  };
+}
+
+// Upsert the entra and/or intune AssetSource rows for a discovered device.
+// `dev.sources` drives which rows are written — both for the common hybrid
+// case, just one for entra-only or intune-only devices. After upsert,
+// removes any stale entra/intune source rows on the same Asset whose
+// externalId differs from this device's deviceId (covers the
+// "duplicate-Entra-registration: incoming wins" auto-resolve path, where
+// the asset adopts a new deviceId and the old source rows would otherwise
+// orphan-link the prior identity).
+async function upsertEntraIntuneSources(
+  assetId: string,
+  integrationId: string,
+  dev: entraId.DiscoveredEntraDevice,
+  syncedAt: Date,
+  lastSeen: Date,
+): Promise<void> {
+  const externalId = dev.deviceId.toLowerCase();
+  const wantsEntra = dev.sources?.includes("entra") ?? false;
+  const wantsIntune = dev.sources?.includes("intune") ?? false;
+
+  if (wantsEntra) {
+    const observed = buildEntraObservedBlob(dev, syncedAt);
+    await prisma.assetSource.upsert({
+      where: { sourceKind_externalId: { sourceKind: "entra", externalId } },
+      create: { assetId, sourceKind: "entra", externalId, integrationId, observed: observed as any, inferred: false, syncedAt, firstSeen: lastSeen, lastSeen },
+      update: { assetId, integrationId, observed: observed as any, inferred: false, syncedAt, lastSeen },
+    });
+  }
+  if (wantsIntune) {
+    const observed = buildIntuneObservedBlob(dev, syncedAt);
+    await prisma.assetSource.upsert({
+      where: { sourceKind_externalId: { sourceKind: "intune", externalId } },
+      create: { assetId, sourceKind: "intune", externalId, integrationId, observed: observed as any, inferred: false, syncedAt, firstSeen: lastSeen, lastSeen },
+      update: { assetId, integrationId, observed: observed as any, inferred: false, syncedAt, lastSeen },
+    });
+  }
+
+  // Sweep stale source rows for entra/intune kinds whose externalId no
+  // longer matches this device's deviceId. Prevents orphan rows from a
+  // prior deviceId silently re-linking a future discovery to the wrong
+  // asset.
+  await prisma.assetSource.deleteMany({
+    where: {
+      assetId,
+      sourceKind: { in: ["entra", "intune"] },
+      externalId: { not: externalId },
+    },
+  });
+}
+
+// Build the Entra sync's lookup index from AssetSource rows. Replaces the
+// legacy in-memory scan over Asset.assetTag / Asset.tags for "entra:" /
+// "sid:" markers. AD source rows are joined in so the SID hybrid-cross-link
+// resolves both ways (entra.observed.onPremisesSecurityIdentifier and
+// ad.observed.objectSid both populate assetIdBySid).
+async function buildEntraSyncIndex(
+  allAssets: { id: string; hostname: string | null }[],
+): Promise<{
+  assetByEntraDeviceId: Map<string, any>;
+  assetIdBySid: Map<string, string>;
+  assetIdsWithEntraSource: Set<string>;
+  assetIdsWithAdSource: Set<string>;
+  assetById: Map<string, any>;
+}> {
+  const assetById = new Map<string, any>();
+  for (const a of allAssets) assetById.set(a.id, a);
+
+  const sources = await prisma.assetSource.findMany({
+    where: { sourceKind: { in: ["entra", "intune", "ad"] } },
+  });
+
+  const assetByEntraDeviceId = new Map<string, any>();
+  const assetIdBySid = new Map<string, string>();
+  const assetIdsWithEntraSource = new Set<string>();
+  const assetIdsWithAdSource = new Set<string>();
+
+  for (const src of sources) {
+    const obs = (src.observed as Record<string, unknown> | null) || {};
+    if (src.sourceKind === "entra" || src.sourceKind === "intune") {
+      assetIdsWithEntraSource.add(src.assetId);
+      const a = assetById.get(src.assetId);
+      if (a) assetByEntraDeviceId.set(src.externalId.toLowerCase(), a);
+      const sid =
+        typeof obs.onPremisesSecurityIdentifier === "string"
+          ? obs.onPremisesSecurityIdentifier.toUpperCase()
+          : null;
+      if (sid) assetIdBySid.set(sid, src.assetId);
+    } else if (src.sourceKind === "ad") {
+      assetIdsWithAdSource.add(src.assetId);
+      const sid = typeof obs.objectSid === "string" ? obs.objectSid.toUpperCase() : null;
+      if (sid) assetIdBySid.set(sid, src.assetId);
+    }
+  }
+
+  return { assetByEntraDeviceId, assetIdBySid, assetIdsWithEntraSource, assetIdsWithAdSource, assetById };
+}
+
 async function syncEntraDevices(
   integrationId: string,
   integrationName: string,
@@ -3188,26 +3338,35 @@ async function syncEntraDevices(
   const skipped: string[] = [];
   const now = new Date();
 
-  // Load the full asset table so we can index by (Entra) assetTag, by SID tag,
-  // and by hostname. SID index catches hybrid-joined devices that the on-prem
-  // AD integration discovered first (assetTag = "ad:{guid}").
+  // Load the full asset table and the AssetSource lookup index. The Entra
+  // device-id and SID indexes are now built from AssetSource (Phase 2
+  // cutover); MAC and hostname maps still derive from in-memory asset
+  // properties below.
   const allAssets = await prisma.asset.findMany();
-  const assetByEntraId = new Map<string, any>();              // deviceId → asset
-  const assetBySid = new Map<string, any>();                  // uppercase SID → asset
-  const assetByHostnameNoTag = new Map<string, any>();        // hostname → asset (untagged only)
-  const assetByHostnameEntraTagged = new Map<string, any>();  // hostname → asset (entra-tagged; for duplicate-registration detection)
-  const assetByMac = new Map<string, any>();                  // normalized MAC → asset (any source; for mac-collision detection)
+  const {
+    assetByEntraDeviceId,
+    assetIdBySid,
+    assetIdsWithEntraSource,
+    assetIdsWithAdSource,
+    assetById,
+  } = await buildEntraSyncIndex(allAssets);
+
+  // Untagged-collision map: assets with neither an entra/intune nor an ad
+  // source (e.g. FortiGate-discovered, manually created). Duplicate-Entra
+  // map: assets that already carry an entra/intune source (different
+  // deviceId — same deviceId would have matched the primary entra lookup
+  // first and never reached the collision branch).
+  const assetByHostnameNoTag = new Map<string, any>();
+  const assetByHostnameEntraTagged = new Map<string, any>();
+  const assetByMac = new Map<string, any>(); // normalized MAC → asset (any source; for mac-collision detection)
   for (const a of allAssets) {
-    const tag = a.assetTag ?? "";
-    if (tag.startsWith(ENTRA_ASSET_TAG_PREFIX)) {
-      assetByEntraId.set(tag.slice(ENTRA_ASSET_TAG_PREFIX.length).toLowerCase(), a);
-      if (a.hostname) indexHostname(assetByHostnameEntraTagged, a.hostname, a);
-    } else if (!tag && a.hostname) {
-      indexHostname(assetByHostnameNoTag, a.hostname, a);
-    }
-    for (const t of (a.tags as string[] | null) || []) {
-      if (t.startsWith(SID_TAG_PREFIX)) {
-        assetBySid.set(t.slice(SID_TAG_PREFIX.length).toUpperCase(), a);
+    if (a.hostname) {
+      const hasEntra = assetIdsWithEntraSource.has(a.id);
+      const hasAd = assetIdsWithAdSource.has(a.id);
+      if (hasEntra) {
+        indexHostname(assetByHostnameEntraTagged, a.hostname, a);
+      } else if (!hasAd) {
+        indexHostname(assetByHostnameNoTag, a.hostname, a);
       }
     }
     // Index every MAC ever seen on this asset — primary + history.
@@ -3272,18 +3431,26 @@ async function syncEntraDevices(
     const lastSeen = lastSeenIso ? new Date(lastSeenIso) : null;
     const acquiredAt = dev.registrationDateTime ? new Date(dev.registrationDateTime) : null;
 
-    // 1. Primary match: Entra assetTag
-    let existing = assetByEntraId.get(deviceIdKey);
+    // 1. Primary match: any entra-or-intune AssetSource with this deviceId
+    let existing: any = assetByEntraDeviceId.get(deviceIdKey) ?? null;
     let takingOver = false;
-    // 2. Secondary match (hybrid-joined): on-prem SID tag. Lets Entra claim
-    //    assets first discovered by the AD integration.
+    // 2. Secondary match (hybrid-joined): on-prem SID. Resolves through any
+    //    source's observed payload (entra.onPremisesSecurityIdentifier or
+    //    ad.objectSid). Lets Entra claim assets first discovered by AD.
     if (!existing && dev.onPremisesSecurityIdentifier) {
-      const sidMatch = assetBySid.get(dev.onPremisesSecurityIdentifier.toUpperCase());
-      if (sidMatch) {
-        existing = sidMatch;
-        takingOver = !(sidMatch.assetTag || "").startsWith(ENTRA_ASSET_TAG_PREFIX);
-        if (takingOver) {
-          syncLog("info", `SID cross-link: Entra device "${dev.displayName}" (${dev.deviceId}) taking over existing asset ${sidMatch.id} (was ${sidMatch.assetTag || "<untagged>"}).`);
+      const sidAssetId = assetIdBySid.get(dev.onPremisesSecurityIdentifier.toUpperCase());
+      if (sidAssetId) {
+        const sidMatch = assetById.get(sidAssetId) ?? null;
+        if (sidMatch) {
+          existing = sidMatch;
+          // Take-over fires when the SID-matched asset has no entra/intune
+          // source yet (i.e. AD discovered it first). assetIdsWithEntraSource
+          // is the authoritative signal — assetTag is no longer the source
+          // of truth for source-of-record under the multi-source model.
+          takingOver = !assetIdsWithEntraSource.has(sidMatch.id);
+          if (takingOver) {
+            syncLog("info", `SID cross-link: Entra device "${dev.displayName}" (${dev.deviceId}) taking over existing asset ${sidMatch.id} (was ${sidMatch.assetTag || "<untagged>"}).`);
+          }
         }
       }
     }
@@ -3355,6 +3522,14 @@ async function syncEntraDevices(
       try {
         clampAcquiredToLastSeen(updateData, existing);
         await prisma.asset.update({ where: { id: existing.id }, data: updateData });
+        // Explicit AssetSource upsert(s) — the entra and (when intune
+        // contributed) intune source rows own their rich observed blobs.
+        // The shadow-write extension's UPDATE branch leaves observed alone.
+        try {
+          await upsertEntraIntuneSources(existing.id, integrationId, dev, now, lastSeen ?? now);
+        } catch (err: any) {
+          syncLog("warning", `Updated asset for Entra device ${dev.displayName || dev.deviceId} but failed to upsert AssetSource row(s): ${err.message || "Unknown error"}`);
+        }
         updated.push(dev.displayName || dev.deviceId);
       } catch (err: any) {
         syncLog("error", `Failed to update asset for Entra device ${dev.displayName || dev.deviceId}: ${err.message || "Unknown error"}`);
@@ -3490,9 +3665,20 @@ async function syncEntraDevices(
             if (dupEntra.asset.assetType === "other") updateFields.assetType = assetType;
             clampAcquiredToLastSeen(updateFields, dupEntra.asset);
             await prisma.asset.update({ where: { id: dupEntra.asset.id }, data: updateFields });
+            // Replace the asset's entra/intune source rows with the new
+            // deviceId. upsertEntraIntuneSources also sweeps stale entra/
+            // intune rows on this asset whose externalId differs from the
+            // new deviceId, so the old (entra, oldDeviceId) and (intune,
+            // oldDeviceId) rows go away — preventing them from re-linking
+            // a future discovery to this asset under the prior identity.
+            try {
+              await upsertEntraIntuneSources(dupEntra.asset.id, integrationId, dev, now, lastSeen ?? now);
+            } catch (err: any) {
+              syncLog("warning", `Auto-resolved duplicate Entra registration "${dev.displayName}" but failed to upsert AssetSource row(s): ${err.message || "Unknown error"}`);
+            }
             // Update in-memory index so further iterations find the asset by its new ID.
-            assetByEntraId.delete(existingEntraId.toLowerCase());
-            assetByEntraId.set(deviceIdKey, { ...dupEntra.asset, assetTag: `${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}` });
+            assetByEntraDeviceId.delete(existingEntraId.toLowerCase());
+            assetByEntraDeviceId.set(deviceIdKey, { ...dupEntra.asset, assetTag: `${ENTRA_ASSET_TAG_PREFIX}${dev.deviceId}` });
             updated.push(dev.displayName || dev.deviceId);
             syncLog("info", `Auto-resolved duplicate Entra registration "${dev.displayName}" — incoming ${dev.deviceId} (${lastSeen?.toISOString()}) newer than existing ${existingEntraId} (${existingLastSeen?.toISOString() ?? "never"}). Asset updated; old ID preserved as prev-entra: tag.`);
           } else {
@@ -3567,9 +3753,22 @@ async function syncEntraDevices(
       };
       clampAcquiredToLastSeen(createData);
       const newAsset = await prisma.asset.create({ data: createData as any });
-      assetByEntraId.set(deviceIdKey, newAsset);
+      // Explicit AssetSource upsert(s) with rich observed blobs. The
+      // Asset.create already triggered the shadow-write extension which
+      // laid down a skeleton entra row from the assetTag — this overwrites
+      // it with truth and adds the intune row when intune contributed.
+      try {
+        await upsertEntraIntuneSources(newAsset.id, integrationId, dev, now, lastSeen ?? now);
+      } catch (err: any) {
+        syncLog("warning", `Created asset for Entra device ${dev.displayName || dev.deviceId} but failed to upsert AssetSource row(s): ${err.message || "Unknown error"}`);
+      }
+      // Refresh the in-memory indexes so later devices in this run see the
+      // new asset (sibling-collision detection, SID matches, etc.).
+      assetById.set(newAsset.id, newAsset);
+      assetByEntraDeviceId.set(deviceIdKey, newAsset);
+      assetIdsWithEntraSource.add(newAsset.id);
       if (dev.onPremisesSecurityIdentifier) {
-        assetBySid.set(dev.onPremisesSecurityIdentifier.toUpperCase(), newAsset);
+        assetIdBySid.set(dev.onPremisesSecurityIdentifier.toUpperCase(), newAsset.id);
       }
       // Index the freshly-created asset by every MAC we just stored so a later
       // device in this same run reporting any of those MACs raises a

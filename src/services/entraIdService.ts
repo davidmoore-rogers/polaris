@@ -24,6 +24,20 @@ export interface EntraIdConfig {
 }
 
 export interface DiscoveredEntraDevice {
+  // Which Graph endpoints contributed to this merged record. Entra-registered
+  // devices that haven't been Intune-enrolled show ["entra"]; Intune-managed
+  // devices that lack an Entra registration (rare) show ["intune"]; the
+  // common hybrid case shows ["entra", "intune"]. Drives the AssetSource
+  // write split in syncEntraDevices — each contributing source gets its own
+  // row so the asset details modal can render side-by-side.
+  sources: ("entra" | "intune")[];
+  // Original entra-side displayName, kept distinct from `displayName` (which
+  // is intune-overridden when intune contributed). Used by the entra source
+  // observed blob so it reflects what Entra actually said. Undefined when
+  // entra didn't contribute (intune-only devices).
+  entraDisplayName?: string;
+  // Original intune-side deviceName. Undefined when intune didn't contribute.
+  intuneDeviceName?: string;
   deviceId: string;            // Azure AD deviceId — stable identifier across both endpoints
   displayName: string;         // Hostname in Entra; deviceName in Intune
   operatingSystem: string;
@@ -368,7 +382,12 @@ export async function discoverDevices(
     const intune = intuneByDeviceId.get(deviceId);
     const wifi = formatMac(intune?.wiFiMacAddress);
     const eth = formatMac(intune?.ethernetMacAddress);
+    const sources: ("entra" | "intune")[] = ["entra"];
+    if (intune) sources.push("intune");
     merged.push({
+      sources,
+      entraDisplayName: e.displayName ? String(e.displayName) : undefined,
+      intuneDeviceName: intune?.deviceName ? String(intune.deviceName) : undefined,
       deviceId,
       displayName: (intune?.deviceName || e.displayName || "") as string,
       operatingSystem: (intune?.operatingSystem || e.operatingSystem || "") as string,
@@ -403,6 +422,8 @@ export async function discoverDevices(
     const wifi = formatMac(intune.wiFiMacAddress);
     const eth = formatMac(intune.ethernetMacAddress);
     merged.push({
+      sources: ["intune"],
+      intuneDeviceName: intune.deviceName ? String(intune.deviceName) : undefined,
       deviceId,
       displayName: String(intune.deviceName || ""),
       operatingSystem: String(intune.operatingSystem || ""),
