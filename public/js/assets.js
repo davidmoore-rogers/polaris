@@ -1462,6 +1462,16 @@ async function openViewModal(id) {
       { key: "general", label: "General", html: generalHTML },
       { key: "system",  label: "System",  html: systemHTML },
     ];
+    // Sources tab — surfaces the multi-source asset model (Phase 3a). Loaded
+    // ahead of render so the table is ready on first paint; failures fall
+    // through to an empty-state message so the rest of the modal still works.
+    var sources = [];
+    try {
+      sources = await api.assets.getSources(a.id);
+    } catch (err) {
+      console.warn("Failed to load asset sources", err);
+    }
+    tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources) });
     // SNMP Walk tab — admin-only, mirrors the backend gate. Loads credentials
     // before render so the picker isn't empty on first paint.
     if (isAdmin()) {
@@ -6008,6 +6018,97 @@ function _wireSnmpWalkTab(a) {
       }
     });
   }
+}
+
+// ─── Sources tab (multi-source asset model — Phase 3a) ─────────────────────
+//
+// Renders the AssetSource rows for an asset, one card per source, in stable
+// presentation order (entra → intune → ad → fortigate-firewall → fortiswitch →
+// fortiap → manual). Each card shows the source's friendly label, the
+// originating integration (when known), an inferred-row warning badge, and
+// the raw observed blob as a key-value table — that's the "what did this
+// source independently say" view that the Phase 1+2 foundation set up.
+
+var _assetSourceLabels = {
+  "entra":              "Microsoft Entra ID",
+  "intune":             "Microsoft Intune",
+  "ad":                 "Active Directory",
+  "fortigate-firewall": "FortiGate (firewall)",
+  "fortiswitch":        "FortiSwitch",
+  "fortiap":            "FortiAP",
+  "manual":             "Manual / other",
+};
+
+// Internal fields hidden from the per-source key/value table. `kind` and
+// `syncedAt` are surfaced in the card header instead; raw recovery markers
+// like `recovered` are shown via the inferred badge.
+var _assetSourceHiddenObservedKeys = { kind: 1, syncedAt: 1, recovered: 1 };
+
+function _humanizeSourceObservedKey(k) {
+  // Camel-case → "Title Case With Spaces".
+  if (!k) return "";
+  var spaced = String(k).replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/_/g, " ");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+function _formatSourceObservedValue(v) {
+  if (v === null || v === undefined) return '<span style="color:var(--color-text-secondary)">—</span>';
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  if (typeof v === "number") return escapeHtml(String(v));
+  if (typeof v === "string") {
+    // Pretty-print ISO timestamps; raw-show short strings; mono-format obvious
+    // identifiers so they're easy to read at a glance.
+    if (/^\d{4}-\d{2}-\d{2}T/.test(v)) return escapeHtml(formatDate(v));
+    return escapeHtml(v);
+  }
+  return '<code class="mono" style="font-size:0.78rem">' + escapeHtml(JSON.stringify(v)) + '</code>';
+}
+
+function _assetSourcesTabHTML(sources) {
+  if (!Array.isArray(sources) || sources.length === 0) {
+    return '<div class="empty-state" style="padding:1rem">No source rows on file for this asset. Phase-1 backfill runs at startup; check the Events log if you expected entries here.</div>';
+  }
+  return sources.map(function (s) {
+    var label = _assetSourceLabels[s.sourceKind] || s.sourceKind;
+    var badges = [];
+    if (s.inferred) {
+      badges.push('<span class="badge badge-maintenance" title="Synthesized by phase-1 backfill from a legacy `ad-guid:` tag breadcrumb. The next real discovery from this source replaces the row with truth.">Inferred</span>');
+    }
+    if (s.integration) {
+      badges.push('<span class="badge badge-active" title="' + escapeHtml(s.integration.type) + '">' + escapeHtml(s.integration.name) + '</span>');
+    }
+    var headerRight = badges.length ? '<div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center">' + badges.join("") + '</div>' : '';
+
+    var meta = [];
+    if (s.syncedAt) meta.push("Synced " + escapeHtml(formatDate(s.syncedAt)));
+    if (s.firstSeen) meta.push("First seen " + escapeHtml(formatDate(s.firstSeen)));
+    if (s.lastSeen)  meta.push("Last seen " + escapeHtml(formatDate(s.lastSeen)));
+    if (s.externalId) meta.push("External ID <code class=\"mono\" style=\"font-size:0.78rem\">" + escapeHtml(s.externalId) + "</code>");
+
+    var observed = (s.observed && typeof s.observed === "object") ? s.observed : {};
+    var rows = Object.keys(observed)
+      .filter(function (k) { return !_assetSourceHiddenObservedKeys[k]; })
+      .map(function (k) {
+        return '<tr>' +
+          '<th style="text-align:left;padding:0.25rem 0.6rem 0.25rem 0;color:var(--color-text-secondary);font-weight:500;white-space:nowrap;vertical-align:top">' + escapeHtml(_humanizeSourceObservedKey(k)) + '</th>' +
+          '<td style="padding:0.25rem 0">' + _formatSourceObservedValue(observed[k]) + '</td>' +
+        '</tr>';
+      }).join("");
+    var observedTable = rows
+      ? '<table style="width:100%;font-size:0.85rem;border-collapse:collapse">' + rows + '</table>'
+      : '<em style="color:var(--color-text-secondary)">No observed fields recorded.</em>';
+
+    return (
+      '<div class="section-block" style="margin-bottom:1rem">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:0.6rem;margin-bottom:0.25rem">' +
+          '<div class="section-label" style="margin:0">' + escapeHtml(label) + '</div>' +
+          headerRight +
+        '</div>' +
+        (meta.length ? '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-bottom:0.5rem">' + meta.join(" · ") + '</div>' : '') +
+        observedTable +
+      '</div>'
+    );
+  }).join("");
 }
 
 // ─── Quarantine tab ─────────────────────────────────────────────────────────

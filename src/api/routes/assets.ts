@@ -1736,6 +1736,59 @@ router.get("/:id/sightings", async (req, res, next) => {
   }
 });
 
+// GET /api/v1/assets/:id/sources — per-discovery-source view of an asset
+// (Phase 3a of the multi-source asset model). Returns every AssetSource row
+// for this asset with the originating integration's name + type joined in,
+// sorted by sourceKind in a stable presentation order. Drives the "Sources"
+// tab on the asset details modal — operators can see what each integration
+// independently said, side-by-side.
+router.get("/:id/sources", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const exists = await prisma.asset.findUnique({ where: { id }, select: { id: true } });
+    if (!exists) throw new AppError(404, "Asset not found");
+
+    const rows = await prisma.assetSource.findMany({
+      where: { assetId: id },
+      include: { integration: { select: { id: true, name: true, type: true } } },
+      orderBy: [{ sourceKind: "asc" }, { lastSeen: "desc" }],
+    });
+
+    // Stable presentation order — identity-first, manual last.
+    const ORDER: Record<string, number> = {
+      "entra": 1,
+      "intune": 2,
+      "ad": 3,
+      "fortigate-firewall": 4,
+      "fortiswitch": 5,
+      "fortiap": 6,
+      "manual": 99,
+    };
+    rows.sort((a, b) => {
+      const ai = ORDER[a.sourceKind] ?? 50;
+      const bi = ORDER[b.sourceKind] ?? 50;
+      if (ai !== bi) return ai - bi;
+      return (b.lastSeen?.getTime() ?? 0) - (a.lastSeen?.getTime() ?? 0);
+    });
+
+    res.json(
+      rows.map((r) => ({
+        id: r.id,
+        sourceKind: r.sourceKind,
+        externalId: r.externalId,
+        integration: r.integration ? { id: r.integration.id, name: r.integration.name, type: r.integration.type } : null,
+        observed: r.observed,
+        inferred: r.inferred,
+        syncedAt: r.syncedAt,
+        firstSeen: r.firstSeen,
+        lastSeen: r.lastSeen,
+      })),
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/v1/assets/:id/quarantine-status — current quarantine state + recorded targets
 router.get("/:id/quarantine-status", async (req, res, next) => {
   try {
