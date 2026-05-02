@@ -159,7 +159,15 @@ router.get("/database", async (_req, res, next) => {
     const urlMatch = connUrl.match(/@([^:/?]+)(?::(\d+))?/);
     const host = urlMatch ? urlMatch[1] : "localhost";
     const port = urlMatch && urlMatch[2] ? parseInt(urlMatch[2], 10) : 5432;
-    const ssl = connUrl.includes("sslmode=require") || connUrl.includes("ssl=true") ? "Enabled" : "Disabled";
+
+    // Authoritative SSL state from the live backend, not the URL — `sslmode`
+    // has six values (require / verify-ca / verify-full / no-verify / prefer /
+    // disable) plus the legacy `ssl=true`, and "prefer" only resolves at
+    // negotiation time. pg_stat_ssl reports what the connection actually did.
+    const sslResult = await prisma.$queryRawUnsafe<{ ssl: boolean }[]>(
+      "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()"
+    );
+    const ssl = sslResult[0]?.ssl ? "Enabled" : "Disabled";
 
     res.json({
       type: "PostgreSQL",

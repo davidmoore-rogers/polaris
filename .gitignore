@@ -15,3 +15,6 @@ data/backups/
 
 # First-run setup marker — written per-host after setup finalizes
 .setup-complete
+
+# Per-developer Claude Code settings (permissions, hook config) — local
+.claude/
