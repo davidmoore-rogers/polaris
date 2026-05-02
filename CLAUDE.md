@@ -6,7 +6,7 @@
 
 > **Naming:** the project was previously called Shelob and has been fully rebranded — every on-host identifier (install path, system user, Postgres DB/user, systemd unit, NSSM service name, firewall rule label), browser-side identifier (CSRF cookie, localStorage keys), and source-level constant (argon2 timing dummy, encrypted-backup magic) now uses `polaris` / `Polaris` / `POLARIS`. Encrypted backups are versioned by the 8-byte magic header `POLARIS\0`; the previous `SHELOB1\0` format is no longer recognized. Existing installs migrate via dump-and-reinstall (plain `pg_dump` carries cleanly into a polaris-named DB).
 
-Current version: **0.9.x** (pre-release; patch = git commit count, minor per release). Version is shown in the sidebar and embedded in backup filenames. The patch is derived automatically at startup from `git rev-list --count HEAD` — never bump it manually.
+Version policy: `<major>.<minor>` lives in `package.json` and is the single source of truth — pre-release line is the 0.x series, bump the minor (e.g. `0.9.0` → `0.10.0`) when cutting a named release. The patch is the git commit count, computed at runtime by `src/utils/version.ts`: it reads `POLARIS_BUILD_COMMIT_COUNT` (baked into the Docker image at build time) when set, otherwise falls back to `git rev-list --count HEAD` for RHEL prod / dev where the .git tree is present. Never edit the patch in package.json — it stays `<major>.<minor>.0` there. Version is shown in the sidebar and embedded in backup filenames.
 
 ---
 
@@ -1266,7 +1266,7 @@ npm run lint
 - **Keep CLAUDE.md current.** When you add a model, field, route, service, job, or env var — update the relevant section of this file in the same commit.
 - **Keep demo.mjs current.** When you add a significant new entity, field, or feature, update `demo.mjs` so it exercises the new capability.
 - **Commit after every change.** Each logical change (feature, fix, update) gets its own commit immediately — don't batch unrelated work.
-- **Version is automatic.** The patch number is derived at runtime from `git rev-list --count HEAD`. Do not touch `package.json` version for patch increments. Only bump the minor (e.g. `0.9.0` → `0.10.0`) when cutting a named release.
+- **Version is automatic.** The patch is computed by `src/utils/version.ts` (Docker: baked-in `POLARIS_BUILD_COMMIT_COUNT`, otherwise `git rev-list --count HEAD`). Do not touch `package.json` version for patch increments — it stays `<major>.<minor>.0`. Bump the minor (e.g. `0.9.0` → `0.10.0`) only when cutting a named release.
 
 ---
 

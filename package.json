@@ -1,6 +1,6 @@
 {
   "name": "polaris",
-  "version": "1.0.0",
+  "version": "0.9.0",
   "description": "Polaris — subnet & IP address management, the fixed reference point for your network",
   "type": "module",
   "main": "dist/index.js",
