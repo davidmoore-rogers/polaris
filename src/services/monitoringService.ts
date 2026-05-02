@@ -2653,7 +2653,33 @@ async function persistLldpNeighbors(
     }
   }
 
-  const toDelete = existing.filter((e) => !seen.has(keyOf(e.localIfName, e.chassisId, e.portId))).map((e) => e.id);
+  // Stickiness rule for stale rows. LLDP advertisements get missed
+  // intermittently — a packet drops, a switch reboots, a peer briefly
+  // unplugs — and a hard "delete on every scrape that doesn't see them"
+  // rule made the operator-visible Neighbor column flap empty for those
+  // gaps. Instead, keep the prior row for a 48-hour grace period UNLESS
+  // a fresh scrape just learned a DIFFERENT neighbor on the same local
+  // port (in which case the new value supersedes immediately — that's
+  // a real topology change, not a missed advertisement).
+  const STALE_AFTER_MS = 48 * 60 * 60 * 1000;
+  const portsWithFreshNeighbor = new Set<string>();
+  for (const n of neighbors) portsWithFreshNeighbor.add(n.localIfName);
+  const toDelete: string[] = [];
+  for (const e of existing) {
+    const k = keyOf(e.localIfName, e.chassisId, e.portId);
+    if (seen.has(k)) continue; // refreshed by this scrape — keep
+    // Same port saw a different neighbor → real change, drop the old.
+    if (portsWithFreshNeighbor.has(e.localIfName)) {
+      toDelete.push(e.id);
+      continue;
+    }
+    // No fresh neighbor on this port; honor the 48h grace period before
+    // declaring the row stale.
+    const ageMs = now.getTime() - new Date(e.lastSeen).getTime();
+    if (ageMs > STALE_AFTER_MS) {
+      toDelete.push(e.id);
+    }
+  }
   if (toDelete.length > 0) {
     await prisma.assetLldpNeighbor.deleteMany({ where: { id: { in: toDelete } } });
   }

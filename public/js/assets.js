@@ -2063,7 +2063,7 @@ function _renderInterfacesTable(container, si, asset) {
 
   container.innerHTML =
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th title="Pin this interface for fast-cadence polling">Poll 1m</th>' +
+      '<th title="Pin this interface for fast-cadence polling" style="width:32px"></th>' +
       '<th>Interface</th><th>Status</th><th>Speed</th><th>IP</th><th>MAC</th><th>In</th><th>Out</th><th>Errors (in/out)</th>' +
       '<th title="LLDP neighbor seen on this interface">Neighbor</th>' +
     '</tr></thead><tbody>' + html + "</tbody></table></div>";
@@ -2208,7 +2208,7 @@ function _renderStorageTable(container, si, asset) {
   }).join("");
   container.innerHTML =
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th title="Pin this mountpoint for fast-cadence polling">Poll 1m</th>' +
+      '<th title="Pin this mountpoint for fast-cadence polling" style="width:32px"></th>' +
       '<th>Mount</th><th>Used</th><th>Total</th><th>Used %</th>' +
     '</tr></thead><tbody>' + body + '</tbody></table></div>';
 
