@@ -18,6 +18,11 @@
  *     alias map before projection so it matches the canonicalized form
  *     that the Prisma extension stamps on Asset.manufacturer (otherwise
  *     "Dell Inc." vs "Dell" produces noise drift on every cycle).
+ *   - ipAddress: fortigate-endpoint wins — the FortiGate sees the live
+ *     DHCP/ARP binding, so its observed.ipAddress is the freshest
+ *     signal. MDM sources don't carry IP at all. Fortinet infrastructure
+ *     rules below only apply to firewall/switch/AP-typed assets, which
+ *     never carry a fortigate-endpoint source.
  *
  * Per-field priority order (first truthy wins). Inferred sources are
  * skipped — they're phase-1 backfill skeletons, not authoritative
@@ -27,6 +32,9 @@
  * Fields the projection owns:
  *   hostname, serialNumber, manufacturer, model, os, osVersion,
  *   learnedLocation, ipAddress, latitude, longitude
+ *
+ * See the "Asset projection priority table" section in CLAUDE.md for
+ * the full per-field × per-source-kind priority matrix.
  *
  * Fields the projection deliberately does NOT own (for now):
  *   - macAddress / macAddresses — DHCP discovery writes these directly to
@@ -51,6 +59,7 @@ export type AssetSourceKind =
   | "fortigate-firewall"
   | "fortiswitch"
   | "fortiap"
+  | "fortigate-endpoint"
   | "manual";
 
 export interface AssetSourceForProjection {
@@ -130,6 +139,11 @@ const HOSTNAME_RULES: FieldRule[] = [
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "hostname") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "switchId") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "name") },
+  // fortigate-endpoint hostname — the FortiGate's DHCP client identifier.
+  // Lowest priority because DHCP client IDs are operator-set and may not
+  // match the device's "real" hostname (random strings, owner names,
+  // serial numbers). Useful only when no MDM/AD source has an opinion.
+  { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "hostname") },
 ];
 
 const SERIAL_RULES: FieldRule[] = [
@@ -155,6 +169,16 @@ const MANUFACTURER_RULES: FieldRule[] = [
   { sourceKind: "fortigate-firewall", pick: () => "Fortinet" },
   { sourceKind: "fortiswitch", pick: () => "Fortinet" },
   { sourceKind: "fortiap", pick: () => "Fortinet" },
+  // fortigate-endpoint hardwareVendor — populated from FortiOS device-
+  // inventory or OUI lookup at discovery time. Coarser than Intune
+  // (vendor only, no model fidelity) but better than nothing for assets
+  // that have no MDM source. Same alias-normalization pass as Intune so
+  // "Dell Inc." → "Dell" matches the canonical Asset value.
+  { sourceKind: "fortigate-endpoint", pick: (o) => {
+      const raw = obsString(o, "hardwareVendor");
+      return raw ? normalizeManufacturer(raw) : null;
+    }
+  },
 ];
 
 const MODEL_RULES: FieldRule[] = [
@@ -165,6 +189,9 @@ const MODEL_RULES: FieldRule[] = [
   // and AP do carry a meaningful model string.
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "model") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "model") },
+  // fortigate-endpoint model — DHCP fingerprint or device-inventory model
+  // string. Coarse signal but better than nothing for non-MDM assets.
+  { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "model") },
 ];
 
 const OS_RULES: FieldRule[] = [
@@ -174,6 +201,10 @@ const OS_RULES: FieldRule[] = [
   { sourceKind: "ad", pick: (o) => obsString(o, "operatingSystem") },
   { sourceKind: "intune", pick: (o) => obsString(o, "operatingSystem") },
   { sourceKind: "entra", pick: (o) => obsString(o, "operatingSystem") },
+  // fortigate-endpoint os — FortiGate device-inventory's OS detection
+  // (rough fingerprint based on DHCP options + traffic). Coarse but
+  // useful when no MDM/AD source has the device.
+  { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "os") },
 ];
 
 const OS_VERSION_RULES: FieldRule[] = [
@@ -183,6 +214,7 @@ const OS_VERSION_RULES: FieldRule[] = [
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "osVersion") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "osVersion") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "osVersion") },
+  { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "osVersion") },
 ];
 
 const LEARNED_LOCATION_RULES: FieldRule[] = [
@@ -194,13 +226,23 @@ const LEARNED_LOCATION_RULES: FieldRule[] = [
   // duplicate it; we leave learnedLocation = null for firewalls and let
   // the legacy "set when null" rule continue to work.
   { sourceKind: "ad", pick: (o) => obsString(o, "ouPath") },
+  // fortigate-endpoint learnedLocation — the FortiGate device name acts
+  // as a site label for endpoints with no AD OU (BYO laptops on guest
+  // SSIDs, contractor devices, IoT gear). Slots between AD (the
+  // operator-organized OU path) and the legacy controllerFortigate
+  // labels for switches/APs.
+  { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "learnedLocation") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "controllerFortigate") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "controllerFortigate") },
 ];
 
 const IP_ADDRESS_RULES: FieldRule[] = [
-  // Endpoint IPs come from DHCP discovery on the legacy path — no source
-  // row carries them today. Only Fortinet infrastructure projects an IP.
+  // Endpoint IPs: fortigate-endpoint sees the live DHCP/ARP binding —
+  // freshest signal we have. MDM sources don't carry IP. Wins over
+  // Fortinet-infrastructure mgmtIp for endpoint-typed assets, and the
+  // infrastructure rules below only apply to firewall/switch/AP-typed
+  // assets that won't have a fortigate-endpoint source on them.
+  { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "ipAddress") },
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "mgmtIp") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "mgmtIp") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "mgmtIp") },
