@@ -956,31 +956,37 @@ function _capacitySeverityLabel(s) {
   return "Healthy";
 }
 
-function renderEngineStatHtml(db) {
-  if (!db) return "";
-  return '<div class="capacity-stat-card">' +
-    '<h5>Database engine</h5>' +
-    '<div class="db-info-grid">' +
-      dbInfoRow("Type", db.type || "Unknown") +
-      dbInfoRow("Version", db.version || "Unknown") +
-      (db.host ? dbInfoRow("Host", db.host + (db.port ? ":" + db.port : "")) : "") +
-      (db.database ? dbInfoRow("Database", db.database) : "") +
-      (db.ssl ? dbInfoRow("SSL", db.ssl) : "") +
-    '</div>' +
-  '</div>';
-}
-
-function renderPoolStatHtml(db) {
+// Combined Database Engine + Connection Pool stat card. The two sets of
+// fields are tightly related (engine identity + its live connection
+// state) and were taking up two cards' worth of horizontal space — fold
+// them into one card with sub-headings so the Maintenance tab reads as
+// host / database / engine+pool / monitoring rather than four narrow
+// columns where the engine and pool barely overlap on what they tell
+// the operator.
+function renderEnginePoolStatHtml(db) {
   if (!db) return "";
   var hasPool = db.uptime || db.activeConnections !== undefined || db.maxConnections !== undefined;
-  if (!hasPool) return "";
-  return '<div class="capacity-stat-card">' +
-    '<h5>Connection pool</h5>' +
-    '<div class="db-info-grid">' +
-      (db.activeConnections !== undefined ? dbInfoRow("Active connections", db.activeConnections) : "") +
+
+  var engineRows =
+    dbInfoRow("Type", db.type || "Unknown") +
+    dbInfoRow("Version", db.version || "Unknown") +
+    (db.host ? dbInfoRow("Host", db.host + (db.port ? ":" + db.port : "")) : "") +
+    (db.database ? dbInfoRow("Database", db.database) : "") +
+    (db.ssl ? dbInfoRow("SSL", db.ssl) : "");
+
+  var poolRows = hasPool
+    ? (db.activeConnections !== undefined ? dbInfoRow("Active connections", db.activeConnections) : "") +
       (db.maxConnections !== undefined ? dbInfoRow("Max connections", db.maxConnections) : "") +
-      (db.uptime ? dbInfoRow("Uptime", db.uptime) : "") +
-    '</div>' +
+      (db.uptime ? dbInfoRow("Uptime", db.uptime) : "")
+    : "";
+
+  return '<div class="capacity-stat-card">' +
+    '<h5>Database engine</h5>' +
+    '<div class="db-info-grid">' + engineRows + '</div>' +
+    (poolRows
+      ? '<h5 style="margin-top:0.85rem">Connection pool</h5>' +
+        '<div class="db-info-grid">' + poolRows + '</div>'
+      : '') +
   '</div>';
 }
 
@@ -989,12 +995,11 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
     // Capacity grading unavailable (e.g. statfs not supported) — still render
     // the engine + pool stats under a plain Database header so operators
     // don't lose visibility into the database connection.
-    var engineOnly = renderEngineStatHtml(dbInfo);
-    var poolOnly = renderPoolStatHtml(dbInfo);
-    if (!engineOnly && !poolOnly) return "";
+    var engineOnly = renderEnginePoolStatHtml(dbInfo);
+    if (!engineOnly) return "";
     return '<div class="settings-card">' +
       '<h4>Database</h4>' +
-      '<div class="capacity-grid">' + engineOnly + poolOnly + '</div>' +
+      '<div class="capacity-grid">' + engineOnly + '</div>' +
     '</div>';
   }
 
@@ -1118,8 +1123,7 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
       '<p class="hint" style="margin-top:0.5rem">Steady-state size is what the database grows to if monitoring settings stay as they are. Reduce retention or cadence to lower it.</p>' +
     '</div>';
 
-  var engineHtml = renderEngineStatHtml(dbInfo);
-  var poolHtml = renderPoolStatHtml(dbInfo);
+  var enginePoolHtml = renderEnginePoolStatHtml(dbInfo);
 
   return '<div class="settings-card capacity-card capacity-card-' + severity + '" id="capacity-card">' +
     '<div class="capacity-header">' +
@@ -1127,7 +1131,7 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
       '<span class="' + pillClass + '">' + _capacitySeverityLabel(severity) + '</span>' +
     '</div>' +
     reasonsHtml +
-    '<div class="capacity-grid">' + hostHtml + dbHtml + engineHtml + poolHtml + workHtml + '</div>' +
+    '<div class="capacity-grid">' + hostHtml + dbHtml + enginePoolHtml + workHtml + '</div>' +
     '<p class="hint" style="margin-top:0.75rem;font-size:0.78rem">Last computed ' + escapeHtml(capacity.computedAt || "") + '</p>' +
   '</div>';
 }
