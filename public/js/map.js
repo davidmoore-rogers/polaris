@@ -146,7 +146,11 @@
 
     if (latlngs.length > 0) {
       var bounds = L.latLngBounds(latlngs);
-      map.fitBounds(bounds.pad(0.2), { maxZoom: 11 });
+      // Tighter fit — 5% padding around the actual asset bounds (was 20%)
+      // so the operator's eye lands on the cluster, not the empty
+      // ocean/border. maxZoom bumped to 12 for clustered fleets where
+      // the natural fit zoom would otherwise be capped too far out.
+      map.fitBounds(bounds.pad(0.05), { maxZoom: 12 });
     }
     setStatus(siteCache.length + " FortiGate" + (siteCache.length === 1 ? "" : "s") + " on the map");
   }
