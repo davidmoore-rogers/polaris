@@ -200,10 +200,15 @@ router.post("/finalize", async (req, res) => {
     await appClient.connect();
 
     const passwordHash = await hashPassword(admin.password);
+    // Column names: password_hash and auth_provider are @map()'d to snake_case
+    // in the Prisma schema; createdAt and updatedAt are not, so they're
+    // generated as quoted camelCase columns. updatedAt has no DB default
+    // (Prisma sets it on every write at the application layer), so we have
+    // to supply NOW() explicitly here.
     await appClient.query(
-      `INSERT INTO users (id, username, password_hash, role, auth_provider, created_at, updated_at)
-       VALUES (gen_random_uuid(), $1, $2, 'admin', 'local', NOW(), NOW())
-       ON CONFLICT (username) DO UPDATE SET password_hash = $2, role = 'admin'`,
+      `INSERT INTO users (id, username, password_hash, role, auth_provider, "updatedAt")
+       VALUES (gen_random_uuid(), $1, $2, 'admin', 'local', NOW())
+       ON CONFLICT (username) DO UPDATE SET password_hash = $2, role = 'admin', "updatedAt" = NOW()`,
       [admin.username, passwordHash],
     );
     await appClient.end();
