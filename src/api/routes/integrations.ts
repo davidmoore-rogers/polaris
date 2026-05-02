@@ -3485,7 +3485,87 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     }
   }
 
-  return { created, updated, skipped, deprecated, assets: assetNames, reservations: reservationNames, vips: vipNames.length, dhcpLeases: dhcpLeases.length, dhcpReservations: dhcpReservations.length, inventoryDevices: inventoryAssets.length, dnsResolved, ouiResolved, ouiOverridden, decommissionedSwitches, decommissionedAps, endpointSourcesStamped };
+  // Phase 11 — projection apply pass. The inline merge in syncDhcpSubnets
+  // sets Asset fields opportunistically (set-when-empty for OS, set-always
+  // for osVersion, etc.). After Phase 10 stamps the fortigate-endpoint
+  // source row, a hybrid-managed device has all its sources on file:
+  // entra + intune + ad + fortigate-endpoint, each with its own observed
+  // blob. We re-project here and correct any field where projection
+  // priority disagrees with the inline-written value.
+  //
+  // Concretely this fixes: Intune's `osVersion = "10.0.19045"` getting
+  // overwritten by FortiOS's coarser `osVersion = "10.0"` on every
+  // device-inventory pass, plus mirror cases where AD's verbose
+  // `operatingSystem = "Windows 10 Pro"` should beat Intune's "Windows".
+  // For assets WITHOUT MDM/AD sources the projection picks
+  // fortigate-endpoint's values and writes them back unchanged, so
+  // FortiGate-only fleets behave identically to before.
+  //
+  // Skips fields the projection deliberately doesn't own (lastSeenSwitch,
+  // lastSeenAp, status, mac, operator-owned fields — see the priority
+  // table in CLAUDE.md). Only writes when the projected value is non-null
+  // AND differs from the current Asset value, so quiet syncs skip the
+  // round-trip entirely.
+  let projectionCorrected = 0;
+  if (fortigateEndpointAssetIds.size > 0) {
+    const projectionResults = await batchSettled(
+      Array.from(fortigateEndpointAssetIds),
+      async (assetId: string) => {
+        const asset = assetIdx.findById(assetId);
+        if (!asset) return false;
+        const sourceRows = await prisma.assetSource.findMany({
+          where: { assetId },
+          select: { sourceKind: true, inferred: true, observed: true },
+        });
+        const { projected } = projectAssetFromSources(
+          sourceRows.map((s) => ({
+            sourceKind: s.sourceKind,
+            inferred: s.inferred,
+            observed: s.observed as Record<string, unknown> | null,
+          })),
+        );
+        const corrections: Record<string, unknown> = {};
+        const considerString = (key: "hostname" | "os" | "osVersion" | "manufacturer" | "model" | "learnedLocation" | "ipAddress" | "serialNumber") => {
+          const next = projected[key];
+          if (next !== null && next !== (asset as any)[key]) {
+            corrections[key] = next;
+          }
+        };
+        considerString("hostname");
+        considerString("os");
+        considerString("osVersion");
+        considerString("manufacturer");
+        considerString("model");
+        considerString("learnedLocation");
+        considerString("ipAddress");
+        considerString("serialNumber");
+        // lat/long: only meaningful for firewall-typed assets (excluded
+        // from this set since infrastructure assets aren't tracked in
+        // fortigateEndpointAssetIds), so we don't bother projecting.
+        if (Object.keys(corrections).length === 0) return false;
+        // ipAddress correction needs to clear ipSource if the inline path
+        // wrote a stale tag. Mirror the existing inline pattern.
+        if ("ipAddress" in corrections) {
+          corrections.ipSource = `${integrationType}:fortigate-endpoint`;
+        }
+        clampAcquiredToLastSeen(corrections, asset);
+        await prisma.asset.update({ where: { id: assetId }, data: corrections });
+        Object.assign(asset, corrections);
+        return true;
+      },
+    );
+    for (const r of projectionResults) {
+      if (r.status === "fulfilled" && r.value === true) projectionCorrected++;
+    }
+    const projFailed = projectionResults.filter((r) => r.status === "rejected").length;
+    if (projFailed > 0) {
+      syncLog("error", `fortigate-endpoint projection apply: corrected ${projectionCorrected}, ${projFailed} failed`);
+    } else if (projectionCorrected > 0) {
+      syncLog("info", `fortigate-endpoint projection apply: corrected ${projectionCorrected} of ${fortigateEndpointAssetIds.size} touched assets`);
+    }
+  }
+
+  return { created, updated, skipped, deprecated, assets: assetNames, reservations: reservationNames, vips: vipNames.length, dhcpLeases: dhcpLeases.length, dhcpReservations: dhcpReservations.length, inventoryDevices: inventoryAssets.length, dnsResolved, ouiResolved, ouiOverridden, decommissionedSwitches, decommissionedAps, endpointSourcesStamped, projectionCorrected };
 }
 
 // ─── Entra ID asset sync ─────────────────────────────────────────────────────
