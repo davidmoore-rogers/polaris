@@ -211,6 +211,20 @@
       map.fitBounds(bounds.pad(0.05), { maxZoom: 12 });
     }
     setStatus(siteCache.length + " FortiGate" + (siteCache.length === 1 ? "" : "s") + " on the map");
+
+    // If the operator landed here from a global-search "site" hit, the URL
+    // hash carries `#site=<assetId>`. Pan once the marker cache is built.
+    var hash = window.location.hash || "";
+    var m = hash.match(/^#site=([^&]+)/);
+    if (m) {
+      var siteId = decodeURIComponent(m[1]);
+      // Defer one frame so fitBounds completes first; then flyTo overrides.
+      requestAnimationFrame(function () {
+        if (typeof window.polarisMapPanToAsset === "function") {
+          window.polarisMapPanToAsset(siteId);
+        }
+      });
+    }
   }
 
   function monitorClass(site) {

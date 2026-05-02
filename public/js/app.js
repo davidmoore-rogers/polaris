@@ -340,14 +340,14 @@ async function _performSearch(q) {
 
 function _renderSearchDropdown(results) {
   var dropdown = document.getElementById("global-search-dropdown");
-  var total = results.blocks.length + results.subnets.length + results.reservations.length + results.assets.length + results.ips.length;
+  var sites = results.sites || [];
+  var total = results.blocks.length + results.subnets.length + results.reservations.length + results.assets.length + results.ips.length + sites.length;
   if (total === 0) {
     dropdown.innerHTML = '<div class="global-search-empty">No matches for "' + escapeHtml(results.query) + '"</div>';
     dropdown.style.display = "block";
     return;
   }
 
-  var html = "";
   function section(label, hits) {
     if (!hits.length) return "";
     var rows = hits.map(function (h) {
@@ -359,11 +359,28 @@ function _renderSearchDropdown(results) {
     }).join("");
     return '<div class="gs-group"><div class="gs-group-label">' + label + '</div>' + rows + '</div>';
   }
-  html += section("IP", results.ips);
-  html += section("Blocks", results.blocks);
-  html += section("Networks", results.subnets);
-  html += section("Reservations", results.reservations);
-  html += section("Assets", results.assets);
+
+  // Page-aware section ordering — the section relevant to the page
+  // the operator is currently on goes first so the most likely
+  // intended pick is at the top of the dropdown. The remaining
+  // sections fall through in a stable default order behind it.
+  var sections = [
+    { key: "ips",          label: "IP",          hits: results.ips },
+    { key: "blocks",       label: "Blocks",      hits: results.blocks },
+    { key: "subnets",      label: "Networks",    hits: results.subnets },
+    { key: "reservations", label: "Reservations", hits: results.reservations },
+    { key: "assets",       label: "Assets",      hits: results.assets },
+    { key: "sites",        label: "Device Map",  hits: sites },
+  ];
+  var pinned = _searchSectionForCurrentPage();
+  if (pinned) {
+    var idx = sections.findIndex(function (s) { return s.key === pinned; });
+    if (idx > 0) {
+      var hoisted = sections.splice(idx, 1)[0];
+      sections.unshift(hoisted);
+    }
+  }
+  var html = sections.map(function (s) { return section(s.label, s.hits); }).join("");
 
   dropdown.innerHTML = html;
   dropdown.style.display = "block";
@@ -424,7 +441,34 @@ function openSearchResult(hit) {
   }
 }
 
+// Return the section key (matching the `sections` array in
+// _renderSearchDropdown) that should be hoisted to the top when the
+// operator is on the corresponding page. Null = use the default order.
+function _searchSectionForCurrentPage() {
+  var p = window.location.pathname || "";
+  if (p === "/map.html")     return "sites";
+  if (p === "/subnets.html") return "subnets";
+  if (p === "/assets.html")  return "assets";
+  if (p === "/blocks.html")  return "blocks";
+  return null;
+}
+
 function _searchTargetFor(hit) {
+  if (hit.type === "site") {
+    // Site hit — route to the Device Map and pan-to-marker. If the
+    // user is already on the map page, call the in-place pan hook;
+    // otherwise navigate to the map page with a hash that map.js
+    // reads on load to pan.
+    return {
+      page: "/map.html",
+      hash: "#site=" + encodeURIComponent(hit.id),
+      handler: function () {
+        if (typeof window.polarisMapPanToAsset === "function") {
+          window.polarisMapPanToAsset(hit.id);
+        }
+      },
+    };
+  }
   if (hit.type === "asset") {
     // Map-page intercept: when an operator picks a FortiGate hit while
     // looking at the Device Map, pan-and-zoom the marker into view

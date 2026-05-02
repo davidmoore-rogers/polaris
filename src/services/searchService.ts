@@ -11,7 +11,7 @@ import { prisma } from "../db.js";
 import { isValidIpAddress, normalizeCidr, ipInCidr } from "../utils/cidr.js";
 
 export interface SearchHit {
-  type: "block" | "subnet" | "reservation" | "asset" | "ip";
+  type: "block" | "subnet" | "reservation" | "asset" | "ip" | "site";
   id: string;
   title: string;       // Primary label (hostname, name, IP, etc.)
   subtitle?: string;   // Secondary label (CIDR, MAC, owner, etc.)
@@ -26,6 +26,14 @@ export interface SearchResults {
   reservations: SearchHit[];
   assets: SearchHit[];
   ips: SearchHit[];
+  /**
+   * Firewall assets that have lat/lng coordinates set — i.e. they
+   * appear as pins on the Device Map. Surfaced as a separate group so
+   * the dropdown can render a "Device Map" section that lets the
+   * operator pan-to-marker. Excluded from `assets` to avoid showing
+   * the same FortiGate twice.
+   */
+  sites: SearchHit[];
 }
 
 const PER_GROUP_LIMIT = 8;
@@ -55,7 +63,7 @@ export async function searchAll(rawQuery: string): Promise<SearchResults> {
   const q = rawQuery.trim();
   const empty: SearchResults = {
     query: q,
-    blocks: [], subnets: [], reservations: [], assets: [], ips: [],
+    blocks: [], subnets: [], reservations: [], assets: [], ips: [], sites: [],
   };
   if (q.length < 2) return empty;
 
@@ -75,13 +83,24 @@ export async function searchAll(rawQuery: string): Promise<SearchResults> {
     isIp ? resolveIp(q) : Promise.resolve(null),
   ]);
 
+  // Site = firewall asset with lat/lng coords. Surface separately under
+  // the "Device Map" section so the dropdown can pan-to-marker. Drop
+  // these from the regular Assets group too so the same FortiGate
+  // doesn't appear in both sections.
+  const sites = assets.filter(
+    (a) => a.assetType === "firewall" && a.latitude !== null && a.longitude !== null,
+  );
+  const siteIds = new Set(sites.map((s) => s.id));
+  const assetsWithoutSites = assets.filter((a) => !siteIds.has(a.id));
+
   return {
     query: q,
     blocks: blocks.map(blockHit),
     subnets: subnets.map(subnetHit),
     reservations: reservations.map(reservationHit),
-    assets: assets.map(assetHit),
+    assets: assetsWithoutSites.map(assetHit),
     ips: ipHit ? [ipHit] : [],
+    sites: sites.map(siteHit),
   };
 }
 
@@ -288,5 +307,24 @@ function assetHit(
     id: a.id,
     title: a.hostname || a.assetTag || "asset",
     subtitle: secondary || a.assetType,
+  };
+}
+
+function siteHit(
+  a: { id: string; hostname: string | null; serialNumber: string | null; ipAddress: string | null; model: string | null; learnedLocation: string | null },
+): SearchHit {
+  // Site label leads with hostname; subtitle pulls model + IP/serial so
+  // the operator can disambiguate FortiGates whose hostnames overlap
+  // (e.g. multiple branch units of the same model).
+  const bits: string[] = [];
+  if (a.model) bits.push(a.model);
+  if (a.ipAddress) bits.push(a.ipAddress);
+  if (a.serialNumber) bits.push(a.serialNumber);
+  if (a.learnedLocation && a.learnedLocation !== a.hostname) bits.push(a.learnedLocation);
+  return {
+    type: "site",
+    id: a.id,
+    title: a.hostname || a.serialNumber || "FortiGate",
+    subtitle: bits.join(" — "),
   };
 }
