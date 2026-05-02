@@ -18,8 +18,11 @@ export function startSetupServer(): void {
 
   const publicDir = path.resolve(__dirname, "..", "..", "public");
 
-  // Serve setup.html and static assets (CSS, images)
-  app.use(express.static(publicDir));
+  // Serve static assets (CSS, images, setup.html itself when requested by name).
+  // index:false disables the default index.html resolution so `GET /` falls
+  // through to the catch-all below and serves setup.html instead of the
+  // dashboard's index.html.
+  app.use(express.static(publicDir, { index: false }));
 
   // Setup API routes
   app.use("/api/setup", setupRoutes);
