@@ -2614,14 +2614,29 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
         })),
       });
     }
-    // Mirror per-interface IPs+MACs into Asset.associatedIps. Replaces what
-    // the old FMG/FortiGate Phase 4b used to write — discovery no longer
-    // populates interface IPs, so the System tab is the single source for
-    // them once monitoring is on. Manual entries (`source: "manual"`) are
-    // preserved across pulls.
-    const associatedIps = buildAssociatedIpsFromInterfaces(assetId, d.interfaces, now);
-    if (associatedIps !== null) {
-      await prisma.asset.update({ where: { id: assetId }, data: { associatedIps: associatedIps as any } });
+    // Mirror per-interface IPs+MACs into the asset_associated_ips side
+    // table. Replaces the legacy JSONB read-modify-write pattern. Discovery
+    // no longer populates interface IPs, so the System tab is the single
+    // source for them once monitoring is on. Manual entries (source =
+    // "manual") are preserved by deleting only the non-manual rows before
+    // re-inserting the fresh monitor set.
+    //
+    // One $transaction so the delete + insert pair is atomic — a concurrent
+    // reader will either see the old set or the new set, never an empty
+    // intermediate. Skipped entirely when the scrape returned no interface
+    // IPs (better to keep the previous list than wipe it on a transient
+    // empty result, matching the prior null-return behavior).
+    const monitorAssocEntries = buildMonitorAssocIpEntries(d.interfaces, now);
+    if (monitorAssocEntries.length > 0) {
+      await prisma.$transaction([
+        prisma.assetAssociatedIp.deleteMany({
+          where: { assetId, source: { not: "manual" } },
+        }),
+        prisma.assetAssociatedIp.createMany({
+          data: monitorAssocEntries.map((e) => ({ ...e, assetId })),
+          skipDuplicates: true,
+        }),
+      ]);
     }
     // LLDP neighbors. `undefined` = the collector didn't run / unsupported
     // transport, so leave the existing rows alone. `[]` or a populated array
@@ -2775,7 +2790,7 @@ async function persistLldpNeighbors(
  * table at persist time is cheaper than per-neighbor queries; the table is
  * kept in scope only for the duration of a single recordSystemInfoResult call.
  *
- * - byIp: ipAddress + every entry in associatedIps (manual + monitor-discovered)
+ * - byIp: ipAddress + every row in asset_associated_ips (manual + monitor-discovered)
  * - byMac: macAddress (uppercased) + every entry in macAddresses
  * - byHostname: hostname (lowercased) — first wins on duplicates
  */
@@ -2785,7 +2800,10 @@ async function buildLldpAssetMatchIndex(): Promise<{
   byHostname: Map<string, string>;
 }> {
   const rows = await prisma.asset.findMany({
-    select: { id: true, ipAddress: true, macAddress: true, macAddresses: true, associatedIps: true, hostname: true, dnsName: true },
+    select: {
+      id: true, ipAddress: true, macAddress: true, macAddresses: true, hostname: true, dnsName: true,
+      associatedIpRows: { select: { ip: true } },
+    },
   });
   const byIp = new Map<string, string>();
   const byMac = new Map<string, string>();
@@ -2809,11 +2827,8 @@ async function buildLldpAssetMatchIndex(): Promise<{
   };
   for (const a of rows) {
     if (a.ipAddress && !byIp.has(a.ipAddress)) byIp.set(a.ipAddress, a.id);
-    if (Array.isArray(a.associatedIps)) {
-      for (const e of a.associatedIps as any[]) {
-        const ip = e?.ip;
-        if (typeof ip === "string" && ip && !byIp.has(ip)) byIp.set(ip, a.id);
-      }
+    for (const row of a.associatedIpRows) {
+      if (row.ip && !byIp.has(row.ip)) byIp.set(row.ip, a.id);
     }
     if (a.macAddress) {
       const mac = a.macAddress.toUpperCase();
@@ -2838,34 +2853,46 @@ async function buildLldpAssetMatchIndex(): Promise<{
 }
 
 /**
- * Build the new Asset.associatedIps payload from a fresh interface scrape.
- * Returns null when the asset doesn't exist or the scrape returned no
- * interface IPs (in which case we leave whatever is there alone — better to
- * keep a stale-ish list than wipe it on a transient empty result).
+ * Build the per-interface monitor-source rows for the asset_associated_ips
+ * table from a fresh interface scrape. Pure: takes the interface samples,
+ * returns rows ready for createMany. Caller (recordSystemInfoResult) does
+ * the delete-and-replace transaction; manual entries are preserved by
+ * filtering on source there.
+ *
+ * Empty result is meaningful — it tells the caller to skip the persist
+ * entirely so a transient "scrape returned no interface IPs" doesn't wipe
+ * an existing monitor-source set.
  */
-async function buildAssociatedIpsFromInterfaces(
-  assetId: string,
+function buildMonitorAssocIpEntries(
   interfaces: InterfaceSample[],
   now: Date,
-): Promise<unknown[] | null> {
-  const monitorEntries: Array<Record<string, unknown>> = [];
+): Array<{
+  ip: string;
+  source: string;
+  interfaceName: string | null;
+  mac: string | null;
+  lastSeen: Date;
+  firstSeen: Date;
+}> {
+  const out: Array<{
+    ip: string; source: string; interfaceName: string | null;
+    mac: string | null; lastSeen: Date; firstSeen: Date;
+  }> = [];
+  const seenIps = new Set<string>();
   for (const i of interfaces) {
     if (!i.ipAddress) continue;
-    monitorEntries.push({
+    if (seenIps.has(i.ipAddress)) continue; // dedupe within a single scrape
+    seenIps.add(i.ipAddress);
+    out.push({
       ip:            i.ipAddress,
-      interfaceName: i.ifName,
-      ...(i.macAddress ? { mac: i.macAddress } : {}),
       source:        "monitor-system-info",
-      lastSeen:      now.toISOString(),
+      interfaceName: i.ifName,
+      mac:           i.macAddress ?? null,
+      lastSeen:      now,
+      firstSeen:     now,
     });
   }
-  if (monitorEntries.length === 0) return null;
-
-  const asset = await prisma.asset.findUnique({ where: { id: assetId }, select: { associatedIps: true } });
-  if (!asset) return null;
-  const existing: any[] = Array.isArray(asset.associatedIps) ? (asset.associatedIps as any[]) : [];
-  const manualEntries = existing.filter((e: any) => e?.source === "manual");
-  return [...manualEntries, ...monitorEntries];
+  return out;
 }
 
 // ─── Persisting a probe result ──────────────────────────────────────────────

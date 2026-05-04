@@ -30,6 +30,60 @@ import { getCredential } from "../../services/credentialService.js";
 
 const router = Router();
 
+// ─── associatedIps shape helper ──────────────────────────────────────────────
+//
+// `Asset.associatedIps` was a JSONB column until the side-table migration; the
+// frontend (`public/js/assets.js`) and any external API consumer still expect
+// the response to carry an `associatedIps: [...]` JSON array on the asset
+// object. Rather than change the wire format, every place that reads asset
+// rows + their `associatedIpRows` relation runs the rows through this helper
+// to project them back into the original JSON shape.
+
+interface AssociatedIpJson {
+  ip: string;
+  source: string;
+  interfaceName?: string;
+  mac?: string;
+  ptrName?: string;
+  ptrTtl?: number;
+  ptrFetchedAt?: string;
+  lastSeen?: string;
+  firstSeen?: string;
+}
+
+interface AssociatedIpRow {
+  ip: string;
+  source: string;
+  interfaceName: string | null;
+  mac: string | null;
+  ptrName: string | null;
+  ptrTtl: number | null;
+  ptrFetchedAt: Date | null;
+  lastSeen: Date;
+  firstSeen: Date;
+}
+
+function shapeAssociatedIps(rows: AssociatedIpRow[] | null | undefined): AssociatedIpJson[] {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r) => {
+    const out: AssociatedIpJson = { ip: r.ip, source: r.source };
+    if (r.interfaceName) out.interfaceName = r.interfaceName;
+    if (r.mac)           out.mac           = r.mac;
+    if (r.ptrName)       out.ptrName       = r.ptrName;
+    if (r.ptrTtl != null) out.ptrTtl       = r.ptrTtl;
+    if (r.ptrFetchedAt)   out.ptrFetchedAt = r.ptrFetchedAt.toISOString();
+    out.lastSeen  = r.lastSeen.toISOString();
+    out.firstSeen = r.firstSeen.toISOString();
+    return out;
+  });
+}
+
+const ASSOCIATED_IP_SELECT = {
+  ip: true, source: true, interfaceName: true, mac: true,
+  ptrName: true, ptrTtl: true, ptrFetchedAt: true,
+  lastSeen: true, firstSeen: true,
+} as const;
+
 // ─── Zod Schemas ─────────────────────────────────────────────────────────────
 
 const AssetTypeEnum = z.enum([
@@ -238,7 +292,7 @@ router.get("/", async (req, res, next) => {
           ipAddress: true,
           macAddress: true,
           macAddresses: true,
-          associatedIps: true,
+          associatedIpRows: { select: ASSOCIATED_IP_SELECT },
           serialNumber: true,
           manufacturer: true,
           model: true,
@@ -263,8 +317,9 @@ router.get("/", async (req, res, next) => {
       prisma.asset.count({ where }),
     ]);
     const ipCtx = await buildIpContexts(assets.map((a) => a.ipAddress).filter(Boolean) as string[]);
-    const enriched = assets.map((a) => ({
+    const enriched = assets.map(({ associatedIpRows, ...a }) => ({
       ...a,
+      associatedIps: shapeAssociatedIps(associatedIpRows),
       ipContext: a.ipAddress ? (ipCtx.get(a.ipAddress) || null) : null,
     }));
     res.json({ assets: enriched, total, limit, offset });
@@ -395,6 +450,7 @@ router.get("/:id", async (req, res, next) => {
       include: {
         discoveredByIntegration: { select: { id: true, name: true, type: true, config: true } },
         monitorCredential:       { select: { id: true, name: true, type: true } },
+        associatedIpRows:        { select: ASSOCIATED_IP_SELECT },
       },
     });
     if (!asset) throw new AppError(404, "Asset not found");
@@ -431,8 +487,10 @@ router.get("/:id", async (req, res, next) => {
       };
     }
     const { config: _omit, ...integrationLite } = (asset.discoveredByIntegration as { config?: unknown } | null) || {};
+    const { associatedIpRows, ...assetRest } = asset;
     const safeAsset = {
-      ...asset,
+      ...assetRest,
+      associatedIps: shapeAssociatedIps(associatedIpRows),
       discoveredByIntegration: asset.discoveredByIntegration ? integrationLite : null,
       integrationMonitorCredential,
       integrationTransportSources,
@@ -1271,38 +1329,39 @@ router.post("/dns-lookup", requireAssetsAdmin, async (req, res, next) => {
     }
 
     // ── Associated IPs ───────────────────────────────────────────────────────
-    const assocAssets = await prisma.asset.findMany({
-      where: { status: { notIn: ["decommissioned", "disabled"] } },
-      select: { id: true, associatedIps: true },
+    // Iterate every active asset_associated_ips row directly (the side table is
+    // smaller than the asset table, so this is cheaper than the per-asset
+    // findMany + array merge loop the JSONB version did). Per-row PTR refresh
+    // hits an `update` only when something actually changed; ON CONFLICT
+    // semantics aren't relevant here because each row already has a stable id.
+    const assocRows = await prisma.assetAssociatedIp.findMany({
+      where: { asset: { status: { notIn: ["decommissioned", "disabled"] } } },
+      select: { id: true, ip: true, ptrName: true, ptrTtl: true, ptrFetchedAt: true },
     });
 
     let assocResolved = 0;
     let assocSkipped = 0;
-    for (const asset of assocAssets) {
-      const entries: any[] = Array.isArray(asset.associatedIps) ? (asset.associatedIps as any[]) : [];
-      if (entries.length === 0) continue;
-
-      let changed = false;
-      const updated = await Promise.all(entries.map(async (entry: any) => {
-        if (!entry.ip) return entry;
-        if (!isPtrExpired(entry.ptrFetchedAt, entry.ptrTtl, now)) { assocSkipped++; return entry; }
-        const ptrFetchedAt = new Date().toISOString();
-        try {
-          const records = await resolver.reverse(entry.ip);
-          if (records.length > 0) {
-            assocResolved++;
-            changed = true;
-            return { ...entry, ptrName: records[0].name, ptrTtl: records[0].ttl, ptrFetchedAt };
-          }
-        } catch {}
-        // Negative cache
-        changed = true;
-        return { ...entry, ptrName: entry.ptrName ?? null, ptrTtl: null, ptrFetchedAt };
-      }));
-
-      if (changed) {
-        await prisma.asset.update({ where: { id: asset.id }, data: { associatedIps: updated } });
-      }
+    for (const row of assocRows) {
+      if (!row.ip) continue;
+      const fetchedAtIso = row.ptrFetchedAt ? row.ptrFetchedAt.toISOString() : null;
+      if (!isPtrExpired(fetchedAtIso, row.ptrTtl, now)) { assocSkipped++; continue; }
+      const ptrFetchedAt = new Date();
+      try {
+        const records = await resolver.reverse(row.ip);
+        if (records.length > 0) {
+          assocResolved++;
+          await prisma.assetAssociatedIp.update({
+            where: { id: row.id },
+            data: { ptrName: records[0].name, ptrTtl: records[0].ttl, ptrFetchedAt },
+          });
+          continue;
+        }
+      } catch {}
+      // Negative cache — preserve any existing ptrName, clear ttl, stamp fetchedAt
+      await prisma.assetAssociatedIp.update({
+        where: { id: row.id },
+        data: { ptrTtl: null, ptrFetchedAt },
+      });
     }
 
     logEvent({
@@ -1318,11 +1377,14 @@ router.post("/dns-lookup", requireAssetsAdmin, async (req, res, next) => {
 // POST /api/v1/assets/:id/dns-lookup — PTR lookup for a single asset; always queries (user-triggered)
 router.post("/:id/dns-lookup", requireAssetsAdmin, async (req, res, next) => {
   try {
-    const asset = await prisma.asset.findUnique({ where: { id: req.params.id as string } });
+    const asset = await prisma.asset.findUnique({
+      where: { id: req.params.id as string },
+      include: { associatedIpRows: { select: { id: true, ip: true, ptrName: true } } },
+    });
     if (!asset) throw new AppError(404, "Asset not found");
 
-    const assocIps: any[] = Array.isArray(asset.associatedIps) ? (asset.associatedIps as any[]) : [];
-    if (!asset.ipAddress && assocIps.length === 0) throw new AppError(400, "Asset has no IP address");
+    const assocRows = asset.associatedIpRows;
+    if (!asset.ipAddress && assocRows.length === 0) throw new AppError(400, "Asset has no IP address");
 
     const resolver = await getConfiguredResolver();
     let dnsName: string | null = asset.dnsName;
@@ -1339,32 +1401,42 @@ router.post("/:id/dns-lookup", requireAssetsAdmin, async (req, res, next) => {
       }
     }
 
-    // PTR for each associated IP — always re-query on single-asset lookup
+    // PTR for each associated IP — always re-query on single-asset lookup.
+    // One DB write per row (small batches; this is a manual-action endpoint
+    // so we're not in a hot path). $transaction packs the per-row updates
+    // into a single round-trip so the cost stays low even for assets with
+    // dozens of associated IPs.
     let assocResolved = 0;
-    const updatedAssocIps = await Promise.all(assocIps.map(async (entry: any) => {
-      if (!entry.ip) return entry;
-      const ptrFetchedAt = new Date().toISOString();
+    const assocUpdates: Array<{ id: string; data: Record<string, unknown> }> = [];
+    for (const row of assocRows) {
+      if (!row.ip) continue;
+      const ptrFetchedAt = new Date();
       try {
-        const records = await resolver.reverse(entry.ip);
+        const records = await resolver.reverse(row.ip);
         if (records.length > 0) {
           assocResolved++;
-          return { ...entry, ptrName: records[0].name, ptrTtl: records[0].ttl, ptrFetchedAt };
+          assocUpdates.push({ id: row.id, data: { ptrName: records[0].name, ptrTtl: records[0].ttl, ptrFetchedAt } });
+          continue;
         }
       } catch {}
-      return { ...entry, ptrName: entry.ptrName ?? null, ptrTtl: null, ptrFetchedAt };
-    }));
+      assocUpdates.push({ id: row.id, data: { ptrTtl: null, ptrFetchedAt } });
+    }
+    if (assocUpdates.length > 0) {
+      await prisma.$transaction(assocUpdates.map((u) =>
+        prisma.assetAssociatedIp.update({ where: { id: u.id }, data: u.data }),
+      ));
+    }
 
     const updateData: Record<string, unknown> = {
       dnsName,
       dnsNameFetchedAt: fetchedAt,
       dnsNameTtl,
-      associatedIps: updatedAssocIps,
     };
     await prisma.asset.update({ where: { id: asset.id }, data: updateData });
 
     if (!dnsName && assocResolved === 0) {
-      const testedIp = asset.ipAddress || assocIps[0]?.ip;
-      return res.json({ ok: false, message: `No PTR records found for ${testedIp}${assocIps.length > 1 ? " or its associated IPs" : ""}` });
+      const testedIp = asset.ipAddress || assocRows[0]?.ip;
+      return res.json({ ok: false, message: `No PTR records found for ${testedIp}${assocRows.length > 1 ? " or its associated IPs" : ""}` });
     }
 
     const parts: string[] = [];

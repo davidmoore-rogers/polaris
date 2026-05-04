@@ -336,7 +336,14 @@ Asset
   lastSeenSwitch  String?         -- e.g. "FS-248E-01/port15"
   lastSeenAp      String?         -- FortiAP name
   lastSeen        DateTime?
-  associatedIps   Json            -- [{ip, interfaceName?, source?, lastSeen?, ptrName?}] — additional IPs; source="manual" preserved across discovery
+  -- associatedIps: stored in the AssetAssociatedIp side table (one row per
+  -- asset+ip pair). The list/get response still serializes the relation back
+  -- into the legacy `associatedIps: [...]` JSON shape so the frontend reads
+  -- the same field name as before. Per-row PTR cache (ptrName/ptrTtl/
+  -- ptrFetchedAt) lives on the row directly. Persist semantics: monitor
+  -- system-info pass deletes all source != "manual" rows for the asset and
+  -- re-inserts the fresh interface set in one $transaction; manual entries
+  -- are preserved across pulls.
   associatedUsers Json            -- [{user, domain?, lastSeen, source?}]
   latitude        Float?          -- FortiGate geo coord from `config system global` (decimal degrees); drives Device Map pins
   longitude       Float?
@@ -443,6 +450,21 @@ AssetIpHistory                  -- Auto-populated log of every IP each asset has
   firstSeen     DateTime
   lastSeen      DateTime
   @@unique([assetId, ip])       -- one row per (asset, ip); lastSeen and source update on re-sighting
+
+AssetAssociatedIp               -- Additional ("secondary") IPs an asset holds beyond Asset.ipAddress. Replaces the legacy Asset.associatedIps JSONB column.
+  id            UUID PK
+  assetId       UUID FK → Asset (cascade delete)
+  ip            String
+  source        String          -- "manual" | "monitor-system-info" | various legacy values from the JSON backfill
+  interfaceName String?
+  mac           String?
+  ptrName       String?         -- reverse-DNS cache, populated by the bulk DNS job and the per-asset DNS lookup endpoint
+  ptrTtl        Int?
+  ptrFetchedAt  DateTime?
+  firstSeen     DateTime
+  lastSeen      DateTime
+  @@unique([assetId, ip])
+  -- Persist: system-info scrape deletes all source != "manual" rows for the asset and re-inserts the fresh interface set in one $transaction; source="manual" rows are preserved. The list/get response serializes the relation back into the legacy `associatedIps: [...]` JSON shape so the frontend reads the same field name as before.
 
 AssetSource                     -- Per-discovery-source view of an asset (Phase 1 of the multi-source asset model)
   id            UUID PK

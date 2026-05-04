@@ -294,7 +294,6 @@ model Asset {
   lastSeenSwitch   String? // FortiSwitch name/port, e.g. "FS-248E-01/port15"
   lastSeenAp       String? // FortiAP name, e.g. "FAP-431F-01"
   lastSeen         DateTime? // Most recent discovery sighting
-  associatedIps    Json?       @default("[]") // [{ip, interfaceName?, source?, lastSeen?, ptrName?}] — additional interface IPs (e.g. firewall ports)
   associatedUsers  Json?       @default("[]") // [{user, domain?, lastSeen, source?}] — logged-in / registered users
   latitude         Float? // FortiGate geo coordinate (decimal degrees); populated from `config system global` on discovery
   longitude        Float? // FortiGate geo coordinate (decimal degrees)
@@ -400,6 +399,7 @@ model Asset {
   lldpNeighbors       AssetLldpNeighbor[]      @relation("AssetLldpNeighbors")
   lldpNeighborMatches AssetLldpNeighbor[]      @relation("AssetLldpNeighborMatch")
   sources             AssetSource[]
+  associatedIpRows    AssetAssociatedIp[]
 
   @@index([ipAddress])
   @@index([macAddress])
@@ -507,6 +507,53 @@ model AssetInterfaceSample {
   @@index([assetId, timestamp])
   @@index([assetId, ifName, timestamp])
   @@map("asset_interface_samples")
+}
+
+// Per-asset additional IPs ("interface IPs", "secondary IPs", manually-tagged
+// IPs). Replaces the legacy `Asset.associatedIps` JSONB column. Populated by:
+//   - System-info scrape (one row per interface that returned an IP, with
+//     source="monitor-system-info"). Reconciled per scrape: rows owned by
+//     a non-manual source are deleted in bulk and re-inserted with the
+//     fresh interface set, while source="manual" rows are preserved.
+//   - Manual edits via assets.ts (PATCH /assets/:id payload still carries
+//     `associatedIps` as a JSON array; the route serializes both directions).
+//   - Discovery currently does NOT write this table directly — it relies on
+//     the live monitor pull as the single source per the original design.
+//
+// Read paths: bulk DNS PTR refresh, single-asset DNS lookup, the LLDP
+// neighbor match index, and the assets list/get response (which serializes
+// rows back into the `associatedIps` JSON shape so the frontend reads the
+// same field name as before).
+model AssetAssociatedIp {
+  id            String    @id @default(uuid())
+  assetId       String
+  asset         Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  ip            String
+  // Free-text source identifier. Stable values used by the codebase:
+  //   "manual"                — operator-added via the assets edit panel
+  //   "monitor-system-info"   — written by the systemInfo scrape
+  //   plus various legacy values from older discovery paths preserved
+  //   from the JSON backfill (the column is text not enum to match the
+  //   prior open shape).
+  source        String
+  interfaceName String?
+  // Per-IP MAC. May differ from `Asset.macAddress` (which is the asset's
+  // primary MAC) — many devices have one MAC per interface.
+  mac           String?
+  // PTR cache. ptrFetchedAt is the wall-clock of the last reverse-DNS
+  // attempt (success or failure); ptrTtl is the TTL the resolver returned
+  // when there was a hit. Used by the bulk DNS job to decide which entries
+  // are due for re-resolution.
+  ptrName       String?
+  ptrTtl        Int?
+  ptrFetchedAt  DateTime?
+  lastSeen      DateTime  @default(now())
+  firstSeen     DateTime  @default(now())
+
+  @@unique([assetId, ip])
+  @@index([assetId])
+  @@index([ip])
+  @@map("asset_associated_ips")
 }
 
 // Operator-typed override for an interface's "Interface Comments" text box.
