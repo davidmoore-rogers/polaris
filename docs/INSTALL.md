@@ -25,20 +25,26 @@ The setup wizard runs a preflight check that statfs's the conventional PGDATA pa
 
 ## RHEL / Rocky / AlmaLinux 9
 
-### 1. PostgreSQL
+> **Note:** This walkthrough installs PostgreSQL from PGDG (the official PostgreSQL Global Development Group repo), not the RHEL AppStream module. PGDG matches upstream within days, supports the full Postgres extension ecosystem (TimescaleDB, PostGIS, etc.), and supports side-by-side major versions. AppStream's module ships a curated subset and lags upstream; in particular, **the TimescaleDB package targets PGDG only** — the AppStream `postgresql:15` module's package names (`postgresql-server`) don't satisfy `timescaledb-2-postgresql-15`'s requirement on `postgresql15-server`. If you have an existing AppStream install you want to migrate from, see *Migrating from AppStream to PGDG* below.
+
+### 1. PostgreSQL (PGDG)
 
 ```bash
-# AppStream PostgreSQL 13 is the OS default; if you need 15+, enable the
-# DNF module first:
-sudo dnf module reset postgresql -y
-sudo dnf module enable postgresql:15 -y
+# Install the PGDG repo
+sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
 
-sudo dnf install -y postgresql-server postgresql-contrib
-sudo postgresql-setup --initdb
-sudo systemctl enable --now postgresql
+# Disable RHEL's AppStream postgresql module so PGDG's packages aren't shadowed
+sudo dnf -qy module disable postgresql
+
+# Install Postgres 15 + contrib (needed for various Polaris features)
+sudo dnf install -y postgresql15 postgresql15-server postgresql15-contrib
+
+# Initialize PGDATA and start the service
+sudo /usr/pgsql-15/bin/postgresql-15-setup initdb
+sudo systemctl enable --now postgresql-15
 ```
 
-PGDATA lands at `/var/lib/pgsql/data`. Verify the disk holding `/var/lib/pgsql` has at least 50 GB free:
+PGDATA lands at `/var/lib/pgsql/15/data`. Verify the disk holding `/var/lib/pgsql` has at least 50 GB free:
 
 ```bash
 df -h /var/lib/pgsql
@@ -58,10 +64,10 @@ SQL
 
 The `pg_read_all_settings` grant lets Polaris read `SHOW data_directory` so the Maintenance tab can measure the `/var` filesystem and alert before it fills.
 
-Allow the postgres directory to be traversed by the polaris OS user (needed for the same disk-space check — `statfs` on `/var/lib/pgsql/data` requires search permission on the parent). The PostgreSQL startup scripts reset this directory to `700` on every restart, so persist it via a systemd override rather than a one-off chmod:
+Allow the postgres directory to be traversed by the polaris OS user (needed for the same disk-space check — `statfs` on `/var/lib/pgsql/15/data` requires search permission on every ancestor directory). The PostgreSQL startup scripts reset these directories to `700` on every restart, so persist via a systemd override rather than a one-off chmod:
 
 ```bash
-sudo systemctl edit postgresql
+sudo systemctl edit postgresql-15
 ```
 
 Add the following and save:
@@ -69,16 +75,17 @@ Add the following and save:
 ```ini
 [Service]
 ExecStartPost=/bin/chmod o+x /var/lib/pgsql
+ExecStartPost=/bin/chmod o+x /var/lib/pgsql/15
 ```
 
 Then reload and apply immediately:
 
 ```bash
 sudo systemctl daemon-reload
-sudo chmod o+x /var/lib/pgsql
+sudo chmod o+x /var/lib/pgsql /var/lib/pgsql/15
 ```
 
-Edit `/var/lib/pgsql/data/pg_hba.conf` and add a line for the polaris user (typically `host polaris polaris 127.0.0.1/32 scram-sha-256`), then `sudo systemctl reload postgresql`.
+Edit `/var/lib/pgsql/15/data/pg_hba.conf` and add a line for the polaris user (typically `host polaris polaris 127.0.0.1/32 scram-sha-256`), then `sudo systemctl reload postgresql-15`.
 
 ### 3. Node.js 20+
 
@@ -102,12 +109,19 @@ npm ci --omit=dev
 
 ### 5. systemd unit
 
-The shipped unit at `deploy/polaris.service` requires `postgresql.service`. Copy it into place and enable:
+The shipped unit at `deploy/polaris.service` should require `postgresql-15.service` (NOT `postgresql.service` — that's the AppStream unit name). Copy it into place and enable:
 
 ```bash
 sudo cp deploy/polaris.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now polaris
+```
+
+If you're starting from a unit that references `postgresql.service` (older Polaris docs or an upstream community install), edit it before enabling:
+
+```bash
+sudo sed -i 's/postgresql\.service/postgresql-15.service/g' /etc/systemd/system/polaris.service
+sudo systemctl daemon-reload
 ```
 
 Browse to `http://<host>:3000` to run the setup wizard.
@@ -133,7 +147,81 @@ sudo lvextend -r -L +20G /dev/vg1/var
 df -h /var
 ```
 
-If you can't grow `/var`, the alternative is to relocate PGDATA to `/opt` (which usually has ample space): stop postgres, `rsync -aHAX /var/lib/pgsql/ /opt/pgsql/`, set `Environment=PGDATA=/opt/pgsql/data` via a systemd drop-in, fix SELinux contexts with `sudo semanage fcontext -a -e /var/lib/pgsql /opt/pgsql && sudo restorecon -R /opt/pgsql`, then daemon-reload and start postgres.
+If you can't grow `/var`, the alternative is to relocate PGDATA to `/opt` (which usually has ample space): stop postgres, `rsync -aHAX /var/lib/pgsql/15/ /opt/pgsql/`, set `Environment=PGDATA=/opt/pgsql/data` via a systemd drop-in, fix SELinux contexts with `sudo semanage fcontext -a -e /var/lib/pgsql /opt/pgsql && sudo restorecon -R /opt/pgsql`, then daemon-reload and start postgres.
+
+### Migrating from AppStream Postgres to PGDG
+
+If you already have a working Polaris install on AppStream Postgres and want to switch to PGDG (typically because you want TimescaleDB), the migration is a dump → install PGDG → restore cycle. Plan ~15-30 min of downtime; the dump itself is the bottleneck and scales with your fleet's data volume.
+
+```bash
+# 1. Dump the existing database (run as postgres OS user — peer auth)
+sudo systemctl stop polaris
+sudo -u postgres pg_dump polaris --clean --if-exists --no-owner --no-acl > /tmp/polaris.sql
+sudo systemctl stop postgresql
+
+# 2. Install PGDG, disable the AppStream module
+sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+sudo dnf -qy module disable postgresql
+sudo dnf install -y postgresql15 postgresql15-server postgresql15-contrib
+sudo /usr/pgsql-15/bin/postgresql-15-setup initdb
+
+# 3. Verify pg_hba.conf uses scram-sha-256 (default on PGDG; check anyway)
+sudo grep -E '^(local|host)' /var/lib/pgsql/15/data/pg_hba.conf | head -5
+# If you see ident/md5 on the 127.0.0.1 lines, edit to scram-sha-256
+
+# 4. Apply the chmod-traversable override (see step 2 above) BEFORE starting,
+#    then start the new instance
+sudo systemctl edit postgresql-15  # add the [Service] block from above
+sudo systemctl daemon-reload
+sudo chmod o+x /var/lib/pgsql /var/lib/pgsql/15
+sudo systemctl disable postgresql
+sudo systemctl enable --now postgresql-15
+
+# 5. Recreate the polaris role + database
+PWORD=$(sudo grep -oP 'polaris:\K[^@]+' /opt/polaris/.env)
+sudo -u postgres psql <<EOF
+CREATE USER polaris WITH PASSWORD '$PWORD';
+CREATE DATABASE polaris OWNER polaris;
+GRANT pg_read_all_settings TO polaris;
+EOF
+
+# 6. Restore the dump (as postgres, since the dump used --no-owner)
+sudo -u postgres psql -d polaris < /tmp/polaris.sql
+
+# 7. Reassign ownership of all polaris-database objects to the polaris role
+#    (--no-owner restored everything as postgres; polaris needs ownership
+#    to ALTER its tables, including the create_hypertable conversion that
+#    runs at Polaris boot once TimescaleDB is installed)
+sudo -u postgres psql -d polaris <<'SQL'
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+    EXECUTE format('ALTER TABLE public.%I OWNER TO polaris', r.tablename);
+  END LOOP;
+  FOR r IN SELECT sequence_name FROM information_schema.sequences WHERE sequence_schema = 'public' LOOP
+    EXECUTE format('ALTER SEQUENCE public.%I OWNER TO polaris', r.sequence_name);
+  END LOOP;
+  FOR r IN SELECT viewname FROM pg_views WHERE schemaname = 'public' LOOP
+    EXECUTE format('ALTER VIEW public.%I OWNER TO polaris', r.viewname);
+  END LOOP;
+END $$;
+GRANT USAGE, CREATE ON SCHEMA public TO polaris;
+SQL
+
+# 8. Update polaris.service to depend on postgresql-15.service instead of postgresql.service
+sudo sed -i 's/postgresql\.service/postgresql-15.service/g' /etc/systemd/system/polaris.service
+sudo systemctl daemon-reload
+
+# 9. Optionally remove the abandoned AppStream PGDATA
+sudo test -f /var/lib/pgsql/data/PG_VERSION && echo "OLD DATA STILL EXISTS — DO NOT DELETE" || sudo rm -rf /var/lib/pgsql/data
+
+# 10. Start Polaris and watch the boot
+sudo systemctl start polaris
+sudo journalctl -u polaris -f --no-pager
+```
+
+After step 10 succeeds, follow *Recommended: TimescaleDB* below to install the extension. On the first restart afterward, Polaris detects the extension and converts the six monitoring sample tables to hypertables (~5-15 min for a fleet that's been running for weeks; no operator action required, just patience as conversions log in the journal).
 
 ### Recovery: postgres crashes on a full /var
 
@@ -141,12 +229,12 @@ If `/var` filled and postgres is now crash-looping with `PANIC: could not write 
 
 ```bash
 # Free space safely first
-sudo rm /var/lib/pgsql/data/log/postgresql-Wed.log    # rotator overwrites next week
+sudo rm /var/lib/pgsql/15/data/log/postgresql-Wed.log    # rotator overwrites next week
 sudo dnf clean all
 sudo journalctl --vacuum-size=50M
 
 # Then start postgres
-sudo systemctl start postgresql
+sudo systemctl start postgresql-15
 ```
 
 Watch for `database system is ready to accept connections`. Once recovery completes, `pg_wal` segments get recycled and free a few hundred MB. Then start polaris.

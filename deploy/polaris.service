@@ -1,8 +1,13 @@
 [Unit]
 Description=Polaris — IP Management Tool
 Documentation=https://github.com/davidmoore-rogers/polaris
-After=network.target postgresql.service
-Requires=postgresql.service
+# PGDG packages name the unit `postgresql-15.service`. Adjust the version
+# suffix to match your install (`postgresql-16.service`, etc.). If you're on
+# the RHEL AppStream module instead of PGDG, change both lines below to
+# reference `postgresql.service` — see docs/INSTALL.md for the full
+# migration path from AppStream to PGDG.
+After=network.target postgresql-15.service
+Requires=postgresql-15.service
 
 [Service]
 Type=simple
