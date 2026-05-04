@@ -440,18 +440,23 @@ function computeReasons(
   }
 
   // Stale autovacuum on a populated sample table — bloat will keep growing.
-  for (const t of snap.database.sampleTables) {
-    if (t.lastAutovacuum && t.rows > 1000) {
-      const ageMs = Date.now() - new Date(t.lastAutovacuum).getTime();
-      if (ageMs > 7 * 86400 * 1000) {
-        reasons.push({
-          severity: "red",
-          code: "autovacuum_stale",
-          message: `Table ${t.name} hasn't been autovacuumed in over 7 days.`,
-          suggestion: `Investigate autovacuum status. Run VACUUM ${t.name}; manually and lower autovacuum_vacuum_scale_factor for this table.`,
-        });
-      }
-    }
+  // Collapsed into a single reason listing every affected table so an install
+  // with several bloated sample tables doesn't render the same advice 3-5
+  // times stacked vertically.
+  const staleTables = snap.database.sampleTables.filter((t) => {
+    if (!t.lastAutovacuum || t.rows <= 1000) return false;
+    return Date.now() - new Date(t.lastAutovacuum).getTime() > 7 * 86400 * 1000;
+  });
+  if (staleTables.length > 0) {
+    const names = staleTables.map((t) => t.name).join(", ");
+    reasons.push({
+      severity: "red",
+      code: "autovacuum_stale",
+      message: staleTables.length === 1
+        ? `Table ${names} hasn't been autovacuumed in over 7 days.`
+        : `${staleTables.length} tables haven't been autovacuumed in over 7 days: ${names}.`,
+      suggestion: `Investigate autovacuum status. Run VACUUM on the affected tables manually and lower autovacuum_vacuum_scale_factor to 0.05 for each.`,
+    });
   }
 
   // Steady-state DB size > 8× host RAM — query performance will collapse.
@@ -465,15 +470,24 @@ function computeReasons(
   }
 
   // ── Amber: autovacuum lag ────────────────────────────────────────────────
-  for (const t of snap.database.sampleTables) {
-    if (t.rows > 1000 && t.deadTupRatio > 0.20) {
-      reasons.push({
-        severity: "amber",
-        code: "autovacuum_lag",
-        message: `Table ${t.name} has ${(t.deadTupRatio * 100).toFixed(0)}% dead tuples — autovacuum is falling behind.`,
-        suggestion: `Lower autovacuum_vacuum_scale_factor for ${t.name} to 0.05.`,
-      });
-    }
+  // Collapsed into a single reason listing every affected table with its
+  // dead-tuple percentage — multiple bloated sample tables would otherwise
+  // each push their own near-identical warning row.
+  const laggingTables = snap.database.sampleTables.filter(
+    (t) => t.rows > 1000 && t.deadTupRatio > 0.20,
+  );
+  if (laggingTables.length > 0) {
+    const list = laggingTables
+      .map((t) => `${t.name} (${(t.deadTupRatio * 100).toFixed(0)}%)`)
+      .join(", ");
+    reasons.push({
+      severity: "amber",
+      code: "autovacuum_lag",
+      message: laggingTables.length === 1
+        ? `Table ${list} has dead tuples building up — autovacuum is falling behind.`
+        : `${laggingTables.length} tables have dead tuples building up — autovacuum is falling behind: ${list}.`,
+      suggestion: `Lower autovacuum_vacuum_scale_factor to 0.05 for the affected tables.`,
+    });
   }
 
   if (snap.workload.steadyStateSizeBytes > ram * 4 && snap.workload.steadyStateSizeBytes <= ram * 8) {
