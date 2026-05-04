@@ -25,6 +25,8 @@
  * avoid a circular import.
  */
 
+import { randomUUID } from "node:crypto";
+
 import { PrismaClient } from "./generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { normalizeManufacturer } from "./utils/manufacturerNormalize.js";
@@ -138,22 +140,41 @@ function touchesAssetSources(data: unknown): boolean {
 }
 
 async function recordIpHistory(base: PrismaClient, assetId: string, ip: string, src: string) {
-  const now = new Date();
+  // Single SQL upsert. Previously this was a findUnique-then-update-or-create
+  // pair (two DB round-trips per Asset write that touched ipAddress). The
+  // INSERT ... ON CONFLICT form below does the same work in one round-trip,
+  // including the "reset firstSeen when source changes" logic via a CASE in
+  // the UPDATE branch — discovery often re-asserts the same IP from the same
+  // source, and the new statement reads as identical to the old behavior in
+  // every case.
+  //
+  // The id column uses Prisma's @default(uuid()) which is generated client-
+  // side; with raw SQL we generate it ourselves via node:crypto. The
+  // generated UUID is only used when the row doesn't exist (CONFLICT path
+  // ignores VALUES on the id column).
+  //
+  // Fire-and-forget — history is best-effort and the caller doesn't await.
+  const now = new Date().toISOString();
   try {
-    const existing = await base.assetIpHistory.findUnique({ where: { assetId_ip: { assetId, ip } } });
-    if (existing) {
-      const sourceChanged = existing.source !== src;
-      await base.assetIpHistory.update({
-        where: { assetId_ip: { assetId, ip } },
-        data: { lastSeen: now, source: src, ...(sourceChanged ? { firstSeen: now } : {}) },
-      });
-    } else {
-      await base.assetIpHistory.create({
-        data: { assetId, ip, source: src, firstSeen: now, lastSeen: now },
-      });
-    }
+    await base.$executeRawUnsafe(
+      `INSERT INTO "asset_ip_history" ("id", "assetId", "ip", "source", "firstSeen", "lastSeen")
+       VALUES ($1, $2, $3, $4, $5::timestamp, $5::timestamp)
+       ON CONFLICT ("assetId", "ip") DO UPDATE SET
+         "lastSeen" = EXCLUDED."lastSeen",
+         "source" = EXCLUDED."source",
+         "firstSeen" = CASE
+           WHEN "asset_ip_history"."source" <> EXCLUDED."source" THEN EXCLUDED."firstSeen"
+           ELSE "asset_ip_history"."firstSeen"
+         END`,
+      randomUUID(),
+      assetId,
+      ip,
+      src,
+      now,
+    );
   } catch {
-    // Fire-and-forget; history is best-effort.
+    // Best-effort; swallow errors so a transient DB issue can't break the
+    // underlying Asset write.
   }
 }
 
