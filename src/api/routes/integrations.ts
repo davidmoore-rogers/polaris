@@ -3962,7 +3962,7 @@ async function syncEntraDevices(
   // first and never reached the collision branch).
   const assetByHostnameNoTag = new Map<string, any>();
   const assetByHostnameEntraTagged = new Map<string, any>();
-  const assetByMac = new Map<string, any>(); // normalized MAC → asset (any source; for mac-collision detection)
+  const assetByMac = new Map<string, any>(); // normalized MAC → asset (any source; powers the MAC identity-match cascade)
   for (const a of allAssets) {
     if (a.hostname) {
       const hasEntra = assetIdsWithEntraSource.has(a.id);
@@ -4062,13 +4062,32 @@ async function syncEntraDevices(
         }
       }
     }
+    // 3. Tertiary match: Ethernet MAC. Treats a MAC hit as positive identity
+    //    confirmation (re-enroll, re-image, NIC swap into a known device)
+    //    rather than the old mac-collision conflict pathway, which generated
+    //    operator noise that was almost always "same physical box, new Entra
+    //    deviceId". Only the Ethernet MAC qualifies — WiFi MAC randomizes
+    //    per-network on modern Windows/iOS/Android. Logged at info on every
+    //    silent take-over so the merge is auditable.
+    if (!existing && dev.ethernetMacAddress) {
+      const macKey = normalizeMacKey(dev.ethernetMacAddress);
+      if (macKey) {
+        const macMatch = assetByMac.get(macKey);
+        if (macMatch) {
+          existing = macMatch;
+          takingOver = !assetIdsWithEntraSource.has(macMatch.id);
+          const targetLabel = macMatch.hostname || macMatch.assetTag || macMatch.id;
+          syncLog("info", `MAC cross-link: Entra device "${dev.displayName || dev.deviceId}" Ethernet MAC ${dev.ethernetMacAddress} matched existing asset ${targetLabel}${takingOver ? " (taking over)" : ""}.`);
+        }
+      }
+    }
 
     // Build the proposed-fields snapshot once; used both in the existing-asset
     // sibling checks below AND in the no-existing-match collision checks further
     // down. Defined here so both branches share the same closure.
     const buildProposed = (
-      collisionReason: "untagged-collision" | "duplicate-registration" | "mac-collision",
-      matchedVia: "exact" | "netbios" | "mac",
+      collisionReason: "untagged-collision" | "duplicate-registration",
+      matchedVia: "exact" | "netbios",
     ) => ({
       sourceType: "entraid",
       assetTagPrefix: ENTRA_ASSET_TAG_PREFIX,
@@ -4210,16 +4229,12 @@ async function syncEntraDevices(
       continue;
     }
 
-    // No existing assetTag or SID match — check for hostname or MAC collision.
-    // Three flavours, in order of decreasing confidence:
+    // No existing assetTag, SID, or MAC match — check for hostname collision.
+    // Two flavours, in order of decreasing confidence:
     //   (a) hostname collision with an untagged asset
     //   (b) duplicate Entra registration where another entra-tagged asset shares
     //       the hostname (Entra returned two distinct deviceIds for the same
     //       display name — re-enrol, re-image, dual-boot, etc.)
-    //   (c) MAC collision against any existing asset (Intune-supplied MAC
-    //       matches a MAC ever seen on another asset). Weaker signal than
-    //       hostname because of MAC randomization on modern Windows/iOS — only
-    //       runs when no hostname collision was raised.
     // Each flavour raises a pending Conflict so an admin can decide whether to
     // merge (accept) or keep separate (reject). Hostname matching tolerates
     // 15-char NetBIOS truncation so an AD `cn`-derived hostname can match the
@@ -4344,33 +4359,9 @@ async function syncEntraDevices(
       }
     }
 
-    // (c) MAC collision — runs only when no hostname collision was raised, and
-    // only against the Ethernet MAC. WiFi MAC randomization on modern Windows
-    // / iOS / Android makes the WiFi MAC unreliable as a cross-asset identity
-    // key (the same physical box gets a different WiFi MAC per network), so
-    // we never raise MAC-collision conflicts on it. The WiFi MAC is still
-    // stored in `Asset.macAddresses[]` with `source: "intune-wifi"` for
-    // visibility and for FortiGate DHCP-discovery's MAC-based asset matching.
-    const macKey = normalizeMacKey(dev.ethernetMacAddress);
-    if (macKey) {
-      const macHit = assetByMac.get(macKey);
-      if (macHit) {
-        try {
-          await upsertAssetConflict({
-            collisionAssetId: macHit.id,
-            integrationId,
-            proposedDeviceId: dev.deviceId,
-            proposedAssetFields: buildProposed("mac-collision", "mac"),
-          });
-          const targetLabel = macHit.hostname || macHit.assetTag || macHit.id;
-          syncLog("warning", `MAC collision queued for review — Entra device "${dev.displayName || dev.deviceId}" Ethernet MAC ${dev.ethernetMacAddress} matches existing asset ${targetLabel}.`);
-        } catch (err: any) {
-          syncLog("error", `Failed to queue MAC-collision conflict for "${dev.displayName || dev.deviceId}": ${err.message || "Unknown error"}`);
-        }
-        skipped.push(`${dev.displayName || dev.deviceId} (MAC collision — pending review)`);
-        continue;
-      }
-    }
+    // (Ethernet MAC matches are no longer a conflict pathway — they're
+    // resolved as a positive identity match in the cascade above the
+    // if (existing) block.)
 
     // Create a new asset
     try {
@@ -4433,8 +4424,9 @@ async function syncEntraDevices(
         assetIdBySid.set(dev.onPremisesSecurityIdentifier.toUpperCase(), newAsset.id);
       }
       // Index the freshly-created asset by every MAC we just stored so a later
-      // device in this same run reporting any of those MACs raises a
-      // mac-collision conflict instead of creating a third duplicate row.
+      // device in this same run reporting any of those MACs cross-links into
+      // this asset via the MAC identity-match cascade instead of creating a
+      // third duplicate row.
       for (const e of intuneMacEntries) {
         const k = normalizeMacKey(e.mac);
         if (k && !assetByMac.has(k)) assetByMac.set(k, newAsset);
