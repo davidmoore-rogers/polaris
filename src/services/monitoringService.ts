@@ -2895,6 +2895,135 @@ interface RunStats {
 export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered";
 
 /**
+ * Per-cadence outcome tally returned by the runFooFor() functions. Used by
+ * both runMonitorPass (rolls into RunStats) and the upcoming pg-boss workers
+ * (logs only; pg-boss tracks job state independently). `crash` is reserved
+ * for unexpected exceptions; `failure` covers expected sad-path returns
+ * like "probe ran but credential failed" or "telemetry returned no data".
+ */
+export type CadenceOutcome = "success" | "failure" | "crash";
+
+/**
+ * Run a single response-time probe for one asset, write the sample, update
+ * Asset row state (monitorStatus / lastMonitorAt / consecutiveFailures),
+ * record metrics. `transport` labels the per-transport histogram + counter
+ * — callers that already know the asset's monitorType (e.g. runMonitorPass
+ * has it from the candidate query) pass it in to avoid a second DB read.
+ */
+export async function runProbeFor(assetId: string, transport: string): Promise<CadenceOutcome> {
+  const stopWork = startWorkTimer("probe");
+  const probeStart = Date.now();
+  try {
+    const result = await probeAsset(assetId);
+    const probeMs = Date.now() - probeStart;
+    await recordProbeResult(assetId, result);
+    if (result.success) {
+      recordProbe(transport, probeMs / 1000, "success");
+      recordWorkOutcome("probe", "success");
+      return "success";
+    }
+    recordProbe(transport, probeMs / 1000, "failure");
+    recordWorkOutcome("probe", "failure");
+    return "failure";
+  } catch (err) {
+    const probeMs = Date.now() - probeStart;
+    logger.error({ err, assetId }, "Monitor probe crashed");
+    recordProbe(transport, probeMs / 1000, "failure");
+    recordWorkOutcome("probe", "crash");
+    return "crash";
+  } finally {
+    stopWork();
+  }
+}
+
+/**
+ * Telemetry pull (CPU + memory + temperatures) for one asset. Returns
+ * `success` on a clean run regardless of whether data was collected —
+ * `supported=false` is a normal outcome for ICMP/SSH-monitored assets.
+ * `failure` means the transport is supported but the call returned no
+ * data (timed-out, rejected, etc.).
+ */
+export async function runTelemetryFor(assetId: string): Promise<CadenceOutcome> {
+  const stopWork = startWorkTimer("telemetry");
+  try {
+    const tr = await collectTelemetry(assetId);
+    await recordTelemetryResult(assetId, tr);
+    if (tr.supported) {
+      if (tr.data) {
+        recordWorkOutcome("telemetry", "success");
+        return "success";
+      }
+      recordWorkOutcome("telemetry", "failure");
+      return "failure";
+    }
+    recordWorkOutcome("telemetry", "success");
+    return "success";
+  } catch (err) {
+    logger.error({ err, assetId }, "Telemetry collection crashed");
+    recordWorkOutcome("telemetry", "crash");
+    return "crash";
+  } finally {
+    stopWork();
+  }
+}
+
+/**
+ * Full system-info pass (interfaces + storage + IPsec + LLDP) for one
+ * asset. Same supported / data / failure semantics as telemetry.
+ */
+export async function runSystemInfoFor(assetId: string): Promise<CadenceOutcome> {
+  const stopWork = startWorkTimer("systemInfo");
+  try {
+    const sr = await collectSystemInfo(assetId);
+    await recordSystemInfoResult(assetId, sr);
+    if (sr.supported) {
+      if (sr.data) {
+        recordWorkOutcome("systemInfo", "success");
+        return "success";
+      }
+      recordWorkOutcome("systemInfo", "failure");
+      return "failure";
+    }
+    recordWorkOutcome("systemInfo", "success");
+    return "success";
+  } catch (err) {
+    logger.error({ err, assetId }, "System info collection crashed");
+    recordWorkOutcome("systemInfo", "crash");
+    return "crash";
+  } finally {
+    stopWork();
+  }
+}
+
+/**
+ * Fast-filtered scrape for the operator-pinned subset (interfaces + storage
+ * + IPsec). Same supported / data / failure semantics as systemInfo.
+ */
+export async function runFastFilteredFor(assetId: string): Promise<CadenceOutcome> {
+  const stopWork = startWorkTimer("fastFiltered");
+  try {
+    const fr = await collectFastFiltered(assetId);
+    await recordFastFilteredResult(assetId, fr);
+    if (fr.supported) {
+      if (fr.data) {
+        recordWorkOutcome("fastFiltered", "success");
+        return "success";
+      }
+      recordWorkOutcome("fastFiltered", "failure");
+      return "failure";
+    }
+    recordWorkOutcome("fastFiltered", "success");
+    return "success";
+  } catch (err) {
+    logger.error({ err, assetId }, "Fast-cadence scrape crashed");
+    recordWorkOutcome("fastFiltered", "crash");
+    return "crash";
+  } finally {
+    stopWork();
+  }
+}
+
+/**
  * One iteration of the monitor job. Picks assets due for the requested
  * cadences and runs the due work in parallel. Each cadence has its own due
  * check + per-asset interval override (`monitorIntervalSec`,
@@ -3040,108 +3169,28 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       const w = work[idx];
       switch (w.kind) {
         case "probe": {
-          const stopWork = startWorkTimer("probe");
           const transport = transportById.get(w.id) ?? "unknown";
-          const probeStart = Date.now();
-          try {
-            const result = await probeAsset(w.id);
-            const probeMs = Date.now() - probeStart;
-            await recordProbeResult(w.id, result);
-            stats.probed++;
-            if (result.success) {
-              stats.succeeded++;
-              recordProbe(transport, probeMs / 1000, "success");
-              recordWorkOutcome("probe", "success");
-            } else {
-              stats.failed++;
-              recordProbe(transport, probeMs / 1000, "failure");
-              recordWorkOutcome("probe", "failure");
-            }
-          } catch (err) {
-            const probeMs = Date.now() - probeStart;
-            logger.error({ err, assetId: w.id }, "Monitor probe crashed");
-            stats.probed++;
-            stats.failed++;
-            recordProbe(transport, probeMs / 1000, "failure");
-            recordWorkOutcome("probe", "crash");
-          } finally {
-            stopWork();
-          }
+          const outcome = await runProbeFor(w.id, transport);
+          stats.probed++;
+          if (outcome === "success") stats.succeeded++; else stats.failed++;
           break;
         }
         case "telemetry": {
-          const stopWork = startWorkTimer("telemetry");
-          try {
-            const tr = await collectTelemetry(w.id);
-            await recordTelemetryResult(w.id, tr);
-            if (tr.supported) {
-              if (tr.data) {
-                stats.telemetry.collected++;
-                recordWorkOutcome("telemetry", "success");
-              } else {
-                stats.telemetry.failed++;
-                recordWorkOutcome("telemetry", "failure");
-              }
-            } else {
-              recordWorkOutcome("telemetry", "success");
-            }
-          } catch (err) {
-            logger.error({ err, assetId: w.id }, "Telemetry collection crashed");
-            stats.telemetry.failed++;
-            recordWorkOutcome("telemetry", "crash");
-          } finally {
-            stopWork();
-          }
+          const outcome = await runTelemetryFor(w.id);
+          if (outcome === "success") stats.telemetry.collected++;
+          else stats.telemetry.failed++;
           break;
         }
         case "systemInfo": {
-          const stopWork = startWorkTimer("systemInfo");
-          try {
-            const sr = await collectSystemInfo(w.id);
-            await recordSystemInfoResult(w.id, sr);
-            if (sr.supported) {
-              if (sr.data) {
-                stats.systemInfo.collected++;
-                recordWorkOutcome("systemInfo", "success");
-              } else {
-                stats.systemInfo.failed++;
-                recordWorkOutcome("systemInfo", "failure");
-              }
-            } else {
-              recordWorkOutcome("systemInfo", "success");
-            }
-          } catch (err) {
-            logger.error({ err, assetId: w.id }, "System info collection crashed");
-            stats.systemInfo.failed++;
-            recordWorkOutcome("systemInfo", "crash");
-          } finally {
-            stopWork();
-          }
+          const outcome = await runSystemInfoFor(w.id);
+          if (outcome === "success") stats.systemInfo.collected++;
+          else stats.systemInfo.failed++;
           break;
         }
         case "fastFiltered": {
-          const stopWork = startWorkTimer("fastFiltered");
-          try {
-            const fr = await collectFastFiltered(w.id);
-            await recordFastFilteredResult(w.id, fr);
-            if (fr.supported) {
-              if (fr.data) {
-                stats.fastFiltered.collected++;
-                recordWorkOutcome("fastFiltered", "success");
-              } else {
-                stats.fastFiltered.failed++;
-                recordWorkOutcome("fastFiltered", "failure");
-              }
-            } else {
-              recordWorkOutcome("fastFiltered", "success");
-            }
-          } catch (err) {
-            logger.error({ err, assetId: w.id }, "Fast-cadence scrape crashed");
-            stats.fastFiltered.failed++;
-            recordWorkOutcome("fastFiltered", "crash");
-          } finally {
-            stopWork();
-          }
+          const outcome = await runFastFilteredFor(w.id);
+          if (outcome === "success") stats.fastFiltered.collected++;
+          else stats.fastFiltered.failed++;
           break;
         }
       }
