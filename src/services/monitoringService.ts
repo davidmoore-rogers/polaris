@@ -1213,16 +1213,45 @@ async function collectSystemInfoFortinet(
   const fg = buildFortinetConfig(host, integration);
   if ("error" in fg) throw new Error(fg.error);
 
-  // /api/v2/monitor/system/interface returns runtime stats but only includes
-  // `type` / `vlanid` / `interface` (parent) sporadically depending on FortiOS
-  // version — many 7.x firmwares omit them entirely. The CMDB endpoint is the
-  // canonical source for type metadata, so we fetch it alongside the monitor
-  // payload and merge. CMDB failure is non-fatal (e.g. token without cmdb
-  // permission): we still get flat interface stats, just no nesting.
+  // Fan out every independent FortiOS REST call in parallel. The merge logic
+  // (cmdb + monitor → interfaces[]) only depends on both responses being
+  // available, not on serial ordering of the requests. Sequencing them used
+  // to make a healthy host's collection 5× longer than necessary; on a
+  // wedged host it stacked their 15s timeouts (~75s total) instead of
+  // running them concurrently (~15s).
+  //
+  // Per-stream error handling is preserved: cmdb fetch returns null on any
+  // failure (token without cmdb scope is the common case), ipsec and lldp
+  // each have their own .catch fallback, and the monitor-interface error
+  // is captured and only re-thrown if it would have ended up with an empty
+  // interfaces[] (matching the prior behavior where monitor failure with
+  // no interfaces threw, but partial success returned).
+  const cmdbInterfacePromise = fgRequest<any>(fg, "GET", "/api/v2/cmdb/system/interface", { query: { vdom: "root" } })
+    .catch(() => null as any);
+  const monitorInterfacePromise = fgRequest<any>(fg, "GET", "/api/v2/monitor/system/interface", {
+    query: { scope: "vdom", include_vlan: "true", include_aggregate: "true" },
+  })
+    .then((res) => ({ ok: true as const, res }))
+    .catch((err) => ({ ok: false as const, err }));
+  const ipsecPromise = opts.includeIpsec
+    ? collectIpsecTunnelsFortinet(fg).catch(() => [] as IpsecTunnelSample[])
+    : Promise.resolve<IpsecTunnelSample[] | undefined>(undefined);
+  const lldpPromise = opts.includeLldp !== false
+    ? collectLldpNeighborsFortinet(fg).catch(() => undefined)
+    : Promise.resolve<LldpNeighborSample[] | undefined>(undefined);
+
+  const [cmdbRes, monitorOutcome, ipsecTunnels, lldpNeighbors] = await Promise.all([
+    cmdbInterfacePromise,
+    monitorInterfacePromise,
+    ipsecPromise,
+    lldpPromise,
+  ]);
+
+  // Build cmdbByName from the CMDB response. Non-fatal failure → empty map
+  // → falls back to monitor-only types (same as the original try/catch).
   const cmdbByName = new Map<string, { type: string | null; parent: string | null; vlanId: number | null; members: string[]; alias: string | null; description: string | null }>();
-  try {
-    const cmdb = await fgRequest<any>(fg, "GET", "/api/v2/cmdb/system/interface", { query: { vdom: "root" } });
-    const arr = Array.isArray(cmdb) ? cmdb : (Array.isArray(cmdb?.results) ? cmdb.results : []);
+  if (cmdbRes) {
+    const arr = Array.isArray(cmdbRes) ? cmdbRes : (Array.isArray(cmdbRes?.results) ? cmdbRes.results : []);
     for (const c of arr) {
       if (!c || typeof c !== "object" || typeof c.name !== "string") continue;
       const t = typeof c.type === "string" ? c.type : null;
@@ -1242,18 +1271,11 @@ async function collectSystemInfoFortinet(
         description,
       });
     }
-  } catch { /* tokens without cmdb scope — fall back to monitor-only types */ }
+  }
 
   const interfaces: InterfaceSample[] = [];
-  try {
-    // The interface monitor returns a results object keyed by interface name.
-    // include_vlan/include_aggregate are required to get sub-interfaces in
-    // the response — by default FortiOS returns physical interfaces only,
-    // which is why VLANs and aggregates were never showing up under their
-    // parents in the System tab tree.
-    const res = await fgRequest<any>(fg, "GET", "/api/v2/monitor/system/interface", {
-      query: { scope: "vdom", include_vlan: "true", include_aggregate: "true" },
-    });
+  if (monitorOutcome.ok) {
+    const res = monitorOutcome.res;
     const obj = (res && typeof res === "object" && !Array.isArray(res)) ? res as Record<string, any> : {};
     for (const [name, info] of Object.entries(obj)) {
       if (!info || typeof info !== "object") continue;
@@ -1339,32 +1361,26 @@ async function collectSystemInfoFortinet(
         ifMap.set(memberStr, synthetic);
       }
     }
-  } catch (err: any) {
-    // Re-throw — partial collection of interfaces is fine, but no interfaces
-    // means the call genuinely failed.
-    if (interfaces.length === 0) throw err;
+  } else if (interfaces.length === 0) {
+    // Monitor failed AND we have no interfaces from the (also-failing) cmdb
+    // synthesis path — re-throw the original error to match the prior
+    // semantics. Partial success returns whatever we managed to merge.
+    throw monitorOutcome.err;
   }
   applyFortiInterfaceFilter(interfaces, integration);
-  // IPsec tunnels are best-effort: older FortiOS firmwares 404 the endpoint,
-  // and a FortiGate without IPsec configured returns an empty list. Either
-  // way we should not fail the whole system-info pass — the System tab simply
-  // hides the section when the array is empty. Skipped entirely on the fast
-  // (per-minute) cadence so we don't hammer the endpoint.
-  const ipsecTunnels = opts.includeIpsec
-    ? await collectIpsecTunnelsFortinet(fg).catch(() => [] as IpsecTunnelSample[])
-    : undefined;
-  // LLDP is also best-effort. FortiOS 6.4+ exposes the per-interface neighbor
-  // list at /api/v2/monitor/system/interface/lldp-neighbors; older firmwares
-  // 404 it. A FortiGate without LLDP enabled on any interface returns an
-  // empty array — we still treat that as "queried successfully" so the
-  // persistence layer wipes any stale neighbors. A genuine failure (404,
-  // network error, no permissions) leaves `lldpNeighbors` undefined so the
-  // persistence layer leaves existing rows alone. `includeLldp` lets the
-  // caller skip this when the operator routed LLDP to SNMP — the caller
-  // then overlays the SNMP result onto the returned sample.
-  const lldpNeighbors = opts.includeLldp !== false
-    ? await collectLldpNeighborsFortinet(fg).catch(() => undefined)
-    : undefined;
+  // ipsecTunnels: best-effort, already resolved above. Older FortiOS
+  // firmwares 404 the endpoint and FortiGates without IPsec configured
+  // return an empty list — either way the System tab just hides the
+  // section. Skipped entirely on the fast (per-minute) cadence so we
+  // don't hammer the endpoint.
+  //
+  // lldpNeighbors: also best-effort. FortiOS 6.4+ exposes the per-interface
+  // neighbor list; older firmwares 404 it. An empty array is "queried
+  // successfully, no neighbors" → persist layer wipes stale rows. A
+  // genuine failure leaves `lldpNeighbors` undefined → persist layer
+  // leaves existing rows alone. `includeLldp: false` lets the caller skip
+  // this when the operator routed LLDP to SNMP; the caller overlays the
+  // SNMP result onto the returned sample.
   return { interfaces, storage: [], ipsecTunnels, lldpNeighbors, lldpSource: opts.includeLldp !== false ? "fortios" : undefined };
 }
 
@@ -1471,10 +1487,19 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTu
   // "dynamic" instead of rolling phase-2 selectors up to "down" when no
   // client happens to be connected at scrape time. Best-effort: tokens
   // without cmdb scope just leave both null on every row.
+  // CMDB phase1 + monitor /vpn/ipsec are independent on the wire — fire them
+  // in parallel and merge below. CMDB failure (token without cmdb scope) is
+  // non-fatal and just leaves phase1Map empty so parentInterface / type are
+  // null on every row, matching the prior behavior.
+  const [cmdbResult, res] = await Promise.all([
+    fgRequest<any>(fg, "GET", "/api/v2/cmdb/vpn.ipsec/phase1-interface", { query: { vdom: "root" } })
+      .catch(() => null as any),
+    fgRequest<any>(fg, "GET", "/api/v2/monitor/vpn/ipsec", { query: { scope: "vdom" } }),
+  ]);
+
   const phase1Map = new Map<string, { iface: string | null; type: string | null }>();
-  try {
-    const cmdb = await fgRequest<any>(fg, "GET", "/api/v2/cmdb/vpn.ipsec/phase1-interface", { query: { vdom: "root" } });
-    const cmdbArr = Array.isArray(cmdb?.results) ? cmdb.results : (Array.isArray(cmdb) ? cmdb : []);
+  if (cmdbResult) {
+    const cmdbArr = Array.isArray(cmdbResult?.results) ? cmdbResult.results : (Array.isArray(cmdbResult) ? cmdbResult : []);
     for (const p of cmdbArr) {
       if (!p || typeof p !== "object") continue;
       const name  = typeof (p as any).name      === "string" ? (p as any).name.trim()      : "";
@@ -1482,9 +1507,7 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig): Promise<IpsecTu
       const type  = typeof (p as any).type      === "string" ? (p as any).type.trim().toLowerCase() : "";
       if (name) phase1Map.set(name, { iface: iface || null, type: type || null });
     }
-  } catch { /* tokens without cmdb scope — fall through with an empty map */ }
-
-  const res = await fgRequest<any>(fg, "GET", "/api/v2/monitor/vpn/ipsec", { query: { scope: "vdom" } });
+  }
   const arr = Array.isArray(res?.results) ? res.results : (Array.isArray(res) ? res : []);
   const out: IpsecTunnelSample[] = [];
   for (const t of arr) {
