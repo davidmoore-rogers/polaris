@@ -1419,21 +1419,23 @@ async function registerFortinetHost(integrationType: string, host: string, integ
     }
   }
 
-  // ── Asset (always create — multiple assets may share an IP) ──
-  const proposedAsset = {
-    ipAddress: host,
-    hostname,
-    assetType,
-    status: "active" as const,
-    manufacturer: "Fortinet",
-    model: productLabel,
-    department: "Network Security",
-    notes: `Auto-registered from ${productLabel} integration: ${integrationName}`,
-    tags: [integrationType, "auto-registered"],
-  };
-
-  await prisma.asset.create({ data: proposedAsset });
-  created.push("asset");
+  // ── Asset (skip if a same-type asset already exists at this IP) ──
+  const existingAsset = await prisma.asset.findFirst({ where: { ipAddress: host, assetType } });
+  if (!existingAsset) {
+    const proposedAsset = {
+      ipAddress: host,
+      hostname,
+      assetType,
+      status: "active" as const,
+      manufacturer: "Fortinet",
+      model: productLabel,
+      department: "Network Security",
+      notes: `Auto-registered from ${productLabel} integration: ${integrationName}`,
+      tags: [integrationType, "auto-registered"],
+    };
+    await prisma.asset.create({ data: proposedAsset });
+    created.push("asset");
+  }
 
   return { conflicts, created };
 }
