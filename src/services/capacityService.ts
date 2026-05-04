@@ -40,7 +40,7 @@ import { fileURLToPath } from "node:url";
 import { prisma } from "../db.js";
 import { getMonitorSettings, type MonitorSettings } from "./monitoringService.js";
 import { isTimescaleAvailable, isHypertable, SAMPLE_TABLES as TIMESCALE_SAMPLE_TABLES } from "./timescaleService.js";
-import { isPgbossInstalled, getBootTimeMode } from "./queueService.js";
+import { isPgbossInstalled, getBootTimeMode, getQueueMode } from "./queueService.js";
 import { getDeploymentContext } from "../utils/deploymentContext.js";
 import { BACKUP_DIR, STATE_DIR } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
@@ -111,15 +111,17 @@ export interface CapacitySnapshot {
     };
     /**
      * Monitor work queue status. `pgbossInstalled` reflects whether the
-     * pg-boss npm package is available at runtime; `active` reflects the
-     * `Setting.monitor.queueMode` value (default "cursor"). Surfaced on
-     * the Maintenance tab Capabilities row alongside TimescaleDB. Phase 4b
-     * wires the actual detection + Setting lookup; until then this is a
-     * frozen "cursor / not installed" view that matches reality.
+     * pg-boss npm package is available at runtime; `active` is the mode
+     * the running process is using (captured from Setting at boot);
+     * `persisted` is the current Setting value (= what the next process
+     * restart will use). When `active !== persisted`, the operator has
+     * flipped the mode via the [Enable on next restart] button and a
+     * restart is pending. Surfaced on the Maintenance tab Capabilities row.
      */
     queue: {
       pgbossInstalled: boolean;
       active: "cursor" | "pgboss";
+      persisted: "cursor" | "pgboss";
     };
   };
   workload: {
@@ -547,6 +549,31 @@ function computeReasons(
     });
   }
 
+  // ── Watch: pg-boss recommendation ────────────────────────────────────────
+  // Once the monitored fleet crosses ~500 assets and the operator is still
+  // on the cursor queue, advise switching to pg-boss. Below that threshold
+  // cursor (post-Step-4a split-tick fix) keeps up fine; above it the in-
+  // process worker pool starts contending with HTTP request handlers and
+  // the publisher loses headroom for adding workers without restarting.
+  // Skip when pg-boss isn't installed (no actionable advice to give).
+  const PGBOSS_RECOMMEND_ASSETS = 500;
+  if (
+    snap.database.queue.active === "cursor" &&
+    snap.database.queue.pgbossInstalled &&
+    snap.workload.monitoredAssetCount > PGBOSS_RECOMMEND_ASSETS
+  ) {
+    const ctx = getDeploymentContext();
+    const suggestion = !ctx.dbIsLocal
+      ? "Click Enable on next restart to switch. pg-boss creates its own tables in the polaris database — confirm your DB role has CREATE TABLE permission with your DBA before flipping."
+      : "Click Enable on next restart to switch. After the next application restart Polaris will use the pg-boss queue with per-cadence worker pools.";
+    reasons.push({
+      severity: "watch",
+      code: "pgboss_recommended",
+      message: `Monitoring ${snap.workload.monitoredAssetCount} assets on the cursor queue. pg-boss has structural per-cadence isolation that scales further.`,
+      suggestion,
+    });
+  }
+
   // ── Watch: TimescaleDB recommendation ────────────────────────────────────
   // Once the sample tables together cross ~1 GB and the extension isn't
   // installed, advise the operator. Below the threshold it's not worth
@@ -677,6 +704,7 @@ export async function getCapacitySnapshot(opts: {
       queue: {
         pgbossInstalled: isPgbossInstalled(),
         active: getBootTimeMode(),
+        persisted: await getQueueMode(),
       },
     },
     workload: {

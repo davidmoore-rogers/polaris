@@ -1083,6 +1083,13 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
       '<div class="capacity-reasons">' +
         capacity.reasons.map(function (r) {
           var extra = r.code === "pg_tuning_needed" ? pgSettingsRowsHtml : "";
+          // pgboss_recommended carries an action button — clicking it
+          // writes Setting.monitor.queueMode = "pgboss" so the next
+          // application restart picks up the new queue. Confirmation
+          // happens via showConfirm() in the click handler.
+          var action = r.code === "pgboss_recommended"
+            ? '<button class="btn btn-sm btn-primary capacity-action" data-action="enable-pgboss" style="margin-top:0.5rem">Enable on next restart</button>'
+            : "";
           return '<div class="capacity-reason capacity-reason-' + r.severity + '">' +
             '<div class="capacity-reason-head">' +
               '<span class="capacity-pill capacity-pill-' + r.severity + ' capacity-pill-sm">' +
@@ -1091,6 +1098,7 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
               '<span class="capacity-reason-msg">' + escapeHtml(r.message) + '</span>' +
             '</div>' +
             '<div class="capacity-reason-suggestion">' + escapeHtml(r.suggestion) + '</div>' +
+            action +
             extra +
           '</div>';
         }).join("") +
@@ -1140,10 +1148,10 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
     tsLabel = htCount > 0 ? ("Enabled (" + htCount + " hypertable" + (htCount === 1 ? "" : "s") + ")") : "Installed, not enabled";
   }
 
-  // Monitor queue: pg-boss matches the same three-state shape (npm package
-  // detection + Setting.monitor.queueMode active value). Until Step 4b wires
-  // pg-boss in, both flags are static and the UI shows "Cursor (default)" /
-  // "Not installed" — accurate for current runtime state.
+  // Monitor queue: three-state shape mirroring TimescaleDB. When
+  // `persisted` differs from `active`, the operator has clicked the
+  // [Enable on next restart] button and a restart is pending — append a
+  // bold "Pending: <mode> on next restart" hint so it's not invisible.
   var q = db.queue || {};
   var queueLabel;
   if (!q.pgbossInstalled) {
@@ -1152,6 +1160,10 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
     queueLabel = "pg-boss (active)";
   } else {
     queueLabel = "Cursor (pg-boss installed, not active)";
+  }
+  if (q.persisted && q.active && q.persisted !== q.active) {
+    queueLabel += ' <strong style="color:var(--color-warning,#f59e0b)">— Pending: ' +
+      escapeHtml(q.persisted) + ' on next restart</strong>';
   }
 
   var dbHtml =
@@ -1343,6 +1355,7 @@ async function loadDatabaseInfo() {
     initRestoreControls();
     loadBackupHistory();
     initUpdateControls();
+    initCapacityActions();
   } catch (err) {
     container.innerHTML = '<div class="settings-card"><p class="empty-state">Error: ' + escapeHtml(err.message) + '</p></div>';
   }
@@ -1369,6 +1382,36 @@ async function warnIfDiscoveryRunning(actionLabel) {
     return api.integrations.abortDiscover(d.id);
   }));
   return true;
+}
+
+/**
+ * Wire click handlers for the action buttons rendered inside capacity
+ * reasons (currently just the pgboss recommendation's [Enable on next
+ * restart]). Called from loadDatabaseInfo after the card is in the DOM.
+ */
+function initCapacityActions() {
+  var card = document.getElementById("capacity-card");
+  if (!card) return;
+  card.querySelectorAll('button[data-action="enable-pgboss"]').forEach(function (btn) {
+    btn.addEventListener("click", async function () {
+      var ok = await showConfirm(
+        "Polaris will switch to the pg-boss monitor queue after the next application restart. The new queue creates ~5 tables in the Polaris database. Continue?"
+      );
+      if (!ok) return;
+      btn.disabled = true;
+      btn.textContent = "Saving...";
+      try {
+        await api.serverSettings.setQueueMode("pgboss");
+        showToast("pg-boss will be active after the next application restart", "success");
+        _dbLoaded = false;
+        loadDatabaseInfo();
+      } catch (err) {
+        showToast("Could not save: " + (err && err.message ? err.message : "unknown error"), "error");
+        btn.disabled = false;
+        btn.textContent = "Enable on next restart";
+      }
+    });
+  });
 }
 
 function initBackupControls() {

@@ -58,6 +58,12 @@ import { AppError } from "../../utils/errors.js";
 import { hasActiveDiscoveries } from "./integrations.js";
 import { logger } from "../../utils/logger.js";
 import { getCapacitySnapshot, recordCapacityTransition } from "../../services/capacityService.js";
+import {
+  getBootTimeMode,
+  getQueueMode,
+  setQueueMode,
+  isPgbossInstalled,
+} from "../../services/queueService.js";
 import { BACKUP_DIR, UPLOADS_DIR } from "../../utils/paths.js";
 import { getAppVersion } from "../../utils/version.js";
 
@@ -1049,6 +1055,59 @@ router.post("/pg-tuning/snooze", async (req, res, next) => {
       create: { key: "pg_tuning_snooze", value: { until } },
     });
     res.json({ ok: true, snoozedUntil: until });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Monitor queue mode ──────────────────────────────────────────────────
+//
+// Two-state config (cursor | pgboss) backed by Setting.monitor.queueMode.
+// The currently-running process always uses its boot-time mode; a flip
+// here writes the Setting and returns success. The next application
+// restart picks up the new mode. Surfaced on the Maintenance tab so
+// admins can act on the `pgboss_recommended` capacity reason without
+// shell access.
+
+router.get("/queue-mode", async (_req, res, next) => {
+  try {
+    const persisted = await getQueueMode();
+    const active = getBootTimeMode();
+    res.json({
+      active,                  // what this process is using
+      persisted,               // what next restart will use
+      restartRequired: active !== persisted,
+      pgbossInstalled: isPgbossInstalled(),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/queue-mode", async (req, res, next) => {
+  try {
+    const requested = req.body?.mode;
+    if (requested !== "cursor" && requested !== "pgboss") {
+      throw new AppError(400, "mode must be 'cursor' or 'pgboss'");
+    }
+    if (requested === "pgboss" && !isPgbossInstalled()) {
+      throw new AppError(409, "pg-boss is not installed in this build");
+    }
+    await setQueueMode(requested);
+    await logEvent({
+      level: "info",
+      action: "monitor.queue_mode.set",
+      resourceType: "setting",
+      resourceName: "monitor.queueMode",
+      actor: req.session?.username,
+      message: `Monitor queue mode set to ${requested} (effective on next restart)`,
+    });
+    res.json({
+      ok: true,
+      persisted: requested,
+      active: getBootTimeMode(),
+      restartRequired: getBootTimeMode() !== requested,
+    });
   } catch (err) {
     next(err);
   }
