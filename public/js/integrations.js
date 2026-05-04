@@ -23,6 +23,46 @@ function _runFortigateSampleProbe(runner) {
     });
 }
 
+// After a fresh integration of a subnet-producing type is created, warn the
+// operator if no IP blocks are defined yet. Discovery skips every DHCP scope
+// without a matching parent block (`syncDhcpSubnets` logs them as "no matching
+// parent block"), so without a block the integration is effectively a no-op.
+// Asset-only integrations (Entra/AD) don't need blocks — they're skipped here.
+async function _warnIfNoBlocksForIntegrationType(integrationType, integrationName) {
+  var producesSubnets =
+    integrationType === "fortimanager" ||
+    integrationType === "fortigate" ||
+    integrationType === "windowsserver";
+  if (!producesSubnets) return;
+  var blocks;
+  try {
+    var resp = await api.blocks.list();
+    blocks = Array.isArray(resp) ? resp : (resp && resp.blocks) || [];
+  } catch (e) {
+    return; // Best-effort; don't block the create flow on a list-blocks failure
+  }
+  if (blocks.length > 0) return;
+  var name = escapeHtml(integrationName || "this integration");
+  var body =
+    '<p style="font-size:0.95rem;color:var(--color-text-primary);margin-bottom:0.75rem">' +
+    'No IP blocks are defined yet.</p>' +
+    '<p style="font-size:0.88rem;color:var(--color-text-secondary);line-height:1.5;margin-bottom:0.75rem">' +
+    'When ' + name + ' runs discovery, every DHCP scope it finds needs a parent IP block to land in. ' +
+    'Without at least one block, all discovered subnets will be skipped and no endpoint reservations will be tracked.' +
+    '</p>' +
+    '<p style="font-size:0.88rem;color:var(--color-text-secondary);line-height:1.5">' +
+    'Add the IP space your organization owns under <strong>IP Blocks</strong> before running discovery.' +
+    '</p>';
+  var footer =
+    '<button class="btn btn-secondary" id="noblocks-dismiss">Got it</button>' +
+    '<button class="btn btn-primary" id="noblocks-go">Add IP Block</button>';
+  openModal("IP Blocks Required", body, footer);
+  var dismiss = document.getElementById("noblocks-dismiss");
+  var go = document.getElementById("noblocks-go");
+  if (dismiss) dismiss.onclick = function () { closeModal(); };
+  if (go) go.onclick = function () { closeModal(); window.location.href = "/blocks.html"; };
+}
+
 // Toggle FMG integration form between proxy and direct modes.
 // `useDirect=true` means bypass FMG and query each FortiGate directly;
 // the on-disk integration field stays `useProxy` (true=proxy) — only the
@@ -1579,6 +1619,11 @@ async function openCreateModal(type) {
       }
       if (result && result.conflicts && result.conflicts.length) {
         showConflictModal(result.id, result.conflicts);
+      } else {
+        // Conflict modal owns the screen when it renders, so skip the
+        // no-blocks warning in that case — operators see it on the next
+        // create or after the conflict modal closes.
+        await _warnIfNoBlocksForIntegrationType(type, input.name);
       }
     } catch (err) {
       showToast(err.message, "error");
