@@ -264,6 +264,16 @@ app.get("/health", (req, res) => {
   }
   res.json({ status: "ok" });
 });
+// API responses are session/state-dependent and must never be cached. Without
+// this header, browsers fall back to heuristic caching of JSON responses,
+// which surfaces visibly when /auth/me gets cached pre-login and then
+// re-served as a 304 after login completes — the mobile flow then thinks
+// the user isn't authenticated and bounces back to the login screen.
+// `no-store` disables both browser cache AND any intermediate proxy cache.
+app.use("/api", (_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
 app.use("/api/v1", router);
 app.use(errorHandler);
 
