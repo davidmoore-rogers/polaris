@@ -2891,23 +2891,33 @@ interface RunStats {
   fastFiltered: { collected: number; failed: number };
 }
 
+export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered";
+
 /**
- * One iteration of the monitor job. Picks assets due for any of the four
- * cadences (response-time probe, telemetry, system info, fast-cadence pinned
- * scrape) and runs the due work in parallel. Each cadence has its own due
+ * One iteration of the monitor job. Picks assets due for the requested
+ * cadences and runs the due work in parallel. Each cadence has its own due
  * check + per-asset interval override (`monitorIntervalSec`,
  * `telemetryIntervalSec`, `systemInfoIntervalSec`).
+ *
+ * `cadences` selects which cadences this pass owns. The job layer
+ * (`monitorAssets.ts`) splits the cadences across two independent ticking
+ * loops — light (`probe` + `fastFiltered`) every 5s and heavy (`telemetry`
+ * + `systemInfo`) every 30s — so a wedged systemInfo on dead hosts can't
+ * hold up per-minute probe polling across ticks. Default is all four
+ * cadences so call sites that don't care (e.g. `POST /assets/:id/probe-now`)
+ * still see the legacy "do everything" behavior.
  *
  * Each cadence is its own queue item — workers pull single-cadence items
  * rather than the full per-asset pipeline. A 30s SNMP-walk timeout on one
  * host's systemInfo no longer holds up the cheap probe of the next asset:
  * any free worker can pick up that probe immediately. Probes are queued
  * first so when the worker pool is saturated, the lightweight cadence
- * drains before the heavy ones, keeping per-asset response-time polling
- * close to its configured interval even when systemInfo is wedged across
- * a fleet of dead targets.
+ * drains before the heavy ones.
  */
-export async function runMonitorPass(opts?: { concurrency?: number }): Promise<RunStats> {
+export async function runMonitorPass(opts?: { concurrency?: number; cadences?: MonitorCadence[] }): Promise<RunStats> {
+  const enabled = new Set<MonitorCadence>(
+    opts?.cadences ?? ["probe", "fastFiltered", "telemetry", "systemInfo"],
+  );
   const endPassTimer = startPassTimer();
   const settings = await getMonitorSettings();
   const concurrency = Math.max(1, Math.min(opts?.concurrency ?? 8, 32));
@@ -2980,15 +2990,21 @@ export async function runMonitorPass(opts?: { concurrency?: number }): Promise<R
     // "unknown" is treated like "up" — a never-probed asset still deserves
     // a full first-attempt pass.
     const isDown = a.monitorStatus === "down";
-    if (probe)                                 probes.push({ id: a.id, kind: "probe" });
-    if (telemetry  && !isDown)                 telemetries.push({ id: a.id, kind: "telemetry" });
-    if (systemInfo && !isDown)                 systemInfos.push({ id: a.id, kind: "systemInfo" });
+    if (probe      && enabled.has("probe"))                 probes.push({ id: a.id, kind: "probe" });
+    if (telemetry  && enabled.has("telemetry")  && !isDown) telemetries.push({ id: a.id, kind: "telemetry" });
+    if (systemInfo && enabled.has("systemInfo") && !isDown) systemInfos.push({ id: a.id, kind: "systemInfo" });
     // Fast-cadence pinned scrape rides the response-time cadence (default 60s).
-    // Skip it when the full systemInfo pass is also due this tick — they'd
-    // hit the same OIDs twice and the full pass already covers the pinned
-    // subset. Gating at enqueue time keeps the queue items independent so
-    // workers don't need cross-item coordination.
-    if (probe && hasFastPin && !systemInfo && !isDown) fastFiltereds.push({ id: a.id, kind: "fastFiltered" });
+    // Skip it when the full systemInfo pass is also due — they'd hit the same
+    // OIDs twice and the full pass already covers the pinned subset. The
+    // `systemInfo` boolean here reflects the asset's overall due state, not
+    // whether THIS pass is going to handle systemInfo, so the gating works
+    // correctly even when light + heavy passes run on different ticking
+    // loops: when systemInfo is due, fast-filtered is skipped on this and
+    // every following light tick until systemInfo runs successfully and
+    // bumps lastSystemInfoAt.
+    if (probe && hasFastPin && !systemInfo && !isDown && enabled.has("fastFiltered")) {
+      fastFiltereds.push({ id: a.id, kind: "fastFiltered" });
+    }
   }
   // Order matters: probes first so a saturated worker pool drains the cheap
   // cadence ahead of the heavy walks. Fast-filtered scrapes ride the same
