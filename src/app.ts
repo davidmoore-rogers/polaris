@@ -43,7 +43,7 @@ import "./jobs/scrubLegacySidGuidTags.js";
 import "./jobs/backfillFortigateEndpointSources.js";
 import { ensureRegistryLoaded } from "./services/oidRegistry.js";
 import { detectTimescale, migrateToHypertables } from "./services/timescaleService.js";
-import { initializeQueue } from "./services/queueService.js";
+import { initializeQueue, startPgbossWorkers, stopPgbossWorkers } from "./services/queueService.js";
 import { runStartupDiskCheck } from "./utils/startupDiskCheck.js";
 
 // Warm the symbolic-OID registry once at startup so the first monitor tick
@@ -55,10 +55,26 @@ ensureRegistryLoaded().catch((err) => {
 
 // Warm the monitor-queue mode cache at startup so the dispatcher in
 // `monitorAssets.ts` and the capacity snapshot both see the same value.
+// When the boot-time mode is "pgboss", also spin up the pg-boss worker
+// pools — they pull jobs the publisher submits from monitorAssets.ts.
 // Non-fatal — failure leaves Polaris on the cursor (default) queue.
-initializeQueue().catch((err) => {
-  logger.warn({ err: err?.message }, "Queue initialization failed; defaulting to cursor mode");
-});
+initializeQueue()
+  .then(() =>
+    startPgbossWorkers().catch((err) => {
+      logger.warn({ err: err?.message }, "pg-boss worker start failed; staying on cursor");
+    }),
+  )
+  .catch((err) => {
+    logger.warn({ err: err?.message }, "Queue initialization failed; defaulting to cursor mode");
+  });
+
+// Graceful pg-boss shutdown on SIGTERM/SIGINT so in-flight jobs can drain
+// before the process exits. No-op when pg-boss never started.
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.once(sig, () => {
+    stopPgbossWorkers().finally(() => process.exit(0));
+  });
+}
 
 // Detect TimescaleDB once at startup so the prune layer + capacity service
 // can dispatch on hypertable status without paying a probe on every call.
