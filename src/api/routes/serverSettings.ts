@@ -129,12 +129,19 @@ router.get("/database", async (_req, res, next) => {
     );
     const databaseSize = sizeResult[0]?.size || "Unknown";
 
+    // Restrict to the public schema so pg-boss's internal tables (in the
+    // `pgboss` schema, including `pgboss.version`) don't show up in the
+    // operator-facing table list AND don't trip pg_total_relation_size(quote_ident(relname))
+    // — that helper produces an unqualified identifier, which Postgres
+    // tries to resolve via search_path; tables outside `public` fail with
+    // `relation "<name>" does not exist`.
     const tablesResult = await prisma.$queryRawUnsafe<any[]>(`
       SELECT
         relname AS name,
         n_live_tup::integer AS rows,
         pg_size_pretty(pg_total_relation_size(quote_ident(relname))) AS size
       FROM pg_stat_user_tables
+      WHERE schemaname = 'public'
       ORDER BY pg_total_relation_size(quote_ident(relname)) DESC
     `);
     const tables = tablesResult.map((t: any) => ({
