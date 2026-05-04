@@ -52,7 +52,16 @@ If `/var` is on its own LV (the typical STIG-hardened layout) and has less than 
 sudo -u postgres psql <<'SQL'
 CREATE USER polaris WITH PASSWORD 'change-me';
 CREATE DATABASE polaris OWNER polaris;
+GRANT pg_read_all_settings TO polaris;
 SQL
+```
+
+The `pg_read_all_settings` grant lets Polaris read `SHOW data_directory` so the Maintenance tab can measure the `/var` filesystem and alert before it fills.
+
+Allow the postgres directory to be traversed by the polaris OS user (needed for the same disk-space check — `statfs` on `/var/lib/pgsql/data` requires search permission on the parent):
+
+```bash
+sudo chmod o+x /var/lib/pgsql
 ```
 
 Edit `/var/lib/pgsql/data/pg_hba.conf` and add a line for the polaris user (typically `host polaris polaris 127.0.0.1/32 scram-sha-256`), then `sudo systemctl reload postgresql`.
@@ -152,7 +161,16 @@ df -h /var/lib/postgresql
 sudo -u postgres psql <<'SQL'
 CREATE USER polaris WITH PASSWORD 'change-me';
 CREATE DATABASE polaris OWNER polaris;
+GRANT pg_read_all_settings TO polaris;
 SQL
+```
+
+The `pg_read_all_settings` grant lets Polaris read `SHOW data_directory` so the Maintenance tab can measure the `/var` filesystem and alert before it fills.
+
+Allow the postgres directory to be traversed by the polaris OS user:
+
+```bash
+sudo chmod o+x /var/lib/postgresql
 ```
 
 Edit `/etc/postgresql/<version>/main/pg_hba.conf` to add the polaris user, then `sudo systemctl reload postgresql`.
