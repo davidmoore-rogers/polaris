@@ -154,6 +154,44 @@ const DEFAULT_BYTES_PER_ROW: Record<string, number> = {
 
 const APP_DIR = dirname(fileURLToPath(import.meta.url));
 
+// Conventional PGDATA paths per platform. Used when `SHOW data_directory`
+// fails — typically because the application's DB role is not a superuser and
+// not a member of `pg_read_all_settings` (the default in a least-privilege
+// install), which makes `data_directory` unreadable. Without this fallback a
+// separate /var on a STIG-style RHEL layout never enters the volume scan and
+// the UI shows only the app volume even when /var is the at-risk filesystem.
+// Mirrors the candidate list in `src/utils/startupDiskCheck.ts`.
+const PG_DATA_DIR_CANDIDATES: string[] = process.platform === "win32"
+  ? [
+      "C:\\Program Files\\PostgreSQL\\17\\data",
+      "C:\\Program Files\\PostgreSQL\\16\\data",
+      "C:\\Program Files\\PostgreSQL\\15\\data",
+      "C:\\Program Files\\PostgreSQL\\14\\data",
+      "C:\\Program Files\\PostgreSQL\\13\\data",
+    ]
+  : [
+      "/var/lib/pgsql/data",
+      "/var/lib/pgsql/17/data",
+      "/var/lib/pgsql/16/data",
+      "/var/lib/pgsql/15/data",
+      "/var/lib/postgresql/17/main",
+      "/var/lib/postgresql/16/main",
+      "/var/lib/postgresql/15/main",
+      "/var/lib/postgresql/14/main",
+    ];
+
+async function pickFirstExistingPath(candidates: string[]): Promise<string | null> {
+  for (const p of candidates) {
+    try {
+      await stat(p);
+      return p;
+    } catch {
+      // not present, keep going
+    }
+  }
+  return null;
+}
+
 function isDbLocal(): boolean {
   const url = process.env.DATABASE_URL || "";
   const m = url.match(/@([^:/?]+)/);
@@ -163,12 +201,12 @@ function isDbLocal(): boolean {
 }
 
 /**
- * Resolve PostgreSQL's data directory via `SHOW data_directory`. Returns null
- * when the DB is remote (path is meaningless on this host) or when the query
- * fails. We don't fall back to platform-conventional paths (`/var/lib/pgsql/...`,
- * `C:\Program Files\PostgreSQL\...`) because guessing is worse than honestly
- * reporting "we don't know" — the volume scan still picks up the app + state +
- * backups paths for at-risk filesystems.
+ * Resolve PostgreSQL's data directory. Tries `SHOW data_directory` first
+ * because it's authoritative when it works; falls back to scanning the
+ * platform's conventional PGDATA candidates when it doesn't (the common case
+ * is a non-superuser application role lacking `pg_read_all_settings`, which
+ * makes `data_directory` unreadable). Returns null when the DB is remote or
+ * when no candidate path exists on disk.
  */
 async function resolveDbDataDirectory(): Promise<string | null> {
   if (!isDbLocal()) return null;
@@ -177,11 +215,11 @@ async function resolveDbDataDirectory(): Promise<string | null> {
       "SHOW data_directory",
     );
     const path = rows[0]?.data_directory;
-    return path && path.length > 0 ? path : null;
+    if (path && path.length > 0) return path;
   } catch (err: any) {
-    logger.debug({ err: err?.message }, "capacityService: SHOW data_directory failed");
-    return null;
+    logger.debug({ err: err?.message }, "capacityService: SHOW data_directory failed, falling back to platform candidates");
   }
+  return pickFirstExistingPath(PG_DATA_DIR_CANDIDATES);
 }
 
 /**
