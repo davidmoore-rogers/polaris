@@ -1,0 +1,1275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Polaris Mobile — Mockup</title>
+<style>
+  :root {
+    --bg-page: #0a0a14;
+    --bg-app: #151528;
+    --bg-surface: #1e1e36;
+    --bg-elev: #252540;
+    --border: #2c2c4a;
+    --border-soft: #20203a;
+    --text: #e6e6e6;
+    --text-dim: #a0a0b3;
+    --text-faint: #7d7d93;
+    --accent: #4fc3f7;
+    --accent-dim: #29b6f6;
+    --green: #00c853;
+    --amber: #ffd600;
+    --red: #ff1744;
+    --orange: #ff9800;
+    --purple: #ab47bc;
+    --shadow: 0 10px 40px rgba(0,0,0,.6);
+    --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "Roboto Mono", "Consolas", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg-page);
+    color: var(--text);
+    font-family: var(--font);
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    padding: 32px 24px 64px;
+  }
+  .gallery-header {
+    max-width: 1400px;
+    margin: 0 auto 32px;
+    text-align: center;
+  }
+  .gallery-header h1 {
+    font-size: 28px;
+    font-weight: 700;
+    margin: 0 0 6px;
+    letter-spacing: -.5px;
+  }
+  .gallery-header p {
+    color: var(--text-dim);
+    margin: 0;
+    font-size: 14px;
+  }
+  .grid {
+    max-width: 1700px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 40px 32px;
+    justify-items: center;
+  }
+  .screen-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+  .screen-label {
+    font-size: 13px;
+    color: var(--text-dim);
+    font-weight: 500;
+    letter-spacing: .3px;
+  }
+  .phone {
+    width: 360px;
+    height: 760px;
+    background: var(--bg-app);
+    border-radius: 36px;
+    border: 8px solid #1a1a2a;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+  /* Status bar */
+  .statusbar {
+    height: 28px;
+    flex: 0 0 28px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 18px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+    background: var(--bg-app);
+  }
+  .statusbar .icons {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+  /* App header */
+  .appbar {
+    flex: 0 0 auto;
+    padding: 12px 16px 10px;
+    border-bottom: 1px solid var(--border-soft);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--bg-app);
+  }
+  .appbar h1 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -.3px;
+  }
+  .appbar .left { display: flex; align-items: center; gap: 10px; }
+  .appbar .icon-btn {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: transparent; border: none; color: var(--text-dim);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; cursor: pointer;
+  }
+  /* Body */
+  .body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    background: var(--bg-app);
+  }
+  .body::-webkit-scrollbar { width: 0; }
+  /* Tab bar */
+  .tabbar {
+    flex: 0 0 64px;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    padding-bottom: 6px;
+  }
+  .tabbar .tab {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    padding-top: 6px;
+    color: var(--text-faint);
+    font-size: 10px;
+    font-weight: 500;
+    cursor: pointer;
+    position: relative;
+  }
+  .tabbar .tab .gly {
+    font-size: 18px;
+    line-height: 1;
+  }
+  .tabbar .tab.active {
+    color: var(--accent);
+  }
+  .tabbar .tab .badge {
+    position: absolute;
+    top: 4px;
+    right: 22px;
+    background: var(--red);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    border-radius: 9px;
+    padding: 1px 5px;
+    min-width: 16px;
+    text-align: center;
+  }
+  /* Search */
+  .search-shell {
+    padding: 10px 14px 14px;
+    position: sticky;
+    top: 0;
+    background: var(--bg-app);
+    z-index: 2;
+  }
+  .search-input {
+    width: 100%;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px 10px 36px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: var(--font);
+    outline: none;
+    position: relative;
+  }
+  .search-wrap {
+    position: relative;
+  }
+  .search-wrap::before {
+    content: "🔍";
+    position: absolute;
+    left: 11px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 13px;
+    opacity: .6;
+  }
+  .section-head {
+    padding: 12px 16px 6px;
+    color: var(--text-faint);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .section-head .count {
+    background: var(--bg-elev);
+    color: var(--text-dim);
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 10px;
+    letter-spacing: 0;
+  }
+  /* List rows */
+  .row {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border-soft);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+  }
+  .row:active { background: var(--bg-elev); }
+  .row .mono {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+  }
+  .row .meta {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-top: 2px;
+  }
+  .row .grow { flex: 1 1 auto; min-width: 0; }
+  .row .grow .ttl {
+    font-size: 14px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .row .chev { color: var(--text-faint); font-size: 16px; }
+  /* Status dots */
+  .dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    flex: 0 0 10px;
+  }
+  .dot.up { background: var(--green); box-shadow: 0 0 8px rgba(0,200,83,.5); }
+  .dot.warn { background: var(--amber); box-shadow: 0 0 8px rgba(255,214,0,.5); }
+  .dot.down { background: var(--red); box-shadow: 0 0 8px rgba(255,23,68,.6); }
+  .dot.unk { background: var(--text-faint); }
+  /* Badges */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 500;
+    border: 1px solid;
+  }
+  .b-v4    { background: rgba(79,195,247,.10); color: var(--accent); border-color: rgba(79,195,247,.30); }
+  .b-vlan  { background: rgba(79,195,247,.10); color: var(--accent); border-color: rgba(79,195,247,.30); }
+  .b-active{ background: rgba(0,200,83,.10); color: var(--green); border-color: rgba(0,200,83,.30); }
+  .b-down  { background: rgba(255,23,68,.10); color: var(--red); border-color: rgba(255,23,68,.30); }
+  .b-warn  { background: rgba(255,214,0,.10); color: var(--amber); border-color: rgba(255,214,0,.30); }
+  .b-fw    { background: rgba(255,152,0,.10); color: var(--orange); border-color: rgba(255,152,0,.30); }
+  .b-sw    { background: rgba(171,71,188,.10); color: var(--purple); border-color: rgba(171,71,188,.30); }
+  .b-srv   { background: rgba(79,195,247,.10); color: var(--accent); border-color: rgba(79,195,247,.30); }
+  /* Filter chips */
+  .chips {
+    display: flex;
+    gap: 8px;
+    padding: 10px 16px 12px;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 16px;
+    padding: 6px 12px;
+    font-size: 12px;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .chip.on {
+    background: rgba(79,195,247,.15);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  /* Asset cards (alternative compact format) */
+  .asset-card {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .asset-card .top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .asset-card .top .name {
+    flex: 1;
+    font-weight: 600;
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .asset-card .meta-row {
+    display: flex;
+    gap: 12px;
+    color: var(--text-dim);
+    font-size: 12px;
+    flex-wrap: wrap;
+  }
+  .asset-card .meta-row .mono { font-family: var(--mono); color: var(--text); }
+  /* Detail sheet */
+  .sheet-handle {
+    width: 36px;
+    height: 4px;
+    background: var(--bg-elev);
+    border-radius: 2px;
+    margin: 8px auto 4px;
+  }
+  .sheet-hero {
+    padding: 16px 16px 14px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .sheet-hero .name {
+    font-size: 18px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .sheet-hero .ip {
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 13px;
+    margin-top: 4px;
+  }
+  .sheet-hero .actions {
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+  }
+  .btn {
+    flex: 1;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 9px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    text-align: center;
+    cursor: pointer;
+    font-family: var(--font);
+  }
+  .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0a0a14;
+    font-weight: 600;
+  }
+  .btn.danger {
+    background: rgba(255,23,68,.10);
+    border-color: rgba(255,23,68,.40);
+    color: var(--red);
+  }
+  /* Sections in detail */
+  .sect {
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .sect-head {
+    padding: 12px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+  }
+  .sect-head .ttl {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+  .sect-head .caret { color: var(--text-faint); }
+  .sect-body {
+    padding: 0 16px 14px;
+  }
+  .kv {
+    display: flex;
+    justify-content: space-between;
+    padding: 5px 0;
+    font-size: 13px;
+  }
+  .kv .k { color: var(--text-dim); }
+  .kv .v { color: var(--text); font-family: var(--mono); font-size: 12px; }
+  /* Mini chart */
+  .chart-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-soft);
+    border-radius: 10px;
+    padding: 12px;
+    margin: 4px 0 10px;
+  }
+  .chart-card .label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+  .chart-card .value {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+  .range-tabs {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .range-tabs .r {
+    padding: 3px 9px;
+    border-radius: 12px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--bg-elev);
+    cursor: pointer;
+  }
+  .range-tabs .r.on { background: var(--accent); color: #0a0a14; font-weight: 600; }
+  /* Map mock */
+  .map-mock {
+    flex: 1;
+    background:
+      radial-gradient(circle at 30% 30%, rgba(79,195,247,.08), transparent 50%),
+      radial-gradient(circle at 70% 60%, rgba(0,200,83,.06), transparent 50%),
+      linear-gradient(180deg, #0e1a26 0%, #0a1320 100%);
+    position: relative;
+    overflow: hidden;
+  }
+  .map-mock::before {
+    /* fake grid */
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.03) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+  .pin {
+    position: absolute;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    border: 3px solid #fff;
+    box-shadow: 0 2px 8px rgba(0,0,0,.6);
+    transform: translate(-50%, -50%);
+  }
+  .pin.up { background: var(--green); }
+  .pin.warn { background: var(--amber); }
+  .pin.down { background: var(--red); }
+  .pin .count {
+    position: absolute;
+    top: -8px; right: -8px;
+    background: var(--bg-app);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    border-radius: 9px;
+    padding: 1px 5px;
+    border: 2px solid var(--bg-page);
+  }
+  .map-search-float {
+    position: absolute;
+    top: 12px; left: 12px; right: 12px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 9px 14px 9px 34px;
+    font-size: 13px;
+    color: var(--text-dim);
+    box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  }
+  .map-search-float::before {
+    content: "🔍";
+    position: absolute;
+    left: 11px;
+    top: 50%;
+    transform: translateY(-50%);
+    opacity: .7;
+  }
+  .map-fab {
+    position: absolute;
+    right: 14px;
+    bottom: 14px;
+    width: 44px; height: 44px;
+    border-radius: 22px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    box-shadow: 0 4px 16px rgba(0,0,0,.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    color: var(--accent);
+  }
+  /* Login */
+  .login-shell {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0 28px;
+    gap: 14px;
+  }
+  .logo-mark {
+    width: 56px; height: 56px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+    display: flex; align-items: center; justify-content: center;
+    font-size: 28px;
+    color: #0a0a14;
+    margin-bottom: 8px;
+  }
+  .login-shell h2 { font-size: 20px; font-weight: 600; margin: 0; }
+  .login-shell .sub { color: var(--text-dim); font-size: 13px; margin-bottom: 18px; }
+  .login-shell .full-input {
+    width: 100%;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 11px 14px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: var(--font);
+  }
+  .login-shell .full-btn {
+    width: 100%;
+    background: var(--accent);
+    color: #0a0a14;
+    font-weight: 600;
+    border: none;
+    border-radius: 10px;
+    padding: 12px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .login-shell .divider {
+    width: 100%;
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 11px;
+    margin: 4px 0;
+    position: relative;
+  }
+  .login-shell .divider::before, .login-shell .divider::after {
+    content: ""; height: 1px; background: var(--border);
+    position: absolute; top: 50%; width: 35%;
+  }
+  .login-shell .divider::before { left: 0; }
+  .login-shell .divider::after { right: 0; }
+  .login-shell .full-btn-alt {
+    width: 100%;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 11px;
+    border-radius: 10px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  /* Sticky bottom bar */
+  .sticky-bottom {
+    position: absolute;
+    left: 0; right: 0;
+    bottom: 64px;
+    padding: 10px 14px;
+    background: linear-gradient(180deg, transparent, var(--bg-app) 35%);
+  }
+  .sticky-bottom .btn { width: 100%; }
+  /* Reserve sheet */
+  .reserve-sheet {
+    position: absolute;
+    left: 0; right: 0;
+    bottom: 0;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border);
+    border-radius: 16px 16px 0 0;
+    padding: 0 16px 18px;
+    box-shadow: 0 -8px 24px rgba(0,0,0,.5);
+  }
+  .reserve-sheet h3 {
+    margin: 0;
+    font-size: 16px;
+    padding: 4px 0 10px;
+  }
+  .field {
+    margin-bottom: 12px;
+  }
+  .field label {
+    display: block;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    margin-bottom: 5px;
+    font-weight: 600;
+  }
+  .field input, .field select {
+    width: 100%;
+    background: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 12px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: var(--mono);
+  }
+  .field-hint {
+    font-size: 11px;
+    color: var(--text-faint);
+    margin-top: 4px;
+  }
+  /* Alert cards */
+  .alert-card {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-soft);
+    display: flex;
+    gap: 12px;
+  }
+  .alert-card .ico {
+    flex: 0 0 28px;
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    margin-top: 2px;
+  }
+  .alert-card .ico.down  { background: rgba(255,23,68,.15); color: var(--red); }
+  .alert-card .ico.warn  { background: rgba(255,214,0,.15); color: var(--amber); }
+  .alert-card .ico.info  { background: rgba(79,195,247,.15); color: var(--accent); }
+  .alert-card .b { flex: 1; min-width: 0; }
+  .alert-card .ttl {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .alert-card .sub {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-top: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .alert-card .when {
+    color: var(--text-faint);
+    font-size: 11px;
+    margin-top: 4px;
+    font-family: var(--mono);
+  }
+  /* More tab list */
+  .more-list {
+    padding: 8px 0;
+  }
+  .more-list .row {
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .more-section {
+    color: var(--text-faint);
+    text-transform: uppercase;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 16px 16px 6px;
+    letter-spacing: .8px;
+  }
+  .gly {
+    width: 28px; height: 28px;
+    background: var(--bg-elev);
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    flex: 0 0 28px;
+  }
+  /* Annotations under each phone */
+  .notes {
+    width: 360px;
+    color: var(--text-faint);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .notes b { color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<div class="gallery-header">
+  <h1>Polaris Mobile — Mockup</h1>
+  <p>Static preview of the proposed phone UI. No backend wiring; all data is illustrative.</p>
+</div>
+
+<div class="grid">
+
+<!-- ════════════════════════════════════════════════════════════════════
+     1. LOGIN
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="login-shell">
+      <div class="logo-mark">★</div>
+      <h2>Polaris</h2>
+      <div class="sub">IP management, navigated</div>
+      <input class="full-input" placeholder="Username" value="dmoore">
+      <input class="full-input" type="password" placeholder="Password" value="••••••••">
+      <button class="full-btn">Sign in</button>
+      <div class="divider">or</div>
+      <button class="full-btn-alt">Continue with Microsoft</button>
+    </div>
+  </div>
+  <div class="screen-label">Login</div>
+  <div class="notes">Same auth flow as desktop — TOTP step (when enabled) presents a 6-digit input with <b>autocomplete=one-time-code</b> so iOS/Android can autofill from the authenticator notification.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     2. SEARCH (with results)
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="appbar">
+      <div class="left"><h1>Search</h1></div>
+      <button class="icon-btn">⚙</button>
+    </div>
+    <div class="body">
+      <div class="search-shell">
+        <div class="search-wrap">
+          <input class="search-input" value="10.45.12">
+        </div>
+      </div>
+
+      <div class="section-head">IP addresses<span class="count">3</span></div>
+      <div class="row">
+        <span class="dot up"></span>
+        <div class="grow">
+          <div class="ttl mono">10.45.12.1</div>
+          <div class="meta">Jefferson_Hardware · gateway</div>
+        </div>
+        <span class="badge b-active">reserved</span>
+      </div>
+      <div class="row">
+        <span class="dot warn"></span>
+        <div class="grow">
+          <div class="ttl mono">10.45.12.42</div>
+          <div class="meta">FS-248E-01 · DHCP lease</div>
+        </div>
+        <span class="badge b-vlan">vlan 12</span>
+      </div>
+      <div class="row">
+        <span class="dot unk"></span>
+        <div class="grow">
+          <div class="ttl mono">10.45.12.103</div>
+          <div class="meta">Jefferson_Hardware · available</div>
+        </div>
+        <span class="chev">›</span>
+      </div>
+
+      <div class="section-head">Assets<span class="count">2</span></div>
+      <div class="row">
+        <span class="dot up"></span>
+        <div class="grow">
+          <div class="ttl">jeff-fgt-01</div>
+          <div class="meta mono">10.45.12.1 · FortiGate 60F</div>
+        </div>
+        <span class="badge b-fw">firewall</span>
+      </div>
+      <div class="row">
+        <span class="dot warn"></span>
+        <div class="grow">
+          <div class="ttl">jeff-sw-hw01</div>
+          <div class="meta mono">10.45.12.5 · FortiSwitch 248E</div>
+        </div>
+        <span class="badge b-sw">switch</span>
+      </div>
+
+      <div class="section-head">Subnets<span class="count">1</span></div>
+      <div class="row">
+        <div class="grow">
+          <div class="ttl mono">10.45.12.0/24</div>
+          <div class="meta">Jefferson_Hardware · 47% used</div>
+        </div>
+        <span class="badge b-v4">v4</span>
+      </div>
+    </div>
+    <div class="tabbar">
+      <div class="tab active"><span class="gly">🔍</span><span>Search</span></div>
+      <div class="tab"><span class="gly">🗺</span><span>Map</span></div>
+      <div class="tab"><span class="gly">📋</span><span>Assets</span></div>
+      <div class="tab"><span class="gly">⚠</span><span>Alerts</span><span class="badge">3</span></div>
+      <div class="tab"><span class="gly">⋯</span><span>More</span></div>
+    </div>
+  </div>
+  <div class="screen-label">Search — results</div>
+  <div class="notes">Default landing tab. Re-uses the existing <b>/search</b> endpoint; results grouped under collapsible headers, capped at 8 per group. Tap any row → details sheet.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     3. MAP
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="appbar">
+      <div class="left"><h1>Device Map</h1></div>
+      <button class="icon-btn">⊕</button>
+    </div>
+    <div class="map-mock">
+      <div class="map-search-float">Search sites…</div>
+      <!-- Pins -->
+      <div class="pin up"   style="top:30%; left:25%;"></div>
+      <div class="pin up"   style="top:40%; left:55%;"><span class="count">5</span></div>
+      <div class="pin warn" style="top:55%; left:35%;"></div>
+      <div class="pin up"   style="top:60%; left:72%;"></div>
+      <div class="pin down" style="top:70%; left:48%;"></div>
+      <div class="pin up"   style="top:75%; left:20%;"></div>
+      <div class="pin up"   style="top:80%; left:62%;"></div>
+      <div class="map-fab">⌖</div>
+    </div>
+    <div class="tabbar">
+      <div class="tab"><span class="gly">🔍</span><span>Search</span></div>
+      <div class="tab active"><span class="gly">🗺</span><span>Map</span></div>
+      <div class="tab"><span class="gly">📋</span><span>Assets</span></div>
+      <div class="tab"><span class="gly">⚠</span><span>Alerts</span><span class="badge">3</span></div>
+      <div class="tab"><span class="gly">⋯</span><span>More</span></div>
+    </div>
+  </div>
+  <div class="screen-label">Map</div>
+  <div class="notes">Leaflet view, already touch-friendly. Pin colors mirror desktop monitor health (green/amber/red). Tap pin → asset detail sheet. The ⌖ FAB re-centers on the device's GPS.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     4. ASSETS LIST
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="appbar">
+      <div class="left"><h1>Assets</h1></div>
+      <button class="icon-btn">🔍</button>
+    </div>
+    <div class="body">
+      <div class="chips">
+        <div class="chip on">All</div>
+        <div class="chip">Down only</div>
+        <div class="chip">Monitored</div>
+        <div class="chip">Firewalls</div>
+        <div class="chip">Switches</div>
+        <div class="chip">Servers</div>
+      </div>
+
+      <div class="asset-card">
+        <div class="top">
+          <span class="dot up"></span>
+          <span class="name">jeff-fgt-01</span>
+          <span class="badge b-fw">firewall</span>
+        </div>
+        <div class="meta-row">
+          <span class="mono">10.45.12.1</span>
+          <span>FortiGate 60F</span>
+          <span>Jefferson</span>
+        </div>
+      </div>
+
+      <div class="asset-card">
+        <div class="top">
+          <span class="dot warn"></span>
+          <span class="name">jeff-sw-hw01</span>
+          <span class="badge b-sw">switch</span>
+        </div>
+        <div class="meta-row">
+          <span class="mono">10.45.12.5</span>
+          <span>FortiSwitch 248E</span>
+          <span>2/10 packet loss</span>
+        </div>
+      </div>
+
+      <div class="asset-card">
+        <div class="top">
+          <span class="dot down"></span>
+          <span class="name">md-prn-04</span>
+          <span class="badge b-srv">printer</span>
+        </div>
+        <div class="meta-row">
+          <span class="mono">10.45.12.181</span>
+          <span>HP M428</span>
+          <span>down 14m</span>
+        </div>
+      </div>
+
+      <div class="asset-card">
+        <div class="top">
+          <span class="dot up"></span>
+          <span class="name">jeff-srv-app01</span>
+          <span class="badge b-srv">server</span>
+        </div>
+        <div class="meta-row">
+          <span class="mono">10.45.12.20</span>
+          <span>Windows 2022</span>
+          <span>Operations</span>
+        </div>
+      </div>
+
+      <div class="asset-card">
+        <div class="top">
+          <span class="dot up"></span>
+          <span class="name">jeff-ap-04</span>
+          <span class="badge b-sw">access pt</span>
+        </div>
+        <div class="meta-row">
+          <span class="mono">10.45.12.34</span>
+          <span>FortiAP 231F</span>
+          <span>Warehouse</span>
+        </div>
+      </div>
+
+      <div class="asset-card">
+        <div class="top">
+          <span class="dot up"></span>
+          <span class="name">cisco-core-01</span>
+          <span class="badge b-sw">switch</span>
+        </div>
+        <div class="meta-row">
+          <span class="mono">10.45.12.2</span>
+          <span>Catalyst 9300</span>
+          <span>MDF</span>
+        </div>
+      </div>
+
+      <div class="asset-card">
+        <div class="top">
+          <span class="dot unk"></span>
+          <span class="name">md-wks-1238</span>
+          <span class="badge b-srv">workstation</span>
+        </div>
+        <div class="meta-row">
+          <span class="mono">10.45.12.118</span>
+          <span>Windows 11</span>
+          <span>jdoe</span>
+        </div>
+      </div>
+    </div>
+    <div class="tabbar">
+      <div class="tab"><span class="gly">🔍</span><span>Search</span></div>
+      <div class="tab"><span class="gly">🗺</span><span>Map</span></div>
+      <div class="tab active"><span class="gly">📋</span><span>Assets</span></div>
+      <div class="tab"><span class="gly">⚠</span><span>Alerts</span><span class="badge">3</span></div>
+      <div class="tab"><span class="gly">⋯</span><span>More</span></div>
+    </div>
+  </div>
+  <div class="screen-label">Assets — list</div>
+  <div class="notes">Card feed (no checkboxes, no toolbar). Filter chips above. Tap card → asset detail sheet. No bulk operations on mobile — those redirect to desktop.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     5. ASSET DETAIL — System tab
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="appbar">
+      <div class="left">
+        <button class="icon-btn">‹</button>
+        <h1 style="font-size:15px;">jeff-fgt-01</h1>
+      </div>
+      <button class="icon-btn">⋯</button>
+    </div>
+    <div class="body">
+      <div class="sheet-handle"></div>
+      <div class="sheet-hero">
+        <div class="name"><span class="dot up"></span>jeff-fgt-01</div>
+        <div class="ip">10.45.12.1 · FortiGate 60F · S/N FGT60FTK22034567</div>
+        <div class="actions">
+          <button class="btn">Refresh</button>
+          <button class="btn primary">Reserve IP</button>
+        </div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-head"><span class="ttl">Monitor</span><span class="caret">▾</span></div>
+        <div class="sect-body">
+          <div class="kv"><span class="k">Status</span><span class="v" style="color:var(--green);">UP · 12 ms</span></div>
+          <div class="kv"><span class="k">Source</span><span class="v">FortiOS REST</span></div>
+          <div class="kv"><span class="k">Last poll</span><span class="v">14s ago</span></div>
+
+          <div class="chart-card" style="margin-top:10px;">
+            <div class="label"><span>Response time</span><span>avg 11 ms</span></div>
+            <div class="value">12 <span style="font-size:11px;color:var(--text-dim);">ms</span></div>
+            <svg viewBox="0 0 280 60" width="100%" height="50">
+              <polyline fill="none" stroke="#4fc3f7" stroke-width="1.5"
+                points="0,42 12,38 24,40 36,32 48,30 60,28 72,34 84,30 96,26 108,30 120,28 132,24 144,26 156,28 168,32 180,28 192,30 204,26 216,24 228,28 240,30 252,32 264,28 280,30"/>
+              <polyline fill="rgba(79,195,247,.12)" stroke="none"
+                points="0,42 12,38 24,40 36,32 48,30 60,28 72,34 84,30 96,26 108,30 120,28 132,24 144,26 156,28 168,32 180,28 192,30 204,26 216,24 228,28 240,30 252,32 264,28 280,30 280,60 0,60"/>
+            </svg>
+            <div class="range-tabs">
+              <span class="r">1h</span>
+              <span class="r on">24h</span>
+              <span class="r">7d</span>
+              <span class="r">30d</span>
+            </div>
+          </div>
+
+          <div class="chart-card">
+            <div class="label"><span>CPU + Memory</span><span>cpu 18% · mem 42%</span></div>
+            <svg viewBox="0 0 280 60" width="100%" height="50">
+              <polyline fill="none" stroke="#4fc3f7" stroke-width="1.5"
+                points="0,48 30,46 60,44 90,40 120,42 150,38 180,40 210,42 240,40 270,42"/>
+              <polyline fill="none" stroke="#ab47bc" stroke-width="1.5"
+                points="0,32 30,30 60,32 90,28 120,30 150,26 180,28 210,30 240,28 270,30"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-head"><span class="ttl">Interfaces · 8</span><span class="caret">▸</span></div>
+      </div>
+      <div class="sect">
+        <div class="sect-head"><span class="ttl">IPsec tunnels · 3</span><span class="caret">▸</span></div>
+      </div>
+      <div class="sect">
+        <div class="sect-head"><span class="ttl">LLDP neighbors · 6</span><span class="caret">▸</span></div>
+      </div>
+      <div class="sect">
+        <div class="sect-head"><span class="ttl">General</span><span class="caret">▸</span></div>
+      </div>
+      <div class="sect">
+        <div class="sect-head"><span class="ttl">IP history · 4</span><span class="caret">▸</span></div>
+      </div>
+    </div>
+    <div class="tabbar">
+      <div class="tab"><span class="gly">🔍</span><span>Search</span></div>
+      <div class="tab"><span class="gly">🗺</span><span>Map</span></div>
+      <div class="tab active"><span class="gly">📋</span><span>Assets</span></div>
+      <div class="tab"><span class="gly">⚠</span><span>Alerts</span><span class="badge">3</span></div>
+      <div class="tab"><span class="gly">⋯</span><span>More</span></div>
+    </div>
+  </div>
+  <div class="screen-label">Asset detail — System</div>
+  <div class="notes">Slide-up sheet pattern, scrollable. Refresh button calls <b>/probe-now</b> (toast names per-stream success/fail). Charts use the existing SVG renderer with drag-to-scrub instead of hover.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     6. ALERTS
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="appbar">
+      <div class="left"><h1>Alerts</h1></div>
+      <button class="icon-btn">↻</button>
+    </div>
+    <div class="body">
+      <div class="section-head">Down right now<span class="count">3</span></div>
+      <div class="alert-card">
+        <div class="ico down">▼</div>
+        <div class="b">
+          <div class="ttl">md-prn-04 went DOWN</div>
+          <div class="sub">10.45.12.181 · 3 of last 3 ICMP probes failed</div>
+          <div class="when">14m ago</div>
+        </div>
+      </div>
+      <div class="alert-card">
+        <div class="ico down">▼</div>
+        <div class="b">
+          <div class="ttl">jeff-ap-warehouse-2 went DOWN</div>
+          <div class="sub">10.45.12.91 · controller reports disconnected</div>
+          <div class="when">1h ago</div>
+        </div>
+      </div>
+      <div class="alert-card">
+        <div class="ico down">▼</div>
+        <div class="b">
+          <div class="ttl">cisco-core-01 went DOWN</div>
+          <div class="sub">10.45.12.2 · SNMP timeout 4/4</div>
+          <div class="when">2h ago</div>
+        </div>
+      </div>
+
+      <div class="section-head">Recent events<span class="count">last 24h</span></div>
+      <div class="alert-card">
+        <div class="ico warn">⚠</div>
+        <div class="b">
+          <div class="ttl">Discovery slow</div>
+          <div class="sub">FMG-prod · run elapsed 9m32s exceeds baseline 4m12s</div>
+          <div class="when">22m ago</div>
+        </div>
+      </div>
+      <div class="alert-card">
+        <div class="ico warn">⚠</div>
+        <div class="b">
+          <div class="ttl">Conflict created</div>
+          <div class="sub">Reservation for 10.32.4.7 — discovered hostname differs from existing</div>
+          <div class="when">3h ago</div>
+        </div>
+      </div>
+      <div class="alert-card">
+        <div class="ico info">i</div>
+        <div class="b">
+          <div class="ttl">Integration test failed</div>
+          <div class="sub">Entra-ID-prod · token refresh 401</div>
+          <div class="when">5h ago</div>
+        </div>
+      </div>
+    </div>
+    <div class="tabbar">
+      <div class="tab"><span class="gly">🔍</span><span>Search</span></div>
+      <div class="tab"><span class="gly">🗺</span><span>Map</span></div>
+      <div class="tab"><span class="gly">📋</span><span>Assets</span></div>
+      <div class="tab active"><span class="gly">⚠</span><span>Alerts</span><span class="badge">3</span></div>
+      <div class="tab"><span class="gly">⋯</span><span>More</span></div>
+    </div>
+  </div>
+  <div class="screen-label">Alerts</div>
+  <div class="notes">Triage screen. Top section = monitored assets currently down. Below = recent <b>/events</b> at level warning/error. Pull-to-refresh; tab badge shows the down count.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     7. RESERVE SHEET (over assets)
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="appbar">
+      <div class="left">
+        <button class="icon-btn">‹</button>
+        <h1 style="font-size:15px;">10.45.12.0/24</h1>
+      </div>
+      <button class="icon-btn">⋯</button>
+    </div>
+    <div class="body" style="filter: brightness(.55);">
+      <div class="section-head">Reservations<span class="count">37</span></div>
+      <div class="row"><span class="dot up"></span><div class="grow"><div class="ttl mono">10.45.12.1</div><div class="meta">jeff-fgt-01 · gateway</div></div></div>
+      <div class="row"><span class="dot up"></span><div class="grow"><div class="ttl mono">10.45.12.2</div><div class="meta">cisco-core-01</div></div></div>
+      <div class="row"><span class="dot warn"></span><div class="grow"><div class="ttl mono">10.45.12.5</div><div class="meta">jeff-sw-hw01</div></div></div>
+      <div class="row"><span class="dot up"></span><div class="grow"><div class="ttl mono">10.45.12.20</div><div class="meta">jeff-srv-app01</div></div></div>
+    </div>
+
+    <!-- Reserve sheet overlay -->
+    <div class="reserve-sheet" style="bottom:0;">
+      <div class="sheet-handle"></div>
+      <h3>Reserve IP</h3>
+
+      <div class="field">
+        <label>IP address</label>
+        <input value="10.45.12.103">
+        <div class="field-hint">Next available · tap to change</div>
+      </div>
+
+      <div class="field">
+        <label>Hostname</label>
+        <input value="jeff-iot-thermo-03">
+      </div>
+
+      <div class="field">
+        <label>Owner</label>
+        <input value="dmoore">
+      </div>
+
+      <div style="display:flex; gap:8px;">
+        <button class="btn">More fields</button>
+        <button class="btn primary">Reserve</button>
+      </div>
+    </div>
+
+    <div class="tabbar">
+      <div class="tab"><span class="gly">🔍</span><span>Search</span></div>
+      <div class="tab"><span class="gly">🗺</span><span>Map</span></div>
+      <div class="tab"><span class="gly">📋</span><span>Assets</span></div>
+      <div class="tab"><span class="gly">⚠</span><span>Alerts</span><span class="badge">3</span></div>
+      <div class="tab active"><span class="gly">⋯</span><span>More</span></div>
+    </div>
+  </div>
+  <div class="screen-label">Reserve sheet</div>
+  <div class="notes">Three default fields (IP / hostname / owner) — notes / projectRef / expiresAt collapsed under <b>More fields</b> to keep the field-tech path short. <b>Next available</b> uses the existing endpoint.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     8. MORE
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="appbar">
+      <div class="left"><h1>More</h1></div>
+    </div>
+    <div class="body">
+      <div class="more-section">Network</div>
+      <div class="row"><span class="gly">🧱</span><div class="grow"><div class="ttl">Blocks</div><div class="meta">12 blocks · 4 v6</div></div><span class="chev">›</span></div>
+      <div class="row"><span class="gly">🌐</span><div class="grow"><div class="ttl">Subnets</div><div class="meta">184 subnets · 47% used</div></div><span class="chev">›</span></div>
+      <div class="row"><span class="gly">🔖</span><div class="grow"><div class="ttl">Reservations</div><div class="meta">2,431 active</div></div><span class="chev">›</span></div>
+
+      <div class="more-section">Operations</div>
+      <div class="row"><span class="gly">🔄</span><div class="grow"><div class="ttl">Discoveries</div><div class="meta">2 running · 1 slow</div></div><span class="chev">›</span></div>
+      <div class="row"><span class="gly">⚖</span><div class="grow"><div class="ttl">Conflicts</div><div class="meta">3 pending — review on desktop</div></div><span class="chev">›</span></div>
+      <div class="row"><span class="gly">📜</span><div class="grow"><div class="ttl">Events</div><div class="meta">Audit log · last 7 days</div></div><span class="chev">›</span></div>
+
+      <div class="more-section">Account</div>
+      <div class="row">
+        <span class="gly">👤</span>
+        <div class="grow">
+          <div class="ttl">dmoore</div>
+          <div class="meta">admin · TOTP enabled</div>
+        </div>
+        <span class="chev">›</span>
+      </div>
+      <div class="row"><span class="gly">🖥</span><div class="grow"><div class="ttl">Desktop view</div><div class="meta">Open full app</div></div><span class="chev">›</span></div>
+      <div class="row"><span class="gly">↪</span><div class="grow"><div class="ttl" style="color:var(--red);">Sign out</div></div></div>
+
+      <div style="text-align:center; padding:24px 0; color:var(--text-faint); font-size:11px;">
+        Polaris 0.9.187
+      </div>
+    </div>
+    <div class="tabbar">
+      <div class="tab"><span class="gly">🔍</span><span>Search</span></div>
+      <div class="tab"><span class="gly">🗺</span><span>Map</span></div>
+      <div class="tab"><span class="gly">📋</span><span>Assets</span></div>
+      <div class="tab"><span class="gly">⚠</span><span>Alerts</span><span class="badge">3</span></div>
+      <div class="tab active"><span class="gly">⋯</span><span>More</span></div>
+    </div>
+  </div>
+  <div class="screen-label">More</div>
+  <div class="notes">Catch-all. Read-only access to Blocks/Subnets/Reservations/Discoveries/Events. Conflicts and Server Settings deep-link to the desktop app. Profile holds TOTP self-management + sign-out.</div>
+</div>
+
+</div>
+
+</body>
+</html>

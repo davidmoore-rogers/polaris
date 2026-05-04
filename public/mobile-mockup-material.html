@@ -1,0 +1,1699 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Polaris Mobile — Material 3 Mockup</title>
+<style>
+  /* ─── Material 3 tokens (dark theme, blue source palette) ──────────── */
+  :root {
+    /* Key colors */
+    --md-primary:                   #a3c9ff;
+    --md-on-primary:                #00305f;
+    --md-primary-container:         #00468d;
+    --md-on-primary-container:      #d4e3ff;
+    --md-secondary:                 #bcc7dc;
+    --md-on-secondary:              #263141;
+    --md-secondary-container:       #3c4858;
+    --md-on-secondary-container:    #d8e3f8;
+    --md-tertiary:                  #d8bce0;
+    --md-on-tertiary:               #3b2843;
+    --md-tertiary-container:        #533e5b;
+    --md-on-tertiary-container:     #f4d8fc;
+    --md-error:                     #ffb4ab;
+    --md-on-error:                  #690005;
+    --md-error-container:           #93000a;
+    --md-on-error-container:        #ffdad6;
+
+    /* Neutral surfaces */
+    --md-surface-dim:               #111418;
+    --md-surface:                   #111418;
+    --md-surface-bright:            #37393e;
+    --md-surface-cont-lowest:       #0c0f12;
+    --md-surface-cont-low:          #191c20;
+    --md-surface-cont:              #1d2024;
+    --md-surface-cont-high:         #272a2f;
+    --md-surface-cont-highest:      #32353a;
+    --md-on-surface:                #e2e2e8;
+    --md-on-surface-variant:        #c3c6cf;
+    --md-outline:                   #8d9199;
+    --md-outline-variant:           #43474e;
+    --md-inverse-surface:           #e2e2e8;
+    --md-inverse-on-surface:        #2e3035;
+
+    /* Custom semantic */
+    --md-success:                   #5ed87b;
+    --md-warning:                   #ffd54a;
+
+    /* Shape tokens */
+    --shape-xs: 4px;
+    --shape-sm: 8px;
+    --shape-md: 12px;
+    --shape-lg: 16px;
+    --shape-xl: 28px;
+    --shape-full: 999px;
+
+    /* Elevation shadows */
+    --elev-1: 0 1px 2px rgba(0,0,0,.30), 0 1px 3px 1px rgba(0,0,0,.15);
+    --elev-2: 0 1px 2px rgba(0,0,0,.30), 0 2px 6px 2px rgba(0,0,0,.15);
+    --elev-3: 0 4px 8px 3px rgba(0,0,0,.15), 0 1px 3px rgba(0,0,0,.30);
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #050608;
+    color: var(--md-on-surface);
+    font-family: "Roboto", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    padding: 32px 24px 64px;
+  }
+
+  /* ─── MD3 type scale ─────────────────────────────────────────────────── */
+  .ty-display-s   { font-size: 36px; line-height: 44px; font-weight: 400; letter-spacing: 0; }
+  .ty-headline-s  { font-size: 24px; line-height: 32px; font-weight: 400; letter-spacing: 0; }
+  .ty-title-l     { font-size: 22px; line-height: 28px; font-weight: 400; letter-spacing: 0; }
+  .ty-title-m     { font-size: 16px; line-height: 24px; font-weight: 500; letter-spacing: .15px; }
+  .ty-title-s     { font-size: 14px; line-height: 20px; font-weight: 500; letter-spacing: .1px; }
+  .ty-body-l      { font-size: 16px; line-height: 24px; font-weight: 400; letter-spacing: .5px; }
+  .ty-body-m      { font-size: 14px; line-height: 20px; font-weight: 400; letter-spacing: .25px; }
+  .ty-body-s      { font-size: 12px; line-height: 16px; font-weight: 400; letter-spacing: .4px; }
+  .ty-label-l     { font-size: 14px; line-height: 20px; font-weight: 500; letter-spacing: .1px; }
+  .ty-label-m     { font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .5px; }
+  .ty-label-s     { font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: .5px; }
+
+  .gallery-header {
+    max-width: 1400px;
+    margin: 0 auto 32px;
+    text-align: center;
+  }
+  .gallery-header h1 {
+    font-size: 30px;
+    font-weight: 400;
+    margin: 0 0 8px;
+    letter-spacing: 0;
+    color: var(--md-on-surface);
+  }
+  .gallery-header p {
+    color: var(--md-on-surface-variant);
+    margin: 0;
+    font-size: 14px;
+    letter-spacing: .25px;
+  }
+  .badge-pill {
+    display: inline-block;
+    margin-top: 10px;
+    background: var(--md-tertiary-container);
+    color: var(--md-on-tertiary-container);
+    padding: 4px 12px;
+    border-radius: var(--shape-full);
+    font-size: 12px;
+    letter-spacing: .5px;
+  }
+  .grid {
+    max-width: 1700px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+    gap: 48px 32px;
+    justify-items: center;
+  }
+  .screen-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+  }
+  .screen-label {
+    font-size: 13px;
+    color: var(--md-on-surface-variant);
+    font-weight: 500;
+    letter-spacing: .3px;
+  }
+  .notes {
+    width: 380px;
+    color: var(--md-on-surface-variant);
+    font-size: 12px;
+    line-height: 1.55;
+    letter-spacing: .25px;
+  }
+  .notes b { color: var(--md-on-surface); font-weight: 500; }
+
+  /* ─── Phone frame ────────────────────────────────────────────────────── */
+  .phone {
+    width: 380px;
+    height: 800px;
+    background: var(--md-surface);
+    border-radius: 40px;
+    border: 8px solid #0a0c0f;
+    box-shadow: 0 14px 48px rgba(0,0,0,.7);
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+  /* Status bar */
+  .statusbar {
+    height: 30px;
+    flex: 0 0 30px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 22px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--md-on-surface);
+  }
+  .statusbar .icons {
+    display: flex; gap: 5px; align-items: center;
+    color: var(--md-on-surface);
+  }
+  .body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    background: var(--md-surface);
+    position: relative;
+  }
+  .body::-webkit-scrollbar { width: 0; }
+
+  /* ─── Top app bar (small, center-aligned variant) ────────────────────── */
+  .topbar {
+    flex: 0 0 64px;
+    padding: 0 4px;
+    display: flex;
+    align-items: center;
+    background: var(--md-surface);
+    z-index: 5;
+  }
+  .topbar .leading,
+  .topbar .trailing {
+    display: flex; align-items: center;
+    padding: 0 4px;
+  }
+  .topbar .title {
+    flex: 1;
+    font-size: 22px;
+    line-height: 28px;
+    font-weight: 400;
+    letter-spacing: 0;
+    padding: 0 12px;
+    color: var(--md-on-surface);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .topbar.on-scroll {
+    background: var(--md-surface-cont);
+  }
+
+  /* ─── Icon button (40px target, 24px icon) ──────────────────────────── */
+  .icon-btn {
+    width: 48px; height: 48px;
+    border-radius: var(--shape-full);
+    background: transparent;
+    border: none;
+    color: var(--md-on-surface-variant);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    transition: background .15s;
+  }
+  .icon-btn:hover { background: rgba(227,228,232,.08); }
+  .icon-btn svg { width: 24px; height: 24px; fill: currentColor; }
+
+  /* ─── Material 3 Search Bar ─────────────────────────────────────────── */
+  .m3-searchbar {
+    margin: 6px 16px 12px;
+    height: 56px;
+    background: var(--md-surface-cont-high);
+    border-radius: var(--shape-full);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 16px;
+    box-shadow: var(--elev-1);
+  }
+  .m3-searchbar .icon-btn { width: 40px; height: 40px; }
+  .m3-searchbar .icon-btn svg { width: 24px; height: 24px; }
+  .m3-searchbar .input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    outline: none;
+    color: var(--md-on-surface);
+    font-size: 16px;
+    font-family: inherit;
+    letter-spacing: .5px;
+  }
+  .m3-searchbar .input::placeholder { color: var(--md-on-surface-variant); }
+  .m3-searchbar .avatar {
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    background: var(--md-tertiary-container);
+    color: var(--md-on-tertiary-container);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  /* ─── Section header (overline) ─────────────────────────────────────── */
+  .section-head {
+    padding: 16px 20px 8px;
+    color: var(--md-primary);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .section-head .count {
+    color: var(--md-on-surface-variant);
+    font-size: 11px;
+    letter-spacing: .5px;
+    text-transform: none;
+  }
+
+  /* ─── List items (one-line, two-line) ───────────────────────────────── */
+  .list-item {
+    min-height: 56px;
+    padding: 8px 16px 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    cursor: pointer;
+    position: relative;
+  }
+  .list-item.two-line { min-height: 72px; }
+  .list-item.three-line { min-height: 88px; align-items: flex-start; padding-top: 12px; padding-bottom: 12px; }
+  .list-item:hover { background: rgba(227,228,232,.05); }
+
+  .list-item .leading {
+    flex: 0 0 auto;
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    background: var(--md-surface-cont-highest);
+    color: var(--md-on-surface-variant);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .list-item .leading svg { width: 24px; height: 24px; fill: currentColor; }
+  .list-item .leading.tonal { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
+  .list-item .leading.tertiary { background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); }
+  .list-item .leading.error { background: var(--md-error-container); color: var(--md-on-error-container); }
+  .list-item .leading.success { background: rgba(94,216,123,.18); color: var(--md-success); }
+
+  .list-item .content {
+    flex: 1 1 auto; min-width: 0;
+  }
+  .list-item .headline {
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 400;
+    letter-spacing: .15px;
+    color: var(--md-on-surface);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .list-item .supporting {
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--md-on-surface-variant);
+    letter-spacing: .25px;
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .list-item .trailing {
+    flex: 0 0 auto;
+    color: var(--md-on-surface-variant);
+    font-size: 12px;
+    text-align: right;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+  }
+  .list-item .trailing svg { width: 24px; height: 24px; fill: currentColor; }
+  .list-divider {
+    height: 1px;
+    background: var(--md-outline-variant);
+    margin: 0 16px 0 72px;
+    opacity: .5;
+  }
+
+  .mono { font-family: "Roboto Mono", "Consolas", monospace; }
+
+  /* ─── Status dots (for status indication beyond MD spec) ───────────── */
+  .dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    display: inline-block; flex: 0 0 10px;
+  }
+  .dot.up   { background: var(--md-success); }
+  .dot.warn { background: var(--md-warning); }
+  .dot.down { background: var(--md-error); }
+  .dot.unk  { background: var(--md-outline); }
+
+  /* ─── Filter chips (M3 spec) ────────────────────────────────────────── */
+  .chip-row {
+    display: flex;
+    gap: 8px;
+    padding: 12px 16px;
+    overflow-x: auto;
+  }
+  .chip-row::-webkit-scrollbar { display: none; }
+  .chip {
+    height: 32px;
+    padding: 0 16px;
+    border-radius: var(--shape-sm);
+    border: 1px solid var(--md-outline);
+    background: transparent;
+    color: var(--md-on-surface-variant);
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: .1px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .chip svg { width: 18px; height: 18px; fill: currentColor; }
+  .chip.selected {
+    background: var(--md-secondary-container);
+    color: var(--md-on-secondary-container);
+    border-color: transparent;
+    padding-left: 8px;
+  }
+
+  /* ─── Buttons (filled, tonal, outlined, text) ─────────────────────── */
+  .btn-base {
+    height: 40px;
+    padding: 0 24px;
+    border-radius: var(--shape-full);
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: .1px;
+    border: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+  .btn-base svg { width: 18px; height: 18px; fill: currentColor; }
+  .btn-filled {
+    background: var(--md-primary);
+    color: var(--md-on-primary);
+  }
+  .btn-tonal {
+    background: var(--md-secondary-container);
+    color: var(--md-on-secondary-container);
+  }
+  .btn-outlined {
+    background: transparent;
+    color: var(--md-primary);
+    border: 1px solid var(--md-outline);
+  }
+  .btn-text {
+    background: transparent;
+    color: var(--md-primary);
+    padding: 0 12px;
+  }
+
+  /* Extended FAB */
+  .fab-ext {
+    height: 56px;
+    padding: 0 20px;
+    border-radius: var(--shape-lg);
+    background: var(--md-primary-container);
+    color: var(--md-on-primary-container);
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: .1px;
+    border: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: var(--elev-3);
+    font-family: inherit;
+  }
+  .fab-ext svg { width: 24px; height: 24px; fill: currentColor; }
+
+  /* Standard FAB (rounded square, MD3) */
+  .fab {
+    width: 56px; height: 56px;
+    border-radius: var(--shape-lg);
+    background: var(--md-primary-container);
+    color: var(--md-on-primary-container);
+    border: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: var(--elev-3);
+  }
+  .fab svg { width: 24px; height: 24px; fill: currentColor; }
+
+  /* ─── Cards ──────────────────────────────────────────────────────────── */
+  .card-elevated {
+    background: var(--md-surface-cont-low);
+    border-radius: var(--shape-md);
+    box-shadow: var(--elev-1);
+    overflow: hidden;
+  }
+  .card-filled {
+    background: var(--md-surface-cont-highest);
+    border-radius: var(--shape-md);
+    overflow: hidden;
+  }
+  .card-outlined {
+    background: var(--md-surface);
+    border: 1px solid var(--md-outline-variant);
+    border-radius: var(--shape-md);
+    overflow: hidden;
+  }
+
+  /* ─── Navigation Bar (bottom) — MD3 spec ────────────────────────────── */
+  .navbar {
+    flex: 0 0 80px;
+    background: var(--md-surface-cont);
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    align-items: center;
+    padding: 12px 0 16px;
+  }
+  .navbar .nav-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    position: relative;
+  }
+  .navbar .nav-icon-pill {
+    width: 64px; height: 32px;
+    border-radius: var(--shape-full);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--md-on-surface-variant);
+    transition: all .2s;
+    position: relative;
+  }
+  .navbar .nav-icon-pill svg { width: 24px; height: 24px; fill: currentColor; }
+  .navbar .nav-item.active .nav-icon-pill {
+    background: var(--md-secondary-container);
+    color: var(--md-on-secondary-container);
+  }
+  .navbar .nav-item.active .nav-label {
+    color: var(--md-on-surface);
+    font-weight: 500;
+  }
+  .navbar .nav-label {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+    letter-spacing: .5px;
+    color: var(--md-on-surface-variant);
+  }
+  .navbar .nav-badge {
+    position: absolute;
+    top: -2px;
+    right: 12px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    background: var(--md-error);
+    color: var(--md-on-error);
+    font-size: 11px;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid var(--md-surface-cont);
+  }
+
+  /* ─── Modal bottom sheet ────────────────────────────────────────────── */
+  .scrim {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,.45);
+    z-index: 9;
+  }
+  .sheet {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    background: var(--md-surface-cont-low);
+    border-radius: var(--shape-xl) var(--shape-xl) 0 0;
+    padding: 0 24px 24px;
+    z-index: 10;
+    box-shadow: 0 -4px 24px rgba(0,0,0,.5);
+  }
+  .sheet-handle {
+    width: 32px; height: 4px;
+    background: var(--md-on-surface-variant);
+    opacity: .4;
+    border-radius: 2px;
+    margin: 12px auto 16px;
+  }
+  .sheet-title {
+    font-size: 22px;
+    line-height: 28px;
+    color: var(--md-on-surface);
+    margin: 0 0 16px;
+  }
+
+  /* ─── M3 text fields (filled + outlined) ────────────────────────────── */
+  .tf-filled {
+    position: relative;
+    background: var(--md-surface-cont-highest);
+    border-radius: var(--shape-xs) var(--shape-xs) 0 0;
+    border-bottom: 1px solid var(--md-on-surface-variant);
+    padding: 8px 16px 8px;
+    margin-bottom: 12px;
+    transition: border-bottom-color .2s;
+  }
+  .tf-filled:focus-within { border-bottom: 2px solid var(--md-primary); padding-bottom: 7px; }
+  .tf-filled .lbl {
+    position: absolute;
+    top: 8px;
+    left: 16px;
+    font-size: 12px;
+    color: var(--md-primary);
+    letter-spacing: .4px;
+    pointer-events: none;
+  }
+  .tf-filled input,
+  .tf-filled select {
+    width: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--md-on-surface);
+    font-size: 16px;
+    line-height: 24px;
+    padding: 16px 0 4px;
+    font-family: inherit;
+  }
+
+  .tf-outlined {
+    position: relative;
+    margin-bottom: 16px;
+  }
+  .tf-outlined .field {
+    width: 100%;
+    background: transparent;
+    border: 1px solid var(--md-outline);
+    border-radius: var(--shape-xs);
+    padding: 16px;
+    color: var(--md-on-surface);
+    font-size: 16px;
+    line-height: 24px;
+    font-family: inherit;
+    outline: none;
+  }
+  .tf-outlined .field:focus { border: 2px solid var(--md-primary); padding: 15px; }
+  .tf-outlined .lbl {
+    position: absolute;
+    top: -8px;
+    left: 12px;
+    background: var(--md-surface-cont-low);
+    padding: 0 4px;
+    color: var(--md-primary);
+    font-size: 12px;
+    letter-spacing: .4px;
+  }
+  .tf-outlined .support {
+    color: var(--md-on-surface-variant);
+    font-size: 12px;
+    letter-spacing: .4px;
+    margin-top: 4px;
+    padding: 0 16px;
+  }
+
+  /* ─── Login layout ──────────────────────────────────────────────────── */
+  .login-shell {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0 32px;
+    gap: 6px;
+  }
+  .logo-mark {
+    width: 64px; height: 64px;
+    border-radius: var(--shape-lg);
+    background: var(--md-primary-container);
+    color: var(--md-on-primary-container);
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 16px;
+    box-shadow: var(--elev-2);
+  }
+  .logo-mark svg { width: 36px; height: 36px; fill: currentColor; }
+  .login-shell h2 {
+    margin: 0;
+    font-size: 28px;
+    line-height: 36px;
+    font-weight: 400;
+    letter-spacing: 0;
+    color: var(--md-on-surface);
+  }
+  .login-shell .sub {
+    color: var(--md-on-surface-variant);
+    font-size: 14px;
+    letter-spacing: .25px;
+    margin-bottom: 24px;
+  }
+  .login-shell .full-field {
+    width: 100%;
+    margin-bottom: 16px;
+  }
+  .login-shell .full-btn {
+    width: 100%;
+    height: 48px;
+    padding: 0;
+  }
+  .login-shell .divider {
+    width: 100%;
+    text-align: center;
+    color: var(--md-on-surface-variant);
+    font-size: 12px;
+    margin: 12px 0;
+    position: relative;
+    letter-spacing: .5px;
+  }
+  .login-shell .divider::before,
+  .login-shell .divider::after {
+    content: ""; height: 1px; background: var(--md-outline-variant);
+    position: absolute; top: 50%; width: 38%;
+  }
+  .login-shell .divider::before { left: 0; }
+  .login-shell .divider::after { right: 0; }
+
+  /* ─── Map mock ──────────────────────────────────────────────────────── */
+  .map-mock {
+    flex: 1;
+    background:
+      radial-gradient(circle at 30% 30%, rgba(163,201,255,.07), transparent 50%),
+      radial-gradient(circle at 70% 60%, rgba(94,216,123,.06), transparent 50%),
+      linear-gradient(180deg, #0d141a 0%, #0a1015 100%);
+    position: relative;
+    overflow: hidden;
+  }
+  .map-mock::before {
+    content: "";
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.03) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+  .pin {
+    position: absolute;
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    border: 3px solid #fff;
+    box-shadow: 0 2px 8px rgba(0,0,0,.6);
+    transform: translate(-50%, -50%);
+  }
+  .pin.up { background: var(--md-success); }
+  .pin.warn { background: var(--md-warning); }
+  .pin.down { background: var(--md-error); }
+  .pin .pin-count {
+    position: absolute;
+    top: -10px; right: -10px;
+    min-width: 18px; height: 18px;
+    background: var(--md-surface);
+    color: var(--md-on-surface);
+    font-size: 10px;
+    font-weight: 500;
+    border-radius: 9px;
+    padding: 0 5px;
+    border: 2px solid var(--md-surface);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .map-search-float {
+    position: absolute;
+    top: 16px; left: 16px; right: 16px;
+    height: 56px;
+    background: var(--md-surface-cont-high);
+    border-radius: var(--shape-full);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 12px;
+    box-shadow: var(--elev-2);
+  }
+  .map-search-float .placeholder {
+    flex: 1; color: var(--md-on-surface-variant); font-size: 16px; letter-spacing: .5px;
+  }
+  .map-fab-pos {
+    position: absolute;
+    right: 16px;
+    bottom: 16px;
+  }
+
+  /* ─── Hero / asset detail ───────────────────────────────────────────── */
+  .hero {
+    padding: 4px 24px 24px;
+    background: var(--md-surface-cont-low);
+  }
+  .hero .h-title {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 4px;
+  }
+  .hero .h-name {
+    font-size: 24px;
+    line-height: 32px;
+    font-weight: 400;
+    color: var(--md-on-surface);
+  }
+  .hero .h-sub {
+    color: var(--md-on-surface-variant);
+    font-size: 14px;
+    letter-spacing: .25px;
+  }
+  .hero .h-actions {
+    margin-top: 16px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  /* Sections inside detail */
+  .sect {
+    border-bottom: 1px solid var(--md-outline-variant);
+  }
+  .sect-header {
+    padding: 16px 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+  }
+  .sect-header .left { display: flex; align-items: center; gap: 16px; }
+  .sect-header .left .ico {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    background: var(--md-surface-cont-highest);
+    color: var(--md-on-surface-variant);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .sect-header .left .ico svg { width: 24px; height: 24px; fill: currentColor; }
+  .sect-header .h-text {
+    font-size: 16px;
+    color: var(--md-on-surface);
+    font-weight: 500;
+    letter-spacing: .15px;
+  }
+  .sect-header .h-sub {
+    font-size: 12px;
+    color: var(--md-on-surface-variant);
+    margin-top: 2px;
+    letter-spacing: .4px;
+  }
+  .sect-body {
+    padding: 0 24px 16px;
+  }
+  .kv {
+    display: flex; justify-content: space-between;
+    padding: 8px 0;
+    font-size: 14px;
+    letter-spacing: .25px;
+  }
+  .kv .k { color: var(--md-on-surface-variant); }
+  .kv .v { color: var(--md-on-surface); }
+
+  /* Chart card */
+  .chart-card {
+    background: var(--md-surface-cont-high);
+    border-radius: var(--shape-md);
+    padding: 16px;
+    margin: 8px 0 12px;
+  }
+  .chart-card .lbl {
+    font-size: 12px;
+    color: var(--md-on-surface-variant);
+    letter-spacing: .4px;
+    margin-bottom: 4px;
+  }
+  .chart-card .val {
+    font-size: 28px;
+    line-height: 36px;
+    font-weight: 400;
+    color: var(--md-on-surface);
+    margin-bottom: 8px;
+  }
+  .chart-card .val .unit { font-size: 14px; color: var(--md-on-surface-variant); }
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--md-outline);
+    border-radius: var(--shape-full);
+    overflow: hidden;
+    margin-top: 8px;
+  }
+  .seg .s {
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--md-on-surface-variant);
+    cursor: pointer;
+    border-right: 1px solid var(--md-outline);
+  }
+  .seg .s:last-child { border-right: none; }
+  .seg .s.on {
+    background: var(--md-secondary-container);
+    color: var(--md-on-secondary-container);
+  }
+
+  /* ─── Asset cards on the list ───────────────────────────────────────── */
+  .asset-list { padding: 8px 16px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .asset-card {
+    background: var(--md-surface-cont-low);
+    border-radius: var(--shape-md);
+    padding: 16px;
+    cursor: pointer;
+  }
+  .asset-card .top {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 4px;
+  }
+  .asset-card .top .ico {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    flex: 0 0 40px;
+  }
+  .asset-card .top .ico svg { width: 24px; height: 24px; fill: currentColor; }
+  .asset-card .top .name {
+    flex: 1;
+    font-size: 16px;
+    font-weight: 500;
+    letter-spacing: .15px;
+    color: var(--md-on-surface);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .asset-card .meta {
+    color: var(--md-on-surface-variant);
+    font-size: 13px;
+    letter-spacing: .25px;
+    padding-left: 52px;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .asset-card .meta .mono { color: var(--md-on-surface); }
+
+  /* Color tokens for type avatars */
+  .ico-fw   { background: rgba(255,180,80,.18); color: #ffc78a; }
+  .ico-sw   { background: rgba(216,188,224,.20); color: var(--md-tertiary); }
+  .ico-srv  { background: rgba(163,201,255,.20); color: var(--md-primary); }
+  .ico-prn  { background: rgba(94,216,123,.18); color: var(--md-success); }
+  .ico-ap   { background: rgba(216,188,224,.20); color: var(--md-tertiary); }
+
+  /* Snackbar (just for visual on one screen) */
+  .snackbar {
+    position: absolute;
+    left: 16px; right: 16px;
+    bottom: 96px;
+    background: var(--md-inverse-surface);
+    color: var(--md-inverse-on-surface);
+    border-radius: var(--shape-xs);
+    padding: 14px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    box-shadow: var(--elev-3);
+    z-index: 8;
+  }
+  .snackbar .label { font-size: 14px; font-weight: 400; letter-spacing: .25px; }
+  .snackbar .action {
+    color: #003c79;
+    background: transparent;
+    border: none;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: .1px;
+    cursor: pointer;
+  }
+  /* Different scope token for inverse-primary so snackbar's action looks proper */
+  .snackbar .action { color: #1d2024; font-weight: 500; }
+
+  /* Switch (M3) */
+  .switch {
+    width: 52px; height: 32px;
+    background: var(--md-surface-cont-highest);
+    border: 2px solid var(--md-outline);
+    border-radius: var(--shape-full);
+    position: relative;
+    cursor: pointer;
+  }
+  .switch .thumb {
+    position: absolute;
+    top: 50%;
+    left: 4px;
+    transform: translateY(-50%);
+    width: 16px; height: 16px;
+    background: var(--md-outline);
+    border-radius: 50%;
+    transition: .15s;
+  }
+  .switch.on { background: var(--md-primary); border-color: var(--md-primary); }
+  .switch.on .thumb {
+    width: 24px; height: 24px;
+    left: 22px;
+    background: var(--md-on-primary);
+  }
+
+  /* Compact ip listing */
+  .ip-row {
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--md-outline-variant);
+    opacity: 1;
+  }
+  .ip-row:last-child { border-bottom: none; }
+  .ip-row .lead { display: flex; gap: 10px; align-items: center; }
+  .ip-row .ip { font-family: "Roboto Mono", monospace; color: var(--md-on-surface); font-size: 14px; }
+  .ip-row .meta { color: var(--md-on-surface-variant); font-size: 12px; margin-top: 2px; letter-spacing: .25px; }
+  .ip-row .grow { flex: 1; min-width: 0; }
+</style>
+</head>
+<body>
+
+<!-- ─── Reusable SVG sprite ──────────────────────────────────────────── -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-search" viewBox="0 0 24 24"><path d="M9.5 3a6.5 6.5 0 1 0 4.23 11.43l4.92 4.92 1.42-1.42-4.92-4.92A6.5 6.5 0 0 0 9.5 3Zm0 2a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9Z"/></symbol>
+    <symbol id="i-map" viewBox="0 0 24 24"><path d="M15 21l-6-2.1L4.65 20.6a.75.75 0 0 1-1.05-.69V5.43a.75.75 0 0 1 .47-.69L9 3l6 2.1 4.35-1.71a.75.75 0 0 1 1.05.69v14.49a.75.75 0 0 1-.47.69L15 21Zm-1-2.45V6.85L10 5.45v11.7l4 1.4Z"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M3 5h18v2H3V5Zm0 6h18v2H3v-2Zm0 6h18v2H3v-2Z"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2Zm6-6V11a6 6 0 1 0-12 0v5l-2 2v1h16v-1l-2-2Z"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M19.43 12.97c.04-.32.07-.64.07-.97s-.03-.66-.07-.98l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.49 1a7.32 7.32 0 0 0-1.7-.99l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.49.41l-.38 2.65c-.61.25-1.18.58-1.7.99l-2.49-1a.5.5 0 0 0-.61.22l-2 3.46a.5.5 0 0 0 .12.64L4.57 11.02c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .61.22l2.49-1c.52.41 1.09.74 1.7.99l.38 2.65A.5.5 0 0 0 10 22h4a.5.5 0 0 0 .49-.41l.38-2.65c.61-.25 1.18-.58 1.7-.99l2.49 1a.5.5 0 0 0 .61-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.12-1.66ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.74 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm9 3v2h-2.05A7 7 0 0 1 13 18.95V21h-2v-2.05A7 7 0 0 1 5.05 13H3v-2h2.05A7 7 0 0 1 11 5.05V3h2v2.05A7 7 0 0 1 18.95 11H21Z"/></symbol>
+    <symbol id="i-chev-right" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+    <symbol id="i-chev-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6z"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2Z"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.41 1.41L9 19 21 7l-1.41-1.41Z"/></symbol>
+    <symbol id="i-add" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M1 21h22L12 2 1 21Zm12-3h-2v-2h2v2Zm0-4h-2v-4h2v4Z"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm1 15h-2v-6h2v6Zm0-8h-2V7h2v2Z"/></symbol>
+    <symbol id="i-down-arrow" viewBox="0 0 24 24"><path d="M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8Z"/></symbol>
+    <symbol id="i-router" viewBox="0 0 24 24"><path d="M20 14h-3v-3h-2v3H9v-3H7v3H4a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2Zm-6 4H6v-1h8v1Zm5-1.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2ZM12 4l-4 4h3v3h2V8h3l-4-4Z"/></symbol>
+    <symbol id="i-switch-icon" viewBox="0 0 24 24"><path d="M3 6h18v4H3V6Zm0 8h18v4H3v-4Zm3-6h2v2H6V8Zm0 8h2v2H6v-2Z"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><path d="M4 4h16v6H4V4Zm0 10h16v6H4v-6Zm2-7h2v2H6V7Zm0 10h2v2H6v-2Z"/></symbol>
+    <symbol id="i-printer" viewBox="0 0 24 24"><path d="M19 8H5a3 3 0 0 0-3 3v6h4v4h12v-4h4v-6a3 3 0 0 0-3-3Zm-3 11H8v-5h8v5Zm3-7a1 1 0 1 1 0-2 1 1 0 0 1 0 2ZM18 3H6v4h12V3Z"/></symbol>
+    <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M1 9l2 2a12.7 12.7 0 0 1 18 0l2-2A15.5 15.5 0 0 0 1 9Zm8 8 3 3 3-3a4.24 4.24 0 0 0-6 0Zm-4-4 2 2a8.48 8.48 0 0 1 10 0l2-2a11.27 11.27 0 0 0-14 0Z"/></symbol>
+    <symbol id="i-block" viewBox="0 0 24 24"><path d="M3 4h18v4H3V4Zm0 6h18v4H3v-4Zm0 6h18v4H3v-4Z"/></symbol>
+    <symbol id="i-subnet" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2Zm-1 17.93A8 8 0 0 1 4.07 13H7v1a2 2 0 0 0 2 2h2v3.93Zm6.9-2.55A2 2 0 0 0 16 16h-1v-3a1 1 0 0 0-1-1H8v-2h2a1 1 0 0 0 1-1V7h2a2 2 0 0 0 2-2v-.41a8 8 0 0 1 3.9 12.79Z"/></symbol>
+    <symbol id="i-bookmark" viewBox="0 0 24 24"><path d="M17 3H7a2 2 0 0 0-2 2v16l7-3 7 3V5a2 2 0 0 0-2-2Z"/></symbol>
+    <symbol id="i-sync" viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6a6 6 0 0 1 5.78 7.66l1.46 1.46A8 8 0 0 0 12 4Zm0 14a6 6 0 0 1-5.78-7.66L4.76 8.88A8 8 0 0 0 12 20v3l4-4-4-4v3Z"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6a7 7 0 1 1 2.05 4.95l-1.42 1.42A9 9 0 1 0 13 3Zm-1 5v5l4.25 2.52.75-1.27-3.5-2.07V8h-1.5Z"/></symbol>
+    <symbol id="i-event" viewBox="0 0 24 24"><path d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2Zm0 16H5V10h14v10Z"/></symbol>
+    <symbol id="i-balance" viewBox="0 0 24 24"><path d="M12 3 4 7v6c0 4.42 3.58 8 8 9 4.42-1 8-4.58 8-9V7l-8-4Z"/></symbol>
+    <symbol id="i-person" viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4Z"/></symbol>
+    <symbol id="i-desktop" viewBox="0 0 24 24"><path d="M21 2H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7v2H8v2h8v-2h-2v-2h7a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2Zm0 14H3V4h18v12Z"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5-5-5ZM4 5h8V3H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h8v-2H4V5Z"/></symbol>
+    <symbol id="i-microsoft" viewBox="0 0 24 24"><path d="M2 2h9.5v9.5H2V2Zm10.5 0H22v9.5h-9.5V2ZM2 12.5h9.5V22H2v-9.5Zm10.5 0H22V22h-9.5v-9.5Z"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3h2v18H3V3Zm6 8h2v10H9V11Zm6-6h2v16h-2V5Zm6 4h-2v12h2V9Z"/></symbol>
+    <symbol id="i-cable" viewBox="0 0 24 24"><path d="M5 8a3 3 0 1 1 6 0v8a1 1 0 0 0 2 0V8a5 5 0 1 0-10 0v8a3 3 0 1 0 6 0V8a1 1 0 0 0-2 0v8a1 1 0 0 1-2 0V8Z"/></symbol>
+    <symbol id="i-tunnel" viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-9 9v9h6v-9a3 3 0 1 1 6 0v9h6v-9a9 9 0 0 0-9-9Z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4Z"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></symbol>
+    <symbol id="i-vis-on" viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5Zm0 12.5a5 5 0 1 1 0-10 5 5 0 0 1 0 10Zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/></symbol>
+  </defs>
+</svg>
+
+<div class="gallery-header">
+  <h1>Polaris Mobile · Material 3</h1>
+  <p>Same product, MD3 components: tonal surfaces, pill-shaped buttons, navigation bar with active pill indicator.</p>
+  <span class="badge-pill">Variant A — Material 3</span>
+</div>
+
+<div class="grid">
+
+<!-- ════════════════════════════════════════════════════════════════════
+     1. LOGIN
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M2 22h20V2L2 22Z"/></svg></span></div>
+    <div class="login-shell">
+      <div class="logo-mark"><svg viewBox="0 0 24 24"><use href="#i-star"/></svg></div>
+      <h2>Polaris</h2>
+      <div class="sub">IP management, navigated</div>
+
+      <div class="full-field">
+        <div class="tf-outlined">
+          <span class="lbl">Username</span>
+          <input class="field" value="dmoore">
+        </div>
+      </div>
+
+      <div class="full-field">
+        <div class="tf-outlined">
+          <span class="lbl">Password</span>
+          <input class="field" type="password" value="••••••••">
+        </div>
+      </div>
+
+      <button class="btn-base btn-filled full-btn">Sign in</button>
+      <div class="divider">or</div>
+      <button class="btn-base btn-tonal full-btn">
+        <svg viewBox="0 0 24 24"><use href="#i-microsoft"/></svg>
+        Continue with Microsoft
+      </button>
+    </div>
+  </div>
+  <div class="screen-label">Login</div>
+  <div class="notes"><b>Material 3 outlined text fields</b> with floating labels and pill-shaped <b>filled / tonal</b> buttons. The Microsoft SSO uses a <i>tonal</i> button (secondary container) so the primary filled button stays the unambiguous default action.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     2. SEARCH (with results)
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+
+    <div class="m3-searchbar" style="margin-top:12px;">
+      <button class="icon-btn"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></button>
+      <input class="input" value="10.45.12">
+      <div class="avatar">DM</div>
+    </div>
+
+    <div class="body">
+      <div class="section-head">IP addresses<span class="count">3</span></div>
+      <div class="list-item two-line">
+        <span class="leading success"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span>
+        <div class="content">
+          <div class="headline mono">10.45.12.1</div>
+          <div class="supporting">Jefferson_Hardware · gateway</div>
+        </div>
+        <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item two-line">
+        <span class="leading" style="background:rgba(255,213,74,.18);color:var(--md-warning);">
+          <svg viewBox="0 0 24 24"><use href="#i-warn"/></svg>
+        </span>
+        <div class="content">
+          <div class="headline mono">10.45.12.42</div>
+          <div class="supporting">FS-248E-01 · DHCP lease</div>
+        </div>
+        <div class="trailing">
+          <span style="font-size:11px; color:var(--md-on-surface-variant);">vlan 12</span>
+        </div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item two-line">
+        <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-add"/></svg></span>
+        <div class="content">
+          <div class="headline mono">10.45.12.103</div>
+          <div class="supporting">Jefferson_Hardware · available</div>
+        </div>
+        <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>
+      </div>
+
+      <div class="section-head">Assets<span class="count">2</span></div>
+      <div class="list-item two-line">
+        <span class="leading" style="background:rgba(255,180,80,.18);color:#ffc78a;"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg></span>
+        <div class="content">
+          <div class="headline">jeff-fgt-01</div>
+          <div class="supporting">10.45.12.1 · FortiGate 60F</div>
+        </div>
+        <div class="trailing"><span class="dot up"></span></div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item two-line">
+        <span class="leading tertiary"><svg viewBox="0 0 24 24"><use href="#i-switch-icon"/></svg></span>
+        <div class="content">
+          <div class="headline">jeff-sw-hw01</div>
+          <div class="supporting">10.45.12.5 · FortiSwitch 248E</div>
+        </div>
+        <div class="trailing"><span class="dot warn"></span></div>
+      </div>
+
+      <div class="section-head">Subnets<span class="count">1</span></div>
+      <div class="list-item two-line">
+        <span class="leading tonal"><svg viewBox="0 0 24 24"><use href="#i-subnet"/></svg></span>
+        <div class="content">
+          <div class="headline mono">10.45.12.0/24</div>
+          <div class="supporting">Jefferson_Hardware · 47% used</div>
+        </div>
+        <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>
+      </div>
+    </div>
+
+    <div class="navbar">
+      <div class="nav-item active">
+        <div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></div>
+        <div class="nav-label">Search</div>
+      </div>
+      <div class="nav-item">
+        <div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-map"/></svg></div>
+        <div class="nav-label">Map</div>
+      </div>
+      <div class="nav-item">
+        <div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-list"/></svg></div>
+        <div class="nav-label">Assets</div>
+      </div>
+      <div class="nav-item">
+        <div class="nav-icon-pill">
+          <svg viewBox="0 0 24 24"><use href="#i-bell"/></svg>
+          <span class="nav-badge">3</span>
+        </div>
+        <div class="nav-label">Alerts</div>
+      </div>
+      <div class="nav-item">
+        <div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg></div>
+        <div class="nav-label">More</div>
+      </div>
+    </div>
+  </div>
+  <div class="screen-label">Search — results</div>
+  <div class="notes"><b>M3 Search Bar</b> (pill, elevated) replaces the boxy iOS field. Results use proper <b>two-line list items</b> with leading icon avatars in tonal containers. Bottom <b>Navigation Bar</b> shows the signature pill-shaped active indicator.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     3. MAP
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="map-mock">
+      <div class="map-search-float">
+        <svg viewBox="0 0 24 24" width="20" height="20" style="fill:var(--md-on-surface-variant)"><use href="#i-search"/></svg>
+        <span class="placeholder">Search sites…</span>
+        <div class="avatar" style="width:32px;height:32px;background:var(--md-tertiary-container);color:var(--md-on-tertiary-container);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;">DM</div>
+      </div>
+      <!-- Pins -->
+      <div class="pin up"   style="top:30%; left:25%;"></div>
+      <div class="pin up"   style="top:40%; left:55%;"><span class="pin-count">5</span></div>
+      <div class="pin warn" style="top:55%; left:35%;"></div>
+      <div class="pin up"   style="top:60%; left:72%;"></div>
+      <div class="pin down" style="top:70%; left:48%;"></div>
+      <div class="pin up"   style="top:75%; left:20%;"></div>
+      <div class="pin up"   style="top:80%; left:62%;"></div>
+      <div class="map-fab-pos">
+        <button class="fab"><svg viewBox="0 0 24 24"><use href="#i-target"/></svg></button>
+      </div>
+    </div>
+    <div class="navbar">
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></div><div class="nav-label">Search</div></div>
+      <div class="nav-item active"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-map"/></svg></div><div class="nav-label">Map</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-list"/></svg></div><div class="nav-label">Assets</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-bell"/></svg><span class="nav-badge">3</span></div><div class="nav-label">Alerts</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg></div><div class="nav-label">More</div></div>
+    </div>
+  </div>
+  <div class="screen-label">Map</div>
+  <div class="notes"><b>Standard FAB</b> (rounded-square 16px corners, primary-container) replaces the circular iOS button. Floating search uses the same M3 search bar component as the other tabs for consistency.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     4. ASSETS LIST
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="topbar">
+      <div class="leading"></div>
+      <div class="title">Assets</div>
+      <div class="trailing">
+        <button class="icon-btn"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></button>
+      </div>
+    </div>
+    <div class="body">
+      <div class="chip-row">
+        <button class="chip selected"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg>All</button>
+        <button class="chip">Down only</button>
+        <button class="chip">Monitored</button>
+        <button class="chip">Firewalls</button>
+        <button class="chip">Switches</button>
+      </div>
+
+      <div class="asset-list">
+        <div class="asset-card">
+          <div class="top">
+            <div class="ico ico-fw"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg></div>
+            <div class="name">jeff-fgt-01</div>
+            <span class="dot up"></span>
+          </div>
+          <div class="meta"><span class="mono">10.45.12.1</span><span>FortiGate 60F</span><span>Jefferson</span></div>
+        </div>
+        <div class="asset-card">
+          <div class="top">
+            <div class="ico ico-sw"><svg viewBox="0 0 24 24"><use href="#i-switch-icon"/></svg></div>
+            <div class="name">jeff-sw-hw01</div>
+            <span class="dot warn"></span>
+          </div>
+          <div class="meta"><span class="mono">10.45.12.5</span><span>FortiSwitch 248E</span><span>2/10 packet loss</span></div>
+        </div>
+        <div class="asset-card">
+          <div class="top">
+            <div class="ico ico-prn"><svg viewBox="0 0 24 24"><use href="#i-printer"/></svg></div>
+            <div class="name">md-prn-04</div>
+            <span class="dot down"></span>
+          </div>
+          <div class="meta"><span class="mono">10.45.12.181</span><span>HP M428</span><span>down 14m</span></div>
+        </div>
+        <div class="asset-card">
+          <div class="top">
+            <div class="ico ico-srv"><svg viewBox="0 0 24 24"><use href="#i-server"/></svg></div>
+            <div class="name">jeff-srv-app01</div>
+            <span class="dot up"></span>
+          </div>
+          <div class="meta"><span class="mono">10.45.12.20</span><span>Windows 2022</span><span>Operations</span></div>
+        </div>
+        <div class="asset-card">
+          <div class="top">
+            <div class="ico ico-ap"><svg viewBox="0 0 24 24"><use href="#i-wifi"/></svg></div>
+            <div class="name">jeff-ap-04</div>
+            <span class="dot up"></span>
+          </div>
+          <div class="meta"><span class="mono">10.45.12.34</span><span>FortiAP 231F</span><span>Warehouse</span></div>
+        </div>
+        <div class="asset-card">
+          <div class="top">
+            <div class="ico ico-sw"><svg viewBox="0 0 24 24"><use href="#i-switch-icon"/></svg></div>
+            <div class="name">cisco-core-01</div>
+            <span class="dot up"></span>
+          </div>
+          <div class="meta"><span class="mono">10.45.12.2</span><span>Catalyst 9300</span><span>MDF</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="navbar">
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></div><div class="nav-label">Search</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-map"/></svg></div><div class="nav-label">Map</div></div>
+      <div class="nav-item active"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-list"/></svg></div><div class="nav-label">Assets</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-bell"/></svg><span class="nav-badge">3</span></div><div class="nav-label">Alerts</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg></div><div class="nav-label">More</div></div>
+    </div>
+  </div>
+  <div class="screen-label">Assets — list</div>
+  <div class="notes"><b>M3 Filter chips</b> (8px corner radius, with checkmark on selection) replace iOS pill chips. Asset rows are <b>elevated cards</b> in surface-container-low with type-coded leading avatars.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     5. ASSET DETAIL — System tab
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="topbar on-scroll">
+      <div class="leading">
+        <button class="icon-btn"><svg viewBox="0 0 24 24"><use href="#i-back"/></svg></button>
+      </div>
+      <div class="title">jeff-fgt-01</div>
+      <div class="trailing">
+        <button class="icon-btn"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg></button>
+      </div>
+    </div>
+    <div class="body">
+      <div class="hero">
+        <div class="h-title">
+          <span class="dot up" style="width:14px;height:14px;flex:0 0 14px;"></span>
+          <span class="h-name">jeff-fgt-01</span>
+        </div>
+        <div class="h-sub">10.45.12.1 · FortiGate 60F · S/N FGT60FTK22034567</div>
+        <div class="h-actions">
+          <button class="btn-base btn-tonal">
+            <svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg>
+            Refresh
+          </button>
+          <button class="btn-base btn-filled">
+            <svg viewBox="0 0 24 24"><use href="#i-bookmark"/></svg>
+            Reserve IP
+          </button>
+        </div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-header">
+          <div class="left">
+            <div class="ico" style="background:rgba(94,216,123,.18);color:var(--md-success);"><svg viewBox="0 0 24 24"><use href="#i-chart"/></svg></div>
+            <div>
+              <div class="h-text">Monitor</div>
+              <div class="h-sub">UP · 12 ms · last poll 14s</div>
+            </div>
+          </div>
+          <svg viewBox="0 0 24 24" width="24" height="24" style="fill:var(--md-on-surface-variant)"><use href="#i-chev-down"/></svg>
+        </div>
+        <div class="sect-body">
+          <div class="chart-card">
+            <div class="lbl">Response time</div>
+            <div class="val">12 <span class="unit">ms</span></div>
+            <svg viewBox="0 0 280 60" width="100%" height="50">
+              <polyline fill="none" stroke="var(--md-primary)" stroke-width="2"
+                points="0,42 12,38 24,40 36,32 48,30 60,28 72,34 84,30 96,26 108,30 120,28 132,24 144,26 156,28 168,32 180,28 192,30 204,26 216,24 228,28 240,30 252,32 264,28 280,30"/>
+              <polyline fill="rgba(163,201,255,.12)" stroke="none"
+                points="0,42 12,38 24,40 36,32 48,30 60,28 72,34 84,30 96,26 108,30 120,28 132,24 144,26 156,28 168,32 180,28 192,30 204,26 216,24 228,28 240,30 252,32 264,28 280,30 280,60 0,60"/>
+            </svg>
+            <div class="seg">
+              <div class="s">1h</div>
+              <div class="s on">24h</div>
+              <div class="s">7d</div>
+              <div class="s">30d</div>
+            </div>
+          </div>
+
+          <div class="chart-card">
+            <div class="lbl">CPU + Memory</div>
+            <div class="val" style="font-size:18px; line-height:24px;">
+              <span style="color:var(--md-primary);">cpu 18%</span>
+              <span style="color:var(--md-on-surface-variant); margin:0 8px;">·</span>
+              <span style="color:var(--md-tertiary);">mem 42%</span>
+            </div>
+            <svg viewBox="0 0 280 60" width="100%" height="50">
+              <polyline fill="none" stroke="var(--md-primary)" stroke-width="2"
+                points="0,48 30,46 60,44 90,40 120,42 150,38 180,40 210,42 240,40 270,42"/>
+              <polyline fill="none" stroke="var(--md-tertiary)" stroke-width="2"
+                points="0,32 30,30 60,32 90,28 120,30 150,26 180,28 210,30 240,28 270,30"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-header">
+          <div class="left">
+            <div class="ico"><svg viewBox="0 0 24 24"><use href="#i-cable"/></svg></div>
+            <div><div class="h-text">Interfaces</div><div class="h-sub">8 total · 2 pinned</div></div>
+          </div>
+          <svg viewBox="0 0 24 24" width="24" height="24" style="fill:var(--md-on-surface-variant)"><use href="#i-chev-right"/></svg>
+        </div>
+      </div>
+      <div class="sect">
+        <div class="sect-header">
+          <div class="left">
+            <div class="ico"><svg viewBox="0 0 24 24"><use href="#i-tunnel"/></svg></div>
+            <div><div class="h-text">IPsec tunnels</div><div class="h-sub">3 up</div></div>
+          </div>
+          <svg viewBox="0 0 24 24" width="24" height="24" style="fill:var(--md-on-surface-variant)"><use href="#i-chev-right"/></svg>
+        </div>
+      </div>
+      <div class="sect">
+        <div class="sect-header">
+          <div class="left">
+            <div class="ico"><svg viewBox="0 0 24 24"><use href="#i-history"/></svg></div>
+            <div><div class="h-text">IP history</div><div class="h-sub">4 entries</div></div>
+          </div>
+          <svg viewBox="0 0 24 24" width="24" height="24" style="fill:var(--md-on-surface-variant)"><use href="#i-chev-right"/></svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Snackbar (for refresh confirmation) -->
+    <div class="snackbar">
+      <span class="label">Refresh complete · 12 ms</span>
+      <button class="action">View</button>
+    </div>
+
+    <div class="navbar">
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></div><div class="nav-label">Search</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-map"/></svg></div><div class="nav-label">Map</div></div>
+      <div class="nav-item active"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-list"/></svg></div><div class="nav-label">Assets</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-bell"/></svg><span class="nav-badge">3</span></div><div class="nav-label">Alerts</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg></div><div class="nav-label">More</div></div>
+    </div>
+  </div>
+  <div class="screen-label">Asset detail — System</div>
+  <div class="notes">Hero with <b>filled</b> primary action + <b>tonal</b> secondary. Sections use M3 list-with-icon pattern. Chart range chips become a <b>segmented button</b> (M3 spec). <b>Snackbar</b> confirms the refresh.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     6. ALERTS
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="topbar">
+      <div class="leading"></div>
+      <div class="title">Alerts</div>
+      <div class="trailing">
+        <button class="icon-btn"><svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg></button>
+      </div>
+    </div>
+    <div class="body">
+      <div class="section-head">Down right now<span class="count">3</span></div>
+      <div class="list-item three-line">
+        <span class="leading error"><svg viewBox="0 0 24 24"><use href="#i-down-arrow"/></svg></span>
+        <div class="content">
+          <div class="headline">md-prn-04 went DOWN</div>
+          <div class="supporting" style="white-space:normal;">10.45.12.181 · 3 of last 3 ICMP probes failed</div>
+          <div class="supporting mono" style="font-size:12px;color:var(--md-on-surface-variant);margin-top:4px;">14m ago</div>
+        </div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item three-line">
+        <span class="leading error"><svg viewBox="0 0 24 24"><use href="#i-down-arrow"/></svg></span>
+        <div class="content">
+          <div class="headline">jeff-ap-warehouse-2 went DOWN</div>
+          <div class="supporting" style="white-space:normal;">10.45.12.91 · controller reports disconnected</div>
+          <div class="supporting mono" style="font-size:12px;color:var(--md-on-surface-variant);margin-top:4px;">1h ago</div>
+        </div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item three-line">
+        <span class="leading error"><svg viewBox="0 0 24 24"><use href="#i-down-arrow"/></svg></span>
+        <div class="content">
+          <div class="headline">cisco-core-01 went DOWN</div>
+          <div class="supporting" style="white-space:normal;">10.45.12.2 · SNMP timeout 4/4</div>
+          <div class="supporting mono" style="font-size:12px;color:var(--md-on-surface-variant);margin-top:4px;">2h ago</div>
+        </div>
+      </div>
+
+      <div class="section-head">Recent events<span class="count">last 24h</span></div>
+      <div class="list-item three-line">
+        <span class="leading" style="background:rgba(255,213,74,.18);color:var(--md-warning);"><svg viewBox="0 0 24 24"><use href="#i-warn"/></svg></span>
+        <div class="content">
+          <div class="headline">Discovery slow</div>
+          <div class="supporting" style="white-space:normal;">FMG-prod · run elapsed 9m32s exceeds baseline 4m12s</div>
+          <div class="supporting mono" style="font-size:12px;color:var(--md-on-surface-variant);margin-top:4px;">22m ago</div>
+        </div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item three-line">
+        <span class="leading" style="background:rgba(255,213,74,.18);color:var(--md-warning);"><svg viewBox="0 0 24 24"><use href="#i-warn"/></svg></span>
+        <div class="content">
+          <div class="headline">Conflict created</div>
+          <div class="supporting" style="white-space:normal;">10.32.4.7 — discovered hostname differs from existing</div>
+          <div class="supporting mono" style="font-size:12px;color:var(--md-on-surface-variant);margin-top:4px;">3h ago</div>
+        </div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item three-line">
+        <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-info"/></svg></span>
+        <div class="content">
+          <div class="headline">Integration test failed</div>
+          <div class="supporting" style="white-space:normal;">Entra-ID-prod · token refresh 401</div>
+          <div class="supporting mono" style="font-size:12px;color:var(--md-on-surface-variant);margin-top:4px;">5h ago</div>
+        </div>
+      </div>
+    </div>
+    <div class="navbar">
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></div><div class="nav-label">Search</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-map"/></svg></div><div class="nav-label">Map</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-list"/></svg></div><div class="nav-label">Assets</div></div>
+      <div class="nav-item active"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-bell"/></svg><span class="nav-badge">3</span></div><div class="nav-label">Alerts</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg></div><div class="nav-label">More</div></div>
+    </div>
+  </div>
+  <div class="screen-label">Alerts</div>
+  <div class="notes"><b>Three-line list items</b> (88px height, MD3 spec) with semantic leading containers — error / warning / info — using the corresponding tonal palette pairs.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     7. RESERVE — Modal bottom sheet
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="topbar">
+      <div class="leading">
+        <button class="icon-btn"><svg viewBox="0 0 24 24"><use href="#i-back"/></svg></button>
+      </div>
+      <div class="title mono" style="font-size:18px;">10.45.12.0/24</div>
+      <div class="trailing">
+        <button class="icon-btn"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg></button>
+      </div>
+    </div>
+    <div class="body" style="filter:brightness(.5);">
+      <div class="section-head">Reservations<span class="count">37</span></div>
+      <div class="ip-row">
+        <div class="lead"><span class="dot up"></span></div>
+        <div class="grow"><div class="ip">10.45.12.1</div><div class="meta">jeff-fgt-01 · gateway</div></div>
+      </div>
+      <div class="ip-row">
+        <div class="lead"><span class="dot up"></span></div>
+        <div class="grow"><div class="ip">10.45.12.2</div><div class="meta">cisco-core-01</div></div>
+      </div>
+      <div class="ip-row">
+        <div class="lead"><span class="dot warn"></span></div>
+        <div class="grow"><div class="ip">10.45.12.5</div><div class="meta">jeff-sw-hw01</div></div>
+      </div>
+      <div class="ip-row">
+        <div class="lead"><span class="dot up"></span></div>
+        <div class="grow"><div class="ip">10.45.12.20</div><div class="meta">jeff-srv-app01</div></div>
+      </div>
+    </div>
+
+    <div class="scrim"></div>
+    <div class="sheet" style="z-index:10;">
+      <div class="sheet-handle"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <h3 class="sheet-title" style="margin:0;">Reserve IP</h3>
+        <button class="icon-btn"><svg viewBox="0 0 24 24"><use href="#i-close"/></svg></button>
+      </div>
+
+      <div class="tf-outlined">
+        <span class="lbl">IP address</span>
+        <input class="field mono" value="10.45.12.103">
+        <div class="support">Next available · tap to change</div>
+      </div>
+
+      <div class="tf-outlined">
+        <span class="lbl">Hostname</span>
+        <input class="field" value="jeff-iot-thermo-03">
+      </div>
+
+      <div class="tf-outlined">
+        <span class="lbl">Owner</span>
+        <input class="field" value="dmoore">
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:12px;">
+        <button class="btn-base btn-text">More fields</button>
+        <button class="btn-base btn-filled">Reserve</button>
+      </div>
+    </div>
+
+    <div class="navbar" style="filter:brightness(.5);">
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></div><div class="nav-label">Search</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-map"/></svg></div><div class="nav-label">Map</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-list"/></svg></div><div class="nav-label">Assets</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-bell"/></svg></div><div class="nav-label">Alerts</div></div>
+      <div class="nav-item active"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg></div><div class="nav-label">More</div></div>
+    </div>
+  </div>
+  <div class="screen-label">Reserve — modal bottom sheet</div>
+  <div class="notes">M3 <b>modal bottom sheet</b> with scrim, drag handle, 28px top corners. Outlined text fields with floating labels and supporting text. <b>Text</b> button for "More fields", <b>filled</b> for the primary commit.</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     8. MORE
+     ════════════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="phone">
+    <div class="statusbar"><span>9:41</span><span class="icons">●●● 100%</span></div>
+    <div class="topbar">
+      <div class="leading"></div>
+      <div class="title">More</div>
+      <div class="trailing"></div>
+    </div>
+    <div class="body">
+      <div class="section-head">Network</div>
+      <div class="list-item two-line">
+        <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-block"/></svg></span>
+        <div class="content"><div class="headline">Blocks</div><div class="supporting">12 blocks · 4 v6</div></div>
+        <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item two-line">
+        <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-subnet"/></svg></span>
+        <div class="content"><div class="headline">Subnets</div><div class="supporting">184 subnets · 47% used</div></div>
+        <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item two-line">
+        <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-bookmark"/></svg></span>
+        <div class="content"><div class="headline">Reservations</div><div class="supporting">2,431 active</div></div>
+        <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>
+      </div>
+
+      <div class="section-head">Operations</div>
+      <div class="list-item two-line">
+        <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-sync"/></svg></span>
+        <div class="content"><div class="headline">Discoveries</div><div class="supporting">2 running · 1 slow</div></div>
+        <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item two-line">
+        <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-balance"/></svg></span>
+        <div class="content"><div class="headline">Conflicts</div><div class="supporting">3 pending — review on desktop</div></div>
+        <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-desktop"/></svg></div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item two-line">
+        <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-event"/></svg></span>
+        <div class="content"><div class="headline">Events</div><div class="supporting">Audit log · last 7 days</div></div>
+        <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>
+      </div>
+
+      <div class="section-head">Account</div>
+      <div class="list-item two-line">
+        <span class="leading tertiary"><svg viewBox="0 0 24 24"><use href="#i-person"/></svg></span>
+        <div class="content"><div class="headline">dmoore</div><div class="supporting">admin · TOTP enabled</div></div>
+        <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item">
+        <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-vis-on"/></svg></span>
+        <div class="content"><div class="headline">Use system theme</div></div>
+        <div class="trailing"><div class="switch on"><div class="thumb"></div></div></div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item two-line">
+        <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-desktop"/></svg></span>
+        <div class="content"><div class="headline">Desktop view</div><div class="supporting">Open full app</div></div>
+        <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>
+      </div>
+      <div class="list-divider"></div>
+      <div class="list-item">
+        <span class="leading error"><svg viewBox="0 0 24 24"><use href="#i-logout"/></svg></span>
+        <div class="content"><div class="headline" style="color:var(--md-error);">Sign out</div></div>
+      </div>
+
+      <div style="text-align:center; padding:24px 0; color:var(--md-on-surface-variant); font-size:11px; letter-spacing:.5px;">
+        Polaris 0.9.187
+      </div>
+    </div>
+    <div class="navbar">
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></div><div class="nav-label">Search</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-map"/></svg></div><div class="nav-label">Map</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-list"/></svg></div><div class="nav-label">Assets</div></div>
+      <div class="nav-item"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-bell"/></svg><span class="nav-badge">3</span></div><div class="nav-label">Alerts</div></div>
+      <div class="nav-item active"><div class="nav-icon-pill"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg></div><div class="nav-label">More</div></div>
+    </div>
+  </div>
+  <div class="screen-label">More</div>
+  <div class="notes">Two-line list items grouped under M3 section overlines. Includes an <b>M3 switch</b> for the theme toggle and uses the <b>error tonal container</b> on Sign out so it reads dangerous without clashing with the palette.</div>
+</div>
+
+</div>
+
+</body>
+</html>
