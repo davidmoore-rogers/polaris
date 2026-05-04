@@ -57,7 +57,7 @@ import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { hasActiveDiscoveries } from "./integrations.js";
 import { logger } from "../../utils/logger.js";
-import { getCapacitySnapshot } from "../../services/capacityService.js";
+import { getCapacitySnapshot, recordCapacityTransition } from "../../services/capacityService.js";
 import { BACKUP_DIR, UPLOADS_DIR } from "../../utils/paths.js";
 import { getAppVersion } from "../../utils/version.js";
 
@@ -1011,6 +1011,13 @@ router.get("/pg-tuning", async (_req, res, next) => {
     // steady-state size projection. The legacy fields above are preserved
     // for backwards compatibility.
     const capacity = await getCapacitySnapshot({ ramInsufficient, pgTuningNeeded });
+
+    // Best-effort transition Event so a flip into watch/amber/red flows out
+    // through eventArchiveService → syslog/SFTP even if no admin loads the
+    // Maintenance tab. The dedicated job (`capacityWatch`) carries this on
+    // a fixed cadence; the route call is the fast path for "operator is
+    // already looking and we want the audit trail in real time."
+    void recordCapacityTransition(capacity);
 
     res.json({
       needed: pgTuningNeeded,

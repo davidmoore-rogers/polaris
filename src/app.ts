@@ -35,11 +35,13 @@ import "./jobs/normalizeManufacturers.js";
 import "./jobs/migrateMonitorTransport.js";
 import "./jobs/backfillAssetSources.js";
 import "./jobs/flagStaleReservations.js";
+import "./jobs/capacityWatch.js";
 import "./jobs/resolvePolarisPushedConflicts.js";
 import "./jobs/resolveStaleReservationConflicts.js";
 import "./jobs/scrubLegacySidGuidTags.js";
 import "./jobs/backfillFortigateEndpointSources.js";
 import { ensureRegistryLoaded } from "./services/oidRegistry.js";
+import { runStartupDiskCheck } from "./utils/startupDiskCheck.js";
 
 // Warm the symbolic-OID registry once at startup so the first monitor tick
 // can resolve vendor MIB symbols without paying a load on the hot path. Errors
@@ -47,6 +49,14 @@ import { ensureRegistryLoaded } from "./services/oidRegistry.js";
 ensureRegistryLoaded().catch((err) => {
   logger.warn({ err: err?.message }, "OID registry warm-up failed");
 });
+
+// Boot-time disk diagnostic. Logs a clear "X volume has Y MB free" line for
+// every filesystem Polaris/Postgres write to, at info/warn/error level
+// depending on free percentage. Catches the "polaris flapping because /var
+// is full" case before the operator has to dig through Prisma errors.
+// Non-fatal — never blocks startup; the periodic capacityWatch job and
+// Maintenance tab carry the same signal at runtime.
+void runStartupDiskCheck();
 
 const app = express();
 

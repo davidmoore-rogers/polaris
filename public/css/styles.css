@@ -542,6 +542,7 @@ code {
 .capacity-card {
   border-left: 3px solid var(--color-text-tertiary);
 }
+.capacity-card.capacity-card-watch { border-left-color: var(--color-info, #4fc3f7); }
 .capacity-card.capacity-card-amber { border-left-color: var(--color-warning); }
 .capacity-card.capacity-card-red   { border-left-color: var(--color-danger); }
 
@@ -563,11 +564,20 @@ code {
 }
 .capacity-pill-sm { font-size: 0.68rem; padding: 1px 6px; }
 .capacity-pill-ok    { background: rgba(46,204,113,0.15); color: #2ecc71; }
+.capacity-pill-watch { background: rgba(79,195,247,0.18); color: var(--color-info, #4fc3f7); }
 .capacity-pill-amber { background: rgba(255,214,0,0.18);  color: var(--color-warning); }
 .capacity-pill-red   { background: rgba(239,83,80,0.18);  color: var(--color-danger); }
 [data-theme="light"] .capacity-pill-ok    { background: rgba(39,174,96,0.15);  color: #27ae60; }
+[data-theme="light"] .capacity-pill-watch { background: rgba(2,136,209,0.13);  color: #0288d1; }
 [data-theme="light"] .capacity-pill-amber { background: rgba(245,127,23,0.15); color: var(--color-warning); }
 [data-theme="light"] .capacity-pill-red   { background: rgba(198,40,40,0.13);  color: var(--color-danger); }
+
+/* Volume free/used bars inside Application host card */
+.capacity-bar { background: rgba(46,204,113,0.55); transition: width 0.2s; }
+.capacity-bar-ok    { background: rgba(46,204,113,0.55); }
+.capacity-bar-watch { background: rgba(79,195,247,0.65); }
+.capacity-bar-amber { background: rgba(255,214,0,0.70);  }
+.capacity-bar-red   { background: rgba(239,83,80,0.80);  }
 
 .capacity-reasons {
   display: flex;
@@ -581,10 +591,12 @@ code {
   border: 1px solid var(--color-border);
   background: var(--color-bg-secondary);
 }
-.capacity-reason-amber { border-color: rgba(255,214,0,0.35); background: rgba(255,214,0,0.06); }
-.capacity-reason-red   { border-color: rgba(239,83,80,0.40); background: rgba(239,83,80,0.07); }
+.capacity-reason-watch { border-color: rgba(79,195,247,0.35); background: rgba(79,195,247,0.06); }
+.capacity-reason-amber { border-color: rgba(255,214,0,0.35);  background: rgba(255,214,0,0.06); }
+.capacity-reason-red   { border-color: rgba(239,83,80,0.40);  background: rgba(239,83,80,0.07); }
+[data-theme="light"] .capacity-reason-watch { border-color: rgba(2,136,209,0.30);  background: rgba(2,136,209,0.06); }
 [data-theme="light"] .capacity-reason-amber { border-color: rgba(245,127,23,0.30); background: rgba(245,127,23,0.06); }
-[data-theme="light"] .capacity-reason-red   { border-color: rgba(198,40,40,0.30); background: rgba(198,40,40,0.06); }
+[data-theme="light"] .capacity-reason-red   { border-color: rgba(198,40,40,0.30);  background: rgba(198,40,40,0.06); }
 .capacity-reason-head {
   display: flex;
   align-items: flex-start;

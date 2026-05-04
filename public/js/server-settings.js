@@ -953,7 +953,56 @@ function _capacityFormatPct(num, denom) {
 function _capacitySeverityLabel(s) {
   if (s === "red") return "Critical";
   if (s === "amber") return "Action recommended";
+  if (s === "watch") return "Watch";
   return "Healthy";
+}
+
+// Friendly label for a volume's set of roles. Matches the backend's
+// `volumeLabel()` so the UI and the audit-log Event message use the same
+// terminology.
+function _capacityVolumeLabel(roles) {
+  if (!roles || !roles.length) return "Volume";
+  if (roles.length === 1) {
+    if (roles[0] === "db") return "Database volume";
+    if (roles[0] === "app") return "Application volume";
+    if (roles[0] === "state") return "State volume";
+    if (roles[0] === "backups") return "Backups volume";
+  }
+  if (roles.indexOf("db") !== -1 && roles.indexOf("app") !== -1) return "Application + DB volume";
+  if (roles.indexOf("db") !== -1) return "DB volume";
+  return "Application volume";
+}
+
+// Render one volume row inside the Application host card. Bar-style indicator
+// gives the operator a quick at-a-glance read on each filesystem; numeric
+// detail is shown alongside.
+function _capacityRenderVolume(v) {
+  if (!v || !v.totalBytes) return "";
+  var pct = v.freeBytes / v.totalBytes;
+  var pctLabel = (pct * 100).toFixed(1) + "%";
+  var barClass = "capacity-bar capacity-bar-ok";
+  if (pct < 0.10) barClass = "capacity-bar capacity-bar-red";
+  else if (pct < 0.20) barClass = "capacity-bar capacity-bar-amber";
+  else if (pct < 0.30) barClass = "capacity-bar capacity-bar-watch";
+  // Used % is the inverse of free %; show that bar so a fuller volume reads
+  // as a longer/redder bar (the conventional disk-meter direction).
+  var usedPct = (1 - pct) * 100;
+  var pathLabel = (v.paths && v.paths.length) ? v.paths.join(", ") : "—";
+  var rolesLabel = _capacityVolumeLabel(v.roles);
+  return (
+    '<div style="display:flex;flex-direction:column;gap:0.2rem;margin-bottom:0.55rem">' +
+      '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:0.5rem">' +
+        '<span style="font-size:0.82rem;font-weight:600">' + escapeHtml(rolesLabel) + '</span>' +
+        '<span style="font-size:0.78rem;color:var(--color-text-secondary)">' +
+          _capacityFormatBytes(v.freeBytes) + ' free of ' + _capacityFormatBytes(v.totalBytes) + ' (' + escapeHtml(pctLabel) + ')' +
+        '</span>' +
+      '</div>' +
+      '<div style="height:6px;background:var(--color-bg-tertiary, rgba(127,127,127,0.18));border-radius:3px;overflow:hidden">' +
+        '<div class="' + barClass + '" style="height:100%;width:' + Math.min(100, Math.max(0, usedPct)).toFixed(1) + '%"></div>' +
+      '</div>' +
+      '<div style="font-size:0.74rem;color:var(--color-text-tertiary);font-family:var(--font-mono, monospace)">' + escapeHtml(pathLabel) + '</div>' +
+    '</div>'
+  );
 }
 
 // Combined Database Engine + Connection Pool stat card. The two sets of
@@ -1052,9 +1101,10 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
   var db = capacity.database || {};
   var work = capacity.workload || {};
 
-  var diskPct = host.diskFreeBytes != null && host.diskTotalBytes
-    ? Math.round((host.diskFreeBytes / host.diskTotalBytes) * 100)
-    : null;
+  var volumes = Array.isArray(host.volumes) ? host.volumes : [];
+  var volumesHtml = volumes.length
+    ? volumes.map(_capacityRenderVolume).join("")
+    : '<p class="hint" style="margin:0">No volume statistics available — statfs may be unsupported on this host.</p>';
 
   var hostHtml =
     '<div class="capacity-stat-card">' +
@@ -1064,13 +1114,13 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
         dbInfoRow("RAM (total)", _capacityFormatBytes(host.totalMemoryBytes)) +
         dbInfoRow("RAM (free)", _capacityFormatBytes(host.freeMemoryBytes)) +
         (host.loadAvg ? dbInfoRow("Load avg (1/5/15m)", host.loadAvg.map(function (n) { return n.toFixed(2); }).join(" / ")) : "") +
-        dbInfoRow("Disk free", _capacityFormatBytes(host.diskFreeBytes) + (diskPct != null ? " (" + diskPct + "%)" : "")) +
-        dbInfoRow("Disk total", _capacityFormatBytes(host.diskTotalBytes)) +
         dbInfoRow("DB co-located", host.dbColocated ? "Yes" : "No (remote)") +
       '</div>' +
+      '<h5 style="margin-top:0.85rem">Storage volumes</h5>' +
+      '<div style="margin-top:0.4rem">' + volumesHtml + '</div>' +
       (host.dbColocated
         ? ''
-        : '<p class="hint" style="margin-top:0.5rem">Disk free is measured on the Polaris install volume. PostgreSQL is on a separate host — its data volume is not visible here.</p>') +
+        : '<p class="hint" style="margin-top:0.5rem">PostgreSQL is on a separate host — its data volume is not visible here.</p>') +
     '</div>';
 
   var allTables = (dbInfo && dbInfo.tables) || [];

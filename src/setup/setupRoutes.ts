@@ -6,13 +6,14 @@ import { Router } from "express";
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { writeFileSync, mkdirSync } from "node:fs";
+import { statfs, stat } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import pg from "pg";
 import { markSetupComplete } from "./detectSetup.js";
 import { hashPassword } from "../utils/password.js";
-import { ENV_FILE } from "../utils/paths.js";
+import { ENV_FILE, STATE_DIR } from "../utils/paths.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -74,6 +75,174 @@ function buildConnectionString(db: DbConfig): string {
 // GET /api/setup/status
 router.get("/status", (_req, res) => {
   res.json({ needsSetup: true });
+});
+
+// POST /api/setup/preflight — runs after the operator picks a DB host but
+// before finalize. Returns disk-free info for every volume Polaris will write
+// to (state dir + app dir) and, when the DB host is localhost, the
+// conventional PostgreSQL data directory candidates so the wizard can warn
+// "your /var is only 8 GB, this is going to bite you in 6 months."
+//
+// Cross-platform via node:fs/promises — RHEL, Ubuntu, Windows all return
+// usable statfs data. PostgreSQL's actual `data_directory` isn't available
+// here (we haven't connected yet), so we walk a list of conventional paths
+// per platform and report the first one that exists. The runtime
+// `capacityService` resolves PGDATA authoritatively via `SHOW data_directory`
+// once the DB connection is up.
+const PG_DATA_DIR_CANDIDATES: string[] = process.platform === "win32"
+  ? [
+      "C:\\Program Files\\PostgreSQL\\17\\data",
+      "C:\\Program Files\\PostgreSQL\\16\\data",
+      "C:\\Program Files\\PostgreSQL\\15\\data",
+      "C:\\Program Files\\PostgreSQL\\14\\data",
+      "C:\\Program Files\\PostgreSQL\\13\\data",
+    ]
+  : [
+      "/var/lib/pgsql/data",
+      "/var/lib/pgsql/17/data",
+      "/var/lib/pgsql/16/data",
+      "/var/lib/pgsql/15/data",
+      "/var/lib/postgresql/17/main",
+      "/var/lib/postgresql/16/main",
+      "/var/lib/postgresql/15/main",
+      "/var/lib/postgresql/14/main",
+    ];
+
+const PreflightSchema = z.object({
+  dbHost: z.string().min(1).optional(),
+});
+
+// Recommended minimums. Below these, the wizard surfaces a warning but
+// doesn't block — the operator may know a layout the heuristic doesn't.
+// 50 GB DB volume covers a ~1000-asset deployment on default retention with
+// 6 months of headroom; 5 GB app/state gets through a couple of update cycles
+// (each update copies the new bundle, then verifies, then swaps).
+const RECOMMENDED_DB_FREE_GB = 50;
+const RECOMMENDED_APP_FREE_GB = 5;
+
+interface PreflightVolume {
+  role: "app" | "state" | "db";
+  path: string;
+  freeBytes: number;
+  totalBytes: number;
+  freePct: number;
+  recommendedMinFreeGb: number;
+  meetsRecommendation: boolean;
+  notes: string | null;
+}
+
+async function statfsForPreflight(role: PreflightVolume["role"], path: string, recommendedMinFreeGb: number): Promise<PreflightVolume | null> {
+  try {
+    const fs = await statfs(path);
+    const freeBytes = Number(fs.bavail) * Number(fs.bsize);
+    const totalBytes = Number(fs.blocks) * Number(fs.bsize);
+    const freePct = totalBytes > 0 ? freeBytes / totalBytes : 1;
+    const minFreeBytes = recommendedMinFreeGb * 1024 ** 3;
+    return {
+      role,
+      path,
+      freeBytes,
+      totalBytes,
+      freePct,
+      recommendedMinFreeGb,
+      meetsRecommendation: freeBytes >= minFreeBytes,
+      notes: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function pickFirstExistingPath(candidates: string[]): Promise<string | null> {
+  for (const p of candidates) {
+    try {
+      await stat(p);
+      return p;
+    } catch {
+      // not present, keep going
+    }
+  }
+  return null;
+}
+
+router.post("/preflight", async (req, res) => {
+  try {
+    const { dbHost } = PreflightSchema.parse(req.body || {});
+
+    const isLocal = dbHost
+      ? ["localhost", "127.0.0.1", "::1", ""].includes(dbHost.toLowerCase().trim())
+      : true;
+
+    const out: PreflightVolume[] = [];
+
+    // App + state volumes (almost always the same on a default install where
+    // POLARIS_STATE_DIR is unset; getVolumes-style dedupe by stat.dev would
+    // collapse them at runtime, but for a one-shot wizard pass we keep them
+    // separate so the operator sees both paths labeled).
+    const appProbe = await statfsForPreflight("app", resolve(__dirname, "..", ".."), RECOMMENDED_APP_FREE_GB);
+    if (appProbe) out.push(appProbe);
+    const stateProbe = await statfsForPreflight("state", STATE_DIR, RECOMMENDED_APP_FREE_GB);
+    if (stateProbe) out.push(stateProbe);
+
+    let dbCandidatePath: string | null = null;
+    let dbProbe: PreflightVolume | null = null;
+    if (isLocal) {
+      dbCandidatePath = await pickFirstExistingPath(PG_DATA_DIR_CANDIDATES);
+      if (dbCandidatePath) {
+        dbProbe = await statfsForPreflight("db", dbCandidatePath, RECOMMENDED_DB_FREE_GB);
+        if (dbProbe) out.push(dbProbe);
+      }
+    }
+
+    // Dedupe by (freeBytes,totalBytes) heuristic (statfs doesn't surface
+    // device id portably enough here; identical free+total on the same host
+    // means same filesystem in practice).
+    const seen = new Set<string>();
+    const deduped: PreflightVolume[] = [];
+    for (const v of out) {
+      const key = `${v.freeBytes}|${v.totalBytes}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(v);
+    }
+
+    const warnings: string[] = [];
+    for (const v of deduped) {
+      if (!v.meetsRecommendation) {
+        const gb = (v.freeBytes / 1024 ** 3).toFixed(1);
+        warnings.push(
+          v.role === "db"
+            ? `Database volume (${v.path}) has only ${gb} GB free — recommended ≥ ${v.recommendedMinFreeGb} GB. Sample tables grow with monitored asset count and retention; you may run out of space within months.`
+            : `${v.role === "app" ? "Application" : "State"} volume (${v.path}) has only ${gb} GB free — recommended ≥ ${v.recommendedMinFreeGb} GB. Backups and update rollback both need headroom.`,
+        );
+      }
+    }
+
+    if (isLocal && !dbCandidatePath) {
+      warnings.push(
+        "PostgreSQL data directory could not be located via the standard paths — disk-free check on the DB volume was skipped. The runtime check will catch it once the DB connection is established.",
+      );
+    }
+    if (!isLocal) {
+      warnings.push(
+        `Database host (${dbHost}) is not local — disk-free check on the DB volume was skipped. Make sure the DB host has at least ${RECOMMENDED_DB_FREE_GB} GB free on its data volume before completing setup.`,
+      );
+    }
+
+    res.json({
+      ok: warnings.length === 0,
+      isDbLocal: isLocal,
+      volumes: deduped,
+      warnings,
+      recommendedDbFreeGb: RECOMMENDED_DB_FREE_GB,
+      recommendedAppFreeGb: RECOMMENDED_APP_FREE_GB,
+    });
+  } catch (err: any) {
+    if (err.name === "ZodError") {
+      return res.status(400).json({ ok: false, message: "Invalid input", errors: err.errors });
+    }
+    res.status(500).json({ ok: false, message: err.message || "Preflight check failed" });
+  }
 });
 
 // POST /api/setup/generate-secret

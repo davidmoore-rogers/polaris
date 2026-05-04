@@ -91,22 +91,75 @@ document.getElementById("btn-test-conn").addEventListener("click", async functio
       resultEl.textContent = data.message;
       connectionTested = true;
       document.getElementById("btn-next-1").disabled = false;
+      // Fire-and-forget disk preflight. Warnings are advisory: a too-small
+      // /var or DB volume is the most common operational footgun for fresh
+      // installs (RHEL STIG templates ship with /var at 8 GB by default),
+      // so we surface the issue here instead of letting the operator hit
+      // "no space left on device" three months in.
+      runPreflight(db.host).catch(function () { /* non-fatal */ });
     } else {
       resultEl.className = "test-result error";
       resultEl.textContent = data.message;
       connectionTested = false;
       document.getElementById("btn-next-1").disabled = true;
+      hidePreflight();
     }
   } catch (err) {
     resultEl.className = "test-result error";
     resultEl.textContent = err.message || "Connection test failed";
     connectionTested = false;
     document.getElementById("btn-next-1").disabled = true;
+    hidePreflight();
   } finally {
     btn.disabled = false;
     btn.textContent = "Test Connection";
   }
 });
+
+function hidePreflight() {
+  var el = document.getElementById("preflight-result");
+  if (el) el.style.display = "none";
+}
+
+async function runPreflight(dbHost) {
+  var el = document.getElementById("preflight-result");
+  if (!el) return;
+  try {
+    var res = await fetch("/api/setup/preflight", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dbHost: dbHost }),
+    });
+    var data = await res.json();
+    if (!data || (Array.isArray(data.warnings) && data.warnings.length === 0)) {
+      el.style.display = "none";
+      return;
+    }
+    var warnings = (data.warnings || []).map(function (w) {
+      return '<li style="margin-bottom:0.35rem">' + escapeHtml(w) + '</li>';
+    }).join("");
+    el.style.display = "block";
+    el.style.background = "rgba(255, 167, 38, 0.10)";
+    el.style.border = "1px solid rgba(255, 167, 38, 0.45)";
+    el.style.color = "var(--color-text-primary)";
+    el.innerHTML =
+      '<strong>Disk preflight — review before proceeding</strong>' +
+      '<ul style="margin:0.4rem 0 0;padding-left:1.1rem">' + warnings + '</ul>' +
+      '<p class="hint" style="margin:0.5rem 0 0">These are advisories — you can still continue with setup.</p>';
+  } catch (_err) {
+    // Preflight is best-effort; never block the install on a network/route hiccup.
+    el.style.display = "none";
+  }
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 // Reset test when DB fields change
 ["db-host", "db-port", "db-username", "db-password", "db-database", "db-ssl", "db-ssl-allow-self-signed"].forEach(function (id) {
