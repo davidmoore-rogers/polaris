@@ -2801,8 +2801,9 @@ async function buildLldpAssetMatchIndex(): Promise<{
 }> {
   const rows = await prisma.asset.findMany({
     select: {
-      id: true, ipAddress: true, macAddress: true, macAddresses: true, hostname: true, dnsName: true,
+      id: true, ipAddress: true, macAddress: true, hostname: true, dnsName: true,
       associatedIpRows: { select: { ip: true } },
+      macAddressRows:   { select: { mac: true } },
     },
   });
   const byIp = new Map<string, string>();
@@ -2834,13 +2835,10 @@ async function buildLldpAssetMatchIndex(): Promise<{
       const mac = a.macAddress.toUpperCase();
       if (!byMac.has(mac)) byMac.set(mac, a.id);
     }
-    if (Array.isArray(a.macAddresses)) {
-      for (const e of a.macAddresses as any[]) {
-        const m = e?.mac;
-        if (typeof m === "string" && m) {
-          const mac = m.toUpperCase();
-          if (!byMac.has(mac)) byMac.set(mac, a.id);
-        }
+    for (const row of a.macAddressRows) {
+      if (row.mac) {
+        const mac = row.mac.toUpperCase();
+        if (!byMac.has(mac)) byMac.set(mac, a.id);
       }
     }
     idxHostname(a.hostname, a.id);

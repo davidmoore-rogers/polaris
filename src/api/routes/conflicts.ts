@@ -33,6 +33,7 @@ import { requireAuth } from "../middleware/auth.js";
 import { logEvent } from "./events.js";
 import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
+import { MAC_ROW_SELECT, reconcileMacAddresses, shapeMacRows } from "../../utils/macAddresses.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -132,7 +133,7 @@ router.post("/:id/accept", async (req, res, next) => {
   try {
     const conflict = await prisma.conflict.findUnique({
       where: { id: req.params.id },
-      include: { reservation: true, asset: true },
+      include: { reservation: true, asset: { include: { macAddressRows: { select: MAC_ROW_SELECT } } } },
     });
     if (!conflict) throw new AppError(404, "Conflict not found");
     if (conflict.status !== "pending") throw new AppError(409, "Conflict is already resolved");
@@ -162,7 +163,7 @@ router.post("/:id/reject", async (req, res, next) => {
   try {
     const conflict = await prisma.conflict.findUnique({
       where: { id: req.params.id },
-      include: { reservation: true, asset: true },
+      include: { reservation: true, asset: { include: { macAddressRows: { select: MAC_ROW_SELECT } } } },
     });
     if (!conflict) throw new AppError(404, "Conflict not found");
     if (conflict.status !== "pending") throw new AppError(409, "Conflict is already resolved");
@@ -319,11 +320,12 @@ async function acceptAssetConflict(conflict: any, actor?: string) {
   const externalId = String(conflict.proposedDeviceId).toLowerCase();
   const existingSourceForId = await prisma.assetSource.findUnique({
     where: { sourceKind_externalId: { sourceKind, externalId } },
-    include: { asset: true },
+    include: { asset: { include: { macAddressRows: { select: MAC_ROW_SELECT } } } },
   });
   const ghost: any = (existingSourceForId && existingSourceForId.assetId !== existing.id)
     ? existingSourceForId.asset
     : null;
+  let mergedMacsForReconcile: ReturnType<typeof shapeMacRows> | null = null;
   if (ghost) {
     // Absorb any fields from the ghost that the accept target is still missing.
     if (!update.serialNumber && !existing.serialNumber && ghost.serialNumber) update.serialNumber = ghost.serialNumber;
@@ -335,19 +337,25 @@ async function acceptAssetConflict(conflict: any, actor?: string) {
     if (!update.assignedTo && !existing.assignedTo && ghost.assignedTo) update.assignedTo = ghost.assignedTo;
     if (!update.notes && !existing.notes && ghost.notes) update.notes = ghost.notes;
     if (!update.lastSeen && !existing.lastSeen && ghost.lastSeen) update.lastSeen = ghost.lastSeen;
-    // Merge ghost's macAddresses history.
-    const ghostMacs = Array.isArray(ghost.macAddresses) ? (ghost.macAddresses as any[]) : [];
+    // Merge ghost's MAC history into the accept target. Side-table reconcile
+    // happens AFTER the asset.update below — assembling the merged shape
+    // here so we can run a single reconcile call.
+    const ghostMacs = shapeMacRows(ghost.macAddressRows);
+    const existingMacs = shapeMacRows(existing.macAddressRows);
     if (ghostMacs.length > 0) {
-      const existingMacs = Array.isArray(existing.macAddresses) ? (existing.macAddresses as any[]) : [];
-      const merged: any[] = [...existingMacs];
+      const merged = [...existingMacs];
       for (const m of ghostMacs) {
         const key = (m.mac || "").replace(/[^0-9a-fA-F]/g, "").toUpperCase();
-        if (key && !merged.some((x: any) => (x.mac || "").replace(/[^0-9a-fA-F]/g, "").toUpperCase() === key)) {
+        if (key && !merged.some((x) => (x.mac || "").replace(/[^0-9a-fA-F]/g, "").toUpperCase() === key)) {
           merged.push(m);
         }
       }
-      if (merged.length > existingMacs.length) update.macAddresses = merged;
+      if (merged.length > existingMacs.length) {
+        mergedMacsForReconcile = merged;
+      }
     }
+    // Delete the ghost. Cascade rule on AssetMacAddress.assetId removes the
+    // ghost's MAC rows automatically — no separate cleanup needed.
     await prisma.asset.delete({ where: { id: ghost.id } });
   }
 
@@ -356,6 +364,9 @@ async function acceptAssetConflict(conflict: any, actor?: string) {
     where: { id: existing.id },
     data: update,
   });
+  if (mergedMacsForReconcile) {
+    await reconcileMacAddresses(existing.id, mergedMacsForReconcile);
+  }
 
   // Stamp the AssetSource row that ties this asset to the conflict's
   // entra/ad identity. This replaces the legacy `assetTag = entra:<id>`

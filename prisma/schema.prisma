@@ -272,7 +272,6 @@ model Asset {
   ipAddress        String? // IPv4 or IPv6
   ipSource         String? // Where ipAddress was last set from: "manual", "fortimanager", "fortigate", etc.
   macAddress       String? // Most recently seen MAC, e.g. "AA:BB:CC:DD:EE:FF"
-  macAddresses     Json?       @default("[]") // [{mac, lastSeen, source?}] — all associated MACs
   hostname         String?
   dnsName          String? // FQDN from PTR lookup, e.g. "server01.corp.local"
   dnsNameFetchedAt DateTime? // When the last PTR lookup ran (success or failure)
@@ -400,6 +399,7 @@ model Asset {
   lldpNeighborMatches AssetLldpNeighbor[]      @relation("AssetLldpNeighborMatch")
   sources             AssetSource[]
   associatedIpRows    AssetAssociatedIp[]
+  macAddressRows      AssetMacAddress[]
 
   @@index([ipAddress])
   @@index([macAddress])
@@ -554,6 +554,52 @@ model AssetAssociatedIp {
   @@index([assetId])
   @@index([ip])
   @@map("asset_associated_ips")
+}
+
+// All MAC addresses an asset has been seen with. Replaces the legacy
+// `Asset.macAddresses` JSONB column. Populated by:
+//   - DHCP discovery (FMG / FortiGate, source="fmg-discovery" or "fortigate")
+//   - Device-inventory FortiOS sweep (source="device-inventory")
+//   - Intune sync (source="intune-ethernet" / "intune-wifi")
+//   - AD computer-object sync (source="ad")
+//   - Conflict ghost-merge (preserved from the deleted ghost asset)
+//   - Manual edits via the asset edit panel (source="manual")
+//
+// `Asset.macAddress` (the scalar column on Asset) remains the asset's
+// primary MAC — typically the most recently-seen entry. The relation
+// here is the FULL history; quarantine push, LLDP matching, and the
+// `mac-collision` conflict pathway all walk this table to find every MAC
+// the asset has ever advertised.
+//
+// Persist semantics: discovery code that builds an in-memory mac list
+// (deduped by normalized MAC, sorted by lastSeen desc) calls
+// `reconcileMacAddresses(assetId, macs)` from src/utils/macAddresses.ts to
+// sync the side table after the asset.update lands. The list/get response
+// serializes the relation back into the legacy `macAddresses: [...]` JSON
+// shape so existing API consumers (the frontend, external integrations)
+// keep reading the same field name.
+model AssetMacAddress {
+  id         String   @id @default(uuid())
+  assetId    String
+  asset      Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  // Normalized to colon-uppercase form (AA:BB:CC:DD:EE:FF) at write time.
+  // Frontends that present MACs format from this canonical form.
+  mac        String
+  source     String
+  // Optional metadata that some sources include. `device` is the FortiGate
+  // hostname when this MAC came from a DHCP scrape; `subnetCidr` /
+  // `subnetName` are populated when the MAC's IP at sighting time fell
+  // inside a known Polaris subnet on that FortiGate.
+  device     String?
+  subnetCidr String?
+  subnetName String?
+  lastSeen   DateTime @default(now())
+  firstSeen  DateTime @default(now())
+
+  @@unique([assetId, mac])
+  @@index([assetId])
+  @@index([mac])
+  @@map("asset_mac_addresses")
 }
 
 // Operator-typed override for an interface's "Interface Comments" text box.

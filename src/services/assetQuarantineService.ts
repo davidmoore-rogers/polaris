@@ -381,11 +381,11 @@ export interface QuarantineTargetRecord {
   error?: string;
 }
 
-function macsForAsset(asset: { macAddress: string | null; macAddresses: unknown }): string[] {
+function macsForAsset(asset: { macAddress: string | null; macAddressRows?: Array<{ mac: string }> }): string[] {
   const set = new Set<string>();
   if (asset.macAddress) set.add(normalizeMac(asset.macAddress));
-  if (Array.isArray(asset.macAddresses)) {
-    for (const entry of asset.macAddresses as Array<{ mac?: string }>) {
+  if (Array.isArray(asset.macAddressRows)) {
+    for (const entry of asset.macAddressRows) {
       const m = entry?.mac ? normalizeMac(entry.mac) : "";
       if (m) set.add(m);
     }
@@ -428,7 +428,10 @@ export interface QuarantineAssetResult {
 export async function quarantineAsset(
   params: QuarantineAssetParams,
 ): Promise<QuarantineAssetResult> {
-  const asset = await prisma.asset.findUnique({ where: { id: params.assetId } });
+  const asset = await prisma.asset.findUnique({
+    where: { id: params.assetId },
+    include: { macAddressRows: { select: { mac: true } } },
+  });
   if (!asset) throw new AppError(404, `Asset ${params.assetId} not found`);
 
   // Infrastructure assets discovered from FMG/FortiGate (firewalls, switches,
@@ -768,7 +771,10 @@ export async function verifyAssetQuarantine(
   targets: QuarantineTargetRecord[];
   driftDetected: boolean;
 }> {
-  const asset = await prisma.asset.findUnique({ where: { id: assetId } });
+  const asset = await prisma.asset.findUnique({
+    where: { id: assetId },
+    include: { macAddressRows: { select: { mac: true } } },
+  });
   if (!asset) throw new AppError(404, `Asset ${assetId} not found`);
 
   const macs = macsForAsset(asset);

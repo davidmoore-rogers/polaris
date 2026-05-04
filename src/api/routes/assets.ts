@@ -19,6 +19,7 @@ import { getSightingsForAsset, getSightingSettings, updateSightingSettings } fro
 import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
 import { isValidIpAddress, cidrContains } from "../../utils/cidr.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
+import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
 import {
   getMonitorSettings, updateMonitorSettings,
   probeAsset, recordProbeResult,
@@ -291,7 +292,7 @@ router.get("/", async (req, res, next) => {
           assetTag: true,
           ipAddress: true,
           macAddress: true,
-          macAddresses: true,
+          macAddressRows: { select: MAC_ROW_SELECT },
           associatedIpRows: { select: ASSOCIATED_IP_SELECT },
           serialNumber: true,
           manufacturer: true,
@@ -317,9 +318,10 @@ router.get("/", async (req, res, next) => {
       prisma.asset.count({ where }),
     ]);
     const ipCtx = await buildIpContexts(assets.map((a) => a.ipAddress).filter(Boolean) as string[]);
-    const enriched = assets.map(({ associatedIpRows, ...a }) => ({
+    const enriched = assets.map(({ associatedIpRows, macAddressRows, ...a }) => ({
       ...a,
       associatedIps: shapeAssociatedIps(associatedIpRows),
+      macAddresses: shapeMacRows(macAddressRows),
       ipContext: a.ipAddress ? (ipCtx.get(a.ipAddress) || null) : null,
     }));
     res.json({ assets: enriched, total, limit, offset });
@@ -451,6 +453,7 @@ router.get("/:id", async (req, res, next) => {
         discoveredByIntegration: { select: { id: true, name: true, type: true, config: true } },
         monitorCredential:       { select: { id: true, name: true, type: true } },
         associatedIpRows:        { select: ASSOCIATED_IP_SELECT },
+        macAddressRows:          { select: MAC_ROW_SELECT },
       },
     });
     if (!asset) throw new AppError(404, "Asset not found");
@@ -487,10 +490,11 @@ router.get("/:id", async (req, res, next) => {
       };
     }
     const { config: _omit, ...integrationLite } = (asset.discoveredByIntegration as { config?: unknown } | null) || {};
-    const { associatedIpRows, ...assetRest } = asset;
+    const { associatedIpRows, macAddressRows, ...assetRest } = asset;
     const safeAsset = {
       ...assetRest,
       associatedIps: shapeAssociatedIps(associatedIpRows),
+      macAddresses:  shapeMacRows(macAddressRows),
       discoveredByIntegration: asset.discoveredByIntegration ? integrationLite : null,
       integrationMonitorCredential,
       integrationTransportSources,
@@ -1652,33 +1656,38 @@ router.delete("/:id/macs/:mac", requireNetworkAdmin, async (req, res, next) => {
     const id = req.params.id as string;
     const normalized = String(req.params.mac || "").toUpperCase().replace(/-/g, ":");
 
-    const existing = await prisma.asset.findUnique({ where: { id } });
+    const existing = await prisma.asset.findUnique({
+      where: { id },
+      include: { macAddressRows: { select: MAC_ROW_SELECT } },
+    });
     if (!existing) throw new AppError(404, "Asset not found");
 
-    const macs = Array.isArray(existing.macAddresses) ? (existing.macAddresses as any[]) : [];
-    const filtered = macs.filter((m) => {
-      const mac = String(m?.mac || "").toUpperCase().replace(/-/g, ":");
-      return mac !== normalized;
-    });
-
-    if (filtered.length === macs.length) {
+    const allRows = existing.macAddressRows;
+    const target = allRows.find((m) => m.mac.toUpperCase().replace(/-/g, ":") === normalized);
+    if (!target) {
       throw new AppError(404, "MAC address not found on this asset");
     }
 
+    // Compute the new primary `Asset.macAddress` scalar after removal:
+    // most-recently-seen surviving MAC, or null if the deleted MAC was the
+    // last one. Side-table delete + scalar-column update run as a single
+    // transaction so the asset never points at a MAC that no longer exists.
     let primary = existing.macAddress;
     if (primary && primary.toUpperCase().replace(/-/g, ":") === normalized) {
-      const sorted = [...filtered].sort((a, b) => {
-        const ta = a?.lastSeen ? new Date(a.lastSeen).getTime() : 0;
-        const tb = b?.lastSeen ? new Date(b.lastSeen).getTime() : 0;
-        return tb - ta;
-      });
-      primary = sorted[0]?.mac ? String(sorted[0].mac).toUpperCase().replace(/-/g, ":") : null;
+      const survivors = allRows.filter((m) => m.mac !== target.mac);
+      survivors.sort((a, b) => b.lastSeen.getTime() - a.lastSeen.getTime());
+      primary = survivors[0]?.mac ?? null;
     }
 
-    const updated = await prisma.asset.update({
-      where: { id },
-      data: { macAddresses: filtered as any, macAddress: primary },
-    });
+    const [, updated] = await prisma.$transaction([
+      prisma.assetMacAddress.deleteMany({
+        where: { assetId: id, mac: target.mac },
+      }),
+      prisma.asset.update({
+        where: { id },
+        data: { macAddress: primary },
+      }),
+    ]);
 
     logEvent({
       action: "asset.mac_removed",

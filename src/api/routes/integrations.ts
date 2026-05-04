@@ -25,6 +25,13 @@ import { getAdMonitorProtocol } from "../../services/monitoringService.js";
 import * as autoMonitor from "../../services/autoMonitorInterfacesService.js";
 import * as sightings from "../../services/assetSightingService.js";
 import { quarantineAsset, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
+import {
+  MAC_ROW_SELECT,
+  shapeMacRows,
+  reconcileMacAddresses,
+  buildMacRowsForCreate,
+  type MacJsonEntry,
+} from "../../utils/macAddresses.js";
 
 const router = Router();
 
@@ -1829,12 +1836,23 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   const apInventoriedDevices     = new Set<string>(result.apInventoriedDevices     || []);
 
   // ── Pre-load all data in parallel (4 queries total) ──
-  const [blocks, allSubnetsRaw, allReservationsRaw, allAssetsRaw] = await Promise.all([
+  // Asset rows are hydrated with their macAddressRows so the in-memory MAC
+  // pipeline (AssetIndex, MAC merges in DHCP / device-inventory / Intune
+  // syncs) can keep working with the legacy `asset.macAddresses` JSON
+  // shape. Each asset write site writes back through reconcileMacAddresses
+  // at end of asset.update.
+  const [blocks, allSubnetsRaw, allReservationsRaw, allAssetsRawWithRows] = await Promise.all([
     prisma.ipBlock.findMany(),
     prisma.subnet.findMany(),
     prisma.reservation.findMany({ where: { status: "active" } }),
-    prisma.asset.findMany(),
+    prisma.asset.findMany({ include: { macAddressRows: { select: MAC_ROW_SELECT } } }),
   ]);
+  // Hydrate asset.macAddresses from the side-table rows (sorted lastSeen
+  // desc) so existing code paths can keep building macList in memory.
+  const allAssetsRaw = allAssetsRawWithRows.map((a: any) => ({
+    ...a,
+    macAddresses: shapeMacRows(a.macAddressRows),
+  }));
 
   // ── Build in-memory indexes ──
 
@@ -2568,7 +2586,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             ipAddress: apCreateProjected.ipAddress,
             ...(apCreateProjected.ipAddress ? { ipSource: ap.device || integrationType } : {}),
             macAddress: normalizedMac,
-            macAddresses: normalizedMac ? [{ mac: normalizedMac, lastSeen: now, source: "fmg-discovery" }] : [],
+            ...(normalizedMac
+              ? { macAddressRows: { create: buildMacRowsForCreate([{ mac: normalizedMac, lastSeen: now, source: "fmg-discovery" }]) } }
+              : {}),
             hostname: apCreateProjected.hostname,
             serialNumber: apCreateProjected.serialNumber,
             manufacturer: apCreateProjected.manufacturer || "Fortinet",
@@ -2884,7 +2904,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
   if (result.dhcpEntries && result.dhcpEntries.length > 0) {
     // Collect all updates, then batch-execute
-    const assetUpdates: Array<{ id: string; data: any }> = [];
+    // `macs` (when present) is reconciled to asset_mac_addresses after the
+    // asset.update lands, so the in-memory MAC merge logic can stay
+    // unchanged while the persist path uses the new side table.
+    const assetUpdates: Array<{ id: string; data: any; macs?: MacJsonEntry[] }> = [];
     const resUpdates: Array<{ id: string; data: Record<string, string> }> = [];
     // Quarantine fan-out hook: every (asset, FortiGate) DHCP attribution
     // becomes a sighting. The flush at the end of the phase is fire-and-
@@ -2939,12 +2962,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       }
       macList.sort((a: any, b: any) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
 
-      // Queue asset update
+      // Queue asset update. macAddresses go to the side table via the
+      // reconcile call inside batchSettled, not as a JSON column write.
       assetUpdates.push({
         id: asset.id,
         data: {
           macAddress: macList[0].mac,
-          macAddresses: macList,
           ipAddress: entry.ipAddress,
           ipSource: entry.device || integrationType,
           status: "active",
@@ -2952,6 +2975,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           lastSeen: new Date(now),
           ...(entry.device ? { learnedLocation: entry.device } : {}),
         },
+        macs: macList,
       });
 
       // Update in-memory so device inventory phase sees current state
@@ -2981,11 +3005,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       }
     }
 
-    // Batch-execute asset updates
+    // Batch-execute asset updates. After each successful update, reconcile
+    // the MAC side table from the in-memory list the discovery sync built.
+    // Keeping the reconcile inline (per-asset) instead of as a second
+    // global pass means a failure on one asset's reconcile only affects
+    // that asset's MAC table — the others stay consistent.
     if (assetUpdates.length > 0) {
-      const results = await batchSettled(assetUpdates, (u) =>
-        prisma.asset.update({ where: { id: u.id }, data: u.data })
-      );
+      const results = await batchSettled(assetUpdates, async (u) => {
+        const updated = await prisma.asset.update({ where: { id: u.id }, data: u.data });
+        if (u.macs) await reconcileMacAddresses(u.id, u.macs);
+        return updated;
+      });
       for (let i = 0; i < results.length; i++) {
         if (results[i].status === "rejected") {
           const entry = result.dhcpEntries![i];
@@ -3133,8 +3163,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           updateData.associatedUsers = userList;
         }
 
+        let macListForReconcile: MacJsonEntry[] | null = null;
         if (normalizedMac && !handledByDhcp) {
-          const macList: Array<{mac: string; lastSeen: string; source: string; device?: string}> = Array.isArray(existingAsset.macAddresses) ? [...(existingAsset.macAddresses as any)] : [];
+          const macList: MacJsonEntry[] = Array.isArray(existingAsset.macAddresses) ? [...(existingAsset.macAddresses as any)] : [];
           const existingMac = macList.find((m) => m.mac === normalizedMac);
           if (existingMac) {
             existingMac.lastSeen = now;
@@ -3150,16 +3181,25 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           }
           macList.sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
           updateData.macAddress = macList[0].mac;
-          updateData.macAddresses = macList;
+          // Update in-memory `existingAsset.macAddresses` for downstream sync
+          // phases that read it before the next pre-load. Side-table reconcile
+          // happens after the asset.update lands.
+          existingAsset.macAddresses = macList;
+          macListForReconcile = macList;
         }
 
-        if (Object.keys(updateData).length > 0) {
+        if (Object.keys(updateData).length > 0 || macListForReconcile) {
           try {
             clampAcquiredToLastSeen(updateData, existingAsset);
-            await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
-            // Update in-memory
-            Object.assign(existingAsset, updateData);
-            assetIdx.reindex(existingAsset);
+            if (Object.keys(updateData).length > 0) {
+              await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
+              // Update in-memory
+              Object.assign(existingAsset, updateData);
+              assetIdx.reindex(existingAsset);
+            }
+            if (macListForReconcile) {
+              await reconcileMacAddresses(existingAsset.id, macListForReconcile);
+            }
             inventoryAssets.push(`${existingAsset.hostname || normalizedMac} (updated)`);
             if (existingAsset.assetType !== "firewall" && existingAsset.assetType !== "switch" && existingAsset.assetType !== "access_point") {
               fortigateEndpointAssetIds.add(existingAsset.id);
@@ -3187,7 +3227,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               ipAddress: resolvedIp,
               ipSource: inv.device || integrationType,
               macAddress: normalizedMac || null,
-              macAddresses: normalizedMac ? [{ mac: normalizedMac, lastSeen: now, source: "device-inventory", ...(inv.device ? { device: inv.device } : {}) }] : [],
+              ...(normalizedMac
+                ? { macAddressRows: { create: buildMacRowsForCreate([{ mac: normalizedMac, lastSeen: now, source: "device-inventory", ...(inv.device ? { device: inv.device } : {}) }]) } }
+                : {}),
               hostname: inv.hostname || null,
               manufacturer: inv.hardwareVendor || null,
               assetType: inferAssetTypeFromOs(inv.os),
@@ -3235,7 +3277,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       seenMacOnDevice.add(`${mac}|${inv.device}`);
     }
 
-    const staleSweepUpdates: Array<{ id: string; data: any }> = [];
+    // Stale-device sweep: when a FortiGate previously held a MAC but the
+    // refreshed scrape no longer sees it on that device, clear the per-row
+    // device stamp so the asset detail panel doesn't keep surfacing a
+    // misleading "last seen on FortiGate-X" link. Reconciles directly to
+    // the side table — no asset.update needed (only the relation rows
+    // change, no scalar columns on Asset).
+    const staleSweepReconciles: Array<{ id: string; macs: MacJsonEntry[] }> = [];
     for (const asset of assetIdx.all()) {
       const macs = Array.isArray(asset.macAddresses) ? (asset.macAddresses as any[]) : [];
       if (macs.length === 0) continue;
@@ -3249,16 +3297,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
       }
       if (mutated) {
-        staleSweepUpdates.push({ id: asset.id, data: { macAddresses: macs } });
+        staleSweepReconciles.push({ id: asset.id, macs });
         asset.macAddresses = macs;
       }
     }
 
-    if (staleSweepUpdates.length > 0) {
-      await batchSettled(staleSweepUpdates, (u) =>
-        prisma.asset.update({ where: { id: u.id }, data: u.data })
-      );
-      syncLog("info", `Cleared stale MAC device stamps on ${staleSweepUpdates.length} asset(s) across ${refreshedDevices.size} refreshed FortiGate(s)`);
+    if (staleSweepReconciles.length > 0) {
+      await batchSettled(staleSweepReconciles, (u) => reconcileMacAddresses(u.id, u.macs));
+      syncLog("info", `Cleared stale MAC device stamps on ${staleSweepReconciles.length} asset(s) across ${refreshedDevices.size} refreshed FortiGate(s)`);
     }
   }
 
@@ -3947,8 +3993,16 @@ async function syncEntraDevices(
   // Load the full asset table and the AssetSource lookup index. The Entra
   // device-id and SID indexes are now built from AssetSource (Phase 2
   // cutover); MAC and hostname maps still derive from in-memory asset
-  // properties below.
-  const allAssets = await prisma.asset.findMany();
+  // properties below. macAddressRows are hydrated to .macAddresses so the
+  // Entra sync's MAC index builder + mergeIntuneMacs pipeline keep
+  // working with the legacy JSON shape.
+  const allAssetsWithRows = await prisma.asset.findMany({
+    include: { macAddressRows: { select: MAC_ROW_SELECT } },
+  });
+  const allAssets = allAssetsWithRows.map((a: any) => ({
+    ...a,
+    macAddresses: shapeMacRows(a.macAddressRows),
+  }));
   const {
     assetByEntraDeviceId,
     assetIdBySid,
@@ -4157,9 +4211,10 @@ async function syncEntraDevices(
       // SID-cross-link finds the row that AD created first). Existing
       // assetTag values on the row are preserved for back-compat.
       // Operator-owned / non-projected fields.
+      let entraMergedMacs: MacJsonEntry[] | null = null;
       if (intuneMacEntries.length > 0) {
         const { primary, merged } = mergeIntuneMacs(existing.macAddresses as any[]);
-        updateData.macAddresses = merged;
+        entraMergedMacs = merged as MacJsonEntry[];
         if (primary) updateData.macAddress = primary;
       }
       if (dev.userPrincipalName) updateData.assignedTo = dev.userPrincipalName;
@@ -4177,6 +4232,7 @@ async function syncEntraDevices(
       try {
         clampAcquiredToLastSeen(updateData, existing);
         await prisma.asset.update({ where: { id: existing.id }, data: updateData });
+        if (entraMergedMacs) await reconcileMacAddresses(existing.id, entraMergedMacs);
         // (AssetSource rows already upserted above the projection step.)
         updated.push(dev.displayName || dev.deviceId);
       } catch (err: any) {
@@ -4320,9 +4376,10 @@ async function syncEntraDevices(
             if (dupProjected.learnedLocation !== null) updateFields.learnedLocation = dupProjected.learnedLocation;
             // Operator-owned / non-projected fields.
             if (dev.userPrincipalName) updateFields.assignedTo = dev.userPrincipalName;
+            let dupEntraMergedMacs: MacJsonEntry[] | null = null;
             if (intuneMacEntries.length > 0) {
               const { primary, merged } = mergeIntuneMacs(dupEntra.asset.macAddresses as any[]);
-              updateFields.macAddresses = merged;
+              dupEntraMergedMacs = merged as MacJsonEntry[];
               if (primary) updateFields.macAddress = primary;
             }
             if (acquiredAt && (!dupEntra.asset.acquiredAt || acquiredAt < new Date(dupEntra.asset.acquiredAt as any))) {
@@ -4331,6 +4388,7 @@ async function syncEntraDevices(
             if (dupEntra.asset.assetType === "other") updateFields.assetType = assetType;
             clampAcquiredToLastSeen(updateFields, dupEntra.asset);
             await prisma.asset.update({ where: { id: dupEntra.asset.id }, data: updateFields });
+            if (dupEntraMergedMacs) await reconcileMacAddresses(dupEntra.asset.id, dupEntraMergedMacs);
             // (AssetSource rows were already upserted above the projection
             // step, including the stale-deviceId sweep that removes the
             // old (entra,oldDeviceId)/(intune,oldDeviceId) rows so the
@@ -4391,7 +4449,9 @@ async function syncEntraDevices(
         hostname: projected.hostname,
         serialNumber: projected.serialNumber,
         macAddress: seeded.primary || dev.macAddress || null,
-        macAddresses: seeded.merged,
+        ...(seeded.merged.length > 0
+          ? { macAddressRows: { create: buildMacRowsForCreate(seeded.merged as MacJsonEntry[]) } }
+          : {}),
         manufacturer: projected.manufacturer,
         model: projected.model,
         assetType,

@@ -316,7 +316,15 @@ Asset
   ipAddress       String?
   ipSource        String?         -- Where ipAddress was last set from: "manual", "fortimanager", "fortigate", etc.
   macAddress      String?         -- Most recently seen MAC (Intune writes prefer Ethernet over Wi-Fi when both are reported)
-  macAddresses    Json            -- [{mac, lastSeen, source?}] — full MAC history. `source` examples: `"intune-ethernet"`, `"intune-wifi"`, `"dhcp_reservation"`, `"dhcp_lease"`, `"device-inventory"`, `"fmg-discovery"`.
+  -- macAddresses: stored in the AssetMacAddress side table (one row per
+  -- assetId+mac pair). The list/get response still serializes the relation
+  -- back into the legacy `macAddresses: [...]` JSON shape so the frontend
+  -- reads the same field name as before. Discovery code paths (FMG /
+  -- FortiGate DHCP, device-inventory, Intune sync, conflict ghost-merge)
+  -- hydrate `asset.macAddresses` from the rows on load, modify the array
+  -- in JS as before, then call `reconcileMacAddresses(assetId, macs)` from
+  -- src/utils/macAddresses.ts to sync the side table after the
+  -- asset.update lands.
   hostname        String?
   dnsName         String?         -- FQDN from PTR lookup
   dnsNameFetchedAt DateTime?      -- When the last PTR lookup ran (success or failure)
@@ -450,6 +458,19 @@ AssetIpHistory                  -- Auto-populated log of every IP each asset has
   firstSeen     DateTime
   lastSeen      DateTime
   @@unique([assetId, ip])       -- one row per (asset, ip); lastSeen and source update on re-sighting
+
+AssetMacAddress                 -- All MACs an asset has been seen with. Replaces the legacy Asset.macAddresses JSONB column.
+  id            UUID PK
+  assetId       UUID FK → Asset (cascade delete)
+  mac           String                    -- normalized colon-uppercase (AA:BB:CC:DD:EE:FF)
+  source        String                    -- "fmg-discovery" | "fortigate" | "intune-ethernet" | "intune-wifi" | "device-inventory" | "ad" | "manual" | various
+  device        String?                   -- FortiGate device name when this MAC came from a DHCP scrape
+  subnetCidr    String?                   -- populated when the IP at sighting time fell inside a known subnet
+  subnetName    String?
+  firstSeen     DateTime
+  lastSeen      DateTime
+  @@unique([assetId, mac])
+  -- Persist: discovery code that builds an in-memory mac list (deduped + sorted lastSeen desc) calls `reconcileMacAddresses(assetId, macs)` from src/utils/macAddresses.ts after the asset.update lands. The list/get response serializes the relation back into the legacy `macAddresses: [...]` JSON shape so existing API consumers keep reading the same field name.
 
 AssetAssociatedIp               -- Additional ("secondary") IPs an asset holds beyond Asset.ipAddress. Replaces the legacy Asset.associatedIps JSONB column.
   id            UUID PK
