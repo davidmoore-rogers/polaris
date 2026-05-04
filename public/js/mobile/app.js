@@ -105,26 +105,37 @@
       body = document.getElementById("app-body");
     }
 
+    // Top-level tab?
     var tabSpec = PolarisTabs.byId(route.name);
-
-    // Phase 1: only top-level tab routes are wired. Detail routes
-    // (#asset/:id, #subnet/:id, #more/<sub>) come in later phases.
-    if (!tabSpec) {
-      // Unknown route — bounce to search.
-      PolarisRouter.go("search", { replace: true });
+    if (tabSpec) {
+      setActiveTab(route.name);
+      topbar.innerHTML = tabSpec.renderTopbar
+        ? tabSpec.renderTopbar({ user: currentUser, route: route }) : '';
+      tabSpec.render(body, { user: currentUser, route: route });
+      body.scrollTop = 0;
       return;
     }
 
-    setActiveTab(route.name);
+    // Detail route? (asset, subnet, block, site)
+    var details = window.PolarisDetails || {};
+    var detailSpec = details[route.name];
+    if (detailSpec) {
+      // Detail screens leave the navbar visible but unselected so the user
+      // can hop straight to another tab. Set data-tab to the route name so
+      // the navbar shows but no item is active.
+      app.dataset.tab = route.name;
+      var nav = document.getElementById("navbar");
+      if (nav) nav.querySelectorAll(".nav-item").forEach(function (b) { b.classList.remove("active"); });
 
-    // Render the tab's optional top app bar, then its body.
-    topbar.innerHTML = tabSpec.renderTopbar
-      ? tabSpec.renderTopbar({ user: currentUser, route: route })
-      : '';
-    tabSpec.render(body, { user: currentUser, route: route });
+      topbar.innerHTML = detailSpec.renderTopbar
+        ? detailSpec.renderTopbar({ user: currentUser, route: route }) : '';
+      detailSpec.render(body, { user: currentUser, route: route });
+      body.scrollTop = 0;
+      return;
+    }
 
-    // Snap scroll to top on tab change.
-    body.scrollTop = 0;
+    // Unknown route — bounce to search.
+    PolarisRouter.go("search", { replace: true });
   }
 
   // ─── Public surface ────────────────────────────────────────────────────

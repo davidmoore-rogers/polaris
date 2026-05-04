@@ -17,7 +17,75 @@
       + '</div>';
   }
 
+  // ─── Shared snackbar ───────────────────────────────────────────────────
+  // Single-instance toast at the bottom of the viewport, above the navbar.
+  // showSnackbar(message, opts?) where opts may carry { error, action: { label, onClick }, duration }.
+  // Re-calling supersedes the previous toast immediately.
+  var _snackTimer = null;
+  function showSnackbar(message, opts) {
+    opts = opts || {};
+    var existing = document.getElementById("snackbar");
+    if (existing) existing.remove();
+    if (_snackTimer) { clearTimeout(_snackTimer); _snackTimer = null; }
+
+    var sb = document.createElement("div");
+    sb.id = "snackbar";
+    sb.className = "snackbar" + (opts.error ? " error" : "");
+    sb.innerHTML = '<span class="label">' + escapeHtml(message) + '</span>'
+      + (opts.action ? '<button class="action" id="snack-action">' + escapeHtml(opts.action.label) + '</button>' : '');
+    document.body.appendChild(sb);
+
+    if (opts.action) {
+      document.getElementById("snack-action").addEventListener("click", function () {
+        try { opts.action.onClick(); } catch (_) {}
+        sb.remove();
+        if (_snackTimer) { clearTimeout(_snackTimer); _snackTimer = null; }
+      });
+    }
+
+    _snackTimer = setTimeout(function () {
+      sb.remove();
+      _snackTimer = null;
+    }, opts.duration || 3500);
+  }
+
   // ─── Search ────────────────────────────────────────────────────────────
+  // Group order on results — picks the most discriminating hits first so
+  // the user sees the answer they were typing toward at the top of the
+  // list. IPs is first because typing an IP is the strongest signal
+  // ("the user knows the exact IP and wants to see what's there").
+  var SEARCH_GROUP_ORDER = ["ips", "assets", "sites", "subnets", "reservations", "blocks"];
+
+  var SEARCH_GROUP_META = {
+    ips:           { label: "IP addresses",  icon: "#i-router",   leading: "tonal" },
+    assets:        { label: "Assets",        icon: "#i-server",   leading: "" },
+    sites:         { label: "Device Map",    icon: "#i-map",      leading: "tertiary" },
+    subnets:       { label: "Networks",      icon: "#i-subnet",   leading: "tonal" },
+    reservations:  { label: "Reservations",  icon: "#i-bookmark", leading: "" },
+    blocks:        { label: "Blocks",        icon: "#i-block",    leading: "" },
+  };
+
+  // Map a hit to the route to navigate to on tap. Returns null when there's
+  // no sensible mobile destination (those rows are still tappable but
+  // navigate via fallback — see hitClick).
+  function hitTarget(group, hit) {
+    if (group === "assets")       return "asset/" + hit.id;
+    if (group === "sites")        return "site/" + hit.id;
+    if (group === "subnets")      return "subnet/" + hit.id;
+    if (group === "blocks")       return "block/" + hit.id;
+    if (group === "reservations") {
+      var ctx = hit.context || {};
+      if (ctx.subnetId) return "subnet/" + ctx.subnetId;
+      return null;
+    }
+    if (group === "ips") {
+      var ctx2 = hit.context || {};
+      if (ctx2.subnetId) return "subnet/" + ctx2.subnetId;
+      return null;
+    }
+    return null;
+  }
+
   var Search = {
     title: "Search",
     icon: "#i-search",
@@ -26,16 +94,163 @@
         .slice(0, 2).toUpperCase();
       return ''
         + '<div class="m3-searchbar" style="margin:8px 16px 0;">'
-        + '  <button class="icon-btn" aria-label="Search"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></button>'
-        + '  <input class="input" type="search" placeholder="Search IPs, assets, subnets…" disabled>'
-        + '  <div class="avatar" id="topbar-avatar">' + initials + '</div>'
+        + '  <button class="icon-btn" id="search-clear-btn" aria-label="Clear" type="button" style="display:none;"><svg viewBox="0 0 24 24"><use href="#i-close"/></svg></button>'
+        + '  <button class="icon-btn" id="search-icon-btn" aria-label="Search" type="button"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></button>'
+        + '  <input class="input" type="search" id="search-input" placeholder="Search IPs, assets, subnets…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">'
+        + '  <div class="avatar">' + escapeHtml(initials) + '</div>'
         + '</div>';
     },
     render: function (body) {
-      body.innerHTML = placeholder(
-        "Search coming soon",
-        "Type-ahead across IPs, assets, subnets, blocks and Device Map sites — wires the existing /search endpoint."
-      );
+      body.innerHTML = '<div id="search-state"></div>';
+      var state = document.getElementById("search-state");
+      var input = document.getElementById("search-input");
+      var clearBtn = document.getElementById("search-clear-btn");
+      var iconBtn  = document.getElementById("search-icon-btn");
+
+      var debounceTimer = null;
+      var inFlight = null;
+
+      function setClearVisible(visible) {
+        if (!clearBtn || !iconBtn) return;
+        clearBtn.style.display = visible ? "" : "none";
+        iconBtn.style.display  = visible ? "none" : "";
+      }
+
+      function renderEmpty() {
+        state.innerHTML = ''
+          + '<div class="empty-state" style="padding-top:48px;">'
+          + '  <div class="icon"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></div>'
+          + '  <div class="ttl">Search Polaris</div>'
+          + '  <div class="desc">Find IPs, assets, subnets, FortiGate sites and reservations. Try typing an IP, hostname, MAC, or partial name.</div>'
+          + '</div>';
+      }
+
+      function renderLoading() {
+        state.innerHTML = '<div class="loading-screen" style="padding:48px 0;"><div class="spinner"></div></div>';
+      }
+
+      function renderError(msg) {
+        state.innerHTML = ''
+          + '<div class="empty-state" style="padding-top:48px;">'
+          + '  <div class="icon" style="background:var(--md-error-container);color:var(--md-on-error-container);"><svg viewBox="0 0 24 24"><use href="#i-warn"/></svg></div>'
+          + '  <div class="ttl">Search failed</div>'
+          + '  <div class="desc">' + escapeHtml(msg) + '</div>'
+          + '</div>';
+      }
+
+      function renderResults(data) {
+        var totalHits = 0;
+        SEARCH_GROUP_ORDER.forEach(function (g) { totalHits += (data[g] || []).length; });
+        if (totalHits === 0) {
+          state.innerHTML = ''
+            + '<div class="empty-state" style="padding-top:48px;">'
+            + '  <div class="icon"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></div>'
+            + '  <div class="ttl">No matches</div>'
+            + '  <div class="desc">Nothing matched “' + escapeHtml(data.query || "") + '”. Try a different query.</div>'
+            + '</div>';
+          return;
+        }
+
+        var html = "";
+        SEARCH_GROUP_ORDER.forEach(function (g) {
+          var hits = data[g] || [];
+          if (hits.length === 0) return;
+          var meta = SEARCH_GROUP_META[g];
+          html += '<div class="section-head">' + meta.label + '<span class="count">' + hits.length + '</span></div>';
+          hits.forEach(function (hit, idx) {
+            var titleClass = (g === "ips" || g === "subnets" || g === "blocks") ? "headline mono" : "headline";
+            var leadingCls = "leading" + (meta.leading ? " " + meta.leading : "");
+            html += ''
+              + '<button class="list-item two-line" data-group="' + g + '" data-idx="' + idx + '">'
+              + '  <span class="' + leadingCls + '"><svg viewBox="0 0 24 24"><use href="' + meta.icon + '"/></svg></span>'
+              + '  <div class="content">'
+              + '    <div class="' + titleClass + '">' + escapeHtml(hit.title || "") + '</div>'
+              + (hit.subtitle ? '    <div class="supporting">' + escapeHtml(hit.subtitle) + '</div>' : '')
+              + '  </div>'
+              + '  <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>'
+              + '</button>';
+          });
+        });
+        state.innerHTML = html;
+
+        // Wire row taps. We rebuild the list on every query so listeners
+        // are fresh — no leak risk.
+        state.querySelectorAll(".list-item").forEach(function (row) {
+          row.addEventListener("click", function () {
+            var g = row.dataset.group;
+            var idx = parseInt(row.dataset.idx, 10);
+            var hit = (data[g] || [])[idx];
+            if (!hit) return;
+            var target = hitTarget(g, hit);
+            if (target) {
+              PolarisRouter.go(target);
+            } else {
+              showSnackbar("No mobile view for this result yet — open it on desktop.");
+            }
+          });
+        });
+      }
+
+      function runSearch(q) {
+        // Abort any in-flight request first, even if we're about to bail
+        // on the short-query check — otherwise a slow response from a
+        // longer prior query can paint stale results over the empty state.
+        if (inFlight) { inFlight.abort(); inFlight = null; }
+        if (q.length < 2) {
+          renderEmpty();
+          return;
+        }
+        inFlight = new AbortController();
+        var thisFlight = inFlight;
+
+        renderLoading();
+        fetch("/api/v1/search?q=" + encodeURIComponent(q), { signal: thisFlight.signal })
+          .then(function (r) {
+            if (r.status === 401) { window.PolarisMobile.boot(); throw new Error("auth"); }
+            if (!r.ok) throw new Error("Request failed (" + r.status + ")");
+            return r.json();
+          })
+          .then(function (data) {
+            if (thisFlight !== inFlight) return; // superseded
+            renderResults(data);
+          })
+          .catch(function (err) {
+            if (err.name === "AbortError" || err.message === "auth") return;
+            renderError(err.message || "Network error");
+          });
+      }
+
+      input.addEventListener("input", function () {
+        setClearVisible(!!input.value);
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(function () { runSearch(input.value.trim()); }, 200);
+      });
+
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") {
+          input.value = "";
+          setClearVisible(false);
+          renderEmpty();
+        }
+      });
+
+      if (clearBtn) {
+        clearBtn.addEventListener("click", function () {
+          input.value = "";
+          setClearVisible(false);
+          renderEmpty();
+          input.focus();
+        });
+      }
+
+      // Initial state.
+      renderEmpty();
+      // Auto-focus the input on first land. Skip on touch devices
+      // (showing the keyboard before the user asks is annoying on
+      // phones — it covers the screen).
+      if (!("ontouchstart" in window)) {
+        setTimeout(function () { try { input.focus(); } catch (_) {} }, 50);
+      }
     },
   };
 
@@ -190,5 +405,6 @@
     },
     escapeHtml: escapeHtml,
     placeholder: placeholder,
+    showSnackbar: showSnackbar,
   };
 })();
