@@ -23,6 +23,7 @@ import { initHttps, httpsRedirectMiddleware } from "./httpsManager.js";
 import { getHttpsSettings } from "./services/serverSettingsService.js";
 import { UPLOADS_DIR } from "./utils/paths.js";
 import { isAzureSsoConfiguredAsync, getSsoSettings } from "./services/azureAuthService.js";
+import { renderMetrics } from "./metrics.js";
 import "./jobs/pruneEvents.js";
 import "./jobs/ouiRefresh.js";
 import "./jobs/updateCheck.js";
@@ -273,6 +274,24 @@ app.get("/health", (req, res) => {
     }
   }
   res.json({ status: "ok" });
+});
+
+// Prometheus metrics endpoint. Same Bearer-token convention as /health: open
+// by default, gated by METRICS_TOKEN when set. Exports default Node.js
+// process / event-loop metrics plus Polaris-specific monitor / probe
+// histograms and counters defined in src/metrics.ts.
+app.get("/metrics", async (req, res) => {
+  const expected = process.env.METRICS_TOKEN;
+  if (expected) {
+    const auth = req.get("authorization") || "";
+    const supplied = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    if (supplied !== expected) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+  }
+  const { contentType, body } = await renderMetrics();
+  res.setHeader("Content-Type", contentType);
+  res.send(body);
 });
 // API responses are session/state-dependent and must never be cached. Without
 // this header, browsers fall back to heuristic caching of JSON responses,

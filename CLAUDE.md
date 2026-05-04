@@ -1182,6 +1182,10 @@ TRUST_PROXY=
 # `Authorization: Bearer <token>`. Leave unset on private deployments.
 HEALTH_TOKEN=
 
+# Prometheus metrics bearer token — optional. When set, /metrics requires
+# `Authorization: Bearer <token>`. Leave unset on private deployments.
+METRICS_TOKEN=
+
 # Persistent-state directory — optional. When set, the four runtime-mutable
 # state items (.env, .setup-complete, data/backups, public/uploads) all live
 # under this single directory. Leaving it unset keeps the legacy layout where
@@ -1290,6 +1294,23 @@ npm run lint
 - **Commit after every change.** Each logical change (feature, fix, update) gets its own commit immediately — don't batch unrelated work.
 - **Version is automatic.** The patch is computed by `src/utils/version.ts` (Docker: baked-in `POLARIS_BUILD_COMMIT_COUNT`, otherwise `git rev-list --count HEAD`). Do not touch `package.json` version for patch increments — it stays `<major>.<minor>.0`. Bump the minor (e.g. `0.9.0` → `0.10.0`) only when cutting a named release.
 - **FortiManager ↔ standalone FortiGate parity.** Treat the FortiManager and standalone FortiGate integrations as paired surfaces. Whenever you add or change a FortiManager-side feature — new tab, config field, toggle, push pathway, monitoring stream, filter, etc. — evaluate whether the same change applies to the standalone FortiGate path and, if so, ship both in the same change. The two integrations talk to the same FortiOS device fleet via different transports (FMG proxy/direct vs. direct REST), so most user-visible features make sense on both. Only skip parity when the feature is structurally FMG-only (multi-FortiGate device filter, ADOM scoping, FMG-proxy concurrency tuning). UI: the Add/Edit modal tab layouts (`General` / `Filters` / `Monitoring` / `DHCP Push` / `Quarantine Push`) should look identical between the two types — diverge only on the tab content where the integrations genuinely differ. Backend: prefer `buildTransportForIntegration()`-style helpers that dispatch on integration type so push/quarantine/lease-release pathways stay generic instead of hardcoding `type === "fortimanager"` checks.
+
+---
+
+## Observability
+
+- `GET /health` — open by default, gated by `HEALTH_TOKEN` when set. Returns `{status: "ok"}` once the app has booted; the first-run setup wizard polls it (from localhost) to detect when the main app has come up after finalize.
+- `GET /metrics` — Prometheus text-format endpoint, open by default, gated by `METRICS_TOKEN` when set. Exposes default Node.js process / GC / event-loop metrics (un-prefixed so standard Grafana dashboards work) plus Polaris-specific gauges, histograms, and counters defined in `src/metrics.ts`. Polaris-specific metric names are prefixed `polaris_`. Currently exported:
+  - `polaris_monitor_pass_duration_seconds` (histogram) — wall-clock of one `runMonitorPass`. Watch this rise toward the configured cadence as a saturation signal.
+  - `polaris_monitor_work_duration_seconds{cadence}` (histogram) — per-work-item wall-clock; `cadence` is `probe | telemetry | systemInfo | fastFiltered`.
+  - `polaris_monitor_work_total{cadence,outcome}` (counter) — `outcome` is `success | failure | crash`.
+  - `polaris_monitor_queue_depth{cadence}` (gauge) — queued items at start of pass.
+  - `polaris_probe_duration_seconds{transport}` (histogram) — per-probe RTT; `transport` is the asset's `monitorType`.
+  - `polaris_probe_total{transport,outcome}` (counter) — `outcome` is `success | failure`.
+  - `polaris_monitored_assets` (gauge) — total assets with `monitored=true` and a `monitorType` set.
+  - `polaris_monitored_assets_by_status{status}` (gauge) — `status` is `up | down | unknown`.
+
+  These mirror the structure that pg-boss / TimescaleDB / discovery instrumentation will plug into in later phases.
 
 ---
 

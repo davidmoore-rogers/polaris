@@ -40,6 +40,14 @@ import {
   pickVendorProfile,
   type VendorTelemetryProfile,
 } from "./vendorTelemetryProfiles.js";
+import {
+  startPassTimer,
+  startWorkTimer,
+  recordWorkOutcome,
+  recordProbe,
+  setMonitoredAssets,
+  setQueueDepth,
+} from "../metrics.js";
 
 export type MonitorType =
   | "fortimanager"
@@ -2900,6 +2908,7 @@ interface RunStats {
  * a fleet of dead targets.
  */
 export async function runMonitorPass(opts?: { concurrency?: number }): Promise<RunStats> {
+  const endPassTimer = startPassTimer();
   const settings = await getMonitorSettings();
   const concurrency = Math.max(1, Math.min(opts?.concurrency ?? 8, 32));
   const now = new Date();
@@ -2909,7 +2918,7 @@ export async function runMonitorPass(opts?: { concurrency?: number }): Promise<R
     select: {
       id: true,
       assetType: true, manufacturer: true,
-      monitorStatus: true,
+      monitorType: true, monitorStatus: true,
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, telemetryIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
@@ -2918,6 +2927,21 @@ export async function runMonitorPass(opts?: { concurrency?: number }): Promise<R
       monitoredIpsecTunnels: true,
     },
   });
+
+  // Asset-count gauges. Set every pass so the Grafana view stays current
+  // even when the fleet size changes between ticks.
+  let upCount = 0, downCount = 0, unknownCount = 0;
+  for (const a of candidates) {
+    if (a.monitorStatus === "up") upCount++;
+    else if (a.monitorStatus === "down") downCount++;
+    else unknownCount++;
+  }
+  setMonitoredAssets(candidates.length, { up: upCount, down: downCount, unknown: unknownCount });
+
+  // Map (assetId → monitorType) so the per-probe metrics can label by
+  // transport without a second DB lookup.
+  const transportById = new Map<string, string>();
+  for (const a of candidates) transportById.set(a.id, a.monitorType ?? "unknown");
 
   function isDue(last: Date | null, perAsset: number | null, defaultSec: number): boolean {
     if (defaultSec <= 0) return false;
@@ -2974,13 +2998,23 @@ export async function runMonitorPass(opts?: { concurrency?: number }): Promise<R
   // shouldn't get to block per-minute polling for the rest of the fleet.
   const work: Work[] = [...probes, ...fastFiltereds, ...telemetries, ...systemInfos];
 
+  setQueueDepth({
+    probe: probes.length,
+    fastFiltered: fastFiltereds.length,
+    telemetry: telemetries.length,
+    systemInfo: systemInfos.length,
+  });
+
   const stats: RunStats = {
     probed: 0, succeeded: 0, failed: 0,
     telemetry:  { collected: 0, failed: 0 },
     systemInfo: { collected: 0, failed: 0 },
     fastFiltered: { collected: 0, failed: 0 },
   };
-  if (work.length === 0) return stats;
+  if (work.length === 0) {
+    endPassTimer();
+    return stats;
+  }
 
   let cursor = 0;
   async function worker(): Promise<void> {
@@ -2989,65 +3023,118 @@ export async function runMonitorPass(opts?: { concurrency?: number }): Promise<R
       const w = work[idx];
       switch (w.kind) {
         case "probe": {
+          const stopWork = startWorkTimer("probe");
+          const transport = transportById.get(w.id) ?? "unknown";
+          const probeStart = Date.now();
           try {
             const result = await probeAsset(w.id);
+            const probeMs = Date.now() - probeStart;
             await recordProbeResult(w.id, result);
             stats.probed++;
-            if (result.success) stats.succeeded++;
-            else stats.failed++;
+            if (result.success) {
+              stats.succeeded++;
+              recordProbe(transport, probeMs / 1000, "success");
+              recordWorkOutcome("probe", "success");
+            } else {
+              stats.failed++;
+              recordProbe(transport, probeMs / 1000, "failure");
+              recordWorkOutcome("probe", "failure");
+            }
           } catch (err) {
+            const probeMs = Date.now() - probeStart;
             logger.error({ err, assetId: w.id }, "Monitor probe crashed");
             stats.probed++;
             stats.failed++;
+            recordProbe(transport, probeMs / 1000, "failure");
+            recordWorkOutcome("probe", "crash");
+          } finally {
+            stopWork();
           }
           break;
         }
         case "telemetry": {
+          const stopWork = startWorkTimer("telemetry");
           try {
             const tr = await collectTelemetry(w.id);
             await recordTelemetryResult(w.id, tr);
             if (tr.supported) {
-              if (tr.data) stats.telemetry.collected++;
-              else stats.telemetry.failed++;
+              if (tr.data) {
+                stats.telemetry.collected++;
+                recordWorkOutcome("telemetry", "success");
+              } else {
+                stats.telemetry.failed++;
+                recordWorkOutcome("telemetry", "failure");
+              }
+            } else {
+              recordWorkOutcome("telemetry", "success");
             }
           } catch (err) {
             logger.error({ err, assetId: w.id }, "Telemetry collection crashed");
             stats.telemetry.failed++;
+            recordWorkOutcome("telemetry", "crash");
+          } finally {
+            stopWork();
           }
           break;
         }
         case "systemInfo": {
+          const stopWork = startWorkTimer("systemInfo");
           try {
             const sr = await collectSystemInfo(w.id);
             await recordSystemInfoResult(w.id, sr);
             if (sr.supported) {
-              if (sr.data) stats.systemInfo.collected++;
-              else stats.systemInfo.failed++;
+              if (sr.data) {
+                stats.systemInfo.collected++;
+                recordWorkOutcome("systemInfo", "success");
+              } else {
+                stats.systemInfo.failed++;
+                recordWorkOutcome("systemInfo", "failure");
+              }
+            } else {
+              recordWorkOutcome("systemInfo", "success");
             }
           } catch (err) {
             logger.error({ err, assetId: w.id }, "System info collection crashed");
             stats.systemInfo.failed++;
+            recordWorkOutcome("systemInfo", "crash");
+          } finally {
+            stopWork();
           }
           break;
         }
         case "fastFiltered": {
+          const stopWork = startWorkTimer("fastFiltered");
           try {
             const fr = await collectFastFiltered(w.id);
             await recordFastFilteredResult(w.id, fr);
             if (fr.supported) {
-              if (fr.data) stats.fastFiltered.collected++;
-              else stats.fastFiltered.failed++;
+              if (fr.data) {
+                stats.fastFiltered.collected++;
+                recordWorkOutcome("fastFiltered", "success");
+              } else {
+                stats.fastFiltered.failed++;
+                recordWorkOutcome("fastFiltered", "failure");
+              }
+            } else {
+              recordWorkOutcome("fastFiltered", "success");
             }
           } catch (err) {
             logger.error({ err, assetId: w.id }, "Fast-cadence scrape crashed");
             stats.fastFiltered.failed++;
+            recordWorkOutcome("fastFiltered", "crash");
+          } finally {
+            stopWork();
           }
           break;
         }
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(concurrency, work.length) }, () => worker()));
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, work.length) }, () => worker()));
+  } finally {
+    endPassTimer();
+  }
   return stats;
 }
 
