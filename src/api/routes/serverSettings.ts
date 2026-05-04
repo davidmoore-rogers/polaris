@@ -942,7 +942,9 @@ router.get("/pg-tuning", async (_req, res, next) => {
     if (reservationCount >= PG_TUNING_THRESHOLDS.reservations) triggered.push("reservations");
 
     if (!triggered.length) {
-      return res.json({ needed: false, triggered: [], settings: [], snoozedUntil: null });
+      const capacity = await getCapacitySnapshot({ ramInsufficient: false, pgTuningNeeded: false });
+      void recordCapacityTransition(capacity);
+      return res.json({ needed: false, triggered: [], settings: [], snoozedUntil: null, capacity });
     }
 
     // 2. Check snooze state
