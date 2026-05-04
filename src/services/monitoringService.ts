@@ -2668,6 +2668,13 @@ async function persistLldpNeighbors(
   const existingByKey = new Map<string, typeof existing[number]>();
   for (const e of existing) existingByKey.set(keyOf(e.localIfName, e.chassisId, e.portId), e);
 
+  // Partition fresh neighbors into to-create and to-update so each side can
+  // hit the DB in a single batched call instead of N per-neighbor round-trips.
+  // For a switch with 40 LLDP neighbors this collapses 40 DB calls into 2
+  // (one createMany for new, one $transaction for updates).
+  const toCreate: Array<Record<string, unknown>> = [];
+  const toUpdate: Array<{ id: string; data: Record<string, unknown> }> = [];
+
   for (const n of neighbors) {
     const k = keyOf(n.localIfName, n.chassisId ?? null, n.portId ?? null);
     seen.add(k);
@@ -2688,14 +2695,9 @@ async function persistLldpNeighbors(
     };
     const prior = existingByKey.get(k);
     if (prior) {
-      await prisma.assetLldpNeighbor.update({
-        where: { id: prior.id },
-        data: { ...data, lastSeen: now },
-      });
+      toUpdate.push({ id: prior.id, data: { ...data, lastSeen: now } });
     } else {
-      await prisma.assetLldpNeighbor.create({
-        data: { ...data, assetId, firstSeen: now, lastSeen: now },
-      });
+      toCreate.push({ ...data, assetId, firstSeen: now, lastSeen: now });
     }
   }
 
@@ -2725,6 +2727,20 @@ async function persistLldpNeighbors(
     if (ageMs > STALE_AFTER_MS) {
       toDelete.push(e.id);
     }
+  }
+  // Batched writes. createMany is a single statement; the $transaction wraps
+  // all per-row updates into one round-trip pipelined over the connection.
+  // Order: creates first so a brand-new neighbor is visible before stale
+  // siblings on the same port get deleted.
+  if (toCreate.length > 0) {
+    await prisma.assetLldpNeighbor.createMany({ data: toCreate as any });
+  }
+  if (toUpdate.length > 0) {
+    await prisma.$transaction(
+      toUpdate.map((u) =>
+        prisma.assetLldpNeighbor.update({ where: { id: u.id }, data: u.data as any }),
+      ),
+    );
   }
   if (toDelete.length > 0) {
     await prisma.assetLldpNeighbor.deleteMany({ where: { id: { in: toDelete } } });
