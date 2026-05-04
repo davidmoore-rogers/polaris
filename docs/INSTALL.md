@@ -58,9 +58,23 @@ SQL
 
 The `pg_read_all_settings` grant lets Polaris read `SHOW data_directory` so the Maintenance tab can measure the `/var` filesystem and alert before it fills.
 
-Allow the postgres directory to be traversed by the polaris OS user (needed for the same disk-space check — `statfs` on `/var/lib/pgsql/data` requires search permission on the parent):
+Allow the postgres directory to be traversed by the polaris OS user (needed for the same disk-space check — `statfs` on `/var/lib/pgsql/data` requires search permission on the parent). The PostgreSQL startup scripts reset this directory to `700` on every restart, so persist it via a systemd override rather than a one-off chmod:
 
 ```bash
+sudo systemctl edit postgresql
+```
+
+Add the following and save:
+
+```ini
+[Service]
+ExecStartPost=/bin/chmod o+x /var/lib/pgsql
+```
+
+Then reload and apply immediately:
+
+```bash
+sudo systemctl daemon-reload
 sudo chmod o+x /var/lib/pgsql
 ```
 
@@ -167,9 +181,23 @@ SQL
 
 The `pg_read_all_settings` grant lets Polaris read `SHOW data_directory` so the Maintenance tab can measure the `/var` filesystem and alert before it fills.
 
-Allow the postgres directory to be traversed by the polaris OS user:
+Allow the postgres directory to be traversed by the polaris OS user. Persist it via a systemd override so it survives PostgreSQL restarts (replace `<version>` with your installed version, e.g. `15`):
 
 ```bash
+sudo systemctl edit postgresql@<version>-main
+```
+
+Add the following and save:
+
+```ini
+[Service]
+ExecStartPost=/bin/chmod o+x /var/lib/postgresql
+```
+
+Then reload and apply immediately:
+
+```bash
+sudo systemctl daemon-reload
 sudo chmod o+x /var/lib/postgresql
 ```
 
