@@ -839,3 +839,84 @@ button, .list-item, .chip { touch-action: manipulation; }
 .ico-rtr  { background: rgba(163,201,255,.20); color: var(--md-primary); }
 .ico-wks  { background: rgba(163,201,255,.20); color: var(--md-primary); }
 .ico-other{ background: var(--md-surface-cont-highest); color: var(--md-on-surface-variant); }
+
+/* ─── Asset detail ────────────────────────────────────────────────────── */
+.asset-hero {
+  padding: 4px 24px 24px;
+  background: var(--md-surface-cont-low);
+}
+.asset-hero .hero-name {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+  font-size: 24px;
+  line-height: 32px;
+  font-weight: 400;
+  color: var(--md-on-surface);
+}
+.asset-hero .hero-name .dot { width: 14px; height: 14px; flex: 0 0 14px; }
+.asset-hero .hero-sub {
+  color: var(--md-on-surface-variant);
+  font-size: 14px;
+  letter-spacing: .25px;
+}
+.asset-sect-header {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--md-outline-variant);
+  text-align: left;
+}
+.asset-sect-header:hover { background: rgba(227,228,232,.04); }
+.asset-sect-header .sect-title {
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: .15px;
+  color: var(--md-on-surface);
+}
+.asset-sect-header .sect-sub {
+  font-size: 12px;
+  letter-spacing: .4px;
+  color: var(--md-on-surface-variant);
+  margin-top: 2px;
+}
+.sect-body { padding: 0 16px 16px; }
+.sect-body[hidden] { display: none; }
+
+.kv-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  padding: 8px 8px;
+  font-size: 14px;
+  letter-spacing: .25px;
+  border-bottom: 1px solid var(--md-outline-variant);
+}
+.kv-row:last-child { border-bottom: none; }
+.kv-row .k { color: var(--md-on-surface-variant); flex: 0 0 auto; }
+.kv-row .v { color: var(--md-on-surface); text-align: right; min-width: 0; word-break: break-word; }
+
+/* Segmented button (used for chart range chips). MD3 spec: pill outer,
+   internal divider, secondary-container fill on the active segment. */
+.seg .seg-item {
+  background: transparent;
+  border: none;
+  color: var(--md-on-surface-variant);
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: .1px;
+  border-right: 1px solid var(--md-outline);
+}
+.seg .seg-item:last-child { border-right: none; }
+.seg .seg-item.on {
+  background: var(--md-secondary-container);
+  color: var(--md-on-secondary-container);
+}

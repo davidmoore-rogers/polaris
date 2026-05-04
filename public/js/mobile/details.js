@@ -65,17 +65,17 @@
   // inside the detail. Specs without a parentTab leave the navbar
   // unhighlighted (e.g. block detail isn't part of any mobile tab).
 
-  // ─── Asset detail (placeholder until Phase 5) ──────────────────────────
-  var Asset = {
+  // ─── Asset detail ──────────────────────────────────────────────────────
+  // Real spec lives in /js/mobile/asset-detail.js. Falls back to a
+  // placeholder if the module didn't load (script-order regression check).
+  var Asset = (window.PolarisAssetDetail && window.PolarisAssetDetail.spec) || {
     parentTab: "assets",
-    renderTopbar: function (ctx) {
-      return backTopbar("Asset");
-    },
+    renderTopbar: function () { return backTopbar("Asset"); },
     render: function (body, ctx) {
       var id = ctx.route.parts[0] || "";
       body.innerHTML = placeholderBody(
-        "Asset detail coming soon",
-        "Phase 5 wires this screen up to the System tab — charts, interfaces, IP history. Asset id: " + id,
+        "Asset detail not loaded",
+        "PolarisAssetDetail module is missing — check script order. Asset id: " + id,
         "/assets.html#view=asset:" + id
       );
       wireBack("search");
