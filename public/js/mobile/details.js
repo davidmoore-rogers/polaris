@@ -82,17 +82,16 @@
     },
   };
 
-  // ─── Subnet detail (placeholder until Phase 8) ─────────────────────────
-  var Subnet = {
+  // ─── Subnet detail ─────────────────────────────────────────────────────
+  // Real spec lives in /js/mobile/subnet-detail.js.
+  var Subnet = (window.PolarisSubnetDetail && window.PolarisSubnetDetail.spec) || {
     parentTab: null,
-    renderTopbar: function () {
-      return backTopbar("Subnet");
-    },
+    renderTopbar: function () { return backTopbar("Subnet"); },
     render: function (body, ctx) {
       var id = ctx.route.parts[0] || "";
       body.innerHTML = placeholderBody(
-        "Subnet detail coming soon",
-        "Phase 8 ships the IP list with reserve / release actions. Subnet id: " + id,
+        "Subnet detail not loaded",
+        "PolarisSubnetDetail module is missing — check script order. Subnet id: " + id,
         "/subnets.html"
       );
       wireBack("search");
