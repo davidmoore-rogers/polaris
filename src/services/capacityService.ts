@@ -40,6 +40,7 @@ import { fileURLToPath } from "node:url";
 import { prisma } from "../db.js";
 import { getMonitorSettings, type MonitorSettings } from "./monitoringService.js";
 import { isTimescaleAvailable, isHypertable, SAMPLE_TABLES as TIMESCALE_SAMPLE_TABLES } from "./timescaleService.js";
+import { isPgbossInstalled, getBootTimeMode } from "./queueService.js";
 import { getDeploymentContext } from "../utils/deploymentContext.js";
 import { BACKUP_DIR, STATE_DIR } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
@@ -674,8 +675,8 @@ export async function getCapacitySnapshot(opts: {
         hypertableTables: TIMESCALE_SAMPLE_TABLES.filter((t) => isHypertable(t)),
       },
       queue: {
-        pgbossInstalled: false, // Step 4b: detect via dynamic import
-        active: "cursor",       // Step 4b: read from Setting.monitor.queueMode
+        pgbossInstalled: isPgbossInstalled(),
+        active: getBootTimeMode(),
       },
     },
     workload: {

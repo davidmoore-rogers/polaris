@@ -43,6 +43,7 @@ import "./jobs/scrubLegacySidGuidTags.js";
 import "./jobs/backfillFortigateEndpointSources.js";
 import { ensureRegistryLoaded } from "./services/oidRegistry.js";
 import { detectTimescale, migrateToHypertables } from "./services/timescaleService.js";
+import { initializeQueue } from "./services/queueService.js";
 import { runStartupDiskCheck } from "./utils/startupDiskCheck.js";
 
 // Warm the symbolic-OID registry once at startup so the first monitor tick
@@ -50,6 +51,13 @@ import { runStartupDiskCheck } from "./utils/startupDiskCheck.js";
 // are non-fatal — the registry will lazily reload on the next resolve() call.
 ensureRegistryLoaded().catch((err) => {
   logger.warn({ err: err?.message }, "OID registry warm-up failed");
+});
+
+// Warm the monitor-queue mode cache at startup so the dispatcher in
+// `monitorAssets.ts` and the capacity snapshot both see the same value.
+// Non-fatal — failure leaves Polaris on the cursor (default) queue.
+initializeQueue().catch((err) => {
+  logger.warn({ err: err?.message }, "Queue initialization failed; defaulting to cursor mode");
 });
 
 // Detect TimescaleDB once at startup so the prune layer + capacity service
