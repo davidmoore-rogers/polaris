@@ -32,8 +32,25 @@ import { deriveAssetSources, type AssetSnapshot } from "./utils/assetSourceDeriv
 
 const g = globalThis as unknown as { prisma: any; _prismaBase: PrismaClient };
 
+// Resolve the pg connection-pool size. The driver-adapter (`@prisma/adapter-pg`)
+// runs queries through a `pg.Pool`, whose default `max` is 10 — undersized
+// once you sum monitor workers + HTTP request handlers + background jobs at
+// any meaningful asset count. `DATABASE_POOL_SIZE` lets operators raise it
+// without editing code; the default of 25 is a safe step up that covers
+// today's worker pool plus comfortable headroom for HTTP burst.
+function resolveDatabasePoolSize(): number {
+  const raw = process.env.DATABASE_POOL_SIZE;
+  if (!raw) return 25;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return 25;
+  return n;
+}
+
 function buildBaseClient(): PrismaClient {
-  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL ?? "" });
+  const adapter = new PrismaPg({
+    connectionString: process.env.DATABASE_URL ?? "",
+    max: resolveDatabasePoolSize(),
+  });
   return new PrismaClient({ adapter });
 }
 

@@ -413,6 +413,15 @@ model Asset {
   @@index([discoveredByIntegrationId])
   @@index([monitored])
   @@index([monitored, lastMonitorAt])
+  // Covers the runMonitorPass candidate query
+  // `WHERE monitored = true AND monitorType IS NOT NULL`. The leading
+  // `monitored` filter rules out unmonitored rows fast, then `monitorType`
+  // narrows further. `lastMonitorAt` rides at the tail so the planner can
+  // do an index range scan without a heap fetch when the query also wants
+  // to know which rows are due. Don't drop the older two-column index —
+  // queries that filter on monitored + lastMonitorAt without monitorType
+  // can't use this composite as a prefix.
+  @@index([monitored, monitorType, lastMonitorAt])
   @@map("assets")
 }
 

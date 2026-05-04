@@ -1164,6 +1164,10 @@ Vanilla JavaScript SPA served from `/public/`. No build step — plain ES module
 # Database
 DATABASE_URL=postgresql://user:password@localhost:5432/polaris
 
+# pg pool size for the Prisma driver adapter (default 25). Raise when running
+# with many monitored assets so worker writes don't queue inside the adapter.
+DATABASE_POOL_SIZE=25
+
 # App
 PORT=3000
 NODE_ENV=development
