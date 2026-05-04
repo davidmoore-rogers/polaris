@@ -129,6 +129,37 @@ export function pickMonitorClass(settings: MonitorSettings, sig: AssetClassSig):
   return null;
 }
 
+/**
+ * Effective probe interval for one asset, applying exponential backoff when
+ * the asset is confirmed down. Probes still fire periodically so recovery is
+ * detected, but with sane spacing — a fleet with chronically-decommissioned
+ * hosts that nobody flipped to `decommissioned` shouldn't burn the probe
+ * budget on them every minute.
+ *
+ *   status != "down":                    baseIntervalSec (no backoff)
+ *   down + consecutiveFailures ≤ 10:     max(base,  5 min)  — fresh outage
+ *   down + consecutiveFailures ≤ 30:     max(base, 15 min)  — sustained outage
+ *   down + consecutiveFailures > 30:     max(base, 30 min)  — chronic / decommissioned
+ *
+ * `max(base, bucket)` so operators with deliberately long base intervals
+ * (e.g. 600 s for low-priority hosts) don't get probes accelerated by the
+ * backoff. On the first successful probe, `consecutiveFailures` resets to
+ * 0 in `recordProbeResult` and the asset returns to base cadence — recovery
+ * is detected within the current bucket's window (worst case 30 min).
+ */
+export function probeIntervalWithBackoff(
+  baseIntervalSec: number,
+  monitorStatus: string | null,
+  consecutiveFailures: number,
+): number {
+  if (monitorStatus !== "down") return baseIntervalSec;
+  let backoffSec: number;
+  if (consecutiveFailures <= 10)      backoffSec = 5  * 60;
+  else if (consecutiveFailures <= 30) backoffSec = 15 * 60;
+  else                                backoffSec = 30 * 60;
+  return Math.max(baseIntervalSec, backoffSec);
+}
+
 const PROBE_TIMEOUT_MS = 10_000;
 const sysUpTimeOid = "1.3.6.1.2.1.1.3.0";
 
@@ -3058,7 +3089,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     select: {
       id: true,
       assetType: true, manufacturer: true,
-      monitorType: true, monitorStatus: true,
+      monitorType: true, monitorStatus: true, consecutiveFailures: true,
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, telemetryIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
@@ -3100,7 +3131,14 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     // Per-class default resolution: Fortinet switches/APs may carry their own
     // interval/retention overrides; everything else uses the top-level values.
     const cls = pickMonitorClass(settings, { assetType: a.assetType, manufacturer: a.manufacturer }) ?? settings;
-    const probe      = isDue(a.lastMonitorAt,    a.monitorIntervalSec,    cls.intervalSeconds);
+    // Probe due-check applies exponential backoff for confirmed-down assets
+    // — see probeIntervalWithBackoff. Heavy cadences are gated separately via
+    // !isDown below, so the backoff only matters for the probe path itself.
+    const baseProbeInterval = a.monitorIntervalSec || cls.intervalSeconds;
+    const effectiveProbeInterval = probeIntervalWithBackoff(
+      baseProbeInterval, a.monitorStatus, a.consecutiveFailures,
+    );
+    const probe      = isDue(a.lastMonitorAt,    null,                    effectiveProbeInterval);
     const telemetry  = isDue(a.lastTelemetryAt,  a.telemetryIntervalSec,  cls.telemetryIntervalSeconds);
     const systemInfo = isDue(a.lastSystemInfoAt, a.systemInfoIntervalSec, cls.systemInfoIntervalSeconds);
     const hasFastPin =

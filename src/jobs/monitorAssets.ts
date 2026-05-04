@@ -43,6 +43,7 @@ import {
   pruneSystemInfoSamples,
   getMonitorSettings,
   pickMonitorClass,
+  probeIntervalWithBackoff,
   type MonitorCadence,
 } from "../services/monitoringService.js";
 import { getBootTimeMode, publishMonitorJob } from "../services/queueService.js";
@@ -104,7 +105,7 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     select: {
       id: true,
       assetType: true, manufacturer: true,
-      monitorType: true, monitorStatus: true,
+      monitorType: true, monitorStatus: true, consecutiveFailures: true,
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, telemetryIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
@@ -123,7 +124,11 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
 
   for (const a of candidates) {
     const cls = pickMonitorClass(settings, { assetType: a.assetType, manufacturer: a.manufacturer }) ?? settings;
-    const probe      = isDue(a.lastMonitorAt,    a.monitorIntervalSec,    cls.intervalSeconds);
+    const baseProbeInterval = a.monitorIntervalSec || cls.intervalSeconds;
+    const effectiveProbeInterval = probeIntervalWithBackoff(
+      baseProbeInterval, a.monitorStatus, a.consecutiveFailures,
+    );
+    const probe      = isDue(a.lastMonitorAt,    null,                    effectiveProbeInterval);
     const telemetry  = isDue(a.lastTelemetryAt,  a.telemetryIntervalSec,  cls.telemetryIntervalSeconds);
     const systemInfo = isDue(a.lastSystemInfoAt, a.systemInfoIntervalSec, cls.systemInfoIntervalSeconds);
     const hasFastPin =
