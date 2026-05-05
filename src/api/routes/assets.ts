@@ -409,38 +409,54 @@ router.post("/bulk-monitor", requireAssetsAdmin, async (req, res, next) => {
       monitorIntervalSec:  z.number().int().min(5).max(86400).nullable().optional(),
     }).parse(req.body);
 
-    const assets = await prisma.asset.findMany({
-      where: { id: { in: body.ids } },
-      select: { id: true, hostname: true, monitorType: true, monitorCredentialId: true },
-    });
-    const byId = new Map(assets.map((a) => [a.id, a]));
-    const updated: string[] = [];
-    const errors: Array<{ id: string; error: string }> = [];
+    // Build the per-asset data shape ONCE — every selected asset gets the
+    // same monitor config in a bulk operation. validateMonitorConfig
+    // historically ran per-asset to access `existing.monitorType` /
+    // `existing.monitorCredentialId`, but for bulk updates the body
+    // overrides both anyway, so we can validate against an empty
+    // "existing" shape and apply the same data uniformly.
+    const data: Record<string, unknown> = { monitored: body.monitored };
+    if (body.monitorType !== undefined)         data.monitorType         = body.monitorType;
+    if (body.monitorCredentialId !== undefined) data.monitorCredentialId = body.monitorCredentialId;
+    if (body.monitorIntervalSec !== undefined)  data.monitorIntervalSec  = body.monitorIntervalSec;
+    try {
+      validateMonitorConfig(data, { monitorType: null, monitorCredentialId: null });
+    } catch (err: any) {
+      throw new AppError(400, err?.message || "Invalid monitor config");
+    }
 
-    for (const id of body.ids) {
-      const a = byId.get(id);
-      if (!a) { errors.push({ id, error: "Asset not found" }); continue; }
-      const data: Record<string, unknown> = { monitored: body.monitored };
-      if (body.monitorType !== undefined) data.monitorType = body.monitorType;
-      if (body.monitorCredentialId !== undefined) data.monitorCredentialId = body.monitorCredentialId;
-      if (body.monitorIntervalSec !== undefined) data.monitorIntervalSec = body.monitorIntervalSec;
-      try {
-        validateMonitorConfig(data, a);
-        await prisma.asset.update({ where: { id }, data: data as any });
-        updated.push(id);
-      } catch (err: any) {
-        errors.push({ id, error: err?.message || "Update failed" });
-      }
+    // Identify which of the requested ids actually exist so the response
+    // can flag missing rows. One round-trip vs the previous N-asset loop.
+    const found = await prisma.asset.findMany({
+      where: { id: { in: body.ids } },
+      select: { id: true },
+    });
+    const foundSet = new Set(found.map((a) => a.id));
+    const errors: Array<{ id: string; error: string }> = body.ids
+      .filter((id) => !foundSet.has(id))
+      .map((id) => ({ id, error: "Asset not found" }));
+
+    // Single bulk update — Postgres' `WHERE id = ANY(...)` planner walks
+    // the (newly-added) primary key once and applies the uniform data
+    // change to every matched row. Was 1000 sequential round-trips, is
+    // now one statement.
+    let updatedCount = 0;
+    if (foundSet.size > 0) {
+      const result = await prisma.asset.updateMany({
+        where: { id: { in: [...foundSet] } },
+        data: data as any,
+      });
+      updatedCount = result.count;
     }
 
     logEvent({
       action: body.monitored ? "monitor.bulk_enabled" : "monitor.bulk_disabled",
       resourceType: "asset",
       actor: req.session?.username,
-      message: `Bulk ${body.monitored ? "enabled" : "disabled"} monitoring on ${updated.length} asset(s)` + (errors.length ? `; ${errors.length} error(s)` : ""),
+      message: `Bulk ${body.monitored ? "enabled" : "disabled"} monitoring on ${updatedCount} asset(s)` + (errors.length ? `; ${errors.length} error(s)` : ""),
       details: errors.length ? { errors } : undefined,
     });
-    res.json({ updated: updated.length, errors });
+    res.json({ updated: updatedCount, errors });
   } catch (err) { next(err); }
 });
 

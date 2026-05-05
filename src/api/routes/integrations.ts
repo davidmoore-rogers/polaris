@@ -3562,15 +3562,29 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // round-trip entirely.
   let projectionCorrected = 0;
   if (fortigateEndpointAssetIds.size > 0) {
+    // Pre-load every touched asset's AssetSource rows in ONE query and
+    // partition by assetId in JS. Was: N sequential `assetSource.findMany`
+    // calls (one per touched endpoint) — for a 5K-endpoint sync that's 5K
+    // round-trips before any update happens. The bulk fetch + Map dispatch
+    // collapses that to one round-trip. Per-asset writes still go through
+    // batchSettled so unchanged assets don't pay any DB cost.
+    const allSourceRows = await prisma.assetSource.findMany({
+      where: { assetId: { in: [...fortigateEndpointAssetIds] } },
+      select: { assetId: true, sourceKind: true, inferred: true, observed: true },
+    });
+    const sourcesByAsset = new Map<string, typeof allSourceRows>();
+    for (const r of allSourceRows) {
+      const existing = sourcesByAsset.get(r.assetId);
+      if (existing) existing.push(r);
+      else sourcesByAsset.set(r.assetId, [r]);
+    }
+
     const projectionResults = await batchSettled(
       Array.from(fortigateEndpointAssetIds),
       async (assetId: string) => {
         const asset = assetIdx.findById(assetId);
         if (!asset) return false;
-        const sourceRows = await prisma.assetSource.findMany({
-          where: { assetId },
-          select: { sourceKind: true, inferred: true, observed: true },
-        });
+        const sourceRows = sourcesByAsset.get(assetId) ?? [];
         const { projected } = projectAssetFromSources(
           sourceRows.map((s) => ({
             sourceKind: s.sourceKind,
