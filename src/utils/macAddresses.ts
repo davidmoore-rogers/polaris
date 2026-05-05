@@ -76,72 +76,75 @@ export function shapeMacRows(rows: readonly MacRow[] | null | undefined): MacJso
  * `data.macAddresses = macList` on an asset.update.
  *
  *   - Rows in the side table that are NOT in `macs` get deleted
- *   - Each entry in `macs` is upserted (insert if missing, update lastSeen
- *     + metadata if present)
+ *   - Each entry in `macs` is upserted (insert if missing, update metadata
+ *     if present) via a single bulk INSERT ... ON CONFLICT statement
  *
- * Wrapped in a `$transaction` so the delete + upserts are atomic — a
- * concurrent reader sees either the old or the new set, never an empty
- * intermediate. No-op (no DB write) when `macs` is empty AND there are no
- * existing rows to clear.
+ * Two round-trips total per call (delete + bulk upsert). The original
+ * implementation wrapped a deleteMany + N per-row upserts in a
+ * `$transaction` — for an asset with 50 MACs that meant 51 sequential
+ * statements inside one transaction, easily exceeding Prisma's 5-second
+ * default timeout once batchSettled was running ~50 reconciles in
+ * parallel and the connection pool started backing up. The bulk SQL form
+ * collapses N upserts into one statement; no transaction overhead, no
+ * pool contention.
+ *
+ * Trade-off: there's a brief window between the delete and the upsert
+ * where a concurrent reader could see a partial set. Acceptable for
+ * monitor-source MAC data — discovery doesn't read its own write mid-
+ * pass, and external readers (asset details panel, quarantine push) are
+ * not running during a discovery sync.
  */
 export async function reconcileMacAddresses(
   assetId: string,
   macs: readonly MacJsonEntry[],
 ): Promise<void> {
-  const newMacSet = new Set(macs.map((m) => m.mac).filter(Boolean));
+  const newMacs = macs.filter((m) => !!m.mac);
 
-  // Find rows we need to delete. Cheaper than always running a deleteMany
-  // when the asset already had no rows (common on first sighting).
-  const existing = await prisma.assetMacAddress.findMany({
-    where: { assetId },
-    select: { mac: true },
+  // Empty list = wipe all MAC rows for this asset.
+  if (newMacs.length === 0) {
+    await prisma.assetMacAddress.deleteMany({ where: { assetId } });
+    return;
+  }
+
+  // Delete any existing rows whose mac isn't in the new set. One statement
+  // regardless of row count.
+  await prisma.assetMacAddress.deleteMany({
+    where: { assetId, mac: { notIn: newMacs.map((m) => m.mac) } },
   });
-  const toDelete = existing
-    .map((e) => e.mac)
-    .filter((m) => !newMacSet.has(m));
 
-  // Skip the round-trip entirely when nothing changed and no new entries
-  // arrived (e.g. discovery saw the same fleet of MACs as last time).
-  if (toDelete.length === 0 && macs.length === 0) return;
-
-  const ops: Promise<unknown>[] = [];
-  if (toDelete.length > 0) {
-    ops.push(
-      prisma.assetMacAddress.deleteMany({
-        where: { assetId, mac: { in: toDelete } },
-      }) as unknown as Promise<unknown>,
+  // Bulk upsert via INSERT ... ON CONFLICT. Build a flat parameter list and
+  // parallel VALUES tuples; the (assetId, mac) unique index drives the
+  // upsert path. id uses gen_random_uuid() (Postgres 13+ built-in) so we
+  // don't have to round-trip per row to generate UUIDs in JS.
+  const params: unknown[] = [];
+  const tuples: string[] = [];
+  let p = 1;
+  for (const m of newMacs) {
+    const lastSeen = m.lastSeen ? new Date(m.lastSeen).toISOString() : new Date().toISOString();
+    tuples.push(
+      `(gen_random_uuid()::text, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}::timestamp, $${p++}::timestamp)`,
+    );
+    params.push(
+      assetId,
+      m.mac,
+      m.source || "unknown",
+      m.device ?? null,
+      m.subnetCidr ?? null,
+      m.subnetName ?? null,
+      lastSeen,
+      lastSeen,
     );
   }
-  for (const m of macs) {
-    if (!m.mac) continue;
-    const lastSeen = m.lastSeen ? new Date(m.lastSeen) : new Date();
-    ops.push(
-      prisma.assetMacAddress.upsert({
-        where: { assetId_mac: { assetId, mac: m.mac } },
-        create: {
-          assetId,
-          mac: m.mac,
-          source: m.source || "unknown",
-          device: m.device ?? null,
-          subnetCidr: m.subnetCidr ?? null,
-          subnetName: m.subnetName ?? null,
-          lastSeen,
-          firstSeen: lastSeen,
-        },
-        update: {
-          source: m.source || "unknown",
-          device: m.device ?? null,
-          subnetCidr: m.subnetCidr ?? null,
-          subnetName: m.subnetName ?? null,
-          lastSeen,
-        },
-      }) as unknown as Promise<unknown>,
-    );
-  }
-
-  if (ops.length > 0) {
-    await prisma.$transaction(ops as any);
-  }
+  const sql =
+    `INSERT INTO "asset_mac_addresses" ("id", "assetId", "mac", "source", "device", "subnetCidr", "subnetName", "lastSeen", "firstSeen") ` +
+    `VALUES ${tuples.join(", ")} ` +
+    `ON CONFLICT ("assetId", "mac") DO UPDATE SET ` +
+    `  "source" = EXCLUDED."source", ` +
+    `  "device" = EXCLUDED."device", ` +
+    `  "subnetCidr" = EXCLUDED."subnetCidr", ` +
+    `  "subnetName" = EXCLUDED."subnetName", ` +
+    `  "lastSeen" = EXCLUDED."lastSeen"`;
+  await prisma.$executeRawUnsafe(sql, ...params);
 }
 
 /**
