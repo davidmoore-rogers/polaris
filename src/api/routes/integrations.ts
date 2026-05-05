@@ -434,6 +434,25 @@ router.get("/:id", async (req, res, next) => {
 router.post("/", async (req, res, next) => {
   try {
     const input = CreateIntegrationSchema.parse(req.body);
+    // Defensive: reject the masked-display sentinel ("••••••••") as a
+    // literal secret value at create time. The edit modal pre-fills
+    // sensitive fields with this string for visual masking; if a
+    // workflow ever ports those values into a create call, we'd
+    // otherwise persist literal bullets as the secret and the next
+    // outgoing API call would fail with a "ByteString" error. The
+    // PUT /:id and POST /test handlers fall back to the stored value
+    // when they see this sentinel, but a fresh create has nothing to
+    // fall back to — surface a clear error so the operator pastes the
+    // real token instead.
+    const createCfg = input.config as Record<string, unknown>;
+    for (const field of ["apiToken", "fortigateApiToken", "password", "clientSecret", "bindPassword"] as const) {
+      if (isMaskedSecretSentinel(createCfg[field])) {
+        throw new AppError(
+          400,
+          `${field} appears to be the masked display value (a string of •). Paste the real secret value, not the placeholder.`,
+        );
+      }
+    }
     if (input.type === "fortimanager" || input.type === "fortigate") {
       const cfg = input.config as any;
       // Validate the FortiGate response-time SNMP override credential.
@@ -761,8 +780,14 @@ router.post("/test/fortigate-sample", async (req, res, next) => {
       const existing = await prisma.integration.findUnique({ where: { id: existingId } });
       if (existing) {
         const stored = existing.config as Record<string, unknown>;
-        if (!cfg.apiToken || typeof cfg.apiToken !== "string") cfg.apiToken = stored.apiToken;
-        if (!cfg.fortigateApiToken || typeof cfg.fortigateApiToken !== "string") cfg.fortigateApiToken = stored.fortigateApiToken;
+        // Same masked-sentinel guard as the PUT /:id and POST /test handlers
+        // — the edit modal echoes "••••••••" back as the form value when
+        // the operator doesn't retype the token, and the prior falsy/typeof
+        // check let the bullets through as the literal token.
+        const needsRestore = (v: unknown): boolean =>
+          !v || typeof v !== "string" || isMaskedSecretSentinel(v);
+        if (needsRestore(cfg.apiToken)) cfg.apiToken = stored.apiToken;
+        if (needsRestore(cfg.fortigateApiToken)) cfg.fortigateApiToken = stored.fortigateApiToken;
       }
     }
 
