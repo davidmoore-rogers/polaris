@@ -448,27 +448,40 @@ function integrationMonitorOverrideHTML(credentials, selectedId, sources) {
 // the same field set. `defaults` is the FortiGate (top-level) class so
 // the FortiSwitch / FortiAP subtabs render the same defaults the operator
 // would see if they hadn't customized anything yet.
-function _classTimerFieldsHTML(idPrefix, s, defaults) {
+// Renders the 8 cadence + retention fields for the integration tier of the
+// monitor settings hierarchy (intervalSeconds, failureThreshold,
+// probeTimeoutMs, telemetry / systemInfo cadence + retention, sample
+// retention). Used inside the integration's Monitoring tab. The form's
+// values are read back via `_readIntegrationCadenceForm()` and saved as
+// `Integration.config.monitorSettings` through PUT
+// /api/v1/monitor-settings/integration/:id.
+function _integrationCadenceSectionHTML(s) {
   s = s || {};
-  defaults = defaults || {};
-  function num(name, label, value, defaultValue, min, max, hint) {
-    return '<div class="form-group"><label>' + escapeHtml(label) + '</label>' +
-      '<input type="number" id="' + idPrefix + name + '" value="' + (value != null ? value : defaultValue) + '" min="' + min + '" max="' + max + '" style="width:120px">' +
+  function num(name, label, value, defaultValue, min, max, hint, warn500) {
+    var v = (value != null) ? value : defaultValue;
+    var warnMarkup = warn500
+      ? '<span id="f-mon-' + name + '-warn" style="display:none;font-size:0.75rem;color:var(--color-warning);margin-left:0.5rem">⚠ Below 500 ms — probes will likely false-fail under healthy network conditions.</span>'
+      : '';
+    return '<div class="form-group"><label>' + escapeHtml(label) + warnMarkup + '</label>' +
+      '<input type="number" id="f-mon-' + name + '" value="' + escapeHtml(String(v)) + '" min="' + min + '" max="' + max + '" style="width:140px">' +
       (hint ? '<p class="hint">' + hint + '</p>' : '') +
     '</div>';
   }
   return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Response-time polling</p>' +
-    num("intervalSeconds",          "Polling interval (seconds)",            s.intervalSeconds,          defaults.intervalSeconds          || 60,  5,  86400, "How often each monitored asset in this class is probed for an up/down ping. Default 60 s.") +
-    num("failureThreshold",         "Failure threshold (consecutive misses)", s.failureThreshold,        defaults.failureThreshold         || 3,   1,  100,   "Number of consecutive failed probes before an asset is marked Down.") +
-    num("sampleRetentionDays",      "Sample retention (days)",                s.sampleRetentionDays,     defaults.sampleRetentionDays      || 30,  0,  3650,  "How long this class's response-time samples are kept. 0 = forever.") +
+    num("intervalSeconds",   "Polling interval (seconds)",            s.intervalSeconds,   60,    5,   86400, "How often each monitored asset is probed for response time. Default 60 s.", false) +
+    num("failureThreshold",  "Failure threshold (consecutive misses)", s.failureThreshold, 3,     1,   100,   "Consecutive failed probes before an asset is marked Down — and consecutive successes needed to recover from Warning / Pending back to Up.", false) +
+    num("probeTimeoutMs",    "Probe timeout (ms)",                     s.probeTimeoutMs,   5000,  100, 60000, "Per-probe timeout for ICMP/SNMP/REST/WinRM/SSH. Default 5000 ms.", true) +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Telemetry (CPU + memory)</p>' +
-    num("telemetryIntervalSeconds", "Telemetry interval (seconds)",           s.telemetryIntervalSeconds, defaults.telemetryIntervalSeconds || 60, 15,  86400, "How often each asset's CPU and memory snapshot is taken. Default 60 s.") +
-    num("telemetryRetentionDays",   "Telemetry retention (days)",             s.telemetryRetentionDays,   defaults.telemetryRetentionDays   || 30,  0,  3650,  "How long telemetry samples are kept. 0 = forever.") +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Telemetry (CPU + memory + temperature)</p>' +
+    num("telemetryIntervalSeconds", "Telemetry interval (seconds)", s.telemetryIntervalSeconds, 60,  15,  86400, "How often each asset's CPU and memory snapshot is taken. Default 60 s.", false) +
+    num("telemetryRetentionDays",   "Telemetry retention (days)",   s.telemetryRetentionDays,   30,  0,   3650,  "How long telemetry samples are kept. 0 = forever.", false) +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface &amp; storage discovery</p>' +
-    num("systemInfoIntervalSeconds","Discovery interval (seconds)",            s.systemInfoIntervalSeconds, defaults.systemInfoIntervalSeconds || 600, 60, 86400, "How often interfaces and storage are scraped. Default 600 s (10 min).") +
-    num("systemInfoRetentionDays",  "Sample retention (days)",                 s.systemInfoRetentionDays,  defaults.systemInfoRetentionDays   || 30,  0,  3650,  "How long interface and storage samples are kept. 0 = forever.");
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface, storage &amp; LLDP discovery</p>' +
+    num("systemInfoIntervalSeconds","Discovery interval (seconds)", s.systemInfoIntervalSeconds, 600, 60,  86400, "How often interfaces, storage, IPsec and LLDP neighbors are scraped. Default 600 s (10 min).", false) +
+    num("systemInfoRetentionDays",  "Sample retention (days)",      s.systemInfoRetentionDays,   30,  0,   3650,  "How long interface and storage samples are kept. 0 = forever.", false) +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Response-time sample retention</p>' +
+    num("sampleRetentionDays",      "Sample retention (days)",      s.sampleRetentionDays,       30,  0,   3650,  "How long response-time probe samples are kept. 0 = forever.", false);
 }
 
 // Picker block for the FortiSwitch / FortiAP subtab — "enable direct polling"
@@ -794,62 +807,330 @@ function _fortigateAddMonitoredHTML(idPrefix, currentAddAsMonitored) {
 // install (server-side resolver picks the top-level when a class field is
 // unset). Showing the inherited number as the placeholder lets the operator
 // see what's currently in effect even if they haven't customized this class.
+// Renders the integration's Monitoring tab. Three stacked sections:
+//
+//   1. Cadence & Retention — the integration tier of the monitor settings
+//      hierarchy (8 fields). Saved via PUT /monitor-settings/integration/:id
+//      when the modal's Save Changes button fires.
+//   2. Discovery Defaults — for FMG/FortiGate integrations only; renders
+//      the existing 3-subtab layout (FortiGates / FortiSwitches / FortiAPs)
+//      with each class's discovery-time defaults: addAsMonitored,
+//      snmpCredentialId, autoMonitorInterfaces, plus the FortiGates
+//      per-stream transport overrides + SNMP credential picker. Cadence
+//      inputs are intentionally NOT in this section anymore — they live
+//      in the Cadence section above and apply to every class.
+//   3. Class Overrides — list of MonitorClassOverride rows scoped to
+//      THIS integration. Add/Edit/Delete each row inline. Loaded
+//      asynchronously by `_intgWireClassOverridesSection` after the modal
+//      renders. Hidden on the Add flow (no integration id yet).
+//
+// opts: { integrationId, integrationType, integrationName, snmpCredentials,
+//         monitorCredentialId, transportSources, fortigateMonitor,
+//         fortiswitchMonitor, fortiapMonitor }
 function monitorSettingsFormHTML(s, opts) {
   s = s || {};
   opts = opts || {};
-  var classDefaults = {
-    intervalSeconds: s.intervalSeconds, failureThreshold: s.failureThreshold,
-    sampleRetentionDays: s.sampleRetentionDays,
-    telemetryIntervalSeconds: s.telemetryIntervalSeconds, telemetryRetentionDays: s.telemetryRetentionDays,
-    systemInfoIntervalSeconds: s.systemInfoIntervalSeconds, systemInfoRetentionDays: s.systemInfoRetentionDays,
-  };
-  var fsClass = s.fortiswitch || {};
-  var faClass = s.fortiap     || {};
-  var fwSwCfg = opts.fortiswitchMonitor || { enabled: false, snmpCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
-  var fwApCfg = opts.fortiapMonitor     || { enabled: false, snmpCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
-  var fwFgCfg = opts.fortigateMonitor   || { addAsMonitored: false, autoMonitorInterfaces: null };
-  var hasId = !!opts.integrationId;
-  // Stash the originally-saved name selection so the lazy-loaded checklist can
-  // re-tick checkboxes that match the saved selection — even if an interface
-  // name has gone missing from the latest discovery.
-  if (typeof window !== "undefined") {
-    window["__autoMon_seed_f-mon-fortigate-amon-"]   = (fwFgCfg.autoMonitorInterfaces && fwFgCfg.autoMonitorInterfaces.mode === "names") ? fwFgCfg.autoMonitorInterfaces.names.slice() : [];
-    window["__autoMon_seed_f-mon-fortiswitch-amon-"] = (fwSwCfg.autoMonitorInterfaces && fwSwCfg.autoMonitorInterfaces.mode === "names") ? fwSwCfg.autoMonitorInterfaces.names.slice() : [];
-    window["__autoMon_seed_f-mon-fortiap-amon-"]     = (fwApCfg.autoMonitorInterfaces && fwApCfg.autoMonitorInterfaces.mode === "names") ? fwApCfg.autoMonitorInterfaces.names.slice() : [];
+  var integrationType = opts.integrationType || "";
+  var isFmgFgt = integrationType === "fortimanager" || integrationType === "fortigate";
+  var hasId    = !!opts.integrationId;
+
+  // ─── Section 1: Cadence & Retention ───────────────────────────────────────
+  var cadenceSection =
+    '<section style="margin-bottom:1.5rem">' +
+      '<h4 style="margin:0 0 0.25rem 0">Cadence & Retention</h4>' +
+      '<p class="hint" style="margin:0 0 1rem 0;color:var(--color-text-tertiary)">' +
+        'Default cadences and retention windows applied to every asset discovered by this integration. ' +
+        'A class override below or a per-asset override on the asset itself takes priority.' +
+      '</p>' +
+      _integrationCadenceSectionHTML(s) +
+    '</section>';
+
+  // ─── Section 2: Discovery Defaults (FMG/FortiGate only) ───────────────────
+  var discoverySection = "";
+  if (isFmgFgt) {
+    var fwSwCfg = opts.fortiswitchMonitor || { enabled: false, snmpCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
+    var fwApCfg = opts.fortiapMonitor     || { enabled: false, snmpCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
+    var fwFgCfg = opts.fortigateMonitor   || { addAsMonitored: false, autoMonitorInterfaces: null };
+
+    // Stash auto-monitor selections for the lazy-loaded checklists.
+    if (typeof window !== "undefined") {
+      window["__autoMon_seed_f-mon-fortigate-amon-"]   = (fwFgCfg.autoMonitorInterfaces && fwFgCfg.autoMonitorInterfaces.mode === "names") ? fwFgCfg.autoMonitorInterfaces.names.slice() : [];
+      window["__autoMon_seed_f-mon-fortiswitch-amon-"] = (fwSwCfg.autoMonitorInterfaces && fwSwCfg.autoMonitorInterfaces.mode === "names") ? fwSwCfg.autoMonitorInterfaces.names.slice() : [];
+      window["__autoMon_seed_f-mon-fortiap-amon-"]     = (fwApCfg.autoMonitorInterfaces && fwApCfg.autoMonitorInterfaces.mode === "names") ? fwApCfg.autoMonitorInterfaces.names.slice() : [];
+    }
+
+    var fortigatePanel =
+      _fortigateAddMonitoredHTML("f-mon-fortigate-", fwFgCfg.addAsMonitored === true) +
+      integrationMonitorOverrideHTML(opts.snmpCredentials, opts.monitorCredentialId, opts.transportSources || {}) +
+      _autoMonitorInterfacesHTML("f-mon-fortigate-amon-", "FortiGate", fwFgCfg.autoMonitorInterfaces || null, "names", hasId);
+
+    var switchPanel =
+      _classDirectPollHTML("f-mon-fortiswitch-", "FortiSwitch", opts.snmpCredentials, fwSwCfg.enabled === true, fwSwCfg.snmpCredentialId || null, fwSwCfg.addAsMonitored === true) +
+      _autoMonitorInterfacesHTML("f-mon-fortiswitch-amon-", "FortiSwitch", fwSwCfg.autoMonitorInterfaces || null, "wildcard", hasId);
+
+    var apPanel =
+      _classDirectPollHTML("f-mon-fortiap-", "FortiAP", opts.snmpCredentials, fwApCfg.enabled === true, fwApCfg.snmpCredentialId || null, fwApCfg.addAsMonitored === true) +
+      _autoMonitorInterfacesHTML("f-mon-fortiap-amon-", "FortiAP", fwApCfg.autoMonitorInterfaces || null, "type", hasId);
+
+    discoverySection =
+      '<section style="margin-bottom:1.5rem">' +
+        '<h4 style="margin:0 0 0.25rem 0">Discovery Defaults</h4>' +
+        '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">' +
+          'Stamped on assets when this integration discovers them. Operators can change the per-asset values later from each asset\'s Monitoring tab.' +
+        '</p>' +
+        _intRenderTabbedBody("intg-mon", [
+          { key: "fortigates",    label: "FortiGates",    html: fortigatePanel },
+          { key: "fortiswitches", label: "FortiSwitches", html: switchPanel },
+          { key: "fortiaps",      label: "FortiAPs",      html: apPanel },
+        ]) +
+      '</section>';
   }
 
-  var fortigatePanel =
-    _fortigateAddMonitoredHTML("f-mon-fortigate-", fwFgCfg.addAsMonitored === true) +
-    integrationMonitorOverrideHTML(opts.snmpCredentials, opts.monitorCredentialId, opts.transportSources || {}) +
-    _autoMonitorInterfacesHTML("f-mon-fortigate-amon-", "FortiGate", fwFgCfg.autoMonitorInterfaces || null, "names", hasId) +
-    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">' +
-      'These timers apply <strong style="color:var(--color-text-primary)">globally</strong> to every monitored asset that isn\'t a Fortinet switch or AP — Cisco SNMP, Windows WinRM, Linux SSH, ICMP, etc. Switches and APs use the values on their own subtabs.' +
-    '</div>' +
-    _classTimerFieldsHTML("f-mon-", s, {});
+  // ─── Section 3: Class Overrides (only on edit) ────────────────────────────
+  var classOverridesSection = '<section>' +
+    '<h4 style="margin:0 0 0.25rem 0">Class Overrides</h4>' +
+    '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">' +
+      'Per-class overrides scoped to this integration. Each row supplies values for one asset class (firewall, switch, server, etc.) ' +
+      'that take priority over the Cadence settings above and apply to every asset of that class discovered by this integration. ' +
+      'Per-asset overrides (set from each asset\'s Monitoring tab) take priority over class overrides.' +
+    '</p>' +
+    (hasId
+      ? '<div id="intg-class-overrides-wrap" data-integration-id="' + escapeHtml(opts.integrationId) +
+        '" data-integration-name="' + escapeHtml(opts.integrationName || "") + '">' +
+          '<div class="empty-state" style="padding:1rem 0;font-size:0.85rem">Loading class overrides…</div>' +
+        '</div>'
+      : '<p class="hint" style="font-size:0.82rem;color:var(--color-text-tertiary)">Class overrides become available after the integration is created.</p>'
+    ) +
+  '</section>';
 
-  var switchPanel =
-    _classDirectPollHTML("f-mon-fortiswitch-", "FortiSwitch", opts.snmpCredentials, fwSwCfg.enabled === true, fwSwCfg.snmpCredentialId || null, fwSwCfg.addAsMonitored === true) +
-    _autoMonitorInterfacesHTML("f-mon-fortiswitch-amon-", "FortiSwitch", fwSwCfg.autoMonitorInterfaces || null, "wildcard", hasId) +
-    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">' +
-      'These timers apply <strong style="color:var(--color-text-primary)">globally</strong> to every monitored Fortinet FortiSwitch — across all integrations, not just this one. Empty fields fall back to the values on the FortiGates subtab.' +
-    '</div>' +
-    _classTimerFieldsHTML("f-mon-fortiswitch-", fsClass, classDefaults);
+  return cadenceSection +
+    (discoverySection ? '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' + discoverySection : '') +
+    '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    classOverridesSection;
+}
 
-  var apPanel =
-    _classDirectPollHTML("f-mon-fortiap-", "FortiAP", opts.snmpCredentials, fwApCfg.enabled === true, fwApCfg.snmpCredentialId || null, fwApCfg.addAsMonitored === true) +
-    _autoMonitorInterfacesHTML("f-mon-fortiap-amon-", "FortiAP", fwApCfg.autoMonitorInterfaces || null, "type", hasId) +
-    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">' +
-      'These timers apply <strong style="color:var(--color-text-primary)">globally</strong> to every monitored Fortinet FortiAP — across all integrations, not just this one. Empty fields fall back to the values on the FortiGates subtab.' +
-    '</div>' +
-    _classTimerFieldsHTML("f-mon-fortiap-", faClass, classDefaults);
+// Wires the per-asset-timeout warning indicator so the Cadence section
+// surfaces "⚠ Below 500 ms" feedback while the operator types. Mirrors the
+// same warning the assets-page Monitoring Settings modal renders.
+function _wireProbeTimeoutWarning() {
+  var input = document.getElementById("f-mon-probeTimeoutMs");
+  var warn  = document.getElementById("f-mon-probeTimeoutMs-warn");
+  if (!input || !warn) return;
+  function check() {
+    var v = parseInt(input.value, 10);
+    warn.style.display = (Number.isFinite(v) && v > 0 && v < 500) ? "inline" : "none";
+  }
+  input.addEventListener("input", check);
+  check();
+}
 
-  // Inner sub-tab bar inside the outer "Monitoring" tab. Same _intRenderTabbedBody
-  // pattern, just with a unique prefix so the two tab bars don't collide.
-  return _intRenderTabbedBody("intg-mon", [
-    { key: "fortigates",    label: "FortiGates",    html: fortigatePanel },
-    { key: "fortiswitches", label: "FortiSwitches", html: switchPanel },
-    { key: "fortiaps",      label: "FortiAPs",      html: apPanel },
-  ]);
+// Lazy-loads the class-override list once the modal is in the DOM. Looks up
+// the integration's saved overrides via /monitor-settings/class-overrides
+// scoped to this integrationId, renders the table, and wires Add / Edit /
+// Delete handlers. Safe to call when integrationId is null (Add flow) —
+// the wrapper element won't exist there and we no-op.
+async function _intgWireClassOverridesSection() {
+  var wrap = document.getElementById("intg-class-overrides-wrap");
+  if (!wrap) return;
+  var integrationId   = wrap.getAttribute("data-integration-id") || null;
+  var integrationName = wrap.getAttribute("data-integration-name") || "";
+  if (!integrationId) return;
+  var scope = { integrationId: integrationId, integrationName: integrationName };
+
+  var rows = [];
+  try {
+    rows = await api.monitorSettings.listClassOverrides({ integrationId: integrationId });
+  } catch (err) {
+    wrap.innerHTML = '<div class="empty-state" style="padding:1rem 0;color:var(--color-danger)">Failed to load: ' +
+      escapeHtml(err.message || "unknown error") + '</div>';
+    return;
+  }
+  _intgRenderClassOverridesList(rows || [], scope);
+}
+
+function _intgRenderClassOverridesList(rows, scope) {
+  var wrap = document.getElementById("intg-class-overrides-wrap");
+  if (!wrap) return;
+  // Stash the live row list so per-row handlers can reach it without
+  // closing over a stale snapshot.
+  wrap.__rows = rows;
+
+  var rowHTML = rows.length === 0
+    ? '<tr><td colspan="3" class="empty-state" style="padding:1rem 0;text-align:center">No class overrides configured for this integration.</td></tr>'
+    : rows.map(function (o) {
+        var classLabel = (typeof ASSET_TYPE_LABELS !== "undefined" && ASSET_TYPE_LABELS[o.assetType]) || o.assetType;
+        return '<tr>' +
+          '<td style="padding:6px 8px">' + escapeHtml(classLabel) + '</td>' +
+          '<td style="padding:6px 8px"><span class="hint" style="font-size:0.78rem;color:var(--color-text-tertiary)">' +
+            escapeHtml(_intgOverrideSummary(o)) + '</span></td>' +
+          '<td style="padding:6px 8px;white-space:nowrap;text-align:right">' +
+            '<button type="button" class="btn btn-sm btn-secondary" data-edit-override="' + escapeHtml(o.id) + '">Edit</button> ' +
+            '<button type="button" class="btn btn-sm btn-danger"    data-delete-override="' + escapeHtml(o.id) + '">Delete</button>' +
+          '</td>' +
+        '</tr>';
+      }).join("");
+
+  wrap.innerHTML =
+    '<div style="display:flex;justify-content:flex-end;margin-bottom:0.5rem">' +
+      '<button type="button" class="btn btn-secondary btn-sm" id="btn-intg-add-override">+ Add Class Override</button>' +
+    '</div>' +
+    '<table style="width:100%;border-collapse:collapse">' +
+      '<thead><tr>' +
+        '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Class</th>' +
+        '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Overrides</th>' +
+        '<th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--color-border)">Actions</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rowHTML + '</tbody>' +
+    '</table>';
+
+  document.getElementById("btn-intg-add-override").addEventListener("click", function () {
+    _intgOpenClassOverrideEditor(scope, null);
+  });
+  wrap.querySelectorAll("[data-edit-override]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var id  = btn.getAttribute("data-edit-override");
+      var row = (wrap.__rows || []).find(function (r) { return r.id === id; });
+      if (row) _intgOpenClassOverrideEditor(scope, row);
+    });
+  });
+  wrap.querySelectorAll("[data-delete-override]").forEach(function (btn) {
+    btn.addEventListener("click", async function () {
+      var id  = btn.getAttribute("data-delete-override");
+      var row = (wrap.__rows || []).find(function (r) { return r.id === id; });
+      var label = row
+        ? (((typeof ASSET_TYPE_LABELS !== "undefined" && ASSET_TYPE_LABELS[row.assetType]) || row.assetType) + " override")
+        : "this override";
+      var ok = await showConfirm("Delete " + label + "?");
+      if (!ok) return;
+      try {
+        await api.monitorSettings.deleteClassOverride(id);
+        var nextRows = (wrap.__rows || []).filter(function (r) { return r.id !== id; });
+        _intgRenderClassOverridesList(nextRows, scope);
+        showToast("Override deleted");
+      } catch (err) {
+        showToast(err.message || "Failed to delete override", "error");
+      }
+    });
+  });
+}
+
+function _intgOverrideSummary(o) {
+  var parts = [];
+  var labels = {
+    intervalSeconds:           "probe",
+    failureThreshold:          "threshold",
+    probeTimeoutMs:            "timeout",
+    telemetryIntervalSeconds:  "telemetry",
+    systemInfoIntervalSeconds: "sysinfo",
+    sampleRetentionDays:       "probe-retain",
+    telemetryRetentionDays:    "telem-retain",
+    systemInfoRetentionDays:   "sysinfo-retain",
+  };
+  Object.keys(labels).forEach(function (k) {
+    if (o[k] !== null && o[k] !== undefined) parts.push(labels[k] + "=" + o[k]);
+  });
+  return parts.length === 0 ? "(empty — all fields inherited)" : parts.join(", ");
+}
+
+// Opens an Add or Edit modal for one class override scoped to a specific
+// integration. The integration is fixed (not a picker); only the class
+// dropdown lets the operator choose. On edit the class is also locked
+// since changing it is effectively delete-and-recreate.
+function _intgOpenClassOverrideEditor(scope, existing) {
+  var ASSET_TYPES = {
+    server: "Server", switch: "Switch", router: "Router", firewall: "Firewall",
+    workstation: "Workstation", printer: "Printer", access_point: "AP", other: "Other",
+  };
+  var labels = (typeof ASSET_TYPE_LABELS !== "undefined") ? ASSET_TYPE_LABELS : ASSET_TYPES;
+  var isEdit = !!existing;
+
+  var classOpts = Object.keys(labels).map(function (key) {
+    var sel = (existing && existing.assetType === key) ? " selected" : "";
+    return '<option value="' + escapeHtml(key) + '"' + sel + '>' + escapeHtml(labels[key]) + '</option>';
+  }).join("");
+  var v = existing || {};
+
+  function field(name, label, value, min, max, hint) {
+    var raw = (value === null || value === undefined) ? "" : value;
+    return '<div class="form-group"><label>' + escapeHtml(label) + '</label>' +
+      '<input type="number" id="intg-cov-' + name + '" value="' + escapeHtml(String(raw)) + '" min="' + min + '" max="' + max + '" style="width:140px" placeholder="inherit">' +
+      (hint ? '<p class="hint">' + escapeHtml(hint) + '</p>' : '') +
+    '</div>';
+  }
+
+  var body =
+    '<div class="form-group"><label>Asset Source</label>' +
+      '<input type="text" value="' + escapeHtml(scope.integrationName || "(this integration)") + '" disabled style="opacity:0.7">' +
+    '</div>' +
+    '<div class="form-group"><label>Class</label>' +
+      '<select id="intg-cov-class"' + (isEdit ? " disabled" : "") + '>' + classOpts + '</select>' +
+      (isEdit ? '<p class="hint" style="font-size:0.78rem;color:var(--color-text-tertiary)">Class is fixed for an existing override; delete and re-create to change it.</p>' : '') +
+    '</div>' +
+    '<p class="hint" style="margin:0.5rem 0 0.75rem 0">Leave a field blank to inherit from the integration tier above.</p>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem 1rem">' +
+      field("intervalSeconds",           "Probe interval",         v.intervalSeconds,           1,   86400, "seconds") +
+      field("failureThreshold",          "Failure threshold",      v.failureThreshold,          1,   100,   "consecutive failures") +
+      field("probeTimeoutMs",            "Probe timeout",          v.probeTimeoutMs,            100, 60000, "ms (warning under 500)") +
+      field("telemetryIntervalSeconds",  "Telemetry interval",     v.telemetryIntervalSeconds,  15,  86400, "seconds (CPU + memory + temp)") +
+      field("systemInfoIntervalSeconds", "System info interval",   v.systemInfoIntervalSeconds, 60,  86400, "seconds (interfaces + storage)") +
+      field("sampleRetentionDays",       "Probe sample retention", v.sampleRetentionDays,       0,   3650,  "days (0 = forever)") +
+      field("telemetryRetentionDays",    "Telemetry retention",    v.telemetryRetentionDays,    0,   3650,  "days (0 = forever)") +
+      field("systemInfoRetentionDays",   "System info retention",  v.systemInfoRetentionDays,   0,   3650,  "days (0 = forever)") +
+    '</div>';
+
+  var footer = '<button type="button" class="btn btn-secondary" id="btn-intg-cov-cancel">Cancel</button>' +
+    '<button type="button" class="btn btn-primary" id="btn-intg-cov-save">' + (isEdit ? "Save Changes" : "Create Override") + '</button>';
+  openModal(isEdit ? "Edit Class Override" : "Add Class Override", body, footer);
+
+  document.getElementById("btn-intg-cov-cancel").addEventListener("click", function () {
+    closeModal();
+  });
+  document.getElementById("btn-intg-cov-save").addEventListener("click", function () {
+    _intgSaveClassOverride(scope, existing);
+  });
+}
+
+async function _intgSaveClassOverride(scope, existing) {
+  var btn = document.getElementById("btn-intg-cov-save");
+  if (!btn) return;
+  var prevText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  function readOptional(name) {
+    var el = document.getElementById("intg-cov-" + name);
+    if (!el || el.value === "") return null;
+    var n = parseInt(el.value, 10);
+    return Number.isFinite(n) ? n : null;
+  }
+  var fields = {
+    intervalSeconds:           readOptional("intervalSeconds"),
+    failureThreshold:          readOptional("failureThreshold"),
+    probeTimeoutMs:            readOptional("probeTimeoutMs"),
+    telemetryIntervalSeconds:  readOptional("telemetryIntervalSeconds"),
+    systemInfoIntervalSeconds: readOptional("systemInfoIntervalSeconds"),
+    sampleRetentionDays:       readOptional("sampleRetentionDays"),
+    telemetryRetentionDays:    readOptional("telemetryRetentionDays"),
+    systemInfoRetentionDays:   readOptional("systemInfoRetentionDays"),
+  };
+  try {
+    if (existing) {
+      await api.monitorSettings.updateClassOverride(existing.id, fields);
+      showToast("Class override updated");
+    } else {
+      var assetType = document.getElementById("intg-cov-class").value;
+      await api.monitorSettings.createClassOverride(
+        Object.assign({ assetType: assetType, integrationId: scope.integrationId }, fields)
+      );
+      showToast("Class override created");
+    }
+    closeModal();
+    // Refresh the list under the integration modal that's still open underneath.
+    _intgWireClassOverridesSection();
+  } catch (err) {
+    showToast(err.message || "Failed to save override", "error");
+    btn.disabled    = false;
+    btn.textContent = prevText;
+  }
 }
 
 // Call after monitorSettingsFormHTML() has been inserted into the DOM. Wires
@@ -862,11 +1143,13 @@ function wireAutoMonitorCards(integrationId) {
   _wireAutoMonitorCard("f-mon-fortiap-amon-",     "fortiap",     integrationId || null);
 }
 
-// Reads one class's timer block (FortiGate / FortiSwitch / FortiAP) and
-// returns the seven-field shape the server expects for that class.
-function _readClassTimers(prefix) {
+// Reads the eight integration-tier cadence + retention fields from the
+// Monitoring tab. Returns the flat MonitorTierSettings shape that the
+// `/api/v1/monitor-settings/integration/:id` endpoint accepts. Out-of-range
+// or empty values are dropped (server-side Zod re-validates anyway).
+function _readIntegrationCadenceForm() {
   function n(name) {
-    var el = document.getElementById(prefix + name);
+    var el = document.getElementById("f-mon-" + name);
     if (!el) return undefined;
     var v = parseInt(el.value, 10);
     return Number.isFinite(v) ? v : undefined;
@@ -874,44 +1157,20 @@ function _readClassTimers(prefix) {
   return {
     intervalSeconds:           n("intervalSeconds"),
     failureThreshold:          n("failureThreshold"),
-    sampleRetentionDays:       n("sampleRetentionDays"),
+    probeTimeoutMs:            n("probeTimeoutMs"),
     telemetryIntervalSeconds:  n("telemetryIntervalSeconds"),
-    telemetryRetentionDays:    n("telemetryRetentionDays"),
     systemInfoIntervalSeconds: n("systemInfoIntervalSeconds"),
+    sampleRetentionDays:       n("sampleRetentionDays"),
+    telemetryRetentionDays:    n("telemetryRetentionDays"),
     systemInfoRetentionDays:   n("systemInfoRetentionDays"),
   };
 }
 
-// Adapter: the new monitor-settings/integration endpoint returns a flat
-// 8-field MonitorTierSettings shape. The legacy form helper below still
-// expects an object that ALSO carries fortiswitch/fortiap nested blocks (the
-// form renders inputs for them). Mirror the top-level into both nested keys
-// so the FortiSwitches and FortiAPs subtab inputs render with the same
-// values as the FortiGates subtab. The subtab cadence values aren't read
-// back on save (see getMonitorSettingsFromForm); class-specific overrides
-// live in MonitorClassOverride rows now and are edited from the Assets page.
-function _expandTierToLegacyShape(tier) {
-  if (!tier) return {};
-  return Object.assign({}, tier, {
-    fortiswitch: Object.assign({}, tier),
-    fortiap:     Object.assign({}, tier),
-  });
-}
-
+// Kept under the old name for the two existing call sites in the Add/Edit
+// flows — both pass the result straight into setIntegration(). Identical
+// shape, just renamed for clarity.
 function getMonitorSettingsFromForm() {
-  // Reads the top-level (FortiGate subtab) cadence + retention fields from
-  // the integration's Monitoring tab. Returns the flat 8-field
-  // MonitorTierSettings shape that the new
-  // /api/v1/monitor-settings/integration/:id endpoint accepts.
-  //
-  // Note: the legacy FortiSwitches / FortiAPs subtabs still render cadence
-  // inputs but their values are NOT included here — class-specific overrides
-  // live in MonitorClassOverride rows now (edited from the Assets page
-  // Monitoring Settings modal). The per-class subtab cadence inputs are
-  // cosmetic until the deferred step-13 modal rebuild removes them; their
-  // addAsMonitored / autoMonitorInterfaces controls are still saved via the
-  // separate _readClassMonitorBlock helper.
-  return _readClassTimers("f-mon-");
+  return _readIntegrationCadenceForm();
 }
 
 // Reads the "enable direct polling" + SNMP credential picker + the auto-Monitor
@@ -1519,7 +1778,7 @@ async function openCreateModal(type) {
     // integration's tier gets written via setIntegration() below.
     try {
       var manual = await api.monitorSettings.getManual();
-      monSettings = manual ? _expandTierToLegacyShape(manual) : {};
+      monSettings = manual || {};
     } catch (e) { /* fall back to defaults */ }
     try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; } catch (e) { /* picker just shows defaults */ }
     var generalHtml = isFmg ? fortiManagerGeneralHTML({}) : fortiGateGeneralHTML({});
@@ -1528,7 +1787,7 @@ async function openCreateModal(type) {
       { key: "general", label: "General", html: generalHtml },
       { key: "filters", label: "Filters", html: filtersHtml },
     ];
-    addTabs.push({ key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, { snmpCredentials: creds, monitorCredentialId: null, integrationId: null }) });
+    addTabs.push({ key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, { snmpCredentials: creds, monitorCredentialId: null, integrationId: null, integrationType: type, integrationName: "" }) });
     // FMG and standalone FortiGate share the Reservation Push and Quarantine
     // Push tabs. Both default to off. The "useProxy=true" flag in the form
     // helpers labels the active mode for FMG; standalone FortiGate ignores it
@@ -1546,9 +1805,13 @@ async function openCreateModal(type) {
   openModal(title, body, footer);
   if (isFmg || isFgt) {
     _intWireModalTabs("intg-edit");
-    // Inner sub-tabs inside the Monitoring tab (FortiGates / FortiSwitches / FortiAPs).
+    // Inner sub-tabs inside the Monitoring tab's Discovery Defaults section
+    // (FortiGates / FortiSwitches / FortiAPs).
     _intWireModalTabs("intg-mon");
     wireAutoMonitorCards(null);
+    _wireProbeTimeoutWarning();
+    // Class overrides not available on Add (no integration ID yet); the
+    // Monitoring tab renders a hint pointing operators at the Edit modal.
   }
 
   // Tracks whether the pre-save Test Connection succeeded against the
@@ -1815,7 +2078,7 @@ async function openEditModal(id) {
         var tier = resp && resp.settings;
         // Tier may be null on a fresh integration whose tier-3 hasn't been
         // saved yet — the form falls back to its hardcoded defaults.
-        if (tier) monSettings = _expandTierToLegacyShape(tier);
+        if (tier) monSettings = tier;
       } catch (e) { /* fall back to defaults */ }
       try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; } catch (e) { /* picker just shows defaults */ }
       var generalHtml = (intg.type === "fortimanager") ? fortiManagerGeneralHTML(defaults) : fortiGateGeneralHTML(defaults);
@@ -1838,6 +2101,8 @@ async function openEditModal(id) {
           fortiswitchMonitor: config.fortiswitchMonitor || null,
           fortiapMonitor:     config.fortiapMonitor     || null,
           integrationId:      id,
+          integrationType:    intg.type,
+          integrationName:    intg.name,
         }) },
       );
       // Reservation Push + Quarantine Push tabs render for both FMG and
@@ -1868,6 +2133,8 @@ async function openEditModal(id) {
       _intWireModalTabs("intg-edit");
       _intWireModalTabs("intg-mon");
       wireAutoMonitorCards(id);
+      _wireProbeTimeoutWarning();
+      _intgWireClassOverridesSection();
     }
 
     document.getElementById("btn-test-existing").addEventListener("click", async function () {
