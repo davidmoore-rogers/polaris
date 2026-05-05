@@ -215,8 +215,6 @@ const api = {
     getIpHistory:         (id)  => request("GET",  `/assets/${id}/ip-history`),
     getHistorySettings:   ()    => request("GET",  "/assets/ip-history-settings"),
     updateHistorySettings:(body) => request("PUT",  "/assets/ip-history-settings", body),
-    getMonitorSettings:   ()    => request("GET",  "/assets/monitor-settings"),
-    updateMonitorSettings:(body) => request("PUT", "/assets/monitor-settings", body),
     bulkMonitor:          (body) => request("POST", "/assets/bulk-monitor", body),
     monitorHistory:       (id, opts) => {
       // Accepts a range string ("24h") or { range } / { from, to } object.

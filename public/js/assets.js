@@ -1618,13 +1618,14 @@ async function openViewModal(id) {
   });
 
   try {
-    // Fetch the asset and (once per session) the global monitor settings in parallel.
-    // _monitorSettingsCache feeds the auto-refresh schedulers — without it we'd
-    // fall back to a hardcoded 60s default even when the admin has tuned the
-    // global cadence higher.
+    // Fetch the asset in parallel with a one-shot manual-tier read used as a
+    // generic auto-refresh cadence fallback. Step 9 will replace this with the
+    // per-asset effective-monitor-settings call so each asset's auto-refresh
+    // matches its resolved tier; for now the manual tier is a "good enough"
+    // default that keeps the schedulers from hard-coding 60s.
     var fetches = [api.assets.get(id)];
     if (!_monitorSettingsCache) {
-      fetches.push(api.assets.getMonitorSettings().catch(function () { return null; }));
+      fetches.push(api.monitorSettings.getManual().catch(function () { return null; }));
     }
     var fetched = await Promise.all(fetches);
     var a = fetched[0];

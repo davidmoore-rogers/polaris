@@ -882,19 +882,36 @@ function _readClassTimers(prefix) {
   };
 }
 
+// Adapter: the new monitor-settings/integration endpoint returns a flat
+// 8-field MonitorTierSettings shape. The legacy form helper below still
+// expects an object that ALSO carries fortiswitch/fortiap nested blocks (the
+// form renders inputs for them). Mirror the top-level into both nested keys
+// so the FortiSwitches and FortiAPs subtab inputs render with the same
+// values as the FortiGates subtab. The subtab cadence values aren't read
+// back on save (see getMonitorSettingsFromForm); class-specific overrides
+// live in MonitorClassOverride rows now and are edited from the Assets page.
+function _expandTierToLegacyShape(tier) {
+  if (!tier) return {};
+  return Object.assign({}, tier, {
+    fortiswitch: Object.assign({}, tier),
+    fortiap:     Object.assign({}, tier),
+  });
+}
+
 function getMonitorSettingsFromForm() {
-  // Top-level (FortiGate subtab) + nested per-class (Switch/AP subtabs).
-  // Only include the per-class blocks when the corresponding subtab actually
-  // rendered — tab might be hidden when the modal hasn't been opened yet.
-  var top = _readClassTimers("f-mon-");
-  var out = top;
-  if (document.getElementById("f-mon-fortiswitch-intervalSeconds")) {
-    out.fortiswitch = _readClassTimers("f-mon-fortiswitch-");
-  }
-  if (document.getElementById("f-mon-fortiap-intervalSeconds")) {
-    out.fortiap = _readClassTimers("f-mon-fortiap-");
-  }
-  return out;
+  // Reads the top-level (FortiGate subtab) cadence + retention fields from
+  // the integration's Monitoring tab. Returns the flat 8-field
+  // MonitorTierSettings shape that the new
+  // /api/v1/monitor-settings/integration/:id endpoint accepts.
+  //
+  // Note: the legacy FortiSwitches / FortiAPs subtabs still render cadence
+  // inputs but their values are NOT included here — class-specific overrides
+  // live in MonitorClassOverride rows now (edited from the Assets page
+  // Monitoring Settings modal). The per-class subtab cadence inputs are
+  // cosmetic until the deferred step-13 modal rebuild removes them; their
+  // addAsMonitored / autoMonitorInterfaces controls are still saved via the
+  // separate _readClassMonitorBlock helper.
+  return _readClassTimers("f-mon-");
 }
 
 // Reads the "enable direct polling" + SNMP credential picker + the auto-Monitor
@@ -1497,7 +1514,13 @@ async function openCreateModal(type) {
   if (isFmg || isFgt) {
     var monSettings = {};
     var creds = [];
-    try { monSettings = await api.assets.getMonitorSettings(); } catch (e) { /* fall back to defaults */ }
+    // No integration ID yet on the Add flow — seed the form from the manual
+    // tier (closest equivalent to "fleet defaults"). After create, the new
+    // integration's tier gets written via setIntegration() below.
+    try {
+      var manual = await api.monitorSettings.getManual();
+      monSettings = manual ? _expandTierToLegacyShape(manual) : {};
+    } catch (e) { /* fall back to defaults */ }
     try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; } catch (e) { /* picker just shows defaults */ }
     var generalHtml = isFmg ? fortiManagerGeneralHTML({}) : fortiGateGeneralHTML({});
     var filtersHtml = isFmg ? fortiManagerFiltersHTML({}) : fortiGateFiltersHTML({});
@@ -1603,10 +1626,11 @@ async function openCreateModal(type) {
         pollInterval: parseInt(document.getElementById("f-pollInterval").value, 10) || 4,
       };
       var result = await api.integrations.create(input);
-      // Save the global monitor settings if the Monitoring tab was rendered.
-      // Failures here aren't fatal — the integration is already created.
-      if (isFmg || isFgt) {
-        try { await api.assets.updateMonitorSettings(getMonitorSettingsFromForm()); }
+      // Save the new integration's tier-3 monitor settings if the Monitoring
+      // tab was rendered. Failures here aren't fatal — the integration is
+      // already created; operator can edit and resave.
+      if ((isFmg || isFgt) && result && result.id) {
+        try { await api.monitorSettings.setIntegration(result.id, getMonitorSettingsFromForm()); }
         catch (e) { showToast("Integration created, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
       }
       closeModal();
@@ -1778,14 +1802,21 @@ async function openEditModal(id) {
       };
     }
 
-    // FMG + FortiGate get a Monitoring tab. The settings are global, so they
-    // apply across all integrations — the tab here is just a convenient
-    // editor surface (saved alongside the integration on Save Changes).
+    // FMG + FortiGate get a Monitoring tab. Tier-3 settings are now
+    // per-integration: this tab edits THIS integration's settings only.
+    // (Manual tier + class overrides live on the Assets page Monitoring
+    // Settings modal.)
     var isFmgOrFgt = (intg.type === "fortimanager" || intg.type === "fortigate");
     if (isFmgOrFgt) {
       var monSettings = {};
       var creds = [];
-      try { monSettings = await api.assets.getMonitorSettings(); } catch (e) { /* fall back to defaults */ }
+      try {
+        var resp = await api.monitorSettings.getIntegration(intg.id);
+        var tier = resp && resp.settings;
+        // Tier may be null on a fresh integration whose tier-3 hasn't been
+        // saved yet — the form falls back to its hardcoded defaults.
+        if (tier) monSettings = _expandTierToLegacyShape(tier);
+      } catch (e) { /* fall back to defaults */ }
       try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; } catch (e) { /* picker just shows defaults */ }
       var generalHtml = (intg.type === "fortimanager") ? fortiManagerGeneralHTML(defaults) : fortiGateGeneralHTML(defaults);
       var filtersHtml = (intg.type === "fortimanager") ? fortiManagerFiltersHTML(defaults) : fortiGateFiltersHTML(defaults);
@@ -1926,7 +1957,7 @@ async function openEditModal(id) {
       };
       var result = await api.integrations.update(id, input);
       if (isFmgOrFgt) {
-        try { await api.assets.updateMonitorSettings(getMonitorSettingsFromForm()); }
+        try { await api.monitorSettings.setIntegration(id, getMonitorSettingsFromForm()); }
         catch (e) { showToast("Integration updated, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
       }
       return { result: result, editConfig: editConfig };
