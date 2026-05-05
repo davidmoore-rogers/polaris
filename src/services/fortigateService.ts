@@ -102,14 +102,17 @@ export async function fgRequest<T>(
   config: FortiGateConfig,
   method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
-  opts: { query?: Record<string, string>; body?: unknown; signal?: AbortSignal } = {},
+  opts: { query?: Record<string, string>; body?: unknown; signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<T> {
   const port = config.port || 443;
   const qs = new URLSearchParams(opts.query || {});
   const url = `https://${config.host}:${port}${path}${qs.toString() ? (path.includes("?") ? "&" : "?") + qs.toString() : ""}`;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  // Default 15s for discovery / push paths. Response-time probes pass their
+  // resolved per-asset probeTimeoutMs (default 5000, range 100..60000) so a
+  // wedged FortiOS box trips faster than the discovery default.
+  const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
   const onExternalAbort = () => controller.abort();
   opts.signal?.addEventListener("abort", onExternalAbort, { once: true });
 

@@ -167,13 +167,16 @@ const DEFAULT_SETTINGS: MonitorSettings = {
 
 const sysUpTimeOid = "1.3.6.1.2.1.1.3.0";
 
-// PROBE_TIMEOUT_MS is the resolved per-asset timeout — populated by
-// `resolveMonitorSettings(asset).probeTimeoutMs`. The hardcoded constant
-// below is the legacy fallback used by probe paths that haven't yet been
-// converted to thread the resolved value through (those conversions land
-// in step 3). Once every probe takes a `timeoutMs` parameter, this constant
-// goes away.
-const PROBE_TIMEOUT_MS = HARDCODED_FLOOR.probeTimeoutMs;
+// Per-request timeout for SNMP sessions / FortiOS REST calls inside the
+// HEAVY-cadence collectors (collectTelemetry / collectSystemInfo / SNMP walks).
+// These walks issue many requests and we want each individual request to fail
+// fast on a wedged peer rather than burn the entire walk budget on one OID.
+//
+// NOT used by the response-time probes — those resolve their timeout through
+// `resolveMonitorSettings(asset).probeTimeoutMs` per asset (default 5000ms,
+// range 100..60000) and pass it down via the `timeoutMs` argument on every
+// probe function.
+const COLLECTOR_REQUEST_TIMEOUT_MS = 10_000;
 
 /**
  * Decide which protocol the AD-locked monitor should use for a given asset OS.
@@ -586,6 +589,12 @@ export async function probeAsset(assetId: string): Promise<ProbeResult> {
       (type === "activedirectory" ? (asset.dnsName || asset.hostname) : null);
     if (!targetIp) return finish(start, false, "Asset has no IP address");
 
+    // Resolve the asset's effective probe timeout once and thread it through
+    // every probe path. Default 5000ms; per-asset / class / tier overrides
+    // layered by resolveMonitorSettings.
+    const effective = await resolveMonitorSettings(asset);
+    const timeoutMs = effective.probeTimeoutMs;
+
     if (type === "fortimanager" || type === "fortigate") {
       if (!asset.discoveredByIntegration) {
         return finish(start, false, "Originating integration not found");
@@ -594,12 +603,12 @@ export async function probeAsset(assetId: string): Promise<ProbeResult> {
       if (transport === "snmp") {
         try {
           const credConfig = await loadSnmpCredentialConfigForFortinetAsset(asset, asset.discoveredByIntegration);
-          return await probeSnmp(targetIp, credConfig, start);
+          return await probeSnmp(targetIp, credConfig, start, timeoutMs);
         } catch (err: any) {
           return finish(start, false, err?.message || "SNMP credential lookup failed");
         }
       }
-      return await probeFortinet(targetIp, asset.discoveredByIntegration as any, start);
+      return await probeFortinet(targetIp, asset.discoveredByIntegration as any, start, timeoutMs);
     }
     if (type === "activedirectory") {
       if (!asset.discoveredByIntegration) {
@@ -608,22 +617,22 @@ export async function probeAsset(assetId: string): Promise<ProbeResult> {
       if (asset.discoveredByIntegration.type !== "activedirectory") {
         return finish(start, false, "Originating integration is not Active Directory");
       }
-      return await probeActiveDirectory(targetIp, asset.os, asset.discoveredByIntegration as any, start);
+      return await probeActiveDirectory(targetIp, asset.os, asset.discoveredByIntegration as any, start, timeoutMs);
     }
     if (type === "icmp") {
-      return await probeIcmp(targetIp, start);
+      return await probeIcmp(targetIp, start, timeoutMs);
     }
     if (type === "snmp") {
       if (!asset.monitorCredential) return finish(start, false, "No SNMP credential selected");
-      return await probeSnmp(targetIp, asset.monitorCredential.config as Record<string, unknown>, start);
+      return await probeSnmp(targetIp, asset.monitorCredential.config as Record<string, unknown>, start, timeoutMs);
     }
     if (type === "winrm") {
       if (!asset.monitorCredential) return finish(start, false, "No WinRM credential selected");
-      return await probeWinRm(targetIp, asset.monitorCredential.config as Record<string, unknown>, start);
+      return await probeWinRm(targetIp, asset.monitorCredential.config as Record<string, unknown>, start, timeoutMs);
     }
     if (type === "ssh") {
       if (!asset.monitorCredential) return finish(start, false, "No SSH credential selected");
-      return await probeSsh(targetIp, asset.monitorCredential.config as Record<string, unknown>, start);
+      return await probeSsh(targetIp, asset.monitorCredential.config as Record<string, unknown>, start, timeoutMs);
     }
     return finish(start, false, `Unknown monitor type "${type}"`);
   } catch (err: any) {
@@ -642,6 +651,7 @@ async function probeFortinet(
   host: string,
   integration: { type: string; config: Record<string, unknown> },
   start: number,
+  timeoutMs: number,
 ): Promise<ProbeResult> {
   const cfg = integration.config || {};
 
@@ -671,7 +681,7 @@ async function probeFortinet(
   };
 
   try {
-    await fgRequest<unknown>(fgConfig, "GET", "/api/v2/monitor/system/status");
+    await fgRequest<unknown>(fgConfig, "GET", "/api/v2/monitor/system/status", { timeoutMs });
     return finish(start, true);
   } catch (err: any) {
     return finish(start, false, err?.message || "FortiOS request failed");
@@ -688,6 +698,7 @@ async function probeActiveDirectory(
   os: string | null | undefined,
   integration: { type: string; config: Record<string, unknown> },
   start: number,
+  timeoutMs: number,
 ): Promise<ProbeResult> {
   const cfg = integration.config || {};
   const username = String(cfg.bindDn || "");
@@ -697,20 +708,20 @@ async function probeActiveDirectory(
   }
   const protocol = getAdMonitorProtocol(os);
   if (protocol === "winrm") {
-    return await probeWinRm(host, { username, password, useHttps: true, port: 5986 }, start);
+    return await probeWinRm(host, { username, password, useHttps: true, port: 5986 }, start, timeoutMs);
   }
   if (protocol === "ssh") {
-    return await probeSsh(host, { username, password, port: 22 }, start);
+    return await probeSsh(host, { username, password, port: 22 }, start, timeoutMs);
   }
   return finish(start, false, "Asset OS is not Windows or Linux — cannot pick AD probe protocol");
 }
 
-async function probeIcmp(host: string, start: number): Promise<ProbeResult> {
+async function probeIcmp(host: string, start: number, timeoutMs: number): Promise<ProbeResult> {
   return await new Promise<ProbeResult>((resolve) => {
     const isWindows = process.platform === "win32";
     const args = isWindows
-      ? ["-n", "1", "-w", String(PROBE_TIMEOUT_MS), host]
-      : ["-c", "1", "-W", String(Math.ceil(PROBE_TIMEOUT_MS / 1000)), host];
+      ? ["-n", "1", "-w", String(timeoutMs), host]
+      : ["-c", "1", "-W", String(Math.ceil(timeoutMs / 1000)), host];
     const child = spawn("ping", args, { stdio: ["ignore", "pipe", "pipe"] });
     let resolved = false;
     const timer = setTimeout(() => {
@@ -718,7 +729,7 @@ async function probeIcmp(host: string, start: number): Promise<ProbeResult> {
       resolved = true;
       try { child.kill(); } catch {}
       resolve(finish(start, false, "ping timed out"));
-    }, PROBE_TIMEOUT_MS + 2_000);
+    }, timeoutMs + 2_000);
     child.on("error", (err) => {
       if (resolved) return;
       resolved = true;
@@ -757,7 +768,7 @@ function mapSnmpPrivProtocol(value: unknown): unknown {
   }
 }
 
-async function probeSnmp(host: string, config: Record<string, unknown>, start: number): Promise<ProbeResult> {
+async function probeSnmp(host: string, config: Record<string, unknown>, start: number, timeoutMs: number): Promise<ProbeResult> {
   const port = toPositiveInt(config.port, 161);
   const version = config.version === "v3" ? "v3" : "v2c";
   return await new Promise<ProbeResult>((resolve) => {
@@ -768,7 +779,7 @@ async function probeSnmp(host: string, config: Record<string, unknown>, start: n
       try { (session as any)?.close?.(); } catch {}
       resolve(r);
     };
-    const timer = setTimeout(() => finishOnce(finish(start, false, "SNMP timed out")), PROBE_TIMEOUT_MS);
+    const timer = setTimeout(() => finishOnce(finish(start, false, "SNMP timed out")), timeoutMs);
 
     let session: any;
     try {
@@ -776,7 +787,7 @@ async function probeSnmp(host: string, config: Record<string, unknown>, start: n
         session = snmp.createSession(host, String(config.community || ""), {
           port,
           version: snmp.Version2c,
-          timeout: PROBE_TIMEOUT_MS,
+          timeout: timeoutMs,
           retries: 0,
         });
       } else {
@@ -800,7 +811,7 @@ async function probeSnmp(host: string, config: Record<string, unknown>, start: n
         session = snmp.createV3Session(host, user, {
           port,
           version: snmp.Version3,
-          timeout: PROBE_TIMEOUT_MS,
+          timeout: timeoutMs,
           retries: 0,
         });
       }
@@ -825,7 +836,7 @@ async function probeSnmp(host: string, config: Record<string, unknown>, start: n
   });
 }
 
-async function probeWinRm(host: string, config: Record<string, unknown>, start: number): Promise<ProbeResult> {
+async function probeWinRm(host: string, config: Record<string, unknown>, start: number, timeoutMs: number): Promise<ProbeResult> {
   const useHttps = config.useHttps !== false;
   const port = toPositiveInt(config.port, useHttps ? 5986 : 5985);
   const username = String(config.username || "");
@@ -861,7 +872,7 @@ async function probeWinRm(host: string, config: Record<string, unknown>, start: 
         "Content-Length": Buffer.byteLength(body).toString(),
       },
       rejectUnauthorized: false,
-      timeout: PROBE_TIMEOUT_MS,
+      timeout: timeoutMs,
     } as any, (res) => {
       // Drain the body so the socket can close cleanly.
       res.on("data", () => {});
@@ -878,7 +889,7 @@ async function probeWinRm(host: string, config: Record<string, unknown>, start: 
   });
 }
 
-async function probeSsh(host: string, config: Record<string, unknown>, start: number): Promise<ProbeResult> {
+async function probeSsh(host: string, config: Record<string, unknown>, start: number, timeoutMs: number): Promise<ProbeResult> {
   const port = toPositiveInt(config.port, 22);
   const username = String(config.username || "");
   const password = typeof config.password === "string" ? config.password : "";
@@ -894,7 +905,7 @@ async function probeSsh(host: string, config: Record<string, unknown>, start: nu
       try { client.end(); } catch {}
       resolve(r);
     };
-    const timer = setTimeout(() => finishOnce(finish(start, false, "SSH timed out")), PROBE_TIMEOUT_MS);
+    const timer = setTimeout(() => finishOnce(finish(start, false, "SSH timed out")), timeoutMs);
 
     client.on("ready", () => {
       clearTimeout(timer);
@@ -910,7 +921,7 @@ async function probeSsh(host: string, config: Record<string, unknown>, start: nu
         host,
         port,
         username,
-        readyTimeout: PROBE_TIMEOUT_MS,
+        readyTimeout: timeoutMs,
       };
       if (privateKey) opts.privateKey = privateKey;
       else opts.password = password;
@@ -936,11 +947,15 @@ export async function probeCredentialAgainstHost(
 ): Promise<ProbeResult> {
   const start = performance.now();
   if (!host) return finish(start, false, "Host is required");
+  // No asset context, so we use the hardcoded floor's probeTimeoutMs as the
+  // default. Operator-driven credential test — they can re-trigger if the
+  // host is genuinely slow.
+  const timeoutMs = HARDCODED_FLOOR.probeTimeoutMs;
   try {
-    if (type === "icmp")  return await probeIcmp(host, start);
-    if (type === "snmp")  return await probeSnmp(host, config, start);
-    if (type === "winrm") return await probeWinRm(host, config, start);
-    if (type === "ssh")   return await probeSsh(host, config, start);
+    if (type === "icmp")  return await probeIcmp(host, start, timeoutMs);
+    if (type === "snmp")  return await probeSnmp(host, config, start, timeoutMs);
+    if (type === "winrm") return await probeWinRm(host, config, start, timeoutMs);
+    if (type === "ssh")   return await probeSsh(host, config, start, timeoutMs);
     return finish(start, false, `Unsupported credential type "${type}"`);
   } catch (err: any) {
     return finish(start, false, err?.message || "Probe failed");
@@ -1938,7 +1953,7 @@ function buildSnmpSession(host: string, config: Record<string, unknown>): any {
     return snmp.createSession(host, String(config.community || ""), {
       port,
       version: snmp.Version2c,
-      timeout: PROBE_TIMEOUT_MS,
+      timeout: COLLECTOR_REQUEST_TIMEOUT_MS,
       retries: 0,
     });
   }
@@ -1959,7 +1974,7 @@ function buildSnmpSession(host: string, config: Record<string, unknown>): any {
   return snmp.createV3Session(host, user, {
     port,
     version: snmp.Version3,
-    timeout: PROBE_TIMEOUT_MS,
+    timeout: COLLECTOR_REQUEST_TIMEOUT_MS,
     retries: 0,
   });
 }
