@@ -261,6 +261,15 @@ model MonitorClassOverride {
   sampleRetentionDays       Int?
   telemetryRetentionDays    Int?
   systemInfoRetentionDays   Int?
+  // Per-stream polling-method overrides. null = inherit from the integration
+  // tier (or the manual tier when integrationId is null). Accepted values:
+  // "rest_api" | "snmp" | "winrm" | "ssh" | "icmp". The compatibility-aware
+  // resolver silently falls through when the chosen method isn't valid for
+  // the asset's source — see CLAUDE.md "Polling-method compatibility matrix".
+  responseTimePolling       String?
+  telemetryPolling          String?
+  interfacesPolling         String?
+  lldpPolling               String?
   createdAt                 DateTime     @default(now())
   updatedAt                 DateTime     @updatedAt
 
