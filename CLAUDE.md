@@ -1180,6 +1180,7 @@ Active Directory and Entra ID identify the same hybrid-joined device with two un
 7. **Conflict detection** — Discovery values differing from an existing manual reservation create a `Conflict` record rather than overwriting.
 8. **Event archival** — Events older than 7 days are pruned; syslog (CEF) and SFTP/SCP archival are configurable.
 9. **Asset `acquiredAt` ≤ `lastSeen`** — Enforced on every write via `clampAcquiredToLastSeen` in `src/utils/assetInvariants.ts`. If a write would leave `acquiredAt` later than `lastSeen`, `acquiredAt` is clamped down to match. Existing rows are repaired by the `clampAssetAcquiredAt` startup job.
+10. **Decommissioned/disabled assets are not monitored** — Enforced on every Asset write via `clampMonitoredForStatus` in the Prisma extension in `src/db.ts`. Whenever a create/update/updateMany/upsert sets `status` to `decommissioned` or `disabled`, `monitored` is forced to `false` and `consecutiveFailures` is reset (matches the `monitored=false` branch of `validateMonitorConfig` in `assets.ts`). One-way: flipping status back to `active` does not auto-resume monitoring — re-enabling is operator-driven. Centralized at the DB layer so every write path benefits: the assets PUT route, the `decommissionStaleAssets` job, the integration FortiSwitch/FortiAP decommission sweep, and the Entra/AD syncs that set `status="disabled"` on disabled accounts.
 
 ---
 

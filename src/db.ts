@@ -197,12 +197,37 @@ function normalizeManufacturerInData(data: any): void {
   }
 }
 
+/**
+ * Mutate args.data in place to enforce the "decommissioned/disabled assets
+ * are not monitored" invariant. Whenever a write sets status to one of those
+ * terminal-ish values, monitored is forced false and consecutiveFailures is
+ * reset (matching the assets PUT route's existing behavior on manual disable
+ * via validateMonitorConfig). Re-activation is left alone — flipping back to
+ * "active" doesn't auto-resume monitoring; that's the operator's choice.
+ *
+ * Centralized here so every write path benefits: the assets PUT route, the
+ * decommissionStaleAssets job, the integration FortiSwitch/FortiAP sweep,
+ * and the Entra/AD syncs that flip status="disabled" on disabled accounts.
+ */
+function clampMonitoredForStatus(data: any): void {
+  if (!data || typeof data !== "object") return;
+  if (!("status" in data)) return;
+  const v = data.status;
+  let status: unknown = null;
+  if (typeof v === "string") status = v;
+  else if (v && typeof v === "object" && "set" in v) status = (v as any).set;
+  if (status !== "decommissioned" && status !== "disabled") return;
+  data.monitored = false;
+  data.consecutiveFailures = 0;
+}
+
 function _buildClient(base: PrismaClient) {
   return base.$extends({
     query: {
       asset: {
         async create({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
           normalizeManufacturerInData(args?.data);
+          clampMonitoredForStatus(args?.data);
           const result = await query(args);
           const d = args.data as Record<string, unknown> | undefined;
           const ip = typeof d?.ipAddress === "string" ? d.ipAddress : undefined;
@@ -218,6 +243,7 @@ function _buildClient(base: PrismaClient) {
         },
         async update({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
           normalizeManufacturerInData(args?.data);
+          clampMonitoredForStatus(args?.data);
           const result = await query(args);
           const d = args.data as Record<string, unknown> | undefined;
           const ip = typeof d?.ipAddress === "string" ? d.ipAddress : undefined;
@@ -232,6 +258,7 @@ function _buildClient(base: PrismaClient) {
         },
         async updateMany({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
           normalizeManufacturerInData(args?.data);
+          clampMonitoredForStatus(args?.data);
           // updateMany: skip shadow-write. Rare on identity fields, and the
           // backfill job sweeps any drift on next startup.
           return query(args);
@@ -239,6 +266,8 @@ function _buildClient(base: PrismaClient) {
         async upsert({ args, query }: { args: any; query: (args: any) => Promise<any> }) {
           normalizeManufacturerInData(args?.create);
           normalizeManufacturerInData(args?.update);
+          clampMonitoredForStatus(args?.create);
+          clampMonitoredForStatus(args?.update);
           const result = await query(args);
           const updateTouches = touchesAssetSources(args?.update);
           // Always fires after a create branch (we can't tell from the
