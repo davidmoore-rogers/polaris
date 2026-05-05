@@ -3599,6 +3599,7 @@ function renderCredentialsTab() {
       '<td style="color:var(--color-text-secondary);font-size:0.85rem">' + credSummary(c) + '</td>' +
       '<td style="text-align:right">' +
         '<button class="btn btn-sm btn-secondary" data-action="edit" data-id="' + escapeHtml(c.id) + '">Edit</button> ' +
+        '<button class="btn btn-sm btn-secondary" data-action="test" data-id="' + escapeHtml(c.id) + '">Test</button> ' +
         '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + escapeHtml(c.id) + '" data-name="' + escapeHtml(c.name) + '">Delete</button>' +
       '</td>' +
     '</tr>';
@@ -3624,10 +3625,30 @@ function renderCredentialsTab() {
   container.querySelectorAll('button[data-action="edit"]').forEach(function (btn) {
     btn.addEventListener("click", function () { openCredentialModal(btn.getAttribute("data-id")); });
   });
+  container.querySelectorAll('button[data-action="test"]').forEach(function (btn) {
+    btn.addEventListener("click", function () { testCredentialFromList(btn.getAttribute("data-id")); });
+  });
   container.querySelectorAll('button[data-action="delete"]').forEach(function (btn) {
     btn.addEventListener("click", function () {
       deleteCredential(btn.getAttribute("data-id"), btn.getAttribute("data-name"));
     });
+  });
+}
+
+// Launches the Test Connection modal directly from the credentials list,
+// without going through the edit modal first. Secrets in the GET payload are
+// masked, but the server's /credentials/test endpoint merges real values back
+// in via `id`, so the probe sees the actual stored secrets.
+async function testCredentialFromList(id) {
+  var cred;
+  try { cred = await api.credentials.get(id); }
+  catch (err) { showToast(err.message, "error"); return; }
+  openCredentialTestModal({
+    id: cred.id,
+    name: cred.name,
+    type: cred.type,
+    config: cred.config,
+    fromList: true,
   });
 }
 
@@ -3731,7 +3752,7 @@ function openCredentialTestModal(state) {
     '<div id="f-cred-test-selected" style="display:none;padding:0.6rem 0.75rem;border:1px solid var(--color-border);border-radius:4px;margin-bottom:0.75rem;background:var(--color-surface-alt,rgba(127,127,127,0.05))"></div>' +
     '<div id="f-cred-test-result" style="display:none"></div>';
   var footer =
-    '<button class="btn btn-secondary" id="btn-cred-test-back" style="margin-right:auto">&larr; Back</button>' +
+    (state.fromList ? '' : '<button class="btn btn-secondary" id="btn-cred-test-back" style="margin-right:auto">&larr; Back</button>') +
     '<button class="btn btn-secondary" onclick="closeModal()">Close</button>' +
     '<button class="btn btn-primary" id="btn-cred-test-run" disabled>Run Test</button>';
   openModal(title, body, footer);
@@ -3805,7 +3826,10 @@ function openCredentialTestModal(state) {
       try {
         var results = await api.search.query(q);
         if (results.query !== lastQuery) return; // stale
-        renderResults(results.assets || []);
+        // Pinned-on-the-Device-Map firewalls are split into `sites` and
+        // dropped from `assets` server-side. They're still real probe
+        // targets, so merge them back in for the credential test picker.
+        renderResults((results.assets || []).concat(results.sites || []));
       } catch (err) {
         resultsBox.innerHTML = '<div style="padding:0.5rem 0.75rem;color:var(--color-danger,#c0392b);font-size:0.85rem">Search failed: ' + escapeHtml(err.message || "Unknown error") + '</div>';
         resultsBox.style.display = "block";
@@ -3850,9 +3874,11 @@ function openCredentialTestModal(state) {
     }
   });
 
-  backBtn.addEventListener("click", function () {
-    openCredentialModal(state.id, { name: state.name, type: state.type, config: state.config });
-  });
+  if (backBtn) {
+    backBtn.addEventListener("click", function () {
+      openCredentialModal(state.id, { name: state.name, type: state.type, config: state.config });
+    });
+  }
 }
 
 function credSnmpForm(cfg) {
