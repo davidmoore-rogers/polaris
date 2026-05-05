@@ -192,11 +192,12 @@ model Integration {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  subnets            Subnet[]
-  discoveredAssets   Asset[] // Assets stamped with this integration's id (back-relation)
-  pushedReservations Reservation[]            @relation("ReservationPushedTo")
-  fortigateSightings AssetFortigateSighting[] // Back-relation: sightings recorded against this integration's discovered FortiGates
-  assetSources       AssetSource[] // Back-relation: per-source asset rows attributed to this integration
+  subnets               Subnet[]
+  discoveredAssets      Asset[] // Assets stamped with this integration's id (back-relation)
+  pushedReservations    Reservation[]            @relation("ReservationPushedTo")
+  fortigateSightings    AssetFortigateSighting[] // Back-relation: sightings recorded against this integration's discovered FortiGates
+  assetSources          AssetSource[] // Back-relation: per-source asset rows attributed to this integration
+  monitorClassOverrides MonitorClassOverride[] // Back-relation: (assetType, integration) override rows
 
   @@index([type])
   @@index([enabled])
@@ -226,6 +227,46 @@ model Credential {
 
   @@index([type])
   @@map("credentials")
+}
+
+// (class + integration) tier of the monitoring settings hierarchy. Each row
+// overrides a subset of fields for assets of `assetType` that are scoped to
+// `integrationId`. Null `integrationId` represents an override applied to
+// "manual" assets — those whose `discoveredByIntegrationId` is null (e.g.
+// hand-created assets, or assets whose origin integration was deleted).
+//
+// Resolution order at probe time:
+//   asset override → MonitorClassOverride → Integration.config.monitorSettings
+//                                          OR Setting "manualMonitorSettings"
+//
+// Every settings field is nullable: null = inherit from the tier below.
+// Range / sanity validation lives in the route layer (Zod schemas) so the DB
+// only enforces shape and uniqueness.
+//
+// Uniqueness: Postgres treats NULLs as distinct in unique constraints, so the
+// `(integrationId, assetType)` index alone won't prevent two `(null, "switch")`
+// rows. The service layer enforces uniqueness for the manual-tier case before
+// insert. The DB-side index still prevents duplicates within a single
+// integration, which is the common case.
+model MonitorClassOverride {
+  id                        String       @id @default(uuid())
+  integrationId             String? // null = override applies to manual-tier (orphan) assets
+  integration               Integration? @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  assetType                 String // matches Asset.assetType — "firewall" | "switch" | "access_point" | "server" | "workstation" | "router" | "printer" | "other"
+  intervalSeconds           Int?
+  failureThreshold          Int?
+  probeTimeoutMs            Int?
+  telemetryIntervalSeconds  Int?
+  systemInfoIntervalSeconds Int?
+  sampleRetentionDays       Int?
+  telemetryRetentionDays    Int?
+  systemInfoRetentionDays   Int?
+  createdAt                 DateTime     @default(now())
+  updatedAt                 DateTime     @updatedAt
+
+  @@unique([integrationId, assetType])
+  @@index([assetType])
+  @@map("monitor_class_overrides")
 }
 
 model Event {
@@ -316,10 +357,22 @@ model Asset {
   // probes the credential is pulled from the discovering integration, so the
   // credential FK stays null.
   monitored           Boolean     @default(false)
+  // Sticky flag set whenever an operator explicitly toggles `monitored` (asset
+  // edit modal, bulk-monitor, clickable Status pill in the Assets list). When
+  // true, discovery's `addAsMonitored` re-stamp on FortiSwitch/FortiAP/AD paths
+  // is suppressed so an operator's manual "unmonitored" choice persists across
+  // re-discovery cycles. Cleared only by an operator action — discovery does
+  // not flip it.
+  monitoredOperatorSet Boolean    @default(false)
   monitorType         String? // "fortimanager" | "fortigate" | "snmp" | "winrm" | "ssh" | "icmp"
   monitorCredentialId String?
   monitorCredential   Credential? @relation(fields: [monitorCredentialId], references: [id], onDelete: SetNull)
-  monitorIntervalSec  Int? // Per-asset override for response-time probes; falls back to monitor.intervalSeconds
+  monitorIntervalSec  Int? // Per-asset override for response-time probes; falls back to the resolved tier-3 setting
+  // Per-asset override for the probe TCP/UDP/HTTP timeout in milliseconds.
+  // Range 100..60000; null = inherit from the resolved tier-3 setting (default 5000ms).
+  // Below 500ms the UI shows a warning icon — at that range probes start to
+  // false-fail on healthy networks under transient latency.
+  probeTimeoutMs      Int?
   monitorStatus       String? // "up" | "down" | "unknown"
   lastMonitorAt       DateTime?
   lastResponseTimeMs  Int?
