@@ -1908,6 +1908,7 @@ async function openViewModal(id) {
     }
     if (a.monitored) _loadMonitorHistoryFor(a.id, "24h");
     if (a.monitored) _loadSystemTabFor(a.id, "24h", a);
+    if (a.monitored) _renderIntermittencyBar(a.id);
     document.querySelectorAll(".asset-system-range-btn").forEach(function (b) {
       b.addEventListener("click", function () {
         var range = b.getAttribute("data-range");
@@ -3705,6 +3706,15 @@ function assetMonitoringViewHTML(a) {
       // would render the badge markup as text.
       '<div class="detail-row"><span class="detail-label">Status</span>' +
         '<span class="detail-value">' + probeBtn + pill + '</span></div>' +
+      // Last hour intermittency bar — one cell per probe sample, colored
+      // by the resolved monitor state at that point. Loaded asynchronously
+      // by _renderIntermittencyBar(). Hidden on unmonitored assets.
+      (a.monitored
+        ? '<div class="detail-row"><span class="detail-label">Last hour</span>' +
+            '<span class="detail-value" id="asset-intermittency-bar" data-asset-id="' + escapeHtml(a.id) + '">' +
+              '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">Loading…</span>' +
+            '</span></div>'
+        : '') +
       viewRow("Source", sourceLabel) +
       viewRow("Last Response Time", lastRtt) +
       viewRow("Last Poll", lastPoll) +
@@ -3725,6 +3735,94 @@ function assetMonitoringViewHTML(a) {
       'Loading samples…' +
     '</div>'
   );
+}
+
+/**
+ * Renders a thin colored bar under the Status row on the asset System tab.
+ * Each cell = one probe sample over the past hour, colored by the resolved
+ * monitor state at that point. Replays the five-state machine forward over
+ * the samples (starting from "unknown") so the bar matches what the Status
+ * pill would have read sample-by-sample. Runs once on tab open; not
+ * auto-refreshed (the sample chart above already auto-refreshes and this
+ * mostly serves as an at-a-glance intermittency indicator).
+ */
+async function _renderIntermittencyBar(assetId) {
+  var slot = document.getElementById("asset-intermittency-bar");
+  if (!slot || slot.getAttribute("data-asset-id") !== assetId) return;
+  // Fetch in parallel: 1h sample stream + the resolved threshold for the
+  // state-machine replay. Both are best-effort; if either fails we fall
+  // back to a sensible default so the bar still renders something useful.
+  var samples = [];
+  var threshold = 3;
+  try {
+    var results = await Promise.all([
+      api.assets.monitorHistory(assetId, "1h").catch(function () { return null; }),
+      api.assets.effectiveMonitorSettings(assetId).catch(function () { return null; }),
+    ]);
+    samples = (results[0] && Array.isArray(results[0].samples)) ? results[0].samples : [];
+    if (results[1] && results[1].resolved && Number.isFinite(results[1].resolved.failureThreshold)) {
+      threshold = results[1].resolved.failureThreshold;
+    }
+  } catch (_) { /* fall through with defaults */ }
+
+  if (samples.length === 0) {
+    slot.innerHTML = '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">No samples in the last hour</span>';
+    return;
+  }
+  // Replay the state machine forward across samples to label each one with
+  // its resolved status. failureThreshold doubles as the recovery threshold.
+  // Starting state is "unknown" — for the first ~threshold cells the bar
+  // may show pending/warning before settling, which is honest given we
+  // have no memory of pre-window state.
+  var cf = 0;
+  var cs = 0;
+  var prev = "unknown";
+  var states = samples.map(function (s) {
+    if (s.success) {
+      cf = 0; cs += 1;
+      if (prev === "up") {
+        // stay up
+      } else if (prev === "warning" || prev === "pending") {
+        if (cs >= threshold) prev = "up";
+      } else {
+        // unknown / down
+        prev = (cs >= threshold) ? "up" : "pending";
+      }
+    } else {
+      cs = 0; cf += 1;
+      if (cf >= threshold) prev = "down";
+      else if (prev === "up" || prev === "unknown") prev = "warning";
+      // pending / warning / down stay
+    }
+    return { timestamp: s.timestamp, status: prev };
+  });
+
+  // Color map mirrors badge-monitor-* hues so the bar reads as the same
+  // visual vocabulary as the pill above it.
+  var colors = {
+    up:      "rgba(0,200,83,0.65)",
+    warning: "rgba(255,193,7,0.75)",
+    pending: "rgba(79,195,247,0.65)",
+    down:    "rgba(211,47,47,0.75)",
+    unknown: "rgba(117,117,117,0.45)",
+  };
+  // Each cell flexes to 1fr so the bar always fills the column regardless
+  // of how many samples landed in the hour. Tooltip carries the timestamp +
+  // status so an operator can hover to inspect a specific dip.
+  var cellHTML = states.map(function (st) {
+    var ts = new Date(st.timestamp).toLocaleTimeString();
+    var color = colors[st.status] || colors.unknown;
+    return '<div title="' + escapeHtml(ts + " · " + st.status) + '" style="flex:1;background:' + color + '"></div>';
+  }).join("");
+  slot.innerHTML =
+    '<div style="display:flex;height:14px;width:100%;border:1px solid var(--color-border);border-radius:3px;overflow:hidden;gap:1px;background:var(--color-bg-elevated)">' +
+      cellHTML +
+    '</div>' +
+    '<div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--color-text-tertiary);margin-top:2px">' +
+      '<span>1h ago</span>' +
+      '<span>' + samples.length + ' sample' + (samples.length === 1 ? '' : 's') + '</span>' +
+      '<span>now</span>' +
+    '</div>';
 }
 
 async function _loadMonitorHistoryFor(assetId, selection, callOpts) {
