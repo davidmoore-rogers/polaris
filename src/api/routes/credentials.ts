@@ -18,7 +18,7 @@ import { probeCredentialAgainstHost } from "../../services/monitoringService.js"
 
 const router = Router();
 
-const CredentialTypeEnum = z.enum(["snmp", "winrm", "ssh"]);
+const CredentialTypeEnum = z.enum(["snmp", "winrm", "ssh", "restapi"]);
 
 const CreateSchema = z.object({
   name:   z.string().min(1),
@@ -115,7 +115,12 @@ router.post("/test", requireAdmin, async (req, res, next) => {
     });
     if (!asset) throw new AppError(404, "Asset not found");
     const host = asset.ipAddress || asset.dnsName || asset.hostname;
-    if (!host) throw new AppError(400, "Asset has no IP, DNS name, or hostname to test against");
+    // restapi credentials carry their own baseUrl, so a host on the asset is
+    // optional — the credential is tested against its own URL. Every other
+    // type still needs a routable target.
+    if (!host && input.type !== "restapi") {
+      throw new AppError(400, "Asset has no IP, DNS name, or hostname to test against");
+    }
 
     let config = input.config || {};
     if (input.id) {
@@ -144,7 +149,7 @@ router.post("/test", requireAdmin, async (req, res, next) => {
       return;
     }
 
-    const result = await probeCredentialAgainstHost(host, input.type, config);
+    const result = await probeCredentialAgainstHost(host || "", input.type, config);
     const label = asset.hostname || asset.ipAddress || asset.id;
     logEvent({
       action: "credential.tested",

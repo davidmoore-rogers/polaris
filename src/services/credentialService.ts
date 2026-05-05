@@ -1,16 +1,20 @@
 /**
  * src/services/credentialService.ts
  *
- * Named credential store for monitoring probes (SNMP v2c/v3, WinRM, SSH).
- * Mirrors the Integration model: plaintext at rest, masked at the API
- * boundary via `stripSecrets()`. ICMP doesn't use credentials so there's
- * no "icmp" type here.
+ * Named credential store for monitoring probes (SNMP v2c/v3, WinRM, SSH,
+ * REST API). Mirrors the Integration model: plaintext at rest, masked at
+ * the API boundary via `stripSecrets()`. ICMP doesn't use credentials so
+ * there's no "icmp" type here.
+ *
+ * "restapi" credentials carry a baseUrl + bearer token pair so manually-
+ * created assets can be probed via the same REST-API path FMG/FortiGate-
+ * discovered firewalls use through their integration's stored token.
  */
 
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 
-export type CredentialType = "snmp" | "winrm" | "ssh";
+export type CredentialType = "snmp" | "winrm" | "ssh" | "restapi";
 
 export interface SnmpV2cConfig {
   version: "v2c";
@@ -55,7 +59,24 @@ export interface SshConfig {
   port?: number;
 }
 
-export type CredentialConfig = SnmpConfig | WinRmConfig | SshConfig;
+/**
+ * REST API credential — a base URL + bearer token. Used by the REST API
+ * polling method when the asset's source doesn't already have a token
+ * (i.e. manually-created assets, or any asset where the operator wants
+ * to override with a different token). FMG/FortiGate-discovered firewalls
+ * keep using the integration's stored token by default.
+ *
+ * verifyTls defaults to false (parity with FortiOS REST behaviour where
+ * self-signed device certs are common); operators flip it on when their
+ * target presents a real cert.
+ */
+export interface RestApiConfig {
+  baseUrl: string;
+  apiToken: string;
+  verifyTls?: boolean;
+}
+
+export type CredentialConfig = SnmpConfig | WinRmConfig | SshConfig | RestApiConfig;
 
 export interface CredentialRecord {
   id: string;
@@ -85,9 +106,10 @@ const MASK = "••••••••";
  * mask (or an empty string).
  */
 const SECRET_FIELDS_BY_TYPE: Record<CredentialType, string[]> = {
-  snmp:  ["community", "authKey", "privKey"],
-  winrm: ["password"],
-  ssh:   ["password", "privateKey"],
+  snmp:    ["community", "authKey", "privKey"],
+  winrm:   ["password"],
+  ssh:     ["password", "privateKey"],
+  restapi: ["apiToken"],
 };
 
 function secretFieldsFor(type: string): string[] {
@@ -193,10 +215,35 @@ function validateSshConfig(config: Record<string, unknown>): void {
   }
 }
 
+function validateRestApiConfig(config: Record<string, unknown>): void {
+  if (typeof config.baseUrl !== "string" || !config.baseUrl) {
+    throw new AppError(400, "REST API credential requires a baseUrl");
+  }
+  // Defensive URL parse — operators may paste a hostname with no scheme,
+  // a trailing path, or even a stray newline. We require an http(s) scheme
+  // because the polling code can't talk anything else, and we trim trailing
+  // slashes so the probe path concatenation doesn't double up. The trim
+  // happens at validation time so the stored value is canonical.
+  let u: URL;
+  try { u = new URL(config.baseUrl.trim()); }
+  catch { throw new AppError(400, "REST API baseUrl must be a valid URL (e.g. https://device.example/)"); }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new AppError(400, "REST API baseUrl must use http:// or https://");
+  }
+  config.baseUrl = u.toString().replace(/\/+$/, "");
+  if (typeof config.apiToken !== "string" || !config.apiToken) {
+    throw new AppError(400, "REST API credential requires an apiToken");
+  }
+  if (config.verifyTls !== undefined && typeof config.verifyTls !== "boolean") {
+    throw new AppError(400, "REST API verifyTls must be a boolean");
+  }
+}
+
 export function validateConfig(type: CredentialType, config: Record<string, unknown>): void {
-  if (type === "snmp")  return validateSnmpConfig(config);
-  if (type === "winrm") return validateWinRmConfig(config);
-  if (type === "ssh")   return validateSshConfig(config);
+  if (type === "snmp")    return validateSnmpConfig(config);
+  if (type === "winrm")   return validateWinRmConfig(config);
+  if (type === "ssh")     return validateSshConfig(config);
+  if (type === "restapi") return validateRestApiConfig(config);
   throw new AppError(400, `Unknown credential type "${type}"`);
 }
 
@@ -241,8 +288,8 @@ export async function getCredential(id: string, opts?: { revealSecrets?: boolean
 export async function createCredential(input: SaveCredentialInput): Promise<CredentialRecord> {
   const name = normalizeName(input.name);
   if (!name) throw new AppError(400, "Credential name is required");
-  if (input.type !== "snmp" && input.type !== "winrm" && input.type !== "ssh") {
-    throw new AppError(400, "Credential type must be snmp, winrm, or ssh");
+  if (input.type !== "snmp" && input.type !== "winrm" && input.type !== "ssh" && input.type !== "restapi") {
+    throw new AppError(400, "Credential type must be snmp, winrm, ssh, or restapi");
   }
   if (!input.config || typeof input.config !== "object") {
     throw new AppError(400, "Credential config is required");

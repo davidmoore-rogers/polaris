@@ -1019,6 +1019,60 @@ async function probeSsh(host: string, config: Record<string, unknown>, start: nu
 }
 
 /**
+ * REST API credential test — issues an HTTPS GET to the credential's
+ * baseUrl with `Authorization: Bearer <apiToken>` and treats 200/204/401
+ * as a successful auth round-trip (401 means the URL is reachable but
+ * the token's wrong; we surface that explicitly so operators know the
+ * connection isn't the problem). Other status codes get bubbled up as
+ * the error message.
+ *
+ * Doesn't take a `host` argument — the URL is in the credential, not the
+ * asset. The probe runs against config.baseUrl directly.
+ */
+async function probeRestApiCredential(config: Record<string, unknown>, start: number, timeoutMs: number): Promise<ProbeResult> {
+  const baseUrl = String(config.baseUrl || "");
+  const apiToken = String(config.apiToken || "");
+  const verifyTls = config.verifyTls === true;
+  if (!baseUrl) return finish(start, false, "REST API credential is missing baseUrl");
+  if (!apiToken) return finish(start, false, "REST API credential is missing apiToken");
+  let url: URL;
+  try { url = new URL(baseUrl); }
+  catch { return finish(start, false, "REST API baseUrl is not a valid URL"); }
+  const isHttps = url.protocol === "https:";
+  const reqFn = isHttps ? httpsRequest : httpRequest;
+  return await new Promise<ProbeResult>((resolve) => {
+    let resolved = false;
+    const finishOnce = (r: ProbeResult) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(r);
+    };
+    const req = reqFn({
+      hostname: url.hostname,
+      port:     url.port ? Number(url.port) : (isHttps ? 443 : 80),
+      path:     url.pathname + (url.search || ""),
+      method:   "GET",
+      headers:  { "Authorization": "Bearer " + apiToken, "Accept": "application/json,*/*" },
+      rejectUnauthorized: !!verifyTls,
+      timeout:  timeoutMs,
+    } as any, (res) => {
+      // Drain so the socket releases.
+      res.on("data", () => {});
+      res.on("end", () => {
+        const code = res.statusCode || 0;
+        if (code === 200 || code === 204) return finishOnce(finish(start, true));
+        if (code === 401 || code === 403) return finishOnce(finish(start, false, "REST API authentication failed (HTTP " + code + ")"));
+        if (code === 0)                   return finishOnce(finish(start, false, "REST API request returned no status"));
+        finishOnce(finish(start, false, "REST API HTTP " + code));
+      });
+    });
+    req.on("timeout", () => { try { req.destroy(); } catch {}; finishOnce(finish(start, false, "REST API timed out")); });
+    req.on("error",   (err) => finishOnce(finish(start, false, err.message || "REST API error")));
+    req.end();
+  });
+}
+
+/**
  * Run a one-shot probe against `host` with the given credential type + config,
  * without touching the asset row or writing samples. Used by the credential
  * Test Connection flow in Server Settings → Credentials, where the operator
@@ -1027,20 +1081,24 @@ async function probeSsh(host: string, config: Record<string, unknown>, start: nu
  */
 export async function probeCredentialAgainstHost(
   host: string,
-  type: "snmp" | "winrm" | "ssh" | "icmp",
+  type: "snmp" | "winrm" | "ssh" | "icmp" | "restapi",
   config: Record<string, unknown>,
 ): Promise<ProbeResult> {
   const start = performance.now();
-  if (!host) return finish(start, false, "Host is required");
+  // restapi uses config.baseUrl directly, so a missing host on the asset
+  // isn't a deal-breaker for that type — the credential is tested against
+  // the URL stored on the credential, not the asset.
+  if (!host && type !== "restapi") return finish(start, false, "Host is required");
   // No asset context, so we use the hardcoded floor's probeTimeoutMs as the
   // default. Operator-driven credential test — they can re-trigger if the
   // host is genuinely slow.
   const timeoutMs = HARDCODED_FLOOR.probeTimeoutMs;
   try {
-    if (type === "icmp")  return await probeIcmp(host, start, timeoutMs);
-    if (type === "snmp")  return await probeSnmp(host, config, start, timeoutMs);
-    if (type === "winrm") return await probeWinRm(host, config, start, timeoutMs);
-    if (type === "ssh")   return await probeSsh(host, config, start, timeoutMs);
+    if (type === "icmp")    return await probeIcmp(host, start, timeoutMs);
+    if (type === "snmp")    return await probeSnmp(host, config, start, timeoutMs);
+    if (type === "winrm")   return await probeWinRm(host, config, start, timeoutMs);
+    if (type === "ssh")     return await probeSsh(host, config, start, timeoutMs);
+    if (type === "restapi") return await probeRestApiCredential(config, start, timeoutMs);
     return finish(start, false, `Unsupported credential type "${type}"`);
   } catch (err: any) {
     return finish(start, false, err?.message || "Probe failed");

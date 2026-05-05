@@ -3568,9 +3568,10 @@ async function loadCredentialsTab() {
 }
 
 function credTypeLabel(t) {
-  if (t === "snmp") return "SNMP";
-  if (t === "winrm") return "WinRM";
-  if (t === "ssh") return "SSH";
+  if (t === "snmp")    return "SNMP";
+  if (t === "winrm")   return "WinRM";
+  if (t === "ssh")     return "SSH";
+  if (t === "restapi") return "REST API";
   return t;
 }
 
@@ -3586,6 +3587,11 @@ function credSummary(c) {
   if (c.type === "ssh") {
     var auth = (typeof cfg.privateKey === "string" && cfg.privateKey) ? "private key" : "password";
     return escapeHtml(cfg.username || "") + " · " + auth;
+  }
+  if (c.type === "restapi") {
+    var url = cfg.baseUrl || "";
+    var verifyTls = cfg.verifyTls === true ? "verify TLS" : "skip TLS";
+    return escapeHtml(url) + " · " + verifyTls;
   }
   return "";
 }
@@ -3672,9 +3678,10 @@ async function openCredentialModal(id, initialState) {
     '</div>' +
     '<div class="form-group"><label>Type</label>' +
       '<select id="f-cred-type"' + (isNew ? '' : ' disabled') + '>' +
-        '<option value="snmp"'  + (formType === "snmp"  ? ' selected' : '') + '>SNMP</option>' +
-        '<option value="winrm"' + (formType === "winrm" ? ' selected' : '') + '>WinRM</option>' +
-        '<option value="ssh"'   + (formType === "ssh"   ? ' selected' : '') + '>SSH</option>' +
+        '<option value="snmp"'    + (formType === "snmp"    ? ' selected' : '') + '>SNMP</option>' +
+        '<option value="winrm"'   + (formType === "winrm"   ? ' selected' : '') + '>WinRM</option>' +
+        '<option value="ssh"'     + (formType === "ssh"     ? ' selected' : '') + '>SSH</option>' +
+        '<option value="restapi"' + (formType === "restapi" ? ' selected' : '') + '>REST API</option>' +
       '</select>' +
       (isNew ? '<p class="hint">Type cannot be changed after creation.</p>' : '') +
     '</div>' +
@@ -3689,10 +3696,11 @@ async function openCredentialModal(id, initialState) {
     var t = document.getElementById("f-cred-type").value;
     var cfg = formConfig || {};
     var host = document.getElementById("cred-type-fields");
-    if (t === "snmp") host.innerHTML = credSnmpForm(cfg);
-    else if (t === "winrm") host.innerHTML = credWinrmForm(cfg);
-    else host.innerHTML = credSshForm(cfg);
-    wireSnmpVersionToggle();
+    if (t === "snmp")        host.innerHTML = credSnmpForm(cfg);
+    else if (t === "winrm")  host.innerHTML = credWinrmForm(cfg);
+    else if (t === "ssh")    host.innerHTML = credSshForm(cfg);
+    else if (t === "restapi") host.innerHTML = credRestApiForm(cfg);
+    if (t === "snmp") wireSnmpVersionToggle();
   }
   document.getElementById("f-cred-type").addEventListener("change", function () {
     // Switching type discards the config from the old type — there's no
@@ -4009,6 +4017,26 @@ function credSshForm(cfg) {
   );
 }
 
+function credRestApiForm(cfg) {
+  return (
+    '<div class="form-group"><label>Base URL</label>' +
+      '<input type="text" id="f-rest-baseurl" value="' + escapeHtml(cfg.baseUrl || "") + '" placeholder="https://device.example/">' +
+      '<p class="hint">Full URL the credential authenticates against, including scheme. Trailing slashes are normalized.</p>' +
+    '</div>' +
+    '<div class="form-group"><label>API Token</label>' +
+      '<input type="password" id="f-rest-token" value="' + escapeHtml(cfg.apiToken || "") + '">' +
+      '<p class="hint">Sent as <code>Authorization: Bearer &lt;token&gt;</code>.</p>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
+        '<input type="checkbox" id="f-rest-verifytls"' + (cfg.verifyTls === true ? " checked" : "") + '>' +
+        '<span>Verify TLS certificate</span>' +
+      '</label>' +
+      '<p class="hint">Off by default to match FortiOS REST behaviour where self-signed device certs are common. Turn on when targeting a host with a real certificate.</p>' +
+    '</div>'
+  );
+}
+
 function readCredentialForm(type) {
   function num(v) { v = (v || "").trim(); return v ? Number(v) : undefined; }
   if (type === "snmp") {
@@ -4040,6 +4068,13 @@ function readCredentialForm(type) {
     var wp = num(document.getElementById("f-winrm-port").value);
     if (wp !== undefined) w.port = wp;
     return w;
+  }
+  if (type === "restapi") {
+    return {
+      baseUrl: (document.getElementById("f-rest-baseurl").value || "").trim(),
+      apiToken: document.getElementById("f-rest-token").value,
+      verifyTls: document.getElementById("f-rest-verifytls").checked,
+    };
   }
   var s = {
     username: document.getElementById("f-ssh-user").value,
