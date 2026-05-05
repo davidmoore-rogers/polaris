@@ -20,6 +20,7 @@ import mapRouter from "./routes/map.js";
 import allocationTemplatesRouter from "./routes/allocationTemplates.js";
 import credentialsRouter from "./routes/credentials.js";
 import manufacturerAliasesRouter from "./routes/manufacturerAliases.js";
+import monitorSettingsRouter from "./routes/monitorSettings.js";
 import apiTokensRouter from "./routes/apiTokens.js";
 import { requireAuth, requireAdmin, requireNetworkAdmin, attachApiToken } from "./middleware/auth.js";
 
@@ -59,6 +60,9 @@ router.use("/map", mapRouter);
 router.use("/conflicts", conflictsRouter);
 router.use("/credentials", credentialsRouter);
 router.use("/manufacturer-aliases", requireAdmin, manufacturerAliasesRouter);
+// monitor-settings: reads open to any auth caller (asset-modal tier badges
+// need them); writes guarded per-route by requireAssetsAdmin.
+router.use("/monitor-settings", monitorSettingsRouter);
 router.use("/api-tokens", requireAdmin, apiTokensRouter);
 router.use("/server-settings", requireAdmin, serverSettingsRouter);
 // device-icons applies its own per-route guards (admin for CRUD, auth for image-serve)
