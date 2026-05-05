@@ -855,62 +855,96 @@ export async function probeAsset(assetId: string): Promise<ProbeResult> {
     });
     if (!asset) return finish(start, false, "Asset not found");
     if (!asset.monitored) return finish(start, false, "Monitoring disabled");
-    if (!asset.monitorType) return finish(start, false, "No monitor type configured");
 
-    const type = asset.monitorType as MonitorType;
+    // Resolve effective settings (probeTimeoutMs + responseTimePolling) through
+    // the four-tier hierarchy. The resolver's source-default fallback always
+    // populates responseTimePolling — fortinet → "rest_api", everything else
+    // → "icmp" — so dispatch never falls through to the legacy monitorType.
+    const effective = await resolveMonitorSettings({
+      ...asset,
+      discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+    });
+    const timeoutMs = effective.probeTimeoutMs;
+    const polling   = effective.responseTimePolling;
+    if (!polling) return finish(start, false, "No response-time polling method configured");
+
     // AD-discovered Windows hosts often have no IP yet (only dnsName/hostname),
-    // and WinRM resolves FQDNs fine — fall back so the probe can still run.
+    // and WinRM/SSH resolve FQDNs fine — fall back so the probe can still run
+    // when the polling method is one that doesn't need an IPv4 literal.
+    const adFallback = asset.dnsName || asset.hostname;
     const targetIp =
       asset.ipAddress ||
-      (type === "activedirectory" ? (asset.dnsName || asset.hostname) : null);
+      ((polling === "winrm" || polling === "ssh") ? adFallback : null);
+    // ICMP needs an IP — bail clearly if we have neither.
     if (!targetIp) return finish(start, false, "Asset has no IP address");
 
-    // Resolve the asset's effective probe timeout once and thread it through
-    // every probe path. Default 5000ms; per-asset / class / tier overrides
-    // layered by resolveMonitorSettings.
-    const effective = await resolveMonitorSettings(asset);
-    const timeoutMs = effective.probeTimeoutMs;
+    const integration  = asset.discoveredByIntegration ?? null;
+    const sourceKind   = assetSourceKindFromIntegrationType(integration?.type ?? null);
+    const isFortinetSrc = sourceKind === "fortimanager" || sourceKind === "fortigate";
+    const isAdSrc       = sourceKind === "activedirectory";
 
-    if (type === "fortimanager" || type === "fortigate") {
-      if (!asset.discoveredByIntegration) {
-        return finish(start, false, "Originating integration not found");
+    if (polling === "icmp") {
+      return await probeIcmp(targetIp, start, timeoutMs);
+    }
+    if (polling === "rest_api") {
+      // Fortinet-discovered firewalls reuse the integration's stored API token.
+      // Manual REST API targets pull from a stored "restapi"-typed credential.
+      if (isFortinetSrc && integration) {
+        return await probeFortinet(targetIp, integration as any, start, timeoutMs);
       }
-      const transport = resolveMonitorTransport(asset, asset.discoveredByIntegration, "responseTime");
-      if (transport === "snmp") {
+      if (asset.monitorCredential?.type === "restapi") {
+        return await probeRestApiCredential(asset.monitorCredential.config as Record<string, unknown>, start, timeoutMs);
+      }
+      return finish(start, false, "REST API polling requires either a Fortinet integration or a REST API credential");
+    }
+    if (polling === "snmp") {
+      // Asset's own SNMP credential wins. Fortinet-discovered firewalls fall
+      // back to the integration's monitorCredentialId so an operator who set
+      // the integration tier to SNMP doesn't need to attach a credential to
+      // every firewall.
+      if (asset.monitorCredential?.type === "snmp") {
+        return await probeSnmp(targetIp, asset.monitorCredential.config as Record<string, unknown>, start, timeoutMs);
+      }
+      if (isFortinetSrc && integration) {
         try {
-          const credConfig = await loadSnmpCredentialConfigForFortinetAsset(asset, asset.discoveredByIntegration);
+          const credConfig = await loadSnmpCredentialConfigForFortinetAsset(asset, integration);
           return await probeSnmp(targetIp, credConfig, start, timeoutMs);
         } catch (err: any) {
           return finish(start, false, err?.message || "SNMP credential lookup failed");
         }
       }
-      return await probeFortinet(targetIp, asset.discoveredByIntegration as any, start, timeoutMs);
+      return finish(start, false, "No SNMP credential selected");
     }
-    if (type === "activedirectory") {
-      if (!asset.discoveredByIntegration) {
-        return finish(start, false, "Originating integration not found");
+    if (polling === "winrm") {
+      // Asset's own WinRM credential wins. AD-discovered hosts fall back to
+      // the integration's bind credentials over HTTPS/5986.
+      if (asset.monitorCredential?.type === "winrm") {
+        return await probeWinRm(targetIp, asset.monitorCredential.config as Record<string, unknown>, start, timeoutMs);
       }
-      if (asset.discoveredByIntegration.type !== "activedirectory") {
-        return finish(start, false, "Originating integration is not Active Directory");
+      if (isAdSrc && integration) {
+        const cfg      = (integration.config as Record<string, unknown>) || {};
+        const username = String(cfg.bindDn || "");
+        const password = String(cfg.bindPassword || "");
+        if (!username || !password) return finish(start, false, "Active Directory bind credentials not configured");
+        return await probeWinRm(targetIp, { username, password, useHttps: true, port: 5986 }, start, timeoutMs);
       }
-      return await probeActiveDirectory(targetIp, asset.os, asset.discoveredByIntegration as any, start, timeoutMs);
+      return finish(start, false, "No WinRM credential selected");
     }
-    if (type === "icmp") {
-      return await probeIcmp(targetIp, start, timeoutMs);
+    if (polling === "ssh") {
+      // Same shape as WinRM — asset credential first, AD bind fallback second.
+      if (asset.monitorCredential?.type === "ssh") {
+        return await probeSsh(targetIp, asset.monitorCredential.config as Record<string, unknown>, start, timeoutMs);
+      }
+      if (isAdSrc && integration) {
+        const cfg      = (integration.config as Record<string, unknown>) || {};
+        const username = String(cfg.bindDn || "");
+        const password = String(cfg.bindPassword || "");
+        if (!username || !password) return finish(start, false, "Active Directory bind credentials not configured");
+        return await probeSsh(targetIp, { username, password, port: 22 }, start, timeoutMs);
+      }
+      return finish(start, false, "No SSH credential selected");
     }
-    if (type === "snmp") {
-      if (!asset.monitorCredential) return finish(start, false, "No SNMP credential selected");
-      return await probeSnmp(targetIp, asset.monitorCredential.config as Record<string, unknown>, start, timeoutMs);
-    }
-    if (type === "winrm") {
-      if (!asset.monitorCredential) return finish(start, false, "No WinRM credential selected");
-      return await probeWinRm(targetIp, asset.monitorCredential.config as Record<string, unknown>, start, timeoutMs);
-    }
-    if (type === "ssh") {
-      if (!asset.monitorCredential) return finish(start, false, "No SSH credential selected");
-      return await probeSsh(targetIp, asset.monitorCredential.config as Record<string, unknown>, start, timeoutMs);
-    }
-    return finish(start, false, `Unknown monitor type "${type}"`);
+    return finish(start, false, `Unknown polling method "${polling}"`);
   } catch (err: any) {
     return finish(start, false, err?.message || "Unknown probe error");
   }
@@ -962,34 +996,6 @@ async function probeFortinet(
   } catch (err: any) {
     return finish(start, false, err?.message || "FortiOS request failed");
   }
-}
-
-// AD-discovered hosts reuse the integration's bind credentials for the probe,
-// mirroring how FMG/FortiGate-discovered firewalls reuse the integration's API
-// token. Windows hosts get WinRM (5986/HTTPS Basic); realm-joined Linux hosts
-// get SSH (22). The bind DN must be in UPN form (user@domain.com) or down-level
-// form (DOMAIN\user) for both WinRM and SSH-to-realmd to accept it.
-async function probeActiveDirectory(
-  host: string,
-  os: string | null | undefined,
-  integration: { type: string; config: Record<string, unknown> },
-  start: number,
-  timeoutMs: number,
-): Promise<ProbeResult> {
-  const cfg = integration.config || {};
-  const username = String(cfg.bindDn || "");
-  const password = String(cfg.bindPassword || "");
-  if (!username || !password) {
-    return finish(start, false, "Active Directory bind credentials not configured");
-  }
-  const protocol = getAdMonitorProtocol(os);
-  if (protocol === "winrm") {
-    return await probeWinRm(host, { username, password, useHttps: true, port: 5986 }, start, timeoutMs);
-  }
-  if (protocol === "ssh") {
-    return await probeSsh(host, { username, password, port: 22 }, start, timeoutMs);
-  }
-  return finish(start, false, "Asset OS is not Windows or Linux — cannot pick AD probe protocol");
 }
 
 async function probeIcmp(host: string, start: number, timeoutMs: number): Promise<ProbeResult> {
@@ -3771,11 +3777,20 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       id: true,
       assetType: true,
       discoveredByIntegrationId: true,
+      // Joined for the resolver — picks the source-default polling method
+      // (rest_api for fortinet, icmp for everything else). Without this the
+      // resolver maps every candidate to "manual" and the cadence calculation
+      // silently drifts.
+      discoveredByIntegration: { select: { type: true } },
       monitorType: true, monitorStatus: true, consecutiveFailures: true,
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, telemetryIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
       probeTimeoutMs: true,
+      responseTimePolling: true,
+      telemetryPolling:    true,
+      interfacesPolling:   true,
+      lldpPolling:         true,
       monitoredInterfaces: true,
       monitoredStorage: true,
       monitoredIpsecTunnels: true,
@@ -3813,7 +3828,10 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     // Resolve effective settings through the four-tier hierarchy. Internally
     // memoized — first asset in a (integration|manual, assetType) bucket
     // pays for the DB read; everything else hits the in-memory cache.
-    const eff = await resolveMonitorSettings(a);
+    const eff = await resolveMonitorSettings({
+      ...a,
+      discoveredByIntegrationType: a.discoveredByIntegration?.type ?? null,
+    });
     // Probe cadence is just the resolved intervalSeconds — no backoff for
     // down hosts. Down-host suppression below stops heavy cadences regardless;
     // the cheap response-time probe keeps firing at base cadence so recovery

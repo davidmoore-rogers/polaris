@@ -103,11 +103,18 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       id: true,
       assetType: true,
       discoveredByIntegrationId: true,
+      // Joined for the resolver — picks the source-default polling method.
+      // See the matching comment in monitoringService.runMonitorPass.
+      discoveredByIntegration: { select: { type: true } },
       monitorType: true, monitorStatus: true,
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, telemetryIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
       probeTimeoutMs: true,
+      responseTimePolling: true,
+      telemetryPolling:    true,
+      interfacesPolling:   true,
+      lldpPolling:         true,
       monitoredInterfaces: true,
       monitoredStorage: true,
       monitoredIpsecTunnels: true,
@@ -123,7 +130,10 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
   for (const a of candidates) {
     // Resolve effective settings via the four-tier hierarchy. Cached after
     // first lookup per (integration|manual, assetType) bucket.
-    const eff = await resolveMonitorSettings(a);
+    const eff = await resolveMonitorSettings({
+      ...a,
+      discoveredByIntegrationType: a.discoveredByIntegration?.type ?? null,
+    });
     const probe      = isDue(a.lastMonitorAt,    eff.intervalSeconds);
     const telemetry  = isDue(a.lastTelemetryAt,  eff.telemetryIntervalSeconds);
     const systemInfo = isDue(a.lastSystemInfoAt, eff.systemInfoIntervalSeconds);

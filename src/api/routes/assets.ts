@@ -518,14 +518,22 @@ router.get("/:id/effective-monitor-settings", async (req, res, next) => {
         id:                        true,
         assetType:                 true,
         discoveredByIntegrationId: true,
+        discoveredByIntegration:   { select: { type: true } },
         monitorIntervalSec:        true,
         telemetryIntervalSec:      true,
         systemInfoIntervalSec:     true,
         probeTimeoutMs:            true,
+        responseTimePolling:       true,
+        telemetryPolling:          true,
+        interfacesPolling:         true,
+        lldpPolling:               true,
       },
     });
     if (!asset) throw new AppError(404, "Asset not found");
-    const result = await resolveMonitorSettingsWithProvenance(asset);
+    const result = await resolveMonitorSettingsWithProvenance({
+      ...asset,
+      discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+    });
     res.json(result);
   } catch (err) {
     next(err);
