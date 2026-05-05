@@ -24,6 +24,13 @@ import { invalidateMonitorSettingsCache } from "../../services/monitoringService
 import { requireAssetsAdmin } from "../middleware/auth.js";
 import { logEvent } from "./events.js";
 import { AppError } from "../../utils/errors.js";
+import {
+  type PollingMethod,
+  type AssetSourceKind,
+  assetSourceKindFromIntegrationType,
+  isPollingMethodCompatible,
+  pollingMethodLabel,
+} from "../../utils/pollingCompatibility.js";
 
 const router = Router();
 
@@ -39,9 +46,13 @@ const ASSET_TYPES = [
 ] as const;
 const AssetTypeSchema = z.enum(ASSET_TYPES);
 
-// Tier-3 / "complete" settings: every field present, no nulls. Used by the
-// integration-tier and manual-tier PUT endpoints — those layers store the
-// canonical floor for assets in their group.
+const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp"]);
+
+// Tier-3 / "complete" settings: every cadence field present (no nulls). The
+// per-stream polling fields are optional/nullable at every tier — null means
+// "use the source default" (fortinet→rest_api, everything else→icmp). Stored
+// alongside the cadence fields in Integration.config.monitorSettings (tier-3
+// integration) or in the Setting "manualMonitorSettings" row (tier-3 manual).
 const TierSettingsSchema = z.object({
   intervalSeconds:           z.number().int().min(1).max(86400),
   failureThreshold:          z.number().int().min(1).max(100),
@@ -51,6 +62,10 @@ const TierSettingsSchema = z.object({
   sampleRetentionDays:       z.number().int().min(0).max(3650),
   telemetryRetentionDays:    z.number().int().min(0).max(3650),
   systemInfoRetentionDays:   z.number().int().min(0).max(3650),
+  responseTimePolling:       PollingMethodEnum.nullable().optional(),
+  telemetryPolling:          PollingMethodEnum.nullable().optional(),
+  interfacesPolling:         PollingMethodEnum.nullable().optional(),
+  lldpPolling:               PollingMethodEnum.nullable().optional(),
 });
 
 // Override shape — every field optional/nullable, null = inherit from tier
@@ -64,7 +79,36 @@ const OverrideSettingsSchema = z.object({
   sampleRetentionDays:       z.number().int().min(0).max(3650).nullable().optional(),
   telemetryRetentionDays:    z.number().int().min(0).max(3650).nullable().optional(),
   systemInfoRetentionDays:   z.number().int().min(0).max(3650).nullable().optional(),
+  responseTimePolling:       PollingMethodEnum.nullable().optional(),
+  telemetryPolling:          PollingMethodEnum.nullable().optional(),
+  interfacesPolling:         PollingMethodEnum.nullable().optional(),
+  lldpPolling:               PollingMethodEnum.nullable().optional(),
 });
+
+// Polling-method compatibility check shared by integration-tier and
+// class-override writes. A tier whose source is fixed (any single integration
+// or a class override scoped to one) cannot store a method that wouldn't
+// apply on the assets it covers — the resolver would silently fall through
+// and the operator would never see why their setting "didn't take." Manual
+// tier accepts every method (it covers any source).
+const POLLING_FIELDS = ["responseTimePolling", "telemetryPolling", "interfacesPolling", "lldpPolling"] as const;
+type PollingField = (typeof POLLING_FIELDS)[number];
+
+function assertPollingCompatible(
+  source: AssetSourceKind,
+  input: Partial<Record<PollingField, PollingMethod | null | undefined>>,
+): void {
+  for (const field of POLLING_FIELDS) {
+    const v = input[field];
+    if (!v) continue;
+    if (!isPollingMethodCompatible(source, v)) {
+      throw new AppError(
+        400,
+        `${pollingMethodLabel(v)} polling is not supported for ${source} assets (field: ${field})`,
+      );
+    }
+  }
+}
 
 const MANUAL_SETTING_KEY = "manualMonitorSettings";
 
@@ -133,6 +177,11 @@ router.put("/integration/:id", requireAssetsAdmin, async (req, res, next) => {
       select: { id: true, name: true, type: true, config: true },
     });
     if (!integration) throw new AppError(404, "Integration not found");
+    // Tier-3 integration polling methods must apply on the integration's
+    // source kind — picking WinRM on a FortiManager tier silently drops to
+    // the source default at resolve time, leaving the operator confused
+    // about why their selection "didn't take."
+    assertPollingCompatible(assetSourceKindFromIntegrationType(integration.type), input);
     const cfg = (integration.config as Record<string, unknown> | null) ?? {};
     cfg.monitorSettings = input;
     await prisma.integration.update({
@@ -189,13 +238,19 @@ router.get("/class-overrides", async (req, res, next) => {
 router.post("/class-overrides", requireAssetsAdmin, async (req, res, next) => {
   try {
     const input = ClassCreateSchema.parse(req.body);
+    let sourceKind: AssetSourceKind = "manual";
     if (input.integrationId !== null) {
       const exists = await prisma.integration.findUnique({
         where:  { id: input.integrationId },
-        select: { id: true },
+        select: { id: true, type: true },
       });
       if (!exists) throw new AppError(400, `Integration ${input.integrationId} not found`);
+      sourceKind = assetSourceKindFromIntegrationType(exists.type);
     }
+    // Class overrides scoped to a single integration must use polling methods
+    // valid for that integration's source kind. Manual-tier overrides
+    // (integrationId = null) cover any source so they accept any method.
+    assertPollingCompatible(sourceKind, input);
     // Service-layer uniqueness for the manual-tier case (Postgres treats nulls
     // as distinct, so the @@unique alone won't catch it).
     const existing = await prisma.monitorClassOverride.findFirst({
@@ -231,8 +286,17 @@ router.put("/class-overrides/:id", requireAssetsAdmin, async (req, res, next) =>
   try {
     const input = ClassUpdateSchema.parse(req.body);
     const id = req.params.id as string;
-    const existing = await prisma.monitorClassOverride.findUnique({ where: { id } });
+    const existing = await prisma.monitorClassOverride.findUnique({
+      where:   { id },
+      include: { integration: { select: { type: true } } },
+    });
     if (!existing) throw new AppError(404, "Class override not found");
+    // Same compatibility check as create — keep operators from saving a
+    // method that wouldn't apply on the assets this row covers.
+    const sourceKind: AssetSourceKind = existing.integration
+      ? assetSourceKindFromIntegrationType(existing.integration.type)
+      : "manual";
+    assertPollingCompatible(sourceKind, input);
     const updated = await prisma.monitorClassOverride.update({
       where:   { id },
       data:    input,
@@ -300,6 +364,10 @@ router.get("/asset-overrides", async (req, res, next) => {
         { telemetryIntervalSec:  { not: null } },
         { systemInfoIntervalSec: { not: null } },
         { probeTimeoutMs:        { not: null } },
+        { responseTimePolling:   { not: null } },
+        { telemetryPolling:      { not: null } },
+        { interfacesPolling:     { not: null } },
+        { lldpPolling:           { not: null } },
       ],
     };
     if (integrationIdParam === "null") where.discoveredByIntegrationId = null;
@@ -318,6 +386,10 @@ router.get("/asset-overrides", async (req, res, next) => {
         telemetryIntervalSec:    true,
         systemInfoIntervalSec:   true,
         probeTimeoutMs:          true,
+        responseTimePolling:     true,
+        telemetryPolling:        true,
+        interfacesPolling:       true,
+        lldpPolling:             true,
         discoveredByIntegrationId: true,
       },
       orderBy: { hostname: "asc" },

@@ -28,6 +28,12 @@ import {
   resolveMonitorSettingsWithProvenance,
 } from "../../services/monitoringService.js";
 import { getCredential } from "../../services/credentialService.js";
+import {
+  type PollingMethod,
+  assetSourceKindFromIntegrationType,
+  isPollingMethodCompatible,
+  pollingMethodLabel,
+} from "../../utils/pollingCompatibility.js";
 
 const router = Router();
 
@@ -122,6 +128,7 @@ const CreateAssetSchema = z.object({
 
 const MonitorTypeEnum = z.enum(["fortimanager", "fortigate", "activedirectory", "snmp", "winrm", "ssh", "icmp"]);
 const MonitorTransportEnum = z.enum(["rest", "snmp"]);
+const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp"]);
 
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   monitored:             z.boolean().optional(),
@@ -131,8 +138,17 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // Per-asset probe timeout override. 100..60000 ms; null inherits from the
   // resolved tier-3 setting. The frontend renders a soft warning at <500 ms.
   probeTimeoutMs:        z.number().int().min(100).max(60000).nullable().optional(),
-  // Per-stream transport overrides for FMG/FortiGate-discovered firewalls.
-  // null = inherit from the integration's matching toggle.
+  // Per-stream polling-method overrides — top-tier override, falls through
+  // to the class override / integration tier / source default. Compatibility
+  // with the asset's source kind is enforced at PUT time below.
+  responseTimePolling:   PollingMethodEnum.nullable().optional(),
+  telemetryPolling:      PollingMethodEnum.nullable().optional(),
+  interfacesPolling:     PollingMethodEnum.nullable().optional(),
+  lldpPolling:           PollingMethodEnum.nullable().optional(),
+  // Legacy per-stream transport overrides for FMG/FortiGate-discovered
+  // firewalls. null = inherit from the integration's matching toggle.
+  // Retired in favour of {responseTime,telemetry,interfaces,lldp}Polling
+  // — phase 3j drops these columns.
   monitorResponseTimeSource: MonitorTransportEnum.nullable().optional(),
   monitorTelemetrySource:    MonitorTransportEnum.nullable().optional(),
   monitorInterfacesSource:   MonitorTransportEnum.nullable().optional(),
@@ -1275,9 +1291,33 @@ router.post("/", requireAssetsAdmin, async (req, res, next) => {
 router.put("/:id", requireAssetsAdmin, async (req, res, next) => {
   try {
     const id = req.params.id as string;
-    const existing = await prisma.asset.findUnique({ where: { id } });
+    const existing = await prisma.asset.findUnique({
+      where:   { id },
+      include: { discoveredByIntegration: { select: { type: true } } },
+    });
     if (!existing) throw new AppError(404, "Asset not found");
     const input = UpdateAssetSchema.parse(req.body);
+    // Per-asset polling overrides must be valid for the asset's source kind.
+    // Falling through silently at the resolver would leave the operator
+    // confused about why their selection didn't take.
+    {
+      const sourceKind = assetSourceKindFromIntegrationType(existing.discoveredByIntegration?.type ?? null);
+      const fields: Array<["responseTimePolling" | "telemetryPolling" | "interfacesPolling" | "lldpPolling", PollingMethod | null | undefined]> = [
+        ["responseTimePolling", input.responseTimePolling],
+        ["telemetryPolling",    input.telemetryPolling],
+        ["interfacesPolling",   input.interfacesPolling],
+        ["lldpPolling",         input.lldpPolling],
+      ];
+      for (const [name, value] of fields) {
+        if (!value) continue;
+        if (!isPollingMethodCompatible(sourceKind, value)) {
+          throw new AppError(
+            400,
+            `${pollingMethodLabel(value)} polling is not supported for ${sourceKind} assets (field: ${name})`,
+          );
+        }
+      }
+    }
     // Quarantine status is owned by the dedicated quarantine endpoints —
     // setting it via the generic asset PUT would skip the FortiGate push
     // (or skip the device-side unpush on release), creating divergence
