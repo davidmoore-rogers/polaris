@@ -716,6 +716,31 @@ async function probeSsh(host: string, config: Record<string, unknown>, start: nu
   });
 }
 
+/**
+ * Run a one-shot probe against `host` with the given credential type + config,
+ * without touching the asset row or writing samples. Used by the credential
+ * Test Connection flow in Server Settings → Credentials, where the operator
+ * picks an asset just to supply the host — the asset's stored monitor
+ * settings are intentionally ignored. ICMP needs no credential.
+ */
+export async function probeCredentialAgainstHost(
+  host: string,
+  type: "snmp" | "winrm" | "ssh" | "icmp",
+  config: Record<string, unknown>,
+): Promise<ProbeResult> {
+  const start = performance.now();
+  if (!host) return finish(start, false, "Host is required");
+  try {
+    if (type === "icmp")  return await probeIcmp(host, start);
+    if (type === "snmp")  return await probeSnmp(host, config, start);
+    if (type === "winrm") return await probeWinRm(host, config, start);
+    if (type === "ssh")   return await probeSsh(host, config, start);
+    return finish(start, false, `Unsupported credential type "${type}"`);
+  } catch (err: any) {
+    return finish(start, false, err?.message || "Probe failed");
+  }
+}
+
 // ─── System tab: telemetry + system-info collection ────────────────────────
 //
 // These run on independent cadences from the response-time probe. Telemetry

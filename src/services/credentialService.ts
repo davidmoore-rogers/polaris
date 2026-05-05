@@ -193,7 +193,7 @@ function validateSshConfig(config: Record<string, unknown>): void {
   }
 }
 
-function validateConfig(type: CredentialType, config: Record<string, unknown>): void {
+export function validateConfig(type: CredentialType, config: Record<string, unknown>): void {
   if (type === "snmp")  return validateSnmpConfig(config);
   if (type === "winrm") return validateWinRmConfig(config);
   if (type === "ssh")   return validateSshConfig(config);
@@ -205,7 +205,7 @@ function validateConfig(type: CredentialType, config: Record<string, unknown>): 
  * whose incoming value is either the mask sentinel or empty. Lets the
  * edit modal round-trip a masked value without wiping the real secret.
  */
-function mergeConfigPreservingSecrets(
+export function mergeConfigPreservingSecrets(
   type: CredentialType,
   existing: Record<string, unknown>,
   incoming: Record<string, unknown>,

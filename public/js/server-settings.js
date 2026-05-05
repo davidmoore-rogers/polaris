@@ -3631,44 +3631,67 @@ function renderCredentialsTab() {
   });
 }
 
-async function openCredentialModal(id) {
+async function openCredentialModal(id, initialState) {
   var cred = null;
   if (id) {
     try { cred = await api.credentials.get(id); }
     catch (err) { showToast(err.message, "error"); return; }
   }
   var isNew = !cred;
-  var type = cred ? cred.type : "snmp";
-  var title = isNew ? "Add Credential" : ("Edit Credential — " + cred.name);
+  // initialState overrides the fetched-or-default form values; passed by the
+  // Test Connection modal's Back button so the operator's in-flight edits
+  // (including a freshly-typed password) survive the round-trip.
+  var formName   = initialState ? initialState.name   : (cred ? cred.name   : "");
+  var formType   = initialState ? initialState.type   : (cred ? cred.type   : "snmp");
+  var formConfig = initialState ? initialState.config : (cred ? cred.config : null);
+  var title = isNew ? "Add Credential" : ("Edit Credential — " + (cred ? cred.name : ""));
   var body =
     '<div class="form-group"><label>Name</label>' +
-      '<input type="text" id="f-cred-name" value="' + escapeHtml(cred ? cred.name : "") + '" placeholder="e.g. Core SNMP v2c">' +
+      '<input type="text" id="f-cred-name" value="' + escapeHtml(formName) + '" placeholder="e.g. Core SNMP v2c">' +
     '</div>' +
     '<div class="form-group"><label>Type</label>' +
       '<select id="f-cred-type"' + (isNew ? '' : ' disabled') + '>' +
-        '<option value="snmp"'  + (type === "snmp"  ? ' selected' : '') + '>SNMP</option>' +
-        '<option value="winrm"' + (type === "winrm" ? ' selected' : '') + '>WinRM</option>' +
-        '<option value="ssh"'   + (type === "ssh"   ? ' selected' : '') + '>SSH</option>' +
+        '<option value="snmp"'  + (formType === "snmp"  ? ' selected' : '') + '>SNMP</option>' +
+        '<option value="winrm"' + (formType === "winrm" ? ' selected' : '') + '>WinRM</option>' +
+        '<option value="ssh"'   + (formType === "ssh"   ? ' selected' : '') + '>SSH</option>' +
       '</select>' +
       (isNew ? '<p class="hint">Type cannot be changed after creation.</p>' : '') +
     '</div>' +
     '<div id="cred-type-fields"></div>';
   var footer =
+    '<button class="btn btn-secondary" id="btn-cred-test" style="margin-right:auto">Test Connection</button>' +
     '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-cred-save">Save</button>';
   openModal(title, body, footer);
 
   function renderTypeFields() {
     var t = document.getElementById("f-cred-type").value;
-    var cfg = (cred && cred.config) || {};
+    var cfg = formConfig || {};
     var host = document.getElementById("cred-type-fields");
     if (t === "snmp") host.innerHTML = credSnmpForm(cfg);
     else if (t === "winrm") host.innerHTML = credWinrmForm(cfg);
     else host.innerHTML = credSshForm(cfg);
     wireSnmpVersionToggle();
   }
-  document.getElementById("f-cred-type").addEventListener("change", renderTypeFields);
+  document.getElementById("f-cred-type").addEventListener("change", function () {
+    // Switching type discards the config from the old type — there's no
+    // sensible cross-type carryover (SNMP community vs WinRM password etc.)
+    formConfig = null;
+    renderTypeFields();
+  });
   renderTypeFields();
+
+  document.getElementById("btn-cred-test").addEventListener("click", function () {
+    var name = (document.getElementById("f-cred-name").value || "").trim();
+    var selectedType = document.getElementById("f-cred-type").value;
+    var config = readCredentialForm(selectedType);
+    openCredentialTestModal({
+      id: id,
+      name: name,
+      type: selectedType,
+      config: config,
+    });
+  });
 
   document.getElementById("btn-cred-save").addEventListener("click", async function () {
     var name = (document.getElementById("f-cred-name").value || "").trim();
@@ -3684,6 +3707,151 @@ async function openCredentialModal(id) {
     } catch (err) {
       showToast(err.message, "error");
     }
+  });
+}
+
+// Test Connection modal — opens on top of the credential edit modal. Operator
+// searches for an asset by name/IP/hostname; the asset's IP supplies the host
+// for a one-shot probe of the credential as it currently sits in the form.
+// Back returns to the credential modal with the operator's in-flight edits
+// preserved (including any freshly-typed password) so the test result can
+// inform their next save.
+function openCredentialTestModal(state) {
+  var typeLabel = credTypeLabel(state.type);
+  var title = "Test Credential" + (state.name ? " — " + state.name : "");
+  var body =
+    '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin:0 0 0.75rem">' +
+      'Pick an asset to test this ' + escapeHtml(typeLabel) + ' credential against. The asset\'s IP supplies the host; ' +
+      'its monitor settings are ignored — the form values you entered are what gets exercised.' +
+    '</p>' +
+    '<div class="form-group"><label>Search asset</label>' +
+      '<input type="search" id="f-cred-test-search" autocomplete="off" spellcheck="false" placeholder="hostname, IP, or MAC (min 2 chars)">' +
+      '<div id="f-cred-test-results" style="margin-top:0.25rem;max-height:240px;overflow:auto;border:1px solid var(--color-border);border-radius:4px;display:none"></div>' +
+    '</div>' +
+    '<div id="f-cred-test-selected" style="display:none;padding:0.6rem 0.75rem;border:1px solid var(--color-border);border-radius:4px;margin-bottom:0.75rem;background:var(--color-surface-alt,rgba(127,127,127,0.05))"></div>' +
+    '<div id="f-cred-test-result" style="display:none"></div>';
+  var footer =
+    '<button class="btn btn-secondary" id="btn-cred-test-back" style="margin-right:auto">&larr; Back</button>' +
+    '<button class="btn btn-secondary" onclick="closeModal()">Close</button>' +
+    '<button class="btn btn-primary" id="btn-cred-test-run" disabled>Run Test</button>';
+  openModal(title, body, footer);
+
+  var selectedAsset = null;
+  var searchTimer = null;
+  var lastQuery = "";
+
+  var searchInput   = document.getElementById("f-cred-test-search");
+  var resultsBox    = document.getElementById("f-cred-test-results");
+  var selectedBox   = document.getElementById("f-cred-test-selected");
+  var resultBox     = document.getElementById("f-cred-test-result");
+  var runBtn        = document.getElementById("btn-cred-test-run");
+  var backBtn       = document.getElementById("btn-cred-test-back");
+
+  function setSelected(hit) {
+    selectedAsset = hit;
+    if (!hit) {
+      selectedBox.style.display = "none";
+      runBtn.disabled = true;
+      return;
+    }
+    selectedBox.innerHTML =
+      '<div style="font-weight:600">' + escapeHtml(hit.title || "asset") + '</div>' +
+      (hit.subtitle ? '<div style="font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(hit.subtitle) + '</div>' : '');
+    selectedBox.style.display = "block";
+    resultsBox.style.display = "none";
+    resultsBox.innerHTML = "";
+    searchInput.value = hit.title || "";
+    runBtn.disabled = false;
+  }
+
+  function renderResults(hits) {
+    if (!hits.length) {
+      resultsBox.innerHTML = '<div style="padding:0.5rem 0.75rem;color:var(--color-text-secondary);font-size:0.85rem">No asset matches.</div>';
+      resultsBox.style.display = "block";
+      return;
+    }
+    resultsBox.innerHTML = hits.map(function (h, idx) {
+      return '<div class="cred-test-hit" data-idx="' + idx + '" style="padding:0.5rem 0.75rem;cursor:pointer;border-bottom:1px solid var(--color-border)">' +
+        '<div style="font-weight:600">' + escapeHtml(h.title || "asset") + '</div>' +
+        (h.subtitle ? '<div style="font-size:0.8rem;color:var(--color-text-secondary)">' + escapeHtml(h.subtitle) + '</div>' : '') +
+      '</div>';
+    }).join("");
+    resultsBox.style.display = "block";
+    resultsBox.querySelectorAll(".cred-test-hit").forEach(function (el) {
+      el.addEventListener("click", function () {
+        var idx = Number(el.getAttribute("data-idx"));
+        setSelected(hits[idx]);
+      });
+    });
+  }
+
+  searchInput.addEventListener("input", function () {
+    var q = searchInput.value.trim();
+    if (selectedAsset && q !== (selectedAsset.title || "")) {
+      // operator started typing again — clear the previous selection
+      selectedAsset = null;
+      selectedBox.style.display = "none";
+      runBtn.disabled = true;
+    }
+    clearTimeout(searchTimer);
+    if (q.length < 2) {
+      resultsBox.style.display = "none";
+      resultsBox.innerHTML = "";
+      lastQuery = "";
+      return;
+    }
+    searchTimer = setTimeout(async function () {
+      lastQuery = q;
+      try {
+        var results = await api.search.query(q);
+        if (results.query !== lastQuery) return; // stale
+        renderResults(results.assets || []);
+      } catch (err) {
+        resultsBox.innerHTML = '<div style="padding:0.5rem 0.75rem;color:var(--color-danger,#c0392b);font-size:0.85rem">Search failed: ' + escapeHtml(err.message || "Unknown error") + '</div>';
+        resultsBox.style.display = "block";
+      }
+    }, 180);
+  });
+  setTimeout(function () { searchInput.focus(); }, 0);
+
+  runBtn.addEventListener("click", async function () {
+    if (!selectedAsset) return;
+    runBtn.disabled = true;
+    var origLabel = runBtn.textContent;
+    runBtn.textContent = "Testing…";
+    resultBox.style.display = "block";
+    resultBox.innerHTML = '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin:0.75rem 0 0">Running probe…</p>';
+    var body = { assetId: selectedAsset.id, type: state.type, config: state.config };
+    if (state.id) body.id = state.id;
+    try {
+      var res = await api.credentials.test(body);
+      var ok = !!res.success;
+      var color = ok ? 'var(--color-success,#27ae60)' : 'var(--color-danger,#c0392b)';
+      var icon  = ok ? '✓' : '✗';
+      var label = ok ? 'Success' : 'Failed';
+      var detail;
+      if (ok) detail = 'Probe answered in ' + (res.responseTimeMs || 0) + ' ms.';
+      else detail = res.error || 'Probe failed (no error returned).';
+      resultBox.innerHTML =
+        '<div style="margin-top:0.75rem;padding:0.75rem;border:1px solid ' + color + ';border-radius:4px;background:rgba(127,127,127,0.04)">' +
+          '<div style="font-weight:600;color:' + color + '">' + icon + ' ' + label + '</div>' +
+          '<div style="font-size:0.85rem;margin-top:0.25rem">' + escapeHtml(detail) + '</div>' +
+          (res.host ? '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-top:0.25rem">Host: ' + escapeHtml(res.host) + '</div>' : '') +
+        '</div>';
+    } catch (err) {
+      resultBox.innerHTML =
+        '<div style="margin-top:0.75rem;padding:0.75rem;border:1px solid var(--color-danger,#c0392b);border-radius:4px">' +
+          '<div style="font-weight:600;color:var(--color-danger,#c0392b)">✗ Failed</div>' +
+          '<div style="font-size:0.85rem;margin-top:0.25rem">' + escapeHtml(err.message || "Test request failed") + '</div>' +
+        '</div>';
+    } finally {
+      runBtn.textContent = origLabel;
+      runBtn.disabled = !selectedAsset;
+    }
+  });
+
+  backBtn.addEventListener("click", function () {
+    openCredentialModal(state.id, { name: state.name, type: state.type, config: state.config });
   });
 }
 
