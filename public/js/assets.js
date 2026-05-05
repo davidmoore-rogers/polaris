@@ -1216,20 +1216,15 @@ function getAssetFormData() {
       var ptRaw = ptEl.value === "" ? null : parseInt(ptEl.value, 10);
       data.probeTimeoutMs = (Number.isFinite(ptRaw) && ptRaw >= 100 && ptRaw <= 60000) ? ptRaw : null;
     }
-    // Per-stream transport overrides. Each select returns "" (= inherit), "rest", or "snmp".
-    function readTransport(id) {
-      var el = document.getElementById(id);
-      if (!el) return undefined;
-      return el.value === "rest" || el.value === "snmp" ? el.value : null;
+    // Per-stream polling-method overrides. Each select returns null
+    // (= inherit) or one of "rest_api"/"snmp"/"winrm"/"ssh"/"icmp".
+    var polling = _polarisReadPollingFourStream("f-");
+    if (document.getElementById("f-responseTimePolling")) {
+      data.responseTimePolling = polling.responseTimePolling;
+      data.telemetryPolling    = polling.telemetryPolling;
+      data.interfacesPolling   = polling.interfacesPolling;
+      data.lldpPolling         = polling.lldpPolling;
     }
-    var rt = readTransport("f-monitorResponseTimeSource");
-    var tl = readTransport("f-monitorTelemetrySource");
-    var iv2 = readTransport("f-monitorInterfacesSource");
-    var ll = readTransport("f-monitorLldpSource");
-    if (rt !== undefined) data.monitorResponseTimeSource = rt;
-    if (tl !== undefined) data.monitorTelemetrySource    = tl;
-    if (iv2 !== undefined) data.monitorInterfacesSource  = iv2;
-    if (ll !== undefined) data.monitorLldpSource         = ll;
   }
   return data;
 }
@@ -1306,54 +1301,25 @@ function assetMonitoringFormHTML(asset) {
     '</select>' +
     defaultHintHtml;
 
-  // Per-stream transport overrides — only meaningful when the asset is on
-  // the FMG/FortiGate integration default (the only path that has a REST vs
-  // SNMP choice). Hidden for AD-discovered, generic snmp/icmp/winrm/ssh, or
-  // manually-created assets. Refresh hook in _wireMonitorEditTab toggles
-  // visibility live as the operator changes monitorType.
-  var canShowTransport = (integrationDefault === "fortimanager" || integrationDefault === "fortigate");
-  // Resolve the integration's actual default for each stream so the dropdown
-  // can label "Integration default (REST)" or "Integration default (SNMP)"
-  // — surfaces the inherited value without making the operator click into
-  // the integration to check.
-  var integTransports = (asset && asset.integrationTransportSources) || {};
-  function defaultLabelFor(stream) {
-    var v = integTransports[stream];
-    return v === "snmp" ? "Integration default (SNMP)" : "Integration default (REST)";
-  }
-  function transportSelect(id, currentVal, stream) {
-    var v = currentVal || "";
-    return '<select id="' + id + '">' +
-        '<option value=""'      + (v === ""      ? " selected" : "") + '>' + escapeHtml(defaultLabelFor(stream)) + '</option>' +
-        '<option value="rest"'  + (v === "rest"  ? " selected" : "") + '>REST</option>' +
-        '<option value="snmp"'  + (v === "snmp"  ? " selected" : "") + '>SNMP</option>' +
-      '</select>';
-  }
-  var transportBlockHtml = "";
-  if (canShowTransport) {
-    transportBlockHtml =
-      '<div id="f-transport-wrap" style="margin-top:0.5rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
-        '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.5rem">Per-stream transport overrides</p>' +
-        '<p class="hint" style="margin-bottom:0.75rem">Integration default pulls from the integration\'s Monitoring tab. Per-asset overrides win when set.</p>' +
-        '<div class="form-group" style="display:flex;align-items:center;gap:1rem">' +
-          '<label style="margin:0;min-width:160px">Response time</label>' +
-          transportSelect("f-monitorResponseTimeSource", asset && asset.monitorResponseTimeSource, "responseTime") +
-        '</div>' +
-        '<div class="form-group" style="display:flex;align-items:center;gap:1rem">' +
-          '<label style="margin:0;min-width:160px">Telemetry</label>' +
-          transportSelect("f-monitorTelemetrySource", asset && asset.monitorTelemetrySource, "telemetry") +
-        '</div>' +
-        '<div class="form-group" style="display:flex;align-items:center;gap:1rem">' +
-          '<label style="margin:0;min-width:160px">Interfaces</label>' +
-          transportSelect("f-monitorInterfacesSource", asset && asset.monitorInterfacesSource, "interfaces") +
-        '</div>' +
-        '<div class="form-group" style="display:flex;align-items:center;gap:1rem">' +
-          '<label style="margin:0;min-width:160px">LLDP neighbors</label>' +
-          transportSelect("f-monitorLldpSource", asset && asset.monitorLldpSource, "lldp") +
-        '</div>' +
-        '<p class="hint">SNMP uses this asset\'s credential when set; otherwise the integration\'s. IPsec tunnels always stay on REST.</p>' +
-      '</div>';
-  }
+  // Per-stream polling-method overrides. Compat-aware — methods that don't
+  // apply to this asset's source are hidden inside the helper. Always
+  // visible when monitoring is enabled (every asset has at least the
+  // response-time stream); the resolver labels each "Inherit" option with
+  // the source default (REST API / ICMP / Not delivered).
+  var integrationType = (asset && asset.discoveredByIntegration && asset.discoveredByIntegration.type) || null;
+  var assetSourceKind = integrationType || "manual";
+  if (!_POLLING_COMPAT[assetSourceKind]) assetSourceKind = "manual";
+  var pollingCurrent = {
+    responseTimePolling: asset && asset.responseTimePolling,
+    telemetryPolling:    asset && asset.telemetryPolling,
+    interfacesPolling:   asset && asset.interfacesPolling,
+    lldpPolling:         asset && asset.lldpPolling,
+  };
+  var transportBlockHtml =
+    '<div id="f-transport-wrap" style="margin-top:0.5rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
+      _polarisPollingFourStreamHTML("f-", assetSourceKind, pollingCurrent) +
+      '<p class="hint" style="margin-top:0.25rem">Per-asset overrides win over class / integration / source-default tiers. Methods that need a credential (SNMP / WinRM / SSH / REST API) use this asset\'s credential when set; FMG/FortiGate-discovered firewalls fall back to the integration\'s API token (REST API) or shared SNMP credential.</p>' +
+    '</div>';
 
   return (
     '<div class="form-group">' +
@@ -1414,11 +1380,12 @@ async function _wireMonitorEditTab(asset) {
       var current = credSel.getAttribute("data-current-id") || "";
       credSel.innerHTML = _credentialOptionsFor(t, current);
     }
-    // Per-stream transport overrides only apply on the FMG/FortiGate paths.
-    // Hide otherwise so the operator doesn't think they affect a generic
-    // snmp/icmp probe.
+    // Per-stream polling block visibility — only visible while monitoring
+    // is enabled. Compat-aware filtering of the per-method options happens
+    // inside the helper at render time, so the same block is reused for
+    // every source kind (the "Inherit" label adapts).
     if (transportWrap) {
-      transportWrap.style.display = (enabled && (t === "fortimanager" || t === "fortigate")) ? "block" : "none";
+      transportWrap.style.display = enabled ? "block" : "none";
     }
   }
   if (typeSel) typeSel.addEventListener("change", refresh);
@@ -3686,7 +3653,6 @@ function _probeMethodLabel(a) {
 // the badge in that case.
 function _assetMonitorStreamSource(asset, stream) {
   if (!asset) return { polling: null, source: "—" };
-  var t = asset.monitorType;
   var integration = asset.discoveredByIntegration;
 
   // Asset source: which integration discovered this asset, or "Manual".
@@ -3701,40 +3667,24 @@ function _assetMonitorStreamSource(asset, stream) {
     ? ((typeLabels[integration.type] || integration.type) + " · " + integration.name)
     : "Manual";
 
-  var polling = null;
+  // Per-asset polling override wins; otherwise show the source default for
+  // this stream. This is a coarse view (skips class-override / tier-3 layers
+  // — that fidelity comes from /effective-monitor-settings) and is good
+  // enough for the at-a-glance chart badge.
+  var sourceKind = (integration && integration.type) || "manual";
+  if (!_POLLING_COMPAT[sourceKind]) sourceKind = "manual";
+  var assetField = stream + "Polling";
+  var resolved = asset[assetField] || _polarisSourceDefaultPolling(sourceKind, stream);
+  if (!resolved) return { polling: null, source: sourceName };
 
-  if (t === "fortimanager" || t === "fortigate") {
-    // Per-stream REST/SNMP toggle. Asset override takes priority over the
-    // integration's default. integrationTransportSources is stamped server-
-    // side on the asset GET payload for FMG/FortiGate-discovered firewalls.
-    var assetTransports = {
-      responseTime: asset.monitorResponseTimeSource,
-      telemetry:    asset.monitorTelemetrySource,
-      interfaces:   asset.monitorInterfacesSource,
-      lldp:         asset.monitorLldpSource,
-    };
-    var integTransports = asset.integrationTransportSources || {};
-    var streamTransport = assetTransports[stream] || integTransports[stream] || "rest";
-    if (streamTransport === "snmp") {
-      var cred = asset.monitorCredential || asset.integrationMonitorCredential;
-      polling = "SNMP" + (cred && cred.name ? " · " + cred.name : "");
-    } else {
-      polling = "FortiOS REST";
-    }
-  } else if (t === "snmp") {
-    polling = "SNMP" + (asset.monitorCredential && asset.monitorCredential.name ? " · " + asset.monitorCredential.name : "");
-  } else if (t === "winrm") {
-    polling = (stream === "responseTime") ? "WinRM" : null;
-  } else if (t === "ssh") {
-    polling = (stream === "responseTime") ? "SSH" : null;
-  } else if (t === "icmp") {
-    polling = (stream === "responseTime") ? "ICMP" : null;
-  } else if (t === "activedirectory") {
-    var os = (asset.os || "").toLowerCase();
-    var protocol = os.indexOf("linux") >= 0 ? "SSH" : "WinRM";
-    polling = (stream === "responseTime") ? ("AD " + protocol) : null;
+  var polling = _POLLING_LABELS[resolved] || resolved;
+  // Append the credential name on transports that need one — gives the
+  // operator a quick visual confirmation of which credential the probe is
+  // about to use without opening the edit modal.
+  var cred = asset.monitorCredential;
+  if ((resolved === "snmp" || resolved === "winrm" || resolved === "ssh" || resolved === "rest_api") && cred && cred.name) {
+    polling += " · " + cred.name;
   }
-
   return { polling: polling, source: sourceName };
 }
 
@@ -3928,6 +3878,12 @@ async function _renderIntermittencyBar(assetId) {
 async function _fetchPollingTransitions(assetId, since, until) {
   var TRACKED = {
     monitorType:               "Polling type",
+    responseTimePolling:       "Response-time polling",
+    telemetryPolling:          "Telemetry polling",
+    interfacesPolling:         "Interfaces polling",
+    lldpPolling:               "LLDP polling",
+    // Legacy transport breadcrumbs — kept until 3j drops the columns so
+    // historical events (pre-polling-redesign) still render on the chart.
     monitorResponseTimeSource: "Response-time transport",
     monitorTelemetrySource:    "Telemetry transport",
     monitorInterfacesSource:   "Interfaces transport",
@@ -7115,6 +7071,11 @@ var MON_TIER_DEFAULTS = {
   systemInfoRetentionDays:   30,
 };
 
+// Polling-method helpers (_POLLING_LABELS / _POLLING_COMPAT /
+// _polarisPollingFourStreamHTML / _polarisReadPollingFourStream) are
+// defined in integrations.js (loaded before this file on both
+// integrations.html and assets.html), exposed globally on `window`.
+
 var _monsetIntegrations  = [];   // for the source picker on add/edit
 var _monsetOverrides     = [];   // class override rows currently rendered
 var _monsetManualValues  = null; // last-fetched manual-tier settings (or null = not yet seeded)
@@ -7210,6 +7171,9 @@ function _monsetManualSectionHTML(v) {
       _monsetField("monset-manual-telemetryRetentionDays",    "Telemetry retention",    "days (0 = forever)",            values.telemetryRetentionDays,    0,   3650,  false) +
       _monsetField("monset-manual-systemInfoRetentionDays",   "System info retention",  "days (0 = forever)",            values.systemInfoRetentionDays,   0,   3650,  false) +
     '</div>' +
+    '<hr style="margin:1rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    _polarisPollingFourStreamHTML("monset-manual-", "manual", values) +
+    '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">Manual tier accepts any method — operator picks per stream and supplies a credential at the asset level (or relies on ICMP).</p>' +
     '<div style="margin-top:1rem;text-align:right">' +
       '<button class="btn btn-primary" id="btn-monset-save-manual">Save Manual Tier</button>' +
     '</div>' +
@@ -7252,6 +7216,7 @@ async function _monsetSaveManual() {
     telemetryRetentionDays:    _monsetReadField("monset-manual-telemetryRetentionDays",    MON_TIER_DEFAULTS.telemetryRetentionDays),
     systemInfoRetentionDays:   _monsetReadField("monset-manual-systemInfoRetentionDays",   MON_TIER_DEFAULTS.systemInfoRetentionDays),
   };
+  Object.assign(body, _polarisReadPollingFourStream("monset-manual-"));
   try {
     var saved = await api.monitorSettings.setManual(body);
     _monsetManualValues = saved || body;
@@ -7311,6 +7276,10 @@ function _monsetOverrideSummary(o) {
     sampleRetentionDays:       "probe-retain",
     telemetryRetentionDays:    "telem-retain",
     systemInfoRetentionDays:   "sysinfo-retain",
+    responseTimePolling:       "rt-poll",
+    telemetryPolling:          "tel-poll",
+    interfacesPolling:         "if-poll",
+    lldpPolling:               "lldp-poll",
   };
   Object.keys(labels).forEach(function (k) {
     if (o[k] !== null && o[k] !== undefined) parts.push(labels[k] + "=" + o[k]);
@@ -7324,13 +7293,19 @@ function _monsetOpenOverrideEditor(existing) {
     var sel = (existing && existing.assetType === key) ? " selected" : "";
     return '<option value="' + escapeHtml(key) + '"' + sel + '>' + escapeHtml(ASSET_TYPE_LABELS[key]) + '</option>';
   }).join("");
-  // Default to "Manual" on add; preserve the row's source on edit.
-  var sourceOpts = '<option value="null"' + ((existing && existing.integrationId === null) || !existing ? " selected" : "") + '>Manual</option>' +
+  // Default to "Manual" on add; preserve the row's source on edit. Each
+  // option carries data-type so the polling-block re-renderer below can
+  // figure out the asset-source kind without re-querying the integrations
+  // list.
+  var sourceOpts = '<option value="null" data-type=""' + ((existing && existing.integrationId === null) || !existing ? " selected" : "") + '>Manual</option>' +
     _monsetIntegrations.map(function (intg) {
       var sel = (existing && existing.integrationId === intg.id) ? " selected" : "";
-      return '<option value="' + escapeHtml(intg.id) + '"' + sel + '>' + escapeHtml(intg.name) + ' (' + escapeHtml(intg.type) + ')</option>';
+      return '<option value="' + escapeHtml(intg.id) + '" data-type="' + escapeHtml(intg.type) + '"' + sel + '>' + escapeHtml(intg.name) + ' (' + escapeHtml(intg.type) + ')</option>';
     }).join("");
   var v = existing || {};
+  // Initial source kind: if editing, use the row's integration type;
+  // otherwise default to manual (matches the default-selected source option).
+  var initialSourceKind = (existing && existing.integration && existing.integration.type) || "manual";
   var body =
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem 1rem">' +
       '<div class="form-group"><label for="monset-ov-class">Class</label>' +
@@ -7351,7 +7326,9 @@ function _monsetOpenOverrideEditor(existing) {
       _monsetField("monset-ov-sampleRetentionDays",       "Probe sample retention", "days (0 = forever)",            v.sampleRetentionDays,       0,   3650,  false) +
       _monsetField("monset-ov-telemetryRetentionDays",    "Telemetry retention",    "days (0 = forever)",            v.telemetryRetentionDays,    0,   3650,  false) +
       _monsetField("monset-ov-systemInfoRetentionDays",   "System info retention",  "days (0 = forever)",            v.systemInfoRetentionDays,   0,   3650,  false) +
-    '</div>';
+    '</div>' +
+    '<hr style="margin:1rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    '<div id="monset-ov-polling-block">' + _polarisPollingFourStreamHTML("monset-ov-", initialSourceKind, v) + '</div>';
   var footer = '<button class="btn btn-secondary" id="btn-monset-ov-cancel">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-monset-ov-save">' + (isEdit ? "Save Changes" : "Create Override") + '</button>';
   openModal(isEdit ? "Edit Class Override" : "Add Class Override", body, footer);
@@ -7359,6 +7336,27 @@ function _monsetOpenOverrideEditor(existing) {
   document.getElementById("btn-monset-ov-save").addEventListener("click", function () {
     _monsetSaveOverride(existing);
   });
+  // Re-render the polling block when the source changes — methods compatible
+  // with the new source replace the old options. Disabled in edit mode (the
+  // source picker itself is disabled).
+  if (!isEdit) {
+    var srcSel = document.getElementById("monset-ov-source");
+    if (srcSel) {
+      srcSel.addEventListener("change", function () {
+        var opt = srcSel.options[srcSel.selectedIndex];
+        var kind = (opt && opt.getAttribute("data-type")) || "manual";
+        // Preserve currently-typed values that survive the new compat
+        // matrix; everything else falls back to "Inherit".
+        var currentValues = _polarisReadPollingFourStream("monset-ov-");
+        var allowed = _POLLING_COMPAT[kind] || _POLLING_COMPAT.manual;
+        ["responseTimePolling", "telemetryPolling", "interfacesPolling", "lldpPolling"].forEach(function (k) {
+          if (currentValues[k] && allowed.indexOf(currentValues[k]) === -1) currentValues[k] = null;
+        });
+        var block = document.getElementById("monset-ov-polling-block");
+        if (block) block.innerHTML = _polarisPollingFourStreamHTML("monset-ov-", kind, currentValues);
+      });
+    }
+  }
 }
 
 async function _monsetSaveOverride(existing) {
@@ -7385,6 +7383,7 @@ async function _monsetSaveOverride(existing) {
     telemetryRetentionDays:    readOptional("monset-ov-telemetryRetentionDays"),
     systemInfoRetentionDays:   readOptional("monset-ov-systemInfoRetentionDays"),
   };
+  Object.assign(fields, _polarisReadPollingFourStream("monset-ov-"));
   try {
     if (existing) {
       var updated = await api.monitorSettings.updateClassOverride(existing.id, fields);

@@ -2,6 +2,86 @@
  * public/js/integrations.js — Integrations management page
  */
 
+// ─── Polling-method dropdown helpers ───────────────────────────────────────
+// Mirrors src/utils/pollingCompatibility.ts. Frontend can't import TS, so we
+// repeat the matrix here. Defined in integrations.js because that file loads
+// before assets.js on both integrations.html and assets.html, so the helpers
+// are available globally to every page that needs them. Keep in lockstep
+// with the matrix comment in pollingCompatibility.ts.
+
+var _POLLING_LABELS = {
+  rest_api: "REST API",
+  snmp:     "SNMP",
+  winrm:    "WinRM",
+  ssh:      "SSH",
+  icmp:     "ICMP",
+};
+
+var _POLLING_COMPAT = {
+  fortimanager:    ["rest_api", "snmp", "ssh", "icmp"],
+  fortigate:       ["rest_api", "snmp", "ssh", "icmp"],
+  activedirectory: ["icmp", "winrm", "ssh"],
+  entraid:         ["icmp", "winrm", "ssh"],
+  windowsserver:   ["icmp", "winrm", "ssh"],
+  manual:          ["rest_api", "snmp", "winrm", "ssh", "icmp"],
+};
+
+// Source-default polling for one stream. Mirrors defaultPollingForSource() in
+// src/services/monitoringService.ts. Used to label the "Inherit" option.
+function _polarisSourceDefaultPolling(source, stream) {
+  if (source === "fortimanager" || source === "fortigate") return "rest_api";
+  if (stream === "responseTime") return "icmp";
+  return null; // telemetry/interfaces/lldp not delivered on AD/Entra/Win/Manual by default
+}
+
+// Builds a polling-method <select>. When `currentValue` is null/empty/missing
+// the "Inherit" option is selected and labeled with the resolver's expected
+// fallback ("Source default: REST API", "Source default: ICMP", or "Not
+// delivered" when the stream has no default for this source kind).
+function _polarisPollingDropdownHTML(id, source, stream, currentValue) {
+  var allowed = _POLLING_COMPAT[source] || _POLLING_COMPAT.manual;
+  var defaultMethod = _polarisSourceDefaultPolling(source, stream);
+  var inheritLabel = defaultMethod
+    ? "Inherit (Source default: " + _POLLING_LABELS[defaultMethod] + ")"
+    : "Inherit (Not delivered for this source)";
+  var v = currentValue || "";
+  var opts = '<option value=""' + (v === "" ? " selected" : "") + '>' + escapeHtml(inheritLabel) + '</option>';
+  for (var i = 0; i < allowed.length; i++) {
+    var m = allowed[i];
+    opts += '<option value="' + m + '"' + (v === m ? " selected" : "") + '>' + escapeHtml(_POLLING_LABELS[m]) + '</option>';
+  }
+  return '<select id="' + id + '">' + opts + '</select>';
+}
+
+function _polarisReadPollingDropdown(id) {
+  var el = document.getElementById(id);
+  if (!el) return undefined;
+  return el.value || null;
+}
+
+// Renders the four-stream polling block (response-time, telemetry, interfaces,
+// lldp) for a given source kind. Used by the manual tier modal, the class
+// override editor, and the asset edit modal.
+function _polarisPollingFourStreamHTML(idPrefix, source, current) {
+  current = current || {};
+  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0.5rem 0 0.5rem 0">Polling Methods</p>' +
+    '<div style="display:grid;grid-template-columns:200px 1fr;gap:0.5rem 1rem;align-items:center;margin-bottom:0.75rem">' +
+      '<label style="margin:0">Response time</label>' + _polarisPollingDropdownHTML(idPrefix + "responseTimePolling", source, "responseTime", current.responseTimePolling) +
+      '<label style="margin:0">Telemetry</label>'      + _polarisPollingDropdownHTML(idPrefix + "telemetryPolling",    source, "telemetry",    current.telemetryPolling) +
+      '<label style="margin:0">Interfaces</label>'     + _polarisPollingDropdownHTML(idPrefix + "interfacesPolling",   source, "interfaces",   current.interfacesPolling) +
+      '<label style="margin:0">LLDP neighbors</label>' + _polarisPollingDropdownHTML(idPrefix + "lldpPolling",         source, "lldp",         current.lldpPolling) +
+    '</div>';
+}
+
+function _polarisReadPollingFourStream(idPrefix) {
+  return {
+    responseTimePolling: _polarisReadPollingDropdown(idPrefix + "responseTimePolling"),
+    telemetryPolling:    _polarisReadPollingDropdown(idPrefix + "telemetryPolling"),
+    interfacesPolling:   _polarisReadPollingDropdown(idPrefix + "interfacesPolling"),
+    lldpPolling:         _polarisReadPollingDropdown(idPrefix + "lldpPolling"),
+  };
+}
+
 document.addEventListener("DOMContentLoaded", function () {
   // Guard: this file is also loaded on assets.html for its monitoring form
   // helpers; only run the integrations-page init when the list element exists.
@@ -455,7 +535,7 @@ function integrationMonitorOverrideHTML(credentials, selectedId, sources) {
 // values are read back via `_readIntegrationCadenceForm()` and saved as
 // `Integration.config.monitorSettings` through PUT
 // /api/v1/monitor-settings/integration/:id.
-function _integrationCadenceSectionHTML(s) {
+function _integrationCadenceSectionHTML(s, integrationType) {
   s = s || {};
   function num(name, label, value, defaultValue, min, max, hint, warn500) {
     var v = (value != null) ? value : defaultValue;
@@ -467,10 +547,18 @@ function _integrationCadenceSectionHTML(s) {
       (hint ? '<p class="hint">' + hint + '</p>' : '') +
     '</div>';
   }
+  // Polling block: source-aware compatibility filtering. Integrations of
+  // type fortimanager / fortigate get rest_api/snmp/ssh/icmp; AD / Entra /
+  // WindowsServer get icmp/winrm/ssh; manual gets all five.
+  var sourceKind = integrationType || "manual";
+  if (!_POLLING_COMPAT[sourceKind]) sourceKind = "manual";
   return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Response-time polling</p>' +
     num("intervalSeconds",   "Polling interval (seconds)",            s.intervalSeconds,   60,    5,   86400, "How often each monitored asset is probed for response time. Default 60 s.", false) +
     num("failureThreshold",  "Failure threshold (consecutive misses)", s.failureThreshold, 3,     1,   100,   "Consecutive failed probes before an asset is marked Down — and consecutive successes needed to recover from Warning / Pending back to Up.", false) +
     num("probeTimeoutMs",    "Probe timeout (ms)",                     s.probeTimeoutMs,   5000,  100, 60000, "Per-probe timeout for ICMP/SNMP/REST/WinRM/SSH. Default 5000 ms.", true) +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    _polarisPollingFourStreamHTML("f-mon-tier-", sourceKind, s) +
+    '<p class="hint" style="margin:0 0 0.75rem 0">Per-stream polling method. "Inherit" falls through to the source default. Only methods compatible with this integration type are offered.</p>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Telemetry (CPU + memory + temperature)</p>' +
     num("telemetryIntervalSeconds", "Telemetry interval (seconds)", s.telemetryIntervalSeconds, 60,  15,  86400, "How often each asset's CPU and memory snapshot is taken. Default 60 s.", false) +
@@ -842,7 +930,7 @@ function monitorSettingsFormHTML(s, opts) {
         'Default cadences and retention windows applied to every asset discovered by this integration. ' +
         'A class override below or a per-asset override on the asset itself takes priority.' +
       '</p>' +
-      _integrationCadenceSectionHTML(s) +
+      _integrationCadenceSectionHTML(s, integrationType) +
     '</section>';
 
   // ─── Section 2: Discovery Defaults (FMG/FortiGate only) ───────────────────
@@ -896,7 +984,8 @@ function monitorSettingsFormHTML(s, opts) {
     '</p>' +
     (hasId
       ? '<div id="intg-class-overrides-wrap" data-integration-id="' + escapeHtml(opts.integrationId) +
-        '" data-integration-name="' + escapeHtml(opts.integrationName || "") + '">' +
+        '" data-integration-name="' + escapeHtml(opts.integrationName || "") +
+        '" data-integration-type="' + escapeHtml(integrationType) + '">' +
           '<div class="empty-state" style="padding:1rem 0;font-size:0.85rem">Loading class overrides…</div>' +
         '</div>'
       : '<p class="hint" style="font-size:0.82rem;color:var(--color-text-tertiary)">Class overrides become available after the integration is created.</p>'
@@ -934,8 +1023,13 @@ async function _intgWireClassOverridesSection() {
   if (!wrap) return;
   var integrationId   = wrap.getAttribute("data-integration-id") || null;
   var integrationName = wrap.getAttribute("data-integration-name") || "";
+  var integrationType = wrap.getAttribute("data-integration-type") || "";
   if (!integrationId) return;
-  var scope = { integrationId: integrationId, integrationName: integrationName };
+  var scope = {
+    integrationId:   integrationId,
+    integrationName: integrationName,
+    integrationType: integrationType,
+  };
 
   var rows = [];
   try {
@@ -1058,6 +1152,11 @@ function _intgOpenClassOverrideEditor(scope, existing) {
     '</div>';
   }
 
+  // Source kind is fixed for class overrides scoped to an integration —
+  // they apply only to assets discovered by THIS integration. Methods are
+  // filtered against the source's compatibility matrix by the helper.
+  var sourceKind = scope.integrationType || "manual";
+  if (!_POLLING_COMPAT[sourceKind]) sourceKind = "manual";
   var body =
     '<div class="form-group"><label>Asset Source</label>' +
       '<input type="text" value="' + escapeHtml(scope.integrationName || "(this integration)") + '" disabled style="opacity:0.7">' +
@@ -1076,7 +1175,9 @@ function _intgOpenClassOverrideEditor(scope, existing) {
       field("sampleRetentionDays",       "Probe sample retention", v.sampleRetentionDays,       0,   3650,  "days (0 = forever)") +
       field("telemetryRetentionDays",    "Telemetry retention",    v.telemetryRetentionDays,    0,   3650,  "days (0 = forever)") +
       field("systemInfoRetentionDays",   "System info retention",  v.systemInfoRetentionDays,   0,   3650,  "days (0 = forever)") +
-    '</div>';
+    '</div>' +
+    '<hr style="margin:1rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    _polarisPollingFourStreamHTML("intg-cov-", sourceKind, v);
 
   var footer = '<button type="button" class="btn btn-secondary" id="btn-intg-cov-cancel">Cancel</button>' +
     '<button type="button" class="btn btn-primary" id="btn-intg-cov-save">' + (isEdit ? "Save Changes" : "Create Override") + '</button>';
@@ -1112,6 +1213,7 @@ async function _intgSaveClassOverride(scope, existing) {
     telemetryRetentionDays:    readOptional("telemetryRetentionDays"),
     systemInfoRetentionDays:   readOptional("systemInfoRetentionDays"),
   };
+  Object.assign(fields, _polarisReadPollingFourStream("intg-cov-"));
   try {
     if (existing) {
       await api.monitorSettings.updateClassOverride(existing.id, fields);
@@ -1154,7 +1256,7 @@ function _readIntegrationCadenceForm() {
     var v = parseInt(el.value, 10);
     return Number.isFinite(v) ? v : undefined;
   }
-  return {
+  var out = {
     intervalSeconds:           n("intervalSeconds"),
     failureThreshold:          n("failureThreshold"),
     probeTimeoutMs:            n("probeTimeoutMs"),
@@ -1164,6 +1266,8 @@ function _readIntegrationCadenceForm() {
     telemetryRetentionDays:    n("telemetryRetentionDays"),
     systemInfoRetentionDays:   n("systemInfoRetentionDays"),
   };
+  Object.assign(out, _polarisReadPollingFourStream("f-mon-tier-"));
+  return out;
 }
 
 // Kept under the old name for the two existing call sites in the Add/Edit
