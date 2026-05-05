@@ -177,11 +177,19 @@ async function loadAssets() {
     }
     function _mapAsset(a) {
       a._server = a.location || a.learnedLocation || "";
-      a._monitor = (!a.monitored)
-        ? "Unmonitored"
-        : (a.monitorStatus === "up"   ? "Monitored"
-        :  a.monitorStatus === "down" ? "Down"
-        :                                "Pending");
+      // Array so a single row can satisfy multiple filter selections —
+      // e.g. a monitored Up asset matches both "Monitored" and "Up". The
+      // patched multi-filter in table-sf.js checks membership when the
+      // row value is an array.
+      if (!a.monitored) {
+        a._monitor = ["Unmonitored"];
+      } else if (a.monitorStatus === "up") {
+        a._monitor = ["Monitored", "Up"];
+      } else if (a.monitorStatus === "down") {
+        a._monitor = ["Monitored", "Down"];
+      } else {
+        a._monitor = ["Monitored", "Pending"];
+      }
       return a;
     }
     _assetsData = all.map(_mapAsset);
@@ -811,10 +819,12 @@ function assetStatusBadge(asset) {
   return '<span class="badge ' + cls + '"' + title + '>' + escapeHtml(label) + '</span>';
 }
 
-// Three-state monitoring pill matching the user-facing taxonomy:
+// Four-state monitoring pill. "Monitored" is never shown directly — when an
+// asset is being monitored we surface the actual probe outcome (Up/Down/
+// Pending) so operators don't have to drill in to discover the state.
 //   monitored=false                     → grey  "Unmonitored"
 //   monitored=true, no probe yet        → blue  "Pending"
-//   monitored=true, status="up"         → green "Monitored"
+//   monitored=true, status="up"         → green "Up"
 //   monitored=true, status="down"       → red   "Down"
 function assetMonitorBadge(asset) {
   if (!asset || asset.monitored === false || asset.monitored == null) {
@@ -826,7 +836,7 @@ function assetMonitorBadge(asset) {
   if (typeof asset.lastResponseTimeMs === "number") bits.push("Last RTT: " + asset.lastResponseTimeMs + " ms");
   if (asset.lastMonitorAt) bits.push("Last poll: " + new Date(asset.lastMonitorAt).toLocaleString());
   var title = bits.length ? ' title="' + escapeHtml(bits.join("\n")) + '"' : "";
-  if (s === "up")   return '<span class="badge badge-monitored"' + title + '>Monitored</span>';
+  if (s === "up")   return '<span class="badge badge-monitored"' + title + '>Up</span>';
   if (s === "down") return '<span class="badge badge-monitor-down"' + title + '>Down</span>';
   return '<span class="badge badge-monitor-pending"' + title + '>Pending</span>';
 }

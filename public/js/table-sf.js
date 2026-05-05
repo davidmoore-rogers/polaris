@@ -521,9 +521,19 @@ TableSF.prototype.apply = function (data) {
         var raw = self._filters[k];
         if (Array.isArray(raw)) {
           if (!raw.length) return true;
-          var rv = String(self._val(row, k)).toLowerCase();
+          // When the row value itself is an array, a single row can satisfy
+          // multiple filter options (e.g. a "Monitored Up" asset matches both
+          // the "Monitored" and the "Up" filter selections). Check membership
+          // instead of the default scalar string-equality.
+          var rawV = self._rawVal(row, k);
+          var rowVals = Array.isArray(rawV)
+            ? rawV.map(function (v) { return String(v).toLowerCase(); })
+            : [String(self._val(row, k)).toLowerCase()];
           for (var i = 0; i < raw.length; i++) {
-            if (rv === String(raw[i]).toLowerCase()) return true;
+            var sel = String(raw[i]).toLowerCase();
+            for (var j = 0; j < rowVals.length; j++) {
+              if (rowVals[j] === sel) return true;
+            }
           }
           return false;
         }
