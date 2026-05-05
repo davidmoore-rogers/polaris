@@ -279,6 +279,47 @@ function _handleCopyClick(e) {
   });
 }
 
+// Delegated click handler for the Status column pill. Toggles the asset's
+// `monitored` flag through PUT /assets/:id; the route stamps
+// `monitoredOperatorSet=true` so the choice survives discovery cycles. UI
+// is optimistic — flip the cached row + re-render before the network round
+// trip; rollback on failure with a toast.
+async function _handleMonitorPillClick(e) {
+  var pill = e.target.closest('[data-monitor-toggle]');
+  if (!pill) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (typeof canManageAssets === "function" && !canManageAssets()) return;
+  var assetId = pill.getAttribute('data-monitor-toggle');
+  var currentlyMonitored = pill.getAttribute('data-monitored') === "true";
+  var nextMonitored = !currentlyMonitored;
+  // Find the cached row.
+  var idx = (_assetsData || []).findIndex(function (a) { return a.id === assetId; });
+  if (idx === -1) return;
+  var prevSnapshot = Object.assign({}, _assetsData[idx]);
+  // Optimistic update.
+  _assetsData[idx].monitored = nextMonitored;
+  if (!nextMonitored) {
+    _assetsData[idx].monitorStatus = null;
+    _assetsData[idx].lastResponseTimeMs = null;
+  } else if (!_assetsData[idx].monitorStatus) {
+    _assetsData[idx].monitorStatus = "unknown";
+  }
+  renderAssetsPage();
+  try {
+    await api.assets.update(assetId, { monitored: nextMonitored });
+    showToast(nextMonitored ? "Monitoring enabled" : "Monitoring disabled");
+  } catch (err) {
+    // Rollback. Single field-level revert keeps the rest of the row's
+    // state (lastResponseTimeMs etc.) untouched in case other fields drifted.
+    _assetsData[idx].monitored          = prevSnapshot.monitored;
+    _assetsData[idx].monitorStatus      = prevSnapshot.monitorStatus;
+    _assetsData[idx].lastResponseTimeMs = prevSnapshot.lastResponseTimeMs;
+    renderAssetsPage();
+    showToast((err && err.message) || "Failed to update monitoring", "error");
+  }
+}
+
 async function _handleMacDeleteClick(e) {
   var btn = e.target.closest('.mac-tooltip-delete');
   if (!btn) return;
@@ -304,6 +345,8 @@ function renderAssetsPage() {
   var tbody = document.getElementById("assets-tbody");
   tbody.removeEventListener("click", _handleCopyClick);
   tbody.addEventListener("click", _handleCopyClick);
+  tbody.removeEventListener("click", _handleMonitorPillClick);
+  tbody.addEventListener("click", _handleMonitorPillClick);
   if (_assetsData.length === 0) {
     tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No assets found. Add one to get started.</td></tr>';
     clearPageControls("pagination");
@@ -826,19 +869,35 @@ function assetStatusBadge(asset) {
 //   monitored=true, no probe yet        → blue  "Pending"
 //   monitored=true, status="up"         → green "Up"
 //   monitored=true, status="down"       → red   "Down"
+//
+// For admin/assetsadmin callers the pill is clickable: a single click
+// toggles monitored (sets monitoredOperatorSet=true server-side so the
+// choice sticks across discovery cycles). The pill carries
+// `data-monitor-toggle="<asset-id>"` and `data-monitored="true|false"` so
+// the delegated handler in `_handleMonitorPillClick` can flip it without
+// re-querying. Display semantics: a Down asset clicked to unmonitored
+// flips to "Unmonitored" and stops being probed; a Pending → Unmonitored
+// click is the same.
 function assetMonitorBadge(asset) {
+  var canToggle = typeof canManageAssets === "function" && canManageAssets() && asset && asset.id;
+  var toggleAttrs = canToggle
+    ? ' data-monitor-toggle="' + escapeHtml(asset.id) + '" data-monitored="' + (asset.monitored ? "true" : "false") + '" role="button" tabindex="0"'
+    : "";
   if (!asset || asset.monitored === false || asset.monitored == null) {
-    return '<span class="badge badge-unmonitored">Unmonitored</span>';
+    var unmonTitle = canToggle ? ' title="Click to enable monitoring"' : "";
+    return '<span class="badge badge-unmonitored' + (canToggle ? " badge-clickable" : "") + '"' + unmonTitle + toggleAttrs + '>Unmonitored</span>';
   }
   var s = asset.monitorStatus || "unknown";
   var bits = [];
   if (asset.monitorType) bits.push("Type: " + asset.monitorType);
   if (typeof asset.lastResponseTimeMs === "number") bits.push("Last RTT: " + asset.lastResponseTimeMs + " ms");
   if (asset.lastMonitorAt) bits.push("Last poll: " + new Date(asset.lastMonitorAt).toLocaleString());
+  if (canToggle) bits.push("Click to disable monitoring");
   var title = bits.length ? ' title="' + escapeHtml(bits.join("\n")) + '"' : "";
-  if (s === "up")   return '<span class="badge badge-monitored"' + title + '>Up</span>';
-  if (s === "down") return '<span class="badge badge-monitor-down"' + title + '>Down</span>';
-  return '<span class="badge badge-monitor-pending"' + title + '>Pending</span>';
+  var clickCls = canToggle ? " badge-clickable" : "";
+  if (s === "up")   return '<span class="badge badge-monitored' + clickCls + '"' + title + toggleAttrs + '>Up</span>';
+  if (s === "down") return '<span class="badge badge-monitor-down' + clickCls + '"' + title + toggleAttrs + '>Down</span>';
+  return '<span class="badge badge-monitor-pending' + clickCls + '"' + title + toggleAttrs + '>Pending</span>';
 }
 
 function ipCellHTML(asset) {
