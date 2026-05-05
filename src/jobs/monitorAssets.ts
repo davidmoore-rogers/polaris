@@ -131,18 +131,20 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       (Array.isArray(a.monitoredInterfaces)   && a.monitoredInterfaces.length   > 0) ||
       (Array.isArray(a.monitoredStorage)      && a.monitoredStorage.length      > 0) ||
       (Array.isArray(a.monitoredIpsecTunnels) && a.monitoredIpsecTunnels.length > 0);
-    const isDown = a.monitorStatus === "down";
+    // Heavy-cadence suppression: only "up" runs telemetry / systemInfo /
+    // fastFiltered. See the matching comment in monitoringService.runMonitorPass.
+    const isUp = a.monitorStatus === "up";
 
     if (probe && enabled.has("probe")) {
       await publishMonitorJob("probe", a.id, a.monitorType ?? "unknown");
     }
-    if (telemetry && !isDown && enabled.has("telemetry")) {
+    if (telemetry && isUp && enabled.has("telemetry")) {
       await publishMonitorJob("telemetry", a.id);
     }
-    if (systemInfo && !isDown && enabled.has("systemInfo")) {
+    if (systemInfo && isUp && enabled.has("systemInfo")) {
       await publishMonitorJob("systemInfo", a.id);
     }
-    if (probe && hasFastPin && !systemInfo && !isDown && enabled.has("fastFiltered")) {
+    if (probe && hasFastPin && !systemInfo && isUp && enabled.has("fastFiltered")) {
       await publishMonitorJob("fastFiltered", a.id);
     }
   }

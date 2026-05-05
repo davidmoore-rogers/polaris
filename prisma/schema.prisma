@@ -373,10 +373,15 @@ model Asset {
   // Below 500ms the UI shows a warning icon — at that range probes start to
   // false-fail on healthy networks under transient latency.
   probeTimeoutMs      Int?
-  monitorStatus       String? // "up" | "down" | "unknown"
+  monitorStatus       String? // "up" | "warning" | "pending" | "down" | "unknown"
   lastMonitorAt       DateTime?
   lastResponseTimeMs  Int?
   consecutiveFailures Int         @default(0)
+  // Counts probe successes since the last failure. Drives the
+  // pending/warning -> up transition: an asset stays in pending or warning
+  // until consecutiveSuccesses reaches the resolved failureThreshold (the
+  // same value gates both directions). Reset to 0 on any failure.
+  consecutiveSuccesses Int        @default(0)
 
   // Per-stream transport overrides for FortiManager/FortiGate-discovered firewalls.
   // null = inherit from the integration's matching toggle (which itself defaults to "rest").

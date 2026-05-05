@@ -3241,6 +3241,7 @@ export async function recordProbeResult(assetId: string, result: ProbeResult): P
       monitored: true,
       monitorStatus: true,
       consecutiveFailures: true,
+      consecutiveSuccesses: true,
       discoveredByIntegrationId: true,
       monitorIntervalSec: true,
       telemetryIntervalSec: true,
@@ -3250,22 +3251,54 @@ export async function recordProbeResult(assetId: string, result: ProbeResult): P
   });
   if (!asset) return;
 
-  // Resolve the asset's effective failure threshold through the hierarchy
-  // (per-asset override → class override → integration/manual tier → floor).
+  // Resolve effective settings through the hierarchy. failureThreshold doubles
+  // as the recovery threshold — we use it for both up→down and pending→up
+  // transitions. Same number of confirmations either direction.
   const effective = await resolveMonitorSettings(asset);
+  const threshold = effective.failureThreshold;
 
   const now = new Date();
-  const newConsec = result.success ? 0 : (asset.consecutiveFailures ?? 0) + 1;
   const previousStatus = asset.monitorStatus ?? "unknown";
-  let nextStatus: "up" | "down" | "unknown";
+  // Counter update: success path zeroes failures + bumps successes; failure
+  // path zeroes successes + bumps failures. Either path resets the opposite
+  // counter so the in-flight transition is unambiguous.
+  const newCf = result.success ? 0                                        : (asset.consecutiveFailures  ?? 0) + 1;
+  const newCs = result.success ? (asset.consecutiveSuccesses ?? 0) + 1     : 0;
+
+  // Five-state machine. See CLAUDE.md "Monitor Settings Hierarchy" /
+  // "Monitor status state machine" for the table.
+  //
+  //   unknown / down + success → pending (until cs ≥ threshold → up)
+  //   pending          + success → up if cs ≥ threshold else stay pending
+  //   pending          + failure → down if cf ≥ threshold else stay pending
+  //   up               + failure → warning (cf=1, count toward down)
+  //   warning          + success → up if cs ≥ threshold else stay warning
+  //   warning          + failure → down if cf ≥ threshold else stay warning
+  //   unknown          + failure → warning (treat as fresh up that just failed)
+  //
+  // Down hosts that fail again stay down; the down→pending arrow is the only
+  // exit from down and requires at least one success.
+  let nextStatus: "up" | "warning" | "pending" | "down" | "unknown";
   if (result.success) {
-    nextStatus = "up";
-  } else if (newConsec >= effective.failureThreshold) {
-    nextStatus = "down";
+    if (previousStatus === "up") {
+      nextStatus = "up";
+    } else if (previousStatus === "warning" || previousStatus === "pending") {
+      nextStatus = newCs >= threshold ? "up" : previousStatus;
+    } else {
+      // unknown / down → start the recovery counter at pending.
+      nextStatus = newCs >= threshold ? "up" : "pending";
+    }
   } else {
-    // Below threshold — keep prior up/down status (we know it's failing
-    // right now, but a single failed sample shouldn't flip the pill yet).
-    nextStatus = (previousStatus === "up" || previousStatus === "down") ? previousStatus : "unknown";
+    if (newCf >= threshold) {
+      nextStatus = "down";
+    } else if (previousStatus === "up" || previousStatus === "unknown") {
+      nextStatus = "warning";
+    } else if (previousStatus === "warning" || previousStatus === "pending" || previousStatus === "down") {
+      // Stay in the current state and let the counter march toward "down".
+      nextStatus = previousStatus;
+    } else {
+      nextStatus = "warning";
+    }
   }
 
   await prisma.assetMonitorSample.create({
@@ -3284,7 +3317,8 @@ export async function recordProbeResult(assetId: string, result: ProbeResult): P
       monitorStatus: nextStatus,
       lastMonitorAt: now,
       lastResponseTimeMs: result.success ? result.responseTimeMs : null,
-      consecutiveFailures: newConsec,
+      consecutiveFailures: newCf,
+      consecutiveSuccesses: newCs,
     },
   });
 
@@ -3303,7 +3337,8 @@ export async function recordProbeResult(assetId: string, result: ProbeResult): P
         nextStatus,
         responseTimeMs: result.success ? result.responseTimeMs : null,
         error: result.error ?? null,
-        consecutiveFailures: newConsec,
+        consecutiveFailures:  newCf,
+        consecutiveSuccesses: newCs,
       },
     });
   }
@@ -3541,22 +3576,23 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       (Array.isArray(a.monitoredInterfaces)   && a.monitoredInterfaces.length   > 0) ||
       (Array.isArray(a.monitoredStorage)      && a.monitoredStorage.length      > 0) ||
       (Array.isArray(a.monitoredIpsecTunnels) && a.monitoredIpsecTunnels.length > 0);
-    // While an asset is confirmed down (consecutiveFailures past threshold),
-    // suppress everything except the response-time probe. Assets stay offline
-    // for weeks or months in normal operation; doing full SNMP walks against
-    // each one every pass burns worker time on a host that's just going to
-    // time out three more times. The probe alone is cheap and is the only
-    // signal we need to detect recovery — the moment one probe succeeds,
-    // recordProbeResult flips status back to "up" and the next pass picks
-    // up the heavy cadences again. lastSystemInfoAt didn't advance during
-    // the outage (only bumps on success), so systemInfo will be due
-    // immediately on recovery and the System tab refreshes naturally.
-    // "unknown" is treated like "up" — a never-probed asset still deserves
-    // a full first-attempt pass.
-    const isDown = a.monitorStatus === "down";
-    if (probe      && enabled.has("probe"))                 probes.push({ id: a.id, kind: "probe" });
-    if (telemetry  && enabled.has("telemetry")  && !isDown) telemetries.push({ id: a.id, kind: "telemetry" });
-    if (systemInfo && enabled.has("systemInfo") && !isDown) systemInfos.push({ id: a.id, kind: "systemInfo" });
+    // Heavy-cadence suppression. Telemetry / systemInfo / fastFiltered run
+    // ONLY while the asset is confirmed up — every other state (warning /
+    // pending / down / unknown) suppresses them. Rationale:
+    //   - "down": stale by definition; full SNMP walks just burn worker
+    //     time on a host that's about to time out three more times.
+    //   - "warning": the asset has missed at least one probe; its data is
+    //     in flux. Heavy cadences resume once a full recovery (cs reaches
+    //     threshold) flips the asset back to "up".
+    //   - "pending": brand-new or recovering; not yet confirmed up.
+    //   - "unknown": never been probed; let the response-time probe alone
+    //     establish a baseline before scheduling heavy walks.
+    // The cheap probe keeps firing in every state so recovery can be
+    // detected within one tick of the resolved cadence.
+    const isUp = a.monitorStatus === "up";
+    if (probe      && enabled.has("probe"))                probes.push({ id: a.id, kind: "probe" });
+    if (telemetry  && enabled.has("telemetry")  && isUp)   telemetries.push({ id: a.id, kind: "telemetry" });
+    if (systemInfo && enabled.has("systemInfo") && isUp)   systemInfos.push({ id: a.id, kind: "systemInfo" });
     // Fast-cadence pinned scrape rides the response-time cadence (default 60s).
     // Skip it when the full systemInfo pass is also due — they'd hit the same
     // OIDs twice and the full pass already covers the pinned subset. The
@@ -3566,7 +3602,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     // loops: when systemInfo is due, fast-filtered is skipped on this and
     // every following light tick until systemInfo runs successfully and
     // bumps lastSystemInfoAt.
-    if (probe && hasFastPin && !systemInfo && !isDown && enabled.has("fastFiltered")) {
+    if (probe && hasFastPin && !systemInfo && isUp && enabled.has("fastFiltered")) {
       fastFiltereds.push({ id: a.id, kind: "fastFiltered" });
     }
   }
