@@ -21,11 +21,11 @@ import { isValidIpAddress, cidrContains } from "../../utils/cidr.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
 import {
-  getMonitorSettings, updateMonitorSettings,
   probeAsset, recordProbeResult,
   collectTelemetry, recordTelemetryResult,
   collectSystemInfo, recordSystemInfoResult,
   snmpWalkRaw,
+  resolveMonitorSettingsWithProvenance,
 } from "../../services/monitoringService.js";
 import { getCredential } from "../../services/credentialService.js";
 
@@ -128,14 +128,17 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   monitorType:           MonitorTypeEnum.nullable().optional(),
   monitorCredentialId:   z.string().uuid().nullable().optional(),
   monitorIntervalSec:    z.number().int().min(5).max(86400).nullable().optional(),
+  // Per-asset probe timeout override. 100..60000 ms; null inherits from the
+  // resolved tier-3 setting. The frontend renders a soft warning at <500 ms.
+  probeTimeoutMs:        z.number().int().min(100).max(60000).nullable().optional(),
   // Per-stream transport overrides for FMG/FortiGate-discovered firewalls.
   // null = inherit from the integration's matching toggle.
   monitorResponseTimeSource: MonitorTransportEnum.nullable().optional(),
   monitorTelemetrySource:    MonitorTransportEnum.nullable().optional(),
   monitorInterfacesSource:   MonitorTransportEnum.nullable().optional(),
   monitorLldpSource:         MonitorTransportEnum.nullable().optional(),
-  // Per-asset cadence overrides for the System tab. Null falls back to
-  // monitor.telemetryIntervalSeconds / systemInfoIntervalSeconds.
+  // Per-asset cadence overrides for the System tab. Null falls back to the
+  // resolved tier-3 telemetry / system-info interval.
   telemetryIntervalSec:  z.number().int().min(15).max(86400).nullable().optional(),
   systemInfoIntervalSec: z.number().int().min(60).max(86400).nullable().optional(),
   // ifNames the operator pinned for fast-cadence polling on the System tab.
@@ -353,43 +356,14 @@ router.put("/ip-history-settings", requireAssetsAdmin, async (req, res, next) =>
   }
 });
 
-// GET /api/v1/assets/monitor-settings — global monitor defaults (any authed user)
-// Defined before /:id to avoid route shadowing.
-router.get("/monitor-settings", async (_req, res, next) => {
-  try {
-    res.json(await getMonitorSettings());
-  } catch (err) {
-    next(err);
-  }
-});
-
-// PUT /api/v1/assets/monitor-settings — update global monitor defaults (admin)
-router.put("/monitor-settings", requireAssetsAdmin, async (req, res, next) => {
-  try {
-    const classGroup = z.object({
-      intervalSeconds:           z.number().int().min(5).max(86400).optional(),
-      failureThreshold:          z.number().int().min(1).max(100).optional(),
-      sampleRetentionDays:       z.number().int().min(0).max(3650).optional(),
-      telemetryIntervalSeconds:  z.number().int().min(15).max(86400).optional(),
-      systemInfoIntervalSeconds: z.number().int().min(60).max(86400).optional(),
-      telemetryRetentionDays:    z.number().int().min(0).max(3650).optional(),
-      systemInfoRetentionDays:   z.number().int().min(0).max(3650).optional(),
-    });
-    const body = classGroup.extend({
-      // Per-class overrides for Fortinet switches / APs. Each field falls
-      // back to its top-level counterpart when omitted.
-      fortiswitch: classGroup.optional(),
-      fortiap:     classGroup.optional(),
-    }).parse(req.body);
-    const next = await updateMonitorSettings(body);
-    logEvent({
-      action: "monitor.settings.updated",
-      actor: req.session?.username,
-      message: `Monitor settings updated (probe ${next.intervalSeconds}s/threshold ${next.failureThreshold}/retain ${next.sampleRetentionDays}d, telemetry ${next.telemetryIntervalSeconds}s/retain ${next.telemetryRetentionDays}d, sysinfo ${next.systemInfoIntervalSeconds}s/retain ${next.systemInfoRetentionDays}d; fortiswitch probe ${next.fortiswitch.intervalSeconds}s/sysinfo ${next.fortiswitch.systemInfoIntervalSeconds}s; fortiap probe ${next.fortiap.intervalSeconds}s/sysinfo ${next.fortiap.systemInfoIntervalSeconds}s)`,
-    });
-    res.json(next);
-  } catch (err) { next(err); }
-});
+// Note: the legacy GET/PUT /monitor-settings routes were retired with the
+// move to the four-tier hierarchy. Operators now use:
+//   - /api/v1/monitor-settings/manual                → global manual tier
+//   - /api/v1/monitor-settings/integration/:id       → per-integration tier
+//   - /api/v1/monitor-settings/class-overrides       → (class + integration)
+//   - PUT /api/v1/assets/:id  with monitorIntervalSec / probeTimeoutMs / etc.
+//                                                    → per-asset overrides
+// See src/api/routes/monitorSettings.ts.
 
 // POST /api/v1/assets/bulk-monitor — enable/disable monitoring on a set of assets.
 // Body: { ids, monitored, monitorType?, monitorCredentialId?, monitorIntervalSec? }.
@@ -407,6 +381,7 @@ router.post("/bulk-monitor", requireAssetsAdmin, async (req, res, next) => {
       monitorType:         MonitorTypeEnum.nullable().optional(),
       monitorCredentialId: z.string().uuid().nullable().optional(),
       monitorIntervalSec:  z.number().int().min(5).max(86400).nullable().optional(),
+      probeTimeoutMs:      z.number().int().min(100).max(60000).nullable().optional(),
     }).parse(req.body);
 
     // Build the per-asset data shape ONCE — every selected asset gets the
@@ -415,10 +390,18 @@ router.post("/bulk-monitor", requireAssetsAdmin, async (req, res, next) => {
     // `existing.monitorCredentialId`, but for bulk updates the body
     // overrides both anyway, so we can validate against an empty
     // "existing" shape and apply the same data uniformly.
-    const data: Record<string, unknown> = { monitored: body.monitored };
+    //
+    // monitoredOperatorSet flips to true on every bulk write so subsequent
+    // discovery cycles don't auto-flip the `monitored` flag back to its
+    // integration default for the assets the operator just touched.
+    const data: Record<string, unknown> = {
+      monitored: body.monitored,
+      monitoredOperatorSet: true,
+    };
     if (body.monitorType !== undefined)         data.monitorType         = body.monitorType;
     if (body.monitorCredentialId !== undefined) data.monitorCredentialId = body.monitorCredentialId;
     if (body.monitorIntervalSec !== undefined)  data.monitorIntervalSec  = body.monitorIntervalSec;
+    if (body.probeTimeoutMs !== undefined)      data.probeTimeoutMs      = body.probeTimeoutMs;
     try {
       validateMonitorConfig(data, { monitorType: null, monitorCredentialId: null });
     } catch (err: any) {
@@ -517,6 +500,33 @@ router.get("/:id", async (req, res, next) => {
     };
 
     res.json({ ...safeAsset, ipContext: ipCtx });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/assets/:id/effective-monitor-settings — fully-resolved monitor
+// settings for one asset PLUS per-field tier provenance, so the asset edit
+// modal can render "Asset / Class / Integration / Manual" badges next to
+// each field. Read-open to any authenticated caller.
+router.get("/:id/effective-monitor-settings", async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: {
+        id:                        true,
+        assetType:                 true,
+        discoveredByIntegrationId: true,
+        monitorIntervalSec:        true,
+        telemetryIntervalSec:      true,
+        systemInfoIntervalSec:     true,
+        probeTimeoutMs:            true,
+      },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+    const result = await resolveMonitorSettingsWithProvenance(asset);
+    res.json(result);
   } catch (err) {
     next(err);
   }
@@ -1280,6 +1290,14 @@ router.put("/:id", requireAssetsAdmin, async (req, res, next) => {
     if (input.status !== undefined) {
       data.statusChangedAt = new Date();
       data.statusChangedBy = req.session?.username ?? "manual";
+    }
+    // Mark the monitored toggle as operator-set so discovery's addAsMonitored
+    // re-stamp on FortiSwitch/FortiAP/AD paths doesn't flip it back later.
+    // Only fires when the operator explicitly included `monitored` in the
+    // request body — un-related PUTs (e.g. just changing notes) leave the
+    // sticky flag alone.
+    if (input.monitored !== undefined) {
+      data.monitoredOperatorSet = true;
     }
     validateMonitorConfig(data, existing);
     clampAcquiredToLastSeen(data, existing);

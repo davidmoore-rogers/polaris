@@ -469,6 +469,91 @@ export async function resolveMonitorSettings(asset: AssetMonitorContext): Promis
   return merged;
 }
 
+/** Per-field "where did this value come from?" label. Drives the asset-modal tier badges. */
+export type ProvenanceTier = "asset" | "class" | "integration" | "manual";
+
+export interface ResolvedSettingsWithProvenance {
+  resolved:        ResolvedMonitorSettings;
+  /** One label per resolved field naming which tier provided the final value. */
+  provenance:      Record<keyof MonitorTierSettings, ProvenanceTier>;
+  /** Which tier-3 storage holds this asset's baseline. UI uses this to label the badge. */
+  tier3Source:     "integration" | "manual";
+  /** When a class override applies, the row id so the UI can deep-link to its edit form. */
+  classOverrideId: string | null;
+}
+
+/**
+ * Resolve effective settings for one asset AND report which tier supplied each
+ * field. Slower than `resolveMonitorSettings` (one extra DB lookup for the
+ * class-override row id when present) — intended for one-shot UI loads, not
+ * the hot monitor loop.
+ */
+export async function resolveMonitorSettingsWithProvenance(
+  asset: AssetMonitorContext,
+): Promise<ResolvedSettingsWithProvenance> {
+  const tier3Source: "integration" | "manual" = asset.discoveredByIntegrationId ? "integration" : "manual";
+  const tier3 = asset.discoveredByIntegrationId
+    ? await loadIntegrationTierSettings(asset.discoveredByIntegrationId)
+    : await loadManualTierSettings();
+
+  const classOverride = await loadClassOverride(asset.discoveredByIntegrationId, asset.assetType);
+
+  // Class-override row id (extra lookup; only needed by this provenance API).
+  let classOverrideId: string | null = null;
+  if (classOverride) {
+    const row = await prisma.monitorClassOverride.findFirst({
+      where:  { integrationId: asset.discoveredByIntegrationId, assetType: asset.assetType },
+      select: { id: true },
+    });
+    classOverrideId = row?.id ?? null;
+  }
+
+  const resolved: ResolvedMonitorSettings = { ...tier3 };
+  // Initialize provenance to tier3Source for every field; class/asset layers
+  // overwrite below. Listing the keys explicitly keeps the type checker happy
+  // (Record<keyof X, ...>) without an Object.fromEntries dance.
+  const provenance: Record<keyof MonitorTierSettings, ProvenanceTier> = {
+    intervalSeconds:           tier3Source,
+    failureThreshold:          tier3Source,
+    probeTimeoutMs:            tier3Source,
+    telemetryIntervalSeconds:  tier3Source,
+    systemInfoIntervalSeconds: tier3Source,
+    sampleRetentionDays:       tier3Source,
+    telemetryRetentionDays:    tier3Source,
+    systemInfoRetentionDays:   tier3Source,
+  };
+
+  if (classOverride) {
+    for (const key of Object.keys(classOverride) as Array<keyof MonitorTierSettings>) {
+      const v = classOverride[key];
+      if (v != null) {
+        resolved[key] = v;
+        provenance[key] = "class";
+      }
+    }
+  }
+
+  // Per-asset (only the four overridable fields).
+  if (asset.monitorIntervalSec != null) {
+    resolved.intervalSeconds = asset.monitorIntervalSec;
+    provenance.intervalSeconds = "asset";
+  }
+  if (asset.telemetryIntervalSec != null) {
+    resolved.telemetryIntervalSeconds = asset.telemetryIntervalSec;
+    provenance.telemetryIntervalSeconds = "asset";
+  }
+  if (asset.systemInfoIntervalSec != null) {
+    resolved.systemInfoIntervalSeconds = asset.systemInfoIntervalSec;
+    provenance.systemInfoIntervalSeconds = "asset";
+  }
+  if (asset.probeTimeoutMs != null) {
+    resolved.probeTimeoutMs = asset.probeTimeoutMs;
+    provenance.probeTimeoutMs = "asset";
+  }
+
+  return { resolved, provenance, tier3Source, classOverrideId };
+}
+
 // ─── Per-stream transport overrides ─────────────────────────────────────────
 //
 // FMG/FortiGate-discovered firewalls (assets with monitorType=fortimanager or
