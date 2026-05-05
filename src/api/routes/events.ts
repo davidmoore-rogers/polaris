@@ -31,14 +31,29 @@ router.get("/", async (req, res, next) => {
     const level = req.query.level as string | undefined;
     const action = req.query.action as string | undefined;
     const resourceType = req.query.resourceType as string | undefined;
+    const resourceId = req.query.resourceId as string | undefined;
     const message = req.query.message as string | undefined;
+    const since = req.query.since as string | undefined;
+    const until = req.query.until as string | undefined;
 
     const { retentionDays } = await getRetentionSettings();
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
-    const where: Record<string, unknown> = { timestamp: { gte: cutoff } };
+    // Caller-supplied since narrows the window; the retention cutoff is the
+    // floor regardless. until is optional and unbounded by default.
+    const tsFilter: Record<string, Date> = { gte: cutoff };
+    if (since) {
+      const sinceD = new Date(since);
+      if (!isNaN(+sinceD) && +sinceD > +cutoff) tsFilter.gte = sinceD;
+    }
+    if (until) {
+      const untilD = new Date(until);
+      if (!isNaN(+untilD)) tsFilter.lte = untilD;
+    }
+    const where: Record<string, unknown> = { timestamp: tsFilter };
     if (level) where.level = level;
     if (action) where.action = { contains: action };
     if (resourceType) where.resourceType = resourceType;
+    if (resourceId) where.resourceId = resourceId;
     if (message) where.message = { contains: message, mode: "insensitive" };
 
     const [events, total] = await Promise.all([

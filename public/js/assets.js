@@ -3912,6 +3912,62 @@ async function _renderIntermittencyBar(assetId) {
     '</div>';
 }
 
+/**
+ * Fetches asset.updated events for one asset within the chart window and
+ * returns transition markers — one per event whose change-set touched the
+ * polling-method fields (monitorType, the four monitor*Source toggles, or
+ * monitorCredentialId). Each marker carries { timestamp, label } so the
+ * chart can render a vertical line at that timestamp with the human-
+ * readable transition string in its tooltip.
+ *
+ * Bounded by the events table's 7-day rolling retention. Older events
+ * have been pruned and won't appear; that's acceptable for an
+ * intermittency-investigation tool — the markers are most useful for
+ * recent changes anyway.
+ */
+async function _fetchPollingTransitions(assetId, since, until) {
+  var TRACKED = {
+    monitorType:               "Polling type",
+    monitorResponseTimeSource: "Response-time transport",
+    monitorTelemetrySource:    "Telemetry transport",
+    monitorInterfacesSource:   "Interfaces transport",
+    monitorLldpSource:         "LLDP transport",
+    monitorCredentialId:       "Credential",
+  };
+  var params = {
+    resourceType: "asset",
+    resourceId:   assetId,
+    action:       "asset.updated",
+    limit:        200,
+  };
+  if (since) params.since = since;
+  if (until) params.until = until;
+  var resp;
+  try { resp = await api.events.list(params); }
+  catch (_) { return []; }
+  var events = (resp && resp.events) || [];
+  var markers = [];
+  events.forEach(function (e) {
+    var changes = e && e.details && e.details.changes;
+    if (!changes || typeof changes !== "object") return;
+    var bits = [];
+    Object.keys(TRACKED).forEach(function (field) {
+      var c = changes[field];
+      if (!c) return;
+      // c is { from, to } per buildChanges() convention.
+      var from = c.from === null || c.from === undefined ? "—" : String(c.from);
+      var to   = c.to   === null || c.to   === undefined ? "—" : String(c.to);
+      bits.push(TRACKED[field] + ": " + from + " → " + to);
+    });
+    if (bits.length === 0) return;
+    markers.push({ timestamp: e.timestamp, label: bits.join("\n") });
+  });
+  // Server returns newest-first; sort ascending so the chart's left-to-right
+  // overlay matches time order regardless.
+  markers.sort(function (a, b) { return new Date(a.timestamp) - new Date(b.timestamp); });
+  return markers;
+}
+
 async function _loadMonitorHistoryFor(assetId, selection, callOpts) {
   // Cancel any pending auto-refresh — a manual range change or probe-now click
   // shouldn't race against an in-flight scheduled tick.
@@ -3939,7 +3995,14 @@ async function _loadMonitorHistoryFor(assetId, selection, callOpts) {
   var savedScroll = panelBody ? panelBody.scrollTop : 0;
   try {
     var data = await api.assets.monitorHistory(assetId, opts);
-    _renderMonitorChart(chart, data);
+    // Fetch transitions in parallel — failures are non-fatal (chart still
+    // renders without markers). Scoped to the chart's window when available
+    // so we don't pull every asset.updated event Polaris has ever seen.
+    var transitions = [];
+    try {
+      transitions = await _fetchPollingTransitions(assetId, data && data.since, data && data.until);
+    } catch (_) { /* defensive */ }
+    _renderMonitorChart(chart, data, transitions);
     if (stats && data.stats) {
       var s = data.stats;
       var loss = s.packetLossRate != null ? (s.packetLossRate * 100).toFixed(1) + "%" : "—";
@@ -3988,12 +4051,13 @@ function _toLocalDatetimeInput(d) {
     "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
 }
 
-function _renderMonitorChart(container, data) {
+function _renderMonitorChart(container, data, transitions) {
   var samples = (data && data.samples) || [];
   if (samples.length === 0) {
     container.textContent = "No samples in this range yet.";
     return;
   }
+  transitions = Array.isArray(transitions) ? transitions : [];
   var W = container.clientWidth || 600;
   var H = 200;
   var padL = 56, padR = 10, padT = 10, padB = 56;
@@ -4094,11 +4158,29 @@ function _renderMonitorChart(container, data) {
   var yTitle = '<text class="chart-axis-title" x="' + yTitleX + '" y="' + yTitleY + '" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.85" transform="rotate(-90 ' + yTitleX + ' ' + yTitleY + ')">Response time (ms)</text>';
   var xTitle = '<text class="chart-axis-title" x="' + (padL + innerW / 2) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.85">Time</text>';
 
+  // Polling-method transition markers — vertical amber dashed lines at
+  // events where monitorType / monitor*Source / monitorCredentialId
+  // changed. Filter to within the chart window so off-screen transitions
+  // don't smear at the edges. A hit-target rectangle around each line
+  // makes the hover forgiving without tying tooltip behaviour to the 1.5px
+  // stroke. Tooltip text comes from the marker's data-label.
+  var transitionLayer = transitions
+    .map(function (m) { return { ts: new Date(m.timestamp).getTime(), label: m.label, raw: m.timestamp }; })
+    .filter(function (m) { return m.ts >= t0 && m.ts <= t1; })
+    .map(function (m) {
+      var x = xFor(m.raw);
+      return '<line x1="' + x + '" y1="' + padT + '" x2="' + x + '" y2="' + (padT + innerH) + '" stroke="rgba(255,193,7,0.55)" stroke-width="1.5" stroke-dasharray="3,3"/>' +
+        '<circle cx="' + x + '" cy="' + (padT - 2) + '" r="3" fill="rgba(255,193,7,0.9)" stroke="rgba(0,0,0,0.3)" stroke-width="0.5"/>' +
+        '<rect class="monitor-transition" x="' + (x - 5) + '" y="' + padT + '" width="10" height="' + innerH + '" fill="transparent" style="cursor:help"' +
+          ' data-ts="' + escapeHtml(String(m.raw)) + '" data-label="' + escapeHtml(m.label) + '"/>';
+    }).join("");
+
   var svg =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       ticks +
       xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      transitionLayer +
       yTitle +
       xTitle +
       failureLines +
@@ -4116,6 +4198,18 @@ function _renderMonitorChart(container, data) {
 
   var tip = container.querySelector(".monitor-tooltip");
   var svgEl = container.querySelector("svg");
+  function positionTip(evt) {
+    var rect = container.getBoundingClientRect();
+    var x = evt.clientX - rect.left + 12;
+    var y = evt.clientY - rect.top + 12;
+    var tw = tip.offsetWidth, th = tip.offsetHeight;
+    if (x + tw > container.clientWidth - 4) x = evt.clientX - rect.left - tw - 12;
+    if (y + th > container.clientHeight - 4) y = evt.clientY - rect.top - th - 12;
+    if (x < 4) x = 4;
+    if (y < 4) y = 4;
+    tip.style.left = x + "px";
+    tip.style.top = y + "px";
+  }
   function showTip(target, evt) {
     var ts = target.getAttribute("data-ts");
     var rtt = target.getAttribute("data-rtt");
@@ -4130,20 +4224,32 @@ function _renderMonitorChart(container, data) {
       '<div>Packet loss: ' + lossLine + '</div>' +
       errLine;
     tip.style.display = "block";
-    var rect = container.getBoundingClientRect();
-    var x = evt.clientX - rect.left + 12;
-    var y = evt.clientY - rect.top + 12;
-    var tw = tip.offsetWidth, th = tip.offsetHeight;
-    if (x + tw > container.clientWidth - 4) x = evt.clientX - rect.left - tw - 12;
-    if (y + th > container.clientHeight - 4) y = evt.clientY - rect.top - th - 12;
-    if (x < 4) x = 4;
-    if (y < 4) y = 4;
-    tip.style.left = x + "px";
-    tip.style.top = y + "px";
+    positionTip(evt);
+  }
+  // Hover tooltip for the amber polling-method transition lines.
+  // Multiline labels render with each transition on its own line.
+  function showTransitionTip(target, evt) {
+    var ts    = target.getAttribute("data-ts");
+    var label = target.getAttribute("data-label") || "";
+    var lines = label.split("\n").map(function (l) {
+      return '<div>' + escapeHtml(l) + '</div>';
+    }).join("");
+    tip.innerHTML =
+      '<div style="font-weight:600;margin-bottom:2px;color:#ffc107">⚙ Polling change</div>' +
+      '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(fmtTooltipTs(ts)) + '</div>' +
+      lines;
+    tip.style.display = "block";
+    positionTip(evt);
   }
   svgEl.addEventListener("mousemove", function (evt) {
     var t = evt.target;
-    if (t && t.classList && t.classList.contains("monitor-hit")) {
+    if (!t || !t.classList) { tip.style.display = "none"; return; }
+    // Transition rect takes priority — operators investigating intermittency
+    // want to see the polling-method change first when their cursor lands on
+    // both a sample dot and a transition line.
+    if (t.classList.contains("monitor-transition")) {
+      showTransitionTip(t, evt);
+    } else if (t.classList.contains("monitor-hit")) {
       showTip(t, evt);
     } else {
       tip.style.display = "none";
