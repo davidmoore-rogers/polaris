@@ -398,10 +398,24 @@ model Asset {
   // (or, if null, the integration's monitorCredentialId). Only consulted when monitorType
   // resolves to fortimanager or fortigate; ignored on assets the operator switched to a
   // generic snmp/winrm/ssh/icmp probe (those follow monitorType end-to-end).
+  // **Legacy** — being replaced by the per-stream polling columns below in
+  // step 3 of the polling-method redesign. Kept until 3j confirms the
+  // backfill (3e) is clean across every asset, then dropped along with
+  // monitorType in the same migration.
   monitorResponseTimeSource String? // null | "rest" | "snmp"
   monitorTelemetrySource    String? // null | "rest" | "snmp" — covers CPU + memory + temperature
   monitorInterfacesSource   String? // null | "rest" | "snmp" — covers interfaces + storage; IPsec always REST
   monitorLldpSource         String? // null | "rest" | "snmp" — covers LLDP neighbor discovery (decoupled from interfaces because some FortiOS releases 404 the LLDP endpoint while LLDP-MIB still works, and vice-versa)
+  // Per-stream polling-method overrides — the new replacement for monitor*Source +
+  // monitorType. Each accepts the 5-way enum "rest_api" | "snmp" | "winrm" | "ssh" |
+  // "icmp" or null (= inherit from the class override / integration tier / source
+  // default). The resolver in monitoringService applies the compatibility matrix
+  // from utils/pollingCompatibility — values that don't match the asset's source
+  // are silently ignored at resolution time.
+  responseTimePolling       String?
+  telemetryPolling          String?
+  interfacesPolling         String?
+  lldpPolling               String?
 
   // System tab cadences. Telemetry = CPU% + memory snapshot, taken once per minute by default.
   // System info = full interface + storage scrape, taken once per ten minutes by default.

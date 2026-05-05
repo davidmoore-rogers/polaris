@@ -49,6 +49,13 @@ import {
   setQueueDepth,
 } from "../metrics.js";
 import { dropChunks } from "./timescaleService.js";
+import {
+  type PollingMethod,
+  type AssetSourceKind,
+  isPollingMethod,
+  isPollingMethodCompatible,
+  assetSourceKindFromIntegrationType,
+} from "../utils/pollingCompatibility.js";
 
 export type MonitorType =
   | "fortimanager"
@@ -104,6 +111,17 @@ export interface MonitorTierSettings {
   sampleRetentionDays:       number;
   telemetryRetentionDays:    number;
   systemInfoRetentionDays:   number;
+  /**
+   * Per-stream polling method. null at this tier = "no operator preference,
+   * fall back to the source default". The resolver checks compatibility
+   * against the asset's source via utils/pollingCompatibility and silently
+   * skips an incompatible value (e.g. an integration tier with REST API
+   * doesn't apply to an Active Directory asset since AD can't speak REST API).
+   */
+  responseTimePolling:       PollingMethod | null;
+  telemetryPolling:          PollingMethod | null;
+  interfacesPolling:         PollingMethod | null;
+  lldpPolling:               PollingMethod | null;
 }
 
 export type MonitorOverrideSettings = Partial<MonitorTierSettings>;
@@ -126,6 +144,14 @@ const HARDCODED_FLOOR: MonitorTierSettings = {
   sampleRetentionDays:       30,
   telemetryRetentionDays:    30,
   systemInfoRetentionDays:   30,
+  // Polling fields default to null at every tier. Source-aware defaults
+  // (FMG/FortiGate -> rest_api, AD/Entra/Win -> icmp, manual -> icmp for
+  // responseTime + null for the other streams) are applied by the resolver
+  // via defaultPollingForSource().
+  responseTimePolling:       null,
+  telemetryPolling:          null,
+  interfacesPolling:         null,
+  lldpPolling:               null,
 };
 
 // ─── Legacy global-tier types (transitional, scheduled for removal) ────────
@@ -338,8 +364,19 @@ export function invalidateMonitorSettingsCache(scope?: {
   }
 }
 
+function readPollingFromJson(v: Record<string, unknown> | undefined, key: string): PollingMethod | null {
+  if (!v) return null;
+  const raw = v[key];
+  return isPollingMethod(raw) ? raw : null;
+}
+
 function tierFromJson(v: Record<string, unknown> | null | undefined): MonitorTierSettings {
   const o = v ?? {};
+  // Per-stream polling lives in a nested `polling: { responseTime, telemetry,
+  // interfaces, lldp }` block on the tier-3 JSON. Each stream is optional;
+  // a missing or non-PollingMethod value reads as null and the resolver
+  // falls back to the source default.
+  const pollingBlock = (o.polling as Record<string, unknown> | undefined) ?? undefined;
   return {
     intervalSeconds:           toPositiveInt(o.intervalSeconds,           HARDCODED_FLOOR.intervalSeconds),
     failureThreshold:          toPositiveInt(o.failureThreshold,          HARDCODED_FLOOR.failureThreshold),
@@ -349,7 +386,37 @@ function tierFromJson(v: Record<string, unknown> | null | undefined): MonitorTie
     sampleRetentionDays:       toPositiveInt(o.sampleRetentionDays,       HARDCODED_FLOOR.sampleRetentionDays),
     telemetryRetentionDays:    toPositiveInt(o.telemetryRetentionDays,    HARDCODED_FLOOR.telemetryRetentionDays),
     systemInfoRetentionDays:   toPositiveInt(o.systemInfoRetentionDays,   HARDCODED_FLOOR.systemInfoRetentionDays),
+    responseTimePolling:       readPollingFromJson(pollingBlock, "responseTime"),
+    telemetryPolling:          readPollingFromJson(pollingBlock, "telemetry"),
+    interfacesPolling:         readPollingFromJson(pollingBlock, "interfaces"),
+    lldpPolling:               readPollingFromJson(pollingBlock, "lldp"),
   };
+}
+
+/**
+ * Source-default polling method per stream. Used when no tier (integration,
+ * class, asset) supplies a value and we need *something* to start with.
+ *
+ * - FMG / FortiGate: REST API for every stream — the integration's stored
+ *   API token covers all four.
+ * - AD / Entra / Windows Server: only the response-time stream is supported
+ *   on these hosts, and ICMP is the safest "everything works" baseline. The
+ *   other three streams default to null so the System tab politely says
+ *   "not delivered for this asset".
+ * - Manual: ICMP for response-time only — operator must explicitly pick a
+ *   credentialed method (and a credential) to enable telemetry/interfaces
+ *   on a manually-created asset.
+ */
+function defaultPollingForSource(
+  source: AssetSourceKind,
+  stream: "responseTime" | "telemetry" | "interfaces" | "lldp",
+): PollingMethod | null {
+  if (source === "fortimanager" || source === "fortigate") return "rest_api";
+  if (source === "activedirectory" || source === "entraid" || source === "windowsserver") {
+    return stream === "responseTime" ? "icmp" : null;
+  }
+  // manual
+  return stream === "responseTime" ? "icmp" : null;
 }
 
 async function loadLegacyGlobalAsTier(): Promise<MonitorTierSettings | null> {
@@ -410,6 +477,10 @@ async function loadClassOverride(
       sampleRetentionDays:       true,
       telemetryRetentionDays:    true,
       systemInfoRetentionDays:   true,
+      responseTimePolling:       true,
+      telemetryPolling:          true,
+      interfacesPolling:         true,
+      lldpPolling:               true,
     },
   });
   let result: MonitorOverrideSettings | null = null;
@@ -423,6 +494,14 @@ async function loadClassOverride(
     if (row.sampleRetentionDays       != null) result.sampleRetentionDays       = row.sampleRetentionDays;
     if (row.telemetryRetentionDays    != null) result.telemetryRetentionDays    = row.telemetryRetentionDays;
     if (row.systemInfoRetentionDays   != null) result.systemInfoRetentionDays   = row.systemInfoRetentionDays;
+    // Polling columns are nullable strings; only adopt them when they pass
+    // the type guard so a stale legacy value (e.g. "rest") in the DB doesn't
+    // smuggle through as a typed PollingMethod here. Bad values are silently
+    // dropped — the resolver falls through to the next tier.
+    if (isPollingMethod(row.responseTimePolling)) result.responseTimePolling = row.responseTimePolling;
+    if (isPollingMethod(row.telemetryPolling))    result.telemetryPolling    = row.telemetryPolling;
+    if (isPollingMethod(row.interfacesPolling))   result.interfacesPolling   = row.interfacesPolling;
+    if (isPollingMethod(row.lldpPolling))         result.lldpPolling         = row.lldpPolling;
   }
   classOverrideCache.set(key, result);
   return result;
@@ -432,10 +511,24 @@ async function loadClassOverride(
 export interface AssetMonitorContext {
   assetType:                 string;
   discoveredByIntegrationId: string | null;
+  /**
+   * Type of the discovering integration. Drives the source-default
+   * polling method and the compatibility matrix. Pass null/undefined for
+   * orphan / manually-created assets — the resolver maps it to the
+   * "manual" source kind.
+   */
+  discoveredByIntegrationType?: string | null;
   monitorIntervalSec:        number | null;
   telemetryIntervalSec:      number | null;
   systemInfoIntervalSec:     number | null;
   probeTimeoutMs:            number | null;
+  // Per-stream polling overrides on the asset itself. null = inherit.
+  // String? on disk so legacy values can sit alongside; resolver adopts
+  // them only when they pass isPollingMethod().
+  responseTimePolling?:      string | null;
+  telemetryPolling?:         string | null;
+  interfacesPolling?:        string | null;
+  lldpPolling?:              string | null;
 }
 
 /**
@@ -443,6 +536,17 @@ export interface AssetMonitorContext {
  * values for one asset. Reads through the resolver caches; one cold call hits
  * 1-2 DB rows, every subsequent call for assets in the same tier/class group
  * is in-memory.
+ *
+ * Per-stream polling resolution:
+ *   1. Source default (FMG/FortiGate→rest_api, AD/Entra/Win→icmp+null,
+ *      manual→icmp+null) sets the baseline for each of the four streams.
+ *   2. Tier-3 (integration or manual) value overrides if present AND
+ *      compatible with the asset's source per
+ *      utils/pollingCompatibility.isPollingMethodCompatible. Incompatible
+ *      values are silently ignored — the resolver leaves the layer below
+ *      in place.
+ *   3. Class override applies the same compatible-or-skip rule.
+ *   4. Per-asset value applies the same rule.
  */
 export async function resolveMonitorSettings(asset: AssetMonitorContext): Promise<ResolvedMonitorSettings> {
   // Tier 3 (integration-tier or manual-tier).
@@ -456,15 +560,74 @@ export async function resolveMonitorSettings(asset: AssetMonitorContext): Promis
     asset.assetType,
   );
 
-  // Compose tier 3 → tier 2.
-  const merged: ResolvedMonitorSettings = { ...tier3 };
-  if (classOverride) Object.assign(merged, classOverride);
+  // Resolve the asset's source kind once — drives both the polling default
+  // and the compatibility check at every layer.
+  const sourceKind = assetSourceKindFromIntegrationType(asset.discoveredByIntegrationType ?? null);
 
-  // Tier 1 (per-asset overrides — only the four cadence/timeout fields).
+  // Compose tier 3 → tier 2 for the cadence/retention fields. Polling fields
+  // are resolved separately below with the compatibility-aware fallthrough.
+  const merged: ResolvedMonitorSettings = { ...tier3 };
+  if (classOverride) {
+    if (classOverride.intervalSeconds           != null) merged.intervalSeconds           = classOverride.intervalSeconds;
+    if (classOverride.failureThreshold          != null) merged.failureThreshold          = classOverride.failureThreshold;
+    if (classOverride.probeTimeoutMs            != null) merged.probeTimeoutMs            = classOverride.probeTimeoutMs;
+    if (classOverride.telemetryIntervalSeconds  != null) merged.telemetryIntervalSeconds  = classOverride.telemetryIntervalSeconds;
+    if (classOverride.systemInfoIntervalSeconds != null) merged.systemInfoIntervalSeconds = classOverride.systemInfoIntervalSeconds;
+    if (classOverride.sampleRetentionDays       != null) merged.sampleRetentionDays       = classOverride.sampleRetentionDays;
+    if (classOverride.telemetryRetentionDays    != null) merged.telemetryRetentionDays    = classOverride.telemetryRetentionDays;
+    if (classOverride.systemInfoRetentionDays   != null) merged.systemInfoRetentionDays   = classOverride.systemInfoRetentionDays;
+  }
+
+  // Tier 1 (per-asset cadence / timeout overrides).
   if (asset.monitorIntervalSec    != null) merged.intervalSeconds           = asset.monitorIntervalSec;
   if (asset.telemetryIntervalSec  != null) merged.telemetryIntervalSeconds  = asset.telemetryIntervalSec;
   if (asset.systemInfoIntervalSec != null) merged.systemInfoIntervalSeconds = asset.systemInfoIntervalSec;
   if (asset.probeTimeoutMs        != null) merged.probeTimeoutMs            = asset.probeTimeoutMs;
+
+  // Per-stream polling resolution — see header comment above for rules.
+  function resolveStream(
+    stream: "responseTime" | "telemetry" | "interfaces" | "lldp",
+    tierVal: PollingMethod | null,
+    classVal: PollingMethod | null | undefined,
+    assetVal: string | null | undefined,
+  ): PollingMethod | null {
+    let resolved: PollingMethod | null = defaultPollingForSource(sourceKind, stream);
+    if (tierVal && isPollingMethodCompatible(sourceKind, tierVal)) {
+      resolved = tierVal;
+    }
+    if (classVal && isPollingMethodCompatible(sourceKind, classVal)) {
+      resolved = classVal;
+    }
+    if (isPollingMethod(assetVal) && isPollingMethodCompatible(sourceKind, assetVal)) {
+      resolved = assetVal;
+    }
+    return resolved;
+  }
+
+  merged.responseTimePolling = resolveStream(
+    "responseTime",
+    tier3.responseTimePolling,
+    classOverride?.responseTimePolling ?? null,
+    asset.responseTimePolling,
+  );
+  merged.telemetryPolling = resolveStream(
+    "telemetry",
+    tier3.telemetryPolling,
+    classOverride?.telemetryPolling ?? null,
+    asset.telemetryPolling,
+  );
+  merged.interfacesPolling = resolveStream(
+    "interfaces",
+    tier3.interfacesPolling,
+    classOverride?.interfacesPolling ?? null,
+    asset.interfacesPolling,
+  );
+  merged.lldpPolling = resolveStream(
+    "lldp",
+    tier3.lldpPolling,
+    classOverride?.lldpPolling ?? null,
+    asset.lldpPolling,
+  );
 
   return merged;
 }
@@ -521,16 +684,29 @@ export async function resolveMonitorSettingsWithProvenance(
     sampleRetentionDays:       tier3Source,
     telemetryRetentionDays:    tier3Source,
     systemInfoRetentionDays:   tier3Source,
+    responseTimePolling:       tier3Source,
+    telemetryPolling:          tier3Source,
+    interfacesPolling:         tier3Source,
+    lldpPolling:               tier3Source,
   };
 
   if (classOverride) {
-    for (const key of Object.keys(classOverride) as Array<keyof MonitorTierSettings>) {
-      const v = classOverride[key];
-      if (v != null) {
-        resolved[key] = v;
-        provenance[key] = "class";
-      }
-    }
+    // Field-by-field copy + provenance bump. The mixed value types (numbers
+    // for cadence, PollingMethod for polling) make the previous loop hostile
+    // to TypeScript's narrowing — listing each field explicitly keeps the
+    // types straight without `as any`.
+    if (classOverride.intervalSeconds           != null) { resolved.intervalSeconds           = classOverride.intervalSeconds;           provenance.intervalSeconds           = "class"; }
+    if (classOverride.failureThreshold          != null) { resolved.failureThreshold          = classOverride.failureThreshold;          provenance.failureThreshold          = "class"; }
+    if (classOverride.probeTimeoutMs            != null) { resolved.probeTimeoutMs            = classOverride.probeTimeoutMs;            provenance.probeTimeoutMs            = "class"; }
+    if (classOverride.telemetryIntervalSeconds  != null) { resolved.telemetryIntervalSeconds  = classOverride.telemetryIntervalSeconds;  provenance.telemetryIntervalSeconds  = "class"; }
+    if (classOverride.systemInfoIntervalSeconds != null) { resolved.systemInfoIntervalSeconds = classOverride.systemInfoIntervalSeconds; provenance.systemInfoIntervalSeconds = "class"; }
+    if (classOverride.sampleRetentionDays       != null) { resolved.sampleRetentionDays       = classOverride.sampleRetentionDays;       provenance.sampleRetentionDays       = "class"; }
+    if (classOverride.telemetryRetentionDays    != null) { resolved.telemetryRetentionDays    = classOverride.telemetryRetentionDays;    provenance.telemetryRetentionDays    = "class"; }
+    if (classOverride.systemInfoRetentionDays   != null) { resolved.systemInfoRetentionDays   = classOverride.systemInfoRetentionDays;   provenance.systemInfoRetentionDays   = "class"; }
+    if (classOverride.responseTimePolling)        { resolved.responseTimePolling = classOverride.responseTimePolling; provenance.responseTimePolling = "class"; }
+    if (classOverride.telemetryPolling)           { resolved.telemetryPolling    = classOverride.telemetryPolling;    provenance.telemetryPolling    = "class"; }
+    if (classOverride.interfacesPolling)          { resolved.interfacesPolling   = classOverride.interfacesPolling;   provenance.interfacesPolling   = "class"; }
+    if (classOverride.lldpPolling)                { resolved.lldpPolling         = classOverride.lldpPolling;         provenance.lldpPolling         = "class"; }
   }
 
   // Per-asset (only the four overridable fields).
@@ -550,6 +726,21 @@ export async function resolveMonitorSettingsWithProvenance(
     resolved.probeTimeoutMs = asset.probeTimeoutMs;
     provenance.probeTimeoutMs = "asset";
   }
+  // Per-asset polling overrides — only adopted when they're a real
+  // PollingMethod string. Compatibility check happens here too: a stale
+  // legacy "rest" or an incompatible value silently falls through to the
+  // class/tier value.
+  const sourceKindForAsset = assetSourceKindFromIntegrationType(asset.discoveredByIntegrationType ?? null);
+  function takeAssetPolling(stream: keyof Pick<MonitorTierSettings, "responseTimePolling" | "telemetryPolling" | "interfacesPolling" | "lldpPolling">, raw: string | null | undefined) {
+    if (isPollingMethod(raw) && isPollingMethodCompatible(sourceKindForAsset, raw)) {
+      resolved[stream] = raw;
+      provenance[stream] = "asset";
+    }
+  }
+  takeAssetPolling("responseTimePolling", asset.responseTimePolling);
+  takeAssetPolling("telemetryPolling",    asset.telemetryPolling);
+  takeAssetPolling("interfacesPolling",   asset.interfacesPolling);
+  takeAssetPolling("lldpPolling",         asset.lldpPolling);
 
   return { resolved, provenance, tier3Source, classOverrideId };
 }

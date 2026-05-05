@@ -41,6 +41,10 @@ import {
 } from "../../src/services/monitoringService.js";
 import { prisma } from "../../src/db.js";
 
+// Tier-3 baseline values. After 3d the resolver also returns four per-stream
+// polling fields — those are computed from the asset's source kind and the
+// compatibility matrix, so the expected resolved shape varies per test. Each
+// test that uses toEqual() picks the right polling defaults below.
 const FLOOR = {
   intervalSeconds:           60,
   failureThreshold:          3,
@@ -50,6 +54,10 @@ const FLOOR = {
   sampleRetentionDays:       30,
   telemetryRetentionDays:    30,
   systemInfoRetentionDays:   30,
+  responseTimePolling:       null,
+  telemetryPolling:          null,
+  interfacesPolling:         null,
+  lldpPolling:               null,
 };
 
 const TUNED_TIER = {
@@ -61,6 +69,25 @@ const TUNED_TIER = {
   sampleRetentionDays:       60,
   telemetryRetentionDays:    14,
   systemInfoRetentionDays:   14,
+  responseTimePolling:       null,
+  telemetryPolling:          null,
+  interfacesPolling:         null,
+  lldpPolling:               null,
+};
+
+// Per-stream polling defaults the resolver applies for a given source kind.
+// Mirrors defaultPollingForSource in monitoringService.ts.
+const MANUAL_POLLING_DEFAULT = {
+  responseTimePolling: "icmp" as const,
+  telemetryPolling:    null,
+  interfacesPolling:   null,
+  lldpPolling:         null,
+};
+const FORTI_POLLING_DEFAULT = {
+  responseTimePolling: "rest_api" as const,
+  telemetryPolling:    "rest_api" as const,
+  interfacesPolling:   "rest_api" as const,
+  lldpPolling:         "rest_api" as const,
 };
 
 beforeEach(() => {
@@ -83,7 +110,8 @@ describe("resolveMonitorSettings — tier-3 fallback", () => {
       systemInfoIntervalSec:     null,
       probeTimeoutMs:            null,
     });
-    expect(out).toEqual(TUNED_TIER);
+    // Manual source: ICMP for responseTime, null for the other streams.
+    expect(out).toEqual({ ...TUNED_TIER, ...MANUAL_POLLING_DEFAULT });
   });
 
   it("hardcoded floor when manual tier Setting is unseeded AND legacy row absent", async () => {
@@ -100,7 +128,7 @@ describe("resolveMonitorSettings — tier-3 fallback", () => {
       systemInfoIntervalSec:     null,
       probeTimeoutMs:            null,
     });
-    expect(out).toEqual(FLOOR);
+    expect(out).toEqual({ ...FLOOR, ...MANUAL_POLLING_DEFAULT });
   });
 
   it("falls back to legacy monitorSettings row when manualMonitorSettings is unseeded", async () => {
@@ -122,7 +150,7 @@ describe("resolveMonitorSettings — tier-3 fallback", () => {
       systemInfoIntervalSec:     null,
       probeTimeoutMs:            null,
     });
-    expect(out).toEqual(TUNED_TIER);
+    expect(out).toEqual({ ...TUNED_TIER, ...MANUAL_POLLING_DEFAULT });
   });
 
   it("integration tier when asset.discoveredByIntegrationId is set", async () => {
@@ -134,12 +162,14 @@ describe("resolveMonitorSettings — tier-3 fallback", () => {
     const out = await resolveMonitorSettings({
       assetType:                 "firewall",
       discoveredByIntegrationId: "fmg-1",
+      discoveredByIntegrationType: "fortimanager",
       monitorIntervalSec:        null,
       telemetryIntervalSec:      null,
       systemInfoIntervalSec:     null,
       probeTimeoutMs:            null,
     });
-    expect(out).toEqual(TUNED_TIER);
+    // FortiManager source: REST API for every stream.
+    expect(out).toEqual({ ...TUNED_TIER, ...FORTI_POLLING_DEFAULT });
   });
 });
 
