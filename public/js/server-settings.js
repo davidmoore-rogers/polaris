@@ -3824,12 +3824,24 @@ function openCredentialTestModal(state) {
     searchTimer = setTimeout(async function () {
       lastQuery = q;
       try {
-        var results = await api.search.query(q);
-        if (results.query !== lastQuery) return; // stale
-        // Pinned-on-the-Device-Map firewalls are split into `sites` and
-        // dropped from `assets` server-side. They're still real probe
-        // targets, so merge them back in for the credential test picker.
-        renderResults((results.assets || []).concat(results.sites || []));
+        // /assets, not the global /search endpoint: /search caps each
+        // entity group at 8 and partitions pinned firewalls out into
+        // `sites`, so on fleets with lots of endpoints sharing a hostname
+        // prefix a firewall could silently fall off the bottom of the
+        // typeahead. /assets has no per-group cap and returns every
+        // asset type uniformly, including firewalls regardless of map pin.
+        var results = await api.assets.list({ search: q, limit: 25 });
+        if (q !== lastQuery) return; // stale
+        var hits = (results.assets || []).map(function (a) {
+          var vendorModel = [a.manufacturer, a.model].filter(Boolean).join(" ");
+          var bits = [a.ipAddress, a.macAddress, vendorModel].filter(Boolean);
+          return {
+            id: a.id,
+            title: a.hostname || a.assetTag || "asset",
+            subtitle: bits.join(" — ") || a.assetType,
+          };
+        });
+        renderResults(hits);
       } catch (err) {
         resultsBox.innerHTML = '<div style="padding:0.5rem 0.75rem;color:var(--color-danger,#c0392b);font-size:0.85rem">Search failed: ' + escapeHtml(err.message || "Unknown error") + '</div>';
         resultsBox.style.display = "block";
