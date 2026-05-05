@@ -76,8 +76,8 @@ document.addEventListener("DOMContentLoaded", async function () {
   });
   var settingsBtn = document.getElementById("btn-asset-settings");
   if (settingsBtn) settingsBtn.addEventListener("click", openAssetSettingsModal);
-  var globalMonBtn = document.getElementById("btn-global-monitoring");
-  if (globalMonBtn) globalMonBtn.addEventListener("click", openGlobalMonitoringModal);
+  var monsetBtn = document.getElementById("btn-monitoring-settings");
+  if (monsetBtn) monsetBtn.addEventListener("click", openMonitoringSettingsModal);
   await userReady;
   _restoreAssetsPrefs();
   loadAssets();
@@ -6628,273 +6628,323 @@ function _credentialOptionsFor(type, selectedId) {
   return opts;
 }
 
-// ─── Global Monitoring Modal ─────────────────────────────────────────────────
-// Opened from the "Monitoring" button in the page header. Shows the same
-// FortiGates / FortiSwitches / FortiAPs subtabs as the Monitoring tab inside
-// the integration edit modal on the Integrations page. Saves to the same
-// Integration.config via PUT /api/v1/integrations/:id, so both UIs stay in
-// sync. Global monitor timer settings (polling intervals, retention days) are
-// also saved via PUT /api/v1/assets/monitor-settings.
+// ─── Monitoring Settings Modal ──────────────────────────────────────────────
+// Opened from the "Monitoring Settings" button in the Assets page header.
+// Two sections, both admin/assetsadmin only:
 //
-// Functions from integrations.js are used here:
-//   monitorSettingsFormHTML, _intRenderTabbedBody, _intWireModalTabs,
-//   wireAutoMonitorCards, _readMonitorCredentialId,
-//   _readMonitorTransportSources, _readFortigateMonitorBlock,
-//   _readClassMonitorBlock, getMonitorSettingsFromForm,
-//   AUTO_MONITOR_INTERFACE_WARN_THRESHOLD
+//   1. Manual Monitoring tier — settings for orphan / manually-created assets.
+//      One form with the eight tier-3 fields. Save via
+//      PUT /api/v1/monitor-settings/manual.
+//
+//   2. Class Overrides — list of (assetType + asset source) override rows.
+//      Add / Edit / Delete. The integration tier (per-integration settings)
+//      lives on the Integrations page and is edited from each integration's
+//      Monitoring tab — it's intentionally NOT in this modal.
+//
+// All resolver caches invalidate server-side on every write.
 
-var _gMonIntegrations = [];  // all FMG/FGT integrations loaded on modal open
-var _gMonCurrentId    = null; // ID of the currently-visible integration tab
-var _gMonFormCache    = {};   // intgId → { credId, transports, fgBlock, swBlock, apBlock }
-var _gMonTimers       = {};   // global timer values (shared; may be edited before switching tabs)
-var _gMonCreds        = [];   // credential list, fetched once on modal open
+var MON_TIER_DEFAULTS = {
+  intervalSeconds:           60,
+  failureThreshold:          3,
+  probeTimeoutMs:            5000,
+  telemetryIntervalSeconds:  60,
+  systemInfoIntervalSeconds: 600,
+  sampleRetentionDays:       30,
+  telemetryRetentionDays:    30,
+  systemInfoRetentionDays:   30,
+};
 
-async function openGlobalMonitoringModal() {
-  var results = await Promise.all([
-    api.integrations.list().catch(function () { return []; }),
-    api.assets.getMonitorSettings().catch(function () { return {}; }),
-    api.credentials.list().catch(function () { return []; }),
-  ]);
-  var intgResp = results[0];
-  var monSettings = results[1] || {};
-  var credResp = results[2];
+var _monsetIntegrations  = [];   // for the source picker on add/edit
+var _monsetOverrides     = [];   // class override rows currently rendered
+var _monsetManualValues  = null; // last-fetched manual-tier settings (or null = not yet seeded)
 
-  var allIntgs = intgResp.integrations || intgResp || [];
-  _gMonIntegrations = allIntgs.filter(function (i) {
-    return i.type === "fortimanager" || i.type === "fortigate";
-  });
-  _gMonTimers    = monSettings;
-  _gMonCreds     = Array.isArray(credResp) ? credResp : [];
-  _gMonFormCache = {};
-  _gMonCurrentId = null;
-
-  if (_gMonIntegrations.length === 0) {
-    openModal(
-      "Integration Monitoring Settings",
-      '<div class="empty-state" style="padding:2rem 0">No FortiManager or FortiGate integrations configured. Add one under <a href="/integrations.html">Integrations</a> first.</div>',
-      '<button class="btn btn-secondary" onclick="closeModal()">Close</button>'
-    );
+async function openMonitoringSettingsModal() {
+  // Loading shell first so the operator sees instant feedback. Replaced by
+  // _monsetRender() below once the three parallel fetches resolve.
+  openModal(
+    "Monitoring Settings",
+    '<div class="empty-state" style="padding:2rem 0">Loading…</div>',
+    '<button class="btn btn-secondary" onclick="closeModal()">Close</button>',
+    { wide: true }
+  );
+  try {
+    var results = await Promise.all([
+      api.monitorSettings.getManual().catch(function () { return null; }),
+      api.monitorSettings.listClassOverrides({}).catch(function () { return []; }),
+      api.integrations.list().catch(function () { return []; }),
+    ]);
+    _monsetManualValues = results[0] || Object.assign({}, MON_TIER_DEFAULTS);
+    _monsetOverrides    = Array.isArray(results[1]) ? results[1] : [];
+    var intgResp        = results[2];
+    _monsetIntegrations = (intgResp && (intgResp.integrations || intgResp)) || [];
+  } catch (err) {
+    showToast(err.message || "Failed to load monitoring settings", "error");
     return;
   }
+  _monsetRender();
+}
 
-  // Outer tab bar — one button per FMG / FGT integration.
-  var tabBar = '<div class="page-tabs" id="g-mon-intg-tabs" style="margin-bottom:1rem">' +
-    _gMonIntegrations.map(function (intg, i) {
-      var badge = intg.type === "fortigate" ? "FGT" : "FMG";
-      return '<button type="button" class="page-tab' + (i === 0 ? " active" : "") +
-        '" data-intg-id="' + intg.id + '">' +
-        escapeHtml(intg.name) +
-        ' <span style="font-size:0.7rem;opacity:0.65;margin-left:4px">[' + badge + ']</span>' +
-      '</button>';
-    }).join("") +
-  '</div>';
+function _monsetRender() {
+  var manualBody    = _monsetManualSectionHTML(_monsetManualValues);
+  var overridesBody = _monsetOverridesSectionHTML(_monsetOverrides);
+  var body = manualBody +
+    '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    overridesBody;
+  openModal(
+    "Monitoring Settings",
+    body,
+    '<button class="btn btn-secondary" onclick="closeModal()">Close</button>',
+    { wide: true }
+  );
 
-  var body = tabBar + '<div id="g-mon-content"></div>';
-  var footer =
-    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-    '<button class="btn btn-primary" id="btn-g-mon-save">Save Changes</button>';
-
-  openModal("Integration Monitoring Settings", body, footer, { wide: true });
-
-  // Wire outer integration tabs: cache current state then re-render.
-  document.querySelectorAll("#g-mon-intg-tabs .page-tab").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      _gMonCacheCurrentState();
-      document.querySelectorAll("#g-mon-intg-tabs .page-tab").forEach(function (b) {
-        b.classList.remove("active");
-      });
-      btn.classList.add("active");
-      _gMonCurrentId = btn.getAttribute("data-intg-id");
-      _gMonRenderContent(_gMonCurrentId);
-    });
+  document.getElementById("btn-monset-save-manual").addEventListener("click", _monsetSaveManual);
+  document.getElementById("btn-monset-add-override").addEventListener("click", function () {
+    _monsetOpenOverrideEditor(null);
   });
-
-  document.getElementById("btn-g-mon-save").addEventListener("click", _gMonSave);
-
-  // Render the first integration's monitoring form.
-  _gMonCurrentId = _gMonIntegrations[0].id;
-  _gMonRenderContent(_gMonCurrentId);
+  // Per-row edit/delete buttons. Reattach each render since the table HTML
+  // is rebuilt above.
+  var tbody = document.getElementById("monset-overrides-tbody");
+  if (tbody) {
+    tbody.querySelectorAll("[data-edit-override]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var id  = btn.getAttribute("data-edit-override");
+        var row = _monsetOverrides.find(function (o) { return o.id === id; });
+        if (row) _monsetOpenOverrideEditor(row);
+      });
+    });
+    tbody.querySelectorAll("[data-delete-override]").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        var id  = btn.getAttribute("data-delete-override");
+        var row = _monsetOverrides.find(function (o) { return o.id === id; });
+        var label = row
+          ? ((ASSET_TYPE_LABELS[row.assetType] || row.assetType) + " @ " + (row.integration ? row.integration.name : "Manual"))
+          : "this override";
+        var ok = await showConfirm("Delete class override for " + label + "?");
+        if (!ok) return;
+        try {
+          await api.monitorSettings.deleteClassOverride(id);
+          _monsetOverrides = _monsetOverrides.filter(function (o) { return o.id !== id; });
+          _monsetRender();
+          showToast("Override deleted");
+        } catch (err) {
+          showToast(err.message || "Failed to delete override", "error");
+        }
+      });
+    });
+  }
 }
 
-// Snapshot the currently-displayed form state into the cache.
-// Also refreshes the timer cache in case the operator edited timer fields.
-function _gMonCacheCurrentState() {
-  if (!_gMonCurrentId) return;
-  try {
-    var t = getMonitorSettingsFromForm();
-    if (t) _gMonTimers = t;
-  } catch (_) {}
-  _gMonFormCache[_gMonCurrentId] = {
-    credId:     _readMonitorCredentialId(),
-    transports: _readMonitorTransportSources(),
-    fgBlock:    _readFortigateMonitorBlock("f-mon-fortigate-"),
-    swBlock:    _readClassMonitorBlock("f-mon-fortiswitch-"),
-    apBlock:    _readClassMonitorBlock("f-mon-fortiap-"),
-  };
+function _monsetManualSectionHTML(v) {
+  var values = v || MON_TIER_DEFAULTS;
+  return '<div class="monset-section">' +
+    '<h3 style="margin-bottom:0.25rem">Manual Monitoring</h3>' +
+    '<p class="hint" style="margin:0 0 1rem 0;color:var(--color-text-tertiary)">Settings applied to assets without an integration source — manually-created assets, or assets whose origin integration was deleted.</p>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem 1rem">' +
+      _monsetField("monset-manual-intervalSeconds",           "Probe interval",         "seconds",                       values.intervalSeconds,           1,   86400, false) +
+      _monsetField("monset-manual-failureThreshold",          "Failure threshold",      "consecutive failures",          values.failureThreshold,          1,   100,   false) +
+      _monsetField("monset-manual-probeTimeoutMs",            "Probe timeout",          "ms (warning under 500)",        values.probeTimeoutMs,            100, 60000, true)  +
+      _monsetField("monset-manual-telemetryIntervalSeconds",  "Telemetry interval",     "seconds (CPU + memory + temp)", values.telemetryIntervalSeconds,  15,  86400, false) +
+      _monsetField("monset-manual-systemInfoIntervalSeconds", "System info interval",   "seconds (interfaces + storage)",values.systemInfoIntervalSeconds, 60,  86400, false) +
+      _monsetField("monset-manual-sampleRetentionDays",       "Probe sample retention", "days (0 = forever)",            values.sampleRetentionDays,       0,   3650,  false) +
+      _monsetField("monset-manual-telemetryRetentionDays",    "Telemetry retention",    "days (0 = forever)",            values.telemetryRetentionDays,    0,   3650,  false) +
+      _monsetField("monset-manual-systemInfoRetentionDays",   "System info retention",  "days (0 = forever)",            values.systemInfoRetentionDays,   0,   3650,  false) +
+    '</div>' +
+    '<div style="margin-top:1rem;text-align:right">' +
+      '<button class="btn btn-primary" id="btn-monset-save-manual">Save Manual Tier</button>' +
+    '</div>' +
+  '</div>';
 }
 
-// Render the monitoring form for `intgId` into #g-mon-content.
-// Uses the form cache when the tab was previously visited so unsaved edits
-// survive switching between integration tabs.
-function _gMonRenderContent(intgId) {
-  var intg = _gMonIntegrations.find(function (i) { return i.id === intgId; });
-  if (!intg) return;
-  var config  = intg.config || {};
-  var cached  = _gMonFormCache[intgId];
-
-  // Integration-specific opts: prefer cached (unsaved) state over stored config.
-  var opts = {
-    snmpCredentials:    _gMonCreds,
-    monitorCredentialId: cached ? (cached.credId || null) : (config.monitorCredentialId || null),
-    transportSources: (cached && cached.transports) ? {
-      responseTime: cached.transports.monitorResponseTimeSource === "snmp" ? "snmp" : "rest",
-      telemetry:    cached.transports.monitorTelemetrySource    === "snmp" ? "snmp" : "rest",
-      interfaces:   cached.transports.monitorInterfacesSource   === "snmp" ? "snmp" : "rest",
-      lldp:         cached.transports.monitorLldpSource         === "snmp" ? "snmp" : "rest",
-    } : {
-      responseTime: config.monitorResponseTimeSource || "rest",
-      telemetry:    config.monitorTelemetrySource    || "rest",
-      interfaces:   config.monitorInterfacesSource   || "rest",
-      lldp:         config.monitorLldpSource         || "rest",
-    },
-    fortigateMonitor:   cached ? (cached.fgBlock || null) : (config.fortigateMonitor   || null),
-    fortiswitchMonitor: cached ? (cached.swBlock || null) : (config.fortiswitchMonitor || null),
-    fortiapMonitor:     cached ? (cached.apBlock || null) : (config.fortiapMonitor     || null),
-    integrationId: intgId,
-  };
-
-  var contentEl = document.getElementById("g-mon-content");
-  if (!contentEl) return;
-  contentEl.innerHTML = monitorSettingsFormHTML(_gMonTimers, opts);
-
-  // Wire the inner FortiGates / FortiSwitches / FortiAPs sub-tabs.
-  _intWireModalTabs("intg-mon");
-  wireAutoMonitorCards(intgId);
+// Renders one numeric input with label + range hint. `warnUnder500` adds a
+// soft warning indicator when the current value is below 500ms — used for
+// probeTimeoutMs per the spec.
+function _monsetField(id, label, unit, value, min, max, warnUnder500) {
+  var v = (value === null || value === undefined) ? "" : value;
+  var warn = warnUnder500 && Number(v) > 0 && Number(v) < 500;
+  var warnIcon = warn ? ' <span title="Probes will likely false-fail under healthy network conditions at this timeout" style="color:var(--color-warning);font-weight:700">⚠</span>' : "";
+  return '<div class="form-group">' +
+    '<label for="' + id + '">' + escapeHtml(label) + warnIcon + '</label>' +
+    '<input type="number" id="' + id + '" min="' + min + '" max="' + max + '" value="' + escapeHtml(String(v)) + '">' +
+    (unit ? '<div style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:2px">' + escapeHtml(unit) + '</div>' : '') +
+  '</div>';
 }
 
-// Save all integrations that have cached form state (at minimum the current
-// one, which is cached first). Also saves global monitor timer settings.
-async function _gMonSave() {
-  var btn = document.getElementById("btn-g-mon-save");
+function _monsetReadField(id, fallback) {
+  var el = document.getElementById(id);
+  if (!el || el.value === "") return fallback;
+  var n = parseInt(el.value, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+async function _monsetSaveManual() {
+  var btn = document.getElementById("btn-monset-save-manual");
   if (!btn) return;
   btn.disabled = true;
-  btn.textContent = "Saving...";
-
+  btn.textContent = "Saving…";
+  var body = {
+    intervalSeconds:           _monsetReadField("monset-manual-intervalSeconds",           MON_TIER_DEFAULTS.intervalSeconds),
+    failureThreshold:          _monsetReadField("monset-manual-failureThreshold",          MON_TIER_DEFAULTS.failureThreshold),
+    probeTimeoutMs:            _monsetReadField("monset-manual-probeTimeoutMs",            MON_TIER_DEFAULTS.probeTimeoutMs),
+    telemetryIntervalSeconds:  _monsetReadField("monset-manual-telemetryIntervalSeconds",  MON_TIER_DEFAULTS.telemetryIntervalSeconds),
+    systemInfoIntervalSeconds: _monsetReadField("monset-manual-systemInfoIntervalSeconds", MON_TIER_DEFAULTS.systemInfoIntervalSeconds),
+    sampleRetentionDays:       _monsetReadField("monset-manual-sampleRetentionDays",       MON_TIER_DEFAULTS.sampleRetentionDays),
+    telemetryRetentionDays:    _monsetReadField("monset-manual-telemetryRetentionDays",    MON_TIER_DEFAULTS.telemetryRetentionDays),
+    systemInfoRetentionDays:   _monsetReadField("monset-manual-systemInfoRetentionDays",   MON_TIER_DEFAULTS.systemInfoRetentionDays),
+  };
   try {
-    // Cache the currently-displayed form so we don't miss the active tab.
-    _gMonCacheCurrentState();
-
-    // Save global monitor timer settings.
-    try {
-      await api.assets.updateMonitorSettings(_gMonTimers);
-    } catch (e) {
-      showToast("Monitor timers couldn't be saved: " + (e.message || "unknown error"), "error");
-    }
-
-    // Collect integrations whose form state was visited (cache entry exists).
-    var toSave = _gMonIntegrations.filter(function (intg) {
-      return !!_gMonFormCache[intg.id];
-    });
-
-    if (toSave.length === 0) {
-      closeModal();
-      showToast("Monitoring settings saved");
-      return;
-    }
-
-    var errors     = [];
-    var needsApply = [];
-
-    for (var s = 0; s < toSave.length; s++) {
-      var intg   = toSave[s];
-      var cached = _gMonFormCache[intg.id];
-
-      // Build the full config patch, preserving all non-monitoring fields.
-      var patch = Object.assign({}, intg.config || {});
-      if (cached.credId !== undefined) patch.monitorCredentialId = cached.credId || null;
-      if (cached.transports) {
-        patch.monitorResponseTimeSource = cached.transports.monitorResponseTimeSource;
-        patch.monitorTelemetrySource    = cached.transports.monitorTelemetrySource;
-        patch.monitorInterfacesSource   = cached.transports.monitorInterfacesSource;
-        patch.monitorLldpSource         = cached.transports.monitorLldpSource;
-      }
-      if (cached.fgBlock) patch.fortigateMonitor   = cached.fgBlock;
-      if (cached.swBlock) patch.fortiswitchMonitor = cached.swBlock;
-      if (cached.apBlock) patch.fortiapMonitor     = cached.apBlock;
-
-      try {
-        await api.integrations.update(intg.id, {
-          name:         intg.name,
-          config:       patch,
-          enabled:      intg.enabled,
-          autoDiscover: intg.autoDiscover !== false,
-          pollInterval: intg.pollInterval,
-        });
-        intg.config = patch; // keep local copy current for re-visits
-
-        // Collect auto-monitor apply candidates (any class with a selection).
-        if ((cached.fgBlock && cached.fgBlock.autoMonitorInterfaces) ||
-            (cached.swBlock && cached.swBlock.autoMonitorInterfaces) ||
-            (cached.apBlock && cached.apBlock.autoMonitorInterfaces)) {
-          needsApply.push({ intg: intg, cached: cached });
-        }
-      } catch (err) {
-        errors.push(intg.name + ": " + (err.message || "error"));
-      }
-    }
-
-    // Auto-monitor apply pass (mirrors integration edit modal behaviour).
-    if (needsApply.length > 0) {
-      var totalEstimate = 0;
-      ["f-mon-fortigate-amon-", "f-mon-fortiswitch-amon-", "f-mon-fortiap-amon-"].forEach(function (p) {
-        var el = document.getElementById(p + "preview");
-        var n = el && el.dataset && parseInt(el.dataset.interfaceCount || "0", 10);
-        if (Number.isFinite(n)) totalEstimate += n;
-      });
-      var proceed = true;
-      if (totalEstimate > AUTO_MONITOR_INTERFACE_WARN_THRESHOLD) {
-        proceed = window.confirm(
-          "Auto-Monitor will pin approximately " + totalEstimate + " interfaces.\n\n" +
-          "Each pin is scraped on the response-time cadence (default 60 s). Large pin counts " +
-          "add load to the database and to the monitored devices.\n\nContinue applying now?"
-        );
-      }
-      if (proceed) {
-        btn.textContent = "Applying...";
-        for (var a = 0; a < needsApply.length; a++) {
-          var entry = needsApply[a];
-          var classes = [
-            ["fortigate",   entry.cached.fgBlock],
-            ["fortiswitch", entry.cached.swBlock],
-            ["fortiap",     entry.cached.apBlock],
-          ];
-          for (var c = 0; c < classes.length; c++) {
-            var klass = classes[c][0];
-            var block = classes[c][1];
-            if (!block || !block.autoMonitorInterfaces) continue;
-            try {
-              await api.integrations.interfaceAggregateApply(entry.intg.id, klass);
-            } catch (err) {
-              errors.push(entry.intg.name + " auto-monitor (" + klass + "): " + (err.message || "error"));
-            }
-          }
-        }
-      }
-    }
-
-    if (errors.length > 0) {
-      showToast("Saved with errors: " + errors.join("; "), "error");
-    } else {
-      closeModal();
-      showToast("Monitoring settings saved");
-    }
+    var saved = await api.monitorSettings.setManual(body);
+    _monsetManualValues = saved || body;
+    showToast("Manual monitoring settings saved");
   } catch (err) {
-    showToast(err.message, "error");
+    showToast(err.message || "Failed to save manual settings", "error");
   } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = "Save Changes";
+    btn.disabled = false;
+    btn.textContent = "Save Manual Tier";
+  }
+}
+
+function _monsetOverridesSectionHTML(rows) {
+  var rowHTML = rows.length === 0
+    ? '<tr><td colspan="4" class="empty-state" style="text-align:center;padding:1rem">No class overrides configured.</td></tr>'
+    : rows.map(function (o) {
+        var sourceLabel = o.integration
+          ? escapeHtml(o.integration.name) + ' <span class="hint" style="opacity:0.65">(' + escapeHtml(o.integration.type) + ')</span>'
+          : '<em>Manual</em>';
+        var classLabel = ASSET_TYPE_LABELS[o.assetType] || o.assetType;
+        return '<tr>' +
+          '<td>' + escapeHtml(classLabel) + '</td>' +
+          '<td>' + sourceLabel + '</td>' +
+          '<td><span class="hint" style="font-size:0.78rem;color:var(--color-text-tertiary)">' + escapeHtml(_monsetOverrideSummary(o)) + '</span></td>' +
+          '<td class="actions" style="white-space:nowrap">' +
+            '<button class="btn btn-sm btn-secondary" data-edit-override="' + escapeHtml(o.id) + '">Edit</button> ' +
+            '<button class="btn btn-sm btn-danger"    data-delete-override="' + escapeHtml(o.id) + '">Delete</button>' +
+          '</td>' +
+        '</tr>';
+      }).join("");
+  return '<div class="monset-section">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem">' +
+      '<h3 style="margin:0">Class Overrides</h3>' +
+      '<button class="btn btn-primary" id="btn-monset-add-override">+ Add Override</button>' +
+    '</div>' +
+    '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Per-(class + asset source) overrides. Take priority over the integration tier and the manual tier; per-asset overrides take priority over these.</p>' +
+    '<table class="data-table" style="width:100%;border-collapse:collapse">' +
+      '<thead><tr>' +
+        '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Class</th>' +
+        '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Asset Source</th>' +
+        '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Overrides</th>' +
+        '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Actions</th>' +
+      '</tr></thead>' +
+      '<tbody id="monset-overrides-tbody">' + rowHTML + '</tbody>' +
+    '</table>' +
+  '</div>';
+}
+
+function _monsetOverrideSummary(o) {
+  var parts  = [];
+  var labels = {
+    intervalSeconds:           "probe",
+    failureThreshold:          "threshold",
+    probeTimeoutMs:            "timeout",
+    telemetryIntervalSeconds:  "telemetry",
+    systemInfoIntervalSeconds: "sysinfo",
+    sampleRetentionDays:       "probe-retain",
+    telemetryRetentionDays:    "telem-retain",
+    systemInfoRetentionDays:   "sysinfo-retain",
+  };
+  Object.keys(labels).forEach(function (k) {
+    if (o[k] !== null && o[k] !== undefined) parts.push(labels[k] + "=" + o[k]);
+  });
+  return parts.length === 0 ? "(empty — all fields inherited)" : parts.join(", ");
+}
+
+function _monsetOpenOverrideEditor(existing) {
+  var isEdit = !!existing;
+  var classOpts = Object.keys(ASSET_TYPE_LABELS).map(function (key) {
+    var sel = (existing && existing.assetType === key) ? " selected" : "";
+    return '<option value="' + escapeHtml(key) + '"' + sel + '>' + escapeHtml(ASSET_TYPE_LABELS[key]) + '</option>';
+  }).join("");
+  // Default to "Manual" on add; preserve the row's source on edit.
+  var sourceOpts = '<option value="null"' + ((existing && existing.integrationId === null) || !existing ? " selected" : "") + '>Manual</option>' +
+    _monsetIntegrations.map(function (intg) {
+      var sel = (existing && existing.integrationId === intg.id) ? " selected" : "";
+      return '<option value="' + escapeHtml(intg.id) + '"' + sel + '>' + escapeHtml(intg.name) + ' (' + escapeHtml(intg.type) + ')</option>';
+    }).join("");
+  var v = existing || {};
+  var body =
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem 1rem">' +
+      '<div class="form-group"><label for="monset-ov-class">Class</label>' +
+        '<select id="monset-ov-class"' + (isEdit ? " disabled" : "") + '>' + classOpts + '</select>' +
+      '</div>' +
+      '<div class="form-group"><label for="monset-ov-source">Asset Source</label>' +
+        '<select id="monset-ov-source"' + (isEdit ? " disabled" : "") + '>' + sourceOpts + '</select>' +
+      '</div>' +
+    '</div>' +
+    (isEdit ? '<p class="hint" style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.25rem 0 0.75rem 0">Class and source are fixed for an existing override; delete and re-create to change them.</p>' : '') +
+    '<p class="hint" style="margin:0.5rem 0 0.75rem 0;color:var(--color-text-tertiary)">Leave a field blank to inherit from the source\'s tier.</p>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem 1rem">' +
+      _monsetField("monset-ov-intervalSeconds",           "Probe interval",         "seconds",                       v.intervalSeconds,           1,   86400, false) +
+      _monsetField("monset-ov-failureThreshold",          "Failure threshold",      "consecutive failures",          v.failureThreshold,          1,   100,   false) +
+      _monsetField("monset-ov-probeTimeoutMs",            "Probe timeout",          "ms (warning under 500)",        v.probeTimeoutMs,            100, 60000, true)  +
+      _monsetField("monset-ov-telemetryIntervalSeconds",  "Telemetry interval",     "seconds (CPU + memory + temp)", v.telemetryIntervalSeconds,  15,  86400, false) +
+      _monsetField("monset-ov-systemInfoIntervalSeconds", "System info interval",   "seconds (interfaces + storage)",v.systemInfoIntervalSeconds, 60,  86400, false) +
+      _monsetField("monset-ov-sampleRetentionDays",       "Probe sample retention", "days (0 = forever)",            v.sampleRetentionDays,       0,   3650,  false) +
+      _monsetField("monset-ov-telemetryRetentionDays",    "Telemetry retention",    "days (0 = forever)",            v.telemetryRetentionDays,    0,   3650,  false) +
+      _monsetField("monset-ov-systemInfoRetentionDays",   "System info retention",  "days (0 = forever)",            v.systemInfoRetentionDays,   0,   3650,  false) +
+    '</div>';
+  var footer = '<button class="btn btn-secondary" id="btn-monset-ov-cancel">Cancel</button>' +
+    '<button class="btn btn-primary" id="btn-monset-ov-save">' + (isEdit ? "Save Changes" : "Create Override") + '</button>';
+  openModal(isEdit ? "Edit Class Override" : "Add Class Override", body, footer);
+  document.getElementById("btn-monset-ov-cancel").addEventListener("click", _monsetRender);
+  document.getElementById("btn-monset-ov-save").addEventListener("click", function () {
+    _monsetSaveOverride(existing);
+  });
+}
+
+async function _monsetSaveOverride(existing) {
+  var btn = document.getElementById("btn-monset-ov-save");
+  if (!btn) return;
+  var prevText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+
+  // Collect optional override fields. null = inherit from below.
+  function readOptional(id) {
+    var el = document.getElementById(id);
+    if (!el || el.value === "") return null;
+    var n = parseInt(el.value, 10);
+    return Number.isFinite(n) ? n : null;
+  }
+  var fields = {
+    intervalSeconds:           readOptional("monset-ov-intervalSeconds"),
+    failureThreshold:          readOptional("monset-ov-failureThreshold"),
+    probeTimeoutMs:            readOptional("monset-ov-probeTimeoutMs"),
+    telemetryIntervalSeconds:  readOptional("monset-ov-telemetryIntervalSeconds"),
+    systemInfoIntervalSeconds: readOptional("monset-ov-systemInfoIntervalSeconds"),
+    sampleRetentionDays:       readOptional("monset-ov-sampleRetentionDays"),
+    telemetryRetentionDays:    readOptional("monset-ov-telemetryRetentionDays"),
+    systemInfoRetentionDays:   readOptional("monset-ov-systemInfoRetentionDays"),
+  };
+  try {
+    if (existing) {
+      var updated = await api.monitorSettings.updateClassOverride(existing.id, fields);
+      var idx = _monsetOverrides.findIndex(function (o) { return o.id === existing.id; });
+      if (idx >= 0) _monsetOverrides[idx] = updated;
+      showToast("Class override updated");
+    } else {
+      var assetType    = document.getElementById("monset-ov-class").value;
+      var sourceVal    = document.getElementById("monset-ov-source").value;
+      var integrationId = sourceVal === "null" ? null : sourceVal;
+      var created = await api.monitorSettings.createClassOverride(
+        Object.assign({ assetType: assetType, integrationId: integrationId }, fields)
+      );
+      _monsetOverrides.push(created);
+      showToast("Class override created");
     }
+    _monsetRender();
+  } catch (err) {
+    showToast(err.message || "Failed to save override", "error");
+    btn.disabled    = false;
+    btn.textContent = prevText;
   }
 }
 

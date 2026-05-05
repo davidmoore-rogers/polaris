@@ -232,6 +232,7 @@ const api = {
       return request("GET", `/assets/${id}/monitor-history` + (qs.length ? "?" + qs.join("&") : ""));
     },
     probeNow:             (id)  => request("POST", `/assets/${id}/probe-now`),
+    effectiveMonitorSettings: (id) => request("GET", `/assets/${id}/effective-monitor-settings`),
     snmpWalk:             (id, body, signal) => request("POST", `/assets/${id}/snmp-walk`, body, signal),
     quarantine:           (id, reason) => request("POST", `/assets/${id}/quarantine`, reason !== undefined ? { reason } : {}),
     unquarantine:         (id)  => request("DELETE", `/assets/${id}/quarantine`),
@@ -327,6 +328,36 @@ const api = {
     interfaceAggregate:        (id, klass) => request("GET", `/integrations/${id}/interface-aggregate?class=${encodeURIComponent(klass)}`),
     interfaceAggregatePreview: (id, body)  => request("POST", `/integrations/${id}/interface-aggregate/preview`, body),
     interfaceAggregateApply:   (id, klass) => trackedRequest("Applying auto-monitor interfaces", "POST", `/integrations/${id}/interface-aggregate/apply`, { class: klass }),
+  },
+  monitorSettings: {
+    // Manual tier — settings for orphan/non-integration-discovered assets.
+    getManual:           ()     => request("GET",  "/monitor-settings/manual"),
+    setManual:           (body) => request("PUT",  "/monitor-settings/manual", body),
+    // Integration tier — settings stored in Integration.config.monitorSettings.
+    getIntegration:      (id)   => request("GET",  `/monitor-settings/integration/${id}`),
+    setIntegration:      (id, body) => request("PUT", `/monitor-settings/integration/${id}`, body),
+    // Class overrides — (assetType + integration) tuple. integrationId may be
+    // null (URL sentinel "null") to scope to the manual tier.
+    listClassOverrides:  (params) => {
+      var qs = [];
+      if (params && Object.prototype.hasOwnProperty.call(params, "integrationId")) {
+        qs.push("integrationId=" + encodeURIComponent(params.integrationId === null ? "null" : params.integrationId));
+      }
+      if (params && params.assetType) qs.push("assetType=" + encodeURIComponent(params.assetType));
+      return request("GET", "/monitor-settings/class-overrides" + (qs.length ? "?" + qs.join("&") : ""));
+    },
+    createClassOverride: (body) => request("POST",   "/monitor-settings/class-overrides", body),
+    updateClassOverride: (id, body) => request("PUT", `/monitor-settings/class-overrides/${id}`, body),
+    deleteClassOverride: (id)   => request("DELETE", `/monitor-settings/class-overrides/${id}`),
+    // Reverse lookup: assets with per-asset overrides under (integrationId, assetType).
+    assetOverrides:      (params) => {
+      var qs = [];
+      if (params && Object.prototype.hasOwnProperty.call(params, "integrationId")) {
+        qs.push("integrationId=" + encodeURIComponent(params.integrationId === null ? "null" : params.integrationId));
+      }
+      if (params && params.assetType) qs.push("assetType=" + encodeURIComponent(params.assetType));
+      return request("GET", "/monitor-settings/asset-overrides" + (qs.length ? "?" + qs.join("&") : ""));
+    },
   },
   conflicts: {
     list:   (params) => request("GET", "/conflicts" + toQuery(params)),
