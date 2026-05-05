@@ -1766,9 +1766,16 @@ async function openCreateModal(type) {
   var isAd = type === "activedirectory";
   var isFmg = type === "fortimanager";
   var isFgt = type === "fortigate";
+  var isAd  = type === "activedirectory";
+  var isEntra = type === "entraid";
+  var isWin = type === "windowsserver";
   var title = _titleForType(type, "Add");
-  // FMG + FortiGate get a Monitoring tab alongside General; the rest still
-  // render a single flat form (their telemetry isn't wired up yet).
+  // FMG / FortiGate / AD / Entra / WindowsServer integrations all expose a
+  // Monitoring tab. FMG and FortiGate also get the Discovery Defaults
+  // section (per-class addAsMonitored / autoMonitorInterfaces / per-stream
+  // transport overrides). All five seed their initial Monitoring tab from
+  // the manual tier — closest equivalent to "fleet defaults" until the
+  // operator saves the new integration's own tier.
   var body;
   if (isFmg || isFgt) {
     var monSettings = {};
@@ -1796,6 +1803,21 @@ async function openCreateModal(type) {
     addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true) });
     addTabs.push({ key: "quarantine-push", label: "Quarantine Push", html: quarantinePushFormHTML(false, true) });
     body = _intRenderTabbedBody("intg-edit", addTabs);
+  } else if (isAd || isEntra || isWin) {
+    var addMonSettings = {};
+    try {
+      var addManual = await api.monitorSettings.getManual();
+      addMonSettings = addManual || {};
+    } catch (e) { /* fall back to defaults */ }
+    var addNonFortinetTabs = [
+      { key: "general",    label: "General",    html: _formHTMLForType(type, {}) },
+      { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(addMonSettings, {
+        integrationId:   null,
+        integrationType: type,
+        integrationName: "",
+      }) },
+    ];
+    body = _intRenderTabbedBody("intg-edit", addNonFortinetTabs);
   } else {
     body = _formHTMLForType(type, {});
   }
@@ -1812,6 +1834,9 @@ async function openCreateModal(type) {
     _wireProbeTimeoutWarning();
     // Class overrides not available on Add (no integration ID yet); the
     // Monitoring tab renders a hint pointing operators at the Edit modal.
+  } else if (isAd || isEntra || isWin) {
+    _intWireModalTabs("intg-edit");
+    _wireProbeTimeoutWarning();
   }
 
   // Tracks whether the pre-save Test Connection succeeded against the
@@ -1892,7 +1917,7 @@ async function openCreateModal(type) {
       // Save the new integration's tier-3 monitor settings if the Monitoring
       // tab was rendered. Failures here aren't fatal — the integration is
       // already created; operator can edit and resave.
-      if ((isFmg || isFgt) && result && result.id) {
+      if ((isFmg || isFgt || isAd || isEntra || isWin) && result && result.id) {
         try { await api.monitorSettings.setIntegration(result.id, getMonitorSettingsFromForm()); }
         catch (e) { showToast("Integration created, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
       }
@@ -2065,11 +2090,34 @@ async function openEditModal(id) {
       };
     }
 
-    // FMG + FortiGate get a Monitoring tab. Tier-3 settings are now
-    // per-integration: this tab edits THIS integration's settings only.
-    // (Manual tier + class overrides live on the Assets page Monitoring
-    // Settings modal.)
+    // FMG + FortiGate get the full Monitoring tab (Cadence + Discovery
+    // Defaults + Class Overrides). AD / Entra / WindowsServer get the same
+    // Monitoring tab minus the Discovery Defaults section (those concerns
+    // don't apply to non-Fortinet integrations). All tier-3 settings are
+    // now per-integration — this tab edits THIS integration's settings
+    // only. Manual tier + cross-source class overrides live on the Assets
+    // page Monitoring Settings modal.
     var isFmgOrFgt = (intg.type === "fortimanager" || intg.type === "fortigate");
+    var monCapable = isFmgOrFgt || isAd || isEntra || isWin;
+    if (!isFmgOrFgt && monCapable) {
+      // AD / Entra / WindowsServer: wrap the existing flat form as the
+      // General tab and add a Monitoring tab alongside it.
+      var monSettings = {};
+      try {
+        var resp = await api.monitorSettings.getIntegration(intg.id);
+        if (resp && resp.settings) monSettings = resp.settings;
+      } catch (e) { /* fall back to defaults */ }
+      var generalTabBody = body;
+      var nonFortinetTabs = [
+        { key: "general",    label: "General",    html: generalTabBody },
+        { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, {
+          integrationId:   id,
+          integrationType: intg.type,
+          integrationName: intg.name,
+        }) },
+      ];
+      body = _intRenderTabbedBody("intg-edit", nonFortinetTabs);
+    }
     if (isFmgOrFgt) {
       var monSettings = {};
       var creds = [];
@@ -2133,6 +2181,10 @@ async function openEditModal(id) {
       _intWireModalTabs("intg-edit");
       _intWireModalTabs("intg-mon");
       wireAutoMonitorCards(id);
+      _wireProbeTimeoutWarning();
+      _intgWireClassOverridesSection();
+    } else if (isAd || isEntra || isWin) {
+      _intWireModalTabs("intg-edit");
       _wireProbeTimeoutWarning();
       _intgWireClassOverridesSection();
     }
@@ -2223,7 +2275,10 @@ async function openEditModal(id) {
         pollInterval: parseInt(document.getElementById("f-pollInterval").value, 10) || 4,
       };
       var result = await api.integrations.update(id, input);
-      if (isFmgOrFgt) {
+      // Persist the integration-tier monitor settings for any integration
+      // type that renders a Monitoring tab. Failures here aren't fatal —
+      // the integration update itself already landed.
+      if (isFmgOrFgt || isAd || isEntra || isWin) {
         try { await api.monitorSettings.setIntegration(id, getMonitorSettingsFromForm()); }
         catch (e) { showToast("Integration updated, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
       }
