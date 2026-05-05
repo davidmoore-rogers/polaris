@@ -3177,8 +3177,11 @@ function _renderSystemChart(container, data) {
   var cpuPts = cpuValues.map(function (e) { return xFor(e.s.timestamp) + "," + yFor(e.v); }).join(" ");
   var memPts = memValues.map(function (e) { return xFor(e.s.timestamp) + "," + yFor(e.v); }).join(" ");
 
-  // Build one hit per sample timestamp so the tooltip names both lines together.
-  // We anchor the marker at whichever curve sits higher in the chart.
+  // Build one full-height vertical lane per timestamp so the tooltip fires
+  // anywhere in the sample's column — including over a flatlined CPU line at
+  // the bottom of a chart whose memory line dominates the visible space.
+  // Lane width is the Voronoi span (midpoint to each neighbor) so coverage is
+  // continuous across the chart with no dead zones between samples.
   var byTs = {};
   cpuValues.forEach(function (e) {
     var k = String(e.s.timestamp);
@@ -3190,12 +3193,14 @@ function _renderSystemChart(container, data) {
     if (!byTs[k]) byTs[k] = { ts: e.s.timestamp, sample: e.s };
     byTs[k].mem = e.v;
   });
-  var hits = Object.keys(byTs).map(function (k) {
-    var h = byTs[k];
-    var anchor = (h.cpu != null && h.mem != null) ? Math.max(h.cpu, h.mem)
-               : (h.cpu != null ? h.cpu : h.mem);
+  var sortedHits = Object.keys(byTs).map(function (k) { return byTs[k]; })
+                         .sort(function (a, b) { return new Date(a.ts).getTime() - new Date(b.ts).getTime(); });
+  var hits = sortedHits.map(function (h, i) {
+    var x = xFor(h.ts);
+    var leftEdge  = i === 0 ? padL : (xFor(sortedHits[i - 1].ts) + x) / 2;
+    var rightEdge = i === sortedHits.length - 1 ? (W - padR) : (xFor(sortedHits[i + 1].ts) + x) / 2;
     var s = h.sample;
-    return '<circle class="chart-hit" cx="' + xFor(h.ts) + '" cy="' + yFor(anchor) + '" r="7" fill="transparent" style="cursor:crosshair"' +
+    return '<rect class="chart-hit" x="' + leftEdge + '" y="' + padT + '" width="' + (rightEdge - leftEdge) + '" height="' + innerH + '" fill="transparent" style="cursor:crosshair"' +
       ' data-ts="' + escapeHtml(String(h.ts)) + '"' +
       ' data-cpu="' + (h.cpu != null ? h.cpu : "") + '"' +
       ' data-mem="' + (h.mem != null ? h.mem : "") + '"' +
