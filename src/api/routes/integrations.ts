@@ -2377,7 +2377,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // the operator chose something custom and we leave it alone.
   function buildClassMonitorStamp(
     cfg: ClassMonCfg,
-    existing?: { monitorType?: string | null; monitorCredentialId?: string | null; monitored?: boolean | null },
+    existing?: { monitorType?: string | null; monitorCredentialId?: string | null; monitored?: boolean | null; monitoredOperatorSet?: boolean | null },
   ): Record<string, unknown> {
     if (!cfg.enabled && !cfg.addAsMonitored) return {};
 
@@ -2396,10 +2396,18 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       monitorType: stampedType,
       monitorCredentialId: stampedCred,
     };
-    // Only flip `monitored` when the operator opted into auto-Monitored.
-    // Otherwise leave the existing value alone (newly-created assets fall
-    // back to the Prisma default of false).
-    if (cfg.addAsMonitored) stamp.monitored = true;
+    // Only flip `monitored` when the operator opted into auto-Monitored AND
+    // the operator hasn't already made an explicit decision about this
+    // asset's monitored state. monitoredOperatorSet stays true forever once
+    // the operator clicks the Status pill / saves the Monitoring modal /
+    // bulk-monitors with `monitored` in the body, so the integration default
+    // can never silently re-enable monitoring on something the operator
+    // turned off (or vice versa). New assets land here with the field at
+    // its Prisma default of false, so the integration's addAsMonitored flag
+    // still controls the initial state on a fresh discovery.
+    if (cfg.addAsMonitored && existing?.monitoredOperatorSet !== true) {
+      stamp.monitored = true;
+    }
     return stamp;
   }
 
