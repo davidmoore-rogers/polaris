@@ -279,6 +279,112 @@ function _handleCopyClick(e) {
   });
 }
 
+// Singleton dropdown element used by the clickable Type pill. Created lazily
+// on first open, appended to document.body so it floats over the table
+// without being clipped by row overflow, repositioned per-click. One global
+// instance keeps the DOM clean even when an operator clicks rapidly across
+// rows.
+var _typeDropdown = null;
+var _typeDropdownOutsideHandler = null;
+
+function _closeTypeDropdown() {
+  if (!_typeDropdown) return;
+  if (_typeDropdownOutsideHandler) {
+    document.removeEventListener("mousedown", _typeDropdownOutsideHandler, true);
+    _typeDropdownOutsideHandler = null;
+  }
+  _typeDropdown.classList.remove("open");
+  _typeDropdown.style.display = "none";
+}
+
+function _ensureTypeDropdown() {
+  if (_typeDropdown) return _typeDropdown;
+  var el = document.createElement("div");
+  el.className = "btn-dropdown-menu type-pill-dropdown";
+  el.style.position = "absolute";
+  el.style.display = "none";
+  el.style.minWidth = "140px";
+  document.body.appendChild(el);
+  _typeDropdown = el;
+  return el;
+}
+
+// Delegated click handler for the Type column pill. Opens a dropdown of the
+// 8 AssetType values; clicking an option PUTs the change inline with the same
+// optimistic / rollback pattern as the Status pill.
+async function _handleTypePillClick(e) {
+  var pill = e.target.closest('[data-asset-type-toggle]');
+  if (!pill) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (typeof canManageAssets === "function" && !canManageAssets()) return;
+  var assetId    = pill.getAttribute('data-asset-type-toggle');
+  var currentType = pill.getAttribute('data-asset-type') || "other";
+
+  var dd = _ensureTypeDropdown();
+  // Build dropdown content fresh each open — the option list is small (8
+  // entries) and the active highlight changes per asset.
+  var html = ['<div class="dropdown-heading">Asset type</div>'];
+  Object.keys(ASSET_TYPE_LABELS).forEach(function (key) {
+    var active = key === currentType ? ' style="font-weight:600;"' : '';
+    html.push('<button type="button" data-type-option="' + escapeHtml(key) + '"' + active + '>' + escapeHtml(ASSET_TYPE_LABELS[key]) + (key === currentType ? ' ✓' : '') + '</button>');
+  });
+  dd.innerHTML = html.join("");
+
+  // Position below the pill, aligned to its left edge. Document scroll
+  // offsets matter when the table is scrolled; getBoundingClientRect returns
+  // viewport coords, so add window.scrollX/Y to land in document coords.
+  var rect = pill.getBoundingClientRect();
+  dd.style.left = (rect.left + window.scrollX) + "px";
+  dd.style.top  = (rect.bottom + window.scrollY + 4) + "px";
+  dd.style.right = "auto";
+  dd.style.display = "block";
+  dd.classList.add("open");
+
+  // Close on outside click. Capture phase so it fires before the inner
+  // option-button click bubbles back here.
+  if (_typeDropdownOutsideHandler) {
+    document.removeEventListener("mousedown", _typeDropdownOutsideHandler, true);
+  }
+  _typeDropdownOutsideHandler = function (ev) {
+    if (!dd.contains(ev.target)) _closeTypeDropdown();
+  };
+  // Defer attaching the outside handler one tick so the click that opened
+  // us doesn't immediately close us.
+  setTimeout(function () {
+    document.addEventListener("mousedown", _typeDropdownOutsideHandler, true);
+  }, 0);
+
+  // Wire option buttons. Reattach each open since innerHTML replaced them.
+  dd.querySelectorAll('button[data-type-option]').forEach(function (btn) {
+    btn.addEventListener("click", async function (evt) {
+      evt.preventDefault();
+      evt.stopPropagation();
+      var nextType = btn.getAttribute("data-type-option");
+      _closeTypeDropdown();
+      if (!nextType || nextType === currentType) return;
+      await _setAssetType(assetId, nextType);
+    });
+  });
+}
+
+async function _setAssetType(assetId, nextType) {
+  var idx = (_assetsData || []).findIndex(function (a) { return a.id === assetId; });
+  if (idx === -1) return;
+  var prevType = _assetsData[idx].assetType;
+  // Optimistic flip + re-render; rollback below if the PUT fails.
+  _assetsData[idx].assetType = nextType;
+  renderAssetsPage();
+  try {
+    await api.assets.update(assetId, { assetType: nextType });
+    showToast("Type changed to " + (ASSET_TYPE_LABELS[nextType] || nextType));
+  } catch (err) {
+    _assetsData[idx].assetType = prevType;
+    renderAssetsPage();
+    showToast((err && err.message) || "Failed to update type", "error");
+  }
+}
+
 // Delegated click handler for the Status column pill. Toggles the asset's
 // `monitored` flag through PUT /assets/:id; the route stamps
 // `monitoredOperatorSet=true` so the choice survives discovery cycles. UI
@@ -347,6 +453,8 @@ function renderAssetsPage() {
   tbody.addEventListener("click", _handleCopyClick);
   tbody.removeEventListener("click", _handleMonitorPillClick);
   tbody.addEventListener("click", _handleMonitorPillClick);
+  tbody.removeEventListener("click", _handleTypePillClick);
+  tbody.addEventListener("click", _handleTypePillClick);
   if (_assetsData.length === 0) {
     tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No assets found. Add one to get started.</td></tr>';
     clearPageControls("pagination");
@@ -373,7 +481,7 @@ function renderAssetsPage() {
       '</td>' +
       '<td class="mono">' + ipCellHTML(a) + '</td>' +
       '<td>' + _copyableCell(a.serialNumber) + '</td>' +
-      '<td>' + assetTypeBadge(a.assetType) + '</td>' +
+      '<td>' + assetTypeBadge(a.assetType, a) + '</td>' +
       '<td>' + assetStatusBadge(a) + '</td>' +
       '<td>' + assetMonitorBadge(a) + '</td>' +
       '<td>' + escapeHtml(a.location || a.learnedLocation || "-") + '</td>' +
@@ -840,9 +948,21 @@ async function openBulkEditModal() {
   });
 }
 
-function assetTypeBadge(type) {
-  var label = ASSET_TYPE_LABELS[type] || type;
-  return '<span class="badge badge-asset-type">' + escapeHtml(label) + '</span>';
+function assetTypeBadge(type, asset) {
+  var label = ASSET_TYPE_LABELS[type] || type || "-";
+  // Clickable for admin/assetsadmin — opens a dropdown of the 8 AssetType
+  // values; selecting one PUTs the change inline. Same data-attribute pattern
+  // as the Status pill so the delegated handler can dispatch without lookups.
+  var canToggle = typeof canManageAssets === "function" && canManageAssets() && asset && asset.id;
+  if (!canToggle) {
+    return '<span class="badge badge-asset-type">' + escapeHtml(label) + '</span>';
+  }
+  return '<span class="badge badge-asset-type badge-clickable"' +
+    ' data-asset-type-toggle="' + escapeHtml(asset.id) + '"' +
+    ' data-asset-type="' + escapeHtml(type || "other") + '"' +
+    ' role="button" tabindex="0"' +
+    ' title="Click to change type">' +
+    escapeHtml(label) + ' ▾</span>';
 }
 
 function assetStatusBadge(asset) {
