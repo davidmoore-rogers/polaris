@@ -35,6 +35,7 @@ import "./jobs/monitorAssets.js";
 import "./jobs/normalizeManufacturers.js";
 import "./jobs/migrateMonitorTransport.js";
 import "./jobs/migrateMonitorSettingsHierarchy.js";
+import "./jobs/migrateAssetPollingMethods.js";
 import "./jobs/backfillAssetSources.js";
 import "./jobs/flagStaleReservations.js";
 import "./jobs/capacityWatch.js";
