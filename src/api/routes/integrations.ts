@@ -35,6 +35,17 @@ import {
 
 const router = Router();
 
+// Detect the masked-secret sentinel the GET endpoints emit (eight or more
+// U+2022 BULLET characters). The integration edit modal pre-fills sensitive
+// fields with this string; if the operator saves without retyping, the form
+// echoes the bullets back to us and we MUST treat them as "no change" rather
+// than persisting them as the real secret. Failing to do so produces auth
+// tokens like "Bearer ••••••••" which Node's HTTP layer rejects with a
+// "ByteString" error on the next API call.
+function isMaskedSecretSentinel(value: unknown): boolean {
+  return typeof value === "string" && value.length > 0 && /^•+$/.test(value);
+}
+
 // Track in-flight DHCP discovery per integration — abort previous if re-saved.
 // Carries per-run timing so we can detect "taking longer than normal" and
 // emit `integration.discover.slow` events without double-firing.
@@ -549,21 +560,25 @@ router.put("/:id", async (req, res, next) => {
     if (input.autoDiscover !== undefined) data.autoDiscover = input.autoDiscover;
     if (input.pollInterval !== undefined) data.pollInterval = input.pollInterval;
     if (input.config) {
-      // Merge config — preserve secrets if not re-submitted
+      // Merge config — preserve secrets if not re-submitted OR if the form
+      // echoed back the masked-display sentinel (a string of U+2022 bullets).
+      // The previous falsy-only check let the bullets through as the literal
+      // token, which then poisoned the stored value and broke every
+      // subsequent FMG/FortiGate call with a "ByteString" error.
       const newConfig = { ...currentConfig, ...input.config };
-      if (!input.config.apiToken) {
+      if (!input.config.apiToken || isMaskedSecretSentinel(input.config.apiToken)) {
         newConfig.apiToken = currentConfig.apiToken;
       }
-      if (!input.config.fortigateApiToken) {
+      if (!input.config.fortigateApiToken || isMaskedSecretSentinel(input.config.fortigateApiToken)) {
         newConfig.fortigateApiToken = currentConfig.fortigateApiToken;
       }
-      if (!input.config.password) {
+      if (!input.config.password || isMaskedSecretSentinel(input.config.password)) {
         newConfig.password = currentConfig.password;
       }
-      if (!input.config.clientSecret) {
+      if (!input.config.clientSecret || isMaskedSecretSentinel(input.config.clientSecret)) {
         newConfig.clientSecret = currentConfig.clientSecret;
       }
-      if (!input.config.bindPassword) {
+      if (!input.config.bindPassword || isMaskedSecretSentinel(input.config.bindPassword)) {
         newConfig.bindPassword = currentConfig.bindPassword;
       }
       // Validate the optional FMG/FortiGate response-time SNMP override.
@@ -1280,19 +1295,21 @@ router.post("/test", async (req, res, next) => {
       if (existing) {
         const stored = existing.config as Record<string, unknown>;
         const cfg = input.config as Record<string, unknown>;
-        if ((input.type === "fortimanager" || input.type === "fortigate") && (!cfg.apiToken || typeof cfg.apiToken !== "string")) {
+        const needsRestore = (v: unknown): boolean =>
+          !v || typeof v !== "string" || isMaskedSecretSentinel(v);
+        if ((input.type === "fortimanager" || input.type === "fortigate") && needsRestore(cfg.apiToken)) {
           cfg.apiToken = stored.apiToken;
         }
-        if (input.type === "fortimanager" && (!cfg.fortigateApiToken || typeof cfg.fortigateApiToken !== "string")) {
+        if (input.type === "fortimanager" && needsRestore(cfg.fortigateApiToken)) {
           cfg.fortigateApiToken = stored.fortigateApiToken;
         }
-        if (input.type === "windowsserver" && (!cfg.password || typeof cfg.password !== "string")) {
+        if (input.type === "windowsserver" && needsRestore(cfg.password)) {
           cfg.password = stored.password;
         }
-        if (input.type === "entraid" && (!cfg.clientSecret || typeof cfg.clientSecret !== "string")) {
+        if (input.type === "entraid" && needsRestore(cfg.clientSecret)) {
           cfg.clientSecret = stored.clientSecret;
         }
-        if (input.type === "activedirectory" && (!cfg.bindPassword || typeof cfg.bindPassword !== "string")) {
+        if (input.type === "activedirectory" && needsRestore(cfg.bindPassword)) {
           cfg.bindPassword = stored.bindPassword;
         }
       }
