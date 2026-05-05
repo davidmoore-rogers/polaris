@@ -185,9 +185,13 @@ async function loadAssets() {
         a._monitor = ["Unmonitored"];
       } else if (a.monitorStatus === "up") {
         a._monitor = ["Monitored", "Up"];
+      } else if (a.monitorStatus === "warning") {
+        a._monitor = ["Monitored", "Warning"];
       } else if (a.monitorStatus === "down") {
         a._monitor = ["Monitored", "Down"];
       } else {
+        // Both "pending" (recovering / freshly enabled) and "unknown" (never
+        // probed) display as Pending — they're indistinguishable to operators.
         a._monitor = ["Monitored", "Pending"];
       }
       return a;
@@ -982,22 +986,22 @@ function assetStatusBadge(asset) {
   return '<span class="badge ' + cls + '"' + title + '>' + escapeHtml(label) + '</span>';
 }
 
-// Four-state monitoring pill. "Monitored" is never shown directly — when an
-// asset is being monitored we surface the actual probe outcome (Up/Down/
-// Pending) so operators don't have to drill in to discover the state.
-//   monitored=false                     → grey  "Unmonitored"
-//   monitored=true, no probe yet        → blue  "Pending"
-//   monitored=true, status="up"         → green "Up"
-//   monitored=true, status="down"       → red   "Down"
+// Five-state monitoring pill. "Monitored" is never shown directly — when an
+// asset is being monitored we surface the actual probe outcome so operators
+// don't have to drill in to discover the state.
+//   monitored=false                       → grey   "Unmonitored"
+//   monitored=true, status="up"           → green  "Up"
+//   monitored=true, status="warning"      → amber  "Warning"   (was up, currently failing but below threshold)
+//   monitored=true, status="pending"      → blue   "Pending"   (recovering from down / freshly enabled, below threshold)
+//   monitored=true, status="down"         → red    "Down"
+//   monitored=true, status="unknown"/null → blue   "Pending"   (never probed — same display as "pending")
 //
 // For admin/assetsadmin callers the pill is clickable: a single click
 // toggles monitored (sets monitoredOperatorSet=true server-side so the
 // choice sticks across discovery cycles). The pill carries
 // `data-monitor-toggle="<asset-id>"` and `data-monitored="true|false"` so
 // the delegated handler in `_handleMonitorPillClick` can flip it without
-// re-querying. Display semantics: a Down asset clicked to unmonitored
-// flips to "Unmonitored" and stops being probed; a Pending → Unmonitored
-// click is the same.
+// re-querying.
 function assetMonitorBadge(asset) {
   var canToggle = typeof canManageAssets === "function" && canManageAssets() && asset && asset.id;
   var toggleAttrs = canToggle
@@ -1015,8 +1019,10 @@ function assetMonitorBadge(asset) {
   if (canToggle) bits.push("Click to disable monitoring");
   var title = bits.length ? ' title="' + escapeHtml(bits.join("\n")) + '"' : "";
   var clickCls = canToggle ? " badge-clickable" : "";
-  if (s === "up")   return '<span class="badge badge-monitored' + clickCls + '"' + title + toggleAttrs + '>Up</span>';
-  if (s === "down") return '<span class="badge badge-monitor-down' + clickCls + '"' + title + toggleAttrs + '>Down</span>';
+  if (s === "up")      return '<span class="badge badge-monitored'        + clickCls + '"' + title + toggleAttrs + '>Up</span>';
+  if (s === "warning") return '<span class="badge badge-monitor-warning'  + clickCls + '"' + title + toggleAttrs + '>Warning</span>';
+  if (s === "down")    return '<span class="badge badge-monitor-down'     + clickCls + '"' + title + toggleAttrs + '>Down</span>';
+  // pending + unknown both render as "Pending".
   return '<span class="badge badge-monitor-pending' + clickCls + '"' + title + toggleAttrs + '>Pending</span>';
 }
 
