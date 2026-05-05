@@ -2040,24 +2040,35 @@ function assetSystemViewHTML(a) {
     '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="24h">24h</button>' +
     '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="7d">7d</button>' +
     '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="30d">30d</button>';
+  // CPU/Memory + Temperatures share the Telemetry stream — the same toggle
+  // controls both, so they get the same source badge. Interfaces is its
+  // own stream. Storage and LLDP ride the same stream as Interfaces.
+  var telemetryBadge   = _streamSourceBadgeHTML(a, "telemetry");
+  var interfacesBadge  = _streamSourceBadgeHTML(a, "interfaces");
+  function sectionHeader(title, badgeHTML, withRangeButtons) {
+    return '<div style="display:flex;align-items:center;justify-content:space-between;margin:1.25rem 0 0.5rem">' +
+      '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +
+        '<h4 style="margin:0">' + title + '</h4>' +
+        (badgeHTML || '') +
+      '</div>' +
+      (withRangeButtons ? ('<div style="display:flex;gap:6px">' + rangeBtns + '</div>') : '') +
+    '</div>';
+  }
   return (
-    '<div style="display:flex;align-items:center;justify-content:space-between;margin:0.25rem 0 0.5rem">' +
-      '<h4 style="margin:0">CPU &amp; Memory</h4>' +
-      '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
-    '</div>' +
+    sectionHeader("CPU &amp; Memory", telemetryBadge, true) +
     '<div id="asset-system-summary" style="display:flex;gap:1.25rem;flex-wrap:wrap;font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">' +
       '<span>Loading…</span>' +
     '</div>' +
     '<div id="asset-system-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
       'Loading samples…' +
     '</div>' +
-    '<h4 style="margin:1.25rem 0 0.5rem">Temperatures</h4>' +
+    sectionHeader("Temperatures", telemetryBadge, false) +
     '<div id="asset-system-temps"><span class="empty-state">Loading…</span></div>' +
-    '<h4 style="margin:1.25rem 0 0.5rem">Interfaces</h4>' +
+    sectionHeader("Interfaces", interfacesBadge, false) +
     '<div id="asset-system-interfaces"><span class="empty-state">Loading…</span></div>' +
-    '<h4 style="margin:1.25rem 0 0.5rem">Storage</h4>' +
+    sectionHeader("Storage", interfacesBadge, false) +
     '<div id="asset-system-storage"><span class="empty-state">Loading…</span></div>' +
-    '<h4 style="margin:1.25rem 0 0.5rem">LLDP Neighbors</h4>' +
+    sectionHeader("LLDP Neighbors", _streamSourceBadgeHTML(a, "lldp"), false) +
     '<div id="asset-system-lldp"><span class="empty-state">Loading…</span></div>'
   );
 }
@@ -3662,6 +3673,84 @@ function _probeMethodLabel(a) {
   return t || "—";
 }
 
+// Per-stream polling-method + asset-source resolver used by the chart badges
+// in the asset System tab. Each chart shows what protocol is actually moving
+// data on its stream and which integration the asset came from. For
+// FMG/FortiGate types each stream has its own REST↔SNMP toggle (asset
+// override > integration default); generic types (snmp/winrm/ssh/icmp)
+// route every stream through the same monitorType. Returns
+//   { polling: "FortiOS REST" | "SNMP · <cred>" | "WinRM" | "SSH" | "ICMP" | "AD WinRM" | "AD SSH" | null,
+//     source:  "FortiManager · <name>" | "Active Directory · <name>" | "Manual" | ... }
+// `polling` is null when the asset's monitorType doesn't deliver that stream
+// (e.g. ICMP-monitored host has no telemetry stream); the caller should hide
+// the badge in that case.
+function _assetMonitorStreamSource(asset, stream) {
+  if (!asset) return { polling: null, source: "—" };
+  var t = asset.monitorType;
+  var integration = asset.discoveredByIntegration;
+
+  // Asset source: which integration discovered this asset, or "Manual".
+  var typeLabels = {
+    fortimanager:    "FortiManager",
+    fortigate:       "FortiGate",
+    activedirectory: "Active Directory",
+    entraid:         "Entra ID",
+    windowsserver:   "Windows Server",
+  };
+  var sourceName = integration
+    ? ((typeLabels[integration.type] || integration.type) + " · " + integration.name)
+    : "Manual";
+
+  var polling = null;
+
+  if (t === "fortimanager" || t === "fortigate") {
+    // Per-stream REST/SNMP toggle. Asset override takes priority over the
+    // integration's default. integrationTransportSources is stamped server-
+    // side on the asset GET payload for FMG/FortiGate-discovered firewalls.
+    var assetTransports = {
+      responseTime: asset.monitorResponseTimeSource,
+      telemetry:    asset.monitorTelemetrySource,
+      interfaces:   asset.monitorInterfacesSource,
+      lldp:         asset.monitorLldpSource,
+    };
+    var integTransports = asset.integrationTransportSources || {};
+    var streamTransport = assetTransports[stream] || integTransports[stream] || "rest";
+    if (streamTransport === "snmp") {
+      var cred = asset.monitorCredential || asset.integrationMonitorCredential;
+      polling = "SNMP" + (cred && cred.name ? " · " + cred.name : "");
+    } else {
+      polling = "FortiOS REST";
+    }
+  } else if (t === "snmp") {
+    polling = "SNMP" + (asset.monitorCredential && asset.monitorCredential.name ? " · " + asset.monitorCredential.name : "");
+  } else if (t === "winrm") {
+    polling = (stream === "responseTime") ? "WinRM" : null;
+  } else if (t === "ssh") {
+    polling = (stream === "responseTime") ? "SSH" : null;
+  } else if (t === "icmp") {
+    polling = (stream === "responseTime") ? "ICMP" : null;
+  } else if (t === "activedirectory") {
+    var os = (asset.os || "").toLowerCase();
+    var protocol = os.indexOf("linux") >= 0 ? "SSH" : "WinRM";
+    polling = (stream === "responseTime") ? ("AD " + protocol) : null;
+  }
+
+  return { polling: polling, source: sourceName };
+}
+
+// Renders the badge content "polling · source" used next to each chart
+// header. Returns "" when the stream isn't delivered by this asset's
+// monitorType (caller can use the empty string to skip the badge entirely).
+function _streamSourceBadgeHTML(asset, stream) {
+  var info = _assetMonitorStreamSource(asset, stream);
+  if (!info.polling) return "";
+  var label = info.polling + " via " + info.source;
+  var titleLabel = "Polling method · Asset source for this stream";
+  return '<span title="' + escapeHtml(titleLabel) + '" style="font-size:0.75rem;padding:2px 6px;border-radius:10px;background:var(--color-bg-elevated);border:1px solid var(--color-border);color:var(--color-text-secondary);white-space:nowrap">' +
+    escapeHtml(label) +
+  '</span>';
+}
+
 function assetMonitoringViewHTML(a) {
   if (!a) return '<p class="empty-state">No data.</p>';
   var pill = assetMonitorBadge(a);
@@ -3723,9 +3812,7 @@ function assetMonitoringViewHTML(a) {
     '<div style="display:flex;align-items:center;justify-content:space-between;margin:1.5rem 0 0.5rem">' +
       '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +
         '<h4 style="margin:0">Response time</h4>' +
-        '<span title="Probe method used to measure response time" style="font-size:0.75rem;padding:2px 6px;border-radius:10px;background:var(--color-bg-elevated);border:1px solid var(--color-border);color:var(--color-text-secondary)">' +
-          escapeHtml(_probeMethodLabel(a)) +
-        '</span>' +
+        _streamSourceBadgeHTML(a, "responseTime") +
       '</div>' +
       '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
     '</div>' +
