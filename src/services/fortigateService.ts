@@ -255,12 +255,45 @@ export async function discoverDhcpSubnets(
     mgmtIp = config.host;
   }
 
+  // Geo coordinates from `config system global` (parity with FMG's CMDB read at
+  // fortimanagerService.ts: `/pm/config/device/<name>/global/system/global`).
+  // Drives Device Map pin placement; without this the standalone path leaves
+  // latitude/longitude null and the projection layer can't write them back to
+  // the Asset row.
+  let deviceLatitude: number | undefined;
+  let deviceLongitude: number | undefined;
+  try {
+    const sysGlobal = await fgRequest<any>(config, "GET", "/api/v2/cmdb/system/global", {
+      query: { ...queryBase, format: "gui-device-latitude|gui-device-longitude|latitude|longitude" },
+      signal,
+    });
+    const g = sysGlobal && typeof sysGlobal === "object" && !Array.isArray(sysGlobal) ? sysGlobal : {};
+    const lat = parseFloat(String(g["gui-device-latitude"] ?? g.latitude ?? ""));
+    const lng = parseFloat(String(g["gui-device-longitude"] ?? g.longitude ?? ""));
+    if (Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0)) {
+      deviceLatitude = lat;
+      deviceLongitude = lng;
+      if (!skipGeoLog) {
+        log("discover.geo", "info", `${deviceHostname}: Resolved coordinates from CMDB: ${lat.toFixed(4)}, ${lng.toFixed(4)}`, deviceHostname);
+      }
+    } else if (!skipGeoLog) {
+      log("discover.geo", "info", `${deviceHostname}: No latitude/longitude in CMDB system/global — set them in System → Settings → Device Geographical Location`, deviceHostname);
+    }
+  } catch (err: any) {
+    if (!skipGeoLog) {
+      log("discover.geo", "info", `${deviceHostname}: Geo lookup skipped — ${err.message || "Unknown error"}`, deviceHostname);
+    }
+  }
+
   devices.push({
     name: deviceName,
     hostname: deviceHostname,
     serial: deviceSerial,
     model: deviceModel,
     mgmtIp: mgmtIp || "",
+    ...(deviceLatitude !== undefined && deviceLongitude !== undefined
+      ? { latitude: deviceLatitude, longitude: deviceLongitude }
+      : {}),
   });
 
   if (mgmtIp) {

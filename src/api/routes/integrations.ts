@@ -1468,22 +1468,38 @@ async function registerFortinetHost(integrationType: string, host: string, integ
     }
   }
 
-  // ── Asset (skip if a same-type asset already exists at this IP) ──
-  const existingAsset = await prisma.asset.findFirst({ where: { ipAddress: host, assetType } });
-  if (!existingAsset) {
-    const proposedAsset = {
-      ipAddress: host,
-      hostname,
-      assetType,
-      status: "active" as const,
-      manufacturer: "Fortinet",
-      model: productLabel,
-      department: "Network Security",
-      notes: `Auto-registered from ${productLabel} integration: ${integrationName}`,
-      tags: [integrationType, "auto-registered"],
-    };
-    await prisma.asset.create({ data: proposedAsset });
-    created.push("asset");
+  // ── Asset ──
+  // Standalone FortiGate: skip the placeholder. The discovery's Phase 3 owns
+  // FortiGate firewall asset creation as the single source of truth — it has
+  // the real serial, model, OS version, geo coordinates, and resolved mgmt
+  // IP (which can differ from the user-typed `host` when the FortiGate's
+  // mgmt-interface lookup returns a different address). A placeholder here
+  // creates a duplicate-asset risk: if the placeholder's hostname (= the
+  // integration name) and IP (= `host`) don't both match what discovery
+  // resolves, `findByEntry` misses and discovery creates a second asset
+  // while the placeholder sits stale with no serial/coords.
+  //
+  // FortiManager: keep the placeholder. The FMG server itself is a separate
+  // asset (assetType="server") from any FortiGate it manages (assetType=
+  // "firewall"), so there's no collision with discovery's per-FortiGate
+  // asset writes.
+  if (!isFortiGate) {
+    const existingAsset = await prisma.asset.findFirst({ where: { ipAddress: host, assetType } });
+    if (!existingAsset) {
+      const proposedAsset = {
+        ipAddress: host,
+        hostname,
+        assetType,
+        status: "active" as const,
+        manufacturer: "Fortinet",
+        model: productLabel,
+        department: "Network Security",
+        notes: `Auto-registered from ${productLabel} integration: ${integrationName}`,
+        tags: [integrationType, "auto-registered"],
+      };
+      await prisma.asset.create({ data: proposedAsset });
+      created.push("asset");
+    }
   }
 
   return { conflicts, created };
