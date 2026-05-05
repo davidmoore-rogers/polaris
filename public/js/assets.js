@@ -1203,6 +1203,13 @@ function getAssetFormData() {
       var iv = parseInt(ivEl.value, 10);
       data.monitorIntervalSec = Number.isFinite(iv) && iv >= 5 ? iv : null;
     }
+    var ptEl = document.getElementById("f-probeTimeoutMs");
+    if (ptEl) {
+      // Empty string = inherit (null). Out-of-range values get clamped by Zod
+      // server-side, but be defensive here too — null on bad input.
+      var ptRaw = ptEl.value === "" ? null : parseInt(ptEl.value, 10);
+      data.probeTimeoutMs = (Number.isFinite(ptRaw) && ptRaw >= 100 && ptRaw <= 60000) ? ptRaw : null;
+    }
     // Per-stream transport overrides. Each select returns "" (= inherit), "rest", or "snmp".
     function readTransport(id) {
       var el = document.getElementById(id);
@@ -1251,7 +1258,11 @@ function assetMonitoringFormHTML(asset) {
   var monitorType = asset && asset.monitorType ? asset.monitorType : "";
   var credId = asset && asset.monitorCredentialId ? asset.monitorCredentialId : "";
   var interval = asset && asset.monitorIntervalSec != null ? asset.monitorIntervalSec : "";
+  var probeTimeout = asset && asset.probeTimeoutMs != null ? asset.probeTimeoutMs : "";
   var monitored = asset && asset.monitored ? " checked" : "";
+  // Asset id is needed to fetch effective settings + populate the Asset
+  // Overrides button — empty on the create flow.
+  var assetIdAttr = (asset && asset.id) ? ' data-asset-id="' + escapeHtml(asset.id) + '"' : "";
 
   // Build the dropdown. When the asset is integration-discovered we add an
   // extra option representing the integration's native type, labeled with the
@@ -1355,21 +1366,33 @@ function assetMonitoringFormHTML(asset) {
       '<p class="hint">Add credentials in <a href="/server-settings.html?tab=credentials">Server Settings → Credentials</a>.</p>' +
     '</div>' +
     '<div class="form-group">' +
-      '<label>Poll Interval Override (seconds)</label>' +
-      '<input type="number" id="f-monitorInterval" min="5" max="86400" value="' + escapeHtml(String(interval)) + '" placeholder="leave blank for global default" style="max-width:240px">' +
-      '<p class="hint">Default is set in <a href="/events.html?tab=settings">Events → Settings</a>. Minimum 5 seconds.</p>' +
+      '<label>Poll Interval Override (seconds) <span class="tier-badge" id="f-monitorInterval-tier" style="margin-left:0.5rem;font-size:0.78rem;font-weight:normal;color:var(--color-text-tertiary)"></span></label>' +
+      '<input type="number" id="f-monitorInterval" min="5" max="86400" value="' + escapeHtml(String(interval)) + '" placeholder="leave blank to inherit" style="max-width:240px">' +
+      '<p class="hint">Inherits from the resolved tier when blank. Minimum 5 seconds. Edit defaults from the <a href="/assets.html#monitoring-settings">Monitoring Settings</a> button at the top of the Assets page or from the integration\'s Monitoring tab.</p>' +
     '</div>' +
-    transportBlockHtml
+    '<div class="form-group">' +
+      '<label>Probe Timeout Override (ms) <span class="tier-badge" id="f-probeTimeoutMs-tier" style="margin-left:0.5rem;font-size:0.78rem;font-weight:normal;color:var(--color-text-tertiary)"></span></label>' +
+      '<input type="number" id="f-probeTimeoutMs" min="100" max="60000" value="' + escapeHtml(String(probeTimeout)) + '" placeholder="leave blank to inherit" style="max-width:240px">' +
+      '<p class="hint" id="f-probeTimeoutMs-warn" style="display:none;color:var(--color-warning)">⚠ Below 500 ms — probes will likely false-fail under healthy network conditions.</p>' +
+      '<p class="hint">Range 100..60000 ms; default is 5000 ms. Inherits from the resolved tier when blank.</p>' +
+    '</div>' +
+    transportBlockHtml +
+    '<div class="form-group" id="f-asset-overrides-wrap"' + assetIdAttr + ' style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--color-border);display:none">' +
+      '<button type="button" class="btn btn-secondary" id="btn-asset-overrides-list">Show other asset overrides under this scope</button>' +
+      '<p class="hint" id="f-asset-overrides-hint">Lists every asset under the same (class, asset source) scope that has its own per-asset overrides.</p>' +
+    '</div>'
   );
 }
 
-async function _wireMonitorEditTab(_asset) {
+async function _wireMonitorEditTab(asset) {
   await _ensureCredentials();
   var monChk = document.getElementById("f-monitored");
   var typeSel = document.getElementById("f-monitorType");
   var credWrap = document.getElementById("f-monitorCredential-wrap");
   var credSel = document.getElementById("f-monitorCredential");
   var intervalEl = document.getElementById("f-monitorInterval");
+  var probeTimeoutEl = document.getElementById("f-probeTimeoutMs");
+  var probeTimeoutWarn = document.getElementById("f-probeTimeoutMs-warn");
 
   var transportWrap = document.getElementById("f-transport-wrap");
   function refresh() {
@@ -1378,6 +1401,7 @@ async function _wireMonitorEditTab(_asset) {
     var needsCred = (t === "snmp" || t === "winrm" || t === "ssh");
     if (typeSel) typeSel.disabled = !enabled;
     if (intervalEl) intervalEl.disabled = !enabled;
+    if (probeTimeoutEl) probeTimeoutEl.disabled = !enabled;
     if (credWrap) credWrap.style.display = (enabled && needsCred) ? "block" : "none";
     if (credSel) credSel.disabled = !enabled;
     if (enabled && needsCred && credSel) {
@@ -1394,6 +1418,145 @@ async function _wireMonitorEditTab(_asset) {
   if (typeSel) typeSel.addEventListener("change", refresh);
   if (monChk) monChk.addEventListener("change", refresh);
   refresh();
+
+  // Soft warning when probe timeout drops below 500 ms — Zod still allows
+  // 100, but at that range probes false-fail under healthy network conditions.
+  function checkProbeTimeoutWarn() {
+    if (!probeTimeoutEl || !probeTimeoutWarn) return;
+    var v = parseInt(probeTimeoutEl.value, 10);
+    var show = Number.isFinite(v) && v > 0 && v < 500;
+    probeTimeoutWarn.style.display = show ? "block" : "none";
+  }
+  if (probeTimeoutEl) {
+    probeTimeoutEl.addEventListener("input", checkProbeTimeoutWarn);
+    checkProbeTimeoutWarn();
+  }
+
+  // Tier badges + Asset Overrides button — only meaningful on edit (existing
+  // asset). The create flow has no asset id and skips both.
+  if (asset && asset.id) {
+    _populateAssetMonitorTierBadges(asset);
+    _wireAssetOverridesButton(asset);
+  }
+}
+
+/**
+ * Fetches the per-asset effective monitor settings and stamps a small
+ * "(from class override: 60s)" badge next to each cadence/timeout label.
+ * Best-effort — failure leaves the badges blank.
+ */
+async function _populateAssetMonitorTierBadges(asset) {
+  var eff;
+  try { eff = await api.assets.effectiveMonitorSettings(asset.id); } catch (e) { return; }
+  if (!eff || !eff.provenance || !eff.resolved) return;
+
+  function tierLabel(tier) {
+    if (tier === "asset")       return null; // own override — no badge needed; the input itself IS the value
+    if (tier === "class")       return "from class override";
+    if (tier === "integration") return "from integration tier";
+    if (tier === "manual")      return "from manual tier";
+    return null;
+  }
+  function setBadge(spanId, fieldKey, suffix) {
+    var span = document.getElementById(spanId);
+    if (!span) return;
+    var prov  = eff.provenance[fieldKey];
+    var label = tierLabel(prov);
+    if (!label) {
+      // "asset" (per-asset override is set) — no inherited badge to show.
+      // Clear the span in case a stale value is hanging around.
+      span.textContent = "";
+      return;
+    }
+    span.textContent = "(" + label + ": " + eff.resolved[fieldKey] + (suffix || "") + ")";
+  }
+  setBadge("f-monitorInterval-tier", "intervalSeconds", " s");
+  setBadge("f-probeTimeoutMs-tier",  "probeTimeoutMs",  " ms");
+}
+
+/**
+ * Reveal + wire the "Show other asset overrides" button. Click opens a
+ * slide-over modal listing assets under the same (assetType, integrationId)
+ * scope that have at least one per-asset override set.
+ */
+function _wireAssetOverridesButton(asset) {
+  var wrap = document.getElementById("f-asset-overrides-wrap");
+  var btn  = document.getElementById("btn-asset-overrides-list");
+  if (!wrap || !btn) return;
+  wrap.style.display = "block";
+  btn.addEventListener("click", function () {
+    _openAssetOverridesSlideover({
+      integrationId: asset.discoveredByIntegrationId || null,
+      assetType:     asset.assetType,
+      thisAssetId:   asset.id,
+      sourceLabel:   asset.discoveredByIntegration ? asset.discoveredByIntegration.name : "Manual",
+    });
+  });
+}
+
+async function _openAssetOverridesSlideover(scope) {
+  var classLabel = ASSET_TYPE_LABELS[scope.assetType] || scope.assetType;
+  var titleScope = classLabel + " @ " + (scope.sourceLabel || "Manual");
+  openModal(
+    "Asset Overrides — " + titleScope,
+    '<div class="empty-state" style="padding:2rem 0">Loading…</div>',
+    '<button class="btn btn-secondary" onclick="closeModal()">Close</button>'
+  );
+  var rows;
+  try {
+    rows = await api.monitorSettings.assetOverrides({
+      integrationId: scope.integrationId,
+      assetType:     scope.assetType,
+    });
+  } catch (err) {
+    var bodyEl = document.querySelector("#modal-overlay .modal-body");
+    if (bodyEl) bodyEl.innerHTML = '<div class="empty-state" style="padding:2rem 0;color:var(--color-danger)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</div>';
+    return;
+  }
+  // Exclude the asset whose modal is being viewed — the operator's already
+  // looking at it. Showing it again would just be visual noise.
+  var others = (rows || []).filter(function (r) { return r.id !== scope.thisAssetId; });
+  var bodyEl = document.querySelector("#modal-overlay .modal-body");
+  if (!bodyEl) return;
+  if (others.length === 0) {
+    bodyEl.innerHTML = '<div class="empty-state" style="padding:2rem 0">No other ' +
+      escapeHtml(classLabel.toLowerCase()) +
+      ' assets under this source have per-asset overrides.</div>';
+    return;
+  }
+  bodyEl.innerHTML = '<p class="hint" style="margin-bottom:0.75rem">Other ' +
+    escapeHtml(classLabel.toLowerCase()) +
+    ' assets discovered by ' + escapeHtml(scope.sourceLabel || "Manual") +
+    ' that have at least one per-asset monitor override. Click a row to open the asset.</p>' +
+    '<table style="width:100%;border-collapse:collapse">' +
+      '<thead><tr>' +
+        '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Hostname</th>' +
+        '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">IP</th>' +
+        '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Overrides</th>' +
+      '</tr></thead>' +
+      '<tbody>' +
+      others.map(function (a) {
+        var bits = [];
+        if (a.monitorIntervalSec    != null) bits.push("interval=" + a.monitorIntervalSec + "s");
+        if (a.telemetryIntervalSec  != null) bits.push("telemetry=" + a.telemetryIntervalSec + "s");
+        if (a.systemInfoIntervalSec != null) bits.push("sysinfo=" + a.systemInfoIntervalSec + "s");
+        if (a.probeTimeoutMs        != null) bits.push("timeout=" + a.probeTimeoutMs + "ms");
+        return '<tr style="cursor:pointer" data-asset-link="' + escapeHtml(a.id) + '">' +
+          '<td style="padding:6px 8px"><a href="#" onclick="return false">' + escapeHtml(a.hostname || "(no hostname)") + '</a></td>' +
+          '<td style="padding:6px 8px;font-family:var(--font-mono)">' + escapeHtml(a.ipAddress || "-") + '</td>' +
+          '<td style="padding:6px 8px;font-size:0.78rem;color:var(--color-text-tertiary)">' + escapeHtml(bits.join(", ")) + '</td>' +
+        '</tr>';
+      }).join("") +
+      '</tbody>' +
+    '</table>';
+  bodyEl.querySelectorAll("[data-asset-link]").forEach(function (row) {
+    row.addEventListener("click", function () {
+      var id = row.getAttribute("data-asset-link");
+      closeModal();
+      // Defer one tick so the close animation doesn't fight the open below.
+      setTimeout(function () { openViewModal(id); }, 100);
+    });
+  });
 }
 
 function _renderTabbedBody(prefix, tabs) {
