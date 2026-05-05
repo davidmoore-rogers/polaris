@@ -67,14 +67,80 @@ export interface ProbeResult {
   error?: string;
 }
 
-// Per-asset-class timer + retention group. Same shape as the top-level
-// monitor settings, just isolated so Fortinet switches/APs (which usually
-// don't need the same cadence as a busy FortiGate) can be tuned separately.
-// Resolution: an asset matching a class group falls back to the *class*
-// values; everything else (Cisco/Juniper/etc.) keeps using the top-level.
+// ─── Monitor settings hierarchy ─────────────────────────────────────────────
+//
+// Resolution order (most-specific wins):
+//
+//   per-asset override  →  (assetType + integration) class override
+//                       →  integration tier   (for integration-discovered assets)
+//                          OR manual tier     (for orphan assets)
+//                       →  hardcoded floor    (final safety net; never user-visible)
+//
+// Tier-3 ("integration tier" / "manual tier") storage:
+//   - integration tier → Integration.config.monitorSettings JSON blob
+//   - manual tier      → Setting row keyed "manualMonitorSettings"
+//
+// Tier-2 ("class override") storage: MonitorClassOverride table, one row per
+//   (integrationId, assetType). Null integrationId = override for orphan assets.
+//
+// Tier-1 ("per-asset") storage: individual columns on Asset
+//   (monitorIntervalSec, telemetryIntervalSec, systemInfoIntervalSec,
+//    probeTimeoutMs). null = inherit.
+//
+// Probe timeout note: there is no asset-level override for `failureThreshold`
+// or any retention field. Those cascade only down to tier-2.
+//
+// `MonitorTierSettings` is the canonical "all eight settings populated" shape
+// used at every level of the resolver after merging. `MonitorOverrideSettings`
+// is the partial shape used at tier-1 / tier-2 (null = inherit).
+
+export interface MonitorTierSettings {
+  intervalSeconds:           number;
+  failureThreshold:          number;
+  /** Probe TCP/UDP/HTTP timeout in milliseconds. Default 5000. Range 100..60000. */
+  probeTimeoutMs:            number;
+  telemetryIntervalSeconds:  number;
+  systemInfoIntervalSeconds: number;
+  sampleRetentionDays:       number;
+  telemetryRetentionDays:    number;
+  systemInfoRetentionDays:   number;
+}
+
+export type MonitorOverrideSettings = Partial<MonitorTierSettings>;
+
+/** Final per-asset shape after the resolver walks all four tiers. */
+export type ResolvedMonitorSettings = MonitorTierSettings;
+
+/**
+ * Hardcoded floor — final fallback when the integration / manual tier hasn't
+ * been seeded yet (e.g. fresh install before the migration job runs, or an
+ * orphan asset and no operator has touched the manual tier). Operators never
+ * see this value in any UI; it just keeps the system running.
+ */
+const HARDCODED_FLOOR: MonitorTierSettings = {
+  intervalSeconds:           60,
+  failureThreshold:          3,
+  probeTimeoutMs:            5000,
+  telemetryIntervalSeconds:  60,
+  systemInfoIntervalSeconds: 600,
+  sampleRetentionDays:       30,
+  telemetryRetentionDays:    30,
+  systemInfoRetentionDays:   30,
+};
+
+// ─── Legacy global-tier types (transitional, scheduled for removal) ────────
+//
+// The old single-row `monitorSettings` Setting + per-class fortiswitch/fortiap
+// blocks. Kept alive temporarily so the prune helpers and capacityService
+// continue working while the migration job (step 5) seeds the new tiers.
+// After that migration runs, the legacy row is deleted and these types stop
+// being read at all — at which point they get removed in a follow-up pass.
+
+/** @deprecated use MonitorTierSettings */
 export interface MonitorClassSettings {
   intervalSeconds:           number;
   failureThreshold:          number;
+  probeTimeoutMs:            number;
   sampleRetentionDays:       number;
   telemetryIntervalSeconds:  number;
   systemInfoIntervalSeconds: number;
@@ -82,24 +148,16 @@ export interface MonitorClassSettings {
   systemInfoRetentionDays:   number;
 }
 
+/** @deprecated legacy storage shape; new code uses MonitorTierSettings */
 export interface MonitorSettings extends MonitorClassSettings {
-  // Per-class overrides for Fortinet switches / APs. Applied when an asset's
-  // assetType+manufacturer matches; otherwise the top-level values are used.
   fortiswitch: MonitorClassSettings;
   fortiap:     MonitorClassSettings;
 }
 
 const SETTING_KEY = "monitorSettings";
+const MANUAL_SETTING_KEY = "manualMonitorSettings";
 
-const DEFAULT_CLASS_SETTINGS: MonitorClassSettings = {
-  intervalSeconds:           60,
-  failureThreshold:          3,
-  sampleRetentionDays:       30,
-  telemetryIntervalSeconds:  60,
-  systemInfoIntervalSeconds: 600,
-  telemetryRetentionDays:    30,
-  systemInfoRetentionDays:   30,
-};
+const DEFAULT_CLASS_SETTINGS: MonitorClassSettings = { ...HARDCODED_FLOOR };
 
 const DEFAULT_SETTINGS: MonitorSettings = {
   ...DEFAULT_CLASS_SETTINGS,
@@ -107,61 +165,15 @@ const DEFAULT_SETTINGS: MonitorSettings = {
   fortiap:     { ...DEFAULT_CLASS_SETTINGS },
 };
 
-// Asset-class signature passed to the per-class resolver. We include
-// manufacturer because we only want the Fortinet-specific overrides to
-// apply to Fortinet hardware — a Cisco SNMP-monitored switch should keep
-// the top-level defaults.
-export type AssetClassSig = {
-  assetType:    string | null | undefined;
-  manufacturer: string | null | undefined;
-};
-
-/**
- * Pick the right per-class settings group for a given asset, or null when
- * the asset doesn't match any class override (in which case callers should
- * fall back to the top-level fields).
- */
-export function pickMonitorClass(settings: MonitorSettings, sig: AssetClassSig): MonitorClassSettings | null {
-  const mfg = (sig.manufacturer || "").trim().toLowerCase();
-  if (mfg !== "fortinet") return null;
-  if (sig.assetType === "switch")       return settings.fortiswitch;
-  if (sig.assetType === "access_point") return settings.fortiap;
-  return null;
-}
-
-/**
- * Effective probe interval for one asset, applying exponential backoff when
- * the asset is confirmed down. Probes still fire periodically so recovery is
- * detected, but with sane spacing — a fleet with chronically-decommissioned
- * hosts that nobody flipped to `decommissioned` shouldn't burn the probe
- * budget on them every minute.
- *
- *   status != "down":                    baseIntervalSec (no backoff)
- *   down + consecutiveFailures ≤ 10:     max(base,  5 min)  — fresh outage
- *   down + consecutiveFailures ≤ 30:     max(base, 15 min)  — sustained outage
- *   down + consecutiveFailures > 30:     max(base, 30 min)  — chronic / decommissioned
- *
- * `max(base, bucket)` so operators with deliberately long base intervals
- * (e.g. 600 s for low-priority hosts) don't get probes accelerated by the
- * backoff. On the first successful probe, `consecutiveFailures` resets to
- * 0 in `recordProbeResult` and the asset returns to base cadence — recovery
- * is detected within the current bucket's window (worst case 30 min).
- */
-export function probeIntervalWithBackoff(
-  baseIntervalSec: number,
-  monitorStatus: string | null,
-  consecutiveFailures: number,
-): number {
-  if (monitorStatus !== "down") return baseIntervalSec;
-  let backoffSec: number;
-  if (consecutiveFailures <= 10)      backoffSec = 5  * 60;
-  else if (consecutiveFailures <= 30) backoffSec = 15 * 60;
-  else                                backoffSec = 30 * 60;
-  return Math.max(baseIntervalSec, backoffSec);
-}
-
-const PROBE_TIMEOUT_MS = 10_000;
 const sysUpTimeOid = "1.3.6.1.2.1.1.3.0";
+
+// PROBE_TIMEOUT_MS is the resolved per-asset timeout — populated by
+// `resolveMonitorSettings(asset).probeTimeoutMs`. The hardcoded constant
+// below is the legacy fallback used by probe paths that haven't yet been
+// converted to thread the resolved value through (those conversions land
+// in step 3). Once every probe takes a `timeoutMs` parameter, this constant
+// goes away.
+const PROBE_TIMEOUT_MS = HARDCODED_FLOOR.probeTimeoutMs;
 
 /**
  * Decide which protocol the AD-locked monitor should use for a given asset OS.
@@ -184,6 +196,7 @@ function readClassFromJson(v: Record<string, unknown> | undefined, defaults: Mon
   return {
     intervalSeconds:           toPositiveInt(o.intervalSeconds,           defaults.intervalSeconds),
     failureThreshold:          toPositiveInt(o.failureThreshold,          defaults.failureThreshold),
+    probeTimeoutMs:            toPositiveInt(o.probeTimeoutMs,            defaults.probeTimeoutMs),
     sampleRetentionDays:       toPositiveInt(o.sampleRetentionDays,       defaults.sampleRetentionDays),
     telemetryIntervalSeconds:  toPositiveInt(o.telemetryIntervalSeconds,  defaults.telemetryIntervalSeconds),
     systemInfoIntervalSeconds: toPositiveInt(o.systemInfoIntervalSeconds, defaults.systemInfoIntervalSeconds),
@@ -214,6 +227,7 @@ function mergeClassUpdate(current: MonitorClassSettings, input: Partial<MonitorC
   return {
     intervalSeconds:           pick(input.intervalSeconds,           current.intervalSeconds),
     failureThreshold:          pick(input.failureThreshold,          current.failureThreshold),
+    probeTimeoutMs:            pick(input.probeTimeoutMs,            current.probeTimeoutMs),
     sampleRetentionDays:       pick(input.sampleRetentionDays,       current.sampleRetentionDays),
     telemetryIntervalSeconds:  pick(input.telemetryIntervalSeconds,  current.telemetryIntervalSeconds),
     systemInfoIntervalSeconds: pick(input.systemInfoIntervalSeconds, current.systemInfoIntervalSeconds),
@@ -234,6 +248,7 @@ export async function updateMonitorSettings(input: MonitorSettingsUpdateInput): 
   const baseUpdate: Partial<MonitorClassSettings> = {
     intervalSeconds:           input.intervalSeconds,
     failureThreshold:          input.failureThreshold,
+    probeTimeoutMs:            input.probeTimeoutMs,
     sampleRetentionDays:       input.sampleRetentionDays,
     telemetryIntervalSeconds:  input.telemetryIntervalSeconds,
     systemInfoIntervalSeconds: input.systemInfoIntervalSeconds,
@@ -258,6 +273,197 @@ function toPositiveInt(v: unknown, fallback: number): number {
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0) return fallback;
   return Math.floor(n);
+}
+
+// ─── Monitor settings resolver ──────────────────────────────────────────────
+//
+// `resolveMonitorSettings(asset)` is the runtime entry point that walks the
+// hierarchy and returns the effective settings for one asset. Tier-3 readers
+// (`loadIntegrationTierSettings` / `loadManualTierSettings`) and the class
+// override loader memoize their results in module-local Maps, so the hot
+// monitor loop can resolve hundreds of assets per pass with only one DB hit
+// per (integration/manual) tuple plus one per (tier, assetType) pair.
+//
+// Cache invalidation is the responsibility of any code that writes to the
+// underlying storage — call `invalidateMonitorSettingsCache(scope)` after
+// upserting an Integration.config.monitorSettings, the manualMonitorSettings
+// row, or a MonitorClassOverride row. The migration job (step 5) calls
+// `invalidateMonitorSettingsCache()` (no scope = full clear) at the end.
+//
+// Transitional fallback: when the new tier rows aren't seeded yet (i.e. the
+// migration job hasn't run), `loadLegacyGlobalAsTier` reads the old
+// `monitorSettings` Setting row and projects it into a tier-shaped value.
+// Once the migration has run + deleted that row, the loaders fall through to
+// HARDCODED_FLOOR for the brief window where a fresh integration has no
+// monitor settings yet (operators set them as needed via the new routes).
+
+const MANUAL_TIER_CACHE_KEY = "__manual__";
+const tierCache = new Map<string, MonitorTierSettings>();
+const classOverrideCache = new Map<string, MonitorOverrideSettings | null>();
+
+function classCacheKey(integrationId: string | null, assetType: string): string {
+  return `${integrationId ?? MANUAL_TIER_CACHE_KEY}:${assetType}`;
+}
+
+/**
+ * Drop cached resolver state. Call this whenever the underlying storage
+ * changes (integration save, manual-tier save, class-override CRUD,
+ * migration job). Without a scope, clears everything.
+ */
+export function invalidateMonitorSettingsCache(scope?: {
+  integrationId?: string | null;
+  assetType?: string;
+}): void {
+  if (!scope) {
+    tierCache.clear();
+    classOverrideCache.clear();
+    return;
+  }
+  const tierKey = scope.integrationId === null ? MANUAL_TIER_CACHE_KEY : scope.integrationId;
+  if (tierKey != null) {
+    tierCache.delete(tierKey);
+    if (scope.assetType) {
+      classOverrideCache.delete(`${tierKey}:${scope.assetType}`);
+    } else {
+      for (const k of Array.from(classOverrideCache.keys())) {
+        if (k.startsWith(`${tierKey}:`)) classOverrideCache.delete(k);
+      }
+    }
+  } else {
+    // No tier identified — fall back to a full class-cache clear.
+    classOverrideCache.clear();
+  }
+}
+
+function tierFromJson(v: Record<string, unknown> | null | undefined): MonitorTierSettings {
+  const o = v ?? {};
+  return {
+    intervalSeconds:           toPositiveInt(o.intervalSeconds,           HARDCODED_FLOOR.intervalSeconds),
+    failureThreshold:          toPositiveInt(o.failureThreshold,          HARDCODED_FLOOR.failureThreshold),
+    probeTimeoutMs:            toPositiveInt(o.probeTimeoutMs,            HARDCODED_FLOOR.probeTimeoutMs),
+    telemetryIntervalSeconds:  toPositiveInt(o.telemetryIntervalSeconds,  HARDCODED_FLOOR.telemetryIntervalSeconds),
+    systemInfoIntervalSeconds: toPositiveInt(o.systemInfoIntervalSeconds, HARDCODED_FLOOR.systemInfoIntervalSeconds),
+    sampleRetentionDays:       toPositiveInt(o.sampleRetentionDays,       HARDCODED_FLOOR.sampleRetentionDays),
+    telemetryRetentionDays:    toPositiveInt(o.telemetryRetentionDays,    HARDCODED_FLOOR.telemetryRetentionDays),
+    systemInfoRetentionDays:   toPositiveInt(o.systemInfoRetentionDays,   HARDCODED_FLOOR.systemInfoRetentionDays),
+  };
+}
+
+async function loadLegacyGlobalAsTier(): Promise<MonitorTierSettings | null> {
+  const row = await prisma.setting.findUnique({ where: { key: SETTING_KEY } });
+  if (!row?.value) return null;
+  return tierFromJson(row.value as Record<string, unknown>);
+}
+
+async function loadIntegrationTierSettings(integrationId: string): Promise<MonitorTierSettings> {
+  const cached = tierCache.get(integrationId);
+  if (cached) return cached;
+  const integration = await prisma.integration.findUnique({
+    where:  { id: integrationId },
+    select: { config: true },
+  });
+  const cfg = (integration?.config as Record<string, unknown> | null) ?? {};
+  const ms  = cfg.monitorSettings as Record<string, unknown> | undefined;
+  let result: MonitorTierSettings;
+  if (ms) {
+    result = tierFromJson(ms);
+  } else {
+    // Transitional: fall back to the legacy global until the migration runs.
+    result = (await loadLegacyGlobalAsTier()) ?? { ...HARDCODED_FLOOR };
+  }
+  tierCache.set(integrationId, result);
+  return result;
+}
+
+async function loadManualTierSettings(): Promise<MonitorTierSettings> {
+  const cached = tierCache.get(MANUAL_TIER_CACHE_KEY);
+  if (cached) return cached;
+  const row = await prisma.setting.findUnique({ where: { key: MANUAL_SETTING_KEY } });
+  let result: MonitorTierSettings;
+  if (row?.value) {
+    result = tierFromJson(row.value as Record<string, unknown>);
+  } else {
+    // Transitional: fall back to the legacy global until the migration runs.
+    result = (await loadLegacyGlobalAsTier()) ?? { ...HARDCODED_FLOOR };
+  }
+  tierCache.set(MANUAL_TIER_CACHE_KEY, result);
+  return result;
+}
+
+async function loadClassOverride(
+  integrationId: string | null,
+  assetType: string,
+): Promise<MonitorOverrideSettings | null> {
+  const key = classCacheKey(integrationId, assetType);
+  if (classOverrideCache.has(key)) return classOverrideCache.get(key) ?? null;
+  const row = await prisma.monitorClassOverride.findFirst({
+    where: { integrationId, assetType },
+    select: {
+      intervalSeconds:           true,
+      failureThreshold:          true,
+      probeTimeoutMs:            true,
+      telemetryIntervalSeconds:  true,
+      systemInfoIntervalSeconds: true,
+      sampleRetentionDays:       true,
+      telemetryRetentionDays:    true,
+      systemInfoRetentionDays:   true,
+    },
+  });
+  let result: MonitorOverrideSettings | null = null;
+  if (row) {
+    result = {};
+    if (row.intervalSeconds           != null) result.intervalSeconds           = row.intervalSeconds;
+    if (row.failureThreshold          != null) result.failureThreshold          = row.failureThreshold;
+    if (row.probeTimeoutMs            != null) result.probeTimeoutMs            = row.probeTimeoutMs;
+    if (row.telemetryIntervalSeconds  != null) result.telemetryIntervalSeconds  = row.telemetryIntervalSeconds;
+    if (row.systemInfoIntervalSeconds != null) result.systemInfoIntervalSeconds = row.systemInfoIntervalSeconds;
+    if (row.sampleRetentionDays       != null) result.sampleRetentionDays       = row.sampleRetentionDays;
+    if (row.telemetryRetentionDays    != null) result.telemetryRetentionDays    = row.telemetryRetentionDays;
+    if (row.systemInfoRetentionDays   != null) result.systemInfoRetentionDays   = row.systemInfoRetentionDays;
+  }
+  classOverrideCache.set(key, result);
+  return result;
+}
+
+/** Minimal asset shape the resolver needs. */
+export interface AssetMonitorContext {
+  assetType:                 string;
+  discoveredByIntegrationId: string | null;
+  monitorIntervalSec:        number | null;
+  telemetryIntervalSec:      number | null;
+  systemInfoIntervalSec:     number | null;
+  probeTimeoutMs:            number | null;
+}
+
+/**
+ * Walk the four-tier monitor settings hierarchy and return the effective
+ * values for one asset. Reads through the resolver caches; one cold call hits
+ * 1-2 DB rows, every subsequent call for assets in the same tier/class group
+ * is in-memory.
+ */
+export async function resolveMonitorSettings(asset: AssetMonitorContext): Promise<ResolvedMonitorSettings> {
+  // Tier 3 (integration-tier or manual-tier).
+  const tier3 = asset.discoveredByIntegrationId
+    ? await loadIntegrationTierSettings(asset.discoveredByIntegrationId)
+    : await loadManualTierSettings();
+
+  // Tier 2 (class override scoped to the same tier-3 source).
+  const classOverride = await loadClassOverride(
+    asset.discoveredByIntegrationId,
+    asset.assetType,
+  );
+
+  // Compose tier 3 → tier 2.
+  const merged: ResolvedMonitorSettings = { ...tier3 };
+  if (classOverride) Object.assign(merged, classOverride);
+
+  // Tier 1 (per-asset overrides — only the four cadence/timeout fields).
+  if (asset.monitorIntervalSec    != null) merged.intervalSeconds           = asset.monitorIntervalSec;
+  if (asset.telemetryIntervalSec  != null) merged.telemetryIntervalSeconds  = asset.telemetryIntervalSec;
+  if (asset.systemInfoIntervalSec != null) merged.systemInfoIntervalSeconds = asset.systemInfoIntervalSec;
+  if (asset.probeTimeoutMs        != null) merged.probeTimeoutMs            = asset.probeTimeoutMs;
+
+  return merged;
 }
 
 // ─── Per-stream transport overrides ─────────────────────────────────────────
@@ -2926,24 +3132,27 @@ function buildMonitorAssocIpEntries(
  * fires a single monitor.status_changed Event on transition.
  */
 export async function recordProbeResult(assetId: string, result: ProbeResult): Promise<void> {
-  const settings = await getMonitorSettings();
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
     select: {
       id: true,
       hostname: true,
       assetType: true,
-      manufacturer: true,
       monitored: true,
       monitorStatus: true,
       consecutiveFailures: true,
+      discoveredByIntegrationId: true,
+      monitorIntervalSec: true,
+      telemetryIntervalSec: true,
+      systemInfoIntervalSec: true,
+      probeTimeoutMs: true,
     },
   });
   if (!asset) return;
 
-  // Per-class failure threshold so Fortinet switches/APs can be tuned more
-  // tolerantly than firewalls if the operator wants.
-  const cls = pickMonitorClass(settings, { assetType: asset.assetType, manufacturer: asset.manufacturer }) ?? settings;
+  // Resolve the asset's effective failure threshold through the hierarchy
+  // (per-asset override → class override → integration/manual tier → floor).
+  const effective = await resolveMonitorSettings(asset);
 
   const now = new Date();
   const newConsec = result.success ? 0 : (asset.consecutiveFailures ?? 0) + 1;
@@ -2951,7 +3160,7 @@ export async function recordProbeResult(assetId: string, result: ProbeResult): P
   let nextStatus: "up" | "down" | "unknown";
   if (result.success) {
     nextStatus = "up";
-  } else if (newConsec >= cls.failureThreshold) {
+  } else if (newConsec >= effective.failureThreshold) {
     nextStatus = "down";
   } else {
     // Below threshold — keep prior up/down status (we know it's failing
@@ -3169,7 +3378,6 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     opts?.cadences ?? ["probe", "fastFiltered", "telemetry", "systemInfo"],
   );
   const endPassTimer = startPassTimer();
-  const settings = await getMonitorSettings();
   const concurrency = Math.max(1, Math.min(opts?.concurrency ?? 8, 32));
   const now = new Date();
 
@@ -3177,11 +3385,13 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     where: { monitored: true, monitorType: { not: null } },
     select: {
       id: true,
-      assetType: true, manufacturer: true,
+      assetType: true,
+      discoveredByIntegrationId: true,
       monitorType: true, monitorStatus: true, consecutiveFailures: true,
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, telemetryIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
+      probeTimeoutMs: true,
       monitoredInterfaces: true,
       monitoredStorage: true,
       monitoredIpsecTunnels: true,
@@ -3203,9 +3413,8 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   const transportById = new Map<string, string>();
   for (const a of candidates) transportById.set(a.id, a.monitorType ?? "unknown");
 
-  function isDue(last: Date | null, perAsset: number | null, defaultSec: number): boolean {
-    if (defaultSec <= 0) return false;
-    const intervalSec = perAsset || defaultSec;
+  function isDue(last: Date | null, intervalSec: number): boolean {
+    if (intervalSec <= 0) return false;
     if (!last) return true;
     return now.getTime() - last.getTime() >= intervalSec * 1000;
   }
@@ -3217,19 +3426,17 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   const telemetries: Work[]  = [];
   const systemInfos: Work[]  = [];
   for (const a of candidates) {
-    // Per-class default resolution: Fortinet switches/APs may carry their own
-    // interval/retention overrides; everything else uses the top-level values.
-    const cls = pickMonitorClass(settings, { assetType: a.assetType, manufacturer: a.manufacturer }) ?? settings;
-    // Probe due-check applies exponential backoff for confirmed-down assets
-    // — see probeIntervalWithBackoff. Heavy cadences are gated separately via
-    // !isDown below, so the backoff only matters for the probe path itself.
-    const baseProbeInterval = a.monitorIntervalSec || cls.intervalSeconds;
-    const effectiveProbeInterval = probeIntervalWithBackoff(
-      baseProbeInterval, a.monitorStatus, a.consecutiveFailures,
-    );
-    const probe      = isDue(a.lastMonitorAt,    null,                    effectiveProbeInterval);
-    const telemetry  = isDue(a.lastTelemetryAt,  a.telemetryIntervalSec,  cls.telemetryIntervalSeconds);
-    const systemInfo = isDue(a.lastSystemInfoAt, a.systemInfoIntervalSec, cls.systemInfoIntervalSeconds);
+    // Resolve effective settings through the four-tier hierarchy. Internally
+    // memoized — first asset in a (integration|manual, assetType) bucket
+    // pays for the DB read; everything else hits the in-memory cache.
+    const eff = await resolveMonitorSettings(a);
+    // Probe cadence is just the resolved intervalSeconds — no backoff for
+    // down hosts. Down-host suppression below stops heavy cadences regardless;
+    // the cheap response-time probe keeps firing at base cadence so recovery
+    // is detected within one tick.
+    const probe      = isDue(a.lastMonitorAt,    eff.intervalSeconds);
+    const telemetry  = isDue(a.lastTelemetryAt,  eff.telemetryIntervalSeconds);
+    const systemInfo = isDue(a.lastSystemInfoAt, eff.systemInfoIntervalSeconds);
     const hasFastPin =
       (Array.isArray(a.monitoredInterfaces)   && a.monitoredInterfaces.length   > 0) ||
       (Array.isArray(a.monitoredStorage)      && a.monitoredStorage.length      > 0) ||

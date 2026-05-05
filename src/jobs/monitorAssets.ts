@@ -41,9 +41,7 @@ import {
   pruneMonitorSamples,
   pruneTelemetrySamples,
   pruneSystemInfoSamples,
-  getMonitorSettings,
-  pickMonitorClass,
-  probeIntervalWithBackoff,
+  resolveMonitorSettings,
   type MonitorCadence,
 } from "../services/monitoringService.js";
 import { getBootTimeMode, publishMonitorJob } from "../services/queueService.js";
@@ -92,45 +90,43 @@ let lastPruneAt = 0;
  * the candidate query and isDue logic are mirrored. Keeping the cursor and
  * publisher paths separate (rather than parametrizing runMonitorPass) makes
  * each one clearer to read and easier to evolve independently. Both paths
- * call `pickMonitorClass` + the same `isDue` semantics, so the due-set is
- * always identical between modes.
+ * call `resolveMonitorSettings` per asset and use the same `isDue` semantics,
+ * so the due-set is always identical between modes.
  */
 async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
   const enabled = new Set<MonitorCadence>(cadences);
-  const settings = await getMonitorSettings();
   const now = new Date();
 
   const candidates = await prisma.asset.findMany({
     where: { monitored: true, monitorType: { not: null } },
     select: {
       id: true,
-      assetType: true, manufacturer: true,
-      monitorType: true, monitorStatus: true, consecutiveFailures: true,
+      assetType: true,
+      discoveredByIntegrationId: true,
+      monitorType: true, monitorStatus: true,
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, telemetryIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
+      probeTimeoutMs: true,
       monitoredInterfaces: true,
       monitoredStorage: true,
       monitoredIpsecTunnels: true,
     },
   });
 
-  function isDue(last: Date | null, perAsset: number | null, defaultSec: number): boolean {
-    if (defaultSec <= 0) return false;
-    const intervalSec = perAsset || defaultSec;
+  function isDue(last: Date | null, intervalSec: number): boolean {
+    if (intervalSec <= 0) return false;
     if (!last) return true;
     return now.getTime() - last.getTime() >= intervalSec * 1000;
   }
 
   for (const a of candidates) {
-    const cls = pickMonitorClass(settings, { assetType: a.assetType, manufacturer: a.manufacturer }) ?? settings;
-    const baseProbeInterval = a.monitorIntervalSec || cls.intervalSeconds;
-    const effectiveProbeInterval = probeIntervalWithBackoff(
-      baseProbeInterval, a.monitorStatus, a.consecutiveFailures,
-    );
-    const probe      = isDue(a.lastMonitorAt,    null,                    effectiveProbeInterval);
-    const telemetry  = isDue(a.lastTelemetryAt,  a.telemetryIntervalSec,  cls.telemetryIntervalSeconds);
-    const systemInfo = isDue(a.lastSystemInfoAt, a.systemInfoIntervalSec, cls.systemInfoIntervalSeconds);
+    // Resolve effective settings via the four-tier hierarchy. Cached after
+    // first lookup per (integration|manual, assetType) bucket.
+    const eff = await resolveMonitorSettings(a);
+    const probe      = isDue(a.lastMonitorAt,    eff.intervalSeconds);
+    const telemetry  = isDue(a.lastTelemetryAt,  eff.telemetryIntervalSeconds);
+    const systemInfo = isDue(a.lastSystemInfoAt, eff.systemInfoIntervalSeconds);
     const hasFastPin =
       (Array.isArray(a.monitoredInterfaces)   && a.monitoredInterfaces.length   > 0) ||
       (Array.isArray(a.monitoredStorage)      && a.monitoredStorage.length      > 0) ||
