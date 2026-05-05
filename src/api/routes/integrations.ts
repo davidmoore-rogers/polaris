@@ -4944,26 +4944,25 @@ async function syncActiveDirectoryDevices(
       );
       updateData.tags = [...preserved, ...tags.filter((t) => !preserved.includes(t))];
 
-      // Default monitoring source to this AD integration for realm-monitorable
-      // hosts. Skip if the asset is already discovered by a different
-      // integration (e.g. an FMG-discovered firewall — defensive, shouldn't
-      // happen). Also skip the type+credential reset when the operator has
-      // explicitly overridden monitorType (anything other than null or the AD
-      // default) — preserve their choice across re-runs.
+      // Stamp the AD source link so the polling-method resolver picks AD's
+      // source default (ICMP for response-time, null for the other streams)
+      // and the asset edit modal shows the right tier badges. Skip when
+      // another integration already owns the asset (defensive — an FMG-
+      // discovered firewall shouldn't end up under AD).
+      //
+      // Polling-method redesign (step 3i): we no longer stamp
+      // `monitorType="activedirectory"` here. The legacy stamp made probes
+      // route to WinRM/SSH using the AD bind credentials; modern hardened
+      // Windows hosts often refuse that, so the new default is ICMP. An
+      // operator who wants the bind-creds probe sets
+      // `responseTimePolling="winrm"` (or "ssh") on the asset and the
+      // dispatcher's AD bind fallback handles it.
       const alreadyOwnedByOtherIntegration =
         existing.discoveredByIntegrationId &&
         existing.discoveredByIntegrationId !== integrationId &&
         (existing.monitorType === "fortimanager" || existing.monitorType === "fortigate");
       if (adMonitorable && !alreadyOwnedByOtherIntegration) {
         updateData.discoveredByIntegrationId = integrationId;
-        const isOperatorOverride =
-          existing.monitorType !== null &&
-          existing.monitorType !== "activedirectory";
-        if (!isOperatorOverride) {
-          updateData.monitorType = "activedirectory";
-          // WinRM/SSH use the integration's bindDn/bindPassword, not a Credential row.
-          updateData.monitorCredentialId = null;
-        }
       }
 
       try {
@@ -5071,10 +5070,12 @@ async function syncActiveDirectoryDevices(
         lastSeen: lastLogon,
         acquiredAt: whenCreated,
         tags,
-        // Realm-monitorable hosts: lock monitoring source to this AD integration
-        // so the bind credentials are reused for the probe (WinRM for Windows,
-        // SSH for Linux).
-        ...(adMonitorable ? { discoveredByIntegrationId: integrationId, monitorType: "activedirectory" } : {}),
+        // Stamp the AD source link on realm-monitorable hosts so the
+        // polling-method resolver picks AD's source default (ICMP) when the
+        // operator later enables monitoring on this asset. We no longer
+        // stamp `monitorType="activedirectory"` here — see the matching
+        // comment on the update path above for the rationale.
+        ...(adMonitorable ? { discoveredByIntegrationId: integrationId } : {}),
       };
       clampAcquiredToLastSeen(createData);
       const newAsset = await prisma.asset.create({ data: createData as any });

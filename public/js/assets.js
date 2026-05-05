@@ -3710,15 +3710,24 @@ function assetMonitoringViewHTML(a) {
       '<span style="color:var(--color-text-secondary)">Monitoring is disabled for this asset. Enable it from the Edit modal’s Monitoring tab.</span>' +
     '</div>';
   }
-  var sourceLabel = a.monitorType || "—";
-  if (_isMonitorOnIntegrationDefault(a) && a.discoveredByIntegration) {
-    var integrationPrefix =
-      a.monitorType === "fortigate"       ? "FortiGate: " :
-      a.monitorType === "activedirectory" ? "Active Directory: " :
-                                            "FortiManager: ";
-    sourceLabel = integrationPrefix + a.discoveredByIntegration.name;
+  // Source label: prefer the integration name when the asset is integration-
+  // discovered (covers AD-discovered hosts post-3i where monitorType is null
+  // but the source link is still set). Falls back to credential + method or
+  // bare method name for manual assets.
+  var sourceLabel = "—";
+  var integ = a.discoveredByIntegration;
+  if (integ) {
+    var integTypeLabels = {
+      fortimanager:    "FortiManager",
+      fortigate:       "FortiGate",
+      activedirectory: "Active Directory",
+      entraid:         "Entra ID",
+      windowsserver:   "Windows Server",
+    };
+    sourceLabel = (integTypeLabels[integ.type] || integ.type) + ": " + integ.name;
   } else if (a.monitorType === "snmp" || a.monitorType === "winrm" || a.monitorType === "ssh") {
     if (a.monitorCredential) sourceLabel = a.monitorType.toUpperCase() + " · " + a.monitorCredential.name;
+    else sourceLabel = a.monitorType.toUpperCase();
   } else if (a.monitorType === "icmp") {
     sourceLabel = "ICMP";
   }
