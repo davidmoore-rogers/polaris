@@ -47,6 +47,43 @@ function _restoreAssetsPrefs() {
   } catch (_) {}
 }
 
+// Per-chart-type "last selected range" persistence (per-user via localStorage,
+// matching the polaris-prefs-<scope>-<username> convention used elsewhere).
+// One JSON map per user keyed by chart id (e.g. "assetMonitor", "assetSystem")
+// so adding a new chart never collides with existing prefs blobs. "custom"
+// ranges are intentionally not persisted — the from/to inputs reset on reopen,
+// so restoring "custom" would land on an empty panel.
+function _getChartRangePref(key, fallback) {
+  if (!currentUsername) return fallback;
+  try {
+    var raw = localStorage.getItem("polaris-prefs-charts-" + currentUsername);
+    var p = raw ? JSON.parse(raw) : null;
+    var v = p && p[key];
+    return v || fallback;
+  } catch (_) { return fallback; }
+}
+function _setChartRangePref(key, range) {
+  if (!currentUsername || !range || range === "custom") return;
+  try {
+    var raw = localStorage.getItem("polaris-prefs-charts-" + currentUsername);
+    var p = raw ? (JSON.parse(raw) || {}) : {};
+    p[key] = range;
+    localStorage.setItem("polaris-prefs-charts-" + currentUsername, JSON.stringify(p));
+  } catch (_) {}
+}
+// Render a chart range-button bar with the saved (or default) range marked as
+// primary. `entries` is a list of { value, label, id? }; each rendered button
+// carries `data-range="<value>"` so existing click handlers work unchanged.
+function _chartRangeBtnsHTML(barClass, entries, prefKey, fallback) {
+  var active = _getChartRangePref(prefKey, fallback);
+  return entries.map(function (e) {
+    var primary = e.value === active;
+    var idAttr = e.id ? ' id="' + e.id + '"' : '';
+    return '<button class="btn btn-sm ' + (primary ? 'btn-primary' : 'btn-secondary') + ' ' + barClass +
+      '" data-range="' + e.value + '"' + idAttr + '>' + e.label + '</button>';
+  }).join("");
+}
+
 document.addEventListener("DOMContentLoaded", async function () {
   _assetsSF = new TableSF("assets-tbody", function () { _assetsPage = 1; renderAssetsPage(); _saveAssetsPrefs(); });
   var assetsTable = document.querySelector("#assets-tbody").closest("table");
@@ -1887,8 +1924,8 @@ async function openViewModal(id) {
         openEditModal(a.id);
       });
     }
-    if (a.monitored) _loadMonitorHistoryFor(a.id, "24h");
-    if (a.monitored) _loadSystemTabFor(a.id, "24h", a);
+    if (a.monitored) _loadMonitorHistoryFor(a.id, _getChartRangePref("assetMonitor", "24h"));
+    if (a.monitored) _loadSystemTabFor(a.id, _getChartRangePref("assetSystem", "1h"), a);
     if (a.monitored) _renderIntermittencyBar(a.id);
     document.querySelectorAll(".asset-system-range-btn").forEach(function (b) {
       b.addEventListener("click", function () {
@@ -1909,6 +1946,7 @@ async function openViewModal(id) {
         if (panel) panel.style.display = "none";
         document.querySelectorAll(".asset-system-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
         b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+        _setChartRangePref("assetSystem", range);
         _loadSystemTabFor(a.id, range, a);
       });
     });
@@ -1990,6 +2028,7 @@ async function openViewModal(id) {
         if (panel) panel.style.display = "none";
         document.querySelectorAll(".asset-monitor-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
         b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+        _setChartRangePref("assetMonitor", range);
         _loadMonitorHistoryFor(a.id, range);
       });
     });
@@ -2050,11 +2089,13 @@ function assetSystemViewHTML(a) {
     '</div>';
   }
   var rangeBtns =
-    '<button class="btn btn-sm btn-primary asset-system-range-btn" data-range="1h">1h</button>' +
-    '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="24h">24h</button>' +
-    '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="7d">7d</button>' +
-    '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="30d">30d</button>' +
-    '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="custom" id="btn-asset-system-custom">Custom…</button>';
+    _chartRangeBtnsHTML("asset-system-range-btn", [
+      { value: "1h",  label: "1h" },
+      { value: "24h", label: "24h" },
+      { value: "7d",  label: "7d" },
+      { value: "30d", label: "30d" },
+      { value: "custom", label: "Custom…", id: "btn-asset-system-custom" },
+    ], "assetSystem", "1h");
   // CPU/Memory + Temperatures share the Telemetry stream — the same toggle
   // controls both, so they get the same source badge. Interfaces is its
   // own stream. Storage and LLDP ride the same stream as Interfaces.
@@ -2850,10 +2891,11 @@ async function openSensorDetailPanel(asset, sensorName) {
   });
   document.getElementById("btn-sensor-panel-close-btn").addEventListener("click", closeSensorPanel);
 
-  var rangeBtns =
-    '<button class="btn btn-sm btn-primary sensor-range-btn" data-range="24h">24h</button>' +
-    '<button class="btn btn-sm btn-secondary sensor-range-btn" data-range="7d">7d</button>' +
-    '<button class="btn btn-sm btn-secondary sensor-range-btn" data-range="30d">30d</button>';
+  var rangeBtns = _chartRangeBtnsHTML("sensor-range-btn", [
+    { value: "24h", label: "24h" },
+    { value: "7d",  label: "7d" },
+    { value: "30d", label: "30d" },
+  ], "assetSensor", "24h");
 
   bodyEl.innerHTML =
     '<div style="padding:1rem 1.25rem">' +
@@ -2878,12 +2920,13 @@ async function openSensorDetailPanel(asset, sensorName) {
     box.style.fontSize = "0.85rem";
   }
 
-  await _loadSensorHistoryFor(asset.id, sensorName, "24h");
+  await _loadSensorHistoryFor(asset.id, sensorName, _getChartRangePref("assetSensor", "24h"));
   document.querySelectorAll(".sensor-range-btn").forEach(function (b) {
     b.addEventListener("click", function () {
       var range = b.getAttribute("data-range");
       document.querySelectorAll(".sensor-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
       b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+      _setChartRangePref("assetSensor", range);
       _loadSensorHistoryFor(asset.id, sensorName, range);
     });
   });
@@ -3806,11 +3849,13 @@ function assetMonitoringViewHTML(a) {
     ? '<button class="btn btn-sm btn-primary" id="btn-asset-probe-now" style="margin-right:6px" title="Run a response-time probe and pull fresh telemetry + interface data">Refresh</button>'
     : '';
   var rangeBtns =
-    '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="1h">1h</button>' +
-    '<button class="btn btn-sm btn-primary asset-monitor-range-btn" data-range="24h">24h</button>' +
-    '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="7d">7d</button>' +
-    '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="30d">30d</button>' +
-    '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="custom" id="btn-asset-monitor-custom">Custom…</button>';
+    _chartRangeBtnsHTML("asset-monitor-range-btn", [
+      { value: "1h",  label: "1h" },
+      { value: "24h", label: "24h" },
+      { value: "7d",  label: "7d" },
+      { value: "30d", label: "30d" },
+      { value: "custom", label: "Custom…", id: "btn-asset-monitor-custom" },
+    ], "assetMonitor", "24h");
   var customPanel =
     '<div id="asset-monitor-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
       '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="asset-monitor-from" class="form-input" style="padding:2px 6px"></label>' +
@@ -3824,10 +3869,13 @@ function assetMonitoringViewHTML(a) {
       '<div class="detail-row"><span class="detail-label">Status</span>' +
         '<span class="detail-value">' + probeBtn + pill + '</span></div>' +
       // Last hour intermittency bar — one cell per probe sample, colored
-      // by the resolved monitor state at that point. Loaded asynchronously
-      // by _renderIntermittencyBar(). Hidden on unmonitored assets.
+      // by the resolved monitor state at that point. Spans both columns of
+      // the asset-view-grid (full-span) so the bar is wide enough to read
+      // sample-by-sample on a typical fleet (~60 cells/hour). Loaded
+      // asynchronously by _renderIntermittencyBar(). Hidden on
+      // unmonitored assets.
       (a.monitored
-        ? '<div class="detail-row"><span class="detail-label">Last hour</span>' +
+        ? '<div class="detail-row full-span"><span class="detail-label">Last hour</span>' +
             '<span class="detail-value" id="asset-intermittency-bar" data-asset-id="' + escapeHtml(a.id) + '">' +
               '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">Loading…</span>' +
             '</span></div>'
@@ -4360,11 +4408,12 @@ async function openInterfaceDetailPanel(asset, ifName) {
     _screenshotInterfacePanel(asset, ifName);
   });
 
-  var rangeBtns =
-    '<button class="btn btn-sm btn-primary iface-range-btn" data-range="1h">1h</button>' +
-    '<button class="btn btn-sm btn-secondary iface-range-btn" data-range="24h">24h</button>' +
-    '<button class="btn btn-sm btn-secondary iface-range-btn" data-range="7d">7d</button>' +
-    '<button class="btn btn-sm btn-secondary iface-range-btn" data-range="30d">30d</button>';
+  var rangeBtns = _chartRangeBtnsHTML("iface-range-btn", [
+    { value: "1h",  label: "1h" },
+    { value: "24h", label: "24h" },
+    { value: "7d",  label: "7d" },
+    { value: "30d", label: "30d" },
+  ], "assetInterface", "1h");
 
   var canEditComment = canManageAssets();
   bodyEl.innerHTML =
@@ -4411,12 +4460,13 @@ async function openInterfaceDetailPanel(asset, ifName) {
     el.style.fontSize = "0.85rem";
   });
 
-  await _loadInterfaceHistoryFor(asset.id, ifName, "1h");
+  await _loadInterfaceHistoryFor(asset.id, ifName, _getChartRangePref("assetInterface", "1h"));
   document.querySelectorAll(".iface-range-btn").forEach(function (b) {
     b.addEventListener("click", function () {
       var range = b.getAttribute("data-range");
       document.querySelectorAll(".iface-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
       b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+      _setChartRangePref("assetInterface", range);
       _loadInterfaceHistoryFor(asset.id, ifName, range);
     });
   });
@@ -4959,10 +5009,11 @@ async function openIpsecTunnelDetailPanel(asset, tunnelName) {
   });
   document.getElementById("btn-ipsec-panel-close-btn").addEventListener("click", closeIpsecPanel);
 
-  var rangeBtns =
-    '<button class="btn btn-sm btn-primary ipsec-range-btn" data-range="24h">24h</button>' +
-    '<button class="btn btn-sm btn-secondary ipsec-range-btn" data-range="7d">7d</button>' +
-    '<button class="btn btn-sm btn-secondary ipsec-range-btn" data-range="30d">30d</button>';
+  var rangeBtns = _chartRangeBtnsHTML("ipsec-range-btn", [
+    { value: "24h", label: "24h" },
+    { value: "7d",  label: "7d" },
+    { value: "30d", label: "30d" },
+  ], "assetIpsec", "24h");
 
   bodyEl.innerHTML =
     '<div style="padding:1rem 1.25rem">' +
@@ -4991,12 +5042,13 @@ async function openIpsecTunnelDetailPanel(asset, tunnelName) {
     el.style.fontSize = "0.85rem";
   });
 
-  await _loadIpsecHistoryFor(asset.id, tunnelName, "24h");
+  await _loadIpsecHistoryFor(asset.id, tunnelName, _getChartRangePref("assetIpsec", "24h"));
   document.querySelectorAll(".ipsec-range-btn").forEach(function (b) {
     b.addEventListener("click", function () {
       var range = b.getAttribute("data-range");
       document.querySelectorAll(".ipsec-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
       b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+      _setChartRangePref("assetIpsec", range);
       _loadIpsecHistoryFor(asset.id, tunnelName, range);
     });
   });
@@ -5292,11 +5344,12 @@ async function openStorageDetailPanel(asset, mountPath) {
   });
   document.getElementById("btn-storage-panel-close-btn").addEventListener("click", closeStoragePanel);
 
-  var rangeBtns =
-    '<button class="btn btn-sm btn-primary storage-range-btn" data-range="1h">1h</button>' +
-    '<button class="btn btn-sm btn-secondary storage-range-btn" data-range="24h">24h</button>' +
-    '<button class="btn btn-sm btn-secondary storage-range-btn" data-range="7d">7d</button>' +
-    '<button class="btn btn-sm btn-secondary storage-range-btn" data-range="30d">30d</button>';
+  var rangeBtns = _chartRangeBtnsHTML("storage-range-btn", [
+    { value: "1h",  label: "1h" },
+    { value: "24h", label: "24h" },
+    { value: "7d",  label: "7d" },
+    { value: "30d", label: "30d" },
+  ], "assetStorage", "1h");
 
   bodyEl.innerHTML =
     '<div style="padding:1rem 1.25rem">' +
@@ -5323,12 +5376,13 @@ async function openStorageDetailPanel(asset, mountPath) {
     el.style.fontSize = "0.85rem";
   });
 
-  await _loadStorageHistoryFor(asset.id, mountPath, "1h");
+  await _loadStorageHistoryFor(asset.id, mountPath, _getChartRangePref("assetStorage", "1h"));
   document.querySelectorAll(".storage-range-btn").forEach(function (b) {
     b.addEventListener("click", function () {
       var range = b.getAttribute("data-range");
       document.querySelectorAll(".storage-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
       b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+      _setChartRangePref("assetStorage", range);
       _loadStorageHistoryFor(asset.id, mountPath, range);
     });
   });
