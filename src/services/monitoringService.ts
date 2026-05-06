@@ -40,6 +40,7 @@ import {
 } from "./fortimanagerService.js";
 import { logEvent } from "../api/routes/events.js";
 import { logger } from "../utils/logger.js";
+import { isDiscoveryRunning } from "../utils/discoveryState.js";
 import { resolveOidSync, ensureRegistryLoaded } from "./oidRegistry.js";
 import {
   pickVendorProfile,
@@ -68,6 +69,14 @@ export interface ProbeResult {
   responseTimeMs: number;
   /** Short human-readable reason on failure; null on success. */
   error?: string;
+  /**
+   * True when the probe was intentionally skipped because the asset's
+   * integration is currently running a discovery. The caller (runProbeFor)
+   * must NOT write a sample or update monitorStatus — the five-state machine
+   * stays frozen until discovery finishes so RTT spikes caused by session
+   * contention don't affect the asset's status or history.
+   */
+  skipped?: boolean;
 }
 
 // ─── Monitor settings hierarchy ─────────────────────────────────────────────
@@ -801,6 +810,14 @@ export async function probeAsset(assetId: string): Promise<ProbeResult> {
     });
     if (!asset) return finish(start, false, "Asset not found");
     if (!asset.monitored) return finish(start, false, "Monitoring disabled");
+    // Suppress probe while the asset's integration is running discovery —
+    // both compete for the same FortiGate REST sessions, causing RTT to
+    // spike (often doubling). The five-state machine stays frozen; no sample
+    // is written (see runProbeFor). Discovery already captures switch/AP
+    // status as part of its run, so the brief gap is inconsequential.
+    if (asset.discoveredByIntegrationId && isDiscoveryRunning(asset.discoveredByIntegrationId)) {
+      return { success: true, responseTimeMs: 0, skipped: true };
+    }
 
     // Resolve effective settings (probeTimeoutMs + responseTimePolling) through
     // the four-tier hierarchy. The resolver's source-default fallback always
@@ -3910,6 +3927,13 @@ export async function runProbeFor(assetId: string, transport: string): Promise<C
   try {
     const result = await probeAsset(assetId);
     const probeMs = Date.now() - probeStart;
+    if (result.skipped) {
+      // Discovery is in flight for this integration — don't write a sample
+      // or update monitorStatus. Return success so the worker slot is freed
+      // without incrementing consecutive-failure counters.
+      recordWorkOutcome("probe", "success");
+      return "success";
+    }
     await recordProbeResult(assetId, result);
     if (result.success) {
       recordProbe(transport, probeMs / 1000, "success");

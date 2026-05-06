@@ -22,6 +22,7 @@ import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
 import { recordSample, getBaselines, type Baseline } from "../../services/discoveryDurationService.js";
 import { getAdMonitorProtocol } from "../../services/monitoringService.js";
+import { markDiscoveryStarted, markDiscoveryFinished } from "../../utils/discoveryState.js";
 import * as autoMonitor from "../../services/autoMonitorInterfacesService.js";
 import * as sightings from "../../services/assetSightingService.js";
 import { quarantineAsset, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
@@ -1145,6 +1146,7 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
     slowAlerted: false,
     slowAlertedDevices: new Set(),
   });
+  markDiscoveryStarted(integrationId);
 
   await prisma.integration.update({ where: { id: integrationId }, data: { lastDiscoveryAt: new Date() } });
 
@@ -1281,6 +1283,7 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
       }
     } finally {
       activeDiscovery.delete(integrationId);
+      markDiscoveryFinished(integrationId);
     }
   })();
 }
