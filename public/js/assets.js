@@ -3639,11 +3639,16 @@ function _probeMethodLabel(a) {
 // `polling` is null when the source doesn't deliver that stream (e.g. AD/
 // Entra/WinServer hosts have no telemetry/interfaces/lldp stream by
 // default); the caller should hide the badge in that case.
-function _assetMonitorStreamSource(asset, stream) {
-  if (!asset) return { polling: null, source: "—" };
-  var integration = asset.discoveredByIntegration;
-
-  // Asset source: which integration discovered this asset, or "Manual".
+// Append the parent FortiGate name when the asset is a managed
+// FortiSwitch or FortiAP under an FMG/FortiGate integration. The chain
+// "FortiManager · <fmg> → <FortiGate>" tells the operator which
+// controller actually answers polls for this device. Returns the bare
+// integration name otherwise. `joiner` controls the prefix between the
+// integration label and integration name (": " for the Source detail row,
+// " · " for the chart-badge style).
+function _assetIntegrationLabelWithController(asset, joiner) {
+  var integration = asset && asset.discoveredByIntegration;
+  if (!integration) return "Manual";
   var typeLabels = {
     fortimanager:    "FortiManager",
     fortigate:       "FortiGate",
@@ -3651,9 +3656,26 @@ function _assetMonitorStreamSource(asset, stream) {
     entraid:         "Entra ID",
     windowsserver:   "Windows Server",
   };
-  var sourceName = integration
-    ? ((typeLabels[integration.type] || integration.type) + " · " + integration.name)
-    : "Manual";
+  var label = (typeLabels[integration.type] || integration.type) + joiner + integration.name;
+  if (asset.assetType !== "switch" && asset.assetType !== "access_point") return label;
+  if (integration.type !== "fortimanager" && integration.type !== "fortigate") return label;
+  var controller = asset.fortinetTopology && asset.fortinetTopology.controllerFortigate;
+  if (!controller) return label;
+  // Standalone FortiGate integrations: integration.name IS the controller —
+  // suppress the redundant "→ same-name" suffix.
+  if (typeof controller === "string" && controller.toLowerCase() === String(integration.name || "").toLowerCase()) {
+    return label;
+  }
+  return label + " → " + controller;
+}
+
+function _assetMonitorStreamSource(asset, stream) {
+  if (!asset) return { polling: null, source: "—" };
+  var integration = asset.discoveredByIntegration;
+
+  // Asset source: which integration discovered this asset (with the parent
+  // FortiGate appended for managed switches/APs), or "Manual".
+  var sourceName = _assetIntegrationLabelWithController(asset, " · ");
 
   // Per-asset polling override wins; otherwise show the source default for
   // this stream. This is a coarse view (skips class-override / tier-3 layers
@@ -3698,19 +3720,12 @@ function assetMonitoringViewHTML(a) {
       '<span style="color:var(--color-text-secondary)">Monitoring is disabled for this asset. Enable it from the Edit modal’s Monitoring tab.</span>' +
     '</div>';
   }
-  // Source label: integration name when integration-discovered, else
-  // credential name + polling method, else bare polling method.
-  var sourceLabel = "—";
-  var integ = a.discoveredByIntegration;
-  if (integ) {
-    var integTypeLabels = {
-      fortimanager:    "FortiManager",
-      fortigate:       "FortiGate",
-      activedirectory: "Active Directory",
-      entraid:         "Entra ID",
-      windowsserver:   "Windows Server",
-    };
-    sourceLabel = (integTypeLabels[integ.type] || integ.type) + ": " + integ.name;
+  // Source label: integration name (with parent FortiGate appended for
+  // managed switches/APs) when integration-discovered, else credential
+  // name + polling method, else bare polling method.
+  var sourceLabel;
+  if (a.discoveredByIntegration) {
+    sourceLabel = _assetIntegrationLabelWithController(a, ": ");
   } else {
     var rtPolling = a.responseTimePolling || "icmp";
     if (a.monitorCredential) sourceLabel = rtPolling.toUpperCase() + " · " + a.monitorCredential.name;
