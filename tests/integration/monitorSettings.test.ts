@@ -17,52 +17,19 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
 import { app } from "../../src/app.js";
 import { prisma } from "../../src/db.js";
-import { hashPassword } from "../../src/utils/password.js";
+import { authedAgent, dbReachable, dbDescribe, ensureTestUser } from "./_helpers.js";
 
-const TEST_USERNAME = "polaris-monset-tester";
-const TEST_PASSWORD = "test-password-do-not-use-in-prod";
-
-// Probe DB reachability at file-load time so we can cleanly skip the whole
-// suite in environments where DATABASE_URL is unset (CI without the dev DB)
-// or set but unreachable (offline laptop). When the probe fails we use
-// `describe.skip` so vitest reports the suite as skipped rather than red —
-// the integration tests are valuable when the DB is available and a no-op
-// otherwise.
-const dbReachable = await (async () => {
-  if (!process.env.DATABASE_URL) return false;
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-    return true;
-  } catch {
-    return false;
-  }
-})();
-
-const d = dbReachable ? describe : describe.skip;
-
-if (!dbReachable) {
-  // eslint-disable-next-line no-console
-  console.warn("[monitorSettings.test] Skipped — DATABASE_URL not set or DB unreachable.");
-}
+const d = dbDescribe;
+let TEST_USERNAME = "";
 
 beforeAll(async () => {
   if (!dbReachable) return;
   await prisma.$connect();
-  // Idempotent admin user — created once for the whole file.
-  await prisma.user.deleteMany({ where: { username: TEST_USERNAME } });
-  await prisma.user.create({
-    data: {
-      username:     TEST_USERNAME,
-      passwordHash: await hashPassword(TEST_PASSWORD),
-      role:         "admin",
-      authProvider: "local",
-    },
-  });
+  ({ username: TEST_USERNAME } = await ensureTestUser());
 });
 
 afterAll(async () => {
   if (!dbReachable) return;
-  await prisma.user.deleteMany({ where: { username: TEST_USERNAME } });
   await prisma.$disconnect();
 });
 
@@ -85,30 +52,6 @@ beforeEach(async () => {
 // ─── Test helpers ──────────────────────────────────────────────────────────
 
 /**
- * Build a logged-in supertest agent for the test admin user. The agent
- * holds the session cookie + the polaris_csrf cookie across requests; the
- * returned `csrf` string is what mutating requests must echo in the
- * `X-CSRF-Token` header.
- */
-async function authedAgent(): Promise<{ agent: ReturnType<typeof request.agent>; csrf: string }> {
-  const agent = request.agent(app);
-  // GET first so the session-pinned CSRF cookie gets set before login.
-  await agent.get("/api/v1/auth/me");
-  const loginResp = await agent
-    .post("/api/v1/auth/login")
-    .send({ username: TEST_USERNAME, password: TEST_PASSWORD })
-    .set("Content-Type", "application/json");
-  if (loginResp.status !== 200) {
-    throw new Error(`Login failed (${loginResp.status}): ${JSON.stringify(loginResp.body)}`);
-  }
-  // Pull the CSRF token from the agent's cookie jar.
-  const cookies = (agent.jar as any).getCookies("http://127.0.0.1/");
-  const csrf = (cookies.find((c: any) => c.key === "polaris_csrf") || {}).value || "";
-  if (!csrf) throw new Error("CSRF cookie not set after login");
-  return { agent, csrf };
-}
-
-/**
  * Default tier-3 settings that satisfy TierSettingsSchema in
  * src/api/routes/monitorSettings.ts. Tests spread overrides on top.
  */
@@ -129,7 +72,7 @@ function defaultTierSettings(): Record<string, unknown> {
 
 d("PUT /api/v1/monitor-settings/manual", () => {
   it("upserts the manual tier (including polling fields) and returns the saved values", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const body = {
       ...defaultTierSettings(),
       responseTimePolling: "snmp",
@@ -152,7 +95,7 @@ d("PUT /api/v1/monitor-settings/manual", () => {
   });
 
   it("rejects probeTimeoutMs below 100 with a 400", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const resp = await agent
       .put("/api/v1/monitor-settings/manual")
       .set("X-CSRF-Token", csrf)
@@ -161,7 +104,7 @@ d("PUT /api/v1/monitor-settings/manual", () => {
   });
 
   it("emits a monitor_settings.manual.updated audit Event", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     await agent
       .put("/api/v1/monitor-settings/manual")
       .set("X-CSRF-Token", csrf)
@@ -178,7 +121,7 @@ d("PUT /api/v1/monitor-settings/manual", () => {
 
 d("PUT /api/v1/monitor-settings/integration/:id", () => {
   it("rejects WinRM polling on a FortiManager integration with a 400", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const integ = await prisma.integration.create({
       data: { type: "fortimanager", name: "FMG-test", config: {} },
     });
@@ -192,7 +135,7 @@ d("PUT /api/v1/monitor-settings/integration/:id", () => {
   });
 
   it("accepts SNMP polling on a FortiManager integration and writes monitorSettings", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const integ = await prisma.integration.create({
       data: { type: "fortimanager", name: "FMG-test", config: { useProxy: true } },
     });
@@ -209,7 +152,7 @@ d("PUT /api/v1/monitor-settings/integration/:id", () => {
   });
 
   it("rejects REST API polling on an Active Directory integration", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const integ = await prisma.integration.create({
       data: { type: "activedirectory", name: "AD-test", config: {} },
     });
@@ -226,7 +169,7 @@ d("PUT /api/v1/monitor-settings/integration/:id", () => {
 
 d("POST /api/v1/monitor-settings/class-overrides", () => {
   it("creates a manual-scope override accepting any polling method (winrm)", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const resp = await agent
       .post("/api/v1/monitor-settings/class-overrides")
       .set("X-CSRF-Token", csrf)
@@ -241,7 +184,7 @@ d("POST /api/v1/monitor-settings/class-overrides", () => {
   });
 
   it("rejects WinRM on an integration-scoped override when the integration is FortiManager", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const integ = await prisma.integration.create({
       data: { type: "fortimanager", name: "FMG-test", config: {} },
     });
@@ -257,7 +200,7 @@ d("POST /api/v1/monitor-settings/class-overrides", () => {
   });
 
   it("returns 409 when an override for (integrationId, assetType) already exists", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     await prisma.monitorClassOverride.create({
       data: { integrationId: null, assetType: "switch" },
     });
@@ -273,7 +216,7 @@ d("POST /api/v1/monitor-settings/class-overrides", () => {
 
 d("PUT /api/v1/assets/:id (polling fields)", () => {
   it("rejects WinRM polling on a FortiManager-discovered asset with a 400", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const integ = await prisma.integration.create({
       data: { type: "fortimanager", name: "FMG-test", config: {} },
     });
@@ -294,7 +237,7 @@ d("PUT /api/v1/assets/:id (polling fields)", () => {
   });
 
   it("accepts SNMP polling on a FortiManager-discovered asset", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const integ = await prisma.integration.create({
       data: { type: "fortimanager", name: "FMG-test", config: {} },
     });
@@ -316,7 +259,7 @@ d("PUT /api/v1/assets/:id (polling fields)", () => {
   });
 
   it("flips monitoredOperatorSet=true on every PUT that includes the monitored field", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const asset = await prisma.asset.create({
       data: { hostname: "test-host", assetType: "server", monitoredOperatorSet: false },
     });
@@ -331,7 +274,7 @@ d("PUT /api/v1/assets/:id (polling fields)", () => {
   });
 
   it("leaves monitoredOperatorSet alone when the PUT body omits monitored", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const asset = await prisma.asset.create({
       data: { hostname: "test-host", assetType: "server", monitoredOperatorSet: false },
     });
@@ -349,7 +292,7 @@ d("PUT /api/v1/assets/:id (polling fields)", () => {
 
 d("GET /api/v1/assets/:id/effective-monitor-settings", () => {
   it("returns the source-default polling for an asset under the manual tier with no overrides", async () => {
-    const { agent } = await authedAgent();
+    const { agent } = await authedAgent(app);
     const asset = await prisma.asset.create({
       data: { hostname: "manual-host", assetType: "server" },
     });
@@ -362,7 +305,7 @@ d("GET /api/v1/assets/:id/effective-monitor-settings", () => {
   });
 
   it("bubbles a per-asset polling override into resolved + flips provenance to 'asset'", async () => {
-    const { agent, csrf } = await authedAgent();
+    const { agent, csrf } = await authedAgent(app);
     const integ = await prisma.integration.create({
       data: { type: "fortimanager", name: "FMG-test", config: {} },
     });
