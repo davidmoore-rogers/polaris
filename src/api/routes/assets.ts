@@ -169,8 +169,13 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
 function clampMonitoredState(data: Record<string, unknown>): void {
   const monitored = data.monitored === undefined ? undefined : Boolean(data.monitored);
   if (monitored === false) {
-    // Clear the failure counter so the next enable starts clean.
     data.consecutiveFailures = 0;
+  } else if (monitored === true) {
+    // Reset probe state so the pill always starts at Recovering on re-enable
+    // rather than carrying over stale Down/Warning from the previous session.
+    data.monitorStatus = "recovering";
+    data.consecutiveFailures = 0;
+    data.consecutiveSuccesses = 0;
   }
 }
 
