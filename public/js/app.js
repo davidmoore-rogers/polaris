@@ -1049,7 +1049,7 @@ function clearPageControls(containerId) {
   if (topEl) topEl.innerHTML = "";
 }
 
-function renderPageControls(containerId, total, pageSize, currentPage, onPageChange, onSizeChange) {
+function renderPageControls(containerId, total, pageSize, currentPage, onPageChange, onSizeChange, opts) {
   var containers = [];
   var mainEl = document.getElementById(containerId);
   if (mainEl) containers.push(mainEl);
@@ -1100,6 +1100,19 @@ function renderPageControls(containerId, total, pageSize, currentPage, onPageCha
         onPageChange(parseInt(btn.getAttribute("data-page"), 10));
       });
     });
+    if (opts && opts.actionButtons && opts.actionButtons.length) {
+      container.style.position = "relative";
+      var btnWrap = document.createElement("span");
+      btnWrap.style.cssText = "position:absolute;right:0;display:flex;gap:6px;align-items:center;";
+      opts.actionButtons.forEach(function (cfg) {
+        var btn = document.createElement("button");
+        btn.className = "btn btn-secondary btn-sm" + (cfg.className ? " " + cfg.className : "");
+        btn.textContent = cfg.label;
+        btn.addEventListener("click", cfg.onClick);
+        btnWrap.appendChild(btn);
+      });
+      container.appendChild(btnWrap);
+    }
   });
 }
 

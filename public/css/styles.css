@@ -1131,6 +1131,9 @@ th.sf-th { vertical-align: top; white-space: normal; padding-bottom: 6px; }
   letter-spacing: 0;
   padding-right: 16px;
   position: relative;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .sf-multi-button::after {
   content: "▾";
