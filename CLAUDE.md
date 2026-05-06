@@ -25,7 +25,8 @@ polaris/
 │   ├── schema.prisma                # Database schema
 │   └── seed.ts
 ├── docs/
-│   └── INSTALL.md                   # Fresh-install guide (RHEL/Rocky/AlmaLinux 9, Ubuntu/Debian, Windows Server). Includes disk-sizing requirements per volume (DB ≥50 GB, app/state ≥5 GB, /var/log ≥5 GB on STIG layouts) and recovery steps for the "/var is full and Postgres is crash-looping" case. Don't follow this for upgrades — those use the in-app updater under Server Settings → Maintenance → Updates.
+│   ├── INSTALL.md                   # Fresh-install guide (RHEL/Rocky/AlmaLinux 9, Ubuntu/Debian, Windows Server). Includes disk-sizing requirements per volume (DB ≥50 GB, app/state ≥5 GB, /var/log ≥5 GB on STIG layouts) and recovery steps for the "/var is full and Postgres is crash-looping" case. Don't follow this for upgrades — those use the in-app updater under Server Settings → Maintenance → Updates.
+│   └── fmg-discovery.md             # FortiManager discovery decision tree (operator-facing): transport mode (proxy vs direct), roster filtering, per-class stamping for FortiGates / FortiSwitches / FortiAPs, push toggles, projection apply. Companion to the phase-by-phase narrative in CLAUDE.md's "FMG Discovery Workflow" section.
 ├── scripts/
 │   ├── test-fmg.mjs                 # FortiManager integration test harness
 │   ├── audit-multi-mac-assets.ts    # One-off: unstitch assets cross-stapled by old IP-fallback bug
@@ -1065,6 +1066,8 @@ Release-time unpush is best-effort — a device-side failure logs `reservation.u
 ---
 
 ## FMG Discovery Workflow
+
+> See `docs/fmg-discovery.md` for the at-a-glance decision tree (transport mode, roster filtering, per-class stamping, push toggles) — that doc is the operator-facing reference; this section is the phase-by-phase narrative and data shapes.
 
 ### Asset projection priority table
 
