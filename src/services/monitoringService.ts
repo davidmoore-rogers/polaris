@@ -745,56 +745,6 @@ export async function resolveMonitorSettingsWithProvenance(
   return { resolved, provenance, tier3Source, classOverrideId };
 }
 
-// ─── Per-stream transport overrides ─────────────────────────────────────────
-//
-// FMG/FortiGate-discovered firewalls (assets with monitorType=fortimanager or
-// fortigate) can have individual streams — response-time probe, telemetry,
-// interfaces — independently rerouted from the default REST API to SNMP.
-// Useful for branch-class FortiGates whose REST endpoints 404 (sensor-info on
-// 7.4.x) or are slow (system/status). Three tiers:
-//
-//   1. Asset-level override     (Asset.monitor{ResponseTime,Telemetry,Interfaces}Source)
-//   2. Integration-level toggle (Integration.config.monitor{...}Source)
-//   3. Default                   "rest"
-//
-// Only consulted when the asset's monitorType resolves to fortimanager or
-// fortigate. Operators who switched the asset to a generic snmp/winrm/ssh/icmp
-// monitorType bypass this entirely — those follow monitorType end-to-end.
-//
-// IPsec is always REST regardless of toggle: SNMP has no equivalent and we
-// don't want toggling "interfaces" off REST to silently kill IPsec history.
-
-export type MonitorTransport = "rest" | "snmp";
-export type MonitorTransportStream = "responseTime" | "telemetry" | "interfaces" | "lldp";
-
-interface MonitorTransportSources {
-  monitorResponseTimeSource?: string | null;
-  monitorTelemetrySource?:    string | null;
-  monitorInterfacesSource?:   string | null;
-  monitorLldpSource?:         string | null;
-}
-
-function normalizeTransport(v: unknown): MonitorTransport | null {
-  return v === "rest" || v === "snmp" ? v : null;
-}
-
-export function resolveMonitorTransport(
-  asset: MonitorTransportSources,
-  integration: { config?: unknown } | null | undefined,
-  stream: MonitorTransportStream,
-): MonitorTransport {
-  const intCfg = (integration?.config && typeof integration.config === "object")
-    ? (integration.config as Record<string, unknown>)
-    : {};
-  let assetVal: string | null | undefined;
-  let intVal:   unknown;
-  if      (stream === "responseTime") { assetVal = asset.monitorResponseTimeSource; intVal = intCfg.monitorResponseTimeSource; }
-  else if (stream === "telemetry")    { assetVal = asset.monitorTelemetrySource;    intVal = intCfg.monitorTelemetrySource; }
-  else if (stream === "interfaces")   { assetVal = asset.monitorInterfacesSource;   intVal = intCfg.monitorInterfacesSource; }
-  else                                { assetVal = asset.monitorLldpSource;         intVal = intCfg.monitorLldpSource; }
-  return normalizeTransport(assetVal) ?? normalizeTransport(intVal) ?? "rest";
-}
-
 /**
  * Resolve the SNMP credential config to use when an FMG/FortiGate-typed asset
  * has a transport toggle flipped to "snmp". Asset's own monitorCredential wins
@@ -1429,40 +1379,52 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
   });
   if (!asset)            return { supported: false, error: "Asset not found" };
   if (!asset.monitored)  return { supported: false };
-  if (!asset.monitorType) return { supported: false };
-  const type = asset.monitorType as MonitorType;
+
+  // Resolve the per-stream polling method. Source-default fallback gives us
+  // a value (rest_api on Fortinet, null on AD/Entra/Win/Manual since the
+  // telemetry stream isn't delivered there by default).
+  const effective = await resolveMonitorSettings({
+    ...asset,
+    discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+  });
+  const polling = effective.telemetryPolling;
+  if (!polling) return { supported: false };
+
+  // FQDN fallback for credentialed methods that resolve hostnames natively.
   const targetIp =
     asset.ipAddress ||
-    (type === "activedirectory" ? (asset.dnsName || asset.hostname) : null);
+    ((polling === "winrm" || polling === "ssh") ? (asset.dnsName || asset.hostname) : null);
   if (!targetIp) return { supported: false, error: "Asset has no IP address" };
 
+  const integration   = asset.discoveredByIntegration ?? null;
+  const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+
   try {
-    if (type === "fortimanager" || type === "fortigate") {
-      if (!asset.discoveredByIntegration) return { supported: true, error: "Originating integration not found" };
-      const transport = resolveMonitorTransport(asset, asset.discoveredByIntegration, "telemetry");
-      if (transport === "snmp") {
-        const credConfig = await loadSnmpCredentialConfigForFortinetAsset(asset, asset.discoveredByIntegration);
-        const data = await collectTelemetrySnmp(targetIp, credConfig, asset.manufacturer, asset.model, asset.os);
-        return { supported: true, data };
+    if (polling === "rest_api") {
+      // Telemetry over REST API is FortiOS-specific. Manual REST API
+      // credentials don't yet have a telemetry shape — `{ supported: false }`
+      // until that lands.
+      if (!isFortinetSrc || !integration) return { supported: false };
+      const data = await collectTelemetryFortinet(targetIp, integration as any);
+      return { supported: true, data };
+    }
+    if (polling === "snmp") {
+      // Asset's own SNMP credential wins; Fortinet-discovered firewalls fall
+      // back to the integration's monitorCredentialId (matches probe and
+      // collectSystemInfo).
+      let snmpCfg: Record<string, unknown>;
+      if (asset.monitorCredential?.type === "snmp") {
+        snmpCfg = asset.monitorCredential.config as Record<string, unknown>;
+      } else if (isFortinetSrc && integration) {
+        snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(asset, integration);
+      } else {
+        return { supported: true, error: "No SNMP credential selected" };
       }
-      const data = await collectTelemetryFortinet(targetIp, asset.discoveredByIntegration as any);
+      const data = await collectTelemetrySnmp(targetIp, snmpCfg, asset.manufacturer, asset.model, asset.os);
       return { supported: true, data };
     }
-    if (type === "snmp") {
-      if (!asset.monitorCredential) return { supported: true, error: "No SNMP credential selected" };
-      const data = await collectTelemetrySnmp(
-        targetIp,
-        asset.monitorCredential.config as Record<string, unknown>,
-        asset.manufacturer,
-        asset.model,
-        asset.os,
-      );
-      return { supported: true, data };
-    }
-    if (type === "winrm" || type === "activedirectory") {
-      // TODO: implement WMI Enumerate over WS-Management. Tracked separately.
-      return { supported: false };
-    }
+    // winrm / ssh / icmp don't yet deliver telemetry. WinRM via WMI
+    // Enumerate-over-WS-Management is tracked separately.
     return { supported: false };
   } catch (err: any) {
     return { supported: true, error: err?.message || "Telemetry collection failed" };
@@ -1486,50 +1448,64 @@ export async function collectFastFiltered(assetId: string): Promise<CollectionRe
   });
   if (!asset)            return { supported: false, error: "Asset not found" };
   if (!asset.monitored)  return { supported: false };
-  if (!asset.monitorType) return { supported: false };
   const wantedIfaces  = (asset.monitoredInterfaces   || []) as string[];
   const wantedStorage = (asset.monitoredStorage      || []) as string[];
   const wantedTunnels = (asset.monitoredIpsecTunnels || []) as string[];
   if (wantedIfaces.length === 0 && wantedStorage.length === 0 && wantedTunnels.length === 0) {
     return { supported: false };
   }
-  const type = asset.monitorType as MonitorType;
+
+  const effective = await resolveMonitorSettings({
+    ...asset,
+    discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+  });
+  const polling = effective.interfacesPolling;
+  if (!polling) return { supported: false };
+
   const targetIp =
     asset.ipAddress ||
-    (type === "activedirectory" ? (asset.dnsName || asset.hostname) : null);
+    ((polling === "winrm" || polling === "ssh") ? (asset.dnsName || asset.hostname) : null);
   if (!targetIp) return { supported: false, error: "Asset has no IP address" };
+
+  const integration   = asset.discoveredByIntegration ?? null;
+  const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
 
   try {
     let full: SystemInfoSample;
-    if (type === "fortimanager" || type === "fortigate") {
-      if (!asset.discoveredByIntegration) return { supported: true, error: "Originating integration not found" };
-      const transport = resolveMonitorTransport(asset, asset.discoveredByIntegration, "interfaces");
-      if (transport === "snmp") {
-        const credConfig = await loadSnmpCredentialConfigForFortinetAsset(asset, asset.discoveredByIntegration);
-        // Fast cadence skips LLDP — neighbors don't change between system-info
-        // passes often enough to be worth re-walking the table once a minute.
-        full = await collectSystemInfoSnmp(targetIp, credConfig, { includeLldp: false });
-        applyFortiInterfaceFilter(full.interfaces, asset.discoveredByIntegration as any);
-        // IPsec always on REST. Only fetch when a tunnel is actually pinned —
-        // /api/v2/monitor/vpn/ipsec is slow and we don't want to hit it on
-        // the fast cadence unless asked.
+    if (polling === "rest_api") {
+      if (!isFortinetSrc || !integration) return { supported: false };
+      // Only ask FortiOS for IPsec when a tunnel is actually pinned —
+      // /api/v2/monitor/vpn/ipsec is the slow endpoint we want to avoid on
+      // the fast cadence. Fast cadence always skips LLDP — neighbors don't
+      // change between full system-info passes often enough to merit
+      // re-walking the table once a minute.
+      full = await collectSystemInfoFortinet(targetIp, integration as any, {
+        includeIpsec: wantedTunnels.length > 0,
+        includeLldp:  false,
+      });
+    } else if (polling === "snmp") {
+      let snmpCfg: Record<string, unknown>;
+      if (asset.monitorCredential?.type === "snmp") {
+        snmpCfg = asset.monitorCredential.config as Record<string, unknown>;
+      } else if (isFortinetSrc && integration) {
+        snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(asset, integration);
+      } else {
+        return { supported: true, error: "No SNMP credential selected" };
+      }
+      full = await collectSystemInfoSnmp(targetIp, snmpCfg, { includeLldp: false });
+      // Fortinet-discovered firewalls running SNMP still benefit from the
+      // integration's interface filter (CMDB blocklist) and from the FortiOS
+      // IPsec overlay — the two endpoints are independent of the SNMP path.
+      if (isFortinetSrc && integration) {
+        applyFortiInterfaceFilter(full.interfaces, integration as any);
         if (wantedTunnels.length > 0) {
-          const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, asset.discoveredByIntegration as any);
+          const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any);
           if (ipsec !== undefined) full.ipsecTunnels = ipsec;
         }
-      } else {
-        // Only ask FortiOS for IPsec when we actually have a pinned tunnel —
-        // /api/v2/monitor/vpn/ipsec is the slow endpoint we're trying to avoid
-        // on the fast cadence. Fast cadence skips LLDP for the same reason.
-        full = await collectSystemInfoFortinet(targetIp, asset.discoveredByIntegration as any, {
-          includeIpsec: wantedTunnels.length > 0,
-          includeLldp:  false,
-        });
       }
-    } else if (type === "snmp") {
-      if (!asset.monitorCredential) return { supported: true, error: "No SNMP credential selected" };
-      full = await collectSystemInfoSnmp(targetIp, asset.monitorCredential.config as Record<string, unknown>, { includeLldp: false });
     } else {
+      // winrm / ssh / icmp don't yet deliver interfaces / storage. Same
+      // story as collectTelemetry.
       return { supported: false };
     }
     const wantIf = new Set(wantedIfaces);
@@ -1611,50 +1587,74 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
   });
   if (!asset)            return { supported: false, error: "Asset not found" };
   if (!asset.monitored)  return { supported: false };
-  if (!asset.monitorType) return { supported: false };
-  const type = asset.monitorType as MonitorType;
+
+  const effective = await resolveMonitorSettings({
+    ...asset,
+    discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+  });
+  const interfacesPolling = effective.interfacesPolling;
+  const lldpPolling       = effective.lldpPolling;
+  // No interfaces stream → no system-info to collect. LLDP-only without an
+  // interfaces context isn't meaningful (we'd have nothing to attach the
+  // neighbors to in the System tab table).
+  if (!interfacesPolling) return { supported: false };
+
   const targetIp =
     asset.ipAddress ||
-    (type === "activedirectory" ? (asset.dnsName || asset.hostname) : null);
+    ((interfacesPolling === "winrm" || interfacesPolling === "ssh") ? (asset.dnsName || asset.hostname) : null);
   if (!targetIp) return { supported: false, error: "Asset has no IP address" };
 
+  const integration   = asset.discoveredByIntegration ?? null;
+  const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+
   try {
-    if (type === "fortimanager" || type === "fortigate") {
-      if (!asset.discoveredByIntegration) return { supported: true, error: "Originating integration not found" };
-      const integration = asset.discoveredByIntegration;
-      const interfacesTransport = resolveMonitorTransport(asset, integration, "interfaces");
-      const lldpTransport       = resolveMonitorTransport(asset, integration, "lldp");
-      // LLDP can be toggled independently of interfaces. Pre-load the SNMP
-      // credential lazily — only if either stream actually needs it.
+    if (interfacesPolling === "rest_api" || interfacesPolling === "snmp") {
+      // Mixed-transport branch: interfaces and LLDP can independently be
+      // REST or SNMP. Pre-load the SNMP credential only if at least one
+      // stream needs it.
       let snmpCfg: Record<string, unknown> | null = null;
-      const needSnmp = interfacesTransport === "snmp" || lldpTransport === "snmp";
-      if (needSnmp) snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(asset, integration);
+      const needSnmp = interfacesPolling === "snmp" || lldpPolling === "snmp";
+      if (needSnmp) {
+        if (asset.monitorCredential?.type === "snmp") {
+          snmpCfg = asset.monitorCredential.config as Record<string, unknown>;
+        } else if (isFortinetSrc && integration) {
+          snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(asset, integration);
+        } else {
+          return { supported: true, error: "No SNMP credential selected" };
+        }
+      }
+      // REST API for interfaces requires a Fortinet integration.
+      if (interfacesPolling === "rest_api" && (!isFortinetSrc || !integration)) {
+        return { supported: false };
+      }
 
       let data: SystemInfoSample;
-      if (interfacesTransport === "snmp") {
+      if (interfacesPolling === "snmp") {
         // SNMP-path interfaces+storage. Fetch LLDP via the same session iff
-        // the LLDP toggle agrees; otherwise leave it out and overlay below.
-        data = await collectSystemInfoSnmp(targetIp, snmpCfg!, { includeLldp: lldpTransport === "snmp" });
-        applyFortiInterfaceFilter(data.interfaces, integration as any);
-        // IPsec always on REST regardless of toggle — SNMP has no equivalent.
-        const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any);
-        if (ipsec !== undefined) data.ipsecTunnels = ipsec;
+        // the LLDP polling agrees; otherwise leave it out and overlay below.
+        data = await collectSystemInfoSnmp(targetIp, snmpCfg!, { includeLldp: lldpPolling === "snmp" });
+        if (isFortinetSrc && integration) {
+          applyFortiInterfaceFilter(data.interfaces, integration as any);
+          // IPsec always via REST when the source is Fortinet — SNMP has no equivalent.
+          const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any);
+          if (ipsec !== undefined) data.ipsecTunnels = ipsec;
+        }
       } else {
-        // FortiOS-path. Skip the FortiOS LLDP call when LLDP is on SNMP.
+        // FortiOS REST path. Skip the FortiOS LLDP call when LLDP is on SNMP.
         data = await collectSystemInfoFortinet(targetIp, integration as any, {
           includeIpsec: true,
-          includeLldp:  lldpTransport === "rest",
+          includeLldp:  lldpPolling === "rest_api",
         });
       }
       // Cross-transport LLDP overlay: when the chosen LLDP source differs
       // from the interfaces source we already used above.
-      if (lldpTransport === "snmp" && interfacesTransport === "rest") {
-        const neighbors = await collectLldpOnlySnmp(targetIp, snmpCfg!).catch(() => undefined);
+      if (lldpPolling === "snmp" && interfacesPolling === "rest_api" && snmpCfg) {
+        const neighbors = await collectLldpOnlySnmp(targetIp, snmpCfg).catch(() => undefined);
         if (neighbors !== undefined) {
           data.lldpNeighbors = neighbors;
           data.lldpSource    = "snmp";
         }
-      } else if (lldpTransport === "rest" && interfacesTransport === "snmp") {
+      } else if (lldpPolling === "rest_api" && interfacesPolling === "snmp" && isFortinetSrc && integration) {
         const neighbors = await collectLldpOnlyFortinet(targetIp, integration as any).catch(() => undefined);
         if (neighbors !== undefined) {
           data.lldpNeighbors = neighbors;
@@ -1663,14 +1663,7 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
       }
       return { supported: true, data };
     }
-    if (type === "snmp") {
-      if (!asset.monitorCredential) return { supported: true, error: "No SNMP credential selected" };
-      const data = await collectSystemInfoSnmp(targetIp, asset.monitorCredential.config as Record<string, unknown>);
-      return { supported: true, data };
-    }
-    if (type === "winrm" || type === "activedirectory") {
-      return { supported: false };
-    }
+    // winrm / ssh / icmp — no interfaces / storage / IPsec / LLDP support yet.
     return { supported: false };
   } catch (err: any) {
     return { supported: true, error: err?.message || "System info collection failed" };
