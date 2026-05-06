@@ -984,31 +984,18 @@ interface FortinetControllerCacheEntry {
 const FORTINET_CONTROLLER_CACHE_TTL_MS = 30_000;
 const fortinetControllerCache = new Map<string, FortinetControllerCacheEntry>();
 
+// Coalesce concurrent inventory fetches against the same controller. Without
+// this, every worker that wakes up on the same 60s tick races past the
+// cache-miss check and fires its own fmgProxyRest call — N workers × 1
+// upstream request, hammering FMG (which drops parallel sessions above
+// ~1–2 at Rogers Group's deployment, surfacing as code -11 = "permission
+// denied / session limit"). The promise-singleton pattern below funnels N
+// concurrent callers into one upstream call; the cache then absorbs
+// follow-on calls within the 30 s TTL.
+const inflightControllerFetch = new Map<string, Promise<Map<string, FortinetControllerEntry>>>();
+
 function controllerCacheKey(integrationId: string, deviceName: string, kind: "switches" | "aps"): string {
   return `${integrationId}::${deviceName}::${kind}`;
-}
-
-/**
- * Build the directly-callable FortiGateConfig for a managed device behind
- * an FMG integration in direct mode. Resolves the device's mgmt IP via FMG
- * (one CMDB lookup; cheap and parallelizable). Returns null when the
- * integration isn't configured for direct mode.
- */
-async function fmgDirectFortiGateConfig(
-  fmgConfig: FortiManagerConfig,
-  deviceName: string,
-): Promise<FortiGateConfig | null> {
-  if (fmgConfig.useProxy !== false) return null;
-  if (!fmgConfig.fortigateApiToken || !fmgConfig.mgmtInterface?.trim()) return null;
-  const mgmtIp = await resolveDeviceMgmtIpViaFmg(fmgConfig, deviceName);
-  if (!mgmtIp) return null;
-  return {
-    host: mgmtIp,
-    port: 443,
-    apiUser: fmgConfig.fortigateApiUser || "",
-    apiToken: fmgConfig.fortigateApiToken,
-    verifySsl: fmgConfig.fortigateVerifySsl === true,
-  };
 }
 
 async function fetchFortinetControllerInventory(
@@ -1022,54 +1009,110 @@ async function fetchFortinetControllerInventory(
   if (cached && Date.now() - cached.fetchedAt < FORTINET_CONTROLLER_CACHE_TTL_MS) {
     return cached.inventory;
   }
+  // If another worker already kicked off the fetch for this controller +
+  // kind, wait on its promise instead of firing our own. Critical at scale
+  // — the alternative is N concurrent upstream calls per controller per
+  // 60s tick. In proxy mode that hits FMG's parallel-session limit (code
+  // -11 "invalid or expired API token"); in direct mode it hits the
+  // FortiGate's REST-admin session limit (token lockouts). The promise-
+  // singleton below funnels N concurrent callers into one outbound call
+  // regardless of mode; the 30s cache absorbs follow-on calls.
+  const inflight = inflightControllerFetch.get(cacheKey);
+  if (inflight) return inflight;
 
-  const path = kind === "switches"
-    ? "/api/v2/monitor/switch-controller/managed-switch/status"
-    : "/api/v2/monitor/wifi/managed_ap";
+  const fetchPromise = (async () => {
+    try {
+      const path = kind === "switches"
+        ? "/api/v2/monitor/switch-controller/managed-switch/status"
+        : "/api/v2/monitor/wifi/managed_ap";
 
-  let rawRows: unknown;
-  if (integration.type === "fortimanager") {
-    const fmgConfig = integration.config as unknown as FortiManagerConfig;
-    const direct = await fmgDirectFortiGateConfig(fmgConfig, deviceName);
-    if (direct) {
-      rawRows = await fgRequest<unknown>(direct, "GET", path, { timeoutMs });
-    } else {
-      // Proxy mode (default) — wrap in /sys/proxy/json. fmgProxyRest unwraps
-      // the FMG envelope + FortiOS envelope and returns the inner results.
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), timeoutMs);
-      try {
-        rawRows = await fmgProxyRest<unknown>(fmgConfig, deviceName, "GET", path, { signal: ac.signal });
-      } finally {
-        clearTimeout(timer);
+      let rawRows: unknown;
+      if (integration.type === "fortimanager") {
+        const fmgConfig = integration.config as unknown as FortiManagerConfig;
+        // Strict bypass: when useProxy=false the operator has explicitly
+        // opted out of FMG proxy. Polaris will never silently fall back
+        // — if the direct path can't be assembled (missing token / mgmt
+        // interface / mgmt IP not resolvable in FMG) the probe fails
+        // with a precondition-specific error so the operator sees what's
+        // misconfigured. This matters at scale because a silent
+        // fallback to proxy turns "I disabled proxy" into "I disabled
+        // proxy except when something else is wrong, in which case it
+        // silently re-enables itself and overruns FMG's session limit."
+        if (fmgConfig.useProxy === false) {
+          if (!fmgConfig.fortigateApiToken) {
+            throw new Error(
+              "Direct mode is enabled (useProxy=false) but no FortiGate API token is configured on the integration. " +
+              "Set fortigateApiToken on the integration's Settings tab, or re-enable proxy mode.",
+            );
+          }
+          if (!fmgConfig.mgmtInterface?.trim()) {
+            throw new Error(
+              "Direct mode is enabled (useProxy=false) but mgmtInterface is empty. " +
+              "Set the FortiGate management interface name (e.g. \"mgmt\", \"port1\") on the integration's Settings tab.",
+            );
+          }
+          const mgmtIp = await resolveDeviceMgmtIpViaFmg(fmgConfig, deviceName);
+          if (!mgmtIp) {
+            throw new Error(
+              `Direct mode: could not resolve ${deviceName}'s management IP via FMG ` +
+              `(no IP found on interface "${fmgConfig.mgmtInterface}" in the device CMDB).`,
+            );
+          }
+          const directConfig: FortiGateConfig = {
+            host: mgmtIp,
+            port: 443,
+            apiUser: fmgConfig.fortigateApiUser || "",
+            apiToken: fmgConfig.fortigateApiToken,
+            verifySsl: fmgConfig.fortigateVerifySsl === true,
+          };
+          rawRows = await fgRequest<unknown>(directConfig, "GET", path, { timeoutMs });
+        } else {
+          // Proxy mode (default) — wrap in /sys/proxy/json. fmgProxyRest unwraps
+          // the FMG envelope + FortiOS envelope and returns the inner results.
+          const ac = new AbortController();
+          const timer = setTimeout(() => ac.abort(), timeoutMs);
+          try {
+            rawRows = await fmgProxyRest<unknown>(fmgConfig, deviceName, "GET", path, { signal: ac.signal });
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+      } else if (integration.type === "fortigate") {
+        rawRows = await fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
+      } else {
+        throw new Error(`Unsupported integration type for Fortinet controller probe: ${integration.type}`);
       }
+
+      const rows: unknown[] = Array.isArray(rawRows)
+        ? rawRows
+        : Array.isArray((rawRows as any)?.results) ? (rawRows as any).results : [];
+      const inventory = new Map<string, FortinetControllerEntry>();
+      for (const row of rows) {
+        const r = row as Record<string, unknown>;
+        const serial = String(r.serial || r.sn || r.wtp_id || "").trim();
+        if (!serial) continue;
+        const status = String(r.status || r.state || "");
+        const connected = kind === "switches"
+          // Managed switch reports `status: "Connected" | "Disconnected"`.
+          ? status === "Connected"
+          // Managed APs report `status: "online" | "offline" | "discovered" | ...`
+          // — only "online"/"connected" count as up.
+          : (status === "online" || status === "connected");
+        inventory.set(serial.toUpperCase(), { connected, status });
+      }
+
+      fortinetControllerCache.set(cacheKey, { fetchedAt: Date.now(), inventory });
+      return inventory;
+    } finally {
+      // Always clear the inflight entry — successful fetches are now in the
+      // cache; failed fetches need a clean slate so the next call can retry
+      // without waiting on a rejected promise.
+      inflightControllerFetch.delete(cacheKey);
     }
-  } else if (integration.type === "fortigate") {
-    rawRows = await fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
-  } else {
-    throw new Error(`Unsupported integration type for Fortinet controller probe: ${integration.type}`);
-  }
+  })();
 
-  const rows: unknown[] = Array.isArray(rawRows)
-    ? rawRows
-    : Array.isArray((rawRows as any)?.results) ? (rawRows as any).results : [];
-  const inventory = new Map<string, FortinetControllerEntry>();
-  for (const row of rows) {
-    const r = row as Record<string, unknown>;
-    const serial = String(r.serial || r.sn || r.wtp_id || "").trim();
-    if (!serial) continue;
-    const status = String(r.status || r.state || "");
-    const connected = kind === "switches"
-      // Managed switch reports `status: "Connected" | "Disconnected"`.
-      ? status === "Connected"
-      // Managed APs report `status: "online" | "offline" | "discovered" | ...`
-      // — only "online"/"connected" count as up.
-      : (status === "online" || status === "connected");
-    inventory.set(serial.toUpperCase(), { connected, status });
-  }
-
-  fortinetControllerCache.set(cacheKey, { fetchedAt: Date.now(), inventory });
-  return inventory;
+  inflightControllerFetch.set(cacheKey, fetchPromise);
+  return fetchPromise;
 }
 
 async function probeFortinetController(
