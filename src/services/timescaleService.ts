@@ -116,8 +116,14 @@ export function getDetectionState(): DetectionState {
 export async function dropChunks(tableName: string, olderThan: Date): Promise<void> {
   if (!isHypertable(tableName)) return;
   try {
+    // Cast to `timestamp` (without time zone) — the sample tables' partitioning
+    // column is Prisma `DateTime` which maps to `timestamp(3)` in Postgres, so
+    // drop_chunks rejects a `timestamptz` cutoff with SQLSTATE 22023:
+    // "invalid time argument type". The ISO string Date.toISOString() produces
+    // is UTC; Postgres strips the trailing Z when parsing into `timestamp`, so
+    // the comparison stays correct (column values are UTC by convention).
     await prisma.$executeRawUnsafe(
-      `SELECT drop_chunks($1::regclass, $2::timestamptz)`,
+      `SELECT drop_chunks($1::regclass, $2::timestamp)`,
       tableName,
       olderThan.toISOString(),
     );
