@@ -33,6 +33,11 @@ import { Client as SshClient } from "ssh2";
 
 import { prisma } from "../db.js";
 import { fgRequest, type FortiGateConfig } from "./fortigateService.js";
+import {
+  fmgProxyRest,
+  resolveDeviceMgmtIpViaFmg,
+  type FortiManagerConfig,
+} from "./fortimanagerService.js";
 import { logEvent } from "../api/routes/events.js";
 import { logger } from "../utils/logger.js";
 import { resolveOidSync, ensureRegistryLoaded } from "./oidRegistry.js";
@@ -809,6 +814,23 @@ export async function probeAsset(assetId: string): Promise<ProbeResult> {
     const polling   = effective.responseTimePolling;
     if (!polling) return finish(start, false, "No response-time polling method configured");
 
+    const integration  = asset.discoveredByIntegration ?? null;
+    const sourceKind   = assetSourceKindFromIntegrationType(integration?.type ?? null);
+    const isFortinetSrc = sourceKind === "fortimanager" || sourceKind === "fortigate";
+    const isAdSrc       = sourceKind === "activedirectory";
+
+    // REST-API probes for managed FortiSwitches/FortiAPs query the parent
+    // FortiGate's controller-status table, not the asset itself — so they
+    // don't need an asset IP and dispatch before the IP guard below.
+    if (
+      polling === "rest_api" &&
+      isFortinetSrc &&
+      integration &&
+      (asset.assetType === "switch" || asset.assetType === "access_point")
+    ) {
+      return await probeFortinetController(asset, integration as any, start, timeoutMs);
+    }
+
     // AD-discovered Windows hosts often have no IP yet (only dnsName/hostname),
     // and WinRM/SSH resolve FQDNs fine — fall back so the probe can still run
     // when the polling method is one that doesn't need an IPv4 literal.
@@ -816,19 +838,15 @@ export async function probeAsset(assetId: string): Promise<ProbeResult> {
     const targetIp =
       asset.ipAddress ||
       ((polling === "winrm" || polling === "ssh") ? adFallback : null);
-    // ICMP needs an IP — bail clearly if we have neither.
     if (!targetIp) return finish(start, false, "Asset has no IP address");
-
-    const integration  = asset.discoveredByIntegration ?? null;
-    const sourceKind   = assetSourceKindFromIntegrationType(integration?.type ?? null);
-    const isFortinetSrc = sourceKind === "fortimanager" || sourceKind === "fortigate";
-    const isAdSrc       = sourceKind === "activedirectory";
 
     if (polling === "icmp") {
       return await probeIcmp(targetIp, start, timeoutMs);
     }
     if (polling === "rest_api") {
       // Fortinet-discovered firewalls reuse the integration's stored API token.
+      // (Managed FortiSwitches/FortiAPs are dispatched earlier, above, since
+      // they query the parent FortiGate rather than the asset's own IP.)
       // Manual REST API targets pull from a stored "restapi"-typed credential.
       if (isFortinetSrc && integration) {
         return await probeFortinet(targetIp, integration as any, start, timeoutMs);
@@ -935,6 +953,170 @@ async function probeFortinet(
     return finish(start, true);
   } catch (err: any) {
     return finish(start, false, err?.message || "FortiOS request failed");
+  }
+}
+
+// ─── Fortinet controller-status probe (managed switches & APs) ──────────────
+//
+// Managed FortiSwitches and FortiAPs aren't directly REST-able — they're
+// proxied through the parent FortiGate's switch-controller / wireless-
+// controller subsystems. The authoritative up/down signal for them is the
+// controller's `managed-switch/status` or `wifi/managed_ap` table.
+//
+// The probe fetches the controller's full inventory in one call and looks
+// up the asset by its serial number. Multiple switches/APs on the same
+// controller share one inventory call within a short TTL window so the
+// probe rate stays bounded by controller-count, not device-count — important
+// for FMG proxy mode (concurrency = 1).
+
+interface FortinetControllerEntry {
+  /** True when the controller reports this device as currently online. */
+  connected: boolean;
+  /** Raw status string the controller reported, surfaced in failure errors. */
+  status: string;
+}
+
+interface FortinetControllerCacheEntry {
+  fetchedAt: number;
+  inventory: Map<string, FortinetControllerEntry>;
+}
+
+const FORTINET_CONTROLLER_CACHE_TTL_MS = 30_000;
+const fortinetControllerCache = new Map<string, FortinetControllerCacheEntry>();
+
+function controllerCacheKey(integrationId: string, deviceName: string, kind: "switches" | "aps"): string {
+  return `${integrationId}::${deviceName}::${kind}`;
+}
+
+/**
+ * Build the directly-callable FortiGateConfig for a managed device behind
+ * an FMG integration in direct mode. Resolves the device's mgmt IP via FMG
+ * (one CMDB lookup; cheap and parallelizable). Returns null when the
+ * integration isn't configured for direct mode.
+ */
+async function fmgDirectFortiGateConfig(
+  fmgConfig: FortiManagerConfig,
+  deviceName: string,
+): Promise<FortiGateConfig | null> {
+  if (fmgConfig.useProxy !== false) return null;
+  if (!fmgConfig.fortigateApiToken || !fmgConfig.mgmtInterface?.trim()) return null;
+  const mgmtIp = await resolveDeviceMgmtIpViaFmg(fmgConfig, deviceName);
+  if (!mgmtIp) return null;
+  return {
+    host: mgmtIp,
+    port: 443,
+    apiUser: fmgConfig.fortigateApiUser || "",
+    apiToken: fmgConfig.fortigateApiToken,
+    verifySsl: fmgConfig.fortigateVerifySsl === true,
+  };
+}
+
+async function fetchFortinetControllerInventory(
+  integration: { id: string; type: string; config: Record<string, unknown> },
+  deviceName: string,
+  kind: "switches" | "aps",
+  timeoutMs: number,
+): Promise<Map<string, FortinetControllerEntry>> {
+  const cacheKey = controllerCacheKey(integration.id, deviceName, kind);
+  const cached = fortinetControllerCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < FORTINET_CONTROLLER_CACHE_TTL_MS) {
+    return cached.inventory;
+  }
+
+  const path = kind === "switches"
+    ? "/api/v2/monitor/switch-controller/managed-switch/status"
+    : "/api/v2/monitor/wifi/managed_ap";
+
+  let rawRows: unknown;
+  if (integration.type === "fortimanager") {
+    const fmgConfig = integration.config as unknown as FortiManagerConfig;
+    const direct = await fmgDirectFortiGateConfig(fmgConfig, deviceName);
+    if (direct) {
+      rawRows = await fgRequest<unknown>(direct, "GET", path, { timeoutMs });
+    } else {
+      // Proxy mode (default) — wrap in /sys/proxy/json. fmgProxyRest unwraps
+      // the FMG envelope + FortiOS envelope and returns the inner results.
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), timeoutMs);
+      try {
+        rawRows = await fmgProxyRest<unknown>(fmgConfig, deviceName, "GET", path, { signal: ac.signal });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  } else if (integration.type === "fortigate") {
+    rawRows = await fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
+  } else {
+    throw new Error(`Unsupported integration type for Fortinet controller probe: ${integration.type}`);
+  }
+
+  const rows: unknown[] = Array.isArray(rawRows)
+    ? rawRows
+    : Array.isArray((rawRows as any)?.results) ? (rawRows as any).results : [];
+  const inventory = new Map<string, FortinetControllerEntry>();
+  for (const row of rows) {
+    const r = row as Record<string, unknown>;
+    const serial = String(r.serial || r.sn || r.wtp_id || "").trim();
+    if (!serial) continue;
+    const status = String(r.status || r.state || "");
+    const connected = kind === "switches"
+      // Managed switch reports `status: "Connected" | "Disconnected"`.
+      ? status === "Connected"
+      // Managed APs report `status: "online" | "offline" | "discovered" | ...`
+      // — only "online"/"connected" count as up.
+      : (status === "online" || status === "connected");
+    inventory.set(serial.toUpperCase(), { connected, status });
+  }
+
+  fortinetControllerCache.set(cacheKey, { fetchedAt: Date.now(), inventory });
+  return inventory;
+}
+
+async function probeFortinetController(
+  asset: {
+    id: string;
+    assetType: string;
+    serialNumber: string | null;
+    fortinetTopology: unknown;
+  },
+  integration: { id: string; type: string; config: Record<string, unknown> },
+  start: number,
+  timeoutMs: number,
+): Promise<ProbeResult> {
+  const serial = (asset.serialNumber || "").trim();
+  if (!serial) {
+    return finish(start, false, "Cannot probe via REST API — asset has no serial number recorded");
+  }
+
+  const topology = (asset.fortinetTopology ?? {}) as Record<string, unknown>;
+  let deviceName = typeof topology.controllerFortigate === "string" ? topology.controllerFortigate.trim() : "";
+  // For standalone FortiGate integrations, the FortiGate IS the controller —
+  // the integration's own host is the right target regardless of what's
+  // recorded on the asset's topology blob.
+  if (!deviceName && integration.type === "fortigate") {
+    const cfg = integration.config as Record<string, unknown>;
+    deviceName = String(cfg.host || "");
+  }
+  if (!deviceName) {
+    return finish(start, false, "Cannot probe via REST API — asset has no controller FortiGate recorded");
+  }
+
+  const kind: "switches" | "aps" = asset.assetType === "access_point" ? "aps" : "switches";
+
+  try {
+    const inventory = await fetchFortinetControllerInventory(integration, deviceName, kind, timeoutMs);
+    const entry = inventory.get(serial.toUpperCase());
+    if (!entry) {
+      const label = kind === "switches" ? "managed-switch" : "managed-AP";
+      return finish(start, false, `Not present in ${deviceName}'s ${label} table`);
+    }
+    if (entry.connected) {
+      return finish(start, true);
+    }
+    const role = kind === "switches" ? "switch" : "AP";
+    return finish(start, false, `Controller reports ${role} status: ${entry.status || "Disconnected"}`);
+  } catch (err: any) {
+    return finish(start, false, err?.message || "Controller query failed");
   }
 }
 
