@@ -1881,12 +1881,6 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   align-items: stretch;
   gap: 2px;
 }
-/* When a detail-row is placed inside an asset-view-grid (or any 2-column
- * grid) and needs to use the full row width — e.g. the Last Hour
- * intermittency bar, where 50% of the column is too narrow to read
- * sample-by-sample. */
-.detail-row.full-span { grid-column: 1 / -1; }
-.detail-row.full-span .detail-value { flex: 1; }
 .detail-row.stacked .detail-value { text-align: left; }
 .empty-state-card {
   background: var(--color-bg-primary);
