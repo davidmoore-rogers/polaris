@@ -1825,11 +1825,40 @@ async function openViewModal(id) {
     document.querySelectorAll(".asset-system-range-btn").forEach(function (b) {
       b.addEventListener("click", function () {
         var range = b.getAttribute("data-range");
+        var panel = document.getElementById("asset-system-custom-panel");
+        if (range === "custom") {
+          if (!panel) return;
+          var willOpen = panel.style.display === "none";
+          panel.style.display = willOpen ? "flex" : "none";
+          if (willOpen) {
+            var toInput = document.getElementById("asset-system-to");
+            var fromInput = document.getElementById("asset-system-from");
+            if (toInput && !toInput.value) toInput.value = _toLocalDatetimeInput(new Date());
+            if (fromInput && !fromInput.value) fromInput.value = _toLocalDatetimeInput(new Date(Date.now() - 24 * 3600 * 1000));
+          }
+          return;
+        }
+        if (panel) panel.style.display = "none";
         document.querySelectorAll(".asset-system-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
         b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
         _loadSystemTabFor(a.id, range, a);
       });
     });
+    var sysApplyBtn = document.getElementById("btn-asset-system-custom-apply");
+    if (sysApplyBtn) {
+      sysApplyBtn.addEventListener("click", function () {
+        var fromInput = document.getElementById("asset-system-from");
+        var toInput   = document.getElementById("asset-system-to");
+        if (!fromInput.value || !toInput.value) { showToast("Enter both From and To", "error"); return; }
+        var fromIso = new Date(fromInput.value).toISOString();
+        var toIso   = new Date(toInput.value).toISOString();
+        if (new Date(fromIso) >= new Date(toIso)) { showToast("From must be before To", "error"); return; }
+        document.querySelectorAll(".asset-system-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+        var customBtn = document.getElementById("btn-asset-system-custom");
+        if (customBtn) { customBtn.classList.remove("btn-secondary"); customBtn.classList.add("btn-primary"); }
+        _loadSystemTabFor(a.id, { from: fromIso, to: toIso }, a);
+      });
+    }
     var probeBtn = document.getElementById("btn-asset-probe-now");
     if (probeBtn) {
       probeBtn.addEventListener("click", async function () {
@@ -1956,7 +1985,8 @@ function assetSystemViewHTML(a) {
     '<button class="btn btn-sm btn-primary asset-system-range-btn" data-range="1h">1h</button>' +
     '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="24h">24h</button>' +
     '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="7d">7d</button>' +
-    '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="30d">30d</button>';
+    '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="30d">30d</button>' +
+    '<button class="btn btn-sm btn-secondary asset-system-range-btn" data-range="custom" id="btn-asset-system-custom">Custom…</button>';
   // CPU/Memory + Temperatures share the Telemetry stream — the same toggle
   // controls both, so they get the same source badge. Interfaces is its
   // own stream. Storage and LLDP ride the same stream as Interfaces.
@@ -1973,6 +2003,11 @@ function assetSystemViewHTML(a) {
   }
   return (
     sectionHeader("CPU &amp; Memory", telemetryBadge, true) +
+    '<div id="asset-system-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
+      '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="asset-system-from" class="form-input" style="padding:2px 6px"></label>' +
+      '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="asset-system-to" class="form-input" style="padding:2px 6px"></label>' +
+      '<button class="btn btn-sm btn-primary" id="btn-asset-system-custom-apply">Apply</button>' +
+    '</div>' +
     '<div id="asset-system-summary" style="display:flex;gap:1.25rem;flex-wrap:wrap;font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">' +
       '<span>Loading…</span>' +
     '</div>' +
@@ -1992,7 +2027,11 @@ function assetSystemViewHTML(a) {
 
 function _currentSystemTabRange() {
   var chart = document.getElementById("asset-system-chart");
-  return (chart && chart.dataset.range) || "24h";
+  if (!chart) return "24h";
+  if (chart.dataset.from && chart.dataset.to) {
+    return { from: chart.dataset.from, to: chart.dataset.to };
+  }
+  return chart.dataset.range || "24h";
 }
 
 async function _loadSystemTabFor(assetId, range, asset, opts) {
@@ -2007,7 +2046,17 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
   var temps   = document.getElementById("asset-system-temps");
   var lldp    = document.getElementById("asset-system-lldp");
   if (!chart) return;
-  chart.dataset.range = range || "24h";
+  // Accept a range string ("24h") or a { from, to } object for custom windows.
+  var telOpts = (typeof range === "string" || !range) ? { range: range || "24h" } : range;
+  if (telOpts.from && telOpts.to) {
+    chart.dataset.from = telOpts.from;
+    chart.dataset.to = telOpts.to;
+    delete chart.dataset.range;
+  } else {
+    chart.dataset.range = telOpts.range || "24h";
+    delete chart.dataset.from;
+    delete chart.dataset.to;
+  }
   if (!silent) {
     chart.textContent = "Loading samples…";
     if (summary) summary.innerHTML = "<span>Loading…</span>";
@@ -2022,7 +2071,7 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
 
   try {
     var results = await Promise.all([
-      api.assets.telemetryHistory(assetId, range || "24h"),
+      api.assets.telemetryHistory(assetId, telOpts),
       api.assets.systemInfo(assetId),
     ]);
     var tel    = results[0];
@@ -2052,6 +2101,8 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
       if (panelBody.scrollTop !== savedScroll) panelBody.scrollTop = savedScroll;
     });
   }
+  // Custom date ranges are fixed historical windows — do not auto-refresh.
+  if (telOpts.from && telOpts.to) return;
   // Schedule next auto-refresh on the telemetry cadence (the fastest of the
   // three System-tab streams). Keep going on error so a transient blip doesn't
   // disable the chain.
@@ -3672,6 +3723,7 @@ function assetMonitoringViewHTML(a) {
     ? '<button class="btn btn-sm btn-primary" id="btn-asset-probe-now" style="margin-right:6px" title="Run a response-time probe and pull fresh telemetry + interface data">Refresh</button>'
     : '';
   var rangeBtns =
+    '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="1h">1h</button>' +
     '<button class="btn btn-sm btn-primary asset-monitor-range-btn" data-range="24h">24h</button>' +
     '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="7d">7d</button>' +
     '<button class="btn btn-sm btn-secondary asset-monitor-range-btn" data-range="30d">30d</button>' +
