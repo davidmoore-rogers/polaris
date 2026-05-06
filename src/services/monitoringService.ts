@@ -998,6 +998,53 @@ interface FortinetControllerCacheEntry {
 const FORTINET_CONTROLLER_CACHE_TTL_MS = 30_000;
 const fortinetControllerCache = new Map<string, FortinetControllerCacheEntry>();
 
+// Cache of (integrationId::deviceName) → management IP for the parent FortiGate.
+// Populated from Asset.ipAddress (set during discovery) so the probe path
+// never needs to hit FMG's CMDB just to learn an IP we already know. TTL is
+// intentionally long — management IPs change only when the operator
+// reconfigures the device, and a stale entry self-heals on the next discovery
+// run which re-stamps Asset.ipAddress. Falls back to resolveDeviceMgmtIpViaFmg
+// only when the FortiGate asset hasn't been discovered yet or has no IP set.
+const CONTROLLER_MGMT_IP_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
+interface ControllerMgmtIpEntry { ip: string; cachedAt: number; }
+const controllerMgmtIpCache = new Map<string, ControllerMgmtIpEntry>();
+
+async function resolveControllerMgmtIp(
+  integrationId: string,
+  deviceName: string,
+  fmgConfig: FortiManagerConfig,
+): Promise<string | null> {
+  const cacheKey = `${integrationId}::${deviceName}`;
+  const cached = controllerMgmtIpCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < CONTROLLER_MGMT_IP_CACHE_TTL_MS) {
+    return cached.ip;
+  }
+
+  // Primary: look up the FortiGate's already-discovered Asset.ipAddress.
+  // This is the same IP that discovery resolved via resolveDeviceMgmtIpViaFmg
+  // and stamped on the asset — no need to hit FMG again.
+  const fgAsset = await prisma.asset.findFirst({
+    where: {
+      hostname: deviceName,
+      assetType: "firewall",
+      discoveredByIntegrationId: integrationId,
+    },
+    select: { ipAddress: true },
+  });
+  if (fgAsset?.ipAddress) {
+    controllerMgmtIpCache.set(cacheKey, { ip: fgAsset.ipAddress, cachedAt: Date.now() });
+    return fgAsset.ipAddress;
+  }
+
+  // Fallback: FortiGate not yet discovered as an asset (or has no IP stamped).
+  // Hit FMG CMDB the old way so fresh installs and edge cases still work.
+  const ip = await resolveDeviceMgmtIpViaFmg(fmgConfig, deviceName);
+  if (ip) {
+    controllerMgmtIpCache.set(cacheKey, { ip, cachedAt: Date.now() });
+  }
+  return ip;
+}
+
 // Coalesce concurrent inventory fetches against the same controller. Without
 // this, every worker that wakes up on the same 60s tick races past the
 // cache-miss check and fires its own fmgProxyRest call — N workers × 1
@@ -1066,11 +1113,11 @@ async function fetchFortinetControllerInventory(
               "Set the FortiGate management interface name (e.g. \"mgmt\", \"port1\") on the integration's Settings tab.",
             );
           }
-          const mgmtIp = await resolveDeviceMgmtIpViaFmg(fmgConfig, deviceName);
+          const mgmtIp = await resolveControllerMgmtIp(integration.id, deviceName, fmgConfig);
           if (!mgmtIp) {
             throw new Error(
-              `Direct mode: could not resolve ${deviceName}'s management IP via FMG ` +
-              `(no IP found on interface "${fmgConfig.mgmtInterface}" in the device CMDB).`,
+              `Direct mode: could not resolve ${deviceName}'s management IP ` +
+              `(not found in Polaris asset inventory or FMG CMDB interface "${fmgConfig.mgmtInterface || "mgmt"}").`,
             );
           }
           const directConfig: FortiGateConfig = {
