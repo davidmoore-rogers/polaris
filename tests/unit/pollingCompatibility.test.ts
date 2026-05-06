@@ -80,7 +80,7 @@ describe("isPollingMethod type guard", () => {
   it("rejects non-method strings", () => {
     expect(isPollingMethod("rest")).toBe(false);          // legacy wire value, intentionally rejected
     expect(isPollingMethod("REST_API")).toBe(false);
-    expect(isPollingMethod("fortimanager")).toBe(false);  // monitorType, not a polling method
+    expect(isPollingMethod("fortimanager")).toBe(false);  // integration type, not a polling method
     expect(isPollingMethod("")).toBe(false);
   });
   it("rejects non-strings", () => {
