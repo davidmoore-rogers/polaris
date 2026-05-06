@@ -475,16 +475,12 @@ function _readPushQuarantineToggle() {
 // plus four checkboxes that decide which streams (response-time, telemetry,
 // interfaces, LLDP) ride SNMP vs the default FortiOS REST API. IPsec is always
 // REST regardless — SNMP has no equivalent.
-//
-// `sources` is the integration's current transport config:
-//   { responseTime: "rest"|"snmp", telemetry: ..., interfaces: ..., lldp: ... }
-// All default to "rest".
-function integrationMonitorOverrideHTML(credentials, selectedId, sources) {
-  sources = sources || {};
-  var rt = sources.responseTime === "snmp";
-  var tl = sources.telemetry    === "snmp";
-  var iv = sources.interfaces   === "snmp";
-  var ll = sources.lldp         === "snmp";
+// SNMP credential picker for the FortiGates subtab on FMG/FortiGate
+// integration modals. Per-stream polling-method selection (REST API / SNMP /
+// SSH / ICMP) lives in the Cadence & Retention section above; this picker
+// supplies the credential the SNMP-keyed streams will use. A per-asset
+// monitorCredential on the Asset's Monitoring tab takes priority.
+function integrationMonitorOverrideHTML(credentials, selectedId) {
   var snmp = (credentials || []).filter(function (c) { return c.type === "snmp"; });
   var options = '<option value="">— none —</option>' +
     snmp.map(function (c) {
@@ -492,34 +488,13 @@ function integrationMonitorOverrideHTML(credentials, selectedId, sources) {
       return '<option value="' + escapeHtml(c.id) + '"' + sel + '>' + escapeHtml(c.name) + '</option>';
     }).join("");
   var emptyHint = snmp.length === 0
-    ? '<p class="hint" style="color:var(--color-warning)">No SNMP credentials defined yet — add one under Server Settings &gt; Credentials before enabling any SNMP toggle.</p>'
-    : '<p class="hint">Used by every stream below toggled to SNMP. A per-asset credential on the Asset Monitoring tab takes precedence when set.</p>';
-  function row(id, label, checked, hint) {
-    return '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
-        '<input type="checkbox" id="' + id + '" ' + (checked ? "checked" : "") + ' style="width:auto">' +
-        '<label for="' + id + '" style="margin:0;font-weight:500">' + escapeHtml(label) + '</label>' +
-      '</div>' +
-      '<p class="hint" style="margin:-0.2rem 0 0.7rem 1.6rem">' + hint + '</p>';
-  }
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Monitoring transport</p>' +
+    ? '<p class="hint" style="color:var(--color-warning)">No SNMP credentials defined yet — add one under Server Settings &gt; Credentials before pointing any polling method at SNMP.</p>'
+    : '<p class="hint">Used by every stream above whose polling method is SNMP. A per-asset credential on the Asset Monitoring tab takes precedence when set.</p>';
+  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">SNMP credential</p>' +
     '<div class="form-group">' +
-      '<label>SNMP credential</label>' +
       '<select id="f-mon-credential">' + options + '</select>' +
       emptyHint +
     '</div>' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0.6rem 0 0.5rem">Use SNMP for</p>' +
-    row("f-mon-src-responseTime", "Response time",
-        rt,
-        'SNMP <code>sysUpTime</code> instead of FortiOS REST <code>/system/status</code>. Typically much faster.') +
-    row("f-mon-src-telemetry",    "Telemetry (CPU, memory, temperature)",
-        tl,
-        'Vendor SNMP profile + ENTITY-SENSOR/<code>fgHwSensorTable</code> instead of FortiOS REST <code>/resource/usage</code> + <code>/sensor-info</code>. Use this on branch FortiGates (40F/60F/61F/91G/101F class) whose REST sensor endpoint 404s on FortiOS 7.4.x.') +
-    row("f-mon-src-interfaces",   "Interfaces (and storage)",
-        iv,
-        'IF-MIB + HOST-RESOURCES instead of FortiOS REST <code>/system/interface</code>. IPsec tunnels stay on REST regardless — SNMP has no equivalent.') +
-    row("f-mon-src-lldp",         "LLDP neighbor discovery",
-        ll,
-        'LLDP-MIB walk (<code>lldpRemTable</code>) instead of FortiOS REST <code>/system/interface/lldp-neighbors</code>. Useful when the REST endpoint 404s on a given firmware but LLDP-MIB still reports neighbors. Decoupled from "Interfaces" so the operator can pick the working source per-stream.') +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
 }
 
@@ -913,8 +888,8 @@ function _fortigateAddMonitoredHTML(idPrefix, currentAddAsMonitored) {
 //      renders. Hidden on the Add flow (no integration id yet).
 //
 // opts: { integrationId, integrationType, integrationName, snmpCredentials,
-//         monitorCredentialId, transportSources, fortigateMonitor,
-//         fortiswitchMonitor, fortiapMonitor }
+//         monitorCredentialId, fortigateMonitor, fortiswitchMonitor,
+//         fortiapMonitor }
 function monitorSettingsFormHTML(s, opts) {
   s = s || {};
   opts = opts || {};
@@ -949,7 +924,7 @@ function monitorSettingsFormHTML(s, opts) {
 
     var fortigatePanel =
       _fortigateAddMonitoredHTML("f-mon-fortigate-", fwFgCfg.addAsMonitored === true) +
-      integrationMonitorOverrideHTML(opts.snmpCredentials, opts.monitorCredentialId, opts.transportSources || {}) +
+      integrationMonitorOverrideHTML(opts.snmpCredentials, opts.monitorCredentialId) +
       _autoMonitorInterfacesHTML("f-mon-fortigate-amon-", "FortiGate", fwFgCfg.autoMonitorInterfaces || null, "names", hasId);
 
     var switchPanel =
@@ -1836,23 +1811,6 @@ function _readMonitorCredentialId() {
   return el.value || "";
 }
 
-// Reads the per-stream transport checkboxes from the FortiGates subtab.
-// Returns { responseTime, telemetry, interfaces, lldp } as "rest" | "snmp",
-// or null when the subtab isn't on screen — caller leaves the existing config.
-function _readMonitorTransportSources() {
-  var rt = document.getElementById("f-mon-src-responseTime");
-  var tl = document.getElementById("f-mon-src-telemetry");
-  var iv = document.getElementById("f-mon-src-interfaces");
-  var ll = document.getElementById("f-mon-src-lldp");
-  if (!rt && !tl && !iv && !ll) return null;
-  return {
-    monitorResponseTimeSource: rt && rt.checked ? "snmp" : "rest",
-    monitorTelemetrySource:    tl && tl.checked ? "snmp" : "rest",
-    monitorInterfacesSource:   iv && iv.checked ? "snmp" : "rest",
-    monitorLldpSource:         ll && ll.checked ? "snmp" : "rest",
-  };
-}
-
 function _titleForType(type, action) {
   var product =
     type === "windowsserver" ? "Windows Server" :
@@ -1989,13 +1947,11 @@ async function openCreateModal(type) {
       if (isFmg || isFgt) {
         var credId = _readMonitorCredentialId();
         if (credId) createConfig.monitorCredentialId = credId;
-        var transports = _readMonitorTransportSources();
-        if (transports) {
-          createConfig.monitorResponseTimeSource = transports.monitorResponseTimeSource;
-          createConfig.monitorTelemetrySource    = transports.monitorTelemetrySource;
-          createConfig.monitorInterfacesSource   = transports.monitorInterfacesSource;
-          createConfig.monitorLldpSource         = transports.monitorLldpSource;
-        }
+        // Per-stream polling methods are part of the integration tier
+        // settings now (Cadence & Retention section); they're written to
+        // Integration.config.monitorSettings.polling by the
+        // /monitor-settings/integration/:id PUT after the integration is
+        // created — no inline fields needed on create.
         var fgBlockNew = _readFortigateMonitorBlock("f-mon-fortigate-");
         var swBlockNew = _readClassMonitorBlock("f-mon-fortiswitch-");
         var apBlockNew = _readClassMonitorBlock("f-mon-fortiap-");
@@ -2243,12 +2199,6 @@ async function openEditModal(id) {
         { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, {
           snmpCredentials: creds,
           monitorCredentialId: config.monitorCredentialId || null,
-          transportSources: {
-            responseTime: config.monitorResponseTimeSource || "rest",
-            telemetry:    config.monitorTelemetrySource    || "rest",
-            interfaces:   config.monitorInterfacesSource   || "rest",
-            lldp:         config.monitorLldpSource         || "rest",
-          },
           fortigateMonitor:   config.fortigateMonitor   || null,
           fortiswitchMonitor: config.fortiswitchMonitor || null,
           fortiapMonitor:     config.fortiapMonitor     || null,
@@ -2346,14 +2296,9 @@ async function openEditModal(id) {
         // Always send the picker value so an explicit clear round-trips.
         // Empty string is normalized to null on the server.
         editConfig.monitorCredentialId = _readMonitorCredentialId() || null;
-        // Per-stream transport toggles. Reader returns null when the subtab
-        // didn't render — leave the existing config alone in that case.
-        var transports = _readMonitorTransportSources();
-        if (transports) {
-          editConfig.monitorResponseTimeSource = transports.monitorResponseTimeSource;
-          editConfig.monitorTelemetrySource    = transports.monitorTelemetrySource;
-          editConfig.monitorInterfacesSource   = transports.monitorInterfacesSource;
-        }
+        // Per-stream polling methods are persisted via the
+        // /monitor-settings/integration/:id PUT below — they live in
+        // Integration.config.monitorSettings.polling now.
         // Per-class FortiGate / FortiSwitch / FortiAP blocks. The reader
         // returns null when its subtab didn't render — in that case leave
         // the existing config alone rather than wiping it.

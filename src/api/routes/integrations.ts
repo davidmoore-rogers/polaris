@@ -193,13 +193,6 @@ const FortiGateClassMonitorSchema = z.object({
   autoMonitorInterfaces: AutoMonitorInterfacesSchema,
 }).optional().default({ addAsMonitored: false, autoMonitorInterfaces: null });
 
-// Per-stream transport toggle. Default "rest" preserves the legacy behaviour
-// (FortiOS REST for everything). Setting to "snmp" reroutes that stream
-// through the integration's `monitorCredentialId` (or the asset's own
-// `monitorCredentialId` when set, which wins). Only consulted when the asset's
-// `monitorType` resolves to fortimanager or fortigate.
-const MonitorTransportSchema = z.enum(["rest", "snmp"]).optional().default("rest");
-
 const FortiManagerConfigSchema = z.object({
   host:      z.string().optional().default(""),
   port:      z.number().int().min(1).max(65535).optional().default(443),
@@ -221,26 +214,16 @@ const FortiManagerConfigSchema = z.object({
   fortigateApiUser:  z.string().optional().default(""),
   fortigateApiToken: z.string().optional().default(""),
   fortigateVerifySsl: z.boolean().optional().default(false),
-  // Optional: stored SNMP credential used by any per-stream transport toggle
-  // below set to "snmp". Without a credential, "snmp" toggles surface the
-  // configuration error in the System tab refresh toast.
+  // Optional: stored SNMP credential used by the integration's per-stream
+  // polling-method tier-3 setting (Integration.config.monitorSettings.polling)
+  // when the operator picks SNMP for a stream. Without a credential, the
+  // resolver falls back to the source default and SNMP-keyed streams surface
+  // a configuration error in the System tab refresh toast.
   monitorCredentialId: z.string().uuid().nullable().optional(),
-  // Per-stream transport toggles. Default "rest" preserves the legacy path
-  // (FortiOS REST) for response-time, telemetry (CPU/mem/temperature), and
-  // interfaces. "snmp" reroutes that stream through monitorCredentialId.
-  // IPsec stays on REST regardless — SNMP has no equivalent.
-  monitorResponseTimeSource: MonitorTransportSchema,
-  monitorTelemetrySource:    MonitorTransportSchema,
-  monitorInterfacesSource:   MonitorTransportSchema,
-  // LLDP runs on the system-info cadence. Decoupled from the interfaces
-  // toggle because the FortiOS LLDP REST endpoint and SNMP LLDP-MIB don't
-  // always agree on coverage — branch-class FortiGates sometimes 404 the
-  // REST endpoint while still publishing LLDP-MIB, and vice-versa.
-  monitorLldpSource:         MonitorTransportSchema,
   // Per-class auto-monitor settings for assets discovered through this
   // integration. fortigateMonitor only carries `addAsMonitored` since
-  // FortiGates always get a monitorType stamped at discovery; the switch /
-  // AP blocks also carry the SNMP-direct-polling toggle + credential.
+  // FortiGates always get a discoveredByIntegrationId stamp at discovery;
+  // the switch / AP blocks also carry the SNMP-direct-polling toggle + credential.
   fortigateMonitor:   FortiGateClassMonitorSchema,
   fortiswitchMonitor: FortinetClassMonitorSchema,
   fortiapMonitor:     FortinetClassMonitorSchema,
@@ -272,10 +255,6 @@ const FortiGateConfigSchema = z.object({
   inventoryExcludeInterfaces: z.array(z.string()).optional().default([]),
   inventoryIncludeInterfaces: z.array(z.string()).optional().default([]),
   monitorCredentialId: z.string().uuid().nullable().optional(),
-  monitorResponseTimeSource: MonitorTransportSchema,
-  monitorTelemetrySource:    MonitorTransportSchema,
-  monitorInterfacesSource:   MonitorTransportSchema,
-  monitorLldpSource:         MonitorTransportSchema,
   fortigateMonitor:   FortiGateClassMonitorSchema,
   fortiswitchMonitor: FortinetClassMonitorSchema,
   fortiapMonitor:     FortinetClassMonitorSchema,
@@ -455,20 +434,25 @@ router.post("/", async (req, res, next) => {
     }
     if (input.type === "fortimanager" || input.type === "fortigate") {
       const cfg = input.config as any;
-      // Validate the FortiGate response-time SNMP override credential.
+      // Validate the integration-tier SNMP credential. Required whenever the
+      // tier-3 polling block routes any stream through SNMP — the polling-
+      // method routes already enforce that "polling=snmp + no credential"
+      // is rejected, but catch it here at integration-save time too so the
+      // operator sees an error before the integration is created.
       const credId = cfg.monitorCredentialId;
       if (credId) {
         const cred = await prisma.credential.findUnique({ where: { id: credId } });
         if (!cred) throw new AppError(400, "Selected monitor credential not found");
         if (cred.type !== "snmp") throw new AppError(400, "Monitor credential override must be SNMP");
       }
-      // Any per-stream toggle set to "snmp" requires an SNMP credential at
-      // the integration level. Per-asset overrides can still bring their own.
+      const polling = (cfg.monitorSettings && typeof cfg.monitorSettings === "object")
+        ? (cfg.monitorSettings.polling as Record<string, unknown> | undefined) ?? {}
+        : {};
       const snmpStreams: string[] = [];
-      if (cfg.monitorResponseTimeSource === "snmp") snmpStreams.push("Response time");
-      if (cfg.monitorTelemetrySource    === "snmp") snmpStreams.push("Telemetry");
-      if (cfg.monitorInterfacesSource   === "snmp") snmpStreams.push("Interfaces");
-      if (cfg.monitorLldpSource         === "snmp") snmpStreams.push("LLDP");
+      if (polling.responseTime === "snmp") snmpStreams.push("Response time");
+      if (polling.telemetry    === "snmp") snmpStreams.push("Telemetry");
+      if (polling.interfaces   === "snmp") snmpStreams.push("Interfaces");
+      if (polling.lldp         === "snmp") snmpStreams.push("LLDP");
       if (snmpStreams.length > 0 && !credId) {
         throw new AppError(400, `Select an SNMP credential to route ${snmpStreams.join(", ")} via SNMP`);
       }
@@ -612,12 +596,17 @@ router.put("/:id", async (req, res, next) => {
           if (!cred) throw new AppError(400, "Selected monitor credential not found");
           if (cred.type !== "snmp") throw new AppError(400, "Monitor credential override must be SNMP");
         }
-        // Match the POST validation: any toggle set to "snmp" requires a credential.
+        // Match the POST validation: any tier-3 polling field set to "snmp"
+        // requires a credential. Reads the polling block from monitorSettings,
+        // not the legacy monitor*Source toggles.
+        const polling = (newConfig.monitorSettings && typeof newConfig.monitorSettings === "object")
+          ? ((newConfig.monitorSettings as Record<string, unknown>).polling as Record<string, unknown> | undefined) ?? {}
+          : {};
         const snmpStreams: string[] = [];
-        if (newConfig.monitorResponseTimeSource === "snmp") snmpStreams.push("Response time");
-        if (newConfig.monitorTelemetrySource    === "snmp") snmpStreams.push("Telemetry");
-        if (newConfig.monitorInterfacesSource   === "snmp") snmpStreams.push("Interfaces");
-        if (newConfig.monitorLldpSource         === "snmp") snmpStreams.push("LLDP");
+        if (polling.responseTime === "snmp") snmpStreams.push("Response time");
+        if (polling.telemetry    === "snmp") snmpStreams.push("Telemetry");
+        if (polling.interfaces   === "snmp") snmpStreams.push("Interfaces");
+        if (polling.lldp         === "snmp") snmpStreams.push("LLDP");
         if (snmpStreams.length > 0 && !newConfig.monitorCredentialId) {
           throw new AppError(400, `Select an SNMP credential to route ${snmpStreams.join(", ")} via SNMP`);
         }

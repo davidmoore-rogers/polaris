@@ -915,11 +915,10 @@ async function probeFortinet(
 ): Promise<ProbeResult> {
   const cfg = integration.config || {};
 
-  // SNMP override is handled by the dispatcher in probeAsset via the
-  // `monitorResponseTimeSource` toggle (asset-level, integration-level, or
-  // default "rest"). The startup migration in src/jobs/migrateMonitorTransport
-  // back-fills the integration toggle from the legacy `monitorCredentialId`
-  // setting so existing deployments keep their SNMP probe path.
+  // SNMP routing is handled by the dispatcher in probeAsset via the
+  // resolved responseTimePolling field. By the time we get here the polling
+  // method already resolved to "rest_api" — only Fortinet-discovered
+  // firewalls hit this function.
 
   let apiUser  = "";
   let apiToken = "";

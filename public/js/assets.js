@@ -3891,12 +3891,6 @@ async function _fetchPollingTransitions(assetId, since, until) {
     telemetryPolling:          "Telemetry polling",
     interfacesPolling:         "Interfaces polling",
     lldpPolling:               "LLDP polling",
-    // Legacy transport breadcrumbs — kept until 3j drops the columns so
-    // historical events (pre-polling-redesign) still render on the chart.
-    monitorResponseTimeSource: "Response-time transport",
-    monitorTelemetrySource:    "Telemetry transport",
-    monitorInterfacesSource:   "Interfaces transport",
-    monitorLldpSource:         "LLDP transport",
     monitorCredentialId:       "Credential",
   };
   var params = {
