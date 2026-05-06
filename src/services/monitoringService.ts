@@ -1570,6 +1570,7 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
 
   const integration   = asset.discoveredByIntegration ?? null;
   const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+  const isManagedSwitchOrAp = asset.assetType === "switch" || asset.assetType === "access_point";
 
   try {
     if (polling === "rest_api") {
@@ -1577,6 +1578,16 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
       // credentials don't yet have a telemetry shape — `{ supported: false }`
       // until that lands.
       if (!isFortinetSrc || !integration) return { supported: false };
+      // Managed FortiSwitches / FortiAPs in FortiLink mode aren't directly
+      // REST-able — they don't speak FortiOS REST and the integration's API
+      // token isn't valid against them. The probe path redirects to the
+      // parent FortiGate's controller-status table, but there's no
+      // controller-side endpoint that exposes CPU / memory / per-interface
+      // counters for the managed device. Operators who want telemetry on
+      // these assets enable direct SNMP polling on the integration's
+      // FortiSwitches / FortiAPs subtab; that switches the resolved
+      // telemetryPolling to "snmp" and dispatches below.
+      if (isManagedSwitchOrAp) return { supported: false };
       const data = await collectTelemetryFortinet(targetIp, integration as any);
       return { supported: true, data };
     }
@@ -1641,11 +1652,18 @@ export async function collectFastFiltered(assetId: string): Promise<CollectionRe
 
   const integration   = asset.discoveredByIntegration ?? null;
   const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+  const isManagedSwitchOrAp = asset.assetType === "switch" || asset.assetType === "access_point";
 
   try {
     let full: SystemInfoSample;
     if (polling === "rest_api") {
       if (!isFortinetSrc || !integration) return { supported: false };
+      // Managed FortiSwitches / FortiAPs aren't directly REST-able; the
+      // parent FortiGate's controller-status table doesn't expose per-port
+      // counters or storage. Operators flip the integration's
+      // FortiSwitches / FortiAPs subtab to direct SNMP polling to enable
+      // this stream. Same guard as collectTelemetry.
+      if (isManagedSwitchOrAp) return { supported: false };
       // Only ask FortiOS for IPsec when a tunnel is actually pinned —
       // /api/v2/monitor/vpn/ipsec is the slow endpoint we want to avoid on
       // the fast cadence. Fast cadence always skips LLDP — neighbors don't
@@ -1778,6 +1796,7 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
 
   const integration   = asset.discoveredByIntegration ?? null;
   const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+  const isManagedSwitchOrAp = asset.assetType === "switch" || asset.assetType === "access_point";
 
   try {
     if (interfacesPolling === "rest_api" || interfacesPolling === "snmp") {
@@ -1797,6 +1816,14 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
       }
       // REST API for interfaces requires a Fortinet integration.
       if (interfacesPolling === "rest_api" && (!isFortinetSrc || !integration)) {
+        return { supported: false };
+      }
+      // Managed FortiSwitches / FortiAPs aren't directly REST-able. Same
+      // guard as collectTelemetry / collectFastFiltered — operators flip the
+      // integration's FortiSwitches / FortiAPs subtab to direct SNMP polling
+      // (which sets interfacesPolling to "snmp" via the integration tier or
+      // a class override) to enable this stream on those asset types.
+      if (interfacesPolling === "rest_api" && isManagedSwitchOrAp) {
         return { supported: false };
       }
 
@@ -1826,7 +1853,7 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
           data.lldpNeighbors = neighbors;
           data.lldpSource    = "snmp";
         }
-      } else if (lldpPolling === "rest_api" && interfacesPolling === "snmp" && isFortinetSrc && integration) {
+      } else if (lldpPolling === "rest_api" && interfacesPolling === "snmp" && isFortinetSrc && integration && !isManagedSwitchOrAp) {
         const neighbors = await collectLldpOnlyFortinet(targetIp, integration as any).catch(() => undefined);
         if (neighbors !== undefined) {
           data.lldpNeighbors = neighbors;
