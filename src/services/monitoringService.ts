@@ -3715,34 +3715,36 @@ export async function recordProbeResult(assetId: string, result: ProbeResult): P
   // Five-state machine. See CLAUDE.md "Monitor Settings Hierarchy" /
   // "Monitor status state machine" for the table.
   //
-  //   unknown / down + success → pending (until cs ≥ threshold → up)
-  //   pending          + success → up if cs ≥ threshold else stay pending
-  //   pending          + failure → down if cf ≥ threshold else stay pending
-  //   up               + failure → warning (cf=1, count toward down)
-  //   warning          + success → up if cs ≥ threshold else stay warning
-  //   warning          + failure → down if cf ≥ threshold else stay warning
-  //   unknown          + failure → warning (treat as fresh up that just failed)
+  //   unknown / down + success → recovering (until cs ≥ threshold → up)
+  //   recovering        + success → up if cs ≥ threshold else stay recovering
+  //   recovering        + failure → down if cf ≥ threshold else stay recovering
+  //   up                + failure → warning (cf=1, count toward down)
+  //   warning           + success → up if cs ≥ threshold else stay warning
+  //   warning           + failure → down if cf ≥ threshold else stay warning
+  //   unknown           + failure → warning (treat as fresh up that just failed)
   //
-  // Down hosts that fail again stay down; the down→pending arrow is the only
-  // exit from down and requires at least one success.
-  let nextStatus: "up" | "warning" | "pending" | "down" | "unknown";
+  // Down hosts that fail again stay down; the down→recovering arrow is the
+  // only exit from down and requires at least one success. The previous name
+  // for this state was "pending"; the migrateMonitorStatusRename startup job
+  // bumps any leftover "pending" rows to "recovering".
+  let nextStatus: "up" | "warning" | "recovering" | "down" | "unknown";
   if (result.success) {
     if (previousStatus === "up") {
       nextStatus = "up";
-    } else if (previousStatus === "warning" || previousStatus === "pending") {
+    } else if (previousStatus === "warning" || previousStatus === "recovering") {
       nextStatus = newCs >= threshold ? "up" : previousStatus;
     } else {
-      // unknown / down → start the recovery counter at pending.
-      nextStatus = newCs >= threshold ? "up" : "pending";
+      // unknown / down → start the recovery counter at recovering.
+      nextStatus = newCs >= threshold ? "up" : "recovering";
     }
   } else {
     if (newCf >= threshold) {
       nextStatus = "down";
     } else if (previousStatus === "up" || previousStatus === "unknown") {
       nextStatus = "warning";
-    } else if (previousStatus === "warning" || previousStatus === "pending" || previousStatus === "down") {
+    } else if (previousStatus === "warning" || previousStatus === "recovering" || previousStatus === "down") {
       // Stay in the current state and let the counter march toward "down".
-      nextStatus = previousStatus;
+      nextStatus = previousStatus as "warning" | "recovering" | "down";
     } else {
       nextStatus = "warning";
     }

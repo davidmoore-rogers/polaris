@@ -34,6 +34,7 @@ import "./jobs/decommissionStaleAssets.js";
 import "./jobs/monitorAssets.js";
 import "./jobs/normalizeManufacturers.js";
 import "./jobs/migrateMonitorSettingsHierarchy.js";
+import "./jobs/migrateMonitorStatusRename.js";
 import "./jobs/backfillAssetSources.js";
 import "./jobs/flagStaleReservations.js";
 import "./jobs/capacityWatch.js";

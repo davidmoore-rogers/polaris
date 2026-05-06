@@ -384,7 +384,7 @@ model Asset {
   // Below 500ms the UI shows a warning icon — at that range probes start to
   // false-fail on healthy networks under transient latency.
   probeTimeoutMs      Int?
-  monitorStatus       String? // "up" | "warning" | "pending" | "down" | "unknown"
+  monitorStatus       String? // "up" | "warning" | "recovering" | "down" | "unknown"
   lastMonitorAt       DateTime?
   lastResponseTimeMs  Int?
   consecutiveFailures Int         @default(0)

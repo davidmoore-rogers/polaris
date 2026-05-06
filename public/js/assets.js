@@ -226,9 +226,12 @@ async function loadAssets() {
         a._monitor = ["Monitored", "Warning"];
       } else if (a.monitorStatus === "down") {
         a._monitor = ["Monitored", "Down"];
+      } else if (a.monitorStatus === "recovering") {
+        a._monitor = ["Monitored", "Recovering"];
       } else {
-        // Both "pending" (recovering / freshly enabled) and "unknown" (never
-        // probed) display as Pending — they're indistinguishable to operators.
+        // "unknown" (never probed) and any unrecognized value fall through
+        // here. Filter chip is "Pending" — operators read it as "we don't
+        // know yet" rather than the directional "Recovering".
         a._monitor = ["Monitored", "Pending"];
       }
       return a;
@@ -1106,12 +1109,12 @@ function assetStatusBadge(asset) {
 // Five-state monitoring pill. "Monitored" is never shown directly — when an
 // asset is being monitored we surface the actual probe outcome so operators
 // don't have to drill in to discover the state.
-//   monitored=false                       → grey   "Unmonitored"
-//   monitored=true, status="up"           → green  "Up"
-//   monitored=true, status="warning"      → amber  "Warning"   (was up, currently failing but below threshold)
-//   monitored=true, status="pending"      → blue   "Pending"   (recovering from down / freshly enabled, below threshold)
-//   monitored=true, status="down"         → red    "Down"
-//   monitored=true, status="unknown"/null → blue   "Pending"   (never probed — same display as "pending")
+//   monitored=false                          → grey   "Unmonitored"
+//   monitored=true, status="up"              → green  "Up"
+//   monitored=true, status="warning"         → amber  "Warning"     (was up, currently failing but below threshold)
+//   monitored=true, status="recovering"      → blue   "Recovering"  (was down, now succeeding; below threshold)
+//   monitored=true, status="down"            → red    "Down"
+//   monitored=true, status="unknown"/null    → blue   "Pending"     (never probed — same blue treatment as "Recovering" but a different label)
 //
 // For admin/assetsadmin callers the pill is clickable: a single click
 // toggles monitored (sets monitoredOperatorSet=true server-side so the
@@ -1136,11 +1139,13 @@ function assetMonitorBadge(asset) {
   if (canToggle) bits.push("Click to disable monitoring");
   var title = bits.length ? ' title="' + escapeHtml(bits.join("\n")) + '"' : "";
   var clickCls = canToggle ? " badge-clickable" : "";
-  if (s === "up")      return '<span class="badge badge-monitored'        + clickCls + '"' + title + toggleAttrs + '>Up</span>';
-  if (s === "warning") return '<span class="badge badge-monitor-warning'  + clickCls + '"' + title + toggleAttrs + '>Warning</span>';
-  if (s === "down")    return '<span class="badge badge-monitor-down'     + clickCls + '"' + title + toggleAttrs + '>Down</span>';
-  // pending + unknown both render as "Pending".
-  return '<span class="badge badge-monitor-pending' + clickCls + '"' + title + toggleAttrs + '>Pending</span>';
+  if (s === "up")         return '<span class="badge badge-monitored'        + clickCls + '"' + title + toggleAttrs + '>Up</span>';
+  if (s === "warning")    return '<span class="badge badge-monitor-warning'  + clickCls + '"' + title + toggleAttrs + '>Warning</span>';
+  if (s === "down")       return '<span class="badge badge-monitor-down'     + clickCls + '"' + title + toggleAttrs + '>Down</span>';
+  if (s === "recovering") return '<span class="badge badge-monitor-recovering' + clickCls + '"' + title + toggleAttrs + '>Recovering</span>';
+  // unknown / null / unrecognized → Pending. Same blue treatment as
+  // Recovering (different label).
+  return '<span class="badge badge-monitor-recovering' + clickCls + '"' + title + toggleAttrs + '>Pending</span>';
 }
 
 function ipCellHTML(asset) {
@@ -3945,29 +3950,30 @@ async function _renderIntermittencyBar(assetId) {
       cf = 0; cs += 1;
       if (prev === "up") {
         // stay up
-      } else if (prev === "warning" || prev === "pending") {
+      } else if (prev === "warning" || prev === "recovering") {
         if (cs >= threshold) prev = "up";
       } else {
-        // unknown / down
-        prev = (cs >= threshold) ? "up" : "pending";
+        // unknown / down → start the recovery counter at recovering.
+        prev = (cs >= threshold) ? "up" : "recovering";
       }
     } else {
       cs = 0; cf += 1;
       if (cf >= threshold) prev = "down";
       else if (prev === "up" || prev === "unknown") prev = "warning";
-      // pending / warning / down stay
+      // recovering / warning / down stay
     }
     return { timestamp: s.timestamp, status: prev };
   });
 
   // Color map mirrors badge-monitor-* hues so the bar reads as the same
-  // visual vocabulary as the pill above it.
+  // visual vocabulary as the pill above it. Recovering and unknown share
+  // the blue treatment (different labels in the pill, same color here).
   var colors = {
-    up:      "rgba(0,200,83,0.65)",
-    warning: "rgba(255,193,7,0.75)",
-    pending: "rgba(79,195,247,0.65)",
-    down:    "rgba(211,47,47,0.75)",
-    unknown: "rgba(117,117,117,0.45)",
+    up:         "rgba(0,200,83,0.65)",
+    warning:    "rgba(255,193,7,0.75)",
+    recovering: "rgba(79,195,247,0.65)",
+    down:       "rgba(211,47,47,0.75)",
+    unknown:    "rgba(117,117,117,0.45)",
   };
   // Each cell flexes to 1fr so the bar always fills the column regardless
   // of how many samples landed in the hour. Tooltip carries the timestamp +
