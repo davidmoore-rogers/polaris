@@ -3875,13 +3875,14 @@ function assetMonitoringViewHTML(a) {
         '<span class="detail-value">' + probeBtn + pill + '</span></div>' +
       // Last hour intermittency bar — one cell per probe sample, colored
       // by the resolved monitor state at that point. Sits in a single
-      // grid column (half the panel) — that's tight for ~60 cells/hour
-      // but readable, and stretching to full width visually outweighed
-      // the rest of the status block. Loaded asynchronously by
-      // _renderIntermittencyBar(). Hidden on unmonitored assets.
+      // grid column (half the panel); the value cell is flex:1 so the bar
+      // fills the column's value-side rather than collapsing to the natural
+      // width of the "Nh ago/N samples/now" caption underneath. Loaded
+      // asynchronously by _renderIntermittencyBar(). Hidden on unmonitored
+      // assets.
       (a.monitored
         ? '<div class="detail-row"><span class="detail-label">Last hour</span>' +
-            '<span class="detail-value" id="asset-intermittency-bar" data-asset-id="' + escapeHtml(a.id) + '">' +
+            '<span class="detail-value" id="asset-intermittency-bar" data-asset-id="' + escapeHtml(a.id) + '" style="flex:1">' +
               '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">Loading…</span>' +
             '</span></div>'
         : '') +
