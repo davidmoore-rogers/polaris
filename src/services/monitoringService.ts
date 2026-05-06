@@ -976,8 +976,22 @@ interface FortinetControllerEntry {
   status: string;
 }
 
+interface FortinetControllerFetchResult {
+  inventory: Map<string, FortinetControllerEntry>;
+  /**
+   * Wall-clock duration of the upstream call that produced this inventory.
+   * Reported as the RTT for every probe that consumes this result — the
+   * fresh fetcher, every concurrent in-flight waiter, and every cache hit
+   * within the TTL window — so all switches/APs under one parent FortiGate
+   * show a consistent RTT instead of the lead-worker eating ~650 ms while
+   * its peers report a misleading ~2 ms (the in-process cache-lookup time).
+   */
+  fetchDurationMs: number;
+}
+
 interface FortinetControllerCacheEntry {
   fetchedAt: number;
+  fetchDurationMs: number;
   inventory: Map<string, FortinetControllerEntry>;
 }
 
@@ -992,7 +1006,7 @@ const fortinetControllerCache = new Map<string, FortinetControllerCacheEntry>();
 // denied / session limit"). The promise-singleton pattern below funnels N
 // concurrent callers into one upstream call; the cache then absorbs
 // follow-on calls within the 30 s TTL.
-const inflightControllerFetch = new Map<string, Promise<Map<string, FortinetControllerEntry>>>();
+const inflightControllerFetch = new Map<string, Promise<FortinetControllerFetchResult>>();
 
 function controllerCacheKey(integrationId: string, deviceName: string, kind: "switches" | "aps"): string {
   return `${integrationId}::${deviceName}::${kind}`;
@@ -1003,11 +1017,11 @@ async function fetchFortinetControllerInventory(
   deviceName: string,
   kind: "switches" | "aps",
   timeoutMs: number,
-): Promise<Map<string, FortinetControllerEntry>> {
+): Promise<FortinetControllerFetchResult> {
   const cacheKey = controllerCacheKey(integration.id, deviceName, kind);
   const cached = fortinetControllerCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < FORTINET_CONTROLLER_CACHE_TTL_MS) {
-    return cached.inventory;
+    return { inventory: cached.inventory, fetchDurationMs: cached.fetchDurationMs };
   }
   // If another worker already kicked off the fetch for this controller +
   // kind, wait on its promise instead of firing our own. Critical at scale
@@ -1020,7 +1034,8 @@ async function fetchFortinetControllerInventory(
   const inflight = inflightControllerFetch.get(cacheKey);
   if (inflight) return inflight;
 
-  const fetchPromise = (async () => {
+  const fetchPromise = (async (): Promise<FortinetControllerFetchResult> => {
+    const fetchStartedAt = performance.now();
     try {
       const path = kind === "switches"
         ? "/api/v2/monitor/switch-controller/managed-switch/status"
@@ -1101,8 +1116,9 @@ async function fetchFortinetControllerInventory(
         inventory.set(serial.toUpperCase(), { connected, status });
       }
 
-      fortinetControllerCache.set(cacheKey, { fetchedAt: Date.now(), inventory });
-      return inventory;
+      const fetchDurationMs = Math.max(0, Math.round(performance.now() - fetchStartedAt));
+      fortinetControllerCache.set(cacheKey, { fetchedAt: Date.now(), fetchDurationMs, inventory });
+      return { inventory, fetchDurationMs };
     } finally {
       // Always clear the inflight entry — successful fetches are now in the
       // cache; failed fetches need a clean slate so the next call can retry
@@ -1147,18 +1163,40 @@ async function probeFortinetController(
   const kind: "switches" | "aps" = asset.assetType === "access_point" ? "aps" : "switches";
 
   try {
-    const inventory = await fetchFortinetControllerInventory(integration, deviceName, kind, timeoutMs);
+    // Report the upstream controller call's duration as the asset's RTT —
+    // not the locally-measured elapsed time from `start`. The cache + in-
+    // flight coalescing means the worker servicing this asset may have done
+    // either a fresh upstream call (~hundreds of ms over FMG/FortiOS REST),
+    // a wait on a peer worker's in-flight call (same), or a pure cache hit
+    // (sub-ms). Showing the local elapsed time produced jarringly different
+    // RTTs across switches/APs sharing one parent FortiGate (e.g. 650 ms
+    // for the lead worker, 2 ms for its peers). Surfacing the real upstream
+    // duration on every consumer keeps RTT consistent across the fleet and
+    // accurately reflects what FortiOS took to answer.
+    const { inventory, fetchDurationMs } = await fetchFortinetControllerInventory(
+      integration,
+      deviceName,
+      kind,
+      timeoutMs,
+    );
     const entry = inventory.get(serial.toUpperCase());
     if (!entry) {
       const label = kind === "switches" ? "managed-switch" : "managed-AP";
-      return finish(start, false, `Not present in ${deviceName}'s ${label} table`);
+      return { success: false, responseTimeMs: fetchDurationMs, error: `Not present in ${deviceName}'s ${label} table` };
     }
     if (entry.connected) {
-      return finish(start, true);
+      return { success: true, responseTimeMs: fetchDurationMs };
     }
     const role = kind === "switches" ? "switch" : "AP";
-    return finish(start, false, `Controller reports ${role} status: ${entry.status || "Disconnected"}`);
+    return {
+      success: false,
+      responseTimeMs: fetchDurationMs,
+      error: `Controller reports ${role} status: ${entry.status || "Disconnected"}`,
+    };
   } catch (err: any) {
+    // Precondition failures and upstream errors don't have a meaningful
+    // upstream duration; fall back to local elapsed time so the operator
+    // still sees how long the failure took.
     return finish(start, false, err?.message || "Controller query failed");
   }
 }
