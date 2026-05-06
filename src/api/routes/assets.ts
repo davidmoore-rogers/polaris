@@ -298,6 +298,7 @@ router.get("/", async (req, res, next) => {
           monitorStatus: true,
           lastMonitorAt: true,
           lastResponseTimeMs: true,
+          discoveredByIntegrationId: true,
         },
       }),
       prisma.asset.count({ where }),
@@ -1260,6 +1261,17 @@ router.put("/:id", requireAssetsAdmin, async (req, res, next) => {
           );
         }
       }
+    }
+    // Lock assetType on Fortinet infrastructure discovered via an integration.
+    // The next discovery cycle would re-stamp the asset anyway, so accepting
+    // the change just to revert it is misleading.
+    if (
+      input.assetType !== undefined &&
+      input.assetType !== existing.assetType &&
+      existing.discoveredByIntegrationId &&
+      (existing.assetType === "firewall" || existing.assetType === "switch" || existing.assetType === "access_point")
+    ) {
+      throw new AppError(400, `Asset type is locked — discovered as ${existing.assetType} by an integration`);
     }
     // Quarantine status is owned by the dedicated quarantine endpoints —
     // setting it via the generic asset PUT would skip the FortiGate push

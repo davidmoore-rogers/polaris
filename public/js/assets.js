@@ -961,12 +961,24 @@ function assetTypeBadge(type, asset) {
   if (!canToggle) {
     return '<span class="badge badge-asset-type">' + escapeHtml(label) + '</span>';
   }
+  if (isAssetTypeLocked(asset)) {
+    return '<span class="badge badge-asset-type" title="Locked — discovered as ' + escapeHtml(label) + ' by an integration">' + escapeHtml(label) + '</span>';
+  }
   return '<span class="badge badge-asset-type badge-clickable"' +
     ' data-asset-type-toggle="' + escapeHtml(asset.id) + '"' +
     ' data-asset-type="' + escapeHtml(type || "other") + '"' +
     ' role="button" tabindex="0"' +
     ' title="Click to change type">' +
     escapeHtml(label) + ' ▾</span>';
+}
+
+// Fortinet infrastructure (firewall/switch/access_point) discovered via an
+// integration is not reclassifiable — the next discovery cycle would revert
+// any change. Mirrored on the backend in PUT /assets/:id.
+function isAssetTypeLocked(asset) {
+  if (!asset || !asset.discoveredByIntegrationId) return false;
+  var t = asset.assetType;
+  return t === "firewall" || t === "switch" || t === "access_point";
 }
 
 function assetStatusBadge(asset) {
@@ -1133,7 +1145,7 @@ function assetFormHTML(defaults) {
     '<div class="form-group"><label>Asset Tag</label><input type="text" id="f-assetTag" value="' + escapeHtml(d.assetTag || "") + '" placeholder="e.g. RGI-00421"></div>' +
     '<div class="form-group"><label>Manufacturer</label><input type="text" id="f-manufacturer" value="' + escapeHtml(d.manufacturer || "") + '" placeholder="e.g. Dell, Cisco, HP"></div>' +
     '<div class="form-group"><label>Model</label><input type="text" id="f-model" value="' + escapeHtml(d.model || "") + '" placeholder="e.g. PowerEdge R740"></div>' +
-    '<div class="form-group"><label>Type</label><select id="f-assetType">' +
+    '<div class="form-group"><label>Type' + (isAssetTypeLocked(d) ? ' <span style="font-weight:normal;color:var(--color-text-tertiary);font-size:0.75rem">(locked — discovered by integration)</span>' : '') + '</label><select id="f-assetType"' + (isAssetTypeLocked(d) ? ' disabled' : '') + '>' +
       '<option value="server"' + (d.assetType === "server" ? " selected" : "") + '>Server</option>' +
       '<option value="switch"' + (d.assetType === "switch" ? " selected" : "") + '>Switch</option>' +
       '<option value="router"' + (d.assetType === "router" ? " selected" : "") + '>Router</option>' +
