@@ -126,8 +126,33 @@ info "Testing database connectivity..."
 if command -v psql &>/dev/null; then
   if psql "$DATABASE_URL" -c "SELECT 1" &>/dev/null; then
     info "Database connection successful"
+    # pg-boss (queue runtime for monitor cadences at scale) lives in its own
+    # `pgboss` schema. Try to create it as the connecting role; if the role
+    # doesn't have CREATE on the database, surface what the DBA needs to run.
+    if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -X <<'SQL' &>/dev/null
+CREATE SCHEMA IF NOT EXISTS pgboss;
+SQL
+    then
+      info "pg-boss schema present"
+    else
+      warn "Could not pre-create the pgboss schema as the connecting role."
+      warn "Have your DBA run the following on the polaris database, replacing \$DB_USER with the role the app connects as:"
+      cat <<'GRANTS'
+  CREATE SCHEMA IF NOT EXISTS pgboss;
+  ALTER SCHEMA pgboss OWNER TO $DB_USER;
+  GRANT ALL ON SCHEMA pgboss TO $DB_USER;
+  GRANT ALL ON ALL TABLES    IN SCHEMA pgboss TO $DB_USER;
+  GRANT ALL ON ALL SEQUENCES IN SCHEMA pgboss TO $DB_USER;
+  GRANT ALL ON ALL FUNCTIONS IN SCHEMA pgboss TO $DB_USER;
+  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON TABLES    TO $DB_USER;
+  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON SEQUENCES TO $DB_USER;
+  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON FUNCTIONS TO $DB_USER;
+GRANTS
+      warn "Without these grants Polaris will fall back to in-process cursor mode (suitable for small/medium fleets only)."
+    fi
   else
     warn "Could not connect to database — check your DATABASE_URL. Continuing anyway (the database may not be ready yet)."
+    warn "Once the DB is reachable, your DBA needs to grant the polaris role ownership of the pgboss schema for the queue runtime — see docs/INSTALL.md."
   fi
 fi
 

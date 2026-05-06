@@ -61,7 +61,33 @@ ensureRegistryLoaded().catch((err) => {
 initializeQueue()
   .then(() =>
     startPgbossWorkers().catch((err) => {
-      logger.warn({ err: err?.message }, "pg-boss worker start failed; staying on cursor");
+      const msg = String(err?.message || "");
+      // Distinguish the most common operator-actionable failure (the role
+      // Polaris connects as doesn't own the pgboss schema) from generic
+      // pg-boss errors. The actionable error gets a multi-line log entry
+      // with the SQL the DBA needs to run; everything else stays a plain
+      // warn line.
+      if (/permission denied for schema pgboss/i.test(msg)) {
+        logger.error(
+          { err: msg },
+          "pg-boss worker start failed — the polaris DB role does not own the pgboss schema.\n" +
+          "Polaris will fall back to in-process cursor mode (suitable for small/medium fleets only).\n" +
+          "To enable pg-boss for large fleets, run the following on the polaris database as a Postgres\n" +
+          "superuser (psql ... or via your managed-Postgres console), replacing $DB_USER with the\n" +
+          "polaris role:\n" +
+          "  ALTER SCHEMA pgboss OWNER TO $DB_USER;\n" +
+          "  GRANT ALL ON SCHEMA pgboss TO $DB_USER;\n" +
+          "  GRANT ALL ON ALL TABLES    IN SCHEMA pgboss TO $DB_USER;\n" +
+          "  GRANT ALL ON ALL SEQUENCES IN SCHEMA pgboss TO $DB_USER;\n" +
+          "  GRANT ALL ON ALL FUNCTIONS IN SCHEMA pgboss TO $DB_USER;\n" +
+          "  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON TABLES    TO $DB_USER;\n" +
+          "  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON SEQUENCES TO $DB_USER;\n" +
+          "  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON FUNCTIONS TO $DB_USER;\n" +
+          "Then restart the polaris service.",
+        );
+      } else {
+        logger.warn({ err: msg }, "pg-boss worker start failed; staying on cursor");
+      }
     }),
   )
   .catch((err) => {

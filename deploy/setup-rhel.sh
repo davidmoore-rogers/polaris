@@ -91,6 +91,21 @@ sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | gr
 sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
   sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
 
+# pg-boss (queue runtime for monitor cadences at scale) lives in its own
+# `pgboss` schema. Make sure the polaris role owns it so pg-boss can create
+# its tables and the workers can boot. Idempotent — safe to re-run.
+sudo -u postgres psql -d "$DB_NAME" <<SQL
+CREATE SCHEMA IF NOT EXISTS pgboss;
+ALTER SCHEMA pgboss OWNER TO $DB_USER;
+GRANT ALL ON SCHEMA pgboss TO $DB_USER;
+GRANT ALL ON ALL TABLES    IN SCHEMA pgboss TO $DB_USER;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA pgboss TO $DB_USER;
+GRANT ALL ON ALL FUNCTIONS IN SCHEMA pgboss TO $DB_USER;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON TABLES    TO $DB_USER;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON SEQUENCES TO $DB_USER;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON FUNCTIONS TO $DB_USER;
+SQL
+
 info "Database '$DB_NAME' ready"
 
 # Ensure pg_hba.conf allows password auth for the polaris user

@@ -59,10 +59,28 @@ sudo -u postgres psql <<'SQL'
 CREATE USER polaris WITH PASSWORD 'change-me';
 CREATE DATABASE polaris OWNER polaris;
 GRANT pg_read_all_settings TO polaris;
+
+-- pg-boss (queue runtime for monitor cadences at scale) lives in its
+-- own `pgboss` schema. The polaris role needs to own it so pg-boss can
+-- create its tables on first boot. Pre-creating with the right owner
+-- here prevents the schema from being created later by a different role
+-- (which would lock polaris out and force a fallback to cursor mode).
+\c polaris
+CREATE SCHEMA IF NOT EXISTS pgboss;
+ALTER SCHEMA pgboss OWNER TO polaris;
+GRANT ALL ON SCHEMA pgboss TO polaris;
+GRANT ALL ON ALL TABLES    IN SCHEMA pgboss TO polaris;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA pgboss TO polaris;
+GRANT ALL ON ALL FUNCTIONS IN SCHEMA pgboss TO polaris;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON TABLES    TO polaris;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON SEQUENCES TO polaris;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON FUNCTIONS TO polaris;
 SQL
 ```
 
 The `pg_read_all_settings` grant lets Polaris read `SHOW data_directory` so the Maintenance tab can measure the `/var` filesystem and alert before it fills.
+
+The `pgboss` schema grants are required for pg-boss queue mode (operators with thousands of monitored assets). Without them, "permission denied for schema pgboss" appears in `journalctl -u polaris` and Polaris falls back to in-process cursor mode — fine for small/medium fleets, won't keep up at thousands. The scripted installs (`deploy/setup-rhel.sh`, `deploy/setup-ubuntu.sh`) run these grants for you; manual or remote-DB installs need to run them once. **Remote/managed PostgreSQL (RDS, Cloud SQL, Neon, etc.):** hand the `\c polaris ... ALTER DEFAULT PRIVILEGES ...` block to your DBA to run on the polaris database.
 
 Allow the postgres directory to be traversed by the polaris OS user (needed for the same disk-space check — `statfs` on `/var/lib/pgsql/15/data` requires search permission on every ancestor directory). The PostgreSQL startup scripts reset these directories to `700` on every restart, so persist via a systemd override rather than a one-off chmod:
 
@@ -264,10 +282,28 @@ sudo -u postgres psql <<'SQL'
 CREATE USER polaris WITH PASSWORD 'change-me';
 CREATE DATABASE polaris OWNER polaris;
 GRANT pg_read_all_settings TO polaris;
+
+-- pg-boss (queue runtime for monitor cadences at scale) lives in its
+-- own `pgboss` schema. The polaris role needs to own it so pg-boss can
+-- create its tables on first boot. Pre-creating with the right owner
+-- here prevents the schema from being created later by a different role
+-- (which would lock polaris out and force a fallback to cursor mode).
+\c polaris
+CREATE SCHEMA IF NOT EXISTS pgboss;
+ALTER SCHEMA pgboss OWNER TO polaris;
+GRANT ALL ON SCHEMA pgboss TO polaris;
+GRANT ALL ON ALL TABLES    IN SCHEMA pgboss TO polaris;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA pgboss TO polaris;
+GRANT ALL ON ALL FUNCTIONS IN SCHEMA pgboss TO polaris;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON TABLES    TO polaris;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON SEQUENCES TO polaris;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON FUNCTIONS TO polaris;
 SQL
 ```
 
 The `pg_read_all_settings` grant lets Polaris read `SHOW data_directory` so the Maintenance tab can measure the `/var` filesystem and alert before it fills.
+
+The `pgboss` schema grants are required for pg-boss queue mode (operators with thousands of monitored assets). Without them, "permission denied for schema pgboss" appears in `journalctl -u polaris` and Polaris falls back to in-process cursor mode — fine for small/medium fleets, won't keep up at thousands. The scripted installs (`deploy/setup-rhel.sh`, `deploy/setup-ubuntu.sh`) run these grants for you; manual or remote-DB installs need to run them once. **Remote/managed PostgreSQL (RDS, Cloud SQL, Neon, etc.):** hand the `\c polaris ... ALTER DEFAULT PRIVILEGES ...` block to your DBA to run on the polaris database.
 
 Allow the postgres directory to be traversed by the polaris OS user. Persist it via a systemd override so it survives PostgreSQL restarts (replace `<version>` with your installed version, e.g. `15`):
 
@@ -346,10 +382,22 @@ If `C:` has less than 50 GB free, **install PGDATA on a different drive** during
 ```sql
 CREATE USER polaris WITH PASSWORD 'change-me';
 CREATE DATABASE polaris OWNER polaris;
+\c polaris
+CREATE SCHEMA IF NOT EXISTS pgboss;
+ALTER SCHEMA pgboss OWNER TO polaris;
+GRANT ALL ON SCHEMA pgboss TO polaris;
+GRANT ALL ON ALL TABLES    IN SCHEMA pgboss TO polaris;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA pgboss TO polaris;
+GRANT ALL ON ALL FUNCTIONS IN SCHEMA pgboss TO polaris;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON TABLES    TO polaris;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON SEQUENCES TO polaris;
+ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON FUNCTIONS TO polaris;
 \q
 ```
 
 Edit `pg_hba.conf` (in the data directory) to add a line for the polaris user, then restart the PostgreSQL service from `services.msc`.
+
+The `pgboss` schema grants are required for pg-boss queue mode (operators with thousands of monitored assets). Without them Polaris falls back to in-process cursor mode — fine for small/medium fleets, won't keep up at thousands.
 
 ### 3. Node.js 20+
 
