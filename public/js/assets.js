@@ -391,10 +391,13 @@ async function _setAssetType(assetId, nextType) {
 
 // Delegated click handler for the Status column pill. Toggles the asset's
 // `monitored` flag through PUT /assets/:id; the route stamps
-// `monitoredOperatorSet=true` so the choice survives discovery cycles. UI
-// is optimistic — flip the cached row + re-render before the network round
-// trip; rollback on failure with a toast.
-async function _handleMonitorPillClick(e) {
+// `monitoredOperatorSet=true` so the choice survives discovery cycles.
+//
+// Disabling monitoring opens a small inline confirm popover anchored to
+// the pill — operators were tripping the toggle accidentally while
+// scanning the column. Re-enabling stays a one-click action since it's
+// low-risk (worst case the asset starts probing and is flipped off again).
+function _handleMonitorPillClick(e) {
   var pill = e.target.closest('[data-monitor-toggle]');
   if (!pill) return;
   e.preventDefault();
@@ -402,12 +405,79 @@ async function _handleMonitorPillClick(e) {
   if (typeof canManageAssets === "function" && !canManageAssets()) return;
   var assetId = pill.getAttribute('data-monitor-toggle');
   var currentlyMonitored = pill.getAttribute('data-monitored') === "true";
-  var nextMonitored = !currentlyMonitored;
-  // Find the cached row.
+
+  if (currentlyMonitored) {
+    _showMonitorDisableConfirm(pill, function () { _flipAssetMonitor(assetId, false); });
+  } else {
+    _flipAssetMonitor(assetId, true);
+  }
+}
+
+// Inline confirmation popover for the "disable monitoring" direction.
+// Anchored in viewport coordinates so the parent <td>'s overflow:hidden
+// doesn't clip it. Closes on outside click, Escape, or button click.
+function _showMonitorDisableConfirm(anchorEl, onConfirm) {
+  // Drop any earlier popover first — clicking another pill while one is
+  // open should swap, not stack.
+  var existing = document.querySelector(".monitor-confirm-popover");
+  if (existing) existing.remove();
+
+  var popover = document.createElement("div");
+  popover.className = "monitor-confirm-popover";
+  popover.setAttribute("role", "dialog");
+  popover.setAttribute("aria-label", "Disable monitoring");
+  popover.innerHTML =
+    '<div class="mcp-message">Disable monitoring on this asset?</div>' +
+    '<div class="mcp-actions">' +
+      '<button type="button" class="mcp-cancel">Cancel</button>' +
+      '<button type="button" class="mcp-confirm">Disable</button>' +
+    '</div>';
+  document.body.appendChild(popover);
+
+  // Position: prefer below the pill; fall back to above if it would clip
+  // the bottom edge. Horizontal alignment defaults to the pill's left
+  // edge; nudge left if it would overrun the right viewport edge.
+  var anchor = anchorEl.getBoundingClientRect();
+  var pop = popover.getBoundingClientRect();
+  var top = anchor.bottom + 6;
+  if (top + pop.height > window.innerHeight - 8) top = anchor.top - pop.height - 6;
+  var left = anchor.left;
+  if (left + pop.width > window.innerWidth - 8) left = window.innerWidth - pop.width - 8;
+  if (left < 8) left = 8;
+  popover.style.top  = top  + "px";
+  popover.style.left = left + "px";
+
+  function close() {
+    popover.remove();
+    document.removeEventListener("mousedown", onOutside, true);
+    document.removeEventListener("keydown",   onKey,     true);
+  }
+  function onOutside(ev) {
+    if (popover.contains(ev.target)) return;
+    close();
+  }
+  function onKey(ev) {
+    if (ev.key === "Escape") { ev.preventDefault(); close(); }
+  }
+  document.addEventListener("mousedown", onOutside, true);
+  document.addEventListener("keydown",   onKey,     true);
+
+  popover.querySelector(".mcp-cancel").addEventListener("click", close);
+  popover.querySelector(".mcp-confirm").addEventListener("click", function () {
+    close();
+    onConfirm();
+  });
+  // Focus Cancel by default — accidental Enter shouldn't disable monitoring.
+  setTimeout(function () { popover.querySelector(".mcp-cancel").focus(); }, 0);
+}
+
+// Optimistic-update helper extracted from the click handler so the
+// confirmed-disable and immediate-enable paths share a single network +
+// rollback flow.
+async function _flipAssetMonitor(assetId, nextMonitored) {
   var idx = (_assetsData || []).findIndex(function (a) { return a.id === assetId; });
   if (idx === -1) return;
   var prevSnapshot = Object.assign({}, _assetsData[idx]);
-  // Optimistic update.
   _assetsData[idx].monitored = nextMonitored;
   if (!nextMonitored) {
     _assetsData[idx].monitorStatus = null;
@@ -420,8 +490,6 @@ async function _handleMonitorPillClick(e) {
     await api.assets.update(assetId, { monitored: nextMonitored });
     showToast(nextMonitored ? "Monitoring enabled" : "Monitoring disabled");
   } catch (err) {
-    // Rollback. Single field-level revert keeps the rest of the row's
-    // state (lastResponseTimeMs etc.) untouched in case other fields drifted.
     _assetsData[idx].monitored          = prevSnapshot.monitored;
     _assetsData[idx].monitorStatus      = prevSnapshot.monitorStatus;
     _assetsData[idx].lastResponseTimeMs = prevSnapshot.lastResponseTimeMs;

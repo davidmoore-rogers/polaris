@@ -1448,6 +1448,55 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .badge-clickable:hover  { filter: brightness(1.18); }
 .badge-clickable:active { transform: scale(0.96); }
 .badge-clickable:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+/* Inline confirmation popover anchored to a Status pill — used when the
+ * operator clicks an Up/Warning/Pending/Down pill to disable monitoring.
+ * Positioned in viewport space (fixed) by JS so the parent table cell's
+ * overflow doesn't clip it. */
+.monitor-confirm-popover {
+  position: fixed;
+  z-index: 1100;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-md, 0 4px 12px rgba(0,0,0,0.18));
+  padding: 8px 10px;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.monitor-confirm-popover .mcp-message {
+  font-size: 0.82rem;
+  color: var(--color-text-primary);
+  line-height: 1.3;
+}
+.monitor-confirm-popover .mcp-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.monitor-confirm-popover button {
+  font-size: 0.78rem;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+}
+.monitor-confirm-popover button.mcp-confirm {
+  background: rgba(239,83,80,0.18);
+  color: #ef5350;
+  border-color: rgba(239,83,80,0.40);
+  font-weight: 600;
+}
+.monitor-confirm-popover button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
 .badge-available  { background: rgba(0,200,83,0.12); color: var(--color-success); border: 1px solid rgba(0,200,83,0.25); }
 .badge-reserved   { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); }
 .badge-deprecated { background: rgba(117,117,117,0.12); color: var(--color-deprecated); border: 1px solid rgba(117,117,117,0.25); }
