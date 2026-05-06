@@ -522,8 +522,10 @@ async function _flipAssetMonitor(assetId, nextMonitored) {
   if (!nextMonitored) {
     _assetsData[idx].monitorStatus = null;
     _assetsData[idx].lastResponseTimeMs = null;
-  } else if (!_assetsData[idx].monitorStatus) {
-    _assetsData[idx].monitorStatus = "unknown";
+  } else {
+    _assetsData[idx].monitorStatus = "recovering";
+    _assetsData[idx].consecutiveFailures = 0;
+    _assetsData[idx].consecutiveSuccesses = 0;
   }
   renderAssetsPage();
   try {
@@ -616,6 +618,22 @@ function renderAssetsPage() {
   renderPageControls("pagination", sfData.length, _assetsPageSize, _assetsPage, function (p) {
     _assetsPage = p;
     renderAssetsPage();
+  }, null, {
+    actionButtons: [
+      {
+        label: "Refresh",
+        onClick: loadAssets,
+      },
+      {
+        label: "Clear Filters",
+        onClick: function () {
+          if (_assetsSF) _assetsSF.clearFilters();
+          _assetsPage = 1;
+          renderAssetsPage();
+          _saveAssetsPrefs();
+        },
+      },
+    ],
   });
 }
 
