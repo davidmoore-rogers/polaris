@@ -383,38 +383,44 @@ function reservationPushFormHTML(pushReservations, useProxy) {
   var modeBody = (useProxy === false)
     ? "DHCP writes go to each FortiGate's REST API using the per-device API token configured on the Settings tab. FortiManager is bypassed entirely. Each call lands on the running config in real time."
     : "DHCP writes go through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials. Each call lands on the running config in real time; FortiManager will see the change on its next config sync.";
-  return '<div class="form-section">' +
-    '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
-      '<input type="checkbox" id="f-pushReservations" ' + checked + ' style="width:auto">' +
-      '<label for="f-pushReservations" style="margin:0;font-weight:500">Write Polaris DHCP changes back to FortiGate</label>' +
-    '</div>' +
-    '<p class="hint" style="margin-bottom:0.4rem">When checked, two DHCP writes flow from Polaris back to the originating FortiGate on subnets discovered by this integration:</p>' +
-    '<ul class="hint" style="margin:0 0 1rem 1.2rem;padding:0">' +
-      '<li><strong>Reservation create.</strong> Every manual IP reservation is written to the FortiGate at create time as a <code>reserved-address</code> entry. The Polaris reservation only commits if the device write succeeds and the entry verifies on read-back; any failure aborts the create.</li>' +
-      '<li><strong>DHCP lease revoke.</strong> Freeing a discovered <code>dhcp_lease</code> row tells the FortiGate to forget the current lease via <code>release-lease</code>. Best-effort &mdash; a device-side failure is logged as a warning but does not block the Polaris release. The same client can still DHCP-acquire the IP back on its next request; this is "expire now," not a block.</li>' +
-    '</ul>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.4rem">Push transport (current setting)</p>' +
-    '<p style="margin:0 0 0.4rem 0;font-weight:500">' + escapeHtml(modeLabel) + '</p>' +
-    '<p class="hint" style="margin-bottom:1rem">' + modeBody + '</p>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.4rem">Required FortiManager admin profile changes</p>' +
-    '<ul style="margin:0 0 0.5rem 1.2rem;padding:0;font-size:0.85rem">' +
-      '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
-      '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write &nbsp;<span style="color:var(--color-text-tertiary)">&larr; the actual gate</span></li>' +
-      '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
-      '<li><strong>Policy &amp; Objects</strong> &mdash; leave at Read-Only or None</li>' +
-      '<li style="margin-left:1.2rem"><strong>Install Policy Package or Device Configuration</strong> &rarr; None &nbsp;<span style="color:var(--color-text-tertiary)">&larr; Polaris never triggers installs</span></li>' +
-    '</ul>' +
-    '<div class="form-group" style="background:var(--color-warning-bg, rgba(255,193,7,0.08));border:1px solid var(--color-warning, #ffc107);border-radius:4px;padding:0.6rem 0.8rem;margin-top:0.6rem">' +
-      '<p style="margin:0 0 0.4rem 0;font-weight:500;color:var(--color-warning, #ffc107)">&#9888; Blast radius</p>' +
-      '<p class="hint" style="margin:0">FortiManager admin profiles do not have a per-object permission for DHCP reservations. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. A compromised Polaris API token could in principle modify other device-level config &mdash; interfaces, routing, other DHCP scopes &mdash; not just the reservations Polaris pushes. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.</p>' +
-    '</div>' +
-    '<div class="form-group" style="background:var(--color-info-bg, rgba(33,150,243,0.06));border:1px solid var(--color-info, #2196f3);border-radius:4px;padding:0.6rem 0.8rem;margin-top:0.6rem">' +
-      '<p style="margin:0 0 0.4rem 0;font-weight:500;color:var(--color-info, #2196f3)">&#128161; Tighter scope alternative</p>' +
-      '<p class="hint" style="margin:0">For tighter scope, switch to direct mode (uncheck <em>Query each FortiGate directly (bypass FortiManager proxy)</em> on the Settings tab) and configure a per-FortiGate REST API admin with <strong>Network &rarr; Custom &rarr; Configuration</strong> set to Read/Write. This scopes write access to one FortiGate\'s network-configuration bucket instead of every CMDB tree on every device in the ADOM.</p>' +
-    '</div>' +
-  '</div>';
+  return '<section style="margin-bottom:1.5rem">' +
+      '<h4 style="margin:0 0 0.25rem 0">DHCP Push</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">When enabled, two DHCP writes flow from Polaris back to the originating FortiGate on subnets discovered by this integration.</p>' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<input type="checkbox" id="f-pushReservations" ' + checked + ' style="width:auto">' +
+        '<label for="f-pushReservations" style="margin:0">Write Polaris DHCP changes back to FortiGate</label>' +
+      '</div>' +
+      '<ul class="hint" style="margin:0.25rem 0 0 1.2rem;padding:0">' +
+        '<li><strong>Reservation create.</strong> Every manual IP reservation is written to the FortiGate at create time as a <code>reserved-address</code> entry. The Polaris reservation only commits if the device write succeeds and the entry verifies on read-back; any failure aborts the create.</li>' +
+        '<li><strong>DHCP lease revoke.</strong> Freeing a discovered <code>dhcp_lease</code> row tells the FortiGate to forget the current lease via <code>release-lease</code>. Best-effort &mdash; a device-side failure is logged as a warning but does not block the Polaris release. The same client can still DHCP-acquire the IP back on its next request; this is "expire now," not a block.</li>' +
+      '</ul>' +
+    '</section>' +
+    '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    '<section style="margin-bottom:1.5rem">' +
+      '<h4 style="margin:0 0 0.25rem 0">Push Transport</h4>' +
+      '<p class="hint" style="margin:0 0 0.25rem 0;color:var(--color-text-tertiary)">Current setting: <strong style="color:var(--color-text-primary)">' + escapeHtml(modeLabel) + '</strong></p>' +
+      '<p class="hint" style="margin:0;color:var(--color-text-tertiary)">' + modeBody + '</p>' +
+    '</section>' +
+    '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    '<section>' +
+      '<h4 style="margin:0 0 0.25rem 0">Required FortiManager Admin Profile</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">The following permission changes are needed on the FortiManager admin profile Polaris uses:</p>' +
+      '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem">' +
+        '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
+        '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write &nbsp;<span style="color:var(--color-text-tertiary)">&larr; the actual gate</span></li>' +
+        '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
+        '<li><strong>Policy &amp; Objects</strong> &mdash; leave at Read-Only or None</li>' +
+        '<li style="margin-left:1.2rem"><strong>Install Policy Package or Device Configuration</strong> &rarr; None &nbsp;<span style="color:var(--color-text-tertiary)">&larr; Polaris never triggers installs</span></li>' +
+      '</ul>' +
+      '<div style="background:var(--color-warning-bg, rgba(255,193,7,0.08));border:1px solid var(--color-warning, #ffc107);border-radius:4px;padding:0.6rem 0.8rem;margin-bottom:0.5rem">' +
+        '<p style="margin:0 0 0.4rem 0;font-weight:500;color:var(--color-warning, #ffc107)">&#9888; Blast radius</p>' +
+        '<p class="hint" style="margin:0">FortiManager admin profiles do not have a per-object permission for DHCP reservations. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. A compromised Polaris API token could in principle modify other device-level config &mdash; interfaces, routing, other DHCP scopes &mdash; not just the reservations Polaris pushes. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.</p>' +
+      '</div>' +
+      '<div style="background:var(--color-info-bg, rgba(33,150,243,0.06));border:1px solid var(--color-info, #2196f3);border-radius:4px;padding:0.6rem 0.8rem">' +
+        '<p style="margin:0 0 0.4rem 0;font-weight:500;color:var(--color-info, #2196f3)">&#128161; Tighter scope alternative</p>' +
+        '<p class="hint" style="margin:0">For tighter scope, switch to direct mode (uncheck <em>Query each FortiGate directly (bypass FortiManager proxy)</em> on the Settings tab) and configure a per-FortiGate REST API admin with <strong>Network &rarr; Custom &rarr; Configuration</strong> set to Read/Write. This scopes write access to one FortiGate\'s network-configuration bucket instead of every CMDB tree on every device in the ADOM.</p>' +
+      '</div>' +
+    '</section>';
 }
 
 // Read the toggle's current value out of the Reservation Push tab. Returns
@@ -439,28 +445,34 @@ function quarantinePushFormHTML(pushQuarantine, useProxy) {
   var modeBody = (useProxy === false)
     ? "Quarantine entries are written to each FortiGate's REST API using the per-device API token configured on the Settings tab."
     : "Quarantine entries are written through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials.";
-  return '<div class="form-section">' +
-    '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
-      '<input type="checkbox" id="f-pushQuarantine" ' + checked + ' style="width:auto">' +
-      '<label for="f-pushQuarantine" style="margin:0;font-weight:500">Push asset quarantine entries from Polaris back to FortiGate</label>' +
-    '</div>' +
-    '<p class="hint" style="margin-bottom:1rem">When checked, quarantining an asset adds its MAC addresses to the FortiGate quarantine address-group on every device that has recently sighted the asset. Releasing quarantine removes the entries from the device.</p>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.4rem">Push transport (current setting)</p>' +
-    '<p style="margin:0 0 0.4rem 0;font-weight:500">' + escapeHtml(modeLabel) + '</p>' +
-    '<p class="hint" style="margin-bottom:1rem">' + modeBody + '</p>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.4rem">Required FortiManager admin profile changes</p>' +
-    '<ul style="margin:0 0 0.5rem 1.2rem;padding:0;font-size:0.85rem">' +
-      '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
-      '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write</li>' +
-      '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
-    '</ul>' +
-    '<div class="form-group" style="background:var(--color-warning-bg, rgba(255,193,7,0.08));border:1px solid var(--color-warning, #ffc107);border-radius:4px;padding:0.6rem 0.8rem;margin-top:0.6rem">' +
-      '<p style="margin:0 0 0.4rem 0;font-weight:500;color:var(--color-warning, #ffc107)">&#9888; Blast radius</p>' +
-      '<p class="hint" style="margin:0">FortiManager admin profiles do not have a per-object permission for quarantine. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.</p>' +
-    '</div>' +
-  '</div>';
+  return '<section style="margin-bottom:1.5rem">' +
+      '<h4 style="margin:0 0 0.25rem 0">Quarantine Push</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">When enabled, quarantining an asset adds its MAC addresses to the FortiGate quarantine address-group on every device that has recently sighted the asset. Releasing quarantine removes the entries from the device.</p>' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+        '<input type="checkbox" id="f-pushQuarantine" ' + checked + ' style="width:auto">' +
+        '<label for="f-pushQuarantine" style="margin:0">Push asset quarantine entries from Polaris back to FortiGate</label>' +
+      '</div>' +
+    '</section>' +
+    '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    '<section style="margin-bottom:1.5rem">' +
+      '<h4 style="margin:0 0 0.25rem 0">Push Transport</h4>' +
+      '<p class="hint" style="margin:0 0 0.25rem 0;color:var(--color-text-tertiary)">Current setting: <strong style="color:var(--color-text-primary)">' + escapeHtml(modeLabel) + '</strong></p>' +
+      '<p class="hint" style="margin:0;color:var(--color-text-tertiary)">' + modeBody + '</p>' +
+    '</section>' +
+    '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    '<section>' +
+      '<h4 style="margin:0 0 0.25rem 0">Required FortiManager Admin Profile</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">The following permission changes are needed on the FortiManager admin profile Polaris uses:</p>' +
+      '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem">' +
+        '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
+        '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write</li>' +
+        '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
+      '</ul>' +
+      '<div style="background:var(--color-warning-bg, rgba(255,193,7,0.08));border:1px solid var(--color-warning, #ffc107);border-radius:4px;padding:0.6rem 0.8rem">' +
+        '<p style="margin:0 0 0.4rem 0;font-weight:500;color:var(--color-warning, #ffc107)">&#9888; Blast radius</p>' +
+        '<p class="hint" style="margin:0">FortiManager admin profiles do not have a per-object permission for quarantine. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.</p>' +
+      '</div>' +
+    '</section>';
 }
 
 // Read the quarantine push toggle. Returns undefined when the tab didn't render.
@@ -1348,8 +1360,8 @@ function fortiManagerFiltersHTML(defaults) {
   var invIfaces = invMode === "include" ? (d.inventoryIncludeInterfaces || []) : (d.inventoryExcludeInterfaces || []);
   var devMode = (d.deviceInclude && d.deviceInclude.length > 0) ? "include" : "exclude";
   var devNames = devMode === "include" ? (d.deviceInclude || []) : (d.deviceExclude || []);
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">FortiGate Device Scope</p>' +
-    '<div class="form-group"><label>Device Filter</label>' +
+  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">FortiGate Device Filter</p>' +
+    '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-deviceMode" style="width:auto">' +
           '<option value="include"' + (devMode === "include" ? " selected" : "") + '>Include</option>' +
@@ -1361,8 +1373,8 @@ function fortiManagerFiltersHTML(defaults) {
       '<p class="hint">Leave empty to query all managed FortiGates. Matched against device name or hostname. Wildcards supported: <code>FG-*</code>, <code>*-lab</code>, <code>*dc*</code></p>' +
     '</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Scope</p>' +
-    '<div class="form-group"><label>DHCP Filter</label>' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Filter</p>' +
+    '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-dhcpMode" style="width:auto">' +
           '<option value="include"' + (dhcpMode === "include" ? " selected" : "") + '>Include</option>' +
@@ -1374,8 +1386,8 @@ function fortiManagerFiltersHTML(defaults) {
       '<p class="hint">Leave empty to include all interfaces. Applies to DHCP server scope discovery only. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
     '</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Scope</p>' +
-    '<div class="form-group"><label>Interface Filter</label>' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Filter</p>' +
+    '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-ifaceMode" style="width:auto">' +
           '<option value="include"' + (ifaceMode === "include" ? " selected" : "") + '>Include</option>' +
@@ -1490,8 +1502,8 @@ function fortiGateFiltersHTML(defaults) {
   var ifaceList = ifaceMode === "include" ? (d.interfaceInclude || []) : (d.interfaceExclude || []);
   var invMode = (d.inventoryIncludeInterfaces && d.inventoryIncludeInterfaces.length > 0) ? "include" : "exclude";
   var invIfaces = invMode === "include" ? (d.inventoryIncludeInterfaces || []) : (d.inventoryExcludeInterfaces || []);
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Scope</p>' +
-    '<div class="form-group"><label>DHCP Filter</label>' +
+  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Filter</p>' +
+    '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-dhcpMode" style="width:auto">' +
           '<option value="include"' + (dhcpMode === "include" ? " selected" : "") + '>Include</option>' +
@@ -1503,8 +1515,8 @@ function fortiGateFiltersHTML(defaults) {
       '<p class="hint">Leave empty to include all interfaces. Applies to DHCP server scope discovery only. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
     '</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Scope</p>' +
-    '<div class="form-group"><label>Interface Filter</label>' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Filter</p>' +
+    '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-ifaceMode" style="width:auto">' +
           '<option value="include"' + (ifaceMode === "include" ? " selected" : "") + '>Include</option>' +
@@ -1640,8 +1652,8 @@ function entraIdFormHTML(defaults) {
     '</div>' +
     '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to automatically query Graph for device updates (1–24 hours)</p></div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Device Scope</p>' +
-    '<div class="form-group"><label>Device Filter</label>' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Device Filter</p>' +
+    '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-deviceMode" style="width:auto">' +
           '<option value="include"' + (devMode === "include" ? " selected" : "") + '>Include</option>' +
@@ -1718,8 +1730,8 @@ function activeDirectoryFormHTML(defaults) {
     '</div>' +
     '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to re-query AD for device updates (1–24 hours)</p></div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Computer Scope</p>' +
-    '<div class="form-group"><label>OU Filter</label>' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">OU Filter</p>' +
+    '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-deviceMode" style="width:auto">' +
           '<option value="include"' + (devMode === "include" ? " selected" : "") + '>Include</option>' +
