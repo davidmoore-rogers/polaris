@@ -849,7 +849,23 @@ export async function probeAsset(assetId: string): Promise<ProbeResult> {
       // they query the parent FortiGate rather than the asset's own IP.)
       // Manual REST API targets pull from a stored "restapi"-typed credential.
       if (isFortinetSrc && integration) {
-        return await probeFortinet(targetIp, integration as any, start, timeoutMs);
+        const result = await probeFortinet(targetIp, integration as any, start, timeoutMs);
+        // Proxy mode only: after a successful FortiGate probe, pre-warm the
+        // switch + AP controller-inventory cache so children that fire within
+        // the 30 s TTL window get a free cache hit instead of a separate FMG
+        // proxy call. Fire-and-forget — don't add to the FortiGate's RTT.
+        // Direct mode keeps children independent (no proxy bottleneck, and
+        // per-device parallelism is up to 20).
+        if (
+          result.success &&
+          integration.type === "fortimanager" &&
+          (integration.config as Record<string, unknown>).useProxy !== false &&
+          asset.hostname
+        ) {
+          void fetchFortinetControllerInventory(integration as any, asset.hostname, "switches", timeoutMs).catch(() => {});
+          void fetchFortinetControllerInventory(integration as any, asset.hostname, "aps",     timeoutMs).catch(() => {});
+        }
+        return result;
       }
       if (asset.monitorCredential?.type === "restapi") {
         return await probeRestApiCredential(asset.monitorCredential.config as Record<string, unknown>, start, timeoutMs);
