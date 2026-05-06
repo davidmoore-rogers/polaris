@@ -98,7 +98,7 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
   const now = new Date();
 
   const candidates = await prisma.asset.findMany({
-    where: { monitored: true, monitorType: { not: null } },
+    where: { monitored: true },
     select: {
       id: true,
       assetType: true,
@@ -106,7 +106,7 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       // Joined for the resolver — picks the source-default polling method.
       // See the matching comment in monitoringService.runMonitorPass.
       discoveredByIntegration: { select: { type: true } },
-      monitorType: true, monitorStatus: true,
+      monitorStatus: true,
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, telemetryIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
@@ -146,7 +146,11 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     const isUp = a.monitorStatus === "up";
 
     if (probe && enabled.has("probe")) {
-      await publishMonitorJob("probe", a.id, a.monitorType ?? "unknown");
+      // Transport label for the per-probe metrics. Uses the resolved
+      // responseTimePolling — same fidelity as runMonitorPass's
+      // transportById in monitoringService.
+      const transport = eff.responseTimePolling || "unknown";
+      await publishMonitorJob("probe", a.id, transport);
     }
     if (telemetry && isUp && enabled.has("telemetry")) {
       await publishMonitorJob("telemetry", a.id);

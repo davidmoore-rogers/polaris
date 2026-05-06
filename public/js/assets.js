@@ -1013,7 +1013,7 @@ function assetMonitorBadge(asset) {
   }
   var s = asset.monitorStatus || "unknown";
   var bits = [];
-  if (asset.monitorType) bits.push("Type: " + asset.monitorType);
+  if (asset.responseTimePolling) bits.push("Method: " + asset.responseTimePolling);
   if (typeof asset.lastResponseTimeMs === "number") bits.push("Last RTT: " + asset.lastResponseTimeMs + " ms");
   if (asset.lastMonitorAt) bits.push("Last poll: " + new Date(asset.lastMonitorAt).toLocaleString());
   if (canToggle) bits.push("Click to disable monitoring");
@@ -1200,8 +1200,6 @@ function getAssetFormData() {
   var mon = document.getElementById("f-monitored");
   if (mon) {
     data.monitored = mon.checked;
-    var typeSel = document.getElementById("f-monitorType");
-    if (typeSel) data.monitorType = typeSel.value || null;
     var credSel = document.getElementById("f-monitorCredential");
     if (credSel) data.monitorCredentialId = credSel.value || null;
     var ivEl = document.getElementById("f-monitorInterval");
@@ -1231,32 +1229,7 @@ function getAssetFormData() {
 
 // ─── Tabbed asset modal scaffolding ────────────────────────────────────────
 
-// Returns the integration-default monitor type for an asset (the type stamped
-// by the discovering integration), or null if the asset is not integration-
-// discovered. Operators can override the running monitorType to a generic
-// type (snmp/icmp/winrm/ssh); the override is preserved across re-discovery.
-function _assetIntegrationDefault(asset) {
-  if (!asset || !asset.discoveredByIntegrationId) return null;
-  var integrationType = asset.discoveredByIntegration && asset.discoveredByIntegration.type;
-  if (integrationType === "fortimanager")  return "fortimanager";
-  if (integrationType === "fortigate")     return "fortigate";
-  if (integrationType === "activedirectory") return "activedirectory";
-  return null;
-}
-
-// True when this integration-discovered asset is still running on its
-// discovery-stamped default monitor type (i.e. the operator hasn't switched
-// it to a generic snmp/icmp/winrm/ssh probe). Drives view-only rendering of
-// the Source label and probe-method label.
-function _isMonitorOnIntegrationDefault(asset) {
-  var def = _assetIntegrationDefault(asset);
-  return !!def && asset.monitorType === def;
-}
-
 function assetMonitoringFormHTML(asset) {
-  var integrationDefault = _assetIntegrationDefault(asset);
-  var integrationName = (asset && asset.discoveredByIntegration && asset.discoveredByIntegration.name) || "";
-  var monitorType = asset && asset.monitorType ? asset.monitorType : "";
   var credId = asset && asset.monitorCredentialId ? asset.monitorCredentialId : "";
   var interval = asset && asset.monitorIntervalSec != null ? asset.monitorIntervalSec : "";
   var probeTimeout = asset && asset.probeTimeoutMs != null ? asset.probeTimeoutMs : "";
@@ -1264,42 +1237,6 @@ function assetMonitoringFormHTML(asset) {
   // Asset id is needed to fetch effective settings + populate the Asset
   // Overrides button — empty on the create flow.
   var assetIdAttr = (asset && asset.id) ? ' data-asset-id="' + escapeHtml(asset.id) + '"' : "";
-
-  // Build the dropdown. When the asset is integration-discovered we add an
-  // extra option representing the integration's native type, labeled with the
-  // integration name so it's clear this is the "default" path. Operators can
-  // pick any option — there is no hard lock.
-  var defaultOptionHtml = "";
-  var defaultHintHtml = "";
-  if (integrationDefault) {
-    var defaultLabel =
-      integrationDefault === "fortigate"        ? "FortiGate: " :
-      integrationDefault === "activedirectory"  ? "Active Directory: " :
-                                                    "FortiManager: ";
-    defaultLabel += (integrationName || "(unknown)") + " (default)";
-    defaultOptionHtml =
-      '<option value="' + escapeHtml(integrationDefault) + '"' +
-        (monitorType === integrationDefault ? " selected" : "") + '>' +
-        escapeHtml(defaultLabel) +
-      '</option>';
-    defaultHintHtml = integrationDefault === "activedirectory"
-      ? '<p class="hint">Default routes probes through ' + escapeHtml(integrationName || "this integration") +
-        '’s bind credentials (WinRM for Windows, SSH for Linux; bind DN must be UPN form, e.g. <code>user@domain.com</code>). ' +
-        'Switch to SNMP/WinRM/SSH/ICMP if you want to probe the host directly.</p>'
-      : '<p class="hint">Default routes probes through ' + escapeHtml(integrationName || "this integration") +
-        '’s API token (FortiOS REST). Switch to SNMP for small-branch FortiGates whose REST sensor endpoint 404s, or to ICMP for plain reachability checks.</p>';
-  }
-
-  var typeSelect =
-    '<select id="f-monitorType">' +
-      '<option value=""'      + (monitorType === ""      ? " selected" : "") + '>— none —</option>' +
-      defaultOptionHtml +
-      '<option value="icmp"'  + (monitorType === "icmp"  ? " selected" : "") + '>ICMP (no credentials)</option>' +
-      '<option value="snmp"'  + (monitorType === "snmp"  ? " selected" : "") + '>SNMP</option>' +
-      '<option value="winrm"' + (monitorType === "winrm" ? " selected" : "") + '>WinRM</option>' +
-      '<option value="ssh"'   + (monitorType === "ssh"   ? " selected" : "") + '>SSH</option>' +
-    '</select>' +
-    defaultHintHtml;
 
   // Per-stream polling-method overrides. Compat-aware — methods that don't
   // apply to this asset's source are hidden inside the helper. Always
@@ -1329,13 +1266,12 @@ function assetMonitoringFormHTML(asset) {
       '</label>' +
       '<p class="hint">A successful probe means the credential authenticated. Probes write a sample row each cycle; failed probes count as packet loss.</p>' +
     '</div>' +
-    '<div class="form-group"><label>Monitor Type</label>' + typeSelect + '</div>' +
-    '<div class="form-group" id="f-monitorCredential-wrap" style="display:none">' +
+    '<div class="form-group" id="f-monitorCredential-wrap">' +
       '<label>Credential</label>' +
       '<select id="f-monitorCredential" data-current-id="' + escapeHtml(credId) + '">' +
         '<option value="">— none —</option>' +
       '</select>' +
-      '<p class="hint">Add credentials in <a href="/server-settings.html?tab=credentials">Server Settings → Credentials</a>.</p>' +
+      '<p class="hint">Used by polling methods that need authentication (SNMP / WinRM / SSH / REST API). FMG/FortiGate-discovered firewalls fall back to the integration\'s API token when no asset credential is set. Add credentials in <a href="/server-settings.html?tab=credentials">Server Settings → Credentials</a>.</p>' +
     '</div>' +
     '<div class="form-group">' +
       '<label>Poll Interval Override (seconds) <span class="tier-badge" id="f-monitorInterval-tier" style="margin-left:0.5rem;font-size:0.78rem;font-weight:normal;color:var(--color-text-tertiary)"></span></label>' +
@@ -1359,7 +1295,6 @@ function assetMonitoringFormHTML(asset) {
 async function _wireMonitorEditTab(asset) {
   await _ensureCredentials();
   var monChk = document.getElementById("f-monitored");
-  var typeSel = document.getElementById("f-monitorType");
   var credWrap = document.getElementById("f-monitorCredential-wrap");
   var credSel = document.getElementById("f-monitorCredential");
   var intervalEl = document.getElementById("f-monitorInterval");
@@ -1369,26 +1304,25 @@ async function _wireMonitorEditTab(asset) {
   var transportWrap = document.getElementById("f-transport-wrap");
   function refresh() {
     var enabled = !!(monChk && monChk.checked);
-    var t = typeSel ? typeSel.value : "";
-    var needsCred = (t === "snmp" || t === "winrm" || t === "ssh");
-    if (typeSel) typeSel.disabled = !enabled;
     if (intervalEl) intervalEl.disabled = !enabled;
     if (probeTimeoutEl) probeTimeoutEl.disabled = !enabled;
-    if (credWrap) credWrap.style.display = (enabled && needsCred) ? "block" : "none";
-    if (credSel) credSel.disabled = !enabled;
-    if (enabled && needsCred && credSel) {
-      var current = credSel.getAttribute("data-current-id") || "";
-      credSel.innerHTML = _credentialOptionsFor(t, current);
+    if (credWrap) credWrap.style.display = enabled ? "block" : "none";
+    if (credSel) {
+      credSel.disabled = !enabled;
+      // Populate with every credential type — operator picks the one that
+      // matches the polling method they've chosen below. The picker stays
+      // visible whenever monitoring is enabled because a single asset
+      // could have polling=snmp + a stored SNMP credential, or
+      // polling=winrm + a WinRM credential, etc.
+      if (enabled) {
+        var current = credSel.getAttribute("data-current-id") || "";
+        credSel.innerHTML = _credentialOptionsForAny(current);
+      }
     }
-    // Per-stream polling block visibility — only visible while monitoring
-    // is enabled. Compat-aware filtering of the per-method options happens
-    // inside the helper at render time, so the same block is reused for
-    // every source kind (the "Inherit" label adapts).
     if (transportWrap) {
       transportWrap.style.display = enabled ? "block" : "none";
     }
   }
-  if (typeSel) typeSel.addEventListener("change", refresh);
   if (monChk) monChk.addEventListener("change", refresh);
   refresh();
 
@@ -1991,15 +1925,19 @@ function assetSystemViewHTML(a) {
       'Enable monitoring on this asset (Edit → Monitoring tab) to start collecting CPU/memory and interface data.' +
     '</div>';
   }
-  var t = a.monitorType;
-  if (t === "icmp" || t === "ssh") {
-    return '<div style="padding:1rem 0;color:var(--color-text-secondary)">' +
-      'System metrics are not available for ' + escapeHtml(t.toUpperCase()) + '-monitored assets — switch to SNMP, FortiOS, or WinRM to see CPU, memory, interfaces, and storage.' +
-    '</div>';
+  // Heavy-cadence streams (telemetry / interfaces / storage) are only
+  // delivered when the resolved interfacesPolling is REST API or SNMP.
+  // ICMP / SSH / WinRM don't carry the data shapes yet.
+  var ifPolling = a.interfacesPolling;
+  if (!ifPolling) {
+    var integ = a.discoveredByIntegration;
+    var sk = (integ && integ.type) || "manual";
+    if (sk !== "fortimanager" && sk !== "fortigate") ifPolling = null;
+    else ifPolling = "rest_api";
   }
-  if (t === "winrm" || t === "activedirectory") {
+  if (ifPolling !== "rest_api" && ifPolling !== "snmp") {
     return '<div style="padding:1rem 0;color:var(--color-text-secondary)">' +
-      'WinRM telemetry collection is not yet implemented. Use SNMP if you need CPU, memory, and interface metrics for this host today.' +
+      'System metrics (CPU / memory / interfaces / storage) require REST API or SNMP polling on the Interfaces stream. Switch the polling method on the Monitoring tab to enable.' +
     '</div>';
   }
   var rangeBtns =
@@ -3606,51 +3544,38 @@ function _renderSystemChart(container, data) {
   _observeChartResize(container, function (c) { _renderSystemChart(c, data); });
 }
 
-// Human-readable label for the probe method behind the response-time chart.
-// Mirrors the routing in monitoringService.probeAsset / getAdMonitorProtocol so
-// the chart self-describes (FortiOS REST vs SNMP vs ICMP vs WinRM vs SSH).
-// AD-locked assets are split into AD-WinRM (Windows hosts) and AD-SSH (realm-
-// joined Linux) since the probe path differs.
-//
-// FMG/FortiGate-locked assets honor the per-integration response-time probe
-// override: when the integration has a `monitorCredentialId` set to a stored
-// SNMP credential, the actual probe runs SNMP `sysUpTime` instead of the
-// FortiOS REST API. The label reflects that so the chart isn't lying about
-// what generated the samples.
+// Human-readable label for the polling method behind the response-time
+// chart. Reads the per-asset responseTimePolling override first; falls
+// back to the source default ("rest_api" for Fortinet, "icmp" for the
+// rest). Coarse view — full provenance is in /effective-monitor-settings,
+// but a label that's right 95% of the time is good enough for a chart
+// caption.
 function _probeMethodLabel(a) {
   if (!a) return "—";
-  var t = a.monitorType;
-  if (t === "fortimanager" || t === "fortigate") {
-    var override = a.integrationMonitorCredential;
-    if (override && override.type === "snmp") {
-      return "SNMP GET · " + override.name;
-    }
-    return "FortiOS REST API";
+  var integ = a.discoveredByIntegration;
+  var sourceKind = (integ && integ.type) || "manual";
+  var polling = a.responseTimePolling
+    || (sourceKind === "fortimanager" || sourceKind === "fortigate" ? "rest_api" : "icmp");
+  switch (polling) {
+    case "rest_api": return "REST API";
+    case "snmp":     return "SNMP GET";
+    case "winrm":    return "WinRM";
+    case "ssh":      return "SSH";
+    case "icmp":     return "ICMP ping";
+    default:         return polling;
   }
-  if (t === "snmp") return "SNMP GET";
-  if (t === "winrm") return "WinRM";
-  if (t === "ssh") return "SSH";
-  if (t === "icmp") return "ICMP ping";
-  if (t === "activedirectory") {
-    var os = (a.os || "").toLowerCase();
-    if (os.indexOf("linux") >= 0) return "AD-locked SSH";
-    if (os.indexOf("windows") >= 0) return "AD-locked WinRM";
-    return "Active Directory";
-  }
-  return t || "—";
 }
 
 // Per-stream polling-method + asset-source resolver used by the chart badges
 // in the asset System tab. Each chart shows what protocol is actually moving
-// data on its stream and which integration the asset came from. For
-// FMG/FortiGate types each stream has its own REST↔SNMP toggle (asset
-// override > integration default); generic types (snmp/winrm/ssh/icmp)
-// route every stream through the same monitorType. Returns
-//   { polling: "FortiOS REST" | "SNMP · <cred>" | "WinRM" | "SSH" | "ICMP" | "AD WinRM" | "AD SSH" | null,
+// data on its stream and which integration the asset came from. Reads the
+// per-asset *Polling override first and falls back to the source default.
+// Returns
+//   { polling: "REST API" | "SNMP · <cred>" | "WinRM" | "SSH" | "ICMP" | null,
 //     source:  "FortiManager · <name>" | "Active Directory · <name>" | "Manual" | ... }
-// `polling` is null when the asset's monitorType doesn't deliver that stream
-// (e.g. ICMP-monitored host has no telemetry stream); the caller should hide
-// the badge in that case.
+// `polling` is null when the source doesn't deliver that stream (e.g. AD/
+// Entra/WinServer hosts have no telemetry/interfaces/lldp stream by
+// default); the caller should hide the badge in that case.
 function _assetMonitorStreamSource(asset, stream) {
   if (!asset) return { polling: null, source: "—" };
   var integration = asset.discoveredByIntegration;
@@ -3689,8 +3614,8 @@ function _assetMonitorStreamSource(asset, stream) {
 }
 
 // Renders the badge content "polling · source" used next to each chart
-// header. Returns "" when the stream isn't delivered by this asset's
-// monitorType (caller can use the empty string to skip the badge entirely).
+// header. Returns "" when the stream isn't delivered for the asset's
+// source kind (caller skips the badge entirely).
 function _streamSourceBadgeHTML(asset, stream) {
   var info = _assetMonitorStreamSource(asset, stream);
   if (!info.polling) return "";
@@ -3710,10 +3635,8 @@ function assetMonitoringViewHTML(a) {
       '<span style="color:var(--color-text-secondary)">Monitoring is disabled for this asset. Enable it from the Edit modal’s Monitoring tab.</span>' +
     '</div>';
   }
-  // Source label: prefer the integration name when the asset is integration-
-  // discovered (covers AD-discovered hosts post-3i where monitorType is null
-  // but the source link is still set). Falls back to credential + method or
-  // bare method name for manual assets.
+  // Source label: integration name when integration-discovered, else
+  // credential name + polling method, else bare polling method.
   var sourceLabel = "—";
   var integ = a.discoveredByIntegration;
   if (integ) {
@@ -3725,11 +3648,10 @@ function assetMonitoringViewHTML(a) {
       windowsserver:   "Windows Server",
     };
     sourceLabel = (integTypeLabels[integ.type] || integ.type) + ": " + integ.name;
-  } else if (a.monitorType === "snmp" || a.monitorType === "winrm" || a.monitorType === "ssh") {
-    if (a.monitorCredential) sourceLabel = a.monitorType.toUpperCase() + " · " + a.monitorCredential.name;
-    else sourceLabel = a.monitorType.toUpperCase();
-  } else if (a.monitorType === "icmp") {
-    sourceLabel = "ICMP";
+  } else {
+    var rtPolling = a.responseTimePolling || "icmp";
+    if (a.monitorCredential) sourceLabel = rtPolling.toUpperCase() + " · " + a.monitorCredential.name;
+    else sourceLabel = rtPolling.toUpperCase();
   }
   var lastRtt = (typeof a.lastResponseTimeMs === "number") ? (a.lastResponseTimeMs + " ms") : "—";
   var lastPoll = a.lastMonitorAt ? formatDate(a.lastMonitorAt) : "—";
@@ -3874,10 +3796,10 @@ async function _renderIntermittencyBar(assetId) {
 /**
  * Fetches asset.updated events for one asset within the chart window and
  * returns transition markers — one per event whose change-set touched the
- * polling-method fields (monitorType, the four monitor*Source toggles, or
- * monitorCredentialId). Each marker carries { timestamp, label } so the
- * chart can render a vertical line at that timestamp with the human-
- * readable transition string in its tooltip.
+ * polling-method fields (responseTimePolling / telemetryPolling /
+ * interfacesPolling / lldpPolling) or monitorCredentialId. Each marker
+ * carries { timestamp, label } so the chart can render a vertical line at
+ * that timestamp with the human-readable transition string in its tooltip.
  *
  * Bounded by the events table's 7-day rolling retention. Older events
  * have been pruned and won't appear; that's acceptable for an
@@ -3886,7 +3808,6 @@ async function _renderIntermittencyBar(assetId) {
  */
 async function _fetchPollingTransitions(assetId, since, until) {
   var TRACKED = {
-    monitorType:               "Polling type",
     responseTimePolling:       "Response-time polling",
     telemetryPolling:          "Telemetry polling",
     interfacesPolling:         "Interfaces polling",
@@ -4118,8 +4039,8 @@ function _renderMonitorChart(container, data, transitions) {
   var xTitle = '<text class="chart-axis-title" x="' + (padL + innerW / 2) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.85">Time</text>';
 
   // Polling-method transition markers — vertical amber dashed lines at
-  // events where monitorType / monitor*Source / monitorCredentialId
-  // changed. Filter to within the chart window so off-screen transitions
+  // events where any *Polling field or monitorCredentialId changed. Filter
+  // to within the chart window so off-screen transitions
   // don't smear at the edges. A hit-target rectangle around each line
   // makes the hover forgiving without tying tooltip behaviour to the 1.5px
   // stroke. Tooltip text comes from the marker's data-label.
@@ -6599,7 +6520,12 @@ function assetSnmpWalkViewHTML(a) {
       'SNMP walks need an IP address — assign one to this asset before running a walk.' +
     '</div>';
   }
-  var seedCredId = (a.monitorType === "snmp" && a.monitorCredentialId) ? a.monitorCredentialId : null;
+  // Pre-select the asset's stored monitor credential when it's an SNMP one
+  // — the SNMP walk speaks the same protocol so it's the natural default.
+  // Other credential types stay deselected; the operator picks one from
+  // the dropdown.
+  var monCred = a.monitorCredential;
+  var seedCredId = (monCred && monCred.type === "snmp") ? monCred.id : null;
   return (
     '<div style="display:flex;flex-direction:column;gap:0.75rem">' +
       '<div style="font-size:0.85rem;color:var(--color-text-secondary)">' +
@@ -7048,6 +6974,23 @@ function _credentialOptionsFor(type, selectedId) {
   return opts;
 }
 
+// All credential types in one picker, with the type tagged on each label so
+// the operator can pick the credential that matches their chosen polling
+// method. Used by the asset edit modal's Monitoring tab — picking a SNMP
+// credential alongside polling=winrm is silently ignored at probe time, but
+// that's the operator's call to make.
+function _credentialOptionsForAny(selectedId) {
+  var opts = '<option value="">— none —</option>';
+  _credentialCache.list.forEach(function (c) {
+    var typeLabel = (c.type || "").toUpperCase();
+    opts += '<option value="' + escapeHtml(c.id) + '"' +
+      (selectedId === c.id ? " selected" : "") + '>' +
+      escapeHtml(c.name) + ' · ' + escapeHtml(typeLabel) +
+      '</option>';
+  });
+  return opts;
+}
+
 // ─── Monitoring Settings Modal ──────────────────────────────────────────────
 // Opened from the "Monitoring Settings" button in the Assets page header.
 // Two sections, both admin/assetsadmin only:
@@ -7411,18 +7354,18 @@ async function _monsetSaveOverride(existing) {
   }
 }
 
-// One-click bulk monitoring toggle. The backend now applies the requested
-// monitorType uniformly — including to integration-discovered firewalls and
-// AD hosts. Sending "icmp" here means *every* selected row gets ICMP; pick a
-// more refined per-asset type via the Edit modal's Monitoring tab if that's
-// not what you want.
+// One-click bulk monitoring toggle. The polling method comes from the
+// resolver (per-asset overrides set via PUT, class overrides, integration
+// tier, source default) — this endpoint just flips `monitored` on the
+// selected rows. Per-asset polling adjustments are made through the asset
+// edit modal's Monitoring tab.
 async function bulkSetMonitoring(monitored) {
   var ids = Array.from(_assetsSelected);
   if (!ids.length) return;
   var btn = document.getElementById(monitored ? "assets-bulk-monitor-on-btn" : "assets-bulk-monitor-off-btn");
   if (btn) btn.disabled = true;
   var payload = monitored
-    ? { ids: ids, monitored: true,  monitorType: "icmp", monitorCredentialId: null }
+    ? { ids: ids, monitored: true,  monitorCredentialId: null }
     : { ids: ids, monitored: false };
   try {
     var result = await api.assets.bulkMonitor(payload);

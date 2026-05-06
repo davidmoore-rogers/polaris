@@ -575,16 +575,17 @@ function _classDirectPollHTML(idPrefix, kindLabel, snmpCredentials, currentEnabl
       '</div>' +
     '</div>' +
     // "Add as Monitored" checkbox — independent of direct polling. When on,
-    // each newly-discovered switch/AP is created with monitored=true and
-    // either monitorType="snmp" (when direct polling is configured) or
-    // monitorType="icmp" (fallback when no SNMP credential is wired up yet).
-    // Existing assets are not touched — operator stays in charge of those.
+    // each newly-discovered switch/AP is created with monitored=true; the
+    // polling-method resolver picks SNMP when an SNMP credential is wired
+    // up above (or via the integration tier / class override) and falls
+    // back to the source default (ICMP) otherwise. Existing assets are not
+    // touched — operator stays in charge of those.
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Auto-monitoring</p>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
       '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (currentAddAsMonitored ? "checked" : "") + ' style="width:auto">' +
       '<label for="' + idPrefix + 'addAsMonitored" style="margin:0;font-weight:500">Add discovered ' + escapeHtml(kindLabel) + 's to Assets as Monitored</label>' +
     '</div>' +
-    '<p class="hint" style="margin-bottom:1rem">When checked, newly-discovered ' + escapeHtml(kindLabel) + 's land in Assets with monitoring enabled. Without an SNMP credential above, monitorType falls back to <code>icmp</code>. Existing assets are unchanged — flip them individually from the asset modal.</p>' +
+    '<p class="hint" style="margin-bottom:1rem">When checked, newly-discovered ' + escapeHtml(kindLabel) + 's land in Assets with monitoring enabled. Without an SNMP credential above, the polling method falls back to <code>icmp</code>. Existing assets are unchanged — flip them individually from the asset modal.</p>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
 }
 
@@ -846,8 +847,9 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
   showPanel(initialMode);
 }
 
-// FortiGate subtab variant — only "Add as Monitored" since FortiGates always
-// get a monitorType stamped at discovery (the integration's native type).
+// FortiGate subtab variant — only "Add as Monitored" since FortiGates
+// always get the integration source link stamped at discovery, which
+// drives the polling-method resolver to REST API by default.
 function _fortigateAddMonitoredHTML(idPrefix, currentAddAsMonitored) {
   return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Auto-monitoring</p>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
@@ -1270,7 +1272,8 @@ function _readClassMonitorBlock(prefix) {
 }
 
 // FortiGate variant — only the auto-Monitor flag (no direct-polling toggle
-// since FortiGates always have a monitorType stamped at discovery) plus the
+// since FortiGates always have the integration source link stamped at
+// discovery, which the resolver picks REST API for) plus the
 // auto-monitor-interfaces selection.
 function _readFortigateMonitorBlock(prefix) {
   var addMonEl = document.getElementById(prefix + "addAsMonitored");

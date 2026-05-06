@@ -381,7 +381,6 @@ router.get("/asset-overrides", async (req, res, next) => {
         hostname:                true,
         ipAddress:               true,
         assetType:               true,
-        monitorType:             true,
         monitorIntervalSec:      true,
         telemetryIntervalSec:    true,
         systemInfoIntervalSec:   true,

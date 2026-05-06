@@ -65,7 +65,7 @@ const probeTotal = new Counter({
 
 const monitoredAssets = new Gauge({
   name: "polaris_monitored_assets",
-  help: "Number of assets with monitored=true and a monitorType set.",
+  help: "Number of assets with monitored=true.",
   registers: [registry],
 });
 

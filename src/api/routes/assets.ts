@@ -126,12 +126,10 @@ const CreateAssetSchema = z.object({
   tags:          z.array(z.string()).optional(),
 });
 
-const MonitorTypeEnum = z.enum(["fortimanager", "fortigate", "activedirectory", "snmp", "winrm", "ssh", "icmp"]);
 const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp"]);
 
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   monitored:             z.boolean().optional(),
-  monitorType:           MonitorTypeEnum.nullable().optional(),
   monitorCredentialId:   z.string().uuid().nullable().optional(),
   monitorIntervalSec:    z.number().int().min(5).max(86400).nullable().optional(),
   // Per-asset probe timeout override. 100..60000 ms; null inherits from the
@@ -163,38 +161,16 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
 });
 
 /**
- * Asserts the requested monitoring config is internally consistent.
- * Mutates `data` in place to clear conflicting columns so a stale FK
- * or stale type can't survive the save.
+ * Apply Asset.monitored side-effects on save. The polling-method resolver is
+ * the source of truth for HOW the asset gets probed — we don't re-validate
+ * polling/credential consistency at write-time; the dispatcher reports
+ * errors clearly when a missing credential surfaces during a probe.
  */
-function validateMonitorConfig(data: Record<string, unknown>, existing: { monitorType?: string | null; monitorCredentialId?: string | null }): void {
+function clampMonitoredState(data: Record<string, unknown>): void {
   const monitored = data.monitored === undefined ? undefined : Boolean(data.monitored);
-  const monitorType =
-    data.monitorType === undefined ? existing.monitorType : (data.monitorType as string | null);
-  const monitorCredentialId =
-    data.monitorCredentialId === undefined
-      ? existing.monitorCredentialId
-      : (data.monitorCredentialId as string | null);
-
   if (monitored === false) {
-    // Clear consec failures so the next enable starts clean; keep type/cred selection.
+    // Clear the failure counter so the next enable starts clean.
     data.consecutiveFailures = 0;
-    return;
-  }
-  if (monitored === true || monitorType) {
-    if (!monitorType) {
-      throw new AppError(400, "Monitoring requires a monitor type");
-    }
-    if (monitorType === "snmp" || monitorType === "winrm" || monitorType === "ssh") {
-      if (!monitorCredentialId) {
-        throw new AppError(400, `Monitoring with ${monitorType} requires a credential`);
-      }
-    } else {
-      // ICMP / fortinet probes don't use the credential FK; clear it.
-      if (data.monitorCredentialId === undefined && existing.monitorCredentialId) {
-        data.monitorCredentialId = null;
-      }
-    }
   }
 }
 
@@ -319,7 +295,6 @@ router.get("/", async (req, res, next) => {
           acquiredAt: true,
           createdAt: true,
           monitored: true,
-          monitorType: true,
           monitorStatus: true,
           lastMonitorAt: true,
           lastResponseTimeMs: true,
@@ -373,47 +348,37 @@ router.put("/ip-history-settings", requireAssetsAdmin, async (req, res, next) =>
 // See src/api/routes/monitorSettings.ts.
 
 // POST /api/v1/assets/bulk-monitor — enable/disable monitoring on a set of assets.
-// Body: { ids, monitored, monitorType?, monitorCredentialId?, monitorIntervalSec? }.
-// On enable: applies the same monitorType + credential to every selected asset.
-// Discovery-stamped defaults (fortimanager / fortigate / activedirectory) are no
-// longer "locked" — operators can bulk-flip integration-discovered firewalls or
-// AD hosts to snmp/icmp/winrm/ssh from the toolbar; subsequent discovery runs
-// preserve the override.
+// Body: { ids, monitored, monitorCredentialId?, monitorIntervalSec?, probeTimeoutMs? }.
+// On enable: applies the same credential + cadence overrides uniformly. The
+// polling method comes from the resolver (per-asset overrides set via PUT,
+// class overrides, integration-tier setting, source default) — the bulk
+// endpoint isn't the place to choose a method, since one selection rarely
+// fits a heterogeneous batch. Operators picking a method per-asset use the
+// asset edit modal's Monitoring tab.
 // Returns per-id error list for any rejected rows.
 router.post("/bulk-monitor", requireAssetsAdmin, async (req, res, next) => {
   try {
     const body = z.object({
       ids:                 z.array(z.string().uuid()).min(1),
       monitored:           z.boolean(),
-      monitorType:         MonitorTypeEnum.nullable().optional(),
       monitorCredentialId: z.string().uuid().nullable().optional(),
       monitorIntervalSec:  z.number().int().min(5).max(86400).nullable().optional(),
       probeTimeoutMs:      z.number().int().min(100).max(60000).nullable().optional(),
     }).parse(req.body);
 
     // Build the per-asset data shape ONCE — every selected asset gets the
-    // same monitor config in a bulk operation. validateMonitorConfig
-    // historically ran per-asset to access `existing.monitorType` /
-    // `existing.monitorCredentialId`, but for bulk updates the body
-    // overrides both anyway, so we can validate against an empty
-    // "existing" shape and apply the same data uniformly.
-    //
-    // monitoredOperatorSet flips to true on every bulk write so subsequent
-    // discovery cycles don't auto-flip the `monitored` flag back to its
-    // integration default for the assets the operator just touched.
+    // same monitor config in a bulk operation. monitoredOperatorSet flips
+    // to true so subsequent discovery cycles don't auto-flip the `monitored`
+    // flag back to its integration default for the assets the operator
+    // just touched.
     const data: Record<string, unknown> = {
       monitored: body.monitored,
       monitoredOperatorSet: true,
     };
-    if (body.monitorType !== undefined)         data.monitorType         = body.monitorType;
     if (body.monitorCredentialId !== undefined) data.monitorCredentialId = body.monitorCredentialId;
     if (body.monitorIntervalSec !== undefined)  data.monitorIntervalSec  = body.monitorIntervalSec;
     if (body.probeTimeoutMs !== undefined)      data.probeTimeoutMs      = body.probeTimeoutMs;
-    try {
-      validateMonitorConfig(data, { monitorType: null, monitorCredentialId: null });
-    } catch (err: any) {
-      throw new AppError(400, err?.message || "Invalid monitor config");
-    }
+    clampMonitoredState(data);
 
     // Identify which of the requested ids actually exist so the response
     // can flag missing rows. One round-trip vs the previous N-asset loop.
@@ -864,7 +829,7 @@ router.get("/:id/system-info", async (req, res, next) => {
     const asset = await prisma.asset.findUnique({
       where: { id },
       select: {
-        id: true, monitored: true, monitorType: true,
+        id: true, monitored: true,
         lastTelemetryAt: true, lastSystemInfoAt: true,
         monitoredInterfaces: true,
         monitoredStorage: true,
@@ -944,7 +909,6 @@ router.get("/:id/system-info", async (req, res, next) => {
 
     res.json({
       monitored: asset.monitored,
-      monitorType: asset.monitorType,
       lastTelemetryAt: asset.lastTelemetryAt,
       lastSystemInfoAt: asset.lastSystemInfoAt,
       telemetry: latestTelemetry ? {
@@ -1326,7 +1290,7 @@ router.put("/:id", requireAssetsAdmin, async (req, res, next) => {
     if (input.monitored !== undefined) {
       data.monitoredOperatorSet = true;
     }
-    validateMonitorConfig(data, existing);
+    clampMonitoredState(data);
     clampAcquiredToLastSeen(data, existing);
     const asset = await prisma.asset.update({ where: { id }, data: data as any });
     const trackFields = ["hostname", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "notes", "dnsName"] as const;

@@ -57,15 +57,6 @@ import {
   assetSourceKindFromIntegrationType,
 } from "../utils/pollingCompatibility.js";
 
-export type MonitorType =
-  | "fortimanager"
-  | "fortigate"
-  | "activedirectory"
-  | "snmp"
-  | "winrm"
-  | "ssh"
-  | "icmp";
-
 export interface ProbeResult {
   success: boolean;
   /** Wall-clock duration of the probe, rounded to integer ms. */
@@ -3764,7 +3755,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   const now = new Date();
 
   const candidates = await prisma.asset.findMany({
-    where: { monitored: true, monitorType: { not: null } },
+    where: { monitored: true },
     select: {
       id: true,
       assetType: true,
@@ -3774,7 +3765,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       // resolver maps every candidate to "manual" and the cadence calculation
       // silently drifts.
       discoveredByIntegration: { select: { type: true } },
-      monitorType: true, monitorStatus: true, consecutiveFailures: true,
+      monitorStatus: true, consecutiveFailures: true,
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, telemetryIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
@@ -3799,10 +3790,22 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   }
   setMonitoredAssets(candidates.length, { up: upCount, down: downCount, unknown: unknownCount });
 
-  // Map (assetId → monitorType) so the per-probe metrics can label by
-  // transport without a second DB lookup.
+  // Map (assetId → resolved transport label) for the per-probe metrics.
+  // Pre-3j we labeled by Asset.monitorType; now we use the resolved
+  // responseTimePolling, falling back through the hierarchy to the source
+  // default. Computed from the candidate row's per-asset polling override
+  // first, then the integration-source default — full resolver fidelity
+  // would require the class-override + tier-3 lookup but that's overkill
+  // for a metric label.
   const transportById = new Map<string, string>();
-  for (const a of candidates) transportById.set(a.id, a.monitorType ?? "unknown");
+  for (const a of candidates) {
+    let label: string = a.responseTimePolling || "";
+    if (!label) {
+      const t = a.discoveredByIntegration?.type;
+      label = (t === "fortimanager" || t === "fortigate") ? "rest_api" : "icmp";
+    }
+    transportById.set(a.id, label);
+  }
 
   function isDue(last: Date | null, intervalSec: number): boolean {
     if (intervalSec <= 0) return false;

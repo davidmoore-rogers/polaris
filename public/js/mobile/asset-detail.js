@@ -388,7 +388,7 @@
   function monitorPillSubtext(asset) {
     if (!asset.monitored) return "";
     var bits = [];
-    if (asset.monitorType) bits.push(asset.monitorType);
+    if (asset.responseTimePolling) bits.push(asset.responseTimePolling);
     if (asset.lastMonitorAt) bits.push("last poll " + formatTimeAgo(asset.lastMonitorAt));
     return bits.join(" · ");
   }

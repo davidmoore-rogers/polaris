@@ -361,10 +361,13 @@ model Asset {
   discoveredByIntegration   Integration? @relation(fields: [discoveredByIntegrationId], references: [id], onDelete: SetNull)
 
   // Monitoring. `monitored` toggles whether the monitor job probes this
-  // asset; `monitorType` chooses the probe method; `monitorCredentialId`
-  // points at a Credential row for snmp/winrm/ssh. For fortimanager/fortigate
-  // probes the credential is pulled from the discovering integration, so the
-  // credential FK stays null.
+  // asset. The polling method per stream is resolved through the four-tier
+  // hierarchy (per-asset *Polling overrides → MonitorClassOverride →
+  // Integration.config.monitorSettings.polling | manualMonitorSettings →
+  // source default). `monitorCredentialId` points at a Credential row used
+  // by polling methods that need authentication (snmp/winrm/ssh/restapi);
+  // FMG/FortiGate-discovered firewalls fall back to the discovering
+  // integration's stored API token / SNMP credential when this is null.
   monitored           Boolean     @default(false)
   // Sticky flag set whenever an operator explicitly toggles `monitored` (asset
   // edit modal, bulk-monitor, clickable Status pill in the Assets list). When
@@ -373,7 +376,6 @@ model Asset {
   // re-discovery cycles. Cleared only by an operator action — discovery does
   // not flip it.
   monitoredOperatorSet Boolean    @default(false)
-  monitorType         String? // "fortimanager" | "fortigate" | "snmp" | "winrm" | "ssh" | "icmp"
   monitorCredentialId String?
   monitorCredential   Credential? @relation(fields: [monitorCredentialId], references: [id], onDelete: SetNull)
   monitorIntervalSec  Int? // Per-asset override for response-time probes; falls back to the resolved tier-3 setting
@@ -480,15 +482,6 @@ model Asset {
   @@index([discoveredByIntegrationId])
   @@index([monitored])
   @@index([monitored, lastMonitorAt])
-  // Covers the runMonitorPass candidate query
-  // `WHERE monitored = true AND monitorType IS NOT NULL`. The leading
-  // `monitored` filter rules out unmonitored rows fast, then `monitorType`
-  // narrows further. `lastMonitorAt` rides at the tail so the planner can
-  // do an index range scan without a heap fetch when the query also wants
-  // to know which rows are due. Don't drop the older two-column index —
-  // queries that filter on monitored + lastMonitorAt without monitorType
-  // can't use this composite as a prefix.
-  @@index([monitored, monitorType, lastMonitorAt])
   @@map("assets")
 }
 

@@ -2198,18 +2198,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         existingAsset = assetIdx.findByEntry(undefined, fgHostname, device.mgmtIp || undefined);
       }
       if (existingAsset) {
-        // Stamp the discovering integration so the Monitoring tab can render
-        // the integration's name as the default probe path. monitorType
-        // defaults to the integration's native type, but is *not* re-stamped
-        // when the operator has explicitly overridden it (e.g. switched a
-        // small-branch FortiGate whose REST sensor endpoint 404s to SNMP).
-        // Detect override by anything other than the two firewall defaults.
-        const integrationDefaultType = integrationType === "fortigate" ? "fortigate" : "fortimanager";
-        const isOperatorOverride =
-          existingAsset.monitorType !== null &&
-          existingAsset.monitorType !== "fortimanager" &&
-          existingAsset.monitorType !== "fortigate";
-
         // Phase 3b.1 cutover: discovery-owned fields come from projection.
         // Same shape as AD/Entra cutovers — upsert source first, fetch all
         // sources, project, single Asset.update.
@@ -2243,7 +2231,6 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           lastSeen: new Date(now),
           fortinetTopology: topology,
           discoveredByIntegrationId: integrationId,
-          ...(isOperatorOverride ? {} : { monitorType: integrationDefaultType }),
           ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
         };
         // Discovery-owned fields from projection.
@@ -2304,11 +2291,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           learnedLocation: fgHostname,
           osVersion: fwCreateProjected.osVersion,
           lastSeen: new Date(now),
-          // Default monitoring source to the discovering integration. Probes
-          // route through the integration's stored API token; operators can
-          // override the type later from the asset's Monitoring tab.
+          // Stamp the discovering integration. The polling-method resolver
+          // picks the source default (REST API for fortimanager / fortigate)
+          // unless an operator overrides per-asset on the Monitoring tab.
           discoveredByIntegrationId: integrationId,
-          monitorType: integrationType === "fortigate" ? "fortigate" : "fortimanager",
           // Auto-Monitored is opt-in via the integration's "Add Discovered
           // FortiGates as Monitored" checkbox. Existing FortiGates are not
           // touched — only fresh creates get the flag flipped.
@@ -2348,43 +2334,43 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // toggles drive four cases:
   //
   //   enabled=false, addAsMonitored=false  → no-op (legacy default)
-  //   enabled=false, addAsMonitored=true   → stamp monitored=true,
-  //                                          monitorType="icmp" (fallback
-  //                                          when no SNMP credential is yet
-  //                                          configured for this class)
-  //   enabled=true,  addAsMonitored=false  → stamp monitorType="snmp" +
-  //                                          credential, leave monitored
-  //                                          as-is so operators opt-in
-  //                                          per-asset later
-  //   enabled=true,  addAsMonitored=true   → stamp everything (the original
-  //                                          behaviour)
+  //   enabled=false, addAsMonitored=true   → stamp monitored=true; resolver
+  //                                          falls back to the source default
+  //                                          (ICMP) since no credential is
+  //                                          configured for this class
+  //   enabled=true,  addAsMonitored=false  → stamp monitorCredentialId,
+  //                                          leave `monitored` as-is so
+  //                                          operators opt-in per-asset later
+  //   enabled=true,  addAsMonitored=true   → stamp credential AND flip
+  //                                          monitored=true
   //
-  // Operator override detection compares the existing asset's monitorType +
-  // credential against either of the integration's two possible defaults
-  // (snmp+integration-credential, or icmp+null). Anything else (winrm, ssh,
-  // a different SNMP credential, the fortimanager/fortigate defaults) means
-  // the operator chose something custom and we leave it alone.
+  // Operator override detection: discovery never overwrites a
+  // monitorCredentialId that already differs from this integration's class
+  // credential — that's an explicit operator choice — and never re-flips
+  // `monitored` once monitoredOperatorSet is true.
   function buildClassMonitorStamp(
     cfg: ClassMonCfg,
-    existing?: { monitorType?: string | null; monitorCredentialId?: string | null; monitored?: boolean | null; monitoredOperatorSet?: boolean | null },
+    existing?: { monitorCredentialId?: string | null; monitored?: boolean | null; monitoredOperatorSet?: boolean | null },
   ): Record<string, unknown> {
     if (!cfg.enabled && !cfg.addAsMonitored) return {};
 
-    const wantSnmp = cfg.enabled && !!cfg.snmpCredentialId;
-    const stampedType = wantSnmp ? "snmp" : "icmp";
-    const stampedCred = wantSnmp ? cfg.snmpCredentialId : null;
-
-    if (existing && existing.monitorType != null) {
-      const matchesSnmpDefault = existing.monitorType === "snmp" && existing.monitorCredentialId === cfg.snmpCredentialId;
-      const matchesIcmpDefault = existing.monitorType === "icmp" && existing.monitorCredentialId == null;
-      if (!matchesSnmpDefault && !matchesIcmpDefault) return {};
-    }
-
     const stamp: Record<string, unknown> = {
       discoveredByIntegrationId: integrationId,
-      monitorType: stampedType,
-      monitorCredentialId: stampedCred,
     };
+    // Stamp the integration's class credential only when the existing
+    // asset has none (or has the same credential — the no-op idempotent
+    // case). Anything else (operator-chosen credential of a different
+    // type or pointing elsewhere) is preserved.
+    if (cfg.enabled && cfg.snmpCredentialId) {
+      const existingCred = existing?.monitorCredentialId ?? null;
+      if (existingCred === null || existingCred === cfg.snmpCredentialId) {
+        stamp.monitorCredentialId = cfg.snmpCredentialId;
+      } else {
+        // Operator pointed this asset at a different credential — leave
+        // their choice in place.
+        return stamp;
+      }
+    }
     // Only flip `monitored` when the operator opted into auto-Monitored AND
     // the operator hasn't already made an explicit decision about this
     // asset's monitored state. monitoredOperatorSet stays true forever once
@@ -4948,8 +4934,7 @@ async function syncActiveDirectoryDevices(
       // dispatcher's AD bind fallback handles it.
       const alreadyOwnedByOtherIntegration =
         existing.discoveredByIntegrationId &&
-        existing.discoveredByIntegrationId !== integrationId &&
-        (existing.monitorType === "fortimanager" || existing.monitorType === "fortigate");
+        existing.discoveredByIntegrationId !== integrationId;
       if (adMonitorable && !alreadyOwnedByOtherIntegration) {
         updateData.discoveredByIntegrationId = integrationId;
       }
