@@ -2640,13 +2640,6 @@ async function openViewModal(id) {
     var dependencies    = auxResults[1];
     var managedAgent    = auxResults[2];
     agentSubpanelHTML   = assetAgentSubpanelHTML(a, managedAgent);
-    tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id) });
-    // SNMP Walk tab — admin-only, mirrors the backend gate. Loads credentials
-    // before render so the picker isn't empty on first paint.
-    if (isAdmin()) {
-      await _ensureCredentials();
-      tabs.push({ key: "snmp", label: "SNMP Walk", html: assetSnmpWalkViewHTML(a) });
-    }
     // Stations tab — visible on FortiAPs that have wireless clients
     // reported by the most recent SNMP fapStationTable scrape. The
     // content is loaded async from /system-info so initial render is a
@@ -2656,6 +2649,7 @@ async function openViewModal(id) {
     if (a.assetType === "access_point" && a.monitored) {
       tabs.push({ key: "stations", label: "Stations", html: _assetStationsTabHTML(a) });
     }
+    tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id) });
     // Custom MIB tab — present whenever the asset's manufacturer has at least
     // one custom widget defined under its ManufacturerProfile. The tab body
     // is rendered async from /assets/:id/custom-widgets; if the manufacturer
@@ -2665,6 +2659,12 @@ async function openViewModal(id) {
     // lookup, since that data isn't on the asset row.
     if (a.manufacturer) {
       tabs.push({ key: "customMib", label: "Custom MIB", html: _assetCustomMibTabHTML(a) });
+    }
+    // SNMP Walk tab — admin-only, mirrors the backend gate. Loads credentials
+    // before render so the picker isn't empty on first paint.
+    if (isAdmin()) {
+      await _ensureCredentials();
+      tabs.push({ key: "snmp", label: "SNMP Walk", html: assetSnmpWalkViewHTML(a) });
     }
     // Quarantine tab — assets-admin only, shown for any asset that has MACs or is quarantined.
     // Infrastructure assets (firewall/switch/access_point) only get the tab if they're
