@@ -124,7 +124,7 @@
       + '<div class="sect-body" data-sect="monitor"' + (st.sections.monitor ? '' : ' hidden') + '>'
       + '  <div class="card-filled" style="padding:16px;margin-bottom:8px;">'
       + '    <div class="seg" id="asset-range-seg" style="display:inline-flex;border:1px solid var(--md-outline);border-radius:var(--shape-full);overflow:hidden;margin-bottom:8px;">' + rangeButtons + '</div>'
-      + '    <div id="asset-monitor-chart" style="min-height:80px;"></div>'
+      + '    <div id="asset-monitor-chart" style="min-height:120px;"></div>'
       + '    <div class="muted" id="asset-monitor-stats" style="font-size:12px;margin-top:8px;letter-spacing:.4px;"></div>'
       + '  </div>'
       + '</div>'
@@ -133,7 +133,7 @@
       + sectionHeader("telemetry", "CPU + Memory", "", st.sections.telemetry)
       + '<div class="sect-body" data-sect="telemetry"' + (st.sections.telemetry ? '' : ' hidden') + '>'
       + '  <div class="card-filled" style="padding:16px;margin-bottom:8px;">'
-      + '    <div id="asset-telemetry-chart" style="min-height:80px;"></div>'
+      + '    <div id="asset-telemetry-chart" style="min-height:120px;"></div>'
       + '    <div class="muted" id="asset-telemetry-stats" style="font-size:12px;margin-top:8px;letter-spacing:.4px;"></div>'
       + '  </div>'
       + '</div>'
@@ -260,7 +260,8 @@
       });
       chartHost.innerHTML = PolarisCharts.lineChart({
         series: [{ values: samples, color: "var(--md-primary)", fill: true }],
-        height: 80,
+        height: 120,
+        yUnit: "ms",
         ariaLabel: "Response time over " + st.range,
       });
       if (statsHost) {
@@ -309,8 +310,9 @@
           { values: cpuSeries, color: "var(--md-primary)" },
           { values: memSeries, color: "var(--md-tertiary)" },
         ],
-        height: 80,
+        height: 120,
         yMin: 0, yMax: 100,
+        yUnit: "%",
         ariaLabel: "CPU and memory over " + st.range,
       });
       if (statsHost) {
