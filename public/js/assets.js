@@ -6059,15 +6059,14 @@ async function _renderIntermittencyBar(assetId) {
   // Fetch in parallel: 1h sample stream (trimmed to last 30) + the resolved
   // threshold for the state-machine replay. Both are best-effort; if either
   // fails we fall back to a sensible default so the bar still renders.
-  var samples = [];
+  var allSamples = [];
   var threshold = 3;
   try {
     var results = await Promise.all([
       api.assets.monitorHistory(assetId, "1h").catch(function () { return null; }),
       api.assets.effectiveMonitorSettings(assetId).catch(function () { return null; }),
     ]);
-    var raw = (results[0] && Array.isArray(results[0].samples)) ? results[0].samples : [];
-    samples = raw.slice(-30);
+    allSamples = (results[0] && Array.isArray(results[0].samples)) ? results[0].samples : [];
     if (results[1] && results[1].resolved) {
       if (Number.isFinite(results[1].resolved.failureThreshold)) {
         threshold = results[1].resolved.failureThreshold;
@@ -6081,19 +6080,18 @@ async function _renderIntermittencyBar(assetId) {
     }
   } catch (_) { /* fall through with defaults */ }
 
-  if (samples.length === 0) {
+  if (allSamples.length === 0) {
     slot.innerHTML = '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">No samples in the last 30 minutes</span>';
     return;
   }
-  // Replay the state machine forward across samples to label each one with
-  // its resolved status. failureThreshold doubles as the recovery threshold.
-  // Starting state is "unknown" — for the first ~threshold cells the bar
-  // may show pending/warning before settling, which is honest given we
-  // have no memory of pre-window state.
+  // Replay the state machine forward across the FULL hour of samples, then
+  // slice the trailing 30 for display — gives the replay ~30 samples of
+  // warm-up so the visible window starts in a settled state instead of a
+  // blue "recovering" run while the success counter climbs to threshold.
   var cf = 0;
   var cs = 0;
   var prev = "unknown";
-  var states = samples.map(function (s) {
+  var allStates = allSamples.map(function (s) {
     if (s.success) {
       cf = 0; cs += 1;
       if (prev === "up") {
@@ -6112,6 +6110,7 @@ async function _renderIntermittencyBar(assetId) {
     }
     return { timestamp: s.timestamp, status: prev };
   });
+  var states = allStates.slice(-30);
 
   // Color map mirrors badge-monitor-* hues so the bar reads as the same
   // visual vocabulary as the pill above it. Recovering and unknown share
@@ -6137,7 +6136,7 @@ async function _renderIntermittencyBar(assetId) {
     '</div>' +
     '<div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--color-text-tertiary);margin-top:2px">' +
       '<span>30m ago</span>' +
-      '<span>' + samples.length + ' sample' + (samples.length === 1 ? '' : 's') + '</span>' +
+      '<span>' + states.length + ' sample' + (states.length === 1 ? '' : 's') + '</span>' +
       '<span>now</span>' +
     '</div>';
 }
