@@ -30,6 +30,7 @@
 
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
+import { normalizeFortiapInterfaceName } from "../utils/fortiapInterfaceAlias.js";
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -388,6 +389,38 @@ async function loadInferredLldpByAsset(
 }
 
 /**
+ * Rewrite fortiap inferred-LLDP keys from the FortiAP CLI naming used by
+ * discovery (`lan1`, `lan2`, ...) into the SNMP-canonical names the AP's
+ * own IF-MIB exposes (`eth0`, `eth1`, ...) so the entries line up with the
+ * interface table AND with what `Asset.monitoredInterfaces` would have to
+ * contain for fast-cadence pinning to actually scrape a real ifIndex.
+ * Mutates `inferred` in place — collisions on rewrite merge into the
+ * existing key. See `src/utils/fortiapInterfaceAlias.ts`.
+ */
+function normalizeFortiapInferredLldp(
+  inferred: Map<string, LldpByIfName>,
+  interfacesByAsset: Map<string, ResolverInterface[]>,
+): void {
+  for (const [assetId, byIf] of inferred) {
+    const known = interfacesByAsset.get(assetId);
+    if (!known || known.length === 0) continue;
+    const knownIfNames = new Set(known.map((i) => i.ifName));
+    const renames: Array<{ from: string; to: string }> = [];
+    for (const ifName of byIf.keys()) {
+      const normalized = normalizeFortiapInterfaceName(ifName, knownIfNames);
+      if (normalized !== ifName) renames.push({ from: ifName, to: normalized });
+    }
+    for (const { from, to } of renames) {
+      const matches = byIf.get(from)!;
+      byIf.delete(from);
+      const existing = byIf.get(to);
+      if (existing) existing.push(...matches);
+      else byIf.set(to, matches);
+    }
+  }
+}
+
+/**
  * Merge inferred matches into the real-LLDP map per (assetId, ifName).
  * Real entries come first, inferred appended after. Duplicates within an
  * ifName are harmless — `resolvePinnedInterfaces` looks for ANY match
@@ -551,6 +584,7 @@ export async function previewAutoMonitorForClass(
     needLldp ? loadLldpByAsset(ids) : Promise.resolve(new Map<string, LldpByIfName>()),
     needLldp ? loadInferredLldpByAsset(assets, klass) : Promise.resolve(new Map<string, LldpByIfName>()),
   ]);
+  if (needLldp && klass === "fortiap") normalizeFortiapInferredLldp(inferredLldp, interfacesByAsset);
   const lldpByAsset = mergeLldpMaps(realLldp, inferredLldp);
 
   const currentPins = computePinsByAsset(assets, interfacesByAsset, lldpByAsset, selection);
@@ -647,6 +681,7 @@ export async function applyAutoMonitorForClass(
     needLldp ? loadLldpByAsset(ids) : Promise.resolve(new Map<string, LldpByIfName>()),
     needLldp ? loadInferredLldpByAsset(assets, klass) : Promise.resolve(new Map<string, LldpByIfName>()),
   ]);
+  if (needLldp && klass === "fortiap") normalizeFortiapInferredLldp(inferredLldp, interfacesByAsset);
   const lldpByAsset = mergeLldpMaps(realLldp, inferredLldp);
 
   // Two-phase apply: compute every pending update in memory FIRST, then

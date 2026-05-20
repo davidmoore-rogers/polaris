@@ -1172,7 +1172,7 @@ Listed alphabetically.
 
 **Public API:** `compileWildcard`, `compilePattern`, `resolvePinnedInterfaces`, `getInterfaceAggregate`, `previewAutoMonitorForClass`, `applyAutoMonitorForClass`, `coerceLegacySelection`, `AutoMonitorSelection`, `AutoMonitorClass`, `ResolverInterface`, `LldpNeighborMatch`, `LldpByIfName`, `LldpNeighborType`, `IfType`, `AggregateRow`, `PreviewResult`, `ApplyResult`, `LLDP_NEIGHBOR_TYPES`, `IF_TYPES`.
 
-**Cross-service deps:** Reads `asset_interface_samples` (latest per (assetId, ifName) via DISTINCT ON) and `asset_lldp_neighbors` JOIN `assets` (matched-asset type + monitored flag) directly via `prisma.$queryRaw`. ALSO consults `Asset.fortinetTopology` JSON paths (class-aware raw SQL in `loadInferredLldpByAsset`) to synthesize peer-inferred neighbor matches that the persisted LLDP table can't see — same data source `peerInferredLldpService` uses for the System tab Neighbor column. Inferred matches merge into the real LLDP map via `mergeLldpMaps` before the pure resolver runs; the resolver itself is unchanged and can't tell them apart.
+**Cross-service deps:** Reads `asset_interface_samples` (latest per (assetId, ifName) via DISTINCT ON) and `asset_lldp_neighbors` JOIN `assets` (matched-asset type + monitored flag) directly via `prisma.$queryRaw`. ALSO consults `Asset.fortinetTopology` JSON paths (class-aware raw SQL in `loadInferredLldpByAsset`) to synthesize peer-inferred neighbor matches that the persisted LLDP table can't see — same data source `peerInferredLldpService` uses for the System tab Neighbor column. Inferred matches merge into the real LLDP map via `mergeLldpMaps` before the pure resolver runs; the resolver itself is unchanged and can't tell them apart. For the `fortiap` class, a post-load step (`normalizeFortiapInferredLldp` → `src/utils/fortiapInterfaceAlias.ts:normalizeFortiapInterfaceName`) rewrites synthesized `localIfName` from FortiAP-CLI naming (`lan1`) to SNMP-canonical (`eth0`) when the AP's interface table exposes the eth* form — without this, the resolver would pin a name that doesn't match any ifIndex on the fast-cadence scrape.
 
 **Used by:** `src/api/routes/integrations.ts` — `interface-aggregate` / preview / apply endpoints AND `syncDhcpSubnets` Phase 2c on discovery completion. `src/jobs/migrateAutoMonitorInterfacesShape.ts` — calls `coerceLegacySelection` to rewrite stored configs at boot.
 
@@ -1835,7 +1835,7 @@ Listed alphabetically.
 
 **Public API:** `buildInferredNeighborsForAsset(assetId)`, `dedupeInferredNeighbors(real, inferred)`, `InferredLldpNeighbor`.
 
-**Cross-service deps:** None (reads `Asset` rows + `fortinetTopology` JSON via Prisma).
+**Cross-service deps:** Reads `Asset` rows + `fortinetTopology` JSON via Prisma. The FortiAP branch additionally reads recent `AssetInterfaceSample` rows for the AP itself and passes them through `src/utils/fortiapInterfaceAlias.ts:normalizeFortiapInterfaceName` so the synthesized `localIfName` matches the AP's SNMP-canonical naming (`eth0`) rather than discovery's FortiAP-CLI form (`lan1`).
 
 **Used by:**
 - `src/api/routes/assets.ts` — `GET /assets/:id/system-info` (merges into `lldpNeighbors` response array)
@@ -1847,7 +1847,7 @@ Listed alphabetically.
 - Three synthesis branches:
   - Asset is `switch` → APs where `fortinetTopology.parentSwitch === self.hostname`; emit on the AP's `parentPort`.
   - Asset is `firewall` → switches where `fortinetTopology.controllerFortigate === self.hostname`; emit on the switch's `uplinkInterface` (FortiGate-side interface name from `fgt_peer_intf_name`).
-  - Asset is `access_point` → if `self.fortinetTopology.parentSwitch` + `uplinkInterface` both set, resolve the switch by hostname and emit on AP's local port.
+  - Asset is `access_point` → if `self.fortinetTopology.parentSwitch` + `uplinkInterface` both set, resolve the switch by hostname and emit on the AP's local port normalized via `normalizeFortiapInterfaceName` against the AP's known SNMP ifNames (prefers `eth0` form when present so the inferred row lines up with the System tab's interface table).
 - Direct-attached FortiAPs (controllerFortigate set, no parentSwitch) are intentionally skipped — `uplinkInterface` on an AP is the AP's own port, not the FortiGate's, so we can't pin the row to a FortiGate interface.
 - Skip on missing data: empty self hostname → return []; missing `parentPort` / `uplinkInterface` on the peer side → skip that row.
 - Dedup rule (applied by callers via `dedupeInferredNeighbors`): drop inferred row when a real LLDP row exists on the same `(localIfName, matchedAssetId)`. Real LLDP wins. A real row with no `matchedAsset.id` does NOT suppress inferred rows.

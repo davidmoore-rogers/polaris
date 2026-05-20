@@ -31,6 +31,7 @@
 // and `uplinkInterface` on the AP is its OWN port, not the FortiGate's.
 
 import { prisma } from "../db.js";
+import { normalizeFortiapInterfaceName } from "../utils/fortiapInterfaceAlias.js";
 
 interface FortinetTopology {
   role?: string;
@@ -154,13 +155,30 @@ export async function buildInferredNeighborsForAsset(assetId: string): Promise<I
     const parentSwitchName = selfFt?.parentSwitch;
     const apLocalPort = selfFt?.uplinkInterface;
     if (parentSwitchName && apLocalPort) {
-      const sw = await prisma.asset.findFirst({
-        where: { hostname: parentSwitchName, assetType: "switch" },
-        select: PEER_SELECT,
-      });
+      // Load the switch + the AP's most recent ifNames in parallel so we can
+      // normalize lan1↔eth0 — discovery stamps uplinkInterface from the
+      // FortiGate's managed_ap response (FortiAP-CLI naming like "lan1") but
+      // the AP's own SNMP IF-MIB exposes the same port as "eth0". The
+      // System tab interface table uses the SNMP name; an inferred row on
+      // "lan1" wouldn't line up with any visible interface row. See
+      // src/utils/fortiapInterfaceAlias.ts.
+      const [sw, knownIfRows] = await Promise.all([
+        prisma.asset.findFirst({
+          where: { hostname: parentSwitchName, assetType: "switch" },
+          select: PEER_SELECT,
+        }),
+        prisma.assetInterfaceSample.findMany({
+          where: { assetId: self.id },
+          orderBy: { timestamp: "desc" },
+          select: { ifName: true },
+          take: 64,
+        }),
+      ]);
       if (sw) {
+        const knownIfNames = new Set(knownIfRows.map((r) => r.ifName));
+        const localIfName = normalizeFortiapInterfaceName(apLocalPort, knownIfNames);
         inferred.push({
-          localIfName: apLocalPort,
+          localIfName,
           chassisIdSubtype: null,
           chassisId: null,
           portIdSubtype: null,
