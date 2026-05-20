@@ -25,6 +25,7 @@
 
 import { performance } from "node:perf_hooks";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
 import { URL } from "node:url";
@@ -33,6 +34,7 @@ import * as snmp from "net-snmp";
 import { Client as SshClient } from "ssh2";
 
 import { prisma } from "../db.js";
+import { retryOnDeadlock } from "../utils/dbRetry.js";
 import { fgRequest, type FortiGateConfig } from "./fortigateService.js";
 import {
   fmgProxyRest,
@@ -5332,37 +5334,36 @@ async function persistLldpNeighbors(
   const existingByKey = new Map<string, typeof existing[number]>();
   for (const e of existing) existingByKey.set(keyOf(e.localIfName, e.chassisId, e.portId), e);
 
-  // Partition fresh neighbors into to-create and to-update so each side can
-  // hit the DB in a single batched call instead of N per-neighbor round-trips.
-  // For a switch with 40 LLDP neighbors this collapses 40 DB calls into 2
-  // (one createMany for new, one $transaction for updates).
-  const toCreate: Array<Record<string, unknown>> = [];
-  const toUpdate: Array<{ id: string; data: Record<string, unknown> }> = [];
+  // Build a unified upsert list. Existing rows reuse their prior id (so the
+  // ON CONFLICT (id) DO UPDATE branch fires and firstSeen survives); new rows
+  // get a fresh randomUUID() so they don't collide and take the INSERT branch.
+  // Both flow through one bulk statement — see bulkUpsertLldpNeighbors below
+  // for why we target the PK instead of the (assetId, localIfName, chassisId,
+  // portId) business key.
+  const toUpsert: LldpUpsertRow[] = [];
 
   for (const n of neighbors) {
     const k = keyOf(n.localIfName, n.chassisId ?? null, n.portId ?? null);
     seen.add(k);
     const matched = matchedFor(n);
-    const data = {
-      localIfName:       n.localIfName,
-      chassisIdSubtype:  n.chassisIdSubtype ?? null,
-      chassisId:         n.chassisId ?? null,
-      portIdSubtype:     n.portIdSubtype ?? null,
-      portId:            n.portId ?? null,
-      portDescription:   n.portDescription ?? null,
-      systemName:        n.systemName ?? null,
-      systemDescription: n.systemDescription ?? null,
-      managementIp:      n.managementIp ?? null,
-      capabilities:      n.capabilities ?? [],
-      matchedAssetId:    matched,
-      source:            defaultSource,
-    };
     const prior = existingByKey.get(k);
-    if (prior) {
-      toUpdate.push({ id: prior.id, data: { ...data, lastSeen: now } });
-    } else {
-      toCreate.push({ ...data, assetId, firstSeen: now, lastSeen: now });
-    }
+    toUpsert.push({
+      id: prior?.id ?? randomUUID(),
+      data: {
+        localIfName:       n.localIfName,
+        chassisIdSubtype:  n.chassisIdSubtype ?? null,
+        chassisId:         n.chassisId ?? null,
+        portIdSubtype:     n.portIdSubtype ?? null,
+        portId:            n.portId ?? null,
+        portDescription:   n.portDescription ?? null,
+        systemName:        n.systemName ?? null,
+        systemDescription: n.systemDescription ?? null,
+        managementIp:      n.managementIp ?? null,
+        capabilities:      n.capabilities ?? [],
+        matchedAssetId:    matched,
+        source:            defaultSource,
+      },
+    });
   }
 
   // Stickiness rule for stale rows. LLDP advertisements get missed
@@ -5392,29 +5393,137 @@ async function persistLldpNeighbors(
       toDelete.push(e.id);
     }
   }
-  // Batched writes. createMany is a single statement; the $transaction wraps
-  // all per-row updates into one round-trip pipelined over the connection.
-  // Order: creates first so a brand-new neighbor is visible before stale
-  // siblings on the same port get deleted.
-  if (toCreate.length > 0) {
-    const endCreate = startPhase("systeminfo.persist.lldp_createMany");
-    await prisma.assetLldpNeighbor.createMany({ data: toCreate as any });
-    endCreate({ rows: toCreate.length });
-  }
-  if (toUpdate.length > 0) {
-    const endUpdate = startPhase("systeminfo.persist.lldp_update_txn");
-    await prisma.$transaction(
-      toUpdate.map((u) =>
-        prisma.assetLldpNeighbor.update({ where: { id: u.id }, data: u.data as any }),
-      ),
-    );
-    endUpdate({ rows: toUpdate.length });
+  // Single bulk upsert covers both creates and in-place updates — one SQL
+  // round-trip instead of the legacy createMany + $transaction([per-row
+  // updates]) pair (which held a connection for the duration of N pipelined
+  // updates inside a BEGIN/COMMIT). On a switch with 40 LLDP neighbors that
+  // collapses ~42 statements into 1.
+  if (toUpsert.length > 0) {
+    const endUpsert = startPhase("systeminfo.persist.lldp_upsert");
+    await bulkUpsertLldpNeighbors(assetId, toUpsert, now);
+    endUpsert({ rows: toUpsert.length });
   }
   if (toDelete.length > 0) {
     const endDelete = startPhase("systeminfo.persist.lldp_deleteMany");
     await prisma.assetLldpNeighbor.deleteMany({ where: { id: { in: toDelete } } });
     endDelete({ rows: toDelete.length });
   }
+}
+
+type LldpUpsertRow = {
+  id: string;
+  data: {
+    localIfName: string;
+    chassisIdSubtype: string | null;
+    chassisId: string | null;
+    portIdSubtype: string | null;
+    portId: string | null;
+    portDescription: string | null;
+    systemName: string | null;
+    systemDescription: string | null;
+    managementIp: string | null;
+    capabilities: readonly string[];
+    matchedAssetId: string | null;
+    source: string;
+  };
+};
+
+/**
+ * Single-statement bulk upsert into asset_lldp_neighbors. Conflict target
+ * is the primary key (id), NOT the (assetId, localIfName, chassisId, portId)
+ * business-key unique constraint — Postgres treats NULL as distinct in
+ * unique indexes, so a row with chassisId IS NULL would never match an
+ * ON CONFLICT on the business key. The caller (persistLldpNeighbors) pre-
+ * assigns ids by looking up prior rows in JS, so we know which inserts
+ * should land as updates.
+ *
+ * `capabilities` (text[]) is encoded as an explicit ARRAY[$N,$N,$N]::text[]
+ * expression per row rather than passing the JS array as a single bound
+ * parameter — pg adapter behavior with array-typed parameters via
+ * $executeRawUnsafe is undocumented in this codebase, so we stay on the
+ * unambiguous path. For typical LLDP rows with 1-4 capability tokens this
+ * adds a handful of extra parameter slots per row, well inside the 65535
+ * parameter ceiling even for switches with hundreds of neighbors.
+ */
+async function bulkUpsertLldpNeighbors(
+  assetId: string,
+  rows: readonly LldpUpsertRow[],
+  now: Date,
+): Promise<void> {
+  if (rows.length === 0) return;
+  const params: unknown[] = [];
+  const tuples: string[] = [];
+  let p = 1;
+  const nowIso = now.toISOString();
+  for (const r of rows) {
+    const d = r.data;
+    const capPlaceholders: string[] = [];
+    for (const cap of d.capabilities) {
+      params.push(cap);
+      capPlaceholders.push(`$${p++}`);
+    }
+    const capExpr =
+      capPlaceholders.length > 0
+        ? `ARRAY[${capPlaceholders.join(",")}]::text[]`
+        : `ARRAY[]::text[]`;
+    const tupleParts = [
+      `$${p++}::uuid`,            // id
+      `$${p++}`,                  // assetId
+      `$${p++}`,                  // localIfName
+      `$${p++}`,                  // chassisIdSubtype
+      `$${p++}`,                  // chassisId
+      `$${p++}`,                  // portIdSubtype
+      `$${p++}`,                  // portId
+      `$${p++}`,                  // portDescription
+      `$${p++}`,                  // systemName
+      `$${p++}`,                  // systemDescription
+      `$${p++}`,                  // managementIp
+      capExpr,                    // capabilities
+      `$${p++}`,                  // matchedAssetId
+      `$${p++}`,                  // source
+      `$${p++}::timestamp`,       // firstSeen
+      `$${p++}::timestamp`,       // lastSeen
+    ];
+    tuples.push(`(${tupleParts.join(", ")})`);
+    params.push(
+      r.id,
+      assetId,
+      d.localIfName,
+      d.chassisIdSubtype,
+      d.chassisId,
+      d.portIdSubtype,
+      d.portId,
+      d.portDescription,
+      d.systemName,
+      d.systemDescription,
+      d.managementIp,
+      d.matchedAssetId,
+      d.source,
+      nowIso,
+      nowIso,
+    );
+  }
+  const sql =
+    `INSERT INTO "asset_lldp_neighbors" (` +
+    `"id", "assetId", "localIfName", ` +
+    `"chassisIdSubtype", "chassisId", "portIdSubtype", "portId", ` +
+    `"portDescription", "systemName", "systemDescription", "managementIp", ` +
+    `"capabilities", "matchedAssetId", "source", "firstSeen", "lastSeen"` +
+    `) VALUES ${tuples.join(", ")} ` +
+    `ON CONFLICT ("id") DO UPDATE SET ` +
+    `"chassisIdSubtype"  = EXCLUDED."chassisIdSubtype", ` +
+    `"chassisId"         = EXCLUDED."chassisId", ` +
+    `"portIdSubtype"     = EXCLUDED."portIdSubtype", ` +
+    `"portId"            = EXCLUDED."portId", ` +
+    `"portDescription"   = EXCLUDED."portDescription", ` +
+    `"systemName"        = EXCLUDED."systemName", ` +
+    `"systemDescription" = EXCLUDED."systemDescription", ` +
+    `"managementIp"      = EXCLUDED."managementIp", ` +
+    `"capabilities"      = EXCLUDED."capabilities", ` +
+    `"matchedAssetId"    = EXCLUDED."matchedAssetId", ` +
+    `"source"            = EXCLUDED."source", ` +
+    `"lastSeen"          = EXCLUDED."lastSeen"`;
+  await retryOnDeadlock(() => prisma.$executeRawUnsafe(sql, ...params));
 }
 
 /**
@@ -5456,8 +5565,7 @@ async function persistWirelessStations(
   for (const e of existing) existingByMac.set(e.staMacAddr, e);
 
   const seen = new Set<string>();
-  const toCreate: Array<Record<string, unknown>> = [];
-  const toUpdate: Array<{ id: string; data: Record<string, unknown> }> = [];
+  const toUpsert: WirelessUpsertRow[] = [];
   // Endpoint-side `lastSeenAp` stamps. One per matched station; deduplicated
   // by endpoint id so a single AP with N rooms-worth of clients still hits
   // each endpoint's row once.
@@ -5471,29 +5579,26 @@ async function persistWirelessStations(
     if (matchedAssetId && matchedAssetId !== apAssetId && apHostname) {
       endpointStamps.set(matchedAssetId, apHostname);
     }
-    const data = {
-      staMacAddr:     mac,
-      staIpAddr:      s.staIpAddr ?? null,
-      ssid:           s.ssid ?? null,
-      radioId:        s.radioId ?? null,
-      wlanId:         s.wlanId ?? null,
-      vlanId:         s.vlanId ?? null,
-      bssid:          s.bssid ?? null,
-      signalStrength: s.signalStrength ?? null,
-      noise:          s.noise ?? null,
-      bandwidthTx:    s.bandwidthTx ?? null,
-      bandwidthRx:    s.bandwidthRx ?? null,
-      idleSeconds:    s.idleSeconds ?? null,
-      matchedAssetId,
-      source:         "snmp",
-      lastSeen:       new Date(),
-    };
     const ex = existingByMac.get(mac);
-    if (ex) {
-      toUpdate.push({ id: ex.id, data });
-    } else {
-      toCreate.push({ ...data, apAssetId, firstSeen: new Date() });
-    }
+    toUpsert.push({
+      id: ex?.id ?? randomUUID(),
+      data: {
+        staMacAddr:     mac,
+        staIpAddr:      s.staIpAddr ?? null,
+        ssid:           s.ssid ?? null,
+        radioId:        s.radioId ?? null,
+        wlanId:         s.wlanId ?? null,
+        vlanId:         s.vlanId ?? null,
+        bssid:          s.bssid ?? null,
+        signalStrength: s.signalStrength ?? null,
+        noise:          s.noise ?? null,
+        bandwidthTx:    s.bandwidthTx ?? null,
+        bandwidthRx:    s.bandwidthRx ?? null,
+        idleSeconds:    s.idleSeconds ?? null,
+        matchedAssetId,
+        source:         "snmp",
+      },
+    });
   }
 
   // Anything stored but not in the fresh scrape → drop. Same semantics as
@@ -5504,15 +5609,8 @@ async function persistWirelessStations(
     if (!seen.has(e.staMacAddr)) toDelete.push(e.id);
   }
 
-  if (toCreate.length > 0) {
-    await prisma.assetWirelessStation.createMany({ data: toCreate as any });
-  }
-  if (toUpdate.length > 0) {
-    await prisma.$transaction(
-      toUpdate.map((u) =>
-        prisma.assetWirelessStation.update({ where: { id: u.id }, data: u.data as any }),
-      ),
-    );
+  if (toUpsert.length > 0) {
+    await bulkUpsertWirelessStations(apAssetId, toUpsert, new Date());
   }
   if (toDelete.length > 0) {
     await prisma.assetWirelessStation.deleteMany({ where: { id: { in: toDelete } } });
@@ -5528,6 +5626,98 @@ async function persistWirelessStations(
       ),
     );
   }
+}
+
+type WirelessUpsertRow = {
+  id: string;
+  data: {
+    staMacAddr: string;
+    staIpAddr: string | null;
+    ssid: string | null;
+    radioId: number | null;
+    wlanId: number | null;
+    vlanId: number | null;
+    bssid: string | null;
+    signalStrength: number | null;
+    noise: number | null;
+    bandwidthTx: number | null;
+    bandwidthRx: number | null;
+    idleSeconds: number | null;
+    matchedAssetId: string | null;
+    source: string;
+  };
+};
+
+/**
+ * Single-statement bulk upsert into asset_wireless_stations. Same shape as
+ * `bulkUpsertLldpNeighbors` — conflict target is the PK so callers control
+ * insert-vs-update by pre-assigning ids. Replaces the legacy createMany +
+ * $transaction([per-row updates]) pair (which held a connection across N
+ * pipelined updates inside BEGIN/COMMIT). No text[] field to worry about,
+ * so the per-row tuple is a straight parameter list.
+ */
+async function bulkUpsertWirelessStations(
+  apAssetId: string,
+  rows: readonly WirelessUpsertRow[],
+  now: Date,
+): Promise<void> {
+  if (rows.length === 0) return;
+  const params: unknown[] = [];
+  const tuples: string[] = [];
+  let p = 1;
+  const nowIso = now.toISOString();
+  for (const r of rows) {
+    const d = r.data;
+    tuples.push(
+      `($${p++}::uuid, $${p++}, $${p++}, ` +
+      `$${p++}, $${p++}, $${p++}, $${p++}, $${p++}, ` +
+      `$${p++}, $${p++}, $${p++}, $${p++}, $${p++}, ` +
+      `$${p++}, $${p++}, $${p++}::timestamp, $${p++}::timestamp)`,
+    );
+    params.push(
+      r.id,
+      apAssetId,
+      d.staMacAddr,
+      d.staIpAddr,
+      d.ssid,
+      d.radioId,
+      d.wlanId,
+      d.vlanId,
+      d.bssid,
+      d.signalStrength,
+      d.noise,
+      d.bandwidthTx,
+      d.bandwidthRx,
+      d.idleSeconds,
+      d.matchedAssetId,
+      d.source,
+      nowIso,
+      nowIso,
+    );
+  }
+  const sql =
+    `INSERT INTO "asset_wireless_stations" (` +
+    `"id", "apAssetId", "staMacAddr", ` +
+    `"staIpAddr", "ssid", "radioId", "wlanId", "vlanId", ` +
+    `"bssid", "signalStrength", "noise", "bandwidthTx", "bandwidthRx", ` +
+    `"idleSeconds", "matchedAssetId", "source", "firstSeen", "lastSeen"` +
+    `) VALUES ${tuples.join(", ")} ` +
+    `ON CONFLICT ("id") DO UPDATE SET ` +
+    `"staIpAddr"      = EXCLUDED."staIpAddr", ` +
+    `"ssid"           = EXCLUDED."ssid", ` +
+    `"radioId"        = EXCLUDED."radioId", ` +
+    `"wlanId"         = EXCLUDED."wlanId", ` +
+    `"vlanId"         = EXCLUDED."vlanId", ` +
+    `"bssid"          = EXCLUDED."bssid", ` +
+    `"signalStrength" = EXCLUDED."signalStrength", ` +
+    `"noise"          = EXCLUDED."noise", ` +
+    `"bandwidthTx"    = EXCLUDED."bandwidthTx", ` +
+    `"bandwidthRx"    = EXCLUDED."bandwidthRx", ` +
+    `"idleSeconds"    = EXCLUDED."idleSeconds", ` +
+    `"matchedAssetId" = EXCLUDED."matchedAssetId", ` +
+    `"source"         = EXCLUDED."source", ` +
+    `"lastSeen"       = EXCLUDED."lastSeen"`;
+  await retryOnDeadlock(() => prisma.$executeRawUnsafe(sql, ...params));
 }
 
 /**
