@@ -48,6 +48,7 @@ import { setEnvVar } from "../utils/envFile.js";
 import { getMonitorWorkHistogramValues, type HistogramBucketValue } from "../metrics.js";
 import { setQueueMode, isPgbossInstalled, QUEUE_NAMES } from "./queueService.js";
 import type { CapacitySnapshot } from "./capacityService.js";
+import { logEvent } from "../api/routes/events.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -989,20 +990,20 @@ async function recordAdvisorTransition(state: AdvisorState): Promise<void> {
     const prior = await readStoredChangeRequired();
     if (prior === state.anyChangeRequired) return;
     // Only emit an Event when the rollup flag flips — avoids per-tick spam.
-    await prisma.event.create({
-      data: {
-        action: "capacity_advisor.recomputed",
-        resourceType: "system",
-        actor: "system",
-        level: "info",
-        message: state.anyChangeRequired
-          ? `Capacity Advisor: one or more settings now below recommended.`
-          : `Capacity Advisor: all settings at or above recommended.`,
-        details: {
-          recommendations: state.recommendations
-            .filter((r) => r.changeRequired)
-            .map((r) => ({ key: r.key, current: r.current, recommended: r.recommended })),
-        } as any,
+    // Routed through logEvent so Setting.eventRetention.minLevel applies
+    // (info-only event; operators with minLevel >= warning won't see this).
+    await logEvent({
+      action: "capacity_advisor.recomputed",
+      resourceType: "system",
+      actor: "system",
+      level: "info",
+      message: state.anyChangeRequired
+        ? `Capacity Advisor: one or more settings now below recommended.`
+        : `Capacity Advisor: all settings at or above recommended.`,
+      details: {
+        recommendations: state.recommendations
+          .filter((r) => r.changeRequired)
+          .map((r) => ({ key: r.key, current: r.current, recommended: r.recommended })),
       },
     });
     await writeStoredChangeRequired(state.anyChangeRequired);

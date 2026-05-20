@@ -47,6 +47,7 @@ import { getDeploymentContext } from "../utils/deploymentContext.js";
 import { BACKUP_DIR, STATE_DIR } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
 import { getDirectDatabaseUrl, isPgbouncerMode } from "../utils/dbConnections.js";
+import { logEvent } from "../api/routes/events.js";
 
 export type Severity = "ok" | "watch" | "warning" | "critical";
 
@@ -1452,28 +1453,31 @@ export async function recordCapacityTransition(snap: CapacitySnapshot): Promise<
         ? `Capacity ${prior.severity} → ${snap.severity}${headline ? `: ${headline.message}` : "."}`
         : `Capacity ${prior.severity} → ${snap.severity} (recovered).`;
 
-    await prisma.event.create({
-      data: {
-        action: "capacity.severity_changed",
-        resourceType: "system",
-        actor: "system",
-        level,
-        message,
-        details: {
-          from: prior?.severity ?? null,
-          to: snap.severity,
-          direction,
-          reasons: snap.reasons,
-          volumes: snap.appHost.volumes.map((v) => ({
-            paths: v.paths,
-            roles: v.roles,
-            freeBytes: v.freeBytes,
-            totalBytes: v.totalBytes,
-            freePct: v.totalBytes > 0
-              ? Number(((v.freeBytes / v.totalBytes) * 100).toFixed(1))
-              : null,
-          })),
-        } as any,
+    // Routed through logEvent so Setting.eventRetention.minLevel applies
+    // uniformly across the codebase — an operator who muted info events
+    // for the rest of Polaris doesn't get unmuted just for capacity
+    // recovery transitions. Escalations (warning/error level) still flow
+    // through regardless because those outrank the default minLevel.
+    await logEvent({
+      action: "capacity.severity_changed",
+      resourceType: "system",
+      actor: "system",
+      level,
+      message,
+      details: {
+        from: prior?.severity ?? null,
+        to: snap.severity,
+        direction,
+        reasons: snap.reasons,
+        volumes: snap.appHost.volumes.map((v) => ({
+          paths: v.paths,
+          roles: v.roles,
+          freeBytes: v.freeBytes,
+          totalBytes: v.totalBytes,
+          freePct: v.totalBytes > 0
+            ? Number(((v.freeBytes / v.totalBytes) * 100).toFixed(1))
+            : null,
+        })),
       },
     });
 
