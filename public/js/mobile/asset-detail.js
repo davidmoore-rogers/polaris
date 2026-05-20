@@ -32,9 +32,12 @@
     if (!_mounts[id]) {
       _mounts[id] = {
         range: DEFAULT_RANGE,
+        // Chart sections collapse by default — operators get the summary
+        // (avg/max in the section subtitle) at a glance and can expand for
+        // the full chart when needed.
         sections: {
-          monitor: true,
-          telemetry: true,
+          monitor: false,
+          telemetry: false,
           general: true,
           temperatures: true,
           interfaces: true,
@@ -119,22 +122,23 @@
       + '  <div style="margin-top:12px;">' + monitorPillHtml + '</div>'
       + '</div>'
 
-      // Monitor section
-      + sectionHeader("monitor", "Monitor", monitorPillSubtext(asset), st.sections.monitor)
+      // Response Time section — collapsed by default; subtitle shows
+      // avg/max once the loader returns. `asset-monitor-sub` is the slot
+      // the loader writes into.
+      + sectionHeader("monitor", "Response Time", escapeHtml(monitorPillSubtext(asset)), st.sections.monitor, "asset-monitor-sub")
       + '<div class="sect-body" data-sect="monitor"' + (st.sections.monitor ? '' : ' hidden') + '>'
       + '  <div class="card-filled" style="padding:16px;margin-bottom:8px;">'
       + '    <div class="seg" id="asset-range-seg" style="display:inline-flex;border:1px solid var(--md-outline);border-radius:var(--shape-full);overflow:hidden;margin-bottom:8px;">' + rangeButtons + '</div>'
       + '    <div id="asset-monitor-chart" style="min-height:120px;"></div>'
-      + '    <div class="muted" id="asset-monitor-stats" style="font-size:12px;margin-top:8px;letter-spacing:.4px;"></div>'
       + '  </div>'
       + '</div>'
 
-      // Telemetry section
-      + sectionHeader("telemetry", "CPU + Memory", "", st.sections.telemetry)
+      // CPU + Memory section — collapsed by default; subtitle shows
+      // cpu/mem avg/max once the loader returns.
+      + sectionHeader("telemetry", "CPU + Memory", "", st.sections.telemetry, "asset-telemetry-sub")
       + '<div class="sect-body" data-sect="telemetry"' + (st.sections.telemetry ? '' : ' hidden') + '>'
       + '  <div class="card-filled" style="padding:16px;margin-bottom:8px;">'
       + '    <div id="asset-telemetry-chart" style="min-height:120px;"></div>'
-      + '    <div class="muted" id="asset-telemetry-stats" style="font-size:12px;margin-top:8px;letter-spacing:.4px;"></div>'
       + '  </div>'
       + '</div>'
 
@@ -201,14 +205,19 @@
     if (refresh) refresh.addEventListener("click", function () { onRefresh(asset.id, refresh, st); });
   }
 
-  function sectionHeader(key, title, subtitle, expanded) {
+  // `subtitleHtml` is rendered raw (callers escape their own text). Pass
+  // `subtitleId` when a loader needs to update the subtitle asynchronously
+  // — the slot is always rendered so the loader can write into it even if
+  // the initial subtitle is empty.
+  function sectionHeader(key, title, subtitleHtml, expanded, subtitleId) {
+    var subId = subtitleId ? ' id="' + subtitleId + '"' : '';
     return ''
       + '<button class="asset-sect-header" data-key="' + key + '">'
-      + '  <div style="flex:1;text-align:left;">'
+      + '  <div style="flex:1;text-align:left;min-width:0;">'
       + '    <div class="sect-title">' + escapeHtml(title) + '</div>'
-      + (subtitle ? '    <div class="sect-sub">' + escapeHtml(subtitle) + '</div>' : '')
+      + '    <div class="sect-sub"' + subId + '>' + (subtitleHtml || "") + '</div>'
       + '  </div>'
-      + '  <svg class="caret" viewBox="0 0 24 24" width="24" height="24" style="fill:var(--md-on-surface-variant);"><use href="' + (expanded ? "#i-chev-down" : "#i-chev-right") + '"/></svg>'
+      + '  <svg class="caret" viewBox="0 0 24 24" width="24" height="24" style="fill:var(--md-on-surface-variant);flex-shrink:0;"><use href="' + (expanded ? "#i-chev-down" : "#i-chev-right") + '"/></svg>'
       + '</button>';
   }
 
@@ -248,42 +257,42 @@
   // ─── Loaders ───────────────────────────────────────────────────────────
   function loadMonitor(id, st) {
     var chartHost = document.getElementById("asset-monitor-chart");
-    var statsHost = document.getElementById("asset-monitor-stats");
-    if (!chartHost) return;
-    chartHost.innerHTML = '<div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div>';
-    if (statsHost) statsHost.textContent = "";
+    var sub = document.getElementById("asset-monitor-sub");
+    if (chartHost) chartHost.innerHTML = '<div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div>';
 
     api.assets.monitorHistory(id, st.range).then(function (resp) {
       if (!resp) return;
       var samples = (resp.samples || []).map(function (s) {
         return { ts: s.timestamp, v: s.responseTimeMs };
       });
-      chartHost.innerHTML = PolarisCharts.lineChart({
-        series: [{ values: samples, color: "var(--md-primary)", fill: true }],
-        height: 120,
-        yUnit: "ms",
-        ariaLabel: "Response time over " + st.range,
-      });
-      if (statsHost) {
+      if (chartHost) {
+        chartHost.innerHTML = PolarisCharts.lineChart({
+          series: [{ values: samples, color: "var(--md-primary)", fill: true }],
+          height: 120,
+          yUnit: "ms",
+          ariaLabel: "Response time over " + st.range,
+        });
+      }
+      if (sub) {
         var stats = resp.stats || {};
-        var bits = [];
-        if (stats.avgMs != null) bits.push("avg " + stats.avgMs + " ms");
-        if (stats.maxMs != null) bits.push("max " + stats.maxMs + " ms");
-        if (stats.packetLossRate != null) bits.push((stats.packetLossRate * 100).toFixed(1) + "% loss");
-        if (stats.total != null) bits.push(stats.total + " samples");
-        statsHost.textContent = bits.join(" · ") || "No samples";
+        var statBits = [];
+        if (stats.avgMs != null) statBits.push("avg " + stats.avgMs + " ms");
+        if (stats.maxMs != null) statBits.push("max " + stats.maxMs + " ms");
+        if (stats.packetLossRate != null && stats.packetLossRate > 0) {
+          statBits.push((stats.packetLossRate * 100).toFixed(1) + "% loss");
+        }
+        sub.textContent = statBits.length ? statBits.join(" · ") : "No samples";
       }
     }).catch(function (err) {
-      chartHost.innerHTML = '<div class="muted" style="font-size:13px;padding:8px 0;">Couldn’t load monitor history: ' + escapeHtml(err && err.message ? err.message : "error") + '</div>';
+      if (chartHost) chartHost.innerHTML = '<div class="muted" style="font-size:13px;padding:8px 0;">Couldn’t load monitor history: ' + escapeHtml(err && err.message ? err.message : "error") + '</div>';
+      if (sub) sub.textContent = "—";
     });
   }
 
   function loadTelemetry(id, st) {
     var chartHost = document.getElementById("asset-telemetry-chart");
-    var statsHost = document.getElementById("asset-telemetry-stats");
-    if (!chartHost) return;
-    chartHost.innerHTML = '<div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div>';
-    if (statsHost) statsHost.textContent = "";
+    var sub = document.getElementById("asset-telemetry-sub");
+    if (chartHost) chartHost.innerHTML = '<div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div>';
 
     api.assets.telemetryHistory(id, st.range).then(function (resp) {
       if (!resp) return;
@@ -302,30 +311,34 @@
         .filter(function (p) { return p.v != null; });
 
       if (cpuSeries.length === 0 && memSeries.length === 0) {
-        chartHost.innerHTML = '<div class="muted" style="font-size:13px;padding:8px 0;">No telemetry — this monitor type doesn’t collect CPU/memory.</div>';
+        if (chartHost) chartHost.innerHTML = '<div class="muted" style="font-size:13px;padding:8px 0;">No telemetry — this monitor type doesn’t collect CPU/memory.</div>';
+        if (sub) sub.textContent = "Not collected for this monitor type";
         return;
       }
-      chartHost.innerHTML = PolarisCharts.lineChart({
-        series: [
-          { values: cpuSeries, color: "var(--md-primary)" },
-          { values: memSeries, color: "var(--md-tertiary)" },
-        ],
-        height: 120,
-        yMin: 0, yMax: 100,
-        yUnit: "%",
-        ariaLabel: "CPU and memory over " + st.range,
-      });
-      if (statsHost) {
+      if (chartHost) {
+        chartHost.innerHTML = PolarisCharts.lineChart({
+          series: [
+            { values: cpuSeries, color: "var(--md-primary)" },
+            { values: memSeries, color: "var(--md-tertiary)" },
+          ],
+          height: 120,
+          yMin: 0, yMax: 100,
+          yUnit: "%",
+          ariaLabel: "CPU and memory over " + st.range,
+        });
+      }
+      if (sub) {
         var stats = resp.stats || {};
         var bits = [];
         if (stats.avgCpuPct != null) bits.push('<span style="color:var(--md-primary);">cpu avg ' + Math.round(stats.avgCpuPct) + "%</span>");
         if (stats.maxCpuPct != null) bits.push("max " + Math.round(stats.maxCpuPct) + "%");
         if (stats.avgMemPct != null) bits.push('<span style="color:var(--md-tertiary);">mem avg ' + Math.round(stats.avgMemPct) + "%</span>");
         if (stats.maxMemPct != null) bits.push("max " + Math.round(stats.maxMemPct) + "%");
-        statsHost.innerHTML = bits.join(" · ") || "No samples";
+        sub.innerHTML = bits.length ? bits.join(" · ") : "No samples";
       }
     }).catch(function (err) {
-      chartHost.innerHTML = '<div class="muted" style="font-size:13px;padding:8px 0;">Couldn’t load telemetry: ' + escapeHtml(err && err.message ? err.message : "error") + '</div>';
+      if (chartHost) chartHost.innerHTML = '<div class="muted" style="font-size:13px;padding:8px 0;">Couldn’t load telemetry: ' + escapeHtml(err && err.message ? err.message : "error") + '</div>';
+      if (sub) sub.textContent = "—";
     });
   }
 
