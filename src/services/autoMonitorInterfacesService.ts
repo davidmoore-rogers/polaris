@@ -649,11 +649,30 @@ export async function applyAutoMonitorForClass(
   ]);
   const lldpByAsset = mergeLldpMaps(realLldp, inferredLldp);
 
-  let devices = 0;
-  let interfacesAdded = 0;
+  // Two-phase apply: compute every pending update in memory FIRST, then
+  // batch the prisma.asset.update calls in chunks so the network round-trips
+  // don't serialize. The previous shape did `await prisma.asset.update` once
+  // per asset inside the resolver loop, which on a fleet of a few hundred
+  // switches stacked up enough round-trips to wedge the modal's "Applying..."
+  // state for minutes (and exhaust the DB connection pool's headroom for the
+  // rest of the app).
+  //
+  // Idempotency holds because the apply pass is strictly additive — a half-
+  // landed batch produces the same final pin set as a fully-landed one
+  // re-run (the next call recomputes `fresh` against the current
+  // monitoredInterfaces and only fires for the rows that still need a
+  // change). So we use Promise.allSettled rather than a $transaction; one
+  // failed write doesn't block the other writes from landing, and the
+  // operator just re-clicks Apply if they care to catch up.
+  interface PendingUpdate {
+    assetId:   string;
+    hostname:  string | null;
+    fresh:     string[];
+    unionedLength: number;
+    unionedNext:   string[];
+  }
+  const pending: PendingUpdate[] = [];
   let perDeviceMax = 0;
-  const sampleDevices: ApplyResult["sampleDevices"] = [];
-
   for (const a of assets) {
     const computed = resolvePinnedInterfaces(
       selection,
@@ -665,17 +684,53 @@ export async function applyAutoMonitorForClass(
     const fresh = computed.filter((n) => !existing.has(n));
     if (fresh.length === 0) continue;
     const unioned = [...a.monitoredInterfaces, ...fresh];
-    await prisma.asset.update({
-      where: { id: a.id },
-      data: { monitoredInterfaces: unioned },
-    });
-    devices += 1;
-    interfacesAdded += fresh.length;
     if (unioned.length > perDeviceMax) perDeviceMax = unioned.length;
-    if (sampleDevices.length < 5) {
-      sampleDevices.push({ assetId: a.id, hostname: a.hostname, pinNames: fresh });
+    pending.push({
+      assetId:       a.id,
+      hostname:      a.hostname,
+      fresh,
+      unionedLength: unioned.length,
+      unionedNext:   unioned,
+    });
+  }
+  if (pending.length === 0) return { devices: 0, interfacesAdded: 0, perDeviceMax: 0, sampleDevices: [] };
+
+  // Chunked Promise.allSettled — mirrors `batchSettled` in
+  // src/api/routes/integrations.ts. 50 is the conventional batch size in
+  // this codebase; small enough to keep pool headroom for the rest of the
+  // app on big fleets but large enough to amortize the per-batch overhead.
+  const BATCH_SIZE = 50;
+  let devices = 0;
+  let interfacesAdded = 0;
+  for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+    const chunk = pending.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      chunk.map((p) =>
+        prisma.asset.update({
+          where: { id: p.assetId },
+          data:  { monitoredInterfaces: p.unionedNext },
+        }),
+      ),
+    );
+    for (let k = 0; k < results.length; k++) {
+      const r = results[k];
+      const p = chunk[k];
+      if (!r || !p) continue;
+      if (r.status === "fulfilled") {
+        devices += 1;
+        interfacesAdded += p.fresh.length;
+      }
     }
   }
+
+  // Sample devices used to be filled inline as updates landed; rebuild them
+  // from the first 5 successful entries in pending order. Order is stable
+  // across re-applies which keeps the toast deterministic.
+  const sampleDevices: ApplyResult["sampleDevices"] = pending.slice(0, 5).map((p) => ({
+    assetId:  p.assetId,
+    hostname: p.hostname,
+    pinNames: p.fresh,
+  }));
 
   return { devices, interfacesAdded, perDeviceMax, sampleDevices };
 }

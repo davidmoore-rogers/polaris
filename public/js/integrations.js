@@ -2891,19 +2891,32 @@ async function openEditModal(id) {
             }
           }
           btn.textContent = "Applying...";
+          // Run the per-class applies in parallel. Each call is independent
+          // (different assetType slice of the integration's assets), the
+          // backend's chunked Promise.allSettled handles its own per-class
+          // concurrency, and waiting for them serially used to leave the
+          // modal stuck on "Applying..." for minutes on big fleets — one
+          // class with a few hundred switches could take 30-60s on its own
+          // under the old sequential-update path.
+          var activeApplies = classes.filter(function (entry) {
+            return entry[1] && entry[1].autoMonitorInterfaces;
+          });
+          var applyResults = await Promise.all(activeApplies.map(function (entry) {
+            return api.integrations.interfaceAggregateApply(id, entry[0]).then(
+              function (r) { return { ok: true,  klass: entry[0], r: r }; },
+              function (err) { return { ok: false, klass: entry[0], err: err }; },
+            );
+          }));
           var totalDevices = 0;
           var totalIfaces = 0;
           var failures = [];
-          for (var c = 0; c < classes.length; c++) {
-            var klass = classes[c][0];
-            var block = classes[c][1];
-            if (!block || !block.autoMonitorInterfaces) continue;
-            try {
-              var r = await api.integrations.interfaceAggregateApply(id, klass);
-              totalDevices += r.devices || 0;
-              totalIfaces  += r.interfacesAdded || 0;
-            } catch (err) {
-              failures.push(klass + ": " + (err.message || "failed"));
+          for (var c = 0; c < applyResults.length; c++) {
+            var result = applyResults[c];
+            if (result.ok) {
+              totalDevices += result.r.devices || 0;
+              totalIfaces  += result.r.interfacesAdded || 0;
+            } else {
+              failures.push(result.klass + ": " + (result.err.message || "failed"));
             }
           }
           closeModal();
