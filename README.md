@@ -1,6 +1,6 @@
 # Polaris
 
-A network management tool built with automation in mind. Auto-discovery from FortiManager / FortiGate / Windows DHCP / Entra ID / Active Directory, to build out IPv4/IPv6 networks, asset inventories and device maps. Made specifically with Fortinet network devices in mind, monitors devices over FortiOS REST and SNMP (response time, telemetry, system info, LLDP topology), maps managed FortiGates with their FortiSwitch/FortiAP/LLDP topology, push DHCP reservations and DHCP lease revocation as well as pushes asset quarantine to FortiGates.
+A network management tool built with automation in mind. Auto-discovery from FortiManager / FortiGate / Palo Alto / Windows DHCP / Entra ID / Active Directory, to build out IPv4/IPv6 networks, asset inventories and device maps. Made specifically with Fortinet network devices in mind, monitors devices over FortiOS REST and SNMP (response time, telemetry, system info, LLDP topology), maps managed FortiGates with their FortiSwitch/FortiAP/LLDP topology, push DHCP reservations and DHCP lease revocation as well as pushes asset quarantine to FortiGates.
 
 ## Features
 
@@ -224,6 +224,9 @@ DHCP push, quarantine push, monitoring transport (per-stream REST/SNMP toggles),
 
 ### Standalone FortiGate
 A single FortiGate via REST API — same discovery scope as FortiManager — for deployments not managed by one. Requires a REST API admin token (System → Administrators → REST API Admin).
+
+### Standalone Palo Alto
+A single Palo Alto firewall via the PAN-OS REST API (**PAN-OS 9.0+**) for deployments not fronted by Panorama. **Read-only in v1**: discovery covers DHCP scopes (derived from Layer-3 interface IPs that host a DHCP server), DHCP reservations + live leases, interface IPs, static destination-NAT rules (mapped to the FortiGate VIP concept), the ARP table, and HA state (active-passive / active-active members surfaced as `haMembers[]`). Endpoints that have no PAN-OS REST equivalent — DHCP leases, ARP, HA state, system info — use XML "op" commands (`/api/?type=op&cmd=…`); the rest go through `/restapi/v10.1/…`. Requires an API key generated under **Operations → Generate API Key** (PAN-OS UI). DHCP push and quarantine push surfaces aren't in v1.
 
 ### Windows Server
 Windows Server DHCP via WinRM (PowerShell remoting, port 5985 HTTP or 5986 HTTPS). Discovers v4 DHCP scopes.
