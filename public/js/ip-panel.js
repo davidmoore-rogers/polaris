@@ -415,7 +415,10 @@ function _renderIpList(data) {
     } else if (r && r.status === "active") {
       actions = retryBtn + freeBtn + assetBtn + editBtn;
     } else if (r && r.status === "expired") {
-      actions = assetBtn + editBtn;
+      var expiredReserveBtn = canReserveIps()
+        ? '<button class="btn btn-sm ' + reserveBtnClass + ' ip-reserve-btn" data-ip="' + escapeHtml(ip.address) + '" title="' + reserveTitle + '">Reserve</button>'
+        : '';
+      actions = expiredReserveBtn + assetBtn + editBtn;
     } else if (!r && canReserveIps()) {
       actions = '<button class="btn btn-sm ' + reserveBtnClass + ' ip-reserve-btn" data-ip="' + escapeHtml(ip.address) + '" title="' + reserveTitle + '">Reserve</button>' + assetBtn;
     } else {
