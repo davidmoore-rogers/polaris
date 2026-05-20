@@ -481,6 +481,14 @@ function toPositiveInt(v: unknown, fallback: number): number {
 const MANUAL_TIER_CACHE_KEY = "__manual__";
 const tierCache = new Map<string, MonitorTierSettings>();
 const classOverrideCache = new Map<string, MonitorOverrideSettings | null>();
+// Sidecar: did the cached integration tier-3 derive systemInfoIntervalSeconds
+// from Integration.pollInterval (true) or read it from an explicit tier-3
+// JSON value (false)? Drives the "integrationPollInterval" provenance label
+// in resolveMonitorSettingsWithProvenance so the UI can render
+// `Inherit: 14400s (4h, from <integration> discovery cycle)` instead of a
+// generic integration-tier badge. Manual-tier rows are not eligible (no
+// pollInterval to inherit from).
+const tierSystemInfoFromPollIntervalCache = new Map<string, boolean>();
 
 function classCacheKey(integrationId: string | null, assetType: string): string {
   return `${integrationId ?? MANUAL_TIER_CACHE_KEY}:${assetType}`;
@@ -498,11 +506,13 @@ export function invalidateMonitorSettingsCache(scope?: {
   if (!scope) {
     tierCache.clear();
     classOverrideCache.clear();
+    tierSystemInfoFromPollIntervalCache.clear();
     return;
   }
   const tierKey = scope.integrationId === null ? MANUAL_TIER_CACHE_KEY : scope.integrationId;
   if (tierKey != null) {
     tierCache.delete(tierKey);
+    tierSystemInfoFromPollIntervalCache.delete(tierKey);
     if (scope.assetType) {
       classOverrideCache.delete(`${tierKey}:${scope.assetType}`);
     } else {
@@ -636,7 +646,7 @@ async function loadIntegrationTierSettings(integrationId: string): Promise<Monit
   if (cached) return cached;
   const integration = await prisma.integration.findUnique({
     where:  { id: integrationId },
-    select: { config: true },
+    select: { config: true, pollInterval: true },
   });
   const cfg = (integration?.config as Record<string, unknown> | null) ?? {};
   const ms  = cfg.monitorSettings as Record<string, unknown> | undefined;
@@ -647,7 +657,25 @@ async function loadIntegrationTierSettings(integrationId: string): Promise<Monit
     // Transitional: fall back to the legacy global until the migration runs.
     result = (await loadLegacyGlobalAsTier()) ?? { ...HARDCODED_FLOOR };
   }
+  // systemInfo cadence linkage: when the integration tier doesn't explicitly
+  // set systemInfoIntervalSeconds, derive it from the integration's discovery
+  // pollInterval. Keeps interface / LLDP / storage / IPsec collection on the
+  // same schedule as discovery, slashing interface-sample volume by 24× at
+  // the default 4h pollInterval. Explicit class / per-asset overrides still
+  // win — this only affects the tier-3 baseline.
+  //   - ms missing                → derive (tier-3 not yet seeded)
+  //   - ms.systemInfoIntervalSeconds is number > 0  → respect operator value
+  //   - ms.systemInfoIntervalSeconds is null / missing / non-positive → derive
+  const rawSysInfo = ms ? (ms as Record<string, unknown>).systemInfoIntervalSeconds : undefined;
+  const explicitTierSystemInfo = typeof rawSysInfo === "number" && rawSysInfo > 0;
+  let systemInfoFromPollInterval = false;
+  if (!explicitTierSystemInfo && integration?.pollInterval != null && integration.pollInterval > 0) {
+    const derived = Math.max(60, Math.min(86400, integration.pollInterval * 3600));
+    result.systemInfoIntervalSeconds = derived;
+    systemInfoFromPollInterval = true;
+  }
   tierCache.set(integrationId, result);
+  tierSystemInfoFromPollIntervalCache.set(integrationId, systemInfoFromPollInterval);
   return result;
 }
 
@@ -936,8 +964,18 @@ export async function resolveMonitorSettings(asset: AssetMonitorContext): Promis
   return merged;
 }
 
-/** Per-field "where did this value come from?" label. Drives the asset-modal tier badges. */
-export type ProvenanceTier = "asset" | "class" | "integration" | "manual";
+/**
+ * Per-field "where did this value come from?" label. Drives the asset-modal
+ * tier badges.
+ *
+ * `"integrationPollInterval"` is a sub-label of the integration tier used for
+ * `systemInfoIntervalSeconds` only — it means the value was derived from the
+ * integration's discovery `pollInterval` rather than read from an explicit
+ * tier-3 JSON setting. The UI renders it as
+ * `Inherit: 14400s (4h, from <integration> discovery cycle)` so operators see
+ * why their interface scrape cadence matches discovery.
+ */
+export type ProvenanceTier = "asset" | "class" | "integration" | "manual" | "integrationPollInterval";
 
 export interface ResolvedSettingsWithProvenance {
   resolved:        ResolvedMonitorSettings;
@@ -976,6 +1014,17 @@ export async function resolveMonitorSettingsWithProvenance(
   }
 
   const resolved: ResolvedMonitorSettings = { ...tier3 };
+  // systemInfoIntervalSeconds carries a sub-label: when the integration tier
+  // derived the value from Integration.pollInterval (rather than an explicit
+  // tier-3 JSON entry), provenance reads "integrationPollInterval" so the UI
+  // can render a discovery-cycle-aware hint. Only applies to the integration
+  // tier — manual-tier orphan assets always carry the literal "manual" label.
+  const systemInfoTier3Label: ProvenanceTier =
+    tier3Source === "integration"
+      && asset.discoveredByIntegrationId != null
+      && tierSystemInfoFromPollIntervalCache.get(asset.discoveredByIntegrationId) === true
+      ? "integrationPollInterval"
+      : tier3Source;
   // Initialize provenance to tier3Source for every field; class/asset layers
   // overwrite below. Listing the keys explicitly keeps the type checker happy
   // (Record<keyof X, ...>) without an Object.fromEntries dance.
@@ -988,7 +1037,7 @@ export async function resolveMonitorSettingsWithProvenance(
     systemInfoTimeoutMs:        tier3Source,
     cpuMemoryIntervalSeconds:   tier3Source,
     temperatureIntervalSeconds: tier3Source,
-    systemInfoIntervalSeconds:  tier3Source,
+    systemInfoIntervalSeconds:  systemInfoTier3Label,
     sampleRetentionDays:        tier3Source,
     telemetryRetentionDays:     tier3Source,
     systemInfoRetentionDays:    tier3Source,

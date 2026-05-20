@@ -754,7 +754,7 @@ function integrationMonitorOverrideHTML(credentials, selectedSnmpId, selectedSsh
 // values are read back via `_readIntegrationCadenceForm()` and saved as
 // `Integration.config.monitorSettings` through PUT
 // /api/v1/monitor-settings/integration/:id.
-function _integrationCadenceSectionHTML(s, integrationType) {
+function _integrationCadenceSectionHTML(s, integrationType, pollIntervalHours) {
   s = s || {};
   function num(name, label, value, defaultValue, min, max, hint, warn500) {
     var v = (value != null) ? value : defaultValue;
@@ -763,6 +763,17 @@ function _integrationCadenceSectionHTML(s, integrationType) {
       : '';
     return '<div class="form-group"><label>' + escapeHtml(label) + warnMarkup + '</label>' +
       '<input type="number" id="f-mon-' + name + '" value="' + escapeHtml(String(v)) + '" min="' + min + '" max="' + max + '" style="width:140px">' +
+      (hint ? '<p class="hint">' + hint + '</p>' : '') +
+    '</div>';
+  }
+  // Blank-allowed numeric input used by systemInfoIntervalSeconds. Empty
+  // means "follow the integration's discovery pollInterval", and the resolver
+  // derives `pollInterval × 3600` seconds at runtime. Helper text spells the
+  // current derived value out so operators see what they'd inherit.
+  function numBlankable(name, label, value, min, max, hint, blankLabel) {
+    var v = (value != null) ? String(value) : "";
+    return '<div class="form-group"><label>' + escapeHtml(label) + '</label>' +
+      '<input type="number" id="f-mon-' + name + '" value="' + escapeHtml(v) + '" min="' + min + '" max="' + max + '" style="width:140px" placeholder="' + escapeHtml(blankLabel || "") + '">' +
       (hint ? '<p class="hint">' + hint + '</p>' : '') +
     '</div>';
   }
@@ -787,7 +798,14 @@ function _integrationCadenceSectionHTML(s, integrationType) {
     num("temperatureTimeoutMs",       "Temperature timeout (ms)",       s.temperatureTimeoutMs,       10000, 1000, 120000, "Per-request timeout for the temperature collector. Default 10000 ms.", false) +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface, storage &amp; LLDP discovery</p>' +
-    num("systemInfoIntervalSeconds","Discovery interval (seconds)", s.systemInfoIntervalSeconds, 600,   60,   86400,  "How often interfaces, storage, IPsec and LLDP neighbors are scraped. Default 600 s (10 min).", false) +
+    (function () {
+      var derivedSec = (pollIntervalHours != null) ? pollIntervalHours * 3600 : null;
+      var derivedHint = (pollIntervalHours != null)
+        ? 'Leave blank to follow this integration\'s discovery interval (currently ' + escapeHtml(String(pollIntervalHours)) + 'h ≈ ' + escapeHtml(String(derivedSec)) + ' s). Set an explicit value to override.'
+        : 'Leave blank to follow this integration\'s discovery interval. Set an explicit value to override.';
+      var blankLabel = (derivedSec != null) ? ("discovery cycle (" + derivedSec + " s)") : "discovery cycle";
+      return numBlankable("systemInfoIntervalSeconds", "Discovery interval (seconds)", s.systemInfoIntervalSeconds, 60, 86400, derivedHint, blankLabel);
+    })() +
     num("systemInfoTimeoutMs",      "Discovery timeout (ms)",       s.systemInfoTimeoutMs,       10000, 1000, 120000, "Per-request timeout for the interface / storage / LLDP collector. Default 10000 ms.", false) +
     '<p class="hint" style="margin:1rem 0 0 0;font-size:0.78rem">Sample retention is a global setting. Edit it in <a href="/server-settings.html?tab=retention">Server Settings → Retention</a>.</p>';
 }
@@ -1322,6 +1340,7 @@ function monitorSettingsFormHTML(s, opts) {
   var integrationType = opts.integrationType || "";
   var isFmgFgt = integrationType === "fortimanager" || integrationType === "fortigate";
   var hasId    = !!opts.integrationId;
+  var pollIntervalHours = (typeof opts.pollInterval === "number" && opts.pollInterval > 0) ? opts.pollInterval : null;
 
   // ─── Section 1: Cadence & Retention ───────────────────────────────────────
   var cadenceSection =
@@ -1331,7 +1350,7 @@ function monitorSettingsFormHTML(s, opts) {
         'Default cadences and retention windows applied to every asset discovered by this integration. ' +
         'A class override (Assets page → Monitoring Settings) or a per-asset override on the asset itself takes priority.' +
       '</p>' +
-      _integrationCadenceSectionHTML(s, integrationType) +
+      _integrationCadenceSectionHTML(s, integrationType, pollIntervalHours) +
     '</section>';
 
   // ─── Section 2: Discovery Defaults (FMG/FortiGate only) ───────────────────
@@ -1485,6 +1504,18 @@ function _readIntegrationCadenceForm() {
     var v = parseInt(el.value, 10);
     return Number.isFinite(v) ? v : undefined;
   }
+  // systemInfoIntervalSeconds accepts a blank input meaning "follow the
+  // integration's discovery pollInterval". Blank → null (not undefined) so
+  // the server-side Zod (nullable on the integration tier) accepts it and
+  // the resolver applies the pollInterval derivation.
+  function nNullable(name) {
+    var el = document.getElementById("f-mon-" + name);
+    if (!el) return undefined;
+    var raw = (el.value == null ? "" : String(el.value)).trim();
+    if (raw === "") return null;
+    var v = parseInt(raw, 10);
+    return Number.isFinite(v) ? v : null;
+  }
   var out = {
     intervalSeconds:           n("intervalSeconds"),
     failureThreshold:          n("failureThreshold"),
@@ -1494,7 +1525,7 @@ function _readIntegrationCadenceForm() {
     systemInfoTimeoutMs:       n("systemInfoTimeoutMs"),
     cpuMemoryIntervalSeconds:  n("cpuMemoryIntervalSeconds"),
     temperatureIntervalSeconds: n("temperatureIntervalSeconds"),
-    systemInfoIntervalSeconds: n("systemInfoIntervalSeconds"),
+    systemInfoIntervalSeconds: nNullable("systemInfoIntervalSeconds"),
   };
   // Slice 2 split telemetry into cpuMemory + temperature streams server-side
   // (TierSettingsSchema requires both). The Temperature inputs are now in
@@ -2530,6 +2561,7 @@ async function openEditModal(id) {
           integrationId:   id,
           integrationType: intg.type,
           integrationName: intg.name,
+          pollInterval:    intg.pollInterval,
         }) },
       ];
       body = _intRenderTabbedBody("intg-edit", nonFortinetTabs);
@@ -2562,6 +2594,7 @@ async function openEditModal(id) {
           integrationId:      id,
           integrationType:    intg.type,
           integrationName:    intg.name,
+          pollInterval:       intg.pollInterval,
         }) },
       );
       // Reservation Push + Quarantine Push tabs render for both FMG and

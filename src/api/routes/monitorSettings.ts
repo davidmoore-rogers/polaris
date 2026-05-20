@@ -57,6 +57,14 @@ const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "d
 // "use the source default" (fortinet→rest_api, everything else→icmp). Stored
 // alongside the cadence fields in Integration.config.monitorSettings (tier-3
 // integration) or in the Setting "manualMonitorSettings" row (tier-3 manual).
+//
+// systemInfoIntervalSeconds note: required at the manual tier (orphan assets
+// have no integration to inherit from), but nullable at the integration tier
+// — null means "follow this integration's discovery pollInterval", which the
+// resolver derives in loadIntegrationTierSettings. See the "integrationPoll-
+// Interval" provenance label and the migrateSystemInfoCadenceLinkage startup
+// job that retroactively nulls existing 600s defaults so installed fleets
+// pick up the linkage on next deploy.
 const TierSettingsSchema = z.object({
   intervalSeconds:            z.number().int().min(1).max(86400),
   failureThreshold:           z.number().int().min(1).max(100),
@@ -90,6 +98,14 @@ const TierSettingsSchema = z.object({
   temperatureMibId:           z.string().nullable().optional(),
   interfacesMibId:            z.string().nullable().optional(),
   lldpMibId:                  z.string().nullable().optional(),
+});
+
+// Integration-tier variant: systemInfoIntervalSeconds becomes nullable.
+// Null means "follow integration.pollInterval × 3600" — the resolver derives
+// the cadence in loadIntegrationTierSettings. Manual tier stays required
+// because orphan assets have no integration to inherit from.
+const TierSettingsIntegrationSchema = TierSettingsSchema.extend({
+  systemInfoIntervalSeconds: z.number().int().min(60).max(86400).nullable(),
 });
 
 // Override shape — every field optional/nullable, null = inherit from tier
@@ -227,7 +243,7 @@ router.get("/integration/:id", requirePermission("assetMonitorSettings", "read")
 /** Write the integration tier. Affects every asset discovered by this integration. */
 router.put("/integration/:id", requirePermission("assetMonitorSettings", "write"), async (req, res, next) => {
   try {
-    const input = stripLegacyRetention(TierSettingsSchema.parse(req.body));
+    const input = stripLegacyRetention(TierSettingsIntegrationSchema.parse(req.body));
     const integrationId = req.params.id as string;
     const integration = await prisma.integration.findUnique({
       where:  { id: integrationId },

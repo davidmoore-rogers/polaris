@@ -540,7 +540,7 @@ router.get("/:id/effective-monitor-settings", requirePermission("assets", "read"
         id:                         true,
         assetType:                  true,
         discoveredByIntegrationId:  true,
-        discoveredByIntegration:    { select: { type: true } },
+        discoveredByIntegration:    { select: { name: true, type: true, pollInterval: true } },
         monitorIntervalSec:         true,
         cpuMemoryIntervalSec:       true,
         temperatureIntervalSec:     true,
@@ -595,7 +595,19 @@ router.get("/:id/effective-monitor-settings", requirePermission("assets", "read"
       });
       for (const r of rows) mibLookup[r.id] = { moduleName: r.moduleName };
     }
-    res.json({ ...result, mibLookup });
+    // Surface the integration's name + pollInterval alongside the resolved
+    // settings so the frontend can render the "integrationPollInterval"
+    // provenance badge as `Inherit: 14400s (4h, from <integration> discovery
+    // cycle)` without a second /integrations/:id round-trip.
+    const integrationInfo = asset.discoveredByIntegration
+      ? {
+          id:           asset.discoveredByIntegrationId,
+          name:         asset.discoveredByIntegration.name,
+          type:         asset.discoveredByIntegration.type,
+          pollInterval: asset.discoveredByIntegration.pollInterval,
+        }
+      : null;
+    res.json({ ...result, mibLookup, integration: integrationInfo });
   } catch (err) {
     next(err);
   }

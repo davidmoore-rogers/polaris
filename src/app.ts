@@ -48,6 +48,7 @@ import "./jobs/migrateRetentionTiers.js";
 import "./jobs/consolidateSampleRetention.js";
 import "./jobs/migrateMonitorStatusRename.js";
 import "./jobs/migrateAutoMonitorInterfacesShape.js";
+import "./jobs/migrateSystemInfoCadenceLinkage.js";
 import "./jobs/backfillAssetSources.js";
 import "./jobs/flagStaleReservations.js";
 import "./jobs/capacityWatch.js";
