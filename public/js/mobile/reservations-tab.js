@@ -44,16 +44,14 @@
     title: "Reservations",
     icon: "#i-bookmark",
     renderTopbar: function (ctx) {
-      var user = (ctx && ctx.user) || null;
-      var addBtn = canCreate(user)
-        ? '    <button class="icon-btn" id="reservations-add-btn" aria-label="Reserve an IP"><svg viewBox="0 0 24 24"><use href="#i-add"/></svg></button>'
-        : '';
+      // Add action moved to a floating "+ Reserve" FAB in the body —
+      // matches the Networks page's Reserve FAB so the same primary
+      // create gesture lands in the same spot on both screens.
       return ""
         + '<div class="m3-topbar">'
         + '  <div class="leading"></div>'
         + '  <div class="title">Reservations</div>'
         + '  <div class="trailing">'
-        +      addBtn
         + '    <button class="icon-btn" id="reservations-refresh-btn" aria-label="Refresh"><svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg></button>'
         + '  </div>'
         + '</div>';
@@ -61,7 +59,12 @@
     render: function (body, ctx) {
       _state.user = (ctx && ctx.user) || null;
       _state.expandedId = null;
-      body.innerHTML = '<div id="reservations-host"></div>';
+      var user = _state.user;
+      body.innerHTML = ''
+        + '<div id="reservations-host"></div>'
+        + (canCreate(user)
+          ? '<button class="fab-ext" id="reservations-fab" style="position:fixed;right:16px;bottom:calc(var(--navbar-h) + 16px);z-index:30;"><svg viewBox="0 0 24 24"><use href="#i-add"/></svg>Reserve</button>'
+          : '');
       load();
 
       var btn = document.getElementById("reservations-refresh-btn");
@@ -70,8 +73,8 @@
         load().finally(function () { btn.disabled = false; });
       });
 
-      var addBtn = document.getElementById("reservations-add-btn");
-      if (addBtn) addBtn.addEventListener("click", function () {
+      var fab = document.getElementById("reservations-fab");
+      if (fab) fab.addEventListener("click", function () {
         openCreateByIpSheet();
       });
     },

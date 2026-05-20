@@ -43,6 +43,10 @@
           interfaces: true,
           ipHistory: false,
         },
+        // Interfaces sub-toggle: collapsed shows only `monitoredInterfaces`
+        // (the operator-pinned fast-poll subset); expanded shows every up
+        // interface. Persists per asset for the lifetime of the SPA mount.
+        interfacesShowAll: false,
       };
     }
     return _mounts[id];
@@ -65,7 +69,7 @@
       // populate their respective sections independently.
       loadMonitor(id, st);
       loadTelemetry(id, st);
-      loadSystemInfo(id, st);
+      loadSystemInfo(id, st, asset);
       loadIpHistory(id, st);
     }).catch(function (err) {
       var msg = (err && err.message) ? err.message : "Failed to load asset";
@@ -345,7 +349,9 @@
   // Fetch system-info (current interfaces + temperatures + LLDP) and 1h
   // temperature samples for per-sensor min/avg/max. The two requests are
   // independent so they fly in parallel.
-  function loadSystemInfo(id, st) {
+  function loadSystemInfo(id, st, asset) {
+    if (asset) _assetCache[id] = asset;
+    var resolvedAsset = asset || _assetCache[id] || null;
     var tempsHost  = document.getElementById("asset-temperatures-host");
     var ifacesHost = document.getElementById("asset-interfaces-host");
     if (!tempsHost && !ifacesHost) return;
@@ -370,13 +376,17 @@
       _systemInfoCache[id] = info;
 
       if (tempsHost)  renderTemperatures(tempsHost, info, tempHist);
-      if (ifacesHost) renderInterfaces(ifacesHost, info, id);
+      if (ifacesHost) renderInterfaces(ifacesHost, info, id, st, resolvedAsset);
     });
   }
 
   // Per-asset cache of the latest /system-info payload so the bottom sheet
   // can render details without re-fetching. Re-populated on every loadSystemInfo.
   var _systemInfoCache = Object.create(null);
+  // Per-asset cache of the Asset row itself so async loaders (Refresh, the
+  // interfaces toggle) can read fields like `monitoredInterfaces` without
+  // re-fetching.
+  var _assetCache = Object.create(null);
 
   function renderTemperatures(host, info, tempHist) {
     var temps = (info && info.temperatures) || [];
@@ -423,49 +433,91 @@
     host.innerHTML = html;
   }
 
-  function renderInterfaces(host, info, assetId) {
+  // Default view: only `Asset.monitoredInterfaces` (the operator-pinned
+  // fast-poll subset) — these are the interfaces the operator cares about,
+  // and pinned-but-currently-down ones are kept so the operator can see
+  // the outage. Expanded view: every interface whose latest sample reports
+  // operStatus==="up", regardless of pinning. The "Show all / Show
+  // monitored only" button at the bottom of the section flips
+  // `st.interfacesShowAll` and re-renders.
+  function renderInterfaces(host, info, assetId, st, asset) {
     var ifaces = (info && info.interfaces) || [];
-    var up = ifaces.filter(function (i) { return (i.operStatus || "").toLowerCase() === "up"; });
-    if (up.length === 0) {
-      host.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">No interfaces up.</div>';
-      return;
-    }
-    // Stable order: by alias/ifName.
-    up.sort(function (a, b) {
+    var monitoredSet = Object.create(null);
+    var monitoredArr = (asset && asset.monitoredInterfaces) || [];
+    monitoredArr.forEach(function (n) { if (n) monitoredSet[n] = true; });
+
+    var allUp = ifaces.filter(function (i) { return (i.operStatus || "").toLowerCase() === "up"; });
+    var monitored = ifaces.filter(function (i) { return monitoredSet[i.ifName]; });
+
+    function cmp(a, b) {
       var an = (a.alias || a.ifName || "").toLowerCase();
       var bn = (b.alias || b.ifName || "").toLowerCase();
       return an < bn ? -1 : an > bn ? 1 : 0;
-    });
+    }
+    allUp.sort(cmp);
+    monitored.sort(cmp);
 
-    var html = "";
-    up.forEach(function (iface, i) {
-      var label = iface.alias || iface.ifName || "(unnamed)";
-      var sub   = iface.alias && iface.ifName && iface.alias !== iface.ifName
-        ? iface.ifName
-        : (iface.ipAddress || "");
-      var speed = (iface.speedBps != null) ? formatBps(iface.speedBps) : "";
-      var idx   = String(i);
-      html += ''
-        + '<div class="list-item two-line iface-row" data-iface-idx="' + escapeHtml(idx) + '" role="button" tabindex="0" style="padding-left:16px;padding-right:16px;cursor:pointer;">'
-        + '  <span class="leading"><span class="dot up" style="display:inline-block;width:10px;height:10px;border-radius:50%;"></span></span>'
-        + '  <div class="content">'
-        + '    <div class="headline">' + escapeHtml(label) + '</div>'
-        + (sub ? '    <div class="supporting mono">' + escapeHtml(sub) + '</div>' : '')
-        + '  </div>'
-        + '  <span class="trailing muted mono" style="font-size:12px;">' + escapeHtml(speed) + '</span>'
-        + '</div>'
-        + (i < up.length - 1 ? '<div class="list-divider"></div>' : '');
-    });
-    host.innerHTML = html;
+    var showAll = !!(st && st.interfacesShowAll);
+    var visible = showAll ? allUp : monitored;
 
-    // Wire tap → bottom sheet. Stash the sorted-up list on the closure so
-    // the index in dataset matches what's rendered above.
+    var listHtml = "";
+    if (visible.length === 0) {
+      if (!showAll && monitoredArr.length === 0) {
+        listHtml = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">No interfaces monitored. Tap <b>Show all</b> to browse every up interface.</div>';
+      } else if (!showAll) {
+        // monitoredArr non-empty but no matching samples yet (heavy cadence hasn't fired).
+        listHtml = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">Monitored interfaces pinned but no samples yet.</div>';
+      } else {
+        listHtml = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">No interfaces up.</div>';
+      }
+    } else {
+      visible.forEach(function (iface, i) {
+        var label = iface.alias || iface.ifName || "(unnamed)";
+        var sub   = iface.alias && iface.ifName && iface.alias !== iface.ifName
+          ? iface.ifName
+          : (iface.ipAddress || "");
+        var speed = (iface.speedBps != null) ? formatBps(iface.speedBps) : "";
+        var idx   = String(i);
+        // operStatus drives the leading status dot — pinned-but-down monitored
+        // interfaces should look down, not up, when the operator opens the section.
+        var statusCls = (iface.operStatus || "").toLowerCase() === "up" ? "up" : "down";
+        listHtml += ''
+          + '<div class="list-item two-line iface-row" data-iface-idx="' + escapeHtml(idx) + '" role="button" tabindex="0" style="padding-left:16px;padding-right:16px;cursor:pointer;">'
+          + '  <span class="leading"><span class="dot ' + statusCls + '" style="display:inline-block;width:10px;height:10px;border-radius:50%;"></span></span>'
+          + '  <div class="content">'
+          + '    <div class="headline">' + escapeHtml(label) + '</div>'
+          + (sub ? '    <div class="supporting mono">' + escapeHtml(sub) + '</div>' : '')
+          + '  </div>'
+          + '  <span class="trailing muted mono" style="font-size:12px;">' + escapeHtml(speed) + '</span>'
+          + '</div>'
+          + (i < visible.length - 1 ? '<div class="list-divider"></div>' : '');
+      });
+    }
+
+    var btnLabel = showAll
+      ? "Show monitored only"
+      : "Show all" + (allUp.length ? " (" + allUp.length + ")" : "");
+    var toggleHtml = ''
+      + '<div style="padding:12px 16px 4px;">'
+      + '  <button class="btn btn-tonal" id="iface-show-all-btn" style="width:100%;">' + escapeHtml(btnLabel) + '</button>'
+      + '</div>';
+
+    host.innerHTML = listHtml + toggleHtml;
+
+    // Wire row taps — index into the same `visible` list rendered above.
     host.querySelectorAll(".iface-row").forEach(function (row) {
       row.addEventListener("click", function () {
         var idx = parseInt(row.dataset.ifaceIdx, 10);
         if (isNaN(idx)) return;
-        openInterfaceSheet(up[idx], info, assetId);
+        openInterfaceSheet(visible[idx], info, assetId);
       });
+    });
+
+    // Wire the toggle — flips state and re-renders against the same data.
+    var toggleBtn = document.getElementById("iface-show-all-btn");
+    if (toggleBtn) toggleBtn.addEventListener("click", function () {
+      if (st) st.interfacesShowAll = !st.interfacesShowAll;
+      renderInterfaces(host, info, assetId, st, asset);
     });
   }
 
