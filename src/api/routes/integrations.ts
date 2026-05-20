@@ -3927,9 +3927,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     skippedNoIp: 0,
     skippedNoSubnet: 0,
     skippedCollision: 0,
-    // Path counters (exactly one per processed entry)
+    // Path counters (exactly one per processed entry).
+    // dhcpFlipMixed = the row needed a sourceType change (and maybe also a
+    // staleness bump) — written inline as one per-row update.
+    // dhcpFlipBumpOnly = the row only needed lastSeenLeased=now (steady-state
+    // confirmation that an existing dhcp_reservation's target is still online)
+    // — deferred to one bulk updateMany at end of phase. On big FortiGates with
+    // hundreds of leased reservations this is the dominant per-cycle write cost
+    // and bulking it collapses N statements into 1 round-trip.
     pathExistingDhcpNoChange: 0,
-    pathExistingDhcpFlip: 0,
+    pathExistingDhcpFlipMixed: 0,
+    pathExistingDhcpFlipBumpOnly: 0,
     pathExistingManualPolarisEcho: 0,
     pathExistingManualConflictOnly: 0,
     pathExistingVipSuccession: 0,
@@ -3939,14 +3947,20 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     pathNewCreate: 0,
     pathNewCreateAfterRetry: 0,
     pathNewCreateFailed: 0,
-    // Write counters (sum across branches)
+    // Write counters (statement count, NOT row count).
+    // writesReservationUpdateMany is the bulk path — 0 or 1 statement per
+    // cycle, covering pathExistingDhcpFlipBumpOnly rows.
     writesReservationUpdate: 0,
+    writesReservationUpdateMany: 0,
     writesReservationCreate: 0,
     writesReservationDelete: 0,
     writesConflictUpdateMany: 0,
     writesDnsRelease: 0,
     writesUpsertConflict: 0,
   };
+  // Collected ids whose only Phase 5 write is the lastSeenLeased=now bump.
+  // Flushed as one updateMany after the loop.
+  const dhcpFlipBumpOnlyIds: string[] = [];
 
   if (result.dhcpEntries && result.dhcpEntries.length > 0) {
     for (const entry of result.dhcpEntries) {
@@ -4226,9 +4240,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // "dhcp-reservation") so the UI status pill and owner column
           // stay aligned. Operator-stamped owners (anything outside that
           // allowlist) survive untouched.
-          const update: Record<string, unknown> = {};
-          if (existingRes.sourceType !== proposedSourceType) {
-            update.sourceType = proposedSourceType;
+          const needsSourceFlip = existingRes.sourceType !== proposedSourceType;
+          const needsStalenessBump = entry.seenLeased && isDhcpReservation;
+          if (needsSourceFlip) {
+            // Mixed update — the new sourceType differs per row, so we can't
+            // bulk these (updateMany only supports one common data shape).
+            // Issue inline as one per-row update; the staleness bump rides
+            // along when both apply.
+            const update: Record<string, unknown> = {
+              sourceType: proposedSourceType,
+            };
             if (
               existingRes.owner === "dhcp-lease" ||
               existingRes.owner === "dhcp-reservation"
@@ -4238,24 +4259,25 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
                   ? "dhcp-reservation"
                   : "dhcp-lease";
             }
-          }
-          if (entry.seenLeased && isDhcpReservation) {
-            // Bump the last-seen-leased timestamp so the stale-reservation
-            // job knows the target was online at this discovery run.
-            // Clear staleNotifiedAt (re-arm the alert if it goes silent
-            // again later) and staleSnoozedUntil (a snooze on a now-online
-            // row shouldn't linger).
-            update.lastSeenLeased = new Date();
-            update.staleNotifiedAt = null;
-            update.staleSnoozedUntil = null;
-          }
-          if (Object.keys(update).length > 0) {
-            phase5Stats.pathExistingDhcpFlip++;
+            if (needsStalenessBump) {
+              update.lastSeenLeased = new Date();
+              update.staleNotifiedAt = null;
+              update.staleSnoozedUntil = null;
+            }
+            phase5Stats.pathExistingDhcpFlipMixed++;
             await prisma.reservation.update({
               where: { id: existingRes.id },
               data: update,
             });
             phase5Stats.writesReservationUpdate++;
+          } else if (needsStalenessBump) {
+            // Pure staleness bump — defer to one bulk updateMany at end of
+            // phase. Every row in this set gets the same data shape
+            // (lastSeenLeased=now, clear staleNotifiedAt + staleSnoozedUntil),
+            // so a single statement covers them all. On a 200-row FortiGate
+            // this is the difference between 100+ updates and 1.
+            dhcpFlipBumpOnlyIds.push(existingRes.id);
+            phase5Stats.pathExistingDhcpFlipBumpOnly++;
           } else {
             phase5Stats.pathExistingDhcpNoChange++;
           }
@@ -4349,13 +4371,33 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     }
   }
 
+  // Flush the deferred dhcp_reservation staleness bumps as one updateMany.
+  // Every row in dhcpFlipBumpOnlyIds gets the same data shape, so this is
+  // exactly the shape updateMany was designed for. One statement regardless
+  // of row count — the dominant per-cycle write savings on big FortiGates.
+  if (dhcpFlipBumpOnlyIds.length > 0) {
+    const bumpAt = new Date();
+    await prisma.reservation.updateMany({
+      where: { id: { in: dhcpFlipBumpOnlyIds } },
+      data: {
+        lastSeenLeased: bumpAt,
+        staleNotifiedAt: null,
+        staleSnoozedUntil: null,
+      },
+    });
+    phase5Stats.writesReservationUpdateMany++;
+  }
+
   // Phase 5 summary — one info Event per per-FortiGate sync so operators can
   // characterize the actual per-cycle DB write distribution from the Events
   // page. The path-* counters sum to entriesTotal; the writes-* counters are
-  // the actual prisma.reservation/conflict statements issued.
+  // the actual prisma.reservation/conflict statements issued (NOT rows —
+  // updateMany counts as one regardless of rows touched, which is the
+  // connection-pressure number).
   if (phase5Stats.entriesTotal > 0) {
     const totalWrites =
       phase5Stats.writesReservationUpdate +
+      phase5Stats.writesReservationUpdateMany +
       phase5Stats.writesReservationCreate +
       phase5Stats.writesReservationDelete +
       phase5Stats.writesConflictUpdateMany +
@@ -4364,10 +4406,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     syncLog(
       "info",
       `Phase 5 DHCP entry processing: ${phase5Stats.entriesTotal} entries, ${totalWrites} DB writes ` +
-      `(updates=${phase5Stats.writesReservationUpdate}, creates=${phase5Stats.writesReservationCreate}, ` +
-      `deletes=${phase5Stats.writesReservationDelete}, conflictUpdates=${phase5Stats.writesConflictUpdateMany}, ` +
-      `dnsReleases=${phase5Stats.writesDnsRelease}, upsertConflicts=${phase5Stats.writesUpsertConflict}); ` +
-      `paths: noChange=${phase5Stats.pathExistingDhcpNoChange}, dhcpFlip=${phase5Stats.pathExistingDhcpFlip}, ` +
+      `(updates=${phase5Stats.writesReservationUpdate}, updateMany=${phase5Stats.writesReservationUpdateMany} covering ${dhcpFlipBumpOnlyIds.length} rows, ` +
+      `creates=${phase5Stats.writesReservationCreate}, deletes=${phase5Stats.writesReservationDelete}, ` +
+      `conflictUpdates=${phase5Stats.writesConflictUpdateMany}, dnsReleases=${phase5Stats.writesDnsRelease}, ` +
+      `upsertConflicts=${phase5Stats.writesUpsertConflict}); ` +
+      `paths: noChange=${phase5Stats.pathExistingDhcpNoChange}, ` +
+      `dhcpFlipMixed=${phase5Stats.pathExistingDhcpFlipMixed}, dhcpFlipBumpOnly=${phase5Stats.pathExistingDhcpFlipBumpOnly}, ` +
       `polarisEcho=${phase5Stats.pathExistingManualPolarisEcho}, manualConflict=${phase5Stats.pathExistingManualConflictOnly}, ` +
       `vipSucc=${phase5Stats.pathExistingVipSuccession}, vipMacFill=${phase5Stats.pathExistingVipMacFill}, ` +
       `pendingAdopt=${phase5Stats.pathExistingPendingAdopt}, pendingCollide=${phase5Stats.pathExistingPendingCollide}, ` +
