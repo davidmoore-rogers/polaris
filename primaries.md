@@ -38,6 +38,7 @@ Per-pattern sections:
 - [Operator-customizable widget surface](#operator-customizable-widget-surface)
 - [Queue-on-transient-failure with retry tick + recovery hook](#queue-on-transient-failure-with-retry-tick--recovery-hook)
 - [Integration type (config + discovery + sync + frontend modal)](#integration-type-config--discovery--sync--frontend-modal)
+- [Mobile bottom sheet](#mobile-bottom-sheet)
 
 ---
 
@@ -522,3 +523,25 @@ Per-pattern sections:
 6. **Run the cross-cutting checklist** in [touches.md](touches.md)'s `cross-cutting/integration-type-onboarding` section — that's the authoritative list of every callsite. If you discover a callsite this primaries.md entry didn't mention, add it to touches.md in the same commit.
 7. **Test discovery → sync → asset write** end-to-end with the new type: create the integration via UI, hit Test Connection, hit Discover, verify `DiscoveryResult` round-trips through `syncDhcpSubnets`, verify projected Asset fields look right, verify the integration shows up on the assets list filter. Cover the asset-only path if applicable.
 8. **Write a one-shot startup migration job** if the new type retroactively claims assets that existed before (e.g. `backfillPaloAltoFirewallAssetSources`) — mirrors `backfillFortigateEndpointSources.ts`. Idempotent, marker-keyed, fires once at boot.
+
+---
+
+## Mobile bottom sheet
+
+**What it is:** A modal slide-up panel anchored to the bottom of the viewport on the mobile SPA. Dismissed by tapping the scrim, tapping the X button, or swiping the sheet down. Used for the Device Map site detail, asset interface drilldown, reservation edit + create-by-IP, subnet reserve, and topology node detail.
+
+**Canonical implementation:** `openSiteSheet()` in [public/js/mobile/map-tab.js](public/js/mobile/map-tab.js) + matching `closeSiteSheet()`.
+
+**Key conventions:**
+- DOM shape: one `.scrim` and one `.sheet` element, both appended to `document.body` with unique IDs (`<feature>-sheet-scrim` + `<feature>-sheet`). Close = `remove()` both.
+- The sheet's first child is `<div class="sheet-handle"></div>` — the small grabber bar that both signals draggability and is the always-on swipe-dismiss start zone.
+- Next comes a `display:flex` header row with the title block on the left and an icon `<button class="icon-btn" id="<feature>-sheet-close" aria-label="Close">` carrying `<svg><use href="#i-close"/></svg>` on the right.
+- Three close paths, all calling the same close function: `scrim.addEventListener("click", closeXxx)`, the close button click, and `PolarisTabs.attachSwipeToDismiss(sheet, closeXxx)`. The swipe helper lives in [public/js/mobile/tabs.js](public/js/mobile/tabs.js).
+- CSS comes from [public/css/mobile.css](public/css/mobile.css) — the `.scrim`, `.sheet`, `.sheet-handle`, `.sheet-title` rules. Don't invent new container classes; reuse these so the swipe helper's transform composes correctly with the `sheet-in` open keyframe.
+- Forms inside the sheet keep their native gesture handling — the swipe helper opts out of `input`, `textarea`, `select`, and `[contenteditable=true]` so iOS text-cursor drag and selection handles work.
+
+**When adding a new instance:**
+- Mirror the DOM shape — `.sheet-handle` first, header row with `icon-btn` close button second.
+- Wire all three close paths: scrim click, close-button click, and `PolarisTabs.attachSwipeToDismiss(sheet, closeXxx)`.
+- The close function `remove()`s both the scrim and the sheet by ID; idempotent so double-fire from a swipe finishing while the user also taps scrim is safe.
+- If the sheet is scrollable, the swipe-dismiss helper handles "scroll first, dismiss only when at top" automatically — no extra wiring needed.

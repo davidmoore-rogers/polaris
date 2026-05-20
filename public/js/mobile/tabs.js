@@ -367,6 +367,128 @@
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  // ─── Sheet swipe-to-dismiss ────────────────────────────────────────────
+  // Touch-drag the sheet downward to dismiss. Companion to the X button
+  // and scrim tap — all three end up calling the same close function.
+  //
+  // Rules:
+  //   - Drag is captured only when the gesture starts on the handle, OR
+  //     when the sheet's scroll position is already at the top. Anywhere
+  //     else, native vertical scroll wins.
+  //   - Form controls (input/textarea/select/contenteditable) opt out so
+  //     the iOS text-cursor drag and selection handles still work.
+  //   - Buttons and anchors stay tappable — we don't preventDefault on
+  //     touchstart, so a clean tap still fires click; only a real drag
+  //     (>5 px down) starts moving the sheet.
+  //   - Dismiss fires past 30% of sheet height OR a short downward flick
+  //     (≥40 px with velocity ≥0.5 px/ms). Below that, the sheet snaps
+  //     back into place.
+  function attachSwipeToDismiss(sheetEl, onDismiss) {
+    if (!sheetEl || typeof onDismiss !== "function") return;
+
+    var startY = 0;
+    var startTime = 0;
+    var currentY = 0;
+    var tracking = false;   // touchstart accepted the gesture
+    var dragging = false;   // user has moved past the activation threshold
+    var startedOnHandle = false;
+    var restoreTimer = null;
+
+    function isFormControl(el) {
+      if (!el || !el.closest) return false;
+      return !!el.closest("input, textarea, select, [contenteditable=\"true\"]");
+    }
+
+    function onTouchStart(e) {
+      if (!e.touches || e.touches.length !== 1) return;
+      var target = e.target;
+
+      // Form controls keep their native gesture handling.
+      if (isFormControl(target)) return;
+
+      var handle = sheetEl.querySelector(".sheet-handle");
+      startedOnHandle = !!(handle && handle.contains(target));
+
+      // Off-handle drags only count when the sheet content is already
+      // scrolled to the top — otherwise the user is scrolling, not
+      // dismissing.
+      if (!startedOnHandle && sheetEl.scrollTop > 0) return;
+
+      tracking = true;
+      dragging = false;
+      startY = e.touches[0].clientY;
+      startTime = Date.now();
+      currentY = 0;
+
+      if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null; }
+      sheetEl.style.transition = "none";
+    }
+
+    function onTouchMove(e) {
+      if (!tracking) return;
+      var dy = e.touches[0].clientY - startY;
+
+      if (dy < 0) {
+        // Upward — release the gesture; native scroll can take over.
+        if (dragging) {
+          sheetEl.style.transition = "transform .2s ease-out";
+          sheetEl.style.transform = "";
+        }
+        tracking = false;
+        dragging = false;
+        currentY = 0;
+        return;
+      }
+
+      // Below activation threshold: don't intercept yet, so a sloppy tap
+      // still resolves to a click on the underlying button.
+      if (!dragging && dy < 5) return;
+
+      dragging = true;
+
+      // Light resistance past 200 px so the sheet doesn't fly off-screen
+      // on a long drag — keeps the snap-back feel reasonable.
+      var translated = dy < 200 ? dy : 200 + (dy - 200) * 0.5;
+      sheetEl.style.transform = "translateY(" + translated + "px)";
+      currentY = dy;
+
+      if (e.cancelable) e.preventDefault();
+    }
+
+    function onTouchEnd() {
+      if (!tracking) return;
+      tracking = false;
+      if (!dragging) { sheetEl.style.transition = ""; return; }
+      dragging = false;
+
+      var elapsed = Math.max(Date.now() - startTime, 1);
+      var velocity = currentY / elapsed;   // px per ms
+      var height = sheetEl.offsetHeight || 400;
+      var threshold = Math.min(120, height * 0.3);
+      var shouldDismiss = currentY >= threshold || (currentY >= 40 && velocity >= 0.5);
+
+      if (shouldDismiss) {
+        sheetEl.style.transition = "transform .2s ease-out";
+        sheetEl.style.transform = "translateY(100%)";
+        setTimeout(function () {
+          try { onDismiss(); } catch (_) {}
+        }, 180);
+      } else {
+        sheetEl.style.transition = "transform .2s ease-out";
+        sheetEl.style.transform = "";
+        restoreTimer = setTimeout(function () {
+          sheetEl.style.transition = "";
+          restoreTimer = null;
+        }, 220);
+      }
+    }
+
+    sheetEl.addEventListener("touchstart",  onTouchStart, { passive: true });
+    sheetEl.addEventListener("touchmove",   onTouchMove,  { passive: false });
+    sheetEl.addEventListener("touchend",    onTouchEnd,   { passive: true });
+    sheetEl.addEventListener("touchcancel", onTouchEnd,   { passive: true });
+  }
+
   window.PolarisTabs = {
     list: TABS,
     byId: function (id) {
@@ -376,5 +498,6 @@
     escapeHtml: escapeHtml,
     placeholder: placeholder,
     showSnackbar: showSnackbar,
+    attachSwipeToDismiss: attachSwipeToDismiss,
   };
 })();

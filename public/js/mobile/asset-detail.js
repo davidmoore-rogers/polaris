@@ -561,6 +561,7 @@
 
     scrim.addEventListener("click", closeInterfaceSheet);
     document.getElementById("iface-sheet-close").addEventListener("click", closeInterfaceSheet);
+    PolarisTabs.attachSwipeToDismiss(sheet, closeInterfaceSheet);
     sheet.querySelectorAll(".iface-neighbor-pivot").forEach(function (b) {
       b.addEventListener("click", function () {
         var nid = b.dataset.assetId;

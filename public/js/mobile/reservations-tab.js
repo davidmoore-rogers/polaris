@@ -346,6 +346,7 @@
     scrim.addEventListener("click", closeEditSheet);
     document.getElementById("edit-rsv-close").addEventListener("click", closeEditSheet);
     document.getElementById("edit-rsv-cancel").addEventListener("click", closeEditSheet);
+    PolarisTabs.attachSwipeToDismiss(sheet, closeEditSheet);
     document.getElementById("edit-rsv-form").addEventListener("submit", function (e) {
       e.preventDefault();
       submitEdit(row, pushEligible, onSuccess);
@@ -456,6 +457,7 @@
     scrim.addEventListener("click", closeCreateByIpSheet);
     document.getElementById("create-rsv-close").addEventListener("click", closeCreateByIpSheet);
     document.getElementById("create-rsv-cancel").addEventListener("click", closeCreateByIpSheet);
+    PolarisTabs.attachSwipeToDismiss(sheet, closeCreateByIpSheet);
     document.getElementById("create-rsv-form").addEventListener("submit", function (e) {
       e.preventDefault();
       submitCreateByIp();

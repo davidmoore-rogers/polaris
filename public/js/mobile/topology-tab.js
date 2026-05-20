@@ -619,6 +619,7 @@
 
     scrim.addEventListener("click", closeTopologySheet);
     document.getElementById("topo-sheet-close").addEventListener("click", closeTopologySheet);
+    PolarisTabs.attachSwipeToDismiss(sheet, closeTopologySheet);
 
     if (canPivotToAsset) {
       document.getElementById("topo-sheet-asset").addEventListener("click", function () {

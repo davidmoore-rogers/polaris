@@ -437,6 +437,7 @@
     scrim.addEventListener("click", closeReserveSheet);
     document.getElementById("reserve-close-btn").addEventListener("click", closeReserveSheet);
     document.getElementById("reserve-cancel").addEventListener("click", closeReserveSheet);
+    PolarisTabs.attachSwipeToDismiss(sheet, closeReserveSheet);
     document.getElementById("reserve-form").addEventListener("submit", function (e) {
       e.preventDefault();
       onSubmit(subnetId, st, user, opts);

@@ -490,6 +490,7 @@
 
     scrim.addEventListener("click", closeSiteSheet);
     document.getElementById("map-sheet-close").addEventListener("click", closeSiteSheet);
+    PolarisTabs.attachSwipeToDismiss(sheet, closeSiteSheet);
     document.getElementById("map-sheet-asset").addEventListener("click", function () {
       closeSiteSheet();
       PolarisRouter.go("asset/" + site.id);
