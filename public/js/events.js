@@ -546,13 +546,13 @@ function retentionFormHTML(d) {
       'Default is 7 days.</p>' +
   '</div>' +
   '<div class="form-group">' +
-    '<label>Minimum Event Level</label>' +
-    '<select id="f-retention-minlevel" style="max-width:200px">' +
-      '<option value="info"' + (d.minLevel === "info" ? ' selected' : '') + '>Info — store all events</option>' +
-      '<option value="warning"' + (d.minLevel === "warning" ? ' selected' : '') + '>Warning — skip info events</option>' +
-      '<option value="error"' + (d.minLevel === "error" ? ' selected' : '') + '>Error — skip info and warning events</option>' +
+    '<label>Minimum Event Level to Retain</label>' +
+    '<select id="f-retention-minlevel" style="max-width:300px">' +
+      '<option value="info"' + (d.minLevel === "info" ? ' selected' : '') + '>Info — store all events (recommended)</option>' +
+      '<option value="warning"' + (d.minLevel === "warning" ? ' selected' : '') + '>Warning — drop info events permanently</option>' +
+      '<option value="error"' + (d.minLevel === "error" ? ' selected' : '') + '>Error — drop info and warning events permanently</option>' +
     '</select>' +
-    '<p class="hint">Events below this level are not written to the log. Default is Info (all events stored).</p>' +
+    '<p class="hint"><strong>This is a retention filter, not a display filter.</strong> Events below the selected level are never written to the database and cannot be recovered later — they will also be missing from syslog and SFTP archive exports. To hide events from the page without losing the data, use the Level dropdown at the top of the Events page instead. Default is Info (all events stored).</p>' +
   '</div>';
 }
 
