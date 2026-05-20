@@ -226,6 +226,20 @@ const sampleBufferDepth = new Gauge({
   registers: [registry],
 });
 
+const probePatchWriteDuration = new Histogram({
+  name: "polaris_probe_patch_write_duration_seconds",
+  help: "Wall-clock duration of one bulk UPDATE flush from the probe-patch buffer. Splits the per-flush state-write cost out of the broader monitor-work duration so a slow DB write (lock contention, index bloat) is visible separately from network probe time. One observation per 2 s flush tick — a single observation covers state writes for many assets.",
+  buckets: [0.005, 0.01, 0.05, 0.1, 0.5, 1, 5],
+  registers: [registry],
+});
+
+const probePatchBufferDepth = new Gauge({
+  name: "polaris_probe_patch_buffer_depth",
+  help: "Patches currently held in the in-memory probe-patch buffer. Oscillates between near-0 and the steady-state batch size between 2 s flush ticks; a persistently rising value means the flush can't keep up with the enqueue rate.",
+  labelNames: ["table"] as const,
+  registers: [registry],
+});
+
 const sampleRollupDuration = new Histogram({
   name: "polaris_sample_rollup_duration_seconds",
   help: "Wall-clock duration of one INSERT...ON CONFLICT rollup statement against a single source table. `tier` is hourly | daily; `table` is the logical source name (monitor / telemetry / temperature / interface / storage / ipsec). Hourly cadence runs every 30 minutes; daily runs once a day. Watch this to spot a rollup tick that starts dragging behind its cadence at fleet growth.",
@@ -452,6 +466,14 @@ export function startSampleRollupTimer(tier: "hourly" | "daily", table: string):
 
 export function setSampleBufferDepth(table: string, depth: number): void {
   sampleBufferDepth.set({ table }, depth);
+}
+
+export function startProbePatchWriteTimer(): () => number {
+  return probePatchWriteDuration.startTimer();
+}
+
+export function setProbePatchBufferDepth(table: string, depth: number): void {
+  probePatchBufferDepth.set({ table }, depth);
 }
 
 export type StatusClass = "2xx" | "3xx" | "4xx" | "5xx";

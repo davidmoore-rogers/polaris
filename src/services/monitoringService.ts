@@ -73,6 +73,7 @@ import {
   enqueueStorageSamples,
   enqueueIpsecTunnelSamples,
 } from "./sampleWriteBuffer.js";
+import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import {
   type PollingMethod,
   type AssetSourceKind,
@@ -5919,7 +5920,7 @@ export async function recordProbeResult(
    *  synthetic no-op probeAsset doesn't churn state. */
   opts?: { fromAgent?: boolean },
 ): Promise<void> {
-  const asset = preloadedAsset ?? await prisma.asset.findUnique({
+  const loaded = preloadedAsset ?? await prisma.asset.findUnique({
     where: { id: assetId },
     select: {
       id: true,
@@ -5937,7 +5938,25 @@ export async function recordProbeResult(
       probeTimeoutMs: true,
     },
   });
-  if (!asset) return;
+  if (!loaded) return;
+
+  // Overlay any pending probe-patch buffer entry onto the loaded row so the
+  // state machine reads its own writes within the flush window. Without this
+  // overlay, two back-to-back failed probes inside the same 2 s window would
+  // each see consecutiveFailures=0 on disk and each compute newCf=1; the
+  // second probe's patch would overwrite the first and the failureThreshold
+  // counter would never advance past 1. The overlay only touches the three
+  // fields the state machine uses; everything else (hostname, assetType,
+  // intervals, etc.) flows through unchanged from the DB read.
+  const pending = getPendingProbePatch(assetId);
+  const asset = pending
+    ? {
+        ...loaded,
+        monitorStatus:        pending.monitorStatus,
+        consecutiveFailures:  pending.consecutiveFailures,
+        consecutiveSuccesses: pending.consecutiveSuccesses,
+      }
+    : loaded;
 
   // Resolve effective settings through the hierarchy. failureThreshold doubles
   // as the recovery threshold — we use it for both up→down and pending→up
@@ -6013,19 +6032,24 @@ export async function recordProbeResult(
     error: result.success ? null : (result.error ?? null),
   });
 
-  await prisma.asset.update({
-    where: { id: assetId },
-    data: {
-      monitorStatus: nextStatus,
-      lastMonitorAt: now,
-      lastResponseTimeMs: result.success ? result.responseTimeMs : null,
-      consecutiveFailures: newCf,
-      consecutiveSuccesses: newCs,
-      // Stamp on every state change (up↔warning↔recovering↔down, including
-      // unknown→anything). The Event log still fires only on up↔down; this
-      // column is the source for the Dashboard Monitor Alerts duration.
-      ...(previousStatus !== nextStatus ? { monitorStatusChangedAt: now } : {}),
-    },
+  // Buffer the state write — the periodic flush in probePatchBuffer collapses
+  // every patch seen in the same 2 s window into one bulk UPDATE FROM VALUES
+  // statement, cutting per-probe pool acquisitions from one prisma.asset.update
+  // per asset to one bulk update per flush across the whole fleet. The
+  // overlay above means the state machine still reads its own writes within
+  // the window; the side effects below (Event log, propagate hook, retry
+  // hook) all run synchronously on in-memory values so audit + latency-
+  // optimization paths don't wait for the flush. Stamp monitorStatusChangedAt
+  // on every state change (up↔warning↔recovering↔down, including
+  // unknown→anything). The Event log still fires only on up↔down; this
+  // column is the source for the Dashboard Monitor Alerts duration.
+  enqueueProbePatch(assetId, {
+    monitorStatus: nextStatus,
+    lastMonitorAt: now,
+    lastResponseTimeMs: result.success ? result.responseTimeMs : null,
+    consecutiveFailures: newCf,
+    consecutiveSuccesses: newCs,
+    monitorStatusChangedAt: previousStatus !== nextStatus ? now : undefined,
   });
 
   if (previousStatus !== nextStatus && (nextStatus === "up" || nextStatus === "down")) {

@@ -73,6 +73,7 @@ import { ensureRegistryLoaded } from "./services/oidRegistry.js";
 import { detectTimescale, migrateToHypertables } from "./services/timescaleService.js";
 import { initializeQueue, startPgbossWorkers, stopPgbossWorkers } from "./services/queueService.js";
 import { startSampleWriteBuffer, shutdownFlushSampleBuffers } from "./services/sampleWriteBuffer.js";
+import { startProbePatchBuffer, shutdownFlushProbePatchBuffer } from "./services/probePatchBuffer.js";
 import { runStartupDiskCheck } from "./utils/startupDiskCheck.js";
 import { getDbConnectionMode } from "./utils/dbConnections.js";
 import { recordDbConnectionMode } from "./metrics.js";
@@ -146,13 +147,20 @@ initializeQueue()
 // per 2-second flush window instead of one create per work item.
 startSampleWriteBuffer();
 
+// Start the probe-patch buffer. Companion to the sample-write buffer for
+// the STATE side of recordProbeResult — one bulk UPDATE FROM VALUES per
+// 2 s window covers every asset's monitorStatus / counters / last-at
+// timestamps instead of one prisma.asset.update per probe.
+startProbePatchBuffer();
+
 // Graceful shutdown on SIGTERM/SIGINT so in-flight jobs can drain and the
-// final sample-buffer flush lands before the process exits. No-op when
+// final buffer flushes land before the process exits. No-op when
 // pg-boss never started.
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.once(sig, () => {
     Promise.allSettled([
       shutdownFlushSampleBuffers(),
+      shutdownFlushProbePatchBuffer(),
       stopPgbossWorkers(),
     ]).finally(() => process.exit(0));
   });
