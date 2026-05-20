@@ -407,16 +407,17 @@ enum AssetStatus {
   quarantined
 }
 
-enum AssetType {
-  server
-  switch
-  router
-  firewall
-  workstation
-  printer
-  access_point
-  other
-}
+// AssetType enum was retired in the asset-type registry cutover
+// (migration 20260520000000_asset_types_table_cutover). Asset.assetType
+// is now a free-form `String` validated at write time against the
+// `AssetTypeDef` registry. The eight historical enum values are seeded
+// as `isBuiltIn=true` AssetTypeDef rows so behavior matches pre-cutover
+// for installs that never add custom types. Code that branches on
+// `assetType === "firewall" | "switch" | "access_point"` (dependency
+// tree, fortinetTopology, polling source defaults, topology rendering,
+// inferAssetTypeFromOs) only special-cases the eight built-ins —
+// custom types fall through to "other"-like generic behavior by design.
+// See "Asset type registry" in CLAUDE.md.
 
 model Asset {
   id               String      @id @default(uuid())
@@ -431,7 +432,7 @@ model Asset {
   serialNumber     String?
   manufacturer     String?
   model            String?
-  assetType        AssetType   @default(other)
+  assetType        String      @default("other") // validated against AssetTypeDef registry at write time
   status           AssetStatus @default(active)
   statusChangedAt  DateTime? // When status was last changed
   statusChangedBy  String? // Who/what changed it: username, integration name, or "system"
@@ -1479,6 +1480,42 @@ model UserDashboard {
 // See "Roles / RBAC" in CLAUDE.md for the function-key catalogue + the
 // access-level ordering. `updatedAt` doubles as the cache-version
 // stamp the session snapshot compares against on each request.
+// AssetTypeDef: operator-extensible asset-type registry. Replaces the
+// pre-cutover `AssetType` enum. The eight historical values
+// (server / switch / router / firewall / workstation / printer /
+// access_point / other) are seeded `isBuiltIn=true, isProtected=true`
+// so existing installs see no behavior change; admins can add custom
+// types from the Assets page → Manage asset types slide-over (CRUD on
+// /api/v1/asset-types). `name` is the lowercase machine value stored
+// on `Asset.assetType`; `label` is the human-facing display string in
+// the UI; `description` is optional operator notes.
+//
+// Built-in behavioral special-cases (FortiGate / switch / access_point
+// in dependency tree, fortinetTopology, polling source defaults,
+// topology rendering, inferAssetTypeFromOs) only fire for the eight
+// `isBuiltIn=true` rows — custom types fall through to "other"-like
+// generic behavior. Documented as a known limitation in CLAUDE.md.
+//
+// Built-in rows are NOT renameable (FK rows on Asset.assetType reference
+// `name` literally) and NOT deletable. Custom rows are deletable only
+// when no Asset.assetType row references them (the service layer counts
+// usage before delete; raw FK isn't used because Asset.assetType is a
+// String, not a relation — keeps the historical value preserved if a
+// type is later renamed via operator action on a non-built-in).
+model AssetTypeDef {
+  id          String   @id @default(uuid())
+  name        String   @unique // machine value: lowercase, alphanumeric + dash/underscore, 2-32 chars
+  label       String   // human-facing display label, e.g. "Access Point"
+  description String?
+  isBuiltIn   Boolean  @default(false) @map("is_built_in")
+  isProtected Boolean  @default(false) @map("is_protected") // blocks rename/delete; true for all 8 seeds
+  createdBy   String?  @map("created_by")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("asset_type_defs")
+}
+
 model Role {
   id          String   @id @default(uuid())
   name        String   @unique

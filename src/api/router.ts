@@ -23,6 +23,7 @@ import mapRegionsRouter from "./routes/mapRegions.js";
 import allocationTemplatesRouter from "./routes/allocationTemplates.js";
 import credentialsRouter from "./routes/credentials.js";
 import manufacturerAliasesRouter from "./routes/manufacturerAliases.js";
+import assetTypesRouter from "./routes/assetTypes.js";
 import monitorSettingsRouter from "./routes/monitorSettings.js";
 import apiTokensRouter from "./routes/apiTokens.js";
 import dashboardRouter from "./routes/dashboard.js";
@@ -75,6 +76,12 @@ router.use("/me/dashboard", userDashboardRouter);
 router.use("/users", requirePermission("users", "read"), usersRouter);
 router.use("/roles", rolesRouter);
 router.use("/integrations", requirePermission("integrations", "read"), integrationsRouter);
+// asset-types is mounted BEFORE /assets so Express's first-match routing
+// picks the registry endpoint instead of treating "types" as an asset id.
+// Reads gated by assets=read; writes by assets=write (admin + assetsadmin
+// in the default role matrix). Custom-type CRUD lives here; the eight
+// built-ins are seeded as isProtected=true and reject rename/delete.
+router.use("/asset-types", assetTypesRouter);
 router.use("/assets", assetsRouter);
 router.use("/events", eventsRouter);
 router.use("/search", searchRouter);

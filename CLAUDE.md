@@ -102,6 +102,7 @@ polaris/
 │   │       ├── allocationTemplates.ts # CRUD for saved multi-subnet allocation templates
 │   │       ├── credentials.ts       # CRUD for the named-credential store used by monitoring probes (SNMP / WinRM / SSH)
 │   │       ├── manufacturerAliases.ts # Admin CRUD for the manufacturer alias map (Fortinet, Inc. → Fortinet, etc.)
+│   │       ├── assetTypes.ts          # CRUD for the operator-extensible AssetTypeDef registry. Mounted at `/asset-types` BEFORE `/assets` so Express picks the registry endpoint instead of treating "types" as an asset id. Reads gated by `assets=read`; writes by `assets=write` (admin + assetsadmin). Eight built-ins seeded by migration are `isProtected=true` and reject rename/delete. Rename is transactional — every Asset row holding the old name is rewritten in the same `$transaction` as the registry update.
 │   │       ├── mibs.ts              # MIB Database CRUD + Browse + MIB-aware Walk. Mounted at `/server-settings/mibs` BEFORE the rest of /server-settings so its per-route guards (admin OR assets-admin on reads, admin-only on writes) take precedence over the blanket `requireAdmin` on the rest of /server-settings. Carries the `/structure` (parsed object tree) and `/walk` (decoded MIB-aware SNMP walk) endpoints alongside the existing list/get/upload/delete/profile-status/facets routes that moved here from serverSettings.ts.
 │   │       └── serverSettings.ts    # HTTPS, branding, backup/restore
 │   ├── services/
@@ -138,6 +139,7 @@ polaris/
 │   │   ├── serverSettingsService.ts # HTTPS, branding, backup/restore
 │   │   ├── credentialService.ts     # Named credential store (SNMP / WinRM / SSH) with masking + secret-preservation merge
 │   │   ├── manufacturerAliasService.ts # Manufacturer alias map: CRUD + cache + idempotent default seed + backfill of existing Asset/MibFile rows
+│   │   ├── assetTypeService.ts        # AssetTypeDef registry: CRUD + cache refresh + idempotent built-in seed. `listAssetTypes({withUsage})` joins `prisma.asset.groupBy` for the Manage UI's per-row "N assets" badges. Rename path is a `$transaction` that rewrites every Asset row holding the old name to the new name atomically with the registry-row update; delete refuses while any Asset still references the type. Built-in rows (`isProtected=true`) are immutable. After every mutation calls `refreshCache()` so synchronous `isKnownAssetType()` in `src/utils/assetTypes.ts` sees the new state immediately.
 │   │   ├── mibService.ts            # SNMP MIB module storage + minimal SMI parser. `parseMib` validates uploads (extracts moduleName + IMPORTS) on the upload hot path. `parseMibStructured` is the heavier peer used by the Browse modal + MIB-aware walk: extracts SYNTAX (with INTEGER enum value labels), MAX-ACCESS / ACCESS, STATUS, DESCRIPTION, INDEX clauses, and SEQUENCE OF table structure. Per-symbol parse failures degrade to "name + parentName known, everything else null" rather than dropping the symbol — operators can still walk it, they just don't get decoding. Parses on demand; `oidRegistry` already keeps every MIB's contents in memory after `ensureLoaded()`.
 │   │   ├── mibParserUtils.ts        # Shared `stripComments` helper consumed by both `mibService` and `oidRegistry` so the comment-aware string-literal scanner doesn't drift between the two parsers.
 │   │   ├── oidRegistry.ts           # Symbolic name → numeric OID resolver. Per-asset **scoped** resolution: device-specific MIBs override vendor-wide MIBs override generic MIBs override the built-in SMI seed. Each scope is computed lazily and cached; cache + parsed entries refresh on MIB upload/delete and at app startup. Tracks per-symbol provenance so the UI can show which MIB provided each resolved name. Exposes `resolveSymbolsForMib(mibId)` and `resolveSymbolForMib(mibId, name)` so the MIB Browse + Walk endpoints can resolve every symbol declared by a chosen MIB at the MIB's natural scope (its own manufacturer + model layer, falling back through vendor-only and generic) without re-implementing the layer pass.
@@ -172,6 +174,7 @@ polaris/
 │   │   ├── decommissionStaleAssets.ts # Every 24h: decommission assets not seen in N months
 │   │   ├── monitorAssets.ts          # Two ticking loops with independent `running` guards. Light loop (probe + fastFiltered) ticks every 5s; heavy loop (telemetry + systemInfo) ticks every 30s and runs the daily retention prune. A wedged systemInfo on dead hosts blocks ONLY future heavy ticks — light loop keeps firing on its own clock so per-minute probe polling stays close to its configured cadence regardless. Default concurrency is CPU-aware (`cpus().length * 2` for light, `cpus().length` for heavy), env-overridable via POLARIS_PROBE_CONCURRENCY / POLARIS_HEAVY_CONCURRENCY.
 │   │   ├── normalizeManufacturers.ts # One-shot startup: seed default aliases, load cache, backfill existing Asset/MibFile rows
+│   │   ├── seedAssetTypes.ts         # One-shot startup: idempotent insert of the eight built-in AssetTypeDef rows (safety net for fresh Docker volumes / restored backups where the registry-cutover migration didn't get to seed) plus `refreshCache()` so the Prisma extension in `db.ts` sees the registry on the first Asset write. Failures log but never block boot — `isKnownAssetType()` falls back to accepting the eight built-in names while the cache is cold.
 │   │   ├── seedManufacturerProfiles.ts # One-shot startup (Slice 6a): converts the hardcoded `VENDOR_TELEMETRY_PROFILES` constant into `ManufacturerProfile` + `ManufacturerProfileMetric` + `ManufacturerProfileMetricOverride` rows. Idempotent (marker `Setting.seedManufacturerProfilesSeededAt`). One profile per distinct canonical manufacturer (Cisco / Juniper / Mikrotik / Fortinet / HP / Dell); the Fortinet sub-family entries (FortiSwitch / FortiAP) become `modelPattern`-keyed overrides under the umbrella Fortinet profile. Calls `refreshProfileCache()` after seeding so the in-memory cache is warm for downstream code. The constant stays runtime-authoritative — this job only owns persistence. Best-effort: failures log and never block boot.
 │   │   ├── backfillAssetSources.ts  # One-shot startup (Phase 1 of multi-source asset model): walks every Asset and upserts AssetSource rows from the legacy `assetTag` / `sid:` / `ad-guid:` tag conventions. Idempotent; pairs with the shadow-write extension in src/db.ts.
 │   │   ├── resolveStaleReservationConflicts.ts # One-shot startup: auto-reject pending reservation Conflict rows whose proposed values now match the live Reservation (legacy lingering conflicts)
@@ -207,6 +210,7 @@ polaris/
 │       ├── assetInvariants.ts       # Write-time clamp: acquiredAt <= lastSeen
 │       ├── loginLockout.ts          # Per-username login-failure counter + temporary lockout
 │       ├── manufacturerNormalize.ts # Pure (no DB) cache + sync normalizeManufacturer(); imported by db.ts Prisma extension to canonicalize every Asset/MibFile manufacturer write
+│       ├── assetTypes.ts            # Pure (no DB) `BUILT_IN_ASSET_TYPES` constant (the eight historical enum values — stable identifiers for code that branches on assetType) + in-memory registry cache populated by `assetTypeService.refreshCache()` at boot and after every CRUD mutation. `isKnownAssetType(name)` is the sync validator used by `/assets` and `/monitor-settings` Zod schemas; until the cache loads it falls back to accepting the eight built-in names so early-boot writes stay legal. Also exports `validateAssetTypeName` / `validateAssetTypeLabel` consumed by `assetTypeService` write paths.
 │       ├── symbolTransforms.ts      # Pure (no I/O) value-transform registry for the editable Manufacturer Profile (Slice 6a). `TRANSFORM_KINDS` + `TRANSFORM_LABELS` enumerate the operator-pickable transforms (celsius_to_fahrenheit / fahrenheit_to_celsius / bytes_to_mb / bytes_to_gb / mb_to_bytes / ticks_to_seconds / ratio_to_percent / percent_to_ratio / signed_to_unsigned); `applyTransform(value, kind)` is the sample-write hook the resolver swap will use to coerce raw SNMP values before persistence. `isTransformKind` is the type guard used by `manufacturerProfileService` write-path validation.
 │       ├── assetSourceDerivation.ts # Pure (no DB) deriveAssetSources(): turns an Asset row's legacy assetTag / `sid:` / `ad-guid:` tag conventions into the AssetSource rows it should own. Shared by the shadow-write Prisma extension in src/db.ts and the backfillAssetSources startup job.
 │       ├── fortiapLldp.ts            # Pure (no I/O) extractApLldpAndMesh(): pulls wired-uplink LLDP fields (system_name, port_id) plus mesh fields (mesh_uplink, parent_wtp_id) off a /api/v2/monitor/wifi/managed_ap row. Filters lldp[] by system_description starting with "FortiSwitch-" so wireless-mesh peers are skipped. Used by both fortimanagerService and fortigateService for AP→switch attribution.
@@ -270,7 +274,18 @@ ConflictStatus:          pending | accepted | rejected
 // 20260524000000_roles_table_cutover). Role identity + permission matrix
 // now live in the `Role` table and are joined into User via `User.roleId`.
 AssetStatus:             active | maintenance | decommissioned | storage | disabled | quarantined
-AssetType:               server | switch | router | firewall | workstation | printer | access_point | other
+// AssetType enum retired in the asset-type registry cutover (migration
+// 20260527000000_asset_types_registry_cutover). Asset.assetType is now a
+// free-form String validated at write time against the `AssetTypeDef`
+// registry. The eight historical enum values (server / switch / router /
+// firewall / workstation / printer / access_point / other) are seeded as
+// `isBuiltIn=true, isProtected=true` registry rows so behavior matches
+// pre-cutover for installs that never add custom types. Code that branches
+// on `assetType === "firewall" | "switch" | "access_point"` (dependency
+// tree, fortinetTopology, polling source defaults, topology rendering,
+// inferAssetTypeFromOs) only special-cases the eight built-ins — custom
+// operator-added types fall through to "other"-like generic behavior by
+// design. See "Asset type registry" below for the management surface.
 ```
 
 ### Core Entities
@@ -408,7 +423,7 @@ Asset
   serialNumber    String?
   manufacturer    String?
   model           String?
-  assetType       AssetType       @default(other)
+  assetType       String          @default("other")  -- validated against AssetTypeDef registry at write time
   status          AssetStatus     @default(active)
   location        String?         -- User-set (overrides learnedLocation)
   learnedLocation String?         -- Auto-discovered from DHCP (FortiGate name)
@@ -833,6 +848,40 @@ User
   totpBackupCodes String[]      -- argon2id-hashed single-use recovery codes
   needsRoleReview Boolean       -- Flipped true at the password step the first time the user logs in (Asset.lastLogin transitions null → set). Drives the admin-only "new user logged in" panel in the sidebar (#role-review-status, rendered above #query-status). Auto-cleared when an admin PUTs /users/:id/role (implicit review) or DELETEs /users/:id/role-review (explicit Dismiss). Dismiss is global — clearing the flag hides the row for every admin at once. SAML SSO sets it on auto-provision and on first-ever login of an existing account.
 
+AssetTypeDef                    -- Operator-extensible asset-type registry; replaces the prior hardcoded `AssetType` enum
+  id            UUID PK
+  name          String @unique  -- machine value stored on `Asset.assetType`; 2-32 chars, lowercase + dash/underscore. Validated by `validateAssetTypeName` in `src/utils/assetTypes.ts`.
+  label         String          -- human-facing display label, e.g. "Access Point"
+  description   String?
+  isBuiltIn     Boolean        @default(false) -- true for the eight seeded rows (server / switch / router / firewall / workstation / printer / access_point / other)
+  isProtected   Boolean        @default(false) -- true for every built-in row; blocks rename/delete (FK-rows on Asset.assetType reference `name` literally, and special-case code keys on the eight literals).
+  createdBy     String?
+  createdAt     DateTime
+  updatedAt     DateTime
+  -- Seeded by `prisma/migrations/20260527000000_asset_types_registry_cutover/migration.sql`.
+  -- The eight built-in rows reproduce the pre-cutover enum exactly so
+  -- existing installs see no behavior change. Operator-created custom
+  -- types are stored as `isBuiltIn=false, isProtected=false` rows and
+  -- can be renamed in place (renames are transactional — every Asset
+  -- row holding the old name is rewritten to the new name atomically
+  -- with the registry-row update; see `assetTypeService.updateAssetType`).
+  -- Custom rows can be deleted only when no Asset.assetType row
+  -- references them. Asset.assetType is a String (not a relation), so
+  -- the service counts usage explicitly before issuing the delete.
+  --
+  -- Behavioral special-cases (FortiGate / switch / access_point in
+  -- dependency tree, fortinetTopology, polling source defaults,
+  -- topology rendering, inferAssetTypeFromOs) only fire for the eight
+  -- built-in names — custom types fall through to "other"-like generic
+  -- behavior by design. Known limitation; documented next to the
+  -- registry's UI surface (Assets page → Manage asset types).
+  --
+  -- Cache: `src/utils/assetTypes.ts` holds the in-memory map populated
+  -- by `assetTypeService.refreshCache()` at boot and after every CRUD
+  -- mutation. Synchronous `isKnownAssetType()` reads it; until the
+  -- cache loads it falls back to accepting the eight built-in names so
+  -- early-boot writes stay legal.
+
 Role                            -- Dynamic role + permission matrix; replaces the prior hardcoded `UserRole` enum
   id            UUID PK
   name          String @unique  -- 2-32 chars, alphanumeric + dash/underscore. Case-insensitive uniqueness enforced at service layer.
@@ -1123,6 +1172,14 @@ Per-user dashboard layout. One row per user in `UserDashboard`; absent row = emp
 - `GET    /integrations/:id/interface-aggregate?class=fortigate|fortiswitch|fortiap` — Auto-Monitor Interfaces "By name" data source. Returns `{ rows: [{ ifName, ifType, deviceCount, devices: [{assetId, hostname, ipAddress}] }] }`, sorted by deviceCount desc. Source: latest `AssetInterfaceSample` per `(assetId, ifName)` for assets where `discoveredByIntegrationId = :id` AND `assetType` matches the class (firewall / switch / access_point). Empty array on a fresh integration before any system-info pass has run.
 - `POST   /integrations/:id/interface-aggregate/preview` — Live preview for the modal. Body: `{ class, selection: AutoMonitorInterfacesSchema | null }`. Returns `{ deviceCount, interfaceCount, perDeviceMax, sampleDevices: [{hostname, pinNames: string[]}] }`. Read-only: does not persist or write `monitoredInterfaces`. `interfaceCount` is the sum of pin lengths produced by `selection` alone (not unioned with operator-pinned interfaces).
 - `POST   /integrations/:id/interface-aggregate/apply` — Apply-on-save trigger. Body: `{ class }`. Reads the current `selection` from `Integration.config.<klass>Monitor.autoMonitorInterfaces` (whatever was most recently saved) and runs the same apply pass that fires at the end of every discovery: union into each matching asset's `monitoredInterfaces` (additive only). Writes one `integration.auto_monitor_interfaces.applied` Event when something changed. Returns `{ devices, interfacesAdded, perDeviceMax, sampleDevices }`. Called by the integration edit modal's **Save Changes** button for each per-class block whose selection is non-null, so saving the modal pins interfaces immediately without waiting for the next discovery cycle.
+
+### Asset Types — `assets` function key
+Operator-extensible asset-type registry. The eight historical built-ins (server / switch / router / firewall / workstation / printer / access_point / other) are seeded as `isBuiltIn=true, isProtected=true` rows by the registry-cutover migration and cannot be renamed or deleted. Custom rows are admin/assetsadmin-managed from the Assets page → **Manage asset types** slide-over (Phase 2; the route + service ship in Phase 1). Behavioral special-cases (FortiGate / switch / access_point branches in dependency tree, fortinetTopology, polling source defaults, topology rendering, inferAssetTypeFromOs) only fire for the eight built-ins — custom types fall through to "other"-like generic behavior. Mounted at `/api/v1/asset-types` BEFORE `/assets` so Express's first-match routing picks the registry endpoints instead of treating "types" as an asset id.
+- `GET    /asset-types[?withUsage=1]`           *(read)* — `{ types: [{ id, name, label, description, isBuiltIn, isProtected, createdBy, createdAt, updatedAt, usageCount? }] }`. `usageCount` only included when `?withUsage=1` (one extra `prisma.asset.groupBy` to count assets per type — used by the Manage modal to show "N assets" badges and refuse delete when in-use).
+- `GET    /asset-types/:id`                     *(read)* — Single row with `usageCount`.
+- `POST   /asset-types`                         *(write)* — Body: `{ name, label, description? }`. `name` is lowercased + validated against `/^[a-z0-9_-]{2,32}$/` and rejected if it collides with a built-in. Writes one `asset_type.created` Event. Cache refresh fires immediately so the registry is hot for the next `/assets` write.
+- `PUT    /asset-types/:id`                     *(write)* — Body accepts any subset of `{ name, label, description }`. **Refuses with 403 on built-in rows** (`isProtected=true`). Rename is transactional: every `Asset` row holding the old name is rewritten to the new name atomically with the registry row update via a `$transaction([asset.updateMany(...), assetTypeDef.update(...)])`. Writes one `asset_type.updated` Event.
+- `DELETE /asset-types/:id`                     *(write)* — **Refuses with 403 on built-ins**, and **with 409 when any Asset still references the type** (operator must reassign or delete those assets first). Writes one `asset_type.deleted` Event.
 
 ### Assets — `requireAuth`
 - `GET    /assets`                              — List (filter by status, type, department, search, createdBy)
@@ -1675,6 +1732,7 @@ Active Directory and Entra ID identify the same hybrid-joined device with two un
 | `updateCheck` | Periodic | Check for software updates |
 | `clampAssetAcquiredAt` | Once at startup | Clamp `acquiredAt` down to `lastSeen` on any Asset row where the invariant was violated |
 | `normalizeManufacturers` | Once at startup | Idempotent: seed default manufacturer aliases on a fresh install, load the in-memory cache used by the Prisma extension in `src/db.ts`, and rewrite any existing `Asset.manufacturer` / `MibFile.manufacturer` values that the alias map canonicalizes to something different. Mutations to the alias map at runtime (`POST/PUT /manufacturer-aliases`) re-run `applyAliasesToExistingRows()` in the background so admin edits propagate to historical data without a restart. |
+| `seedAssetTypes` | Once at startup | Idempotent. Defense-in-depth seed of the eight built-in `AssetTypeDef` rows (the registry-cutover migration is the authoritative seed; this catches fresh Docker volumes / restored backups where the migration didn't run). After the seed, `refreshCache()` populates the in-memory map used by `isKnownAssetType()` in `src/utils/assetTypes.ts` — which is the synchronous validator backing every `/assets` and `/monitor-settings` Zod schema. Failures log but never block boot — the validator falls back to accepting the eight built-in names while the cache is cold. |
 | `seedManufacturerProfiles` | Once at startup | Idempotent (marker `Setting.seedManufacturerProfilesSeededAt`). Slice 6a — converts the hardcoded `VENDOR_TELEMETRY_PROFILES` constant into `ManufacturerProfile` + `ManufacturerProfileMetric` + `ManufacturerProfileMetricOverride` rows. One profile per distinct canonical manufacturer; the Fortinet sub-family entries (FortiSwitch / FortiAP) become `modelPattern`-keyed overrides under the umbrella Fortinet profile. The memory metric row + override carry the bytes-form `composition` blob via `memoryQueryToComposition()` so the editable profile lines up with the hardcoded baseline's multi-OID memory queries. Calls `refreshProfileCache()` at the end so the in-memory cache is warm. The hardcoded constant stays runtime-authoritative — this job only owns persistence. Best-effort: failures log and never block boot. |
 | `backfillManufacturerProfileMemoryComposition` | Once at startup | Idempotent (marker `Setting.backfillManufacturerProfileMemoryCompositionAt`). Stamps the multi-OID memory `composition` blob onto existing `ManufacturerProfileMetric` + `ManufacturerProfileMetricOverride` rows that predate the column. Pairs with the inline emission in `seedManufacturerProfiles` so fresh installs get composition from the start; this job is for installs that ran the seed before the column existed. Two safety checks per row: composition stays null, AND the existing `defaultSymbol` / `symbol` matches the hardcoded entry's primary OID (operator-edited rows are skipped). Refreshes the profile cache on completion. |
 | `backfillAssetSources` | Once at startup | Idempotent. Walks every Asset row and upserts `AssetSource` rows derived from the legacy `assetTag` / `sid:` / `ad-guid:` tag conventions (entra → "entra:" assetTag; ad → "ad:" assetTag; fortigate firewall → "fgt:" assetTag) **plus a Fortinet-infrastructure fallback** keyed on `manufacturer="Fortinet" + non-empty serialNumber + assetType` — `firewall`/`switch`/`access_point` map to `fortigate-firewall`/`fortiswitch`/`fortiap` respectively. Catches pre-tag firewalls and the un-tagged switch/AP fleet in one pass. ad-guid breadcrumbs become `inferred=true` AD recovery rows; everything else falls through to a single "manual" row keyed on Asset.id. Pairs with the shadow-write Prisma extension in `src/db.ts` which keeps the table fresh between restarts whenever an asset's `assetTag`, `tags`, or `discoveredByIntegrationId` change. |

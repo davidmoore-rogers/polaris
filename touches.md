@@ -1136,7 +1136,7 @@ Listed alphabetically.
 
 **When changing this:**
 - Audit `fortigateService.ts` + `fortimanagerService.ts` transport compatibility if FortiOS version bumps or endpoint changes.
-- Check infrastructure-asset type list (firewall/switch/access_point) against Asset.assetType enum + discovery source-kind tagging.
+- Check infrastructure-asset type list (firewall/switch/access_point) against the `BUILT_IN_ASSET_TYPES` constant in `src/utils/assetTypes.ts` + discovery source-kind tagging. (Custom operator-added AssetTypeDef rows DO NOT receive infrastructure special-casing — they fall through to "other"-like generic behavior.)
 - Verify `getSightingSettings()` Settings key and max-age filter alignment with caller expectations.
 - Review rollback/error-logging in event payload (event action names: asset.quarantine.succeeded/partial/failed/released/unpush.failed).
 
@@ -1365,7 +1365,7 @@ Listed alphabetically.
 **When changing this:**
 - Check magic-byte prefixes (PNG/JPEG/WebP) if adding new raster formats; ensure length matches actual file signatures.
 - SVG_REJECT_PATTERNS is the security boundary — adding a new tag/attribute reject pattern is fine, but loosening one needs careful review (every entry maps to a known XSS / XXE / SSRF vector).
-- Sync VALID_TYPE_KEYS set against Asset.assetType enum if new types added.
+- Sync VALID_TYPE_KEYS set against `BUILT_IN_ASSET_TYPES` in `src/utils/assetTypes.ts` if new built-ins are added. Custom operator-added AssetTypeDef rows don't automatically get icon-resolution coverage — device icons keyed by manufacturer-type only resolve for built-in type names.
 - Verify Prisma DeviceIcon schema: unique constraint on (scope, key), Bytes column type for data. Scope is a String column — no DB migration needed when adding new scope values.
 - Review map.ts topology rendering (resolveIconUrl call sites) if icon resolution priority changes — but priority is built once in `buildResolutionCandidates()`, so updates land in both sync and async paths together.
 - Ensure upload route multer fileSize limit (256KB) stays at or above the raster MAX_ICON_BYTES constant. SVG's tighter MAX_SVG_BYTES is enforced inside validateUpload after multer accepts.

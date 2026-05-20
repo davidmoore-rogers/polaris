@@ -18,6 +18,7 @@ import { getIpHistory, getHistorySettings, updateHistorySettings, pruneOldHistor
 import { getSightingsForAsset, getSightingSettings, updateSightingSettings } from "../../services/assetSightingService.js";
 import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
 import { isValidIpAddress, cidrContains } from "../../utils/cidr.js";
+import { isKnownAssetType } from "../../utils/assetTypes.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
 import {
@@ -105,10 +106,15 @@ const ASSOCIATED_IP_SELECT = {
 
 // ─── Zod Schemas ─────────────────────────────────────────────────────────────
 
-const AssetTypeEnum = z.enum([
-  "server", "switch", "router", "firewall",
-  "workstation", "printer", "access_point", "other",
-]);
+// Asset type is now a free-form string validated against the AssetTypeDef
+// registry (eight built-ins + any operator-added custom types). The synchronous
+// `isKnownAssetType` reads the in-memory cache populated at boot by
+// assetTypeService.refreshCache(); until the cache loads it falls back to
+// accepting the eight built-in names, which keeps early-boot writes legal.
+const AssetTypeEnum = z.string().min(2).max(32).refine(
+  (v) => isKnownAssetType(v),
+  { message: "Unknown asset type. Add it under Assets → Manage asset types first." },
+);
 
 const AssetStatusEnum = z.enum([
   "active", "maintenance", "decommissioned", "storage", "disabled", "quarantined",

@@ -31,20 +31,18 @@ import {
   isPollingMethodCompatible,
   pollingMethodLabel,
 } from "../../utils/pollingCompatibility.js";
+import { isKnownAssetType } from "../../utils/assetTypes.js";
 
 const router = Router();
 
-const ASSET_TYPES = [
-  "server",
-  "switch",
-  "router",
-  "firewall",
-  "workstation",
-  "printer",
-  "access_point",
-  "other",
-] as const;
-const AssetTypeSchema = z.enum(ASSET_TYPES);
+// Asset type validated against the AssetTypeDef registry so MonitorClassOverride
+// rows can be scoped to operator-added custom types alongside the eight
+// built-ins. isKnownAssetType reads the in-memory cache populated at boot;
+// before the cache loads it falls back to accepting the eight built-in names.
+const AssetTypeSchema = z.string().min(2).max(32).refine(
+  (v) => isKnownAssetType(v),
+  { message: "Unknown asset type. Add it under Assets → Manage asset types first." },
+);
 
 // Mirrors PollingMethod in src/utils/pollingCompatibility.ts. Source-kind
 // compatibility is enforced at resolution time inside resolveMonitorSettings —
