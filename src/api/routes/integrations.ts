@@ -3916,12 +3916,45 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   phaseMark("5");
   // ══════════════════════════════════════════════════════════════════════════════
 
+  // Phase 5 instrumentation — counts per-branch path frequency and per-type
+  // write fire count so we can size the actual per-cycle DB pressure before
+  // deciding whether to bulk-batch the create / update paths. Emitted as a
+  // single info-level syncLog at the bottom of the phase; one Event row per
+  // per-FortiGate sync. Cheap (just integer increments) and always-on so
+  // operators can grep the Events page to characterize their fleet.
+  const phase5Stats = {
+    entriesTotal: 0,
+    skippedNoIp: 0,
+    skippedNoSubnet: 0,
+    skippedCollision: 0,
+    // Path counters (exactly one per processed entry)
+    pathExistingDhcpNoChange: 0,
+    pathExistingDhcpFlip: 0,
+    pathExistingManualPolarisEcho: 0,
+    pathExistingManualConflictOnly: 0,
+    pathExistingVipSuccession: 0,
+    pathExistingVipMacFill: 0,
+    pathExistingPendingAdopt: 0,
+    pathExistingPendingCollide: 0,
+    pathNewCreate: 0,
+    pathNewCreateAfterRetry: 0,
+    pathNewCreateFailed: 0,
+    // Write counters (sum across branches)
+    writesReservationUpdate: 0,
+    writesReservationCreate: 0,
+    writesReservationDelete: 0,
+    writesConflictUpdateMany: 0,
+    writesDnsRelease: 0,
+    writesUpsertConflict: 0,
+  };
+
   if (result.dhcpEntries && result.dhcpEntries.length > 0) {
     for (const entry of result.dhcpEntries) {
-      if (!entry.ipAddress) continue;
+      phase5Stats.entriesTotal++;
+      if (!entry.ipAddress) { phase5Stats.skippedNoIp++; continue; }
 
       const matchingSubnet = findSubnetForIp(entry.ipAddress);
-      if (!matchingSubnet) continue;
+      if (!matchingSubnet) { phase5Stats.skippedNoSubnet++; continue; }
 
       const key = reservationKey(matchingSubnet.id, entry.ipAddress);
       const isDhcpReservation = entry.type === "dhcp-reservation";
@@ -3976,6 +4009,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             // Fast-path adopt — operator added the entry on the device
             // (or a previous retry succeeded but Polaris missed the reply)
             // while we were queued. Promote in place to synced.
+            phase5Stats.pathExistingPendingAdopt++;
             await prisma.reservation.update({
               where: { id: existingRes.id },
               data: {
@@ -3994,10 +4028,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
                   : {}),
               },
             });
+            phase5Stats.writesReservationUpdate++;
             await prisma.conflict.updateMany({
               where: { reservationId: existingRes.id, status: "pending" },
               data: { status: "rejected", resolvedBy: "auto", resolvedAt: new Date() },
             });
+            phase5Stats.writesConflictUpdateMany++;
             existingRes.sourceType = "dhcp_reservation";
             existingRes.pushStatus = "synced";
             logEvent({
@@ -4026,6 +4062,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // on this IP — the unique-on-active constraint would block it
           // anyway.
           const errMsg = `IP collided during queue — discovered ${proposedSourceType}${freshMac ? ` by ${freshMac}` : ""}`;
+          phase5Stats.pathExistingPendingCollide++;
           await prisma.reservation.update({
             where: { id: existingRes.id },
             data: {
@@ -4034,6 +4071,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               pushLastAttemptAt: new Date(),
             },
           });
+          phase5Stats.writesReservationUpdate++;
           existingRes.pushStatus = "failed_permanent";
           logEvent({
             action: "reservation.push.queued.collided",
@@ -4066,6 +4104,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             // <hostname>) and shouldn't become the Polaris-side hostname.
             // Also dismiss any pending conflicts already raised on this
             // row from prior discovery runs that didn't have this guard.
+            phase5Stats.pathExistingManualPolarisEcho++;
             await prisma.reservation.update({
               where: { id: existingRes.id },
               data: {
@@ -4075,12 +4114,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
                   : {}),
               },
             });
+            phase5Stats.writesReservationUpdate++;
             await prisma.conflict.updateMany({
               where: { reservationId: existingRes.id, status: "pending" },
               data: { status: "rejected", resolvedBy: "auto", resolvedAt: new Date() },
             });
+            phase5Stats.writesConflictUpdateMany++;
           } else {
+            phase5Stats.pathExistingManualConflictOnly++;
             await upsertConflict(existingRes.id, integrationId, { hostname: proposedHostname, owner: proposedOwner, projectRef: projectRefLabel, notes: proposedNotes, sourceType: proposedSourceType }, existingRes);
+            phase5Stats.writesUpsertConflict++;
           }
         } else if (existingRes.sourceType === "vip") {
           const vipStillExists = currentVipKeys.has(key);
@@ -4111,7 +4154,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               updateData.staleNotifiedAt = null;
               updateData.staleSnoozedUntil = null;
             }
+            phase5Stats.pathExistingVipSuccession++;
             await prisma.reservation.update({ where: { id: existingRes.id }, data: updateData });
+            phase5Stats.writesReservationUpdate++;
             // Auto-reject any pending VIP-merge conflicts on this row —
             // they were raised against the prior VIP state which is now
             // gone. The DHCP source is unambiguous; no operator review
@@ -4120,6 +4165,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               where: { reservationId: existingRes.id, status: "pending" },
               data: { status: "rejected", resolvedBy: "auto", resolvedAt: new Date() },
             });
+            phase5Stats.writesConflictUpdateMany++;
             const priorVipInfo = existingRes.vipInfo as any;
             existingRes.sourceType = proposedSourceType;
             existingRes.vipInfo = null;
@@ -4152,11 +4198,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // decision needed), then raise a merge conflict for the metadata
           // fold-in review. upsertConflict's 30-day guard prevents re-raise
           // once the operator resolves.
+          phase5Stats.pathExistingVipMacFill++;
           if (macNormalized && !existingRes.macAddress) {
             await prisma.reservation.update({
               where: { id: existingRes.id },
               data: { macAddress: macNormalized },
             });
+            phase5Stats.writesReservationUpdate++;
             existingRes.macAddress = macNormalized;
           }
           await upsertConflict(
@@ -4165,6 +4213,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             { hostname: proposedHostname, owner: proposedOwner, projectRef: projectRefLabel, notes: proposedNotes, sourceType: proposedSourceType },
             existingRes,
           );
+          phase5Stats.writesUpsertConflict++;
         } else if (
           existingRes.sourceType === "dhcp_lease" ||
           existingRes.sourceType === "dhcp_reservation"
@@ -4201,10 +4250,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             update.staleSnoozedUntil = null;
           }
           if (Object.keys(update).length > 0) {
+            phase5Stats.pathExistingDhcpFlip++;
             await prisma.reservation.update({
               where: { id: existingRes.id },
               data: update,
             });
+            phase5Stats.writesReservationUpdate++;
+          } else {
+            phase5Stats.pathExistingDhcpNoChange++;
           }
         }
         continue;
@@ -4236,9 +4289,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       };
       try {
         await releaseDnsResolvedAt(matchingSubnet.id, entry.ipAddress);
+        phase5Stats.writesDnsRelease++;
         let newRes;
+        let createdAfterRetry = false;
         try {
           newRes = await prisma.reservation.create({ data: createData });
+          phase5Stats.writesReservationCreate++;
         } catch (err: any) {
           // `fireDnsResolvedReconcile` (Prisma extension hook in src/db.ts) is
           // fire-and-forget on every asset write that touches ipAddress /
@@ -4259,6 +4315,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           });
           if (colliding?.sourceType !== "dns_resolved") {
             syncLog("error", `Failed to create DHCP ${isDhcpReservation ? "reservation" : "lease"} for ${entry.ipAddress}: collided with active ${colliding?.sourceType ?? "(missing)"} reservation`);
+            phase5Stats.skippedCollision++;
             continue;
           }
           // Hard-delete the colliding dns_resolved row rather than flipping
@@ -4269,7 +4326,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // audit value, so the delete is the simpler + always-correct
           // semantic.
           await prisma.reservation.delete({ where: { id: colliding.id } });
+          phase5Stats.writesReservationDelete++;
           newRes = await prisma.reservation.create({ data: createData });
+          phase5Stats.writesReservationCreate++;
+          createdAfterRetry = true;
+        }
+        if (createdAfterRetry) {
+          phase5Stats.pathNewCreateAfterRetry++;
+        } else {
+          phase5Stats.pathNewCreate++;
         }
         activeResMap.set(key, newRes); // Track for MAC cross-update phase
         if (isDhcpReservation) {
@@ -4278,9 +4343,38 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           dhcpLeases.push(`${entry.ipAddress} (${entry.hostname || entry.macAddress})`);
         }
       } catch (err: any) {
+        phase5Stats.pathNewCreateFailed++;
         syncLog("error", `Failed to create DHCP ${isDhcpReservation ? "reservation" : "lease"} for ${entry.ipAddress}: ${err.message || "Unknown error"}`);
       }
     }
+  }
+
+  // Phase 5 summary — one info Event per per-FortiGate sync so operators can
+  // characterize the actual per-cycle DB write distribution from the Events
+  // page. The path-* counters sum to entriesTotal; the writes-* counters are
+  // the actual prisma.reservation/conflict statements issued.
+  if (phase5Stats.entriesTotal > 0) {
+    const totalWrites =
+      phase5Stats.writesReservationUpdate +
+      phase5Stats.writesReservationCreate +
+      phase5Stats.writesReservationDelete +
+      phase5Stats.writesConflictUpdateMany +
+      phase5Stats.writesDnsRelease +
+      phase5Stats.writesUpsertConflict;
+    syncLog(
+      "info",
+      `Phase 5 DHCP entry processing: ${phase5Stats.entriesTotal} entries, ${totalWrites} DB writes ` +
+      `(updates=${phase5Stats.writesReservationUpdate}, creates=${phase5Stats.writesReservationCreate}, ` +
+      `deletes=${phase5Stats.writesReservationDelete}, conflictUpdates=${phase5Stats.writesConflictUpdateMany}, ` +
+      `dnsReleases=${phase5Stats.writesDnsRelease}, upsertConflicts=${phase5Stats.writesUpsertConflict}); ` +
+      `paths: noChange=${phase5Stats.pathExistingDhcpNoChange}, dhcpFlip=${phase5Stats.pathExistingDhcpFlip}, ` +
+      `polarisEcho=${phase5Stats.pathExistingManualPolarisEcho}, manualConflict=${phase5Stats.pathExistingManualConflictOnly}, ` +
+      `vipSucc=${phase5Stats.pathExistingVipSuccession}, vipMacFill=${phase5Stats.pathExistingVipMacFill}, ` +
+      `pendingAdopt=${phase5Stats.pathExistingPendingAdopt}, pendingCollide=${phase5Stats.pathExistingPendingCollide}, ` +
+      `newCreate=${phase5Stats.pathNewCreate}, newCreateRetry=${phase5Stats.pathNewCreateAfterRetry}, ` +
+      `newCreateFail=${phase5Stats.pathNewCreateFailed}, skipNoIp=${phase5Stats.skippedNoIp}, ` +
+      `skipNoSubnet=${phase5Stats.skippedNoSubnet}, skipCollision=${phase5Stats.skippedCollision})`,
+    );
   }
 
   // ══════════════════════════════════════════════════════════════════════════════
