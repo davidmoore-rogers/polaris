@@ -30,6 +30,7 @@ import {
   decHttpInFlight,
   statusToClass,
 } from "./metrics.js";
+import "./jobs/expireReservations.js";
 import "./jobs/pruneEvents.js";
 import "./jobs/ouiRefresh.js";
 import "./jobs/updateCheck.js";
