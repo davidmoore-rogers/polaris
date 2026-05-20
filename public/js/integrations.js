@@ -995,7 +995,7 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
            '</label>';
   }
   var lldpPanel = '<div id="' + idPrefix + 'panel-lldp" style="display:' + (byLldp ? '' : 'none') + ';margin:0.35rem 0 0.6rem 1.5rem">' +
-    '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.82rem">Pin any interface whose LLDP neighbor matched a <strong>monitored</strong> Polaris asset of one of the selected types. Updates as fleet topology changes — new uplinks get pinned automatically next discovery.</p>' +
+    '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.82rem">Pin where Polaris knows a <strong>monitored</strong> neighbor of the chosen type is connected — via direct LLDP advertisement <strong>OR</strong> via FortiOS topology inference (managed FortiAPs reported through their parent FortiGate, FortiSwitch FortiLink uplinks, etc.). Updates as fleet topology changes — new uplinks get pinned automatically next discovery.</p>' +
     lldpBox("firewall",     "Firewall") +
     lldpBox("switch",       "Switch") +
     lldpBox("access_point", "Access Point") +
@@ -1019,7 +1019,7 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
       patternsPanel +
       masterBox("types",    "By interface type",  "types seen on this integration's devices",         !!byTypes) +
       typesPanel +
-      masterBox("lldp",     "By LLDP neighbor",   "pin where an LLDP neighbor is a monitored asset",  !!byLldp) +
+      masterBox("lldp",     "By LLDP (includes inferred interfaces)",   "pin where a monitored neighbor is connected (LLDP or FortiOS topology inference)",  !!byLldp) +
       lldpPanel +
       previewPanel +
     '</div>' +

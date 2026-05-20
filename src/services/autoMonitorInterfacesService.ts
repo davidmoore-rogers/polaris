@@ -278,6 +278,138 @@ function selectionUsesLldp(sel: AutoMonitorSelection): boolean {
   return !!sel?.byLldp && sel.byLldp.neighborTypes.length > 0;
 }
 
+/**
+ * Peer-inferred LLDP matches synthesized from `Asset.fortinetTopology` so
+ * "By LLDP" covers managed FortiAPs whose FortiSwitch silently consumes
+ * LLDP without re-publishing via SNMP LLDP-MIB. Same data source as the
+ * inferred Neighbor column on the System tab (peerInferredLldpService).
+ *
+ * Three class-aware queries:
+ *   - klass=fortigate     → child switches name this FG as controllerFortigate.
+ *                           Emit on FG's id at localIfName = switch.uplinkInterface
+ *                           (FortiGate-side FortiLink port name).
+ *   - klass=fortiswitch   → child APs name this switch as parentSwitch. Emit
+ *                           on switch's id at localIfName = ap.parentPort.
+ *   - klass=fortiap       → self has parentSwitch + uplinkInterface (AP-local
+ *                           port). Emit on AP's id at that localIfName, with
+ *                           the matched switch's monitored flag.
+ */
+async function loadInferredLldpByAsset(
+  assets: ReadonlyArray<{ id: string; hostname: string | null }>,
+  klass: AutoMonitorClass,
+): Promise<Map<string, LldpByIfName>> {
+  const out = new Map<string, LldpByIfName>();
+  const hostnames = assets.map((a) => a.hostname).filter((h): h is string => !!h && h.length > 0);
+  if (hostnames.length === 0) return out;
+  const byHostname = new Map<string, string>();
+  for (const a of assets) if (a.hostname) byHostname.set(a.hostname, a.id);
+
+  const add = (selfId: string, ifName: string, matchedAssetType: string, matchedMonitored: boolean) => {
+    let perAsset = out.get(selfId);
+    if (!perAsset) { perAsset = new Map(); out.set(selfId, perAsset); }
+    let list = perAsset.get(ifName);
+    if (!list) { list = []; perAsset.set(ifName, list); }
+    list.push({ matchedAssetType, matchedAssetMonitored: matchedMonitored });
+  };
+
+  if (klass === "fortigate") {
+    const rows = await prisma.$queryRaw<Array<{
+      controllerFortigate: string;
+      uplinkInterface: string;
+      monitored: boolean;
+    }>>`
+      SELECT
+        "fortinetTopology"->>'controllerFortigate' AS "controllerFortigate",
+        "fortinetTopology"->>'uplinkInterface'     AS "uplinkInterface",
+        monitored                                  AS "monitored"
+      FROM assets
+      WHERE "assetType"::text = 'switch'
+        AND "fortinetTopology"->>'controllerFortigate' = ANY(${hostnames}::text[])
+        AND "fortinetTopology"->>'uplinkInterface' IS NOT NULL
+    `;
+    for (const r of rows) {
+      const fgId = byHostname.get(r.controllerFortigate);
+      if (!fgId) continue;
+      add(fgId, r.uplinkInterface, "switch", r.monitored === true);
+    }
+  } else if (klass === "fortiswitch") {
+    const rows = await prisma.$queryRaw<Array<{
+      parentSwitch: string;
+      parentPort: string;
+      monitored: boolean;
+    }>>`
+      SELECT
+        "fortinetTopology"->>'parentSwitch' AS "parentSwitch",
+        "fortinetTopology"->>'parentPort'   AS "parentPort",
+        monitored                           AS "monitored"
+      FROM assets
+      WHERE "assetType"::text = 'access_point'
+        AND "fortinetTopology"->>'parentSwitch' = ANY(${hostnames}::text[])
+        AND "fortinetTopology"->>'parentPort' IS NOT NULL
+    `;
+    for (const r of rows) {
+      const swId = byHostname.get(r.parentSwitch);
+      if (!swId) continue;
+      add(swId, r.parentPort, "access_point", r.monitored === true);
+    }
+  } else if (klass === "fortiap") {
+    // For each in-scope AP that has parentSwitch + uplinkInterface, resolve
+    // the switch by hostname so we can carry its monitored flag.
+    const apRows = await prisma.$queryRaw<Array<{
+      id: string;
+      parentSwitch: string;
+      uplinkInterface: string;
+    }>>`
+      SELECT
+        id,
+        "fortinetTopology"->>'parentSwitch'     AS "parentSwitch",
+        "fortinetTopology"->>'uplinkInterface'  AS "uplinkInterface"
+      FROM assets
+      WHERE id = ANY(${assets.map((a) => a.id)}::text[])
+        AND "fortinetTopology"->>'parentSwitch' IS NOT NULL
+        AND "fortinetTopology"->>'uplinkInterface' IS NOT NULL
+    `;
+    if (apRows.length > 0) {
+      const switchHostnames = [...new Set(apRows.map((r) => r.parentSwitch))];
+      const switches = await prisma.asset.findMany({
+        where: { hostname: { in: switchHostnames }, assetType: "switch" as any },
+        select: { hostname: true, monitored: true },
+      });
+      const swMonitoredByHostname = new Map<string, boolean>();
+      for (const sw of switches) if (sw.hostname) swMonitoredByHostname.set(sw.hostname, sw.monitored === true);
+      for (const r of apRows) {
+        if (!swMonitoredByHostname.has(r.parentSwitch)) continue;
+        add(r.id, r.uplinkInterface, "switch", swMonitoredByHostname.get(r.parentSwitch)!);
+      }
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Merge inferred matches into the real-LLDP map per (assetId, ifName).
+ * Real entries come first, inferred appended after. Duplicates within an
+ * ifName are harmless — `resolvePinnedInterfaces` looks for ANY match
+ * satisfying the byLldp filter — so no dedupe.
+ */
+function mergeLldpMaps(
+  base: Map<string, LldpByIfName>,
+  extra: Map<string, LldpByIfName>,
+): Map<string, LldpByIfName> {
+  if (extra.size === 0) return base;
+  for (const [assetId, extraByIf] of extra) {
+    let baseByIf = base.get(assetId);
+    if (!baseByIf) { baseByIf = new Map(); base.set(assetId, baseByIf); }
+    for (const [ifName, matches] of extraByIf) {
+      const existing = baseByIf.get(ifName);
+      if (!existing) baseByIf.set(ifName, matches.slice());
+      else existing.push(...matches);
+    }
+  }
+  return base;
+}
+
 export interface AggregateRow {
   ifName: string;
   ifType: string | null;
@@ -414,10 +546,12 @@ export async function previewAutoMonitorForClass(
   const ids = assets.map((a) => a.id);
   // LLDP join is only needed if either selection uses byLldp; load once.
   const needLldp = selectionUsesLldp(selection) || (wantDiff && selectionUsesLldp(baselineSelection ?? null));
-  const [interfacesByAsset, lldpByAsset] = await Promise.all([
+  const [interfacesByAsset, realLldp, inferredLldp] = await Promise.all([
     loadLatestInterfaces(ids),
     needLldp ? loadLldpByAsset(ids) : Promise.resolve(new Map<string, LldpByIfName>()),
+    needLldp ? loadInferredLldpByAsset(assets, klass) : Promise.resolve(new Map<string, LldpByIfName>()),
   ]);
+  const lldpByAsset = mergeLldpMaps(realLldp, inferredLldp);
 
   const currentPins = computePinsByAsset(assets, interfacesByAsset, lldpByAsset, selection);
 
@@ -507,10 +641,13 @@ export async function applyAutoMonitorForClass(
   });
   if (assets.length === 0) return empty;
   const ids = assets.map((a) => a.id);
-  const [interfacesByAsset, lldpByAsset] = await Promise.all([
+  const needLldp = selectionUsesLldp(selection);
+  const [interfacesByAsset, realLldp, inferredLldp] = await Promise.all([
     loadLatestInterfaces(ids),
-    selectionUsesLldp(selection) ? loadLldpByAsset(ids) : Promise.resolve(new Map<string, LldpByIfName>()),
+    needLldp ? loadLldpByAsset(ids) : Promise.resolve(new Map<string, LldpByIfName>()),
+    needLldp ? loadInferredLldpByAsset(assets, klass) : Promise.resolve(new Map<string, LldpByIfName>()),
   ]);
+  const lldpByAsset = mergeLldpMaps(realLldp, inferredLldp);
 
   let devices = 0;
   let interfacesAdded = 0;
