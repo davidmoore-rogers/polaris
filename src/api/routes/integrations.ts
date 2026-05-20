@@ -1906,30 +1906,49 @@ async function upsertConflict(
     return;
   }
 
-  const existingConflict = await prisma.conflict.findFirst({
-    where: { reservationId, status: "pending" },
-  });
-
-  // Merge-type collisions (VIP + DHCP) where the existing reservation is
-  // already non-manual: once the operator has resolved one of these within
-  // the last 30 days, don't re-raise on every subsequent discovery cycle.
-  // Without this guard, the existing-vs-proposed values stay different
-  // forever (the "fold in blanks only" merge intentionally leaves the
-  // existing values alone), so upsertConflict would otherwise re-create
-  // the same conflict every poll. Scoped narrowly: only when proposed is
-  // vip/dhcp_* so the existing manual-overwrite re-raise behavior is
-  // preserved.
+  // Single round-trip that covers both lookups upsertConflict needs:
+  //
+  //   1. Existing pending conflict on this reservation (drives the
+  //      update-vs-create branch below).
+  //   2. Merge-type 30-day re-raise guard — once the operator has resolved
+  //      a vip/dhcp_* conflict on this reservation within the last 30 days,
+  //      we suppress re-raising on every subsequent discovery cycle.
+  //      Without this guard, the existing-vs-proposed values stay different
+  //      forever (the "fold in blanks only" merge intentionally leaves the
+  //      existing values alone), so upsertConflict would otherwise re-create
+  //      the same conflict every poll.
+  //
+  // Previously these were two sequential findFirst calls per invocation.
+  // Phase 5 instrumentation showed upsertConflict firing 60-80 times per
+  // cycle on big FortiGates whose subnets carry many operator-typed manual
+  // reservations — 120-160 SELECTs per cycle just to find "no, nothing
+  // pending, and yes the operator already resolved this within 30 days."
+  // Collapsing to one findMany halves the round-trip count.
   const MERGE_TYPES = new Set(["vip", "dhcp_reservation", "dhcp_lease"]);
-  if (!existingConflict && MERGE_TYPES.has(proposed.sourceType)) {
-    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const recentResolved = await prisma.conflict.findFirst({
-      where: {
-        reservationId,
-        status: { in: ["accepted", "rejected"] },
-        proposedSourceType: { in: ["vip", "dhcp_reservation", "dhcp_lease"] },
-        resolvedAt: { gte: cutoff },
-      },
+  const wantsMergeGuard = MERGE_TYPES.has(proposed.sourceType);
+  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const orClauses: Array<Record<string, unknown>> = [
+    { status: "pending" },
+  ];
+  if (wantsMergeGuard) {
+    orClauses.push({
+      status: { in: ["accepted", "rejected"] },
+      proposedSourceType: { in: ["vip", "dhcp_reservation", "dhcp_lease"] },
+      resolvedAt: { gte: cutoff },
     });
+  }
+  const candidates = await prisma.conflict.findMany({
+    where: { reservationId, OR: orClauses },
+    // Bounded result set: at most one pending row (by upsert invariant) plus
+    // any matching resolved rows within 30 days. We only need to know whether
+    // each kind exists, so take a small cap rather than reading every
+    // historical conflict for the reservation.
+    take: 4,
+    orderBy: { resolvedAt: "desc" },
+  });
+  const existingConflict = candidates.find((c) => c.status === "pending") ?? null;
+  if (!existingConflict && wantsMergeGuard) {
+    const recentResolved = candidates.some((c) => c.status !== "pending");
     if (recentResolved) return;
   }
 
