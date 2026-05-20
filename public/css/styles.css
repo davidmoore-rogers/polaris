@@ -364,6 +364,9 @@ code {
   opacity: 0.65;
   margin-top: 2px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 .query-status-name-slow {
   color: var(--color-warning);

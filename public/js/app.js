@@ -997,7 +997,9 @@ function renderRoleReviewStatus() {
     '<ul class="query-status-list">' +
       users.map(function (u) {
         var who = u.displayName ? (u.displayName + ' (' + u.username + ')') : u.username;
-        var sub = 'Role: ' + (u.role || 'readonly') + (u.authProvider === 'azure' ? ' · SSO' : '');
+        var roleName = (u.role && typeof u.role === 'object') ? (u.role.name || 'readonly')
+          : (typeof u.role === 'string' ? u.role : 'readonly');
+        var sub = 'Role: ' + roleName + (u.authProvider === 'azure' ? ' · SSO' : '');
         return '<li><div style="min-width:0;flex:1">' +
           '<span class="query-status-name" title="' + escapeHtml(who) + '">' + escapeHtml(who) + '</span>' +
           '<span class="query-status-progress">' + escapeHtml(sub) + ' — may need role change</span>' +
