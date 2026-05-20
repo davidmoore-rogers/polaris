@@ -2713,17 +2713,25 @@ export async function collectFastFiltered(assetId: string): Promise<CollectionRe
           return { supported: true, error: "No SNMP credential selected" };
         }
       }
-      full = await collectSystemInfoSnmp(targetIp, snmpCfg, {
-        includeLldp:  false,
-        timeoutMs:    sysInfoTimeout,
-        manufacturer: asset.manufacturer,
-        model:        asset.model,
-        os:           asset.os,
-        assetType:    asset.assetType,
+      // Wire-level filtered scrape: pulls only the columns/rows we actually
+      // need (pinned ifNames + pinned mountPaths) instead of walking the full
+      // IF-MIB / hrStorage subtrees. On a 48-port switch with one pinned
+      // interface this is ~13 OIDs in one PDU vs. ~770 OID-fetches across 16
+      // column walks under the legacy path — drops fast-cadence p90 from
+      // multi-second to sub-second on busy fleets. See `collectFastFilteredSnmp`
+      // for the three-phase rationale (discovery walks → multi-GET → assembly).
+      full = await collectFastFilteredSnmp(targetIp, snmpCfg, {
+        wantedIfaces:  wantedIfaces,
+        wantedStorage: wantedStorage,
+        timeoutMs:     sysInfoTimeout,
       });
       // Fortinet-discovered firewalls running SNMP still benefit from the
       // integration's interface filter (CMDB blocklist) and from the FortiOS
       // IPsec overlay — the two endpoints are independent of the SNMP path.
+      // The CMDB filter is a no-op when the SNMP scrape already filtered to
+      // the operator-pinned set (operators don't pin interfaces they've also
+      // filtered out), but we keep the call to preserve the same defense-in-
+      // depth behavior as the heavy cadence.
       if (isFortinetSrc && integration) {
         applyFortiInterfaceFilter(full.interfaces, integration as any);
         if (wantedTunnels.length > 0) {
@@ -4201,6 +4209,60 @@ function snmpGetScalar(session: any, oid: string): Promise<unknown> {
   });
 }
 
+/**
+ * Targeted multi-OID GET. Backs the wire-level filtered fast cadence: pulls
+ * exactly the column values we need at known ifIndex / hrStorageIndex slots
+ * instead of walking entire IF-MIB / hrStorage subtrees. Chunked to
+ * SNMP_MULTI_GET_BATCH OIDs per request because most agents enforce a per-PDU
+ * varbind limit (anywhere from ~50 to ~100 depending on vendor); 40 is safely
+ * below the lowest commonly-seen cap.
+ *
+ * Returns a Map keyed by the input OID with the varbind value (or null on
+ * varbindError / noSuchInstance — same as snmpGetScalar). Errors from the
+ * SNMP layer (timeout, connection failure) reject the promise.
+ */
+const SNMP_MULTI_GET_BATCH = 40;
+function snmpMultiGet(session: any, oids: string[]): Promise<Map<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const out = new Map<string, unknown>();
+    if (oids.length === 0) return resolve(out);
+    // Dedup + preserve order. Useful for callers that build OID lists across
+    // many resolution steps and may accidentally repeat.
+    const uniqueOids = Array.from(new Set(oids));
+    const batches: string[][] = [];
+    for (let i = 0; i < uniqueOids.length; i += SNMP_MULTI_GET_BATCH) {
+      batches.push(uniqueOids.slice(i, i + SNMP_MULTI_GET_BATCH));
+    }
+    let remaining = batches.length;
+    let aborted = false;
+    const fail = (err: Error) => {
+      if (aborted) return;
+      aborted = true;
+      reject(err);
+    };
+    for (const batch of batches) {
+      try {
+        session.get(batch, (err: Error | null, varbinds: any[]) => {
+          if (aborted) return;
+          if (err) return fail(err);
+          for (let i = 0; i < batch.length; i++) {
+            const vb = varbinds?.[i];
+            if (!vb || snmp.isVarbindError(vb)) {
+              out.set(batch[i] as string, null);
+            } else {
+              out.set(batch[i] as string, vb.value);
+            }
+          }
+          remaining -= 1;
+          if (remaining === 0) resolve(out);
+        });
+      } catch (err: any) {
+        return fail(err);
+      }
+    }
+  });
+}
+
 async function collectTemperaturesSnmp(
   session: any,
   manufacturer?: string | null,
@@ -4485,6 +4547,218 @@ async function collectSystemInfoSnmp(
       lldpNeighbors,
       lldpSource: opts.includeLldp !== false ? "snmp" : undefined,
       wirelessStations,
+    };
+  }, opts.timeoutMs);
+}
+
+/**
+ * Wire-level filtered SNMP system-info scrape. Pulls only the columns/rows the
+ * fast cadence actually needs — pinned interfaces and pinned storage — instead
+ * of walking the full IF-MIB / hrStorage subtrees the way `collectSystemInfoSnmp`
+ * does. The full pass at the heavy cadence still walks everything; this is
+ * strictly an optimization for the per-minute scrape.
+ *
+ * Three phases:
+ *
+ *   1. Discovery — walk `ifName` + `ifDescr` (and `hrStorageDescr` when storage
+ *      is pinned) to map the operator-supplied names back to their SNMP
+ *      indexes. These walks are tiny (one varbind per port / disk) and finish
+ *      in well under a second on most agents. We don't currently persist the
+ *      name→index map; the heavy-cadence sample already records ifName but
+ *      not ifIndex, and adding a column would mean a schema migration. The
+ *      bounded walks here are the simpler path.
+ *
+ *   2. Multi-GET — pack every column-at-index OID we want into one `session.get`
+ *      (chunked at SNMP_MULTI_GET_BATCH). On a 48-port switch with one pinned
+ *      interface, that's 13 OIDs in a single PDU — vs. 16 full column walks
+ *      under the legacy path (~770 OID-fetches). Latency is dominated by the
+ *      network round-trip, so one PDU ≈ one round-trip ≈ ~50 ms regardless of
+ *      varbind count.
+ *
+ *   3. Assembly — emit one `InterfaceSample` per matched name (skipping names
+ *      that didn't resolve to an index, e.g. the operator pinned a port that
+ *      no longer exists on the device). Speed/IP/MAC follow the same picker
+ *      rules as the full walk: high-counter prefers `ifHC*Octets` over the
+ *      legacy 32-bit columns, speed prefers `ifHighSpeed * 1e6` over
+ *      `ifSpeed`, IP comes from inverting `ipAdEntIfIndex` for ipByIfIndex.
+ *
+ * IP resolution is the one gotcha: `ipAdEntIfIndex` is a small walk (one
+ * varbind per IPv4 address on the device, not per interface) — we walk it once
+ * here so the pinned interface gets its IP. On devices with many IPs (large
+ * branches) this is the dominant cost; still tiny compared to the full pass.
+ *
+ * Returns the same `SystemInfoSample` shape as `collectSystemInfoSnmp` so
+ * `recordSystemInfoResult` downstream is unchanged. LLDP and wireless are
+ * always skipped on the fast cadence (LLDP rides the heavy cadence, wireless
+ * isn't a fast-pin target today).
+ */
+async function collectFastFilteredSnmp(
+  host: string,
+  config: Record<string, unknown>,
+  opts: {
+    wantedIfaces:   string[];
+    wantedStorage:  string[];
+    timeoutMs?:     number;
+  },
+): Promise<SystemInfoSample> {
+  const wantedIfaceSet  = new Set(opts.wantedIfaces);
+  const wantedStorageSet = new Set(opts.wantedStorage);
+
+  return await withSnmpSession(host, config, async (session) => {
+    // ── Phase 1: discover ifIndex for each pinned ifName ──────────────────
+    // Walk ifName + ifDescr in parallel; one full pass on a 48-port switch
+    // is ~50 varbinds per column ≈ <500ms total. Resolve every pinned name
+    // to its index; pinned-but-missing names are dropped silently (same
+    // behavior as the full walk: the stored sample just doesn't include
+    // that ifName on this tick).
+    let ifIndexByName = new Map<string, string>();
+    const endIfaceDiscovery = startPhase("fastfiltered.snmp.iface_discovery");
+    try {
+      const [names, descrs] = await Promise.all([
+        snmpWalk(session, OID.ifName).catch(() => new Map()),
+        snmpWalk(session, OID.ifDescr).catch(() => new Map()),
+      ]);
+      // ifName is preferred (modern devices); ifDescr fallback covers older
+      // agents that don't populate ifName.
+      const indexToName = new Map<string, string>();
+      for (const [idx, vb] of names.entries()) {
+        const n = snmpVbToString(vb);
+        if (n) indexToName.set(idx, n);
+      }
+      for (const [idx, vb] of descrs.entries()) {
+        if (indexToName.has(idx)) continue;
+        const n = snmpVbToString(vb);
+        if (n) indexToName.set(idx, n);
+      }
+      for (const [idx, name] of indexToName.entries()) {
+        if (wantedIfaceSet.has(name)) ifIndexByName.set(name, idx);
+      }
+    } catch { /* leave ifIndexByName empty; sample will skip iface rows */ }
+    endIfaceDiscovery({ resolved: ifIndexByName.size, wanted: wantedIfaceSet.size });
+
+    // ── Phase 1b: discover hrStorageIndex for each pinned mountPath ───────
+    // Storage column rows are also small (one per disk/partition); only walk
+    // when at least one mountPath is pinned to avoid burning a round-trip
+    // on iface-only fast pins.
+    let storageIndexByMount = new Map<string, string>();
+    if (wantedStorageSet.size > 0) {
+      const endStorageDiscovery = startPhase("fastfiltered.snmp.storage_discovery");
+      try {
+        const descrs = await snmpWalk(session, OID.hrStorageDescr);
+        for (const [idx, vb] of descrs.entries()) {
+          const m = snmpVbToString(vb);
+          if (m && wantedStorageSet.has(m)) storageIndexByMount.set(m, idx);
+        }
+      } catch { /* leave empty */ }
+      endStorageDiscovery({ resolved: storageIndexByMount.size, wanted: wantedStorageSet.size });
+    }
+
+    // ── Phase 2: build the targeted OID list ──────────────────────────────
+    // 13 columns per pinned interface, 3 per pinned storage row. Names are
+    // resolved in Phase 1; missing names contribute no OIDs.
+    const IFACE_COLS = [
+      OID.ifName,         // re-pull so the assembly step has the authoritative ifName
+      OID.ifAdminStatus,
+      OID.ifOperStatus,
+      OID.ifSpeed,
+      OID.ifHighSpeed,
+      OID.ifPhysAddress,
+      OID.ifInOctets,
+      OID.ifOutOctets,
+      OID.ifHCInOctets,
+      OID.ifHCOutOctets,
+      OID.ifInErrors,
+      OID.ifOutErrors,
+      OID.ifType,
+      OID.ifAlias,
+    ];
+    const STORAGE_COLS = [
+      OID.hrStorageAllocationUnits,
+      OID.hrStorageSize,
+      OID.hrStorageUsed,
+    ];
+    const oids: string[] = [];
+    for (const idx of ifIndexByName.values()) {
+      for (const col of IFACE_COLS) oids.push(`${col}.${idx}`);
+    }
+    for (const idx of storageIndexByMount.values()) {
+      for (const col of STORAGE_COLS) oids.push(`${col}.${idx}`);
+    }
+
+    // Also need ifIndex by IP for the pinned interfaces' ipAddress field.
+    // ipAdEntIfIndex is indexed by the IP itself, not by ifIndex, so we have
+    // to walk it. Tiny on most devices (one varbind per IPv4 address). Skip
+    // when no interfaces are pinned (storage-only fast cadence is rare but
+    // technically possible).
+    let ipByIfIndex = new Map<string, string>();
+    if (ifIndexByName.size > 0) {
+      const endIpWalk = startPhase("fastfiltered.snmp.ip_walk");
+      try {
+        const ipMap = await snmpWalk(session, OID.ipAdEntIfIndex);
+        for (const [ip, idxRaw] of ipMap.entries()) {
+          const idx = String(snmpVbToNumber(idxRaw) ?? "");
+          if (!idx) continue;
+          if (!ipByIfIndex.has(idx)) ipByIfIndex.set(idx, ip);
+        }
+      } catch { /* leave empty */ }
+      endIpWalk({ ipMappings: ipByIfIndex.size });
+    }
+
+    // ── Phase 3: one batched multi-GET, then assembly ─────────────────────
+    const endMultiGet = startPhase("fastfiltered.snmp.multi_get");
+    const vbByOid = oids.length > 0
+      ? await snmpMultiGet(session, oids).catch(() => new Map<string, unknown>())
+      : new Map<string, unknown>();
+    endMultiGet({ oids: oids.length });
+
+    const interfaces: InterfaceSample[] = [];
+    for (const [pinnedName, idx] of ifIndexByName.entries()) {
+      const name = snmpVbToString(vbByOid.get(`${OID.ifName}.${idx}`)) || pinnedName;
+      const speedHi = snmpVbToNumber(vbByOid.get(`${OID.ifHighSpeed}.${idx}`));
+      const speed32 = snmpVbToNumber(vbByOid.get(`${OID.ifSpeed}.${idx}`));
+      const speedBps = speedHi && speedHi > 0
+        ? speedHi * 1_000_000
+        : (speed32 != null ? speed32 : null);
+      const inHi = snmpVbToNumber(vbByOid.get(`${OID.ifHCInOctets}.${idx}`));
+      const outHi = snmpVbToNumber(vbByOid.get(`${OID.ifHCOutOctets}.${idx}`));
+      const aliasRaw = snmpVbToString(vbByOid.get(`${OID.ifAlias}.${idx}`));
+      const alias = aliasRaw && aliasRaw.trim() ? aliasRaw.trim() : null;
+      interfaces.push({
+        ifName:      name,
+        adminStatus: ifStatusLabel(snmpVbToNumber(vbByOid.get(`${OID.ifAdminStatus}.${idx}`))),
+        operStatus:  ifStatusLabel(snmpVbToNumber(vbByOid.get(`${OID.ifOperStatus}.${idx}`))),
+        speedBps,
+        ipAddress:   ipByIfIndex.get(idx) || null,
+        macAddress:  snmpMacFromBuffer(vbByOid.get(`${OID.ifPhysAddress}.${idx}`)),
+        inOctets:    inHi != null  ? inHi  : snmpVbToNumber(vbByOid.get(`${OID.ifInOctets}.${idx}`)),
+        outOctets:   outHi != null ? outHi : snmpVbToNumber(vbByOid.get(`${OID.ifOutOctets}.${idx}`)),
+        inErrors:    snmpVbToNumber(vbByOid.get(`${OID.ifInErrors}.${idx}`)),
+        outErrors:   snmpVbToNumber(vbByOid.get(`${OID.ifOutErrors}.${idx}`)),
+        ifType:      snmpIfTypeLabel(snmpVbToNumber(vbByOid.get(`${OID.ifType}.${idx}`))),
+        alias,
+      });
+    }
+
+    const storage: StorageSample[] = [];
+    for (const [mountPath, idx] of storageIndexByMount.entries()) {
+      const u = snmpVbToNumber(vbByOid.get(`${OID.hrStorageAllocationUnits}.${idx}`)) ?? 1;
+      const s = snmpVbToNumber(vbByOid.get(`${OID.hrStorageSize}.${idx}`));
+      const ud = snmpVbToNumber(vbByOid.get(`${OID.hrStorageUsed}.${idx}`));
+      storage.push({
+        mountPath,
+        totalBytes: s != null  ? s * u  : null,
+        usedBytes:  ud != null ? ud * u : null,
+      });
+    }
+
+    return {
+      interfaces,
+      storage,
+      // LLDP intentionally omitted on the fast cadence — undefined preserves
+      // stored rows from the last heavy pass instead of wiping them. Same
+      // contract as `collectSystemInfoSnmp` with `includeLldp: false`.
+      lldpNeighbors: undefined,
+      wirelessStations: undefined,
     };
   }, opts.timeoutMs);
 }

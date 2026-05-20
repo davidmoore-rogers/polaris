@@ -764,7 +764,16 @@ async function readIntegrationBreakdown(): Promise<IntegrationBreakdown> {
  * Reads the per-cadence applicable counts from the same SQL conventions used
  * by capacityService.projectSteadyStateSize: probe = monitored, telemetry +
  * systemInfo exclude managed FortiSwitches/APs on REST API, fastFiltered =
- * monitoredInterfaceCount (Asset.monitoredInterfaces array sum).
+ * assets with at least one pin (interface / storage / ipsec tunnel).
+ *
+ * `fastFiltered` mirrors the gate in `jobs/monitorAssets.ts:236` —
+ * `publishMonitorJob("fastFiltered", a.id, …)` fires once per ASSET (not per
+ * pin) when `hasFastPin` is true. Counting `monitoredInterfaceCount` (the
+ * sum of pin-array lengths across all assets) is wrong because an operator
+ * who pins 12 ports on one switch produces 12 interface pins but only 1
+ * fast-cadence job per tick. Diff is small on fleets with 1 pin per asset
+ * but compounds badly when operators pin heavily — surfaced an over-sized
+ * worker recommendation on the prod fleet at 2,080 assets × ~1 pin each.
  */
 async function readApplicableCounts(snap: CapacitySnapshot): Promise<Record<CadenceKey, number>> {
   const monitored = snap.workload.monitoredAssetCount;
@@ -784,9 +793,21 @@ async function readApplicableCounts(snap: CapacitySnapshot): Promise<Record<Cade
         AND ("interfacesPolling" IS NULL OR "interfacesPolling" = 'rest_api')
       )
   `);
+  // Mirrors `hasFastPin` from src/jobs/monitorAssets.ts: any of the three
+  // pin arrays non-empty. array_length(col, 1) returns NULL for an empty
+  // array in Postgres, so COALESCE to 0 before the > 0 test.
+  const fastRow = await prisma.$queryRawUnsafe<{ count: bigint }[]>(`
+    SELECT COUNT(*)::bigint AS count FROM "assets"
+    WHERE monitored = true
+      AND (
+        COALESCE(array_length("monitoredInterfaces", 1), 0) > 0
+        OR COALESCE(array_length("monitoredStorage", 1), 0) > 0
+        OR COALESCE(array_length("monitoredIpsecTunnels", 1), 0) > 0
+      )
+  `);
   return {
     probe:        monitored,
-    fastFiltered: snap.workload.monitoredInterfaceCount,
+    fastFiltered: Number(fastRow[0]?.count ?? 0),
     telemetry:    Number(telemetryRow[0]?.count ?? monitored),
     systemInfo:   Number(systemInfoRow[0]?.count ?? monitored),
   };
