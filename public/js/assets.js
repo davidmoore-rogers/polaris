@@ -4049,14 +4049,23 @@ function _renderInterfacesTable(container, si, asset) {
 // the first neighbor's system name (falling back to chassisId / managementIp
 // when LLDP didn't supply one), plus a "+N" badge when multiple neighbors
 // share the local port. Returns "—" when no neighbor is on this interface.
+// Peer-inferred entries (source = "peer-inferred", derived from
+// Asset.fortinetTopology rather than a direct LLDP scrape) render in italic
+// with a tooltip explaining the inference.
 function _lldpNeighborInlineCell(neighbors) {
   if (!neighbors || neighbors.length === 0) return "—";
   var first = neighbors[0];
+  var inferred = first.source === "peer-inferred";
+  var inferredTitle = inferred ? "Inferred from peer's reported uplink (no direct LLDP from this device)" : "";
   var label = (first.systemName && String(first.systemName).trim())
     || first.chassisId
     || first.managementIp
     || "neighbor";
   var port = first.portId || first.portDescription || "";
+  var openTag = inferred
+    ? '<em style="font-style:italic" title="' + escapeHtml(inferredTitle) + '">'
+    : "";
+  var closeTag = inferred ? "</em>" : "";
   var labelHtml = first.matchedAsset && first.matchedAsset.id
     ? '<a href="#" class="asset-lldp-link" data-asset-id="' + escapeHtml(first.matchedAsset.id) +
       '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(label) + '</a>'
@@ -4065,7 +4074,7 @@ function _lldpNeighborInlineCell(neighbors) {
   var more = neighbors.length > 1
     ? ' <span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#6b728018;color:#9ca3af;border:1px solid #6b728030">+' + (neighbors.length - 1) + '</span>'
     : "";
-  return labelHtml + portStr + more;
+  return openTag + labelHtml + portStr + more + closeTag;
 }
 
 function _renderStorageTable(container, si, asset) {
@@ -4250,6 +4259,10 @@ function _renderLldpNeighborsCard(container, si, asset) {
     return String(a.chassisId || "").localeCompare(String(b.chassisId || ""));
   });
   var rows = neighbors.map(function (n) {
+    var inferred = n.source === "peer-inferred";
+    var inferredTitle = inferred ? "Inferred from peer's reported uplink (no direct LLDP from this device)" : "";
+    var rowStyle = inferred ? ' style="font-style:italic"' : "";
+    var rowTitle = inferred ? ' title="' + escapeHtml(inferredTitle) + '"' : "";
     var primary = n.systemName || n.managementIp || n.chassisId || "(unknown)";
     var primaryHtml = (n.matchedAsset && n.matchedAsset.id)
       ? '<a href="#" class="asset-lldp-link" data-asset-id="' + escapeHtml(n.matchedAsset.id) +
@@ -4262,7 +4275,7 @@ function _renderLldpNeighborsCard(container, si, asset) {
     var caps = (Array.isArray(n.capabilities) && n.capabilities.length > 0)
       ? n.capabilities.join(", ")
       : "—";
-    return '<tr>' +
+    return '<tr' + rowStyle + rowTitle + '>' +
       '<td class="mono">' + escapeHtml(n.localIfName || "—") + '</td>' +
       '<td>' + primaryHtml +
         (idBits.length ? '<div class="mono" style="font-size:0.72rem;color:var(--color-text-tertiary);margin-top:2px">' + escapeHtml(idBits.join(" · ")) + '</div>' : '') +
@@ -6982,6 +6995,11 @@ function _renderIfaceLldpBlock(neighbors) {
     '</div>';
   html += '<div style="display:flex;flex-direction:column;gap:0.4rem">';
   neighbors.forEach(function (n) {
+    var inferred = n.source === "peer-inferred";
+    var inferredTitle = "Inferred from peer's reported uplink (no direct LLDP from this device)";
+    var cardStyle = "background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem 0.6rem";
+    if (inferred) cardStyle += ";font-style:italic";
+    var cardTitle = inferred ? ' title="' + escapeHtml(inferredTitle) + '"' : "";
     var label = n.systemName || n.chassisId || n.managementIp || "Unknown neighbor";
     var titleHtml = n.matchedAsset && n.matchedAsset.id
       ? '<a href="#" class="iface-lldp-asset-link" data-asset-id="' + escapeHtml(n.matchedAsset.id) + '" style="color:var(--color-accent);text-decoration:none;font-weight:600">' + escapeHtml(label) + '</a>'
@@ -6997,6 +7015,7 @@ function _renderIfaceLldpBlock(neighbors) {
       }).join("")]);
     }
     if (n.systemDescription)    rows.push(["System description", '<span style="font-size:0.8rem">' + escapeHtml(n.systemDescription) + '</span>']);
+    if (inferred)               rows.push(["Source", '<span style="font-size:0.78rem;color:var(--color-text-secondary)">Inferred from peer&rsquo;s reported uplink</span>']);
     var rowHtml = rows.map(function (r) {
       return '<div style="display:flex;gap:0.5rem;font-size:0.8rem"><div style="width:140px;color:var(--color-text-secondary);flex-shrink:0">' + r[0] + '</div><div style="flex:1;min-width:0;word-break:break-word">' + r[1] + '</div></div>';
     }).join("");
@@ -7004,7 +7023,7 @@ function _renderIfaceLldpBlock(neighbors) {
       ? ''
       : ' <span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#6b728018;color:#9ca3af;border:1px solid #6b728030;margin-left:6px" title="No Polaris asset matched this neighbor by management IP, chassis MAC, or hostname">unmatched</span>';
     html +=
-      '<div style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem 0.6rem">' +
+      '<div style="' + cardStyle + '"' + cardTitle + '>' +
         '<div style="margin-bottom:0.4rem">' + titleHtml + matchHint + '</div>' +
         rowHtml +
       '</div>';

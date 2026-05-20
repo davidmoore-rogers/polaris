@@ -47,6 +47,10 @@ import {
   isPollingMethodCompatible,
   pollingMethodLabel,
 } from "../../utils/pollingCompatibility.js";
+import {
+  buildInferredNeighborsForAsset,
+  dedupeInferredNeighbors,
+} from "../../services/peerInferredLldpService.js";
 
 const router = Router();
 
@@ -942,7 +946,7 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
     });
     if (!asset) throw new AppError(404, "Asset not found");
 
-    const [latestTelemetry, latestIfaceMeta, latestStorageMeta, latestTempMeta, latestIpsecMeta, lldpNeighbors, wirelessStations] = await Promise.all([
+    const [latestTelemetry, latestIfaceMeta, latestStorageMeta, latestTempMeta, latestIpsecMeta, lldpNeighbors, wirelessStations, inferredNeighbors] = await Promise.all([
       prisma.assetTelemetrySample.findFirst({
         where: { assetId: id },
         orderBy: { timestamp: "desc" },
@@ -994,7 +998,16 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
           },
         },
       }),
+      // Peer-inferred neighbors synthesized from Asset.fortinetTopology
+      // (managed FortiAPs reported via FortiGate, FortiSwitch FortiLink
+      // uplinks, etc.). Real LLDP rows take precedence on collision —
+      // dedupe by (localIfName, matchedAssetId) below.
+      buildInferredNeighborsForAsset(id),
     ]);
+    const mergedNeighbors = [
+      ...lldpNeighbors,
+      ...dedupeInferredNeighbors(lldpNeighbors, inferredNeighbors),
+    ];
 
     // Prefer the full system-info pass timestamp so the table renders every
     // interface — the fast cadence only writes pinned ones, and ordering by
@@ -1076,7 +1089,7 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
         outgoingBytes:   bigIntToNumber(t.outgoingBytes),
         proxyIdCount:    t.proxyIdCount,
       })),
-      lldpNeighbors: lldpNeighbors.map((n) => ({
+      lldpNeighbors: mergedNeighbors.map((n) => ({
         localIfName:        n.localIfName,
         chassisIdSubtype:   n.chassisIdSubtype,
         chassisId:          n.chassisId,
@@ -1244,7 +1257,7 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
     // header reflects what was configured during that window; the
     // operator-typed override (Polaris-local) takes precedence for the
     // resolved `description` field shown in the UI.
-    const [history, override, neighbors] = await Promise.all([
+    const [history, override, neighbors, inferredAll] = await Promise.all([
       readInterfaceHistory(id, since, until, pick.tier, ifName),
       prisma.assetInterfaceOverride.findUnique({
         where: { assetId_ifName: { assetId: id, ifName } },
@@ -1262,7 +1275,17 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
           },
         },
       }),
+      // Peer-inferred neighbors for the whole asset, filtered to this
+      // interface below. Cheap enough at branch-class fleet sizes that
+      // a per-interface query isn't worth the extra surface area on the
+      // service.
+      buildInferredNeighborsForAsset(id),
     ]);
+    const inferredForIf = inferredAll.filter((n) => n.localIfName === ifName);
+    const mergedNeighbors = [
+      ...neighbors,
+      ...dedupeInferredNeighbors(neighbors, inferredForIf),
+    ];
     const overrideDescription = override?.description ?? null;
     res.json({
       range: rangeLabel,
@@ -1276,7 +1299,7 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
       tier: pick.tier,
       bucketSeconds: pick.bucketSeconds,
       samples: history.samples,
-      lldpNeighbors: neighbors.map((n) => ({
+      lldpNeighbors: mergedNeighbors.map((n) => ({
         chassisIdSubtype:  n.chassisIdSubtype,
         chassisId:         n.chassisId,
         portIdSubtype:     n.portIdSubtype,
