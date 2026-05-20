@@ -4217,27 +4217,56 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const normalizedMacAtCreate = entry.macAddress
         ? entry.macAddress.toUpperCase().replace(/-/g, ":")
         : null;
+      const createData = {
+        subnetId: matchingSubnet.id,
+        ipAddress: entry.ipAddress,
+        hostname: proposedHostname,
+        owner: proposedOwner,
+        projectRef: projectRefLabel,
+        notes: proposedNotes,
+        macAddress: normalizedMacAtCreate,
+        status: "active" as const,
+        sourceType: proposedSourceType,
+        expiresAt: proposedExpiresAt,
+        // First-discovery stamp for newly-created dhcp_reservation rows
+        // whose target is currently online — gives the stale job a
+        // baseline so it doesn't immediately flag a brand-new reservation
+        // we just learned about.
+        lastSeenLeased: entry.seenLeased && isDhcpReservation ? new Date() : null,
+      };
       try {
         await releaseDnsResolvedAt(matchingSubnet.id, entry.ipAddress);
-        const newRes = await prisma.reservation.create({
-          data: {
-            subnetId: matchingSubnet.id,
-            ipAddress: entry.ipAddress,
-            hostname: proposedHostname,
-            owner: proposedOwner,
-            projectRef: projectRefLabel,
-            notes: proposedNotes,
-            macAddress: normalizedMacAtCreate,
-            status: "active",
-            sourceType: proposedSourceType,
-            expiresAt: proposedExpiresAt,
-            // First-discovery stamp for newly-created dhcp_reservation rows
-            // whose target is currently online — gives the stale job a
-            // baseline so it doesn't immediately flag a brand-new reservation
-            // we just learned about.
-            lastSeenLeased: entry.seenLeased && isDhcpReservation ? new Date() : null,
-          },
-        });
+        let newRes;
+        try {
+          newRes = await prisma.reservation.create({ data: createData });
+        } catch (err: any) {
+          // `fireDnsResolvedReconcile` (Prisma extension hook in src/db.ts) is
+          // fire-and-forget on every asset write that touches ipAddress /
+          // status / hostname / dnsName / macAddress. A queued reconcile from
+          // Phase 3/4 or a parallel monitor pass can land between the
+          // releaseDnsResolvedAt call above and this create, inserting a
+          // dns_resolved row at (subnetId, ip, "active") that then collides
+          // with our create on the @@unique([subnetId, ipAddress, status])
+          // index. P2002 with a dns_resolved row on the colliding side →
+          // release it again and retry once. Any other sourceType is a
+          // genuine collision (concurrent integration writing to overlapping
+          // subnets, manual reservation typed during sync, etc.) — log and
+          // skip rather than thrashing.
+          if (err?.code !== "P2002") throw err;
+          const colliding = await prisma.reservation.findFirst({
+            where: { subnetId: matchingSubnet.id, ipAddress: entry.ipAddress, status: "active" },
+            select: { id: true, sourceType: true },
+          });
+          if (colliding?.sourceType !== "dns_resolved") {
+            syncLog("error", `Failed to create DHCP ${isDhcpReservation ? "reservation" : "lease"} for ${entry.ipAddress}: collided with active ${colliding?.sourceType ?? "(missing)"} reservation`);
+            continue;
+          }
+          await prisma.reservation.update({
+            where: { id: colliding.id },
+            data: { status: "released" },
+          });
+          newRes = await prisma.reservation.create({ data: createData });
+        }
         activeResMap.set(key, newRes); // Track for MAC cross-update phase
         if (isDhcpReservation) {
           dhcpReservations.push(`${entry.ipAddress} (${entry.hostname || entry.macAddress})`);
