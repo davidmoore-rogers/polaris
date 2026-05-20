@@ -1,20 +1,21 @@
 // public/js/mobile/asset-detail.js — Asset detail screen.
 //
-// Phase 5 ships the highest-value sections of the desktop System tab:
+// Sections (top to bottom):
 //   - Hero with name + status + Refresh action
 //   - Monitor section (response-time chart, status pill, RTT/last poll)
 //   - Telemetry section (CPU+Memory chart, when supported)
 //   - General section (IP/MAC/type/model/OS/location/last seen)
+//   - Temperatures section — current per-sensor reading + 1h min/avg/max
+//   - Interfaces section — operStatus=="up" only; tap a row opens a bottom
+//     sheet with status / speed / ip / mac / errors / LLDP neighbor(s)
 //   - IP history list
 //
-// Out of scope for v1 (likely never on mobile — they're complex slide-over
-// surfaces that work better on a desktop):
-//   - Interfaces table with per-interface comments editor + throughput chart
+// Out of scope for v1 (desktop-only):
+//   - Per-interface throughput + errors charts
+//   - Per-interface comments editor
 //   - IPsec tunnels
-//   - LLDP neighbors
 //   - SNMP walk
 //   - Per-source observed blob view
-// Each is a follow-up if operators ask for them.
 
 (function () {
   // Single shared chart range — driven by the 24h/7d segmented control on
@@ -31,7 +32,14 @@
     if (!_mounts[id]) {
       _mounts[id] = {
         range: DEFAULT_RANGE,
-        sections: { monitor: true, telemetry: true, general: true, ipHistory: false },
+        sections: {
+          monitor: true,
+          telemetry: true,
+          general: true,
+          temperatures: true,
+          interfaces: true,
+          ipHistory: false,
+        },
       };
     }
     return _mounts[id];
@@ -54,6 +62,7 @@
       // populate their respective sections independently.
       loadMonitor(id, st);
       loadTelemetry(id, st);
+      loadSystemInfo(id, st);
       loadIpHistory(id, st);
     }).catch(function (err) {
       var msg = (err && err.message) ? err.message : "Failed to load asset";
@@ -133,6 +142,18 @@
       + sectionHeader("general", "General", "", st.sections.general)
       + '<div class="sect-body" data-sect="general"' + (st.sections.general ? '' : ' hidden') + '>'
       + renderGeneralBody(asset)
+      + '</div>'
+
+      // Temperatures section — populated by loadSystemInfo.
+      + sectionHeader("temperatures", "Temperatures", "", st.sections.temperatures)
+      + '<div class="sect-body" data-sect="temperatures"' + (st.sections.temperatures ? '' : ' hidden') + '>'
+      + '  <div id="asset-temperatures-host"><div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div></div>'
+      + '</div>'
+
+      // Interfaces section — populated by loadSystemInfo (operStatus=="up" only).
+      + sectionHeader("interfaces", "Interfaces", "", st.sections.interfaces)
+      + '<div class="sect-body" data-sect="interfaces"' + (st.sections.interfaces ? '' : ' hidden') + '>'
+      + '  <div id="asset-interfaces-host"><div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div></div>'
       + '</div>'
 
       // IP history section
@@ -306,6 +327,251 @@
     });
   }
 
+  // Fetch system-info (current interfaces + temperatures + LLDP) and 1h
+  // temperature samples for per-sensor min/avg/max. The two requests are
+  // independent so they fly in parallel.
+  function loadSystemInfo(id, st) {
+    var tempsHost  = document.getElementById("asset-temperatures-host");
+    var ifacesHost = document.getElementById("asset-interfaces-host");
+    if (!tempsHost && !ifacesHost) return;
+    if (tempsHost)  tempsHost.innerHTML  = '<div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div>';
+    if (ifacesHost) ifacesHost.innerHTML = '<div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div>';
+
+    Promise.all([
+      api.assets.systemInfo(id).catch(function (e) { return { error: e }; }),
+      api.assets.temperatureHistory(id, { range: "1h" }).catch(function () { return null; }),
+    ]).then(function (results) {
+      var info = results[0] || {};
+      var tempHist = results[1] || null;
+
+      if (info.error) {
+        var msg = (info.error && info.error.message) ? info.error.message : "error";
+        if (tempsHost)  tempsHost.innerHTML  = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">Couldn’t load temperatures: ' + escapeHtml(msg) + '</div>';
+        if (ifacesHost) ifacesHost.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">Couldn’t load interfaces: ' + escapeHtml(msg) + '</div>';
+        return;
+      }
+
+      // Cache for the interface-sheet open path so we don't re-fetch.
+      _systemInfoCache[id] = info;
+
+      if (tempsHost)  renderTemperatures(tempsHost, info, tempHist);
+      if (ifacesHost) renderInterfaces(ifacesHost, info, id);
+    });
+  }
+
+  // Per-asset cache of the latest /system-info payload so the bottom sheet
+  // can render details without re-fetching. Re-populated on every loadSystemInfo.
+  var _systemInfoCache = Object.create(null);
+
+  function renderTemperatures(host, info, tempHist) {
+    var temps = (info && info.temperatures) || [];
+    if (temps.length === 0) {
+      host.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">No sensors reported.</div>';
+      return;
+    }
+    // Aggregate the unfiltered 1h samples by sensorName so we get per-sensor
+    // min/avg/max in one round-trip instead of N. AssetTemperatureSample rows
+    // carry sensorName + celsius directly.
+    var byName = Object.create(null);
+    var samples = (tempHist && tempHist.samples) || [];
+    samples.forEach(function (s) {
+      if (s.celsius == null || !s.sensorName) return;
+      var b = byName[s.sensorName] || (byName[s.sensorName] = { sum: 0, n: 0, min: Infinity, max: -Infinity });
+      b.sum += Number(s.celsius);
+      b.n   += 1;
+      if (s.celsius < b.min) b.min = Number(s.celsius);
+      if (s.celsius > b.max) b.max = Number(s.celsius);
+    });
+
+    var html = "";
+    temps.forEach(function (t, i) {
+      var b = byName[t.sensorName];
+      var statsLine = "";
+      if (b && b.n > 0) {
+        var avg = b.sum / b.n;
+        statsLine = "1h · min " + b.min.toFixed(1) + "° · avg " + avg.toFixed(1) + "° · max " + b.max.toFixed(1) + "°";
+      } else {
+        statsLine = "no 1h history";
+      }
+      var current = (t.celsius != null) ? Math.round(t.celsius * 10) / 10 + "°C" : "—";
+      html += ''
+        + '<div class="list-item two-line" style="padding-left:16px;padding-right:16px;">'
+        + '  <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-temp"/></svg></span>'
+        + '  <div class="content">'
+        + '    <div class="headline">' + escapeHtml(t.sensorName || "sensor") + '</div>'
+        + '    <div class="supporting">' + escapeHtml(statsLine) + '</div>'
+        + '  </div>'
+        + '  <span class="trailing mono" style="font-weight:600;">' + escapeHtml(current) + '</span>'
+        + '</div>'
+        + (i < temps.length - 1 ? '<div class="list-divider"></div>' : '');
+    });
+    host.innerHTML = html;
+  }
+
+  function renderInterfaces(host, info, assetId) {
+    var ifaces = (info && info.interfaces) || [];
+    var up = ifaces.filter(function (i) { return (i.operStatus || "").toLowerCase() === "up"; });
+    if (up.length === 0) {
+      host.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">No interfaces up.</div>';
+      return;
+    }
+    // Stable order: by alias/ifName.
+    up.sort(function (a, b) {
+      var an = (a.alias || a.ifName || "").toLowerCase();
+      var bn = (b.alias || b.ifName || "").toLowerCase();
+      return an < bn ? -1 : an > bn ? 1 : 0;
+    });
+
+    var html = "";
+    up.forEach(function (iface, i) {
+      var label = iface.alias || iface.ifName || "(unnamed)";
+      var sub   = iface.alias && iface.ifName && iface.alias !== iface.ifName
+        ? iface.ifName
+        : (iface.ipAddress || "");
+      var speed = (iface.speedBps != null) ? formatBps(iface.speedBps) : "";
+      var idx   = String(i);
+      html += ''
+        + '<div class="list-item two-line iface-row" data-iface-idx="' + escapeHtml(idx) + '" role="button" tabindex="0" style="padding-left:16px;padding-right:16px;cursor:pointer;">'
+        + '  <span class="leading"><span class="dot up" style="display:inline-block;width:10px;height:10px;border-radius:50%;"></span></span>'
+        + '  <div class="content">'
+        + '    <div class="headline">' + escapeHtml(label) + '</div>'
+        + (sub ? '    <div class="supporting mono">' + escapeHtml(sub) + '</div>' : '')
+        + '  </div>'
+        + '  <span class="trailing muted mono" style="font-size:12px;">' + escapeHtml(speed) + '</span>'
+        + '</div>'
+        + (i < up.length - 1 ? '<div class="list-divider"></div>' : '');
+    });
+    host.innerHTML = html;
+
+    // Wire tap → bottom sheet. Stash the sorted-up list on the closure so
+    // the index in dataset matches what's rendered above.
+    host.querySelectorAll(".iface-row").forEach(function (row) {
+      row.addEventListener("click", function () {
+        var idx = parseInt(row.dataset.ifaceIdx, 10);
+        if (isNaN(idx)) return;
+        openInterfaceSheet(up[idx], info, assetId);
+      });
+    });
+  }
+
+  // ─── Interface bottom sheet ────────────────────────────────────────────
+  // Reuses the .sheet + .scrim pattern from map-tab.js for consistency.
+  function openInterfaceSheet(iface, info, assetId) {
+    closeInterfaceSheet();
+
+    var scrim = document.createElement("div");
+    scrim.className = "scrim";
+    scrim.id = "iface-sheet-scrim";
+
+    var sheet = document.createElement("div");
+    sheet.className = "sheet";
+    sheet.id = "iface-sheet";
+
+    var title = iface.alias || iface.ifName || "Interface";
+    var ifSubtitle = (iface.alias && iface.ifName && iface.alias !== iface.ifName) ? iface.ifName : "";
+
+    // Rows: status, speed, ip, mac, errors. Keep it tight.
+    var rows = [];
+    function row(k, v, mono) {
+      if (v == null || v === "") return;
+      rows.push({ k: k, v: v, mono: !!mono });
+    }
+    var statusBits = [];
+    if (iface.operStatus)  statusBits.push("oper " + iface.operStatus);
+    if (iface.adminStatus) statusBits.push("admin " + iface.adminStatus);
+    row("Status", statusBits.join(" · "));
+    row("Speed", iface.speedBps != null ? formatBps(iface.speedBps) : null);
+    if (iface.ifType) row("Type", iface.ifType + (iface.vlanId != null ? " · VLAN " + iface.vlanId : ""));
+    row("IP",  iface.ipAddress, true);
+    row("MAC", iface.macAddress, true);
+    row("In errors",  iface.inErrors  != null ? String(iface.inErrors)  : null);
+    row("Out errors", iface.outErrors != null ? String(iface.outErrors) : null);
+
+    var detailRowsHtml = rows.map(function (r) {
+      var v = r.mono ? '<span class="mono">' + escapeHtml(r.v) + '</span>' : escapeHtml(r.v);
+      return ''
+        + '<div class="kv-row">'
+        + '  <span class="k">' + escapeHtml(r.k) + '</span>'
+        + '  <span class="v">' + v + '</span>'
+        + '</div>';
+    }).join("");
+
+    // LLDP neighbors on this localIfName — drawn from the cached system-info
+    // payload. Peer-inferred rows are included server-side so they render here too.
+    var allNeighbors = (info && info.lldpNeighbors) || [];
+    var neighbors = allNeighbors.filter(function (n) { return n.localIfName === iface.ifName; });
+    var neighborHtml = "";
+    if (neighbors.length === 0) {
+      neighborHtml = '<div class="muted" style="padding:4px 0 0;font-size:13px;">No LLDP neighbor seen.</div>';
+    } else {
+      neighborHtml = neighbors.map(function (n) {
+        var headline = n.systemName || n.managementIp || n.chassisId || "(unknown)";
+        var portBit  = n.portId ? '<span class="mono">' + escapeHtml(n.portId) + '</span>' : "";
+        var metaBits = [];
+        if (n.managementIp) metaBits.push('<span class="mono">' + escapeHtml(n.managementIp) + '</span>');
+        if (n.chassisId && n.chassisId !== n.managementIp) metaBits.push('<span class="mono">' + escapeHtml(n.chassisId) + '</span>');
+        if (n.source === "peer-inferred") metaBits.push('<em>inferred</em>');
+        var matchBtn = "";
+        if (n.matchedAsset && n.matchedAsset.id) {
+          matchBtn = '<button class="btn btn-tonal iface-neighbor-pivot" data-asset-id="' + escapeHtml(n.matchedAsset.id) + '" style="margin-top:8px;"><svg viewBox="0 0 24 24"><use href="#i-server"/></svg>View asset</button>';
+        }
+        return ''
+          + '<div class="card-filled" style="padding:12px;margin-bottom:8px;">'
+          + '  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">'
+          + '    <div style="min-width:0;font-weight:500;">' + escapeHtml(headline) + '</div>'
+          + '    <div style="font-size:12px;">' + portBit + '</div>'
+          + '  </div>'
+          + (metaBits.length ? '  <div class="muted" style="font-size:12px;margin-top:4px;">' + metaBits.join(" · ") + '</div>' : '')
+          + (n.systemDescription ? '  <div class="muted" style="font-size:12px;margin-top:4px;">' + escapeHtml(n.systemDescription) + '</div>' : '')
+          + matchBtn
+          + '</div>';
+      }).join("");
+    }
+
+    sheet.innerHTML = ''
+      + '<div class="sheet-handle"></div>'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;">'
+      + '  <div style="min-width:0;">'
+      + '    <h3 class="sheet-title" style="margin:0 0 4px;">' + escapeHtml(title) + '</h3>'
+      + (ifSubtitle ? '    <div class="muted mono" style="font-size:13px;">' + escapeHtml(ifSubtitle) + '</div>' : '')
+      + '  </div>'
+      + '  <button class="icon-btn" id="iface-sheet-close" aria-label="Close"><svg viewBox="0 0 24 24"><use href="#i-close"/></svg></button>'
+      + '</div>'
+      + detailRowsHtml
+      + '<div style="font-weight:500;margin:16px 0 8px;">Neighbor</div>'
+      + neighborHtml;
+
+    document.body.appendChild(scrim);
+    document.body.appendChild(sheet);
+
+    scrim.addEventListener("click", closeInterfaceSheet);
+    document.getElementById("iface-sheet-close").addEventListener("click", closeInterfaceSheet);
+    sheet.querySelectorAll(".iface-neighbor-pivot").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var nid = b.dataset.assetId;
+        closeInterfaceSheet();
+        if (nid) PolarisRouter.go("asset/" + nid);
+      });
+    });
+  }
+
+  function closeInterfaceSheet() {
+    var s = document.getElementById("iface-sheet");
+    var sc = document.getElementById("iface-sheet-scrim");
+    if (s) s.remove();
+    if (sc) sc.remove();
+  }
+
+  function formatBps(bps) {
+    if (bps == null) return "";
+    var n = Number(bps);
+    if (!isFinite(n) || n <= 0) return "";
+    if (n >= 1e9) return (n / 1e9) + " Gbps";
+    if (n >= 1e6) return (n / 1e6) + " Mbps";
+    if (n >= 1e3) return (n / 1e3) + " Kbps";
+    return n + " bps";
+  }
+
   function loadIpHistory(id, st) {
     var host = document.getElementById("asset-ip-history-host");
     if (!host) return;
@@ -354,9 +620,10 @@
         (resp.telemetry && resp.telemetry.collected === false && resp.telemetry.error) ||
         (resp.systemInfo && resp.systemInfo.collected === false && resp.systemInfo.error);
       PolarisTabs.showSnackbar((anyFailure ? "Refresh partial — " : "Refresh ok — ") + bits.join(" · "), { error: !!anyFailure });
-      // Repull the charts.
+      // Repull the charts + system-info sections.
       loadMonitor(id, st);
       loadTelemetry(id, st);
+      loadSystemInfo(id, st);
     }).catch(function (err) {
       var msg = (err && err.message) ? err.message : "Refresh failed";
       PolarisTabs.showSnackbar("Refresh failed — " + msg, { error: true });
