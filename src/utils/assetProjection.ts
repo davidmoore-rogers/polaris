@@ -61,6 +61,7 @@ export type AssetSourceKind =
   | "fortiswitch"
   | "fortiap"
   | "fortigate-endpoint"
+  | "paloalto-firewall"
   | "polaris-agent"
   | "manual";
 
@@ -146,6 +147,7 @@ const HOSTNAME_RULES: FieldRule[] = [
   // AD non-FQDN fallback — short dnsHostName or cn (NetBIOS).
   { sourceKind: "ad", pick: (o) => obsString(o, "dnsHostName") || obsString(o, "cn") },
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "hostname") },
+  { sourceKind: "paloalto-firewall", pick: (o) => obsString(o, "hostname") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "switchId") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "name") },
   // fortigate-endpoint hostname — the FortiGate's DHCP client identifier.
@@ -166,6 +168,7 @@ const SERIAL_RULES: FieldRule[] = [
   { sourceKind: "polaris-agent", pick: (o) => obsString(o, "serialNumber") },
   { sourceKind: "intune", pick: (o) => obsString(o, "serialNumber") },
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "serial") },
+  { sourceKind: "paloalto-firewall", pick: (o) => obsString(o, "serial") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "serial") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "serial") },
 ];
@@ -194,6 +197,11 @@ const MANUFACTURER_RULES: FieldRule[] = [
   { sourceKind: "fortigate-firewall", pick: () => "Fortinet" },
   { sourceKind: "fortiswitch", pick: () => "Fortinet" },
   { sourceKind: "fortiap", pick: () => "Fortinet" },
+  // Palo Alto firewalls: always literally "Palo Alto Networks". The discovery
+  // observed blob doesn't carry a manufacturer string — the constant here is
+  // authoritative and ignores observed by design (mirrors the Fortinet
+  // entries above).
+  { sourceKind: "paloalto-firewall", pick: () => "Palo Alto Networks" },
   // fortigate-endpoint hardwareVendor — populated from FortiOS device-
   // inventory or OUI lookup at discovery time. Coarser than Intune
   // (vendor only, no model fidelity) but better than nothing for assets
@@ -217,6 +225,7 @@ const MODEL_RULES: FieldRule[] = [
   // whatever the legacy create path stamped (also "FortiSwitch"). Firewall
   // and AP do carry a meaningful model string.
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "model") },
+  { sourceKind: "paloalto-firewall", pick: (o) => obsString(o, "model") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "model") },
   // fortigate-endpoint model — DHCP fingerprint or device-inventory model
   // string. Coarse signal but better than nothing for non-MDM assets.
@@ -253,6 +262,7 @@ const OS_VERSION_RULES: FieldRule[] = [
   { sourceKind: "entra", pick: (o) => obsString(o, "operatingSystemVersion") },
   { sourceKind: "ad", pick: (o) => obsString(o, "operatingSystemVersion") },
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "osVersion") },
+  { sourceKind: "paloalto-firewall", pick: (o) => obsString(o, "osVersion") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "osVersion") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "osVersion") },
   { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "osVersion") },
@@ -285,6 +295,7 @@ const IP_ADDRESS_RULES: FieldRule[] = [
   // assets that won't have a fortigate-endpoint source on them.
   { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "ipAddress") },
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "mgmtIp") },
+  { sourceKind: "paloalto-firewall", pick: (o) => obsString(o, "mgmtIp") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "mgmtIp") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "mgmtIp") },
 ];

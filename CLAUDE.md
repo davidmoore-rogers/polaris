@@ -1600,6 +1600,26 @@ Scope is the same as FMG (DHCP scopes + reservations + leases, interface IPs, VI
 
 ---
 
+## Palo Alto Discovery Workflow (Standalone)
+
+`paloaltoService.ts` talks directly to a single standalone Palo Alto firewall (not managed by Panorama) via the PAN-OS REST API (PAN-OS 9.0+). Read-only in v1 — no DHCP reservation push, no quarantine push. Returns the shared `DiscoveryResult` shape from `fortimanagerService.ts` so the existing sync pipeline in `integrations.ts` consumes it identically (concepts that have no Palo Alto analog — FortiSwitch / FortiAP / switch-port MAC table — return as empty arrays with empty success flags so Phase 5b sweeps skip cleanly).
+
+Mirrored after the standalone FortiGate workflow per the canonical [primaries.md → Integration type](primaries.md#integration-type-config--discovery--sync--frontend-modal). Key differences:
+
+- **Two transports** — PAN-OS splits between `/restapi/v10.1/...` (JSON, configured under typed REST endpoints) and `/api/?type=op&cmd=<xml>` (XML op commands for runtime data the REST API doesn't surface). `paloaltoService` exports both `panRequest` (REST + JSON, X-PAN-KEY header) and `panOpCommand` (XML op, key= query param). The `proxyQuery` route auto-dispatches: REST paths use `panRequest`; bare XML fragments or `/api/?type=op&cmd=…` URLs use `panOpCommand`.
+- **Auth** — API key generated under Operations → Generate API Key (PAN-OS UI). Sent in the `X-PAN-KEY` header for REST calls and as `&key=…` on op commands. No `apiUser` field — PAN-OS doesn't require one.
+- **Scoping** — `vsys` query param (default `vsys1`) is the PAN-OS analog of FortiGate's `vdom`. Applied to REST endpoints that accept `?location=vsys&vsys=…`.
+- **DHCP server model** — PAN-OS DHCP scopes are bound to Layer-3 interfaces; the subnet IS the interface's subnet. Discovery walks `/restapi/v10.1/Network/EthernetInterfaces` once and derives DHCP subnets from each interface's primary IP + prefix when `layer3.dhcp-server` is non-null. Reservations come from `layer3.dhcp-server.reserved.entry[]`. Live leases (`<show><dhcp><server><lease><interface>all</interface></lease></server></dhcp></show>`) merge in via the same overlap rule as FortiGate (CMDB is the base set; monitor stamps `seenLeased=true` on overlapping rows).
+- **VIP analog** — Static destination-NAT rules from `/restapi/v10.1/Policies/NATRules` whose `destination-translation.translated-address` is set. One `DiscoveredVip` per external IP in the rule's `destination` member list. Inbound source-NAT or DIPP rules aren't surfaced; only static destination-NATs map cleanly to the VIP concept.
+- **ARP table** — `<show><arp><entry name="all"/></arp></show>`. Skips MACs that read `(incomplete)` (unresolved ARP).
+- **HA discovery** — `<show><high-availability><state/></high-availability></show>`. Active/passive (`a-p`) and active/active (`a-a`) modes are mapped to `DiscoveredDevice.haMembers[]` keyed on each member's serial — identical shape to FortiGate so Phase 3 fan-out works without per-type branching. PAN-OS `disabled` / missing HA state normalizes to `haMode: "standalone"`.
+- **Asset projection** — discoveries write a `paloalto-firewall` `AssetSource` row keyed on serial number. Per-field projection priorities (hostname / serial / model / osVersion / mgmtIp) slot in next to `fortigate-firewall`. Manufacturer is fixed at `"Palo Alto Networks"` (constant; observed blob ignored, same convention as Fortinet's `"Fortinet"` constant).
+- **Polling defaults** — `paloalto` is an `AssetSourceKind` in `pollingCompatibility.ts` with the same allowed methods as FortiGate (`rest_api`, `snmp`, `ssh`, `icmp`, `disabled`). Source-default polling matches FortiGate too (`rest_api` on probe / telemetry / temperature / interfaces; `disabled` on LLDP). PAN-OS SNMP MIBs ship from factory, so operators can flip individual streams to SNMP per-asset when REST coverage is uneven.
+- **Filters** — `interfaceInclude` / `interfaceExclude` for interface IP discovery and `dhcpInclude` / `dhcpExclude` for DHCP subnet discovery use the same wildcard semantics as FortiGate (`*`, `prefix*`, `*suffix`, `*middle*`, literal). Filters apply to PAN-OS interface naming (`ethernet1/1`, `ethernet1/2.10`, etc.); the wildcard syntax is identical.
+- **What's NOT in v1** — DHCP reservation push (no write-back to PAN-OS), quarantine push (no MAC-block surface), Panorama integration (analog to FortiManager — multi-firewall fan-out is a follow-up), per-asset SNMP MIB seeding (PAN-COMMON-MIB upload still works through the standard MIB Database surface). The integration modal hides the DHCP Push and Quarantine Push tabs accordingly.
+
+---
+
 ## Entra ID / Intune Discovery Workflow
 
 `entraIdService.ts` queries Microsoft Graph via OAuth2 client-credentials flow to sync registered devices as assets. **Produces assets only** — no subnets, reservations, or VIPs — so it uses a dedicated `syncEntraDevices` path in `integrations.ts` rather than the shared `syncDhcpSubnets` pipeline.

@@ -10,6 +10,7 @@ import { requirePermission } from "../middleware/permissions.js";
 import * as fortimanager from "../../services/fortimanagerService.js";
 import { getFmgWorker } from "../../services/fmgWorker.js";
 import * as fortigate from "../../services/fortigateService.js";
+import * as paloalto from "../../services/paloaltoService.js";
 import * as windowsServer from "../../services/windowsServerService.js";
 import * as entraId from "../../services/entraIdService.js";
 import * as activeDirectory from "../../services/activeDirectoryService.js";
@@ -395,6 +396,30 @@ const FortiGateConfigSchema = z.object({
   verboseLogging: z.boolean().optional().default(false),
 });
 
+// Palo Alto firewall — read-only v1. Mirrors FortiGateConfigSchema for the
+// uniform top-level keys (host / port / verifySsl / verboseLogging /
+// monitorSettings / device + interface + dhcp filters). API key is the PAN-OS
+// equivalent of FortiGate's apiToken — operator generates it under
+// Operations → Generate API Key. `vsys` defaults to "vsys1" (Palo Alto's
+// analog of FortiGate's `vdom`). DHCP Push / Quarantine Push toggles are
+// intentionally absent in v1 — the integration modal hides those tabs.
+const PaloAltoConfigSchema = z.object({
+  host:      z.string().optional().default(""),
+  port:      z.number().int().min(1).max(65535).optional().default(443),
+  apiKey:    z.string().optional().default(""),
+  vsys:      z.string().optional().default("vsys1"),
+  verifySsl: z.boolean().optional().default(false),
+  mgmtInterface: z.string().optional().default(""),
+  interfaceInclude: z.array(z.string()).optional().default([]),
+  interfaceExclude: z.array(z.string()).optional().default([]),
+  dhcpInclude:      z.array(z.string()).optional().default([]),
+  dhcpExclude:      z.array(z.string()).optional().default([]),
+  monitorCredentialId: z.string().uuid().nullable().optional(),
+  sshCredentialId:    z.string().uuid().nullable().optional(),
+  // Per-integration verbose debug logging — uniform across types.
+  verboseLogging: z.boolean().optional().default(false),
+});
+
 const WindowsServerConfigSchema = z.object({
   host:      z.string().optional().default(""),
   port:      z.number().int().min(1).max(65535).optional().default(5985),
@@ -448,6 +473,14 @@ const CreateIntegrationSchema = z.discriminatedUnion("type", [
     type:         z.literal("fortigate"),
     name:         z.string().min(1, "Name is required"),
     config:       FortiGateConfigSchema,
+    enabled:      z.boolean().optional().default(true),
+    autoDiscover: z.boolean().optional().default(true),
+    pollInterval: z.number().int().min(1).max(24).optional().default(12),
+  }),
+  z.object({
+    type:         z.literal("paloalto"),
+    name:         z.string().min(1, "Name is required"),
+    config:       PaloAltoConfigSchema,
     enabled:      z.boolean().optional().default(true),
     autoDiscover: z.boolean().optional().default(true),
     pollInterval: z.number().int().min(1).max(24).optional().default(12),
@@ -715,6 +748,8 @@ router.post("/", async (req, res, next) => {
           discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
         } else if (input.type === "fortigate") {
           discoveryResult = await fortigate.discoverDhcpSubnets(input.config as any, ac.signal);
+        } else if (input.type === "paloalto") {
+          discoveryResult = await paloalto.discoverDhcpSubnets(input.config as any, ac.signal);
         } else {
           discoveryResult = await fortimanager.discoverDhcpSubnets(input.config as any, ac.signal, undefined, undefined, undefined, integration.id);
         }
@@ -921,6 +956,8 @@ router.post("/:id/test", async (req, res, next) => {
       result = await fortimanager.testConnection(config as any, integration.id);
     } else if (integration.type === "fortigate") {
       result = await fortigate.testConnection(config as any);
+    } else if (integration.type === "paloalto") {
+      result = await paloalto.testConnection(config as any);
     } else if (integration.type === "windowsserver") {
       result = await windowsServer.testConnection(config as any);
     } else if (integration.type === "entraid") {
@@ -1078,6 +1115,23 @@ router.post("/:id/query", async (req, res, next) => {
         query: z.record(z.string()).optional(),
       }).parse(req.body);
       const result = await fortigate.proxyQuery(integration.config as any, method, path, query);
+      sendProxyJson(res, result);
+      return;
+    }
+
+    if (integration.type === "paloalto") {
+      // Path forms:
+      //   /restapi/v10.1/...                  → REST (JSON) call
+      //   /api/?type=op&cmd=<xml>             → XML op command via panOpCommand
+      //   <xml fragment>                      → XML op command (bare form)
+      // See paloaltoService.proxyQuery for the dispatch rules.
+      const { method, path, query, body } = z.object({
+        method: z.enum(["GET", "POST", "PUT", "DELETE"]).optional().default("GET"),
+        path: z.string().min(1),
+        query: z.record(z.string()).optional(),
+        body: z.unknown().optional(),
+      }).parse(req.body);
+      const result = await paloalto.proxyQuery(integration.config as any, method, path, query, body);
       sendProxyJson(res, result);
       return;
     }
@@ -1367,6 +1421,7 @@ async function runPreflightTest(integration: { id: string; type: string; config:
   const config = integration.config as Record<string, unknown>;
   if (integration.type === "fortimanager") return fortimanager.testConnection(config as any, integration.id);
   if (integration.type === "fortigate") return fortigate.testConnection(config as any);
+  if (integration.type === "paloalto") return paloalto.testConnection(config as any);
   if (integration.type === "windowsserver") return windowsServer.testConnection(config as any);
   if (integration.type === "entraid") return entraId.testConnection(config as any);
   if (integration.type === "activedirectory") return activeDirectory.testConnection(config as any);
@@ -1393,6 +1448,7 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
     if (!config.host) throw new AppError(400, "Integration has no host configured");
     if (integration.type === "fortimanager" && !config.apiToken) throw new AppError(400, "Integration has no API token configured");
     if (integration.type === "fortigate" && !config.apiToken) throw new AppError(400, "Integration has no API token configured");
+    if (integration.type === "paloalto" && !config.apiKey) throw new AppError(400, "Integration has no API key configured");
     if (integration.type === "windowsserver" && !config.username) throw new AppError(400, "Integration has no username configured");
     if (integration.type === "activedirectory") {
       if (!config.bindDn) throw new AppError(400, "Integration has no bind DN configured");
@@ -1575,6 +1631,19 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
           syncTotals.decommissionedSwitches.push(...(r.decommissionedSwitches || []));
           syncTotals.decommissionedAps.push(...(r.decommissionedAps || []));
         }
+      } else if (integration.type === "paloalto") {
+        // Single Palo Alto firewall — same one-pass model as standalone FortiGate.
+        // Read-only v1: no DHCP push, no managed-switch/AP fan-out, no per-device
+        // iteration. Phase 2b decommission sweeps in syncDhcpSubnets find empty
+        // switchInventoriedDevices / apInventoriedDevices and skip cleanly.
+        discoveryResult = await paloalto.discoverDhcpSubnets(config as any, ac.signal, onProgress);
+        if (!ac.signal.aborted) {
+          const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
+          syncTotals.created.push(...r.created);
+          syncTotals.updated.push(...r.updated);
+          syncTotals.skipped.push(...r.skipped);
+          syncTotals.deprecated.push(...r.deprecated);
+        }
       } else {
         // FortiManager: onDeviceComplete fires after each managed FortiGate is queried,
         // syncing subnets/assets/reservations incrementally.
@@ -1665,6 +1734,9 @@ router.post("/test", async (req, res, next) => {
         if (input.type === "fortimanager" && needsRestore(cfg.fortigateApiToken)) {
           cfg.fortigateApiToken = stored.fortigateApiToken;
         }
+        if (input.type === "paloalto" && needsRestore(cfg.apiKey)) {
+          cfg.apiKey = stored.apiKey;
+        }
         if (input.type === "windowsserver" && needsRestore(cfg.password)) {
           cfg.password = stored.password;
         }
@@ -1681,6 +1753,8 @@ router.post("/test", async (req, res, next) => {
       result = await fortimanager.testConnection(input.config);
     } else if (input.type === "fortigate") {
       result = await fortigate.testConnection(input.config);
+    } else if (input.type === "paloalto") {
+      result = await paloalto.testConnection(input.config);
     } else if (input.type === "windowsserver") {
       result = await windowsServer.testConnection(input.config);
     } else if (input.type === "entraid") {
@@ -2060,6 +2134,97 @@ async function upsertFortigateFirewallAssetSource(
   // construction.
 }
 
+// ─── Palo Alto firewall AssetSource helpers ────────────────────────────────
+// Parallel to the FortiGate helpers above. The Palo Alto integration produces
+// the same `DiscoveredDevice` shape (single device per discovery run, keyed
+// on serial) so the projection layer treats it identically — only the
+// `kind` discriminator + `managedBy` value differ. Concepts the Palo Alto
+// path doesn't surface in v1 (metavar coords, FMG-style proxy, SNMP
+// sysLocation) stay null in the observed blob; future cycles can populate
+// them without changing the source-kind contract.
+function buildPaloAltoFirewallObservedBlob(
+  device: {
+    name?: string;
+    hostname?: string;
+    serial?: string;
+    model?: string;
+    mgmtIp?: string;
+    osVersion?: string;
+    latitude?: number;
+    longitude?: number;
+  },
+  syncedAt: Date,
+  ha?: {
+    haMode: "a-p" | "a-a";
+    haRole: "primary" | "secondary";
+    haPeerSerial: string;
+  },
+): Record<string, unknown> {
+  return {
+    kind: "paloalto-firewall",
+    syncedAt: syncedAt.toISOString(),
+    serial: device.serial || null,
+    hostname: device.hostname || device.name || null,
+    model: device.model || null,
+    osVersion: device.osVersion || null,
+    mgmtIp: device.mgmtIp || null,
+    latitude: Number.isFinite(device.latitude) ? device.latitude : null,
+    longitude: Number.isFinite(device.longitude) ? device.longitude : null,
+    // v1 doesn't pull these from PAN-OS yet; keep the field present and
+    // null so future cycles can populate without bumping the source-kind
+    // contract.
+    snmpLocation: null,
+    snmpGeocodedLatitude: null,
+    snmpGeocodedLongitude: null,
+    managedBy: "paloalto",
+    ...(ha
+      ? {
+          haMode: ha.haMode,
+          haRole: ha.haRole,
+          haPeerSerial: ha.haPeerSerial,
+        }
+      : {}),
+  };
+}
+
+async function upsertPaloAltoFirewallAssetSource(
+  assetId: string,
+  integrationId: string,
+  serial: string,
+  observed: Record<string, unknown>,
+  syncedAt: Date,
+  lastSeen: Date,
+): Promise<void> {
+  await prisma.assetSource.upsert({
+    where: { sourceKind_externalId: { sourceKind: "paloalto-firewall", externalId: serial } },
+    create: {
+      assetId,
+      sourceKind: "paloalto-firewall",
+      externalId: serial,
+      integrationId,
+      observed: observed as any,
+      inferred: false,
+      syncedAt,
+      firstSeen: lastSeen,
+      lastSeen,
+    },
+    update: {
+      assetId,
+      integrationId,
+      observed: observed as any,
+      inferred: false,
+      syncedAt,
+      lastSeen,
+    },
+  });
+  // Sweep any phantom "manual" source row keyed on the asset's own id —
+  // mirrors the FortiGate path. A pre-existing Polaris asset that gets
+  // claimed by a new Palo Alto discovery should drop the manual marker.
+  await prisma.assetSource.deleteMany({
+    where: { assetId, sourceKind: "manual", externalId: assetId },
+  });
+}
+
 // Source-shaped observed blob for managed FortiSwitch assets. Mirrors the
 // per-source JSON shape sketched in CLAUDE.md ("Per-source observed shapes
 // / sourceKind: fortiswitch"). Companion to the firewall blob above.
@@ -2290,6 +2455,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   const integrationLabel =
     integrationType === "windowsserver" ? "Windows Server" :
     integrationType === "fortigate" ? "FortiGate" :
+    integrationType === "paloalto" ? "Palo Alto" :
     "FortiManager";
   const projectRefLabel = `${integrationLabel} Integration`;
   const created: string[] = [];
@@ -3012,10 +3178,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (member.serial) {
           try {
             const syncedAt = new Date(now);
-            const observed = buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", syncedAt, memberHaCtx);
-            await upsertFortigateFirewallAssetSource(existingAsset.id, integrationId, member.serial, observed, syncedAt, syncedAt);
+            if (integrationType === "paloalto") {
+              const observed = buildPaloAltoFirewallObservedBlob(memberDevice, syncedAt, memberHaCtx);
+              await upsertPaloAltoFirewallAssetSource(existingAsset.id, integrationId, member.serial, observed, syncedAt, syncedAt);
+            } else {
+              const observed = buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", syncedAt, memberHaCtx);
+              await upsertFortigateFirewallAssetSource(existingAsset.id, integrationId, member.serial, observed, syncedAt, syncedAt);
+            }
           } catch (err: any) {
-            syncLog("error", `Failed to upsert fortigate-firewall AssetSource for ${memberDevice.hostname || device.name}: ${err?.message || "Unknown error"}`);
+            syncLog("error", `Failed to upsert firewall AssetSource for ${memberDevice.hostname || device.name}: ${err?.message || "Unknown error"}`);
           }
         }
         const fwSourceRows = await prisma.assetSource.findMany({
@@ -3123,9 +3294,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // built directly from this just-discovered firewall's observed blob.
       // Pure projection, no DB roundtrip — new asset has no other sources.
       const fwSyncedAt = new Date(now);
-      const fwObserved = buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", fwSyncedAt, memberHaCtx);
+      const isPaloAlto = integrationType === "paloalto";
+      const fwObserved = isPaloAlto
+        ? buildPaloAltoFirewallObservedBlob(memberDevice, fwSyncedAt, memberHaCtx)
+        : buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", fwSyncedAt, memberHaCtx);
       const { projected: fwCreateProjected } = projectAssetFromSources([
-        { sourceKind: "fortigate-firewall", inferred: false, observed: fwObserved },
+        { sourceKind: isPaloAlto ? "paloalto-firewall" : "fortigate-firewall", inferred: false, observed: fwObserved },
       ]);
       const isStandbyCreate = haMembers != null && !member.isPrimary;
       const newAsset = await prisma.asset.create({
@@ -3140,8 +3314,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // Phase 4d: legacy `assetTag = fgt:<serial>` write retired —
           // AssetSource (sourceKind="fortigate-firewall", externalId=serial)
           // upserted just below is the canonical identity link.
-          manufacturer: fwCreateProjected.manufacturer || "Fortinet",
-          model: fwCreateProjected.model || "FortiGate",
+          manufacturer: fwCreateProjected.manufacturer || (isPaloAlto ? "Palo Alto Networks" : "Fortinet"),
+          model: fwCreateProjected.model || (isPaloAlto ? "Palo Alto" : "FortiGate"),
           assetType: "firewall",
           status: "active",
           statusChangedAt: new Date(now),
@@ -3172,9 +3346,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           notes: isStandbyCreate
             ? `Auto-discovered from ${integrationLabel} integration (HA standby member)`
             : `Auto-discovered from ${integrationLabel} integration`,
-          tags: isStandbyCreate
-            ? ["fortigate", "auto-discovered", "ha-standby"]
-            : ["fortigate", "auto-discovered"],
+          tags: isPaloAlto
+            ? (isStandbyCreate
+                ? ["paloalto", "auto-discovered", "ha-standby"]
+                : ["paloalto", "auto-discovered"])
+            : (isStandbyCreate
+                ? ["fortigate", "auto-discovered", "ha-standby"]
+                : ["fortigate", "auto-discovered"]),
         },
       });
       // Explicit fortigate-firewall AssetSource upsert with rich observed
@@ -3184,10 +3362,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       if (member.serial) {
         try {
           const syncedAt = new Date(now);
-          const observed = buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", syncedAt, memberHaCtx);
-          await upsertFortigateFirewallAssetSource(newAsset.id, integrationId, member.serial, observed, syncedAt, syncedAt);
+          if (isPaloAlto) {
+            const observed = buildPaloAltoFirewallObservedBlob(memberDevice, syncedAt, memberHaCtx);
+            await upsertPaloAltoFirewallAssetSource(newAsset.id, integrationId, member.serial, observed, syncedAt, syncedAt);
+          } else {
+            const observed = buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", syncedAt, memberHaCtx);
+            await upsertFortigateFirewallAssetSource(newAsset.id, integrationId, member.serial, observed, syncedAt, syncedAt);
+          }
         } catch (err: any) {
-          syncLog("error", `Created FortiGate asset ${memberDevice.hostname || device.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
+          syncLog("error", `Created firewall asset ${memberDevice.hostname || device.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
         }
       }
       // Seed the `firewall:<hostname>` Tag registry row so the asset-edit

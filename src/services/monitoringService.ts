@@ -603,6 +603,18 @@ function defaultPollingForSource(
     if (stream === "lldp") return "disabled";
     return "rest_api";
   }
+  if (source === "paloalto") {
+    // PAN-OS REST API (9.0+) covers config + interfaces + NAT. Telemetry
+    // and temperature live on SNMP only (PAN-OS SNMP MIBs ship from the
+    // factory), but defaultPollingForSource picks rest_api on CPU/memory
+    // for parity with FortiGate and the resolver will route the sample
+    // collector to the appropriate transport per stream — operators
+    // override per-asset when they want SNMP telemetry. PAN-OS does
+    // surface LLDP via op command, but most enterprise fleets don't
+    // enable it, so we default to disabled (same call as Fortinet).
+    if (stream === "lldp") return "disabled";
+    return "rest_api";
+  }
   if (source === "activedirectory" || source === "entraid" || source === "windowsserver") {
     return stream === "responseTime" ? "icmp" : null;
   }

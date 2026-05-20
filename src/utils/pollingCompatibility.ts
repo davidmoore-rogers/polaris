@@ -34,6 +34,7 @@ export type PollingMethod = "rest_api" | "snmp" | "winrm" | "ssh" | "icmp" | "di
 export type AssetSourceKind =
   | "fortimanager"
   | "fortigate"
+  | "paloalto"
   | "activedirectory"
   | "entraid"
   | "windowsserver"
@@ -50,6 +51,13 @@ const ALL_METHODS: ReadonlyArray<PollingMethod> = ["rest_api", "snmp", "winrm", 
 const COMPATIBILITY: Readonly<Record<AssetSourceKind, ReadonlySet<PollingMethod>>> = {
   fortimanager:    new Set<PollingMethod>(["rest_api", "snmp", "ssh", "icmp", "disabled"]),
   fortigate:       new Set<PollingMethod>(["rest_api", "snmp", "ssh", "icmp", "disabled"]),
+  // Palo Alto: REST API (PAN-OS 9.0+) for config / interface IPs / NAT.
+  // SNMP supported on every PAN-OS for telemetry. SSH for CLI. ICMP for
+  // basic reachability. No WinRM (PAN-OS doesn't run it). No Agent
+  // (appliance — can't run third-party binaries). Same matrix shape as
+  // FortiGate; the underlying transports differ but the compatibility set
+  // is identical.
+  paloalto:        new Set<PollingMethod>(["rest_api", "snmp", "ssh", "icmp", "disabled"]),
   activedirectory: new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent"]),
   entraid:         new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent"]),
   windowsserver:   new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent"]),
@@ -66,6 +74,7 @@ export function assetSourceKindFromIntegrationType(integrationType: string | nul
   switch (integrationType) {
     case "fortimanager":    return "fortimanager";
     case "fortigate":       return "fortigate";
+    case "paloalto":        return "paloalto";
     case "activedirectory": return "activedirectory";
     case "entraid":         return "entraid";
     case "windowsserver":   return "windowsserver";

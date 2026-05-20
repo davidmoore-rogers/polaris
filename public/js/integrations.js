@@ -30,6 +30,7 @@ var _POLLING_LABELS = {
 var _POLLING_COMPAT = {
   fortimanager:    ["rest_api", "snmp", "ssh", "icmp", "disabled"],
   fortigate:       ["rest_api", "snmp", "ssh", "icmp", "disabled"],
+  paloalto:        ["rest_api", "snmp", "ssh", "icmp", "disabled"],
   activedirectory: ["icmp", "winrm", "ssh", "disabled"],
   entraid:         ["icmp", "winrm", "ssh", "disabled"],
   windowsserver:   ["icmp", "winrm", "ssh", "disabled"],
@@ -39,7 +40,7 @@ var _POLLING_COMPAT = {
 // Source-default polling for one stream. Mirrors defaultPollingForSource() in
 // src/services/monitoringService.ts. Used to label the "Inherit" option.
 function _polarisSourceDefaultPolling(source, stream) {
-  if (source === "fortimanager" || source === "fortigate") {
+  if (source === "fortimanager" || source === "fortigate" || source === "paloalto") {
     if (stream === "lldp") return "disabled";
     return "rest_api";
   }
@@ -427,6 +428,7 @@ async function loadIntegrations() {
       var typeBadge =
         intg.type === "windowsserver" ? "Windows Server" :
         intg.type === "fortigate" ? "FortiGate" :
+        intg.type === "paloalto" ? "Palo Alto" :
         intg.type === "entraid" ? "Entra ID" :
         intg.type === "activedirectory" ? "Active Directory" :
         "FortiManager";
@@ -478,6 +480,14 @@ async function loadIntegrations() {
           filterRow("DHCP", config.dhcpInclude, config.dhcpExclude) +
           filterRow("Interface", config.interfaceInclude, config.interfaceExclude) +
           filterRow("Inventory", config.inventoryIncludeInterfaces, config.inventoryExcludeInterfaces);
+      } else if (intg.type === "paloalto") {
+        detailRows =
+          '<div class="detail-row"><span class="detail-label">Host</span><span class="detail-value mono">' + escapeHtml(config.host || "-") + ':' + (config.port || defaultPort) + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">VSYS</span><span class="detail-value">' + escapeHtml(config.vsys || "vsys1") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">SSL Verify</span><span class="detail-value">' + (config.verifySsl ? "Yes" : "No") + '</span></div>' +
+          '<div class="detail-row"><span class="detail-label">Mgmt Interface</span><span class="detail-value mono">' + escapeHtml(config.mgmtInterface || "-") + '</span></div>' +
+          filterRow("DHCP", config.dhcpInclude, config.dhcpExclude) +
+          filterRow("Interface", config.interfaceInclude, config.interfaceExclude);
       } else {
         detailRows =
           '<div class="detail-row"><span class="detail-label">Host</span><span class="detail-value mono">' + escapeHtml(config.host || "-") + ':' + (config.port || defaultPort) + '</span></div>' +
@@ -1872,6 +1882,100 @@ function getFgtFormConfig() {
   };
 }
 
+// Palo Alto firewall — read-only v1. Single-device integration like standalone
+// FortiGate; auth uses an API key in the X-PAN-KEY header (PAN-OS 9.0+ REST)
+// plus the `key=` query param on `/api/?type=op&cmd=…` XML op commands.
+// DHCP Push / Quarantine Push tabs are not rendered for paloalto — those
+// surfaces don't exist in v1 (toggled by `openCreateModal` tab visibility).
+function paloAltoGeneralHTML(defaults) {
+  var d = defaults || {};
+  return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Branch Office Palo Alto"></div>' +
+    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">This integration connects <strong style="color:var(--color-text-primary)">directly to a standalone Palo Alto firewall</strong> (not managed by Panorama). Requires <strong style="color:var(--color-text-primary)">PAN-OS 9.0+</strong> and an API key generated under <strong style="color:var(--color-text-primary)">Operations &gt; Generate API Key</strong>.</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
+    '<div style="display:grid;grid-template-columns:1fr auto;gap:8px">' +
+      '<div class="form-group"><label>Host / IP *</label><input type="text" id="f-host" value="' + escapeHtml(d.host || "") + '" placeholder="e.g. paloalto.example.com"></div>' +
+      '<div class="form-group"><label>Port</label><input type="number" id="f-port" value="' + (d.port || 443) + '" min="1" max="65535" style="width:90px"></div>' +
+    '</div>' +
+    '<div class="form-group"><label>API Key</label><input type="password" id="f-apiKey" value="' + (d.apiKeyPlaceholder ? "" : escapeHtml(d.apiKey || "")) + '" placeholder="' + (d.apiKeyPlaceholder || "PAN-OS API key") + '"><p class="hint">Generate under Operations &gt; Generate API Key (PAN-OS Web UI)</p></div>' +
+    '<div class="form-group"><label>Virtual System (vsys)</label><input type="text" id="f-vsys" value="' + escapeHtml(d.vsys || "vsys1") + '" placeholder="vsys1"><p class="hint">PAN-OS Virtual System — leave as "vsys1" for default</p></div>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-verifySsl" ' + (d.verifySsl ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-verifySsl" style="margin:0">Verify SSL certificate</label>' +
+    '</div>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-enabled" ' + (d.enabled !== false ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-enabled" style="margin:0">Enabled</label>' +
+    '</div>' +
+    '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="f-autoDiscover" ' + (d.autoDiscover !== false ? "checked" : "") + ' style="width:auto">' +
+      '<label for="f-autoDiscover" style="margin:0">Enable auto-discovery</label>' +
+    '</div>' +
+    '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to automatically query for DHCP / NAT / ARP updates (1–24 hours)</p></div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Palo Alto Settings</p>' +
+    '<div class="form-group"><label>Management Interface</label><input type="text" id="f-mgmtInterface" value="' + escapeHtml(d.mgmtInterface || "") + '" placeholder="e.g. management, ethernet1/1"><p class="hint">Optional — Polaris uses the host you connected to as the management IP if unset</p></div>' +
+    verboseLoggingFormHTML(d);
+}
+
+function paloAltoFiltersHTML(defaults) {
+  var d = defaults || {};
+  var dhcpMode = (d.dhcpInclude && d.dhcpInclude.length > 0) ? "include" : "exclude";
+  var dhcpIfaces = dhcpMode === "include" ? (d.dhcpInclude || []) : (d.dhcpExclude || []);
+  var ifaceMode = (d.interfaceInclude && d.interfaceInclude.length > 0) ? "include" : "exclude";
+  var ifaceList = ifaceMode === "include" ? (d.interfaceInclude || []) : (d.interfaceExclude || []);
+  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Filter</p>' +
+    '<div class="form-group">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<select id="f-dhcpMode" style="width:auto">' +
+          '<option value="include"' + (dhcpMode === "include" ? " selected" : "") + '>Include</option>' +
+          '<option value="exclude"' + (dhcpMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
+        '</select>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these interfaces from DHCP scope discovery</span>' +
+      '</div>' +
+      '<textarea id="f-dhcpInterfaces" rows="2" placeholder="One per line — e.g. ethernet1/1&#10;ethernet1/2.*&#10;*trust">' + escapeHtml(dhcpIfaces.join("\n")) + '</textarea>' +
+      '<p class="hint">Leave empty to include all interfaces. Wildcards: <code>ethernet1/*</code>, <code>*trust</code>, <code>*mgmt*</code></p>' +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Filter</p>' +
+    '<div class="form-group">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<select id="f-ifaceMode" style="width:auto">' +
+          '<option value="include"' + (ifaceMode === "include" ? " selected" : "") + '>Include</option>' +
+          '<option value="exclude"' + (ifaceMode === "exclude" ? " selected" : "") + '>Exclude</option>' +
+        '</select>' +
+        '<span style="font-size:0.85rem;color:var(--color-text-secondary)">these interfaces from interface IP discovery</span>' +
+      '</div>' +
+      '<textarea id="f-ifaceInterfaces" rows="2" placeholder="One per line — e.g. ethernet1/1&#10;ethernet1/2.*&#10;*trust">' + escapeHtml(ifaceList.join("\n")) + '</textarea>' +
+      '<p class="hint">Leave empty to include all interfaces. Wildcards: <code>ethernet1/*</code>, <code>*trust</code>, <code>*mgmt*</code></p>' +
+    '</div>';
+}
+
+function paloAltoFormHTML(defaults) {
+  return paloAltoGeneralHTML(defaults) + paloAltoFiltersHTML(defaults);
+}
+
+function getPaloFormConfig() {
+  var port = document.getElementById("f-port").value;
+  var dhcpMode = document.getElementById("f-dhcpMode") ? document.getElementById("f-dhcpMode").value : "exclude";
+  var dhcpIfaces = document.getElementById("f-dhcpInterfaces") ? linesToArray("f-dhcpInterfaces") : [];
+  var ifaceMode = document.getElementById("f-ifaceMode") ? document.getElementById("f-ifaceMode").value : "exclude";
+  var ifaceIfaces = document.getElementById("f-ifaceInterfaces") ? linesToArray("f-ifaceInterfaces") : [];
+  return {
+    host: val("f-host"),
+    port: port ? parseInt(port, 10) : 443,
+    apiKey: val("f-apiKey"),
+    vsys: val("f-vsys") || "vsys1",
+    verifySsl: document.getElementById("f-verifySsl").checked,
+    mgmtInterface: val("f-mgmtInterface") || "",
+    dhcpInclude: dhcpMode === "include" ? dhcpIfaces : [],
+    dhcpExclude: dhcpMode === "exclude" ? dhcpIfaces : [],
+    interfaceInclude: ifaceMode === "include" ? ifaceIfaces : [],
+    interfaceExclude: ifaceMode === "exclude" ? ifaceIfaces : [],
+    verboseLogging: readVerboseLoggingFromForm(),
+  };
+}
+
 function windowsServerFormHTML(defaults) {
   var d = defaults || {};
   var sslChecked = d.useSsl ? "checked" : "";
@@ -2083,6 +2187,10 @@ function showTypePicker() {
         '<strong>FortiGate</strong>' +
         '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">Standalone FortiGate via REST</span>' +
       '</button>' +
+      '<button class="btn btn-secondary" id="pick-palo" style="padding:1.2rem;font-size:0.95rem;display:flex;flex-direction:column;align-items:center;gap:6px">' +
+        '<strong>Palo Alto</strong>' +
+        '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">Standalone PAN-OS firewall via REST (read-only)</span>' +
+      '</button>' +
       '<button class="btn btn-secondary" id="pick-win" style="padding:1.2rem;font-size:0.95rem;display:flex;flex-direction:column;align-items:center;gap:6px">' +
         '<strong>Windows Server</strong>' +
         '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">DHCP scopes via WinRM</span>' +
@@ -2100,6 +2208,7 @@ function showTypePicker() {
   openModal("Add Integration", body, footer);
   document.getElementById("pick-fmg").addEventListener("click", function () { closeModal(); openCreateModal("fortimanager"); });
   document.getElementById("pick-fgt").addEventListener("click", function () { closeModal(); openCreateModal("fortigate"); });
+  document.getElementById("pick-palo").addEventListener("click", function () { closeModal(); openCreateModal("paloalto"); });
   document.getElementById("pick-win").addEventListener("click", function () { closeModal(); openCreateModal("windowsserver"); });
   document.getElementById("pick-entra").addEventListener("click", function () { closeModal(); openCreateModal("entraid"); });
   document.getElementById("pick-ad").addEventListener("click", function () { closeModal(); openCreateModal("activedirectory"); });
@@ -2108,6 +2217,7 @@ function showTypePicker() {
 function _formHTMLForType(type, defaults) {
   if (type === "windowsserver") return windowsServerFormHTML(defaults);
   if (type === "fortigate") return fortiGateFormHTML(defaults);
+  if (type === "paloalto") return paloAltoFormHTML(defaults);
   if (type === "entraid") return entraIdFormHTML(defaults);
   if (type === "activedirectory") return activeDirectoryFormHTML(defaults);
   return fortiManagerFormHTML(defaults);
@@ -2116,6 +2226,7 @@ function _formHTMLForType(type, defaults) {
 function _formConfigForType(type) {
   if (type === "windowsserver") return getWinFormConfig();
   if (type === "fortigate") return getFgtFormConfig();
+  if (type === "paloalto") return getPaloFormConfig();
   if (type === "entraid") return getEntraFormConfig();
   if (type === "activedirectory") return getAdFormConfig();
   return getFormConfig();
@@ -2142,6 +2253,7 @@ function _titleForType(type, action) {
   var product =
     type === "windowsserver" ? "Windows Server" :
     type === "fortigate" ? "FortiGate" :
+    type === "paloalto" ? "Palo Alto" :
     type === "entraid" ? "Entra ID" :
     type === "activedirectory" ? "Active Directory" :
     "FortiManager";
@@ -2155,6 +2267,7 @@ async function openCreateModal(type) {
   var isAd = type === "activedirectory";
   var isFmg = type === "fortimanager";
   var isFgt = type === "fortigate";
+  var isPalo = type === "paloalto";
   var isAd  = type === "activedirectory";
   var isEntra = type === "entraid";
   var isWin = type === "windowsserver";
@@ -2192,6 +2305,23 @@ async function openCreateModal(type) {
     addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true) });
     addTabs.push({ key: "quarantine-push", label: "Quarantine Push", html: quarantinePushFormHTML(false, true) });
     body = _intRenderTabbedBody("intg-edit", addTabs);
+  } else if (isPalo) {
+    // Palo Alto read-only v1: General + Filters + Monitoring. No DHCP Push,
+    // no Quarantine Push (those tabs require write surfaces that don't
+    // exist for paloalto in v1).
+    var paloMonSettings = {};
+    var paloCreds = [];
+    try {
+      var paloManual = await api.monitorSettings.getManual();
+      paloMonSettings = paloManual || {};
+    } catch (e) { /* fall back to defaults */ }
+    try { var paloCredResp = await api.credentials.list(); paloCreds = Array.isArray(paloCredResp) ? paloCredResp : []; } catch (e) { /* picker just shows defaults */ }
+    var paloTabs = [
+      { key: "general",    label: "General",    html: paloAltoGeneralHTML({}) },
+      { key: "filters",    label: "Filters",    html: paloAltoFiltersHTML({}) },
+      { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(paloMonSettings, { snmpCredentials: paloCreds, monitorCredentialId: null, integrationId: null, integrationType: type, integrationName: "" }) },
+    ];
+    body = _intRenderTabbedBody("intg-edit", paloTabs);
   } else if (isAd || isEntra || isWin) {
     var addMonSettings = {};
     try {
@@ -2344,6 +2474,7 @@ async function openEditModal(id) {
     var config = intg.config || {};
     var isWin = intg.type === "windowsserver";
     var isFgt = intg.type === "fortigate";
+    var isPalo = intg.type === "paloalto";
     var isEntra = intg.type === "entraid";
     var isAd = intg.type === "activedirectory";
     var body, formGetter;
@@ -2449,6 +2580,38 @@ async function openEditModal(id) {
         if (!fc.apiToken) delete fc.apiToken;
         return fc;
       };
+    } else if (isPalo) {
+      var paloDefaults = {
+        name: intg.name,
+        host: config.host,
+        port: config.port,
+        apiKey: "",
+        apiKeyPlaceholder: "Leave blank to keep current API key",
+        vsys: config.vsys || "vsys1",
+        verifySsl: config.verifySsl,
+        enabled: intg.enabled,
+        autoDiscover: intg.autoDiscover !== false,
+        pollInterval: intg.pollInterval,
+        mgmtInterface: config.mgmtInterface,
+        dhcpInclude: config.dhcpInclude || [],
+        dhcpExclude: config.dhcpExclude || [],
+        interfaceInclude: config.interfaceInclude || [],
+        interfaceExclude: config.interfaceExclude || [],
+        verboseLogging: config.verboseLogging === true,
+        verboseLoggingEnabledAt: config.verboseLoggingEnabledAt,
+      };
+      // Edit modal tabs match the create modal's 3-tab layout exactly so
+      // the operator sees the same surface across both flows. The
+      // Monitoring tab wraps the per-integration tier-3 settings (loaded
+      // below in the isPalo-aware block at line ~2700).
+      body = paloAltoFormHTML(paloDefaults); // flat fallback; replaced by tabs below
+      // Stash for the tab-construction block to reuse without re-deriving.
+      var _paloEditDefaults = paloDefaults;
+      formGetter = function () {
+        var fc = getPaloFormConfig();
+        if (!fc.apiKey) delete fc.apiKey;
+        return fc;
+      };
     } else {
       var defaults = {
         name: intg.name,
@@ -2497,8 +2660,8 @@ async function openEditModal(id) {
     // only. Manual tier + cross-source class overrides live on the Assets
     // page Monitoring Settings modal.
     var isFmgOrFgt = (intg.type === "fortimanager" || intg.type === "fortigate");
-    var monCapable = isFmgOrFgt || isAd || isEntra || isWin;
-    if (!isFmgOrFgt && monCapable) {
+    var monCapable = isFmgOrFgt || isAd || isEntra || isWin || isPalo;
+    if (!isFmgOrFgt && !isPalo && monCapable) {
       // AD / Entra / WindowsServer: wrap the existing flat form as the
       // General tab and add a Monitoring tab alongside it.
       var monSettings = {};
@@ -2516,6 +2679,30 @@ async function openEditModal(id) {
         }) },
       ];
       body = _intRenderTabbedBody("intg-edit", nonFortinetTabs);
+    }
+    if (isPalo) {
+      // Palo Alto edit modal: General + Filters + Monitoring (3 tabs),
+      // matching the create modal's layout exactly. No DHCP Push or
+      // Quarantine Push tabs — those write surfaces don't exist in v1.
+      var paloMonSettings = {};
+      var paloCreds = [];
+      try {
+        var paloResp = await api.monitorSettings.getIntegration(intg.id);
+        if (paloResp && paloResp.settings) paloMonSettings = paloResp.settings;
+      } catch (e) { /* fall back to defaults */ }
+      try { var paloCredResp = await api.credentials.list(); paloCreds = Array.isArray(paloCredResp) ? paloCredResp : []; } catch (e) { /* picker just shows defaults */ }
+      var paloEditTabs = [
+        { key: "general",    label: "General",    html: paloAltoGeneralHTML(_paloEditDefaults) },
+        { key: "filters",    label: "Filters",    html: paloAltoFiltersHTML(_paloEditDefaults) },
+        { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(paloMonSettings, {
+          snmpCredentials: paloCreds,
+          monitorCredentialId: null,
+          integrationId:   id,
+          integrationType: intg.type,
+          integrationName: intg.name,
+        }) },
+      ];
+      body = _intRenderTabbedBody("intg-edit", paloEditTabs);
     }
     if (isFmgOrFgt) {
       var monSettings = {};
