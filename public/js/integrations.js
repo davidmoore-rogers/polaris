@@ -883,6 +883,40 @@ function _amonCoerceLegacy(sel) {
   return null;
 }
 
+// Canonical-stringify an autoMonitorInterfaces selection for change detection.
+// Sorts string arrays so reordering inside a list doesn't read as a change,
+// normalizes booleans, and collapses null / {} / coerced-legacy shapes to the
+// same string ("null"). Used by the save handler to skip the per-class apply
+// pass when nothing about that block's selection actually changed — saving
+// for an unrelated reason (API token rotation, name change, monitoring tier
+// edit) shouldn't re-fire an apply that can be expensive on big fleets.
+function _amonCanonicalize(sel) {
+  var coerced = _amonCoerceLegacy(sel);
+  if (!coerced) return "null";
+  var out = {};
+  if (coerced.byNames && Array.isArray(coerced.byNames.names)) {
+    out.byNames = { names: coerced.byNames.names.slice().sort() };
+  }
+  if (coerced.byPatterns && Array.isArray(coerced.byPatterns.patterns)) {
+    out.byPatterns = {
+      patterns: coerced.byPatterns.patterns.slice().sort(),
+      regex:    coerced.byPatterns.regex === true,
+      onlyUp:   coerced.byPatterns.onlyUp === true,
+    };
+  }
+  if (coerced.byTypes && Array.isArray(coerced.byTypes.types)) {
+    out.byTypes = {
+      types:  coerced.byTypes.types.slice().sort(),
+      onlyUp: coerced.byTypes.onlyUp === true,
+    };
+  }
+  if (coerced.byLldp && Array.isArray(coerced.byLldp.neighborTypes)) {
+    out.byLldp = { neighborTypes: coerced.byLldp.neighborTypes.slice().sort() };
+  }
+  if (Object.keys(out).length === 0) return "null";
+  return JSON.stringify(out);
+}
+
 function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defaultMode, hasIntegrationId) {
   var sel = _amonCoerceLegacy(currentSelection) || {};
   var byNames    = sel.byNames    || null;
@@ -2865,14 +2899,39 @@ async function openEditModal(id) {
           ["fortiswitch", saved.editConfig.fortiswitchMonitor],
           ["fortiap",     saved.editConfig.fortiapMonitor],
         ] : [];
-        var hasSelection = classes.some(function (c) { return c[1] && c[1].autoMonitorInterfaces; });
 
-        if (hasSelection) {
+        // Fire apply only for per-class blocks whose autoMonitorInterfaces
+        // selection actually changed during this modal session. Saving for
+        // an unrelated reason (API token rotation, name change, monitoring
+        // tier edit) used to re-fire apply for every block that had ANY
+        // selection — expensive on big fleets and surprising to operators.
+        // Baseline = saved selection stashed at modal-open by
+        // _autoMonitorInterfacesHTML; post-save = whatever editConfig holds
+        // (what we just PUT). Equality goes through _amonCanonicalize so
+        // array reordering / null-vs-empty-object don't read as a change.
+        var classToBaselinePrefix = {
+          fortigate:   "f-mon-fortigate-amon-",
+          fortiswitch: "f-mon-fortiswitch-amon-",
+          fortiap:     "f-mon-fortiap-amon-",
+        };
+        var activeApplies = classes.filter(function (entry) {
+          if (!(entry[1] && entry[1].autoMonitorInterfaces)) return false;
+          var prefix = classToBaselinePrefix[entry[0]];
+          var baseline = prefix ? window["__autoMon_savedSelection_" + prefix] : null;
+          return _amonCanonicalize(baseline) !== _amonCanonicalize(entry[1].autoMonitorInterfaces);
+        });
+
+        if (activeApplies.length > 0) {
           // Capacity guard: warn before applying selections that would pin
           // a large number of interfaces. We sniff the cached count from
           // each preview block; missing/stale values just skip the warning.
+          // Scoped to the blocks that ARE changing — a class whose selection
+          // didn't change this session shouldn't contribute to the estimate.
+          var changedPrefixes = activeApplies
+            .map(function (e) { return classToBaselinePrefix[e[0]]; })
+            .filter(Boolean);
           var totalEstimate = 0;
-          ["f-mon-fortigate-amon-", "f-mon-fortiswitch-amon-", "f-mon-fortiap-amon-"].forEach(function (p) {
+          changedPrefixes.forEach(function (p) {
             var el = document.getElementById(p + "preview");
             var n = el && el.dataset && parseInt(el.dataset.interfaceCount || "0", 10);
             if (Number.isFinite(n)) totalEstimate += n;
@@ -2898,9 +2957,6 @@ async function openEditModal(id) {
           // modal stuck on "Applying..." for minutes on big fleets — one
           // class with a few hundred switches could take 30-60s on its own
           // under the old sequential-update path.
-          var activeApplies = classes.filter(function (entry) {
-            return entry[1] && entry[1].autoMonitorInterfaces;
-          });
           var applyResults = await Promise.all(activeApplies.map(function (entry) {
             return api.integrations.interfaceAggregateApply(id, entry[0]).then(
               function (r) { return { ok: true,  klass: entry[0], r: r }; },
