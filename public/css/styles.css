@@ -1087,6 +1087,21 @@ thead th {
   white-space: normal;
   overflow-wrap: anywhere;
 }
+/* Assets page: pin the column header row (labels + inline TableSF filter
+   widgets) below the sticky filter-bar so they stay visible while scrolling
+   through long asset lists. Scoped so other pages keep their default
+   non-sticky thead. The filter-bar pins at top:0 and stands ~53px tall;
+   thead pins flush against its bottom edge. The .table-wrapper would
+   normally trap sticky thead inside its own scroll container (overflow-x
+   computes overflow-y to auto per CSS spec), so we lift the wrapper's
+   overflow back to visible on this page — losing the per-row horizontal
+   scroll, which the column-hide controls (#btn-assets-columns) cover. */
+body.page-assets .table-wrapper { overflow: visible; }
+body.page-assets .table-wrapper thead th {
+  position: sticky;
+  top: 53px;
+  z-index: 10;
+}
 tbody td {
   padding: 0.6rem 1rem;
   border-bottom: 1px solid var(--color-border-light);
