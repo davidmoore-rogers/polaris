@@ -1128,9 +1128,17 @@ const ClassQuerySchema = z.enum(["fortigate", "fortiswitch", "fortiap"]);
 // in-flight live preview that fires on every keystroke before Save. Same
 // multi-block shape, same legacy-shape coercion, so an older UI build that
 // posts the single-mode form still gets a useful preview.
+//
+// `baselineSelection` is optional. When provided, the service computes per-
+// asset pin sets for BOTH selections from a single DB fetch and returns a
+// `diff` block alongside the regular preview shape. Drives the "+X / −Y"
+// delta hint that lets operators see what a checkbox toggle just changed.
+// Older UI builds that don't send baselineSelection get the same preview
+// shape as before — no diff.
 const PreviewBodySchema = z.object({
-  class:     ClassQuerySchema,
-  selection: AutoMonitorInterfacesSchema,
+  class:             ClassQuerySchema,
+  selection:         AutoMonitorInterfacesSchema,
+  baselineSelection: AutoMonitorInterfacesSchema.optional(),
 });
 
 router.get("/:id/interface-aggregate", async (req, res, next) => {
@@ -1157,7 +1165,22 @@ router.post("/:id/interface-aggregate/preview", async (req, res, next) => {
     if (byPatterns) {
       for (const pat of byPatterns.patterns) autoMonitor.compilePattern(pat, byPatterns.regex === true);
     }
-    const result = await autoMonitor.previewAutoMonitorForClass(req.params.id, body.class, body.selection ?? null);
+    // Same syntactic validation for the baseline so a stale regex in the
+    // last-sent selection doesn't 500 the diff request.
+    const baselineByPatterns = body.baselineSelection?.byPatterns;
+    if (baselineByPatterns) {
+      for (const pat of baselineByPatterns.patterns) autoMonitor.compilePattern(pat, baselineByPatterns.regex === true);
+    }
+    // `baselineSelection` undefined → service returns no diff (back-compat).
+    // `baselineSelection === null` (key present, value null) → service treats
+    // it as "no pins at all" so the diff shows the full current set as adds.
+    const baseline = "baselineSelection" in body ? (body.baselineSelection ?? null) : undefined;
+    const result = await autoMonitor.previewAutoMonitorForClass(
+      req.params.id,
+      body.class,
+      body.selection ?? null,
+      baseline,
+    );
     res.json(result);
   } catch (err) {
     next(err);

@@ -890,6 +890,14 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
   var byTypes    = sel.byTypes    || null;
   var byLldp     = sel.byLldp     || null;
 
+  // Stash the saved selection so the wire function can seed lastSentSelection
+  // with it. The diff in the live preview compares each in-flight selection
+  // against the PREVIOUS one sent — initial baseline = saved, so the first
+  // render shows no diff and subsequent toggles show per-click adds/removes.
+  // Stored under a per-card key so multiple cards in the same modal (the
+  // FortiGate / FortiSwitch / FortiAP subtabs) don't clobber each other.
+  window["__autoMon_savedSelection_" + idPrefix] = (Object.keys(sel).length > 0) ? sel : null;
+
   // Each "block" gets a master checkbox that controls visibility + inclusion.
   // Independent — operators can mix-and-match modes; the union is what gets
   // pinned. No "Disabled" toggle anymore: all four off = nothing pinned.
@@ -946,21 +954,36 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
   '</div>';
 
   // ─── By interface type panel ──────────────────────────────────────────────
-  var typeSet = byTypes ? new Set(byTypes.types) : new Set();
+  // The list of types rendered here is sourced from the integration's
+  // interface-aggregate endpoint at lazy-load time (shared with the By-name
+  // load) so operators only see ifType values that actually exist on this
+  // integration's discovered devices. Saved-selection types not present in
+  // the latest discovery are preserved so a stored value isn't silently
+  // dropped. The initial render shows only the saved-selection types (or a
+  // loading placeholder when there's nothing saved yet) — the data load
+  // replaces this with the observed set.
   var typeOnlyUp = byTypes ? byTypes.onlyUp !== false : true;
-  function typeBox(name) {
-    var on = typeSet.has(name) ? " checked" : "";
+  var savedTypes = byTypes ? byTypes.types.slice() : [];
+  // Stash for the loader so it can preserve saved-but-not-yet-rendered types
+  // even before the user has opened this panel.
+  window["__autoMon_typeSeed_" + idPrefix] = savedTypes;
+  function _initialTypeBox(name) {
     return '<label style="display:flex;align-items:center;gap:6px;font-size:0.88rem;margin-bottom:0.25rem">' +
-             '<input type="checkbox" data-type-checkbox="1" id="' + idPrefix + 'type-' + name + '" value="' + name + '"' + on + ' style="width:auto"> ' + name +
+             '<input type="checkbox" data-type-checkbox="1" id="' + idPrefix + 'type-' + name + '" value="' + name + '" checked style="width:auto"> ' + name +
            '</label>';
   }
+  var initialTypesHtml = savedTypes.length > 0
+    ? savedTypes.map(_initialTypeBox).join("")
+    : (hasIntegrationId
+        ? '<p class="hint" style="margin:0">Loading interface types…</p>'
+        : '<p class="hint" style="margin:0;color:var(--color-warning)">Save the integration and run discovery first — interface types are aggregated from already-discovered devices.</p>');
   var typesPanel = '<div id="' + idPrefix + 'panel-types" style="display:' + (byTypes ? '' : 'none') + ';margin:0.35rem 0 0.6rem 1.5rem">' +
-    typeBox("physical") + typeBox("aggregate") + typeBox("vlan") + typeBox("loopback") + typeBox("tunnel") +
+    '<div id="' + idPrefix + 'types-options">' + initialTypesHtml + '</div>' +
     '<label style="display:flex;align-items:center;gap:6px;font-size:0.86rem;margin-top:0.5rem">' +
       '<input type="checkbox" id="' + idPrefix + 'types-onlyUp"' + (typeOnlyUp ? " checked" : "") + ' style="width:auto"> Only currently up' +
       ' <span class="hint" style="margin:0;font-size:0.78rem">(skips disabled / disconnected ports)</span>' +
     '</label>' +
-    '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Examples: <code>physical</code> matches every Ethernet port; <code>aggregate</code> matches LAG / MCLAG bundles; <code>vlan</code> matches 802.1Q sub-interfaces.</p>' +
+    '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Only interface types observed on this integration\'s ' + escapeHtml(kindLabel) + 's are listed.</p>' +
   '</div>';
 
   // ─── By LLDP neighbor panel ───────────────────────────────────────────────
@@ -994,7 +1017,7 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
       namesPanel +
       masterBox("patterns", "By pattern",         "wildcard or regex match",                          !!byPatterns) +
       patternsPanel +
-      masterBox("types",    "By interface type",  "physical / aggregate / vlan / ...",                !!byTypes) +
+      masterBox("types",    "By interface type",  "types seen on this integration's devices",         !!byTypes) +
       typesPanel +
       masterBox("lldp",     "By LLDP neighbor",   "pin where an LLDP neighbor is a monitored asset",  !!byLldp) +
       lldpPanel +
@@ -1087,7 +1110,17 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
     lldp:     document.getElementById(idPrefix + "panel-lldp"),
   };
   var preview = document.getElementById(idPrefix + "preview");
-  var namesLoaded = false;
+  var aggregateLoaded = false;
+  var aggregateRows = null;
+  // Per-card tracking of the most recently sent selection. The next preview
+  // request passes this as `baselineSelection`, so the backend's diff block
+  // shows the delta from the operator's previous click — not from the saved
+  // state. Initial baseline = saved selection at modal open (stashed by
+  // _autoMonitorInterfacesHTML), so the first preview-on-open shows no diff.
+  var lastSentSelection = window["__autoMon_savedSelection_" + idPrefix] || null;
+  // Canonical IfType order — matches IF_TYPES in src/services/autoMonitorInterfacesService.ts.
+  // Backend Zod schema rejects values outside this set, so the UI mirrors it.
+  var CANONICAL_IF_TYPES = ["physical", "aggregate", "vlan", "loopback", "tunnel"];
 
   function syncMasterVisibility() {
     var anyEnabled = false;
@@ -1096,53 +1129,104 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
       var key = masters[m].value;
       if (panels[key]) panels[key].style.display = checked ? "" : "none";
       if (checked) anyEnabled = true;
-      if (key === "names" && checked && !namesLoaded && integrationId) loadNamesList();
+      if ((key === "names" || key === "types") && checked && !aggregateLoaded && integrationId) loadAggregate();
     }
     return anyEnabled;
   }
 
-  function loadNamesList(force) {
+  // Renders the dynamic "By interface type" checklist from cached aggregate
+  // rows. Only canonical ifTypes that actually appear in the integration's
+  // discovered samples are listed, plus any saved-selection types not seen
+  // in the latest data (preserved so a stored value isn't silently dropped).
+  // Already-checked boxes in the DOM are preserved across re-renders.
+  function renderTypesList() {
+    var optsEl = document.getElementById(idPrefix + "types-options");
+    if (!optsEl || aggregateRows === null) return;
+    var existingChecked = new Set();
+    var existing = optsEl.querySelectorAll('input[data-type-checkbox="1"]:checked');
+    for (var i = 0; i < existing.length; i++) existingChecked.add(existing[i].value);
+    var seed = window["__autoMon_typeSeed_" + idPrefix];
+    if (seed && seed.length) seed.forEach(function (t) { existingChecked.add(t); });
+    var seenTypes = new Set();
+    for (var r = 0; r < aggregateRows.length; r++) {
+      var t = aggregateRows[r].ifType;
+      if (t && CANONICAL_IF_TYPES.indexOf(t) !== -1) seenTypes.add(t);
+    }
+    // Union the observed types with any saved-selection types we need to
+    // preserve. Render in canonical order.
+    var renderSet = new Set(seenTypes);
+    existingChecked.forEach(function (t) {
+      if (CANONICAL_IF_TYPES.indexOf(t) !== -1) renderSet.add(t);
+    });
+    var rendered = CANONICAL_IF_TYPES.filter(function (t) { return renderSet.has(t); });
+    if (rendered.length === 0) {
+      optsEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-warning)">No interface types found yet. Once monitoring runs at least one System Info pass on each discovered device, types will appear here.</p>';
+      return;
+    }
+    optsEl.innerHTML = rendered.map(function (name) {
+      var on = existingChecked.has(name) ? " checked" : "";
+      return '<label style="display:flex;align-items:center;gap:6px;font-size:0.88rem;margin-bottom:0.25rem">' +
+               '<input type="checkbox" data-type-checkbox="1" id="' + idPrefix + 'type-' + name + '" value="' + name + '"' + on + ' style="width:auto"> ' + name +
+             '</label>';
+    }).join("");
+    var boxes = optsEl.querySelectorAll('input[data-type-checkbox="1"]');
+    for (var b = 0; b < boxes.length; b++) {
+      boxes[b].addEventListener("change", schedulePreview);
+    }
+  }
+
+  function loadAggregate(force) {
     if (!integrationId) return;
+    if (!force && aggregateLoaded) return;
+    var listEl = document.getElementById(idPrefix + "names-list");
+    var typesEl = document.getElementById(idPrefix + "types-options");
+    if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0">Loading…</p>';
+    if (typesEl && (force || !aggregateRows)) typesEl.innerHTML = '<p class="hint" style="margin:0">Loading interface types…</p>';
+    api.integrations.interfaceAggregate(integrationId, klass).then(function (resp) {
+      aggregateLoaded = true;
+      var rows = (resp && resp.rows) || [];
+      aggregateRows = rows;
+      renderNamesList(rows);
+      renderTypesList();
+    }).catch(function (err) {
+      if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-error)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
+      if (typesEl) typesEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-error)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
+    });
+  }
+
+  function renderNamesList(rows) {
     var listEl = document.getElementById(idPrefix + "names-list");
     if (!listEl) return;
-    if (!force && namesLoaded) return;
-    listEl.innerHTML = '<p class="hint" style="margin:0">Loading…</p>';
-    api.integrations.interfaceAggregate(integrationId, klass).then(function (resp) {
-      namesLoaded = true;
-      var rows = (resp && resp.rows) || [];
-      // Preserve any names the operator already checked from a prior selection.
-      var existingChecked = new Set();
-      var existing = document.querySelectorAll('input[data-name-checkbox="1"][data-prefix="' + idPrefix + '"]:checked');
-      for (var i = 0; i < existing.length; i++) existingChecked.add(existing[i].value);
-      // ALSO seed with the original currentSelection.names so "By name" remembers
-      // the saved selection even when it doesn't match anything in the latest aggregate.
-      if (window["__autoMon_seed_" + idPrefix]) {
-        window["__autoMon_seed_" + idPrefix].forEach(function (n) { existingChecked.add(n); });
-      }
-      if (rows.length === 0) {
-        listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-warning)">No interface samples yet. Once monitoring runs at least one System Info pass on each discovered device, names will appear here.</p>';
-      } else {
-        listEl.innerHTML = rows.map(function (r) {
-          var checked = existingChecked.has(r.ifName) ? " checked" : "";
-          var typeTag = r.ifType ? '<span class="hint" style="margin:0 0 0 6px;font-size:0.78rem">[' + escapeHtml(r.ifType) + ']</span>' : "";
-          return '<label style="display:flex;align-items:center;gap:6px;padding:2px 0;font-size:0.86rem">' +
-                   '<input type="checkbox" data-name-checkbox="1" data-prefix="' + idPrefix + '" value="' + escapeHtml(r.ifName) + '"' + checked + ' style="width:auto">' +
-                   '<span style="font-family:monospace">' + escapeHtml(r.ifName) + '</span>' +
-                   typeTag +
-                   '<span class="hint" style="margin:0 0 0 auto;font-size:0.78rem">' + r.deviceCount + ' device' + (r.deviceCount === 1 ? "" : "s") + '</span>' +
-                 '</label>';
-        }).join("");
-      }
-      // Hand-roll the change listener — fires the preview + selected counter.
-      var boxes = listEl.querySelectorAll('input[data-name-checkbox="1"]');
-      for (var b = 0; b < boxes.length; b++) {
-        boxes[b].addEventListener("change", function () { updateNamesCounter(); schedulePreview(); });
-      }
-      updateNamesCounter();
-      schedulePreview();
-    }).catch(function (err) {
-      listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-error)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
-    });
+    // Preserve any names the operator already checked from a prior selection.
+    var existingChecked = new Set();
+    var existing = document.querySelectorAll('input[data-name-checkbox="1"][data-prefix="' + idPrefix + '"]:checked');
+    for (var i = 0; i < existing.length; i++) existingChecked.add(existing[i].value);
+    // ALSO seed with the original currentSelection.names so "By name" remembers
+    // the saved selection even when it doesn't match anything in the latest aggregate.
+    if (window["__autoMon_seed_" + idPrefix]) {
+      window["__autoMon_seed_" + idPrefix].forEach(function (n) { existingChecked.add(n); });
+    }
+    if (rows.length === 0) {
+      listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-warning)">No interface samples yet. Once monitoring runs at least one System Info pass on each discovered device, names will appear here.</p>';
+    } else {
+      listEl.innerHTML = rows.map(function (r) {
+        var checked = existingChecked.has(r.ifName) ? " checked" : "";
+        var typeTag = r.ifType ? '<span class="hint" style="margin:0 0 0 6px;font-size:0.78rem">[' + escapeHtml(r.ifType) + ']</span>' : "";
+        return '<label style="display:flex;align-items:center;gap:6px;padding:2px 0;font-size:0.86rem">' +
+                 '<input type="checkbox" data-name-checkbox="1" data-prefix="' + idPrefix + '" value="' + escapeHtml(r.ifName) + '"' + checked + ' style="width:auto">' +
+                 '<span style="font-family:monospace">' + escapeHtml(r.ifName) + '</span>' +
+                 typeTag +
+                 '<span class="hint" style="margin:0 0 0 auto;font-size:0.78rem">' + r.deviceCount + ' device' + (r.deviceCount === 1 ? "" : "s") + '</span>' +
+               '</label>';
+      }).join("");
+    }
+    // Hand-roll the change listener — fires the preview + selected counter.
+    var boxes = listEl.querySelectorAll('input[data-name-checkbox="1"]');
+    for (var b = 0; b < boxes.length; b++) {
+      boxes[b].addEventListener("change", function () { updateNamesCounter(); schedulePreview(); });
+    }
+    updateNamesCounter();
+    schedulePreview();
   }
 
   function updateNamesCounter() {
@@ -1170,19 +1254,64 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
     if (!selection) {
       preview.innerHTML = '<em>Enable a block and add at least one value to preview matches.</em>';
       preview.style.borderColor = "";
+      // Keep lastSentSelection in sync so the next toggle's diff is "from
+      // empty" instead of "from a stale earlier selection."
+      lastSentSelection = null;
       return;
     }
-    api.integrations.interfaceAggregatePreview(integrationId, { class: klass, selection: selection }).then(function (r) {
+    // Pass the previously-sent selection as the baseline. Backend computes
+    // both pin sets in one DB fetch and returns a `diff` block with the
+    // per-(asset, ifName) add/remove counts. On the very first preview-after-
+    // open, baseline = saved selection at modal open (so diff is 0); on every
+    // subsequent toggle, baseline = the prior in-flight selection (so diff
+    // shows what that toggle just changed).
+    var requestBaseline = lastSentSelection;
+    api.integrations.interfaceAggregatePreview(integrationId, { class: klass, selection: selection, baselineSelection: requestBaseline }).then(function (r) {
+      // Update the baseline for the NEXT request right after a successful
+      // round-trip — preserves per-click semantics even if the user clicks
+      // a second time while the first preview is still in flight (debounce
+      // collapses bursts; whichever response lands last wins, and the next
+      // baseline tracks that one).
+      lastSentSelection = selection;
       var warn = r.interfaceCount > AUTO_MONITOR_INTERFACE_WARN_THRESHOLD;
       var sample = (r.sampleDevices || []).slice(0, 5).map(function (d) {
         return escapeHtml(d.hostname || "(unnamed)") + ' <span class="hint" style="margin:0;font-size:0.78rem">(' + d.pinNames.length + ')</span>';
       }).join(" · ");
+      // Diff badge. Hidden when there's no change since the last request.
+      // Renders side-by-side green (+N added) and amber (−N removed) so an
+      // operator can see at a glance whether a click broadened or narrowed
+      // the pinned set. Sample additions/removals show a few illustrative
+      // (hostname / ifName) pairs without overwhelming the box.
+      var diff = r.diff || null;
+      var diffHtml = "";
+      if (diff && (diff.addedCount > 0 || diff.removedCount > 0)) {
+        var parts = [];
+        if (diff.addedCount > 0) {
+          parts.push('<span style="color:var(--color-success);font-weight:600">+' + diff.addedCount + ' added</span>');
+        }
+        if (diff.removedCount > 0) {
+          parts.push('<span style="color:var(--color-warning);font-weight:600">−' + diff.removedCount + ' removed</span>');
+        }
+        var sampleParts = [];
+        var addedSample = (diff.addedSample || []).slice(0, 3).map(function (e) {
+          return '<span style="color:var(--color-success)">+' + escapeHtml(e.hostname || "(unnamed)") + ' / ' + escapeHtml(e.ifName) + '</span>';
+        });
+        var removedSample = (diff.removedSample || []).slice(0, 3).map(function (e) {
+          return '<span style="color:var(--color-warning)">−' + escapeHtml(e.hostname || "(unnamed)") + ' / ' + escapeHtml(e.ifName) + '</span>';
+        });
+        sampleParts = addedSample.concat(removedSample);
+        diffHtml =
+          '<div style="margin-top:0.3rem;font-size:0.82rem">Change since last edit: ' + parts.join(" · ") +
+          (sampleParts.length > 0 ? ' <span class="hint" style="margin:0 0 0 6px;font-size:0.78rem">(' + sampleParts.join(" · ") + ')</span>' : '') +
+          '</div>';
+      }
       preview.innerHTML =
         '<div><strong>' + r.interfaceCount + '</strong> interface' + (r.interfaceCount === 1 ? "" : "s") +
         ' on <strong>' + r.deviceCount + '</strong> device' + (r.deviceCount === 1 ? "" : "s") +
         ' (max ' + r.perDeviceMax + '/device)' +
         (warn ? ' <span style="color:var(--color-warning);margin-left:6px">⚠ above warn threshold (' + AUTO_MONITOR_INTERFACE_WARN_THRESHOLD + ')</span>' : '') +
         '</div>' +
+        diffHtml +
         (sample ? '<div style="margin-top:0.3rem;font-size:0.82rem">First matches: ' + sample + '</div>' : '');
       preview.style.borderColor = warn ? "var(--color-warning)" : "";
       // Cache the latest interface count on the card for the Save handler to read.
@@ -1270,7 +1399,7 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
 
   // Reload (By name).
   var reload = document.getElementById(idPrefix + "reload");
-  if (reload) reload.addEventListener("click", function () { namesLoaded = false; loadNamesList(true); });
+  if (reload) reload.addEventListener("click", function () { aggregateLoaded = false; loadAggregate(true); });
 
   // Initial visibility sync.
   syncMasterVisibility();

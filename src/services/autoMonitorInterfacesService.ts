@@ -331,6 +331,50 @@ export interface PreviewResult {
   interfaceCount: number;
   perDeviceMax: number;
   sampleDevices: Array<{ hostname: string | null; pinNames: string[] }>;
+  /**
+   * Per-asset set difference between `selection` and the optional
+   * `baselineSelection` (typically the previous in-flight selection or the
+   * saved selection). Only present when `baselineSelection` is supplied to
+   * `previewAutoMonitorForClass`. Drives the "+X / −Y" delta hint on the
+   * auto-monitor card's live preview so operators see what each checkbox
+   * toggle just changed without re-counting by hand.
+   *
+   * `addedCount` / `removedCount` count distinct (assetId, ifName) pairs,
+   * not raw ifName strings — the same ifName on two devices is two pairs.
+   * `addedSample` / `removedSample` carry up to 5 illustrative entries each
+   * for the UI to surface.
+   */
+  diff?: {
+    addedCount: number;
+    removedCount: number;
+    addedSample: Array<{ hostname: string | null; ifName: string }>;
+    removedSample: Array<{ hostname: string | null; ifName: string }>;
+  };
+}
+
+/**
+ * Compute the per-asset pin set for `selection` against an already-loaded
+ * (assets, interfacesByAsset, lldpByAsset) view. Pure — no DB I/O. Used by
+ * the diff path so we can run two pin computations against one DB fetch.
+ */
+function computePinsByAsset(
+  assets: ReadonlyArray<{ id: string; hostname: string | null }>,
+  interfacesByAsset: Map<string, ResolverInterface[]>,
+  lldpByAsset: Map<string, LldpByIfName>,
+  selection: AutoMonitorSelection,
+): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  if (!selection) return out;
+  for (const a of assets) {
+    const pin = resolvePinnedInterfaces(
+      selection,
+      interfacesByAsset.get(a.id) ?? [],
+      lldpByAsset.get(a.id),
+    );
+    if (pin.length === 0) continue;
+    out.set(a.id, pin);
+  }
+  return out;
 }
 
 /**
@@ -339,43 +383,101 @@ export interface PreviewResult {
  * alone* would produce, not unioned with whatever the operator pinned by
  * hand. That's intentional: the preview answers "what does my selection
  * cover", and existing manual pins are a separate concern.
+ *
+ * When `baselineSelection` is non-undefined the response carries a `diff`
+ * block enumerating per-asset (assetId, ifName) pairs that the change in
+ * selection just added or removed. `null` baselineSelection counts as "no
+ * pins at all" so the diff shows the full current set as additions — that
+ * matches the natural reading of "you just turned this block on for the
+ * first time, here's what +X means."
  */
 export async function previewAutoMonitorForClass(
   integrationId: string,
   klass: AutoMonitorClass,
   selection: AutoMonitorSelection,
+  baselineSelection?: AutoMonitorSelection,
 ): Promise<PreviewResult> {
-  if (!selection) return { deviceCount: 0, interfaceCount: 0, perDeviceMax: 0, sampleDevices: [] };
+  const empty: PreviewResult = { deviceCount: 0, interfaceCount: 0, perDeviceMax: 0, sampleDevices: [] };
+  const wantDiff = baselineSelection !== undefined;
+  if (!selection && !wantDiff) return empty;
+
   const assetType = CLASS_TO_ASSET_TYPE[klass];
   const assets = await prisma.asset.findMany({
     where: { discoveredByIntegrationId: integrationId, assetType: assetType as any },
     select: { id: true, hostname: true },
   });
-  if (assets.length === 0) return { deviceCount: 0, interfaceCount: 0, perDeviceMax: 0, sampleDevices: [] };
+  if (assets.length === 0) {
+    return wantDiff
+      ? { ...empty, diff: { addedCount: 0, removedCount: 0, addedSample: [], removedSample: [] } }
+      : empty;
+  }
   const ids = assets.map((a) => a.id);
+  // LLDP join is only needed if either selection uses byLldp; load once.
+  const needLldp = selectionUsesLldp(selection) || (wantDiff && selectionUsesLldp(baselineSelection ?? null));
   const [interfacesByAsset, lldpByAsset] = await Promise.all([
     loadLatestInterfaces(ids),
-    selectionUsesLldp(selection) ? loadLldpByAsset(ids) : Promise.resolve(new Map<string, LldpByIfName>()),
+    needLldp ? loadLldpByAsset(ids) : Promise.resolve(new Map<string, LldpByIfName>()),
   ]);
 
+  const currentPins = computePinsByAsset(assets, interfacesByAsset, lldpByAsset, selection);
+
+  // Build the preview shape from currentPins.
   let deviceCount = 0;
   let interfaceCount = 0;
   let perDeviceMax = 0;
   const matched: Array<{ hostname: string | null; pinNames: string[] }> = [];
   for (const a of assets) {
-    const pin = resolvePinnedInterfaces(
-      selection,
-      interfacesByAsset.get(a.id) ?? [],
-      lldpByAsset.get(a.id),
-    );
-    if (pin.length === 0) continue;
+    const pin = currentPins.get(a.id);
+    if (!pin || pin.length === 0) continue;
     deviceCount += 1;
     interfaceCount += pin.length;
     if (pin.length > perDeviceMax) perDeviceMax = pin.length;
     matched.push({ hostname: a.hostname, pinNames: pin });
   }
   matched.sort((x, y) => (x.hostname || "").localeCompare(y.hostname || ""));
-  return { deviceCount, interfaceCount, perDeviceMax, sampleDevices: matched.slice(0, 5) };
+  const result: PreviewResult = {
+    deviceCount,
+    interfaceCount,
+    perDeviceMax,
+    sampleDevices: matched.slice(0, 5),
+  };
+
+  if (!wantDiff) return result;
+
+  // Diff currentPins against baselinePins, one (assetId, ifName) pair at a
+  // time. Hostname is captured per-asset so the sample can render a useful
+  // "hostname · ifName" pair without a second lookup.
+  const baselinePins = computePinsByAsset(assets, interfacesByAsset, lldpByAsset, baselineSelection ?? null);
+  const hostnameById = new Map(assets.map((a) => [a.id, a.hostname]));
+  let addedCount = 0;
+  let removedCount = 0;
+  const addedSample: Array<{ hostname: string | null; ifName: string }> = [];
+  const removedSample: Array<{ hostname: string | null; ifName: string }> = [];
+  // Walk every asset that appears in either set so partial overlaps are
+  // counted correctly. Per-asset comparison is cheap because pin lists are
+  // small (rarely >50 interfaces).
+  const allIds = new Set<string>([...currentPins.keys(), ...baselinePins.keys()]);
+  for (const id of allIds) {
+    const cur = currentPins.get(id) ?? [];
+    const base = baselinePins.get(id) ?? [];
+    if (cur.length === 0 && base.length === 0) continue;
+    const baseSet = new Set(base);
+    const curSet = new Set(cur);
+    for (const n of cur) {
+      if (!baseSet.has(n)) {
+        addedCount += 1;
+        if (addedSample.length < 5) addedSample.push({ hostname: hostnameById.get(id) ?? null, ifName: n });
+      }
+    }
+    for (const n of base) {
+      if (!curSet.has(n)) {
+        removedCount += 1;
+        if (removedSample.length < 5) removedSample.push({ hostname: hostnameById.get(id) ?? null, ifName: n });
+      }
+    }
+  }
+  result.diff = { addedCount, removedCount, addedSample, removedSample };
+  return result;
 }
 
 export interface ApplyResult {
