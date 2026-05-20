@@ -140,9 +140,15 @@ async function findSystemRowAt(subnetId: string, ipAddress: string): Promise<Exi
 
 async function releaseRows(ids: string[], reason: string, assetId: string): Promise<number> {
   if (ids.length === 0) return 0;
-  const res = await prisma.reservation.updateMany({
+  // Hard-delete instead of flipping to status="released". dns_resolved rows
+  // are system-created fallback markers with no audit value once they're
+  // gone, and the `@@unique([subnetId, ipAddress, status])` constraint
+  // applies to every status (released included), so accumulating
+  // released-state rows permanently occupies the (sub, ip, "released")
+  // slot. That blocks both this updateMany and the discovery-side P2002
+  // retry from completing later transitions at the same target.
+  const res = await prisma.reservation.deleteMany({
     where: { id: { in: ids }, status: "active" },
-    data: { status: "released" },
   });
   if (res.count > 0) {
     await logEvent({
@@ -362,14 +368,17 @@ export async function releaseDnsResolvedForAsset(assetId: string): Promise<void>
  */
 export async function releaseDnsResolvedAt(subnetId: string, ipAddress: string): Promise<void> {
   try {
-    const res = await prisma.reservation.updateMany({
+    // Hard-delete (see releaseRows above for the rationale). The
+    // status-slot-collision otherwise causes this updateMany to fail
+    // silently and leaves the dns_resolved row holding the (sub, ip,
+    // "active") slot, which is exactly what blocks Phase 5's create.
+    const res = await prisma.reservation.deleteMany({
       where: {
         subnetId,
         ipAddress,
         status: "active",
         sourceType: "dns_resolved" as any,
       },
-      data: { status: "released" },
     });
     if (res.count > 0) {
       await logEvent({

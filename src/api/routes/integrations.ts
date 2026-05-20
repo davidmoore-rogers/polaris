@@ -4261,10 +4261,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             syncLog("error", `Failed to create DHCP ${isDhcpReservation ? "reservation" : "lease"} for ${entry.ipAddress}: collided with active ${colliding?.sourceType ?? "(missing)"} reservation`);
             continue;
           }
-          await prisma.reservation.update({
-            where: { id: colliding.id },
-            data: { status: "released" },
-          });
+          // Hard-delete the colliding dns_resolved row rather than flipping
+          // to status="released" — the (sub, ip, "released") slot may
+          // already be occupied by an older released dns_resolved row, and
+          // the @@unique([subnetId, ipAddress, status]) constraint would
+          // block the transition. dns_resolved is a system fallback with no
+          // audit value, so the delete is the simpler + always-correct
+          // semantic.
+          await prisma.reservation.delete({ where: { id: colliding.id } });
           newRes = await prisma.reservation.create({ data: createData });
         }
         activeResMap.set(key, newRes); // Track for MAC cross-update phase

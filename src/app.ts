@@ -56,6 +56,7 @@ import "./jobs/capacityWatch.js";
 import "./jobs/resolvePolarisPushedConflicts.js";
 import "./jobs/resolveStaleReservationConflicts.js";
 import "./jobs/scrubLegacySidGuidTags.js";
+import "./jobs/cleanupStaleDnsResolvedReleased.js";
 import "./jobs/backfillFortigateEndpointSources.js";
 import "./jobs/fixInfraAssetTypes.js";
 import "./jobs/mergeFortiswitchEndpointGhosts.js";
