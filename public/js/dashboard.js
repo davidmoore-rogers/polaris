@@ -27,6 +27,8 @@
     saveTimer: null,
     summary: null, // cached /dashboard/summary payload (shared by all four built-in widgets)
     unmounts: {},  // widget instance id → cleanup fn
+    gridOverlay: null, // overlay DOM during drag/resize
+    dropPreview: null, // child of gridOverlay; sized to dragged widget at target slot
   };
 
   var canvasEl = null;
@@ -49,6 +51,22 @@
     canvasEl.addEventListener("dragover", onCanvasDragOver);
     canvasEl.addEventListener("dragleave", onCanvasDragLeave);
     canvasEl.addEventListener("drop", onCanvasDrop);
+
+    // Library-card dragstarts happen outside the canvas (in the +Widget
+    // slide-in), so we capture them at the document level to stash the type
+    // for the drop-preview's default-size lookup. dataTransfer.getData() is
+    // unreadable during dragover for security reasons.
+    document.addEventListener("dragstart", function (e) {
+      var card = e.target && e.target.closest ? e.target.closest(".widget-library-card[data-type]") : null;
+      if (card) _dragStashType = card.getAttribute("data-type");
+    });
+    document.addEventListener("dragend", function (e) {
+      if (e.target && e.target.closest && e.target.closest(".widget-library-card")) {
+        _dragStashType = null;
+        canvasEl.classList.remove("drop-target");
+        hideGridOverlay();
+      }
+    });
 
     // Close popover on outside-click.
     document.addEventListener("click", function (e) {
@@ -285,8 +303,19 @@
       e.dataTransfer.setData("application/x-polaris-widget-move", w.id);
       e.dataTransfer.setData("text/plain", w.id);
       article.classList.add("dragging");
+      _dragStashId = w.id;
+      _dragStashType = null;
+      canvasEl.classList.add("is-dragging");
+      showGridOverlay();
     });
-    titleEl.addEventListener("dragend", function () { article.classList.remove("dragging"); });
+    titleEl.addEventListener("dragend", function () {
+      article.classList.remove("dragging");
+      _dragStashId = null;
+      _dragStashType = null;
+      canvasEl.classList.remove("is-dragging");
+      canvasEl.classList.remove("drop-target");
+      hideGridOverlay();
+    });
 
     article.querySelector('[data-action="gear"]').addEventListener("click", function (ev) {
       ev.stopPropagation();
@@ -366,15 +395,35 @@
     ev.preventDefault();
     ev.dataTransfer.dropEffect = isAdd ? "copy" : "move";
     canvasEl.classList.add("drop-target");
+    // dragstart for library cards happens outside this orchestrator's reach,
+    // so library-drags don't yet have an overlay — lazily mount one here.
+    if (!state.gridOverlay) showGridOverlay();
+    var movingId = isMove ? readWidgetIdFromDataTransfer(ev.dataTransfer) : null;
+    var moving   = movingId ? state.layout.widgets.find(function (x) { return x.id === movingId; }) : null;
+    var size;
+    if (moving) {
+      size = { width: moving.width, height: moving.height };
+    } else if (isAdd) {
+      // Library drag — best-guess preview using the type's defaultSize.
+      var type = readWidgetIdFromDataTransfer(ev.dataTransfer, "application/x-polaris-widget");
+      var mod  = type ? PolarisWidgets.getByType(type) : null;
+      size = (mod && mod.defaultSize) || { width: 6, height: 1 };
+    } else {
+      size = { width: 6, height: 1 };
+    }
+    updateDropPreviewAt(ev.clientX, ev.clientY, size);
   }
 
   function onCanvasDragLeave(ev) {
     if (ev.relatedTarget && canvasEl.contains(ev.relatedTarget)) return;
     canvasEl.classList.remove("drop-target");
+    // The drop will fire next (and clean up) on a successful drag; the
+    // dragend handler on the widget article clears for cancelled drags.
   }
 
   function onCanvasDrop(ev) {
     canvasEl.classList.remove("drop-target");
+    hideGridOverlay();
     var addType  = ev.dataTransfer.getData("application/x-polaris-widget");
     var moveId   = ev.dataTransfer.getData("application/x-polaris-widget-move");
     if (!addType && !moveId) return;
@@ -386,6 +435,89 @@
     } else if (moveId) {
       moveWidget(moveId, idx);
     }
+  }
+
+  // dataTransfer.getData() is only readable during the `drop` event — during
+  // dragover it's empty for security reasons. We do have `types`, which lists
+  // the registered formats, so the moving-widget id has to come from elsewhere.
+  // We stash the id on a module-level variable during dragstart and clear on
+  // dragend. Library-drag types: same pattern.
+  var _dragStashId = null;
+  var _dragStashType = null;
+  function readWidgetIdFromDataTransfer(_dt, format) {
+    if (format === "application/x-polaris-widget") return _dragStashType;
+    return _dragStashId;
+  }
+
+  // ─── Grid overlay + drop-preview ────────────────────────────────────────
+
+  function showGridOverlay() {
+    if (state.gridOverlay) return;
+    var rect = canvasEl.getBoundingClientRect();
+    var colWidth = (rect.width - GAP_PX * (GRID_COLS - 1)) / GRID_COLS;
+    var rowStride = ROW_HEIGHT_PX + GAP_PX;
+
+    var overlay = document.createElement("div");
+    overlay.className = "dashboard-grid-overlay";
+
+    // Column cells — one per column, full height. The cell's own border
+    // outlines the column's left + right edges.
+    for (var c = 0; c < GRID_COLS; c++) {
+      var col = document.createElement("div");
+      col.className = "dashboard-grid-col";
+      col.style.left = (c * (colWidth + GAP_PX)) + "px";
+      col.style.width = colWidth + "px";
+      overlay.appendChild(col);
+    }
+
+    // Horizontal row separators. Draw enough to cover the current canvas
+    // height plus one extra row for new-bottom-row drop targets.
+    var height = Math.max(rect.height, rowStride * 2);
+    var rowCount = Math.ceil(height / rowStride) + 1;
+    for (var r = 1; r <= rowCount; r++) {
+      var row = document.createElement("div");
+      row.className = "dashboard-grid-row";
+      // Land the line on the row-boundary gap-center: each row occupies
+      // (r-1)*rowStride .. r*rowStride - GAP_PX, then GAP_PX of gap.
+      row.style.top = (r * rowStride - GAP_PX - 1) + "px";
+      overlay.appendChild(row);
+    }
+
+    var preview = document.createElement("div");
+    preview.className = "dashboard-drop-preview";
+    preview.style.display = "none";
+    overlay.appendChild(preview);
+
+    canvasEl.appendChild(overlay);
+    state.gridOverlay = overlay;
+    state.dropPreview = preview;
+  }
+
+  function hideGridOverlay() {
+    if (!state.gridOverlay) return;
+    try { canvasEl.removeChild(state.gridOverlay); } catch (_) {}
+    state.gridOverlay = null;
+    state.dropPreview = null;
+  }
+
+  function updateDropPreviewAt(clientX, clientY, size) {
+    if (!state.dropPreview) return;
+    var rect = canvasEl.getBoundingClientRect();
+    var x = Math.max(0, clientX - rect.left);
+    var y = Math.max(0, clientY - rect.top);
+    var colWidth = (rect.width - GAP_PX * (GRID_COLS - 1)) / GRID_COLS;
+    var rowStride = ROW_HEIGHT_PX + GAP_PX;
+    var w = (size && size.width) || 6;
+    var h = (size && size.height) || 1;
+    // Snap the cursor to its column; clamp so the preview never overshoots
+    // the right edge of the grid.
+    var col = Math.max(0, Math.min(GRID_COLS - w, Math.floor(x / (colWidth + GAP_PX))));
+    var row = Math.max(0, Math.floor(y / rowStride));
+    state.dropPreview.style.display = "block";
+    state.dropPreview.style.left   = (col * (colWidth + GAP_PX)) + "px";
+    state.dropPreview.style.top    = (row * rowStride) + "px";
+    state.dropPreview.style.width  = (w * colWidth + (w - 1) * GAP_PX) + "px";
+    state.dropPreview.style.height = (h * ROW_HEIGHT_PX + (h - 1) * GAP_PX) + "px";
   }
 
   function handleTapToAdd(type) {
@@ -404,6 +536,8 @@
     var startH = w.height;
     var widthSteps = [3, 4, 6, 12];
     var heightSteps = [1, 2];
+    canvasEl.classList.add("is-resizing");
+    showGridOverlay();
 
     function pickClosest(target, steps) {
       var best = steps[0], bestDist = Infinity;
@@ -435,6 +569,8 @@
     function onUp() {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
+      canvasEl.classList.remove("is-resizing");
+      hideGridOverlay();
       var finalW = parseInt(article.getAttribute("data-preview-w") || startW, 10);
       var finalH = parseInt(article.getAttribute("data-preview-h") || startH, 10);
       article.removeAttribute("data-preview-w");

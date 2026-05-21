@@ -3309,6 +3309,46 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   border-radius: 6px;
 }
 
+/* Drag/resize grid overlay — only visible while the canvas carries
+   .is-dragging or .is-resizing. Children are absolutely positioned
+   relative to this overlay (which itself fills the canvas). pointer-events
+   are off so the overlay never intercepts the drag's own events. */
+.dashboard-grid-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+.dashboard-grid-col {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left:  1px dashed rgba(79,195,247,0.22);
+  border-right: 1px dashed rgba(79,195,247,0.22);
+}
+.dashboard-grid-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(79,195,247,0.18);
+}
+.dashboard-drop-preview {
+  position: absolute;
+  background: rgba(79,195,247,0.10);
+  border: 2px dashed rgba(79,195,247,0.65);
+  border-radius: 6px;
+  transition: left 90ms ease-out, top 90ms ease-out, width 90ms ease-out, height 90ms ease-out;
+  box-shadow: 0 0 0 1px rgba(79,195,247,0.18) inset;
+}
+/* While dragging, gently dim the widget being moved so the drop preview
+   reads as the focal point. .dashboard-widget.dragging already exists for
+   this on the article level; this rule layers a second hint at the canvas
+   level for the library-drag case where no specific widget is "dragging". */
+.dashboard-canvas.is-dragging .dashboard-widget:not(.dragging) {
+  opacity: 0.85;
+}
+
 .dashboard-widget {
   position: relative;
   background: var(--color-bg-elevated, #1c1f24);
