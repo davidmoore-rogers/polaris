@@ -891,11 +891,22 @@ function renderQueryStatus() {
     return;
   }
 
+  var queryCount = activeQueries.length;
+  var discoveryCount = serverDiscoveries.length;
+  var labelText;
+  if (queryCount > 0 && discoveryCount > 0) {
+    labelText = totalCount + ' operation' + (totalCount === 1 ? '' : 's') + ' running';
+  } else if (discoveryCount > 0) {
+    labelText = discoveryCount + ' discover' + (discoveryCount === 1 ? 'y' : 'ies') + ' running';
+  } else {
+    labelText = queryCount + ' quer' + (queryCount === 1 ? 'y' : 'ies') + ' running';
+  }
+
   container.style.display = "block";
   container.innerHTML =
     '<div class="query-status-header">' +
       '<span class="query-spinner"></span>' +
-      '<span class="query-status-label">' + totalCount + ' quer' + (totalCount === 1 ? 'y' : 'ies') + ' running</span>' +
+      '<span class="query-status-label">' + labelText + '</span>' +
     '</div>' +
     '<ul class="query-status-list">' +
       activeQueries.map(function (q) {
