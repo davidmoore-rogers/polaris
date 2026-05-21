@@ -67,6 +67,7 @@ router.get("/summary", async (req, res, next) => {
           assetType: true,
           monitorStatus: true,
           monitorStatusChangedAt: true,
+          discoveredByIntegration: { select: { name: true, type: true } },
         },
         // Newest transitions first; nulls (unknown transition time, typically
         // pre-backfill assets) sink to the bottom.
