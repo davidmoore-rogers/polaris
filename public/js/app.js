@@ -509,6 +509,7 @@ function _showSearchShortcutHints() {
   if (!dropdown) return;
   var hints = [
     { prefix: "block:",       short: "b:", label: "Search IP blocks only" },
+    { prefix: "network:",     short: "n:", label: "Search networks (subnets) only" },
     { prefix: "asset:",       short: "a:", label: "Search assets only" },
     { prefix: "reservation:", short: "r:", label: "Search reservations only" },
     { prefix: "map:",         short: "m:", label: "Search pinned firewalls (Device Map) only" },

@@ -157,6 +157,7 @@
     // keep typing into the scoped query.
     var hints = [
       { prefix: "block:",       short: "b:", label: "IP blocks only" },
+      { prefix: "network:",     short: "n:", label: "Networks only" },
       { prefix: "asset:",       short: "a:", label: "Assets only" },
       { prefix: "reservation:", short: "r:", label: "Reservations only" },
       { prefix: "map:",         short: "m:", label: "Pinned firewalls only" },

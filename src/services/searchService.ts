@@ -37,27 +37,28 @@ export interface SearchResults {
 }
 
 const PER_GROUP_LIMIT = 8;
-// When the operator scopes a search to one group via a `block:` / `asset:` /
-// `reservation:` / `map:` prefix (or the short forms `b:` / `a:` / `r:` /
-// `m:`), the per-group cap is lifted to this value. Picked to be much larger
-// than the default cap while still bounded so a pathological query can't
-// scan the entire fleet — operators who want to enumerate a whole category
-// have the dedicated page for that.
+// When the operator scopes a search to one group via a `block:` / `network:`
+// / `asset:` / `reservation:` / `map:` prefix (or the short forms `b:` /
+// `n:` / `a:` / `r:` / `m:`), the per-group cap is lifted to this value.
+// Picked to be much larger than the default cap while still bounded so a
+// pathological query can't scan the entire fleet — operators who want to
+// enumerate a whole category have the dedicated page for that.
 const SCOPED_LIMIT = 200;
 
 // ─── Input classification ────────────────────────────────────────────────────
 
 const MAC_HEX_ONLY = /^[0-9a-f]{12}$/i;
 
-type SearchScope = "block" | "asset" | "reservation" | "map";
+type SearchScope = "block" | "asset" | "reservation" | "map" | "network";
 
-// Recognize `block:` / `asset:` / `reservation:` / `map:` and their short
-// forms `b:` / `a:` / `r:` / `m:`. Case-insensitive; trims whitespace after
-// the colon so `asset:  foo` works. The scopes are mutually exclusive with
-// the `entra:` / `ad:` / `fgt:` source-kind prefix consumed inside
-// `stripSourceKindPrefix` — none of those start with the scope letters.
+// Recognize `block:` / `asset:` / `reservation:` / `map:` / `network:` and
+// their short forms `b:` / `a:` / `r:` / `m:` / `n:`. Case-insensitive;
+// trims whitespace after the colon so `asset:  foo` works. The scopes are
+// mutually exclusive with the `entra:` / `ad:` / `fgt:` source-kind prefix
+// consumed inside `stripSourceKindPrefix` — none of those start with the
+// scope letters.
 function parseSearchScope(raw: string): { scope: SearchScope | null; query: string } {
-  const m = raw.match(/^(block|asset|reservation|map|b|a|r|m):\s*(.*)$/i);
+  const m = raw.match(/^(block|asset|reservation|map|network|b|a|r|m|n):\s*(.*)$/i);
   if (!m) return { scope: null, query: raw };
   const prefix = m[1].toLowerCase();
   const rest = m[2].trim();
@@ -65,6 +66,7 @@ function parseSearchScope(raw: string): { scope: SearchScope | null; query: stri
   if (prefix === "block" || prefix === "b") scope = "block";
   else if (prefix === "asset" || prefix === "a") scope = "asset";
   else if (prefix === "reservation" || prefix === "r") scope = "reservation";
+  else if (prefix === "network" || prefix === "n") scope = "network";
   else scope = "map";
   return { scope, query: rest };
 }
@@ -117,6 +119,10 @@ export async function searchAll(rawQuery: string): Promise<SearchResults> {
   if (scope === "block") {
     const blocks = await searchBlocks(like, SCOPED_LIMIT);
     return { ...empty, blocks: blocks.map(blockHit) };
+  }
+  if (scope === "network") {
+    const subnets = await searchSubnets(like, isCidr ? q : null, SCOPED_LIMIT);
+    return { ...empty, subnets: subnets.map(subnetHit) };
   }
   if (scope === "reservation") {
     const reservations = await searchReservations(like, isIp ? q : null, SCOPED_LIMIT);
@@ -259,7 +265,7 @@ async function searchBlocks(like: string, limit = PER_GROUP_LIMIT) {
   });
 }
 
-async function searchSubnets(like: string, cidrExact: string | null) {
+async function searchSubnets(like: string, cidrExact: string | null, limit = PER_GROUP_LIMIT) {
   let cidrNormalized: string | null = null;
   if (cidrExact) {
     try { cidrNormalized = normalizeCidr(cidrExact); } catch { /* ignore */ }
@@ -275,7 +281,7 @@ async function searchSubnets(like: string, cidrExact: string | null) {
         { fortigateDevice: { contains: like, mode: "insensitive" as const } },
       ],
     },
-    take: PER_GROUP_LIMIT,
+    take: limit,
     orderBy: { name: "asc" },
   });
 }
