@@ -44,10 +44,12 @@ var _eventsLayout = null;
     chooserButton: document.getElementById("btn-events-columns"),
     onChange: _saveEventsPrefs,
   });
+  var prefsReady;
   if (typeof userReady !== "undefined" && userReady && typeof userReady.then === "function") {
-    userReady.then(_restoreEventsPrefs);
+    prefsReady = userReady.then(_restoreEventsPrefs);
   } else {
     _restoreEventsPrefs();
+    prefsReady = Promise.resolve();
   }
 
   async function loadEvents() {
@@ -225,8 +227,8 @@ var _eventsLayout = null;
   var settingsBtn = document.getElementById("btn-event-settings");
   if (settingsBtn) settingsBtn.addEventListener("click", openEventSettingsModal);
 
-  // Initial load
-  loadEvents();
+  // Initial load — wait for restored prefs so pageSize matches the dropdown
+  prefsReady.then(loadEvents);
 })();
 
 // ─── Settings Modal (Tabbed) ────────────────────────────────────────────────
