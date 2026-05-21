@@ -5669,12 +5669,27 @@ async function bulkUpsertWirelessStations(
   const nowIso = now.toISOString();
   for (const r of rows) {
     const d = r.data;
-    tuples.push(
-      `($${p++}::uuid, $${p++}, $${p++}, ` +
-      `$${p++}, $${p++}, $${p++}, $${p++}, $${p++}, ` +
-      `$${p++}, $${p++}, $${p++}, $${p++}, $${p++}, ` +
-      `$${p++}, $${p++}, $${p++}, $${p++}::timestamp, $${p++}::timestamp)`,
-    );
+    const tupleParts = [
+      `$${p++}::uuid`,            // id
+      `$${p++}`,                  // apAssetId
+      `$${p++}`,                  // staMacAddr
+      `$${p++}`,                  // staIpAddr
+      `$${p++}`,                  // ssid
+      `$${p++}`,                  // radioId
+      `$${p++}`,                  // wlanId
+      `$${p++}`,                  // vlanId
+      `$${p++}`,                  // bssid
+      `$${p++}`,                  // signalStrength
+      `$${p++}`,                  // noise
+      `$${p++}`,                  // bandwidthTx
+      `$${p++}`,                  // bandwidthRx
+      `$${p++}`,                  // idleSeconds
+      `$${p++}`,                  // matchedAssetId
+      `$${p++}`,                  // source
+      `$${p++}::timestamp`,       // firstSeen
+      `$${p++}::timestamp`,       // lastSeen
+    ];
+    tuples.push(`(${tupleParts.join(", ")})`);
     params.push(
       r.id,
       apAssetId,
