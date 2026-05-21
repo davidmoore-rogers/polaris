@@ -741,6 +741,52 @@ input, select, textarea { font-family: inherit; }
 .empty-state .ttl { color: var(--md-on-surface); font-size: 16px; margin-bottom: 8px; }
 .empty-state .desc { font-size: 14px; line-height: 20px; max-width: 280px; margin: 0 auto; }
 
+/* Scope-prefix shortcut hints shown in the Search tab empty state. */
+.search-hint-section { padding: 8px 16px 24px; }
+.search-hint-section-label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--md-on-surface-variant);
+  padding: 4px 4px 8px;
+}
+.search-hint-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.search-hint-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--md-surface-cont);
+  border: 1px solid var(--md-outline-variant);
+  color: var(--md-on-surface);
+  text-align: left;
+  cursor: pointer;
+}
+.search-hint-chip:active { background: var(--md-surface-cont-highest); }
+.search-hint-keys { display: flex; align-items: center; gap: 6px; }
+.search-hint-key {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  padding: 2px 6px;
+  background: var(--md-surface-cont-highest);
+  border-radius: 6px;
+  color: var(--md-on-surface);
+}
+.search-hint-or { font-size: 11px; color: var(--md-on-surface-variant); }
+.search-hint-label { font-size: 13px; color: var(--md-on-surface-variant); }
+.search-hint-foot {
+  margin-top: 12px;
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--md-on-surface-variant);
+}
+
 /* ─── Misc utilities ──────────────────────────────────────────────────── */
 .hidden { display: none !important; }
 .muted { color: var(--md-on-surface-variant); }

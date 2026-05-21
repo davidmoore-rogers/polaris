@@ -152,12 +152,48 @@
   function renderSearchEmpty() {
     var state = searchState();
     if (!state) return;
+    // Scope-prefix shortcuts. Tapping a chip pre-fills the search bar
+    // with the prefix + space and leaves focus there so the operator can
+    // keep typing into the scoped query.
+    var hints = [
+      { prefix: "block:",       short: "b:", label: "IP blocks only" },
+      { prefix: "asset:",       short: "a:", label: "Assets only" },
+      { prefix: "reservation:", short: "r:", label: "Reservations only" },
+      { prefix: "map:",         short: "m:", label: "Pinned firewalls only" },
+    ];
+    var chipHtml = hints.map(function (h) {
+      return '<button class="search-hint-chip" type="button" data-prefix="' + escapeHtml(h.prefix) + '">'
+        + '<div class="search-hint-keys">'
+        + '<span class="search-hint-key">' + escapeHtml(h.prefix) + '</span>'
+        + '<span class="search-hint-or">or</span>'
+        + '<span class="search-hint-key">' + escapeHtml(h.short) + '</span>'
+        + '</div>'
+        + '<div class="search-hint-label">' + escapeHtml(h.label) + '</div>'
+        + '</button>';
+    }).join("");
     state.innerHTML = ''
-      + '<div class="empty-state" style="padding-top:48px;">'
+      + '<div class="empty-state" style="padding-top:32px;padding-bottom:8px;">'
       + '  <div class="icon"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></div>'
       + '  <div class="ttl">Search Polaris</div>'
       + '  <div class="desc">Find IPs, assets, networks, FortiGate sites and reservations. Try typing an IP, hostname, MAC, or partial name.</div>'
+      + '</div>'
+      + '<div class="search-hint-section">'
+      + '  <div class="search-hint-section-label">Shortcuts — scope your search</div>'
+      + '  <div class="search-hint-grid">' + chipHtml + '</div>'
+      + '  <div class="search-hint-foot">Scoped searches return up to 200 results instead of the default top 8.</div>'
       + '</div>';
+    state.querySelectorAll(".search-hint-chip").forEach(function (chip) {
+      chip.addEventListener("click", function () {
+        var input = document.getElementById("search-input");
+        if (!input) return;
+        input.value = chip.getAttribute("data-prefix") + " ";
+        input.focus();
+        // Move caret to end so the next keystroke continues the scoped query.
+        var v = input.value;
+        input.setSelectionRange(v.length, v.length);
+        // Keep the hint panel visible — the operator hasn't typed a real query yet.
+      });
+    });
   }
 
   function renderSearchLoading() {

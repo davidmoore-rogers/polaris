@@ -171,6 +171,17 @@ window.PolarisTheme = {
       PolarisSearch.debounce(q);
     });
 
+    // Tapping the search input from any tab brings up the Search tab so
+    // the shortcut-hint chips are visible before the operator types. We
+    // only route on empty input so this doesn't fight an in-progress
+    // query (focus events fire on keyboard re-entry too).
+    input.addEventListener("focus", function () {
+      var cur = PolarisRouter.current();
+      if (!input.value.trim() && cur.name !== "search") {
+        PolarisRouter.go("search", { replace: true });
+      }
+    });
+
     input.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
         input.value = "";

@@ -37,10 +37,37 @@ export interface SearchResults {
 }
 
 const PER_GROUP_LIMIT = 8;
+// When the operator scopes a search to one group via a `block:` / `asset:` /
+// `reservation:` / `map:` prefix (or the short forms `b:` / `a:` / `r:` /
+// `m:`), the per-group cap is lifted to this value. Picked to be much larger
+// than the default cap while still bounded so a pathological query can't
+// scan the entire fleet — operators who want to enumerate a whole category
+// have the dedicated page for that.
+const SCOPED_LIMIT = 200;
 
 // ─── Input classification ────────────────────────────────────────────────────
 
 const MAC_HEX_ONLY = /^[0-9a-f]{12}$/i;
+
+type SearchScope = "block" | "asset" | "reservation" | "map";
+
+// Recognize `block:` / `asset:` / `reservation:` / `map:` and their short
+// forms `b:` / `a:` / `r:` / `m:`. Case-insensitive; trims whitespace after
+// the colon so `asset:  foo` works. The scopes are mutually exclusive with
+// the `entra:` / `ad:` / `fgt:` source-kind prefix consumed inside
+// `stripSourceKindPrefix` — none of those start with the scope letters.
+function parseSearchScope(raw: string): { scope: SearchScope | null; query: string } {
+  const m = raw.match(/^(block|asset|reservation|map|b|a|r|m):\s*(.*)$/i);
+  if (!m) return { scope: null, query: raw };
+  const prefix = m[1].toLowerCase();
+  const rest = m[2].trim();
+  let scope: SearchScope;
+  if (prefix === "block" || prefix === "b") scope = "block";
+  else if (prefix === "asset" || prefix === "a") scope = "asset";
+  else if (prefix === "reservation" || prefix === "r") scope = "reservation";
+  else scope = "map";
+  return { scope, query: rest };
+}
 
 /** Normalize a MAC to UPPER:CASE:COLON:FORM if recognizable, else null. */
 export function normalizeMac(raw: string): string | null {
@@ -60,12 +87,22 @@ function isIpLike(s: string): boolean {
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export async function searchAll(rawQuery: string): Promise<SearchResults> {
-  const q = rawQuery.trim();
+  const trimmed = rawQuery.trim();
+  // Always echo the original query back to the client; the dropdown
+  // stale-response check compares against what was typed, not the
+  // post-scope-strip form.
   const empty: SearchResults = {
-    query: q,
+    query: trimmed,
     blocks: [], subnets: [], reservations: [], assets: [], ips: [], sites: [],
   };
-  if (q.length < 2) return empty;
+
+  const { scope, query: scopedQuery } = parseSearchScope(trimmed);
+  // Scoped searches accept any non-empty query (so `block:f` works);
+  // unscoped queries keep the 2-char min so accidental keystrokes don't
+  // fan out across every entity table.
+  const minLen = scope ? 1 : 2;
+  const q = scopedQuery;
+  if (q.length < minLen) return empty;
 
   const mac = normalizeMac(q);
   const isIp = isIpLike(q);
@@ -73,6 +110,28 @@ export async function searchAll(rawQuery: string): Promise<SearchResults> {
 
   // Text pattern used for contains-insensitive matches
   const like = q;
+
+  // Scoped path: run only the requested group's query with the elevated
+  // cap and return everything else empty. Operators who pick a scope
+  // explicitly want the full enumeration, not the typeahead-tuned top 8.
+  if (scope === "block") {
+    const blocks = await searchBlocks(like, SCOPED_LIMIT);
+    return { ...empty, blocks: blocks.map(blockHit) };
+  }
+  if (scope === "reservation") {
+    const reservations = await searchReservations(like, isIp ? q : null, SCOPED_LIMIT);
+    return { ...empty, reservations: reservations.map(reservationHit) };
+  }
+  if (scope === "map") {
+    const sites = await searchPinnedFirewalls(like, mac, SCOPED_LIMIT);
+    return { ...empty, sites: sites.map(siteHit) };
+  }
+  if (scope === "asset") {
+    const assetRows = await searchAssets(like, mac, SCOPED_LIMIT);
+    const originBySrcId = await resolveOriginFortigates(assetRows.map((a) => a.id));
+    const assetHits = assetRows.map((a) => decorateAssetHit(a, originBySrcId.get(a.id)));
+    return { ...empty, assets: assetHits };
+  }
 
   // Run all queries in parallel. Pinned firewalls are queried as their
   // own group (`sites`) with an independent PER_GROUP_LIMIT budget so
@@ -99,25 +158,9 @@ export async function searchAll(rawQuery: string): Promise<SearchResults> {
   const originBySrcId = await resolveOriginFortigates(
     assetsWithoutSites.map((a) => a.id),
   );
-  const assetHits = assetsWithoutSites.map((a) => {
-    const hit = assetHit(a);
-    const origin = originBySrcId.get(a.id);
-    if (origin) {
-      hit.context = {
-        ...(hit.context ?? {}),
-        siteId: origin.siteId,
-        siteHostname: origin.hostname,
-        // Identifying fields for the topology-modal search to pulse the
-        // matching switch on the graph. Frontend picks whichever is
-        // most discriminating (hostname > IP > MAC).
-        focusHostname: a.hostname ?? null,
-        focusIpAddress: a.ipAddress ?? null,
-        focusMacAddress: a.macAddress ?? null,
-        focusAssetId: a.id,
-      };
-    }
-    return hit;
-  });
+  const assetHits = assetsWithoutSites.map((a) =>
+    decorateAssetHit(a, originBySrcId.get(a.id)),
+  );
 
   return {
     query: q,
@@ -202,7 +245,7 @@ async function resolveOriginFortigates(
 
 // ─── Query helpers ───────────────────────────────────────────────────────────
 
-async function searchBlocks(like: string) {
+async function searchBlocks(like: string, limit = PER_GROUP_LIMIT) {
   return prisma.ipBlock.findMany({
     where: {
       OR: [
@@ -211,7 +254,7 @@ async function searchBlocks(like: string) {
         { cidr: { contains: like, mode: "insensitive" } },
       ],
     },
-    take: PER_GROUP_LIMIT,
+    take: limit,
     orderBy: { name: "asc" },
   });
 }
@@ -237,7 +280,7 @@ async function searchSubnets(like: string, cidrExact: string | null) {
   });
 }
 
-async function searchReservations(like: string, ipExact: string | null) {
+async function searchReservations(like: string, ipExact: string | null, limit = PER_GROUP_LIMIT) {
   return prisma.reservation.findMany({
     where: {
       status: "active",
@@ -251,24 +294,24 @@ async function searchReservations(like: string, ipExact: string | null) {
       ],
     },
     include: { subnet: { select: { id: true, cidr: true, name: true } } },
-    take: PER_GROUP_LIMIT,
+    take: limit,
     orderBy: { hostname: "asc" },
   });
 }
 
-async function searchAssets(like: string, mac: string | null) {
-  return runAssetSearch(like, mac, {});
+async function searchAssets(like: string, mac: string | null, limit = PER_GROUP_LIMIT) {
+  return runAssetSearch(like, mac, {}, limit);
 }
 
-async function searchPinnedFirewalls(like: string, mac: string | null) {
+async function searchPinnedFirewalls(like: string, mac: string | null, limit = PER_GROUP_LIMIT) {
   return runAssetSearch(like, mac, {
     assetType: "firewall",
     latitude: { not: null },
     longitude: { not: null },
-  });
+  }, limit);
 }
 
-async function runAssetSearch(like: string, mac: string | null, baseFilter: any) {
+async function runAssetSearch(like: string, mac: string | null, baseFilter: any, limit = PER_GROUP_LIMIT) {
   const or: any[] = [
     { hostname: { contains: like, mode: "insensitive" as const } },
     { dnsName: { contains: like, mode: "insensitive" as const } },
@@ -294,10 +337,11 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any)
   // common "<kind>:" prefix so an operator can paste either form.
   const sourceQuery = stripSourceKindPrefix(like);
   const likePattern = `%${like}%`;
+  const jsonLimit = limit * 4;
   const [byAsset, sourceHits, macSideHits, ipSideHits, jsonHitIds] = await Promise.all([
     prisma.asset.findMany({
       where: { ...baseFilter, OR: or },
-      take: PER_GROUP_LIMIT,
+      take: limit,
       orderBy: { hostname: "asc" },
     }),
     prisma.assetSource.findMany({
@@ -308,7 +352,7 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any)
       include: {
         asset: true,
       },
-      take: PER_GROUP_LIMIT,
+      take: limit,
     }),
     // Full MAC history (the side table) — `Asset.macAddress` only carries the
     // most-recently-seen value, so historical MACs from prior NICs / sightings
@@ -319,7 +363,7 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any)
         asset: baseFilter,
       },
       include: { asset: true },
-      take: PER_GROUP_LIMIT,
+      take: limit,
       orderBy: { lastSeen: "desc" },
     }),
     // Secondary interface IPs — `Asset.ipAddress` is the primary; multi-NIC
@@ -331,7 +375,7 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any)
         asset: baseFilter,
       },
       include: { asset: true },
-      take: PER_GROUP_LIMIT,
+      take: limit,
       orderBy: { lastSeen: "desc" },
     }),
     // JSON-blob substring search across `Asset.associatedUsers` (logged-in
@@ -346,7 +390,7 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any)
       UNION
       SELECT "assetId" FROM asset_sources
       WHERE observed::text ILIKE ${likePattern}
-      LIMIT ${PER_GROUP_LIMIT * 4}
+      LIMIT ${jsonLimit}
     `,
   ]);
   // The raw query returns asset ids only; load the asset rows with the
@@ -356,7 +400,7 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any)
   const jsonAssets = jsonHitIds.length
     ? await prisma.asset.findMany({
         where: { ...baseFilter, id: { in: jsonHitIds.map((r) => r.assetId) } },
-        take: PER_GROUP_LIMIT,
+        take: limit,
         orderBy: { hostname: "asc" },
       })
     : [];
@@ -372,22 +416,44 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any)
   };
   for (const a of byAsset) tryPush(a);
   for (const s of sourceHits) {
-    if (merged.length >= PER_GROUP_LIMIT) break;
+    if (merged.length >= limit) break;
     tryPush(s.asset);
   }
   for (const m of macSideHits) {
-    if (merged.length >= PER_GROUP_LIMIT) break;
+    if (merged.length >= limit) break;
     tryPush(m.asset);
   }
   for (const ip of ipSideHits) {
-    if (merged.length >= PER_GROUP_LIMIT) break;
+    if (merged.length >= limit) break;
     tryPush(ip.asset);
   }
   for (const a of jsonAssets) {
-    if (merged.length >= PER_GROUP_LIMIT) break;
+    if (merged.length >= limit) break;
     tryPush(a);
   }
-  return merged.slice(0, PER_GROUP_LIMIT);
+  return merged.slice(0, limit);
+}
+
+// Build an asset SearchHit + stamp the origin-FortiGate context onto it when
+// the asset was seen on a pinned firewall. Extracted from `searchAll` so the
+// scoped `asset:` path can reuse the same shape.
+function decorateAssetHit(
+  a: { id: string; hostname: string | null; ipAddress: string | null; macAddress: string | null; assetTag: string | null; assetType: string; manufacturer: string | null; model: string | null },
+  origin: { siteId: string; hostname: string } | undefined,
+): SearchHit {
+  const hit = assetHit(a);
+  if (origin) {
+    hit.context = {
+      ...(hit.context ?? {}),
+      siteId: origin.siteId,
+      siteHostname: origin.hostname,
+      focusHostname: a.hostname ?? null,
+      focusIpAddress: a.ipAddress ?? null,
+      focusMacAddress: a.macAddress ?? null,
+      focusAssetId: a.id,
+    };
+  }
+  return hit;
 }
 
 // Strip the "entra:" / "ad:" / "fgt:" / "intune:" / "fortiswitch:" / "fortiap:"

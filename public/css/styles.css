@@ -761,6 +761,42 @@ code {
   font-size: 0.85rem;
   color: var(--color-text-tertiary);
 }
+.gs-hint {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.gs-hint:hover {
+  background: var(--color-bg-secondary);
+  border-left-color: var(--color-accent);
+}
+.gs-hint-keys {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  min-width: 130px;
+}
+.gs-hint-key {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78rem;
+  padding: 2px 6px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+}
+.gs-hint-or {
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
+}
+.gs-hint-label {
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+}
 
 .user-badge {
   display: flex;
@@ -3054,9 +3090,35 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   text-decoration: none;
   color: inherit;
   border-radius: var(--radius-sm);
+  /* Button reset — the row was previously an <a>, now a <button> for the
+     expand-in-place pattern. Strip button chrome so the layout matches the
+     old anchor exactly. */
+  background: none;
+  border: 0;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
 }
-.dash-alert-row + .dash-alert-row { border-top: 1px solid var(--color-border); }
+.dash-alert-item + .dash-alert-item .dash-alert-row { border-top: 1px solid var(--color-border); }
 .dash-alert-row:hover { background: var(--color-bg-elevated); }
+.dash-alert-item.is-expanded .dash-alert-row { background: var(--color-bg-elevated); }
+.dash-alert-ip {
+  font-family: var(--font-mono);
+  color: var(--color-text-secondary);
+}
+.dash-alert-source { color: var(--color-text-secondary); }
+.dash-alert-expand {
+  padding: 8px 4px 4px 24px;
+  border-top: 1px dashed var(--color-border);
+}
+.dash-alert-open {
+  display: inline-block;
+  font-size: 0.82rem;
+  color: var(--color-primary);
+  text-decoration: none;
+}
+.dash-alert-open:hover { text-decoration: underline; }
 .dash-alert-dot {
   display: inline-block;
   width: 10px;
@@ -3314,15 +3376,15 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   position: absolute;
   right: 2px;
   bottom: 2px;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   cursor: nwse-resize;
   background:
-    linear-gradient(135deg, transparent 50%, var(--color-text-tertiary) 50%, var(--color-text-tertiary) 60%, transparent 60%, transparent 70%, var(--color-text-tertiary) 70%, var(--color-text-tertiary) 80%, transparent 80%);
-  opacity: 0.5;
+    linear-gradient(135deg, transparent 45%, var(--color-text-tertiary) 45%, var(--color-text-tertiary) 55%, transparent 55%, transparent 65%, var(--color-text-tertiary) 65%, var(--color-text-tertiary) 75%, transparent 75%, transparent 85%, var(--color-text-tertiary) 85%, var(--color-text-tertiary) 95%, transparent 95%);
+  opacity: 0.75;
   border-radius: 0 0 6px 0;
 }
-.dashboard-widget-resize:hover { opacity: 0.85; }
+.dashboard-widget-resize:hover { opacity: 1; }
 
 /* Widget-specific body wrappers reuse the rolled-up styles from the old
    dashboard surface — kept under .dashboard-widget-body so layout still

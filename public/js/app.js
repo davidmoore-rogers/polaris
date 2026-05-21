@@ -378,9 +378,14 @@ function renderGlobalSearch() {
     var q = input.value.trim();
     clearTimeout(_searchDebounceTimer);
     if (q.length < 2) {
-      dropdown.style.display = "none";
-      dropdown.innerHTML = "";
+      // Empty input → fall back to the focus-state shortcut hints so
+      // operators see the scope abbreviations again the moment they
+      // clear the box. A 1-char query still hides the dropdown so
+      // accidental keystrokes don't flash the hint panel.
+      if (q.length === 0) _showSearchShortcutHints();
+      else { dropdown.style.display = "none"; dropdown.innerHTML = ""; }
       _searchLastQuery = "";
+      _searchActiveResults = null;
       return;
     }
     _searchDebounceTimer = setTimeout(function () { _performSearch(q); }, 180);
@@ -395,6 +400,7 @@ function renderGlobalSearch() {
 
   input.addEventListener("focus", function () {
     if (_searchActiveResults) dropdown.style.display = "block";
+    else if (!input.value.trim()) _showSearchShortcutHints();
   });
 
   document.addEventListener("click", function (e) {
@@ -493,6 +499,44 @@ function _renderSearchDropdown(results) {
 function _hideSearchDropdown() {
   var dropdown = document.getElementById("global-search-dropdown");
   if (dropdown) dropdown.style.display = "none";
+}
+
+// Show the scope-shortcut help panel when the search bar is focused with
+// no query in flight. Clicking a hint pre-fills the input with the scope
+// prefix and a trailing space so the operator can keep typing.
+function _showSearchShortcutHints() {
+  var dropdown = document.getElementById("global-search-dropdown");
+  if (!dropdown) return;
+  var hints = [
+    { prefix: "block:",       short: "b:", label: "Search IP blocks only" },
+    { prefix: "asset:",       short: "a:", label: "Search assets only" },
+    { prefix: "reservation:", short: "r:", label: "Search reservations only" },
+    { prefix: "map:",         short: "m:", label: "Search pinned firewalls (Device Map) only" },
+  ];
+  var rows = hints.map(function (h) {
+    return '<div class="gs-hint" data-prefix="' + escapeHtml(h.prefix) + '">' +
+      '<div class="gs-hint-keys"><span class="gs-hint-key">' + escapeHtml(h.prefix) + '</span>' +
+        '<span class="gs-hint-or">or</span>' +
+        '<span class="gs-hint-key">' + escapeHtml(h.short) + '</span></div>' +
+      '<div class="gs-hint-label">' + escapeHtml(h.label) + '</div>' +
+    '</div>';
+  }).join("");
+  dropdown.innerHTML =
+    '<div class="gs-group gs-hint-group">' +
+    '  <div class="gs-group-label">Search shortcuts — scoped searches return up to 200 results (no top-8 cap)</div>' +
+    rows +
+    '</div>';
+  dropdown.style.display = "block";
+
+  dropdown.querySelectorAll(".gs-hint").forEach(function (el) {
+    el.addEventListener("click", function () {
+      var input = document.getElementById("global-search-input");
+      if (!input) return;
+      input.value = el.getAttribute("data-prefix") + " ";
+      input.focus();
+      // Keep the hint panel up — the operator hasn't typed a query yet.
+    });
+  });
 }
 
 function _handleSearchKeyNav(e) {
