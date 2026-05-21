@@ -123,7 +123,10 @@ const MANUAL_POLLING_DEFAULT = {
   storagePolling:      null,
 };
 const FORTI_POLLING_DEFAULT = {
-  responseTimePolling: "rest_api" as const,
+  // Response time defaults to ICMP across every source kind — the cheapest
+  // universal liveness probe. Operators wanting REST `/sys/status` or SNMP
+  // sysUpTime opt in per-asset / per-class / at the integration tier.
+  responseTimePolling: "icmp" as const,
   cpuMemoryPolling:    "rest_api" as const,
   temperaturePolling:  "rest_api" as const,
   interfacesPolling:   "rest_api" as const,
