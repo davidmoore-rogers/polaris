@@ -5673,7 +5673,7 @@ async function bulkUpsertWirelessStations(
       `($${p++}::uuid, $${p++}, $${p++}, ` +
       `$${p++}, $${p++}, $${p++}, $${p++}, $${p++}, ` +
       `$${p++}, $${p++}, $${p++}, $${p++}, $${p++}, ` +
-      `$${p++}, $${p++}, $${p++}::timestamp, $${p++}::timestamp)`,
+      `$${p++}, $${p++}, $${p++}, $${p++}::timestamp, $${p++}::timestamp)`,
     );
     params.push(
       r.id,
