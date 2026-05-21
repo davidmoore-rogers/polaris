@@ -564,7 +564,7 @@ export async function applyUpdate(password?: string | null): Promise<void> {
 /**
  * Restart the service using the platform's service manager.
  */
-function restartService() {
+export function restartService() {
   const isWindows = process.platform === "win32";
 
   if (isWindows) {

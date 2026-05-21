@@ -2228,11 +2228,11 @@ Listed alphabetically.
 
 **What it owns:** In-app software update check, availability detection (Docker vs git checkout), update application pipeline (backup→pull→npm ci→prisma generate→tsc→migrate→restart), and progress tracking.
 
-**Public API:** `initUpdateStatus`, `getUpdateStatus`, `isUpdateMechanismAvailable`, `clearUpdateStatus`, `checkForUpdates`, `applyUpdate`, `getRecentCommits`.
+**Public API:** `initUpdateStatus`, `getUpdateStatus`, `isUpdateMechanismAvailable`, `clearUpdateStatus`, `checkForUpdates`, `applyUpdate`, `getRecentCommits`, `restartService`.
 
 **Cross-service deps:** none (spawns git/npm/prisma, reads/writes .update-status.json, creates DB backup).
 
-**Used by:** `src/api/routes/serverSettings.ts:1135,1143,1151,1159 — Application Updates card endpoints`; `src/jobs/updateCheck.ts:19,31 — hourly check job`. ~6 call sites.
+**Used by:** `src/api/routes/serverSettings.ts:1135,1143,1151,1159 — Application Updates card endpoints`; `src/api/routes/serverSettings.ts — POST /restart` (Capacity Advisor "Restart Polaris to apply" button uses `restartService` standalone, without the update pipeline); `src/jobs/updateCheck.ts:19,31 — hourly check job`. ~7 call sites.
 
 **Invariants:**
 - Update mechanism disabled in Docker (`/.dockerenv` present, `.git/` absent) or when no `.git/` checkout exists; `getUpdateStatus()` returns `state: "disabled"` with a human-readable reason.

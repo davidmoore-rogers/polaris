@@ -1268,7 +1268,7 @@ function renderCapacityAdvisorCard(advisor, pgConfigFile, dbConnectionMode) {
   var staged = recs.filter(function (r) { return r.applyMode !== "advisory-only" && r.changeRequired; }).length;
   var stageBtn;
   if (_advisorJustStaged && staged === 0) {
-    stageBtn = '<button class="btn btn-warning" disabled>Restart Polaris to apply</button>';
+    stageBtn = '<button class="btn btn-warning" id="capacity-advisor-restart-btn">Restart Polaris to apply</button>';
   } else if (staged > 0) {
     stageBtn = '<button class="btn btn-primary" id="capacity-advisor-stage-btn" data-staged-count="' + staged + '">Stage selected</button>';
   } else {
@@ -1874,6 +1874,31 @@ function initCapacityActions() {
 function initCapacityAdvisorActions() {
   var card = document.getElementById("capacity-advisor-card");
   if (!card) return;
+
+  var restartBtn = document.getElementById("capacity-advisor-restart-btn");
+  if (restartBtn) {
+    restartBtn.addEventListener("click", async function () {
+      if (!await warnIfDiscoveryRunning("restart")) return;
+      var ok = await showConfirm(
+        "Restart Polaris now?\n\n" +
+        "The server will be unreachable for ~30 seconds. Any in-flight operator action " +
+        "will fail and must be retried after the restart."
+      );
+      if (!ok) return;
+      restartBtn.disabled = true;
+      restartBtn.textContent = "Restarting...";
+      try {
+        await api.serverSettings.restart();
+        _advisorJustStaged = false;
+        pollUntilServerReachable();
+      } catch (err) {
+        showToast("Restart failed: " + (err && err.message ? err.message : "unknown error"), "error");
+        restartBtn.disabled = false;
+        restartBtn.textContent = "Restart Polaris to apply";
+      }
+    });
+  }
+
   var stageBtn = document.getElementById("capacity-advisor-stage-btn");
   if (!stageBtn || stageBtn.disabled) return;
 
@@ -2591,6 +2616,54 @@ function pollForRestart(lastStatus) {
             '<p style="font-size:0.82rem;margin-top:0.5rem">The server has not responded after 60 seconds. Check the server logs for errors.</p>' +
             '<button class="btn btn-secondary" style="margin-top:0.75rem" onclick="location.reload()">Retry</button>' +
           '</div>';
+      }
+    }
+  }, 2000);
+}
+
+// Lightweight standalone restart poller used by the Capacity Advisor "Restart
+// Polaris to apply" button. Unlike pollForRestart, this isn't tied to the
+// update-status state machine — a plain restart never reaches "complete", so
+// we just wait for ANY successful response from the server and reload.
+function pollUntilServerReachable() {
+  // Full-screen overlay so the operator can see something is happening even
+  // when the click happened from a non-update card.
+  var overlay = document.createElement("div");
+  overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.55);" +
+    "display:flex;align-items:center;justify-content:center;z-index:9999;";
+  overlay.innerHTML =
+    '<div style="background:var(--color-bg-primary);border:1px solid var(--color-border);' +
+      'border-radius:var(--radius-md);padding:1.5rem 2rem;min-width:320px;text-align:center">' +
+      '<div class="spinner" style="width:28px;height:28px;margin:0 auto 0.75rem"></div>' +
+      '<strong>Restarting Polaris...</strong>' +
+      '<p id="restart-poll-msg" style="font-size:0.82rem;margin-top:0.5rem;color:var(--color-text-secondary)">' +
+        'Waiting for the server to come back online.' +
+      '</p>' +
+    '</div>';
+  document.body.appendChild(overlay);
+
+  var serverWentDown = false;
+  var attempts = 0;
+  var timer = setInterval(async function () {
+    attempts++;
+    try {
+      await api.serverSettings.getUpdateStatus();
+      if (serverWentDown) {
+        // Was down, now reachable → reload to pick up the restarted process.
+        clearInterval(timer);
+        window.location.reload();
+        return;
+      }
+    } catch (_) {
+      // Server is down — expected during the restart window.
+      serverWentDown = true;
+    }
+    if (attempts > 60) {
+      clearInterval(timer);
+      var msg = document.getElementById("restart-poll-msg");
+      if (msg) {
+        msg.innerHTML = '<span style="color:var(--color-danger)">Server has not responded after 120 seconds. ' +
+          'Check the server logs.</span><br><button class="btn btn-secondary" style="margin-top:0.75rem" onclick="location.reload()">Retry</button>';
       }
     }
   }, 2000);

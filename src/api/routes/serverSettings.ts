@@ -44,6 +44,7 @@ import {
   initUpdateStatus,
   isUpdateMechanismAvailable,
   getRecentCommits,
+  restartService,
 } from "../../services/updateService.js";
 import { applyHttps, isHttpsRunning } from "../../httpsManager.js";
 import { prisma } from "../../db.js";
@@ -1211,6 +1212,29 @@ router.post("/security-tokens/generate", async (req, res, next) => {
       message: `Bearer token generated for ${which === "metrics" ? "/metrics" : "/health"}`,
     });
     res.json({ ok: true, key });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Restart ─────────────────────────────────────────────────────────────
+//
+// Operator-triggered process restart. Used by the Capacity Advisor card
+// after staging env-driven values that only take effect on next boot.
+// On Linux exits with code 1 so systemd's Restart=on-failure brings the
+// process back; on Windows shells out to NSSM. Responds before the exit
+// so the client sees a clean 200 and can switch to its restart-polling UI.
+router.post("/restart", async (req, res, next) => {
+  try {
+    await logEvent({
+      level: "warning",
+      action: "server.restart.requested",
+      resourceType: "server",
+      actor: req.session?.username,
+      message: `Operator-triggered restart by ${req.session?.username ?? "(unknown)"}`,
+    });
+    res.json({ ok: true, message: "Restarting..." });
+    setTimeout(() => { restartService(); }, 500);
   } catch (err) {
     next(err);
   }

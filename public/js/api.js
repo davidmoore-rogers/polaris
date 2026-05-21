@@ -591,6 +591,7 @@ const api = {
     getSampleRetention: () => request("GET", "/server-settings/sample-retention"),
     setSampleRetention: (retention) => request("PUT", "/server-settings/sample-retention", retention),
     generateSecurityToken: (which) => request("POST", "/server-settings/security-tokens/generate", { which: which }),
+    restart: () => request("POST", "/server-settings/restart"),
     checkForUpdates: () => request("GET", "/server-settings/updates/check"),
     getUpdateStatus: () => request("GET", "/server-settings/updates/status"),
     applyUpdate:     (password) => request("POST", "/server-settings/updates/apply", password ? { password: password } : undefined),
