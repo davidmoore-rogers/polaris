@@ -8,7 +8,7 @@ A network management tool. Auto-discovery from FortiManager / FortiGate / Window
 - **Blocks, subnets, reservations** with conflict detection, VLAN tagging, next-available allocation, and per-block / per-subnet utilization.
 - **Bulk site allocation** — save a multi-subnet template (e.g. `Hardware /25`, `Users /25`, `Voice /26`, plus `skip` entries to leave gaps) and stamp it out for each site. Allocations are anchor-aligned (default `/24`, per-user) and all-or-nothing inside one transaction.
 - **Stale reservation alerts** — DHCP reservations whose target client hasn't actively held the IP within a configurable window surface in a sidebar badge with snooze / permanent-ignore controls.
-- **Global typeahead search** — the header search classifies IP / CIDR / MAC / text and returns blocks, subnets, reservations, assets, and individual IPs in one dropdown. Scope prefixes (`block:` / `b:`, `asset:` / `a:`, `reservation:` / `r:`, `map:` / `m:`) constrain the search to one group and lift the default 8-per-group cap to 200 results.
+- **Global typeahead search** — the header search classifies IP / CIDR / MAC / text and returns blocks, subnets, reservations, assets, and individual IPs in one dropdown. Scope prefixes (`block:` / `b:`, `network:` / `n:`, `asset:` / `a:`, `reservation:` / `r:`, `map:` / `m:`) constrain the search to one group and lift the default 8-per-group cap to 200 results.
 
 ### Asset inventory & discovery
 - **Assets** — servers, switches, firewalls, APs, workstations with full MAC history, serials, warranty/procurement info, OS, IP source tracking, location, and status changes attributed to who set them and when.
