@@ -526,6 +526,142 @@
     sheetEl.addEventListener("touchcancel", onTouchEnd,   { passive: true });
   }
 
+  // ─── Pull-to-refresh ───────────────────────────────────────────────────
+  // Touch-pull on a scrollable element (typically #app-body) to trigger an
+  // async refresh. MD3-style: only the indicator puck moves; body content
+  // stays put. Caller passes onRefresh which may return a Promise — the
+  // puck spins until it settles. Returns a release() function to tear down
+  // the listeners + remove the indicator; the route handler in app.js
+  // calls release() on every route change so handlers don't stack up.
+  //
+  // Rules:
+  //   - Only tracks when the gesture starts with scrollEl.scrollTop === 0,
+  //     so a pull from mid-scroll doesn't fire.
+  //   - Form controls opt out so iOS text-cursor drag still works.
+  //   - Click suppression is left to the browser: a touchmove past ~10px
+  //     already cancels the underlying button's click, so we never need
+  //     preventDefault here. That also means the touchmove listener can
+  //     stay passive — no jank.
+  //   - Threshold 70px to trigger; opacity ramps in from 0..40px so a
+  //     stray nudge doesn't flash the puck.
+  function installPullRefresh(scrollEl, onRefresh) {
+    if (!scrollEl || typeof onRefresh !== "function") return function () {};
+
+    var ind = document.createElement("div");
+    ind.className = "ptr-indicator";
+    ind.innerHTML = '<div class="ptr-circle"><svg class="ptr-svg" viewBox="0 0 24 24"><use href="#i-refresh"/></svg></div>';
+    scrollEl.appendChild(ind);
+
+    var THRESHOLD = 70;
+    var MAX = 120;
+    var startY = 0;
+    var dy = 0;
+    var tracking = false;
+    var refreshing = false;
+
+    function isFormControl(el) {
+      if (!el || !el.closest) return false;
+      return !!el.closest('input, textarea, select, [contenteditable="true"]');
+    }
+
+    function setPuck(amount, state) {
+      var svg = ind.querySelector(".ptr-svg");
+      if (state === "rest") {
+        ind.classList.remove("ready", "refreshing");
+        ind.style.opacity = "0";
+        ind.style.transform = "translateY(-56px)";
+        if (svg) svg.style.transform = "";
+        return;
+      }
+      if (state === "refreshing") {
+        ind.classList.add("refreshing");
+        ind.classList.remove("ready");
+        ind.style.opacity = "1";
+        ind.style.transform = "translateY(8px)";
+        if (svg) svg.style.transform = "";
+        return;
+      }
+      // pulling
+      var travel = Math.min(amount, MAX);
+      ind.style.opacity = String(Math.min(travel / 40, 1));
+      ind.style.transform = "translateY(" + (travel - 48) + "px)";
+      ind.classList.toggle("ready", amount >= THRESHOLD);
+      // Rotate the icon proportionally to progress, capped at the threshold.
+      if (svg) {
+        var rot = Math.min(amount / THRESHOLD, 1) * 270;
+        svg.style.transform = "rotate(" + rot + "deg)";
+      }
+    }
+
+    function reset() { setPuck(0, "rest"); }
+    reset();
+
+    function onTouchStart(e) {
+      if (refreshing) return;
+      if (!e.touches || e.touches.length !== 1) return;
+      if (isFormControl(e.target)) return;
+      if (scrollEl.scrollTop > 0) return;
+      tracking = true;
+      startY = e.touches[0].clientY;
+      dy = 0;
+      ind.style.transition = "none";
+    }
+
+    function onTouchMove(e) {
+      if (!tracking || refreshing) return;
+      dy = e.touches[0].clientY - startY;
+      if (dy <= 0 || scrollEl.scrollTop > 0) {
+        // Going up or page scrolled mid-gesture — abandon.
+        tracking = false;
+        ind.style.transition = "transform .2s ease, opacity .2s ease";
+        reset();
+        return;
+      }
+      // Light resistance past MAX so the puck doesn't run off-screen on a
+      // long drag.
+      var amount = dy < MAX ? dy : MAX + (dy - MAX) * 0.3;
+      setPuck(amount, "pulling");
+    }
+
+    function onTouchEnd() {
+      if (!tracking) return;
+      tracking = false;
+      ind.style.transition = "transform .25s ease, opacity .25s ease";
+      if (dy >= THRESHOLD && !refreshing) {
+        refreshing = true;
+        setPuck(0, "refreshing");
+        var done = function () {
+          refreshing = false;
+          reset();
+        };
+        var result;
+        try { result = onRefresh(); } catch (_) { result = null; }
+        if (result && typeof result.then === "function") {
+          result.then(done, done);
+        } else {
+          // Caller returned nothing — keep the puck visible briefly so the
+          // pull feels like it did something, then hide.
+          setTimeout(done, 600);
+        }
+      } else {
+        reset();
+      }
+    }
+
+    scrollEl.addEventListener("touchstart",  onTouchStart, { passive: true });
+    scrollEl.addEventListener("touchmove",   onTouchMove,  { passive: true });
+    scrollEl.addEventListener("touchend",    onTouchEnd,   { passive: true });
+    scrollEl.addEventListener("touchcancel", onTouchEnd,   { passive: true });
+
+    return function release() {
+      scrollEl.removeEventListener("touchstart",  onTouchStart);
+      scrollEl.removeEventListener("touchmove",   onTouchMove);
+      scrollEl.removeEventListener("touchend",    onTouchEnd);
+      scrollEl.removeEventListener("touchcancel", onTouchEnd);
+      if (ind.parentNode) ind.parentNode.removeChild(ind);
+    };
+  }
+
   window.PolarisTabs = {
     list: TABS,
     byId: function (id) {
@@ -536,5 +672,6 @@
     placeholder: placeholder,
     showSnackbar: showSnackbar,
     attachSwipeToDismiss: attachSwipeToDismiss,
+    installPullRefresh: installPullRefresh,
   };
 })();

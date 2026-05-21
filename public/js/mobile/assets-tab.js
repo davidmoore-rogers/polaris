@@ -79,6 +79,13 @@
       _state.total = 0;
       loadPage(true);
     },
+    onPullToRefresh: function () {
+      // Reset paging + re-fetch the first page under the current filter.
+      _state.assets = [];
+      _state.offset = 0;
+      _state.total = 0;
+      return loadPage(true);
+    },
   };
 
   function renderChips() {
@@ -116,7 +123,7 @@
     var params = { limit: PAGE_SIZE, offset: _state.offset };
     if (filter.type) params.assetType = filter.type;
 
-    api.assets.list(params).then(function (resp) {
+    return api.assets.list(params).then(function (resp) {
       if (thisSeq !== _state.seq) return; // superseded by a later filter change
       _state.loading = false;
       if (!resp) return;

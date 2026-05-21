@@ -78,6 +78,9 @@
         openCreateByIpSheet();
       });
     },
+    onPullToRefresh: function () {
+      return load();
+    },
   };
 
   function load() {

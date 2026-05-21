@@ -64,7 +64,7 @@
     renderTopbar: function () { return backTopbar("Blocks"); },
     render: function (body) {
       body.innerHTML = loadingHtml();
-      api.blocks.list().then(function (blocks) {
+      return api.blocks.list().then(function (blocks) {
         if (!Array.isArray(blocks) || blocks.length === 0) {
           body.innerHTML = '<div class="empty-state" style="padding-top:48px;"><div class="icon"><svg viewBox="0 0 24 24"><use href="#i-block"/></svg></div><div class="ttl">No blocks</div><div class="desc">No IP blocks have been created yet.</div></div>';
           return;
@@ -97,7 +97,7 @@
     renderTopbar: function () { return backTopbar("Networks"); },
     render: function (body) {
       body.innerHTML = loadingHtml();
-      api.subnets.list({ limit: 200 }).then(function (resp) {
+      return api.subnets.list({ limit: 200 }).then(function (resp) {
         // listSubnets returns { subnets, total, limit, offset }
         var subnets = (resp && resp.subnets) || [];
         if (subnets.length === 0) {
@@ -137,7 +137,7 @@
     renderTopbar: function () { return backTopbar("Events"); },
     render: function (body) {
       body.innerHTML = loadingHtml();
-      api.events.list({ limit: 100 }).then(function (resp) {
+      return api.events.list({ limit: 100 }).then(function (resp) {
         var events = (resp && resp.events) || [];
         if (events.length === 0) {
           body.innerHTML = '<div class="empty-state" style="padding-top:48px;"><div class="icon"><svg viewBox="0 0 24 24"><use href="#i-event"/></svg></div><div class="ttl">No events</div><div class="desc">No events recorded in the retention window.</div></div>';
@@ -295,6 +295,20 @@
       var subSpec = sub && SUB_PAGES[sub];
       if (subSpec) return subSpec.render(body, ctx);
       return renderMenu(body, ctx);
+    },
+    // PTR only meaningful on the list sub-pages (blocks / subnets /
+    // events). The root menu is static and has nothing to refresh.
+    enablesPullToRefresh: function (ctx) {
+      var sub = ctx && ctx.route && ctx.route.parts && ctx.route.parts[0];
+      return !!(sub && SUB_PAGES[sub]);
+    },
+    onPullToRefresh: function (ctx) {
+      var sub = ctx && ctx.route && ctx.route.parts && ctx.route.parts[0];
+      var subSpec = sub && SUB_PAGES[sub];
+      if (!subSpec) return null;
+      var body = document.getElementById("app-body");
+      if (!body) return null;
+      return subSpec.render(body, ctx);
     },
   };
 

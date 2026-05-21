@@ -233,6 +233,27 @@ window.PolarisTheme = {
     });
   }
 
+  // Pull-to-refresh handle for the currently-mounted route. Cleared on
+  // every route change so handlers + indicator DOM don't stack up.
+  var _ptrRelease = null;
+
+  function installPtrForSpec(spec, ctx) {
+    if (_ptrRelease) { try { _ptrRelease(); } catch (_) {} _ptrRelease = null; }
+    if (!spec || typeof spec.onPullToRefresh !== "function") return;
+    // Optional predicate — lets a spec like More disable PTR on its root
+    // menu while keeping it on the sub-pages. Treat missing predicate as
+    // "always enabled."
+    if (typeof spec.enablesPullToRefresh === "function") {
+      try { if (!spec.enablesPullToRefresh(ctx)) return; }
+      catch (_) { return; }
+    }
+    var body = document.getElementById("app-body");
+    if (!body || !window.PolarisTabs || !PolarisTabs.installPullRefresh) return;
+    _ptrRelease = PolarisTabs.installPullRefresh(body, function () {
+      try { return spec.onPullToRefresh(ctx); } catch (_) { return null; }
+    });
+  }
+
   // ─── Route handler ─────────────────────────────────────────────────────
   function routeChanged(route) {
     if (!currentUser) return;
@@ -258,10 +279,12 @@ window.PolarisTheme = {
     var tabSpec = PolarisTabs.byId(route.name);
     if (tabSpec) {
       setActiveTab(route.name);
+      var tabCtx = { user: currentUser, route: route };
       topbar.innerHTML = tabSpec.renderTopbar
-        ? tabSpec.renderTopbar({ user: currentUser, route: route }) : '';
-      tabSpec.render(body, { user: currentUser, route: route });
+        ? tabSpec.renderTopbar(tabCtx) : '';
+      tabSpec.render(body, tabCtx);
       body.scrollTop = 0;
+      installPtrForSpec(tabSpec, tabCtx);
       return;
     }
 
@@ -280,14 +303,17 @@ window.PolarisTheme = {
         b.classList.toggle("active", parentTab !== "" && b.dataset.tab === parentTab);
       });
 
+      var detailCtx = { user: currentUser, route: route };
       topbar.innerHTML = detailSpec.renderTopbar
-        ? detailSpec.renderTopbar({ user: currentUser, route: route }) : '';
-      detailSpec.render(body, { user: currentUser, route: route });
+        ? detailSpec.renderTopbar(detailCtx) : '';
+      detailSpec.render(body, detailCtx);
       body.scrollTop = 0;
+      installPtrForSpec(detailSpec, detailCtx);
       return;
     }
 
-    // Unknown route — bounce to search.
+    // Unknown route — bounce to search. Clear any installed PTR.
+    if (_ptrRelease) { try { _ptrRelease(); } catch (_) {} _ptrRelease = null; }
     PolarisRouter.go("search", { replace: true });
   }
 

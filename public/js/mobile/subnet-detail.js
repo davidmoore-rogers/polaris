@@ -553,11 +553,49 @@
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  // Pull-to-refresh — for FortiGate-discovered subnets that the caller can
+  // write to, this fires the same single-scope refresh as the topbar
+  // button (reconciles CMDB reservations + leases against the FortiGate),
+  // then re-pulls IPs. For other subnets it just re-pulls the IP list.
+  // Either way returns a promise so the PTR puck spins until done.
+  function refreshFromPtr(ctx) {
+    var id = (ctx && ctx.route && ctx.route.parts && ctx.route.parts[0]) || "";
+    if (!id) return null;
+    var st = mountState(id);
+    var user = ctx && ctx.user;
+    var canRefreshFromGate = st.subnet && st.subnet.fortigateDevice && canWrite(user);
+    var prePull = canRefreshFromGate
+      ? api.subnets.refresh(id).then(function (r) {
+          var parts = [];
+          if (r.created)  parts.push(r.created + " created");
+          if (r.updated)  parts.push(r.updated + " updated");
+          if (r.released) parts.push(r.released + " released");
+          if (r.skipped)  parts.push(r.skipped + " skipped");
+          var summary = parts.length ? parts.join(", ") : "no changes";
+          PolarisTabs.showSnackbar("Refreshed " + (st.subnet.fortigateDevice || "FortiGate") + " — " + summary);
+        }, function (err) {
+          PolarisTabs.showSnackbar(err && err.message ? err.message : "Refresh failed", { error: true });
+        })
+      : Promise.resolve();
+    return prePull.then(function () {
+      return api.subnets.ips(id, { page: 1, pageSize: IP_PAGE_SIZE }).then(function (resp) {
+        st.subnet = resp.subnet;
+        st.ips = resp.ips || [];
+        st.totalIps = resp.totalIps || st.ips.length;
+        renderShell(st, user);
+        mountRefreshButton(id, st, user);
+      });
+    }).catch(function (err) {
+      PolarisTabs.showSnackbar(err && err.message ? err.message : "Reload failed", { error: true });
+    });
+  }
+
   window.PolarisSubnetDetail = {
     spec: {
       parentTab: null,
       renderTopbar: renderTopbar,
       render: render,
+      onPullToRefresh: refreshFromPtr,
     },
   };
 

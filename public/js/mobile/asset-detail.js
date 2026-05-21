@@ -761,11 +761,45 @@
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  // Pull-to-refresh path — same backend work the topbar Refresh button
+  // does (probe-now + repull monitor/telemetry/system-info), but returns a
+  // promise so the PTR puck can spin until it settles. Snackbar still
+  // fires so the operator gets the same per-stream outcome message.
+  function refreshFromPtr(ctx) {
+    var id = (ctx && ctx.route && ctx.route.parts && ctx.route.parts[0]) || "";
+    if (!id) return null;
+    var st = mountState(id);
+    return api.assets.probeNow(id).then(function (resp) {
+      var bits = [];
+      if (resp.success) bits.push("probe " + (resp.responseTimeMs != null ? resp.responseTimeMs + " ms" : "ok"));
+      else if (resp.error) bits.push("probe failed");
+      if (resp.telemetry) {
+        if (resp.telemetry.collected) bits.push("telemetry");
+        else if (resp.telemetry.error) bits.push("telemetry: " + resp.telemetry.error);
+      }
+      if (resp.systemInfo) {
+        if (resp.systemInfo.collected) bits.push("system-info");
+        else if (resp.systemInfo.error) bits.push("system-info: " + resp.systemInfo.error);
+      }
+      var anyFailure = (resp.success === false) ||
+        (resp.telemetry && resp.telemetry.collected === false && resp.telemetry.error) ||
+        (resp.systemInfo && resp.systemInfo.collected === false && resp.systemInfo.error);
+      PolarisTabs.showSnackbar((anyFailure ? "Refresh partial — " : "Refresh ok — ") + bits.join(" · "), { error: !!anyFailure });
+      loadMonitor(id, st);
+      loadTelemetry(id, st);
+      loadSystemInfo(id, st);
+    }).catch(function (err) {
+      var msg = (err && err.message) ? err.message : "Refresh failed";
+      PolarisTabs.showSnackbar("Refresh failed — " + msg, { error: true });
+    });
+  }
+
   window.PolarisAssetDetail = {
     spec: {
       parentTab: "assets",
       renderTopbar: renderTopbar,
       render: render,
+      onPullToRefresh: refreshFromPtr,
     },
   };
 })();

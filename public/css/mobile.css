@@ -162,9 +162,63 @@ input, select, textarea { font-family: inherit; }
   flex: 1 1 auto;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  /* Stops iOS rubber-band so the pull-to-refresh puck (mounted on
+     #app-body) has unambiguous touchmove dy to react to. Momentum
+     scrolling within the body is unaffected. */
+  overscroll-behavior-y: contain;
   position: relative;
 }
 .app-body::-webkit-scrollbar { width: 0; height: 0; }
+
+/* ─── Pull-to-refresh indicator ───────────────────────────────────────────
+   Appended to #app-body by PolarisTabs.installPullRefresh. Circular MD3
+   surface-container puck with a refresh icon — rotates with pull progress,
+   flips primary-tinted past the trigger threshold, spins while the
+   onRefresh promise is in flight. Body content never moves; only the puck
+   slides down. ────────────────────────────────────────────────────────── */
+.ptr-indicator {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  width: 40px;
+  height: 40px;
+  margin-left: -20px;
+  z-index: 10;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: translateY(-56px);
+}
+.ptr-indicator .ptr-circle {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--md-surface-container-high);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--md-primary);
+  transition: background-color .15s ease, color .15s ease;
+}
+.ptr-indicator .ptr-svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+}
+.ptr-indicator.ready .ptr-circle {
+  background: var(--md-primary);
+  color: var(--md-on-primary);
+}
+.ptr-indicator.refreshing .ptr-svg {
+  animation: ptr-spin .9s linear infinite;
+}
+@keyframes ptr-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
 
 /* ─── Status indicators ───────────────────────────────────────────────── */
 .dot {

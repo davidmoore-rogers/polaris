@@ -39,6 +39,7 @@ Per-pattern sections:
 - [Queue-on-transient-failure with retry tick + recovery hook](#queue-on-transient-failure-with-retry-tick--recovery-hook)
 - [Integration type (config + discovery + sync + frontend modal)](#integration-type-config--discovery--sync--frontend-modal)
 - [Mobile bottom sheet](#mobile-bottom-sheet)
+- [Mobile pull-to-refresh](#mobile-pull-to-refresh)
 
 ---
 
@@ -545,3 +546,26 @@ Per-pattern sections:
 - Wire all three close paths: scrim click, close-button click, and `PolarisTabs.attachSwipeToDismiss(sheet, closeXxx)`.
 - The close function `remove()`s both the scrim and the sheet by ID; idempotent so double-fire from a swipe finishing while the user also taps scrim is safe.
 - If the sheet is scrollable, the swipe-dismiss helper handles "scroll first, dismiss only when at top" automatically — no extra wiring needed.
+
+---
+
+## Mobile pull-to-refresh
+
+**What it is:** Touch-pull-down on a mobile tab or detail page to re-fetch its data. MD3-style: only a small circular puck moves, body content stays put. The puck rotates with pull progress, flips primary-tinted past the trigger threshold, spins while the caller's onRefresh promise is in flight.
+
+**Canonical implementation:** `PolarisTabs.installPullRefresh(scrollEl, onRefresh)` in [public/js/mobile/tabs.js](public/js/mobile/tabs.js). Wired into the route lifecycle by `installPtrForSpec(spec, ctx)` in [public/js/mobile/app.js](public/js/mobile/app.js) — every route change releases the prior handle + installs a fresh one if the new spec has `onPullToRefresh`.
+
+**Key conventions:**
+- Tab specs and detail specs opt in by exposing `onPullToRefresh(ctx)` that returns a Promise. The PTR puck spins until the promise settles; sync returns / non-promises get a 600 ms held-puck fallback.
+- Optional `enablesPullToRefresh(ctx)` predicate disables install entirely for one route within a multi-page spec (the More tab uses this to skip its static root menu while still PTR-ing the blocks / subnets / events sub-pages).
+- Only tracks a gesture that starts with `scrollEl.scrollTop === 0` — pulling from mid-scroll is left to the browser as normal scroll behavior.
+- Form controls (`input`, `textarea`, `select`, `[contenteditable=true]`) opt out so iOS text-cursor drag still works inside any forms on the page.
+- Click suppression is left to the browser: a touchmove past ~10 px already cancels the underlying button's `click`, so no `preventDefault` is needed — listeners stay `passive: true`.
+- `.app-body` carries `overscroll-behavior-y: contain` so iOS rubber-band doesn't compete with the pull gesture.
+- CSS (`.ptr-indicator`, `.ptr-circle`, `.ptr-svg`, `.ptr-indicator.ready`, `.ptr-indicator.refreshing`) lives in [public/css/mobile.css](public/css/mobile.css).
+- Skipped on routes where it makes no sense or where touch is owned by another library: Map tab (Leaflet captures touch), Topology tab (Cytoscape captures touch), Site detail (delegates to Map), Search tab (results are query-driven), More root menu (static), Block detail (placeholder), Login.
+
+**When adding a new instance:**
+- Define `onPullToRefresh(ctx)` on the tab or detail spec. Return the Promise from the same data-load function the topbar Refresh button uses (or equivalent) — don't fork a separate refresh path.
+- The spec's render-time DOM must still be present when the promise resolves; loaders that target `getElementById` should be safe because the user can't navigate away during the PTR gesture without releasing first.
+- Whenever the refresh action has variant behavior depending on user role / route parts (e.g. subnet detail's gate-side refresh vs. plain re-pull, or More's per-sub-page dispatch), branch inside `onPullToRefresh` rather than inside the install wiring. Use `enablesPullToRefresh` only for "no PTR at all on this route."
