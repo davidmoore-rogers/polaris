@@ -215,6 +215,13 @@ async function loadLatestInterfaces(
 ): Promise<Map<string, ResolverInterface[]>> {
   const out = new Map<string, ResolverInterface[]>();
   if (assetIds.length === 0) return out;
+  // Bound the read to a recent window — without it the DISTINCT ON has to
+  // walk the entire active hypertable chunk per (assetId, ifName) pair, the
+  // same disaster pattern interfaceTopologyService.ts had to fix (observed
+  // at 13.5 min / 90M rows / 9 GB I/O on prod). 72h tolerates the long end
+  // of the pollInterval-linked systemInfo cadence (up to 24h) plus a couple
+  // missed scrapes; APs that haven't reported in 3 days drop from the
+  // "By name" checklist, which is the right behavior.
   const rows = await prisma.$queryRaw<Array<{
     assetId: string;
     ifName: string;
@@ -225,6 +232,7 @@ async function loadLatestInterfaces(
       "assetId", "ifName", "ifType", "operStatus"
     FROM asset_interface_samples
     WHERE "assetId" = ANY(${assetIds}::text[])
+      AND "timestamp" > NOW() - INTERVAL '72 hours'
     ORDER BY "assetId", "ifName", "timestamp" DESC
   `;
   for (const r of rows) {
