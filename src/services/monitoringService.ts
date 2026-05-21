@@ -4487,7 +4487,13 @@ async function collectSystemInfoSnmp(
         ...names.keys(), ...descrs.keys(), ...admin.keys(), ...oper.keys(),
       ]);
       for (const idx of allIdx) {
-        const name = snmpVbToString(names.get(idx)) || snmpVbToString(descrs.get(idx)) || `if-${idx}`;
+        // Drop rows where IF-MIB advertises neither ifName nor ifDescr — on
+        // FortiAPs these are ephemeral per-station / per-VAP virtual interfaces
+        // that can't be meaningfully pinned (ifIndex churns as clients
+        // associate) and just pollute AssetInterfaceSample + the auto-monitor
+        // aggregate.
+        const name = snmpVbToString(names.get(idx)) || snmpVbToString(descrs.get(idx));
+        if (!name) continue;
         const speedHi = snmpVbToNumber(hiSpeeds.get(idx));
         const speed32 = snmpVbToNumber(speeds.get(idx));
         const speedBps = speedHi && speedHi > 0
