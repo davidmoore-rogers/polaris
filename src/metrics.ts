@@ -209,6 +209,14 @@ const discoveryTotal = new Counter({
   registers: [registry],
 });
 
+const discoveryPhaseDuration = new Histogram({
+  name: "polaris_discovery_phase_duration_seconds",
+  help: "Wall-clock duration of one phase inside a discovery run. Observed at every phaseMark() transition in syncDhcpSubnets (FMG + standalone FortiGate). `phase` is the marker name used in code (e.g. '1', '2', '2a', '3b', '7.5', '13.5'). Always-on regardless of the integration's verboseLogging flag — the verbose log is the per-line journalctl story; this histogram is the bucketed-distribution story across many runs.",
+  labelNames: ["integration_type", "phase"] as const,
+  buckets: [0.05, 0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 600],
+  registers: [registry],
+});
+
 // ─── Sample-table write duration ─────────────────────────────────────────
 
 const sampleWriteDuration = new Histogram({
@@ -454,6 +462,16 @@ export function recordDiscovery(
     discoveryDuration.observe({ integration_type: integrationType }, durationSeconds);
   }
   discoveryTotal.inc({ integration_type: integrationType, outcome });
+}
+
+export function observeDiscoveryPhase(
+  integrationType: string,
+  phase: string,
+  durationSeconds: number,
+): void {
+  if (Number.isFinite(durationSeconds) && durationSeconds >= 0) {
+    discoveryPhaseDuration.observe({ integration_type: integrationType, phase }, durationSeconds);
+  }
 }
 
 export function startSampleWriteTimer(table: string): () => number {

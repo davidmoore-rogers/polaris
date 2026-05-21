@@ -23,7 +23,7 @@ import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
 import { recordSample, getBaselines, type Baseline } from "../../services/discoveryDurationService.js";
 import { releaseDnsResolvedAt } from "../../services/dnsResolvedReservationService.js";
-import { recordDiscovery } from "../../metrics.js";
+import { recordDiscovery, observeDiscoveryPhase } from "../../metrics.js";
 import { getAdMonitorProtocol, invalidateMonitorSettingsCache } from "../../services/monitoringService.js";
 import * as autoMonitor from "../../services/autoMonitorInterfacesService.js";
 import { recomputeDependencyTree } from "../../services/dependencyTreeService.js";
@@ -2322,13 +2322,18 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   let lastPhaseAt = Date.now();
   let lastPhaseName: string | null = null;
   const phaseMark = (name: string): void => {
-    if (!verboseLogging) return;
     const now = Date.now();
     if (lastPhaseName) {
-      logger.info(
-        { verbose: true, integrationId, integrationName, phase: lastPhaseName, elapsedMs: now - lastPhaseAt },
-        "discovery.phase.complete",
-      );
+      const elapsedMs = now - lastPhaseAt;
+      // Always-on histogram observation — operators don't have to flip
+      // verboseLogging to get the bucketed distribution across runs.
+      observeDiscoveryPhase(integrationType, lastPhaseName, elapsedMs / 1000);
+      if (verboseLogging) {
+        logger.info(
+          { verbose: true, integrationId, integrationName, phase: lastPhaseName, elapsedMs },
+          "discovery.phase.complete",
+        );
+      }
     }
     lastPhaseName = name;
     lastPhaseAt = now;
