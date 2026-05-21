@@ -291,7 +291,7 @@ const jobTotal = new Counter({
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-export type Cadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered";
+export type Cadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage";
 export type WorkOutcome = "success" | "failure" | "crash";
 export type ProbeOutcome = "success" | "failure";
 
@@ -342,11 +342,13 @@ export function setMonitoredAssets(
   monitoredAssetsByStatus.set({ status: "unknown" }, byStatus.unknown);
 }
 
-export function setQueueDepth(depths: Record<Cadence, number>): void {
-  monitorQueueDepth.set({ cadence: "probe" }, depths.probe);
-  monitorQueueDepth.set({ cadence: "fastFiltered" }, depths.fastFiltered);
-  monitorQueueDepth.set({ cadence: "telemetry" }, depths.telemetry);
-  monitorQueueDepth.set({ cadence: "systemInfo" }, depths.systemInfo);
+export function setQueueDepth(depths: Partial<Record<Cadence, number>>): void {
+  if (depths.probe        !== undefined) monitorQueueDepth.set({ cadence: "probe" }, depths.probe);
+  if (depths.fastFiltered !== undefined) monitorQueueDepth.set({ cadence: "fastFiltered" }, depths.fastFiltered);
+  if (depths.telemetry    !== undefined) monitorQueueDepth.set({ cadence: "telemetry" }, depths.telemetry);
+  if (depths.systemInfo   !== undefined) monitorQueueDepth.set({ cadence: "systemInfo" }, depths.systemInfo);
+  if (depths.lldp         !== undefined) monitorQueueDepth.set({ cadence: "lldp" }, depths.lldp);
+  if (depths.storage      !== undefined) monitorQueueDepth.set({ cadence: "storage" }, depths.storage);
 }
 
 export function setPgbossQueueJobs(queue: string, state: string, count: number): void {
@@ -364,15 +366,15 @@ export function recordDbConnectionMode(mode: "direct" | "pgbouncer"): void {
 }
 
 export function setMonitorWorkers(
-  counts: Record<Cadence, number> & { floating?: number },
+  counts: Partial<Record<Cadence, number>> & { floating?: number },
 ): void {
-  monitorWorkers.set({ queue: "probe" },        counts.probe);
-  monitorWorkers.set({ queue: "fastFiltered" }, counts.fastFiltered);
-  monitorWorkers.set({ queue: "telemetry" },    counts.telemetry);
-  monitorWorkers.set({ queue: "systemInfo" },   counts.systemInfo);
-  if (counts.floating !== undefined) {
-    monitorWorkers.set({ queue: "floating" }, counts.floating);
-  }
+  if (counts.probe        !== undefined) monitorWorkers.set({ queue: "probe" },        counts.probe);
+  if (counts.fastFiltered !== undefined) monitorWorkers.set({ queue: "fastFiltered" }, counts.fastFiltered);
+  if (counts.telemetry    !== undefined) monitorWorkers.set({ queue: "telemetry" },    counts.telemetry);
+  if (counts.systemInfo   !== undefined) monitorWorkers.set({ queue: "systemInfo" },   counts.systemInfo);
+  if (counts.lldp         !== undefined) monitorWorkers.set({ queue: "lldp" },         counts.lldp);
+  if (counts.storage      !== undefined) monitorWorkers.set({ queue: "storage" },      counts.storage);
+  if (counts.floating     !== undefined) monitorWorkers.set({ queue: "floating" },     counts.floating);
 }
 
 export function setFmgWorkerQueueDepth(integrationId: string, depth: number): void {

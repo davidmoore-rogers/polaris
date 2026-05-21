@@ -270,6 +270,33 @@ const AutoMonitorInterfacesSchema = z.preprocess(
   }).strict().nullable().optional().default(null),
 );
 
+// Per-class per-stream config block (Phase 2). Each integration carries one
+// per asset class (FortiGate / FortiSwitch / FortiAP / Workstations / Servers
+// depending on type). Every field is nullable so an operator can leave
+// individual cells blank and inherit from the integration tier baseline /
+// source default. `failureThreshold` only applies to responseTime; the
+// resolver ignores it on the other streams.
+const ClassStreamSchema = z.object({
+  polling:          z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled"]).nullable().optional(),
+  credentialId:     z.string().uuid().nullable().optional(),
+  intervalSeconds:  z.number().int().min(1).max(86400).nullable().optional(),
+  timeoutMs:        z.number().int().min(100).max(120000).nullable().optional(),
+  failureThreshold: z.number().int().min(1).max(100).nullable().optional(),
+  mibId:            z.string().nullable().optional(),
+}).partial();
+
+const ClassStreamsSchema = z.object({
+  responseTime: ClassStreamSchema.optional(),
+  cpuMemory:    ClassStreamSchema.optional(),
+  temperature:  ClassStreamSchema.optional(),
+  interfaces:   ClassStreamSchema.optional(),
+  lldp:         ClassStreamSchema.optional(),
+  // Storage is nullable at the class block level so the FortiAP class block
+  // can carry an explicit null (APs have no mountable storage). The resolver
+  // drops storage entries silently for FortiAP regardless.
+  storage:      ClassStreamSchema.nullable().optional(),
+}).partial();
+
 // Per-integration switch/AP monitor stamping. When `enabled` is true,
 // discovery sets each newly-found FortiSwitch/FortiAP's monitorType to
 // "snmp" with the chosen credential — but only when the asset has no
@@ -278,6 +305,12 @@ const AutoMonitorInterfacesSchema = z.preprocess(
 // monitorType configured but `monitored=false`, so operators can opt in
 // asset-by-asset later. `addAsMonitored` requires `enabled` to be true
 // (a switch/AP can't be monitored without a monitorType).
+//
+// Phase 2: `streams` carries the per-(class, stream) per-asset-class config
+// (polling method / credential / interval / timeout / mibId per stream,
+// failureThreshold on responseTime only). Operators edit each class's
+// streams block from its subtab on the integration's Monitoring tab; the
+// resolver dispatches into this block by Asset.assetType.
 const FortinetClassMonitorSchema = z.object({
   enabled:               z.boolean().optional().default(false),
   snmpCredentialId:      z.string().uuid().nullable().optional(),
@@ -286,6 +319,7 @@ const FortinetClassMonitorSchema = z.object({
   sshCredentialId:       z.string().uuid().nullable().optional(),
   addAsMonitored:        z.boolean().optional().default(false),
   autoMonitorInterfaces: AutoMonitorInterfacesSchema,
+  streams:               ClassStreamsSchema.optional(),
 }).optional().default({ enabled: false, snmpCredentialId: null, sshCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null });
 
 // FortiGate-class equivalent. FortiGates always get a monitorType stamped
@@ -308,6 +342,7 @@ const FortiGateClassMonitorSchema = z.object({
   autoMonitorInterfaces: AutoMonitorInterfacesSchema,
   pullSnmpLocation:      z.boolean().optional().default(false),
   pushGeocodedCoords:    z.boolean().optional().default(false),
+  streams:               ClassStreamsSchema.optional(),
 }).optional().default({
   addAsMonitored: false,
   autoMonitorInterfaces: null,
@@ -395,6 +430,19 @@ const FortiGateConfigSchema = z.object({
   verboseLogging: z.boolean().optional().default(false),
 });
 
+// Per-class monitor block for AD / Entra / Windows Server integrations.
+// Mirrors the FMG/FortiGate class blocks but with the workstation/server
+// shape — no `enabled` toggle (those integrations always discover),
+// no per-class snmpCredentialId / sshCredentialId at the block level
+// (per-stream credentials inside `streams` cover those), and no FortiGate-
+// specific pullSnmpLocation / pushGeocodedCoords / autoMonitorInterfaces.
+const WorkstationServerClassMonitorSchema = z.object({
+  enabled:               z.boolean().optional().default(true),
+  addAsMonitored:        z.boolean().optional().default(false),
+  autoMonitorInterfaces: AutoMonitorInterfacesSchema,
+  streams:               ClassStreamsSchema.optional(),
+}).optional().default({ enabled: true, addAsMonitored: false, autoMonitorInterfaces: null });
+
 const WindowsServerConfigSchema = z.object({
   host:      z.string().optional().default(""),
   port:      z.number().int().min(1).max(65535).optional().default(5985),
@@ -404,6 +452,9 @@ const WindowsServerConfigSchema = z.object({
   domain:    z.string().optional().default(""),
   dhcpInclude: z.array(z.string()).optional().default([]),
   dhcpExclude: z.array(z.string()).optional().default([]),
+  // Per-class per-stream config for assets this integration discovers.
+  workstationMonitor: WorkstationServerClassMonitorSchema,
+  serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
   verboseLogging: z.boolean().optional().default(false),
 });
@@ -415,6 +466,8 @@ const EntraIdConfigSchema = z.object({
   enableIntune:  z.boolean().optional().default(false),
   deviceInclude: z.array(z.string()).optional().default([]),
   deviceExclude: z.array(z.string()).optional().default([]),
+  workstationMonitor: WorkstationServerClassMonitorSchema,
+  serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
   verboseLogging: z.boolean().optional().default(false),
 });
@@ -431,6 +484,8 @@ const ActiveDirectoryConfigSchema = z.object({
   ouInclude:       z.array(z.string()).optional().default([]),
   ouExclude:       z.array(z.string()).optional().default([]),
   includeDisabled: z.boolean().optional().default(true),
+  workstationMonitor: WorkstationServerClassMonitorSchema,
+  serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
   verboseLogging: z.boolean().optional().default(false),
 });

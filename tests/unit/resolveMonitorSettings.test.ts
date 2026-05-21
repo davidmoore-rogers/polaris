@@ -55,6 +55,11 @@ const FLOOR = {
   cpuMemoryIntervalSeconds:   60,
   temperatureIntervalSeconds: 60,
   systemInfoIntervalSeconds:  600,
+  // Phase 2 LLDP / Storage cadence + timeout fields — hardcoded floor.
+  lldpIntervalSeconds:        600,
+  lldpTimeoutMs:              10000,
+  storageIntervalSeconds:     600,
+  storageTimeoutMs:           10000,
   sampleRetentionDays:        30,
   telemetryRetentionDays:     30,
   systemInfoRetentionDays:    30,
@@ -92,6 +97,13 @@ const TUNED_TIER = {
   cpuMemoryIntervalSeconds:   90,
   temperatureIntervalSeconds: 90,
   systemInfoIntervalSeconds:  1200,
+  // Phase 2 LLDP / Storage cadence + timeout fields. Tuned tier doesn't set
+  // them — they fall through to the hardcoded floor (600 s / 10000 ms each)
+  // per tierFromJson's default chain.
+  lldpIntervalSeconds:        600,
+  lldpTimeoutMs:              10000,
+  storageIntervalSeconds:     600,
+  storageTimeoutMs:           10000,
   sampleRetentionDays:        60,
   telemetryRetentionDays:     14,
   systemInfoRetentionDays:    14,
@@ -123,7 +135,10 @@ const MANUAL_POLLING_DEFAULT = {
   storagePolling:      null,
 };
 const FORTI_POLLING_DEFAULT = {
-  responseTimePolling: "rest_api" as const,
+  // Response time defaults to ICMP across every source kind — the cheapest
+  // universal liveness probe. Operators wanting REST `/sys/status` or SNMP
+  // sysUpTime opt in per-asset / per-class / at the integration tier.
+  responseTimePolling: "icmp" as const,
   cpuMemoryPolling:    "rest_api" as const,
   temperaturePolling:  "rest_api" as const,
   interfacesPolling:   "rest_api" as const,
@@ -221,6 +236,78 @@ describe("resolveMonitorSettings — tier-3 fallback", () => {
     });
     // FortiManager source: REST API for every stream.
     expect(out).toEqual({ ...TUNED_TIER, ...FORTI_POLLING_DEFAULT });
+  });
+
+  it("reads from fortiswitchMonitor.streams when assetType=switch (Phase 2 per-class)", async () => {
+    (prisma.integration.findUnique as any).mockResolvedValue({
+      config: {
+        monitorSettings: TUNED_TIER,
+        // Switch-specific overlay: response time on SNMP at 30s, leave the
+        // rest inheriting from the flat tier baseline.
+        fortiswitchMonitor: {
+          enabled: true,
+          streams: {
+            responseTime: { polling: "snmp", intervalSeconds: 30, timeoutMs: 8000 },
+            // Empty cells inherit the flat baseline.
+            cpuMemory:   {},
+            temperature: {},
+            interfaces:  {},
+            lldp:        {},
+            storage:     { polling: "snmp" },
+          },
+        },
+      },
+      type: "fortimanager",
+    });
+    (prisma.monitorClassOverride.findFirst as any).mockResolvedValue(null);
+
+    const out = await resolveMonitorSettings({
+      assetType:                 "switch",
+      discoveredByIntegrationId: "fmg-1",
+      discoveredByIntegrationType: "fortimanager",
+      monitorIntervalSec:        null,
+      cpuMemoryIntervalSec:      null,
+      temperatureIntervalSec:    null,
+      systemInfoIntervalSec:     null,
+      probeTimeoutMs:            null,
+    });
+    // Class block wins: responseTime polling flips snmp; intervalSeconds=30;
+    // probeTimeoutMs=8000; storage polling flips snmp. Other fields stay at
+    // the flat baseline / source default.
+    expect(out.responseTimePolling).toBe("snmp");
+    expect(out.intervalSeconds).toBe(30);
+    expect(out.probeTimeoutMs).toBe(8000);
+    expect(out.storagePolling).toBe("snmp");
+    // cpuMemory unchanged → FortiManager source default of rest_api.
+    expect(out.cpuMemoryPolling).toBe("rest_api");
+  });
+
+  it("firewall vs switch read from different per-class streams blocks on the same integration", async () => {
+    // Same integration, two assets of different classes. The resolver's
+    // cache key is `${integrationId}:${assetType}` so each class gets its
+    // own resolved snapshot.
+    (prisma.integration.findUnique as any).mockResolvedValue({
+      config: {
+        monitorSettings: TUNED_TIER,
+        fortigateMonitor:   { streams: { responseTime: { polling: "rest_api", intervalSeconds: 60 } } },
+        fortiswitchMonitor: { enabled: true, streams: { responseTime: { polling: "snmp",     intervalSeconds: 120 } } },
+      },
+      type: "fortimanager",
+    });
+    (prisma.monitorClassOverride.findFirst as any).mockResolvedValue(null);
+
+    const firewallOut = await resolveMonitorSettings({
+      assetType: "firewall", discoveredByIntegrationId: "fmg-1", discoveredByIntegrationType: "fortimanager",
+      monitorIntervalSec: null, cpuMemoryIntervalSec: null, temperatureIntervalSec: null, systemInfoIntervalSec: null, probeTimeoutMs: null,
+    });
+    const switchOut = await resolveMonitorSettings({
+      assetType: "switch", discoveredByIntegrationId: "fmg-1", discoveredByIntegrationType: "fortimanager",
+      monitorIntervalSec: null, cpuMemoryIntervalSec: null, temperatureIntervalSec: null, systemInfoIntervalSec: null, probeTimeoutMs: null,
+    });
+    expect(firewallOut.responseTimePolling).toBe("rest_api");
+    expect(firewallOut.intervalSeconds).toBe(60);
+    expect(switchOut.responseTimePolling).toBe("snmp");
+    expect(switchOut.intervalSeconds).toBe(120);
   });
 });
 

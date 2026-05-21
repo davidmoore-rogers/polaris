@@ -571,10 +571,20 @@ model Asset {
   cpuMemoryIntervalSec  Int?
   temperatureIntervalSec Int?
   systemInfoIntervalSec Int?
+  // Phase 2 carve-out: LLDP + Storage run on independent cadences (their own
+  // pg-boss queues — polaris-monitor-lldp / polaris-monitor-storage) rather
+  // than riding systemInfo. null = inherit from the resolved tier.
+  lldpIntervalSec        Int?
+  storageIntervalSec     Int?
   // Slice 7 — per-asset custom-widget probe cadence (seconds). null = inherit.
   customWidgetIntervalSec Int?
   lastTelemetryAt       DateTime?
   lastSystemInfoAt      DateTime?
+  // Per-cadence last-touched stamps for the LLDP + Storage queues. Bumped by
+  // runLldpFor / runStorageFor on every successful pass; publisher reads them
+  // to decide when the next job is due.
+  lastLldpAt            DateTime?
+  lastStorageAt         DateTime?
   // Bumped after every successful collectCustomWidgets pass.
   lastCustomWidgetAt    DateTime?
 

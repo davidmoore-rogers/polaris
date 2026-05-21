@@ -881,6 +881,51 @@ var _ALL_STREAMS = [
   { key: "storage",      label: "Storage",       pollField: "storagePolling",      mibStreamKey: null,           intervalField: "storageIntervalSeconds",     timeoutField: "storageTimeoutMs",    noMib: true },
 ];
 
+// Phase 2 — pick the saved per-class `streams` block matching this class
+// subtab, from the `opts` object passed into `_classSubtabBodyHTML`. The
+// per-class blocks live on the integration's config at
+// `<klass>Monitor.streams` (post-migration); when absent, this returns
+// undefined and the overlay falls through to the flat baseline so a
+// freshly-edited or unmigrated install still renders sensible values.
+function _classStreamsBlockFor(klass, opts) {
+  function streamsOf(block) { return block && typeof block === "object" ? block.streams : null; }
+  if (klass === "fortigate")    return streamsOf(opts.fortigateMonitor);
+  if (klass === "fortiswitch")  return streamsOf(opts.fortiswitchMonitor);
+  if (klass === "fortiap")      return streamsOf(opts.fortiapMonitor);
+  // _CLASS_SUBTAB_SPECS uses plural class keys for AD/Entra/WinSrv (matches
+  // the human-facing tab labels). The backend Integration.config blocks
+  // stay singular (workstationMonitor / serverMonitor) so the resolver
+  // dispatches on Asset.assetType which is also singular.
+  if (klass === "workstations" || klass === "workstation") return streamsOf(opts.workstationMonitor);
+  if (klass === "servers"      || klass === "server")      return streamsOf(opts.serverMonitor);
+  return null;
+}
+
+// Phase 2 — overlay a per-class streams block onto the flat baseline so a
+// class subtab can show its own saved values. Maps stream cell keys to the
+// legacy field names `_classStreamSubtabHTML` consumes from `settings`.
+// Returns a shallow-merged copy; never mutates the inputs.
+function _classSettingsOverlay(flatSettings, classStreams) {
+  var out = Object.assign({}, flatSettings || {});
+  if (!classStreams || typeof classStreams !== "object") return out;
+  function pickStream(streamKey, fields) {
+    var cell = classStreams[streamKey];
+    if (!cell || typeof cell !== "object") return;
+    if (Object.prototype.hasOwnProperty.call(cell, "polling")          && cell.polling          != null) out[fields.poll]     = cell.polling;
+    if (Object.prototype.hasOwnProperty.call(cell, "intervalSeconds")  && cell.intervalSeconds  != null) out[fields.interval] = cell.intervalSeconds;
+    if (Object.prototype.hasOwnProperty.call(cell, "timeoutMs")        && cell.timeoutMs        != null) out[fields.timeout]  = cell.timeoutMs;
+    if (fields.mib && Object.prototype.hasOwnProperty.call(cell, "mibId")            && cell.mibId  != null) out[fields.mib]      = cell.mibId;
+    if (fields.failure && Object.prototype.hasOwnProperty.call(cell, "failureThreshold") && cell.failureThreshold != null) out[fields.failure] = cell.failureThreshold;
+  }
+  pickStream("responseTime", { poll: "responseTimePolling", interval: "intervalSeconds",            timeout: "probeTimeoutMs",       mib: "responseTimeMibId", failure: "failureThreshold" });
+  pickStream("cpuMemory",    { poll: "cpuMemoryPolling",    interval: "cpuMemoryIntervalSeconds",   timeout: "cpuMemoryTimeoutMs",   mib: "cpuMemoryMibId" });
+  pickStream("temperature",  { poll: "temperaturePolling",  interval: "temperatureIntervalSeconds", timeout: "temperatureTimeoutMs", mib: "temperatureMibId" });
+  pickStream("interfaces",   { poll: "interfacesPolling",   interval: "systemInfoIntervalSeconds",  timeout: "systemInfoTimeoutMs",  mib: "interfacesMibId" });
+  pickStream("lldp",         { poll: "lldpPolling",         interval: "lldpIntervalSeconds",        timeout: "lldpTimeoutMs",        mib: "lldpMibId" });
+  pickStream("storage",      { poll: "storagePolling",      interval: "storageIntervalSeconds",     timeout: "storageTimeoutMs" });
+  return out;
+}
+
 function _streamsForClass(klass) {
   if (klass === "fortiap") return _ALL_STREAMS.filter(function (s) { return s.key !== "storage"; });
   return _ALL_STREAMS;
@@ -1034,6 +1079,17 @@ function _classSubtabBodyHTML(opts) {
   var credentials     = opts.credentials || [];
   var headerHtml      = opts.headerHtml || "";
 
+  // Phase 2: overlay the per-class streams block onto the flat settings
+  // baseline so this class subtab shows its own saved per-stream values
+  // instead of mirroring the FortiGate / Workstation primary subtab. The
+  // per-class block lives at opts.<klass>MonitorConfig.streams.<stream>.
+  // Each stream's cells become the same keys the legacy `settings`
+  // object carried: `<pollField>` / `<intervalField>` / `<timeoutField>` /
+  // `<mibStreamKey>MibId` / `failureThreshold`. Empty fields fall back to
+  // the flat baseline so legacy integrations that haven't been migrated
+  // yet still render their familiar starting values.
+  var perClassSettings = _classSettingsOverlay(settings, opts.classStreams);
+
   // Phase 1: every non-primary class subtab is an echo of the primary today
   // (the save reader only consumes the primary subtab's namespaced ids). The
   // banner that used to call this out has been removed at the user's request —
@@ -1062,7 +1118,7 @@ function _classSubtabBodyHTML(opts) {
     return {
       key: stream.key,
       label: stream.label,
-      html: _classStreamSubtabHTML(echoPrefix, integrationType, klass, stream, settings, credentials, isPrimary, { fmgDirectMode: initialFmgDirectMode }),
+      html: _classStreamSubtabHTML(echoPrefix, integrationType, klass, stream, perClassSettings, credentials, isPrimary, { fmgDirectMode: initialFmgDirectMode }),
     };
   });
 
@@ -1971,11 +2027,20 @@ function monitorSettingsFormHTML(s, opts) {
         isPrimary:       c.key === spec.primary,
         primaryLabel:    primaryLabel,
         settings:        s,
+        // Phase 2 — pick the per-class streams block matching this class.
+        // FMG / FortiGate route to fortigateMonitor / fortiswitchMonitor /
+        // fortiapMonitor; AD / Entra / WinSrv route to workstationMonitor /
+        // serverMonitor. Missing block → undefined → overlay no-ops →
+        // legacy flat baseline shows through (unmigrated install).
+        classStreams: _classStreamsBlockFor(c.key, opts),
         credentials:     credentials,
         headerHtml:      headerForClass(c.key),
         fmgDefaults:     opts.fmgDefaults || {},
+        fortigateMonitor:   opts.fortigateMonitor   || {},
         fortiswitchMonitor: opts.fortiswitchMonitor || {},
-        fortiapMonitor:     opts.fortiapMonitor || {},
+        fortiapMonitor:     opts.fortiapMonitor     || {},
+        workstationMonitor: opts.workstationMonitor || {},
+        serverMonitor:      opts.serverMonitor     || {},
       }),
     };
   });
@@ -2263,39 +2328,136 @@ function getMonitorSettingsFromForm() {
   return _readIntegrationCadenceForm();
 }
 
+// Phase 2 — read the per-stream values from one class subtab into the
+// `streams` shape the backend persists at config.<klass>Monitor.streams.
+// `isPrimary` true reads from the primary subtab's legacy IDs
+// (`f-mon-tier-<pollField>` / `f-mon-<intervalField>`); false reads from
+// the secondary subtab's namespaced IDs
+// (`f-mon-classecho-<klass>-tier-<pollField>` / `f-mon-classecho-<klass>-<intervalField>`).
+// `includeStorage` matches `_streamsForClass` — FortiAP omits storage.
+function _readClassStreamSubtabs(klass, isPrimary, includeStorage) {
+  function id(suffix) {
+    return isPrimary ? ("f-mon-" + suffix) : ("f-mon-classecho-" + klass + "-" + suffix);
+  }
+  function tierId(suffix) {
+    return isPrimary ? ("f-mon-tier-" + suffix) : ("f-mon-classecho-" + klass + "-tier-" + suffix);
+  }
+  function pollVal(field) {
+    var el = document.getElementById(tierId(field));
+    if (!el) return undefined;
+    var v = el.value || "";
+    return v.length > 0 ? v : null;
+  }
+  function mibVal(streamKey) {
+    var el = document.getElementById(tierId(streamKey + "Mib"));
+    if (!el) return undefined;
+    var v = el.value || "";
+    return v.length > 0 ? v : null;
+  }
+  function numVal(field) {
+    var el = document.getElementById(id(field));
+    if (!el) return undefined;
+    var raw = (el.value == null ? "" : String(el.value)).trim();
+    if (raw === "") return null;
+    var n = parseInt(raw, 10);
+    return Number.isFinite(n) ? n : null;
+  }
+  // Cell builder for one stream. Empty per-stream cells are still serialized
+  // as `{polling:null, intervalSeconds:null, ...}` so the operator's explicit
+  // "inherit at all 4 layers" choice persists across reload.
+  function cell(opts) {
+    var out = {};
+    if (opts.polling          !== undefined) out.polling          = opts.polling;
+    if (opts.intervalSeconds  !== undefined) out.intervalSeconds  = opts.intervalSeconds;
+    if (opts.timeoutMs        !== undefined) out.timeoutMs        = opts.timeoutMs;
+    if (opts.mibId            !== undefined) out.mibId            = opts.mibId;
+    if (opts.failureThreshold !== undefined) out.failureThreshold = opts.failureThreshold;
+    return out;
+  }
+  var streams = {
+    responseTime: cell({
+      polling:          pollVal("responseTimePolling"),
+      intervalSeconds:  numVal("intervalSeconds"),
+      timeoutMs:        numVal("probeTimeoutMs"),
+      mibId:            mibVal("responseTime"),
+      failureThreshold: numVal("failureThreshold"),
+    }),
+    cpuMemory: cell({
+      polling:         pollVal("cpuMemoryPolling"),
+      intervalSeconds: numVal("cpuMemoryIntervalSeconds"),
+      timeoutMs:       numVal("cpuMemoryTimeoutMs"),
+      mibId:           mibVal("cpuMemory"),
+    }),
+    temperature: cell({
+      polling:         pollVal("temperaturePolling"),
+      intervalSeconds: numVal("temperatureIntervalSeconds"),
+      timeoutMs:       numVal("temperatureTimeoutMs"),
+      mibId:           mibVal("temperature"),
+    }),
+    interfaces: cell({
+      polling:         pollVal("interfacesPolling"),
+      intervalSeconds: numVal("systemInfoIntervalSeconds"),
+      timeoutMs:       numVal("systemInfoTimeoutMs"),
+      mibId:           mibVal("interfaces"),
+    }),
+    lldp: cell({
+      polling:         pollVal("lldpPolling"),
+      intervalSeconds: numVal("lldpIntervalSeconds"),
+      timeoutMs:       numVal("lldpTimeoutMs"),
+      mibId:           mibVal("lldp"),
+    }),
+  };
+  if (includeStorage !== false) {
+    streams.storage = cell({
+      polling:         pollVal("storagePolling"),
+      intervalSeconds: numVal("storageIntervalSeconds"),
+      timeoutMs:       numVal("storageTimeoutMs"),
+    });
+  }
+  return streams;
+}
+
 // Reads the "enable direct polling" + SNMP/SSH credential pickers + the
 // auto-Monitor flag + the auto-monitor-interfaces selection for one class
 // (FortiSwitch or FortiAP). Returns null when the subtab didn't render.
 // Both credential ids are persisted regardless of which row is currently
 // visible — flipping the integration tier between SNMP and SSH should
 // restore the prior selection rather than zero it out.
-function _readClassMonitorBlock(prefix) {
+function _readClassMonitorBlock(prefix, opts) {
   var enabledEl    = document.getElementById(prefix + "enabled");
   var credEl       = document.getElementById(prefix + "credentialId");
   var sshCredEl    = document.getElementById(prefix + "sshCredentialId");
   var addMonEl     = document.getElementById(prefix + "addAsMonitored");
   if (!enabledEl || !credEl) return null;
   var ami = _readAutoMonitorInterfaces(prefix + "amon-");
-  return {
+  var out = {
     enabled: enabledEl.checked === true,
     snmpCredentialId: credEl.value || null,
     sshCredentialId:  sshCredEl ? (sshCredEl.value || null) : null,
     addAsMonitored: addMonEl ? addMonEl.checked === true : false,
     autoMonitorInterfaces: ami === undefined ? null : ami,
   };
+  // Phase 2 per-class streams. `opts.klass` and `opts.isPrimary` drive the
+  // ID lookup for the stream subtabs inside this class subtab. FortiAP omits
+  // storage. When the caller doesn't pass these (legacy invocation), we skip
+  // the streams field so backward-compat behavior is preserved.
+  if (opts && opts.klass) {
+    out.streams = _readClassStreamSubtabs(opts.klass, opts.isPrimary === true, opts.includeStorage !== false);
+  }
+  return out;
 }
 
 // FortiGate variant — only the auto-Monitor flag (no direct-polling toggle
 // since FortiGates always have the integration source link stamped at
 // discovery, which the resolver picks REST API for) plus the
 // auto-monitor-interfaces selection.
-function _readFortigateMonitorBlock(prefix) {
+function _readFortigateMonitorBlock(prefix, opts) {
   var addMonEl   = document.getElementById(prefix + "addAsMonitored");
   var pullEl     = document.getElementById(prefix + "pullSnmpLocation");
   var pushEl     = document.getElementById(prefix + "pushGeocodedCoords");
   if (!addMonEl) return null;
   var ami = _readAutoMonitorInterfaces(prefix + "amon-");
-  return {
+  var out = {
     addAsMonitored: addMonEl.checked === true,
     autoMonitorInterfaces: ami === undefined ? null : ami,
     pullSnmpLocation: pullEl ? pullEl.checked === true : false,
@@ -2304,6 +2466,12 @@ function _readFortigateMonitorBlock(prefix) {
     // in that state.
     pushGeocodedCoords: (pullEl && pullEl.checked && pushEl) ? pushEl.checked === true : false,
   };
+  // Phase 2: FortiGate subtab is the primary class subtab for FMG / standalone
+  // FortiGate integrations. Read its per-stream values into config.fortigateMonitor.streams.
+  if (opts && opts.klass) {
+    out.streams = _readClassStreamSubtabs(opts.klass, opts.isPrimary === true, true);
+  }
+  return out;
 }
 
 // Shared "Verbose debug logging" checkbox appended to the General tab of
@@ -3028,9 +3196,9 @@ async function openCreateModal(type) {
         // Integration.config.monitorSettings.polling by the
         // /monitor-settings/integration/:id PUT after the integration is
         // created — no inline fields needed on create.
-        var fgBlockNew = _readFortigateMonitorBlock("f-mon-fortigate-");
-        var swBlockNew = _readClassMonitorBlock("f-mon-fortiswitch-");
-        var apBlockNew = _readClassMonitorBlock("f-mon-fortiap-");
+        var fgBlockNew = _readFortigateMonitorBlock("f-mon-fortigate-",   { klass: "fortigate",   isPrimary: true });
+        var swBlockNew = _readClassMonitorBlock("f-mon-fortiswitch-",     { klass: "fortiswitch", isPrimary: false });
+        var apBlockNew = _readClassMonitorBlock("f-mon-fortiap-",         { klass: "fortiap",     isPrimary: false, includeStorage: false });
         if (fgBlockNew) createConfig.fortigateMonitor   = fgBlockNew;
         if (swBlockNew) createConfig.fortiswitchMonitor = swBlockNew;
         if (apBlockNew) createConfig.fortiapMonitor     = apBlockNew;
@@ -3261,6 +3429,12 @@ async function openEditModal(id) {
           integrationType: intg.type,
           integrationName: intg.name,
           pollInterval:    intg.pollInterval,
+          // Phase 2 — forward AD/Entra/WinSrv per-class blocks so per-class
+          // subtabs can render their own saved stream values. Blocks are
+          // freshly seeded by the migration job; pre-migration installs see
+          // an empty object → overlay no-ops → flat baseline shows through.
+          workstationMonitor: config.workstationMonitor || null,
+          serverMonitor:      config.serverMonitor      || null,
         }) },
       ];
       body = _intRenderTabbedBody("intg-edit", nonFortinetTabs);
@@ -3409,9 +3583,13 @@ async function openEditModal(id) {
         // Per-class FortiGate / FortiSwitch / FortiAP blocks. The reader
         // returns null when its subtab didn't render — in that case leave
         // the existing config alone rather than wiping it.
-        var fgBlock = _readFortigateMonitorBlock("f-mon-fortigate-");
-        var swBlock = _readClassMonitorBlock("f-mon-fortiswitch-");
-        var apBlock = _readClassMonitorBlock("f-mon-fortiap-");
+        // Phase 2: each class subtab carries its own per-stream config. The
+        // FortiGate subtab is the primary (uses legacy IDs); FortiSwitch and
+        // FortiAP are secondary subtabs whose IDs are namespaced under
+        // `f-mon-classecho-<klass>-`. FortiAP omits storage.
+        var fgBlock = _readFortigateMonitorBlock("f-mon-fortigate-",   { klass: "fortigate",   isPrimary: true });
+        var swBlock = _readClassMonitorBlock("f-mon-fortiswitch-",     { klass: "fortiswitch", isPrimary: false });
+        var apBlock = _readClassMonitorBlock("f-mon-fortiap-",         { klass: "fortiap",     isPrimary: false, includeStorage: false });
         if (fgBlock) editConfig.fortigateMonitor   = fgBlock;
         if (swBlock) editConfig.fortiswitchMonitor = swBlock;
         if (apBlock) editConfig.fortiapMonitor     = apBlock;

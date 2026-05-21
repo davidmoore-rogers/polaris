@@ -46,6 +46,8 @@ import {
   runTelemetryFor,
   runSystemInfoFor,
   runFastFilteredFor,
+  runLldpFor,
+  runStorageFor,
   type MonitorCadence,
 } from "./monitoringService.js";
 
@@ -148,6 +150,11 @@ export const QUEUE_NAMES: Record<MonitorCadence, string> = {
   fastFiltered: "polaris-monitor-fastfiltered",
   telemetry:    "polaris-monitor-telemetry",
   systemInfo:   "polaris-monitor-systeminfo",
+  // Phase 2 carve-out: LLDP + Storage each get their own queue + worker pool
+  // + per-asset cadence. Same coalescing semantics as the other cadences
+  // (singleton key `<assetId>:<cadence>` collapses duplicate publishes).
+  lldp:         "polaris-monitor-lldp",
+  storage:      "polaris-monitor-storage",
 };
 
 interface MonitorJobPayload {
@@ -188,6 +195,8 @@ let slotPools: {
   fastFiltered: WorkerSlotPool;
   telemetry:    WorkerSlotPool;
   systemInfo:   WorkerSlotPool;
+  lldp:         WorkerSlotPool;
+  storage:      WorkerSlotPool;
   floating:     WorkerSlotPool;
 } | null = null;
 
@@ -251,7 +260,14 @@ async function runDedicatedWorker(
 let floatingInFlight = 0;
 let floatingLoopRunning = false;
 
-const FLOAT_PRIORITY: MonitorCadence[] = ["probe", "fastFiltered", "telemetry", "systemInfo"];
+// Floating worker priority order (Phase 2):
+//   probe > fastFiltered > lldp > storage > telemetry > systemInfo
+// LLDP outranks storage because LLDP feeds the topology graph (visible to
+// operators in the Device Map and asset details Neighbor column) and is
+// generally cheaper than the per-vendor disk scalar pair; storage outranks
+// telemetry because storage feeds capacity alerts directly. Both still sit
+// below probe/fastFiltered so probes (the cheapest cadence) never starve.
+const FLOAT_PRIORITY: MonitorCadence[] = ["probe", "fastFiltered", "lldp", "storage", "telemetry", "systemInfo"];
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -335,7 +351,7 @@ async function refreshPgbossMetrics(): Promise<void> {
       setPgbossJobAge(name, "created", 0);
       setPgbossJobAge(name, "active", 0);
     }
-    const heavyQueues = new Set([QUEUE_NAMES.telemetry, QUEUE_NAMES.systemInfo]);
+    const heavyQueues = new Set([QUEUE_NAMES.telemetry, QUEUE_NAMES.systemInfo, QUEUE_NAMES.lldp, QUEUE_NAMES.storage]);
     for (const row of rows) {
       setPgbossQueueJobs(row.name, row.state, Number(row.count));
       // Only created/active have a meaningful "oldest job age." Failed jobs
@@ -503,6 +519,11 @@ export async function startPgbossWorkers(): Promise<void> {
     fastFiltered: 60,   // one collector round-trip + buffered writes
     telemetry:    180,  // SNMP walks for CPU/mem/sensors
     systemInfo:   300,  // full interface + storage + IPsec + LLDP walk
+    // Phase 2 carve-out — LLDP and Storage each get their own queue with the
+    // same handler timeout as systemInfo since they share its walk family
+    // (SNMP-MIB or FortiOS REST) and might tail at the same pace.
+    lldp:         600,
+    storage:      600,
   };
   // createQueue is idempotent on name but does NOT re-apply config to an
   // existing queue — the stored `expire_seconds` / `retry_limit` / etc on
@@ -533,17 +554,25 @@ export async function startPgbossWorkers(): Promise<void> {
   const probeWorkers    = resolveEnvInt("POLARIS_MONITOR_PROBE_WORKERS", 24);
   const fastWorkers     = resolveEnvInt("POLARIS_MONITOR_FAST_WORKERS",  24);
   const heavyWorkers    = resolveEnvInt("POLARIS_MONITOR_HEAVY_WORKERS", 24);
+  // Phase 2 carve-out workers. Defaults sized smaller than heavy (12 vs 24)
+  // because LLDP and Storage are lower-frequency than systemInfo + telemetry.
+  // Operators on fleets that aggressively reuse the LLDP topology graph can
+  // bump POLARIS_MONITOR_LLDP_WORKERS / POLARIS_MONITOR_STORAGE_WORKERS via env.
+  const lldpWorkers     = resolveEnvInt("POLARIS_MONITOR_LLDP_WORKERS",    12);
+  const storageWorkers  = resolveEnvInt("POLARIS_MONITOR_STORAGE_WORKERS", 12);
   const floatingWorkers = resolveEnvInt("POLARIS_MONITOR_FLOATING_WORKERS", 32);
   setMonitorWorkers({
     probe:        probeWorkers,
     fastFiltered: fastWorkers,
     telemetry:    heavyWorkers,
     systemInfo:   heavyWorkers,
+    lldp:         lldpWorkers,
+    storage:      storageWorkers,
     floating:     floatingWorkers,
   });
   logger.info(
     {
-      probeWorkers, fastWorkers, heavyWorkers, floatingWorkers, cores: cpus().length,
+      probeWorkers, fastWorkers, heavyWorkers, lldpWorkers, storageWorkers, floatingWorkers, cores: cpus().length,
     },
     "pg-boss workers configured",
   );
@@ -557,6 +586,8 @@ export async function startPgbossWorkers(): Promise<void> {
     fastFiltered: createWorkerSlotPool("fast",      fastWorkers),
     telemetry:    createWorkerSlotPool("telemetry", heavyWorkers),
     systemInfo:   createWorkerSlotPool("sysinfo",   heavyWorkers),
+    lldp:         createWorkerSlotPool("lldp",      lldpWorkers),
+    storage:      createWorkerSlotPool("storage",   storageWorkers),
     floating:     createWorkerSlotPool("floating",  floatingWorkers),
   };
 
@@ -589,6 +620,22 @@ export async function startPgbossWorkers(): Promise<void> {
   }, async (jobs: PgBossJob<MonitorJobPayload>[]) => {
     await runDedicatedWorker("systemInfo", jobs[0], (assetId, labels) =>
       runSystemInfoFor(assetId, labels),
+    );
+  });
+
+  await boss.work<MonitorJobPayload>(QUEUE_NAMES.lldp, {
+    localConcurrency: lldpWorkers, batchSize: 1, pollingIntervalSeconds: 5,
+  }, async (jobs: PgBossJob<MonitorJobPayload>[]) => {
+    await runDedicatedWorker("lldp", jobs[0], (assetId, labels) =>
+      runLldpFor(assetId, labels),
+    );
+  });
+
+  await boss.work<MonitorJobPayload>(QUEUE_NAMES.storage, {
+    localConcurrency: storageWorkers, batchSize: 1, pollingIntervalSeconds: 5,
+  }, async (jobs: PgBossJob<MonitorJobPayload>[]) => {
+    await runDedicatedWorker("storage", jobs[0], (assetId, labels) =>
+      runStorageFor(assetId, labels),
     );
   });
 
@@ -692,6 +739,8 @@ async function dispatchFloatingJob(
       case "fastFiltered": await runFastFilteredFor(assetId, labels); break;
       case "telemetry":    await runTelemetryFor(assetId, labels);    break;
       case "systemInfo":   await runSystemInfoFor(assetId, labels);   break;
+      case "lldp":         await runLldpFor(assetId, labels);         break;
+      case "storage":      await runStorageFor(assetId, labels);      break;
     }
     await boss.complete(queueName, job.id);
   } catch (err) {
