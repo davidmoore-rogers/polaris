@@ -332,15 +332,20 @@ router.get("/class-overrides", requirePermission("assetMonitorSettings", "read")
 router.post("/class-overrides", requirePermission("assetMonitorSettings", "write"), async (req, res, next) => {
   try {
     const input = ClassCreateSchema.parse(req.body);
-    let sourceKind: AssetSourceKind = "manual";
+    // Phase 2 narrowing — integration-scoped class overrides are no longer
+    // accepted. Each integration owns per-class settings natively via its
+    // Monitoring tab's per-class streams blocks; the Assets-page
+    // Class Overrides surface is for manually-added assets only
+    // (integrationId = null). The Phase 2 migration job folds any
+    // existing integration-scoped rows into the integration streams blocks
+    // and deletes them, so by the time this guard fires the DB is clean.
     if (input.integrationId !== null) {
-      const exists = await prisma.integration.findUnique({
-        where:  { id: input.integrationId },
-        select: { id: true, type: true },
-      });
-      if (!exists) throw new AppError(400, `Integration ${input.integrationId} not found`);
-      sourceKind = assetSourceKindFromIntegrationType(exists.type);
+      throw new AppError(
+        400,
+        "Integration-scoped class overrides are no longer supported — configure per-class settings on the integration's Monitoring tab.",
+      );
     }
+    const sourceKind: AssetSourceKind = "manual";
     // Class overrides scoped to a single integration must use polling methods
     // valid for that integration's source kind. Manual-tier overrides
     // (integrationId = null) cover any source so they accept any method.
@@ -386,11 +391,19 @@ router.put("/class-overrides/:id", requirePermission("assetMonitorSettings", "wr
       include: { integration: { select: { type: true } } },
     });
     if (!existing) throw new AppError(404, "Class override not found");
+    // Phase 2 narrowing — refuse updates to integration-scoped rows. The
+    // migration job should have folded + deleted these, but defend against
+    // a partial-rollback / leftover row that escaped the sweep.
+    if (existing.integrationId !== null) {
+      throw new AppError(
+        400,
+        "Integration-scoped class overrides are no longer supported — configure per-class settings on the integration's Monitoring tab.",
+      );
+    }
     // Same compatibility check as create — keep operators from saving a
     // method that wouldn't apply on the assets this row covers.
-    const sourceKind: AssetSourceKind = existing.integration
-      ? assetSourceKindFromIntegrationType(existing.integration.type)
-      : "manual";
+    const sourceKind: AssetSourceKind = "manual";
+    void assetSourceKindFromIntegrationType; // kept for backward-compat with any future callsite
     assertPollingCompatible(sourceKind, input);
     const updated = await prisma.monitorClassOverride.update({
       where:   { id },

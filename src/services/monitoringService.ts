@@ -174,6 +174,23 @@ export interface MonitorTierSettings {
   cpuMemoryIntervalSeconds:  number;
   temperatureIntervalSeconds: number;
   systemInfoIntervalSeconds: number;
+  /**
+   * Phase 2 carve-out — LLDP rides its own pg-boss queue
+   * (polaris-monitor-lldp) and its own cadence. Defaults to the systemInfo
+   * cadence at the floor; operators can set it slower (e.g. once an hour
+   * while interfaces scrape every 10 min) to cut LLDP-MIB walk pressure
+   * on big fleets.
+   */
+  lldpIntervalSeconds:       number;
+  /** Per-request timeout (ms) for the LLDP collector. Default 10000. */
+  lldpTimeoutMs:             number;
+  /**
+   * Phase 2 carve-out — Storage rides its own pg-boss queue
+   * (polaris-monitor-storage) and its own cadence. Same shape as
+   * lldpIntervalSeconds / lldpTimeoutMs.
+   */
+  storageIntervalSeconds:    number;
+  storageTimeoutMs:          number;
   sampleRetentionDays:       number;
   /**
    * Single retention setting shared by AssetTelemetrySample (CPU/memory)
@@ -257,6 +274,13 @@ const HARDCODED_FLOOR: MonitorTierSettings = {
   cpuMemoryIntervalSeconds:  60,
   temperatureIntervalSeconds: 60,
   systemInfoIntervalSeconds: 600,
+  // Phase 2: LLDP + Storage default to the same baseline as systemInfo so
+  // existing fleets see no behavior change at the floor; operators can
+  // tune each independently from the per-class subtabs.
+  lldpIntervalSeconds:       600,
+  lldpTimeoutMs:             10_000,
+  storageIntervalSeconds:    600,
+  storageTimeoutMs:          10_000,
   sampleRetentionDays:       30,
   telemetryRetentionDays:    30,
   systemInfoRetentionDays:   30,
@@ -514,8 +538,27 @@ export function invalidateMonitorSettingsCache(scope?: {
   }
   const tierKey = scope.integrationId === null ? MANUAL_TIER_CACHE_KEY : scope.integrationId;
   if (tierKey != null) {
-    tierCache.delete(tierKey);
-    tierSystemInfoFromPollIntervalCache.delete(tierKey);
+    if (tierKey === MANUAL_TIER_CACHE_KEY) {
+      // Manual tier is a single cached entry (no per-class branches), so the
+      // legacy key clear still works.
+      tierCache.delete(MANUAL_TIER_CACHE_KEY);
+      tierSystemInfoFromPollIntervalCache.delete(MANUAL_TIER_CACHE_KEY);
+    } else if (scope.assetType) {
+      // Per-class evict — Phase 2 cache key is `${integrationId}:${assetType}`.
+      const k = `${tierKey}:${scope.assetType}`;
+      tierCache.delete(k);
+      tierSystemInfoFromPollIntervalCache.delete(k);
+    } else {
+      // Whole-integration evict — walk every `<integrationId>:<assetType>`
+      // entry. Integration config writes (PUT /integrations/:id, per-class
+      // streams edits) hit this path so every assetType variant refreshes.
+      for (const k of Array.from(tierCache.keys())) {
+        if (k.startsWith(`${tierKey}:`)) {
+          tierCache.delete(k);
+          tierSystemInfoFromPollIntervalCache.delete(k);
+        }
+      }
+    }
     if (scope.assetType) {
       classOverrideCache.delete(`${tierKey}:${scope.assetType}`);
     } else {
@@ -562,6 +605,15 @@ function tierFromJson(v: Record<string, unknown> | null | undefined): MonitorTie
     cpuMemoryIntervalSeconds:   toPositiveInt(o.cpuMemoryIntervalSeconds,  legacyInterval ?? HARDCODED_FLOOR.cpuMemoryIntervalSeconds),
     temperatureIntervalSeconds: toPositiveInt(o.temperatureIntervalSeconds, legacyInterval ?? HARDCODED_FLOOR.temperatureIntervalSeconds),
     systemInfoIntervalSeconds:  toPositiveInt(o.systemInfoIntervalSeconds, HARDCODED_FLOOR.systemInfoIntervalSeconds),
+    // Phase 1 wrote lldpIntervalSeconds / lldpTimeoutMs / storageIntervalSeconds
+    // / storageTimeoutMs as additive flat keys on the integration-tier JSON
+    // before the per-class streams blocks existed. Continue to read them here
+    // as the integration-tier default; per-class streams entries override at
+    // dispatch time via loadIntegrationTierSettings(.., assetType).
+    lldpIntervalSeconds:        toPositiveInt(o.lldpIntervalSeconds,       HARDCODED_FLOOR.lldpIntervalSeconds),
+    lldpTimeoutMs:              toPositiveInt(o.lldpTimeoutMs,             HARDCODED_FLOOR.lldpTimeoutMs),
+    storageIntervalSeconds:     toPositiveInt(o.storageIntervalSeconds,    HARDCODED_FLOOR.storageIntervalSeconds),
+    storageTimeoutMs:           toPositiveInt(o.storageTimeoutMs,          HARDCODED_FLOOR.storageTimeoutMs),
     sampleRetentionDays:        toPositiveInt(o.sampleRetentionDays,       HARDCODED_FLOOR.sampleRetentionDays),
     telemetryRetentionDays:     toPositiveInt(o.telemetryRetentionDays,    HARDCODED_FLOOR.telemetryRetentionDays),
     systemInfoRetentionDays:    toPositiveInt(o.systemInfoRetentionDays,   HARDCODED_FLOOR.systemInfoRetentionDays),
@@ -648,12 +700,158 @@ async function loadLegacyGlobalAsTier(): Promise<MonitorTierSettings | null> {
   return tierFromJson(row.value as Record<string, unknown>);
 }
 
-async function loadIntegrationTierSettings(integrationId: string): Promise<MonitorTierSettings> {
-  const cached = tierCache.get(integrationId);
+/**
+ * Picks the per-class streams block on the integration config for the given
+ * assetType. FMG / FortiGate route firewall→fortigateMonitor, switch→
+ * fortiswitchMonitor, access_point→fortiapMonitor; AD / Entra / Windows
+ * Server route workstation→workstationMonitor, server→serverMonitor. Every
+ * other (assetType, integration-type) pair returns undefined so the resolver
+ * falls back to the flat `monitorSettings` JSON for that asset class.
+ */
+function pickClassStreamsBlock(
+  integrationType: string | null,
+  cfg: Record<string, unknown>,
+  assetType: string,
+): Record<string, unknown> | undefined {
+  if (integrationType === "fortimanager" || integrationType === "fortigate") {
+    let block: Record<string, unknown> | undefined;
+    if (assetType === "firewall")          block = cfg.fortigateMonitor   as Record<string, unknown> | undefined;
+    else if (assetType === "switch")       block = cfg.fortiswitchMonitor as Record<string, unknown> | undefined;
+    else if (assetType === "access_point") block = cfg.fortiapMonitor     as Record<string, unknown> | undefined;
+    if (!block) return undefined;
+    const streams = block.streams as Record<string, unknown> | undefined;
+    return streams && typeof streams === "object" ? streams : undefined;
+  }
+  if (integrationType === "activedirectory" || integrationType === "entraid" || integrationType === "windowsserver") {
+    let block: Record<string, unknown> | undefined;
+    if (assetType === "workstation") block = cfg.workstationMonitor as Record<string, unknown> | undefined;
+    else if (assetType === "server")  block = cfg.serverMonitor      as Record<string, unknown> | undefined;
+    if (!block) return undefined;
+    const streams = block.streams as Record<string, unknown> | undefined;
+    return streams && typeof streams === "object" ? streams : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Overlay a per-class streams block onto a tier-3 baseline. Each stream
+ * carries up to 6 fields (polling / credentialId / intervalSeconds /
+ * timeoutMs / failureThreshold / mibId); non-null values win over the
+ * baseline, null/undefined leaves the baseline in place. Mutates `base`
+ * in place and returns it for chaining convenience.
+ */
+function applyClassStreamsOverlay(
+  base: MonitorTierSettings,
+  streams: Record<string, unknown> | undefined,
+): MonitorTierSettings {
+  if (!streams) return base;
+  type StreamKey = "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage";
+  type StreamCells = {
+    pollingField:        keyof MonitorTierSettings;
+    credentialField:     keyof MonitorTierSettings;
+    intervalField:       keyof MonitorTierSettings;
+    timeoutField:        keyof MonitorTierSettings;
+    mibField?:           keyof MonitorTierSettings;
+    acceptsFailureField?: boolean;
+  };
+  const map: Record<StreamKey, StreamCells> = {
+    responseTime: { pollingField: "responseTimePolling", credentialField: "responseTimeCredentialId", intervalField: "intervalSeconds",            timeoutField: "probeTimeoutMs",        mibField: "responseTimeMibId", acceptsFailureField: true },
+    cpuMemory:    { pollingField: "cpuMemoryPolling",    credentialField: "cpuMemoryCredentialId",    intervalField: "cpuMemoryIntervalSeconds",   timeoutField: "cpuMemoryTimeoutMs",    mibField: "cpuMemoryMibId" },
+    temperature:  { pollingField: "temperaturePolling",  credentialField: "temperatureCredentialId",  intervalField: "temperatureIntervalSeconds", timeoutField: "temperatureTimeoutMs",  mibField: "temperatureMibId" },
+    interfaces:   { pollingField: "interfacesPolling",   credentialField: "interfacesCredentialId",   intervalField: "systemInfoIntervalSeconds",  timeoutField: "systemInfoTimeoutMs",   mibField: "interfacesMibId" },
+    lldp:         { pollingField: "lldpPolling",         credentialField: "lldpCredentialId",         intervalField: "lldpIntervalSeconds",        timeoutField: "lldpTimeoutMs",         mibField: "lldpMibId" },
+    storage:      { pollingField: "storagePolling",      credentialField: "interfacesCredentialId",   intervalField: "storageIntervalSeconds",     timeoutField: "storageTimeoutMs" },
+  };
+  for (const key of Object.keys(map) as StreamKey[]) {
+    const stream = streams[key] as Record<string, unknown> | null | undefined;
+    if (!stream || typeof stream !== "object") continue;
+    const cells = map[key];
+    if ("polling" in stream && isPollingMethod(stream.polling)) {
+      (base as any)[cells.pollingField] = stream.polling;
+    }
+    if ("credentialId" in stream && typeof stream.credentialId === "string" && stream.credentialId.length > 0) {
+      (base as any)[cells.credentialField] = stream.credentialId;
+    }
+    if ("intervalSeconds" in stream && typeof stream.intervalSeconds === "number" && stream.intervalSeconds > 0) {
+      (base as any)[cells.intervalField] = stream.intervalSeconds;
+    }
+    if ("timeoutMs" in stream && typeof stream.timeoutMs === "number" && stream.timeoutMs > 0) {
+      (base as any)[cells.timeoutField] = stream.timeoutMs;
+    }
+    if (cells.mibField && "mibId" in stream && typeof stream.mibId === "string" && stream.mibId.length > 0) {
+      (base as any)[cells.mibField] = stream.mibId;
+    }
+    if (cells.acceptsFailureField && "failureThreshold" in stream && typeof stream.failureThreshold === "number" && stream.failureThreshold > 0) {
+      base.failureThreshold = stream.failureThreshold;
+    }
+  }
+  return base;
+}
+
+/**
+ * Walk a per-class streams block and report which MonitorTierSettings fields
+ * the block actually populates. Used by resolveMonitorSettingsWithProvenance
+ * to label per-class-contributed fields as "integration-class" provenance.
+ * Returns a partial map (field → true) — fields the block left null/missing
+ * are absent from the result.
+ */
+function detectPerClassFieldOrigins(
+  streams: Record<string, unknown>,
+): Partial<Record<keyof MonitorTierSettings, true>> {
+  const out: Partial<Record<keyof MonitorTierSettings, true>> = {};
+  type StreamKey = "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage";
+  type StreamCellMap = {
+    polling?:         keyof MonitorTierSettings;
+    credentialId?:    keyof MonitorTierSettings;
+    intervalSeconds?: keyof MonitorTierSettings;
+    timeoutMs?:       keyof MonitorTierSettings;
+    failureThreshold?: keyof MonitorTierSettings;
+    mibId?:           keyof MonitorTierSettings;
+  };
+  const map: Record<StreamKey, StreamCellMap> = {
+    responseTime: { polling: "responseTimePolling", credentialId: "responseTimeCredentialId", intervalSeconds: "intervalSeconds",            timeoutMs: "probeTimeoutMs",        failureThreshold: "failureThreshold", mibId: "responseTimeMibId" },
+    cpuMemory:    { polling: "cpuMemoryPolling",    credentialId: "cpuMemoryCredentialId",    intervalSeconds: "cpuMemoryIntervalSeconds",   timeoutMs: "cpuMemoryTimeoutMs",                                       mibId: "cpuMemoryMibId" },
+    temperature:  { polling: "temperaturePolling",  credentialId: "temperatureCredentialId",  intervalSeconds: "temperatureIntervalSeconds", timeoutMs: "temperatureTimeoutMs",                                     mibId: "temperatureMibId" },
+    interfaces:   { polling: "interfacesPolling",   credentialId: "interfacesCredentialId",   intervalSeconds: "systemInfoIntervalSeconds",  timeoutMs: "systemInfoTimeoutMs",                                      mibId: "interfacesMibId" },
+    lldp:         { polling: "lldpPolling",         credentialId: "lldpCredentialId",         intervalSeconds: "lldpIntervalSeconds",        timeoutMs: "lldpTimeoutMs",                                            mibId: "lldpMibId" },
+    storage:      { polling: "storagePolling",      credentialId: "interfacesCredentialId",   intervalSeconds: "storageIntervalSeconds",     timeoutMs: "storageTimeoutMs" },
+  };
+  for (const key of Object.keys(map) as StreamKey[]) {
+    const stream = streams[key] as Record<string, unknown> | null | undefined;
+    if (!stream || typeof stream !== "object") continue;
+    const cells = map[key];
+    if (cells.polling          && "polling"          in stream && isPollingMethod(stream.polling))                                       out[cells.polling]          = true;
+    if (cells.credentialId     && "credentialId"     in stream && typeof stream.credentialId === "string" && stream.credentialId.length) out[cells.credentialId]     = true;
+    if (cells.intervalSeconds  && "intervalSeconds"  in stream && typeof stream.intervalSeconds === "number" && stream.intervalSeconds > 0) out[cells.intervalSeconds] = true;
+    if (cells.timeoutMs        && "timeoutMs"        in stream && typeof stream.timeoutMs === "number" && stream.timeoutMs > 0)         out[cells.timeoutMs]        = true;
+    if (cells.failureThreshold && "failureThreshold" in stream && typeof stream.failureThreshold === "number" && stream.failureThreshold > 0) out[cells.failureThreshold] = true;
+    if (cells.mibId            && "mibId"            in stream && typeof stream.mibId === "string" && stream.mibId.length)             out[cells.mibId]            = true;
+  }
+  return out;
+}
+
+/**
+ * Tier-3 loader. `assetType` selects which per-class streams block applies
+ * on top of the flat `monitorSettings` baseline:
+ *   - fortimanager / fortigate: firewall→fortigateMonitor.streams,
+ *     switch→fortiswitchMonitor.streams, access_point→fortiapMonitor.streams.
+ *     Other asset types (endpoint workstation / server / printer / router /
+ *     other discovered via FortiGate DHCP) fall back to the flat baseline.
+ *   - activedirectory / entraid / windowsserver: workstation→
+ *     workstationMonitor.streams, server→serverMonitor.streams. Other types
+ *     fall back to the flat baseline.
+ *   - any other integration type: flat baseline only.
+ * Cached keyed on `${integrationId}:${assetType}` so each (integration, class)
+ * pair is computed at most once per process lifetime; writes route through
+ * invalidateMonitorSettingsCache.
+ */
+async function loadIntegrationTierSettings(integrationId: string, assetType: string): Promise<MonitorTierSettings> {
+  const cacheKey = `${integrationId}:${assetType}`;
+  const cached = tierCache.get(cacheKey);
   if (cached) return cached;
   const integration = await prisma.integration.findUnique({
     where:  { id: integrationId },
-    select: { config: true, pollInterval: true },
+    select: { config: true, pollInterval: true, type: true },
   });
   const cfg = (integration?.config as Record<string, unknown> | null) ?? {};
   const ms  = cfg.monitorSettings as Record<string, unknown> | undefined;
@@ -664,6 +862,11 @@ async function loadIntegrationTierSettings(integrationId: string): Promise<Monit
     // Transitional: fall back to the legacy global until the migration runs.
     result = (await loadLegacyGlobalAsTier()) ?? { ...HARDCODED_FLOOR };
   }
+  // Per-class streams overlay. Phase 2: when the integration config carries a
+  // class-specific streams block for this asset's assetType, its per-stream
+  // values win over the flat baseline.
+  const classStreams = pickClassStreamsBlock(integration?.type ?? null, cfg, assetType);
+  applyClassStreamsOverlay(result, classStreams);
   // systemInfo cadence linkage: when the integration tier doesn't explicitly
   // set systemInfoIntervalSeconds, derive it from the integration's discovery
   // pollInterval. Keeps interface / LLDP / storage / IPsec collection on the
@@ -673,20 +876,30 @@ async function loadIntegrationTierSettings(integrationId: string): Promise<Monit
   //   - ms missing                → derive (tier-3 not yet seeded)
   //   - ms.systemInfoIntervalSeconds is number > 0  → respect operator value
   //   - ms.systemInfoIntervalSeconds is null / missing / non-positive → derive
+  // Also respects an explicit per-class streams override — when the per-class
+  // interfaces.intervalSeconds is set, the overlay above already moved the
+  // value into result.systemInfoIntervalSeconds. We detect that by comparing
+  // against the pre-overlay tier value.
+  const classInterfacesInterval = (classStreams?.interfaces as Record<string, unknown> | undefined)?.intervalSeconds;
+  const hasExplicitClassInterfaces = typeof classInterfacesInterval === "number" && classInterfacesInterval > 0;
   const rawSysInfo = ms ? (ms as Record<string, unknown>).systemInfoIntervalSeconds : undefined;
   const explicitTierSystemInfo = typeof rawSysInfo === "number" && rawSysInfo > 0;
   let systemInfoFromPollInterval = false;
-  if (!explicitTierSystemInfo && integration?.pollInterval != null && integration.pollInterval > 0) {
+  if (!hasExplicitClassInterfaces && !explicitTierSystemInfo && integration?.pollInterval != null && integration.pollInterval > 0) {
     const derived = Math.max(60, Math.min(86400, integration.pollInterval * 3600));
     result.systemInfoIntervalSeconds = derived;
     systemInfoFromPollInterval = true;
   }
-  tierCache.set(integrationId, result);
-  tierSystemInfoFromPollIntervalCache.set(integrationId, systemInfoFromPollInterval);
+  tierCache.set(cacheKey, result);
+  tierSystemInfoFromPollIntervalCache.set(cacheKey, systemInfoFromPollInterval);
   return result;
 }
 
 async function loadManualTierSettings(): Promise<MonitorTierSettings> {
+  // Manual tier has no per-class blocks — one Setting row covers every asset
+  // class. Keep the legacy sentinel cache key so the existing
+  // invalidateMonitorSettingsCache({integrationId: null}) clear stays
+  // single-key (instead of the per-class prefix-walk it does for integrations).
   const cached = tierCache.get(MANUAL_TIER_CACHE_KEY);
   if (cached) return cached;
   const row = await prisma.setting.findUnique({ where: { key: MANUAL_SETTING_KEY } });
@@ -795,6 +1008,10 @@ export interface AssetMonitorContext {
   cpuMemoryIntervalSec:      number | null;
   temperatureIntervalSec:    number | null;
   systemInfoIntervalSec:     number | null;
+  /** Phase 2 — per-asset LLDP cadence override (sec). null = inherit. */
+  lldpIntervalSec?:          number | null;
+  /** Phase 2 — per-asset Storage cadence override (sec). null = inherit. */
+  storageIntervalSec?:       number | null;
   probeTimeoutMs:            number | null;
   /** Per-asset CPU+memory collector timeout override (ms). null = inherit. */
   cpuMemoryTimeoutMs?:       number | null;
@@ -840,9 +1057,11 @@ export interface AssetMonitorContext {
  *   4. Per-asset value applies the same rule.
  */
 export async function resolveMonitorSettings(asset: AssetMonitorContext): Promise<ResolvedMonitorSettings> {
-  // Tier 3 (integration-tier or manual-tier).
+  // Tier 3 (integration-tier or manual-tier). Per-class streams overlay is
+  // applied inside loadIntegrationTierSettings when the integration carries
+  // a matching `<klass>Monitor.streams` block for asset.assetType.
   const tier3 = asset.discoveredByIntegrationId
-    ? await loadIntegrationTierSettings(asset.discoveredByIntegrationId)
+    ? await loadIntegrationTierSettings(asset.discoveredByIntegrationId, asset.assetType)
     : await loadManualTierSettings();
 
   // Tier 2 (class override scoped to the same tier-3 source).
@@ -878,6 +1097,8 @@ export async function resolveMonitorSettings(asset: AssetMonitorContext): Promis
   if (asset.cpuMemoryIntervalSec   != null) merged.cpuMemoryIntervalSeconds   = asset.cpuMemoryIntervalSec;
   if (asset.temperatureIntervalSec != null) merged.temperatureIntervalSeconds = asset.temperatureIntervalSec;
   if (asset.systemInfoIntervalSec  != null) merged.systemInfoIntervalSeconds  = asset.systemInfoIntervalSec;
+  if (asset.lldpIntervalSec        != null) merged.lldpIntervalSeconds        = asset.lldpIntervalSec;
+  if (asset.storageIntervalSec     != null) merged.storageIntervalSeconds     = asset.storageIntervalSec;
   if (asset.probeTimeoutMs         != null) merged.probeTimeoutMs             = asset.probeTimeoutMs;
   if (asset.cpuMemoryTimeoutMs     != null) merged.cpuMemoryTimeoutMs         = asset.cpuMemoryTimeoutMs;
   if (asset.temperatureTimeoutMs   != null) merged.temperatureTimeoutMs       = asset.temperatureTimeoutMs;
@@ -982,7 +1203,21 @@ export async function resolveMonitorSettings(asset: AssetMonitorContext): Promis
  * `Inherit: 14400s (4h, from <integration> discovery cycle)` so operators see
  * why their interface scrape cadence matches discovery.
  */
-export type ProvenanceTier = "asset" | "class" | "integration" | "manual" | "integrationPollInterval";
+/**
+ * Provenance label tier names:
+ *   - "asset"             — per-asset column on Asset
+ *   - "class"             — MonitorClassOverride row
+ *   - "integration"       — integration's flat `config.monitorSettings`
+ *   - "integration-class" — integration's per-class streams block
+ *                           (`config.<klass>Monitor.streams.<stream>`).
+ *                           Phase 2 sub-label of the integration tier so the
+ *                           asset modal can render "FortiSwitch subtab"
+ *                           instead of generic "FortiManager".
+ *   - "manual"            — manualMonitorSettings Setting
+ *   - "integrationPollInterval" — systemInfoIntervalSeconds derived from the
+ *                           integration's discovery pollInterval
+ */
+export type ProvenanceTier = "asset" | "class" | "integration" | "integration-class" | "manual" | "integrationPollInterval";
 
 export interface ResolvedSettingsWithProvenance {
   resolved:        ResolvedMonitorSettings;
@@ -1005,8 +1240,28 @@ export async function resolveMonitorSettingsWithProvenance(
 ): Promise<ResolvedSettingsWithProvenance> {
   const tier3Source: "integration" | "manual" = asset.discoveredByIntegrationId ? "integration" : "manual";
   const tier3 = asset.discoveredByIntegrationId
-    ? await loadIntegrationTierSettings(asset.discoveredByIntegrationId)
+    ? await loadIntegrationTierSettings(asset.discoveredByIntegrationId, asset.assetType)
     : await loadManualTierSettings();
+
+  // Per-class streams block detection (Phase 2). When this asset's integration
+  // carries a per-class streams block for asset.assetType AND that block sets
+  // a non-null value on a stream, the corresponding `tier3` field originated
+  // at the class level rather than the flat baseline — provenance reports
+  // "integration-class" so the asset modal can label the badge accordingly.
+  // Cheap extra lookup (one integration row, already-cached config blob);
+  // skipped for manual-tier assets which never have per-class streams.
+  let perClassFieldOrigins: Partial<Record<keyof MonitorTierSettings, true>> = {};
+  if (asset.discoveredByIntegrationId) {
+    const intRow = await prisma.integration.findUnique({
+      where:  { id: asset.discoveredByIntegrationId },
+      select: { config: true, type: true },
+    });
+    const cfg = (intRow?.config as Record<string, unknown> | null) ?? {};
+    const streams = pickClassStreamsBlock(intRow?.type ?? null, cfg, asset.assetType);
+    if (streams) {
+      perClassFieldOrigins = detectPerClassFieldOrigins(streams);
+    }
+  }
 
   const classOverride = await loadClassOverride(asset.discoveredByIntegrationId, asset.assetType);
 
@@ -1029,7 +1284,7 @@ export async function resolveMonitorSettingsWithProvenance(
   const systemInfoTier3Label: ProvenanceTier =
     tier3Source === "integration"
       && asset.discoveredByIntegrationId != null
-      && tierSystemInfoFromPollIntervalCache.get(asset.discoveredByIntegrationId) === true
+      && tierSystemInfoFromPollIntervalCache.get(`${asset.discoveredByIntegrationId}:${asset.assetType}`) === true
       ? "integrationPollInterval"
       : tier3Source;
   // Initialize provenance to tier3Source for every field; class/asset layers
@@ -1045,6 +1300,10 @@ export async function resolveMonitorSettingsWithProvenance(
     cpuMemoryIntervalSeconds:   tier3Source,
     temperatureIntervalSeconds: tier3Source,
     systemInfoIntervalSeconds:  systemInfoTier3Label,
+    lldpIntervalSeconds:        tier3Source,
+    lldpTimeoutMs:              tier3Source,
+    storageIntervalSeconds:     tier3Source,
+    storageTimeoutMs:           tier3Source,
     sampleRetentionDays:        tier3Source,
     telemetryRetentionDays:     tier3Source,
     systemInfoRetentionDays:    tier3Source,
@@ -1068,6 +1327,15 @@ export async function resolveMonitorSettingsWithProvenance(
     interfacesCredentialId:     tier3Source,
     lldpCredentialId:           tier3Source,
   };
+
+  // Stamp "integration-class" on every field the per-class streams block
+  // contributed. Done BEFORE the classOverride layer so a real
+  // MonitorClassOverride hit later still wins. Manual-tier orphan assets
+  // keep the literal "manual" label since the perClassFieldOrigins map is
+  // always empty for them.
+  for (const field of Object.keys(perClassFieldOrigins) as Array<keyof MonitorTierSettings>) {
+    provenance[field] = "integration-class";
+  }
 
   if (classOverride) {
     // Field-by-field copy + provenance bump. The mixed value types (numbers
@@ -1120,6 +1388,14 @@ export async function resolveMonitorSettingsWithProvenance(
   if (asset.systemInfoIntervalSec != null) {
     resolved.systemInfoIntervalSeconds = asset.systemInfoIntervalSec;
     provenance.systemInfoIntervalSeconds = "asset";
+  }
+  if (asset.lldpIntervalSec != null) {
+    resolved.lldpIntervalSeconds = asset.lldpIntervalSec;
+    provenance.lldpIntervalSeconds = "asset";
+  }
+  if (asset.storageIntervalSec != null) {
+    resolved.storageIntervalSeconds = asset.storageIntervalSec;
+    provenance.storageIntervalSeconds = "asset";
   }
   if (asset.probeTimeoutMs != null) {
     resolved.probeTimeoutMs = asset.probeTimeoutMs;
@@ -6126,7 +6402,7 @@ interface RunStats {
   fastFiltered: { collected: number; failed: number };
 }
 
-export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered";
+export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage";
 
 /**
  * Per-cadence outcome tally returned by the runFooFor() functions. Used by
@@ -6468,6 +6744,255 @@ export async function runFastFilteredFor(assetId: string, labels: WorkItemLabels
 }
 
 /**
+ * Phase 2 carve-out: LLDP-only pass for one asset. Walks the LLDP-MIB
+ * (`collectLldpOnlySnmp`) or hits `/api/v2/monitor/system/interface/lldp-neighbors`
+ * (`collectLldpOnlyFortinet`) per the resolved `lldpPolling` and persists via
+ * the same `persistLldpNeighbors` full-replace path the legacy
+ * `collectSystemInfo` uses — so this is idempotent against any in-flight
+ * systemInfo pass that also walked LLDP on a session-coalesced tick.
+ *
+ * Stamps `Asset.lastLldpAt` on every successful pass so the publisher in
+ * `monitorAssets.ts` knows when the next LLDP job is due.
+ */
+export async function runLldpFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
+  const stopWork = startWorkTimer("lldp", labels);
+  try {
+    const asset = await prisma.asset.findUnique({
+      where: { id: assetId },
+      include: { monitorCredential: true, interfacesCredential: true, lldpCredential: true, discoveredByIntegration: true },
+    });
+    if (!asset || !asset.monitored) {
+      recordWorkOutcome("lldp", "success", labels);
+      return "success";
+    }
+    const effective = await resolveMonitorSettings({
+      ...asset,
+      discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+    });
+    const lldpPolling = effective.lldpPolling;
+    if (!lldpPolling || lldpPolling === "disabled" || lldpPolling === "agent") {
+      recordWorkOutcome("lldp", "success", labels);
+      return "success";
+    }
+    const targetIp = asset.ipAddress || ((lldpPolling === "winrm" || lldpPolling === "ssh") ? (asset.dnsName || asset.hostname) : null);
+    if (!targetIp) {
+      recordWorkOutcome("lldp", "failure", labels);
+      return "failure";
+    }
+    const integration = asset.discoveredByIntegration ?? null;
+    const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+    const lldpTimeout   = effective.lldpTimeoutMs;
+    let neighbors: LldpNeighborSample[] | undefined;
+    let sourceLabel: "fortios" | "snmp" = "snmp";
+    if (lldpPolling === "rest_api") {
+      if (!isFortinetSrc || !integration) {
+        recordWorkOutcome("lldp", "failure", labels);
+        return "failure";
+      }
+      sourceLabel = "fortios";
+      neighbors = await collectLldpOnlyFortinet(targetIp, integration as any, lldpTimeout).catch(() => undefined);
+    } else if (lldpPolling === "snmp") {
+      // Per-stream credential wins, then asset default, then integration fallback.
+      const effectiveLldpCred = asset.lldpCredential ?? asset.monitorCredential;
+      let snmpCfg: Record<string, unknown> | null = null;
+      if (effectiveLldpCred?.type === "snmp") {
+        snmpCfg = effectiveLldpCred.config as Record<string, unknown>;
+      } else {
+        const classCred = await loadClassOverrideStreamCredential(effective.lldpCredentialId, "snmp");
+        if (classCred) {
+          snmpCfg = classCred.config as Record<string, unknown>;
+        } else if (isFortinetSrc && integration) {
+          try { snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(effectiveLldpCred, integration); }
+          catch { snmpCfg = null; }
+        }
+      }
+      if (!snmpCfg) {
+        recordWorkOutcome("lldp", "failure", labels);
+        return "failure";
+      }
+      sourceLabel = "snmp";
+      neighbors = await collectLldpOnlySnmp(targetIp, snmpCfg, lldpTimeout).catch(() => undefined);
+    } else {
+      // winrm / ssh / icmp don't deliver LLDP today.
+      recordWorkOutcome("lldp", "success", labels);
+      return "success";
+    }
+    if (neighbors === undefined) {
+      // Transport failure — don't wipe existing rows, don't bump lastLldpAt
+      // (so the next tick retries promptly).
+      recordWorkOutcome("lldp", "failure", labels);
+      return "failure";
+    }
+    await persistLldpNeighbors(assetId, neighbors, new Date(), sourceLabel);
+    await prisma.asset.update({ where: { id: assetId }, data: { lastLldpAt: new Date() } });
+    recordWorkOutcome("lldp", "success", labels);
+    return "success";
+  } catch (err) {
+    logger.error({ err, assetId }, "LLDP-only scrape crashed");
+    recordWorkOutcome("lldp", "crash", labels);
+    return "crash";
+  } finally {
+    stopWork();
+  }
+}
+
+/**
+ * Phase 2 carve-out: Storage-only pass for one asset. SNMP-only — FortiOS
+ * appliances expose no mountable storage and WinRM is not yet supported.
+ * Walks HOST-RESOURCES-MIB hrStorageTable; falls back to the vendor disk
+ * scalar pair (e.g. FortiSwitch `fsSysDiskUsage` / `fsSysDiskCapacity`) when
+ * the table is empty.
+ *
+ * Stamps `Asset.lastStorageAt` on every successful pass.
+ */
+export async function runStorageFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
+  const stopWork = startWorkTimer("storage", labels);
+  try {
+    const asset = await prisma.asset.findUnique({
+      where: { id: assetId },
+      include: { monitorCredential: true, interfacesCredential: true, discoveredByIntegration: true },
+    });
+    if (!asset || !asset.monitored) {
+      recordWorkOutcome("storage", "success", labels);
+      return "success";
+    }
+    const effective = await resolveMonitorSettings({
+      ...asset,
+      discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+    });
+    const storagePolling = effective.storagePolling;
+    if (storagePolling !== "snmp") {
+      // Storage walk is SNMP-only when enabled.
+      recordWorkOutcome("storage", "success", labels);
+      return "success";
+    }
+    const targetIp = asset.ipAddress;
+    if (!targetIp) {
+      recordWorkOutcome("storage", "failure", labels);
+      return "failure";
+    }
+    // Storage shares the interfaces credential at probe time — there's no
+    // per-stream storage credential column. Per-stream interfaces credential
+    // wins, then asset default, then class-override interfacesCredentialId,
+    // then integration fallback.
+    const effectiveIfacesCred = asset.interfacesCredential ?? asset.monitorCredential;
+    const integration = asset.discoveredByIntegration ?? null;
+    const isFortinetSrc = integration?.type === "fortimanager" || integration?.type === "fortigate";
+    let snmpCfg: Record<string, unknown> | null = null;
+    if (effectiveIfacesCred?.type === "snmp") {
+      snmpCfg = effectiveIfacesCred.config as Record<string, unknown>;
+    } else {
+      const classCred = await loadClassOverrideStreamCredential(effective.interfacesCredentialId, "snmp");
+      if (classCred) {
+        snmpCfg = classCred.config as Record<string, unknown>;
+      } else if (isFortinetSrc && integration) {
+        try { snmpCfg = await loadSnmpCredentialConfigForFortinetAsset(effectiveIfacesCred, integration); }
+        catch { snmpCfg = null; }
+      }
+    }
+    if (!snmpCfg) {
+      recordWorkOutcome("storage", "failure", labels);
+      return "failure";
+    }
+    const storage = await collectStorageOnlySnmp(targetIp, snmpCfg, asset.manufacturer, asset.model, effective.storageTimeoutMs).catch(() => undefined);
+    if (storage === undefined) {
+      recordWorkOutcome("storage", "failure", labels);
+      return "failure";
+    }
+    const now = new Date();
+    if (storage.length > 0) {
+      enqueueStorageSamples(
+        storage.map((s) => ({
+          assetId,
+          timestamp: now,
+          mountPath:  s.mountPath,
+          totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
+          usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
+        })),
+      );
+    }
+    await prisma.asset.update({ where: { id: assetId }, data: { lastStorageAt: now } });
+    recordWorkOutcome("storage", "success", labels);
+    return "success";
+  } catch (err) {
+    logger.error({ err, assetId }, "Storage-only scrape crashed");
+    recordWorkOutcome("storage", "crash", labels);
+    return "crash";
+  } finally {
+    stopWork();
+  }
+}
+
+/**
+ * Storage-only SNMP walk. Same shape as the storage portion of
+ * collectSystemInfoSnmp — hrStorageTable first, vendor disk scalar pair as
+ * fallback. Used by `runStorageFor` to walk just the storage table without
+ * incurring the full IF-MIB / LLDP-MIB session cost.
+ */
+export async function collectStorageOnlySnmp(
+  host: string,
+  config: Record<string, unknown>,
+  manufacturer: string | null | undefined,
+  model: string | null | undefined,
+  timeoutMs?: number,
+): Promise<StorageSample[]> {
+  const vendorProfile = pickVendorProfileMerged(manufacturer ?? null, null, model ?? null);
+  const vendorScope   = { manufacturer: manufacturer ?? null, model: model ?? null };
+  return await withSnmpSession(host, config, async (session) => {
+    const storage: StorageSample[] = [];
+    try {
+      const types = await snmpWalk(session, OID.hrStorageType);
+      const diskIdxs = [...types.entries()].filter(([, v]) => {
+        const t = snmpVbToString(v);
+        return t === OID.hrStorageFixedDisk || t === OID.hrStorageRemovableDisk;
+      }).map(([k]) => k);
+      if (diskIdxs.length > 0) {
+        const [descrs, units, sizes, useds] = await Promise.all([
+          snmpWalk(session, OID.hrStorageDescr).catch(() => new Map()),
+          snmpWalk(session, OID.hrStorageAllocationUnits).catch(() => new Map()),
+          snmpWalk(session, OID.hrStorageSize).catch(() => new Map()),
+          snmpWalk(session, OID.hrStorageUsed).catch(() => new Map()),
+        ]);
+        for (const idx of diskIdxs) {
+          const u = snmpVbToNumber(units.get(idx)) ?? 1;
+          const s = snmpVbToNumber(sizes.get(idx));
+          const ud = snmpVbToNumber(useds.get(idx));
+          storage.push({
+            mountPath:  snmpVbToString(descrs.get(idx)) || `disk-${idx}`,
+            totalBytes: s != null  ? s * u  : null,
+            usedBytes:  ud != null ? ud * u : null,
+          });
+        }
+      }
+    } catch { /* fall through to vendor fallback */ }
+    if (storage.length === 0 && vendorProfile?.disk) {
+      try {
+        await ensureRegistryLoaded();
+        const disk    = vendorProfile.disk;
+        const usedOid = resolveOidSync(disk.usedBytesSymbol,  vendorScope);
+        const totOid  = resolveOidSync(disk.totalBytesSymbol, vendorScope);
+        if (usedOid && totOid) {
+          const [usedVb, totVb] = await Promise.all([
+            snmpGetScalar(session, usedOid).catch(() => null),
+            snmpGetScalar(session, totOid).catch(() => null),
+          ]);
+          const usedBytes  = snmpVbToNumber(usedVb);
+          const totalBytes = snmpVbToNumber(totVb);
+          if (usedBytes != null || totalBytes != null) {
+            storage.push({
+              mountPath:  disk.mountPath || "system",
+              usedBytes:  usedBytes  ?? null,
+              totalBytes: totalBytes ?? null,
+            });
+          }
+        }
+      } catch { /* leave storage empty */ }
+    }
+    return storage;
+  }, timeoutMs);
+}
+
+/**
  * One iteration of the monitor job. Picks assets due for the requested
  * cadences and runs the due work in parallel. Each cadence has its own due
  * check + per-asset interval override (`monitorIntervalSec`,
@@ -6567,6 +7092,12 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       telemetry:    telT,
       systemInfo:   ifT,
       fastFiltered: ifT,
+      // Phase 2 carve-out: LLDP + Storage cadences are pg-boss-only and don't
+      // dispatch through runMonitorPass in cursor mode. Fill the transport
+      // labels anyway so the histogram label set is complete if a future
+      // cursor-mode dispatcher needs them.
+      lldp:         a.lldpPolling    || ifT,
+      storage:      a.storagePolling || ifT,
     });
     assetTypeById.set(a.id, a.assetType ?? "unknown");
   }

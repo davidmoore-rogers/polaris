@@ -10466,15 +10466,13 @@ async function _monsetSaveManual() {
 }
 
 function _monsetOverridesSectionHTML(rows) {
-  // Phase 1 narrowing: Class Overrides surface is now manual-scope-only.
+  // Phase 2 (post-migration): Class Overrides surface is manual-scope-only.
   // Per-class settings for integration-discovered assets are configured on
-  // each integration's Monitoring tab. We filter the rendered list to
-  // integrationId === null so the operator only sees rows they can manage
-  // here. Backend GET/POST endpoints still accept any scope — pre-existing
-  // integration-scoped rows remain active in the resolver and the next
-  // release will fold them via Phase 2 migration. The trailing note hints
-  // at this so operators with existing integration-scoped overrides don't
-  // think they've disappeared.
+  // each integration's Monitoring tab via the per-class streams blocks.
+  // The Phase 2 migration job folded any historical integration-scoped
+  // rows into the integration streams blocks and deleted them, so the
+  // integrationId !== null filter here is defense-in-depth — the GET/POST
+  // endpoints now reject integration-scoped writes outright (400).
   var manualRows = (rows || []).filter(function (o) { return !o.integrationId; });
   var rowHTML = manualRows.length === 0
     ? '<tr><td colspan="2" class="empty-state" style="text-align:center;padding:1rem">No manual-scope class overrides configured.</td></tr>'
@@ -10496,8 +10494,7 @@ function _monsetOverridesSectionHTML(rows) {
     '<div style="margin:0.25rem 0 0.5rem 0;padding:0.5rem 0.75rem;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-secondary);font-size:0.85rem">' +
       '<strong>Manual scope only — assets without an integration source.</strong>' +
     '</div>' +
-    '<p class="hint" style="margin:0 0 0.4rem 0;color:var(--color-text-tertiary)">Per-class settings for integration-discovered assets are configured on each integration\'s Monitoring tab. Use this section for manually-added assets organized by asset type.</p>' +
-    '<p class="hint" style="margin:0 0 0.5rem 0;font-size:0.78rem;color:var(--color-text-tertiary)">Existing per-integration class overrides remain active until the next release.</p>' +
+    '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Per-class settings for integration-discovered assets are configured on each integration\'s Monitoring tab. Use this section for manually-added assets organized by asset type.</p>' +
     '<table class="data-table" style="width:100%;border-collapse:collapse">' +
       '<thead><tr>' +
         '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Class</th>' +

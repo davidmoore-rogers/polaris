@@ -125,6 +125,9 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       lastMonitorAt: true, monitorIntervalSec: true,
       lastTelemetryAt: true, cpuMemoryIntervalSec: true, temperatureIntervalSec: true,
       lastSystemInfoAt: true, systemInfoIntervalSec: true,
+      // Phase 2 carve-out: LLDP + Storage each have their own cadence + queue.
+      lastLldpAt:    true, lldpIntervalSec:    true,
+      lastStorageAt: true, storageIntervalSec: true,
       probeTimeoutMs: true,
       responseTimePolling: true,
       cpuMemoryPolling:    true,
@@ -167,6 +170,13 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     // temperature gets its own independent cadence.
     const telemetry  = isDue(a.lastTelemetryAt,  eff.cpuMemoryIntervalSeconds);
     const systemInfo = isDue(a.lastSystemInfoAt, eff.systemInfoIntervalSeconds);
+    // Phase 2 carve-out: LLDP + Storage run on independent cadences. The
+    // legacy systemInfo path still walks both as side effects on a shared
+    // SNMP session — persistLldpNeighbors + enqueueStorageSamples are
+    // idempotent against any overlap so the dedicated cadences don't need
+    // to suppress when systemInfo is also due.
+    const lldp       = isDue(a.lastLldpAt,    eff.lldpIntervalSeconds);
+    const storage    = isDue(a.lastStorageAt, eff.storageIntervalSeconds);
     const hasFastPin =
       (Array.isArray(a.monitoredInterfaces)   && a.monitoredInterfaces.length   > 0) ||
       (Array.isArray(a.monitoredStorage)      && a.monitoredStorage.length      > 0) ||
@@ -236,6 +246,17 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     if (probe && hasFastPin && canSystemInfo && !systemInfo && isUp && enabled.has("fastFiltered")) {
       await publishMonitorJob("fastFiltered", a.id, ifLabels);
     }
+    // Phase 2 carve-out: LLDP rides "isUp" gate just like systemInfo because
+    // it's a heavy SNMP-MIB / FortiOS REST walk we don't want hitting dead
+    // hosts. Skipped when the resolved lldpPolling is disabled or not delivered.
+    if (lldp && isUp && enabled.has("lldp") && eff.lldpPolling && eff.lldpPolling !== "disabled") {
+      const lldpTransport = eff.lldpPolling || "unknown";
+      await publishMonitorJob("lldp", a.id, { transport: lldpTransport, assetType, verboseDebug });
+    }
+    if (storage && isUp && enabled.has("storage") && eff.storagePolling === "snmp") {
+      const storageTransport = eff.storagePolling || "unknown";
+      await publishMonitorJob("storage", a.id, { transport: storageTransport, assetType, verboseDebug });
+    }
   }
 
   const total = candidates.length;
@@ -274,7 +295,13 @@ async function heavyTick(): Promise<void> {
   try {
     await runInstrumentedJob("monitorAssets.heavy", async () => {
       if (getBootTimeMode() === "pgboss") {
-        await publishDueWork(["telemetry", "systemInfo"]);
+        // Phase 2 carve-out: LLDP + Storage publish on the heavy tick alongside
+        // telemetry + systemInfo. Cursor mode keeps the legacy
+        // ["telemetry", "systemInfo"] set — the cursor pass doesn't drive the
+        // LLDP/Storage queues (those are pg-boss-only); the existing
+        // systemInfo walk picks up LLDP + Storage as session-coalesced side
+        // effects on cursor installs.
+        await publishDueWork(["telemetry", "systemInfo", "lldp", "storage"]);
       } else {
         const stats = await runMonitorPass({
           cadences: ["telemetry", "systemInfo"],

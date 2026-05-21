@@ -22,7 +22,7 @@
  * `-?` suffix so the logging path never throws.
  */
 
-export type WorkerSlotPrefix = "probe" | "fast" | "telemetry" | "sysinfo" | "floating";
+export type WorkerSlotPrefix = "probe" | "fast" | "telemetry" | "sysinfo" | "lldp" | "storage" | "floating";
 
 export interface WorkerSlotPool {
   prefix: WorkerSlotPrefix;

@@ -52,7 +52,7 @@ import { logEvent } from "../api/routes/events.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
-export type CadenceKey = "probe" | "fastFiltered" | "telemetry" | "systemInfo";
+export type CadenceKey = "probe" | "fastFiltered" | "telemetry" | "systemInfo" | "lldp" | "storage";
 
 export type AdvisorLeverKey =
   | "DATABASE_POOL_SIZE"
@@ -60,6 +60,8 @@ export type AdvisorLeverKey =
   | "POLARIS_MONITOR_PROBE_WORKERS"
   | "POLARIS_MONITOR_FAST_WORKERS"
   | "POLARIS_MONITOR_HEAVY_WORKERS"
+  | "POLARIS_MONITOR_LLDP_WORKERS"
+  | "POLARIS_MONITOR_STORAGE_WORKERS"
   | "POLARIS_MONITOR_FLOATING_WORKERS"
   | "POLARIS_PROBE_CONCURRENCY"
   | "POLARIS_HEAVY_CONCURRENCY"
@@ -174,6 +176,8 @@ export interface AdvisorInputs {
     POLARIS_MONITOR_PROBE_WORKERS: number;
     POLARIS_MONITOR_FAST_WORKERS: number;
     POLARIS_MONITOR_HEAVY_WORKERS: number;
+    POLARIS_MONITOR_LLDP_WORKERS: number;
+    POLARIS_MONITOR_STORAGE_WORKERS: number;
     POLARIS_MONITOR_FLOATING_WORKERS: number;
     POLARIS_PROBE_CONCURRENCY: number;
     POLARIS_HEAVY_CONCURRENCY: number;
@@ -199,6 +203,12 @@ export const COLD_START_P90_SEC: Record<CadenceKey, number> = {
   fastFiltered: 0.6,
   telemetry:    0.8,
   systemInfo:   1.0,
+  // Phase 2 carve-outs default to roughly half the systemInfo p90 — they walk
+  // one MIB family each (LLDP-MIB or HOST-RESOURCES-MIB hrStorageTable) plus
+  // the vendor disk fallback for storage, much less work than the full
+  // interfaces + storage + IPsec + LLDP combined pass.
+  lldp:         0.5,
+  storage:      0.5,
 };
 
 /** Cap on the per-cadence floor. Large fleets land here regardless of fleet
@@ -351,6 +361,8 @@ async function observeCadences(): Promise<Record<CadenceKey, CadenceObservation>
     fastFiltered: { sampleCount: 0, p50: null, p90: null, usedDefault: true },
     telemetry:    { sampleCount: 0, p50: null, p90: null, usedDefault: true },
     systemInfo:   { sampleCount: 0, p50: null, p90: null, usedDefault: true },
+    lldp:         { sampleCount: 0, p50: null, p90: null, usedDefault: true },
+    storage:      { sampleCount: 0, p50: null, p90: null, usedDefault: true },
   };
   try {
     const hist = await getMonitorWorkHistogramValues();
@@ -392,8 +404,8 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
     FLOATING_FLOOR,
     Math.max(FLOATING_FLOOR_MIN, Math.ceil(monitoredCount * FLEET_FLOOR_FACTOR)),
   );
-  const cadenceKeys: CadenceKey[] = ["probe", "fastFiltered", "telemetry", "systemInfo"];
-  const workersNeeded: Record<CadenceKey, number> = { probe: 0, fastFiltered: 0, telemetry: 0, systemInfo: 0 };
+  const cadenceKeys: CadenceKey[] = ["probe", "fastFiltered", "telemetry", "systemInfo", "lldp", "storage"];
+  const workersNeeded: Record<CadenceKey, number> = { probe: 0, fastFiltered: 0, telemetry: 0, systemInfo: 0, lldp: 0, storage: 0 };
   const handlerTimeoutPressure: HandlerTimeoutPressure[] = [];
   for (const c of cadenceKeys) {
     const p90 = cadence[c].p90 ?? COLD_START_P90_SEC[c];
@@ -484,6 +496,8 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
     { key: "POLARIS_MONITOR_FAST_WORKERS",     cad: "fastFiltered", need: workersNeeded.fastFiltered, current: currentEnv.POLARIS_MONITOR_FAST_WORKERS     },
     // HEAVY_WORKERS covers both telemetry + systemInfo — pick the larger gap.
     { key: "POLARIS_MONITOR_HEAVY_WORKERS",    cad: "telemetry",    need: Math.max(workersNeeded.telemetry, workersNeeded.systemInfo), current: currentEnv.POLARIS_MONITOR_HEAVY_WORKERS },
+    { key: "POLARIS_MONITOR_LLDP_WORKERS",     cad: "lldp",         need: workersNeeded.lldp,         current: currentEnv.POLARIS_MONITOR_LLDP_WORKERS     },
+    { key: "POLARIS_MONITOR_STORAGE_WORKERS",  cad: "storage",      need: workersNeeded.storage,      current: currentEnv.POLARIS_MONITOR_STORAGE_WORKERS  },
     { key: "POLARIS_MONITOR_FLOATING_WORKERS", cad: "floating",     need: floatingWorkers,            current: currentEnv.POLARIS_MONITOR_FLOATING_WORKERS },
   ];
   for (const lever of pgbossWorkerLevers) {
@@ -693,6 +707,7 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
 async function readQueueTimeouts(): Promise<Record<CadenceKey, number | null>> {
   const out: Record<CadenceKey, number | null> = {
     probe: null, fastFiltered: null, telemetry: null, systemInfo: null,
+    lldp: null, storage: null,
   };
   try {
     const rows = await prisma.$queryRawUnsafe<Array<{ name: string; expire_seconds: number | bigint }>>(
@@ -806,11 +821,30 @@ async function readApplicableCounts(snap: CapacitySnapshot): Promise<Record<Cade
         OR COALESCE(array_length("monitoredIpsecTunnels", 1), 0) > 0
       )
   `);
+  // Phase 2 carve-out applicability:
+  //   - LLDP: monitored AND lldpPolling resolves to a non-null non-"disabled"
+  //     method. The resolver does the actual fallthrough; this SQL counts the
+  //     conservative case where the asset's own column is set to something
+  //     truthful. Approximates the publisher's gate well enough for sizing.
+  //   - Storage: monitored AND storagePolling = 'snmp' at any tier. Same
+  //     conservative approximation.
+  const lldpRow = await prisma.$queryRawUnsafe<{ count: bigint }[]>(`
+    SELECT COUNT(*)::bigint AS count FROM "assets"
+    WHERE monitored = true
+      AND ("lldpPolling" IS NOT NULL AND "lldpPolling" <> 'disabled')
+  `);
+  const storageRow = await prisma.$queryRawUnsafe<{ count: bigint }[]>(`
+    SELECT COUNT(*)::bigint AS count FROM "assets"
+    WHERE monitored = true
+      AND "storagePolling" = 'snmp'
+  `);
   return {
     probe:        monitored,
     fastFiltered: Number(fastRow[0]?.count ?? 0),
     telemetry:    Number(telemetryRow[0]?.count ?? monitored),
     systemInfo:   Number(systemInfoRow[0]?.count ?? monitored),
+    lldp:         Number(lldpRow[0]?.count ?? 0),
+    storage:      Number(storageRow[0]?.count ?? 0),
   };
 }
 
@@ -846,6 +880,13 @@ export async function recomputeAdvisorFromSnapshot(
       fastFiltered: snap.workload.cadences.responseTimeSec,
       telemetry:    snap.workload.cadences.telemetrySec,
       systemInfo:   snap.workload.cadences.systemInfoSec,
+      // Phase 2 carve-out cadences default to systemInfo's interval — the
+      // resolver inherits there at the floor and operators tune via the
+      // per-class subtabs. capacityService.workload.cadences doesn't carry
+      // LLDP / Storage cadences yet; using systemInfo's value matches what
+      // a fresh install actually runs at.
+      lldp:         snap.workload.cadences.systemInfoSec,
+      storage:      snap.workload.cadences.systemInfoSec,
     },
     handlerTimeoutSec,
     applicable,
@@ -855,6 +896,8 @@ export async function recomputeAdvisorFromSnapshot(
       POLARIS_MONITOR_PROBE_WORKERS:     readEnvInt("POLARIS_MONITOR_PROBE_WORKERS", 24),
       POLARIS_MONITOR_FAST_WORKERS:      readEnvInt("POLARIS_MONITOR_FAST_WORKERS", 24),
       POLARIS_MONITOR_HEAVY_WORKERS:     readEnvInt("POLARIS_MONITOR_HEAVY_WORKERS", 24),
+      POLARIS_MONITOR_LLDP_WORKERS:      readEnvInt("POLARIS_MONITOR_LLDP_WORKERS", 12),
+      POLARIS_MONITOR_STORAGE_WORKERS:   readEnvInt("POLARIS_MONITOR_STORAGE_WORKERS", 12),
       POLARIS_MONITOR_FLOATING_WORKERS:  readEnvInt("POLARIS_MONITOR_FLOATING_WORKERS", 32),
       POLARIS_PROBE_CONCURRENCY:         readEnvInt("POLARIS_PROBE_CONCURRENCY", 16),
       POLARIS_HEAVY_CONCURRENCY:         readEnvInt("POLARIS_HEAVY_CONCURRENCY", 8),
@@ -907,6 +950,8 @@ const PGBOSS_ONLY_LEVERS = new Set<AdvisorLeverKey>([
   "POLARIS_MONITOR_PROBE_WORKERS",
   "POLARIS_MONITOR_FAST_WORKERS",
   "POLARIS_MONITOR_HEAVY_WORKERS",
+  "POLARIS_MONITOR_LLDP_WORKERS",
+  "POLARIS_MONITOR_STORAGE_WORKERS",
   "POLARIS_MONITOR_FLOATING_WORKERS",
 ]);
 
@@ -930,6 +975,8 @@ export function summarizeAdvisorGaps(state: AdvisorState): AdvisorGapSummary {
       r.key === "POLARIS_MONITOR_PROBE_WORKERS" ||
       r.key === "POLARIS_MONITOR_FAST_WORKERS" ||
       r.key === "POLARIS_MONITOR_HEAVY_WORKERS" ||
+      r.key === "POLARIS_MONITOR_LLDP_WORKERS" ||
+      r.key === "POLARIS_MONITOR_STORAGE_WORKERS" ||
       r.key === "POLARIS_MONITOR_FLOATING_WORKERS" ||
       r.key === "POLARIS_PROBE_CONCURRENCY" ||
       r.key === "POLARIS_HEAVY_CONCURRENCY"

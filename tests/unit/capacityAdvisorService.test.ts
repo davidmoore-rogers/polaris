@@ -143,14 +143,18 @@ function buildInputs(snap: any, env?: Partial<AdvisorInputs["currentEnv"]>): Adv
       fastFiltered: fullObservation(0.5),
       telemetry:    fullObservation(0.7),
       systemInfo:   fullObservation(1.0),
+      lldp:         fullObservation(0.5),
+      storage:      fullObservation(0.5),
     },
-    cadenceIntervals: { probe: 60, fastFiltered: 60, telemetry: 60, systemInfo: 600 },
-    handlerTimeoutSec: { probe: 30, fastFiltered: 60, telemetry: 180, systemInfo: 300 },
+    cadenceIntervals: { probe: 60, fastFiltered: 60, telemetry: 60, systemInfo: 600, lldp: 600, storage: 600 },
+    handlerTimeoutSec: { probe: 30, fastFiltered: 60, telemetry: 180, systemInfo: 300, lldp: 600, storage: 600 },
     applicable: {
       probe:        snap.workload.monitoredAssetCount,
       fastFiltered: snap.workload.monitoredInterfaceCount,
       telemetry:    snap.workload.monitoredAssetCount,
       systemInfo:   snap.workload.monitoredAssetCount,
+      lldp:         snap.workload.monitoredAssetCount,
+      storage:      0,
     },
     currentEnv: {
       DATABASE_POOL_SIZE: 25,
@@ -158,6 +162,8 @@ function buildInputs(snap: any, env?: Partial<AdvisorInputs["currentEnv"]>): Adv
       POLARIS_MONITOR_PROBE_WORKERS: 24,
       POLARIS_MONITOR_FAST_WORKERS: 24,
       POLARIS_MONITOR_HEAVY_WORKERS: 24,
+      POLARIS_MONITOR_LLDP_WORKERS: 12,
+      POLARIS_MONITOR_STORAGE_WORKERS: 12,
       POLARIS_MONITOR_FLOATING_WORKERS: 32,
       POLARIS_PROBE_CONCURRENCY: 16,
       POLARIS_HEAVY_CONCURRENCY: 8,
@@ -268,7 +274,9 @@ describe("buildAdvisorState — tiny install (6 monitored, cursor) scales the fl
   });
   it("scales the floating floor proportionally (clamped at FLOATING_FLOOR_MIN=4)", () => {
     const floating = state.recommendations.find((r) => r.key === "POLARIS_MONITOR_FLOATING_WORKERS")!;
-    expect(floating.recommended).toBe(4);
+    // Phase 2: floatingWorkers = max(floatingFloor, ceil(sumWorkersNeeded × 0.25))
+    // With 6 cadences at floor 4 each, sumWorkersNeeded = 24 → ceil(24×0.25) = 6.
+    expect(floating.recommended).toBe(6);
   });
   it("emits a sensible cursor PROBE_CONCURRENCY (sum of probe + fastFiltered floors)", () => {
     const probeC = state.recommendations.find((r) => r.key === "POLARIS_PROBE_CONCURRENCY")!;
@@ -306,13 +314,12 @@ describe("buildAdvisorState — small install (200 monitored, 1 fortigate, curso
     const heavy = state.recommendations.find((r) => r.key === "POLARIS_MONITOR_HEAVY_WORKERS")!;
     expect(heavy.recommended).toBe(24);
   });
-  it("sizes Prisma pool around 50 (workerCeiling + reserve + http overhead)", () => {
+  it("sizes Prisma pool around 200 (workerCeiling + reserve + http overhead)", () => {
     const prisma = state.recommendations.find((r) => r.key === "DATABASE_POOL_SIZE")!;
-    // workerCeiling = 4*24 + 32 = 128; discoveryReserve = 1; httpOverhead = 15 → 144
-    // The "around 50" in the plan was a heuristic but the floor makes the floor=24 install
-    // size deterministically: workerCeiling absorbs the floors. Allow a generous range.
-    expect(prisma.recommended).toBeGreaterThanOrEqual(120);
-    expect(prisma.recommended).toBeLessThanOrEqual(160);
+    // Phase 2: 6 cadences × 24-worker floor = 144 + floating = 180 ceiling;
+    // discoveryReserve = 1; httpOverhead = 15 → 196 modeled → 200 rounded.
+    expect(prisma.recommended).toBeGreaterThanOrEqual(150);
+    expect(prisma.recommended).toBeLessThanOrEqual(250);
   });
   it("emits PG_MAX_CONNECTIONS as advisory-only", () => {
     const mc = state.recommendations.find((r) => r.key === "PG_MAX_CONNECTIONS")!;
@@ -387,6 +394,8 @@ describe("buildAdvisorState — cold start", () => {
     fastFiltered: coldObservation(),
     telemetry: coldObservation(),
     systemInfo: coldObservation(),
+    lldp: coldObservation(),
+    storage: coldObservation(),
   };
   const state = buildAdvisorState(inputs);
 
