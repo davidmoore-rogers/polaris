@@ -1799,53 +1799,126 @@ function assetMonitoringFormHTML(asset, managedAgent) {
     lldp:         "LLDP-MIB",
   };
 
-  // Build each stream row: [label | polling dropdown] then optional credential
-  // and MIB sub-rows. Sub-rows are hidden and shown/hidden by JS in
-  // _wireMonitorEditTab whenever the polling method changes.
+  // Per-stream subtab body: polling-method dropdown (with credential + MIB
+  // sub-rows beneath that show/hide based on selected method), then a per-
+  // stream cadence + timeout block, then on Response Time only the failure
+  // threshold. Preserves the legacy DOM ids the save reader in
+  // extractAssetEditData() reads (`f-responseTimePolling` /
+  // `f-responseTimeCredential` / `f-responseTimeMib` / `f-monitorInterval` /
+  // `f-probeTimeoutMs` / etc.). LLDP + Storage subtabs share the system-info
+  // cadence + timeout with the Interfaces subtab — the input lives in
+  // Interfaces and the LLDP/Storage subtabs render a hint pointing operators
+  // there (Asset row only carries 4 cadence columns: monitorIntervalSec,
+  // cpuMemoryIntervalSec, temperatureIntervalSec, systemInfoIntervalSec).
   //
   // "icmp" and "disabled" never need a credential; "agent" doesn't either —
   // the Polaris Agent's own per-asset bearer (issued at install time) is
   // implicit and never picked from the credential store.
-  function streamRow(label, streamName, pollingId, credSelectId, mibSelectId, currentPoll, currentCredId, currentMibId, autoMibName, note) {
+  function streamPollingBlock(streamName, pollingId, credSelectId, mibSelectId, currentPoll, currentCredId, currentMibId, autoMibName) {
     var needsCred = currentPoll && currentPoll !== "icmp" && currentPoll !== "disabled" && currentPoll !== "agent";
     var isSnmp    = currentPoll === "snmp";
     var credDisplay = needsCred ? "flex" : "none";
     var mibDisplay  = isSnmp   ? "flex" : "none";
-    var noteHtml    = note
-      ? '<div style="font-size:0.72rem;font-weight:normal;color:var(--color-text-tertiary);margin-top:2px">' + escapeHtml(note) + '</div>'
-      : '';
     // Storage has no per-stream MIB column on Asset — HOST-RESOURCES-MIB +
     // the vendor disk fallback in pickVendorProfileMerged covers it without
     // operator input. Skip the MIB sub-row when no mibSelectId was passed.
     var mibSubRow = mibSelectId
-      ? '<div id="' + pollingId + '-mib-wrap" style="display:' + mibDisplay + ';grid-column:2;align-items:center;gap:0.5rem;margin-top:0.25rem">' +
-          '<label style="margin:0;font-size:0.85rem;color:var(--color-text-secondary)">MIB</label>' +
+      ? '<div class="form-group" id="' + pollingId + '-mib-wrap" style="display:' + mibDisplay + ';align-items:center;gap:0.5rem;margin-top:0.5rem">' +
+          '<label style="margin:0;font-size:0.85rem;color:var(--color-text-secondary);min-width:90px">MIB</label>' +
           '<select id="' + mibSelectId + '" data-current-id="' + escapeHtml(currentMibId) + '" data-auto-mib-name="' + escapeHtml(autoMibName || "") + '" data-mib-picker="1" style="flex:1">' +
             _mibOptionsHTML(currentMibId, autoMibName) +
           '</select>' +
         '</div>'
       : '';
-    return '<label style="margin:0">' + escapeHtml(label) + noteHtml + '</label>' +
-      _polarisPollingDropdownHTML(pollingId, assetSourceKind, streamName, currentPoll) +
-      '<div id="' + pollingId + '-cred-wrap" style="display:' + credDisplay + ';grid-column:2;align-items:center;gap:0.5rem;margin-top:0.25rem">' +
-        '<label style="margin:0;font-size:0.85rem;color:var(--color-text-secondary)">Credential</label>' +
+    return '<div class="form-group"><label>Polling method</label>' +
+        _polarisPollingDropdownHTML(pollingId, assetSourceKind, streamName, currentPoll) +
+        '<p class="hint">Select the protocol Polaris uses for this stream. "Inherit" falls through to the resolved class / integration / manual / source-default tiers.</p>' +
+      '</div>' +
+      '<div class="form-group" id="' + pollingId + '-cred-wrap" style="display:' + credDisplay + ';align-items:center;gap:0.5rem;margin-top:0.5rem">' +
+        '<label style="margin:0;font-size:0.85rem;color:var(--color-text-secondary);min-width:90px">Credential</label>' +
         '<select id="' + credSelectId + '" data-current-id="' + escapeHtml(currentCredId) + '" style="flex:1"></select>' +
       '</div>' +
       mibSubRow;
   }
 
+  // Each interval/timeout input keeps its legacy DOM id + tier-badge span id
+  // so _populateAssetMonitorTierBadges() and the save reader keep working
+  // unchanged.
+  function intervalInput(id, label, value, min, max, hint) {
+    return '<div class="form-group">' +
+      '<label>' + escapeHtml(label) + ' <span class="tier-badge" id="' + id + '-tier" style="margin-left:0.5rem;font-size:0.78rem;font-weight:normal;color:var(--color-text-tertiary)"></span></label>' +
+      '<input type="number" id="' + id + '" min="' + min + '" max="' + max + '" value="' + escapeHtml(String(value)) + '" placeholder="leave blank to inherit" style="max-width:240px">' +
+      (hint ? '<p class="hint">' + hint + '</p>' : '') +
+    '</div>';
+  }
+  function probeTimeoutInput() {
+    return '<div class="form-group">' +
+      '<label>Probe Timeout Override (ms) <span class="tier-badge" id="f-probeTimeoutMs-tier" style="margin-left:0.5rem;font-size:0.78rem;font-weight:normal;color:var(--color-text-tertiary)"></span></label>' +
+      '<input type="number" id="f-probeTimeoutMs" min="100" max="60000" value="' + escapeHtml(String(probeTimeout)) + '" placeholder="leave blank to inherit" style="max-width:240px">' +
+      '<p class="hint" id="f-probeTimeoutMs-warn" style="display:none;color:var(--color-warning)">⚠ Below 500 ms — probes will likely false-fail under healthy network conditions.</p>' +
+      '<p class="hint">Range 100..60000 ms; default is 5000 ms. Inherits from the resolved tier when blank.</p>' +
+    '</div>';
+  }
+  function failureThresholdInput() {
+    // Per-asset failure threshold isn't a column on Asset — it resolves from
+    // the class / integration / manual tier. Render the input read-only here
+    // with a hint so operators see it in the right place but edit it at the
+    // tier where it lives.
+    return '<div class="form-group">' +
+      '<label>Failure Threshold</label>' +
+      '<p class="hint">Inherited from the resolved tier. Edit at the integration\'s Monitoring tab or via the Monitoring Settings button (Assets page).</p>' +
+    '</div>';
+  }
+
+  // Subtab body builders — one per stream. LLDP + Storage share systemInfo
+  // cadence with Interfaces at the asset tier (Asset row has no separate
+  // lldpIntervalSec / storageIntervalSec columns); their subtabs link to
+  // Interfaces for those inputs.
+  function bodyResponseTime() {
+    return streamPollingBlock("responseTime", "f-responseTimePolling", "f-responseTimeCredential", "f-responseTimeMib", pollingCurrent.responseTimePolling, rtCredId, rtMibId, _autoMibNames.responseTime) +
+      intervalInput("f-monitorInterval", "Poll Interval Override (seconds)", interval, 5, 86400, "Minimum 5 seconds. Inherits from the resolved tier when blank.") +
+      probeTimeoutInput() +
+      failureThresholdInput();
+  }
+  function bodyCpuMemory() {
+    return streamPollingBlock("telemetry", "f-cpuMemoryPolling", "f-cpuMemoryCredential", "f-telemetryMib", pollingCurrent.cpuMemoryPolling, telCredId, telMibId, _autoMibNames.telemetry) +
+      intervalInput("f-cpuMemoryTimeoutMs", "CPU/Memory Timeout Override (ms)", telemetryTimeout, 1000, 120000, "Per-request timeout for the CPU/memory collector (FortiOS REST + SNMP). Range 1000..120000 ms; default 10000 ms. Inherits when blank.");
+  }
+  function bodyTemperature() {
+    return streamPollingBlock("temperature", "f-temperaturePolling", "f-temperatureCredential", "f-temperatureMib", pollingCurrent.temperaturePolling, tempCredId, tempMibId, _autoMibNames.temperature) +
+      intervalInput("f-temperatureTimeoutMs", "Temperature Timeout Override (ms)", temperatureTimeout, 1000, 120000, "Per-request timeout for the temperature collector (FortiOS sensor-info / SNMP ENTITY-SENSOR-MIB). Range 1000..120000 ms; default 10000 ms. Inherits when blank.");
+  }
+  function bodyInterfaces() {
+    return streamPollingBlock("interfaces", "f-interfacesPolling", "f-interfacesCredential", "f-interfacesMib", pollingCurrent.interfacesPolling, ifCredId, ifMibId, _autoMibNames.interfaces) +
+      intervalInput("f-systemInfoTimeoutMs", "System Info Timeout Override (ms)", systemInfoTimeout, 1000, 120000, "Per-request timeout for the interface / storage / LLDP collector. Range 1000..120000 ms; default 10000 ms. Inherits when blank.");
+  }
+  function bodyStorage() {
+    return streamPollingBlock("storage", "f-storagePolling", "f-storageCredential", null, pollingCurrent.storagePolling, "", "", null) +
+      '<p class="hint" style="margin:0.5rem 0 0;padding:0.5rem 0.65rem;background:var(--color-bg-tertiary);border-radius:var(--radius-sm);color:var(--color-text-secondary)">Cadence + timeout for this stream are shared with the <strong>Interfaces</strong> subtab at the per-asset tier — edit them there.</p>';
+  }
+  function bodyLldp() {
+    return streamPollingBlock("lldp", "f-lldpPolling", "f-lldpCredential", "f-lldpMib", pollingCurrent.lldpPolling, lldpCredId, lldpMibId, _autoMibNames.lldp) +
+      '<p class="hint" style="margin:0.5rem 0 0;padding:0.5rem 0.65rem;background:var(--color-bg-tertiary);border-radius:var(--radius-sm);color:var(--color-text-secondary)">Cadence + timeout for this stream are shared with the <strong>Interfaces</strong> subtab at the per-asset tier — edit them there.</p>';
+  }
+
+  var streamTabs = [
+    { key: "responseTime", label: "Response Time", html: bodyResponseTime() },
+    { key: "cpuMemory",    label: "CPU/Memory",    html: bodyCpuMemory()    },
+    { key: "temperature",  label: "Temperature",   html: bodyTemperature()  },
+    { key: "interfaces",   label: "Interfaces",    html: bodyInterfaces()   },
+    { key: "lldp",         label: "LLDP",          html: bodyLldp()         },
+    { key: "storage",      label: "Storage",       html: bodyStorage()      },
+  ];
+
+  // _intRenderTabbedBody + _intWireModalTabs are global helpers from
+  // integrations.js (loaded before assets.js on assets.html). The tab key
+  // namespaces the strip so it doesn't collide with the Integration modal's
+  // stream-tab strips when both pages share a session.
   var transportBlockHtml =
     '<div id="f-transport-wrap" style="margin-top:0.5rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
       '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0.5rem 0 0.5rem 0">Polling Methods</p>' +
-      '<div style="display:grid;grid-template-columns:200px 1fr;gap:0.5rem 1rem;align-items:center;margin-bottom:0.75rem">' +
-        streamRow("Response time",  "responseTime", "f-responseTimePolling", "f-responseTimeCredential", "f-responseTimeMib", pollingCurrent.responseTimePolling, rtCredId,   rtMibId,   _autoMibNames.responseTime) +
-        streamRow("CPU/Memory",     "telemetry",    "f-cpuMemoryPolling",    "f-cpuMemoryCredential",    "f-telemetryMib",    pollingCurrent.cpuMemoryPolling,    telCredId,  telMibId,  _autoMibNames.telemetry) +
-        streamRow("Temperature",    "temperature",  "f-temperaturePolling",  "f-temperatureCredential",  "f-temperatureMib",  pollingCurrent.temperaturePolling,  tempCredId, tempMibId, _autoMibNames.temperature) +
-        streamRow("Interfaces",     "interfaces",   "f-interfacesPolling",   "f-interfacesCredential",   "f-interfacesMib",   pollingCurrent.interfacesPolling,   ifCredId,   ifMibId,   _autoMibNames.interfaces) +
-        streamRow("Storage",        "storage",      "f-storagePolling",      "f-storageCredential",      null,                pollingCurrent.storagePolling,      "",         "",        null) +
-        streamRow("LLDP neighbors", "lldp",         "f-lldpPolling",         "f-lldpCredential",         "f-lldpMib",         pollingCurrent.lldpPolling,         lldpCredId, lldpMibId, _autoMibNames.lldp) +
-      '</div>' +
-      '<p class="hint" style="margin-top:0.25rem">Per-asset overrides win over class / integration / source-default tiers. When a method needs a credential, "Source default" lets the asset inherit the integration\'s configured credential at runtime.</p>' +
+      _intRenderTabbedBody("asset-mon-streams", streamTabs) +
+      '<p class="hint" style="margin-top:0.5rem">Per-asset overrides win over class / integration / source-default tiers. When a method needs a credential, "Source default" lets the asset inherit the integration\'s configured credential at runtime.</p>' +
     '</div>';
 
   // ─── Polaris Agent block ───────────────────────────────────────────
@@ -1933,32 +2006,6 @@ function assetMonitoringFormHTML(asset, managedAgent) {
       '</label>' +
       '<p class="hint">A successful probe means the credential authenticated. Probes write a sample row each cycle; failed probes count as packet loss.</p>' +
     '</div>' +
-    '<div class="form-group">' +
-      '<label>Poll Interval Override (seconds) <span class="tier-badge" id="f-monitorInterval-tier" style="margin-left:0.5rem;font-size:0.78rem;font-weight:normal;color:var(--color-text-tertiary)"></span></label>' +
-      '<input type="number" id="f-monitorInterval" min="5" max="86400" value="' + escapeHtml(String(interval)) + '" placeholder="leave blank to inherit" style="max-width:240px">' +
-      '<p class="hint">Inherits from the resolved tier when blank. Minimum 5 seconds. Edit defaults from the <a href="/assets.html#monitoring-settings">Monitoring Settings</a> button at the top of the Assets page or from the integration\'s Monitoring tab.</p>' +
-    '</div>' +
-    '<div class="form-group">' +
-      '<label>Probe Timeout Override (ms) <span class="tier-badge" id="f-probeTimeoutMs-tier" style="margin-left:0.5rem;font-size:0.78rem;font-weight:normal;color:var(--color-text-tertiary)"></span></label>' +
-      '<input type="number" id="f-probeTimeoutMs" min="100" max="60000" value="' + escapeHtml(String(probeTimeout)) + '" placeholder="leave blank to inherit" style="max-width:240px">' +
-      '<p class="hint" id="f-probeTimeoutMs-warn" style="display:none;color:var(--color-warning)">⚠ Below 500 ms — probes will likely false-fail under healthy network conditions.</p>' +
-      '<p class="hint">Range 100..60000 ms; default is 5000 ms. Inherits from the resolved tier when blank.</p>' +
-    '</div>' +
-    '<div class="form-group">' +
-      '<label>CPU/Memory Timeout Override (ms) <span class="tier-badge" id="f-cpuMemoryTimeoutMs-tier" style="margin-left:0.5rem;font-size:0.78rem;font-weight:normal;color:var(--color-text-tertiary)"></span></label>' +
-      '<input type="number" id="f-cpuMemoryTimeoutMs" min="1000" max="120000" value="' + escapeHtml(String(telemetryTimeout)) + '" placeholder="leave blank to inherit" style="max-width:240px">' +
-      '<p class="hint">Per-request timeout for the CPU/memory collector (FortiOS REST + SNMP). Range 1000..120000 ms; default 10000 ms. Inherits when blank.</p>' +
-    '</div>' +
-    '<div class="form-group">' +
-      '<label>Temperature Timeout Override (ms) <span class="tier-badge" id="f-temperatureTimeoutMs-tier" style="margin-left:0.5rem;font-size:0.78rem;font-weight:normal;color:var(--color-text-tertiary)"></span></label>' +
-      '<input type="number" id="f-temperatureTimeoutMs" min="1000" max="120000" value="' + escapeHtml(String(temperatureTimeout)) + '" placeholder="leave blank to inherit" style="max-width:240px">' +
-      '<p class="hint">Per-request timeout for the temperature collector (FortiOS sensor-info / SNMP ENTITY-SENSOR-MIB). Range 1000..120000 ms; default 10000 ms. Inherits when blank.</p>' +
-    '</div>' +
-    '<div class="form-group">' +
-      '<label>System Info Timeout Override (ms) <span class="tier-badge" id="f-systemInfoTimeoutMs-tier" style="margin-left:0.5rem;font-size:0.78rem;font-weight:normal;color:var(--color-text-tertiary)"></span></label>' +
-      '<input type="number" id="f-systemInfoTimeoutMs" min="1000" max="120000" value="' + escapeHtml(String(systemInfoTimeout)) + '" placeholder="leave blank to inherit" style="max-width:240px">' +
-      '<p class="hint">Per-request timeout for the interface / storage / LLDP collector. Range 1000..120000 ms; default 10000 ms. Inherits when blank.</p>' +
-    '</div>' +
     agentBlockHtml +
     (transportBlockShown ? transportBlockHtml : '') +
     '<div class="form-group" id="f-asset-overrides-wrap"' + assetIdAttr + ' style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--color-border);display:none">' +
@@ -2000,6 +2047,14 @@ async function _wireMonitorEditTab(asset) {
   var probeTimeoutWarn = document.getElementById("f-probeTimeoutMs-warn");
 
   var transportWrap = document.getElementById("f-transport-wrap");
+
+  // Wire the per-stream subtab strip inside the Polling Methods block so
+  // clicking a stream tab actually swaps the body. _intWireModalTabs is a
+  // global helper from integrations.js (loaded before assets.js on every
+  // page that needs the asset modal).
+  if (transportWrap && typeof _intWireModalTabs === "function") {
+    _intWireModalTabs("asset-mon-streams");
+  }
 
   // Per-stream selects and their corresponding polling selects. Storage has
   // no MIB picker (HOST-RESOURCES-MIB + vendor fallback covers it without
@@ -10253,6 +10308,13 @@ function _monsetRender() {
     { wide: true }
   );
 
+  // Wire the Manual Monitoring stream-subtab tab strip so clicking a stream
+  // tab activates its panel. Same shared helper the integration Monitoring
+  // tab uses. Safe to call before the listeners below — they don't depend
+  // on tab state.
+  if (typeof _intWireModalTabs === "function") {
+    _intWireModalTabs("monset-manual-streams");
+  }
   document.getElementById("btn-monset-save-manual").addEventListener("click", _monsetSaveManual);
   document.getElementById("btn-monset-add-override").addEventListener("click", function () {
     _monsetOpenOverrideEditor(null);
@@ -10292,23 +10354,50 @@ function _monsetRender() {
 
 function _monsetManualSectionHTML(v) {
   var values = v || MON_TIER_DEFAULTS;
+  // Manual Monitoring is the bottom of the resolver hierarchy — there's
+  // nothing to inherit from. Stamp sensible per-stream polling defaults
+  // when the loaded tier doesn't already carry an explicit value:
+  // Response Time → ICMP, every other stream → Disabled. Operators flip
+  // streams on per-asset as needed. Explicit operator picks on a saved
+  // Manual tier survive — we only fill nulls.
+  var seeded = Object.assign({}, values);
+  if (seeded.responseTimePolling == null) seeded.responseTimePolling = "icmp";
+  if (seeded.cpuMemoryPolling    == null) seeded.cpuMemoryPolling    = "disabled";
+  if (seeded.temperaturePolling  == null) seeded.temperaturePolling  = "disabled";
+  if (seeded.interfacesPolling   == null) seeded.interfacesPolling   = "disabled";
+  if (seeded.lldpPolling         == null) seeded.lldpPolling         = "disabled";
+  if (seeded.storagePolling      == null) seeded.storagePolling      = "disabled";
+  // Manual tier uses the same per-stream subtab layout the integration
+  // Monitoring tab uses — Response Time / CPU+Memory / Temperature /
+  // Interfaces / LLDP / Storage. No outer class strip (Manual has no per-
+  // class breakdown). DOM id prefix `f-manual-mon-` namespaces every input
+  // so it doesn't collide with the integration modal's `f-mon-` ids.
+  // showInherit:false suppresses the misleading "Inherit" option in every
+  // polling dropdown (Manual is the bottom of the resolver). showMib:false
+  // drops the per-stream MIB picker here — Manual tier doesn't expose it
+  // for this iteration; MIBs are picked at the asset tier instead.
+  // _classStreamSubtabHTML, _streamsForClass, _intRenderTabbedBody, and
+  // _intWireModalTabs are global function declarations in integrations.js
+  // (loaded before this file on assets.html), so they're directly callable.
+  var creds = (typeof _credentialCache !== "undefined" && _credentialCache && Array.isArray(_credentialCache.list))
+    ? _credentialCache.list
+    : [];
+  var streams = (typeof _streamsForClass === "function") ? _streamsForClass("manual") : [];
+  var streamTabs = streams.map(function (stream) {
+    return {
+      key:   stream.key,
+      label: stream.label,
+      html:  _classStreamSubtabHTML("f-manual-mon-", "manual", "manual", stream, seeded, creds, false, {
+        showInherit: false,
+        showMib:     false,
+      }),
+    };
+  });
   return '<div class="monset-section">' +
     '<h3 style="margin-bottom:0.25rem">Manual Monitoring</h3>' +
     '<p class="hint" style="margin:0 0 1rem 0;color:var(--color-text-tertiary)">Settings applied to assets without an integration source — manually-created assets, or assets whose origin integration was deleted.</p>' +
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem 1rem">' +
-      _monsetField("monset-manual-intervalSeconds",           "Probe interval",         "seconds",                        values.intervalSeconds,           1,    86400,  false) +
-      _monsetField("monset-manual-failureThreshold",          "Failure threshold",      "consecutive failures",           values.failureThreshold,          1,    100,    false) +
-      _monsetField("monset-manual-probeTimeoutMs",            "Probe timeout",          "ms (warning under 500)",         values.probeTimeoutMs,            100,  60000,  true)  +
-      _monsetField("monset-manual-cpuMemoryIntervalSeconds",   "CPU/memory interval",    "seconds",                        values.cpuMemoryIntervalSeconds,   15,   86400,  false) +
-      _monsetField("monset-manual-cpuMemoryTimeoutMs",         "CPU/memory timeout",     "ms (FortiOS REST + SNMP)",       values.cpuMemoryTimeoutMs,         1000, 120000, false) +
-      _monsetField("monset-manual-temperatureIntervalSeconds", "Temperature interval",   "seconds",                        values.temperatureIntervalSeconds, 15,   86400,  false) +
-      _monsetField("monset-manual-temperatureTimeoutMs",       "Temperature timeout",    "ms",                             values.temperatureTimeoutMs,       1000, 120000, false) +
-      _monsetField("monset-manual-systemInfoIntervalSeconds",  "System info interval",   "seconds (interfaces + storage)", values.systemInfoIntervalSeconds,  60,   86400,  false) +
-      _monsetField("monset-manual-systemInfoTimeoutMs",        "System info timeout",    "ms (interface/storage/LLDP)",    values.systemInfoTimeoutMs,        1000, 120000, false) +
-    '</div>' +
-    '<hr style="margin:1rem 0;border:none;border-top:1px solid var(--color-border)">' +
-    _polarisPollingFourStreamHTML("monset-manual-", "manual", values) +
-    '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Manual tier accepts any method — operator picks per stream and supplies a credential at the asset level (or relies on ICMP).</p>' +
+    _intRenderTabbedBody("monset-manual-streams", streamTabs) +
+    '<p class="hint" style="margin:0.5rem 0 0.5rem 0;color:var(--color-text-tertiary)">Manual tier accepts any method — operator picks per stream and supplies a credential at the asset level (or relies on ICMP).</p>' +
     '<p class="hint" style="margin:0 0 0.75rem 0;font-size:0.78rem">Sample retention is a global setting. Edit it in <a href="/server-settings.html?tab=retention">Server Settings → Retention</a>.</p>' +
     '<div style="margin-top:1rem;text-align:right">' +
       '<button class="btn btn-primary" id="btn-monset-save-manual">Save Manual Tier</button>' +
@@ -10342,18 +10431,28 @@ async function _monsetSaveManual() {
   if (!btn) return;
   btn.disabled = true;
   btn.textContent = "Saving…";
+  // Stream-subtab layout uses id prefix `f-manual-mon-` for numeric inputs
+  // (cadences + timeouts + failure threshold) and `f-manual-mon-tier-` for
+  // polling-method + MIB selects, mirroring the integration Monitoring tab's
+  // _classStreamSubtabHTML(isPrimary=false) shape.
   var body = {
-    intervalSeconds:           _monsetReadField("monset-manual-intervalSeconds",           MON_TIER_DEFAULTS.intervalSeconds),
-    failureThreshold:          _monsetReadField("monset-manual-failureThreshold",          MON_TIER_DEFAULTS.failureThreshold),
-    probeTimeoutMs:            _monsetReadField("monset-manual-probeTimeoutMs",            MON_TIER_DEFAULTS.probeTimeoutMs),
-    cpuMemoryTimeoutMs:        _monsetReadField("monset-manual-cpuMemoryTimeoutMs",        MON_TIER_DEFAULTS.cpuMemoryTimeoutMs),
-    temperatureTimeoutMs:      _monsetReadField("monset-manual-temperatureTimeoutMs",      MON_TIER_DEFAULTS.temperatureTimeoutMs),
-    systemInfoTimeoutMs:       _monsetReadField("monset-manual-systemInfoTimeoutMs",       MON_TIER_DEFAULTS.systemInfoTimeoutMs),
-    cpuMemoryIntervalSeconds:  _monsetReadField("monset-manual-cpuMemoryIntervalSeconds",  MON_TIER_DEFAULTS.cpuMemoryIntervalSeconds),
-    temperatureIntervalSeconds: _monsetReadField("monset-manual-temperatureIntervalSeconds", MON_TIER_DEFAULTS.temperatureIntervalSeconds),
-    systemInfoIntervalSeconds: _monsetReadField("monset-manual-systemInfoIntervalSeconds", MON_TIER_DEFAULTS.systemInfoIntervalSeconds),
+    intervalSeconds:           _monsetReadField("f-manual-mon-intervalSeconds",           MON_TIER_DEFAULTS.intervalSeconds),
+    failureThreshold:          _monsetReadField("f-manual-mon-failureThreshold",          MON_TIER_DEFAULTS.failureThreshold),
+    probeTimeoutMs:            _monsetReadField("f-manual-mon-probeTimeoutMs",            MON_TIER_DEFAULTS.probeTimeoutMs),
+    cpuMemoryTimeoutMs:        _monsetReadField("f-manual-mon-cpuMemoryTimeoutMs",        MON_TIER_DEFAULTS.cpuMemoryTimeoutMs),
+    temperatureTimeoutMs:      _monsetReadField("f-manual-mon-temperatureTimeoutMs",      MON_TIER_DEFAULTS.temperatureTimeoutMs),
+    systemInfoTimeoutMs:       _monsetReadField("f-manual-mon-systemInfoTimeoutMs",       MON_TIER_DEFAULTS.systemInfoTimeoutMs),
+    cpuMemoryIntervalSeconds:  _monsetReadField("f-manual-mon-cpuMemoryIntervalSeconds",  MON_TIER_DEFAULTS.cpuMemoryIntervalSeconds),
+    temperatureIntervalSeconds: _monsetReadField("f-manual-mon-temperatureIntervalSeconds", MON_TIER_DEFAULTS.temperatureIntervalSeconds),
+    systemInfoIntervalSeconds: _monsetReadField("f-manual-mon-systemInfoIntervalSeconds", MON_TIER_DEFAULTS.systemInfoIntervalSeconds),
+    // Phase 1 LLDP + Storage cadences. Persisted but inert today — see the
+    // matching comment in integrations.js _readIntegrationCadenceForm.
+    lldpIntervalSeconds:       _monsetReadField("f-manual-mon-lldpIntervalSeconds",       null),
+    lldpTimeoutMs:             _monsetReadField("f-manual-mon-lldpTimeoutMs",             null),
+    storageIntervalSeconds:    _monsetReadField("f-manual-mon-storageIntervalSeconds",    null),
+    storageTimeoutMs:          _monsetReadField("f-manual-mon-storageTimeoutMs",          null),
   };
-  Object.assign(body, _polarisReadPollingFourStream("monset-manual-"));
+  Object.assign(body, _polarisReadPollingFourStream("f-manual-mon-tier-"));
   try {
     var saved = await api.monitorSettings.setManual(body);
     _monsetManualValues = saved || body;
@@ -10367,16 +10466,22 @@ async function _monsetSaveManual() {
 }
 
 function _monsetOverridesSectionHTML(rows) {
-  var rowHTML = rows.length === 0
-    ? '<tr><td colspan="3" class="empty-state" style="text-align:center;padding:1rem">No class overrides configured.</td></tr>'
-    : rows.map(function (o) {
-        var sourceLabel = o.integration
-          ? escapeHtml(o.integration.name) + ' <span class="hint" style="opacity:0.65">(' + escapeHtml(o.integration.type) + ')</span>'
-          : '<em>Manual</em>';
+  // Phase 1 narrowing: Class Overrides surface is now manual-scope-only.
+  // Per-class settings for integration-discovered assets are configured on
+  // each integration's Monitoring tab. We filter the rendered list to
+  // integrationId === null so the operator only sees rows they can manage
+  // here. Backend GET/POST endpoints still accept any scope — pre-existing
+  // integration-scoped rows remain active in the resolver and the next
+  // release will fold them via Phase 2 migration. The trailing note hints
+  // at this so operators with existing integration-scoped overrides don't
+  // think they've disappeared.
+  var manualRows = (rows || []).filter(function (o) { return !o.integrationId; });
+  var rowHTML = manualRows.length === 0
+    ? '<tr><td colspan="2" class="empty-state" style="text-align:center;padding:1rem">No manual-scope class overrides configured.</td></tr>'
+    : manualRows.map(function (o) {
         var classLabel = ASSET_TYPE_LABELS[o.assetType] || o.assetType;
         return '<tr>' +
           '<td>' + escapeHtml(classLabel) + '</td>' +
-          '<td>' + sourceLabel + '</td>' +
           '<td class="actions" style="white-space:nowrap">' +
             '<button class="btn btn-sm btn-secondary" data-edit-override="' + escapeHtml(o.id) + '">Edit</button> ' +
             '<button class="btn btn-sm btn-danger"    data-delete-override="' + escapeHtml(o.id) + '">Delete</button>' +
@@ -10388,11 +10493,14 @@ function _monsetOverridesSectionHTML(rows) {
       '<h3 style="margin:0">Class Overrides</h3>' +
       '<button class="btn btn-primary" id="btn-monset-add-override">+ Add Override</button>' +
     '</div>' +
-    '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Per-(class + asset source) overrides. Take priority over the integration tier and the manual tier; per-asset overrides take priority over these.</p>' +
+    '<div style="margin:0.25rem 0 0.5rem 0;padding:0.5rem 0.75rem;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-secondary);font-size:0.85rem">' +
+      '<strong>Manual scope only — assets without an integration source.</strong>' +
+    '</div>' +
+    '<p class="hint" style="margin:0 0 0.4rem 0;color:var(--color-text-tertiary)">Per-class settings for integration-discovered assets are configured on each integration\'s Monitoring tab. Use this section for manually-added assets organized by asset type.</p>' +
+    '<p class="hint" style="margin:0 0 0.5rem 0;font-size:0.78rem;color:var(--color-text-tertiary)">Existing per-integration class overrides remain active until the next release.</p>' +
     '<table class="data-table" style="width:100%;border-collapse:collapse">' +
       '<thead><tr>' +
         '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Class</th>' +
-        '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Asset Source</th>' +
         '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--color-border)">Actions</th>' +
       '</tr></thead>' +
       '<tbody id="monset-overrides-tbody">' + rowHTML + '</tbody>' +
@@ -10457,136 +10565,132 @@ function _monsetOpenOverrideEditor(existing) {
     var sel = (existing && existing.assetType === key) ? " selected" : "";
     return '<option value="' + escapeHtml(key) + '"' + sel + '>' + escapeHtml(ASSET_TYPE_LABELS[key]) + '</option>';
   }).join("");
-  // Default to "Manual" on add; preserve the row's source on edit. Each
-  // option carries data-type so the polling-block re-renderer below can
-  // figure out the asset-source kind without re-querying the integrations
-  // list.
-  var sourceOpts = '<option value="null" data-type=""' + ((existing && existing.integrationId === null) || !existing ? " selected" : "") + '>Manual</option>' +
-    _monsetIntegrations.map(function (intg) {
-      var sel = (existing && existing.integrationId === intg.id) ? " selected" : "";
-      return '<option value="' + escapeHtml(intg.id) + '" data-type="' + escapeHtml(intg.type) + '"' + sel + '>' + escapeHtml(intg.name) + ' (' + escapeHtml(intg.type) + ')</option>';
-    }).join("");
   var v = existing || Object.assign({}, MON_TIER_DEFAULTS);
-  // Initial source kind: if editing, use the row's integration type;
-  // otherwise default to manual (matches the default-selected source option).
-  var initialSourceKind = (existing && existing.integration && existing.integration.type) || "manual";
+  // Phase 1 Class Overrides is manual-scope only — the source picker is now
+  // a static banner. Editing legacy integration-scoped rows would not work
+  // here either; the filter in _monsetOverridesSectionHTML hides them from
+  // the list, but defense-in-depth: if an operator somehow opens an
+  // integration-scoped row via the edit pathway we still render the editor
+  // (preserves manual editability of the cadence/timeout fields) — the
+  // save handler still posts to the same row id.
+  //
+  // Stream-subtab layout — Response Time / CPU+Memory / Temperature /
+  // Interfaces / LLDP / Storage — matches the canonical design in
+  // primaries.md ("Polling methods section"). Reuses `_classStreamSubtabHTML`
+  // with `isPrimary=false` + prefix `monset-ov-` so generated input ids
+  // follow the same convention Manual Monitoring uses (polling/MIB selects
+  // at `monset-ov-tier-<pollField>` / `monset-ov-tier-<streamKey>Mib`;
+  // numeric inputs at `monset-ov-<field>`). showInherit:true — class
+  // overrides legitimately defer to the integration / manual tier below.
+  // showMib:true — per-stream MIB pickers are meaningful at this tier.
+  var initialSourceKind = "manual";
+  var creds = (_credentialCache && _credentialCache.list) ? _credentialCache.list : [];
+  var streams = (typeof _streamsForClass === "function") ? _streamsForClass("manual") : [];
+  var streamTabs = streams.map(function (stream) {
+    return {
+      key:   stream.key,
+      label: stream.label,
+      html:  _classStreamSubtabHTML("monset-ov-", initialSourceKind, "manual", stream, v, creds, false, {
+        showInherit: true,
+        showMib:     true,
+      }),
+    };
+  });
   var body =
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem 1rem">' +
-      '<div class="form-group"><label for="monset-ov-class">Class</label>' +
-        '<select id="monset-ov-class"' + (isEdit ? " disabled" : "") + '>' + classOpts + '</select>' +
-      '</div>' +
-      '<div class="form-group"><label for="monset-ov-source">Asset Source</label>' +
-        '<select id="monset-ov-source"' + (isEdit ? " disabled" : "") + '>' + sourceOpts + '</select>' +
-      '</div>' +
+    '<div class="form-group"><label for="monset-ov-class">Class</label>' +
+      '<select id="monset-ov-class"' + (isEdit ? " disabled" : "") + '>' + classOpts + '</select>' +
     '</div>' +
-    (isEdit ? '<p class="hint" style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.25rem 0 0.75rem 0">Class and source are fixed for an existing override; delete and re-create to change them.</p>' : '') +
-    '<div id="monset-ov-direct-poll-warning">' + _monsetDirectPollWarningHTML(existing && existing.integrationId, existing && existing.assetType) + '</div>' +
+    '<div style="margin:0.25rem 0 0.75rem 0;padding:0.5rem 0.75rem;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-secondary);font-size:0.85rem">' +
+      '<strong>Manual scope only — assets without an integration source.</strong>' +
+    '</div>' +
+    (isEdit ? '<p class="hint" style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.25rem 0 0.75rem 0">Class is fixed for an existing override; delete and re-create to change it.</p>' : '') +
+    '<div id="monset-ov-direct-poll-warning"></div>' +
     '<p class="hint" style="margin:0.5rem 0 0.75rem 0;color:var(--color-text-tertiary)">Leave a field blank to inherit from the source\'s tier.</p>' +
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem 1rem">' +
-      _monsetField("monset-ov-intervalSeconds",           "Probe interval",         "seconds",                        v.intervalSeconds,           1,    86400,  false) +
-      _monsetField("monset-ov-failureThreshold",          "Failure threshold",      "consecutive failures",           v.failureThreshold,          1,    100,    false) +
-      _monsetField("monset-ov-probeTimeoutMs",            "Probe timeout",          "ms (warning under 500)",         v.probeTimeoutMs,            100,  60000,  true)  +
-      _monsetField("monset-ov-cpuMemoryIntervalSeconds",   "CPU/memory interval",    "seconds",                        v.cpuMemoryIntervalSeconds,   15,   86400,  false) +
-      _monsetField("monset-ov-cpuMemoryTimeoutMs",         "CPU/memory timeout",     "ms (FortiOS REST + SNMP)",       v.cpuMemoryTimeoutMs,         1000, 120000, false) +
-      _monsetField("monset-ov-temperatureIntervalSeconds", "Temperature interval",   "seconds",                        v.temperatureIntervalSeconds, 15,   86400,  false) +
-      _monsetField("monset-ov-temperatureTimeoutMs",       "Temperature timeout",    "ms",                             v.temperatureTimeoutMs,       1000, 120000, false) +
-      _monsetField("monset-ov-systemInfoIntervalSeconds",  "System info interval",   "seconds (interfaces + storage)", v.systemInfoIntervalSeconds,  60,   86400,  false) +
-      _monsetField("monset-ov-systemInfoTimeoutMs",        "System info timeout",    "ms (interface/storage/LLDP)",    v.systemInfoTimeoutMs,        1000, 120000, false) +
-    '</div>' +
-    '<p class="hint" style="margin:0.5rem 0 0 0;font-size:0.78rem">Sample retention is a global setting. Edit it in <a href="/server-settings.html?tab=retention">Server Settings → Retention</a>.</p>' +
-    '<hr style="margin:1rem 0;border:none;border-top:1px solid var(--color-border)">' +
-    '<div id="monset-ov-polling-block">' + _polarisPollingFourStreamHTML("monset-ov-", initialSourceKind, v, {
-      showMibRows:  true,
-      showCredRows: true,
-      credentials:  (_credentialCache && _credentialCache.list) ? _credentialCache.list : [],
-      credValues:   v,
-      mibValues:    v,
-    }) + '</div>';
+    _intRenderTabbedBody("monset-ov-streams", streamTabs) +
+    '<p class="hint" style="margin:0.5rem 0 0 0;font-size:0.78rem">Sample retention is a global setting. Edit it in <a href="/server-settings.html?tab=retention">Server Settings → Retention</a>.</p>';
   var footer = '<button class="btn btn-secondary" id="btn-monset-ov-cancel">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-monset-ov-save">' + (isEdit ? "Save Changes" : "Create Override") + '</button>';
   openModal(isEdit ? "Edit Class Override" : "Add Class Override", body, footer);
   _populateUploadedMibsInDropdowns();
+  if (typeof _intWireModalTabs === "function") _intWireModalTabs("monset-ov-streams");
   document.getElementById("btn-monset-ov-cancel").addEventListener("click", _monsetRender);
   document.getElementById("btn-monset-ov-save").addEventListener("click", function () {
     _monsetSaveOverride(existing);
   });
 
-  // Wire per-stream polling dropdowns to show/hide credential + MIB sub-rows.
+  // Wire per-stream polling dropdowns to show/hide the credential + MIB
+  // sub-rows rendered by _classStreamSubtabHTML. Sub-row visibility rules:
+  //   - credential row for a credtype shows when the picked method needs that
+  //     credtype (snmp → snmp credrow, ssh → ssh credrow, winrm → winrm
+  //     credrow; rest_api / icmp / disabled → no credrow)
+  //   - MIB row shows when picked method is snmp
+  var STREAMS_FULL = ["responseTime", "cpuMemory", "temperature", "interfaces", "lldp", "storage"];
+  function _credtypeForMethod(method) {
+    if (method === "snmp")  return "snmp";
+    if (method === "ssh")   return "ssh";
+    if (method === "winrm") return "winrm";
+    return null;
+  }
+  function _ovPollFieldFor(streamKey) {
+    return streamKey === "cpuMemory" ? "cpuMemoryPolling"
+      : streamKey === "responseTime" ? "responseTimePolling"
+      : streamKey + "Polling";
+  }
+  function _ovMibStreamKeyFor(streamKey) {
+    // Mirror _ALL_STREAMS in integrations.js: cpuMemory uses telemetry MIB.
+    if (streamKey === "cpuMemory") return "telemetry";
+    return streamKey;
+  }
   function _refreshOvStreamSubRows() {
-    ["responseTime", "telemetry", "temperature", "interfaces", "lldp", "storage"].forEach(function (stream) {
-      var pollEl    = document.getElementById("monset-ov-" + stream + "Polling");
-      var credWrap  = document.getElementById("monset-ov-" + stream + "-cred-wrap");
-      var mibWrap   = document.getElementById("monset-ov-" + stream + "-mib-wrap");
-      var method    = pollEl ? pollEl.value : "";
-      var isSnmp    = (method === "snmp");
-      var hasMethod = (method && method !== "inherit");
-      if (credWrap) credWrap.style.display = (hasMethod && isSnmp) ? "flex" : "none";
-      if (mibWrap)  mibWrap.style.display  = isSnmp ? "flex" : "none";
+    STREAMS_FULL.forEach(function (streamKey) {
+      var pollId = "monset-ov-tier-" + _ovPollFieldFor(streamKey);
+      var pollEl = document.getElementById(pollId);
+      var method = pollEl ? pollEl.value : "";
+      // Per-credtype rows are siblings: <pollId>-credrow-<credtype>
+      ["snmp", "ssh", "winrm"].forEach(function (credType) {
+        var row = document.getElementById(pollId + "-credrow-" + credType);
+        if (!row) return;
+        row.style.display = (_credtypeForMethod(method) === credType) ? "" : "none";
+      });
+      // MIB row id from _classStreamSubtabHTML: <prefix>tier-<mibStreamKey>-mib-wrap
+      var mibStreamKey = _ovMibStreamKeyFor(streamKey);
+      var mibWrap = document.getElementById("monset-ov-tier-" + mibStreamKey + "-mib-wrap");
+      if (mibWrap) mibWrap.style.display = (method === "snmp") ? "" : "none";
     });
   }
   _refreshOvStreamSubRows();
-  ["responseTime", "telemetry", "temperature", "interfaces", "lldp", "storage"].forEach(function (stream) {
-    var pollEl = document.getElementById("monset-ov-" + stream + "Polling");
+  STREAMS_FULL.forEach(function (streamKey) {
+    var pollEl = document.getElementById("monset-ov-tier-" + _ovPollFieldFor(streamKey));
     if (pollEl) pollEl.addEventListener("change", _refreshOvStreamSubRows);
   });
 
-  // Refresh the direct-poll warning whenever class or source changes (add
-  // mode only — both pickers are disabled on edit).
-  function _refreshOvDirectPollWarning() {
-    var wrap   = document.getElementById("monset-ov-direct-poll-warning");
-    var clsSel = document.getElementById("monset-ov-class");
-    var srcSel = document.getElementById("monset-ov-source");
-    if (!wrap || !clsSel || !srcSel) return;
-    var integrationId = srcSel.value === "null" ? null : srcSel.value;
-    wrap.innerHTML = _monsetDirectPollWarningHTML(integrationId, clsSel.value);
-  }
-  if (!isEdit) {
-    var clsSelEl = document.getElementById("monset-ov-class");
-    if (clsSelEl) clsSelEl.addEventListener("change", _refreshOvDirectPollWarning);
-    var srcSelEl = document.getElementById("monset-ov-source");
-    if (srcSelEl) srcSelEl.addEventListener("change", _refreshOvDirectPollWarning);
-  }
+  // Pre-select per-stream credentials from the loaded override. _classStreamSubtabHTML
+  // doesn't pre-select credentials because the integration modal's per-credtype
+  // credential pickers are placeholders today; the class override row carries
+  // real per-stream credential ids that we want reflected in the UI.
+  var _OV_CRED_FIELDS = {
+    responseTime: "responseTimeCredentialId",
+    cpuMemory:    "cpuMemoryCredentialId",
+    temperature:  "temperatureCredentialId",
+    interfaces:   "interfacesCredentialId",
+    lldp:         "lldpCredentialId",
+  };
+  Object.keys(_OV_CRED_FIELDS).forEach(function (streamKey) {
+    var credId = v[_OV_CRED_FIELDS[streamKey]];
+    if (!credId) return;
+    var method = (v[_ovPollFieldFor(streamKey)] || "").toString();
+    var credType = (method === "snmp") ? "snmp" : (method === "ssh") ? "ssh" : (method === "winrm") ? "winrm" : null;
+    if (!credType) return;
+    var sel = document.getElementById("monset-ov-tier-" + _ovPollFieldFor(streamKey) + "-cred-" + credType);
+    if (sel) sel.value = credId;
+  });
 
-  // Re-render the polling block when the source changes — methods compatible
-  // with the new source replace the old options. Disabled in edit mode (the
-  // source picker itself is disabled).
-  if (!isEdit) {
-    var srcSel = document.getElementById("monset-ov-source");
-    if (srcSel) {
-      srcSel.addEventListener("change", function () {
-        var opt = srcSel.options[srcSel.selectedIndex];
-        var kind = (opt && opt.getAttribute("data-type")) || "manual";
-        // Preserve currently-typed values that survive the new compat matrix;
-        // also preserve credential and MIB selections across the re-render.
-        var currentValues = Object.assign(
-          {},
-          _polarisReadPollingFourStream("monset-ov-"),
-          _polarisReadCredFourStream("monset-ov-"),
-          _polarisReadMibFourStream("monset-ov-")
-        );
-        var allowed = _POLLING_COMPAT[kind] || _POLLING_COMPAT.manual;
-        ["responseTimePolling", "cpuMemoryPolling", "temperaturePolling", "interfacesPolling", "lldpPolling", "storagePolling"].forEach(function (k) {
-          if (currentValues[k] && allowed.indexOf(currentValues[k]) === -1) currentValues[k] = null;
-        });
-        var block = document.getElementById("monset-ov-polling-block");
-        if (block) {
-          block.innerHTML = _polarisPollingFourStreamHTML("monset-ov-", kind, currentValues, {
-            showMibRows:  true,
-            showCredRows: true,
-            credentials:  (_credentialCache && _credentialCache.list) ? _credentialCache.list : [],
-            credValues:   currentValues,
-            mibValues:    currentValues,
-          });
-          _populateUploadedMibsInDropdowns();
-          _refreshOvStreamSubRows();
-          ["responseTime", "telemetry", "temperature", "interfaces", "lldp", "storage"].forEach(function (stream) {
-            var pollEl = document.getElementById("monset-ov-" + stream + "Polling");
-            if (pollEl) pollEl.addEventListener("change", _refreshOvStreamSubRows);
-          });
-        }
-      });
-    }
-  }
+  // Class Overrides is manual-scope only now — there is no source picker to
+  // wire, and the direct-poll warning (which only applies to FMG/FortiGate
+  // integration-scoped switch/AP overrides) no longer fires from this surface.
+  // The wrap div is left in place to avoid disturbing the surrounding DOM
+  // layout; it stays empty in Phase 1 and is removed entirely when Phase 2
+  // lands the backend narrowing.
 }
 
 async function _monsetSaveOverride(existing) {
@@ -10603,6 +10707,9 @@ async function _monsetSaveOverride(existing) {
     var n = parseInt(el.value, 10);
     return Number.isFinite(n) ? n : null;
   }
+  // Numeric inputs live at `monset-ov-<field>` (isPrimary=false in
+  // _classStreamSubtabHTML uses `idPrefix + idSuffix` directly for the
+  // numeric inputs — see numInput() inside that helper).
   var fields = {
     intervalSeconds:           readOptional("monset-ov-intervalSeconds"),
     failureThreshold:          readOptional("monset-ov-failureThreshold"),
@@ -10614,9 +10721,40 @@ async function _monsetSaveOverride(existing) {
     temperatureIntervalSeconds: readOptional("monset-ov-temperatureIntervalSeconds"),
     systemInfoIntervalSeconds: readOptional("monset-ov-systemInfoIntervalSeconds"),
   };
-  Object.assign(fields, _polarisReadPollingFourStream("monset-ov-"));
-  Object.assign(fields, _polarisReadCredFourStream("monset-ov-"));
-  Object.assign(fields, _polarisReadMibFourStream("monset-ov-"));
+  // Polling-method + MIB selects use the `monset-ov-tier-` prefix (matches
+  // the Manual Monitoring section's `f-manual-mon-tier-` convention).
+  Object.assign(fields, _polarisReadPollingFourStream("monset-ov-tier-"));
+  Object.assign(fields, _polarisReadMibFourStream("monset-ov-tier-"));
+  // Per-stream credentials: _classStreamSubtabHTML renders one select per
+  // (stream × credtype) at `<pollId>-cred-<credtype>`. Pick the credential
+  // matching the stream's chosen polling method; "Inherit / none" (empty)
+  // also maps to null. The backend column is per-stream
+  // (responseTimeCredentialId / cpuMemoryCredentialId / ...).
+  var _OV_STREAM_TO_FIELDS = {
+    responseTime: { pollField: "responseTimePolling", credField: "responseTimeCredentialId" },
+    cpuMemory:    { pollField: "cpuMemoryPolling",    credField: "cpuMemoryCredentialId"    },
+    temperature:  { pollField: "temperaturePolling",  credField: "temperatureCredentialId"  },
+    interfaces:   { pollField: "interfacesPolling",   credField: "interfacesCredentialId"   },
+    lldp:         { pollField: "lldpPolling",         credField: "lldpCredentialId"         },
+    // Storage stream has no dedicated per-stream credential column on
+    // MonitorClassOverride — the SNMP storage walk reuses whichever
+    // credential the interfaces stream resolved.
+  };
+  Object.keys(_OV_STREAM_TO_FIELDS).forEach(function (streamKey) {
+    var f = _OV_STREAM_TO_FIELDS[streamKey];
+    var pollEl = document.getElementById("monset-ov-tier-" + f.pollField);
+    var method = pollEl ? pollEl.value : "";
+    var credType = (method === "snmp") ? "snmp"
+      : (method === "ssh") ? "ssh"
+      : (method === "winrm") ? "winrm"
+      : null;
+    if (!credType) {
+      fields[f.credField] = null;
+      return;
+    }
+    var credEl = document.getElementById("monset-ov-tier-" + f.pollField + "-cred-" + credType);
+    fields[f.credField] = credEl ? (credEl.value || null) : null;
+  });
   try {
     if (existing) {
       var updated = await api.monitorSettings.updateClassOverride(existing.id, fields);
@@ -10624,11 +10762,12 @@ async function _monsetSaveOverride(existing) {
       if (idx >= 0) _monsetOverrides[idx] = updated;
       showToast("Class override updated");
     } else {
-      var assetType    = document.getElementById("monset-ov-class").value;
-      var sourceVal    = document.getElementById("monset-ov-source").value;
-      var integrationId = sourceVal === "null" ? null : sourceVal;
+      var assetType = document.getElementById("monset-ov-class").value;
+      // Phase 1 narrowing: every new override is manual-scope.
+      // Per-integration overrides are configured on each integration's
+      // Monitoring tab.
       var created = await api.monitorSettings.createClassOverride(
-        Object.assign({ assetType: assetType, integrationId: integrationId }, fields)
+        Object.assign({ assetType: assetType, integrationId: null }, fields)
       );
       _monsetOverrides.push(created);
       showToast("Class override created");

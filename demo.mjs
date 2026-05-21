@@ -848,7 +848,288 @@ const INTEGRATIONS = [
     createdAt: "2026-04-10T09:00:00.000Z",
     updatedAt: "2026-04-20T09:00:00.000Z",
   },
+  // ─── Phase 1 monitoring-tab redesign seeds ─────────────────────────────────
+  // These integrations exist purely so the new per-class / per-stream
+  // Monitoring tab has meaningful data to render against — they're all
+  // `enabled: false` so the discovery scheduler skips them.
+  {
+    id: "i6000000-0000-0000-0000-000000000006",
+    type: "fortimanager",
+    name: "FMG Demo (proxy)",
+    config: {
+      host: "10.99.0.10",
+      port: 443,
+      apiUser: "polaris-ro",
+      apiToken: "••••••••",
+      adom: "root",
+      verifySsl: false,
+      mgmtInterface: "port1",
+      useProxy: true,
+      // Populated tier-3 settings so every class subtab inherits real
+      // numbers in Phase 1's echo behaviour.
+      monitorSettings: {
+        intervalSeconds: 60,
+        failureThreshold: 3,
+        probeTimeoutMs: 5000,
+        cpuMemoryIntervalSeconds: 60,
+        cpuMemoryTimeoutMs: 10000,
+        temperatureIntervalSeconds: 120,
+        temperatureTimeoutMs: 10000,
+        systemInfoIntervalSeconds: null,
+        systemInfoTimeoutMs: 15000,
+        responseTimePolling: "rest_api",
+        cpuMemoryPolling: "rest_api",
+        temperaturePolling: "snmp",
+        interfacesPolling: "rest_api",
+        lldpPolling: "rest_api",
+        storagePolling: "disabled",
+      },
+      fortigateMonitor: {
+        addAsMonitored: true,
+        autoMonitorInterfaces: null,
+        pullSnmpLocation: true,
+        pushGeocodedCoords: false,
+      },
+      fortiswitchMonitor: {
+        enabled: true,
+        snmpCredentialId: "cred-snmp-demo",
+        sshCredentialId: null,
+        addAsMonitored: true,
+        autoMonitorInterfaces: null,
+      },
+      fortiapMonitor: {
+        enabled: true,
+        snmpCredentialId: "cred-snmp-demo",
+        sshCredentialId: null,
+        addAsMonitored: false,
+        autoMonitorInterfaces: null,
+      },
+    },
+    enabled: false,
+    pollInterval: 4,
+    lastTestAt: null,
+    lastTestOk: null,
+    createdAt: "2026-05-15T12:00:00.000Z",
+    updatedAt: "2026-05-15T12:00:00.000Z",
+  },
+  {
+    id: "i7000000-0000-0000-0000-000000000007",
+    type: "fortimanager",
+    name: "FMG Demo (direct)",
+    config: {
+      host: "10.99.0.11",
+      port: 443,
+      apiUser: "polaris-ro",
+      apiToken: "••••••••",
+      adom: "root",
+      verifySsl: false,
+      mgmtInterface: "port1",
+      useProxy: false,
+      discoveryParallelism: 10,
+      fortigateApiUser: "polaris-ro",
+      fortigateApiToken: "••••••••",
+      fortigateVerifySsl: false,
+      monitorSettings: {
+        intervalSeconds: 30,
+        failureThreshold: 3,
+        probeTimeoutMs: 4000,
+        cpuMemoryIntervalSeconds: 60,
+        cpuMemoryTimeoutMs: 10000,
+        temperatureIntervalSeconds: 120,
+        temperatureTimeoutMs: 10000,
+        systemInfoIntervalSeconds: 600,
+        systemInfoTimeoutMs: 15000,
+        responseTimePolling: "rest_api",
+        cpuMemoryPolling: "snmp",
+        temperaturePolling: "snmp",
+        interfacesPolling: "rest_api",
+        lldpPolling: "rest_api",
+        storagePolling: "disabled",
+      },
+      fortigateMonitor: {
+        addAsMonitored: true,
+        autoMonitorInterfaces: null,
+        pullSnmpLocation: false,
+        pushGeocodedCoords: false,
+      },
+      fortiswitchMonitor: {
+        enabled: false, snmpCredentialId: null, sshCredentialId: null,
+        addAsMonitored: false, autoMonitorInterfaces: null,
+      },
+      fortiapMonitor: {
+        enabled: false, snmpCredentialId: null, sshCredentialId: null,
+        addAsMonitored: false, autoMonitorInterfaces: null,
+      },
+    },
+    enabled: false,
+    pollInterval: 4,
+    lastTestAt: null,
+    lastTestOk: null,
+    createdAt: "2026-05-15T12:05:00.000Z",
+    updatedAt: "2026-05-15T12:05:00.000Z",
+  },
+  {
+    id: "i8000000-0000-0000-0000-000000000008",
+    type: "fortigate",
+    name: "FortiGate Demo (standalone)",
+    config: {
+      host: "10.99.0.20",
+      port: 443,
+      apiUser: "polaris-ro",
+      apiToken: "••••••••",
+      vdom: "root",
+      verifySsl: false,
+      mgmtInterface: "port1",
+      monitorSettings: {
+        intervalSeconds: 60,
+        failureThreshold: 3,
+        probeTimeoutMs: 5000,
+        cpuMemoryIntervalSeconds: 60,
+        cpuMemoryTimeoutMs: 10000,
+        temperatureIntervalSeconds: 60,
+        temperatureTimeoutMs: 10000,
+        systemInfoIntervalSeconds: 600,
+        systemInfoTimeoutMs: 10000,
+        responseTimePolling: "rest_api",
+        cpuMemoryPolling: "rest_api",
+        temperaturePolling: "rest_api",
+        interfacesPolling: "rest_api",
+        lldpPolling: "rest_api",
+        storagePolling: "disabled",
+      },
+      fortigateMonitor: {
+        addAsMonitored: true,
+        autoMonitorInterfaces: null,
+        pullSnmpLocation: false,
+        pushGeocodedCoords: false,
+      },
+      fortiswitchMonitor: {
+        enabled: false, snmpCredentialId: null, sshCredentialId: null,
+        addAsMonitored: false, autoMonitorInterfaces: null,
+      },
+      fortiapMonitor: {
+        enabled: false, snmpCredentialId: null, sshCredentialId: null,
+        addAsMonitored: false, autoMonitorInterfaces: null,
+      },
+    },
+    enabled: false,
+    pollInterval: 4,
+    lastTestAt: null,
+    lastTestOk: null,
+    createdAt: "2026-05-15T12:10:00.000Z",
+    updatedAt: "2026-05-15T12:10:00.000Z",
+  },
+  {
+    id: "i9000000-0000-0000-0000-000000000009",
+    type: "activedirectory",
+    name: "AD Demo",
+    config: {
+      host: "dc01.demo.local",
+      port: 636,
+      useLdaps: true,
+      verifyTls: false,
+      bindDn: "polaris@demo.local",
+      bindPassword: "••••••••",
+      baseDn: "DC=demo,DC=local",
+      searchScope: "sub",
+      includeDisabled: true,
+      ouInclude: [],
+      ouExclude: [],
+      monitorSettings: {
+        intervalSeconds: 120,
+        failureThreshold: 3,
+        probeTimeoutMs: 5000,
+        cpuMemoryIntervalSeconds: 120,
+        cpuMemoryTimeoutMs: 10000,
+        temperatureIntervalSeconds: 600,
+        temperatureTimeoutMs: 10000,
+        systemInfoIntervalSeconds: 1800,
+        systemInfoTimeoutMs: 15000,
+        responseTimePolling: "icmp",
+        cpuMemoryPolling: "winrm",
+        temperaturePolling: "disabled",
+        interfacesPolling: "winrm",
+        lldpPolling: "disabled",
+        storagePolling: "disabled",
+      },
+    },
+    enabled: false,
+    pollInterval: 12,
+    lastTestAt: null,
+    lastTestOk: null,
+    createdAt: "2026-05-15T12:15:00.000Z",
+    updatedAt: "2026-05-15T12:15:00.000Z",
+  },
+  {
+    id: "ia000000-0000-0000-0000-00000000000a",
+    type: "entraid",
+    name: "Entra ID Demo",
+    config: {
+      tenantId: "deadbeef-1234-5678-9abc-def012345678",
+      clientId: "cafef00d-1234-5678-9abc-def012345678",
+      clientSecret: "••••••••",
+      enableIntune: true,
+      deviceInclude: [],
+      deviceExclude: [],
+      monitorSettings: {
+        intervalSeconds: 180,
+        failureThreshold: 3,
+        probeTimeoutMs: 5000,
+        cpuMemoryIntervalSeconds: 180,
+        cpuMemoryTimeoutMs: 10000,
+        temperatureIntervalSeconds: 600,
+        temperatureTimeoutMs: 10000,
+        systemInfoIntervalSeconds: 3600,
+        systemInfoTimeoutMs: 15000,
+        responseTimePolling: "icmp",
+        cpuMemoryPolling: "disabled",
+        temperaturePolling: "disabled",
+        interfacesPolling: "disabled",
+        lldpPolling: "disabled",
+        storagePolling: "disabled",
+      },
+    },
+    enabled: false,
+    pollInterval: 12,
+    lastTestAt: null,
+    lastTestOk: null,
+    createdAt: "2026-05-15T12:20:00.000Z",
+    updatedAt: "2026-05-15T12:20:00.000Z",
+  },
 ];
+
+// Stored Credentials shown by the new Monitoring-tab class subtabs. Demo
+// store has no Server Settings > Credentials surface, but the per-stream
+// + per-class credential pickers in the Monitoring tab populate from
+// `GET /api/v1/credentials` so these need to be queryable.
+const CREDENTIALS = [
+  { id: "cred-snmp-demo",  name: "Lab SNMPv2c (community ro)",       type: "snmp",  createdAt: "2026-05-15T12:00:00.000Z", updatedAt: "2026-05-15T12:00:00.000Z" },
+  { id: "cred-snmp-v3",    name: "Lab SNMPv3 (sha+aes, polaris-ro)", type: "snmp",  createdAt: "2026-05-15T12:00:00.000Z", updatedAt: "2026-05-15T12:00:00.000Z" },
+  { id: "cred-ssh-demo",   name: "Lab SSH (polaris-ro)",             type: "ssh",   createdAt: "2026-05-15T12:00:00.000Z", updatedAt: "2026-05-15T12:00:00.000Z" },
+  { id: "cred-winrm-demo", name: "Lab WinRM (polaris-ro@demo)",      type: "winrm", createdAt: "2026-05-15T12:00:00.000Z", updatedAt: "2026-05-15T12:00:00.000Z" },
+];
+
+// Manual-tier monitor settings — what GET /api/v1/monitor-settings/manual
+// returns when the operator opens the modal on the Assets page. Mirrored
+// here so the integration Create modal's "seed initial values from manual"
+// step picks up real numbers.
+let MANUAL_MONITOR_SETTINGS = {
+  intervalSeconds: 60,
+  failureThreshold: 3,
+  probeTimeoutMs: 5000,
+  cpuMemoryIntervalSeconds: 60,
+  cpuMemoryTimeoutMs: 10000,
+  temperatureIntervalSeconds: 60,
+  temperatureTimeoutMs: 10000,
+  systemInfoIntervalSeconds: 600,
+  systemInfoTimeoutMs: 10000,
+  responseTimePolling: "icmp",
+  cpuMemoryPolling: null,
+  temperaturePolling: null,
+  interfacesPolling: null,
+  lldpPolling: null,
+  storagePolling: null,
+};
 
 // Mock Entra ID / Intune devices — exercised by demo discover handler below
 const MOCK_ENTRA_DEVICES = [
@@ -3531,6 +3812,59 @@ async function routeAPI(method, path, params, body, res, req) {
     API_TOKENS.splice(idx, 1);
     res.writeHead(204);
     return res.end();
+  }
+
+  // Credentials — list, get, create/update/delete stubs so the per-stream
+  // credential pickers in the Monitoring tab modal have real options.
+  if (path === "/api/v1/credentials" && method === "GET") {
+    return json(res, CREDENTIALS);
+  }
+  if (path.match(/^\/api\/v1\/credentials\/[^/]+$/) && method === "GET") {
+    const id = path.split("/").pop();
+    const c = CREDENTIALS.find((x) => x.id === id);
+    return c ? json(res, c) : json(res, { error: "Not found" }, 404);
+  }
+
+  // Monitor settings — manual tier + per-integration tier. The new
+  // Monitoring tab reads these to seed initial values; Phase 1 writes go
+  // straight back into the same store.
+  if (path === "/api/v1/monitor-settings/manual" && method === "GET") {
+    return json(res, MANUAL_MONITOR_SETTINGS);
+  }
+  if (path === "/api/v1/monitor-settings/manual" && method === "PUT") {
+    MANUAL_MONITOR_SETTINGS = { ...MANUAL_MONITOR_SETTINGS, ...body };
+    return json(res, MANUAL_MONITOR_SETTINGS);
+  }
+  if (path.match(/^\/api\/v1\/monitor-settings\/integration\/[^/]+$/) && method === "GET") {
+    const id = path.split("/").pop();
+    const intg = INTEGRATIONS.find((i) => i.id === id);
+    if (!intg) return json(res, { error: "Not found" }, 404);
+    return json(res, {
+      integrationId: intg.id,
+      integrationName: intg.name,
+      integrationType: intg.type,
+      settings: intg.config?.monitorSettings || null,
+    });
+  }
+  if (path.match(/^\/api\/v1\/monitor-settings\/integration\/[^/]+$/) && method === "PUT") {
+    const id = path.split("/").pop();
+    const intg = INTEGRATIONS.find((i) => i.id === id);
+    if (!intg) return json(res, { error: "Not found" }, 404);
+    intg.config = intg.config || {};
+    intg.config.monitorSettings = { ...(intg.config.monitorSettings || {}), ...body };
+    return json(res, {
+      integrationId: intg.id,
+      integrationName: intg.name,
+      integrationType: intg.type,
+      settings: intg.config.monitorSettings,
+    });
+  }
+  // Class overrides / asset overrides — empty stubs so the picker doesn't 404.
+  if (path === "/api/v1/monitor-settings/class-overrides" && method === "GET") {
+    return json(res, { classOverrides: [] });
+  }
+  if (path === "/api/v1/monitor-settings/asset-overrides" && method === "GET") {
+    return json(res, { assets: [] });
   }
 
   // Integrations

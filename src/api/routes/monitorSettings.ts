@@ -76,6 +76,13 @@ const TierSettingsSchema = z.object({
   cpuMemoryIntervalSeconds:   z.number().int().min(15).max(86400),
   temperatureIntervalSeconds: z.number().int().min(15).max(86400),
   systemInfoIntervalSeconds:  z.number().int().min(60).max(86400),
+  // Phase 1 LLDP + Storage cadences/timeouts: persisted today, inert at
+  // runtime (LLDP + Storage still ride systemInfo cadence). Phase 2 wires
+  // the actual dispatch + queue carve-out. Tolerated but not required.
+  lldpIntervalSeconds:        z.number().int().min(60).max(86400).nullable().optional(),
+  lldpTimeoutMs:              z.number().int().min(100).max(120000).nullable().optional(),
+  storageIntervalSeconds:     z.number().int().min(60).max(86400).nullable().optional(),
+  storageTimeoutMs:           z.number().int().min(100).max(120000).nullable().optional(),
   // Retention used to live on this tier (sample/telemetry/systemInfo
   // RetentionDays). Phase 5 moved it to the global Setting("sampleRetention")
   // edited from Server Settings → Retention. The fields are still tolerated
@@ -118,6 +125,12 @@ const OverrideSettingsSchema = z.object({
   cpuMemoryIntervalSeconds:   z.number().int().min(15).max(86400).nullable().optional(),
   temperatureIntervalSeconds: z.number().int().min(15).max(86400).nullable().optional(),
   systemInfoIntervalSeconds:  z.number().int().min(60).max(86400).nullable().optional(),
+  // Phase 1 LLDP + Storage cadences/timeouts. Same Phase 2 plan as
+  // TierSettingsSchema above — persisted, runtime-inert today.
+  lldpIntervalSeconds:        z.number().int().min(60).max(86400).nullable().optional(),
+  lldpTimeoutMs:              z.number().int().min(100).max(120000).nullable().optional(),
+  storageIntervalSeconds:     z.number().int().min(60).max(86400).nullable().optional(),
+  storageTimeoutMs:           z.number().int().min(100).max(120000).nullable().optional(),
   // Class-override retention is dead — see the comment on the matching
   // fields in TierSettingsSchema above. Tolerated on input, dropped before
   // persistence; retention now lives globally in Setting("sampleRetention").
@@ -164,6 +177,16 @@ function assertPollingCompatible(
       throw new AppError(
         400,
         `${pollingMethodLabel(v)} polling is not supported for ${source} assets (field: ${field})`,
+      );
+    }
+    // ICMP is only meaningful for the response-time probe — for telemetry /
+    // interfaces / LLDP / storage / temperature there's no payload to gather
+    // from an ICMP echo. Reject so an operator pick doesn't silently
+    // fall through at resolution time.
+    if (v === "icmp" && field !== "responseTimePolling") {
+      throw new AppError(
+        400,
+        `ICMP polling is only valid for the response-time stream (field: ${field})`,
       );
     }
   }
