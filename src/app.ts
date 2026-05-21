@@ -60,6 +60,7 @@ import "./jobs/cleanupStaleDnsResolvedReleased.js";
 import "./jobs/backfillFortigateEndpointSources.js";
 import "./jobs/fixInfraAssetTypes.js";
 import "./jobs/mergeFortiswitchEndpointGhosts.js";
+import "./jobs/mergeDuplicateHostnameAssets.js";
 import "./jobs/backfillDependencyTree.js";
 import "./jobs/backfillMonitorStatusChangedAt.js";
 import "./jobs/rasterizeStoredSvgIcons.js";

@@ -1,0 +1,502 @@
+/**
+ * src/jobs/mergeDuplicateHostnameAssets.ts
+ *
+ * One-shot startup cleanup for accumulated duplicate-hostname Asset rows.
+ *
+ * Several discovery pathways create separate Asset rows for the same physical
+ * device when no overlapping identifier was available at the time:
+ *
+ *   - **Workstation ghosts** — FortiGate device-inventory creates one
+ *     "fortigate-endpoint" Asset per distinct MAC sighting. A device with
+ *     wired + WiFi NICs ends up with two endpoint rows sharing a hostname
+ *     but no MAC. Entra/Intune later cross-links one of them by Ethernet MAC;
+ *     the other lives on as a hostname-only duplicate.
+ *   - **Phase-1 backfill leftovers** — assets with only a "manual" source row
+ *     (the backfill placeholder) that should have been swept by the real
+ *     discovery on first contact, but weren't (the inline sweep covers
+ *     specific shapes; some early-shipped configurations slipped through).
+ *   - **Infrastructure ghosts** — managed FortiSwitch/FortiAP discovered by
+ *     serial, while its mgmt MAC was independently learned via DHCP/ARP and
+ *     created a sibling "fortigate-endpoint" asset. The companion
+ *     `mergeFortiswitchEndpointGhosts` job handles the specific case where
+ *     the switch's MAC is still NULL; once `baseMac` capture stamps it (post
+ *     -baseMac landing), the existing job's filter no longer matches but
+ *     the duplicate row persists. This job catches those.
+ *
+ * Each cycle of every discovery loop re-raises a "Sibling hostname collision"
+ * Conflict against the un-cross-linked sibling — operator queue pressure
+ * without operator action resolving the underlying duplication. Accepting
+ * one cycle's conflict absorbs ONE ghost (the previous canonical, via
+ * acceptAssetConflict's ghost-absorption block) but leaves the OTHER ghosts
+ * untouched, so the queue refills on the next discovery cycle.
+ *
+ * This job walks every `lower(hostname)` group with ≥2 Asset rows, picks the
+ * canonical by source-kind priority, and transfers/merges every sibling into
+ * the canonical inside a single transaction.
+ *
+ * Canonical-pick priority (lower number wins; same number → most-recent
+ * `lastSeen` then most-recent `updatedAt`):
+ *
+ *   1 — entra / intune / ad / polaris-agent  (identity-tagged)
+ *   2 — fortiswitch                          (managed switch)
+ *   3 — fortiap                              (managed AP)
+ *   4 — fortigate-firewall                   (managed firewall)
+ *   5 — fortigate-endpoint                   (DHCP-discovered endpoint)
+ *   6 — manual                               (Phase-1 backfill placeholder)
+ *   7 — no source rows                       (orphan)
+ *
+ * Tie-safety: if two rows are tied at the same tier AND both have non-null
+ * primary MACs that DON'T MATCH, the group is skipped (genuine "two
+ * different devices sharing a hostname"). Logged at warn with the asset
+ * ids so an operator can decide.
+ *
+ * Side-table transfer (delete-on-conflict for unique violations):
+ *   - AssetMacAddress      — unique on (assetId, mac)
+ *   - AssetAssociatedIp    — unique on (assetId, ip)
+ *   - AssetIpHistory       — unique on (assetId, ip)
+ *   - AssetFortigateSighting — unique on (assetId, fortigateDevice)
+ *
+ * Cascade-deletes when the ghost is removed (no transfer needed):
+ *   - AssetSource (the canonical's sources are authoritative; next discovery
+ *     re-observes anything still live)
+ *   - AssetMonitorSample + every other AssetXxxSample / *Hourly / *Daily
+ *     (workstation + endpoint ghosts aren't monitored; fortiswitch/fortiap
+ *     ghosts only ever appeared as fortigate-endpoint siblings of the real
+ *     monitored device, so the ghost has no samples either)
+ *   - AssetLldpNeighbor + AssetWirelessStation
+ *   - AssetCustomWidgetSample
+ *   - AssetInterfaceOverride (operator-set comments — rare on a ghost; this
+ *     job documents the loss in the log line; preserving them would require
+ *     transferring with conflict-handling on (assetId, ifName))
+ *   - Conflict (pending conflicts pointing at the ghost cascade-clear, so
+ *     the queue empties naturally on next discovery)
+ *   - AssetDependencyParent (both sides; the 60s dependencyReconciler tick
+ *     recomputes from authoritative topology data)
+ *
+ * Scalar-field absorption onto the canonical (only when the canonical's
+ * field is empty/null and the ghost has a value): macAddress, ipAddress,
+ * serialNumber, manufacturer, model, os, osVersion, assignedTo, notes,
+ * acquiredAt, lastSeen, learnedLocation. Mirrors `acceptAssetConflict`'s
+ * ghost-absorption block. Tags are union-merged.
+ *
+ * Dry-run mode: set `POLARIS_GHOST_MERGE_DRY_RUN=1` to log every decision
+ * without writing. Use on the first deploy to review the per-group choices,
+ * then unset the env var and let the next restart actually merge.
+ *
+ * Idempotent: re-running with no env var finds zero candidates once
+ * convergent. No marker; the query itself is the converge check.
+ *
+ * Pairs with the existing `mergeFortiswitchEndpointGhosts` job (which handles
+ * the now-narrow case of NULL-MAC FortiSwitches) and Phase 11 of
+ * `syncDhcpSubnets` (the projection apply pass that prevents inline drift
+ * from creating new duplicates going forward).
+ */
+
+import { logger } from "../utils/logger.js";
+import { prisma } from "../db.js";
+import { logEvent } from "../api/routes/events.js";
+import { runInstrumentedJob } from "./_metrics.js";
+
+type SourceTier = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+
+const KIND_TIER: Record<string, SourceTier> = {
+  entra: 1,
+  intune: 1,
+  ad: 1,
+  "polaris-agent": 1,
+  fortiswitch: 2,
+  fortiap: 3,
+  "fortigate-firewall": 4,
+  "fortigate-endpoint": 5,
+  manual: 6,
+};
+
+type AssetRow = {
+  id: string;
+  hostname: string | null;
+  ipAddress: string | null;
+  macAddress: string | null;
+  serialNumber: string | null;
+  manufacturer: string | null;
+  model: string | null;
+  os: string | null;
+  osVersion: string | null;
+  assignedTo: string | null;
+  notes: string | null;
+  learnedLocation: string | null;
+  acquiredAt: Date | null;
+  lastSeen: Date | null;
+  updatedAt: Date;
+  tags: string[];
+  sources: { sourceKind: string }[];
+};
+
+function tierForAsset(sourceKinds: string[]): SourceTier {
+  if (sourceKinds.length === 0) return 7;
+  let best: SourceTier = 7;
+  for (const k of sourceKinds) {
+    const t = (KIND_TIER[k] ?? 7) as SourceTier;
+    if (t < best) best = t;
+  }
+  return best;
+}
+
+function normMac(mac: string | null): string | null {
+  if (!mac) return null;
+  const hex = mac.replace(/[^0-9a-fA-F]/g, "").toUpperCase();
+  return hex.length === 12 ? hex : null;
+}
+
+type Decision =
+  | { kind: "merge"; canonical: AssetRow; ghosts: AssetRow[]; tiers: number[] }
+  | { kind: "skip"; reason: string };
+
+function decideGroup(rows: AssetRow[]): Decision {
+  const decorated = rows.map((r) => ({
+    row: r,
+    tier: tierForAsset(r.sources.map((s) => s.sourceKind)),
+  }));
+  decorated.sort((a, b) => {
+    if (a.tier !== b.tier) return a.tier - b.tier;
+    const at = a.row.lastSeen?.getTime() ?? 0;
+    const bt = b.row.lastSeen?.getTime() ?? 0;
+    if (at !== bt) return bt - at;
+    return b.row.updatedAt.getTime() - a.row.updatedAt.getTime();
+  });
+  const canonical = decorated[0];
+  const rest = decorated.slice(1);
+
+  // Tie-safety: any same-tier sibling whose non-null MAC disagrees with the
+  // canonical's non-null MAC is treated as a genuine second device; skip the
+  // whole group so an operator can decide whether to rename or merge by hand.
+  const cMac = normMac(canonical.row.macAddress);
+  for (const g of rest) {
+    if (g.tier !== canonical.tier) continue;
+    const gMac = normMac(g.row.macAddress);
+    if (cMac && gMac && cMac !== gMac) {
+      return {
+        kind: "skip",
+        reason: `tied tier ${canonical.tier} with conflicting MACs (${cMac} vs ${gMac})`,
+      };
+    }
+  }
+
+  return {
+    kind: "merge",
+    canonical: canonical.row,
+    ghosts: rest.map((d) => d.row),
+    tiers: [canonical.tier, ...rest.map((d) => d.tier)],
+  };
+}
+
+(async () => {
+  try {
+    await runInstrumentedJob("mergeDuplicateHostnameAssets", async () => {
+      const dryRun = process.env.POLARIS_GHOST_MERGE_DRY_RUN === "1";
+
+      // Find every hostname appearing on >1 Asset row. Capped at the
+      // realistic upper bound — even at thousands-of-assets fleets the
+      // duplicate-hostname set is small (the prod sample showed 99).
+      const dupHosts = await prisma.$queryRaw<{ host: string }[]>`
+        SELECT lower(hostname) AS host
+        FROM assets
+        WHERE hostname IS NOT NULL
+        GROUP BY lower(hostname)
+        HAVING count(*) > 1
+        LIMIT 2000
+      `;
+      if (dupHosts.length === 0) return;
+
+      const hosts = dupHosts.map((d) => d.host);
+      const rows: AssetRow[] = await prisma.asset.findMany({
+        where: {
+          // Prisma has no "lower() match" filter, so we fetch any case
+          // variant and re-bucket in JS by lower(hostname). Hostname is
+          // indexed; even at fleet scale this is a few hundred rows.
+          OR: hosts.map((h) => ({ hostname: { equals: h, mode: "insensitive" as const } })),
+        },
+        select: {
+          id: true,
+          hostname: true,
+          ipAddress: true,
+          macAddress: true,
+          serialNumber: true,
+          manufacturer: true,
+          model: true,
+          os: true,
+          osVersion: true,
+          assignedTo: true,
+          notes: true,
+          learnedLocation: true,
+          acquiredAt: true,
+          lastSeen: true,
+          updatedAt: true,
+          tags: true,
+          sources: { select: { sourceKind: true } },
+        },
+      });
+
+      const groups = new Map<string, AssetRow[]>();
+      for (const r of rows) {
+        const key = (r.hostname ?? "").toLowerCase();
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(r);
+      }
+
+      let groupsScanned = 0;
+      let groupsMerged = 0;
+      let ghostsAbsorbed = 0;
+      let groupsSkippedAmbiguous = 0;
+      let groupsSkippedSingleton = 0;
+
+      for (const [host, members] of groups) {
+        if (members.length < 2) {
+          groupsSkippedSingleton++;
+          continue;
+        }
+        groupsScanned++;
+
+        const decision = decideGroup(members);
+        if (decision.kind === "skip") {
+          groupsSkippedAmbiguous++;
+          logger.warn(
+            {
+              host,
+              reason: decision.reason,
+              assetIds: members.map((m) => m.id),
+            },
+            "duplicate-hostname-merge: skipping (operator review)",
+          );
+          continue;
+        }
+
+        const { canonical, ghosts, tiers } = decision;
+        if (dryRun) {
+          logger.info(
+            {
+              host,
+              tiers,
+              canonicalId: canonical.id,
+              canonicalSources: canonical.sources.map((s) => s.sourceKind),
+              ghostIds: ghosts.map((g) => g.id),
+              ghostSources: ghosts.map((g) => g.sources.map((s) => s.sourceKind)),
+              dryRun: true,
+            },
+            "duplicate-hostname-merge: WOULD merge (dry-run)",
+          );
+          continue;
+        }
+
+        try {
+          for (const ghost of ghosts) {
+            await mergeGhostIntoCanonical(canonical, ghost);
+            ghostsAbsorbed++;
+          }
+          groupsMerged++;
+          logger.info(
+            {
+              host,
+              tiers,
+              canonicalId: canonical.id,
+              absorbedIds: ghosts.map((g) => g.id),
+            },
+            "duplicate-hostname-merge: merged",
+          );
+          await logEvent({
+            action: "asset.duplicate_merged",
+            resourceType: "asset",
+            resourceId: canonical.id,
+            resourceName: canonical.hostname ?? undefined,
+            level: "info",
+            message: `Duplicate-hostname cleanup — absorbed ${ghosts.length} sibling${ghosts.length === 1 ? "" : "s"} into ${canonical.hostname || canonical.id}`,
+            details: {
+              host,
+              tiers,
+              canonicalId: canonical.id,
+              absorbedIds: ghosts.map((g) => g.id),
+              absorbedSources: ghosts.map((g) => g.sources.map((s) => s.sourceKind)),
+            },
+          });
+        } catch (err) {
+          logger.warn(
+            { err, host, canonicalId: canonical.id, ghostIds: ghosts.map((g) => g.id) },
+            "duplicate-hostname-merge: failed (will retry next boot)",
+          );
+        }
+      }
+
+      if (groupsScanned > 0) {
+        logger.info(
+          {
+            dryRun,
+            groupsScanned,
+            groupsMerged,
+            ghostsAbsorbed,
+            groupsSkippedAmbiguous,
+            groupsSkippedSingleton,
+          },
+          dryRun
+            ? "duplicate-hostname-merge dry-run complete"
+            : "duplicate-hostname-merge complete",
+        );
+      }
+    });
+  } catch (err) {
+    logger.error({ err }, "mergeDuplicateHostnameAssets failed (will retry next boot)");
+  }
+})();
+
+async function mergeGhostIntoCanonical(canonical: AssetRow, ghost: AssetRow): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    // Side-table transfers. Same delete-on-conflict pattern as
+    // mergeFortiswitchEndpointGhosts.
+
+    // AssetMacAddress — unique on (assetId, mac).
+    {
+      const cur = await tx.assetMacAddress.findMany({
+        where: { assetId: canonical.id },
+        select: { mac: true },
+      });
+      const curSet = new Set(cur.map((m) => m.mac));
+      const incoming = await tx.assetMacAddress.findMany({
+        where: { assetId: ghost.id },
+        select: { id: true, mac: true },
+      });
+      for (const m of incoming) {
+        if (curSet.has(m.mac)) {
+          await tx.assetMacAddress.delete({ where: { id: m.id } });
+        } else {
+          await tx.assetMacAddress.update({
+            where: { id: m.id },
+            data: { assetId: canonical.id },
+          });
+          curSet.add(m.mac);
+        }
+      }
+    }
+
+    // AssetAssociatedIp — unique on (assetId, ip).
+    {
+      const cur = await tx.assetAssociatedIp.findMany({
+        where: { assetId: canonical.id },
+        select: { ip: true },
+      });
+      const curSet = new Set(cur.map((i) => i.ip));
+      const incoming = await tx.assetAssociatedIp.findMany({
+        where: { assetId: ghost.id },
+        select: { id: true, ip: true },
+      });
+      for (const i of incoming) {
+        if (curSet.has(i.ip)) {
+          await tx.assetAssociatedIp.delete({ where: { id: i.id } });
+        } else {
+          await tx.assetAssociatedIp.update({
+            where: { id: i.id },
+            data: { assetId: canonical.id },
+          });
+          curSet.add(i.ip);
+        }
+      }
+    }
+
+    // AssetIpHistory — unique on (assetId, ip).
+    {
+      const cur = await tx.assetIpHistory.findMany({
+        where: { assetId: canonical.id },
+        select: { ip: true },
+      });
+      const curSet = new Set(cur.map((h) => h.ip));
+      const incoming = await tx.assetIpHistory.findMany({
+        where: { assetId: ghost.id },
+        select: { id: true, ip: true },
+      });
+      for (const h of incoming) {
+        if (curSet.has(h.ip)) {
+          await tx.assetIpHistory.delete({ where: { id: h.id } });
+        } else {
+          await tx.assetIpHistory.update({
+            where: { id: h.id },
+            data: { assetId: canonical.id },
+          });
+          curSet.add(h.ip);
+        }
+      }
+    }
+
+    // AssetFortigateSighting — unique on (assetId, fortigateDevice).
+    {
+      const cur = await tx.assetFortigateSighting.findMany({
+        where: { assetId: canonical.id },
+        select: { fortigateDevice: true },
+      });
+      const curSet = new Set(cur.map((s) => s.fortigateDevice));
+      const incoming = await tx.assetFortigateSighting.findMany({
+        where: { assetId: ghost.id },
+        select: { id: true, fortigateDevice: true },
+      });
+      for (const s of incoming) {
+        if (curSet.has(s.fortigateDevice)) {
+          await tx.assetFortigateSighting.delete({ where: { id: s.id } });
+        } else {
+          await tx.assetFortigateSighting.update({
+            where: { id: s.id },
+            data: { assetId: canonical.id },
+          });
+          curSet.add(s.fortigateDevice);
+        }
+      }
+    }
+
+    // Scalar-field absorption — only fill canonical's null/empty fields from
+    // the ghost. Tags union-merge. Mirrors acceptAssetConflict.
+    const update: Record<string, unknown> = {};
+    if (!canonical.macAddress && ghost.macAddress) update.macAddress = ghost.macAddress;
+    if (!canonical.ipAddress && ghost.ipAddress) update.ipAddress = ghost.ipAddress;
+    if (!canonical.serialNumber && ghost.serialNumber) update.serialNumber = ghost.serialNumber;
+    if (!canonical.manufacturer && ghost.manufacturer) update.manufacturer = ghost.manufacturer;
+    if (!canonical.model && ghost.model) update.model = ghost.model;
+    if (!canonical.os && ghost.os) update.os = ghost.os;
+    if (!canonical.osVersion && ghost.osVersion) update.osVersion = ghost.osVersion;
+    if (!canonical.assignedTo && ghost.assignedTo) update.assignedTo = ghost.assignedTo;
+    if (!canonical.notes && ghost.notes) update.notes = ghost.notes;
+    if (!canonical.learnedLocation && ghost.learnedLocation)
+      update.learnedLocation = ghost.learnedLocation;
+    if (!canonical.acquiredAt && ghost.acquiredAt) update.acquiredAt = ghost.acquiredAt;
+    // lastSeen — keep the more recent of the two so the canonical reflects
+    // any sighting from the ghost the canonical didn't have.
+    if (ghost.lastSeen && (!canonical.lastSeen || ghost.lastSeen > canonical.lastSeen)) {
+      update.lastSeen = ghost.lastSeen;
+    }
+    // tags — union, preserving canonical's order.
+    const cTags = new Set(canonical.tags);
+    const merged = [...canonical.tags];
+    for (const t of ghost.tags) {
+      if (!cTags.has(t)) {
+        merged.push(t);
+        cTags.add(t);
+      }
+    }
+    if (merged.length > canonical.tags.length) update.tags = merged;
+
+    if (Object.keys(update).length > 0) {
+      // Re-clamp acquiredAt to whichever lastSeen we now hold (the Asset write
+      // extension in src/db.ts enforces this invariant on every write, but
+      // we're already inside the transaction so it runs against our update).
+      await tx.asset.update({ where: { id: canonical.id }, data: update });
+    }
+
+    // Cascade-delete the ghost. Everything still pointing at it goes:
+    //   - AssetSource rows (the canonical's are authoritative; next discovery
+    //     re-observes anything still live).
+    //   - All AssetXxxSample / hourly / daily rollup rows (empty for ghosts —
+    //     workstation + endpoint ghosts aren't monitored).
+    //   - AssetLldpNeighbor / AssetWirelessStation / AssetCustomWidgetSample.
+    //   - AssetInterfaceOverride (rare on a ghost; loss is logged via the
+    //     summary line above).
+    //   - Conflict rows pointing at the ghost via assetId (pending sibling
+    //     hostname-collision conflicts dissolve, which is the point).
+    //   - AssetDependencyParent rows on either side; the 60s
+    //     dependencyReconciler tick recomputes from authoritative topology.
+    await tx.asset.delete({ where: { id: ghost.id } });
+  });
+}
