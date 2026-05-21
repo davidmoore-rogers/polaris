@@ -629,6 +629,10 @@ function defaultPollingForSource(
     // off so the SNMP storage walk doesn't run wasted scrapes against every
     // FortiGate / FortiSwitch / FortiAP. Operators opt in by picking SNMP.
     if (stream === "storage") return "disabled";
+    // Response Time is the cheapest probe — ICMP is the universal default
+    // for routable devices. CPU/mem/interfaces/temperature still default to
+    // REST API because that's where the data actually is.
+    if (stream === "responseTime") return "icmp";
     return "rest_api";
   }
   if (source === "activedirectory" || source === "entraid" || source === "windowsserver") {

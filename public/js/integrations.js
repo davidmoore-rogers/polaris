@@ -44,29 +44,69 @@ function _polarisSourceDefaultPolling(source, stream) {
     // FortiOS appliances don't expose meaningful mountable storage; default
     // off so operators opt in by picking SNMP at any tier when they need it.
     if (stream === "storage") return "disabled";
+    // Response Time is the cheapest probe — ICMP is the universal default
+    // for routable devices. CPU/mem/interfaces/temperature still default to
+    // REST API because that's where the data actually is.
+    if (stream === "responseTime") return "icmp";
     return "rest_api";
   }
   if (stream === "responseTime") return "icmp";
   return null; // telemetry/interfaces/lldp/storage not delivered on AD/Entra/Win/Manual by default
 }
 
+// Source-label table for the "Inherit" option. ICMP is universal for response-
+// time but the rest of the streams need REST API / SNMP / WinRM / etc. — the
+// label tells operators which source kind they're inheriting from. FMG depends
+// on the Direct Polling toggle's current state because the same `fortimanager`
+// source kind talks via two different transports; the relabel helper updates
+// every Inherit option in place when the toggle flips.
+function _polarisSourceLabel(source, opts) {
+  opts = opts || {};
+  if (source === "fortigate") return "FortiGate Direct";
+  if (source === "fortimanager") {
+    return opts.fmgDirectMode ? "FortiGate Direct" : "FortiManager Proxy";
+  }
+  if (source === "activedirectory") return "Active Directory";
+  if (source === "entraid")         return "Entra ID";
+  if (source === "windowsserver")   return "Windows Server";
+  return "Manual";
+}
+
 // Builds a polling-method <select>. When `currentValue` is null/empty/missing
 // the "Inherit" option is selected and labeled with the resolver's expected
-// fallback ("Source default: REST API", "Source default: ICMP", or "Not
-// delivered" when the stream has no default for this source kind).
-function _polarisPollingDropdownHTML(id, source, stream, currentValue) {
+// fallback ("Inherit (Source FortiGate Direct: REST API)", "Inherit (Source
+// Manual: ICMP)", or "Inherit (Source <Label>: not delivered)" when the
+// stream has no default for this source kind).
+//
+// ICMP is filtered out of every stream except responseTime — telemetry /
+// interfaces / LLDP / storage all need a real protocol; an ICMP pick on those
+// would silently fall through at resolution time. The backend
+// validateStreamPollingMethod() applies the same filter on writes.
+function _polarisPollingDropdownHTML(id, source, stream, currentValue, opts) {
+  opts = opts || {};
   var allowed = _POLLING_COMPAT[source] || _POLLING_COMPAT.manual;
+  if (stream !== "responseTime") {
+    allowed = allowed.filter(function (m) { return m !== "icmp"; });
+  }
+  // showInherit defaults to true. Set false at the bottom of the resolver
+  // hierarchy (Manual Monitoring) where there's nothing to inherit from —
+  // the "Inherit" option there would be misleading.
+  var showInherit = opts.showInherit !== false;
   var defaultMethod = _polarisSourceDefaultPolling(source, stream);
+  var sourceLabel = _polarisSourceLabel(source, opts);
   var inheritLabel = defaultMethod
-    ? "Inherit (Source default: " + _POLLING_LABELS[defaultMethod] + ")"
-    : "Inherit (Not delivered for this source)";
+    ? "Inherit (Source " + sourceLabel + ": " + _POLLING_LABELS[defaultMethod] + ")"
+    : "Inherit (Source " + sourceLabel + ": not delivered)";
   var v = currentValue || "";
-  var opts = '<option value=""' + (v === "" ? " selected" : "") + '>' + escapeHtml(inheritLabel) + '</option>';
+  var opts2 = "";
+  if (showInherit) {
+    opts2 += '<option value=""' + (v === "" ? " selected" : "") + '>' + escapeHtml(inheritLabel) + '</option>';
+  }
   for (var i = 0; i < allowed.length; i++) {
     var m = allowed[i];
-    opts += '<option value="' + m + '"' + (v === m ? " selected" : "") + '>' + escapeHtml(_POLLING_LABELS[m]) + '</option>';
+    opts2 += '<option value="' + m + '"' + (v === m ? " selected" : "") + '>' + escapeHtml(_POLLING_LABELS[m]) + '</option>';
   }
-  return '<select id="' + id + '">' + opts + '</select>';
+  return '<select id="' + id + '" data-poll-source="' + escapeHtml(source) + '" data-poll-stream="' + escapeHtml(stream) + '">' + opts2 + '</select>';
 }
 
 function _polarisReadPollingDropdown(id) {
@@ -747,76 +787,360 @@ function integrationMonitorOverrideHTML(credentials, selectedSnmpId, selectedSsh
 // the same field set. `defaults` is the FortiGate (top-level) class so
 // the FortiSwitch / FortiAP subtabs render the same defaults the operator
 // would see if they hadn't customized anything yet.
-// Renders the 8 cadence + retention fields for the integration tier of the
-// monitor settings hierarchy (intervalSeconds, failureThreshold,
-// probeTimeoutMs, telemetry / systemInfo cadence + retention, sample
-// retention). Used inside the integration's Monitoring tab. The form's
-// values are read back via `_readIntegrationCadenceForm()` and saved as
-// `Integration.config.monitorSettings` through PUT
-// /api/v1/monitor-settings/integration/:id.
-function _integrationCadenceSectionHTML(s, integrationType, pollIntervalHours) {
-  s = s || {};
-  function num(name, label, value, defaultValue, min, max, hint, warn500) {
+// ─── Phase 1 monitoring redesign — class subtabs + per-stream subtabs ──────
+//
+// The new Monitoring tab is organised as:
+//   Class subtabs (FortiGate / FortiSwitch / FortiAP for FMG+FortiGate,
+//                  Workstations / Servers for AD+Entra+WinSrv)
+//     └── Stream subtabs (Response Time / CPU+Memory / Temperature /
+//                         Interfaces / LLDP / Storage — Storage absent on
+//                         FortiAP)
+//          └── Polling method + credential + interval + timeout
+//                                + failure threshold (Response Time only)
+//
+// In Phase 1 every class subtab reads + writes the SAME shared
+// `Integration.config.monitorSettings` JSON. The PRIMARY class subtab
+// (FortiGate for FMG/FortiGate, Workstations for AD/Entra/WinSrv) uses the
+// legacy `f-mon-tier-...` / `f-mon-...` DOM ids so the existing
+// `_readIntegrationCadenceForm()` save path keeps working unchanged. Other
+// class subtabs use namespaced ids (`f-mon-classecho-<klass>-...`) so the
+// inputs render with real values but don't collide on save. The banner inside
+// the secondary subtabs warns operators that those values currently mirror
+// the primary subtab.
+//
+// Phase 2 lands the per-class data model + migration + Assets-page narrowing
+// after the layout has been reviewed in the demo.
+
+// Per-integration-type class subtab metadata. `primary` names the class whose
+// subtab uses the canonical `f-mon-tier-` / `f-mon-` DOM ids — i.e. the one
+// whose stream values are actually saved in Phase 1.
+var _CLASS_SUBTAB_SPECS = {
+  fortimanager: {
+    primary: "fortigate",
+    classes: [
+      { key: "fortigate",   label: "FortiGate"    },
+      { key: "fortiswitch", label: "FortiSwitch"  },
+      { key: "fortiap",     label: "FortiAP"      },
+    ],
+  },
+  fortigate: {
+    primary: "fortigate",
+    classes: [
+      { key: "fortigate",   label: "FortiGate"    },
+      { key: "fortiswitch", label: "FortiSwitch"  },
+      { key: "fortiap",     label: "FortiAP"      },
+    ],
+  },
+  activedirectory: {
+    primary: "workstations",
+    classes: [
+      { key: "workstations", label: "Workstations" },
+      { key: "servers",      label: "Servers"      },
+    ],
+  },
+  entraid: {
+    primary: "workstations",
+    classes: [
+      { key: "workstations", label: "Workstations" },
+      { key: "servers",      label: "Servers"      },
+    ],
+  },
+  windowsserver: {
+    primary: "workstations",
+    classes: [
+      { key: "workstations", label: "Workstations" },
+      { key: "servers",      label: "Servers"      },
+    ],
+  },
+};
+
+// Streams rendered inside each class subtab. Each entry names:
+//   pollField   — legacy poll-method field on monitorSettings (driver of the
+//                 polling dropdown id `f-mon-tier-<pollField>`)
+//   mibStreamKey — key in _polarisReadMibFourStream's output (responseTime,
+//                  telemetry, temperature, interfaces, lldp); MIB select id
+//                  is `f-mon-tier-<mibStreamKey>Mib`
+//   intervalField / timeoutField — field name on monitorSettings; legacy id
+//                  is `f-mon-<intervalField>`, `f-mon-<timeoutField>`. NULL
+//                  on lldp + storage — they share systemInfo cadence with
+//                  interfaces and the cadence inputs render only on
+//                  interfaces. The save reader (_readIntegrationCadenceForm)
+//                  already reads systemInfoIntervalSeconds + Timeout once.
+// FortiAP omits Storage — APs don't expose mountable storage.
+// Phase 1 LLDP + Storage carry their own intervalField / timeoutField. The
+// backend resolver doesn't consume these yet (LLDP + Storage continue to
+// ride systemInfo cadence at runtime); Phase 2 wires the actual cadence
+// dispatch and queue carve-out. Persisted today so the operator's choice
+// survives the cutover.
+var _ALL_STREAMS = [
+  { key: "responseTime", label: "Response Time", pollField: "responseTimePolling", mibStreamKey: "responseTime", intervalField: "intervalSeconds",            timeoutField: "probeTimeoutMs",       hasFailure: true },
+  { key: "cpuMemory",    label: "CPU/Memory",    pollField: "cpuMemoryPolling",    mibStreamKey: "telemetry",    intervalField: "cpuMemoryIntervalSeconds",   timeoutField: "cpuMemoryTimeoutMs"   },
+  { key: "temperature",  label: "Temperature",   pollField: "temperaturePolling",  mibStreamKey: "temperature",  intervalField: "temperatureIntervalSeconds", timeoutField: "temperatureTimeoutMs" },
+  { key: "interfaces",   label: "Interfaces",    pollField: "interfacesPolling",   mibStreamKey: "interfaces",   intervalField: "systemInfoIntervalSeconds",  timeoutField: "systemInfoTimeoutMs", sharesCadenceWith: null },
+  { key: "lldp",         label: "LLDP",          pollField: "lldpPolling",         mibStreamKey: "lldp",         intervalField: "lldpIntervalSeconds",        timeoutField: "lldpTimeoutMs"        },
+  { key: "storage",      label: "Storage",       pollField: "storagePolling",      mibStreamKey: null,           intervalField: "storageIntervalSeconds",     timeoutField: "storageTimeoutMs",    noMib: true },
+];
+
+function _streamsForClass(klass) {
+  if (klass === "fortiap") return _ALL_STREAMS.filter(function (s) { return s.key !== "storage"; });
+  return _ALL_STREAMS;
+}
+
+// Renders the polling-method + credential + interval + timeout block for ONE
+// (class, stream) pair. `idPrefix` namespaces the DOM ids. For the PRIMARY
+// class subtab the prefix is empty-ish: polling dropdowns use the legacy
+// `f-mon-tier-<pollField>` ids and numeric inputs use `f-mon-<numField>`
+// ids so `_readIntegrationCadenceForm()` finds them unchanged. For
+// SECONDARY class subtabs (echo of the primary in Phase 1) the prefix
+// becomes `f-mon-classecho-<klass>-` and the same suffixes follow — those
+// ids exist so the inputs render with the same starting values but never
+// get read on save.
+function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, credentials, isPrimary, opts) {
+  settings = settings || {};
+  credentials = credentials || [];
+  opts = opts || {};
+  // opts.showInherit (default true) — pass false at the bottom of the
+  // resolver hierarchy (Manual Monitoring) so the polling-method dropdown
+  // omits "Inherit". opts.showMib (default true) — pass false on surfaces
+  // where the per-stream MIB picker isn't meaningful (also Manual Monitoring
+  // in this iteration).
+  var showInherit = opts.showInherit !== false;
+  var showMib     = opts.showMib     !== false;
+  var pollCurrent = settings[stream.pollField] || "";
+
+  // ID composition. The primary subtab uses the legacy naming so the existing
+  // _polarisReadPollingFourStream / _polarisReadMibFourStream /
+  // _readIntegrationCadenceForm readers find the values without changes.
+  var pollId    = isPrimary ? ("f-mon-tier-" + stream.pollField)         : (idPrefix + "tier-" + stream.pollField);
+  var mibId     = (stream.mibStreamKey && !stream.noMib)
+    ? (isPrimary ? ("f-mon-tier-" + stream.mibStreamKey + "Mib")          : (idPrefix + "tier-" + stream.mibStreamKey + "Mib"))
+    : null;
+  var mibWrapId = (stream.mibStreamKey && !stream.noMib)
+    ? (isPrimary ? ("f-mon-tier-" + stream.mibStreamKey + "-mib-wrap")    : (idPrefix + "tier-" + stream.mibStreamKey + "-mib-wrap"))
+    : null;
+
+  // Polling dropdown. Polling stream key fed into _polarisPollingDropdownHTML
+  // mirrors the legacy mapping (cpuMemory → telemetry) so the source-default
+  // label matches the resolver.
+  var pollStreamKeyForDefaults = stream.key === "cpuMemory" ? "telemetry" : stream.key;
+  var pollDropdown = _polarisPollingDropdownHTML(pollId, sourceKind, pollStreamKeyForDefaults, pollCurrent, {
+    fmgDirectMode: opts.fmgDirectMode === true,
+    showInherit:   showInherit,
+  });
+
+  // Credential picker. Visibility is reactive — we render the row always and
+  // toggle display based on whether the chosen polling method needs creds.
+  // The legacy single-credential pickers (`f-mon-credential` / `-ssh`) still
+  // live higher up the Monitoring tab; the per-stream rows here are visual
+  // hooks today and will become the persistence layer in Phase 2.
+  var credRows = "";
+  ["snmp", "ssh", "winrm"].forEach(function (credType) {
+    var label = credType === "winrm" ? "WinRM" : credType.toUpperCase();
+    var rows = credentials.filter(function (c) { return c.type === credType; });
+    var options = '<option value="">— Inherit / none —</option>' +
+      rows.map(function (c) {
+        return '<option value="' + escapeHtml(c.id) + '">' + escapeHtml(c.name) + '</option>';
+      }).join("");
+    credRows += '<div class="form-group" id="' + pollId + '-credrow-' + credType + '" style="display:none;margin-bottom:0.5rem">' +
+        '<label style="margin:0 0 0.25rem 0;font-size:0.85rem">' + escapeHtml(label) + ' credential</label>' +
+        '<select id="' + pollId + '-cred-' + credType + '">' + options + '</select>' +
+        (rows.length === 0
+          ? '<p class="hint" style="color:var(--color-warning);margin-top:0.25rem">No ' + escapeHtml(label) + ' credentials defined yet — add one under Server Settings &gt; Credentials.</p>'
+          : '<p class="hint" style="margin-top:0.25rem">Used when this stream\'s polling method resolves to ' + escapeHtml(label) + '. A per-asset credential takes priority.</p>'
+        ) +
+      '</div>';
+  });
+
+  // Per-stream cadence + timeout. Streams that share systemInfo cadence with
+  // Interfaces (LLDP, Storage) skip the inputs and render a shares-cadence
+  // hint instead — the underlying systemInfoIntervalSeconds / Timeout fields
+  // are edited from the Interfaces subtab.
+  function numInput(idSuffix, label, value, defaultValue, min, max, hint, warn500) {
+    var fullId = isPrimary ? ("f-mon-" + idSuffix) : (idPrefix + idSuffix);
     var v = (value != null) ? value : defaultValue;
     var warnMarkup = warn500
-      ? '<span id="f-mon-' + name + '-warn" style="display:none;font-size:0.75rem;color:var(--color-warning);margin-left:0.5rem">⚠ Below 500 ms — probes will likely false-fail under healthy network conditions.</span>'
+      ? '<span id="' + fullId + '-warn" style="display:none;font-size:0.75rem;color:var(--color-warning);margin-left:0.5rem">⚠ Below 500 ms — probes will likely false-fail under healthy network conditions.</span>'
       : '';
     return '<div class="form-group"><label>' + escapeHtml(label) + warnMarkup + '</label>' +
-      '<input type="number" id="f-mon-' + name + '" value="' + escapeHtml(String(v)) + '" min="' + min + '" max="' + max + '" style="width:140px">' +
+      '<input type="number" id="' + fullId + '" value="' + escapeHtml(String(v == null ? "" : v)) + '" min="' + min + '" max="' + max + '" style="width:140px">' +
       (hint ? '<p class="hint">' + hint + '</p>' : '') +
     '</div>';
   }
-  // Blank-allowed numeric input used by systemInfoIntervalSeconds. Empty
-  // means "follow the integration's discovery pollInterval", and the resolver
-  // derives `pollInterval × 3600` seconds at runtime. Helper text spells the
-  // current derived value out so operators see what they'd inherit.
-  function numBlankable(name, label, value, min, max, hint, blankLabel) {
-    var v = (value != null) ? String(value) : "";
-    return '<div class="form-group"><label>' + escapeHtml(label) + '</label>' +
-      '<input type="number" id="f-mon-' + name + '" value="' + escapeHtml(v) + '" min="' + min + '" max="' + max + '" style="width:140px" placeholder="' + escapeHtml(blankLabel || "") + '">' +
-      (hint ? '<p class="hint">' + hint + '</p>' : '') +
-    '</div>';
+
+  var cadenceHtml = "";
+  if (stream.sharesCadenceWith) {
+    cadenceHtml = '<p class="hint" style="margin:0.25rem 0 0.75rem 0;padding:0.5rem 0.65rem;background:var(--color-bg-tertiary);border-radius:var(--radius-sm);color:var(--color-text-secondary)">' +
+      "Cadence + timeout for this stream are shared with the <strong>" + escapeHtml(stream.sharesCadenceWith) + "</strong> subtab. " +
+      "An independent " + escapeHtml(stream.key) + " queue + interval ships in the next release." +
+    '</p>';
+  } else {
+    var intervalDefault, intervalMin, intervalMax, timeoutDefault;
+    if (stream.key === "responseTime") {
+      intervalDefault = 60; intervalMin = 5; intervalMax = 86400; timeoutDefault = 5000;
+    } else if (stream.key === "cpuMemory" || stream.key === "temperature") {
+      intervalDefault = 60; intervalMin = 15; intervalMax = 86400; timeoutDefault = 10000;
+    } else {
+      intervalDefault = 600; intervalMin = 60; intervalMax = 86400; timeoutDefault = 10000;
+    }
+    var intervalHint = "How often this stream collects from each monitored " + escapeHtml(klass) + ".";
+    var timeoutHint = "Per-request timeout.";
+    cadenceHtml = numInput(stream.intervalField, "Interval (seconds)", settings[stream.intervalField], intervalDefault, intervalMin, intervalMax, intervalHint, false) +
+      numInput(stream.timeoutField, "Timeout (ms)", settings[stream.timeoutField], timeoutDefault, 100, 120000, timeoutHint, stream.key === "responseTime");
   }
-  // Polling block: source-aware compatibility filtering. Integrations of
-  // type fortimanager / fortigate get rest_api/snmp/ssh/icmp; AD / Entra /
-  // WindowsServer get icmp/winrm/ssh; manual gets all five.
-  var sourceKind = integrationType || "manual";
-  if (!_POLLING_COMPAT[sourceKind]) sourceKind = "manual";
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Response-time polling</p>' +
-    num("intervalSeconds",   "Polling interval (seconds)",            s.intervalSeconds,   60,    5,   86400, "How often each monitored asset is probed for response time. Default 60 s.", false) +
-    num("failureThreshold",  "Failure threshold (consecutive misses)", s.failureThreshold, 3,     1,   100,   "Consecutive failed probes before an asset is marked Down — and consecutive successes needed to recover from Warning / Pending back to Up.", false) +
-    num("probeTimeoutMs",    "Probe timeout (ms)",                     s.probeTimeoutMs,   5000,  100, 60000, "Per-probe timeout for ICMP/SNMP/REST/WinRM/SSH. Default 5000 ms.", true) +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    _polarisPollingFourStreamHTML("f-mon-tier-", sourceKind, s, { showMibRows: true, mibValues: s }) +
-    '<p class="hint" style="margin:0 0 0.75rem 0">Per-stream polling method. "Inherit" falls through to the source default. When SNMP is selected, optionally pin a specific MIB (default: Automatic).</p>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">CPU + memory</p>' +
-    num("cpuMemoryIntervalSeconds", "CPU/memory interval (seconds)", s.cpuMemoryIntervalSeconds, 60,    15,   86400,  "How often each asset's CPU and memory snapshot is taken. Default 60 s.", false) +
-    num("cpuMemoryTimeoutMs",       "CPU/memory timeout (ms)",       s.cpuMemoryTimeoutMs,       10000, 1000, 120000, "Per-request timeout for the CPU/memory collector (FortiOS REST + SNMP). Default 10000 ms.", false) +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0.75rem 0">Temperature</p>' +
-    num("temperatureIntervalSeconds", "Temperature interval (seconds)", s.temperatureIntervalSeconds, 60,    15,   86400,  "How often each asset's temperature sensors are scraped. Default 60 s — set higher to ease load on small-branch FortiGates whose sensor endpoint is slow to respond.", false) +
-    num("temperatureTimeoutMs",       "Temperature timeout (ms)",       s.temperatureTimeoutMs,       10000, 1000, 120000, "Per-request timeout for the temperature collector. Default 10000 ms.", false) +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface, storage &amp; LLDP discovery</p>' +
-    (function () {
-      var derivedSec = (pollIntervalHours != null) ? pollIntervalHours * 3600 : null;
-      var derivedHint = (pollIntervalHours != null)
-        ? 'Leave blank to follow this integration\'s discovery interval (currently ' + escapeHtml(String(pollIntervalHours)) + 'h ≈ ' + escapeHtml(String(derivedSec)) + ' s). Set an explicit value to override.'
-        : 'Leave blank to follow this integration\'s discovery interval. Set an explicit value to override.';
-      var blankLabel = (derivedSec != null) ? ("discovery cycle (" + derivedSec + " s)") : "discovery cycle";
-      return numBlankable("systemInfoIntervalSeconds", "Discovery interval (seconds)", s.systemInfoIntervalSeconds, 60, 86400, derivedHint, blankLabel);
-    })() +
-    num("systemInfoTimeoutMs",      "Discovery timeout (ms)",       s.systemInfoTimeoutMs,       10000, 1000, 120000, "Per-request timeout for the interface / storage / LLDP collector. Default 10000 ms.", false) +
-    '<p class="hint" style="margin:1rem 0 0 0;font-size:0.78rem">Sample retention is a global setting. Edit it in <a href="/server-settings.html?tab=retention">Server Settings → Retention</a>.</p>';
+
+  // Failure threshold lives only on the Response Time subtab.
+  var failureHtml = "";
+  if (stream.hasFailure) {
+    failureHtml = numInput("failureThreshold", "Failure threshold (consecutive misses)", settings.failureThreshold, 3, 1, 100, "Consecutive failed probes before the asset is marked Down — and successes needed to recover back to Up.", false);
+  }
+
+  // Optional per-stream MIB picker (only shown when SNMP is the chosen
+  // polling method). The select id matches what _polarisReadMibFourStream
+  // already reads (`f-mon-tier-<streamKey>Mib`).
+  var mibHtml = "";
+  if (mibId && mibWrapId && showMib) {
+    var autoName = (_autoMibNamesForSource(sourceKind) || {})[pollStreamKeyForDefaults] || "";
+    var mibCurrent = settings[stream.mibStreamKey + "MibId"] || "";
+    mibHtml = '<div class="form-group" id="' + mibWrapId + '" style="display:none">' +
+        '<label>MIB</label>' +
+        '<select id="' + mibId + '" data-current-id="' + escapeHtml(mibCurrent) + '" data-auto-mib-name="' + escapeHtml(autoName) + '" data-mib-picker="1">' +
+          _mibOptionsHTML(mibCurrent, autoName) +
+        '</select>' +
+        '<p class="hint">Defaults to Automatic — Polaris picks the right MIB based on the asset\'s manufacturer/model. Pin one here only when a particular ' + escapeHtml(klass) + ' needs a vendor-specific module.</p>' +
+      '</div>';
+  }
+
+  return '<div class="form-group"><label>Polling method</label>' + pollDropdown +
+      '<p class="hint">Select the protocol Polaris uses for this stream. "Inherit" falls through to the source default.</p>' +
+    '</div>' +
+    credRows +
+    cadenceHtml +
+    failureHtml +
+    mibHtml;
+}
+
+// Renders the inside of one class subtab (e.g. FortiSwitch) — the optional
+// "direct polling" / "discovery defaults" header content first, then the
+// stream subtabs. The primary class subtab uses the legacy DOM ids so the
+// existing save reader keeps working; secondary subtabs use namespaced ids
+// for parallel render-only inputs and surface a banner explaining that
+// their values currently mirror the primary subtab.
+function _classSubtabBodyHTML(opts) {
+  var integrationType = opts.integrationType;
+  var klass           = opts.klass;
+  var isPrimary       = opts.isPrimary;
+  var primaryLabel    = opts.primaryLabel;
+  var settings        = opts.settings || {};
+  var credentials     = opts.credentials || [];
+  var headerHtml      = opts.headerHtml || "";
+
+  // Phase 1: every non-primary class subtab is an echo of the primary today
+  // (the save reader only consumes the primary subtab's namespaced ids). The
+  // banner that used to call this out has been removed at the user's request —
+  // operators know it's echo-only and don't need the inline reminder.
+  var banner = "";
+
+  // Secondary class subtabs get a fully-namespaced id prefix so their inputs
+  // don't collide with the primary subtab's legacy ids.
+  var echoPrefix = "f-mon-classecho-" + klass + "-";
+
+  // Nested tab strip key per class so two class subtabs in the same modal
+  // don't share active stream-tab state.
+  var streamTabsPrefix = isPrimary
+    ? "intg-mon-streams-primary"
+    : "intg-mon-streams-" + klass;
+
+  // fmgDirectMode is the live state of the f-useDirect toggle for fortimanager
+  // integrations (true when checked / useProxy=false); for fortigate integrations
+  // it's implicitly always direct. Drives the "Inherit (Source FortiGate Direct
+  // / FortiManager Proxy: …)" label rendered by _polarisPollingDropdownHTML.
+  var initialFmgDirectMode = integrationType === "fortimanager"
+    ? ((opts.fmgDefaults || {}).useProxy === false)
+    : (integrationType === "fortigate");
+  var streams = _streamsForClass(klass);
+  var streamTabs = streams.map(function (stream) {
+    return {
+      key: stream.key,
+      label: stream.label,
+      html: _classStreamSubtabHTML(echoPrefix, integrationType, klass, stream, settings, credentials, isPrimary, { fmgDirectMode: initialFmgDirectMode }),
+    };
+  });
+
+  // Stream subtabs are gated by the class's Direct Polling toggle on
+  // integrations that have one (FMG-FortiGate, FortiSwitch, FortiAP).
+  // `_wireMonitoringTabSubtabs` wires the toggles' change events to show/hide
+  // this wrapper at runtime. Classes without a toggle (standalone FortiGate's
+  // FortiGate subtab, AD / Entra / WinSrv) render the wrapper always-visible.
+  var streamsWrapId = "intg-mon-streams-wrap-" + (isPrimary ? "primary-" : "") + klass;
+  var directToggleId = _directPollingToggleIdFor(integrationType, klass);
+  var initialDirectOn = _directPollingInitialStateFor(integrationType, klass, opts);
+  var wrapperHidden = (directToggleId && !initialDirectOn) ? "display:none" : "";
+
+  return banner +
+    headerHtml +
+    '<div id="' + streamsWrapId + '" data-direct-toggle="' + escapeHtml(directToggleId || "") + '" style="' + wrapperHidden + '">' +
+      _intRenderTabbedBody(streamTabsPrefix, streamTabs) +
+    '</div>';
+}
+
+// Returns the DOM id of the Direct Polling checkbox that gates this class's
+// stream subtabs, or null when the class has no such toggle (standalone
+// FortiGate's FortiGate subtab, AD / Entra / WindowsServer). The class subtab
+// renderer reads this to decide whether to wrap stream subtabs in a hidden
+// container; `_wireMonitoringTabSubtabs` reads it to wire the toggle's
+// `change` event so flipping it reveals/hides the wrapper.
+function _directPollingToggleIdFor(integrationType, klass) {
+  if (klass === "fortigate"   && integrationType === "fortimanager") return "f-useDirect";
+  if (klass === "fortiswitch" && (integrationType === "fortimanager" || integrationType === "fortigate")) return "f-mon-fortiswitch-enabled";
+  if (klass === "fortiap"     && (integrationType === "fortimanager" || integrationType === "fortigate")) return "f-mon-fortiap-enabled";
+  return null;
+}
+
+// Returns the initial on/off state for the Direct Polling toggle that gates
+// this class's stream subtabs. Mirrors the same values the toggle's own
+// `checked` attribute is rendered with so the stream wrapper opens in the
+// matching state without a JS round-trip.
+function _directPollingInitialStateFor(integrationType, klass, opts) {
+  if (klass === "fortigate" && integrationType === "fortimanager") {
+    return (opts.fmgDefaults || {}).useProxy === false;
+  }
+  if (klass === "fortiswitch" && (integrationType === "fortimanager" || integrationType === "fortigate")) {
+    return (opts.fortiswitchMonitor || {}).enabled === true;
+  }
+  if (klass === "fortiap" && (integrationType === "fortimanager" || integrationType === "fortigate")) {
+    return (opts.fortiapMonitor || {}).enabled === true;
+  }
+  return true;
+}
+
+// "Add discovered <kind>s to Assets as Monitored" checkbox + hint. Rendered
+// inside a styled box matching the Auto-Monitor Interfaces card so the two
+// auto-monitoring controls share the same visual treatment under the
+// "Auto-monitoring" section header. The DOM id (`<prefix>addAsMonitored`)
+// is unchanged so the save-path reader keeps finding it. The trailing
+// section <hr> + the inline "Auto-monitoring" header that used to live
+// here moved out to the call site (`headerForClass`) where they now sit
+// above this card and the matching Auto-Monitor Interfaces card.
+function _classAddAsMonitoredHTML(idPrefix, kindLabel, currentAddAsMonitored) {
+  return '<div style="background:rgba(79,195,247,0.06);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
+        '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (currentAddAsMonitored ? "checked" : "") + ' style="width:auto">' +
+        '<label for="' + idPrefix + 'addAsMonitored" style="margin:0;font-weight:500">Add discovered ' + escapeHtml(kindLabel) + 's to Assets as Monitored</label>' +
+      '</div>' +
+      '<p class="hint" style="margin:0">When checked, newly-discovered ' + escapeHtml(kindLabel) + 's land in Assets with monitoring enabled. Without an SNMP credential below, the polling method falls back to <code>icmp</code>. Existing assets are unchanged — flip them individually from the asset modal.</p>' +
+    '</div>';
 }
 
 // Picker block for the FortiSwitch / FortiAP subtab — "enable direct polling"
-// checkbox + per-credential-type dropdowns (SNMP / SSH) + "Add as Monitored"
-// checkbox. id prefix collides if you instantiate twice on the same page; we
-// use distinct prefixes per class. The SNMP and SSH rows render hidden and
-// are revealed reactively by _syncCredentialPickerVisibility() once the
-// integration-tier polling dropdowns pick the matching method.
-function _classDirectPollHTML(idPrefix, kindLabel, credentials, currentEnabled, currentSnmpCredId, currentAddAsMonitored, currentSshCredId) {
+// checkbox + per-credential-type dropdowns (SNMP / SSH). The addAsMonitored
+// checkbox used to live here too but was hoisted into
+// `_classAddAsMonitoredHTML` so the FortiSwitch / FortiAP subtabs can render
+// addAsMonitored at the top of the body. id prefix collides if you
+// instantiate twice on the same page; we use distinct prefixes per class.
+// The SNMP and SSH rows render hidden and are revealed reactively by
+// _syncCredentialPickerVisibility() once the integration-tier polling
+// dropdowns pick the matching method.
+function _classDirectPollHTML(idPrefix, kindLabel, credentials, currentEnabled, currentSnmpCredId, currentSshCredId) {
   function credRow(type, label, selectId, selectedId) {
     var rows = (credentials || []).filter(function (c) { return c.type === type; });
     var options = '<option value="">— select credential —</option>' +
@@ -825,7 +1149,7 @@ function _classDirectPollHTML(idPrefix, kindLabel, credentials, currentEnabled, 
         return '<option value="' + escapeHtml(c.id) + '"' + sel + '>' + escapeHtml(c.name) + '</option>';
       }).join("");
     var emptyHint = rows.length === 0
-      ? '<p class="hint" style="color:var(--color-warning)">No ' + escapeHtml(label) + ' credentials defined yet — add one under Server Settings &gt; Credentials, or leave direct polling off and Polaris will fall back to ICMP when "Add as Monitored" is checked below.</p>'
+      ? '<p class="hint" style="color:var(--color-warning)">No ' + escapeHtml(label) + ' credentials defined yet — add one under Server Settings &gt; Credentials, or leave direct polling off and Polaris will fall back to ICMP when "Add as Monitored" is checked above.</p>'
       : '<p class="hint">Discovery stamps each newly-found ' + escapeHtml(kindLabel) + ' with this credential when ' + escapeHtml(label) + ' is the resolved polling method. Operator overrides on existing assets are preserved.</p>';
     return '<div class="form-group" id="' + selectId + '-row" style="margin-bottom:0.6rem;display:none">' +
         '<label>' + escapeHtml(label) + ' credential</label>' +
@@ -842,20 +1166,7 @@ function _classDirectPollHTML(idPrefix, kindLabel, credentials, currentEnabled, 
       '</div>' +
       credRow("snmp", "SNMP", idPrefix + "credentialId",    currentSnmpCredId) +
       credRow("ssh",  "SSH",  idPrefix + "sshCredentialId", currentSshCredId)  +
-    '</div>' +
-    // "Add as Monitored" checkbox — independent of direct polling. When on,
-    // each newly-discovered switch/AP is created with monitored=true; the
-    // polling-method resolver picks SNMP when an SNMP credential is wired
-    // up above (or via the integration tier / class override) and falls
-    // back to the source default (ICMP) otherwise. Existing assets are not
-    // touched — operator stays in charge of those.
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Auto-monitoring</p>' +
-    '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
-      '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (currentAddAsMonitored ? "checked" : "") + ' style="width:auto">' +
-      '<label for="' + idPrefix + 'addAsMonitored" style="margin:0;font-weight:500">Add discovered ' + escapeHtml(kindLabel) + 's to Assets as Monitored</label>' +
-    '</div>' +
-    '<p class="hint" style="margin-bottom:1rem">When checked, newly-discovered ' + escapeHtml(kindLabel) + 's land in Assets with monitoring enabled. Without an SNMP credential above, the polling method falls back to <code>icmp</code>. Existing assets are unchanged — flip them individually from the asset modal.</p>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
+    '</div>';
 }
 
 // ─── Auto-Monitor Interfaces card ──────────────────────────────────────────
@@ -1441,137 +1752,369 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
   schedulePreview();
 }
 
-// FortiGate subtab variant — "Add as Monitored" + the SNMP-sysLocation
-// read/write-back toggles. FortiGates always get the integration source
-// link stamped at discovery, which drives the polling-method resolver to
-// REST API by default, so no per-class credential picker is needed here.
-function _fortigateAddMonitoredHTML(idPrefix, currentAddAsMonitored, currentPullSnmpLocation, currentPushGeocodedCoords) {
+// FortiGate subtab variant — "Add as Monitored" only, wrapped in a styled
+// box matching the Auto-Monitor Interfaces card. The SNMP-sysLocation
+// pull/push toggles moved out to the top-level Geographic Location tab on
+// the integration's Edit modal (see geographicLocationFormHTML). FortiGates
+// always get the integration source link stamped at discovery, which drives
+// the polling-method resolver to REST API by default, so no per-class
+// credential picker is needed here.
+function _fortigateAddMonitoredHTML(idPrefix, currentAddAsMonitored) {
+  return '<div style="background:rgba(79,195,247,0.06);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
+        '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (currentAddAsMonitored ? "checked" : "") + ' style="width:auto">' +
+        '<label for="' + idPrefix + 'addAsMonitored" style="margin:0;font-weight:500">Add discovered FortiGates to Assets as Monitored</label>' +
+      '</div>' +
+      '<p class="hint" style="margin:0">When checked, newly-discovered FortiGates land in Assets with monitoring enabled (the integration\'s API token already provides the probe path). Existing FortiGates are unchanged — flip them individually from the asset modal.</p>' +
+    '</div>';
+}
+
+// Body of the new top-level "Geographic Location" tab on FMG and standalone
+// FortiGate integration Edit/Create modals. Carries the pull-from-SNMP and
+// push-geocoded-coords toggles previously surfaced under Monitoring →
+// FortiGate. The DOM ids stay `f-mon-fortigate-pullSnmpLocation` and
+// `f-mon-fortigate-pushGeocodedCoords` so `_readFortigateMonitorBlock()`
+// finds them unchanged at save time. The pushGeocodedCoords box reactively
+// disables when pullSnmpLocation is off — same onchange hook used by the
+// prior in-Monitoring rendering.
+function geographicLocationFormHTML(currentPullSnmpLocation, currentPushGeocodedCoords) {
+  var idPrefix = "f-mon-fortigate-";
   var pull = currentPullSnmpLocation === true;
   var push = currentPushGeocodedCoords === true;
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Auto-monitoring</p>' +
-    '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
-      '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (currentAddAsMonitored ? "checked" : "") + ' style="width:auto">' +
-      '<label for="' + idPrefix + 'addAsMonitored" style="margin:0;font-weight:500">Add discovered FortiGates to Assets as Monitored</label>' +
-    '</div>' +
-    '<p class="hint" style="margin-bottom:1rem">When checked, newly-discovered FortiGates land in Assets with monitoring enabled (the integration\'s API token already provides the probe path). Existing FortiGates are unchanged — flip them individually from the asset modal.</p>' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Geographic location (SNMP)</p>' +
+  return '<p style="font-size:0.9rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 1rem 0">' +
+      'Polaris reads each FortiGate\'s SNMP <code>sysLocation</code> string via REST API ' +
+      '(<code>/api/v2/cmdb/system.snmp/sysinfo</code> — no separate SNMP credential needed), ' +
+      'geocodes the value via OpenStreetMap Nominatim, and (optionally) writes the resulting coordinates ' +
+      'back to the FortiGate so the device shows up correctly on the Polaris Device Map. ' +
+      'When the SNMP location is blank or doesn\'t geocode, Polaris falls back to FortiManager metavars / CMDB coords.' +
+    '</p>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
       '<input type="checkbox" id="' + idPrefix + 'pullSnmpLocation" ' + (pull ? "checked" : "") +
       ' onchange="(function(cb){var p=document.getElementById(\'' + idPrefix + 'pushGeocodedCoords\');if(p){p.disabled=!cb.checked;if(!cb.checked)p.checked=false;var lbl=p.nextElementSibling;if(lbl)lbl.style.opacity=cb.checked?\'1\':\'0.5\';}})(this)"' +
       ' style="width:auto">' +
       '<label for="' + idPrefix + 'pullSnmpLocation" style="margin:0;font-weight:500">Pull SNMP sysLocation from each FortiGate</label>' +
     '</div>' +
-    '<p class="hint" style="margin-bottom:0.75rem">Reads `sysLocation` from each FortiGate via the REST API (`/api/v2/cmdb/system.snmp/sysinfo` — no separate SNMP credential needed). Geocodes the value via OpenStreetMap Nominatim and uses the result for the asset\'s coordinates on the Device Map. Falls back to FMG metavars / CMDB coords if SNMP location is blank or doesn\'t geocode.</p>' +
+    '<p class="hint" style="margin-bottom:1rem">Each discovery cycle, Polaris fetches <code>sysLocation</code> for every FortiGate via the FortiOS REST API and geocodes it through Nominatim. The resolved coordinates become the asset\'s position on the Device Map.</p>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
       '<input type="checkbox" id="' + idPrefix + 'pushGeocodedCoords" ' + (push ? "checked" : "") + (pull ? "" : " disabled") + ' style="width:auto">' +
       '<label for="' + idPrefix + 'pushGeocodedCoords" style="margin:0;font-weight:500' + (pull ? "" : ";opacity:0.5") + '">Write geocoded coordinates back to the FortiGate</label>' +
     '</div>' +
-    '<p class="hint" style="margin-bottom:1rem">When the geocoded coords differ from the FortiGate\'s current GUI values, update them on the device — writes to both FortiManager metavars (Latitude / Longitude) and the FortiGate\'s CMDB `gui-device-latitude` / `gui-device-longitude`. Standalone FortiGate integrations write only the CMDB values. In FortiManager mode the change lands in FMG\'s CMDB but won\'t reach the live FortiGate until an operator runs Install Device Configuration in FMG.</p>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
+    '<p class="hint" style="margin-bottom:0">When the geocoded coords differ from the FortiGate\'s current GUI values, update them on the device — writes to both FortiManager metavars (Latitude / Longitude) and the FortiGate\'s CMDB <code>gui-device-latitude</code> / <code>gui-device-longitude</code>. Standalone FortiGate integrations write only the CMDB values. In FortiManager mode the change lands in FMG\'s CMDB but won\'t reach the live FortiGate until an operator runs Install Device Configuration in FMG.</p>';
 }
 
-// Renders the Monitoring tab as 3 sub-tabs: FortiGates, FortiSwitches,
-// FortiAPs. The FortiGates subtab keeps the existing FortiGate-specific
-// content (per-integration SNMP probe override + global FortiGate timers).
-// FortiSwitches / FortiAPs add a "direct polling" block (enable + SNMP
-// credential picker) that drives discovery-time auto-stamping, plus their
-// own per-class timer fields (default = the FortiGate values).
+// Renders the integration's Monitoring tab as a set of CLASS subtabs. Each
+// class subtab carries:
+//   1. Class-level header content (FortiGate: useDirect-toggle + discovery
+//      defaults; FortiSwitch / FortiAP: direct-polling toggle + discovery
+//      defaults; AD / Entra / WinSrv: no class header — they always discover)
+//   2. Stream subtabs (Response Time / CPU+Memory / Temperature / Interfaces
+//      / LLDP / Storage). FortiAP omits Storage.
 //
-// The classDefaults below are pulled from the top-level monitor settings
-// because the FortiSwitch / FortiAP groups inherit from them on a fresh
-// install (server-side resolver picks the top-level when a class field is
-// unset). Showing the inherited number as the placeholder lets the operator
-// see what's currently in effect even if they haven't customized this class.
-// Renders the integration's Monitoring tab. Two stacked sections:
+// Class subtab set per integration type (see `_CLASS_SUBTAB_SPECS`):
+//   fortimanager + fortigate → FortiGate / FortiSwitch / FortiAP
+//   activedirectory + entraid + windowsserver → Workstations / Servers
 //
-//   1. Cadence & Retention — the integration tier of the monitor settings
-//      hierarchy (8 fields). Saved via PUT /monitor-settings/integration/:id
-//      when the modal's Save Changes button fires.
-//   2. Discovery Defaults — for FMG/FortiGate integrations only; renders
-//      the 3-subtab layout (FortiGates / FortiSwitches / FortiAPs) with each
-//      class's discovery-time defaults: addAsMonitored, snmpCredentialId,
-//      sshCredentialId, autoMonitorInterfaces. Cadence inputs and class
-//      overrides live elsewhere — the Cadence section above (cadence) and
-//      the Assets-page Monitoring Settings modal (class overrides).
+// Phase 1 behaviour: every class subtab reads + writes the SAME flat
+// `Integration.config.monitorSettings` JSON. The PRIMARY class subtab uses
+// the legacy `f-mon-tier-...` / `f-mon-...` ids so `_readIntegrationCadenceForm`
+// finds the values; secondary subtabs render a parallel, namespaced echo
+// that doesn't get read on save. A banner inside each secondary subtab
+// makes that explicit.
 //
 // opts: { integrationId, integrationType, integrationName, snmpCredentials,
 //         monitorCredentialId, sshCredentialId, fortigateMonitor,
-//         fortiswitchMonitor, fortiapMonitor }
+//         fortiswitchMonitor, fortiapMonitor, fmgDefaults?, pollInterval }
+//   fmgDefaults is the FMG/FortiGate connection-form `defaults` blob — only
+//   consulted for the relocated useDirect / discoveryParallelism /
+//   fortigateApiUser / fortigateApiToken / fortigateVerifySsl fields when
+//   `integrationType` is fortimanager.
 function monitorSettingsFormHTML(s, opts) {
   s = s || {};
   opts = opts || {};
   var integrationType = opts.integrationType || "";
-  var isFmgFgt = integrationType === "fortimanager" || integrationType === "fortigate";
-  var hasId    = !!opts.integrationId;
-  var pollIntervalHours = (typeof opts.pollInterval === "number" && opts.pollInterval > 0) ? opts.pollInterval : null;
-
-  // ─── Section 1: Cadence & Retention ───────────────────────────────────────
-  var cadenceSection =
-    '<section style="margin-bottom:1.5rem">' +
-      '<h4 style="margin:0 0 0.25rem 0">Cadence & Retention</h4>' +
-      '<p class="hint" style="margin:0 0 1rem 0;color:var(--color-text-tertiary)">' +
-        'Default cadences and retention windows applied to every asset discovered by this integration. ' +
-        'A class override (Assets page → Monitoring Settings) or a per-asset override on the asset itself takes priority.' +
-      '</p>' +
-      _integrationCadenceSectionHTML(s, integrationType, pollIntervalHours) +
-    '</section>';
-
-  // ─── Section 2: Discovery Defaults (FMG/FortiGate only) ───────────────────
-  var discoverySection = "";
-  if (isFmgFgt) {
-    var fwSwCfg = opts.fortiswitchMonitor || { enabled: false, snmpCredentialId: null, sshCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
-    var fwApCfg = opts.fortiapMonitor     || { enabled: false, snmpCredentialId: null, sshCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
-    var fwFgCfg = opts.fortigateMonitor   || { addAsMonitored: false, autoMonitorInterfaces: null, pullSnmpLocation: false, pushGeocodedCoords: false };
-
-    // Stash auto-monitor selections for the lazy-loaded checklists.
-    if (typeof window !== "undefined") {
-      // Multi-block reads from .byNames.names; legacy single-mode shape (in
-      // case the integration hasn't been migrated yet) reads from .names.
-      function _amonSeedNames(sel) {
-        if (!sel) return [];
-        if (sel.byNames && Array.isArray(sel.byNames.names)) return sel.byNames.names.slice();
-        if (sel.mode === "names" && Array.isArray(sel.names)) return sel.names.slice();
-        return [];
-      }
-      window["__autoMon_seed_f-mon-fortigate-amon-"]   = _amonSeedNames(fwFgCfg.autoMonitorInterfaces);
-      window["__autoMon_seed_f-mon-fortiswitch-amon-"] = _amonSeedNames(fwSwCfg.autoMonitorInterfaces);
-      window["__autoMon_seed_f-mon-fortiap-amon-"]     = _amonSeedNames(fwApCfg.autoMonitorInterfaces);
-    }
-
-    var fortigatePanel =
-      _fortigateAddMonitoredHTML(
-        "f-mon-fortigate-",
-        fwFgCfg.addAsMonitored === true,
-        fwFgCfg.pullSnmpLocation === true,
-        fwFgCfg.pushGeocodedCoords === true,
-      ) +
-      integrationMonitorOverrideHTML(opts.snmpCredentials, opts.monitorCredentialId, opts.sshCredentialId || null) +
-      _autoMonitorInterfacesHTML("f-mon-fortigate-amon-", "FortiGate", fwFgCfg.autoMonitorInterfaces || null, "names", hasId);
-
-    var switchPanel =
-      _classDirectPollHTML("f-mon-fortiswitch-", "FortiSwitch", opts.snmpCredentials, fwSwCfg.enabled === true, fwSwCfg.snmpCredentialId || null, fwSwCfg.addAsMonitored === true, fwSwCfg.sshCredentialId || null) +
-      _autoMonitorInterfacesHTML("f-mon-fortiswitch-amon-", "FortiSwitch", fwSwCfg.autoMonitorInterfaces || null, "wildcard", hasId);
-
-    var apPanel =
-      _classDirectPollHTML("f-mon-fortiap-", "FortiAP", opts.snmpCredentials, fwApCfg.enabled === true, fwApCfg.snmpCredentialId || null, fwApCfg.addAsMonitored === true, fwApCfg.sshCredentialId || null) +
-      _autoMonitorInterfacesHTML("f-mon-fortiap-amon-", "FortiAP", fwApCfg.autoMonitorInterfaces || null, "type", hasId);
-
-    discoverySection =
-      '<section style="margin-bottom:1.5rem">' +
-        '<h4 style="margin:0 0 0.25rem 0">Discovery Defaults</h4>' +
-        '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">' +
-          'Stamped on assets when this integration discovers them. Operators can change the per-asset values later from each asset\'s Monitoring tab.' +
-        '</p>' +
-        _intRenderTabbedBody("intg-mon", [
-          { key: "fortigates",    label: "FortiGates",    html: fortigatePanel },
-          { key: "fortiswitches", label: "FortiSwitches", html: switchPanel },
-          { key: "fortiaps",      label: "FortiAPs",      html: apPanel },
-        ]) +
-      '</section>';
+  var spec = _CLASS_SUBTAB_SPECS[integrationType];
+  if (!spec) {
+    // Fallback: no per-class layout known for this type — render a single
+    // primary class subtab carrying every stream, no header content. Keeps
+    // the modal functional for future integration types that haven't been
+    // added to the spec yet.
+    spec = { primary: "generic", classes: [{ key: "generic", label: "Monitoring" }] };
   }
 
-  return cadenceSection +
-    (discoverySection ? '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' + discoverySection : '');
+  var isFmgFgt = integrationType === "fortimanager" || integrationType === "fortigate";
+  var hasId    = !!opts.integrationId;
+  var credentials = opts.snmpCredentials || [];
+
+  // Per-class header content (auto-monitor, direct-polling toggles, etc.).
+  // Built lazily per class inside the loop below.
+  var fwFgCfg = opts.fortigateMonitor   || { addAsMonitored: false, autoMonitorInterfaces: null, pullSnmpLocation: false, pushGeocodedCoords: false };
+  var fwSwCfg = opts.fortiswitchMonitor || { enabled: false, snmpCredentialId: null, sshCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
+  var fwApCfg = opts.fortiapMonitor     || { enabled: false, snmpCredentialId: null, sshCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
+
+  // Stash auto-monitor name seeds for the lazy-loaded checklists.
+  if (typeof window !== "undefined" && isFmgFgt) {
+    function _amonSeedNames(sel) {
+      if (!sel) return [];
+      if (sel.byNames && Array.isArray(sel.byNames.names)) return sel.byNames.names.slice();
+      if (sel.mode === "names" && Array.isArray(sel.names)) return sel.names.slice();
+      return [];
+    }
+    window["__autoMon_seed_f-mon-fortigate-amon-"]   = _amonSeedNames(fwFgCfg.autoMonitorInterfaces);
+    window["__autoMon_seed_f-mon-fortiswitch-amon-"] = _amonSeedNames(fwSwCfg.autoMonitorInterfaces);
+    window["__autoMon_seed_f-mon-fortiap-amon-"]     = _amonSeedNames(fwApCfg.autoMonitorInterfaces);
+  }
+
+  // Class subtab header content (Discovery defaults at top, then optional
+  // Direct Polling toggle whose ON state reveals the per-class direct-polling
+  // credentials AND the per-stream subtabs below). Returns "" for AD / Entra /
+  // WindowsServer + the generic fallback — those have no per-class discovery-
+  // time knobs to surface.
+  //
+  // For FortiGate on FMG integrations, the SNMP/SSH credential pickers from
+  // `integrationMonitorOverrideHTML` are rendered hidden (display:none) at the
+  // bottom of the section so the save-path reader (`_polarisReadCredentials`
+  // / form serializer) still finds the `f-mon-credential` /
+  // `f-mon-credential-ssh` select elements. Per-stream credential pickers
+  // inside each stream subtab are the operator-facing surface. We pre-mirror
+  // the SNMP value from the Response Time stream's snmp credential picker on
+  // form change so a save still serializes the operator's intent.
+  // Per-class header content. Each FMG/FortiGate class subtab gets an
+  // "Auto-monitoring" section header followed by two side-by-side concept
+  // cards (addAsMonitored, then Auto-Monitor Interfaces), then any class-
+  // specific tail (Direct Polling toggle for FortiSwitch / FortiAP; FMG's
+  // Direct Polling block for the FortiGate subtab on FMG integrations).
+  // The "Discovery defaults" heading + description that used to lead the
+  // section have been dropped — the "Auto-monitoring" header replaces them
+  // positionally, and the help text inside each card is the only descriptor
+  // operators need.
+  function autoMonitoringHeader() {
+    return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0 0 0.75rem 0">Auto-monitoring</p>';
+  }
+  function headerForClass(klass) {
+    if (klass === "fortigate" && isFmgFgt) {
+      // Auto-Monitor Interfaces is gated on addAsMonitored — auto-monitor
+      // pins interfaces on newly-discovered assets to be polled on the fast
+      // cadence, which only makes sense when those assets are being added
+      // as monitored. _wireMonitoringTabSubtabs wires a change listener on
+      // the addAsMonitored checkbox to toggle this wrapper's display.
+      var fgAutoMonWrapHidden = (fwFgCfg.addAsMonitored === true) ? "" : "display:none";
+      var autoMonitoringSection =
+        '<section style="margin-bottom:1.25rem">' +
+          autoMonitoringHeader() +
+          _fortigateAddMonitoredHTML(
+            "f-mon-fortigate-",
+            fwFgCfg.addAsMonitored === true,
+          ) +
+          '<div id="f-mon-fortigate-automon-wrap" style="' + fgAutoMonWrapHidden + '">' +
+            _autoMonitorInterfacesHTML("f-mon-fortigate-amon-", "FortiGate", fwFgCfg.autoMonitorInterfaces || null, "names", hasId) +
+          '</div>' +
+        '</section>';
+
+      // Save-path continuity: keep the legacy SNMP/SSH credential pickers in
+      // the DOM but invisible. `_syncCredentialPickerVisibility` normally
+      // shows/hides these based on per-stream polling-method selections; we
+      // need them to stay hidden no matter what under FortiGate now, so we
+      // wrap them in a display:none container that nothing flips back on.
+      var hiddenLegacyCreds =
+        '<div id="f-mon-fortigate-legacy-creds" style="display:none" aria-hidden="true">' +
+          integrationMonitorOverrideHTML(credentials, opts.monitorCredentialId, opts.sshCredentialId || null) +
+        '</div>';
+
+      // FMG-only: Direct Polling toggle + revealable inner block (REST
+      // credentials). Standalone FortiGate is always direct so this block
+      // is omitted entirely there.
+      var directBlock = (integrationType === "fortimanager")
+        ? _fmgDirectModeBlockHTML(opts.fmgDefaults || {})
+        : "";
+
+      return autoMonitoringSection + directBlock + hiddenLegacyCreds;
+    }
+    if (klass === "fortiswitch" && isFmgFgt) {
+      // Order: Auto-monitoring header → addAsMonitored card → Auto-Monitor
+      // Interfaces card (gated on addAsMonitored) → Direct Polling toggle +
+      // per-class credentials. Stream subtabs (rendered by
+      // _classSubtabBodyHTML) sit below the Direct Polling toggle and are
+      // gated by it.
+      var swAutoMonWrapHidden = (fwSwCfg.addAsMonitored === true) ? "" : "display:none";
+      return '<section style="margin-bottom:1.25rem">' +
+          autoMonitoringHeader() +
+          _classAddAsMonitoredHTML("f-mon-fortiswitch-", "FortiSwitch", fwSwCfg.addAsMonitored === true) +
+          '<div id="f-mon-fortiswitch-automon-wrap" style="' + swAutoMonWrapHidden + '">' +
+            _autoMonitorInterfacesHTML("f-mon-fortiswitch-amon-", "FortiSwitch", fwSwCfg.autoMonitorInterfaces || null, "wildcard", hasId) +
+          '</div>' +
+          _classDirectPollHTML("f-mon-fortiswitch-", "FortiSwitch", credentials, fwSwCfg.enabled === true, fwSwCfg.snmpCredentialId || null, fwSwCfg.sshCredentialId || null) +
+        '</section>';
+    }
+    if (klass === "fortiap" && isFmgFgt) {
+      var apAutoMonWrapHidden = (fwApCfg.addAsMonitored === true) ? "" : "display:none";
+      return '<section style="margin-bottom:1.25rem">' +
+          autoMonitoringHeader() +
+          _classAddAsMonitoredHTML("f-mon-fortiap-", "FortiAP", fwApCfg.addAsMonitored === true) +
+          '<div id="f-mon-fortiap-automon-wrap" style="' + apAutoMonWrapHidden + '">' +
+            _autoMonitorInterfacesHTML("f-mon-fortiap-amon-", "FortiAP", fwApCfg.autoMonitorInterfaces || null, "type", hasId) +
+          '</div>' +
+          _classDirectPollHTML("f-mon-fortiap-", "FortiAP", credentials, fwApCfg.enabled === true, fwApCfg.snmpCredentialId || null, fwApCfg.sshCredentialId || null) +
+        '</section>';
+    }
+    return "";
+  }
+
+  // Build the class-level tab list.
+  var primaryLabel = (spec.classes.find(function (c) { return c.key === spec.primary; }) || spec.classes[0]).label;
+  var classTabs = spec.classes.map(function (c) {
+    return {
+      key: c.key,
+      label: c.label,
+      html: _classSubtabBodyHTML({
+        integrationType: integrationType,
+        klass:           c.key,
+        isPrimary:       c.key === spec.primary,
+        primaryLabel:    primaryLabel,
+        settings:        s,
+        credentials:     credentials,
+        headerHtml:      headerForClass(c.key),
+        fmgDefaults:     opts.fmgDefaults || {},
+        fortiswitchMonitor: opts.fortiswitchMonitor || {},
+        fortiapMonitor:     opts.fortiapMonitor || {},
+      }),
+    };
+  });
+
+  return '<section>' +
+      '<p class="hint" style="margin:0 0 0.85rem 0;color:var(--color-text-tertiary)">' +
+        "Per-class polling, cadences, and credentials for assets discovered by this integration. " +
+        "A class override (Assets page → Monitoring Settings) or a per-asset override on the asset itself takes priority." +
+      '</p>' +
+      _intRenderTabbedBody("intg-mon-class", classTabs) +
+    '</section>';
+}
+
+// Direct-polling toggle + REST API credentials for FMG-managed FortiGates.
+// Rendered inside the FortiGate class subtab of the Monitoring tab. Mirrors
+// the FortiSwitch/FortiAP "Direct Polling" pattern visually (compact toggle
+// + revealable inner block) — the legacy DOM ids (`f-useDirect`,
+// `f-direct-mode-block`, `f-discoveryParallelism`, `f-fortigateApiUser`,
+// `f-fortigateApiToken`, `f-fortigateVerifySsl`) all stay so
+// `getFormConfig()` and `_fmgToggleDirectMode()` keep reading them unchanged.
+// UI semantic: checked = direct (useProxy=false); unchecked = proxy.
+function _fmgDirectModeBlockHTML(d) {
+  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Direct polling</p>' +
+    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<input type="checkbox" id="f-useDirect" ' + (d.useProxy === false ? "checked" : "") + ' style="width:auto" onchange="_fmgToggleDirectMode(this.checked)">' +
+        '<label for="f-useDirect" style="margin:0;font-weight:500">Direct Polling</label>' +
+      '</div>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.6rem 0">Bypass FortiManager proxy to directly poll discovered FortiGates. Some information is still gathered through FortiManager.</p>' +
+      '<div id="f-direct-mode-block" style="' + (d.useProxy === false ? "" : "display:none;") + 'border-top:1px solid rgba(79,195,247,0.2);padding-top:0.75rem;margin-top:0.25rem">' +
+        '<div class="form-group"><label>Parallel FortiGate Queries</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-discoveryParallelism" value="' + (d.useProxy === false ? (d.discoveryParallelism || 5) : 1) + '" min="1" max="20" style="width:80px"><span id="f-parallelism-note" style="color:var(--color-text-tertiary);font-size:0.85rem">gates at once</span></div><p class="hint">Up to 20 FortiGates concurrently. Recommended when monitoring more than 20 FortiGates — proxy mode polls them one at a time.</p></div>' +
+        '<div class="form-group"><label>FortiGate API User</label><input type="text" id="f-fortigateApiUser" value="' + escapeHtml(d.fortigateApiUser || "") + '" placeholder="e.g. polaris-ro"><p class="hint">REST API admin username configured on each managed FortiGate</p></div>' +
+        '<div class="form-group"><label>FortiGate API Token</label><input type="password" id="f-fortigateApiToken" value="' + (d.fortigateApiTokenPlaceholder ? "" : escapeHtml(d.fortigateApiToken || "")) + '" placeholder="' + (d.fortigateApiTokenPlaceholder || "Bearer token") + '"><p class="hint">Bearer token for the above admin. Must be the same across all managed FortiGates.</p></div>' +
+        '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0">' +
+          '<input type="checkbox" id="f-fortigateVerifySsl" ' + (d.fortigateVerifySsl ? "checked" : "") + ' style="width:auto">' +
+          '<label for="f-fortigateVerifySsl" style="margin:0">Verify SSL certificate on FortiGates</label>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+}
+
+// Walk every polling-method <select> rendered by _polarisPollingDropdownHTML
+// (identified by data-poll-source / data-poll-stream attributes) inside the
+// given container and rewrite the first option's text — the "Inherit (…)"
+// label — so it reflects the current Direct Polling state. Called from the
+// FMG `f-useDirect` toggle's change handler so flipping the toggle live
+// updates every per-stream dropdown's label without re-rendering and losing
+// the operator's current selections.
+function _relabelInheritOptions(container, fmgDirectMode) {
+  if (!container) container = document;
+  var selects = container.querySelectorAll("select[data-poll-source][data-poll-stream]");
+  for (var i = 0; i < selects.length; i++) {
+    var sel = selects[i];
+    var source = sel.getAttribute("data-poll-source");
+    var stream = sel.getAttribute("data-poll-stream");
+    if (!sel.options || sel.options.length === 0) continue;
+    var firstOpt = sel.options[0];
+    if (firstOpt.value !== "") continue; // safety: only touch the Inherit row
+    var defaultMethod = _polarisSourceDefaultPolling(source, stream);
+    var sourceLabel = _polarisSourceLabel(source, { fmgDirectMode: fmgDirectMode === true });
+    firstOpt.textContent = defaultMethod
+      ? "Inherit (Source " + sourceLabel + ": " + _POLLING_LABELS[defaultMethod] + ")"
+      : "Inherit (Source " + sourceLabel + ": not delivered)";
+  }
+}
+
+// Wires every nested tab strip rendered inside the Monitoring tab: one
+// class-level strip (intg-mon-class) plus one stream-level strip per class
+// subtab (intg-mon-streams-primary + intg-mon-streams-<klass> for each
+// secondary class). Idempotent — safe to call whenever the modal mounts.
+function _wireMonitoringTabSubtabs(integrationType) {
+  var spec = _CLASS_SUBTAB_SPECS[integrationType];
+  if (!spec) return;
+  _intWireModalTabs("intg-mon-class");
+  spec.classes.forEach(function (c) {
+    var prefix = (c.key === spec.primary)
+      ? "intg-mon-streams-primary"
+      : "intg-mon-streams-" + c.key;
+    _intWireModalTabs(prefix);
+
+    // Wire the Direct Polling toggle (if any) for this class so flipping it
+    // reveals or hides the per-stream subtab wrapper without losing the
+    // values inside. Classes without a toggle (standalone FortiGate's
+    // FortiGate subtab, AD / Entra / WinSrv) render the wrapper always-on
+    // and don't enter this branch.
+    var toggleId = _directPollingToggleIdFor(integrationType, c.key);
+    if (toggleId) {
+      var streamsWrapId = "intg-mon-streams-wrap-" + (c.key === spec.primary ? "primary-" : "") + c.key;
+      var toggleEl = document.getElementById(toggleId);
+      var wrapEl   = document.getElementById(streamsWrapId);
+      if (toggleEl && wrapEl) {
+        // Closure captures the per-class toggle + wrap; outer scope captures
+        // integrationType so the FMG-only "FortiGate Direct" vs "FortiManager
+        // Proxy" relabel only fires for fortimanager integrations.
+        (function (tEl, wEl, cls) {
+          tEl.addEventListener("change", function () {
+            wEl.style.display = tEl.checked ? "" : "none";
+            // FMG's f-useDirect toggle changes the source label across every
+            // stream-subtab dropdown in the whole modal (every class subtab
+            // reads "FortiGate Direct" vs "FortiManager Proxy" from the same
+            // toggle). Relabel everything inside the Monitoring tab; the
+            // class-specific FortiSwitch / FortiAP toggles don't change any
+            // labels so they skip this branch.
+            if (cls === "fortigate" && integrationType === "fortimanager") {
+              var monTab = document.getElementById("intg-mon-class-tabs") || document;
+              // The class subtabs may have moved out of the tab-strip wrapper
+              // depending on the modal HTML; fall back to walking from the
+              // form root so every dropdown gets relabeled.
+              var root = monTab.closest ? (monTab.closest("form, .modal, body") || document) : document;
+              _relabelInheritOptions(root, tEl.checked);
+            }
+          });
+        })(toggleEl, wrapEl, c.key);
+      }
+    }
+
+    // FMG/FortiGate only: gate the Auto-Monitor Interfaces section on the
+    // class's addAsMonitored checkbox. Auto-monitor pins fast-cadence
+    // interfaces on newly-discovered assets, so it only makes sense when
+    // those assets are actually being added as monitored. Each class
+    // (fortigate / fortiswitch / fortiap) has its own checkbox + its own
+    // wrapper id; classes without one (AD / Entra / WinSrv) skip this.
+    var addAsMonitoredId = null;
+    if (integrationType === "fortimanager" || integrationType === "fortigate") {
+      if (c.key === "fortigate"   || c.key === "fortiswitch" || c.key === "fortiap") {
+        addAsMonitoredId = "f-mon-" + c.key + "-addAsMonitored";
+      }
+    }
+    if (addAsMonitoredId) {
+      var automonWrapId = "f-mon-" + c.key + "-automon-wrap";
+      var addEl = document.getElementById(addAsMonitoredId);
+      var automonWrapEl = document.getElementById(automonWrapId);
+      if (addEl && automonWrapEl) {
+        addEl.addEventListener("change", function () {
+          automonWrapEl.style.display = addEl.checked ? "" : "none";
+        });
+      }
+    }
+  });
 }
 
 // Wires the per-asset-timeout warning indicator so the Cadence section
@@ -1689,6 +2232,14 @@ function _readIntegrationCadenceForm() {
     cpuMemoryIntervalSeconds:  n("cpuMemoryIntervalSeconds"),
     temperatureIntervalSeconds: n("temperatureIntervalSeconds"),
     systemInfoIntervalSeconds: nNullable("systemInfoIntervalSeconds"),
+    // Phase 1 carves LLDP + Storage out of systemInfo cadence: the inputs are
+    // rendered + persisted, but the backend resolver still has them riding
+    // systemInfoIntervalSeconds at runtime. Phase 2 lands the actual queue
+    // split. Storing today keeps operator intent across the cutover.
+    lldpIntervalSeconds:       n("lldpIntervalSeconds"),
+    lldpTimeoutMs:             n("lldpTimeoutMs"),
+    storageIntervalSeconds:    n("storageIntervalSeconds"),
+    storageTimeoutMs:          n("storageTimeoutMs"),
   };
   // Slice 2 split telemetry into cpuMemory + temperature streams server-side
   // (TierSettingsSchema requires both). The Temperature inputs are now in
@@ -1830,25 +2381,6 @@ function fortiManagerGeneralHTML(defaults) {
       '<label for="f-autoDiscover" style="margin:0">Enable auto-discovery</label>' +
     '</div>' +
     '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to automatically query for DHCP updates (1–24 hours)</p></div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
-      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
-        // Backend field is still `useProxy`; UI shows the inverse — checked = direct, unchecked = proxy.
-        '<input type="checkbox" id="f-useDirect" ' + (d.useProxy === false ? "checked" : "") + ' style="width:auto" onchange="_fmgToggleDirectMode(this.checked)">' +
-        '<label for="f-useDirect" style="margin:0;font-weight:500">Query each FortiGate directly (bypass FortiManager proxy)</label>' +
-      '</div>' +
-      '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.75rem 0">When checked, Polaris skips FortiManager\'s <code>/sys/proxy/json</code> and talks straight to each managed FortiGate\'s management IP using the REST API credentials below — supports up to 20 parallel queries. When unchecked (default), all per-device DHCP/interface/switch/AP/VIP queries are proxied through FortiManager, which serializes them to one at a time.</p>' +
-      '<p style="font-size:0.82rem;color:var(--color-warning);line-height:1.5;margin:0 0 0.75rem 0;background:rgba(255,214,0,0.08);border:1px solid rgba(255,214,0,0.25);border-radius:4px;padding:0.5rem 0.65rem"><strong>Tip:</strong> If your environment has more than 20 managed FortiGates, switching to direct queries is strongly recommended — proxy mode polls them one at a time, so a full discovery run scales linearly with device count.</p>' +
-      '<div id="f-direct-mode-block" style="' + (d.useProxy === false ? "" : "display:none;") + 'border-top:1px solid rgba(79,195,247,0.2);padding-top:0.75rem;margin-top:0.5rem">' +
-        '<div class="form-group"><label>Parallel FortiGate Queries</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-discoveryParallelism" value="' + (d.useProxy === false ? (d.discoveryParallelism || 5) : 1) + '" min="1" max="20" style="width:80px"><span id="f-parallelism-note" style="color:var(--color-text-tertiary);font-size:0.85rem">gates at once</span></div><p class="hint">Up to 20 FortiGates concurrently.</p></div>' +
-        '<div class="form-group"><label>FortiGate API User</label><input type="text" id="f-fortigateApiUser" value="' + escapeHtml(d.fortigateApiUser || "") + '" placeholder="e.g. polaris-ro"><p class="hint">REST API admin username configured on each managed FortiGate</p></div>' +
-        '<div class="form-group"><label>FortiGate API Token</label><input type="password" id="f-fortigateApiToken" value="' + (d.fortigateApiTokenPlaceholder ? "" : escapeHtml(d.fortigateApiToken || "")) + '" placeholder="' + (d.fortigateApiTokenPlaceholder || "Bearer token") + '"><p class="hint">Bearer token for the above admin. Must be the same across all managed FortiGates.</p></div>' +
-        '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0">' +
-          '<input type="checkbox" id="f-fortigateVerifySsl" ' + (d.fortigateVerifySsl ? "checked" : "") + ' style="width:auto">' +
-          '<label for="f-fortigateVerifySsl" style="margin:0">Verify SSL certificate on FortiGates</label>' +
-        '</div>' +
-      '</div>' +
-    '</div>' +
     verboseLoggingFormHTML(d);
 }
 
@@ -2394,7 +2926,7 @@ async function openCreateModal(type) {
       { key: "general", label: "General", html: generalHtml },
       { key: "filters", label: "Filters", html: filtersHtml },
     ];
-    addTabs.push({ key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, { snmpCredentials: creds, monitorCredentialId: null, integrationId: null, integrationType: type, integrationName: "" }) });
+    addTabs.push({ key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, { snmpCredentials: creds, monitorCredentialId: null, integrationId: null, integrationType: type, integrationName: "", fmgDefaults: {} }) });
     // FMG and standalone FortiGate share the Reservation Push and Quarantine
     // Push tabs. Both default to off. The "useProxy=true" flag in the form
     // helpers labels the active mode for FMG; standalone FortiGate ignores it
@@ -2402,6 +2934,11 @@ async function openCreateModal(type) {
     // pass true so the FMG copy doesn't render an irrelevant "direct" warning.
     addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true) });
     addTabs.push({ key: "quarantine-push", label: "Quarantine Push", html: quarantinePushFormHTML(false, true) });
+    // Geographic Location tab (FMG + standalone FortiGate). Carries the
+    // pull-from-SNMP and push-geocoded-coords toggles previously surfaced
+    // inside Monitoring → FortiGate. DOM ids preserved so the existing save
+    // path (`_readFortigateMonitorBlock`) keeps finding them.
+    addTabs.push({ key: "geographicLocation", label: "Geographic Location", html: geographicLocationFormHTML(false, false) });
     body = _intRenderTabbedBody("intg-edit", addTabs);
   } else if (isAd || isEntra || isWin) {
     var addMonSettings = {};
@@ -2427,15 +2964,14 @@ async function openCreateModal(type) {
   openModal(title, body, footer, { wide: true });
   if (isFmg || isFgt) {
     _intWireModalTabs("intg-edit");
-    // Inner sub-tabs inside the Monitoring tab's Discovery Defaults section
-    // (FortiGates / FortiSwitches / FortiAPs).
-    _intWireModalTabs("intg-mon");
+    _wireMonitoringTabSubtabs(type);
     wireAutoMonitorCards(null);
     _wireProbeTimeoutWarning();
     _wireCredentialPickerVisibility();
     _populateUploadedMibsInDropdowns();
   } else if (isAd || isEntra || isWin) {
     _intWireModalTabs("intg-edit");
+    _wireMonitoringTabSubtabs(type);
     _wireProbeTimeoutWarning();
   }
 
@@ -2758,6 +3294,12 @@ async function openEditModal(id) {
           integrationType:    intg.type,
           integrationName:    intg.name,
           pollInterval:       intg.pollInterval,
+          // The relocated useDirect toggle + direct-mode credentials block
+          // lives inside the FortiGate class subtab in the Monitoring tab.
+          // Pass the FMG `defaults` blob so it renders with the current
+          // values. Standalone FortiGate doesn't carry these fields and
+          // the block is skipped on that path.
+          fmgDefaults:        defaults,
         }) },
       );
       // Reservation Push + Quarantine Push tabs render for both FMG and
@@ -2776,6 +3318,16 @@ async function openEditModal(id) {
           label: "Quarantine Push",
           html: quarantinePushFormHTML(config.pushQuarantine === true, pushUseProxy),
         });
+        // Geographic Location tab (FMG + standalone FortiGate). Carries the
+        // pull-from-SNMP and push-geocoded-coords toggles previously surfaced
+        // inside Monitoring → FortiGate. DOM ids preserved so the existing
+        // save path (`_readFortigateMonitorBlock`) keeps finding them.
+        var fwFgCfgEdit = config.fortigateMonitor || {};
+        editTabs.push({
+          key: "geographicLocation",
+          label: "Geographic Location",
+          html: geographicLocationFormHTML(fwFgCfgEdit.pullSnmpLocation === true, fwFgCfgEdit.pushGeocodedCoords === true),
+        });
       }
       body = _intRenderTabbedBody("intg-edit", editTabs);
     }
@@ -2786,13 +3338,14 @@ async function openEditModal(id) {
     openModal("Edit Integration", body, footer, { wide: true });
     if (isFmgOrFgt) {
       _intWireModalTabs("intg-edit");
-      _intWireModalTabs("intg-mon");
+      _wireMonitoringTabSubtabs(intg.type);
       wireAutoMonitorCards(id);
       _wireProbeTimeoutWarning();
       _wireCredentialPickerVisibility();
       _populateUploadedMibsInDropdowns();
     } else if (isAd || isEntra || isWin) {
       _intWireModalTabs("intg-edit");
+      _wireMonitoringTabSubtabs(intg.type);
       _wireProbeTimeoutWarning();
     }
 
