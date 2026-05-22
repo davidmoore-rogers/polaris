@@ -4376,24 +4376,21 @@ export async function snmpWalkRaw(
   });
 }
 
-// Per-asset metric resolution from the editable Manufacturer Profile (Slice 6c).
+// Per-asset metric resolution from the editable Manufacturer Profile.
 // Walks the profile's per-model overrides in `order` and picks the first whose
 // `modelPattern` regex matches `Asset.model`; falls back to the metric row's
-// `defaultSymbol` / `composition`. Returns null when the DB has no opinion —
-// the caller then uses the hardcoded `VENDOR_TELEMETRY_PROFILES` entry
-// unchanged.
+// defaults. Returns null when the DB has no opinion — the caller then uses
+// the hardcoded `VENDOR_TELEMETRY_PROFILES` entry unchanged.
 //
-// `composition` (memory only today) wins over `defaultSymbol` / `symbol`
-// when present. The `pick` shape carries both: the legacy single-symbol pair
-// AND the multi-OID composition, so the caller can decide which form to emit.
+// `type="double_scalar"` carries TWO OIDs (`symbol` + `symbolB`) and a
+// `transform` that is a CombinerKind; the caller decides how to map that
+// onto the runtime probe shape (memory walks both OIDs and computes a
+// percent via the combiner's semantics).
 interface DbMetricPick {
-  symbol:      string | null;
-  type:        "scalar" | "table";
-  composition: { shape: "percent" | "bytes_used_total" | "bytes_used_free";
-                 usedSymbol?:  string | null;
-                 totalSymbol?: string | null;
-                 freeSymbol?:  string | null;
-                 pctSymbol?:   string | null } | null;
+  symbol:    string | null;
+  symbolB:   string | null;
+  type:      "scalar" | "double_scalar" | "table";
+  transform: string | null; // TransformKind on scalar/table; CombinerKind on double_scalar
 }
 function resolveDbMetric(metric: MetricRow | undefined, model: string | null | undefined): DbMetricPick | null {
   if (!metric) return null;
@@ -4402,18 +4399,20 @@ function resolveDbMetric(metric: MetricRow | undefined, model: string | null | u
     try {
       if (new RegExp(o.modelPattern, "i").test(modelStr)) {
         return {
-          symbol:      o.symbol || null,
-          type:        o.type,
-          composition: o.composition ?? null,
+          symbol:    o.symbol || null,
+          symbolB:   o.symbolB ?? null,
+          type:      o.type,
+          transform: o.transform ?? null,
         };
       }
     } catch { /* malformed regex; skip — write-path validates so this is defensive only */ }
   }
-  if (metric.composition || metric.defaultSymbol) {
+  if (metric.defaultSymbol || metric.defaultSymbolB) {
     return {
-      symbol:      metric.defaultSymbol ?? null,
-      type:        metric.defaultType,
-      composition: metric.composition ?? null,
+      symbol:    metric.defaultSymbol ?? null,
+      symbolB:   metric.defaultSymbolB ?? null,
+      type:      metric.defaultType,
+      transform: metric.defaultTransform ?? null,
     };
   }
   return null;
@@ -4422,15 +4421,17 @@ function resolveDbMetric(metric: MetricRow | undefined, model: string | null | u
 // Layer the editable Manufacturer Profile on top of the hardcoded vendor
 // profile. The DB owns operator-edited symbols + per-model exceptions; when
 // the DB has a non-null choice we swap the primary symbol on a CLONE of the
-// hardcoded profile so the rest of the probe shape (memory bytes derivation,
-// walk-avg mode for Cisco, etc.) survives unchanged.
+// hardcoded profile so the rest of the probe shape (walk-avg mode for
+// Cisco, etc.) survives unchanged.
 //
-// Memory has a richer Shape: when the DB carries a `composition` blob we
-// emit the multi-OID shape directly (`{ usedBytesSymbol, totalBytesSymbol }`
-// or `{ usedBytesSymbol, freeBytesSymbol }`) so `collectMemoryVendor` walks
-// both OIDs and computes the percent — matching what the hardcoded
-// FortiSwitch baseline already does. Without composition we fall back to the
-// single-symbol pctSymbol shape (today's behaviour).
+// Memory supports a richer Shape: when the DB row is `type="double_scalar"`
+// (replaces the legacy memory-only `composition` blob), the combiner tells
+// us which multi-OID memory shape to emit:
+//   transform="a_over_b_as_percent"        → { usedBytesSymbol, totalBytesSymbol }
+//   transform="a_over_a_plus_b_as_percent" → { usedBytesSymbol, freeBytesSymbol }
+// `collectMemoryVendor` then walks both OIDs and computes the percent —
+// matching what the hardcoded FortiSwitch baseline already does. Scalar
+// memory rows fall back to the single-symbol pctSymbol shape.
 //
 // Returns the hardcoded profile unchanged when the DB cache hasn't loaded yet
 // OR no matching DB profile exists.
@@ -4465,32 +4466,31 @@ function pickVendorProfileMerged(
     merged.cpu = { symbol: cpuPick.symbol, mode: cpuPick.type === "table" ? "walk-avg" : "scalar" };
   }
   if (memPick) {
-    // Composition wins. Map each Shape to the corresponding multi-OID
-    // memory shape the probe path consumes.
-    if (memPick.composition) {
-      const c = memPick.composition;
-      if (c.shape === "bytes_used_total" && c.usedSymbol && c.totalSymbol) {
+    if (memPick.type === "double_scalar" && memPick.symbol && memPick.symbolB) {
+      // Map combiner → runtime memory shape. The runtime collector walks
+      // both OIDs identically; only the field name signals which pair we're
+      // dealing with (used+total vs used+free).
+      if (memPick.transform === "a_over_b_as_percent") {
         merged.memory = {
-          usedBytesSymbol:  c.usedSymbol,
-          totalBytesSymbol: c.totalSymbol,
-          walkSubtree:      memPick.type === "table",
+          usedBytesSymbol:  memPick.symbol,
+          totalBytesSymbol: memPick.symbolB,
+          walkSubtree:      false,
         };
-      } else if (c.shape === "bytes_used_free" && c.usedSymbol && c.freeSymbol) {
+      } else if (memPick.transform === "a_over_a_plus_b_as_percent") {
         merged.memory = {
-          usedBytesSymbol: c.usedSymbol,
-          freeBytesSymbol: c.freeSymbol,
-          walkSubtree:     memPick.type === "table",
+          usedBytesSymbol: memPick.symbol,
+          freeBytesSymbol: memPick.symbolB,
+          walkSubtree:     false,
         };
-      } else if (c.shape === "percent" && c.pctSymbol) {
-        merged.memory = { pctSymbol: c.pctSymbol, walkSubtree: memPick.type === "table" };
       }
-      // Any other state falls through silently — write-path validation
-      // should make this unreachable; if it happens we keep the baseline.
-    } else if (memPick.symbol) {
-      // Legacy single-symbol path — same behaviour as before composition
-      // landed. Operators who haven't migrated their memory row to a
-      // composition still get the pctSymbol treatment.
-      merged.memory = { pctSymbol: memPick.symbol, walkSubtree: memPick.type === "table" };
+      // Other combiners aren't memory-meaningful; fall through to base.
+    } else if (memPick.type === "scalar" && memPick.symbol) {
+      // Single-symbol percent path. walkSubtree is on for vendors whose
+      // pctSymbol comes from a walked table (Juniper jnxOperatingBuffer,
+      // Cisco ciscoMemoryPool*Free, etc.) — we infer that from the
+      // hardcoded baseline since the DB row no longer carries walkSubtree.
+      const baseWalk = base?.memory?.walkSubtree === true;
+      merged.memory = { pctSymbol: memPick.symbol, walkSubtree: baseWalk };
     }
   }
   if (tempPick && tempPick.symbol) {

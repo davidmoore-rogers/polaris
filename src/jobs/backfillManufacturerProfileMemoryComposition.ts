@@ -1,40 +1,46 @@
 /**
  * src/jobs/backfillManufacturerProfileMemoryComposition.ts
  *
- * One-shot startup migration: stamp the multi-OID memory `composition` blob
- * onto existing ManufacturerProfileMetric + ManufacturerProfileMetricOverride
- * rows that predate the column. Pairs with the inline emission added to
- * `seedManufacturerProfiles` so fresh installs get composition stamped from
- * the start; this job is for installs that ran the seed before the column
- * existed.
+ * One-shot startup migration: promote existing single-symbol memory rows to
+ * the generic `double_scalar` shape on installs that ran the seed job
+ * BEFORE the `defaultSymbolB` column existed. Pairs with the inline
+ * emission in `seedManufacturerProfiles` so fresh installs get the new
+ * shape stamped from the start; this job is for installs that ran the
+ * old seed.
  *
- * Behaviour: for every entry in VENDOR_TELEMETRY_PROFILES whose `memory`
- * block maps to a known composition shape (via `memoryQueryToComposition`),
- * find the matching DB row(s) and write composition ONLY when both:
- *   1. The row's existing `composition` column is null (don't overwrite
- *      operator edits).
- *   2. The row's `defaultSymbol` / `symbol` matches the primary OID from
- *      the hardcoded entry (sanity check — operator hasn't already
- *      replaced the seed value with their own bespoke symbol).
+ * The 20260531000000 SQL migration already promoted any rows that carried
+ * the legacy `composition` JSON blob; this job catches the orphan case
+ * where the seed wrote `defaultSymbol = "<usedBytesSymbol>"` + `type =
+ * "scalar"` but never got a composition stamped (because composition came
+ * later AND this job didn't run before the new shape landed).
  *
- * Idempotent: the marker `Setting.backfillManufacturerProfileMemoryCompositionAt`
- * is stamped on first successful run. Re-runs are a no-op via marker; even
- * without the marker, the two safety checks above mean a re-run wouldn't
- * clobber anything.
+ * Behaviour: for every VENDOR_TELEMETRY_PROFILES entry whose `memory` block
+ * maps to a `double_scalar` (bytes-form), find the matching DB row(s) and
+ * promote ONLY when:
+ *   1. The row's existing `defaultSymbolB` / `symbolB` is null (no shape
+ *      stamped yet).
+ *   2. The row's `defaultSymbol` / `symbol` matches the bytes-form's
+ *      primary OID (sanity check — operator hasn't replaced the seed).
+ *   3. The row's `defaultType` / `type` is "scalar" (not already promoted,
+ *      not table).
+ *
+ * Idempotent via the marker key (and the three safety checks above mean a
+ * re-run wouldn't clobber anything anyway).
+ *
+ * Marker key is kept as the legacy `backfillManufacturerProfileMemoryCompositionAt`
+ * for back-compat with installs that already ran the prior version of this
+ * job — those installs are already in the desired post-promotion state.
  */
 
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { runInstrumentedJob } from "./_metrics.js";
-import { VENDOR_TELEMETRY_PROFILES, memoryQueryToComposition } from "../services/vendorTelemetryProfiles.js";
+import { VENDOR_TELEMETRY_PROFILES, memoryQueryToDoubleScalar } from "../services/vendorTelemetryProfiles.js";
 import { normalizeManufacturer } from "../utils/manufacturerNormalize.js";
 import { refreshProfileCache } from "../services/manufacturerProfileService.js";
 
 const MARKER_KEY = "backfillManufacturerProfileMemoryCompositionAt";
 
-// Same SEED_MAP relationship as `seedManufacturerProfiles.ts` — translates
-// the human-friendly vendor labels onto canonical manufacturer + optional
-// modelPattern so we can find the right row(s) to backfill.
 interface SeedRow { vendorLabel: string; manufacturer: string; modelPattern: string | null }
 const SEED_MAP: SeedRow[] = [
   { vendorLabel: "Cisco IOS / IOS-XE / NX-OS",        manufacturer: "Cisco",    modelPattern: null },
@@ -61,16 +67,10 @@ export async function backfillManufacturerProfileMemoryComposition(): Promise<Ba
   for (const seedRow of SEED_MAP) {
     const profile = VENDOR_TELEMETRY_PROFILES.find((p) => p.vendor === seedRow.vendorLabel);
     if (!profile?.memory) continue;
-    const composition = memoryQueryToComposition(profile.memory);
-    if (!composition) continue;
-    // Primary symbol — whichever the seed job picked. Order matches
-    // `profileToMetricSeeds` so the matching check stays stable.
-    const primarySymbol =
-      profile.memory.usedBytesSymbol ||
-      profile.memory.totalBytesSymbol ||
-      profile.memory.pctSymbol ||
-      profile.memory.freeBytesSymbol;
-    if (!primarySymbol) continue;
+    const ds = memoryQueryToDoubleScalar(profile.memory);
+    // Only the double_scalar case needs promotion. scalar (percent) rows are
+    // already correctly stamped by the old seed and don't need any change.
+    if (!ds || ds.type !== "double_scalar") continue;
 
     const mfr = normalizeManufacturer(seedRow.manufacturer) ?? seedRow.manufacturer;
     const dbProfile = await (prisma as any).manufacturerProfile.findUnique({
@@ -82,24 +82,34 @@ export async function backfillManufacturerProfileMemoryComposition(): Promise<Ba
     if (!memoryRow) continue;
 
     if (seedRow.modelPattern) {
-      // Override-targeted backfill — find the override matching this seed's
-      // modelPattern and stamp composition when the safety checks pass.
-      const override = memoryRow.overrides.find((o: any) =>
-        o.modelPattern === seedRow.modelPattern && o.symbol === primarySymbol);
+      // Promote a per-model override (FortiSwitch).
+      const override = memoryRow.overrides.find(
+        (o: any) => o.modelPattern === seedRow.modelPattern && o.symbol === ds.symbol,
+      );
       if (!override) continue;
-      if (override.composition) continue; // already set — don't clobber
+      if (override.symbolB) continue;       // already promoted
+      if (override.type !== "scalar") continue; // already changed shape
       await (prisma as any).manufacturerProfileMetricOverride.update({
         where: { id: override.id },
-        data:  { composition },
+        data:  {
+          type:      "double_scalar",
+          symbolB:   ds.symbolB,
+          transform: ds.transform,
+        },
       });
       overrideRowsUpdated += 1;
     } else {
-      // Umbrella metric-row backfill.
-      if (memoryRow.composition) continue;             // already set
-      if (memoryRow.defaultSymbol !== primarySymbol) continue; // operator-edited; skip
+      // Promote the umbrella metric row.
+      if (memoryRow.defaultSymbolB) continue;
+      if (memoryRow.defaultType !== "scalar") continue;
+      if (memoryRow.defaultSymbol !== ds.symbol) continue;
       await (prisma as any).manufacturerProfileMetric.update({
         where: { id: memoryRow.id },
-        data:  { composition },
+        data:  {
+          defaultType:      "double_scalar",
+          defaultSymbolB:   ds.symbolB,
+          defaultTransform: ds.transform,
+        },
       });
       metricRowsUpdated += 1;
     }
@@ -119,10 +129,8 @@ export async function backfillManufacturerProfileMemoryComposition(): Promise<Ba
     await runInstrumentedJob("backfillManufacturerProfileMemoryComposition", async () => {
       const result = await backfillManufacturerProfileMemoryComposition();
       if (!result.skipped && (result.metricRowsUpdated || result.overrideRowsUpdated)) {
-        logger.info(result, "Backfilled manufacturer profile memory composition");
+        logger.info(result, "Promoted manufacturer profile memory rows to double_scalar");
       }
-      // Refresh the in-memory cache so the resolver picks up the new
-      // composition without waiting for the next write to a profile row.
       await refreshProfileCache();
     });
   } catch (err) {

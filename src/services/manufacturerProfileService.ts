@@ -12,7 +12,12 @@
 
 import { prisma } from "../db.js";
 import { normalizeManufacturer } from "../utils/manufacturerNormalize.js";
-import { isTransformKind, type TransformKind } from "../utils/symbolTransforms.js";
+import {
+  isTransformKind,
+  isCombinerKind,
+  type TransformKind,
+  type CombinerKind,
+} from "../utils/symbolTransforms.js";
 import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
@@ -54,42 +59,35 @@ function asStdMibKeyOrNull(value: unknown): string | null {
   return value;
 }
 
-// Multi-OID composition for the memory metric. Today consulted only when
-// metricKey="memory" — lets operators express bytes-form memory in the editable
-// profile, matching what the hardcoded VENDOR_TELEMETRY_PROFILES baseline can
-// already do via collectMemoryVendor. When present takes precedence over
-// defaultSymbol on the metric row (and over `symbol` on an override row).
-export type MemoryShape = "percent" | "bytes_used_total" | "bytes_used_free";
-
-export interface MemoryComposition {
-  shape:        MemoryShape;
-  usedSymbol?:  string | null;
-  totalSymbol?: string | null;
-  freeSymbol?:  string | null;
-  pctSymbol?:   string | null;
-}
+// Metric-row Type values. `scalar` is the original single-OID shape; `table`
+// is a single OID returning multiple rows; `double_scalar` is the
+// generalized multi-OID shape that replaced the memory-only `composition`
+// blob — the resolver fetches `symbol` AND `symbolB` and combines them via
+// the `transform` field (which carries a CombinerKind in this case rather
+// than the usual unary TransformKind).
+export type MetricRowType = "scalar" | "double_scalar" | "table";
 
 export interface MetricOverrideRow {
   id:           string;
   modelPattern: string;
   symbol:       string;
+  symbolB:      string | null;
   mibId:        string | null;
   mibStdKey:    string | null;
-  type:         "scalar" | "table";
-  transform:    TransformKind | null;
+  type:         MetricRowType;
+  transform:    TransformKind | CombinerKind | null;
   order:        number;
-  composition:  MemoryComposition | null;
 }
 
 export interface MetricRow {
   id:               string;
   metricKey:        MetricKey;
   defaultSymbol:    string | null;
+  defaultSymbolB:   string | null;
   defaultMibId:     string | null;
   defaultMibStdKey: string | null;
-  defaultType:      "scalar" | "table";
-  defaultTransform: TransformKind | null;
-  composition:      MemoryComposition | null;
+  defaultType:      MetricRowType;
+  defaultTransform: TransformKind | CombinerKind | null;
   overrides:        MetricOverrideRow[];
 }
 
@@ -137,23 +135,55 @@ function asMetricKey(value: unknown): MetricKey {
   return value as MetricKey;
 }
 
-function asType(value: unknown): "scalar" | "table" {
-  if (value === "scalar" || value === "table") return value;
-  throw new AppError(400, "Invalid type — expected 'scalar' or 'table'");
+function asMetricRowType(value: unknown): MetricRowType {
+  if (value === "scalar" || value === "double_scalar" || value === "table") return value;
+  throw new AppError(400, "Invalid type — expected 'scalar' | 'double_scalar' | 'table'");
 }
 
+// Custom widgets still only support scalar/table — double_scalar applies to
+// metric rows where the resolver knows how to combine the two readings; the
+// widget renderer doesn't.
 function asWidgetType(value: unknown): "gauge" | "line" | "table" {
   if (value === "gauge" || value === "line" || value === "table") return value;
   throw new AppError(400, "Invalid widgetType — expected gauge | line | table");
 }
 
-function asTransform(value: unknown): TransformKind | null {
-  if (value === null || value === undefined || value === "") return null;
+function asWidgetSymbolType(value: unknown): "scalar" | "table" {
+  if (value === "scalar" || value === "table") return value;
+  throw new AppError(400, "Invalid widget symbol type — expected 'scalar' or 'table'");
+}
+
+// For scalar / table types `transform` is a unary TransformKind (or null).
+// For double_scalar `transform` is a binary CombinerKind. The validator is
+// type-aware so a typo (combiner on a scalar row, transform on a double row)
+// errors at write time instead of silently being persisted.
+function asTransformForType(value: unknown, type: MetricRowType): TransformKind | CombinerKind | null {
+  if (value === null || value === undefined || value === "") {
+    // double_scalar requires a combiner to be useful, but we accept null at
+    // write time so the operator can save a partially-configured row and
+    // come back to it. The resolver treats double_scalar with no combiner
+    // as a no-op.
+    return null;
+  }
+  if (type === "double_scalar") {
+    if (isCombinerKind(value)) return value;
+    throw new AppError(400, `Invalid combiner for double_scalar type: ${String(value)}`);
+  }
+  // scalar / table
   if (isTransformKind(value)) return value;
   throw new AppError(400, `Invalid transform: ${String(value)}`);
 }
 
-const MEMORY_SHAPES: MemoryShape[] = ["percent", "bytes_used_total", "bytes_used_free"];
+// Reads a stored transform from the DB without knowing the row's type — used
+// only in the shapeProfile path. Tries both registries; returns null if the
+// value matches neither. The DB always stores values written through
+// asTransformForType, so this only sees legitimate values.
+function readStoredTransform(value: unknown): TransformKind | CombinerKind | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (isTransformKind(value)) return value;
+  if (isCombinerKind(value)) return value;
+  return null;
+}
 
 function trimOrNull(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -161,74 +191,46 @@ function trimOrNull(value: unknown): string | null {
   return t ? t : null;
 }
 
-/**
- * Parse + validate a JSON `composition` blob coming from the API. Returns:
- *   - `null` when the input is null/undefined/empty (clears the column)
- *   - a normalized `MemoryComposition` when valid
- *   - throws AppError(400) when malformed
- *
- * Per-shape required fields:
- *   - "percent"            → pctSymbol required
- *   - "bytes_used_total"   → usedSymbol + totalSymbol required
- *   - "bytes_used_free"    → usedSymbol + freeSymbol required
- *
- * Unrelated fields are stripped on output so the stored shape stays tight
- * regardless of what the client sent.
- *
- * Today scoped to `metricKey="memory"`. The function is metric-key-agnostic
- * so future composition shapes for other metrics can reuse the same column;
- * callers gate by metricKey themselves.
- */
-export function parseMemoryComposition(value: unknown): MemoryComposition | null {
-  if (value === null || value === undefined || value === "") return null;
-  if (typeof value !== "object" || Array.isArray(value)) {
-    throw new AppError(400, "composition must be a JSON object");
+// Validate that the per-row shape is internally consistent:
+//   scalar:        symbol required, symbolB must be null
+//   double_scalar: symbol + symbolB both required
+//   table:         symbol required, symbolB must be null, transform must be null
+// Caller passes the EFFECTIVE values (after merging input with the stored
+// row for update paths) so partial updates that leave a row invalid are
+// rejected before the DB write lands.
+//
+// Empty-row exception: a metric row with symbol+symbolB+transform all null
+// is the legitimate "use built-in seed for this metric" state. It passes
+// validation regardless of type (which defaults to "scalar"). Override
+// rows always require a symbol because their whole purpose is to override
+// the parent metric row's defaults.
+function validateMetricRowShape(args: {
+  type:      MetricRowType;
+  symbol:    string | null;
+  symbolB:   string | null;
+  transform: TransformKind | CombinerKind | null;
+  // "metric" or "override" — used in error messages AND to gate the
+  // empty-row exception (only metric rows can be unconfigured).
+  label:     "metric" | "override";
+}): void {
+  const { type, symbol, symbolB, transform, label } = args;
+  if (label === "metric" && !symbol && !symbolB && !transform) {
+    return; // unconfigured metric row = "use built-in seed"
   }
-  const raw = value as Record<string, unknown>;
-  const shape = raw.shape;
-  if (typeof shape !== "string" || !(MEMORY_SHAPES as string[]).includes(shape)) {
-    throw new AppError(400, `composition.shape must be one of: ${MEMORY_SHAPES.join(", ")}`);
+  if (type === "table") {
+    if (!symbol) throw new AppError(400, `${label}: symbol is required`);
+    if (symbolB) throw new AppError(400, `${label}: symbolB must be null on type="table"`);
+    if (transform) throw new AppError(400, `${label}: transform must be null on type="table"`);
+    return;
   }
-  const used  = trimOrNull(raw.usedSymbol);
-  const total = trimOrNull(raw.totalSymbol);
-  const free  = trimOrNull(raw.freeSymbol);
-  const pct   = trimOrNull(raw.pctSymbol);
-  const out: MemoryComposition = { shape: shape as MemoryShape };
-  if (shape === "percent") {
-    if (!pct) throw new AppError(400, "composition.pctSymbol is required for shape \"percent\"");
-    out.pctSymbol = pct;
-  } else if (shape === "bytes_used_total") {
-    if (!used)  throw new AppError(400, "composition.usedSymbol is required for shape \"bytes_used_total\"");
-    if (!total) throw new AppError(400, "composition.totalSymbol is required for shape \"bytes_used_total\"");
-    out.usedSymbol  = used;
-    out.totalSymbol = total;
-  } else { // bytes_used_free
-    if (!used) throw new AppError(400, "composition.usedSymbol is required for shape \"bytes_used_free\"");
-    if (!free) throw new AppError(400, "composition.freeSymbol is required for shape \"bytes_used_free\"");
-    out.usedSymbol = used;
-    out.freeSymbol = free;
+  if (type === "scalar") {
+    if (!symbol) throw new AppError(400, `${label}: symbol is required`);
+    if (symbolB) throw new AppError(400, `${label}: symbolB must be null on type="scalar"`);
+    return;
   }
-  return out;
-}
-
-function shapeStoredComposition(raw: unknown): MemoryComposition | null {
-  if (raw === null || raw === undefined) return null;
-  if (typeof raw !== "object" || Array.isArray(raw)) return null;
-  const r = raw as Record<string, unknown>;
-  if (typeof r.shape !== "string" || !(MEMORY_SHAPES as string[]).includes(r.shape)) return null;
-  // Trust stored DB shape (already validated on write). Reflect whichever
-  // symbol fields were stored — defensive `trimOrNull` handles legacy rows
-  // that may have empty strings.
-  const out: MemoryComposition = { shape: r.shape as MemoryShape };
-  const used  = trimOrNull(r.usedSymbol);
-  const total = trimOrNull(r.totalSymbol);
-  const free  = trimOrNull(r.freeSymbol);
-  const pct   = trimOrNull(r.pctSymbol);
-  if (used)  out.usedSymbol  = used;
-  if (total) out.totalSymbol = total;
-  if (free)  out.freeSymbol  = free;
-  if (pct)   out.pctSymbol   = pct;
-  return out;
+  // double_scalar
+  if (!symbol)  throw new AppError(400, `${label}: symbol (A) is required for type="double_scalar"`);
+  if (!symbolB) throw new AppError(400, `${label}: symbolB (B) is required for type="double_scalar"`);
 }
 
 function shapeProfile(row: any): ProfileFull {
@@ -236,21 +238,21 @@ function shapeProfile(row: any): ProfileFull {
     id:               m.id,
     metricKey:        asMetricKey(m.metricKey),
     defaultSymbol:    m.defaultSymbol ?? null,
+    defaultSymbolB:   m.defaultSymbolB ?? null,
     defaultMibId:     m.defaultMibId ?? null,
     defaultMibStdKey: m.defaultMibStdKey ?? null,
-    defaultType:      asType(m.defaultType),
-    defaultTransform: asTransform(m.defaultTransform),
-    composition:      shapeStoredComposition(m.composition),
+    defaultType:      asMetricRowType(m.defaultType),
+    defaultTransform: readStoredTransform(m.defaultTransform),
     overrides: (m.overrides || []).map((o: any) => ({
       id:           o.id,
       modelPattern: o.modelPattern,
       symbol:       o.symbol,
+      symbolB:      o.symbolB ?? null,
       mibId:        o.mibId ?? null,
       mibStdKey:    o.mibStdKey ?? null,
-      type:         asType(o.type),
-      transform:    asTransform(o.transform),
+      type:         asMetricRowType(o.type),
+      transform:    readStoredTransform(o.transform),
       order:        o.order,
-      composition:  shapeStoredComposition(o.composition),
     })),
   }));
   const widgets: CustomWidgetRow[] = (row.widgets || []).map((w: any) => ({
@@ -258,9 +260,9 @@ function shapeProfile(row: any): ProfileFull {
     name:           w.name,
     symbol:         w.symbol,
     mibId:          w.mibId,
-    type:           asType(w.type),
+    type:           asWidgetSymbolType(w.type),
     widgetType:     asWidgetType(w.widgetType),
-    transform:      asTransform(w.transform),
+    transform:      w.transform && isTransformKind(w.transform) ? (w.transform as TransformKind) : null,
     displayOptions: (w.displayOptions ?? {}) as Record<string, unknown>,
     order:          w.order,
     modelPattern:   w.modelPattern ?? null,
@@ -394,14 +396,11 @@ export async function updateMetricRow(
   metricKey: string,
   input: {
     defaultSymbol?:    string | null;
+    defaultSymbolB?:   string | null;
     defaultMibId?:     string | null;
     defaultMibStdKey?: string | null;
     defaultType?:      string;
     defaultTransform?: string | null;
-    // Memory-only today. Validated by parseMemoryComposition; explicit null
-    // (or empty object) clears the stored composition so the row falls back
-    // to defaultSymbol. Undefined leaves the existing value alone.
-    composition?:      unknown;
   },
 ): Promise<MetricRow> {
   const mk = asMetricKey(metricKey);
@@ -409,16 +408,6 @@ export async function updateMetricRow(
     where: { profileId_metricKey: { profileId, metricKey: mk } },
   });
   if (!row) throw new AppError(404, "Metric row not found for this profile");
-
-  // composition is memory-only; reject on other metrics so a typo in the UI
-  // doesn't silently persist nonsense onto the wrong row.
-  let compositionUpdate: MemoryComposition | null | undefined = undefined;
-  if (input.composition !== undefined) {
-    if (mk !== "memory" && input.composition !== null) {
-      throw new AppError(400, "composition is only supported on the memory metric");
-    }
-    compositionUpdate = parseMemoryComposition(input.composition);
-  }
 
   // Mutual exclusion: a metric row points at AT MOST one MIB source —
   // either an uploaded MibFile (defaultMibId) or a built-in standard MIB
@@ -433,15 +422,36 @@ export async function updateMetricRow(
     throw new AppError(400, "defaultMibId and defaultMibStdKey are mutually exclusive");
   }
 
+  // Resolve effective values (merge input with existing row) so the shape
+  // validator sees the post-write state and can reject invalid combos
+  // (e.g. flipping to double_scalar without supplying symbolB).
+  const nextType      = input.defaultType      === undefined ? asMetricRowType(row.defaultType) : asMetricRowType(input.defaultType);
+  const nextSymbol    = input.defaultSymbol    === undefined ? (row.defaultSymbol ?? null)      : trimOrNull(input.defaultSymbol);
+  const nextSymbolB   = input.defaultSymbolB   === undefined ? (row.defaultSymbolB ?? null)     : trimOrNull(input.defaultSymbolB);
+  const nextTransform = input.defaultTransform === undefined
+    ? readStoredTransform(row.defaultTransform)
+    : asTransformForType(input.defaultTransform, nextType);
+
+  validateMetricRowShape({
+    type:      nextType,
+    symbol:    nextSymbol,
+    symbolB:   nextSymbolB,
+    transform: nextTransform,
+    label:     "metric",
+  });
+
   const updated = await (prisma as any).manufacturerProfileMetric.update({
     where: { id: row.id },
     data: {
-      defaultSymbol:    input.defaultSymbol === undefined    ? undefined : (input.defaultSymbol ?? null),
-      defaultMibId:     input.defaultMibId === undefined     ? undefined : (input.defaultMibId ?? null),
+      defaultSymbol:    input.defaultSymbol    === undefined ? undefined : (nextSymbol ?? null),
+      // When type is not double_scalar, force symbolB null at write time
+      // so accidental leftovers from an earlier double_scalar config don't
+      // get re-promoted later.
+      defaultSymbolB:   nextType === "double_scalar" ? (nextSymbolB ?? null) : null,
+      defaultMibId:     input.defaultMibId     === undefined ? undefined : (input.defaultMibId ?? null),
       defaultMibStdKey: input.defaultMibStdKey === undefined ? undefined : nextStdKey,
-      defaultType:      input.defaultType === undefined      ? undefined : asType(input.defaultType),
-      defaultTransform: input.defaultTransform === undefined ? undefined : (asTransform(input.defaultTransform) ?? null),
-      composition:      compositionUpdate === undefined ? undefined : (compositionUpdate ?? null),
+      defaultType:      input.defaultType      === undefined ? undefined : nextType,
+      defaultTransform: input.defaultTransform === undefined ? undefined : (nextTransform ?? null),
     },
     include: { overrides: { orderBy: { order: "asc" } } },
   });
@@ -451,21 +461,21 @@ export async function updateMetricRow(
     id:               updated.id,
     metricKey:        mk,
     defaultSymbol:    updated.defaultSymbol ?? null,
+    defaultSymbolB:   updated.defaultSymbolB ?? null,
     defaultMibId:     updated.defaultMibId ?? null,
     defaultMibStdKey: updated.defaultMibStdKey ?? null,
-    defaultType:      asType(updated.defaultType),
-    defaultTransform: asTransform(updated.defaultTransform),
-    composition:      shapeStoredComposition(updated.composition),
+    defaultType:      asMetricRowType(updated.defaultType),
+    defaultTransform: readStoredTransform(updated.defaultTransform),
     overrides: (updated.overrides || []).map((o: any) => ({
       id:           o.id,
       modelPattern: o.modelPattern,
       symbol:       o.symbol,
+      symbolB:      o.symbolB ?? null,
       mibId:        o.mibId ?? null,
       mibStdKey:    o.mibStdKey ?? null,
-      type:         asType(o.type),
-      transform:    asTransform(o.transform),
+      type:         asMetricRowType(o.type),
+      transform:    readStoredTransform(o.transform),
       order:        o.order,
-      composition:  shapeStoredComposition(o.composition),
     })),
   };
 }
@@ -476,12 +486,12 @@ export async function createOverride(
   input: {
     modelPattern: string;
     symbol?:      string;
+    symbolB?:     string | null;
     mibId?:       string | null;
     mibStdKey?:   string | null;
     type?:        string;
     transform?:   string | null;
     order?:       number;
-    composition?: unknown;
   },
 ): Promise<MetricOverrideRow> {
   const mk = asMetricKey(metricKey);
@@ -497,38 +507,28 @@ export async function createOverride(
   } catch {
     throw new AppError(400, "modelPattern must be a valid regex");
   }
-  let composition: MemoryComposition | null = null;
-  if (input.composition !== undefined) {
-    if (mk !== "memory" && input.composition !== null) {
-      throw new AppError(400, "composition is only supported on the memory metric");
-    }
-    composition = parseMemoryComposition(input.composition);
-  }
-  // Either composition is supplied (bytes-form / explicit percent) or the
-  // legacy single-symbol path applies. Composition wins when both are sent.
-  const symbol = (input.symbol || "").trim();
-  if (!composition && !symbol) {
-    throw new AppError(400, "symbol or composition is required");
-  }
   const stdKey = asStdMibKeyOrNull(input.mibStdKey ?? null);
   if (input.mibId && stdKey) {
     throw new AppError(400, "mibId and mibStdKey are mutually exclusive");
   }
+
+  const type      = asMetricRowType(input.type ?? "scalar");
+  const symbol    = trimOrNull(input.symbol);
+  const symbolB   = trimOrNull(input.symbolB);
+  const transform = asTransformForType(input.transform ?? null, type);
+  validateMetricRowShape({ type, symbol, symbolB, transform, label: "override" });
+
   const created = await (prisma as any).manufacturerProfileMetricOverride.create({
     data: {
       metricRowId:  row.id,
       modelPattern: input.modelPattern,
-      // `symbol` is non-null in the DB schema — store the composition's
-      // primary OID (or an empty string if the operator only supplied a
-      // composition with no scalar value) so the column stays satisfied
-      // without losing the bytes-form intent.
-      symbol:       symbol || (composition?.usedSymbol ?? composition?.pctSymbol ?? ""),
+      symbol:       symbol ?? "",
+      symbolB:      type === "double_scalar" ? (symbolB ?? null) : null,
       mibId:        input.mibId ?? null,
       mibStdKey:    stdKey,
-      type:         asType(input.type ?? "scalar"),
-      transform:    asTransform(input.transform ?? null),
+      type,
+      transform:    transform ?? null,
       order:        Number.isFinite(input.order) ? Number(input.order) : 0,
-      composition:  composition ?? null,
     },
   });
   await touchProfile(profileId);
@@ -537,12 +537,12 @@ export async function createOverride(
     id:           created.id,
     modelPattern: created.modelPattern,
     symbol:       created.symbol,
+    symbolB:      created.symbolB ?? null,
     mibId:        created.mibId ?? null,
     mibStdKey:    created.mibStdKey ?? null,
-    type:         asType(created.type),
-    transform:    asTransform(created.transform),
+    type:         asMetricRowType(created.type),
+    transform:    readStoredTransform(created.transform),
     order:        created.order,
-    composition:  shapeStoredComposition(created.composition),
   };
 }
 
@@ -551,12 +551,12 @@ export async function updateOverride(
   input: {
     modelPattern?: string;
     symbol?:       string;
+    symbolB?:      string | null;
     mibId?:        string | null;
     mibStdKey?:    string | null;
     type?:         string;
     transform?:    string | null;
     order?:        number;
-    composition?:  unknown;
   },
 ): Promise<MetricOverrideRow> {
   const existing = await (prisma as any).manufacturerProfileMetricOverride.findUnique({
@@ -579,34 +579,33 @@ export async function updateOverride(
       throw new AppError(400, "modelPattern must be a valid regex");
     }
   }
-  let compositionUpdate: MemoryComposition | null | undefined = undefined;
-  if (input.composition !== undefined) {
-    if (existing.metricRow.metricKey !== "memory" && input.composition !== null) {
-      throw new AppError(400, "composition is only supported on the memory metric");
-    }
-    compositionUpdate = parseMemoryComposition(input.composition);
-  }
-  // When composition is being set, allow `symbol` to remain whatever the
-  // composition's primary OID is; when neither is supplied keep existing.
-  // Reject only the "symbol cleared AND no composition present" case so the
-  // DB's non-null `symbol` column stays satisfied.
-  if (input.symbol !== undefined && !input.symbol.trim()) {
-    // Symbol blank — composition must already cover it.
-    const effectiveComposition =
-      compositionUpdate !== undefined ? compositionUpdate : shapeStoredComposition(existing.composition);
-    if (!effectiveComposition) throw new AppError(400, "symbol is required (or set a composition)");
-  }
+
+  const nextType      = input.type      === undefined ? asMetricRowType(existing.type) : asMetricRowType(input.type);
+  const nextSymbol    = input.symbol    === undefined ? (existing.symbol ?? null)     : trimOrNull(input.symbol);
+  const nextSymbolB   = input.symbolB   === undefined ? (existing.symbolB ?? null)    : trimOrNull(input.symbolB);
+  const nextTransform = input.transform === undefined
+    ? readStoredTransform(existing.transform)
+    : asTransformForType(input.transform, nextType);
+
+  validateMetricRowShape({
+    type:      nextType,
+    symbol:    nextSymbol,
+    symbolB:   nextSymbolB,
+    transform: nextTransform,
+    label:     "override",
+  });
+
   const updated = await (prisma as any).manufacturerProfileMetricOverride.update({
     where: { id: overrideId },
     data: {
       modelPattern: input.modelPattern === undefined ? undefined : input.modelPattern,
-      symbol:       input.symbol === undefined       ? undefined : input.symbol,
-      mibId:        input.mibId === undefined        ? undefined : (input.mibId ?? null),
-      mibStdKey:    input.mibStdKey === undefined    ? undefined : nextStdKey,
-      type:         input.type === undefined         ? undefined : asType(input.type),
-      transform:    input.transform === undefined    ? undefined : (asTransform(input.transform) ?? null),
-      order:        input.order === undefined        ? undefined : Number(input.order),
-      composition:  compositionUpdate === undefined  ? undefined : (compositionUpdate ?? null),
+      symbol:       input.symbol       === undefined ? undefined : (nextSymbol ?? ""),
+      symbolB:      nextType === "double_scalar" ? (nextSymbolB ?? null) : null,
+      mibId:        input.mibId        === undefined ? undefined : (input.mibId ?? null),
+      mibStdKey:    input.mibStdKey    === undefined ? undefined : nextStdKey,
+      type:         input.type         === undefined ? undefined : nextType,
+      transform:    input.transform    === undefined ? undefined : (nextTransform ?? null),
+      order:        input.order        === undefined ? undefined : Number(input.order),
     },
   });
   await touchProfile(existing.metricRow.profileId);
@@ -615,12 +614,12 @@ export async function updateOverride(
     id:           updated.id,
     modelPattern: updated.modelPattern,
     symbol:       updated.symbol,
+    symbolB:      updated.symbolB ?? null,
     mibId:        updated.mibId ?? null,
     mibStdKey:    updated.mibStdKey ?? null,
-    type:         asType(updated.type),
-    transform:    asTransform(updated.transform),
+    type:         asMetricRowType(updated.type),
+    transform:    readStoredTransform(updated.transform),
     order:        updated.order,
-    composition:  shapeStoredComposition(updated.composition),
   };
 }
 
@@ -664,9 +663,9 @@ export async function createWidget(
       name:           input.name.trim(),
       symbol:         input.symbol.trim(),
       mibId:          input.mibId,
-      type:           asType(input.type ?? "scalar"),
+      type:           asWidgetSymbolType(input.type ?? "scalar"),
       widgetType:     asWidgetType(input.widgetType),
-      transform:      asTransform(input.transform ?? null),
+      transform:      asTransformForType(input.transform ?? null, "scalar") as TransformKind | null,
       displayOptions: input.displayOptions ?? {},
       order:          Number.isFinite(input.order) ? Number(input.order) : 0,
       modelPattern:   input.modelPattern ?? null,
@@ -705,9 +704,9 @@ export async function updateWidget(
       name:           input.name === undefined           ? undefined : input.name.trim(),
       symbol:         input.symbol === undefined         ? undefined : input.symbol.trim(),
       mibId:          input.mibId === undefined          ? undefined : input.mibId,
-      type:           input.type === undefined           ? undefined : asType(input.type),
+      type:           input.type === undefined           ? undefined : asWidgetSymbolType(input.type),
       widgetType:     input.widgetType === undefined     ? undefined : asWidgetType(input.widgetType),
-      transform:      input.transform === undefined      ? undefined : (asTransform(input.transform) ?? null),
+      transform:      input.transform === undefined      ? undefined : (asTransformForType(input.transform, "scalar") as TransformKind | null ?? null),
       displayOptions: input.displayOptions === undefined ? undefined : (input.displayOptions ?? {}),
       order:          input.order === undefined          ? undefined : Number(input.order),
       modelPattern:   input.modelPattern === undefined   ? undefined : (input.modelPattern ?? null),
@@ -740,9 +739,9 @@ function shapeWidget(w: any): CustomWidgetRow {
     name:           w.name,
     symbol:         w.symbol,
     mibId:          w.mibId,
-    type:           asType(w.type),
+    type:           asWidgetSymbolType(w.type),
     widgetType:     asWidgetType(w.widgetType),
-    transform:      asTransform(w.transform),
+    transform:      w.transform && isTransformKind(w.transform) ? (w.transform as TransformKind) : null,
     displayOptions: (w.displayOptions ?? {}) as Record<string, unknown>,
     order:          w.order,
     modelPattern:   w.modelPattern ?? null,

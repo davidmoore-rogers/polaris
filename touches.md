@@ -2327,7 +2327,7 @@ Listed alphabetically.
 
 **What it owns:** Built-in vendor telemetry profiles (Cisco, Juniper, Mikrotik, Fortinet FortiSwitch, Fortinet FortiAP, Fortinet FortiGate, HP-Aruba, Dell) matching assets by manufacturer + OS + model regex and exposing symbolic OID queries for CPU / memory / disk / temperature via oidRegistry resolution.
 
-**Public API:** `VENDOR_TELEMETRY_PROFILES`, `pickVendorProfile`, `VendorTelemetryProfile`, `CpuQuery`, `MemoryQuery`, `DiskQuery`, `TemperatureQuery`.
+**Public API:** `VENDOR_TELEMETRY_PROFILES`, `pickVendorProfile`, `memoryQueryToDoubleScalar`, `VendorTelemetryProfile`, `CpuQuery`, `MemoryQuery`, `DiskQuery`, `TemperatureQuery`. `memoryQueryToDoubleScalar(mem)` translates a hardcoded `MemoryQuery` into the editable Manufacturer Profile's double-scalar shape (`{type, symbol, symbolB, transform}` with the matching `CombinerKind`) — consumed by `seedManufacturerProfiles` and `backfillManufacturerProfileMemoryComposition`. Returns null for empty memory blocks.
 
 **Cross-service deps:** None (vendorTelemetryProfiles is leaf; consumed by monitoringService + mibService).
 

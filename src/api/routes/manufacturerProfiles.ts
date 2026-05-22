@@ -19,7 +19,12 @@ import {
   updateMetricRow, createOverride, updateOverride, deleteOverride,
   createWidget, updateWidget, deleteWidget,
 } from "../../services/manufacturerProfileService.js";
-import { TRANSFORM_KINDS, TRANSFORM_LABELS } from "../../utils/symbolTransforms.js";
+import {
+  TRANSFORM_KINDS,
+  TRANSFORM_LABELS,
+  COMBINER_KINDS,
+  COMBINER_LABELS,
+} from "../../utils/symbolTransforms.js";
 import { logger } from "../../utils/logger.js";
 
 const router: Router = Router();
@@ -42,7 +47,11 @@ function handle(fn: (req: Request, res: Response) => Promise<void>) {
 // GET / — list every profile (summary view).
 router.get("/", requirePermission("manufacturerProfiles", "read"), handle(async (_req, res) => {
   const profiles = await listProfiles();
-  send(res, { profiles, transforms: TRANSFORM_KINDS.map((k) => ({ kind: k, label: TRANSFORM_LABELS[k] })) });
+  send(res, {
+    profiles,
+    transforms: TRANSFORM_KINDS.map((k) => ({ kind: k, label: TRANSFORM_LABELS[k] })),
+    combiners:  COMBINER_KINDS.map((k) => ({ kind: k, label: COMBINER_LABELS[k] })),
+  });
 }));
 
 // GET /:id — full profile (metrics + overrides + custom widgets).
@@ -63,19 +72,20 @@ router.post("/", requirePermission("manufacturerProfiles", "write"), handle(asyn
   send(res, { profile }, 201);
 }));
 
-// PUT /:id/metrics/:metricKey — set the metric row's default symbol/mibId/type/transform.
-// Body additionally accepts `composition` for the memory metric — see
-// `parseMemoryComposition` in manufacturerProfileService for the shape and
-// per-shape required fields. Passing `composition: null` clears it.
+// PUT /:id/metrics/:metricKey — set the metric row's default symbol(s) +
+// mib + type + transform. Body fields: { defaultSymbol, defaultSymbolB,
+// defaultMibId, defaultMibStdKey, defaultType, defaultTransform }. The
+// service validates that the shape is internally consistent (scalar →
+// symbolB null, double_scalar → both symbols required, table → symbolB +
+// transform null, empty-row state allowed).
 router.put("/:id/metrics/:metricKey", requirePermission("manufacturerProfiles", "write"), handle(async (req, res) => {
   const updated = await updateMetricRow(String(req.params.id), String(req.params.metricKey), req.body || {});
   send(res, { metric: updated });
 }));
 
-// POST /:id/metrics/:metricKey/overrides — add a per-model override.
-// Body additionally accepts `composition` for the memory metric (same shape
-// as the metric row's composition). When composition is supplied, the `symbol`
-// field is optional — the resolver consumes the composition directly.
+// POST /:id/metrics/:metricKey/overrides — add a per-model override. Body
+// fields: { modelPattern, symbol, symbolB, mibId, mibStdKey, type,
+// transform, order }. Same shape validation as the metric row.
 router.post("/:id/metrics/:metricKey/overrides", requirePermission("manufacturerProfiles", "write"), handle(async (req, res) => {
   const created = await createOverride(String(req.params.id), String(req.params.metricKey), req.body || {});
   send(res, { override: created }, 201);

@@ -17,7 +17,7 @@
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { runInstrumentedJob } from "./_metrics.js";
-import { VENDOR_TELEMETRY_PROFILES, type VendorTelemetryProfile, memoryQueryToComposition } from "../services/vendorTelemetryProfiles.js";
+import { VENDOR_TELEMETRY_PROFILES, type VendorTelemetryProfile, memoryQueryToDoubleScalar } from "../services/vendorTelemetryProfiles.js";
 import { refreshProfileCache } from "../services/manufacturerProfileService.js";
 import { normalizeManufacturer } from "../utils/manufacturerNormalize.js";
 
@@ -46,51 +46,68 @@ const SEED_MAP: SeedRow[] = [
   { vendorLabel: "Dell PowerConnect / Networking",    manufacturer: "Dell",     modelPattern: null },
 ];
 
-// Translate a VENDOR_TELEMETRY_PROFILES entry's metric queries into a
-// {symbol, type} pair per metric key. The hardcoded profile shape is
-// richer than what the DB schema captures (mode="walk-avg", multi-symbol
-// memory queries with separate used/free/total) — for seeding we capture
-// the primary symbol; operators with bespoke needs replace it in the UI.
+// Translate a VENDOR_TELEMETRY_PROFILES entry's metric queries into a per-
+// metric seed shape. Memory may be either `scalar` (single percent OID) or
+// `double_scalar` (two byte OIDs combined by `transform`) depending on what
+// the hardcoded vendor shape exposes; CPU/temperature/disk are scalar.
 interface MetricSeed {
-  metricKey:   string;
-  symbol:      string;
-  type:        "scalar" | "table";
-  // Multi-OID composition for memory (today). Captured from the hardcoded
-  // VENDOR_TELEMETRY_PROFILES bytes-form shape so the editable profile lines
-  // up with what the runtime baseline already does.
-  composition: ReturnType<typeof memoryQueryToComposition>;
+  metricKey: string;
+  symbol:    string;
+  symbolB:   string | null;
+  type:      "scalar" | "double_scalar" | "table";
+  transform: string | null;
 }
 
 function profileToMetricSeeds(p: VendorTelemetryProfile): MetricSeed[] {
   const out: MetricSeed[] = [];
   if (p.cpu) {
     out.push({
-      metricKey:   "cpu",
-      symbol:      p.cpu.symbol,
-      type:        p.cpu.mode === "walk-avg" ? "table" : "scalar",
-      composition: null,
+      metricKey: "cpu",
+      symbol:    p.cpu.symbol,
+      symbolB:   null,
+      type:      p.cpu.mode === "walk-avg" ? "table" : "scalar",
+      transform: null,
     });
   }
   if (p.memory) {
-    const mem = p.memory;
-    // Primary symbol is what gets stored in the legacy single-symbol column;
-    // composition carries the richer bytes-form shape when applicable. Both
-    // are emitted — the resolver consults composition first.
-    const memSymbol = mem.usedBytesSymbol || mem.totalBytesSymbol || mem.pctSymbol || mem.freeBytesSymbol;
-    if (memSymbol) {
+    const ds = memoryQueryToDoubleScalar(p.memory);
+    if (ds) {
       out.push({
-        metricKey:   "memory",
-        symbol:      memSymbol,
-        type:        mem.walkSubtree ? "table" : "scalar",
-        composition: memoryQueryToComposition(mem),
+        metricKey: "memory",
+        symbol:    ds.symbol,
+        symbolB:   ds.symbolB,
+        // walkSubtree forms (Cisco / Juniper) walk a table column under the
+        // hood — the runtime path averages/sums the result. The editable
+        // profile records the type the resolver will use, not the wire
+        // shape, so percent → scalar and bytes-form → double_scalar
+        // regardless of walkSubtree.
+        type:      ds.type,
+        transform: ds.transform,
       });
     }
   }
   if (p.disk) {
-    out.push({ metricKey: "storage", symbol: p.disk.usedBytesSymbol, type: "scalar", composition: null });
+    // Disk in the hardcoded profile is always bytes-form (used + total).
+    // Stamp it as double_scalar so the editable surface matches what the
+    // resolver does at probe time when the collector swap lands. The
+    // current runtime monitor still consults the hardcoded constant
+    // directly for the disk-fallback path — see collectSystemInfoSnmp.
+    out.push({
+      metricKey: "storage",
+      symbol:    p.disk.usedBytesSymbol,
+      symbolB:   p.disk.totalBytesSymbol,
+      type:      "double_scalar",
+      transform: "a_over_b_as_percent",
+    });
   }
   if (p.temperature) {
-    out.push({ metricKey: "temperature", symbol: p.temperature.symbol, type: "scalar", composition: null });
+    out.push({
+      metricKey: "temperature",
+      symbol:    p.temperature.symbol,
+      symbolB:   null,
+      type:      "scalar",
+      transform: null,
+    });
   }
   return out;
 }
@@ -150,12 +167,11 @@ export async function seedManufacturerProfiles(): Promise<{ profiles: number; ov
           data: {
             id,
             profileId,
-            metricKey:     mk,
-            defaultSymbol: seed?.symbol ?? null,
-            defaultType:   seed?.type ?? "scalar",
-            // Composition is memory-only today and only stamped when the
-            // vendor's hardcoded shape provides one. Null otherwise.
-            composition:   seed?.composition ?? null,
+            metricKey:        mk,
+            defaultSymbol:    seed?.symbol  ?? null,
+            defaultSymbolB:   seed?.symbolB ?? null,
+            defaultType:      seed?.type    ?? "scalar",
+            defaultTransform: seed?.transform ?? null,
           },
         }),
       );
@@ -204,12 +220,10 @@ export async function seedManufacturerProfiles(): Promise<{ profiles: number; ov
             metricRowId,
             modelPattern: seedRow.modelPattern,
             symbol:       s.symbol,
+            symbolB:      s.symbolB ?? null,
             type:         s.type,
+            transform:    s.transform ?? null,
             order:        0,
-            // Composition is memory-only today; carried into the override row
-            // so e.g. the FortiSwitch entry under Fortinet's Memory metric
-            // gets `{ shape: "bytes_used_total", usedSymbol, totalSymbol }`.
-            composition:  s.composition ?? null,
           },
         });
         createdOverrides += 1;

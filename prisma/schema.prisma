@@ -1698,15 +1698,23 @@ model ManufacturerProfileMetric {
   // Lets the Manufacturer Profile table show a meaningful MIB label for
   // metrics whose symbol comes from a built-in seed instead of "seed".
   defaultMibStdKey String?
-  defaultType      String   @default("scalar") // "scalar" | "table"
-  defaultTransform String?  // "celsius_to_fahrenheit" | "bytes_to_mb" | ... | null
-  // Multi-OID composition. Today consulted only when metricKey="memory" — lets
-  // operators express the bytes-form memory shape (Used+Total or Used+Free) in
-  // the editable profile, matching what the hardcoded VENDOR_TELEMETRY_PROFILES
-  // baseline can already do for FortiSwitch. When present, takes precedence
-  // over defaultSymbol. Shape: { shape: "percent" | "bytes_used_total" |
-  // "bytes_used_free", usedSymbol?, totalSymbol?, freeSymbol?, pctSymbol? }.
-  // Validated by manufacturerProfileService.parseMemoryComposition.
+  defaultType      String   @default("scalar") // "scalar" | "double_scalar" | "table"
+  // Unary transforms (TransformKind, e.g. celsius_to_fahrenheit, bytes_to_gb)
+  // when defaultType="scalar"; binary combiners (CombinerKind, e.g.
+  // a_over_b_as_percent) when defaultType="double_scalar"; null on
+  // defaultType="table". Validated against the registries in
+  // src/utils/symbolTransforms.ts at the service layer.
+  defaultTransform String?
+  // Second OID for the double_scalar shape. Populated when defaultType=
+  // "double_scalar"; the combiner in defaultTransform is applied as
+  // f(defaultSymbol, defaultSymbolB) at probe time. Null on scalar / table.
+  defaultSymbolB   String?
+  // DEPRECATED — superseded by the generic double_scalar shape carried in
+  // defaultType + defaultTransform + defaultSymbolB. Kept for one release as
+  // a rollback safety net for the data migration that copied the legacy
+  // memory-only `composition` blob into the new columns. To be dropped in a
+  // follow-up migration once production has settled. New writes must NOT
+  // populate this column; new reads ignore it.
   composition      Json?
 
   overrides ManufacturerProfileMetricOverride[]
@@ -1731,13 +1739,15 @@ model ManufacturerProfileMetricOverride {
   // Same display-only standard-MIB hint as the parent metric row. See
   // ManufacturerProfileMetric.defaultMibStdKey.
   mibStdKey    String?
-  type         String   @default("scalar") // "scalar" | "table"
-  transform    String?
+  type         String   @default("scalar") // "scalar" | "double_scalar" | "table"
+  transform    String?  // TransformKind on scalar; CombinerKind on double_scalar; null on table
+  // Second OID for the double_scalar shape — mirrors the parent metric row's
+  // defaultSymbolB. The combiner in `transform` is applied as
+  // f(symbol, symbolB) at probe time. Null on scalar / table.
+  symbolB      String?
   order        Int      @default(0)
-  // Multi-OID composition — mirrors the parent metric row's column. Same
-  // shape, same precedence rule: when present, takes precedence over `symbol`.
-  // Lets a per-model override carry its own memory Shape (e.g. parent metric
-  // = bytes_used_total, override for a specific model = percent, or vice versa).
+  // DEPRECATED — see ManufacturerProfileMetric.composition for the rationale
+  // and removal plan. New writes must NOT populate this column.
   composition  Json?
 
   @@index([metricRowId, order])

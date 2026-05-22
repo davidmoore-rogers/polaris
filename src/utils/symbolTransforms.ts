@@ -1,17 +1,25 @@
 /**
- * src/utils/symbolTransforms.ts — Pure value-transform registry consumed by
+ * src/utils/symbolTransforms.ts — Pure value-transform registries consumed by
  * the manufacturer-profile resolver and the Custom MIB tab.
  *
- * When an operator picks a vendor-specific MIB symbol whose units don't
- * match what Polaris stores natively (FortiOS reports temperature in
- * Celsius, but a chassis-monitor MIB might report Fahrenheit; some vendors
- * publish bytes where the chart expects MB), they pair the symbol with a
- * transform here. The probe path applies the transform after the SNMP
- * value lands and before the sample row is written.
+ * Two registries live here:
  *
- * Pure (no I/O, no DB) so it can be exercised from unit tests trivially
- * and reused on the frontend if we ever need preview-time conversion.
+ *   1. Unary transforms (`TransformKind`) — applied to a single scalar reading
+ *      before persistence. Pairs with `type="scalar"` on a metric row. Used
+ *      when the device's units don't match what Polaris stores natively
+ *      (Celsius vs Fahrenheit; bytes vs MB; ratio vs percent).
+ *
+ *   2. Binary combiners (`CombinerKind`) — applied to two scalar readings
+ *      (`a` and `b`) to produce one number. Pairs with `type="double_scalar"`
+ *      on a metric row. Used when a metric is exposed by the device as two
+ *      OIDs that have to be combined (e.g. memory `used` + `total`; disk
+ *      `used` + `free`).
+ *
+ * Pure (no I/O, no DB) so unit tests are trivial and the frontend can reuse
+ * the labels.
  */
+
+// ─── Unary transforms ────────────────────────────────────────────────────
 
 export type TransformKind =
   | "celsius_to_fahrenheit"
@@ -53,7 +61,7 @@ export function isTransformKind(value: unknown): value is TransformKind {
 }
 
 /**
- * Apply the named transform to a raw numeric value. Returns the input
+ * Apply the named unary transform to a raw numeric value. Returns the input
  * unchanged when `kind` is null/undefined or the value isn't a finite
  * number — null/non-numeric inputs flow through so an upstream "no data"
  * signal isn't silently coerced to 0.
@@ -73,5 +81,76 @@ export function applyTransform(value: number | null | undefined, kind: Transform
     case "percent_to_ratio":      return value / 100;
     case "signed_to_unsigned":    return value < 0 ? value + 2 ** 32 : value;
     default:                      return value;
+  }
+}
+
+// ─── Binary combiners ────────────────────────────────────────────────────
+
+export type CombinerKind =
+  | "a_over_b_as_percent"           // a / b × 100         (used / total → memory %)
+  | "a_over_a_plus_b_as_percent"    // a / (a + b) × 100   (used / (used + free) → memory %)
+  | "b_minus_a_over_b_as_percent"   // (b - a) / b × 100   (free / total → "% used" via inverse)
+  | "a_minus_b"                     // a - b               (total - free = used)
+  | "a_plus_b"                      // a + b               (used + free = total)
+  | "a_over_b_ratio";               // a / b               (used / total → ratio 0..1)
+
+export const COMBINER_KINDS: CombinerKind[] = [
+  "a_over_b_as_percent",
+  "a_over_a_plus_b_as_percent",
+  "b_minus_a_over_b_as_percent",
+  "a_minus_b",
+  "a_plus_b",
+  "a_over_b_ratio",
+];
+
+export const COMBINER_LABELS: Record<CombinerKind, string> = {
+  a_over_b_as_percent:         "A / B × 100 (e.g. used / total → percent)",
+  a_over_a_plus_b_as_percent:  "A / (A + B) × 100 (e.g. used / (used + free) → percent)",
+  b_minus_a_over_b_as_percent: "(B − A) / B × 100 (e.g. used / total → percent when A=free, B=total)",
+  a_minus_b:                   "A − B (e.g. total − free = used)",
+  a_plus_b:                    "A + B (e.g. used + free = total)",
+  a_over_b_ratio:              "A / B (ratio 0..1)",
+};
+
+export function isCombinerKind(value: unknown): value is CombinerKind {
+  return typeof value === "string" && (COMBINER_KINDS as string[]).includes(value);
+}
+
+/**
+ * Apply the named binary combiner to two raw numeric values. Returns null
+ * when either input is null/undefined/non-finite (caller decides how to
+ * propagate "no data"). Division-by-zero and zero-sum denominators return
+ * null rather than Infinity/NaN so downstream chart code can render "—"
+ * cleanly without special-casing.
+ */
+export function applyCombiner(
+  a: number | null | undefined,
+  b: number | null | undefined,
+  kind: CombinerKind | null | undefined,
+): number | null {
+  if (a === null || a === undefined || b === null || b === undefined) return null;
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  if (!kind) return null;
+  switch (kind) {
+    case "a_over_b_as_percent":
+      if (b === 0) return null;
+      return (a / b) * 100;
+    case "a_over_a_plus_b_as_percent": {
+      const denom = a + b;
+      if (denom === 0) return null;
+      return (a / denom) * 100;
+    }
+    case "b_minus_a_over_b_as_percent":
+      if (b === 0) return null;
+      return ((b - a) / b) * 100;
+    case "a_minus_b":
+      return a - b;
+    case "a_plus_b":
+      return a + b;
+    case "a_over_b_ratio":
+      if (b === 0) return null;
+      return a / b;
+    default:
+      return null;
   }
 }

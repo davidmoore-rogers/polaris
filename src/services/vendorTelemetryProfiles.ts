@@ -237,34 +237,42 @@ export function pickVendorProfile(
 
 /**
  * Translate a hardcoded `MemoryQuery` into the editable Manufacturer Profile's
- * `composition` JSON shape (see `manufacturerProfileService.MemoryComposition`).
- * Used by the seed job to stamp the bytes-form memory shape onto fresh installs
- * AND by the backfill job to retrofit existing installs that ran the seed
- * before this column existed. Returns null when the vendor's memory shape
- * doesn't map to a known composition (e.g. Cisco's `usedBytesSymbol +
- * freeBytesSymbol` is `bytes_used_free`; a bare `pctSymbol` is `percent`;
- * an empty `memory` block returns null and the seed falls back to whatever
- * single-symbol baseline it used before this column existed).
+ * double-scalar shape (`{ type, symbol, symbolB, transform }`). Used by the
+ * seed job to stamp memory rows onto fresh installs AND by the backfill job
+ * to retrofit existing installs that ran the seed before this shape existed.
+ * Returns null when the vendor's memory shape doesn't map cleanly (e.g.
+ * empty `memory` block).
+ *
+ * Mapping rules:
+ *   - usedBytes + totalBytes  → double_scalar, symbol=used,  symbolB=total, transform=a_over_b_as_percent
+ *   - usedBytes + freeBytes   → double_scalar, symbol=used,  symbolB=free,  transform=a_over_a_plus_b_as_percent
+ *   - pctSymbol               → scalar,        symbol=pct,   symbolB=null,  transform=null
  */
-export function memoryQueryToComposition(mem: MemoryQuery | undefined): {
-  shape:        "percent" | "bytes_used_total" | "bytes_used_free";
-  usedSymbol?:  string;
-  totalSymbol?: string;
-  freeSymbol?:  string;
-  pctSymbol?:   string;
+export function memoryQueryToDoubleScalar(mem: MemoryQuery | undefined): {
+  type:      "scalar" | "double_scalar";
+  symbol:    string;
+  symbolB:   string | null;
+  transform: string | null;
 } | null {
   if (!mem) return null;
-  // Bytes form, used + total (FortiSwitch).
   if (mem.usedBytesSymbol && mem.totalBytesSymbol) {
-    return { shape: "bytes_used_total", usedSymbol: mem.usedBytesSymbol, totalSymbol: mem.totalBytesSymbol };
+    return {
+      type:      "double_scalar",
+      symbol:    mem.usedBytesSymbol,
+      symbolB:   mem.totalBytesSymbol,
+      transform: "a_over_b_as_percent",
+    };
   }
-  // Bytes form, used + free (Cisco).
   if (mem.usedBytesSymbol && mem.freeBytesSymbol) {
-    return { shape: "bytes_used_free", usedSymbol: mem.usedBytesSymbol, freeSymbol: mem.freeBytesSymbol };
+    return {
+      type:      "double_scalar",
+      symbol:    mem.usedBytesSymbol,
+      symbolB:   mem.freeBytesSymbol,
+      transform: "a_over_a_plus_b_as_percent",
+    };
   }
-  // Single percent OID (Juniper, FortiGate/FortiAP, generic Fortinet).
   if (mem.pctSymbol) {
-    return { shape: "percent", pctSymbol: mem.pctSymbol };
+    return { type: "scalar", symbol: mem.pctSymbol, symbolB: null, transform: null };
   }
   return null;
 }
