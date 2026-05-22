@@ -3846,16 +3846,23 @@ function _renderInterfacesTable(container, si, asset) {
 
   // Switch-port VLAN chip — present only on managed FortiSwitches where the
   // monitoring path overlaid the parent FortiGate's CMDB ports table. Access
-  // ports get a single "VLAN <n>" chip; trunks get "Trunk <native>/<tagged>".
-  // Long tagged lists collapse to a "+N more" tail with the full list in the
-  // title tooltip.
+  // ports get a single "VLAN <n>" chip; explicit-list trunks get
+  // "Trunk <native>/<tagged>"; trunk-all ports (`set allowed-vlans all`)
+  // get "Trunk all" since enumerating 4094 VLANs would be useless. Long
+  // tagged lists collapse to "+N more" with the full list in the tooltip.
   function vlanChip(iface) {
     var native = (iface.nativeVlan != null) ? iface.nativeVlan : null;
     var tagged = Array.isArray(iface.taggedVlans) ? iface.taggedVlans : [];
-    if (native == null && tagged.length === 0) return "";
+    var trunkAll = iface.trunksAllVlans === true;
+    if (native == null && tagged.length === 0 && !trunkAll) return "";
     var color = "#0d9488";
     var label, fullTitle;
-    if (tagged.length === 0) {
+    if (trunkAll) {
+      var nativeAllBit = native != null ? (native + "/") : "";
+      label = "Trunk " + nativeAllBit + "all";
+      fullTitle = "Trunk port — allowed-vlans=all" +
+        (native != null ? " · native VLAN " + native : "");
+    } else if (tagged.length === 0) {
       label = "VLAN " + native;
       fullTitle = "Access port — native VLAN " + native;
     } else {
@@ -7206,21 +7213,36 @@ function _ifaceVlanBlockHTML(iface) {
   if (!iface) return "";
   var native = (iface.nativeVlan != null) ? iface.nativeVlan : null;
   var tagged = Array.isArray(iface.taggedVlans) ? iface.taggedVlans : [];
-  if (native == null && tagged.length === 0) return "";
-  var role = tagged.length === 0 ? "Access" : "Trunk";
+  var trunkAll = iface.trunksAllVlans === true;
+  if (native == null && tagged.length === 0 && !trunkAll) return "";
+  // Role pill: trunk-all wins over explicit-list trunk wins over access.
+  // Operationally these are three distinct states and the badge must show
+  // which one without forcing the operator to read the body of the card.
+  var role = trunkAll ? "Trunk (all)" : (tagged.length === 0 ? "Access" : "Trunk");
   var nativeBit = native != null
     ? '<div><span style="font-size:0.75rem;color:var(--color-text-secondary)">Native VLAN</span> ' +
         '<span class="mono" style="margin-left:6px">' + escapeHtml(String(native)) + '</span></div>'
     : "";
-  var taggedBit = tagged.length > 0
-    ? '<div style="margin-top:0.25rem"><span style="font-size:0.75rem;color:var(--color-text-secondary)">Tagged VLANs</span> ' +
-        '<span class="mono" style="margin-left:6px">' + escapeHtml(tagged.join(", ")) + '</span> ' +
-        '<span style="font-size:0.7rem;color:var(--color-text-secondary)">(' + tagged.length + ')</span></div>'
-    : "";
+  var taggedBit;
+  if (trunkAll) {
+    taggedBit = '<div style="margin-top:0.25rem"><span style="font-size:0.75rem;color:var(--color-text-secondary)">Allowed VLANs</span> ' +
+      '<span class="mono" style="margin-left:6px">all</span>' +
+      (tagged.length > 0
+        ? ' <span style="font-size:0.7rem;color:var(--color-text-secondary)">(' + tagged.length + ' explicitly listed: ' + escapeHtml(tagged.join(", ")) + ')</span>'
+        : "") +
+    '</div>';
+  } else if (tagged.length > 0) {
+    taggedBit = '<div style="margin-top:0.25rem"><span style="font-size:0.75rem;color:var(--color-text-secondary)">Tagged VLANs</span> ' +
+      '<span class="mono" style="margin-left:6px">' + escapeHtml(tagged.join(", ")) + '</span> ' +
+      '<span style="font-size:0.7rem;color:var(--color-text-secondary)">(' + tagged.length + ')</span>' +
+    '</div>';
+  } else {
+    taggedBit = "";
+  }
   return '<div style="margin-bottom:0.75rem;padding:0.5rem 0.65rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px">' +
     '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem">' +
       '<span style="font-size:0.8rem;font-weight:600;color:var(--color-text-secondary)">VLAN</span>' +
-      '<span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#0d948818;color:#0d9488;border:1px solid #0d948830">' + role + '</span>' +
+      '<span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#0d948818;color:#0d9488;border:1px solid #0d948830">' + escapeHtml(role) + '</span>' +
     '</div>' +
     nativeBit +
     taggedBit +

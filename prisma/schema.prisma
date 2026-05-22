@@ -797,8 +797,15 @@ model AssetInterfaceSample {
   // (allowed-vlans minus untagged-vlans), expanded to integer ids. Other
   // asset types and the SNMP-only path on non-Fortinet switches leave both
   // null/empty.
-  nativeVlan  Int?
-  taggedVlans Int[]    @default([])
+  nativeVlan   Int?
+  taggedVlans  Int[]   @default([])
+  // True when the FortiSwitch port has `set allowed-vlans all` — i.e. trunks
+  // every VLAN on the switch. Operationally distinct from an access port
+  // (taggedVlans=[]) AND from an explicit-list trunk (taggedVlans=[10,20]),
+  // so it's a separate flag rather than a sentinel. Detected by reading the
+  // CMDB port's `allowed-vlans-all` field (newer FortiOS) and falling back
+  // to the string sentinel `"all"` in `allowed-vlans` on older versions.
+  trunksAllVlans Boolean @default(false)
   // Operator-set label that overrides ifName in the UI when present.
   // FortiOS CMDB `alias`; SNMP IF-MIB ifAlias (1.3.6.1.2.1.31.1.1.1.18).
   alias       String?

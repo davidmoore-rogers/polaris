@@ -278,6 +278,7 @@ agentsRouter.post("/samples", async (req, res, next) => {
         // reads its own host's NIC table. Always null/empty from this source.
         nativeVlan:  null,
         taggedVlans: [] as number[],
+        trunksAllVlans: false,
         alias:       s.alias ?? null,
         description: s.description ?? null,
       }));

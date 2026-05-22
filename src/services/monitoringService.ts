@@ -1991,6 +1991,7 @@ async function fetchFortinetControllerInventory(
 interface FortiswitchPortVlan {
   nativeVlan: number | null;
   taggedVlans: number[];
+  trunksAllVlans: boolean;
 }
 
 // switchSerialUpper → portName → vlan config
@@ -2008,13 +2009,34 @@ function fortiswitchPortsCacheKey(integrationId: string, deviceName: string): st
   return `${integrationId}::${deviceName}::fsw-ports`;
 }
 
+// FortiOS coerces booleans inconsistently across endpoints — sometimes
+// "enable"/"disable", sometimes "yes"/"no", sometimes real true/false. This
+// helper normalizes them so callers don't have to repeat the case-fold +
+// string-equality dance.
+function fortiosBool(raw: unknown): boolean {
+  if (raw === true) return true;
+  if (typeof raw === "number") return raw !== 0;
+  if (typeof raw !== "string") return false;
+  const s = raw.trim().toLowerCase();
+  return s === "enable" || s === "yes" || s === "true" || s === "1";
+}
+
+// "all"-sentinel detector for FortiOS VLAN list fields. Older FortiOS
+// versions return the literal string "all" instead of an empty array +
+// sibling allowed-vlans-all="enable". Either form must map to "this port
+// trunks every VLAN."
+function isFortiosVlanListAll(raw: unknown): boolean {
+  if (typeof raw === "string") return raw.trim().toLowerCase() === "all";
+  return false;
+}
+
 // FortiOS reports allowed-vlans / untagged-vlans in several shapes depending
 // on version + datasource flag: array of objects with vlan-id / id, array of
-// raw numbers, or a comma-separated string with "10-20" ranges. "all" is a
-// placeholder that means "every VLAN on the switch" and is intentionally
-// dropped — we can't surface "every VLAN" as a finite int list, and the
-// operator-useful question is "which VLANs is this port carrying" not "is it
-// a trunk-all."
+// raw numbers, or a comma-separated string with "10-20" ranges. The "all"
+// sentinel is detected separately by `isFortiosVlanListAll` + the sibling
+// `allowed-vlans-all` field (see fetchFortiswitchControllerPortsCmdb); here
+// it's dropped to `[]` because we can't surface "every VLAN" as a finite
+// int list.
 function parseFortiosVlanList(raw: unknown): number[] {
   const out = new Set<number>();
   const push = (n: unknown): void => {
@@ -2125,7 +2147,13 @@ async function fetchFortiswitchControllerPortsCmdb(
           const allowed   = parseFortiosVlanList(port["allowed-vlans"]);
           const untagged  = new Set(parseFortiosVlanList(port["untagged-vlans"]));
           const tagged    = allowed.filter((v) => !untagged.has(v));
-          portMap.set(portName, { nativeVlan, taggedVlans: tagged });
+          // Trunk-all detection: newer FortiOS exposes a sibling boolean
+          // (`allowed-vlans-all: "enable"`), older versions stuff the
+          // string `"all"` directly into `allowed-vlans`. Honor either.
+          const trunksAllVlans =
+            fortiosBool(port["allowed-vlans-all"]) ||
+            isFortiosVlanListAll(port["allowed-vlans"]);
+          portMap.set(portName, { nativeVlan, taggedVlans: tagged, trunksAllVlans });
         }
         map.set(serial.toUpperCase(), portMap);
       }
@@ -2741,6 +2769,8 @@ export interface InterfaceSample {
   nativeVlan?:  number | null;
   /** Tagged VLAN set for a switch port (allowed-vlans minus untagged-vlans, expanded). Managed FortiSwitches only. */
   taggedVlans?: number[] | null;
+  /** True when the port has `set allowed-vlans all` — trunks every VLAN. Takes precedence over `taggedVlans` for UI display. Managed FortiSwitches only. */
+  trunksAllVlans?: boolean | null;
   /** Operator-set label that overrides ifName in the UI. FortiOS CMDB `alias`; SNMP ifAlias (1.3.6.1.2.1.31.1.1.1.18). */
   alias?:       string | null;
   /** Operator-set free-text comment. FortiOS CMDB `description`; SNMP has no equivalent. */
@@ -3244,6 +3274,7 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
         vlanId:      null,
         nativeVlan:  i.nativeVlan ?? null,
         taggedVlans: i.taggedVlans ?? [],
+        trunksAllVlans: i.trunksAllVlans === true,
         alias:       i.alias       ?? null,
         description: i.description ?? null,
       })),
@@ -3417,8 +3448,9 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
                   for (const iface of data.interfaces) {
                     const cfg = portsForSwitch.get(iface.ifName);
                     if (!cfg) continue;
-                    iface.nativeVlan  = cfg.nativeVlan;
-                    iface.taggedVlans = cfg.taggedVlans;
+                    iface.nativeVlan     = cfg.nativeVlan;
+                    iface.taggedVlans    = cfg.taggedVlans;
+                    iface.trunksAllVlans = cfg.trunksAllVlans;
                     overlaid++;
                   }
                   endVlan({ overlaid, total: data.interfaces.length });
@@ -5654,6 +5686,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
           vlanId:      i.vlanId   ?? null,
           nativeVlan:  i.nativeVlan ?? null,
           taggedVlans: i.taggedVlans ?? [],
+          trunksAllVlans: i.trunksAllVlans === true,
           alias:       i.alias       ?? null,
           description: i.description ?? null,
         })),

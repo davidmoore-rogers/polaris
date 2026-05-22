@@ -93,6 +93,7 @@ export interface InterfaceSampleRow {
   vlanId: number | null;
   nativeVlan: number | null;
   taggedVlans: number[];
+  trunksAllVlans: boolean;
   alias: string | null;
   description: string | null;
 }
