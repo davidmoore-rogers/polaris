@@ -91,6 +91,8 @@ export interface InterfaceSampleRow {
   ifType: string | null;
   ifParent: string | null;
   vlanId: number | null;
+  nativeVlan: number | null;
+  taggedVlans: number[];
   alias: string | null;
   description: string | null;
 }

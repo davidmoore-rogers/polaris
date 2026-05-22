@@ -1977,6 +1977,170 @@ async function fetchFortinetControllerInventory(
   return fetchPromise;
 }
 
+// ─── FortiSwitch port VLAN overlay ────────────────────────────────────────
+//
+// Managed FortiSwitches expose interface counters via SNMP IF-MIB, but the
+// per-port VLAN config (native PVID + tagged allow-list) lives only on the
+// parent FortiGate's CMDB at /api/v2/cmdb/switch-controller/managed-switch.
+// One CMDB call per controller carries every managed switch's ports, so we
+// cache it per (integration, controller) with the same 30s TTL the inventory
+// fetcher uses. Best-effort — overlay failures never break the interface
+// scrape. SNMP-monitored non-Fortinet switches don't get VLAN data here
+// (Q-BRIDGE-MIB would be the cross-vendor path; out of scope for v1).
+
+interface FortiswitchPortVlan {
+  nativeVlan: number | null;
+  taggedVlans: number[];
+}
+
+// switchSerialUpper → portName → vlan config
+type FortiswitchControllerPortsMap = Map<string, Map<string, FortiswitchPortVlan>>;
+
+interface FortiswitchControllerPortsCacheEntry {
+  fetchedAt: number;
+  ports: FortiswitchControllerPortsMap;
+}
+
+const fortiswitchControllerPortsCache = new Map<string, FortiswitchControllerPortsCacheEntry>();
+const inflightFortiswitchPortsFetch = new Map<string, Promise<FortiswitchControllerPortsMap>>();
+
+function fortiswitchPortsCacheKey(integrationId: string, deviceName: string): string {
+  return `${integrationId}::${deviceName}::fsw-ports`;
+}
+
+// FortiOS reports allowed-vlans / untagged-vlans in several shapes depending
+// on version + datasource flag: array of objects with vlan-id / id, array of
+// raw numbers, or a comma-separated string with "10-20" ranges. "all" is a
+// placeholder that means "every VLAN on the switch" and is intentionally
+// dropped — we can't surface "every VLAN" as a finite int list, and the
+// operator-useful question is "which VLANs is this port carrying" not "is it
+// a trunk-all."
+function parseFortiosVlanList(raw: unknown): number[] {
+  const out = new Set<number>();
+  const push = (n: unknown): void => {
+    const v = typeof n === "number" ? n : Number(n);
+    if (Number.isFinite(v) && Number.isInteger(v) && v >= 1 && v <= 4094) out.add(v);
+  };
+  if (raw == null) return [];
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (entry == null) continue;
+      if (typeof entry === "number" || typeof entry === "string") {
+        push(entry);
+        continue;
+      }
+      const obj = entry as Record<string, unknown>;
+      const id = obj["vlan-id"] ?? obj.vlanid ?? obj.id ?? obj.vlan;
+      if (id !== undefined) push(id);
+    }
+  } else if (typeof raw === "string") {
+    const s = raw.trim();
+    if (!s || s.toLowerCase() === "all") return [];
+    for (const part of s.split(",")) {
+      const p = part.trim();
+      if (!p) continue;
+      if (p.includes("-")) {
+        const [a, b] = p.split("-").map((x) => Number(x.trim()));
+        if (Number.isFinite(a) && Number.isFinite(b) && a <= b) {
+          for (let i = a; i <= b; i++) push(i);
+        }
+      } else {
+        push(p);
+      }
+    }
+  }
+  return Array.from(out).sort((a, b) => a - b);
+}
+
+async function fetchFortiswitchControllerPortsCmdb(
+  integration: { id: string; type: string; config: Record<string, unknown> },
+  deviceName: string,
+  timeoutMs: number,
+): Promise<FortiswitchControllerPortsMap> {
+  const cacheKey = fortiswitchPortsCacheKey(integration.id, deviceName);
+  const cached = fortiswitchControllerPortsCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < FORTINET_CONTROLLER_CACHE_TTL_MS) {
+    return cached.ports;
+  }
+  const inflight = inflightFortiswitchPortsFetch.get(cacheKey);
+  if (inflight) return inflight;
+
+  const fetchPromise = (async (): Promise<FortiswitchControllerPortsMap> => {
+    try {
+      // datasource=1 expands range syntax in allowed-vlans / untagged-vlans
+      // into individual {vlan-id} entries on the versions that support it;
+      // older FortiOS ignores the flag and returns the raw string, which the
+      // parser above handles too.
+      const path = "/api/v2/cmdb/switch-controller/managed-switch?datasource=1";
+      let rawRows: unknown;
+      if (integration.type === "fortimanager") {
+        const fmgConfig = integration.config as unknown as FortiManagerConfig;
+        if (fmgConfig.useProxy === false) {
+          if (!fmgConfig.fortigateApiToken || !fmgConfig.mgmtInterface?.trim()) {
+            throw new Error("Direct-mode prerequisites missing for FortiSwitch CMDB ports fetch");
+          }
+          const mgmtIp = await resolveControllerMgmtIp(integration.id, deviceName, fmgConfig);
+          if (!mgmtIp) throw new Error(`Could not resolve ${deviceName}'s management IP`);
+          const directConfig: FortiGateConfig = {
+            host: mgmtIp,
+            port: 443,
+            apiUser: fmgConfig.fortigateApiUser || "",
+            apiToken: fmgConfig.fortigateApiToken,
+            verifySsl: fmgConfig.fortigateVerifySsl === true,
+          };
+          rawRows = await fgRequest<unknown>(directConfig, "GET", path, { timeoutMs });
+        } else {
+          const ac = new AbortController();
+          const timer = setTimeout(() => ac.abort(), timeoutMs);
+          try {
+            rawRows = await fmgProxyRest<unknown>(fmgConfig, deviceName, "GET", path, { signal: ac.signal, integrationId: integration.id });
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+      } else if (integration.type === "fortigate") {
+        rawRows = await fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
+      } else {
+        throw new Error(`Unsupported integration type for FortiSwitch CMDB ports fetch: ${integration.type}`);
+      }
+
+      const rows: unknown[] = Array.isArray(rawRows)
+        ? rawRows
+        : Array.isArray((rawRows as any)?.results) ? (rawRows as any).results : [];
+      const map: FortiswitchControllerPortsMap = new Map();
+      for (const row of rows) {
+        const r = row as Record<string, unknown>;
+        const serial = String(r.sn || r["switch-id"] || r.name || "").trim();
+        if (!serial) continue;
+        const portsRaw = r.ports;
+        if (!Array.isArray(portsRaw)) continue;
+        const portMap = new Map<string, FortiswitchPortVlan>();
+        for (const p of portsRaw) {
+          const port = p as Record<string, unknown>;
+          const portName = String(port["port-name"] ?? "").trim();
+          if (!portName) continue;
+          const nativeRaw = port.vlan;
+          const native = typeof nativeRaw === "number" ? nativeRaw : Number(nativeRaw);
+          const nativeVlan = Number.isFinite(native) && Number.isInteger(native) && native >= 1 && native <= 4094 ? native : null;
+          const allowed   = parseFortiosVlanList(port["allowed-vlans"]);
+          const untagged  = new Set(parseFortiosVlanList(port["untagged-vlans"]));
+          const tagged    = allowed.filter((v) => !untagged.has(v));
+          portMap.set(portName, { nativeVlan, taggedVlans: tagged });
+        }
+        map.set(serial.toUpperCase(), portMap);
+      }
+
+      fortiswitchControllerPortsCache.set(cacheKey, { fetchedAt: Date.now(), ports: map });
+      return map;
+    } finally {
+      inflightFortiswitchPortsFetch.delete(cacheKey);
+    }
+  })();
+
+  inflightFortiswitchPortsFetch.set(cacheKey, fetchPromise);
+  return fetchPromise;
+}
+
 async function probeFortinetController(
   asset: {
     id: string;
@@ -2573,6 +2737,10 @@ export interface InterfaceSample {
   ifParent?:    string | null;
   /** 802.1Q VLAN ID. FortiOS REST only. */
   vlanId?:      number | null;
+  /** Untagged PVID for a switch port. Managed FortiSwitches only — overlaid from the parent FortiGate's `switch-controller/managed-switch` CMDB. */
+  nativeVlan?:  number | null;
+  /** Tagged VLAN set for a switch port (allowed-vlans minus untagged-vlans, expanded). Managed FortiSwitches only. */
+  taggedVlans?: number[] | null;
   /** Operator-set label that overrides ifName in the UI. FortiOS CMDB `alias`; SNMP ifAlias (1.3.6.1.2.1.31.1.1.1.18). */
   alias?:       string | null;
   /** Operator-set free-text comment. FortiOS CMDB `description`; SNMP has no equivalent. */
@@ -3074,6 +3242,8 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
         ifType:      null,
         ifParent:    null,
         vlanId:      null,
+        nativeVlan:  i.nativeVlan ?? null,
+        taggedVlans: i.taggedVlans ?? [],
         alias:       i.alias       ?? null,
         description: i.description ?? null,
       })),
@@ -3219,6 +3389,47 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
           const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any, sysInfoTimeout);
           endIpsec({ tunnels: ipsec?.length ?? null });
           if (ipsec !== undefined) data.ipsecTunnels = ipsec;
+          // FortiSwitch port-VLAN overlay. SNMP IF-MIB gives us per-port
+          // counters but not VLAN membership; the parent FortiGate's
+          // switch-controller CMDB does. One cached call per controller per
+          // 30s, keyed by serial, joined onto the in-memory InterfaceSample
+          // list by port-name == ifName. Best-effort: any failure leaves the
+          // VLAN fields null on every row and the interface scrape proceeds.
+          if (asset.assetType === "switch" && asset.serialNumber) {
+            const topology = (asset.fortinetTopology ?? {}) as Record<string, unknown>;
+            let controllerName = typeof topology.controllerFortigate === "string"
+              ? topology.controllerFortigate.trim()
+              : "";
+            if (!controllerName && integration.type === "fortigate") {
+              controllerName = String((integration.config as Record<string, unknown>).host || "");
+            }
+            if (controllerName) {
+              const endVlan = startPhase("systeminfo.snmp.fortiswitch_vlan_overlay");
+              try {
+                const portsMap = await fetchFortiswitchControllerPortsCmdb(
+                  integration as any,
+                  controllerName,
+                  sysInfoTimeout,
+                );
+                const portsForSwitch = portsMap.get(asset.serialNumber.toUpperCase());
+                if (portsForSwitch && portsForSwitch.size > 0) {
+                  let overlaid = 0;
+                  for (const iface of data.interfaces) {
+                    const cfg = portsForSwitch.get(iface.ifName);
+                    if (!cfg) continue;
+                    iface.nativeVlan  = cfg.nativeVlan;
+                    iface.taggedVlans = cfg.taggedVlans;
+                    overlaid++;
+                  }
+                  endVlan({ overlaid, total: data.interfaces.length });
+                } else {
+                  endVlan({ overlaid: 0, total: data.interfaces.length, reason: "switch_not_in_cmdb" });
+                }
+              } catch (err: any) {
+                endVlan({ overlaid: 0, total: data.interfaces.length, error: err?.message || String(err) });
+              }
+            }
+          }
         }
       } else {
         // FortiOS REST path. Skip the FortiOS LLDP call when LLDP is on SNMP.
@@ -5441,6 +5652,8 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
           ifType:      i.ifType   ?? null,
           ifParent:    i.ifParent ?? null,
           vlanId:      i.vlanId   ?? null,
+          nativeVlan:  i.nativeVlan ?? null,
+          taggedVlans: i.taggedVlans ?? [],
           alias:       i.alias       ?? null,
           description: i.description ?? null,
         })),

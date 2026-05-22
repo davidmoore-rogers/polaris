@@ -790,6 +790,15 @@ model AssetInterfaceSample {
   ifType      String?
   ifParent    String?
   vlanId      Int?
+  // Switch-port VLAN config — populated only on managed FortiSwitches via a
+  // CMDB call to the parent FortiGate's
+  // `/api/v2/cmdb/switch-controller/managed-switch?datasource=1`. nativeVlan
+  // is the port's untagged PVID; taggedVlans is the resolved tagged-set
+  // (allowed-vlans minus untagged-vlans), expanded to integer ids. Other
+  // asset types and the SNMP-only path on non-Fortinet switches leave both
+  // null/empty.
+  nativeVlan  Int?
+  taggedVlans Int[]    @default([])
   // Operator-set label that overrides ifName in the UI when present.
   // FortiOS CMDB `alias`; SNMP IF-MIB ifAlias (1.3.6.1.2.1.31.1.1.1.18).
   alias       String?

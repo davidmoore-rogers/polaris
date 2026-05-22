@@ -274,6 +274,10 @@ agentsRouter.post("/samples", async (req, res, next) => {
         ifType:      s.ifType ?? null,
         ifParent:    s.ifParent ?? null,
         vlanId:      s.vlanId ?? null,
+        // The Polaris Agent doesn't observe switch-port VLAN config — it
+        // reads its own host's NIC table. Always null/empty from this source.
+        nativeVlan:  null,
+        taggedVlans: [] as number[],
         alias:       s.alias ?? null,
         description: s.description ?? null,
       }));
