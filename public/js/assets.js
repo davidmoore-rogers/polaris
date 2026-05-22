@@ -4149,7 +4149,14 @@ function _renderInterfacesTable(container, si, asset) {
       '<th title="LLDP neighbor seen on this interface" data-col-id="neighbor">Neighbor</th>' +
     '</tr></thead><tbody>' + html + inactiveRow + "</tbody></table></div>";
   if (typeof applyTableLayout === "function") {
-    applyTableLayout(container.querySelector("table"), "asset-interfaces");
+    // Per device-type persistence — FortiGate, FortiSwitch, FortiAP, and
+    // generic endpoints have very different interface tables (aggregate
+    // names + IPsec rows on firewalls; dozens of `port1..portN` on switches;
+    // 2-3 short names on APs) so operators want independent column widths
+    // per class. `assetType` is the eight-value enum-ish string from the
+    // registry; null/empty falls back to "other".
+    var ifaceTypeKey = "asset-interfaces-" + ((asset && asset.assetType) || "other");
+    applyTableLayout(container.querySelector("table"), ifaceTypeKey);
   }
 
   // Restore per-user, per-asset collapsed state for nested rows.
