@@ -1296,7 +1296,14 @@ table thead:hover .sf-col-gear-wrap,
 }
 .sf-col-gear:hover { opacity: 1; color: var(--color-accent); border-color: var(--color-accent); }
 
-.sf-col-chooser { padding: 4px 0; max-height: 70vh; }
+.sf-col-chooser {
+  padding: 4px 0;
+  max-height: 70vh;
+  /* Above .slideover-overlay (1050) so the chooser opened from a gear inside
+     the asset-detail slide-over is visible. .sf-multi-popover's base z-index
+     (1000) sits behind the slide-over backdrop. */
+  z-index: 1200;
+}
 .sf-col-chooser-title {
   font-weight: 600;
   font-size: 0.7rem;
@@ -1788,7 +1795,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   background: var(--color-bg-tertiary);
 }
 .modal-header h3 { font-size: 1rem; font-weight: 600; color: #fff; }
-.modal-body { padding: 1.25rem; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.modal-body { padding: 1.25rem; overflow-y: auto; overscroll-behavior: contain; flex: 1 1 auto; min-height: 0; }
 .modal-footer {
   display: flex;
   justify-content: flex-end;
@@ -2789,6 +2796,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .slideover-body {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 0;
 }
 .slideover-footer {
