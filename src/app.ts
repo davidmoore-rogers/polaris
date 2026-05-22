@@ -78,6 +78,7 @@ import { initializeQueue, startPgbossWorkers, stopPgbossWorkers } from "./servic
 import { startSampleWriteBuffer, shutdownFlushSampleBuffers } from "./services/sampleWriteBuffer.js";
 import { startProbePatchBuffer, shutdownFlushProbePatchBuffer } from "./services/probePatchBuffer.js";
 import { runStartupDiskCheck } from "./utils/startupDiskCheck.js";
+import { runSchemaSanityCheck } from "./utils/schemaSanityCheck.js";
 import { getDbConnectionMode } from "./utils/dbConnections.js";
 import { recordDbConnectionMode } from "./metrics.js";
 
@@ -521,6 +522,12 @@ app.use("/api/v1", router);
 app.use(errorHandler);
 
 export async function startApp(): Promise<void> {
+  // Boot-time Prisma-client-vs-DB schema check. Fails fast with a clear
+  // recovery message when the running client references columns the
+  // database doesn't have (or vice versa). Runs before listen() so a
+  // broken deploy doesn't bind a port and accept traffic it can't serve.
+  await runSchemaSanityCheck();
+
   const httpsSettings = await getHttpsSettings().catch(() => null);
   const PORT = process.env.PORT ?? httpsSettings?.httpPort ?? 3000;
   const httpServer = app.listen(PORT, () => {
