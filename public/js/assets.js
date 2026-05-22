@@ -2499,6 +2499,12 @@ async function openEditModal(id) {
 
 var _assetMonitorRefreshTimer = null;
 var _assetSystemRefreshTimer  = null;
+// Most-recent /system-info payload for the open asset details modal. Reused
+// by chart-only re-renders (range-button click on the CPU & Memory chart) so
+// they don't have to re-fetch system-info just to repaint the chart's stale
+// banner and the latest-reading rows in the summary. Cleared whenever the
+// modal closes or switches assets via _resetAssetSystemRefresh.
+var _assetSystemSiCache       = null;
 var _ifaceRefreshTimer        = null;
 var _sensorRefreshTimer       = null;
 var _ipsecRefreshTimer        = null;
@@ -2530,6 +2536,7 @@ function _clearAssetRefreshTimers() {
   if (_ifaceRefreshTimer)        { clearTimeout(_ifaceRefreshTimer);        _ifaceRefreshTimer        = null; }
   if (_sensorRefreshTimer)       { clearTimeout(_sensorRefreshTimer);       _sensorRefreshTimer       = null; }
   if (_ipsecRefreshTimer)        { clearTimeout(_ipsecRefreshTimer);        _ipsecRefreshTimer        = null; }
+  _assetSystemSiCache = null;
 }
 
 function _clearIfaceRefreshTimer() {
@@ -2869,7 +2876,7 @@ async function openViewModal(id) {
         document.querySelectorAll(".asset-system-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
         b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
         _setChartRangePref("assetSystem", range);
-        _loadSystemTabFor(a.id, range, a);
+        _loadSystemTabFor(a.id, range, a, { chartOnly: true });
       });
     });
     var sysApplyBtn = document.getElementById("btn-asset-system-custom-apply");
@@ -2884,7 +2891,7 @@ async function openViewModal(id) {
         document.querySelectorAll(".asset-system-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
         var customBtn = document.getElementById("btn-asset-system-custom");
         if (customBtn) { customBtn.classList.remove("btn-secondary"); customBtn.classList.add("btn-primary"); }
-        _loadSystemTabFor(a.id, { from: fromIso, to: toIso }, a);
+        _loadSystemTabFor(a.id, { from: fromIso, to: toIso }, a, { chartOnly: true });
       });
     }
     var probeBtn = document.getElementById("btn-asset-probe-now");
@@ -3545,6 +3552,12 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
   // re-render shouldn't race a scheduled tick.
   if (_assetSystemRefreshTimer) { clearTimeout(_assetSystemRefreshTimer); _assetSystemRefreshTimer = null; }
   var silent = !!(opts && opts.silent);
+  // chartOnly: range-button click on the CPU & Memory chart. The other
+  // sections (interfaces, storage, temperatures, LLDP, stations) are
+  // current-state and don't depend on `range`, so we skip the systemInfo
+  // re-fetch + their re-render and reuse the cached si for the chart's
+  // stale banner and the latest-reading rows.
+  var chartOnly = !!(opts && opts.chartOnly) && _assetSystemSiCache;
   var chart   = document.getElementById("asset-system-chart");
   var summary = document.getElementById("asset-system-summary");
   var ifaces  = document.getElementById("asset-system-interfaces");
@@ -3566,39 +3579,52 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
   }
   if (!silent) {
     chart.textContent = "Loading samples…";
-    if (summary) summary.innerHTML = "<span>Loading…</span>";
-    if (ifaces)  ifaces.innerHTML  = '<span class="empty-state">Loading…</span>';
-    if (storage) storage.innerHTML = '<span class="empty-state">Loading…</span>';
-    if (temps)   temps.innerHTML   = '<span class="empty-state">Loading…</span>';
-    if (lldp)    lldp.innerHTML    = '<span class="empty-state">Loading…</span>';
+    if (!chartOnly) {
+      if (summary) summary.innerHTML = "<span>Loading…</span>";
+      if (ifaces)  ifaces.innerHTML  = '<span class="empty-state">Loading…</span>';
+      if (storage) storage.innerHTML = '<span class="empty-state">Loading…</span>';
+      if (temps)   temps.innerHTML   = '<span class="empty-state">Loading…</span>';
+      if (lldp)    lldp.innerHTML    = '<span class="empty-state">Loading…</span>';
+    }
   }
 
   var panelBody = silent ? document.getElementById("asset-panel-body") : null;
   var savedScroll = panelBody ? panelBody.scrollTop : 0;
 
   try {
-    var results = await Promise.all([
-      api.assets.telemetryHistory(assetId, telOpts),
-      api.assets.systemInfo(assetId),
-    ]);
-    var tel    = results[0];
-    var si     = results[1];
+    var tel, si;
+    if (chartOnly) {
+      tel = await api.assets.telemetryHistory(assetId, telOpts);
+      si  = _assetSystemSiCache;
+    } else {
+      var results = await Promise.all([
+        api.assets.telemetryHistory(assetId, telOpts),
+        api.assets.systemInfo(assetId),
+      ]);
+      tel = results[0];
+      si  = results[1];
+      _assetSystemSiCache = si;
+    }
 
     _renderSystemChart(chart, tel, asset, si);
     _renderSystemSummary(summary, tel, si);
-    _renderInterfacesTable(ifaces, si, asset);
-    _renderStorageTable(storage, si, asset);
-    _renderTemperatures(temps, si, asset);
-    _renderLldpNeighborsCard(lldp, si, asset);
-    if (stations) _renderWirelessStationsCard(stations, si, asset);
+    if (!chartOnly) {
+      _renderInterfacesTable(ifaces, si, asset);
+      _renderStorageTable(storage, si, asset);
+      _renderTemperatures(temps, si, asset);
+      _renderLldpNeighborsCard(lldp, si, asset);
+      if (stations) _renderWirelessStationsCard(stations, si, asset);
+    }
   } catch (err) {
     if (!silent) {
       chart.textContent = "Error: " + (err.message || "failed to load");
-      if (summary) summary.innerHTML = "";
-      if (ifaces)  ifaces.innerHTML  = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
-      if (storage) storage.innerHTML = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
-      if (temps)   temps.innerHTML   = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
-      if (lldp)    lldp.innerHTML    = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
+      if (!chartOnly) {
+        if (summary) summary.innerHTML = "";
+        if (ifaces)  ifaces.innerHTML  = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
+        if (storage) storage.innerHTML = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
+        if (temps)   temps.innerHTML   = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
+        if (lldp)    lldp.innerHTML    = '<p class="empty-state">' + escapeHtml(err.message || "failed to load") + '</p>';
+      }
     }
     // On silent-refresh failure leave the stale content alone so the user
     // doesn't see a transient blip blow away the panel they were reading.
