@@ -9810,7 +9810,7 @@ function _depTreeStatusPip(node) {
   if (depTestUntil && depTestUntil.getTime() > Date.now()) {
     return '<span class="dep-tree-pip dep-tree-pip-dep-test" title="Dependency Test active — simulated DOWN until ' + escapeHtml(depTestUntil.toLocaleString()) + '">●</span>';
   }
-  if (node.dependencySuppressed && node.monitorStatus !== "down") {
+  if (node.dependencySuppressed) {
     return '<span class="dep-tree-pip dep-tree-pip-dep" title="Dep. Down — upstream parent is offline">●</span>';
   }
   switch (node.monitorStatus) {
