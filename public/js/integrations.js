@@ -915,14 +915,17 @@ function _classSettingsOverlay(flatSettings, classStreams) {
     if (Object.prototype.hasOwnProperty.call(cell, "intervalSeconds")  && cell.intervalSeconds  != null) out[fields.interval] = cell.intervalSeconds;
     if (Object.prototype.hasOwnProperty.call(cell, "timeoutMs")        && cell.timeoutMs        != null) out[fields.timeout]  = cell.timeoutMs;
     if (fields.mib && Object.prototype.hasOwnProperty.call(cell, "mibId")            && cell.mibId  != null) out[fields.mib]      = cell.mibId;
+    if (fields.cred && Object.prototype.hasOwnProperty.call(cell, "credentialId")    && cell.credentialId != null) out[fields.cred] = cell.credentialId;
     if (fields.failure && Object.prototype.hasOwnProperty.call(cell, "failureThreshold") && cell.failureThreshold != null) out[fields.failure] = cell.failureThreshold;
   }
-  pickStream("responseTime", { poll: "responseTimePolling", interval: "intervalSeconds",            timeout: "probeTimeoutMs",       mib: "responseTimeMibId", failure: "failureThreshold" });
-  pickStream("cpuMemory",    { poll: "cpuMemoryPolling",    interval: "cpuMemoryIntervalSeconds",   timeout: "cpuMemoryTimeoutMs",   mib: "cpuMemoryMibId" });
-  pickStream("temperature",  { poll: "temperaturePolling",  interval: "temperatureIntervalSeconds", timeout: "temperatureTimeoutMs", mib: "temperatureMibId" });
-  pickStream("interfaces",   { poll: "interfacesPolling",   interval: "systemInfoIntervalSeconds",  timeout: "systemInfoTimeoutMs",  mib: "interfacesMibId" });
-  pickStream("lldp",         { poll: "lldpPolling",         interval: "lldpIntervalSeconds",        timeout: "lldpTimeoutMs",        mib: "lldpMibId" });
-  pickStream("storage",      { poll: "storagePolling",      interval: "storageIntervalSeconds",     timeout: "storageTimeoutMs" });
+  pickStream("responseTime", { poll: "responseTimePolling", interval: "intervalSeconds",            timeout: "probeTimeoutMs",       mib: "responseTimeMibId", cred: "responseTimeCredentialId", failure: "failureThreshold" });
+  pickStream("cpuMemory",    { poll: "cpuMemoryPolling",    interval: "cpuMemoryIntervalSeconds",   timeout: "cpuMemoryTimeoutMs",   mib: "cpuMemoryMibId",    cred: "cpuMemoryCredentialId" });
+  pickStream("temperature",  { poll: "temperaturePolling",  interval: "temperatureIntervalSeconds", timeout: "temperatureTimeoutMs", mib: "temperatureMibId",  cred: "temperatureCredentialId" });
+  pickStream("interfaces",   { poll: "interfacesPolling",   interval: "systemInfoIntervalSeconds",  timeout: "systemInfoTimeoutMs",  mib: "interfacesMibId",   cred: "interfacesCredentialId" });
+  pickStream("lldp",         { poll: "lldpPolling",         interval: "lldpIntervalSeconds",        timeout: "lldpTimeoutMs",        mib: "lldpMibId",         cred: "lldpCredentialId" });
+  // Storage shares the interfaces credential at the backend overlay layer,
+  // so the pre-select uses interfacesCredentialId — matching the resolver.
+  pickStream("storage",      { poll: "storagePolling",      interval: "storageIntervalSeconds",     timeout: "storageTimeoutMs",     cred: "interfacesCredentialId" });
   return out;
 }
 
@@ -948,10 +951,29 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
   // resolver hierarchy (Manual Monitoring) so the polling-method dropdown
   // omits "Inherit". opts.showMib (default true) — pass false on surfaces
   // where the per-stream MIB picker isn't meaningful (also Manual Monitoring
-  // in this iteration).
+  // in this iteration). opts.showStreamCredentials (default true) — pass
+  // false on FortiSwitch + FortiAP class subtabs where the class-level
+  // SNMP/SSH credential picker (rendered inside _classDirectPollHTML) is
+  // the authoritative source; managed switches and APs use one credential
+  // across every stream so the per-stream rows would just duplicate it.
   var showInherit = opts.showInherit !== false;
   var showMib     = opts.showMib     !== false;
+  var showStreamCredentials = opts.showStreamCredentials !== false;
   var pollCurrent = settings[stream.pollField] || "";
+
+  // Stream-key → settings field that holds this stream's saved credential
+  // id, used both for pre-selecting the dropdown on render and by the read
+  // path on save. Storage shares the interfaces credential (mirrors the
+  // backend overlay's `storage: { credentialField: "interfacesCredentialId" }`).
+  var streamCredField =
+    stream.key === "responseTime" ? "responseTimeCredentialId" :
+    stream.key === "cpuMemory"    ? "cpuMemoryCredentialId"    :
+    stream.key === "temperature"  ? "temperatureCredentialId"  :
+    stream.key === "interfaces"   ? "interfacesCredentialId"   :
+    stream.key === "lldp"         ? "lldpCredentialId"         :
+    stream.key === "storage"      ? "interfacesCredentialId"   :
+    null;
+  var savedStreamCredId = streamCredField ? (settings[streamCredField] || "") : "";
 
   // ID composition. The primary subtab uses the legacy naming so the existing
   // _polarisReadPollingFourStream / _polarisReadMibFourStream /
@@ -975,26 +997,42 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
 
   // Credential picker. Visibility is reactive — we render the row always and
   // toggle display based on whether the chosen polling method needs creds.
-  // The legacy single-credential pickers (`f-mon-credential` / `-ssh`) still
-  // live higher up the Monitoring tab; the per-stream rows here are visual
-  // hooks today and will become the persistence layer in Phase 2.
+  // Each stream cell carries a `credentialId` field on the backend at
+  // config.<klass>Monitor.streams.<stream>.credentialId; we pre-select the
+  // matching dropdown when the saved id matches the credential type that
+  // pairs with the chosen polling method. When showStreamCredentials is
+  // false (FortiSwitch + FortiAP class subtabs), the rows are omitted
+  // entirely — the class-level credential picker is the authoritative
+  // source there.
   var credRows = "";
-  ["snmp", "ssh", "winrm"].forEach(function (credType) {
-    var label = credType === "winrm" ? "WinRM" : credType.toUpperCase();
-    var rows = credentials.filter(function (c) { return c.type === credType; });
-    var options = '<option value="">— Inherit / none —</option>' +
-      rows.map(function (c) {
-        return '<option value="' + escapeHtml(c.id) + '">' + escapeHtml(c.name) + '</option>';
-      }).join("");
-    credRows += '<div class="form-group" id="' + pollId + '-credrow-' + credType + '" style="display:none;margin-bottom:0.5rem">' +
-        '<label style="margin:0 0 0.25rem 0;font-size:0.85rem">' + escapeHtml(label) + ' credential</label>' +
-        '<select id="' + pollId + '-cred-' + credType + '">' + options + '</select>' +
-        (rows.length === 0
-          ? '<p class="hint" style="color:var(--color-warning);margin-top:0.25rem">No ' + escapeHtml(label) + ' credentials defined yet — add one under Server Settings &gt; Credentials.</p>'
-          : '<p class="hint" style="margin-top:0.25rem">Used when this stream\'s polling method resolves to ' + escapeHtml(label) + '. A per-asset credential takes priority.</p>'
-        ) +
-      '</div>';
-  });
+  if (showStreamCredentials) {
+    ["snmp", "ssh", "winrm"].forEach(function (credType) {
+      var label = credType === "winrm" ? "WinRM" : credType.toUpperCase();
+      var rows = credentials.filter(function (c) { return c.type === credType; });
+      // Pre-select the saved credential only when it actually exists in this
+      // credtype's list — guards against the saved value belonging to a
+      // different credtype than the currently-chosen polling method (e.g.
+      // operator flipped polling from SNMP to SSH; the stored SNMP id stays
+      // in settings but the SSH dropdown stays at "Inherit").
+      var selectedValue = "";
+      if (savedStreamCredId && rows.some(function (c) { return c.id === savedStreamCredId; })) {
+        selectedValue = savedStreamCredId;
+      }
+      var options = '<option value=""' + (selectedValue === "" ? " selected" : "") + '>— Inherit / none —</option>' +
+        rows.map(function (c) {
+          var sel = c.id === selectedValue ? " selected" : "";
+          return '<option value="' + escapeHtml(c.id) + '"' + sel + '>' + escapeHtml(c.name) + '</option>';
+        }).join("");
+      credRows += '<div class="form-group" id="' + pollId + '-credrow-' + credType + '" style="display:none;margin-bottom:0.5rem">' +
+          '<label style="margin:0 0 0.25rem 0;font-size:0.85rem">' + escapeHtml(label) + ' credential</label>' +
+          '<select id="' + pollId + '-cred-' + credType + '">' + options + '</select>' +
+          (rows.length === 0
+            ? '<p class="hint" style="color:var(--color-warning);margin-top:0.25rem">No ' + escapeHtml(label) + ' credentials defined yet — add one under Server Settings &gt; Credentials.</p>'
+            : '<p class="hint" style="margin-top:0.25rem">Used when this stream\'s polling method resolves to ' + escapeHtml(label) + '. A per-asset credential takes priority.</p>'
+          ) +
+        '</div>';
+    });
+  }
 
   // Per-stream cadence + timeout. Streams that share systemInfo cadence with
   // Interfaces (LLDP, Storage) skip the inputs and render a shares-cadence
@@ -1118,7 +1156,10 @@ function _classSubtabBodyHTML(opts) {
     return {
       key: stream.key,
       label: stream.label,
-      html: _classStreamSubtabHTML(echoPrefix, integrationType, klass, stream, perClassSettings, credentials, isPrimary, { fmgDirectMode: initialFmgDirectMode }),
+      html: _classStreamSubtabHTML(echoPrefix, integrationType, klass, stream, perClassSettings, credentials, isPrimary, {
+        fmgDirectMode: initialFmgDirectMode,
+        showStreamCredentials: opts.showStreamCredentials !== false,
+      }),
     };
   });
 
@@ -2074,6 +2115,11 @@ function monitorSettingsFormHTML(s, opts) {
         fortiapMonitor:     opts.fortiapMonitor     || {},
         workstationMonitor: opts.workstationMonitor || {},
         serverMonitor:      opts.serverMonitor     || {},
+        // Hide per-stream credential rows on FortiSwitch + FortiAP class
+        // subtabs — the class-level SNMP/SSH credential picker inside the
+        // Direct Polling block is authoritative for those classes (managed
+        // switches and APs use one credential across every stream).
+        showStreamCredentials: !(c.key === "fortiswitch" || c.key === "fortiap"),
       }),
     };
   });
@@ -2445,12 +2491,35 @@ function _readClassStreamSubtabs(klass, isPrimary, includeStorage) {
     var n = parseInt(raw, 10);
     return Number.isFinite(n) ? n : null;
   }
+  // Reads the per-stream credential dropdown that matches the chosen polling
+  // method. _classStreamSubtabHTML emits three sibling dropdowns per stream
+  // (snmp/ssh/winrm), and only the one matching `polling` is visible to the
+  // operator — the other two stay at "Inherit / none". When the class subtab
+  // omitted per-stream credentials entirely (FortiSwitch + FortiAP via
+  // showStreamCredentials: false), the lookup misses every credtype dropdown
+  // and we return undefined so the streams cell stays free of a credentialId
+  // key, letting the resolver fall back to the asset's monitorCredentialId
+  // which discovery already stamps from the class-level credential picker.
+  function credVal(pollField) {
+    var pollEl = document.getElementById(tierId(pollField));
+    if (!pollEl) return undefined;
+    var method = pollEl.value || "";
+    var credType = method === "snmp" ? "snmp"
+      : method === "ssh"   ? "ssh"
+      : method === "winrm" ? "winrm"
+      : null;
+    if (!credType) return null;
+    var credEl = document.getElementById(tierId(pollField) + "-cred-" + credType);
+    if (!credEl) return undefined; // row not rendered (showStreamCredentials=false)
+    return credEl.value || null;
+  }
   // Cell builder for one stream. Empty per-stream cells are still serialized
   // as `{polling:null, intervalSeconds:null, ...}` so the operator's explicit
   // "inherit at all 4 layers" choice persists across reload.
   function cell(opts) {
     var out = {};
     if (opts.polling          !== undefined) out.polling          = opts.polling;
+    if (opts.credentialId     !== undefined) out.credentialId     = opts.credentialId;
     if (opts.intervalSeconds  !== undefined) out.intervalSeconds  = opts.intervalSeconds;
     if (opts.timeoutMs        !== undefined) out.timeoutMs        = opts.timeoutMs;
     if (opts.mibId            !== undefined) out.mibId            = opts.mibId;
@@ -2460,6 +2529,7 @@ function _readClassStreamSubtabs(klass, isPrimary, includeStorage) {
   var streams = {
     responseTime: cell({
       polling:          pollVal("responseTimePolling"),
+      credentialId:     credVal("responseTimePolling"),
       intervalSeconds:  numVal("intervalSeconds"),
       timeoutMs:        numVal("probeTimeoutMs"),
       mibId:            mibVal("responseTime"),
@@ -2467,24 +2537,28 @@ function _readClassStreamSubtabs(klass, isPrimary, includeStorage) {
     }),
     cpuMemory: cell({
       polling:         pollVal("cpuMemoryPolling"),
+      credentialId:    credVal("cpuMemoryPolling"),
       intervalSeconds: numVal("cpuMemoryIntervalSeconds"),
       timeoutMs:       numVal("cpuMemoryTimeoutMs"),
       mibId:           mibVal("cpuMemory"),
     }),
     temperature: cell({
       polling:         pollVal("temperaturePolling"),
+      credentialId:    credVal("temperaturePolling"),
       intervalSeconds: numVal("temperatureIntervalSeconds"),
       timeoutMs:       numVal("temperatureTimeoutMs"),
       mibId:           mibVal("temperature"),
     }),
     interfaces: cell({
       polling:         pollVal("interfacesPolling"),
+      credentialId:    credVal("interfacesPolling"),
       intervalSeconds: numVal("systemInfoIntervalSeconds"),
       timeoutMs:       numVal("systemInfoTimeoutMs"),
       mibId:           mibVal("interfaces"),
     }),
     lldp: cell({
       polling:         pollVal("lldpPolling"),
+      credentialId:    credVal("lldpPolling"),
       intervalSeconds: numVal("lldpIntervalSeconds"),
       timeoutMs:       numVal("lldpTimeoutMs"),
       mibId:           mibVal("lldp"),
@@ -2493,6 +2567,7 @@ function _readClassStreamSubtabs(klass, isPrimary, includeStorage) {
   if (includeStorage !== false) {
     streams.storage = cell({
       polling:         pollVal("storagePolling"),
+      credentialId:    credVal("storagePolling"),
       intervalSeconds: numVal("storageIntervalSeconds"),
       timeoutMs:       numVal("storageTimeoutMs"),
     });
