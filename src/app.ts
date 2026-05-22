@@ -64,6 +64,7 @@ import "./jobs/mergeFortiswitchEndpointGhosts.js";
 import "./jobs/mergeDuplicateHostnameAssets.js";
 import "./jobs/backfillDependencyTree.js";
 import "./jobs/backfillMonitorStatusChangedAt.js";
+import "./jobs/backfillMonitorOverride.js";
 import "./jobs/rasterizeStoredSvgIcons.js";
 import "./jobs/dependencyReconciler.js";
 import "./jobs/retryQueuedReservationPushes.js";

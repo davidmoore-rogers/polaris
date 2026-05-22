@@ -41,6 +41,13 @@ import { geocode } from "../../services/geocoderService.js";
 import { pushCoordsToFortigate } from "../../services/fortigateCoordPushService.js";
 import { isValidGeoCoord, coordsClose } from "../../utils/geo.js";
 import {
+  getAddAsMonitoredFromConfig,
+  buildMonitoredSweep,
+  snapshotAddAsMonitoredByAssetType,
+  sweepMonitoredForIntegration,
+  recomputeMonitorOverrideForIntegration,
+} from "../../services/monitorOverrideService.js";
+import {
   MAC_ROW_SELECT,
   shapeMacRows,
   reconcileMacAddresses,
@@ -920,6 +927,42 @@ router.put("/:id", async (req, res, next) => {
     // method until process restart.
     invalidateMonitorSettingsCache({ integrationId: req.params.id });
 
+    // Auto-Monitor flag change sweep — if any per-class addAsMonitored value
+    // flipped, sweep `monitored` on affected non-override assets immediately
+    // (without waiting for the next discovery cycle) and refresh the
+    // monitorOverride flag on every asset this integration owns so the UI
+    // pill state is current. The frontend protects the operator from
+    // accidental fleet-wide disables via a confirm modal at Save Changes;
+    // by the time we get here the operator has already confirmed (or no
+    // disable transition is happening). Cheap when nothing changed — both
+    // helpers no-op via their WHERE clauses when no diff is found.
+    {
+      const oldSnap = snapshotAddAsMonitoredByAssetType(existing.type, existing.config as Record<string, unknown>);
+      const newSnap = snapshotAddAsMonitoredByAssetType(existing.type, updated.config as Record<string, unknown>);
+      const flipped =
+        oldSnap.firewall     !== newSnap.firewall ||
+        oldSnap.switch       !== newSnap.switch ||
+        oldSnap.access_point !== newSnap.access_point ||
+        oldSnap.workstation  !== newSnap.workstation ||
+        oldSnap.server       !== newSnap.server;
+      if (flipped) {
+        const swept = await sweepMonitoredForIntegration(prisma, req.params.id);
+        await recomputeMonitorOverrideForIntegration(prisma, req.params.id);
+        if (swept > 0) {
+          logEvent({
+            action: "integration.auto_monitor_swept",
+            resourceType: "integration",
+            resourceId: req.params.id,
+            resourceName: updated.name,
+            actor: req.session?.username,
+            level: "info",
+            message: `Auto-monitor swept ${swept} asset(s) for "${updated.name}" after addAsMonitored change`,
+            details: { swept, from: oldSnap, to: newSnap },
+          });
+        }
+      }
+    }
+
     logEvent({ action: "integration.updated", resourceType: "integration", resourceId: req.params.id, resourceName: updated.name, actor: req.session?.username, message: `Integration "${updated.name}" updated` });
 
     const finalConfig = (updated.config as Record<string, unknown>) || {};
@@ -1272,6 +1315,87 @@ router.post("/:id/interface-aggregate/apply", async (req, res, next) => {
   }
 });
 
+// POST /api/v1/integrations/:id/auto-monitor-assets/preflight
+//
+// Returns per-class projected impact for an in-flight integration edit so
+// the frontend can render a confirmation modal at Save Changes time. The
+// operator's proposed addAsMonitored values are compared against current
+// asset state (filtered to assets discovered by this integration); the
+// response carries enough to render "N assets would have monitoring
+// enabled / M would have it disabled (P are overridden and won't be
+// touched)".
+//
+// The body's `proposed` map keys are the five auto-monitor asset types
+// (firewall / switch / access_point / workstation / server). Any missing
+// key is treated as "no proposed change" for that class (omitted from
+// the response).
+router.post("/:id/auto-monitor-assets/preflight", async (req, res, next) => {
+  try {
+    const ProposedSchema = z.object({
+      proposed: z.object({
+        firewall:     z.boolean().optional(),
+        switch:       z.boolean().optional(),
+        access_point: z.boolean().optional(),
+        workstation:  z.boolean().optional(),
+        server:       z.boolean().optional(),
+      }).default({}),
+    });
+    const { proposed } = ProposedSchema.parse(req.body ?? {});
+    const integ = await prisma.integration.findUnique({ where: { id: req.params.id } });
+    if (!integ) throw new AppError(404, "Integration not found");
+
+    // Per-class current addAsMonitored derived from the stored config (NOT
+    // the proposed value — proposed comes from the request body).
+    const current = snapshotAddAsMonitoredByAssetType(integ.type, integ.config as Record<string, unknown>);
+
+    type ClassKey = "firewall" | "switch" | "access_point" | "workstation" | "server";
+    const out: Record<ClassKey, {
+      currentAddAsMonitored: boolean | null;
+      proposedAddAsMonitored: boolean;
+      total: number;
+      overridden: number;
+      wouldEnable: number;
+      wouldDisable: number;
+    }> = {} as any;
+
+    const classKeys: ClassKey[] = ["firewall", "switch", "access_point", "workstation", "server"];
+    for (const k of classKeys) {
+      const proposedVal = proposed[k];
+      if (proposedVal === undefined) continue;
+      // Three groupBy queries combined into one scoped findMany — fleet-
+      // bounded by integrationId + assetType so we read at most one
+      // class-worth of rows.
+      const rows = await prisma.asset.findMany({
+        where: {
+          discoveredByIntegrationId: req.params.id,
+          assetType: k,
+        },
+        select: { monitored: true, monitorOverride: true },
+      });
+      let overridden = 0;
+      let wouldEnable = 0;
+      let wouldDisable = 0;
+      for (const r of rows) {
+        if (r.monitorOverride) { overridden++; continue; }
+        if (proposedVal && !r.monitored) wouldEnable++;
+        else if (!proposedVal && r.monitored) wouldDisable++;
+      }
+      out[k] = {
+        currentAddAsMonitored: current[k],
+        proposedAddAsMonitored: proposedVal,
+        total: rows.length,
+        overridden,
+        wouldEnable,
+        wouldDisable,
+      };
+    }
+
+    res.json({ integrationId: req.params.id, integrationName: integ.name, classes: out });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/v1/integrations/:id/register — overwrite selected fields on conflicting reservation
 router.post("/:id/register", async (req, res, next) => {
   try {
@@ -1617,7 +1741,7 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
         // Entra ID discovery produces assets only — no subnets, reservations, or VIPs.
         const result = await entraId.discoverDevices(config as any, ac.signal, onProgress);
         if (!ac.signal.aborted) {
-          const r = await syncEntraDevices(integrationId, integrationName, result, actor);
+          const r = await syncEntraDevices(integrationId, integrationName, config, result, actor);
           syncTotals.created.push(...r.created);
           syncTotals.updated.push(...r.updated);
           syncTotals.skipped.push(...r.skipped);
@@ -1626,7 +1750,7 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
         // Active Directory discovery produces assets only — no subnets, reservations, or VIPs.
         const result = await activeDirectory.discoverDevices(config as any, ac.signal, onProgress);
         if (!ac.signal.aborted) {
-          const r = await syncActiveDirectoryDevices(integrationId, integrationName, result, actor);
+          const r = await syncActiveDirectoryDevices(integrationId, integrationName, config, result, actor);
           syncTotals.created.push(...r.created);
           syncTotals.updated.push(...r.updated);
           syncTotals.skipped.push(...r.skipped);
@@ -3180,6 +3304,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           updateData.snmpLocationFetchedAt = devSnmpLocationFetchedAt;
         }
         clampAcquiredToLastSeen(updateData, existingAsset);
+        // Auto-Monitor sweep: enforce monitored = fortigateAddAsMonitored on
+        // every cycle unless the operator has set a divergent override.
+        // Standby HA members are excluded.
+        const isStandbyMember = haMembers != null && !member.isPrimary;
+        Object.assign(updateData, buildFortigateMonitorStamp(existingAsset, isStandbyMember));
         // Snapshot pre-write hostname so we can detect a rename below and
         // rotate the firewall:* tag on every dependent asset before Phase 13.5
         // recomputes membership.
@@ -3367,29 +3496,36 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   phaseMark("3b");
   // ══════════════════════════════════════════════════════════════════════════════
 
-  // Auto-stamping policy for managed FortiSwitch / FortiAP. Two independent
-  // toggles drive four cases:
+  // Auto-stamping policy for managed FortiSwitch / FortiAP. `enabled` drives
+  // credential stamping (direct polling SNMP/SSH); `addAsMonitored` drives
+  // the bidirectional `monitored` sweep through the monitor-override model.
   //
-  //   enabled=false, addAsMonitored=false  → no-op (legacy default)
+  //   enabled=false, addAsMonitored=false  → ensure monitored=false (sweep off)
   //   enabled=false, addAsMonitored=true   → stamp monitored=true; resolver
   //                                          falls back to the source default
   //                                          (ICMP) since no credential is
   //                                          configured for this class
-  //   enabled=true,  addAsMonitored=false  → stamp monitorCredentialId,
-  //                                          leave `monitored` as-is so
-  //                                          operators opt-in per-asset later
+  //   enabled=true,  addAsMonitored=false  → stamp monitorCredentialId AND
+  //                                          ensure monitored=false (sweep off)
   //   enabled=true,  addAsMonitored=true   → stamp credential AND flip
-  //                                          monitored=true
+  //                                          monitored=true (sweep on)
   //
-  // Operator override detection: discovery never overwrites a
-  // monitorCredentialId that already differs from this integration's class
-  // credential — that's an explicit operator choice — and never re-flips
-  // `monitored` once monitoredOperatorSet is true.
+  // Monitor-override semantics: when the operator's current `monitored`
+  // diverges from `addAsMonitored`, `Asset.monitorOverride` is true and
+  // discovery leaves `monitored` alone (operator wins). When they match,
+  // override is false and discovery enforces `monitored = addAsMonitored`
+  // on every cycle. Credentials are still preserved when the operator
+  // pointed at a different one (a soft override on credential identity).
   function buildClassMonitorStamp(
     cfg: ClassMonCfg,
-    existing?: { monitorCredentialId?: string | null; monitored?: boolean | null; monitoredOperatorSet?: boolean | null },
+    existing?: { monitorCredentialId?: string | null; monitored?: boolean | null; monitorOverride?: boolean | null },
   ): Record<string, unknown> {
-    if (!cfg.enabled && !cfg.addAsMonitored) return {};
+    if (!cfg.enabled && !cfg.addAsMonitored && existing?.monitored !== true) {
+      // No opt-in and the asset isn't currently monitored — nothing to do.
+      // Re-stamping `discoveredByIntegrationId` is a no-op since the existing
+      // value is already correct on this asset's update path.
+      return {};
+    }
 
     const stamp: Record<string, unknown> = {
       discoveredByIntegrationId: integrationId,
@@ -3406,25 +3542,44 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       const existingCred = existing?.monitorCredentialId ?? null;
       if (existingCred === null || existingCred === cfg.stampCredentialId) {
         stamp.monitorCredentialId = cfg.stampCredentialId;
-      } else {
-        // Operator pointed this asset at a different credential — leave
-        // their choice in place.
-        return stamp;
+      }
+      // Operator-chosen credential pointing elsewhere stays in place; we
+      // still continue to the monitored sweep below (credential identity
+      // is a separate concern from the monitored bit).
+    }
+    // Monitored sweep: discovery enforces `monitored = addAsMonitored`
+    // unless the operator has set an override. New assets land here with
+    // `monitorOverride=false` (Prisma default) and `monitored=false`, so
+    // the integration's flag still picks the initial state cleanly.
+    if (existing?.monitorOverride !== true) {
+      const desired = cfg.addAsMonitored === true;
+      if (desired && existing?.monitored !== true) {
+        stamp.monitored = true;
+      } else if (!desired && existing?.monitored === true) {
+        stamp.monitored = false;
       }
     }
-    // Only flip `monitored` when the operator opted into auto-Monitored AND
-    // the operator hasn't already made an explicit decision about this
-    // asset's monitored state. monitoredOperatorSet stays true forever once
-    // the operator clicks the Status pill / saves the Monitoring modal /
-    // bulk-monitors with `monitored` in the body, so the integration default
-    // can never silently re-enable monitoring on something the operator
-    // turned off (or vice versa). New assets land here with the field at
-    // its Prisma default of false, so the integration's addAsMonitored flag
-    // still controls the initial state on a fresh discovery.
-    if (cfg.addAsMonitored && existing?.monitoredOperatorSet !== true) {
-      stamp.monitored = true;
-    }
     return stamp;
+  }
+
+  /**
+   * FortiGate-class equivalent (no enabled/credential branch — the FortiGate
+   * integration always uses its own API token, no per-class credential to
+   * stamp). HA standby members are excluded — they aren't directly REST-
+   * reachable through the cluster IP, so the sweep would just churn
+   * monitored=true → failed probes; operators opt in standby members
+   * per-asset (which creates an override that protects the choice).
+   */
+  function buildFortigateMonitorStamp(
+    existing: { monitored?: boolean | null; monitorOverride?: boolean | null },
+    isStandby: boolean,
+  ): Record<string, unknown> {
+    if (isStandby) return {};
+    if (existing.monitorOverride === true) return {};
+    const desired = fortigateAddAsMonitored;
+    if (desired && existing.monitored !== true) return { monitored: true };
+    if (!desired && existing.monitored === true) return { monitored: false };
+    return {};
   }
 
   for (const sw of result.fortiSwitches || []) {
@@ -5845,9 +6000,19 @@ async function buildEntraSyncIndex(
 async function syncEntraDevices(
   integrationId: string,
   integrationName: string,
+  integrationConfig: Record<string, unknown> | null,
   result: { devices: entraId.DiscoveredEntraDevice[] },
   actor?: string,
 ): Promise<{ created: string[]; updated: string[]; skipped: string[] }> {
+  // Per-class addAsMonitored snapshot for the auto-monitor sweep. null = the
+  // class block isn't enabled / present, in which case buildMonitoredSweep
+  // returns {} and discovery leaves monitored alone.
+  const workstationAddAs = getAddAsMonitoredFromConfig("entraid", integrationConfig, "workstation");
+  const serverAddAs      = getAddAsMonitoredFromConfig("entraid", integrationConfig, "server");
+  const resolveAddAs = (assetType: string): boolean | null =>
+    assetType === "workstation" ? workstationAddAs
+    : assetType === "server"    ? serverAddAs
+    : null;
   const syncLog = (level: "info" | "error" | "warning", message: string) => {
     logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
   };
@@ -6089,6 +6254,14 @@ async function syncEntraDevices(
       }
       // Only overwrite assetType if the existing one is "other" (default) — respect manual recategorization
       if (existing.assetType === "other") updateData.assetType = assetType;
+      // Auto-Monitor sweep: enforce monitored = addAsMonitored unless the
+      // operator has set a divergent override. assetType here is either the
+      // existing value or the freshly-inferred one (for "other" → typed),
+      // so the resolver sees the post-update class.
+      Object.assign(
+        updateData,
+        buildMonitoredSweep(resolveAddAs(updateData.assetType ?? existing.assetType), existing),
+      );
       // Merge tags: strip Entra-managed auto-tags and re-add the fresh set.
       // Cross-integration identity tags (sid:*, ad-guid:*) and user-set tags
       // pass through untouched.
@@ -6252,6 +6425,11 @@ async function syncEntraDevices(
               updateFields.acquiredAt = acquiredAt;
             }
             if (dupEntra.asset.assetType === "other") updateFields.assetType = assetType;
+            // Auto-Monitor sweep on the duplicate-takeover path.
+            Object.assign(
+              updateFields,
+              buildMonitoredSweep(resolveAddAs(updateFields.assetType ?? dupEntra.asset.assetType), dupEntra.asset),
+            );
             clampAcquiredToLastSeen(updateFields, dupEntra.asset);
             await prisma.asset.update({ where: { id: dupEntra.asset.id }, data: updateFields });
             if (dupEntraMergedMacs) await reconcileMacAddresses(dupEntra.asset.id, dupEntraMergedMacs);
@@ -6333,6 +6511,11 @@ async function syncEntraDevices(
         notes: `Auto-discovered from Entra ID integration "${integrationName}"${dev.trustType ? ` (trust: ${dev.trustType})` : ""}`,
         tags,
       };
+      // Initial monitored state on create. With no prior asset row,
+      // buildMonitoredSweep sees `existing.monitored !== true` and stamps
+      // monitored=true when addAsMonitored is on. monitorOverride stays
+      // false (Prisma default) — operator hasn't disagreed yet.
+      Object.assign(createData, buildMonitoredSweep(resolveAddAs(assetType), { monitored: false, monitorOverride: false }));
       clampAcquiredToLastSeen(createData);
       const newAsset = await prisma.asset.create({ data: createData as any });
       // Persist the entra (and intune, when intune contributed) source
@@ -6587,6 +6770,7 @@ async function buildAdSyncIndex(
 async function syncActiveDirectoryDevices(
   integrationId: string,
   integrationName: string,
+  integrationConfig: Record<string, unknown> | null,
   result: { devices: activeDirectory.DiscoveredAdDevice[] },
   actor?: string,
 ): Promise<{ created: string[]; updated: string[]; skipped: string[] }> {
@@ -6596,6 +6780,14 @@ async function syncActiveDirectoryDevices(
   const created: string[] = [];
   const updated: string[] = [];
   const skipped: string[] = [];
+
+  // Per-class addAsMonitored snapshot for the auto-monitor sweep.
+  const workstationAddAs = getAddAsMonitoredFromConfig("activedirectory", integrationConfig, "workstation");
+  const serverAddAs      = getAddAsMonitoredFromConfig("activedirectory", integrationConfig, "server");
+  const resolveAddAs = (assetType: string | null | undefined): boolean | null =>
+    assetType === "workstation" ? workstationAddAs
+    : assetType === "server"    ? serverAddAs
+    : null;
 
   // Load the full asset table and the AssetSource lookup index. The AD-source
   // index is now built from AssetSource (Phase 2 cutover); hostname-collision
@@ -6751,6 +6943,11 @@ async function syncActiveDirectoryDevices(
       }
 
       try {
+        // Auto-Monitor sweep: enforce monitored = addAsMonitored for the
+        // resolved class unless the operator has set a divergent override.
+        // assetType here is the freshly-inferred value when one applies.
+        const sweepAssetType = (updateData.assetType ?? existing.assetType) as string | null | undefined;
+        Object.assign(updateData, buildMonitoredSweep(resolveAddAs(sweepAssetType), existing));
         clampAcquiredToLastSeen(updateData, existing);
         await prisma.asset.update({ where: { id: existing.id }, data: updateData });
         // (AssetSource upsert already happened above the projection step
@@ -6862,6 +7059,13 @@ async function syncActiveDirectoryDevices(
         // comment on the update path above for the rationale.
         ...(adMonitorable ? { discoveredByIntegrationId: integrationId } : {}),
       };
+      // Initial monitored state on create. Only sweep when the AD-source link
+      // is being stamped (adMonitorable hosts) — otherwise the asset isn't
+      // associated with this integration and the per-class flag shouldn't
+      // apply. monitorOverride defaults to false on create.
+      if (adMonitorable) {
+        Object.assign(createData, buildMonitoredSweep(resolveAddAs(assetType), { monitored: false, monitorOverride: false }));
+      }
       clampAcquiredToLastSeen(createData);
       const newAsset = await prisma.asset.create({ data: createData as any });
       // Persist the AD source row. The shadow-write extension already laid

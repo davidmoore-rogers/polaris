@@ -552,8 +552,9 @@ async function _setAssetType(assetId, nextType) {
 }
 
 // Delegated click handler for the Status column pill. Toggles the asset's
-// `monitored` flag through PUT /assets/:id; the route stamps
-// `monitoredOperatorSet=true` so the choice survives discovery cycles.
+// `monitored` flag through PUT /assets/:id; the route then recomputes
+// `monitorOverride` against the discovering integration's per-class
+// `addAsMonitored` so the System tab's Asset Override badge stays current.
 //
 // Disabling monitoring opens a small inline confirm popover anchored to
 // the pill — operators were tripping the toggle accidentally while
@@ -1435,8 +1436,10 @@ function assetStatusBadge(asset) {
 //   monitored=true, status="unknown"/null    → blue   "Pending"     (never probed — same blue treatment as "Recovering" but a different label)
 //
 // For admin/assetsadmin callers the pill is clickable: a single click
-// toggles monitored (sets monitoredOperatorSet=true server-side so the
-// choice sticks across discovery cycles). The pill carries
+// toggles monitored. The server recomputes `monitorOverride` against the
+// discovering integration's per-class `addAsMonitored` after the write —
+// override goes true when the operator's new choice diverges from the
+// integration default, clears when they re-converge. The pill carries
 // `data-monitor-toggle="<asset-id>"` and `data-monitored="true|false"` so
 // the delegated handler in `_handleMonitorPillClick` can flip it without
 // re-querying.
@@ -6004,12 +6007,26 @@ async function _updateStreamSourceBadgesFromEffective(assetId, asset) {
   });
 }
 
+// "Asset Override" badge rendered next to the Monitor Status pill on the
+// asset details System tab when the operator's `monitored` choice diverges
+// from the discovering integration's per-class addAsMonitored. Replaces
+// the legacy sticky monitoredOperatorSet flag with a convergent model: the
+// badge shows up the moment the two disagree and disappears when they
+// converge (either side moving satisfies the equality). Hidden for assets
+// with no discoveredByIntegrationId (manual assets have nothing to override).
+function _assetOverrideBadge(a) {
+  if (!a || a.monitorOverride !== true) return "";
+  var tip = "This asset's monitored state diverges from the discovering integration's Auto-Monitor setting. Discovery won't sweep this asset until the operator re-aligns the choice (or flips Auto-Monitor in the integration).";
+  return '<span class="badge badge-warning" title="' + escapeHtml(tip) + '" style="margin-left:6px">Asset Override</span>';
+}
+
 function assetMonitoringViewHTML(a) {
   if (!a) return '<p class="empty-state">No data.</p>';
   var pill = assetMonitorBadge(a);
+  var overridePill = _assetOverrideBadge(a);
   if (!a.monitored) {
     return '<div style="padding:1rem 0">' +
-      pill + ' &nbsp; ' +
+      pill + overridePill + ' &nbsp; ' +
       '<span style="color:var(--color-text-secondary)">Monitoring is disabled for this asset. Enable it from the Edit modal’s Monitoring tab.</span>' +
     '</div>';
   }
@@ -6077,7 +6094,7 @@ function assetMonitoringViewHTML(a) {
       // Status uses a raw-HTML row because viewRow() escapes its value and
       // would render the badge markup as text.
       '<div class="detail-row"><span class="detail-label">Status</span>' +
-        '<span class="detail-value">' + probeBtn + pill + depTestBtn + '</span></div>' +
+        '<span class="detail-value">' + probeBtn + pill + overridePill + depTestBtn + '</span></div>' +
       // Last hour intermittency bar — one cell per probe sample, colored
       // by the resolved monitor state at that point. Sits in a single
       // grid column (half the panel); the value cell is flex:1 so the bar

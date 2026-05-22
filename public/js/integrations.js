@@ -1169,21 +1169,29 @@ function _directPollingInitialStateFor(integrationType, klass, opts) {
   return true;
 }
 
-// "Add discovered <kind>s to Assets as Monitored" checkbox + hint. Rendered
-// inside a styled box matching the Auto-Monitor Interfaces card so the two
-// auto-monitoring controls share the same visual treatment under the
-// "Auto-monitoring" section header. The DOM id (`<prefix>addAsMonitored`)
-// is unchanged so the save-path reader keeps finding it. The trailing
-// section <hr> + the inline "Auto-monitoring" header that used to live
-// here moved out to the call site (`headerForClass`) where they now sit
-// above this card and the matching Auto-Monitor Interfaces card.
+// "Enable / Disable Auto-Monitoring" button + hint. Replaces the prior
+// checkbox to add visual weight to the destructive transition (red
+// "Disable" framing). The id `<prefix>addAsMonitored` continues to be
+// the source of truth read by the save path; we now stash its boolean
+// state on a hidden input of the same id (so the existing _getCheckbox
+// reader keeps working) and the visible Button toggles the hidden input
+// while updating its own label/color reactively.
+//
+// The Save Changes path runs a preflight against the proposed addAsMonitored
+// values and shows a confirm modal when wouldDisable > 0 on any class —
+// see `_promptAutoMonitorAssetsConfirm` below.
 function _classAddAsMonitoredHTML(idPrefix, kindLabel, currentAddAsMonitored) {
+  var enabled = currentAddAsMonitored === true;
+  var btnClass = enabled ? "btn-danger" : "btn-primary";
+  var btnLabel = enabled ? "Disable Auto-Monitoring" : "Enable Auto-Monitoring";
   return '<div style="background:rgba(79,195,247,0.06);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
-      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
-        '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (currentAddAsMonitored ? "checked" : "") + ' style="width:auto">' +
-        '<label for="' + idPrefix + 'addAsMonitored" style="margin:0;font-weight:500">Add discovered ' + escapeHtml(kindLabel) + 's to Assets as Monitored</label>' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:12px;margin-bottom:0.4rem">' +
+        // Hidden input preserves the existing save-path read pattern (_getCheckbox).
+        '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (enabled ? "checked" : "") + ' style="display:none">' +
+        '<button type="button" class="btn ' + btnClass + '" data-auto-monitor-toggle="' + idPrefix + 'addAsMonitored" style="min-width:200px">' + btnLabel + '</button>' +
+        '<div style="font-weight:500">Auto-Monitor ' + escapeHtml(kindLabel) + 's</div>' +
       '</div>' +
-      '<p class="hint" style="margin:0">When checked, newly-discovered ' + escapeHtml(kindLabel) + 's land in Assets with monitoring enabled. Without an SNMP credential below, the polling method falls back to <code>icmp</code>. Existing assets are unchanged — flip them individually from the asset modal.</p>' +
+      '<p class="hint" style="margin:0">When enabled, every discovered ' + escapeHtml(kindLabel) + ' is monitored. Disabling sweeps existing ' + escapeHtml(kindLabel) + 's off monitoring on the next discovery cycle unless an operator has set a per-asset override. You\'ll be asked to confirm at Save Changes.</p>' +
     '</div>';
 }
 
@@ -1816,12 +1824,16 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
 // the polling-method resolver to REST API by default, so no per-class
 // credential picker is needed here.
 function _fortigateAddMonitoredHTML(idPrefix, currentAddAsMonitored) {
+  var enabled = currentAddAsMonitored === true;
+  var btnClass = enabled ? "btn-danger" : "btn-primary";
+  var btnLabel = enabled ? "Disable Auto-Monitoring" : "Enable Auto-Monitoring";
   return '<div style="background:rgba(79,195,247,0.06);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
-      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
-        '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (currentAddAsMonitored ? "checked" : "") + ' style="width:auto">' +
-        '<label for="' + idPrefix + 'addAsMonitored" style="margin:0;font-weight:500">Add discovered FortiGates to Assets as Monitored</label>' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:12px;margin-bottom:0.4rem">' +
+        '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (enabled ? "checked" : "") + ' style="display:none">' +
+        '<button type="button" class="btn ' + btnClass + '" data-auto-monitor-toggle="' + idPrefix + 'addAsMonitored" style="min-width:200px">' + btnLabel + '</button>' +
+        '<div style="font-weight:500">Auto-Monitor FortiGates</div>' +
       '</div>' +
-      '<p class="hint" style="margin:0">When checked, newly-discovered FortiGates land in Assets with monitoring enabled (the integration\'s API token already provides the probe path). Existing FortiGates are unchanged — flip them individually from the asset modal.</p>' +
+      '<p class="hint" style="margin:0">When enabled, every discovered FortiGate is monitored (the integration\'s API token already provides the probe path). Disabling sweeps existing FortiGates off monitoring on the next discovery cycle unless an operator has set a per-asset override. You\'ll be asked to confirm at Save Changes.</p>' +
     '</div>';
 }
 
@@ -2111,10 +2123,50 @@ function _relabelInheritOptions(container, fmgDirectMode) {
 // class-level strip (intg-mon-class) plus one stream-level strip per class
 // subtab (intg-mon-streams-primary + intg-mon-streams-<klass> for each
 // secondary class). Idempotent — safe to call whenever the modal mounts.
+// Bind the Enable/Disable Auto-Monitoring button to its paired hidden
+// checkbox. The button toggles the checkbox, dispatches a `change` event
+// (so the existing automon-wrap visibility listener and any other change
+// hooks fire unchanged), and re-themes itself (blue → red on enable,
+// red → blue on disable). Idempotent: re-binding is harmless.
+function _wireAutoMonitoringButtons(rootEl) {
+  var root = rootEl || document;
+  var buttons = root.querySelectorAll('button[data-auto-monitor-toggle]');
+  for (var i = 0; i < buttons.length; i++) {
+    var btn = buttons[i];
+    if (btn.dataset.wired === "1") continue;
+    btn.dataset.wired = "1";
+    (function (b) {
+      b.addEventListener("click", function () {
+        var targetId = b.getAttribute("data-auto-monitor-toggle");
+        var hidden = document.getElementById(targetId);
+        if (!hidden) return;
+        var nextOn = !hidden.checked;
+        hidden.checked = nextOn;
+        if (nextOn) {
+          b.classList.remove("btn-primary");
+          b.classList.add("btn-danger");
+          b.textContent = "Disable Auto-Monitoring";
+        } else {
+          b.classList.remove("btn-danger");
+          b.classList.add("btn-primary");
+          b.textContent = "Enable Auto-Monitoring";
+        }
+        // Dispatch so the existing change listener (automon-wrap display,
+        // any future side effects) fires as before. Inputs of type=checkbox
+        // dispatch 'change' on user interaction; we have to do it manually
+        // when we mutate `checked` from JS.
+        hidden.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    })(btn);
+  }
+}
+
 function _wireMonitoringTabSubtabs(integrationType) {
   var spec = _CLASS_SUBTAB_SPECS[integrationType];
   if (!spec) return;
   _intWireModalTabs("intg-mon-class");
+  // Wire the Enable/Disable Auto-Monitoring buttons for every class subtab.
+  _wireAutoMonitoringButtons(document);
   spec.classes.forEach(function (c) {
     var prefix = (c.key === spec.primary)
       ? "intg-mon-streams-primary"
@@ -3624,6 +3676,54 @@ async function openEditModal(id) {
       btn.disabled = true;
       btn.textContent = "Saving...";
       try {
+        // Auto-Monitor confirm gate (FortiGate/Switch/AP only) — preflight
+        // the operator's proposed addAsMonitored toggle states and ask for
+        // confirmation when disabling would sweep monitoring off existing
+        // assets. Read from the hidden checkboxes (the visible buttons
+        // toggle these via _wireAutoMonitoringButtons). Aborts the save
+        // without re-enabling the button if the operator declines, so the
+        // finally block at the end resets state cleanly.
+        if (isFmgOrFgt) {
+          var proposed = {};
+          var fgEl = document.getElementById("f-mon-fortigate-addAsMonitored");
+          var swEl = document.getElementById("f-mon-fortiswitch-addAsMonitored");
+          var apEl = document.getElementById("f-mon-fortiap-addAsMonitored");
+          if (fgEl) proposed.firewall     = fgEl.checked === true;
+          if (swEl) proposed["switch"]    = swEl.checked === true;
+          if (apEl) proposed.access_point = apEl.checked === true;
+          try {
+            var pre = await api.integrations.autoMonitorAssetsPreflight(id, proposed);
+            var disablingClasses = [];
+            ["firewall", "switch", "access_point"].forEach(function (k) {
+              var c = pre && pre.classes && pre.classes[k];
+              if (c && c.wouldDisable > 0) {
+                disablingClasses.push({ k: k, wouldDisable: c.wouldDisable, overridden: c.overridden });
+              }
+            });
+            if (disablingClasses.length > 0) {
+              var humanClass = { firewall: "FortiGate", "switch": "FortiSwitch", access_point: "FortiAP" };
+              var lines = disablingClasses.map(function (d) {
+                var protectedNote = d.overridden > 0 ? " (" + d.overridden + " protected by per-asset override)" : "";
+                return "  • " + humanClass[d.k] + ": " + d.wouldDisable + " asset(s) will stop being monitored" + protectedNote;
+              });
+              var ok = window.confirm(
+                "Disabling Auto-Monitoring will sweep monitoring OFF for previously-discovered assets:\n\n" +
+                lines.join("\n") + "\n\n" +
+                "Per-asset overrides are preserved. Continue?"
+              );
+              if (!ok) {
+                btn.disabled = false;
+                btn.textContent = "Save Changes";
+                return;
+              }
+            }
+          } catch (preflightErr) {
+            // Preflight failure shouldn't block the save — log it and proceed.
+            // The backend save itself will still apply correctly.
+            if (window.console) console.warn("Auto-Monitor preflight failed:", preflightErr);
+          }
+        }
+
         var saved = await performSave();
         var classes = isFmgOrFgt ? [
           ["fortigate",   saved.editConfig.fortigateMonitor],

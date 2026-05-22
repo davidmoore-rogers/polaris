@@ -19,6 +19,7 @@ import { getSightingsForAsset, getSightingSettings, updateSightingSettings } fro
 import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
 import { isValidIpAddress, cidrContains } from "../../utils/cidr.js";
 import { isKnownAssetType } from "../../utils/assetTypes.js";
+import { recomputeMonitorOverrideForAssets } from "../../services/monitorOverrideService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
 import {
@@ -424,13 +425,12 @@ router.post("/bulk-monitor", requirePermission("assets", "write"), async (req, r
     }).parse(req.body);
 
     // Build the per-asset data shape ONCE — every selected asset gets the
-    // same monitor config in a bulk operation. monitoredOperatorSet flips
-    // to true so subsequent discovery cycles don't auto-flip the `monitored`
-    // flag back to its integration default for the assets the operator
-    // just touched.
+    // same monitor config in a bulk operation. monitorOverride is NOT set
+    // here because it depends on each asset's discoveredByIntegrationId +
+    // assetType (per-asset-varying) — instead we recompute it in one SQL
+    // pass against the touched ids after the updateMany lands.
     const data: Record<string, unknown> = {
       monitored: body.monitored,
-      monitoredOperatorSet: true,
     };
     if (body.monitorCredentialId !== undefined) data.monitorCredentialId = body.monitorCredentialId;
     if (body.monitorIntervalSec !== undefined)  data.monitorIntervalSec  = body.monitorIntervalSec;
@@ -459,6 +459,12 @@ router.post("/bulk-monitor", requirePermission("assets", "write"), async (req, r
         data: data as any,
       });
       updatedCount = result.count;
+      // Recompute monitorOverride for every touched asset in one SQL UPDATE.
+      // Each asset's override depends on its discoveredByIntegrationId +
+      // assetType, so it has to be done per-asset against the integration's
+      // per-class addAsMonitored. Assets without an integration link are
+      // skipped by the WHERE clause and keep monitorOverride=false.
+      await recomputeMonitorOverrideForAssets(prisma, [...foundSet]);
     }
 
     logEvent({
@@ -1527,17 +1533,16 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
       data.statusChangedAt = new Date();
       data.statusChangedBy = req.session?.username ?? "manual";
     }
-    // Mark the monitored toggle as operator-set so discovery's addAsMonitored
-    // re-stamp on FortiSwitch/FortiAP/AD paths doesn't flip it back later.
-    // Only fires when the operator explicitly included `monitored` in the
-    // request body — un-related PUTs (e.g. just changing notes) leave the
-    // sticky flag alone.
-    if (input.monitored !== undefined) {
-      data.monitoredOperatorSet = true;
-    }
     clampMonitoredState(data);
     clampAcquiredToLastSeen(data, existing);
     const asset = await prisma.asset.update({ where: { id }, data: data as any });
+    // When the operator's `monitored` choice changes (or assetType changes,
+    // which moves the asset into a different per-class block), recompute
+    // monitorOverride against the discovering integration's addAsMonitored.
+    // A single SQL UPDATE handles the JSON-path lookup in one round-trip.
+    if (input.monitored !== undefined || input.assetType !== undefined) {
+      await recomputeMonitorOverrideForAssets(prisma, [id]);
+    }
     const trackFields = ["hostname", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "notes", "dnsName"] as const;
     const before: Record<string, unknown> = {};
     const after: Record<string, unknown> = {};

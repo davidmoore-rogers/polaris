@@ -258,10 +258,10 @@ d("PUT /api/v1/assets/:id (polling fields)", () => {
     expect(fresh!.telemetryPolling).toBe("snmp");
   });
 
-  it("flips monitoredOperatorSet=true on every PUT that includes the monitored field", async () => {
+  it("recomputes monitorOverride after a PUT that includes the monitored field — no integration link → stays false", async () => {
     const { agent, csrf } = await authedAgent(app);
     const asset = await prisma.asset.create({
-      data: { hostname: "test-host", assetType: "server", monitoredOperatorSet: false },
+      data: { hostname: "test-host", assetType: "server", monitorOverride: false },
     });
     const resp = await agent
       .put(`/api/v1/assets/${asset.id}`)
@@ -269,14 +269,16 @@ d("PUT /api/v1/assets/:id (polling fields)", () => {
       .send({ monitored: true });
     expect(resp.status).toBe(200);
     const fresh = await prisma.asset.findUnique({ where: { id: asset.id } });
-    expect(fresh!.monitoredOperatorSet).toBe(true);
     expect(fresh!.monitored).toBe(true);
+    // No discoveredByIntegrationId → recompute helper's WHERE clause skips
+    // this asset and monitorOverride stays at its existing value (false).
+    expect(fresh!.monitorOverride).toBe(false);
   });
 
-  it("leaves monitoredOperatorSet alone when the PUT body omits monitored", async () => {
+  it("leaves monitorOverride alone when the PUT body omits monitored", async () => {
     const { agent, csrf } = await authedAgent(app);
     const asset = await prisma.asset.create({
-      data: { hostname: "test-host", assetType: "server", monitoredOperatorSet: false },
+      data: { hostname: "test-host", assetType: "server", monitorOverride: false },
     });
     const resp = await agent
       .put(`/api/v1/assets/${asset.id}`)
@@ -284,7 +286,7 @@ d("PUT /api/v1/assets/:id (polling fields)", () => {
       .send({ notes: "just touching notes" });
     expect(resp.status).toBe(200);
     const fresh = await prisma.asset.findUnique({ where: { id: asset.id } });
-    expect(fresh!.monitoredOperatorSet).toBe(false);
+    expect(fresh!.monitorOverride).toBe(false);
   });
 });
 
