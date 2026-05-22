@@ -3,9 +3,19 @@
  *
  * Tier-aware readers for the six chart history endpoints. Phase 4 of the
  * tiered sample-retention work. Each function takes (assetId, since, until,
- * tier[, extraKey]) and returns serialised sample rows + stats matching
- * the existing response shape the chart renderers expect, with two
+ * tier[, extraKey, fetchSince]) and returns serialised sample rows + stats
+ * matching the existing response shape the chart renderers expect, with two
  * additions on rollup tiers:
+ *
+ * `fetchSince` is the optional **lookback overflow** boundary — when set,
+ * the query window extends to `[fetchSince, until]` so the rendered chart
+ * has at least one sample BEFORE the visible window, letting the polyline
+ * enter the chart area from the left edge instead of starting partway
+ * through. Stats are still computed from samples within `[since, until]`
+ * so the operator-visible counts and averages match the visible window
+ * (overflow rows are for line continuity only). Defaults to `since` when
+ * omitted, in which case behavior is unchanged. See the "Time-series chart
+ * (SVG)" section of primaries.md for the convention.
  *
  *   - Gauge tables (monitor, telemetry, temperature, storage):
  *     samples keep the SAME field names the detail tier emits — e.g.
@@ -86,16 +96,20 @@ export async function readMonitorHistory(
   since: Date,
   until: Date,
   tier: SampleTier,
+  fetchSince?: Date,
 ): Promise<MonitorHistoryResult> {
+  const queryFrom = fetchSince ?? since;
+  const sinceMs = since.getTime();
   if (tier === "detail") {
     const rows = await prisma.assetMonitorSample.findMany({
-      where: { assetId, timestamp: { gte: since, lte: until } },
+      where: { assetId, timestamp: { gte: queryFrom, lte: until } },
       orderBy: { timestamp: "asc" },
       select: { timestamp: true, success: true, responseTimeMs: true, error: true },
     });
-    const total = rows.length;
-    const failed = rows.filter((s) => !s.success).length;
-    const ok = rows.filter((s) => s.success && typeof s.responseTimeMs === "number").map((s) => s.responseTimeMs as number);
+    const visible = rows.filter((s) => s.timestamp.getTime() >= sinceMs);
+    const total = visible.length;
+    const failed = visible.filter((s) => !s.success).length;
+    const ok = visible.filter((s) => s.success && typeof s.responseTimeMs === "number").map((s) => s.responseTimeMs as number);
     return {
       samples: rows,
       stats: {
@@ -125,13 +139,14 @@ export async function readMonitorHistory(
      FROM "${table}"
      WHERE "assetId" = $1 AND "bucketStart" >= $2 AND "bucketStart" <= $3
      ORDER BY "bucketStart" ASC`,
-    assetId, since, until,
+    assetId, queryFrom, until,
   );
 
   let total = 0, failed = 0;
   let weightedSum = 0, weightedCount = 0;
   let minMs: number | null = null, maxMs: number | null = null;
   for (const r of rows) {
+    if (r.bucketStart.getTime() < sinceMs) continue;
     total += r.sampleCount;
     failed += r.failureCount;
     if (r.avgResponseTimeMs != null && r.successCount > 0) {
@@ -194,10 +209,13 @@ export async function readTelemetryHistory(
   since: Date,
   until: Date,
   tier: SampleTier,
+  fetchSince?: Date,
 ): Promise<TelemetryHistoryResult> {
+  const queryFrom = fetchSince ?? since;
+  const sinceMs = since.getTime();
   if (tier === "detail") {
     const samples = await prisma.assetTelemetrySample.findMany({
-      where: { assetId, timestamp: { gte: since, lte: until } },
+      where: { assetId, timestamp: { gte: queryFrom, lte: until } },
       orderBy: { timestamp: "asc" },
       select: { timestamp: true, cpuPct: true, memPct: true, memUsedBytes: true, memTotalBytes: true },
     });
@@ -208,13 +226,14 @@ export async function readTelemetryHistory(
       memUsedBytes:  bn(s.memUsedBytes),
       memTotalBytes: bn(s.memTotalBytes),
     }));
-    const cpus = rows.map((r) => r.cpuPct).filter((x): x is number => typeof x === "number");
-    const mems = rows.map((r) => r.memPct ?? (r.memTotalBytes && r.memUsedBytes ? (r.memUsedBytes / r.memTotalBytes) * 100 : null))
+    const visible = rows.filter((r) => r.timestamp.getTime() >= sinceMs);
+    const cpus = visible.map((r) => r.cpuPct).filter((x): x is number => typeof x === "number");
+    const mems = visible.map((r) => r.memPct ?? (r.memTotalBytes && r.memUsedBytes ? (r.memUsedBytes / r.memTotalBytes) * 100 : null))
                      .filter((x): x is number => typeof x === "number");
     return {
       samples: rows,
       stats: {
-        total:     rows.length,
+        total:     visible.length,
         avgCpuPct: cpus.length ? cpus.reduce((a, b) => a + b, 0) / cpus.length : null,
         maxCpuPct: cpus.length ? Math.max(...cpus) : null,
         avgMemPct: mems.length ? mems.reduce((a, b) => a + b, 0) / mems.length : null,
@@ -240,18 +259,20 @@ export async function readTelemetryHistory(
      FROM "${table}"
      WHERE "assetId" = $1 AND "bucketStart" >= $2 AND "bucketStart" <= $3
      ORDER BY "bucketStart" ASC`,
-    assetId, since, until,
+    assetId, queryFrom, until,
   );
 
   let total = 0;
   let cpuWeightedSum = 0, cpuWeightedCount = 0, cpuMax: number | null = null;
   let memWeightedSum = 0, memWeightedCount = 0, memMax: number | null = null;
   const out: TelemetryHistoryRow[] = rows.map((r) => {
-    total += r.sampleCount;
-    if (r.avgCpuPct != null) { cpuWeightedSum += r.avgCpuPct * r.sampleCount; cpuWeightedCount += r.sampleCount; }
-    if (r.maxCpuPct != null) cpuMax = cpuMax == null ? r.maxCpuPct : Math.max(cpuMax, r.maxCpuPct);
-    if (r.avgMemPct != null) { memWeightedSum += r.avgMemPct * r.sampleCount; memWeightedCount += r.sampleCount; }
-    if (r.maxMemPct != null) memMax = memMax == null ? r.maxMemPct : Math.max(memMax, r.maxMemPct);
+    if (r.bucketStart.getTime() >= sinceMs) {
+      total += r.sampleCount;
+      if (r.avgCpuPct != null) { cpuWeightedSum += r.avgCpuPct * r.sampleCount; cpuWeightedCount += r.sampleCount; }
+      if (r.maxCpuPct != null) cpuMax = cpuMax == null ? r.maxCpuPct : Math.max(cpuMax, r.maxCpuPct);
+      if (r.avgMemPct != null) { memWeightedSum += r.avgMemPct * r.sampleCount; memWeightedCount += r.sampleCount; }
+      if (r.maxMemPct != null) memMax = memMax == null ? r.maxMemPct : Math.max(memMax, r.maxMemPct);
+    }
     return {
       timestamp:     r.bucketStart,
       cpuPct:        r.avgCpuPct,
@@ -304,10 +325,13 @@ export async function readTemperatureHistory(
   until: Date,
   tier: SampleTier,
   sensorName: string | null,
+  fetchSince?: Date,
 ): Promise<TemperatureHistoryResult> {
+  const queryFrom = fetchSince ?? since;
+  const sinceMs = since.getTime();
   if (tier === "detail") {
     const samples = await prisma.assetTemperatureSample.findMany({
-      where: { assetId, timestamp: { gte: since, lte: until }, ...(sensorName ? { sensorName } : {}) },
+      where: { assetId, timestamp: { gte: queryFrom, lte: until }, ...(sensorName ? { sensorName } : {}) },
       orderBy: { timestamp: "asc" },
     });
     const rows: TemperatureHistoryRow[] = samples.map((s) => ({
@@ -315,11 +339,12 @@ export async function readTemperatureHistory(
       sensorName: s.sensorName,
       celsius:    s.celsius,
     }));
-    const cs = rows.map((r) => r.celsius).filter((x): x is number => typeof x === "number");
+    const visible = rows.filter((r) => r.timestamp.getTime() >= sinceMs);
+    const cs = visible.map((r) => r.celsius).filter((x): x is number => typeof x === "number");
     return {
       samples: rows,
       stats: {
-        total:      rows.length,
+        total:      visible.length,
         avgCelsius: cs.length ? cs.reduce((a, b) => a + b, 0) / cs.length : null,
         minCelsius: cs.length ? Math.min(...cs) : null,
         maxCelsius: cs.length ? Math.max(...cs) : null,
@@ -328,7 +353,7 @@ export async function readTemperatureHistory(
   }
 
   const table = tier === "hourly" ? "asset_temperature_samples_hourly" : "asset_temperature_samples_daily";
-  const params: unknown[] = [assetId, since, until];
+  const params: unknown[] = [assetId, queryFrom, until];
   let where = `"assetId" = $1 AND "bucketStart" >= $2 AND "bucketStart" <= $3`;
   if (sensorName) {
     params.push(sensorName);
@@ -353,10 +378,12 @@ export async function readTemperatureHistory(
   let weightedSum = 0, weightedCount = 0;
   let cmin: number | null = null, cmax: number | null = null;
   const out: TemperatureHistoryRow[] = rows.map((r) => {
-    total += r.sampleCount;
-    if (r.avgCelsius != null) { weightedSum += r.avgCelsius * r.sampleCount; weightedCount += r.sampleCount; }
-    if (r.minCelsius != null) cmin = cmin == null ? r.minCelsius : Math.min(cmin, r.minCelsius);
-    if (r.maxCelsius != null) cmax = cmax == null ? r.maxCelsius : Math.max(cmax, r.maxCelsius);
+    if (r.bucketStart.getTime() >= sinceMs) {
+      total += r.sampleCount;
+      if (r.avgCelsius != null) { weightedSum += r.avgCelsius * r.sampleCount; weightedCount += r.sampleCount; }
+      if (r.minCelsius != null) cmin = cmin == null ? r.minCelsius : Math.min(cmin, r.minCelsius);
+      if (r.maxCelsius != null) cmax = cmax == null ? r.maxCelsius : Math.max(cmax, r.maxCelsius);
+    }
     return {
       timestamp:   r.bucketStart,
       sensorName:  r.sensorName,
@@ -394,10 +421,12 @@ export async function readStorageHistory(
   until: Date,
   tier: SampleTier,
   mountPath: string,
+  fetchSince?: Date,
 ): Promise<{ samples: StorageHistoryRow[] }> {
+  const queryFrom = fetchSince ?? since;
   if (tier === "detail") {
     const samples = await prisma.assetStorageSample.findMany({
-      where: { assetId, mountPath, timestamp: { gte: since, lte: until } },
+      where: { assetId, mountPath, timestamp: { gte: queryFrom, lte: until } },
       orderBy: { timestamp: "asc" },
     });
     return {
@@ -422,7 +451,7 @@ export async function readStorageHistory(
      FROM "${table}"
      WHERE "assetId" = $1 AND "mountPath" = $2 AND "bucketStart" >= $3 AND "bucketStart" <= $4
      ORDER BY "bucketStart" ASC`,
-    assetId, mountPath, since, until,
+    assetId, mountPath, queryFrom, until,
   );
   return {
     samples: rows.map((r) => ({
@@ -471,10 +500,12 @@ export async function readInterfaceHistory(
   until: Date,
   tier: SampleTier,
   ifName: string,
+  fetchSince?: Date,
 ): Promise<{ samples: InterfaceHistoryRow[]; meta: InterfaceHistoryMeta }> {
+  const queryFrom = fetchSince ?? since;
   if (tier === "detail") {
     const samples = await prisma.assetInterfaceSample.findMany({
-      where: { assetId, ifName, timestamp: { gte: since, lte: until } },
+      where: { assetId, ifName, timestamp: { gte: queryFrom, lte: until } },
       orderBy: { timestamp: "asc" },
     });
     const latest = samples.length > 0 ? samples[samples.length - 1] : null;
@@ -530,7 +561,7 @@ export async function readInterfaceHistory(
      FROM "${table}"
      WHERE "assetId" = $1 AND "ifName" = $2 AND "bucketStart" >= $3 AND "bucketStart" <= $4
      ORDER BY "bucketStart" ASC`,
-    assetId, ifName, since, until,
+    assetId, ifName, queryFrom, until,
   );
 
   let latestAlias: string | null = null;
@@ -602,10 +633,12 @@ export async function readIpsecHistory(
   until: Date,
   tier: SampleTier,
   tunnelName: string,
+  fetchSince?: Date,
 ): Promise<{ samples: IpsecHistoryRow[] }> {
+  const queryFrom = fetchSince ?? since;
   if (tier === "detail") {
     const samples = await prisma.assetIpsecTunnelSample.findMany({
-      where: { assetId, tunnelName, timestamp: { gte: since, lte: until } },
+      where: { assetId, tunnelName, timestamp: { gte: queryFrom, lte: until } },
       orderBy: { timestamp: "asc" },
     });
     return {
@@ -641,7 +674,7 @@ export async function readIpsecHistory(
      FROM "${table}"
      WHERE "assetId" = $1 AND "tunnelName" = $2 AND "bucketStart" >= $3 AND "bucketStart" <= $4
      ORDER BY "bucketStart" ASC`,
-    assetId, tunnelName, since, until,
+    assetId, tunnelName, queryFrom, until,
   );
 
   return {

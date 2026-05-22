@@ -147,6 +147,32 @@ function _chartRangeBtnsHTML(barClass, entries, prefKey, fallback) {
   }).join("");
 }
 
+// Lookback-overflow clipping helpers. The history endpoints fetch ~1 bucket
+// of samples BEFORE the visible window so the chart's polyline enters from
+// the left edge with continuous data instead of starting partway through;
+// see the "Time-series chart (SVG)" section of primaries.md. The chart
+// renderer hides those pre-since samples by wrapping every data-drawing
+// element (polyline / dots / failure lines / hit targets) in a <g> bound
+// to a per-chart clipPath that matches the inner plot area exactly.
+//
+// _chartClipDefs returns the <defs>…</defs> string that declares the
+// clipPath; _chartClipAttr returns the matching `clip-path="…"` attribute.
+// Each chart instance derives a unique id from its container so multiple
+// charts on the same page don't collide.
+var _chartClipSeq = 0;
+function _chartClipId(prefix) {
+  _chartClipSeq += 1;
+  return "polaris-chart-clip-" + (prefix || "x") + "-" + _chartClipSeq;
+}
+function _chartClipDefs(id, padL, padT, innerW, innerH) {
+  return '<defs><clipPath id="' + id + '">' +
+    '<rect x="' + padL + '" y="' + padT + '" width="' + innerW + '" height="' + innerH + '"/>' +
+    '</clipPath></defs>';
+}
+function _chartClipAttr(id) {
+  return 'clip-path="url(#' + id + ')"';
+}
+
 // Renders a stats line into the given container using the canonical
 // Response Time format (see primaries.md): leading "<count> samples"
 // span (count bolded), then one "<Label>: <value>" span per metric.
@@ -4990,13 +5016,17 @@ function _renderSensorChart(container, samples, opts) {
     '<text class="chart-axis-title" x="' + yLabelX + '" y="' + yLabelY + '" text-anchor="middle" font-size="11" fill="currentColor"' +
       ' transform="rotate(-90 ' + yLabelX + ' ' + yLabelY + ')">Temperature (°C)</text>';
 
+  var clipId = _chartClipId("sensor");
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       labels + ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
-      '<polyline points="' + pts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
-      samples.map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.celsius) + '" r="1.5" fill="var(--color-accent)"/>'; }).join("") +
-      hits +
+      '<g ' + _chartClipAttr(clipId) + '>' +
+        '<polyline points="' + pts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
+        samples.map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.celsius) + '" r="1.5" fill="var(--color-accent)"/>'; }).join("") +
+        hits +
+      '</g>' +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
   container.style.alignItems = "stretch";
@@ -5661,16 +5691,21 @@ function _renderSystemChart(container, data, asset, si) {
     '</g>';
 
   var chartStaleBanner = _staleBannerHTML(asset && asset.id, asset, "telemetry", si && si.lastTelemetryAt);
+  var clipId = _chartClipId("system");
   container.innerHTML =
     chartStaleBanner +
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
-      (cpuPts ? '<polyline points="' + cpuPts + '" fill="none" stroke="' + cpuColor + '" stroke-width="1.5"/>' : '') +
-      (memPts ? '<polyline points="' + memPts + '" fill="none" stroke="' + memColor + '" stroke-width="1.5"/>' : '') +
-      cpuValues.map(function (e) { return '<circle cx="' + xFor(e.s.timestamp) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + cpuColor + '"/>'; }).join("") +
-      memValues.map(function (e) { return '<circle cx="' + xFor(e.s.timestamp) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + memColor + '"/>'; }).join("") +
-      legend + hits +
+      '<g ' + _chartClipAttr(clipId) + '>' +
+        (cpuPts ? '<polyline points="' + cpuPts + '" fill="none" stroke="' + cpuColor + '" stroke-width="1.5"/>' : '') +
+        (memPts ? '<polyline points="' + memPts + '" fill="none" stroke="' + memColor + '" stroke-width="1.5"/>' : '') +
+        cpuValues.map(function (e) { return '<circle cx="' + xFor(e.s.timestamp) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + cpuColor + '"/>'; }).join("") +
+        memValues.map(function (e) { return '<circle cx="' + xFor(e.s.timestamp) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + memColor + '"/>'; }).join("") +
+        hits +
+      '</g>' +
+      legend +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
   container.style.alignItems = "stretch";
@@ -6532,20 +6567,24 @@ function _renderMonitorChart(container, data, transitions) {
           ' data-ts="' + escapeHtml(String(m.raw)) + '" data-label="' + escapeHtml(m.label) + '"/>';
     }).join("");
 
+  var clipId = _chartClipId("monitor");
   var svg =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks +
       xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       transitionLayer +
       yTitle +
       xTitle +
-      failureLines +
-      (pointsAttr ? '<polyline points="' + pointsAttr + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' : '') +
-      oks.map(function (s) {
-        return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.responseTimeMs) + '" r="1.5" fill="var(--color-accent)"/>';
-      }).join("") +
-      hitTargets +
+      '<g ' + _chartClipAttr(clipId) + '>' +
+        failureLines +
+        (pointsAttr ? '<polyline points="' + pointsAttr + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' : '') +
+        oks.map(function (s) {
+          return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.responseTimeMs) + '" r="1.5" fill="var(--color-accent)"/>';
+        }).join("") +
+        hitTargets +
+      '</g>' +
     '</svg>' +
     '<div class="monitor-tooltip" style="position:absolute;pointer-events:none;display:none;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:4px;padding:6px 8px;font-size:0.75rem;line-height:1.35;color:var(--color-text);box-shadow:0 4px 12px rgba(0,0,0,0.25);white-space:nowrap;z-index:5"></div>';
   container.innerHTML = svg;
@@ -7229,15 +7268,20 @@ function _renderIfaceThroughputChart(container, derived, opts) {
       '<rect x="' + (padL + 70)  + '" y="2" width="10" height="10" fill="' + outColor + '"/>' +
       '<text x="' + (padL + 84)  + '" y="11">Output</text>' +
     '</g>';
+  var clipId = _chartClipId("ifaceTp");
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
-      (inPts  ? '<polyline points="' + inPts  + '" fill="none" stroke="' + inColor  + '" stroke-width="1.5"/>' : '') +
-      (outPts ? '<polyline points="' + outPts + '" fill="none" stroke="' + outColor + '" stroke-width="1.5"/>' : '') +
-      inSeries .map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.inBps)  + '" r="1.5" fill="' + inColor  + '"/>'; }).join("") +
-      outSeries.map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.outBps) + '" r="1.5" fill="' + outColor + '"/>'; }).join("") +
-      legend + hits +
+      '<g ' + _chartClipAttr(clipId) + '>' +
+        (inPts  ? '<polyline points="' + inPts  + '" fill="none" stroke="' + inColor  + '" stroke-width="1.5"/>' : '') +
+        (outPts ? '<polyline points="' + outPts + '" fill="none" stroke="' + outColor + '" stroke-width="1.5"/>' : '') +
+        inSeries .map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.inBps)  + '" r="1.5" fill="' + inColor  + '"/>'; }).join("") +
+        outSeries.map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.outBps) + '" r="1.5" fill="' + outColor + '"/>'; }).join("") +
+        hits +
+      '</g>' +
+      legend +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
   container.style.alignItems = "stretch";
@@ -7320,15 +7364,20 @@ function _renderIfaceErrorChart(container, derived, opts) {
       '<rect x="' + (padL + 110) + '" y="2" width="10" height="10" fill="#9b5de5"/>' +
       '<text x="' + (padL + 124) + '" y="11">Out errors</text>' +
     '</g>';
+  var clipId = _chartClipId("ifaceErr");
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
-      (inPts  ? '<polyline points="' + inPts  + '" fill="none" stroke="#d32f2f" stroke-width="1.5"/>' : '') +
-      (outPts ? '<polyline points="' + outPts + '" fill="none" stroke="#9b5de5" stroke-width="1.5"/>' : '') +
-      inSeries .map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.inErr)  + '" r="1.5" fill="#d32f2f"/>'; }).join("") +
-      outSeries.map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.outErr) + '" r="1.5" fill="#9b5de5"/>'; }).join("") +
-      legend + hits +
+      '<g ' + _chartClipAttr(clipId) + '>' +
+        (inPts  ? '<polyline points="' + inPts  + '" fill="none" stroke="#d32f2f" stroke-width="1.5"/>' : '') +
+        (outPts ? '<polyline points="' + outPts + '" fill="none" stroke="#9b5de5" stroke-width="1.5"/>' : '') +
+        inSeries .map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.inErr)  + '" r="1.5" fill="#d32f2f"/>'; }).join("") +
+        outSeries.map(function (d) { return '<circle cx="' + xFor(d.timestamp) + '" cy="' + yFor(d.outErr) + '" r="1.5" fill="#9b5de5"/>'; }).join("") +
+        hits +
+      '</g>' +
+      legend +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
   container.style.alignItems = "stretch";
@@ -7699,10 +7748,15 @@ function _renderIpsecStatusChart(container, samples, opts) {
       '<rect x="' + (padL + 110) + '" y="2" width="10" height="6" fill="#d32f2f"/><text x="' + (padL + 124) + '" y="8">down</text>' +
       (hasDynamic ? '<rect x="' + (padL + 160) + '" y="2" width="10" height="6" fill="#7b8794"/><text x="' + (padL + 174) + '" y="8">dynamic</text>' : '') +
     '</g>';
+  var clipId = _chartClipId("ipsecStat");
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
-      bars + xTicks +
+      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      '<g ' + _chartClipAttr(clipId) + '>' +
+        bars +
+      '</g>' +
       legend +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
@@ -7770,13 +7824,17 @@ function _renderIpsecBpsChart(container, derived, side, opts) {
       '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
   }
   var color = side === "in" ? "var(--color-accent)" : "#f4a261";
+  var clipId = _chartClipId("ipsecBps");
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
-      '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>' +
-      values.map(function (e) { return '<circle cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + color + '"/>'; }).join("") +
-      hits +
+      '<g ' + _chartClipAttr(clipId) + '>' +
+        '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>' +
+        values.map(function (e) { return '<circle cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + color + '"/>'; }).join("") +
+        hits +
+      '</g>' +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
   container.style.alignItems = "stretch";
@@ -8347,15 +8405,19 @@ function _renderStorageChart(container, samples, opts) {
       '<text x="' + (x1 + 3) + '" y="' + (padT + 9) + '" font-size="9" fill="currentColor" opacity="0.7">now</text>';
   }
 
+  var clipId = _chartClipId("storage");
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
-      seriesSvg +
-      forecastSvg +
-      nowMarkerSvg +
+      '<g ' + _chartClipAttr(clipId) + '>' +
+        seriesSvg +
+        forecastSvg +
+        nowMarkerSvg +
+        hitSvg +
+      '</g>' +
       legendSvg +
-      hitSvg +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
   container.style.alignItems = "stretch";

@@ -670,7 +670,8 @@ router.get("/:id/monitor-history", requirePermission("assets", "read"), async (r
       rangeLabel = range;
     }
     const pick = await pickSampleTierForAsset(id, "sample", since);
-    const result = await readMonitorHistory(id, since, until, pick.tier);
+    const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
+    const result = await readMonitorHistory(id, since, until, pick.tier, fetchSince);
     res.json({
       range: rangeLabel,
       since,
@@ -909,6 +910,26 @@ function resolveRange(req: any): { since: Date; until: Date; rangeLabel: string 
   return { since: new Date(+until - windowMs), until, rangeLabel: range };
 }
 
+/**
+ * Extend `since` backwards by one bucket of lookback overflow so the chart
+ * polyline has at least one sample BEFORE the visible window. The renderer
+ * clips drawn content to `[since, until]` via SVG clipPath, so the extra
+ * sample is hidden but its presence lets the line enter the chart from the
+ * left edge instead of starting partway through. Stats stay scoped to the
+ * visible window (filtered in the service). See the "Time-series chart
+ * (SVG)" section of primaries.md.
+ *
+ *   - detail tier (bucketSeconds=0): 5-minute lookback — covers ~1-5 polls
+ *     at 1m/2m/5m cadences without bloating the query.
+ *   - hourly tier: one extra bucket (3600s).
+ *   - daily tier:  one extra bucket (86400s).
+ */
+function extendSinceForLookback(since: Date, bucketSeconds: number): Date {
+  const DETAIL_LOOKBACK_MS = 5 * 60 * 1000;
+  const lookbackMs = bucketSeconds > 0 ? bucketSeconds * 1000 : DETAIL_LOOKBACK_MS;
+  return new Date(+since - lookbackMs);
+}
+
 function bigIntToNumber(v: bigint | null | undefined): number | null {
   if (v == null) return null;
   return Number(v);
@@ -920,7 +941,8 @@ router.get("/:id/telemetry-history", requirePermission("assets", "read"), async 
     const id = req.params.id as string;
     const { since, until, rangeLabel } = resolveRange(req);
     const pick = await pickSampleTierForAsset(id, "telemetry", since);
-    const result = await readTelemetryHistory(id, since, until, pick.tier);
+    const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
+    const result = await readTelemetryHistory(id, since, until, pick.tier, fetchSince);
     res.json({
       range: rangeLabel,
       since,
@@ -1254,6 +1276,7 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
     if (!ifName) throw new AppError(400, "ifName query parameter is required");
     const { since, until, rangeLabel } = resolveRange(req);
     const pick = await pickSampleTierForAsset(id, "systemInfo", since);
+    const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
 
     // Samples come from the tier-aware reader. LLDP neighbors and the
     // operator-typed comment override are stream-independent — both fetch
@@ -1264,7 +1287,7 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
     // operator-typed override (Polaris-local) takes precedence for the
     // resolved `description` field shown in the UI.
     const [history, override, neighbors, inferredAll] = await Promise.all([
-      readInterfaceHistory(id, since, until, pick.tier, ifName),
+      readInterfaceHistory(id, since, until, pick.tier, ifName, fetchSince),
       prisma.assetInterfaceOverride.findUnique({
         where: { assetId_ifName: { assetId: id, ifName } },
       }),
@@ -1390,7 +1413,8 @@ router.get("/:id/temperature-history", requirePermission("assets", "read"), asyn
     const sensorName = req.query.sensorName ? String(req.query.sensorName) : null;
     const { since, until, rangeLabel } = resolveRange(req);
     const pick = await pickSampleTierForAsset(id, "telemetry", since);
-    const result = await readTemperatureHistory(id, since, until, pick.tier, sensorName);
+    const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
+    const result = await readTemperatureHistory(id, since, until, pick.tier, sensorName, fetchSince);
     res.json({
       range: rangeLabel,
       sensorName,
@@ -1412,7 +1436,8 @@ router.get("/:id/ipsec-history", requirePermission("assets", "read"), async (req
     if (!tunnelName) throw new AppError(400, "tunnelName query parameter is required");
     const { since, until, rangeLabel } = resolveRange(req);
     const pick = await pickSampleTierForAsset(id, "systemInfo", since);
-    const result = await readIpsecHistory(id, since, until, pick.tier, tunnelName);
+    const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
+    const result = await readIpsecHistory(id, since, until, pick.tier, tunnelName, fetchSince);
     res.json({
       range: rangeLabel,
       tunnelName,
@@ -1433,7 +1458,8 @@ router.get("/:id/storage-history", requirePermission("assets", "read"), async (r
     if (!mountPath) throw new AppError(400, "mountPath query parameter is required");
     const { since, until, rangeLabel } = resolveRange(req);
     const pick = await pickSampleTierForAsset(id, "systemInfo", since);
-    const result = await readStorageHistory(id, since, until, pick.tier, mountPath);
+    const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
+    const result = await readStorageHistory(id, since, until, pick.tier, mountPath, fetchSince);
     res.json({
       range: rangeLabel,
       mountPath,
