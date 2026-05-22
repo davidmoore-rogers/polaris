@@ -71,6 +71,45 @@ function _setChartRangePref(key, range) {
     localStorage.setItem("polaris-prefs-charts-" + currentUsername, JSON.stringify(p));
   } catch (_) {}
 }
+// Storage chart view mode (Used % vs Used bytes). Single string per user
+// because operators tend to think in one mental model across the whole
+// fleet, not per-asset.
+function _getStorageViewPref() {
+  if (!currentUsername) return "pct";
+  try {
+    var v = localStorage.getItem("polaris-prefs-storage-view-" + currentUsername);
+    return v === "bytes" ? "bytes" : "pct";
+  } catch (_) { return "pct"; }
+}
+function _setStorageViewPref(view) {
+  if (!currentUsername) return;
+  try {
+    localStorage.setItem("polaris-prefs-storage-view-" + currentUsername, view === "bytes" ? "bytes" : "pct");
+  } catch (_) {}
+}
+
+// Per-(asset, mount) forecast-overlay visibility. Default on; only stored
+// when the operator explicitly toggles it off (or back on after toggling
+// off) — absent entry = default on.
+function _getStorageForecastVisible(assetId, mountPath) {
+  if (!currentUsername || !assetId || !mountPath) return true;
+  try {
+    var raw = localStorage.getItem("polaris-prefs-storage-forecast-" + currentUsername);
+    var p = raw ? JSON.parse(raw) : null;
+    var v = p && p[assetId + ":" + mountPath];
+    return v === false ? false : true;
+  } catch (_) { return true; }
+}
+function _setStorageForecastVisible(assetId, mountPath, visible) {
+  if (!currentUsername || !assetId || !mountPath) return;
+  try {
+    var raw = localStorage.getItem("polaris-prefs-storage-forecast-" + currentUsername);
+    var p = raw ? (JSON.parse(raw) || {}) : {};
+    p[assetId + ":" + mountPath] = !!visible;
+    localStorage.setItem("polaris-prefs-storage-forecast-" + currentUsername, JSON.stringify(p));
+  } catch (_) {}
+}
+
 // Per-asset collapsed-interface persistence. Storage shape:
 //   { "<assetId>": ["wan1", "agg1", ...] }  // collapsed parent ifNames
 // Same per-user keying as chart-range prefs. Per-asset because the same parent
@@ -7827,12 +7866,13 @@ async function openStorageDetailPanel(asset, mountPath) {
         '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
       '</div>' +
       storageCustomPanel +
-      '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Used vs total (bytes)</h5>' +
-      '<div id="storage-bytes-stats" style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
-      '<div id="storage-bytes-chart" class="storage-chart-box"></div>' +
-      '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Used %</h5>' +
-      '<div id="storage-pct-stats" style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
-      '<div id="storage-pct-chart" class="storage-chart-box"></div>' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;margin:0.75rem 0 0.25rem;flex-wrap:wrap">' +
+        '<div style="display:flex;gap:6px" id="storage-view-toggle"></div>' +
+        '<div style="display:flex;gap:6px" id="storage-forecast-toggle"></div>' +
+      '</div>' +
+      '<div id="storage-forecast-headline" style="margin:0.25rem 0 0.5rem;font-size:0.85rem"></div>' +
+      '<div id="storage-stats" style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
+      '<div id="storage-chart" class="storage-chart-box"></div>' +
     '</div>';
   document.querySelectorAll(".storage-chart-box").forEach(function (el) {
     el.style.background = "var(--color-bg-elevated)";
@@ -7846,8 +7886,10 @@ async function openStorageDetailPanel(asset, mountPath) {
     el.style.color = "var(--color-text-secondary)";
     el.style.fontSize = "0.85rem";
   });
+  _renderStorageViewToggle(asset.id, mountPath);
+  _renderStorageForecastToggle(asset.id, mountPath);
 
-  await _loadStorageHistoryFor(asset.id, mountPath, _getChartRangePref("assetStorage", "1h"));
+  await _loadStorageHistoryFor(asset.id, mountPath, _getChartRangePref("assetStorage", "24h"));
   document.querySelectorAll(".storage-range-btn").forEach(function (b) {
     b.addEventListener("click", function () {
       var range = b.getAttribute("data-range");
@@ -7888,86 +7930,301 @@ async function openStorageDetailPanel(asset, mountPath) {
   }
 }
 
-async function _loadStorageHistoryFor(assetId, mountPath, range) {
-  var bytesEl = document.getElementById("storage-bytes-chart");
-  var pctEl   = document.getElementById("storage-pct-chart");
-  var bytesStats = document.getElementById("storage-bytes-stats");
-  var pctStats   = document.getElementById("storage-pct-stats");
-  if (!bytesEl) return;
-  bytesEl.textContent = pctEl.textContent = "Loading samples…";
-  if (bytesStats) bytesStats.textContent = "Loading…";
-  if (pctStats)   pctStats.textContent   = "Loading…";
-  // Accept range as a string or `{from, to}` object (canonical convention).
-  var reqOpts = (typeof range === "string" || !range) ? { range: range || "1h" } : range;
-  try {
-    var data = await api.assets.storageHistory(assetId, mountPath, reqOpts);
-    var samples = (data && data.samples) || [];
-    _renderStorageBytesStats(bytesStats, samples, data);
-    _renderStoragePctStats(pctStats, samples, data);
-    var renderOpts = { since: data.since, until: data.until, subject: mountPath };
-    _renderStorageBytesChart(bytesEl, samples, renderOpts);
-    _renderStoragePctChart(pctEl, samples, renderOpts);
-  } catch (err) {
-    bytesEl.textContent = pctEl.textContent = "Error: " + (err.message || "failed to load");
-    if (bytesStats) bytesStats.textContent = "";
-    if (pctStats)   pctStats.textContent   = "";
-  }
-}
+// Module-level cache of the most recent storage panel state so toggle clicks
+// (view + forecast visibility) can re-render without re-fetching. Reset on
+// every _loadStorageHistoryFor call.
+var _storagePanelState = null;
 
-function _renderStorageBytesStats(container, samples, data) {
-  if (!container) return;
-  var latest = samples.length ? samples[samples.length - 1] : null;
-  var storageBytesParts = [
-    { label: "Latest used", value: latest && typeof latest.usedBytes  === "number" ? _fmtBytes(latest.usedBytes)  : "—" },
-    { label: "Total",       value: latest && typeof latest.totalBytes === "number" ? _fmtBytes(latest.totalBytes) : "—" },
-    { label: "Free",        value: (latest && typeof latest.totalBytes === "number" && typeof latest.usedBytes === "number")
-                                   ? _fmtBytes(Math.max(0, latest.totalBytes - latest.usedBytes))
-                                   : "—" },
-  ];
-  var storageBytesTierPart = _tierStatsPart(data);
-  if (storageBytesTierPart) storageBytesParts.unshift(storageBytesTierPart);
-  _renderChartStats(container, samples.length, storageBytesParts);
-}
-
-function _renderStoragePctStats(container, samples, data) {
-  if (!container) return;
-  var pcts = [];
-  samples.forEach(function (s) {
-    if (s.totalBytes && s.usedBytes != null && s.totalBytes > 0) {
-      pcts.push((s.usedBytes / s.totalBytes) * 100);
-    }
+function _renderStorageViewToggle(assetId, mountPath) {
+  var bar = document.getElementById("storage-view-toggle");
+  if (!bar) return;
+  var view = _getStorageViewPref();
+  bar.innerHTML =
+    '<button class="btn btn-sm ' + (view === "pct"   ? 'btn-primary' : 'btn-secondary') + ' storage-view-btn" data-view="pct">Used %</button>' +
+    '<button class="btn btn-sm ' + (view === "bytes" ? 'btn-primary' : 'btn-secondary') + ' storage-view-btn" data-view="bytes">Used bytes</button>';
+  bar.querySelectorAll(".storage-view-btn").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var next = b.getAttribute("data-view");
+      if (next === _getStorageViewPref()) return;
+      _setStorageViewPref(next);
+      _renderStorageViewToggle(assetId, mountPath);
+      _rerenderStorageChartFromState();
+    });
   });
-  var minP = pcts.length ? Math.min.apply(null, pcts) : null;
-  var maxP = pcts.length ? Math.max.apply(null, pcts) : null;
-  var avgP = pcts.length ? pcts.reduce(function (a, b) { return a + b; }, 0) / pcts.length : null;
-  var latest = samples.length ? samples[samples.length - 1] : null;
-  var latestPct = (latest && latest.totalBytes && latest.usedBytes != null && latest.totalBytes > 0)
-    ? ((latest.usedBytes / latest.totalBytes) * 100)
-    : null;
-  var storagePctParts = [
-    { label: "Latest", value: latestPct != null ? latestPct.toFixed(1) + "%" : "—" },
-    { label: "Avg",    value: avgP      != null ? avgP.toFixed(1)      + "%" : "—" },
-    { label: "Min",    value: minP      != null ? minP.toFixed(1)      + "%" : "—" },
-    { label: "Max",    value: maxP      != null ? maxP.toFixed(1)      + "%" : "—" },
-  ];
-  var storagePctTierPart = _tierStatsPart(data);
-  if (storagePctTierPart) storagePctParts.unshift(storagePctTierPart);
-  _renderChartStats(container, samples.length, storagePctParts);
 }
 
-function _renderStorageBytesChart(container, samples, opts) {
-  opts = opts || {};
-  var used  = samples.map(function (s) { return { ts: s.timestamp, v: s.usedBytes }; }).filter(function (e) { return typeof e.v === "number"; });
-  var total = samples.map(function (s) { return { ts: s.timestamp, v: s.totalBytes }; }).filter(function (e) { return typeof e.v === "number"; });
-  if (used.length === 0 && total.length === 0) {
-    container.textContent = "No usage samples in this range yet.";
-    return;
+function _renderStorageForecastToggle(assetId, mountPath) {
+  var bar = document.getElementById("storage-forecast-toggle");
+  if (!bar) return;
+  var on = _getStorageForecastVisible(assetId, mountPath);
+  bar.innerHTML =
+    '<button class="btn btn-sm ' + (on ? 'btn-primary' : 'btn-secondary') + '" id="btn-storage-forecast-toggle" title="Per asset and mount; default on">' +
+      (on ? '✓ Forecast' : 'Forecast') +
+    '</button>';
+  var btn = document.getElementById("btn-storage-forecast-toggle");
+  if (btn) {
+    btn.addEventListener("click", function () {
+      var next = !_getStorageForecastVisible(assetId, mountPath);
+      _setStorageForecastVisible(assetId, mountPath, next);
+      _renderStorageForecastToggle(assetId, mountPath);
+      _rerenderStorageChartFromState();
+    });
   }
+}
+
+function _rerenderStorageChartFromState() {
+  var s = _storagePanelState;
+  if (!s) return;
+  _renderStorageStats(document.getElementById("storage-stats"), s.samples, s.data, _getStorageViewPref());
+  _renderStorageForecastHeadline(document.getElementById("storage-forecast-headline"), s.forecast, _getStorageViewPref());
+  _renderStorageChart(document.getElementById("storage-chart"), s.samples, {
+    since: s.data && s.data.since,
+    until: s.data && s.data.until,
+    subject: s.mountPath,
+    view: _getStorageViewPref(),
+    forecast: s.forecast,
+    forecastVisible: _getStorageForecastVisible(s.assetId, s.mountPath),
+  });
+}
+
+async function _loadStorageHistoryFor(assetId, mountPath, range) {
+  var chartEl = document.getElementById("storage-chart");
+  var statsEl = document.getElementById("storage-stats");
+  var headEl  = document.getElementById("storage-forecast-headline");
+  if (!chartEl) return;
+  chartEl.textContent = "Loading samples…";
+  if (statsEl) statsEl.textContent = "Loading…";
+  if (headEl)  headEl.innerHTML = "";
+  // Accept range as a string or `{from, to}` object (canonical convention).
+  var reqOpts = (typeof range === "string" || !range) ? { range: range || "24h" } : range;
+  var rangeKey = typeof range === "string" ? range : "custom";
+  try {
+    // Forecast regression always runs over a fixed 7d window so the headline
+    // and projected line stay consistent regardless of the chart's selected
+    // range. Dedupe to one fetch when the operator picked 7d (same payload).
+    var primaryPromise = api.assets.storageHistory(assetId, mountPath, reqOpts);
+    var forecastPromise = rangeKey === "7d" ? primaryPromise : api.assets.storageHistory(assetId, mountPath, { range: "7d" });
+    var results = await Promise.all([primaryPromise, forecastPromise]);
+    var data = results[0];
+    var forecastData = results[1];
+    var samples = (data && data.samples) || [];
+    var forecastSamples = (forecastData && forecastData.samples) || [];
+    var forecast = _computeStorageForecast(forecastSamples);
+    _storagePanelState = { assetId: assetId, mountPath: mountPath, data: data, samples: samples, forecast: forecast };
+    _renderStorageStats(statsEl, samples, data, _getStorageViewPref());
+    _renderStorageForecastHeadline(headEl, forecast, _getStorageViewPref());
+    _renderStorageChart(chartEl, samples, {
+      since: data && data.since,
+      until: data && data.until,
+      subject: mountPath,
+      view: _getStorageViewPref(),
+      forecast: forecast,
+      forecastVisible: _getStorageForecastVisible(assetId, mountPath),
+    });
+  } catch (err) {
+    _storagePanelState = null;
+    chartEl.textContent = "Error: " + (err.message || "failed to load");
+    if (statsEl) statsEl.textContent = "";
+    if (headEl)  headEl.innerHTML = "";
+  }
+}
+
+function _renderStorageStats(container, samples, data, view) {
+  if (!container) return;
+  var latest = samples.length ? samples[samples.length - 1] : null;
+  var parts;
+  if (view === "bytes") {
+    parts = [
+      { label: "Latest used", value: latest && typeof latest.usedBytes  === "number" ? _fmtBytes(latest.usedBytes)  : "—" },
+      { label: "Total",       value: latest && typeof latest.totalBytes === "number" ? _fmtBytes(latest.totalBytes) : "—" },
+      { label: "Free",        value: (latest && typeof latest.totalBytes === "number" && typeof latest.usedBytes === "number")
+                                     ? _fmtBytes(Math.max(0, latest.totalBytes - latest.usedBytes))
+                                     : "—" },
+    ];
+  } else {
+    var pcts = [];
+    samples.forEach(function (s) {
+      if (s.totalBytes && s.usedBytes != null && s.totalBytes > 0) {
+        pcts.push((s.usedBytes / s.totalBytes) * 100);
+      }
+    });
+    var minP = pcts.length ? Math.min.apply(null, pcts) : null;
+    var maxP = pcts.length ? Math.max.apply(null, pcts) : null;
+    var avgP = pcts.length ? pcts.reduce(function (a, b) { return a + b; }, 0) / pcts.length : null;
+    var latestPct = (latest && latest.totalBytes && latest.usedBytes != null && latest.totalBytes > 0)
+      ? ((latest.usedBytes / latest.totalBytes) * 100)
+      : null;
+    parts = [
+      { label: "Latest", value: latestPct != null ? latestPct.toFixed(1) + "%" : "—" },
+      { label: "Avg",    value: avgP      != null ? avgP.toFixed(1)      + "%" : "—" },
+      { label: "Min",    value: minP      != null ? minP.toFixed(1)      + "%" : "—" },
+      { label: "Max",    value: maxP      != null ? maxP.toFixed(1)      + "%" : "—" },
+    ];
+  }
+  var tier = _tierStatsPart(data);
+  if (tier) parts.unshift(tier);
+  _renderChartStats(container, samples.length, parts);
+}
+
+// Linear least-squares over the last 7 days of usedBytes samples. Treats the
+// latest sample's totalBytes as the projection target (FortiOS volume resizes
+// are rare; assuming a fixed denominator avoids regressing two correlated
+// series). Returns null when there are fewer than two samples or the latest
+// sample has no totalBytes — caller renders "no data" in that case.
+//
+// `signal` semantics:
+//   "growing"        — slope > 0 and daysToFull ≤ 365
+//   "beyond-horizon" — slope > 0 but daysToFull > 365 (negligible growth)
+//   "flat"           — |slope| × 7d projection is < 0.1% of totalBytes
+//   "shrinking"      — slope < 0 with measurable shrink
+function _computeStorageForecast(samples) {
+  if (!Array.isArray(samples)) return null;
+  var pts = [];
+  for (var i = 0; i < samples.length; i++) {
+    var s = samples[i];
+    if (typeof s.usedBytes !== "number") continue;
+    var ts = new Date(s.timestamp).getTime();
+    if (!isFinite(ts)) continue;
+    pts.push({ ts: ts, used: s.usedBytes, total: s.totalBytes });
+  }
+  if (pts.length < 2) return null;
+  // Latest non-null totalBytes from the series — used as the projection
+  // ceiling. Falls back to scanning the most recent samples that have it set.
+  var totalBytes = null;
+  for (var k = pts.length - 1; k >= 0; k--) {
+    if (typeof pts[k].total === "number" && pts[k].total > 0) { totalBytes = pts[k].total; break; }
+  }
+  if (totalBytes == null) return null;
+  // Least-squares: regress used = m * ts + b.
+  var n = pts.length, sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+  for (var j = 0; j < n; j++) {
+    sumX  += pts[j].ts;
+    sumY  += pts[j].used;
+    sumXY += pts[j].ts * pts[j].used;
+    sumXX += pts[j].ts * pts[j].ts;
+  }
+  var denom = (n * sumXX) - (sumX * sumX);
+  if (denom === 0) return null;
+  var slopePerMs = ((n * sumXY) - (sumX * sumY)) / denom;
+  var intercept  = (sumY - slopePerMs * sumX) / n;
+  var msPerDay = 86400000;
+  var slopePerDay = slopePerMs * msPerDay;
+  var latest = pts[pts.length - 1];
+  // Significance threshold: 7-day projected change less than 0.1% of total.
+  var sevenDayDelta = Math.abs(slopePerDay) * 7;
+  var significanceFloor = totalBytes * 0.001;
+  var signal;
+  var daysToFull = null;
+  if (sevenDayDelta < significanceFloor) {
+    signal = "flat";
+  } else if (slopePerDay < 0) {
+    signal = "shrinking";
+  } else {
+    var remaining = totalBytes - latest.used;
+    if (remaining <= 0) {
+      daysToFull = 0;
+      signal = "growing";
+    } else {
+      daysToFull = remaining / slopePerDay;
+      signal = daysToFull > 365 ? "beyond-horizon" : "growing";
+    }
+  }
+  return {
+    slopePerMs: slopePerMs,
+    slopePerDay: slopePerDay,
+    intercept: intercept,
+    latestTs: latest.ts,
+    latestUsed: latest.used,
+    totalBytes: totalBytes,
+    daysToFull: daysToFull,
+    signal: signal,
+  };
+}
+
+function _renderStorageForecastHeadline(container, forecast, view) {
+  if (!container) return;
+  if (!forecast) { container.innerHTML = ""; return; }
+  var color = "var(--color-text-secondary)";
+  var headline;
+  if (forecast.signal === "growing") {
+    var days = forecast.daysToFull;
+    if (days != null && days < 30) color = "var(--color-danger, #e63946)";
+    else if (days != null && days < 90) color = "var(--color-warning, #f4a261)";
+    else color = "var(--color-success, #2a9d8f)";
+    headline = "Days until full: <strong>" + (days != null ? days.toFixed(days < 10 ? 1 : 0) : "—") + "</strong>";
+    var trendBytes = Math.abs(forecast.slopePerDay);
+    if (view === "bytes") {
+      headline += ' <span style="color:var(--color-text-secondary)">· trend: +' + _fmtBytes(trendBytes) + "/day</span>";
+    } else {
+      var pctPerDay = (forecast.slopePerDay / forecast.totalBytes) * 100;
+      headline += ' <span style="color:var(--color-text-secondary)">· trend: +' + pctPerDay.toFixed(pctPerDay < 1 ? 2 : 1) + "%/day</span>";
+    }
+  } else if (forecast.signal === "shrinking") {
+    color = "var(--color-success, #2a9d8f)";
+    headline = "Shrinking";
+    var shrinkBytes = Math.abs(forecast.slopePerDay);
+    if (view === "bytes") {
+      headline += ' <span style="color:var(--color-text-secondary)">· −' + _fmtBytes(shrinkBytes) + "/day</span>";
+    } else {
+      var shrinkPct = Math.abs((forecast.slopePerDay / forecast.totalBytes) * 100);
+      headline += ' <span style="color:var(--color-text-secondary)">· −' + shrinkPct.toFixed(shrinkPct < 1 ? 2 : 1) + "%/day</span>";
+    }
+  } else if (forecast.signal === "beyond-horizon") {
+    color = "var(--color-success, #2a9d8f)";
+    headline = "Days until full: <strong>&gt; 1 year</strong>";
+  } else {
+    headline = "No measurable growth";
+  }
+  container.innerHTML = '<span style="color:' + color + '">' + headline + "</span>";
+}
+
+// Unified storage chart. `view` ∈ "pct" | "bytes". When `opts.forecast` is
+// present and `opts.forecastVisible` is true and the forecast is growing,
+// the X-axis extends to the right by up to one history-span so the projected
+// dashed line is visible without compressing history off the chart.
+function _renderStorageChart(container, samples, opts) {
+  if (!container) return;
+  opts = opts || {};
+  var view = opts.view === "bytes" ? "bytes" : "pct";
+  var forecast = opts.forecast || null;
+  var forecastVisible = opts.forecastVisible !== false && forecast != null;
+  var drawForecast = forecastVisible && forecast && forecast.signal === "growing";
+
+  if (view === "bytes") {
+    var used  = samples.map(function (s) { return { ts: s.timestamp, v: s.usedBytes }; }).filter(function (e) { return typeof e.v === "number"; });
+    var total = samples.map(function (s) { return { ts: s.timestamp, v: s.totalBytes }; }).filter(function (e) { return typeof e.v === "number"; });
+    if (used.length === 0 && total.length === 0) {
+      container.textContent = "No usage samples in this range yet.";
+      return;
+    }
+  } else {
+    var pctValues = samples.map(function (s) {
+      var pct = (s.totalBytes && s.usedBytes != null && s.totalBytes > 0) ? (s.usedBytes / s.totalBytes) * 100 : null;
+      return { ts: s.timestamp, v: pct };
+    }).filter(function (e) { return typeof e.v === "number"; });
+    if (pctValues.length === 0) {
+      container.textContent = "No usage % samples in this range yet.";
+      return;
+    }
+  }
+
   var W = container.clientWidth || 600, H = 180;
-  var padL = 64, padR = 10, padT = 10, padB = 32;
+  var padL = view === "bytes" ? 64 : 44, padR = 10, padT = 10, padB = 32;
   var innerW = W - padL - padR, innerH = H - padT - padB;
   var bounds = _chartTimeBounds(samples, opts.since, opts.until);
   var t0 = bounds.t0, t1 = bounds.t1;
+  var historySpan = Math.max(1, t1 - t0);
+  var forecastEndTs = null;
+  if (drawForecast) {
+    var msPerDay = 86400000;
+    // Cap projection extension at one history-span so a slow trend doesn't
+    // compress history into a sliver on a 1h range. Also cap absolutely
+    // at one year to keep daysToFull-of-300 from blowing out a 7d range.
+    var capMs = Math.min(historySpan, 365 * msPerDay);
+    var fullMs = forecast.daysToFull != null ? forecast.daysToFull * msPerDay : capMs;
+    forecastEndTs = forecast.latestTs + Math.min(fullMs, capMs);
+    if (forecastEndTs > t1) t1 = forecastEndTs;
+  }
   var spanMs = t1 - t0, oneDayMs = 86400000;
   function pad2(n) { return n < 10 ? "0" + n : String(n); }
   function fmtTick(ts) {
@@ -7975,36 +8232,36 @@ function _renderStorageBytesChart(container, samples, opts) {
     if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
     return (d.getMonth() + 1) + "/" + d.getDate();
   }
-  var maxV = 0;
-  used.concat(total).forEach(function (e) { if (e.v > maxV) maxV = e.v; });
-  if (maxV <= 0) maxV = 1;
-  function tidyCeil(n) {
-    var exp = Math.pow(10, Math.floor(Math.log10(n)));
-    var mant = n / exp;
-    var step = mant <= 1 ? 1 : mant <= 2 ? 2 : mant <= 5 ? 5 : 10;
-    return step * exp;
+
+  var ceil;
+  if (view === "bytes") {
+    var maxV = 0;
+    samples.forEach(function (s) {
+      if (typeof s.usedBytes  === "number" && s.usedBytes  > maxV) maxV = s.usedBytes;
+      if (typeof s.totalBytes === "number" && s.totalBytes > maxV) maxV = s.totalBytes;
+    });
+    if (maxV <= 0) maxV = 1;
+    function tidyCeil(n) {
+      var exp = Math.pow(10, Math.floor(Math.log10(n)));
+      var mant = n / exp;
+      var step = mant <= 1 ? 1 : mant <= 2 ? 2 : mant <= 5 ? 5 : 10;
+      return step * exp;
+    }
+    ceil = tidyCeil(maxV);
+  } else {
+    ceil = 100;
   }
-  var ceil = tidyCeil(maxV);
   function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
   function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
-  var usedPts  = used.map(function (e)  { return xFor(e.ts) + "," + yFor(e.v); }).join(" ");
-  var totalPts = total.map(function (e) { return xFor(e.ts) + "," + yFor(e.v); }).join(" ");
-  var hits = samples.map(function (s) {
-    var y = padT + innerH;
-    if (typeof s.usedBytes  === "number") y = Math.min(y, yFor(s.usedBytes));
-    if (typeof s.totalBytes === "number") y = Math.min(y, yFor(s.totalBytes));
-    return '<circle class="chart-hit" cx="' + xFor(s.timestamp) + '" cy="' + y + '" r="6" fill="transparent" style="cursor:crosshair"' +
-      ' data-ts="' + escapeHtml(String(s.timestamp)) + '"' +
-      ' data-used="'  + (typeof s.usedBytes  === "number" ? s.usedBytes  : "") + '"' +
-      ' data-total="' + (typeof s.totalBytes === "number" ? s.totalBytes : "") + '"/>';
-  }).join("");
+
   var ticks = "";
   for (var i = 0; i <= 4; i++) {
     var v = ceil * i / 4;
     var y = padT + innerH - (i / 4) * innerH;
+    var label = view === "bytes" ? _fmtBytes(v) : v.toFixed(0) + "%";
     ticks +=
       '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
-      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + _fmtBytes(v) + '</text>';
+      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + label + '</text>';
   }
   var xTicks = "";
   for (var j = 0; j <= 5; j++) {
@@ -8014,101 +8271,112 @@ function _renderStorageBytesChart(container, samples, opts) {
       '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
       '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
   }
-  var legend =
-    '<g font-size="10" fill="currentColor">' +
-      '<rect x="' + (padL + 10) + '" y="2" width="10" height="10" fill="var(--color-accent)"/>' +
-      '<text x="' + (padL + 24) + '" y="11">Used</text>' +
-      '<rect x="' + (padL + 80) + '" y="2" width="10" height="10" fill="#9b5de5"/>' +
-      '<text x="' + (padL + 94) + '" y="11">Total</text>' +
-    '</g>';
-  container.innerHTML =
-    '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
-      ticks + xTicks +
-      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+
+  // Build main series, hit-targets, and forecast overlay per view.
+  var seriesSvg = "", hitSvg = "", legendSvg = "", forecastSvg = "", nowMarkerSvg = "";
+  if (view === "bytes") {
+    var usedPts  = samples.filter(function (s) { return typeof s.usedBytes  === "number"; }).map(function (s) { return xFor(s.timestamp) + "," + yFor(s.usedBytes);  }).join(" ");
+    var totalPts = samples.filter(function (s) { return typeof s.totalBytes === "number"; }).map(function (s) { return xFor(s.timestamp) + "," + yFor(s.totalBytes); }).join(" ");
+    seriesSvg =
       (totalPts ? '<polyline points="' + totalPts + '" fill="none" stroke="#9b5de5" stroke-width="1.5" stroke-dasharray="4 3"/>' : '') +
       (usedPts  ? '<polyline points="' + usedPts  + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' : '') +
-      total.map(function (e) { return '<circle cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="1.5" fill="#9b5de5"/>'; }).join("") +
-      used .map(function (e) { return '<circle cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="1.5" fill="var(--color-accent)"/>'; }).join("") +
-      legend + hits +
-    '</svg>' + CHART_TOOLTIP_HTML;
-  container.style.position = "relative";
-  container.style.alignItems = "stretch";
-  container.style.justifyContent = "flex-start";
-  _wireChartTooltip(container, function (target) {
-    var u = target.getAttribute("data-used");
-    var t = target.getAttribute("data-total");
-    return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
-      '<div>Used: '  + (u !== "" ? _fmtBytes(Number(u)) : "—") + '</div>' +
-      '<div>Total: ' + (t !== "" ? _fmtBytes(Number(t)) : "—") + '</div>';
-  });
-  _addChartScreenshotButton(container, "Storage usage (bytes)", { yAxis: "Bytes", subject: opts.subject });
-  _observeChartResize(container, function (c) { _renderStorageBytesChart(c, samples, opts); });
-}
+      samples.filter(function (s) { return typeof s.totalBytes === "number"; }).map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.totalBytes) + '" r="1.5" fill="#9b5de5"/>'; }).join("") +
+      samples.filter(function (s) { return typeof s.usedBytes  === "number"; }).map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.usedBytes)  + '" r="1.5" fill="var(--color-accent)"/>'; }).join("");
+    legendSvg =
+      '<g font-size="10" fill="currentColor">' +
+        '<rect x="' + (padL + 10) + '" y="2" width="10" height="10" fill="var(--color-accent)"/>' +
+        '<text x="' + (padL + 24) + '" y="11">Used</text>' +
+        '<rect x="' + (padL + 80) + '" y="2" width="10" height="10" fill="#9b5de5"/>' +
+        '<text x="' + (padL + 94) + '" y="11">Total</text>' +
+        (drawForecast ? '<line x1="' + (padL + 150) + '" y1="7" x2="' + (padL + 168) + '" y2="7" stroke="var(--color-accent)" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.7"/><text x="' + (padL + 172) + '" y="11">Forecast</text>' : '') +
+      '</g>';
+    hitSvg = samples.map(function (s) {
+      var y = padT + innerH;
+      if (typeof s.usedBytes  === "number") y = Math.min(y, yFor(s.usedBytes));
+      if (typeof s.totalBytes === "number") y = Math.min(y, yFor(s.totalBytes));
+      return '<circle class="chart-hit" cx="' + xFor(s.timestamp) + '" cy="' + y + '" r="6" fill="transparent" style="cursor:crosshair"' +
+        ' data-ts="' + escapeHtml(String(s.timestamp)) + '"' +
+        ' data-used="'  + (typeof s.usedBytes  === "number" ? s.usedBytes  : "") + '"' +
+        ' data-total="' + (typeof s.totalBytes === "number" ? s.totalBytes : "") + '"/>';
+    }).join("");
+  } else {
+    var pctSeries = samples.map(function (s) {
+      var pct = (s.totalBytes && s.usedBytes != null && s.totalBytes > 0) ? (s.usedBytes / s.totalBytes) * 100 : null;
+      return { ts: s.timestamp, v: pct };
+    }).filter(function (e) { return typeof e.v === "number"; });
+    var pctPts = pctSeries.map(function (e) { return xFor(e.ts) + "," + yFor(e.v); }).join(" ");
+    seriesSvg =
+      '<polyline points="' + pctPts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
+      pctSeries.map(function (e) { return '<circle cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="1.5" fill="var(--color-accent)"/>'; }).join("");
+    if (drawForecast) {
+      legendSvg =
+        '<g font-size="10" fill="currentColor">' +
+          '<line x1="' + (padL + 10) + '" y1="7" x2="' + (padL + 28) + '" y2="7" stroke="var(--color-accent)" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.7"/>' +
+          '<text x="' + (padL + 32) + '" y="11">Forecast</text>' +
+        '</g>';
+    }
+    hitSvg = pctSeries.map(function (e) {
+      return '<circle class="chart-hit" cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="6" fill="transparent" style="cursor:crosshair"' +
+        ' data-ts="' + escapeHtml(String(e.ts)) + '" data-v="' + e.v + '"/>';
+    }).join("");
+  }
 
-function _renderStoragePctChart(container, samples, opts) {
-  opts = opts || {};
-  var values = samples.map(function (s) {
-    var pct = (s.totalBytes && s.usedBytes != null && s.totalBytes > 0) ? (s.usedBytes / s.totalBytes) * 100 : null;
-    return { ts: s.timestamp, v: pct };
-  }).filter(function (e) { return typeof e.v === "number"; });
-  if (values.length === 0) {
-    container.textContent = "No usage % samples in this range yet.";
-    return;
+  // Forecast overlay — dashed line in same color as the active series.
+  if (drawForecast) {
+    var fStart = forecast.latestTs;
+    var fEnd   = forecastEndTs;
+    var fStartV, fEndV;
+    if (view === "bytes") {
+      fStartV = forecast.latestUsed;
+      fEndV   = forecast.intercept + forecast.slopePerMs * fEnd;
+      if (fEndV > ceil) fEndV = ceil;
+    } else {
+      fStartV = (forecast.latestUsed / forecast.totalBytes) * 100;
+      var projectedUsed = forecast.intercept + forecast.slopePerMs * fEnd;
+      fEndV = Math.min(100, (projectedUsed / forecast.totalBytes) * 100);
+    }
+    var x1 = xFor(fStart), y1 = yFor(fStartV);
+    var x2 = xFor(fEnd),   y2 = yFor(fEndV);
+    forecastSvg =
+      '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '"' +
+        ' stroke="var(--color-accent)" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.7"/>';
+    // Vertical "now" divider at the projection origin.
+    nowMarkerSvg =
+      '<line x1="' + x1 + '" y1="' + padT + '" x2="' + x1 + '" y2="' + (padT + innerH) + '"' +
+        ' stroke="rgba(127,127,127,0.55)" stroke-width="1" stroke-dasharray="2,3"/>' +
+      '<text x="' + (x1 + 3) + '" y="' + (padT + 9) + '" font-size="9" fill="currentColor" opacity="0.7">now</text>';
   }
-  var W = container.clientWidth || 600, H = 180;
-  var padL = 44, padR = 10, padT = 10, padB = 32;
-  var innerW = W - padL - padR, innerH = H - padT - padB;
-  var bounds = _chartTimeBounds(samples, opts.since, opts.until);
-  var t0 = bounds.t0, t1 = bounds.t1;
-  var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
-  function fmtTick(ts) {
-    var d = new Date(ts);
-    if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
-    return (d.getMonth() + 1) + "/" + d.getDate();
-  }
-  // Y axis fixed at 0–100% so charts comparing two mountpoints feel consistent.
-  var ceil = 100;
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
-  var pts = values.map(function (e) { return xFor(e.ts) + "," + yFor(e.v); }).join(" ");
-  var hits = values.map(function (e) {
-    return '<circle class="chart-hit" cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="6" fill="transparent" style="cursor:crosshair"' +
-      ' data-ts="' + escapeHtml(String(e.ts)) + '" data-v="' + e.v + '"/>';
-  }).join("");
-  var ticks = "";
-  for (var i = 0; i <= 4; i++) {
-    var v = ceil * i / 4;
-    var y = padT + innerH - (i / 4) * innerH;
-    ticks +=
-      '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
-      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + v.toFixed(0) + '%</text>';
-  }
-  var xTicks = "";
-  for (var j = 0; j <= 5; j++) {
-    var tsTick = t0 + (t1 - t0) * (j / 5);
-    var xPos = padL + (j / 5) * innerW;
-    xTicks +=
-      '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
-      '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
-  }
+
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
-      '<polyline points="' + pts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
-      values.map(function (e) { return '<circle cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="1.5" fill="var(--color-accent)"/>'; }).join("") +
-      hits +
+      seriesSvg +
+      forecastSvg +
+      nowMarkerSvg +
+      legendSvg +
+      hitSvg +
     '</svg>' + CHART_TOOLTIP_HTML;
   container.style.position = "relative";
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
-  _wireChartTooltip(container, function (target) {
-    return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
-      '<div>Used: ' + Number(target.getAttribute("data-v")).toFixed(2) + '%</div>';
-  });
-  _addChartScreenshotButton(container, "Storage usage %", { yAxis: "Used %", subject: opts.subject });
-  _observeChartResize(container, function (c) { _renderStoragePctChart(c, samples, opts); });
+  if (view === "bytes") {
+    _wireChartTooltip(container, function (target) {
+      var u = target.getAttribute("data-used");
+      var t = target.getAttribute("data-total");
+      return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+        '<div>Used: '  + (u !== "" ? _fmtBytes(Number(u)) : "—") + '</div>' +
+        '<div>Total: ' + (t !== "" ? _fmtBytes(Number(t)) : "—") + '</div>';
+    });
+    _addChartScreenshotButton(container, "Storage usage (bytes)", { yAxis: "Bytes", subject: opts.subject });
+  } else {
+    _wireChartTooltip(container, function (target) {
+      return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+        '<div>Used: ' + Number(target.getAttribute("data-v")).toFixed(2) + '%</div>';
+    });
+    _addChartScreenshotButton(container, "Storage usage %", { yAxis: "Used %", subject: opts.subject });
+  }
+  _observeChartResize(container, function (c) { _renderStorageChart(c, samples, opts); });
 }
 
 async function openIpHistoryModal(assetId, label) {
