@@ -10315,6 +10315,12 @@ function _monsetRender() {
   if (typeof _intWireModalTabs === "function") {
     _intWireModalTabs("monset-manual-streams");
   }
+  // Reactive per-stream credential rows: each stream's polling-method
+  // dropdown reveals the matching snmp/ssh/winrm credential row. Helper
+  // lives in integrations.js (loaded before assets.js on assets.html).
+  if (typeof _wireStreamCredentialPickerVisibility === "function") {
+    _wireStreamCredentialPickerVisibility(document);
+  }
   document.getElementById("btn-monset-save-manual").addEventListener("click", _monsetSaveManual);
   document.getElementById("btn-monset-add-override").addEventListener("click", function () {
     _monsetOpenOverrideEditor(null);

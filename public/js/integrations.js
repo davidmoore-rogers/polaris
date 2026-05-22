@@ -1906,6 +1906,11 @@ function monitorSettingsFormHTML(s, opts) {
   var fwFgCfg = opts.fortigateMonitor   || { addAsMonitored: false, autoMonitorInterfaces: null, pullSnmpLocation: false, pushGeocodedCoords: false };
   var fwSwCfg = opts.fortiswitchMonitor || { enabled: false, snmpCredentialId: null, sshCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
   var fwApCfg = opts.fortiapMonitor     || { enabled: false, snmpCredentialId: null, sshCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
+  // AD/Entra/WindowsServer per-class blocks. The backend Zod schema names
+  // them singularly (workstationMonitor / serverMonitor); the in-UI class
+  // keys are plural (workstations / servers).
+  var workstationCfg = opts.workstationMonitor || { addAsMonitored: false, autoMonitorInterfaces: null };
+  var serverCfg      = opts.serverMonitor     || { addAsMonitored: false, autoMonitorInterfaces: null };
 
   // Stash auto-monitor name seeds for the lazy-loaded checklists.
   if (typeof window !== "undefined" && isFmgFgt) {
@@ -2012,6 +2017,34 @@ function monitorSettingsFormHTML(s, opts) {
           _classDirectPollHTML("f-mon-fortiap-", "FortiAP", credentials, fwApCfg.enabled === true, fwApCfg.snmpCredentialId || null, fwApCfg.sshCredentialId || null) +
         '</section>';
     }
+    // AD / Entra / Windows Server Workstations + Servers subtabs. Currently
+    // these integrations always discover (no `enabled` toggle) and the
+    // addAsMonitored flag is persisted but NOT yet consulted by the AD /
+    // Entra / WinSrv discovery code — a backend follow-up will wire it.
+    // Auto-Monitor Interfaces is the FortiGate-discovery feature; surface
+    // it on workstations/servers would mislead since AD/Entra-discovered
+    // endpoints don't have an authoritative interface roster to apply
+    // against, so we omit that card entirely here.
+    if (klass === "workstations" || klass === "workstation") {
+      return '<section style="margin-bottom:1.25rem">' +
+          autoMonitoringHeader() +
+          _classAddAsMonitoredHTML("f-mon-workstation-", "workstation", workstationCfg.addAsMonitored === true) +
+          '<p class="hint" style="margin:-0.25rem 0 0 0;color:var(--color-text-tertiary)">' +
+            "Flag is persisted today but not yet honored by discovery — a backend follow-up will wire it. " +
+            "In the meantime, flip <code>monitored</code> per-asset from the assets table." +
+          '</p>' +
+        '</section>';
+    }
+    if (klass === "servers" || klass === "server") {
+      return '<section style="margin-bottom:1.25rem">' +
+          autoMonitoringHeader() +
+          _classAddAsMonitoredHTML("f-mon-server-", "server", serverCfg.addAsMonitored === true) +
+          '<p class="hint" style="margin:-0.25rem 0 0 0;color:var(--color-text-tertiary)">' +
+            "Flag is persisted today but not yet honored by discovery — a backend follow-up will wire it. " +
+            "In the meantime, flip <code>monitored</code> per-asset from the assets table." +
+          '</p>' +
+        '</section>';
+    }
     return "";
   }
 
@@ -2107,6 +2140,43 @@ function _relabelInheritOptions(container, fmgDirectMode) {
   }
 }
 
+// Per-stream credential-row reactivity. Each polling-method <select> rendered
+// by _polarisPollingDropdownHTML carries data-poll-source + data-poll-stream
+// attributes and its DOM id; _classStreamSubtabHTML emits three sibling
+// credential rows below each dropdown at `<pollId>-credrow-snmp` /
+// `-credrow-ssh` / `-credrow-winrm`, all default display:none. This helper
+// walks every such dropdown inside `rootEl` (defaults to document), wires a
+// `change` listener that reveals only the row matching the chosen polling
+// method (snmp/ssh/winrm), hides the others (and hides all three on
+// rest_api / icmp / disabled), and applies the same logic to each
+// dropdown's current value so the initial render lands in the right state
+// before any user interaction. Idempotent against re-call — the wired flag
+// on each element prevents stacking duplicate listeners.
+function _wireStreamCredentialPickerVisibility(rootEl) {
+  var root = rootEl || document;
+  var selects = root.querySelectorAll("select[data-poll-source][data-poll-stream]");
+  function applyOne(sel) {
+    var pollId = sel.id;
+    if (!pollId) return;
+    var value = sel.value || "";
+    ["snmp", "ssh", "winrm"].forEach(function (credType) {
+      var row = document.getElementById(pollId + "-credrow-" + credType);
+      if (!row) return;
+      row.style.display = (value === credType) ? "" : "none";
+    });
+  }
+  for (var i = 0; i < selects.length; i++) {
+    var sel = selects[i];
+    applyOne(sel);
+    if (!sel.dataset.polarisCredRowsWired) {
+      sel.dataset.polarisCredRowsWired = "1";
+      sel.addEventListener("change", (function (s) {
+        return function () { applyOne(s); };
+      })(sel));
+    }
+  }
+}
+
 // Wires every nested tab strip rendered inside the Monitoring tab: one
 // class-level strip (intg-mon-class) plus one stream-level strip per class
 // subtab (intg-mon-streams-primary + intg-mon-streams-<klass> for each
@@ -2180,6 +2250,16 @@ function _wireMonitoringTabSubtabs(integrationType) {
       }
     }
   });
+  // Reactive per-stream credential rows (snmp/ssh/winrm) reveal based on the
+  // polling-method dropdown's chosen value. Scoped to the Monitoring tab so
+  // we don't touch dropdowns on other tabs. The Direct Polling toggle (above)
+  // hides the entire stream subtab strip but doesn't unmount it — credrow
+  // wiring stays valid when the wrapper flips back on.
+  var monRoot = document.getElementById("intg-mon-class-tabs");
+  if (monRoot && monRoot.closest) {
+    monRoot = monRoot.closest("form, .modal-body, .modal, body") || document;
+  }
+  _wireStreamCredentialPickerVisibility(monRoot || document);
 }
 
 // Wires the per-asset-timeout warning indicator so the Cadence section
@@ -2468,6 +2548,26 @@ function _readFortigateMonitorBlock(prefix, opts) {
   };
   // Phase 2: FortiGate subtab is the primary class subtab for FMG / standalone
   // FortiGate integrations. Read its per-stream values into config.fortigateMonitor.streams.
+  if (opts && opts.klass) {
+    out.streams = _readClassStreamSubtabs(opts.klass, opts.isPrimary === true, true);
+  }
+  return out;
+}
+
+// AD / Entra / Windows Server Workstations + Servers reader. No enabled
+// toggle (those integrations always discover); no per-class snmp/ssh
+// credentials (per-stream credentials inside `streams` carry that). The
+// addAsMonitored flag is persisted but not yet consulted by AD/Entra/WinSrv
+// discovery code — a backend follow-up will wire it. Auto-Monitor
+// Interfaces is omitted by design (workstation/server endpoints don't have
+// an authoritative interface roster to apply against).
+function _readWorkstationServerMonitorBlock(prefix, opts) {
+  var addMonEl = document.getElementById(prefix + "addAsMonitored");
+  if (!addMonEl) return null;
+  var out = {
+    addAsMonitored: addMonEl.checked === true,
+    autoMonitorInterfaces: null,
+  };
   if (opts && opts.klass) {
     out.streams = _readClassStreamSubtabs(opts.klass, opts.isPrimary === true, true);
   }
@@ -3203,6 +3303,16 @@ async function openCreateModal(type) {
         if (swBlockNew) createConfig.fortiswitchMonitor = swBlockNew;
         if (apBlockNew) createConfig.fortiapMonitor     = apBlockNew;
       }
+      if (isAd || isEntra || isWin) {
+        // AD / Entra / Windows Server per-class blocks. Workstations is the
+        // primary class subtab (legacy `f-mon-*` IDs); Servers is secondary
+        // (namespaced `f-mon-classecho-servers-*`). _CLASS_SUBTAB_SPECS
+        // uses plural class keys; backend Zod schema names them singularly.
+        var wsBlockNew = _readWorkstationServerMonitorBlock("f-mon-workstation-", { klass: "workstations", isPrimary: true });
+        var srvBlockNew = _readWorkstationServerMonitorBlock("f-mon-server-",     { klass: "servers",      isPrimary: false });
+        if (wsBlockNew)  createConfig.workstationMonitor = wsBlockNew;
+        if (srvBlockNew) createConfig.serverMonitor      = srvBlockNew;
+      }
       if (isFmg || isFgt) {
         var pushToggleNew = _readPushReservationsToggle();
         if (pushToggleNew !== undefined) createConfig.pushReservations = pushToggleNew;
@@ -3600,6 +3710,18 @@ async function openEditModal(id) {
         if (pushToggle !== undefined) editConfig.pushReservations = pushToggle;
         var quarantinePushToggle = _readPushQuarantineToggle();
         if (quarantinePushToggle !== undefined) editConfig.pushQuarantine = quarantinePushToggle;
+      }
+      if (isAd || isEntra || isWin) {
+        // AD / Entra / Windows Server per-class blocks. Workstations is the
+        // primary class subtab (legacy `f-mon-*` IDs); Servers is secondary
+        // (namespaced `f-mon-classecho-servers-*`). Class keys are plural in
+        // _CLASS_SUBTAB_SPECS to match the human-facing tab labels; backend
+        // schema names them singularly. Readers return null when the subtab
+        // didn't render — leave existing config alone.
+        var wsBlock  = _readWorkstationServerMonitorBlock("f-mon-workstation-", { klass: "workstations", isPrimary: true });
+        var srvBlock = _readWorkstationServerMonitorBlock("f-mon-server-",      { klass: "servers",      isPrimary: false });
+        if (wsBlock)  editConfig.workstationMonitor = wsBlock;
+        if (srvBlock) editConfig.serverMonitor      = srvBlock;
       }
       var input = {
         name: val("f-name"),
