@@ -6294,8 +6294,8 @@ function renderOverrideRow(profileId, metricKey, o, manufacturer) {
 // MIBs section, not the Standard MIBs optgroup.
 var STD_MIB_LABELS = {
   "std:system":         "System (RFC 1213)",
-  "std:interfaces":     "IF-MIB (RFC 2863)",
-  "std:if-ext":         "IF-MIB Extended (RFC 2863)",
+  "std:interfaces":     "Interfaces — ifTable (RFC 2863)",
+  "std:if-ext":         "Interfaces — ifXTable, 64-bit counters (RFC 2863)",
   "std:host-resources": "HOST-RESOURCES-MIB (RFC 2790)",
   "std:entity":         "ENTITY-MIB (RFC 4133)",
   "std:entity-sensor":  "ENTITY-SENSOR-MIB (RFC 3433)",

@@ -9602,8 +9602,8 @@ var _snmpMibStructureCache = {};    // keyed by mibId; structure payload from GE
 // also unlocks the MIB-aware walk (symbol resolution + value decoding).
 var _SNMP_STANDARD_MIBS = [
   { id: "std:system",         label: "System (RFC 1213)",              oid: "1.3.6.1.2.1.1"          },
-  { id: "std:interfaces",     label: "Interfaces — IF-MIB (RFC 2863)", oid: "1.3.6.1.2.1.2"          },
-  { id: "std:if-ext",         label: "IF-MIB Extended (RFC 2863)",     oid: "1.3.6.1.2.1.31"         },
+  { id: "std:interfaces",     label: "Interfaces — ifTable (RFC 2863)", oid: "1.3.6.1.2.1.2"          },
+  { id: "std:if-ext",         label: "Interfaces — ifXTable, 64-bit counters (RFC 2863)", oid: "1.3.6.1.2.1.31"         },
   { id: "std:host-resources", label: "HOST-RESOURCES-MIB (RFC 2790)",  oid: "1.3.6.1.2.1.25"         },
   { id: "std:entity",         label: "ENTITY-MIB (RFC 4133)",          oid: "1.3.6.1.2.1.47"         },
   { id: "std:entity-sensor",  label: "ENTITY-SENSOR-MIB (RFC 3433)",   oid: "1.3.6.1.2.1.99"         },
