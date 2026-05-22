@@ -167,6 +167,28 @@ Per-pattern sections:
 
 ---
 
+## Table column layout (resize + hover-gear chooser)
+
+**What it is:** Drag-to-resize column widths plus a show/hide column chooser, opened by a gear icon that surfaces on `<thead>` hover at the right edge of the header. Replaces the older "Columns ▾" toolbar button — the gear is the only canonical affordance going forward. Pairs naturally with `TableSF` (same `data-sf-key` ids double as column ids) but works standalone on any `<table>` with a `<thead>`.
+
+**Canonical implementations:**
+- `setupColumnLayout(tableEl, options)` in [public/js/table-sf.js](public/js/table-sf.js) — the underlying widget. Injects a gear into the rightmost visible `<th>`, auto-relocates when columns hide. Used directly for the long-lived list-page tables (Assets, Blocks, Subnets, Events, IP panel, Users, Roles).
+- `applyTableLayout(tableEl, typeKey)` in the same file — wrapper for tables that get **re-rendered on every refresh** (asset-detail System tab: Interfaces / Storage / Temperatures / LLDP / Wireless Stations; same shape works for any dynamic table). Persists widths + hidden columns under `polaris-table-layout-<typeKey>-<username>` so the same Interface widths apply to every asset and survive each rebuild. Safe to call after every `innerHTML` replacement.
+
+**Key conventions:**
+- Mark every `<th>` with a stable `data-col-id="<name>"`. Falls back to `data-sf-key`, then `__col<index>` if neither is present — but explicit ids survive column reordering, so always set them on dynamic-rendered tables.
+- Mark "anchor" columns (the ones a sensible table must always show — usually the leftmost identity column plus any actions column) with `data-col-required="true"`. The gear will never anchor itself to a hideable column, and operators can't hide a required one via the chooser.
+- For list pages using `setupColumnLayout` directly: persist via the page's own `polaris-prefs-<scope>-<username>` blob (call `layout.getPrefs()` in `_save…Prefs` and `layout.setPrefs(p.layout)` in `_restore…Prefs`). The standalone "Columns ▾" button is gone — the gear replaces it.
+- For dynamic-rendered tables: use `applyTableLayout(table, typeKey)` instead. Persistence is by-table-type, NOT by-page or by-asset — operators want one set of widths for "Interfaces" everywhere, not per asset.
+- Last column should remain present at all times in the header DOM even when hidden — the gear auto-relocates left to the next visible `<th>` via `positionGear()`.
+
+**When adding a new instance:**
+- Long-lived static table on a list page → call `setupColumnLayout(tableEl, { onChange: _saveYourPagePrefs })` once after the `<thead>` is in the DOM; thread its `getPrefs/setPrefs` into the existing per-page prefs JSON.
+- Dynamic table inside a modal or panel rebuilt on every refresh → call `applyTableLayout(container.querySelector("table"), "<stable-type-key>")` immediately after the `innerHTML` assignment. Choose a global, type-level key (e.g. `"asset-interfaces"`, `"server-mibs"`) — never include the asset id or page id in the key.
+- Do NOT add a standalone "Columns" button to the toolbar — the gear is the only column-chooser entry point going forward.
+
+---
+
 ## Per-instance multi-lane worker (constrained + unconstrained endpoints)
 
 **What it is:** A per-instance worker that segregates traffic to a flaky external system by endpoint family — endpoints subject to the system's parallel-connection limit ride a strict single-consumer FIFO lane (concurrency=1); endpoints without that constraint ride an unbounded lane that just tracks inflight count for observability. Distinct from a single-cap worker pool: the value is *cross-feature serialization for the constrained endpoints only*, while letting unconstrained endpoints parallelize freely.

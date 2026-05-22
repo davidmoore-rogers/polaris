@@ -7,6 +7,8 @@ var _usersRaw = [];           // last list from GET /users
 var _usersSF = null;           // TableSF instance
 var _usersPage = 1;            // unused today (no pagination) but matches the
                                //  callback shape the canonical implementations use
+var _usersLayout = null;       // setupColumnLayout instance for the Users table
+var _rolesLayout = null;       // setupColumnLayout instance for the Roles table
 var _rolesRaw = [];            // last list from GET /roles
 var _rolesById = {};           // { id: role }
 var _matrixSpec = null;        // { accessLevels, functions } from GET /roles/functions
@@ -26,6 +28,8 @@ function _saveUsersPrefs() {
       sortKey: _usersSF ? _usersSF._sortKey : null,
       sortDir: _usersSF ? _usersSF._sortDir : "asc",
       sfFilters: _usersSF ? Object.assign({}, _usersSF._filters) : {},
+      layout: _usersLayout ? _usersLayout.getPrefs() : null,
+      rolesLayout: _rolesLayout ? _rolesLayout.getPrefs() : null,
     }));
   } catch (_) {}
 }
@@ -46,6 +50,8 @@ function _restoreUsersPrefs() {
       }
       _usersSF._updateIcons();
     }
+    if (_usersLayout && p.layout) _usersLayout.setPrefs(p.layout);
+    if (_rolesLayout && p.rolesLayout) _rolesLayout.setPrefs(p.rolesLayout);
   } catch (_) {}
 }
 
@@ -55,6 +61,15 @@ document.addEventListener("DOMContentLoaded", async function () {
     renderUsersBody();
     _saveUsersPrefs();
   });
+  var usersTable = document.querySelector("#users-tbody").closest("table");
+  if (usersTable && typeof setupColumnLayout === "function") {
+    _usersLayout = setupColumnLayout(usersTable, { onChange: _saveUsersPrefs });
+  }
+  var rolesTableEl = document.querySelector("#roles-tbody");
+  rolesTableEl = rolesTableEl ? rolesTableEl.closest("table") : null;
+  if (rolesTableEl && typeof setupColumnLayout === "function") {
+    _rolesLayout = setupColumnLayout(rolesTableEl, { onChange: _saveUsersPrefs });
+  }
   await userReady;
   _restoreUsersPrefs();
   loadUsers();

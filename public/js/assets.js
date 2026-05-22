@@ -234,7 +234,6 @@ document.addEventListener("DOMContentLoaded", async function () {
   _assetsSF = new TableSF("assets-tbody", function () { _assetsPage = 1; renderAssetsPage(); _saveAssetsPrefs(); });
   var assetsTable = document.querySelector("#assets-tbody").closest("table");
   _assetsLayout = setupColumnLayout(assetsTable, {
-    chooserButton: document.getElementById("btn-assets-columns"),
     onChange: _saveAssetsPrefs,
   });
   // MAC tooltips are promoted to <body>, so delegate on document so the
@@ -3845,6 +3844,32 @@ function _renderInterfacesTable(container, si, asset) {
     return '<span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:' + c + '18;color:' + c + ';border:1px solid ' + c + '30;margin-left:5px;white-space:nowrap">' + escapeHtml(cfg[0]) + '</span>';
   }
 
+  // Switch-port VLAN chip — present only on managed FortiSwitches where the
+  // monitoring path overlaid the parent FortiGate's CMDB ports table. Access
+  // ports get a single "VLAN <n>" chip; trunks get "Trunk <native>/<tagged>".
+  // Long tagged lists collapse to a "+N more" tail with the full list in the
+  // title tooltip.
+  function vlanChip(iface) {
+    var native = (iface.nativeVlan != null) ? iface.nativeVlan : null;
+    var tagged = Array.isArray(iface.taggedVlans) ? iface.taggedVlans : [];
+    if (native == null && tagged.length === 0) return "";
+    var color = "#0d9488";
+    var label, fullTitle;
+    if (tagged.length === 0) {
+      label = "VLAN " + native;
+      fullTitle = "Access port — native VLAN " + native;
+    } else {
+      var head = tagged.slice(0, 4).join(",");
+      var tail = tagged.length > 4 ? (" +" + (tagged.length - 4) + " more") : "";
+      var nativeBit = native != null ? (native + "/") : "";
+      label = "Trunk " + nativeBit + head + tail;
+      fullTitle = "Trunk port" +
+        (native != null ? " — native VLAN " + native : "") +
+        " — tagged: " + tagged.join(",");
+    }
+    return '<span title="' + escapeHtml(fullTitle) + '" style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:' + color + '18;color:' + color + ';border:1px solid ' + color + '30;margin-left:5px;white-space:nowrap">' + escapeHtml(label) + '</span>';
+  }
+
   function buildRow(iface, opts) {
     opts = opts || {};
     var checked  = monitored.has(iface.ifName) ? " checked" : "";
@@ -3871,6 +3896,7 @@ function _renderInterfacesTable(container, si, asset) {
       '<td class="mono" style="' + padStyle + '" title="' + escapeHtml(iface.ifName) + '">' + prefix +
       '<a href="#" class="asset-iface-link" data-ifname="' + escapeHtml(iface.ifName) + '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(label) + '</a>' +
       typeBadge(iface, opts.isChild) +
+      vlanChip(iface) +
       subtitle +
       '</td>';
 
@@ -4058,10 +4084,20 @@ function _renderInterfacesTable(container, si, asset) {
 
   container.innerHTML = staleBanner +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th title="Pin this interface for fast-cadence polling" style="width:32px"></th>' +
-      '<th>Interface</th><th>Status</th><th>Speed</th><th>IP</th><th>MAC</th><th>In</th><th>Out</th><th>Errors (in/out)</th>' +
-      '<th title="LLDP neighbor seen on this interface">Neighbor</th>' +
+      '<th title="Pin this interface for fast-cadence polling" style="width:32px" data-col-id="poll" data-col-required="true"></th>' +
+      '<th data-col-id="ifname" data-col-required="true">Interface</th>' +
+      '<th data-col-id="status">Status</th>' +
+      '<th data-col-id="speed">Speed</th>' +
+      '<th data-col-id="ip">IP</th>' +
+      '<th data-col-id="mac">MAC</th>' +
+      '<th data-col-id="in">In</th>' +
+      '<th data-col-id="out">Out</th>' +
+      '<th data-col-id="errors">Errors (in/out)</th>' +
+      '<th title="LLDP neighbor seen on this interface" data-col-id="neighbor">Neighbor</th>' +
     '</tr></thead><tbody>' + html + "</tbody></table></div>";
+  if (typeof applyTableLayout === "function") {
+    applyTableLayout(container.querySelector("table"), "asset-interfaces");
+  }
 
   // Restore per-user, per-asset collapsed state for nested rows.
   var assetId = asset && asset.id;
@@ -4117,11 +4153,16 @@ function _renderInterfacesTable(container, si, asset) {
     });
   }
 
-  // Interface name click — opens per-interface history panel
+  // Interface name click — opens per-interface history panel. Pass the
+  // already-loaded row through so the slide-over can surface current-state
+  // fields (VLAN config in particular) that the interface-history endpoint
+  // doesn't carry.
   container.querySelectorAll(".asset-iface-link").forEach(function (link) {
     link.addEventListener("click", function (e) {
       e.preventDefault();
-      openInterfaceDetailPanel(asset, link.getAttribute("data-ifname"));
+      var ifn = link.getAttribute("data-ifname");
+      var row = rows.find(function (r) { return r.ifName === ifn; }) || null;
+      openInterfaceDetailPanel(asset, ifn, row);
     });
   });
 
@@ -4228,9 +4269,15 @@ function _renderStorageTable(container, si, asset) {
   }).join("");
   container.innerHTML =
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th title="Pin this mountpoint for fast-cadence polling" style="width:32px"></th>' +
-      '<th>Mount</th><th>Used</th><th>Total</th><th>Used %</th>' +
+      '<th title="Pin this mountpoint for fast-cadence polling" style="width:32px" data-col-id="poll" data-col-required="true"></th>' +
+      '<th data-col-id="mount" data-col-required="true">Mount</th>' +
+      '<th data-col-id="used">Used</th>' +
+      '<th data-col-id="total">Total</th>' +
+      '<th data-col-id="usedPct">Used %</th>' +
     '</tr></thead><tbody>' + body + '</tbody></table></div>';
+  if (typeof applyTableLayout === "function") {
+    applyTableLayout(container.querySelector("table"), "asset-storage");
+  }
 
   if (canEdit && asset) {
     container.querySelectorAll(".asset-storage-toggle").forEach(function (cb) {
@@ -4333,16 +4380,23 @@ function _renderTemperatures(container, si, asset) {
         '</summary>' +
         '<div class="table-wrapper" style="margin-top:0.4rem">' +
           '<table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-            '<th>Sensor</th><th>Reading</th>' +
+            '<th data-col-id="sensor" data-col-required="true">Sensor</th>' +
+            '<th data-col-id="reading">Reading</th>' +
           '</tr></thead><tbody>' + hiddenRows + '</tbody></table>' +
         '</div>' +
       '</details>';
   }
   container.innerHTML =
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th>Sensor</th><th>Reading</th>' +
+      '<th data-col-id="sensor" data-col-required="true">Sensor</th>' +
+      '<th data-col-id="reading">Reading</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
     toggleHTML;
+  if (typeof applyTableLayout === "function") {
+    container.querySelectorAll("table").forEach(function (t) {
+      applyTableLayout(t, "asset-temperatures");
+    });
+  }
 
   container.querySelectorAll(".asset-temp-link").forEach(function (link) {
     link.addEventListener("click", function (e) {
@@ -4409,8 +4463,13 @@ function _renderLldpNeighborsCard(container, si, asset) {
   var lldpStaleBanner = _staleBannerHTML(asset && asset.id, asset, "systemInfo", si && si.lastSystemInfoAt);
   container.innerHTML = lldpStaleBanner +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th>Local Port</th><th>Neighbor</th><th>Capabilities</th>' +
+      '<th data-col-id="localPort" data-col-required="true">Local Port</th>' +
+      '<th data-col-id="neighbor" data-col-required="true">Neighbor</th>' +
+      '<th data-col-id="capabilities">Capabilities</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+  if (typeof applyTableLayout === "function") {
+    applyTableLayout(container.querySelector("table"), "asset-lldp");
+  }
 
   // Click-through on matched-asset links opens the matched asset's
   // details slide-in directly — same in-place pattern the inline
@@ -4489,9 +4548,17 @@ function _renderWirelessStationsCard(container, si, asset) {
   var staleBanner = _staleBannerHTML(asset && asset.id, asset, "systemInfo", si && si.lastSystemInfoAt);
   container.innerHTML = staleBanner +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th>SSID</th><th>MAC</th><th>IP</th><th>Endpoint</th><th>Radio/WLAN</th>' +
-      '<th style="text-align:right">Signal</th><th style="text-align:right">Idle</th>' +
+      '<th data-col-id="ssid">SSID</th>' +
+      '<th data-col-id="mac" data-col-required="true">MAC</th>' +
+      '<th data-col-id="ip">IP</th>' +
+      '<th data-col-id="endpoint" data-col-required="true">Endpoint</th>' +
+      '<th data-col-id="radio">Radio/WLAN</th>' +
+      '<th style="text-align:right" data-col-id="signal">Signal</th>' +
+      '<th style="text-align:right" data-col-id="idle">Idle</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+  if (typeof applyTableLayout === "function") {
+    applyTableLayout(container.querySelector("table"), "asset-wireless-stations");
+  }
 
   // Click-through on matched-endpoint links — opens the endpoint asset's
   // own details modal directly. Same pattern as the LLDP neighbor links.
@@ -6704,7 +6771,7 @@ function closeIfacePanel() {
   _clearIfaceRefreshTimer();
 }
 
-async function openInterfaceDetailPanel(asset, ifName) {
+async function openInterfaceDetailPanel(asset, ifName, ifaceRow) {
   if (!asset || !ifName) return;
   _ensureIfacePanelDOM();
   var titleEl  = document.getElementById("iface-panel-title");
@@ -6764,6 +6831,7 @@ async function openInterfaceDetailPanel(asset, ifName) {
             '</div>'
           : '') +
       '</div>' +
+      _ifaceVlanBlockHTML(ifaceRow) +
       '<div id="iface-lldp-block" style="margin-bottom:0.75rem"></div>' +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
         '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +
@@ -7129,6 +7197,36 @@ function _renderIfaceErrorStats(container, rawSamples, derived, data) {
 // the interface has no neighbors. When the neighbor's chassis/management info
 // resolves to an existing Polaris asset, the system-name link opens that
 // asset's view modal so the operator can pivot from one device to the next.
+// VLAN summary card for the interface slide-over. Renders only when the
+// passed-in row carries nativeVlan or taggedVlans (i.e. managed FortiSwitch
+// ports overlaid from the parent FortiGate's CMDB). Other asset types and
+// SNMP-only paths on non-Fortinet switches return empty markup so the
+// surrounding layout stays unchanged.
+function _ifaceVlanBlockHTML(iface) {
+  if (!iface) return "";
+  var native = (iface.nativeVlan != null) ? iface.nativeVlan : null;
+  var tagged = Array.isArray(iface.taggedVlans) ? iface.taggedVlans : [];
+  if (native == null && tagged.length === 0) return "";
+  var role = tagged.length === 0 ? "Access" : "Trunk";
+  var nativeBit = native != null
+    ? '<div><span style="font-size:0.75rem;color:var(--color-text-secondary)">Native VLAN</span> ' +
+        '<span class="mono" style="margin-left:6px">' + escapeHtml(String(native)) + '</span></div>'
+    : "";
+  var taggedBit = tagged.length > 0
+    ? '<div style="margin-top:0.25rem"><span style="font-size:0.75rem;color:var(--color-text-secondary)">Tagged VLANs</span> ' +
+        '<span class="mono" style="margin-left:6px">' + escapeHtml(tagged.join(", ")) + '</span> ' +
+        '<span style="font-size:0.7rem;color:var(--color-text-secondary)">(' + tagged.length + ')</span></div>'
+    : "";
+  return '<div style="margin-bottom:0.75rem;padding:0.5rem 0.65rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px">' +
+    '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem">' +
+      '<span style="font-size:0.8rem;font-weight:600;color:var(--color-text-secondary)">VLAN</span>' +
+      '<span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#0d948818;color:#0d9488;border:1px solid #0d948830">' + role + '</span>' +
+    '</div>' +
+    nativeBit +
+    taggedBit +
+  '</div>';
+}
+
 function _renderIfaceLldpBlock(neighbors) {
   var container = document.getElementById("iface-lldp-block");
   if (!container) return;

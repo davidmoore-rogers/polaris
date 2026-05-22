@@ -1270,6 +1270,32 @@ body.sf-resizing .sf-resize-handle { background: var(--color-accent); opacity: 0
 body.sf-resizing { cursor: col-resize !important; user-select: none; }
 body.sf-resizing * { user-select: none !important; }
 
+.sf-col-gear-wrap {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 6;
+  display: none;
+  pointer-events: auto;
+}
+table thead:hover .sf-col-gear-wrap,
+.sf-col-gear-wrap.open { display: inline-flex; }
+.sf-col-gear {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.85;
+  line-height: 0;
+}
+.sf-col-gear:hover { opacity: 1; color: var(--color-accent); border-color: var(--color-accent); }
+
 .sf-col-chooser { padding: 4px 0; max-height: 70vh; }
 .sf-col-chooser-title {
   font-weight: 600;

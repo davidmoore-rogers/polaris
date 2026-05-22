@@ -58,7 +58,6 @@ async function _initBlocksPage() {
   _blocksSF = new TableSF("blocks-tbody", function () { _blocksPage = 1; renderBlocksPage(); _saveBlocksPrefs(); });
   var blocksTable = document.querySelector("#blocks-tbody").closest("table");
   _blocksLayout = setupColumnLayout(blocksTable, {
-    chooserButton: document.getElementById("btn-blocks-columns"),
     onChange: _saveBlocksPrefs,
   });
   await userReady;

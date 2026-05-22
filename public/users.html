@@ -25,14 +25,14 @@
         <table>
           <thead>
             <tr>
-              <th style="width:24px"></th>
+              <th style="width:24px" data-col-id="avatar" data-col-required="true"></th>
               <th data-sf-key="username"        data-sf-type="string">Username</th>
               <th data-sf-key="authProvider"    data-sf-type="string">Auth</th>
               <th data-sf-key="role.name"       data-sf-type="string">Role</th>
               <th data-sf-key="totpEnabledSort" data-sf-type="string">2FA</th>
               <th data-sf-key="lastLogin"       data-sf-type="date">Last Login</th>
               <th data-sf-key="createdAt"       data-sf-type="date">Created</th>
-              <th style="width:260px">Actions</th>
+              <th style="width:260px" data-col-id="actions" data-col-required="true">Actions</th>
             </tr>
           </thead>
           <tbody id="users-tbody">
@@ -55,11 +55,11 @@
           <table>
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Description</th>
-                <th style="width:120px">Users</th>
-                <th style="width:120px">Built-in</th>
-                <th style="width:260px">Actions</th>
+                <th data-col-id="name" data-col-required="true">Name</th>
+                <th data-col-id="description">Description</th>
+                <th style="width:120px" data-col-id="users">Users</th>
+                <th style="width:120px" data-col-id="builtIn">Built-in</th>
+                <th style="width:260px" data-col-id="actions" data-col-required="true">Actions</th>
               </tr>
             </thead>
             <tbody id="roles-tbody">

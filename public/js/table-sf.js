@@ -675,6 +675,7 @@ function setupColumnLayout(tableEl, options) {
       rules.push(sel + ' > colgroup > col:nth-child(' + n + ') { display: none; }');
     });
     styleEl.textContent = rules.join("\n");
+    if (typeof positionGear === "function") positionGear();
   }
 
   function applyWidths() {
@@ -732,6 +733,57 @@ function setupColumnLayout(tableEl, options) {
       document.addEventListener("mouseup", onUp);
     });
   });
+
+  // Inline gear icon at the right edge of the header row. Appears on
+  // <thead> hover (CSS) and stays visible while the chooser is open.
+  // Auto-relocates to the rightmost visible <th> when columns hide.
+  var gearWrap = null;
+  function positionGear() {
+    if (!gearWrap) return;
+    for (var i = ths.length - 1; i >= 0; i--) {
+      if (!hidden[colIds[i]]) {
+        if (ths[i] !== gearWrap.parentNode) {
+          if (!ths[i].style.position) ths[i].style.position = "relative";
+          ths[i].appendChild(gearWrap);
+        }
+        return;
+      }
+    }
+  }
+  if (ths.length > 0 && !headerRow.querySelector(".sf-col-gear-wrap")) {
+    gearWrap = document.createElement("span");
+    gearWrap.className = "sf-col-gear-wrap";
+    var gearBtn = document.createElement("button");
+    gearBtn.type = "button";
+    gearBtn.className = "sf-col-gear";
+    gearBtn.title = "Show or hide columns";
+    gearBtn.setAttribute("aria-label", "Show or hide columns");
+    gearBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">' +
+      '<circle cx="12" cy="12" r="3"/>' +
+      '<path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>' +
+      '</svg>';
+    gearBtn.addEventListener("mousedown", function (e) { e.stopPropagation(); });
+    gearBtn.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var willOpen = !chooserPop || chooserPop.hasAttribute("hidden");
+      document.querySelectorAll(".sf-multi-popover").forEach(function (p) { p.setAttribute("hidden", ""); });
+      document.querySelectorAll(".sf-col-gear-wrap.open").forEach(function (g) { g.classList.remove("open"); });
+      if (willOpen) {
+        openChooser(gearBtn);
+        gearWrap.classList.add("open");
+        if (!gearWrap._observed && chooserPop) {
+          gearWrap._observed = true;
+          new MutationObserver(function () {
+            if (chooserPop.hasAttribute("hidden")) gearWrap.classList.remove("open");
+          }).observe(chooserPop, { attributes: true, attributeFilter: ["hidden"] });
+        }
+      }
+    });
+    gearWrap.appendChild(gearBtn);
+    positionGear();
+  }
 
   var chooserPop = null;
   function buildChooser() {
@@ -835,4 +887,33 @@ function setupColumnLayout(tableEl, options) {
     openChooser: openChooser,
     refresh: function () { applyWidths(); rewriteHideStyle(); },
   };
+}
+
+/**
+ * applyTableLayout(tableEl, typeKey, options?) — per-table-type wrapper around
+ * setupColumnLayout for tables that are rebuilt on every render. Persists
+ * widths + hidden cols under `polaris-table-layout-<typeKey>-<username>` so
+ * the same Interface table widths apply to every asset and survive each
+ * re-render. Safe to call after every innerHTML replacement; idempotent on
+ * the same DOM since setupColumnLayout's chooser/resize handles are guarded
+ * against duplicate install.
+ */
+function applyTableLayout(tableEl, typeKey, options) {
+  if (!tableEl || !typeKey || typeof setupColumnLayout !== "function") return null;
+  options = options || {};
+  var user = (typeof currentUsername === "string" && currentUsername) ? currentUsername : "default";
+  var storageKey = "polaris-table-layout-" + typeKey + "-" + user;
+  var layout = setupColumnLayout(tableEl, {
+    labelFor: options.labelFor,
+    onChange: function () {
+      try { localStorage.setItem(storageKey, JSON.stringify(layout.getPrefs())); } catch (_) {}
+      if (typeof options.onChange === "function") options.onChange();
+    },
+  });
+  if (!layout) return null;
+  try {
+    var raw = localStorage.getItem(storageKey);
+    if (raw) layout.setPrefs(JSON.parse(raw));
+  } catch (_) {}
+  return layout;
 }

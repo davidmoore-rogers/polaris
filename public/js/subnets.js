@@ -57,7 +57,6 @@ async function _initSubnetsPage() {
   _subnetsSF = new TableSF("subnets-tbody", function () { _subnetsPage = 1; renderSubnetsPage(); _saveSubnetsPrefs(); });
   var subnetsTable = document.querySelector("#subnets-tbody").closest("table");
   _subnetsLayout = setupColumnLayout(subnetsTable, {
-    chooserButton: document.getElementById("btn-subnets-columns"),
     onChange: _saveSubnetsPrefs,
   });
   document.getElementById("subnets-bulk-edit-btn").addEventListener("click", openBulkEditSubnetsModal);

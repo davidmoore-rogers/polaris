@@ -41,7 +41,6 @@ var _eventsLayout = null;
 
   var eventsTable = document.querySelector("#events-tbody").closest("table");
   _eventsLayout = setupColumnLayout(eventsTable, {
-    chooserButton: document.getElementById("btn-events-columns"),
     onChange: _saveEventsPrefs,
   });
   var prefsReady;
