@@ -4083,60 +4083,153 @@ function val(id) { return document.getElementById(id).value.trim(); }
 
 // Preset queries use "<adom>" as a placeholder — substituted with the integration's
 // configured ADOM when loaded into the form. Only "<device-name>" needs user input.
-var _FMG_PRESET_QUERIES = [
+// Each preset carries a `mode` ("fmg" = JSON-RPC against FortiManager, including
+// /sys/proxy/json passthroughs; "fortigate" = direct REST against a managed
+// FortiGate). The Saved Queries dropdown filters by the currently-selected radio.
+var _FMG_PROXY_PRESET_QUERIES = [
   {
     name: "System status",
+    mode: "fmg",
     method: "get",
     params: '[\n  { "url": "/sys/status" }\n]',
   },
   {
     name: "List ADOMs",
+    mode: "fmg",
     method: "get",
     params: '[\n  {\n    "url": "/dvmdb/adom",\n    "data": { "fields": ["name", "state", "os_ver"] }\n  }\n]',
   },
   {
     name: "List devices in ADOM",
+    mode: "fmg",
     method: "get",
     params: '[\n  {\n    "url": "/dvmdb/adom/<adom>/device",\n    "data": { "fields": ["name", "sn", "ip", "os_ver", "platform_str", "ha_mode", "conn_status", "last_checked"] }\n  }\n]',
   },
   {
     name: "DHCP servers on device",
+    mode: "fmg",
     method: "exec",
     params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/system.dhcp/server"\n    }\n  }\n]',
   },
   {
     name: "DHCP leases on device",
+    mode: "fmg",
     method: "exec",
     params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/system/dhcp?format=ip|mac|hostname|interface|reserved|expire_time|access_point|ssid|vci"\n    }\n  }\n]',
   },
   {
     name: "Interface IPs on device",
+    mode: "fmg",
     method: "exec",
     params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/system/interface",\n      "params": [{ "fields": ["name", "ip", "vdom", "type", "status"] }]\n    }\n  }\n]',
   },
   {
     name: "Managed FortiSwitches on device",
+    mode: "fmg",
     method: "exec",
     params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/switch-controller/managed-switch/status?format=connecting_from|fgt_peer_intf_name|join_time|os_version|serial|switch-id|state|status"\n    }\n  }\n]',
   },
   {
     name: "Managed FortiAPs on device",
+    mode: "fmg",
     method: "exec",
     params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/wifi/managed_ap?format=name|wtp_id|serial|model|wtp_profile|ip_addr|ip_address|local_ipv4_address|base_mac|mac|status|state|version|firmware_version"\n    }\n  }\n]',
   },
   {
     name: "Firewall VIPs on device",
+    mode: "fmg",
     method: "exec",
     params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/cmdb/firewall/vip"\n    }\n  }\n]',
   },
   {
     name: "Endpoint devices on device",
+    mode: "fmg",
     method: "exec",
     params: '[\n  {\n    "url": "/sys/proxy/json",\n    "data": {\n      "target": ["/adom/<adom>/device/<device-name>"],\n      "action": "get",\n      "resource": "/api/v2/monitor/user/device/query?format=mac|ip|hostname|host|os|type|os_version|hardware_vendor|interface|switch_fortilink|fortiswitch|switch_port|ap_name|fortiap|user|detected_user|is_online|last_seen"\n    }\n  }\n]',
   },
 ];
 
-var _FMG_QUERIES_VERSION = 3;
+// Direct-mode (REST-to-FortiGate) presets. Available when the integration has
+// `useProxy=false` AND the operator picks the "Directly to FortiGate (REST)"
+// radio. The FortiManager-native queries (sys/status, dvmdb/adom, etc.) have
+// no direct-mode equivalent — they query FMG itself, not a managed gate — so
+// they only appear in the FMG-proxy preset list above. `deviceName` is left
+// blank so the operator types in the target FortiGate per query.
+var _FMG_DIRECT_PRESET_QUERIES = [
+  {
+    name: "System status",
+    mode: "fortigate",
+    method: "GET",
+    path: "/api/v2/monitor/system/status",
+    deviceName: "",
+    query: "vdom=root",
+  },
+  {
+    name: "DHCP servers on device",
+    mode: "fortigate",
+    method: "GET",
+    path: "/api/v2/cmdb/system.dhcp/server",
+    deviceName: "",
+    query: "vdom=root",
+  },
+  {
+    name: "DHCP leases on device",
+    mode: "fortigate",
+    method: "GET",
+    path: "/api/v2/monitor/system/dhcp",
+    deviceName: "",
+    query: "vdom=root\nformat=ip|mac|hostname|interface|reserved|expire_time|access_point|ssid|vci",
+  },
+  {
+    name: "Interface IPs on device",
+    mode: "fortigate",
+    method: "GET",
+    path: "/api/v2/cmdb/system/interface",
+    deviceName: "",
+    query: "vdom=root\nformat=name|ip|vdom|type|status",
+  },
+  {
+    name: "Managed FortiSwitches on device",
+    mode: "fortigate",
+    method: "GET",
+    path: "/api/v2/monitor/switch-controller/managed-switch/status",
+    deviceName: "",
+    query: "vdom=root\nformat=connecting_from|fgt_peer_intf_name|join_time|os_version|serial|switch-id|state|status",
+  },
+  {
+    name: "Managed FortiAPs on device",
+    mode: "fortigate",
+    method: "GET",
+    path: "/api/v2/monitor/wifi/managed_ap",
+    deviceName: "",
+    query: "vdom=root\nformat=name|wtp_id|serial|model|wtp_profile|ip_addr|ip_address|local_ipv4_address|base_mac|mac|status|state|version|firmware_version",
+  },
+  {
+    name: "Firewall VIPs on device",
+    mode: "fortigate",
+    method: "GET",
+    path: "/api/v2/cmdb/firewall/vip",
+    deviceName: "",
+    query: "vdom=root",
+  },
+  {
+    name: "Endpoint devices on device",
+    mode: "fortigate",
+    method: "GET",
+    path: "/api/v2/monitor/user/device/query",
+    deviceName: "",
+    query: "vdom=root\nformat=mac|ip|hostname|host|os|type|os_version|hardware_vendor|interface|switch_fortilink|fortiswitch|switch_port|ap_name|fortiap|user|detected_user|is_online|last_seen",
+  },
+];
+
+// Back-compat alias — kept so anything that still imports this name keeps working.
+var _FMG_PRESET_QUERIES = _FMG_PROXY_PRESET_QUERIES.concat(_FMG_DIRECT_PRESET_QUERIES);
+
+// Bumped to 4 to reseed savedQueries with the new direct-mode presets and the
+// mode-tagged proxy presets. Operator-saved queries are reseeded with the new
+// preset set; previously-saved custom names are lost on upgrade — same contract
+// as prior version bumps (operators rebuild their named queries).
+var _FMG_QUERIES_VERSION = 4;
 
 function _substituteFmgAdom(paramsStr, adom) {
   return String(paramsStr).replace(/<adom>/g, adom || "root");
@@ -4146,9 +4239,10 @@ function _fmgLoadQueries() {
   try {
     var stored = JSON.parse(localStorage.getItem("polaris-fmg-queries") || "null");
     if (!stored || stored.v !== _FMG_QUERIES_VERSION) {
-      var initial = { v: _FMG_QUERIES_VERSION, queries: _FMG_PRESET_QUERIES.slice() };
+      var seed = _FMG_PROXY_PRESET_QUERIES.concat(_FMG_DIRECT_PRESET_QUERIES);
+      var initial = { v: _FMG_QUERIES_VERSION, queries: seed.slice() };
       localStorage.setItem("polaris-fmg-queries", JSON.stringify(initial));
-      return _FMG_PRESET_QUERIES.slice();
+      return seed.slice();
     }
     return stored.queries;
   } catch (_) { return []; }
@@ -4158,11 +4252,22 @@ function _fmgPersistQueries(queries) {
   localStorage.setItem("polaris-fmg-queries", JSON.stringify({ v: _FMG_QUERIES_VERSION, queries: queries }));
 }
 
-function _fmgRenderSavedSelect(queries, selectValue) {
+// Filters `queries` to the entries matching `mode` ("fmg" | "fortigate"). Entries
+// saved before the mode field existed are treated as "fmg" (the legacy default).
+// `selectValue` is the *original* queries-array index of the entry to preselect;
+// the option's value stays the original index so load/delete can look the entry
+// up by `savedQueries[idx]` without remapping.
+function _fmgRenderSavedSelect(queries, mode, selectValue) {
   var sel = document.getElementById("fmg-saved-select");
   if (!sel) return;
+  var filteredIdx = [];
+  queries.forEach(function (q, i) {
+    var qMode = q && q.mode === "fortigate" ? "fortigate" : "fmg";
+    if (qMode === mode) filteredIdx.push(i);
+  });
   sel.innerHTML = '<option value="">— load a saved query —</option>' +
-    queries.map(function (q, i) {
+    filteredIdx.map(function (i) {
+      var q = queries[i];
       return '<option value="' + i + '"' + (String(i) === String(selectValue) ? " selected" : "") + '>' + escapeHtml(q.name) + '</option>';
     }).join("");
 }
@@ -4260,7 +4365,7 @@ function openApiQueryModal(id, adom, useProxy) {
   openModal("FortiManager API Query", body, footer, { wide: true });
 
   var savedQueries = _fmgLoadQueries();
-  _fmgRenderSavedSelect(savedQueries);
+  _fmgRenderSavedSelect(savedQueries, "fmg");
 
   // Mode toggle: when FMG proxy mode is enabled, the "Directly to FortiGate"
   // option is disabled. Lock state is driven by the integration's `useProxy`
@@ -4279,6 +4384,16 @@ function openApiQueryModal(id, adom, useProxy) {
   function _fmgApplyMode(mode) {
     document.getElementById("fmg-form-fmg").style.display = mode === "fmg" ? "" : "none";
     document.getElementById("fmg-form-fgt").style.display = mode === "fortigate" ? "" : "none";
+    // Repopulate the Saved Queries dropdown with the presets/saves that match
+    // the newly selected transport. The dropdown's option value is the original
+    // index into savedQueries, so load/delete still resolve by that index.
+    // Preserve the current selection across the re-render so loading a query
+    // and then clicking Send doesn't reset the dropdown to "— load a saved
+    // query —". When the mode actually changes the prior selection's option
+    // will be filtered out and the dropdown collapses to its placeholder.
+    var sel = document.getElementById("fmg-saved-select");
+    var prior = sel ? sel.value : "";
+    _fmgRenderSavedSelect(savedQueries, mode, prior);
   }
   fmgRadio.addEventListener("change", function () { if (this.checked) _fmgApplyMode("fmg"); });
   fgtRadio.addEventListener("change", function () { if (this.checked) _fmgApplyMode("fortigate"); });
@@ -4313,7 +4428,7 @@ function openApiQueryModal(id, adom, useProxy) {
     if (!ok) return;
     savedQueries.splice(idx, 1);
     _fmgPersistQueries(savedQueries);
-    _fmgRenderSavedSelect(savedQueries);
+    _fmgRenderSavedSelect(savedQueries, _fmgCurrentMode());
   });
 
   function _fmgCurrentMode() {
@@ -4351,7 +4466,7 @@ function openApiQueryModal(id, adom, useProxy) {
       existIdx = savedQueries.length - 1;
     }
     _fmgPersistQueries(savedQueries);
-    _fmgRenderSavedSelect(savedQueries, existIdx);
+    _fmgRenderSavedSelect(savedQueries, mode, existIdx);
     showToast("Query saved");
   });
 
