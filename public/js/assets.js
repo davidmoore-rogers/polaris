@@ -4257,7 +4257,7 @@ function _renderStorageTable(container, si, asset) {
   container.querySelectorAll(".asset-storage-link").forEach(function (link) {
     link.addEventListener("click", function (e) {
       e.preventDefault();
-      openStorageDetailPanel(asset, link.getAttribute("data-mount"));
+      openStorageDetailPanel(asset, link.getAttribute("data-mount"), rows);
     });
   });
 }
@@ -7886,15 +7886,29 @@ function closeStoragePanel() {
   if (ov) ov.classList.remove("open");
 }
 
-async function openStorageDetailPanel(asset, mountPath) {
-  if (!asset || !mountPath) return;
+// Opens the consolidated storage slide-in panel containing one section per
+// mountpoint discovered on this asset. `focusMountPath` (optional) is the
+// mount that triggered the open — its section gets scrolled into view and
+// briefly highlighted. `storage` is the asset's current storage[] array
+// (one row per mount) as already loaded by the System tab; we use it for
+// the mount list and the latest-snapshot Used/Total/% so each section can
+// paint a header before its history fetch lands.
+async function openStorageDetailPanel(asset, focusMountPath, storage) {
+  if (!asset) return;
+  var mounts = Array.isArray(storage) ? storage.filter(function (s) { return s && s.mountPath; }) : [];
+  if (mounts.length === 0 && focusMountPath) {
+    // Legacy callers that only have the mountPath (no storage array) — synthesize
+    // a one-entry list so the panel still works.
+    mounts = [{ mountPath: focusMountPath }];
+  }
+  if (mounts.length === 0) return;
   _ensureStoragePanelDOM();
   var titleEl  = document.getElementById("storage-panel-title");
   var metaEl   = document.getElementById("storage-panel-meta");
   var bodyEl   = document.getElementById("storage-panel-body");
   var footerEl = document.getElementById("storage-panel-footer");
-  titleEl.textContent = "Storage — " + mountPath;
-  metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
+  titleEl.textContent = "Storage — " + (asset.hostname || asset.ipAddress || asset.id);
+  metaEl.textContent = mounts.length + " mount" + (mounts.length === 1 ? "" : "s");
   bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 1.25rem">Loading…</p>';
   footerEl.innerHTML =
     '<button class="btn btn-sm btn-secondary" id="btn-storage-panel-close-btn">Close</button>';
@@ -7909,7 +7923,7 @@ async function openStorageDetailPanel(asset, mountPath) {
     { value: "7d",  label: "7d" },
     { value: "30d", label: "30d" },
     { value: "custom", label: "Custom…", id: "btn-storage-custom" },
-  ], "assetStorage", "1h");
+  ], "assetStorage", "24h");
   var storageCustomPanel =
     '<div id="storage-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
       '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="storage-custom-from" class="form-input" style="padding:2px 6px"></label>' +
@@ -7917,20 +7931,47 @@ async function openStorageDetailPanel(asset, mountPath) {
       '<button class="btn btn-sm btn-primary" id="btn-storage-custom-apply">Apply</button>' +
     '</div>';
 
+  // Build per-mount section markup up front so the layout settles before the
+  // (parallel) history fetches resolve. Each section carries data-mount so
+  // re-renders and scroll-to-focus can target it by mount path.
+  var sectionsHtml = mounts.map(function (m, i) {
+    var safeMount = escapeHtml(m.mountPath);
+    var latestPct = (m.totalBytes && m.usedBytes != null && m.totalBytes > 0)
+      ? ((m.usedBytes / m.totalBytes) * 100).toFixed(1) + "%"
+      : "—";
+    var latestUsed  = (m.usedBytes  != null) ? _fmtBytes(m.usedBytes)  : "—";
+    var latestTotal = (m.totalBytes != null) ? _fmtBytes(m.totalBytes) : "—";
+    return (
+      '<section class="storage-mount-section" data-mount="' + safeMount + '" data-mount-idx="' + i + '"' +
+        ' style="border-top:1px solid var(--color-border);padding-top:1rem;margin-top:1rem;transition:background-color 1.2s ease">' +
+        '<div style="display:flex;align-items:flex-end;justify-content:space-between;gap:0.75rem;flex-wrap:wrap;margin-bottom:0.5rem">' +
+          '<div>' +
+            '<h5 class="mono" style="margin:0;font-size:0.95rem">' + safeMount + '</h5>' +
+            '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-top:2px">' +
+              'Latest: <strong>' + latestUsed + '</strong> / ' + latestTotal + ' (' + latestPct + ')' +
+            '</div>' +
+          '</div>' +
+          '<div style="display:flex;gap:6px" data-storage-forecast-toggle></div>' +
+        '</div>' +
+        '<div data-storage-forecast-headline style="margin:0.25rem 0 0.5rem;font-size:0.85rem"></div>' +
+        '<div data-storage-stats style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
+        '<div data-storage-chart class="storage-chart-box"></div>' +
+      '</section>'
+    );
+  }).join("");
+
   bodyEl.innerHTML =
     '<div style="padding:1rem 1.25rem">' +
-      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;gap:0.75rem;flex-wrap:wrap">' +
         '<h4 style="margin:0">Usage history</h4>' +
         '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
       '</div>' +
       storageCustomPanel +
-      '<div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;margin:0.75rem 0 0.25rem;flex-wrap:wrap">' +
+      '<div style="display:flex;align-items:center;gap:0.75rem;margin:0.5rem 0 0.25rem;flex-wrap:wrap">' +
         '<div style="display:flex;gap:6px" id="storage-view-toggle"></div>' +
-        '<div style="display:flex;gap:6px" id="storage-forecast-toggle"></div>' +
+        '<span style="font-size:0.78rem;color:var(--color-text-secondary)">Applies to every mount below.</span>' +
       '</div>' +
-      '<div id="storage-forecast-headline" style="margin:0.25rem 0 0.5rem;font-size:0.85rem"></div>' +
-      '<div id="storage-stats" style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
-      '<div id="storage-chart" class="storage-chart-box"></div>' +
+      sectionsHtml +
     '</div>';
   document.querySelectorAll(".storage-chart-box").forEach(function (el) {
     el.style.background = "var(--color-bg-elevated)";
@@ -7944,10 +7985,12 @@ async function openStorageDetailPanel(asset, mountPath) {
     el.style.color = "var(--color-text-secondary)";
     el.style.fontSize = "0.85rem";
   });
-  _renderStorageViewToggle(asset.id, mountPath);
-  _renderStorageForecastToggle(asset.id, mountPath);
+  _renderStorageViewToggle();
+  mounts.forEach(function (m) { _renderStorageForecastToggleFor(asset.id, m.mountPath); });
 
-  await _loadStorageHistoryFor(asset.id, mountPath, _getChartRangePref("assetStorage", "24h"));
+  await _loadAllStorageForAsset(asset.id, mounts.map(function (m) { return m.mountPath; }), _getChartRangePref("assetStorage", "24h"));
+  if (focusMountPath) _scrollStorageSectionIntoView(focusMountPath);
+
   document.querySelectorAll(".storage-range-btn").forEach(function (b) {
     b.addEventListener("click", function () {
       var range = b.getAttribute("data-range");
@@ -7968,7 +8011,7 @@ async function openStorageDetailPanel(asset, mountPath) {
       document.querySelectorAll(".storage-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
       b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
       _setChartRangePref("assetStorage", range);
-      _loadStorageHistoryFor(asset.id, mountPath, range);
+      _loadAllStorageForAsset(asset.id, mounts.map(function (m) { return m.mountPath; }), range);
     });
   });
   var storageCustomApply = document.getElementById("btn-storage-custom-apply");
@@ -7983,17 +8026,48 @@ async function openStorageDetailPanel(asset, mountPath) {
       document.querySelectorAll(".storage-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
       var customBtn = document.getElementById("btn-storage-custom");
       if (customBtn) { customBtn.classList.remove("btn-secondary"); customBtn.classList.add("btn-primary"); }
-      _loadStorageHistoryFor(asset.id, mountPath, { from: fromIso, to: toIso });
+      _loadAllStorageForAsset(asset.id, mounts.map(function (m) { return m.mountPath; }), { from: fromIso, to: toIso });
     });
   }
 }
 
+function _findStorageSection(mountPath) {
+  if (!mountPath) return null;
+  // Use attribute selector with CSS.escape so unusual mount paths like
+  // "C:" / "/var/log" don't break the selector. CSS.escape is available
+  // in every browser Polaris supports.
+  try {
+    return document.querySelector('.storage-mount-section[data-mount="' + CSS.escape(mountPath) + '"]');
+  } catch (_) {
+    var sections = document.querySelectorAll(".storage-mount-section");
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].getAttribute("data-mount") === mountPath) return sections[i];
+    }
+    return null;
+  }
+}
+
+function _scrollStorageSectionIntoView(mountPath) {
+  var section = _findStorageSection(mountPath);
+  if (!section) return;
+  // Defer a tick so the just-rendered charts have their final layout before
+  // we measure scroll position.
+  setTimeout(function () {
+    section.scrollIntoView({ behavior: "smooth", block: "start" });
+    // Brief highlight to make the target obvious — fades via the
+    // 1.2s background-color transition declared in the section style.
+    section.style.backgroundColor = "var(--color-accent-soft, rgba(79,195,247,0.15))";
+    setTimeout(function () { section.style.backgroundColor = "transparent"; }, 900);
+  }, 30);
+}
+
 // Module-level cache of the most recent storage panel state so toggle clicks
 // (view + forecast visibility) can re-render without re-fetching. Reset on
-// every _loadStorageHistoryFor call.
+// every _loadAllStorageForAsset call.
+//   { assetId, mounts: [{ mountPath, data, samples, forecast, error? }] }
 var _storagePanelState = null;
 
-function _renderStorageViewToggle(assetId, mountPath) {
+function _renderStorageViewToggle() {
   var bar = document.getElementById("storage-view-toggle");
   if (!bar) return;
   var view = _getStorageViewPref();
@@ -8005,86 +8079,110 @@ function _renderStorageViewToggle(assetId, mountPath) {
       var next = b.getAttribute("data-view");
       if (next === _getStorageViewPref()) return;
       _setStorageViewPref(next);
-      _renderStorageViewToggle(assetId, mountPath);
-      _rerenderStorageChartFromState();
+      _renderStorageViewToggle();
+      _rerenderAllStorageSectionsFromState();
     });
   });
 }
 
-function _renderStorageForecastToggle(assetId, mountPath) {
-  var bar = document.getElementById("storage-forecast-toggle");
+function _renderStorageForecastToggleFor(assetId, mountPath) {
+  var section = _findStorageSection(mountPath);
+  if (!section) return;
+  var bar = section.querySelector("[data-storage-forecast-toggle]");
   if (!bar) return;
   var on = _getStorageForecastVisible(assetId, mountPath);
   bar.innerHTML =
-    '<button class="btn btn-sm ' + (on ? 'btn-primary' : 'btn-secondary') + '" id="btn-storage-forecast-toggle" title="Per asset and mount; default on">' +
+    '<button class="btn btn-sm ' + (on ? 'btn-primary' : 'btn-secondary') + '" title="Per asset and mount; default on">' +
       (on ? '✓ Forecast' : 'Forecast') +
     '</button>';
-  var btn = document.getElementById("btn-storage-forecast-toggle");
+  var btn = bar.querySelector("button");
   if (btn) {
     btn.addEventListener("click", function () {
       var next = !_getStorageForecastVisible(assetId, mountPath);
       _setStorageForecastVisible(assetId, mountPath, next);
-      _renderStorageForecastToggle(assetId, mountPath);
-      _rerenderStorageChartFromState();
+      _renderStorageForecastToggleFor(assetId, mountPath);
+      _rerenderStorageSectionFromState(mountPath);
     });
   }
 }
 
-function _rerenderStorageChartFromState() {
+function _rerenderAllStorageSectionsFromState() {
   var s = _storagePanelState;
-  if (!s) return;
-  _renderStorageStats(document.getElementById("storage-stats"), s.samples, s.data, _getStorageViewPref());
-  _renderStorageForecastHeadline(document.getElementById("storage-forecast-headline"), s.forecast, _getStorageViewPref());
-  _renderStorageChart(document.getElementById("storage-chart"), s.samples, {
-    since: s.data && s.data.since,
-    until: s.data && s.data.until,
-    subject: s.mountPath,
-    view: _getStorageViewPref(),
-    forecast: s.forecast,
-    forecastVisible: _getStorageForecastVisible(s.assetId, s.mountPath),
+  if (!s || !s.mounts) return;
+  s.mounts.forEach(function (m) { _rerenderStorageSectionFromState(m.mountPath); });
+}
+
+function _rerenderStorageSectionFromState(mountPath) {
+  var s = _storagePanelState;
+  if (!s || !s.mounts) return;
+  var mountState = null;
+  for (var i = 0; i < s.mounts.length; i++) {
+    if (s.mounts[i].mountPath === mountPath) { mountState = s.mounts[i]; break; }
+  }
+  if (!mountState) return;
+  var section = _findStorageSection(mountPath);
+  if (!section) return;
+  var chartEl = section.querySelector("[data-storage-chart]");
+  var statsEl = section.querySelector("[data-storage-stats]");
+  var headEl  = section.querySelector("[data-storage-forecast-headline]");
+  if (mountState.error) {
+    if (chartEl) chartEl.textContent = "Error: " + mountState.error;
+    if (statsEl) statsEl.textContent = "";
+    if (headEl)  headEl.innerHTML = "";
+    return;
+  }
+  var view = _getStorageViewPref();
+  _renderStorageStats(statsEl, mountState.samples, mountState.data, view);
+  _renderStorageForecastHeadline(headEl, mountState.forecast, view);
+  _renderStorageChart(chartEl, mountState.samples, {
+    since: mountState.data && mountState.data.since,
+    until: mountState.data && mountState.data.until,
+    subject: mountPath,
+    view: view,
+    forecast: mountState.forecast,
+    forecastVisible: _getStorageForecastVisible(s.assetId, mountPath),
   });
 }
 
-async function _loadStorageHistoryFor(assetId, mountPath, range) {
-  var chartEl = document.getElementById("storage-chart");
-  var statsEl = document.getElementById("storage-stats");
-  var headEl  = document.getElementById("storage-forecast-headline");
-  if (!chartEl) return;
-  chartEl.textContent = "Loading samples…";
-  if (statsEl) statsEl.textContent = "Loading…";
-  if (headEl)  headEl.innerHTML = "";
-  // Accept range as a string or `{from, to}` object (canonical convention).
+async function _loadAllStorageForAsset(assetId, mountPaths, range) {
+  if (!Array.isArray(mountPaths) || mountPaths.length === 0) return;
+  // Set every section's chart container to "Loading…" up front so the user
+  // sees activity across the pane, not just on the focused mount.
+  mountPaths.forEach(function (mp) {
+    var section = _findStorageSection(mp);
+    if (!section) return;
+    var chartEl = section.querySelector("[data-storage-chart]");
+    var statsEl = section.querySelector("[data-storage-stats]");
+    var headEl  = section.querySelector("[data-storage-forecast-headline]");
+    if (chartEl) chartEl.textContent = "Loading samples…";
+    if (statsEl) statsEl.textContent = "Loading…";
+    if (headEl)  headEl.innerHTML = "";
+  });
+
   var reqOpts = (typeof range === "string" || !range) ? { range: range || "24h" } : range;
   var rangeKey = typeof range === "string" ? range : "custom";
-  try {
-    // Forecast regression always runs over a fixed 7d window so the headline
-    // and projected line stay consistent regardless of the chart's selected
-    // range. Dedupe to one fetch when the operator picked 7d (same payload).
-    var primaryPromise = api.assets.storageHistory(assetId, mountPath, reqOpts);
-    var forecastPromise = rangeKey === "7d" ? primaryPromise : api.assets.storageHistory(assetId, mountPath, { range: "7d" });
-    var results = await Promise.all([primaryPromise, forecastPromise]);
-    var data = results[0];
-    var forecastData = results[1];
-    var samples = (data && data.samples) || [];
-    var forecastSamples = (forecastData && forecastData.samples) || [];
-    var forecast = _computeStorageForecast(forecastSamples);
-    _storagePanelState = { assetId: assetId, mountPath: mountPath, data: data, samples: samples, forecast: forecast };
-    _renderStorageStats(statsEl, samples, data, _getStorageViewPref());
-    _renderStorageForecastHeadline(headEl, forecast, _getStorageViewPref());
-    _renderStorageChart(chartEl, samples, {
-      since: data && data.since,
-      until: data && data.until,
-      subject: mountPath,
-      view: _getStorageViewPref(),
-      forecast: forecast,
-      forecastVisible: _getStorageForecastVisible(assetId, mountPath),
-    });
-  } catch (err) {
-    _storagePanelState = null;
-    chartEl.textContent = "Error: " + (err.message || "failed to load");
-    if (statsEl) statsEl.textContent = "";
-    if (headEl)  headEl.innerHTML = "";
-  }
+
+  // One {primary, 7d-forecast} pair per mount, deduped to a single fetch
+  // when the operator's selected range happens to be 7d. All N pairs fire
+  // in parallel under one Promise.all — per-mount failures are caught and
+  // stored so one bad mount doesn't take down the rest of the pane.
+  var perMount = await Promise.all(mountPaths.map(async function (mountPath) {
+    try {
+      var primaryPromise = api.assets.storageHistory(assetId, mountPath, reqOpts);
+      var forecastPromise = rangeKey === "7d" ? primaryPromise : api.assets.storageHistory(assetId, mountPath, { range: "7d" });
+      var pair = await Promise.all([primaryPromise, forecastPromise]);
+      var data = pair[0];
+      var samples = (data && data.samples) || [];
+      var forecastSamples = (pair[1] && pair[1].samples) || [];
+      var forecast = _computeStorageForecast(forecastSamples);
+      return { mountPath: mountPath, data: data, samples: samples, forecast: forecast };
+    } catch (err) {
+      return { mountPath: mountPath, error: err && err.message ? err.message : "failed to load" };
+    }
+  }));
+
+  _storagePanelState = { assetId: assetId, mounts: perMount };
+  perMount.forEach(function (m) { _rerenderStorageSectionFromState(m.mountPath); });
 }
 
 function _renderStorageStats(container, samples, data, view) {
@@ -8246,7 +8344,10 @@ function _renderStorageChart(container, samples, opts) {
   var view = opts.view === "bytes" ? "bytes" : "pct";
   var forecast = opts.forecast || null;
   var forecastVisible = opts.forecastVisible !== false && forecast != null;
-  var drawForecast = forecastVisible && forecast && forecast.signal === "growing";
+  // Draw the projection for every non-null forecast — flat and shrinking
+  // trajectories are useful information too. Only skip when we don't have
+  // enough data to regress (forecast === null).
+  var drawForecast = forecastVisible && forecast != null;
 
   if (view === "bytes") {
     var used  = samples.map(function (s) { return { ts: s.timestamp, v: s.usedBytes }; }).filter(function (e) { return typeof e.v === "number"; });
@@ -8274,13 +8375,13 @@ function _renderStorageChart(container, samples, opts) {
   var historySpan = Math.max(1, t1 - t0);
   var forecastEndTs = null;
   if (drawForecast) {
-    var msPerDay = 86400000;
-    // Cap projection extension at one history-span so a slow trend doesn't
-    // compress history into a sliver on a 1h range. Also cap absolutely
-    // at one year to keep daysToFull-of-300 from blowing out a 7d range.
-    var capMs = Math.min(historySpan, 365 * msPerDay);
-    var fullMs = forecast.daysToFull != null ? forecast.daysToFull * msPerDay : capMs;
-    forecastEndTs = forecast.latestTs + Math.min(fullMs, capMs);
+    // Always extend the X-axis by exactly one history-span so the projection
+    // half of the chart sits next to a same-scale history half — a 1h range
+    // shows 1h of history + 1h of future, a 7d range shows 7d + 7d, etc.
+    // Flat and shrinking trajectories still get the extension so the dashed
+    // line is visible; "growing" trajectories with daysToFull < historySpan
+    // get clipped to the 100% line by the Y-axis cap below.
+    forecastEndTs = forecast.latestTs + historySpan;
     if (forecastEndTs > t1) t1 = forecastEndTs;
   }
   var spanMs = t1 - t0, oneDayMs = 86400000;
@@ -8380,6 +8481,8 @@ function _renderStorageChart(container, samples, opts) {
   }
 
   // Forecast overlay — dashed line in same color as the active series.
+  // Drawn for every signal (growing / flat / shrinking / beyond-horizon)
+  // so the operator always sees the projected trajectory next to history.
   if (drawForecast) {
     var fStart = forecast.latestTs;
     var fEnd   = forecastEndTs;
@@ -8388,10 +8491,12 @@ function _renderStorageChart(container, samples, opts) {
       fStartV = forecast.latestUsed;
       fEndV   = forecast.intercept + forecast.slopePerMs * fEnd;
       if (fEndV > ceil) fEndV = ceil;
+      if (fEndV < 0) fEndV = 0;
     } else {
       fStartV = (forecast.latestUsed / forecast.totalBytes) * 100;
       var projectedUsed = forecast.intercept + forecast.slopePerMs * fEnd;
-      fEndV = Math.min(100, (projectedUsed / forecast.totalBytes) * 100);
+      var projectedPct  = (projectedUsed / forecast.totalBytes) * 100;
+      fEndV = Math.max(0, Math.min(100, projectedPct));
     }
     var x1 = xFor(fStart), y1 = yFor(fStartV);
     var x2 = xFor(fEnd),   y2 = yFor(fEndV);
