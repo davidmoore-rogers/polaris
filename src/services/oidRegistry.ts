@@ -37,7 +37,7 @@ import { stripComments } from "./mibParserUtils.js";
 // enterprise prefixes. Including the vendor prefixes lets users upload only
 // the leaf MIB they care about (e.g. CISCO-PROCESS-MIB) without having to
 // chase down every CISCO-SMI dependency first.
-const BUILT_IN_OIDS: Record<string, string> = {
+export const BUILT_IN_OIDS: Record<string, string> = {
   // Top-level
   ccitt: "0",
   iso: "1",
@@ -223,26 +223,31 @@ function isInteger(s: string): boolean {
   return /^\d+$/.test(s);
 }
 
-function tryResolveParts(parts: string[], numeric: Map<string, string>): string | null {
+// ASN.1 named-number syntax: `std(0)` means "the arc named `std` with value
+// 0". LLDP-MIB's MODULE-IDENTITY anchors at
+//   ::= { iso std(0) iso8802(8802) ieee802dot1(1) ieee802dot1mibs(1) 2 }
+// using this idiom. We extract the digit directly; any name on the LHS is
+// just human documentation in this position.
+const NAMED_NUMBER_RE = /^[a-zA-Z][\w-]*\((\d+)\)$/;
+
+export function tryResolveParts(parts: string[], numeric: Map<string, string>): string | null {
   if (parts.length === 0) return null;
-  const head = parts[0];
-  let prefix: string | null;
-  if (isInteger(head)) {
-    prefix = head;
-  } else if (numeric.has(head)) {
-    prefix = numeric.get(head)!;
-  } else {
+
+  function partToOid(p: string, isFirst: boolean): string | null {
+    if (isInteger(p)) return p;
+    const namedNum = NAMED_NUMBER_RE.exec(p);
+    if (namedNum) return namedNum[1];
+    if (numeric.has(p)) return numeric.get(p)!;
     return null;
   }
+
+  const head = partToOid(parts[0], true);
+  if (head == null) return null;
+  let prefix = head;
   for (let i = 1; i < parts.length; i++) {
-    const p = parts[i];
-    if (isInteger(p)) {
-      prefix += "." + p;
-    } else if (numeric.has(p)) {
-      prefix += "." + numeric.get(p)!;
-    } else {
-      return null;
-    }
+    const v = partToOid(parts[i], false);
+    if (v == null) return null;
+    prefix += "." + v;
   }
   return prefix;
 }

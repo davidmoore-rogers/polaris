@@ -33,6 +33,11 @@ import {
 import { resolveSymbolsForMib } from "../../services/oidRegistry.js";
 import { snmpWalkRaw } from "../../services/monitoringService.js";
 import { getCredential } from "../../services/credentialService.js";
+import {
+  listStdMibs,
+  getStdMibDef,
+  getStdMibStructure,
+} from "../../services/stdMibLibrary.js";
 import { logEvent } from "./events.js";
 
 const router = Router();
@@ -51,6 +56,193 @@ router.get("/facets", requirePermission("mibDatabase", "read"), async (_req, res
 router.get("/profile-status", requirePermission("mibDatabase", "read"), async (_req, res, next) => {
   try {
     res.json(await getProfileStatus());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Standard MIB browse + walk ───────────────────────────────────────────
+// Static segment "/std" — declared before `/:id` so the uploaded-MIB
+// catchall doesn't eat the std list. The deeper `/std/:key/*` routes have
+// three segments and are already unambiguous against `/:id/*`.
+
+router.get("/std", requirePermission("mibDatabase", "read"), (_req, res) => {
+  res.json(
+    listStdMibs().map((m) => ({
+      key: m.key,
+      label: m.label,
+      moduleName: m.moduleName,
+      rootOid: m.rootOid,
+    })),
+  );
+});
+
+router.get("/std/:key/structure", requirePermission("mibDatabase", "read"), (req, res, next) => {
+  try {
+    const key = req.params.key as string;
+    const def = getStdMibDef(`std:${key}`);
+    if (!def) throw new AppError(404, `Unknown standard MIB "${key}"`);
+    const structured = getStdMibStructure(def.key);
+    res.json({
+      ...structured,
+      mibId: def.key,            // wire-shape parity with the uploaded variant
+      moduleName: def.moduleName,
+      manufacturer: null,
+      model: null,
+      isStandard: true,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/std/:key/walk", requirePermission("mibDatabase", "read"), async (req, res, next) => {
+  try {
+    const parsed = WalkSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new AppError(400, parsed.error.issues.map((e) => e.message).join("; "));
+    }
+    const { assetId, credentialId, objectName, maxRows } = parsed.data;
+
+    const key = req.params.key as string;
+    const def = getStdMibDef(`std:${key}`);
+    if (!def) throw new AppError(404, `Unknown standard MIB "${key}"`);
+
+    const structured = getStdMibStructure(def.key);
+    const targetSymbol = structured.symbols.find((s) => s.name === objectName);
+    if (!targetSymbol) {
+      throw new AppError(400, `MIB ${def.moduleName} does not define an object named "${objectName}"`);
+    }
+    if (!targetSymbol.fullOid) {
+      throw new AppError(400, `Object "${objectName}" cannot be resolved to a numeric OID at the standard scope`);
+    }
+
+    const asset = await prisma.asset.findUnique({
+      where: { id: assetId },
+      select: { id: true, hostname: true, ipAddress: true },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+    if (!asset.ipAddress) throw new AppError(400, "Asset has no IP address to walk");
+
+    const cred = await getCredential(credentialId, { revealSecrets: true });
+    if (cred.type !== "snmp") {
+      throw new AppError(400, `Credential "${cred.name}" is type "${cred.type}", expected "snmp"`);
+    }
+
+    const baseOid = targetSymbol.fullOid;
+    const label = asset.hostname || asset.ipAddress;
+
+    let walk;
+    try {
+      walk = await snmpWalkRaw(asset.ipAddress, cred.config as Record<string, unknown>, baseOid, maxRows);
+    } catch (err: any) {
+      const message = err?.message || "SNMP walk failed";
+      logEvent({
+        action: "asset.snmp_walk",
+        resourceType: "asset",
+        resourceId: assetId,
+        resourceName: asset.hostname || asset.ipAddress || undefined,
+        actor: req.session?.username,
+        level: "warning",
+        message: `MIB walk failed: ${label} — ${def.moduleName}::${objectName} — ${message}`,
+        details: {
+          mibId: def.key,             // "std:lldp" etc. — Events page treats this as opaque
+          mibModuleName: def.moduleName,
+          objectName,
+          oid: baseOid,
+          credentialName: cred.name,
+          error: message,
+        },
+      });
+      throw new AppError(502, message);
+    }
+
+    // Same decode + group pipeline as the uploaded-MIB walk.
+    type Entry = WalkScalarEntry & { symbolRef: MibSymbol | null };
+    const entries: Entry[] = walk.rows.map((row) => {
+      const hit = findSymbolForOid(row.oid, structured.symbols);
+      const symbolRef = hit?.symbol ?? null;
+      return {
+        oid: row.oid,
+        symbol: symbolRef?.name ?? null,
+        suffix: hit?.suffix ?? null,
+        syntax: symbolRef?.syntax ?? null,
+        baseType: symbolRef?.baseType ?? null,
+        raw: row.value,
+        decoded: decodeValue(row.value, symbolRef, row.type),
+        symbolRef,
+      };
+    });
+
+    let kind: "table" | "scalars" = "scalars";
+    let tablePayload: WalkTablePayload | null = null;
+    const rowParents = new Set<string>();
+    for (const e of entries) {
+      if (!e.symbolRef?.parentName) {
+        rowParents.clear();
+        break;
+      }
+      rowParents.add(e.symbolRef.parentName);
+    }
+    if (entries.length > 0 && rowParents.size === 1) {
+      const onlyParent = rowParents.values().next().value as string;
+      const tableMatch = structured.tables.find((t) => t.rowSymbol === onlyParent);
+      if (tableMatch) {
+        kind = "table";
+        tablePayload = renderTablePayload(tableMatch, entries);
+      }
+    }
+
+    const decodedCount = entries.filter((e) => e.symbol !== null).length;
+
+    logEvent({
+      action: "asset.snmp_walk",
+      resourceType: "asset",
+      resourceId: assetId,
+      resourceName: asset.hostname || asset.ipAddress || undefined,
+      actor: req.session?.username,
+      level: "info",
+      message: `MIB walk: ${label} — ${def.moduleName}::${objectName} → ${entries.length} row(s)${walk.truncated ? " (truncated)" : ""}`,
+      details: {
+        mibId: def.key,
+        mibModuleName: def.moduleName,
+        objectName,
+        oid: baseOid,
+        credentialName: cred.name,
+        kind,
+        rowCount: entries.length,
+        decodedCount,
+        truncated: walk.truncated,
+        durationMs: walk.durationMs,
+      },
+    });
+
+    if (kind === "table" && tablePayload) {
+      res.json({
+        kind,
+        table: tablePayload,
+        truncated: walk.truncated,
+        durationMs: walk.durationMs,
+        rowCount: entries.length,
+        decodedCount,
+        host: asset.ipAddress,
+        oid: baseOid,
+        objectName,
+      });
+      return;
+    }
+
+    res.json({
+      kind: "scalars",
+      entries: entries.map(({ symbolRef: _ignored, ...rest }) => rest),
+      truncated: walk.truncated,
+      durationMs: walk.durationMs,
+      rowCount: entries.length,
+      decodedCount,
+      host: asset.ipAddress,
+      oid: baseOid,
+      objectName,
+    });
   } catch (err) {
     next(err);
   }

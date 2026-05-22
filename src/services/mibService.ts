@@ -55,8 +55,12 @@ export function parseMib(raw: string): ParsedMib {
   const stripped = stripComments(text);
 
   // Module declaration: `<MODULE-NAME> DEFINITIONS ::= BEGIN`
-  // Module name is uppercase letters, digits, and hyphens (SMI rules).
-  const headMatch = stripped.match(/([A-Z][A-Z0-9-]*)\s+DEFINITIONS(?:\s+[A-Z-]+)*\s*::=\s*BEGIN/);
+  // SMI requires an uppercase first letter; the rest is alphanumeric +
+  // hyphens. RFC-canonical names commonly carry a lowercase `v` for
+  // version segments (`SNMPv2-MIB`, `SNMPv2-SMI`, `SNMPv2-TC`), so the
+  // body is mixed-case alphanumeric + hyphens — same tolerance the
+  // IMPORTS-parser below uses.
+  const headMatch = stripped.match(/([A-Z][A-Za-z0-9-]*)\s+DEFINITIONS(?:\s+[A-Z-]+)*\s*::=\s*BEGIN/);
   if (!headMatch) {
     throw new AppError(
       400,

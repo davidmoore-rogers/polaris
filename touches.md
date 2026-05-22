@@ -1730,7 +1730,7 @@ Listed alphabetically.
 
 **Invariants:**
 - SMI parser validates UTF-8 text only (rejects NUL and control chars <0x20 except tab/CR/LF).
-- Module header required: `<NAME> DEFINITIONS ::= BEGIN`; footer required: `END`.
+- Module header required: `<NAME> DEFINITIONS ::= BEGIN`; footer required: `END`. The module-name regex tolerates **mixed-case** identifiers (`[A-Z][A-Za-z0-9-]*`) — RFC-canonical names like `SNMPv2-MIB`, `SNMPv2-SMI`, `SNMPv2-TC` carry a lowercase `v` for version segments, matching the same tolerance the IMPORTS-parser uses below. An uppercase-only regex would capture the trailing `MIB` after `SNMPv2-` as the module name.
 - Duplicate check on (manufacturer, model, moduleName) tuple catches generics via explicit query (NULL handling).
 - Successful create/delete always refreshes oidRegistry immediately.
 - `parseMibStructured` is a peer of `parseMib`, NOT a superset call. A regression in the structured parser must not be reachable from the upload hot path. Per-symbol parse failures degrade fields to null rather than dropping symbols.
@@ -1742,6 +1742,7 @@ Listed alphabetically.
 - Update `DEFAULT_ALIASES` in `manufacturerAliasService.ts` if adding new vendor facets.
 - Check `src/api/routes/mibs.ts` (NOT `serverSettings.ts`) for upload/list/delete endpoint compliance — the MIB routes were extracted there to take precedence over `/server-settings`'s blanket `requireAdmin`.
 - Re-run `tests/unit/mibParseStructured.test.ts` — covers IF-MIB-style table detection, INTEGER enum extraction, multi-line DESCRIPTION, embedded `""` quote escapes, and comment-tolerant enum bodies.
+- `stdMibLibrary.ts` re-uses `parseMibStructured` against bundled standard-MIB text files — any change to the parser must keep the 16 cases in `tests/unit/stdMibLibrary.test.ts` (SNMPv2-MIB / IF-MIB / HOST-RESOURCES-MIB / ENTITY-MIB / ENTITY-SENSOR-MIB / LLDP-MIB spot-checks) green.
 
 ---
 
@@ -1780,13 +1781,13 @@ Listed alphabetically.
 
 ## services/oidRegistry.ts
 
-**What it owns:** Per-asset scoped OID symbol resolution from MIBs (device → vendor → generic → seed), layered SCOPED symbol caching with per-symbol provenance, and lazy cache warmup at app startup.
+**What it owns:** Per-asset scoped OID symbol resolution from MIBs (device → vendor → generic → seed), layered SCOPED symbol caching with per-symbol provenance, and lazy cache warmup at app startup. Also exports the low-level building blocks (`BUILT_IN_OIDS`, `parseObjectAssignments`, `tryResolveParts`) that `stdMibLibrary.ts` re-uses to resolve std MIBs against the seed only — no DB layering.
 
-**Public API:** `resolveOid`, `resolveOidSync`, `ensureRegistryLoaded`, `refreshRegistry`, `resolveSymbolAtVendorScope`, `listModelOverrides`, `getMibSymbolCount`, `resolveSymbolsForMib`, `resolveSymbolForMib`, `parseObjectAssignments`, `ResolveScope`, `SymbolStatus`.
+**Public API:** `resolveOid`, `resolveOidSync`, `ensureRegistryLoaded`, `refreshRegistry`, `resolveSymbolAtVendorScope`, `listModelOverrides`, `getMibSymbolCount`, `resolveSymbolsForMib`, `resolveSymbolForMib`, `parseObjectAssignments`, `tryResolveParts`, `BUILT_IN_OIDS`, `ResolveScope`, `SymbolStatus`.
 
 **Cross-service deps:** `mibService` (via import in mibService for refreshRegistry calls), `mibParserUtils` (stripComments).
 
-**Used by:** `src/app.ts:46 — startup warmup`, `src/services/monitoringService.ts:43 — telemetry probe resolution`, `src/services/mibService.ts:17 — profile status introspection`, `src/api/routes/mibs.ts — Browse modal OID resolution + MIB-aware walk symbol → numeric OID lookup`.
+**Used by:** `src/app.ts:46 — startup warmup`, `src/services/monitoringService.ts:43 — telemetry probe resolution`, `src/services/mibService.ts:17 — profile status introspection`, `src/api/routes/mibs.ts — Browse modal OID resolution + MIB-aware walk symbol → numeric OID lookup`, `src/services/stdMibLibrary.ts — std MIB symbol resolution against the seed`.
 
 **Invariants:**
 - Resolution is scoped per (manufacturer, model) tuple; both cached and layer-resolved case-insensitively.
@@ -1794,6 +1795,7 @@ Listed alphabetically.
 - Built-in seed (BUILT_IN_OIDS) always acts as final fallback; vendor OIDs override generic MIBs.
 - Seed currently covers Cisco / Juniper / HP-Aruba / Dell-RADLAN / Fortinet FortiGate / FortiSwitch / FortiAP — each vendor seed includes the vendor-specific telemetry symbols (CPU / memory and, where applicable, disk / temperature) so probes work without uploading the proprietary MIB.
 - `resolveOidSync()` returns null until `ensureRegistryLoaded()` has completed and the scope has been accessed.
+- `tryResolveParts` accepts three token shapes per OID part: pure integers (`"42"`), known symbols (looked up in the seed/scope map), and **ASN.1 named-number syntax** (`name(digit)` → uses the digit). The named-number form is required by LLDP-MIB's root anchor `{ iso std(0) iso8802(8802) ieee802dot1(1) ieee802dot1mibs(1) 2 }` and benefits any uploaded vendor MIB that uses the same idiom. Strict additive change — strings the legacy code resolved still resolve identically.
 
 **When changing this:**
 - Add coverage to BUILT_IN_OIDS if new standard SMI roots or vendor enterprise prefixes are needed.
@@ -1801,6 +1803,31 @@ Listed alphabetically.
 - Verify cache key normalization (case-insensitive) handles mixed-case manufacturer input correctly.
 - Run `resolveSymbolAtVendorScope()` after updates to confirm vendor-floor symbol availability.
 - Profile performance: cache rebuild is O(mibs × entries × resolution-passes); log timings on large uploads.
+- Any change to `tryResolveParts` token-handling must keep `tests/unit/stdMibLibrary.test.ts` "resolves LLDP-MIB through ASN.1 named-number syntax" green AND not regress the 102 cases in `tests/unit/mibParseStructured.test.ts`.
+
+---
+
+## services/stdMibLibrary.ts
+
+**What it owns:** Browse-tree + MIB-aware walk for the seven bundled standard MIBs (SNMPv2-MIB, IF-MIB, HOST-RESOURCES-MIB, ENTITY-MIB, ENTITY-SENSOR-MIB, LLDP-MIB; IF-MIB backs both `std:interfaces` and `std:if-ext`). Read-only — std MIBs are immutable at runtime. Loads text files from `src/services/stdMibs/<MODULE>.txt` lazily on first request via `parseMibStructured`, resolves every symbol's `fullOid` against the BUILT_IN_OIDS seed only (no DB MIB layering), and caches the result module-level for the process lifetime.
+
+**Public API:** `STD_MIBS`, `StdMibDef`, `listStdMibs`, `getStdMibDef`, `getStdMibStructure`, `resolveStdSymbol`.
+
+**Cross-service deps:** `mibService` (parseMibStructured, types), `oidRegistry` (BUILT_IN_OIDS, parseObjectAssignments, tryResolveParts).
+
+**Used by:** `src/api/routes/mibs.ts — GET /std, GET /std/:key/structure, POST /std/:key/walk routes`.
+
+**Invariants:**
+- The 7 dropdown keys (`std:system`, `std:interfaces`, `std:if-ext`, `std:host-resources`, `std:entity`, `std:entity-sensor`, `std:lldp`) are owned in BOTH the backend `STD_MIBS` constant AND the frontend `_SNMP_STANDARD_MIBS` constant in `public/js/assets.js`. The frontend hardcodes the dropdown today; `GET /std` is for tooling parity. Adding/removing/renaming a std key requires updating both lists in lockstep + the bundled text file in `stdMibs/` + the `EXPECTED` table in `scripts/smoke-std-mibs.ts` + `tests/unit/stdMibLibrary.test.ts`.
+- `parseObjectAssignments` (re-imported from `oidRegistry`) is the canonical extractor — the structured parser drops some `OBJECT IDENTIFIER` shorthand assignments that the regex resolver picks up. The std resolver calls both extractors and intersects: structured parse for the displayed symbol tree; raw assignments for OID resolution.
+- Cache is permanent (process lifetime). No invalidation API — files change only via redeploy.
+- Bundle refresh is operator-initiated via `node scripts/fetch-std-mibs.mjs` which writes SHA-256 + source URL into `stdMibs/SOURCES.md`. Commit the regenerated text files + SOURCES.md together so the audit trail stays in sync.
+
+**When changing this:**
+- Run `npx tsx scripts/smoke-std-mibs.ts` to verify all 27 spot-checks still pass.
+- Run `npx vitest run tests/unit/stdMibLibrary.test.ts` for the formal 16 cases.
+- If adding a new std MIB: extend `STD_MIBS`, drop the text file in `stdMibs/`, add it to `MIBS` in `scripts/fetch-std-mibs.mjs`, add 2-4 spot-checks to `EXPECTED` in the smoke script, add at least one resolved-OID assertion to the unit test, and add the matching `{ id, label, oid }` entry to `_SNMP_STANDARD_MIBS` in `public/js/assets.js`.
+- The IEEE LLDP-MIB carries an IEEE copyright header (preserved verbatim in the file). Re-read the header text on every refresh per Rogers Group's "legal/compliance language requires human review" policy.
 
 ---
 

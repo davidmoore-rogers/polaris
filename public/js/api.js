@@ -559,6 +559,18 @@ const api = {
     // Returns either { kind: "scalars", entries: [...] } or
     // { kind: "table", table: { columns, rows: [{ index, cells }] }, ... }.
     walkMib: (id, body) => request("POST", `/server-settings/mibs/${id}/walk`, body),
+    // Bundled standard MIBs (RFC/IEEE). `key` is the std:* dropdown id; the
+    // route strips the `std:` prefix server-side and looks up the parsed
+    // structure or runs the MIB-aware walk against the asset. Same response
+    // shapes as the uploaded variants above.
+    getStdMibStructure: (key) => {
+      var k = key && key.indexOf("std:") === 0 ? key.slice(4) : key;
+      return request("GET", "/server-settings/mibs/std/" + encodeURIComponent(k) + "/structure");
+    },
+    walkStdMib: (key, body) => {
+      var k = key && key.indexOf("std:") === 0 ? key.slice(4) : key;
+      return request("POST", "/server-settings/mibs/std/" + encodeURIComponent(k) + "/walk", body);
+    },
     listManufacturerAliases:   ()      => request("GET",    "/manufacturer-aliases"),
     createManufacturerAlias:   (body)  => request("POST",   "/manufacturer-aliases", body),
     updateManufacturerAlias:   (id, b) => request("PUT",    `/manufacturer-aliases/${encodeURIComponent(id)}`, b),
