@@ -4804,19 +4804,26 @@ async function collectTemperaturesSnmp(
     snmpWalk(session, OID.entPhysicalDescr).catch(() => new Map()),
   ]);
   const out: TemperatureSample[] = [];
+  // Some agents (notably FortiSwitchOS) stamp entPhySensorType=8 (celsius) on
+  // every row in the table — SFP optical readings, fan tachs, voltage rails —
+  // not just real temperature sensors. Cross-check the entPhysicalDescr from
+  // ENTITY-MIB to drop rows the descr identifies as something else.
+  const NON_TEMP_DESCR = /\b(sfp|fan|rpm|voltage|bias)\b/i;
   for (const [idx, typeRaw] of types.entries()) {
     const t = snmpVbToNumber(typeRaw);
     if (t !== 8) continue; // RFC 3433: 8 = celsius
     const oper = snmpVbToNumber(opers.get(idx));
     // 1 = ok, 2 = unavailable, 3 = nonoperational. Skip non-ok rows.
     if (oper != null && oper !== 1) continue;
+    const descr = snmpVbToString(descrs.get(idx));
+    if (descr && NON_TEMP_DESCR.test(descr)) continue;
     const raw = snmpVbToNumber(values.get(idx));
     if (raw == null) continue;
     const scale = snmpVbToNumber(scales.get(idx));   // SI prefix code
     const prec  = snmpVbToNumber(precisions.get(idx)); // decimal-point shift
     const celsius = scaleEntitySensor(raw, scale, prec);
     out.push({
-      sensorName: snmpVbToString(descrs.get(idx)) || `sensor-${idx}`,
+      sensorName: descr || `sensor-${idx}`,
       celsius:    Number.isFinite(celsius) ? Math.round(celsius * 10) / 10 : null,
     });
   }
