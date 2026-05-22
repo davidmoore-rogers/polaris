@@ -4,17 +4,28 @@
 
 document.addEventListener("DOMContentLoaded", function () {
   // Page-level access widening: admin sees every tab; assets-admin sees only
-  // the Identification tab (and only the MIB Database card within it) so the
+  // the Credentials tab (and only the MIB Database card within it) so the
   // MIB-aware browse + walk surface is reachable without giving them the
   // rest of Server Settings. Backend guards on /server-settings/mibs/* are
-  // the source of truth — this is just UX hide.
-  if (typeof isAdmin === "function" && !isAdmin()) {
+  // the source of truth — this is just UX hide. The credentials list itself
+  // and the Manufacturer Profiles card are gated to admin inside
+  // renderCredentialsTab().
+  var isAssetsAdminOnly = (typeof isAdmin === "function" && !isAdmin());
+  if (isAssetsAdminOnly) {
     document.querySelectorAll("#settings-tabs .page-tab").forEach(function (t) {
-      if (t.getAttribute("data-tab") !== "identification") t.style.display = "none";
+      if (t.getAttribute("data-tab") !== "credentials") t.style.display = "none";
     });
     document.querySelectorAll(".page-tab-panel").forEach(function (p) {
-      if (p.id !== "tab-identification") p.style.display = "none";
+      if (p.id !== "tab-credentials") p.style.display = "none";
     });
+    // The HTML defaults the active tab to Identification — flip the active
+    // class so assets-admin lands on Credentials without an extra click.
+    document.querySelectorAll("#settings-tabs .page-tab").forEach(function (t) { t.classList.remove("active"); });
+    document.querySelectorAll(".page-tab-panel").forEach(function (p) { p.classList.remove("active"); });
+    var credTab = document.querySelector('#settings-tabs .page-tab[data-tab="credentials"]');
+    var credPanel = document.getElementById("tab-credentials");
+    if (credTab) credTab.classList.add("active");
+    if (credPanel) credPanel.classList.add("active");
   }
 
   // Tab switching
@@ -50,7 +61,13 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   }
 
-  loadIdentificationTab();
+  // Assets-admin starts on Credentials (only tab they can see); admin starts
+  // on Identification per the HTML default.
+  if (isAssetsAdminOnly) {
+    loadCredentialsTab();
+  } else {
+    loadIdentificationTab();
+  }
 });
 
 // ─── NTP Tab ────────────────────────────────────────────────────────────────
@@ -3117,18 +3134,28 @@ function _currentCategories() {
   return Object.keys(cats);
 }
 
+// The MIB Database + Manufacturer Profiles cards moved to the Credentials
+// tab. Most pre-existing event handlers in those flows call
+// `renderIdentificationTab()` to refresh after a mutation. To avoid touching
+// every callsite, the identification renderer below also re-renders the
+// Credentials tab whenever it's been loaded — the dual-render keeps both
+// surfaces in sync and is cheap (innerHTML rewrite of two cards).
+function _maybeRerenderCredentialsTabForMibOrProfile() {
+  if (typeof _credsLoaded !== "undefined" && _credsLoaded) {
+    try { renderCredentialsTab(); } catch (_) {}
+  }
+}
+
 function renderIdentificationTab() {
   var container = document.getElementById("tab-identification");
   var html = '';
 
-  // Assets-admin reaches this page only to use the MIB browse + walk
-  // surface — render just the MIB Database card and skip everything else.
-  // Backend guards on /server-settings/* are the source of truth; this is
-  // purely UX. Admin path falls through to the full multi-card view.
+  // Assets-admin's MIB-browse surface lives on the Credentials tab now. If a
+  // non-admin somehow lands on Identification (e.g. a stale bookmark), render
+  // an empty card pointing them at the right tab rather than a blank page.
   if (typeof isAdmin === "function" && !isAdmin()) {
-    html += mibCardHTML();
-    container.innerHTML = html;
-    wireMibControls();
+    container.innerHTML = '<div class="settings-card"><p class="empty-state">The MIB Database has moved to the Credentials tab.</p></div>';
+    _maybeRerenderCredentialsTabForMibOrProfile();
     return;
   }
 
@@ -3266,13 +3293,9 @@ function renderIdentificationTab() {
   html += '</div>'; // end mac-id-two-col
   html += '</div>'; // end settings-card
 
-  // ── 4. MIB Database ──
-  html += mibCardHTML();
-
-  // ── 4a. Manufacturer Profiles (Slice 6b — editable surface).
-  //    Read-only Vendor Profile Status card stays inside mibCardHTML() until
-  //    the resolver swap lands; this card is the new editable mirror.
-  html += manufacturerProfilesCardHTML();
+  // MIB Database + Manufacturer Profiles cards moved to the Credentials tab
+  // so the credential, MIB-source, and per-vendor probe configuration all
+  // live together. See renderCredentialsTab().
 
   // ── 4b. Device Icons ──
   html += deviceIconsCardHTML();
@@ -3351,9 +3374,8 @@ function renderIdentificationTab() {
 
   wireDnsControls();
   loadOuiStatus();
-  wireMibControls();
+  // MIB + manufacturer-profile wiring lives on the Credentials tab now.
   wireDeviceIconHandlers();
-  wireManufacturerProfileControls();
 
   // OUI override events
   document.getElementById("btn-add-oui-override").addEventListener("click", addOuiOverride);
@@ -3410,6 +3432,12 @@ function renderIdentificationTab() {
       cb.disabled = false;
     }
   });
+
+  // Re-render the Credentials tab too — the MIB Database and Manufacturer
+  // Profiles cards live there now, and many pre-existing handlers still call
+  // renderIdentificationTab() after a mutation. This keeps both surfaces in
+  // sync without touching every callsite.
+  _maybeRerenderCredentialsTabForMibOrProfile();
 }
 
 async function addOuiOverride() {
@@ -4801,7 +4829,34 @@ async function loadCredentialsTab() {
   var container = document.getElementById("tab-credentials");
   container.innerHTML = '<div class="settings-card"><p class="empty-state">Loading...</p></div>';
   try {
-    _credsData = await api.credentials.list();
+    // Assets-admin loads only the MIB-related endpoints (the only ones the
+    // backend opens to them). admin gets the full set — credentials list,
+    // MIBs + facets (for the MIB Database card), and manufacturer profiles.
+    var adminUser = !(typeof isAdmin === "function" && !isAdmin());
+    if (adminUser) {
+      var results = await Promise.all([
+        api.credentials.list(),
+        api.serverSettings.listMibs().catch(function () { return []; }),
+        api.serverSettings.getMibFacets().catch(function () { return { manufacturers: [], modelsByManufacturer: {} }; }),
+        api.serverSettings.listManufacturerProfiles().catch(function () { return { profiles: [], transforms: [] }; }),
+      ]);
+      _credsData = results[0] || [];
+      _mibsData = results[1] || [];
+      _mibFacets = results[2] || { manufacturers: [], modelsByManufacturer: {} };
+      var profilePayload = results[3] || {};
+      _mfgProfiles = profilePayload.profiles || [];
+      _mfgProfileTransforms = profilePayload.transforms || [];
+    } else {
+      // Assets-admin: MIB Database card only. Credentials list + Manufacturer
+      // Profiles stay admin-only — gated below in renderCredentialsTab().
+      var mibResults = await Promise.all([
+        api.serverSettings.listMibs().catch(function () { return []; }),
+        api.serverSettings.getMibFacets().catch(function () { return { manufacturers: [], modelsByManufacturer: {} }; }),
+      ]);
+      _credsData = [];
+      _mibsData = mibResults[0] || [];
+      _mibFacets = mibResults[1] || { manufacturers: [], modelsByManufacturer: {} };
+    }
     _credsLoaded = true;
     renderCredentialsTab();
   } catch (err) {
@@ -4840,47 +4895,76 @@ function credSummary(c) {
 
 function renderCredentialsTab() {
   var container = document.getElementById("tab-credentials");
-  var rows = _credsData.map(function (c) {
-    return '<tr>' +
-      '<td>' + escapeHtml(c.name) + '</td>' +
-      '<td>' + credTypeLabel(c.type) + '</td>' +
-      '<td style="color:var(--color-text-secondary);font-size:0.85rem">' + credSummary(c) + '</td>' +
-      '<td style="text-align:right">' +
-        '<button class="btn btn-sm btn-secondary" data-action="edit" data-id="' + escapeHtml(c.id) + '">Edit</button> ' +
-        '<button class="btn btn-sm btn-secondary" data-action="test" data-id="' + escapeHtml(c.id) + '">Test</button> ' +
-        '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + escapeHtml(c.id) + '" data-name="' + escapeHtml(c.name) + '">Delete</button>' +
-      '</td>' +
-    '</tr>';
-  }).join("");
+  var adminUser = !(typeof isAdmin === "function" && !isAdmin());
 
-  container.innerHTML =
-    '<div class="settings-card">' +
-      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">' +
-        '<h4 style="margin:0">Stored Credentials</h4>' +
-        '<button class="btn btn-primary btn-sm" id="btn-cred-new">Add Credential</button>' +
-      '</div>' +
-      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
-        'Named credentials for asset monitoring probes. ' +
-        'SNMP (v2c/v3), WinRM, and SSH credentials can be reused across assets. ' +
-        'ICMP needs no credentials, and FortiManager-discovered firewalls reuse the direct-mode API token configured on their integration.' +
-      '</p>' +
-      (_credsData.length === 0
-        ? '<p class="empty-state">No credentials yet. Click "Add Credential" to create one.</p>'
-        : '<table class="data-table"><thead><tr><th>Name</th><th>Type</th><th>Details</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>') +
-    '</div>';
+  var html = "";
 
-  document.getElementById("btn-cred-new").addEventListener("click", function () { openCredentialModal(null); });
-  container.querySelectorAll('button[data-action="edit"]').forEach(function (btn) {
-    btn.addEventListener("click", function () { openCredentialModal(btn.getAttribute("data-id")); });
-  });
-  container.querySelectorAll('button[data-action="test"]').forEach(function (btn) {
-    btn.addEventListener("click", function () { testCredentialFromList(btn.getAttribute("data-id")); });
-  });
-  container.querySelectorAll('button[data-action="delete"]').forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      deleteCredential(btn.getAttribute("data-id"), btn.getAttribute("data-name"));
+  // ── 1. Stored Credentials (admin-only) ──
+  if (adminUser) {
+    var rows = _credsData.map(function (c) {
+      return '<tr>' +
+        '<td>' + escapeHtml(c.name) + '</td>' +
+        '<td>' + credTypeLabel(c.type) + '</td>' +
+        '<td style="color:var(--color-text-secondary);font-size:0.85rem">' + credSummary(c) + '</td>' +
+        '<td style="text-align:right">' +
+          '<button class="btn btn-sm btn-secondary" data-action="edit" data-id="' + escapeHtml(c.id) + '">Edit</button> ' +
+          '<button class="btn btn-sm btn-secondary" data-action="test" data-id="' + escapeHtml(c.id) + '">Test</button> ' +
+          '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + escapeHtml(c.id) + '" data-name="' + escapeHtml(c.name) + '">Delete</button>' +
+        '</td>' +
+      '</tr>';
+    }).join("");
+
+    html +=
+      '<div class="settings-card">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">' +
+          '<h4 style="margin:0">Stored Credentials</h4>' +
+          '<button class="btn btn-primary btn-sm" id="btn-cred-new">Add Credential</button>' +
+        '</div>' +
+        '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+          'Named credentials for asset monitoring probes. ' +
+          'SNMP (v2c/v3), WinRM, and SSH credentials can be reused across assets. ' +
+          'ICMP needs no credentials, and FortiManager-discovered firewalls reuse the direct-mode API token configured on their integration.' +
+        '</p>' +
+        (_credsData.length === 0
+          ? '<p class="empty-state">No credentials yet. Click "Add Credential" to create one.</p>'
+          : '<table class="data-table"><thead><tr><th>Name</th><th>Type</th><th>Details</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>') +
+      '</div>';
+  }
+
+  // ── 2. MIB Database (admin OR assets-admin) ──
+  html += mibCardHTML();
+
+  // ── 3. Manufacturer Profiles (admin-only) ──
+  if (adminUser) {
+    html += manufacturerProfilesCardHTML();
+  }
+
+  container.innerHTML = html;
+
+  // Wire credentials list controls only when rendered (admin).
+  if (adminUser) {
+    document.getElementById("btn-cred-new").addEventListener("click", function () { openCredentialModal(null); });
+    container.querySelectorAll('button[data-action="edit"]').forEach(function (btn) {
+      btn.addEventListener("click", function () { openCredentialModal(btn.getAttribute("data-id")); });
     });
-  });
+    container.querySelectorAll('button[data-action="test"]').forEach(function (btn) {
+      btn.addEventListener("click", function () { testCredentialFromList(btn.getAttribute("data-id")); });
+    });
+    container.querySelectorAll('button[data-action="delete"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        deleteCredential(btn.getAttribute("data-id"), btn.getAttribute("data-name"));
+      });
+    });
+  }
+
+  // MIB controls (browse/upload/delete) — admin-only writes enforced by the
+  // backend; admin-or-assets-admin reads.
+  wireMibControls();
+
+  // Manufacturer profile controls (admin-only) — only rendered above for admin.
+  if (adminUser) {
+    wireManufacturerProfileControls();
+  }
 }
 
 // Launches the Test Connection modal directly from the credentials list,

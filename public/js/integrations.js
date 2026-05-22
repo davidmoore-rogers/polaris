@@ -1051,7 +1051,7 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
         '<select id="' + mibId + '" data-current-id="' + escapeHtml(mibCurrent) + '" data-auto-mib-name="' + escapeHtml(autoName) + '" data-mib-picker="1">' +
           _mibOptionsHTML(mibCurrent, autoName) +
         '</select>' +
-        '<p class="hint">Defaults to Automatic — Polaris picks the right MIB based on the asset\'s manufacturer/model. Pin one here only when a particular ' + escapeHtml(klass) + ' needs a vendor-specific module.</p>' +
+        "<p class=\"hint\">Defaults to Automatic — Polaris picks the right MIB from the asset's Manufacturer Profile (Server Settings → Credentials → Manufacturer Profiles). Pin a specific module here only when a particular device needs to override its profile.</p>" +
       '</div>';
   }
 
@@ -2300,10 +2300,13 @@ function _syncCredentialPickerVisibility() {
     if (el.value === "snmp") anySnmp = true;
     if (el.value === "ssh")  anySsh  = true;
     // Show/hide the per-stream MIB sub-row for this stream. mibWrapId is null
-    // for streams that don't carry a MIB picker (storage).
+    // for streams that don't carry a MIB picker (storage). Reveal as "" so the
+    // form-group resumes its default block layout — using "flex" puts the
+    // label, select, and hint paragraph on a single horizontal line which is
+    // wrong for the per-class stream subtab's stacked layout.
     if (streamDefs[i].mibWrapId) {
       var mibWrap = document.getElementById(streamDefs[i].mibWrapId);
-      if (mibWrap) mibWrap.style.display = (el.value === "snmp") ? "flex" : "none";
+      if (mibWrap) mibWrap.style.display = (el.value === "snmp") ? "" : "none";
     }
   }
   var snmpRowIds = ["f-mon-credential-row", "f-mon-fortiswitch-credentialId-row", "f-mon-fortiap-credentialId-row"];
