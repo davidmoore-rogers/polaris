@@ -727,6 +727,12 @@ router.post("/", async (req, res, next) => {
       },
     });
 
+    // Defensive: a new integration's id has no cached resolver entries yet,
+    // but bumping the cache here keeps POST symmetric with PUT/DELETE and
+    // covers the freshly-created → /monitor-settings/integration/:id PUT
+    // path the frontend fires right after create.
+    invalidateMonitorSettingsCache({ integrationId: integration.id });
+
     logEvent({ action: "integration.created", resourceType: "integration", resourceId: integration.id, resourceName: input.name, actor: req.session?.username, message: `Integration "${input.name}" (${input.type}) created` });
 
     const response: Record<string, unknown> = stripSecret(integration);
