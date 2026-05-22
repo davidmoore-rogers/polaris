@@ -481,13 +481,21 @@ model Asset {
   // FMG/FortiGate-discovered firewalls fall back to the discovering
   // integration's stored API token / SNMP credential when this is null.
   monitored                Boolean     @default(false)
-  // Sticky flag set whenever an operator explicitly toggles `monitored` (asset
-  // edit modal, bulk-monitor, clickable Status pill in the Assets list). When
-  // true, discovery's `addAsMonitored` re-stamp on FortiSwitch/FortiAP/AD paths
-  // is suppressed so an operator's manual "unmonitored" choice persists across
-  // re-discovery cycles. Cleared only by an operator action — discovery does
-  // not flip it.
-  monitoredOperatorSet     Boolean     @default(false)
+  // True when the operator's current `monitored` choice diverges from the
+  // discovering integration's per-class `addAsMonitored` flag. Discovery
+  // sweeps `monitored` to match `addAsMonitored` on every cycle EXCEPT when
+  // this flag is true — the override is what protects an explicit operator
+  // choice from being clobbered. Auto-clears the moment the operator's
+  // choice converges back to the integration's flag (either side moving
+  // satisfies the equality). Stays false for assets with no
+  // `discoveredByIntegrationId` (manually-created assets have nothing to
+  // override). Maintained on every operator write to `monitored`
+  // (PUT /assets/:id, POST /assets/bulk-monitor, Status pill toggle) and
+  // every integration save where `addAsMonitored` changes (transactional
+  // sweep across affected assets so the UI pill state is never stale).
+  // Replaces the legacy `monitoredOperatorSet` field which was a one-way
+  // "operator ever touched this" flag that couldn't model convergence.
+  monitorOverride          Boolean     @default(false)
   monitorCredentialId      String?
   monitorCredential        Credential? @relation("AssetMonitorCred", fields: [monitorCredentialId], references: [id], onDelete: SetNull)
   responseTimeCredentialId String?

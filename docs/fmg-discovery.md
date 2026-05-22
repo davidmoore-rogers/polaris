@@ -93,14 +93,14 @@ FMG Integration Discovery
 │   │   ┌─────────────────┬──────────────────┬──────────────────────────────────────┐
 │   │   │ enabled         │ addAsMonitored   │ Stamp on NEW switch                  │
 │   │   ├─────────────────┼──────────────────┼──────────────────────────────────────┤
-│   │   │ false           │ false            │ no-op                                │
+│   │   │ false           │ false            │ ensure monitored=false (sweep off)   │
 │   │   │ false           │ true             │ monitored=true (ICMP source default) │
-│   │   │ true (with cred)│ false            │ monitorCredentialId stamped          │
+│   │   │ true (with cred)│ false            │ credential stamped; monitored=false  │
 │   │   │ true (with cred)│ true             │ credential AND monitored=true        │
 │   │   └─────────────────┴──────────────────┴──────────────────────────────────────┘
 │   │
 │   ├─ EXISTING switch — operator-override preservation:
-│   │     monitoredOperatorSet === true                  → don't touch `monitored`
+│   │     monitorOverride === true                       → don't touch `monitored`
 │   │     existing monitorCredentialId is null
 │   │       OR matches cfg.snmpCredentialId              → safe to re-stamp
 │   │     existing monitorCredentialId differs           → preserve operator choice
