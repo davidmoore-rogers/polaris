@@ -3796,7 +3796,27 @@ function _renderInterfacesTable(container, si, asset) {
   var monitored        = new Set(((si && si.monitoredInterfaces)   || (asset && asset.monitoredInterfaces)   || []));
   var monitoredTunnels = new Set(((si && si.monitoredIpsecTunnels) || (asset && asset.monitoredIpsecTunnels) || []));
   var canEdit = canManageAssets();
-  var COLS = 10;
+  // VLAN columns appear only when at least one row in this table actually
+  // carries port-VLAN data (managed FortiSwitches overlaid from the parent
+  // FortiGate's CMDB). On FortiGates / non-Fortinet hosts the columns would
+  // otherwise render as dashes across every row, which is just noise.
+  var showVlanCols = rows.some(function (r) {
+    return r.nativeVlan != null ||
+      (Array.isArray(r.taggedVlans) && r.taggedVlans.length > 0) ||
+      r.trunksAllVlans === true;
+  });
+  // "Inactive" = no traffic ever observed (both cumulative counters are
+  // null or zero). User-set rule: ports with any non-zero in/out count
+  // are always shown regardless of admin/oper status; everything else
+  // gets hidden behind a "Show N inactive interfaces" expander so a
+  // 48-port switch with 6 active ports isn't a wall of zeros. Aggregate
+  // members, VLAN sub-interfaces, loopbacks, etc. follow the same rule.
+  function isInactive(iface) {
+    var hasIn  = iface.inOctets  != null && iface.inOctets  > 0;
+    var hasOut = iface.outOctets != null && iface.outOctets > 0;
+    return !hasIn && !hasOut;
+  }
+  var COLS = 10 + (showVlanCols ? 2 : 0);
   // Group LLDP neighbors by local interface so the row builder can stamp the
   // first neighbor's label inline. Most ports only ever see one neighbor; a
   // "+N" badge appears when more are present and the slide-over enumerates them.
@@ -3844,37 +3864,34 @@ function _renderInterfacesTable(container, si, asset) {
     return '<span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:' + c + '18;color:' + c + ';border:1px solid ' + c + '30;margin-left:5px;white-space:nowrap">' + escapeHtml(cfg[0]) + '</span>';
   }
 
-  // Switch-port VLAN chip — present only on managed FortiSwitches where the
-  // monitoring path overlaid the parent FortiGate's CMDB ports table. Access
-  // ports get a single "VLAN <n>" chip; explicit-list trunks get
-  // "Trunk <native>/<tagged>"; trunk-all ports (`set allowed-vlans all`)
-  // get "Trunk all" since enumerating 4094 VLANs would be useless. Long
-  // tagged lists collapse to "+N more" with the full list in the tooltip.
-  function vlanChip(iface) {
+  // Native + Tagged VLAN cells for the interfaces table — populated only on
+  // managed FortiSwitches where the monitoring path overlaid the parent
+  // FortiGate's CMDB ports table. Other rows in the same table get "—".
+  // The Tagged column collapses long lists past 6 entries to "<6>, +N more"
+  // with the full list in the cell tooltip; trunk-all ports show "all"
+  // distinctly from explicit-list trunks, matching the slide-over pill.
+  function vlanCellsHTML(iface) {
+    if (!showVlanCols) return "";
     var native = (iface.nativeVlan != null) ? iface.nativeVlan : null;
     var tagged = Array.isArray(iface.taggedVlans) ? iface.taggedVlans : [];
     var trunkAll = iface.trunksAllVlans === true;
-    if (native == null && tagged.length === 0 && !trunkAll) return "";
-    var color = "#0d9488";
-    var label, fullTitle;
+    var nativeCell = '<td class="mono">' + (native != null ? escapeHtml(String(native)) : "—") + '</td>';
+    var taggedHTML, taggedTitle;
     if (trunkAll) {
-      var nativeAllBit = native != null ? (native + "/") : "";
-      label = "Trunk " + nativeAllBit + "all";
-      fullTitle = "Trunk port — allowed-vlans=all" +
-        (native != null ? " · native VLAN " + native : "");
+      taggedHTML = '<span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#0d948818;color:#0d9488;border:1px solid #0d948830">all</span>';
+      taggedTitle = "allowed-vlans=all" + (tagged.length > 0 ? " (explicit: " + tagged.join(",") + ")" : "");
     } else if (tagged.length === 0) {
-      label = "VLAN " + native;
-      fullTitle = "Access port — native VLAN " + native;
+      taggedHTML = "—";
+      taggedTitle = "";
+    } else if (tagged.length <= 6) {
+      taggedHTML = escapeHtml(tagged.join(", "));
+      taggedTitle = tagged.join(",");
     } else {
-      var head = tagged.slice(0, 4).join(",");
-      var tail = tagged.length > 4 ? (" +" + (tagged.length - 4) + " more") : "";
-      var nativeBit = native != null ? (native + "/") : "";
-      label = "Trunk " + nativeBit + head + tail;
-      fullTitle = "Trunk port" +
-        (native != null ? " — native VLAN " + native : "") +
-        " — tagged: " + tagged.join(",");
+      taggedHTML = escapeHtml(tagged.slice(0, 6).join(", ")) + ' <span style="opacity:0.7">+' + (tagged.length - 6) + ' more</span>';
+      taggedTitle = tagged.join(",");
     }
-    return '<span title="' + escapeHtml(fullTitle) + '" style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:' + color + '18;color:' + color + ';border:1px solid ' + color + '30;margin-left:5px;white-space:nowrap">' + escapeHtml(label) + '</span>';
+    var taggedCell = '<td class="mono"' + (taggedTitle ? ' title="' + escapeHtml(taggedTitle) + '"' : "") + '>' + taggedHTML + '</td>';
+    return nativeCell + taggedCell;
   }
 
   function buildRow(iface, opts) {
@@ -3903,7 +3920,6 @@ function _renderInterfacesTable(container, si, asset) {
       '<td class="mono" style="' + padStyle + '" title="' + escapeHtml(iface.ifName) + '">' + prefix +
       '<a href="#" class="asset-iface-link" data-ifname="' + escapeHtml(iface.ifName) + '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(label) + '</a>' +
       typeBadge(iface, opts.isChild) +
-      vlanChip(iface) +
       subtitle +
       '</td>';
 
@@ -3911,16 +3927,26 @@ function _renderInterfacesTable(container, si, asset) {
     var errs  = ((iface.inErrors != null && iface.inErrors > 0) || (iface.outErrors != null && iface.outErrors > 0))
       ? ((iface.inErrors || 0) + " / " + (iface.outErrors || 0))
       : "0 / 0";
-    var childAttr = opts.isChild ? ' class="iface-child" data-parent="' + escapeHtml(opts.parentName) + '"' : "";
+    // Combine child + inactive classes. Inactive rows ship with inline
+    // display:none; the expander toggle clears the inline style (and
+    // re-applies it if the row's parent is collapsed when re-hiding).
+    var classes = [];
+    if (opts.isChild) classes.push("iface-child");
+    var inactive = isInactive(iface);
+    if (inactive) classes.push("iface-inactive");
+    var rowAttrs = classes.length > 0 ? ' class="' + classes.join(" ") + '"' : "";
+    if (opts.isChild) rowAttrs += ' data-parent="' + escapeHtml(opts.parentName) + '"';
+    if (inactive) rowAttrs += ' style="display:none"';
     var neighborCell = '<td>' + _lldpNeighborInlineCell(lldpByIf[iface.ifName] || []) + '</td>';
 
-    return "<tr" + childAttr + ">" +
+    return "<tr" + rowAttrs + ">" +
       '<td style="text-align:center;width:1%">' + checkbox + "</td>" +
       nameCell +
       "<td>" + statusCell(iface) + "</td>" +
       "<td>" + speed + "</td>" +
       '<td class="mono">' + escapeHtml(iface.ipAddress  || "—") + "</td>" +
       '<td class="mono">' + escapeHtml(iface.macAddress || "—") + "</td>" +
+      vlanCellsHTML(iface) +
       "<td>" + (iface.inOctets  != null ? _fmtBytes(iface.inOctets)  : "—") + "</td>" +
       "<td>" + (iface.outOctets != null ? _fmtBytes(iface.outOctets) : "—") + "</td>" +
       '<td title="In errors / Out errors (cumulative)">' + errs + "</td>" +
@@ -3971,6 +3997,10 @@ function _renderInterfacesTable(container, si, asset) {
     var rowAttr = opts.collapseGroupName
       ? ' class="iface-child" data-parent="' + escapeHtml(opts.collapseGroupName) + '"'
       : "";
+    // VLAN columns (when present) sit between MAC and In. IPsec tunnels
+    // don't carry per-port VLAN config, so emit empty placeholders so the
+    // column count stays consistent across every row in the table.
+    var vlanPlaceholders = showVlanCols ? '<td class="mono">—</td><td class="mono">—</td>' : "";
     return "<tr" + rowAttr + ">" +
       '<td style="text-align:center;width:1%">' + checkbox + "</td>" +
       nameCell +
@@ -3978,6 +4008,7 @@ function _renderInterfacesTable(container, si, asset) {
       "<td>—</td>" +
       '<td class="mono">' + escapeHtml(tn.remoteGateway || "—") + "</td>" +
       '<td class="mono">—</td>' +
+      vlanPlaceholders +
       "<td>" + (tn.incomingBytes != null ? _fmtBytes(tn.incomingBytes) : "—") + "</td>" +
       "<td>" + (tn.outgoingBytes != null ? _fmtBytes(tn.outgoingBytes) : "—") + "</td>" +
       "<td>—</td>" +
@@ -4089,6 +4120,20 @@ function _renderInterfacesTable(container, si, asset) {
     orphanTunnels.forEach(function (tn) { html += buildTunnelRow(tn, { depth: 0 }); });
   }
 
+  // Per-table inactive count drives the trailing toggle row. Excludes
+  // tunnels and section rows (those aren't in the .iface-inactive class).
+  var inactiveCount = rows.filter(isInactive).length;
+  var inactiveRow = inactiveCount > 0
+    ? '<tr id="iface-inactive-toggle-row"><td colspan="' + COLS + '" style="padding:0.45rem 0.6rem;text-align:center;background:transparent;border-top:1px solid var(--color-border)">' +
+        '<button type="button" id="iface-inactive-toggle" style="background:none;border:none;color:var(--color-text-secondary);font-size:0.78rem;cursor:pointer;padding:0;text-decoration:underline" title="Inactive = no in/out traffic counters">' +
+          '▶ Show ' + inactiveCount + ' inactive interface' + (inactiveCount === 1 ? '' : 's') + ' (no traffic)' +
+        '</button>' +
+      '</td></tr>'
+    : "";
+  var vlanHeader = showVlanCols
+    ? '<th data-col-id="native-vlan" title="Untagged PVID on the FortiSwitch port">Native VLAN</th>' +
+      '<th data-col-id="tagged-vlans" title="Tagged VLAN set on the FortiSwitch port (allowed-vlans − untagged-vlans). \"all\" indicates `set allowed-vlans all`.">Tagged VLANs</th>'
+    : "";
   container.innerHTML = staleBanner +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
       '<th title="Pin this interface for fast-cadence polling" style="width:32px" data-col-id="poll" data-col-required="true"></th>' +
@@ -4097,11 +4142,12 @@ function _renderInterfacesTable(container, si, asset) {
       '<th data-col-id="speed">Speed</th>' +
       '<th data-col-id="ip">IP</th>' +
       '<th data-col-id="mac">MAC</th>' +
+      vlanHeader +
       '<th data-col-id="in">In</th>' +
       '<th data-col-id="out">Out</th>' +
       '<th data-col-id="errors">Errors (in/out)</th>' +
       '<th title="LLDP neighbor seen on this interface" data-col-id="neighbor">Neighbor</th>' +
-    '</tr></thead><tbody>' + html + "</tbody></table></div>";
+    '</tr></thead><tbody>' + html + inactiveRow + "</tbody></table></div>";
   if (typeof applyTableLayout === "function") {
     applyTableLayout(container.querySelector("table"), "asset-interfaces");
   }
@@ -4120,7 +4166,37 @@ function _renderInterfacesTable(container, si, asset) {
     });
   });
 
-  // Expand / collapse aggregate and physical-with-children rows
+  // Show-inactive toggle. Ephemeral per modal open — operators flip this
+  // during an investigation and the table re-builds on every refresh tick
+  // anyway, so persistence would mostly create friction. When ON, inactive
+  // rows reveal except for ones whose parent is currently collapsed (the
+  // collapse-state always wins because the operator just hid that group).
+  var showInactive = false;
+  function syncInactiveRows() {
+    container.querySelectorAll(".iface-inactive").forEach(function (row) {
+      if (showInactive) {
+        var parent = row.getAttribute("data-parent");
+        row.style.display = (parent && collapsed.has(parent)) ? "none" : "";
+      } else {
+        row.style.display = "none";
+      }
+    });
+  }
+  var inactiveBtn = container.querySelector("#iface-inactive-toggle");
+  if (inactiveBtn) {
+    inactiveBtn.addEventListener("click", function () {
+      showInactive = !showInactive;
+      inactiveBtn.textContent = showInactive
+        ? "▼ Hide " + inactiveCount + " inactive interface" + (inactiveCount === 1 ? "" : "s")
+        : "▶ Show " + inactiveCount + " inactive interface" + (inactiveCount === 1 ? "" : "s") + " (no traffic)";
+      syncInactiveRows();
+    });
+  }
+
+  // Expand / collapse aggregate and physical-with-children rows. When
+  // expanding, inactive children stay hidden unless show-inactive is on —
+  // otherwise the operator's "show only active" preference would silently
+  // break every time they click a parent's toggle.
   container.querySelectorAll(".iface-expand-toggle").forEach(function (btn) {
     btn.addEventListener("click", function (e) {
       e.stopPropagation();
@@ -4129,7 +4205,13 @@ function _renderInterfacesTable(container, si, asset) {
       btn.textContent = expanded ? "▶" : "▼";
       btn.title = expanded ? "Expand children" : "Collapse children";
       container.querySelectorAll(".iface-child").forEach(function (row) {
-        if (row.getAttribute("data-parent") === parentName) row.style.display = expanded ? "none" : "";
+        if (row.getAttribute("data-parent") !== parentName) return;
+        if (expanded) {
+          row.style.display = "none";
+        } else {
+          var rowInactive = row.classList.contains("iface-inactive");
+          row.style.display = (rowInactive && !showInactive) ? "none" : "";
+        }
       });
       if (expanded) collapsed.add(parentName); else collapsed.delete(parentName);
       _setCollapsedIfaces(assetId, collapsed);
@@ -9858,11 +9940,12 @@ function assetSnmpWalkViewHTML(a) {
   // the dropdown.
   var monCred = a.monitorCredential;
   var seedCredId = (monCred && monCred.type === "snmp") ? monCred.id : null;
-  var oidVal = _snmpWalkLastMibId.startsWith("std:")
-    ? (_SNMP_STANDARD_MIBS.find(function (m) { return m.id === _snmpWalkLastMibId; }) || {}).oid || _snmpWalkLastOid
-    : (_snmpWalkLastMibId ? _snmpWalkLastObjectName : _snmpWalkLastOid);
-  var oidLabelText = _snmpWalkLastMibId && !_snmpWalkLastMibId.startsWith("std:") ? "Object name" : "Base OID";
-  var oidPlaceholder = _snmpWalkLastMibId && !_snmpWalkLastMibId.startsWith("std:") ? "e.g. sysDescr, ifTable, lldpRemTable" : "1.3.6.1.2.1.1";
+  // std and uploaded MIBs both use the object-name input + browse tree.
+  // No MIB selected → numeric base-OID input + raw walk.
+  var mibAware = !!_snmpWalkLastMibId;
+  var oidVal = mibAware ? (_snmpWalkLastObjectName || "") : (_snmpWalkLastOid || "");
+  var oidLabelText = mibAware ? "Object name" : "Base OID";
+  var oidPlaceholder = mibAware ? "e.g. sysDescr, ifTable, lldpRemTable" : "1.3.6.1.2.1.1";
   return (
     '<div style="display:flex;flex-direction:column;gap:0.75rem">' +
       '<div style="font-size:0.85rem;color:var(--color-text-secondary)">' +
@@ -10091,9 +10174,13 @@ function _wireSnmpWalkTab(a) {
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   function _isUploadedMib(mibId) { return mibId && !mibId.startsWith("std:"); }
+  // "MIB-aware" — std AND uploaded MIBs both render the browse tree and
+  // walk through the symbol-resolving endpoint. Raw OID mode (no MIB) is
+  // the only branch that stays on numeric input + raw walk.
+  function _isMibAware(mibId) { return !!mibId; }
 
   function _loadAndRenderMibTree(mibId) {
-    if (!_isUploadedMib(mibId)) {
+    if (!_isMibAware(mibId)) {
       _renderSnmpMibTree(null);
       return;
     }
@@ -10116,7 +10203,10 @@ function _wireSnmpWalkTab(a) {
       mount.style.display = "";
       mount.innerHTML = '<div style="padding:0.5rem;font-size:0.8rem;color:var(--color-text-secondary)">Loading MIB structure…</div>';
     }
-    api.serverSettings.getMibStructure(mibId).then(function (st) {
+    var fetcher = mibId.indexOf("std:") === 0
+      ? api.serverSettings.getStdMibStructure(mibId)
+      : api.serverSettings.getMibStructure(mibId);
+    fetcher.then(function (st) {
       _snmpMibStructureCache[mibId] = st;
       if (mibSel.value === mibId) {
         _renderSnmpMibTree(st, pick, _snmpWalkLastObjectName || null);
@@ -10134,15 +10224,12 @@ function _wireSnmpWalkTab(a) {
   }
 
   function _updateOidMode(mibId) {
-    if (_isUploadedMib(mibId)) {
+    if (_isMibAware(mibId)) {
+      // std and uploaded MIBs both use object-name mode; the browse tree
+      // fills the input on click.
       oidLabel.textContent = "Object name";
       oidInput.placeholder = "e.g. sysDescr, ifTable, lldpRemTable";
       oidInput.value = _snmpWalkLastObjectName || "";
-    } else if (mibId && mibId.startsWith("std:")) {
-      oidLabel.textContent = "Base OID";
-      var stdMib = _SNMP_STANDARD_MIBS.find(function (m) { return m.id === mibId; });
-      oidInput.placeholder = stdMib ? stdMib.oid : "1.3.6.1.2.1.1";
-      oidInput.value = stdMib ? stdMib.oid : _snmpWalkLastOid;
     } else {
       oidLabel.textContent = "Base OID";
       oidInput.placeholder = "1.3.6.1.2.1.1";
@@ -10206,11 +10293,12 @@ function _wireSnmpWalkTab(a) {
     var oidOrObj = (oidInput.value || "").trim();
     var credId  = document.getElementById("snmp-walk-cred").value;
     var maxRows = parseInt(document.getElementById("snmp-walk-max").value, 10) || 500;
-    var uploaded = _isUploadedMib(mibId);
+    var mibAware = _isMibAware(mibId);
+    var isStd    = mibAware && mibId.indexOf("std:") === 0;
 
-    if (!oidOrObj) { showToast(uploaded ? "Enter an object name" : "Enter a base OID", "error"); return; }
+    if (!oidOrObj) { showToast(mibAware ? "Enter an object name" : "Enter a base OID", "error"); return; }
     if (!credId)   { showToast("Select an SNMP credential", "error"); return; }
-    if (!uploaded && !/^\d+(\.\d+)*$/.test(oidOrObj)) {
+    if (!mibAware && !/^\d+(\.\d+)*$/.test(oidOrObj)) {
       showToast("OID must be numeric (e.g. 1.3.6.1.2.1.1)", "error");
       return;
     }
@@ -10218,13 +10306,13 @@ function _wireSnmpWalkTab(a) {
     // Persist state
     _snmpWalkLastMibId   = mibId;
     _snmpWalkLastCredId  = credId;
-    if (uploaded) { _snmpWalkLastObjectName = oidOrObj; } else { _snmpWalkLastOid = oidOrObj; }
+    if (mibAware) { _snmpWalkLastObjectName = oidOrObj; } else { _snmpWalkLastOid = oidOrObj; }
 
     walkBtn.disabled = true;
     walkBtn.textContent = "Walking…";
     if (copyBtn) copyBtn.disabled = true;
-    // Abort only works for raw walks (MIB-aware endpoint has no signal support)
-    if (abortBtn) { abortBtn.style.display = uploaded ? "none" : ""; abortBtn.disabled = false; }
+    // Abort only works for raw walks (MIB-aware endpoints have no signal support)
+    if (abortBtn) { abortBtn.style.display = mibAware ? "none" : ""; abortBtn.disabled = false; }
     statusEl.textContent = "Walking " + a.ipAddress + "…";
     document.getElementById("snmp-walk-results").innerHTML = "";
     lastResult = null;
@@ -10234,8 +10322,11 @@ function _wireSnmpWalkTab(a) {
     var thisController = activeController;
 
     try {
-      if (uploaded) {
-        var mibResult = await api.serverSettings.walkMib(mibId, { assetId: a.id, credentialId: credId, objectName: oidOrObj, maxRows: maxRows });
+      if (mibAware) {
+        var walkBody = { assetId: a.id, credentialId: credId, objectName: oidOrObj, maxRows: maxRows };
+        var mibResult = isStd
+          ? await api.serverSettings.walkStdMib(mibId, walkBody)
+          : await api.serverSettings.walkMib(mibId, walkBody);
         lastMibResult = mibResult;
         statusEl.textContent = mibResult.rowCount + " row(s) in " + mibResult.durationMs + " ms" +
           (mibResult.truncated ? " (truncated)" : "") +
@@ -10252,7 +10343,7 @@ function _wireSnmpWalkTab(a) {
     } catch (err) {
       lastResult = null;
       lastMibResult = null;
-      var aborted = !uploaded && err && (err.name === "AbortError" || thisController.signal.aborted);
+      var aborted = !mibAware && err && (err.name === "AbortError" || thisController.signal.aborted);
       if (aborted) {
         statusEl.textContent = "Walk aborted.";
         document.getElementById("snmp-walk-results").innerHTML =
