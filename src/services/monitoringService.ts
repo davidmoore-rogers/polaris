@@ -5649,9 +5649,17 @@ export async function recordTelemetryResult(assetId: string, result: CollectionR
 export async function recordTemperatureResult(assetId: string, result: CollectionResult<TemperatureSample[]>): Promise<void> {
   if (!result.supported) return;
   if (Array.isArray(result.data) && result.data.length > 0) {
+    // Drop rows whose celsius reading falls outside a plausible operating
+    // range — covers misinterpreted ENTITY-SENSOR-MIB scale/precision on some
+    // agents (we've seen FortiSwitch sensors report 52000 / 34937). Null
+    // celsius is preserved as the "couldn't read" signal.
+    const filtered = result.data.filter(
+      (t) => t.celsius == null || (Number.isFinite(t.celsius) && t.celsius >= -40 && t.celsius <= 200),
+    );
+    if (filtered.length === 0) return;
     const now = new Date();
     enqueueTemperatureSamples(
-      result.data.map((t) => ({
+      filtered.map((t) => ({
         assetId,
         timestamp: now,
         sensorName: t.sensorName,
