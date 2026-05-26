@@ -1461,7 +1461,7 @@
   }
 
   // Cross-site asset clicks + topology right-bar links pivot to the canonical
-  // asset details slide-over (openViewModal in assets.js, the primaries.md
+  // asset details slide-over (openViewModal in assets.js, the TEMPLATES.md
   // canonical Slide-over implementation). assets.js + its UI deps are loaded
   // on map.html for this; each file's DOMContentLoaded handler self-guards
   // so the Assets-page UI doesn't try to bootstrap here.

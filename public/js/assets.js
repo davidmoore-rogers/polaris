@@ -150,7 +150,7 @@ function _chartRangeBtnsHTML(barClass, entries, prefKey, fallback) {
 // Lookback-overflow clipping helpers. The history endpoints fetch ~1 bucket
 // of samples BEFORE the visible window so the chart's polyline enters from
 // the left edge with continuous data instead of starting partway through;
-// see the "Time-series chart (SVG)" section of primaries.md. The chart
+// see the "Time-series chart (SVG)" section of TEMPLATES.md. The chart
 // renderer hides those pre-since samples by wrapping every data-drawing
 // element (polyline / dots / failure lines / hit targets) in a <g> bound
 // to a per-chart clipPath that matches the inner plot area exactly.
@@ -174,7 +174,7 @@ function _chartClipAttr(id) {
 }
 
 // Renders a stats line into the given container using the canonical
-// Response Time format (see primaries.md): leading "<count> samples"
+// Response Time format (see TEMPLATES.md): leading "<count> samples"
 // span (count bolded), then one "<Label>: <value>" span per metric.
 // Flex gap on the container handles visual separation. Also writes a
 // plaintext summary to container.dataset.summary for screenshot
@@ -3345,7 +3345,7 @@ function _openInstallAgentModal(a) {
         '<p class="hint">The credential needs admin rights on the target host (the installer creates a Windows Service and writes under <code>%ProgramFiles%\\Polaris\\Agent\\</code>). WinRM must be enabled and reachable on port 5986 (HTTPS) or 5985 (HTTP).</p>' +
       '</div>';
 
-    // Match the canonical modal pattern (primaries.md → Modal): build the
+    // Match the canonical modal pattern (TEMPLATES.md → Modal): build the
     // body + a footer string + use openModal directly, then bind the
     // primary button's onclick. showFormModal is the right helper-of-
     // last-resort for plain OK/Cancel forms, but we need to KEEP the
@@ -3406,7 +3406,7 @@ function _openInstallAgentModal(a) {
 
 function _confirmUninstallAgent(a, force) {
   // showConfirm returns a Promise<boolean>; never use window.confirm
-  // (per primaries.md → Modal canonical pattern).
+  // (per TEMPLATES.md → Modal canonical pattern).
   var prompt = force
     ? "Force-remove drops the local ManagedAgent row immediately without contacting the host. The agent's bearer has already been revoked, but the binary + service will remain on the host as an orphan — you'll need to clean those up manually. Continue?"
     : "Polaris will SSH into the host using the credential stored at install time, stop the agent, and remove the binary + service. The local row will be hard-deleted on success.";
@@ -5104,7 +5104,7 @@ async function _loadSensorHistoryFor(assetId, sensorName, range, callOpts) {
       subject: sensorName,
     });
     // Stash the active selection on the chart so silent ticks / probe-now
-    // refetch the same view (canonical convention from primaries.md).
+    // refetch the same view (canonical convention from TEMPLATES.md).
     if (opts.from && opts.to) {
       chartEl.dataset.from = opts.from;
       chartEl.dataset.to   = opts.to;
@@ -11275,7 +11275,7 @@ function _monsetOpenOverrideEditor(existing) {
   //
   // Stream-subtab layout — Response Time / CPU+Memory / Temperature /
   // Interfaces / LLDP / Storage — matches the canonical design in
-  // primaries.md ("Polling methods section"). Reuses `_classStreamSubtabHTML`
+  // TEMPLATES.md ("Polling methods section"). Reuses `_classStreamSubtabHTML`
   // with `isPrimary=false` + prefix `monset-ov-` so generated input ids
   // follow the same convention Manual Monitoring uses (polling/MIB selects
   // at `monset-ov-tier-<pollField>` / `monset-ov-tier-<streamKey>Mib`;

@@ -2,7 +2,7 @@
 
 A lookup index of **canonical implementations** to model new work after. Answers the question **"there are five places that already do this — which one is the reference?"**
 
-This file complements [CLAUDE.md](CLAUDE.md) (narrative architecture) and [touches.md](touches.md) (cross-cutting writers/readers/invariants). Use `primaries.md` whenever you're about to build a new instance of a pattern that already exists somewhere — pick the canonical one and copy its shape.
+This file complements [CLAUDE.md](CLAUDE.md) (narrative architecture) and [TOUCHES.md](TOUCHES.md) (cross-cutting writers/readers/invariants). Use `TEMPLATES.md` whenever you're about to build a new instance of a pattern that already exists somewhere — pick the canonical one and copy its shape.
 
 ## How to use
 
@@ -10,15 +10,17 @@ This file complements [CLAUDE.md](CLAUDE.md) (narrative architecture) and [touch
 2. Open the **Canonical implementation** file/line and read it.
 3. Match its conventions — DOM structure, helper calls, persistence keys, refresh model.
 4. Only diverge when the new surface genuinely needs something the canonical doesn't (note the divergence in your PR).
-5. **Keep this file current.** Per CLAUDE.md's commit-review rule, every commit re-reads `primaries.md` for staleness — if your change replaced the canonical, moved its file, or invalidated a convention, fix it in the same commit.
+5. **Keep this file current.** Per CLAUDE.md's commit-review rule, every commit re-reads `TEMPLATES.md` for staleness — if your change replaced the canonical, moved its file, or invalidated a convention, fix it in the same commit.
 
 ## Format
 
 Per-pattern sections:
 - **What it is** — one-sentence scope
-- **Canonical implementation** — entry-point function + file:line
+- **Canonical implementation** — entry-point `path/file.ts → symbolName()`
 - **Key conventions** — DOM/data shape, helpers, persistence keys, refresh model
 - **When adding a new instance** — checklist before merging
+
+> **Reference convention:** code references are `path/file.ts → symbolName()` — line numbers are deliberately omitted (they drift). Grep the symbol name.
 
 ## Sections
 
@@ -49,11 +51,11 @@ Per-pattern sections:
 **What it is:** A range-selectable SVG line chart driven by an API endpoint that returns `{ since, until, samples, stats }`. Used for response time, CPU+memory, interface throughput/errors, IPsec bytes, storage usage, sensor temperatures.
 
 **Canonical implementation:** Asset Details → System → **Response Time** graph.
-- Loader: `_loadMonitorHistoryFor()` in `public/js/assets.js:4311` — fetches history + polling-method transitions, calls renderer, schedules auto-refresh.
-- Renderer: `_renderMonitorChart()` in `public/js/assets.js:4394` — builds the SVG; uses `_chartTimeBounds()` to align to `since`/`until` so empty regions stay visible.
-- Range buttons: `_chartRangeButtons()` in `public/js/assets.js:78` — produces the `1h / 24h / 7d / 30d / Custom` toolbar.
-- Persistence: `_getChartRangePref(key, fallback)` / `_setChartRangePref(key, range)` in `public/js/assets.js:56-65` — per-user `localStorage.polaris-prefs-charts-<username>` JSON map keyed by chart id (`assetMonitor`, `assetSystem`, `assetSensor`, `assetInterface`, `assetIpsec`, `assetStorage`).
-- Tooltip: `_wireChartTooltip(container, formatHTML)` in `public/js/assets.js:3325` — single shared hover handler all charts use.
+- Loader: `_loadMonitorHistoryFor()` in `public/js/assets.js` — fetches history + polling-method transitions, calls renderer, schedules auto-refresh.
+- Renderer: `_renderMonitorChart()` in `public/js/assets.js` — builds the SVG; uses `_chartTimeBounds()` to align to `since`/`until` so empty regions stay visible.
+- Range buttons: `_chartRangeBtnsHTML()` in `public/js/assets.js` — produces the `1h / 24h / 7d / 30d / Custom` toolbar.
+- Persistence: `_getChartRangePref(key, fallback)` / `_setChartRangePref(key, range)` in `public/js/assets.js` — per-user `localStorage.polaris-prefs-charts-<username>` JSON map keyed by chart id (`assetMonitor`, `assetSystem`, `assetSensor`, `assetInterface`, `assetIpsec`, `assetStorage`).
+- Tooltip: `_wireChartTooltip(container, formatHTML)` in `public/js/assets.js` — single shared hover handler all charts use.
 - Resize: `_observeChartResize(container, rerender)` — re-renders on container resize via ResizeObserver.
 - Stats line: `_renderChartStats(container, count, parts)` — single helper every chart calls; produces the canonical `<count> samples · <Label>: <value> · …` shape and writes a plaintext fallback to `container.dataset.summary` for screenshots/tooltips.
 - Polling-method badge: `_streamSourceBadgeHTML(asset, stream)` (sync first paint) + `_updateStreamSourceBadgesFromEffective(assetId, asset)` (async overwrite from `/effective-monitor-settings`). Renders `<method> (<details>) · every <interval> · <tier>`.
@@ -73,7 +75,7 @@ Per-pattern sections:
 
 **When adding a new instance:**
 - Pick a unique chart id and add it to the prefs key list above.
-- Reuse `_chartRangeButtons` for the toolbar — don't roll your own.
+- Reuse `_chartRangeBtnsHTML` for the toolbar — don't roll your own.
 - Wire `_wireChartTooltip` and `_observeChartResize` — every existing chart does, and skipping breaks behavior parity.
 - Attach the loader's persisted range to the container dataset so silent refresh and probe-now refetch the same window.
 - Use `_renderChartStats` for the stats line. If your chart has additional "current" readings worth showing, put them in the Status block (or a sibling section that mirrors Status), not inline in the stats line.
@@ -89,7 +91,7 @@ Per-pattern sections:
 
 **What it is:** A centered, draggable modal dialog with header / body / footer, used for forms, confirmations, and inline detail editors.
 
-**Canonical implementation:** `openModal(title, bodyHTML, footerHTML, options)` in `public/js/app.js:950`. Companion: `closeModal()` at `public/js/app.js:1004`, `showConfirm(message)` at `public/js/app.js:1011`.
+**Canonical implementation:** `openModal(title, bodyHTML, footerHTML, options)` in `public/js/app.js`. Companion: `closeModal()` at `public/js/app.js`, `showConfirm(message)` at `public/js/app.js`.
 
 **Key conventions:**
 - Single shared `#modal-overlay` element appended to `document.body` on first call; reused across opens.
@@ -114,7 +116,7 @@ Per-pattern sections:
 
 **What it is:** A right-edge resizable detail panel for entity views (asset details, network/IP details, block details, lease lookups). Distinct from a modal: persistent header + scrollable body, can stay open while the user interacts with the underlying page.
 
-**Canonical implementation:** Asset Details panel built by `_ensureAssetPanelDOM()` in `public/js/assets.js:1890`; opened by `openViewModal(id)` at `public/js/assets.js:1925`.
+**Canonical implementation:** Asset Details panel built by `_ensureAssetPanelDOM()` in `public/js/assets.js`; opened by `openViewModal(id)` at `public/js/assets.js`.
 
 **Key conventions:**
 - Single overlay per page, lazily created on first open and reused.
@@ -145,7 +147,7 @@ Per-pattern sections:
 
 **What it is:** A `<table>` with per-column sort, inline filter, and (optionally) multi-select dropdown filters. Used for the assets, subnets, blocks, reservations, integrations, events, users, MIBs, and credentials lists.
 
-**Canonical implementation:** `TableSF` in `public/js/table-sf.js:20`. Used by every list page; the assets table at `public/assets.html` + `public/js/assets.js` is the most feature-complete example.
+**Canonical implementation:** `TableSF` in `public/js/table-sf.js`. Used by every list page; the assets table at `public/assets.html` + `public/js/assets.js` is the most feature-complete example.
 
 **Key conventions:**
 - Mark sortable/filterable columns on `<th>` with:
@@ -239,7 +241,7 @@ Per-pattern sections:
 - Define your edge-strength order over the available signals. Document it in the service header comment so future contributors don't re-litigate which signal wins.
 - Pick the "in-scope" axis for incremental recompute (here: `discoveredByIntegrationId`). The full graph load is cheap; the per-scope writeback is what matters for keeping cycles isolated to the active integration's writes.
 - Pure helpers go in the service file with explicit `export`. DB-bound wrappers stay in the same file but mark them clearly with a comment header so test contributors know which functions to mock vs which to call directly.
-- Add a touches.md cross-cutting section on day one — runtime callers and UI surfaces will discover the DAG quickly and reach for it; the index keeps the writers/readers visible.
+- Add a TOUCHES.md cross-cutting section on day one — runtime callers and UI surfaces will discover the DAG quickly and reach for it; the index keeps the writers/readers visible.
 
 ---
 
@@ -265,7 +267,7 @@ Per-pattern sections:
 - Mirror the public service API to `allocationTemplateService` (storage-only) or `mapRegionService` (with reconciler) — pick the closer one and copy its shape verbatim.
 - Service-level uniqueness validation must run before persistence. Tests cover the create-create / update-rename collision.
 - If you have a reconciler: provide three entry points — `applyOne(record)` (used inline by create / polygon-only update), `applyRename(record, previousName)` (rename branch), `applyDelete(record)` (delete branch), and `reconcileAll()` (periodic + discovery hook). Periodic job uses the additive `reconcileAll()`; never call the rename/delete helpers from there (those are CRUD-only).
-- Add a touches.md `services/<feature>.ts` section for the service AND a cross-cutting section if your reconciler writes to a shared namespace (e.g. asset tags). The index keeps the additive vs authoritative writer split visible.
+- Add a TOUCHES.md `services/<feature>.ts` section for the service AND a cross-cutting section if your reconciler writes to a shared namespace (e.g. asset tags). The index keeps the additive vs authoritative writer split visible.
 
 ---
 
@@ -276,7 +278,7 @@ Per-pattern sections:
 **Canonical implementation:** `firewallTagService` in [src/services/firewallTagService.ts](src/services/firewallTagService.ts), wired into [src/api/routes/integrations.ts](src/api/routes/integrations.ts) at Phase 2a (decommission strip), Phase 3 firewall create (registry seed), Phase 3 firewall update (rename rotation), and Phase 13.5 (end-of-sync reconciler). No periodic job.
 
 **Key conventions:**
-- **Single owner per prefix.** Document the prefix in [touches.md](touches.md) under the cross-cutting "Asset.tags writers" section. Don't add a second writer to `firewall:*` (or whatever your prefix is) — pick a different prefix.
+- **Single owner per prefix.** Document the prefix in [TOUCHES.md](TOUCHES.md) under the cross-cutting "Asset.tags writers" section. Don't add a second writer to `firewall:*` (or whatever your prefix is) — pick a different prefix.
 - **Strip allowlist scoped to the integration's owned set.** The reconciler computes "tags I'm allowed to remove" as `firewall:<hostname>` for every active firewall this integration discovered. Tags pointing at FortiGates owned by other integrations or operator-typed `firewall:fake` survive every pass. Without this scoping, two integrations would fight over the same asset's tags.
 - **Self-attribution skip.** A FortiGate firewall asset never gets its own `firewall:<own-hostname>` tag. Bake the skip into the membership compute.
 - **Per-asset diff write.** Read current `Asset.tags`, compute expected, walk both sets to build the next array (carry non-`firewall:*` tags through; keep allowlist-external `firewall:*` tags; add expected; drop allowlist-internal expected-misses). Update only when the array actually differs — most reconciler ticks should be no-ops on healthy fleets.
@@ -290,7 +292,7 @@ Per-pattern sections:
 - **Best-effort everywhere.** Wrap every Phase hook + the reconciler call in try/catch and `syncLog("error", ...)` so a tag failure never blocks the sync return. Tags are derived state — losing a write means at most one cycle of stale tags.
 
 **When adding a new instance:**
-- Pick a unique tag prefix and a registry category. Document both in [touches.md](touches.md) under the "Asset.tags writers" cross-cutting entry.
+- Pick a unique tag prefix and a registry category. Document both in [TOUCHES.md](TOUCHES.md) under the "Asset.tags writers" cross-cutting entry.
 - Define the membership rule explicitly: which assets get the tag, sourced from which fields / tables. Pure functions over inputs already written by discovery.
 - Define the strip allowlist: which tags THIS reconciler is allowed to remove (always scoped to "things owned by the current integration").
 - Wire the four lifecycle points. The reconciler is the source of truth; the inline hooks are latency optimizations + invariants on registry-row presence.
@@ -314,14 +316,14 @@ Per-pattern sections:
 - **Histograms observe successful work only.** Failures / aborts / errors increment a counter (`polaris_*_total{outcome}`) without polluting the latency distribution. Achieved by structuring the helper as `startTimer() ... await op() ... stop()` — a throw before `stop()` drops the observation.
 - **HTTP middleware uses `req.route?.path` at finish time.** Captured in `res.once("finish", ...)` so the Express router has had a chance to match. Unmatched paths roll up to `"unmatched"`. Combine with `req.baseUrl` for routers mounted on a sub-path. `/metrics` and `/health` are explicitly skipped so scrape requests don't show up as application traffic.
 - **`runInstrumentedJob(name, fn)` for periodic jobs.** Wraps the tick body without changing existing error semantics — thrown errors propagate to the caller's existing try/catch. Job names are stable, machine-readable identifiers; multi-tick modules use `<module>.<loop>` (e.g. `monitorAssets.probe` / `monitorAssets.heavy`).
-- **Documentation in two places.** Every new metric family gets a one-paragraph entry in CLAUDE.md's Observability section AND a writers/readers/invariants entry in `touches.md`'s `cross-cutting/observability-metrics`.
+- **Documentation in two places.** Every new metric family gets a one-paragraph entry in CLAUDE.md's Observability section AND a writers/readers/invariants entry in `TOUCHES.md`'s `cross-cutting/observability-metrics`.
 
 **When adding a new metric:**
 - Define the metric object + helpers in `src/metrics.ts`. Helpers go right after the definitions, in the existing `// ─── Helpers ───` block.
 - Decide on histogram buckets by walking through the actual range the operation can take. Powers-of-10 spaced for >1s metrics, 0.005/0.025/0.1/0.5/1/5 for HTTP-class metrics, 0.01..15 for probe-class.
 - Consider cardinality before adding a label. If the value is per-asset / per-row / per-UUID, push it into the histogram buckets or aggregate it by class instead.
 - Wire the helper into the call site. ONE call site per metric family if possible — the FMG worker's queue-depth gauge is updated only inside `FmgWorker`, not elsewhere; the discovery duration histogram fires only at the `recordSample()` callsite.
-- Add the documentation entries (CLAUDE.md Observability + touches.md cross-cutting/observability-metrics) in the same commit.
+- Add the documentation entries (CLAUDE.md Observability + TOUCHES.md cross-cutting/observability-metrics) in the same commit.
 
 **When instrumenting a new job:**
 - Wrap the tick body in `runInstrumentedJob("name", async () => { ... })`. Keep the existing outer try/catch for error logging — the helper's catch re-throws so log paths are preserved.
@@ -350,7 +352,7 @@ Per-pattern sections:
 **When adding a new table:**
 - Append a `BufferKey`, a `TABLE_LABEL` entry, an `enqueueXxx` helper, and a `writeBatch` switch arm — five touch points in one file. Tests mirror the same shape.
 - Confirm the new table is append-only with no FK on `(assetId, ...)` that requires per-row uniqueness mid-flush; if it does, you probably want synchronous semantics (LLDP-style) instead.
-- Update `touches.md`'s `services/sampleWriteBuffer.ts` entry's Writers list to name the new caller.
+- Update `TOUCHES.md`'s `services/sampleWriteBuffer.ts` entry's Writers list to name the new caller.
 
 ---
 
@@ -386,7 +388,7 @@ Per-pattern sections:
 - New prune helper in `monitoringService.ts` that calls `pruneOneTable` per (table × tier).
 - Capacity SAMPLE_TABLES enumeration in `capacityService.ts` gets three new entries (detail / hourly / daily).
 - Maintenance UI card gets a new stream row in `SAMPLE_RETENTION_STREAMS`.
-- Update `touches.md`'s cross-cutting/tiered-sample-retention section's Writers list to name the new caller.
+- Update `TOUCHES.md`'s cross-cutting/tiered-sample-retention section's Writers list to name the new caller.
 
 **When changing retention defaults:**
 - Update `DEFAULT_DETAIL_DAYS` / `DEFAULT_HOURLY_DAYS` / `DEFAULT_DAILY_DAYS` in `sampleRetentionService.ts`.
@@ -433,7 +435,7 @@ Per-pattern sections:
 
 **Canonical implementation:**
 - Middleware: `src/api/middleware/permissions.ts` (`requirePermission` / `requireOwnership` / `hasPermission` / `requireSessionOrTokenPermission`).
-- Function-key catalogue: `FUNCTION_KEYS` constant in `permissions.ts:54-79`.
+- Function-key catalogue: `FUNCTION_KEYS` constant in `permissions.ts`.
 - CRUD service template: `src/services/roleService.ts` (built-in protection + cache-version bump + per-field diff Event).
 - Route layer template: `src/api/routes/roles.ts` (per-method `requirePermission` gates; Zod schema for permission shape).
 - Frontend matrix consumer: `public/js/users.js` `openRoleSlideover` + `regionPickerHtml`.
@@ -514,7 +516,7 @@ Per-pattern sections:
 - Write the service helpers: `retryPending<X>s()` (batch tick entry), `retry<X>Now(id, actor)` (operator-triggered single row), `trigger<X>RetryAfterStatusChange(assetId)` (recovery hook). Factor a private `attemptQueued<X>(row, opts)` helper both call paths share.
 - Add a 60s job file modeled on `src/jobs/retryQueuedReservationPushes.ts`. Import it from `src/app.ts` next to the other job imports.
 - Fire `triggerXRetryAfterStatusChange` from `monitoringService.recordProbeResult` only on the up edge. Count-gate inside the helper, don't try to filter at the call site.
-- Add a touches.md cross-cutting section covering the writers (create-time queue branch, retry tick, operator retry, edit/release no-op branches, discovery adopt/collide) and the readers (list/count endpoints, UI badges, success-toast suffix, sidebar dot).
+- Add a TOUCHES.md cross-cutting section covering the writers (create-time queue branch, retry tick, operator retry, edit/release no-op branches, discovery adopt/collide) and the readers (list/count endpoints, UI badges, success-toast suffix, sidebar dot).
 - Surface the queue under the existing Reservations alerts UI pattern — new filter option on the same panel rather than a separate page; combine the count into the existing sidebar dot rather than minting a second indicator.
 
 ---
@@ -524,8 +526,8 @@ Per-pattern sections:
 **What it is:** A new external system that Polaris talks to: a firewall family (FortiGate, Palo Alto), a manager (FortiManager, Panorama), an identity provider (Entra ID, Active Directory), or a DHCP server (Windows Server). Adding a new integration type touches a ~30-callsite catalogue across backend dispatch, frontend modal tabs, polling-method compatibility, asset projection, and source-default polling. Without a single reference shape, each new type drifts on tab layout, config-blob keys, transport dispatch, and projection priority — operators see five different UIs for what should feel like the same thing.
 
 **Canonical implementations (parallel):**
-- **Directly-talked-to device** (no manager in front): standalone FortiGate. Service [src/services/fortigateService.ts](src/services/fortigateService.ts). Config schema `FortiGateConfigSchema` in [src/api/routes/integrations.ts](src/api/routes/integrations.ts:376). Frontend form helpers `fortiGateGeneralHTML` / `fortiGateFiltersHTML` / `fortiGateFormHTML` / `getFgtFormConfig` in [public/js/integrations.js](public/js/integrations.js). **Use this when** the new type is a single device with its own REST/SSH API (Palo Alto firewall, Cisco ASA, future on-prem appliances).
-- **Manager that fronts many devices**: FortiManager. Service [src/services/fortimanagerService.ts](src/services/fortimanagerService.ts) + per-integration [src/services/fmgWorker.ts](src/services/fmgWorker.ts). Config schema `FortiManagerConfigSchema` in [src/api/routes/integrations.ts](src/api/routes/integrations.ts:318). **Use this when** the new type aggregates / proxies multiple devices (Panorama, Meraki Dashboard, future SDN controllers). The multi-lane worker pattern applies — see the [Per-instance multi-lane worker](#per-instance-multi-lane-worker-constrained--unconstrained-endpoints) entry.
+- **Directly-talked-to device** (no manager in front): standalone FortiGate. Service [src/services/fortigateService.ts](src/services/fortigateService.ts). Config schema `FortiGateConfigSchema` in [src/api/routes/integrations.ts](src/api/routes/integrations.ts). Frontend form helpers `fortiGateGeneralHTML` / `fortiGateFiltersHTML` / `fortiGateFormHTML` / `getFgtFormConfig` in [public/js/integrations.js](public/js/integrations.js). **Use this when** the new type is a single device with its own REST/SSH API (Palo Alto firewall, Cisco ASA, future on-prem appliances).
+- **Manager that fronts many devices**: FortiManager. Service [src/services/fortimanagerService.ts](src/services/fortimanagerService.ts) + per-integration [src/services/fmgWorker.ts](src/services/fmgWorker.ts). Config schema `FortiManagerConfigSchema` in [src/api/routes/integrations.ts](src/api/routes/integrations.ts). **Use this when** the new type aggregates / proxies multiple devices (Panorama, Meraki Dashboard, future SDN controllers). The multi-lane worker pattern applies — see the [Per-instance multi-lane worker](#per-instance-multi-lane-worker-constrained--unconstrained-endpoints) entry.
 - **Asset-only discovery (no subnets/reservations)**: Entra ID / Active Directory / Windows Server. Services [src/services/entraIdService.ts](src/services/entraIdService.ts), [src/services/activeDirectoryService.ts](src/services/activeDirectoryService.ts), [src/services/windowsServerService.ts](src/services/windowsServerService.ts). Use a dedicated `syncXxxDevices` path in `integrations.ts` rather than the shared `syncDhcpSubnets`. **Use this when** the new type produces assets only — no DHCP scopes, no reservations, no NAT/VIP.
 
 **Key conventions:**
@@ -547,7 +549,7 @@ Per-pattern sections:
 3. **Wire the three route dispatchers** (testConnection, discover, /query) and the `integrationLabel` ternary in `syncDhcpSubnets`. Wire the discovery scheduler dispatch alongside.
 4. **Add the source kind** to `pollingCompatibility.ts` and the per-field rules in `assetProjection.ts`. Add the per-stream source defaults to `defaultPollingForSource` in `monitoringService.ts`.
 5. **Build the frontend modal** — `<type>GeneralHTML`, `<type>FiltersHTML`, `<type>FormHTML`, `get<Type>FormConfig`, picker button + listener, type-label ternaries (at least two), tab-visibility predicate updates (`isFmg || isFgt || isPalo` style). Append `verboseLoggingFormHTML(d)` to the General tab.
-6. **Run the cross-cutting checklist** in [touches.md](touches.md)'s `cross-cutting/integration-type-onboarding` section — that's the authoritative list of every callsite. If you discover a callsite this primaries.md entry didn't mention, add it to touches.md in the same commit.
+6. **Run the cross-cutting checklist** in [TOUCHES.md](TOUCHES.md)'s `cross-cutting/integration-type-onboarding` section — that's the authoritative list of every callsite. If you discover a callsite this TEMPLATES.md entry didn't mention, add it to TOUCHES.md in the same commit.
 7. **Test discovery → sync → asset write** end-to-end with the new type: create the integration via UI, hit Test Connection, hit Discover, verify `DiscoveryResult` round-trips through `syncDhcpSubnets`, verify projected Asset fields look right, verify the integration shows up on the assets list filter. Cover the asset-only path if applicable.
 8. **Write a one-shot startup migration job** if the new type retroactively claims assets that existed before (e.g. `backfillPaloAltoFirewallAssetSources`) — mirrors `backfillFortigateEndpointSources.ts`. Idempotent, marker-keyed, fires once at boot.
 
@@ -557,7 +559,7 @@ Per-pattern sections:
 
 **What it is:** A configuration surface that exposes per-stream monitoring settings — polling method (dropdown), credential picker, MIB picker (when polling resolves to SNMP), interval, timeout, and failure threshold (Response Time only). Used inside the integration edit modal (per-class × per-stream), the Assets-page Monitoring Settings modal (Manual Monitoring section), and the asset edit modal's Monitoring tab. Without one canonical layout, three near-identical surfaces drift on label text, sub-row visibility rules, "Inherit" labelling, and DOM id conventions — making the resolver hierarchy harder to read at the UI.
 
-**Canonical implementation:** `_classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, credentials, isPrimary, opts)` in [public/js/integrations.js](public/js/integrations.js:891). Companion helpers (all in `integrations.js`):
+**Canonical implementation:** `_classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, credentials, isPrimary, opts)` in [public/js/integrations.js](public/js/integrations.js). Companion helpers (all in `integrations.js`):
 - `_polarisPollingDropdownHTML(id, source, stream, currentValue, opts)` (line 85) — emits the polling-method `<select>`. Honors `opts.showInherit` (default `true`; pass `false` at the bottom of the resolver hierarchy where there's nothing to inherit from) and `opts.fmgDirectMode` (drives the "FortiGate Direct" vs "FortiManager Proxy" label for FMG sources).
 - `_polarisSourceDefaultPolling(source, stream)` (line 41) — mirrors `defaultPollingForSource()` in `monitoringService.ts`; returns the per-source-kind per-stream default Polaris would resolve to. Used to label the "Inherit" option.
 - `_polarisSourceLabel(source, opts)` (line 63) — the per-source-kind name table: FortiGate Direct / FortiManager Proxy / Active Directory / Entra ID / Windows Server / Manual.
@@ -566,9 +568,9 @@ Per-pattern sections:
 
 **Consumers (parallel surfaces):**
 - **Integration edit modal** — class-subtab strip (FortiGates / FortiSwitches / FortiAPs for FMG+FGT; Workstations / Servers for AD/Entra/WinSrv) → stream-subtab strip per class. Uses `_classStreamSubtabHTML(..., isPrimary=true)` for the primary class (FortiGate / Workstations — legacy DOM ids `f-mon-tier-<pollField>`) and `isPrimary=false` with namespaced `f-mon-classecho-<klass>-` prefix for the other class subtabs. **Phase 2 save handler**: each class subtab's stream values serialize independently into `Integration.config.<klass>Monitor.streams.<stream>` via `_readClassStreamSubtabs(klass, isPrimary, includeStorage)` — secondary subtabs no longer echo the primary; each class's own input values are persisted. **Phase 2 load handler**: `_classStreamsBlockFor(klass, opts)` picks the matching `<klass>Monitor.streams` block; `_classSettingsOverlay(flatSettings, classStreams)` overlays the per-stream values onto the flat baseline before passing to each stream subtab so each class renders its own saved settings. `showInherit: true`, `showMib: true` (defaults).
-- **Assets page → Monitoring Settings modal → Manual Monitoring section** — no class strip (Manual is class-agnostic). DOM id prefix `f-manual-mon-`. Passes `showInherit: false` (bottom of resolver — nothing to inherit) and `showMib: false` (Manual tier doesn't expose per-stream MIB in this iteration). Renderer at `_monsetManualSectionHTML()` in [public/js/assets.js](public/js/assets.js:10300).
+- **Assets page → Monitoring Settings modal → Manual Monitoring section** — no class strip (Manual is class-agnostic). DOM id prefix `f-manual-mon-`. Passes `showInherit: false` (bottom of resolver — nothing to inherit) and `showMib: false` (Manual tier doesn't expose per-stream MIB in this iteration). Renderer at `_monsetManualSectionHTML()` in [public/js/assets.js](public/js/assets.js).
 - **Assets page → Monitoring Settings modal → Class Overrides editor (Add / Edit)** — no class strip (manual-scope only, per the Phase 1 narrowing). DOM id prefix `monset-ov-`. Passes `showInherit: true` (class overrides legitimately defer to the integration / manual tier below) and `showMib: true` (per-stream MIB pickers are meaningful here). Renderer at `_monsetOpenOverrideEditor()` in [public/js/assets.js](public/js/assets.js). Sub-row visibility is wired locally — `_refreshOvStreamSubRows()` toggles the per-credtype credential rows (`<pollId>-credrow-snmp` / `-ssh` / `-winrm`) and the MIB row (`<prefix>tier-<mibStreamKey>-mib-wrap`) based on each stream's polling-method pick. Per-stream credential save: the helper renders one select per (stream × credtype); the override save handler picks the select matching the chosen polling method and stores it in the per-stream column (`responseTimeCredentialId` / `cpuMemoryCredentialId` / …) the backend expects. Source kind is hardcoded to `"manual"` for the Inherit-option label.
-- **Asset edit modal → Monitoring tab** — no class strip (single asset's overrides). DOES NOT use `_classStreamSubtabHTML` because its DOM id conventions diverge from the asset modal's legacy `f-responseTimePolling` / `f-cpuMemoryPolling` / `f-monitorInterval` / etc. ids that `extractAssetEditData()` reads on save. Instead the renderer in `assetMonitoringFormHTML()` ([public/js/assets.js](public/js/assets.js:1740)) builds per-stream subtab bodies inline using the same visual shape (polling-method `<select>` → cred sub-row → MIB sub-row → cadence + timeout → failure threshold on Response Time only) and wraps them with `_intRenderTabbedBody("asset-mon-streams", streamTabs)`. `showInherit: true` (the Inherit option here legitimately defers to the class / integration / manual tier above the asset). MIB pickers visible per stream. LLDP + Storage subtabs share the system-info cadence with Interfaces (Asset row carries only 4 cadence columns: `monitorIntervalSec`, `cpuMemoryIntervalSec`, `temperatureIntervalSec`, `systemInfoIntervalSec`) — those two subtabs render a "shared with Interfaces" hint instead of duplicating the inputs.
+- **Asset edit modal → Monitoring tab** — no class strip (single asset's overrides). DOES NOT use `_classStreamSubtabHTML` because its DOM id conventions diverge from the asset modal's legacy `f-responseTimePolling` / `f-cpuMemoryPolling` / `f-monitorInterval` / etc. ids that `extractAssetEditData()` reads on save. Instead the renderer in `assetMonitoringFormHTML()` ([public/js/assets.js](public/js/assets.js)) builds per-stream subtab bodies inline using the same visual shape (polling-method `<select>` → cred sub-row → MIB sub-row → cadence + timeout → failure threshold on Response Time only) and wraps them with `_intRenderTabbedBody("asset-mon-streams", streamTabs)`. `showInherit: true` (the Inherit option here legitimately defers to the class / integration / manual tier above the asset). MIB pickers visible per stream. LLDP + Storage subtabs share the system-info cadence with Interfaces (Asset row carries only 4 cadence columns: `monitorIntervalSec`, `cpuMemoryIntervalSec`, `temperatureIntervalSec`, `systemInfoIntervalSec`) — those two subtabs render a "shared with Interfaces" hint instead of duplicating the inputs.
 
 **Key conventions:**
 - **Stream list and order:** Response Time → CPU/Memory → Temperature → Interfaces → LLDP → Storage. FortiAP omits Storage (handled by `_streamsForClass("fortiap")`).

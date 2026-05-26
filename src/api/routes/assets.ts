@@ -917,7 +917,7 @@ function resolveRange(req: any): { since: Date; until: Date; rangeLabel: string 
  * sample is hidden but its presence lets the line enter the chart from the
  * left edge instead of starting partway through. Stats stay scoped to the
  * visible window (filtered in the service). See the "Time-series chart
- * (SVG)" section of primaries.md.
+ * (SVG)" section of TEMPLATES.md.
  *
  *   - detail tier (bucketSeconds=0): 5-minute lookback — covers ~1-5 polls
  *     at 1m/2m/5m cadences without bloating the query.

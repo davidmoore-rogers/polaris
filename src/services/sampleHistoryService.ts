@@ -15,7 +15,7 @@
  * so the operator-visible counts and averages match the visible window
  * (overflow rows are for line continuity only). Defaults to `since` when
  * omitted, in which case behavior is unchanged. See the "Time-series chart
- * (SVG)" section of primaries.md for the convention.
+ * (SVG)" section of TEMPLATES.md for the convention.
  *
  *   - Gauge tables (monitor, telemetry, temperature, storage):
  *     samples keep the SAME field names the detail tier emits — e.g.

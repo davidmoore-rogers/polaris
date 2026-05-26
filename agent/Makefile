@@ -17,7 +17,7 @@
 # (agentBuildService.ts) reads the same file, so a `make all` from a shell
 # and a click on the Build button in the UI produce binaries stamped with
 # the same -ldflags='-X main.version=...' value. Anyone editing agent code
-# must bump VERSION in the same commit per the touches.md rebuild contract.
+# must bump VERSION in the same commit per the TOUCHES.md rebuild contract.
 VERSION := $(shell cat $(dir $(lastword $(MAKEFILE_LIST)))VERSION | tr -d '[:space:]')
 PKG     := github.com/polaris/agent/cmd/polaris-agent
 OUTDIR  := dist/$(VERSION)

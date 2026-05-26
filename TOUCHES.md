@@ -9,7 +9,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 1. **Before changing a service or a shared invariant**, find its section here.
 2. Walk the **Used by** / **Writers** / **Readers** lists to see what depends on the thing you're touching.
 3. Run through the **When changing this** checklist before opening a PR.
-4. **Keep this file current.** Per CLAUDE.md's commit-review rule, every commit re-reads `touches.md` for staleness — if your change moved writers/readers, broke an invariant, or invalidated a checklist item, fix it in the same commit.
+4. **Keep this file current.** Per CLAUDE.md's commit-review rule, every commit re-reads `TOUCHES.md` for staleness — if your change moved writers/readers, broke an invariant, or invalidated a checklist item, fix it in the same commit.
 
 ## Format
 
@@ -17,16 +17,18 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - **What it owns** — one-sentence responsibility
 - **Public API** — exported symbols
 - **Cross-service deps** — other `src/services/*` files this one imports
-- **Used by** — external callers (`file:line — purpose`)
+- **Used by** — external callers (`file → symbol — purpose`)
 - **Invariants** — rules every caller must respect
 - **When changing this** — pre-merge checklist
 
 **Cross-cutting** sections swap **Used by** for separate **Writers** / **Readers** lists since the concern spans many files.
 
+> **Reference convention:** code references are `path/file.ts → symbolName()` — we deliberately omit line numbers because they drift constantly on large files. Grep the symbol name to locate it.
+
 ## Sections
 
 - [Cross-cutting concerns](#cross-cutting-concerns) (17)
-- [Per-service touches](#per-service-touches) — alphabetical, 42 services in `src/services/`
+- [Per-service touches](#per-service-touches) — alphabetical; covers the highest-traffic of the 65 services in `src/services/` (not every service has a section)
 
 ---
 
@@ -40,17 +42,17 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `src/services/monitoringService.ts` — runProbeFor() updates Asset.monitorStatus/consecutiveFailures/consecutiveSuccesses after each probe result, stamps Asset.monitorStatusChangedAt whenever monitorStatus changes value (any-to-any, not just up↔down), emits monitor.status_changed Event on up↔down transitions, fires propagateAfterStatusChange() to push the edge into descendant dependencySuppressed state
 - `src/jobs/monitorAssets.ts` — Light/heavy ticking loops invoke runMonitorPass() which dispatches probe collection
 - `src/jobs/backfillMonitorStatusChangedAt.ts` — One-shot startup (60s after boot): seeds Asset.monitorStatusChangedAt for pre-existing warning/down/recovering assets from the latest monitor.status_changed Event when one is still within the 7-day retention window
-- `src/api/routes/assets.ts:651` — recordProbeResult() on manual /probe-now endpoint
+- `src/api/routes/assets.ts` — recordProbeResult() on manual /probe-now endpoint
 - `src/api/routes/assets.ts` — PUT /assets/:id validateMonitorConfig handler resets consecutiveFailures on manual disable
-- `src/db.ts:212-222` — Prisma extension clampMonitoredForStatus() forces monitored=false and resets consecutiveFailures when status flips to decommissioned/disabled
+- `src/db.ts` — Prisma extension clampMonitoredForStatus() forces monitored=false and resets consecutiveFailures when status flips to decommissioned/disabled
 
 **Readers** (files that consume it):
-- `public/js/assets.js:223-229` — Status pill renderer colors by monitorStatus (green/amber/blue/red/grey)
-- `public/js/assets.js:1152` — intermittency-bar client-side replay engine reads monitorStatus to color per-sample cells
+- `public/js/assets.js` — Status pill renderer colors by monitorStatus (green/amber/blue/red/grey)
+- `public/js/assets.js` — intermittency-bar client-side replay engine reads monitorStatus to color per-sample cells
 - `src/services/monitoringService.ts:runMonitorPass()` — Heavy-cadence suppression gate: telemetry/systemInfo only run when monitorStatus==="up" AND !dependencySuppressed; probe interval doubles when dependencySuppressed (parent down)
 - `src/services/dependencyTreeService.ts` — reconcileDependencySuppression() reads monitorStatus to evaluate "all-down" suppression — only the confirmed-down edge propagates (warning/recovering do NOT)
 - `src/api/routes/map.ts` — Device Map topology endpoint reads monitorStatus for FortiGate/switch/AP health coloring via monitorStatusToHealth()
-- `src/jobs/monitorAssets.ts:110` — Queue eligibility check consults monitorStatus + dependencySuppressed
+- `src/jobs/monitorAssets.ts` — Queue eligibility check consults monitorStatus + dependencySuppressed
 - `src/api/routes/dashboard.ts` — `/dashboard/summary` reads `monitored=true AND monitorStatus in (warning, down)` for the Monitor Alerts card and orders by `monitorStatusChangedAt asc nulls last` so the oldest outages surface first
 - `public/js/dashboard.js` — Monitor Alerts card renders the duration since monitorStatusChangedAt; re-ticks the label every 30s without re-fetching
 
@@ -80,16 +82,16 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 **What it is:** Multi-source asset discovery unified via AssetSource rows and deriveAssetSources() / projectAssetFromSources() pure functions (see "Asset projection priority table" in CLAUDE.md).
 
 **Writers** (files that mutate or emit this state):
-- `src/db.ts:59-132` — Prisma extension shadowWriteAssetSources() upserts AssetSource rows on every asset.create/update/upsert when assetTag/tags/discoveredByIntegrationId change
-- `src/api/routes/integrations.ts:1629-1760` — upsertFortigateFirewallAssetSource() / upsertFortinetInfraAssetSource() for FMG/FortiGate firewall/switch/AP discovery
-- `src/api/routes/integrations.ts:3969-4020` — Entra/Intune upsert paths (buildEntraSource / buildIntuneFdmSource + upsertEntraIntuneSources)
-- `src/api/routes/integrations.ts:3622-3650` — fortigate-endpoint AssetSource stamping on DHCP endpoint discovery
+- `src/db.ts` — Prisma extension shadowWriteAssetSources() upserts AssetSource rows on every asset.create/update/upsert when assetTag/tags/discoveredByIntegrationId change
+- `src/api/routes/integrations.ts` — upsertFortigateFirewallAssetSource() / upsertFortinetInfraAssetSource() for FMG/FortiGate firewall/switch/AP discovery
+- `src/api/routes/integrations.ts` — Entra/Intune upsert paths (buildEntraSource / buildIntuneFdmSource + upsertEntraIntuneSources)
+- `src/api/routes/integrations.ts` — fortigate-endpoint AssetSource stamping on DHCP endpoint discovery
 - `src/api/routes/integrations.ts` — Active Directory / Windows Server discovery paths upsert ad / windowsserver source rows
 - `src/jobs/backfillAssetSources.ts` — One-shot startup: derives sources from legacy assetTag / sid: / ad-guid: tag conventions
 - `src/utils/assetSourceDerivation.ts` — deriveAssetSources() implements source derivation rules for both shadow-write and backfill
 
 **Readers** (files that consume it):
-- `src/utils/assetProjection.ts:279-321` — projectAssetFromSources() reads AssetSource rows and applies priority rules to build ProjectedAsset shape
+- `src/utils/assetProjection.ts` — projectAssetFromSources() reads AssetSource rows and applies priority rules to build ProjectedAsset shape
 - `src/api/routes/assets.ts` — Asset read endpoints attach AssetSource rows in the assetSources relation
 - `src/services/projectionDriftService.ts` — Compares projectAssetFromSources() output against Asset field values to detect drift
 - Discovery paths use projectAssetFromSources() output as the source of truth for Asset field writes (Phase 3b.1 cutover pending)
@@ -130,7 +132,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `src/services/monitoringService.ts:runMonitorPass` — per-stream (probe/telemetry/systemInfo/fastFiltered) dispatch branches consult resolved settings to pick method + timeout + retry logic
 - `src/jobs/monitorAssets.ts` — publishDueWork() and light/heavy loops call resolveMonitorSettings() to determine which assets are due for each cadence
 - `public/js/assets.js` — Asset Monitoring tab UI renders manual override tier (per-asset dropdowns + per-stream SNMP credential pickers + per-stream MIB pickers); class override editor renders all three sub-rows (polling, credential, MIB) per stream
-- `public/js/integrations.js` — Integration Monitoring tab renders the integration tier as **per-class subtabs** (FortiGate/FortiSwitch/FortiAP for FMG+FortiGate; Workstations/Servers for AD/Entra/WinSrv) each wrapping a **per-stream subtab strip** (Response Time / CPU/Memory / Temperature / Interfaces / LLDP / Storage). Each stream subtab carries polling-method dropdown + credential picker + interval + timeout (failure threshold only on Response Time). Class overrides have moved to the Assets-page Monitoring Settings modal. **Phase 2 save handler**: per-class subtabs serialize their own stream values into `Integration.config.<klass>Monitor.streams.<stream>` (FMG/FortiGate via `_readFortigateMonitorBlock("…", {klass, isPrimary})` + `_readClassMonitorBlock("…", {klass, isPrimary, includeStorage?})`; AD/Entra/WinSrv still use the legacy flat path in the current UI iteration). Helper: `_readClassStreamSubtabs(klass, isPrimary, includeStorage)`. **Phase 2 load handler**: `_classStreamsBlockFor(klass, opts)` picks the matching per-class block from opts; `_classSettingsOverlay(flatSettings, classStreams)` overlays it onto the flat baseline before passing to each stream subtab so each class's own saved values render. Canonical helper: `_classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, credentials, isPrimary, opts)` — see `primaries.md` "Polling methods section (per-stream subtab strip)" entry for the full contract. Per-source-default label generator: `_polarisSourceDefaultPolling(source, stream)` + `_polarisSourceLabel(source, fmgDirectMode)`. Class subtab spec: `_CLASS_SUBTAB_SPECS`. Form readers: `_polarisReadPollingFourStream` / `_polarisReadCredFourStream` / `_polarisReadMibFourStream`. Geographic Location (pullSnmpLocation / pushGeocodedCoords) now lives in its own top-level tab on FMG + standalone FortiGate, NOT under Monitoring. ICMP is rendered only on Response Time stream dropdowns (filtered in `_polarisPollingDropdownHTML`); backend write-time check in `monitorSettings.ts:assertPollingCompatible` mirrors this.
+- `public/js/integrations.js` — Integration Monitoring tab renders the integration tier as **per-class subtabs** (FortiGate/FortiSwitch/FortiAP for FMG+FortiGate; Workstations/Servers for AD/Entra/WinSrv) each wrapping a **per-stream subtab strip** (Response Time / CPU/Memory / Temperature / Interfaces / LLDP / Storage). Each stream subtab carries polling-method dropdown + credential picker + interval + timeout (failure threshold only on Response Time). Class overrides have moved to the Assets-page Monitoring Settings modal. **Phase 2 save handler**: per-class subtabs serialize their own stream values into `Integration.config.<klass>Monitor.streams.<stream>` (FMG/FortiGate via `_readFortigateMonitorBlock("…", {klass, isPrimary})` + `_readClassMonitorBlock("…", {klass, isPrimary, includeStorage?})`; AD/Entra/WinSrv still use the legacy flat path in the current UI iteration). Helper: `_readClassStreamSubtabs(klass, isPrimary, includeStorage)`. **Phase 2 load handler**: `_classStreamsBlockFor(klass, opts)` picks the matching per-class block from opts; `_classSettingsOverlay(flatSettings, classStreams)` overlays it onto the flat baseline before passing to each stream subtab so each class's own saved values render. Canonical helper: `_classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, credentials, isPrimary, opts)` — see `TEMPLATES.md` "Polling methods section (per-stream subtab strip)" entry for the full contract. Per-source-default label generator: `_polarisSourceDefaultPolling(source, stream)` + `_polarisSourceLabel(source, fmgDirectMode)`. Class subtab spec: `_CLASS_SUBTAB_SPECS`. Form readers: `_polarisReadPollingFourStream` / `_polarisReadCredFourStream` / `_polarisReadMibFourStream`. Geographic Location (pullSnmpLocation / pushGeocodedCoords) now lives in its own top-level tab on FMG + standalone FortiGate, NOT under Monitoring. ICMP is rendered only on Response Time stream dropdowns (filtered in `_polarisPollingDropdownHTML`); backend write-time check in `monitorSettings.ts:assertPollingCompatible` mirrors this.
 - `src/api/routes/assets.ts` — GET /assets/:id/effective-monitor-settings endpoint returns full resolved stack + provenance (used by System tab intermittency-bar replay, by per-stream chart badges to label which tier supplied each polling method — see _streamBadgeText in public/js/assets.js — AND by the stale-data banner threshold; the three callers in assets.js cache `eff.resolved` in `_effectiveResolvedByAssetId` so banner slots can re-evaluate against the class/integration cadence after first paint)
 - `src/api/routes/assets.ts` — GET /assets/:id exposes `discoveredByIntegration.useProxy` (FMG only) so the System tab chart badges can render "Proxy via <fmg>" vs "Direct" without a second round-trip; integration `config` otherwise stripped to keep API tokens out of the response
 - **Raw-SQL readers (NOT type-checked against Prisma schema)** — these hardcode the per-stream column names in `prisma.$queryRawUnsafe` strings; a schema column rename will compile clean but 500 at runtime:
@@ -355,7 +357,7 @@ build auto-prune + boot-time auto-build are layered on top.
 
 **What it is:** The complete callsite catalogue for adding a new integration type (Palo Alto firewall, future device families). Every new type touches the same ~30 callsites across backend dispatch, frontend modal, polling compatibility, asset projection, and source-default polling. Without this checklist a new type drifts on tab layout, config-blob keys, transport dispatch, and projection priority; with it, every integration feels uniform.
 
-The canonical to mirror for a standalone-device-with-its-own-API type (most common new case) is **standalone FortiGate**. For a manager-that-fronts-many-devices type, mirror **FortiManager**. For asset-only types (no subnets/reservations), mirror **Entra ID / Active Directory**. See [primaries.md → Integration type](primaries.md#integration-type-config--discovery--sync--frontend-modal) for the model-after instruction. This entry is the authoritative checklist.
+The canonical to mirror for a standalone-device-with-its-own-API type (most common new case) is **standalone FortiGate**. For a manager-that-fronts-many-devices type, mirror **FortiManager**. For asset-only types (no subnets/reservations), mirror **Entra ID / Active Directory**. See [TEMPLATES.md → Integration type](TEMPLATES.md#integration-type-config--discovery--sync--frontend-modal) for the model-after instruction. This entry is the authoritative checklist.
 
 **Writers** (files that need a per-type branch):
 - `src/services/<type>Service.ts` — NEW. Exports `testConnection(config)`, `discoverDhcpSubnets(config, signal?, onProgress?, ...)` returning the shared `DiscoveryResult` shape from `fortimanagerService.ts`, `proxyQuery(config, method, path, query?, body?)` for the manual /query route, and any per-type helpers (e.g. an `xxxRequest()` low-level fetcher used internally).
@@ -401,10 +403,10 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - AssetSource projection priorities for a new firewall type slot in **at the same trust level** as the existing firewall types — don't elevate a new vendor above existing ones without reason. Manufacturer rules ignore the observed blob and pick a constant string so misreported fields can't pollute the projection.
 
 **When adding a new integration type:**
-- Pick the canonical (standalone-device vs manager-fronted vs asset-only) per [primaries.md → Integration type](primaries.md#integration-type-config--discovery--sync--frontend-modal).
+- Pick the canonical (standalone-device vs manager-fronted vs asset-only) per [TEMPLATES.md → Integration type](TEMPLATES.md#integration-type-config--discovery--sync--frontend-modal).
 - Walk this Writers list top-to-bottom, adding one branch per callsite. Don't shortcut — every callsite is load-bearing for one piece of the operator experience.
 - Run the parallel test plan: (1) Create integration via the new picker button, save, reload — config roundtrips. (2) Test Connection succeeds + writes the expected `lastTestAt` / `lastTestOk`. (3) Discover writes the expected `DiscoveryResult` shape — verify via DB. (4) Discovered assets project correctly — hostname / serial / manufacturer / model resolve from the new source kind. (5) Resolved polling method matches the source default — verify via `GET /assets/:id/effective-monitor-settings`. (6) Asset shows up under the integration filter on `/assets.html`.
-- If you discover a callsite that wasn't in this Writers list, ADD IT to touches.md in the same commit. The index only stays trustworthy if every contributor extends it as they touch new code.
+- If you discover a callsite that wasn't in this Writers list, ADD IT to TOUCHES.md in the same commit. The index only stays trustworthy if every contributor extends it as they touch new code.
 
 ---
 
@@ -414,11 +416,11 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 **Writers** (files that mutate or emit this state):
 - `src/api/routes/integrations.ts` — POST / PUT integration handlers parse both fortimanager and fortigate integration types, store config.pushReservations / pushQuarantine / monitorSettings / deviceInclude/Exclude in the same JSON shape
-- `src/services/reservationPushService.ts:65-90` — buildTransportForIntegration() dispatches to FMG proxy/direct or FortiGate direct transport based on integration.type
+- `src/services/reservationPushService.ts` — buildTransportForIntegration() dispatches to FMG proxy/direct or FortiGate direct transport based on integration.type
 - `src/services/assetQuarantineService.ts` — quarantineAsset() / releaseQuarantine() use buildTransportForIntegration() for both FMG and FortiGate
 - `src/services/fortigateLocationService.ts` — fetchFortigateSysLocation() uses buildTransportForIntegration() + callFortiOs() for both FMG and FortiGate
 - `src/services/fortigateCoordPushService.ts` — FMG-mode pushes to metavars + CMDB natively (no proxy); standalone pushes CMDB via direct REST. Same source-of-truth dispatch pattern as the other push services.
-- `public/js/integrations.js:335-875` — Integration modal tab bodies for General (useProxy, Filters), Monitoring, DHCP Push, Quarantine Push. FortiGates Monitoring subtab now also carries the `pullSnmpLocation` / `pushGeocodedCoords` toggles.
+- `public/js/integrations.js` — Integration modal tab bodies for General (useProxy, Filters), Monitoring, DHCP Push, Quarantine Push. FortiGates Monitoring subtab now also carries the `pullSnmpLocation` / `pushGeocodedCoords` toggles.
 
 **Readers** (files that consume it):
 - `src/api/routes/integrations.ts` — Discovery sync paths read pushReservations toggle to decide whether to push DHCP changes
@@ -450,7 +452,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 **What it is:** Prisma extension in src/db.ts that automatically normalizes manufacturer, clamps acquiredAt, checks monitoring status, derives asset sources, and records IP history on every Asset create/update/upsert (see "Asset write-time clamps" in CLAUDE.md).
 
 **Writers** (files that mutate or emit this state):
-- `src/db.ts:224-302` — Extended client wraps asset.create/update/updateMany/upsert/delete with six hooks:
+- `src/db.ts` — Extended client wraps asset.create/update/updateMany/upsert/delete with six hooks:
   - normalizeManufacturerInData() runs `Asset.manufacturer` through normalizeManufacturer()
   - clampMonitoredForStatus() forces monitored=false + resets consecutiveFailures when status ∈ {decommissioned, disabled}
   - recordIpHistory() upserts AssetIpHistory on ipAddress change
@@ -499,7 +501,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/services/reservationService.ts:retryReservationNow` — Operator-triggered single-row retry from the IP panel "Retry" button + Events page push-queue panel. Bypasses readiness gates; bumps `failed_permanent` rows back to `pending` first. Emits `reservation.push.queued.retry_manual`.
 - `src/services/reservationService.ts:triggerRetryAfterStatusChange` — Called from `monitoringService.recordProbeResult` when a firewall asset transitions to `up`. Count-gated (zero-pending = early return) so most up-transitions cost one indexed COUNT(*).
 - `src/jobs/retryQueuedReservationPushes.ts` — 60s tick wrapping `retryPendingReservations` via `runInstrumentedJob`. Independent `running` guard. First tick delayed 60s after boot.
-- `src/services/monitoringService.ts:5381` — After `propagateAfterStatusChange`, fires `triggerRetryAfterStatusChange` only when `nextStatus === "up"`.
+- `src/services/monitoringService.ts` — After `propagateAfterStatusChange`, fires `triggerRetryAfterStatusChange` only when `nextStatus === "up"`.
 - `src/services/subnetRefreshService.ts` — Per-subnet Refresh action: fast-path adopt pending rows whose MAC matches a discovered dhcp_reservation (uses CMDB entry id from `listReservedAddresses` in-scope); hard-collide pending rows whose MAC mismatches (flip to `failed_permanent`).
 - `src/api/routes/integrations.ts:syncDhcpSubnets` — Same fast-path adopt + hard-collide logic for full-discovery flows. Reads `entry.scopeId` / `entry.entryId` from the DiscoveredDhcpEntry shape (populated by fortimanagerService + fortigateService at extraction time from `server.id` / `entry.id`).
 - `src/api/routes/integrations.ts:syncDhcpSubnets` Phase 5b — Releases active `dhcp_reservation` rows (including ex-Polaris-pushed-manual rows that flipped to `dhcp_reservation` on first sight) whose CMDB query succeeded this cycle but whose `(subnetId, ip)` isn't in `result.dhcpEntries`. Clears `pushedToId`/`pushedScopeId`/`pushedEntryId`/`pushStatus`. Gated to `subnet.discoveredBy === integrationId` so other integrations' rows are never touched. Auto-rejects pending conflicts on the released row. Writes `reservation.dhcp_reservation.released` Event.
@@ -562,7 +564,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `prisma/schema.prisma` — Asset.snmpLocation / Asset.snmpLocationFetchedAt columns; GeocodeCache model.
 
 **Readers** (files that consume it):
-- `public/js/assets.js:2538` — Renders "SNMP Location" viewRow on asset details General tab when `a.snmpLocation` is set.
+- `public/js/assets.js` — Renders "SNMP Location" viewRow on asset details General tab when `a.snmpLocation` is set.
 - `public/js/integrations.js` — FortiGate Monitoring subtab renders the two toggles via `_fortigateAddMonitoredHTML`; `_readFortigateMonitorBlock` reads them on Save. `pushGeocodedCoords` is force-cleared client-side when `pullSnmpLocation` is off (matches the inline onchange UI handler that disables the push checkbox when pull flips off).
 - `src/api/routes/integrations.ts:FortiGateClassMonitorSchema` — Zod schema for the persisted shape (`pullSnmpLocation: boolean`, `pushGeocodedCoords: boolean`).
 - `src/api/routes/assets.ts` — Asset findUnique / findMany returns snmpLocation + snmpLocationFetchedAt naturally (no field whitelist filters them out).
@@ -608,7 +610,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/services/reservationService.ts` (`createReservation`) — manual create's existing-active-reservation check excludes dns_resolved; calls `releaseDnsResolvedAt` inline before the `$transaction`.
 
 **Readers** (files that consume it):
-- `public/js/ip-panel.js:282-347` — recognizes `r.sourceType === "dns_resolved"` to render a distinct "DNS Resolved" status pill and tooltip. The Reserve/Release/Edit button gating is unchanged — `createdBy === "system:dns-resolved"` doesn't match any user, so non-admin operators see view-only.
+- `public/js/ip-panel.js` — recognizes `r.sourceType === "dns_resolved"` to render a distinct "DNS Resolved" status pill and tooltip. The Reserve/Release/Edit button gating is unchanged — `createdBy === "system:dns-resolved"` doesn't match any user, so non-admin operators see view-only.
 - `src/api/routes/assets.ts:buildIpContexts` — `ipContext.reservation.sourceType` carries the value through to the assets list's View Lease deep-link target; no special handling needed (the deep link just opens the IP panel which renders the badge).
 
 **Invariants:**
@@ -756,7 +758,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 ## cross-cutting/schema-migrations-and-prisma-client-lifecycle
 
-**What it is:** The contract between `prisma/schema.prisma`, the generated Prisma client at `src/generated/prisma/` (gitignored), the compiled `dist/generated/prisma/`, and the in-app updater pipeline that holds them together. Polaris uses Prisma 7 with `provider = "prisma-client"` which emits TypeScript source — `prisma generate` writes to `src/generated/prisma/`, then `tsc` compiles to `dist/generated/prisma/`. The running process imports from `./generated/prisma/client.js` (see `src/db.ts:30`). The state the running process holds in memory must match the actual DB schema, or every Prisma query that selects the affected columns crashes with `column "<name>" does not exist`.
+**What it is:** The contract between `prisma/schema.prisma`, the generated Prisma client at `src/generated/prisma/` (gitignored), the compiled `dist/generated/prisma/`, and the in-app updater pipeline that holds them together. Polaris uses Prisma 7 with `provider = "prisma-client"` which emits TypeScript source — `prisma generate` writes to `src/generated/prisma/`, then `tsc` compiles to `dist/generated/prisma/`. The running process imports from `./generated/prisma/client.js` (see `src/db.ts`). The state the running process holds in memory must match the actual DB schema, or every Prisma query that selects the affected columns crashes with `column "<name>" does not exist`.
 
 **Lifecycle (steps must execute in this order):**
 1. **Schema edit** — `prisma/schema.prisma` is the source of truth for what the Prisma client knows about.
@@ -886,11 +888,11 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 **What it is:** Helmet's Content-Security-Policy in `src/app.ts` sets `scriptSrc: ["'self'"]` — every `<script>...</script>` block with inline content is BLOCKED by the browser. Only external `<script src="...">` tags and inline `on*=` handler attributes (allowed via `scriptSrcAttr: ["'unsafe-inline'"]`) are permitted. This is the most dangerous XSS vector closed by the strict CSP, and it must stay closed.
 
 **Writers** (anywhere a Polaris route or stub HTML emits inline scripts — must be EMPTY of inline scripts):
-- `src/app.ts:405` — `legacyIpamRedirect()` stub HTML. Loads `/js/legacy-ipam-redirect.js` (external file at `public/js/legacy-ipam-redirect.js`) which reads `location.pathname` to decide the target tab and `location.hash` to preserve the legacy fragment, then `location.replace()`s to `/ipam.html#tab=<tab>&<legacyHash>`. Was a `blank page` regression for two weeks (2026-04 to 2026-05) when this used an inline `<script>` block — CSP silently blocked the redirect, leaving a blank body. Symptom for the operator: clicking "View Lease → Open in Networks" on the assets page navigated to `/subnets.html#ip=<sid>@<ip>` and stayed blank.
+- `src/app.ts` — `legacyIpamRedirect()` stub HTML. Loads `/js/legacy-ipam-redirect.js` (external file at `public/js/legacy-ipam-redirect.js`) which reads `location.pathname` to decide the target tab and `location.hash` to preserve the legacy fragment, then `location.replace()`s to `/ipam.html#tab=<tab>&<legacyHash>`. Was a `blank page` regression for two weeks (2026-04 to 2026-05) when this used an inline `<script>` block — CSP silently blocked the redirect, leaving a blank body. Symptom for the operator: clicking "View Lease → Open in Networks" on the assets page navigated to `/subnets.html#ip=<sid>@<ip>` and stayed blank.
 - Any future server-rendered stub or framework view should use an external file (or pass data via `data-*` attributes that the external script reads via `document.currentScript.dataset`).
 
 **Readers** (the CSP itself):
-- `src/app.ts:207-221` — Helmet `contentSecurityPolicy.directives.scriptSrc: ["'self'"]` blocks inline; `scriptSrcAttr: ["'unsafe-inline'"]` keeps `onclick="..."` working because most pages still build HTML via `innerHTML`.
+- `src/app.ts` — Helmet `contentSecurityPolicy.directives.scriptSrc: ["'self'"]` blocks inline; `scriptSrcAttr: ["'unsafe-inline'"]` keeps `onclick="..."` working because most pages still build HTML via `innerHTML`.
 
 **Invariants:**
 - Never emit `<script>...code...</script>` from any HTTP route handler or static file. Always use `<script src="/js/something.js"></script>`. If the inline script needs runtime values from the server, render those as `data-*` attributes on a placeholder element and read them in the external script.
@@ -941,7 +943,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - Region tag normalization: trim → drop empties → dedupe case-insensitively → cap length (64 chars) + count (64 entries).
 
 **When extending the matrix:**
-See `primaries.md` → "Permission-gated route + dynamic-role function key" for the recipe (add to FUNCTION_KEYS, migrate every Role's permissions JSON, wire the route guards, document in CLAUDE.md).
+See `TEMPLATES.md` → "Permission-gated route + dynamic-role function key" for the recipe (add to FUNCTION_KEYS, migrate every Role's permissions JSON, wire the route guards, document in CLAUDE.md).
 
 ---
 
@@ -957,7 +959,7 @@ Listed alphabetically.
 
 **Cross-service deps:** None (pure LDAP client; no service-to-service calls).
 
-**Used by:** src/api/routes/integrations.ts:14,701,874,1111,1250 — discovery trigger, test connection, manual LDAP proxy query, sync path syncActiveDirectoryDevices.
+**Used by:** src/api/routes/integrations.ts,701,874,1111,1250 — discovery trigger, test connection, manual LDAP proxy query, sync path syncActiveDirectoryDevices.
 
 **Invariants:**
 - LDAP simple bind (no Kerberos); default port 636 (LDAPS) or 389 (plain LDAP).
@@ -986,7 +988,7 @@ Listed alphabetically.
 
 **Public API:** listTemplates, saveTemplate, deleteTemplate.
 
-**Used by:** src/api/routes/allocationTemplates.ts:10 (all CRUD operations).
+**Used by:** src/api/routes/allocationTemplates.ts (all CRUD operations).
 
 **Invariants:**
 - Templates stored as JSON blob in Setting.networkAllocationTemplates
@@ -1055,7 +1057,7 @@ Listed alphabetically.
 - Registry rows under category "FortiGate" stay in 1:1 correspondence with active firewall hostnames (create upserts; rename rotates; decommission removes; the reconciler also re-upserts as a safety net so rows don't go missing).
 
 **When changing this:**
-- If the tag prefix or category constants change, also update CLAUDE.md "Firewall tag reconcile (Phase 13.5)" section + the touches.md "Asset.tags" cross-cutting entry.
+- If the tag prefix or category constants change, also update CLAUDE.md "Firewall tag reconcile (Phase 13.5)" section + the TOUCHES.md "Asset.tags" cross-cutting entry.
 - Endpoint membership depends on the sightings table's `integrationId` index — if `AssetFortigateSighting`'s indexing changes, audit the `findMany` filter for performance regressions.
 - Adding a fourth lifecycle path (e.g. operator-driven hostname rename via PUT /assets/:id on a firewall row) means hooking `applyFirewallRename` in that path too — the projection-driven Phase 3 hook only catches discovery-driven renames.
 - The reconciler currently runs only at Phase 13.5 of FMG/FortiGate discovery. If discovery is ever skipped or disabled long-term, stale tags persist — operators should run a manual reconcile or delete the tag manually. (No periodic safety-net job exists by design — every input is discovery-written.)
@@ -1071,11 +1073,11 @@ Listed alphabetically.
 **Cross-service deps:** none.
 
 **Used by:**
-- src/api/routes/apiTokens.ts:55 — GET /api-tokens, list all tokens
-- src/api/routes/apiTokens.ts:71 — POST /api-tokens, create new token (show raw once)
-- src/api/routes/apiTokens.ts:96 — POST /api-tokens/:id/revoke, revoke by ID
-- src/api/routes/apiTokens.ts:114 — DELETE /api-tokens/:id, delete by ID
-- src/api/middleware/auth.ts:89 — attachApiToken middleware, verify bearer token on every request
+- src/api/routes/apiTokens.ts — GET /api-tokens, list all tokens
+- src/api/routes/apiTokens.ts — POST /api-tokens, create new token (show raw once)
+- src/api/routes/apiTokens.ts — POST /api-tokens/:id/revoke, revoke by ID
+- src/api/routes/apiTokens.ts — DELETE /api-tokens/:id, delete by ID
+- src/api/middleware/auth.ts — attachApiToken middleware, verify bearer token on every request
 - ...and N other call sites (quarantine/release endpoints use verifyToken indirectly via middleware)
 
 **Invariants:**
@@ -1102,7 +1104,7 @@ Listed alphabetically.
 
 **Cross-service deps:** None.
 
-**Used by:** `src/api/routes/assets.ts:522 — fetch IP history for asset detail modal`, `src/api/routes/assets.ts:343 — prune endpoint (manual trigger)`
+**Used by:** `src/api/routes/assets.ts — fetch IP history for asset detail modal`, `src/api/routes/assets.ts — prune endpoint (manual trigger)`
 
 **Invariants:**
 - History is auto-populated on every Asset write that touches `ipAddress`; this service reads + prunes only.
@@ -1126,7 +1128,7 @@ Listed alphabetically.
 
 **Cross-service deps:** `assetSightingService.ts` (for candidate targeting).
 
-**Used by:** `src/api/routes/assets.ts:2098,2115,2130,2168,2189 — quarantine/release/verify endpoints (4 routes)`, `src/api/routes/integrations.ts:3182,3185 — auto-quarantine post-discovery on new FortiGate sighting`
+**Used by:** `src/api/routes/assets.ts,2115,2130,2168,2189 — quarantine/release/verify endpoints (4 routes)`, `src/api/routes/integrations.ts,3185 — auto-quarantine post-discovery on new FortiGate sighting`
 
 **Invariants:**
 - Infrastructure assets (firewall/switch/access_point) rejected at `quarantineAsset()` entry; release does NOT enforce type guard (operator can orphan old entries).
@@ -1152,7 +1154,7 @@ Listed alphabetically.
 
 **Cross-service deps:** None.
 
-**Used by:** `src/api/routes/integrations.ts:3148 — batch-record sightings after DHCP discovery sync`, `src/api/routes/assets.ts:1837 — fetch sighting list for Quarantine tab`, `src/services/assetQuarantineService.ts:455 — fan-out targeting within quarantineAsset()`
+**Used by:** `src/api/routes/integrations.ts — batch-record sightings after DHCP discovery sync`, `src/api/routes/assets.ts — fetch sighting list for Quarantine tab`, `src/services/assetQuarantineService.ts — fan-out targeting within quarantineAsset()`
 
 **Invariants:**
 - Sightings are deduped by `(assetId, fortigateDevice)` pair; `seenAt` determines entry precedence, `dhcp_reservation` trumps `dhcp_lease` on tie.
@@ -1204,7 +1206,7 @@ Listed alphabetically.
 
 **Cross-service deps:** None (SAML + database; no service-to-service calls).
 
-**Used by:** src/app.ts:25 — check SSO configured on startup to conditionally skip login page, src/api/routes/auth.ts:29 — SAML login/logout flow (generateRelayState, getSamlLoginUrl, validateSamlResponse, getSamlLogoutUrl, findOrProvisionSamlUser).
+**Used by:** src/app.ts — check SSO configured on startup to conditionally skip login page, src/api/routes/auth.ts — SAML login/logout flow (generateRelayState, getSamlLoginUrl, validateSamlResponse, getSamlLogoutUrl, findOrProvisionSamlUser).
 
 **Invariants:**
 - SSO settings stored in Setting table (key="sso"); 30-second in-memory cache with expiry.
@@ -1230,7 +1232,7 @@ Listed alphabetically.
 
 **Public API:** listBlocks, getBlock, createBlock, updateBlock, deleteBlock.
 
-**Used by:** src/api/routes/blocks.ts:7 (all CRUD operations), src/services/subnetService.ts (block parent lookups, overlap validation).
+**Used by:** src/api/routes/blocks.ts (all CRUD operations), src/services/subnetService.ts (block parent lookups, overlap validation).
 
 **Invariants:**
 - Block deletion forbidden if any active reservations exist across child subnets
@@ -1320,12 +1322,12 @@ Listed alphabetically.
 **Cross-service deps:** none.
 
 **Used by:**
-- src/api/routes/credentials.ts:50 — GET /credentials, list (secrets masked)
-- src/api/routes/credentials.ts:57 — GET /credentials/:id, fetch one
-- src/api/routes/credentials.ts:65 — POST /credentials, create
-- src/api/routes/credentials.ts:87 — PUT /credentials/:id, update (merge w/ secret preservation)
-- src/api/routes/credentials.ts:174 — DELETE /credentials/:id, revoke (fails 409 if asset references it)
-- src/api/routes/assets.ts:30 — GET /assets/:id/resolve-monitor-setting, fetch credential for asset monitoring setup
+- src/api/routes/credentials.ts — GET /credentials, list (secrets masked)
+- src/api/routes/credentials.ts — GET /credentials/:id, fetch one
+- src/api/routes/credentials.ts — POST /credentials, create
+- src/api/routes/credentials.ts — PUT /credentials/:id, update (merge w/ secret preservation)
+- src/api/routes/credentials.ts — DELETE /credentials/:id, revoke (fails 409 if asset references it)
+- src/api/routes/assets.ts — GET /assets/:id/resolve-monitor-setting, fetch credential for asset monitoring setup
 
 **Invariants:**
 - Secret fields (community, authKey, privKey, password, privateKey, apiToken) are masked to "••••••••" on every GET; empty string and mask are treated as "preserve from stored value" on PUT.
@@ -1352,7 +1354,7 @@ Listed alphabetically.
 
 **Cross-service deps:** `utils/manufacturerNormalize.normalizeManufacturer()` for alias-canonicalization of manufacturer values (both the standalone manufacturer scope and the manufacturer half of model:<mfr>/<model> keys).
 
-**Used by:** `src/api/routes/deviceIcons.ts:32,56,83,105 — upload/list/delete CRUD + image serve`, `src/api/routes/map.ts:210,267,369,588,710,787 — icon resolution for topology switches/APs/firewalls (icon cache preloaded once per request)`
+**Used by:** `src/api/routes/deviceIcons.ts,56,83,105 — upload/list/delete CRUD + image serve`, `src/api/routes/map.ts,267,369,588,710,787 — icon resolution for topology switches/APs/firewalls (icon cache preloaded once per request)`
 
 **Invariants:**
 - Scope: "manufacturer-type" (asset type key, enum: server/switch/router/firewall/workstation/printer/access_point/other) or "manufacturer-model" (vendor-specific chassis/model). Both require a manufacturer; standalone type/model/manufacturer uploads are not supported.
@@ -1362,8 +1364,7 @@ Listed alphabetically.
 - Resolution is most-specific-wins: manufacturer-model → manufacturer-type → null (frontend leaves node as a plain status circle). Assets with no manufacturer resolve to null directly — no fallback to "any vendor".
 - `resolveIconUrl()` is synchronous (used in hot topology path); operates against pre-loaded cache from `loadIconResolutionCache()`. Both call sites share `buildResolutionCandidates()` so the priority order can't drift between sync and async paths.
 - Topology renderer overlays the icon at ~70% of the visual diameter centered. The recipe is `background-fit: contain` with NO `background-width`/`background-height` override (so Cytoscape scales the image to fill the model-space node bounds, maintaining aspect ratio AND scaling with zoom), and a per-role thick `border-width` so the colored ring eats the outer ~15% of the visual diameter on each side. Both percentage and pixel `background-width` were tried in earlier attempts and both have Cytoscape 3.30 quirks: percentage causes zoom-dependent overflow; pixel is treated as render pixels (icon stops scaling with zoom) and breaks centering. Letting contain do the work alone is the predictable recipe. See `public/js/topology-render.js` `node[hasIcon=1]` style + the per-role border-width selectors directly below it.
-- Bytes stored as Uint8Array in DeviceIcon.data column; `/api/v1/device-icons/:id/image` serves raw bytes with Content-Type + Cache-Control. SVG responses additionally carry X-Content-Type-Options: nosniff and a strict CSP (`default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox`) as defense-in-depth against validator bypass.
-- SVG responses also pass through `ensureSvgIntrinsicSize()` on the way out: if the opening `<svg>` tag has neither `width=` nor `height=`, both are injected at 512×512. Adobe Illustrator / common design-tool exports omit those attributes and just declare `viewBox` — when Cytoscape loads such an SVG via `new Image()` the browser picks a tiny default natural size and the topology icon ends up anchored upper-left and stuck at that pixel size at every zoom. Injection happens on serve so it fixes every SVG already in the DB without a backfill; stored bytes are untouched. Idempotent — operator-supplied dimensions pass through unchanged.
+- Bytes stored as Uint8Array in DeviceIcon.data column; `/api/v1/device-icons/:id/image` serves raw bytes with Content-Type + Cache-Control. (Defense-in-depth: any `image/svg+xml` row — only legacy rows predating the rasterize-on-upload change, since new SVG uploads are stored as PNG — is served with X-Content-Type-Options: nosniff + a strict CSP `default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox`.)
 
 **When changing this:**
 - Check magic-byte prefixes (PNG/JPEG/WebP) if adding new raster formats; ensure length matches actual file signatures.
@@ -1386,7 +1387,7 @@ Listed alphabetically.
 
 **Cross-service deps:** none (reads/writes Settings key "discoveryDurationStats").
 
-**Used by:** `src/api/routes/integrations.ts:1035 — slow-check baseline lookup`; `src/api/routes/integrations.ts:1212,1310 — record per-FG and overall run durations`. ~3 call sites.
+**Used by:** `src/api/routes/integrations.ts — slow-check baseline lookup`; `src/api/routes/integrations.ts,1310 — record per-FG and overall run durations`. ~3 call sites.
 
 **Invariants:**
 - Only successful (non-aborted, non-errored) runs recorded; failed runs skip `recordSample()` to avoid poisoning the average.
@@ -1412,9 +1413,9 @@ Listed alphabetically.
 **Public API:** DnsSettings, PtrRecord, ARecord, ResolverLike, getDnsSettings, updateDnsSettings, createResolver, getConfiguredResolver.
 
 **Used by:**
-- src/api/routes/assets.ts:14 — GET /assets/:id, resolve PTR names for associated IPs
-- src/api/routes/integrations.ts:20 — POST /integrations/discover, resolve PTR during discovery
-- src/api/routes/serverSettings.ts:34 — GET/PUT /server-settings/dns, CRUD DNS config + test endpoint
+- src/api/routes/assets.ts — GET /assets/:id, resolve PTR names for associated IPs
+- src/api/routes/integrations.ts — POST /integrations/discover, resolve PTR during discovery
+- src/api/routes/serverSettings.ts — GET/PUT /server-settings/dns, CRUD DNS config + test endpoint
 
 **Invariants:**
 - Three modes (standard, dot, doh): standard falls back to system DNS, returns null TTL; DoT connects to port 853 (configurable), parses TCP wire format; DoH uses JSON API (Cloudflare/Google/Quad9).
@@ -1440,7 +1441,7 @@ Listed alphabetically.
 
 **Cross-service deps:** None (pure Graph API client; no service-to-service calls).
 
-**Used by:** src/api/routes/integrations.ts:13,699,861,1110,1241 — discovery trigger, test connection, manual Graph proxy query, sync path syncEntraDevices.
+**Used by:** src/api/routes/integrations.ts,699,861,1110,1241 — discovery trigger, test connection, manual Graph proxy query, sync path syncEntraDevices.
 
 **Invariants:**
 - OAuth2 client-credentials flow; tokens cached in-memory by tenantId:clientId until expiry ≥60s buffer.
@@ -1469,7 +1470,7 @@ Listed alphabetically.
 
 **Cross-service deps:** none (reads Settings, spawns sftp/scp/nc, uses prisma Event table).
 
-**Used by:** `src/jobs/pruneEvents.ts:20,25 — scheduled archive/export`; `src/jobs/decommissionStaleAssets.ts:13 — inactivity threshold`; `src/api/routes/events.ts — admin CRUD endpoints`; `capacityService.ts:997 — capacity transition Event creation`. ~8 call sites.
+**Used by:** `src/jobs/pruneEvents.ts,25 — scheduled archive/export`; `src/jobs/decommissionStaleAssets.ts — inactivity threshold`; `src/api/routes/events.ts — admin CRUD endpoints`; `capacityService.ts — capacity transition Event creation`. ~8 call sites.
 
 **Invariants:**
 - All successful Events are written to `prisma.event.create()` by callers (routes, services, jobs); eventArchiveService does not write Events, only manages their export/retention.
@@ -1496,7 +1497,7 @@ Listed alphabetically.
 
 **Cross-service deps:** fortimanagerService (imports DiscoveryResult shape + types; fortimanagerService imports fgRequest, testConnection, proxyQuery for proxy-mode device iteration).
 
-**Used by:** src/api/routes/integrations.ts:529,695,851,1107,1269 — discovery + test + manual proxy query, src/services/monitoringService.ts:35 — REST calls for uptime monitoring, src/services/reservationPushService.ts:21 — direct REST push of DHCP reservations, src/services/assetQuarantineService.ts:44 — direct REST push of quarantine targets.
+**Used by:** src/api/routes/integrations.ts,695,851,1107,1269 — discovery + test + manual proxy query, src/services/monitoringService.ts — REST calls for uptime monitoring, src/services/reservationPushService.ts — direct REST push of DHCP reservations, src/services/assetQuarantineService.ts — direct REST push of quarantine targets.
 
 **Invariants:**
 - fgRequest is the low-level bearer-token auth layer; all per-device queries use it.
@@ -1596,7 +1597,7 @@ Listed alphabetically.
 
 **Cross-service deps:** fortigateService (imports discoverDhcpSubnets for direct-mode fallback; imports fgTestConnection and proxyQuery for proxy testing); fmgWorker (every rpc call routes through `getFmgWorker` when an integrationId is in scope).
 
-**Used by:** src/api/routes/integrations.ts:531,693,824,840,1107,1283 — discovery orchestration + test + manual proxy query + realtime push via FMG, src/services/monitoringService.ts:39 — FMG proxy REST for uptime monitoring, src/services/reservationPushService.ts:26 — push DHCP reservations to FortiGate via FMG proxy/direct, src/services/assetQuarantineService.ts:49 — push quarantine targets via FMG proxy/direct.
+**Used by:** src/api/routes/integrations.ts,693,824,840,1107,1283 — discovery orchestration + test + manual proxy query + realtime push via FMG, src/services/monitoringService.ts — FMG proxy REST for uptime monitoring, src/services/reservationPushService.ts — push DHCP reservations to FortiGate via FMG proxy/direct, src/services/assetQuarantineService.ts — push quarantine targets via FMG proxy/direct.
 
 **Invariants:**
 - Proxy mode (`useProxy: true`, default) clamps per-FortiGate parallelism to 1 because FortiManager drops parallel `/sys/proxy/json` connections. The FMG worker's proxy lane enforces that serialization; the per-device CMDB scrapes (interface config, DHCP CMDB, VIPs, geo coords, etc.) run concurrently on the worker's native lane, so per-device throughput is higher than the proxy-lane bottleneck alone would suggest.
@@ -1653,7 +1654,7 @@ Listed alphabetically.
 
 **Cross-service deps:** None (reads AssetInterfaceSample rows and in-memory asset inventory; calls utility functions).
 
-**Used by:** src/api/routes/map.ts:19 — topology graph for Device Map (sites/:id/topology endpoint); src/services/dependencyTreeService.ts — Phase 12 of FMG/FortiGate sync via `recomputeDependencyTree`.
+**Used by:** src/api/routes/map.ts — topology graph for Device Map (sites/:id/topology endpoint); src/services/dependencyTreeService.ts — Phase 12 of FMG/FortiGate sync via `recomputeDependencyTree`.
 
 **Invariants:**
 - Reads latest AssetInterfaceSample per (assetId, ifName) from seed asset set within a 1-hour timestamp window; no live discovery queries. The window exists to filter out interfaces that have stopped reporting (asset down/decommissioned, monitoring disabled) — drawing a topology edge from a stale sample would be wrong data. Default system-info cadence is 600s, so 1 hour tolerates ~5 missed scrapes without admitting genuinely-stale interfaces. Without the bound the DISTINCT ON had to scan the entire active hypertable chunk and was observed at 13.5 min / 90M rows / 9 GB I/O on a fleet of ~600 infra assets.
@@ -1701,7 +1702,7 @@ Listed alphabetically.
 
 **Cross-service deps:** None (consumed by routes and jobs).
 
-**Used by:** `src/api/routes/manufacturerAliases.ts:11 — admin CRUD endpoints`, `src/jobs/normalizeManufacturers.ts:18 — startup seeding and backfill`, `src/db.ts:32 — Prisma extension normalizer hook`.
+**Used by:** `src/api/routes/manufacturerAliases.ts — admin CRUD endpoints`, `src/jobs/normalizeManufacturers.ts — startup seeding and backfill`, `src/db.ts — Prisma extension normalizer hook`.
 
 **Invariants:**
 - In-memory map (`setAliasMap()` in `manufacturerNormalize.ts`) must be refreshed after every mutation.
@@ -1726,7 +1727,7 @@ Listed alphabetically.
 
 **Cross-service deps:** `oidRegistry` (refreshRegistry, resolveSymbolAtVendorScope, listModelOverrides), `vendorTelemetryProfiles` (VENDOR_TELEMETRY_PROFILES), `mibParserUtils` (stripComments).
 
-**Used by:** `src/api/routes/mibs.ts — list/get/upload/delete + Browse `/structure` + MIB-aware `/walk``, `src/services/oidRegistry.ts:17 — refreshes the symbol table on create/delete`, `src/services/monitoringService.ts — via oidRegistry for vendor profile matching`.
+**Used by:** `src/api/routes/mibs.ts — list/get/upload/delete + Browse `/structure` + MIB-aware `/walk``, `src/services/oidRegistry.ts — refreshes the symbol table on create/delete`, `src/services/monitoringService.ts — via oidRegistry for vendor profile matching`.
 
 **Invariants:**
 - SMI parser validates UTF-8 text only (rejects NUL and control chars <0x20 except tab/CR/LF).
@@ -1754,7 +1755,7 @@ Listed alphabetically.
 
 **Cross-service deps:** `fortigateService.ts`, `fortimanagerService.ts`, `timescaleService.ts`, `oidRegistry.ts`, `vendorTelemetryProfiles.ts`.
 
-**Used by:** `src/app.ts:47` — boot timescale detection; `src/api/routes/credentials.ts:17` — probe credential testing; `src/api/routes/integrations.ts:24` — AD monitor protocol selection; `src/api/routes/assets.ts:24` — effective monitor settings + probe request; `src/api/routes/monitorSettings.ts:23` — cache invalidation; `src/jobs/monitorAssets.ts:40` — core monitor loop dispatch; `src/jobs/migrateMonitorSettingsHierarchy.ts:36` — cache invalidation; `src/services/capacityService.ts:41` — monitor settings for capacity calculation.
+**Used by:** `src/app.ts` — boot timescale detection; `src/api/routes/credentials.ts` — probe credential testing; `src/api/routes/integrations.ts` — AD monitor protocol selection; `src/api/routes/assets.ts` — effective monitor settings + probe request; `src/api/routes/monitorSettings.ts` — cache invalidation; `src/jobs/monitorAssets.ts` — core monitor loop dispatch; `src/jobs/migrateMonitorSettingsHierarchy.ts` — cache invalidation; `src/services/capacityService.ts` — monitor settings for capacity calculation.
 
 **Invariants:**
 - **Four-tier resolver:** per-asset overrides (top) → class override → integration/manual tier → hardcoded floor. Call `invalidateMonitorSettingsCache(scope)` after any tier-3 or tier-2 write to refresh `resolveMonitorSettings()` on next call. The eight cadence/timeout fields (`intervalSeconds`, `cpuMemoryIntervalSeconds`, `temperatureIntervalSeconds`, `systemInfoIntervalSeconds`, `probeTimeoutMs`, `cpuMemoryTimeoutMs`, `temperatureTimeoutMs`, `systemInfoTimeoutMs`) cascade through every tier; `failureThreshold` and the three retentions stop at tier-2 (class override). CPU/memory and temperature dispatch independently: `collectTelemetry` consumes `cpuMemoryPolling` / `cpuMemoryTimeoutMs` / `cpuMemoryCredentialId` / `cpuMemoryMibId` and `collectTemperatures` consumes `temperaturePolling` / `temperatureTimeoutMs` / `temperatureCredentialId` / `temperatureMibId`, each opening its own SNMP session or FortiOS REST call. `runTelemetryFor` runs both in parallel each telemetry tick — they still share the telemetry cadence trigger (`cpuMemoryIntervalSeconds`); an independent `temperatureIntervalSeconds` timer is a future follow-up.
@@ -1787,7 +1788,7 @@ Listed alphabetically.
 
 **Cross-service deps:** `mibService` (via import in mibService for refreshRegistry calls), `mibParserUtils` (stripComments).
 
-**Used by:** `src/app.ts:46 — startup warmup`, `src/services/monitoringService.ts:43 — telemetry probe resolution`, `src/services/mibService.ts:17 — profile status introspection`, `src/api/routes/mibs.ts — Browse modal OID resolution + MIB-aware walk symbol → numeric OID lookup`, `src/services/stdMibLibrary.ts — std MIB symbol resolution against the seed`.
+**Used by:** `src/app.ts — startup warmup`, `src/services/monitoringService.ts — telemetry probe resolution`, `src/services/mibService.ts — profile status introspection`, `src/api/routes/mibs.ts — Browse modal OID resolution + MIB-aware walk symbol → numeric OID lookup`, `src/services/stdMibLibrary.ts — std MIB symbol resolution against the seed`.
 
 **Invariants:**
 - Resolution is scoped per (manufacturer, model) tuple; both cached and layer-resolved case-insensitively.
@@ -1838,10 +1839,10 @@ Listed alphabetically.
 **Public API:** lookupOui, lookupOuiBatch, lookupOuiOverride, refreshOuiDatabase, getOuiStatus, OuiOverride, getOuiOverrides, setOuiOverride, deleteOuiOverride.
 
 **Used by:**
-- src/api/routes/assets.ts:15 — GET /assets/:id, look up MAC OUI (vendor name)
-- src/api/routes/integrations.ts:21 — POST /integrations/discover, tag assets with vendor during discovery
-- src/api/routes/serverSettings.ts:36 — GET/PUT /server-settings/oui, CRUD overrides + trigger refresh
-- src/jobs/ouiRefresh.ts:30 — Weekly cron job, refresh database and log entries/size
+- src/api/routes/assets.ts — GET /assets/:id, look up MAC OUI (vendor name)
+- src/api/routes/integrations.ts — POST /integrations/discover, tag assets with vendor during discovery
+- src/api/routes/serverSettings.ts — GET/PUT /server-settings/oui, CRUD overrides + trigger refresh
+- src/jobs/ouiRefresh.ts — Weekly cron job, refresh database and log entries/size
 
 **Invariants:**
 - IEEE database is downloaded from standards-oui.ieee.org/oui/oui.csv; stored as JSON in Setting table; loaded on-demand into module-level in-memory map (singleton pattern, reset only on refresh).
@@ -1924,7 +1925,7 @@ Listed alphabetically.
 
 **Cross-service deps:** `monitoringService.ts`.
 
-**Used by:** `src/app.ts:48` — queue initialization and pg-boss worker lifecycle; `src/jobs/monitorAssets.ts:47` — queue mode dispatch and job publishing; `src/api/routes/serverSettings.ts` — queue mode write; `src/services/capacityService.ts:43` — capacity snapshot input (queue mode + pg-boss status).
+**Used by:** `src/app.ts` — queue initialization and pg-boss worker lifecycle; `src/jobs/monitorAssets.ts` — queue mode dispatch and job publishing; `src/api/routes/serverSettings.ts` — queue mode write; `src/services/capacityService.ts` — capacity snapshot input (queue mode + pg-boss status).
 
 **Invariants:**
 - **Boot-time mode capture:** mode read once at startup into `bootTimeMode`; `setQueueMode()` updates Setting + cache but never affects running process. New mode takes effect on next restart only.
@@ -1950,7 +1951,7 @@ Listed alphabetically.
 
 **Cross-service deps:** fortigateService (fgRequest), fortimanagerService (fmgProxyRest, resolveDeviceMgmtIpViaFmg).
 
-**Used by:** src/services/reservationService.ts:15 (pushReservation on create, unpushReservation on release, releaseDhcpLease on dhcp_lease release); src/services/subnetRefreshService.ts:29 (read-only per-subnet refresh consumes the transport helpers).
+**Used by:** src/services/reservationService.ts (pushReservation on create, unpushReservation on release, releaseDhcpLease on dhcp_lease release); src/services/subnetRefreshService.ts (read-only per-subnet refresh consumes the transport helpers).
 
 **Invariants:**
 - MAC address must be 48-bit (normalized to xx:xx:xx:xx:xx:xx)
@@ -1977,7 +1978,7 @@ Listed alphabetically.
 
 **Cross-service deps:** reservationPushService (pushReservation, updatePushedReservation, unpushReservation, releaseDhcpLease, normalizeMac).
 
-**Used by:** src/api/routes/reservations.ts:12 (all CRUD + next-available), src/jobs/expireReservations.ts:11 (expireStaleReservations every 15 min).
+**Used by:** src/api/routes/reservations.ts (all CRUD + next-available), src/jobs/expireReservations.ts (expireStaleReservations every 15 min).
 
 **Invariants:**
 - MAC address required when push eligible (subnet discovered by FMG/FortiGate with pushReservations=true)
@@ -2005,7 +2006,7 @@ Listed alphabetically.
 
 **Public API:** getStaleSettings, updateStaleSettings, listStaleReservations, snoozeReservation, setStaleIgnored, flagStaleReservations.
 
-**Used by:** src/api/routes/reservations.ts:13 (list/snooze/ignore endpoints), src/jobs/flagStaleReservations.ts:19 (flagStaleReservations every 6 hours).
+**Used by:** src/api/routes/reservations.ts (list/snooze/ignore endpoints), src/jobs/flagStaleReservations.ts (flagStaleReservations every 6 hours).
 
 **Invariants:**
 - Stale threshold (staleAfterDays) defaults to 60 days, 0 = disabled
@@ -2094,7 +2095,7 @@ Listed alphabetically.
 
 **Cross-service deps:** none (uses cidr.js utils and prisma directly).
 
-**Used by:** `src/api/routes/search.ts:14 — GET /api/v1/search endpoint`. Total 1 call site.
+**Used by:** `src/api/routes/search.ts — GET /api/v1/search endpoint`. Total 1 call site.
 
 **Invariants:**
 - MAC normalization handles any whitespace/colon/dash separator; result is uppercase colon form.
@@ -2127,7 +2128,7 @@ Listed alphabetically.
 
 **Cross-service deps:** none.
 
-**Used by:** `src/app.ts:385 — boot-time HTTPS port selection`; `src/httpsManager.ts:41,12 — TLS setup and request redirection`; `src/api/routes/serverSettings.ts — full CRUD endpoints`. ~6 call sites across routes and init.
+**Used by:** `src/app.ts — boot-time HTTPS port selection`; `src/httpsManager.ts,12 — TLS setup and request redirection`; `src/api/routes/serverSettings.ts — full CRUD endpoints`. ~6 call sites across routes and init.
 
 **Invariants:**
 - NTP, HTTPS, certificate lists persist in Settings table under `key: "ntp"`, `"https"`, `"certificates"` respectively.
@@ -2177,7 +2178,7 @@ Listed alphabetically.
 
 **Cross-service deps:** ipService (indirectly via cidrContains/cidrOverlaps from utils/cidr.ts).
 
-**Used by:** src/api/routes/subnets.ts:7 (all operations), src/services/reservationService.ts (subnet lookups, status checks), src/services/utilizationService.ts (subnet status grouping).
+**Used by:** src/api/routes/subnets.ts (all operations), src/services/reservationService.ts (subnet lookups, status checks), src/services/utilizationService.ts (subnet status grouping).
 
 **Invariants:**
 - Subnet must be contained within parent block CIDR
@@ -2204,7 +2205,7 @@ Listed alphabetically.
 
 **Cross-service deps:** none.
 
-**Used by:** `src/app.ts:47` — boot detection and hypertable migration; `src/services/monitoringService.ts:56` — `dropChunks` calls in pruning; `src/services/capacityService.ts:42` — hypertable status for capacity snapshot.
+**Used by:** `src/app.ts` — boot detection and hypertable migration; `src/services/monitoringService.ts` — `dropChunks` calls in pruning; `src/services/capacityService.ts` — hypertable status for capacity snapshot.
 
 **Invariants:**
 - **Boot-time detection cache:** `detectTimescale()` caches result; cache updates only on successful probe. Re-detection runs after `migrateToHypertables()` completes so `isHypertable()` reflects post-conversion state.
@@ -2229,14 +2230,14 @@ Listed alphabetically.
 **Cross-service deps:** none.
 
 **Used by:**
-- src/api/routes/auth.ts:602 — POST /totp/enroll, QR code + secret generation
-- src/api/routes/auth.ts:603 — POST /totp/enroll, render QR SVG
-- src/api/routes/auth.ts:209 — POST /login/totp, verify TOTP code during login
-- src/api/routes/auth.ts:625 — POST /totp/confirm, validate code at enrollment finish
-- src/api/routes/auth.ts:203 — POST /login/totp, consume backup code on fallback
-- src/api/routes/auth.ts:629 — POST /totp/confirm, generate backup codes on enable
-- src/api/routes/auth.ts:668 — DELETE /totp, consume backup code on disable
-- src/api/routes/auth.ts:671 — DELETE /totp, verify code before disabling
+- src/api/routes/auth.ts — POST /totp/enroll, QR code + secret generation
+- src/api/routes/auth.ts — POST /totp/enroll, render QR SVG
+- src/api/routes/auth.ts — POST /login/totp, verify TOTP code during login
+- src/api/routes/auth.ts — POST /totp/confirm, validate code at enrollment finish
+- src/api/routes/auth.ts — POST /login/totp, consume backup code on fallback
+- src/api/routes/auth.ts — POST /totp/confirm, generate backup codes on enable
+- src/api/routes/auth.ts — DELETE /totp, consume backup code on disable
+- src/api/routes/auth.ts — DELETE /totp, verify code before disabling
 
 **Invariants:**
 - TOTP secret must be base32-encoded; verify operations accept ±1 step (30s drift tolerance) to absorb client/server clock skew.
@@ -2260,7 +2261,7 @@ Listed alphabetically.
 
 **Cross-service deps:** none (spawns git/npm/prisma, reads/writes .update-status.json, creates DB backup).
 
-**Used by:** `src/api/routes/serverSettings.ts:1135,1143,1151,1159 — Application Updates card endpoints`; `src/api/routes/serverSettings.ts — POST /restart` (Capacity Advisor "Restart Polaris to apply" button uses `restartService` standalone, without the update pipeline); `src/jobs/updateCheck.ts:19,31 — hourly check job`. ~7 call sites.
+**Used by:** `src/api/routes/serverSettings.ts,1143,1151,1159 — Application Updates card endpoints`; `src/api/routes/serverSettings.ts — POST /restart` (Capacity Advisor "Restart Polaris to apply" button uses `restartService` standalone, without the update pipeline); `src/jobs/updateCheck.ts,31 — hourly check job`. ~7 call sites.
 
 **Invariants:**
 - Update mechanism disabled in Docker (`/.dockerenv` present, `.git/` absent) or when no `.git/` checkout exists; `getUpdateStatus()` returns `state: "disabled"` with a human-readable reason.
@@ -2288,7 +2289,7 @@ Listed alphabetically.
 
 **Public API:** getGlobalUtilization, getBlockUtilization, getRecentManualReservations.
 
-**Used by:** src/api/routes/utilization.ts:6 (GET / for dashboard, GET /blocks/:id for per-block drill-down). `src/api/routes/dashboard.ts` (`/dashboard/summary` consumes `getGlobalUtilization` for `blockUtilization` and `getRecentManualReservations` for `recentReservations`).
+**Used by:** src/api/routes/utilization.ts (GET / for dashboard, GET /blocks/:id for per-block drill-down). `src/api/routes/dashboard.ts` (`/dashboard/summary` consumes `getGlobalUtilization` for `blockUtilization` and `getRecentManualReservations` for `recentReservations`).
 
 **Invariants:**
 - Global utilization counts all blocks, subnets, and active reservations in one query set
@@ -2331,7 +2332,7 @@ Listed alphabetically.
 
 **Cross-service deps:** None (vendorTelemetryProfiles is leaf; consumed by monitoringService + mibService).
 
-**Used by:** `src/services/monitoringService.ts:45 — probe strategy selection for telemetry`, `src/services/mibService.ts:18 — profile status reporting in MIB database UI`.
+**Used by:** `src/services/monitoringService.ts — probe strategy selection for telemetry`, `src/services/mibService.ts — profile status reporting in MIB database UI`.
 
 **Invariants:**
 - `match` regex is tested against `"${manufacturer ?? ''} ${os ?? ''} ${model ?? ''}".trim()` (all three fields optional).
@@ -2358,7 +2359,7 @@ Listed alphabetically.
 
 **Cross-service deps:** None (WinRM client; no service-to-service calls).
 
-**Used by:** src/api/routes/integrations.ts:12,523,697,1109,1372 — discovery trigger, subnet sync, test connection.
+**Used by:** src/api/routes/integrations.ts,523,697,1109,1372 — discovery trigger, subnet sync, test connection.
 
 **Invariants:**
 - WinRM simple auth (HTTP/HTTPS, default port 5985/5986); no Kerberos.

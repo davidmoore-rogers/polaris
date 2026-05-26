@@ -60,7 +60,7 @@ export function getAppVersion(): string {
 //
 // The Polaris Agent is version-tracked independently from Polaris itself.
 // `agent/VERSION` is a one-line text file at the root of the agent module
-// that ANY edit to agent code MUST also bump (per the touches.md rebuild
+// that ANY edit to agent code MUST also bump (per the TOUCHES.md rebuild
 // contract). Decoupling means:
 //
 //   - Polaris releases that don't touch agent/ produce zero auto-build
