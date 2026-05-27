@@ -1,7 +1,10 @@
 /**
  * src/jobs/mergeDuplicateHostnameAssets.ts
  *
- * One-shot startup cleanup for accumulated duplicate-hostname Asset rows.
+ * Periodic safety-net cleanup for accumulated duplicate-hostname Asset rows
+ * (also runs once at boot). Discovery re-creates these continuously, so a
+ * boot-only pass left them piling up between restarts on a long-lived prod
+ * host — see the INTERVAL_MS note below the schedule.
  *
  * Several discovery pathways create separate Asset rows for the same physical
  * device when no overlapping identifier was available at the time:
@@ -189,7 +192,15 @@ function decideGroup(rows: AssetRow[]): Decision {
   };
 }
 
-(async () => {
+// Periodic safety-net interval. The job runs once at boot AND on this cadence
+// because discovery re-creates duplicate-hostname rows continuously (e.g. the
+// same device DHCP-discovered by several FortiGates), and production is
+// long-lived (restarted only on in-app updates) — a boot-only pass let
+// duplicates accumulate between restarts. Idempotent + scale-aware, so re-runs
+// are cheap once convergent.
+const INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+
+async function mergeDuplicateHostnameAssets(): Promise<void> {
   try {
     await runInstrumentedJob("mergeDuplicateHostnameAssets", async () => {
       const dryRun = process.env.POLARIS_GHOST_MERGE_DRY_RUN === "1";
@@ -342,9 +353,12 @@ function decideGroup(rows: AssetRow[]): Decision {
       }
     });
   } catch (err) {
-    logger.error({ err }, "mergeDuplicateHostnameAssets failed (will retry next boot)");
+    logger.error({ err }, "mergeDuplicateHostnameAssets failed (will retry next cycle)");
   }
-})();
+}
+
+mergeDuplicateHostnameAssets();
+setInterval(mergeDuplicateHostnameAssets, INTERVAL_MS);
 
 async function mergeGhostIntoCanonical(canonical: AssetRow, ghost: AssetRow): Promise<void> {
   await prisma.$transaction(async (tx) => {

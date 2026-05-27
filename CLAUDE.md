@@ -190,7 +190,7 @@ Hybrid-join detection links AD and Entra/Intune via on-prem SID (`ad.observed.ob
 
 ## Background Jobs
 
-~47 files in `src/jobs/` (46 jobs + the `_metrics.ts` `runInstrumentedJob` helper): continuous ticks (`monitorAssets` light + heavy loops, `dependencyReconciler`, `retryQueuedReservationPushes`), periodic safety nets (`capacityWatch`, `reconcileMapRegions`, `discoverySlowCheck`, `flagStaleReservations`, `decommissionStaleAssets`), nightly maintenance (`pruneEvents`, sample-table prune, `runSampleRollup` hourly + daily ticks), and one-shot startup migrations (manufacturer-alias seed, asset-source backfill, ghost-merge cleanups, monitor-settings hierarchy migrations).
+~47 files in `src/jobs/` (46 jobs + the `_metrics.ts` `runInstrumentedJob` helper): continuous ticks (`monitorAssets` light + heavy loops, `dependencyReconciler`, `retryQueuedReservationPushes`), periodic safety nets (`capacityWatch`, `reconcileMapRegions`, `discoverySlowCheck`, `flagStaleReservations`, `decommissionStaleAssets`, `mergeDuplicateHostnameAssets`), nightly maintenance (`pruneEvents`, sample-table prune, `runSampleRollup` hourly + daily ticks), and one-shot startup migrations (manufacturer-alias seed, asset-source backfill, the `mergeFortiswitchEndpointGhosts` NULL-MAC ghost cleanup, monitor-settings hierarchy migrations).
 
 > Full table with schedule + per-job purpose: [ARCHITECTURE.md → Background Jobs](ARCHITECTURE.md#background-jobs).
 
