@@ -31,8 +31,10 @@
  *   DATABASE_POOL_SIZE      = roundUpToNearest(max(prismaTarget, current), 50)
  *   POLARIS_PGBOSS_POOL_SIZE = roundUpToNearest(max(pgbossTarget, current), 50)
  *
- *   polarisNeeded    = effective prisma pool + effective pgboss pool
- *   polarisFloor     = max(polarisNeeded, peakObserved)
+ *   perProcessPool   = effective prisma pool + effective pgboss pool
+ *   processCount     = POLARIS_MONITOR_REPLICAS>0 ? replicas+2 : 1  (web + N monitor + discovery)
+ *   polarisNeeded    = perProcessPool × processCount
+ *   polarisFloor     = max(polarisNeeded, peakObserved)   // peakObserved is group-wide (pg_stat_activity)
  *   recommendedMax   = roundUpToNearest(ceil(polarisFloor / 0.65), 50)
  *
  * Cold start: when histogram sample count is < 100 per cadence, substitute
@@ -463,7 +465,18 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
   // connections the moment it hit 301.
   const effectivePrismaPool = Math.max(prismaTarget, currentEnv.DATABASE_POOL_SIZE);
   const effectivePgbossPool = Math.max(pgbossTarget, currentEnv.POLARIS_PGBOSS_POOL_SIZE);
-  const polarisNeeded = effectivePrismaPool + effectivePgbossPool;
+  const perProcessPool = effectivePrismaPool + effectivePgbossPool;
+  // Multi-process group footprint. Each process (web producer, N monitor
+  // replicas, discovery) opens its own Prisma + pg-boss pool, so the group's
+  // connection demand is roughly perProcessPool × processCount. Set
+  // POLARIS_MONITOR_REPLICAS on the web node to the number of polaris-monitor@N
+  // units so the recommendation is right from day one; unset = single-process
+  // ("all") = 1. (peakObserved below is already group-wide — it's a server-side
+  // pg_stat_activity count across every process — so the recommendation also
+  // self-corrects from observation once the group is live.)
+  const monitorReplicas = readEnvInt("POLARIS_MONITOR_REPLICAS", 0);
+  const processCount = monitorReplicas > 0 ? monitorReplicas + 2 : 1; // web + N monitor + discovery
+  const polarisNeeded = perProcessPool * processCount;
   const polarisFloor = Math.max(polarisNeeded, peakObserved);
   const recommendedMax = roundUpToNearest(
     Math.ceil(polarisFloor / POLARIS_FRACTION_OF_MAX),
@@ -632,11 +645,16 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
     applyMode: "advisory-only",
     current: maxConnectionsCurrent,
     recommended: recommendedMax,
-    rationale: `Set max_connections so Polaris's combined pool sits at ${Math.round(POLARIS_FRACTION_OF_MAX * 100)}% of max. Requires a PostgreSQL restart.`,
+    rationale: processCount > 1
+      ? `Set max_connections so the Polaris group (web + ${monitorReplicas} monitor + discovery = ${processCount} processes, ${perProcessPool} conns each) sits at ${Math.round(POLARIS_FRACTION_OF_MAX * 100)}% of max. Requires a PostgreSQL restart.`
+      : `Set max_connections so Polaris's combined pool sits at ${Math.round(POLARIS_FRACTION_OF_MAX * 100)}% of max. Requires a PostgreSQL restart.`,
     breakdown: {
       polarisNeeded,
       peakObserved,
       polarisFloor,
+      perProcessPool,
+      processCount,
+      monitorReplicas,
       polarisFraction: POLARIS_FRACTION_OF_MAX,
       rounding: MAX_CONNECTIONS_ROUNDING,
     },

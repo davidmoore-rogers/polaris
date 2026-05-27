@@ -151,6 +151,18 @@ const dbPoolMax = new Gauge({
   registers: [registry],
 });
 
+const dbPoolRoleCapacity = new Gauge({
+  name: "polaris_db_pool_role_capacity",
+  help: "This process's configured Polaris connection capacity (Prisma DATABASE_POOL_SIZE + pg-boss POLARIS_PGBOSS_POOL_SIZE when this process opens a pg-boss pool), labeled by POLARIS_ROLE. Stamped once at boot. In a multi-process deployment, sum this across role series (and over monitor-replica instances) for the group's true footprint against max_connections — no single process sees the whole group.",
+  labelNames: ["role"] as const,
+  registers: [registry],
+});
+
+/** Stamp this process's configured pool capacity under its role label. */
+export function setDbPoolRoleCapacity(role: string, capacity: number): void {
+  dbPoolRoleCapacity.labels(role).set(capacity);
+}
+
 const capacitySeverity = new Gauge({
   name: "polaris_capacity_severity",
   help: "Overall capacity severity: 0=ok, 1=watch, 2=warning, 3=critical. Mirrors the Maintenance-tab pill and the sidebar critical-alert state.",

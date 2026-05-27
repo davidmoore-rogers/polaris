@@ -430,6 +430,96 @@ Browse to `http://<host>:3000` to run the setup wizard.
 
 ---
 
+## Optional: Multi-process deployment (web / monitor / discovery)
+
+By default Polaris runs as **one process** (`POLARIS_ROLE` unset = `all`) — the
+single `polaris.service` unit above. At large fleet sizes you can split the
+workload across processes so discovery's CPU/DB-heavy phases can't starve the
+monitor workers (they no longer share one Node event loop). This requires
+**pg-boss queue mode** (Maintenance tab → Enable on next restart) — the split
+coordinates through the pg-boss queue.
+
+The roles (chosen per-process via `POLARIS_ROLE`):
+
+- **web** — HTTP/HTTPS + all singleton schedulers + one-shot migrations. Single instance (control plane). Owns the in-app updater.
+- **monitor** — pg-boss monitor-queue consumers. Run **N replicas**; pg-boss gives each job to exactly one worker.
+- **discovery** — pg-boss discovery-queue consumer.
+
+### systemd (RHEL/Ubuntu)
+
+The shipped units in `deploy/` mirror the SolarWinds "many services + a grouping
+target" model. `POLARIS_ROLE` is injected per-unit via `Environment=`; all share
+the one `/opt/polaris/.env` (keep `POLARIS_ROLE` **out** of `.env`).
+
+```bash
+# Copy the role units + the migrate one-shot + the grouping target.
+sudo cp deploy/polaris-migrate.service deploy/polaris-web.service \
+        deploy/polaris-monitor@.service deploy/polaris-discovery.service \
+        deploy/polaris.target /etc/systemd/system/
+# Match the PostgreSQL unit name as you did for polaris.service (e.g. on Ubuntu).
+sudo systemctl daemon-reload
+
+# Enable the group + the monitor replicas you want (here: 2).
+sudo systemctl enable polaris-monitor@1 polaris-monitor@2
+sudo systemctl enable --now polaris.target     # "Start Everything"
+```
+
+`systemctl start polaris.target` brings up migrate → web → monitor@1..N →
+discovery; `systemctl stop polaris.target` stops the group. Do **not** also
+enable the legacy `polaris.service` (it's the single-process `all` deployment).
+
+**Updater group-restart grant.** The in-app updater (Server Settings →
+Maintenance) restarts the whole group via `systemd-run … systemctl restart
+polaris.target`. Grant the `polaris` user permission with a polkit rule
+(`/etc/polkit-1/rules.d/49-polaris.rules`):
+
+```javascript
+polkit.addRule(function(action, subject) {
+  if (action.id == "org.freedesktop.systemd1.manage-units" &&
+      subject.user == "polaris") {
+    return polkit.Result.YES;
+  }
+});
+```
+
+### Windows (NSSM)
+
+Register one service per role with the same `AppDirectory`, role via
+`AppEnvironmentExtra`, and a migrate step before the app services start
+(`npx --no-install prisma migrate deploy`). NSSM's `DependOnService` only orders
+start, it doesn't wait for a one-shot to finish — run migrate as a script step,
+not a service. Example:
+
+```powershell
+nssm install PolarisWeb       "C:\Program Files\nodejs\node.exe" "dist\index.js"
+nssm set     PolarisWeb       AppEnvironmentExtra "NODE_ENV=production" "POLARIS_ROLE=web"
+nssm install PolarisMonitor1  "C:\Program Files\nodejs\node.exe" "dist\index.js"
+nssm set     PolarisMonitor1  AppEnvironmentExtra "NODE_ENV=production" "POLARIS_ROLE=monitor"
+nssm install PolarisDiscovery "C:\Program Files\nodejs\node.exe" "dist\index.js"
+nssm set     PolarisDiscovery AppEnvironmentExtra "NODE_ENV=production" "POLARIS_ROLE=discovery"
+```
+
+### Docker
+
+Use the shipped `docker-compose.yml` — one image, per-service `POLARIS_ROLE`, a
+one-shot `migrate` service the app services gate on
+(`service_completed_successfully`), and `monitor` with `deploy.replicas`.
+
+### Sizing — connections multiply
+
+Each process opens its own Prisma + pg-boss pool, so the group needs roughly
+`(monitor replicas + 2) × (DATABASE_POOL_SIZE + POLARIS_PGBOSS_POOL_SIZE)`
+connections. Keep that under Postgres `max_connections` (minus headroom for
+`pg_dump`, admin sessions). Lower the per-replica `DATABASE_POOL_SIZE` (10–15)
+and `POLARIS_PGBOSS_POOL_SIZE` (~10) and set `POLARIS_MONITOR_REPLICAS` on the
+web node so the Capacity Advisor sizes `max_connections` correctly.
+**PgBouncer** absorbs the Prisma pools (recommended for multi-monitor) but
+pg-boss pools always connect to Postgres directly — budget those against the
+raw `max_connections`. Per-role footprint is exposed at
+`/metrics` as `polaris_db_pool_role_capacity{role}`.
+
+---
+
 ## Recommended: TimescaleDB
 
 Polaris's monitoring data lives in eighteen sample tables: six source tables (`asset_monitor_samples`, `asset_telemetry_samples`, `asset_temperature_samples`, `asset_interface_samples`, `asset_storage_samples`, `asset_ipsec_tunnel_samples`) that hold raw per-cadence samples, plus twelve `*_hourly` / `*_daily` rollup tables produced by the tiered-retention rollup job (one hourly + one daily companion per source). All eighteen are append-only / upsert-only time-series. Plain Postgres handles them fine at small scale, but once the combined size crosses ~1 GB the daily retention prune starts seq-scanning hundreds of millions of rows, contending with normal write load. **TimescaleDB** (an official Postgres extension) converts all of them to hypertables with chunk-based partitioning and native compression:

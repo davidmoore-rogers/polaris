@@ -221,6 +221,38 @@ model Integration {
   @@map("integrations")
 }
 
+// Cross-process live state for a discovery run. Replaces the former in-memory
+// `activeDiscovery` Map so the web process can render progress + signal cancel
+// while the discovery process actually executes the run. One row per
+// integration (`integrationId @unique`) is the DB-level "one active run per
+// integration" invariant, paired with the pg-boss discovery queue's
+// singletonKey. Rows are upserted on enqueue and updated by the discovery
+// worker; terminal status + finishedAt mark completion.
+model DiscoveryRun {
+  id                  String    @id @default(uuid())
+  integrationId       String    @unique
+  integrationName     String
+  type                String // mirrors Integration.type (fortimanager, fortigate, …)
+  status              String    @default("queued") // queued | running | completed | aborted | error
+  actor               String // who triggered it (username or "auto-discovery")
+  startedAt           DateTime? // set by the worker at run start
+  updatedAt           DateTime  @updatedAt
+  finishedAt          DateTime?
+  totalDevices        Int? // FMG/FortiGate: device count once known
+  completedCount      Int       @default(0)
+  skippedOfflineCount Int       @default(0)
+  skippedErrorCount   Int       @default(0)
+  activeDevices       Json      @default("[]") // [{ name, startedAt }] — collapses the old Set + start-time Map
+  slowAlerted         Boolean   @default(false)
+  slowAlertedDevices  Json      @default("[]") // string[] of device names already slow-alerted
+  cancelRequested     Boolean   @default(false) // web sets this; the worker polls it and aborts
+  workerHeartbeatAt   DateTime? // last write from the worker; drives the stale-run reaper
+  createdAt           DateTime  @default(now())
+
+  @@index([status])
+  @@map("discovery_runs")
+}
+
 // Credential store for monitoring probes (SNMP, WinRM, SSH).
 // Single discriminator table; type-specific fields live in `config` JSON
 // following the same plaintext-at-rest + mask-on-API-read pattern as Integration.

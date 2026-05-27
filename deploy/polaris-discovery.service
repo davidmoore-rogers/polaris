@@ -1,0 +1,34 @@
+[Unit]
+Description=Polaris — discovery worker (pg-boss discovery-queue consumer)
+Documentation=https://github.com/davidmoore-rogers/polaris
+After=network.target postgresql-15.service polaris-migrate.service
+Requires=postgresql-15.service polaris-migrate.service
+PartOf=polaris.target
+
+[Service]
+Type=simple
+User=polaris
+Group=polaris
+WorkingDirectory=/opt/polaris
+ExecStart=/usr/bin/node dist/index.js
+EnvironmentFile=/opt/polaris/.env
+Environment=POLARIS_ROLE=discovery
+# Cross-integration discovery parallelism (per-integration runs are serialized
+# by the queue's singletonKey). Default 2; raise only if you run many
+# integrations that should discover concurrently:
+#Environment=POLARIS_DISCOVERY_WORKERS=2
+Restart=on-failure
+RestartSec=5
+
+# No port bind — the discovery worker doesn't serve HTTP.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/polaris
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polaris-discovery
+
+[Install]
+WantedBy=polaris.target

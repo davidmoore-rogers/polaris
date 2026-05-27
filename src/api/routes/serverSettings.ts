@@ -273,7 +273,7 @@ router.post("/database/restore", restoreUpload.single("file"), async (req, res, 
 
   try {
     if (!req.file) throw new AppError(400, "No backup file uploaded");
-    if (hasActiveDiscoveries()) throw new AppError(409, "A discovery is currently running — wait for it to finish or abort it before restoring");
+    if (await hasActiveDiscoveries()) throw new AppError(409, "A discovery is currently running — wait for it to finish or abort it before restoring");
     const password: string | null = req.body?.password || null;
     // psql restore goes direct — see backup-route comment above for why.
     const connUrl = getDirectDatabaseUrl();

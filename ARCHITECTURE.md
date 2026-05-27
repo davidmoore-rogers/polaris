@@ -148,6 +148,7 @@ polaris/
 │   │   ├── autoMonitorInterfacesService.ts # "Auto-Monitor Interfaces" feature: pure resolver over a multi-block union (byNames / byPatterns / byTypes / byLldp) + DB-bound aggregate/preview/apply for the FMG/FortiGate Monitoring tab. By LLDP pins any interface whose neighbor — direct `AssetLldpNeighbor.matchedAssetId` OR peer-inferred edge from `Asset.fortinetTopology` — resolves to a monitored asset of one of the selected types. The peer-inferred half (`loadInferredLldpByAsset` — class-aware raw SQL over `fortinetTopology->>'controllerFortigate'` / `parentSwitch` / etc.) covers managed FortiAPs whose FortiSwitch silently consumes LLDP without re-publishing via SNMP LLDP-MIB; same data source as the inferred Neighbor column on the System tab (see `peerInferredLldpService`). For the `fortiap` class, a post-load step (`normalizeFortiapInferredLldp`) rewrites synthesized `localIfName` from FortiAP-CLI naming (`lan1`) to SNMP-canonical (`eth0`) when the AP's interface table actually exposes the eth* form — without this, the resolver would pin a name that doesn't match any ifIndex on the fast-cadence scrape. UI label reads **By LLDP (includes inferred interfaces)** so operators see at a glance that the match set isn't LLDP-protocol-only. `compilePattern` dispatches wildcards vs raw regex per block. `coerceLegacySelection` rewrites the older single-mode discriminated-union shape (`{mode, ...}`) on read so the Zod parser + apply route + frontend renderer all keep working until the one-shot migration sweeps stored configs. Strictly additive to Asset.monitoredInterfaces.
 │   │   ├── assetIpHistoryService.ts # Asset IP history reads, retention settings, pruning (Setting-backed)
 │   │   ├── discoveryDurationService.ts # Rolling discovery-duration samples + "slow-run" threshold (Setting-backed)
+│   │   ├── discoveryRunState.ts     # DB-backed live discovery-run state (DiscoveryRun table) — replaces the in-memory activeDiscovery Map; written by the discovery worker, read by the web process (progress, isDiscoveryRunning, slow-run check, cancel)
 │   │   ├── azureAuthService.ts      # Azure AD/Entra SAML SSO, user provisioning
 │   │   ├── totpService.ts           # RFC 6238 TOTP secret / code / backup-code helpers
 │   │   ├── dnsService.ts            # Reverse DNS lookup for assets
@@ -400,6 +401,27 @@ Integration
   lastTestOk    Boolean?
   lastDiscoveryAt DateTime?        -- Stamped at start of each run; used by scheduler to gate auto-runs across restarts
   subnets       Subnet[]
+
+DiscoveryRun
+  id              UUID PK
+  integrationId   String  @unique   -- One active run per integration (DB-level invariant; paired with the discovery queue's singletonKey)
+  integrationName String
+  type            String            -- mirrors Integration.type
+  status          String            -- queued | running | completed | aborted | error
+  actor           String            -- username or "auto-discovery"
+  startedAt       DateTime?         -- set by the discovery worker at run start
+  finishedAt      DateTime?
+  totalDevices    Int?              -- FMG/FortiGate device count once known
+  completedCount / skippedOfflineCount / skippedErrorCount Int  -- rolling progress counters
+  activeDevices   Json              -- [{name, startedAt}] currently-running FortiGates (FMG)
+  slowAlerted / slowAlertedDevices  -- slow-run dedup flags
+  cancelRequested Boolean           -- web sets it; the discovery worker polls and aborts
+  workerHeartbeatAt DateTime?        -- drives the stale-run reaper
+  -- Cross-process live discovery state. Replaces the former in-memory
+  -- `activeDiscovery` Map so the web process can render progress + signal
+  -- cancel while the `discovery`-role process executes the run. Written by the
+  -- discovery worker, read by the web process's /discoveries endpoint +
+  -- isDiscoveryRunning + slow-run check. See "Multi-process architecture".
 
 Asset
   id              UUID PK
@@ -1570,6 +1592,54 @@ Operator-uploaded images that overlay vendor logos on each Device Map topology n
 
 ---
 
+
+---
+
+## Multi-process architecture
+
+Polaris can run as one process (default) or split across specialized processes
+that coordinate through the shared PostgreSQL + pg-boss queue (the SolarWinds
+Orion model: many supervised services + a grouping wrapper). The role is chosen
+by `POLARIS_ROLE`; capability gating lives in `src/utils/role.ts` (`roleConfig`),
+and `src/app.ts` branches on the capability flags at boot.
+
+| Role | Boots | Notes |
+|---|---|---|
+| `all` (default, unset) | everything | Today's single-process behavior — existing installs + `npm run dev` unchanged. |
+| `web` | Express/HTTPS/agent-WS, **all singleton schedulers**, one-shot migrations, pg-boss **producer** connection | Single instance — the control plane. Owns the in-app updater (restarts the whole group). |
+| `monitor` | pg-boss **monitor-queue consumers** + floating pool, sample/probe write buffers | Run **N replicas** — pg-boss hands each job to exactly one worker, so replicas never double-execute. |
+| `discovery` | pg-boss **discovery-queue consumer** (`runDiscovery`) | Executes discovery runs off the `polaris-discovery-run` queue. |
+
+**Discovery is queue-backed.** `triggerDiscovery` (route + scheduler) validates,
+upserts a `queued` `DiscoveryRun`, and `publishDiscoveryJob`s to the
+`polaris-discovery-run` queue (singletonKey = integrationId → one active run per
+integration). The discovery worker runs `runDiscovery`, transitioning the
+`DiscoveryRun` row (queued → running → completed/aborted/error) and flushing a
+progress accumulator to it; the web process reads that row for the
+`/discoveries` endpoint, `isDiscoveryRunning`, the slow-run check, and renders
+cancel by setting `cancelRequested` (the worker polls it → aborts its local
+AbortController). When pg-boss is off (cursor mode), `triggerDiscovery` runs
+`runDiscovery` in-process — the single code path across topologies. See
+`src/services/discoveryRunState.ts` and `DiscoveryRun` in the domain model.
+
+**Singletons** (monitor producer ticks, discovery scheduler, reconcilers,
+rollups, prune, one-shot migrations) are pinned to `web`/`all` so they run in
+exactly one process; monitor/discovery stay pure consumers.
+
+**Connection budgeting.** Each process opens its own Prisma + pg-boss pool, so
+the group footprint ≈ `(monitor replicas + 2) × per-process pool`. Size so it
+stays under Postgres `max_connections` (PgBouncer absorbs the Prisma pools but
+pg-boss pools always hit Postgres directly). Each process emits
+`polaris_db_pool_role_capacity{role}`; the Capacity Advisor's max_connections
+model multiplies by `POLARIS_MONITOR_REPLICAS` (and `peakObserved` is already
+group-wide via `pg_stat_activity`).
+
+**Deployment.** systemd: `polaris-migrate.service` (oneshot, sole migrator) →
+`polaris-web.service` / `polaris-monitor@.service` (templated, N) /
+`polaris-discovery.service`, grouped by `polaris.target` (`systemctl start
+polaris.target`). Docker: one image, per-service `POLARIS_ROLE`, a one-shot
+`migrate` compose service the app services gate on. Legacy `polaris.service`
+(role unset = `all`) is retained. See [docs/INSTALL.md](docs/INSTALL.md).
 
 ---
 

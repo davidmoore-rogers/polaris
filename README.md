@@ -185,6 +185,10 @@ The flow: snapshot the commit → `pg_dump` backup (last 10 kept in `backups/`) 
 **Linux (systemd):** `systemctl status|restart polaris`, `journalctl -u polaris -f`
 **Windows (NSSM):** `nssm status|restart Polaris`, logs in `C:\polaris\logs\service-stdout.log`
 
+> Running the optional multi-process split (web / monitor / discovery)? Manage
+> the group with `systemctl status|restart polaris.target` instead. See
+> [docs/INSTALL.md](docs/INSTALL.md) → "Optional: Multi-process deployment".
+
 ## API overview
 
 All endpoints live under `/api/v1/`.

@@ -22,6 +22,7 @@ import { randomBytes, scryptSync, createCipheriv } from "node:crypto";
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { getAppVersion } from "../utils/version.js";
+import { getRole } from "../utils/role.js";
 
 const execAsync = promisify(exec);
 
@@ -563,21 +564,54 @@ export async function applyUpdate(password?: string | null): Promise<void> {
 
 /**
  * Restart the service using the platform's service manager.
+ *
+ * Multi-process (POLARIS_ROLE set, e.g. web) must restart the WHOLE group, not
+ * just this process — otherwise the monitor/discovery units keep running the
+ * OLD code against the freshly-migrated schema (the exact column-mismatch
+ * failure the updater guards against). Single-process ("all", role unset) keeps
+ * the historical single-unit restart.
+ *
+ * The updater only runs on the web/all role (it owns the git checkout + status
+ * file), so this is always called from the web process.
  */
 export function restartService() {
   const isWindows = process.platform === "win32";
+  // role unset => "all" => legacy single-process install.
+  const multiProcess = getRole() !== "all";
 
   if (isWindows) {
-    // NSSM restart — spawn detached so it survives parent exit
-    const child = spawn("cmd.exe", ["/c", "C:\\nssm\\nssm.exe restart Polaris"], {
+    // Multi-process: restart each per-role NSSM service, web LAST so its status
+    // page survives through the others' restart. Single-process: the one
+    // "Polaris" service. Detached so it survives this process's exit.
+    const cmd = multiProcess
+      ? "C:\\nssm\\nssm.exe restart PolarisDiscovery & C:\\nssm\\nssm.exe restart PolarisMonitor1 & C:\\nssm\\nssm.exe restart PolarisWeb"
+      : "C:\\nssm\\nssm.exe restart Polaris";
+    const child = spawn("cmd.exe", ["/c", cmd], {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
     });
     child.unref();
     setTimeout(() => { process.exit(0); }, 5000);
+  } else if (multiProcess) {
+    // Restart the full group via a transient unit so the restart survives our
+    // own exit (a detached child stays in web's cgroup and would be killed when
+    // web restarts; systemd-run runs it as an independent transient unit).
+    // Requires a polkit/sudo grant for the polaris user to manage polaris.target
+    // — see docs/INSTALL.md. Falls back to a plain exit so at least web cycles.
+    logger.info("Restarting polaris.target (full group) for update...");
+    try {
+      const child = spawn("systemd-run", ["--no-block", "systemctl", "restart", "polaris.target"], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+    } catch (err: any) {
+      logger.warn({ err: err?.message }, "systemd-run for group restart failed; falling back to self-exit");
+    }
+    setTimeout(() => { process.exit(0); }, 3000);
   } else {
-    // Exit with non-zero code so systemd Restart=on-failure restarts us
+    // Legacy single unit: exit non-zero so systemd Restart=on-failure cycles us.
     logger.info("Exiting for systemd restart...");
     process.exit(1);
   }

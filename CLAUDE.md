@@ -248,6 +248,15 @@ DATABASE_POOL_SIZE=25
 #   POLARIS_PROBE_CONCURRENCY         (cursor mode probe + fastFiltered cap)
 #   POLARIS_HEAVY_CONCURRENCY         (cursor mode telemetry + systemInfo cap)
 
+# Process role (multi-process deployment). Unset = "all" = single process runs
+# every subsystem (default; unchanged single-process behavior). Split via:
+#   web | monitor | discovery — set per service unit / container, NOT in .env.
+# Capability gating lives in src/utils/role.ts (roleConfig); boot path branches
+# on it in src/app.ts. See "Multi-process architecture" in ARCHITECTURE.md and
+# docs/INSTALL.md. Companion vars: POLARIS_DISCOVERY_WORKERS (discovery role,
+# default 2), POLARIS_MONITOR_REPLICAS (Capacity Advisor sizing hint, web node).
+POLARIS_ROLE=
+
 # App
 PORT=3000
 NODE_ENV=development

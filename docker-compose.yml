@@ -1,0 +1,67 @@
+# Polaris multi-process deployment (web + monitor replicas + discovery).
+#
+# Same image for every service; the role is selected per-service via
+# POLARIS_ROLE. A one-shot `migrate` service runs `prisma migrate deploy` ONCE
+# and the app services wait for it to complete, so no app container races on
+# migrations. For a single-process deployment instead, run one service with
+# POLARIS_ROLE unset (= "all") — see the README.
+#
+# Provide secrets via an external env file (env_file: ./state/.env) or your
+# orchestrator's secret store — do NOT inline DATABASE_URL / SESSION_SECRET
+# here. POLARIS_ROLE is intentionally set per-service and kept OUT of .env.
+
+x-polaris-common: &polaris-common
+  image: polaris:latest
+  restart: unless-stopped
+  env_file:
+    - ./state/.env
+  volumes:
+    - ./state:/app/state
+  environment:
+    POLARIS_STATE_DIR: /app/state
+
+services:
+  migrate:
+    <<: *polaris-common
+    restart: "no"
+    environment:
+      POLARIS_STATE_DIR: /app/state
+      POLARIS_ROLE: migrate
+
+  web:
+    <<: *polaris-common
+    environment:
+      POLARIS_STATE_DIR: /app/state
+      POLARIS_ROLE: web
+    ports:
+      - "3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  monitor:
+    <<: *polaris-common
+    environment:
+      POLARIS_STATE_DIR: /app/state
+      POLARIS_ROLE: monitor
+      # Per-replica pool sizing — keep N×(DATABASE_POOL_SIZE +
+      # POLARIS_PGBOSS_POOL_SIZE) + web + discovery under Postgres
+      # max_connections. See docs/INSTALL.md.
+      DATABASE_POOL_SIZE: "12"
+      POLARIS_PGBOSS_POOL_SIZE: "10"
+    deploy:
+      replicas: 2
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      web:
+        condition: service_started
+
+  discovery:
+    <<: *polaris-common
+    environment:
+      POLARIS_STATE_DIR: /app/state
+      POLARIS_ROLE: discovery
+    depends_on:
+      migrate:
+        condition: service_completed_successfully

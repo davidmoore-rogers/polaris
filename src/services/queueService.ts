@@ -140,10 +140,11 @@ export async function initializeQueue(): Promise<void> {
 
 // ─── pg-boss runtime ───────────────────────────────────────────────────────
 //
-// Naming convention: every Polaris-owned queue starts `polaris-monitor-`.
-// When discovery moves into pg-boss in a future phase, add `polaris-discovery-*`
-// queues alongside and revisit the worker-count tuning together — they share
-// the same Node.js worker process and the same DB pool.
+// Naming convention: every Polaris-owned monitor queue starts `polaris-monitor-`;
+// the discovery queue is `polaris-discovery-run`. In the multi-process split the
+// monitor queues are consumed by the `monitor` role and the discovery queue by
+// the `discovery` role; the `web` role (and `all`) publish to both. Each process
+// opens its own pg-boss connection via ensureBoss().
 
 export const QUEUE_NAMES: Record<MonitorCadence, string> = {
   probe:        "polaris-monitor-probe",
@@ -182,8 +183,32 @@ interface MonitorJobPayload {
   verboseDebug?: boolean;
 }
 
+// ─── discovery queue ───────────────────────────────────────────────────────
+// Discovery runs as a pg-boss job so it can execute in a dedicated `discovery`
+// process instead of inline on the web/producer node. `policy: "singleton"` +
+// `singletonKey: integrationId` enforces one active run per integration across
+// all processes (the cross-process replacement for the old in-memory
+// `activeDiscovery` Map). Runs take minutes, so the handler-runtime cap is far
+// larger than any monitor cadence — undersizing it would have pg-boss kill a
+// run mid-walk.
+export const DISCOVERY_QUEUE_NAME = "polaris-discovery-run";
+
+export interface DiscoveryJobPayload {
+  integrationId: string;
+  actor: string;
+}
+
+/** Signature of the discovery executor injected by the boot path (app.ts). */
+export type DiscoveryJobHandler = (integrationId: string, actor: string) => Promise<void>;
+
 let bossInstance: PgBossType | null = null;
 let metricsRefreshInterval: ReturnType<typeof setInterval> | null = null;
+// Idempotency flags so the per-capability start* functions can each ensure the
+// boss/queues without duplicating worker registrations. In the `all` role every
+// start* runs in one process; in the split each runs in its own process.
+let monitorWorkersStarted = false;
+let discoveryWorkerStarted = false;
+let queuesEnsured = false;
 
 // Per-cadence worker slot pools, populated at boot inside startPgbossWorkers().
 // Acquire on handler entry, release on exit so the slot id rotates through
@@ -450,12 +475,18 @@ function resolveEnvInt(envName: string, fallback: number): number {
  *   - archive deletes after 7 days (covers a "what happened last week"
  *     forensic window without bloating pg-boss's tables)
  */
-export async function startPgbossWorkers(): Promise<void> {
-  if (bossInstance) return;
-  if (getBootTimeMode() !== "pgboss") return;
+/**
+ * Idempotently open this process's pg-boss connection. Returns the shared
+ * instance, or null when pg-boss can't/shouldn't run (cursor mode, package
+ * missing, no direct URL). Every role that publishes or consumes calls this;
+ * it creates the connection at most once per process.
+ */
+async function ensureBoss(): Promise<PgBossType | null> {
+  if (bossInstance) return bossInstance;
+  if (getBootTimeMode() !== "pgboss") return null;
   if (!isPgbossInstalled()) {
     logger.warn("pg-boss queue mode requested but package not installed; staying on cursor");
-    return;
+    return null;
   }
   // Route pg-boss through the direct Postgres URL even when DATABASE_URL
   // points at PgBouncer. pg-boss uses LISTEN/NOTIFY for job-state
@@ -466,7 +497,7 @@ export async function startPgbossWorkers(): Promise<void> {
   const directUrl = getDirectDatabaseUrl();
   if (!directUrl) {
     logger.warn("pg-boss requested but neither POLARIS_DB_DIRECT_URL nor DATABASE_URL is set; staying on cursor");
-    return;
+    return null;
   }
 
   const { PgBoss } = await import("pg-boss");
@@ -474,7 +505,10 @@ export async function startPgbossWorkers(): Promise<void> {
   // Default 20 — sized for the bumped worker defaults below (max 64 per
   // queue on bigger boxes); operators on small pg-boss fleets can drop it
   // back via env var. Expose as POLARIS_PGBOSS_POOL_SIZE so operators can
-  // size it alongside DATABASE_POOL_SIZE.
+  // size it alongside DATABASE_POOL_SIZE. NOTE (multi-process): each role's
+  // process opens its own pool, so total Postgres connections ≈
+  // web + N×monitor + discovery; size against max_connections. See the
+  // Capacity Advisor's group-aware budget.
   const pgbossPoolSize = resolveEnvInt("POLARIS_PGBOSS_POOL_SIZE", 20);
   const boss: PgBossType = new PgBoss({
     connectionString: directUrl,
@@ -486,7 +520,20 @@ export async function startPgbossWorkers(): Promise<void> {
   });
 
   await boss.start();
+  bossInstance = boss;
+  return boss;
+}
 
+/**
+ * Idempotently create + converge every Polaris queue (monitor cadences +
+ * discovery). createQueue is idempotent on name but does NOT re-apply config
+ * to an existing queue, so each createQueue is paired with an updateQueue to
+ * force convergence on installs that predate a config change. Run by every
+ * role touching pg-boss so a producer-only process can `send` before any
+ * consumer has registered.
+ */
+async function ensureQueues(boss: PgBossType): Promise<void> {
+  if (queuesEnsured) return;
   // Per-queue config:
   //   - policy "singleton" + singletonKey on every send → only one job
   //     per (assetId, cadence) can be queued or active. Duplicate submits
@@ -544,6 +591,80 @@ export async function startPgbossWorkers(): Promise<void> {
     await boss.createQueue(name, { policy: "singleton", ...queueOptions });
     await boss.updateQueue(name, queueOptions);
   }
+
+  // Discovery queue. Singleton on integrationId (one active run per
+  // integration). expireInSeconds dwarfs the monitor caps because a discovery
+  // run legitimately takes minutes (FMG fleet walk + DB sync); too-low would
+  // have pg-boss kill the run mid-walk. retryLimit 0 — discovery side effects
+  // (asset/subnet writes, Events) aren't cheap to replay; the scheduler
+  // re-enqueues on its next tick and operators can re-trigger.
+  {
+    const discoveryOptions = {
+      retryLimit: 0,
+      deleteAfterSeconds: 86_400,
+      retentionSeconds: 7_200,
+      expireInSeconds: resolveEnvInt("POLARIS_DISCOVERY_EXPIRE_SECONDS", 3_600),
+    };
+    await boss.createQueue(DISCOVERY_QUEUE_NAME, { policy: "singleton", ...discoveryOptions });
+    await boss.updateQueue(DISCOVERY_QUEUE_NAME, discoveryOptions);
+  }
+
+  queuesEnsured = true;
+}
+
+/**
+ * Ensure the 15s pg-boss metrics refresh loop is running. Idempotent so any
+ * role (web producer, monitor, discovery) can call it without spawning a
+ * second interval.
+ */
+function ensureMetricsRefresh(): void {
+  if (metricsRefreshInterval !== null) return;
+  void refreshPgbossMetrics();
+  metricsRefreshInterval = setInterval(() => { void refreshPgbossMetrics(); }, 15_000);
+}
+
+/**
+ * Producer-only init for roles that publish but don't consume (web / all's
+ * scheduler tier). Opens the boss connection + ensures queues exist so
+ * publishMonitorJob / publishDiscoveryJob have a live `send` target, and
+ * starts the metrics refresh so the Maintenance tab sees queue depth.
+ */
+export async function startQueueProducer(): Promise<void> {
+  const boss = await ensureBoss();
+  if (!boss) return;
+  await ensureQueues(boss);
+  ensureMetricsRefresh();
+  logger.info("pg-boss producer initialized (publish-only role)");
+}
+
+/**
+ * Register the discovery-queue consumer. Called only by roles with
+ * runsDiscoveryConsumers (discovery / all). The executor is injected by the
+ * boot path to avoid a queueService→discoveryRunner→integrations→queueService
+ * import cycle.
+ */
+export async function startDiscoveryWorker(handler: DiscoveryJobHandler): Promise<void> {
+  if (discoveryWorkerStarted) return;
+  const boss = await ensureBoss();
+  if (!boss) return;
+  await ensureQueues(boss);
+  const discoveryWorkers = resolveEnvInt("POLARIS_DISCOVERY_WORKERS", 2);
+  await boss.work<DiscoveryJobPayload>(DISCOVERY_QUEUE_NAME, {
+    localConcurrency: discoveryWorkers, batchSize: 1, pollingIntervalSeconds: 5,
+  }, async (jobs: PgBossJob<DiscoveryJobPayload>[]) => {
+    const { integrationId, actor } = jobs[0].data;
+    await handler(integrationId, actor);
+  });
+  discoveryWorkerStarted = true;
+  ensureMetricsRefresh();
+  logger.info({ discoveryWorkers }, "pg-boss discovery worker started");
+}
+
+export async function startPgbossWorkers(): Promise<void> {
+  if (monitorWorkersStarted) return;
+  const boss = await ensureBoss();
+  if (!boss) return;
+  await ensureQueues(boss);
 
   // pg-boss v12 renamed the concurrency knobs. `localConcurrency` is the
   // total number of jobs this node will process in parallel for the queue
@@ -639,13 +760,12 @@ export async function startPgbossWorkers(): Promise<void> {
     );
   });
 
-  bossInstance = boss;
+  monitorWorkersStarted = true;
 
   // Floating pool: fire-and-forget. Loop self-manages via floatingLoopRunning.
   void startFloatingWorkers(boss, floatingWorkers);
 
-  void refreshPgbossMetrics();
-  metricsRefreshInterval = setInterval(() => { void refreshPgbossMetrics(); }, 15_000);
+  ensureMetricsRefresh();
   logger.info(
     { probeWorkers, fastWorkers, heavyWorkers, floatingWorkers },
     "pg-boss queue workers started",
@@ -798,6 +918,23 @@ export async function publishMonitorJob(
 }
 
 /**
+ * Enqueue a discovery run. Returns true when the job was sent (pg-boss live),
+ * false when pg-boss isn't running so the caller can fall back to in-process
+ * execution (cursor-mode installs). `singletonKey: integrationId` coalesces a
+ * manual trigger that races the scheduler — only one queued-or-active run per
+ * integration exists at a time.
+ */
+export async function publishDiscoveryJob(integrationId: string, actor: string): Promise<boolean> {
+  if (!bossInstance) return false;
+  await bossInstance.send(
+    DISCOVERY_QUEUE_NAME,
+    { integrationId, actor } as DiscoveryJobPayload,
+    { singletonKey: integrationId },
+  );
+  return true;
+}
+
+/**
  * Graceful stop. Drains in-flight jobs (up to a timeout) before resolving.
  * Called on process shutdown handlers; safe if pg-boss never started.
  */
@@ -816,6 +953,9 @@ export async function stopPgbossWorkers(): Promise<void> {
     logger.warn({ err }, "pg-boss stop failed");
   }
   bossInstance = null;
+  monitorWorkersStarted = false;
+  discoveryWorkerStarted = false;
+  queuesEnsured = false;
 }
 
 export function isPgbossRunning(): boolean {

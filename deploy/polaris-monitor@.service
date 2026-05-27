@@ -1,0 +1,41 @@
+[Unit]
+# Templated unit — start N identical monitor consumers with
+#   systemctl enable --now polaris-monitor@1 polaris-monitor@2 ...
+# pg-boss hands each job to exactly one worker across all connected processes,
+# so replicas never double-execute. %i is the instance number (log identity
+# only — every replica is interchangeable).
+Description=Polaris — monitor worker %i (pg-boss monitor-queue consumer)
+Documentation=https://github.com/davidmoore-rogers/polaris
+After=network.target postgresql-15.service polaris-migrate.service polaris-web.service
+Requires=postgresql-15.service polaris-migrate.service
+PartOf=polaris.target
+
+[Service]
+Type=simple
+User=polaris
+Group=polaris
+WorkingDirectory=/opt/polaris
+ExecStart=/usr/bin/node dist/index.js
+EnvironmentFile=/opt/polaris/.env
+Environment=POLARIS_ROLE=monitor
+# Per-replica DB pool sizing (see docs/INSTALL.md): N replicas each open a
+# Prisma + pg-boss pool, so size so N×(DATABASE_POOL_SIZE + POLARIS_PGBOSS_POOL_SIZE)
+# plus web + discovery stays under Postgres max_connections. Uncomment to
+# override the .env values per monitor replica:
+#Environment=DATABASE_POOL_SIZE=12
+#Environment=POLARIS_PGBOSS_POOL_SIZE=10
+Restart=on-failure
+RestartSec=5
+
+# No port bind — workers don't serve HTTP.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/polaris
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polaris-monitor@%i
+
+[Install]
+WantedBy=polaris.target
