@@ -401,6 +401,27 @@ Integration
   lastDiscoveryAt DateTime?        -- Stamped at start of each run; used by scheduler to gate auto-runs across restarts
   subnets       Subnet[]
 
+DiscoveryRun
+  id              UUID PK
+  integrationId   String  @unique   -- One active run per integration (DB-level invariant; paired with the discovery queue's singletonKey)
+  integrationName String
+  type            String            -- mirrors Integration.type
+  status          String            -- queued | running | completed | aborted | error
+  actor           String            -- username or "auto-discovery"
+  startedAt       DateTime?         -- set by the discovery worker at run start
+  finishedAt      DateTime?
+  totalDevices    Int?              -- FMG/FortiGate device count once known
+  completedCount / skippedOfflineCount / skippedErrorCount Int  -- rolling progress counters
+  activeDevices   Json              -- [{name, startedAt}] currently-running FortiGates (FMG)
+  slowAlerted / slowAlertedDevices  -- slow-run dedup flags
+  cancelRequested Boolean           -- web sets it; the discovery worker polls and aborts
+  workerHeartbeatAt DateTime?        -- drives the stale-run reaper
+  -- Cross-process live discovery state. Replaces the former in-memory
+  -- `activeDiscovery` Map so the web process can render progress + signal
+  -- cancel while the `discovery`-role process executes the run. Written by the
+  -- discovery worker, read by the web process's /discoveries endpoint +
+  -- isDiscoveryRunning + slow-run check. See "Multi-process architecture".
+
 Asset
   id              UUID PK
   ipAddress       String?
