@@ -1,13 +1,16 @@
-// public/js/mobile/asset-detail.js — Asset detail screen.
+// public/js/mobile/asset-detail.js — Asset detail slide-up sheet.
 //
 // Sections (top to bottom):
-//   - Hero with name + status + Refresh action
+//   - Hero with status pill + identity bits (name lives in the sheet header)
 //   - Monitor section (response-time chart, status pill, RTT/last poll)
 //   - Telemetry section (CPU+Memory chart, when supported)
 //   - General section (IP/MAC/type/model/OS/location/last seen)
 //   - Temperatures section — current per-sensor reading + 1h min/avg/max
 //   - Interfaces section — operStatus=="up" only; tap a row opens a bottom
 //     sheet with status / speed / ip / mac / errors / LLDP neighbor(s)
+//   - Discovery sources — per-source list (sourceKind + integration + lastSeen)
+//   - Firewall sightings — which FortiGates saw this asset (needs
+//     assetsQuarantine read; degrades to a muted note otherwise)
 //   - IP history list
 //
 // Out of scope for v1 (desktop-only):
@@ -15,7 +18,8 @@
 //   - Per-interface comments editor
 //   - IPsec tunnels
 //   - SNMP walk
-//   - Per-source observed blob view
+//   - Per-source observed blob view (mobile shows the source summary, not the
+//     full observed key/value table)
 
 (function () {
   // Single shared chart range — driven by the 24h/7d segmented control on
@@ -23,6 +27,20 @@
   // sections move together when the operator switches windows.
   var DEFAULT_RANGE = "24h";
   var RANGES = ["1h", "24h", "7d", "30d"];
+
+  // Human labels for AssetSource.sourceKind — mirrors `_assetSourceLabels` in
+  // the desktop assets.js so both surfaces name discovery sources the same.
+  var SOURCE_LABELS = {
+    "entra":              "Microsoft Entra ID",
+    "intune":             "Microsoft Intune",
+    "ad":                 "Active Directory",
+    "fortigate-firewall": "FortiGate (firewall)",
+    "fortiswitch":        "FortiSwitch",
+    "fortiap":            "FortiAP",
+    "fortigate-endpoint": "FortiGate / FortiManager (endpoint)",
+    "polaris-agent":      "Polaris Agent",
+    "manual":             "Manual / other",
+  };
 
   // Per-mount state keyed by asset id so navigating back from another tab
   // remembers which sections were collapsed and which range was active.
@@ -41,6 +59,11 @@
           general: true,
           temperatures: true,
           interfaces: true,
+          // Discovery provenance. Sources expanded by default (the primary
+          // "where did this asset come from" answer); firewall sightings +
+          // IP history collapsed with a count in the header subtitle.
+          sources: true,
+          sightings: false,
           ipHistory: false,
         },
         // Interfaces sub-toggle: collapsed shows only `monitoredInterfaces`
@@ -179,6 +202,8 @@
       loadMonitor(id, st);
       loadTelemetry(id, st);
       loadSystemInfo(id, st, asset);
+      loadSources(id, st);
+      loadSightings(id, st);
       loadIpHistory(id, st);
     }).catch(function (err) {
       if (_openId !== id) return;
@@ -286,8 +311,22 @@
       + '  <div id="asset-interfaces-host"><div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div></div>'
       + '</div>'
 
+      // Discovery sources — which integrations independently reported this
+      // asset. Header subtitle shows the source count once loaded.
+      + sectionHeader("sources", "Discovery sources", "", st.sections.sources, "asset-sources-sub")
+      + '<div class="sect-body" data-sect="sources"' + (st.sections.sources ? '' : ' hidden') + '>'
+      + '  <div id="asset-sources-host"><div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div></div>'
+      + '</div>'
+
+      // FortiGate sightings — which firewalls have seen this asset (needs
+      // assetsQuarantine read; degrades to a muted note otherwise).
+      + sectionHeader("sightings", "Firewall sightings", "", st.sections.sightings, "asset-sightings-sub")
+      + '<div class="sect-body" data-sect="sightings"' + (st.sections.sightings ? '' : ' hidden') + '>'
+      + '  <div id="asset-sightings-host"><div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div></div>'
+      + '</div>'
+
       // IP history section
-      + sectionHeader("ipHistory", "IP history", "", st.sections.ipHistory)
+      + sectionHeader("ipHistory", "IP history", "", st.sections.ipHistory, "asset-ip-history-sub")
       + '<div class="sect-body" data-sect="ipHistory"' + (st.sections.ipHistory ? '' : ' hidden') + '>'
       + '  <div id="asset-ip-history-host"><div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div></div>'
       + '</div>';
@@ -760,12 +799,99 @@
     return n + " bps";
   }
 
+  // Discovery sources — which integrations independently reported this asset.
+  function loadSources(id, st) {
+    var host = document.getElementById("asset-sources-host");
+    var sub  = document.getElementById("asset-sources-sub");
+    if (!host) return;
+    api.assets.getSources(id).then(function (resp) {
+      if (_openId !== id) return;   // bail if a newer asset replaced us
+      var rows = Array.isArray(resp) ? resp : [];
+      if (sub) sub.textContent = rows.length ? rows.length + (rows.length === 1 ? " source" : " sources") : "none";
+      if (rows.length === 0) {
+        host.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">No discovery sources recorded.</div>';
+        return;
+      }
+      var html = "";
+      rows.forEach(function (s, i) {
+        var label = SOURCE_LABELS[s.sourceKind] || s.sourceKind;
+        var bits = [];
+        if (s.integration && s.integration.name) bits.push(escapeHtml(s.integration.name));
+        if (s.lastSeen) bits.push("seen " + escapeHtml(formatTimeAgo(s.lastSeen)));
+        var inferred = s.inferred ? ' <span class="muted" style="font-size:12px;font-weight:400;">· inferred</span>' : '';
+        var extId = s.externalId
+          ? '<div class="mono" style="font-size:11px;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(s.externalId) + '</div>'
+          : '';
+        html += ''
+          + '<div class="list-item two-line" style="padding-left:16px;padding-right:16px;">'
+          + '  <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-server"/></svg></span>'
+          + '  <div class="content">'
+          + '    <div class="headline">' + escapeHtml(label) + inferred + '</div>'
+          + '    <div class="supporting">' + bits.join(" · ") + extId + '</div>'
+          + '  </div>'
+          + '</div>'
+          + (i < rows.length - 1 ? '<div class="list-divider"></div>' : '');
+      });
+      host.innerHTML = html;
+    }).catch(function (err) {
+      if (_openId !== id) return;
+      if (sub) sub.textContent = "—";
+      host.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">Couldn’t load sources: ' + escapeHtml(err && err.message ? err.message : "error") + '</div>';
+    });
+  }
+
+  // FortiGate sightings — which firewalls have seen this asset, enriched with
+  // subnet/VLAN server-side. Endpoint needs `assetsQuarantine read`; lower-
+  // privilege roles get an error which we surface as a muted note.
+  function loadSightings(id, st) {
+    var host = document.getElementById("asset-sightings-host");
+    var sub  = document.getElementById("asset-sightings-sub");
+    if (!host) return;
+    api.assets.getSightings(id).then(function (resp) {
+      if (_openId !== id) return;   // bail if a newer asset replaced us
+      var rows = Array.isArray(resp) ? resp : [];
+      if (sub) sub.textContent = rows.length ? rows.length + (rows.length === 1 ? " firewall" : " firewalls") : "none";
+      if (rows.length === 0) {
+        host.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">No firewall sightings.</div>';
+        return;
+      }
+      var html = "";
+      rows.forEach(function (s, i) {
+        var bits = [];
+        if (s.ipAddress) bits.push('<span class="mono">' + escapeHtml(s.ipAddress) + '</span>');
+        var netParts = [];
+        if (s.subnetName) netParts.push(escapeHtml(s.subnetName));
+        if (s.vlan != null) netParts.push("VLAN " + escapeHtml(String(s.vlan)));
+        if (netParts.length) bits.push(netParts.join(" "));
+        if (s.source) bits.push(escapeHtml(s.source));
+        if (s.lastSeen) bits.push("seen " + escapeHtml(formatTimeAgo(s.lastSeen)));
+        html += ''
+          + '<div class="list-item two-line" style="padding-left:16px;padding-right:16px;">'
+          + '  <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-router"/></svg></span>'
+          + '  <div class="content">'
+          + '    <div class="headline">' + escapeHtml(s.fortigateDevice || "?") + '</div>'
+          + '    <div class="supporting">' + bits.join(" · ") + '</div>'
+          + '  </div>'
+          + '</div>'
+          + (i < rows.length - 1 ? '<div class="list-divider"></div>' : '');
+      });
+      host.innerHTML = html;
+    }).catch(function (err) {
+      if (_openId !== id) return;
+      if (sub) sub.textContent = "—";
+      host.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">Couldn’t load firewall sightings: ' + escapeHtml(err && err.message ? err.message : "error") + '</div>';
+    });
+  }
+
   function loadIpHistory(id, st) {
     var host = document.getElementById("asset-ip-history-host");
+    var sub  = document.getElementById("asset-ip-history-sub");
     if (!host) return;
     api.assets.getIpHistory(id).then(function (resp) {
       if (_openId !== id) return;   // bail if a newer asset replaced us
-      var rows = (resp && resp.history) || [];
+      // The endpoint returns a bare array — not `{ history: [...] }`.
+      var rows = Array.isArray(resp) ? resp : ((resp && resp.history) || []);
+      if (sub) sub.textContent = rows.length ? rows.length + (rows.length === 1 ? " address" : " addresses") : "none";
       if (rows.length === 0) {
         host.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">No IP history recorded yet.</div>';
         return;
@@ -784,6 +910,8 @@
       });
       host.innerHTML = html;
     }).catch(function (err) {
+      if (_openId !== id) return;
+      if (sub) sub.textContent = "—";
       host.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">Couldn’t load IP history: ' + escapeHtml(err && err.message ? err.message : "error") + '</div>';
     });
   }
