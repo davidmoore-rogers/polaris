@@ -102,29 +102,24 @@
     title: "Device Map",
     icon: "#i-map",
     renderTopbar: function () {
-      // No top app bar — the floating searchbar over the map plays that
-      // role. Empty topbar slot lets the map take the full body height.
+      // No top app bar — the shell's persistent searchbar sits above the
+      // map. Empty topbar slot lets the map take the full body height.
       return "";
     },
     render: function (body, ctx) {
       // Bare-minimum DOM the first time we render this tab. Subsequent
       // renders reuse it.
+      // No floating search pill — the shell's persistent searchbar
+      // (#search-slot) sits above the map on this tab and already routes
+      // to the Search tab, so a map-local search would be redundant.
       body.innerHTML = ''
         + '<div class="map-screen">'
         + '  <div id="map-container"></div>'
-        + '  <div class="map-search-float" id="map-search-float">'
-        + '    <svg viewBox="0 0 24 24"><use href="#i-search"/></svg>'
-        + '    <span class="placeholder">Search sites…</span>'
-        + '  </div>'
         + '  <div class="map-fab-pos">'
         + '    <button class="fab" id="map-recenter" aria-label="Recenter on me"><svg viewBox="0 0 24 24"><use href="#i-target"/></svg></button>'
         + '  </div>'
         + '  <div id="map-status" style="position:absolute;bottom:88px;left:16px;right:16px;text-align:center;color:var(--md-on-surface-variant);font-size:13px;letter-spacing:.25px;pointer-events:none;"></div>'
         + '</div>';
-
-      document.getElementById("map-search-float").addEventListener("click", function () {
-        PolarisRouter.go("search");
-      });
 
       document.getElementById("map-recenter").addEventListener("click", recenterOnUser);
 

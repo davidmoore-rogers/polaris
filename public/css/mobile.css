@@ -713,8 +713,14 @@ input, select, textarea { font-family: inherit; }
 /* Peek: slide the sheet down so only its top band (handle + header) shows.
    --asset-peek-y is measured + set in JS from the live height so short
    content peeks correctly. attachSwipeToDismiss clears any inline transform
-   on snap-back, which falls through to this rule and restores the peek. */
-.asset-sheet.peek { transform: translateY(var(--asset-peek-y, 100%)); }
+   on snap-back, which falls through to this rule and restores the peek.
+   We lift the band by the bottom navbar height + safe-area inset so the
+   peeked header (which carries the asset name) sits ABOVE the navbar
+   instead of at the very bottom edge — otherwise the mobile browser's
+   bottom address bar overlays it and the name is invisible. */
+.asset-sheet.peek {
+  transform: translateY(calc(var(--asset-peek-y, 100%) - var(--navbar-h) - env(safe-area-inset-bottom, 0px)));
+}
 .asset-sheet.peek .asset-sheet-header { cursor: pointer; }
 .asset-sheet.peek #asset-sheet-refresh { display: none; }
 
@@ -894,29 +900,6 @@ button, .list-item, .chip { touch-action: manipulation; }
 .map-screen #map-container {
   position: absolute;
   inset: 0;
-}
-.map-screen .map-search-float {
-  position: absolute;
-  top: 12px; left: 12px; right: 12px;
-  height: 56px;
-  background: var(--md-surface-cont-high);
-  border-radius: var(--shape-full);
-  display: flex;
-  align-items: center;
-  padding: 0 16px;
-  gap: 12px;
-  box-shadow: var(--elev-2);
-  z-index: 600;
-  cursor: pointer;
-}
-.map-screen .map-search-float .placeholder {
-  flex: 1;
-  color: var(--md-on-surface-variant);
-  font-size: 16px;
-  letter-spacing: .5px;
-}
-.map-screen .map-search-float svg {
-  width: 24px; height: 24px; fill: var(--md-on-surface-variant);
 }
 .map-screen .map-fab-pos {
   position: absolute;
