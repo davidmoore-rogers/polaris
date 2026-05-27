@@ -10502,6 +10502,11 @@ function _depTreeNodeRow(node, opts) {
   var safeName = escapeHtml(name);
   var typeLabel = _DEP_TREE_TYPE_LABEL[node.assetType] || node.assetType || "asset";
   var pip = _depTreeStatusPip(node);
+  // Every node carries its computed dependencyLayer in the payload; surface it
+  // so the operator can read each row's level, not just the current asset's.
+  var levelBit = (node.dependencyLayer != null)
+    ? ' <span class="dep-tree-level" title="Dependency level ' + node.dependencyLayer + '">L' + node.dependencyLayer + '</span>'
+    : "";
   var hostHTML;
   if (opts.self) {
     // Current asset — bold + non-clickable, with the level annotation.
@@ -10515,6 +10520,8 @@ function _depTreeNodeRow(node, opts) {
   return '<div class="dep-tree-row' + (opts.self ? ' dep-tree-row-self' : '') + depthClass + '">' +
     pip + ' ' + hostHTML +
     ' <span class="dep-tree-type">' + escapeHtml(typeLabel) + '</span>' +
+    // Self node already prints "— level N" inline, so skip the tag there.
+    (opts.self ? '' : levelBit) +
     sourceTag +
     '</div>';
 }
@@ -10561,8 +10568,8 @@ function renderDependencyTreeBlock(payload, selfId) {
   }
   var selfHTML = _depTreeNodeRow({
     id: self.id, hostname: self.hostname, assetType: self.assetType,
-    dependencyLayer: self.dependencyLayer, monitorStatus: null,
-    monitored: true, dependencySuppressed: !!self.dependencySuppressed,
+    dependencyLayer: self.dependencyLayer, monitorStatus: self.monitorStatus,
+    monitored: self.monitored !== false, dependencySuppressed: !!self.dependencySuppressed,
     dependencyTestUntil: self.dependencyTestUntil,
   }, { self: true });
 

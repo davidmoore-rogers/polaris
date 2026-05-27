@@ -2274,6 +2274,12 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   color: var(--color-text-secondary);
   font-size: 0.78rem;
 }
+.dep-tree-level {
+  color: var(--color-text-secondary);
+  font-size: 0.7rem;
+  opacity: 0.75;
+  font-family: var(--font-mono, monospace);
+}
 .dep-tree-source-tag,
 .dep-tree-override-tag {
   font-size: 0.7rem;
