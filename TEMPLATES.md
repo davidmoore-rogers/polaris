@@ -597,9 +597,11 @@ Per-pattern sections:
 
 ## Mobile bottom sheet
 
-**What it is:** A modal slide-up panel anchored to the bottom of the viewport on the mobile SPA. Dismissed by tapping the scrim, tapping the X button, or swiping the sheet down. Used for the Device Map site detail, asset interface drilldown, reservation edit + create-by-IP, subnet reserve, and topology node detail.
+**What it is:** A modal slide-up panel anchored to the bottom of the viewport on the mobile SPA. Dismissed by tapping the scrim, tapping the X button, or swiping the sheet down. Used for the Device Map site detail, asset interface drilldown, reservation edit + create-by-IP, subnet reserve, topology node detail, and the full asset detail screen.
 
-**Canonical implementation:** `openSiteSheet()` in [public/js/mobile/map-tab.js](public/js/mobile/map-tab.js) + matching `closeSiteSheet()`.
+**Canonical implementation:** `openSiteSheet()` in [public/js/mobile/map-tab.js](public/js/mobile/map-tab.js) + matching `closeSiteSheet()` — use this for the common two-state (open/dismiss) sheet.
+
+**Three-state minimizable variant:** the asset detail sheet (`PolarisAssetDetail.open(id)` in [public/js/mobile/asset-detail.js](public/js/mobile/asset-detail.js)) extends the pattern with a **peek** state for content-heavy sheets the operator wants to keep open while using the page behind. Scrim tap → minimize (slides the sheet down to its header band, measured into `--asset-peek-y`, and hides the scrim so the searchbar is reachable); peek-bar tap → expand; swipe-down/close → dismiss. Minimize never tears down the DOM, so charts/scroll/per-feature state survive. Reuses `attachSwipeToDismiss` unchanged — its inline-transform clear on snap-back falls through to the CSS `.peek` transform. Sits at z-index 900/901 (below the generic `.scrim`/`.sheet` at 1000/1001) so a nested two-state sheet stacks on top. Model new minimizable sheets on this; keep simple sheets on `openSiteSheet`.
 
 **Key conventions:**
 - DOM shape: one `.scrim` and one `.sheet` element, both appended to `document.body` with unique IDs (`<feature>-sheet-scrim` + `<feature>-sheet`). Close = `remove()` both.

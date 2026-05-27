@@ -699,6 +699,43 @@ input, select, textarea { font-family: inherit; }
   margin: 0 0 16px;
 }
 
+/* ─── Asset detail sheet (three-state slide-up) ───────────────────────────
+   A bottom sheet that can be expanded (~90vh), minimized to a peek bar
+   (just the header band), or dismissed. It sits BELOW the generic interface
+   sheet (.sheet/.scrim at 1000/1001) so tapping an interface row stacks the
+   detail sheet on top of the asset sheet correctly. */
+.asset-scrim { z-index: 900; }
+.asset-sheet {
+  z-index: 901;
+  transition: transform .25s ease;
+  will-change: transform;
+}
+/* Peek: slide the sheet down so only its top band (handle + header) shows.
+   --asset-peek-y is measured + set in JS from the live height so short
+   content peeks correctly. attachSwipeToDismiss clears any inline transform
+   on snap-back, which falls through to this rule and restores the peek. */
+.asset-sheet.peek { transform: translateY(var(--asset-peek-y, 100%)); }
+.asset-sheet.peek .asset-sheet-header { cursor: pointer; }
+.asset-sheet.peek #asset-sheet-refresh { display: none; }
+
+.asset-sheet-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0 12px;
+}
+.asset-sheet-header .dot { width: 12px; height: 12px; flex: 0 0 12px; }
+.asset-sheet-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--md-on-surface);
+}
+
 /* ─── Login layout ────────────────────────────────────────────────────── */
 .login-shell {
   flex: 1 1 auto;

@@ -274,6 +274,12 @@
         var idx = parseInt(row.dataset.idx, 10);
         var hit = (data[g] || [])[idx];
         if (!hit) return;
+        // Asset hits open the slide-up sheet over the current screen rather
+        // than navigating to a full-page route.
+        if (g === "assets" && hit.id && window.PolarisAssetDetail && PolarisAssetDetail.open) {
+          PolarisAssetDetail.open(hit.id);
+          return;
+        }
         var target = hitTarget(g, hit);
         if (target) {
           PolarisRouter.go(target);

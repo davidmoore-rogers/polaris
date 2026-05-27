@@ -316,7 +316,11 @@
         var act = btn.dataset.act;
         var ipAddr = btn.dataset.ip;
         var assetId = btn.dataset.asset;
-        if (act === "open-asset" && assetId) { PolarisRouter.go("asset/" + assetId); return; }
+        if (act === "open-asset" && assetId) {
+          if (window.PolarisAssetDetail && PolarisAssetDetail.open) PolarisAssetDetail.open(assetId);
+          else PolarisRouter.go("asset/" + assetId);
+          return;
+        }
         var ipEntry = st.ips.find(function (x) { return x.address === ipAddr; });
         if (!ipEntry || !ipEntry.reservation) return;
         var row = Object.assign({}, ipEntry.reservation, {

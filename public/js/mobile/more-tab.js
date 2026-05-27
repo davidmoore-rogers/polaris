@@ -163,7 +163,10 @@
           row.addEventListener("click", function () {
             var rt = row.dataset.rt, rid = row.dataset.rid;
             if (!rid) return;
-            if (rt === "asset")  PolarisRouter.go("asset/" + rid);
+            if (rt === "asset") {
+              if (window.PolarisAssetDetail && PolarisAssetDetail.open) PolarisAssetDetail.open(rid);
+              else PolarisRouter.go("asset/" + rid);
+            }
             else if (rt === "subnet") PolarisRouter.go("subnet/" + rid);
             else if (rt === "block")  PolarisRouter.go("block/" + rid);
             else PolarisTabs.showSnackbar("No mobile view for this event.");

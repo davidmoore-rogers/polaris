@@ -493,7 +493,8 @@
     PolarisTabs.attachSwipeToDismiss(sheet, closeSiteSheet);
     document.getElementById("map-sheet-asset").addEventListener("click", function () {
       closeSiteSheet();
-      PolarisRouter.go("asset/" + site.id);
+      if (window.PolarisAssetDetail && PolarisAssetDetail.open) PolarisAssetDetail.open(site.id);
+      else PolarisRouter.go("asset/" + site.id);
     });
     document.getElementById("map-sheet-topology").addEventListener("click", function () {
       closeSiteSheet();

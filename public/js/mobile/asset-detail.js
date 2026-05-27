@@ -52,18 +52,127 @@
     return _mounts[id];
   }
 
-  function render(body, ctx) {
-    var id = (ctx.route && ctx.route.parts && ctx.route.parts[0]) || "";
-    if (!id) {
-      body.innerHTML = '<div class="empty-state" style="padding-top:64px;"><div class="ttl">Asset id missing</div></div>';
-      return;
+  // ─── Three-state slide-up sheet ────────────────────────────────────────
+  // The asset detail is a bottom sheet (not a full-page route): tapping an
+  // asset anywhere calls `open(id)`. States:
+  //   expanded — tall (~90vh) scrollable sheet with the full content.
+  //   peek     — slid down so only the header band (status dot + name) shows;
+  //              the scrim is hidden so the searchbar behind becomes usable.
+  //              The DOM is NOT torn down — charts, scroll position and per-
+  //              asset `mountState` survive, so re-expand is instant.
+  //   closed   — sheet + scrim removed from the DOM.
+  // Minimize is triggered by tapping the scrim (i.e. the dimmed area over the
+  // searchbar); expand by tapping the peek bar; dismiss by swipe-down or the
+  // close button.
+  var PEEK_BAND_PX = 56;
+  var _state = "closed";   // "closed" | "expanded" | "peek"
+  var _openId = null;      // asset id currently shown — also the loader race guard
+
+  // Build the scrim + sheet once and reuse across opens. Returns the sheet.
+  function ensureSheet() {
+    var existing = document.getElementById("asset-sheet");
+    if (existing) return existing;
+
+    var scrim = document.createElement("div");
+    scrim.className = "scrim asset-scrim";
+    scrim.id = "asset-sheet-scrim";
+
+    var sheet = document.createElement("div");
+    sheet.className = "sheet asset-sheet";
+    sheet.id = "asset-sheet";
+    sheet.innerHTML = ''
+      + '<div class="sheet-handle"></div>'
+      + '<div class="asset-sheet-header">'
+      + '  <span class="dot" id="asset-sheet-dot" style="display:none;"></span>'
+      + '  <div class="asset-sheet-name" id="asset-sheet-name">Asset</div>'
+      + '  <button class="icon-btn" id="asset-sheet-refresh" aria-label="Refresh"><svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg></button>'
+      + '  <button class="icon-btn" id="asset-sheet-close" aria-label="Close"><svg viewBox="0 0 24 24"><use href="#i-close"/></svg></button>'
+      + '</div>'
+      + '<div id="asset-host"></div>';
+
+    document.body.appendChild(scrim);
+    document.body.appendChild(sheet);
+
+    // Tapping the scrim (over the searchbar) minimizes rather than dismisses.
+    scrim.addEventListener("click", minimize);
+    document.getElementById("asset-sheet-close").addEventListener("click", dismiss);
+    document.getElementById("asset-sheet-refresh").addEventListener("click", function () {
+      if (_openId) onRefresh(_openId, this, mountState(_openId));
+    });
+    // Tapping the header while peeked re-expands (ignore taps on the buttons).
+    sheet.querySelector(".asset-sheet-header").addEventListener("click", function (e) {
+      if (_state === "peek" && !e.target.closest("#asset-sheet-close, #asset-sheet-refresh")) expand();
+    });
+    PolarisTabs.attachSwipeToDismiss(sheet, dismiss);
+    return sheet;
+  }
+
+  function setHeader(asset) {
+    var nameEl = document.getElementById("asset-sheet-name");
+    if (nameEl) nameEl.textContent = asset.hostname || asset.assetTag || "Asset";
+    var dotEl = document.getElementById("asset-sheet-dot");
+    if (dotEl) {
+      var cls = monitorDotCls(asset);
+      dotEl.className = "dot" + (cls ? " " + cls : "");
+      dotEl.style.display = cls ? "" : "none";
     }
+  }
+
+  function minimize() {
+    if (_state !== "expanded") return;
+    var sheet = document.getElementById("asset-sheet");
+    var scrim = document.getElementById("asset-sheet-scrim");
+    if (!sheet) return;
+    // Slide the sheet down so only its top band (handle + header) peeks above
+    // the bottom edge. Measured from the live height so short content peeks
+    // correctly too. attachSwipeToDismiss clears inline transform on snap-back,
+    // which falls through to this CSS-var translate, so peek is restored.
+    var translate = Math.max(0, (sheet.offsetHeight || 0) - PEEK_BAND_PX);
+    sheet.style.setProperty("--asset-peek-y", translate + "px");
+    sheet.classList.add("peek");
+    if (scrim) scrim.style.display = "none";
+    _state = "peek";
+  }
+
+  function expand() {
+    if (_state !== "peek") return;
+    var sheet = document.getElementById("asset-sheet");
+    var scrim = document.getElementById("asset-sheet-scrim");
+    if (!sheet) return;
+    sheet.classList.remove("peek");
+    sheet.style.transform = "";   // drop any inline transform left by a drag
+    if (scrim) scrim.style.display = "";
+    _state = "expanded";
+  }
+
+  function dismiss() {
+    _openId = null;
+    _state = "closed";
+    var s = document.getElementById("asset-sheet");
+    var sc = document.getElementById("asset-sheet-scrim");
+    if (s) s.remove();
+    if (sc) sc.remove();
+  }
+
+  // Public opener. Builds the sheet (if needed), then fetches + renders the
+  // asset into it. Opening a different asset while one is shown replaces the
+  // content in place (single #asset-host). Opening the same asset just
+  // re-expands. `_openId` doubles as the loader race guard: a late promise
+  // from a superseded asset bails because `_openId` no longer matches.
+  function open(id) {
+    if (!id) return;
+    var sheet = ensureSheet();
+
+    if (_openId === id && _state !== "closed") { expand(); return; }
+
+    _openId = id;
+    expandFresh(sheet);
+
     var st = mountState(id);
-
-    body.innerHTML = '<div id="asset-host"><div class="loading-screen"><div class="spinner"></div></div></div>';
-
     api.assets.get(id).then(function (asset) {
+      if (_openId !== id) return;
       if (!asset) throw new Error("Asset not found");
+      setHeader(asset);
       renderShell(asset, st);
       // Fire monitor + telemetry + IP history fetches in parallel — these
       // populate their respective sections independently.
@@ -72,6 +181,7 @@
       loadSystemInfo(id, st, asset);
       loadIpHistory(id, st);
     }).catch(function (err) {
+      if (_openId !== id) return;
       var msg = (err && err.message) ? err.message : "Failed to load asset";
       var host = document.getElementById("asset-host");
       if (!host) return;
@@ -84,27 +194,43 @@
     });
   }
 
-  function renderTopbar(ctx) {
-    return ''
-      + '<div class="m3-topbar">'
-      + '  <div class="leading">'
-      + '    <button class="icon-btn" id="asset-back-btn" aria-label="Back"><svg viewBox="0 0 24 24"><use href="#i-back"/></svg></button>'
-      + '  </div>'
-      + '  <div class="title" id="asset-topbar-title">Asset</div>'
-      + '  <div class="trailing">'
-      + '    <button class="icon-btn" id="asset-refresh-btn" aria-label="Refresh"><svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg></button>'
-      + '  </div>'
-      + '</div>';
+  // Reset the sheet to a fresh expanded loading state (used by open()).
+  function expandFresh(sheet) {
+    sheet.classList.remove("peek");
+    sheet.style.transform = "";
+    var scrim = document.getElementById("asset-sheet-scrim");
+    if (scrim) scrim.style.display = "";
+    _state = "expanded";
+    sheet.scrollTop = 0;
+    var nameEl = document.getElementById("asset-sheet-name");
+    if (nameEl) nameEl.textContent = "Asset";
+    var dotEl = document.getElementById("asset-sheet-dot");
+    if (dotEl) { dotEl.className = "dot"; dotEl.style.display = "none"; }
+    var host = document.getElementById("asset-host");
+    if (host) host.innerHTML = '<div class="loading-screen"><div class="spinner"></div></div>';
+  }
+
+  // Deep-link shim: `#asset/<id>` routes still resolve (e.g. a pasted URL).
+  // Render the assets list as a backdrop so dismissing reveals it, then open
+  // the sheet over it. Does NOT push history — normal in-app navigation calls
+  // open() directly.
+  function render(body, ctx) {
+    var id = (ctx && ctx.route && ctx.route.parts && ctx.route.parts[0]) || "";
+    if (window.PolarisAssetsTab && PolarisAssetsTab.spec && PolarisAssetsTab.spec.render) {
+      try {
+        PolarisAssetsTab.spec.render(body, { user: ctx && ctx.user, route: { name: "assets", parts: [], full: "assets" } });
+      } catch (_) { /* backdrop is best-effort */ }
+    }
+    if (id) open(id);
   }
 
   function renderShell(asset, st) {
     var host = document.getElementById("asset-host");
     if (!host) return;
 
-    var topbarTitle = document.getElementById("asset-topbar-title");
-    if (topbarTitle) topbarTitle.textContent = asset.hostname || asset.assetTag || "Asset";
-
-    var dotCls = monitorDotCls(asset);
+    // The sheet header already shows the status dot + asset name, so the hero
+    // omits the name line (it used to repeat it) and leads with the status
+    // pill + identity bits.
     var monitorPillHtml = renderMonitorPill(asset);
     var heroBits = [];
     if (asset.ipAddress) heroBits.push('<span class="mono">' + escapeHtml(asset.ipAddress) + '</span>');
@@ -118,12 +244,8 @@
 
     host.innerHTML = ''
       + '<div class="asset-hero">'
-      + '  <div class="hero-name">'
-      + (dotCls ? '    <span class="dot ' + dotCls + '"></span>' : '')
-      + '    <span>' + escapeHtml(asset.hostname || asset.assetTag || "asset") + '</span>'
-      + '  </div>'
-      + '  <div class="hero-sub">' + heroBits.join(" · ") + '</div>'
-      + '  <div style="margin-top:12px;">' + monitorPillHtml + '</div>'
+      + (heroBits.length ? '  <div class="hero-sub">' + heroBits.join(" · ") + '</div>' : '')
+      + '  <div style="margin-top:' + (heroBits.length ? '12px' : '0') + ';">' + monitorPillHtml + '</div>'
       + '</div>'
 
       // Response Time section — collapsed by default; subtitle shows
@@ -181,7 +303,12 @@
           if (st.sections[key]) body.removeAttribute("hidden");
           else body.setAttribute("hidden", "");
         }
-        if (caret) caret.setAttribute("href", st.sections[key] ? "#i-chev-down" : "#i-chev-right");
+        // The icon is the <use> child's href — setting it on the <svg> does
+        // nothing, which is why the chevron never flipped.
+        if (caret) {
+          var useEl = caret.querySelector("use");
+          if (useEl) useEl.setAttribute("href", st.sections[key] ? "#i-chev-down" : "#i-chev-right");
+        }
       });
     });
 
@@ -198,15 +325,7 @@
         loadTelemetry(asset.id, st);
       });
     });
-
-    // Topbar back + refresh wiring
-    var back = document.getElementById("asset-back-btn");
-    if (back) back.addEventListener("click", function () {
-      if (window.history.length > 1) window.history.back();
-      else PolarisRouter.go("assets", { replace: true });
-    });
-    var refresh = document.getElementById("asset-refresh-btn");
-    if (refresh) refresh.addEventListener("click", function () { onRefresh(asset.id, refresh, st); });
+    // Back/refresh now live in the sheet header (wired once in ensureSheet).
   }
 
   // `subtitleHtml` is rendered raw (callers escape their own text). Pass
@@ -265,7 +384,7 @@
     if (chartHost) chartHost.innerHTML = '<div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div>';
 
     api.assets.monitorHistory(id, st.range).then(function (resp) {
-      if (!resp) return;
+      if (_openId !== id || !resp) return;   // bail if a newer asset replaced us
       var samples = (resp.samples || []).map(function (s) {
         return { ts: s.timestamp, v: s.responseTimeMs };
       });
@@ -299,7 +418,7 @@
     if (chartHost) chartHost.innerHTML = '<div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div>';
 
     api.assets.telemetryHistory(id, st.range).then(function (resp) {
-      if (!resp) return;
+      if (_openId !== id || !resp) return;   // bail if a newer asset replaced us
       var samples = resp.samples || [];
       var cpuSeries = samples
         .filter(function (s) { return s.cpuPct != null; })
@@ -362,6 +481,7 @@
       api.assets.systemInfo(id).catch(function (e) { return { error: e }; }),
       api.assets.temperatureHistory(id, { range: "1h" }).catch(function () { return null; }),
     ]).then(function (results) {
+      if (_openId !== id) return;   // bail if a newer asset replaced us
       var info = results[0] || {};
       var tempHist = results[1] || null;
 
@@ -618,7 +738,7 @@
       b.addEventListener("click", function () {
         var nid = b.dataset.assetId;
         closeInterfaceSheet();
-        if (nid) PolarisRouter.go("asset/" + nid);
+        if (nid) open(nid);   // replace the sheet content in place with the neighbor
       });
     });
   }
@@ -644,6 +764,7 @@
     var host = document.getElementById("asset-ip-history-host");
     if (!host) return;
     api.assets.getIpHistory(id).then(function (resp) {
+      if (_openId !== id) return;   // bail if a newer asset replaced us
       var rows = (resp && resp.history) || [];
       if (rows.length === 0) {
         host.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">No IP history recorded yet.</div>';
@@ -795,9 +916,11 @@
   }
 
   window.PolarisAssetDetail = {
+    open: open,
     spec: {
       parentTab: "assets",
-      renderTopbar: renderTopbar,
+      // No topbar — the slide-up sheet carries its own header.
+      renderTopbar: function () { return ""; },
       render: render,
       onPullToRefresh: refreshFromPtr,
     },

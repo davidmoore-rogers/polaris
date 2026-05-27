@@ -625,7 +625,8 @@
       document.getElementById("topo-sheet-asset").addEventListener("click", function () {
         var assetId = node.data("assetId") || node.id();
         closeTopologySheet();
-        PolarisRouter.go("asset/" + assetId);
+        if (window.PolarisAssetDetail && PolarisAssetDetail.open) PolarisAssetDetail.open(assetId);
+        else PolarisRouter.go("asset/" + assetId);
       });
     }
 
@@ -635,7 +636,8 @@
         var id = btn.dataset.assetId;
         if (id) {
           closeTopologySheet();
-          PolarisRouter.go("asset/" + id);
+          if (window.PolarisAssetDetail && PolarisAssetDetail.open) PolarisAssetDetail.open(id);
+          else PolarisRouter.go("asset/" + id);
         }
       });
     });

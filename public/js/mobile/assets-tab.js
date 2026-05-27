@@ -182,7 +182,9 @@
     host.querySelectorAll(".asset-card").forEach(function (card) {
       card.addEventListener("click", function () {
         var id = card.dataset.id;
-        if (id) PolarisRouter.go("asset/" + id);
+        if (!id) return;
+        if (window.PolarisAssetDetail && PolarisAssetDetail.open) PolarisAssetDetail.open(id);
+        else PolarisRouter.go("asset/" + id);
       });
     });
     var more = document.getElementById("assets-load-more");
