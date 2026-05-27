@@ -342,19 +342,40 @@ const FortinetClassMonitorSchema = z.object({
 // `pushGeocodedCoords` (off by default; UI-disabled when `pullSnmpLocation`
 // is off) writes the geocoded lat/lng back to the FortiGate when the SNMP
 // fallback path landed coords. FMG mode writes to BOTH the per-device
-// metavars `Latitude` / `Longitude` AND the CMDB `gui-device-latitude` /
+// metavars (named by `latitudeMetavar` / `longitudeMetavar`, defaulting to
+// `Latitude` / `Longitude`) AND the CMDB `gui-device-latitude` /
 // `gui-device-longitude` fields. Standalone FortiGate writes CMDB only.
+//
+// `latitudeMetavar` / `longitudeMetavar` name the FMG per-device metavariables
+// Polaris reads (the discovery-time coord fallback) and writes (push-back).
+// They default to FMG's common `Latitude` / `Longitude` convention; operators
+// using a different metavar naming scheme override them here. Blank coerces
+// back to the default. FMG-only — ignored by the standalone FortiGate path.
+//
+// `addressMetavar` names a FMG per-device metavariable holding a street
+// address. When set + populated, Polaris geocodes that address string instead
+// of (and in preference to) the SNMP sysLocation — the opt-in path for
+// operators who don't want to pull sysLocation. Blank = disabled (default).
+// FMG-only.
+const MetavarName = (fallback: string) =>
+  z.string().optional().default(fallback).transform((v) => v.trim() || fallback);
 const FortiGateClassMonitorSchema = z.object({
   addAsMonitored:        z.boolean().optional().default(false),
   autoMonitorInterfaces: AutoMonitorInterfacesSchema,
   pullSnmpLocation:      z.boolean().optional().default(false),
   pushGeocodedCoords:    z.boolean().optional().default(false),
+  latitudeMetavar:       MetavarName("Latitude"),
+  longitudeMetavar:      MetavarName("Longitude"),
+  addressMetavar:        z.string().optional().default("").transform((v) => v.trim()),
   streams:               ClassStreamsSchema.optional(),
 }).optional().default({
   addAsMonitored: false,
   autoMonitorInterfaces: null,
   pullSnmpLocation: false,
   pushGeocodedCoords: false,
+  latitudeMetavar: "Latitude",
+  longitudeMetavar: "Longitude",
+  addressMetavar: "",
 });
 
 const FortiManagerConfigSchema = z.object({
@@ -2204,6 +2225,10 @@ function buildFortigateFirewallObservedBlob(
     // picks these up as authoritative when the pair is valid.
     snmpGeocodedLatitude?: number | null;
     snmpGeocodedLongitude?: number | null;
+    // FMG per-device address metavariable string (operator-named via
+    // `fortigateMonitor.addressMetavar`; FMG-only). Projected to
+    // Asset.learnedAddress and shown as "Address" on the General tab.
+    metavarAddress?: string | null;
   },
   integrationType: "fortimanager" | "fortigate",
   syncedAt: Date,
@@ -2234,6 +2259,7 @@ function buildFortigateFirewallObservedBlob(
     snmpLocation: typeof device.snmpLocation === "string" && device.snmpLocation ? device.snmpLocation : null,
     snmpGeocodedLatitude: Number.isFinite(device.snmpGeocodedLatitude) ? device.snmpGeocodedLatitude : null,
     snmpGeocodedLongitude: Number.isFinite(device.snmpGeocodedLongitude) ? device.snmpGeocodedLongitude : null,
+    metavarAddress: typeof device.metavarAddress === "string" && device.metavarAddress ? device.metavarAddress : null,
     managedBy: integrationType,
     ...(ha
       ? {
@@ -2580,6 +2606,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // re-reading the integration config per device. Both default to off.
   let pullSnmpLocation = false;
   let pushGeocodedCoords = false;
+  // FMG metavar names used by the coord read (extractMetavarCoordsFromFmgDevice,
+  // upstream in discovery) + write-back (pushCoordsToFortigate). Lat/Long default
+  // to the common convention; addressMetavar is blank-disabled by default and, when
+  // set + populated, becomes the preferred geocode-source string (SNMP fallback).
+  let latitudeMetavar = "Latitude";
+  let longitudeMetavar = "Longitude";
+  let addressMetavar = "";
   // Full integration config retained for handing to the location-pull + coord-
   // push services (which need the FMG/FortiGate credentials inside it).
   let integrationConfig: Record<string, unknown> | null = null;
@@ -2618,6 +2651,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     fortigateAddAsMonitored = fg.addAsMonitored === true;
     pullSnmpLocation        = fg.pullSnmpLocation === true;
     pushGeocodedCoords      = fg.pushGeocodedCoords === true;
+    latitudeMetavar         = (typeof fg.latitudeMetavar === "string" && fg.latitudeMetavar.trim()) || "Latitude";
+    longitudeMetavar        = (typeof fg.longitudeMetavar === "string" && fg.longitudeMetavar.trim()) || "Longitude";
+    addressMetavar          = (typeof fg.addressMetavar === "string" ? fg.addressMetavar.trim() : "");
   }
 
   // Sighting sets for the FortiSwitch / FortiAP decommission sweep below.
@@ -3109,20 +3145,28 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   for (const device of result.devices) {
     try {
       const fgHostname = device.hostname || device.name;
-      // ─── SNMP sysLocation pull (FortiGate-only, opt-in) ──────────────────
-      // Pulled ONCE per device (not per HA member — cluster members are
-      // physically co-located and share sysLocation). The result feeds the
-      // observed blob for every member's AssetSource row and drives the
-      // projection-tier-1 coord resolution.
+      // ─── Location → coords resolution (FortiGate-only, opt-in) ───────────
+      // Resolved ONCE per device (not per HA member — cluster members are
+      // physically co-located and share a location). Two opt-in sources feed
+      // the geocoder; an address metavar (FMG-only) WINS when set + populated,
+      // with SNMP sysLocation as the fallback. The geocoded coords feed the
+      // observed blob for every member's AssetSource row and drive the
+      // projection-tier-1 coord resolution; `snmpLocation` (when pulled) is
+      // stored regardless for display on the asset General tab.
+      const fgIsFortinet = integrationType === "fortimanager" || integrationType === "fortigate";
       let devSnmpLocation: string | null = null;
       let devSnmpLocationFetchedAt: Date | null = null;
       let devGeocodedLat: number | null = null;
       let devGeocodedLng: number | null = null;
-      if (
-        pullSnmpLocation &&
-        (integrationType === "fortimanager" || integrationType === "fortigate") &&
-        integrationConfig
-      ) {
+      // Address metavar string for this device (FMG-only; blank unless an
+      // address metavar is configured AND populated on the device).
+      const addressMetavarValue =
+        addressMetavar && typeof device.metavarAddress === "string"
+          ? device.metavarAddress.trim()
+          : "";
+      // Pull + store sysLocation whenever the toggle is on (independent of which
+      // source ends up driving the coords).
+      if (pullSnmpLocation && fgIsFortinet && integrationConfig) {
         devSnmpLocationFetchedAt = new Date();
         try {
           devSnmpLocation = await fetchFortigateSysLocation({
@@ -3132,22 +3176,25 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         } catch (err: any) {
           syncLog("error", `${fgHostname}: SNMP location pull threw — ${err?.message || "Unknown error"}`);
         }
-        if (devSnmpLocation) {
-          try {
-            const geo = await geocode(devSnmpLocation);
-            if (isValidGeoCoord(geo.latitude, geo.longitude)) {
-              devGeocodedLat = geo.latitude;
-              devGeocodedLng = geo.longitude;
-              if (verboseLogging) {
-                logger.info(
-                  { verbose: true, integrationId, deviceName: device.name, sysLocation: devSnmpLocation, lat: devGeocodedLat, lng: devGeocodedLng, cached: geo.cached },
-                  "discovery.snmp_location.geocoded",
-                );
-              }
+      }
+      // Geocode source: address metavar wins; SNMP sysLocation is the fallback.
+      const geoString = addressMetavarValue || devSnmpLocation || "";
+      const geoSource = addressMetavarValue ? "address-metavar" : (devSnmpLocation ? "snmp" : null);
+      if (geoString) {
+        try {
+          const geo = await geocode(geoString);
+          if (isValidGeoCoord(geo.latitude, geo.longitude)) {
+            devGeocodedLat = geo.latitude;
+            devGeocodedLng = geo.longitude;
+            if (verboseLogging) {
+              logger.info(
+                { verbose: true, integrationId, deviceName: device.name, geoSource, location: geoString, lat: devGeocodedLat, lng: devGeocodedLng, cached: geo.cached },
+                "discovery.location.geocoded",
+              );
             }
-          } catch (err: any) {
-            syncLog("error", `${fgHostname}: Geocode of sysLocation "${devSnmpLocation}" failed — ${err?.message || "Unknown error"}`);
           }
+        } catch (err: any) {
+          syncLog("error", `${fgHostname}: Geocode of ${geoSource} "${geoString}" failed — ${err?.message || "Unknown error"}`);
         }
       }
       // HA fan-out: when the cluster reports multiple members, write one
@@ -3233,6 +3280,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           snmpLocation: devSnmpLocation,
           snmpGeocodedLatitude: devGeocodedLat,
           snmpGeocodedLongitude: devGeocodedLng,
+          metavarAddress: device.metavarAddress,
         };
       // Match by serial first; fall back to hostname/IP for assets that
       // pre-date a serial (e.g. the placeholder created by registerFortinetHost
@@ -3312,6 +3360,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (devSnmpLocationFetchedAt) {
           updateData.snmpLocation = fwProjected.snmpLocation;
           updateData.snmpLocationFetchedAt = devSnmpLocationFetchedAt;
+        }
+        // Learned street address from the FMG address metavar. Only (re)written
+        // when an address metavar is configured this cycle — mirrors the
+        // snmpLocation "only when we looked" rule so an integration without an
+        // address metavar never clobbers an address learned earlier. When the
+        // metavar is configured but empty on this device, projection yields null
+        // and the field is cleared.
+        if (addressMetavar) {
+          updateData.learnedAddress = fwProjected.learnedAddress;
         }
         clampAcquiredToLastSeen(updateData, existingAsset);
         // Auto-Monitor sweep: enforce monitored = fortigateAddAsMonitored on
@@ -3412,6 +3469,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           ...(fwCreateProjected.latitude !== null ? { latitude: fwCreateProjected.latitude } : {}),
           ...(fwCreateProjected.longitude !== null ? { longitude: fwCreateProjected.longitude } : {}),
           ...(fwCreateProjected.snmpLocation !== null ? { snmpLocation: fwCreateProjected.snmpLocation } : {}),
+          ...(addressMetavar && fwCreateProjected.learnedAddress !== null ? { learnedAddress: fwCreateProjected.learnedAddress } : {}),
           ...(devSnmpLocationFetchedAt ? { snmpLocationFetchedAt: devSnmpLocationFetchedAt } : {}),
           fortinetTopology: memberTopology as any,
           notes: isStandbyCreate
@@ -3470,6 +3528,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               device.name,
               devGeocodedLat,
               devGeocodedLng,
+              latitudeMetavar,
+              longitudeMetavar,
             );
             if (pushResult.ok) {
               logEvent({

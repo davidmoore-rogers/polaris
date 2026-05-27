@@ -458,6 +458,12 @@ model Asset {
   // (null / NaN / (0,0) / out-of-range) — see syncDhcpSubnets Phase 11.5.
   snmpLocation          String?
   snmpLocationFetchedAt DateTime?
+  // Auto-discovered street address. Populated on firewall assets from the FMG
+  // per-device address metavariable named by the originating integration's
+  // `fortigateMonitor.addressMetavar` (FMG-only, opt-in). Distinct from
+  // `learnedLocation` (a site/controller label) and `snmpLocation` (raw SNMP
+  // sysLocation string). Surfaced as "Address" on the asset details General tab.
+  learnedAddress        String?
   fortinetTopology Json? // { role: "fortigate" | "fortiswitch" | "fortiap", controllerFortigate?, uplinkInterface?, parentSwitch?, parentPort?, parentVlan? } — real connection graph from FMG/FortiGate discovery
   acquiredAt       DateTime? // Acquisition / purchase date
   warrantyExpiry   DateTime? // Warranty end date

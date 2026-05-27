@@ -36,6 +36,14 @@ export interface FortiManagerConfig {
   fortigateApiUser?: string;  // Only used when useProxy is false — REST API admin username configured on each managed FortiGate.
   fortigateApiToken?: string; // Only used when useProxy is false — Bearer token for the REST API admin on each managed FortiGate.
   fortigateVerifySsl?: boolean; // Only used when useProxy is false — whether to verify TLS certs on direct FortiGate connections (default false).
+  // FortiGate-class monitor block. Only the metavar-name subfields are read by
+  // this service (to name the per-device coord / address metavars during the
+  // device-list read); the rest of the block is consumed in integrations.ts.
+  fortigateMonitor?: {
+    latitudeMetavar?: string;
+    longitudeMetavar?: string;
+    addressMetavar?: string;
+  };
 }
 
 interface JsonRpcRequest {
@@ -659,6 +667,12 @@ export interface DiscoveredDevice {
   // monitoringService (which the SNMP helper uses for session infrastructure).
   metavarLatitude?: number;
   metavarLongitude?: number;
+  // FMG per-device metavariable holding a street address (operator-named via
+  // `fortigateMonitor.addressMetavar`). When present, syncDhcpSubnets Phase 11.5
+  // geocodes this string in preference to SNMP sysLocation. FMG-only; undefined
+  // on standalone-FortiGate-discovered firewalls and when no address metavar is
+  // configured / populated.
+  metavarAddress?: string;
   // HA cluster awareness. `haMembers` lists every physical unit in the cluster
   // (including the current primary), each keyed on its own stable serial. The
   // top-level fields (`serial`, `hostname`, `mgmtIp`) reflect whichever member
@@ -987,28 +1001,39 @@ export function extractHaFromFmgDevice(
  *
  * The metavar name lookup is case-insensitive (FMG stores keys as the
  * operator typed them — `Latitude`, `latitude`, `LATITUDE` all map to the
- * same value here). Returns undefined for missing / unparseable values; the
- * coord resolver downstream validates the (lat, lng) pair via
- * isValidGeoCoord before trusting either half.
+ * same value here). The names default to the common `Latitude` / `Longitude`
+ * convention but operators can rename them per integration; `addrName` (the
+ * optional address metavar) is blank-disabled by default. Returns undefined
+ * for missing / unparseable values; the coord resolver downstream validates
+ * the (lat, lng) pair via isValidGeoCoord before trusting either half, and the
+ * address string is geocoded in Phase 11.5.
  */
 export function extractMetavarCoordsFromFmgDevice(
   raw: any,
-): { latitude?: number; longitude?: number } {
+  latName = "Latitude",
+  lngName = "Longitude",
+  addrName = "",
+): { latitude?: number; longitude?: number; address?: string } {
   const meta = raw?.["meta fields"];
   if (!meta || typeof meta !== "object") return {};
   const findKey = (target: string): unknown => {
+    const t = target.toLowerCase();
     for (const k of Object.keys(meta)) {
-      if (k.toLowerCase() === target) return (meta as Record<string, unknown>)[k];
+      if (k.toLowerCase() === t) return (meta as Record<string, unknown>)[k];
     }
     return undefined;
   };
-  const latRaw = findKey("latitude");
-  const lngRaw = findKey("longitude");
+  const latRaw = findKey(latName);
+  const lngRaw = findKey(lngName);
   const lat = latRaw === undefined || latRaw === null || latRaw === "" ? NaN : Number(latRaw);
   const lng = lngRaw === undefined || lngRaw === null || lngRaw === "" ? NaN : Number(lngRaw);
-  const out: { latitude?: number; longitude?: number } = {};
+  const out: { latitude?: number; longitude?: number; address?: string } = {};
   if (Number.isFinite(lat)) out.latitude = lat;
   if (Number.isFinite(lng)) out.longitude = lng;
+  if (addrName) {
+    const addrRaw = findKey(addrName);
+    if (typeof addrRaw === "string" && addrRaw.trim()) out.address = addrRaw.trim();
+  }
   return out;
 }
 
@@ -1054,6 +1079,11 @@ export async function discoverDhcpSubnets(
   const adom = config.adom || "root";
   const { apiUser, apiToken, verifySsl } = config;
   const log = onProgress || (() => {});
+  // Operator-named coord / address metavars (FMG convention). Resolved once so
+  // the per-device metavar extraction uses the configured names.
+  const latMetavar = config.fortigateMonitor?.latitudeMetavar?.trim() || "Latitude";
+  const lngMetavar = config.fortigateMonitor?.longitudeMetavar?.trim() || "Longitude";
+  const addrMetavar = config.fortigateMonitor?.addressMetavar?.trim() || "";
 
   // Step 1: List managed devices in the ADOM. We deliberately do NOT filter on
   // conn_status server-side — we need the full roster (online + offline) so the
@@ -1297,7 +1327,7 @@ export async function discoverDhcpSubnets(
           // when FMG didn't surface one (older FMG releases, missing perms).
           const fmgHa = extractHaFromFmgDevice(rawDevice);
           const haFromFmg = fmgHa.haMembers.length > 0;
-          const mv = extractMetavarCoordsFromFmgDevice(rawDevice);
+          const mv = extractMetavarCoordsFromFmgDevice(rawDevice, latMetavar, lngMetavar, addrMetavar);
           const localDev: DiscoveredDevice = {
             name: deviceName,
             hostname: rawDevice.hostname || deviceName,
@@ -1312,6 +1342,7 @@ export async function discoverDhcpSubnets(
             longitude: fmgCoordsOk ? fmgLng : fgResult.devices[0]?.longitude,
             ...(mv.latitude !== undefined ? { metavarLatitude: mv.latitude } : {}),
             ...(mv.longitude !== undefined ? { metavarLongitude: mv.longitude } : {}),
+            ...(mv.address !== undefined ? { metavarAddress: mv.address } : {}),
             ...(haFromFmg
               ? { haMode: fmgHa.haMode, haMembers: fmgHa.haMembers }
               : (fgResult.devices[0]?.haMembers && fgResult.devices[0].haMembers.length > 0
@@ -1394,7 +1425,7 @@ export async function discoverDhcpSubnets(
     // has no per-device fortigateService call to fall back on, so this is
     // the only source. Standalone or missing → haMode: "standalone".
     const fmgHa = extractHaFromFmgDevice(rawDevice);
-    const mv = extractMetavarCoordsFromFmgDevice(rawDevice);
+    const mv = extractMetavarCoordsFromFmgDevice(rawDevice, latMetavar, lngMetavar, addrMetavar);
     const localDevice: DiscoveredDevice = {
       name: deviceName,
       hostname: rawDevice.hostname || deviceName,
@@ -1405,6 +1436,7 @@ export async function discoverDhcpSubnets(
       ...(fmgCoordsOk ? { latitude: fmgLat, longitude: fmgLng } : {}),
       ...(mv.latitude !== undefined ? { metavarLatitude: mv.latitude } : {}),
       ...(mv.longitude !== undefined ? { metavarLongitude: mv.longitude } : {}),
+      ...(mv.address !== undefined ? { metavarAddress: mv.address } : {}),
       ...(fmgHa.haMembers.length > 0
         ? { haMode: fmgHa.haMode, haMembers: fmgHa.haMembers }
         : { haMode: "standalone" as const }),

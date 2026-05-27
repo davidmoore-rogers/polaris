@@ -31,6 +31,7 @@ describe("projectAssetFromSources — empty + edge cases", () => {
       latitude: null,
       longitude: null,
       snmpLocation: null,
+      learnedAddress: null,
     });
     expect(provenance).toEqual({});
   });
@@ -266,6 +267,25 @@ describe("projectAssetFromSources — ipAddress + lat/long", () => {
   });
 });
 
+describe("projectAssetFromSources — learnedAddress", () => {
+  it("comes from the fortigate-firewall metavarAddress", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("fortigate-firewall", { serial: "FGT001", metavarAddress: "421 Great Circle Rd, Nashville TN" }),
+    ]);
+    expect(projected.learnedAddress).toBe("421 Great Circle Rd, Nashville TN");
+    expect(provenance.learnedAddress).toBe("fortigate-firewall");
+  });
+
+  it("is null when no source carries an address metavar", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("fortigate-firewall", { serial: "FGT001", mgmtIp: "10.0.0.1" }),
+      src("ad", { dnsHostName: "fw.contoso.com" }),
+    ]);
+    expect(projected.learnedAddress).toBeNull();
+    expect(provenance.learnedAddress).toBeUndefined();
+  });
+});
+
 describe("projectAssetFromSources — hybrid Windows laptop (full integration scenario)", () => {
   it("merges entra + intune + ad correctly with priorities", () => {
     const { projected, provenance } = projectAssetFromSources([
@@ -308,6 +328,7 @@ describe("projectAssetFromSources — hybrid Windows laptop (full integration sc
       latitude: null,
       longitude: null,
       snmpLocation: null, // not a fortigate-firewall source
+      learnedAddress: null, // not a fortigate-firewall source
     });
     expect(provenance.hostname).toBe("ad");
     expect(provenance.os).toBe("ad");

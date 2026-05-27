@@ -2732,6 +2732,7 @@ async function openViewModal(id) {
       ((a.latitude != null && a.longitude != null)
         ? viewRow("Coordinates", a.latitude.toFixed(4) + ", " + a.longitude.toFixed(4), true)
         : "") +
+      (a.learnedAddress ? viewRow("Address", a.learnedAddress) : "") +
       (a.snmpLocation ? viewRow("SNMP Location", a.snmpLocation) : "") +
       viewRow("Department", a.department) +
       viewRow("Assigned To", a.assignedTo) +

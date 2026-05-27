@@ -1884,37 +1884,91 @@ function _fortigateAddMonitoredHTML(idPrefix, currentAddAsMonitored) {
     '</div>';
 }
 
-// Body of the new top-level "Geographic Location" tab on FMG and standalone
+// Reactively enable/disable the pushGeocodedCoords checkbox. Push is available
+// when EITHER "Pull SNMP sysLocation" is on OR an address metavar is named
+// (FMG-only) — both are geocode sources Polaris can write coords back from.
+// Attached to window so the inline onchange/oninput handlers in
+// geographicLocationFormHTML can reach it after the modal renders.
+if (typeof window !== "undefined") {
+  window._geoRecomputePush = function (prefix) {
+    var pull = document.getElementById(prefix + "pullSnmpLocation");
+    var addr = document.getElementById(prefix + "addressMetavar");
+    var push = document.getElementById(prefix + "pushGeocodedCoords");
+    if (!push) return;
+    var enabled = (pull && pull.checked === true) || (addr && addr.value.trim() !== "");
+    push.disabled = !enabled;
+    if (!enabled) push.checked = false;
+    var lbl = push.nextElementSibling;
+    if (lbl) lbl.style.opacity = enabled ? "1" : "0.5";
+  };
+}
+
+// Body of the top-level "Geographic Location" tab on FMG and standalone
 // FortiGate integration Edit/Create modals. Carries the pull-from-SNMP and
-// push-geocoded-coords toggles previously surfaced under Monitoring →
-// FortiGate. The DOM ids stay `f-mon-fortigate-pullSnmpLocation` and
-// `f-mon-fortigate-pushGeocodedCoords` so `_readFortigateMonitorBlock()`
-// finds them unchanged at save time. The pushGeocodedCoords box reactively
-// disables when pullSnmpLocation is off — same onchange hook used by the
-// prior in-Monitoring rendering.
-function geographicLocationFormHTML(currentPullSnmpLocation, currentPushGeocodedCoords) {
+// push-geocoded-coords toggles plus (FMG only) the per-device metavar-name
+// fields. The DOM ids stay `f-mon-fortigate-pullSnmpLocation` /
+// `...pushGeocodedCoords` / `...latitudeMetavar` / `...longitudeMetavar` /
+// `...addressMetavar` so `_readFortigateMonitorBlock()` finds them at save
+// time. pushGeocodedCoords reactively enables when pull is on OR an address
+// metavar is named (see window._geoRecomputePush).
+function geographicLocationFormHTML(currentPullSnmpLocation, currentPushGeocodedCoords, latMeta, lngMeta, addrMeta, integrationType) {
   var idPrefix = "f-mon-fortigate-";
   var pull = currentPullSnmpLocation === true;
   var push = currentPushGeocodedCoords === true;
+  var isFmg = integrationType === "fortimanager";
+  var addrSet = isFmg && typeof addrMeta === "string" && addrMeta.trim() !== "";
+  var pushEnabled = pull || addrSet;
+  // FMG-only metavar-name fields. Standalone FortiGate has no metavars, so the
+  // block is omitted entirely there (push writes CMDB only).
+  var metavarBlock = "";
+  if (isFmg) {
+    metavarBlock =
+      '<div style="margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--color-border)">' +
+        '<div style="font-weight:600;margin-bottom:0.25rem">FortiManager metavariable names</div>' +
+        '<p class="hint" style="margin-top:0;margin-bottom:0.75rem">Names of the per-device FMG metavariables Polaris reads coordinates from and writes them back to. Leave Latitude / Longitude at the defaults unless your fleet uses a different naming scheme.</p>' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem">' +
+          '<div class="form-group" style="margin:0">' +
+            '<label for="' + idPrefix + 'latitudeMetavar" style="font-weight:500">Latitude metavar</label>' +
+            '<input type="text" id="' + idPrefix + 'latitudeMetavar" value="' + escapeHtml(latMeta || "Latitude") + '" placeholder="Latitude">' +
+          '</div>' +
+          '<div class="form-group" style="margin:0">' +
+            '<label for="' + idPrefix + 'longitudeMetavar" style="font-weight:500">Longitude metavar</label>' +
+            '<input type="text" id="' + idPrefix + 'longitudeMetavar" value="' + escapeHtml(lngMeta || "Longitude") + '" placeholder="Longitude">' +
+          '</div>' +
+        '</div>' +
+        '<div class="form-group" style="margin:0.75rem 0 0 0">' +
+          '<label for="' + idPrefix + 'addressMetavar" style="font-weight:500">Address metavar (optional)</label>' +
+          '<input type="text" id="' + idPrefix + 'addressMetavar" value="' + escapeHtml(addrMeta || "") + '" placeholder="Leave blank to use SNMP sysLocation" oninput="window._geoRecomputePush(\'' + idPrefix + '\')">' +
+          '<p class="hint" style="margin-bottom:0">When set, Polaris reads this metavar\'s address string from each FortiGate and geocodes it <strong>instead of</strong> the SNMP sysLocation (SNMP is used only as a fallback when this metavar is empty). Use this if you don\'t want to pull sysLocation. Leave blank to rely on SNMP.</p>' +
+        '</div>' +
+      '</div>';
+  }
   return '<p style="font-size:0.9rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 1rem 0">' +
-      'Polaris reads each FortiGate\'s SNMP <code>sysLocation</code> string via REST API ' +
-      '(<code>/api/v2/cmdb/system.snmp/sysinfo</code> — no separate SNMP credential needed), ' +
-      'geocodes the value via OpenStreetMap Nominatim, and (optionally) writes the resulting coordinates ' +
-      'back to the FortiGate so the device shows up correctly on the Polaris Device Map. ' +
-      'When the SNMP location is blank or doesn\'t geocode, Polaris falls back to FortiManager metavars / CMDB coords.' +
+      'Polaris resolves each FortiGate\'s location to map coordinates and (optionally) writes the result ' +
+      'back to the device so it shows up correctly on the Polaris Device Map. The location string comes from ' +
+      'the SNMP <code>sysLocation</code> (read via REST API — no separate SNMP credential needed)' +
+      (isFmg ? ' or, in preference, a FortiManager address metavariable' : '') +
+      ', geocoded via OpenStreetMap Nominatim. ' +
+      'When the location is blank or doesn\'t geocode, Polaris falls back to ' +
+      (isFmg ? 'FortiManager coordinate metavars / CMDB coords.' : 'the FortiGate\'s CMDB coords.') +
     '</p>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
       '<input type="checkbox" id="' + idPrefix + 'pullSnmpLocation" ' + (pull ? "checked" : "") +
-      ' onchange="(function(cb){var p=document.getElementById(\'' + idPrefix + 'pushGeocodedCoords\');if(p){p.disabled=!cb.checked;if(!cb.checked)p.checked=false;var lbl=p.nextElementSibling;if(lbl)lbl.style.opacity=cb.checked?\'1\':\'0.5\';}})(this)"' +
+      ' onchange="window._geoRecomputePush(\'' + idPrefix + '\')"' +
       ' style="width:auto">' +
       '<label for="' + idPrefix + 'pullSnmpLocation" style="margin:0;font-weight:500">Pull SNMP sysLocation from each FortiGate</label>' +
     '</div>' +
     '<p class="hint" style="margin-bottom:1rem">Each discovery cycle, Polaris fetches <code>sysLocation</code> for every FortiGate via the FortiOS REST API and geocodes it through Nominatim. The resolved coordinates become the asset\'s position on the Device Map.</p>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem">' +
-      '<input type="checkbox" id="' + idPrefix + 'pushGeocodedCoords" ' + (push ? "checked" : "") + (pull ? "" : " disabled") + ' style="width:auto">' +
-      '<label for="' + idPrefix + 'pushGeocodedCoords" style="margin:0;font-weight:500' + (pull ? "" : ";opacity:0.5") + '">Write geocoded coordinates back to the FortiGate</label>' +
+      '<input type="checkbox" id="' + idPrefix + 'pushGeocodedCoords" ' + (push ? "checked" : "") + (pushEnabled ? "" : " disabled") + ' style="width:auto">' +
+      '<label for="' + idPrefix + 'pushGeocodedCoords" style="margin:0;font-weight:500' + (pushEnabled ? "" : ";opacity:0.5") + '">Write geocoded coordinates back to the FortiGate</label>' +
     '</div>' +
-    '<p class="hint" style="margin-bottom:0">When the geocoded coords differ from the FortiGate\'s current GUI values, update them on the device — writes to both FortiManager metavars (Latitude / Longitude) and the FortiGate\'s CMDB <code>gui-device-latitude</code> / <code>gui-device-longitude</code>. Standalone FortiGate integrations write only the CMDB values. In FortiManager mode the change lands in FMG\'s CMDB but won\'t reach the live FortiGate until an operator runs Install Device Configuration in FMG.</p>';
+    '<p class="hint" style="margin-bottom:0">When the geocoded coords differ from the FortiGate\'s current GUI values, update them on the device — ' +
+      (isFmg
+        ? 'writes to both the FortiManager coordinate metavars and the FortiGate\'s CMDB <code>gui-device-latitude</code> / <code>gui-device-longitude</code>. In FortiManager mode the change lands in FMG\'s CMDB but won\'t reach the live FortiGate until an operator runs Install Device Configuration in FMG.'
+        : 'writes the FortiGate\'s CMDB <code>gui-device-latitude</code> / <code>gui-device-longitude</code>.') +
+    '</p>' +
+    metavarBlock;
 }
 
 // Renders the integration's Monitoring tab as a set of CLASS subtabs. Each
@@ -1962,7 +2016,7 @@ function monitorSettingsFormHTML(s, opts) {
 
   // Per-class header content (auto-monitor, direct-polling toggles, etc.).
   // Built lazily per class inside the loop below.
-  var fwFgCfg = opts.fortigateMonitor   || { addAsMonitored: false, autoMonitorInterfaces: null, pullSnmpLocation: false, pushGeocodedCoords: false };
+  var fwFgCfg = opts.fortigateMonitor   || { addAsMonitored: false, autoMonitorInterfaces: null, pullSnmpLocation: false, pushGeocodedCoords: false, latitudeMetavar: "Latitude", longitudeMetavar: "Longitude", addressMetavar: "" };
   var fwSwCfg = opts.fortiswitchMonitor || { enabled: false, snmpCredentialId: null, sshCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
   var fwApCfg = opts.fortiapMonitor     || { enabled: false, snmpCredentialId: null, sshCredentialId: null, addAsMonitored: false, autoMonitorInterfaces: null };
   // AD/Entra/WindowsServer per-class blocks. The backend Zod schema names
@@ -2671,16 +2725,25 @@ function _readFortigateMonitorBlock(prefix, opts) {
   var addMonEl   = document.getElementById(prefix + "addAsMonitored");
   var pullEl     = document.getElementById(prefix + "pullSnmpLocation");
   var pushEl     = document.getElementById(prefix + "pushGeocodedCoords");
+  var latEl      = document.getElementById(prefix + "latitudeMetavar");
+  var lngEl      = document.getElementById(prefix + "longitudeMetavar");
+  var addrEl     = document.getElementById(prefix + "addressMetavar");
   if (!addMonEl) return null;
   var ami = _readAutoMonitorInterfaces(prefix + "amon-");
+  var addrVal = addrEl ? addrEl.value.trim() : "";
+  // Push is allowed when there's a geocode source: SNMP pull OR a named address
+  // metavar. Force pushGeocodedCoords false otherwise (checkbox is disabled in
+  // that state). Metavar-name inputs are FMG-only — absent on standalone
+  // FortiGate, where they fall back to the defaults (ignored by that path).
+  var pushAllowed = (pullEl && pullEl.checked === true) || addrVal !== "";
   var out = {
     addAsMonitored: addMonEl.checked === true,
     autoMonitorInterfaces: ami === undefined ? null : ami,
     pullSnmpLocation: pullEl ? pullEl.checked === true : false,
-    // Force pushGeocodedCoords false when pull is off — the operator can't
-    // push what they aren't pulling, and the checkbox is rendered disabled
-    // in that state.
-    pushGeocodedCoords: (pullEl && pullEl.checked && pushEl) ? pushEl.checked === true : false,
+    pushGeocodedCoords: (pushAllowed && pushEl) ? pushEl.checked === true : false,
+    latitudeMetavar: (latEl && latEl.value.trim()) || "Latitude",
+    longitudeMetavar: (lngEl && lngEl.value.trim()) || "Longitude",
+    addressMetavar: addrVal,
   };
   // Phase 2: FortiGate subtab is the primary class subtab for FMG / standalone
   // FortiGate integrations. Read its per-stream values into config.fortigateMonitor.streams.
@@ -3342,7 +3405,7 @@ async function openCreateModal(type) {
     // pull-from-SNMP and push-geocoded-coords toggles previously surfaced
     // inside Monitoring → FortiGate. DOM ids preserved so the existing save
     // path (`_readFortigateMonitorBlock`) keeps finding them.
-    addTabs.push({ key: "geographicLocation", label: "Geographic Location", html: geographicLocationFormHTML(false, false) });
+    addTabs.push({ key: "geographicLocation", label: "Geographic Location", html: geographicLocationFormHTML(false, false, "Latitude", "Longitude", "", type) });
     body = _intRenderTabbedBody("intg-edit", addTabs);
   } else if (isAd || isEntra || isWin) {
     var addMonSettings = {};
@@ -3746,7 +3809,14 @@ async function openEditModal(id) {
         editTabs.push({
           key: "geographicLocation",
           label: "Geographic Location",
-          html: geographicLocationFormHTML(fwFgCfgEdit.pullSnmpLocation === true, fwFgCfgEdit.pushGeocodedCoords === true),
+          html: geographicLocationFormHTML(
+            fwFgCfgEdit.pullSnmpLocation === true,
+            fwFgCfgEdit.pushGeocodedCoords === true,
+            fwFgCfgEdit.latitudeMetavar || "Latitude",
+            fwFgCfgEdit.longitudeMetavar || "Longitude",
+            fwFgCfgEdit.addressMetavar || "",
+            intg.type,
+          ),
         });
       }
       body = _intRenderTabbedBody("intg-edit", editTabs);

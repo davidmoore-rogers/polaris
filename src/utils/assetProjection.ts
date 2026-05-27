@@ -82,6 +82,7 @@ export interface ProjectedAsset {
   latitude: number | null;
   longitude: number | null;
   snmpLocation: string | null;
+  learnedAddress: string | null;
 }
 
 export type ProjectionProvenance = Partial<Record<keyof ProjectedAsset, AssetSourceKind | string>>;
@@ -354,6 +355,14 @@ const SNMP_LOCATION_RULES: FieldRule[] = [
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "snmpLocation") },
 ];
 
+// Auto-discovered street address from the FMG per-device address metavariable
+// (operator-named via `fortigateMonitor.addressMetavar`). Only fortigate-firewall
+// sources carry it; the value is whatever string the operator stored in that
+// metavar. Surfaced as "Address" on the asset details General tab.
+const LEARNED_ADDRESS_RULES: FieldRule[] = [
+  { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "metavarAddress") },
+];
+
 // Walk priority rules in order; return the first non-empty value plus its
 // source kind. Inferred sources are excluded — they're phase-1 backfill
 // skeletons, not authoritative observations.
@@ -389,6 +398,7 @@ export function projectAssetFromSources(
     latitude: null,
     longitude: null,
     snmpLocation: null,
+    learnedAddress: null,
   };
   const provenance: ProjectionProvenance = {};
 
@@ -416,6 +426,7 @@ export function projectAssetFromSources(
   apply("latitude", LATITUDE_RULES);
   apply("longitude", LONGITUDE_RULES);
   apply("snmpLocation", SNMP_LOCATION_RULES);
+  apply("learnedAddress", LEARNED_ADDRESS_RULES);
 
   return { projected, provenance };
 }

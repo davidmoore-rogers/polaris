@@ -1379,6 +1379,7 @@ const ASSETS = [
     status: "active",
     location: "DC1 Security Rack",
     learnedLocation: null,
+    learnedAddress: "421 Great Circle Rd, Nashville, TN 37228",
     department: "Network Security",
     assignedTo: "network-team",
     os: "FortiOS",

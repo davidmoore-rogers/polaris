@@ -7,7 +7,8 @@
  *
  * Behavior per integration type:
  *   - `fortimanager`: writes BOTH targets natively against FMG:
- *       1. Per-device metavars `Latitude` / `Longitude` on
+ *       1. Per-device metavars (named by `latMetavar` / `lngMetavar`, defaulting
+ *          to `Latitude` / `Longitude`) on
  *          `/dvmdb/adom/<adom>/device/<n>` (operator-existing convention)
  *       2. CMDB GUI coords `gui-device-latitude` / `gui-device-longitude` on
  *          `/pm/config/device/<n>/global/system/global` (drives FMG's map +
@@ -42,6 +43,10 @@ export async function pushCoordsToFortigate(
   deviceName: string,
   latitude: number,
   longitude: number,
+  // FMG metavar names to write. Default to the common convention; operators can
+  // rename them per integration. Ignored by the standalone FortiGate path.
+  latMetavar = "Latitude",
+  lngMetavar = "Longitude",
 ): Promise<CoordPushResult> {
   const latStr = latitude.toFixed(6);
   const lngStr = longitude.toFixed(6);
@@ -51,12 +56,14 @@ export async function pushCoordsToFortigate(
     const targets: string[] = [];
     let metavarErr: string | null = null;
     let cmdbErr: string | null = null;
+    const latKey = latMetavar.trim() || "Latitude";
+    const lngKey = lngMetavar.trim() || "Longitude";
 
     try {
       await setFmgDeviceMetaFields(
         cfg,
         deviceName,
-        { Latitude: latStr, Longitude: lngStr },
+        { [latKey]: latStr, [lngKey]: lngStr },
         integration.id,
       );
       targets.push("fmg_metavars");
