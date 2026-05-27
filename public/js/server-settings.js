@@ -1888,33 +1888,53 @@ function initCapacityActions() {
  * confirms the operator, posts to POST /capacity-advisor/stage, and renders
  * per-row success/error badges from the receipt.
  */
+function wireAdvisorRestartBtn(restartBtn) {
+  if (!restartBtn) return;
+  restartBtn.addEventListener("click", async function () {
+    if (!await warnIfDiscoveryRunning("restart")) return;
+    var ok = await showConfirm(
+      "Restart Polaris now?\n\n" +
+      "The server will be unreachable for ~30 seconds. Any in-flight operator action " +
+      "will fail and must be retried after the restart."
+    );
+    if (!ok) return;
+    restartBtn.disabled = true;
+    restartBtn.textContent = "Restarting...";
+    try {
+      await api.serverSettings.restart();
+      _advisorJustStaged = false;
+      pollUntilServerReachable();
+    } catch (err) {
+      showToast("Restart failed: " + (err && err.message ? err.message : "unknown error"), "error");
+      restartBtn.disabled = false;
+      restartBtn.textContent = "Restart Polaris to apply";
+    }
+  });
+}
+
+/**
+ * Mark a staged advisor row in place: drop the checkbox, flip the Status pill
+ * to "Staged". Staged env values live in .env but don't reach the running
+ * process until restart, so a re-fetch would still show them as pending —
+ * hence we mutate the DOM directly instead of re-rendering from the advisor.
+ */
+function markAdvisorRowStaged(card, key) {
+  var checkbox = card.querySelector('input.advisor-stage-checkbox[data-key="' + key + '"]');
+  if (!checkbox) return;
+  var row = checkbox.closest("tr");
+  if (!row) return;
+  var cells = row.querySelectorAll("td");
+  // Status pill is the 4th column; Stage checkbox is the 5th (see _advisorRowHtml).
+  if (cells[3]) cells[3].innerHTML = '<span class="advisor-pill advisor-pill-ok">Staged</span>';
+  if (cells[4]) cells[4].innerHTML = '<span class="muted">✓</span>';
+  row.classList.remove("advisor-row-change");
+}
+
 function initCapacityAdvisorActions() {
   var card = document.getElementById("capacity-advisor-card");
   if (!card) return;
 
-  var restartBtn = document.getElementById("capacity-advisor-restart-btn");
-  if (restartBtn) {
-    restartBtn.addEventListener("click", async function () {
-      if (!await warnIfDiscoveryRunning("restart")) return;
-      var ok = await showConfirm(
-        "Restart Polaris now?\n\n" +
-        "The server will be unreachable for ~30 seconds. Any in-flight operator action " +
-        "will fail and must be retried after the restart."
-      );
-      if (!ok) return;
-      restartBtn.disabled = true;
-      restartBtn.textContent = "Restarting...";
-      try {
-        await api.serverSettings.restart();
-        _advisorJustStaged = false;
-        pollUntilServerReachable();
-      } catch (err) {
-        showToast("Restart failed: " + (err && err.message ? err.message : "unknown error"), "error");
-        restartBtn.disabled = false;
-        restartBtn.textContent = "Restart Polaris to apply";
-      }
-    });
-  }
+  wireAdvisorRestartBtn(document.getElementById("capacity-advisor-restart-btn"));
 
   var stageBtn = document.getElementById("capacity-advisor-stage-btn");
   if (!stageBtn || stageBtn.disabled) return;
@@ -1937,16 +1957,36 @@ function initCapacityAdvisorActions() {
     stageBtn.textContent = "Staging...";
     try {
       var receipt = await api.serverSettings.stageCapacityAdvisor(checked);
-      var applied = (receipt.results || []).filter(function (r) { return r.status === "applied"; }).length;
+      var appliedRows = (receipt.results || []).filter(function (r) { return r.status === "applied"; });
+      var applied = appliedRows.length;
       var errored = (receipt.results || []).filter(function (r) { return r.status === "error";   });
       if (errored.length > 0) {
         showToast("Staged " + applied + ", " + errored.length + " error" + (errored.length === 1 ? "" : "s") + ": " + errored.map(function (r) { return r.key + " — " + (r.reason || "unknown"); }).join("; "), "error");
-      } else {
-        _advisorJustStaged = true;
-        showToast("Staged " + applied + " value" + (applied === 1 ? "" : "s") + ". Restart Polaris to apply.", "success");
+        stageBtn.disabled = false;
+        stageBtn.textContent = "Stage selected";
+        return;
       }
-      _dbLoaded = false;
-      loadDatabaseInfo();
+      // Staged values are written to .env but don't reach the running process
+      // until restart, so re-fetching the advisor would still show them as
+      // pending. Instead, mark the staged rows and swap the footer button to
+      // "Restart Polaris to apply" in place — no full-tab reload.
+      _advisorJustStaged = true;
+      appliedRows.forEach(function (r) { markAdvisorRowStaged(card, r.key); });
+      showToast("Staged " + applied + " value" + (applied === 1 ? "" : "s") + ". Restart Polaris to apply.", "success");
+
+      var remaining = card.querySelectorAll("input.advisor-stage-checkbox").length;
+      if (remaining === 0) {
+        var restartBtn = document.createElement("button");
+        restartBtn.className = "btn btn-warning";
+        restartBtn.id = "capacity-advisor-restart-btn";
+        restartBtn.textContent = "Restart Polaris to apply";
+        stageBtn.replaceWith(restartBtn);
+        wireAdvisorRestartBtn(restartBtn);
+      } else {
+        // Other recommendations remain unstaged — keep the Stage button live.
+        stageBtn.disabled = false;
+        stageBtn.textContent = "Stage selected";
+      }
     } catch (err) {
       showToast("Stage failed: " + (err && err.message ? err.message : "unknown error"), "error");
       stageBtn.disabled = false;
