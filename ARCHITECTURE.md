@@ -1595,6 +1595,54 @@ Operator-uploaded images that overlay vendor logos on each Device Map topology n
 
 ---
 
+## Multi-process architecture
+
+Polaris can run as one process (default) or split across specialized processes
+that coordinate through the shared PostgreSQL + pg-boss queue (the SolarWinds
+Orion model: many supervised services + a grouping wrapper). The role is chosen
+by `POLARIS_ROLE`; capability gating lives in `src/utils/role.ts` (`roleConfig`),
+and `src/app.ts` branches on the capability flags at boot.
+
+| Role | Boots | Notes |
+|---|---|---|
+| `all` (default, unset) | everything | Today's single-process behavior — existing installs + `npm run dev` unchanged. |
+| `web` | Express/HTTPS/agent-WS, **all singleton schedulers**, one-shot migrations, pg-boss **producer** connection | Single instance — the control plane. Owns the in-app updater (restarts the whole group). |
+| `monitor` | pg-boss **monitor-queue consumers** + floating pool, sample/probe write buffers | Run **N replicas** — pg-boss hands each job to exactly one worker, so replicas never double-execute. |
+| `discovery` | pg-boss **discovery-queue consumer** (`runDiscovery`) | Executes discovery runs off the `polaris-discovery-run` queue. |
+
+**Discovery is queue-backed.** `triggerDiscovery` (route + scheduler) validates,
+upserts a `queued` `DiscoveryRun`, and `publishDiscoveryJob`s to the
+`polaris-discovery-run` queue (singletonKey = integrationId → one active run per
+integration). The discovery worker runs `runDiscovery`, transitioning the
+`DiscoveryRun` row (queued → running → completed/aborted/error) and flushing a
+progress accumulator to it; the web process reads that row for the
+`/discoveries` endpoint, `isDiscoveryRunning`, the slow-run check, and renders
+cancel by setting `cancelRequested` (the worker polls it → aborts its local
+AbortController). When pg-boss is off (cursor mode), `triggerDiscovery` runs
+`runDiscovery` in-process — the single code path across topologies. See
+`src/services/discoveryRunState.ts` and `DiscoveryRun` in the domain model.
+
+**Singletons** (monitor producer ticks, discovery scheduler, reconcilers,
+rollups, prune, one-shot migrations) are pinned to `web`/`all` so they run in
+exactly one process; monitor/discovery stay pure consumers.
+
+**Connection budgeting.** Each process opens its own Prisma + pg-boss pool, so
+the group footprint ≈ `(monitor replicas + 2) × per-process pool`. Size so it
+stays under Postgres `max_connections` (PgBouncer absorbs the Prisma pools but
+pg-boss pools always hit Postgres directly). Each process emits
+`polaris_db_pool_role_capacity{role}`; the Capacity Advisor's max_connections
+model multiplies by `POLARIS_MONITOR_REPLICAS` (and `peakObserved` is already
+group-wide via `pg_stat_activity`).
+
+**Deployment.** systemd: `polaris-migrate.service` (oneshot, sole migrator) →
+`polaris-web.service` / `polaris-monitor@.service` (templated, N) /
+`polaris-discovery.service`, grouped by `polaris.target` (`systemctl start
+polaris.target`). Docker: one image, per-service `POLARIS_ROLE`, a one-shot
+`migrate` compose service the app services gate on. Legacy `polaris.service`
+(role unset = `all`) is retained. See [docs/INSTALL.md](docs/INSTALL.md).
+
+---
+
 ## Monitoring Architecture
 
 > Moved from CLAUDE.md's Authentication & RBAC section. Covers polling-method resolution, the Polaris Agent, branch-class FortiGate workarounds, per-class FortiSwitch/FortiAP direct polling, push toggles, and verbose-logging behavior.
