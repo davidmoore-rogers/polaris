@@ -2161,8 +2161,27 @@ router.get("/:id/sources", requirePermission("assets", "read"), async (req, res,
       return (b.lastSeen?.getTime() ?? 0) - (a.lastSeen?.getTime() ?? 0);
     });
 
+    // Collapse rows that are the "same source" but split across multiple
+    // AssetSource rows because the device's identity key churned. The worst
+    // offender is `fortigate-endpoint`, whose externalId is the endpoint MAC —
+    // a MAC change spawns a fresh source row and leaves the old one behind, so
+    // the same integration would render as several near-identical cards. We
+    // key dedup on (sourceKind, integrationId) and keep the most recent row
+    // (rows are already lastSeen-desc within each sourceKind from the sort
+    // above). The serial/GUID-keyed kinds (fortigate-firewall/switch/ap, ad,
+    // entra, intune) have stable externalIds and so never collapse. The
+    // dropped MAC history is still visible in the Firewall Sightings and IP
+    // History tables on the same Sources tab.
+    const seen = new Set<string>();
+    const deduped = rows.filter((r) => {
+      const key = `${r.sourceKind} ${r.integrationId ?? ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
     res.json(
-      rows.map((r) => ({
+      deduped.map((r) => ({
         id: r.id,
         sourceKind: r.sourceKind,
         externalId: r.externalId,
