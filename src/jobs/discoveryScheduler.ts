@@ -32,7 +32,7 @@ async function runScheduledDiscoveries(): Promise<void> {
     const now = Date.now();
 
     for (const intg of integrations) {
-      if (isDiscoveryRunning(intg.id)) continue;
+      if (await isDiscoveryRunning(intg.id)) continue;
 
       const intervalMs = (intg.pollInterval ?? 12) * 60 * 60 * 1000;
       const lastRun = intg.lastDiscoveryAt?.getTime();
@@ -45,5 +45,11 @@ async function runScheduledDiscoveries(): Promise<void> {
   });
 }
 
-runScheduledDiscoveries();
-setInterval(runScheduledDiscoveries, CHECK_INTERVAL_MS);
+/**
+ * Start the discovery scheduler (singleton — runs only in roles with
+ * runsSchedulers, i.e. web/all). Fires once immediately, then every 15 min.
+ */
+export function startDiscoveryScheduler(): void {
+  runScheduledDiscoveries();
+  setInterval(runScheduledDiscoveries, CHECK_INTERVAL_MS);
+}

@@ -22,6 +22,21 @@ import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
 import { recordSample, getBaselines, type Baseline } from "../../services/discoveryDurationService.js";
+import { isPgbossRunning, publishDiscoveryJob } from "../../services/queueService.js";
+import {
+  upsertQueuedRun,
+  markRunStarted,
+  flushRunProgress,
+  finishRun,
+  isRunActive,
+  anyRunActive,
+  isCancelRequested,
+  requestCancel,
+  listActiveRuns,
+  persistSlowFlags,
+  newRunAccumulator,
+  type RunAccumulator,
+} from "../../services/discoveryRunState.js";
 import { releaseDnsResolvedAt } from "../../services/dnsResolvedReservationService.js";
 import { recordDiscovery, observeDiscoveryPhase } from "../../metrics.js";
 import { getAdMonitorProtocol, invalidateMonitorSettingsCache } from "../../services/monitoringService.js";
@@ -117,29 +132,11 @@ function isMaskedSecretSentinel(value: unknown): boolean {
   return typeof value === "string" && value.length > 0 && /^•+$/.test(value);
 }
 
-// Track in-flight DHCP discovery per integration — abort previous if re-saved.
-// Carries per-run timing so we can detect "taking longer than normal" and
-// emit `integration.discover.slow` events without double-firing.
-interface ActiveDiscoveryEntry {
-  controller: AbortController;
-  name: string;
-  type: string;                           // e.g. "fortimanager", "fortigate"
-  startedAt: number;                      // Date.now() at run start
-  activeDevices: Set<string>;             // FMG: currently-running FortiGate names
-  deviceStartedAt: Map<string, number>;   // FMG: per-FortiGate start timestamps
-  slowAlerted: boolean;                   // overall-run slow event already emitted
-  slowAlertedDevices: Set<string>;        // per-FortiGate slow event already emitted
-  // Rolling progress counters surfaced in the UI's "N/M complete, S skipped"
-  // line. FMG only — populated by parsing the existing onProgress events
-  // (`discover.devices` info message for the total, then `discover.device.*`
-  // events for the per-device terminal counts). Standalone FortiGate runs
-  // leave these at the initial values since there's exactly one device.
-  totalDevices: number | null;
-  completedCount: number;
-  skippedOfflineCount: number;             // conn_status !== 1 at roster time
-  skippedErrorCount: number;               // misconfig / unreachable / sync failure
-}
-const activeDiscovery = new Map<string, ActiveDiscoveryEntry>();
+// In-flight discovery state lives in the DiscoveryRun table (see
+// src/services/discoveryRunState.ts), not an in-memory Map, so the web process
+// can render progress + signal cancel while the discovery-role process executes
+// the run. The discovery worker mutates a local RunAccumulator and flushes it to
+// the row; abort is signaled via the row's cancelRequested flag.
 
 // Safely stringify a proxy-query response, converting v8 string-limit and oversized
 // payloads into a helpful 413 instead of an opaque 500.
@@ -598,33 +595,31 @@ router.get("/", async (req, res, next) => {
 router.get("/discoveries", async (req, res) => {
   await checkForSlowRuns().catch(() => {});
   const now = Date.now();
-  const running = Array.from(activeDiscovery.entries()).map(([id, entry]) => {
-    // For FortiManager integrations, surface the FMG itself as a synthetic
-    // "active device" whenever its worker has any inflight calls (proxy or
-    // native). Discovery starts by talking to FMG directly for the device
-    // roster + per-device mgmt-IP resolves + CMDB scrapes — without this
-    // the operator sees an empty active list during those phases even
-    // though work is clearly happening on the FMG side.
-    const devices = [...entry.activeDevices];
-    if (entry.type === "fortimanager") {
-      const w = getFmgWorker(id);
-      if (w.proxyInFlightLabel !== null || w.nativeInFlightCount > 0) {
-        devices.unshift(entry.name);
-      }
+  const rows = await listActiveRuns();
+  const running = rows.map((row) => {
+    const base = (row.startedAt ?? row.createdAt).getTime();
+    const devices = (row.activeDevices as { name: string; startedAt: number }[]).map((d) => d.name);
+    // FMG self-as-active-device: the old in-memory path surfaced the FMG itself
+    // while its worker had inflight calls (roster + mgmt-IP resolve + CMDB
+    // phases). That worker state is process-local to the discovery process, so
+    // here (web process) we approximate: a running FortiManager run with no
+    // per-device entries yet is in those FMG-bound phases — show the FMG.
+    if (row.type === "fortimanager" && row.status === "running" && devices.length === 0) {
+      devices.unshift(row.integrationName);
     }
     return {
-      id,
-      name: entry.name,
-      type: entry.type,
-      startedAt: entry.startedAt,
-      elapsedMs: now - entry.startedAt,
+      id: row.integrationId,
+      name: row.integrationName,
+      type: row.type,
+      startedAt: base,
+      elapsedMs: now - base,
       activeDevices: devices,
-      slow: entry.slowAlerted,
-      slowDevices: [...entry.slowAlertedDevices],
-      totalDevices: entry.totalDevices,
-      completedCount: entry.completedCount,
-      skippedOfflineCount: entry.skippedOfflineCount,
-      skippedErrorCount: entry.skippedErrorCount,
+      slow: row.slowAlerted,
+      slowDevices: row.slowAlertedDevices as string[],
+      totalDevices: row.totalDevices,
+      completedCount: row.completedCount,
+      skippedOfflineCount: row.skippedOfflineCount,
+      skippedErrorCount: row.skippedErrorCount,
     };
   });
   res.json({ discoveries: running });
@@ -634,13 +629,18 @@ router.get("/discoveries", async (req, res) => {
 // Admin-only: the router-level guard already requires integrations:write, but
 // aborting a running discovery/query is a disruptive operation we restrict to
 // admin-equivalent roles (integrations:fullwrite). networkadmin (write) cannot.
-router.delete("/:id/discover", requirePermission("integrations", "fullwrite"), (req, res) => {
-  const id = req.params.id as string;
-  const entry = activeDiscovery.get(id);
-  if (!entry) { res.status(404).json({ message: "No active discovery for this integration" }); return; }
-  entry.controller.abort();
-  activeDiscovery.delete(id);
-  res.status(204).send();
+router.delete("/:id/discover", requirePermission("integrations", "fullwrite"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    // Set the cancel flag on the run row; the discovery worker polls it and
+    // aborts its local AbortController (the run may be executing in a separate
+    // process, so there's no in-memory controller to call here).
+    const cancelled = await requestCancel(id);
+    if (!cancelled) { res.status(404).json({ message: "No active discovery for this integration" }); return; }
+    res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
 });
 
 // GET /api/v1/integrations/:id
@@ -777,52 +777,8 @@ router.post("/", async (req, res, next) => {
       }
     }
 
-    // Skip auto-discovery on create — require a successful test first
-    const canDiscover = false;
-
-    if (canDiscover) {
-      activeDiscovery.get(integration.id)?.controller.abort();
-      const ac = new AbortController();
-      activeDiscovery.set(integration.id, {
-        controller: ac,
-        name: input.name,
-        type: input.type,
-        startedAt: Date.now(),
-        activeDevices: new Set(),
-        deviceStartedAt: new Map(),
-        slowAlerted: false,
-        slowAlertedDevices: new Set(),
-        totalDevices: null,
-        completedCount: 0,
-        skippedOfflineCount: 0,
-        skippedErrorCount: 0,
-      });
-      logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integration.id, resourceName: input.name, actor: req.session?.username, message: `DHCP discovery started for "${input.name}"` });
-      try {
-        let discoveryResult: DiscoveryResult;
-        if (input.type === "windowsserver") {
-          const subnets = await windowsServer.discoverDhcpScopes(input.config as any, ac.signal);
-          // Windows Server stamps subnets with config.host as their fortigateDevice,
-          // so the "known roster" is just the DHCP server host itself.
-          const wsHost = (input.config as any).host as string;
-          discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
-        } else if (input.type === "fortigate") {
-          discoveryResult = await fortigate.discoverDhcpSubnets(input.config as any, ac.signal);
-        } else {
-          discoveryResult = await fortimanager.discoverDhcpSubnets(input.config as any, ac.signal, undefined, undefined, undefined, integration.id);
-        }
-        const syncResult = await syncDhcpSubnets(integration.id, input.name, input.type, discoveryResult, req.session?.username, "full");
-        response.dhcpDiscovery = syncResult;
-        logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integration.id, resourceName: input.name, actor: req.session?.username, message: `DHCP discovery completed for "${input.name}" — ${syncResult.created.length} created, ${syncResult.updated.length} updated, ${syncResult.skipped.length} skipped` });
-      } catch (err: any) {
-        if (err.name !== "AbortError") {
-          response.dhcpDiscoveryError = err.message || "DHCP discovery failed";
-          logEvent({ action: "integration.discover.error", resourceType: "integration", resourceId: integration.id, resourceName: input.name, actor: req.session?.username, level: "error", message: `DHCP discovery failed for "${input.name}": ${err.message || "Unknown error"}` });
-        }
-      } finally {
-        activeDiscovery.delete(integration.id);
-      }
-    }
+    // Auto-discovery on create is intentionally disabled — operators must run a
+    // successful credential test, then trigger discovery explicitly.
 
     res.status(201).json(response);
   } catch (err) {
@@ -1451,8 +1407,8 @@ router.post("/:id/register", async (req, res, next) => {
 
 // ─── Shared discovery trigger (used by route handler + scheduler) ─────────────
 
-export function isDiscoveryRunning(integrationId: string): boolean {
-  return activeDiscovery.has(integrationId);
+export async function isDiscoveryRunning(integrationId: string): Promise<boolean> {
+  return isRunActive(integrationId);
 }
 
 /**
@@ -1467,15 +1423,16 @@ export function isDiscoveryRunning(integrationId: string): boolean {
  * the UI flips to amber promptly without waiting on the slower timer.
  */
 export async function checkForSlowRuns(): Promise<void> {
-  if (activeDiscovery.size === 0) return;
+  const rows = await listActiveRuns();
+  if (rows.length === 0) return;
 
   // Gather all (integration, device) unit keys we need baselines for.
   const unitKeys: string[] = [];
-  for (const [id, entry] of activeDiscovery.entries()) {
-    if (!entry.slowAlerted) unitKeys.push(id);
-    if (entry.type === "fortimanager") {
-      for (const dev of entry.deviceStartedAt.keys()) {
-        if (!entry.slowAlertedDevices.has(dev)) unitKeys.push(`${id}:${dev}`);
+  for (const row of rows) {
+    if (!row.slowAlerted) unitKeys.push(row.integrationId);
+    if (row.type === "fortimanager") {
+      for (const dev of row.activeDevices as { name: string; startedAt: number }[]) {
+        if (!(row.slowAlertedDevices as string[]).includes(dev.name)) unitKeys.push(`${row.integrationId}:${dev.name}`);
       }
     }
   }
@@ -1489,20 +1446,27 @@ export async function checkForSlowRuns(): Promise<void> {
   }
 
   const now = Date.now();
-  for (const [id, entry] of activeDiscovery.entries()) {
+  for (const row of rows) {
+    const id = row.integrationId;
+    const startedMs = (row.startedAt ?? row.createdAt).getTime();
+    let slowAlerted = row.slowAlerted;
+    const slowAlertedDevices = new Set(row.slowAlertedDevices as string[]);
+    let mutated = false;
+
     // Overall-run threshold — applies to every integration type.
-    if (!entry.slowAlerted) {
+    if (!slowAlerted) {
       const bl = baselines.get(id) ?? null;
-      const elapsed = now - entry.startedAt;
+      const elapsed = now - startedMs;
       if (bl && elapsed > bl.thresholdMs) {
-        entry.slowAlerted = true;
+        slowAlerted = true;
+        mutated = true;
         logEvent({
           action: "integration.discover.slow",
           resourceType: "integration",
           resourceId: id,
-          resourceName: entry.name,
+          resourceName: row.integrationName,
           level: "warning",
-          message: `Discovery for "${entry.name}" is running longer than normal — ${fmtSec(elapsed)} elapsed vs typical ${fmtSec(bl.avgMs)} (threshold ${fmtSec(bl.thresholdMs)}, ${bl.sampleCount} samples)`,
+          message: `Discovery for "${row.integrationName}" is running longer than normal — ${fmtSec(elapsed)} elapsed vs typical ${fmtSec(bl.avgMs)} (threshold ${fmtSec(bl.thresholdMs)}, ${bl.sampleCount} samples)`,
           details: {
             scope: "integration",
             integrationId: id,
@@ -1517,25 +1481,26 @@ export async function checkForSlowRuns(): Promise<void> {
     }
 
     // Per-FortiGate threshold — FMG only.
-    if (entry.type === "fortimanager") {
-      for (const [dev, devStart] of entry.deviceStartedAt.entries()) {
-        if (entry.slowAlertedDevices.has(dev)) continue;
-        const key = `${id}:${dev}`;
+    if (row.type === "fortimanager") {
+      for (const dev of row.activeDevices as { name: string; startedAt: number }[]) {
+        if (slowAlertedDevices.has(dev.name)) continue;
+        const key = `${id}:${dev.name}`;
         const bl = baselines.get(key) ?? null;
-        const elapsed = now - devStart;
+        const elapsed = now - dev.startedAt;
         if (bl && elapsed > bl.thresholdMs) {
-          entry.slowAlertedDevices.add(dev);
+          slowAlertedDevices.add(dev.name);
+          mutated = true;
           logEvent({
             action: "integration.discover.slow",
             resourceType: "integration",
             resourceId: id,
-            resourceName: entry.name,
+            resourceName: row.integrationName,
             level: "warning",
-            message: `Discovery on FortiGate "${dev}" via "${entry.name}" is running longer than normal — ${fmtSec(elapsed)} elapsed vs typical ${fmtSec(bl.avgMs)} (threshold ${fmtSec(bl.thresholdMs)}, ${bl.sampleCount} samples)`,
+            message: `Discovery on FortiGate "${dev.name}" via "${row.integrationName}" is running longer than normal — ${fmtSec(elapsed)} elapsed vs typical ${fmtSec(bl.avgMs)} (threshold ${fmtSec(bl.thresholdMs)}, ${bl.sampleCount} samples)`,
             details: {
               scope: "fortigate",
               integrationId: id,
-              device: dev,
+              device: dev.name,
               elapsedMs: elapsed,
               avgMs: bl.avgMs,
               stddevMs: bl.stddevMs,
@@ -1546,6 +1511,12 @@ export async function checkForSlowRuns(): Promise<void> {
         }
       }
     }
+
+    // Persist the dedup flags so the next poll (this process or the 30s job)
+    // doesn't re-emit. The worker's progress flushes preserve these because the
+    // accumulator is the worker's source of truth for activeDevices, not these
+    // flags — checkForSlowRuns only runs in the web/scheduler role.
+    if (mutated) await persistSlowFlags(id, slowAlerted, [...slowAlertedDevices]);
   }
 }
 
@@ -1607,9 +1578,12 @@ async function runPreflightTest(integration: { id: string; type: string; config:
 }
 
 /**
- * Validates the integration, registers it in activeDiscovery, and fires the
- * discovery pipeline detached (returns before it completes). Throws AppError
- * on validation failure so callers can handle it appropriately.
+ * Enqueue a discovery run. Validates the integration config (fast 400 for the
+ * manual route), upserts a `queued` DiscoveryRun row, then either publishes a
+ * pg-boss discovery job (consumed by the discovery-role process) or — when
+ * pg-boss is off (cursor-mode single-process installs) — runs it in-process.
+ * Coalesces: a re-trigger while a run is queued/running is a no-op (the
+ * singleton queue would absorb it anyway), preserving the in-flight row.
  *
  * actor: the username triggering the run, or "auto-discovery" for scheduled runs.
  */
@@ -1634,11 +1608,45 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
     }
   }
 
-  // Live credential test before committing to a discovery run. Updates
-  // lastTestAt/lastTestOk so the integration list reflects the current state.
-  // Runs before activeDiscovery.set so a failed preflight never shows as
-  // in-flight on the Integrations page.
-  const preflightLabel = actor === "auto-discovery" ? "Scheduled" : "Manual";
+  // Coalesce concurrent triggers. The scheduler already gates on
+  // isDiscoveryRunning, but the manual route doesn't — and a re-trigger
+  // shouldn't reset the live progress of an in-flight run.
+  if (await isRunActive(integrationId)) return;
+
+  await upsertQueuedRun({ integrationId, integrationName: integration.name, type: integration.type, actor });
+
+  // pg-boss live → hand off to the discovery-role worker. Off (cursor mode,
+  // single-process) → run in-process detached, the historical behavior. The
+  // credential preflight now runs inside runDiscovery (it may execute in a
+  // different process), so the manual route returns 202 immediately and a
+  // failed preflight surfaces via the DiscoveryRun row + an Event.
+  const enqueued = await publishDiscoveryJob(integrationId, actor);
+  if (!enqueued) void runDiscovery(integrationId, actor);
+}
+
+/**
+ * Execute a discovery run. Invoked by the pg-boss discovery worker (discovery
+ * role) or in-process by triggerDiscovery's cursor-mode fallback. Owns the
+ * credential preflight, the run-state transitions on DiscoveryRun, the
+ * progress accumulator (flushed to the row), and cancellation (polls the row's
+ * cancelRequested flag and aborts its local AbortController).
+ */
+export async function runDiscovery(integrationId: string, actor: string): Promise<void> {
+  const integration = await prisma.integration.findUnique({ where: { id: integrationId } });
+  if (!integration) {
+    await finishRun(integrationId, "error").catch(() => {});
+    return;
+  }
+
+  const config = integration.config as Record<string, unknown>;
+  const integrationName = integration.name;
+  const integrationType = integration.type;
+  const label = actor === "auto-discovery" ? "Scheduled" : "Manual";
+  const kindLabel = (integration.type === "entraid" || integration.type === "activedirectory") ? "device discovery" : "DHCP discovery";
+
+  // Live credential test before committing to the run. Updates lastTestAt/Ok
+  // so the integration list reflects current state. A failure ends the run as
+  // `error` (the manual route already returned 202).
   const preflight = await runPreflightTest(integration);
   await prisma.integration.update({
     where: { id: integrationId },
@@ -1650,42 +1658,40 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
       level: "warning",
       resourceType: "integration",
       resourceId: integrationId,
-      resourceName: integration.name,
+      resourceName: integrationName,
       actor,
-      message: `${preflightLabel} discovery blocked for "${integration.name}" — credential test failed: ${preflight.message}`,
+      message: `${label} discovery blocked for "${integrationName}" — credential test failed: ${preflight.message}`,
     });
-    throw new AppError(503, `Credential test failed: ${preflight.message}`);
+    await finishRun(integrationId, "error").catch(() => {});
+    return;
   }
 
-  activeDiscovery.get(integrationId)?.controller.abort();
-  const ac = new AbortController();
-  const integrationName = integration.name;
-  const integrationType = integration.type;
   const runStartedAt = Date.now();
-  activeDiscovery.set(integrationId, {
-    controller: ac,
-    name: integrationName,
-    type: integrationType,
-    startedAt: runStartedAt,
-    activeDevices: new Set(),
-    deviceStartedAt: new Map(),
-    slowAlerted: false,
-    slowAlertedDevices: new Set(),
-    totalDevices: null,
-    completedCount: 0,
-    skippedOfflineCount: 0,
-    skippedErrorCount: 0,
-  });
-
+  await markRunStarted(integrationId, new Date(runStartedAt));
   await prisma.integration.update({ where: { id: integrationId }, data: { lastDiscoveryAt: new Date() } });
-
-  const label = actor === "auto-discovery" ? "Scheduled" : "Manual";
-  const kindLabel = (integration.type === "entraid" || integration.type === "activedirectory") ? "device discovery" : "DHCP discovery";
   logEvent({ action: "integration.discover.started", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} started for "${integrationName}"` });
 
-  // Per-integration verbose flag — when on (and within its 30-minute window),
-  // every discovery step ALSO emits a pino info-level line so an operator
-  // running `journalctl -u polaris -f` sees the per-step trace in real time.
+  const acc: RunAccumulator = newRunAccumulator(integrationId, integrationName, integrationType, runStartedAt);
+  const ac = new AbortController();
+
+  // Cancel signaling across the process boundary: the web DELETE route sets
+  // cancelRequested on the row; we poll it and abort the local controller.
+  if (await isCancelRequested(integrationId)) ac.abort();
+  const cancelTimer = setInterval(() => {
+    isCancelRequested(integrationId)
+      .then((c) => { if (c && !ac.signal.aborted) ac.abort(); })
+      .catch(() => {});
+  }, 3_000);
+
+  // Throttled progress flush so a chatty FMG run doesn't hammer the DB.
+  let lastFlush = 0;
+  const flush = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastFlush < 1_500) return;
+    lastFlush = now;
+    void flushRunProgress(acc);
+  };
+
   const verboseLogging = isVerboseLoggingActive(
     (integration.config && typeof integration.config === "object")
       ? (integration.config as Record<string, unknown>)
@@ -1695,175 +1701,154 @@ export async function triggerDiscovery(integrationId: string, actor: string): Pr
   const onProgress: DiscoveryProgressCallback = (step, level, message, device) => {
     logEvent({ action: `integration.${step}`, resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
     if (verboseLogging) {
-      logger.info(
-        { verbose: true, integrationId, integrationName, step, level, device },
-        message,
-      );
+      logger.info({ verbose: true, integrationId, integrationName, step, level, device }, message);
     }
-    const entry = activeDiscovery.get(integrationId);
     // Progress-counter tracking. Driven off step+level alone (NOT the device
     // param) because the offline skip at fortimanagerService:920 doesn't pass
     // a device — the device.start event hasn't fired yet for those devices.
-    if (entry) {
-      if (step === "discover.devices" && level === "info" && entry.totalDevices === null) {
-        // Roster log: "Found N managed device(s) in ADOM ..." OR
-        // "Found N managed device(s) in ADOM ... — M included, K filtered".
-        // The first capture is always the total roster size before filtering.
-        const m = /Found (\d+) managed device/.exec(message);
-        if (m) entry.totalDevices = Number(m[1]);
-      } else if (step === "discover.device.complete") {
-        entry.completedCount++;
-      } else if (step === "discover.device.skip" && level === "info") {
-        entry.skippedOfflineCount++;
-      } else if (step === "discover.device.skip" && level === "error") {
-        entry.skippedErrorCount++;
-      } else if (step === "discover.device" && level === "error") {
-        entry.skippedErrorCount++;
-      }
+    if (step === "discover.devices" && level === "info" && acc.totalDevices === null) {
+      const m = /Found (\d+) managed device/.exec(message);
+      if (m) acc.totalDevices = Number(m[1]);
+    } else if (step === "discover.device.complete") {
+      acc.completedCount++;
+    } else if (step === "discover.device.skip" && level === "info") {
+      acc.skippedOfflineCount++;
+    } else if (step === "discover.device.skip" && level === "error") {
+      acc.skippedErrorCount++;
+    } else if (step === "discover.device" && level === "error") {
+      acc.skippedErrorCount++;
     }
     if (device) {
-      if (entry) {
-        // Any terminal per-device event clears the device from the active
-        // set. `discover.device.complete` is the happy path; `.skip` and
-        // the error-level `discover.device` event both also end per-device
-        // work and must release the slot — otherwise devices that time out
-        // or error accumulate in activeDevices and the UI shows far more
-        // gates "in flight" than the concurrency cap actually allows.
-        const isTerminal =
-          step === "discover.device.complete" ||
-          step === "discover.device.skip" ||
-          (step === "discover.device" && level === "error");
-        if (isTerminal) {
-          const start = entry.deviceStartedAt.get(device);
-          entry.deviceStartedAt.delete(device);
-          entry.activeDevices.delete(device);
-          entry.slowAlertedDevices.delete(device);
-          // Only record a timing sample for successful completions — skips
-          // and failures shouldn't influence the slow-run baseline.
-          if (step === "discover.device.complete" && start !== undefined) {
-            const unitKey = `${integrationId}:${device}`;
-            recordSample(unitKey, Date.now() - start).catch(() => {});
-          }
-        } else if (step === "discover.device.start") {
-          entry.deviceStartedAt.set(device, Date.now());
-          entry.activeDevices.add(device);
+      const isTerminal =
+        step === "discover.device.complete" ||
+        step === "discover.device.skip" ||
+        (step === "discover.device" && level === "error");
+      if (isTerminal) {
+        const start = acc.activeDevices.get(device);
+        acc.activeDevices.delete(device);
+        // Only record a timing sample for successful completions — skips and
+        // failures shouldn't influence the slow-run baseline.
+        if (step === "discover.device.complete" && start !== undefined) {
+          recordSample(`${integrationId}:${device}`, Date.now() - start).catch(() => {});
         }
+      } else if (step === "discover.device.start") {
+        acc.activeDevices.set(device, Date.now());
       }
     }
+    flush();
   };
 
-  (async () => {
-    try {
-      let discoveryResult: DiscoveryResult;
+  try {
+    let discoveryResult: DiscoveryResult;
 
-      // Accumulate per-device sync totals for the completion log
-      const syncTotals = { created: [] as string[], updated: [] as string[], skipped: [] as string[], deprecated: [] as string[], decommissionedSwitches: [] as string[], decommissionedAps: [] as string[] };
+    // Accumulate per-device sync totals for the completion log
+    const syncTotals = { created: [] as string[], updated: [] as string[], skipped: [] as string[], deprecated: [] as string[], decommissionedSwitches: [] as string[], decommissionedAps: [] as string[] };
 
-      // Per-device callback: sync each FortiGate's data as it arrives (phases 1, 3–9).
-      // Phase 2 (stale deprecation) runs separately at the end once all devices are known.
-      const onDeviceComplete = async (deviceResult: DiscoveryResult) => {
-        const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, deviceResult, actor, "skip-deprecation");
+    // Per-device callback: sync each FortiGate's data as it arrives (phases 1, 3–9).
+    // Phase 2 (stale deprecation) runs separately at the end once all devices are known.
+    const onDeviceComplete = async (deviceResult: DiscoveryResult) => {
+      const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, deviceResult, actor, "skip-deprecation");
+      syncTotals.created.push(...r.created);
+      syncTotals.updated.push(...r.updated);
+      syncTotals.skipped.push(...r.skipped);
+    };
+
+    if (integration.type === "entraid") {
+      // Entra ID discovery produces assets only — no subnets, reservations, or VIPs.
+      const result = await entraId.discoverDevices(config as any, ac.signal, onProgress);
+      if (!ac.signal.aborted) {
+        const r = await syncEntraDevices(integrationId, integrationName, config, result, actor);
         syncTotals.created.push(...r.created);
         syncTotals.updated.push(...r.updated);
         syncTotals.skipped.push(...r.skipped);
-      };
-
-      if (integration.type === "entraid") {
-        // Entra ID discovery produces assets only — no subnets, reservations, or VIPs.
-        const result = await entraId.discoverDevices(config as any, ac.signal, onProgress);
-        if (!ac.signal.aborted) {
-          const r = await syncEntraDevices(integrationId, integrationName, config, result, actor);
-          syncTotals.created.push(...r.created);
-          syncTotals.updated.push(...r.updated);
-          syncTotals.skipped.push(...r.skipped);
-        }
-      } else if (integration.type === "activedirectory") {
-        // Active Directory discovery produces assets only — no subnets, reservations, or VIPs.
-        const result = await activeDirectory.discoverDevices(config as any, ac.signal, onProgress);
-        if (!ac.signal.aborted) {
-          const r = await syncActiveDirectoryDevices(integrationId, integrationName, config, result, actor);
-          syncTotals.created.push(...r.created);
-          syncTotals.updated.push(...r.updated);
-          syncTotals.skipped.push(...r.skipped);
-        }
-      } else if (integration.type === "windowsserver") {
-        const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
-        const wsHost = (config as any).host as string;
-        discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
-        // Windows Server is a single host — no per-device iteration, sync the full result normally
+      }
+    } else if (integration.type === "activedirectory") {
+      // Active Directory discovery produces assets only — no subnets, reservations, or VIPs.
+      const result = await activeDirectory.discoverDevices(config as any, ac.signal, onProgress);
+      if (!ac.signal.aborted) {
+        const r = await syncActiveDirectoryDevices(integrationId, integrationName, config, result, actor);
+        syncTotals.created.push(...r.created);
+        syncTotals.updated.push(...r.updated);
+        syncTotals.skipped.push(...r.skipped);
+      }
+    } else if (integration.type === "windowsserver") {
+      const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
+      const wsHost = (config as any).host as string;
+      discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
+      // Windows Server is a single host — no per-device iteration, sync the full result normally
+      const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
+      syncTotals.created.push(...r.created);
+      syncTotals.updated.push(...r.updated);
+      syncTotals.skipped.push(...r.skipped);
+      syncTotals.deprecated.push(...r.deprecated);
+    } else if (integration.type === "fortigate") {
+      // Single FortiGate — no per-device iteration, sync the full result in one pass
+      discoveryResult = await fortigate.discoverDhcpSubnets(config as any, ac.signal, onProgress);
+      if (!ac.signal.aborted) {
         const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
         syncTotals.created.push(...r.created);
         syncTotals.updated.push(...r.updated);
         syncTotals.skipped.push(...r.skipped);
         syncTotals.deprecated.push(...r.deprecated);
-      } else if (integration.type === "fortigate") {
-        // Single FortiGate — no per-device iteration, sync the full result in one pass
-        discoveryResult = await fortigate.discoverDhcpSubnets(config as any, ac.signal, onProgress);
-        if (!ac.signal.aborted) {
-          const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
-          syncTotals.created.push(...r.created);
-          syncTotals.updated.push(...r.updated);
-          syncTotals.skipped.push(...r.skipped);
-          syncTotals.deprecated.push(...r.deprecated);
-          syncTotals.decommissionedSwitches.push(...(r.decommissionedSwitches || []));
-          syncTotals.decommissionedAps.push(...(r.decommissionedAps || []));
-        }
-      } else {
-        // FortiManager: onDeviceComplete fires after each managed FortiGate is queried,
-        // syncing subnets/assets/reservations incrementally.
-        // Build the warm cache before dispatch — every firewall Asset row
-        // discovered by THIS integration that the monitor loop most recently
-        // saw as "up" gets its cached management IP fed to discovery so the
-        // direct-mode worker pool fills from t=0 instead of dripping in
-        // behind the FMG-serial mgmt-IP resolver. Cold-cache (first run, or
-        // monitor unseeded) returns 0 rows and the resolver path runs as
-        // before. Skipped in proxy mode.
-        const warmCacheIps = await buildFmgWarmCacheIps(integrationId, config);
-        discoveryResult = await fortimanager.discoverDhcpSubnets(config as any, ac.signal, onProgress, integration.pollInterval ?? 24, onDeviceComplete, integrationId, warmCacheIps);
-        // Skip Phase 2 (stale deprecation) if the run was aborted — an aborted
-        // run shouldn't take destructive actions, even though the FMG device
-        // roster used for deprecation is captured up front (not per-device).
-        if (!ac.signal.aborted) {
-          // Run deprecation + DNS/OUI lookups once, now that all devices have been synced.
-          const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "finalize");
-          syncTotals.deprecated.push(...r.deprecated);
-          syncTotals.decommissionedSwitches.push(...(r.decommissionedSwitches || []));
-          syncTotals.decommissionedAps.push(...(r.decommissionedAps || []));
-        }
+        syncTotals.decommissionedSwitches.push(...(r.decommissionedSwitches || []));
+        syncTotals.decommissionedAps.push(...(r.decommissionedAps || []));
       }
-
-      // ── ORIGINAL BATCH SYNC (commented out — replaced by per-device callback above) ──
-      // const syncResult = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor);
-
-      const assetsOnly = integration.type === "entraid" || integration.type === "activedirectory";
-      if (ac.signal.aborted) {
-        const abortSuffix = assetsOnly ? "" : " (stale-subnet deprecation skipped)";
-        logEvent({ action: "integration.discover.aborted", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "warning", message: `${label} ${kindLabel} aborted for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${abortSuffix}` });
-        recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "aborted");
-      } else {
-        const deprecatedSuffix = assetsOnly ? "" : `, ${syncTotals.deprecated.length} deprecated`;
-        const decomSwSuffix = syncTotals.decommissionedSwitches.length > 0 ? `, ${syncTotals.decommissionedSwitches.length} FortiSwitch(es) decommissioned` : "";
-        const decomApSuffix = syncTotals.decommissionedAps.length      > 0 ? `, ${syncTotals.decommissionedAps.length} FortiAP(s) decommissioned`      : "";
-        logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} completed for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${deprecatedSuffix}${decomSwSuffix}${decomApSuffix}` });
-        // Record overall duration sample for slow-run detection. Aborts and
-        // errors are intentionally not recorded — a failed run would poison
-        // the rolling average used to compute the "slow" threshold.
-        recordSample(integrationId, Date.now() - runStartedAt).catch(() => {});
-        recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "success");
+    } else {
+      // FortiManager: onDeviceComplete fires after each managed FortiGate is queried,
+      // syncing subnets/assets/reservations incrementally.
+      // Build the warm cache before dispatch — every firewall Asset row
+      // discovered by THIS integration that the monitor loop most recently
+      // saw as "up" gets its cached management IP fed to discovery so the
+      // direct-mode worker pool fills from t=0 instead of dripping in
+      // behind the FMG-serial mgmt-IP resolver. Cold-cache (first run, or
+      // monitor unseeded) returns 0 rows and the resolver path runs as
+      // before. Skipped in proxy mode.
+      const warmCacheIps = await buildFmgWarmCacheIps(integrationId, config);
+      discoveryResult = await fortimanager.discoverDhcpSubnets(config as any, ac.signal, onProgress, integration.pollInterval ?? 24, onDeviceComplete, integrationId, warmCacheIps);
+      // Skip Phase 2 (stale deprecation) if the run was aborted — an aborted
+      // run shouldn't take destructive actions, even though the FMG device
+      // roster used for deprecation is captured up front (not per-device).
+      if (!ac.signal.aborted) {
+        // Run deprecation + DNS/OUI lookups once, now that all devices have been synced.
+        const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "finalize");
+        syncTotals.deprecated.push(...r.deprecated);
+        syncTotals.decommissionedSwitches.push(...(r.decommissionedSwitches || []));
+        syncTotals.decommissionedAps.push(...(r.decommissionedAps || []));
       }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        logEvent({ action: "integration.discover.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `${label} ${kindLabel} failed for "${integrationName}": ${err.message || "Unknown error"}` });
-        recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "failure");
-      } else {
-        // AbortError caught here means the abort raced past the inner
-        // ac.signal.aborted branch above. Count it the same way.
-        recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "aborted");
-      }
-    } finally {
-      activeDiscovery.delete(integrationId);
     }
-  })();
+
+    const assetsOnly = integration.type === "entraid" || integration.type === "activedirectory";
+    if (ac.signal.aborted) {
+      const abortSuffix = assetsOnly ? "" : " (stale-subnet deprecation skipped)";
+      logEvent({ action: "integration.discover.aborted", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "warning", message: `${label} ${kindLabel} aborted for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${abortSuffix}` });
+      recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "aborted");
+      await finishRun(integrationId, "aborted");
+    } else {
+      const deprecatedSuffix = assetsOnly ? "" : `, ${syncTotals.deprecated.length} deprecated`;
+      const decomSwSuffix = syncTotals.decommissionedSwitches.length > 0 ? `, ${syncTotals.decommissionedSwitches.length} FortiSwitch(es) decommissioned` : "";
+      const decomApSuffix = syncTotals.decommissionedAps.length      > 0 ? `, ${syncTotals.decommissionedAps.length} FortiAP(s) decommissioned`      : "";
+      logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} completed for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${deprecatedSuffix}${decomSwSuffix}${decomApSuffix}` });
+      // Record overall duration sample for slow-run detection. Aborts and
+      // errors are intentionally not recorded — a failed run would poison
+      // the rolling average used to compute the "slow" threshold.
+      recordSample(integrationId, Date.now() - runStartedAt).catch(() => {});
+      recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "success");
+      await finishRun(integrationId, "completed");
+    }
+  } catch (err: any) {
+    if (err.name !== "AbortError") {
+      logEvent({ action: "integration.discover.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `${label} ${kindLabel} failed for "${integrationName}": ${err.message || "Unknown error"}` });
+      recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "failure");
+      await finishRun(integrationId, "error");
+    } else {
+      // AbortError caught here means the abort raced past the inner
+      // ac.signal.aborted branch above. Count it the same way.
+      recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "aborted");
+      await finishRun(integrationId, "aborted");
+    }
+  } finally {
+    clearInterval(cancelTimer);
+  }
 }
 
 // POST /api/v1/integrations/:id/discover — manually trigger DHCP discovery
@@ -7211,8 +7196,8 @@ function stripSecret(integration: Record<string, any>) {
   return { ...integration, config };
 }
 
-export function hasActiveDiscoveries(): boolean {
-  return activeDiscovery.size > 0;
+export async function hasActiveDiscoveries(): Promise<boolean> {
+  return anyRunActive();
 }
 
 export default router;
