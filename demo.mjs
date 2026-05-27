@@ -1552,8 +1552,62 @@ let CONFLICTS = [
     status: "pending",
     resolvedBy: null,
     resolvedAt: null,
+    existingAssetSnapshot: null, // pending — UI falls back to the live asset
     createdAt: "2026-04-22T10:00:00.000Z",
     updatedAt: "2026-04-22T10:00:00.000Z",
+  },
+  {
+    // Resolved conflict demonstrating existingAssetSnapshot: the "Existing
+    // Asset" column shows what the asset looked like when the conflict was
+    // raised (frozen here), not the post-accept live row. Note the snapshot's
+    // IP / model / osVersion differ from the live asset to make the point.
+    id: "c5000000-0000-0000-0000-000000000002",
+    entityType: "asset",
+    reservationId: null,
+    reservation: null,
+    assetId: "a1000000-0000-0000-0000-000000000001",  // k8s-worker-01 seed asset
+    asset: null, // filled in on GET
+    integrationId: "i5000000-0000-0000-0000-000000000005",  // Corporate Entra ID
+    proposedHostname: null,
+    proposedOwner: null,
+    proposedProjectRef: null,
+    proposedNotes: null,
+    proposedSourceType: null,
+    proposedDeviceId: "eab53210-dead-beef-cafe-000000000002",
+    proposedAssetFields: {
+      deviceId: "eab53210-dead-beef-cafe-000000000002",
+      hostname: "k8s-worker-01",
+      serialNumber: "5CD-ENTRA-002",
+      macAddress: "AA:BB:CC:DE:AD:02",
+      manufacturer: "Dell",
+      model: "Latitude 7450",
+      os: "Windows",
+      osVersion: "10.0.22631",
+      assignedTo: "platform-team@corp.example.com",
+      chassisType: "laptop",
+      complianceState: "compliant",
+      trustType: "AzureAd",
+      assetType: "workstation",
+      lastSeen: "2026-04-20T08:00:00.000Z",
+      registrationDateTime: "2025-08-01T14:00:00.000Z",
+    },
+    existingAssetSnapshot: {
+      hostname: "k8s-worker-01",
+      serialNumber: "5CD-OLD-0001",
+      macAddress: "AA:BB:CC:00:11:22",
+      ipAddress: "10.20.30.40",          // conflict-time IP, since changed
+      manufacturer: "Dell",
+      model: "Latitude 7400",            // conflict-time model, since changed
+      os: "Windows",
+      osVersion: "10.0.19045",           // conflict-time OS version, since changed
+      assignedTo: null,
+    },
+    conflictFields: ["hostname"],
+    status: "accepted",
+    resolvedBy: "dmoore",
+    resolvedAt: "2026-04-21T09:15:00.000Z",
+    createdAt: "2026-04-20T08:05:00.000Z",
+    updatedAt: "2026-04-21T09:15:00.000Z",
   },
 ];
 

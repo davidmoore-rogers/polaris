@@ -5735,12 +5735,31 @@ async function tombstoneConflict(proposedDeviceId: string, assetId: string, inte
   }
 }
 
+// Snapshot of the existing collision-target asset's displayed fields, frozen
+// onto the Conflict at raise time so the resolved card reflects conflict-time
+// state instead of the post-merge live row. Mirrors the fields the conflict
+// card renders for the existing column (see renderAssetConflictCard).
+function snapshotExistingAsset(asset: any): Record<string, any> {
+  return {
+    hostname: asset.hostname ?? null,
+    serialNumber: asset.serialNumber ?? null,
+    macAddress: asset.macAddress ?? null,
+    ipAddress: asset.ipAddress ?? null,
+    manufacturer: asset.manufacturer ?? null,
+    model: asset.model ?? null,
+    os: asset.os ?? null,
+    osVersion: asset.osVersion ?? null,
+    assignedTo: asset.assignedTo ?? null,
+  };
+}
+
 // Upsert a pending hostname-collision conflict, deduped on proposedDeviceId.
 async function upsertAssetConflict(args: {
   collisionAssetId: string;
   integrationId: string;
   proposedDeviceId: string;
   proposedAssetFields: Record<string, any>;
+  existingAsset: any;
 }): Promise<void> {
   // Don't re-raise a conflict the admin already resolved for this exact
   // (proposedDeviceId, assetId) pair — the decision stands until the
@@ -5755,13 +5774,18 @@ async function upsertAssetConflict(args: {
   });
   if (resolved) return;
 
+  const existingSnapshot = snapshotExistingAsset(args.existingAsset);
   const existing = await prisma.conflict.findFirst({
     where: { entityType: "asset", status: "pending", proposedDeviceId: args.proposedDeviceId },
   });
   if (existing) {
     await prisma.conflict.update({
       where: { id: existing.id },
-      data: { proposedAssetFields: args.proposedAssetFields as any, assetId: args.collisionAssetId },
+      data: {
+        proposedAssetFields: args.proposedAssetFields as any,
+        assetId: args.collisionAssetId,
+        existingAssetSnapshot: existingSnapshot as any,
+      },
     });
   } else {
     await prisma.conflict.create({
@@ -5771,6 +5795,7 @@ async function upsertAssetConflict(args: {
         integrationId: args.integrationId,
         proposedDeviceId: args.proposedDeviceId,
         proposedAssetFields: args.proposedAssetFields as any,
+        existingAssetSnapshot: existingSnapshot as any,
         conflictFields: ["hostname"],
         status: "pending",
       },
@@ -6303,6 +6328,7 @@ async function syncEntraDevices(
               integrationId,
               proposedDeviceId: dev.deviceId,
               proposedAssetFields: buildProposed("untagged-collision", untaggedSibling.via),
+              existingAsset: untaggedSibling.asset,
             });
             syncLog("warning", `Sibling hostname collision — Entra device "${dev.displayName}" (${dev.deviceId}) has a tagged asset but untagged asset ${untaggedSibling.asset.id} shares the same hostname${untaggedSibling.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
           } catch (err: any) {
@@ -6358,6 +6384,7 @@ async function syncEntraDevices(
             integrationId,
             proposedDeviceId: dev.deviceId,
             proposedAssetFields: buildProposed("untagged-collision", untagged.via),
+            existingAsset: untagged.asset,
           });
           syncLog("warning", `Hostname collision queued for review — Entra device "${dev.displayName}" (${dev.deviceId}) matches untagged asset ${untagged.asset.id}${untagged.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
         } catch (err: any) {
@@ -7004,6 +7031,7 @@ async function syncActiveDirectoryDevices(
             integrationId,
             proposedDeviceId: dev.objectGuid,
             proposedAssetFields: buildProposed("untagged-collision", untagged.via),
+            existingAsset: untagged.asset,
           });
           syncLog("warning", `Hostname collision queued for review — AD computer "${displayName}" (${dev.objectGuid}) matches untagged asset ${untagged.asset.id}${untagged.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);
         } catch (err: any) {
@@ -7021,6 +7049,7 @@ async function syncActiveDirectoryDevices(
             integrationId,
             proposedDeviceId: dev.objectGuid,
             proposedAssetFields: buildProposed("duplicate-registration", dupAd.via),
+            existingAsset: dupAd.asset,
           });
           const existingTag = (dupAd.asset.assetTag || "").slice(AD_ASSET_TAG_PREFIX.length) || "<unknown>";
           syncLog("warning", `Duplicate AD registration queued for review — "${displayName}" (${dev.objectGuid}) shares hostname with existing AD computer ${existingTag}${dupAd.via === "netbios" ? " (NetBIOS-truncated match)" : ""}.`);

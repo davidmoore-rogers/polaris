@@ -1005,6 +1005,7 @@ Conflict                        -- Discovery conflict resolution (two variants)
   -- Asset-conflict proposed values (null for reservation conflicts):
   proposedDeviceId  String?        -- Entra deviceId (dedupe key across discovery runs)
   proposedAssetFields Json?        -- Full snapshot: hostname, serial, mac, model, manufacturer, os, osVersion, assignedTo, chassisType, complianceState, trustType
+  existingAssetSnapshot Json?      -- Asset-conflict only. Snapshot of the collision-target asset's displayed fields (hostname, serial, mac, ip, manufacturer, model, os, osVersion, assignedTo) frozen at raise time, refreshed on each discovery run while pending, frozen at resolution. The Conflict Review card's "Existing Asset" column reads this so a resolved card shows conflict-time state, not the post-merge live row. Null for conflicts predating the column (UI falls back to the live `asset` relation).
   conflictFields    String[]       -- Field names that differ
   status            ConflictStatus @default(pending)
   resolvedBy        String?

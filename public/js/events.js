@@ -697,6 +697,23 @@ function getAlertsFormData() {
     }
   }
 
+  // Resolved-status markup shared by both conflict card variants: a
+  // colored Accepted/Rejected badge, the resolver, and the resolve time.
+  function resolvedActionsHtml(c) {
+    var statusClass = c.status === "accepted"
+      ? "badge-active"
+      : (c.status === "rejected" ? "badge-conflict" : "badge-" + c.status);
+    var meta = "";
+    if (c.resolvedBy) meta += " by " + escapeHtml(c.resolvedBy);
+    if (c.resolvedAt) {
+      var ts = new Date(c.resolvedAt);
+      meta += " · " + ts.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
+        " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+    }
+    return '<span class="badge ' + statusClass + '" style="text-transform:capitalize">' + escapeHtml(c.status) + '</span>' +
+      (meta ? ' <span style="color:var(--color-text-tertiary);font-size:0.75rem">' + meta + '</span>' : '');
+  }
+
   function sourceBadgeClass(sourceType) {
     if (!sourceType) return "badge-source-device";
     if (sourceType === "vip") return "badge-source-vip";
@@ -741,8 +758,7 @@ function getAlertsFormData() {
     }).join("");
 
     var actions = isResolved
-      ? '<span class="badge badge-' + c.status + '" style="text-transform:capitalize">' + escapeHtml(c.status) + '</span>' +
-        (c.resolvedBy ? ' <span style="color:var(--color-text-tertiary);font-size:0.75rem">by ' + escapeHtml(c.resolvedBy) + '</span>' : '')
+      ? resolvedActionsHtml(c)
       : '<button class="btn btn-secondary btn-sm" data-conflict-action="reject" data-conflict-id="' + c.id + '">Reject</button>' +
         '<button class="btn btn-primary btn-sm" data-conflict-action="accept" data-conflict-id="' + c.id + '">Accept</button>';
 
@@ -766,7 +782,11 @@ function getAlertsFormData() {
   }
 
   function renderAssetConflictCard(c) {
-    var existing = c.asset || {};
+    // Prefer the conflict-time snapshot of the existing asset so a resolved
+    // card shows what the asset looked like when the conflict was raised, not
+    // the post-merge live row. Conflicts predating the snapshot column fall
+    // back to the live asset relation.
+    var existing = c.existingAssetSnapshot || c.asset || {};
     var proposed = c.proposedAssetFields || {};
     var isResolved = c.status !== "pending";
 
@@ -881,8 +901,7 @@ function getAlertsFormData() {
       : "Adopt the existing asset as this " + sourceShort;
 
     var actions = isResolved
-      ? '<span class="badge badge-' + c.status + '" style="text-transform:capitalize">' + escapeHtml(c.status) + '</span>' +
-        (c.resolvedBy ? ' <span style="color:var(--color-text-tertiary);font-size:0.75rem">by ' + escapeHtml(c.resolvedBy) + '</span>' : '')
+      ? resolvedActionsHtml(c)
       : '<button class="btn btn-secondary btn-sm" data-conflict-action="reject" data-conflict-id="' + c.id + '" title="' + escapeHtml(rejectTitle) + '">Reject (keep separate)</button>' +
         '<button class="btn btn-primary btn-sm" data-conflict-action="merge" data-conflict-id="' + c.id + '" title="' + escapeHtml(acceptTitle) + '">Apply merge</button>';
 
