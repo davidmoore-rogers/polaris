@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "postinstall": "prisma generate",
+    "postinstall": "prisma generate && (git config core.hooksPath .githooks || true)",
     "dev": "node --env-file=.env --import tsx/esm --watch src/index.ts",
     "build": "tsc",
     "start": "node --env-file=.env dist/index.js",
@@ -19,7 +19,8 @@
     "demo": "node demo.mjs",
     "test:fmg": "node scripts/test-fmg.mjs",
     "lint": "eslint src --ext .ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:docs": "node scripts/check-docs.mjs"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.0.2",

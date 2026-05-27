@@ -1,0 +1,25 @@
+#!/bin/sh
+# Polaris pre-commit hook — version-controlled (activate with:
+#   git config core.hooksPath .githooks   ).
+#
+# Runs the structural doc-drift guard so a new model / service / job / route
+# can't land without being documented, and so stale file:line refs / wrong
+# index casing can't creep back in. It does NOT judge prose accuracy.
+#
+# Bypass for one commit:  git commit --no-verify
+
+# Only run when code or the project-memory docs changed (skip pure asset/test commits).
+changed=$(git diff --cached --name-only)
+case "$changed" in
+  *.ts|*src/*|*prisma/schema.prisma*|*CLAUDE.md*|*ARCHITECTURE.md*|*TOUCHES.md*|*TEMPLATES.md*)
+    node scripts/check-docs.mjs || {
+      echo ""
+      echo "pre-commit: doc-drift check failed (see above)."
+      echo "Update the docs, or bypass once with:  git commit --no-verify"
+      exit 1
+    }
+    ;;
+  *)
+    : # nothing relevant changed; skip the check
+    ;;
+esac

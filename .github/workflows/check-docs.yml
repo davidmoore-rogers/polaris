@@ -1,0 +1,27 @@
+name: Check docs
+
+# Structural doc-drift guard for the project-memory files (CLAUDE.md,
+# ARCHITECTURE.md, TOUCHES.md, TEMPLATES.md). Enforces coverage + reference
+# hygiene even when a local clone hasn't activated the pre-commit hook.
+# Pure file reads — no DB, no npm install, no prisma generate needed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Structural doc-drift check
+        run: node scripts/check-docs.mjs
