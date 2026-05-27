@@ -141,8 +141,21 @@ function renderUsersBody() {
   tbody.innerHTML = rows.map(function (u) {
     var roleName = u.role ? u.role.name : "";
     var roleKey = roleName.toLowerCase();
+    var roleColor = u.role ? u.role.color : null;
+    // Friendly label for the built-ins; raw name for everything else.
+    var roleLabelText =
+      roleKey === "admin" ? "admin" :
+      roleKey === "networkadmin" ? "network admin" :
+      roleKey === "assetsadmin" ? "assets admin" :
+      roleKey === "user" ? "user" :
+      roleKey === "readonly" ? "read only" :
+      (roleName || "—");
     var roleBadge;
-    if (roleKey === "admin") roleBadge = '<span class="badge badge-admin">admin</span>';
+    var roleColorStyle = roleBadgeStyleFromColor(roleColor);
+    if (roleColorStyle) {
+      // Stored color wins — survives renames + colors custom roles.
+      roleBadge = '<span class="badge" style="' + roleColorStyle + '">' + escapeHtml(roleLabelText) + '</span>';
+    } else if (roleKey === "admin") roleBadge = '<span class="badge badge-admin">admin</span>';
     else if (roleKey === "networkadmin") roleBadge = '<span class="badge badge-network-admin">network admin</span>';
     else if (roleKey === "assetsadmin") roleBadge = '<span class="badge badge-assets-admin">assets admin</span>';
     else if (roleKey === "user") roleBadge = '<span class="badge badge-user">user</span>';
@@ -951,7 +964,10 @@ function renderRolesBody() {
     return a.name.localeCompare(b.name);
   });
   tbody.innerHTML = visible.map(function (r) {
-    var nameCell = '<button class="btn btn-link" data-role-action="edit" data-role-id="' + escapeHtml(r.id) + '" style="padding:0;font-weight:600;color:var(--color-accent);background:none;border:none;cursor:pointer">' + escapeHtml(r.name) + '</button>';
+    var swatch = r.color
+      ? '<span title="Badge color" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + escapeHtml(r.color) + ';margin-right:7px;vertical-align:middle;border:1px solid var(--color-border)"></span>'
+      : '';
+    var nameCell = swatch + '<button class="btn btn-link" data-role-action="edit" data-role-id="' + escapeHtml(r.id) + '" style="padding:0;font-weight:600;color:var(--color-accent);background:none;border:none;cursor:pointer;vertical-align:middle">' + escapeHtml(r.name) + '</button>';
     var descCell = '<span style="color:var(--color-text-secondary);font-size:0.88em">' + escapeHtml(r.description || "—") + '</span>';
     var usersCell = '<span class="badge" style="background:var(--color-bg-secondary);color:var(--color-text-primary)">' + r.userCount + '</span>';
     var builtInCell = r.isBuiltIn
@@ -1033,6 +1049,26 @@ async function openRoleSlideover(roleId) {
     this.value = "";
   });
 
+  // Color picker: live-preview the badge as the color or name changes, and
+  // re-roll on "Randomize". Inert for protected roles (input disabled).
+  var colorInput = document.getElementById("f-role-color");
+  var colorPreview = document.getElementById("role-color-preview");
+  var nameInput = document.getElementById("f-role-name");
+  function syncColorPreview() {
+    if (!colorPreview) return;
+    var style = roleBadgeStyleFromColor(colorInput ? colorInput.value : null);
+    if (style) colorPreview.setAttribute("style", style);
+    var nm = nameInput ? nameInput.value.trim() : "";
+    colorPreview.textContent = nm || "preview";
+  }
+  if (colorInput) colorInput.addEventListener("input", syncColorPreview);
+  if (nameInput) nameInput.addEventListener("input", syncColorPreview);
+  var randomBtn = document.getElementById("f-role-color-random");
+  if (randomBtn) randomBtn.addEventListener("click", function () {
+    if (colorInput) colorInput.value = randomRoleColor();
+    syncColorPreview();
+  });
+
   if (isProtected) {
     // Don't expose Save for protected roles — read-only view.
     var saveBtn = document.getElementById("role-slideover-save");
@@ -1054,13 +1090,15 @@ async function openRoleSlideover(roleId) {
       perms[f.key] = checked ? checked.value : "none";
     });
     var regionTags = collectRegionPicker("f-role-regions");
+    var colorEl = document.getElementById("f-role-color");
+    var color = colorEl ? colorEl.value : null;
     btn.disabled = true;
     try {
       if (isCreate) {
-        await api.roles.create({ name: name, description: description, permissions: perms, regionTags: regionTags });
+        await api.roles.create({ name: name, description: description, permissions: perms, regionTags: regionTags, color: color });
         showToast('Role "' + name + '" created');
       } else {
-        await api.roles.update(role.id, { name: name, description: description, permissions: perms, regionTags: regionTags });
+        await api.roles.update(role.id, { name: name, description: description, permissions: perms, regionTags: regionTags, color: color });
         showToast('Role "' + name + '" saved');
       }
       closeRoleSlideover();
@@ -1136,6 +1174,21 @@ function buildRoleSlideoverHtml(role, isCreate, isProtected, permissions) {
     '<label>Description</label>' +
     '<input type="text" id="f-role-description" maxlength="200" value="' + escapeHtml(role ? (role.description || "") : "") + '"' + (isProtected ? " disabled" : "") + '>' +
   '</div>';
+  // New roles default to a random color; existing roles prefill their stored
+  // color (or a random one if somehow unset). The native color input always
+  // yields a valid #rrggbb, so it round-trips the backend regex cleanly.
+  var initialColor = (role && role.color) || randomRoleColor();
+  var previewLabel = (role && role.name) || "preview";
+  var colorRow = '<div class="form-group">' +
+    '<label>Badge Color</label>' +
+    '<div style="display:flex;align-items:center;gap:0.6rem">' +
+      '<input type="color" id="f-role-color" value="' + escapeHtml(initialColor) + '"' + (isProtected ? " disabled" : "") +
+        ' style="width:48px;height:34px;padding:2px;border:1px solid var(--color-border);border-radius:6px;background:none;cursor:' + (isProtected ? "default" : "pointer") + '">' +
+      (isProtected ? "" : '<button type="button" class="btn btn-sm btn-secondary" id="f-role-color-random">Randomize</button>') +
+      '<span class="badge" id="role-color-preview" style="' + roleBadgeStyleFromColor(initialColor) + '">' + escapeHtml(previewLabel) + '</span>' +
+    '</div>' +
+    '<p class="hint">Pill color shown in the sidebar, the users list, and this list.</p>' +
+  '</div>';
   var regionsRow = '<div class="form-group">' +
     '<label>Region Scope</label>' +
     '<p class="hint" style="margin-top:0">Empty = unrestricted. Combined with each user\'s own region tags at session time.</p>' +
@@ -1162,6 +1215,7 @@ function buildRoleSlideoverHtml(role, isCreate, isProtected, permissions) {
           '<div class="role-panel-content">' +
             nameRow +
             descRow +
+            colorRow +
             regionsRow +
             '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
             '<h4 style="margin:0 0 0.5rem;font-size:0.95rem">Permissions</h4>' +

@@ -31,6 +31,9 @@ export interface RoleSummary {
   // Region scope inherited by users holding this role. Empty = unrestricted.
   // Effective regions for a session are union(role.regionTags, user.regionTags).
   regionTags: string[];
+  // Badge color as `#rrggbb`, or null to fall back to the legacy name-keyed
+  // badge classes in the frontend.
+  color: string | null;
   isBuiltIn: boolean;
   isProtected: boolean;
   userCount: number;
@@ -43,6 +46,7 @@ export interface CreateRoleInput {
   description?: string | null;
   permissions: Record<string, AccessLevel>;
   regionTags?: string[];
+  color?: string | null;
 }
 
 export interface UpdateRoleInput {
@@ -50,6 +54,7 @@ export interface UpdateRoleInput {
   description?: string | null;
   permissions?: Record<string, AccessLevel>;
   regionTags?: string[];
+  color?: string | null;
 }
 
 // Region tag values are operator-typed strings. Validate them lightly —
@@ -102,6 +107,21 @@ function normalizeDescription(input: string | null | undefined): string | null {
   return trimmed;
 }
 
+// Badge color is a `#rrggbb` hex string (case-insensitive in, lowercased out).
+// Empty/null clears the color → frontend falls back to its legacy name-keyed
+// badge classes. Anything else that isn't a 6-digit hex is rejected.
+const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+function normalizeColor(input: string | null | undefined): string | null {
+  if (input === null || input === undefined) return null;
+  const trimmed = String(input).trim();
+  if (!trimmed) return null;
+  if (!COLOR_RE.test(trimmed)) {
+    throw new AppError(400, "Role color must be a #rrggbb hex string");
+  }
+  return trimmed.toLowerCase();
+}
+
 // Protected names cannot be picked for new roles either — operators can't
 // shadow the built-in identities even with a different case (the unique
 // index is case-sensitive at the DB; we add a case-insensitive guard at
@@ -114,6 +134,7 @@ function summarize(role: {
   description: string | null;
   permissions: unknown;
   regionTags: string[];
+  color: string | null;
   isBuiltIn: boolean;
   isProtected: boolean;
   createdAt: Date;
@@ -126,6 +147,7 @@ function summarize(role: {
     description: role.description,
     permissions: normalizePermissions(role.permissions),
     regionTags: [...role.regionTags],
+    color: role.color,
     isBuiltIn: role.isBuiltIn,
     isProtected: role.isProtected,
     userCount: role._count.users,
@@ -173,6 +195,7 @@ export async function createRole(input: CreateRoleInput, actor?: string): Promis
   const description = normalizeDescription(input.description);
   const permissions = normalizePermissions(input.permissions);
   const regionTags = normalizeRegionTags(input.regionTags);
+  const color = normalizeColor(input.color);
 
   const created = await prisma.role.create({
     data: {
@@ -180,6 +203,7 @@ export async function createRole(input: CreateRoleInput, actor?: string): Promis
       description,
       permissions,
       regionTags,
+      color,
       isBuiltIn: false,
       isProtected: false,
     },
@@ -194,7 +218,7 @@ export async function createRole(input: CreateRoleInput, actor?: string): Promis
     resourceName: created.name,
     actor,
     message: `Role "${created.name}" created`,
-    details: { permissions, description, regionTags },
+    details: { permissions, description, regionTags, color },
   });
 
   return summarize(created);
@@ -212,6 +236,7 @@ export async function updateRole(id: string, input: UpdateRoleInput, actor?: str
     description?: string | null;
     permissions?: Record<string, AccessLevel>;
     regionTags?: string[];
+    color?: string | null;
   } = {};
   const diff: Record<string, { from: unknown; to: unknown }> = {};
 
@@ -254,6 +279,13 @@ export async function updateRole(id: string, input: UpdateRoleInput, actor?: str
     if (!same) {
       data.regionTags = next;
       diff.regionTags = { from: prev, to: next };
+    }
+  }
+  if (input.color !== undefined) {
+    const next = normalizeColor(input.color);
+    if (next !== before.color) {
+      data.color = next;
+      diff.color = { from: before.color, to: next };
     }
   }
 

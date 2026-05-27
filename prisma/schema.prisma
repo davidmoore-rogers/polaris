@@ -1554,6 +1554,11 @@ model Role {
   id          String   @id @default(uuid())
   name        String   @unique
   description String?
+  // Badge color as a `#rrggbb` hex string. Drives the role pill color in the
+  // sidebar user-badge, the users-table role column, and the Manage Roles
+  // list. Null = fall back to the legacy name-keyed badge classes. Built-ins
+  // are seeded with their historical colors by the role_color migration.
+  color       String?
   permissions Json     @default("{}")
   // Region scope inherited by every user holding this role. Empty =
   // unrestricted. Effective regions for a session are
@@ -1810,6 +1815,12 @@ model Conflict {
   // Asset-conflict proposed values
   proposedDeviceId    String? // Entra deviceId — used to de-dupe conflicts across discovery runs
   proposedAssetFields Json? // Full Entra/Intune snapshot: hostname, serial, mac, model, manufacturer, os, osVersion, assignedTo, chassisType, complianceState, trustType
+  // Snapshot of the existing (collision-target) asset captured when the
+  // conflict was raised, so the resolved card shows what the asset looked
+  // like at conflict time — not the post-merge live row. Refreshed on each
+  // discovery run while the conflict is pending; frozen once resolved.
+  // Null for conflicts predating this column (UI falls back to the live asset).
+  existingAssetSnapshot Json?
 
   conflictFields String[]
 

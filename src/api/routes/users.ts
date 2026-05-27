@@ -68,7 +68,7 @@ const USER_LIST_SELECT = {
   totpEnabledAt: true,
   needsRoleReview: true,
   regionTags: true,
-  role: { select: { id: true, name: true, isProtected: true, isBuiltIn: true } },
+  role: { select: { id: true, name: true, color: true, isProtected: true, isBuiltIn: true } },
 } as const;
 
 // GET /api/v1/users/role-review-notifications — sidebar badge feed

@@ -29,11 +29,15 @@ const PermissionsSchema = z.record(z.string(), AccessLevelSchema);
 
 const RegionTagsSchema = z.array(z.string().max(64)).max(64);
 
+// `#rrggbb` hex string; empty string / null clears the color.
+const ColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "Color must be a #rrggbb hex string");
+
 const CreateRoleSchema = z.object({
   name:        z.string().min(2).max(32),
   description: z.string().max(200).optional().nullable(),
   permissions: PermissionsSchema,
   regionTags:  RegionTagsSchema.optional(),
+  color:       ColorSchema.optional().nullable(),
 });
 
 const UpdateRoleSchema = z.object({
@@ -41,6 +45,7 @@ const UpdateRoleSchema = z.object({
   description: z.string().max(200).optional().nullable(),
   permissions: PermissionsSchema.optional(),
   regionTags:  RegionTagsSchema.optional(),
+  color:       ColorSchema.optional().nullable(),
 });
 
 // ─── Function-key catalogue (static; no DB hit) ──────────────────────
@@ -75,6 +80,7 @@ router.post("/", requirePermission("roles", "write"), async (req, res, next) => 
         description: input.description ?? null,
         permissions: input.permissions as Parameters<typeof roleService.createRole>[0]["permissions"],
         ...(input.regionTags !== undefined && { regionTags: input.regionTags }),
+        ...(input.color !== undefined && { color: input.color }),
       },
       req.session?.username,
     );
@@ -94,6 +100,7 @@ router.put("/:id", requirePermission("roles", "write"), async (req, res, next) =
           permissions: input.permissions as Parameters<typeof roleService.updateRole>[1]["permissions"],
         }),
         ...(input.regionTags !== undefined && { regionTags: input.regionTags }),
+        ...(input.color !== undefined && { color: input.color }),
       },
       req.session?.username,
     );

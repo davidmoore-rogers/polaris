@@ -47,6 +47,7 @@ function _moonIcon() {
 // map view) will read it in a follow-on change.
 
 var currentUserRole = null;          // role name (string)
+var currentUserRoleColor = null;     // role.color (#rrggbb) or null
 var currentRolePermissions = {};     // { [functionKey]: "none"|"read"|"write"|"fullwrite" }
 var currentEffectiveRegions = [];    // string[]
 var currentUserRegions = [];         // user.regionTags
@@ -60,6 +61,7 @@ async function fetchCurrentUser() {
     var data = await fetch("/api/v1/auth/me").then(function (r) { return r.json(); });
     if (data.authenticated) {
       currentUserRole = (data.role && data.role.name) || null;
+      currentUserRoleColor = (data.role && data.role.color) || null;
       currentRolePermissions = (data.role && data.role.permissions) || {};
       currentUsername = data.username;
       currentUserRegions = (data.regionTags && data.regionTags.user) || [];
@@ -68,6 +70,7 @@ async function fetchCurrentUser() {
       try {
         localStorage.setItem("polaris-user", JSON.stringify({
           role: currentUserRole,
+          roleColor: currentUserRoleColor,
           permissions: currentRolePermissions,
           username: data.username,
           regions: currentEffectiveRegions,
@@ -336,6 +339,41 @@ function _getRoleBadgeClass(role) {
     case "user":         return "badge-available";
     default:             return "badge-readonly";
   }
+}
+
+// ─── Role badge color helpers ────────────────────────────────────────────────
+// A role can carry a stored `color` (#rrggbb). When present it drives the badge
+// inline (translucent fill + solid text + border, matching the .badge-* CSS
+// recipe) so renamed built-ins and custom roles keep their color. When absent,
+// callers fall back to the legacy name-keyed badge classes above.
+
+function hexToRgba(hex, alpha) {
+  var m = /^#?([0-9a-fA-F]{6})$/.exec((hex || "").trim());
+  if (!m) return null;
+  var n = parseInt(m[1], 16);
+  var r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
+}
+
+// Inline style string for a role badge given its stored color. Returns "" when
+// the color is missing/invalid so the caller can fall back to a CSS class.
+function roleBadgeStyleFromColor(color) {
+  var solid = hexToRgba(color, 1);
+  if (!solid) return "";
+  return "background:" + hexToRgba(color, 0.14) + ";color:" + color +
+    ";border:1px solid " + hexToRgba(color, 0.30);
+}
+
+// A pleasant random `#rrggbb` for the new-role color picker default — random
+// hue, fixed mid saturation/lightness so every default reads as a usable badge.
+function randomRoleColor() {
+  var h = Math.floor(Math.random() * 360), s = 0.62, l = 0.55;
+  var c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2;
+  var rgb = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
+    : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return "#" + rgb.map(function (v) {
+    return ("0" + Math.round((v + m) * 255).toString(16)).slice(-2);
+  }).join("");
 }
 
 // ─── Global search ──────────────────────────────────────────────────────────
@@ -816,14 +854,19 @@ function renderUserBadge() {
   var color = _getInitialsColor(currentUsername);
 
   var roleLabel = _getRoleLabel(currentUserRole);
-  var roleClass = _getRoleBadgeClass(currentUserRole);
+  // Prefer the role's stored color (survives renames + works for custom roles);
+  // fall back to the legacy name-keyed badge class when no color is set.
+  var roleColorStyle = roleBadgeStyleFromColor(currentUserRoleColor);
+  var roleBadgeAttrs = roleColorStyle
+    ? 'class="badge" style="font-size:0.7rem;padding:1px 6px;' + roleColorStyle + '"'
+    : 'class="badge ' + _getRoleBadgeClass(currentUserRole) + '" style="font-size:0.7rem;padding:1px 6px"';
 
   var badge = document.createElement("div");
   badge.className = "user-badge";
   badge.innerHTML =
     '<div class="user-badge-avatar" style="background:' + color + '">' + escapeHtml(initials) + '</div>' +
     '<span class="user-badge-name">' + escapeHtml(currentUsername) + '</span>' +
-    (roleLabel ? '<span class="badge ' + roleClass + '" style="font-size:0.7rem;padding:1px 6px">' + escapeHtml(roleLabel) + '</span>' : '');
+    (roleLabel ? '<span ' + roleBadgeAttrs + '>' + escapeHtml(roleLabel) + '</span>' : '');
   badge.title = currentUsername + ' (' + roleLabel + ')';
   header.appendChild(badge);
 }
@@ -1814,6 +1857,7 @@ document.addEventListener("DOMContentLoaded", async function () {
     var cachedUser = JSON.parse(localStorage.getItem("polaris-user") || "null");
     if (cachedUser && cachedUser.role) {
       currentUserRole = cachedUser.role;
+      currentUserRoleColor = cachedUser.roleColor || null;
       currentUsername = cachedUser.username;
       currentRolePermissions = cachedUser.permissions || {};
       currentEffectiveRegions = Array.isArray(cachedUser.regions) ? cachedUser.regions : [];

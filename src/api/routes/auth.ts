@@ -321,12 +321,19 @@ router.get("/me", async (req, res, next) => {
       authenticated: true,
       username: req.session.username,
       authProvider: req.session.authProvider || "local",
-      role: snapshot ?? {
-        id: u.role.id,
-        name: u.role.name,
-        isProtected: u.role.isProtected,
-        permissions: u.role.permissions ?? {},
-        updatedAt: u.role.updatedAt.toISOString(),
+      // Spread the snapshot (or DB fallback) then always attach the live
+      // role color from `u.role` — the session snapshot predates the color
+      // column, so reading it from the freshly-loaded role row avoids a
+      // re-login requirement for the sidebar badge to pick up a color edit.
+      role: {
+        ...(snapshot ?? {
+          id: u.role.id,
+          name: u.role.name,
+          isProtected: u.role.isProtected,
+          permissions: u.role.permissions ?? {},
+          updatedAt: u.role.updatedAt.toISOString(),
+        }),
+        color: u.role.color ?? null,
       },
       regionTags: {
         user: userRegions,

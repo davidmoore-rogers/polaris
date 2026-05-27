@@ -956,6 +956,7 @@ Role                            -- Dynamic role + permission matrix; replaces th
   -- `union(role.regionTags, user.regionTags)`. Storage only; consumer
   -- lives in a separate change.
   regionTags    String[]       @default([])
+  color         String?         -- Badge pill color as `#rrggbb`; null falls back to the legacy name-keyed `.badge-*` CSS classes in the frontend. Drives the sidebar user-badge, the users-table role column, and the Manage Roles list. Built-ins seeded by the `20260601000000_role_color` migration (admin red / networkadmin orange / assetsadmin blue / readonly gray / user green); new roles get a random color from the add-role color picker.
   isBuiltIn     Boolean        @default(false) -- true for the five seeded rows (admin / readonly / networkadmin / assetsadmin / user)
   isProtected   Boolean        @default(false) -- true for admin + readonly only; blocks edit/delete/rename + hides the row from the editable UI
   updatedAt     DateTime        -- Bumped on every write; doubles as the cache-version stamp the session snapshot compares against on each request to detect a stale matrix
@@ -1203,7 +1204,7 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 ### Auth — public
 - `POST   /auth/login`
 - `POST   /auth/logout`
-- `GET    /auth/me`                             — Session probe. Returns `{ authenticated: false }` for unauthenticated callers; otherwise `{ authenticated: true, username, authProvider, role: { id, name, isProtected, permissions, updatedAt }, regionTags: { user, role, effective } }`. The frontend reads `role.permissions[functionKey]` to gate menu items / buttons (see `permAtLeast()` in `public/js/app.js`).
+- `GET    /auth/me`                             — Session probe. Returns `{ authenticated: false }` for unauthenticated callers; otherwise `{ authenticated: true, username, authProvider, role: { id, name, color, isProtected, permissions, updatedAt }, regionTags: { user, role, effective } }` (`color` is read live from the role row each call, so a color edit shows in the sidebar badge without re-login). The frontend reads `role.permissions[functionKey]` to gate menu items / buttons (see `permAtLeast()` in `public/js/app.js`).
 - `GET    /auth/azure/config`                   — Azure SSO feature flag
 - `GET    /auth/azure/login`                    — Initiate Azure SAML login
 - `POST   /auth/azure/callback`                 — SAML assertion callback
@@ -1270,7 +1271,7 @@ Per-user dashboard layout. One row per user in `UserDashboard`; absent row = emp
 - `PUT    /me/dashboard` — Zod-validates the full layout, upserts, returns the saved shape. Layout shape: `{ version: 1, widgets: WidgetInstance[] }` where each instance is `{ id (uuid), type, col 0..11, row 0..200, width 3|4|6|12, height 1|2, config }`. The client owns positioning (col/row); the server validates ranges but doesn't run its own reflow. Max 64 widgets per layout.
 
 ### Users — `users` function key
-- `GET    /users`                               *(read)* — Every row is returned with the joined `role: { id, name, isProtected, isBuiltIn }` and `regionTags: string[]` (per-user scope).
+- `GET    /users`                               *(read)* — Every row is returned with the joined `role: { id, name, color, isProtected, isBuiltIn }` and `regionTags: string[]` (per-user scope).
 - `POST   /users`                               *(write)* — Body: `{ username, password, roleId, regionTags? }`. The legacy `role: <enum>` field is no longer accepted.
 - `GET    /users/:id`                           *(read)*
 - `DELETE /users/:id`                           *(write)* — Refused with 409 when this would leave Polaris with zero users holding `users=fullwrite` AND `roles=fullwrite` (last-admin-equivalent invariant).
@@ -1282,11 +1283,11 @@ Per-user dashboard layout. One row per user in `UserDashboard`; absent row = emp
 - `DELETE /users/:id/role-review`               *(write)* — Dismiss the new-user notification for one user (global — hides the row for every admin).
 
 ### Roles — `roles` function key
-- `GET    /roles`                               *(read)* — Every Role with `{ id, name, description, permissions, regionTags, isBuiltIn, isProtected, userCount, createdAt, updatedAt }`. The frontend filters `isProtected=true` rows (admin + readonly) out of the editable list.
+- `GET    /roles`                               *(read)* — Every Role with `{ id, name, description, permissions, regionTags, color, isBuiltIn, isProtected, userCount, createdAt, updatedAt }`. The frontend filters `isProtected=true` rows (admin + readonly) out of the editable list.
 - `GET    /roles/:id`                           *(read)*
 - `GET    /roles/functions`                     *(read)* — `{ accessLevels: ["none","read","write","fullwrite"], functions: FunctionKeyDef[] }` — the 25-key catalogue with `{ key, label, description, hasOwnershipDimension? }`. Single source of truth backing the permissions slide-over matrix.
-- `POST   /roles`                               *(write)* — `{ name, description?, permissions, regionTags? }`. Name validated against `/^[A-Za-z0-9_-]{2,32}$/` + case-insensitive uniqueness against existing names + the reserved `admin` / `readonly`. Permissions normalized: unknown function keys dropped, missing keys defaulted to `"none"`.
-- `PUT    /roles/:id`                           *(write)* — Body accepts any subset of `{ name?, description?, permissions?, regionTags? }`. Refused with 403 when the role is `isProtected=true` (admin / readonly). Bumps the role-version cache + writes one `role.updated` Event with per-field diff (including a per-functionKey `permissionChanges` map listing only the keys whose level changed).
+- `POST   /roles`                               *(write)* — `{ name, description?, permissions, regionTags?, color? }`. Name validated against `/^[A-Za-z0-9_-]{2,32}$/` + case-insensitive uniqueness against existing names + the reserved `admin` / `readonly`. `color` validated as `#rrggbb` (empty/null clears). Permissions normalized: unknown function keys dropped, missing keys defaulted to `"none"`.
+- `PUT    /roles/:id`                           *(write)* — Body accepts any subset of `{ name?, description?, permissions?, regionTags?, color? }`. Refused with 403 when the role is `isProtected=true` (admin / readonly). Bumps the role-version cache + writes one `role.updated` Event with per-field diff (including a per-functionKey `permissionChanges` map listing only the keys whose level changed).
 - `DELETE /roles/:id`                           *(write)* — Refused with 409 when `isBuiltIn=true` OR when any user holds the role (admin must reassign first).
 
 ### Integrations — `integrations` function key
