@@ -2764,10 +2764,14 @@ async function openViewModal(id) {
       api.assets.getSources(a.id).catch(function (err) { console.warn("Failed to load asset sources", err); return []; }),
       api.assets.getDependencies(a.id).catch(function (err) { console.warn("Failed to load asset dependencies", err); return null; }),
       api.assets.agent(a.id).catch(function (err) { console.warn("Failed to load managed agent", err); return null; }),
+      api.assets.getSightings(a.id).catch(function (err) { console.warn("Failed to load asset sightings", err); return []; }),
+      api.assets.getIpHistory(a.id).catch(function (err) { console.warn("Failed to load asset IP history", err); return []; }),
     ]);
     var sources         = auxResults[0] || [];
     var dependencies    = auxResults[1];
     var managedAgent    = auxResults[2];
+    var sightings       = Array.isArray(auxResults[3]) ? auxResults[3] : (auxResults[3] && auxResults[3].sightings) || [];
+    var ipHistory       = auxResults[4] || [];
     agentSubpanelHTML   = assetAgentSubpanelHTML(a, managedAgent);
     // Stations tab — visible on FortiAPs that have wireless clients
     // reported by the most recent SNMP fapStationTable scrape. The
@@ -2778,7 +2782,7 @@ async function openViewModal(id) {
     if (a.assetType === "access_point" && a.monitored) {
       tabs.push({ key: "stations", label: "Stations", html: _assetStationsTabHTML(a) });
     }
-    tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id) });
+    tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id, sightings, ipHistory) });
     // Custom MIB tab — present whenever the asset's manufacturer has at least
     // one custom widget defined under its ManufacturerProfile. The tab body
     // is rendered async from /assets/:id/custom-widgets; if the manufacturer
@@ -2810,12 +2814,12 @@ async function openViewModal(id) {
       ? ' <span style="color:var(--color-text-secondary);font-weight:400;margin-left:6px">— ' + escapeHtml(a.hostname) + '</span>'
       : '');
 
-    var histLabel = escapeHtml(a.hostname || a.ipAddress || a.id);
-    var historyBtn = '<button class="btn btn-sm btn-secondary" onclick="openIpHistoryModal(\'' + a.id + '\',\'' + histLabel + '\')">History</button>';
+    // IP history + firewall sightings now live in the Sources tab (no longer a
+    // standalone modal). See _assetSourcesTabHTML.
     var copyBtns =
       '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-copy">Copy</button>' +
       '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-screenshot">Screenshot</button>';
-    var leftBtns = historyBtn + copyBtns;
+    var leftBtns = copyBtns;
     var rightBtns = '<button class="btn btn-sm btn-secondary" id="btn-asset-panel-close-btn">Close</button>' +
       (canManageAssets() ? '<button class="btn btn-sm btn-primary" id="btn-asset-panel-edit-btn">Edit</button>' : '');
     footerEl.innerHTML = leftBtns + '<span style="flex:1"></span>' + rightBtns;
@@ -8781,36 +8785,6 @@ function _renderStorageChart(container, samples, opts) {
   _observeChartResize(container, function (c) { _renderStorageChart(c, samples, opts); });
 }
 
-async function openIpHistoryModal(assetId, label) {
-  var title = "IP History — " + (label || assetId);
-  var closeFooter = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
-  openModal(title, '<p style="color:var(--color-text-secondary);padding:1rem 0">Loading…</p>', closeFooter, { wide: true });
-  try {
-    var history = await api.assets.getIpHistory(assetId);
-    var body;
-    if (!Array.isArray(history) || history.length === 0) {
-      body = '<p style="color:var(--color-text-secondary);padding:1rem 0">No IP history recorded for this asset.</p>';
-    } else {
-      var rows = history.map(function (h) {
-        return '<tr>' +
-          '<td class="mono">' + escapeHtml(h.ip || "-") + '</td>' +
-          '<td>' + escapeHtml(h.source || "-") + '</td>' +
-          '<td>' + (h.firstSeen ? escapeHtml(formatDate(h.firstSeen)) : "-") + '</td>' +
-          '<td>' + (h.lastSeen ? escapeHtml(formatDate(h.lastSeen)) : "-") + '</td>' +
-          '</tr>';
-      }).join("");
-      body =
-        '<div class="table-wrapper"><table class="data-table"><thead><tr>' +
-          '<th>IP Address</th><th>Source</th><th>First Seen</th><th>Last Seen</th>' +
-        '</tr></thead><tbody>' + rows + '</tbody></table></div>';
-    }
-    openModal(title, body, closeFooter, { wide: true });
-  } catch (err) {
-    closeModal();
-    showToast(err.message || "Failed to load IP history", "error");
-  }
-}
-
 // Find the visible content of the asset details slide-in: the active tab
 // panel when the slide-in is rendered with tabs, otherwise the body itself
 // (modal-style edit views without tabs).
@@ -10647,15 +10621,76 @@ function _wireDependencyTreeLinks(rootEl) {
   }
 }
 
-function _assetSourcesTabHTML(sources, assetId) {
-  if (!Array.isArray(sources) || sources.length === 0) {
+// Shared markup for the per-firewall DHCP sighting table. Used by the Sources
+// tab (general-visibility "found by N firewalls" history) and the Quarantine
+// tab's fan-out section.
+function _sightingsTableHTML(rows) {
+  if (!Array.isArray(rows) || !rows.length) {
+    return '<p class="empty-state" style="margin:0">No firewall sightings recorded.</p>';
+  }
+  return '<table class="data-table" style="font-size:0.82rem"><thead><tr><th>FortiGate</th><th>IP Address</th><th>VLAN</th><th>Source</th><th>Last Seen</th></tr></thead><tbody>' +
+    rows.map(function (s) {
+      var vlanCell = "—";
+      if (s.subnetName || s.vlan != null) {
+        var parts = [];
+        if (s.subnetName) parts.push(escapeHtml(s.subnetName));
+        if (s.vlan != null) parts.push("VLAN " + s.vlan);
+        vlanCell = parts.join(" · ");
+      }
+      return '<tr>' +
+        '<td>' + escapeHtml(s.fortigateDevice || "?") + '</td>' +
+        '<td>' + escapeHtml(s.ipAddress || "—") + '</td>' +
+        '<td>' + vlanCell + '</td>' +
+        '<td><span class="badge badge-type">' + escapeHtml(s.source || "?") + '</span></td>' +
+        '<td>' + (s.lastSeen ? formatDate(s.lastSeen) : "—") + '</td>' +
+      '</tr>';
+    }).join("") +
+    '</tbody></table>';
+}
+
+// Shared markup for the IP-history table (IPs this asset has held over time).
+function _ipHistoryTableHTML(rows) {
+  if (!Array.isArray(rows) || !rows.length) {
+    return '<p class="empty-state" style="margin:0">No IP history recorded for this asset.</p>';
+  }
+  return '<table class="data-table" style="font-size:0.82rem"><thead><tr><th>IP Address</th><th>Source</th><th>First Seen</th><th>Last Seen</th></tr></thead><tbody>' +
+    rows.map(function (h) {
+      return '<tr>' +
+        '<td class="mono">' + escapeHtml(h.ip || "-") + '</td>' +
+        '<td>' + escapeHtml(h.source || "-") + '</td>' +
+        '<td>' + (h.firstSeen ? escapeHtml(formatDate(h.firstSeen)) : "-") + '</td>' +
+        '<td>' + (h.lastSeen ? escapeHtml(formatDate(h.lastSeen)) : "-") + '</td>' +
+      '</tr>';
+    }).join("") +
+    '</tbody></table>';
+}
+
+function _assetSourcesTabHTML(sources, assetId, sightings, ipHistory) {
+  sources = Array.isArray(sources) ? sources : [];
+  sightings = Array.isArray(sightings) ? sightings : [];
+  ipHistory = Array.isArray(ipHistory) ? ipHistory : [];
+  if (sources.length === 0 && sightings.length === 0 && ipHistory.length === 0) {
     return '<div class="empty-state" style="padding:1rem">No source rows on file for this asset. Phase-1 backfill runs at startup; check the Events log if you expected entries here.</div>';
   }
+  // History sections appended below the per-source cards: which firewalls have
+  // seen this asset, and which IPs it has held over time. Folded in here so
+  // they're visible to anyone who can view the asset (the Quarantine tab's
+  // sighting copy is assets-admin-only and serves the push fan-out workflow).
+  var historyHTML =
+    '<div class="section-block" style="margin-bottom:1rem">' +
+      '<div class="section-label" style="margin-bottom:0.25rem">Firewall Sightings</div>' +
+      _sightingsTableHTML(sightings) +
+    '</div>' +
+    '<div class="section-block" style="margin-bottom:1rem">' +
+      '<div class="section-label" style="margin-bottom:0.25rem">IP History</div>' +
+      _ipHistoryTableHTML(ipHistory) +
+    '</div>';
+
   // Split is admin-only and only meaningful when there's more than one
   // source on the asset (the backend rejects splitting the only source).
   // Manual sources can never be split (backend also rejects those).
   var canSplit = isAdmin() && sources.length > 1;
-  return sources.map(function (s) {
+  var sourceCards = sources.map(function (s) {
     var label = _assetSourceLabels[s.sourceKind] || s.sourceKind;
     var badges = [];
     if (s.inferred) {
@@ -10708,6 +10743,7 @@ function _assetSourcesTabHTML(sources, assetId) {
       '</div>'
     );
   }).join("");
+  return sourceCards + historyHTML;
 }
 
 // ─── Quarantine tab ─────────────────────────────────────────────────────────
@@ -10785,29 +10821,7 @@ function _wireQuarantineTab(a) {
     if (!container) return;
     api.assets.getSightings(a.id).then(function (data) {
       var rows = Array.isArray(data) ? data : (data.sightings || []);
-      if (!rows.length) {
-        container.innerHTML = '<p class="empty-state" style="margin:0">No DHCP sightings recorded yet.</p>';
-        return;
-      }
-      container.innerHTML =
-        '<table class="data-table" style="font-size:0.82rem"><thead><tr><th>FortiGate</th><th>IP Address</th><th>VLAN</th><th>Source</th><th>Last Seen</th></tr></thead><tbody>' +
-        rows.map(function (s) {
-          var vlanCell = "—";
-          if (s.subnetName || s.vlan != null) {
-            var parts = [];
-            if (s.subnetName) parts.push(escapeHtml(s.subnetName));
-            if (s.vlan != null) parts.push("VLAN " + s.vlan);
-            vlanCell = parts.join(" · ");
-          }
-          return '<tr>' +
-            '<td>' + escapeHtml(s.fortigateDevice || "?") + '</td>' +
-            '<td>' + escapeHtml(s.ipAddress || "—") + '</td>' +
-            '<td>' + vlanCell + '</td>' +
-            '<td><span class="badge badge-type">' + escapeHtml(s.source || "?") + '</span></td>' +
-            '<td>' + (s.lastSeen ? formatDate(s.lastSeen) : "—") + '</td>' +
-          '</tr>';
-        }).join("") +
-        '</tbody></table>';
+      container.innerHTML = _sightingsTableHTML(rows);
     }).catch(function () {
       var container2 = document.getElementById("asset-sightings-container");
       if (container2) container2.innerHTML = '<p class="empty-state" style="color:var(--color-danger,#c0392b)">Failed to load sightings.</p>';
