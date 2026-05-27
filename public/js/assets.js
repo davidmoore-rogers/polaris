@@ -3658,34 +3658,10 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
   _scheduleAssetSystemRefresh(assetId, refAsset, ms);
 }
 
-// Renders the CPU & Memory current + window summary. "Current" readings
-// (Last CPU, Last Memory, Last Telemetry Poll) go to the Status block
-// rows up-top, mirroring how Last Response Time / Last Poll are placed
-// for the response-time stream. The window stats container below the
+// Renders the CPU & Memory window summary. The stats container below the
 // chart gets the canonical "<count> samples · <Label>: <value> · ..."
 // shape via _renderChartStats.
 function _renderSystemSummary(container, tel, si) {
-  var latest = (si && si.telemetry) || null;
-  var cpuRow = document.getElementById("asset-status-last-cpu");
-  var memRow = document.getElementById("asset-status-last-memory");
-  var pollRow = document.getElementById("asset-status-last-telemetry-poll");
-  if (cpuRow) {
-    cpuRow.textContent = (latest && typeof latest.cpuPct === "number") ? (latest.cpuPct.toFixed(1) + "%") : "—";
-  }
-  if (memRow) {
-    if (latest && typeof latest.memPct === "number") {
-      var memText = latest.memPct.toFixed(1) + "%";
-      if (typeof latest.memUsedBytes === "number" && typeof latest.memTotalBytes === "number" && latest.memTotalBytes > 0) {
-        memText += " (" + _fmtBytes(latest.memUsedBytes) + " / " + _fmtBytes(latest.memTotalBytes) + ")";
-      }
-      memRow.textContent = memText;
-    } else {
-      memRow.textContent = "—";
-    }
-  }
-  if (pollRow) {
-    pollRow.textContent = (latest && latest.timestamp) ? formatDate(latest.timestamp) : "—";
-  }
   if (!container) return;
   if (!tel || !tel.stats || !tel.stats.total) {
     container.textContent = "No telemetry samples in this range yet.";
@@ -4631,6 +4607,15 @@ function _assetStationsTabHTML(a) {
     '</div>';
 }
 
+// Short band label for the Stations table. The backend derives band from the
+// FortiAP's fapRadioTable ("2.4GHz" | "5GHz" | "6GHz"); render it compactly.
+function _wirelessBandLabel(band) {
+  if (band === "2.4GHz") return "2G";
+  if (band === "5GHz")   return "5G";
+  if (band === "6GHz")   return "6G";
+  return "—";
+}
+
 // Render the wireless-station table from the system-info response.
 // Same shape as _renderLldpNeighborsCard — current-state list, no time
 // series. Stations matched to a Polaris asset surface the asset name
@@ -4665,18 +4650,15 @@ function _renderWirelessStationsCard(container, si, asset) {
     } else {
       endpointHtml = '<span style="color:var(--color-text-tertiary)">(not in inventory)</span>';
     }
-    var radioLabel = "";
-    if (s.radioId != null) radioLabel = "radio " + s.radioId + (s.wlanId != null ? " · wlan " + s.wlanId : "");
+    var bandLabel   = _wirelessBandLabel(s.band);
     var signalLabel = (s.signalStrength != null) ? (s.signalStrength + " dBm") : "—";
-    var idle       = (s.idleSeconds   != null) ? (s.idleSeconds + "s") : "—";
     return '<tr>' +
       '<td>' + escapeHtml(s.ssid || "—") + '</td>' +
       '<td class="mono">' + escapeHtml(s.staMacAddr) + '</td>' +
       '<td class="mono">' + escapeHtml(s.staIpAddr || "—") + '</td>' +
       '<td>' + endpointHtml + '</td>' +
-      '<td style="font-size:0.78rem;color:var(--color-text-secondary)">' + escapeHtml(radioLabel) + '</td>' +
+      '<td>' + escapeHtml(bandLabel) + '</td>' +
       '<td style="text-align:right">' + escapeHtml(signalLabel) + '</td>' +
-      '<td style="text-align:right">' + escapeHtml(idle) + '</td>' +
     '</tr>';
   }).join("");
   var staleBanner = _staleBannerHTML(asset && asset.id, asset, "systemInfo", si && si.lastSystemInfoAt);
@@ -4686,9 +4668,8 @@ function _renderWirelessStationsCard(container, si, asset) {
       '<th data-col-id="mac" data-col-required="true">MAC</th>' +
       '<th data-col-id="ip">IP</th>' +
       '<th data-col-id="endpoint" data-col-required="true">Endpoint</th>' +
-      '<th data-col-id="radio">Radio/WLAN</th>' +
+      '<th data-col-id="band">Band</th>' +
       '<th style="text-align:right" data-col-id="signal">Signal</th>' +
-      '<th style="text-align:right" data-col-id="idle">Idle</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';
   if (typeof applyTableLayout === "function") {
     applyTableLayout(container.querySelector("table"), "asset-wireless-stations");
@@ -6316,22 +6297,6 @@ function assetMonitoringViewHTML(a) {
     if (a.monitorCredential) sourceLabel = rtPolling.toUpperCase() + " · " + a.monitorCredential.name;
     else sourceLabel = rtPolling.toUpperCase();
   }
-  var lastRtt = (typeof a.lastResponseTimeMs === "number") ? (a.lastResponseTimeMs + " ms") : "—";
-  var lastPoll = a.lastMonitorAt ? formatDate(a.lastMonitorAt) : "—";
-  var consec = a.consecutiveFailures || 0;
-  // Telemetry "current readings" rows — only rendered when the asset's
-  // resolved telemetry stream actually delivers (REST API or SNMP); ICMP /
-  // SSH / WinRM don't carry CPU/memory data. _renderSystemSummary fills in
-  // the values once the telemetry pull lands.
-  var telemetryDelivered = !!(_assetMonitorStreamSource(a, "telemetry").polling);
-  var telemetryRows = telemetryDelivered
-    ? '<div class="detail-row"><span class="detail-label">Last CPU</span>' +
-        '<span class="detail-value" id="asset-status-last-cpu">—</span></div>' +
-      '<div class="detail-row"><span class="detail-label">Last Memory</span>' +
-        '<span class="detail-value" id="asset-status-last-memory">—</span></div>' +
-      '<div class="detail-row"><span class="detail-label">Last Telemetry Poll</span>' +
-        '<span class="detail-value" id="asset-status-last-telemetry-poll">—</span></div>'
-    : '';
   var probeBtn = isUserOrAbove()
     ? '<button class="btn btn-sm btn-primary" id="btn-asset-probe-now" style="margin-right:6px" title="Run a response-time probe and pull fresh telemetry + interface data">Refresh</button>'
     : '';
@@ -6384,10 +6349,6 @@ function assetMonitoringViewHTML(a) {
             '</span></div>'
         : '') +
       viewRow("Source", sourceLabel) +
-      viewRow("Last Response Time", lastRtt) +
-      viewRow("Last Poll", lastPoll) +
-      viewRow("Consecutive Failures", String(consec)) +
-      telemetryRows +
     '</div>' +
     '<div style="display:flex;align-items:center;justify-content:space-between;margin:1.5rem 0 0.5rem">' +
       '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +

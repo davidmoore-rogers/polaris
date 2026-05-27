@@ -44,6 +44,7 @@ import {
 import { logEvent } from "../api/routes/events.js";
 import { logger } from "../utils/logger.js";
 import { parseFortiapTelemetrySnapshot } from "../utils/fortiapMonitorRow.js";
+import { deriveRadioBand } from "../utils/fortiapRadioBand.js";
 import { resolveOidSync, ensureRegistryLoaded } from "./oidRegistry.js";
 import {
   pickVendorProfile,
@@ -1977,6 +1978,121 @@ async function fetchFortinetControllerInventory(
   return fetchPromise;
 }
 
+// ─── Wireless-station signal overlay ──────────────────────────────────────
+//
+// The SNMP fapStationTable carries no per-client RSSI — signal/noise live only
+// on the WiFi controller (FortiGate), exposed at /api/v2/monitor/wifi/client.
+// One call returns every client on the controller, so we cache it per
+// (integration, controller) with the same 30s TTL + inflight-coalescing the
+// inventory fetcher uses and let every AP on that controller share it. At 2000
+// assets this is one REST call per controller per scrape window, not one per
+// AP. Best-effort: any failure leaves signal/noise null and the SNMP-sourced
+// station rows persist unchanged. Stations are matched by normalized client
+// MAC (a client associates to one AP at a time, so MAC alone scopes correctly).
+
+interface WifiClientSignal {
+  signalStrength: number | null;
+  noise: number | null;
+}
+// normalized client MAC (colon-uppercase) → signal
+type WifiClientSignalMap = Map<string, WifiClientSignal>;
+
+interface WifiClientCacheEntry {
+  fetchedAt: number;
+  clients: WifiClientSignalMap;
+}
+
+const fortinetWifiClientCache = new Map<string, WifiClientCacheEntry>();
+const inflightWifiClientFetch = new Map<string, Promise<WifiClientSignalMap>>();
+
+function wifiClientCacheKey(integrationId: string, deviceName: string): string {
+  return `${integrationId}::${deviceName}::wifi-clients`;
+}
+
+function wifiClientNum(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.round(v);
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v.trim());
+    return Number.isFinite(n) ? Math.round(n) : null;
+  }
+  return null;
+}
+
+async function fetchFortinetWifiClients(
+  integration: { id: string; type: string; config: Record<string, unknown> },
+  deviceName: string,
+  timeoutMs: number,
+): Promise<WifiClientSignalMap> {
+  const cacheKey = wifiClientCacheKey(integration.id, deviceName);
+  const cached = fortinetWifiClientCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < FORTINET_CONTROLLER_CACHE_TTL_MS) {
+    return cached.clients;
+  }
+  const inflight = inflightWifiClientFetch.get(cacheKey);
+  if (inflight) return inflight;
+
+  const fetchPromise = (async (): Promise<WifiClientSignalMap> => {
+    try {
+      const path = "/api/v2/monitor/wifi/client";
+      let rawRows: unknown;
+      if (integration.type === "fortimanager") {
+        const fmgConfig = integration.config as unknown as FortiManagerConfig;
+        if (fmgConfig.useProxy === false) {
+          if (!fmgConfig.fortigateApiToken || !fmgConfig.mgmtInterface?.trim()) {
+            throw new Error("Direct-mode prerequisites missing for wifi/client fetch");
+          }
+          const mgmtIp = await resolveControllerMgmtIp(integration.id, deviceName, fmgConfig);
+          if (!mgmtIp) throw new Error(`Could not resolve ${deviceName}'s management IP`);
+          const directConfig: FortiGateConfig = {
+            host: mgmtIp,
+            port: 443,
+            apiUser: fmgConfig.fortigateApiUser || "",
+            apiToken: fmgConfig.fortigateApiToken,
+            verifySsl: fmgConfig.fortigateVerifySsl === true,
+          };
+          rawRows = await fgRequest<unknown>(directConfig, "GET", path, { timeoutMs });
+        } else {
+          const ac = new AbortController();
+          const timer = setTimeout(() => ac.abort(), timeoutMs);
+          try {
+            rawRows = await fmgProxyRest<unknown>(fmgConfig, deviceName, "GET", path, { signal: ac.signal, integrationId: integration.id });
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+      } else if (integration.type === "fortigate") {
+        rawRows = await fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
+      } else {
+        throw new Error(`Unsupported integration type for wifi/client fetch: ${integration.type}`);
+      }
+
+      const rows: unknown[] = Array.isArray(rawRows)
+        ? rawRows
+        : Array.isArray((rawRows as any)?.results) ? (rawRows as any).results : [];
+      const clients: WifiClientSignalMap = new Map();
+      for (const row of rows) {
+        const r = row as Record<string, unknown>;
+        const macRaw = String(r.mac ?? r.sta_mac ?? r.station_mac ?? "").trim();
+        if (!macRaw) continue;
+        const mac = macRaw.toUpperCase().replace(/-/g, ":");
+        if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(mac)) continue;
+        clients.set(mac, {
+          signalStrength: wifiClientNum(r.signal ?? r.signal_strength ?? r.rssi),
+          noise:          wifiClientNum(r.noise),
+        });
+      }
+
+      fortinetWifiClientCache.set(cacheKey, { fetchedAt: Date.now(), clients });
+      return clients;
+    } finally {
+      inflightWifiClientFetch.delete(cacheKey);
+    }
+  })();
+
+  inflightWifiClientFetch.set(cacheKey, fetchPromise);
+  return fetchPromise;
+}
+
 // ─── FortiSwitch port VLAN overlay ────────────────────────────────────────
 //
 // Managed FortiSwitches expose interface counters via SNMP IF-MIB, but the
@@ -2842,6 +2958,7 @@ export interface WirelessStationSample {
   ssid?:           string | null;
   radioId?:        number | null;
   wlanId?:         number | null;
+  band?:           string | null;
   vlanId?:         number | null;
   bssid?:          string | null;
   signalStrength?: number | null;
@@ -3459,6 +3576,37 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
                 }
               } catch (err: any) {
                 endVlan({ overlaid: 0, total: data.interfaces.length, error: err?.message || String(err) });
+              }
+            }
+          }
+          // FortiAP wireless-station signal overlay. fapStationTable (SNMP)
+          // gives us the connected clients + band, but per-client RSSI lives
+          // only on the controller's /api/v2/monitor/wifi/client. One cached
+          // call per controller, joined onto the in-memory station list by
+          // normalized MAC. Best-effort: any failure leaves signal/noise null.
+          if (asset.assetType === "access_point" && Array.isArray(data.wirelessStations) && data.wirelessStations.length > 0) {
+            const topology = (asset.fortinetTopology ?? {}) as Record<string, unknown>;
+            let controllerName = typeof topology.controllerFortigate === "string"
+              ? topology.controllerFortigate.trim()
+              : "";
+            if (!controllerName && integration.type === "fortigate") {
+              controllerName = String((integration.config as Record<string, unknown>).host || "");
+            }
+            if (controllerName) {
+              const endSignal = startPhase("systeminfo.snmp.wifi_signal_overlay_rest");
+              try {
+                const signals = await fetchFortinetWifiClients(integration as any, controllerName, sysInfoTimeout);
+                let overlaid = 0;
+                for (const st of data.wirelessStations) {
+                  const sig = signals.get(st.staMacAddr.toUpperCase());
+                  if (!sig) continue;
+                  st.signalStrength = sig.signalStrength;
+                  st.noise          = sig.noise;
+                  overlaid++;
+                }
+                endSignal({ overlaid, total: data.wirelessStations.length });
+              } catch (err: any) {
+                endSignal({ overlaid: 0, total: data.wirelessStations.length, error: err?.message || String(err) });
               }
             }
           }
@@ -4161,6 +4309,12 @@ const OID = {
   fapStaVlanId:       "1.3.6.1.4.1.12356.120.8.1.1.5",
   fapStaIpAddr:       "1.3.6.1.4.1.12356.120.8.1.1.6",
   fapStaSSID:         "1.3.6.1.4.1.12356.120.8.1.1.7",
+  // FORTINET-FORTIAP-MIB::fapRadioTable (1.3.6.1.4.1.12356.120.4.1.1), INDEX =
+  // { fapRadioIndex }. There is no band column, so we derive band per radio
+  // from fapRadioType + fapRadioChannelOper (see utils/fortiapRadioBand) and
+  // join it onto stations by radioId == fapRadioIndex.
+  fapRadioType:        "1.3.6.1.4.1.12356.120.4.1.1.6",
+  fapRadioChannelOper: "1.3.6.1.4.1.12356.120.4.1.1.14",
 };
 
 function buildSnmpSession(host: string, config: Record<string, unknown>, timeoutMs?: number): any {
@@ -5482,12 +5636,25 @@ function parseLldpChassisId(subtype: number | null, raw: unknown): string | null
  * Each parallel column walk lookup uses the same suffix string.
  */
 async function collectWirelessStationsSnmp(session: any): Promise<WirelessStationSample[] | undefined> {
-  const [ssids, bssids, vlans, ipAddrs] = await Promise.all([
+  const [ssids, bssids, vlans, ipAddrs, radioTypes, radioChannels] = await Promise.all([
     snmpWalk(session, OID.fapStaSSID).catch(() => new Map()),
     snmpWalk(session, OID.fapStaBSSID).catch(() => new Map()),
     snmpWalk(session, OID.fapStaVlanId).catch(() => new Map()),
     snmpWalk(session, OID.fapStaIpAddr).catch(() => new Map()),
+    // fapRadioTable, indexed by fapRadioIndex — used to derive each station's
+    // band. Best-effort: failures leave band null, stations still persist.
+    snmpWalk(session, OID.fapRadioType).catch(() => new Map()),
+    snmpWalk(session, OID.fapRadioChannelOper).catch(() => new Map()),
   ]);
+
+  // radioIndex (string suffix) → derived band. fapRadioIndex is the single
+  // index column, so the walk suffix is the bare radio index.
+  const bandByRadio = new Map<string, string | null>();
+  for (const suffix of new Set([...radioTypes.keys(), ...radioChannels.keys()])) {
+    const type = radioTypes.has(suffix) ? snmpVbToString(radioTypes.get(suffix)).trim() : null;
+    const channel = snmpVbToNumber(radioChannels.get(suffix));
+    bandByRadio.set(String(suffix), deriveRadioBand(type, channel));
+  }
 
   // Treat all-empty as "table unsupported" so we don't wipe stored rows on
   // a transport that can't report. A genuinely empty AP with the MIB in
@@ -5533,6 +5700,7 @@ async function collectWirelessStationsSnmp(session: any): Promise<WirelessStatio
       ssid,
       radioId: Number.isFinite(radioId) ? radioId : null,
       wlanId:  Number.isFinite(wlanId)  ? wlanId  : null,
+      band:    Number.isFinite(radioId) ? (bandByRadio.get(String(radioId)) ?? null) : null,
       vlanId:  vlanId,
       bssid,
     });
@@ -6136,6 +6304,7 @@ async function persistWirelessStations(
         ssid:           s.ssid ?? null,
         radioId:        s.radioId ?? null,
         wlanId:         s.wlanId ?? null,
+        band:           s.band ?? null,
         vlanId:         s.vlanId ?? null,
         bssid:          s.bssid ?? null,
         signalStrength: s.signalStrength ?? null,
@@ -6144,7 +6313,9 @@ async function persistWirelessStations(
         bandwidthRx:    s.bandwidthRx ?? null,
         idleSeconds:    s.idleSeconds ?? null,
         matchedAssetId,
-        source:         "snmp",
+        // Station identity comes from SNMP fapStationTable; signal/noise are an
+        // optional FortiOS-REST overlay from the controller (wifi/client).
+        source:         (s.signalStrength != null || s.noise != null) ? "snmp+rest" : "snmp",
       },
     });
   }
@@ -6184,6 +6355,7 @@ type WirelessUpsertRow = {
     ssid: string | null;
     radioId: number | null;
     wlanId: number | null;
+    band: string | null;
     vlanId: number | null;
     bssid: string | null;
     signalStrength: number | null;
@@ -6224,6 +6396,7 @@ async function bulkUpsertWirelessStations(
       `$${p++}`,                  // ssid
       `$${p++}`,                  // radioId
       `$${p++}`,                  // wlanId
+      `$${p++}`,                  // band
       `$${p++}`,                  // vlanId
       `$${p++}`,                  // bssid
       `$${p++}`,                  // signalStrength
@@ -6245,6 +6418,7 @@ async function bulkUpsertWirelessStations(
       d.ssid,
       d.radioId,
       d.wlanId,
+      d.band,
       d.vlanId,
       d.bssid,
       d.signalStrength,
@@ -6261,7 +6435,7 @@ async function bulkUpsertWirelessStations(
   const sql =
     `INSERT INTO "asset_wireless_stations" (` +
     `"id", "apAssetId", "staMacAddr", ` +
-    `"staIpAddr", "ssid", "radioId", "wlanId", "vlanId", ` +
+    `"staIpAddr", "ssid", "radioId", "wlanId", "band", "vlanId", ` +
     `"bssid", "signalStrength", "noise", "bandwidthTx", "bandwidthRx", ` +
     `"idleSeconds", "matchedAssetId", "source", "firstSeen", "lastSeen"` +
     `) VALUES ${tuples.join(", ")} ` +
@@ -6270,6 +6444,7 @@ async function bulkUpsertWirelessStations(
     `"ssid"           = EXCLUDED."ssid", ` +
     `"radioId"        = EXCLUDED."radioId", ` +
     `"wlanId"         = EXCLUDED."wlanId", ` +
+    `"band"           = EXCLUDED."band", ` +
     `"vlanId"         = EXCLUDED."vlanId", ` +
     `"bssid"          = EXCLUDED."bssid", ` +
     `"signalStrength" = EXCLUDED."signalStrength", ` +

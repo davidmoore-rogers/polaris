@@ -802,7 +802,7 @@ AssetLldpNeighbor               -- Current-state LLDP neighbor table per (asset,
   -- consumes `fortinetTopology` directly for edge layout, so no
   -- supplementation is needed there.
 
-AssetWirelessStation            -- Current-state table of wireless clients connected to a FortiAP. Populated by the SNMP `fapStationTable` walk (1.3.6.1.4.1.12356.120.8.1.1) on `assetType="access_point"` assets when `interfacesPolling` resolves to `snmp`. Mirrors the AssetLldpNeighbor shape but **without** the 48h stickiness window — wireless clients are transient by design and a station absent from a fresh scrape just drops on the spot (per-scrape full-replace per `(apAssetId, staMacAddr)`). `matchedAssetId` is resolved at persist time via MAC lookup against the same `getLldpAssetMatchIndex()` cache LLDP uses; when a station matches an endpoint asset, that endpoint's `Asset.lastSeenAp` is bumped to the AP's hostname so the endpoint's details page shows which AP last saw it. Surfaced via `GET /assets/:id/system-info` (Stations tab on the asset details modal for FortiAPs) and `GET /map/sites/:id/topology` (each AP node carries `stations[]` — top 25 by recency — that the topology renderer draws as small diamond `wireless-station` nodes connected via dashed-cyan `wireless` edges).
+AssetWirelessStation            -- Current-state table of wireless clients connected to a FortiAP. Populated by the SNMP `fapStationTable` walk (1.3.6.1.4.1.12356.120.8.1.1) on `assetType="access_point"` assets when `interfacesPolling` resolves to `snmp`. Mirrors the AssetLldpNeighbor shape but **without** the 48h stickiness window — wireless clients are transient by design and a station absent from a fresh scrape just drops on the spot (per-scrape full-replace per `(apAssetId, staMacAddr)`). `matchedAssetId` is resolved at persist time via MAC lookup against the same `getLldpAssetMatchIndex()` cache LLDP uses; when a station matches an endpoint asset, that endpoint's `Asset.lastSeenAp` is bumped to the AP's hostname so the endpoint's details page shows which AP last saw it. `band` ("2.4GHz"/"5GHz"/"6GHz") is derived per radio by also walking `fapRadioTable` (1.3.6.1.4.1.12356.120.4.1.1 — `fapRadioType`+`fapRadioChannelOper`) in the same SNMP session and joining radio→station by `radioId==fapRadioIndex` (see `src/utils/fortiapRadioBand.ts`). `signalStrength`/`noise` are filled by a best-effort FortiOS-REST overlay against the controlling FortiGate's `/api/v2/monitor/wifi/client` (matched by client MAC, cached per controller via `fetchFortinetWifiClients`); rows enriched this way carry `source="snmp+rest"`. Surfaced via `GET /assets/:id/system-info` (Stations tab on the asset details modal for FortiAPs — columns SSID / MAC / IP / Endpoint / **Band** / Signal) and `GET /map/sites/:id/topology` (each AP node carries `stations[]` — top 25 by recency — that the topology renderer draws as small diamond `wireless-station` nodes connected via dashed-cyan `wireless` edges).
   id             UUID PK
   apAssetId      UUID FK → Asset (cascade delete)
   staMacAddr     String          -- normalized colon-uppercase
@@ -810,15 +810,16 @@ AssetWirelessStation            -- Current-state table of wireless clients conne
   ssid           String?
   radioId        Int?
   wlanId         Int?
+  band           String?         -- "2.4GHz" | "5GHz" | "6GHz", derived from fapRadioTable via radioId
   vlanId         Int?
   bssid          String?
-  signalStrength Int?            -- dBm
-  noise          Int?            -- dBm
+  signalStrength Int?            -- dBm (FortiOS-REST wifi/client overlay)
+  noise          Int?            -- dBm (FortiOS-REST wifi/client overlay)
   bandwidthTx    Int?            -- kbps
   bandwidthRx    Int?            -- kbps
   idleSeconds    Int?
   matchedAssetId UUID? FK → Asset (set null on delete)
-  source         String          -- "snmp"
+  source         String          -- "snmp" | "snmp+rest" (when signal/noise came from the REST overlay)
   firstSeen      DateTime
   lastSeen       DateTime
   @@unique([apAssetId, staMacAddr])

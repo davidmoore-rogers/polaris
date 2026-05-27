@@ -1051,10 +1051,11 @@ model AssetWirelessStation {
   ssid           String?
   radioId        Int?
   wlanId         Int?
+  band           String? // "2.4GHz" | "5GHz" | "6GHz", derived from fapRadioTable via radioId
   vlanId         Int?
   bssid          String?
-  signalStrength Int?    // dBm
-  noise          Int?    // dBm
+  signalStrength Int?    // dBm — populated from the controller's FortiOS REST /api/v2/monitor/wifi/client
+  noise          Int?    // dBm — populated from the same REST overlay when present
   bandwidthTx    Int?    // kbps
   bandwidthRx    Int?    // kbps
   idleSeconds    Int?
@@ -1062,7 +1063,7 @@ model AssetWirelessStation {
   matchedAssetId String?
   matchedAsset   Asset?  @relation("AssetWirelessStationMatch", fields: [matchedAssetId], references: [id], onDelete: SetNull)
 
-  source         String  // "snmp" (FortiOS REST path lands in a follow-up commit)
+  source         String  // "snmp" (band) + optional REST overlay (signal/noise)
 
   firstSeen      DateTime @default(now())
   lastSeen       DateTime @default(now())
