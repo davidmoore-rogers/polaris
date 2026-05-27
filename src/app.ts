@@ -30,51 +30,15 @@ import {
   decHttpInFlight,
   statusToClass,
 } from "./metrics.js";
-import "./jobs/expireReservations.js";
-import "./jobs/pruneEvents.js";
-import "./jobs/ouiRefresh.js";
-import "./jobs/updateCheck.js";
-import "./jobs/discoveryScheduler.js";
-import "./jobs/discoverySlowCheck.js";
-import "./jobs/clampAssetAcquiredAt.js";
-import "./jobs/decommissionStaleAssets.js";
-import "./jobs/monitorAssets.js";
-import "./jobs/normalizeManufacturers.js";
-import "./jobs/seedAssetTypes.js";
-import "./jobs/seedManufacturerProfiles.js";
-import "./jobs/backfillManufacturerProfileMemoryComposition.js";
-import "./jobs/migrateMonitorSettingsHierarchy.js";
-import "./jobs/renameMonitorClassKeys.js";
-import "./jobs/migrateRetentionTiers.js";
-import "./jobs/consolidateSampleRetention.js";
-import "./jobs/migrateMonitorStatusRename.js";
-import "./jobs/migrateAutoMonitorInterfacesShape.js";
-import "./jobs/migrateSystemInfoCadenceLinkage.js";
-import "./jobs/migrateMonitorSettingsPerClass.js";
-import "./jobs/backfillAssetSources.js";
-import "./jobs/flagStaleReservations.js";
-import "./jobs/capacityWatch.js";
-import "./jobs/resolvePolarisPushedConflicts.js";
-import "./jobs/resolveStaleReservationConflicts.js";
-import "./jobs/scrubLegacySidGuidTags.js";
-import "./jobs/cleanupStaleDnsResolvedReleased.js";
-import "./jobs/backfillFortigateEndpointSources.js";
-import "./jobs/fixInfraAssetTypes.js";
-import "./jobs/mergeFortiswitchEndpointGhosts.js";
-import "./jobs/mergeDuplicateHostnameAssets.js";
-import "./jobs/backfillDependencyTree.js";
-import "./jobs/backfillMonitorStatusChangedAt.js";
-import "./jobs/backfillMonitorOverride.js";
-import "./jobs/rasterizeStoredSvgIcons.js";
-import "./jobs/dependencyReconciler.js";
-import "./jobs/retryQueuedReservationPushes.js";
-import "./jobs/reconcileMapRegions.js";
-import "./jobs/reconcileDnsResolvedReservations.js";
-import "./jobs/runSampleRollup.js";
-import "./jobs/autoBuildAgents.js";
+// Background jobs are NOT statically imported here — importing a job module
+// runs its self-start side effect, which must be gated by process role. They
+// are dynamically imported per-role in startBackgroundJobs() below.
+import { roleConfig, type RoleConfig } from "./utils/role.js";
+import { startDiscoveryScheduler } from "./jobs/discoveryScheduler.js";
 import { ensureRegistryLoaded } from "./services/oidRegistry.js";
 import { detectTimescale, migrateToHypertables } from "./services/timescaleService.js";
-import { initializeQueue, startPgbossWorkers, stopPgbossWorkers } from "./services/queueService.js";
+import { initializeQueue, startPgbossWorkers, startDiscoveryWorker, startQueueProducer, stopPgbossWorkers } from "./services/queueService.js";
+import { runDiscovery } from "./api/routes/integrations.js";
 import { startSampleWriteBuffer, shutdownFlushSampleBuffers } from "./services/sampleWriteBuffer.js";
 import { startProbePatchBuffer, shutdownFlushProbePatchBuffer } from "./services/probePatchBuffer.js";
 import { runStartupDiskCheck } from "./utils/startupDiskCheck.js";
@@ -104,58 +68,98 @@ ensureRegistryLoaded().catch((err) => {
   logger.warn({ err: err?.message }, "OID registry warm-up failed");
 });
 
+// Process role gates which subsystems boot here (see src/utils/role.ts).
+// Unset POLARIS_ROLE => "all" => every capability on => today's single-process
+// behavior. web = HTTP + singleton schedulers + migrations; monitor = pg-boss
+// monitor consumers + write buffers; discovery = pg-boss discovery consumer.
+const cfg = roleConfig();
+logger.info(
+  {
+    role: cfg.role,
+    runsHttp: cfg.runsHttp,
+    runsMonitorConsumers: cfg.runsMonitorConsumers,
+    runsDiscoveryConsumers: cfg.runsDiscoveryConsumers,
+    runsSchedulers: cfg.runsSchedulers,
+    runsMigrations: cfg.runsMigrations,
+  },
+  `Polaris process role: ${cfg.role}`,
+);
+
 // Warm the monitor-queue mode cache at startup so the dispatcher in
-// `monitorAssets.ts` and the capacity snapshot both see the same value.
-// When the boot-time mode is "pgboss", also spin up the pg-boss worker
-// pools — they pull jobs the publisher submits from monitorAssets.ts.
-// Non-fatal — failure leaves Polaris on the cursor (default) queue.
+// `monitorAssets.ts` and the capacity snapshot both see the same value, then
+// start the pg-boss surfaces this role needs: monitor consumers
+// (runsMonitorConsumers), the discovery consumer (runsDiscoveryConsumers), and
+// the producer connection so schedulers can publish (runsSchedulers).
+// initializeQueue() runs in every role (cheap cache warm). Non-fatal — failure
+// leaves Polaris on the cursor (default) queue.
 initializeQueue()
-  .then(() =>
-    startPgbossWorkers().catch((err) => {
-      const msg = String(err?.message || "");
-      // Distinguish the most common operator-actionable failure (the role
-      // Polaris connects as doesn't own the pgboss schema) from generic
-      // pg-boss errors. The actionable error gets a multi-line log entry
-      // with the SQL the DBA needs to run; everything else stays a plain
-      // warn line.
-      if (/permission denied for schema pgboss/i.test(msg)) {
-        logger.error(
-          { err: msg },
-          "pg-boss worker start failed — the polaris DB role does not own the pgboss schema.\n" +
-          "Polaris will fall back to in-process cursor mode (suitable for small/medium fleets only).\n" +
-          "To enable pg-boss for large fleets, run the following on the polaris database as a Postgres\n" +
-          "superuser (psql ... or via your managed-Postgres console), replacing $DB_USER with the\n" +
-          "polaris role:\n" +
-          "  ALTER SCHEMA pgboss OWNER TO $DB_USER;\n" +
-          "  GRANT ALL ON SCHEMA pgboss TO $DB_USER;\n" +
-          "  GRANT ALL ON ALL TABLES    IN SCHEMA pgboss TO $DB_USER;\n" +
-          "  GRANT ALL ON ALL SEQUENCES IN SCHEMA pgboss TO $DB_USER;\n" +
-          "  GRANT ALL ON ALL FUNCTIONS IN SCHEMA pgboss TO $DB_USER;\n" +
-          "  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON TABLES    TO $DB_USER;\n" +
-          "  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON SEQUENCES TO $DB_USER;\n" +
-          "  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON FUNCTIONS TO $DB_USER;\n" +
-          "Then restart the polaris service.",
-        );
-      } else {
-        logger.warn({ err: msg }, "pg-boss worker start failed; staying on cursor");
-      }
-    }),
-  )
+  .then(async () => {
+    if (cfg.runsMonitorConsumers) {
+      await startPgbossWorkers().catch((err) => {
+        const msg = String(err?.message || "");
+        // Distinguish the most common operator-actionable failure (the role
+        // Polaris connects as doesn't own the pgboss schema) from generic
+        // pg-boss errors. The actionable error gets a multi-line log entry
+        // with the SQL the DBA needs to run; everything else stays a plain
+        // warn line.
+        if (/permission denied for schema pgboss/i.test(msg)) {
+          logger.error(
+            { err: msg },
+            "pg-boss worker start failed — the polaris DB role does not own the pgboss schema.\n" +
+            "Polaris will fall back to in-process cursor mode (suitable for small/medium fleets only).\n" +
+            "To enable pg-boss for large fleets, run the following on the polaris database as a Postgres\n" +
+            "superuser (psql ... or via your managed-Postgres console), replacing $DB_USER with the\n" +
+            "polaris role:\n" +
+            "  ALTER SCHEMA pgboss OWNER TO $DB_USER;\n" +
+            "  GRANT ALL ON SCHEMA pgboss TO $DB_USER;\n" +
+            "  GRANT ALL ON ALL TABLES    IN SCHEMA pgboss TO $DB_USER;\n" +
+            "  GRANT ALL ON ALL SEQUENCES IN SCHEMA pgboss TO $DB_USER;\n" +
+            "  GRANT ALL ON ALL FUNCTIONS IN SCHEMA pgboss TO $DB_USER;\n" +
+            "  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON TABLES    TO $DB_USER;\n" +
+            "  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON SEQUENCES TO $DB_USER;\n" +
+            "  ALTER DEFAULT PRIVILEGES IN SCHEMA pgboss GRANT ALL ON FUNCTIONS TO $DB_USER;\n" +
+            "Then restart the polaris service.",
+          );
+        } else {
+          logger.warn({ err: msg }, "pg-boss worker start failed; staying on cursor");
+        }
+      });
+    }
+    if (cfg.runsDiscoveryConsumers) {
+      await startDiscoveryWorker(runDiscovery).catch((err) => {
+        logger.warn({ err: err?.message }, "pg-boss discovery worker start failed");
+      });
+    }
+    // Producer connection: schedulers (monitor producer ticks, discovery
+    // scheduler) publish jobs, so the web/all role needs a live boss to send
+    // through even when it consumes nothing. No-op in cursor mode.
+    if (cfg.runsSchedulers && !cfg.runsMonitorConsumers) {
+      await startQueueProducer().catch((err) => {
+        logger.warn({ err: err?.message }, "pg-boss producer init failed; publishing disabled");
+      });
+    }
+  })
   .catch((err) => {
     logger.warn({ err: err?.message }, "Queue initialization failed; defaulting to cursor mode");
   });
 
-// Start the monitor sample-write buffer. Cuts per-probe DB-pool acquisitions
-// by batching the six append-only sample tables (monitor / telemetry /
-// temperature / interface / storage / ipsec tunnel) into one createMany
-// per 2-second flush window instead of one create per work item.
-startSampleWriteBuffer();
+// Sample-write + probe-patch buffers batch the per-probe sample inserts and
+// state updates produced by the monitor consumers. They ride with the consumer
+// role; the web/discovery processes don't produce monitor samples.
+if (cfg.runsWriteBuffers) {
+  // Sample-write buffer: batches the six append-only sample tables (monitor /
+  // telemetry / temperature / interface / storage / ipsec tunnel) into one
+  // createMany per 2-second flush window instead of one create per work item.
+  startSampleWriteBuffer();
+  // Probe-patch buffer: the STATE side of recordProbeResult — one bulk UPDATE
+  // FROM VALUES per 2 s window covers every asset's monitorStatus / counters /
+  // last-at timestamps instead of one prisma.asset.update per probe.
+  startProbePatchBuffer();
+}
 
-// Start the probe-patch buffer. Companion to the sample-write buffer for
-// the STATE side of recordProbeResult — one bulk UPDATE FROM VALUES per
-// 2 s window covers every asset's monitorStatus / counters / last-at
-// timestamps instead of one prisma.asset.update per probe.
-startProbePatchBuffer();
+// Start role-appropriate background jobs (dynamic imports so a job module's
+// self-start side effect only fires in the role that should run it).
+void startBackgroundJobs(cfg);
 
 // Graceful shutdown on SIGTERM/SIGINT so in-flight jobs can drain and the
 // final buffer flushes land before the process exits. No-op when
@@ -183,11 +187,17 @@ for (const sig of ["SIGTERM", "SIGINT"] as const) {
 // on the cache being warm; the migrate itself runs as a fire-and-forget
 // chain so it doesn't block listen().
 detectTimescale()
-  .then(() =>
-    migrateToHypertables().catch((err) => {
-      logger.warn({ err: err?.message }, "TimescaleDB hypertable migration failed");
-    }),
-  )
+  .then(() => {
+    // The hypertable conversion is schema DDL — run it only where migrations
+    // run (web/all), so monitor/discovery replicas don't race on the same
+    // ACCESS EXCLUSIVE locks. Detection itself runs in every role (read-only,
+    // warms the prune/capacity cache).
+    if (cfg.runsMigrations) {
+      return migrateToHypertables().catch((err) => {
+        logger.warn({ err: err?.message }, "TimescaleDB hypertable migration failed");
+      });
+    }
+  })
   .catch((err) => {
     logger.warn({ err: err?.message }, "TimescaleDB detection failed");
   });
@@ -524,9 +534,16 @@ app.use(errorHandler);
 export async function startApp(): Promise<void> {
   // Boot-time Prisma-client-vs-DB schema check. Fails fast with a clear
   // recovery message when the running client references columns the
-  // database doesn't have (or vice versa). Runs before listen() so a
-  // broken deploy doesn't bind a port and accept traffic it can't serve.
+  // database doesn't have (or vice versa). Runs before listen() in EVERY role
+  // so a broken deploy doesn't run workers against a mismatched schema either.
   await runSchemaSanityCheck();
+
+  // Non-HTTP roles (monitor / discovery) don't bind a port — their pg-boss
+  // workers + intervals (started at module load) keep the event loop alive.
+  if (!cfg.runsHttp) {
+    logger.info({ role: cfg.role }, "Non-HTTP role — skipping Express listen; running workers only");
+    return;
+  }
 
   const httpsSettings = await getHttpsSettings().catch(() => null);
   const PORT = process.env.PORT ?? httpsSettings?.httpPort ?? 3000;
@@ -539,6 +556,79 @@ export async function startApp(): Promise<void> {
   // same port and (in production) the same HTTPS cert their pin verifies.
   const { attachAgentWsUpgradeHandler } = await import("./api/routes/agentsWs.js");
   attachAgentWsUpgradeHandler(httpServer);
+}
+
+/**
+ * Dynamically import the background-job modules appropriate to this role.
+ * Importing a job module runs its self-start side effect, so gating the
+ * imports is what gates the jobs. All singleton schedulers + one-shot
+ * migrations are pinned to the web/all role (runsSchedulers / runsMigrations);
+ * monitor and discovery roles import none of them. Order mirrors the historical
+ * static-import order; each job's own async work runs concurrently as before.
+ */
+async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
+  const importJob = async (path: string): Promise<void> => {
+    try { await import(path); }
+    catch (err: any) { logger.warn({ err: err?.message, job: path }, "background job import failed"); }
+  };
+
+  if (cfg.runsMigrations) {
+    // One-shot startup migrations / seeds / backfills — idempotent, marker-keyed.
+    for (const p of [
+      "./jobs/normalizeManufacturers.js",
+      "./jobs/seedAssetTypes.js",
+      "./jobs/seedManufacturerProfiles.js",
+      "./jobs/backfillManufacturerProfileMemoryComposition.js",
+      "./jobs/migrateMonitorSettingsHierarchy.js",
+      "./jobs/renameMonitorClassKeys.js",
+      "./jobs/migrateRetentionTiers.js",
+      "./jobs/consolidateSampleRetention.js",
+      "./jobs/migrateMonitorStatusRename.js",
+      "./jobs/migrateAutoMonitorInterfacesShape.js",
+      "./jobs/migrateSystemInfoCadenceLinkage.js",
+      "./jobs/migrateMonitorSettingsPerClass.js",
+      "./jobs/backfillAssetSources.js",
+      "./jobs/scrubLegacySidGuidTags.js",
+      "./jobs/backfillFortigateEndpointSources.js",
+      "./jobs/fixInfraAssetTypes.js",
+      "./jobs/mergeFortiswitchEndpointGhosts.js",
+      "./jobs/backfillDependencyTree.js",
+      "./jobs/backfillMonitorStatusChangedAt.js",
+      "./jobs/backfillMonitorOverride.js",
+      "./jobs/rasterizeStoredSvgIcons.js",
+      "./jobs/clampAssetAcquiredAt.js",
+    ]) await importJob(p);
+  }
+
+  if (cfg.runsSchedulers) {
+    // Periodic schedulers + reconcilers — singletons; the monitor PRODUCER
+    // (monitorAssets) lives here too (it publishes work the monitor-role
+    // consumers drain; in cursor mode it runs the in-process loop).
+    for (const p of [
+      "./jobs/monitorAssets.js",
+      "./jobs/expireReservations.js",
+      "./jobs/pruneEvents.js",
+      "./jobs/ouiRefresh.js",
+      "./jobs/updateCheck.js",
+      "./jobs/discoverySlowCheck.js",
+      "./jobs/decommissionStaleAssets.js",
+      "./jobs/flagStaleReservations.js",
+      "./jobs/capacityWatch.js",
+      "./jobs/resolvePolarisPushedConflicts.js",
+      "./jobs/resolveStaleReservationConflicts.js",
+      "./jobs/cleanupStaleDnsResolvedReleased.js",
+      "./jobs/mergeDuplicateHostnameAssets.js",
+      "./jobs/dependencyReconciler.js",
+      "./jobs/retryQueuedReservationPushes.js",
+      "./jobs/reconcileMapRegions.js",
+      "./jobs/reconcileDnsResolvedReservations.js",
+      "./jobs/runSampleRollup.js",
+      "./jobs/autoBuildAgents.js",
+    ]) await importJob(p);
+    // discoveryScheduler exports an explicit starter (it was refactored off the
+    // self-start pattern so the discovery worker handler can be injected).
+    startDiscoveryScheduler();
+  }
 }
 
 export { app };
