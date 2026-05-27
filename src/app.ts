@@ -44,7 +44,7 @@ import { startProbePatchBuffer, shutdownFlushProbePatchBuffer } from "./services
 import { runStartupDiskCheck } from "./utils/startupDiskCheck.js";
 import { runSchemaSanityCheck } from "./utils/schemaSanityCheck.js";
 import { getDbConnectionMode } from "./utils/dbConnections.js";
-import { recordDbConnectionMode } from "./metrics.js";
+import { recordDbConnectionMode, setDbPoolRoleCapacity } from "./metrics.js";
 
 // Stamp the detected DB connection topology once at boot so operators (and
 // `/metrics` scrapes) can confirm Polaris recognized their PgBouncer setup
@@ -84,6 +84,20 @@ logger.info(
   },
   `Polaris process role: ${cfg.role}`,
 );
+
+// Stamp this process's configured connection capacity under its role label so
+// /metrics exposes the per-role footprint — in a multi-process deployment no
+// single process sees the whole group, so the Capacity Advisor / Prometheus
+// sums these (across roles + monitor-replica instances) against max_connections.
+{
+  const envInt = (name: string, dflt: number): number => {
+    const n = Number.parseInt(process.env[name] ?? "", 10);
+    return Number.isFinite(n) && n > 0 ? n : dflt;
+  };
+  const prismaPool = envInt("DATABASE_POOL_SIZE", 25);
+  const pgbossPool = envInt("POLARIS_PGBOSS_POOL_SIZE", 20);
+  setDbPoolRoleCapacity(cfg.role, prismaPool + pgbossPool);
+}
 
 // Warm the monitor-queue mode cache at startup so the dispatcher in
 // `monitorAssets.ts` and the capacity snapshot both see the same value, then
