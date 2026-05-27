@@ -40,15 +40,27 @@ function str(v: unknown): string {
 
 /**
  * Derive a human "FortiAP-234F"-style model string from a FortiAP serial
- * number. FortiAP serials start with "FP" + 3-4 alphanumeric chars
- * encoding the model (e.g. FP234F, FP231K, FP431G, FP23JF), followed by
- * a per-unit suffix. Returns empty string when the serial doesn't match
- * the expected shape — caller decides whether to fall back to the live
- * model field or leave it empty.
+ * number. FortiAP serials start with "FP", then the marketing model code,
+ * then a per-unit body (region letter + date + sequence).
+ *
+ * The model code is `<2-3 digits><trailing letter(s)>` with an optional
+ * leading letter for the special families:
+ *   - common indoor/outdoor: 221E, 231F, 234F, 431G, 231K, 243K  (digits + 1 letter)
+ *   - J-series:              23JF, 24JF                          (digits + "J" + letter)
+ *   - U-series / EV suffix:  U431F, U421EV                       (leading "U", optional "EV")
+ *   - S-series:              S321C                               (leading "S")
+ *
+ * We anchor on that grammar rather than a fixed char count: the previous
+ * `{3,5}` greedy window over-captured the start of the serial body (e.g.
+ * `FP231K5...` → `231K5` instead of `231K`, and `FP234FTF...` → `234FT`).
+ * The serial body can begin with either a digit (`FP231K5...`) or a letter
+ * (`FP234FTF...`), so we match the model code itself, not "everything up to
+ * the next digit". Returns empty string when the serial doesn't match the
+ * expected shape — caller decides whether to fall back or leave it empty.
  */
 export function deriveFortiapModelFromSerial(serial: string): string {
   if (!serial) return "";
-  const m = /^FP([A-Z0-9]{3,5})[A-Z0-9]*$/i.exec(serial.trim());
+  const m = /^FP([A-Z]?\d{2,3}(?:J[A-Z]|EV|[A-Z]))[A-Z0-9]*$/i.exec(serial.trim());
   if (!m) return "";
   return `FortiAP-${m[1].toUpperCase()}`;
 }
