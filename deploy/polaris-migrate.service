@@ -1,0 +1,35 @@
+[Unit]
+Description=Polaris — DB migration (one-shot, runs before the app units)
+Documentation=https://github.com/davidmoore-rogers/polaris
+# Match the PostgreSQL unit name to your install (see polaris.service notes).
+After=network.target postgresql-15.service
+Requires=postgresql-15.service
+# Part of the polaris.target group; the app units order After= this one.
+PartOf=polaris.target
+
+[Service]
+# One-shot: runs `prisma migrate deploy` once, then exits. RemainAfterExit
+# keeps it "active (exited)" so the app units' After=/Requires= are satisfied
+# for the lifetime of the group start. This is the SINGLE migration owner —
+# the web/monitor/discovery units never migrate, avoiding N processes racing
+# `migrate deploy`.
+Type=oneshot
+RemainAfterExit=yes
+User=polaris
+Group=polaris
+WorkingDirectory=/opt/polaris
+EnvironmentFile=/opt/polaris/.env
+ExecStart=/bin/sh -c 'exec npx --no-install prisma migrate deploy'
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/polaris
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polaris-migrate
+
+[Install]
+WantedBy=polaris.target

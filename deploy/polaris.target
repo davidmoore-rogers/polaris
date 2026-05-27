@@ -1,0 +1,19 @@
+[Unit]
+Description=Polaris — full process group (web + monitor + discovery)
+Documentation=https://github.com/davidmoore-rogers/polaris
+# "Start Everything": `systemctl start polaris.target` brings up the migrate
+# one-shot, then web, monitor replica(s), and discovery. `systemctl stop
+# polaris.target` stops the group (PartOf= on each unit propagates stop).
+#
+# Wants= lists the default members. To run more than one monitor replica, also
+# `systemctl enable --now polaris-monitor@2` (etc.) and add them here. To run
+# the legacy single-process deployment instead, use polaris.service (role
+# unset = "all") and do NOT enable this target.
+Wants=polaris-migrate.service
+Wants=polaris-web.service
+Wants=polaris-monitor@1.service
+Wants=polaris-discovery.service
+After=polaris-migrate.service
+
+[Install]
+WantedBy=multi-user.target
