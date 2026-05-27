@@ -609,12 +609,16 @@ router.get("/discoveries", async (req, res) => {
   res.json({ discoveries: running });
 });
 
-// DELETE /api/v1/integrations/:id/discover — abort an in-flight discovery
-router.delete("/:id/discover", (req, res) => {
-  const entry = activeDiscovery.get(req.params.id);
+// DELETE /api/v1/integrations/:id/discover — abort an in-flight discovery.
+// Admin-only: the router-level guard already requires integrations:write, but
+// aborting a running discovery/query is a disruptive operation we restrict to
+// admin-equivalent roles (integrations:fullwrite). networkadmin (write) cannot.
+router.delete("/:id/discover", requirePermission("integrations", "fullwrite"), (req, res) => {
+  const id = req.params.id as string;
+  const entry = activeDiscovery.get(id);
   if (!entry) { res.status(404).json({ message: "No active discovery for this integration" }); return; }
   entry.controller.abort();
-  activeDiscovery.delete(req.params.id);
+  activeDiscovery.delete(id);
   res.status(204).send();
 });
 

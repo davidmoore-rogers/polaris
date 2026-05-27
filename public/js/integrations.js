@@ -437,10 +437,16 @@ function _discoverBtnHTML(id, name, discovery, disabled) {
       : 'background:rgba(79,195,247,0.1);border:1px solid rgba(79,195,247,0.25);color:var(--color-accent)';
     var label = isSlow ? 'Discovering — slow' : 'Discovering…';
     var title = isSlow ? ' title="This discovery is running longer than normal"' : '';
+    // Aborting a running discovery/query is admin-only (integrations:fullwrite);
+    // mirrors the server-side guard on DELETE /:id/discover so non-admins don't
+    // see a button that would 403.
+    var abortBtn = permAtLeast("integrations", "fullwrite")
+      ? '<button class="query-abort-btn" style="margin-left:2px" onclick="abortIntegrationDiscovery(\'' + id + '\',\'' + escapeHtml(name) + '\')" title="Abort">&#x2715;</button>'
+      : '';
     return '<span' + title + ' style="display:inline-flex;align-items:center;gap:6px;font-size:0.78rem;padding:0.3rem 0.6rem;border-radius:var(--radius-md);font-weight:500;' + style + '">' +
       '<span class="query-spinner"></span>' +
       '<span>' + label + '</span>' +
-      '<button class="query-abort-btn" style="margin-left:2px" onclick="abortIntegrationDiscovery(\'' + id + '\',\'' + escapeHtml(name) + '\')" title="Abort">&#x2715;</button>' +
+      abortBtn +
     '</span>';
   }
   return '<button class="btn btn-sm btn-primary" onclick="runDiscovery(\'' + id + '\')"' +
