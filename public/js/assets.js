@@ -425,7 +425,7 @@ async function loadAssets() {
     _assetsData = all.map(_mapAsset);
     renderAssetsPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="19" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -757,14 +757,14 @@ function renderAssetsPage() {
   tbody.removeEventListener("click", _handleTypePillClick);
   tbody.addEventListener("click", _handleTypePillClick);
   if (_assetsData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No assets found. Add one to get started.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="19" class="empty-state">No assets found. Add one to get started.</td></tr>';
     clearPageControls("pagination");
     _assetsUpdateSelectAll();
     return;
   }
   var sfData = _assetsSF ? _assetsSF.apply(_assetsData) : _assetsData;
   if (sfData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No results match the current filters.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="19" class="empty-state">No results match the current filters.</td></tr>';
     clearPageControls("pagination");
     _assetsUpdateSelectAll();
     return;
@@ -786,6 +786,14 @@ function renderAssetsPage() {
       '<td>' + assetStatusBadge(a) + '</td>' +
       '<td>' + assetMonitorBadge(a) + '</td>' +
       '<td>' + escapeHtml(a.location || a.learnedLocation || "-") + '</td>' +
+      '<td>' + _copyableCell(a.assetTag) + '</td>' +
+      '<td>' + escapeHtml(a.manufacturer || "-") + '</td>' +
+      '<td>' + escapeHtml(a.model || "-") + '</td>' +
+      '<td>' + escapeHtml([a.os, a.osVersion].filter(Boolean).join(" ") || "-") + '</td>' +
+      '<td>' + macCellHTML(a) + '</td>' +
+      '<td>' + escapeHtml(a.assignedTo || "-") + '</td>' +
+      '<td>' + _copyableCell(a.purchaseOrder) + '</td>' +
+      '<td>' + _copyableCell(a.dnsName) + '</td>' +
       '<td>' + (a.lastSeen ? formatDate(a.lastSeen) : "-") + '</td>' +
       '<td class="actions">' +
         (canManageAssets() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + a.id + '\')">Edit</button>' : '') +

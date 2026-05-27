@@ -100,12 +100,20 @@
               <th data-sf-key="status" data-sf-type="string" data-sf-options="active|maintenance|storage|decommissioned|disabled|quarantined">State</th>
               <th data-sf-key="_monitor" data-sf-type="string" data-sf-options="Monitored|Unmonitored|Up|Warning|Recovering|Down">Status</th>
               <th data-sf-key="_server" data-sf-type="string">Server</th>
+              <th data-sf-key="assetTag" data-sf-type="string" data-col-default-hidden="true">Asset Tag</th>
+              <th data-sf-key="manufacturer" data-sf-type="string" data-col-default-hidden="true">Manufacturer</th>
+              <th data-sf-key="model" data-sf-type="string" data-col-default-hidden="true">Model</th>
+              <th data-sf-key="os" data-sf-type="string" data-col-default-hidden="true">OS / Firmware</th>
+              <th data-sf-key="macAddress" data-sf-type="string" data-col-default-hidden="true">MAC Address</th>
+              <th data-sf-key="assignedTo" data-sf-type="string" data-col-default-hidden="true">Assigned To</th>
+              <th data-sf-key="purchaseOrder" data-sf-type="string" data-col-default-hidden="true">Purchase Order</th>
+              <th data-sf-key="dnsName" data-sf-type="string" data-col-default-hidden="true">DNS Name</th>
               <th data-sf-key="lastSeen" data-sf-type="date">Last Seen</th>
               <th data-col-id="actions" data-col-required="true">Actions</th>
             </tr>
           </thead>
           <tbody id="assets-tbody">
-            <tr><td colspan="11" class="empty-state">Loading...</td></tr>
+            <tr><td colspan="19" class="empty-state">Loading...</td></tr>
           </tbody>
         </table>
       </div>

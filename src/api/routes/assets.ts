@@ -339,6 +339,8 @@ router.get("/", requirePermission("assets", "read"), async (req, res, next) => {
           model: true,
           os: true,
           osVersion: true,
+          assignedTo: true,
+          purchaseOrder: true,
           assetType: true,
           status: true,
           statusChangedAt: true,

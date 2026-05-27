@@ -663,6 +663,17 @@ function setupColumnLayout(tableEl, options) {
   var widths = {};
   var hidden = {};
 
+  // Seed default-hidden columns. A <th data-col-default-hidden="true"> starts
+  // hidden until the user enables it. Saved prefs override this via setPrefs:
+  // a `shown` snapshot un-hides anything the user explicitly turned on, so the
+  // default only applies to columns the user has never made a choice about
+  // (notably newly added columns, absent from older saved prefs).
+  ths.forEach(function (th, i) {
+    if (!required[colIds[i]] && th.getAttribute("data-col-default-hidden") === "true") {
+      hidden[colIds[i]] = true;
+    }
+  });
+
   function rewriteHideStyle() {
     var rules = [];
     var sel = 'table[data-sf-table-id="' + tableId + '"]';
@@ -866,7 +877,11 @@ function setupColumnLayout(tableEl, options) {
 
   return {
     getPrefs: function () {
-      return { widths: Object.assign({}, widths), hidden: Object.keys(hidden) };
+      // Persist an explicit `shown` snapshot alongside `hidden` so a user's
+      // "I turned this on" decision survives reloads even for columns that
+      // default to hidden.
+      var shown = colIds.filter(function (id) { return !required[id] && !hidden[id]; });
+      return { widths: Object.assign({}, widths), hidden: Object.keys(hidden), shown: shown };
     },
     setPrefs: function (p) {
       if (!p) return;
@@ -875,6 +890,13 @@ function setupColumnLayout(tableEl, options) {
           var v = p.widths[id];
           if (typeof v === "number" && v > 0) widths[id] = v;
         });
+      }
+      // Apply `shown` (un-hide) before `hidden` (hide). `hidden` is pre-seeded
+      // with default-hidden columns; un-hiding here lets a saved choice override
+      // the default. Older prefs lack `shown`, so default-hidden columns stay
+      // hidden and previously-hidden columns are still honored.
+      if (Array.isArray(p.shown)) {
+        p.shown.forEach(function (id) { delete hidden[id]; });
       }
       if (Array.isArray(p.hidden)) {
         p.hidden.forEach(function (id) {
