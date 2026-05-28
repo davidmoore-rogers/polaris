@@ -115,6 +115,17 @@ sync_nginx_config() {
   if [[ ! -f "$src" ]]; then
     return 1  # shipped config not present in this checkout (older release?)
   fi
+  # Skip when the shipped file is the static reference with unsubstituted
+  # placeholders (today's state — polaris.conf carries `<PROMETHEUS_IP>` and
+  # is consumed by migrate-to-nginx.sh's sed, not by this sync). On managed-
+  # mode installs the live file is rendered by Polaris from the template
+  # via src/services/nginxRenderer.ts during in-app updates; this manual
+  # path doesn't have DB access to render, so the safe move is to step
+  # aside and let the in-app updater own nginx config management.
+  if grep -q "<PROMETHEUS_IP>" "$src" 2>/dev/null; then
+    info "Shipped nginx config still has placeholder values (rendered by Polaris on managed-mode installs) — skipping sync"
+    return 1
+  fi
   if [[ ! -f "$target" ]]; then
     warn "Proxy mode is on but $target is missing — was migrate-to-nginx.sh ever run?"
     return 1
