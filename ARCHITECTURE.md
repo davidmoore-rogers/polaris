@@ -196,6 +196,7 @@ polaris/
 │   ├── jobs/
 │   │   ├── expireReservations.ts    # Mark past-TTL reservations as expired (every 15 min)
 │   │   ├── discoveryScheduler.ts    # FMG/Windows Server auto-discovery polling
+│   │   ├── integrationConnectionTester.ts # 10-min tick: sequentially test every enabled integration, refresh lastTestAt/lastTestOk so broken integrations auto-resume
 │   │   ├── discoverySlowCheck.ts    # 30s tick: flag in-flight discoveries that exceed their rolling-duration baseline; also calls expireVerboseLogging() to auto-disable verbose debug logging after 30 min
 │   │   ├── ouiRefresh.ts            # Refresh IEEE OUI database
 │   │   ├── pruneEvents.ts           # 7-day event log retention (nightly)
@@ -1970,7 +1971,8 @@ Active Directory and Entra ID identify the same hybrid-joined device with two un
 | Job | Schedule | Purpose |
 |-----|----------|---------|
 | `expireReservations` | Every 15 min | Mark reservations past `expiresAt` as `expired` |
-| `discoveryScheduler` | Per-integration `pollInterval` | Auto-trigger FMG / FortiGate / Windows Server / Entra ID / Active Directory discovery |
+| `discoveryScheduler` | Per-integration `pollInterval` | Auto-trigger FMG / FortiGate / Windows Server / Entra ID / Active Directory discovery. Filters on `lastTestOk: true`, so broken integrations are skipped until `integrationConnectionTester` flips them back. |
+| `integrationConnectionTester` | Every 10 min (first run 30 s after boot) | Sequentially runs the credential preflight test against every enabled integration and refreshes `lastTestAt` / `lastTestOk`. Sequential, not parallel — FortiManager drops parallel connections above ~1-2. Emits `integration.test.recovered` / `integration.test.failed` Events on ok-state transitions. Replaces the inline preflight that used to run inside `runDiscovery`, so a transient credential outage self-heals on the next tick instead of needing a manual operator click. |
 | `ouiRefresh` | Periodic | Refresh IEEE OUI database for MAC vendor lookup |
 | `pruneEvents` | Nightly | Delete Event records older than 7 days |
 | `updateCheck` | Periodic | Check for software updates |

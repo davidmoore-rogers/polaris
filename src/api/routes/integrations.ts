@@ -1579,7 +1579,7 @@ async function buildFmgWarmCacheIps(
   }
 }
 
-async function runPreflightTest(integration: { id: string; type: string; config: unknown }): Promise<{ ok: boolean; message: string }> {
+export async function runPreflightTest(integration: { id: string; type: string; config: unknown }): Promise<{ ok: boolean; message: string }> {
   const config = integration.config as Record<string, unknown>;
   if (integration.type === "fortimanager") return fortimanager.testConnection(config as any, integration.id);
   if (integration.type === "fortigate") return fortigate.testConnection(config as any);
@@ -1656,27 +1656,11 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
   const label = actor === "auto-discovery" ? "Scheduled" : "Manual";
   const kindLabel = (integration.type === "entraid" || integration.type === "activedirectory") ? "device discovery" : "DHCP discovery";
 
-  // Live credential test before committing to the run. Updates lastTestAt/Ok
-  // so the integration list reflects current state. A failure ends the run as
-  // `error` (the manual route already returned 202).
-  const preflight = await runPreflightTest(integration);
-  await prisma.integration.update({
-    where: { id: integrationId },
-    data: { lastTestAt: new Date(), lastTestOk: preflight.ok },
-  });
-  if (!preflight.ok) {
-    logEvent({
-      action: "integration.discover.preflight_failed",
-      level: "warning",
-      resourceType: "integration",
-      resourceId: integrationId,
-      resourceName: integrationName,
-      actor,
-      message: `${label} discovery blocked for "${integrationName}" — credential test failed: ${preflight.message}`,
-    });
-    await finishRun(integrationId, "error").catch(() => {});
-    return;
-  }
+  // No inline preflight — `integrationConnectionTester` refreshes lastTestOk
+  // every 10 min, and the discovery scheduler filters on `lastTestOk: true`,
+  // so a broken integration won't reach this point under auto-discovery. A
+  // manual trigger still proceeds: the operator chose to force a run, and the
+  // discovery error surface is the right place for them to see it fail.
 
   const runStartedAt = Date.now();
   await markRunStarted(integrationId, new Date(runStartedAt));

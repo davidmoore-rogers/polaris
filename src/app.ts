@@ -639,6 +639,7 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/runSampleRollup.js",
       "./jobs/autoBuildAgents.js",
       "./jobs/discoveryRunReaper.js",
+      "./jobs/integrationConnectionTester.js",
     ]) await importJob(p);
     // discoveryScheduler exports an explicit starter (it was refactored off the
     // self-start pattern so the discovery worker handler can be injected).
