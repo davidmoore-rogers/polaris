@@ -29,6 +29,7 @@ set -euo pipefail
 
 APP_DIR="/opt/polaris"
 ENV_FILE="$APP_DIR/.env"
+DB_NAME="polaris"
 NGINX_CERT_DIR="/etc/polaris-nginx"
 NGINX_CONF_DEST="/etc/nginx/conf.d/polaris.conf"
 NGINX_DROPIN_DIR="/etc/systemd/system/polaris-web.service.d"
