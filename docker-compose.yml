@@ -49,6 +49,13 @@ services:
       # max_connections. See docs/INSTALL.md.
       DATABASE_POOL_SIZE: "12"
       POLARIS_PGBOSS_POOL_SIZE: "10"
+      # /metrics listener for Prometheus. Each replica has its own network
+      # namespace, so all replicas can share port 9101 — Prometheus reaches
+      # them by container name (polaris-monitor-1:9101, polaris-monitor-2:9101).
+      # Bind 0.0.0.0 because the default 127.0.0.1 would only be reachable
+      # from inside the container. See docs/grafana/README.md.
+      POLARIS_METRICS_PORT: "9101"
+      POLARIS_METRICS_BIND: "0.0.0.0"
     deploy:
       replicas: 2
     depends_on:
@@ -62,6 +69,10 @@ services:
     environment:
       POLARIS_STATE_DIR: /app/state
       POLARIS_ROLE: discovery
+      # /metrics listener for Prometheus (sibling container reaches it as
+      # polaris-discovery:9110). See docs/grafana/README.md.
+      POLARIS_METRICS_PORT: "9110"
+      POLARIS_METRICS_BIND: "0.0.0.0"
     depends_on:
       migrate:
         condition: service_completed_successfully

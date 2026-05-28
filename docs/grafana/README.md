@@ -70,6 +70,22 @@ scrape_configs:
 
 The same `METRICS_TOKEN` from `.env` gates every role endpoint. If Prometheus runs on a different host from the workers, set `POLARIS_METRICS_BIND=0.0.0.0` per-process and adjust the target addresses; the units pin `127.0.0.1` by default so the metrics endpoint isn't world-reachable.
 
+**Docker Compose.** The shipped `docker-compose.yml` already wires `POLARIS_METRICS_PORT=9101` on the `monitor` service and `9110` on `discovery`, both bound `0.0.0.0` (per-container — replicas share the port because each has its own network namespace). Prometheus running on the same Docker network reaches them by container name:
+
+```yaml
+scrape_configs:
+  - job_name: polaris-web
+    static_configs: [ { targets: ['polaris-web:3000'] } ]
+  - job_name: polaris-monitor
+    static_configs:
+      - targets: ['polaris-monitor-1:9101', 'polaris-monitor-2:9101']
+        labels: { polaris_role: monitor }
+  - job_name: polaris-discovery
+    static_configs:
+      - targets: ['polaris-discovery:9110']
+        labels: { polaris_role: discovery }
+```
+
 ## Importing
 
 In Grafana → **Dashboards → New → Import**:
