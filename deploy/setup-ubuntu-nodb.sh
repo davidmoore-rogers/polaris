@@ -314,6 +314,15 @@ if ! grep -q '^POLARIS_PROXY_CERT_PATH=' "$APP_DIR/.env"; then
     echo "POLARIS_PUBLIC_URL=${PUBLIC_URL}"
   } >> "$APP_DIR/.env"
 fi
+# Capacity Advisor input: replica count drives pool + max_connections sizing
+# across the (web + N monitor + discovery) process group.
+if ! grep -q '^POLARIS_MONITOR_REPLICAS=' "$APP_DIR/.env"; then
+  {
+    echo ""
+    echo "# Added by setup-ubuntu-nodb.sh — split-role replica count (Capacity Advisor input)"
+    echo "POLARIS_MONITOR_REPLICAS=${MONITOR_REPLICAS}"
+  } >> "$APP_DIR/.env"
+fi
 
 # Install split-role units. DB is remote so strip postgres deps from all four.
 info "Installing split-role systemd units..."

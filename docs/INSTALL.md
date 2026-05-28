@@ -580,7 +580,13 @@ Each process opens its own Prisma + pg-boss pool, so the group needs roughly
 connections. Keep that under Postgres `max_connections` (minus headroom for
 `pg_dump`, admin sessions). Lower the per-replica `DATABASE_POOL_SIZE` (10–15)
 and `POLARIS_PGBOSS_POOL_SIZE` (~10) and set `POLARIS_MONITOR_REPLICAS` on the
-web node so the Capacity Advisor sizes `max_connections` correctly.
+web node so the Capacity Advisor sizes `max_connections` correctly. The
+shipped setup scripts (`deploy/setup-{rhel,ubuntu}{,-nodb}.sh`) now persist
+`POLARIS_MONITOR_REPLICAS` from `--monitor-replicas` into `/opt/polaris/.env`
+automatically; if you later scale by `systemctl enable --now polaris-monitor@N`
+or pre-fix installs are missing the var, update it by hand and restart
+`polaris.target`. The web role logs a warning at boot when the var is unset
+in split-role mode.
 **PgBouncer** absorbs the Prisma pools (recommended for multi-monitor) but
 pg-boss pools always connect to Postgres directly — budget those against the
 raw `max_connections`. Per-role footprint is exposed at
