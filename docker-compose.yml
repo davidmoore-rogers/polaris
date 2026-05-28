@@ -1,14 +1,27 @@
-# Polaris multi-process deployment (web + monitor replicas + discovery).
+# Polaris multi-process deployment, nginx-fronted (Phase 3+).
 #
-# Same image for every service; the role is selected per-service via
-# POLARIS_ROLE. A one-shot `migrate` service runs `prisma migrate deploy` ONCE
-# and the app services wait for it to complete, so no app container races on
-# migrations. For a single-process deployment instead, run one service with
-# POLARIS_ROLE unset (= "all") — see the README.
+# Topology:
+#   nginx    → terminates TLS on 443 (HTTP/2 + HTTP/3), path-routes to:
+#              / → polaris-web:3000
+#              /metrics-monitor-N → polaris-monitor-N:9101
+#              /metrics-discovery → polaris-discovery:9110
+#   migrate  → one-shot `prisma migrate deploy`; everyone depends on it
+#   web      → Express + agent WS + schedulers (single instance)
+#   monitor  → pg-boss monitor consumers (N replicas; default 2)
+#   discovery → pg-boss discovery consumer
 #
-# Provide secrets via an external env file (env_file: ./state/.env) or your
-# orchestrator's secret store — do NOT inline DATABASE_URL / SESSION_SECRET
-# here. POLARIS_ROLE is intentionally set per-service and kept OUT of .env.
+# Single-process polaris.service is no longer supported as a production
+# deployment shape — every fresh install is split-role + nginx-fronted.
+# Local dev (npm run dev with POLARIS_ROLE unset) runs Node directly, no
+# Docker needed.
+#
+# Cert + nginx config live in ./state/nginx/ so they survive volume mounts.
+# Replace ./state/nginx/cert.pem and ./state/nginx/key.pem with your real
+# CA cert; the bundled self-signed cert is for local stack-up only.
+#
+# Secrets via env_file (./state/.env) or your orchestrator's secret store —
+# do NOT inline DATABASE_URL / SESSION_SECRET here. POLARIS_ROLE is set
+# per-service in this file and kept OUT of .env.
 
 x-polaris-common: &polaris-common
   image: polaris:latest
@@ -19,8 +32,30 @@ x-polaris-common: &polaris-common
     - ./state:/app/state
   environment:
     POLARIS_STATE_DIR: /app/state
+    # Polaris listens HTTP-only on 127.0.0.1:3000 inside the web container;
+    # nginx is the only thing exposed to the outside world. Set on every
+    # role for env parity even though only web binds.
+    POLARIS_PROXY_CERT_PATH: /app/state/nginx/cert.pem
+    POLARIS_PUBLIC_URL:      ${POLARIS_PUBLIC_URL:-https://localhost}
 
 services:
+  nginx:
+    image: nginx:mainline
+    restart: unless-stopped
+    ports:
+      - "443:443/tcp"
+      - "443:443/udp"   # HTTP/3 over QUIC
+    volumes:
+      # The reference config from deploy/nginx/polaris.conf (mounted RO).
+      # Operators replace the <PROMETHEUS_IP> placeholder before bringing
+      # the stack up, or add a drop-in via ./state/nginx/conf.d/*.conf.
+      - ./deploy/nginx/polaris.conf:/etc/nginx/conf.d/polaris.conf:ro
+      - ./state/nginx/cert.pem:/etc/polaris-nginx/cert.pem:ro
+      - ./state/nginx/key.pem:/etc/polaris-nginx/key.pem:ro
+    depends_on:
+      web:
+        condition: service_started
+
   migrate:
     <<: *polaris-common
     restart: "no"
@@ -33,8 +68,11 @@ services:
     environment:
       POLARIS_STATE_DIR: /app/state
       POLARIS_ROLE: web
-    ports:
-      - "3000:3000"
+      POLARIS_PROXY_CERT_PATH: /app/state/nginx/cert.pem
+      POLARIS_PUBLIC_URL:      ${POLARIS_PUBLIC_URL:-https://localhost}
+    # No `ports:` block — web is only reachable via nginx now. nginx's
+    # depends_on:web:service_started above makes sure nginx waits for web
+    # to start before binding 443, avoiding 502s during initial stack-up.
     depends_on:
       migrate:
         condition: service_completed_successfully

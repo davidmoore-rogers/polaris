@@ -1611,7 +1611,7 @@ and `src/app.ts` branches on the capability flags at boot.
 
 | Role | Boots | Notes |
 |---|---|---|
-| `all` (default, unset) | everything | Today's single-process behavior — existing installs + `npm run dev` unchanged. |
+| `all` (default, unset) | everything | Local dev (`npm run dev`) — runs everything in one process for fast iteration. Not a production deployment target since Phase 3 (no `polaris.service` unit is shipped). |
 | `web` | Express/HTTPS/agent-WS, **all singleton schedulers**, one-shot migrations, pg-boss **producer** connection | Single instance — the control plane. Owns the in-app updater (restarts the whole group). |
 | `monitor` | pg-boss **monitor-queue consumers** + floating pool, sample/probe write buffers | Run **N replicas** — pg-boss hands each job to exactly one worker, so replicas never double-execute. |
 | `discovery` | pg-boss **discovery-queue consumer** (`runDiscovery`) | Executes discovery runs off the `polaris-discovery-run` queue. |
@@ -1644,8 +1644,12 @@ group-wide via `pg_stat_activity`).
 `polaris-web.service` / `polaris-monitor@.service` (templated, N) /
 `polaris-discovery.service`, grouped by `polaris.target` (`systemctl start
 polaris.target`). Docker: one image, per-service `POLARIS_ROLE`, a one-shot
-`migrate` compose service the app services gate on. Legacy `polaris.service`
-(role unset = `all`) is retained. See [docs/INSTALL.md](docs/INSTALL.md).
+`migrate` compose service the app services gate on, plus an `nginx` service
+fronting the stack. The single-process `polaris.service` unit was removed
+in Phase 3 — every fresh install via `deploy/setup-*.sh` lands the split-role
++ nginx layout. The `all` role still exists in `src/utils/role.ts` so
+`npm run dev` keeps working; it's a runtime mode, not a production
+deployment target. See [docs/INSTALL.md](docs/INSTALL.md).
 
 **Per-role metrics endpoint.** prom-client registries are per-process. The
 web role exposes `/metrics` on its main HTTPS listener; monitor and discovery

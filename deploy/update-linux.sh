@@ -27,26 +27,22 @@ APP_USER="polaris"
 DB_NAME="polaris"
 BACKUP_DIR="/opt/polaris/backups"
 
-# Detect deployment topology by asking systemctl which unit is enabled.
-# Split-role layout (polaris.target + web/monitor@N/discovery) is the
-# Rogers Group production shape; single-process polaris.service is the
-# small-install default. If neither is enabled the host wasn't provisioned
-# by the setup script — bail before doing anything destructive.
-if systemctl is-enabled --quiet polaris.target 2>/dev/null; then
-  DEPLOYMENT="split"
-  SYSTEMD_UNIT="polaris.target"
-  # journalctl tail subject when verifying / debugging — polaris-web is the
-  # HTTP face of the group, so its logs are what an operator wants to see
-  # if startup fails.
-  LOG_UNIT="polaris-web.service"
-elif systemctl is-enabled --quiet polaris.service 2>/dev/null; then
-  DEPLOYMENT="single"
-  SYSTEMD_UNIT="polaris.service"
-  LOG_UNIT="polaris.service"
-else
-  echo "[ERROR] Neither polaris.target nor polaris.service is enabled — was this host provisioned by deploy/setup-*.sh?" >&2
+# Phase 3+: single-process polaris.service is no longer supported as a
+# production deployment. Every install runs the split-role layout
+# (polaris.target + web/monitor@N/discovery/migrate). Fresh installs land
+# this layout automatically via deploy/setup-*.sh; pre-Phase-3 installs
+# that are still on polaris.service should follow the migration steps in
+# docs/INSTALL.md before running this updater.
+if ! systemctl is-enabled --quiet polaris.target 2>/dev/null; then
+  echo "[ERROR] polaris.target is not enabled. This updater only supports the split-role layout." >&2
+  echo "[ERROR] If you're on the legacy single-process polaris.service install, follow docs/INSTALL.md → " >&2
+  echo "[ERROR] 'Migrating from single-process polaris.service' before running this script." >&2
   exit 1
 fi
+SYSTEMD_UNIT="polaris.target"
+# journalctl tail subject when verifying / debugging — polaris-web is the HTTP
+# face of the group, so its logs are what an operator wants to see on failure.
+LOG_UNIT="polaris-web.service"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -63,18 +59,13 @@ step()  { echo -e "${CYAN}[STEP]${NC}  $*"; }
 # edits to the main unit file get clobbered here, matching the in-app path.
 sync_unit_files() {
   local synced=0
-  local units
-  if [[ "$DEPLOYMENT" == "split" ]]; then
-    units=(
-      "$APP_DIR/deploy/polaris-web.service"
-      "$APP_DIR/deploy/polaris-monitor@.service"
-      "$APP_DIR/deploy/polaris-discovery.service"
-      "$APP_DIR/deploy/polaris-migrate.service"
-      "$APP_DIR/deploy/polaris.target"
-    )
-  else
-    units=("$APP_DIR/deploy/polaris.service")
-  fi
+  local units=(
+    "$APP_DIR/deploy/polaris-web.service"
+    "$APP_DIR/deploy/polaris-monitor@.service"
+    "$APP_DIR/deploy/polaris-discovery.service"
+    "$APP_DIR/deploy/polaris-migrate.service"
+    "$APP_DIR/deploy/polaris.target"
+  )
   for f in "${units[@]}"; do
     [[ -f "$f" ]] || continue
     local name target
@@ -161,7 +152,7 @@ fi
 
 cd "$APP_DIR"
 
-info "Detected deployment: $DEPLOYMENT (managing $SYSTEMD_UNIT)"
+info "Managing $SYSTEMD_UNIT (split-role layout)"
 
 # ─── 1. Record current version ──────────────────────────────────────────────
 step "1/9  Recording current version..."
