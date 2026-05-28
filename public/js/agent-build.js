@@ -57,6 +57,57 @@
     return m + "m " + (s % 60) + "s";
   }
 
+  // Compute the SHA-256 fingerprint of an X.509 cert PEM file's DER bytes,
+  // returning "sha256:<lowercase-hex>". Matches what the server's
+  // certInfo.getServerCertFingerprint() returns byte-for-byte (server hashes
+  // x509.raw — that IS the DER). Used by the Cert pin rotation pane's
+  // Generate button so operators can fill the pin input from a local
+  // .pem/.crt/.cer without copy-pasting from openssl output.
+  //
+  // Client-side only: the file is read via FileReader and hashed via
+  // window.crypto.subtle.digest. Never uploaded.
+  //
+  // PEM parsing: handles multi-cert chains by picking the FIRST CERTIFICATE
+  // block (the leaf is conventionally first; if your file orders it
+  // differently, paste the leaf separately). Ignores PRIVATE KEY blocks if
+  // the operator accidentally points at a combined cert+key file.
+  function _computeCertPinFromPemFile(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onerror = function () { reject(new Error("Could not read file")); };
+      reader.onload = function () {
+        try {
+          var text = String(reader.result || "");
+          var match = text.match(/-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----/);
+          if (!match) {
+            reject(new Error("No CERTIFICATE block found — is this a PEM file?"));
+            return;
+          }
+          var b64 = match[1].replace(/\s+/g, "");
+          var binary;
+          try { binary = atob(b64); }
+          catch (_) { reject(new Error("Cert body is not valid base64")); return; }
+          var der = new Uint8Array(binary.length);
+          for (var i = 0; i < binary.length; i++) der[i] = binary.charCodeAt(i);
+          window.crypto.subtle.digest("SHA-256", der).then(function (hashBuf) {
+            var bytes = new Uint8Array(hashBuf);
+            var hex = "";
+            for (var j = 0; j < bytes.length; j++) {
+              var h = bytes[j].toString(16);
+              hex += h.length === 1 ? "0" + h : h;
+            }
+            resolve("sha256:" + hex);
+          }).catch(function (e) {
+            reject(new Error("SHA-256 failed: " + (e && e.message || e)));
+          });
+        } catch (e) {
+          reject(e);
+        }
+      };
+      reader.readAsText(file);
+    });
+  }
+
   function initAgentBuildCard() {
     Promise.all([
       api.serverSettings.agentInventory().catch(function () { return null; }),
@@ -363,6 +414,13 @@
           '<input type="text" id="agent-cert-pin-stage-input" ' +
             'placeholder="sha256:abc123...64hex" ' +
             'style="flex:1;padding:5px 8px;font-family:var(--font-mono, monospace);font-size:0.8rem">' +
+          // Hidden file input — triggered by the Generate button. Accepts the
+          // common server-cert extensions; the parser strips PEM headers and
+          // SHA-256s the DER bytes client-side via window.crypto.subtle so the
+          // operator's cert file never leaves their browser.
+          '<input type="file" id="agent-cert-pin-file-input" accept=".pem,.crt,.cer" style="display:none">' +
+          '<button class="btn btn-secondary" id="btn-agent-cert-pin-generate" style="padding:4px 14px;font-size:0.8rem" ' +
+            'title="Compute SHA-256 from a local .pem/.crt/.cer file (client-side; file is not uploaded)">Generate</button>' +
           '<button class="btn btn-secondary" id="btn-agent-cert-pin-stage" style="padding:4px 14px;font-size:0.8rem">Stage</button>' +
         '</div>' +
         '<p style="font-size:0.75rem;color:var(--color-text-tertiary);margin:0.3rem 0 0">' +
@@ -371,6 +429,8 @@
 
       var stageBtn = document.getElementById("btn-agent-cert-pin-stage");
       var stageIn  = document.getElementById("agent-cert-pin-stage-input");
+      var genBtn   = document.getElementById("btn-agent-cert-pin-generate");
+      var fileIn   = document.getElementById("agent-cert-pin-file-input");
       if (stageBtn && stageIn) {
         stageBtn.addEventListener("click", function () {
           var pin = (stageIn.value || "").trim().toLowerCase();
@@ -387,6 +447,27 @@
             showToast("Stage failed: " + err.message, "error");
           }).finally(function () {
             stageBtn.disabled = false;
+          });
+        });
+      }
+      // Generate → file picker → client-side SHA-256 of the cert's DER bytes
+      // → fill the input. The file never leaves the browser. Matches the
+      // server's getServerCertFingerprint() output byte-for-byte.
+      if (genBtn && fileIn && stageIn) {
+        genBtn.addEventListener("click", function () { fileIn.click(); });
+        fileIn.addEventListener("change", function () {
+          var f = fileIn.files && fileIn.files[0];
+          if (!f) return;
+          genBtn.disabled = true;
+          _computeCertPinFromPemFile(f).then(function (pin) {
+            stageIn.value = pin;
+            showToast("Computed pin: " + pin.slice(0, 19) + "..." + pin.slice(-6), "success");
+          }).catch(function (err) {
+            showToast("Could not parse cert: " + err.message, "error");
+          }).finally(function () {
+            genBtn.disabled = false;
+            // Clear so picking the same file twice still fires change.
+            fileIn.value = "";
           });
         });
       }
