@@ -866,7 +866,8 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - HTTP middleware skips `/metrics` itself so scrape requests aren't counted as application traffic. `/health` skipped for the same reason.
 
 **When changing this:**
-- Adding a metric? Define the metric object + its helpers in `src/metrics.ts`, then call from one place. Update the Observability section of CLAUDE.md.
+- Adding a metric? Define the metric object + its helpers in `src/metrics.ts`, then call from one place. Update the Observability section of CLAUDE.md AND add panels for it in `docs/grafana/polaris-monitoring-dashboard.json` (with a matching bullet in `docs/grafana/README.md`). Prometheus picks up new series automatically on the next scrape, but Grafana panels pin specific metric names + label sets — they go blank silently if not updated.
+- Renaming or removing a metric / label? Grep `docs/grafana/polaris-monitoring-dashboard.json` for the old name and update or drop the affected panels in the same commit; the old series stays in Prometheus storage until retention expires (default 15d) but stops getting new samples, so the panel will read flat-zero or no-data until fixed.
 - Adding a job? Wrap the tick body in `runInstrumentedJob("name", async () => ...)` from `src/jobs/_metrics.ts`. Use a stable, machine-readable name (no spaces, no version suffixes); split-loop jobs use `<module>.<loop>` (e.g. `monitorAssets.probe`).
 - Adding a label? Audit cardinality first — a per-asset label would explode at fleet scale. If the value is a UUID or per-row, push it into a histogram bucket or aggregate it instead.
 - Pg-boss → cursor or vice versa? Both modes' metrics keep emitting; the gauge that doesn't apply stays at 0. Don't conditionally remove either family.

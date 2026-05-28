@@ -386,6 +386,7 @@ npm run lint
 - **Add bulk reservation import via CSV** — Route `POST /api/v1/reservations/import`, service function handles row validation and upsert.
 - **Write integration tests** — Vitest + Supertest against a test database (Docker Compose).
 - **Add a new environment variable** — Add to `.env.example` with a comment, document in the CLAUDE.md "Environment Variables" block, update `docs/INSTALL.md` if operator-set, and seed a default in `deploy/setup-*.{sh,ps1}` if the install scripts write `.env`. See `TOUCHES.md → cross-cutting/deployment`.
+- **Add, rename, or remove a `polaris_*` metric** — Update `src/metrics.ts` (define + helper), the Observability section of this file, the writers list in `TOUCHES.md → cross-cutting/observability-metrics`, AND add/edit/remove the corresponding panel in `docs/grafana/polaris-monitoring-dashboard.json` (with the bullet in `docs/grafana/README.md`). Prometheus picks up new series automatically — Grafana does not.
 - **Add a new Polaris Agent sample stream** — Add a Zod variant to `SamplesBodySchema` in `src/api/routes/agents.ts`, map to the enqueue helper, mirror in the Go agent collector under `agent/internal/collectors/`, and bump `agent/VERSION`. See `TOUCHES.md → cross-cutting/polaris-agent`.
 - **Bump a runtime dependency or Go pin** — Update `Dockerfile`, every `deploy/setup-*.{sh,ps1}`, and `docs/INSTALL.md` per-platform notes; for Go, bump `agent/go.mod` in lockstep. See `TOUCHES.md → cross-cutting/deployment`.
 

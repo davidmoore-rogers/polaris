@@ -10,6 +10,11 @@
 - **Throughput & queue health** — pg-boss oldest job age per queue, sample-write p95 per table, discovery duration p95 by integration type, discovery rate by integration + outcome
 - **HTTP latency** — p95 by route (top 10), in-flight gauge, request rate by status class
 - **Job health** — duration p95 per scheduled job, failure rate per job
+- **Monitor work duration** — p95 sliced by cadence, by transport, and by cadence × asset_type (same histogram the Capacity Advisor reads to recommend worker counts)
+- **FMG worker** — per-integration queue depth, proxy-lane inflight (the strict-concurrency=1 lane), native-lane inflight (CMDB / dvmdb / auth)
+- **Write buffers & rollups** — pg-boss queue jobs by queue × state, sample rollup p95 by tier × table, sample buffer depth per table, probe-patch buffer depth + write p95
+- **Discovery phases** — per-phase p95 wall-clock by integration type × phase (top 20)
+- **Boot-time config snapshot** — queue mode (cursor vs pgboss), DB connection mode (direct vs pgbouncer), workers per cadence queue, DB pool role capacity by `POLARIS_ROLE`
 
 ## Prerequisites
 
@@ -57,8 +62,12 @@ For bottleneck spotting at scale, the four most actionable panels are:
 
 For capacity planning, watch the gap between **current DB size** and **projected steady-state** (under "Capacity & growth") — that's your remaining growth runway at the current cadences and retention.
 
-## Adding more panels
+## Keeping the dashboard in sync with `/metrics`
 
-The metric cardinality is intentionally small — the dashboard above uses every Polaris-specific metric Polaris emits. If you want to extend it (e.g. with Postgres or pg-boss metrics), point Prometheus at `pg_exporter` and `pg-boss`'s built-in metrics endpoint and add panels alongside.
+The dashboard is intended to cover every `polaris_*` metric Polaris emits. When a metric is added, renamed, gains a label, or is removed, this JSON has to be updated in the same change — Prometheus itself picks up the new/dropped series automatically, but Grafana panel queries pin specific metric names and labels and will quietly go blank or break otherwise. The contract is encoded in [TOUCHES.md → cross-cutting/observability-metrics](../../TOUCHES.md#cross-cuttingobservability-metrics) under "When changing this."
 
-The full list of Polaris-emitted metric names lives in `src/metrics.ts`; the helpers there also document what's recorded where.
+The full list of Polaris-emitted metric names lives in [src/metrics.ts](../../src/metrics.ts); the helpers there also document what's recorded where.
+
+## Adding more panels (out-of-process sources)
+
+For data Polaris doesn't proxy — Postgres internals, host-level disk/CPU/memory beyond what `prom-client` defaults emit, network — point Prometheus at `postgres_exporter` / `node_exporter` and import a community Grafana dashboard alongside this one. There is no separate pg-boss dashboard: pg-boss has no built-in exporter, and the app-side view (`polaris_pgboss_queue_jobs`, `polaris_pgboss_oldest_job_age_seconds`) lives in the **Write buffers & rollups** + **Throughput & queue health** rows above.
