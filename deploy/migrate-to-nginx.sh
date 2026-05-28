@@ -356,16 +356,29 @@ else
   SMOKE_FAILED=1
 fi
 
-# Check the bearer-gate path on a metrics endpoint — without bearer should
-# 401, since nginx forwards to a worker /metrics that requires METRICS_TOKEN.
-# (Skipped if METRICS_TOKEN isn't set on the worker, in which case 200 is fine.)
+# Verify /metrics-monitor-1 reaches nginx + nginx dispatches the request:
+#   200 = bearer accepted (METRICS_TOKEN unset or curl carried a valid token)
+#   401 = nginx forwarded; upstream rejected the missing/bad bearer
+#   403 = nginx's `allow <PROMETHEUS_IP>; deny all;` rejected localhost,
+#         which is correct — this curl runs from the prod box itself, not
+#         from the Prometheus host. A 403 here means nginx is correctly
+#         enforcing the IP allowlist; the path is wired up. Operators verify
+#         end-to-end from the Prometheus host separately.
+# 502/504 here would mean nginx can't reach the upstream worker; we'd want
+# to surface that.
 METRICS_CODE=$(curl -ks -o /dev/null -w '%{http_code}' "https://localhost/metrics-monitor-1" || echo "000")
-if [[ "$METRICS_CODE" == "200" ]] || [[ "$METRICS_CODE" == "401" ]]; then
-  info "✓ /metrics-monitor-1 responds ($METRICS_CODE)"
-else
-  warn "✗ /metrics-monitor-1 returned $METRICS_CODE — expected 200 or 401"
-  SMOKE_FAILED=1
-fi
+case "$METRICS_CODE" in
+  200|401|403)
+    info "✓ /metrics-monitor-1 responds ($METRICS_CODE)"
+    if [[ "$METRICS_CODE" == "403" ]]; then
+      info "  (403 from localhost is expected — the nginx IP allowlist denies anything other than the Prometheus host)"
+    fi
+    ;;
+  *)
+    warn "✗ /metrics-monitor-1 returned $METRICS_CODE — expected 200, 401, or 403"
+    SMOKE_FAILED=1
+    ;;
+esac
 
 if [[ $SMOKE_FAILED -ne 0 ]]; then
   warn "One or more smoke checks failed. The migration completed but verify manually before declaring done."
