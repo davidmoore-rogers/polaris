@@ -1,0 +1,11 @@
+# /etc/sudoers.d/polaris-nginx — narrow privilege grant for the in-app nginx
+# reverse-proxy management GUI. Synced from deploy/sudoers.d/polaris-nginx by
+# setup-rhel.sh, migrate-to-nginx.sh, and the in-app update path.
+#
+# Installed with mode 0440 root:root (sudo refuses to load otherwise).
+#
+# The wrapper at /usr/local/sbin/polaris-nginx-apply does its own subcommand
+# and argument validation. Sudoers grants only the single binary path —
+# arguments are unrestricted but filtered by the wrapper. NEVER widen this
+# grant to other binaries or a directory wildcard.
+polaris ALL=(root) NOPASSWD: /usr/local/sbin/polaris-nginx-apply

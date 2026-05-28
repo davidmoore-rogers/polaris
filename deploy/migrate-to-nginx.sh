@@ -275,6 +275,20 @@ mkdir -p "$NGINX_DROPIN_DIR"
 install -o root -g root -m 0644 "$SHIPPED_DROPIN" "$NGINX_DROPIN_FILE"
 systemctl daemon-reload
 
+step "Commit: installing in-app nginx GUI helpers"
+# /usr/local/sbin/polaris-nginx-apply + narrow sudoers grant + tmpfiles
+# staging dir back the Server Settings → Certificates nginx GUI. nginx is
+# guaranteed installed at this point (preflight installed it), so the
+# usermod is unconditional.
+install -o root -g root -m 0755 "$APP_DIR/deploy/scripts/polaris-nginx-apply.sh" /usr/local/sbin/polaris-nginx-apply
+install -o root -g root -m 0440 "$APP_DIR/deploy/sudoers.d/polaris-nginx"        /etc/sudoers.d/polaris-nginx
+install -o root -g root -m 0644 "$APP_DIR/deploy/tmpfiles.d/polaris-nginx.conf"  /etc/tmpfiles.d/polaris-nginx.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/polaris-nginx.conf >/dev/null 2>&1 || true
+if ! id -nG polaris 2>/dev/null | grep -qw nginx; then
+  usermod -aG nginx polaris
+  info "Added polaris user to the nginx group (cert file readability)"
+fi
+
 step "Commit: appending POLARIS_PROXY_CERT_PATH and POLARIS_PUBLIC_URL to $ENV_FILE"
 # Idempotent: skip the append on re-run if the keys are already present
 # (e.g. an earlier attempt got past this step but failed during nginx start).

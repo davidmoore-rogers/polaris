@@ -657,12 +657,52 @@ What it does in order:
    that makes polaris-web `Wants=` nginx — nginx starts first, but a failed
    nginx doesn't block polaris-web (so you can SSH in and fix nginx without
    a separate broken-Polaris problem).
-6. Appends `POLARIS_PROXY_CERT_PATH` + `POLARIS_PUBLIC_URL` to `/opt/polaris/.env`.
-7. Opens TCP+UDP/443 in `firewalld`.
-8. `systemctl daemon-reload`, `systemctl enable --now nginx`,
+6. Installs the in-app nginx GUI helpers:
+   `/usr/local/sbin/polaris-nginx-apply` (the privileged wrapper for the
+   Server Settings → Certificates GUI), `/etc/sudoers.d/polaris-nginx`
+   (narrow NOPASSWD grant on the one binary), `/etc/tmpfiles.d/polaris-nginx.conf`
+   (staging dir entry), and adds the `polaris` user to the `nginx` group
+   so the existing fingerprint pane can read the `0640 root:nginx` cert
+   file directly. Existing installs picking this up via in-app update get
+   the same wiring through `restartService()`'s sync block.
+7. Appends `POLARIS_PROXY_CERT_PATH` + `POLARIS_PUBLIC_URL` to `/opt/polaris/.env`.
+8. Opens TCP+UDP/443 in `firewalld`.
+9. `systemctl daemon-reload`, `systemctl enable --now nginx`,
    `systemctl reload nginx`, `systemctl restart polaris.target`.
-9. Smoke tests: TCP + UDP listeners on 443, `Alt-Svc: h3` header, Polaris
-   bound to `127.0.0.1:3000`, `/metrics-monitor-1` returns 200 or 401 (not 5xx).
+10. Smoke tests: TCP + UDP listeners on 443, `Alt-Svc: h3` header, Polaris
+    bound to `127.0.0.1:3000`, `/metrics-monitor-1` returns 200 or 401 (not 5xx).
+
+### After migration: the in-app nginx GUI
+
+Server Settings → Certificates now shows the in-app nginx GUI: the
+**HTTPS Certificate** card (read-only metadata + a **Rotate certificate**
+button), an **nginx Proxy** card with the six controls (HTTPS port, HTTP/3
+toggle, TLS protocols, HSTS, Prometheus allow-list), and the **Trusted
+Certificate Authorities** card (unchanged).
+
+A yellow drift banner reads "nginx config not Polaris-managed yet" until
+you click **Adopt managed mode**. Until then the controls are read-only and
+Polaris will not touch your nginx config on in-app updates. If you've
+hand-edited `/etc/nginx/conf.d/polaris.conf` beyond the six controls (extra
+location blocks, custom headers, custom timeouts), the banner lists what
+it detected — adopting will overwrite those hand-edits on the next Apply.
+
+Click **Adopt managed mode** to unlock. From there:
+
+- **Save & Apply** stages a rendered config to `/run/polaris-nginx-stage/`,
+  validates via `nginx -t`, atomic-renames into place, and `systemctl reload
+  nginx`s. The wrapper rolls back to the most recent `.bak` if `nginx -t`
+  fails.
+- **Rotate certificate** orchestrates the dual-pin workflow: upload cert+key
+  → stage the new pin on every active agent via `/agents/cert-pins/bulk-add`
+  (so they accept both old + new) → swap the cert file + reload nginx →
+  retire the old pin via `/agents/cert-pins/bulk-remove`. Zero-downtime if
+  all agents are online during the staging step.
+
+**Firewall reminder.** Changing the HTTPS port via the GUI requires you to
+manually open `<new>/tcp` + `<new>/udp` in firewalld — Polaris will not
+modify firewall rules from the UI (lockout footgun). The GUI banner after
+Apply reminds you to do this.
 
 ### Verifying
 

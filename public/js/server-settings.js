@@ -601,15 +601,20 @@ async function refreshOuiDatabase() {
 var _certsLoaded = false;
 var _certData = { trustedCAs: [], serverCerts: [] };
 var _httpsSettings = { fingerprint: null, cn: null, dnsSans: [], ipSans: [], expiresAt: null, certPath: null };
+var _proxyData = null;
 
-// Render the Certificates tab. nginx terminates TLS — the cert lives in a
-// file on disk that Polaris doesn't manage. Two cards: an informational pane
-// (fingerprint + SANs + expiry + cert path) and the Trusted Certificate
-// Authorities card (CAs back outbound TLS to LDAP/SMTP/integrations and
-// remain operator-editable). See src/api/routes/serverSettings.ts:GET /https.
+// Render the Certificates tab. nginx terminates TLS — three stacked cards:
+// HTTPS Certificate (read-only metadata + Rotate button), nginx Proxy (the
+// six operator-settable directives: HTTPS port, HTTP/3, TLS protocols, HSTS,
+// Prometheus allow-list, with a Save & Apply button), and Trusted CAs.
+// A drift banner appears above the cards when proxyConfig.managedMode is
+// false (the refuse-and-banner UX for existing installs that haven't opted
+// into Polaris-managed nginx config yet). See src/api/routes/proxySettings.ts.
 function renderCertsTab(container) {
   var s = _httpsSettings || {};
-  var fingerprint = s.fingerprint || "(unavailable)";
+  var p = (_proxyData && _proxyData.config) || {};
+  var drift = (_proxyData && _proxyData.drift) || { managedMode: false, driftMarkers: [] };
+  var fingerprint = (_proxyData && _proxyData.currentFingerprint) || s.fingerprint || "(unavailable)";
   var cn = s.cn || "(none)";
   var dnsSans = (s.dnsSans && s.dnsSans.length) ? s.dnsSans.join(", ") : "(none)";
   var ipSans = (s.ipSans && s.ipSans.length) ? s.ipSans.join(", ") : "(none)";
@@ -620,7 +625,7 @@ function renderCertsTab(container) {
   if (s.expiresAt) {
     var ms = Date.parse(s.expiresAt) - Date.now();
     var days = Math.floor(ms / (24 * 60 * 60 * 1000));
-    var pillClass = "badge-available";  // green
+    var pillClass = "badge-available";
     var pillLabel = days + " days";
     if (days < 0)       { pillClass = "badge-deprecated"; pillLabel = "EXPIRED"; }
     else if (days < 7)  { pillClass = "badge-deprecated"; pillLabel = days + " days"; }
@@ -630,15 +635,44 @@ function renderCertsTab(container) {
                  escapeHtml(pillLabel) + '</span>';
   }
 
-  container.innerHTML =
-    '<div class="settings-cards-row-2">' +
+  // Drift banner — only renders when managedMode is false.
+  var bannerHtml = "";
+  if (!drift.managedMode) {
+    var markers = (drift.driftMarkers || []).slice(0, 5).map(escapeHtml).join("; ");
+    var moreCount = Math.max(0, (drift.driftMarkers || []).length - 5);
+    var markerLine = markers
+      ? '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-top:0.4rem;font-family:monospace">' +
+          escapeHtml("Detected: ") + markers + (moreCount > 0 ? " (+" + moreCount + " more)" : "") +
+        '</div>'
+      : '';
+    bannerHtml =
+      '<div class="settings-card" style="border-color:#f59e0b;background:rgba(245,158,11,0.08);margin-bottom:1rem">' +
+        '<h4 style="color:#f59e0b;margin-bottom:0.5rem">nginx config not Polaris-managed yet</h4>' +
+        '<p style="font-size:0.85rem;margin-bottom:0.6rem">' +
+          'The Save &amp; Apply button below is disabled until you click <strong>Adopt managed mode</strong>. ' +
+          'Until then, the controls show what Polaris parsed from <code>/etc/nginx/conf.d/polaris.conf</code> and ' +
+          'are read-only. Adopting will overwrite any hand-edits beyond the six controls Polaris manages on the ' +
+          'next Apply.' +
+        '</p>' +
+        markerLine +
+        '<div style="margin-top:0.8rem">' +
+          '<button class="btn-primary" id="proxy-adopt-btn">Adopt managed mode</button>' +
+        '</div>' +
+      '</div>';
+  }
+
+  var disabled = drift.managedMode ? "" : " disabled";
+  var hsts = p.hsts || { enabled: true, maxAgeSeconds: 31536000, includeSubDomains: true, preload: true };
+  var prom = (p.prometheusAllowIps || []).join("\n");
+  var tlsProtocols = p.tlsProtocols || ["TLSv1.2", "TLSv1.3"];
+
+  var certCardHtml =
     '<div class="settings-card">' +
-      '<h4>HTTPS — managed by external reverse proxy</h4>' +
+      '<h4>HTTPS Certificate</h4>' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
-        'TLS is terminated by an external proxy (nginx) reading the cert at <code>' + escapeHtml(certPath) + '</code>. ' +
-        'Polaris does not upload, generate, or rotate the server cert in this mode — modify the file directly and ' +
-        'reload nginx (<code>systemctl reload nginx</code>) to roll a new cert. The fingerprint below is what every ' +
-        'Polaris Agent pins; do not change the cert without planning for agent re-pinning.' +
+        'TLS is terminated by nginx reading the cert at <code>' + escapeHtml(certPath) + '</code>. ' +
+        'The fingerprint below is what Polaris Agents pin; rotation walks through the dual-pin stage→swap→retire ' +
+        'workflow so it\'s zero-downtime as long as every agent is online to receive the new pin.' +
       '</p>' +
       '<div class="form-group"><label>Cert path</label>' +
         '<input type="text" readonly value="' + escapeHtml(certPath) + '" style="font-family:monospace">' +
@@ -658,7 +692,64 @@ function renderCertsTab(container) {
       '<div class="form-group"><label>Expiry</label>' +
         '<div style="padding:0.4rem 0">' + expiryHtml + '</div>' +
       '</div>' +
-    '</div>' +
+      '<div style="margin-top:0.5rem">' +
+        '<button class="btn-secondary" id="proxy-rotate-cert-btn">Rotate certificate</button>' +
+      '</div>' +
+    '</div>';
+
+  var proxyCardHtml =
+    '<div class="settings-card">' +
+      '<h4>nginx Proxy</h4>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+        'Six operator-settable directives. Save &amp; Apply renders <code>/etc/nginx/conf.d/polaris.conf</code> ' +
+        'from these values, runs <code>nginx -t</code>, and reloads nginx. server_name is derived from ' +
+        '<code>POLARIS_PUBLIC_URL</code>.' +
+      '</p>' +
+      '<div class="form-group">' +
+        '<label for="proxy-https-port">HTTPS listen port (TCP + UDP)</label>' +
+        '<input type="number" id="proxy-https-port" min="1" max="65535" value="' + escapeHtml(String(p.httpsPort || 443)) + '"' + disabled + '>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label><input type="checkbox" id="proxy-http3-enabled"' + (p.http3Enabled ? " checked" : "") + disabled + '> HTTP/3 (QUIC over UDP)</label>' +
+        '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-top:0.2rem">Requires nginx 1.25+. When off, removes the QUIC listener, the Alt-Svc header, and ssl_early_data.</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>TLS protocols</label>' +
+        '<div style="display:flex;gap:1rem">' +
+          '<label><input type="checkbox" id="proxy-tls-12"' + (tlsProtocols.indexOf("TLSv1.2") >= 0 ? " checked" : "") + disabled + '> TLSv1.2</label>' +
+          '<label><input type="checkbox" id="proxy-tls-13"' + (tlsProtocols.indexOf("TLSv1.3") >= 0 ? " checked" : "") + disabled + '> TLSv1.3</label>' +
+        '</div>' +
+        '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-top:0.2rem">QUIC requires TLSv1.3 — turning HTTP/3 on auto-includes 1.3.</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label><input type="checkbox" id="proxy-hsts-enabled"' + (hsts.enabled ? " checked" : "") + disabled + '> HSTS (Strict-Transport-Security header)</label>' +
+        '<div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.4rem">' +
+          '<input type="number" id="proxy-hsts-max-age" min="0" value="' + escapeHtml(String(hsts.maxAgeSeconds)) + '" style="flex:1"' + disabled + '>' +
+          '<select id="proxy-hsts-preset" style="flex:0 0 8rem"' + disabled + '>' +
+            '<option value="">Preset…</option>' +
+            '<option value="3600">1 hour</option>' +
+            '<option value="86400">1 day</option>' +
+            '<option value="2592000">30 days</option>' +
+            '<option value="31536000">1 year</option>' +
+          '</select>' +
+        '</div>' +
+        '<label style="margin-top:0.3rem"><input type="checkbox" id="proxy-hsts-subdomains"' + (hsts.includeSubDomains ? " checked" : "") + disabled + '> includeSubDomains</label> &nbsp; ' +
+        '<label><input type="checkbox" id="proxy-hsts-preload"' + (hsts.preload ? " checked" : "") + disabled + '> preload</label>' +
+        '<div style="font-size:0.78rem;color:#f59e0b;margin-top:0.3rem">HSTS cannot be undone in already-visited browsers for the duration of the previous max-age.</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label for="proxy-prometheus-ips">Prometheus allow-list (one IP per line)</label>' +
+        '<textarea id="proxy-prometheus-ips" rows="3" placeholder="10.0.0.42"' + disabled + '>' + escapeHtml(prom) + '</textarea>' +
+        '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-top:0.2rem">Empty list = deny all. Bearer auth still gates /metrics; this is the first defense layer.</div>' +
+      '</div>' +
+      '<div style="margin-top:1rem">' +
+        '<button class="btn-primary" id="proxy-apply-btn"' + disabled + '>Save &amp; Apply</button>' +
+        '<div id="proxy-apply-status" style="font-size:0.85rem;margin-top:0.6rem;display:none"></div>' +
+        '<div id="proxy-apply-output" style="font-size:0.78rem;margin-top:0.4rem;display:none;background:var(--color-surface-alt);padding:0.6rem;border-radius:4px;white-space:pre-wrap;font-family:monospace;max-height:14rem;overflow:auto"></div>' +
+      '</div>' +
+    '</div>';
+
+  var caCardHtml =
     '<div class="settings-card" style="display:flex;flex-direction:column">' +
       '<h4>Trusted Certificate Authorities</h4>' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">CA certificates used to verify remote servers when Polaris connects to integrations, syslog, and archive targets. Still operator-editable in proxy mode.</p>' +
@@ -670,8 +761,263 @@ function renderCertsTab(container) {
           '<p>Click to select a .pem, .crt, or .cer file</p>' +
         '</div>' +
       '</div>' +
-    '</div>' +
     '</div>';
+
+  container.innerHTML = bannerHtml + certCardHtml + proxyCardHtml + caCardHtml;
+
+  var adoptBtn = document.getElementById("proxy-adopt-btn");
+  if (adoptBtn) adoptBtn.addEventListener("click", handleProxyAdopt);
+
+  var rotateBtn = document.getElementById("proxy-rotate-cert-btn");
+  if (rotateBtn) rotateBtn.addEventListener("click", openRotateCertModal);
+
+  var presetSelect = document.getElementById("proxy-hsts-preset");
+  if (presetSelect) {
+    presetSelect.addEventListener("change", function () {
+      if (this.value) {
+        document.getElementById("proxy-hsts-max-age").value = this.value;
+        this.value = "";
+      }
+    });
+  }
+
+  var http3Box = document.getElementById("proxy-http3-enabled");
+  if (http3Box) {
+    http3Box.addEventListener("change", function () {
+      if (this.checked) {
+        var tls13 = document.getElementById("proxy-tls-13");
+        if (tls13) tls13.checked = true;
+      }
+    });
+  }
+
+  var applyBtn = document.getElementById("proxy-apply-btn");
+  if (applyBtn) applyBtn.addEventListener("click", handleProxyApply);
+}
+
+async function handleProxyAdopt() {
+  if (!confirm("Adopt Polaris-managed nginx config mode? Hand-edits beyond the six controls will be overwritten on the next Apply.")) return;
+  try {
+    await api.serverSettings.proxyAdoptManagedMode();
+    await loadCertificates();
+  } catch (err) {
+    alert("Failed to adopt managed mode: " + (err.message || err));
+  }
+}
+
+function readProxyFormValues() {
+  var tlsProtocols = [];
+  if (document.getElementById("proxy-tls-12").checked) tlsProtocols.push("TLSv1.2");
+  if (document.getElementById("proxy-tls-13").checked) tlsProtocols.push("TLSv1.3");
+  var ipsRaw = document.getElementById("proxy-prometheus-ips").value || "";
+  var ips = ipsRaw.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+  return {
+    httpsPort: parseInt(document.getElementById("proxy-https-port").value, 10),
+    http3Enabled: document.getElementById("proxy-http3-enabled").checked,
+    tlsProtocols: tlsProtocols,
+    hsts: {
+      enabled: document.getElementById("proxy-hsts-enabled").checked,
+      maxAgeSeconds: parseInt(document.getElementById("proxy-hsts-max-age").value, 10) || 0,
+      includeSubDomains: document.getElementById("proxy-hsts-subdomains").checked,
+      preload: document.getElementById("proxy-hsts-preload").checked,
+    },
+    prometheusAllowIps: ips,
+  };
+}
+
+async function handleProxyApply() {
+  var btn = document.getElementById("proxy-apply-btn");
+  var status = document.getElementById("proxy-apply-status");
+  var outBox = document.getElementById("proxy-apply-output");
+  var body = readProxyFormValues();
+  btn.disabled = true;
+  status.style.display = "block";
+  status.style.color = "var(--color-text-secondary)";
+  status.textContent = "Rendering and reloading nginx…";
+  outBox.style.display = "none";
+  outBox.textContent = "";
+  try {
+    var res = await api.serverSettings.proxyApply(body);
+    if (res.ok) {
+      status.style.color = "var(--color-text-secondary)";
+      status.innerHTML =
+        '<span style="color:#4ade80">✓</span> Applied (sha256=' + escapeHtml(res.hash.slice(0, 12)) + '…). ' +
+        'If you changed the port, open TCP+UDP/<strong>' + escapeHtml(String(body.httpsPort)) + '</strong> in your firewall.';
+      if (res.listening) {
+        outBox.style.display = "block";
+        outBox.textContent = res.listening;
+      }
+      setTimeout(loadCertificates, 800);
+    } else {
+      status.style.color = "#ef4444";
+      status.textContent = "✗ Apply failed. nginx -t output below.";
+      outBox.style.display = "block";
+      outBox.textContent = res.wrapperOutput || "(no output)";
+    }
+  } catch (err) {
+    status.style.color = "#ef4444";
+    status.textContent = "✗ " + (err.message || "Apply failed");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ─── Rotate certificate modal: dual-pin stage → swap → retire workflow ──────
+
+function openRotateCertModal() {
+  var modal = document.createElement("div");
+  modal.className = "modal-overlay";
+  modal.id = "rotate-cert-modal";
+  modal.innerHTML =
+    '<div class="modal-content" style="max-width:620px">' +
+      '<h3>Rotate HTTPS certificate</h3>' +
+      '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+        'Four-step zero-downtime rotation: ' +
+        '(1) upload the replacement pair; ' +
+        '(2) stage the new pin on every active agent so they accept both old + new; ' +
+        '(3) swap the cert file + reload nginx; ' +
+        '(4) retire the old pin once you\'re confident every agent has reconnected.' +
+      '</p>' +
+      '<div class="form-group"><label for="rotate-cert-file">Certificate (.pem / .crt)</label>' +
+        '<input type="file" id="rotate-cert-file" accept=".pem,.crt,.cer">' +
+      '</div>' +
+      '<div class="form-group"><label for="rotate-key-file">Private key (.pem / .key)</label>' +
+        '<input type="file" id="rotate-key-file" accept=".pem,.key">' +
+      '</div>' +
+      '<div id="rotate-preflight" style="display:none;background:var(--color-surface-alt);padding:0.8rem;border-radius:4px;margin-bottom:1rem;font-size:0.82rem"></div>' +
+      '<div id="rotate-error" style="display:none;color:#ef4444;font-size:0.85rem;margin-bottom:1rem"></div>' +
+      '<div style="display:flex;gap:0.5rem;justify-content:flex-end;flex-wrap:wrap">' +
+        '<button class="btn-secondary" id="rotate-cancel-btn">Cancel</button>' +
+        '<button class="btn-secondary" id="rotate-preflight-btn">1. Preflight</button>' +
+        '<button class="btn-secondary" id="rotate-stage-btn" disabled>2. Stage pin</button>' +
+        '<button class="btn-primary" id="rotate-swap-btn" disabled>3. Swap cert</button>' +
+        '<button class="btn-secondary" id="rotate-retire-btn" disabled>4. Retire old pin</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(modal);
+
+  var state = { preflight: null, oldFingerprint: null };
+
+  function showError(msg) {
+    var box = document.getElementById("rotate-error");
+    box.style.display = "block";
+    box.textContent = msg;
+  }
+  function clearError() {
+    document.getElementById("rotate-error").style.display = "none";
+  }
+  function updatePreflightDisplay(extraNote) {
+    var box = document.getElementById("rotate-preflight");
+    if (!state.preflight) { box.style.display = "none"; return; }
+    box.style.display = "block";
+    box.innerHTML =
+      '<div style="font-family:monospace;margin-bottom:0.4rem">' +
+        '<strong>New fingerprint:</strong> ' + escapeHtml(state.preflight.newFingerprint) + '<br>' +
+        '<strong>CN:</strong> ' + escapeHtml(state.preflight.newCn || "(none)") + '<br>' +
+        '<strong>DNS SANs:</strong> ' + escapeHtml((state.preflight.newDnsSans || []).join(", ") || "(none)") + '<br>' +
+        '<strong>Expiry:</strong> ' + escapeHtml(state.preflight.newExpiresAt ? formatDate(state.preflight.newExpiresAt) : "(unknown)") + '<br>' +
+        '<strong>Current pin to retire:</strong> ' + escapeHtml(state.oldFingerprint || "(none)") +
+      '</div>' +
+      (extraNote || "");
+  }
+
+  document.getElementById("rotate-cancel-btn").addEventListener("click", function () {
+    document.body.removeChild(modal);
+  });
+
+  document.getElementById("rotate-preflight-btn").addEventListener("click", async function () {
+    clearError();
+    var certFile = document.getElementById("rotate-cert-file").files[0];
+    var keyFile = document.getElementById("rotate-key-file").files[0];
+    if (!certFile || !keyFile) { showError("Select both a cert and key file."); return; }
+    this.disabled = true;
+    try {
+      state.preflight = await api.serverSettings.proxyCertPreflight(certFile, keyFile);
+      state.oldFingerprint = state.preflight.currentFingerprint;
+      updatePreflightDisplay('<div style="color:#f59e0b">Click <strong>Stage pin</strong> next.</div>');
+      document.getElementById("rotate-stage-btn").disabled = false;
+    } catch (err) {
+      showError(err.message || "Preflight failed");
+      this.disabled = false;
+    }
+  });
+
+  document.getElementById("rotate-stage-btn").addEventListener("click", async function () {
+    if (!state.preflight) return;
+    clearError();
+    this.disabled = true;
+    try {
+      var result = await api.serverSettings.agentCertPinBulkAdd(state.preflight.newFingerprint);
+      updatePreflightDisplay(
+        '<div style="color:#4ade80">✓ Staged on ' + escapeHtml(String(result.added)) +
+        ' agent(s); ' + escapeHtml(String(result.alreadyPresent)) + ' already had the pin. ' +
+        'Total active: ' + escapeHtml(String(result.totalActive)) + '. ' +
+        'Agents apply the new pin within seconds via WS push (offline agents pick it up on next /config poll). ' +
+        'Verify uptake at <a href="#" id="rotate-summary-link">cert-pins summary</a> or just wait ~30s, ' +
+        'then click <strong>Swap cert</strong>.</div>',
+      );
+      document.getElementById("rotate-summary-link").addEventListener("click", async function (ev) {
+        ev.preventDefault();
+        var summary = await api.serverSettings.agentCertPinsSummary();
+        var entry = (summary.pins || []).find(function (p) { return p.pin === state.preflight.newFingerprint.toLowerCase(); });
+        var have = entry ? entry.canonical + entry.staged : 0;
+        alert("Cert pin uptake: " + have + " / " + summary.totalActiveAgents + " active agents have the new pin.");
+      });
+      document.getElementById("rotate-swap-btn").disabled = false;
+    } catch (err) {
+      showError(err.message || "Stage failed");
+      this.disabled = false;
+    }
+  });
+
+  document.getElementById("rotate-swap-btn").addEventListener("click", async function () {
+    if (!state.preflight) return;
+    if (!confirm("Swap /etc/polaris-nginx/{cert,key}.pem and reload nginx? Make sure all active agents have heartbeated with the new pin staged.")) return;
+    clearError();
+    this.disabled = true;
+    try {
+      var result = await api.serverSettings.proxyCertRotate({
+        certPem: state.preflight.certPem,
+        keyPem: state.preflight.keyPem,
+      });
+      if (result.ok) {
+        updatePreflightDisplay(
+          '<div style="color:#4ade80">✓ Cert swapped + nginx reloaded. New fingerprint live. ' +
+          (state.oldFingerprint
+            ? 'Click <strong>Retire old pin</strong> to remove <code>' + escapeHtml(state.oldFingerprint) + '</code> from every agent\'s accepted set.'
+            : 'No previous pin recorded — nothing to retire.') +
+          '</div>',
+        );
+        if (state.oldFingerprint) {
+          document.getElementById("rotate-retire-btn").disabled = false;
+        }
+      } else {
+        showError("Rotate failed. nginx output: " + (result.wrapperOutput || "(no output)"));
+        this.disabled = false;
+      }
+    } catch (err) {
+      showError(err.message || "Rotate failed");
+      this.disabled = false;
+    }
+  });
+
+  document.getElementById("rotate-retire-btn").addEventListener("click", async function () {
+    if (!state.oldFingerprint) return;
+    if (!confirm("Retire the previous pin (" + state.oldFingerprint + ") from every active agent's accepted set? Skipped on any agent where it would be the last pin.")) return;
+    clearError();
+    this.disabled = true;
+    try {
+      var result = await api.serverSettings.agentCertPinBulkRemove(state.oldFingerprint);
+      var msg = "Retired on " + result.removed + " agent(s)";
+      if (result.lastPinSkipped > 0) msg += "; " + result.lastPinSkipped + " skipped (would have been last pin)";
+      alert(msg + ". Rotation complete.");
+      document.body.removeChild(modal);
+      await loadCertificates();
+    } catch (err) {
+      showError(err.message || "Retire failed");
+      this.disabled = false;
+    }
+  });
 }
 
 async function loadCertificates() {
@@ -681,6 +1027,10 @@ async function loadCertificates() {
   try {
     _httpsSettings = await api.serverSettings.getHttps();
   } catch (_) {}
+
+  try {
+    _proxyData = await api.serverSettings.proxyGet();
+  } catch (_) { _proxyData = null; }
 
   renderCertsTab(container);
   wireUploadArea("ca-upload-area", "ca-file-input", uploadCA);
