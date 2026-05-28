@@ -36,12 +36,14 @@ type Client struct {
 	AgentVersion string
 }
 
-// NewClient builds a Client that pins TLS to certFingerprint. The bearer
-// can be empty at construction time — callers Enroll() first, then set
-// the returned bearer via SetBearer().
-func NewClient(baseURL, certFingerprint, bearer string) *Client {
+// NewClient builds a Client that pins TLS to ANY fingerprint in certPins.
+// The bearer can be empty at construction time — callers Enroll() first,
+// then set the returned bearer via SetBearer(). Phase 2 dual-pin: pass
+// cfg.Pins() (the full set); pre-Phase-2 callers can pass a one-element
+// slice — VerifyPeerCertificate handles both shapes identically.
+func NewClient(baseURL string, certPins []string, bearer string) *Client {
 	tr := &http.Transport{
-		TLSClientConfig:       pinned.TLSConfig(certFingerprint),
+		TLSClientConfig:       pinned.TLSConfig(certPins),
 		ResponseHeaderTimeout: 15 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 	}
@@ -248,6 +250,11 @@ type ConfigResponse struct {
 	ETag    string                  `json:"etag"`
 	Streams map[string]StreamConfig `json:"streams"`
 	Monitored bool                  `json:"monitored"`
+	// Phase 2 dual-pin: the current set of acceptable leaf-cert SHA-256
+	// fingerprints (canonical pin + any operator-staged additional pins).
+	// Empty slice means "field not present" — older Phase 1 servers don't
+	// emit this and the agent should leave its existing pin set untouched.
+	CertFingerprints []string `json:"certFingerprints,omitempty"`
 }
 
 // FetchConfig pulls the resolved cadences + which streams are agent-mode.

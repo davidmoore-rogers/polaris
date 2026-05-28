@@ -65,7 +65,7 @@ func main() {
 		log.Fatalf("invalid config: %v", err)
 	}
 
-	client := transport.NewClient(cfg.ServerURL, cfg.CertFingerprint, cfg.BearerToken)
+	client := transport.NewClient(cfg.ServerURL, cfg.Pins(), cfg.BearerToken)
 	// Stamp the ldflag-set version into the client so /enroll and
 	// /heartbeat report the version this binary was built at.
 	client.AgentVersion = version
@@ -350,7 +350,7 @@ func pushSystemInfoOne(client *transport.Client) {
 // the same socket; `refresh-config` triggers a /config refetch via the
 // HTTP transport.
 func wsLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
-	dialer, err := transport.NewWSDialer(cfg.ServerURL, cfg.CertFingerprint, cfg.BearerToken)
+	dialer, err := transport.NewWSDialer(cfg.ServerURL, cfg.Pins(), cfg.BearerToken)
 	if err != nil {
 		log.Printf("ws: dialer setup failed: %v", err)
 		return
@@ -362,10 +362,31 @@ func wsLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
 			return nil
 		case "refresh-config":
 			// Server is telling us something changed (operator edited
-			// cadences etc.). Best-effort refetch — failure here just
-			// means we'll see the change at the next normal poll.
-			if _, err := client.FetchConfig(""); err != nil {
+			// cadences, staged a cert pin, etc.). Best-effort refetch —
+			// failure here just means we'll see the change at the next
+			// normal poll.
+			resp, err := client.FetchConfig("")
+			if err != nil {
 				log.Printf("ws: refresh-config: fetch failed: %v", err)
+				return nil
+			}
+			// Phase 2 dual-pin: if the server's pin set differs from what we
+			// have on disk, save the new pin set and exit cleanly so systemd
+			// cycles us with the updated agent.conf live. The reconnect
+			// post-restart establishes new TLS with the updated pin set,
+			// which is what lets the agent survive a cert rotation initiated
+			// by the operator AFTER the staging push. See cross-cutting/
+			// polaris-agent → "Cert pin rotation" in TOUCHES.md.
+			if resp != nil && len(resp.CertFingerprints) > 0 {
+				if cfg.SetPins(resp.CertFingerprints) {
+					if err := cfg.Save(); err != nil {
+						log.Printf("ws: refresh-config: failed to save updated pin set: %v", err)
+						return nil
+					}
+					log.Printf("ws: refresh-config: pin set updated (%d pins) — exiting for systemd restart",
+						len(resp.CertFingerprints))
+					os.Exit(0)
+				}
 			}
 			return nil
 		case "probe-now-request":

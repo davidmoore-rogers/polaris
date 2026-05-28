@@ -84,8 +84,10 @@ type WSDialer struct {
 	dialer  *websocket.Dialer
 }
 
-// NewWSDialer builds a dialer with TLS pinned to certFingerprint.
-func NewWSDialer(baseURL, certFingerprint, bearer string) (*WSDialer, error) {
+// NewWSDialer builds a dialer with TLS pinned to ANY fingerprint in certPins.
+// Phase 2 dual-pin: pass cfg.Pins() so a staged-rotation pin set lets the
+// websocket survive a server cert rotation in lockstep with the HTTP client.
+func NewWSDialer(baseURL string, certPins []string, bearer string) (*WSDialer, error) {
 	u, err := url.Parse(strings.TrimRight(baseURL, "/") + wsPath)
 	if err != nil {
 		return nil, fmt.Errorf("parse base url: %w", err)
@@ -104,7 +106,7 @@ func NewWSDialer(baseURL, certFingerprint, bearer string) (*WSDialer, error) {
 		bearer: bearer,
 		dialer: &websocket.Dialer{
 			HandshakeTimeout: wsHandshakeTimeout,
-			TLSClientConfig:  pinned.TLSConfig(certFingerprint),
+			TLSClientConfig:  pinned.TLSConfig(certPins),
 			Subprotocols:     []string{"polaris-agent.v1.bearer." + bearer},
 		},
 	}, nil

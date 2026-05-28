@@ -2145,7 +2145,21 @@ model ManagedAgent {
 
   // SHA-256 of the leaf cert as `sha256:<hex>`. Pinned at install; checked
   // server-side at enrollment, client-side on every subsequent TLS handshake.
+  // CANONICAL pin — the one the agent enrolled against most recently. After a
+  // successful staged-rotation, the operator "promotes" a staged pin into this
+  // column and clears `additionalServerCertFingerprints`.
   serverCertFingerprint String
+
+  // STAGED pins. Empty in steady state. Populated when an operator stages a
+  // new cert pin via the Maintenance card before rotating the server cert —
+  // /config push then propagates the union to every agent's agent.conf, so
+  // when the cert actually rotates, every agent already trusts the new
+  // fingerprint and enrollment / heartbeat / WS continue without re-install.
+  // After the operator confirms uptake (every agent has heartbeated with the
+  // new pin), the rotation finishes by promoting the new pin to
+  // serverCertFingerprint and clearing this array. See cross-cutting/polaris-agent
+  // "Cert pin rotation" in TOUCHES.md.
+  additionalServerCertFingerprints String[] @default([])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
