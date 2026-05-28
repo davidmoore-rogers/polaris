@@ -599,9 +599,37 @@ export function restartService() {
     // web restarts; systemd-run runs it as an independent transient unit).
     // Requires a polkit/sudo grant for the polaris user to manage polaris.target
     // — see docs/INSTALL.md. Falls back to a plain exit so at least web cycles.
-    logger.info("Restarting polaris.target (full group) for update...");
+    //
+    // Auto-sync shipped unit files before restarting. A Polaris update that
+    // ships unit-file changes (new env var on a worker role, hardening
+    // directive, etc.) only lands the new content in /opt/polaris/deploy/;
+    // /etc/systemd/system/ still holds whatever the operator cp'd in at
+    // install time. Without the sync + daemon-reload below, the restart
+    // would cycle the processes against the OLD unit definitions and ship
+    // no env changes. cmp-only-overwrite means a no-op when nothing
+    // changed; operator customization should live in <unit>.d/*.conf
+    // drop-ins (per docs/INSTALL.md) — those survive any cp. The transient
+    // unit's contents run as root via the manage-units polkit grant, so
+    // the polaris user doesn't need direct cp access to /etc/systemd/system/.
+    // Chained with && so a failed cp or daemon-reload aborts the restart
+    // and leaves the system running the old code/units pair (the rollback
+    // path knows how to repair from there).
+    logger.info("Syncing unit files and restarting polaris.target (full group) for update...");
+    const syncScript = [
+      "set -e",
+      `for f in ${APP_DIR}/deploy/polaris-web.service ${APP_DIR}/deploy/polaris-monitor@.service ${APP_DIR}/deploy/polaris-discovery.service ${APP_DIR}/deploy/polaris-migrate.service ${APP_DIR}/deploy/polaris.target; do`,
+      `  name="$(basename "$f")"`,
+      `  target="/etc/systemd/system/$name"`,
+      `  if [ -f "$target" ] && ! cmp -s "$f" "$target"; then`,
+      `    cp -f "$f" "$target"`,
+      `    logger -t polaris-updater "Synced unit file: $name (operator edits to the main unit file are clobbered; use $name.d/*.conf drop-ins for customization)"`,
+      `  fi`,
+      `done`,
+      `systemctl daemon-reload`,
+      `systemctl restart polaris.target`,
+    ].join("\n");
     try {
-      const child = spawn("systemd-run", ["--no-block", "systemctl", "restart", "polaris.target"], {
+      const child = spawn("systemd-run", ["--no-block", "/bin/sh", "-c", syncScript], {
         detached: true,
         stdio: "ignore",
       });

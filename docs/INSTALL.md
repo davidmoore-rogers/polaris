@@ -501,6 +501,17 @@ polkit.addRule(function(action, subject) {
 });
 ```
 
+**Auto-sync of unit files.** Before restarting `polaris.target` the updater
+also syncs `/opt/polaris/deploy/polaris-*.service` and `polaris.target` into
+`/etc/systemd/system/`, then runs `systemctl daemon-reload`. Files are
+overwritten only when their content differs from what's currently installed,
+so this is a no-op on updates that don't touch unit files. **Customize via
+drop-ins, not direct edits**: put per-host changes in
+`/etc/systemd/system/polaris-monitor@.service.d/local.conf` (or the matching
+unit's `.d/` directory) so they survive every update. The transient unit
+that runs the sync runs as root via the polkit grant above; no extra sudo /
+NOPASSWD entry is required.
+
 ### Windows (NSSM)
 
 Register one service per role with the same `AppDirectory`, role via
