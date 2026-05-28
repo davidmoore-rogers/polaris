@@ -79,6 +79,7 @@ Server Settings → Maintenance shows host CPU/RAM/disk, database size with samp
 - **Encrypted backups** with versioned magic header (`POLARIS\0`), retained on disk and surfaced for in-app restore.
 - **In-app updates** from Server Settings → Maintenance, with automatic rollback if any step fails.
 - **PDF / CSV export** for assets, networks, events, and IP panel data.
+- **Prometheus `/metrics` + Grafana dashboard** — every `polaris_*` metric (monitor pass + work duration, probe latency by transport, FMG dual-lane worker, DB pool, capacity severity, discovery phases, sample rollups, HTTP, job health) graphed in `docs/grafana/polaris-monitoring-dashboard.json`. Bearer-token gated via `METRICS_TOKEN`. See `docs/INSTALL.md` → "Optional: Prometheus + Grafana."
 
 ## System requirements
 

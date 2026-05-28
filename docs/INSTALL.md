@@ -657,6 +657,27 @@ For headless installs (no UI access) the same env vars can be set by hand. The d
 
 ---
 
+## Optional: Prometheus + Grafana
+
+Polaris exposes a Prometheus scrape endpoint at `GET /metrics` covering every `polaris_*` metric defined in `src/metrics.ts` — monitor pass and per-cadence work duration, probe latency by transport, FMG dual-lane worker saturation, DB pool / capacity severity / dead-tuple ratios, discovery duration and per-phase histograms, sample-write and rollup durations, HTTP request latency, and per-job durations. Default Node.js process metrics (event-loop lag, RSS, heap, CPU) are also emitted unprefixed so the standard Node.js Grafana dashboards work without modification.
+
+**Bearer token.** The first-run setup wizard auto-generates a `METRICS_TOKEN` and writes it to `.env`. Clearing it surfaces a `metrics_token_unset` watch reason on the Maintenance tab (the endpoint leaks fleet recon data if unauthenticated). Prometheus needs a matching `Authorization: Bearer <token>` header; a minimal scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: polaris
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['polaris.example.com:3000']
+    bearer_token: '<value of METRICS_TOKEN from .env>'
+```
+
+**Grafana dashboard.** A pre-built dashboard lives at `docs/grafana/polaris-monitoring-dashboard.json` with the import flow + per-row reading guide in `docs/grafana/README.md`. In Grafana → **Dashboards → New → Import** → upload the JSON → pick your Prometheus datasource for the `DS_PROMETHEUS` variable.
+
+**Postgres-side visibility (separate).** The Polaris dashboard is the *app's* view of the database (pool in-use, dead-tuple ratio on sample tables, projected steady-state size). For true Postgres internals (connections, locks, WAL, replication lag, slow queries, per-table bloat across the whole DB) deploy [`postgres_exporter`](https://github.com/prometheus-community/postgres_exporter) on the prod box and import a community Grafana dashboard like ID 9628 or 12485 alongside.
+
+---
+
 ## Optional: Polaris Agent
 
 The Polaris Agent is a small Go binary you can install on Linux / macOS / Windows hosts that pushes monitoring samples back to Polaris over HTTPS. Useful for hosts behind NAT, hosts without a working SNMP/WinRM probe surface, and Windows / Linux endpoints generally. The feature is **optional** — Polaris monitors plenty of devices without it via the existing REST API / SNMP / WinRM / SSH / ICMP transports.
