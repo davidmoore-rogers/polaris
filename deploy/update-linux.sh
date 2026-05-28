@@ -94,6 +94,60 @@ sync_unit_files() {
   return 1
 }
 
+# Sync the shipped nginx config from $APP_DIR/deploy/nginx/polaris.conf to
+# /etc/nginx/conf.d/polaris.conf when proxy mode is active. Mirrors the
+# in-app updater's behavior in src/services/updateService.ts so manual + in-
+# app paths land the same end state. cmp-only-overwrite — no-op when the
+# shipped config is identical to what's installed. If `nginx -t` fails on
+# the staged config we LOG and skip the reload rather than fail the whole
+# update — existing nginx keeps running with the prior config. Operator
+# notices via journalctl -t polaris-updater.
+#
+# Returns 0 if a reload happened, 1 if no change OR proxy mode is off OR
+# nginx -t failed. set -e tolerated via `|| true` at call sites.
+sync_nginx_config() {
+  # Detect proxy mode from .env — same env-var Polaris reads at boot.
+  if ! grep -q '^POLARIS_PROXY_CERT_PATH=' "$APP_DIR/.env" 2>/dev/null; then
+    return 1  # not in proxy mode; nothing to do
+  fi
+  local src="$APP_DIR/deploy/nginx/polaris.conf"
+  local target="/etc/nginx/conf.d/polaris.conf"
+  if [[ ! -f "$src" ]]; then
+    return 1  # shipped config not present in this checkout (older release?)
+  fi
+  if [[ ! -f "$target" ]]; then
+    warn "Proxy mode is on but $target is missing — was migrate-to-nginx.sh ever run?"
+    return 1
+  fi
+  if cmp -s "$src" "$target"; then
+    return 1  # no change
+  fi
+  info "Shipped nginx config differs from $target — staging update"
+  # Stage to a sibling file, validate the WHOLE system nginx config including
+  # this staged file, then atomically rename into place. If validation fails,
+  # leave the running nginx config untouched.
+  local stage="$target.new"
+  cp -f "$src" "$stage"
+  # Temporarily swap the target with the stage to run `nginx -t` against the
+  # candidate. We can't have both files in /etc/nginx/conf.d at once (would
+  # double-bind 443). Backup the current, install the candidate, validate,
+  # then either commit (reload) or revert.
+  local backup="$target.bak.$(date +%s)"
+  cp -p "$target" "$backup"
+  mv -f "$stage" "$target"
+  if nginx -t >/dev/null 2>&1; then
+    info "nginx -t passed — reloading nginx"
+    rm -f "$backup"
+    systemctl reload nginx
+    return 0
+  else
+    warn "nginx -t FAILED on staged config — reverting to previous nginx config"
+    mv -f "$backup" "$target"
+    nginx -t >&2 || true  # surface the error to journalctl
+    return 1
+  fi
+}
+
 # ─── Preflight ────────────────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
   error "This script must be run as root"
@@ -183,6 +237,7 @@ rollback() {
   # /etc/systemd/system/ — sync the now-rolled-back deploy/ files back into
   # place so systemd reflects the rolled-back code/units pair.
   sync_unit_files || true
+  sync_nginx_config || true
 
   systemctl restart "$SYSTEMD_UNIT" 2>/dev/null
   info "Rolled back to v${OLD_VERSION} (${OLD_COMMIT})"
@@ -255,6 +310,12 @@ info "Migrations complete"
 step "8/9  Syncing systemd unit files..."
 
 sync_unit_files || info "No unit file changes to sync"
+
+# Sync the shipped nginx config in proxy mode. Runs BEFORE the polaris.target
+# restart so any new location blocks / proxy_set_header changes are live in
+# nginx by the time Polaris comes back up — avoids a brief window of 404s if
+# the new build expects a new nginx behavior.
+sync_nginx_config || info "No nginx config changes to sync (or not in proxy mode)"
 
 # Now restart the service with the synced units + new code.
 info "Starting $SYSTEMD_UNIT..."

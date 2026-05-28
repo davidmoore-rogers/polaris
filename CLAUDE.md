@@ -288,6 +288,15 @@ METRICS_TOKEN=
 POLARIS_METRICS_PORT=
 POLARIS_METRICS_BIND=
 
+# Reverse-proxy (nginx) front-end — opt-in. When POLARIS_PROXY_CERT_PATH is
+# set, Polaris listens HTTP-only on 127.0.0.1, the Node HTTPS listener never
+# binds, and Server Settings → Certificates shows the cert as externally
+# managed. POLARIS_PUBLIC_URL is REQUIRED in proxy mode (fail-fast at boot).
+# Cutover via deploy/migrate-to-nginx.sh. See deploy/nginx/polaris.conf for
+# the reference HTTP/2 + HTTP/3 nginx config.
+POLARIS_PROXY_CERT_PATH=
+POLARIS_PUBLIC_URL=
+
 # TimescaleDB chunk compression window (days). Default 7. 0 disables.
 TIMESCALE_COMPRESS_AFTER_DAYS=7
 
@@ -306,7 +315,15 @@ Copy `.env.example` to `.env` before running.
 
 The production instance is updated via the **in-app update mechanism** in **Server Settings → Maintenance**. When pushing changes, the user applies the update through that UI rather than manually redeploying. Keep this in mind when giving deployment advice — do not suggest `git pull` or manual restart steps unless asked.
 
-On the multi-process (split-role) systemd layout, `restartService()` in [src/services/updateService.ts](src/services/updateService.ts) does more than restart: before kicking `polaris.target`, the transient unit it spawns also syncs every shipped `deploy/polaris-*.service` + `polaris.target` into `/etc/systemd/system/` (cmp-only, no-op when unchanged) and runs `systemctl daemon-reload`. So unit-file changes shipped in a Polaris update (new `Environment=` on a worker role, new hardening directive, etc.) take effect on the next in-app update with zero operator intervention. **Operator unit customization must live in `<unit>.d/*.conf` drop-ins** — direct edits to the main unit file in `/etc/systemd/system/` get clobbered by the sync (a `journalctl -t polaris-updater` line records each sync). Single-process (`polaris.service`) installs don't go through this path; they restart via plain `process.exit(1)` and rely on systemd's `Restart=on-failure`.
+On the multi-process (split-role) systemd layout, `restartService()` in [src/services/updateService.ts](src/services/updateService.ts) does more than restart: before kicking `polaris.target`, the transient unit it spawns also syncs every shipped `deploy/polaris-*.service` + `polaris.target` into `/etc/systemd/system/` (cmp-only, no-op when unchanged) and runs `systemctl daemon-reload`. When proxy mode is active (`POLARIS_PROXY_CERT_PATH` set in env), the same transient unit ALSO syncs `deploy/nginx/polaris.conf` into `/etc/nginx/conf.d/polaris.conf`, validates with `nginx -t`, and reloads nginx — before the polaris.target restart so any new location blocks are live by the time Polaris comes back up. So unit-file AND nginx-config changes shipped in a Polaris update take effect on the next in-app update with zero operator intervention. **Operator unit customization must live in `<unit>.d/*.conf` drop-ins** — direct edits to the main unit file in `/etc/systemd/system/` (or to `/etc/nginx/conf.d/polaris.conf` itself) get clobbered by the sync (a `journalctl -t polaris-updater` line records each sync). Single-process (`polaris.service`) installs don't go through this path; they restart via plain `process.exit(1)` and rely on systemd's `Restart=on-failure`.
+
+### Reverse-proxy (nginx) front-end — opt-in
+
+Phase 1 of the multi-phase plan to move TLS termination out of Node and into an external nginx reverse proxy. Activated by setting `POLARIS_PROXY_CERT_PATH=/etc/polaris-nginx/cert.pem` (+ `POLARIS_PUBLIC_URL=https://polaris.example.com`) in `/opt/polaris/.env`. When set: Polaris listens HTTP-only on `127.0.0.1:${PORT:-3000}` (web role), the Node HTTPS listener never binds, `TRUST_PROXY` auto-defaults to `"1"` (first-hop trust) so `req.ip`/`req.secure` honor nginx's `X-Forwarded-*` headers, and Server Settings → Certificates renders an informational pane with the cert's fingerprint + SANs + expiry instead of the upload/generate controls. CA records (`category="ca"`) remain operator-editable because outbound TLS to integrations (LDAP, SMTP) still uses them.
+
+The Polaris Agent's leaf-cert pinning works unchanged: `getServerCertFingerprint()` in [src/services/certInfo.ts](src/services/certInfo.ts) reads from `POLARIS_PROXY_CERT_PATH` and computes the same fingerprint nginx serves. Existing agents continue to pin and enroll as long as the same cert is handed over to nginx (which `deploy/migrate-to-nginx.sh` does). The first cert renewal AFTER cutover requires either re-installing all existing agents or shipping dual-pin / CA-pin support (deferred to Phase 2) — don't rotate the cert in the first few weeks post-cutover.
+
+Cutover is operator-driven via `deploy/migrate-to-nginx.sh --public-url https://polaris.example.com --prometheus-ip 10.0.0.42`. The script: ensures nginx ≥ 1.25 (HTTP/3 stable; falls back to nginx.org mainline repo), extracts the active server cert+key from `Setting.certificates`, stages + validates the nginx config (with HTTP/2 + HTTP/3 listeners both on 443), writes `/etc/polaris-nginx/{cert,key}.pem` with `0640 root:nginx` + SELinux `httpd_sys_content_t`, appends env vars to `.env` (with backup), installs the polaris-web systemd drop-in, opens TCP+UDP/443 in firewalld, restarts polaris.target, smoke-tests Alt-Svc + UDP listener + bearer-gated `/metrics-monitor-1`. Idempotent; transactional (rollback at any gate). Rollback after success: `migrate-to-nginx.sh --rollback`. See [docs/INSTALL.md](docs/INSTALL.md) for the operator-facing walkthrough.
 
 Fresh installs are documented in `docs/INSTALL.md` with three platform sections (RHEL/Rocky/AlmaLinux 9, Ubuntu/Debian, Windows Server). The disk-sizing table at the top of that file is the single source of truth for DB-volume / app-volume / `/var/log` minimums and recommendations — keep it in sync whenever the runtime workload (sample-table cadences, retention defaults, update-staging cost) changes meaningfully. The setup wizard's preflight check uses `RECOMMENDED_DB_FREE_GB = 50` as the threshold for the warning banner; bump that constant in `src/setup/setupRoutes.ts` if the recommended minimum changes and update the docs table to match.
 

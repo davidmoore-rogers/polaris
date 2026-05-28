@@ -614,9 +614,39 @@ export function restartService() {
     // Chained with && so a failed cp or daemon-reload aborts the restart
     // and leaves the system running the old code/units pair (the rollback
     // path knows how to repair from there).
-    logger.info("Syncing unit files and restarting polaris.target (full group) for update...");
+    // Proxy mode: in addition to the systemd unit-file sync, also stage +
+    // validate any updated nginx config from deploy/nginx/polaris.conf into
+    // /etc/nginx/conf.d/polaris.conf, then reload nginx BEFORE the target
+    // restart. Order matters: if Polaris restarts first and the new build
+    // expects a new nginx behavior (new location block etc.), there'd be a
+    // brief window of 404s. Failure mode: if nginx -t rejects the staged
+    // config, we LOG and skip the reload (existing nginx config keeps
+    // running) rather than fail the whole restart. Mirrors
+    // deploy/update-linux.sh:sync_nginx_config() so manual + in-app paths
+    // land the same end state.
+    const proxyMode = Boolean(process.env.POLARIS_PROXY_CERT_PATH);
+    const nginxSync = proxyMode ? [
+      `if [ -f ${APP_DIR}/deploy/nginx/polaris.conf ] && [ -f /etc/nginx/conf.d/polaris.conf ] && ! cmp -s ${APP_DIR}/deploy/nginx/polaris.conf /etc/nginx/conf.d/polaris.conf; then`,
+      `  cp -p /etc/nginx/conf.d/polaris.conf /etc/nginx/conf.d/polaris.conf.bak.$(date +%s)`,
+      `  cp -f ${APP_DIR}/deploy/nginx/polaris.conf /etc/nginx/conf.d/polaris.conf.new`,
+      `  mv -f /etc/nginx/conf.d/polaris.conf.new /etc/nginx/conf.d/polaris.conf`,
+      `  if nginx -t >/dev/null 2>&1; then`,
+      `    systemctl reload nginx && logger -t polaris-updater "Synced nginx config and reloaded"`,
+      `  else`,
+      `    logger -t polaris-updater "ERROR: nginx -t failed on staged config; reverting to previous nginx config"`,
+      `    latest_bak=$(ls -1t /etc/nginx/conf.d/polaris.conf.bak.* 2>/dev/null | head -1)`,
+      `    [ -n "$latest_bak" ] && cp -f "$latest_bak" /etc/nginx/conf.d/polaris.conf`,
+      `  fi`,
+      `fi`,
+    ].join("\n") : "";
+
+    logger.info(
+      { proxyMode },
+      "Syncing unit files (and nginx config in proxy mode) and restarting polaris.target for update...",
+    );
     const syncScript = [
       "set -e",
+      nginxSync,
       `for f in ${APP_DIR}/deploy/polaris-web.service ${APP_DIR}/deploy/polaris-monitor@.service ${APP_DIR}/deploy/polaris-discovery.service ${APP_DIR}/deploy/polaris-migrate.service ${APP_DIR}/deploy/polaris.target; do`,
       `  name="$(basename "$f")"`,
       `  target="/etc/systemd/system/$name"`,
@@ -627,7 +657,7 @@ export function restartService() {
       `done`,
       `systemctl daemon-reload`,
       `systemctl restart polaris.target`,
-    ].join("\n");
+    ].filter(Boolean).join("\n");
     try {
       const child = spawn("systemd-run", ["--no-block", "/bin/sh", "-c", syncScript], {
         detached: true,

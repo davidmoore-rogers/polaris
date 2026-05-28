@@ -70,7 +70,51 @@ scrape_configs:
 
 The same `METRICS_TOKEN` from `.env` gates every role endpoint. If Prometheus runs on a different host from the workers, set `POLARIS_METRICS_BIND=0.0.0.0` per-process and adjust the target addresses; the units pin `127.0.0.1` by default so the metrics endpoint isn't world-reachable.
 
-**Docker Compose.** The shipped `docker-compose.yml` already wires `POLARIS_METRICS_PORT=9101` on the `monitor` service and `9110` on `discovery`, both bound `0.0.0.0` (per-container — replicas share the port because each has its own network namespace). Prometheus running on the same Docker network reaches them by container name:
+### Behind nginx (Phase 1 nginx-front mode — recommended for off-host Prometheus)
+
+If you've run `deploy/migrate-to-nginx.sh` (see [docs/INSTALL.md](../INSTALL.md#optional-nginx-front-end-opt-in-https-termination-move)), nginx terminates TLS on 443 and path-routes the four metrics endpoints to the localhost-bound listeners. This is the **cleanest setup for off-host Prometheus**: one bearer-over-TLS scrape job per role, all targeting the same `polaris.example.com:443`, no firewall rules for 9101/9102/9110, no plain-HTTP bearer travel.
+
+```yaml
+scrape_configs:
+  - job_name: polaris-web
+    scheme: https
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['polaris.example.com:443']
+    bearer_token: '<METRICS_TOKEN>'
+
+  - job_name: polaris-monitor
+    scheme: https
+    metrics_path: /metrics-monitor-1
+    static_configs:
+      - targets: ['polaris.example.com:443']
+        labels: { polaris_role: monitor, polaris_instance: "1" }
+    bearer_token: '<METRICS_TOKEN>'
+
+  # Per-instance jobs because the nginx config has one location per replica.
+  # Add more (/metrics-monitor-2, etc.) for additional polaris-monitor@N units.
+  - job_name: polaris-monitor-2
+    scheme: https
+    metrics_path: /metrics-monitor-2
+    static_configs:
+      - targets: ['polaris.example.com:443']
+        labels: { polaris_role: monitor, polaris_instance: "2" }
+    bearer_token: '<METRICS_TOKEN>'
+
+  - job_name: polaris-discovery
+    scheme: https
+    metrics_path: /metrics-discovery
+    static_configs:
+      - targets: ['polaris.example.com:443']
+        labels: { polaris_role: discovery }
+    bearer_token: '<METRICS_TOKEN>'
+```
+
+The reference nginx config (`deploy/nginx/polaris.conf`) already IP-allowlists each `/metrics-*` location to the Prometheus host (`allow <PROMETHEUS_IP>; deny all;`) so even without the bearer there's no public read-access. HTTP/3 is advertised via `Alt-Svc`; Prometheus itself uses HTTP/2 over TCP, so the QUIC listener isn't on the scrape path.
+
+### Docker Compose
+
+The shipped `docker-compose.yml` already wires `POLARIS_METRICS_PORT=9101` on the `monitor` service and `9110` on `discovery`, both bound `0.0.0.0` (per-container — replicas share the port because each has its own network namespace). Prometheus running on the same Docker network reaches them by container name:
 
 ```yaml
 scrape_configs:

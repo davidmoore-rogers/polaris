@@ -42,7 +42,8 @@ import { getCredential } from "./credentialService.js";
 import { mintEnrollmentToken } from "./agentTokenService.js";
 import { logEvent } from "../api/routes/events.js";
 import { winrmRunOne, type WinRmConnection } from "../utils/winrm.js";
-import { getHttpsPort, getServerCertHostnames } from "../httpsManager.js";
+import { getHttpsPort } from "../httpsRuntime.js";
+import { getServerCertHostnames } from "./certInfo.js";
 
 // ─── Public entry points ──────────────────────────────────────────────
 

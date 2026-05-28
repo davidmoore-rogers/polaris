@@ -1,36 +1,54 @@
 /**
- * src/httpsManager.ts — Manages the HTTPS server lifecycle
+ * src/httpsRuntime.ts — owns the Node HTTPS listener and its hot-rotation.
  *
- * Call `initHttps(app)` once at startup. Call `applyHttps()` whenever
- * HTTPS settings or certificates change — it will start, restart, or
- * stop the HTTPS listener as needed.
+ * This file is the LISTENER half of the former `httpsManager.ts`. The
+ * cert-reading + parsing + caching half lives in `services/certInfo.ts` so
+ * Phase 4's listener removal can be a clean delete without taking the
+ * fingerprint reader with it.
+ *
+ * Proxy-mode behavior (POLARIS_PROXY_CERT_PATH set):
+ *   - `initHttps()` returns immediately — no listener binds.
+ *   - `applyHttps()` returns an "externally managed" result without doing work.
+ *   - `stopHttps()` is a no-op.
+ *   - `httpsRedirectMiddleware` passes through (nginx handles HTTP→HTTPS).
+ *   - `isHttpsRunning()` returns `true` — HTTPS reachability IS real; we
+ *     just aren't the process terminating it. Callers that meant "is Polaris
+ *     reachable over HTTPS?" keep working unchanged. Callers that meant "is
+ *     Node owning the listener?" must use `isHttpsExternallyManaged()`.
+ *   - `getHttpsPort()` returns the port parsed from `POLARIS_PUBLIC_URL`
+ *     (defaulting to 443 if no explicit port). This preserves the contract
+ *     for `agentInstallService.inferOwnServerUrl()` etc.
  */
 
 import https from "node:https";
-import { constants as tlsConstants, createHash, X509Certificate } from "node:crypto";
+import { constants as tlsConstants } from "node:crypto";
 import type { Express, Request, Response, NextFunction } from "express";
 import { getHttpsSettings, resolveHttpsCertificates } from "./services/serverSettingsService.js";
+import { setRuntimeCertPem, clearRuntimeCertPem } from "./services/certInfo.js";
+import { isProxyMode } from "./utils/proxyMode.js";
 import { logger } from "./utils/logger.js";
 
 let httpsServer: https.Server | null = null;
 let expressApp: Express | null = null;
 let redirectEnabled = false;
 let httpsPort = 3443;
-// Cached leaf cert from the currently-active TLS context, kept in sync via
-// applyHttps(). Powers `getServerCertFingerprint()` for Polaris Agent
-// install-time cert pinning. Cleared whenever HTTPS stops.
-let currentCertPem: string | Buffer | null = null;
 
 export function initHttps(app: Express): void {
+  if (isProxyMode()) {
+    // nginx terminates TLS — Polaris listens HTTP-only. Nothing to do here.
+    return;
+  }
   expressApp = app;
   applyHttps();
 }
 
 /**
- * Express middleware — mount early in index.ts.
+ * Express middleware — mount early in app.ts.
  * When redirect is enabled and HTTPS is running, redirects HTTP → HTTPS.
+ * In proxy mode this is a no-op: nginx owns HTTP→HTTPS redirection.
  */
 export function httpsRedirectMiddleware(req: Request, res: Response, next: NextFunction): void {
+  if (isProxyMode()) return next();
   if (!redirectEnabled || !httpsServer?.listening) return next();
   // Already HTTPS (behind a proxy or direct)
   if (req.secure || req.headers["x-forwarded-proto"] === "https") return next();
@@ -42,25 +60,32 @@ export function httpsRedirectMiddleware(req: Request, res: Response, next: NextF
 }
 
 export async function applyHttps(): Promise<{ ok: boolean; message: string }> {
+  if (isProxyMode()) {
+    return {
+      ok: false,
+      message: "Polaris is fronted by an external proxy; cert is managed externally (POLARIS_PROXY_CERT_PATH)",
+    };
+  }
+
   const settings = await getHttpsSettings();
   httpsPort = settings.port;
 
   if (!settings.enabled) {
     redirectEnabled = false;
-    currentCertPem = null;
+    clearRuntimeCertPem();
     await stopHttps();
     return { ok: true, message: "HTTPS disabled" };
   }
 
   const tlsData = await resolveHttpsCertificates();
   if (!tlsData) {
-    currentCertPem = null;
+    clearRuntimeCertPem();
     await stopHttps();
     return { ok: false, message: "HTTPS enabled but certificate or key is missing" };
   }
-  // Cache the leaf cert so getServerCertFingerprint() can hash it without
-  // reaching into the Node TLS internals.
-  currentCertPem = tlsData.cert;
+  // Hand the leaf cert PEM to certInfo so getServerCertFingerprint() etc. can
+  // hash it without reaching into Node's TLS internals.
+  setRuntimeCertPem(tlsData.cert);
 
   const opts: https.ServerOptions = {
     cert: tlsData.cert,
@@ -154,7 +179,7 @@ function startHttps(
 
 async function stopHttps(): Promise<void> {
   if (!httpsServer) return;
-  currentCertPem = null;
+  clearRuntimeCertPem();
   return new Promise((resolve) => {
     httpsServer!.close(() => {
       logger.info("HTTPS server stopped");
@@ -170,95 +195,47 @@ async function stopHttps(): Promise<void> {
   });
 }
 
+/**
+ * "Is Polaris reachable over HTTPS?" — true in proxy mode (nginx terminates,
+ * agents pin nginx's cert) and true when Node owns the listener and it's
+ * actively listening. Callers that semantically meant "does Node own the
+ * HTTPS listener?" must use {@link isHttpsExternallyManaged} instead.
+ */
 export function isHttpsRunning(): boolean {
+  if (isProxyMode()) return true;
   return httpsServer !== null && httpsServer.listening;
 }
 
 /**
- * SHA-256 fingerprint of the running Polaris HTTPS leaf cert, as
- * `sha256:<lowercase-hex>`. Baked into each agent's `agent.conf` at
- * install time so the agent can pin Polaris's cert directly and skip
- * the system CA trust chain entirely (defends against CA-compromise /
- * MITM scenarios). The agent's Go TLS client uses this as a custom
- * VerifyPeerCertificate; `/api/v1/agents/enroll` cross-checks the
- * fingerprint the agent reports it observed against this value.
- *
- * Returns null when HTTPS is not running (e.g. dev installs serving over
- * plain HTTP); the install flow rejects agent installs in that mode
- * because there's no cert to pin and no encrypted transport.
+ * Companion to {@link isHttpsRunning}. Returns `true` ONLY in proxy mode,
+ * signalling that TLS termination is owned by an external reverse proxy.
+ * Use this when the answer to "should Polaris try to mutate cert state?"
+ * matters — cert upload, hot-rotate, listener-restart paths must NOT do
+ * any work when this returns true.
  */
-export function getServerCertFingerprint(): string | null {
-  if (!httpsServer || !httpsServer.listening) return null;
-  if (!currentCertPem) return null;
-  try {
-    const x509 = new X509Certificate(currentCertPem);
-    const hex = createHash("sha256").update(x509.raw).digest("hex");
-    return `sha256:${hex}`;
-  } catch (err) {
-    logger.warn({ err }, "Failed to compute server cert fingerprint");
-    return null;
-  }
+export function isHttpsExternallyManaged(): boolean {
+  return isProxyMode();
 }
 
 /**
- * Current HTTPS listen port — what URL operators tell their reverse proxy
- * to forward to, AND the natural port to embed in `agent.conf`'s
- * server_url when the operator hasn't set POLARIS_PUBLIC_URL. Returns
- * null when HTTPS isn't running (in which case agent install is refused
- * upstream anyway — no cert pin available).
+ * Current HTTPS-reachable port. In Node-HTTPS mode this is whatever port
+ * the listener is bound to. In proxy mode it's parsed from POLARIS_PUBLIC_URL
+ * (defaulting to 443 if no explicit port), which is the port nginx exposes —
+ * that's the right answer for agentInstallService.inferOwnServerUrl() etc.
+ * which want a port to embed in agent.conf's server_url.
  */
 export function getHttpsPort(): number | null {
+  if (isProxyMode()) {
+    const raw = process.env.POLARIS_PUBLIC_URL;
+    if (!raw) return null; // validateRuntimeConfiguration() prevents this at boot
+    try {
+      const u = new URL(raw);
+      if (u.port) return Number(u.port);
+      return u.protocol === "https:" ? 443 : 80;
+    } catch {
+      return null;
+    }
+  }
   if (!httpsServer || !httpsServer.listening) return null;
   return httpsPort;
-}
-
-/**
- * Hostnames the running leaf cert is valid for: the cert's Common Name
- * plus every DNS-type Subject Alternative Name plus IP-type SANs as
- * literal addresses. The agent's TLS verifier ignores hostname matching
- * entirely (it only checks the fingerprint pin), so we're free to pick
- * any name here — but picking one the cert actually claims keeps the
- * agent.conf legible and makes it possible for the operator to verify
- * the URL by inspecting the cert.
- *
- * Returns null when HTTPS isn't running OR the cert is malformed.
- * Returns an empty object when the cert has neither CN nor SANs (which
- * shouldn't happen for any sane operator-generated cert).
- *
- * Used by agentInstallService.inferOwnServerUrl() to derive a default
- * server URL from the live cert when neither POLARIS_PUBLIC_URL nor
- * POLARIS_PUBLIC_HOST is set.
- */
-export function getServerCertHostnames(): { cn: string | null; dnsSans: string[]; ipSans: string[] } | null {
-  if (!httpsServer || !httpsServer.listening) return null;
-  if (!currentCertPem) return null;
-  try {
-    const x509 = new X509Certificate(currentCertPem);
-    // Subject is a multi-line "CN=foo\nO=bar\n…" string in Node 22. The
-    // CN line is the conventional first DN component for TLS but not
-    // strictly required to be — we scan all lines for safety.
-    let cn: string | null = null;
-    for (const line of (x509.subject ?? "").split(/[\r\n]+/)) {
-      const m = line.match(/^CN=(.+)$/);
-      if (m) { cn = m[1].trim(); break; }
-    }
-    // subjectAltName is a comma-separated string like
-    //   "DNS:polaris.example.com, DNS:polaris-internal.local, IP Address:192.168.1.50"
-    // Older Node versions emit "IP Address" with the space; newer emit
-    // "IP" without. We handle both.
-    const dnsSans: string[] = [];
-    const ipSans: string[] = [];
-    for (const raw of (x509.subjectAltName ?? "").split(",")) {
-      const piece = raw.trim();
-      if (!piece) continue;
-      const dnsMatch = piece.match(/^DNS:(.+)$/);
-      if (dnsMatch) { dnsSans.push(dnsMatch[1].trim()); continue; }
-      const ipMatch = piece.match(/^IP(?:\s+Address)?:(.+)$/);
-      if (ipMatch) { ipSans.push(ipMatch[1].trim()); continue; }
-    }
-    return { cn, dnsSans, ipSans };
-  } catch (err) {
-    logger.warn({ err }, "Failed to extract cert hostnames");
-    return null;
-  }
 }
