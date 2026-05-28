@@ -28,17 +28,42 @@ import (
 const Prefix = "sha256:"
 
 // VerifyPeerCertificate builds a custom callback that compares the
-// presented leaf certificate's SHA-256 against `expected`. Plug into
-// tls.Config.VerifyPeerCertificate.
+// presented leaf certificate's SHA-256 against ANY pin in `expected`.
+// Plug into tls.Config.VerifyPeerCertificate.
+//
+// Dual-pin semantics: the agent accepts the cert if its fingerprint matches
+// any element of the set. Operators stage a new pin (server-side via the
+// Maintenance card → /config push) BEFORE rotating the server cert; the
+// agent's TLS handshakes continue working through the rotation window
+// because both old and new pins are trusted. Once every agent has heartbeated
+// post-rotation, the operator drops the old pin from the set and the agent
+// re-narrows to single-pin trust again.
 //
 // We also leave tls.Config.InsecureSkipVerify=true so the standard chain
 // check (which is what consults system roots) is skipped — pin verification
 // is the only check that fires.
-func VerifyPeerCertificate(expected string) func([][]byte, [][]*x509.Certificate) error {
-	expected = strings.ToLower(strings.TrimSpace(expected))
+func VerifyPeerCertificate(expected []string) func([][]byte, [][]*x509.Certificate) error {
+	// Normalize the set once per TLS dialer creation — case + whitespace +
+	// drop empties. The hot path on every handshake then just iterates a
+	// pre-cleaned slice and compares.
+	normalized := make([]string, 0, len(expected))
+	for _, p := range expected {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		if !strings.HasPrefix(p, Prefix) {
+			// Don't return an error from this constructor — Go's TLS stack
+			// calls VerifyPeerCertificate per-handshake and won't surface
+			// constructor errors anyway. Skip the malformed entry; the
+			// handshake will fail with "mismatch" if every entry was bad.
+			continue
+		}
+		normalized = append(normalized, p)
+	}
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		if !strings.HasPrefix(expected, Prefix) {
-			return fmt.Errorf("invalid pin format %q — must start with %q", expected, Prefix)
+		if len(normalized) == 0 {
+			return errors.New("no valid cert pins configured")
 		}
 		if len(rawCerts) == 0 {
 			return errors.New("no peer certificate presented")
@@ -46,22 +71,25 @@ func VerifyPeerCertificate(expected string) func([][]byte, [][]*x509.Certificate
 		// Leaf cert is rawCerts[0] (the standard order on a TLS handshake).
 		sum := sha256.Sum256(rawCerts[0])
 		got := Prefix + hex.EncodeToString(sum[:])
-		if got != expected {
-			return fmt.Errorf("cert pin mismatch — expected %s, got %s", expected, got)
+		for _, p := range normalized {
+			if got == p {
+				return nil
+			}
 		}
-		return nil
+		return fmt.Errorf("cert pin mismatch — got %s, expected one of [%s]", got, strings.Join(normalized, ", "))
 	}
 }
 
-// TLSConfig returns a *tls.Config wired to pin against `expectedFingerprint`.
-// Caller injects this into http.Transport or websocket.Dialer.
-func TLSConfig(expectedFingerprint string) *tls.Config {
+// TLSConfig returns a *tls.Config wired to pin against ANY fingerprint in
+// `expectedFingerprints`. Caller injects this into http.Transport or
+// websocket.Dialer. Single-pin callers pass a one-element slice.
+func TLSConfig(expectedFingerprints []string) *tls.Config {
 	return &tls.Config{
 		// We skip the standard chain check entirely; the pin is sufficient.
 		// VerifyPeerCertificate still fires either way (Go's TLS stack always
 		// calls it when set, regardless of InsecureSkipVerify).
 		InsecureSkipVerify:    true, //nolint:gosec // pin verification replaces it
-		VerifyPeerCertificate: VerifyPeerCertificate(expectedFingerprint),
+		VerifyPeerCertificate: VerifyPeerCertificate(expectedFingerprints),
 		MinVersion:            tls.VersionTLS12,
 	}
 }

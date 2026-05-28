@@ -72,15 +72,23 @@ agentsEnrollRouter.post("/", async (req, res, next) => {
     const consumed = await consumeEnrollmentToken(body.enrollmentToken);
     const { managedAgent, bearer } = consumed;
 
-    // Cross-check the pin. The agent reports the fingerprint it observed
-    // during the TLS handshake; if it doesn't match what we stored at
-    // install kickoff, something is intercepting the connection — refuse
-    // to issue the bearer. We've already consumed the enrollment token at
-    // this point (it's one-shot by design); the install is dead in this
-    // state and the operator must Reinstall to get a fresh enrollment.
-    const expectedPin = managedAgent.serverCertFingerprint.toLowerCase();
+    // Cross-check the pin against the SET of allowed fingerprints. Phase 2
+    // dual-pin: the canonical `serverCertFingerprint` is what was captured
+    // at install kickoff; `additionalServerCertFingerprints` is the staged
+    // pins an operator added for zero-downtime rotation. The agent reports
+    // the fingerprint it observed during the TLS handshake; we accept it if
+    // it matches ANY pin in the union. Mismatch on every pin means
+    // something is intercepting the connection (or the operator hasn't yet
+    // staged the cert nginx is serving) — refuse to issue the bearer.
+    // We've already consumed the enrollment token (it's one-shot); the
+    // install is dead in this state and the operator must Reinstall to
+    // get a fresh enrollment.
+    const expectedPins = [
+      managedAgent.serverCertFingerprint,
+      ...managedAgent.additionalServerCertFingerprints,
+    ].map((p) => p.toLowerCase());
     const observedPin = body.serverCertFingerprintSeen.toLowerCase();
-    if (expectedPin !== observedPin) {
+    if (!expectedPins.includes(observedPin)) {
       // The transaction in consumeEnrollmentToken already minted a bearer
       // we now need to revoke. Mark the install as failed so the operator
       // sees a clear error in the UI.
@@ -88,7 +96,7 @@ agentsEnrollRouter.post("/", async (req, res, next) => {
         where: { id: managedAgent.id },
         data: {
           installStatus: "failed",
-          installError:  `Cert pin mismatch — expected ${expectedPin}, agent saw ${observedPin}`,
+          installError:  `Cert pin mismatch — expected one of [${expectedPins.join(", ")}], agent saw ${observedPin}`,
           bearerRevokedAt: new Date(),
         },
       });
@@ -98,7 +106,7 @@ agentsEnrollRouter.post("/", async (req, res, next) => {
         resourceId:   managedAgent.assetId,
         level:        "error",
         message:      "Agent enrollment rejected: TLS cert pin mismatch",
-        details:      { expectedPin, observedPin, managedAgentId: managedAgent.id },
+        details:      { expectedPins, observedPin, managedAgentId: managedAgent.id },
       });
       throw new AppError(400, "Server cert fingerprint mismatch — refusing enrollment");
     }
@@ -375,6 +383,22 @@ agentsRouter.get("/config", async (req, res, next) => {
       discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
     });
 
+    // Phase 2 dual-pin: ship the current pin set so the agent updates
+    // agent.conf when an operator stages a new pin. The agent re-saves
+    // agent.conf if `certFingerprints` diverges from what's on disk —
+    // next TLS handshake then trusts the new cert too. Steady state:
+    // additionalServerCertFingerprints is empty and certFingerprints is a
+    // single-element list equal to the canonical pin, so the agent
+    // detects no change. ETag below covers this field so a config-only
+    // pin change still invalidates the 304 cache.
+    const managedAgent = await prisma.managedAgent.findUnique({
+      where: { id: req.managedAgent!.managedAgentId },
+      select: { serverCertFingerprint: true, additionalServerCertFingerprints: true },
+    });
+    const certFingerprints = managedAgent
+      ? [managedAgent.serverCertFingerprint, ...managedAgent.additionalServerCertFingerprints]
+      : [];
+
     const payload = {
       streams: {
         responseTime: {
@@ -406,6 +430,7 @@ agentsRouter.get("/config", async (req, res, next) => {
         },
       },
       monitored: asset.monitored,
+      certFingerprints,
     };
     const etag = computeEtag(payload);
 

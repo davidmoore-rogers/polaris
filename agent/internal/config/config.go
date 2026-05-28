@@ -11,11 +11,18 @@
 //
 // Wire shape (intentionally tiny — no nested sections, no quoting rules):
 //
-//	server_url       = https://polaris.example.com:3000
-//	cert_fingerprint = sha256:ab12cd34...
-//	bearer_token     = polaris_xK9rT2pQwL3mNs7v...
-//	agent_id         = 7f2e9a1c-... (optional, used in WS subprotocol)
-//	enrollment_token = polaris_... (present until first /enroll succeeds; then removed by the agent)
+//	server_url        = https://polaris.example.com:3000
+//	cert_fingerprint  = sha256:ab12cd34...                       (legacy, single-pin)
+//	cert_fingerprints = sha256:ab12cd34...,sha256:ef56gh78...    (Phase 2 dual-pin set)
+//	bearer_token      = polaris_xK9rT2pQwL3mNs7v...
+//	agent_id          = 7f2e9a1c-... (optional, used in WS subprotocol)
+//	enrollment_token  = polaris_... (present until first /enroll succeeds; then removed)
+//
+// Pin set parsing: if `cert_fingerprints` is present, parse the
+// comma-separated list and that's the pin set. Otherwise fall back to
+// `cert_fingerprint` (single-pin agent.conf written by pre-Phase-2 installers).
+// On Save() we always write BOTH keys so a downgrade to a pre-Phase-2 agent
+// binary keeps working with the canonical pin.
 //
 // `bearer_token` is the long-lived bearer issued by /enroll. On a fresh
 // install only `enrollment_token` is present; on first run the agent posts
@@ -41,10 +48,16 @@ type Config struct {
 	path string // absolute path; not stored in the file itself
 
 	ServerURL       string
-	CertFingerprint string // "sha256:<lowercase-hex>"
-	AgentID         string
-	BearerToken     string
-	EnrollmentToken string
+	CertFingerprint string // "sha256:<lowercase-hex>" — canonical / legacy single pin
+	// Phase 2 dual-pin set. If non-empty, this REPLACES CertFingerprint for
+	// pin verification. Always contains CertFingerprint as the first element
+	// (canonical pin) plus any staged additional pins. Load() populates from
+	// `cert_fingerprints` line if present, else from `cert_fingerprint`
+	// (single-element). Save() writes both keys for downgrade safety.
+	CertFingerprints []string
+	AgentID          string
+	BearerToken      string
+	EnrollmentToken  string
 
 	// Optional knobs — leave empty for defaults.
 	ResponseTimeIntervalSec int
@@ -107,6 +120,15 @@ func Load(path string) (*Config, error) {
 			cfg.ServerURL = val
 		case "cert_fingerprint":
 			cfg.CertFingerprint = strings.ToLower(val)
+		case "cert_fingerprints":
+			// Comma-separated list. Lowercased + de-spaced per element.
+			// Empty elements skipped (trailing comma or "a,,b").
+			for _, p := range strings.Split(val, ",") {
+				p = strings.ToLower(strings.TrimSpace(p))
+				if p != "" {
+					cfg.CertFingerprints = append(cfg.CertFingerprints, p)
+				}
+			}
 		case "agent_id":
 			cfg.AgentID = val
 		case "bearer_token":
@@ -131,7 +153,66 @@ func Load(path string) (*Config, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	// Pin-set normalization. If the file had `cert_fingerprints` we already
+	// populated the slice; if it only had legacy `cert_fingerprint`, project
+	// that into the slice so callers always read CertFingerprints. Also
+	// guarantee CertFingerprint is filled (= the canonical / first pin) so
+	// the legacy single-pin code path keeps working alongside the set-aware
+	// one. Phase 2 dual-pin / [[prod-cert-rotation]].
+	if len(cfg.CertFingerprints) == 0 && cfg.CertFingerprint != "" {
+		cfg.CertFingerprints = []string{cfg.CertFingerprint}
+	} else if len(cfg.CertFingerprints) > 0 && cfg.CertFingerprint == "" {
+		cfg.CertFingerprint = cfg.CertFingerprints[0]
+	}
 	return cfg, nil
+}
+
+// Pins returns the active set of acceptable leaf-cert SHA-256 fingerprints.
+// Always non-empty after Load() succeeds (Validate() rejects an empty set).
+// Use this from TLS verification and config-diff checks.
+func (c *Config) Pins() []string {
+	if len(c.CertFingerprints) > 0 {
+		return c.CertFingerprints
+	}
+	if c.CertFingerprint != "" {
+		return []string{c.CertFingerprint}
+	}
+	return nil
+}
+
+// SetPins replaces the pin set. Keeps CertFingerprint synced to the first
+// element (canonical) so legacy single-pin readers stay consistent. A
+// no-op when the new set is byte-identical to the current set — caller
+// (transport.client) uses this to detect "config push didn't change pins"
+// and skip the Save().
+func (c *Config) SetPins(pins []string) bool {
+	if equalLowerSlice(c.CertFingerprints, pins) {
+		return false
+	}
+	normalized := make([]string, 0, len(pins))
+	for _, p := range pins {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p != "" {
+			normalized = append(normalized, p)
+		}
+	}
+	c.CertFingerprints = normalized
+	if len(normalized) > 0 {
+		c.CertFingerprint = normalized[0]
+	}
+	return true
+}
+
+func equalLowerSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if strings.ToLower(strings.TrimSpace(a[i])) != strings.ToLower(strings.TrimSpace(b[i])) {
+			return false
+		}
+	}
+	return true
 }
 
 // Save rewrites the config file with the current in-memory values.
@@ -148,8 +229,16 @@ func (c *Config) Save() error {
 	w := bufio.NewWriter(tmp)
 	fmt.Fprintln(w, "# Polaris Agent configuration. Managed by agentInstallService at install")
 	fmt.Fprintln(w, "# time and rewritten by the agent on enrollment. Do not edit by hand.")
-	fmt.Fprintf(w, "server_url       = %s\n", c.ServerURL)
-	fmt.Fprintf(w, "cert_fingerprint = %s\n", c.CertFingerprint)
+	fmt.Fprintf(w, "server_url        = %s\n", c.ServerURL)
+	// Always write BOTH keys. Pre-Phase-2 agent binaries only read
+	// `cert_fingerprint`, so an operator-driven downgrade keeps the
+	// canonical pin. Phase 2 binaries prefer `cert_fingerprints` (full set).
+	fmt.Fprintf(w, "cert_fingerprint  = %s\n", c.CertFingerprint)
+	pins := c.CertFingerprints
+	if len(pins) == 0 && c.CertFingerprint != "" {
+		pins = []string{c.CertFingerprint}
+	}
+	fmt.Fprintf(w, "cert_fingerprints = %s\n", strings.Join(pins, ","))
 	if c.AgentID != "" {
 		fmt.Fprintf(w, "agent_id         = %s\n", c.AgentID)
 	}

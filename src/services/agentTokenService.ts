@@ -80,6 +80,13 @@ export interface ConsumedEnrollment {
     osPlatform: string;
     arch: string;
     serverCertFingerprint: string;
+    /**
+     * Phase 2 dual-pin staged additional pins. Empty in steady state; populated
+     * when an operator stages a new pin for zero-downtime cert rotation. The
+     * enroll cross-check accepts EITHER the canonical fingerprint OR any
+     * fingerprint in this array.
+     */
+    additionalServerCertFingerprints: string[];
   };
 }
 
@@ -164,6 +171,7 @@ export async function consumeEnrollmentToken(
         osPlatform: row.osPlatform,
         arch: row.arch,
         serverCertFingerprint: row.serverCertFingerprint,
+        additionalServerCertFingerprints: row.additionalServerCertFingerprints,
       },
       bearer,
     };

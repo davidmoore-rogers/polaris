@@ -188,6 +188,15 @@
         'Fires once on server boot when the on-disk manifest lags the agent source. Disable for strict supply-chain controls.' +
       '</p>';
 
+    // Cert-pin rotation slot. Populated async by renderAgentCertPinRotation()
+    // after the main inventory renders — it queries the fleet-wide pin summary
+    // separately so a slow query doesn't block the rest of the card.
+    var certPinRotationSlot =
+      '<div id="agent-cert-pin-rotation" style="margin-top:0.75rem;padding-top:0.5rem;border-top:1px solid var(--color-border);font-size:0.85rem">' +
+        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Cert pin rotation</div>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 0.5rem 0">Loading pin set...</p>' +
+      '</div>';
+
     var installedSummarySlot = '<div id="agent-installed-summary"></div>';
 
     body.innerHTML =
@@ -207,7 +216,8 @@
       installedSummarySlot +
       cleanupLine +
       serverUrlRow +
-      autoBuildRow;
+      autoBuildRow +
+      certPinRotationSlot;
 
     var btn = document.getElementById("btn-agent-build");
     if (btn) btn.addEventListener("click", onAgentBuildClick);
@@ -287,6 +297,128 @@
         });
       });
     }).catch(function () { /* leave the slot empty */ });
+
+    // Cert pin rotation pane. Loaded async; failure leaves the slot showing
+    // a one-line error so operators know to refresh.
+    renderAgentCertPinRotation();
+  }
+
+  // Renders the Cert pin rotation pane in the slot reserved by
+  // renderAgentBuildInventory. Fetches /agents/cert-pins/summary, builds one
+  // row per distinct pin with canonical/staged counts and a Retire button,
+  // plus a "Stage a new pin" input + button. Phase 2 dual-pin / [[prod-cert-rotation]].
+  function renderAgentCertPinRotation() {
+    var slot = document.getElementById("agent-cert-pin-rotation");
+    if (!slot) return;
+    api.serverSettings.agentCertPinsSummary().then(function (s) {
+      var pins = s.pins || [];
+      var totalActive = s.totalActiveAgents || 0;
+      var rowsHtml = "";
+      if (totalActive === 0) {
+        rowsHtml =
+          '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.3rem 0 0.5rem">' +
+            'No active agents — staged or retired pins have nothing to apply against until an agent enrolls.' +
+          '</p>';
+      } else if (pins.length === 0) {
+        rowsHtml =
+          '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.3rem 0 0.5rem">' +
+            'No pins observed across the active fleet — unexpected; check journalctl on the web role.' +
+          '</p>';
+      } else {
+        rowsHtml =
+          '<table style="width:100%;border-collapse:collapse;margin:0.3rem 0 0.5rem;font-size:0.8rem">' +
+            '<thead><tr style="border-bottom:1px solid var(--color-border)">' +
+              '<th style="padding:3px 6px;text-align:left;font-weight:600;color:var(--color-text-secondary)">Pin (SHA-256)</th>' +
+              '<th style="padding:3px 6px;text-align:right;font-weight:600;color:var(--color-text-secondary)">Canonical</th>' +
+              '<th style="padding:3px 6px;text-align:right;font-weight:600;color:var(--color-text-secondary)">Staged</th>' +
+              '<th style="padding:3px 6px;text-align:right;font-weight:600;color:var(--color-text-secondary)"></th>' +
+            '</tr></thead><tbody>' +
+            pins.map(function (p) {
+              // Truncate the pin display — full sha256 is 71 chars including
+              // the "sha256:" prefix, too wide for the card.
+              var disp = (p.pin || "").slice(0, 19) + "..." + (p.pin || "").slice(-6);
+              return '<tr style="border-bottom:1px solid var(--color-border-light, var(--color-border))">' +
+                '<td style="padding:3px 6px;font-family:var(--font-mono, monospace);font-size:0.75rem" title="' + escapeHtml(p.pin) + '">' +
+                  escapeHtml(disp) +
+                '</td>' +
+                '<td style="padding:3px 6px;text-align:right">' + (p.canonical || 0) + '</td>' +
+                '<td style="padding:3px 6px;text-align:right">' + (p.staged || 0) + '</td>' +
+                '<td style="padding:3px 6px;text-align:right">' +
+                  '<button class="btn btn-sm btn-secondary" data-retire-pin="' + escapeHtml(p.pin) + '" style="padding:2px 8px;font-size:0.75rem">Retire</button>' +
+                '</td>' +
+              '</tr>';
+            }).join("") +
+          '</tbody></table>';
+      }
+
+      slot.innerHTML =
+        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Cert pin rotation</div>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 0.5rem 0">' +
+          'Stage a new pin BEFORE rotating the server cert; agents trust both old and new during the window. ' +
+          'After every agent has heartbeated post-rotation, retire the old pin. ' +
+          'Total active agents: <strong>' + totalActive + '</strong>' +
+        '</p>' +
+        rowsHtml +
+        '<div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.3rem">' +
+          '<input type="text" id="agent-cert-pin-stage-input" ' +
+            'placeholder="sha256:abc123...64hex" ' +
+            'style="flex:1;padding:5px 8px;font-family:var(--font-mono, monospace);font-size:0.8rem">' +
+          '<button class="btn btn-secondary" id="btn-agent-cert-pin-stage" style="padding:4px 14px;font-size:0.8rem">Stage</button>' +
+        '</div>' +
+        '<p style="font-size:0.75rem;color:var(--color-text-tertiary);margin:0.3rem 0 0">' +
+          'Each agent re-saves agent.conf + restarts via systemd on next /config tick when the pin set changes.' +
+        '</p>';
+
+      var stageBtn = document.getElementById("btn-agent-cert-pin-stage");
+      var stageIn  = document.getElementById("agent-cert-pin-stage-input");
+      if (stageBtn && stageIn) {
+        stageBtn.addEventListener("click", function () {
+          var pin = (stageIn.value || "").trim().toLowerCase();
+          if (!/^sha256:[0-9a-f]{64}$/.test(pin)) {
+            showToast("Pin must be sha256:<64 hex chars>", "error");
+            return;
+          }
+          stageBtn.disabled = true;
+          api.serverSettings.agentCertPinBulkAdd(pin).then(function (r) {
+            showToast("Staged pin on " + r.added + " agent(s) (" + r.alreadyPresent + " already had it)", "success");
+            stageIn.value = "";
+            renderAgentCertPinRotation();
+          }).catch(function (err) {
+            showToast("Stage failed: " + err.message, "error");
+          }).finally(function () {
+            stageBtn.disabled = false;
+          });
+        });
+      }
+
+      var retireBtns = slot.querySelectorAll("button[data-retire-pin]");
+      retireBtns.forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var pin = btn.getAttribute("data-retire-pin");
+          if (!pin) return;
+          var disp = pin.slice(0, 19) + "..." + pin.slice(-6);
+          if (!confirm("Retire pin " + disp + " from every active agent? Skipped on any agent where this would be the last pin.")) {
+            return;
+          }
+          btn.disabled = true;
+          api.serverSettings.agentCertPinBulkRemove(pin).then(function (r) {
+            var msg = "Retired pin from " + r.removed + " agent(s)";
+            if (r.lastPinSkipped > 0) msg += " (" + r.lastPinSkipped + " skipped: would have been last pin)";
+            showToast(msg, "success");
+            renderAgentCertPinRotation();
+          }).catch(function (err) {
+            showToast("Retire failed: " + err.message, "error");
+            btn.disabled = false;
+          });
+        });
+      });
+    }).catch(function (err) {
+      slot.innerHTML =
+        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Cert pin rotation</div>' +
+        '<p style="font-size:0.78rem;color:var(--color-warning);margin:0.3rem 0">' +
+          'Failed to load: ' + escapeHtml(err.message) +
+        '</p>';
+    });
   }
 
   function onAgentPruneClick() {

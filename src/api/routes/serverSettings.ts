@@ -4,6 +4,7 @@
 
 import { Router } from "express";
 import multer from "multer";
+import { z } from "zod";
 import { execSync, spawn } from "node:child_process";
 import { gzipSync, createGunzip } from "node:zlib";
 import {
@@ -1733,6 +1734,180 @@ router.put("/agents/server-url", async (req, res, next) => {
       effective: await inferOwnServerUrl(),
       derived:   inferOwnServerUrlSync(),
     });
+  } catch (err) { next(err); }
+});
+
+// ─── Agent cert-pin rotation (Phase 2 dual-pin) ────────────────────────────
+// Operators stage a new pin BEFORE rotating the server cert so the entire
+// agent fleet trusts both old + new pins during the rotation window. After
+// every agent heartbeats post-rotation, the operator retires the old pin to
+// re-narrow trust. The pin set lives on each ManagedAgent row across the
+// `serverCertFingerprint` (canonical / first) + `additionalServerCertFingerprints`
+// (staged) columns; the union is checked at enroll and pushed to agents via
+// /config. See cross-cutting/polaris-agent → "Cert pin rotation" in TOUCHES.md.
+
+const PinFingerprintSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/i, "fingerprint must be sha256:<64 hex chars>");
+
+const CertPinBulkAddSchema = z.object({
+  pin: PinFingerprintSchema,
+});
+
+const CertPinBulkRemoveSchema = z.object({
+  pin: PinFingerprintSchema,
+});
+
+/**
+ * Fleet-wide pin usage summary. Returns one entry per distinct pin observed
+ * across all active ManagedAgents with separate counts for "canonical" (first
+ * in the agent's pin list) and "staged" (in additionalServerCertFingerprints).
+ * Drives the Maintenance card's rotation pane — the UI uses these numbers to
+ * tell operators when it's safe to retire an old pin (no agent has it as its
+ * only canonical with no staged replacement).
+ */
+router.get("/agents/cert-pins/summary", async (_req, res, next) => {
+  try {
+    const { prisma } = await import("../../db.js");
+    const rows = await prisma.managedAgent.findMany({
+      where:  { installStatus: "active" },
+      select: {
+        serverCertFingerprint:            true,
+        additionalServerCertFingerprints: true,
+      },
+    });
+    const tally = new Map<string, { canonical: number; staged: number }>();
+    for (const r of rows) {
+      const canon = r.serverCertFingerprint.toLowerCase();
+      const entry = tally.get(canon) ?? { canonical: 0, staged: 0 };
+      entry.canonical += 1;
+      tally.set(canon, entry);
+      for (const p of r.additionalServerCertFingerprints) {
+        const key = p.toLowerCase();
+        const e = tally.get(key) ?? { canonical: 0, staged: 0 };
+        e.staged += 1;
+        tally.set(key, e);
+      }
+    }
+    res.json({
+      totalActiveAgents: rows.length,
+      pins: Array.from(tally.entries()).map(([pin, counts]) => ({ pin, ...counts })),
+    });
+  } catch (err) { next(err); }
+});
+
+/**
+ * Stage a new pin across every active agent. Idempotent — agents that
+ * already have the pin (canonical or staged) are skipped. Sends a
+ * refresh-config WS frame to every connected agent so the pin set takes
+ * effect within seconds; offline agents pick it up on next /config poll
+ * (and restart via os.Exit so systemd cycles them with the new pin).
+ */
+router.post("/agents/cert-pins/bulk-add", async (req, res, next) => {
+  try {
+    const body = CertPinBulkAddSchema.parse(req.body);
+    const pin = body.pin.toLowerCase();
+    const { prisma } = await import("../../db.js");
+    const { logEvent } = await import("./events.js");
+    const { refreshConfig } = await import("../../services/agentChannelService.js");
+    const actor = req.session?.username || "unknown";
+
+    const rows = await prisma.managedAgent.findMany({
+      where:  { installStatus: "active" },
+      select: {
+        id:                               true,
+        serverCertFingerprint:            true,
+        additionalServerCertFingerprints: true,
+      },
+    });
+
+    let added = 0;
+    let alreadyPresent = 0;
+    for (const r of rows) {
+      const union = [r.serverCertFingerprint.toLowerCase(), ...r.additionalServerCertFingerprints.map((p) => p.toLowerCase())];
+      if (union.includes(pin)) {
+        alreadyPresent += 1;
+        continue;
+      }
+      await prisma.managedAgent.update({
+        where: { id: r.id },
+        data:  { additionalServerCertFingerprints: { push: pin } },
+      });
+      added += 1;
+      // Fire-and-forget WS push so online agents apply within seconds.
+      try { refreshConfig(r.id); } catch { /* offline — picks up next poll */ }
+    }
+
+    await logEvent({
+      action:       "agent.cert_pin_staged_bulk",
+      level:        "info",
+      actor,
+      resourceType: "polaris-agent",
+      message:      `Staged cert pin on ${added} agent(s) (${alreadyPresent} already had it)`,
+      details:      { pin, added, alreadyPresent, totalActive: rows.length },
+    });
+    res.json({ pin, added, alreadyPresent, totalActive: rows.length });
+  } catch (err) { next(err); }
+});
+
+/**
+ * Retire a pin across every active agent. When the pin is the canonical
+ * one, the first staged pin gets promoted to canonical (otherwise the
+ * agent would lose its only trust anchor). When the pin would be the
+ * LAST trusted pin on an agent, that agent is left untouched and the
+ * response carries `agentsWithLastPinSkipped: N` — the operator must
+ * stage a replacement first.
+ */
+router.post("/agents/cert-pins/bulk-remove", async (req, res, next) => {
+  try {
+    const body = CertPinBulkRemoveSchema.parse(req.body);
+    const pin = body.pin.toLowerCase();
+    const { prisma } = await import("../../db.js");
+    const { logEvent } = await import("./events.js");
+    const { refreshConfig } = await import("../../services/agentChannelService.js");
+    const actor = req.session?.username || "unknown";
+
+    const rows = await prisma.managedAgent.findMany({
+      where:  { installStatus: "active" },
+      select: {
+        id:                               true,
+        serverCertFingerprint:            true,
+        additionalServerCertFingerprints: true,
+      },
+    });
+
+    let removed = 0;
+    let notPresent = 0;
+    let lastPinSkipped = 0;
+    for (const r of rows) {
+      const union = [r.serverCertFingerprint, ...r.additionalServerCertFingerprints];
+      const remaining = union.filter((p) => p.toLowerCase() !== pin);
+      if (remaining.length === union.length) {
+        notPresent += 1;
+        continue;
+      }
+      if (remaining.length === 0) {
+        lastPinSkipped += 1;
+        continue;
+      }
+      await prisma.managedAgent.update({
+        where: { id: r.id },
+        data: {
+          serverCertFingerprint:            remaining[0],
+          additionalServerCertFingerprints: remaining.slice(1),
+        },
+      });
+      removed += 1;
+      try { refreshConfig(r.id); } catch { /* offline */ }
+    }
+
+    await logEvent({
+      action:       "agent.cert_pin_retired_bulk",
+      level:        "info",
+      actor,
+      resourceType: "polaris-agent",
+      message:      `Retired cert pin from ${removed} agent(s) (${lastPinSkipped} skipped: would have been last pin)`,
+      details:      { pin, removed, notPresent, lastPinSkipped, totalActive: rows.length },
+    });
+    res.json({ pin, removed, notPresent, lastPinSkipped, totalActive: rows.length });
   } catch (err) { next(err); }
 });
 

@@ -170,7 +170,41 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `agent/internal/config/config.go` — Load/Save the INI-style agent.conf. Save() is atomic (write-tempfile + rename) and chmods 0600.
 - `agent/internal/transport/client.go` — HTTP client that fires Enroll / PushSamples / Heartbeat / FetchConfig. Bearer stored on the Client struct; SetBearer() called once after enrollment.
 - `agent/internal/pinned/tls.go` — VerifyPeerCertificate that compares the leaf SHA-256 against the pin from agent.conf. tls.Config has InsecureSkipVerify=true so the standard chain check (which consults system roots) is skipped — pin verification is the only thing that fires.
-- **Cert pin source — dual-mode.** The pin embedded in `ManagedAgent.serverCertFingerprint` at install kickoff comes from `certInfo.getServerCertFingerprint()`. In Node-HTTPS mode that reads the in-memory PEM the listener loaded; in nginx-front mode (POLARIS_PROXY_CERT_PATH set) it reads the same cert file nginx serves. Existing agents enrolled BEFORE the nginx cutover pin the cert that was active at install time — that cert is what `deploy/migrate-to-nginx.sh` hands to nginx, so existing agents continue to enroll and heartbeat with no agent-side change. The FIRST cert renewal AFTER cutover invalidates every pin: every agent needs `agentInstallService.startUpgrade` to re-pin to the new cert, OR the future Phase 2 dual-pin / CA-pin work needs to ship first. Don't rotate the cert in the first weeks post-cutover unless ready to fleet-upgrade.
+- **Cert pin source — dual-mode.** The pin embedded in `ManagedAgent.serverCertFingerprint` at install kickoff comes from `certInfo.getServerCertFingerprint()`. In Node-HTTPS mode that reads the in-memory PEM the listener loaded; in nginx-front mode (POLARIS_PROXY_CERT_PATH set) it reads the same cert file nginx serves. Existing agents enrolled BEFORE the nginx cutover pin the cert that was active at install time — that cert is what `deploy/migrate-to-nginx.sh` hands to nginx, so existing agents continue to enroll and heartbeat with no agent-side change.
+
+### Cert pin rotation (Phase 2 dual-pin)
+
+**What it is:** zero-downtime server-cert rotation across the agent fleet. Each `ManagedAgent` row carries `serverCertFingerprint` (canonical / first pin) + `additionalServerCertFingerprints String[]` (operator-staged additional pins). The union is the agent's trust set. Migration: `20260606000000_managed_agent_additional_cert_fingerprints` (additive, NOT NULL DEFAULT `ARRAY[]::TEXT[]`).
+
+**Writers** (places that mutate the pin set):
+- `POST /server-settings/agents/cert-pins/bulk-add` (`src/api/routes/serverSettings.ts`) — appends to `additionalServerCertFingerprints` on every active agent that doesn't already have it. Fires `refreshConfig(managedAgentId)` per agent so online agents apply within seconds. Emits one `agent.cert_pin_staged_bulk` Event with `{pin, added, alreadyPresent, totalActive}`.
+- `POST /server-settings/agents/cert-pins/bulk-remove` — removes from the union (canonical OR additional). When the canonical pin is removed and at least one staged pin remains, the FIRST staged pin is promoted to canonical (so the legacy `cert_fingerprint` line still reflects "the current cert"). Skips any agent where removal would leave zero pins (`lastPinSkipped: N`). Emits `agent.cert_pin_retired_bulk`.
+- `agentInstallService.renderAgentConf` reads `row.serverCertFingerprint` + `row.additionalServerCertFingerprints` and serializes the union as `cert_fingerprints = pin1,pin2,...` PLUS the legacy `cert_fingerprint = <canonical>` line for downgrade compatibility with pre-Phase-2 agent binaries.
+
+**Readers** (server side):
+- `POST /api/v1/agents/enroll` (`src/api/routes/agents.ts`) — checks the agent's observed fingerprint against the union `[serverCertFingerprint, ...additionalServerCertFingerprints]`. Mismatch on the entire set fails enrollment with `agent.install_failed`.
+- `GET /api/v1/agents/config` (`src/api/routes/agents.ts`) — ships `certFingerprints` (the union) in the response payload alongside cadence/stream settings. The ETag covers `certFingerprints` so a pin-only change still invalidates the 304 cache.
+
+**Readers** (Go agent side):
+- `agent/internal/config/config.go` — `Load` parses `cert_fingerprints` (comma-separated, lower-cased, whitespace-trimmed); falls back to legacy `cert_fingerprint` (single) when the new key is absent. `Pins()` is the canonical accessor; `SetPins()` diffs against the current set and returns true on change. `Save()` always writes BOTH keys so a downgrade to a pre-Phase-2 binary keeps the canonical pin live.
+- `agent/internal/pinned/tls.go` — `VerifyPeerCertificate(expected []string)` accepts the presented cert if its SHA-256 matches ANY pin in the set. Malformed entries are silently skipped (good pin in a noisy set still works); an all-malformed set produces a verifier that always rejects.
+- `agent/cmd/polaris-agent/main.go` — when the WS `refresh-config` frame arrives, the agent fetches `/agents/config`, compares the returned `certFingerprints` against `cfg.CertFingerprints` via `cfg.SetPins`, saves `agent.conf` if changed, then calls `os.Exit(0)` so systemd cycles the process with the new pin set live.
+
+**Invariants:**
+- The union (canonical + additional) MUST never be empty for any active `ManagedAgent` row — bulk-remove enforces this with `lastPinSkipped`. An empty pin set bricks the agent's TLS dialer until manual reinstall.
+- The order of the union (canonical first, additional in array order) becomes the order of `cert_fingerprints` in agent.conf. The Go agent's `Pins()` preserves order; the legacy `cert_fingerprint` reader sees the canonical (first) pin.
+- `additionalServerCertFingerprints` is a SET semantically — bulk-add is idempotent (no duplicates); bulk-remove takes one pin at a time.
+
+**Operator workflow** (Maintenance card → Polaris Agent → "Cert pin rotation"):
+1. Stage new pin → `bulk-add` propagates fleet-wide → online agents apply via WS push within seconds, offline agents apply on next /config poll then exit-for-restart.
+2. Rotate the server cert (nginx reload OR Polaris HTTPS hot-rotate). Agents keep working — both pins are trusted.
+3. Wait for every agent to heartbeat. The Maintenance UI shows per-pin canonical/staged counts so the operator can confirm uptake.
+4. Retire old pin → `bulk-remove` promotes a staged pin to canonical on every agent → agents apply, restart, re-narrow trust to the new pin only.
+
+**When changing this:**
+- ADDING a new field that affects the pin set: schema migration + Prisma client regen + `agentInstallService.renderAgentConf` + Go agent's config parsing/saving + Go agent's `pinned.VerifyPeerCertificate`. ALL FIVE in lockstep — or agents and server disagree on what trust set is active.
+- ADDING a new endpoint that mutates the pin set: include `refreshConfig(managedAgentId)` per affected agent (online agents apply fast), log an `agent.cert_pin_*` Event (audit trail), enforce the "non-empty union" invariant in the route handler (don't trust callers).
+- CHANGING the agent.conf wire format: both `agentInstallService.renderAgentConf` and `agent/internal/config/config.go` Load/Save in lockstep. Phase 2 keeps the legacy `cert_fingerprint` line for one release cycle of downgrade safety — don't drop it without a major version bump.
 - `src/api/routes/assets.ts:POST /:id/agent/install` — create row in `pending` (stamping `installCredentialId` so the default uninstall path can reuse it); capture cert pin; emit `agent.install_kickoff`; fire `agentInstallService.startInstall` async (Phase 4a).
 - `src/api/routes/assets.ts:DELETE /:id/agent` — synchronous revokeBearer + (force) hard-delete or (default) fire `agentInstallService.startUninstall` async; emits `agent.revoked` synchronously, then `agent.uninstalled` / `agent.uninstall_failed` from the async path.
 - `src/services/agentInstallService.ts:startInstall` — async transport-aware install. SSH path: SFTP upload binary + conf + installer script to /tmp, `sudo -n bash` the installer. WinRM path: PowerShell installer via `-EncodedCommand`; the script downloads the binary over HTTPS from `/api/v1/agents/binary/:filename` with a cert-pin validation callback (no WS-Management Send verb needed). Both paths transition `pending → uploading → enrolling`. Failure lands as `installStatus="failed" + installError + agent.install_failed` event.
