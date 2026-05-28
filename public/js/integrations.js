@@ -558,11 +558,7 @@ async function loadIntegrations() {
       } else {
         var intervalMs = (intg.pollInterval || 4) * 3600000;
         var nextRunMs = intg.lastDiscoveryAt ? new Date(intg.lastDiscoveryAt).getTime() + intervalMs : Date.now();
-        if (nextRunMs <= Date.now()) {
-          nextDiscoveryText = '<span style="color:var(--color-text-tertiary)">Pending next check (within 15 min)</span>';
-        } else {
-          nextDiscoveryText = escapeHtml(new Date(nextRunMs).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }));
-        }
+        nextDiscoveryText = escapeHtml(new Date(nextRunMs).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }));
       }
 
       // "Avg Discovery Time" row — surfaces the rolling baseline from
