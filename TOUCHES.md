@@ -2236,7 +2236,7 @@ Listed alphabetically.
 
 **Invariants:**
 - NTP and certificate lists persist in Settings table under `key: "ntp"` and `"certificates"`.
-- Certificate store is a single JSON array in the "certificates" Setting; each cert carries id, category (ca/server), type (cert/key), PEM, and metadata. Legacy `category="server"` rows may still exist in old installs but are inert.
+- Certificate store is a single JSON array in the "certificates" Setting; each cert carries id, category (ca/server), type (cert/key), PEM, and metadata. The route surface only handles `category="ca"`; the cleanup migration `20260608000000_drop_legacy_server_certs` strips any legacy `category="server"` entries on upgrade.
 - Backup/restore flows NOT in this service (they live in updateService).
 
 **When changing this:**
