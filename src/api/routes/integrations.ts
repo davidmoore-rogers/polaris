@@ -2791,6 +2791,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       }
     }
   }
+  // Lowercased view of the roster. FMG-stored device names and FortiOS
+  // system-status hostnames can disagree in case; the Phase 2 / 2a roster
+  // checks compare lowercase-on-both-sides so an asset hostname written
+  // from FortiOS truth (uppercase) still matches an FMG roster entry
+  // written from FMG truth (lowercase) and vice versa.
+  const knownDeviceNamesLc = new Set<string>();
+  for (const n of knownDeviceNames) knownDeviceNamesLc.add(n.toLowerCase());
 
   if (mode === "full" || mode === "skip-deprecation") {
   // ══════════════════════════════════════════════════════════════════════════════
@@ -2938,10 +2945,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // ══════════════════════════════════════════════════════════════════════════════
 
   if (knownDeviceNames.size > 0) {
-    // Find stale subnets in-memory first (for the return value)
+    // Find stale subnets in-memory first (for the return value).
+    // Roster check is case-insensitive: a subnet's fortigateDevice can carry
+    // FortiOS-cased casing while the FMG roster carries FMG-cased casing
+    // (same device, different source).
     const staleSubnets = allSubnets.filter(
       (s) => s.discoveredBy === integrationId && s.status !== "deprecated" &&
-             s.fortigateDevice && !knownDeviceNames.has(s.fortigateDevice)
+             s.fortigateDevice && !knownDeviceNamesLc.has(s.fortigateDevice.toLowerCase())
     );
     if (staleSubnets.length > 0) {
       const staleIds = staleSubnets.map((s) => s.id);
@@ -2976,13 +2986,23 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   phaseMark("2a");
   // ══════════════════════════════════════════════════════════════════════════════
   //
-  // For every firewall Asset row discovered by this integration whose hostname
+  // For every firewall Asset row discovered by this integration whose identity
   // is no longer in the FMG roster: flip it to status="decommissioned". The
-  // FMG roster (`knownDeviceNames`) is captured up front from
-  // /dvmdb/adom/<adom>/device with NO conn_status filter, so an offline
-  // FortiGate stays in the set and isn't flagged. Devices filtered out by
-  // deviceInclude/exclude also stay in the set for the same reason — flipping
-  // a filter shouldn't decommission previously-discovered firewalls.
+  // FMG roster (`knownDeviceNames` / `knownFirewallSerials`) is captured up
+  // front from /dvmdb/adom/<adom>/device with NO conn_status filter, so an
+  // offline FortiGate stays in the set and isn't flagged. Devices filtered out
+  // by deviceInclude/exclude also stay in the set for the same reason —
+  // flipping a filter shouldn't decommission previously-discovered firewalls.
+  //
+  // Match order:
+  //   1. Serial — chassis identity, never case-mismatched, never renamed.
+  //      Also covers HA: every cluster member's serial is added to
+  //      `knownFirewallSerials` (including ha_slave[] entries), so a standby
+  //      whose hostname never appears at top-level still matches by serial.
+  //   2. Hostname (case-insensitive) — fallback for legacy/partial rows
+  //      where Asset.serialNumber wasn't populated. FMG-stored names and
+  //      FortiOS system-status hostnames can disagree in case for the same
+  //      device, so the comparison is lowercase-on-both-sides.
   //
   // A decommissioned firewall is reactivated by the Phase-3b firewall update
   // path above on a future discovery cycle when the device returns to FMG.
@@ -2998,17 +3018,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     const staleFwIds: string[] = [];
     const staleFwHostnames: string[] = [];
     for (const a of candidateFws) {
-      if (!a.hostname) continue;
-      if (knownDeviceNames.has(a.hostname)) continue;
-      // HA-aware guard: a member's serial in the cluster's ha_slave[] is
-      // proof the unit is still configured even if its hostname is missing
-      // from the top-level roster. Covers two cases that would otherwise
-      // generate spurious decommission events:
-      //   1. Standby member whose hostname never appears at top-level.
-      //   2. Post-failover where the previous primary's hostname disappears
-      //      from the device record (top-level flips to new primary's
-      //      hostname) but its serial is still listed in ha_slave[].
+      // 1) Serial-first — canonical chassis identity.
       if (a.serialNumber && knownFirewallSerials.has(a.serialNumber)) continue;
+      // 2) Hostname fallback (case-insensitive).
+      if (a.hostname && knownDeviceNamesLc.has(a.hostname.toLowerCase())) continue;
+      if (!a.hostname) continue;
       staleFwIds.push(a.id);
       staleFwHostnames.push(a.hostname);
       logEvent({

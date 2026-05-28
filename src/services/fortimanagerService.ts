@@ -15,6 +15,15 @@ import {
   type FortiGateConfig,
 } from "./fortigateService.js";
 
+// FMG-side device names and FortiOS system-status hostnames can disagree in
+// case (e.g. FMG stores "evansville-fw-1" while the device returns
+// "EVANSVILLE-FW-1" via /api/v2/cmdb/system/global). Every in-memory Map/Set
+// that keys by "FortiGate device name" must lowercase the key so writes from
+// either source land in the same bucket; original casing is preserved on the
+// raw device object and the asset row for logging and Event messages.
+export const fmgNameKey = (n: string | null | undefined): string =>
+  String(n ?? "").toLowerCase();
+
 export interface FortiManagerConfig {
   host: string;
   port?: number;
@@ -1229,12 +1238,16 @@ export async function discoverDhcpSubnets(
 
   // Pre-populate from the warm cache (direct mode only). cachedNames tracks
   // which entries came from the cache so the cache-miss fallback knows
-  // whether to retry on direct-call failure.
+  // whether to retry on direct-call failure. Keys are lowercased via
+  // fmgNameKey because the warm cache is built from Asset.hostname (which
+  // can be FortiOS-cased upper) while FMG roster names may be operator-set
+  // lowercase — same device, different casing.
   const cachedNames = new Set<string>();
   if (!useProxy && warmCacheIps && warmCacheIps.size > 0) {
     for (const [name, ip] of warmCacheIps) {
-      mgmtIpByDevice.set(name, ip);
-      cachedNames.add(name);
+      const key = fmgNameKey(name);
+      mgmtIpByDevice.set(key, ip);
+      cachedNames.add(key);
     }
   }
 
@@ -1271,7 +1284,8 @@ export async function discoverDhcpSubnets(
       // we must NOT call resolveDeviceMgmtIp synchronously here because
       // multiple workers can be running in parallel and FMG only serves one
       // request at a time on the resolver path.
-      let directHost = mgmtIpByDevice.get(deviceName) ?? null;
+      const deviceKey = fmgNameKey(deviceName);
+      let directHost = mgmtIpByDevice.get(deviceKey) ?? null;
       if (!directHost) {
         log("discover.device.skip", "error", `Skipping ${deviceName} — no management IP configured on interface "${mgmtIfaceName}" (pre-resolve missed or failed)`, deviceName);
         return null;
@@ -1383,11 +1397,11 @@ export async function discoverDhcpSubnets(
           // Cache-miss fallback: only retry when the IP came from the warm
           // cache. cachedNames is cleared on first attempt so we never loop
           // a second time.
-          if (!cachedNames.has(deviceName)) {
+          if (!cachedNames.has(deviceKey)) {
             log("discover.device", "error", `${deviceName}: Direct discovery failed — ${err.message || "Unknown error"}`, deviceName);
             return null;
           }
-          cachedNames.delete(deviceName);
+          cachedNames.delete(deviceKey);
           log("discover.device.cache_miss", "info", `${deviceName}: Cached management IP ${directHost} unreachable — re-resolving via FortiManager (${err.message || "unknown error"})`, deviceName);
           let newIp: string | null;
           try {
@@ -1406,7 +1420,7 @@ export async function discoverDhcpSubnets(
           }
           // Fresh IP — update the in-memory map (so any later code in this
           // run sees the new IP) and retry once at the new address.
-          mgmtIpByDevice.set(deviceName, newIp);
+          mgmtIpByDevice.set(deviceKey, newIp);
           directHost = newIp;
           fgConfig = buildFgConfig(newIp);
           // continue while loop → retry once at newIp
@@ -2285,11 +2299,13 @@ export async function discoverDhcpSubnets(
     task.then(() => executing.delete(task), () => executing.delete(task));
   }
 
-  // Index FMG roster devices by name for O(1) lookup from the warm-cache producer.
+  // Index FMG roster devices by name for O(1) lookup from the warm-cache
+  // producer. Keys are lowercased so warm-cache hostnames (which can be
+  // FortiOS-cased) match FMG-roster names that differ only in case.
   const devicesByName = new Map<string, any>();
   for (const d of devicesData) {
     const n = d.name || d.hostname;
-    if (typeof n === "string" && n.length > 0) devicesByName.set(n, d);
+    if (typeof n === "string" && n.length > 0) devicesByName.set(fmgNameKey(n), d);
   }
 
   // Producer A — warm-cache: dispatch every monitor-up FortiGate immediately
@@ -2302,18 +2318,21 @@ export async function discoverDhcpSubnets(
   // verifyTask's synchronous startup: only the first cached name would be in
   // the set at the moment verifyTargets is computed, and the verify producer
   // would redundantly dispatch every other warm-cache device.
+  // warmDispatched holds lowercased keys; cachedNames and devicesByName are
+  // both lowercased so .has() membership and the verify producer's
+  // !warmDispatched.has(...) exclusion all align on the same canonical key.
   const warmDispatched = new Set<string>();
   if (!useProxy) {
-    for (const name of cachedNames) {
-      if (devicesByName.has(name)) warmDispatched.add(name);
+    for (const key of cachedNames) {
+      if (devicesByName.has(key)) warmDispatched.add(key);
     }
   }
   const warmCacheTask: Promise<void> = (async () => {
     if (useProxy || warmDispatched.size === 0) return;
     let dispatched = 0;
-    for (const name of warmDispatched) {
+    for (const key of warmDispatched) {
       if (signal?.aborted) return;
-      const raw = devicesByName.get(name);
+      const raw = devicesByName.get(key);
       if (!raw) continue; // defensive — populated synchronously above
       // Respect FMG's view of online/offline — if FMG says the device is
       // disconnected, processDevice's standard skip log fires anyway, but
@@ -2354,7 +2373,7 @@ export async function discoverDhcpSubnets(
 
     const verifyTargets = sortDevicesByName(devicesData.filter((d) => {
       const n = d.name || d.hostname;
-      return typeof n === "string" && !warmDispatched.has(n);
+      return typeof n === "string" && !warmDispatched.has(fmgNameKey(n));
     }));
     const connectedVerifyCount = verifyTargets.filter(
       (d) => d.conn_status === undefined || d.conn_status === 1,
@@ -2372,7 +2391,7 @@ export async function discoverDhcpSubnets(
         try {
           const ip = await resolveDeviceMgmtIp(baseUrl, config, name, mgmtIfaceName, signal, integrationId);
           if (ip) {
-            mgmtIpByDevice.set(name, ip);
+            mgmtIpByDevice.set(fmgNameKey(name), ip);
             resolved++;
           } else {
             failed++;
