@@ -19,7 +19,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { errorHandler } from "./api/middleware/errorHandler.js";
 import { csrfMiddleware } from "./api/middleware/csrf.js";
 import { logger } from "./utils/logger.js";
-import { initHttps, httpsRedirectMiddleware } from "./httpsManager.js";
+import { initHttps, httpsRedirectMiddleware } from "./httpsRuntime.js";
+import { resolveTrustProxy } from "./utils/trustProxy.js";
+import { validateRuntimeConfiguration } from "./utils/runtimeConfig.js";
+import { isProxyMode } from "./utils/proxyMode.js";
 import { getHttpsSettings } from "./services/serverSettingsService.js";
 import { UPLOADS_DIR } from "./utils/paths.js";
 import { isAzureSsoConfiguredAsync, getSsoSettings } from "./services/azureAuthService.js";
@@ -47,6 +50,13 @@ import { getDbConnectionMode } from "./utils/dbConnections.js";
 import { startMetricsOnlyServer } from "./utils/metricsServer.js";
 import { recordDbConnectionMode, setDbPoolRoleCapacity } from "./metrics.js";
 import { startFmgActivityHeartbeat } from "./services/fmgActivityService.js";
+
+// Fail-fast environment validation runs BEFORE any listener binds, before
+// pg-boss init, before sample buffers start. Throws on misconfiguration
+// (e.g. POLARIS_PROXY_CERT_PATH set without POLARIS_PUBLIC_URL) so systemd's
+// Restart=on-failure cycles the unit cleanly instead of leaving a half-
+// initialized listener open. See src/utils/runtimeConfig.ts.
+validateRuntimeConfiguration();
 
 // Stamp the detected DB connection topology once at boot so operators (and
 // `/metrics` scrapes) can confirm Polaris recognized their PgBouncer setup
@@ -252,15 +262,14 @@ void runStartupDiskCheck();
 
 const app = express();
 
-// ─── Trust proxy (opt-in) ────────────────────────────────────────────────────
-// Only enable when running behind a reverse proxy that sets X-Forwarded-For.
-// Enabling this on a direct-to-internet deployment lets clients spoof their IP
-// and bypass the login rate limiter, so it stays off unless TRUST_PROXY is set.
-// Accepts a hop count (e.g. "1"), "loopback"/"linklocal"/"uniquelocal", or a
-// CIDR list — see https://expressjs.com/en/guide/behind-proxies.html
-const trustProxy = process.env.TRUST_PROXY;
-if (trustProxy) {
-  app.set("trust proxy", /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
+// ─── Trust proxy ────────────────────────────────────────────────────────────
+// Resolution: operator-set TRUST_PROXY wins; otherwise proxy mode auto-defaults
+// to "1" (first-hop trust); otherwise unset (direct-to-internet, no X-Forwarded-*
+// honored — required for that mode because clients can otherwise spoof their IP
+// and bypass the login rate limiter). See src/utils/trustProxy.ts.
+const trustProxy = resolveTrustProxy();
+if (trustProxy !== undefined) {
+  app.set("trust proxy", /^\d+$/.test(String(trustProxy)) ? Number(trustProxy) : trustProxy);
 }
 
 // ─── Session secret ──────────────────────────────────────────────────────────
@@ -586,11 +595,20 @@ export async function startApp(): Promise<void> {
   }
 
   const httpsSettings = await getHttpsSettings().catch(() => null);
-  const PORT = process.env.PORT ?? httpsSettings?.httpPort ?? 3000;
-  const httpServer = app.listen(PORT, () => {
-    logger.info({ port: PORT }, "Polaris server listening");
-    initHttps(app);
-  });
+  const PORT_RAW = process.env.PORT ?? httpsSettings?.httpPort ?? 3000;
+  const PORT = typeof PORT_RAW === "number" ? PORT_RAW : Number.parseInt(String(PORT_RAW), 10) || 3000;
+  // Proxy mode: bind 127.0.0.1 only — nginx terminates TLS on 443 and proxies
+  // here. Direct mode: bind all interfaces (0.0.0.0 / ::) so Polaris is
+  // reachable however the operator wired the network.
+  const httpServer = isProxyMode()
+    ? app.listen(PORT, "127.0.0.1", () => {
+        logger.info({ port: PORT, bind: "127.0.0.1" }, "Polaris server listening (proxy mode)");
+        // initHttps() is a no-op in proxy mode — nginx terminates TLS.
+      })
+    : app.listen(PORT, () => {
+        logger.info({ port: PORT }, "Polaris server listening");
+        initHttps(app);
+      });
   // Attach the Polaris Agent WebSocket upgrade handler. Same server
   // surface as the REST API — agents reach /api/v1/agents/ws over the
   // same port and (in production) the same HTTPS cert their pin verifies.

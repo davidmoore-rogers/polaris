@@ -555,6 +555,132 @@ raw `max_connections`. Per-role footprint is exposed at
 
 ---
 
+## Optional: nginx front-end (opt-in HTTPS termination move)
+
+By default, Polaris terminates TLS itself using the cert + key uploaded
+through Server Settings → Certificates. At scale, it's often cleaner to
+move TLS termination to an external nginx reverse proxy on the same host:
+
+- One external URL for the main app **and** all the role-specific `/metrics`
+  endpoints (path-routed: `/metrics`, `/metrics-monitor-1`, `/metrics-monitor-2`,
+  `/metrics-discovery`) — no firewall changes per worker port, no
+  bearer-in-clear on the worker ports.
+- One place to manage cert rotation (a single file nginx reads, plus
+  `systemctl reload nginx`) instead of cycling Polaris's own cert hot-rotation
+  on every renewal.
+- HTTP/3 over QUIC out-of-the-box for browser traffic.
+
+**This is opt-in for Phase 1.** Fresh installs continue to land single-process
+with Node-terminated HTTPS. nginx migration is a separate operator action via
+`deploy/migrate-to-nginx.sh`, which only supports the split-role layout
+(`polaris.target` enabled with the four role units). Single-process installs
+stay on Node HTTPS for now — Phase 3 of the planning roadmap changes that.
+
+### Prerequisites
+
+- The split-role layout (above) must be enabled.
+- nginx ≥ 1.25 (HTTP/3 stable). The migration script installs from
+  `nginx.org`'s mainline repo if your system nginx is older or missing.
+- A working server cert + key already loaded in Polaris's `Setting.certificates`
+  (the script extracts the active leaf pair from the DB and hands it to nginx).
+- UDP/443 reachable from clients you want to serve HTTP/3 to. The script opens
+  TCP+UDP/443 in `firewalld` on the local host; any upstream firewalls /
+  load balancers also need UDP/443 open. Clients fall back to TCP transparently
+  if UDP is blocked anywhere along the path.
+- A decision on which IP is allowed to scrape `/metrics-*` (your Prometheus
+  host). The script writes an `allow <PROMETHEUS_IP>; deny all;` block on
+  those four nginx locations as the first defense layer; bearer auth via
+  `METRICS_TOKEN` is the second layer.
+
+### Migration
+
+```bash
+sudo bash /opt/polaris/deploy/migrate-to-nginx.sh \
+  --public-url https://polaris.example.com \
+  --prometheus-ip 10.0.0.42
+```
+
+The script is transactional — it backs up `/opt/polaris/.env` first, stages
+nginx config + cert files in `/tmp/`, validates with `nginx -t` before
+committing, and rolls back automatically on failure at any gate. It's also
+idempotent: re-running detects the migrated state and exits cleanly.
+
+What it does in order:
+
+1. Confirms `polaris.target` is enabled.
+2. Ensures nginx ≥ 1.25 is installed (replaces older RHEL AppStream nginx
+   with `nginx.org`'s mainline if needed).
+3. Extracts the active `category="server"` cert + key from
+   `Setting.certificates` via Prisma and writes
+   `/etc/polaris-nginx/{cert,key}.pem` with `0640 root:nginx` permissions
+   and SELinux `httpd_sys_content_t` context (persistent via `semanage
+   fcontext` + `restorecon`).
+4. Installs `deploy/nginx/polaris.conf` into `/etc/nginx/conf.d/polaris.conf`
+   with `<PROMETHEUS_IP>` substituted. Validates with `nginx -t`.
+5. Installs a systemd drop-in at `/etc/systemd/system/polaris-web.service.d/`
+   that makes polaris-web `Wants=` nginx — nginx starts first, but a failed
+   nginx doesn't block polaris-web (so you can SSH in and fix nginx without
+   a separate broken-Polaris problem).
+6. Appends `POLARIS_PROXY_CERT_PATH` + `POLARIS_PUBLIC_URL` to `/opt/polaris/.env`.
+7. Opens TCP+UDP/443 in `firewalld`.
+8. `systemctl daemon-reload`, `systemctl enable --now nginx`,
+   `systemctl reload nginx`, `systemctl restart polaris.target`.
+9. Smoke tests: TCP + UDP listeners on 443, `Alt-Svc: h3` header, Polaris
+   bound to `127.0.0.1:3000`, `/metrics-monitor-1` returns 200 or 401 (not 5xx).
+
+### Verifying
+
+```bash
+ss -ltnp | grep ':443'       # nginx TCP listener
+ss -lunp | grep ':443'       # nginx UDP listener (HTTP/3)
+ss -ltnp | grep ':3000'      # Polaris bound to 127.0.0.1 only
+
+curl -sI https://polaris.example.com/ | grep -i alt-svc
+# expects: alt-svc: h3=":443"; ma=86400
+
+METRICS_TOKEN=$(grep ^METRICS_TOKEN /opt/polaris/.env | cut -d= -f2-)
+curl -sH "Authorization: Bearer $METRICS_TOKEN" https://polaris.example.com/metrics-monitor-1 \
+  | grep -c '^polaris_monitor_work_total'
+# expects a positive count
+```
+
+### Rollback
+
+```bash
+sudo bash /opt/polaris/deploy/migrate-to-nginx.sh --rollback
+```
+
+Restores `.env` from the most-recent `.env.pre-nginx.*` backup, removes the
+nginx config + systemd drop-in, and restarts `polaris.target`. Polaris falls
+back to Node-terminated HTTPS using the same cert that's still in
+`Setting.certificates` (the migration script doesn't delete the DB record;
+it copies out + flips env vars).
+
+### Operational notes
+
+- **Don't rotate the cert in the first few weeks post-cutover** unless you're
+  ready to remote-reinstall every Polaris Agent. Existing agents pin the
+  current leaf cert's SHA-256; nginx serves the SAME cert immediately after
+  cutover, but the FIRST renewal AFTER cutover invalidates every pin. Phase 2
+  of the planning roadmap adds dual-pin / CA-pin support that lifts this
+  constraint — until then, plan rotations carefully.
+- **Operator customization belongs in drop-ins, not the main config files.**
+  The in-app updater (Server Settings → Maintenance → Apply Update) syncs
+  `deploy/nginx/polaris.conf` into `/etc/nginx/conf.d/polaris.conf` on every
+  update (cmp-only, no-op when unchanged) — direct edits there get clobbered.
+  Use `/etc/nginx/conf.d/polaris-local.conf` or a per-server-block drop-in.
+  Same convention for systemd: edit `<unit>.service.d/*.conf`, not the unit file itself.
+- **HTTP/3 / QUIC may be blocked by corporate firewalls or IDS**. Clients
+  transparently fall back to TCP/HTTP-2 in that case (worst case: no HTTP/3
+  benefit, not a broken site). Confirm with network ops that UDP/443 isn't
+  blocked between your operator workstations and the prod box.
+- **The Polaris Agent stays on TCP/HTTP-2.** Go's stdlib `net/http` doesn't
+  speak HTTP/3 — agent traffic (heartbeat, samples, enroll, config) uses
+  the TCP listener, which carries the same cert and same auth. HTTP/3
+  benefits only browser traffic.
+
+---
+
 ## Recommended: TimescaleDB
 
 Polaris's monitoring data lives in eighteen sample tables: six source tables (`asset_monitor_samples`, `asset_telemetry_samples`, `asset_temperature_samples`, `asset_interface_samples`, `asset_storage_samples`, `asset_ipsec_tunnel_samples`) that hold raw per-cadence samples, plus twelve `*_hourly` / `*_daily` rollup tables produced by the tiered-retention rollup job (one hourly + one daily companion per source). All eighteen are append-only / upsert-only time-series. Plain Postgres handles them fine at small scale, but once the combined size crosses ~1 GB the daily retention prune starts seq-scanning hundreds of millions of rows, contending with normal write load. **TimescaleDB** (an official Postgres extension) converts all of them to hypertables with chunk-based partitioning and native compression:

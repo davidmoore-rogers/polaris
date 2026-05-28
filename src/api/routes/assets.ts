@@ -3063,7 +3063,7 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
     // HTTPS isn't running, there's no cert to pin and no encrypted
     // transport — refuse the install with a clear error rather than
     // silently issuing a bearer that the agent won't be able to use.
-    const { getServerCertFingerprint } = await import("../../httpsManager.js");
+    const { getServerCertFingerprint } = await import("../../services/certInfo.js");
     const fingerprint = getServerCertFingerprint();
     if (!fingerprint) {
       throw new AppError(400,
@@ -3085,7 +3085,7 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
                         targetHost === "localhost" || targetHost.toLowerCase() === "localhost.localdomain";
       if (!isSameBox) {
         // Check whether the cert can supply a hostname before bailing.
-        const { getServerCertHostnames } = await import("../../httpsManager.js");
+        const { getServerCertHostnames } = await import("../../services/certInfo.js");
         const hosts = getServerCertHostnames();
         const certHost = hosts?.dnsSans[0] || hosts?.cn || hosts?.ipSans[0] || null;
         if (!certHost || certHost === "localhost" || certHost === "127.0.0.1" || certHost === "::1") {

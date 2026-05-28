@@ -602,6 +602,81 @@ var _certsLoaded = false;
 var _certData = { trustedCAs: [], serverCerts: [] };
 var _httpsSettings = { enabled: false, port: 3443, httpPort: 3000, certId: null, keyId: null, redirectHttp: false, running: false };
 
+// Render the Certificates tab when Polaris is fronted by an external reverse
+// proxy. Two cards instead of three — the "HTTPS Configuration" + "Server
+// Certificates" cards merge into one informational pane (the cert lives on
+// disk where nginx reads it; Polaris exposes its fingerprint + SANs +
+// expiry but doesn't manage it). The "Trusted Certificate Authorities" card
+// renders unchanged because CAs back outbound TLS to LDAP/SMTP/integrations
+// and are still operator-editable. See src/api/routes/serverSettings.ts for
+// the matching server-side branch.
+function renderProxyModeCertsTab(container) {
+  var s = _httpsSettings || {};
+  var fingerprint = s.fingerprint || "(unavailable)";
+  var cn = s.cn || "(none)";
+  var dnsSans = (s.dnsSans && s.dnsSans.length) ? s.dnsSans.join(", ") : "(none)";
+  var ipSans = (s.ipSans && s.ipSans.length) ? s.ipSans.join(", ") : "(none)";
+  var certPath = s.certPath || "(unset)";
+
+  // Expiry with severity pill — amber <30d, red <7d, green otherwise.
+  var expiryHtml = "(unknown)";
+  if (s.expiresAt) {
+    var ms = Date.parse(s.expiresAt) - Date.now();
+    var days = Math.floor(ms / (24 * 60 * 60 * 1000));
+    var pillClass = "badge-available";  // green
+    var pillLabel = days + " days";
+    if (days < 0)       { pillClass = "badge-deprecated"; pillLabel = "EXPIRED"; }
+    else if (days < 7)  { pillClass = "badge-deprecated"; pillLabel = days + " days"; }
+    else if (days < 30) { pillClass = "badge-reserved";   pillLabel = days + " days"; }
+    expiryHtml = escapeHtml(formatDate(s.expiresAt)) +
+                 ' <span class="badge ' + pillClass + '" style="margin-left:6px">' +
+                 escapeHtml(pillLabel) + '</span>';
+  }
+
+  container.innerHTML =
+    '<div class="settings-cards-row-2">' +
+    '<div class="settings-card">' +
+      '<h4>HTTPS — managed by external reverse proxy</h4>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+        'TLS is terminated by an external proxy (nginx) reading the cert at <code>' + escapeHtml(certPath) + '</code>. ' +
+        'Polaris does not upload, generate, or rotate the server cert in this mode — modify the file directly and ' +
+        'reload nginx (<code>systemctl reload nginx</code>) to roll a new cert. The fingerprint below is what every ' +
+        'Polaris Agent pins; do not change the cert without planning for agent re-pinning.' +
+      '</p>' +
+      '<div class="form-group"><label>Cert path</label>' +
+        '<input type="text" readonly value="' + escapeHtml(certPath) + '" style="font-family:monospace">' +
+      '</div>' +
+      '<div class="form-group"><label>SHA-256 fingerprint (agent pin)</label>' +
+        '<input type="text" readonly value="' + escapeHtml(fingerprint) + '" style="font-family:monospace;font-size:0.8rem">' +
+      '</div>' +
+      '<div class="form-group"><label>Common Name</label>' +
+        '<input type="text" readonly value="' + escapeHtml(cn) + '">' +
+      '</div>' +
+      '<div class="form-group"><label>DNS SANs</label>' +
+        '<input type="text" readonly value="' + escapeHtml(dnsSans) + '">' +
+      '</div>' +
+      '<div class="form-group"><label>IP SANs</label>' +
+        '<input type="text" readonly value="' + escapeHtml(ipSans) + '">' +
+      '</div>' +
+      '<div class="form-group"><label>Expiry</label>' +
+        '<div style="padding:0.4rem 0">' + expiryHtml + '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="settings-card" style="display:flex;flex-direction:column">' +
+      '<h4>Trusted Certificate Authorities</h4>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">CA certificates used to verify remote servers when Polaris connects to integrations, syslog, and archive targets. Still operator-editable in proxy mode.</p>' +
+      '<ul class="cert-list" id="ca-list"><li class="cert-empty">Loading...</li></ul>' +
+      '<div style="margin-top:auto;padding-top:1rem">' +
+        '<div class="upload-area" id="ca-upload-area">' +
+          '<input type="file" id="ca-file-input" accept=".pem,.crt,.cer,.der">' +
+          '<strong style="color:var(--color-text-primary)">Upload CA Certificate</strong>' +
+          '<p>Click to select a .pem, .crt, or .cer file</p>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '</div>';
+}
+
 async function loadCertificates() {
   _certsLoaded = true;
   var container = document.getElementById("tab-certificates");
@@ -610,6 +685,20 @@ async function loadCertificates() {
   try {
     _httpsSettings = await api.serverSettings.getHttps();
   } catch (_) {}
+
+  // Proxy mode: nginx terminates TLS, the server cert lives in a file on
+  // disk that Polaris doesn't manage. Replace the HTTPS Configuration +
+  // Server Certificates cards with read-only informational panes; keep the
+  // Trusted CA card unchanged (CAs are still operator-editable). The
+  // fingerprint here is the same value embedded in every Polaris Agent's
+  // agent.conf — operators need it visible somewhere even when nginx owns
+  // the cert lifecycle.
+  if (_httpsSettings && _httpsSettings.externallyManaged) {
+    renderProxyModeCertsTab(container);
+    wireUploadArea("ca-upload-area", "ca-file-input", uploadCA);
+    await refreshCertLists();
+    return;
+  }
 
   container.innerHTML =
     '<div class="settings-cards-row-3">' +
@@ -717,7 +806,7 @@ async function refreshCertLists() {
 function populateHttpsDropdowns() {
   var certSelect = document.getElementById("f-https-cert");
   var keySelect = document.getElementById("f-https-key");
-  if (!certSelect || !keySelect) return;
+  if (!certSelect || !keySelect) return; // also covers proxy mode where these controls aren't rendered
 
   var certs = _certData.serverCerts.filter(function (c) { return c.type === "cert"; });
   var keys = _certData.serverCerts.filter(function (c) { return c.type === "key"; });
@@ -900,6 +989,7 @@ function renderCAList() {
 
 function renderServerCertList() {
   var list = document.getElementById("server-cert-list");
+  if (!list) return; // proxy mode — Server Certificates card isn't rendered
   if (!_certData.serverCerts.length) {
     list.innerHTML = '<li class="cert-empty">No server certificate configured. The app is using its default configuration.</li>';
     return;
