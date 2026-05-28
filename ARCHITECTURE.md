@@ -1318,7 +1318,7 @@ Per-user dashboard layout. One row per user in `UserDashboard`; absent row = emp
 
 ### Integrations — `integrations` function key
 > Mount requires `integrations=read`; all write endpoints inside the file are upgraded to `integrations=write` via an inline `router.use(...)`.
-- `GET    /integrations`
+- `GET    /integrations`                       — List integrations (paginated). Each row carries `discoveryBaseline: { avgMs, sampleCount } | null` from `discoveryDurationService.getBaselines()` so the card UI can render an "Avg Discovery Time" line operators can size `pollInterval` against. `null` until the rolling window has ≥3 successful runs.
 - `POST   /integrations`
 - `GET    /integrations/:id`
 - `PUT    /integrations/:id`

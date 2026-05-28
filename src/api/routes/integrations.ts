@@ -582,8 +582,19 @@ router.get("/", async (req, res, next) => {
       }),
       prisma.integration.count(),
     ]);
-    // Strip passwords from the response
-    const safe = integrations.map(stripSecret);
+    // Attach the rolling discovery-duration baseline so the card UI can show
+    // operators what to size the poll interval against. Per-FortiGate sub-keys
+    // are intentionally not surfaced here — the card is per-integration.
+    const baselines = await getBaselines(integrations.map((i) => i.id));
+    const safe = integrations.map((i) => {
+      const bl = baselines.get(i.id) ?? null;
+      return {
+        ...stripSecret(i),
+        discoveryBaseline: bl
+          ? { avgMs: Math.round(bl.avgMs), sampleCount: bl.sampleCount }
+          : null,
+      };
+    });
     res.json({ integrations: safe, total, limit, offset });
   } catch (err) {
     next(err);

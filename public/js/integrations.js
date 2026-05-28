@@ -565,6 +565,29 @@ async function loadIntegrations() {
         }
       }
 
+      // "Avg Discovery Time" row — surfaces the rolling baseline from
+      // discoveryDurationService so operators can size pollInterval against
+      // observed run length. Hidden until enough samples have been collected
+      // (matches the slow-detection MIN_SAMPLES floor on the backend).
+      var avgRow = "";
+      var bl = intg.discoveryBaseline;
+      if (bl && bl.sampleCount >= 3 && bl.avgMs > 0) {
+        var avgMs = bl.avgMs;
+        var s = Math.floor(avgMs / 1000);
+        var avgText;
+        if (s < 60) avgText = s + "s";
+        else if (s < 3600) avgText = Math.floor(s / 60) + "m " + ((s % 60) < 10 ? "0" : "") + (s % 60) + "s";
+        else avgText = Math.floor(s / 3600) + "h " + (Math.floor(s / 60) % 60) + "m";
+        var intervalMsForAvg = (intg.pollInterval || 4) * 3600000;
+        var autoOn = intg.enabled && intg.lastTestOk && intg.autoDiscover !== false;
+        var nearOverlap = autoOn && avgMs > intervalMsForAvg * 0.75;
+        var valueStyle = nearOverlap ? ' style="color:var(--color-warning)"' : "";
+        var tooltip = nearOverlap
+          ? ' title="Average run time is approaching the auto-discovery interval. Consecutive runs may begin overlapping — consider lengthening the interval."'
+          : "";
+        avgRow = '<div class="detail-row"' + tooltip + '><span class="detail-label">Avg Discovery Time</span><span class="detail-value"' + valueStyle + '>' + escapeHtml(avgText) + ' <span style="color:var(--color-text-tertiary);font-size:0.85em">(last ' + bl.sampleCount + ' run' + (bl.sampleCount === 1 ? '' : 's') + ')</span></span></div>';
+      }
+
       var isFmgDirect = intg.type === "fortimanager" && config.useProxy === false;
       return '<div class="integration-card"' + (isFmgDirect ? ' data-fmg-direct="1"' : '') + '>' +
         '<div class="integration-card-header">' +
@@ -592,6 +615,7 @@ async function loadIntegrations() {
           detailRows +
           '<div class="detail-row"><span class="detail-label">Auto-Discovery</span><span class="detail-value">' + (!intg.lastTestOk ? '<span style="color:var(--color-text-tertiary)">Disabled until a successful connection test</span>' : intg.autoDiscover === false ? '<span style="color:var(--color-text-tertiary)">Disabled</span>' : 'Every ' + (intg.pollInterval || 4) + ' hour' + ((intg.pollInterval || 4) === 1 ? '' : 's')) + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Next Auto-Discovery</span><span class="detail-value">' + nextDiscoveryText + '</span></div>' +
+          avgRow +
           '<div class="detail-row"><span class="detail-label">Status</span><span class="detail-value">' + (intg.enabled ? '<span class="badge badge-active">Enabled</span>' : '<span class="badge badge-deprecated">Disabled</span>') + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Last Tested</span><span class="detail-value">' + lastTest + '</span></div>' +
         '</div>' +

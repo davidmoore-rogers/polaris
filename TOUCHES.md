@@ -1388,7 +1388,7 @@ Listed alphabetically.
 
 **Cross-service deps:** none (reads/writes Settings key "discoveryDurationStats").
 
-**Used by:** `src/api/routes/integrations.ts — slow-check baseline lookup`; `src/api/routes/integrations.ts,1310 — record per-FG and overall run durations`. ~3 call sites.
+**Used by:** `src/api/routes/integrations.ts` — slow-check baseline lookup (`checkForSlowRuns`), record per-FG and overall run durations, and the `GET /integrations` list endpoint attaches `discoveryBaseline` per row so the card UI can show an "Avg Discovery Time" sized against `pollInterval`. ~4 call sites.
 
 **Invariants:**
 - Only successful (non-aborted, non-errored) runs recorded; failed runs skip `recordSample()` to avoid poisoning the average.
