@@ -18,11 +18,13 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, spawn } from "node:child_process";
-import { randomBytes, scryptSync, createCipheriv } from "node:crypto";
+import { randomBytes, scryptSync, createCipheriv, createHash } from "node:crypto";
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { getAppVersion } from "../utils/version.js";
 import { getRole } from "../utils/role.js";
+import { renderNginxConfig } from "./nginxRenderer.js";
+import { getProxyConfig, saveProxyConfig } from "./proxyConfigService.js";
 
 const execAsync = promisify(exec);
 
@@ -574,7 +576,7 @@ export async function applyUpdate(password?: string | null): Promise<void> {
  * The updater only runs on the web/all role (it owns the git checkout + status
  * file), so this is always called from the web process.
  */
-export function restartService() {
+export async function restartService() {
   const isWindows = process.platform === "win32";
   // role unset => "all" => legacy single-process install.
   const multiProcess = getRole() !== "all";
@@ -625,20 +627,76 @@ export function restartService() {
     // deploy/update-linux.sh:sync_nginx_config() so manual + in-app paths
     // land the same end state.
     const proxyMode = Boolean(process.env.POLARIS_PROXY_CERT_PATH);
-    const nginxSync = proxyMode ? [
-      `if [ -f ${APP_DIR}/deploy/nginx/polaris.conf ] && [ -f /etc/nginx/conf.d/polaris.conf ] && ! cmp -s ${APP_DIR}/deploy/nginx/polaris.conf /etc/nginx/conf.d/polaris.conf; then`,
-      `  cp -p /etc/nginx/conf.d/polaris.conf /etc/nginx/conf.d/polaris.conf.bak.$(date +%s)`,
-      `  cp -f ${APP_DIR}/deploy/nginx/polaris.conf /etc/nginx/conf.d/polaris.conf.new`,
-      `  mv -f /etc/nginx/conf.d/polaris.conf.new /etc/nginx/conf.d/polaris.conf`,
-      `  if nginx -t >/dev/null 2>&1; then`,
-      `    systemctl reload nginx && logger -t polaris-updater "Synced nginx config and reloaded"`,
-      `  else`,
-      `    logger -t polaris-updater "ERROR: nginx -t failed on staged config; reverting to previous nginx config"`,
-      `    latest_bak=$(ls -1t /etc/nginx/conf.d/polaris.conf.bak.* 2>/dev/null | head -1)`,
-      `    [ -n "$latest_bak" ] && cp -f "$latest_bak" /etc/nginx/conf.d/polaris.conf`,
-      `  fi`,
-      `fi`,
-    ].join("\n") : "";
+    // Render the operator's proxyConfig into /etc/nginx/conf.d/polaris.conf
+    // before spawning the transient unit. Only fires when managedMode=true
+    // — pre-adoption installs see the old "hand-edited" file left alone, and
+    // the GUI's drift banner stays up until the operator clicks Adopt.
+    //
+    // Drift check: if live file's sha256 doesn't match the proxyConfig row's
+    // lastAppliedHash, somebody hand-edited the config after our last write.
+    // We refuse to clobber and log a warning; the next operator visit to the
+    // GUI shows the drift banner and forces explicit re-adoption.
+    //
+    // Optimistic hash update: we record lastAppliedHash to the freshly-
+    // rendered sha256 BEFORE the transient unit runs. If `nginx -t` fails
+    // and the unit reverts, the DB hash will diverge from the (reverted)
+    // live file — the GUI's getDriftStatus picks that up on the next visit
+    // and prompts the operator to re-apply.
+    const STAGED_UPDATE_CONF = "/run/polaris-nginx-stage/polaris.conf.from-update";
+    let nginxSync = "";
+    if (proxyMode) {
+      try {
+        const cfg = await getProxyConfig();
+        if (!cfg.managedMode) {
+          logger.info("In-app update: skipping nginx config render — proxyConfig.managedMode is false (operator hasn't adopted)");
+        } else {
+          const rendered = renderNginxConfig({
+            config: cfg,
+            serverName: deriveServerNameForRender(),
+            polarisPort: derivePolarisPortForRender(),
+          });
+          let driftDetected = false;
+          try {
+            const live = readFileSync("/etc/nginx/conf.d/polaris.conf", "utf8");
+            const liveSha = createHash("sha256").update(live).digest("hex");
+            if (cfg.lastAppliedHash && liveSha !== cfg.lastAppliedHash) {
+              driftDetected = true;
+              logger.warn(
+                { liveSha, expected: cfg.lastAppliedHash },
+                "In-app update: /etc/nginx/conf.d/polaris.conf has been hand-edited since the last apply — refusing to clobber; GUI will surface drift banner",
+              );
+            }
+          } catch {
+            // Live file unreadable — let the transient unit's existence check skip the swap.
+          }
+          if (!driftDetected) {
+            mkdirSync("/run/polaris-nginx-stage", { recursive: true });
+            writeFileSync(STAGED_UPDATE_CONF, rendered.contents, { mode: 0o644 });
+            await saveProxyConfig({
+              lastAppliedAt: new Date().toISOString(),
+              lastAppliedHash: rendered.sha256,
+            });
+            nginxSync = [
+              `if [ -f ${STAGED_UPDATE_CONF} ]; then`,
+              `  cp -p /etc/nginx/conf.d/polaris.conf /etc/nginx/conf.d/polaris.conf.bak.$(date +%s) 2>/dev/null || true`,
+              `  cp -f ${STAGED_UPDATE_CONF} /etc/nginx/conf.d/polaris.conf.new`,
+              `  mv -f /etc/nginx/conf.d/polaris.conf.new /etc/nginx/conf.d/polaris.conf`,
+              `  rm -f ${STAGED_UPDATE_CONF}`,
+              `  if nginx -t >/dev/null 2>&1; then`,
+              `    systemctl reload nginx && logger -t polaris-updater "Synced nginx config from rendered template (sha256=${rendered.sha256.slice(0, 12)}) and reloaded"`,
+              `  else`,
+              `    logger -t polaris-updater "ERROR: nginx -t failed on rendered config; reverting"`,
+              `    latest_bak=$(ls -1t /etc/nginx/conf.d/polaris.conf.bak.* 2>/dev/null | head -1)`,
+              `    [ -n "$latest_bak" ] && cp -f "$latest_bak" /etc/nginx/conf.d/polaris.conf`,
+              `  fi`,
+              `fi`,
+            ].join("\n");
+          }
+        }
+      } catch (err: any) {
+        logger.warn({ err: err?.message }, "In-app update: nginx config render failed — falling back to no-op (leaving live config untouched)");
+      }
+    }
     // Sync the in-app nginx GUI helpers (wrapper script + sudoers grant +
     // tmpfiles staging-dir entry + polaris↔nginx group membership). Runs
     // unconditionally on every update — outside proxy mode the wrapper and
@@ -702,4 +760,24 @@ export function restartService() {
     logger.info("Exiting for systemd restart...");
     process.exit(1);
   }
+}
+
+// ─── nginx render env-derived inputs (duplicated from nginxApplyService) ───
+// Kept here to avoid a transitive dependency on nginxApplyService which
+// pulls in certInfo + privilegedSysadmin. The renderer itself only needs
+// these two values, derivable from env vars Polaris already reads at boot.
+
+function deriveServerNameForRender(): string {
+  const publicUrl = process.env.POLARIS_PUBLIC_URL;
+  if (publicUrl) {
+    try { return new URL(publicUrl).hostname; } catch { /* fall through */ }
+  }
+  return "polaris.example.com";
+}
+
+function derivePolarisPortForRender(): number {
+  const raw = process.env.PORT;
+  if (!raw) return 3000;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : 3000;
 }
