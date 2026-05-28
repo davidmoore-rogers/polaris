@@ -446,11 +446,12 @@
 
     var startY = 0;
     var startTime = 0;
-    var currentY = 0;
+    var currentY = 0;       // signed: positive = downward drag, negative = upward
     var baseline = 0;       // px to add to dy when writing inline transform
                             // (e.g. current peek offset, so drag continues from there)
     var tracking = false;   // touchstart accepted the gesture
     var dragging = false;   // user has moved past the activation threshold
+    var direction = null;   // "down" or "up" once activated
     var startedOnHandle = false;
     var restoreTimer = null;
 
@@ -491,24 +492,41 @@
       if (!tracking) return;
       var dy = e.touches[0].clientY - startY;
 
-      if (dy < 0) {
-        // Upward — release the gesture; native scroll can take over.
-        if (dragging) {
-          sheetEl.style.transition = "transform .2s ease-out";
-          sheetEl.style.transform = "";
+      // Below activation threshold: don't intercept yet, so a sloppy tap
+      // still resolves to a click on the underlying button.
+      if (!dragging && Math.abs(dy) < 5) return;
+
+      if (!dragging) {
+        dragging = true;
+        direction = dy > 0 ? "down" : "up";
+      }
+
+      if (direction === "up") {
+        // Upward gesture. If the sheet is offset (baseline > 0, e.g. peeked)
+        // AND the caller wired an onSwipeUp handler, this is a "drag the
+        // sheet back up" gesture — capture it. Otherwise let native scroll
+        // take over.
+        if (baseline > 0 && typeof opts.onSwipeUp === "function") {
+          // Constrain so the inline transform never goes above the natural
+          // position (baseline + dy >= 0).
+          var translatedUp = Math.max(dy, -baseline);
+          sheetEl.style.transform = "translateY(" + (baseline + translatedUp) + "px)";
+          currentY = dy;   // negative
+          if (e.cancelable) e.preventDefault();
+          return;
         }
+        // No upward handler available — release the gesture; native scroll
+        // can take over.
+        sheetEl.style.transition = "transform .2s ease-out";
+        sheetEl.style.transform = "";
         tracking = false;
         dragging = false;
+        direction = null;
         currentY = 0;
         return;
       }
 
-      // Below activation threshold: don't intercept yet, so a sloppy tap
-      // still resolves to a click on the underlying button.
-      if (!dragging && dy < 5) return;
-
-      dragging = true;
-
+      // Downward gesture.
       // Light resistance past 200 px so the sheet doesn't fly off-screen
       // on a long drag — keeps the snap-back feel reasonable.
       var translated = dy < 200 ? dy : 200 + (dy - 200) * 0.5;
@@ -521,16 +539,36 @@
     function onTouchEnd() {
       if (!tracking) return;
       tracking = false;
-      if (!dragging) { sheetEl.style.transition = ""; return; }
+      if (!dragging) { sheetEl.style.transition = ""; direction = null; return; }
       dragging = false;
+      var dir = direction;
+      direction = null;
 
       var elapsed = Math.max(Date.now() - startTime, 1);
-      var velocity = currentY / elapsed;   // px per ms
+      var dist = Math.abs(currentY);
+      var velocity = dist / elapsed;   // px per ms
       var height = sheetEl.offsetHeight || 400;
       var threshold = Math.min(120, height * 0.3);
-      var shouldDismiss = currentY >= threshold || (currentY >= 40 && velocity >= 0.5);
+      var crossed = dist >= threshold || (dist >= 40 && velocity >= 0.5);
 
-      if (shouldDismiss) {
+      if (dir === "up" && typeof opts.onSwipeUp === "function") {
+        if (crossed) {
+          sheetEl.style.transition = "";
+          sheetEl.style.transform = "";
+          try { opts.onSwipeUp(); } catch (_) {}
+        } else {
+          // Not enough — snap back to baseline (peek position).
+          sheetEl.style.transition = "transform .2s ease-out";
+          sheetEl.style.transform = "";
+          restoreTimer = setTimeout(function () {
+            sheetEl.style.transition = "";
+            restoreTimer = null;
+          }, 220);
+        }
+        return;
+      }
+
+      if (dir === "down" && crossed) {
         if (typeof opts.onSwipeDown === "function") {
           // Hand off — the caller will animate (e.g. snap to peek). Clear our
           // inline overrides so their CSS-class transition runs cleanly.

@@ -141,6 +141,11 @@
           setTimeout(dismiss, 180);
         }
       },
+      // Swipe-up from the peek band re-expands. In the expanded state baseline
+      // is 0, so the helper falls back to native scroll on upward gestures.
+      onSwipeUp: function () {
+        if (_state === "peek") expand();
+      },
       // Keep drag offsets continuous when peeked — without this the touchmove
       // overrides the peek CSS transform with translateY(dy), jumping the
       // sheet back to its natural position before the drag continues.
