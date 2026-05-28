@@ -353,6 +353,44 @@ build auto-prune + boot-time auto-build are layered on top.
 
 ---
 
+## cross-cutting/deployment
+
+**What it is:** The artifacts an operator touches to install, update, or run Polaris on a host: `deploy/setup-{rhel,ubuntu,windows}{,-nodb}.{sh,ps1}` (six fresh-install scripts), `deploy/update-{linux,windows}.{sh,ps1}` (host-side updaters invoked BY the in-app updater), `deploy/polaris-{web,monitor@,discovery,migrate}.service` + `polaris.service` + `polaris.target` (systemd units for split-role Linux deployments), `Dockerfile`, `docker-compose.yml`, `.env.example`, `docs/INSTALL.md`, and the first-run setup wizard at `src/setup/setupRoutes.ts`. None of these are read by the running app at request time — they shape how the app gets onto a host and what state it expects to find. See CLAUDE.md "Deployment & Updates" and the "Before any push, audit deployment surfaces" rule.
+
+**Writers** (changes in `src/` that the deployment surface must mirror):
+- New environment variable consumed by the app — must appear in `.env.example` with a comment, be documented in the CLAUDE.md "Environment Variables" block, be added to `docs/INSTALL.md` if operator-set, and seeded by the relevant `deploy/setup-*.{sh,ps1}` if those scripts write `.env` for the operator.
+- New runtime dependency — bump in `Dockerfile` (apt/dnf install line) AND in every `deploy/setup-*.{sh,ps1}` that provisions a fresh host. Node major version, Postgres major version, Go pin, system `ping` / `snmpwalk` / `pg_dump` — anything spawned via child_process or required by Prisma / pg-boss counts.
+- New `POLARIS_ROLE` capability or worker tunable — `src/utils/role.ts → roleConfig`, matching systemd unit in `deploy/polaris-*.service`, and `polaris.target`'s `Wants=` line. New tuning env vars need declaring in the unit's `Environment=` block or in `/etc/polaris/polaris.env` (sourced by units).
+- New disk-space minimum — bump `src/setup/setupRoutes.ts → RECOMMENDED_DB_FREE_GB` AND the disk-sizing table at the top of `docs/INSTALL.md`. CLAUDE.md "Deployment & Updates" calls this pair out by name.
+- New singleton scheduler / one-shot startup migration — confirm it's gated to `POLARIS_ROLE=web` (or unset = `all`) in `src/app.ts` so multi-process installs don't run it on every monitor / discovery replica.
+- New first-run setup step — wizard route + UI in `src/setup/`; the `.setup-complete` marker write at finalize still needs to fire (CLAUDE.md "First-run setup lock").
+- New encrypted-backup format change — the magic header is `POLARIS\0` (CLAUDE.md naming note); the restore path must accept the current version's dump and reject older formats with a clear error.
+- New Go-version requirement in the agent — bump in lockstep across `agent/go.mod`, every `deploy/setup-*.{sh,ps1}` Go pin, and the Dockerfile `golang-go` source. Already documented in `cross-cutting/polaris-agent` "When bumping agent/go.mod's go 1.x directive."
+
+**Readers** (artifacts the running app reads from disk that operators provision):
+- `.env` — read once at boot via dotenv. CLAUDE.md "Environment Variables" enumerates every key the app honors.
+- HTTPS cert/key files at `HTTPS_CERT_PATH` / `HTTPS_KEY_PATH` — read by `src/httpsManager.ts`.
+- `<STATE_DIR>/data/agents/<version>/` + `manifest.json` — produced by `agentBuildService` or by `make -C agent all`, consumed by the install / upgrade flows.
+- `.setup-complete` marker at the project root — `src/app.ts` boot path consults it to decide whether to run the wizard.
+
+**Invariants:**
+- `.env.example` is the contract. Any env var the app reads MUST appear there, and the CLAUDE.md "Environment Variables" block mirrors it. Drift here is a footgun — operators upgrade and miss new required keys.
+- `scripts/` ≠ `deploy/`. `scripts/` holds maintenance utilities run ad-hoc by operators or developers (`audit-multi-mac-assets.ts`, `check-docs.mjs`, `check-fmg-tokens.ts`, `fetch-std-mibs.mjs`, FMG smoke tests). `deploy/` holds fresh-install + update scripts and systemd units. New install / update logic belongs in `deploy/`; new ad-hoc diagnostic tooling belongs in `scripts/`.
+- Production updates flow through the in-app updater (Server Settings → Maintenance), not manual redeploy. `deploy/update-linux.sh` / `deploy/update-windows.ps1` are invoked BY the updater service — they are not the operator-facing path. Changes to update flow need to land in the updater service AND these scripts in lockstep.
+- The first-run setup wizard is unauthenticated by design; the `.setup-complete` marker is the only thing keeping a re-run from being an attack surface on an already-configured host. Don't add a code path that deletes the marker outside the documented "admin with shell access" recovery flow.
+- Disk-sizing minimums in `docs/INSTALL.md` are the single source of truth for operator capacity planning. `RECOMMENDED_DB_FREE_GB` in `setupRoutes.ts` and the doc table must agree, or the preflight warning will either over- or under-fire.
+
+**When changing this:**
+- Adding a new env var: update `.env.example`, the CLAUDE.md "Environment Variables" block, `docs/INSTALL.md` if operator-set, and any `deploy/setup-*.{sh,ps1}` that seeds `.env`. If it has a sensible default in code, document the default in both places.
+- Adding a new runtime dependency (apt/dnf package, Node major bump, Postgres major bump): update Dockerfile + all six `deploy/setup-*.{sh,ps1}` + `docs/INSTALL.md` per-platform sections. Smoke a fresh install against at least one platform.
+- Adding a new `POLARIS_ROLE` capability: new entry in `src/utils/role.ts → roleConfig` + new `deploy/polaris-<role>.service` unit + `polaris.target` `Wants=` line + `docs/INSTALL.md` multi-process section + ARCHITECTURE.md role table.
+- Bumping the disk-sizing recommendation: change `RECOMMENDED_DB_FREE_GB` and the `docs/INSTALL.md` table in the same commit.
+- Renaming or moving a state directory under `POLARIS_STATE_DIR`: search Dockerfile (pinned to `/app/state`), every `deploy/setup-*.{sh,ps1}` (paths under `/opt/polaris/state` on Linux), `docs/INSTALL.md`, and the encrypted-backup restore path. The Docker pin is the load-bearing one — break it and container restarts lose state.
+
+**Related:** `cross-cutting/polaris-agent` (Go-version pin, agent binary distribution path under `data/agents/<version>/`).
+
+---
+
 ## cross-cutting/integration-type-onboarding
 
 **What it is:** The complete callsite catalogue for adding a new integration type (Palo Alto firewall, future device families). Every new type touches the same ~30 callsites across backend dispatch, frontend modal, polling compatibility, asset projection, and source-default polling. Without this checklist a new type drifts on tab layout, config-blob keys, transport dispatch, and projection priority; with it, every integration feels uniform.

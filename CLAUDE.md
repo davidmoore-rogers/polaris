@@ -24,7 +24,7 @@ This file is the always-loaded project memory. For deeper material, read on dema
 
 ## Architecture
 
-Code lives in `src/` (`api/routes/`, `api/middleware/`, `services/`, `jobs/`, `utils/`, `models/`, `setup/`). Frontend is vanilla JavaScript in `public/`. Database schema in `prisma/schema.prisma`. Migrations in `prisma/migrations/`. Fresh-install scripts in `scripts/` and `deploy/`. Operator-facing docs in `docs/`.
+Code lives in `src/` (`api/routes/`, `api/middleware/`, `services/`, `jobs/`, `utils/`, `models/`, `setup/`). Frontend is vanilla JavaScript in `public/`. Database schema in `prisma/schema.prisma`. Migrations in `prisma/migrations/`. Fresh-install + update scripts and systemd units in `deploy/`; maintenance utilities (audit, MIB fetcher, doc-check, FMG smoke tests) in `scripts/`. Operator-facing docs in `docs/`.
 
 > Full file-by-file map with per-file purpose notes is in [ARCHITECTURE.md](ARCHITECTURE.md#architecture). Cross-cutting writer/reader relationships are indexed in [TOUCHES.md](TOUCHES.md); canonical implementations to copy from are in [TEMPLATES.md](TEMPLATES.md).
 
@@ -405,6 +405,9 @@ npm run lint
 - **Add a new role permission** — Add the function key to `FUNCTION_KEYS` in `src/api/middleware/permissions.ts`, migration to seed it on existing Roles, apply the guard at the route layer.
 - **Add bulk reservation import via CSV** — Route `POST /api/v1/reservations/import`, service function handles row validation and upsert.
 - **Write integration tests** — Vitest + Supertest against a test database (Docker Compose).
+- **Add a new environment variable** — Add to `.env.example` with a comment, document in the CLAUDE.md "Environment Variables" block, update `docs/INSTALL.md` if operator-set, and seed a default in `deploy/setup-*.{sh,ps1}` if the install scripts write `.env`. See `TOUCHES.md → cross-cutting/deployment`.
+- **Add a new Polaris Agent sample stream** — Add a Zod variant to `SamplesBodySchema` in `src/api/routes/agents.ts`, map to the enqueue helper, mirror in the Go agent collector under `agent/internal/collectors/`, and bump `agent/VERSION`. See `TOUCHES.md → cross-cutting/polaris-agent`.
+- **Bump a runtime dependency or Go pin** — Update `Dockerfile`, every `deploy/setup-*.{sh,ps1}`, and `docs/INSTALL.md` per-platform notes; for Go, bump `agent/go.mod` in lockstep. See `TOUCHES.md → cross-cutting/deployment`.
 
 ---
 
