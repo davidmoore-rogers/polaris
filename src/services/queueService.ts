@@ -355,7 +355,12 @@ async function refreshPgbossMetrics(): Promise<void> {
   let heavyCreated = 0;
   let heavyActive  = 0;
   try {
-    const queueNames = Object.values(QUEUE_NAMES);
+    // Include the discovery queue alongside the six monitor cadences so
+    // operators can see polaris-discovery-run depth / age / failed in /metrics
+    // (otherwise a stuck discovery worker is invisible until the UI surfaces it).
+    // Discovery is intentionally left OUT of the heavyQueues set below — its
+    // long-running jobs would trigger the monitor stalled-worker watchdog.
+    const queueNames = [...Object.values(QUEUE_NAMES), DISCOVERY_QUEUE_NAME];
     // MAX(EXTRACT(...)) gives the oldest waiting job per (queue, state) so a
     // queue that's draining quickly (low age) is distinguishable from one
     // that's stuck (high age) even at identical depth.

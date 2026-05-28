@@ -34,6 +34,7 @@ import {
   requestCancel,
   listActiveRuns,
   persistSlowFlags,
+  touchWorkerHeartbeat,
   newRunAccumulator,
   type RunAccumulator,
 } from "../../services/discoveryRunState.js";
@@ -1683,6 +1684,14 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
       .catch(() => {});
   }, 3_000);
 
+  // Liveness ping for the stale-run reaper. The progress flush already touches
+  // workerHeartbeatAt when activity happens, but a quiet phase (long FMG roster
+  // fetch, slow SNMP walk) can go minutes without one, which would look like a
+  // dead worker. This independent 60s ping keeps the heartbeat current.
+  const heartbeatTimer = setInterval(() => {
+    void touchWorkerHeartbeat(integrationId);
+  }, 60_000);
+
   // Throttled progress flush so a chatty FMG run doesn't hammer the DB.
   let lastFlush = 0;
   const flush = (force = false) => {
@@ -1848,6 +1857,7 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
     }
   } finally {
     clearInterval(cancelTimer);
+    clearInterval(heartbeatTimer);
   }
 }
 
