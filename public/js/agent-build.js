@@ -414,16 +414,19 @@
           '<input type="text" id="agent-cert-pin-stage-input" ' +
             'placeholder="sha256:abc123...64hex" ' +
             'style="flex:1;padding:5px 8px;font-family:var(--font-mono, monospace);font-size:0.8rem">' +
-          // Hidden file input — triggered by the Generate button. Accepts the
-          // common server-cert extensions; the parser strips PEM headers and
-          // SHA-256s the DER bytes client-side via window.crypto.subtle so the
-          // operator's cert file never leaves their browser.
+          // Hidden file input — triggered by the "from file" link below.
+          // Client-side SHA-256 via window.crypto.subtle; the file never
+          // leaves the browser.
           '<input type="file" id="agent-cert-pin-file-input" accept=".pem,.crt,.cer" style="display:none">' +
           '<button class="btn btn-secondary" id="btn-agent-cert-pin-generate" style="padding:4px 14px;font-size:0.8rem" ' +
-            'title="Compute SHA-256 from a local .pem/.crt/.cer file (client-side; file is not uploaded)">Generate</button>' +
+            'title="Fill with the SHA-256 of the cert Polaris is currently serving">Generate</button>' +
           '<button class="btn btn-secondary" id="btn-agent-cert-pin-stage" style="padding:4px 14px;font-size:0.8rem">Stage</button>' +
         '</div>' +
         '<p style="font-size:0.75rem;color:var(--color-text-tertiary);margin:0.3rem 0 0">' +
+          'Generate fills the SHA-256 of the cert Polaris is currently serving. ' +
+          'To stage a DIFFERENT cert\'s pin (typical pre-rotation flow), ' +
+          '<a href="#" id="link-agent-cert-pin-from-file" style="color:var(--color-accent);text-decoration:underline;cursor:pointer">compute it from a local .pem file</a> ' +
+          '(client-side; the file is not uploaded). ' +
           'Each agent re-saves agent.conf + restarts via systemd on next /config tick when the pin set changes.' +
         '</p>';
 
@@ -450,22 +453,46 @@
           });
         });
       }
-      // Generate → file picker → client-side SHA-256 of the cert's DER bytes
-      // → fill the input. The file never leaves the browser. Matches the
-      // server's getServerCertFingerprint() output byte-for-byte.
-      if (genBtn && fileIn && stageIn) {
-        genBtn.addEventListener("click", function () { fileIn.click(); });
+      // Generate → one-click: fetch the fingerprint of the cert Polaris is
+      // currently serving (Node-HTTPS: in-memory PEM; proxy mode: file on
+      // disk) via GET /server-settings/https and drop it into the input.
+      // This is the operator-most-common path — staging the OLD pin before
+      // rotating, or staging a pin to re-pin after an out-of-order rotation.
+      if (genBtn && stageIn) {
+        genBtn.addEventListener("click", function () {
+          genBtn.disabled = true;
+          api.serverSettings.getHttps().then(function (h) {
+            if (!h || !h.fingerprint) {
+              showToast("No cert fingerprint available — is HTTPS running?", "error");
+              return;
+            }
+            stageIn.value = h.fingerprint;
+            showToast("Filled with current cert pin", "success");
+          }).catch(function (err) {
+            showToast("Generate failed: " + err.message, "error");
+          }).finally(function () {
+            genBtn.disabled = false;
+          });
+        });
+      }
+      // "Compute from .pem file" link → file picker → client-side SHA-256.
+      // For staging a DIFFERENT cert's pin (typical pre-rotation flow when
+      // the new cert hasn't been activated yet). File never leaves the browser.
+      var fromFileLink = document.getElementById("link-agent-cert-pin-from-file");
+      if (fromFileLink && fileIn && stageIn) {
+        fromFileLink.addEventListener("click", function (e) {
+          e.preventDefault();
+          fileIn.click();
+        });
         fileIn.addEventListener("change", function () {
           var f = fileIn.files && fileIn.files[0];
           if (!f) return;
-          genBtn.disabled = true;
           _computeCertPinFromPemFile(f).then(function (pin) {
             stageIn.value = pin;
             showToast("Computed pin: " + pin.slice(0, 19) + "..." + pin.slice(-6), "success");
           }).catch(function (err) {
             showToast("Could not parse cert: " + err.message, "error");
           }).finally(function () {
-            genBtn.disabled = false;
             // Clear so picking the same file twice still fires change.
             fileIn.value = "";
           });

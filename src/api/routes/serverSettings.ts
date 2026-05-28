@@ -641,7 +641,16 @@ router.get("/https", async (_req, res, next) => {
       });
     }
     const settings = await getHttpsSettings();
-    res.json({ ...settings, running: isHttpsRunning(), externallyManaged: false });
+    // Always expose the currently-served cert's fingerprint so the
+    // Maintenance card's "Cert pin rotation → Generate" button can one-click
+    // it without a file picker. Null when HTTPS isn't running (no cert
+    // currently loaded — fall back to the file-picker path).
+    res.json({
+      ...settings,
+      running:           isHttpsRunning(),
+      externallyManaged: false,
+      fingerprint:       getServerCertFingerprint(),
+    });
   } catch (err) {
     next(err);
   }
