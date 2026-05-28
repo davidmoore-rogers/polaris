@@ -9,8 +9,14 @@
 #   3. Pulls the latest code from git
 #   4. Installs dependencies and rebuilds
 #   5. Runs database migrations
-#   6. Restarts the service
-#   7. Verifies the service is healthy
+#   6. Syncs shipped systemd unit files into /etc/systemd/system/ + daemon-reload
+#   7. Restarts the service (polaris.target for split-role, polaris.service for single-process)
+#   8. Verifies the service is healthy
+#
+# Works for BOTH deployment topologies — the script detects which by asking
+# systemctl which unit is enabled. Mirrors the in-app updater's auto-sync
+# behavior (src/services/updateService.ts) so manual + in-app paths produce
+# the same end state.
 #
 # On failure, offers to rollback to the previous version.
 
@@ -20,7 +26,27 @@ APP_DIR="/opt/polaris"
 APP_USER="polaris"
 DB_NAME="polaris"
 BACKUP_DIR="/opt/polaris/backups"
-SERVICE_NAME="polaris"
+
+# Detect deployment topology by asking systemctl which unit is enabled.
+# Split-role layout (polaris.target + web/monitor@N/discovery) is the
+# Rogers Group production shape; single-process polaris.service is the
+# small-install default. If neither is enabled the host wasn't provisioned
+# by the setup script — bail before doing anything destructive.
+if systemctl is-enabled --quiet polaris.target 2>/dev/null; then
+  DEPLOYMENT="split"
+  SYSTEMD_UNIT="polaris.target"
+  # journalctl tail subject when verifying / debugging — polaris-web is the
+  # HTTP face of the group, so its logs are what an operator wants to see
+  # if startup fails.
+  LOG_UNIT="polaris-web.service"
+elif systemctl is-enabled --quiet polaris.service 2>/dev/null; then
+  DEPLOYMENT="single"
+  SYSTEMD_UNIT="polaris.service"
+  LOG_UNIT="polaris.service"
+else
+  echo "[ERROR] Neither polaris.target nor polaris.service is enabled — was this host provisioned by deploy/setup-*.sh?" >&2
+  exit 1
+fi
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -28,6 +54,45 @@ info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; }
 step()  { echo -e "${CYAN}[STEP]${NC}  $*"; }
+
+# Sync shipped unit files from $APP_DIR/deploy/ into /etc/systemd/system/.
+# cmp-only-overwrite, so a no-op when nothing changed. Same shape and same
+# rationale as the in-app updater's restartService() (src/services/updateService.ts).
+# Returns 0 if it ran daemon-reload, 1 if no files needed syncing.
+# Operator customization must live in <unit>.d/*.conf drop-ins — direct
+# edits to the main unit file get clobbered here, matching the in-app path.
+sync_unit_files() {
+  local synced=0
+  local units
+  if [[ "$DEPLOYMENT" == "split" ]]; then
+    units=(
+      "$APP_DIR/deploy/polaris-web.service"
+      "$APP_DIR/deploy/polaris-monitor@.service"
+      "$APP_DIR/deploy/polaris-discovery.service"
+      "$APP_DIR/deploy/polaris-migrate.service"
+      "$APP_DIR/deploy/polaris.target"
+    )
+  else
+    units=("$APP_DIR/deploy/polaris.service")
+  fi
+  for f in "${units[@]}"; do
+    [[ -f "$f" ]] || continue
+    local name target
+    name="$(basename "$f")"
+    target="/etc/systemd/system/$name"
+    if [[ -f "$target" ]] && ! cmp -s "$f" "$target"; then
+      cp -f "$f" "$target"
+      info "Synced unit file: $name"
+      synced=$((synced + 1))
+    fi
+  done
+  if [[ $synced -gt 0 ]]; then
+    info "Reloading systemd daemon ($synced unit file(s) updated)..."
+    systemctl daemon-reload
+    return 0
+  fi
+  return 1
+}
 
 # ─── Preflight ────────────────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
@@ -42,8 +107,10 @@ fi
 
 cd "$APP_DIR"
 
+info "Detected deployment: $DEPLOYMENT (managing $SYSTEMD_UNIT)"
+
 # ─── 1. Record current version ──────────────────────────────────────────────
-step "1/8  Recording current version..."
+step "1/9  Recording current version..."
 
 OLD_VERSION=$(node -e "console.log(require('./package.json').version)" 2>/dev/null || echo "unknown")
 OLD_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -51,7 +118,7 @@ OLD_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 info "Current version: v${OLD_VERSION} (${OLD_COMMIT})"
 
 # ─── 2. Pre-update database backup ──────────────────────────────────────────
-step "2/8  Creating pre-update database backup..."
+step "2/9  Creating pre-update database backup..."
 
 mkdir -p "$BACKUP_DIR"
 BACKUP_FILE="${BACKUP_DIR}/polaris-pre-update-${OLD_VERSION}-$(date +%Y%m%d-%H%M%S).sql.gz"
@@ -66,7 +133,7 @@ else
 fi
 
 # ─── 3. Pull latest code ────────────────────────────────────────────────────
-step "3/8  Pulling latest code..."
+step "3/9  Pulling latest code..."
 
 sudo -u "$APP_USER" git fetch --all --prune
 sudo -u "$APP_USER" git pull --ff-only
@@ -111,7 +178,13 @@ rollback() {
     info "Database restored from backup"
   fi
 
-  systemctl restart "$SERVICE_NAME" 2>/dev/null
+  # The git reset above restored deploy/*.service to OLD_COMMIT content. If
+  # we'd synced new unit files mid-update they may still be live in
+  # /etc/systemd/system/ — sync the now-rolled-back deploy/ files back into
+  # place so systemd reflects the rolled-back code/units pair.
+  sync_unit_files || true
+
+  systemctl restart "$SYSTEMD_UNIT" 2>/dev/null
   info "Rolled back to v${OLD_VERSION} (${OLD_COMMIT})"
   info "Service restarted with previous version"
 
@@ -123,7 +196,7 @@ rollback() {
 }
 
 # ─── 4. Install dependencies ────────────────────────────────────────────────
-step "4/8  Installing dependencies..."
+step "4/9  Installing dependencies..."
 
 # Ensure Node.js can bind to privileged ports (80, 443) without root
 setcap cap_net_bind_service=+ep "$(which node)" 2>/dev/null || true
@@ -145,7 +218,7 @@ fi
 # drops columns the running client still selects, and every Asset read/write
 # crashes with `column "<name>" does not exist`. See
 # cross-cutting/schema-migrations-and-prisma-client-lifecycle in TOUCHES.md.
-step "5/8  Generating Prisma client..."
+step "5/9  Generating Prisma client..."
 
 sudo -u "$APP_USER" npx prisma generate || rollback "prisma generate"
 
@@ -154,34 +227,49 @@ sudo -u "$APP_USER" npx prisma generate || rollback "prisma generate"
 # generated-client files Prisma renamed between versions) can't shadow the
 # fresh tsc output. tsc itself is non-destructive: without this, a file
 # that exists in dist/ but no longer in src/ lingers forever.
-step "6/8  Building TypeScript..."
+step "6/9  Building TypeScript..."
 
 sudo -u "$APP_USER" rm -rf "$APP_DIR/dist" || rollback "dist cleanup"
 sudo -u "$APP_USER" npx tsc || rollback "TypeScript build"
 
 info "Build successful — stopping service for migration"
 
-# ─── 7. Migrate & restart ───────────────────────────────────────────────────
-step "7/8  Running database migrations..."
+# ─── 7. Migrate ─────────────────────────────────────────────────────────────
+step "7/9  Running database migrations..."
 
-systemctl stop "$SERVICE_NAME"
+systemctl stop "$SYSTEMD_UNIT"
 
 sudo -u "$APP_USER" npx prisma migrate deploy || rollback "database migration"
 
-info "Migrations complete — starting service"
+info "Migrations complete"
 
-systemctl start "$SERVICE_NAME"
+# ─── 8. Sync systemd unit files + daemon-reload ──────────────────────────────
+# A Polaris update that ships unit-file changes (new Environment= on a worker
+# role, new hardening directive, etc.) only lands the new content in
+# $APP_DIR/deploy/ — /etc/systemd/system/ still holds whatever the operator
+# cp'd at install time. Without this step the restart below would cycle the
+# group against the OLD unit definitions and silently lose the change. cmp-
+# only-overwrite means no-op on updates that don't touch unit files. Same
+# behavior as the in-app updater (src/services/updateService.ts) — manual +
+# in-app paths produce the same end state.
+step "8/9  Syncing systemd unit files..."
 
-# ─── 8. Verify ──────────────────────────────────────────────────────────────
-step "8/8  Verifying service health..."
+sync_unit_files || info "No unit file changes to sync"
+
+# Now restart the service with the synced units + new code.
+info "Starting $SYSTEMD_UNIT..."
+systemctl start "$SYSTEMD_UNIT"
+
+# ─── 9. Verify ──────────────────────────────────────────────────────────────
+step "9/9  Verifying service health..."
 
 sleep 3
 
-if systemctl is-active --quiet "$SERVICE_NAME"; then
+if systemctl is-active --quiet "$SYSTEMD_UNIT"; then
   info "Service is running"
 else
   warn "Service may not have started — checking logs..."
-  journalctl -u "$SERVICE_NAME" --no-pager -n 10
+  journalctl -u "$LOG_UNIT" --no-pager -n 10
   rollback "service startup"
 fi
 
@@ -211,7 +299,7 @@ info "  Commit:  ${OLD_COMMIT} → ${NEW_COMMIT}"
 if [[ -n "$BACKUP_FILE" && -f "$BACKUP_FILE" ]]; then
   info "  Backup:  $BACKUP_FILE"
 fi
-info "  Logs:    journalctl -u $SERVICE_NAME -f"
+info "  Logs:    journalctl -u $LOG_UNIT -f"
 info "============================================"
 echo ""
 
