@@ -12,14 +12,17 @@
  * a transient outage self-heals on the next 10-min tick.
  *
  * Sequential, not parallel — at Rogers Group, FortiManager drops parallel
- * connections above ~1-2, so we test integrations one at a time.
+ * connections above ~1-2, so we test integrations one at a time. For the same
+ * reason, any integration currently in an active discovery run is skipped —
+ * a fresh login session during a long-running FMG discovery would collide
+ * with the worker's open session and stamp a false-positive failure.
  *
  * Import from app.ts to activate.
  */
 
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { runPreflightTest } from "../api/routes/integrations.js";
+import { runPreflightTest, isDiscoveryRunning } from "../api/routes/integrations.js";
 import { logEvent } from "../api/routes/events.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
@@ -33,6 +36,13 @@ async function testAllIntegrations(): Promise<void> {
     });
 
     for (const intg of integrations) {
+      // Skip integrations with an active discovery run. The FMG at Rogers Group
+      // drops parallel connections above ~1-2, so a fresh login session while
+      // discovery is mid-proxy gets rejected and stamps a false-positive
+      // `lastTestOk=false`. A test result during a run also adds no signal —
+      // discovery itself is the live proof. Preserve the prior lastTestAt/Ok.
+      if (await isDiscoveryRunning(intg.id).catch(() => false)) continue;
+
       let result: { ok: boolean; message: string };
       try {
         result = await runPreflightTest(intg);
