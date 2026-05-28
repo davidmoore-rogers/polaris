@@ -1478,7 +1478,12 @@ export async function checkForSlowRuns(): Promise<void> {
   const now = Date.now();
   for (const row of rows) {
     const id = row.integrationId;
-    const startedMs = (row.startedAt ?? row.createdAt).getTime();
+    // Slow detection compares actual run length against the baseline. A queued
+    // row (worker hasn't picked it up yet) has no run length to compare, so
+    // skip it — otherwise the row's createdAt stand-in would charge queue time
+    // against the threshold and flag the run slow before it even started.
+    if (!row.startedAt) continue;
+    const startedMs = row.startedAt.getTime();
     let slowAlerted = row.slowAlerted;
     const slowAlertedDevices = new Set(row.slowAlertedDevices as string[]);
     let mutated = false;

@@ -88,10 +88,15 @@ export async function upsertQueuedRun(args: {
     cancelRequested: false,
     workerHeartbeatAt: null,
   };
+  // createdAt is reset on every enqueue so elapsed-time math against the row
+  // reflects the current run's age, not the row's lifetime. The row is keyed
+  // on integrationId and reused across runs, so Prisma's @default(now()) only
+  // fires the very first time — without this, a re-triggered integration's
+  // queued-window elapsedMs would point at the original first-ever creation.
   await prisma.discoveryRun.upsert({
     where: { integrationId: args.integrationId },
     create: { integrationId: args.integrationId, ...base },
-    update: base,
+    update: { ...base, createdAt: new Date() },
   });
 }
 
