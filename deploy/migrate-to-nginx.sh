@@ -230,9 +230,19 @@ try {
 EXTRACT
 
 set +e
-# Source .env so DATABASE_URL etc. are present for the Node extract
+# Source .env so DATABASE_URL etc. are present for the Node extract.
 set -a; . "$ENV_FILE"; set +a
-sudo -u polaris -- bash -c "cd $APP_DIR && DATABASE_URL='$DATABASE_URL' node $EXTRACT_SCRIPT $TMP"
+# Run the extract as root from $APP_DIR. Originally this `sudo -u polaris`'d
+# down for least-privilege, but mktemp -d creates $TMP with 0700 owned by
+# root so the polaris user couldn't traverse into it to read extract.mjs —
+# Node surfaced that as MODULE_NOT_FOUND. Root reads + writes $TMP fine,
+# Prisma auth happens via DATABASE_URL (DB-level credentials, not OS user),
+# and the extracted cert PEMs are installed below with explicit
+# `install -o root -g nginx` perms regardless of who staged them.
+(
+  cd "$APP_DIR"
+  DATABASE_URL="$DATABASE_URL" node "$EXTRACT_SCRIPT" "$TMP"
+)
 EXTRACT_RC=$?
 set -e
 if [[ $EXTRACT_RC -ne 0 ]]; then
