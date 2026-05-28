@@ -434,12 +434,21 @@
   //   - Dismiss fires past 30% of sheet height OR a short downward flick
   //     (≥40 px with velocity ≥0.5 px/ms). Below that, the sheet snaps
   //     back into place.
-  function attachSwipeToDismiss(sheetEl, onDismiss) {
+  // `opts.onSwipeDown`, if provided, replaces the default
+  // animate-to-translateY(100%) → onDismiss sequence: the helper clears its
+  // inline transform/transition first so the caller can run their own
+  // CSS-class-driven animation (e.g. expanded → peek) and decide whether to
+  // dismiss outright. Used by the asset detail sheet to make the first
+  // swipe-down lock to the peek state and the second one dismiss.
+  function attachSwipeToDismiss(sheetEl, onDismiss, opts) {
     if (!sheetEl || typeof onDismiss !== "function") return;
+    opts = opts || {};
 
     var startY = 0;
     var startTime = 0;
     var currentY = 0;
+    var baseline = 0;       // px to add to dy when writing inline transform
+                            // (e.g. current peek offset, so drag continues from there)
     var tracking = false;   // touchstart accepted the gesture
     var dragging = false;   // user has moved past the activation threshold
     var startedOnHandle = false;
@@ -470,6 +479,9 @@
       startY = e.touches[0].clientY;
       startTime = Date.now();
       currentY = 0;
+      baseline = (typeof opts.baselineTranslate === "function")
+        ? (Number(opts.baselineTranslate()) || 0)
+        : 0;
 
       if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null; }
       sheetEl.style.transition = "none";
@@ -500,7 +512,7 @@
       // Light resistance past 200 px so the sheet doesn't fly off-screen
       // on a long drag — keeps the snap-back feel reasonable.
       var translated = dy < 200 ? dy : 200 + (dy - 200) * 0.5;
-      sheetEl.style.transform = "translateY(" + translated + "px)";
+      sheetEl.style.transform = "translateY(" + (baseline + translated) + "px)";
       currentY = dy;
 
       if (e.cancelable) e.preventDefault();
@@ -519,11 +531,19 @@
       var shouldDismiss = currentY >= threshold || (currentY >= 40 && velocity >= 0.5);
 
       if (shouldDismiss) {
-        sheetEl.style.transition = "transform .2s ease-out";
-        sheetEl.style.transform = "translateY(100%)";
-        setTimeout(function () {
-          try { onDismiss(); } catch (_) {}
-        }, 180);
+        if (typeof opts.onSwipeDown === "function") {
+          // Hand off — the caller will animate (e.g. snap to peek). Clear our
+          // inline overrides so their CSS-class transition runs cleanly.
+          sheetEl.style.transition = "";
+          sheetEl.style.transform = "";
+          try { opts.onSwipeDown(); } catch (_) {}
+        } else {
+          sheetEl.style.transition = "transform .2s ease-out";
+          sheetEl.style.transform = "translateY(100%)";
+          setTimeout(function () {
+            try { onDismiss(); } catch (_) {}
+          }, 180);
+        }
       } else {
         sheetEl.style.transition = "transform .2s ease-out";
         sheetEl.style.transform = "";

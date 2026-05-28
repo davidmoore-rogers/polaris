@@ -126,7 +126,25 @@
     sheet.querySelector(".asset-sheet-header").addEventListener("click", function (e) {
       if (_state === "peek" && !e.target.closest("#asset-sheet-close, #asset-sheet-refresh")) expand();
     });
-    PolarisTabs.attachSwipeToDismiss(sheet, dismiss);
+    PolarisTabs.attachSwipeToDismiss(sheet, dismiss, {
+      // First swipe-down locks to peek; second swipe-down dismisses.
+      onSwipeDown: function () {
+        if (_state === "expanded") {
+          minimize();
+        } else if (_state === "peek") {
+          sheet.style.transition = "transform .2s ease-out";
+          sheet.style.transform = "translateY(100%)";
+          setTimeout(dismiss, 180);
+        }
+      },
+      // Keep drag offsets continuous when peeked — without this the touchmove
+      // overrides the peek CSS transform with translateY(dy), jumping the
+      // sheet back to its natural position before the drag continues.
+      baselineTranslate: function () {
+        if (_state !== "peek") return 0;
+        return Math.max(0, (sheet.offsetHeight || 0) - PEEK_BAND_PX);
+      },
+    });
     return sheet;
   }
 
@@ -139,6 +157,10 @@
       dotEl.className = "dot" + (cls ? " " + cls : "");
       dotEl.style.display = cls ? "" : "none";
     }
+    // Refresh fires probeNow, which only makes sense for monitored assets —
+    // unmonitored hosts have no probe transport to run, so hide the button.
+    var refreshBtn = document.getElementById("asset-sheet-refresh");
+    if (refreshBtn) refreshBtn.style.display = asset.monitored ? "" : "none";
   }
 
   function minimize() {
@@ -231,6 +253,8 @@
     if (nameEl) nameEl.textContent = "Asset";
     var dotEl = document.getElementById("asset-sheet-dot");
     if (dotEl) { dotEl.className = "dot"; dotEl.style.display = "none"; }
+    var refreshBtn = document.getElementById("asset-sheet-refresh");
+    if (refreshBtn) refreshBtn.style.display = "none"; // setHeader re-shows when monitored
     var host = document.getElementById("asset-host");
     if (host) host.innerHTML = '<div class="loading-screen"><div class="spinner"></div></div>';
   }

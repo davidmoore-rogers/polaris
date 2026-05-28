@@ -709,6 +709,7 @@ input, select, textarea { font-family: inherit; }
   z-index: 901;
   transition: transform .25s ease;
   will-change: transform;
+  max-height: 80vh;
 }
 /* Peek: slide the sheet down so only its top band (handle + header) shows.
    --asset-peek-y is measured + set in JS from the live height so short
