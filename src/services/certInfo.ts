@@ -1,17 +1,9 @@
 /**
  * src/services/certInfo.ts — single source of truth for the leaf cert that
- * agents will pin against, regardless of WHERE TLS is terminated.
+ * agents pin against. Reads the PEM nginx serves from POLARIS_PROXY_CERT_PATH.
  *
- * Two modes:
- *   - **proxy mode** (POLARIS_PROXY_CERT_PATH set): reads the PEM from disk.
- *     The cert nginx serves IS what agents pin. Layered cache + last-known-
- *     good fallback survives cert-rotation atomic-rename windows.
- *   - **Node-HTTPS mode** (legacy): httpsRuntime hands us the in-memory PEM
- *     via setRuntimeCertPem() whenever the listener (re)loads its cert.
- *
- * Public API is mode-agnostic — every caller of getServerCertFingerprint() /
- * getServerCertHostnames() / getServerCertExpiry() gets the right value
- * automatically.
+ * Layered cache + last-known-good fallback survives cert-rotation atomic-
+ * rename windows (certbot-style renew).
  *
  * Design review notes folded in:
  *   §5 (layered cache): hash file bytes as the cache key, only re-parse on
@@ -21,9 +13,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { setTimeout as sleep } from "node:timers/promises";
 import { createHash, X509Certificate } from "node:crypto";
-import { isProxyMode } from "../utils/proxyMode.js";
 import { logger } from "../utils/logger.js";
 
 interface CachedCert {
@@ -37,24 +27,6 @@ interface CachedCert {
   /** ISO 8601 expiry date, or null if unparseable. */
   expiresAt: string | null;
   parsedAt: number;
-}
-
-// ─── Mode state ─────────────────────────────────────────────────────────────
-
-let runtimePem: string | Buffer | null = null;
-
-/**
- * In Node-HTTPS mode, the httpsRuntime listener calls this every time it
- * (re)loads its cert. In proxy mode this is never called (or if it is, it's
- * silently ignored — proxy mode reads from disk).
- */
-export function setRuntimeCertPem(pem: string | Buffer | null): void {
-  if (isProxyMode()) return; // proxy mode is the source of truth — don't accept overrides
-  runtimePem = pem;
-}
-
-export function clearRuntimeCertPem(): void {
-  runtimePem = null;
 }
 
 // ─── Cache ──────────────────────────────────────────────────────────────────
@@ -92,30 +64,23 @@ function readActiveCert(): CachedCert | null {
 }
 
 /**
- * Read the raw PEM bytes from whichever source applies. Bounded retry
+ * Read the raw PEM bytes from POLARIS_PROXY_CERT_PATH. Bounded retry
  * (100ms × 1) on ENOENT / zero-byte / read error so a certbot-style atomic
  * rename window doesn't poison the cache.
  */
 function readPemBytes(): Buffer | null {
-  if (isProxyMode()) {
-    const path = process.env.POLARIS_PROXY_CERT_PATH!;
-    const first = tryReadFile(path);
-    if (first && first.length > 0) return first;
-    // Atomic-rename window: a single 100ms retry covers most rename gaps
-    // without turning a real config error into a multi-second hang.
-    sleepSync(100);
-    const second = tryReadFile(path);
-    if (second && second.length > 0) return second;
-    if (!warnSuppressed) {
-      logger.warn({ path }, "Cert file unreadable or empty after retry — returning last-known-good (may be null)");
-      warnSuppressed = true;
-    }
-    return null;
+  const path = process.env.POLARIS_PROXY_CERT_PATH;
+  if (!path) return null;
+  const first = tryReadFile(path);
+  if (first && first.length > 0) return first;
+  sleepSync(100);
+  const second = tryReadFile(path);
+  if (second && second.length > 0) return second;
+  if (!warnSuppressed) {
+    logger.warn({ path }, "Cert file unreadable or empty after retry — returning last-known-good (may be null)");
+    warnSuppressed = true;
   }
-
-  // Node-HTTPS mode: PEM was handed in by httpsRuntime
-  if (!runtimePem) return null;
-  return Buffer.isBuffer(runtimePem) ? runtimePem : Buffer.from(runtimePem);
+  return null;
 }
 
 function tryReadFile(path: string): Buffer | null {
@@ -138,10 +103,6 @@ function sleepSync(ms: number): void {
   // which is rare and short-lived.
   while (Date.now() < end) { /* spin */ }
 }
-// Quiet the linter — the sleep import is here so callers that want async
-// sleep can still get it from this module if we ever flip the API.
-void sleep;
-
 function parseFromBytes(bytes: Buffer, sha256: string): CachedCert | null {
   try {
     const x509 = new X509Certificate(bytes);
@@ -201,9 +162,8 @@ function parseValidTo(validTo: string): string | null {
  * agent's Go TLS client can pin Polaris's cert and skip the system CA
  * trust chain entirely (defends against CA-compromise / MITM scenarios).
  *
- * Returns null when no cert is available: in Node-HTTPS mode, the listener
- * isn't running yet; in proxy mode, the cert file is unreadable AND no
- * previous good fingerprint is cached (e.g. very first boot, mid-rotation).
+ * Returns null when the cert file is unreadable AND no previous good
+ * fingerprint is cached (e.g. very first boot, mid-rotation).
  */
 export function getServerCertFingerprint(): string | null {
   return readActiveCert()?.fingerprint ?? null;
@@ -239,5 +199,4 @@ export function getServerCertExpiry(): string | null {
 export function __resetCertInfoCacheForTests(): void {
   lastGood = null;
   warnSuppressed = false;
-  runtimePem = null;
 }

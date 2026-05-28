@@ -19,11 +19,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { errorHandler } from "./api/middleware/errorHandler.js";
 import { csrfMiddleware } from "./api/middleware/csrf.js";
 import { logger } from "./utils/logger.js";
-import { initHttps, httpsRedirectMiddleware } from "./httpsRuntime.js";
 import { resolveTrustProxy } from "./utils/trustProxy.js";
 import { validateRuntimeConfiguration } from "./utils/runtimeConfig.js";
 import { isProxyMode } from "./utils/proxyMode.js";
-import { getHttpsSettings } from "./services/serverSettingsService.js";
 import { UPLOADS_DIR } from "./utils/paths.js";
 import { isAzureSsoConfiguredAsync, getSsoSettings } from "./services/azureAuthService.js";
 import {
@@ -411,8 +409,10 @@ const loginLimiter = rateLimit({
 app.use("/api/v1/auth/login", loginLimiter);
 app.use("/api/v1/auth/azure/login", loginLimiter);
 
-// HTTP → HTTPS redirect (enabled dynamically via server settings)
-app.use(httpsRedirectMiddleware);
+// HTTP → HTTPS redirect lived here in pre-Phase-4 Node-HTTPS mode. After
+// Phase 4, nginx owns redirects (configured in deploy/nginx/polaris.conf
+// via the optional `listen 80;` server block operators can enable); local
+// dev runs HTTP-only on 127.0.0.1 so there's nothing to redirect from.
 
 // Inactivity timeout — check and update last activity on every authenticated request
 app.use(async (req, res, next) => {
@@ -594,20 +594,22 @@ export async function startApp(): Promise<void> {
     return;
   }
 
-  const httpsSettings = await getHttpsSettings().catch(() => null);
-  const PORT_RAW = process.env.PORT ?? httpsSettings?.httpPort ?? 3000;
+  // Phase 4: Node HTTPS is gone. Polaris always listens HTTP-only.
+  //   - Proxy mode (POLARIS_PROXY_CERT_PATH set): nginx terminates TLS on
+  //     443 and proxies to 127.0.0.1:PORT — bind localhost-only so nothing
+  //     else on the network can reach us.
+  //   - "all" mode (POLARIS_ROLE unset, npm run dev): bind all interfaces
+  //     on PORT for dev ergonomics. No HTTPS, no cert, no Setting.https.
+  // PORT picks env override > 3000 default; no more Setting.https.httpPort
+  // fallback since the Setting key was retired in this same release.
+  const PORT_RAW = process.env.PORT ?? 3000;
   const PORT = typeof PORT_RAW === "number" ? PORT_RAW : Number.parseInt(String(PORT_RAW), 10) || 3000;
-  // Proxy mode: bind 127.0.0.1 only — nginx terminates TLS on 443 and proxies
-  // here. Direct mode: bind all interfaces (0.0.0.0 / ::) so Polaris is
-  // reachable however the operator wired the network.
   const httpServer = isProxyMode()
     ? app.listen(PORT, "127.0.0.1", () => {
         logger.info({ port: PORT, bind: "127.0.0.1" }, "Polaris server listening (proxy mode)");
-        // initHttps() is a no-op in proxy mode — nginx terminates TLS.
       })
     : app.listen(PORT, () => {
-        logger.info({ port: PORT }, "Polaris server listening");
-        initHttps(app);
+        logger.info({ port: PORT }, "Polaris server listening (dev / all-role HTTP-only)");
       });
   // Attach the Polaris Agent WebSocket upgrade handler. Same server
   // surface as the REST API — agents reach /api/v1/agents/ws over the

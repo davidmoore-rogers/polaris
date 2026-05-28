@@ -164,13 +164,13 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 
 **Writers** (state that mutates ManagedAgent / agent.* events):
 - `src/services/agentChannelService.ts` — in-memory `Map<managedAgentId, WebSocket>` session manager. `attach()` registers + schedules 30s heartbeat pings + bumps wsConnectedAt + emits `agent.connected`. `detach()` clears the timer, rejects any pending probe-now promises, closes the socket, bumps wsDisconnectedAt + emits `agent.disconnected`. `sendProbeNow(stream, timeoutMs)` is the server-→agent verb used by /probe-now in agent-mode; `refreshConfig()` sends a `refresh-config` frame so the agent re-fetches /config immediately. Idempotent: replacing an existing session for the same agentId closes the old socket.
-- `src/api/routes/agentsWs.ts` — `attachAgentWsUpgradeHandler(server)` wires `http.Server.on("upgrade", ...)` to validate the bearer carried in `Sec-WebSocket-Protocol: polaris-agent.v1.bearer.<token>`, then hands the socket to `agentChannelService.attach`. Mounted twice: once on the HTTP listener (src/app.ts), once on the HTTPS listener (src/httpsRuntime.ts after listen()). In nginx-front mode (POLARIS_PROXY_CERT_PATH set) the Node HTTPS listener never binds — agent WS upgrades come in over the HTTP listener via nginx's proxy_pass with `Upgrade`/`Connection` headers preserved by the reference config. Bearer never echoed back on the upgrade response — the client `ws` library accepts a no-protocol response by default.
+- `src/api/routes/agentsWs.ts` — `attachAgentWsUpgradeHandler(server)` wires `http.Server.on("upgrade", ...)` to validate the bearer carried in `Sec-WebSocket-Protocol: polaris-agent.v1.bearer.<token>`, then hands the socket to `agentChannelService.attach`. Mounted on the loopback HTTP listener in src/app.ts; agent WS upgrades come in via nginx's proxy_pass with `Upgrade`/`Connection` headers preserved by the reference config. Bearer never echoed back on the upgrade response — the client `ws` library accepts a no-protocol response by default.
 - `agent/cmd/polaris-agent/main.go` — host-side Go binary; loads agent.conf, runs /enroll on first boot (persists returned bearer back to agent.conf via Save), then ticks the response-time collect loop + heartbeat loop + outbound WS loop until SIGTERM. Generic across deployments; per-install identity (server URL, cert pin, bearer) lives entirely in agent.conf.
 - `agent/internal/transport/ws.go` — outbound WebSocket client using `gorilla/websocket`. NewWSDialer wires TLS pinning (same `pinned.TLSConfig` used by HTTP) + carries the bearer in subprotocol. RunWithReconnect loops Dial + Run with exponential-backoff + full-jitter; never gives up.
 - `agent/internal/config/config.go` — Load/Save the INI-style agent.conf. Save() is atomic (write-tempfile + rename) and chmods 0600.
 - `agent/internal/transport/client.go` — HTTP client that fires Enroll / PushSamples / Heartbeat / FetchConfig. Bearer stored on the Client struct; SetBearer() called once after enrollment.
 - `agent/internal/pinned/tls.go` — VerifyPeerCertificate that compares the leaf SHA-256 against the pin from agent.conf. tls.Config has InsecureSkipVerify=true so the standard chain check (which consults system roots) is skipped — pin verification is the only thing that fires.
-- **Cert pin source — dual-mode.** The pin embedded in `ManagedAgent.serverCertFingerprint` at install kickoff comes from `certInfo.getServerCertFingerprint()`. In Node-HTTPS mode that reads the in-memory PEM the listener loaded; in nginx-front mode (POLARIS_PROXY_CERT_PATH set) it reads the same cert file nginx serves. Existing agents enrolled BEFORE the nginx cutover pin the cert that was active at install time — that cert is what `deploy/migrate-to-nginx.sh` hands to nginx, so existing agents continue to enroll and heartbeat with no agent-side change.
+- **Cert pin source.** The pin embedded in `ManagedAgent.serverCertFingerprint` at install kickoff comes from `certInfo.getServerCertFingerprint()`, which reads the same cert file nginx serves (`POLARIS_PROXY_CERT_PATH`). Phase 2's dual-pin column (`additionalServerCertFingerprints[]`) lets operators stage a new pin via the Maintenance card before rolling nginx's cert.
 
 ### Cert pin rotation (Phase 2 dual-pin)
 
@@ -230,14 +230,14 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 **Invariants:**
 - ManagedAgent.assetId is `@unique` — one agent install per asset. Reinstall is "delete row + new install."
 - Bearer is bound to the assetId at issuance; the /samples handler stamps `req.managedAgent.assetId` server-side and ignores any client-supplied assetId on the wire.
-- Cert pin is captured from the live HTTPS server at install kickoff via `httpsManager.getServerCertFingerprint()`. Install REFUSES when HTTPS isn't running (no cert to pin, no encrypted transport).
+- Cert pin is captured at install kickoff via `certInfo.getServerCertFingerprint()`, which reads `POLARIS_PROXY_CERT_PATH`. Install REFUSES when no fingerprint is available (cert file unreadable, no encrypted transport to pin).
 - Enrollment token is one-shot (consumed atomically) and TTL'd to 10 minutes. After consumption it's NULLed on the row; the install state moves to `active` and stays there until DELETE.
 - `recordProbeResult` and `record*Result` early-return on agent-mode UNLESS `opts.fromAgent === true` — defends against the synthetic periodic-tick clobbering the agent's real signal.
 
 **When changing this:**
 - New sample stream: add Zod variant to `SamplesBodySchema`, map to enqueue helper, mirror in the Go agent collector (Phase 3+).
 - New ManagedAgent column: update Prisma model + the route GET /:id/agent response shape (which strips hash fields explicitly).
-- Cert-pin algorithm change: update `httpsManager.getServerCertFingerprint()` AND the Go agent's TLS verifier in lockstep — server pin AND agent pin both compute fingerprint the same way (sha256 of leaf DER).
+- Cert-pin algorithm change: update `certInfo.getServerCertFingerprint()` AND the Go agent's TLS verifier in lockstep — server pin AND agent pin both compute fingerprint the same way (sha256 of leaf DER).
 - New /agents/* route: decide whether it's public (mount under `agentsEnrollRouter`) or bearer-gated (mount under `agentsRouter`). Both are wired in `src/api/router.ts` BEFORE the blanket `requireAuth` gate.
 
 **Agent code changes MUST bump `agent/VERSION`.** The agent has its own
@@ -405,7 +405,7 @@ build auto-prune + boot-time auto-build are layered on top.
 
 **Readers** (artifacts the running app reads from disk that operators provision):
 - `.env` — read once at boot via dotenv. CLAUDE.md "Environment Variables" enumerates every key the app honors.
-- HTTPS cert/key — when Polaris terminates TLS (default mode), stored in the `Setting` table (uploaded via Server Settings → Certificates), loaded into the running TLS context by `src/httpsRuntime.ts`. When `POLARIS_PROXY_CERT_PATH` is set (nginx-front mode), the cert is a file on disk that nginx reads; Polaris reads the same file via `src/services/certInfo.ts` for the agent-pin fingerprint exposure. Server Settings → Certificates shows a read-only informational pane in proxy mode (mutation routes return 409); CA records stay editable in both modes.
+- HTTPS cert/key — nginx terminates TLS for the lifetime of the install. The cert lives at `POLARIS_PROXY_CERT_PATH` on disk; Polaris reads it via `src/services/certInfo.ts` for the agent-pin fingerprint exposure. Server Settings → Certificates renders a read-only informational pane (`GET /server-settings/https`); cert mutation is operator-driven via the file system + `systemctl reload nginx`. CA records stay editable for outbound TLS to LDAP/SMTP/integrations.
 - `<STATE_DIR>/data/agents/<version>/` + `manifest.json` — produced by `agentBuildService` or by `make -C agent all`, consumed by the install / upgrade flows.
 - `.setup-complete` marker at the project root — `src/app.ts` boot path consults it to decide whether to run the wizard.
 
@@ -2226,27 +2226,22 @@ Listed alphabetically.
 
 ## services/serverSettingsService.ts
 
-**What it owns:** Server-wide configuration: NTP (servers, timezone), HTTPS (certs, ports, redirect), and certificate management (upload, list, delete, self-signed generation).
+**What it owns:** Server-wide configuration: NTP (servers, timezone) and CA certificate management (upload, list, delete). Server-leaf certs are managed externally (nginx reads `POLARIS_PROXY_CERT_PATH`).
 
-**Public API:** `getNtpSettings`, `updateNtpSettings`, `getHttpsSettings`, `updateHttpsSettings`, `listCertificates`, `addCertificate`, `deleteCertificate`, `generateSelfSignedCert`, `resolveHttpsCertificates`.
+**Public API:** `getNtpSettings`, `updateNtpSettings`, `testNtpSync`, `listCertificates`, `addCertificate`, `deleteCertificate`.
 
 **Cross-service deps:** none.
 
-**Used by:** `src/app.ts — boot-time HTTPS port selection`; `src/httpsRuntime.ts — TLS setup and request redirection (legacy mode)`; `src/api/routes/serverSettings.ts — full CRUD endpoints`. ~6 call sites across routes and init.
+**Used by:** `src/api/routes/serverSettings.ts — CA upload/list/delete + NTP settings`. Server-cert mutation routes (`POST /certificates` category=server, `DELETE` of a server cert) return 409 unconditionally — handled directly in the route handler, doesn't reach the service.
 
 **Invariants:**
-- NTP, HTTPS, certificate lists persist in Settings table under `key: "ntp"`, `"https"`, `"certificates"` respectively.
-- HTTPS enabled requires both certId and keyId; if either is missing, `resolveHttpsCertificates()` returns null (no TLS active).
-- Self-signed cert CN must match `/^[A-Za-z0-9.*_-]+$/` to prevent openssl injection via `/` field separator.
-- Certificate store is a single JSON array in the "certificates" Setting; each cert carries id, category (ca/server), type (cert/key), PEM, and metadata.
+- NTP and certificate lists persist in Settings table under `key: "ntp"` and `"certificates"`.
+- Certificate store is a single JSON array in the "certificates" Setting; each cert carries id, category (ca/server), type (cert/key), PEM, and metadata. Legacy `category="server"` rows may still exist in old installs but are inert.
 - Backup/restore flows NOT in this service (they live in updateService).
 
 **When changing this:**
-- Test cert upload validation (PEM parsing, magic-byte checks if added).
-- Verify HTTPS port changes take effect on next boot, not runtime.
-- Check self-signed cert generation doesn't fail on Windows (openssl path).
+- Test CA upload validation (PEM parsing, magic-byte checks if added).
 - Confirm cert list dedup handles UUID collisions.
-- Test cascading delete: if a server cert is deleted, routes using it should gracefully skip TLS.
 
 ---
 

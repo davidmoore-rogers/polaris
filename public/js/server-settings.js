@@ -600,17 +600,14 @@ async function refreshOuiDatabase() {
 
 var _certsLoaded = false;
 var _certData = { trustedCAs: [], serverCerts: [] };
-var _httpsSettings = { enabled: false, port: 3443, httpPort: 3000, certId: null, keyId: null, redirectHttp: false, running: false };
+var _httpsSettings = { fingerprint: null, cn: null, dnsSans: [], ipSans: [], expiresAt: null, certPath: null };
 
-// Render the Certificates tab when Polaris is fronted by an external reverse
-// proxy. Two cards instead of three — the "HTTPS Configuration" + "Server
-// Certificates" cards merge into one informational pane (the cert lives on
-// disk where nginx reads it; Polaris exposes its fingerprint + SANs +
-// expiry but doesn't manage it). The "Trusted Certificate Authorities" card
-// renders unchanged because CAs back outbound TLS to LDAP/SMTP/integrations
-// and are still operator-editable. See src/api/routes/serverSettings.ts for
-// the matching server-side branch.
-function renderProxyModeCertsTab(container) {
+// Render the Certificates tab. nginx terminates TLS — the cert lives in a
+// file on disk that Polaris doesn't manage. Two cards: an informational pane
+// (fingerprint + SANs + expiry + cert path) and the Trusted Certificate
+// Authorities card (CAs back outbound TLS to LDAP/SMTP/integrations and
+// remain operator-editable). See src/api/routes/serverSettings.ts:GET /https.
+function renderCertsTab(container) {
   var s = _httpsSettings || {};
   var fingerprint = s.fingerprint || "(unavailable)";
   var cn = s.cn || "(none)";
@@ -681,103 +678,12 @@ async function loadCertificates() {
   _certsLoaded = true;
   var container = document.getElementById("tab-certificates");
 
-  // Load HTTPS settings in parallel with cert data
   try {
     _httpsSettings = await api.serverSettings.getHttps();
   } catch (_) {}
 
-  // Proxy mode: nginx terminates TLS, the server cert lives in a file on
-  // disk that Polaris doesn't manage. Replace the HTTPS Configuration +
-  // Server Certificates cards with read-only informational panes; keep the
-  // Trusted CA card unchanged (CAs are still operator-editable). The
-  // fingerprint here is the same value embedded in every Polaris Agent's
-  // agent.conf — operators need it visible somewhere even when nginx owns
-  // the cert lifecycle.
-  if (_httpsSettings && _httpsSettings.externallyManaged) {
-    renderProxyModeCertsTab(container);
-    wireUploadArea("ca-upload-area", "ca-file-input", uploadCA);
-    await refreshCertLists();
-    return;
-  }
-
-  container.innerHTML =
-    '<div class="settings-cards-row-3">' +
-    '<div class="settings-card">' +
-      '<h4>HTTPS Configuration</h4>' +
-      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">Enable HTTPS to encrypt browser connections. Select a server certificate and key from the uploaded certificates below.</p>' +
-      '<div id="https-status-banner"></div>' +
-      '<div class="form-group">' +
-        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
-          '<input type="checkbox" id="f-https-enabled"' + (_httpsSettings.enabled ? ' checked' : '') + '>' +
-          '<span>Enable HTTPS</span>' +
-        '</label>' +
-      '</div>' +
-      '<div class="form-group"><label>HTTPS Port</label>' +
-        '<input type="number" id="f-https-port" value="' + (_httpsSettings.port || 3443) + '" min="1" max="65535" style="width:120px">' +
-      '</div>' +
-      '<div class="form-group"><label>HTTP Port</label>' +
-        '<input type="number" id="f-http-port" value="' + (_httpsSettings.httpPort || 3000) + '" min="1" max="65535" style="width:120px">' +
-        '<p class="hint">Changing the HTTP port requires a server restart to take effect.</p>' +
-      '</div>' +
-      '<div class="form-group"><label>Server Certificate</label>' +
-        '<select id="f-https-cert"><option value="">— Upload a certificate first —</option></select>' +
-        '<p class="hint">Select the TLS certificate (.pem, .crt) to present to browsers.</p>' +
-      '</div>' +
-      '<select id="f-https-key" style="display:none"></select>' +
-      '<div class="form-group">' +
-        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
-          '<input type="checkbox" id="f-https-redirect"' + (_httpsSettings.redirectHttp ? ' checked' : '') + '>' +
-          '<span>Redirect HTTP to HTTPS</span>' +
-        '</label>' +
-        '<p class="hint">When enabled, all HTTP requests will be redirected to HTTPS. Only takes effect after Apply &amp; Restart.</p>' +
-      '</div>' +
-      '<div style="display:flex;gap:8px;align-items:center">' +
-        '<button class="btn btn-primary" id="btn-https-save">Save</button>' +
-        '<button class="btn btn-secondary" id="btn-https-apply">Apply &amp; Restart</button>' +
-        '<span id="https-status" style="font-size:0.82rem;margin-left:8px"></span>' +
-      '</div>' +
-    '</div>' +
-    '<div class="settings-card" style="display:flex;flex-direction:column">' +
-      '<h4>Trusted Certificate Authorities</h4>' +
-      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">CA certificates used to verify remote servers when Polaris connects to integrations, syslog, and archive targets. These are also included in the HTTPS trust chain.</p>' +
-      '<ul class="cert-list" id="ca-list"><li class="cert-empty">Loading...</li></ul>' +
-      '<div style="margin-top:auto;padding-top:1rem">' +
-        '<div class="upload-area" id="ca-upload-area">' +
-          '<input type="file" id="ca-file-input" accept=".pem,.crt,.cer,.der">' +
-          '<strong style="color:var(--color-text-primary)">Upload CA Certificate</strong>' +
-          '<p>Click to select a .pem, .crt, or .cer file</p>' +
-        '</div>' +
-      '</div>' +
-    '</div>' +
-    '<div class="settings-card" style="display:flex;flex-direction:column">' +
-      '<h4>Server Certificates</h4>' +
-      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">TLS certificate and private key used for HTTPS. Upload a matched certificate and key pair, then select them in the HTTPS Configuration above.</p>' +
-      '<ul class="cert-list" id="server-cert-list"><li class="cert-empty">Loading...</li></ul>' +
-      '<div style="margin-top:auto;padding-top:1rem;display:flex;gap:12px;flex-wrap:wrap">' +
-        '<div class="upload-area" id="cert-upload-area" style="flex:1;min-width:200px">' +
-          '<input type="file" id="cert-file-input" accept=".pem,.crt,.cer,.pfx,.p12,.key" multiple>' +
-          '<strong style="color:var(--color-text-primary)">Upload Certificate / Key</strong>' +
-          '<p>Click to select certificate (.pem, .crt) and/or key (.key, .pem) files</p>' +
-        '</div>' +
-        '<div class="upload-area" id="generate-cert-area" style="flex:1;min-width:200px">' +
-          '<div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:6px">' +
-            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:22px;height:22px;flex-shrink:0;opacity:0.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/><line x1="12" y1="15" x2="12" y2="19"/></svg>' +
-            '<strong style="color:var(--color-text-primary)">Generate Self-Signed</strong>' +
-          '</div>' +
-          '<p>Create a new self-signed certificate for testing or internal use</p>' +
-        '</div>' +
-      '</div>' +
-    '</div>' +
-    '</div>';
-
-  // Wire upload areas
+  renderCertsTab(container);
   wireUploadArea("ca-upload-area", "ca-file-input", uploadCA);
-  wireUploadArea("cert-upload-area", "cert-file-input", uploadServerCert);
-
-  document.getElementById("btn-https-save").addEventListener("click", saveHttpsSettings);
-  document.getElementById("btn-https-apply").addEventListener("click", applyHttpsSettings);
-  document.getElementById("generate-cert-area").addEventListener("click", openGenerateCertModal);
-
   await refreshCertLists();
 }
 
@@ -798,166 +704,6 @@ async function refreshCertLists() {
     _certData = { trustedCAs: [], serverCerts: [] };
   }
   renderCAList();
-  renderServerCertList();
-  populateHttpsDropdowns();
-  updateHttpsStatusBanner();
-}
-
-function populateHttpsDropdowns() {
-  var certSelect = document.getElementById("f-https-cert");
-  var keySelect = document.getElementById("f-https-key");
-  if (!certSelect || !keySelect) return; // also covers proxy mode where these controls aren't rendered
-
-  var certs = _certData.serverCerts.filter(function (c) { return c.type === "cert"; });
-  var keys = _certData.serverCerts.filter(function (c) { return c.type === "key"; });
-
-  certSelect.innerHTML = '<option value="">— Select certificate —</option>' +
-    certs.map(function (c) {
-      var sel = _httpsSettings.certId === c.id ? " selected" : "";
-      return '<option value="' + c.id + '"' + sel + '>' + escapeHtml(c.name) +
-        (c.subject ? " (" + escapeHtml(c.subject) + ")" : "") + '</option>';
-    }).join("");
-  if (certs.length === 0) certSelect.innerHTML = '<option value="">— Upload a certificate first —</option>';
-
-  keySelect.innerHTML = '<option value=""></option>' +
-    keys.map(function (c) {
-      return '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
-    }).join("");
-
-  autoPairKey();
-  certSelect.addEventListener("change", autoPairKey);
-}
-
-function autoPairKey() {
-  var certSelect = document.getElementById("f-https-cert");
-  var keySelect = document.getElementById("f-https-key");
-  if (!certSelect || !keySelect) return;
-
-  var certId = certSelect.value;
-  if (!certId) { keySelect.value = ""; return; }
-
-  if (_httpsSettings.certId === certId && _httpsSettings.keyId) {
-    keySelect.value = _httpsSettings.keyId;
-    return;
-  }
-
-  var cert = _certData.serverCerts.find(function (c) { return c.id === certId; });
-  if (!cert) return;
-
-  var keys = _certData.serverCerts.filter(function (c) { return c.type === "key"; });
-  if (keys.length === 0) return;
-
-  var baseName = cert.name.replace(/\.(pem|crt|cer|pfx|p12)$/i, "");
-  var matched = keys.find(function (k) {
-    return k.name.replace(/\.(key|pem)$/i, "") === baseName;
-  });
-
-  if (matched) {
-    keySelect.value = matched.id;
-  } else {
-    var certTime = new Date(cert.uploadedAt).getTime();
-    keys.sort(function (a, b) {
-      return Math.abs(new Date(a.uploadedAt).getTime() - certTime) -
-             Math.abs(new Date(b.uploadedAt).getTime() - certTime);
-    });
-    keySelect.value = keys[0].id;
-  }
-}
-
-function updateHttpsStatusBanner() {
-  var banner = document.getElementById("https-status-banner");
-  if (!banner) return;
-  if (_httpsSettings.running) {
-    banner.innerHTML = '<div style="background:var(--color-success-bg, rgba(46,160,67,0.15));border:1px solid var(--color-success);border-radius:6px;padding:8px 12px;margin-bottom:1rem;font-size:0.82rem;display:flex;align-items:center;gap:8px">' +
-      '<span style="color:var(--color-success);font-weight:600">&#9679; HTTPS Active</span>' +
-      '<span style="color:var(--color-text-secondary)">Listening on port ' + (_httpsSettings.port || 3443) + '</span>' +
-    '</div>';
-  } else if (_httpsSettings.enabled) {
-    banner.innerHTML = '<div style="background:var(--color-warning-bg, rgba(210,153,34,0.15));border:1px solid var(--color-warning);border-radius:6px;padding:8px 12px;margin-bottom:1rem;font-size:0.82rem;display:flex;align-items:center;gap:8px">' +
-      '<span style="color:var(--color-warning);font-weight:600">&#9679; HTTPS Enabled</span>' +
-      '<span style="color:var(--color-text-secondary)">Not running — click Apply &amp; Restart to start</span>' +
-    '</div>';
-  } else {
-    banner.innerHTML = '';
-  }
-}
-
-function collectHttpsForm() {
-  return {
-    enabled: document.getElementById("f-https-enabled").checked,
-    port: parseInt(document.getElementById("f-https-port").value, 10) || 3443,
-    httpPort: parseInt(document.getElementById("f-http-port").value, 10) || 3000,
-    certId: document.getElementById("f-https-cert").value || null,
-    keyId: document.getElementById("f-https-key").value || null,
-    redirectHttp: document.getElementById("f-https-redirect").checked,
-  };
-}
-
-async function saveHttpsSettings() {
-  var btn = document.getElementById("btn-https-save");
-  btn.disabled = true;
-  try {
-    _httpsSettings = await api.serverSettings.updateHttps(collectHttpsForm());
-    updateHttpsStatusBanner();
-    showToast("HTTPS settings saved");
-  } catch (err) {
-    showToast(err.message, "error");
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function applyHttpsSettings() {
-  var btn = document.getElementById("btn-https-apply");
-  var statusEl = document.getElementById("https-status");
-  btn.disabled = true;
-  statusEl.innerHTML = '<span style="color:var(--color-text-tertiary)">Saving &amp; applying...</span>';
-  try {
-    // Save first, then apply
-    _httpsSettings = await api.serverSettings.updateHttps(collectHttpsForm());
-    var result = await api.serverSettings.applyHttps();
-    _httpsSettings.running = result.running;
-    updateHttpsStatusBanner();
-    statusEl.innerHTML = result.ok
-      ? '<span style="color:var(--color-success)">' + escapeHtml(result.message) + '</span>'
-      : '<span style="color:var(--color-danger)">' + escapeHtml(result.message) + '</span>';
-  } catch (err) {
-    statusEl.innerHTML = '<span style="color:var(--color-danger)">' + escapeHtml(err.message) + '</span>';
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function openGenerateCertModal() {
-  var html =
-    '<div class="form-group"><label>Common Name (CN)</label>' +
-      '<input type="text" id="f-gen-cn" value="localhost" placeholder="e.g. localhost, polaris.example.com">' +
-      '<p class="hint">The hostname that will appear in the certificate subject. Use the hostname clients will connect to.</p>' +
-    '</div>' +
-    '<div class="form-group"><label>Validity (days)</label>' +
-      '<input type="number" id="f-gen-days" value="365" min="1" max="3650" style="width:120px">' +
-      '<p class="hint">How long the certificate is valid. Maximum 3650 days (10 years).</p>' +
-    '</div>';
-
-  var ok = await showFormModal("Generate Self-Signed Certificate", html, "Generate");
-  if (!ok) return;
-
-  var cn = document.getElementById("f-gen-cn").value.trim() || "localhost";
-  var days = parseInt(document.getElementById("f-gen-days").value, 10) || 365;
-
-  try {
-    var result = await api.serverSettings.generateCert({ commonName: cn, days: days });
-    showToast("Self-signed certificate generated: " + cn);
-    await refreshCertLists();
-    // Auto-select the newly generated cert and key in the HTTPS dropdowns
-    if (result.cert && result.key) {
-      _httpsSettings.certId = result.cert.id;
-      _httpsSettings.keyId = result.key.id;
-      populateHttpsDropdowns();
-    }
-  } catch (err) {
-    showToast(err.message, "error");
-  }
 }
 
 function certIconSvg() {
@@ -987,58 +733,11 @@ function renderCAList() {
   }).join("");
 }
 
-function renderServerCertList() {
-  var list = document.getElementById("server-cert-list");
-  if (!list) return; // proxy mode — Server Certificates card isn't rendered
-  if (!_certData.serverCerts.length) {
-    list.innerHTML = '<li class="cert-empty">No server certificate configured. The app is using its default configuration.</li>';
-    return;
-  }
-  var certs = _certData.serverCerts.filter(function (c) { return c.type === "cert"; });
-  if (!certs.length) {
-    list.innerHTML = '<li class="cert-empty">No server certificate configured. The app is using its default configuration.</li>';
-    return;
-  }
-  list.innerHTML = certs.map(certItemHtml).join("");
-}
-
-function certItemHtml(cert) {
-  var typeBadge = cert.type === "key"
-    ? '<span class="badge badge-deprecated" style="margin-left:6px">KEY</span>'
-    : '<span class="badge badge-available" style="margin-left:6px">CERT</span>';
-  return '<li class="cert-item">' +
-    '<div class="cert-icon">' + certIconSvg() + '</div>' +
-    '<div class="cert-info">' +
-      '<div class="cert-name">' + escapeHtml(cert.name) + typeBadge + '</div>' +
-      '<div class="cert-meta">' +
-        (cert.subject ? escapeHtml(cert.subject) + ' &middot; ' : '') +
-        (cert.expiresAt ? 'Expires ' + formatDate(cert.expiresAt) + ' &middot; ' : '') +
-        'Uploaded ' + formatDate(cert.uploadedAt) +
-      '</div>' +
-    '</div>' +
-    '<div class="cert-actions">' +
-      '<button class="btn btn-sm btn-danger" onclick="deleteServerCert(\'' + cert.id + '\', \'' + escapeHtml(cert.name) + '\')">Remove</button>' +
-    '</div>' +
-  '</li>';
-}
-
 async function uploadCA(files) {
   for (var i = 0; i < files.length; i++) {
     try {
       await api.serverSettings.uploadCert("ca", files[i]);
       showToast("CA certificate uploaded: " + files[i].name);
-    } catch (err) {
-      showToast("Failed to upload " + files[i].name + ": " + err.message, "error");
-    }
-  }
-  await refreshCertLists();
-}
-
-async function uploadServerCert(files) {
-  for (var i = 0; i < files.length; i++) {
-    try {
-      await api.serverSettings.uploadCert("server", files[i]);
-      showToast("Uploaded: " + files[i].name);
     } catch (err) {
       showToast("Failed to upload " + files[i].name + ": " + err.message, "error");
     }
@@ -1052,18 +751,6 @@ async function deleteCA(id, name) {
   try {
     await api.serverSettings.deleteCert(id);
     showToast("CA removed");
-    await refreshCertLists();
-  } catch (err) {
-    showToast(err.message, "error");
-  }
-}
-
-async function deleteServerCert(id, name) {
-  var ok = await showConfirm('Remove server certificate "' + name + '"?');
-  if (!ok) return;
-  try {
-    await api.serverSettings.deleteCert(id);
-    showToast("Certificate removed");
     await refreshCertLists();
   } catch (err) {
     showToast(err.message, "error");

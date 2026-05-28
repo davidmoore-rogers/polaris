@@ -42,7 +42,7 @@ import { getCredential } from "./credentialService.js";
 import { mintEnrollmentToken } from "./agentTokenService.js";
 import { logEvent } from "../api/routes/events.js";
 import { winrmRunOne, type WinRmConnection } from "../utils/winrm.js";
-import { getHttpsPort } from "../httpsRuntime.js";
+import { getPublicUrlPort } from "../utils/publicUrl.js";
 import { getServerCertHostnames } from "./certInfo.js";
 
 // ─── Public entry points ──────────────────────────────────────────────
@@ -923,7 +923,7 @@ export const AGENT_SERVER_URL_SETTING_KEY = "agent.serverUrlOverride";
  *   7. `localhost` + PORT (same-box installs only — the install kickoff
  *      route guards this and refuses when the target host isn't loopback).
  *
- * The HTTPS port comes from httpsManager.getHttpsPort() — the actual
+ * The HTTPS port comes from publicUrl.getPublicUrlPort() — the actual
  * port Polaris is listening on, NOT process.env.PORT (which is the HTTP
  * port and may differ).
  */
@@ -943,7 +943,7 @@ export async function inferOwnServerUrl(): Promise<string> {
   if (fromEnv) return fromEnv.replace(/\/$/, "");
 
   // (3-5) Cert-driven derivation.
-  const httpsPort = getHttpsPort();
+  const httpsPort = getPublicUrlPort();
   const hostnames = getServerCertHostnames();
   if (httpsPort != null && hostnames) {
     const preferred = hostnames.dnsSans[0] || hostnames.cn || hostnames.ipSans[0] || null;
@@ -968,7 +968,7 @@ export async function inferOwnServerUrl(): Promise<string> {
 export function inferOwnServerUrlSync(): string {
   const fromEnv = process.env.POLARIS_PUBLIC_URL;
   if (fromEnv) return fromEnv.replace(/\/$/, "");
-  const httpsPort = getHttpsPort();
+  const httpsPort = getPublicUrlPort();
   const hostnames = getServerCertHostnames();
   if (httpsPort != null && hostnames) {
     const preferred = hostnames.dnsSans[0] || hostnames.cn || hostnames.ipSans[0] || null;

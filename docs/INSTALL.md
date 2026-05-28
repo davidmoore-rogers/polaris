@@ -588,26 +588,29 @@ raw `max_connections`. Per-role footprint is exposed at
 
 ---
 
-## Optional: nginx front-end (opt-in HTTPS termination move)
+## nginx front-end (TLS termination)
 
-By default, Polaris terminates TLS itself using the cert + key uploaded
-through Server Settings → Certificates. At scale, it's often cleaner to
-move TLS termination to an external nginx reverse proxy on the same host:
+nginx terminates TLS for every Polaris install. Fresh installs land this
+layout via the setup scripts; existing pre-nginx installs migrate via
+`deploy/migrate-to-nginx.sh`. Polaris itself listens HTTP-only on
+`127.0.0.1:3000` and exposes the cert nginx serves through the Identification
+tab so Polaris Agents can pin against the same leaf nginx presents.
+
+Why nginx fronts the app:
 
 - One external URL for the main app **and** all the role-specific `/metrics`
   endpoints (path-routed: `/metrics`, `/metrics-monitor-1`, `/metrics-monitor-2`,
   `/metrics-discovery`) — no firewall changes per worker port, no
   bearer-in-clear on the worker ports.
 - One place to manage cert rotation (a single file nginx reads, plus
-  `systemctl reload nginx`) instead of cycling Polaris's own cert hot-rotation
-  on every renewal.
+  `systemctl reload nginx`).
 - HTTP/3 over QUIC out-of-the-box for browser traffic.
 
-**This is opt-in for Phase 1.** Fresh installs continue to land single-process
-with Node-terminated HTTPS. nginx migration is a separate operator action via
-`deploy/migrate-to-nginx.sh`, which only supports the split-role layout
-(`polaris.target` enabled with the four role units). Single-process installs
-stay on Node HTTPS for now — Phase 3 of the planning roadmap changes that.
+### Migrating an existing install
+
+Run `deploy/migrate-to-nginx.sh` on installs that were provisioned before the
+nginx-front cutover. The script only supports the split-role layout
+(`polaris.target` enabled with the four role units).
 
 ### Prerequisites
 
@@ -677,26 +680,13 @@ curl -sH "Authorization: Bearer $METRICS_TOKEN" https://polaris.example.com/metr
 # expects a positive count
 ```
 
-### Rollback
-
-```bash
-sudo bash /opt/polaris/deploy/migrate-to-nginx.sh --rollback
-```
-
-Restores `.env` from the most-recent `.env.pre-nginx.*` backup, removes the
-nginx config + systemd drop-in, and restarts `polaris.target`. Polaris falls
-back to Node-terminated HTTPS using the same cert that's still in
-`Setting.certificates` (the migration script doesn't delete the DB record;
-it copies out + flips env vars).
-
 ### Operational notes
 
-- **Don't rotate the cert in the first few weeks post-cutover** unless you're
-  ready to remote-reinstall every Polaris Agent. Existing agents pin the
-  current leaf cert's SHA-256; nginx serves the SAME cert immediately after
-  cutover, but the FIRST renewal AFTER cutover invalidates every pin. Phase 2
-  of the planning roadmap adds dual-pin / CA-pin support that lifts this
-  constraint — until then, plan rotations carefully.
+- **Cert rotation requires the dual-pin window.** Existing agents pin the
+  current leaf cert's SHA-256. Before rolling nginx's cert, stage the new
+  leaf's fingerprint via Server Settings → Maintenance → "Cert pin rotation"
+  → bulk-add. Once every agent has applied the staged pin (visible in the
+  Agents tab), roll the cert in nginx, then bulk-remove the old pin.
 - **Operator customization belongs in drop-ins, not the main config files.**
   The in-app updater (Server Settings → Maintenance → Apply Update) syncs
   `deploy/nginx/polaris.conf` into `/etc/nginx/conf.d/polaris.conf` on every
