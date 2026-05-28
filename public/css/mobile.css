@@ -522,7 +522,11 @@ input, select, textarea { font-family: inherit; }
   grid-template-columns: repeat(5, 1fr);
   align-items: center;
   padding: 12px 0 16px;
-  z-index: 4;
+  /* Above the asset detail sheet (901) and its scrim (900) so the bottom
+     nav stays visible + tappable while an asset is open, but below the
+     generic .scrim/.sheet (1000/1001) so deep drilldowns (interface,
+     reservation edit, etc.) still take the full screen. */
+  z-index: 950;
 }
 .m3-navbar .nav-item {
   display: flex;
@@ -710,17 +714,21 @@ input, select, textarea { font-family: inherit; }
   transition: transform .25s ease;
   will-change: transform;
   max-height: 80vh;
+  /* Anchor the sheet ABOVE the bottom navbar (+ safe area) so the nav
+     stays visible while the asset is open. The navbar's own z-index is
+     bumped above this sheet (but below the generic .sheet at 1001) so
+     the body of the sheet, which still extends down behind the navbar
+     in peek state, is occluded by the navbar instead of covering it. */
+  bottom: calc(var(--navbar-h) + env(safe-area-inset-bottom, 0px));
 }
 /* Peek: slide the sheet down so only its top band (handle + header) shows.
    --asset-peek-y is measured + set in JS from the live height so short
    content peeks correctly. attachSwipeToDismiss clears any inline transform
    on snap-back, which falls through to this rule and restores the peek.
-   We lift the band by the bottom navbar height + safe-area inset so the
-   peeked header (which carries the asset name) sits ABOVE the navbar
-   instead of at the very bottom edge — otherwise the mobile browser's
-   bottom address bar overlays it and the name is invisible. */
+   The sheet anchor already sits above the navbar (see `.asset-sheet`'s
+   bottom rule), so the peek translate doesn't need to subtract navbar-h. */
 .asset-sheet.peek {
-  transform: translateY(calc(var(--asset-peek-y, 100%) - var(--navbar-h) - env(safe-area-inset-bottom, 0px)));
+  transform: translateY(var(--asset-peek-y, 100%));
 }
 .asset-sheet.peek .asset-sheet-header { cursor: pointer; }
 .asset-sheet.peek #asset-sheet-refresh { display: none; }

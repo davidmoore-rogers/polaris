@@ -169,9 +169,13 @@
     var scrim = document.getElementById("asset-sheet-scrim");
     if (!sheet) return;
     // Slide the sheet down so only its top band (handle + header) peeks above
-    // the bottom edge. Measured from the live height so short content peeks
-    // correctly too. attachSwipeToDismiss clears inline transform on snap-back,
-    // which falls through to this CSS-var translate, so peek is restored.
+    // the bottom navbar. The sheet is anchored at bottom: navbar-h (see CSS),
+    // so translateY(offsetHeight - PEEK_BAND_PX) leaves the band exposed just
+    // above the navbar; the rest of the sheet extends behind the navbar and
+    // is occluded by the navbar's higher z-index. Measured from the live
+    // height so short content peeks correctly too. attachSwipeToDismiss
+    // clears inline transform on snap-back, which falls through to the CSS
+    // translate, so peek is restored.
     var translate = Math.max(0, (sheet.offsetHeight || 0) - PEEK_BAND_PX);
     sheet.style.setProperty("--asset-peek-y", translate + "px");
     sheet.classList.add("peek");
