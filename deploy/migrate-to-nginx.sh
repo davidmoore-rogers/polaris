@@ -276,12 +276,19 @@ install -o root -g root -m 0644 "$SHIPPED_DROPIN" "$NGINX_DROPIN_FILE"
 systemctl daemon-reload
 
 step "Commit: appending POLARIS_PROXY_CERT_PATH and POLARIS_PUBLIC_URL to $ENV_FILE"
-{
-  echo ""
-  echo "# Added by deploy/migrate-to-nginx.sh on $BACKUP_TS"
-  echo "POLARIS_PROXY_CERT_PATH=$NGINX_CERT_DIR/cert.pem"
-  echo "POLARIS_PUBLIC_URL=$PUBLIC_URL"
-} >> "$ENV_FILE"
+# Idempotent: skip the append on re-run if the keys are already present
+# (e.g. an earlier attempt got past this step but failed during nginx start).
+# Avoids accumulating duplicate lines in .env across retries.
+if ! grep -q '^POLARIS_PROXY_CERT_PATH=' "$ENV_FILE" 2>/dev/null; then
+  {
+    echo ""
+    echo "# Added by deploy/migrate-to-nginx.sh on $BACKUP_TS"
+    echo "POLARIS_PROXY_CERT_PATH=$NGINX_CERT_DIR/cert.pem"
+    echo "POLARIS_PUBLIC_URL=$PUBLIC_URL"
+  } >> "$ENV_FILE"
+else
+  info "POLARIS_PROXY_CERT_PATH already in $ENV_FILE — skipping append"
+fi
 
 step "Commit: opening TCP+UDP/443 in firewalld"
 if command -v firewall-cmd >/dev/null 2>&1; then
@@ -301,11 +308,17 @@ if ! nginx -t 2>&1 | tee "$TMP/nginx-t.log"; then
   exit 1
 fi
 
-step "Commit: enabling + reloading nginx"
-systemctl enable --now nginx
-systemctl reload nginx
+step "Commit: enabling nginx (start happens via polaris.target's Wants= drop-in)"
+# DON'T `--now` here. Polaris is still bound to :443 with Node HTTPS at this
+# point; if we tried to start nginx now, the bind would fail. Instead, just
+# enable nginx for boot persistence — the polaris.target restart below will
+# stop polaris-web (freeing :443), then pull nginx in via the
+# Wants=nginx.service drop-in we installed under polaris-web.service.d/.
+# polaris-web's After=nginx ensures the new (proxy-mode) polaris-web boots
+# AFTER nginx is listening, so there's no window of "Polaris up, nginx down".
+systemctl enable nginx
 
-step "Commit: restarting polaris.target so Polaris picks up the new env"
+step "Commit: restarting polaris.target — frees :443, starts nginx, restarts Polaris in proxy mode"
 systemctl restart polaris.target
 
 # ─── Smoke tests ──────────────────────────────────────────────────────────
