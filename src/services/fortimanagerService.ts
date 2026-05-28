@@ -218,7 +218,16 @@ async function resolveDeviceMgmtIp(
  * FortiGate-side connection test against it using the direct-transport
  * credentials. Exposed as a standalone call so the UI can stream its
  * result independently of the FMG connection test.
+ *
+ * Retries with a different random gate (a "backup pick") if the first pick
+ * fails — so a single offline/in-maintenance gate doesn't fail the whole
+ * test when the rest of the fleet is healthy. Total attempts capped at
+ * MAX_RANDOM_FORTIGATE_ATTEMPTS; FMG-level failures (device list fetch,
+ * empty/filtered-out ADOM, missing mgmt interface) are not retried because
+ * they aren't gate-specific.
  */
+const MAX_RANDOM_FORTIGATE_ATTEMPTS = 2;
+
 export async function testRandomFortiGate(
   config: FortiManagerConfig,
   integrationId?: string,
@@ -227,6 +236,7 @@ export async function testRandomFortiGate(
   message: string;
   deviceName: string;
   version?: string;
+  attempts?: string[];
 }> {
   if (!config.fortigateApiToken) {
     return {
@@ -271,51 +281,96 @@ export async function testRandomFortiGate(
     };
   }
 
-  const pick = filtered[Math.floor(Math.random() * filtered.length)];
-  const deviceName = String(pick.name || pick.hostname || pick.ip || "(unknown)");
-
-  // Resolve the real management IP from the FortiGate's interface config via
-  // FMG. The discovery path does the same thing — same FMG call, same filter.
   const mgmtIfaceName = config.mgmtInterface?.trim();
   if (!mgmtIfaceName) {
     return {
       ok: false,
       message: 'FortiGate mgmt interface is not configured on the integration — set "Management Interface" before testing direct transport',
-      deviceName,
+      deviceName: "(none)",
     };
   }
 
-  let mgmtIp: string | null;
-  try {
-    mgmtIp = await resolveDeviceMgmtIp(baseUrl, config, deviceName, mgmtIfaceName, undefined, integrationId);
-  } catch (err: any) {
-    return {
-      ok: false,
-      message: `Failed to resolve management IP for "${deviceName}" via FMG (${mgmtIfaceName}): ${err.message || "Unknown error"}`,
-      deviceName,
+  // Fisher-Yates shuffle of the filtered list, then walk the first N entries.
+  // Shuffling (instead of repeated `Math.random()` index picks) guarantees we
+  // never re-test the same gate when the filtered list has ≥2 entries.
+  const shuffled = filtered.slice();
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  const maxAttempts = Math.min(MAX_RANDOM_FORTIGATE_ATTEMPTS, shuffled.length);
+
+  const attemptLog: string[] = [];
+  let lastResult: {
+    ok: boolean;
+    message: string;
+    deviceName: string;
+    version?: string;
+  } | null = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const pick = shuffled[attempt];
+    const deviceName = String(pick.name || pick.hostname || pick.ip || "(unknown)");
+
+    let mgmtIp: string | null;
+    try {
+      mgmtIp = await resolveDeviceMgmtIp(baseUrl, config, deviceName, mgmtIfaceName, undefined, integrationId);
+    } catch (err: any) {
+      lastResult = {
+        ok: false,
+        message: `Failed to resolve management IP for "${deviceName}" via FMG (${mgmtIfaceName}): ${err.message || "Unknown error"}`,
+        deviceName,
+      };
+      attemptLog.push(deviceName);
+      continue;
+    }
+
+    if (!mgmtIp) {
+      lastResult = {
+        ok: false,
+        message: `Could not resolve a management IP for "${deviceName}" on interface "${mgmtIfaceName}"`,
+        deviceName,
+      };
+      attemptLog.push(deviceName);
+      continue;
+    }
+
+    const fgConfig: FortiGateConfig = {
+      host: mgmtIp,
+      port: 443,
+      apiUser: config.fortigateApiUser || "",
+      apiToken: config.fortigateApiToken,
+      vdom: "root",
+      verifySsl: config.fortigateVerifySsl === true,
+      mgmtInterface: mgmtIfaceName,
     };
+
+    const fgResult = await fgTestConnection(fgConfig);
+    attemptLog.push(deviceName);
+    if (fgResult.ok) {
+      return {
+        ok: true,
+        message: fgResult.message,
+        version: fgResult.version,
+        deviceName,
+        attempts: attemptLog,
+      };
+    }
+    lastResult = { ok: false, message: fgResult.message, version: fgResult.version, deviceName };
   }
 
-  if (!mgmtIp) {
-    return {
-      ok: false,
-      message: `Could not resolve a management IP for "${deviceName}" on interface "${mgmtIfaceName}"`,
-      deviceName,
-    };
-  }
-
-  const fgConfig: FortiGateConfig = {
-    host: mgmtIp,
-    port: 443,
-    apiUser: config.fortigateApiUser || "",
-    apiToken: config.fortigateApiToken,
-    vdom: "root",
-    verifySsl: config.fortigateVerifySsl === true,
-    mgmtInterface: mgmtIfaceName,
+  // All attempts failed. Surface the last failure, but include the full list
+  // of attempted device names in the message so the operator can see which
+  // gates were tried and rule out an unlucky single-pick fluke.
+  const lr = lastResult ?? {
+    ok: false,
+    message: "No FortiGate could be tested",
+    deviceName: "(none)",
   };
-
-  const fgResult = await fgTestConnection(fgConfig);
-  return { ok: fgResult.ok, message: fgResult.message, version: fgResult.version, deviceName };
+  const message = attemptLog.length > 1
+    ? `${lr.message} (also tried: ${attemptLog.filter((n) => n !== lr.deviceName).join(", ")})`
+    : lr.message;
+  return { ok: false, message, deviceName: lr.deviceName, version: lr.version, attempts: attemptLog };
 }
 
 /** True when this JSON-RPC payload targets FMG's `/sys/proxy/json` passthrough
