@@ -1,0 +1,124 @@
+/**
+ * src/services/nginxConfigParser.ts — best-effort parse of the 6 user-settable
+ * directives out of a live nginx server config. Used only by the bootstrap
+ * pass in nginxApplyService.bootstrapProxyConfig() on first boot after this
+ * feature ships, to seed a `proxyConfig` Setting row from whatever is already
+ * on disk at /etc/nginx/conf.d/polaris.conf.
+ *
+ * This is NOT a full nginx parser — it's regex over the directives the
+ * renderer writes. Anything beyond those (extra add_header lines, extra
+ * proxy_pass targets, unrecognized location blocks) is reported in `drift`
+ * so the bootstrap can keep managedMode=false and surface the refuse-and-
+ * banner UX rather than auto-clobbering operator customizations.
+ */
+
+import { readFileSync, existsSync } from "node:fs";
+import { defaultProxyConfig, type ProxyConfig, type TlsProtocol } from "../types/proxyConfig.js";
+
+export interface ParseResult {
+  /** Best-effort parse of the 6 controls. Untouched defaults if the file is missing. */
+  config: ProxyConfig;
+  /** Specific markers of customization beyond the 6 controls. Surfaced to the UI. */
+  drift: string[];
+}
+
+const KNOWN_PROXY_PASS_PATTERNS: RegExp[] = [
+  /^http:\/\/127\.0\.0\.1:\d+\/?$/,
+  /^http:\/\/127\.0\.0\.1:\d+\/metrics$/,
+];
+
+const KNOWN_ADD_HEADERS = new Set(["Alt-Svc", "Strict-Transport-Security"]);
+
+export function parseNginxConfig(filePath: string): ParseResult {
+  if (!existsSync(filePath)) {
+    return { config: defaultProxyConfig(), drift: ["file not found"] };
+  }
+  const text = readFileSync(filePath, "utf8");
+  return parseNginxConfigText(text);
+}
+
+export function parseNginxConfigText(rawText: string): ParseResult {
+  // Strip whole-line comments before pattern matching so commentary mentioning
+  // directive names (proxy_pass, add_header, etc.) doesn't trip drift checks.
+  // Inline comments after a directive are rare in our shipped template and
+  // are tolerated.
+  const text = rawText
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+
+  const drift: string[] = [];
+  const cfg = defaultProxyConfig();
+  cfg.managedMode = false;
+
+  // Port — first `listen <N> ssl` we find.
+  const portMatch = text.match(/\blisten\s+(\d+)\s+ssl\b/);
+  if (portMatch) {
+    cfg.httpsPort = Number(portMatch[1]);
+  } else {
+    drift.push("no `listen <port> ssl` directive found");
+  }
+
+  // HTTP/3 — both `listen <N> quic` and `http3 on;` must be present and uncommented.
+  const quicListen = /^\s*listen\s+\d+\s+quic\b/m.test(text);
+  const http3On = /^\s*http3\s+on\s*;/m.test(text);
+  cfg.http3Enabled = quicListen && http3On;
+
+  // TLS protocols — parse the ssl_protocols line if present.
+  const protoMatch = text.match(/^\s*ssl_protocols\s+([^;]+);/m);
+  if (protoMatch) {
+    const found = protoMatch[1]
+      .trim()
+      .split(/\s+/)
+      .filter((p): p is TlsProtocol => p === "TLSv1.2" || p === "TLSv1.3");
+    if (found.length > 0) {
+      cfg.tlsProtocols = found;
+    } else {
+      drift.push(`unrecognized ssl_protocols values: ${protoMatch[1].trim()}`);
+    }
+  }
+
+  // HSTS — pulled from the Strict-Transport-Security add_header if present.
+  const hstsMatch = text.match(/Strict-Transport-Security\s+"([^"]+)"/);
+  if (hstsMatch) {
+    const directives = hstsMatch[1].split(";").map((s) => s.trim());
+    const maxAgeDirective = directives.find((d) => d.startsWith("max-age="));
+    const maxAge = maxAgeDirective ? Number(maxAgeDirective.slice("max-age=".length)) : NaN;
+    cfg.hsts = {
+      enabled: true,
+      maxAgeSeconds: Number.isFinite(maxAge) ? maxAge : 31536000,
+      includeSubDomains: directives.includes("includeSubDomains"),
+      preload: directives.includes("preload"),
+    };
+  } else {
+    cfg.hsts.enabled = false;
+  }
+
+  // Prometheus allow-list — unique IPs from `allow <ip>;` lines.
+  const allowIps = new Set<string>();
+  for (const m of text.matchAll(/^\s*allow\s+([^\s;]+)\s*;/gm)) {
+    allowIps.add(m[1]);
+  }
+  cfg.prometheusAllowIps = Array.from(allowIps);
+
+  // Drift detection — unknown proxy_pass targets, unknown add_header keys,
+  // unexpected location-block count.
+  for (const m of text.matchAll(/\bproxy_pass\s+([^;]+);/g)) {
+    const target = m[1].trim();
+    if (!KNOWN_PROXY_PASS_PATTERNS.some((re) => re.test(target))) {
+      drift.push(`unknown proxy_pass target: ${target}`);
+    }
+  }
+  for (const m of text.matchAll(/\badd_header\s+(\S+)/g)) {
+    if (!KNOWN_ADD_HEADERS.has(m[1])) {
+      drift.push(`unknown add_header: ${m[1]}`);
+    }
+  }
+  // We ship exactly 5 location blocks: / + 4 metrics. Anything else is custom.
+  const locationCount = (text.match(/^\s*location\b/gm) ?? []).length;
+  if (locationCount !== 5) {
+    drift.push(`location block count is ${locationCount} (expected 5)`);
+  }
+
+  return { config: cfg, drift };
+}

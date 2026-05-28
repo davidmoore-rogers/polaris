@@ -1,0 +1,108 @@
+/**
+ * src/services/nginxRenderer.ts — renders the operator's proxyConfig +
+ * env-derived values into a complete nginx server config that lives at
+ * /etc/nginx/conf.d/polaris.conf.
+ *
+ * Source template: deploy/nginx/polaris.conf.template, with {{TOKEN}}
+ * placeholders. The renderer owns the "how does this directive look" logic
+ * so togglable directives (QUIC listener, HSTS header, ssl_early_data) are
+ * emitted as whole-line replacements — never half-commented.
+ *
+ * Determinism: given the same RenderInput, the rendered bytes (and sha256)
+ * are identical across calls. updateService.ts and nginxApplyService.ts both
+ * compare against `lastAppliedHash` to detect drift.
+ */
+
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import type { ProxyConfig } from "../types/proxyConfig.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// The template ships under deploy/nginx/ at the repo root. This module lives
+// at src/services/ in dev (tsx/esm) and dist/services/ in prod (compiled tsc
+// output). Both are two dir levels deep, so resolving "../../deploy/nginx/"
+// finds the template in both layouts.
+function resolveTemplatePath(): string {
+  return path.resolve(__dirname, "..", "..", "deploy", "nginx", "polaris.conf.template");
+}
+
+export interface RenderInput {
+  config: ProxyConfig;
+  /** Hostname for the `server_name` directive — derived from POLARIS_PUBLIC_URL. */
+  serverName: string;
+  /** Polaris web upstream port — derived from PORT env var (default 3000). */
+  polarisPort: number;
+}
+
+export interface RenderResult {
+  contents: string;
+  sha256: string;
+}
+
+export function renderNginxConfig(input: RenderInput, templateOverride?: string): RenderResult {
+  const template = templateOverride ?? readFileSync(resolveTemplatePath(), "utf8");
+
+  const substitutions: Record<string, string> = {
+    HTTPS_PORT: String(input.config.httpsPort),
+    SERVER_NAME: input.serverName,
+    POLARIS_PORT: String(input.polarisPort),
+    SSL_PROTOCOLS_LIST: input.config.tlsProtocols.join(" "),
+    QUIC_LISTENER: renderQuicListener(input.config),
+    SSL_EARLY_DATA: renderSslEarlyData(input.config),
+    HSTS_HEADER: renderHstsHeader(input.config),
+    METRICS_ALLOW_BLOCK: renderMetricsAllowBlock(input.config),
+  };
+
+  let contents = template;
+  for (const [token, value] of Object.entries(substitutions)) {
+    contents = contents.split(`{{${token}}}`).join(value);
+  }
+
+  const sha256 = createHash("sha256").update(contents).digest("hex");
+  return { contents, sha256 };
+}
+
+function renderQuicListener(cfg: ProxyConfig): string {
+  if (!cfg.http3Enabled) return "";
+  return [
+    "",
+    "",
+    "  # UDP listener — HTTP/3 over QUIC. Requires nginx 1.25+.",
+    `  listen ${cfg.httpsPort} quic reuseport;`,
+    "  http3 on;",
+    "",
+    "  # Advertise HTTP/3 to clients connecting over TCP. ma=86400 = 24h client cache.",
+    `  add_header Alt-Svc 'h3=":${cfg.httpsPort}"; ma=86400' always;`,
+  ].join("\n");
+}
+
+function renderSslEarlyData(cfg: ProxyConfig): string {
+  // 0-RTT only emitted when QUIC is enabled. On TCP-TLS-1.3 it also has replay
+  // risk for non-idempotent requests; defense in depth — only ship the
+  // directive when the QUIC payoff justifies the surface.
+  if (!cfg.http3Enabled) return "";
+  return "\n  ssl_early_data on;   # 0-RTT on QUIC for resumed sessions (TLS 1.3 only)";
+}
+
+function renderHstsHeader(cfg: ProxyConfig): string {
+  if (!cfg.hsts.enabled) return "";
+  const directives = [`max-age=${cfg.hsts.maxAgeSeconds}`];
+  if (cfg.hsts.includeSubDomains) directives.push("includeSubDomains");
+  if (cfg.hsts.preload) directives.push("preload");
+  return [
+    "",
+    "",
+    "  # HSTS at the edge.",
+    `  add_header Strict-Transport-Security "${directives.join("; ")}" always;`,
+  ].join("\n");
+}
+
+function renderMetricsAllowBlock(cfg: ProxyConfig): string {
+  const lines = cfg.prometheusAllowIps.map((ip) => `    allow ${ip};`);
+  lines.push("    deny all;");
+  return lines.join("\n") + "\n";
+}
