@@ -87,7 +87,11 @@
   // Minimize is triggered by tapping the scrim (i.e. the dimmed area over the
   // searchbar); expand by tapping the peek bar; dismiss by swipe-down or the
   // close button.
-  var PEEK_BAND_PX = 56;
+  // Sized to clear the full peek-band content above the bottom navbar:
+  // 32px of handle area (4px line + 12+16 margins) + 64px of header (48px
+  // icon-btn rows + 4+12 padding) = 96px. Anything smaller cuts into the
+  // hostname row.
+  var PEEK_BAND_PX = 96;
   var _state = "closed";   // "closed" | "expanded" | "peek"
   var _openId = null;      // asset id currently shown — also the loader race guard
 
