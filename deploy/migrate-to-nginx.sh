@@ -197,8 +197,12 @@ step "Stage: extracting active server cert + key from Setting.certificates"
 # selects the right records; Node is already required to run Polaris, so
 # this adds no new install-time dependency.
 EXTRACT_RC=0
-HTTPS_JSON=$(sudo -u postgres psql -tA -d "$DB_NAME" -c "SELECT value FROM \"Setting\" WHERE key='https'" 2>/dev/null || true)
-CERTS_JSON=$(sudo -u postgres psql -tA -d "$DB_NAME" -c "SELECT value FROM \"Setting\" WHERE key='certificates'" 2>/dev/null || true)
+# Postgres table name is `settings` (snake_case per @@map in
+# prisma/schema.prisma), NOT `"Setting"` — `psql` would silently 0-row a
+# quoted-PascalCase reference. Let stderr surface so a real table-not-found
+# bubbles up rather than masquerading as "no row".
+HTTPS_JSON=$(sudo -u postgres psql -tA -d "$DB_NAME" -c "SELECT value FROM settings WHERE key='https'")
+CERTS_JSON=$(sudo -u postgres psql -tA -d "$DB_NAME" -c "SELECT value FROM settings WHERE key='certificates'")
 
 if [[ -z "$CERTS_JSON" ]]; then
   error "No 'certificates' Setting row found — has Polaris ever been configured with an HTTPS cert?"
