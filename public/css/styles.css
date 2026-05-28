@@ -423,6 +423,35 @@ code {
   flex-shrink: 0;
 }
 
+/* ─── Failed-integration notice (sidebar; surfaced for any user who can read integrations) ── */
+.integration-failed-status {
+  border-color: rgba(239,83,80,0.45);
+  background: rgba(239,83,80,0.08);
+  margin-bottom: 0.5rem;
+  transition: background 0.15s;
+}
+.integration-failed-status:hover {
+  background: rgba(239,83,80,0.14);
+}
+.integration-failed-header {
+  color: var(--color-danger);
+}
+.integration-failed-icon {
+  font-size: 0.85rem;
+  flex-shrink: 0;
+  color: var(--color-danger);
+}
+.integration-failed-name {
+  color: var(--color-text-primary);
+}
+[data-theme="light"] .integration-failed-status {
+  border-color: rgba(198,40,40,0.40);
+  background: rgba(198,40,40,0.07);
+}
+[data-theme="light"] .integration-failed-status:hover {
+  background: rgba(198,40,40,0.12);
+}
+
 /* ─── Capacity reason building blocks (shared by sidebar critical alert + inline pg-tuning rows on the card) ── */
 .pg-tuning-header {
   display: flex;

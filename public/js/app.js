@@ -190,6 +190,7 @@ function renderNav() {
     </ul>
     <div style="margin-top:auto">
       <div id="role-review-status" class="query-status role-review-status" style="display:none"></div>
+      <div id="integration-failed-status" class="query-status integration-failed-status" style="display:none"></div>
       <div id="query-status" class="query-status" style="display:none"></div>
       <div id="capacity-critical-alert" class="capacity-critical-alert" style="display:none"></div>
       ${(isAdmin() || canManageAssets()) ? `<div style="padding:0.5rem 0.5rem 0;border-top:1px solid var(--color-border-light)">
@@ -259,6 +260,27 @@ function renderNav() {
   }
   window._pollRoleReviewNotifications = pollRoleReviewNotifications;
   window._getRoleReviewUsers = function () { return _roleReviewUsers; };
+
+  // ─── Failed-integration notice ────────────────────────────────────────
+  // Sidebar panel surfacing integrations whose most recent credential test
+  // failed. `integrationConnectionTester` refreshes lastTestOk every 10 min,
+  // so polling at 30 s is plenty — the underlying state changes slowly.
+  // Silently degrades on permission denial (the route requires
+  // integrations=read; users without it just see nothing).
+  var _failedIntegrations = [];
+  async function pollFailedIntegrations() {
+    try {
+      var result = await api.integrations.healthSummary();
+      _failedIntegrations = (result && result.failed) || [];
+    } catch (_) {
+      _failedIntegrations = [];
+    }
+    renderIntegrationFailedStatus();
+  }
+  pollFailedIntegrations();
+  setInterval(pollFailedIntegrations, 30000);
+  window._pollFailedIntegrations = pollFailedIntegrations;
+  window._getFailedIntegrations = function () { return _failedIntegrations; };
 
   // Inject global search bar + user badge into page header
   renderGlobalSearch();
@@ -1129,6 +1151,62 @@ function renderRoleReviewStatus() {
       }
     });
   });
+}
+
+// ─── Failed-integration notice ──────────────────────────────────────────────
+// Renders the sidebar panel listing integrations whose latest credential test
+// failed. Reads from the closure-scoped _failedIntegrations array populated by
+// pollFailedIntegrations above. Clicking the panel navigates to
+// /integrations.html so the operator can inspect and re-test.
+
+function renderIntegrationFailedStatus() {
+  var container = document.getElementById("integration-failed-status");
+  if (!container) return;
+  var failed = (window._getFailedIntegrations && window._getFailedIntegrations()) || [];
+  if (!failed.length) {
+    container.style.display = "none";
+    container.innerHTML = "";
+    return;
+  }
+  container.style.display = "block";
+  var label = failed.length === 1 ? "integration not reachable" : "integrations not reachable";
+  function typeLabel(t) {
+    if (t === "fortimanager") return "FortiManager";
+    if (t === "fortigate") return "FortiGate";
+    if (t === "windowsserver") return "Windows Server";
+    if (t === "entraid") return "Entra ID";
+    if (t === "activedirectory") return "Active Directory";
+    return t || "";
+  }
+  container.innerHTML =
+    '<div class="query-status-header integration-failed-header">' +
+      '<span class="integration-failed-icon" aria-hidden="true">&#9888;</span>' +
+      '<span class="query-status-label">' + failed.length + ' ' + label + '</span>' +
+    '</div>' +
+    '<ul class="query-status-list">' +
+      failed.map(function (i) {
+        var sub = typeLabel(i.type);
+        if (i.lastTestAt) {
+          var when = new Date(i.lastTestAt);
+          if (!isNaN(when.getTime())) sub += ' · last test ' + when.toLocaleString();
+        } else {
+          sub += ' · never tested';
+        }
+        return '<li><div style="min-width:0;flex:1">' +
+          '<span class="query-status-name integration-failed-name" title="' + escapeHtml(i.name) + '">' + escapeHtml(i.name) + '</span>' +
+          '<span class="query-status-progress">' + escapeHtml(sub) + '</span>' +
+          '</div></li>';
+      }).join("") +
+    '</ul>';
+
+  // Whole panel clicks through to the integrations page. Skip clicks that
+  // originated on a button (defensive — there are none today, but parity with
+  // the role-review panel pattern).
+  container.style.cursor = "pointer";
+  container.onclick = function (e) {
+    if (e.target && e.target.tagName === "BUTTON") return;
+    window.location.href = "/integrations.html";
+  };
 }
 
 // ─── Tracked PDF Export ─────────────────────────────────────────────────────

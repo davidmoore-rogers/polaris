@@ -222,6 +222,24 @@ function validateAutoMonitorPatterns(cfg: any): void {
   }
 }
 
+// GET /api/v1/integrations/health-summary — sidebar polling target. Returns
+// the small subset of enabled integrations whose most recent connection test
+// failed, so the sidebar can surface a notice prompting an operator to look.
+// Lives in the read-gated section so any user who can see the integrations
+// list also sees the failure indicator.
+router.get("/health-summary", async (_req, res, next) => {
+  try {
+    const failed = await prisma.integration.findMany({
+      where: { enabled: true, lastTestOk: false },
+      select: { id: true, name: true, type: true, lastTestAt: true },
+      orderBy: { name: "asc" },
+    });
+    res.json({ failed });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // /integrations is mounted with `integrations=read` at router.ts so any
 // authenticated caller with read access can see the integration list. Every
 // route below this line is a write — escalate the bar to `integrations=write`.
