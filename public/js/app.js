@@ -472,7 +472,12 @@ async function _performSearch(q) {
 function _renderSearchDropdown(results) {
   var dropdown = document.getElementById("global-search-dropdown");
   var sites = results.sites || [];
-  var endpointMapHits = (results.assets || [])
+  // Skip the virtual-Device-Map synthesis when the operator typed a
+  // non-map scope prefix (`a:`, `r:`, `n:`, `b:` / long forms). The
+  // backend already returns only that group's hits; synthesizing map
+  // rows from the asset list would defeat the scope.
+  var scopeMatch = (results.query || "").match(/^(block|asset|reservation|network|b|a|r|n):/i);
+  var endpointMapHits = scopeMatch ? [] : (results.assets || [])
     .filter(function (h) { return h.context && h.context.siteId; })
     .map(function (h) {
       return Object.assign({}, h, {

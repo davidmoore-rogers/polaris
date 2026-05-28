@@ -222,14 +222,22 @@
     // search opens its origin site's topology graph, not just the asset
     // details page. Without this the Device Map section only ever appears
     // when the operator types a firewall hostname directly.
-    var virtualSites = (data.assets || [])
-      .filter(function (h) { return h.context && h.context.siteId; })
-      .map(function (h) {
-        var ctx = Object.assign({}, h.context, { mapEntry: true });
-        var subtitle = ctx.siteHostname ? ("On " + ctx.siteHostname) : (h.subtitle || "");
-        return Object.assign({}, h, { subtitle: subtitle, context: ctx });
-      });
-    data.sites = (data.sites || []).concat(virtualSites);
+    //
+    // Suppress the injection when the operator typed a non-map scope
+    // prefix (e.g. `a:`, `asset:`, `r:`, `n:`, `b:`). The backend already
+    // returns only that group's hits; synthesizing Device Map rows from
+    // the asset list would defeat the scope.
+    var scopeMatch = (data.query || "").match(/^(block|asset|reservation|network|b|a|r|n):/i);
+    if (!scopeMatch) {
+      var virtualSites = (data.assets || [])
+        .filter(function (h) { return h.context && h.context.siteId; })
+        .map(function (h) {
+          var ctx = Object.assign({}, h.context, { mapEntry: true });
+          var subtitle = ctx.siteHostname ? ("On " + ctx.siteHostname) : (h.subtitle || "");
+          return Object.assign({}, h, { subtitle: subtitle, context: ctx });
+        });
+      data.sites = (data.sites || []).concat(virtualSites);
+    }
 
     var groupOrder = orderedSearchGroups();
     var totalHits = 0;
