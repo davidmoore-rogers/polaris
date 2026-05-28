@@ -44,6 +44,7 @@ import { startProbePatchBuffer, shutdownFlushProbePatchBuffer } from "./services
 import { runStartupDiskCheck } from "./utils/startupDiskCheck.js";
 import { runSchemaSanityCheck } from "./utils/schemaSanityCheck.js";
 import { getDbConnectionMode } from "./utils/dbConnections.js";
+import { startMetricsOnlyServer } from "./utils/metricsServer.js";
 import { recordDbConnectionMode, setDbPoolRoleCapacity } from "./metrics.js";
 
 // Stamp the detected DB connection topology once at boot so operators (and
@@ -169,6 +170,26 @@ if (cfg.runsWriteBuffers) {
   // FROM VALUES per 2 s window covers every asset's monitorStatus / counters /
   // last-at timestamps instead of one prisma.asset.update per probe.
   startProbePatchBuffer();
+}
+
+// Standalone /metrics listener for the non-HTTP roles (monitor, discovery).
+// Web/all serve /metrics from the main Express app, so this only fires when
+// runsHttp is false AND the operator has set POLARIS_METRICS_PORT. Without
+// this, every metric stamped from inside a monitor worker or discovery
+// consumer lives in a process Prometheus never scrapes — the symptom is the
+// "no data" panels for probe / work-duration / sample-write / discovery /
+// FMG-proxy-lane on the Grafana dashboard.
+if (!cfg.runsHttp) {
+  const rawPort = Number.parseInt(process.env.POLARIS_METRICS_PORT ?? "", 10);
+  if (Number.isFinite(rawPort) && rawPort > 0) {
+    const bind = process.env.POLARIS_METRICS_BIND || "127.0.0.1";
+    void startMetricsOnlyServer(rawPort, bind).catch((err) => {
+      logger.error(
+        { err: err?.message, port: rawPort, bind },
+        "Failed to start metrics-only HTTP listener",
+      );
+    });
+  }
 }
 
 // Start role-appropriate background jobs (dynamic imports so a job module's

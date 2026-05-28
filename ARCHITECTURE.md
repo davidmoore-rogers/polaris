@@ -1644,6 +1644,19 @@ polaris.target`). Docker: one image, per-service `POLARIS_ROLE`, a one-shot
 `migrate` compose service the app services gate on. Legacy `polaris.service`
 (role unset = `all`) is retained. See [docs/INSTALL.md](docs/INSTALL.md).
 
+**Per-role metrics endpoint.** prom-client registries are per-process. The
+web role exposes `/metrics` on its main HTTPS listener; monitor and discovery
+boot a standalone HTTP listener via [src/utils/metricsServer.ts](src/utils/metricsServer.ts)
+when `POLARIS_METRICS_PORT` is set. The shipped unit files pin the monitor
+template to `910N` (instance N → 9101/9102/…) and discovery to `9110`, both
+on `127.0.0.1`. Prometheus must scrape every role endpoint or panels that
+depend on consumer-stamped metrics (`polaris_probe_*`, `polaris_monitor_work_duration_seconds`,
+`polaris_sample_write_duration_seconds`, `polaris_discovery_*`,
+`polaris_fmg_worker_queue_depth` / `_inflight`) silently show no data on the
+Grafana dashboard. Dashboard queries already `sum()` across instances, so
+panels populate as soon as the scrape job is complete. See
+[docs/grafana/README.md](docs/grafana/README.md) for an example scrape job.
+
 ---
 
 ## Monitoring Architecture
@@ -2075,7 +2088,7 @@ Vanilla JavaScript SPA served from `/public/`. No build step — plain ES module
 ## Observability
 
 - `GET /health` — gated by `HEALTH_TOKEN` (auto-generated at first-run setup; clearing it reopens the endpoint and surfaces the `health_token_unset` watch-severity reason on the Maintenance tab). Returns `{status: "ok"}` once the app has booted; the first-run setup wizard polls it (from localhost) with the bearer it just generated to detect when the main app has come up after finalize.
-- `GET /metrics` — Prometheus text-format endpoint, gated by `METRICS_TOKEN` (auto-generated at first-run setup; clearing it reopens the endpoint and surfaces the `metrics_token_unset` watch-severity reason on the Maintenance tab — leaving `/metrics` open on a public deployment leaks fleet size, monitor health, monitor pass duration, and queue depth as recon data). Exposes default Node.js process / GC / event-loop metrics (un-prefixed so standard Grafana dashboards work) plus Polaris-specific gauges, histograms, and counters defined in `src/metrics.ts`. Polaris-specific metric names are prefixed `polaris_`. Currently exported:
+- `GET /metrics` — Prometheus text-format endpoint, gated by `METRICS_TOKEN` (auto-generated at first-run setup; clearing it reopens the endpoint and surfaces the `metrics_token_unset` watch-severity reason on the Maintenance tab — leaving `/metrics` open on a public deployment leaks fleet size, monitor health, monitor pass duration, and queue depth as recon data). **In the split-role layout, prom-client registries are per-process** — the web role serves `/metrics` on its main HTTPS listener, while monitor + discovery boot a standalone `/metrics` HTTP listener via [src/utils/metricsServer.ts](src/utils/metricsServer.ts) when `POLARIS_METRICS_PORT` is set (shipped systemd units pin monitor instances to `910N` and discovery to `9110`, both `127.0.0.1`). Prometheus must scrape every role endpoint; metrics stamped from monitor workers (`polaris_probe_*`, `polaris_monitor_work_*`, `polaris_sample_write_*`) or discovery consumers (`polaris_discovery_*`, FMG proxy lane) only exist in those processes' registries. Exposes default Node.js process / GC / event-loop metrics (un-prefixed so standard Grafana dashboards work) plus Polaris-specific gauges, histograms, and counters defined in `src/metrics.ts`. Polaris-specific metric names are prefixed `polaris_`. Currently exported:
   - `polaris_monitor_pass_duration_seconds` (histogram) — wall-clock of one `runMonitorPass`. Watch this rise toward the configured cadence as a saturation signal.
   - `polaris_monitor_work_duration_seconds{cadence,asset_type,transport}` (histogram) — per-work-item wall-clock. `cadence` is `probe | fastFiltered | telemetry | systemInfo | lldp | storage` (LLDP and Storage carved into their own queues + cadences in Phase 2 of the monitoring-tab redesign); `asset_type` is the `Asset.assetType` enum value (`firewall` / `switch` / `access_point` / `server` / `workstation` / `router` / `printer` / `other`); `transport` is the resolved per-cadence polling method (probe → `responseTimePolling`, telemetry → `cpuMemoryPolling`, systemInfo + fastFiltered → `interfacesPolling`, lldp → `lldpPolling`, storage → `storagePolling` — `rest_api` / `snmp` / `winrm` / `ssh` / `icmp` / `disabled` / `not_delivered` / `unknown`). Lets operators slice by device-class × transport to find which combo is the bottleneck (e.g. "SNMP on workstations is the slow tail, FortiOS REST on firewalls is fine"). Labels fall back to `unknown` when a pg-boss job was enqueued by an older release and replayed after upgrade.
   - `polaris_monitor_work_total{cadence,asset_type,transport,outcome}` (counter) — same label set; `outcome` is `success | failure | crash`.

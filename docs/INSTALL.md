@@ -468,6 +468,25 @@ sudo systemctl enable --now polaris.target     # "Start Everything"
 discovery; `systemctl stop polaris.target` stops the group. Do **not** also
 enable the legacy `polaris.service` (it's the single-process `all` deployment).
 
+**Per-role `/metrics` listeners.** prom-client registries are per-process. The
+web role serves `/metrics` on the main HTTPS port; monitor and discovery boot a
+standalone `/metrics` listener via `src/utils/metricsServer.ts` on
+`POLARIS_METRICS_PORT`. The shipped units default to:
+
+| Role | Default port (bind 127.0.0.1) |
+|---|---|
+| `polaris-monitor@N` | `910N` (instance `1` → 9101, `2` → 9102, … `9` → 9109) |
+| `polaris-discovery` | `9110` |
+
+Prometheus must scrape **every** endpoint or any panel that depends on metrics
+stamped from inside a monitor worker (`polaris_probe_*`, `polaris_monitor_work_duration_seconds`,
+`polaris_sample_write_duration_seconds`) or discovery consumer
+(`polaris_discovery_*`, FMG proxy lane) will silently show "no data" on the
+Grafana dashboard. See [docs/grafana/README.md](grafana/README.md#multi-process-split-role-deployments)
+for the matching scrape job. Override with a systemd drop-in if you run more
+than 9 monitor replicas or need to reach Prometheus from a different host
+(`POLARIS_METRICS_BIND=0.0.0.0`).
+
 **Updater group-restart grant.** The in-app updater (Server Settings →
 Maintenance) restarts the whole group via `systemd-run … systemctl restart
 polaris.target`. Grant the `polaris` user permission with a polkit rule
@@ -494,10 +513,15 @@ not a service. Example:
 nssm install PolarisWeb       "C:\Program Files\nodejs\node.exe" "dist\index.js"
 nssm set     PolarisWeb       AppEnvironmentExtra "NODE_ENV=production" "POLARIS_ROLE=web"
 nssm install PolarisMonitor1  "C:\Program Files\nodejs\node.exe" "dist\index.js"
-nssm set     PolarisMonitor1  AppEnvironmentExtra "NODE_ENV=production" "POLARIS_ROLE=monitor"
+nssm set     PolarisMonitor1  AppEnvironmentExtra "NODE_ENV=production" "POLARIS_ROLE=monitor" "POLARIS_METRICS_PORT=9101"
 nssm install PolarisDiscovery "C:\Program Files\nodejs\node.exe" "dist\index.js"
-nssm set     PolarisDiscovery AppEnvironmentExtra "NODE_ENV=production" "POLARIS_ROLE=discovery"
+nssm set     PolarisDiscovery AppEnvironmentExtra "NODE_ENV=production" "POLARIS_ROLE=discovery" "POLARIS_METRICS_PORT=9110"
 ```
+
+Add `POLARIS_METRICS_PORT` to each non-web role so Prometheus can scrape its
+in-process metrics; see the systemd section above for the role → port mapping
+and [docs/grafana/README.md](grafana/README.md#multi-process-split-role-deployments)
+for the scrape job.
 
 ### Docker
 

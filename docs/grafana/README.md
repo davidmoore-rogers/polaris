@@ -33,6 +33,43 @@ scrape_configs:
     # bearer_token: '<your-METRICS_TOKEN-value>'
 ```
 
+### Multi-process (split-role) deployments
+
+In the split-role layout (`polaris-web` + `polaris-monitor@N` + `polaris-discovery`) **prom-client registries are per-process**. The web process exposes `/metrics` on its main HTTPS listener; the monitor and discovery processes each boot a standalone HTTP `/metrics` listener (see [src/utils/metricsServer.ts](../../src/utils/metricsServer.ts)). The shipped systemd units default to:
+
+| Role | Port | Bind | File |
+|---|---|---|---|
+| `web` (and `all` / single-process) | main HTTPS port (3000) | as configured | served by the Express app |
+| `monitor` instance `N` | `910N` (9101, 9102, …) | `127.0.0.1` | `deploy/polaris-monitor@.service` |
+| `discovery` | `9110` | `127.0.0.1` | `deploy/polaris-discovery.service` |
+
+Prometheus must scrape **every** role endpoint or the dashboard will show "no data" for any metric stamped from inside a monitor worker (`polaris_probe_*`, `polaris_monitor_work_duration_seconds`, `polaris_sample_write_duration_seconds`, write/probe-patch buffer depths) or discovery consumer (`polaris_discovery_*`, FMG proxy lane). Dashboard queries already `sum()` across instances so panels populate as soon as the scrape job is complete. Example for two monitor replicas + a discovery worker, all on the same host as Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: polaris-web
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['polaris.example.com:3000']
+    # bearer_token: '<METRICS_TOKEN>'
+
+  - job_name: polaris-monitor
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['127.0.0.1:9101', '127.0.0.1:9102']
+        labels: { polaris_role: monitor }
+    # bearer_token: '<METRICS_TOKEN>'
+
+  - job_name: polaris-discovery
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['127.0.0.1:9110']
+        labels: { polaris_role: discovery }
+    # bearer_token: '<METRICS_TOKEN>'
+```
+
+The same `METRICS_TOKEN` from `.env` gates every role endpoint. If Prometheus runs on a different host from the workers, set `POLARIS_METRICS_BIND=0.0.0.0` per-process and adjust the target addresses; the units pin `127.0.0.1` by default so the metrics endpoint isn't world-reachable.
+
 ## Importing
 
 In Grafana → **Dashboards → New → Import**:
@@ -52,6 +89,8 @@ In Grafana → **Dashboards → New → Import**:
 The single most important panel for cadence health is **Monitor pass duration** (p99 line specifically). If it's hovering well below your configured `monitor.intervalSeconds` (default 60 s), the worker pool has headroom. If p99 is climbing toward — or past — the cadence interval, the publisher is producing work faster than the pool can drain it; expect cadence drift and consider raising worker concurrency (`POLARIS_PROBE_CONCURRENCY` / `POLARIS_HEAVY_CONCURRENCY`) or switching to the pg-boss queue (Maintenance tab → recommendation alert).
 
 For per-transport investigation, the **Probe duration p95 by transport** panel separates the fortinet / snmp / winrm / ssh / icmp paths so you can see if one specific integration is slow without it polluting the overall probe-duration line.
+
+> Two panels in the **Cadence health** row are cursor-mode only by design and will stay "no data" on pg-boss installs: **Monitor pass duration p50/p95/p99** (`polaris_monitor_pass_duration_seconds` is observed inside `runMonitorPass`, which pg-boss mode skips in favor of `publishDueWork`) and **Queue depth by cadence** (`polaris_monitor_queue_depth` is only set by the cursor path). On pg-boss installs, read **Pg-boss oldest job age** + **pg-boss queue jobs by queue × state** under "Throughput & queue health" / "Write buffers & rollups" instead. The third panel in that row — **Work item rate by cadence + outcome** — works in both modes.
 
 For bottleneck spotting at scale, the four most actionable panels are:
 

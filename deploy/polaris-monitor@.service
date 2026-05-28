@@ -24,10 +24,20 @@ Environment=POLARIS_ROLE=monitor
 # override the .env values per monitor replica:
 #Environment=DATABASE_POOL_SIZE=12
 #Environment=POLARIS_PGBOSS_POOL_SIZE=10
+# Per-replica /metrics listener (Prometheus scrape target). The web role
+# exposes /metrics on the main HTTPS listener; monitor + discovery don't bind
+# any Express server, so each replica needs its own port for Prometheus to
+# see in-process work-duration / probe / sample-write histograms that live in
+# this process's prom-client registry. %i is the numeric instance number —
+# instance 1 binds 9101, 2 binds 9102, …, 9 binds 9109. Override with a
+# drop-in if you run more than 9 replicas or want a different range. Binds
+# 127.0.0.1 by default; set POLARIS_METRICS_BIND=0.0.0.0 if your Prometheus
+# runs off-host.
+Environment=POLARIS_METRICS_PORT=910%i
 Restart=on-failure
 RestartSec=5
 
-# No port bind — workers don't serve HTTP.
+# /metrics binds an unprivileged port on 127.0.0.1; no NET_BIND_SERVICE cap needed.
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/polaris
