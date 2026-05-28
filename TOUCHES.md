@@ -369,7 +369,7 @@ build auto-prune + boot-time auto-build are layered on top.
 
 **Readers** (artifacts the running app reads from disk that operators provision):
 - `.env` — read once at boot via dotenv. CLAUDE.md "Environment Variables" enumerates every key the app honors.
-- HTTPS cert/key files at `HTTPS_CERT_PATH` / `HTTPS_KEY_PATH` — read by `src/httpsManager.ts`.
+- HTTPS cert/key — stored in the `Setting` table (uploaded via Server Settings → Security → Identification), loaded into the running TLS context by `src/httpsManager.ts`. Not env-var configured.
 - `<STATE_DIR>/data/agents/<version>/` + `manifest.json` — produced by `agentBuildService` or by `make -C agent all`, consumed by the install / upgrade flows.
 - `.setup-complete` marker at the project root — `src/app.ts` boot path consults it to decide whether to run the wizard.
 

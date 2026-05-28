@@ -283,29 +283,9 @@ TIMESCALE_COMPRESS_AFTER_DAYS=7
 # Persistent-state dir. When set, .env / .setup-complete / data/backups /
 # public/uploads all live under this dir (Docker pins to /app/state).
 POLARIS_STATE_DIR=
-
-# HTTPS (optional)
-HTTPS_CERT_PATH=
-HTTPS_KEY_PATH=
-HTTPS_REDIRECT=false
-
-# Azure SAML (optional)
-AZURE_TENANT_ID=
-AZURE_APP_ID=
-AZURE_SAML_CALLBACK_URL=
-
-# Syslog (optional)
-SYSLOG_HOST=
-SYSLOG_PORT=514
-SYSLOG_PROTOCOL=udp
-
-# SFTP archival (optional)
-ARCHIVE_SFTP_HOST=
-ARCHIVE_SFTP_PORT=22
-ARCHIVE_SFTP_USER=
-ARCHIVE_SFTP_PASSWORD=
-ARCHIVE_SFTP_PATH=
 ```
+
+Configured via the UI, not env vars: HTTPS cert/key (Server Settings → Security → Identification), Azure SAML SSO (Server Settings → Security → Identification), syslog forwarding + SFTP archival (Server Settings → Integrations). These previously had env-var entries here that no longer corresponded to any `process.env.*` reader in `src/`.
 
 Copy `.env.example` to `.env` before running.
 
