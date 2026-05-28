@@ -353,6 +353,22 @@ sed "s|polaris\\.rogersgroupinc\\.com|$HOSTNAME_FROM_URL|g; s|<PROMETHEUS_IP>|$P
 info "Validating nginx config..."
 nginx -t
 
+# ─── 10b. Install in-app nginx GUI helpers ──────────────────────────────────
+# /usr/local/sbin/polaris-nginx-apply + narrow sudoers grant + tmpfiles
+# staging dir back the Server Settings → Certificates nginx GUI.
+# Existing installs picking this up via in-app update get the same wiring
+# through updateService.ts's sync block, but we land it eagerly here so
+# fresh installs work out of the box without an extra restart cycle.
+info "Installing in-app nginx GUI helpers (idempotent)..."
+install -o root -g root -m 0755 "$APP_DIR/deploy/scripts/polaris-nginx-apply.sh" /usr/local/sbin/polaris-nginx-apply
+install -o root -g root -m 0440 "$APP_DIR/deploy/sudoers.d/polaris-nginx"        /etc/sudoers.d/polaris-nginx
+install -o root -g root -m 0644 "$APP_DIR/deploy/tmpfiles.d/polaris-nginx.conf"  /etc/tmpfiles.d/polaris-nginx.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/polaris-nginx.conf >/dev/null 2>&1 || true
+if ! id -nG "$APP_USER" 2>/dev/null | grep -qw nginx; then
+  usermod -aG nginx "$APP_USER"
+  info "Added $APP_USER to the nginx group (cert file readability)"
+fi
+
 # ─── 11. Firewall ───────────────────────────────────────────────────────────
 if command -v firewall-cmd &>/dev/null; then
   info "Opening TCP+UDP/443 in firewalld..."

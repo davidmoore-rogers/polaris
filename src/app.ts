@@ -657,6 +657,7 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/backfillMonitorOverride.js",
       "./jobs/rasterizeStoredSvgIcons.js",
       "./jobs/clampAssetAcquiredAt.js",
+      "./jobs/bootstrapProxyConfig.js",
     ]) await importJob(p);
   }
 

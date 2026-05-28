@@ -341,6 +341,19 @@ sed "s|polaris\\.rogersgroupinc\\.com|$HOSTNAME_FROM_URL|g; s|<PROMETHEUS_IP>|$P
   "$APP_DIR/deploy/nginx/polaris.conf" > "$NGINX_CONF_DEST"
 nginx -t
 
+# In-app nginx GUI helpers (wrapper + sudoers + tmpfiles + group membership).
+# Mirrors setup-rhel.sh's 10b section so fresh -nodb installs land the
+# Server Settings → Certificates nginx GUI without an extra restart cycle.
+info "Installing in-app nginx GUI helpers (idempotent)..."
+install -o root -g root -m 0755 "$APP_DIR/deploy/scripts/polaris-nginx-apply.sh" /usr/local/sbin/polaris-nginx-apply
+install -o root -g root -m 0440 "$APP_DIR/deploy/sudoers.d/polaris-nginx"        /etc/sudoers.d/polaris-nginx
+install -o root -g root -m 0644 "$APP_DIR/deploy/tmpfiles.d/polaris-nginx.conf"  /etc/tmpfiles.d/polaris-nginx.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/polaris-nginx.conf >/dev/null 2>&1 || true
+if ! id -nG "$APP_USER" 2>/dev/null | grep -qw nginx; then
+  usermod -aG nginx "$APP_USER"
+  info "Added $APP_USER to the nginx group (cert file readability)"
+fi
+
 # Firewall
 if command -v firewall-cmd &>/dev/null; then
   info "Opening TCP+UDP/443 in firewalld..."
