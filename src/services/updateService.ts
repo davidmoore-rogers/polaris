@@ -22,7 +22,6 @@ import { randomBytes, scryptSync, createCipheriv } from "node:crypto";
 import { logger } from "../utils/logger.js";
 import { prisma } from "../db.js";
 import { getAppVersion } from "../utils/version.js";
-import { getRole } from "../utils/role.js";
 
 const execAsync = promisify(exec);
 
@@ -576,16 +575,11 @@ export async function applyUpdate(password?: string | null): Promise<void> {
  */
 export function restartService() {
   const isWindows = process.platform === "win32";
-  // role unset => "all" => legacy single-process install.
-  const multiProcess = getRole() !== "all";
 
   if (isWindows) {
-    // Multi-process: restart each per-role NSSM service, web LAST so its status
-    // page survives through the others' restart. Single-process: the one
-    // "Polaris" service. Detached so it survives this process's exit.
-    const cmd = multiProcess
-      ? "C:\\nssm\\nssm.exe restart PolarisDiscovery & C:\\nssm\\nssm.exe restart PolarisMonitor1 & C:\\nssm\\nssm.exe restart PolarisWeb"
-      : "C:\\nssm\\nssm.exe restart Polaris";
+    // Restart each per-role NSSM service, web LAST so its status page survives
+    // through the workers' restart. Detached so it survives this process's exit.
+    const cmd = "C:\\nssm\\nssm.exe restart PolarisDiscovery & C:\\nssm\\nssm.exe restart PolarisMonitor1 & C:\\nssm\\nssm.exe restart PolarisWeb";
     const child = spawn("cmd.exe", ["/c", cmd], {
       detached: true,
       stdio: "ignore",
@@ -593,7 +587,7 @@ export function restartService() {
     });
     child.unref();
     setTimeout(() => { process.exit(0); }, 5000);
-  } else if (multiProcess) {
+  } else {
     // Restart the full group via a transient unit so the restart survives our
     // own exit (a detached child stays in web's cgroup and would be killed when
     // web restarts; systemd-run runs it as an independent transient unit).
@@ -668,9 +662,5 @@ export function restartService() {
       logger.warn({ err: err?.message }, "systemd-run for group restart failed; falling back to self-exit");
     }
     setTimeout(() => { process.exit(0); }, 3000);
-  } else {
-    // Legacy single unit: exit non-zero so systemd Restart=on-failure cycles us.
-    logger.info("Exiting for systemd restart...");
-    process.exit(1);
   }
 }

@@ -125,24 +125,40 @@ cd /opt/polaris
 npm ci --omit=dev
 ```
 
-### 5. systemd unit
+### 5. Run the install script
 
-The shipped unit at `deploy/polaris.service` should require `postgresql-15.service` (NOT `postgresql.service` — that's the AppStream unit name). Copy it into place and enable:
-
-```bash
-sudo cp deploy/polaris.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now polaris
-```
-
-If you're starting from a unit that references `postgresql.service` (older Polaris docs or an upstream community install), edit it before enabling:
+Since Phase 3, fresh installs land the split-role systemd layout
+(`polaris.target` + `polaris-web` + `polaris-monitor@1..@N` + `polaris-discovery`
++ `polaris-migrate`) + nginx-fronted HTTPS in one command. The legacy
+single-process `polaris.service` is no longer shipped.
 
 ```bash
-sudo sed -i 's/postgresql\.service/postgresql-15.service/g' /etc/systemd/system/polaris.service
-sudo systemctl daemon-reload
+sudo bash deploy/setup-rhel.sh --public-url https://polaris.example.com
 ```
 
-Browse to `http://<host>:3000` to run the setup wizard.
+What the script does, in order: installs Node + Postgres + Go + nginx
+(mainline from nginx.org for HTTP/3 ≥ 1.25), creates the `polaris` system
+user + DB + role, clones the repo, builds, runs migrations, generates a
+self-signed cert for the supplied hostname under `/etc/polaris-nginx/`,
+installs the split-role systemd units + a `Wants=nginx` drop-in on
+`polaris-web`, sets `POLARIS_PROXY_CERT_PATH` + `POLARIS_PUBLIC_URL` in
+`.env`, opens TCP+UDP/443 in firewalld, and starts `polaris.target` (which
+brings up nginx first via the drop-in, then `polaris-web` in HTTP-only
+proxy mode on `127.0.0.1:3000`).
+
+Options:
+- `--public-url <https://hostname>` — REQUIRED (well, defaulted to
+  `https://$(hostname -f)` if you skip it). The cert + nginx `server_name`
+  use whatever hostname is in this URL.
+- `--monitor-replicas N` — number of `polaris-monitor@N` instances to
+  enable. Default 2.
+- `--prometheus-ip <IP>` — the IP the nginx `/metrics-*` locations allow.
+  Default `127.0.0.1`. Update later with a drop-in if Prometheus is
+  off-host.
+
+Browse to `https://<your-hostname>/` to run the first-run setup wizard.
+Self-signed cert in use; replace `/etc/polaris-nginx/{cert,key}.pem` with
+your real cert + `systemctl reload nginx` whenever you're ready.
 
 ### Growing `/var` on RHEL
 
@@ -227,9 +243,10 @@ END $$;
 GRANT USAGE, CREATE ON SCHEMA public TO polaris;
 SQL
 
-# 8. Update polaris.service to depend on postgresql-15.service instead of postgresql.service
-sudo sed -i 's/postgresql\.service/postgresql-15.service/g' /etc/systemd/system/polaris.service
-sudo systemctl daemon-reload
+# 8. Re-run the install script — it'll re-stage the split-role units against
+#    postgresql-15.service and bring polaris.target back up against the
+#    migrated DB.
+sudo bash deploy/setup-rhel.sh --public-url https://polaris.example.com
 
 # 9. Optionally remove the abandoned AppStream PGDATA
 sudo test -f /var/lib/pgsql/data/PG_VERSION && echo "OLD DATA STILL EXISTS — DO NOT DELETE" || sudo rm -rf /var/lib/pgsql/data
@@ -338,24 +355,24 @@ sudo apt install -y nodejs
 
 Same as RHEL — install to `/opt/polaris`, run `npm ci --omit=dev`.
 
-### 5. systemd unit
+### 5. Run the install script
 
-Edit the shipped `deploy/polaris.service` to fix the `Requires=` directive — the Ubuntu unit name is versioned:
-
-```ini
-After=network.target postgresql.service
-Requires=postgresql.service
-```
-
-`postgresql.service` on Debian-based systems is a meta-service that depends on the version-specific cluster unit (`postgresql@15-main.service`), so depending on `postgresql.service` works correctly.
-
-Then copy and enable:
+Since Phase 3, the Ubuntu/Debian install script lands the split-role
+systemd layout + nginx-fronted HTTPS in one command (same as RHEL):
 
 ```bash
-sudo cp deploy/polaris.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now polaris
+sudo bash deploy/setup-ubuntu.sh --public-url https://polaris.example.com
 ```
+
+The script installs nginx mainline from nginx.org's Debian/Ubuntu repo
+(distro nginx is too old for HTTP/3), generates a self-signed cert, drops
+the split-role units (rewritten to depend on Ubuntu/Debian's
+`postgresql.service` meta-service instead of RHEL's `postgresql-15.service`),
+opens TCP+UDP/443 in ufw, and starts `polaris.target`. Browse to
+`https://<your-hostname>/` to run the first-run setup wizard.
+
+The same `--public-url` / `--monitor-replicas` / `--prometheus-ip` flags
+documented above for setup-rhel.sh apply here too.
 
 ---
 
@@ -430,43 +447,59 @@ Browse to `http://<host>:3000` to run the setup wizard.
 
 ---
 
-## Optional: Multi-process deployment (web / monitor / discovery)
+## The split-role deployment (web / monitor / discovery)
 
-By default Polaris runs as **one process** (`POLARIS_ROLE` unset = `all`) — the
-single `polaris.service` unit above. At large fleet sizes you can split the
-workload across processes so discovery's CPU/DB-heavy phases can't starve the
-monitor workers (they no longer share one Node event loop). This requires
-**pg-boss queue mode** (Maintenance tab → Enable on next restart) — the split
-coordinates through the pg-boss queue.
+Since Phase 3 this is the **default and only supported production layout**
+on Linux. `deploy/setup-rhel.sh` and `deploy/setup-ubuntu.sh` install it
+automatically; the legacy single-process `polaris.service` unit is no
+longer shipped. This section documents what the install scripts actually
+do, for operators who want to understand the layout or customize it
+post-install.
+
+Polaris's workload splits across processes so discovery's CPU/DB-heavy
+phases can't starve the monitor workers (they don't share one Node event
+loop). The split coordinates through the **pg-boss queue** (enabled at
+boot via `Setting.monitor.queueMode = "pgboss"`).
 
 The roles (chosen per-process via `POLARIS_ROLE`):
 
-- **web** — HTTP/HTTPS + all singleton schedulers + one-shot migrations. Single instance (control plane). Owns the in-app updater.
+- **web** — HTTP-only on `127.0.0.1:3000` (nginx terminates TLS) + all singleton schedulers + one-shot migrations. Single instance (control plane). Owns the in-app updater.
 - **monitor** — pg-boss monitor-queue consumers. Run **N replicas**; pg-boss gives each job to exactly one worker.
 - **discovery** — pg-boss discovery-queue consumer.
+- **migrate** — oneshot `prisma migrate deploy` at boot; the app services gate on its completion.
+
+The `all` role still exists in `src/utils/role.ts` (one process runs every
+capability) and is the default when `POLARIS_ROLE` is unset — that's what
+`npm run dev` uses. **Production never ships `all` mode**: no `polaris.service`
+unit is shipped, no `--without-split` flag exists on the setup scripts.
 
 ### systemd (RHEL/Ubuntu)
 
-The shipped units in `deploy/` mirror the SolarWinds "many services + a grouping
-target" model. `POLARIS_ROLE` is injected per-unit via `Environment=`; all share
-the one `/opt/polaris/.env` (keep `POLARIS_ROLE` **out** of `.env`).
+`deploy/setup-rhel.sh` + `deploy/setup-ubuntu.sh` install the units below
+automatically. This is the manual equivalent for operators who want to
+re-deploy from a fresh checkout:
 
 ```bash
 # Copy the role units + the migrate one-shot + the grouping target.
 sudo cp deploy/polaris-migrate.service deploy/polaris-web.service \
         deploy/polaris-monitor@.service deploy/polaris-discovery.service \
         deploy/polaris.target /etc/systemd/system/
-# Match the PostgreSQL unit name as you did for polaris.service (e.g. on Ubuntu).
+
+# Ubuntu/Debian: rewrite postgresql-15.service → postgresql.service
+# (the meta-service that resolves to the version-specific cluster unit).
+# RHEL/Rocky/Alma: leave as-is.
+# sudo sed -i 's/postgresql-15\.service/postgresql.service/g' /etc/systemd/system/polaris-*.service
+
 sudo systemctl daemon-reload
 
 # Enable the group + the monitor replicas you want (here: 2).
 sudo systemctl enable polaris-monitor@1 polaris-monitor@2
+sudo systemctl enable polaris-web polaris-discovery polaris-migrate
 sudo systemctl enable --now polaris.target     # "Start Everything"
 ```
 
 `systemctl start polaris.target` brings up migrate → web → monitor@1..N →
-discovery; `systemctl stop polaris.target` stops the group. Do **not** also
-enable the legacy `polaris.service` (it's the single-process `all` deployment).
+discovery; `systemctl stop polaris.target` stops the group.
 
 **Per-role `/metrics` listeners.** prom-client registries are per-process. The
 web role serves `/metrics` on the main HTTPS port; monitor and discovery boot a

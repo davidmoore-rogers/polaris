@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
 # deploy/setup-ubuntu.sh — Polaris deployment script for Ubuntu / Debian
 #
-# Run as root:  bash deploy/setup-ubuntu.sh
+# Run as root:  bash deploy/setup-ubuntu.sh --public-url https://polaris.example.com
 #
-# What this script does:
-#   1. Installs Node.js 20 and PostgreSQL 15 (if not already installed)
-#   2. Creates a dedicated 'polaris' system user
-#   3. Creates the PostgreSQL database and role
-#   4. Clones or copies the application to /opt/polaris
-#   5. Installs dependencies and runs migrations
-#   6. Installs and enables a systemd service
+# What this script does (Phase 3+ — single-process polaris.service no longer
+# shipped to production; every fresh install is split-role + nginx-fronted):
+#   1. Installs Node.js 20, PostgreSQL 15, Go 1.22+, nginx (mainline ≥1.25)
+#   2. Creates a dedicated 'polaris' system user + DB + role
+#   3. Clones the application to /opt/polaris
+#   4. Installs dependencies, builds, runs migrations
+#   5. Generates a self-signed TLS cert for the supplied --public-url hostname
+#   6. Installs split-role systemd units + nginx-dependency drop-in;
+#      enables polaris-monitor@1..@N (default N=2)
+#   7. Configures nginx with the operator's hostname + Prometheus IP
+#   8. Sets POLARIS_PROXY_CERT_PATH + POLARIS_PUBLIC_URL in .env
+#   9. Opens 443/tcp + 443/udp in ufw (if installed)
+#  10. Starts polaris.target — which pulls nginx up first via the drop-in
 #
-# After running, the app will be available at http://<server-ip>:3000
+# Arguments:
+#   --public-url        https://<hostname>[:<port>]  (default: https://$(hostname -f))
+#   --monitor-replicas  N                            (default: 2)
+#   --prometheus-ip     <IP>                         (default: 127.0.0.1)
+#
+# Local dev (npm run dev with POLARIS_ROLE unset = "all") still works without
+# any of this — it's a runtime mode in src/utils/role.ts, separate from
+# production deploy artifacts.
 
 set -euo pipefail
 
@@ -22,6 +35,14 @@ DB_NAME="polaris"
 DB_USER="polaris"
 DB_PASS="polaris"
 REPO_URL="https://github.com/davidmoore-rogers/polaris.git"
+CERT_DIR="/etc/polaris-nginx"
+NGINX_CONF_DEST="/etc/nginx/conf.d/polaris.conf"
+NGINX_DROPIN_DIR="/etc/systemd/system/polaris-web.service.d"
+
+# Defaults — overridable via CLI flags below.
+PUBLIC_URL=""
+MONITOR_REPLICAS=2
+PROMETHEUS_IP="127.0.0.1"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -29,12 +50,40 @@ info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
+# ─── Args ────────────────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --public-url)        PUBLIC_URL="$2"; shift 2;;
+    --monitor-replicas)  MONITOR_REPLICAS="$2"; shift 2;;
+    --prometheus-ip)     PROMETHEUS_IP="$2"; shift 2;;
+    -h|--help)
+      head -40 "$0" | sed -n '/^#/p'
+      exit 0;;
+    *) error "Unknown argument: $1";;
+  esac
+done
+
 # ─── Preflight ────────────────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
   error "This script must be run as root"
 fi
 
+if [[ -z "$PUBLIC_URL" ]]; then
+  PUBLIC_URL="https://$(hostname -f)"
+  warn "No --public-url supplied; defaulting to $PUBLIC_URL"
+fi
+
+if [[ ! "$PUBLIC_URL" =~ ^https:// ]]; then
+  error "--public-url must start with https://, got: $PUBLIC_URL"
+fi
+
+HOSTNAME_FROM_URL=$(echo "$PUBLIC_URL" | sed -E 's|^https://([^:/]+).*|\1|')
+
 info "Starting Polaris deployment on $(hostname)"
+info "  Public URL:        $PUBLIC_URL"
+info "  Cert hostname:     $HOSTNAME_FROM_URL"
+info "  Monitor replicas:  $MONITOR_REPLICAS"
+info "  Prometheus IP:     $PROMETHEUS_IP"
 
 # Ensure apt is up to date
 info "Updating package lists..."
@@ -54,9 +103,8 @@ else
   info "Node.js $(node -v) installed"
 fi
 
-# Allow Node.js to bind to privileged ports (80, 443) without root
-info "Granting Node.js low-port binding capability..."
-setcap cap_net_bind_service=+ep "$(which node)"
+# Phase 3+: Polaris no longer binds privileged ports — nginx terminates TLS
+# on 443 and proxies HTTP-only to 127.0.0.1:3000. No setcap on node needed.
 
 # ─── 1b. Install Go 1.22+ ────────────────────────────────────────────────────
 # Required by the Polaris Agent build feature (Server Settings → Maintenance
@@ -74,6 +122,38 @@ else
     snap install --classic --channel=1.22/stable go
     info "Go $(go version | awk '{print $3}') installed via snap"
   fi
+fi
+
+# ─── 1c. Install nginx mainline (HTTP/3 ≥ 1.25 required) ─────────────────────
+# Ubuntu/Debian's default nginx is too old for HTTP/3; pull mainline from
+# nginx.org's official Debian/Ubuntu repo.
+if command -v nginx >/dev/null 2>&1 && nginx -v 2>&1 | grep -qE '1\.(2[5-9]|[3-9][0-9])'; then
+  info "nginx $(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') already installed"
+else
+  info "Installing nginx mainline from nginx.org..."
+  apt-get install -y curl gnupg2 ca-certificates lsb-release ubuntu-keyring 2>/dev/null || \
+    apt-get install -y curl gnupg2 ca-certificates lsb-release debian-archive-keyring
+  curl https://nginx.org/keys/nginx_signing.key | gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg
+  # Detect Ubuntu vs Debian
+  if [[ -f /etc/lsb-release ]] && grep -q DISTRIB_ID=Ubuntu /etc/lsb-release; then
+    NGINX_DISTRO=ubuntu
+  else
+    NGINX_DISTRO=debian
+  fi
+  CODENAME=$(lsb_release -cs)
+  echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/${NGINX_DISTRO} ${CODENAME} nginx" \
+    > /etc/apt/sources.list.d/nginx.list
+  # Pin nginx.org over distro nginx (prevents unattended upgrades from
+  # replacing mainline with the older distro version).
+  cat > /etc/apt/preferences.d/99nginx <<'PREF'
+Package: *
+Pin: origin nginx.org
+Pin: release o=nginx
+Pin-Priority: 900
+PREF
+  apt-get update -qq
+  apt-get install -y nginx
+  info "nginx $(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') installed"
 fi
 
 # ─── 2. Install PostgreSQL 15 ────────────────────────────────────────────────
@@ -152,6 +232,25 @@ fi
 
 cd "$APP_DIR"
 
+# ─── 5b. Generate self-signed TLS cert ───────────────────────────────────────
+mkdir -p "$CERT_DIR"
+if [[ -f "$CERT_DIR/cert.pem" && -f "$CERT_DIR/key.pem" ]]; then
+  info "Cert already present at $CERT_DIR — skipping generation"
+else
+  info "Generating self-signed cert for $HOSTNAME_FROM_URL..."
+  openssl req -x509 -newkey rsa:2048 \
+    -keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/cert.pem" \
+    -days 3650 -nodes \
+    -subj "/CN=$HOSTNAME_FROM_URL" \
+    -addext "subjectAltName=DNS:$HOSTNAME_FROM_URL" \
+    >/dev/null 2>&1
+fi
+# nginx on Debian/Ubuntu runs as www-data by default; the nginx.org RPM
+# uses `nginx` user. Detect which exists and use that group.
+NGINX_GROUP=$(getent group nginx >/dev/null && echo nginx || echo www-data)
+chown "root:$NGINX_GROUP" "$CERT_DIR/cert.pem" "$CERT_DIR/key.pem"
+chmod 0640                 "$CERT_DIR/cert.pem" "$CERT_DIR/key.pem"
+
 # ─── 6. Configure environment ────────────────────────────────────────────────
 if [[ ! -f "$APP_DIR/.env" ]]; then
   info "Creating .env from template..."
@@ -167,12 +266,25 @@ LOG_LEVEL=info
 
 # Auth
 SESSION_SECRET=${SESSION_SECRET}
+
+# Reverse-proxy (nginx) front-end — Polaris listens HTTP-only on
+# 127.0.0.1:3000; nginx terminates TLS on 443.
+POLARIS_PROXY_CERT_PATH=${CERT_DIR}/cert.pem
+POLARIS_PUBLIC_URL=${PUBLIC_URL}
 ENVFILE
   chown "$APP_USER:$APP_GROUP" "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"
-  info ".env created with generated SESSION_SECRET"
+  info ".env created with generated SESSION_SECRET + proxy-mode env vars"
 else
-  info ".env already exists — skipping"
+  info ".env already exists — appending proxy-mode env vars if missing"
+  if ! grep -q '^POLARIS_PROXY_CERT_PATH=' "$APP_DIR/.env"; then
+    {
+      echo ""
+      echo "# Added by setup-ubuntu.sh — reverse-proxy front-end"
+      echo "POLARIS_PROXY_CERT_PATH=${CERT_DIR}/cert.pem"
+      echo "POLARIS_PUBLIC_URL=${PUBLIC_URL}"
+    } >> "$APP_DIR/.env"
+  fi
 fi
 
 # ─── 7. Install dependencies & build ─────────────────────────────────────────
@@ -194,26 +306,39 @@ else
   info "Database already seeded ($HAS_USERS users) — skipping"
 fi
 
-# ─── 8. Install systemd service ──────────────────────────────────────────────
-info "Installing systemd service..."
-cp "$APP_DIR/deploy/polaris.service" /etc/systemd/system/polaris.service
+# ─── 8. Install split-role systemd units ────────────────────────────────────
+info "Installing split-role systemd units (polaris-migrate, polaris-web, polaris-monitor@, polaris-discovery, polaris.target)..."
+cp "$APP_DIR/deploy/polaris-migrate.service"    /etc/systemd/system/polaris-migrate.service
+cp "$APP_DIR/deploy/polaris-web.service"        /etc/systemd/system/polaris-web.service
+cp "$APP_DIR/deploy/polaris-monitor@.service"   /etc/systemd/system/polaris-monitor@.service
+cp "$APP_DIR/deploy/polaris-discovery.service"  /etc/systemd/system/polaris-discovery.service
+cp "$APP_DIR/deploy/polaris.target"             /etc/systemd/system/polaris.target
+
+# Ubuntu/Debian's PostgreSQL service is just `postgresql` (not the
+# `postgresql-15` RHEL uses); strip the RHEL-specific version suffix from
+# the shipped units' After= / Requires= lines so systemd doesn't fail to
+# resolve the dependency.
+for unit in polaris-migrate polaris-web polaris-monitor@ polaris-discovery; do
+  sed -i -E 's/postgresql-15\.service/postgresql.service/g' "/etc/systemd/system/${unit}.service"
+done
+
+info "Installing polaris-web's Wants=nginx drop-in..."
+mkdir -p "$NGINX_DROPIN_DIR"
+cp "$APP_DIR/deploy/nginx/polaris-nginx-dependency.conf" "$NGINX_DROPIN_DIR/nginx-dependency.conf"
+
 systemctl daemon-reload
-systemctl enable --now polaris
 
-info "Waiting for service to start..."
-sleep 2
+# ─── 9. Configure nginx ─────────────────────────────────────────────────────
+info "Installing nginx config (server_name=$HOSTNAME_FROM_URL, prometheus_ip=$PROMETHEUS_IP)..."
+sed "s|polaris\\.rogersgroupinc\\.com|$HOSTNAME_FROM_URL|g; s|<PROMETHEUS_IP>|$PROMETHEUS_IP|g" \
+  "$APP_DIR/deploy/nginx/polaris.conf" > "$NGINX_CONF_DEST"
+nginx -t
 
-if systemctl is-active --quiet polaris; then
-  info "Polaris service is running"
-else
-  warn "Service may not have started — check: journalctl -u polaris -f"
-fi
-
-# ─── 9. Firewall ─────────────────────────────────────────────────────────────
+# ─── 10. Firewall ───────────────────────────────────────────────────────────
 if command -v ufw &>/dev/null; then
-  info "Opening port 3000 in firewall..."
-  ufw allow 3000/tcp
-  # Reload only if ufw is active
+  info "Opening TCP+UDP/443 in ufw..."
+  ufw allow 443/tcp
+  ufw allow 443/udp
   if ufw status | grep -q "Status: active"; then
     info "UFW is active — rule applied"
   else
@@ -221,13 +346,52 @@ if command -v ufw &>/dev/null; then
   fi
 fi
 
+# ─── 11. Enable + start services ────────────────────────────────────────────
+info "Enabling polaris-monitor@1..@$MONITOR_REPLICAS, polaris-discovery, polaris.target, nginx..."
+for ((i=1; i<=MONITOR_REPLICAS; i++)); do
+  systemctl enable "polaris-monitor@$i.service" >/dev/null
+done
+systemctl enable polaris-web.service polaris-discovery.service polaris-migrate.service polaris.target >/dev/null
+systemctl enable nginx >/dev/null
+
+info "Starting polaris.target (brings up nginx first, then polaris-web + workers)..."
+systemctl start polaris.target
+
+# ─── 12. Smoke checks ───────────────────────────────────────────────────────
+sleep 5
+SMOKE_FAILED=0
+if ss -ltnp 2>/dev/null | grep -qE ':443.*nginx'; then
+  info "✓ nginx TCP listener on :443"
+else
+  warn "✗ nginx TCP listener on :443 not detected"
+  SMOKE_FAILED=1
+fi
+if ss -lunp 2>/dev/null | grep -qE ':443.*nginx'; then
+  info "✓ nginx UDP listener on :443 (HTTP/3)"
+else
+  warn "✗ nginx UDP listener on :443 not detected"
+  SMOKE_FAILED=1
+fi
+if ss -ltnp 2>/dev/null | grep -qE '127\\.0\\.0\\.1:3000.*node'; then
+  info "✓ Polaris web bound to 127.0.0.1:3000 (proxy mode)"
+else
+  warn "✗ Polaris web not bound to 127.0.0.1:3000 — check journalctl -u polaris-web"
+  SMOKE_FAILED=1
+fi
+
 # ─── Done ─────────────────────────────────────────────────────────────────────
 echo ""
 info "============================================"
 info "  Polaris deployment complete!"
-info "  URL:   http://$(hostname -I | awk '{print $1}'):3000"
-info "  Login: admin / admin"
-info "  Logs:  journalctl -u polaris -f"
+info "  URL:           $PUBLIC_URL"
+info "  Cert path:     $CERT_DIR/cert.pem  (self-signed; replace with real CA cert later)"
+info "  Monitor units: polaris-monitor@1..@$MONITOR_REPLICAS"
+info "  Logs:          journalctl -u polaris-web -f"
+info "  Status:        systemctl status polaris.target"
 info "============================================"
+if [[ $SMOKE_FAILED -ne 0 ]]; then
+  echo ""
+  warn "One or more smoke checks failed. Verify manually before declaring done."
+fi
 echo ""
-warn "Change the default admin password after first login!"
+warn "Self-signed cert in use. Replace before exposing publicly."

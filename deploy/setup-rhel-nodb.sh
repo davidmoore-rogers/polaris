@@ -31,19 +31,29 @@ info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
+PUBLIC_URL=""
+MONITOR_REPLICAS=2
+PROMETHEUS_IP="127.0.0.1"
+
 # ─── Parse arguments ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --db-url)   DATABASE_URL="$2"; shift 2 ;;
-    --app-dir)  APP_DIR="$2"; shift 2 ;;
-    --repo-url) REPO_URL="$2"; shift 2 ;;
+    --db-url)            DATABASE_URL="$2"; shift 2 ;;
+    --app-dir)           APP_DIR="$2"; shift 2 ;;
+    --repo-url)          REPO_URL="$2"; shift 2 ;;
+    --public-url)        PUBLIC_URL="$2"; shift 2 ;;
+    --monitor-replicas)  MONITOR_REPLICAS="$2"; shift 2 ;;
+    --prometheus-ip)     PROMETHEUS_IP="$2"; shift 2 ;;
     --help|-h)
-      echo "Usage: bash setup-rhel-nodb.sh --db-url \"postgresql://user:pass@host:5432/polaris\""
+      echo "Usage: bash setup-rhel-nodb.sh --db-url \"postgresql://user:pass@host:5432/polaris\" [--public-url https://polaris.example.com]"
       echo ""
       echo "Options:"
-      echo "  --db-url    PostgreSQL connection URL (required)"
-      echo "  --app-dir   Installation directory (default: /opt/polaris)"
-      echo "  --repo-url  Git repository URL"
+      echo "  --db-url            PostgreSQL connection URL (required)"
+      echo "  --app-dir           Installation directory (default: /opt/polaris)"
+      echo "  --repo-url          Git repository URL"
+      echo "  --public-url        https://<hostname>[:<port>]   (default: https://\$(hostname -f))"
+      echo "  --monitor-replicas  N                              (default: 2)"
+      echo "  --prometheus-ip     <IP>                           (default: 127.0.0.1)"
       exit 0 ;;
     *) error "Unknown option: $1" ;;
   esac
@@ -232,39 +242,137 @@ else
   info "Database already seeded ($HAS_USERS users) — skipping"
 fi
 
-# ─── 9. Install systemd service ──────────────────────────────────────────────
-info "Installing systemd service..."
-cp "$APP_DIR/deploy/polaris.service" /etc/systemd/system/polaris.service
-# Remove PostgreSQL dependency since the DB is remote
-sed -i 's/After=network.target postgresql.service/After=network.target/' /etc/systemd/system/polaris.service
-sed -i '/^Requires=postgresql.service/d' /etc/systemd/system/polaris.service
-systemctl daemon-reload
-systemctl enable --now polaris
+# ─── 9. Install nginx mainline + self-signed cert + split-role units ────────
+# Identical to setup-rhel.sh from this point on — see that script's
+# corresponding section comments. We don't share via a sourced library
+# because operators run these scripts via `bash deploy/setup-rhel-nodb.sh`
+# directly from a fresh git clone where relative source paths get messy.
+PUBLIC_URL="${PUBLIC_URL:-https://$(hostname -f)}"
+MONITOR_REPLICAS="${MONITOR_REPLICAS:-2}"
+PROMETHEUS_IP="${PROMETHEUS_IP:-127.0.0.1}"
+HOSTNAME_FROM_URL=$(echo "$PUBLIC_URL" | sed -E 's|^https?://([^:/]+).*|\1|')
+CERT_DIR="/etc/polaris-nginx"
+NGINX_CONF_DEST="/etc/nginx/conf.d/polaris.conf"
+NGINX_DROPIN_DIR="/etc/systemd/system/polaris-web.service.d"
 
-info "Waiting for service to start..."
-sleep 2
+info "Public URL:        $PUBLIC_URL"
+info "Cert hostname:     $HOSTNAME_FROM_URL"
+info "Monitor replicas:  $MONITOR_REPLICAS"
 
-if systemctl is-active --quiet polaris; then
-  info "Polaris service is running"
+# Install nginx mainline from nginx.org (RHEL AppStream is too old for HTTP/3)
+if command -v nginx >/dev/null 2>&1 && nginx -v 2>&1 | grep -qE '1\.(2[5-9]|[3-9][0-9])'; then
+  info "nginx $(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') already installed"
 else
-  warn "Service may not have started — check: journalctl -u polaris -f"
+  info "Installing nginx mainline from nginx.org..."
+  cat > /etc/yum.repos.d/nginx.repo <<'REPO'
+[nginx-stable]
+name=nginx stable repo
+baseurl=http://nginx.org/packages/centos/9/$basearch/
+gpgcheck=1
+enabled=0
+gpgkey=https://nginx.org/keys/nginx_signing.key
+module_hotfixes=true
+
+[nginx-mainline]
+name=nginx mainline repo
+baseurl=http://nginx.org/packages/mainline/centos/9/$basearch/
+gpgcheck=1
+enabled=1
+gpgkey=https://nginx.org/keys/nginx_signing.key
+module_hotfixes=true
+REPO
+  dnf install -y nginx
 fi
 
-# ─── 10. Firewall ────────────────────────────────────────────────────────────
+# Self-signed cert for the public hostname.
+mkdir -p "$CERT_DIR"
+if [[ ! -f "$CERT_DIR/cert.pem" || ! -f "$CERT_DIR/key.pem" ]]; then
+  info "Generating self-signed cert for $HOSTNAME_FROM_URL..."
+  openssl req -x509 -newkey rsa:2048 \
+    -keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/cert.pem" \
+    -days 3650 -nodes \
+    -subj "/CN=$HOSTNAME_FROM_URL" \
+    -addext "subjectAltName=DNS:$HOSTNAME_FROM_URL" \
+    >/dev/null 2>&1
+fi
+chown root:nginx "$CERT_DIR/cert.pem" "$CERT_DIR/key.pem"
+chmod 0640        "$CERT_DIR/cert.pem" "$CERT_DIR/key.pem"
+if command -v semanage >/dev/null 2>&1; then
+  semanage fcontext -a -t httpd_sys_content_t "$CERT_DIR(/.*)?" 2>/dev/null || \
+    semanage fcontext -m -t httpd_sys_content_t "$CERT_DIR(/.*)?" 2>/dev/null || true
+  restorecon -Rv "$CERT_DIR" >/dev/null || true
+fi
+
+# Append proxy-mode env vars if not already in .env
+if ! grep -q '^POLARIS_PROXY_CERT_PATH=' "$APP_DIR/.env"; then
+  {
+    echo ""
+    echo "# Added by setup-rhel-nodb.sh — reverse-proxy front-end"
+    echo "POLARIS_PROXY_CERT_PATH=${CERT_DIR}/cert.pem"
+    echo "POLARIS_PUBLIC_URL=${PUBLIC_URL}"
+  } >> "$APP_DIR/.env"
+fi
+
+# Install split-role systemd units. The polaris-migrate unit has
+# Requires=postgresql-15.service in its shipped form; the -nodb variant of
+# this script strips that out since the DB is remote (no local postgres).
+info "Installing split-role systemd units..."
+cp "$APP_DIR/deploy/polaris-migrate.service"    /etc/systemd/system/polaris-migrate.service
+cp "$APP_DIR/deploy/polaris-web.service"        /etc/systemd/system/polaris-web.service
+cp "$APP_DIR/deploy/polaris-monitor@.service"   /etc/systemd/system/polaris-monitor@.service
+cp "$APP_DIR/deploy/polaris-discovery.service"  /etc/systemd/system/polaris-discovery.service
+cp "$APP_DIR/deploy/polaris.target"             /etc/systemd/system/polaris.target
+
+# Strip local-postgres dependencies from all four units — DB is remote.
+for unit in polaris-migrate polaris-web polaris-monitor@ polaris-discovery; do
+  sed -i -E "s/(After=.*)postgresql-15\\.service\\s*/\\1/" "/etc/systemd/system/${unit}.service"
+  sed -i "/^Requires=postgresql-15\\.service\\s*$/d"        "/etc/systemd/system/${unit}.service"
+done
+
+# nginx-dependency drop-in for polaris-web
+mkdir -p "$NGINX_DROPIN_DIR"
+cp "$APP_DIR/deploy/nginx/polaris-nginx-dependency.conf" "$NGINX_DROPIN_DIR/nginx-dependency.conf"
+
+systemctl daemon-reload
+
+# nginx config with the operator's hostname + Prometheus IP substituted
+info "Installing nginx config..."
+sed "s|polaris\\.rogersgroupinc\\.com|$HOSTNAME_FROM_URL|g; s|<PROMETHEUS_IP>|$PROMETHEUS_IP|g" \
+  "$APP_DIR/deploy/nginx/polaris.conf" > "$NGINX_CONF_DEST"
+nginx -t
+
+# Firewall
 if command -v firewall-cmd &>/dev/null; then
-  info "Opening port 3000 in firewall..."
-  firewall-cmd --permanent --add-port=3000/tcp
-  firewall-cmd --reload
+  info "Opening TCP+UDP/443 in firewalld..."
+  firewall-cmd --permanent --add-port=443/tcp >/dev/null
+  firewall-cmd --permanent --add-port=443/udp >/dev/null
+  firewall-cmd --reload >/dev/null
+fi
+
+# Enable units + start polaris.target (which pulls nginx in via Wants= drop-in)
+for ((i=1; i<=MONITOR_REPLICAS; i++)); do
+  systemctl enable "polaris-monitor@$i.service" >/dev/null
+done
+systemctl enable polaris-web.service polaris-discovery.service polaris-migrate.service polaris.target nginx >/dev/null
+info "Starting polaris.target..."
+systemctl start polaris.target
+
+sleep 5
+if systemctl is-active --quiet polaris-web.service; then
+  info "polaris-web is running"
+else
+  warn "polaris-web may not have started — check: journalctl -u polaris-web -f"
 fi
 
 # ─── Done ─────────────────────────────────────────────────────────────────────
 echo ""
 info "============================================"
 info "  Polaris deployment complete!"
-info "  Mode:  Remote database"
-info "  URL:   http://$(hostname -I | awk '{print $1}'):3000"
-info "  Login: admin / admin"
-info "  Logs:  journalctl -u polaris -f"
+info "  Mode:          Remote database, nginx-fronted (split-role)"
+info "  URL:           $PUBLIC_URL"
+info "  Cert path:     $CERT_DIR/cert.pem  (self-signed; replace with real CA cert later)"
+info "  Monitor units: polaris-monitor@1..@$MONITOR_REPLICAS"
+info "  Logs:          journalctl -u polaris-web -f"
 info "============================================"
 echo ""
-warn "Change the default admin password after first login!"
+warn "Self-signed cert in use. Replace before exposing publicly."
