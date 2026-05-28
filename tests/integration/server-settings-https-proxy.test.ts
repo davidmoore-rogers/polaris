@@ -1,20 +1,16 @@
 /**
  * tests/integration/server-settings-https-proxy.test.ts
  *
- * Asserts the Server Settings → Certificates routes behave correctly when
- * Polaris is in nginx-front mode (POLARIS_PROXY_CERT_PATH set):
+ * Asserts the Server Settings → Certificates routes behave correctly under
+ * nginx-front mode (which is the only mode post-Phase-4):
  *   - GET /server-settings/https returns the externally-managed payload
  *     (externallyManaged: true, fingerprint, SANs, expiry, certPath)
  *   - POST /server-settings/certificates with category=server returns 409
  *   - POST /server-settings/certificates with category=ca STILL works
  *     (CAs are needed for outbound TLS to LDAP/SMTP/etc.)
- *   - POST /server-settings/https/apply returns 409
- *   - PUT /server-settings/https returns 409
  *
  * Skips cleanly when DATABASE_URL isn't reachable (matches the rest of the
- * integration suite). Uses vi.resetModules() to re-import src/app.js with
- * proxy-mode env vars set, so the validateRuntimeConfiguration() boot check
- * and TRUST_PROXY resolution see the fresh state.
+ * integration suite).
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -91,24 +87,6 @@ d("Server Settings HTTPS routes in proxy mode", () => {
     expect(resp.body.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it("PUT /server-settings/https returns 409", async () => {
-    const { agent, csrf } = await authedAgent(app);
-    const resp = await agent
-      .put("/api/v1/server-settings/https")
-      .set("X-CSRF-Token", csrf)
-      .send({ enabled: false });
-    expect(resp.status).toBe(409);
-    expect(resp.body.error).toMatch(/external proxy/i);
-  });
-
-  it("POST /server-settings/https/apply returns 409", async () => {
-    const { agent, csrf } = await authedAgent(app);
-    const resp = await agent
-      .post("/api/v1/server-settings/https/apply")
-      .set("X-CSRF-Token", csrf);
-    expect(resp.status).toBe(409);
-  });
-
   it("POST /server-settings/certificates with category=server returns 409", async () => {
     const { agent, csrf } = await authedAgent(app);
     // A minimal-looking PEM is fine — the 409 fires before parsing.
@@ -138,14 +116,6 @@ d("Server Settings HTTPS routes in proxy mode", () => {
     }
   });
 
-  it("POST /server-settings/certificates/generate returns 409 (server-cert generation)", async () => {
-    const { agent, csrf } = await authedAgent(app);
-    const resp = await agent
-      .post("/api/v1/server-settings/certificates/generate")
-      .set("X-CSRF-Token", csrf)
-      .send({ commonName: "test.local", days: 30 });
-    expect(resp.status).toBe(409);
-  });
 });
 
 // Silence the unused-import warning on machines where dbReachable is false.

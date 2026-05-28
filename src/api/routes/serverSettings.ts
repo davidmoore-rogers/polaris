@@ -28,9 +28,6 @@ import {
   listCertificates,
   addCertificate,
   deleteCertificate,
-  getHttpsSettings,
-  updateHttpsSettings,
-  generateSelfSignedCert,
 } from "../../services/serverSettingsService.js";
 import { getDnsSettings, updateDnsSettings, createResolver } from "../../services/dnsService.js";
 import type { DnsSettings } from "../../services/dnsService.js";
@@ -47,7 +44,7 @@ import {
   getRecentCommits,
   restartService,
 } from "../../services/updateService.js";
-import { applyHttps, isHttpsRunning, isHttpsExternallyManaged, getHttpsPort } from "../../httpsRuntime.js";
+import { getPublicUrlPort } from "../../utils/publicUrl.js";
 import { getServerCertFingerprint, getServerCertHostnames, getServerCertExpiry } from "../../services/certInfo.js";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
@@ -550,12 +547,11 @@ router.get("/certificates", async (_req, res, next) => {
   }
 });
 
-// Server-leaf cert mutations are inert in proxy mode — nginx owns TLS. CA
-// records (category="ca") stay editable because outbound TLS to integrations
-// (LDAP, SMTP) still depends on them. The 409 message is the actionable
-// guidance for an operator who landed here from the UI without realizing
-// they're in proxy mode.
-const PROXY_LEAF_LOCKED_MESSAGE =
+// Server-leaf cert mutations are always rejected — nginx owns TLS for the
+// life of the install. CA records (category="ca") stay editable because
+// outbound TLS to integrations (LDAP, SMTP) still depends on them. The 409
+// message is the actionable guidance for an operator who landed here.
+const SERVER_CERT_EXTERNAL_MESSAGE =
   "Polaris is fronted by an external proxy; manage the server cert via POLARIS_PROXY_CERT_PATH";
 
 router.post("/certificates", upload.single("file"), async (req, res, next) => {
@@ -564,8 +560,8 @@ router.post("/certificates", upload.single("file"), async (req, res, next) => {
       return res.status(400).json({ error: "No file uploaded" });
     }
     const category = req.body.category === "server" ? "server" : "ca";
-    if (category === "server" && isHttpsExternallyManaged()) {
-      return res.status(409).json({ error: PROXY_LEAF_LOCKED_MESSAGE });
+    if (category === "server") {
+      return res.status(409).json({ error: SERVER_CERT_EXTERNAL_MESSAGE });
     }
     const pem = bufferToPem(req.file.buffer, req.file.originalname);
     validatePem(pem, req.file.originalname);
@@ -578,13 +574,10 @@ router.post("/certificates", upload.single("file"), async (req, res, next) => {
 
 router.delete("/certificates/:id", async (req, res, next) => {
   try {
-    if (isHttpsExternallyManaged()) {
-      // Look up the record's category before refusing — CA records stay deletable.
-      const all = await listCertificates();
-      const target = [...all.serverCerts, ...all.trustedCAs].find((c) => c.id === req.params.id);
-      if (target && target.category === "server") {
-        return res.status(409).json({ error: PROXY_LEAF_LOCKED_MESSAGE });
-      }
+    const all = await listCertificates();
+    const target = [...all.serverCerts, ...all.trustedCAs].find((c) => c.id === req.params.id);
+    if (target && target.category === "server") {
+      return res.status(409).json({ error: SERVER_CERT_EXTERNAL_MESSAGE });
     }
     await deleteCertificate(req.params.id);
     res.status(204).end();
@@ -593,88 +586,30 @@ router.delete("/certificates/:id", async (req, res, next) => {
   }
 });
 
-router.post("/certificates/generate", async (req, res, next) => {
-  try {
-    if (isHttpsExternallyManaged()) {
-      return res.status(409).json({ error: PROXY_LEAF_LOCKED_MESSAGE });
-    }
-    const cn = req.body.commonName || "localhost";
-    const days = Math.min(3650, Math.max(1, parseInt(req.body.days, 10) || 365));
-    const result = await generateSelfSignedCert(cn, days);
-    res.status(201).json({
-      cert: { ...result.cert, pem: undefined },
-      key: { ...result.key, pem: undefined },
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
 // ─── HTTPS ──────────────────────────────────────────────────────────────────
+// nginx terminates TLS; Polaris reads the cert file via certInfo.ts to render
+// the Identification tab's informational pane (fingerprint, SANs, expiry,
+// cert path). No mutation routes — operator manages cert via the file path.
 
 router.get("/https", async (_req, res, next) => {
   try {
-    if (isHttpsExternallyManaged()) {
-      // Proxy mode: the cert lives in a file nginx reads. Return what the
-      // Identification tab needs to render an informational pane —
-      // fingerprint (for the agent-pin check operators rely on), SANs (so
-      // they can verify the cert claims the right names), expiry (so the
-      // amber/red pill fires before the cert lapses), and the file path
-      // they'd edit. Keep `enabled`/`port` populated so any existing
-      // frontend code reading those keys doesn't crash.
-      const hosts = getServerCertHostnames();
-      return res.json({
-        externallyManaged: true,
-        running: true,
-        enabled: true,
-        port: getHttpsPort() ?? 443,
-        httpPort: null,
-        certId: null,
-        keyId: null,
-        redirectHttp: false,
-        fingerprint: getServerCertFingerprint(),
-        cn: hosts?.cn ?? null,
-        dnsSans: hosts?.dnsSans ?? [],
-        ipSans: hosts?.ipSans ?? [],
-        expiresAt: getServerCertExpiry(),
-        certPath: process.env.POLARIS_PROXY_CERT_PATH ?? null,
-      });
-    }
-    const settings = await getHttpsSettings();
-    // Always expose the currently-served cert's fingerprint so the
-    // Maintenance card's "Cert pin rotation → Generate" button can one-click
-    // it without a file picker. Null when HTTPS isn't running (no cert
-    // currently loaded — fall back to the file-picker path).
+    const hosts = getServerCertHostnames();
     res.json({
-      ...settings,
-      running:           isHttpsRunning(),
-      externallyManaged: false,
-      fingerprint:       getServerCertFingerprint(),
+      externallyManaged: true,
+      running: true,
+      enabled: true,
+      port: getPublicUrlPort() ?? 443,
+      httpPort: null,
+      certId: null,
+      keyId: null,
+      redirectHttp: false,
+      fingerprint: getServerCertFingerprint(),
+      cn: hosts?.cn ?? null,
+      dnsSans: hosts?.dnsSans ?? [],
+      ipSans: hosts?.ipSans ?? [],
+      expiresAt: getServerCertExpiry(),
+      certPath: process.env.POLARIS_PROXY_CERT_PATH ?? null,
     });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.put("/https", async (req, res, next) => {
-  try {
-    if (isHttpsExternallyManaged()) {
-      return res.status(409).json({ error: PROXY_LEAF_LOCKED_MESSAGE });
-    }
-    const settings = await updateHttpsSettings(req.body);
-    res.json({ ...settings, running: isHttpsRunning() });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/https/apply", async (_req, res, next) => {
-  try {
-    if (isHttpsExternallyManaged()) {
-      return res.status(409).json({ error: PROXY_LEAF_LOCKED_MESSAGE });
-    }
-    const result = await applyHttps();
-    res.json({ ...result, running: isHttpsRunning() });
   } catch (err) {
     next(err);
   }
