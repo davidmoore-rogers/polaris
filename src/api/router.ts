@@ -14,6 +14,7 @@ import assetsRouter from "./routes/assets.js";
 import eventsRouter from "./routes/events.js";
 import conflictsRouter from "./routes/conflicts.js";
 import serverSettingsRouter from "./routes/serverSettings.js";
+import proxySettingsRouter from "./routes/proxySettings.js";
 import mibsRouter from "./routes/mibs.js";
 import manufacturerProfilesRouter from "./routes/manufacturerProfiles.js";
 import deviceIconsRouter from "./routes/deviceIcons.js";
@@ -109,6 +110,12 @@ router.use("/server-settings/mibs", mibsRouter);
 // write on edits). Mounted before the blanket so reads reach roles that
 // have manufacturerProfiles=read but not serverSettingsSystem.
 router.use("/server-settings/manufacturer-profiles", manufacturerProfilesRouter);
+// nginx GUI surface mounted BEFORE /server-settings so the proxy-mode gate
+// and explicit per-route serverSettingsSystem guards (read on GET, fullwrite
+// on PUT/apply/rotate/adopt) apply. Apply + rotate are high-blast-radius —
+// they can lock out the operator from the UI if mis-set — so fullwrite is
+// the right floor regardless of the blanket gate's read level.
+router.use("/server-settings/proxy", proxySettingsRouter);
 // Blanket /server-settings gate: requires at least serverSettingsSystem
 // OR serverSettingsData read (today the OR is implicit — every route
 // inside currently uses serverSettingsSystem; a future per-route split

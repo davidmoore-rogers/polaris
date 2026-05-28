@@ -232,6 +232,19 @@ export function getServerCertExpiry(): string | null {
 }
 
 /**
+ * Drop the cached cert metadata so the next accessor re-reads from disk
+ * (proxy mode) or from runtimePem (Node-HTTPS mode). The sha256-keyed
+ * cache already auto-invalidates on file-content change, but cert rotation
+ * via nginxApplyService calls this explicitly so the fingerprint surfaced
+ * to the GUI reflects the new cert on the very next read instead of after
+ * the next file-hash divergence is detected.
+ */
+export function invalidateCache(): void {
+  lastGood = null;
+  warnSuppressed = false;
+}
+
+/**
  * Test-only: drop the cache. Vitest test isolation needs to flip env vars
  * between tests, which means the cached fingerprint from a prior test
  * would otherwise leak. Don't call from production code.
