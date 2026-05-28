@@ -125,6 +125,20 @@ export async function flushRunProgress(acc: RunAccumulator): Promise<void> {
   });
 }
 
+/**
+ * Lightweight worker liveness ping — touches `workerHeartbeatAt` without
+ * serializing the rest of the accumulator. Called on a 60s timer inside
+ * `runDiscovery` so a quiet phase (long FMG roster fetch, slow SNMP walk)
+ * doesn't look stale to the reaper. Best-effort; a transient DB hiccup
+ * doesn't kill the run.
+ */
+export async function touchWorkerHeartbeat(integrationId: string): Promise<void> {
+  await prisma.discoveryRun.updateMany({
+    where: { integrationId, status: { in: ["queued", "running"] } },
+    data: { workerHeartbeatAt: new Date() },
+  }).catch(() => {});
+}
+
 /** Terminal transition: completed | aborted | error. Clears active devices. */
 export async function finishRun(integrationId: string, status: DiscoveryRunStatus): Promise<void> {
   await prisma.discoveryRun.update({
