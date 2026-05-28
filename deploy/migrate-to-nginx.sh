@@ -187,64 +187,45 @@ TMP=$(mktemp -d /tmp/polaris-nginx-stage.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
 step "Stage: extracting active server cert + key from Setting.certificates"
-EXTRACT_SCRIPT="$TMP/extract.mjs"
-cat > "$EXTRACT_SCRIPT" <<'EXTRACT'
-import fs from "node:fs";
-import path from "node:path";
-import { PrismaClient } from "/opt/polaris/src/generated/prisma/index.js";
+# Pull the JSON values straight out of Postgres via the postgres superuser's
+# peer-auth socket connection — same way the preflight check above already
+# tested DB reachability. Avoids depending on Polaris's generated Prisma
+# client (whose on-disk path moves between build configurations) or on the
+# Polaris source tree being structured a particular way. The cert/key PEMs
+# are written via a small inline `node -e` script that parses the JSON +
+# selects the right records; Node is already required to run Polaris, so
+# this adds no new install-time dependency.
+EXTRACT_RC=0
+HTTPS_JSON=$(sudo -u postgres psql -tA -d "$DB_NAME" -c "SELECT value FROM \"Setting\" WHERE key='https'" 2>/dev/null || true)
+CERTS_JSON=$(sudo -u postgres psql -tA -d "$DB_NAME" -c "SELECT value FROM \"Setting\" WHERE key='certificates'" 2>/dev/null || true)
 
-const outDir = process.argv[2];
-const prisma = new PrismaClient();
-try {
-  const httpsRow = await prisma.setting.findUnique({ where: { key: "https" } });
-  const certsRow = await prisma.setting.findUnique({ where: { key: "certificates" } });
+if [[ -z "$CERTS_JSON" ]]; then
+  error "No 'certificates' Setting row found — has Polaris ever been configured with an HTTPS cert?"
+  exit 1
+fi
 
-  if (!certsRow) {
-    console.error("No 'certificates' Setting row found. Has Polaris ever been configured with an HTTPS cert?");
-    process.exit(1);
-  }
-  const certs = certsRow.value;
-  const https = httpsRow ? httpsRow.value : { certId: null, keyId: null };
-
-  let leafCert = null;
-  let leafKey = null;
-
+# Pass the two JSON blobs + the output dir via env to a Node one-liner. The
+# script picks the canonical (Setting.https.certId/keyId) cert+key pair if
+# Setting.https pins one, else falls back to the first server-category
+# cert+key. Writes cert.pem + key.pem to the staging dir.
+HTTPS_JSON="$HTTPS_JSON" CERTS_JSON="$CERTS_JSON" OUT_DIR="$TMP" node -e "
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const certs = JSON.parse(process.env.CERTS_JSON || '[]');
+  const https = process.env.HTTPS_JSON ? JSON.parse(process.env.HTTPS_JSON) : { certId: null, keyId: null };
+  let leafCert = null, leafKey = null;
   if (https.certId && https.keyId) {
-    leafCert = certs.find(c => c.id === https.certId && c.category === "server" && c.type === "cert");
-    leafKey  = certs.find(c => c.id === https.keyId  && c.category === "server" && c.type === "key");
+    leafCert = certs.find(c => c.id === https.certId && c.category === 'server' && c.type === 'cert');
+    leafKey  = certs.find(c => c.id === https.keyId  && c.category === 'server' && c.type === 'key');
   }
-
-  // Fallback: pick the first server cert+key if Setting.https isn't pinning a pair.
-  if (!leafCert) leafCert = certs.find(c => c.category === "server" && c.type === "cert");
-  if (!leafKey)  leafKey  = certs.find(c => c.category === "server" && c.type === "key");
-
-  if (!leafCert) { console.error("No server cert (category=server, type=cert) in Setting.certificates."); process.exit(1); }
-  if (!leafKey)  { console.error("No server key (category=server, type=key) in Setting.certificates.");  process.exit(1); }
-
-  fs.writeFileSync(path.join(outDir, "cert.pem"), leafCert.pem, { mode: 0o640 });
-  fs.writeFileSync(path.join(outDir, "key.pem"),  leafKey.pem,  { mode: 0o640 });
-  console.log("Extracted cert:", leafCert.name, "key:", leafKey.name);
-} finally {
-  await prisma.$disconnect();
-}
-EXTRACT
-
-set +e
-# Source .env so DATABASE_URL etc. are present for the Node extract.
-set -a; . "$ENV_FILE"; set +a
-# Run the extract as root from $APP_DIR. Originally this `sudo -u polaris`'d
-# down for least-privilege, but mktemp -d creates $TMP with 0700 owned by
-# root so the polaris user couldn't traverse into it to read extract.mjs —
-# Node surfaced that as MODULE_NOT_FOUND. Root reads + writes $TMP fine,
-# Prisma auth happens via DATABASE_URL (DB-level credentials, not OS user),
-# and the extracted cert PEMs are installed below with explicit
-# `install -o root -g nginx` perms regardless of who staged them.
-(
-  cd "$APP_DIR"
-  DATABASE_URL="$DATABASE_URL" node "$EXTRACT_SCRIPT" "$TMP"
-)
-EXTRACT_RC=$?
-set -e
+  if (!leafCert) leafCert = certs.find(c => c.category === 'server' && c.type === 'cert');
+  if (!leafKey)  leafKey  = certs.find(c => c.category === 'server' && c.type === 'key');
+  if (!leafCert) { console.error('No server cert (category=server, type=cert) in Setting.certificates.'); process.exit(1); }
+  if (!leafKey)  { console.error('No server key (category=server, type=key) in Setting.certificates.');  process.exit(1); }
+  fs.writeFileSync(path.join(process.env.OUT_DIR, 'cert.pem'), leafCert.pem, { mode: 0o640 });
+  fs.writeFileSync(path.join(process.env.OUT_DIR, 'key.pem'),  leafKey.pem,  { mode: 0o640 });
+  console.log('Extracted cert:', leafCert.name, '/ key:', leafKey.name);
+" || EXTRACT_RC=$?
 if [[ $EXTRACT_RC -ne 0 ]]; then
   error "Failed to extract cert+key from the database. See log above."
   exit 1
