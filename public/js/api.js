@@ -463,6 +463,30 @@ const api = {
     getHttps:    ()       => request("GET", "/server-settings/https"),
     updateHttps: (body)   => request("PUT", "/server-settings/https", body),
     applyHttps:  ()       => request("POST", "/server-settings/https/apply"),
+    // nginx GUI (proxy-mode-only). Every method 409s if Polaris isn't in
+    // proxy mode; the cert pane uses _httpsSettings.externallyManaged to
+    // gate whether to call these in the first place.
+    proxyGet:             ()      => request("GET",    "/server-settings/proxy"),
+    proxyPut:             (body)  => request("PUT",    "/server-settings/proxy", body),
+    proxyApply:           (body)  => request("POST",   "/server-settings/proxy/apply", body),
+    proxyAdoptManagedMode:()      => request("POST",   "/server-settings/proxy/adopt-managed-mode"),
+    proxyCertPreflight:   (certFile, keyFile) => {
+      var formData = new FormData();
+      formData.append("cert", certFile);
+      formData.append("key", keyFile);
+      return fetch(API_BASE + "/server-settings/proxy/cert/preflight", {
+        method: "POST",
+        headers: _csrfHeaders(),
+        body: formData,
+      }).then(function (res) {
+        if (res.status === 401) { window.location.href = "/login.html"; return; }
+        return res.json().then(function (d) {
+          if (!res.ok) throw new Error(d?.error || "Cert preflight failed");
+          return d;
+        });
+      });
+    },
+    proxyCertRotate:      (body)  => request("POST",   "/server-settings/proxy/cert/rotate", body),
     getDatabase: ()       => request("GET", "/server-settings/database"),
     backupDatabase: (password) => {
       var opts = { method: "POST", headers: _csrfHeaders({ "Content-Type": "application/json" }) };
