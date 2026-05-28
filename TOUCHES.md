@@ -1607,15 +1607,38 @@ Listed alphabetically.
 
 ---
 
+## services/fmgActivityService.ts
+
+**What it owns:** DB-backed heartbeat of every local `FmgWorker`'s proxy + native lane state. The role that runs FMG traffic (discovery in split-role prod, the single process in "all" mode) writes a snapshot of `getAllFmgWorkers()` to the `fmgActivitySnapshot` Setting row every 2 s. The web role reads the same row back to render "Active FMG Calls" on the integrations page — bridging the in-memory state across the multi-process split.
+
+**Public API:** `startFmgActivityHeartbeat()` (idempotent boot-path entry), `getFmgActivityForIntegration(integrationId)` (read-side; returns proxyInFlightLabel + proxyQueueDepth + nativeInFlightCount + updatedAt/role/ageMs/fresh), `STALENESS_MS` (10 s — older snapshots are flagged `fresh: false`), `stopFmgActivityHeartbeatForTests`.
+
+**Cross-service deps:** fmgWorker (`getAllFmgWorkers()` for the snapshot), prisma (single `Setting` row read/write).
+
+**Used by:** src/app.ts boots `startFmgActivityHeartbeat()` inside the `runsDiscoveryConsumers` block, src/api/routes/integrations.ts `GET /:id/fmg-activity` reads via `getFmgActivityForIntegration()`, public/js/integrations.js polls that endpoint every 2 s for every FortiManager-type integration card on screen.
+
+**Invariants:**
+- Heartbeat write rate is 2 s per FMG-running process; only roles with `runsDiscoveryConsumers=true` write. Single Setting row clobbers per write — no per-process slicing, so in dev "all" mode the lone process is the writer.
+- Snapshot is `{ updatedAt, role, integrations: { [id]: { proxyInFlightLabel, proxyQueueDepth, nativeInFlightCount } } }`. An integration absent from the map = no FmgWorker has been instantiated for it yet (lazy create on first submit).
+- Freshness window is 5× heartbeat interval (10 s) so a transient hiccup doesn't flap the UI; a genuinely-down heartbeat process surfaces inside the window.
+- Read path returns a zeroed readout with `fresh: false` when the Setting row is missing — so the UI renders "no heartbeat" on a brand-new install before discovery runs.
+
+**When changing this:**
+- Changing the heartbeat interval: keep `STALENESS_MS ≥ 3×` the interval so the UI doesn't flap on a single missed write.
+- Adding new FmgWorker fields you want surfaced: extend `FmgWorkerActivity`, both `buildSnapshot` and `getFmgActivityForIntegration`, the route response shape, and the `_renderFmgActivity()` helper in [public/js/integrations.js](public/js/integrations.js).
+- Adding more cross-process state surfaces in the future: prefer one Setting row per concern (clobber-on-write is fine at 2 s cadence), not one big shared blob.
+
+---
+
 ## services/fmgWorker.ts
 
 **What it owns:** Per-integration FortiManager worker with two lanes — a proxy lane (strict concurrency=1 FIFO) for `/sys/proxy/json` calls and a native lane (unbounded) for every other FMG call. Module-level `Map<integrationId, FmgWorker>` lazy-created on first submit; never torn down.
 
-**Public API:** `getFmgWorker(integrationId): FmgWorker`, `FmgWorker.submitProxy<T>(label, task, signal)`, `FmgWorker.submitNative<T>(label, task, signal)`, `FmgWorker.proxyQueueDepth`, `FmgWorker.proxyInFlightLabel`, `FmgWorker.nativeInFlightCount`, `__resetFmgWorkersForTests`.
+**Public API:** `getFmgWorker(integrationId): FmgWorker`, `getAllFmgWorkers(): FmgWorker[]`, `FmgWorker.submitProxy<T>(label, task, signal)`, `FmgWorker.submitNative<T>(label, task, signal)`, `FmgWorker.proxyQueueDepth`, `FmgWorker.proxyInFlightLabel`, `FmgWorker.nativeInFlightCount`, `__resetFmgWorkersForTests`.
 
 **Cross-service deps:** metrics (publishes `polaris_fmg_worker_queue_depth{integrationId}` + `polaris_fmg_worker_inflight{integrationId}` for the proxy lane, `polaris_fmg_worker_native_inflight{integrationId}` for the native lane).
 
-**Used by:** src/services/fortimanagerService.ts only — specifically `rpc()`, which inspects each JSON-RPC payload's first param URL and routes to `submitProxy` when it's `/sys/proxy/json` or `submitNative` otherwise. No other module should call `submitProxy` / `submitNative` directly; everything that touches FMG flows through `rpc()` and gets the right lane automatically. By transitivity covers reservationPushService.ts, assetQuarantineService.ts, monitoringService.ts, and the integrations.ts routes that test / probe / manual-query FMG.
+**Used by:** src/services/fortimanagerService.ts (`rpc()` routes via `submitProxy` / `submitNative` based on the JSON-RPC payload URL — every call that touches FMG flows through this), src/services/fmgActivityService.ts (`getAllFmgWorkers()` for the 2 s heartbeat snapshot). No other module should call `submitProxy` / `submitNative` directly; by transitivity the rpc-path covers reservationPushService.ts, assetQuarantineService.ts, monitoringService.ts, and the integrations.ts routes that test / probe / manual-query FMG.
 
 **Invariants:**
 - Proxy lane is strict FIFO with concurrency=1 — honors FMG's "drops parallel /sys/proxy/json past 1-2" constraint. Cross-feature serialization holds here: an operator clicking "Reserve IP" mid-discovery has the reservation-push proxy call wait behind in-flight discovery proxy calls.

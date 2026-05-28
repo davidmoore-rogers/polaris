@@ -585,6 +585,9 @@ async function loadIntegrations() {
       }
 
       var isFmgDirect = intg.type === "fortimanager" && config.useProxy === false;
+      var fmgActivityRow = intg.type === "fortimanager"
+        ? '<div class="detail-row" id="fmg-activity-row-' + intg.id + '"><span class="detail-label">Active FMG Calls</span><span class="detail-value" id="fmg-activity-val-' + intg.id + '" style="color:var(--color-text-tertiary)">&mdash;</span></div>'
+        : '';
       return '<div class="integration-card"' + (isFmgDirect ? ' data-fmg-direct="1"' : '') + '>' +
         '<div class="integration-card-header">' +
           '<div class="integration-card-header-top">' +
@@ -614,13 +617,71 @@ async function loadIntegrations() {
           avgRow +
           '<div class="detail-row"><span class="detail-label">Status</span><span class="detail-value">' + (intg.enabled ? '<span class="badge badge-active">Enabled</span>' : '<span class="badge badge-deprecated">Disabled</span>') + '</span></div>' +
           '<div class="detail-row"><span class="detail-label">Last Tested</span><span class="detail-value">' + lastTest + '</span></div>' +
+          fmgActivityRow +
         '</div>' +
       '</div>';
     }).join("");
+    _pollFmgActivityAll(integrations);
   } catch (err) {
     container.innerHTML = '<p class="empty-state">Error: ' + escapeHtml(err.message) + '</p>';
   }
 }
+
+// Poll the /fmg-activity endpoint for every FortiManager integration on the
+// page and update its "Active FMG Calls" row. Reads the DB-backed snapshot
+// the discovery role (or single-process "all" role) writes every 2 s — so a
+// stuck CMDB call shows up here as a non-zero native-inflight count that
+// never decrements, and a stuck proxy call shows as a long-running label.
+function _pollFmgActivityAll(integrations) {
+  var fmgIds = (integrations || []).filter(function (i) { return i.type === "fortimanager"; }).map(function (i) { return i.id; });
+  fmgIds.forEach(_pollFmgActivityOne);
+}
+async function _pollFmgActivityOne(id) {
+  var el = document.getElementById("fmg-activity-val-" + id);
+  if (!el) return;
+  try {
+    var r = await api.integrations.fmgActivity(id);
+    el.innerHTML = _renderFmgActivity(r);
+  } catch (_) {
+    // Leave the previous value in place on transient errors.
+  }
+}
+function _renderFmgActivity(r) {
+  var tertiary = 'color:var(--color-text-tertiary)';
+  var warning = 'color:var(--color-warning)';
+  if (!r || r.updatedAt === null) {
+    return '<span style="' + tertiary + '" title="No heartbeat from the FMG worker process yet. Snapshot is written by the discovery role; if you\'re in split-role prod, make sure polaris-discovery is running.">no heartbeat</span>';
+  }
+  if (!r.fresh) {
+    var ageSec = r.ageMs != null ? Math.round(r.ageMs / 1000) : null;
+    return '<span style="' + warning + '" title="The FMG worker process stopped publishing its activity heartbeat. Check polaris-discovery service health.">stale' + (ageSec != null ? ' (' + ageSec + 's old)' : '') + '</span>';
+  }
+  var parts = [];
+  if (r.proxyInFlightLabel) {
+    parts.push('<span title="Proxy lane in-flight (one at a time; FMG\'s rule)">&#9889; ' + escapeHtml(String(r.proxyInFlightLabel)) + '</span>');
+  }
+  if (r.proxyQueueDepth > 0) {
+    parts.push('<span title="Proxy-lane requests waiting behind the in-flight call">queued ' + r.proxyQueueDepth + '</span>');
+  }
+  if (r.nativeInFlightCount > 0) {
+    parts.push('<span title="Native-lane (CMDB/dvmdb) calls running in parallel">native ' + r.nativeInFlightCount + '</span>');
+  }
+  if (parts.length === 0) {
+    return '<span style="' + tertiary + '">idle</span>';
+  }
+  return parts.join(' &middot; ');
+}
+
+// Periodic refresher: re-poll every 2 s while the integrations tab is visible.
+// loadIntegrations() does the initial population (and re-runs whenever the
+// list changes); this interval keeps the rows live in between.
+setInterval(function () {
+  var rows = document.querySelectorAll('[id^="fmg-activity-val-"]');
+  rows.forEach(function (el) {
+    var id = el.id.substring("fmg-activity-val-".length);
+    _pollFmgActivityOne(id);
+  });
+}, 2000);
 
 // ─── Tab helpers (FMG / FortiGate modal — General + Monitoring) ────────────
 //

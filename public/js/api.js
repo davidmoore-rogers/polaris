@@ -382,6 +382,7 @@ const api = {
     query:         (id, body) => request("POST", `/integrations/${id}/query`, body),
     discoveries:   ()    => request("GET", "/integrations/discoveries"),
     healthSummary: ()    => request("GET", "/integrations/health-summary"),
+    fmgActivity:   (id)  => request("GET", `/integrations/${id}/fmg-activity`),
     abortDiscover: (id)  => request("DELETE", `/integrations/${id}/discover`),
     interfaceAggregate:        (id, klass) => request("GET", `/integrations/${id}/interface-aggregate?class=${encodeURIComponent(klass)}`),
     interfaceAggregatePreview: (id, body)  => request("POST", `/integrations/${id}/interface-aggregate/preview`, body),

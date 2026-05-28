@@ -46,6 +46,7 @@ import { runSchemaSanityCheck } from "./utils/schemaSanityCheck.js";
 import { getDbConnectionMode } from "./utils/dbConnections.js";
 import { startMetricsOnlyServer } from "./utils/metricsServer.js";
 import { recordDbConnectionMode, setDbPoolRoleCapacity } from "./metrics.js";
+import { startFmgActivityHeartbeat } from "./services/fmgActivityService.js";
 
 // Stamp the detected DB connection topology once at boot so operators (and
 // `/metrics` scrapes) can confirm Polaris recognized their PgBouncer setup
@@ -144,6 +145,10 @@ initializeQueue()
       await startDiscoveryWorker(runDiscovery).catch((err) => {
         logger.warn({ err: err?.message }, "pg-boss discovery worker start failed");
       });
+      // Snapshot per-FmgWorker lane state to the DB every 2 s so the web role
+      // can surface "active FMG calls" on the integration card without holding
+      // the worker instances itself. See services/fmgActivityService.ts.
+      startFmgActivityHeartbeat();
     }
     // Producer connection: schedulers (monitor producer ticks, discovery
     // scheduler) publish jobs, so the web/all role needs a live boss to send

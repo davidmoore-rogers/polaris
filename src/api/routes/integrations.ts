@@ -9,6 +9,7 @@ import { AppError } from "../../utils/errors.js";
 import { requirePermission } from "../middleware/permissions.js";
 import * as fortimanager from "../../services/fortimanagerService.js";
 import { getFmgWorker } from "../../services/fmgWorker.js";
+import { getFmgActivityForIntegration } from "../../services/fmgActivityService.js";
 import * as fortigate from "../../services/fortigateService.js";
 import * as windowsServer from "../../services/windowsServerService.js";
 import * as entraId from "../../services/entraIdService.js";
@@ -235,6 +236,28 @@ router.get("/health-summary", async (_req, res, next) => {
       orderBy: { name: "asc" },
     });
     res.json({ failed });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/integrations/:id/fmg-activity — live readout of this
+// integration's FmgWorker proxy + native lane state, fed by the heartbeat
+// snapshot written by the process that runs FMG traffic (discovery role in
+// split-role prod, the single process in "all" mode). Lives in the read-gated
+// section so the integrations page can poll without write access.
+router.get("/:id/fmg-activity", async (req, res, next) => {
+  try {
+    const integration = await prisma.integration.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, type: true },
+    });
+    if (!integration) throw new AppError(404, "Integration not found");
+    if (integration.type !== "fortimanager") {
+      throw new AppError(400, "fmg-activity only applies to fortimanager integrations");
+    }
+    const readout = await getFmgActivityForIntegration(req.params.id);
+    res.json(readout);
   } catch (err) {
     next(err);
   }
@@ -1075,8 +1098,11 @@ router.post("/:id/test/fortigate-sample", async (req, res, next) => {
     if (cfg.useProxy !== false) throw new AppError(400, "FortiGate sample test is only valid when the FMG proxy is disabled");
 
     const fgResult = await fortimanager.testRandomFortiGate(cfg as any, req.params.id);
+    const backupNote = fgResult.ok && (fgResult.attempts?.length ?? 0) > 1
+      ? ` (initial pick "${fgResult.attempts![0]}" failed; backup pick succeeded)`
+      : "";
     const message = fgResult.ok
-      ? `Randomly selected FortiGate "${fgResult.deviceName}" reachable${fgResult.version ? ` (FortiOS ${fgResult.version})` : ""}`
+      ? `Randomly selected FortiGate "${fgResult.deviceName}" reachable${fgResult.version ? ` (FortiOS ${fgResult.version})` : ""}${backupNote}`
       : `Randomly selected FortiGate "${fgResult.deviceName}" failed: ${fgResult.message}`;
 
     // If the random FortiGate can't be reached, the direct-transport path
@@ -1089,7 +1115,7 @@ router.post("/:id/test/fortigate-sample", async (req, res, next) => {
       }).catch(() => {});
     }
 
-    logEvent({ action: "integration.test.fortigate-sample", resourceType: "integration", resourceId: req.params.id, resourceName: integration.name, actor: req.session?.username, level: fgResult.ok ? "info" : "warning", message: `FortiGate sample test ${fgResult.ok ? "succeeded" : "failed"} for "${integration.name}" on ${fgResult.deviceName}: ${fgResult.message}` });
+    logEvent({ action: "integration.test.fortigate-sample", resourceType: "integration", resourceId: req.params.id, resourceName: integration.name, actor: req.session?.username, level: fgResult.ok ? "info" : "warning", message: `FortiGate sample test ${fgResult.ok ? "succeeded" : "failed"} for "${integration.name}" on ${fgResult.deviceName} (attempts: ${(fgResult.attempts ?? [fgResult.deviceName]).join(", ")}): ${fgResult.message}` });
 
     res.json({ ok: fgResult.ok, message, deviceName: fgResult.deviceName });
   } catch (err) {
@@ -1125,8 +1151,11 @@ router.post("/test/fortigate-sample", async (req, res, next) => {
     }
 
     const fgResult = await fortimanager.testRandomFortiGate(cfg as any, existingId ?? undefined);
+    const backupNote = fgResult.ok && (fgResult.attempts?.length ?? 0) > 1
+      ? ` (initial pick "${fgResult.attempts![0]}" failed; backup pick succeeded)`
+      : "";
     const message = fgResult.ok
-      ? `Randomly selected FortiGate "${fgResult.deviceName}" reachable${fgResult.version ? ` (FortiOS ${fgResult.version})` : ""}`
+      ? `Randomly selected FortiGate "${fgResult.deviceName}" reachable${fgResult.version ? ` (FortiOS ${fgResult.version})` : ""}${backupNote}`
       : `Randomly selected FortiGate "${fgResult.deviceName}" failed: ${fgResult.message}`;
 
     if (existingId && !fgResult.ok) {

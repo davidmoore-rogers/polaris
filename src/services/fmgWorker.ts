@@ -198,6 +198,16 @@ export function getFmgWorker(integrationId: string): FmgWorker {
 }
 
 /**
+ * Returns every FmgWorker currently instantiated in this process. Used by the
+ * activity-heartbeat job to publish a snapshot of proxy/native lane state to
+ * the DB so the web role can surface it on the integration card even when the
+ * actual FMG calls run in a separate discovery process.
+ */
+export function getAllFmgWorkers(): FmgWorker[] {
+  return Array.from(workers.values());
+}
+
+/**
  * Test-only: clear the worker registry. Resets module state between test runs
  * so each test starts with a clean queue.
  */
