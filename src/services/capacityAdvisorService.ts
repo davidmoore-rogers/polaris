@@ -442,7 +442,23 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
   // modeled by workerCeiling + discoveryReserve + httpOverhead. We size the
   // pool so the observed peak (minus the pg-boss share) lands at ≤80% pool
   // utilization, the same threshold db_pool_undersized used to fire at.
+  //
+  // peakObserved is GROUP-WIDE: it's `pg_stat_activity` filtered by current
+  // database, so on a split-role install (web + N monitor + discovery) it
+  // sums every process's open backends. DATABASE_POOL_SIZE is PER-PROCESS —
+  // each Polaris process reads the env var to size its own pool. Before
+  // letting peakObserved floor a per-process pool, divide it by processCount;
+  // otherwise a 5-process group at 150 conns each (750 group-wide) would
+  // advise each process to allocate a 900-conn pool, i.e. 4,500 backends
+  // group-wide and well past any reasonable max_connections.
   const peakObserved = snapshot.database.connectionPool.peakObserved;
+  // Multi-process group footprint. Each process (web producer, N monitor
+  // replicas, discovery) opens its own Prisma + pg-boss pool. Set
+  // POLARIS_MONITOR_REPLICAS on the web node to the number of polaris-monitor@N
+  // units so the recommendation is right from day one; unset = single-process
+  // ("all") = 1.
+  const monitorReplicas = readEnvInt("POLARIS_MONITOR_REPLICAS", 0);
+  const processCount = monitorReplicas > 0 ? monitorReplicas + 2 : 1; // web + N monitor + discovery
   // pg-boss pool sized to absorb the completion burst when many workers
   // finish simultaneously. Floors at PGBOSS_POOL_TARGET so installs below
   // ~80 workers stay on the historical 20-connection default.
@@ -451,10 +467,12 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
     Math.ceil(workerCeiling * PGBOSS_POOL_WORKER_FRACTION),
   );
   const modeledPrismaTarget = workerCeiling + discoveryReserve + HTTP_JOB_OVERHEAD;
-  // peakPrismaFloor subtracts pg-boss's share of the observed peak to back
-  // out the Prisma-only demand. Uses the scaled pgbossTarget so the split
-  // matches what the advisor would actually recommend, not the old fixed 20.
-  const peakPrismaFloor = Math.ceil(Math.max(0, peakObserved - pgbossTarget) / 0.80);
+  // Per-process slice of the group-wide peak, then back out pg-boss's per-
+  // process share so we're sizing the Prisma pool against Prisma demand only.
+  // Floor at the modeled target if peakObserved hasn't surfaced demand the
+  // model missed.
+  const peakPerProcess = peakObserved / Math.max(1, processCount);
+  const peakPrismaFloor = Math.ceil(Math.max(0, peakPerProcess - pgbossTarget) / 0.80);
   const prismaTarget = Math.max(modeledPrismaTarget, peakPrismaFloor);
   // max_connections must support Polaris's ACTUAL pool footprint, not just the
   // modeled target. The advisor's never-shrink rule keeps DATABASE_POOL_SIZE
@@ -466,16 +484,6 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
   const effectivePrismaPool = Math.max(prismaTarget, currentEnv.DATABASE_POOL_SIZE);
   const effectivePgbossPool = Math.max(pgbossTarget, currentEnv.POLARIS_PGBOSS_POOL_SIZE);
   const perProcessPool = effectivePrismaPool + effectivePgbossPool;
-  // Multi-process group footprint. Each process (web producer, N monitor
-  // replicas, discovery) opens its own Prisma + pg-boss pool, so the group's
-  // connection demand is roughly perProcessPool × processCount. Set
-  // POLARIS_MONITOR_REPLICAS on the web node to the number of polaris-monitor@N
-  // units so the recommendation is right from day one; unset = single-process
-  // ("all") = 1. (peakObserved below is already group-wide — it's a server-side
-  // pg_stat_activity count across every process — so the recommendation also
-  // self-corrects from observation once the group is live.)
-  const monitorReplicas = readEnvInt("POLARIS_MONITOR_REPLICAS", 0);
-  const processCount = monitorReplicas > 0 ? monitorReplicas + 2 : 1; // web + N monitor + discovery
   const polarisNeeded = perProcessPool * processCount;
   const polarisFloor = Math.max(polarisNeeded, peakObserved);
   const recommendedMax = roundUpToNearest(
@@ -602,7 +610,9 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
     current: prismaCurrent,
     recommended: prismaRecommended,
     rationale: peakPrismaFloor > modeledPrismaTarget
-      ? "Sized to keep observed peak below 80% pool utilization — peak demand currently exceeds the worker-count model."
+      ? processCount > 1
+        ? `Sized to keep observed peak below 80% pool utilization — peak demand (group-wide ${peakObserved}, ~${Math.ceil(peakPerProcess)}/process across ${processCount} processes) currently exceeds the worker-count model.`
+        : "Sized to keep observed peak below 80% pool utilization — peak demand currently exceeds the worker-count model."
       : "Sized to cover the worker ceiling plus discovery reserve plus HTTP/job overhead.",
     breakdown: {
       workerCeiling,
@@ -610,6 +620,8 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
       httpOverhead: HTTP_JOB_OVERHEAD,
       modeledTarget: modeledPrismaTarget,
       peakObserved,
+      peakPerProcess: Math.ceil(peakPerProcess),
+      processCount,
       peakPrismaFloor,
       target: prismaTarget,
     },
