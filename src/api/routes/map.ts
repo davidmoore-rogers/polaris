@@ -108,6 +108,7 @@ router.get("/sites", async (_req, res, next) => {
         assetType: "firewall",
         latitude: { not: null },
         longitude: { not: null },
+        status: { notIn: ["decommissioned", "disabled"] },
       },
       select: {
         id: true,
@@ -181,8 +182,8 @@ router.get("/sites", async (_req, res, next) => {
 router.get("/sites/:id/topology", async (req, res, next) => {
   try {
     const id = req.params.id;
-    const fg = await prisma.asset.findUnique({
-      where: { id },
+    const fg = await prisma.asset.findFirst({
+      where: { id, status: { notIn: ["decommissioned", "disabled"] } },
       select: {
         id: true,
         hostname: true,
@@ -224,6 +225,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           where: {
             OR: [{ assetType: "switch" }, { assetType: "access_point" }],
             fortinetTopology: { path: ["controllerFortigate"], equals: fgHostname },
+            status: { notIn: ["decommissioned", "disabled"] },
           },
           select: {
             id: true,
@@ -297,6 +299,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         prisma.asset.findMany({
           where: {
             assetType: { notIn: ["firewall", "switch", "access_point"] },
+            status: { notIn: ["decommissioned", "disabled"] },
             OR: switchHostnames.map((h) => ({ lastSeenSwitch: { startsWith: `${h}/` } })),
           },
           select: {
@@ -317,6 +320,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           FROM assets
           WHERE "lastSeenSwitch" IS NOT NULL
             AND "assetType" NOT IN ('firewall', 'switch', 'access_point')
+            AND "status" NOT IN ('decommissioned', 'disabled')
             AND split_part("lastSeenSwitch", '/', 1) = ANY(${switchHostnames}::text[])
           GROUP BY swhost
         `,
@@ -987,8 +991,8 @@ router.get("/sites/:id/topology/search", async (req, res, next) => {
     const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
     if (!q) return res.json({ q: "", results: [] });
 
-    const fg = await prisma.asset.findUnique({
-      where: { id },
+    const fg = await prisma.asset.findFirst({
+      where: { id, status: { notIn: ["decommissioned", "disabled"] } },
       select: { id: true, hostname: true, assetType: true },
     });
     if (!fg || fg.assetType !== "firewall") throw new AppError(404, "FortiGate not found");
@@ -999,6 +1003,7 @@ router.get("/sites/:id/topology/search", async (req, res, next) => {
           where: {
             assetType: "switch",
             fortinetTopology: { path: ["controllerFortigate"], equals: fgHostname },
+            status: { notIn: ["decommissioned", "disabled"] },
           },
           select: { id: true, hostname: true },
         })
@@ -1012,6 +1017,7 @@ router.get("/sites/:id/topology/search", async (req, res, next) => {
     const matches = await prisma.asset.findMany({
       where: {
         assetType: { notIn: ["firewall", "switch", "access_point"] },
+        status: { notIn: ["decommissioned", "disabled"] },
         OR: switchHostnames.map((h) => ({ lastSeenSwitch: { startsWith: `${h}/` } })),
         AND: [
           {
