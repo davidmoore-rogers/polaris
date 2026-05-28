@@ -291,18 +291,31 @@ SESSION_SECRET=${SESSION_SECRET}
 # POLARIS_PROXY_CERT_PATH. POLARIS_PUBLIC_URL is required in this mode.
 POLARIS_PROXY_CERT_PATH=${CERT_DIR}/cert.pem
 POLARIS_PUBLIC_URL=${PUBLIC_URL}
+
+# Split-role replica count — the web role reads this so the Capacity Advisor
+# sizes pools + max_connections correctly across the (web + N monitor +
+# discovery) process group. Must match the number of polaris-monitor@N units
+# enabled below; raise if you scale monitor replicas later.
+POLARIS_MONITOR_REPLICAS=${MONITOR_REPLICAS}
 ENVFILE
   chown "$APP_USER:$APP_GROUP" "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"
   info ".env created with generated SESSION_SECRET + proxy-mode env vars"
 else
-  info ".env already exists — appending proxy-mode env vars if missing"
+  info ".env already exists — appending proxy-mode + replica env vars if missing"
   if ! grep -q '^POLARIS_PROXY_CERT_PATH=' "$APP_DIR/.env"; then
     {
       echo ""
       echo "# Added by setup-rhel.sh — reverse-proxy front-end (Phase 1+)"
       echo "POLARIS_PROXY_CERT_PATH=${CERT_DIR}/cert.pem"
       echo "POLARIS_PUBLIC_URL=${PUBLIC_URL}"
+    } >> "$APP_DIR/.env"
+  fi
+  if ! grep -q '^POLARIS_MONITOR_REPLICAS=' "$APP_DIR/.env"; then
+    {
+      echo ""
+      echo "# Added by setup-rhel.sh — split-role replica count (Capacity Advisor input)"
+      echo "POLARIS_MONITOR_REPLICAS=${MONITOR_REPLICAS}"
     } >> "$APP_DIR/.env"
   fi
 fi

@@ -254,7 +254,10 @@ DATABASE_POOL_SIZE=25
 # Capability gating lives in src/utils/role.ts (roleConfig); boot path branches
 # on it in src/app.ts. See "Multi-process architecture" in ARCHITECTURE.md and
 # docs/INSTALL.md. Companion vars: POLARIS_DISCOVERY_WORKERS (discovery role,
-# default 2), POLARIS_MONITOR_REPLICAS (Capacity Advisor sizing hint, web node).
+# default 2), POLARIS_MONITOR_REPLICAS (required on web role — Capacity Advisor
+# uses it to size pools + max_connections across the process group; setup
+# scripts write it from --monitor-replicas, and the web role warns at boot
+# when it's unset in split-role mode).
 POLARIS_ROLE=
 
 # App

@@ -95,6 +95,24 @@ logger.info(
   `Polaris process role: ${cfg.role}`,
 );
 
+// Capacity Advisor sanity check: the web role sizes pools + max_connections
+// using POLARIS_MONITOR_REPLICAS to know the group's process count. Pre-Phase-3
+// fresh installs (and any -nodb install before this fix) didn't write the var,
+// so the advisor silently degrades to single-process math and over-recommends
+// per-process DATABASE_POOL_SIZE / under-recommends max_connections. Warn loudly
+// when we detect the gap so operators can `echo POLARIS_MONITOR_REPLICAS=N >>
+// /opt/polaris/.env` and restart.
+if (cfg.role === "web") {
+  const replicasRaw = (process.env.POLARIS_MONITOR_REPLICAS ?? "").trim();
+  const replicas = Number.parseInt(replicasRaw, 10);
+  if (!replicasRaw || !Number.isFinite(replicas) || replicas < 1) {
+    logger.warn(
+      { POLARIS_MONITOR_REPLICAS: replicasRaw || "(unset)" },
+      "POLARIS_MONITOR_REPLICAS is unset on the web role — Capacity Advisor will assume single-process and mis-size DATABASE_POOL_SIZE + PG max_connections. Set it to the number of polaris-monitor@N units enabled (matches --monitor-replicas at install time) in /opt/polaris/.env and restart polaris.target.",
+    );
+  }
+}
+
 // Stamp this process's configured connection capacity under its role label so
 // /metrics exposes the per-role footprint — in a multi-process deployment no
 // single process sees the whole group, so the Capacity Advisor / Prometheus
