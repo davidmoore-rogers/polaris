@@ -3682,20 +3682,24 @@ function _renderSystemSummary(container, tel, si) {
 }
 
 // Returns true when the asset is a managed FortiSwitch or FortiAP whose
-// resolved interfaces/telemetry polling method is REST API. These devices
+// resolved polling method *for the given stream* is REST API. These devices
 // aren't directly REST-able — the relevant endpoints live on the parent
 // FortiGate, not on the device's own IP — so REST API delivers no telemetry,
-// no temperature, and no interface-refresh data for them.
-function _isRestApiManagedNetworkDevice(asset) {
+// no temperature, no LLDP, and no interface-refresh data for them. Each
+// stream has its own polling-method override, so a FortiAP on SNMP for
+// temperature must not trip the "not available via REST API" banner just
+// because its interfaces stream is still REST.
+function _isRestApiManagedNetworkDevice(asset, stream) {
   if (!asset) return false;
   var t = asset.assetType;
   if (t !== "switch" && t !== "access_point") return false;
-  var ifPoll = asset.interfacesPolling;
-  if (!ifPoll) {
+  var field = _streamFieldPrefix(stream || "interfaces") + "Polling";
+  var poll = asset[field];
+  if (!poll) {
     var sk = (asset.discoveredByIntegration && asset.discoveredByIntegration.type) || "manual";
-    ifPoll = (sk === "fortimanager" || sk === "fortigate") ? "rest_api" : null;
+    poll = (sk === "fortimanager" || sk === "fortigate") ? "rest_api" : null;
   }
-  return ifPoll === "rest_api";
+  return poll === "rest_api";
 }
 
 // Resolves the polling interval (in seconds) used to gate the stale-data
@@ -4439,7 +4443,7 @@ function _renderTemperatures(container, si, asset) {
   var latest = latestRaw.filter(hasReading);
   var hidden = latestRaw.filter(function (t) { return !hasReading(t); });
   if (latest.length === 0) {
-    if (_isRestApiManagedNetworkDevice(asset)) {
+    if (_isRestApiManagedNetworkDevice(asset, "temperature")) {
       var tempPolling = _assetMonitorStreamSource(asset, "temperature").polling || "REST API";
       container.innerHTML = _notAvailableViaPollingHTML("Temperature", tempPolling);
     } else {
@@ -4528,7 +4532,7 @@ function _renderLldpNeighborsCard(container, si, asset) {
   if (!container) return;
   var neighbors = (si && si.lldpNeighbors) || [];
   if (neighbors.length === 0) {
-    if (_isRestApiManagedNetworkDevice(asset)) {
+    if (_isRestApiManagedNetworkDevice(asset, "lldp")) {
       var lldpPolling = _assetMonitorStreamSource(asset, "lldp").polling || "REST API";
       container.innerHTML = _notAvailableViaPollingHTML("LLDP Neighbors", lldpPolling);
     } else {
@@ -5769,7 +5773,7 @@ function _composeInterfaceScreenshot(parts) {
 function _renderSystemChart(container, data, asset, si) {
   var samples = (data && data.samples) || [];
   if (samples.length === 0) {
-    if (_isRestApiManagedNetworkDevice(asset)) {
+    if (_isRestApiManagedNetworkDevice(asset, "telemetry")) {
       var telPolling = _assetMonitorStreamSource(asset, "telemetry").polling || "REST API";
       container.innerHTML = _notAvailableViaPollingHTML("Telemetry", telPolling);
     } else {
