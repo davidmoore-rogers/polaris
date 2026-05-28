@@ -671,14 +671,12 @@ function renderCertsTab(container) {
       '<h4>HTTPS Certificate</h4>' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
         'TLS is terminated by nginx reading the cert at <code>' + escapeHtml(certPath) + '</code>. ' +
-        'The fingerprint below is what Polaris Agents pin; rotation walks through the dual-pin stage→swap→retire ' +
-        'workflow so it\'s zero-downtime as long as every agent is online to receive the new pin.' +
+        'Rotation walks through the dual-pin stage→swap→retire workflow so it\'s zero-downtime as long as ' +
+        'every agent is online to receive the new pin. The SHA-256 fingerprint Polaris Agents pin against ' +
+        'lives on Integrations → Polaris Agent.' +
       '</p>' +
       '<div class="form-group"><label>Cert path</label>' +
         '<input type="text" readonly value="' + escapeHtml(certPath) + '" style="font-family:monospace">' +
-      '</div>' +
-      '<div class="form-group"><label>SHA-256 fingerprint (agent pin)</label>' +
-        '<input type="text" readonly value="' + escapeHtml(fingerprint) + '" style="font-family:monospace;font-size:0.8rem">' +
       '</div>' +
       '<div class="form-group"><label>Common Name</label>' +
         '<input type="text" readonly value="' + escapeHtml(cn) + '">' +
