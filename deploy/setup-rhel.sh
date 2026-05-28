@@ -210,6 +210,22 @@ else
   warn "Service may not have started — check: journalctl -u polaris -f"
 fi
 
+# ─── 8b. Install in-app nginx helpers (inert outside proxy mode) ─────────────
+# The wrapper at /usr/local/sbin/polaris-nginx-apply, narrow sudoers grant,
+# /run/polaris-nginx-stage staging dir, and polaris↔nginx group membership
+# back the Server Settings → Certificates GUI. Shipped here so an operator
+# who later runs migrate-to-nginx.sh finds them already in place; outside
+# proxy mode none of them are exercised.
+info "Installing in-app nginx helpers (idempotent)..."
+install -o root -g root -m 0755 "$APP_DIR/deploy/scripts/polaris-nginx-apply.sh" /usr/local/sbin/polaris-nginx-apply
+install -o root -g root -m 0440 "$APP_DIR/deploy/sudoers.d/polaris-nginx"        /etc/sudoers.d/polaris-nginx
+install -o root -g root -m 0644 "$APP_DIR/deploy/tmpfiles.d/polaris-nginx.conf"  /etc/tmpfiles.d/polaris-nginx.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/polaris-nginx.conf >/dev/null 2>&1 || true
+if getent group nginx >/dev/null 2>&1 && ! id -nG "$APP_USER" 2>/dev/null | grep -qw nginx; then
+  usermod -aG nginx "$APP_USER"
+  info "Added $APP_USER to the nginx group (cert file readability in proxy mode)"
+fi
+
 # ─── 9. Firewall ─────────────────────────────────────────────────────────────
 if command -v firewall-cmd &>/dev/null; then
   info "Opening port 3000 in firewall..."

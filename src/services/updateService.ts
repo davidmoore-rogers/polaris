@@ -639,6 +639,34 @@ export function restartService() {
       `  fi`,
       `fi`,
     ].join("\n") : "";
+    // Sync the in-app nginx GUI helpers (wrapper script + sudoers grant +
+    // tmpfiles staging-dir entry + polaris↔nginx group membership). Runs
+    // unconditionally on every update — outside proxy mode the wrapper and
+    // sudoers entry are inert, the tmpfiles dir is unused, and the usermod
+    // is gated on `getent group nginx` so it's a no-op without nginx. The
+    // cmp -s pattern makes each install a no-op when the file already
+    // matches what's shipped; the usermod guard makes the group-add a
+    // no-op once polaris is already a member. Together this is how
+    // existing installs pick up the helpers without re-running setup-rhel.
+    const nginxHelperSync = [
+      `if [ -f ${APP_DIR}/deploy/scripts/polaris-nginx-apply.sh ] && ! cmp -s ${APP_DIR}/deploy/scripts/polaris-nginx-apply.sh /usr/local/sbin/polaris-nginx-apply 2>/dev/null; then`,
+      `  install -o root -g root -m 0755 ${APP_DIR}/deploy/scripts/polaris-nginx-apply.sh /usr/local/sbin/polaris-nginx-apply`,
+      `  logger -t polaris-updater "Synced /usr/local/sbin/polaris-nginx-apply"`,
+      `fi`,
+      `if [ -f ${APP_DIR}/deploy/sudoers.d/polaris-nginx ] && ! cmp -s ${APP_DIR}/deploy/sudoers.d/polaris-nginx /etc/sudoers.d/polaris-nginx 2>/dev/null; then`,
+      `  install -o root -g root -m 0440 ${APP_DIR}/deploy/sudoers.d/polaris-nginx /etc/sudoers.d/polaris-nginx`,
+      `  logger -t polaris-updater "Synced /etc/sudoers.d/polaris-nginx"`,
+      `fi`,
+      `if [ -f ${APP_DIR}/deploy/tmpfiles.d/polaris-nginx.conf ] && ! cmp -s ${APP_DIR}/deploy/tmpfiles.d/polaris-nginx.conf /etc/tmpfiles.d/polaris-nginx.conf 2>/dev/null; then`,
+      `  install -o root -g root -m 0644 ${APP_DIR}/deploy/tmpfiles.d/polaris-nginx.conf /etc/tmpfiles.d/polaris-nginx.conf`,
+      `  systemd-tmpfiles --create /etc/tmpfiles.d/polaris-nginx.conf >/dev/null 2>&1 || true`,
+      `  logger -t polaris-updater "Synced /etc/tmpfiles.d/polaris-nginx.conf"`,
+      `fi`,
+      `if getent group nginx >/dev/null 2>&1 && ! id -nG polaris 2>/dev/null | grep -qw nginx; then`,
+      `  usermod -aG nginx polaris`,
+      `  logger -t polaris-updater "Added polaris user to nginx group (cert file readability)"`,
+      `fi`,
+    ].join("\n");
 
     logger.info(
       { proxyMode },
@@ -646,6 +674,7 @@ export function restartService() {
     );
     const syncScript = [
       "set -e",
+      nginxHelperSync,
       nginxSync,
       `for f in ${APP_DIR}/deploy/polaris-web.service ${APP_DIR}/deploy/polaris-monitor@.service ${APP_DIR}/deploy/polaris-discovery.service ${APP_DIR}/deploy/polaris-migrate.service ${APP_DIR}/deploy/polaris.target; do`,
       `  name="$(basename "$f")"`,
