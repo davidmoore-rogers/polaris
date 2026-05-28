@@ -18,7 +18,7 @@
  * workload, not inventory. Discovered-only assets do not enter the calc.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 
 // Mock queueService so isPgbossInstalled is configurable per-test without
 // pulling in the real module (which imports the pg-boss optional dep).
@@ -440,6 +440,87 @@ describe("buildAdvisorState — Prisma pool honors observed peak", () => {
     const prisma = state.recommendations.find((r) => r.key === "DATABASE_POOL_SIZE")!;
     expect(prisma.breakdown).toHaveProperty("peakPrismaFloor");
     expect(prisma.breakdown!.peakObserved).toBe(179);
+  });
+});
+
+describe("buildAdvisorState — Prisma pool divides peakObserved by processCount on split-role installs", () => {
+  // Regression for the prod bug: peakObserved comes from `pg_stat_activity`
+  // and is GROUP-WIDE (sums every Polaris process's backends). The Prisma
+  // pool sizing it floors is PER-PROCESS. On a 5-process split-role install
+  // with each process holding ~150 backends, peakObserved = 750. Pre-fix the
+  // advisor recommended a per-process pool of ~900; post-fix it should
+  // divide by processCount first so the floor reflects per-process demand.
+  const ORIGINAL_ENV = process.env.POLARIS_MONITOR_REPLICAS;
+  afterEach(() => {
+    if (ORIGINAL_ENV === undefined) delete process.env.POLARIS_MONITOR_REPLICAS;
+    else process.env.POLARIS_MONITOR_REPLICAS = ORIGINAL_ENV;
+  });
+
+  it("recommends a single-process pool ~5× smaller when 3 monitor replicas are configured", () => {
+    const snap = baseSnapshot({
+      monitoredAssetCount: 2080,
+      activeQueueMode: "pgboss",
+      peakObserved: 750, // group-wide across 5 processes
+      pgbossPoolSize: 50,
+      prismaPoolSize: 200,
+      maxConnections: 1500,
+    });
+    const inputs = buildInputs(snap, { DATABASE_POOL_SIZE: 200, POLARIS_PGBOSS_POOL_SIZE: 50 });
+    inputs.integrations.fortimanagerDirectParallelismSum = 1;
+
+    process.env.POLARIS_MONITOR_REPLICAS = "3"; // web + 3 monitor + discovery = 5
+    const splitState = buildAdvisorState(inputs);
+    const splitPrisma = splitState.recommendations.find((r) => r.key === "DATABASE_POOL_SIZE")!;
+
+    delete process.env.POLARIS_MONITOR_REPLICAS; // processCount = 1
+    const singleState = buildAdvisorState(inputs);
+    const singlePrisma = singleState.recommendations.find((r) => r.key === "DATABASE_POOL_SIZE")!;
+
+    // Split should be substantially smaller — single-process forces the 750-
+    // conn peak through one pool. Pre-fix these came out equal.
+    expect(splitPrisma.recommended).toBeLessThan(singlePrisma.recommended as number);
+    // Sanity: split pool should be in the ~workerCeiling+reserve+overhead
+    // range, NOT ballooning past 800 like the pre-fix bug.
+    expect(splitPrisma.recommended).toBeLessThan(500);
+  });
+
+  it("exposes processCount + peakPerProcess in the breakdown", () => {
+    const snap = baseSnapshot({
+      monitoredAssetCount: 2080,
+      activeQueueMode: "pgboss",
+      peakObserved: 750,
+      pgbossPoolSize: 50,
+      prismaPoolSize: 200,
+      maxConnections: 1500,
+    });
+    const inputs = buildInputs(snap, { DATABASE_POOL_SIZE: 200, POLARIS_PGBOSS_POOL_SIZE: 50 });
+    process.env.POLARIS_MONITOR_REPLICAS = "3";
+    const state = buildAdvisorState(inputs);
+    const prisma = state.recommendations.find((r) => r.key === "DATABASE_POOL_SIZE")!;
+    expect(prisma.breakdown).toHaveProperty("processCount", 5);
+    expect(prisma.breakdown).toHaveProperty("peakPerProcess");
+    // peakPerProcess = ceil(750 / 5) = 150
+    expect(prisma.breakdown!.peakPerProcess).toBe(150);
+  });
+
+  it("preserves single-process behavior when POLARIS_MONITOR_REPLICAS is unset", () => {
+    const snap = baseSnapshot({
+      monitoredAssetCount: 1714,
+      activeQueueMode: "pgboss",
+      peakObserved: 179,
+      pgbossPoolSize: 20,
+      prismaPoolSize: 152,
+      maxConnections: 300,
+    });
+    const inputs = buildInputs(snap, { DATABASE_POOL_SIZE: 152, POLARIS_PGBOSS_POOL_SIZE: 20 });
+    inputs.integrations.fortimanagerProxy = 1;
+    delete process.env.POLARIS_MONITOR_REPLICAS;
+    const state = buildAdvisorState(inputs);
+    const prisma = state.recommendations.find((r) => r.key === "DATABASE_POOL_SIZE")!;
+    // processCount = 1 → peakPerProcess = peakObserved (unchanged from pre-fix behavior).
+    expect(prisma.breakdown!.processCount).toBe(1);
+    expect(prisma.breakdown!.peakPerProcess).toBe(179);
+    expect(prisma.changeRequired).toBe(true);
   });
 });
 
