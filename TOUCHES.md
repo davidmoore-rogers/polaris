@@ -2329,7 +2329,7 @@ Listed alphabetically.
 
 **Public API:** `initUpdateStatus`, `getUpdateStatus`, `isUpdateMechanismAvailable`, `clearUpdateStatus`, `checkForUpdates`, `applyUpdate`, `getRecentCommits`, `restartService`.
 
-**Cross-service deps:** none (spawns git/npm/prisma, reads/writes .update-status.json, creates DB backup).
+**Cross-service deps:** `nginxRenderer.renderNginxConfig` + `proxyConfigService.getProxyConfig/saveProxyConfig` for the proxy-mode nginx-config render step inside `restartService()`'s transient unit (proxy-mode + managedMode=true only; falls back to no-op outside that path). Otherwise spawns git/npm/prisma, reads/writes .update-status.json, creates DB backup.
 
 **Used by:** `src/api/routes/serverSettings.ts,1143,1151,1159 — Application Updates card endpoints`; `src/api/routes/serverSettings.ts — POST /restart` (Capacity Advisor "Restart Polaris to apply" button uses `restartService` standalone, without the update pipeline); `src/jobs/updateCheck.ts,31 — hourly check job`. ~7 call sites.
 
@@ -2350,6 +2350,35 @@ Listed alphabetically.
 - Verify restart doesn't kill in-flight requests; 1.5s delay before exit(1) should be enough.
 - **Do not reorder steps 3–6** without re-reading `cross-cutting/schema-migrations-and-prisma-client-lifecycle`. A reorder that puts migrate before generate-then-tsc reintroduces the failure mode where dropped columns crash the running client.
 - The `rm -rf dist` between steps 4 and 5 is non-negotiable when Prisma client file layout could have changed between versions. Without it, stale `dist/generated/prisma/*.js` files can shadow the regenerated client and the running process selects columns the schema no longer has.
+
+---
+
+## services/nginxApplyService.ts
+
+**What it owns:** The end-to-end apply flows for the in-app nginx GUI. Composes `proxyConfigService` (DB), `nginxRenderer` (template → text + sha256), `nginxConfigParser` (live config → bootstrap seed), `privilegedSysadmin` (stage + sudo wrapper), and `certInfo.invalidateCache` (post-rotation freshness) into four user-facing operations.
+
+**Public API:**
+- `applyProxyConfig(changes?)` — optional partial save + render + stage + sudo `polaris-nginx-apply apply-config` + record `lastAppliedHash`. Requires `proxyConfig.managedMode=true`.
+- `rotateCertAndKey(certPem, keyPem)` — libcrypto SPKI cert+key pair validation, stage, sudo `polaris-nginx-apply rotate-cert`, invalidate certInfo cache.
+- `preflightCertRotation(certPem, keyPem)` — pair check + new fingerprint/CN/SANs/expiry + count of currently-enrolled agents pinned to the existing cert (the re-pin impact surfaced in the confirm modal).
+- `bootstrapProxyConfig()` — one-shot seed of `proxyConfig` from `parseNginxConfig("/etc/nginx/conf.d/polaris.conf")`. No-ops when not in proxy mode or when the row already exists. Always seeds `managedMode=false` (operator must opt in via the GUI).
+- `getDriftStatus()` — compare live file sha256 against `proxyConfig.lastAppliedHash`; surface drift markers from the parser when they diverge.
+
+**Cross-service deps:** `proxyConfigService`, `nginxRenderer`, `nginxConfigParser`, `privilegedSysadmin`, `certInfo`. Queries `prisma.managedAgent.count` for the re-pin impact.
+
+**Used by:** `src/api/routes/proxySettings.ts` (every route); `src/jobs/bootstrapProxyConfig.ts` (one-shot startup). Not called from `updateService` — that path uses `renderNginxConfig` + `getProxyConfig`/`saveProxyConfig` directly to keep the import graph thin (no transitive dep on certInfo + privilegedSysadmin).
+
+**Invariants:**
+- `applyProxyConfig` refuses unless `managedMode=true` (refuse-and-banner UX). 409 from the route handler.
+- `lastAppliedHash` records the sha256 of the *rendered* config, not the live file. updateService and the GUI both compare against this for drift.
+- Cert validation is libcrypto SPKI-only. We don't `nginx -t` against staged paths — relies on nginx graceful-reload (old workers keep serving the old cert if the new one is rejected).
+- Wrapper unavailability (no `/usr/local/sbin/polaris-nginx-apply`) → 503 with a clear message about running setup-rhel.sh or the in-app updater.
+
+**When changing this:**
+- Verify `bootstrapProxyConfig` is idempotent across re-imports — the `proxyConfigRowExists()` check is the entire gate.
+- If you change the wrapper's subcommand surface, update both this service AND `deploy/scripts/polaris-nginx-apply.sh` AND `src/services/privilegedSysadmin.ts`'s `NginxApplySubcommand` union.
+- The re-pin count query must match the field name baked into `agent.conf` at install time (`ManagedAgent.serverCertFingerprint`). If you rename that column, update this query AND the install/enroll paths in lockstep.
+- `getDriftStatus` is called by the frontend on every Certificates tab visit — keep it cheap (one file read + one sha256, no DB write).
 
 ---
 
