@@ -29,6 +29,7 @@ set -euo pipefail
 
 APP_DIR="/opt/polaris"
 ENV_FILE="$APP_DIR/.env"
+DB_NAME="polaris"
 NGINX_CERT_DIR="/etc/polaris-nginx"
 NGINX_CONF_DEST="/etc/nginx/conf.d/polaris.conf"
 NGINX_DROPIN_DIR="/etc/systemd/system/polaris-web.service.d"
@@ -187,54 +188,49 @@ TMP=$(mktemp -d /tmp/polaris-nginx-stage.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
 step "Stage: extracting active server cert + key from Setting.certificates"
-EXTRACT_SCRIPT="$TMP/extract.mjs"
-cat > "$EXTRACT_SCRIPT" <<'EXTRACT'
-import fs from "node:fs";
-import path from "node:path";
-import { PrismaClient } from "/opt/polaris/src/generated/prisma/index.js";
+# Pull the JSON values straight out of Postgres via the postgres superuser's
+# peer-auth socket connection — same way the preflight check above already
+# tested DB reachability. Avoids depending on Polaris's generated Prisma
+# client (whose on-disk path moves between build configurations) or on the
+# Polaris source tree being structured a particular way. The cert/key PEMs
+# are written via a small inline `node -e` script that parses the JSON +
+# selects the right records; Node is already required to run Polaris, so
+# this adds no new install-time dependency.
+EXTRACT_RC=0
+# Postgres table name is `settings` (snake_case per @@map in
+# prisma/schema.prisma), NOT `"Setting"` — `psql` would silently 0-row a
+# quoted-PascalCase reference. Let stderr surface so a real table-not-found
+# bubbles up rather than masquerading as "no row".
+HTTPS_JSON=$(sudo -u postgres psql -tA -d "$DB_NAME" -c "SELECT value FROM settings WHERE key='https'")
+CERTS_JSON=$(sudo -u postgres psql -tA -d "$DB_NAME" -c "SELECT value FROM settings WHERE key='certificates'")
 
-const outDir = process.argv[2];
-const prisma = new PrismaClient();
-try {
-  const httpsRow = await prisma.setting.findUnique({ where: { key: "https" } });
-  const certsRow = await prisma.setting.findUnique({ where: { key: "certificates" } });
+if [[ -z "$CERTS_JSON" ]]; then
+  error "No 'certificates' Setting row found — has Polaris ever been configured with an HTTPS cert?"
+  exit 1
+fi
 
-  if (!certsRow) {
-    console.error("No 'certificates' Setting row found. Has Polaris ever been configured with an HTTPS cert?");
-    process.exit(1);
-  }
-  const certs = certsRow.value;
-  const https = httpsRow ? httpsRow.value : { certId: null, keyId: null };
-
-  let leafCert = null;
-  let leafKey = null;
-
+# Pass the two JSON blobs + the output dir via env to a Node one-liner. The
+# script picks the canonical (Setting.https.certId/keyId) cert+key pair if
+# Setting.https pins one, else falls back to the first server-category
+# cert+key. Writes cert.pem + key.pem to the staging dir.
+HTTPS_JSON="$HTTPS_JSON" CERTS_JSON="$CERTS_JSON" OUT_DIR="$TMP" node -e "
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const certs = JSON.parse(process.env.CERTS_JSON || '[]');
+  const https = process.env.HTTPS_JSON ? JSON.parse(process.env.HTTPS_JSON) : { certId: null, keyId: null };
+  let leafCert = null, leafKey = null;
   if (https.certId && https.keyId) {
-    leafCert = certs.find(c => c.id === https.certId && c.category === "server" && c.type === "cert");
-    leafKey  = certs.find(c => c.id === https.keyId  && c.category === "server" && c.type === "key");
+    leafCert = certs.find(c => c.id === https.certId && c.category === 'server' && c.type === 'cert');
+    leafKey  = certs.find(c => c.id === https.keyId  && c.category === 'server' && c.type === 'key');
   }
-
-  // Fallback: pick the first server cert+key if Setting.https isn't pinning a pair.
-  if (!leafCert) leafCert = certs.find(c => c.category === "server" && c.type === "cert");
-  if (!leafKey)  leafKey  = certs.find(c => c.category === "server" && c.type === "key");
-
-  if (!leafCert) { console.error("No server cert (category=server, type=cert) in Setting.certificates."); process.exit(1); }
-  if (!leafKey)  { console.error("No server key (category=server, type=key) in Setting.certificates.");  process.exit(1); }
-
-  fs.writeFileSync(path.join(outDir, "cert.pem"), leafCert.pem, { mode: 0o640 });
-  fs.writeFileSync(path.join(outDir, "key.pem"),  leafKey.pem,  { mode: 0o640 });
-  console.log("Extracted cert:", leafCert.name, "key:", leafKey.name);
-} finally {
-  await prisma.$disconnect();
-}
-EXTRACT
-
-set +e
-# Source .env so DATABASE_URL etc. are present for the Node extract
-set -a; . "$ENV_FILE"; set +a
-sudo -u polaris -- bash -c "cd $APP_DIR && DATABASE_URL='$DATABASE_URL' node $EXTRACT_SCRIPT $TMP"
-EXTRACT_RC=$?
-set -e
+  if (!leafCert) leafCert = certs.find(c => c.category === 'server' && c.type === 'cert');
+  if (!leafKey)  leafKey  = certs.find(c => c.category === 'server' && c.type === 'key');
+  if (!leafCert) { console.error('No server cert (category=server, type=cert) in Setting.certificates.'); process.exit(1); }
+  if (!leafKey)  { console.error('No server key (category=server, type=key) in Setting.certificates.');  process.exit(1); }
+  fs.writeFileSync(path.join(process.env.OUT_DIR, 'cert.pem'), leafCert.pem, { mode: 0o640 });
+  fs.writeFileSync(path.join(process.env.OUT_DIR, 'key.pem'),  leafKey.pem,  { mode: 0o640 });
+  console.log('Extracted cert:', leafCert.name, '/ key:', leafKey.name);
+" || EXTRACT_RC=$?
 if [[ $EXTRACT_RC -ne 0 ]]; then
   error "Failed to extract cert+key from the database. See log above."
   exit 1
@@ -280,12 +276,19 @@ install -o root -g root -m 0644 "$SHIPPED_DROPIN" "$NGINX_DROPIN_FILE"
 systemctl daemon-reload
 
 step "Commit: appending POLARIS_PROXY_CERT_PATH and POLARIS_PUBLIC_URL to $ENV_FILE"
-{
-  echo ""
-  echo "# Added by deploy/migrate-to-nginx.sh on $BACKUP_TS"
-  echo "POLARIS_PROXY_CERT_PATH=$NGINX_CERT_DIR/cert.pem"
-  echo "POLARIS_PUBLIC_URL=$PUBLIC_URL"
-} >> "$ENV_FILE"
+# Idempotent: skip the append on re-run if the keys are already present
+# (e.g. an earlier attempt got past this step but failed during nginx start).
+# Avoids accumulating duplicate lines in .env across retries.
+if ! grep -q '^POLARIS_PROXY_CERT_PATH=' "$ENV_FILE" 2>/dev/null; then
+  {
+    echo ""
+    echo "# Added by deploy/migrate-to-nginx.sh on $BACKUP_TS"
+    echo "POLARIS_PROXY_CERT_PATH=$NGINX_CERT_DIR/cert.pem"
+    echo "POLARIS_PUBLIC_URL=$PUBLIC_URL"
+  } >> "$ENV_FILE"
+else
+  info "POLARIS_PROXY_CERT_PATH already in $ENV_FILE — skipping append"
+fi
 
 step "Commit: opening TCP+UDP/443 in firewalld"
 if command -v firewall-cmd >/dev/null 2>&1; then
@@ -305,11 +308,17 @@ if ! nginx -t 2>&1 | tee "$TMP/nginx-t.log"; then
   exit 1
 fi
 
-step "Commit: enabling + reloading nginx"
-systemctl enable --now nginx
-systemctl reload nginx
+step "Commit: enabling nginx (start happens via polaris.target's Wants= drop-in)"
+# DON'T `--now` here. Polaris is still bound to :443 with Node HTTPS at this
+# point; if we tried to start nginx now, the bind would fail. Instead, just
+# enable nginx for boot persistence — the polaris.target restart below will
+# stop polaris-web (freeing :443), then pull nginx in via the
+# Wants=nginx.service drop-in we installed under polaris-web.service.d/.
+# polaris-web's After=nginx ensures the new (proxy-mode) polaris-web boots
+# AFTER nginx is listening, so there's no window of "Polaris up, nginx down".
+systemctl enable nginx
 
-step "Commit: restarting polaris.target so Polaris picks up the new env"
+step "Commit: restarting polaris.target — frees :443, starts nginx, restarts Polaris in proxy mode"
 systemctl restart polaris.target
 
 # ─── Smoke tests ──────────────────────────────────────────────────────────
@@ -347,16 +356,29 @@ else
   SMOKE_FAILED=1
 fi
 
-# Check the bearer-gate path on a metrics endpoint — without bearer should
-# 401, since nginx forwards to a worker /metrics that requires METRICS_TOKEN.
-# (Skipped if METRICS_TOKEN isn't set on the worker, in which case 200 is fine.)
+# Verify /metrics-monitor-1 reaches nginx + nginx dispatches the request:
+#   200 = bearer accepted (METRICS_TOKEN unset or curl carried a valid token)
+#   401 = nginx forwarded; upstream rejected the missing/bad bearer
+#   403 = nginx's `allow <PROMETHEUS_IP>; deny all;` rejected localhost,
+#         which is correct — this curl runs from the prod box itself, not
+#         from the Prometheus host. A 403 here means nginx is correctly
+#         enforcing the IP allowlist; the path is wired up. Operators verify
+#         end-to-end from the Prometheus host separately.
+# 502/504 here would mean nginx can't reach the upstream worker; we'd want
+# to surface that.
 METRICS_CODE=$(curl -ks -o /dev/null -w '%{http_code}' "https://localhost/metrics-monitor-1" || echo "000")
-if [[ "$METRICS_CODE" == "200" ]] || [[ "$METRICS_CODE" == "401" ]]; then
-  info "✓ /metrics-monitor-1 responds ($METRICS_CODE)"
-else
-  warn "✗ /metrics-monitor-1 returned $METRICS_CODE — expected 200 or 401"
-  SMOKE_FAILED=1
-fi
+case "$METRICS_CODE" in
+  200|401|403)
+    info "✓ /metrics-monitor-1 responds ($METRICS_CODE)"
+    if [[ "$METRICS_CODE" == "403" ]]; then
+      info "  (403 from localhost is expected — the nginx IP allowlist denies anything other than the Prometheus host)"
+    fi
+    ;;
+  *)
+    warn "✗ /metrics-monitor-1 returned $METRICS_CODE — expected 200, 401, or 403"
+    SMOKE_FAILED=1
+    ;;
+esac
 
 if [[ $SMOKE_FAILED -ne 0 ]]; then
   warn "One or more smoke checks failed. The migration completed but verify manually before declaring done."
