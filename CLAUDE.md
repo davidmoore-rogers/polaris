@@ -248,6 +248,17 @@ DATABASE_POOL_SIZE=25
 #   POLARIS_PROBE_CONCURRENCY         (cursor mode probe + fastFiltered cap)
 #   POLARIS_HEAVY_CONCURRENCY         (cursor mode telemetry + systemInfo cap)
 
+# Per-waiter wait-timeout (ms) for the per-SNMP-agent serialization gate in
+# monitoringService.withSnmpGate. Default 30000. All probe / telemetry /
+# systemInfo / fastFiltered SNMP calls against the same host:port FIFO-
+# serialize through this gate. When the currently-running collector wedges
+# (e.g. dead-host net-snmp 60s timeout), queued callers behind it fail fast
+# after this timeout with `SNMP gate timeout for <host:port> after <ms>ms`
+# instead of all blocking the full upstream duration. The wedged slot itself
+# still holds the gate until it returns; this timeout only bounds wait time
+# for queued callers, not the wedge itself.
+POLARIS_SNMP_GATE_WAIT_TIMEOUT_MS=30000
+
 # Process role (multi-process deployment). Unset = "all" = single process runs
 # every subsystem (default; unchanged single-process behavior). Split via:
 #   web | monitor | discovery — set per service unit / container, NOT in .env.

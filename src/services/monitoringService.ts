@@ -2554,42 +2554,101 @@ function startPhase(name: string): (extras?: Record<string, unknown>) => void {
 // systemInfo, and fastFiltered SNMP calls FIFO-serialize against the
 // same agent within this Polaris process. FortiOS REST and FMG calls
 // have their own concurrency models and aren't routed through this gate.
-const snmpGate = new Map<string, Promise<unknown>>();
+//
+// Each waiter has a bounded wait via SNMP_GATE_WAIT_TIMEOUT_MS — when the
+// currently-running collector wedges (e.g. 60s net-snmp timeout on a dead
+// host), queued callers fail fast with a clear error instead of all
+// waiting the full upstream duration. The wedged collector still holds
+// its own slot until it returns; the timeout only bounds wait time for
+// callers behind it. Default 30s — enough headroom for a legitimate
+// heavy + telemetry back-to-back (~20s with default tier-3 timeouts),
+// short enough to surface a hang.
+type SnmpGateSlot = {
+  fn: () => Promise<unknown>;
+  resolve: (v: unknown) => void;
+  reject: (e: unknown) => void;
+  enqueuedAt: number;
+  timer: NodeJS.Timeout | null;
+  timedOut: boolean;
+};
+const snmpQueues = new Map<string, SnmpGateSlot[]>();
+const snmpRunning = new Set<string>();
 
-async function withSnmpGate<T>(host: string, port: number, fn: () => Promise<T>): Promise<T> {
-  const key = `${host}:${port}`;
-  const prev = snmpGate.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const next = new Promise<void>((res) => { release = res; });
-  const chained = prev.then(() => next);
-  snmpGate.set(key, chained);
-  const enqueuedAt = Date.now();
-  try {
-    await prev;
-    const waitMs = Date.now() - enqueuedAt;
-    // Always-on warning when a heavy collector is queued behind another
-    // collector on the same SNMP agent for more than 5 seconds. Surfaces
-    // the "wedged systemInfo holds the gate for 300s" hypothesis without
-    // needing verboseLogging enabled. Fires at most once per gate
-    // acquisition. The cheap-probe path resets `start` after the await
-    // (see probeSnmp) so reported response times aren't polluted by wait.
-    if (waitMs > 5000) {
-      logger.warn({ host, port, waitMs }, "SNMP gate wait > 5s");
-    }
-    // Phase tracing for the current handler. Captures the wait portion
-    // separately from the fn() runtime so the operator can tell at a
-    // glance whether the time was spent queued (= upstream walk holding
-    // the agent) or actively walking (= this asset's SNMP agent slow).
-    const endPhase = startPhase("snmp.gate_wait");
-    endPhase({ host, port, waitMs });
-    return await fn();
-  } finally {
-    release();
-    // Best-effort cleanup: only delete if no further chain has been
-    // laid down on top of this one. Slight race is harmless — the Map
-    // entry will be reused / overwritten by a future acquire.
-    if (snmpGate.get(key) === chained) snmpGate.delete(key);
+// Read per-call so tests can inject a small value via process.env without
+// having to re-import the module (which is awkward inside a single-file test
+// suite). Cost is negligible: one Number() coercion per gate entry, dwarfed
+// by the upstream net-snmp call this serializes.
+function snmpGateWaitTimeoutMs(): number {
+  const raw = Number(process.env.POLARIS_SNMP_GATE_WAIT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+}
+
+function processNextSnmpSlot(key: string): void {
+  if (snmpRunning.has(key)) return;
+  const queue = snmpQueues.get(key);
+  if (!queue || queue.length === 0) {
+    snmpQueues.delete(key);
+    return;
   }
+  // Skip past any slots that timed out while waiting; their rejection
+  // already fired, but their queue entry remains until we drain it here.
+  let slot: SnmpGateSlot | undefined;
+  while ((slot = queue.shift())) {
+    if (!slot.timedOut) break;
+  }
+  if (!slot || slot.timedOut) {
+    snmpQueues.delete(key);
+    return;
+  }
+  if (slot.timer) { clearTimeout(slot.timer); slot.timer = null; }
+  snmpRunning.add(key);
+  const waitMs = Date.now() - slot.enqueuedAt;
+  if (waitMs > 5000) {
+    logger.warn({ host: key, waitMs }, "SNMP gate wait > 5s");
+  }
+  // Phase tracing for the current handler. Captures the wait portion
+  // separately from the fn() runtime so the operator can tell at a
+  // glance whether the time was spent queued (= upstream walk holding
+  // the agent) or actively walking (= this asset's SNMP agent slow).
+  const endPhase = startPhase("snmp.gate_wait");
+  endPhase({ host: key, waitMs });
+  Promise.resolve()
+    .then(() => slot.fn())
+    .then(slot.resolve, slot.reject)
+    .finally(() => {
+      snmpRunning.delete(key);
+      processNextSnmpSlot(key);
+    });
+}
+
+export async function withSnmpGate<T>(host: string, port: number, fn: () => Promise<T>): Promise<T> {
+  const key = `${host}:${port}`;
+  return new Promise<T>((resolve, reject) => {
+    const slot: SnmpGateSlot = {
+      fn: fn as () => Promise<unknown>,
+      resolve: resolve as (v: unknown) => void,
+      reject,
+      enqueuedAt: Date.now(),
+      timer: null,
+      timedOut: false,
+    };
+    const timeoutMs = snmpGateWaitTimeoutMs();
+    slot.timer = setTimeout(() => {
+      if (slot.timedOut) return;
+      slot.timedOut = true;
+      slot.timer = null;
+      const waitMs = Date.now() - slot.enqueuedAt;
+      logger.warn(
+        { host, port, waitMs, timeoutMs },
+        "SNMP gate wait timeout — failing fast",
+      );
+      reject(new Error(`SNMP gate timeout for ${key} after ${waitMs}ms`));
+    }, timeoutMs);
+    let queue = snmpQueues.get(key);
+    if (!queue) { queue = []; snmpQueues.set(key, queue); }
+    queue.push(slot);
+    processNextSnmpSlot(key);
+  });
 }
 
 async function probeSnmp(host: string, config: Record<string, unknown>, start: number, timeoutMs: number): Promise<ProbeResult> {
