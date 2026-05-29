@@ -24,14 +24,23 @@ async function main() {
 
   // ─── Default Admin User ────────────────────────────────────────────────────
 
+  // Dynamic-roles cutover (migration 20260524000000_roles_table_cutover)
+  // replaced User.role enum with User.roleId FK into the roles table.
+  const adminRole = await prisma.role.findFirst({ where: { name: "admin" } });
+  if (!adminRole) {
+    throw new Error(
+      "Built-in admin role not found — run `npx prisma migrate deploy` to apply the dynamic-roles cutover migration before seeding.",
+    );
+  }
+
   const adminHash = await hashPassword("admin");
   await prisma.user.upsert({
     where:  { username: "admin" },
-    update: { role: "admin" },
+    update: { roleId: adminRole.id, passwordHash: adminHash },
     create: {
       username:     "admin",
       passwordHash: adminHash,
-      role:         "admin",
+      roleId:       adminRole.id,
     },
   });
 

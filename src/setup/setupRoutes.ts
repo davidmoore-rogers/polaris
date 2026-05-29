@@ -441,17 +441,33 @@ router.post("/finalize", async (req, res) => {
     const appClient = new pg.Client(buildPgClientOptions(db, db.database));
     await appClient.connect();
 
+    // The dynamic-roles cutover (migration 20260524000000_roles_table_cutover)
+    // moved role identity from a User.role enum column to a User.role_id FK
+    // into the roles table. Look up the seeded "admin" role first.
+    const roleResult = await appClient.query(
+      "SELECT id FROM roles WHERE name = 'admin' LIMIT 1",
+    );
+    const adminRoleId = roleResult.rows[0]?.id;
+    if (!adminRoleId) {
+      await appClient.end();
+      return res.status(500).json({
+        ok: false,
+        step: "create-admin",
+        message:
+          "Built-in admin role not found in roles table — the dynamic-roles cutover migration (20260524000000) may not have applied. Check `npx prisma migrate status`.",
+      });
+    }
+
     const passwordHash = await hashPassword(admin.password);
-    // Column names: password_hash and auth_provider are @map()'d to snake_case
-    // in the Prisma schema; createdAt and updatedAt are not, so they're
-    // generated as quoted camelCase columns. updatedAt has no DB default
-    // (Prisma sets it on every write at the application layer), so we have
-    // to supply NOW() explicitly here.
+    // Column names: password_hash, role_id, and auth_provider are @map()'d to
+    // snake_case; createdAt has @default(now()) at the DB level so it's
+    // optional; updatedAt is Prisma-managed (@updatedAt) with no DB default,
+    // so raw SQL must supply NOW() explicitly here.
     await appClient.query(
-      `INSERT INTO users (id, username, password_hash, role, auth_provider, "updatedAt")
-       VALUES (gen_random_uuid(), $1, $2, 'admin', 'local', NOW())
-       ON CONFLICT (username) DO UPDATE SET password_hash = $2, role = 'admin', "updatedAt" = NOW()`,
-      [admin.username, passwordHash],
+      `INSERT INTO users (id, username, password_hash, role_id, auth_provider, "updatedAt")
+       VALUES (gen_random_uuid(), $1, $2, $3, 'local', NOW())
+       ON CONFLICT (username) DO UPDATE SET password_hash = $2, role_id = $3, "updatedAt" = NOW()`,
+      [admin.username, passwordHash, adminRoleId],
     );
     await appClient.end();
 
