@@ -59,7 +59,7 @@ async function testAllIntegrations(): Promise<void> {
         const now = Date.now();
         const last = fmgLastReset.get(intg.id) ?? 0;
         if (now - last >= FMG_SESSION_RESET_MS) {
-          const r = await fmgLogout(intg.config as FortiManagerConfig, intg.id).catch((err) => ({ ok: false, message: err?.message ?? "logout threw" }));
+          const r = await fmgLogout(intg.config as unknown as FortiManagerConfig, intg.id).catch((err) => ({ ok: false, message: err?.message ?? "logout threw" }));
           fmgLastReset.set(intg.id, now);
           logger.info({ integrationId: intg.id, name: intg.name, ok: r.ok, message: r.message }, "integrationConnectionTester: FMG session reset");
         }
