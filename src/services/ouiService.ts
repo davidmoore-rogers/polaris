@@ -46,6 +46,36 @@ export async function lookupOui(mac: string): Promise<string | null> {
 }
 
 /**
+ * Look up a MAC prefix and report both the IEEE-DB hit and any override,
+ * so callers (the Server Settings query UI) can see exactly how the value
+ * was resolved. Returns null `prefix` for malformed input.
+ */
+export async function lookupOuiDetailed(input: string): Promise<{
+  prefix: string | null;
+  normalized: string | null;
+  ieee: string | null;
+  override: { manufacturer: string; device?: string } | null;
+  effective: string | null;
+  source: "override" | "ieee" | null;
+}> {
+  await ensureLoaded();
+  await ensureOverridesLoaded();
+  // Accept either a full MAC or a bare 3-byte prefix (pad so the normalizer accepts it).
+  const cleanInput = String(input || "").replace(/[:\-.\s]/g, "");
+  const padded = cleanInput.length >= 6 ? cleanInput : (cleanInput + "000000").slice(0, 12);
+  const normalized = normalizeMacPrefix(padded);
+  if (!normalized) {
+    return { prefix: null, normalized: null, ieee: null, override: null, effective: null, source: null };
+  }
+  const ieee = _ouiMap?.get(normalized) || null;
+  const ov = _overridesMap.get(normalized) || null;
+  const override = ov ? { manufacturer: ov.manufacturer, ...(ov.device ? { device: ov.device } : {}) } : null;
+  const source: "override" | "ieee" | null = ov ? "override" : ieee ? "ieee" : null;
+  const effective = ov ? ov.manufacturer : ieee;
+  return { prefix: formatPrefix(normalized), normalized, ieee, override, effective, source };
+}
+
+/**
  * Look up OUI for multiple MACs at once (avoids repeated DB reads).
  */
 export async function lookupOuiBatch(macs: string[]): Promise<Map<string, string>> {
