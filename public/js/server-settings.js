@@ -577,6 +577,47 @@ async function loadOuiStatus() {
   }
 }
 
+async function runOuiQuery() {
+  var input = document.getElementById("f-oui-query");
+  var resultEl = document.getElementById("oui-query-result");
+  var btn = document.getElementById("btn-oui-query");
+  var q = input.value.trim();
+  if (!q) {
+    resultEl.innerHTML = '<span style="color:var(--color-text-tertiary)">Enter a MAC address or 3-byte prefix.</span>';
+    return;
+  }
+  btn.disabled = true;
+  resultEl.innerHTML = '<span style="color:var(--color-text-tertiary)">Looking up...</span>';
+  try {
+    var r = await api.serverSettings.lookupOui(q);
+    var rows = "";
+    rows += '<div class="db-info-grid">' +
+      '<div class="db-info-label">Prefix</div>' +
+      '<div class="db-info-value" style="font-family:var(--font-mono)">' + escapeHtml(r.prefix) + '</div>' +
+      '<div class="db-info-label">IEEE Database</div>' +
+      '<div class="db-info-value">' + (r.ieee ? escapeHtml(r.ieee) : '<span style="color:var(--color-text-tertiary)">No match</span>') + '</div>' +
+      '<div class="db-info-label">Override</div>' +
+      '<div class="db-info-value">' +
+        (r.override
+          ? escapeHtml(r.override.manufacturer) + (r.override.device ? ' <span style="color:var(--color-text-tertiary)">(' + escapeHtml(r.override.device) + ')</span>' : '')
+          : '<span style="color:var(--color-text-tertiary)">None</span>') +
+      '</div>' +
+      '<div class="db-info-label">Effective</div>' +
+      '<div class="db-info-value">' +
+        (r.effective
+          ? '<strong>' + escapeHtml(r.effective) + '</strong>' +
+            ' <span style="color:var(--color-text-tertiary);font-size:0.78rem">(from ' + escapeHtml(r.source) + ')</span>'
+          : '<span style="color:var(--color-danger)">Unknown — no IEEE match and no override</span>') +
+      '</div>' +
+    '</div>';
+    resultEl.innerHTML = rows;
+  } catch (err) {
+    resultEl.innerHTML = '<span style="color:var(--color-danger)">' + escapeHtml(err.message) + '</span>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function refreshOuiDatabase() {
   var btn = document.getElementById("btn-oui-refresh");
   var statusEl = document.getElementById("oui-refresh-status");
@@ -3487,6 +3528,17 @@ function renderIdentificationTab() {
       '<button class="btn btn-secondary" id="btn-oui-refresh">Refresh Now</button>' +
       '<span id="oui-refresh-status" style="font-size:0.82rem;margin-left:8px"></span>' +
     '</div>' +
+    '<div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--color-border)">' +
+      '<label style="display:block;font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:0.5rem">' +
+        'OUI Query — look up a MAC address or 3-byte prefix' +
+      '</label>' +
+      '<div style="display:flex;gap:8px;align-items:center">' +
+        '<input type="text" id="f-oui-query" placeholder="AA:BB:CC or AA:BB:CC:DD:EE:FF" ' +
+          'style="font-family:var(--font-mono);font-size:0.85rem;flex:1">' +
+        '<button class="btn btn-secondary" id="btn-oui-query">Look Up</button>' +
+      '</div>' +
+      '<div id="oui-query-result" style="margin-top:0.75rem;font-size:0.85rem"></div>' +
+    '</div>' +
   '</div>';
 
   html += '</div>'; // end mac-id-two-col
@@ -3586,6 +3638,12 @@ function renderIdentificationTab() {
 
   // OUI database refresh
   document.getElementById("btn-oui-refresh").addEventListener("click", refreshOuiDatabase);
+
+  // OUI query
+  document.getElementById("btn-oui-query").addEventListener("click", runOuiQuery);
+  document.getElementById("f-oui-query").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); runOuiQuery(); }
+  });
 
   // Manufacturer alias events
   wireManufacturerAliasControls();

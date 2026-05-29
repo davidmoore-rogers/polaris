@@ -550,6 +550,7 @@ const api = {
     testDns:     (body)   => trackedRequest("Testing DNS", "POST", "/server-settings/dns/test", body),
     getOui:         ()       => request("GET", "/server-settings/oui"),
     refreshOui:     ()       => trackedRequest("Refreshing OUI database", "POST", "/server-settings/oui/refresh"),
+    lookupOui:      (pfx)    => request("GET", `/server-settings/oui/lookup/${encodeURIComponent(pfx)}`),
     getOuiOverrides:()       => request("GET", "/server-settings/oui/overrides"),
     addOuiOverride: (body)   => request("POST", "/server-settings/oui/overrides", body),
     deleteOuiOverride:(pfx)  => request("DELETE", `/server-settings/oui/overrides/${encodeURIComponent(pfx)}`),
