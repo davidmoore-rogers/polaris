@@ -587,6 +587,13 @@ export async function restartService() {
       stdio: "ignore",
       windowsHide: true,
     });
+    // spawn() reports a missing/unspawnable binary asynchronously via the
+    // 'error' event, NOT via the synchronous try/catch below. Without this
+    // listener an ENOENT (no cmd.exe on PATH, etc.) bubbles as an unhandled
+    // error and crashes the process before the self-exit timeout fires.
+    child.on("error", (err) => {
+      logger.warn({ err: err.message }, "nssm restart spawn failed; relying on self-exit + supervisor (NSSM / dev watcher / podman restart policy) to bring the process back");
+    });
     child.unref();
     setTimeout(() => { process.exit(0); }, 5000);
   } else {
@@ -738,6 +745,19 @@ export async function restartService() {
       const child = spawn("systemd-run", ["--no-block", "/bin/sh", "-c", syncScript], {
         detached: true,
         stdio: "ignore",
+      });
+      // spawn() reports a missing binary asynchronously via the 'error' event,
+      // NOT through this try/catch. Without the listener an ENOENT (no
+      // systemd-run on PATH — dev containers without systemd, npm-run-dev on
+      // a non-systemd host, etc.) bubbles as an unhandled error and crashes
+      // the process before the self-exit timeout fires, leaving the container
+      // / watcher with no listener bound on 3000. With the listener attached,
+      // we log + drop into the same self-exit path the prod-failure case uses
+      // and let the supervisor (systemd in prod, podman restart policy in the
+      // dev container, the operator's terminal in npm-run-dev-on-host) bring
+      // the process back.
+      child.on("error", (err) => {
+        logger.warn({ err: err.message }, "systemd-run for group restart unavailable; relying on self-exit + supervisor (systemd / podman / dev watcher) to bring the process back");
       });
       child.unref();
     } catch (err: any) {
