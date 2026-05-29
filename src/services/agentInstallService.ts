@@ -1100,17 +1100,21 @@ async function winrmUninstall(p: WinRmUninstallParams): Promise<void> {
 // ─── SSH-to-Windows install/uninstall/upgrade ─────────────────────────
 //
 // Runs the SAME PowerShell scripts the WinRM path uses (WINDOWS_INSTALL_PS,
-// WINDOWS_UNINSTALL_PS, WINDOWS_UPGRADE_PS), just over an SSH exec channel.
-// Requires OpenSSH Server installed + enabled on the target Windows host
-// (Windows Server 2019+ / Windows 10 1809+ ship it as an optional feature).
+// WINDOWS_UNINSTALL_PS, WINDOWS_UPGRADE_PS). Requires OpenSSH Server
+// installed + enabled on the target Windows host (Windows Server 2019+ /
+// Windows 10 1809+ ship it as an optional feature).
 //
-// The Windows OpenSSH server picks the user's default shell to handle exec
-// commands; that may be cmd.exe (the OpenSSH default) or powershell.exe
-// (operator-configured via the DefaultShell registry value). Either way,
-// invoking `powershell.exe -EncodedCommand <base64-utf16le>` works — cmd
-// forwards the args to powershell, and PowerShell-as-default-shell also
-// understands the -EncodedCommand contract. Encoding bypasses quoting
-// issues at every layer of the shell chain.
+// Delivery: SFTP the script as a UTF-8 file with a BOM to
+// C:/Windows/Temp/polaris-agent-*.ps1, then invoke
+// `powershell.exe -ExecutionPolicy Bypass -File <path>`. We don't use
+// `-EncodedCommand` here even though it works for WinRM — the base64
+// payload of the install script overflows the Windows cmd.exe 8191-char
+// command-line limit (the OpenSSH server on Windows hands the exec
+// command to cmd.exe regardless of the DefaultShell registry value), so
+// invocations failed with "The command line is too long." Writing the
+// script to disk first sidesteps the limit entirely. The BOM is required
+// so Windows PowerShell 5.1 treats the file as UTF-8 with non-ASCII
+// characters intact.
 //
 // The PS script itself downloads the agent binary from Polaris over HTTPS
 // with cert-pin validation (identical to the WinRM path) — no SFTP of the
@@ -1151,13 +1155,13 @@ async function sshWindowsInstall(p: SshWindowsInstallParams): Promise<void> {
     .replace(/__CERT_FINGERPRINT__/g, p.certFingerprint)
     .replace(/__BINARY_FILENAME__/g,  p.binaryFilename)
     .replace(/__AGENT_CONF_B64__/g,   confB64);
-  await runPowerShellOverSsh(p.host, p.cred, ps, 180_000);
+  await runPowerShellOverSsh(p.host, p.cred, ps, "polaris-agent-install.ps1", 180_000);
 }
 
 async function sshWindowsUninstall(p: SshWindowsUninstallParams): Promise<void> {
   if (p.testOverrides?.fakeSshSucceed) return;
   if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
-  await runPowerShellOverSsh(p.host, p.cred, WINDOWS_UNINSTALL_PS, 60_000);
+  await runPowerShellOverSsh(p.host, p.cred, WINDOWS_UNINSTALL_PS, "polaris-agent-uninstall.ps1", 60_000);
 }
 
 async function sshWindowsUpgrade(p: SshWindowsUpgradeParams): Promise<void> {
@@ -1168,25 +1172,38 @@ async function sshWindowsUpgrade(p: SshWindowsUpgradeParams): Promise<void> {
     .replace(/__SERVER_URL__/g,       p.serverUrl)
     .replace(/__CERT_FINGERPRINT__/g, p.certFingerprint)
     .replace(/__BINARY_FILENAME__/g,  p.binaryFilename);
-  await runPowerShellOverSsh(p.host, p.cred, ps, 180_000);
+  await runPowerShellOverSsh(p.host, p.cred, ps, "polaris-agent-upgrade.ps1", 180_000);
 }
 
 async function runPowerShellOverSsh(
   host: string,
   cred: Record<string, unknown>,
   ps: string,
+  scriptName: string,
   timeoutMs: number,
 ): Promise<void> {
-  const encoded = Buffer.from(ps, "utf16le").toString("base64");
-  // Quoting note: -EncodedCommand's argument is pure base64 — no characters
-  // need shell escaping, so a single space-separated command line is safe
-  // across both cmd.exe and powershell.exe default shells.
-  const cmd = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
+  // UTF-8 with BOM. The BOM is the way to tell Windows PowerShell 5.1 that a
+  // .ps1 file is UTF-8 — without it PS5.1 falls back to the legacy ANSI code
+  // page and any non-ASCII byte (an em-dash in a comment, a smart quote) is
+  // mis-decoded. PowerShell 7 reads UTF-8 by default so the BOM is harmless
+  // there. Forward-slash absolute path works with Windows OpenSSH's
+  // sftp-server; "C:/Windows/Temp" is writable by every admin context and
+  // always exists.
+  const remotePath = `C:/Windows/Temp/${scriptName}`;
+  const body = Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from(ps, "utf8")]);
+  const cmd =
+    `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${remotePath}"`;
   await withSshClient(host, cred, async (client) => {
+    await sftpPut(client, remotePath, body, 0o600);
     const out = await sshExec(client, cmd, timeoutMs);
     if (out.exitCode !== 0) {
       throw new Error(`PowerShell exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
     }
+    // Best-effort cleanup. Not fatal if it fails (Windows\Temp is fair game
+    // for orphans, and an admin re-run will overwrite the file anyway).
+    try {
+      await sshExec(client, `cmd.exe /c del /f /q "${remotePath.replace(/\//g, "\\")}"`, 10_000);
+    } catch { /* ignore */ }
   });
 }
 
