@@ -2123,6 +2123,16 @@ model ManagedAgent {
   installCredentialId String?
   installCredential   Credential? @relation("AgentInstallCredential", fields: [installCredentialId], references: [id], onDelete: SetNull)
 
+  // Transport used to run the remote install/upgrade/uninstall scripts.
+  // "ssh"   — Linux/macOS hosts (only path), and Windows hosts with OpenSSH
+  //           Server enabled. Polaris opens an SSH exec channel and runs
+  //           the platform-specific installer (bash on linux/darwin,
+  //           powershell.exe -EncodedCommand on windows).
+  // "winrm" — Windows hosts using the existing PSRP-over-HTTP(S) path.
+  // Persisted so retry / uninstall / upgrade can replay the same transport
+  // without asking the operator to re-pick it.
+  installTransport String @default("ssh") // "ssh" | "winrm"
+
   installStatus String  @default("pending") // see lifecycle comment above
   installError  String? // captured stderr / exception message on failure
 

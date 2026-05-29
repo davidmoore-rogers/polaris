@@ -3348,14 +3348,26 @@ function _openInstallAgentModal(a) {
         '</select>' +
         '<p class="hint">Pick arm64 only for actually-ARM hosts (Apple Silicon, Raspberry Pi, AWS Graviton, etc.). Most x86 servers and most older Windows hosts are amd64.</p>' +
       '</div>' +
-      '<div class="form-group">' +
-        '<label for="agent-install-cred-ssh">SSH credential (Linux / macOS)</label>' +
+      '<div class="form-group" id="agent-install-transport-wrap" style="display:none">' +
+        '<label>Transport</label>' +
+        '<div style="display:flex;gap:1rem;align-items:center;padding:0.25rem 0">' +
+          '<label style="display:flex;align-items:center;gap:0.35rem;font-weight:normal;cursor:pointer">' +
+            '<input type="radio" name="agent-install-transport" value="winrm" checked> WinRM' +
+          '</label>' +
+          '<label style="display:flex;align-items:center;gap:0.35rem;font-weight:normal;cursor:pointer">' +
+            '<input type="radio" name="agent-install-transport" value="ssh"> SSH' +
+          '</label>' +
+        '</div>' +
+        '<p class="hint" id="agent-install-transport-hint">WinRM must be enabled and reachable on port 5986 (HTTPS) or 5985 (HTTP).</p>' +
+      '</div>' +
+      '<div class="form-group" id="agent-install-cred-ssh-wrap">' +
+        '<label for="agent-install-cred-ssh">SSH credential</label>' +
         '<select id="agent-install-cred-ssh">' + credOptions(sshOpts) + '</select>' +
       '</div>' +
       '<div class="form-group" id="agent-install-cred-winrm-wrap">' +
-        '<label for="agent-install-cred-winrm">WinRM credential (Windows)</label>' +
+        '<label for="agent-install-cred-winrm">WinRM credential</label>' +
         '<select id="agent-install-cred-winrm">' + credOptions(winrmOpts) + '</select>' +
-        '<p class="hint">The credential needs admin rights on the target host (the installer creates a Windows Service and writes under <code>%ProgramFiles%\\Polaris\\Agent\\</code>). WinRM must be enabled and reachable on port 5986 (HTTPS) or 5985 (HTTP).</p>' +
+        '<p class="hint">The credential needs admin rights on the target host (the installer creates a Windows Service and writes under <code>%ProgramFiles%\\Polaris\\Agent\\</code>).</p>' +
       '</div>';
 
     // Match the canonical modal pattern (TEMPLATES.md → Modal): build the
@@ -3370,13 +3382,40 @@ function _openInstallAgentModal(a) {
       '<button class="btn btn-primary"   id="btn-agent-install-go">Install</button>';
     openModal(modalTitle, modalBody, footerHTML);
 
-    // Toggle credential row visibility based on OS picker.
+    // Toggle credential row visibility based on OS + transport pickers.
+    // On Windows, both transports are available and the radio group decides
+    // which credential picker is active. On Linux/macOS the transport row is
+    // hidden and SSH is the only choice.
+    function selectedTransport() {
+      var checked = document.querySelector('input[name="agent-install-transport"]:checked');
+      return checked ? checked.value : "winrm";
+    }
     function refreshCredRows() {
       var os = document.getElementById("agent-install-os").value;
-      document.getElementById("agent-install-cred-ssh").parentElement.style.display = (os === "windows") ? "none" : "block";
-      document.getElementById("agent-install-cred-winrm-wrap").style.display        = (os === "windows") ? "block" : "none";
+      var transportWrap = document.getElementById("agent-install-transport-wrap");
+      var sshWrap   = document.getElementById("agent-install-cred-ssh-wrap");
+      var winrmWrap = document.getElementById("agent-install-cred-winrm-wrap");
+      var hint      = document.getElementById("agent-install-transport-hint");
+
+      if (os === "windows") {
+        transportWrap.style.display = "block";
+        var t = selectedTransport();
+        sshWrap.style.display   = (t === "ssh")   ? "block" : "none";
+        winrmWrap.style.display = (t === "winrm") ? "block" : "none";
+        hint.textContent = (t === "ssh")
+          ? "SSH requires OpenSSH Server enabled on the Windows host. The credential needs admin rights to register the polaris-agent Windows Service."
+          : "WinRM must be enabled and reachable on port 5986 (HTTPS) or 5985 (HTTP).";
+      } else {
+        transportWrap.style.display = "none";
+        sshWrap.style.display   = "block";
+        winrmWrap.style.display = "none";
+      }
     }
     document.getElementById("agent-install-os").addEventListener("change", refreshCredRows);
+    Array.prototype.forEach.call(
+      document.querySelectorAll('input[name="agent-install-transport"]'),
+      function (el) { el.addEventListener("change", refreshCredRows); }
+    );
     refreshCredRows();
 
     document.getElementById("btn-agent-install-cancel").onclick = closeModal;
@@ -3386,7 +3425,8 @@ function _openInstallAgentModal(a) {
       var sshSel   = document.getElementById("agent-install-cred-ssh");
       var winrmSel = document.getElementById("agent-install-cred-winrm");
       var os = osSel.value;
-      var credentialId = (os === "windows") ? winrmSel.value : sshSel.value;
+      var transport = (os === "windows") ? selectedTransport() : "ssh";
+      var credentialId = (transport === "winrm") ? winrmSel.value : sshSel.value;
       if (!credentialId) {
         showToast("Pick a credential first", "error");
         return; // keep modal open
@@ -3395,6 +3435,7 @@ function _openInstallAgentModal(a) {
         credentialId: credentialId,
         osPlatform:   os,
         arch:         archSel.value,
+        transport:    transport,
       }).then(function (r) {
         showToast("Install started — watch progress on the System tab", "success");
         closeModal();

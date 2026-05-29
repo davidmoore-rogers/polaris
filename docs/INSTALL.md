@@ -984,16 +984,18 @@ From the Polaris UI:
 2. Flip any stream to **Polaris Agent**
 3. Save
 4. Reopen the asset details modal → **System** tab → **Install Agent…**
-5. Pick a stored SSH (Linux/macOS) or WinRM (Windows) credential
-6. Confirm the OS + arch picker (defaults from `Asset.os`)
-7. Click **Install**
+5. Confirm the OS + arch picker (defaults from `Asset.os`)
+6. On **Windows** assets, pick the transport (WinRM or SSH); on Linux/macOS SSH is the only option
+7. Pick a stored credential of the matching type (SSH or WinRM)
+8. Click **Install**
 
-The install status pill flips `pending → uploading → enrolling → active` over ~30 seconds. The host's systemd / launchd / Windows Service is registered as `polaris-agent`. Uninstall + Force Remove buttons appear once the agent is active.
+The install status pill flips `pending → uploading → enrolling → active` over ~30 seconds. The host's systemd / launchd / Windows Service is registered as `polaris-agent`. Uninstall + Force Remove buttons appear once the agent is active. The chosen transport is persisted on the agent row; retry, uninstall, and upgrade reuse it.
 
 ### Required on the target host
 
 - **Linux / macOS:** SSH reachable from Polaris on port 22 (or whatever the credential's port field specifies); the credential's user must be able to `sudo -n` (passwordless sudo) — the installer creates a systemd unit / launchd plist.
-- **Windows:** WinRM enabled on port 5986 (HTTPS) or 5985 (HTTP). Run `Enable-PSRemoting -Force` on a fresh host. The credential must have local admin rights — the installer creates a Windows Service under `%ProgramFiles%\Polaris\Agent\`.
+- **Windows (WinRM):** WinRM enabled on port 5986 (HTTPS) or 5985 (HTTP). Run `Enable-PSRemoting -Force` on a fresh host. The credential must have local admin rights — the installer creates a Windows Service under `%ProgramFiles%\Polaris\Agent\`.
+- **Windows (SSH):** OpenSSH Server installed and enabled (`Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0; Start-Service sshd; Set-Service -Name sshd -StartupType Automatic`) and reachable on port 22 (or the credential's port). The credential must have local admin rights. Polaris runs the same PowerShell installer used by the WinRM path — the Windows host pulls the agent binary back from Polaris over HTTPS with cert-pin validation, so outbound HTTPS from the host to Polaris must work during the install.
 
 ### Upgrade agents on already-installed hosts
 

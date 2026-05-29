@@ -3001,6 +3001,11 @@ const AgentInstallSchema = z.object({
   credentialId: z.string().uuid("credentialId must be a UUID"),
   osPlatform:   z.enum(["linux", "darwin", "windows"]),
   arch:         z.enum(["amd64", "arm64"]),
+  // Remote transport. Optional for backward-compat with older clients; when
+  // omitted we default linux/darwin → ssh, windows → winrm (the pre-change
+  // behavior). Operators installing the agent on a Windows host that has
+  // OpenSSH Server enabled can pick "ssh" to use an SSH credential instead.
+  transport:    z.enum(["ssh", "winrm"]).optional(),
 });
 
 router.get("/:id/agent", requirePermission("assets", "read"), async (req, res, next) => {
@@ -3040,15 +3045,23 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
         `Polaris Agent is not compatible with ${sourceKind} sources. Compatible: manual, activedirectory, entraid, windowsserver.`);
     }
 
-    // Cred must be ssh (linux/darwin) or winrm (windows). The /install
-    // body specifies osPlatform explicitly so we can validate up-front
-    // even though the actual remote upload doesn't happen until Phase 4.
+    // Resolve transport: explicit body value wins; otherwise default by
+    // osPlatform (linux/darwin → ssh; windows → winrm). Linux + macOS only
+    // support SSH — refuse a winrm pick there.
+    const transport = body.transport ?? (body.osPlatform === "windows" ? "winrm" : "ssh");
+    if (transport === "winrm" && body.osPlatform !== "windows") {
+      throw new AppError(400,
+        `WinRM transport is only valid for Windows hosts — osPlatform=${body.osPlatform}`);
+    }
+
+    // Credential type must match the transport (ssh-typed cred for SSH,
+    // winrm-typed cred for WinRM). Both transports are available for
+    // Windows; only SSH is available for linux/darwin.
     const cred = await getCredential(body.credentialId).catch(() => null);
     if (!cred) throw new AppError(400, `Credential ${body.credentialId} not found`);
-    const wantType = body.osPlatform === "windows" ? "winrm" : "ssh";
-    if (cred.type !== wantType) {
+    if (cred.type !== transport) {
       throw new AppError(400,
-        `Credential type "${cred.type}" doesn't match osPlatform "${body.osPlatform}" — need "${wantType}"`);
+        `Credential type "${cred.type}" doesn't match transport "${transport}" — need a "${transport}" credential`);
     }
 
     // 409 if a row already exists. Operator uses /reinstall to wipe + retry.
@@ -3109,6 +3122,7 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
         installStatus:         "pending",
         serverCertFingerprint: fingerprint,
         installCredentialId:   body.credentialId,
+        installTransport:      transport,
       },
     });
 
@@ -3118,8 +3132,8 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
       resourceId:   assetId,
       actor,
       level:        "info",
-      message:      `Polaris Agent install kicked off (${body.osPlatform}/${body.arch})`,
-      details:      { managedAgentId: row.id, credentialId: body.credentialId },
+      message:      `Polaris Agent install kicked off (${body.osPlatform}/${body.arch}, ${transport})`,
+      details:      { managedAgentId: row.id, credentialId: body.credentialId, transport },
     });
 
     // Fire the async install. The service mints its own enrollment token,

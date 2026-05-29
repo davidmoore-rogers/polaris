@@ -265,15 +265,27 @@ async function runInstall(input: StartInstallInput): Promise<void> {
     }
   } else if (row.osPlatform === "windows") {
     try {
-      await winrmInstall({
-        host,
-        cred: cred.config as Record<string, unknown>,
-        agentConfBody,
-        binaryFilename: binaryName,
-        serverUrl: await inferOwnServerUrl(),
-        certFingerprint: row.serverCertFingerprint,
-        testOverrides,
-      });
+      if (row.installTransport === "ssh") {
+        await sshWindowsInstall({
+          host,
+          cred: cred.config as Record<string, unknown>,
+          agentConfBody,
+          binaryFilename: binaryName,
+          serverUrl: await inferOwnServerUrl(),
+          certFingerprint: row.serverCertFingerprint,
+          testOverrides,
+        });
+      } else {
+        await winrmInstall({
+          host,
+          cred: cred.config as Record<string, unknown>,
+          agentConfBody,
+          binaryFilename: binaryName,
+          serverUrl: await inferOwnServerUrl(),
+          certFingerprint: row.serverCertFingerprint,
+          testOverrides,
+        });
+      }
     } catch (err: any) {
       return failInstall(managedAgentId, row.assetId, err.message ?? String(err));
     }
@@ -359,11 +371,19 @@ async function runUninstall(input: StartUninstallInput): Promise<void> {
     }
   } else if (row.osPlatform === "windows") {
     try {
-      await winrmUninstall({
-        host,
-        cred: cred.config as Record<string, unknown>,
-        testOverrides,
-      });
+      if (row.installTransport === "ssh") {
+        await sshWindowsUninstall({
+          host,
+          cred: cred.config as Record<string, unknown>,
+          testOverrides,
+        });
+      } else {
+        await winrmUninstall({
+          host,
+          cred: cred.config as Record<string, unknown>,
+          testOverrides,
+        });
+      }
     } catch (err: any) {
       return failUninstall(managedAgentId, row.assetId, err.message ?? String(err));
     }
@@ -488,14 +508,25 @@ async function runUpgrade(input: RunUpgradeInput): Promise<void> {
     }
   } else if (row.osPlatform === "windows") {
     try {
-      await winrmUpgrade({
-        host,
-        cred:            cred.config as Record<string, unknown>,
-        binaryFilename:  binaryName,
-        serverUrl:       await inferOwnServerUrl(),
-        certFingerprint: row.serverCertFingerprint,
-        testOverrides:   input.testOverrides,
-      });
+      if (row.installTransport === "ssh") {
+        await sshWindowsUpgrade({
+          host,
+          cred:            cred.config as Record<string, unknown>,
+          binaryFilename:  binaryName,
+          serverUrl:       await inferOwnServerUrl(),
+          certFingerprint: row.serverCertFingerprint,
+          testOverrides:   input.testOverrides,
+        });
+      } else {
+        await winrmUpgrade({
+          host,
+          cred:            cred.config as Record<string, unknown>,
+          binaryFilename:  binaryName,
+          serverUrl:       await inferOwnServerUrl(),
+          certFingerprint: row.serverCertFingerprint,
+          testOverrides:   input.testOverrides,
+        });
+      }
     } catch (err: any) {
       return failUpgrade(input.managedAgentId, row.assetId, err.message ?? String(err), input.actor);
     }
@@ -1064,6 +1095,99 @@ async function winrmUninstall(p: WinRmUninstallParams): Promise<void> {
   if (out.exitCode !== 0) {
     throw new Error(`Windows uninstaller exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
   }
+}
+
+// ─── SSH-to-Windows install/uninstall/upgrade ─────────────────────────
+//
+// Runs the SAME PowerShell scripts the WinRM path uses (WINDOWS_INSTALL_PS,
+// WINDOWS_UNINSTALL_PS, WINDOWS_UPGRADE_PS), just over an SSH exec channel.
+// Requires OpenSSH Server installed + enabled on the target Windows host
+// (Windows Server 2019+ / Windows 10 1809+ ship it as an optional feature).
+//
+// The Windows OpenSSH server picks the user's default shell to handle exec
+// commands; that may be cmd.exe (the OpenSSH default) or powershell.exe
+// (operator-configured via the DefaultShell registry value). Either way,
+// invoking `powershell.exe -EncodedCommand <base64-utf16le>` works — cmd
+// forwards the args to powershell, and PowerShell-as-default-shell also
+// understands the -EncodedCommand contract. Encoding bypasses quoting
+// issues at every layer of the shell chain.
+//
+// The PS script itself downloads the agent binary from Polaris over HTTPS
+// with cert-pin validation (identical to the WinRM path) — no SFTP of the
+// binary is needed. This keeps the new code surface minimal.
+
+interface SshWindowsInstallParams {
+  host: string;
+  cred: Record<string, unknown>;
+  agentConfBody: string;
+  binaryFilename: string;
+  serverUrl: string;
+  certFingerprint: string;
+  testOverrides?: TestOverrides;
+}
+
+interface SshWindowsUninstallParams {
+  host: string;
+  cred: Record<string, unknown>;
+  testOverrides?: TestOverrides;
+}
+
+interface SshWindowsUpgradeParams {
+  host: string;
+  cred: Record<string, unknown>;
+  binaryFilename: string;
+  serverUrl: string;
+  certFingerprint: string;
+  testOverrides?: TestOverrides;
+}
+
+async function sshWindowsInstall(p: SshWindowsInstallParams): Promise<void> {
+  if (p.testOverrides?.fakeSshSucceed) return;
+  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+
+  const confB64 = Buffer.from(p.agentConfBody, "utf8").toString("base64");
+  const ps = WINDOWS_INSTALL_PS
+    .replace(/__SERVER_URL__/g,       p.serverUrl)
+    .replace(/__CERT_FINGERPRINT__/g, p.certFingerprint)
+    .replace(/__BINARY_FILENAME__/g,  p.binaryFilename)
+    .replace(/__AGENT_CONF_B64__/g,   confB64);
+  await runPowerShellOverSsh(p.host, p.cred, ps, 180_000);
+}
+
+async function sshWindowsUninstall(p: SshWindowsUninstallParams): Promise<void> {
+  if (p.testOverrides?.fakeSshSucceed) return;
+  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+  await runPowerShellOverSsh(p.host, p.cred, WINDOWS_UNINSTALL_PS, 60_000);
+}
+
+async function sshWindowsUpgrade(p: SshWindowsUpgradeParams): Promise<void> {
+  if (p.testOverrides?.fakeSshSucceed) return;
+  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+
+  const ps = WINDOWS_UPGRADE_PS
+    .replace(/__SERVER_URL__/g,       p.serverUrl)
+    .replace(/__CERT_FINGERPRINT__/g, p.certFingerprint)
+    .replace(/__BINARY_FILENAME__/g,  p.binaryFilename);
+  await runPowerShellOverSsh(p.host, p.cred, ps, 180_000);
+}
+
+async function runPowerShellOverSsh(
+  host: string,
+  cred: Record<string, unknown>,
+  ps: string,
+  timeoutMs: number,
+): Promise<void> {
+  const encoded = Buffer.from(ps, "utf16le").toString("base64");
+  // Quoting note: -EncodedCommand's argument is pure base64 — no characters
+  // need shell escaping, so a single space-separated command line is safe
+  // across both cmd.exe and powershell.exe default shells.
+  const cmd = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
+  await withSshClient(host, cred, async (client) => {
+    const out = await sshExec(client, cmd, timeoutMs);
+    if (out.exitCode !== 0) {
+      throw new Error(`PowerShell exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
+    }
+  });
 }
 
 function winrmConnectionFromCred(host: string, config: Record<string, unknown>): WinRmConnection {
