@@ -57,7 +57,28 @@ func main() {
 	confPath := flag.String("conf", config.DefaultPath(), "path to agent.conf")
 	flag.Parse()
 
-	cfg, err := config.Load(*confPath)
+	// On Windows, the binary may be launched by the Service Control Manager
+	// (sc.exe / Start-Service) rather than from a console. tryRunAsWindowsService
+	// detects that case via svc.IsWindowsService and hands off to the SCM
+	// dispatcher (which calls runAgent from inside its Execute method).
+	// On non-Windows or when run from a console, the stub returns false and
+	// we fall through to the standard signal-driven main loop. See
+	// service_windows.go for the Windows-only handler implementation.
+	if tryRunAsWindowsService(*confPath) {
+		return
+	}
+
+	ctx, cancel := signalContext()
+	defer cancel()
+	runAgent(ctx, *confPath)
+}
+
+// runAgent is the shared agent runtime — loads config, enrolls if needed,
+// starts every collect / heartbeat / WS goroutine, and blocks on ctx until
+// the caller cancels it. Callable from both main() (console / Unix daemon
+// path) and the Windows Service handler's Execute() (under SCM).
+func runAgent(ctx context.Context, confPath string) {
+	cfg, err := config.Load(confPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
@@ -76,9 +97,6 @@ func main() {
 			log.Fatalf("enrollment failed: %v", err)
 		}
 	}
-
-	ctx, cancel := signalContext()
-	defer cancel()
 
 	// Step 2 + 3 + 4: three independent loops.
 	//   - responseTimeLoop pushes samples on a fixed interval.
