@@ -182,13 +182,14 @@ export async function findOrProvisionSamlUser(profile: Profile) {
   const existing = await prisma.user.findUnique({ where: { azureOid: oid }, include: { role: true } });
   if (existing) {
     const isFirstLogin = existing.lastLogin === null;
+    const stampReview = isFirstLogin && existing.role.name !== "admin";
     return prisma.user.update({
       where: { id: existing.id },
       data: {
         displayName: displayName || existing.displayName,
         email: email || existing.email,
         lastLogin: new Date(),
-        ...(isFirstLogin ? { needsRoleReview: true } : {}),
+        ...(stampReview ? { needsRoleReview: true } : {}),
       },
       include: { role: true },
     });

@@ -112,13 +112,15 @@ router.post("/login", async (req, res, next) => {
     // be detected there. A user who passes password but bails at TOTP still
     // gets flagged — that's fine; an admin reviewing them just sees an
     // account that has valid credentials but no completed-session activity.
+    // Skip the stamp for admins — an admin reviewing their own role is
+    // redundant noise (first-run wizard creates the seed admin this way).
     const isFirstLogin = user.lastLogin === null;
     const updateData: { lastLogin: Date; passwordHash?: string; needsRoleReview?: boolean } =
       { lastLogin: new Date() };
     if (needsRehash) {
       updateData.passwordHash = await hashPassword(password);
     }
-    if (isFirstLogin) updateData.needsRoleReview = true;
+    if (isFirstLogin && user.role.name !== "admin") updateData.needsRoleReview = true;
     await prisma.user.update({ where: { id: user.id }, data: updateData });
 
     // If TOTP is enabled on this (local) account, don't issue the session
