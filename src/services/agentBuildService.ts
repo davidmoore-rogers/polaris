@@ -854,7 +854,22 @@ export async function getInventory(): Promise<InventoryResult> {
 
 export interface PruneResult {
   scanned:    number;
-  protected:  string[];                              // version strings kept
+  /**
+   * Per-version protection records so the UI can render a specific
+   * "kept by X" reason instead of a vague "in use or within keep-last-N"
+   * lump. `reason` priority when multiple rules apply: `in-use` > `current`
+   * > `keep-last-n` (most-specific to least-specific).
+   *   - `current`     — version matches manifest.currentVersion
+   *   - `in-use`      — a non-revoked ManagedAgent reports this agentVersion
+   *   - `keep-last-n` — within the rollback-comfort window
+   */
+  protected:  Array<{ version: string; reason: "current" | "in-use" | "keep-last-n" }>;
+  /**
+   * Knob that decided the keep-last-N window (3 by default, configurable
+   * via POLARIS_AGENT_KEEP_VERSIONS). Returned so the UI can name the
+   * actual N in the "nothing to prune" message.
+   */
+  keepLastN:  number;
   removed:    Array<{ version: string; bytes: number }>;
 }
 
@@ -893,14 +908,14 @@ export async function pruneOldAgentVersions(): Promise<PruneResult> {
     // Defensive: if we can't read the table, fail closed — protect
     // everything and prune nothing.
     inUseVersions = new Set();
-    return { scanned: 0, protected: [], removed: [] };
+    return { scanned: 0, protected: [], keepLastN: keepLastN(), removed: [] };
   }
 
   let entries;
   try {
     entries = await readdir(AGENT_BIN_DIR, { withFileTypes: true });
   } catch {
-    return { scanned: 0, protected: [], removed: [] };
+    return { scanned: 0, protected: [], keepLastN: keepLastN(), removed: [] };
   }
   const versionDirs: Array<{ name: string; path: string; mtimeMs: number }> = [];
   for (const e of entries) {
@@ -918,13 +933,19 @@ export async function pruneOldAgentVersions(): Promise<PruneResult> {
   const keep = keepLastN();
   const recentlyMade = new Set(versionDirs.slice(0, keep).map((v) => v.name));
 
-  const protectedVersions = new Set<string>(recentlyMade);
-  if (manifestCurrent) protectedVersions.add(manifestCurrent);
-  for (const v of inUseVersions) protectedVersions.add(v);
+  // Per-version protection reason — assign the MOST-SPECIFIC reason that
+  // applies so the UI's "nothing to prune" toast names the actual cause.
+  // Priority: in-use > current > keep-last-n.
+  const reasonByVersion = new Map<string, "current" | "in-use" | "keep-last-n">();
+  for (const v of versionDirs) {
+    if (inUseVersions.has(v.name))                reasonByVersion.set(v.name, "in-use");
+    else if (manifestCurrent && v.name === manifestCurrent) reasonByVersion.set(v.name, "current");
+    else if (recentlyMade.has(v.name))            reasonByVersion.set(v.name, "keep-last-n");
+  }
 
   const removed: Array<{ version: string; bytes: number }> = [];
   for (const v of versionDirs) {
-    if (protectedVersions.has(v.name)) continue;
+    if (reasonByVersion.has(v.name)) continue;
     // Compute size before delete so the operator can see what they freed.
     let bytes = 0;
     try {
@@ -947,7 +968,8 @@ export async function pruneOldAgentVersions(): Promise<PruneResult> {
 
   return {
     scanned:    versionDirs.length,
-    protected:  Array.from(protectedVersions).filter((p) => versionDirs.some((v) => v.name === p)),
+    protected:  Array.from(reasonByVersion.entries()).map(([version, reason]) => ({ version, reason })),
+    keepLastN:  keep,
     removed,
   };
 }

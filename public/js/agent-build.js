@@ -644,7 +644,7 @@
     api.serverSettings.agentPrune().then(function (r) {
       var n = (r.removed || []).length;
       if (n === 0) {
-        showToast("Nothing to clean up — old versions are in use or within the keep-last-N window", "info");
+        showToast(_pruneNothingMessage(r), "info");
       } else {
         var bytes = r.removed.reduce(function (s, e) { return s + (e.bytes || 0); }, 0);
         showToast("Removed " + n + " old version" + (n > 1 ? "s" : "") + " (" + _humanBytes(bytes) + " freed)", "success");
@@ -653,6 +653,38 @@
     }).catch(function (err) {
       showToast("Clean up failed: " + err.message, "error");
     });
+  }
+
+  // Build a specific "nothing to prune" message from the per-version
+  // protection reasons. Replaces the older lump-sum text that always
+  // mentioned both "in use" and "keep-last-N" even when only one applied.
+  function _pruneNothingMessage(r) {
+    var prot = r.protected || [];
+    var keep = r.keepLastN != null ? r.keepLastN : 3;
+    if (prot.length === 0) {
+      return "Nothing to clean up — no version directories found.";
+    }
+    var byReason = { "in-use": [], "current": [], "keep-last-n": [] };
+    for (var i = 0; i < prot.length; i++) {
+      var p = prot[i];
+      if (byReason[p.reason]) byReason[p.reason].push(p.version);
+    }
+    var parts = [];
+    if (byReason["in-use"].length) {
+      parts.push(byReason["in-use"].length + " in use by live agent(s) (v" + byReason["in-use"].join(", v") + ")");
+    }
+    if (byReason["current"].length) {
+      parts.push("v" + byReason["current"][0] + " is the current build");
+    }
+    if (byReason["keep-last-n"].length) {
+      parts.push(byReason["keep-last-n"].length + " within keep-last-" + keep +
+        " (v" + byReason["keep-last-n"].join(", v") + ")");
+    }
+    var why = parts.join("; ");
+    var hint = byReason["keep-last-n"].length && !byReason["in-use"].length
+      ? " Lower POLARIS_AGENT_KEEP_VERSIONS in .env to free older versions."
+      : "";
+    return "Nothing to clean up — " + why + "." + hint;
   }
 
   function onAgentBuildClick() {
