@@ -43,7 +43,7 @@ In the split-role layout (`polaris-web` + `polaris-monitor@N` + `polaris-discove
 | `monitor` instance `N` | `910N` (9101, 9102, …) | `127.0.0.1` | `deploy/polaris-monitor@.service` |
 | `discovery` | `9110` | `127.0.0.1` | `deploy/polaris-discovery.service` |
 
-Prometheus must scrape **every** role endpoint or the dashboard will show "no data" for any metric stamped from inside a monitor worker (`polaris_probe_*`, `polaris_monitor_work_duration_seconds`, `polaris_sample_write_duration_seconds`, write/probe-patch buffer depths) or discovery consumer (`polaris_discovery_*`, FMG proxy lane). Dashboard queries already `sum()` across instances so panels populate as soon as the scrape job is complete. Example for two monitor replicas + a discovery worker, all on the same host as Prometheus:
+Prometheus must scrape **every** role endpoint or the dashboard will show "no data" for any metric stamped from inside a monitor worker (`polaris_probe_*`, `polaris_monitor_work_duration_seconds`, `polaris_sample_write_duration_seconds`, write/probe-patch buffer depths) or discovery consumer (`polaris_discovery_*`, FMG proxy lane). Dashboard queries aggregate across instances — `sum` for per-process partitions (db_pool, sample buffers, monitor workers) and `max` for fleet-wide gauges that one process broadcasts (monitored asset counts, capacity severity, disk/DB size, FMG worker depth, queue/mode flags). Histograms wrapped in `rate(...) + sum by (...)` were already correct; the bare-gauge panels were patched in the same change. Example for two monitor replicas + a discovery worker, all on the same host as Prometheus:
 
 ```yaml
 scrape_configs:

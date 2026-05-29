@@ -36,7 +36,7 @@
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "polaris_monitored_assets", "legendFormat": "monitored", "refId": "A" }
+        { "expr": "max(polaris_monitored_assets)", "legendFormat": "monitored", "refId": "A" }
       ],
       "title": "Monitored assets",
       "type": "stat"
@@ -66,7 +66,7 @@
       "options": { "displayLabels": ["name", "percent"], "legend": { "displayMode": "list", "placement": "right", "showLegend": true }, "pieType": "donut" },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "polaris_monitored_assets_by_status", "legendFormat": "{{status}}", "refId": "A" }
+        { "expr": "max by (status) (polaris_monitored_assets_by_status)", "legendFormat": "{{status}}", "refId": "A" }
       ],
       "title": "Assets by monitor status",
       "type": "piechart"
@@ -113,7 +113,7 @@
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "polaris_monitored_assets_by_status{status=\"down\"}", "legendFormat": "down", "refId": "A" }
+        { "expr": "max(polaris_monitored_assets_by_status{status=\"down\"})", "legendFormat": "down", "refId": "A" }
       ],
       "title": "Assets currently down",
       "type": "stat"
@@ -164,7 +164,7 @@
       "id": 7,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_monitor_queue_depth", "legendFormat": "{{cadence}}", "refId": "A" }
+        { "expr": "max by (cadence) (polaris_monitor_queue_depth)", "legendFormat": "{{cadence}}", "refId": "A" }
       ],
       "title": "Queue depth by cadence",
       "type": "timeseries"
@@ -246,8 +246,8 @@
       "id": 11,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
       "targets": [
-        { "expr": "nodejs_eventloop_lag_p99_seconds", "legendFormat": "p99", "refId": "A" },
-        { "expr": "nodejs_eventloop_lag_seconds", "legendFormat": "mean", "refId": "B" }
+        { "expr": "nodejs_eventloop_lag_p99_seconds", "legendFormat": "p99 ({{job}})", "refId": "A" },
+        { "expr": "nodejs_eventloop_lag_seconds", "legendFormat": "mean ({{job}})", "refId": "B" }
       ],
       "title": "Event loop lag",
       "type": "timeseries"
@@ -260,9 +260,9 @@
       "id": 12,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "process_resident_memory_bytes", "legendFormat": "RSS", "refId": "A" },
-        { "expr": "nodejs_heap_size_used_bytes", "legendFormat": "heap used", "refId": "B" },
-        { "expr": "nodejs_heap_size_total_bytes", "legendFormat": "heap total", "refId": "C" }
+        { "expr": "process_resident_memory_bytes", "legendFormat": "RSS ({{job}})", "refId": "A" },
+        { "expr": "nodejs_heap_size_used_bytes", "legendFormat": "heap used ({{job}})", "refId": "B" },
+        { "expr": "nodejs_heap_size_total_bytes", "legendFormat": "heap total ({{job}})", "refId": "C" }
       ],
       "title": "Process memory",
       "type": "timeseries"
@@ -275,7 +275,7 @@
       "id": 13,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
       "targets": [
-        { "expr": "rate(process_cpu_seconds_total[1m])", "legendFormat": "cpu", "refId": "A" }
+        { "expr": "rate(process_cpu_seconds_total[1m])", "legendFormat": "cpu ({{job}})", "refId": "A" }
       ],
       "title": "Process CPU",
       "type": "timeseries"
@@ -308,7 +308,7 @@
       "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "polaris_capacity_severity", "legendFormat": "severity", "refId": "A" }
+        { "expr": "max(polaris_capacity_severity)", "legendFormat": "severity", "refId": "A" }
       ],
       "title": "Capacity severity",
       "type": "stat"
@@ -322,10 +322,10 @@
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "polaris_db_pool_in_use",            "legendFormat": "in use",   "refId": "A" },
-        { "expr": "polaris_db_pool_peak_observed",     "legendFormat": "peak",     "refId": "B" },
-        { "expr": "polaris_db_pool_polaris_capacity",  "legendFormat": "capacity", "refId": "C" },
-        { "expr": "polaris_db_pool_max",               "legendFormat": "pg max",   "refId": "D" }
+        { "expr": "sum(polaris_db_pool_in_use)",            "legendFormat": "in use",   "refId": "A" },
+        { "expr": "sum(polaris_db_pool_peak_observed)",     "legendFormat": "peak",     "refId": "B" },
+        { "expr": "sum(polaris_db_pool_polaris_capacity)",  "legendFormat": "capacity", "refId": "C" },
+        { "expr": "max(polaris_db_pool_max)",               "legendFormat": "pg max",   "refId": "D" }
       ],
       "title": "DB pool — in use / peak / capacity / max",
       "type": "stat"
@@ -347,8 +347,8 @@
       "id": 16,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_db_pool_peak_observed / clamp_min(polaris_db_pool_polaris_capacity, 1)", "legendFormat": "peak / capacity", "refId": "A" },
-        { "expr": "polaris_db_pool_in_use        / clamp_min(polaris_db_pool_polaris_capacity, 1)", "legendFormat": "now / capacity",  "refId": "B" }
+        { "expr": "sum(polaris_db_pool_peak_observed) / clamp_min(sum(polaris_db_pool_polaris_capacity), 1)", "legendFormat": "peak / capacity", "refId": "A" },
+        { "expr": "sum(polaris_db_pool_in_use)        / clamp_min(sum(polaris_db_pool_polaris_capacity), 1)", "legendFormat": "now / capacity",  "refId": "B" }
       ],
       "title": "DB pool utilization (peak & current vs capacity)",
       "type": "timeseries"
@@ -361,8 +361,8 @@
       "id": 17,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_db_size_bytes",              "legendFormat": "current",      "refId": "A" },
-        { "expr": "polaris_db_steady_state_size_bytes", "legendFormat": "steady-state", "refId": "B" }
+        { "expr": "max(polaris_db_size_bytes)",              "legendFormat": "current",      "refId": "A" },
+        { "expr": "max(polaris_db_steady_state_size_bytes)", "legendFormat": "steady-state", "refId": "B" }
       ],
       "title": "Database size — current vs steady-state",
       "type": "timeseries"
@@ -384,7 +384,7 @@
       "id": 18,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_disk_free_ratio", "legendFormat": "{{volume}} ({{roles}})", "refId": "A" }
+        { "expr": "max by (volume, roles) (polaris_disk_free_ratio)", "legendFormat": "{{volume}} ({{roles}})", "refId": "A" }
       ],
       "title": "Disk free ratio per volume",
       "type": "timeseries"
@@ -406,7 +406,7 @@
       "id": 19,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_db_dead_tuple_ratio", "legendFormat": "{{table}}", "refId": "A" }
+        { "expr": "max by (table) (polaris_db_dead_tuple_ratio)", "legendFormat": "{{table}}", "refId": "A" }
       ],
       "title": "Dead tuple ratio per table",
       "type": "timeseries"
@@ -434,7 +434,7 @@
       "id": 20,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_pgboss_oldest_job_age_seconds", "legendFormat": "{{queue}} ({{state}})", "refId": "A" }
+        { "expr": "max by (queue, state) (polaris_pgboss_oldest_job_age_seconds)", "legendFormat": "{{queue}} ({{state}})", "refId": "A" }
       ],
       "title": "Pg-boss oldest job age",
       "type": "timeseries"
@@ -508,7 +508,7 @@
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "polaris_http_in_flight", "legendFormat": "in flight", "refId": "A" }
+        { "expr": "max(polaris_http_in_flight)", "legendFormat": "in flight", "refId": "A" }
       ],
       "title": "HTTP in-flight",
       "type": "stat"
@@ -623,7 +623,7 @@
       "id": 32,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_fmg_worker_queue_depth", "legendFormat": "{{integrationId}}", "refId": "A" }
+        { "expr": "max by (integrationId) (polaris_fmg_worker_queue_depth)", "legendFormat": "{{integrationId}}", "refId": "A" }
       ],
       "title": "FMG worker queue depth",
       "type": "timeseries"
@@ -636,7 +636,7 @@
       "id": 33,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_fmg_worker_inflight", "legendFormat": "{{integrationId}}", "refId": "A" }
+        { "expr": "max by (integrationId) (polaris_fmg_worker_inflight)", "legendFormat": "{{integrationId}}", "refId": "A" }
       ],
       "title": "FMG proxy lane inflight",
       "type": "timeseries"
@@ -649,7 +649,7 @@
       "id": 34,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_fmg_worker_native_inflight", "legendFormat": "{{integrationId}}", "refId": "A" }
+        { "expr": "max by (integrationId) (polaris_fmg_worker_native_inflight)", "legendFormat": "{{integrationId}}", "refId": "A" }
       ],
       "title": "FMG native lane inflight",
       "type": "timeseries"
@@ -670,7 +670,7 @@
       "id": 35,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_pgboss_queue_jobs", "legendFormat": "{{queue}} ({{state}})", "refId": "A" }
+        { "expr": "max by (queue, state) (polaris_pgboss_queue_jobs)", "legendFormat": "{{queue}} ({{state}})", "refId": "A" }
       ],
       "title": "Pg-boss queue jobs (by queue x state)",
       "type": "timeseries"
@@ -696,7 +696,7 @@
       "id": 37,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_sample_buffer_depth", "legendFormat": "{{table}}", "refId": "A" }
+        { "expr": "sum by (table) (polaris_sample_buffer_depth)", "legendFormat": "{{table}}", "refId": "A" }
       ],
       "title": "Sample buffer depth by table",
       "type": "timeseries"
@@ -709,7 +709,7 @@
       "id": 38,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "expr": "polaris_probe_patch_buffer_depth", "legendFormat": "{{table}}", "refId": "A" }
+        { "expr": "sum by (table) (polaris_probe_patch_buffer_depth)", "legendFormat": "{{table}}", "refId": "A" }
       ],
       "title": "Probe-patch buffer depth",
       "type": "timeseries"
@@ -765,7 +765,7 @@
       "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "polaris_monitor_queue_mode", "legendFormat": "{{mode}}", "refId": "A" }
+        { "expr": "max by (mode) (polaris_monitor_queue_mode)", "legendFormat": "{{mode}}", "refId": "A" }
       ],
       "title": "Queue mode (cursor vs pgboss)",
       "type": "bargauge"
@@ -779,7 +779,7 @@
       "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "polaris_db_connection_mode", "legendFormat": "{{mode}}", "refId": "A" }
+        { "expr": "max by (mode) (polaris_db_connection_mode)", "legendFormat": "{{mode}}", "refId": "A" }
       ],
       "title": "DB connection mode (direct vs pgbouncer)",
       "type": "bargauge"
@@ -793,7 +793,7 @@
       "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "polaris_monitor_workers", "legendFormat": "{{queue}}", "refId": "A" }
+        { "expr": "sum by (queue) (polaris_monitor_workers)", "legendFormat": "{{queue}}", "refId": "A" }
       ],
       "title": "Workers per cadence queue",
       "type": "bargauge"
@@ -807,7 +807,7 @@
       "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true },
       "pluginVersion": "9.0.0",
       "targets": [
-        { "expr": "polaris_db_pool_role_capacity", "legendFormat": "{{role}}", "refId": "A" }
+        { "expr": "max by (role) (polaris_db_pool_role_capacity)", "legendFormat": "{{role}}", "refId": "A" }
       ],
       "title": "DB pool role capacity",
       "type": "bargauge"
