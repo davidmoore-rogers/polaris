@@ -10,6 +10,7 @@
 - **Throughput & queue health** — pg-boss oldest job age per queue, sample-write p95 per table, discovery duration p95 by integration type, discovery rate by integration + outcome
 - **HTTP latency** — p95 by route (top 10), in-flight gauge, request rate by status class
 - **Job health** — duration p95 per scheduled job, failure rate per job
+- **Integration connection tester** — per-tick auto-test outcome rate (success / failure / skipped) by integration_type, from the 10-min `integrationConnectionTester` job. A run of `failure` ticks without a `success` follow-up explains an integration that stayed in the Failed state across multiple ticks; `skipped` is the in-discovery-run branch.
 - **Monitor work duration** — p95 sliced by cadence, by transport, and by cadence × asset_type (same histogram the Capacity Advisor reads to recommend worker counts)
 - **FMG worker** — per-integration queue depth, proxy-lane inflight (the strict-concurrency=1 lane), native-lane inflight (CMDB / dvmdb / auth)
 - **Write buffers & rollups** — pg-boss queue jobs by queue × state, sample rollup p95 by tier × table, sample buffer depth per table, probe-patch buffer depth + write p95

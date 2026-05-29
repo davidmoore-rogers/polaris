@@ -24,6 +24,7 @@ import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { runPreflightTest, isDiscoveryRunning } from "../api/routes/integrations.js";
 import { logEvent } from "../api/routes/events.js";
+import { recordIntegrationTest } from "../metrics.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
 const INTERVAL_MS = 10 * 60 * 1000;
@@ -41,7 +42,11 @@ async function testAllIntegrations(): Promise<void> {
       // discovery is mid-proxy gets rejected and stamps a false-positive
       // `lastTestOk=false`. A test result during a run also adds no signal —
       // discovery itself is the live proof. Preserve the prior lastTestAt/Ok.
-      if (await isDiscoveryRunning(intg.id).catch(() => false)) continue;
+      if (await isDiscoveryRunning(intg.id).catch(() => false)) {
+        recordIntegrationTest(intg.type, "skipped");
+        logger.info({ integrationId: intg.id, name: intg.name, type: intg.type, reason: "discovery-running" }, "integrationConnectionTester: skipped");
+        continue;
+      }
 
       let result: { ok: boolean; message: string };
       try {
@@ -56,6 +61,12 @@ async function testAllIntegrations(): Promise<void> {
       }).catch((err) => {
         logger.error({ err, integrationId: intg.id }, "Integration tester: failed to persist test result");
       });
+
+      recordIntegrationTest(intg.type, result.ok ? "success" : "failure");
+      logger.info(
+        { integrationId: intg.id, name: intg.name, type: intg.type, ok: result.ok, message: result.message },
+        result.ok ? "integrationConnectionTester: success" : "integrationConnectionTester: failure",
+      );
 
       const previouslyOk = intg.lastTestOk === true;
       if (result.ok && !previouslyOk) {
