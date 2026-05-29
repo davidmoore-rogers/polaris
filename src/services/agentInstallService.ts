@@ -1223,6 +1223,122 @@ function winrmConnectionFromCred(host: string, config: Record<string, unknown>):
   };
 }
 
+// Shared PowerShell helper: cert-pinned HTTPS download via raw SslStream
+// + HTTP/1.1. Bypasses HttpWebRequest / Invoke-WebRequest entirely.
+//
+// Rationale: Invoke-WebRequest under Windows PowerShell 5.1 uses
+// HttpWebRequest under the hood, which couples cert-pin validation to a
+// global ServicePointManager.ServerCertificateValidationCallback AND
+// also tries to negotiate HTTP/2 via ALPN against modern nginx + reads
+// proxy config out of WinINET. Both interactions are fragile when the
+// powershell.exe process is launched non-interactively over OpenSSH (no
+// HKCU hive loaded, no user profile), producing the cryptic
+// "The underlying connection was closed: An unexpected error occurred
+// on a send." with no diagnostic.
+//
+// Doing the TLS by hand removes every moving part: we open a TcpClient,
+// wrap it in SslStream with a RemoteCertificateValidationCallback that
+// performs the SHA-256 pin check, force TLS 1.2/1.3, send a HTTP/1.1
+// `Connection: close` GET, parse the response status + Content-Length
+// from the headers, and stream the body bytes straight to disk. Works
+// uniformly over WinRM AND over OpenSSH.
+const POLARIS_PS_PINNED_DOWNLOAD_FN = `
+function Invoke-PolarisPinnedDownload {
+  param([string]$Url, [string]$OutFile, [string]$ExpectedPin)
+
+  $uri = [System.Uri]$Url
+  $port = if ($uri.Port -gt 0) { $uri.Port } else { 443 }
+  $script:_PolarisPinObserved = ''
+  $script:_PolarisPinMatches  = $false
+
+  $tcp = New-Object System.Net.Sockets.TcpClient
+  $tcp.Connect($uri.Host, $port)
+  try {
+    $callback = {
+      param($snd, $cert, $chain, $errors)
+      $der = $cert.GetRawCertData()
+      $sha = [System.Security.Cryptography.SHA256]::Create()
+      try {
+        $hash = $sha.ComputeHash($der)
+        $hex = -join ($hash | ForEach-Object { $_.ToString('x2') })
+        $script:_PolarisPinObserved = 'sha256:' + $hex
+        $script:_PolarisPinMatches  = ($script:_PolarisPinObserved -eq $ExpectedPin)
+        return $script:_PolarisPinMatches
+      } finally { $sha.Dispose() }
+    }
+
+    $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false, $callback)
+    try {
+      # TLS 1.2 always; TLS 1.3 if the .NET version's enum has it (Tls13 was
+      # added in .NET 4.8 / PS7). Bitwise-OR so we never clobber what's
+      # available.
+      $protocols = [System.Security.Authentication.SslProtocols]::Tls12
+      try { $protocols = $protocols -bor [System.Security.Authentication.SslProtocols]::Tls13 } catch {}
+      try {
+        $ssl.AuthenticateAsClient($uri.Host, $null, $protocols, $false)
+      } catch {
+        if ($script:_PolarisPinObserved -ne '' -and -not $script:_PolarisPinMatches) {
+          throw "Cert pin mismatch: expected $ExpectedPin, got $script:_PolarisPinObserved"
+        }
+        throw
+      }
+      if (-not $script:_PolarisPinMatches) {
+        throw "Cert pin mismatch: expected $ExpectedPin, got $script:_PolarisPinObserved"
+      }
+
+      $req = "GET $($uri.PathAndQuery) HTTP/1.1\`r\`nHost: $($uri.Host)\`r\`nUser-Agent: polaris-agent-install\`r\`nAccept: */*\`r\`nConnection: close\`r\`n\`r\`n"
+      $reqBytes = [System.Text.Encoding]::ASCII.GetBytes($req)
+      $ssl.Write($reqBytes, 0, $reqBytes.Length)
+      $ssl.Flush()
+
+      # Read headers byte-by-byte until CRLF CRLF — StreamReader would buffer
+      # past the header/body boundary and eat binary body bytes.
+      $hdr = New-Object System.Collections.ArrayList
+      $state = 0
+      while ($true) {
+        $b = $ssl.ReadByte()
+        if ($b -lt 0) { throw "Connection closed before headers complete" }
+        [void]$hdr.Add([byte]$b)
+        if     ($state -eq 0 -and $b -eq 13) { $state = 1 }
+        elseif ($state -eq 1 -and $b -eq 10) { $state = 2 }
+        elseif ($state -eq 2 -and $b -eq 13) { $state = 3 }
+        elseif ($state -eq 3 -and $b -eq 10) { break }
+        else { $state = 0 }
+      }
+      $headers = [System.Text.Encoding]::ASCII.GetString($hdr.ToArray())
+
+      if ($headers -notmatch '^HTTP/1\\.\\d\\s+(\\d{3})\\s') {
+        $preview = $headers.Substring(0, [Math]::Min(200, $headers.Length))
+        throw "Bad HTTP response from $Url : $preview"
+      }
+      $status = [int]$Matches[1]
+      if ($status -ne 200) { throw "HTTP $status fetching $Url" }
+
+      $contentLength = $null
+      foreach ($line in ($headers -split "\`r\`n")) {
+        if ($line -match '^Content-Length:\\s*(\\d+)\\s*$') {
+          $contentLength = [int64]$Matches[1]
+        }
+      }
+      if ($null -eq $contentLength) { throw "Server omitted Content-Length on $Url" }
+
+      $fs = [System.IO.File]::Open($OutFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+      try {
+        $buf = New-Object byte[] 65536
+        $remaining = $contentLength
+        while ($remaining -gt 0) {
+          $toRead = [int][Math]::Min($buf.Length, $remaining)
+          $n = $ssl.Read($buf, 0, $toRead)
+          if ($n -le 0) { throw "Connection closed before body complete ($remaining bytes missing)" }
+          $fs.Write($buf, 0, $n)
+          $remaining -= $n
+        }
+      } finally { $fs.Close() }
+    } finally { $ssl.Dispose() }
+  } finally { $tcp.Close() }
+}
+`;
+
 // PowerShell install template — runs on the target host.
 //
 // Substitutions (literal text replace, no escaping needed because all
@@ -1232,13 +1348,12 @@ function winrmConnectionFromCred(host: string, config: Record<string, unknown>):
 //   __BINARY_FILENAME__    e.g. polaris-agent-0.1.0-windows-amd64.exe
 //   __AGENT_CONF_B64__     base64 of the rendered agent.conf body
 //
-// The cert-pin callback uses ServerCertificateValidationCallback on
-// ServicePointManager — works on PowerShell 5.1 (the version that ships
-// with every Windows 10 / Server 2016+) AND on PowerShell 7. We
-// explicitly do NOT use `-SkipCertificateCheck` (Invoke-WebRequest on
-// PS5.1 doesn't support it; PS7 does but skipping checks entirely is
-// strictly worse than pinning).
+// Download path: the embedded Invoke-PolarisPinnedDownload helper above
+// performs an SslStream-based HTTPS GET with the pin verified inside the
+// TLS handshake callback. We don't use Invoke-WebRequest here — see the
+// helper's banner for why.
 const WINDOWS_INSTALL_PS = `$ErrorActionPreference = 'Stop'
+${POLARIS_PS_PINNED_DOWNLOAD_FN}
 
 $serverUrl     = '__SERVER_URL__'
 $pin           = '__CERT_FINGERPRINT__'.ToLower()
@@ -1262,31 +1377,8 @@ if ($svc) {
   Start-Sleep -Seconds 2
 }
 
-# Cert-pin Invoke-WebRequest. We set a ServerCertificateValidationCallback
-# that compares the leaf SHA-256 against the pinned fingerprint, then
-# restore the previous callback after the download. TLS 1.2 is forced
-# for compatibility with older Windows defaults.
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$prevCallback = [Net.ServicePointManager]::ServerCertificateValidationCallback
-[Net.ServicePointManager]::ServerCertificateValidationCallback = {
-  param($sender, $cert, $chain, $errors)
-  $bytes = $cert.GetRawCertData()
-  $sha   = [Security.Cryptography.SHA256]::Create()
-  $hash  = $sha.ComputeHash($bytes)
-  $hex   = -join ($hash | ForEach-Object { $_.ToString('x2') })
-  $observed = 'sha256:' + $hex
-  if ($observed -ne $pin) {
-    Write-Host "Cert pin mismatch: expected $pin, got $observed"
-    return $false
-  }
-  return $true
-}
-try {
-  $downloadUrl = "$serverUrl/api/v1/agents/binary/$binaryName"
-  Invoke-WebRequest -Uri $downloadUrl -OutFile $binaryPath -UseBasicParsing
-} finally {
-  [Net.ServicePointManager]::ServerCertificateValidationCallback = $prevCallback
-}
+$downloadUrl = "$serverUrl/api/v1/agents/binary/$binaryName"
+Invoke-PolarisPinnedDownload -Url $downloadUrl -OutFile $binaryPath -ExpectedPin $pin
 
 # Write agent.conf from the embedded base64. Atomic-ish via .tmp + Move-Item.
 $confBytes = [Convert]::FromBase64String($confB64)
@@ -1453,6 +1545,7 @@ echo "Polaris Agent upgraded"
 `;
 
 const WINDOWS_UPGRADE_PS = `$ErrorActionPreference = 'Stop'
+${POLARIS_PS_PINNED_DOWNLOAD_FN}
 
 $serverUrl  = '__SERVER_URL__'
 $pin        = '__CERT_FINGERPRINT__'.ToLower()
@@ -1469,27 +1562,8 @@ if (-not (Test-Path $installDir)) {
 # Same cert-pinned download flow the installer uses. Pull the new binary
 # to a .new.exe alongside the live one, then atomic Move-Item over the
 # top after stopping the service.
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$prevCallback = [Net.ServicePointManager]::ServerCertificateValidationCallback
-[Net.ServicePointManager]::ServerCertificateValidationCallback = {
-  param($sender, $cert, $chain, $errors)
-  $bytes = $cert.GetRawCertData()
-  $sha   = [Security.Cryptography.SHA256]::Create()
-  $hash  = $sha.ComputeHash($bytes)
-  $hex   = -join ($hash | ForEach-Object { $_.ToString('x2') })
-  $observed = 'sha256:' + $hex
-  if ($observed -ne $pin) {
-    Write-Host "Cert pin mismatch: expected $pin, got $observed"
-    return $false
-  }
-  return $true
-}
-try {
-  $downloadUrl = "$serverUrl/api/v1/agents/binary/$binaryName"
-  Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpPath -UseBasicParsing
-} finally {
-  [Net.ServicePointManager]::ServerCertificateValidationCallback = $prevCallback
-}
+$downloadUrl = "$serverUrl/api/v1/agents/binary/$binaryName"
+Invoke-PolarisPinnedDownload -Url $downloadUrl -OutFile $tmpPath -ExpectedPin $pin
 
 # Stop service, swap binary, restart. The agent.conf file is untouched
 # so the new binary keeps the same bearer + cert pin.
