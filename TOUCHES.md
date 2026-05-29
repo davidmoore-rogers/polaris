@@ -314,9 +314,13 @@ build auto-prune + boot-time auto-build are layered on top.
     after every successful build + on operator click of the Clean-up
     button on the Maintenance card. Emits `agent.versions.pruned` with
     `trigger: "post-build"|"manual"`.
-- `src/api/routes/serverSettings.ts:/agents/*` — eight admin-only routes
+- `src/api/routes/serverSettings.ts:/agents/*` — admin-only routes
   exposing the service: inventory, build start/poll/current/cancel,
-  prune, installed-summary, upgrade-all, auto-build-setting GET+PUT.
+  prune, installed-summary (returns active count + per-version histogram
+  + live `upgrading` and `upgradeFailed` counts so the UI can poll for
+  in-flight upgrade-all status), upgrade-all (delegates to
+  `upgradeAllOutdated` in agentInstallService), auto-build-setting
+  GET+PUT, auto-upgrade-setting GET+PUT.
 - `src/jobs/autoBuildAgents.ts` — one-shot startup job, fires 60s after
   boot. Five gates in order: manifest exists, version drift, Go
   available, kill-switch off, then `startBuild({actor: "system:auto-
@@ -327,8 +331,14 @@ build auto-prune + boot-time auto-build are layered on top.
   agent.conf. Transitions installStatus active → upgrading → active.
   Emits `agent.upgrade_kickoff`, `agent.upgrade_succeeded`,
   `agent.upgrade_failed`. The bulk path lives in
-  `/server-settings/agents/upgrade-all` (Promise pool of 4 over eligible
-  ManagedAgent rows).
+  `upgradeAllOutdated(actor)` (same file) — Promise pool of 4 over every
+  active ManagedAgent whose agentVersion lags `manifest.currentVersion`.
+  Called from both the operator-initiated `POST
+  /server-settings/agents/upgrade-all` and the post-build auto-upgrade
+  hook in `finalizeBuild` (agentBuildService.ts) gated on
+  `Setting.agent.autoUpgradeOnNewBuild`. Auto-path emits
+  `agent.upgrade_all_auto_kickoff` so the audit trail distinguishes
+  human-initiated from build-triggered fan-outs.
 - `src/utils/version.ts:getAgentVersion()` / `getAgentSourceDir()` —
   readers of `agent/VERSION` (not writers, but documenting here for
   proximity). 5s mtime-checked cache; format-validated; fallback

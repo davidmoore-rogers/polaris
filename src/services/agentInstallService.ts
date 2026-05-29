@@ -180,6 +180,70 @@ export async function startUpgrade(input: StartUpgradeInput): Promise<{ fromVers
   return { fromVersion: row.agentVersion ?? null, toVersion: manifest.currentVersion };
 }
 
+/**
+ * Fan out `startUpgrade` to every ManagedAgent whose installStatus is
+ * "active" but whose agentVersion lags the current manifest. Bounded
+ * concurrency (Promise pool of POOL_SIZE) — the SSH/WinRM connections
+ * are the per-host bottleneck and higher parallelism risks tripping
+ * concurrent-connection limits on the target hosts (Windows WinRM caps
+ * at ~5 by default).
+ *
+ * Each per-agent upgrade goes through the regular state machine so
+ * partial failures land naturally as `installStatus="upgrade_failed"`
+ * per row + an `agent.upgrade_failed` Event; the operator sees them on
+ * the Polaris Agent panel of the affected asset.
+ *
+ * Used by:
+ *   - POST /server-settings/agents/upgrade-all (operator-initiated)
+ *   - The post-build hook in agentBuildService.ts when the
+ *     `agent.autoUpgradeOnNewBuild` Setting is enabled.
+ *
+ * Returns `{ eligible, queued }` so the caller can render a status line
+ * to the operator (or log it on the system-initiated path).
+ */
+export interface UpgradeAllResult {
+  eligible: number;
+  queued:   number;
+  perAsset: Array<{ assetId: string; managedAgentId: string; ok: boolean; error?: string }>;
+}
+
+export async function upgradeAllOutdated(actor: string): Promise<UpgradeAllResult> {
+  const { getInventory } = await import("./agentBuildService.js");
+  const inv = await getInventory();
+  const currentVersion = inv.manifest?.currentVersion;
+  if (!currentVersion) {
+    return { eligible: 0, queued: 0, perAsset: [] };
+  }
+  const eligible = await prisma.managedAgent.findMany({
+    where: {
+      installStatus: "active",
+      NOT: { agentVersion: currentVersion },
+    },
+    select: { id: true, assetId: true, agentVersion: true },
+  });
+  const perAsset: UpgradeAllResult["perAsset"] = [];
+  const POOL_SIZE = 4;
+  let cursor = 0;
+  async function worker() {
+    while (cursor < eligible.length) {
+      const i = cursor++;
+      const e = eligible[i];
+      try {
+        await startUpgrade({ managedAgentId: e.id, actor });
+        perAsset.push({ assetId: e.assetId, managedAgentId: e.id, ok: true });
+      } catch (err: any) {
+        perAsset.push({ assetId: e.assetId, managedAgentId: e.id, ok: false, error: err?.message ?? String(err) });
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(POOL_SIZE, eligible.length) }, () => worker()));
+  return {
+    eligible: eligible.length,
+    queued:   perAsset.filter((p) => p.ok).length,
+    perAsset,
+  };
+}
+
 // ─── Install runner ───────────────────────────────────────────────────
 
 async function runInstall(input: StartInstallInput): Promise<void> {

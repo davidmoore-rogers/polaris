@@ -31,7 +31,7 @@ import {
 } from "../../services/serverSettingsService.js";
 import { getDnsSettings, updateDnsSettings, createResolver } from "../../services/dnsService.js";
 import type { DnsSettings } from "../../services/dnsService.js";
-import { getOuiStatus, refreshOuiDatabase, getOuiOverrides, setOuiOverride, deleteOuiOverride } from "../../services/ouiService.js";
+import { getOuiStatus, refreshOuiDatabase, getOuiOverrides, setOuiOverride, deleteOuiOverride, lookupOuiDetailed } from "../../services/ouiService.js";
 import { logEvent } from "./events.js";
 import { setEnvVar } from "../../utils/envFile.js";
 import {
@@ -715,6 +715,16 @@ router.post("/oui/refresh", async (_req, res, next) => {
   try {
     const result = await refreshOuiDatabase();
     res.json({ ok: true, ...result, message: `OUI database refreshed: ${result.entries.toLocaleString()} vendors loaded` });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/oui/lookup/:prefix", async (req, res, next) => {
+  try {
+    const result = await lookupOuiDetailed(req.params.prefix);
+    if (!result.normalized) throw new AppError(400, "Invalid MAC or prefix — supply at least 3 bytes (e.g. AA:BB:CC)");
+    res.json(result);
   } catch (err) {
     next(err);
   }
@@ -1469,22 +1479,38 @@ router.get("/agents/build/:buildId", async (req, res, next) => {
 
 /**
  * Aggregated view of installed agents for the Maintenance card. Returns
- * per-version counts so the UI can render "N of M installed agents are
- * out-of-date" without fetching every ManagedAgent row.
+ * per-version counts plus the live in-flight upgrade counts so the UI
+ * can render both the "N of M installed agents are out-of-date" line AND
+ * a live "X upgrading / Y failed" status while an upgrade-all is fanning
+ * out. The frontend polls this endpoint every couple of seconds while a
+ * batch upgrade is in progress; counts reconstruct from DB state so the
+ * panel survives page reloads / tab switches.
  */
 router.get("/agents/installed-summary", async (_req, res, next) => {
   try {
     const { prisma } = await import("../../db.js");
     const { getInventory } = await import("../../services/agentBuildService.js");
     const inv = await getInventory();
+    // Pull every ManagedAgent row regardless of installStatus so we can
+    // partition into active / upgrading / upgrade_failed without a
+    // second query.
     const rows = await prisma.managedAgent.findMany({
-      where:  { installStatus: "active" },
-      select: { agentVersion: true },
+      select: { agentVersion: true, installStatus: true },
     });
     const histogram = new Map<string, number>();
+    let totalActive = 0;
+    let upgrading = 0;
+    let upgradeFailed = 0;
     for (const r of rows) {
-      const v = r.agentVersion ?? "unknown";
-      histogram.set(v, (histogram.get(v) ?? 0) + 1);
+      if (r.installStatus === "active") {
+        totalActive++;
+        const v = r.agentVersion ?? "unknown";
+        histogram.set(v, (histogram.get(v) ?? 0) + 1);
+      } else if (r.installStatus === "upgrading") {
+        upgrading++;
+      } else if (r.installStatus === "upgrade_failed") {
+        upgradeFailed++;
+      }
     }
     const current = inv.manifest?.currentVersion ?? null;
     let outOfDate = 0;
@@ -1492,9 +1518,11 @@ router.get("/agents/installed-summary", async (_req, res, next) => {
       if (current && v !== current) outOfDate += n;
     }
     res.json({
-      totalActive:    rows.length,
+      totalActive,
       currentVersion: current,
       outOfDate,
+      upgrading,
+      upgradeFailed,
       byVersion:      Object.fromEntries(histogram),
     });
   } catch (err) { next(err); }
@@ -1502,59 +1530,21 @@ router.get("/agents/installed-summary", async (_req, res, next) => {
 
 /**
  * Bulk-upgrade every active ManagedAgent whose agentVersion lags the
- * current manifest. Each per-agent upgrade goes through the regular
- * state machine + per-agent audit events, so partial failures land
- * naturally as installStatus="upgrade_failed" per row.
- *
- * Promise pool of 4 — the SSH/WinRM connections are the bottleneck;
- * higher parallelism risks tripping concurrent-connection limits on
- * some hosts (Windows WinRM caps at ~5 by default).
+ * current manifest. Logic lives in `upgradeAllOutdated` in
+ * agentInstallService so the same path is reachable from the post-build
+ * auto-upgrade hook.
  */
 router.post("/agents/upgrade-all", async (req, res, next) => {
   try {
-    const { prisma } = await import("../../db.js");
     const { getInventory } = await import("../../services/agentBuildService.js");
-    const { startUpgrade } = await import("../../services/agentInstallService.js");
-    const actor = req.session?.username || "unknown";
-
+    const { upgradeAllOutdated } = await import("../../services/agentInstallService.js");
     const inv = await getInventory();
-    const currentVersion = inv.manifest?.currentVersion;
-    if (!currentVersion) {
+    if (!inv.manifest?.currentVersion) {
       return res.status(400).json({ error: "No agent binaries available — build them first." });
     }
-
-    const eligible = await prisma.managedAgent.findMany({
-      where: {
-        installStatus: "active",
-        NOT: { agentVersion: currentVersion },
-      },
-      select: { id: true, assetId: true, agentVersion: true },
-    });
-
-    // Promise pool — bounded concurrency. Cheap manual implementation
-    // since we don't need anything fancier.
-    const perAsset: Array<{ assetId: string; managedAgentId: string; ok: boolean; error?: string }> = [];
-    const POOL = 4;
-    let cursor = 0;
-    async function worker() {
-      while (cursor < eligible.length) {
-        const i = cursor++;
-        const e = eligible[i];
-        try {
-          await startUpgrade({ managedAgentId: e.id, actor });
-          perAsset.push({ assetId: e.assetId, managedAgentId: e.id, ok: true });
-        } catch (err: any) {
-          perAsset.push({ assetId: e.assetId, managedAgentId: e.id, ok: false, error: err?.message ?? String(err) });
-        }
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(POOL, eligible.length) }, () => worker()));
-
-    res.json({
-      eligible: eligible.length,
-      queued:   perAsset.filter((p) => p.ok).length,
-      perAsset,
-    });
+    const actor = req.session?.username || "unknown";
+    const result = await upgradeAllOutdated(actor);
+    res.json(result);
   } catch (err) { next(err); }
 });
 
@@ -1576,6 +1566,34 @@ router.put("/agents/auto-build-setting", async (req, res, next) => {
       where:  { key: "agent.autoBuildOnVersionMismatch" },
       update: { value: { enabled } as any },
       create: { key: "agent.autoBuildOnVersionMismatch", value: { enabled } as any },
+    });
+    res.json({ enabled });
+  } catch (err) { next(err); }
+});
+
+/**
+ * Auto-upgrade setting. When enabled, every successful agent build
+ * triggers an upgrade-all fan-out for active+outdated agents. Default
+ * OFF — operators must opt in so a routine `agent/VERSION` bump doesn't
+ * surprise-reboot every installed agent during a Polaris update.
+ */
+router.get("/agents/auto-upgrade-setting", async (_req, res, next) => {
+  try {
+    const { prisma } = await import("../../db.js");
+    const row = await prisma.setting.findUnique({ where: { key: "agent.autoUpgradeOnNewBuild" } });
+    const v = row?.value as { enabled?: boolean } | null;
+    res.json({ enabled: v?.enabled === true });
+  } catch (err) { next(err); }
+});
+
+router.put("/agents/auto-upgrade-setting", async (req, res, next) => {
+  try {
+    const { prisma } = await import("../../db.js");
+    const enabled = !!(req.body && req.body.enabled);
+    await prisma.setting.upsert({
+      where:  { key: "agent.autoUpgradeOnNewBuild" },
+      update: { value: { enabled } as any },
+      create: { key: "agent.autoUpgradeOnNewBuild", value: { enabled } as any },
     });
     res.json({ enabled });
   } catch (err) { next(err); }

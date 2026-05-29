@@ -28,6 +28,7 @@
   "use strict";
 
   var _agentBuildPollTimer = null;
+  var _installedSummaryPollTimer = null;
 
   // Lightweight time formatters local to this module so it stays self-
   // contained — the server-settings.js page has richer formatters (with
@@ -227,16 +228,18 @@
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.3rem 0 0">' + srvUrlHint + '</p>' +
       '</div>';
 
-    var autoBuildRow =
+    var autoUpgradeRow =
       '<div style="margin-top:0.75rem;padding-top:0.5rem;border-top:1px solid var(--color-border);' +
           'display:flex;align-items:center;gap:8px;font-size:0.85rem">' +
         '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">' +
-          '<input type="checkbox" id="agent-auto-build-toggle" style="width:15px;height:15px;flex-shrink:0">' +
-          '<span>Auto-build agent binaries when <code>agent/VERSION</code> changes</span>' +
+          '<input type="checkbox" id="agent-auto-upgrade-toggle" style="width:15px;height:15px;flex-shrink:0">' +
+          '<span>Auto-upgrade installed agents when a new build is available</span>' +
         '</label>' +
       '</div>' +
       '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.3rem 0 0 23px">' +
-        'Fires once on server boot when the on-disk manifest lags the agent source. Disable for strict supply-chain controls.' +
+        'After every successful build, fans out the new binary to every active agent whose version lags. ' +
+        'Each host briefly bounces its agent service; bearer + cert pin survive. Default off — leave disabled if you want ' +
+        'every fleet-wide upgrade to be human-initiated.' +
       '</p>';
 
     // Cert-pin rotation slot. Populated async by renderAgentCertPinRotation()
@@ -267,7 +270,7 @@
       installedSummarySlot +
       cleanupLine +
       serverUrlRow +
-      autoBuildRow +
+      autoUpgradeRow +
       certPinRotationSlot;
 
     var btn = document.getElementById("btn-agent-build");
@@ -292,66 +295,174 @@
       });
     }
 
-    var autoToggle = document.getElementById("agent-auto-build-toggle");
-    if (autoToggle) {
-      api.serverSettings.agentAutoBuildSettingGet().then(function (s) {
-        autoToggle.checked = s.enabled !== false;
+    var autoUpgradeToggle = document.getElementById("agent-auto-upgrade-toggle");
+    if (autoUpgradeToggle) {
+      api.serverSettings.agentAutoUpgradeSettingGet().then(function (s) {
+        autoUpgradeToggle.checked = s.enabled === true;
       }).catch(function () {
-        autoToggle.checked = true;
+        autoUpgradeToggle.checked = false;
       });
-      autoToggle.addEventListener("change", function () {
-        api.serverSettings.agentAutoBuildSettingSet(autoToggle.checked).catch(function (err) {
+      autoUpgradeToggle.addEventListener("change", function () {
+        api.serverSettings.agentAutoUpgradeSettingSet(autoUpgradeToggle.checked).catch(function (err) {
           showToast("Failed to save setting: " + err.message, "error");
-          autoToggle.checked = !autoToggle.checked;
+          autoUpgradeToggle.checked = !autoUpgradeToggle.checked;
         });
       });
     }
 
-    // Installed-summary line + Upgrade-all button. Loaded async so the
-    // rest of the card paints first; on failure the slot stays empty.
-    api.serverSettings.agentInstalledSummary().then(function (s) {
-      var slot = document.getElementById("agent-installed-summary");
-      if (!slot) return;
-      if (!s.totalActive) return;
-      if (!s.outOfDate) {
-        slot.innerHTML =
-          '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.5rem 0 0">' +
-            s.totalActive + ' installed agent' + (s.totalActive > 1 ? "s" : "") +
-            ' running v' + escapeHtml(s.currentVersion || "?") + ' (current).' +
-          '</p>';
-        return;
-      }
-      slot.innerHTML =
-        '<div style="margin-top:0.75rem;padding-top:0.5rem;border-top:1px solid var(--color-border);' +
-            'display:flex;align-items:center;gap:0.5rem;font-size:0.85rem">' +
-          '<span style="color:var(--color-text-secondary);flex:1">' +
-            s.outOfDate + ' of ' + s.totalActive + ' installed agent' + (s.totalActive > 1 ? "s" : "") +
-            ' running an older version' +
-            (s.currentVersion ? ' (current: v' + escapeHtml(s.currentVersion) + ')' : "") + '.' +
-          '</span>' +
-          '<button class="btn btn-secondary" id="btn-agent-upgrade-all" style="padding:4px 12px;font-size:0.8rem">Upgrade all</button>' +
-        '</div>';
-      var btn = document.getElementById("btn-agent-upgrade-all");
-      if (btn) btn.addEventListener("click", function () {
-        showConfirm(
-          "Push the new agent binary to all " + s.outOfDate + " out-of-date host" + (s.outOfDate > 1 ? "s" : "") + "?\n\n" +
-          "Each host briefly bounces its agent service while the binary is replaced. " +
-          "Bearers and cert pins are preserved — no re-enrollment required.",
-        ).then(function (ok) {
-          if (!ok) return;
-          api.serverSettings.agentUpgradeAll().then(function (r) {
-            showToast("Queued " + r.queued + " of " + r.eligible + " upgrade(s)", "success");
-            api.serverSettings.agentInventory().then(renderAgentBuildInventory);
-          }).catch(function (err) {
-            showToast("Upgrade-all failed: " + err.message, "error");
-          });
-        });
-      });
-    }).catch(function () { /* leave the slot empty */ });
+    // Installed-summary slot + live upgrade-all status panel.
+    // refreshInstalledSummary populates the slot from the latest
+    // /agents/installed-summary response. When there are agents
+    // currently upgrading (installStatus="upgrading") OR upgrade_failed
+    // rows that haven't been acknowledged, the panel auto-polls every
+    // 2.5 s. The poll loop reconstructs status from DB state, so the
+    // panel survives page reloads / tab switches mid-upgrade.
+    refreshInstalledSummary();
 
     // Cert pin rotation pane. Loaded async; failure leaves the slot showing
     // a one-line error so operators know to refresh.
     renderAgentCertPinRotation();
+  }
+
+  // Populate the #agent-installed-summary slot with the latest counts
+  // from /agents/installed-summary and bind the Upgrade-all button.
+  // When `upgrading > 0` (an upgrade-all is fanning out in real time)
+  // OR `upgradeFailed > 0` (operator needs to see the failures), keep
+  // polling on a 2.5 s tick so the counts tick down live. When neither
+  // is true the timer is stopped — no background work after the panel
+  // settles.
+  function refreshInstalledSummary() {
+    api.serverSettings.agentInstalledSummary().then(function (s) {
+      var slot = document.getElementById("agent-installed-summary");
+      if (!slot) return;
+      slot.innerHTML = _renderInstalledSummaryHTML(s);
+      _wireInstalledSummary(s);
+      // Schedule the next poll if there's still in-flight work.
+      var stillBusy = (s.upgrading && s.upgrading > 0) || (s.upgradeFailed && s.upgradeFailed > 0);
+      if (_installedSummaryPollTimer) {
+        clearTimeout(_installedSummaryPollTimer);
+        _installedSummaryPollTimer = null;
+      }
+      if (stillBusy) {
+        _installedSummaryPollTimer = setTimeout(refreshInstalledSummary, 2500);
+      }
+    }).catch(function () { /* leave whatever was there */ });
+  }
+
+  function _renderInstalledSummaryHTML(s) {
+    if (!s || !s.totalActive) {
+      // No installed agents at all — drop the panel entirely.
+      return "";
+    }
+    // Active upgrade-all in flight: render the live status panel with
+    // counts of upgrading / failed / current. Operators reload-safe.
+    if (s.upgrading > 0 || s.upgradeFailed > 0 || s.outOfDate > 0) {
+      var parts = [];
+      if (s.upgrading > 0) {
+        parts.push(
+          '<span style="color:var(--color-accent)"><strong>' + s.upgrading + '</strong> upgrading</span>'
+        );
+      }
+      var current = s.byVersion && s.currentVersion ? (s.byVersion[s.currentVersion] || 0) : 0;
+      if (current > 0 && s.currentVersion) {
+        parts.push(
+          '<span style="color:var(--color-success)"><strong>' + current + '</strong> on v' +
+          escapeHtml(s.currentVersion) + '</span>'
+        );
+      }
+      if (s.outOfDate > 0) {
+        parts.push(
+          '<span style="color:var(--color-text-secondary)"><strong>' + s.outOfDate + '</strong> out-of-date</span>'
+        );
+      }
+      if (s.upgradeFailed > 0) {
+        parts.push(
+          '<span style="color:var(--color-danger)"><strong>' + s.upgradeFailed + '</strong> failed</span>'
+        );
+      }
+      var statusLine = parts.join(' <span style="color:var(--color-text-tertiary)">·</span> ');
+
+      // Upgrade-all button: visible only when there's stale work AND
+      // nothing currently upgrading (so a second click doesn't fan out
+      // a duplicate batch on top of one already running). Disabled when
+      // no current manifest version.
+      var upgradeBtn = "";
+      if (s.outOfDate > 0 && (s.upgrading || 0) === 0) {
+        upgradeBtn =
+          '<button class="btn btn-secondary" id="btn-agent-upgrade-all" style="padding:4px 12px;font-size:0.8rem">' +
+            'Upgrade all' +
+          '</button>';
+      } else if (s.upgrading > 0) {
+        upgradeBtn =
+          '<button class="btn btn-secondary" disabled style="padding:4px 12px;font-size:0.8rem;opacity:0.6">' +
+            'Upgrading…' +
+          '</button>';
+      }
+      // Acknowledge-failed button: clears the failure noise from the
+      // panel. (Failed rows stay on the asset's Polaris Agent panel —
+      // this just dismisses the aggregate counter on the build card.)
+      var ackBtn = "";
+      if (s.upgradeFailed > 0 && (s.upgrading || 0) === 0) {
+        ackBtn =
+          ' <button class="btn-icon" id="btn-agent-upgrade-failed-ack" style="padding:2px 8px;font-size:0.75rem" ' +
+            'title="Dismiss the failed-counter. Per-asset failures remain visible on each asset\'s Polaris Agent panel.">' +
+            '×' +
+          '</button>';
+      }
+      return (
+        '<div style="margin-top:0.75rem;padding-top:0.5rem;border-top:1px solid var(--color-border);' +
+            'display:flex;align-items:center;gap:0.5rem;font-size:0.85rem">' +
+          '<span style="flex:1">' + statusLine + ackBtn + '</span>' +
+          upgradeBtn +
+        '</div>'
+      );
+    }
+    // Steady state — everything on the current version.
+    return (
+      '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.5rem 0 0">' +
+        s.totalActive + ' installed agent' + (s.totalActive > 1 ? "s" : "") +
+        ' running v' + escapeHtml(s.currentVersion || "?") + ' (current).' +
+      '</p>'
+    );
+  }
+
+  function _wireInstalledSummary(s) {
+    var btn = document.getElementById("btn-agent-upgrade-all");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        showConfirm(
+          "Push the new agent binary to all " + s.outOfDate + " out-of-date host" + (s.outOfDate > 1 ? "s" : "") + "?\n\n" +
+          "Each host briefly bounces its agent service while the binary is replaced. " +
+          "Bearers and cert pins are preserved — no re-enrollment required."
+        ).then(function (ok) {
+          if (!ok) return;
+          btn.disabled = true;
+          api.serverSettings.agentUpgradeAll().then(function (r) {
+            showToast("Queued " + r.queued + " of " + r.eligible + " upgrade(s)", "success");
+            // Kick the live poll immediately so the status panel shows
+            // upgrading=N right away rather than waiting for a manual refresh.
+            refreshInstalledSummary();
+          }).catch(function (err) {
+            showToast("Upgrade-all failed: " + err.message, "error");
+            btn.disabled = false;
+          });
+        });
+      });
+    }
+    var ackBtn = document.getElementById("btn-agent-upgrade-failed-ack");
+    if (ackBtn) {
+      ackBtn.addEventListener("click", function () {
+        // Local-only dismissal: hide the counter for this card session.
+        // Per-asset failure rows live on the asset's Polaris Agent panel
+        // and persist until the operator retries or force-removes.
+        var slot = document.getElementById("agent-installed-summary");
+        if (slot) {
+          var ackSummary = Object.assign({}, s, { upgradeFailed: 0 });
+          slot.innerHTML = _renderInstalledSummaryHTML(ackSummary);
+          _wireInstalledSummary(ackSummary);
+        }
+      });
+    }
   }
 
   // Renders the Cert pin rotation pane in the slot reserved by

@@ -603,6 +603,39 @@ async function doRun(state: BuildState): Promise<void> {
     },
   });
 
+  // Best-effort auto-upgrade: if the operator opted in via the
+  // `agent.autoUpgradeOnNewBuild` Setting, fan out an upgrade-all for
+  // every active agent whose version lags the brand-new manifest.
+  // Fire-and-forget — each per-agent startUpgrade is itself
+  // fire-and-forget under the hood, so this returns quickly. Default
+  // OFF (opt-in) so routine agent/VERSION bumps don't surprise-reboot
+  // every installed agent during an unrelated Polaris update.
+  void (async () => {
+    try {
+      const row = await prisma.setting.findUnique({ where: { key: "agent.autoUpgradeOnNewBuild" } });
+      const enabled = (row?.value as { enabled?: boolean } | null)?.enabled === true;
+      if (!enabled) return;
+      const { upgradeAllOutdated } = await import("./agentInstallService.js");
+      const result = await upgradeAllOutdated("system:auto-upgrade-on-new-build");
+      if (result.eligible === 0) return;
+      logger.info(
+        { eligible: result.eligible, queued: result.queued, version: state.version },
+        "Auto-upgrade fanned out post-build",
+      );
+      await logEvent({
+        action:       "agent.upgrade_all_auto_kickoff",
+        level:        "info",
+        actor:        "system:auto-upgrade-on-new-build",
+        resourceType: "polaris-agent",
+        resourceName: state.version,
+        message:      `Auto-upgrade kicked off post-build: queued ${result.queued} of ${result.eligible} eligible agent(s) to v${state.version}`,
+        details:      { buildId: state.buildId, version: state.version, eligible: result.eligible, queued: result.queued },
+      });
+    } catch (err) {
+      logger.warn({ err }, "Post-build auto-upgrade hook crashed");
+    }
+  })();
+
   // Best-effort auto-prune: after a successful build the new version is
   // safely on disk + manifest. Now's the time to drop older versions
   // beyond the keep-last-N window. Failure here doesn't fail the build —
