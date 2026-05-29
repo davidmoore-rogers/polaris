@@ -1,0 +1,81 @@
+# Local dev stack — Polaris app + Postgres in podman/docker.
+#
+# Production deployment is split-role + nginx-fronted (see docker-compose.yml
+# and docs/INSTALL.md). This file is dev-only: single-process app
+# (POLARIS_ROLE unset = "all"), no nginx, no TLS, no Prometheus.
+#
+# Usage:
+#   podman compose -f compose.dev.yml up -d postgres
+#   podman compose -f compose.dev.yml run --rm app npm install
+#   podman compose -f compose.dev.yml run --rm app npx prisma migrate deploy
+#   podman compose -f compose.dev.yml run --rm app npm run db:seed
+#   podman compose -f compose.dev.yml up app
+#
+# App reaches Postgres at host `postgres` (compose service name); the host
+# can reach it at 127.0.0.1:5432 for ad-hoc psql / DBeaver.
+
+# Project name — overrides the default (which would be the directory name
+# "ip-management"). Containers become polaris-app-1 / polaris-postgres-1
+# and named volumes become polaris_*.
+name: polaris
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: polaris
+      POSTGRES_PASSWORD: polaris
+      POSTGRES_DB: polaris
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polaris -d polaris"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # DATABASE_URL is intentionally NOT set here so the first-run setup
+      # wizard kicks in on a fresh `compose up`. The wizard collects DB
+      # creds from the operator and writes them to /app/.env (which is the
+      # bind-mounted host .env), then subsequent boots pick them up. To
+      # bypass the wizard, set DATABASE_URL in .env or uncomment below.
+      # DATABASE_URL: postgresql://polaris:polaris@postgres:5432/polaris
+      NODE_ENV: development
+      PORT: "3000"
+      LOG_LEVEL: info
+      SESSION_SECRET: dev-only-not-a-real-secret-replace-in-prod
+      # POLARIS_STATE_DIR intentionally NOT set in dev. When set, the wizard
+      # writes .env / .setup-complete under it, but `npm run dev`'s
+      # `node --env-file=.env` reads /app/.env relative to WORKDIR — so the
+      # two get out of sync and boot fails with "DATABASE_URL is missing
+      # but .setup-complete is present". With it unset, state files land
+      # in the bind-mounted project root, which is already gitignored
+      # (data/, public/uploads/, .setup-complete, .env).
+    volumes:
+      # Source tree bind-mounted: hot reload via tsx watch, plus this is
+      # where the wizard writes .env / .setup-complete and where data/ +
+      # public/uploads/ accumulate (all gitignored).
+      - .:/app
+      # Named volume shadows the bind-mounted node_modules so Windows-built
+      # binaries (or an absent host node_modules) don't poison the
+      # container's Linux native modules.
+      - node_modules:/app/node_modules
+    ports:
+      - "127.0.0.1:3000:3000"
+    command: sh -c "test -d node_modules/.bin && test -f node_modules/.bin/tsx || npm install && npm run dev"
+
+volumes:
+  pgdata:
+  node_modules:

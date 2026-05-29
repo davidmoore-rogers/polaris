@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.7
+#
+# Dev-only image used by compose.dev.yml. The production build lives in
+# Dockerfile (multi-stage, npm prune --omit=dev). This one keeps the dev
+# deps, runs tsx watch, and expects the project to be bind-mounted in.
+FROM node:20-bookworm
+
+# Native-module compile deps (argon2, etc.) + postgres client for ad-hoc
+# psql sessions inside the container. iputils-ping is used by ICMP probes
+# in the monitoring code path.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 build-essential \
+      postgresql-client \
+      iputils-ping \
+      ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# State dir (backups, agent binaries, uploads, .setup-complete marker) lives
+# on a named volume so it survives `compose down` and doesn't pollute the
+# bind-mounted source tree on the Windows host.
+ENV POLARIS_STATE_DIR=/app/state
+RUN mkdir -p /app/state/data/backups /app/state/data/agents /app/state/public/uploads
+
+EXPOSE 3000
+
+# The compose file overrides `command:`; this default is a sane no-op for
+# `podman run` of the bare image.
+CMD ["node", "--version"]
