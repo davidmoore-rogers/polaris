@@ -6,6 +6,7 @@
 
 import { Netmask } from "netmask";
 import { AppError } from "../utils/errors.js";
+import { logger } from "../utils/logger.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
 import { getFmgWorker } from "./fmgWorker.js";
 import {
@@ -199,7 +200,7 @@ async function resolveDeviceMgmtIp(
   try {
     const filteredRes = await rpc(
       baseUrl,
-      { id: 2, method: "get", params: [{ url, filter: [["name", "==", mgmtIfaceName]], fields: ["name", "ip"] }] },
+      { id: 2, method: "get", params: [{ url, filter: [["name", "==", mgmtIfaceName]], fields: ["name", "ip"], loadsub: 0 }] },
       config.apiUser, config.apiToken, config.verifySsl, signal, integrationId,
     );
     const list = filteredRes.result?.[0]?.data;
@@ -216,7 +217,7 @@ async function resolveDeviceMgmtIp(
   // of one larger response.
   const fullRes = await rpc(
     baseUrl,
-    { id: 2, method: "get", params: [{ url, fields: ["name", "ip"] }] },
+    { id: 2, method: "get", params: [{ url, fields: ["name", "ip"], loadsub: 0 }] },
     config.apiUser, config.apiToken, config.verifySsl, signal, integrationId,
   );
   const all = fullRes.result?.[0]?.data;
@@ -263,7 +264,7 @@ export async function testRandomFortiGate(
   const devicesPayload: JsonRpcRequest = {
     id: 1,
     method: "get",
-    params: [{ url: `/dvmdb/adom/${adom}/device`, fields: ["name", "hostname", "ip"] }],
+    params: [{ url: `/dvmdb/adom/${adom}/device`, fields: ["name", "hostname", "ip"], loadsub: 0 }],
   };
 
   let devicesRes: JsonRpcResponse;
@@ -447,6 +448,33 @@ function describeRpcParams(payload: JsonRpcRequest): string {
   return first.url ?? "?";
 }
 
+// Bounded retry for transient FortiManager faults. Per the FortiManager API
+// Best Practices Guide ("implement retry logic with exponential backoff for
+// transient errors"), only TRANSIENT failures are retried — HTTP 5xx and
+// network-layer faults (timeout / connection reset). PERMANENT failures
+// (HTTP 401/403/404/405, and the FMG RPC -11 surfaced by callers) are thrown
+// immediately. Retries run INSIDE the caller's FmgWorker lane slot, so the
+// proxy lane stays serialized (concurrency=1) and a struggling FMG isn't piled
+// on. The outward AppError.httpStatus stays 502 for every transport failure
+// (unchanged) — the upstream HTTP code is encoded in the message and used only
+// to decide retryability, never re-exposed to Polaris's own clients (a raw 401
+// would otherwise trip the frontend's session-expired logout).
+const RPC_MAX_ATTEMPTS = 3;        // 1 initial + 2 retries
+const RPC_RETRY_BASE_MS = 500;     // backoff: 500ms then 1500ms
+
+function markRetryable<E extends object>(err: E): E {
+  (err as { retryable?: boolean }).retryable = true;
+  return err;
+}
+
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) { resolve(); return; }
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+  });
+}
+
 async function rpcInner(
   url: string,
   payload: JsonRpcRequest,
@@ -455,8 +483,37 @@ async function rpcInner(
   verifySsl?: boolean,
   externalSignal?: AbortSignal,
 ): Promise<JsonRpcResponse> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < RPC_MAX_ATTEMPTS; attempt++) {
+    if (externalSignal?.aborted) break;
+    try {
+      return await rpcAttempt(url, payload, apiUser, apiToken, verifySsl, externalSignal);
+    } catch (err) {
+      lastErr = err;
+      const retryable = (err as { retryable?: boolean })?.retryable === true;
+      if (!retryable || externalSignal?.aborted || attempt === RPC_MAX_ATTEMPTS - 1) throw err;
+      const backoffMs = RPC_RETRY_BASE_MS * (attempt * 2 + 1); // 500ms, then 1500ms
+      logger.debug(
+        { url: describeRpcParams(payload), attempt: attempt + 1, backoffMs, message: (err as Error)?.message },
+        "fmg rpc: transient failure — backing off then retrying",
+      );
+      await sleepWithAbort(backoffMs, externalSignal);
+    }
+  }
+  throw lastErr;
+}
+
+async function rpcAttempt(
+  url: string,
+  payload: JsonRpcRequest,
+  apiUser: string,
+  apiToken: string,
+  verifySsl?: boolean,
+  externalSignal?: AbortSignal,
+): Promise<JsonRpcResponse> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 10_000);
 
   // If an external signal fires (e.g. integration re-saved), abort this request too
   const onExternalAbort = () => controller.abort();
@@ -472,20 +529,32 @@ async function rpcInner(
     };
     if (apiUser) headers["access_user"] = apiUser;
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-
-    if (res.status === 401 || res.status === 403) {
-      throw new AppError(502, "Authentication failed — check your API token");
+    let res: Awaited<ReturnType<typeof fetch>>;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (err: any) {
+      // Intentional external abort (integration re-saved) — propagate as-is, never retry.
+      if (externalSignal?.aborted && !timedOut) throw err;
+      // Timeout or transient connection fault — retryable.
+      const detail = timedOut ? "timed out after 10s" : (err?.cause?.code || err?.message || "fetch failed");
+      throw markRetryable(new AppError(502, `FortiManager connection error — ${detail}`));
     }
 
-    if (!res.ok) {
-      throw new AppError(502, `FortiManager returned HTTP ${res.status}`);
+    // Permanent (never retry): auth, permission, missing resource, bad method.
+    if (res.status === 401) throw new AppError(502, "FortiManager auth failed (HTTP 401) — invalid or expired API token/session");
+    if (res.status === 403) throw new AppError(502, "FortiManager permission denied (HTTP 403) — check the API user's admin profile");
+    if (res.status === 404) throw new AppError(502, "FortiManager endpoint not found (HTTP 404)");
+    if (res.status === 405) throw new AppError(502, "FortiManager method not allowed (HTTP 405)");
+    // Transient (retry): server-side 5xx.
+    if (res.status === 500 || res.status === 502 || res.status === 503 || res.status === 504) {
+      throw markRetryable(new AppError(502, `FortiManager returned HTTP ${res.status}`));
     }
+    if (!res.ok) throw new AppError(502, `FortiManager returned HTTP ${res.status}`);
 
     return (await res.json()) as JsonRpcResponse;
   } finally {
@@ -1562,7 +1631,7 @@ export async function discoverDhcpSubnets(
       const mgmtIfacePayload: JsonRpcRequest = {
         id: 6,
         method: "get",
-        params: [{ url: `/pm/config/device/${deviceName}/global/system/interface`, filter: [["name", "==", mgmtIfaceName]], fields: ["name", "ip"] }],
+        params: [{ url: `/pm/config/device/${deviceName}/global/system/interface`, filter: [["name", "==", mgmtIfaceName]], fields: ["name", "ip"], loadsub: 0 }],
       };
       const mgmtIfaceRes = await rpc(baseUrl, mgmtIfacePayload, apiUser, apiToken, verifySsl, signal, integrationId);
       const ifaceList = mgmtIfaceRes.result?.[0]?.data;
@@ -1918,6 +1987,7 @@ export async function discoverDhcpSubnets(
           params: [{
             url: `/pm/config/device/${deviceName}/global/switch-controller/managed-switch`,
             fields: ["switch-id", "name"],
+            loadsub: 0,
           }],
         },
         apiUser, apiToken, verifySsl, signal,
@@ -1992,6 +2062,7 @@ export async function discoverDhcpSubnets(
           params: [{
             url: `/pm/config/device/${deviceName}/vdom/root/wireless-controller/wtp`,
             fields: ["wtp-id", "name"],
+            loadsub: 0,
           }],
         },
         apiUser, apiToken, verifySsl, signal,
@@ -2182,6 +2253,7 @@ export async function discoverDhcpSubnets(
             params: [{
               url: `/pm/config/device/${deviceName}/global/system/global`,
               fields: ["gui-device-latitude", "gui-device-longitude", "latitude", "longitude"],
+              loadsub: 0,
             }],
           },
           apiUser, apiToken, verifySsl, signal,
