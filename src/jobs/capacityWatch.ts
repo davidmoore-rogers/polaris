@@ -13,10 +13,10 @@
  * where the DB is on the verge of dying and the UI is moments from
  * becoming unreachable.
  *
- * Best-effort. The `pgTuningNeeded` / `recommendedRamGb` inputs to the
- * snapshot are passed in as false here rather than re-running the full
- * pg-settings query — the job's value is in catching disk + autovacuum
- * transitions out-of-band, not in re-running the tuning advice on a timer.
+ * Best-effort. The `pgTuningNeeded` input to the snapshot is passed in as
+ * false here rather than re-running the full pg-settings query — the job's
+ * value is in catching disk + autovacuum + disk-I/O-pressure transitions
+ * out-of-band, not in re-running the tuning advice on a timer.
  * The route handler runs the full computation when an admin loads the
  * Maintenance tab, so the snapshot stays accurate on the surface that
  * actually displays the reasons.
@@ -35,11 +35,13 @@ const INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 async function runCapacityWatch(): Promise<void> {
   try {
     await runInstrumentedJob("capacityWatch", async () => {
-      // The job doesn't probe pg_settings, so leave both legacy signals false.
-      // Disk + autovacuum + projected-size transitions are still caught — and
-      // those are the ones operators actually need to hear about between
-      // page loads. The full route still surfaces pgTuningNeeded for admins.
-      const snap = await getCapacitySnapshot({ recommendedRamGb: 0, pgTuningNeeded: false });
+      // The job doesn't probe pg_settings, so leave pgTuningNeeded false — the
+      // full route still surfaces it for admins. Disk + autovacuum +
+      // projected-size + disk-I/O-pressure transitions are still caught here
+      // (db_io_pressure / track_io_timing_off read pg_stat_database inside the
+      // snapshot, not pg_settings), and this 10-min tick is what warms the
+      // pg_stat_database rate baseline so the first measured verdict lands.
+      const snap = await getCapacitySnapshot({ pgTuningNeeded: false });
       await recordCapacityTransition(snap);
       setDbPoolGauges(snap.database.connectionPool);
       setCapacityGauges({

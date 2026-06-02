@@ -26,9 +26,10 @@
  *            volume, autovacuum stale >7d on a populated sample table,
  *            projected size > 8× host RAM
  *   amber  — disk 10–20% on any volume, dead-tup >20%, projected > 4× RAM,
- *            recommendedRamGb, pgTuningNeeded
- *   watch  — disk 20–30% on any volume. Drives the transition Event to
- *            syslog/SFTP archival but NOT the navbar banner — gives ops a
+ *            pgTuningNeeded, sustained disk-read pressure (db_io_pressure)
+ *   watch  — disk 20–30% on any volume; disk-read pressure building or
+ *            track_io_timing off (can't measure). Drives the transition Event
+ *            to syslog/SFTP archival but NOT the navbar banner — gives ops a
  *            "you have weeks, not minutes" signal before amber.
  */
 
@@ -48,6 +49,14 @@ import { BACKUP_DIR, STATE_DIR } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
 import { getDirectDatabaseUrl, isPgbouncerMode } from "../utils/dbConnections.js";
 import { logEvent } from "../api/routes/events.js";
+import {
+  deriveDbIoVerdict,
+  IO_VERDICT_STALE_MS,
+  DB_IO_WATCH_BACKENDS,
+  DB_IO_WARNING_BACKENDS,
+  type DbIoReading,
+  type DbIoVerdict,
+} from "./capacityDbIo.js";
 
 export type Severity = "ok" | "watch" | "warning" | "critical";
 
@@ -115,6 +124,78 @@ async function readPgStatActivity(): Promise<{ in_use: number; max: number }> {
   } catch {
     return { in_use: 0, max: 0 };
   }
+}
+
+// ─── Disk-read pressure (pg_stat_database) ───────────────────────────────────
+//
+// Replaces the old size-based `ram_insufficient` heuristic. The pure rate math
+// + tunable thresholds live in capacityDbIo.ts (dependency-free, unit-tested);
+// this module owns the DB read + module-local rate state. We flag RAM pressure
+// only when the host is genuinely waiting on storage — medium-aware (HDD vs
+// SATA vs NVMe) and OS-page-cache-aware for free, because an in-cache read
+// returns from read() in ~0ms. blk_read_time is only populated when
+// `track_io_timing = on`; when it's off we can't measure and nudge the operator
+// to enable it instead of guessing.
+
+// Module-local rate state — same accepted tradeoff as `peakConnectionCount`
+// above: resets on process restart, re-warms within one capacityWatch tick.
+// capacityWatch and the Maintenance route both run on the `web` role, the same
+// process, so the baseline is shared between them.
+let prevDbIo: DbIoReading | null = null;
+let lastIoVerdict: { verdict: DbIoVerdict; atMs: number } | null = null;
+
+async function readPgStatDatabaseIo(): Promise<DbIoReading | null> {
+  const directPool = getDirectStatsPool();
+  // clock_timestamp() (not now()) so elapsed reflects wall time, not txn start.
+  const sql = `
+    SELECT
+      blks_read::float8                                   AS "blksRead",
+      blks_hit::float8                                    AS "blksHit",
+      COALESCE(blk_read_time, 0)::float8                  AS "blkReadTime",
+      (current_setting('track_io_timing') = 'on')         AS "trackIoTiming",
+      (extract(epoch FROM clock_timestamp()) * 1000.0)::float8 AS "nowMs"
+    FROM pg_stat_database
+    WHERE datname = current_database()
+  `;
+  type Row = { blksRead: number; blksHit: number; blkReadTime: number; trackIoTiming: boolean; nowMs: number };
+  try {
+    const row = directPool
+      ? (await directPool.query<Row>(sql)).rows[0]
+      : (await prisma.$queryRawUnsafe<Row[]>(sql))[0];
+    if (!row) return null;
+    return {
+      nowMs: Number(row.nowMs),
+      blksRead: Number(row.blksRead),
+      blksHit: Number(row.blksHit),
+      blkReadTime: Number(row.blkReadTime),
+      trackIoTiming: Boolean(row.trackIoTiming),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read pg_stat_database, fold it against the previous reading into the snapshot
+ * `io` shape, and advance the module-local rate state. A measured verdict is
+ * cached so a sub-window Maintenance-tab refresh between capacityWatch ticks
+ * reuses it instead of flickering the reason off.
+ */
+async function computeDbIoState(): Promise<CapacitySnapshot["database"]["io"]> {
+  const reading = await readPgStatDatabaseIo();
+  if (!reading) {
+    return { trackIoTiming: false, measured: false, avgBackendsBlockedOnDisk: null, windowSeconds: null };
+  }
+  const verdict = deriveDbIoVerdict(prevDbIo, reading);
+  prevDbIo = reading;
+  if (verdict.measured) {
+    lastIoVerdict = { verdict, atMs: reading.nowMs };
+    return { trackIoTiming: reading.trackIoTiming, ...verdict };
+  }
+  if (lastIoVerdict && reading.nowMs - lastIoVerdict.atMs < IO_VERDICT_STALE_MS) {
+    return { trackIoTiming: reading.trackIoTiming, ...lastIoVerdict.verdict };
+  }
+  return { trackIoTiming: reading.trackIoTiming, measured: false, avgBackendsBlockedOnDisk: null, windowSeconds: null };
 }
 
 function readEnvInt(envName: string, fallback: number): number {
@@ -243,6 +324,32 @@ export interface CapacitySnapshot {
     rollupLastSuccess: {
       hourly: string | null;
       daily:  string | null;
+    };
+    /**
+     * Measured disk-read pressure, derived from `pg_stat_database` between
+     * successive snapshots (rate, not the cumulative-since-reset counters).
+     * Drives the `db_io_pressure` watch/warning and the `track_io_timing_off`
+     * watch — the replacement for the old size-based `ram_insufficient`
+     * heuristic.
+     *
+     * `trackIoTiming` is PostgreSQL's `track_io_timing` GUC: when off,
+     * `blk_read_time` stays 0 so we can't tell OS-cache hits from real disk
+     * reads — `measured` is false and we nudge the operator to enable it.
+     *
+     * `avgBackendsBlockedOnDisk` = Δblk_read_time(ms) / Δelapsed(ms) over the
+     * window — intuitively "average number of connections continuously blocked
+     * on storage reads." Medium-aware for free: a cache miss costs ~5-10ms on
+     * spinning disk, ~0.02ms on NVMe, ~0 on an OS-page-cache hit, so this is
+     * high only when misses are both frequent AND slow.
+     *
+     * `measured` is false on the first snapshot of a process, on too-short a
+     * window, or after a stats reset — consumers must not fire a reason then.
+     */
+    io: {
+      trackIoTiming: boolean;
+      measured: boolean;
+      avgBackendsBlockedOnDisk: number | null;
+      windowSeconds: number | null;
     };
   };
   workload: {
@@ -670,7 +777,6 @@ function volumeFamilyKey(v: VolumeStat): string {
 
 function computeReasons(
   snap: CapacitySnapshot,
-  recommendedRamGb: number,
   pgTuningNeeded: boolean,
   advisor?: AdvisorGapsForReasons,
 ): CapacityReason[] {
@@ -1025,18 +1131,37 @@ function computeReasons(
     });
   }
 
-  // RAM-insufficient and PG-tuning are advisory reasons — the route handler
-  // computes the inputs and passes them in here. `ram_insufficient` shares the
-  // db_ram family with projected_db_large / projected_db_huge so a higher-
-  // severity DB-vs-RAM finding absorbs it in the collapse pass.
-  if (recommendedRamGb > 0) {
-    const installedGb = Math.round(snap.appHost.totalMemoryBytes / (1024 * 1024 * 1024));
+  // ── Disk-read pressure (replaces the old size-based ram_insufficient) ─────
+  // Only meaningful once the DB can't fully fit in RAM — below that, disk
+  // pressure can't come from the working set spilling out of cache. We never
+  // tell the operator a specific GB target (the old "recommended N GB" number
+  // is gone); the signal is qualitative and medium-aware.
+  const io = snap.database.io;
+  const dbExceedsRam = snap.database.sizeBytes > ram;
+  if (dbExceedsRam && !io.trackIoTiming) {
+    // Can't measure without track_io_timing — nudge the operator to enable it
+    // rather than guessing. Own family so a growth warning doesn't collapse
+    // away the "turn on measurement" hint.
     reasons.push({
       severity: "watch",
-      code: "ram_insufficient",
+      code: "track_io_timing_off",
+      family: "pg_io_timing",
+      message: `Can't measure disk-read pressure: PostgreSQL track_io_timing is off, and the database (${formatBytes(snap.database.sizeBytes)}) is larger than host RAM (${formatBytes(ram)}).`,
+      suggestion: "Enable track_io_timing = on (RELOAD, no restart; negligible overhead on modern hardware — verify with pg_test_timing) so Polaris can tell whether reads are actually hitting disk.",
+    });
+  } else if (dbExceedsRam && io.measured && io.avgBackendsBlockedOnDisk !== null && io.avgBackendsBlockedOnDisk >= DB_IO_WATCH_BACKENDS) {
+    // Real, sustained disk-read wait. Shares the db_ram family with
+    // projected_db_large / projected_db_huge so a higher-severity DB-vs-RAM
+    // finding absorbs it in the collapse pass.
+    const avg = io.avgBackendsBlockedOnDisk;
+    const mins = io.windowSeconds ? Math.round(io.windowSeconds / 60) : null;
+    const windowText = mins && mins >= 1 ? ` over the last ${mins} min` : "";
+    reasons.push({
+      severity: avg >= DB_IO_WARNING_BACKENDS ? "warning" : "watch",
+      code: "db_io_pressure",
       family: "db_ram",
-      message: `Host RAM is below the recommended minimum for current database size (installed ${installedGb} GB, recommended ${recommendedRamGb} GB).`,
-      suggestion: `Add RAM, or reduce sample retention to lower the recommended minimum.`,
+      message: `Disk I/O is high — PostgreSQL is spending significant time reading from storage rather than serving from cache (avg ${avg.toFixed(1)} connection(s) blocked on disk${windowText}; host RAM ${formatBytes(ram)}, database ${formatBytes(snap.database.sizeBytes)}).`,
+      suggestion: "Consider adding RAM so more of the working set stays cached. Faster storage (NVMe) or lower sample retention also reduce disk reads — the Capacity Advisor card surfaces retention and cadence levers.",
     });
   }
   if (pgTuningNeeded) {
@@ -1138,8 +1263,6 @@ function deriveSeverity(reasons: CapacityReason[]): Severity {
  * the audit-log Event on severity changes.
  */
 export async function getCapacitySnapshot(opts: {
-  /** 0 = RAM is sufficient; positive = the recommended minimum GB (displayed in the reason). */
-  recommendedRamGb: number;
   pgTuningNeeded: boolean;
   /** Optional advisor-driven gap data. When provided, populates the
    *  `monitor_workers_undersized` / `max_connections_undersized` reasons.
@@ -1189,6 +1312,7 @@ export async function getCapacitySnapshot(opts: {
     dbSizeRow,
     sampleTables,
     connRow,
+    dbIoState,
   ] = await Promise.all([
     getMonitorSettings(),
     getSampleRetention(),
@@ -1206,6 +1330,7 @@ export async function getCapacitySnapshot(opts: {
     ),
     getSampleTableStats(),
     readPgStatActivity(),
+    computeDbIoState(),
   ]);
   // Pull the rollup-job lastSuccess markers separately so the failure mode of
   // a missing Setting row stays simple to reason about (parallel fetch on the
@@ -1298,6 +1423,7 @@ export async function getCapacitySnapshot(opts: {
         maxConnections,
       },
       rollupLastSuccess,
+      io: dbIoState,
     },
     workload: {
       monitoredAssetCount: monitoredCount,
@@ -1308,7 +1434,7 @@ export async function getCapacitySnapshot(opts: {
     },
   };
 
-  snap.reasons = computeReasons(snap, opts.recommendedRamGb, opts.pgTuningNeeded, opts.advisor);
+  snap.reasons = computeReasons(snap, opts.pgTuningNeeded, opts.advisor);
   snap.severity = deriveSeverity(snap.reasons);
   return snap;
 }
@@ -1328,8 +1454,6 @@ export async function getCapacitySnapshot(opts: {
  */
 export async function getCapacitySnapshotWithAdvisor(
   opts: {
-    /** 0 = RAM is sufficient; positive = the recommended minimum GB. */
-    recommendedRamGb: number;
     pgTuningNeeded: boolean;
     pgTuning: import("./capacityAdvisorService.js").PgTuningExternal;
   },
@@ -1346,7 +1470,6 @@ export async function getCapacitySnapshotWithAdvisor(
   // the full snapshot just to inject advisor reasons was doubling the
   // Maintenance tab's first-paint latency.
   const snapshot = await getCapacitySnapshot({
-    recommendedRamGb: opts.recommendedRamGb,
     pgTuningNeeded: opts.pgTuningNeeded,
   });
   // Compute the advisor state against this snapshot.
@@ -1365,7 +1488,7 @@ export async function getCapacitySnapshotWithAdvisor(
   };
   // Re-derive reasons + severity in place with the advisor gaps wired in,
   // so the advisor-driven reasons fire without doing a second snapshot pass.
-  snapshot.reasons = computeReasons(snapshot, opts.recommendedRamGb, opts.pgTuningNeeded, gapsForReasons);
+  snapshot.reasons = computeReasons(snapshot, opts.pgTuningNeeded, gapsForReasons);
   snapshot.severity = deriveSeverity(snapshot.reasons);
   return { snapshot, advisor };
 }

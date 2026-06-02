@@ -123,6 +123,8 @@ function baseSnapshot(opts: {
         pgbossPoolSize: opts.pgbossPoolSize ?? null,
         maxConnections: opts.maxConnections ?? 200,
       },
+      rollupLastSuccess: { hourly: null, daily: null },
+      io: { trackIoTiming: true, measured: false, avgBackendsBlockedOnDisk: null, windowSeconds: null },
     },
     workload: {
       monitoredAssetCount: opts.monitoredAssetCount,
