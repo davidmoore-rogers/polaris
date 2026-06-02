@@ -3435,6 +3435,7 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
       d.interfaces.map((i) => ({
         assetId,
         timestamp: now,
+        cadence:     "fast" as const,
         ifName:      i.ifName,
         adminStatus: i.adminStatus ?? null,
         operStatus:  i.operStatus ?? null,
@@ -3461,6 +3462,7 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
       d.storage.map((s) => ({
         assetId,
         timestamp: now,
+        cadence:    "fast" as const,
         mountPath:  s.mountPath,
         totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
         usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
@@ -3472,6 +3474,7 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
       d.ipsecTunnels.map((t) => ({
         assetId,
         timestamp: now,
+        cadence:         "fast" as const,
         tunnelName:      t.tunnelName,
         parentInterface: t.parentInterface,
         remoteGateway:   t.remoteGateway,
@@ -5908,11 +5911,23 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
   const now = new Date();
   if (result.data) {
     const d = result.data;
+    // Selection-aware cadence: the full scrape covers every entity, so stamp
+    // each row "fast" when its entity is operator-pinned (kept at full
+    // retention + rolled up) and "slow" otherwise (kept 24h, never rolled up).
+    // One indexed PK read per scrape on the slow (~10 min) cadence.
+    const pinned = await prisma.asset.findUnique({
+      where: { id: assetId },
+      select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true },
+    });
+    const pinnedIfaces  = new Set(pinned?.monitoredInterfaces ?? []);
+    const pinnedStorage = new Set(pinned?.monitoredStorage ?? []);
+    const pinnedTunnels = new Set(pinned?.monitoredIpsecTunnels ?? []);
     if (d.interfaces.length > 0) {
       enqueueInterfaceSamples(
         d.interfaces.map((i) => ({
           assetId,
           timestamp: now,
+          cadence:     pinnedIfaces.has(i.ifName) ? ("fast" as const) : ("slow" as const),
           ifName:      i.ifName,
           adminStatus: i.adminStatus ?? null,
           operStatus:  i.operStatus ?? null,
@@ -5939,6 +5954,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
         d.storage.map((s) => ({
           assetId,
           timestamp: now,
+          cadence:    pinnedStorage.has(s.mountPath) ? ("fast" as const) : ("slow" as const),
           mountPath:  s.mountPath,
           totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
           usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
@@ -5950,6 +5966,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
         d.ipsecTunnels.map((t) => ({
           assetId,
           timestamp: now,
+          cadence:         pinnedTunnels.has(t.tunnelName) ? ("fast" as const) : ("slow" as const),
           tunnelName:      t.tunnelName,
           parentInterface: t.parentInterface,
           remoteGateway:   t.remoteGateway,
@@ -7395,11 +7412,16 @@ export async function runStorageFor(assetId: string, labels: WorkItemLabels): Pr
       return "failure";
     }
     const now = new Date();
+    // This dedicated SNMP storage stream walks ALL mountpaths, so stamp each
+    // row by whether its mountPath is operator-pinned (monitoredStorage):
+    // pinned → "fast" (full retention + rollups), unpinned → "slow" (24h).
+    const pinnedStorage = new Set(asset.monitoredStorage ?? []);
     if (storage.length > 0) {
       enqueueStorageSamples(
         storage.map((s) => ({
           assetId,
           timestamp: now,
+          cadence:    pinnedStorage.has(s.mountPath) ? ("fast" as const) : ("slow" as const),
           mountPath:  s.mountPath,
           totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
           usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,

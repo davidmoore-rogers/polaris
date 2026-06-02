@@ -859,6 +859,12 @@ model AssetInterfaceSample {
   // Operator-set free-text comment surfaced on the interface slide-over.
   // FortiOS CMDB `description`; SNMP has no equivalent and leaves this null.
   description String?
+  // Cadence discriminator for selection-aware retention. "fast" = this row came
+  // from the response-time re-walk of an operator-pinned interface
+  // (monitoredInterfaces); "slow" = the full system-info scrape. NULL = legacy
+  // rows written before this column existed — treated as "slow" everywhere.
+  // Pinned/fast rows keep full retention + rollups; slow rows keep 24h, no rollup.
+  cadence     String?
 
   @@id([id, timestamp])
   @@index([assetId, timestamp])
@@ -1022,6 +1028,9 @@ model AssetIpsecTunnelSample {
   incomingBytes   BigInt?
   outgoingBytes   BigInt?
   proxyIdCount    Int?
+  // Cadence discriminator (see AssetInterfaceSample.cadence). "fast" = pinned
+  // tunnel re-walk (monitoredIpsecTunnels); "slow"/NULL = full scrape → 24h.
+  cadence         String?
 
   @@id([id, timestamp])
   @@index([assetId, timestamp])
@@ -1155,6 +1164,9 @@ model AssetStorageSample {
   mountPath  String
   totalBytes BigInt?
   usedBytes  BigInt?
+  // Cadence discriminator (see AssetInterfaceSample.cadence). "fast" = pinned
+  // mountPath re-walk (monitoredStorage); "slow"/NULL = full scrape → 24h.
+  cadence    String?
 
   @@id([id, timestamp])
   @@index([assetId, timestamp])
