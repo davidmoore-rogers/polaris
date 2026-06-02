@@ -704,7 +704,17 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/runSampleRollup.js",
       "./jobs/autoBuildAgents.js",
       "./jobs/discoveryRunReaper.js",
-      "./jobs/integrationConnectionTester.js",
+      // integrationConnectionTester DISABLED 2026-06-02: the 10-min synthetic
+      // /sys/status probe fired false-positive `integration.test.failed`
+      // warnings on FMG (a transient RPC -11 "no valid session" — session reap
+      // or a concurrent call on the shared API-key session — which the tester
+      // hardcodes to "Invalid or expired API token" and stamps as lastTestOk=
+      // false). A manual Test Connection seconds later always succeeds. Probe
+      // disabled here (file kept) pending the planned removal + health-derived-
+      // from-real-discovery-traffic redesign. NOTE: with the probe off, nothing
+      // auto-refreshes lastTestOk — a stuck `false` must be cleared by one
+      // manual Test Connection (discovery scheduler still gates on lastTestOk).
+      // "./jobs/integrationConnectionTester.js",
     ]) await importJob(p);
     // discoveryScheduler exports an explicit starter (it was refactored off the
     // self-start pattern so the discovery worker handler can be injected).
