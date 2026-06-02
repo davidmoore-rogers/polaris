@@ -1880,7 +1880,7 @@ function renderCapacityCriticalAlert(capacity) {
 }
 
 // Polls /pg-tuning at page load to feed the capacity critical alert. Amber and
-// watch reasons (pg_tuning_needed, ram_insufficient, db_pool_undersized, …)
+// watch reasons (pg_tuning_needed, db_io_pressure, db_pool_undersized, …)
 // surface on the Database card; only red drives this sidebar alert.
 function checkCapacity() {
   if (!isAdmin()) return;

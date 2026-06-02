@@ -863,33 +863,11 @@ function buildPgRecommended(): Record<string, { min: number; unit: string; displ
     work_mem:            { min: workMem,        unit: "bytes", display: fmt(workMem) },
     effective_cache_size:{ min: effectiveCache, unit: "bytes", display: fmt(effectiveCache) },
     random_page_cost:    { min: -1,             unit: "cost",  display: "1.1" },
+    // Boolean GUC (RELOAD, no restart). Required so the capacity service can
+    // measure real disk-read wait (blk_read_time) for the db_io_pressure
+    // reason; negligible overhead on vDSO clocks (verify with pg_test_timing).
+    track_io_timing:     { min: -1,             unit: "bool",  display: "on" },
   };
-}
-
-// Returns minimum host RAM (bytes) recommended for a database of the given size.
-// Target: ~2x the DB size (half as Postgres shared_buffers + OS page cache,
-// half as OS/application overhead), with a 4 GB floor. Rounded up to the next
-// power of two to match common server RAM sizes.
-function getMinRecommendedRamBytes(dbSizeBytes: number): number {
-  const GB = 1024 * 1024 * 1024;
-  const target = Math.max(4 * GB, dbSizeBytes * 2);
-  return Math.pow(2, Math.ceil(Math.log2(target / GB))) * GB;
-}
-
-// Server RAM ships in standard sizes (commonly powers of 2: 4/8/16/32/64 GiB),
-// but the kernel reserves a few percent for firmware/iGPU/etc., so totalmem()
-// reports less than the installed amount — a 16 GiB box typically shows up as
-// ~15.4–15.7 GiB. Snap to the nearest power-of-2 GiB when within 10%, so the
-// displayed size matches what the operator put in the slot and the comparison
-// against a power-of-2 recommendation doesn't trip on rounding alone. Falls
-// back to nearest-integer GiB for non-pow2 sizes (12 / 24 / 48 GiB).
-function detectInstalledRamGb(rawBytes: number): number {
-  const GB = 1024 * 1024 * 1024;
-  const rawGb = rawBytes / GB;
-  if (rawGb < 1) return Math.max(1, Math.round(rawGb));
-  const nextPow2 = Math.pow(2, Math.ceil(Math.log2(rawGb)));
-  if (rawGb / nextPow2 >= 0.90) return nextPow2;
-  return Math.round(rawGb);
 }
 
 function parsePgBytes(val: string): number {
@@ -909,8 +887,8 @@ function parsePgBytes(val: string): number {
 
 /**
  * Compute the pg-tuning data: per-setting current vs recommended pairs, the
- * pg_settings config-file path, plus the `recommendedRamGb` and `pgTuningNeeded`
- * values consumed by capacityService.
+ * pg_settings config-file path, plus the `pgTuningNeeded` flag consumed by
+ * capacityService.
  *
  * Extracted into a helper so both `/pg-tuning` and `/capacity-advisor` can
  * reuse it without duplicating the PG_SETTINGS query. Returns null when no
@@ -925,8 +903,6 @@ interface PgTuningRow {
 interface PgTuningResult {
   settings: PgTuningRow[];
   pgConfigFile: string | null;
-  /** 0 = RAM is sufficient; positive = the recommended minimum GB (next power-of-2 above 2× DB size). */
-  recommendedRamGb: number;
   pgTuningNeeded: boolean;
 }
 async function computePgTuning(): Promise<PgTuningResult | null> {
@@ -943,32 +919,9 @@ async function computePgTuning(): Promise<PgTuningResult | null> {
   if (!triggered.length) return null;
 
   const pgSettings = await prisma.$queryRawUnsafe<{ name: string; setting: string; unit: string | null }[]>(
-    `SELECT name, setting, unit FROM pg_settings WHERE name IN ('shared_buffers', 'work_mem', 'effective_cache_size', 'random_page_cost', 'config_file')`
+    `SELECT name, setting, unit FROM pg_settings WHERE name IN ('shared_buffers', 'work_mem', 'effective_cache_size', 'random_page_cost', 'track_io_timing', 'config_file')`
   );
   const pgConfigFile = pgSettings.find((s) => s.name === "config_file")?.setting || null;
-
-  const dbSizeResult = await prisma.$queryRawUnsafe<{ size: bigint }[]>(
-    // Catalog-only sum; see the matching comment in capacityService.ts and the
-    // /database route handler. pg_database_size() is fs-scan-bound at prod
-    // scale with TimescaleDB chunks (hundreds-to-thousands of relations) and
-    // dominates the pg-tuning recommendation wall-clock.
-    `SELECT (current_setting('block_size')::bigint * SUM(relpages::bigint))::bigint AS size
-       FROM pg_class WHERE relkind IN ('r', 'i', 't', 'm')`
-  );
-  const dbSizeBytes = Number(dbSizeResult[0]?.size ?? 0);
-  const GB = 1024 * 1024 * 1024;
-  const currentRam = totalmem();
-  // Compare against the raw 2× target so pow2 rounding doesn't create a
-  // false positive: a 20 GB DB has a raw target of 40 GB. If the server has
-  // 32 GB the warning fires correctly (32 < 40); if the DB is 15 GB the
-  // target is 30 GB and 32 GB is sufficient — no false positive.
-  // The display value (next power-of-2 above the raw target) is used only
-  // in the suggestion text so it names a standard server RAM tier to aim for.
-  const rawTargetBytes = Math.max(4 * GB, dbSizeBytes * 2);
-  const ramInsufficient = currentRam < rawTargetBytes;
-  const recommendedRamGb = ramInsufficient
-    ? Math.pow(2, Math.ceil(Math.log2(rawTargetBytes / GB)))
-    : 0;
 
   const PG_RECOMMENDED = buildPgRecommended();
   const settings: PgTuningRow[] = pgSettings.map((s) => {
@@ -981,6 +934,12 @@ async function computePgTuning(): Promise<PgTuningResult | null> {
       const val = parseFloat(s.setting);
       ok = val <= 1.1;
       return { name: s.name, current: String(val), recommended: rec.display, ok };
+    }
+    if (s.name === "track_io_timing") {
+      // Boolean GUC — "on" when enabled. Needed so db_io_pressure can measure
+      // real disk-read wait; "off" contributes to the pg_tuning_needed reason.
+      ok = s.setting === "on";
+      return { name: s.name, current: s.setting, recommended: rec.display, ok };
     }
     if (s.unit === "8kB") {
       currentBytes = parseInt(s.setting, 10) * 8192;
@@ -998,7 +957,7 @@ async function computePgTuning(): Promise<PgTuningResult | null> {
   }).filter((s): s is PgTuningRow => s !== null);
 
   const allOk = settings.every((s) => s.ok);
-  return { settings, pgConfigFile, recommendedRamGb, pgTuningNeeded: !allOk };
+  return { settings, pgConfigFile, pgTuningNeeded: !allOk };
 }
 
 /** Project the pg-tuning rows into the shape the Capacity Advisor consumes. */
@@ -1038,7 +997,7 @@ router.get("/pg-tuning", async (_req, res, next) => {
   try {
     const tuning = await computePgTuning();
     if (!tuning) {
-      const capacity = await getCapacitySnapshot({ recommendedRamGb: 0, pgTuningNeeded: false });
+      const capacity = await getCapacitySnapshot({ pgTuningNeeded: false });
       void recordCapacityTransition(capacity);
       return res.json({ settings: [], pgConfigFile: null, capacity });
     }
@@ -1049,7 +1008,6 @@ router.get("/pg-tuning", async (_req, res, next) => {
     // alongside `capacity` to render the inline pg-tuning rows under the
     // `pg_tuning_needed` reason.
     const capacity = await getCapacitySnapshot({
-      recommendedRamGb: tuning.recommendedRamGb,
       pgTuningNeeded: tuning.pgTuningNeeded,
     });
 
@@ -1165,7 +1123,6 @@ router.get("/capacity-advisor", async (_req, res, next) => {
     const pgTuningExternal = pgTuningToAdvisorShape(tuning);
     const { getCapacitySnapshotWithAdvisor } = await import("../../services/capacityService.js");
     const { snapshot, advisor } = await getCapacitySnapshotWithAdvisor({
-      recommendedRamGb: tuning?.recommendedRamGb ?? 0,
       pgTuningNeeded: tuning?.pgTuningNeeded ?? false,
       pgTuning: pgTuningExternal,
     });
@@ -1197,7 +1154,6 @@ router.post("/capacity-advisor/stage", async (req, res, next) => {
     const pgTuningExternal = pgTuningToAdvisorShape(tuning);
     const { getCapacitySnapshotWithAdvisor } = await import("../../services/capacityService.js");
     const { advisor } = await getCapacitySnapshotWithAdvisor({
-      recommendedRamGb: tuning?.recommendedRamGb ?? 0,
       pgTuningNeeded: tuning?.pgTuningNeeded ?? false,
       pgTuning: pgTuningExternal,
     });
