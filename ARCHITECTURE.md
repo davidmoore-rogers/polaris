@@ -1009,7 +1009,15 @@ UserDashboard                   -- Per-user dashboard layout (widget set + posit
 Event                           -- Audit log, 7-day rolling retention
   id            UUID PK
   timestamp     DateTime
-  level         String          -- "info" | "warning" | "error"
+  level         String          -- "info" | "warning" | "error" (display source of truth)
+  levelRank     Int @default(0) -- Numeric severity stamped at write time by logEvent from `level`:
+                                -- 0=info, 1=warning, 2=error (room for -1=debug / 3=critical
+                                -- later). The Events list endpoint's sortBy=level dispatches
+                                -- to orderBy: { levelRank } so severity sort matches operator
+                                -- expectations (info < warning < error) instead of the
+                                -- alphabetical accident (error < info < warning). Backed by
+                                -- the (levelRank, timestamp) composite index for "severity
+                                -- within the 7-day window" Index Scan plans.
   action        String          -- e.g. "block.created", "integration.discover.started"
   resourceType  String?
   resourceId    String?
@@ -1017,6 +1025,10 @@ Event                           -- Audit log, 7-day rolling retention
   actor         String?         -- username that triggered the event
   message       String
   details       Json?
+  -- Indexed on: timestamp, action, resourceType, level, (levelRank,timestamp),
+  -- (actor,timestamp), (resourceName,timestamp). The trailing-timestamp
+  -- composite indexes back the per-column sort UX added when the Events page
+  -- adopted the server-side TableSF pattern.
 
 Conflict                        -- Discovery conflict resolution (two variants)
   id                UUID PK

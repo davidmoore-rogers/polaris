@@ -3,7 +3,9 @@
  */
 
 import { Router } from "express";
+import { z } from "zod";
 import { prisma } from "../../db.js";
+import { AppError } from "../../utils/errors.js";
 import { requirePermission } from "../middleware/permissions.js";
 import {
   getArchiveSettings,
@@ -21,45 +23,149 @@ import {
 
 const LEVEL_ORDER: Record<string, number> = { info: 0, warning: 1, error: 2 };
 
+// Sort whitelist — Prisma orderBy must never accept user-supplied strings
+// unvalidated. `level` is mapped onto `levelRank` so severity sort matches
+// operator expectations (info < warning < error) rather than alphabetical.
+const SORT_WHITELIST = new Set([
+  "timestamp", "level", "action", "resourceType", "resourceName", "actor", "message",
+]);
+
+// Text-filter operators accepted from the TableSF text-column operator
+// dropdown. `contains` is the default and the only form pre-this-change.
+const TEXT_OPS = new Set(["contains", "not_contains", "empty", "is_not_empty"]);
+
+const ListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  // Multi-value enum filters: CSV. Single-value back-compat is preserved
+  // by treating a 1-element split as { equals: v } downstream.
+  level: z.string().optional(),
+  resourceType: z.string().optional(),
+  resourceId: z.string().optional(),
+  // Text filters + their per-field operator. Operator defaults to `contains`
+  // when omitted, matching pre-this-change behavior.
+  action: z.string().optional(),
+  actionOp: z.string().optional(),
+  actor: z.string().optional(),
+  actorOp: z.string().optional(),
+  message: z.string().optional(),
+  messageOp: z.string().optional(),
+  // Date range on `timestamp`. The retention cutoff is the floor regardless
+  // of what `since` says.
+  since: z.string().optional(),
+  until: z.string().optional(),
+  // Sort whitelist; validated below.
+  sortBy: z.string().optional(),
+  sortDir: z.enum(["asc", "desc"]).optional(),
+});
+
+/** Translate a text-filter op + value into a Prisma `where` clause fragment. */
+function buildTextFilter(value: string | undefined, op: string | undefined): unknown {
+  const operator = op && TEXT_OPS.has(op) ? op : "contains";
+  if (operator === "empty") {
+    return { OR: [{ equals: null }, { equals: "" }] };
+  }
+  if (operator === "is_not_empty") {
+    return { AND: [{ not: null }, { not: "" }] };
+  }
+  const v = (value || "").trim();
+  if (!v) return undefined;
+  if (operator === "not_contains") {
+    return { not: { contains: v, mode: "insensitive" } };
+  }
+  return { contains: v, mode: "insensitive" };
+}
+
+/** CSV → string[]; empty entries dropped; returns undefined for no value. */
+function csvToArray(raw: string | undefined): string[] | undefined {
+  if (!raw) return undefined;
+  const parts = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  return parts.length ? parts : undefined;
+}
+
 const router = Router();
 
-// GET /api/v1/events — list events (newest first, paginated)
+// GET /api/v1/events — list events (newest first by default, paginated).
+//
+// Supports multi-value enum filters on `level` and `resourceType` (CSV),
+// operator-aware text filters on `action` / `actor` / `message` (each takes
+// an optional `<field>Op` of contains | not_contains | empty | is_not_empty,
+// defaulting to contains), and a sort whitelist (timestamp | level | action |
+// resourceType | resourceName | actor | message) honored via `sortBy` +
+// `sortDir`. `sortBy=level` dispatches to `orderBy: { levelRank }` so the
+// operator sees severity order rather than alphabetical (error < info <
+// warning).
+//
+// Pre-this-change single-value callers (`?level=info`) continue to work
+// unchanged — the multi-value path is opted into by passing a CSV.
 router.get("/", requirePermission("events", "read"), async (req, res, next) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 200);
-    const offset = parseInt(req.query.offset as string, 10) || 0;
-    const level = req.query.level as string | undefined;
-    const action = req.query.action as string | undefined;
-    const resourceType = req.query.resourceType as string | undefined;
-    const resourceId = req.query.resourceId as string | undefined;
-    const message = req.query.message as string | undefined;
-    const since = req.query.since as string | undefined;
-    const until = req.query.until as string | undefined;
+    const parsed = ListQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      throw new AppError(400, "Invalid query: " + parsed.error.issues[0].message);
+    }
+    const q = parsed.data;
+    const limit = Math.min(q.limit ?? 50, 200);
+    const offset = q.offset ?? 0;
 
     const { retentionDays } = await getRetentionSettings();
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
     // Caller-supplied since narrows the window; the retention cutoff is the
     // floor regardless. until is optional and unbounded by default.
     const tsFilter: Record<string, Date> = { gte: cutoff };
-    if (since) {
-      const sinceD = new Date(since);
+    if (q.since) {
+      const sinceD = new Date(q.since);
       if (!isNaN(+sinceD) && +sinceD > +cutoff) tsFilter.gte = sinceD;
     }
-    if (until) {
-      const untilD = new Date(until);
+    if (q.until) {
+      const untilD = new Date(q.until);
       if (!isNaN(+untilD)) tsFilter.lte = untilD;
     }
     const where: Record<string, unknown> = { timestamp: tsFilter };
-    if (level) where.level = level;
-    if (action) where.action = { contains: action };
-    if (resourceType) where.resourceType = resourceType;
-    if (resourceId) where.resourceId = resourceId;
-    if (message) where.message = { contains: message, mode: "insensitive" };
+
+    // Multi-value enum filters. CSV with >1 entry → Prisma { in: [...] };
+    // exactly 1 entry → { equals: v } so the back-compat single-value path
+    // serializes identically to pre-this-change.
+    const levels = csvToArray(q.level);
+    if (levels) where.level = levels.length === 1 ? levels[0] : { in: levels };
+
+    const resourceTypes = csvToArray(q.resourceType);
+    if (resourceTypes) where.resourceType = resourceTypes.length === 1 ? resourceTypes[0] : { in: resourceTypes };
+
+    if (q.resourceId) where.resourceId = q.resourceId;
+
+    // Operator-aware text filters. `action`, `actor`, `message` each take an
+    // optional <field>Op param; missing op → contains (default). The actor
+    // filter was silently dropped pre-this-change (frontend already sent it,
+    // backend schema didn't define it) — adding it here is a drive-by fix.
+    const actionFilter = buildTextFilter(q.action, q.actionOp);
+    if (actionFilter !== undefined) where.action = actionFilter;
+
+    const actorFilter = buildTextFilter(q.actor, q.actorOp);
+    if (actorFilter !== undefined) where.actor = actorFilter;
+
+    const messageFilter = buildTextFilter(q.message, q.messageOp);
+    if (messageFilter !== undefined) where.message = messageFilter;
+
+    // Sort whitelist. Reject anything outside the catalogue with a 400 —
+    // Prisma orderBy must never accept user-supplied strings unvalidated.
+    let sortBy: string = "timestamp";
+    if (q.sortBy) {
+      if (!SORT_WHITELIST.has(q.sortBy)) {
+        throw new AppError(400, `Invalid sortBy: ${q.sortBy}`);
+      }
+      sortBy = q.sortBy;
+    }
+    const sortDir: "asc" | "desc" = q.sortDir ?? "desc";
+    // sortBy=level → orderBy on the numeric severity column so operators see
+    // info < warning < error rather than the alphabetical accident.
+    const orderColumn = sortBy === "level" ? "levelRank" : sortBy;
+    const orderBy = { [orderColumn]: sortDir };
 
     const [events, total] = await Promise.all([
       prisma.event.findMany({
         where,
-        orderBy: { timestamp: "desc" },
+        orderBy,
         skip: offset,
         take: limit,
       }),
@@ -203,6 +309,7 @@ export async function logEvent(input: LogEventInput): Promise<void> {
   try {
     const { minLevel } = await getCachedRetentionSettings();
     if ((LEVEL_ORDER[input.level ?? "info"] ?? 0) < (LEVEL_ORDER[minLevel] ?? 0)) return;
+    const level = input.level || "info";
     await prisma.event.create({
       data: {
         action: input.action,
@@ -211,7 +318,12 @@ export async function logEvent(input: LogEventInput): Promise<void> {
         resourceName: input.resourceName,
         actor: input.actor,
         message: input.message,
-        level: input.level || "info",
+        level,
+        // Numeric severity stamped at write time. The list endpoint's
+        // sortBy=level dispatches to orderBy: { levelRank } so the operator
+        // sees severity order, not alphabetical. Falls back to 0 (info) for
+        // any unknown level string.
+        levelRank: LEVEL_ORDER[level] ?? 0,
         details: input.details as any,
       },
     });

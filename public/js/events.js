@@ -7,6 +7,14 @@ var _eventsCurrentOffset = 0;
 var _eventsCurrentTotal = 0;
 var _eventsCurrentPage = [];
 var _eventsLayout = null;
+// TableSF instance — held at module scope so the PDF/CSV export helpers can
+// read its current filter + sort state (they no longer have a DOM strip to
+// scrape). The Events page operates TableSF in *server-side mode*: every row
+// that reaches the tbody is already server-filtered/sorted, so sf.apply() is
+// never called — onTableSFChange translates state into API params and
+// re-fetches instead. Required by the 235k–350k-row Event table; see
+// TEMPLATES.md → "Sortable + filterable data table (server-side mode)".
+var _eventsSF = null;
 
 (function () {
   var pageSize = _eventsPageSize;
@@ -16,9 +24,18 @@ var _eventsLayout = null;
   function _saveEventsPrefs() {
     if (typeof currentUsername === "undefined" || !currentUsername) return;
     try {
+      // Persist filter + sort state alongside the column layout so reloading
+      // the page restores what the operator was looking at, matching the
+      // other list pages (Assets, Subnets, Blocks, etc.).
+      var filters = _eventsSF ? _eventsSF._filters : null;
+      var sort = _eventsSF
+        ? { key: _eventsSF._sortKey, dir: _eventsSF._sortDir }
+        : null;
       localStorage.setItem("polaris-prefs-events-" + currentUsername, JSON.stringify({
         pageSize: pageSize,
         layout: _eventsLayout ? _eventsLayout.getPrefs() : null,
+        filters: filters,
+        sort: sort,
       }));
     } catch (_) {}
   }
@@ -36,6 +53,15 @@ var _eventsLayout = null;
         if (psSel) psSel.value = String(p.pageSize);
       }
       if (_eventsLayout && p.layout) _eventsLayout.setPrefs(p.layout);
+      if (_eventsSF) {
+        if (p.filters && typeof p.filters === "object") _eventsSF._filters = p.filters;
+        if (p.sort && typeof p.sort === "object") {
+          if (p.sort.key) _eventsSF._sortKey = p.sort.key;
+          if (p.sort.dir === "asc" || p.sort.dir === "desc") _eventsSF._sortDir = p.sort.dir;
+        }
+        _eventsSF.restoreFilterUI();
+        _eventsSF._updateIcons();
+      }
     } catch (_) {}
   }
 
@@ -43,31 +69,84 @@ var _eventsLayout = null;
   _eventsLayout = setupColumnLayout(eventsTable, {
     onChange: _saveEventsPrefs,
   });
-  var prefsReady;
-  if (typeof userReady !== "undefined" && userReady && typeof userReady.then === "function") {
-    prefsReady = userReady.then(_restoreEventsPrefs);
-  } else {
-    _restoreEventsPrefs();
-    prefsReady = Promise.resolve();
+
+  // Cached set of distinct resourceType values seen in the latest response —
+  // used to populate the dynamic multi-select on the Resource column. Refreshed
+  // every fetch (cheap: <=10 entries in practice) so newly observed types
+  // appear in the filter as soon as they're written.
+  var _resourceTypeOptions = [];
+
+  /**
+   * Translate the live TableSF filter + sort state into API query params for
+   * GET /api/v1/events. Server-side mode: every filter goes over the wire,
+   * nothing client-side. Mirrors the parameter shape extended by the same
+   * commit that adds this mode to the route (CSV multi-value enums,
+   * <field>Op-aware text filters, sortBy/sortDir whitelist).
+   */
+  function _buildEventsQuery() {
+    var filters = _eventsSF ? _eventsSF._filters || {} : {};
+    var params = {
+      limit: pageSize,
+      offset: currentOffset,
+    };
+
+    // Multi-select enums → CSV.
+    if (Array.isArray(filters.level) && filters.level.length) {
+      params.level = filters.level.join(",");
+    }
+    if (Array.isArray(filters.resourceType) && filters.resourceType.length) {
+      params.resourceType = filters.resourceType.join(",");
+    }
+
+    // Text-column filters carry an operator. TableSF stores them as:
+    //   plain string         → { value: s, op: "contains" }   (default)
+    //   { op: "not-contains", q }
+    //   { op: "empty" }
+    //   { op: "notempty" }
+    // The backend accepts contains | not_contains | empty | is_not_empty.
+    function pushText(field, raw) {
+      if (raw == null) return;
+      if (typeof raw === "string") {
+        var v = raw.trim();
+        if (!v) return;
+        params[field] = v;
+        // op defaults to contains; no need to send it explicitly.
+      } else if (typeof raw === "object") {
+        if (raw.op === "empty") {
+          params[field + "Op"] = "empty";
+        } else if (raw.op === "notempty") {
+          params[field + "Op"] = "is_not_empty";
+        } else if (raw.op === "not-contains") {
+          var q = (raw.q || "").trim();
+          if (!q) return;
+          params[field] = q;
+          params[field + "Op"] = "not_contains";
+        }
+      }
+    }
+    pushText("action", filters.action);
+    pushText("actor", filters.actor);
+    pushText("message", filters.message);
+
+    // Date-range filter on the timestamp column maps to since/until.
+    if (filters.timestamp && filters.timestamp.type === "date") {
+      if (filters.timestamp.from) params.since = filters.timestamp.from + "T00:00:00";
+      if (filters.timestamp.to)   params.until = filters.timestamp.to   + "T23:59:59.999";
+    }
+
+    // Sort state → sortBy/sortDir. The route whitelists the column set;
+    // sortBy=level dispatches to orderBy: { levelRank } server-side.
+    if (_eventsSF && _eventsSF._sortKey) {
+      params.sortBy = _eventsSF._sortKey;
+      params.sortDir = _eventsSF._sortDir === "asc" ? "asc" : "desc";
+    }
+    return params;
   }
 
   async function loadEvents() {
-    var level = document.getElementById("filter-level").value;
-    var resourceType = document.getElementById("filter-resource").value;
-    var action = document.getElementById("filter-action").value.trim();
-    var actor = document.getElementById("filter-actor").value.trim();
-    var message = document.getElementById("filter-message").value.trim();
-
+    var params = _buildEventsQuery();
     try {
-      var data = await api.events.list({
-        limit: pageSize,
-        offset: currentOffset,
-        level: level || undefined,
-        resourceType: resourceType || undefined,
-        action: action || undefined,
-        actor: actor || undefined,
-        message: message || undefined,
-      });
+      var data = await api.events.list(params);
 
       var events = data.events || [];
       currentTotal = data.total || 0;
@@ -77,10 +156,43 @@ var _eventsLayout = null;
       _eventsCurrentPage = events;
       renderTable(events);
       renderPagination();
+
+      // Refresh the dynamic Resource-column multi-select with the distinct
+      // resourceType values seen so far. Merge with the prior set so a value
+      // that fell off the current page doesn't disappear from the filter.
+      if (_eventsSF) {
+        var seen = {};
+        _resourceTypeOptions.forEach(function (v) { seen[v] = true; });
+        events.forEach(function (ev) {
+          if (ev.resourceType) seen[ev.resourceType] = true;
+        });
+        var sorted = Object.keys(seen).sort();
+        if (sorted.length) {
+          _resourceTypeOptions = sorted;
+          _eventsSF.setColumnOptions("resourceType", sorted);
+        }
+      }
     } catch (err) {
       document.getElementById("events-tbody").innerHTML =
         '<tr><td colspan="7" class="empty-state">Failed to load events</td></tr>';
     }
+  }
+
+  // Wire TableSF on the events table. Server-side mode: never call sf.apply();
+  // the onChange callback resets offset to 0 and triggers a fresh fetch with
+  // the live filter + sort state translated into API params.
+  _eventsSF = new TableSF("events-tbody", function () {
+    currentOffset = 0;
+    loadEvents();
+    _saveEventsPrefs();
+  });
+
+  var prefsReady;
+  if (typeof userReady !== "undefined" && userReady && typeof userReady.then === "function") {
+    prefsReady = userReady.then(_restoreEventsPrefs);
+  } else {
+    _restoreEventsPrefs();
+    prefsReady = Promise.resolve();
   }
 
   function renderTable(events) {
@@ -183,33 +295,15 @@ var _eventsLayout = null;
     });
   }
 
-  // Filters
-  document.getElementById("filter-level").addEventListener("change", function () { currentOffset = 0; loadEvents(); });
-  document.getElementById("filter-resource").addEventListener("change", function () { currentOffset = 0; loadEvents(); });
+  // Page size + Refresh — the only non-TableSF controls left. Every other
+  // filter / sort lives on the column headers via TableSF and feeds into
+  // loadEvents() through the onTableSFChange callback above.
   document.getElementById("filter-pagesize").addEventListener("change", function () {
     pageSize = parseInt(this.value, 10) || 15;
     _eventsPageSize = pageSize;
     currentOffset = 0;
     loadEvents();
     _saveEventsPrefs();
-  });
-
-  var actionTimer;
-  document.getElementById("filter-action").addEventListener("input", function () {
-    clearTimeout(actionTimer);
-    actionTimer = setTimeout(function () { currentOffset = 0; loadEvents(); }, 400);
-  });
-
-  var actorTimer;
-  document.getElementById("filter-actor").addEventListener("input", function () {
-    clearTimeout(actorTimer);
-    actorTimer = setTimeout(function () { currentOffset = 0; loadEvents(); }, 400);
-  });
-
-  var messageTimer;
-  document.getElementById("filter-message").addEventListener("input", function () {
-    clearTimeout(messageTimer);
-    messageTimer = setTimeout(function () { currentOffset = 0; loadEvents(); }, 400);
   });
 
   document.getElementById("btn-refresh").addEventListener("click", function () { loadEvents(); });
@@ -1240,14 +1334,47 @@ function getAlertsFormData() {
   });
 })();
 
+// Pulled by the "Export → All filtered results" path so the exported set
+// honors whatever the operator has selected on the table headers. Reads
+// TableSF state via the same translation _buildEventsQuery uses; mirrors
+// the multi-value-CSV / <field>Op-aware shape the route accepts.
 function _getEventFilters() {
-  return {
-    level: document.getElementById("filter-level").value || undefined,
-    resourceType: document.getElementById("filter-resource").value || undefined,
-    action: document.getElementById("filter-action").value.trim() || undefined,
-    actor: document.getElementById("filter-actor").value.trim() || undefined,
-    message: document.getElementById("filter-message").value.trim() || undefined,
-  };
+  var sf = _eventsSF;
+  if (!sf) return {};
+  var filters = sf._filters || {};
+  var out = {};
+  if (Array.isArray(filters.level) && filters.level.length) {
+    out.level = filters.level.join(",");
+  }
+  if (Array.isArray(filters.resourceType) && filters.resourceType.length) {
+    out.resourceType = filters.resourceType.join(",");
+  }
+  function pushText(field, raw) {
+    if (raw == null) return;
+    if (typeof raw === "string") {
+      var v = raw.trim();
+      if (v) out[field] = v;
+    } else if (typeof raw === "object") {
+      if (raw.op === "empty") out[field + "Op"] = "empty";
+      else if (raw.op === "notempty") out[field + "Op"] = "is_not_empty";
+      else if (raw.op === "not-contains") {
+        var q = (raw.q || "").trim();
+        if (q) { out[field] = q; out[field + "Op"] = "not_contains"; }
+      }
+    }
+  }
+  pushText("action", filters.action);
+  pushText("actor", filters.actor);
+  pushText("message", filters.message);
+  if (filters.timestamp && filters.timestamp.type === "date") {
+    if (filters.timestamp.from) out.since = filters.timestamp.from + "T00:00:00";
+    if (filters.timestamp.to)   out.until = filters.timestamp.to   + "T23:59:59.999";
+  }
+  if (sf._sortKey) {
+    out.sortBy  = sf._sortKey;
+    out.sortDir = sf._sortDir === "asc" ? "asc" : "desc";
+  }
+  return out;
 }
 
 async function handleEventExport(mode, fmt) {

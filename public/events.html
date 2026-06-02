@@ -42,30 +42,8 @@
         </div>
       </div>
 
-      <div class="filter-bar">
-        <label>Level</label>
-        <select id="filter-level" style="width:auto">
-          <option value="">All</option>
-          <option value="info">Info</option>
-          <option value="warning">Warning</option>
-          <option value="error">Error</option>
-        </select>
-        <label>Resource</label>
-        <select id="filter-resource" style="width:auto">
-          <option value="">All</option>
-          <option value="block">Blocks</option>
-          <option value="subnet">Networks</option>
-          <option value="reservation">Reservations</option>
-          <option value="asset">Assets</option>
-          <option value="integration">Integrations</option>
-        </select>
-        <label>Action</label>
-        <input type="text" id="filter-action" placeholder="e.g. created, deleted, discover..." style="width:180px">
-        <label>User</label>
-        <input type="text" id="filter-actor" placeholder="e.g. admin" style="width:120px">
-        <label>Message</label>
-        <input type="text" id="filter-message" placeholder="search text..." style="width:200px">
-        <label style="margin-left:auto">Show</label>
+      <div class="filter-bar" style="justify-content:flex-end">
+        <label>Show</label>
         <select id="filter-pagesize" style="width:auto">
           <option value="15" selected>15</option>
           <option value="25">25</option>
@@ -81,12 +59,12 @@
         <table>
           <thead>
             <tr>
-              <th style="width:160px" data-col-id="timestamp">Timestamp</th>
-              <th style="width:70px"  data-col-id="level">Level</th>
-              <th style="width:140px" data-col-id="action">Action</th>
-              <th style="width:100px" data-col-id="resource">Resource</th>
-              <th                       data-col-id="message">Message</th>
-              <th style="width:100px" data-col-id="user">User</th>
+              <th style="width:160px" data-col-id="timestamp"    data-sf-key="timestamp"    data-sf-type="date">Timestamp</th>
+              <th style="width:70px"  data-col-id="level"        data-sf-key="level"        data-sf-type="string" data-sf-options="info|warning|error">Level</th>
+              <th style="width:140px" data-col-id="action"       data-sf-key="action"       data-sf-type="string">Action</th>
+              <th style="width:100px" data-col-id="resource"     data-sf-key="resourceType" data-sf-type="string" data-sf-options="">Resource</th>
+              <th                       data-col-id="message"    data-sf-key="message"      data-sf-type="string">Message</th>
+              <th style="width:100px" data-col-id="user"         data-sf-key="actor"        data-sf-type="string">User</th>
               <th style="width:60px"  data-col-id="actions" data-col-required="true"></th>
             </tr>
           </thead>

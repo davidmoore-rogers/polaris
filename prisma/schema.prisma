@@ -415,6 +415,12 @@ model Event {
   id           String   @id @default(uuid())
   timestamp    DateTime @default(now())
   level        String   @default("info") // info, warning, error
+  // Numeric severity, stamped at write time from `level`:
+  //   0=info, 1=warning, 2=error (room for -1=debug / 3=critical later).
+  // The frontend renders `level`; sortBy=level on the list endpoint
+  // dispatches to orderBy: { levelRank } so severity sort matches operator
+  // expectations rather than alphabetical (error < info < warning).
+  levelRank    Int      @default(0)
   action       String // e.g. "block.created", "integration.discover.started"
   resourceType String? // e.g. "block", "subnet", "integration"
   resourceId   String?
@@ -427,6 +433,9 @@ model Event {
   @@index([action])
   @@index([resourceType])
   @@index([level])
+  @@index([levelRank, timestamp])
+  @@index([actor, timestamp])
+  @@index([resourceName, timestamp])
   @@map("events")
 }
 

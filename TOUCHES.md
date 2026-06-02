@@ -1563,7 +1563,7 @@ Listed alphabetically.
 **Used by:** `src/jobs/pruneEvents.ts,25 — scheduled archive/export`; `src/jobs/decommissionStaleAssets.ts — inactivity threshold`; `src/api/routes/events.ts — admin CRUD endpoints`; `capacityService.ts — capacity transition Event creation`. ~8 call sites.
 
 **Invariants:**
-- All successful Events are written to `prisma.event.create()` by callers (routes, services, jobs); eventArchiveService does not write Events, only manages their export/retention.
+- All successful Events are written to `prisma.event.create()` by callers (routes, services, jobs); eventArchiveService does not write Events, only manages their export/retention. The canonical helper is `logEvent` in [src/api/routes/events.ts](src/api/routes/events.ts) — it consults `getCachedRetentionSettings().minLevel` to drop sub-threshold events, and stamps the numeric `levelRank` (0=info, 1=warning, 2=error) at write time so the Events list endpoint's `sortBy=level` can dispatch to `orderBy: { levelRank }` for severity-ordered sort. Direct `prisma.event.create()` callers must stamp `levelRank` themselves; nothing in-tree bypasses `logEvent` today.
 - Archive export (SFTP/SCP) reads Events older than cutoff, writes JSON file, transfers via ssh/sftp spawn, then deletes from DB (via pruneEvents job).
 - Retention cache (1 min TTL) avoids DB read on every Event write; callers using `getCachedRetentionSettings()` must accept stale data.
 - Asset decommission threshold (0 = disabled) is in months; lastSeen older than that triggers `decommissioned` status in a separate 24h job.
