@@ -1149,14 +1149,6 @@ async function confirmDeleteSubnet(id, cidr, reservationCount) {
 
 function val(id) { return document.getElementById(id).value.trim(); }
 
-function debounce(fn, ms) {
-  var timer;
-  return function () {
-    clearTimeout(timer);
-    timer = setTimeout(fn, ms);
-  };
-}
-
 /* ─── PDF Export ──────────────────────────────────────────────────────────── */
 
 (function () {

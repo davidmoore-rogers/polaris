@@ -1546,11 +1546,3 @@ function generateEventCsv(events) {
   downloadCsv(headers, rows, filename);
   showToast("Exported " + events.length + " events to " + filename);
 }
-
-function debounce(fn, ms) {
-  var timer;
-  return function () {
-    clearTimeout(timer);
-    timer = setTimeout(fn, ms);
-  };
-}

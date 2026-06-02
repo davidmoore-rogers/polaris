@@ -313,11 +313,3 @@ function _compressIPv6(bigint) {
   var R = groups.slice(bestStart + bestLen).map(function (g) { return g.toString(16); }).join(":");
   return L + "::" + R;
 }
-
-function debounce(fn, ms) {
-  var timer;
-  return function () {
-    clearTimeout(timer);
-    timer = setTimeout(fn, ms);
-  };
-}

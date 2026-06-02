@@ -17,6 +17,19 @@
  * value). Selected values are matched case-insensitively against the row's
  * value via exact equality, and the filter is stored as an array.
  */
+
+// Shared debounce. Declared at the top of table-sf.js (loaded before every
+// consumer in every HTML) so TableSF._wireTextFilter can reach it without
+// requiring each host page to redeclare it locally. Also reachable by any
+// page-level code via the same global hoist (e.g. blocks.js's tag filter).
+function debounce(fn, ms) {
+  var timer;
+  return function () {
+    clearTimeout(timer);
+    timer = setTimeout(fn, ms);
+  };
+}
+
 function TableSF(tbodyId, onChange) {
   var tbody = document.getElementById(tbodyId);
   this._thead = tbody ? tbody.closest("table").querySelector("thead") : null;

@@ -9212,14 +9212,6 @@ function dateInputVal(isoStr) {
 
 function val(id) { return document.getElementById(id).value.trim(); }
 
-function debounce(fn, ms) {
-  var timer;
-  return function () {
-    clearTimeout(timer);
-    timer = setTimeout(fn, ms);
-  };
-}
-
 /* ─── DNS Lookup ─────────────────────────────────────────────────────────── */
 
 async function singleDnsLookup(id, name) {

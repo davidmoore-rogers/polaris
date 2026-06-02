@@ -1366,14 +1366,3 @@ function collectRegionPicker(idPrefix) {
   return out;
 }
 
-// TableSF expects a global `debounce` for its inline-filter input — every
-// page that uses TableSF (assets.js / blocks.js / subnets.js) declares its
-// own copy at the bottom of the file. Mirror the pattern here so the
-// Users page's TableSF instance can wire its filter inputs.
-function debounce(fn, ms) {
-  var timer;
-  return function () {
-    clearTimeout(timer);
-    timer = setTimeout(fn, ms);
-  };
-}
