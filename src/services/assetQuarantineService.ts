@@ -275,24 +275,29 @@ export async function pushQuarantineToFortigate(
         })),
       });
     } else {
-      // Reconcile: add missing, remove stale.
+      // Reconcile in ONE call: PUT the full desired MAC set on the parent
+      // target. FortiOS CMDB PUT replaces the object's `macs` child table with
+      // the provided list, so this adds missing entries and removes stale ones
+      // atomically — instead of one POST/DELETE round-trip per MAC (FortiManager
+      // API Best Practices Guide: multiplex multiple objects into one request).
+      // The create path above already multiplexes the same `macs` array shape,
+      // and `callFortiOs` PUT carries the body on both transports (FMG proxy +
+      // direct FortiGate), so this keeps FMG↔FortiGate parity.
       const desiredSet = new Set(desiredMacs);
-      const toAdd = desiredMacs.filter((m) => !existingMacs.has(m));
-      const toRemove = Array.from(existingMacs).filter((m) => !desiredSet.has(m));
-
-      for (const mac of toAdd) {
+      const needsReconcile =
+        desiredMacs.some((m) => !existingMacs.has(m)) ||
+        Array.from(existingMacs).some((m) => !desiredSet.has(m));
+      if (needsReconcile) {
         await callFortiOs<unknown>(
           t,
-          "POST",
-          `/api/v2/cmdb/user/quarantine/targets/${encodeURIComponent(targetName)}/macs`,
-          { mac, description: buildMacDescription(params.hostname, params.actor, mac) },
-        );
-      }
-      for (const mac of toRemove) {
-        await callFortiOs<unknown>(
-          t,
-          "DELETE",
-          `/api/v2/cmdb/user/quarantine/targets/${encodeURIComponent(targetName)}/macs/${encodeURIComponent(mac)}`,
+          "PUT",
+          `/api/v2/cmdb/user/quarantine/targets/${encodeURIComponent(targetName)}`,
+          {
+            macs: desiredMacs.map((mac) => ({
+              mac,
+              description: buildMacDescription(params.hostname, params.actor, mac),
+            })),
+          },
         );
       }
     }

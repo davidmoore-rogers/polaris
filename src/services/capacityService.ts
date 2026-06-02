@@ -629,15 +629,72 @@ interface PgStatRow {
 
 async function getSampleTableStats(): Promise<CapacitySampleTable[]> {
   const names = SAMPLE_TABLES.map((t) => t.name);
+  // Catalog-only sizing — chunk-aware. `pg_total_relation_size(parent)` on a
+  // PG11+ partitioned/inheritance parent recursively sums all children's
+  // relfilenodes via stat(); for TimescaleDB hypertables (asset_monitor_samples
+  // + the 5 *_hourly / *_daily rollups, each potentially backed by hundreds
+  // of chunks in _timescaledb_internal.*) that becomes thousands of fs
+  // syscalls per call and dominated the Maintenance tab's last 30s of
+  // wall-clock. We replace it with a sum of relpages over the parent + its
+  // inheritance children (chunks) + their indexes, all read from pg_class.
+  // n_live_tup / n_dead_tup likewise aggregate parent + chunks because the
+  // parent's own pg_stat_user_tables row is 0/0 for hypertables.
   const rows = await prisma.$queryRawUnsafe<PgStatRow[]>(
-    `SELECT
-       relname,
-       n_live_tup,
-       n_dead_tup,
-       pg_total_relation_size(quote_ident(relname)) AS bytes,
-       last_autovacuum
-     FROM pg_stat_user_tables
-     WHERE relname = ANY($1::text[])`,
+    `WITH parents AS (
+       SELECT c.oid, c.relname, c.relpages
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public'
+         AND c.relname = ANY($1::text[])
+     ),
+     children AS (
+       SELECT p.oid AS parent_oid, i.inhrelid AS rel_oid
+       FROM parents p
+       JOIN pg_inherits i ON i.inhparent = p.oid
+     ),
+     parent_index_pages AS (
+       SELECT p.oid AS parent_oid, COALESCE(SUM(ic.relpages), 0)::bigint AS pages
+       FROM parents p
+       LEFT JOIN pg_index ix ON ix.indrelid = p.oid
+       LEFT JOIN pg_class ic ON ic.oid = ix.indexrelid
+       GROUP BY p.oid
+     ),
+     child_heap_pages AS (
+       SELECT c.parent_oid, COALESCE(SUM(cls.relpages), 0)::bigint AS pages
+       FROM children c
+       JOIN pg_class cls ON cls.oid = c.rel_oid
+       GROUP BY c.parent_oid
+     ),
+     child_index_pages AS (
+       SELECT c.parent_oid, COALESCE(SUM(ic.relpages), 0)::bigint AS pages
+       FROM children c
+       JOIN pg_index ix ON ix.indrelid = c.rel_oid
+       JOIN pg_class ic ON ic.oid = ix.indexrelid
+       GROUP BY c.parent_oid
+     ),
+     child_stats AS (
+       SELECT
+         c.parent_oid,
+         COALESCE(SUM(s.n_live_tup), 0)::bigint AS n_live_tup,
+         COALESCE(SUM(s.n_dead_tup), 0)::bigint AS n_dead_tup,
+         MAX(s.last_autovacuum) AS last_autovacuum
+       FROM children c
+       LEFT JOIN pg_stat_user_tables s ON s.relid = c.rel_oid
+       GROUP BY c.parent_oid
+     )
+     SELECT
+       p.relname,
+       (COALESCE(ps.n_live_tup, 0) + COALESCE(cs.n_live_tup, 0))::bigint AS n_live_tup,
+       (COALESCE(ps.n_dead_tup, 0) + COALESCE(cs.n_dead_tup, 0))::bigint AS n_dead_tup,
+       ((p.relpages + COALESCE(pip.pages, 0) + COALESCE(chp.pages, 0) + COALESCE(cip.pages, 0))::bigint
+         * current_setting('block_size')::bigint)::bigint AS bytes,
+       GREATEST(ps.last_autovacuum, cs.last_autovacuum) AS last_autovacuum
+     FROM parents p
+     LEFT JOIN pg_stat_user_tables ps ON ps.relid = p.oid
+     LEFT JOIN parent_index_pages pip ON pip.parent_oid = p.oid
+     LEFT JOIN child_heap_pages chp ON chp.parent_oid = p.oid
+     LEFT JOIN child_index_pages cip ON cip.parent_oid = p.oid
+     LEFT JOIN child_stats cs ON cs.parent_oid = p.oid`,
     names,
   );
 
@@ -1326,7 +1383,16 @@ export async function getCapacitySnapshot(opts: {
     ),
     getVolumes(dataDirectory),
     prisma.$queryRawUnsafe<{ size: bigint }[]>(
-      "SELECT pg_database_size(current_database()) AS size",
+      // Catalog-only size sum. pg_database_size() stat()'s every relfilenode in
+      // the data directory; with TimescaleDB hypertable chunks (asset_monitor_samples
+      // + the 5 *_hourly / *_daily rollups, each potentially with hundreds of
+      // chunks) that becomes thousands of fs syscalls and dominates the
+      // capacity-advisor wall-clock. Reading relpages from pg_class is an
+      // in-memory catalog lookup; values are accurate as of the last ANALYZE
+      // (minute-scale lag is acceptable for the capacity advisor's RAM-target
+      // recommendation).
+      `SELECT (current_setting('block_size')::bigint * SUM(relpages::bigint))::bigint AS size
+         FROM pg_class WHERE relkind IN ('r', 'i', 't', 'm')`,
     ),
     getSampleTableStats(),
     readPgStatActivity(),

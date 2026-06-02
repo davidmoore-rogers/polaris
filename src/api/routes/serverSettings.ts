@@ -112,50 +112,88 @@ const APP_VERSION: string = getAppVersion();
 
 router.get("/database", async (_req, res, next) => {
   try {
-    // Query PostgreSQL for version, size, table stats, and connections
-    const versionResult = await prisma.$queryRawUnsafe<any[]>("SELECT version()");
+    // Fan out every stat query in parallel. The previous serial chain ran each
+    // await in turn, but the real problem was that pg_database_size() and the
+    // per-table pg_total_relation_size() iteration were inherently minutes-slow
+    // at prod scale — TimescaleDB hypertables (asset_monitor_samples, the five
+    // *_hourly + *_daily rollups, etc.) decompose into thousands of chunk
+    // relations, and each pg_*_size() helper stat()'s every relfilenode behind
+    // them. We now read sizes from `pg_class.relpages * block_size` instead:
+    // it's a catalog-only sum that lives in shared buffers, returns instantly,
+    // and is updated by autovacuum so values are accurate as of the last
+    // ANALYZE (minute-scale lag is acceptable for an operator dashboard).
+    //
+    // The pg_stat_ssl query keys on pg_backend_pid() of the BACKEND running
+    // that statement; under direct-connect (no PgBouncer in transaction mode)
+    // each parallel query picks its own pooled backend and the lookup still
+    // resolves correctly because every backend shares the same SSL config.
+    //
+    // Public-schema filter on the table list: pg-boss's `pgboss.*` tables
+    // and TimescaleDB's `_timescaledb_internal.*` chunks would otherwise
+    // flood the operator-facing list. The chunks' sizes are already counted
+    // toward the database-size total via the catalog sum below.
+    const [
+      versionResult,
+      dbNameResult,
+      sizeResult,
+      tablesResult,
+      connResult,
+      uptimeResult,
+      sslResult,
+    ] = await Promise.all([
+      prisma.$queryRawUnsafe<any[]>("SELECT version()"),
+      prisma.$queryRawUnsafe<any[]>("SELECT current_database() AS db"),
+      prisma.$queryRawUnsafe<any[]>(`
+        SELECT pg_size_pretty(
+          current_setting('block_size')::bigint * SUM(relpages::bigint)
+        ) AS size
+        FROM pg_class
+        WHERE relkind IN ('r', 'i', 't', 'm')
+      `),
+      prisma.$queryRawUnsafe<any[]>(`
+        SELECT
+          c.relname AS name,
+          COALESCE(s.n_live_tup, 0)::integer AS rows,
+          pg_size_pretty(
+            (c.relpages + COALESCE(ti.relpages, 0))::bigint *
+              current_setting('block_size')::bigint
+          ) AS size,
+          (c.relpages + COALESCE(ti.relpages, 0))::bigint AS sort_pages
+        FROM pg_class c
+        LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+        LEFT JOIN LATERAL (
+          SELECT SUM(i.relpages)::bigint AS relpages
+          FROM pg_index x
+          JOIN pg_class i ON i.oid = x.indexrelid
+          WHERE x.indrelid = c.oid
+        ) ti ON true
+        WHERE c.relkind = 'r'
+          AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+        ORDER BY sort_pages DESC
+      `),
+      prisma.$queryRawUnsafe<any[]>(`
+        SELECT
+          (SELECT count(*)::integer FROM pg_stat_activity WHERE datname = current_database()) AS active,
+          (SELECT setting::integer FROM pg_settings WHERE name = 'max_connections') AS max
+      `),
+      prisma.$queryRawUnsafe<any[]>(
+        "SELECT date_trunc('second', current_timestamp - pg_postmaster_start_time())::text AS uptime"
+      ),
+      prisma.$queryRawUnsafe<{ ssl: boolean }[]>(
+        "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()"
+      ),
+    ]);
+
     const version = versionResult[0]?.version || "Unknown";
-
-    const dbNameResult = await prisma.$queryRawUnsafe<any[]>("SELECT current_database() AS db");
     const dbName = dbNameResult[0]?.db || "unknown";
-
-    const sizeResult = await prisma.$queryRawUnsafe<any[]>(
-      "SELECT pg_size_pretty(pg_database_size(current_database())) AS size"
-    );
     const databaseSize = sizeResult[0]?.size || "Unknown";
-
-    // Restrict to the public schema so pg-boss's internal tables (in the
-    // `pgboss` schema, including `pgboss.version`) don't show up in the
-    // operator-facing table list AND don't trip pg_total_relation_size(quote_ident(relname))
-    // — that helper produces an unqualified identifier, which Postgres
-    // tries to resolve via search_path; tables outside `public` fail with
-    // `relation "<name>" does not exist`.
-    const tablesResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT
-        relname AS name,
-        n_live_tup::integer AS rows,
-        pg_size_pretty(pg_total_relation_size(quote_ident(relname))) AS size
-      FROM pg_stat_user_tables
-      WHERE schemaname = 'public'
-      ORDER BY pg_total_relation_size(quote_ident(relname)) DESC
-    `);
     const tables = tablesResult.map((t: any) => ({
       name: t.name,
       rows: Number(t.rows),
       size: t.size,
     }));
-
-    const connResult = await prisma.$queryRawUnsafe<any[]>(`
-      SELECT
-        (SELECT count(*)::integer FROM pg_stat_activity WHERE datname = current_database()) AS active,
-        (SELECT setting::integer FROM pg_settings WHERE name = 'max_connections') AS max
-    `);
     const activeConnections = Number(connResult[0]?.active || 0);
     const maxConnections = Number(connResult[0]?.max || 100);
-
-    const uptimeResult = await prisma.$queryRawUnsafe<any[]>(
-      "SELECT date_trunc('second', current_timestamp - pg_postmaster_start_time())::text AS uptime"
-    );
     const uptime = uptimeResult[0]?.uptime || "Unknown";
 
     // Parse version string to extract short version
@@ -172,9 +210,6 @@ router.get("/database", async (_req, res, next) => {
     // has six values (require / verify-ca / verify-full / no-verify / prefer /
     // disable) plus the legacy `ssl=true`, and "prefer" only resolves at
     // negotiation time. pg_stat_ssl reports what the connection actually did.
-    const sslResult = await prisma.$queryRawUnsafe<{ ssl: boolean }[]>(
-      "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()"
-    );
     const ssl = sslResult[0]?.ssl ? "Enabled" : "Disabled";
 
     res.json({
