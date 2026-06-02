@@ -1202,7 +1202,16 @@ export async function getCapacitySnapshot(opts: {
     ),
     getVolumes(dataDirectory),
     prisma.$queryRawUnsafe<{ size: bigint }[]>(
-      "SELECT pg_database_size(current_database()) AS size",
+      // Catalog-only size sum. pg_database_size() stat()'s every relfilenode in
+      // the data directory; with TimescaleDB hypertable chunks (asset_monitor_samples
+      // + the 5 *_hourly / *_daily rollups, each potentially with hundreds of
+      // chunks) that becomes thousands of fs syscalls and dominates the
+      // capacity-advisor wall-clock. Reading relpages from pg_class is an
+      // in-memory catalog lookup; values are accurate as of the last ANALYZE
+      // (minute-scale lag is acceptable for the capacity advisor's RAM-target
+      // recommendation).
+      `SELECT (current_setting('block_size')::bigint * SUM(relpages::bigint))::bigint AS size
+         FROM pg_class WHERE relkind IN ('r', 'i', 't', 'm')`,
     ),
     getSampleTableStats(),
     readPgStatActivity(),

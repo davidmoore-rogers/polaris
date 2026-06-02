@@ -112,13 +112,16 @@ const APP_VERSION: string = getAppVersion();
 
 router.get("/database", async (_req, res, next) => {
   try {
-    // Fan out every stat query in parallel. pre-this-change they ran
-    // sequentially and pg_database_size + the per-table pg_total_relation_size
-    // iteration (which stat()'s each relfilenode) dominated total wall-clock
-    // at prod scale (235k+ events + monitoring sample tables) — the Maintenance
-    // tab routinely sat at "Loading…" for 15-30s waiting for the chain. With
-    // Promise.all every query lands on its own pooled backend and total time
-    // collapses to the slowest single query (the table-list scan).
+    // Fan out every stat query in parallel. The previous serial chain ran each
+    // await in turn, but the real problem was that pg_database_size() and the
+    // per-table pg_total_relation_size() iteration were inherently minutes-slow
+    // at prod scale — TimescaleDB hypertables (asset_monitor_samples, the five
+    // *_hourly + *_daily rollups, etc.) decompose into thousands of chunk
+    // relations, and each pg_*_size() helper stat()'s every relfilenode behind
+    // them. We now read sizes from `pg_class.relpages * block_size` instead:
+    // it's a catalog-only sum that lives in shared buffers, returns instantly,
+    // and is updated by autovacuum so values are accurate as of the last
+    // ANALYZE (minute-scale lag is acceptable for an operator dashboard).
     //
     // The pg_stat_ssl query keys on pg_backend_pid() of the BACKEND running
     // that statement; under direct-connect (no PgBouncer in transaction mode)
@@ -126,10 +129,9 @@ router.get("/database", async (_req, res, next) => {
     // resolves correctly because every backend shares the same SSL config.
     //
     // Public-schema filter on the table list: pg-boss's `pgboss.*` tables
-    // would otherwise trip pg_total_relation_size(quote_ident(relname)) —
-    // that helper produces an unqualified identifier that Postgres resolves
-    // via search_path, and tables outside `public` fail with
-    // `relation "<name>" does not exist`.
+    // and TimescaleDB's `_timescaledb_internal.*` chunks would otherwise
+    // flood the operator-facing list. The chunks' sizes are already counted
+    // toward the database-size total via the catalog sum below.
     const [
       versionResult,
       dbNameResult,
@@ -141,17 +143,33 @@ router.get("/database", async (_req, res, next) => {
     ] = await Promise.all([
       prisma.$queryRawUnsafe<any[]>("SELECT version()"),
       prisma.$queryRawUnsafe<any[]>("SELECT current_database() AS db"),
-      prisma.$queryRawUnsafe<any[]>(
-        "SELECT pg_size_pretty(pg_database_size(current_database())) AS size"
-      ),
+      prisma.$queryRawUnsafe<any[]>(`
+        SELECT pg_size_pretty(
+          current_setting('block_size')::bigint * SUM(relpages::bigint)
+        ) AS size
+        FROM pg_class
+        WHERE relkind IN ('r', 'i', 't', 'm')
+      `),
       prisma.$queryRawUnsafe<any[]>(`
         SELECT
-          relname AS name,
-          n_live_tup::integer AS rows,
-          pg_size_pretty(pg_total_relation_size(quote_ident(relname))) AS size
-        FROM pg_stat_user_tables
-        WHERE schemaname = 'public'
-        ORDER BY pg_total_relation_size(quote_ident(relname)) DESC
+          c.relname AS name,
+          COALESCE(s.n_live_tup, 0)::integer AS rows,
+          pg_size_pretty(
+            (c.relpages + COALESCE(ti.relpages, 0))::bigint *
+              current_setting('block_size')::bigint
+          ) AS size,
+          (c.relpages + COALESCE(ti.relpages, 0))::bigint AS sort_pages
+        FROM pg_class c
+        LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+        LEFT JOIN LATERAL (
+          SELECT SUM(i.relpages)::bigint AS relpages
+          FROM pg_index x
+          JOIN pg_class i ON i.oid = x.indexrelid
+          WHERE x.indrelid = c.oid
+        ) ti ON true
+        WHERE c.relkind = 'r'
+          AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+        ORDER BY sort_pages DESC
       `),
       prisma.$queryRawUnsafe<any[]>(`
         SELECT
@@ -930,7 +948,12 @@ async function computePgTuning(): Promise<PgTuningResult | null> {
   const pgConfigFile = pgSettings.find((s) => s.name === "config_file")?.setting || null;
 
   const dbSizeResult = await prisma.$queryRawUnsafe<{ size: bigint }[]>(
-    "SELECT pg_database_size(current_database()) AS size"
+    // Catalog-only sum; see the matching comment in capacityService.ts and the
+    // /database route handler. pg_database_size() is fs-scan-bound at prod
+    // scale with TimescaleDB chunks (hundreds-to-thousands of relations) and
+    // dominates the pg-tuning recommendation wall-clock.
+    `SELECT (current_setting('block_size')::bigint * SUM(relpages::bigint))::bigint AS size
+       FROM pg_class WHERE relkind IN ('r', 'i', 't', 'm')`
   );
   const dbSizeBytes = Number(dbSizeResult[0]?.size ?? 0);
   const GB = 1024 * 1024 * 1024;
