@@ -355,7 +355,7 @@ function sqlStorageHourly(): string {
       MAX("usedBytes"),
       (ARRAY_AGG("totalBytes" ORDER BY "timestamp" DESC) FILTER (WHERE "totalBytes" IS NOT NULL))[1]
     FROM "asset_storage_samples"
-    WHERE "timestamp" >= $1
+    WHERE "timestamp" >= $1 AND "cadence" = 'fast'
     GROUP BY "assetId", bucket_start, "mountPath"
     ON CONFLICT ("bucketStart", "assetId", "mountPath") DO UPDATE SET
       "sampleCount"    = EXCLUDED."sampleCount",
@@ -442,7 +442,7 @@ function sqlInterfaceHourly(): string {
       (ARRAY_AGG("vlanId"      ORDER BY "timestamp" DESC) FILTER (WHERE "vlanId"      IS NOT NULL))[1],
       MAX("timestamp")
     FROM "asset_interface_samples"
-    WHERE "timestamp" >= $1
+    WHERE "timestamp" >= $1 AND "cadence" = 'fast'
     GROUP BY "assetId", bucket_start, "ifName"
     ON CONFLICT ("bucketStart", "assetId", "ifName") DO UPDATE SET
       "sampleCount"        = EXCLUDED."sampleCount",
@@ -566,7 +566,7 @@ function sqlIpsecHourly(): string {
       (ARRAY_AGG("proxyIdCount"    ORDER BY "timestamp" DESC) FILTER (WHERE "proxyIdCount"    IS NOT NULL))[1],
       MAX("timestamp")
     FROM "asset_ipsec_tunnel_samples"
-    WHERE "timestamp" >= $1
+    WHERE "timestamp" >= $1 AND "cadence" = 'fast'
     GROUP BY "assetId", bucket_start, "tunnelName"
     ON CONFLICT ("bucketStart", "assetId", "tunnelName") DO UPDATE SET
       "sampleCount"         = EXCLUDED."sampleCount",

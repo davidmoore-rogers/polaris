@@ -75,9 +75,17 @@ export interface TemperatureSampleRow {
   celsius: number | null;
 }
 
+/** Selection cadence for system-info samples (interface / storage / ipsec).
+ *  "fast" = operator-pinned entity re-walked on the response-time cadence
+ *  (kept at full retention with rollups); "slow" = full system-info scrape
+ *  (kept 24h, never rolled up). Required on every write so the discriminator
+ *  is always stamped — see selection-aware retention. */
+export type SampleCadence = "fast" | "slow";
+
 export interface InterfaceSampleRow {
   assetId: string;
   timestamp: Date;
+  cadence: SampleCadence;
   ifName: string;
   adminStatus: string | null;
   operStatus: string | null;
@@ -101,6 +109,7 @@ export interface InterfaceSampleRow {
 export interface StorageSampleRow {
   assetId: string;
   timestamp: Date;
+  cadence: SampleCadence;
   mountPath: string;
   totalBytes: bigint | null;
   usedBytes: bigint | null;
@@ -109,6 +118,7 @@ export interface StorageSampleRow {
 export interface IpsecTunnelSampleRow {
   assetId: string;
   timestamp: Date;
+  cadence: SampleCadence;
   tunnelName: string;
   parentInterface: string | null;
   remoteGateway: string | null;

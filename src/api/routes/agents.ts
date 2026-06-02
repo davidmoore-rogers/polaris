@@ -266,9 +266,16 @@ agentsRouter.post("/samples", async (req, res, next) => {
       // Bump lastTelemetryAt so the System tab reflects freshness.
       await prisma.asset.update({ where: { id: assetId }, data: { lastTelemetryAt: now } });
     } else if (body.stream === "interfaces") {
+      // Selection-aware cadence: the agent reports the host's full NIC table,
+      // so stamp pinned interfaces "fast" (full retention + rollup) and the
+      // rest "slow" (24h). See selection-aware retention.
+      const pinnedIfaces = new Set(
+        (await prisma.asset.findUnique({ where: { id: assetId }, select: { monitoredInterfaces: true } }))?.monitoredInterfaces ?? [],
+      );
       const rows = body.samples.map((s) => ({
         assetId,
         timestamp:   s.timestamp ? new Date(s.timestamp) : now,
+        cadence:     pinnedIfaces.has(s.ifName) ? ("fast" as const) : ("slow" as const),
         ifName:      s.ifName,
         adminStatus: s.adminStatus ?? null,
         operStatus:  s.operStatus ?? null,
@@ -295,9 +302,13 @@ agentsRouter.post("/samples", async (req, res, next) => {
       await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: now } });
     } else {
       // storage
+      const pinnedStorage = new Set(
+        (await prisma.asset.findUnique({ where: { id: assetId }, select: { monitoredStorage: true } }))?.monitoredStorage ?? [],
+      );
       const rows = body.samples.map((s) => ({
         assetId,
         timestamp:  s.timestamp ? new Date(s.timestamp) : now,
+        cadence:    pinnedStorage.has(s.mountPath) ? ("fast" as const) : ("slow" as const),
         mountPath:  s.mountPath,
         totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
         usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,

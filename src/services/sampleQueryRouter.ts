@@ -64,38 +64,32 @@ export function pickSampleTier(
 ): TierPick {
   const now = Date.now();
   const sinceMs = since.getTime();
-  const detailCutoffMs = now - retention.detailDays * SECONDS_PER_DAY * 1000;
-  const hourlyCutoffMs = now - retention.hourlyDays * SECONDS_PER_DAY * 1000;
+  // Encoding: FOREVER (-1) → tier covers all of history; 0 → tier off (no data,
+  // fall through to the next tier); positive → covers the last N days.
+  const covers = (days: number) =>
+    days === FOREVER ? true : sinceMs >= now - days * SECONDS_PER_DAY * 1000;
 
-  if (sinceMs >= detailCutoffMs) return { tier: "detail", bucketSeconds: 0 };
-  if (sinceMs >= hourlyCutoffMs) return { tier: "hourly", bucketSeconds: 3600 };
+  if (covers(retention.detailDays)) return { tier: "detail", bucketSeconds: 0 };
+  if (covers(retention.hourlyDays)) return { tier: "hourly", bucketSeconds: 3600 };
   return { tier: "daily", bucketSeconds: SECONDS_PER_DAY };
 }
 
 /**
- * Asset-aware tier picker. Looks up the asset's assetType, resolves the
- * matching retention class from the global Setting("sampleRetention"),
- * and applies pickSampleTier. One extra small DB read per chart request
- * (PK lookup on Asset + cache-friendly retention read).
+ * Entity-aware tier picker: resolves the configured retention for one entity
+ * (assets / cpuMem / temperature / interfaces / storage / ipsec) from the
+ * global Setting("sampleRetention") and applies pickSampleTier.
  *
- * The `prismaClient` / `getRetention` arguments default to the production
- * Prisma + sampleRetentionService bindings; injected for test paths.
+ * `assetId` is retained in the signature for the forthcoming selection-aware
+ * read (unselected interfaces have no rollup beyond 24h); it isn't consulted
+ * for tier selection today.
  */
-import { prisma } from "../db.js";
-import { getSampleRetention, pickClassForAssetType, type RetentionStream } from "./sampleRetentionService.js";
+import { getSampleRetention, FOREVER, type RetentionEntity } from "./sampleRetentionService.js";
 
 export async function pickSampleTierForAsset(
-  assetId: string,
-  stream: RetentionStream,
+  _assetId: string,
+  entity: RetentionEntity,
   since: Date,
 ): Promise<TierPick> {
-  const [asset, retention] = await Promise.all([
-    prisma.asset.findUnique({ where: { id: assetId }, select: { assetType: true } }),
-    getSampleRetention(),
-  ]);
-  const klass = pickClassForAssetType(asset?.assetType);
-  return pickSampleTier(since, {
-    detailDays: retention[stream].detail[klass],
-    hourlyDays: retention[stream].hourly[klass],
-  });
+  const tier = (await getSampleRetention())[entity];
+  return pickSampleTier(since, { detailDays: tier.detail, hourlyDays: tier.hourly });
 }

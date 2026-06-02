@@ -1,100 +1,109 @@
 /**
  * src/services/sampleRetentionService.ts
  *
- * Global sample-retention policy. Phase 5 pulled retention out of the
- * per-tier monitor-settings hierarchy (where it was confusingly mixed in
- * with cadence / polling / credentials / MIB hints) and into a single
- * `Setting("sampleRetention")` row edited from the Server Settings →
- * Maintenance card.
+ * Global sample-retention policy, edited from the Server Settings → Retention
+ * card and stored in `Setting("sampleRetention")`.
  *
- * Why global: retention is fundamentally a storage concern, not a per-
- * device-class concern. Operators tune it because disk fills up — that's
- * a fleet-wide question. The tiered model (detail / hourly / daily) is
- * also meant to be uniform across the fleet so the rollup writer can
- * produce one set of *_hourly / *_daily rows that every consumer reads.
+ * Why global: retention is a storage concern, not a per-device concern —
+ * operators tune it because disk fills up, which is a fleet-wide question. The
+ * tiered model (detail / hourly / daily) is uniform across the fleet so the
+ * rollup writer produces one set of *_hourly / *_daily rows every consumer reads.
  *
- * Per-class refinement stays. Operators may legitimately want shorter
- * retention for the chattier infra classes (switches and APs at 48-port
- * scale generate ~10× the interface samples of an endpoint). The
- * `default` / `switch` / `accessPoint` breakdown is preserved at every
- * tier × stream cell.
+ * Axis: per-ENTITY, not per-asset-class. The volume driver is the kind of thing
+ * being sampled (interfaces, with per-port cardinality, dwarf per-asset data),
+ * not whether the asset is a switch vs an AP. The configurable entities are:
  *
- * Shape:
+ *   assets       — asset_monitor_samples        (per-asset response-time probe)
+ *   cpuMem       — asset_telemetry_samples       (per-asset CPU / memory)
+ *   temperature  — asset_temperature_samples     (per-asset sensor)
+ *   interfaces   — asset_interface_samples        (per-interface)
+ *   storage      — asset_storage_samples          (per-volume)
+ *   ipsec        — asset_ipsec_tunnel_samples     (per-tunnel)
  *
- *   {
- *     sample:     { detail: ClassRet, hourly: ClassRet, daily: ClassRet },
- *     telemetry:  { detail: ClassRet, hourly: ClassRet, daily: ClassRet },
- *     systemInfo: { detail: ClassRet, hourly: ClassRet, daily: ClassRet },
- *   }
+ * Selection split: for interfaces / storage / ipsec the configured retention
+ * applies to OPERATOR-SELECTED (monitored) entities only — their samples are
+ * stamped `cadence="fast"` and kept at full retention with rollups. UNSELECTED
+ * (bulk) samples (`cadence="slow"` / legacy NULL) are kept for a FIXED
+ * `UNSELECTED_DETAIL_HOURS` and never rolled up; that 24h is a property of being
+ * unselected, not a configurable cell. assets / cpuMem / temperature have no
+ * selection concept — their retention applies to every row.
  *
- * where `ClassRet = { default: number, switch: number, accessPoint: number }`.
+ * Encoding (per tier): positive = N days; 0 = tier OFF (pruned away — do not
+ * keep this tier); FOREVER (-1) = keep forever. NOTE: this flips the legacy
+ * meaning of 0 (which meant "keep forever"); the one-shot migration translates
+ * legacy 0 → FOREVER. See migrateSampleRetentionToEntities.
  *
- * Defaults match the SolarWinds-style tiering operators already know:
- * 7 days detail / 30 days hourly / 365 days daily, uniform across classes
- * and streams. 0 disables the tier (= keep forever for that class+tier).
+ * Defaults: 7 days detail / 30 days hourly / 365 days daily, uniform across
+ * entities. Operators tune from the Retention card.
  *
- * In-process cache with a 5-second TTL: the prune layer reads this once
- * per nightly tick (no cache hit), but the chart history endpoints
- * resolve retention on every request, and the in-process cache avoids a
- * DB roundtrip per chart open. Cache is invalidated on every write via
- * `invalidateSampleRetentionCache()`.
+ * In-process cache with a 5-second TTL: prune reads this once per nightly tick,
+ * but chart history endpoints resolve retention on every request, so the cache
+ * avoids a DB roundtrip per chart open. Invalidated on every write.
  */
 
 import { prisma } from "../db.js";
 
 export const SETTING_KEY = "sampleRetention";
 
-export type RetentionStream = "sample" | "telemetry" | "systemInfo";
-export type RetentionTier   = "detail" | "hourly" | "daily";
-export type RetentionClass  = "default" | "switch" | "accessPoint";
+/** Sentinel: keep this tier forever (never prune). */
+export const FOREVER = -1;
 
-export interface ClassRetention {
-  default:     number;
-  switch:      number;
-  accessPoint: number;
-}
+/** Fixed retention for UNSELECTED (bulk) interface / storage / ipsec samples.
+ *  Not operator-configurable — a property of being unselected. No rollup. */
+export const UNSELECTED_DETAIL_HOURS = 24;
+
+export type RetentionEntity =
+  | "assets"
+  | "cpuMem"
+  | "temperature"
+  | "interfaces"
+  | "storage"
+  | "ipsec";
+export type RetentionTier = "detail" | "hourly" | "daily";
+
+export const RETENTION_ENTITIES: RetentionEntity[] = [
+  "assets",
+  "cpuMem",
+  "temperature",
+  "interfaces",
+  "storage",
+  "ipsec",
+];
+
+/** Entities whose configured retention applies to SELECTED rows only
+ *  (unselected rows are fixed at UNSELECTED_DETAIL_HOURS, no rollup). */
+export const SELECTION_AWARE_ENTITIES: RetentionEntity[] = ["interfaces", "storage", "ipsec"];
 
 export interface TierRetention {
-  detail: ClassRetention;
-  hourly: ClassRetention;
-  daily:  ClassRetention;
+  detail: number;
+  hourly: number;
+  daily: number;
 }
 
-export interface SampleRetention {
-  sample:     TierRetention;
-  telemetry:  TierRetention;
-  systemInfo: TierRetention;
-}
+export type SampleRetention = Record<RetentionEntity, TierRetention>;
 
-// SolarWinds-style defaults. Operators tune from the Maintenance card.
+// SolarWinds-style defaults. Operators tune from the Retention card.
 const DEFAULT_DETAIL_DAYS = 7;
 const DEFAULT_HOURLY_DAYS = 30;
-const DEFAULT_DAILY_DAYS  = 365;
-
-function defaultClass(value: number): ClassRetention {
-  return { default: value, switch: value, accessPoint: value };
-}
+const DEFAULT_DAILY_DAYS = 365;
 
 function defaultTier(): TierRetention {
-  return {
-    detail: defaultClass(DEFAULT_DETAIL_DAYS),
-    hourly: defaultClass(DEFAULT_HOURLY_DAYS),
-    daily:  defaultClass(DEFAULT_DAILY_DAYS),
-  };
+  return { detail: DEFAULT_DETAIL_DAYS, hourly: DEFAULT_HOURLY_DAYS, daily: DEFAULT_DAILY_DAYS };
 }
 
 export function defaultSampleRetention(): SampleRetention {
   return {
-    sample:     defaultTier(),
-    telemetry:  defaultTier(),
-    systemInfo: defaultTier(),
+    assets:      defaultTier(),
+    cpuMem:      defaultTier(),
+    temperature: defaultTier(),
+    interfaces:  defaultTier(),
+    storage:     defaultTier(),
+    ipsec:       defaultTier(),
   };
 }
 
-// In-process cache. TTL deliberately short so an admin PUT is visible
-// to chart queries within a few seconds even without explicit
-// invalidation — and short enough that a hot path (every chart request)
-// doesn't hit the DB.
+// In-process cache. Short TTL so an admin PUT is visible to chart queries
+// within a few seconds, but a hot path (every chart request) doesn't hit the DB.
 const CACHE_TTL_MS = 5000;
 let cache: { value: SampleRetention; fetchedAt: number } | null = null;
 
@@ -102,34 +111,23 @@ export function invalidateSampleRetentionCache(): void {
   cache = null;
 }
 
-function toPositiveInt(v: unknown, fallback: number): number {
+/** Accept positive (N days), 0 (tier off), or FOREVER (-1). Anything else
+ *  (NaN, < -1) falls back. */
+function toRetentionDays(v: unknown, fallback: number): number {
   if (v == null) return fallback;
   const n = Number(v);
-  if (!Number.isFinite(n) || n < 0) return fallback;
-  return Math.floor(n);
-}
-
-function parseClass(raw: unknown, fallback: ClassRetention): ClassRetention {
-  if (raw == null || typeof raw !== "object") return { ...fallback };
-  const r = raw as Record<string, unknown>;
-  return {
-    default:     toPositiveInt(r.default,     fallback.default),
-    switch:      toPositiveInt(r.switch,      fallback.switch),
-    accessPoint: toPositiveInt(r.accessPoint, fallback.accessPoint),
-  };
+  if (!Number.isFinite(n)) return fallback;
+  if (n < FOREVER) return fallback;
+  return Math.trunc(n);
 }
 
 function parseTier(raw: unknown, fallback: TierRetention): TierRetention {
-  if (raw == null || typeof raw !== "object") return {
-    detail: { ...fallback.detail },
-    hourly: { ...fallback.hourly },
-    daily:  { ...fallback.daily },
-  };
+  if (raw == null || typeof raw !== "object") return { ...fallback };
   const r = raw as Record<string, unknown>;
   return {
-    detail: parseClass(r.detail, fallback.detail),
-    hourly: parseClass(r.hourly, fallback.hourly),
-    daily:  parseClass(r.daily,  fallback.daily),
+    detail: toRetentionDays(r.detail, fallback.detail),
+    hourly: toRetentionDays(r.hourly, fallback.hourly),
+    daily:  toRetentionDays(r.daily,  fallback.daily),
   };
 }
 
@@ -137,11 +135,9 @@ function parseSampleRetention(raw: unknown): SampleRetention {
   const fallback = defaultSampleRetention();
   if (raw == null || typeof raw !== "object") return fallback;
   const r = raw as Record<string, unknown>;
-  return {
-    sample:     parseTier(r.sample,     fallback.sample),
-    telemetry:  parseTier(r.telemetry,  fallback.telemetry),
-    systemInfo: parseTier(r.systemInfo, fallback.systemInfo),
-  };
+  const out = {} as SampleRetention;
+  for (const e of RETENTION_ENTITIES) out[e] = parseTier(r[e], fallback[e]);
+  return out;
 }
 
 export async function getSampleRetention(): Promise<SampleRetention> {
@@ -155,18 +151,36 @@ export async function getSampleRetention(): Promise<SampleRetention> {
   return value;
 }
 
+function mergeTier(current: TierRetention, input: unknown): TierRetention {
+  if (input == null || typeof input !== "object") return { ...current };
+  const i = input as Record<string, unknown>;
+  return {
+    detail: i.detail == null ? current.detail : toRetentionDays(i.detail, current.detail),
+    hourly: i.hourly == null ? current.hourly : toRetentionDays(i.hourly, current.hourly),
+    daily:  i.daily  == null ? current.daily  : toRetentionDays(i.daily,  current.daily),
+  };
+}
+
+function mergeRetention(
+  current: SampleRetention,
+  input: Partial<SampleRetention> | Record<string, unknown>,
+): SampleRetention {
+  const i = input as Record<string, unknown>;
+  const out = {} as SampleRetention;
+  for (const e of RETENTION_ENTITIES) out[e] = i[e] == null ? { ...current[e] } : mergeTier(current[e], i[e]);
+  return out;
+}
+
 /**
- * Replace the stored retention with the supplied value. Missing fields
- * inherit from the current stored value (so the UI can PUT a partial
- * update without losing other tiers). Validates each numeric to a
- * non-negative integer; out-of-range or non-numeric values fall back to
- * the existing stored value.
+ * Replace the stored retention. Missing fields inherit from the current stored
+ * value (partial PUT merges cleanly). Each numeric is validated to a day count,
+ * 0 (off), or FOREVER (-1); out-of-range / non-numeric values keep the existing
+ * stored value.
  */
-export async function updateSampleRetention(input: Partial<SampleRetention> | Record<string, unknown>): Promise<SampleRetention> {
+export async function updateSampleRetention(
+  input: Partial<SampleRetention> | Record<string, unknown>,
+): Promise<SampleRetention> {
   const current = await getSampleRetention();
-  // Re-parse the input on top of `current` so partial updates merge
-  // correctly. parseSampleRetention with `current` as the fallback gives
-  // us exactly that semantic.
   const merged = mergeRetention(current, input);
   await prisma.setting.upsert({
     where:  { key: SETTING_KEY },
@@ -177,62 +191,12 @@ export async function updateSampleRetention(input: Partial<SampleRetention> | Re
   return merged;
 }
 
-function mergeClass(current: ClassRetention, input: unknown): ClassRetention {
-  if (input == null || typeof input !== "object") return { ...current };
-  const i = input as Record<string, unknown>;
-  return {
-    default:     i.default     == null ? current.default     : toPositiveInt(i.default,     current.default),
-    switch:      i.switch      == null ? current.switch      : toPositiveInt(i.switch,      current.switch),
-    accessPoint: i.accessPoint == null ? current.accessPoint : toPositiveInt(i.accessPoint, current.accessPoint),
-  };
-}
-
-function mergeTier(current: TierRetention, input: unknown): TierRetention {
-  if (input == null || typeof input !== "object") return {
-    detail: { ...current.detail },
-    hourly: { ...current.hourly },
-    daily:  { ...current.daily },
-  };
-  const i = input as Record<string, unknown>;
-  return {
-    detail: i.detail == null ? { ...current.detail } : mergeClass(current.detail, i.detail),
-    hourly: i.hourly == null ? { ...current.hourly } : mergeClass(current.hourly, i.hourly),
-    daily:  i.daily  == null ? { ...current.daily }  : mergeClass(current.daily,  i.daily),
-  };
-}
-
-function mergeRetention(current: SampleRetention, input: Partial<SampleRetention> | Record<string, unknown>): SampleRetention {
-  const i = input as Record<string, unknown>;
-  return {
-    sample:     i.sample     == null ? current.sample     : mergeTier(current.sample,     i.sample),
-    telemetry:  i.telemetry  == null ? current.telemetry  : mergeTier(current.telemetry,  i.telemetry),
-    systemInfo: i.systemInfo == null ? current.systemInfo : mergeTier(current.systemInfo, i.systemInfo),
-  };
-}
-
-/**
- * Convenience: pull the retention number for one (stream, tier, class)
- * triple out of a SampleRetention bundle. Callers that already have a
- * SampleRetention in hand can do `r.sample.detail.switch` directly;
- * this is for code paths that want a string-keyed lookup.
- */
+/** Retention days for one (entity, tier). Returns 0 (tier off) or FOREVER (-1)
+ *  as stored. */
 export function getRetentionDays(
   retention: SampleRetention,
-  stream: RetentionStream,
+  entity: RetentionEntity,
   tier: RetentionTier,
-  klass: RetentionClass,
 ): number {
-  return retention[stream][tier][klass];
-}
-
-/**
- * Map an `Asset.assetType` enum value to the retention class it belongs to.
- * Anything that isn't a switch or access point falls into `default` — the
- * retention dimension only splits out the two infra classes that generate
- * the dominant share of sample volume on big fleets.
- */
-export function pickClassForAssetType(assetType: string | null | undefined): RetentionClass {
-  if (assetType === "switch") return "switch";
-  if (assetType === "access_point") return "accessPoint";
-  return "default";
+  return retention[entity][tier];
 }
