@@ -671,7 +671,7 @@ router.get("/:id/monitor-history", requirePermission("assets", "read"), async (r
       since = new Date(+until - windowMs);
       rangeLabel = range;
     }
-    const pick = await pickSampleTierForAsset(id, "sample", since);
+    const pick = await pickSampleTierForAsset(id, "assets", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
     const result = await readMonitorHistory(id, since, until, pick.tier, fetchSince);
     res.json({
@@ -942,7 +942,7 @@ router.get("/:id/telemetry-history", requirePermission("assets", "read"), async 
   try {
     const id = req.params.id as string;
     const { since, until, rangeLabel } = resolveRange(req);
-    const pick = await pickSampleTierForAsset(id, "telemetry", since);
+    const pick = await pickSampleTierForAsset(id, "cpuMem", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
     const result = await readTelemetryHistory(id, since, until, pick.tier, fetchSince);
     res.json({
@@ -1281,7 +1281,7 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
     const ifName = req.query.ifName ? String(req.query.ifName) : null;
     if (!ifName) throw new AppError(400, "ifName query parameter is required");
     const { since, until, rangeLabel } = resolveRange(req);
-    const pick = await pickSampleTierForAsset(id, "systemInfo", since);
+    const pick = await pickSampleTierForAsset(id, "interfaces", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
 
     // Samples come from the tier-aware reader. LLDP neighbors and the
@@ -1418,7 +1418,7 @@ router.get("/:id/temperature-history", requirePermission("assets", "read"), asyn
     const id = req.params.id as string;
     const sensorName = req.query.sensorName ? String(req.query.sensorName) : null;
     const { since, until, rangeLabel } = resolveRange(req);
-    const pick = await pickSampleTierForAsset(id, "telemetry", since);
+    const pick = await pickSampleTierForAsset(id, "temperature", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
     const result = await readTemperatureHistory(id, since, until, pick.tier, sensorName, fetchSince);
     res.json({
@@ -1441,7 +1441,7 @@ router.get("/:id/ipsec-history", requirePermission("assets", "read"), async (req
     const tunnelName = req.query.tunnelName ? String(req.query.tunnelName) : null;
     if (!tunnelName) throw new AppError(400, "tunnelName query parameter is required");
     const { since, until, rangeLabel } = resolveRange(req);
-    const pick = await pickSampleTierForAsset(id, "systemInfo", since);
+    const pick = await pickSampleTierForAsset(id, "ipsec", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
     const result = await readIpsecHistory(id, since, until, pick.tier, tunnelName, fetchSince);
     res.json({
@@ -1463,7 +1463,7 @@ router.get("/:id/storage-history", requirePermission("assets", "read"), async (r
     const mountPath = req.query.mountPath ? String(req.query.mountPath) : null;
     if (!mountPath) throw new AppError(400, "mountPath query parameter is required");
     const { since, until, rangeLabel } = resolveRange(req);
-    const pick = await pickSampleTierForAsset(id, "systemInfo", since);
+    const pick = await pickSampleTierForAsset(id, "storage", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
     const result = await readStorageHistory(id, since, until, pick.tier, mountPath, fetchSince);
     res.json({

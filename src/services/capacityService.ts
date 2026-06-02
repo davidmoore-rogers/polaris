@@ -42,7 +42,7 @@ import pg from "pg";
 import { prisma } from "../db.js";
 import { getMonitorSettings, type MonitorSettings } from "./monitoringService.js";
 import { isTimescaleAvailable, isHypertable, ALL_HYPERTABLE_CANDIDATES } from "./timescaleService.js";
-import { getSampleRetention, type RetentionStream, type RetentionTier, type SampleRetention } from "./sampleRetentionService.js";
+import { getSampleRetention, type RetentionEntity, type RetentionTier, type SampleRetention } from "./sampleRetentionService.js";
 import { isPgbossInstalled, getBootTimeMode, getQueueMode } from "./queueService.js";
 import { getDeploymentContext } from "../utils/deploymentContext.js";
 import { BACKUP_DIR, STATE_DIR } from "../utils/paths.js";
@@ -394,31 +394,31 @@ export interface CapacitySnapshot {
 // (asset, extra-key) cell; daily tier is 1 bucket/day per (asset, extra-key).
 const SAMPLE_TABLES: Array<{
   name: string;
-  stream: RetentionStream;
+  entity: RetentionEntity;
   tier:   RetentionTier;
   countKey: "all" | "telemetry" | "systemInfo";
 }> = [
   // Source (detail) tables
-  { name: "asset_monitor_samples",       stream: "sample",     tier: "detail", countKey: "all"        },
-  { name: "asset_telemetry_samples",     stream: "telemetry",  tier: "detail", countKey: "telemetry"  },
-  { name: "asset_temperature_samples",   stream: "telemetry",  tier: "detail", countKey: "telemetry"  },
-  { name: "asset_interface_samples",     stream: "systemInfo", tier: "detail", countKey: "systemInfo" },
-  { name: "asset_storage_samples",       stream: "systemInfo", tier: "detail", countKey: "systemInfo" },
-  { name: "asset_ipsec_tunnel_samples",  stream: "systemInfo", tier: "detail", countKey: "systemInfo" },
+  { name: "asset_monitor_samples",       entity: "assets",      tier: "detail", countKey: "all"        },
+  { name: "asset_telemetry_samples",     entity: "cpuMem",      tier: "detail", countKey: "telemetry"  },
+  { name: "asset_temperature_samples",   entity: "temperature", tier: "detail", countKey: "telemetry"  },
+  { name: "asset_interface_samples",     entity: "interfaces",  tier: "detail", countKey: "systemInfo" },
+  { name: "asset_storage_samples",       entity: "storage",     tier: "detail", countKey: "systemInfo" },
+  { name: "asset_ipsec_tunnel_samples",  entity: "ipsec",       tier: "detail", countKey: "systemInfo" },
   // Hourly rollups
-  { name: "asset_monitor_samples_hourly",       stream: "sample",     tier: "hourly", countKey: "all"        },
-  { name: "asset_telemetry_samples_hourly",     stream: "telemetry",  tier: "hourly", countKey: "telemetry"  },
-  { name: "asset_temperature_samples_hourly",   stream: "telemetry",  tier: "hourly", countKey: "telemetry"  },
-  { name: "asset_interface_samples_hourly",     stream: "systemInfo", tier: "hourly", countKey: "systemInfo" },
-  { name: "asset_storage_samples_hourly",       stream: "systemInfo", tier: "hourly", countKey: "systemInfo" },
-  { name: "asset_ipsec_tunnel_samples_hourly",  stream: "systemInfo", tier: "hourly", countKey: "systemInfo" },
+  { name: "asset_monitor_samples_hourly",       entity: "assets",      tier: "hourly", countKey: "all"        },
+  { name: "asset_telemetry_samples_hourly",     entity: "cpuMem",      tier: "hourly", countKey: "telemetry"  },
+  { name: "asset_temperature_samples_hourly",   entity: "temperature", tier: "hourly", countKey: "telemetry"  },
+  { name: "asset_interface_samples_hourly",     entity: "interfaces",  tier: "hourly", countKey: "systemInfo" },
+  { name: "asset_storage_samples_hourly",       entity: "storage",     tier: "hourly", countKey: "systemInfo" },
+  { name: "asset_ipsec_tunnel_samples_hourly",  entity: "ipsec",       tier: "hourly", countKey: "systemInfo" },
   // Daily rollups
-  { name: "asset_monitor_samples_daily",        stream: "sample",     tier: "daily",  countKey: "all"        },
-  { name: "asset_telemetry_samples_daily",      stream: "telemetry",  tier: "daily",  countKey: "telemetry"  },
-  { name: "asset_temperature_samples_daily",    stream: "telemetry",  tier: "daily",  countKey: "telemetry"  },
-  { name: "asset_interface_samples_daily",      stream: "systemInfo", tier: "daily",  countKey: "systemInfo" },
-  { name: "asset_storage_samples_daily",        stream: "systemInfo", tier: "daily",  countKey: "systemInfo" },
-  { name: "asset_ipsec_tunnel_samples_daily",   stream: "systemInfo", tier: "daily",  countKey: "systemInfo" },
+  { name: "asset_monitor_samples_daily",        entity: "assets",      tier: "daily",  countKey: "all"        },
+  { name: "asset_telemetry_samples_daily",      entity: "cpuMem",      tier: "daily",  countKey: "telemetry"  },
+  { name: "asset_temperature_samples_daily",    entity: "temperature", tier: "daily",  countKey: "telemetry"  },
+  { name: "asset_interface_samples_daily",      entity: "interfaces",  tier: "daily",  countKey: "systemInfo" },
+  { name: "asset_storage_samples_daily",        entity: "storage",     tier: "daily",  countKey: "systemInfo" },
+  { name: "asset_ipsec_tunnel_samples_daily",   entity: "ipsec",       tier: "daily",  countKey: "systemInfo" },
 ];
 
 // Cadence intervals consumed by the rows-per-asset-per-day calc. Source
@@ -765,11 +765,12 @@ function projectSteadyStateSize(args: {
       def.countKey === "systemInfo" ? systemInfoEligibleCount :
       monitoredCount;
     const rowsPerAssetPerDay = DEFAULT_ROWS_PER_ASSET_PER_DAY[def.name](intervals);
-    // Use the "default" class retention for projection — most assets fall
-    // into that bucket. Per-class projection is more accurate but the
-    // rows-per-asset-per-day defaults don't break down by class either,
-    // so we'd be mixing precision levels.
-    const retentionDays = retention[def.stream][def.tier].default;
+    // Per-entity retention. FOREVER (-1) has no finite steady state, so it's
+    // treated as 0 here (undercount); 0 = tier off = 0 bytes. NOTE: this
+    // projection still undercounts (the rows-per-asset-per-day interface
+    // estimate and the selected/unselected split) — PR-D rewrites it for
+    // accuracy. Here we only keep it compiling against the entity model.
+    const retentionDays = Math.max(0, retention[def.entity][def.tier]);
     projectedSampleBytes += count * rowsPerAssetPerDay * retentionDays * t.avgBytesPerRow;
   }
 
@@ -1441,9 +1442,9 @@ export async function getCapacitySnapshot(opts: {
   // The full per-tier per-class shape is available via the global
   // Setting("sampleRetention") fetched by the Maintenance card directly.
   const retention = {
-    monitorDays:    sampleRetention.sample.detail.default,
-    telemetryDays:  sampleRetention.telemetry.detail.default,
-    systemInfoDays: sampleRetention.systemInfo.detail.default,
+    monitorDays:    sampleRetention.assets.detail,
+    telemetryDays:  sampleRetention.cpuMem.detail,
+    systemInfoDays: sampleRetention.interfaces.detail,
   };
 
   const steadyStateSizeBytes = projectSteadyStateSize({

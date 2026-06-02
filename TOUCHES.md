@@ -951,8 +951,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 **Lifecycle / migrations:**
 - `src/jobs/renameMonitorClassKeys.ts` (phase 0) — renames legacy `fortiswitch` / `fortiap` keys to `switch` / `accessPoint`.
-- `src/jobs/migrateRetentionTiers.ts` (phase 1) — seeded per-tier columns on MonitorClassOverride (now unused).
-- `src/jobs/consolidateSampleRetention.ts` (phase 5) — pulled legacy single-tier values into the new `Setting("sampleRetention")`.
+- `src/jobs/migrateSampleRetentionToEntities.ts` — converts the legacy class-shaped `Setting("sampleRetention")` to the per-entity shape (`assets`/`cpuMem`/`temperature`/`interfaces`/`storage`/`ipsec`), flipping legacy `0`=forever to `FOREVER`(-1). Replaced the older `migrateRetentionTiers` / `consolidateSampleRetention` class-shaped seeders.
 - Each migration is idempotent via its own marker Setting; safe to re-run by deleting the marker and restarting.
 
 **Invariants:**
@@ -968,8 +967,8 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 **When changing this:**
 - New rollup column → schema update + sampleRollupService SQL builder for both hourly and daily tiers + sampleHistoryService reader translation. Run `npx prisma migrate diff --from-schema /tmp/old.prisma --to-schema prisma/schema.prisma --script` and commit the resulting `migration.sql`.
-- New monitor stream → add to `RetentionStream` enum in `sampleRetentionService.ts`, add a tier to the Setting JSON shape, extend the Maintenance UI card's stream list, add the per-stream prune helper.
-- Retention default change → update `DEFAULT_DETAIL_DAYS` / `DEFAULT_HOURLY_DAYS` / `DEFAULT_DAILY_DAYS` in `sampleRetentionService.ts` AND the matching defaults in `consolidateSampleRetention.ts` (which seeds from those constants).
+- New retention entity → add to `RetentionEntity` + `RETENTION_ENTITIES` in `sampleRetentionService.ts`, add the entity to `defaultSampleRetention()`, extend the Retention card's entity rows, add/extend the per-entity prune helper in `monitoringService`, and (if selection-aware) add it to `SELECTION_AWARE_ENTITIES` + stamp `cadence` in its writers.
+- Retention default change → update `DEFAULT_DETAIL_DAYS` / `DEFAULT_HOURLY_DAYS` / `DEFAULT_DAILY_DAYS` in `sampleRetentionService.ts`.
 
 ---
 
