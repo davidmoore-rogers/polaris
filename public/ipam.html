@@ -159,10 +159,10 @@
     </main>
   </div>
 
-  <!-- IPAM tab orchestrator: must run before the tab modules so they don't
-       auto-init on DOMContentLoaded (they each check window.__polarisIpamTabs). -->
-  <script>window.__polarisIpamTabs = true;</script>
-
+  <!-- IPAM tab orchestrator: ipam-tabs-flag.js sets window.__polarisIpamTabs
+       BEFORE blocks.js + subnets.js load so they skip their legacy DOMContentLoaded
+       auto-init (each checks the flag) and let ipam.js drive init on tab switch.
+       Externalized from an inline <script> for CSP `script-src 'self'` compatibility. -->
   <script src="/js/vendor/jspdf.umd.min.js"></script>
   <script src="/js/vendor/jspdf.plugin.autotable.min.js"></script>
   <script src="/js/api.js"></script>
@@ -171,6 +171,7 @@
   <script src="/js/favorites.js"></script>
   <script src="/js/block-panel.js"></script>
   <script src="/js/ip-panel.js"></script>
+  <script src="/js/ipam-tabs-flag.js"></script>
   <script src="/js/blocks.js"></script>
   <script src="/js/subnets.js"></script>
   <script src="/js/ipam.js"></script>
