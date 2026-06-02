@@ -42,7 +42,7 @@ import pg from "pg";
 import { prisma } from "../db.js";
 import { getMonitorSettings, type MonitorSettings } from "./monitoringService.js";
 import { isTimescaleAvailable, isHypertable, ALL_HYPERTABLE_CANDIDATES } from "./timescaleService.js";
-import { getSampleRetention, type RetentionEntity, type RetentionTier, type SampleRetention } from "./sampleRetentionService.js";
+import { getSampleRetention, SELECTION_AWARE_ENTITIES, UNSELECTED_DETAIL_HOURS, type RetentionEntity, type RetentionTier, type SampleRetention } from "./sampleRetentionService.js";
 import { isPgbossInstalled, getBootTimeMode, getQueueMode } from "./queueService.js";
 import { getDeploymentContext } from "../utils/deploymentContext.js";
 import { BACKUP_DIR, STATE_DIR } from "../utils/paths.js";
@@ -766,11 +766,19 @@ function projectSteadyStateSize(args: {
       monitoredCount;
     const rowsPerAssetPerDay = DEFAULT_ROWS_PER_ASSET_PER_DAY[def.name](intervals);
     // Per-entity retention. FOREVER (-1) has no finite steady state, so it's
-    // treated as 0 here (undercount); 0 = tier off = 0 bytes. NOTE: this
-    // projection still undercounts (the rows-per-asset-per-day interface
-    // estimate and the selected/unselected split) — PR-D rewrites it for
-    // accuracy. Here we only keep it compiling against the entity model.
-    const retentionDays = Math.max(0, retention[def.entity][def.tier]);
+    // treated as 0 here (an unbounded tier can't be projected); 0 = tier off = 0.
+    let retentionDays = Math.max(0, retention[def.entity][def.tier]);
+    // Selection split: the DETAIL tier of interfaces/storage/ipsec is dominated
+    // by UNSELECTED rows kept only UNSELECTED_DETAIL_HOURS (24h) — the configured
+    // (selected) retention applies to the small operator-pinned subset only. So
+    // cap the detail projection at the unselected window; the selected long-tail
+    // (a handful of pinned entities × full retention) is negligible against the
+    // per-entity bulk and is intentionally omitted. Hourly/daily tiers are
+    // selected-only (rollup filters cadence="fast") and keep their configured
+    // retention.
+    if (def.tier === "detail" && (SELECTION_AWARE_ENTITIES as readonly string[]).includes(def.entity)) {
+      retentionDays = Math.min(retentionDays || UNSELECTED_DETAIL_HOURS / 24, UNSELECTED_DETAIL_HOURS / 24);
+    }
     projectedSampleBytes += count * rowsPerAssetPerDay * retentionDays * t.avgBytesPerRow;
   }
 
