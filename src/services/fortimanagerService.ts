@@ -132,40 +132,16 @@ export async function testConnection(
 }
 
 /**
- * Force FortiManager to drop the current admin session for this bearer token.
- *
- * Polaris's 10-minute integrationConnectionTester keeps resetting FMG's
- * per-session idle counter, so the session never reaps. FortiManager enforces
- * a separate ~24-hour hard session lifetime; when that fires, subsequent
- * bearer-auth calls on Polaris's pooled TCP socket return RPC code -11 against
- * the dead session id until the socket is closed and re-established. Calling
- * /sys/logout periodically destroys the session well before the 24h ceiling;
- * the next request auto-creates a fresh one.
- *
- * Best-effort — returns { ok: false } on any failure rather than throwing,
- * since this runs from a housekeeping loop and must not break the caller.
+ * No /sys/logout. Polaris authenticates to FortiManager with a predefined
+ * REST API Admin api-key (bearer). Per the FortiManager API Best Practices
+ * Guide, that key is permanent: "the same user account will always share the
+ * same session and you do not need to use the login/logout endpoints." The
+ * logout-to-free-slots advice applies only to session-based auth. A prior
+ * hourly /sys/logout (commit 3e70476) tore down the shared session out from
+ * under the split-role monitor/discovery processes that reuse it, producing
+ * RPC -11 "no valid session" churn — removed deliberately. If FMG ever reaps
+ * the session at its hard lifetime, the next bearer call re-establishes it.
  */
-export async function logout(
-  config: FortiManagerConfig,
-  integrationId?: string,
-): Promise<{ ok: boolean; message: string }> {
-  const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
-  try {
-    const payload: JsonRpcRequest = {
-      id: 1,
-      method: "exec",
-      params: [{ url: "/sys/logout" }],
-    };
-    const res = await rpc(baseUrl, payload, config.apiUser, config.apiToken, config.verifySsl, undefined, integrationId);
-    const code = res.result?.[0]?.status?.code;
-    if (code !== 0) {
-      return { ok: false, message: res.result?.[0]?.status?.message || `RPC code ${code}` };
-    }
-    return { ok: true, message: "Logged out" };
-  } catch (err: any) {
-    return { ok: false, message: err?.message || "Unknown error" };
-  }
-}
 
 /**
  * Resolve a FortiGate's real management-interface IP via FMG.

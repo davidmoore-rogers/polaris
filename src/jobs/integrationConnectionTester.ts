@@ -26,15 +26,8 @@ import { runPreflightTest, isDiscoveryRunning } from "../api/routes/integrations
 import { logEvent } from "../api/routes/events.js";
 import { recordIntegrationTest } from "../metrics.js";
 import { runInstrumentedJob } from "./_metrics.js";
-import { logout as fmgLogout, type FortiManagerConfig } from "../services/fortimanagerService.js";
 
 const INTERVAL_MS = 10 * 60 * 1000;
-
-// FMG enforces a ~24h hard session lifetime that the 10-min keepalive cannot
-// reset. Proactively logout each FMG session every hour so the next call
-// re-establishes a fresh one well before the ceiling fires.
-const FMG_SESSION_RESET_MS = 60 * 60 * 1000;
-const fmgLastReset = new Map<string, number>();
 
 async function testAllIntegrations(): Promise<void> {
   await runInstrumentedJob("integrationConnectionTester", async () => {
@@ -53,16 +46,6 @@ async function testAllIntegrations(): Promise<void> {
         recordIntegrationTest(intg.type, "skipped");
         logger.info({ integrationId: intg.id, name: intg.name, type: intg.type, reason: "discovery-running" }, "integrationConnectionTester: skipped");
         continue;
-      }
-
-      if (intg.type === "fortimanager") {
-        const now = Date.now();
-        const last = fmgLastReset.get(intg.id) ?? 0;
-        if (now - last >= FMG_SESSION_RESET_MS) {
-          const r = await fmgLogout(intg.config as unknown as FortiManagerConfig, intg.id).catch((err) => ({ ok: false, message: err?.message ?? "logout threw" }));
-          fmgLastReset.set(intg.id, now);
-          logger.info({ integrationId: intg.id, name: intg.name, ok: r.ok, message: r.message }, "integrationConnectionTester: FMG session reset");
-        }
       }
 
       let result: { ok: boolean; message: string };
