@@ -4195,8 +4195,9 @@ function _renderInterfacesTable(container, si, asset) {
       '<th data-col-id="tagged-vlans" title="Tagged VLAN set on the FortiSwitch port (allowed-vlans − untagged-vlans). \"all\" indicates `set allowed-vlans all`.">Tagged VLANs</th>'
     : "";
   container.innerHTML = staleBanner +
+    '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects interfaces for fast-cadence polling and <strong>full-history retention</strong>. Unselected interfaces are kept for 24&nbsp;h only.</p>' +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th title="Pin this interface for fast-cadence polling" style="width:32px" data-col-id="poll" data-col-required="true"></th>' +
+      '<th title="Pin this interface for fast-cadence polling + full-history retention (unselected interfaces are kept 24h)" style="width:32px" data-col-id="poll" data-col-required="true"></th>' +
       '<th data-col-id="ifname" data-col-required="true">Interface</th>' +
       '<th data-col-id="status">Status</th>' +
       '<th data-col-id="speed">Speed</th>' +
@@ -4424,8 +4425,9 @@ function _renderStorageTable(container, si, asset) {
     '</tr>';
   }).join("");
   container.innerHTML =
+    '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects volumes for fast-cadence polling and <strong>full-history retention</strong>. Unselected volumes are kept for 24&nbsp;h only.</p>' +
     '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th title="Pin this mountpoint for fast-cadence polling" style="width:32px" data-col-id="poll" data-col-required="true"></th>' +
+      '<th title="Pin this mountpoint for fast-cadence polling + full-history retention (unselected volumes are kept 24h)" style="width:32px" data-col-id="poll" data-col-required="true"></th>' +
       '<th data-col-id="mount" data-col-required="true">Mount</th>' +
       '<th data-col-id="used">Used</th>' +
       '<th data-col-id="total">Total</th>' +

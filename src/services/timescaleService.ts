@@ -200,6 +200,21 @@ function resolveCompressAfterDays(): number {
  * on the next table. The prune layer falls back to plain-table deleteMany
  * for any table that didn't make it through.
  */
+// Selection-aware source tables (interfaces / storage / ipsec) carry a mix of
+// "fast" (operator-selected, full retention) and "slow"/unselected rows that
+// prune trims to 24h via a per-row deleteMany. Two requirements fall out:
+//   - a small (1-day) chunk interval so drop_chunks peels selected history at
+//     day granularity and the slow 24h trim lands in small recent chunks;
+//   - compress-after >= 2 days so the 24h deleteMany never has to touch a
+//     compressed chunk (rows in compressed chunks can't be DELETEd).
+const SELECTION_AWARE_SOURCE_TABLES = new Set<string>([
+  "asset_interface_samples",
+  "asset_storage_samples",
+  "asset_ipsec_tunnel_samples",
+]);
+const SELECTION_AWARE_CHUNK_INTERVAL = "1 day";
+const SELECTION_AWARE_MIN_COMPRESS_AFTER_DAYS = 2;
+
 export async function migrateToHypertables(): Promise<void> {
   if (!isTimescaleAvailable()) return;
   const compressAfterDays = resolveCompressAfterDays();
@@ -213,11 +228,22 @@ export async function migrateToHypertables(): Promise<void> {
     try {
       const wasHypertable = isHypertable(table);
       const start = Date.now();
+      const selectionAware = SELECTION_AWARE_SOURCE_TABLES.has(table);
 
       if (!wasHypertable) {
         logger.info({ table, partitionColumn }, "Converting sample table to hypertable");
         await prisma.$executeRawUnsafe(
           `SELECT create_hypertable($1::regclass, by_range('${partitionColumn}'), if_not_exists => TRUE, migrate_data => TRUE)`,
+          table,
+        );
+      }
+
+      // Smaller chunk interval for the selection-aware tables. Affects only
+      // chunks created after this call — existing chunks keep their interval
+      // and age out naturally. Idempotent.
+      if (selectionAware) {
+        await prisma.$executeRawUnsafe(
+          `SELECT set_chunk_time_interval($1::regclass, INTERVAL '${SELECTION_AWARE_CHUNK_INTERVAL}')`,
           table,
         );
       }
@@ -240,16 +266,23 @@ export async function migrateToHypertables(): Promise<void> {
         `SELECT remove_compression_policy($1::regclass, if_exists => TRUE)`,
         table,
       );
-      if (compressAfterDays > 0) {
+      // Selection-aware tables keep the recent window uncompressed long enough
+      // that the unselected 24h deleteMany never hits a compressed chunk. When
+      // compression is disabled globally (0), leave it disabled.
+      const effectiveCompressAfter =
+        selectionAware && compressAfterDays > 0
+          ? Math.max(compressAfterDays, SELECTION_AWARE_MIN_COMPRESS_AFTER_DAYS)
+          : compressAfterDays;
+      if (effectiveCompressAfter > 0) {
         await prisma.$executeRawUnsafe(
-          `SELECT add_compression_policy($1::regclass, INTERVAL '${compressAfterDays} days')`,
+          `SELECT add_compression_policy($1::regclass, INTERVAL '${effectiveCompressAfter} days')`,
           table,
         );
       }
 
       const action = wasHypertable ? "Refreshed compression on" : "Converted to hypertable:";
       logger.info(
-        { table, partitionColumn, durationMs: Date.now() - start, compressAfterDays },
+        { table, partitionColumn, durationMs: Date.now() - start, compressAfterDays: effectiveCompressAfter, selectionAware },
         `${action} ${table}`,
       );
     } catch (err) {

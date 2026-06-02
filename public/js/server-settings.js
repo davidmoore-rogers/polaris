@@ -1694,23 +1694,24 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
 // three tiers (Detail / Hourly / Daily). Stream sections stack vertically.
 // Inputs are tight (3.5rem) so the whole card fits in a single screen.
 
-var SAMPLE_RETENTION_STREAMS = [
-  { key: "sample",     label: "Response time",
-    hint: "Per-probe response-time samples (asset_monitor_samples)." },
-  { key: "telemetry",  label: "CPU, memory & temperature",
-    hint: "Telemetry + temperature samples ride the same retention." },
-  { key: "systemInfo", label: "Interfaces, storage & IPsec",
-    hint: "System-info scrape: interface counters, storage usage, IPsec tunnel state, LLDP neighbors." },
+// Per-ENTITY retention. Rows = entities, columns = tiers (detail/hourly/daily).
+// Encoding per cell: N = keep N days; 0 = drop this tier; -1 = keep forever.
+// The three selection-aware entities (interfaces/storage/ipsec) apply their
+// configured retention to OPERATOR-SELECTED (monitored) rows only — unselected
+// bulk rows are kept a fixed 24h and never rolled up (chosen per-asset in the
+// interface/storage/IPsec slide-ins).
+var SAMPLE_RETENTION_ENTITIES = [
+  { key: "assets",      label: "Response time",  hint: "Per-asset response-time probe (asset_monitor_samples)." },
+  { key: "cpuMem",      label: "CPU & memory",   hint: "Per-asset CPU / memory telemetry." },
+  { key: "temperature", label: "Temperature",    hint: "Per-asset temperature sensors." },
+  { key: "interfaces",  label: "Interfaces",     hint: "Per-interface counters.", selectionAware: true },
+  { key: "storage",     label: "Storage",        hint: "Per-volume usage.",       selectionAware: true },
+  { key: "ipsec",       label: "IPsec tunnels",  hint: "Per-tunnel state.",       selectionAware: true },
 ];
 var SAMPLE_RETENTION_TIERS   = [
   { key: "detail", label: "Detail"      },
   { key: "hourly", label: "Hourly avg"  },
   { key: "daily",  label: "Daily avg"   },
-];
-var SAMPLE_RETENTION_CLASSES = [
-  { key: "default",     label: "Default"        },
-  { key: "switch",      label: "Switches"       },
-  { key: "accessPoint", label: "Access points"  },
 ];
 var SAMPLE_RETENTION_DEFAULTS = {
   detail: 7,
@@ -1718,61 +1719,50 @@ var SAMPLE_RETENTION_DEFAULTS = {
   daily:  365,
 };
 
-function _retentionInputHtml(stream, tier, klass, value) {
-  var id = "ret-" + stream + "-" + tier + "-" + klass;
-  var safeValue = (typeof value === "number" && Number.isFinite(value) && value >= 0) ? value : 0;
-  return '<input type="number" min="0" max="3650" step="1" id="' + id + '" data-stream="' + escapeHtml(stream) +
-    '" data-tier="' + escapeHtml(tier) + '" data-class="' + escapeHtml(klass) +
+function _retentionInputHtml(entity, tier, value) {
+  var id = "ret-" + entity + "-" + tier;
+  var safeValue = (typeof value === "number" && Number.isFinite(value)) ? value : 0;
+  return '<input type="number" min="-1" max="3650" step="1" id="' + id + '" data-entity="' + escapeHtml(entity) +
+    '" data-tier="' + escapeHtml(tier) +
     '" value="' + safeValue + '" style="width:4rem;text-align:center;padding:2px 4px;font-size:0.85rem">';
 }
 
 function renderSampleRetentionCard(retention) {
   // Fall through to defaults if the snapshot fetch failed; operator can
   // still edit and Save to seed the Setting on first use.
-  var r = retention || {
-    sample:     { detail: { default: 7, switch: 7, accessPoint: 7 }, hourly: { default: 30, switch: 30, accessPoint: 30 }, daily: { default: 365, switch: 365, accessPoint: 365 } },
-    telemetry:  { detail: { default: 7, switch: 7, accessPoint: 7 }, hourly: { default: 30, switch: 30, accessPoint: 30 }, daily: { default: 365, switch: 365, accessPoint: 365 } },
-    systemInfo: { detail: { default: 7, switch: 7, accessPoint: 7 }, hourly: { default: 30, switch: 30, accessPoint: 30 }, daily: { default: 365, switch: 365, accessPoint: 365 } },
-  };
+  var r = retention || {};
+  var defTier = { detail: 7, hourly: 30, daily: 365 };
 
-  var sections = "";
-  SAMPLE_RETENTION_STREAMS.forEach(function (stream) {
-    var streamRet = r[stream.key] || {};
-    // Per-tier rows
-    var tierRows = "";
-    SAMPLE_RETENTION_TIERS.forEach(function (tier) {
-      var tierRet = streamRet[tier.key] || {};
-      var cells = SAMPLE_RETENTION_CLASSES.map(function (klass) {
-        return '<td style="padding:3px 6px;text-align:center">' +
-          _retentionInputHtml(stream.key, tier.key, klass.key, tierRet[klass.key]) +
-        '</td>';
-      }).join("");
-      tierRows +=
-        '<tr>' +
-          '<td style="padding:3px 8px 3px 0;font-size:0.82rem">' + escapeHtml(tier.label) + '</td>' +
-          cells +
-          '<td style="padding:3px 0 3px 6px;font-size:0.78rem;color:var(--color-text-tertiary)">days</td>' +
-        '</tr>';
-    });
-    var headerCells = SAMPLE_RETENTION_CLASSES.map(function (klass) {
-      return '<th style="padding:3px 6px;font-size:0.74rem;color:var(--color-text-secondary);font-weight:600;text-transform:uppercase;letter-spacing:0.04em">' +
-        escapeHtml(klass.label) +
-      '</th>';
+  var rows = "";
+  var hasSelectionAware = false;
+  SAMPLE_RETENTION_ENTITIES.forEach(function (entity) {
+    var entRet = r[entity.key] || defTier;
+    if (entity.selectionAware) hasSelectionAware = true;
+    var cells = SAMPLE_RETENTION_TIERS.map(function (tier) {
+      return '<td style="padding:3px 6px;text-align:center">' +
+        _retentionInputHtml(entity.key, tier.key, entRet[tier.key]) +
+      '</td>';
     }).join("");
-    sections +=
-      '<div style="margin-bottom:1.25rem">' +
-        '<h5 style="margin:0 0 0.15rem 0;font-size:0.9rem">' + escapeHtml(stream.label) + '</h5>' +
-        '<p style="margin:0 0 0.4rem 0;font-size:0.76rem;color:var(--color-text-tertiary)">' + escapeHtml(stream.hint) + '</p>' +
-        '<table style="border-collapse:collapse">' +
-          '<thead><tr>' +
-            '<th></th>' +
-            headerCells +
-            '<th></th>' +
-          '</tr></thead>' +
-          '<tbody>' + tierRows + '</tbody>' +
-        '</table>' +
-      '</div>';
+    var label = escapeHtml(entity.label) + (entity.selectionAware ? ' <span style="color:var(--color-text-tertiary)">*</span>' : "");
+    rows +=
+      '<tr>' +
+        '<td style="padding:4px 10px 4px 0;font-size:0.85rem;white-space:nowrap">' + label +
+          '<div style="font-size:0.72rem;color:var(--color-text-tertiary)">' + escapeHtml(entity.hint) + '</div>' +
+        '</td>' +
+        cells +
+        '<td style="padding:3px 0 3px 6px;font-size:0.78rem;color:var(--color-text-tertiary)">days</td>' +
+      '</tr>';
   });
+
+  var headerCells = SAMPLE_RETENTION_TIERS.map(function (tier) {
+    return '<th style="padding:3px 6px;font-size:0.74rem;color:var(--color-text-secondary);font-weight:600;text-transform:uppercase;letter-spacing:0.04em">' +
+      escapeHtml(tier.label) +
+    '</th>';
+  }).join("");
+
+  var footnote = hasSelectionAware
+    ? '<p class="hint" style="margin-top:0.5rem;font-size:0.76rem">* Applies to <strong>selected (monitored)</strong> interfaces / storage / IPsec tunnels only — unselected ones are kept 24&nbsp;h and not rolled up. Choose which to keep from each asset\'s interface / storage / IPsec slide-in.</p>'
+    : "";
 
   return '<div class="settings-card" id="sample-retention-card">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
@@ -1783,9 +1773,17 @@ function renderSampleRetentionCard(retention) {
       '</div>' +
     '</div>' +
     '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:0.85rem">' +
-      'How long Polaris keeps each tier of monitor sample data. Older samples roll up into hourly buckets, then daily buckets, then drop. Set 0 to keep forever for that cell. Switches and access points get their own retention because infra classes generate the dominant share of sample volume on large fleets.' +
+      'How long Polaris keeps each kind of sample data. Older samples roll up into hourly buckets, then daily buckets, then drop. Per cell: <strong>N</strong> = keep N days, <strong>0</strong> = drop that tier, <strong>−1</strong> = keep forever.' +
     '</p>' +
-    sections +
+    '<table style="border-collapse:collapse">' +
+      '<thead><tr>' +
+        '<th></th>' +
+        headerCells +
+        '<th></th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>' +
+    footnote +
     '<p class="hint" style="margin-top:0.5rem;font-size:0.78rem">Defaults: 7 days detail / 30 days hourly / 365 days daily. Takes effect on the next nightly prune (heavy-loop tick) and on the next chart request.</p>' +
   '</div>';
 }
@@ -1799,39 +1797,36 @@ function _wireSampleRetentionCard() {
     defBtn.addEventListener("click", function () {
       // Restore the default values into the inputs without saving. The
       // operator clicks Save to actually persist.
-      SAMPLE_RETENTION_STREAMS.forEach(function (stream) {
+      SAMPLE_RETENTION_ENTITIES.forEach(function (entity) {
         SAMPLE_RETENTION_TIERS.forEach(function (tier) {
-          SAMPLE_RETENTION_CLASSES.forEach(function (klass) {
-            var el = document.getElementById("ret-" + stream.key + "-" + tier.key + "-" + klass.key);
-            if (el) el.value = String(SAMPLE_RETENTION_DEFAULTS[tier.key]);
-          });
+          var el = document.getElementById("ret-" + entity.key + "-" + tier.key);
+          if (el) el.value = String(SAMPLE_RETENTION_DEFAULTS[tier.key]);
         });
       });
     });
   }
   if (saveBtn) {
     saveBtn.addEventListener("click", async function () {
-      var payload = { sample: {}, telemetry: {}, systemInfo: {} };
+      var payload = {};
       var hasError = false;
-      SAMPLE_RETENTION_STREAMS.forEach(function (stream) {
+      SAMPLE_RETENTION_ENTITIES.forEach(function (entity) {
+        payload[entity.key] = {};
         SAMPLE_RETENTION_TIERS.forEach(function (tier) {
-          payload[stream.key][tier.key] = {};
-          SAMPLE_RETENTION_CLASSES.forEach(function (klass) {
-            var el = document.getElementById("ret-" + stream.key + "-" + tier.key + "-" + klass.key);
-            if (!el) return;
-            var n = parseInt(el.value, 10);
-            if (!Number.isFinite(n) || n < 0 || n > 3650) {
-              hasError = true;
-              el.style.borderColor = "var(--color-status-error, #e57373)";
-              return;
-            }
-            el.style.borderColor = "";
-            payload[stream.key][tier.key][klass.key] = n;
-          });
+          var el = document.getElementById("ret-" + entity.key + "-" + tier.key);
+          if (!el) return;
+          var n = parseInt(el.value, 10);
+          // -1 = keep forever, 0 = drop tier, 1..3650 = days.
+          if (!Number.isFinite(n) || n < -1 || n > 3650) {
+            hasError = true;
+            el.style.borderColor = "var(--color-status-error, #e57373)";
+            return;
+          }
+          el.style.borderColor = "";
+          payload[entity.key][tier.key] = n;
         });
       });
       if (hasError) {
-        showToast("Retention values must be 0–3650 days", "error");
+        showToast("Retention values must be −1 (forever), 0 (off), or 1–3650 days", "error");
         return;
       }
       saveBtn.disabled = true;
