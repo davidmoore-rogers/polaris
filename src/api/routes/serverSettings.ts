@@ -45,6 +45,7 @@ import {
   restartService,
 } from "../../services/updateService.js";
 import { getPublicUrlPort } from "../../utils/publicUrl.js";
+import { validateBackupPassword } from "../../utils/backupPassword.js";
 import { getServerCertFingerprint, getServerCertHostnames, getServerCertExpiry } from "../../services/certInfo.js";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
@@ -237,7 +238,15 @@ mkdirSync(BACKUP_DIR, { recursive: true });
 
 router.post("/database/backup", async (req, res, next) => {
   try {
-    const password: string | null = req.body?.password || null;
+    // Reject empty/weak passphrases before they become an AES-256-GCM key —
+    // see src/utils/backupPassword.ts + the 2026-06-03 review (M5). null = no
+    // passphrase = unencrypted backup (a legitimate choice).
+    let password: string | null;
+    try {
+      password = validateBackupPassword(req.body?.password);
+    } catch (e: any) {
+      throw new AppError(400, e?.message || "Invalid backup password");
+    }
     // pg_dump goes direct to Postgres even under PgBouncer — the COPY-heavy
     // dump protocol doesn't proxy reliably through transaction-pool mode.
     // Falls back to DATABASE_URL when POLARIS_DB_DIRECT_URL is unset.
