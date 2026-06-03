@@ -22,7 +22,12 @@
  *                selected types
  *
  * Resolution always happens against each asset's latest AssetInterfaceSample
- * rows. The apply pass is strictly additive: it never strips existing pins.
+ * rows. For the fortigate class those rows are augmented with synthetic
+ * `ifType:"tunnel"` entries built from the latest AssetIpsecTunnelSample per
+ * tunnel (see mergeTunnelsIntoInterfaces) — FortiOS phase1-interface tunnels
+ * are real `config system interface` entries but the REST monitor endpoint
+ * omits them, so they'd otherwise never appear in the "By name" / "By type"
+ * pickers. The apply pass is strictly additive: it never strips existing pins.
  * This is deliberate; Asset.monitoredInterfaces is operator-owned and removing
  * items from it on every discovery would surprise anyone who pinned something
  * by hand.
@@ -203,15 +208,73 @@ export function resolvePinnedInterfaces(
   return Array.from(picked);
 }
 
+// ─── IPsec tunnel → synthetic interface merge (pure) ─────────────────────────
+
+/** Latest IPsec tunnel observation the merge helper consumes. */
+export interface TunnelObservation {
+  tunnelName: string;
+  /** Phase-1 rollup status: "up" | "down" | "partial" | "dynamic". */
+  status: string | null;
+}
+
+/**
+ * Append IPsec tunnels to each asset's interface list as synthetic
+ * `ifType: "tunnel"` rows so the auto-monitor "By name" / "By interface type"
+ * pickers (and the preview/apply resolver) can see them. FortiOS phase1-
+ * interface tunnels are real `config system interface` entries of type
+ * `tunnel`, but the REST `/api/v2/monitor/system/interface` endpoint omits
+ * them — so on REST-polled FortiGates they never reach asset_interface_samples
+ * and would otherwise be invisible here. Their byte counters live in the
+ * dedicated IPsec section (asset_ipsec_tunnel_samples); pinning one only adds
+ * it to Asset.monitoredInterfaces, which yields IF-MIB counters on SNMP and
+ * nothing on REST. See the module header.
+ *
+ * Pure: mutates `interfacesByAsset` in place and returns it. De-dupes per
+ * asset against existing ifNames so a tunnel SNMP already captured as a real
+ * interface row (ifType tunnel via IF-MIB ifType 131) isn't double-counted.
+ *
+ * operStatus mapping: only a fully-`down` tunnel maps to "down"; up / partial
+ * / dynamic all map to "up" so the "only currently-up" filter on By type /
+ * By pattern keeps healthy-but-not-fully-up tunnels (dial-up server templates
+ * report "dynamic" and are operational by design).
+ */
+export function mergeTunnelsIntoInterfaces(
+  interfacesByAsset: Map<string, ResolverInterface[]>,
+  tunnelsByAsset: Map<string, TunnelObservation[]>,
+): Map<string, ResolverInterface[]> {
+  for (const [assetId, tunnels] of tunnelsByAsset) {
+    if (tunnels.length === 0) continue;
+    let list = interfacesByAsset.get(assetId);
+    if (!list) { list = []; interfacesByAsset.set(assetId, list); }
+    const existing = new Set(list.map((i) => i.ifName));
+    for (const t of tunnels) {
+      if (!t.tunnelName || existing.has(t.tunnelName)) continue;
+      existing.add(t.tunnelName);
+      list.push({
+        ifName:     t.tunnelName,
+        ifType:     "tunnel",
+        operStatus: t.status === "down" ? "down" : "up",
+      });
+    }
+  }
+  return interfacesByAsset;
+}
+
 // ─── DB-bound functions ─────────────────────────────────────────────────────
 
 /**
  * Latest AssetInterfaceSample per (assetId, ifName) for every asset in
  * `assetIds`. Single round-trip via DISTINCT ON. Returns a Map keyed by
  * assetId; each value is the asset's interface list.
+ *
+ * When `includeIpsecTunnels` is set (fortigate class only — switches/APs have
+ * no IPsec), the latest IPsec tunnel per (assetId, tunnelName) is also pulled
+ * from asset_ipsec_tunnel_samples and merged in as synthetic tunnel-type
+ * interfaces via `mergeTunnelsIntoInterfaces`. The two reads run in parallel.
  */
 async function loadLatestInterfaces(
   assetIds: string[],
+  includeIpsecTunnels = false,
 ): Promise<Map<string, ResolverInterface[]>> {
   const out = new Map<string, ResolverInterface[]>();
   if (assetIds.length === 0) return out;
@@ -222,7 +285,7 @@ async function loadLatestInterfaces(
   // of the pollInterval-linked systemInfo cadence (up to 24h) plus a couple
   // missed scrapes; APs that haven't reported in 3 days drop from the
   // "By name" checklist, which is the right behavior.
-  const rows = await prisma.$queryRaw<Array<{
+  const ifacesPromise = prisma.$queryRaw<Array<{
     assetId: string;
     ifName: string;
     ifType: string | null;
@@ -235,9 +298,31 @@ async function loadLatestInterfaces(
       AND "timestamp" > NOW() - INTERVAL '72 hours'
     ORDER BY "assetId", "ifName", "timestamp" DESC
   `;
+  // IPsec tunnels (fortigate only): same 72h-bounded DISTINCT ON shape so the
+  // picker surfaces phase1-interface tunnels the REST monitor endpoint omits.
+  const tunnelsPromise = includeIpsecTunnels
+    ? prisma.$queryRaw<Array<{ assetId: string; tunnelName: string; status: string | null }>>`
+        SELECT DISTINCT ON ("assetId", "tunnelName")
+          "assetId", "tunnelName", "status"
+        FROM asset_ipsec_tunnel_samples
+        WHERE "assetId" = ANY(${assetIds}::text[])
+          AND "timestamp" > NOW() - INTERVAL '72 hours'
+        ORDER BY "assetId", "tunnelName", "timestamp" DESC
+      `
+    : Promise.resolve([] as Array<{ assetId: string; tunnelName: string; status: string | null }>);
+
+  const [rows, tunnelRows] = await Promise.all([ifacesPromise, tunnelsPromise]);
   for (const r of rows) {
     if (!out.has(r.assetId)) out.set(r.assetId, []);
     out.get(r.assetId)!.push({ ifName: r.ifName, ifType: r.ifType, operStatus: r.operStatus });
+  }
+  if (tunnelRows.length > 0) {
+    const tunnelsByAsset = new Map<string, TunnelObservation[]>();
+    for (const t of tunnelRows) {
+      if (!tunnelsByAsset.has(t.assetId)) tunnelsByAsset.set(t.assetId, []);
+      tunnelsByAsset.get(t.assetId)!.push({ tunnelName: t.tunnelName, status: t.status });
+    }
+    mergeTunnelsIntoInterfaces(out, tunnelsByAsset);
   }
   return out;
 }
@@ -473,7 +558,7 @@ export async function getInterfaceAggregate(
   });
   if (assets.length === 0) return [];
   const byAssetId = new Map(assets.map((a) => [a.id, a]));
-  const interfacesByAsset = await loadLatestInterfaces(assets.map((a) => a.id));
+  const interfacesByAsset = await loadLatestInterfaces(assets.map((a) => a.id), klass === "fortigate");
 
   // Group by ifName across all assets.
   const byIfName = new Map<string, AggregateRow>();
@@ -588,7 +673,7 @@ export async function previewAutoMonitorForClass(
   // LLDP join is only needed if either selection uses byLldp; load once.
   const needLldp = selectionUsesLldp(selection) || (wantDiff && selectionUsesLldp(baselineSelection ?? null));
   const [interfacesByAsset, realLldp, inferredLldp] = await Promise.all([
-    loadLatestInterfaces(ids),
+    loadLatestInterfaces(ids, klass === "fortigate"),
     needLldp ? loadLldpByAsset(ids) : Promise.resolve(new Map<string, LldpByIfName>()),
     needLldp ? loadInferredLldpByAsset(assets, klass) : Promise.resolve(new Map<string, LldpByIfName>()),
   ]);
@@ -685,7 +770,7 @@ export async function applyAutoMonitorForClass(
   const ids = assets.map((a) => a.id);
   const needLldp = selectionUsesLldp(selection);
   const [interfacesByAsset, realLldp, inferredLldp] = await Promise.all([
-    loadLatestInterfaces(ids),
+    loadLatestInterfaces(ids, klass === "fortigate"),
     needLldp ? loadLldpByAsset(ids) : Promise.resolve(new Map<string, LldpByIfName>()),
     needLldp ? loadInferredLldpByAsset(assets, klass) : Promise.resolve(new Map<string, LldpByIfName>()),
   ]);
