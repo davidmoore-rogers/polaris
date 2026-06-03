@@ -15,6 +15,7 @@ import * as windowsServer from "../../services/windowsServerService.js";
 import * as entraId from "../../services/entraIdService.js";
 import * as activeDirectory from "../../services/activeDirectoryService.js";
 import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps } from "../../utils/cidr.js";
+import { isBlockedOutboundHost } from "../../utils/netGuard.js";
 import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveredVip, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
@@ -417,6 +418,24 @@ const FortiGateClassMonitorSchema = z.object({
   addressMetavar: "",
 });
 
+// SSRF guard shared by every integration config schema that carries a `host`.
+// Blocks loopback / link-local / cloud-metadata / multicast literals while
+// leaving RFC1918 LAN device addresses (the normal target) allowed. Empty host
+// is permitted — a not-yet-configured integration. See src/utils/netGuard.ts
+// and the 2026-06-03 security review (M4).
+function refineConfigHost(cfg: { host?: string }, ctx: z.RefinementCtx): void {
+  if (cfg.host && isBlockedOutboundHost(cfg.host)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["host"],
+      message:
+        `Host "${cfg.host.trim()}" is in a blocked range (loopback / link-local / ` +
+        `metadata / multicast) and cannot be used as an integration target. ` +
+        `Use the device's routable LAN address.`,
+    });
+  }
+}
+
 const FortiManagerConfigSchema = z.object({
   host:      z.string().optional().default(""),
   port:      z.number().int().min(1).max(65535).optional().default(443),
@@ -473,7 +492,7 @@ const FortiManagerConfigSchema = z.object({
   // to pino at info level (visible in `journalctl -u polaris`). High log
   // volume — operators flip on for diagnosis and flip off when done.
   verboseLogging: z.boolean().optional().default(false),
-});
+}).superRefine(refineConfigHost);
 
 const FortiGateConfigSchema = z.object({
   host:      z.string().optional().default(""),
@@ -495,7 +514,7 @@ const FortiGateConfigSchema = z.object({
   // Per-integration verbose debug logging — see FortiManagerConfigSchema for
   // shape + semantics. Default false.
   verboseLogging: z.boolean().optional().default(false),
-});
+}).superRefine(refineConfigHost);
 
 // Per-class monitor block for AD / Entra / Windows Server integrations.
 // Mirrors the FMG/FortiGate class blocks but with the workstation/server
@@ -524,7 +543,7 @@ const WindowsServerConfigSchema = z.object({
   serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
   verboseLogging: z.boolean().optional().default(false),
-});
+}).superRefine(refineConfigHost);
 
 const EntraIdConfigSchema = z.object({
   tenantId:      z.string().optional().default(""),
@@ -555,7 +574,7 @@ const ActiveDirectoryConfigSchema = z.object({
   serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
   verboseLogging: z.boolean().optional().default(false),
-});
+}).superRefine(refineConfigHost);
 
 const CreateIntegrationSchema = z.discriminatedUnion("type", [
   z.object({
@@ -874,6 +893,18 @@ router.put("/:id", async (req, res, next) => {
       }
       if (!input.config.bindPassword || isMaskedSecretSentinel(input.config.bindPassword)) {
         newConfig.bindPassword = currentConfig.bindPassword;
+      }
+      // SSRF guard — the update path validates config as a loose record, so the
+      // per-type schema's host refinement (refineConfigHost) doesn't run here.
+      // Re-check the merged host explicitly so an edit can't smuggle in a
+      // blocked target. See src/utils/netGuard.ts + the 2026-06-03 review (M4).
+      if (typeof newConfig.host === "string" && isBlockedOutboundHost(newConfig.host)) {
+        throw new AppError(
+          400,
+          `Host "${newConfig.host.trim()}" is in a blocked range (loopback / link-local / ` +
+          `metadata / multicast) and cannot be used as an integration target. ` +
+          `Use the device's routable LAN address.`,
+        );
       }
       // Validate the optional FMG/FortiGate response-time SNMP override.
       // Empty string and null both mean "clear" — normalize to null so the
