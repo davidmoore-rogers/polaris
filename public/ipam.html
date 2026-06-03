@@ -15,6 +15,28 @@
     <main class="main">
       <div class="page-header">
         <h2>IPAM</h2>
+        <!-- Export lives in the always-present top header (not inside a tab
+             template) so it works for BOTH the IP Blocks and Networks tabs and
+             stays wired regardless of which tab is mounted. ipam.js wires the
+             button once and dispatches to the active tab's export(). The user
+             badge (rendered by app.js renderUserBadge) is appended into this
+             same .page-header-actions afterwards, so Export sits to its left. -->
+        <div class="page-header-actions">
+          <div class="btn-dropdown-wrap">
+            <button class="btn btn-secondary" id="btn-export">Export &#9662;</button>
+            <div class="btn-dropdown-menu" id="export-menu">
+              <div class="dropdown-heading">PDF</div>
+              <button data-export="page" data-fmt="pdf">Current page</button>
+              <button data-export="filtered" data-fmt="pdf">All filtered results</button>
+              <button data-export="all" data-fmt="pdf" class="export-all-label">Entire network list</button>
+              <div class="dropdown-divider"></div>
+              <div class="dropdown-heading">CSV</div>
+              <button data-export="page" data-fmt="csv">Current page</button>
+              <button data-export="filtered" data-fmt="csv">All filtered results</button>
+              <button data-export="all" data-fmt="csv" class="export-all-label">Entire network list</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="page-tabs" id="ipam-tabs">
@@ -78,20 +100,6 @@
         <div class="page-header" style="margin-top:0">
           <div></div>
           <div class="page-header-actions">
-            <div class="btn-dropdown-wrap">
-              <button class="btn btn-secondary" id="btn-export">Export &#9662;</button>
-              <div class="btn-dropdown-menu" id="export-menu">
-                <div class="dropdown-heading">PDF</div>
-                <button data-export="page" data-fmt="pdf">Current page</button>
-                <button data-export="filtered" data-fmt="pdf">All filtered results</button>
-                <button data-export="all" data-fmt="pdf">Entire network list</button>
-                <div class="dropdown-divider"></div>
-                <div class="dropdown-heading">CSV</div>
-                <button data-export="page" data-fmt="csv">Current page</button>
-                <button data-export="filtered" data-fmt="csv">All filtered results</button>
-                <button data-export="all" data-fmt="csv">Entire network list</button>
-              </div>
-            </div>
             <button class="btn btn-secondary" id="btn-auto-alloc" data-create-networks>Auto-Allocate Next</button>
             <button class="btn btn-primary" id="btn-add-subnet" data-create-networks>+ Add Network</button>
           </div>

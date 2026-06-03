@@ -154,7 +154,9 @@ function _applySubnetsHashFilters() {
   }
 }
 
-window.PolarisSubnets = { init: _initSubnetsPage, applyHashFilters: _applySubnetsHashFilters };
+// export() is invoked by the IPAM orchestrator (ipam.js), which owns the
+// single Export button in the top page-header and dispatches to the active tab.
+window.PolarisSubnets = { init: _initSubnetsPage, applyHashFilters: _applySubnetsHashFilters, export: handleNetworkExport };
 
 // Legacy /subnets.html auto-run. IPAM sets __polarisIpamTabs=true before
 // loading this script so it can drive init itself.
@@ -1164,27 +1166,12 @@ async function confirmDeleteSubnet(id, cidr, reservationCount) {
 
 function val(id) { return document.getElementById(id).value.trim(); }
 
-/* ─── PDF Export ──────────────────────────────────────────────────────────── */
-
-(function () {
-  var menu = document.getElementById("export-menu");
-  var btn  = document.getElementById("btn-export");
-  if (!btn || !menu) return;
-
-  btn.addEventListener("click", function (e) {
-    e.stopPropagation();
-    menu.classList.toggle("open");
-  });
-  document.addEventListener("click", function () { menu.classList.remove("open"); });
-  menu.addEventListener("click", function (e) { e.stopPropagation(); });
-
-  menu.querySelectorAll("button[data-export]").forEach(function (item) {
-    item.addEventListener("click", async function () {
-      menu.classList.remove("open");
-      await handleNetworkExport(this.getAttribute("data-export"), this.getAttribute("data-fmt"));
-    });
-  });
-})();
+/* ─── PDF / CSV Export ──────────────────────────────────────────────────────
+   The Export button + menu now live in the IPAM top page-header and are wired
+   once by ipam.js, which calls window.PolarisSubnets.export(mode, fmt) when the
+   Networks tab is active. (Previously an IIFE here tried to wire a button that
+   lives inside the lazily-mounted tab template — it always ran before the tab
+   was in the DOM, so getElementById returned null and export never worked.) */
 
 async function handleNetworkExport(mode, fmt) {
   var networks, label, ok;

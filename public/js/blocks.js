@@ -82,7 +82,9 @@ async function _initBlocksPage() {
   });
 }
 
-window.PolarisBlocks = { init: _initBlocksPage };
+// export() is invoked by the IPAM orchestrator (ipam.js), which owns the single
+// Export button in the top page-header and dispatches to the active tab.
+window.PolarisBlocks = { init: _initBlocksPage, export: handleBlockExport };
 
 // The legacy /blocks.html bootstrap still auto-runs on its own page. The
 // IPAM page sets window.__polarisIpamTabs=true BEFORE this script loads so
@@ -304,4 +306,116 @@ function _compressIPv6(bigint) {
   var L = groups.slice(0, bestStart).map(function (g) { return g.toString(16); }).join(":");
   var R = groups.slice(bestStart + bestLen).map(function (g) { return g.toString(16); }).join(":");
   return L + "::" + R;
+}
+
+/* ─── PDF / CSV Export ──────────────────────────────────────────────────────
+   Wired by ipam.js (which owns the single Export button in the IPAM top
+   page-header) via window.PolarisBlocks.export(mode, fmt) when the IP Blocks
+   tab is active. Mirrors the Networks export (handleNetworkExport in
+   subnets.js) so both tabs offer the same page / filtered / all + PDF / CSV
+   options as the Assets page. */
+
+async function handleBlockExport(mode, fmt) {
+  var blocks, label, ok;
+
+  var filteredData = _blocksSF ? _blocksSF.apply(_blocksData) : _blocksData;
+  if (mode === "page") {
+    blocks = filteredData.slice((_blocksPage - 1) * _blocksPageSize, _blocksPage * _blocksPageSize);
+    label = "page " + _blocksPage;
+  } else if (mode === "filtered") {
+    blocks = filteredData;
+    label = blocks.length + " filtered blocks";
+    if (blocks.length > 100) {
+      ok = await showConfirm("This will export " + blocks.length + " blocks. Continue?");
+      if (!ok) return;
+    }
+  } else if (mode === "all") {
+    ok = await showConfirm("Export the entire block list? This may take a moment.");
+    if (!ok) return;
+  }
+
+  await trackedPdfExport("Exporting blocks " + fmt.toUpperCase(), async function (signal) {
+    if (mode === "all") {
+      var allResult = await request("GET", "/blocks", undefined, signal);
+      blocks = allResult.blocks || allResult;
+      label = "all " + blocks.length + " blocks";
+    }
+    if (signal.aborted) return;
+    if (!blocks || blocks.length === 0) { showToast("No blocks to export", "error"); return; }
+    if (fmt === "csv") generateBlockCsv(blocks);
+    else generateBlockPdf(blocks, label);
+  });
+}
+
+function generateBlockPdf(blocks, label) {
+  if (!window.jspdf || !window.jspdf.jsPDF) {
+    throw new Error("PDF library not loaded. Check your internet connection and reload the page.");
+  }
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "letter" });
+
+  var now = new Date();
+  var timestamp = now.toLocaleDateString() + " " + now.toLocaleTimeString();
+
+  doc.setFontSize(16);
+  doc.setTextColor(40, 40, 40);
+  doc.text((_branding ? _branding.appName : "Polaris") + " — IP Block Report", 40, 36);
+  doc.setFontSize(9);
+  doc.setTextColor(120, 120, 120);
+  doc.text("Generated: " + timestamp + "  |  Scope: " + label + "  |  Count: " + blocks.length, 40, 52);
+
+  var head = [["Name", "CIDR", "Version", "Description", "Tags", "Networks", "Created"]];
+  var body = blocks.map(function (b) {
+    return [
+      b.name || "-",
+      b.cidr || "-",
+      b.ipVersion === "v6" ? "IPv6" : (b.ipVersion === "v4" ? "IPv4" : "-"),
+      b.description || "-",
+      (b.tags || []).join(", ") || "-",
+      b._count ? String(b._count.subnets) : "0",
+      b.createdAt ? formatDate(b.createdAt) : "-",
+    ];
+  });
+
+  doc.autoTable({
+    startY: 64,
+    head: head,
+    body: body,
+    theme: "grid",
+    styles: { fontSize: 8, cellPadding: 4, overflow: "linebreak" },
+    headStyles: { fillColor: [30, 30, 54], textColor: [230, 230, 230], fontStyle: "bold" },
+    alternateRowStyles: { fillColor: [245, 245, 250] },
+    margin: { left: 40, right: 40 },
+    didDrawPage: function (data) {
+      var pageNum = doc.internal.getNumberOfPages();
+      doc.setFontSize(8);
+      doc.setTextColor(150, 150, 150);
+      doc.text(
+        "Page " + data.pageNumber + " of " + pageNum + "  |  " + (_branding ? _branding.appName : "Polaris") + " IP Block Report",
+        doc.internal.pageSize.getWidth() / 2,
+        doc.internal.pageSize.getHeight() - 20,
+        { align: "center" }
+      );
+    },
+  });
+
+  var filename = "polaris-ip-blocks-" + now.toISOString().slice(0, 10) + ".pdf";
+  doc.save(filename);
+  showToast("Exported " + blocks.length + " blocks to " + filename);
+}
+
+function generateBlockCsv(blocks) {
+  var headers = ["Name", "CIDR", "Version", "Description", "Tags", "Networks", "Created"];
+  var rows = blocks.map(function (b) {
+    return [
+      b.name || "", b.cidr || "",
+      b.ipVersion === "v6" ? "IPv6" : (b.ipVersion === "v4" ? "IPv4" : ""),
+      b.description || "", (b.tags || []).join("; "),
+      b._count ? String(b._count.subnets) : "0",
+      b.createdAt ? formatDate(b.createdAt) : "",
+    ];
+  });
+  var filename = "polaris-ip-blocks-" + new Date().toISOString().slice(0, 10) + ".csv";
+  downloadCsv(headers, rows, filename);
+  showToast("Exported " + blocks.length + " blocks to " + filename);
 }

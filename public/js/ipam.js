@@ -59,6 +59,7 @@
     mount.appendChild(tpl.content.cloneNode(true));
     activeTab = name;
     setActiveButton(name);
+    updateExportLabels(name);
     try {
       if (name === "blocks" && window.PolarisBlocks && window.PolarisBlocks.init) {
         await window.PolarisBlocks.init();
@@ -105,8 +106,44 @@
     if (name !== activeTab) mountTab(name);
   }
 
+  // The Export button + menu live in the always-present top page-header (NOT
+  // inside a tab template), so they're wired exactly once here rather than by
+  // each tab module. Each menu item dispatches to whichever tab is active —
+  // PolarisBlocks.export() for IP Blocks, PolarisSubnets.export() for Networks.
+  function updateExportLabels(name) {
+    var label = name === "blocks" ? "Entire block list" : "Entire network list";
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#export-menu .export-all-label"),
+      function (b) { b.textContent = label; }
+    );
+  }
+
+  function wireExport() {
+    var menu = document.getElementById("export-menu");
+    var btn = document.getElementById("btn-export");
+    if (!btn || !menu) return;
+
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      menu.classList.toggle("open");
+    });
+    document.addEventListener("click", function () { menu.classList.remove("open"); });
+    menu.addEventListener("click", function (e) { e.stopPropagation(); });
+
+    menu.querySelectorAll("button[data-export]").forEach(function (item) {
+      item.addEventListener("click", async function () {
+        menu.classList.remove("open");
+        var mode = this.getAttribute("data-export");
+        var fmt = this.getAttribute("data-fmt");
+        var mod = activeTab === "blocks" ? window.PolarisBlocks : window.PolarisSubnets;
+        if (mod && mod.export) await mod.export(mode, fmt);
+      });
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     wireTabClicks();
+    wireExport();
     mountTab(currentTabFromHash());
     window.addEventListener("hashchange", onHashChange);
   });
