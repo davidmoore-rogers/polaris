@@ -2758,7 +2758,13 @@ async function probeWinRm(host: string, config: Record<string, unknown>, start: 
         "Content-Type":   "application/soap+xml;charset=UTF-8",
         "Content-Length": Buffer.byteLength(body).toString(),
       },
-      rejectUnauthorized: false,
+      // WinRM Basic-auth sends credentials on the wire, so an unverified TLS
+      // session lets a MITM capture them (2026-06-03 review, H1). Verify only
+      // when the WinRM credential explicitly opts in (config.verifyTls === true);
+      // legacy credentials with no flag keep their prior no-verify behavior so
+      // existing self-signed-cert installs don't break. Operators flip it on per
+      // credential in Server Settings → Credentials.
+      rejectUnauthorized: config.verifyTls === true,
       timeout: timeoutMs,
     } as any, (res) => {
       // Drain the body so the socket can close cleanly.

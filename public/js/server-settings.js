@@ -5273,7 +5273,11 @@ async function openCredentialModal(id, initialState) {
 
   function renderTypeFields() {
     var t = document.getElementById("f-cred-type").value;
-    var cfg = formConfig || {};
+    // New credentials default to verify-ON (2026-06-03 review, H1). Existing
+    // credentials keep their stored config (no verifyTls → checkbox unchecked →
+    // current no-verify behavior preserved on save). initialState (Back button)
+    // always wins so in-flight edits survive.
+    var cfg = formConfig || (isNew ? { verifyTls: true } : {});
     var host = document.getElementById("cred-type-fields");
     if (t === "snmp")        host.innerHTML = credSnmpForm(cfg);
     else if (t === "winrm")  host.innerHTML = credWinrmForm(cfg);
@@ -5579,6 +5583,13 @@ function credWinrmForm(cfg) {
         '<input type="checkbox" id="f-winrm-https"' + (cfg.useHttps ? " checked" : "") + '>' +
         '<span>Use HTTPS</span>' +
       '</label>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
+        '<input type="checkbox" id="f-winrm-verifytls"' + (cfg.verifyTls === true ? " checked" : "") + '>' +
+        '<span>Verify TLS certificate</span>' +
+      '</label>' +
+      '<p class="hint" style="color:var(--color-warning,#d98c00)">Applies when Use HTTPS is on. Leave enabled. WinRM sends the username and password as Basic auth, so disabling certificate verification lets a network attacker intercept the connection and capture these credentials. Disable only for a host with a self-signed certificate you cannot replace.</p>' +
     '</div>'
   );
 }
@@ -5648,6 +5659,7 @@ function readCredentialForm(type) {
       username: document.getElementById("f-winrm-user").value,
       password: document.getElementById("f-winrm-pass").value,
       useHttps: document.getElementById("f-winrm-https").checked,
+      verifyTls: document.getElementById("f-winrm-verifytls").checked,
     };
     var wp = num(document.getElementById("f-winrm-port").value);
     if (wp !== undefined) w.port = wp;

@@ -1281,6 +1281,9 @@ function winrmConnectionFromCred(host: string, config: Record<string, unknown>):
     host,
     port:     typeof config.port === "number" ? config.port : undefined,
     useHttps: config.useHttps !== false,
+    // Honor the credential's TLS-verify opt-in (2026-06-03 review, H1); legacy
+    // credentials with no flag keep the prior no-verify behavior.
+    verifyTls: config.verifyTls === true,
     username,
     password,
     timeoutMs: 120_000, // installer downloads a ~10 MB binary; default 60s is tight
