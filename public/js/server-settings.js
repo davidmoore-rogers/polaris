@@ -416,7 +416,7 @@ function initTimezoneDropdown(currentValue) {
 
 // ─── DNS Settings ─────────────────────────────────────────────────────────
 
-var _dnsDefaults = { servers: [], mode: "standard", dohUrl: "" };
+var _dnsDefaults = { servers: [], mode: "standard", dohUrl: "", verifyTls: false };
 
 function dnsCardsHTML() {
   return '<div class="settings-cards-row">' +
@@ -450,6 +450,13 @@ function dnsCardsHTML() {
           '<tr><td style="padding:2px 12px 2px 0;font-weight:500">AdGuard</td><td class="mono">https://dns.adguard-dns.com/dns-query</td></tr>' +
         '</table>' +
       '</div>' +
+    '</div>' +
+    '<div id="dns-verifytls-group" class="form-group" style="display:none">' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
+        '<input type="checkbox" id="f-dns-verifytls"' + (_dnsDefaults.verifyTls === true ? ' checked' : '') + '>' +
+        '<span>Verify resolver TLS certificate</span>' +
+      '</label>' +
+      '<p class="hint" style="color:var(--color-warning,#d98c00)">Recommended. When off, encrypted DNS (DoT/DoH) accepts any certificate, so a network attacker can impersonate the resolver and return forged answers that drive hostname learning and auto-reservations. Public resolvers (Google, Cloudflare, Quad9) present valid certificates and work with this on. Turn off only for an internal resolver that uses a private CA.</p>' +
     '</div>' +
     '<div style="display:flex;gap:8px;align-items:center">' +
       '<button class="btn btn-primary" id="btn-dns-save">Save DNS Settings</button>' +
@@ -486,6 +493,10 @@ function updateDnsFieldVisibility() {
   var dohGroup = document.getElementById("dns-doh-group");
   var serversHint = document.getElementById("dns-servers-hint");
   var serversExamples = document.getElementById("dns-servers-examples");
+  var verifyTlsGroup = document.getElementById("dns-verifytls-group");
+
+  // TLS verification only applies to the encrypted modes (DoT/DoH).
+  if (verifyTlsGroup) verifyTlsGroup.style.display = (mode === "doh" || mode === "dot") ? "" : "none";
 
   if (mode === "doh") {
     serversGroup.style.display = "none";
@@ -521,6 +532,7 @@ function collectDnsForm() {
     servers: document.getElementById("f-dns-servers").value
       .split("\n").map(function (s) { return s.trim(); }).filter(Boolean),
     dohUrl: (document.getElementById("f-dns-doh-url").value || "").trim(),
+    verifyTls: document.getElementById("f-dns-verifytls").checked,
   };
 }
 
@@ -3376,6 +3388,7 @@ async function loadIdentificationTab() {
       _dnsDefaults.servers = results[2].servers || [];
       _dnsDefaults.mode = results[2].mode || "standard";
       _dnsDefaults.dohUrl = results[2].dohUrl || "";
+      _dnsDefaults.verifyTls = results[2].verifyTls === true;
     }
     _ouiOverrides = results[3] || [];
     _mibsData = results[4] || [];
@@ -5303,7 +5316,11 @@ async function openCredentialModal(id, initialState) {
 
   function renderTypeFields() {
     var t = document.getElementById("f-cred-type").value;
-    var cfg = formConfig || {};
+    // New credentials default to verify-ON (2026-06-03 review, H1). Existing
+    // credentials keep their stored config (no verifyTls → checkbox unchecked →
+    // current no-verify behavior preserved on save). initialState (Back button)
+    // always wins so in-flight edits survive.
+    var cfg = formConfig || (isNew ? { verifyTls: true } : {});
     var host = document.getElementById("cred-type-fields");
     if (t === "snmp")        host.innerHTML = credSnmpForm(cfg);
     else if (t === "winrm")  host.innerHTML = credWinrmForm(cfg);
@@ -5609,6 +5626,13 @@ function credWinrmForm(cfg) {
         '<input type="checkbox" id="f-winrm-https"' + (cfg.useHttps ? " checked" : "") + '>' +
         '<span>Use HTTPS</span>' +
       '</label>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
+        '<input type="checkbox" id="f-winrm-verifytls"' + (cfg.verifyTls === true ? " checked" : "") + '>' +
+        '<span>Verify TLS certificate</span>' +
+      '</label>' +
+      '<p class="hint" style="color:var(--color-warning,#d98c00)">Applies when Use HTTPS is on. Leave enabled. WinRM sends the username and password as Basic auth, so disabling certificate verification lets a network attacker intercept the connection and capture these credentials. Disable only for a host with a self-signed certificate you cannot replace.</p>' +
     '</div>'
   );
 }
@@ -5678,6 +5702,7 @@ function readCredentialForm(type) {
       username: document.getElementById("f-winrm-user").value,
       password: document.getElementById("f-winrm-pass").value,
       useHttps: document.getElementById("f-winrm-https").checked,
+      verifyTls: document.getElementById("f-winrm-verifytls").checked,
     };
     var wp = num(document.getElementById("f-winrm-port").value);
     if (wp !== undefined) w.port = wp;

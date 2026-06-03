@@ -46,6 +46,7 @@ import {
   restartService,
 } from "../../services/updateService.js";
 import { getPublicUrlPort } from "../../utils/publicUrl.js";
+import { validateBackupPassword } from "../../utils/backupPassword.js";
 import { getServerCertFingerprint, getServerCertHostnames, getServerCertExpiry } from "../../services/certInfo.js";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
@@ -238,7 +239,15 @@ mkdirSync(BACKUP_DIR, { recursive: true });
 
 router.post("/database/backup", async (req, res, next) => {
   try {
-    const password: string | null = req.body?.password || null;
+    // Reject empty/weak passphrases before they become an AES-256-GCM key —
+    // see src/utils/backupPassword.ts + the 2026-06-03 review (M5). null = no
+    // passphrase = unencrypted backup (a legitimate choice).
+    let password: string | null;
+    try {
+      password = validateBackupPassword(req.body?.password);
+    } catch (e: any) {
+      throw new AppError(400, e?.message || "Invalid backup password");
+    }
     // pg_dump goes direct to Postgres even under PgBouncer — the COPY-heavy
     // dump protocol doesn't proxy reliably through transaction-pool mode.
     // Falls back to DATABASE_URL when POLARIS_DB_DIRECT_URL is unset.
@@ -668,6 +677,7 @@ router.put("/dns", async (req, res, next) => {
       .filter(Boolean);
     const mode = (req.body.mode || "standard") as DnsSettings["mode"];
     const dohUrl = (req.body.dohUrl || "").trim();
+    const verifyTls = req.body.verifyTls === true;
 
     // Validate server entries — allow IPs, hostnames, and host:port
     if (mode !== "doh") {
@@ -684,7 +694,7 @@ router.put("/dns", async (req, res, next) => {
       if (!/^https:\/\/.+/.test(dohUrl)) throw new AppError(400, "DoH URL must start with https://");
     }
 
-    const saved = await updateDnsSettings({ servers, mode, dohUrl });
+    const saved = await updateDnsSettings({ servers, mode, dohUrl, verifyTls });
     res.json(saved);
   } catch (err) {
     next(err);
@@ -698,19 +708,21 @@ router.post("/dns/test", async (req, res, next) => {
       .filter(Boolean);
     const mode = (req.body.mode || "standard") as DnsSettings["mode"];
     const dohUrl = (req.body.dohUrl || "").trim();
+    const verifyTls = req.body.verifyTls === true;
     const testIp = req.body.testIp || "8.8.8.8";
 
     if (mode === "doh" && !dohUrl) {
       return res.json({ ok: false, message: "No DoH URL configured", results: [] });
     }
 
+    // Carry verifyTls so the test exercises the operator's chosen TLS behavior.
     const targets = mode === "doh"
-      ? [{ label: `DoH (${dohUrl})`, settings: { servers: [], mode, dohUrl } as DnsSettings }]
+      ? [{ label: `DoH (${dohUrl})`, settings: { servers: [], mode, dohUrl, verifyTls } as DnsSettings }]
       : mode === "dot"
-        ? servers.map((s) => ({ label: `DoT (${s}:853)`, settings: { servers: [s], mode, dohUrl: "" } as DnsSettings }))
+        ? servers.map((s) => ({ label: `DoT (${s}:853)`, settings: { servers: [s], mode, dohUrl: "", verifyTls } as DnsSettings }))
         : servers.length > 0
-          ? servers.map((s) => ({ label: s, settings: { servers: [s], mode: "standard" as const, dohUrl: "" } }))
-          : [{ label: "system DNS", settings: { servers: [], mode: "standard" as const, dohUrl: "" } }];
+          ? servers.map((s) => ({ label: s, settings: { servers: [s], mode: "standard" as const, dohUrl: "", verifyTls: false } }))
+          : [{ label: "system DNS", settings: { servers: [], mode: "standard" as const, dohUrl: "", verifyTls: false } }];
 
     const results = await Promise.all(targets.map(async (t) => {
       const resolver = await createResolver(t.settings);

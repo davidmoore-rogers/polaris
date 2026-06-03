@@ -38,6 +38,14 @@ export interface WinRmConnection {
   useHttps?: boolean;      // default true
   username: string;
   password: string;
+  /**
+   * Verify the server's TLS certificate on HTTPS connections. Defaults to OFF
+   * when omitted to preserve behavior for callers (and stored credentials) that
+   * predate this flag — see the 2026-06-03 security review (H1). Set true to
+   * reject untrusted certs; WinRM Basic-auth sends credentials on the wire, so
+   * an unverified session is MITM-exposed.
+   */
+  verifyTls?: boolean;
   /** Per-request timeout in ms; default 60_000 */
   timeoutMs?: number;
 }
@@ -254,7 +262,11 @@ function soapPost(conn: WinRmConnection, envelope: string): Promise<string> {
       "Content-Type": "application/soap+xml;charset=UTF-8",
       "Content-Length": Buffer.byteLength(envelope).toString(),
     },
-    rejectUnauthorized: false, // operator self-signed certs are common in lab
+    // Verify only when the caller opts in (conn.verifyTls === true); omitted /
+    // false preserves the prior no-verify behavior for legacy WinRM credentials.
+    // Basic-auth creds ride this connection, so verification matters — see the
+    // 2026-06-03 security review (H1).
+    rejectUnauthorized: conn.verifyTls === true,
     timeout: conn.timeoutMs ?? 60_000,
   };
   return new Promise<string>((resolve, reject) => {

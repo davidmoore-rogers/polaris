@@ -25,6 +25,13 @@ export interface DnsSettings {
   servers: string[];
   mode: "standard" | "dot" | "doh";
   dohUrl: string;
+  /**
+   * Verify the resolver's TLS certificate on DoH/DoT connections. Defaults to
+   * false for stored settings that predate this flag, so existing installs keep
+   * their prior behavior; the Server Settings UI defaults a NEW save to true.
+   * See the 2026-06-03 security review (M3).
+   */
+  verifyTls: boolean;
 }
 
 /** A single PTR answer. ttl is null when the resolver cannot retrieve it (standard mode). */
@@ -48,12 +55,15 @@ export interface ResolverLike {
 
 export async function getDnsSettings(): Promise<DnsSettings> {
   const row = await prisma.setting.findUnique({ where: { key: "dnsSettings" } });
-  if (!row?.value) return { servers: [], mode: "standard", dohUrl: "" };
+  if (!row?.value) return { servers: [], mode: "standard", dohUrl: "", verifyTls: false };
   const val = row.value as any;
   return {
     servers: val.servers || [],
     mode: val.mode || "standard",
     dohUrl: val.dohUrl || "",
+    // Migrate-safe: a stored setting with no verifyTls flag keeps the prior
+    // no-verify behavior (=== true). The UI defaults a new save to true.
+    verifyTls: val.verifyTls === true,
   };
 }
 
@@ -63,6 +73,7 @@ export async function updateDnsSettings(settings: Partial<DnsSettings>): Promise
     servers: (settings.servers ?? current.servers).filter(Boolean),
     mode: settings.mode ?? current.mode,
     dohUrl: settings.dohUrl ?? current.dohUrl,
+    verifyTls: settings.verifyTls ?? current.verifyTls,
   };
   await prisma.setting.upsert({
     where: { key: "dnsSettings" },
@@ -108,16 +119,17 @@ async function resolveServerNames(servers: string[]): Promise<string[]> {
  * Build a resolver from explicit settings (used by the test endpoint).
  */
 export async function createResolver(settings: DnsSettings): Promise<ResolverLike> {
+  const verifyTls = settings.verifyTls === true;
   if (settings.mode === "doh" && settings.dohUrl) {
     return {
-      reverse: (ip: string) => dohReverse(ip, settings.dohUrl),
-      lookup: (hostname: string) => dohLookup(hostname, settings.dohUrl),
+      reverse: (ip: string) => dohReverse(ip, settings.dohUrl, verifyTls),
+      lookup: (hostname: string) => dohLookup(hostname, settings.dohUrl, verifyTls),
     };
   }
   if (settings.mode === "dot" && settings.servers.length > 0) {
     return {
-      reverse: (ip: string) => dotReverse(ip, settings.servers),
-      lookup: (hostname: string) => dotLookup(hostname, settings.servers),
+      reverse: (ip: string) => dotReverse(ip, settings.servers, verifyTls),
+      lookup: (hostname: string) => dotLookup(hostname, settings.servers, verifyTls),
     };
   }
   // Standard mode — setServers() requires IPs, so resolve any hostnames first.
@@ -186,14 +198,18 @@ function expandIpv6(ip: string): string {
 // append ?name=<ptr>&type=PTR with Accept: application/dns-json.
 // ────────────────────────────────────────────────────────────────────────────
 
-async function dohFetchJson(url: string): Promise<any> {
+async function dohFetchJson(url: string, verifyTls: boolean): Promise<any> {
   const body = await new Promise<string>((resolve, reject) => {
     const timer = setTimeout(() => {
       req.destroy();
       reject(Object.assign(new Error("DoH request timed out (5s)"), { code: "DOH_TIMEOUT" }));
     }, 5000);
 
-    const req = https.get(url, { headers: { Accept: "application/dns-json" }, rejectUnauthorized: false }, (res) => {
+    // Verify only when the operator opted in (2026-06-03 review, M3). Public
+    // resolvers (Cloudflare/Google/Quad9 — the documented default) all present
+    // valid certs, so verification is free there; the opt-out exists for an
+    // internal resolver behind a private CA.
+    const req = https.get(url, { headers: { Accept: "application/dns-json" }, rejectUnauthorized: verifyTls === true }, (res) => {
       if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
         clearTimeout(timer);
         res.resume();
@@ -221,11 +237,11 @@ async function dohFetchJson(url: string): Promise<any> {
   }
 }
 
-async function dohReverse(ip: string, dohUrl: string): Promise<PtrRecord[]> {
+async function dohReverse(ip: string, dohUrl: string, verifyTls: boolean): Promise<PtrRecord[]> {
   const ptrName = ipToPtrName(ip);
   const sep = dohUrl.includes("?") ? "&" : "?";
   const url = `${dohUrl}${sep}ct=application/dns-json&name=${encodeURIComponent(ptrName)}&type=PTR`;
-  const data = await dohFetchJson(url);
+  const data = await dohFetchJson(url, verifyTls);
   if (!data.Answer || !Array.isArray(data.Answer)) return [];
   return data.Answer
     .filter((a: any) => a.type === 12)
@@ -235,13 +251,13 @@ async function dohReverse(ip: string, dohUrl: string): Promise<PtrRecord[]> {
     }));
 }
 
-async function dohLookup(hostname: string, dohUrl: string): Promise<ARecord[]> {
+async function dohLookup(hostname: string, dohUrl: string, verifyTls: boolean): Promise<ARecord[]> {
   const sep = dohUrl.includes("?") ? "&" : "?";
   const results: ARecord[] = [];
   for (const [type, typeNum, family] of [["A", 1, 4], ["AAAA", 28, 6]] as [string, number, 4 | 6][]) {
     try {
       const url = `${dohUrl}${sep}ct=application/dns-json&name=${encodeURIComponent(hostname)}&type=${type}`;
-      const data = await dohFetchJson(url);
+      const data = await dohFetchJson(url, verifyTls);
       if (data.Answer && Array.isArray(data.Answer)) {
         for (const a of data.Answer) {
           if (a.type === typeNum && a.data) results.push({ address: a.data, family });
@@ -259,7 +275,7 @@ async function dohLookup(hostname: string, dohUrl: string): Promise<ARecord[]> {
 // Falls through to the next server on failure.
 // ────────────────────────────────────────────────────────────────────────────
 
-async function dotReverse(ip: string, servers: string[]): Promise<PtrRecord[]> {
+async function dotReverse(ip: string, servers: string[], verifyTls: boolean): Promise<PtrRecord[]> {
   const ptrName = ipToPtrName(ip);
   const query = buildDnsQuery(ptrName, 12); // QTYPE 12 = PTR
 
@@ -267,7 +283,7 @@ async function dotReverse(ip: string, servers: string[]): Promise<PtrRecord[]> {
   for (const server of servers) {
     try {
       const { host, port } = parseDotServer(server);
-      const response = await sendTlsQuery(host, port, query);
+      const response = await sendTlsQuery(host, port, query, verifyTls);
       return parseDnsResponse(response);
     } catch (err: any) {
       lastErr = err;
@@ -276,7 +292,7 @@ async function dotReverse(ip: string, servers: string[]): Promise<PtrRecord[]> {
   throw lastErr || new Error("No DoT servers available");
 }
 
-async function dotLookup(hostname: string, servers: string[]): Promise<ARecord[]> {
+async function dotLookup(hostname: string, servers: string[], verifyTls: boolean): Promise<ARecord[]> {
   // Try A (type 1) first, then AAAA (type 28)
   for (const [qtype, family] of [[1, 4], [28, 6]] as [number, 4 | 6][]) {
     let lastErr: Error | null = null;
@@ -284,7 +300,7 @@ async function dotLookup(hostname: string, servers: string[]): Promise<ARecord[]
       try {
         const { host, port } = parseDotServer(server);
         const query = buildDnsQuery(hostname, qtype);
-        const response = await sendTlsQuery(host, port, query);
+        const response = await sendTlsQuery(host, port, query, verifyTls);
         const addrs = parseDnsAResponse(response, qtype, family);
         if (addrs.length > 0) return addrs;
       } catch (err: any) {
@@ -341,7 +357,7 @@ function encodeDnsName(name: string): Buffer {
   return Buffer.concat(parts);
 }
 
-function sendTlsQuery(host: string, port: number, query: Buffer): Promise<Buffer> {
+function sendTlsQuery(host: string, port: number, query: Buffer, verifyTls: boolean): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const lenPrefix = Buffer.alloc(2);
     lenPrefix.writeUInt16BE(query.length, 0);
@@ -351,7 +367,8 @@ function sendTlsQuery(host: string, port: number, query: Buffer): Promise<Buffer
       reject(new Error("DoT query timed out (5s)"));
     }, 5000);
 
-    const socket = tls.connect({ host, port, rejectUnauthorized: false }, () => {
+    // Verify only when the operator opted in (2026-06-03 review, M3).
+    const socket = tls.connect({ host, port, rejectUnauthorized: verifyTls === true }, () => {
       socket.write(Buffer.concat([lenPrefix, query]));
     });
 
