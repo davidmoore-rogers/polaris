@@ -53,6 +53,7 @@ var currentEffectiveRegions = [];    // string[]
 var currentUserRegions = [];         // user.regionTags
 var currentRoleRegions = [];         // role.regionTags
 var currentUsername = null;
+var currentUserAuthProvider = "local"; // "local" | "azure" | "oidc" | "ldap"
 var _userReadyResolve = null;
 var userReady = new Promise(function (resolve) { _userReadyResolve = resolve; });
 
@@ -64,6 +65,7 @@ async function fetchCurrentUser() {
       currentUserRoleColor = (data.role && data.role.color) || null;
       currentRolePermissions = (data.role && data.role.permissions) || {};
       currentUsername = data.username;
+      currentUserAuthProvider = data.authProvider || "local";
       currentUserRegions = (data.regionTags && data.regionTags.user) || [];
       currentRoleRegions = (data.regionTags && data.regionTags.role) || [];
       currentEffectiveRegions = (data.regionTags && data.regionTags.effective) || [];

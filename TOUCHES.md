@@ -1333,14 +1333,14 @@ Listed alphabetically.
 - Relay state generated as random 32-byte base64url for CSRF protection on redirect.
 - SAML response validation uses @node-saml/node-saml library; wantResponseSigned flag controls signature check.
 - User provisioning on first login: extract nameID/email from validated Profile, upsert User row with default role, auto-enable if disabled.
-- skipLoginPage flag allows direct IdP redirect when SSO enabled (bypass Polaris login page).
+- skipLoginPage flag bounces unauthenticated visitors straight to SSO (bypass Polaris login page). app.ts honors SAML first, then OIDC. Turning it ON is lockout-gated in PUT /auth/azure/settings: requires (a) a SAML or OIDC provider configured AND (b) the enabling admin's session authProvider is "azure"/"oidc" (SSO round-trip proven). Turning it OFF is unrestricted (recovery). users.js mirrors the gate by disabling the checkbox for local/LDAP sessions when it's currently off.
 - autoLogoutMinutes triggers silent logout after inactivity (0 = disabled).
 
 **When changing this:**
 - Test SSO cache expiry (30s) on getSsoSettings; verify updateSsoSettings invalidates _samlClient.
 - Check SAML validation still rejects unsigned responses when wantResponseSigned=true.
 - Confirm user provisioning correctly maps SAML Profile fields (nameID, email, groups) to User rows.
-- Validate skipLoginPage redirect flow doesn't expose relay state leaks.
+- Validate skipLoginPage redirect flow doesn't expose relay state leaks; confirm OIDC fallback fires when only OIDC is configured and the lockout guard rejects a local/LDAP admin enabling it.
 - Test logout URL generation with correct nameID/sessionIndex from validated response.
 
 ---

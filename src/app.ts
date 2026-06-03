@@ -24,6 +24,7 @@ import { validateRuntimeConfiguration } from "./utils/runtimeConfig.js";
 import { isProxyMode } from "./utils/proxyMode.js";
 import { UPLOADS_DIR } from "./utils/paths.js";
 import { isAzureSsoConfiguredAsync, getSsoSettings } from "./services/azureAuthService.js";
+import { isOidcEnabled } from "./services/oidcAuthService.js";
 import {
   renderMetrics,
   startHttpRequestTimer,
@@ -493,11 +494,19 @@ const PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 } as const;
 app.use(async (req, res, next) => {
   if (!protectedPages.includes(req.path)) return next();
   if (!req.session?.userId) {
-    // Skip login page: redirect straight to Azure SSO if configured
-    if (await isAzureSsoConfiguredAsync()) {
-      const settings = await getSsoSettings().catch(() => ({ skipLoginPage: false }));
-      if (settings.skipLoginPage) {
+    // Skip login page: redirect unauthenticated users straight to SSO. Honors
+    // either configured provider — SAML (Azure) takes precedence, OIDC is the
+    // fallback. The flag is only ever set by an SSO-authenticated admin (see
+    // the guard on PUT /auth/azure/settings), so reaching here means at least
+    // one of these branches resolves; the final /login.html catch covers the
+    // edge case where SSO was torn down after the flag was set.
+    const settings = await getSsoSettings().catch(() => ({ skipLoginPage: false }));
+    if (settings.skipLoginPage) {
+      if (await isAzureSsoConfiguredAsync()) {
         return res.redirect("/api/v1/auth/azure/login?prompt=none");
+      }
+      if (await isOidcEnabled()) {
+        return res.redirect("/api/v1/auth/oidc/login");
       }
     }
     return res.redirect("/login.html");

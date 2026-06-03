@@ -656,6 +656,32 @@ router.get("/azure/settings", requireAuth, requirePermission("serverSettingsSyst
 // PUT /api/v1/auth/azure/settings — admin only
 router.put("/azure/settings", requireAuth, requirePermission("serverSettingsSystem", "write"), async (req, res, next) => {
   try {
+    // Lockout guard for "Skip login page". Hiding the local login page means
+    // every unauthenticated visitor is bounced straight to SSO — if SSO isn't
+    // actually working, nobody (including the admin who flipped it) can get
+    // back in. So turning it ON requires BOTH:
+    //   (a) a SAML or OIDC provider is configured, AND
+    //   (b) the admin enabling it is themselves signed in via SSO — which is
+    //       end-to-end proof that the SSO round-trip succeeds for at least one
+    //       account before the password page disappears.
+    // Turning it OFF is always allowed (recovery path), so only gate the rising
+    // edge.
+    const current = await getSsoSettings();
+    const enablingSkip = req.body?.skipLoginPage === true && !current.skipLoginPage;
+    if (enablingSkip) {
+      const provider = req.session.authProvider;
+      if (provider !== "azure" && provider !== "oidc") {
+        throw new AppError(
+          400,
+          "Enable “Skip login page” only while signed in through SSO (SAML or OIDC). " +
+            "This proves SSO works end-to-end before the login page is hidden, preventing lockout.",
+        );
+      }
+      const ssoConfigured = (await isAzureSsoConfiguredAsync()) || (await isOidcEnabled());
+      if (!ssoConfigured) {
+        throw new AppError(400, "Configure and enable a SAML or OIDC provider before enabling “Skip login page”.");
+      }
+    }
     const settings = await updateSsoSettings(req.body);
     res.json(settings);
   } catch (err) {

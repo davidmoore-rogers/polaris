@@ -944,13 +944,24 @@ function buildLdapTab(s) {
 }
 
 function buildSessionTab(s) {
+  // Turning "Skip login page" ON is only permitted while the admin is signed in
+  // through SSO (SAML or OIDC) — end-to-end proof that SSO works before the
+  // local login page is hidden, so an SSO misconfiguration can't lock everyone
+  // out. The server enforces this on save; we mirror it here. Turning it OFF is
+  // always allowed, so the checkbox is only locked when it's currently off.
+  var ssoSession = (typeof currentUserAuthProvider !== "undefined") &&
+    (currentUserAuthProvider === "azure" || currentUserAuthProvider === "oidc");
+  var lockOn = !ssoSession && !s.skipLoginPage;
+  var hint = lockOn
+    ? "You are signed in with a local account. To enable this, sign in through SSO (SAML or OIDC) first — this prevents locking everyone out if SSO is misconfigured."
+    : "Redirect unauthenticated users straight to SSO. Requires a SAML or OIDC provider to be configured.";
   return '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:1.25rem">Configure session behavior for all authentication methods.</p>' +
     '<div class="form-group">' +
-      '<label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">' +
-        '<input type="checkbox" id="f-skip-login"' + (s.skipLoginPage ? ' checked' : '') + '>' +
+      '<label style="display:flex;align-items:center;gap:0.5rem;cursor:' + (lockOn ? 'not-allowed' : 'pointer') + '">' +
+        '<input type="checkbox" id="f-skip-login"' + (s.skipLoginPage ? ' checked' : '') + (lockOn ? ' disabled' : '') + '>' +
         '<span>Skip login page (SSO only)</span>' +
       '</label>' +
-      '<p class="hint" style="margin:0.35rem 0 0 1.5rem">Redirect unauthenticated users straight to SSO. Requires an SSO provider to be configured.</p>' +
+      '<p class="hint" style="margin:0.35rem 0 0 1.5rem">' + hint + '</p>' +
     '</div>' +
     '<div class="form-group">' +
       '<label>Auto-logout after inactivity</label>' +
