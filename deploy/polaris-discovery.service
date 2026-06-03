@@ -1,6 +1,6 @@
 [Unit]
 Description=Polaris — discovery worker (pg-boss discovery-queue consumer)
-Documentation=https://github.com/davidmoore-rogers/polaris
+Documentation=https://github.com/rogers-group-inc/polaris
 After=network.target postgresql-15.service polaris-migrate.service
 Requires=postgresql-15.service polaris-migrate.service
 PartOf=polaris.target

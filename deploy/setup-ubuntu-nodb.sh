@@ -22,7 +22,7 @@ set -euo pipefail
 APP_DIR="/opt/polaris"
 APP_USER="polaris"
 APP_GROUP="polaris"
-REPO_URL="https://github.com/davidmoore-rogers/polaris.git"
+REPO_URL="https://github.com/rogers-group-inc/polaris.git"
 DATABASE_URL=""
 
 # ─── Colors ───────────────────────────────────────────────────────────────────

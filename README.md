@@ -134,21 +134,21 @@ Automated scripts install Node.js 20, PostgreSQL 15, the `polaris` system user, 
 **RHEL / Rocky / Alma 9:**
 
 ```bash
-git clone https://github.com/davidmoore-rogers/polaris.git && cd polaris
+git clone https://github.com/rogers-group-inc/polaris.git && cd polaris
 bash deploy/setup-rhel.sh
 ```
 
 **Ubuntu / Debian:**
 
 ```bash
-git clone https://github.com/davidmoore-rogers/polaris.git && cd polaris
+git clone https://github.com/rogers-group-inc/polaris.git && cd polaris
 bash deploy/setup-ubuntu.sh
 ```
 
 **Windows Server 2019 / 2022** (run as Administrator):
 
 ```powershell
-git clone https://github.com/davidmoore-rogers/polaris.git; cd polaris
+git clone https://github.com/rogers-group-inc/polaris.git; cd polaris
 powershell -ExecutionPolicy Bypass -File deploy\setup-windows.ps1
 ```
 
@@ -157,7 +157,7 @@ After the script finishes the app is live at `http://<server-ip>:3000` — log i
 **Docker / Unraid:**
 
 ```bash
-docker pull ghcr.io/davidmoore-rogers/polaris:latest
+docker pull ghcr.io/rogers-group-inc/polaris:latest
 ```
 
 Multi-stage image, ~940 MB, x86_64. PostgreSQL is **not** included — run a `postgres:15` container alongside it (or point at any reachable Postgres). Expose container port `3000` (and `3443` if you enable in-app HTTPS). All persistent state lives under `/app/state`, so a single bind mount is enough:

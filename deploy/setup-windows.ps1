@@ -26,7 +26,7 @@ param(
     [string]$DbName     = "polaris",
     [string]$DbUser     = "polaris",
     [string]$DbPass     = "polaris",
-    [string]$RepoUrl    = "https://github.com/davidmoore-rogers/polaris.git",
+    [string]$RepoUrl    = "https://github.com/rogers-group-inc/polaris.git",
     [int]   $Port       = 3000,
     [string]$NssmUrl    = "https://nssm.cc/release/nssm-2.24.zip"
 )
