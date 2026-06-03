@@ -316,6 +316,15 @@ TIMESCALE_COMPRESS_AFTER_DAYS=7
 # Persistent-state dir. When set, .env / .setup-complete / data/backups /
 # public/uploads all live under this dir (Docker pins to /app/state).
 POLARIS_STATE_DIR=
+
+# Git repository the in-app updater fetches/pulls from. Applied to the `origin`
+# remote before every update check/apply (ensureUpdateRemote in
+# src/services/updateService.ts), so it overrides whatever the install was
+# cloned from. Unset falls back to the canonical upstream
+# (https://github.com/davidmoore-rogers/polaris.git). Point at a fork or
+# internal mirror here. The deploy/update-{linux.sh,windows.ps1} fallback
+# scripts read the same var and repoint origin in lockstep.
+POLARIS_UPDATE_REPO=
 ```
 
 Configured via the UI, not env vars: Azure SAML SSO (Server Settings → Security → Identification), syslog forwarding + SFTP archival (Server Settings → Integrations). HTTPS is managed by nginx — the cert at `POLARIS_PROXY_CERT_PATH` is operator-owned; Polaris reads it for the agent-pin fingerprint exposure only.

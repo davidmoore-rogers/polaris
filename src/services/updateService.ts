@@ -32,6 +32,57 @@ const APP_DIR = join(__dirname, "..", "..");
 const STATUS_FILE = join(APP_DIR, ".update-status.json");
 const BACKUP_DIR = join(APP_DIR, "data", "backups");
 
+// Git repository the in-app updater fetches/pulls from. Operators can point
+// installs at a fork or internal mirror via POLARIS_UPDATE_REPO in .env;
+// unset falls back to the canonical upstream. The URL is applied to the
+// `origin` remote before every fetch/pull (see ensureUpdateRemote), so all the
+// downstream `origin/HEAD || origin/main || origin/master` plumbing in
+// checkForUpdates/applyUpdate keeps working unchanged.
+const DEFAULT_UPDATE_REPO = "https://github.com/davidmoore-rogers/polaris.git";
+
+function configuredUpdateRepo(): string {
+  const raw = (process.env.POLARIS_UPDATE_REPO || "").trim();
+  return raw || DEFAULT_UPDATE_REPO;
+}
+
+/**
+ * Point the `origin` remote at the configured update repo before a
+ * fetch/pull. Idempotent — only rewrites the URL when it differs from what
+ * git already has, so a fresh clone from the same repo is a no-op. Non-fatal:
+ * a failure here just leaves the existing remote in place and is logged.
+ */
+async function ensureUpdateRemote(): Promise<void> {
+  const desired = configuredUpdateRepo();
+  try {
+    const { stdout } = await execAsync("git remote get-url origin", {
+      cwd: APP_DIR,
+      timeout: 10000,
+    });
+    const current = stdout.trim();
+    if (current === desired) return;
+    await execAsync(`git remote set-url origin "${desired}"`, {
+      cwd: APP_DIR,
+      timeout: 10000,
+    });
+    logger.info({ from: current, to: desired }, "In-app update: repointed origin remote to configured update repo");
+  } catch (err: any) {
+    // No origin remote yet, or set-url failed — add it. If even that fails,
+    // leave whatever's there and let the fetch surface a clear error.
+    try {
+      await execAsync(`git remote add origin "${desired}"`, {
+        cwd: APP_DIR,
+        timeout: 10000,
+      });
+      logger.info({ to: desired }, "In-app update: added origin remote for configured update repo");
+    } catch (addErr: any) {
+      logger.warn(
+        { err: err?.message, addErr: addErr?.message, desired },
+        "In-app update: could not set origin remote URL — proceeding with existing remote",
+      );
+    }
+  }
+}
+
 export interface UpdateStatus {
   state:
     | "idle"
@@ -230,6 +281,10 @@ export async function checkForUpdates(): Promise<UpdateStatus> {
   _status = { state: "checking", currentVersion: readCurrentVersion() };
 
   try {
+    // Make sure origin points at the configured update repo (POLARIS_UPDATE_REPO)
+    // before fetching.
+    await ensureUpdateRemote();
+
     // Fetch latest from remote
     await execAsync("git fetch --all --prune", { cwd: APP_DIR, timeout: 30000 });
 
@@ -462,6 +517,10 @@ export async function applyUpdate(password?: string | null): Promise<void> {
     // ── Step 2: Pull latest code ──
     setStep(1, "running");
     try {
+      // Ensure origin points at the configured update repo (POLARIS_UPDATE_REPO)
+      // before pulling — covers the case where applyUpdate runs without a
+      // preceding checkForUpdates, or the env changed since the last check.
+      await ensureUpdateRemote();
       await execAsync("git checkout -- package-lock.json", {
         cwd: APP_DIR,
         timeout: 10000,
