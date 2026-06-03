@@ -355,13 +355,21 @@ export interface CapacitySnapshot {
   workload: {
     monitoredAssetCount: number;
     /**
-     * Total operator-pinned interfaces being polled on the response-time
-     * cadence — sum of `Asset.monitoredInterfaces` array lengths across every
-     * monitored asset. Independent of the ~20-iface-per-asset default the
-     * steady-state projection assumes for the full system-info pass; this is
-     * just the fast-poll subset operators have explicitly opted into.
+     * Total operator-pinned interfaces being polled on the fast cadence — sum
+     * of `Asset.monitoredInterfaces` PLUS `Asset.monitoredIpsecTunnels` array
+     * lengths across every monitored asset (IPsec tunnels are interfaces from
+     * the operator's perspective and fast-poll the same way). Independent of
+     * the ~20-iface-per-asset default the steady-state projection assumes for
+     * the full system-info pass; this is just the fast-poll subset operators
+     * have explicitly opted into.
      */
     monitoredInterfaceCount: number;
+    /**
+     * Total operator-pinned storage mounts being polled on the fast cadence —
+     * sum of `Asset.monitoredStorage` array lengths across every monitored
+     * asset.
+     */
+    monitoredStorageCount: number;
     cadences: { responseTimeSec: number; telemetrySec: number; systemInfoSec: number };
     retention: { monitorDays: number; telemetryDays: number; systemInfoDays: number };
     /**
@@ -1373,7 +1381,7 @@ export async function getCapacitySnapshot(opts: {
     monitoredCount,
     telemetryEligibleRow,
     systemInfoEligibleRow,
-    monitoredInterfaceRow,
+    monitoredPinRow,
     volumes,
     dbSizeRow,
     sampleTables,
@@ -1385,8 +1393,13 @@ export async function getCapacitySnapshot(opts: {
     prisma.asset.count({ where: { monitored: true } }),
     prisma.$queryRawUnsafe<{ count: bigint }[]>(telemetryEligibleSQL),
     prisma.$queryRawUnsafe<{ count: bigint }[]>(systemInfoEligibleSQL),
-    prisma.$queryRawUnsafe<{ count: bigint }[]>(
-      `SELECT COALESCE(SUM(COALESCE(array_length("monitoredInterfaces", 1), 0)), 0)::bigint AS count
+    // One pass over monitored assets summing all three fast-cadence pin arrays.
+    // IPsec tunnels are folded into the interface count (they are interfaces
+    // from the operator's perspective); storage mounts are reported separately.
+    prisma.$queryRawUnsafe<{ interfaces: bigint; ipsec: bigint; storage: bigint }[]>(
+      `SELECT COALESCE(SUM(COALESCE(array_length("monitoredInterfaces", 1), 0)), 0)::bigint     AS interfaces,
+              COALESCE(SUM(COALESCE(array_length("monitoredIpsecTunnels", 1), 0)), 0)::bigint   AS ipsec,
+              COALESCE(SUM(COALESCE(array_length("monitoredStorage", 1), 0)), 0)::bigint         AS storage
          FROM "assets"
         WHERE monitored = true`,
     ),
@@ -1422,7 +1435,9 @@ export async function getCapacitySnapshot(opts: {
   const telemetryEligibleCount  = Number(telemetryEligibleRow[0]?.count  ?? monitoredCount);
   const systemInfoEligibleCount = Number(systemInfoEligibleRow[0]?.count ?? monitoredCount);
 
-  const monitoredInterfaceCount = Number(monitoredInterfaceRow[0]?.count ?? 0);
+  const monitoredInterfaceCount =
+    Number(monitoredPinRow[0]?.interfaces ?? 0) + Number(monitoredPinRow[0]?.ipsec ?? 0);
+  const monitoredStorageCount = Number(monitoredPinRow[0]?.storage ?? 0);
   const dbSizeBytes = Number(dbSizeRow[0]?.size ?? 0);
 
   // Connection-pool snapshot. Update the rolling peak before reading it back
@@ -1503,6 +1518,7 @@ export async function getCapacitySnapshot(opts: {
     workload: {
       monitoredAssetCount: monitoredCount,
       monitoredInterfaceCount,
+      monitoredStorageCount,
       cadences,
       retention,
       steadyStateSizeBytes,

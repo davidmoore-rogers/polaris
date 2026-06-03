@@ -1654,6 +1654,7 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
       '<div class="db-info-grid">' +
         dbInfoRow("Monitored assets", formatNumber(work.monitoredAssetCount || 0)) +
         dbInfoRow("Monitored interfaces", formatNumber(work.monitoredInterfaceCount || 0)) +
+        dbInfoRow("Monitored storage mounts", formatNumber(work.monitoredStorageCount || 0)) +
         (work.cadences
           ? dbInfoRow("Cadences",
               work.cadences.responseTimeSec + "s response · " +
