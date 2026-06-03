@@ -442,7 +442,13 @@ const FortiManagerConfigSchema = z.object({
   apiUser:   z.string().optional().default(""),
   apiToken:  z.string().optional().default(""),
   adom:      z.string().optional().default("root"),
-  verifySsl: z.boolean().optional().default(false),
+  // Default verify-ON for NEW integrations (2026-06-03 review, M1). Existing
+  // rows carry an explicit stored value and the update path preserves it, so
+  // this default never changes a configured integration's behavior — it only
+  // makes a freshly-created one secure-by-default. Read paths honor the stored
+  // value (`config.verifySsl === false` disables); an operator can still opt
+  // out per-integration via the Monitoring tab (with a UI warning).
+  verifySsl: z.boolean().optional().default(true),
   mgmtInterface: z.string().optional().default(""),
   interfaceInclude: z.array(z.string()).optional().default([]),
   interfaceExclude: z.array(z.string()).optional().default([]),
@@ -456,7 +462,12 @@ const FortiManagerConfigSchema = z.object({
   useProxy: z.boolean().optional().default(true),
   fortigateApiUser:  z.string().optional().default(""),
   fortigateApiToken: z.string().optional().default(""),
-  fortigateVerifySsl: z.boolean().optional().default(false),
+  // FMG direct-mode (useProxy=false) TLS verification on the FortiGate REST
+  // connections. Default verify-ON for NEW integrations (2026-06-03 review, M1).
+  // Read path is `config.fortigateVerifySsl === true`, so existing rows (explicit
+  // false, or legacy-undefined) keep their current no-verify behavior — only a
+  // freshly-created integration is secure-by-default.
+  fortigateVerifySsl: z.boolean().optional().default(true),
   // Optional: stored SNMP credential used by the integration's per-stream
   // polling-method tier-3 setting (Integration.config.monitorSettings.polling)
   // when the operator picks SNMP for a stream. Without a credential, the
@@ -500,7 +511,13 @@ const FortiGateConfigSchema = z.object({
   apiUser:   z.string().optional().default(""),
   apiToken:  z.string().optional().default(""),
   vdom:      z.string().optional().default("root"),
-  verifySsl: z.boolean().optional().default(false),
+  // Default verify-ON for NEW integrations (2026-06-03 review, M1). Existing
+  // rows carry an explicit stored value and the update path preserves it, so
+  // this default never changes a configured integration's behavior — it only
+  // makes a freshly-created one secure-by-default. Read paths honor the stored
+  // value (`config.verifySsl === false` disables); an operator can still opt
+  // out per-integration via the Monitoring tab (with a UI warning).
+  verifySsl: z.boolean().optional().default(true),
   mgmtInterface: z.string().optional().default(""),
   dhcpInclude:   z.array(z.string()).optional().default([]),
   dhcpExclude:   z.array(z.string()).optional().default([]),
@@ -562,7 +579,9 @@ const ActiveDirectoryConfigSchema = z.object({
   host:            z.string().optional().default(""),
   port:            z.number().int().min(1).max(65535).optional().default(636),
   useLdaps:        z.boolean().optional().default(true),
-  verifyTls:       z.boolean().optional().default(false),
+  // Default verify-ON for NEW integrations (2026-06-03 review, M1). Existing
+  // rows keep their stored value; read path is `!!config.verifyTls`.
+  verifyTls:       z.boolean().optional().default(true),
   bindDn:          z.string().optional().default(""),
   bindPassword:    z.string().optional().default(""),
   baseDn:          z.string().optional().default(""),

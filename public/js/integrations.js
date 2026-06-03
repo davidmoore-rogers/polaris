@@ -2310,6 +2310,7 @@ function _fmgDirectModeBlockHTML(d) {
           '<input type="checkbox" id="f-fortigateVerifySsl" ' + (d.fortigateVerifySsl ? "checked" : "") + ' style="width:auto">' +
           '<label for="f-fortigateVerifySsl" style="margin:0">Verify SSL certificate on FortiGates</label>' +
         '</div>' +
+        '<p class="hint" style="color:var(--color-warning,#d98c00)">Leave enabled. Disabling lets a network attacker intercept the direct FortiGate REST connections and capture the API token. Disable only for FortiGates with self-signed certificates you cannot replace.</p>' +
       '</div>' +
     '</div>';
 }
@@ -2919,6 +2920,7 @@ function fortiManagerGeneralHTML(defaults) {
       '<input type="checkbox" id="f-verifySsl" ' + (d.verifySsl ? "checked" : "") + ' style="width:auto">' +
       '<label for="f-verifySsl" style="margin:0">Verify SSL certificate</label>' +
     '</div>' +
+    '<p class="hint" style="color:var(--color-warning,#d98c00)">Leave enabled. Disabling certificate verification lets a network attacker on the path intercept this connection and capture the API credentials. Disable only for a device with a self-signed certificate you cannot replace.</p>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
       '<input type="checkbox" id="f-enabled" ' + (d.enabled !== false ? "checked" : "") + ' style="width:auto">' +
@@ -3064,6 +3066,7 @@ function fortiGateGeneralHTML(defaults) {
       '<input type="checkbox" id="f-verifySsl" ' + (d.verifySsl ? "checked" : "") + ' style="width:auto">' +
       '<label for="f-verifySsl" style="margin:0">Verify SSL certificate</label>' +
     '</div>' +
+    '<p class="hint" style="color:var(--color-warning,#d98c00)">Leave enabled. Disabling certificate verification lets a network attacker on the path intercept this connection and capture the API credentials. Disable only for a device with a self-signed certificate you cannot replace.</p>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
       '<input type="checkbox" id="f-enabled" ' + (d.enabled !== false ? "checked" : "") + ' style="width:auto">' +
       '<label for="f-enabled" style="margin:0">Enabled</label>' +
@@ -3300,6 +3303,7 @@ function activeDirectoryFormHTML(defaults) {
       '<input type="checkbox" id="f-verifyTls" ' + (verifyTls ? "checked" : "") + ' style="width:auto">' +
       '<label for="f-verifyTls" style="margin:0">Verify TLS certificate</label>' +
     '</div>' +
+    '<p class="hint" style="color:var(--color-warning,#d98c00)">Leave enabled. Disabling certificate verification lets a network attacker intercept the LDAPS connection and capture the bind credentials. Disable only for a domain controller with a self-signed certificate you cannot replace.</p>' +
     '<div class="form-group"><label>Bind DN *</label><input type="text" id="f-bindDn" value="' + escapeHtml(d.bindDn || "") + '" placeholder="e.g. CN=polaris-svc,OU=Service Accounts,DC=corp,DC=local"><p class="hint">Distinguished name of the bind account. A read-only domain user is sufficient.</p></div>' +
     '<div class="form-group"><label>Bind Password *</label><input type="password" id="f-bindPassword" value="' + (d.bindPasswordPlaceholder ? "" : escapeHtml(d.bindPassword || "")) + '" placeholder="' + (d.bindPasswordPlaceholder || "Password") + '"></div>' +
     '<div class="form-group"><label>Base DN *</label><input type="text" id="f-baseDn" value="' + escapeHtml(d.baseDn || "") + '" placeholder="e.g. DC=corp,DC=local"><p class="hint">Subtree to search for computer objects. Narrow this (e.g. <code>OU=Workstations,DC=corp,DC=local</code>) if you only want part of the directory.</p></div>' +
@@ -3468,7 +3472,12 @@ async function openCreateModal(type) {
       monSettings = manual || {};
     } catch (e) { /* fall back to defaults */ }
     try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; } catch (e) { /* picker just shows defaults */ }
-    var generalHtml = isFmg ? fortiManagerGeneralHTML({}) : fortiGateGeneralHTML({});
+    // Seed TLS-verify ON for NEW integrations so the checkbox renders checked,
+    // matching the verify-by-default backend schema (2026-06-03 review, M1).
+    // Edit flow passes the stored config, so existing rows are unaffected.
+    var generalHtml = isFmg
+      ? fortiManagerGeneralHTML({ verifySsl: true, fortigateVerifySsl: true })
+      : fortiGateGeneralHTML({ verifySsl: true });
     var filtersHtml = isFmg ? fortiManagerFiltersHTML({}) : fortiGateFiltersHTML({});
     var addTabs = [
       { key: "general", label: "General", html: generalHtml },
@@ -3495,7 +3504,7 @@ async function openCreateModal(type) {
       addMonSettings = addManual || {};
     } catch (e) { /* fall back to defaults */ }
     var addNonFortinetTabs = [
-      { key: "general",    label: "General",    html: _formHTMLForType(type, {}) },
+      { key: "general",    label: "General",    html: _formHTMLForType(type, isAd ? { verifyTls: true } : {}) },
       { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(addMonSettings, {
         integrationId:   null,
         integrationType: type,
