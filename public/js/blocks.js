@@ -13,8 +13,6 @@ function _saveBlocksPrefs() {
   try {
     localStorage.setItem("polaris-prefs-blocks-" + currentUsername, JSON.stringify({
       pageSize: _blocksPageSize,
-      version: document.getElementById("filter-version").value,
-      tag: document.getElementById("filter-tag").value,
       sortKey: _blocksSF ? _blocksSF._sortKey : null,
       sortDir: _blocksSF ? _blocksSF._sortDir : "asc",
       sfFilters: _blocksSF ? Object.assign({}, _blocksSF._filters) : {},
@@ -35,8 +33,6 @@ function _restoreBlocksPrefs() {
       var psSel = document.getElementById("filter-pagesize");
       if (psSel) psSel.value = String(p.pageSize);
     }
-    if (p.version) { var vSel = document.getElementById("filter-version"); if (vSel) vSel.value = p.version; }
-    if (p.tag)     { var tEl  = document.getElementById("filter-tag");     if (tEl)  tEl.value  = p.tag; }
     if (_blocksSF) {
       if (p.sortKey) _blocksSF._sortKey = p.sortKey;
       if (p.sortDir) _blocksSF._sortDir = p.sortDir;
@@ -78,8 +74,6 @@ async function _initBlocksPage() {
 
   var addBtn = document.getElementById("btn-add-block");
   if (addBtn) addBtn.addEventListener("click", openBlockCreateModal);
-  document.getElementById("filter-version").addEventListener("change", function () { _blocksPage = 1; loadBlocks(); _saveBlocksPrefs(); });
-  document.getElementById("filter-tag").addEventListener("input", debounce(function () { _blocksPage = 1; loadBlocks(); _saveBlocksPrefs(); }, 300));
   document.getElementById("filter-pagesize").addEventListener("change", function () {
     _blocksPageSize = parseInt(this.value, 10) || 15;
     _blocksPage = 1;
@@ -100,11 +94,9 @@ if (!window.__polarisIpamTabs) {
 async function loadBlocks() {
   var tbody = document.getElementById("blocks-tbody");
   try {
-    var filters = {
-      ipVersion: document.getElementById("filter-version").value || undefined,
-      tag: document.getElementById("filter-tag").value || undefined,
-    };
-    _blocksData = await api.blocks.list(filters);
+    // Version filtering now lives in the Version column header filter (TableSF),
+    // so the full block list loads and filtering happens client-side.
+    _blocksData = await api.blocks.list();
     renderBlocksPage();
   } catch (err) {
     tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';

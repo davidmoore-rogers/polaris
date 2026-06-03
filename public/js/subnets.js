@@ -16,8 +16,6 @@ function _saveSubnetsPrefs() {
   try {
     localStorage.setItem("polaris-prefs-subnets-" + currentUsername, JSON.stringify({
       pageSize: _subnetsPageSize,
-      block: document.getElementById("filter-block").value,
-      creator: document.getElementById("filter-creator").value,
       sortKey: _subnetsSF ? _subnetsSF._sortKey : null,
       sortDir: _subnetsSF ? _subnetsSF._sortDir : "asc",
       sfFilters: _subnetsSF ? Object.assign({}, _subnetsSF._filters) : {},
@@ -38,8 +36,6 @@ function _restoreSubnetsPrefs() {
       var psSel = document.getElementById("filter-pagesize");
       if (psSel) psSel.value = String(p.pageSize);
     }
-    if (p.block)       { var bSel = document.getElementById("filter-block");       if (bSel) bSel.value = p.block; }
-    if (p.creator)     { var cSel = document.getElementById("filter-creator");     if (cSel) cSel.value = p.creator; }
     if (_subnetsSF) {
       if (p.sortKey) _subnetsSF._sortKey = p.sortKey;
       if (p.sortDir) _subnetsSF._sortDir = p.sortDir;
@@ -101,8 +97,6 @@ async function _initSubnetsPage() {
     _subnetsUpdateSelectAll();
     _subnetsUpdateBulkBar();
   });
-  document.getElementById("filter-block").addEventListener("change", function () { _subnetsPage = 1; loadSubnets(); _saveSubnetsPrefs(); });
-  document.getElementById("filter-creator").addEventListener("change", function () { _subnetsPage = 1; loadSubnets(); _saveSubnetsPrefs(); });
   document.getElementById("filter-pagesize").addEventListener("change", function () {
     _subnetsPageSize = parseInt(this.value, 10) || 15;
     _subnetsPage = 1;
@@ -128,12 +122,16 @@ function _applySubnetsHashFilters() {
     var p = kv.split("=");
     if (p.length === 2) params[decodeURIComponent(p[0])] = decodeURIComponent(p[1]);
   });
-  if (params.block) {
-    var sel = document.getElementById("filter-block");
-    if (sel) {
-      // Block options have loaded already (we await loadBlockOptions before
-      // applying); set the value so the upcoming loadSubnets picks it up.
-      sel.value = params.block;
+  if (params.block && _subnetsSF) {
+    // Block filtering now lives in the Block column header filter, which keys
+    // off block NAME (not id). Translate the deep-linked block id via the
+    // already-loaded cachedBlocks (loadBlockOptions is awaited before this) and
+    // seed the column's multi-select filter. setColumnOptions later preserves
+    // this value when it builds the checkbox list from the loaded data.
+    var blk = cachedBlocks.find(function (b) { return b.id === params.block; });
+    if (blk) {
+      _subnetsSF._filters["block.name"] = [blk.name];
+      _subnetsSF.restoreFilterUI();
     }
   }
   if (params.subnet) {
@@ -164,16 +162,12 @@ if (!window.__polarisIpamTabs) {
   document.addEventListener("DOMContentLoaded", _initSubnetsPage);
 }
 
+// Loads the block list into `cachedBlocks` — still needed by blockSelectHTML
+// (create / auto-allocate modals) and by the hash deep-link block translation.
+// Block filtering itself now lives in the Block column header filter (TableSF).
 async function loadBlockOptions() {
   try {
     cachedBlocks = await api.blocks.list();
-    var sel = document.getElementById("filter-block");
-    cachedBlocks.forEach(function (b) {
-      var opt = document.createElement("option");
-      opt.value = b.id;
-      opt.textContent = b.name + " (" + b.cidr + ")";
-      sel.appendChild(opt);
-    });
   } catch (err) {
     showToast("Failed to load blocks: " + err.message, "error");
   }
@@ -192,21 +186,21 @@ async function loadSubnets() {
   _subnetsUpdateBulkBar();
   var tbody = document.getElementById("subnets-tbody");
   try {
-    var filters = {
-      blockId: document.getElementById("filter-block").value || undefined,
-      createdBy: document.getElementById("filter-creator").value || undefined,
-      limit: 10000,
-    };
-    var result = await api.subnets.list(filters);
+    // Block and Creator filtering now live in their column header filters
+    // (TableSF), so the full network list loads and filtering happens
+    // client-side alongside every other column filter.
+    var result = await api.subnets.list({ limit: 10000 });
     _allSubnetsData = (result.subnets || result).map(function (s) {
       s._integration = s.integration ? s.integration.name : "Manual";
       return s;
     });
     _rebuildIntegrationColumnOptions();
+    _rebuildBlockColumnOptions();
+    _rebuildCreatorColumnOptions();
     _subnetsData = _allSubnetsData;
     renderSubnetsPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="14" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -223,17 +217,37 @@ function _rebuildIntegrationColumnOptions() {
   _subnetsSF.setColumnOptions("_integration", options);
 }
 
+function _rebuildBlockColumnOptions() {
+  if (!_subnetsSF) return;
+  var seen = new Set();
+  _allSubnetsData.forEach(function (s) {
+    if (s.block && s.block.name) seen.add(s.block.name);
+  });
+  var options = Array.from(seen).sort(function (a, b) { return a.localeCompare(b); });
+  _subnetsSF.setColumnOptions("block.name", options);
+}
+
+function _rebuildCreatorColumnOptions() {
+  if (!_subnetsSF) return;
+  var seen = new Set();
+  _allSubnetsData.forEach(function (s) {
+    if (s.createdBy) seen.add(s.createdBy);
+  });
+  var options = Array.from(seen).sort(function (a, b) { return a.localeCompare(b); });
+  _subnetsSF.setColumnOptions("createdBy", options);
+}
+
 function renderSubnetsPage() {
   var tbody = document.getElementById("subnets-tbody");
   if (_subnetsData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No networks found. Create one to get started.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="14" class="empty-state">No networks found. Create one to get started.</td></tr>';
     clearPageControls("pagination");
     _subnetsUpdateSelectAll();
     return;
   }
   var sfData = _subnetsSF ? _subnetsSF.apply(_subnetsData) : _subnetsData;
   if (sfData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No results match the current filters.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="14" class="empty-state">No results match the current filters.</td></tr>';
     clearPageControls("pagination");
     _subnetsUpdateSelectAll();
     return;
@@ -261,6 +275,7 @@ function renderSubnetsPage() {
       '<td>' + (tags || '<span style="color:var(--color-text-tertiary)">-</span>') + '</td>' +
       '<td>' + fgtDevice + '</td>' +
       '<td>' + source + '</td>' +
+      '<td>' + (s.createdBy ? escapeHtml(s.createdBy) : '<span style="color:var(--color-text-tertiary)">-</span>') + '</td>' +
       '<td>' + (s._count ? s._count.reservations : 0) + '</td>' +
       '<td class="actions">' +
         (canEditSubnet(s) ? '<button class="btn btn-sm btn-secondary" onclick="openSubnetEditModal(\'' + s.id + '\')">Edit</button>' +

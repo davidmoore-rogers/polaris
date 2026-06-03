@@ -21,14 +21,6 @@
       </div>
 
       <div class="filter-bar">
-        <label>Version</label>
-        <select id="filter-version" style="width:auto">
-          <option value="">All</option>
-          <option value="v4">IPv4</option>
-          <option value="v6">IPv6</option>
-        </select>
-        <label>Tag</label>
-        <input type="text" id="filter-tag" placeholder="e.g. prod" style="width:140px">
         <label style="margin-left:auto">Show</label>
         <select id="filter-pagesize" style="width:auto">
           <option value="15" selected>15</option>
@@ -47,7 +39,7 @@
               <th class="fav-col" title="Favorites pin to the top"></th>
               <th data-sf-key="name" data-sf-type="string">Name</th>
               <th data-sf-key="cidr" data-sf-type="ip">CIDR</th>
-              <th data-sf-key="ipVersion" data-sf-type="string">Version</th>
+              <th data-sf-key="ipVersion" data-sf-type="string" data-sf-options="v4=IPv4|v6=IPv6">Version</th>
               <th data-sf-key="description" data-sf-type="string">Description</th>
               <th data-sf-key="tags" data-sf-type="array">Tags</th>
               <th data-sf-key="_count.subnets" data-sf-type="number">Networks</th>

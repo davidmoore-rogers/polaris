@@ -40,14 +40,6 @@
         </div>
 
         <div class="filter-bar">
-          <label>Version</label>
-          <select id="filter-version" style="width:auto">
-            <option value="">All</option>
-            <option value="v4">IPv4</option>
-            <option value="v6">IPv6</option>
-          </select>
-          <label>Tag</label>
-          <input type="text" id="filter-tag" placeholder="e.g. prod" style="width:140px">
           <label style="margin-left:auto">Show</label>
           <select id="filter-pagesize" style="width:auto">
             <option value="15" selected>15</option>
@@ -66,7 +58,7 @@
                 <th class="fav-col" title="Favorites pin to the top"></th>
                 <th data-sf-key="name" data-sf-type="string">Name</th>
                 <th data-sf-key="cidr" data-sf-type="ip">CIDR</th>
-                <th data-sf-key="ipVersion" data-sf-type="string">Version</th>
+                <th data-sf-key="ipVersion" data-sf-type="string" data-sf-options="v4=IPv4|v6=IPv6">Version</th>
                 <th data-sf-key="description" data-sf-type="string">Description</th>
                 <th data-sf-key="tags" data-sf-type="array">Tags</th>
                 <th data-sf-key="_count.subnets" data-sf-type="number">Networks</th>
@@ -106,13 +98,6 @@
         </div>
 
         <div class="filter-bar">
-          <label>Block</label>
-          <select id="filter-block" style="width:auto"><option value="">All blocks</option></select>
-          <label>Creator</label>
-          <select id="filter-creator" style="width:auto">
-            <option value="">All</option>
-            <option value="me">Mine</option>
-          </select>
           <label style="margin-left:auto">Show</label>
           <select id="filter-pagesize" style="width:auto">
             <option value="15" selected>15</option>
@@ -138,19 +123,20 @@
                 <th class="fav-col" title="Favorites pin to the top"></th>
                 <th data-sf-key="name" data-sf-type="string">Name</th>
                 <th data-sf-key="cidr" data-sf-type="ip">Network</th>
-                <th data-sf-key="block.name" data-sf-type="string">Block</th>
+                <th data-sf-key="block.name" data-sf-type="string" data-sf-options="">Block</th>
                 <th data-sf-key="purpose" data-sf-type="string">Purpose</th>
                 <th data-sf-key="vlan" data-sf-type="number">VLAN</th>
                 <th data-sf-key="status" data-sf-type="string" data-sf-options="available|reserved|deprecated">Status</th>
                 <th data-sf-key="tags" data-sf-type="array">Tags</th>
                 <th data-sf-key="fortigateDevice" data-sf-type="string">Server</th>
                 <th data-sf-key="_integration" data-sf-type="string" data-sf-options="">Integration</th>
+                <th data-sf-key="createdBy" data-sf-type="string" data-sf-options="">Creator</th>
                 <th data-sf-key="_count.reservations" data-sf-type="number">Reservations</th>
                 <th style="width:90px" data-col-id="actions" data-col-required="true">Actions</th>
               </tr>
             </thead>
             <tbody id="subnets-tbody">
-              <tr><td colspan="13" class="empty-state">Loading...</td></tr>
+              <tr><td colspan="14" class="empty-state">Loading...</td></tr>
             </tbody>
           </table>
         </div>
