@@ -14,6 +14,8 @@ var _rolesById = {};           // { id: role }
 var _matrixSpec = null;        // { accessLevels, functions } from GET /roles/functions
 var _regionList = [];          // cached map-region names for the region picker
 var _regionByName = {};        // name → color hex; populated alongside _regionList
+var _groupMappingsRaw = [];    // last list from GET /group-mappings
+var _groupMappingsById = {};   // { id: mapping }
 
 // Per-user TableSF prefs persistence — matches the canonical
 // polaris-prefs-<scope>-<username> convention used by assets.js / blocks.js /
@@ -74,11 +76,25 @@ document.addEventListener("DOMContentLoaded", async function () {
   _restoreUsersPrefs();
   loadUsers();
   loadRoles();          // also drives the role dropdowns in the user modals
+  loadGroupMappings();  // IdP group → role + tags
   loadRegionList();     // best-effort; used by the region pickers
   initAuthSettingsButton();
   document.getElementById("btn-add-user").addEventListener("click", openCreateModal);
   var btnAddRole = document.getElementById("btn-add-role");
   if (btnAddRole) btnAddRole.addEventListener("click", function () { openRoleSlideover(null); });
+  var btnAddGm = document.getElementById("btn-add-group-mapping");
+  if (btnAddGm) btnAddGm.addEventListener("click", function () { openGroupMappingSlideover(null); });
+  var gmTbody = document.getElementById("group-mappings-tbody");
+  if (gmTbody) {
+    gmTbody.addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-gm-action]");
+      if (!btn) return;
+      var action = btn.getAttribute("data-gm-action");
+      var id = btn.getAttribute("data-gm-id");
+      if (action === "edit") openGroupMappingSlideover(id);
+      else if (action === "delete") confirmDeleteGroupMapping(id);
+    });
+  }
 
   // Event delegation for users-table action buttons
   document.getElementById("users-tbody").addEventListener("click", function (e) {
@@ -310,24 +326,28 @@ function openChangeRoleModal(id, username, currentRoleId) {
 function openUserRegionsModal(id, username) {
   var user = _usersRaw.filter(function (u) { return u.id === id; })[0];
   var current = (user && Array.isArray(user.regionTags)) ? user.regionTags.slice() : [];
+  var currentOther = (user && Array.isArray(user.otherTags)) ? user.otherTags.slice() : [];
   var help =
     '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
-      'Per-user region scope for <strong>' + escapeHtml(username) + '</strong>. ' +
-      'Click a pill to add or remove it. Empty = unrestricted. Effective regions ' +
-      'for the user\'s session are union(role.regionTags, user.regionTags).' +
+      'Per-user tag scope for <strong>' + escapeHtml(username) + '</strong>. ' +
+      'Empty = unrestricted. Effective scope is the union of the role\'s tags, ' +
+      'these per-user tags, and any tags granted by the user\'s IdP groups.' +
     '</p>';
-  var picker = regionPickerHtml("f-user-regions", current);
+  var body = help +
+    '<div class="form-group"><label>Region Scope</label>' + regionPickerHtml("f-user-regions", current) + '</div>' +
+    '<div class="form-group"><label>Other Tags</label>' + otherTagsPickerHtml("f-user-other", currentOther) + '</div>';
   var footer = '<button class="btn btn-secondary" id="btn-cancel">Cancel</button><button class="btn btn-primary" id="btn-save">Save</button>';
-  openModal("User Regions", help + picker, footer);
+  openModal("User Tag Scope", body, footer);
   document.getElementById("btn-cancel").addEventListener("click", closeModal);
   document.getElementById("btn-save").addEventListener("click", async function () {
     var btn = this;
     btn.disabled = true;
     try {
       var regionTags = collectRegionPicker("f-user-regions");
-      await api.users.updateRegions(id, { regionTags: regionTags });
+      var otherTags = collectOtherTags("f-user-other");
+      await api.users.updateRegions(id, { regionTags: regionTags, otherTags: otherTags });
       closeModal();
-      showToast("Region scope updated for " + username);
+      showToast("Tag scope updated for " + username);
       loadUsers();
     } catch (err) {
       showToast(err.message, "error");
@@ -558,10 +578,10 @@ async function openAuthSettingsModal() {
       document.querySelectorAll(".settings-tab-panel").forEach(function (p) { p.classList.remove("active"); });
       tab.classList.add("active");
       document.getElementById("tab-" + target).classList.add("active");
-      document.getElementById("btn-test-auth").style.display = target === "saml" ? "" : "none";
+      document.getElementById("btn-test-auth").style.display = (target === "session") ? "none" : "";
     });
   });
-  document.getElementById("btn-test-auth").style.display = _authActiveTab === "saml" ? "" : "none";
+  document.getElementById("btn-test-auth").style.display = (_authActiveTab === "session") ? "none" : "";
 
   // SAML: live-update ACS / SLS URLs
   document.getElementById("f-sp-entity-id").addEventListener("input", function () {
@@ -573,6 +593,8 @@ async function openAuthSettingsModal() {
   // Copy buttons
   document.getElementById("btn-copy-acs-url").addEventListener("click", function () { copyField("f-sp-acs-url", this); });
   document.getElementById("btn-copy-sls-url").addEventListener("click", function () { copyField("f-sp-sls-url", this); });
+  var oidcCopy = document.getElementById("btn-copy-oidc-redirect");
+  if (oidcCopy) oidcCopy.addEventListener("click", function () { copyField("f-oidc-redirect-uri", this); });
   document.getElementById("btn-cancel-auth").addEventListener("click", closeModal);
 
   // Certificate file import
@@ -584,31 +606,55 @@ async function openAuthSettingsModal() {
     reader.readAsText(file);
   });
 
-  // Test (SAML only)
+  // Test \u2014 per active tab (SAML / OIDC / LDAP). Saves that tab's settings
+  // first, then runs the provider-specific connectivity test.
   document.getElementById("btn-test-auth").addEventListener("click", async function () {
+    var tab = _authActiveTab;
     var btn = this;
-    var resultsDiv = document.getElementById("sso-test-results");
+    var resultsDiv = document.getElementById(tab === "saml" ? "sso-test-results" : tab + "-test-results");
+    if (!resultsDiv) return;
+    function setBox(ok) {
+      resultsDiv.style.display = "block";
+      resultsDiv.style.background = ok ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)";
+      resultsDiv.style.border = ok ? "1px solid rgba(34,197,94,0.3)" : "1px solid rgba(239,68,68,0.3)";
+    }
     btn.disabled = true;
     btn.textContent = "Testing\u2026";
     resultsDiv.style.display = "block";
     resultsDiv.style.background = "var(--color-bg-secondary)";
     resultsDiv.style.border = "1px solid var(--color-border)";
-    resultsDiv.innerHTML = '<span style="color:var(--color-text-secondary)">Running tests\u2026</span>';
+    resultsDiv.innerHTML = '<span style="color:var(--color-text-secondary)">Running test\u2026</span>';
     try {
-      await api.auth.updateAzureSettings(getSamlFormData());
-      var data = await api.auth.testAzureSettings();
-      var r = data.results;
-      var html = '<div style="display:flex;flex-direction:column;gap:0.5rem">' +
-        '<div>' + (r.certificate.ok ? "\u2705" : "\u274c") + ' <strong>Certificate:</strong> ' + escapeHtml(r.certificate.message) + '</div>' +
-        '<div>' + (r.idpLoginUrl.ok ? "\u2705" : "\u274c") + ' <strong>IdP Login URL:</strong> ' + escapeHtml(r.idpLoginUrl.message) + '</div>' +
+      if (tab === "saml") {
+        await api.auth.updateAzureSettings(getSamlFormData());
+        var data = await api.auth.testAzureSettings();
+        var r = data.results;
+        resultsDiv.innerHTML = '<div style="display:flex;flex-direction:column;gap:0.5rem">' +
+          '<div>' + (r.certificate.ok ? "\u2705" : "\u274c") + ' <strong>Certificate:</strong> ' + escapeHtml(r.certificate.message) + '</div>' +
+          '<div>' + (r.idpLoginUrl.ok ? "\u2705" : "\u274c") + ' <strong>IdP Login URL:</strong> ' + escapeHtml(r.idpLoginUrl.message) + '</div>' +
         '</div>';
-      resultsDiv.innerHTML = html;
-      resultsDiv.style.background = data.ok ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)";
-      resultsDiv.style.border = data.ok ? "1px solid rgba(34,197,94,0.3)" : "1px solid rgba(239,68,68,0.3)";
+        setBox(data.ok);
+      } else if (tab === "oidc") {
+        await api.auth.updateOidcSettings(getOidcFormData());
+        var od = await api.auth.testOidc();
+        var detailHtml = "";
+        if (od.details) {
+          detailHtml = '<div style="margin-top:0.4rem;font-size:0.8rem;color:var(--color-text-secondary)">' +
+            'authorization: ' + escapeHtml(od.details.authorization_endpoint || "") + '<br>' +
+            'token: ' + escapeHtml(od.details.token_endpoint || "") + '<br>' +
+            'userinfo: ' + escapeHtml(od.details.userinfo_endpoint || "(none)") + '</div>';
+        }
+        resultsDiv.innerHTML = (od.ok ? "\u2705 " : "\u274c ") + escapeHtml(od.message) + detailHtml;
+        setBox(od.ok);
+      } else if (tab === "ldap") {
+        await api.auth.updateLdapSettings(getLdapFormData());
+        var ld = await api.auth.testLdap();
+        resultsDiv.innerHTML = (ld.ok ? "\u2705 " : "\u274c ") + escapeHtml(ld.message);
+        setBox(ld.ok);
+      }
     } catch (err) {
       resultsDiv.innerHTML = '<span style="color:var(--color-danger)">\u274c ' + escapeHtml(err.message) + '</span>';
-      resultsDiv.style.background = "rgba(239,68,68,0.08)";
-      resultsDiv.style.border = "1px solid rgba(239,68,68,0.3)";
+      setBox(false);
     } finally {
       btn.disabled = false;
       btn.textContent = "Test";
@@ -656,6 +702,10 @@ function getOidcFormData() {
     clientId: val("f-oidc-client-id"),
     clientSecret: val("f-oidc-client-secret"),
     scopes: val("f-oidc-scopes"),
+    groupsClaim: val("f-oidc-groups-claim"),
+    usernameClaim: val("f-oidc-username-claim"),
+    emailClaim: val("f-oidc-email-claim"),
+    displayNameClaim: val("f-oidc-displayname-claim"),
   };
 }
 
@@ -670,6 +720,10 @@ function getLdapFormData() {
     tlsVerify: document.getElementById("f-ldap-tls-verify").checked,
     displayNameAttr: val("f-ldap-display-name-attr"),
     emailAttr: val("f-ldap-email-attr"),
+    userIdAttribute: val("f-ldap-userid-attr"),
+    groupAttribute: val("f-ldap-group-attr"),
+    groupBaseDn: val("f-ldap-group-base"),
+    groupFilter: val("f-ldap-group-filter"),
   };
 }
 
@@ -765,11 +819,37 @@ function buildOidcTab(s) {
     '<div class="form-group">' +
       '<label>Scopes</label>' +
       '<input type="text" id="f-oidc-scopes" value="' + escapeHtml(s.scopes || "openid profile email") + '">' +
-      '<p class="hint">Space-separated list of scopes to request.</p>' +
+      '<p class="hint">Space-separated list of scopes to request. Include the scope that returns groups (e.g. <code>groups</code> or a provider-specific scope).</p>' +
     '</div>' +
-    '<div style="margin-top:1rem;padding:0.75rem;background:var(--color-bg-secondary);border-radius:6px;font-size:0.82rem;color:var(--color-text-tertiary)">' +
-      'OIDC authentication is not yet implemented. Save your configuration now and it will be available when support is added.' +
-    '</div>';
+    '<div class="form-group">' +
+      '<label>Redirect URI</label>' +
+      '<div style="display:flex;gap:0.5rem;align-items:center">' +
+        '<input type="text" id="f-oidc-redirect-uri" value="' + escapeHtml(s.redirectUri || "") + '" readonly style="background:var(--color-bg-secondary);cursor:default;flex:1">' +
+        '<button type="button" class="btn btn-sm btn-secondary" id="btn-copy-oidc-redirect" title="Copy">Copy</button>' +
+      '</div>' +
+      '<p class="hint">Register this exact redirect URI in your IdP app. Derived from <code>POLARIS_PUBLIC_URL</code>.</p>' +
+    '</div>' +
+    '<h4 style="font-size:0.88rem;font-weight:600;margin:1.25rem 0 0.75rem;color:var(--color-text-primary);border-bottom:1px solid var(--color-border);padding-bottom:0.4rem">Claim Mapping</h4>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
+      '<div class="form-group">' +
+        '<label>Groups Claim</label>' +
+        '<input type="text" id="f-oidc-groups-claim" value="' + escapeHtml(s.groupsClaim || "groups") + '">' +
+        '<p class="hint">Claim holding the user\'s groups. <strong>Azure AD emits group object IDs (GUIDs), not names</strong> — map those IDs in Group Mappings, or configure Azure to emit names.</p>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Username Claim</label>' +
+        '<input type="text" id="f-oidc-username-claim" value="' + escapeHtml(s.usernameClaim || "preferred_username") + '">' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Email Claim</label>' +
+        '<input type="text" id="f-oidc-email-claim" value="' + escapeHtml(s.emailClaim || "email") + '">' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Display Name Claim</label>' +
+        '<input type="text" id="f-oidc-displayname-claim" value="' + escapeHtml(s.displayNameClaim || "name") + '">' +
+      '</div>' +
+    '</div>' +
+    '<div id="oidc-test-results" style="display:none;margin-top:1rem;padding:0.75rem;border-radius:6px;font-size:0.85rem"></div>';
 }
 
 function buildLdapTab(s) {
@@ -827,9 +907,32 @@ function buildLdapTab(s) {
         '<input type="text" id="f-ldap-email-attr" value="' + escapeHtml(s.emailAttr || "mail") + '">' +
       '</div>' +
     '</div>' +
-    '<div style="margin-top:1rem;padding:0.75rem;background:var(--color-bg-secondary);border-radius:6px;font-size:0.82rem;color:var(--color-text-tertiary)">' +
-      'LDAP authentication is not yet implemented. Save your configuration now and it will be available when support is added.' +
-    '</div>';
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Group Membership</p>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
+      '<div class="form-group">' +
+        '<label>User ID Attribute</label>' +
+        '<input type="text" id="f-ldap-userid-attr" value="' + escapeHtml(s.userIdAttribute || "objectGUID") + '">' +
+        '<p class="hint">Stable per-user id. <code>objectGUID</code> (AD) or <code>entryUUID</code> (OpenLDAP).</p>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Group Attribute</label>' +
+        '<input type="text" id="f-ldap-group-attr" value="' + escapeHtml(s.groupAttribute || "memberOf") + '">' +
+        '<p class="hint">Multi-valued group DNs on the user entry. <code>memberOf</code> on AD.</p>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Group Search Base <span style="color:var(--color-text-tertiary)">(optional)</span></label>' +
+        '<input type="text" id="f-ldap-group-base" value="' + escapeHtml(s.groupBaseDn || "") + '" placeholder="e.g. OU=Groups,DC=corp,DC=local">' +
+        '<p class="hint">Reverse member search to catch groups not in <code>memberOf</code>. Leave blank to skip.</p>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Group Filter <span style="color:var(--color-text-tertiary)">(optional)</span></label>' +
+        '<input type="text" id="f-ldap-group-filter" value="' + escapeHtml(s.groupFilter || "(member={{userDn}})") + '">' +
+        '<p class="hint">Used with the group search base. <code>{{userDn}}</code> is the user\'s DN.</p>' +
+      '</div>' +
+    '</div>' +
+    '<p style="font-size:0.8rem;color:var(--color-text-tertiary);margin-top:0.5rem">Map LDAP group DNs to roles + tags in <strong>Group Mappings</strong>. Group identifiers match on the full DN (lowercased).</p>' +
+    '<div id="ldap-test-results" style="display:none;margin-top:1rem;padding:0.75rem;border-radius:6px;font-size:0.85rem"></div>';
 }
 
 function buildSessionTab(s) {
@@ -1002,6 +1105,172 @@ async function confirmDeleteRole(id) {
   }
 }
 
+// ─── Group Mappings section ─────────────────────────────────────────────────
+
+var _GM_PROVIDERS = [
+  { value: "oidc", label: "OIDC" },
+  { value: "ldap", label: "LDAP" },
+  { value: "saml", label: "SAML" },
+];
+
+async function loadGroupMappings() {
+  var section = document.getElementById("group-mappings-section");
+  if (!section) return;
+  // Admin-only (gated server-side on users=fullwrite); hide for everyone else.
+  if (typeof isAdmin === "function" && !isAdmin()) {
+    section.style.display = "none";
+    return;
+  }
+  section.style.display = "";
+  var tbody = document.getElementById("group-mappings-tbody");
+  try {
+    _groupMappingsRaw = await api.groupMappings.list();
+    _groupMappingsById = {};
+    _groupMappingsRaw.forEach(function (m) { _groupMappingsById[m.id] = m; });
+    renderGroupMappingsBody();
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+  }
+}
+
+function gmTagsCell(m) {
+  var parts = [];
+  (m.regionTags || []).forEach(function (t) {
+    parts.push('<span class="badge" style="background:rgba(74,158,255,0.12);color:var(--color-primary,#4a9eff);border:1px solid rgba(74,158,255,0.35);margin:0.1rem 0.2rem 0.1rem 0">' + escapeHtml(t) + '</span>');
+  });
+  (m.otherTags || []).forEach(function (t) {
+    parts.push('<span class="badge" style="background:rgba(158,158,158,0.14);color:var(--color-text-secondary);border:1px solid rgba(158,158,158,0.4);margin:0.1rem 0.2rem 0.1rem 0">' + escapeHtml(t) + '</span>');
+  });
+  return parts.length ? parts.join("") : '<span style="color:var(--color-text-tertiary)">—</span>';
+}
+
+function renderGroupMappingsBody() {
+  var tbody = document.getElementById("group-mappings-tbody");
+  if (!_groupMappingsRaw.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No group mappings. Click "+ Add Mapping" to map an IdP group to a role + tags.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = _groupMappingsRaw.map(function (m) {
+    var role = m.roleName ? escapeHtml(m.roleName) : '<span style="color:var(--color-text-tertiary)">(tags only)</span>';
+    var enabled = m.enabled
+      ? '<span class="badge" style="background:rgba(34,197,94,0.14);color:#22c55e;border:1px solid rgba(34,197,94,0.4)">Enabled</span>'
+      : '<span class="badge" style="background:rgba(158,158,158,0.14);color:var(--color-text-tertiary);border:1px solid rgba(158,158,158,0.4)">Disabled</span>';
+    return '<tr>' +
+      '<td style="text-transform:uppercase;font-size:0.75rem;font-weight:600">' + escapeHtml(m.provider) + '</td>' +
+      '<td style="word-break:break-all">' + escapeHtml(m.groupLabel || m.groupKey) + (m.description ? '<div class="hint" style="margin:0.15rem 0 0">' + escapeHtml(m.description) + '</div>' : '') + '</td>' +
+      '<td>' + role + '</td>' +
+      '<td>' + gmTagsCell(m) + '</td>' +
+      '<td>' + enabled + '</td>' +
+      '<td>' +
+        '<button class="btn btn-sm btn-secondary" data-gm-action="edit" data-gm-id="' + m.id + '">Edit</button> ' +
+        '<button class="btn btn-sm btn-danger" data-gm-action="delete" data-gm-id="' + m.id + '">Delete</button>' +
+      '</td>' +
+    '</tr>';
+  }).join("");
+}
+
+async function confirmDeleteGroupMapping(id) {
+  var m = _groupMappingsById[id];
+  if (!m) return;
+  var ok = await showConfirm('Delete the ' + m.provider + ' group mapping for "' + (m.groupLabel || m.groupKey) + '"?');
+  if (!ok) return;
+  try {
+    await api.groupMappings.delete(id);
+    showToast("Group mapping deleted");
+    loadGroupMappings();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function openGroupMappingSlideover(id) {
+  // Ensure the role list is loaded for the dropdown.
+  if (!_rolesRaw || !_rolesRaw.length) {
+    try { _rolesRaw = await api.roles.list(); _rolesRaw.forEach(function (r) { _rolesById[r.id] = r; }); } catch (_) {}
+  }
+  var m = id ? _groupMappingsById[id] : null;
+  var isCreate = !m;
+  var provider = m ? m.provider : "oidc";
+
+  var providerOpts = _GM_PROVIDERS.map(function (p) {
+    return '<option value="' + p.value + '"' + (provider === p.value ? " selected" : "") + '>' + p.label + '</option>';
+  }).join("");
+  var roleOpts = '<option value="">(tags only — no role)</option>' +
+    _rolesRaw.map(function (r) {
+      return '<option value="' + r.id + '"' + (m && m.roleId === r.id ? " selected" : "") + '>' + escapeHtml(r.name) + '</option>';
+    }).join("");
+
+  var groupHint = 'For LDAP, enter the full group DN (matched case-insensitively). For OIDC/SAML, enter the group claim value exactly. <strong>Azure AD emits group object IDs (GUIDs)</strong> — use the object ID unless your IdP emits names.';
+
+  var body =
+    '<div class="form-group">' +
+      '<label>Provider</label>' +
+      '<select id="f-gm-provider"' + (isCreate ? "" : " disabled") + '>' + providerOpts + '</select>' +
+      (isCreate ? '' : '<p class="hint">Provider can\'t be changed after creation.</p>') +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Group Identifier *</label>' +
+      '<input type="text" id="f-gm-group" value="' + escapeHtml(m ? (m.groupLabel || m.groupKey) : "") + '" placeholder="CN=NetAdmins,OU=Groups,DC=corp,DC=local or a group name/object-id">' +
+      '<p class="hint">' + groupHint + '</p>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Role</label>' +
+      '<select id="f-gm-role">' + roleOpts + '</select>' +
+      '<p class="hint">Highest-privilege role wins when a user is in multiple mapped groups.</p>' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Region Scope</label>' +
+      regionPickerHtml("f-gm-regions", m ? (m.regionTags || []) : []) +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Other Tags</label>' +
+      otherTagsPickerHtml("f-gm-other", m ? (m.otherTags || []) : []) +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Description</label>' +
+      '<input type="text" id="f-gm-description" value="' + escapeHtml(m && m.description ? m.description : "") + '" maxlength="200" placeholder="Optional note">' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">' +
+        '<input type="checkbox" id="f-gm-enabled"' + (!m || m.enabled ? " checked" : "") + '><span>Enabled</span>' +
+      '</label>' +
+    '</div>';
+  var footer = '<button class="btn btn-secondary" id="btn-cancel">Cancel</button>' +
+    '<button class="btn btn-primary" id="btn-save">' + (isCreate ? "Create Mapping" : "Save Changes") + '</button>';
+  openModal(isCreate ? "Add Group Mapping" : "Edit Group Mapping", body, footer);
+  document.getElementById("btn-cancel").addEventListener("click", closeModal);
+  document.getElementById("btn-save").addEventListener("click", async function () {
+    var btn = this;
+    var groupKey = (document.getElementById("f-gm-group").value || "").trim();
+    if (!groupKey) { showToast("Group identifier is required", "error"); return; }
+    var payload = {
+      groupKey: groupKey,
+      roleId: document.getElementById("f-gm-role").value || null,
+      regionTags: collectRegionPicker("f-gm-regions"),
+      otherTags: collectOtherTags("f-gm-other"),
+      description: (document.getElementById("f-gm-description").value || "").trim() || null,
+      enabled: document.getElementById("f-gm-enabled").checked,
+    };
+    btn.disabled = true;
+    try {
+      if (isCreate) {
+        payload.provider = document.getElementById("f-gm-provider").value;
+        await api.groupMappings.create(payload);
+        showToast("Group mapping created");
+      } else {
+        await api.groupMappings.update(m.id, payload);
+        showToast("Group mapping saved");
+      }
+      closeModal();
+      loadGroupMappings();
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 // ─── Permissions slide-over ────────────────────────────────────────────────
 
 var _PERM_LEVELS = ["none", "read", "write", "fullwrite"];
@@ -1090,15 +1359,16 @@ async function openRoleSlideover(roleId) {
       perms[f.key] = checked ? checked.value : "none";
     });
     var regionTags = collectRegionPicker("f-role-regions");
+    var otherTags = collectOtherTags("f-role-other");
     var colorEl = document.getElementById("f-role-color");
     var color = colorEl ? colorEl.value : null;
     btn.disabled = true;
     try {
       if (isCreate) {
-        await api.roles.create({ name: name, description: description, permissions: perms, regionTags: regionTags, color: color });
+        await api.roles.create({ name: name, description: description, permissions: perms, regionTags: regionTags, otherTags: otherTags, color: color });
         showToast('Role "' + name + '" created');
       } else {
-        await api.roles.update(role.id, { name: name, description: description, permissions: perms, regionTags: regionTags, color: color });
+        await api.roles.update(role.id, { name: name, description: description, permissions: perms, regionTags: regionTags, otherTags: otherTags, color: color });
         showToast('Role "' + name + '" saved');
       }
       closeRoleSlideover();
@@ -1193,6 +1463,11 @@ function buildRoleSlideoverHtml(role, isCreate, isProtected, permissions) {
     '<label>Region Scope</label>' +
     '<p class="hint" style="margin-top:0">Empty = unrestricted. Combined with each user\'s own region tags at session time.</p>' +
     regionPickerHtml("f-role-regions", role ? (role.regionTags || []) : []) +
+  '</div>' +
+  '<div class="form-group">' +
+    '<label>Other Tags</label>' +
+    '<p class="hint" style="margin-top:0">Free-form tag scope, a second dimension alongside region tags. Empty = unrestricted.</p>' +
+    otherTagsPickerHtml("f-role-other", role ? (role.otherTags || []) : []) +
   '</div>';
 
   var footerHtml = isProtected
@@ -1365,4 +1640,86 @@ function collectRegionPicker(idPrefix) {
   });
   return out;
 }
+
+// ─── Free-form "other" tag picker (chip input; no registry) ──────────────
+// Parallel dimension to region tags. Operator types a tag; Enter or comma
+// commits a chip; × removes it. Used in the role slide-over, the per-user
+// tag modal, and the Group Mappings slide-over.
+
+function otherTagChipHtml(t) {
+  return '<span class="badge other-tag-chip" data-tag="' + escapeHtml(t) + '" style="display:inline-flex;align-items:center;gap:0.35rem;background:rgba(74,158,255,0.16);color:var(--color-primary,#4a9eff);border:1px solid rgba(74,158,255,0.4);padding:0.2rem 0.5rem;margin:0.1rem 0">' +
+    escapeHtml(t) +
+    ' <button type="button" class="other-tag-remove" aria-label="Remove" style="background:none;border:none;cursor:pointer;color:inherit;padding:0;font-size:1.1em;line-height:1">&times;</button>' +
+  '</span>';
+}
+
+function otherTagsPickerHtml(idPrefix, selected) {
+  var sel = Array.isArray(selected) ? selected.slice() : [];
+  var chips = sel.map(otherTagChipHtml).join("");
+  return '<div id="' + escapeHtml(idPrefix) + '" class="other-tags-picker">' +
+    '<div class="other-tags-chips" style="display:flex;flex-wrap:wrap;gap:0.35rem;margin-bottom:0.4rem">' + chips + '</div>' +
+    '<input type="text" class="other-tags-input" placeholder="Type a tag, press Enter" autocomplete="off" style="width:100%">' +
+  '</div>';
+}
+
+function addOtherTagChips(input) {
+  var picker = input.closest(".other-tags-picker");
+  if (!picker) return;
+  var chipWrap = picker.querySelector(".other-tags-chips");
+  var existing = {};
+  picker.querySelectorAll(".other-tag-chip").forEach(function (c) {
+    existing[(c.getAttribute("data-tag") || "").toLowerCase()] = true;
+  });
+  input.value.split(",").forEach(function (raw) {
+    var t = raw.trim();
+    if (!t || t.length > 64) return;
+    if (existing[t.toLowerCase()]) return;
+    existing[t.toLowerCase()] = true;
+    chipWrap.insertAdjacentHTML("beforeend", otherTagChipHtml(t));
+  });
+  input.value = "";
+}
+
+function collectOtherTags(idPrefix) {
+  var picker = document.getElementById(idPrefix);
+  if (!picker) return [];
+  var out = [];
+  var seen = {};
+  picker.querySelectorAll(".other-tag-chip").forEach(function (c) {
+    var t = (c.getAttribute("data-tag") || "").trim();
+    if (t && !seen[t.toLowerCase()]) { seen[t.toLowerCase()] = true; out.push(t); }
+  });
+  var input = picker.querySelector(".other-tags-input");
+  if (input && input.value.trim()) {
+    input.value.split(",").forEach(function (raw) {
+      var t = raw.trim();
+      if (t && !seen[t.toLowerCase()]) { seen[t.toLowerCase()] = true; out.push(t); }
+    });
+  }
+  return out;
+}
+
+document.addEventListener("keydown", function (e) {
+  var input = e.target.closest && e.target.closest(".other-tags-picker .other-tags-input");
+  if (!input) return;
+  if (e.key === "Enter" || e.key === ",") {
+    e.preventDefault();
+    addOtherTagChips(input);
+  } else if (e.key === "Backspace" && !input.value) {
+    var chips = input.parentElement.parentElement.querySelectorAll(".other-tag-chip");
+    if (chips.length) chips[chips.length - 1].remove();
+  }
+});
+document.addEventListener("blur", function (e) {
+  var input = e.target.closest && e.target.closest(".other-tags-picker .other-tags-input");
+  if (input && input.value.trim()) addOtherTagChips(input);
+}, true);
+document.addEventListener("click", function (e) {
+  var rm = e.target.closest && e.target.closest(".other-tag-remove");
+  if (rm) {
+    var chip = rm.closest(".other-tag-chip");
+    if (chip) chip.remove();
+    e.preventDefault();
+  }
+});
 

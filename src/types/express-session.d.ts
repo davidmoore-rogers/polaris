@@ -14,10 +14,16 @@ declare module "express-session" {
     role: string;
     roleId: string;
     roleSnapshot: SessionRoleSnapshot;
-    authProvider: string;   // "local" or "azure"
+    authProvider: string;   // "local" | "azure" | "oidc" | "ldap"
     samlRelayState: string;   // CSRF token for SAML flow
     samlNameID: string;       // SAML NameID for logout
     samlSessionIndex: string; // SAML SessionIndex for logout
+    // Transient OIDC Authorization-Code flow checks, set at /oidc/login and
+    // consumed (then cleared) at /oidc/callback. Bind the callback to the
+    // login attempt: state (CSRF), nonce (ID-token replay), PKCE verifier.
+    oidcState: string;
+    oidcNonce: string;
+    oidcCodeVerifier: string;
     lastActivity: number;     // Timestamp for inactivity tracking
     mfaVerified: boolean;     // True when the session has cleared TOTP (local accounts only)
     csrfToken: string;        // Synchronizer token for state-changing requests

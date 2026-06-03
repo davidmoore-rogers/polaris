@@ -1004,11 +1004,13 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 **Writers** (mutate the Role table OR stamp the session snapshot OR write per-user/per-role region scope):
 - `src/services/roleService.ts` — `createRole` / `updateRole` / `deleteRole` enforce built-in + protected invariants, normalize the permissions JSON, validate region tags, validate the `#rrggbb` badge color (`normalizeColor`), bump the in-process role-version cache via `bumpRoleVersion(roleId, updatedAt)`, and emit `role.created` / `role.updated` / `role.deleted` Events with per-field diffs.
-- `src/api/routes/roles.ts` — Per-method `requirePermission("roles", ...)` gates + Zod schema acceptance for the `permissions` matrix + `regionTags` + `color`.
-- `src/api/routes/users.ts` — `POST /users` + `PUT /:id/role` accept `roleId`; `PUT /:id/regions` writes `User.regionTags`; both enforce the `lastAdminEquivalent` invariant.
-- `src/api/routes/auth.ts` — Login (local + TOTP) + SAML callback load `user.role` and stamp `req.session.{roleId, roleSnapshot, role}` via `snapshotFromRole`. `/auth/me` returns the full role snapshot + `regionTags: {user, role, effective}`.
-- `src/services/azureAuthService.ts` — `findOrProvisionSamlUser` auto-provisions new users with the `readonly` role's id and includes the role in the returned object.
-- `src/api/middleware/permissions.ts` — `loadRoleSnapshot` rewrites `req.session.roleSnapshot` + persists via `req.session.save()` when the cached `updatedAt` is newer than the snapshot.
+- `src/api/routes/roles.ts` — Per-method `requirePermission("roles", ...)` gates + Zod schema acceptance for the `permissions` matrix + `regionTags` + `otherTags` + `color`.
+- `src/api/routes/users.ts` — `POST /users` + `PUT /:id/role` accept `roleId`; `PUT /:id/regions` writes `User.regionTags` + `User.otherTags`; password-reset guard refuses any `authProvider !== "local"`; both enforce the `lastAdminEquivalent` invariant.
+- `src/api/routes/auth.ts` — Login (local + TOTP), LDAP branch, SAML callback, and OIDC callback load `user.role` and stamp `req.session.{roleId, roleSnapshot, role, authProvider}` via `snapshotFromRole`. `/auth/me` returns the role snapshot + `regionTags`/`otherTags` each as `{user, role, group, effective}` (group re-resolved from `User.ssoGroups` via `resolveGroupsToAccess`).
+- `src/services/azureAuthService.ts` — `findOrProvisionSamlUser` auto-provisions new SAML users with the `readonly` role (SAML group reading not wired; OIDC/LDAP use the group-mapping path below).
+- `src/services/ssoProvisioning.ts` — `provisionExternalUser` (OIDC + LDAP): resolves IdP groups → role+tags, assigns the group-resolved role (highest-priv) or keeps an existing user's role on no-match, records `ssoGroups`.
+- `src/services/groupMappingService.ts` — `GroupMapping` CRUD + `resolveGroupsToAccess`; the writer of `groupMapping.*` Events (warning when a mapping targets an admin-equivalent role).
+- `src/api/middleware/permissions.ts` — `loadRoleSnapshot` rewrites `req.session.roleSnapshot` + persists via `req.session.save()` when the cached `updatedAt` is newer than the snapshot. `rankRole` / `pickHighestPrivilegeRoleId` rank roles for highest-privilege-wins group resolution.
 
 **Readers** (consult the matrix or the session snapshot to gate behavior):
 - `src/api/middleware/permissions.ts` — `requirePermission` / `hasPermission` / `requireOwnership` / `requireSessionOrTokenPermission`. All route guards funnel through here.
@@ -1029,10 +1031,34 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `lastAdminEquivalent` (userService): every mutation that would leave Polaris with zero users holding `users=fullwrite` AND `roles=fullwrite` returns 409.
 - Custom role names cannot collide with `admin` / `readonly` (case-insensitive reserved-name guard).
 - Permissions JSON is normalized on every write: unknown function keys dropped, missing keys defaulted to `"none"`. The route layer never trusts the raw body shape.
-- Region tag normalization: trim → drop empties → dedupe case-insensitively → cap length (64 chars) + count (64 entries).
+- Region/other tag normalization (shared `src/utils/tagNormalize.ts`): trim → drop empties → dedupe case-insensitively → cap length (64 chars) + count (64 entries).
+- Group-derived tags are computed at read time (`/auth/me` from `User.ssoGroups`) and NEVER written to `User.regionTags`/`User.otherTags` — operator-set per-user tags survive a re-login.
 
 **When extending the matrix:**
 See `TEMPLATES.md` → "Permission-gated route + dynamic-role function key" for the recipe (add to FUNCTION_KEYS, migrate every Role's permissions JSON, wire the route guards, document in CLAUDE.md).
+
+---
+
+## cross-cutting/sso-login-and-group-mapping
+
+**What it is:** OIDC + LDAP user login and the IdP-group → role+tags mapping layer. `authProvider ∈ {local, azure, oidc, ldap}`.
+
+**Login entry points:**
+- `POST /auth/login` (auth.ts) — local password OR LDAP branch (when the account is `authProvider="ldap"` OR the username is unknown and LDAP is enabled). Shared lockout counter applies to both.
+- `GET /auth/oidc/login` + `GET /auth/oidc/callback` (auth.ts) — OIDC Authorization-Code + PKCE; state/nonce/codeVerifier stashed in the (PG) session between the two.
+- `POST /auth/azure/callback` — SAML (unchanged; no group reading yet).
+
+**Services:** `oidcAuthService.ts` (openid-client v6), `ldapAuthService.ts` + shared `ldapClient.ts` (ldapts; also used by `activeDirectoryService.ts` for computer discovery), `ssoProvisioning.ts` (shared provision/role-assign), `groupMappingService.ts` (CRUD + `resolveGroupsToAccess`).
+
+**Settings** (Setting rows, admin-only via `serverSettingsSystem:write`): `oidc` (secret masked) + `ldap` (bindPassword masked). Each has a `POST /auth/{oidc,ldap}/test`.
+
+**Invariants / gotchas:**
+- LDAP: reject empty passwords before binding (unauthenticated-bind trap); RFC-4515-escape the username (`escapeLdapFilterValue`); fail closed on 0/>1 search hits.
+- OIDC: requires `POLARIS_PUBLIC_URL` (redirect URI derivation); Azure `groups` claim emits GUIDs + drops past ~200 groups.
+- Highest-privilege role wins on multi-group match; tags union; provider isolation via `@@unique([provider, groupKey])`.
+- A GroupMapping → admin-equivalent role is a privilege-escalation surface (logged at warning level).
+
+**When adding a sample/login provider field:** update the service's settings shape (mask secrets, preserve-on-unchanged), the matching tab in `public/js/users.js` (`buildOidcTab`/`buildLdapTab` + `getOidcFormData`/`getLdapFormData`), and `public/js/api.js`.
 
 ---
 

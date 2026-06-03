@@ -117,6 +117,7 @@ polaris/
 │   │       ├── deviceIcons.ts       # Device Map topology icon upload/list/delete + image serve (`/device-icons/:id/image`).
 │   │       ├── monitorSettings.ts   # Monitor-settings hierarchy: manual tier, integration tier, class overrides, asset-override reverse lookup.
 │   │       ├── roles.ts             # Dynamic-role CRUD + `/roles/functions` (25-key catalogue).
+│   │       ├── groupMappings.ts     # IdP group → role + tags mapping CRUD, mounted at `/group-mappings` gated `users:fullwrite`. Thin over groupMappingService.
 │   │       ├── userDashboard.ts     # Per-user dashboard layout GET/PUT at `/me/dashboard`.
 │   │       ├── agents.ts            # Polaris Agent runtime: enroll (public) / samples / config / heartbeat / system-info (bearer) / binary download (public, cert-pinned).
 │   │       ├── agentsWs.ts          # Polaris Agent outbound WebSocket upgrade (bearer via Sec-WebSocket-Protocol).
@@ -152,6 +153,11 @@ polaris/
 │   │   ├── discoveryDurationService.ts # Rolling discovery-duration samples + "slow-run" threshold (Setting-backed)
 │   │   ├── discoveryRunState.ts     # DB-backed live discovery-run state (DiscoveryRun table) — replaces the in-memory activeDiscovery Map; written by the discovery worker, read by the web process (progress, isDiscoveryRunning, slow-run check, cancel)
 │   │   ├── azureAuthService.ts      # Azure AD/Entra SAML SSO, user provisioning
+│   │   ├── ldapClient.ts            # Shared ldapts connection helpers (withBoundLdapClient bind/unbind lifecycle, newLdapClient TLS, decodeObjectGuid, formatLdapError) + escapeLdapFilterValue (RFC 4515 filter-injection escape). Used by BOTH activeDirectoryService (computer discovery) and ldapAuthService (user login).
+│   │   ├── ldapAuthService.ts       # LDAP user authentication. Settings (Setting key "ldap"; bindPassword masked/preserve-on-unchanged) + authenticateLdapUser (service-bind → escaped search → re-bind AS user to verify; rejects empty passwords before binding to defeat the unauthenticated-bind trap; reads group attribute (memberOf) + optional reverse member search; objectGUID→hex via decodeObjectGuid) + findOrProvisionLdapUser (→ ssoProvisioning) + testLdapConnection. Drives the LDAP branch in POST /auth/login.
+│   │   ├── oidcAuthService.ts       # OpenID Connect login via `openid-client` v6 (Authorization Code + PKCE-S256). Settings (Setting key "oidc"; clientSecret masked) + discovery cache + buildAuthorizationUrl (state/nonce/PKCE) + handleCallback (validates ID token sig/iss/aud/exp/nonce, merges userinfo) + findOrProvisionOidcUser (→ ssoProvisioning) + getRedirectUri (derived from POLARIS_PUBLIC_URL) + testOidcConnection.
+│   │   ├── ssoProvisioning.ts       # Shared find-or-provision for OIDC + LDAP logins. Resolves IdP groups → role + tags (groupMappingService), matches/creates the user by provider stable-id (oidcSubject / ldapUid), applies the group-resolved role (no-match keeps an existing user's role; new user falls back to readonly + needsRoleReview), records normalized ssoGroups for dynamic /auth/me tag re-resolution. Never writes group-derived tags to the user's own tag columns.
+│   │   ├── groupMappingService.ts   # IdP group → role + tags mapping. CRUD over GroupMapping (+ Events, warning-level when a mapping targets an admin-equivalent role) + 30s enabled-mappings cache + resolveGroupsToAccess(provider, groups) → {roleId, regionTags, otherTags, matchedGroups}: provider-scoped match (LDAP lowercased-DN, OIDC/SAML exact), tag union, HIGHEST-PRIVILEGE role wins (rankRole). normalizeGroupKey is the shared write/read normalizer.
 │   │   ├── totpService.ts           # RFC 6238 TOTP secret / code / backup-code helpers
 │   │   ├── dnsService.ts            # Reverse DNS lookup for assets
 │   │   ├── ouiService.ts            # MAC OUI lookup with admin overrides
@@ -254,6 +260,7 @@ polaris/
 │       ├── loginLockout.ts          # Per-username login-failure counter + temporary lockout
 │       ├── backupPassword.ts        # Pure (no I/O) strength floor for the optional encrypted-backup passphrase. `validateBackupPassword(raw)` returns null for empty/whitespace (unencrypted backup is a legitimate choice), throws `{code:"WEAK_BACKUP_PASSWORD"}` for supplied-but-too-weak (< `BACKUP_MIN_PASSWORD_LEN`=12 chars or < 4 distinct chars), else returns the passphrase unchanged (no trim — spaces are valid key material). Called by `POST /server-settings/database/backup`; restore stays unvalidated (must accept whatever encrypted an existing file). 2026-06-03 review, finding M5.
 │       ├── netGuard.ts              # Pure (no I/O) SSRF guard for operator-supplied outbound hosts. `isBlockedOutboundHost(host)` / `assertOutboundHostAllowed(host)` block loopback / link-local (incl. 169.254.169.254 cloud metadata) / unspecified / multicast literals (and the `localhost` hostname + IPv4-mapped-IPv6 forms) while leaving RFC1918/ULA LAN device addresses — the normal integration target — allowed. Wired into every integration config schema carrying a `host` (FortiManager / FortiGate / Windows Server / Active Directory) via `refineConfigHost` superRefine, plus an explicit re-check on the loose-record update path in `integrations.ts`. Literal-only; DNS-rebinding is a documented residual (2026-06-03 security review, finding M4).
+│       ├── tagNormalize.ts          # Shared normalize for the two operator-typed tag dimensions (region tags + free-form "other" tags) on Role / User / GroupMapping: normalizeTags(input, label) (trim/drop-empty/dedupe-case-insensitive/cap) + unionTags(...lists) (deduped, sorted union for the effective scope at /auth/me). Extracted from roleService.normalizeRegionTags.
 │       ├── manufacturerNormalize.ts # Pure (no DB) cache + sync normalizeManufacturer(); imported by db.ts Prisma extension to canonicalize every Asset/MibFile manufacturer write
 │       ├── assetTypes.ts            # Pure (no DB) `BUILT_IN_ASSET_TYPES` constant (the eight historical enum values — stable identifiers for code that branches on assetType) + in-memory registry cache populated by `assetTypeService.refreshCache()` at boot and after every CRUD mutation. `isKnownAssetType(name)` is the sync validator used by `/assets` and `/monitor-settings` Zod schemas; until the cache loads it falls back to accepting the eight built-in names so early-boot writes stay legal. Also exports `validateAssetTypeName` / `validateAssetTypeLabel` consumed by `assetTypeService` write paths.
 │       ├── symbolTransforms.ts      # Pure (no I/O) value-transform registries for the editable Manufacturer Profile. Two registries live here: **unary transforms** (`TransformKind` + `TRANSFORM_KINDS` + `TRANSFORM_LABELS` + `applyTransform(value, kind)` + `isTransformKind`) paired with `type="scalar"` rows — celsius_to_fahrenheit / fahrenheit_to_celsius / bytes_to_mb / bytes_to_gb / mb_to_bytes / ticks_to_seconds / ratio_to_percent / percent_to_ratio / signed_to_unsigned; and **binary combiners** (`CombinerKind` + `COMBINER_KINDS` + `COMBINER_LABELS` + `applyCombiner(a, b, kind)` + `isCombinerKind`) paired with `type="double_scalar"` rows — a_over_b_as_percent (used/total → percent) / a_over_a_plus_b_as_percent (used/(used+free) → percent) / b_minus_a_over_b_as_percent / a_minus_b / a_plus_b / a_over_b_ratio. Both registries are sample-write hooks consumed by the resolver. Division-by-zero / zero-sum denominators in combiners return null rather than Infinity/NaN so downstream chart code renders "—" cleanly without special-casing.
@@ -928,12 +935,15 @@ User
   roleId        String         -- FK Role; onDelete: Restrict (cannot delete a role that has users)
   role          Role           -- joined Role row, joined on every list/get response
   -- Per-user region scope. Empty = unrestricted (matches pre-cutover default).
-  -- Effective regions for a session are `union(role.regionTags, user.regionTags)`.
-  -- Storage only in v1 — the consumer (asset / subnet / reservation list
-  -- filters, map view) lives in a separate change.
+  -- Effective regions for a session are `union(role, user, group-derived)`.
+  -- Operator-set; group-derived tags are NEVER written here.
   regionTags    String[]       @default([])
-  authProvider  String          -- "local" or "azure"
-  azureOid      String? @unique -- Azure AD Object ID
+  otherTags     String[]       @default([]) -- Per-user free-form ("other") tag scope; second dimension parallel to regionTags, same union semantics.
+  authProvider  String          -- "local" | "azure" | "oidc" | "ldap"
+  azureOid      String? @unique -- Azure AD Object ID (SAML)
+  oidcSubject   String? @unique -- OIDC `sub` claim (stable per-user id for OIDC re-discovery)
+  ldapUid       String? @unique -- LDAP objectGUID hex (stable per-user id for LDAP re-discovery)
+  ssoGroups     String[]       @default([]) -- Last-seen normalized IdP group keys from the most recent SSO/LDAP login. Lets GET /auth/me re-resolve group→tags dynamically without re-contacting the IdP. Empty for local accounts.
   displayName   String?
   email         String?
   lastLogin     DateTime?
@@ -983,9 +993,9 @@ Role                            -- Dynamic role + permission matrix; replaces th
   permissions   Json            -- { [functionKey]: "none" | "read" | "write" | "fullwrite" } per the 25-key catalogue in `src/api/middleware/permissions.ts`. Missing keys default to "none" at read.
   -- Region scope inherited by every user holding this role. Empty =
   -- unrestricted. Effective regions for a session are
-  -- `union(role.regionTags, user.regionTags)`. Storage only; consumer
-  -- lives in a separate change.
+  -- `union(role, user, group-derived)`.
   regionTags    String[]       @default([])
+  otherTags     String[]       @default([]) -- Free-form ("other") tag scope inherited by users with this role; second dimension parallel to regionTags.
   color         String?         -- Badge pill color as `#rrggbb`; null falls back to the legacy name-keyed `.badge-*` CSS classes in the frontend. Drives the sidebar user-badge, the users-table role column, and the Manage Roles list. Built-ins seeded by the `20260601000000_role_color` migration (admin red / networkadmin orange / assetsadmin blue / readonly gray / user green); new roles get a random color from the add-role color picker.
   isBuiltIn     Boolean        @default(false) -- true for the five seeded rows (admin / readonly / networkadmin / assetsadmin / user)
   isProtected   Boolean        @default(false) -- true for admin + readonly only; blocks edit/delete/rename + hides the row from the editable UI
@@ -995,6 +1005,29 @@ Role                            -- Dynamic role + permission matrix; replaces th
   -- existing users see no behavior change. Operator-created custom roles
   -- start with all-`none` permissions; admin grants per function via the
   -- matrix slide-over on /users.html.
+
+GroupMapping                    -- IdP group → role + tags mapping (applied at OIDC/LDAP login)
+  id            UUID PK
+  provider      String          -- "oidc" | "ldap" | "saml" — scopes matching so an OIDC group name can't collide with an LDAP DN
+  groupKey      String          -- normalized match key: lowercased DN for LDAP, trimmed claim value (exact case) for OIDC/SAML. Normalized identically on write + at login by groupMappingService.normalizeGroupKey.
+  groupLabel    String?         -- as-entered form preserved for the admin UI
+  roleId        String?         -- FK Role; onDelete: SetNull (a deleted role degrades the mapping to tags-only rather than blocking the delete). Null = tags-only mapping.
+  regionTags    String[]       @default([])
+  otherTags     String[]       @default([])
+  enabled       Boolean        @default(true)
+  description   String?
+  createdAt     DateTime
+  updatedAt     DateTime
+  @@unique([provider, groupKey])
+  -- At login the user's group claims are matched against the enabled rows for
+  -- their provider; matched rows' tags union into effective scope and the
+  -- HIGHEST-PRIVILEGE matched role wins (rankRole in permissions.ts). CRUD is
+  -- gated on users=fullwrite. A mapping targeting an admin-equivalent role is
+  -- a privilege-escalation surface (IdP group membership → Polaris admin,
+  -- outside the lastAdminEquivalent guard) — groupMappingService stamps a
+  -- warning-level Event when one is created/updated. Seeded by migration
+  -- 20260612000000_group_mappings_and_other_tags (which also adds the
+  -- otherTags / ssoGroups / oidcSubject / ldapUid columns above).
 
 UserDashboard                   -- Per-user dashboard layout (widget set + positions + sizes + per-widget config)
   userId        String PK FK → User (cascade delete)
@@ -1249,12 +1282,16 @@ All routes are prefixed `/api/v1/`. Auth guards are applied in `src/api/router.t
 ### Auth — public
 - `POST   /auth/login`
 - `POST   /auth/logout`
-- `GET    /auth/me`                             — Session probe. Returns `{ authenticated: false }` for unauthenticated callers; otherwise `{ authenticated: true, username, authProvider, role: { id, name, color, isProtected, permissions, updatedAt }, regionTags: { user, role, effective } }` (`color` is read live from the role row each call, so a color edit shows in the sidebar badge without re-login). The frontend reads `role.permissions[functionKey]` to gate menu items / buttons (see `permAtLeast()` in `public/js/app.js`).
+- `GET    /auth/me`                             — Session probe. Returns `{ authenticated: false }` for unauthenticated callers; otherwise `{ authenticated: true, username, authProvider, role: { id, name, color, isProtected, permissions, updatedAt }, regionTags: { user, role, group, effective }, otherTags: { user, role, group, effective } }` (`color` read live each call; `group` is re-resolved from `User.ssoGroups` via `resolveGroupsToAccess` so a GroupMapping edit shows next page load without re-login). The frontend reads `role.permissions[functionKey]` to gate menu items / buttons (see `permAtLeast()` in `public/js/app.js`).
 - `GET    /auth/azure/config`                   — Azure SSO feature flag
 - `GET    /auth/azure/login`                    — Initiate Azure SAML login
 - `POST   /auth/azure/callback`                 — SAML assertion callback
 - `POST   /auth/azure/logout`                    — SAML single-logout
-- SSO/LDAP config (admin): `GET|PUT /auth/azure/settings`, `POST /auth/azure/test`, `GET|PUT /auth/oidc/settings`, `GET|PUT /auth/ldap/settings`
+- `GET    /auth/oidc/config`                    — OIDC feature flag (login page button)
+- `GET    /auth/oidc/login`                     — Initiate OIDC Authorization-Code login (stashes state/nonce/PKCE in session, redirects to IdP)
+- `GET    /auth/oidc/callback`                  — OIDC code exchange + ID-token validation + provision. Top-level GET, so SameSite=Lax session cookies are sent (unlike the SAML POST callback)
+- LDAP login uses the shared `POST /auth/login` form (routes to LDAP when the account is an LDAP user or the username is unknown and LDAP is enabled)
+- SSO/LDAP config (admin, `serverSettingsSystem:write`): `GET|PUT /auth/azure/settings` + `POST /auth/azure/test`, `GET|PUT /auth/oidc/settings` + `POST /auth/oidc/test`, `GET|PUT /auth/ldap/settings` + `POST /auth/ldap/test`
 - `POST   /auth/login/totp`                     — Second step of two-phase login when TOTP is enabled. Body: `{ pendingToken, code, isBackupCode? }`. `pendingToken` is returned by `POST /auth/login` whenever the caller's account has `totpEnabledAt` set — until this endpoint consumes it, the session is not issued.
 
 ### TOTP self-management — `requireAuth`
@@ -1317,12 +1354,12 @@ Per-user dashboard layout. One row per user in `UserDashboard`; absent row = emp
 
 ### Users — `users` function key
 - `GET    /users`                               *(read)* — Every row is returned with the joined `role: { id, name, color, isProtected, isBuiltIn }` and `regionTags: string[]` (per-user scope).
-- `POST   /users`                               *(write)* — Body: `{ username, password, roleId, regionTags? }`. The legacy `role: <enum>` field is no longer accepted.
+- `POST   /users`                               *(write)* — Body: `{ username, password, roleId, regionTags?, otherTags? }`. The legacy `role: <enum>` field is no longer accepted.
 - `GET    /users/:id`                           *(read)*
 - `DELETE /users/:id`                           *(write)* — Refused with 409 when this would leave Polaris with zero users holding `users=fullwrite` AND `roles=fullwrite` (last-admin-equivalent invariant).
 - `PUT    /users/:id/password`                  *(write)* — Local accounts only.
 - `PUT    /users/:id/role`                      *(write)* — Body: `{ roleId }`. Refused with 400 when reassigning yourself; 409 when this would break the last-admin-equivalent invariant. Auto-clears `needsRoleReview` since picking a role is an implicit review.
-- `PUT    /users/:id/regions`                   *(write)* — Body: `{ regionTags: string[] }`. Empty array clears. Validation: trim, drop empties, dedupe case-insensitively, ≤64 entries, each ≤64 chars. Writes one `user.regions_updated` Event with the from/to diff.
+- `PUT    /users/:id/regions`                   *(write)* — Body: `{ regionTags?: string[], otherTags?: string[] }` (each optional; omitted dimension left unchanged, empty array clears). Validation via `tagNormalize`: trim, drop empties, dedupe case-insensitively, ≤64 entries, each ≤64 chars. Writes one `user.regions_updated` Event with the per-dimension from/to diff. These are operator-set tags only — group-derived tags are computed at `/auth/me`, never written here.
 - `DELETE /users/:id/totp`                      *(write)* — Admin-initiated TOTP reset (for "lost device" recovery). Clears the secret and backup codes so the user can re-enroll on next login.
 - `GET    /users/role-review-notifications`     *(read)* — Sidebar feed. Returns `{ users, count }` where `users` is every row with `needsRoleReview=true`, ordered by `lastLogin` asc, projected to `{ id, username, role: { id, name, ... }, regionTags, displayName, authProvider, email, lastLogin, createdAt, ... }`. Polled every 30s by [public/js/app.js](public/js/app.js) for admins only.
 - `DELETE /users/:id/role-review`               *(write)* — Dismiss the new-user notification for one user (global — hides the row for every admin).
@@ -1334,6 +1371,13 @@ Per-user dashboard layout. One row per user in `UserDashboard`; absent row = emp
 - `POST   /roles`                               *(write)* — `{ name, description?, permissions, regionTags?, color? }`. Name validated against `/^[A-Za-z0-9_-]{2,32}$/` + case-insensitive uniqueness against existing names + the reserved `admin` / `readonly`. `color` validated as `#rrggbb` (empty/null clears). Permissions normalized: unknown function keys dropped, missing keys defaulted to `"none"`.
 - `PUT    /roles/:id`                           *(write)* — Body accepts any subset of `{ name?, description?, permissions?, regionTags?, color? }`. Refused with 403 when the role is `isProtected=true` (admin / readonly). Bumps the role-version cache + writes one `role.updated` Event with per-field diff (including a per-functionKey `permissionChanges` map listing only the keys whose level changed).
 - `DELETE /roles/:id`                           *(write)* — Refused with 409 when `isBuiltIn=true` OR when any user holds the role (admin must reassign first).
+
+### Group Mappings — mounted at `/group-mappings`, gated `users:fullwrite`
+- `GET    /group-mappings`                      — All mappings (optional `?provider=oidc|ldap|saml`). Each: `{ id, provider, groupKey, groupLabel, roleId, roleName, regionTags, otherTags, enabled, description, createdAt, updatedAt }`.
+- `GET    /group-mappings/:id`
+- `POST   /group-mappings`                      — `{ provider, groupKey, roleId?, regionTags?, otherTags?, enabled?, description? }`. `groupKey` normalized per provider (LDAP lowercased-DN, OIDC/SAML exact); 409 on duplicate `(provider, groupKey)`. Warning Event when `roleId` is admin-equivalent.
+- `PUT    /group-mappings/:id`                  — Subset of the above (provider is immutable).
+- `DELETE /group-mappings/:id`
 
 ### Integrations — `integrations` function key
 > Mount requires `integrations=read`; all write endpoints inside the file are upgraded to `integrations=write` via an inline `router.use(...)`.

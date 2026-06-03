@@ -227,6 +227,13 @@ const api = {
     delete:    (id)      => request("DELETE", `/roles/${id}`),
     functions: ()        => request("GET", "/roles/functions"),
   },
+  groupMappings: {
+    list:   (provider) => request("GET", provider ? `/group-mappings?provider=${encodeURIComponent(provider)}` : "/group-mappings"),
+    get:    (id)       => request("GET", `/group-mappings/${id}`),
+    create: (body)     => request("POST", "/group-mappings", body),
+    update: (id, b)    => request("PUT", `/group-mappings/${id}`, b),
+    delete: (id)       => request("DELETE", `/group-mappings/${id}`),
+  },
   totp: {
     status:     ()     => request("GET",    "/auth/totp/status"),
     enroll:     ()     => request("POST",   "/auth/totp/enroll"),
@@ -661,10 +668,13 @@ const api = {
     azureSettings: () => request("GET", "/auth/azure/settings"),
     updateAzureSettings: (body) => request("PUT", "/auth/azure/settings", body),
     testAzureSettings: () => request("POST", "/auth/azure/test"),
+    oidcConfig: () => request("GET", "/auth/oidc/config"),
     oidcSettings: () => request("GET", "/auth/oidc/settings"),
     updateOidcSettings: (body) => request("PUT", "/auth/oidc/settings", body),
+    testOidc: () => request("POST", "/auth/oidc/test"),
     ldapSettings: () => request("GET", "/auth/ldap/settings"),
     updateLdapSettings: (body) => request("PUT", "/auth/ldap/settings", body),
+    testLdap: () => request("POST", "/auth/ldap/test"),
   },
 };
 

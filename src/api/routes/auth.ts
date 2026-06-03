@@ -28,6 +28,25 @@ import {
   getSsoSettings,
   updateSsoSettings,
 } from "../../services/azureAuthService.js";
+import {
+  isLdapEnabled,
+  authenticateLdapUser,
+  findOrProvisionLdapUser,
+  getLdapSettingsMasked,
+  updateLdapSettings,
+  testLdapConnection,
+} from "../../services/ldapAuthService.js";
+import {
+  isOidcEnabled,
+  buildAuthorizationUrl as buildOidcAuthorizationUrl,
+  handleCallback as handleOidcCallback,
+  findOrProvisionOidcUser,
+  getOidcSettingsForUi,
+  updateOidcSettings,
+  testOidcConnection,
+} from "../../services/oidcAuthService.js";
+import { resolveGroupsToAccess } from "../../services/groupMappingService.js";
+import { unionTags } from "../../utils/tagNormalize.js";
 import { logEvent } from "./events.js";
 
 const router = Router();
@@ -70,6 +89,64 @@ router.post("/login", async (req, res, next) => {
     }
 
     const user = await prisma.user.findUnique({ where: { username }, include: { role: true } });
+
+    // ── LDAP branch ──
+    // Route to LDAP when the existing account is an LDAP user, OR when the
+    // username is unknown and LDAP is enabled (just-in-time provisioning).
+    // Local accounts (authProvider "local") fall through to the password path
+    // below with all lockout/TOTP behavior intact. The shared per-username
+    // lockout counter applies to LDAP attempts too (checked above).
+    const useLdap = (user?.authProvider === "ldap") || (!user && (await isLdapEnabled()));
+    if (useLdap) {
+      try {
+        const result = await authenticateLdapUser(username, password);
+        clearLockout(username);
+        const provisioned = await findOrProvisionLdapUser(result);
+
+        await regenerateSession(req);
+        req.session.userId = provisioned.id;
+        req.session.username = provisioned.username;
+        req.session.roleId = provisioned.roleId;
+        req.session.roleSnapshot = snapshotFromRole(provisioned.role);
+        req.session.role = provisioned.role.name;
+        req.session.authProvider = "ldap";
+        // Directory owns MFA for LDAP users (TOTP self-enroll is SSO-blocked).
+        req.session.mfaVerified = true;
+        req.session.lastActivity = Date.now();
+
+        logEvent({
+          action: "auth.login.ldap",
+          resourceType: "user",
+          resourceId: provisioned.id,
+          resourceName: provisioned.username,
+          actor: provisioned.username,
+          message: `LDAP login: ${provisioned.username} → role "${provisioned.role.name}"`,
+          details: { ip: req.ip, userAgent: req.get("user-agent") || undefined, groups: result.groups.length, role: provisioned.role.name },
+        });
+        return res.json({ ok: true, username: provisioned.username, role: provisioned.role.name });
+      } catch (err) {
+        const tripped = recordFailure(username);
+        if (tripped.lockedNow) {
+          logEvent({
+            action: "auth.login.lockout",
+            resourceType: "user",
+            resourceName: username,
+            level: "warning",
+            message: `Account "${username}" locked after ${tripped.failures} failed attempts`,
+            details: { ip: req.ip, lockedUntil: tripped.until?.toISOString() },
+          });
+        }
+        logEvent({
+          action: "auth.login.failed",
+          resourceType: "user",
+          resourceName: username,
+          level: "warning",
+          message: `Failed LDAP login for "${username}"`,
+          details: { ip: req.ip, userAgent: req.get("user-agent") || undefined, failures: tripped.failures },
+        });
+        throw new AppError(401, "Invalid username or password");
+      }
+    }
 
     // Constant-time verify: passing null stored hash still runs a dummy
     // argon2 verify so response time is identical for unknown usernames.
@@ -318,7 +395,22 @@ router.get("/me", async (req, res, next) => {
     }
     const userRegions = Array.isArray(u.regionTags) ? u.regionTags : [];
     const roleRegions = Array.isArray(u.role.regionTags) ? u.role.regionTags : [];
-    const effectiveRegions = Array.from(new Set([...roleRegions, ...userRegions])).sort();
+    const userOther = Array.isArray(u.otherTags) ? u.otherTags : [];
+    const roleOther = Array.isArray(u.role.otherTags) ? u.role.otherTags : [];
+
+    // Group-derived tags are re-resolved from the user's last-seen SSO groups
+    // each call, so editing a GroupMapping takes effect on next page load
+    // without re-login. Empty for local users (no ssoGroups). One cached
+    // lookup; /auth/me is per-user, not per-asset. Group-derived tags are
+    // NEVER persisted onto the user's own columns — they only union here.
+    let groupRegions: string[] = [];
+    let groupOther: string[] = [];
+    if (Array.isArray(u.ssoGroups) && u.ssoGroups.length > 0) {
+      const access = await resolveGroupsToAccess(u.authProvider, u.ssoGroups);
+      groupRegions = access.regionTags;
+      groupOther = access.otherTags;
+    }
+
     res.json({
       authenticated: true,
       username: req.session.username,
@@ -340,7 +432,14 @@ router.get("/me", async (req, res, next) => {
       regionTags: {
         user: userRegions,
         role: roleRegions,
-        effective: effectiveRegions,
+        group: groupRegions,
+        effective: unionTags(roleRegions, userRegions, groupRegions),
+      },
+      otherTags: {
+        user: userOther,
+        role: roleOther,
+        group: groupOther,
+        effective: unionTags(roleOther, userOther, groupOther),
       },
     });
   } catch (err) {
@@ -564,30 +663,98 @@ router.put("/azure/settings", requireAuth, requirePermission("serverSettingsSyst
   }
 });
 
-// ─── OIDC Settings ──────────────────────────────────────────────────────────
+// ─── OIDC (OpenID Connect) SSO ────────────────────────────────────────────────
 
+// GET /api/v1/auth/oidc/config — public, login page checks this
+router.get("/oidc/config", async (_req, res) => {
+  const enabled = await isOidcEnabled();
+  res.json({ enabled });
+});
+
+// GET /api/v1/auth/oidc/login — redirect to the IdP authorization endpoint.
+// state / nonce / PKCE verifier are stashed in the session for the callback.
+router.get("/oidc/login", async (req, res) => {
+  try {
+    if (!(await isOidcEnabled())) return res.redirect("/login.html?error=oidc_not_configured");
+    const { url, state, nonce, codeVerifier } = await buildOidcAuthorizationUrl();
+    req.session.oidcState = state;
+    req.session.oidcNonce = nonce;
+    req.session.oidcCodeVerifier = codeVerifier;
+    req.session.save((err) => {
+      if (err) return res.redirect(`/login.html?error=${encodeURIComponent("oidc_session_error")}`);
+      res.redirect(url);
+    });
+  } catch (err: any) {
+    res.redirect(`/login.html?error=${encodeURIComponent(err.message || "oidc_error")}`);
+  }
+});
+
+// GET /api/v1/auth/oidc/callback — exchange code, validate ID token, provision.
+// SameSite=Lax cookies ARE sent on this top-level GET navigation (unlike the
+// SAML cross-site POST), so the session-stored checks are reliably present.
+router.get("/oidc/callback", async (req, res) => {
+  const state = req.session.oidcState;
+  const nonce = req.session.oidcNonce;
+  const codeVerifier = req.session.oidcCodeVerifier;
+  try {
+    if (!state || !nonce || !codeVerifier) {
+      return res.redirect("/login.html?error=oidc_no_session");
+    }
+    const proto = req.protocol;
+    const currentUrl = `${proto}://${req.get("host")}${req.originalUrl}`;
+    const claims = await handleOidcCallback(currentUrl, { state, nonce, codeVerifier });
+    const user = await findOrProvisionOidcUser(claims);
+
+    await regenerateSession(req);
+    req.session.userId = user.id;
+    req.session.username = user.username;
+    req.session.roleId = user.roleId;
+    req.session.roleSnapshot = snapshotFromRole(user.role);
+    req.session.role = user.role.name;
+    req.session.authProvider = "oidc";
+    req.session.mfaVerified = true; // IdP owns MFA
+    req.session.lastActivity = Date.now();
+
+    logEvent({
+      action: "auth.login.oidc",
+      resourceType: "user",
+      resourceId: user.id,
+      resourceName: user.username,
+      actor: user.username,
+      message: `OIDC SSO login: ${user.username} → role "${user.role.name}"`,
+      details: { groups: claims.groups.length, role: user.role.name },
+    });
+    res.redirect("/");
+  } catch (err: any) {
+    logEvent({
+      action: "auth.login.oidc.failed",
+      resourceType: "user",
+      level: "error",
+      message: `OIDC callback failed: ${err.message}`,
+    });
+    res.redirect(`/login.html?error=${encodeURIComponent(err.message || "oidc_callback_error")}`);
+  }
+});
+
+// GET /api/v1/auth/oidc/settings — admin only (secret masked, redirect URI derived)
 router.get("/oidc/settings", requireAuth, requirePermission("serverSettingsSystem", "write"), async (_req, res, next) => {
   try {
-    const row = await prisma.setting.findUnique({ where: { key: "oidc" } });
-    res.json(row?.value ?? { enabled: false, discoveryUrl: "", clientId: "", clientSecret: "", scopes: "openid profile email" });
+    res.json(await getOidcSettingsForUi());
   } catch (err) { next(err); }
 });
 
+// PUT /api/v1/auth/oidc/settings — admin only
 router.put("/oidc/settings", requireAuth, requirePermission("serverSettingsSystem", "write"), async (req, res, next) => {
   try {
-    const value = {
-      enabled: !!req.body.enabled,
-      discoveryUrl: (req.body.discoveryUrl || "").trim(),
-      clientId: (req.body.clientId || "").trim(),
-      clientSecret: (req.body.clientSecret || "").trim(),
-      scopes: (req.body.scopes || "openid profile email").trim(),
-    };
-    await prisma.setting.upsert({
-      where: { key: "oidc" },
-      update: { value: value as any },
-      create: { key: "oidc", value: value as any },
-    });
-    res.json(value);
+    await updateOidcSettings(req.body);
+    res.json(await getOidcSettingsForUi());
+  } catch (err) { next(err); }
+});
+
+// POST /api/v1/auth/oidc/test — run discovery + report endpoints (admin only)
+router.post("/oidc/test", requireAuth, requirePermission("serverSettingsSystem", "write"), async (_req, res, next) => {
+  try {
+    res.json(await testOidcConnection());
   } catch (err) { next(err); }
 });
 
@@ -595,43 +762,21 @@ router.put("/oidc/settings", requireAuth, requirePermission("serverSettingsSyste
 
 router.get("/ldap/settings", requireAuth, requirePermission("serverSettingsSystem", "write"), async (_req, res, next) => {
   try {
-    const row = await prisma.setting.findUnique({ where: { key: "ldap" } });
-    const val: any = row?.value ?? {};
-    res.json({
-      enabled: val.enabled || false,
-      url: val.url || "",
-      bindDn: val.bindDn || "",
-      bindPassword: val.bindPassword ? "********" : "",
-      searchBase: val.searchBase || "",
-      searchFilter: val.searchFilter || "(sAMAccountName={{username}})",
-      tlsVerify: val.tlsVerify !== false,
-      displayNameAttr: val.displayNameAttr || "displayName",
-      emailAttr: val.emailAttr || "mail",
-    });
+    res.json(await getLdapSettingsMasked());
   } catch (err) { next(err); }
 });
 
 router.put("/ldap/settings", requireAuth, requirePermission("serverSettingsSystem", "write"), async (req, res, next) => {
   try {
-    const current = await prisma.setting.findUnique({ where: { key: "ldap" } });
-    const cur: any = current?.value ?? {};
-    const value = {
-      enabled: !!req.body.enabled,
-      url: (req.body.url || "").trim(),
-      bindDn: (req.body.bindDn || "").trim(),
-      bindPassword: req.body.bindPassword === "********" ? (cur.bindPassword || "") : (req.body.bindPassword || "").trim(),
-      searchBase: (req.body.searchBase || "").trim(),
-      searchFilter: (req.body.searchFilter || "(sAMAccountName={{username}})").trim(),
-      tlsVerify: req.body.tlsVerify !== false,
-      displayNameAttr: (req.body.displayNameAttr || "displayName").trim(),
-      emailAttr: (req.body.emailAttr || "mail").trim(),
-    };
-    await prisma.setting.upsert({
-      where: { key: "ldap" },
-      update: { value: value as any },
-      create: { key: "ldap", value: value as any },
-    });
-    res.json({ ...value, bindPassword: value.bindPassword ? "********" : "" });
+    await updateLdapSettings(req.body);
+    res.json(await getLdapSettingsMasked());
+  } catch (err) { next(err); }
+});
+
+// POST /api/v1/auth/ldap/test — service-account bind + base DN check (admin only)
+router.post("/ldap/test", requireAuth, requirePermission("serverSettingsSystem", "write"), async (_req, res, next) => {
+  try {
+    res.json(await testLdapConnection());
   } catch (err) { next(err); }
 });
 
