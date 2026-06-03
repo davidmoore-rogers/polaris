@@ -676,6 +676,7 @@ router.put("/dns", async (req, res, next) => {
       .filter(Boolean);
     const mode = (req.body.mode || "standard") as DnsSettings["mode"];
     const dohUrl = (req.body.dohUrl || "").trim();
+    const verifyTls = req.body.verifyTls === true;
 
     // Validate server entries — allow IPs, hostnames, and host:port
     if (mode !== "doh") {
@@ -692,7 +693,7 @@ router.put("/dns", async (req, res, next) => {
       if (!/^https:\/\/.+/.test(dohUrl)) throw new AppError(400, "DoH URL must start with https://");
     }
 
-    const saved = await updateDnsSettings({ servers, mode, dohUrl });
+    const saved = await updateDnsSettings({ servers, mode, dohUrl, verifyTls });
     res.json(saved);
   } catch (err) {
     next(err);
@@ -706,19 +707,21 @@ router.post("/dns/test", async (req, res, next) => {
       .filter(Boolean);
     const mode = (req.body.mode || "standard") as DnsSettings["mode"];
     const dohUrl = (req.body.dohUrl || "").trim();
+    const verifyTls = req.body.verifyTls === true;
     const testIp = req.body.testIp || "8.8.8.8";
 
     if (mode === "doh" && !dohUrl) {
       return res.json({ ok: false, message: "No DoH URL configured", results: [] });
     }
 
+    // Carry verifyTls so the test exercises the operator's chosen TLS behavior.
     const targets = mode === "doh"
-      ? [{ label: `DoH (${dohUrl})`, settings: { servers: [], mode, dohUrl } as DnsSettings }]
+      ? [{ label: `DoH (${dohUrl})`, settings: { servers: [], mode, dohUrl, verifyTls } as DnsSettings }]
       : mode === "dot"
-        ? servers.map((s) => ({ label: `DoT (${s}:853)`, settings: { servers: [s], mode, dohUrl: "" } as DnsSettings }))
+        ? servers.map((s) => ({ label: `DoT (${s}:853)`, settings: { servers: [s], mode, dohUrl: "", verifyTls } as DnsSettings }))
         : servers.length > 0
-          ? servers.map((s) => ({ label: s, settings: { servers: [s], mode: "standard" as const, dohUrl: "" } }))
-          : [{ label: "system DNS", settings: { servers: [], mode: "standard" as const, dohUrl: "" } }];
+          ? servers.map((s) => ({ label: s, settings: { servers: [s], mode: "standard" as const, dohUrl: "", verifyTls: false } }))
+          : [{ label: "system DNS", settings: { servers: [], mode: "standard" as const, dohUrl: "", verifyTls: false } }];
 
     const results = await Promise.all(targets.map(async (t) => {
       const resolver = await createResolver(t.settings);
