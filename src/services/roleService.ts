@@ -16,6 +16,7 @@
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { logEvent } from "../api/routes/events.js";
+import { normalizeTags } from "../utils/tagNormalize.js";
 import {
   bumpRoleVersion,
   normalizePermissions,
@@ -29,8 +30,10 @@ export interface RoleSummary {
   description: string | null;
   permissions: Record<string, AccessLevel>;
   // Region scope inherited by users holding this role. Empty = unrestricted.
-  // Effective regions for a session are union(role.regionTags, user.regionTags).
+  // Effective scope for a session is union(role, user, group-derived).
   regionTags: string[];
+  // Free-form ("other") tag scope — a second dimension parallel to regionTags.
+  otherTags: string[];
   // Badge color as `#rrggbb`, or null to fall back to the legacy name-keyed
   // badge classes in the frontend.
   color: string | null;
@@ -46,6 +49,7 @@ export interface CreateRoleInput {
   description?: string | null;
   permissions: Record<string, AccessLevel>;
   regionTags?: string[];
+  otherTags?: string[];
   color?: string | null;
 }
 
@@ -54,37 +58,15 @@ export interface UpdateRoleInput {
   description?: string | null;
   permissions?: Record<string, AccessLevel>;
   regionTags?: string[];
+  otherTags?: string[];
   color?: string | null;
 }
 
-// Region tag values are operator-typed strings. Validate them lightly —
-// trim, drop empties, dedupe case-insensitively, cap length. The actual
-// region registry lives in map_regions; we don't FK because admins can
-// pre-assign a region name before drawing the polygon.
-const REGION_TAG_MAX_LEN = 64;
-const REGION_TAGS_MAX_COUNT = 64;
-
-function normalizeRegionTags(input: unknown): string[] {
-  if (!Array.isArray(input)) return [];
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const raw of input) {
-    if (typeof raw !== "string") continue;
-    const trimmed = raw.trim();
-    if (!trimmed) continue;
-    if (trimmed.length > REGION_TAG_MAX_LEN) {
-      throw new AppError(400, `Region tag "${trimmed.slice(0, 32)}..." exceeds ${REGION_TAG_MAX_LEN} characters`);
-    }
-    const key = trimmed.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(trimmed);
-  }
-  if (out.length > REGION_TAGS_MAX_COUNT) {
-    throw new AppError(400, `At most ${REGION_TAGS_MAX_COUNT} region tags per role`);
-  }
-  return out;
-}
+// Tag values are operator-typed strings, normalized by the shared
+// utils/tagNormalize helper (trim, drop empties, dedupe case-insensitively,
+// cap length + count). Neither dimension is FK'd to a registry.
+const normalizeRegionTags = (input: unknown): string[] => normalizeTags(input, "region tag");
+const normalizeOtherTags = (input: unknown): string[] => normalizeTags(input, "tag");
 
 const NAME_RE = /^[A-Za-z0-9_-]{2,32}$/;
 const DESCRIPTION_MAX = 200;
@@ -134,6 +116,7 @@ function summarize(role: {
   description: string | null;
   permissions: unknown;
   regionTags: string[];
+  otherTags: string[];
   color: string | null;
   isBuiltIn: boolean;
   isProtected: boolean;
@@ -147,6 +130,7 @@ function summarize(role: {
     description: role.description,
     permissions: normalizePermissions(role.permissions),
     regionTags: [...role.regionTags],
+    otherTags: [...role.otherTags],
     color: role.color,
     isBuiltIn: role.isBuiltIn,
     isProtected: role.isProtected,
@@ -195,6 +179,7 @@ export async function createRole(input: CreateRoleInput, actor?: string): Promis
   const description = normalizeDescription(input.description);
   const permissions = normalizePermissions(input.permissions);
   const regionTags = normalizeRegionTags(input.regionTags);
+  const otherTags = normalizeOtherTags(input.otherTags);
   const color = normalizeColor(input.color);
 
   const created = await prisma.role.create({
@@ -203,6 +188,7 @@ export async function createRole(input: CreateRoleInput, actor?: string): Promis
       description,
       permissions,
       regionTags,
+      otherTags,
       color,
       isBuiltIn: false,
       isProtected: false,
@@ -218,7 +204,7 @@ export async function createRole(input: CreateRoleInput, actor?: string): Promis
     resourceName: created.name,
     actor,
     message: `Role "${created.name}" created`,
-    details: { permissions, description, regionTags, color },
+    details: { permissions, description, regionTags, otherTags, color },
   });
 
   return summarize(created);
@@ -236,6 +222,7 @@ export async function updateRole(id: string, input: UpdateRoleInput, actor?: str
     description?: string | null;
     permissions?: Record<string, AccessLevel>;
     regionTags?: string[];
+    otherTags?: string[];
     color?: string | null;
   } = {};
   const diff: Record<string, { from: unknown; to: unknown }> = {};
@@ -279,6 +266,15 @@ export async function updateRole(id: string, input: UpdateRoleInput, actor?: str
     if (!same) {
       data.regionTags = next;
       diff.regionTags = { from: prev, to: next };
+    }
+  }
+  if (input.otherTags !== undefined) {
+    const next = normalizeOtherTags(input.otherTags);
+    const prev = [...before.otherTags];
+    const same = next.length === prev.length && next.every((v, i) => v === prev[i]);
+    if (!same) {
+      data.otherTags = next;
+      diff.otherTags = { from: prev, to: next };
     }
   }
   if (input.color !== undefined) {

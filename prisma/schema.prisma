@@ -1515,12 +1515,26 @@ model User {
   role         Role      @relation(fields: [roleId], references: [id], onDelete: Restrict)
   // Per-user region scope. Empty = unrestricted (matches pre-cutover default
   // so existing accounts aren't suddenly locked out). Effective regions for
-  // a session are `union(role.regionTags, user.regionTags)`. Storage only —
-  // the consumer (asset / subnet / reservation list filters; map view) lives
-  // in a separate change.
+  // a session are `union(role.regionTags, user.regionTags, group-derived)` —
+  // see GroupMapping + GET /auth/me. Operator-set; group-derived tags are
+  // computed at read time and NEVER written here.
   regionTags   String[]  @default([]) @map("region_tags")
-  authProvider String    @default("local") @map("auth_provider") // "local" or "azure"
-  azureOid     String?   @unique @map("azure_oid") // Azure AD Object ID
+  // Per-user free-form ("other") tag scope — a second dimension parallel to
+  // regionTags, same union semantics. Operator-set; group-derived tags are
+  // never written here.
+  otherTags    String[]  @default([]) @map("other_tags")
+  authProvider String    @default("local") @map("auth_provider") // "local" | "azure" | "oidc" | "ldap"
+  azureOid     String?   @unique @map("azure_oid") // Azure AD Object ID (SAML)
+  // Stable per-provider external identifiers for SSO re-discovery. Mirror the
+  // azureOid pattern (narrow nullable-unique) rather than a generic externalId
+  // refactor. oidcSubject = OIDC `sub` claim; ldapUid = LDAP objectGUID (hex).
+  oidcSubject  String?   @unique @map("oidc_subject")
+  ldapUid      String?   @unique @map("ldap_uid")
+  // Last-seen normalized IdP group keys from the most recent SSO login. Lets
+  // GET /auth/me re-resolve group→tags dynamically without re-contacting the
+  // IdP, so a GroupMapping edit takes effect on the user's next page load.
+  // Empty for local accounts.
+  ssoGroups    String[]  @default([]) @map("sso_groups")
   displayName  String?   @map("display_name")
   email        String?
   lastLogin    DateTime? @map("last_login")
@@ -1622,17 +1636,54 @@ model Role {
   permissions Json     @default("{}")
   // Region scope inherited by every user holding this role. Empty =
   // unrestricted. Effective regions for a session are
-  // `union(role.regionTags, user.regionTags)`. Storage only; consumers
-  // live in a separate change.
+  // `union(role.regionTags, user.regionTags, group-derived)`.
   regionTags  String[] @default([]) @map("region_tags")
+  // Free-form ("other") tag scope inherited by every user holding this role —
+  // a second dimension parallel to regionTags, same union semantics.
+  otherTags   String[] @default([]) @map("other_tags")
   isBuiltIn   Boolean  @default(false) @map("is_built_in")
   isProtected Boolean  @default(false) @map("is_protected")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  users User[]
+  users         User[]
+  groupMappings GroupMapping[]
 
   @@map("roles")
+}
+
+// GroupMapping: maps an IdP-provided user group to a Polaris role plus region
+// and free-form ("other") tags. Populated at SSO/LDAP login: the user's group
+// claims are matched against these rows (scoped by `provider`), the matched
+// rows' tags union into the user's effective scope, and the HIGHEST-PRIVILEGE
+// matched role wins (see rankRole in permissions.ts). A row with a null roleId
+// is a tags-only mapping (contributes scope, no role). See groupMappingService.
+//
+// `groupKey` is the normalized match key: lowercased DN for LDAP, trimmed
+// claim value (case-sensitive) for OIDC/SAML. `groupLabel` preserves the
+// as-entered form for the admin UI. CRUD is gated on users=fullwrite.
+//
+// SECURITY: a mapping targeting an admin-equivalent role makes IdP group
+// membership a path to Polaris admin (outside the lastAdminEquivalent guard).
+// The service emits a warning-level Event when this happens.
+model GroupMapping {
+  id          String   @id @default(uuid())
+  provider    String // "oidc" | "ldap" | "saml"
+  groupKey    String   @map("group_key") // normalized match key
+  groupLabel  String?  @map("group_label") // as-entered display form
+  roleId      String?  @map("role_id") // nullable → tags-only mapping
+  role        Role?    @relation(fields: [roleId], references: [id], onDelete: SetNull)
+  regionTags  String[] @default([]) @map("region_tags")
+  otherTags   String[] @default([]) @map("other_tags")
+  enabled     Boolean  @default(true)
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([provider, groupKey])
+  @@index([provider, enabled])
+  @@index([roleId])
+  @@map("group_mappings")
 }
 
 model Setting {

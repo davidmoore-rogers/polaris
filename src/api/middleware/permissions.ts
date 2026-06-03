@@ -111,6 +111,50 @@ export function normalizePermissions(input: unknown): Record<string, AccessLevel
   return out;
 }
 
+// ─── Privilege ranking (group-mapping "highest privilege wins") ─────────
+//
+// When a user belongs to multiple mapped IdP groups, the highest-privilege
+// matched role is applied. "Privilege" is ranked as:
+//   1. Admin-equivalent (users=fullwrite AND roles=fullwrite) outranks any
+//      non-admin role — reuses the same predicate as roleService's
+//      lastAdminEquivalent guard so the two notions can't drift.
+//   2. Otherwise the weighted sum of every function key's access level
+//      (none0 / read1 / write2 / fullwrite3).
+// Ties (genuinely equal-privilege roles) break deterministically by role id.
+
+export function isAdminEquivalentPermissions(perms: Record<string, AccessLevel>): boolean {
+  return perms.users === "fullwrite" && perms.roles === "fullwrite";
+}
+
+/** Numeric privilege rank for a permissions matrix. Higher = more privilege. */
+export function rankRole(permissions: unknown): number {
+  const perms = normalizePermissions(permissions);
+  if (isAdminEquivalentPermissions(perms)) return Number.MAX_SAFE_INTEGER;
+  let sum = 0;
+  for (const def of FUNCTION_KEYS) {
+    sum += ACCESS_RANK[perms[def.key] ?? "none"];
+  }
+  return sum;
+}
+
+/**
+ * Pick the highest-privilege role id from a candidate list. Ties break by the
+ * lexicographically-smallest id so the result is deterministic regardless of
+ * input order. Returns null for an empty list.
+ */
+export function pickHighestPrivilegeRoleId(
+  roles: readonly { id: string; permissions: unknown }[],
+): string | null {
+  let best: { id: string; rank: number } | null = null;
+  for (const r of roles) {
+    const rank = rankRole(r.permissions);
+    if (best === null || rank > best.rank || (rank === best.rank && r.id < best.id)) {
+      best = { id: r.id, rank };
+    }
+  }
+  return best ? best.id : null;
+}
+
 // ─── Session snapshot shape ────────────────────────────────────────────
 
 export interface SessionRoleSnapshot {

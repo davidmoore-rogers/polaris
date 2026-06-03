@@ -681,7 +681,7 @@ function _roleByName(name) { return ROLES.find((r) => r.name === name) || ROLES[
 function _roleSummary(r) {
   return {
     id: r.id, name: r.name, description: r.description,
-    permissions: r.permissions, regionTags: r.regionTags || [],
+    permissions: r.permissions, regionTags: r.regionTags || [], otherTags: r.otherTags || [],
     isBuiltIn: r.isBuiltIn, isProtected: r.isProtected,
     userCount: USERS.filter((u) => u.roleId === r.id).length,
     createdAt: r.createdAt, updatedAt: r.updatedAt,
@@ -695,6 +695,13 @@ const USERS = [
   { id: "u4", username: "dmoore", roleId: _roleByName("admin").id, regionTags: [], authProvider: "local", createdAt: "2026-03-01T08:00:00.000Z", updatedAt: "2026-03-01T08:00:00.000Z", lastLogin: "2026-04-17T08:15:00.000Z" },
   { id: "u5", username: "rjones", roleId: _roleByName("readonly").id, regionTags: [], authProvider: "azure", displayName: "Robert Jones", email: "rjones@rogersgroup.com", createdAt: "2026-04-10T10:00:00.000Z", updatedAt: "2026-04-10T10:00:00.000Z", lastLogin: "2026-04-16T09:00:00.000Z" },
   { id: "u6", username: "mwilson", roleId: _roleByName("user").id, regionTags: [], authProvider: "azure", displayName: "Maria Wilson", email: "mwilson@rogersgroup.com", createdAt: "2026-04-12T09:00:00.000Z", updatedAt: "2026-04-12T09:00:00.000Z", lastLogin: "2026-04-17T08:00:00.000Z" },
+];
+
+// IdP group → role + tags mappings (OIDC / LDAP / SAML). Applied at SSO/LDAP
+// login: highest-privilege matched role wins, region+other tags union.
+const GROUP_MAPPINGS = [
+  { id: "gm1", provider: "oidc", groupKey: "Network-Admins", groupLabel: "Network-Admins", roleId: _roleByName("networkadmin").id, roleName: "networkadmin", regionTags: ["east"], otherTags: ["infra"], enabled: true, description: "Engineering network team", createdAt: "2026-05-01T08:00:00.000Z", updatedAt: "2026-05-01T08:00:00.000Z" },
+  { id: "gm2", provider: "ldap", groupKey: "cn=helpdesk,ou=groups,dc=corp,dc=local", groupLabel: "CN=Helpdesk,OU=Groups,DC=corp,DC=local", roleId: _roleByName("assetsadmin").id, roleName: "assetsadmin", regionTags: [], otherTags: ["tier1"], enabled: true, description: null, createdAt: "2026-05-02T08:00:00.000Z", updatedAt: "2026-05-02T08:00:00.000Z" },
 ];
 
 function _userWithRole(u) {
@@ -2995,6 +3002,9 @@ async function routeAPI(method, path, params, body, res, req) {
     const userRegions = sessionUser.regionTags || [];
     const roleRegions = role.regionTags || [];
     const effective = Array.from(new Set([...roleRegions, ...userRegions])).sort();
+    const userOther = sessionUser.otherTags || [];
+    const roleOther = role.otherTags || [];
+    const effectiveOther = Array.from(new Set([...roleOther, ...userOther])).sort();
     return json(res, {
       authenticated: true,
       username: sessionUser.username,
@@ -3003,7 +3013,8 @@ async function routeAPI(method, path, params, body, res, req) {
         id: role.id, name: role.name, isProtected: role.isProtected,
         permissions: role.permissions, updatedAt: role.updatedAt,
       },
-      regionTags: { user: userRegions, role: roleRegions, effective: effective },
+      regionTags: { user: userRegions, role: roleRegions, group: [], effective: effective },
+      otherTags: { user: userOther, role: roleOther, group: [], effective: effectiveOther },
     });
   }
 
@@ -3547,12 +3558,14 @@ async function routeAPI(method, path, params, body, res, req) {
     u.updatedAt = new Date().toISOString();
     return json(res, { ok: true, user: _userWithRole(u) });
   }
-  // PUT /users/:id/regions — Body: { regionTags: string[] }
+  // PUT /users/:id/regions — Body: { regionTags?: string[], otherTags?: string[] }
   if (path.match(/^\/api\/v1\/users\/[\w-]+\/regions$/) && method === "PUT") {
     const uid = path.split("/").slice(-2, -1)[0];
     const u = USERS.find((x) => x.id === uid);
     if (!u) return json(res, { error: "User not found" }, 404);
-    u.regionTags = Array.isArray(body.regionTags) ? body.regionTags.filter((t) => t && String(t).trim()).map((t) => String(t).trim()) : [];
+    const clean = (a) => a.filter((t) => t && String(t).trim()).map((t) => String(t).trim());
+    if (Array.isArray(body.regionTags)) u.regionTags = clean(body.regionTags);
+    if (Array.isArray(body.otherTags)) u.otherTags = clean(body.otherTags);
     u.updatedAt = new Date().toISOString();
     return json(res, { ok: true, user: _userWithRole(u) });
   }
@@ -3576,6 +3589,7 @@ async function routeAPI(method, path, params, body, res, req) {
       name: body.name, description: body.description || null,
       permissions: _fillPerms(body.permissions || {}),
       regionTags: Array.isArray(body.regionTags) ? body.regionTags : [],
+      otherTags: Array.isArray(body.otherTags) ? body.otherTags : [],
       isBuiltIn: false, isProtected: false,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
@@ -3591,6 +3605,7 @@ async function routeAPI(method, path, params, body, res, req) {
     if (body.description !== undefined) r.description = body.description;
     if (body.permissions !== undefined) r.permissions = _fillPerms(body.permissions);
     if (body.regionTags !== undefined) r.regionTags = Array.isArray(body.regionTags) ? body.regionTags : [];
+    if (body.otherTags !== undefined) r.otherTags = Array.isArray(body.otherTags) ? body.otherTags : [];
     r.updatedAt = new Date().toISOString();
     return json(res, _roleSummary(r));
   }
@@ -3603,12 +3618,60 @@ async function routeAPI(method, path, params, body, res, req) {
     ROLES.splice(idx, 1);
     res.writeHead(204); return res.end();
   }
+
+  // Group Mappings (IdP group → role + tags)
+  if (path === "/api/v1/group-mappings" && method === "GET") {
+    const prov = (params.get("provider") || "").trim();
+    return json(res, prov ? GROUP_MAPPINGS.filter((m) => m.provider === prov) : GROUP_MAPPINGS);
+  }
+  if (path.match(/^\/api\/v1\/group-mappings\/[\w-]+$/) && method === "GET") {
+    const m = GROUP_MAPPINGS.find((x) => x.id === path.split("/").pop());
+    if (!m) return json(res, { error: "Group mapping not found" }, 404);
+    return json(res, m);
+  }
+  if (path === "/api/v1/group-mappings" && method === "POST") {
+    const role = body.roleId ? ROLES.find((r) => r.id === body.roleId) : null;
+    const label = String(body.groupKey || "").trim();
+    if (!label) return json(res, { error: "Group identifier is required" }, 400);
+    const m = {
+      id: "gm-" + crypto.randomUUID().slice(0, 8),
+      provider: body.provider, groupKey: body.provider === "ldap" ? label.toLowerCase() : label, groupLabel: label,
+      roleId: body.roleId || null, roleName: role ? role.name : null,
+      regionTags: Array.isArray(body.regionTags) ? body.regionTags : [],
+      otherTags: Array.isArray(body.otherTags) ? body.otherTags : [],
+      enabled: body.enabled !== false, description: body.description || null,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+    GROUP_MAPPINGS.push(m);
+    return json(res, m, 201);
+  }
+  if (path.match(/^\/api\/v1\/group-mappings\/[\w-]+$/) && method === "PUT") {
+    const m = GROUP_MAPPINGS.find((x) => x.id === path.split("/").pop());
+    if (!m) return json(res, { error: "Group mapping not found" }, 404);
+    if (body.groupKey !== undefined) { const l = String(body.groupKey).trim(); m.groupLabel = l; m.groupKey = m.provider === "ldap" ? l.toLowerCase() : l; }
+    if (body.roleId !== undefined) { m.roleId = body.roleId || null; const r = m.roleId ? ROLES.find((x) => x.id === m.roleId) : null; m.roleName = r ? r.name : null; }
+    if (body.regionTags !== undefined) m.regionTags = Array.isArray(body.regionTags) ? body.regionTags : [];
+    if (body.otherTags !== undefined) m.otherTags = Array.isArray(body.otherTags) ? body.otherTags : [];
+    if (body.enabled !== undefined) m.enabled = !!body.enabled;
+    if (body.description !== undefined) m.description = body.description || null;
+    m.updatedAt = new Date().toISOString();
+    return json(res, m);
+  }
+  if (path.match(/^\/api\/v1\/group-mappings\/[\w-]+$/) && method === "DELETE") {
+    const idx = GROUP_MAPPINGS.findIndex((x) => x.id === path.split("/").pop());
+    if (idx === -1) return json(res, { error: "Group mapping not found" }, 404);
+    GROUP_MAPPINGS.splice(idx, 1);
+    return json(res, { ok: true });
+  }
+  if (path === "/api/v1/auth/oidc/config" && method === "GET") {
+    return json(res, { enabled: false });
+  }
   if (path.match(/\/password$/) && method === "PUT") {
     // Find the user and check if Azure (block password reset for Azure users)
     const pwUserId = path.split("/").slice(-2, -1)[0];
     const pwUser = USERS.find((u) => u.id === pwUserId);
-    if (pwUser && pwUser.authProvider === "azure") {
-      return json(res, { error: "Cannot reset password for Azure SSO users" }, 400);
+    if (pwUser && pwUser.authProvider !== "local") {
+      return json(res, { error: "Cannot reset password for SSO/LDAP accounts" }, 400);
     }
     return json(res, { ok: true });
   }

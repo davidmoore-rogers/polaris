@@ -68,11 +68,43 @@
           </table>
         </div>
       </section>
+
+      <!-- IdP group → role + tags mappings — admins only. Maps OIDC / LDAP /
+           SAML group claims to a Polaris role plus region + other tags.
+           Highest-privilege role wins when a user is in multiple groups. -->
+      <section id="group-mappings-section" style="margin-top:2.5rem;display:none">
+        <div class="page-header" style="margin-bottom:0.5rem">
+          <h2 style="font-size:1.15rem;margin:0">Group Mappings</h2>
+          <div class="page-header-actions">
+            <button class="btn btn-primary" id="btn-add-group-mapping">+ Add Mapping</button>
+          </div>
+        </div>
+        <p class="hint" style="margin:0 0 1rem">Map an identity-provider group to a role and tags. Applied at OIDC / LDAP login. A user in several mapped groups gets the highest-privilege role; region and other tags from all matched groups are combined.</p>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:80px" data-col-id="provider">Provider</th>
+                <th data-col-id="group">Group</th>
+                <th style="width:140px" data-col-id="role">Role</th>
+                <th data-col-id="tags">Tags</th>
+                <th style="width:90px" data-col-id="enabled">Enabled</th>
+                <th style="width:170px" data-col-id="actions" data-col-required="true">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="group-mappings-tbody">
+              <tr><td colspan="6" class="empty-state">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </main>
   </div>
 
   <!-- Permissions slide-over (built on first open) -->
   <div id="role-slideover-mount"></div>
+  <!-- Group mapping slide-over -->
+  <div id="group-mapping-slideover-mount"></div>
 
   <script src="/js/table-sf.js"></script>
   <script src="/js/api.js"></script>

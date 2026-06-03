@@ -976,6 +976,16 @@ Without it the agent receives `https://localhost:<PORT>` which only works for te
 
 For reverse-proxy / TLS-termination-upstream topologies (nginx, Caddy, ALB), `POLARIS_PUBLIC_URL` must be the **proxy's** public URL — the agent's pinned cert is the proxy's cert, not the upstream's.
 
+`POLARIS_PUBLIC_URL` is **also required for OIDC SSO** — Polaris derives the OIDC redirect URI from it (`${POLARIS_PUBLIC_URL}/api/v1/auth/oidc/callback`). OIDC login refuses with a clear error if it's unset.
+
+## Authentication providers (OIDC / LDAP / SAML)
+
+Beyond local accounts, Polaris authenticates against Azure SAML, **OIDC** (OpenID Connect Authorization-Code + PKCE), or **LDAP / Active Directory** (bind). Configure under **Users → Authentication** (admin only); each tab has a **Test** button.
+
+- **OIDC:** fill in the Discovery URL, Client ID/Secret, and scopes. Copy the **Redirect URI** shown on the tab and register it in your IdP app registration. **Azure AD note:** by default Azure emits group **object IDs (GUIDs)** in the `groups` claim, not names — map those object IDs in Group Mappings, or configure Azure to emit group names. Azure also drops the claim above ~200 groups (the user then resolves to `readonly` until a smaller group set or a groups-assignment filter is configured).
+- **LDAP/AD:** set the server URL (`ldaps://…`), bind DN + password, search base/filter, and (for group mapping) the User ID Attribute (`objectGUID` on AD) + Group Attribute (`memberOf`). LDAP users sign in through the normal username/password form.
+- **Group → role + tags:** under **Users → Group Mappings**, map an IdP group to a role plus region/other tags. A user in several mapped groups gets the **highest-privilege** role; tags from all matched groups combine. **A mapping to an admin-equivalent role makes IdP group membership a path to Polaris admin** — restrict who can edit those groups in your directory accordingly.
+
 ### Install on a remote host
 
 From the Polaris UI:

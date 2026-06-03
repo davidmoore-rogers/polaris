@@ -24,6 +24,7 @@ import {
   isAdminEquivalentRole,
 } from "../../services/roleService.js";
 import { requirePermission } from "../middleware/permissions.js";
+import { normalizeTags } from "../../utils/tagNormalize.js";
 import { logEvent } from "./events.js";
 
 const router = Router();
@@ -42,6 +43,7 @@ const CreateUserSchema = z.object({
   password: passwordSchema,
   roleId:   z.string().uuid("roleId must be a UUID"),
   regionTags: RegionTagsSchema.optional(),
+  otherTags: RegionTagsSchema.optional(),
 });
 
 const ResetPasswordSchema = z.object({
@@ -53,7 +55,8 @@ const UpdateRoleSchema = z.object({
 });
 
 const UpdateRegionsSchema = z.object({
-  regionTags: RegionTagsSchema,
+  regionTags: RegionTagsSchema.optional(),
+  otherTags: RegionTagsSchema.optional(),
 });
 
 const USER_LIST_SELECT = {
@@ -68,6 +71,7 @@ const USER_LIST_SELECT = {
   totpEnabledAt: true,
   needsRoleReview: true,
   regionTags: true,
+  otherTags: true,
   role: { select: { id: true, name: true, color: true, isProtected: true, isBuiltIn: true } },
 } as const;
 
@@ -148,7 +152,7 @@ async function getOnlineUserIds(): Promise<Set<string>> {
 // POST /api/v1/users
 router.post("/", requirePermission("users", "write"), async (req, res, next) => {
   try {
-    const { username, password, roleId, regionTags } = CreateUserSchema.parse(req.body);
+    const { username, password, roleId, regionTags, otherTags } = CreateUserSchema.parse(req.body);
 
     const [existing, role] = await Promise.all([
       prisma.user.findUnique({ where: { username } }),
@@ -164,7 +168,8 @@ router.post("/", requirePermission("users", "write"), async (req, res, next) => 
         passwordHash,
         roleId: role.id,
         authProvider: "local",
-        regionTags: regionTags ?? [],
+        regionTags: normalizeTags(regionTags ?? [], "region tag"),
+        otherTags: normalizeTags(otherTags ?? [], "tag"),
       },
       select: USER_LIST_SELECT,
     });
@@ -189,7 +194,7 @@ router.put("/:id/password", requirePermission("users", "write"), async (req, res
     const { password } = ResetPasswordSchema.parse(req.body);
     const user = await prisma.user.findUnique({ where: { id } });
     if (!user) throw new AppError(404, "User not found");
-    if (user.authProvider === "azure") throw new AppError(400, "Cannot reset password for Azure SSO users");
+    if (user.authProvider !== "local") throw new AppError(400, "Cannot reset password for SSO/LDAP accounts — credentials are managed by the identity provider.");
 
     const passwordHash = await hashPassword(password);
     await prisma.user.update({
@@ -249,38 +254,36 @@ router.put("/:id/role", requirePermission("users", "write"), async (req, res, ne
   }
 });
 
-// PUT /api/v1/users/:id/regions — set the user's region scope (additive on
-// top of their role's regionTags). Empty array clears.
+// PUT /api/v1/users/:id/regions — set the user's region + other-tag scope
+// (additive on top of the role's tags and any group-derived tags). Each field
+// is optional; an empty array clears that dimension. These are operator-set
+// tags only — group-derived tags are computed at /auth/me, never persisted.
 router.put("/:id/regions", requirePermission("users", "write"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
-    const { regionTags } = UpdateRegionsSchema.parse(req.body);
-    // Normalize: trim, drop empties, dedupe case-insensitive.
-    const seen = new Set<string>();
-    const cleaned: string[] = [];
-    for (const raw of regionTags) {
-      const t = String(raw).trim();
-      if (!t) continue;
-      const key = t.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      cleaned.push(t);
-    }
-    const before = await prisma.user.findUnique({ where: { id }, select: { id: true, username: true, regionTags: true } });
+    const { regionTags, otherTags } = UpdateRegionsSchema.parse(req.body);
+    const before = await prisma.user.findUnique({ where: { id }, select: { id: true, username: true, regionTags: true, otherTags: true } });
     if (!before) throw new AppError(404, "User not found");
-    const updated = await prisma.user.update({
-      where: { id },
-      data: { regionTags: cleaned },
-      select: USER_LIST_SELECT,
-    });
+
+    const data: { regionTags?: string[]; otherTags?: string[] } = {};
+    const details: Record<string, unknown> = {};
+    if (regionTags !== undefined) {
+      data.regionTags = normalizeTags(regionTags, "region tag");
+      details.regions = { from: before.regionTags, to: data.regionTags };
+    }
+    if (otherTags !== undefined) {
+      data.otherTags = normalizeTags(otherTags, "tag");
+      details.other = { from: before.otherTags, to: data.otherTags };
+    }
+    const updated = await prisma.user.update({ where: { id }, data, select: USER_LIST_SELECT });
     logEvent({
       action: "user.regions_updated",
       resourceType: "user",
       resourceId: updated.id,
       resourceName: updated.username,
       actor: req.session?.username,
-      message: `Region tags for "${updated.username}" set to ${cleaned.length === 0 ? "(unrestricted)" : cleaned.join(", ")}`,
-      details: { from: before.regionTags, to: cleaned },
+      message: `Tag scope for "${updated.username}" updated`,
+      details,
     });
     res.json({ ok: true, user: updated });
   } catch (err) {

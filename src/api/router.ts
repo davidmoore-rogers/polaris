@@ -31,6 +31,7 @@ import dashboardRouter from "./routes/dashboard.js";
 import userDashboardRouter from "./routes/userDashboard.js";
 import { agentsEnrollRouter, agentsRouter, agentsBinaryRouter } from "./routes/agents.js";
 import rolesRouter from "./routes/roles.js";
+import groupMappingsRouter from "./routes/groupMappings.js";
 import { requireAuth, attachApiToken } from "./middleware/auth.js";
 import { requirePermission } from "./middleware/permissions.js";
 
@@ -76,6 +77,7 @@ router.use("/dashboard", dashboardRouter);
 router.use("/me/dashboard", userDashboardRouter);
 router.use("/users", requirePermission("users", "read"), usersRouter);
 router.use("/roles", rolesRouter);
+router.use("/group-mappings", requirePermission("users", "fullwrite"), groupMappingsRouter);
 router.use("/integrations", requirePermission("integrations", "read"), integrationsRouter);
 // asset-types is mounted BEFORE /assets so Express's first-match routing
 // picks the registry endpoint instead of treating "types" as an asset id.

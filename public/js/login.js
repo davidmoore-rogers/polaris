@@ -57,6 +57,7 @@
       btn.innerHTML = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="width:18px;height:18px"><path fill="#007DC1" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5z"/></svg> Sign in with Okta';
     }
 
+    btn.style.display = "";
     document.getElementById("sso-section").style.display = "block";
   } catch (_) {}
 })();
@@ -64,6 +65,21 @@
 // SSO button click
 document.getElementById("btn-sso").addEventListener("click", function () {
   window.location.href = "/api/v1/auth/azure/login";
+});
+
+// Check OIDC config and show its button if enabled
+(async function () {
+  try {
+    var res = await fetch("/api/v1/auth/oidc/config");
+    if (!res.ok) return;
+    var cfg = await res.json();
+    if (!cfg.enabled) return;
+    document.getElementById("btn-oidc").style.display = "";
+    document.getElementById("sso-section").style.display = "block";
+  } catch (_) {}
+})();
+document.getElementById("btn-oidc").addEventListener("click", function () {
+  window.location.href = "/api/v1/auth/oidc/login";
 });
 
 // Show "View Setup Wizard" in demo mode

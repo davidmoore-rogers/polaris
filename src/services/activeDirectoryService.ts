@@ -10,8 +10,9 @@
  * to a single asset regardless of which integration found them first.
  */
 
-import { Client, type Entry, type SearchOptions } from "ldapts";
+import { type Entry, type SearchOptions } from "ldapts";
 import { AppError } from "../utils/errors.js";
+import { withBoundLdapClient, decodeObjectGuid, formatLdapError } from "./ldapClient.js";
 
 export interface ActiveDirectoryConfig {
   host: string;
@@ -52,42 +53,8 @@ export type AdDiscoveryProgressCallback = (
   message: string,
 ) => void;
 
-// ─── Client construction ────────────────────────────────────────────────────
-
-function buildUrl(config: ActiveDirectoryConfig): string {
-  const useLdaps = config.useLdaps !== false;
-  const defaultPort = useLdaps ? 636 : 389;
-  const port = config.port && config.port > 0 ? config.port : defaultPort;
-  const scheme = useLdaps ? "ldaps" : "ldap";
-  return `${scheme}://${config.host}:${port}`;
-}
-
-function newClient(config: ActiveDirectoryConfig): Client {
-  const useLdaps = config.useLdaps !== false;
-  return new Client({
-    url: buildUrl(config),
-    timeout: 30_000,
-    connectTimeout: 15_000,
-    tlsOptions: useLdaps ? { rejectUnauthorized: !!config.verifyTls } : undefined,
-  });
-}
-
-async function withBoundClient<T>(
-  config: ActiveDirectoryConfig,
-  signal: AbortSignal | undefined,
-  fn: (client: Client) => Promise<T>,
-): Promise<T> {
-  const client = newClient(config);
-  const onAbort = () => { void client.unbind().catch(() => {}); };
-  signal?.addEventListener("abort", onAbort, { once: true });
-  try {
-    await client.bind(config.bindDn, config.bindPassword);
-    return await fn(client);
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
-    try { await client.unbind(); } catch { /* ignore */ }
-  }
-}
+// LDAP connection + bind lifecycle lives in ./ldapClient (shared with the
+// LDAP user-auth path). withBoundLdapClient accepts our config structurally.
 
 // ─── Connection test ────────────────────────────────────────────────────────
 
@@ -101,7 +68,7 @@ export async function testConnection(config: ActiveDirectoryConfig): Promise<{
   if (!config.baseDn)       return { ok: false, message: "Base DN is required" };
 
   try {
-    const count = await withBoundClient(config, undefined, async (client) => {
+    const count = await withBoundLdapClient(config, undefined, async (client) => {
       const { searchEntries } = await client.search(config.baseDn, {
         scope: config.searchScope || "sub",
         filter: "(&(objectCategory=computer)(objectClass=computer))",
@@ -115,21 +82,6 @@ export async function testConnection(config: ActiveDirectoryConfig): Promise<{
   } catch (err: any) {
     return { ok: false, message: formatLdapError(err) };
   }
-}
-
-function formatLdapError(err: any): string {
-  const name = err?.name || "";
-  const msg = err?.message || "Unknown error";
-  if (name === "InvalidCredentialsError") return "Invalid bind DN or password";
-  if (name === "NoSuchObjectError")       return "Base DN not found";
-  if (name === "InsufficientAccessError") return "Bind account has insufficient access to the base DN";
-  if (err?.code === "ENOTFOUND")          return "Host not found — check DNS/hostname";
-  if (err?.code === "ECONNREFUSED")       return "Connection refused — check port and firewall";
-  if (err?.code === "ETIMEDOUT")          return "Connection timed out";
-  if (err?.code === "DEPTH_ZERO_SELF_SIGNED_CERT" || err?.code === "SELF_SIGNED_CERT_IN_CHAIN" || err?.code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE") {
-    return "TLS certificate verification failed — uncheck \"Verify TLS\" or install the DC's CA certificate";
-  }
-  return msg.split(/\r?\n/)[0];
 }
 
 // ─── Manual query (UI tool) ─────────────────────────────────────────────────
@@ -150,7 +102,7 @@ export async function proxyQuery(
   const size = Math.min(Math.max(body.sizeLimit || 50, 1), 500);
   const attrs = body.attributes && body.attributes.length > 0 ? body.attributes : undefined;
 
-  return withBoundClient(config, undefined, async (client) => {
+  return withBoundLdapClient(config, undefined, async (client) => {
     const { searchEntries } = await client.search(baseDn, {
       scope: body.scope || "sub",
       filter,
@@ -215,7 +167,7 @@ export async function discoverDevices(
   const devices: DiscoveredAdDevice[] = [];
 
   try {
-    await withBoundClient(config, signal, async (client) => {
+    await withBoundLdapClient(config, signal, async (client) => {
       const options: SearchOptions = {
         scope: config.searchScope || "sub",
         filter: "(&(objectCategory=computer)(objectClass=computer))",
@@ -310,14 +262,7 @@ function readString(v: unknown): string {
   return String(v);
 }
 
-// Microsoft stores GUIDs in a mixed-endian layout. For identity-only use it's
-// fine to treat the 16 bytes as an opaque lowercase hex string — we never
-// convert back — but keep the canonical display-form conversion if we ever
-// want to show it to the user.
-function decodeObjectGuid(buf: Buffer): string {
-  if (buf.length !== 16) return "";
-  return buf.toString("hex").toLowerCase();
-}
+// decodeObjectGuid lives in ./ldapClient (shared with LDAP user-auth).
 
 // objectSid is a binary SID structure. Decode to the standard S-1-<auth>-<sub>...
 // string form.
