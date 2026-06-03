@@ -57,7 +57,14 @@ export type IfType = (typeof IF_TYPES)[number];
 
 export interface ByNamesBlock    { names: string[] }
 export interface ByPatternsBlock { patterns: string[]; regex: boolean; onlyUp: boolean }
-export interface ByTypesBlock    { types: IfType[]; onlyUp: boolean }
+/**
+ * `includeDownTunnels` is a tunnel-only exception to `onlyUp`: when both are
+ * set, fully-`down` IPsec tunnels still pin even though "only currently up" is
+ * on. It has no effect on non-tunnel types and is moot when `onlyUp` is false
+ * (down interfaces pin anyway). A down IPsec tunnel is often exactly what an
+ * operator wants to watch, so the picker surfaces this next to the tunnel row.
+ */
+export interface ByTypesBlock    { types: IfType[]; onlyUp: boolean; includeDownTunnels?: boolean }
 export interface ByLldpBlock     { neighborTypes: LldpNeighborType[] }
 
 /**
@@ -182,10 +189,15 @@ export function resolvePinnedInterfaces(
   // By type — ifType ∈ chosen set.
   if (selection.byTypes && selection.byTypes.types.length > 0) {
     const want = new Set(selection.byTypes.types);
+    const includeDownTunnels = selection.byTypes.includeDownTunnels === true;
     for (const i of interfaces) {
       if (i.ifType === null) continue;
       if (!want.has(i.ifType as IfType)) continue;
-      if (selection.byTypes.onlyUp && i.operStatus !== "up") continue;
+      if (selection.byTypes.onlyUp && i.operStatus !== "up") {
+        // onlyUp normally drops non-up interfaces. The one exception:
+        // fully-down IPsec tunnels when the operator opted into them.
+        if (!(includeDownTunnels && i.ifType === "tunnel")) continue;
+      }
       picked.add(i.ifName);
     }
   }

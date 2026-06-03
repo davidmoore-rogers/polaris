@@ -184,6 +184,53 @@ describe("resolvePinnedInterfaces — byTypes", () => {
   });
 });
 
+describe("resolvePinnedInterfaces — byTypes includeDownTunnels", () => {
+  const ifs = [
+    iface("wan1", "physical", true),
+    iface("wan2", "physical", false),     // down physical
+    iface("VPN_UP", "tunnel", true),
+    iface("VPN_DOWN", "tunnel", false),   // down tunnel
+  ];
+
+  it("includes down tunnels when onlyUp=true and includeDownTunnels=true", () => {
+    const out = resolvePinnedInterfaces(
+      { byTypes: { types: ["tunnel"], onlyUp: true, includeDownTunnels: true } },
+      ifs,
+    );
+    expect(out.sort()).toEqual(["VPN_DOWN", "VPN_UP"]);
+  });
+
+  it("still drops down tunnels when includeDownTunnels=false (default)", () => {
+    const out = resolvePinnedInterfaces(
+      { byTypes: { types: ["tunnel"], onlyUp: true } },
+      ifs,
+    );
+    expect(out).toEqual(["VPN_UP"]);
+  });
+
+  it("does NOT rescue down non-tunnel interfaces", () => {
+    // includeDownTunnels is tunnel-scoped: down physical wan2 stays filtered.
+    const out = resolvePinnedInterfaces(
+      { byTypes: { types: ["physical", "tunnel"], onlyUp: true, includeDownTunnels: true } },
+      ifs,
+    );
+    expect(out.sort()).toEqual(["VPN_DOWN", "VPN_UP", "wan1"]);
+  });
+
+  it("is a no-op when onlyUp=false (down tunnels already pin)", () => {
+    const withFlag = resolvePinnedInterfaces(
+      { byTypes: { types: ["tunnel"], onlyUp: false, includeDownTunnels: true } },
+      ifs,
+    );
+    const withoutFlag = resolvePinnedInterfaces(
+      { byTypes: { types: ["tunnel"], onlyUp: false } },
+      ifs,
+    );
+    expect(withFlag.sort()).toEqual(["VPN_DOWN", "VPN_UP"]);
+    expect(withFlag.sort()).toEqual(withoutFlag.sort());
+  });
+});
+
 describe("resolvePinnedInterfaces — byLldp", () => {
   const ifs = [
     iface("port1"),
