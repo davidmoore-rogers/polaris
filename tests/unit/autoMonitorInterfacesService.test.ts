@@ -12,9 +12,11 @@ import {
   compilePattern,
   resolvePinnedInterfaces,
   coerceLegacySelection,
+  mergeTunnelsIntoInterfaces,
   type ResolverInterface,
   type LldpByIfName,
   type AutoMonitorSelection,
+  type TunnelObservation,
 } from "../../src/services/autoMonitorInterfacesService.js";
 
 function iface(name: string, type: string | null = "physical", up = true): ResolverInterface {
@@ -294,5 +296,83 @@ describe("coerceLegacySelection", () => {
     expect(coerceLegacySelection({ mode: "type", types: ["physical"] })).toEqual({
       byTypes: { types: ["physical"], onlyUp: true },
     });
+  });
+});
+
+describe("mergeTunnelsIntoInterfaces", () => {
+  function tn(name: string, status: string | null = "up"): TunnelObservation {
+    return { tunnelName: name, status };
+  }
+
+  it("appends tunnels as synthetic tunnel-type interfaces", () => {
+    const ifaces = new Map<string, ResolverInterface[]>([
+      ["a1", [iface("wan1")]],
+    ]);
+    const tunnels = new Map<string, TunnelObservation[]>([
+      ["a1", [tn("VPN_HQ"), tn("VPN_DR")]],
+    ]);
+    mergeTunnelsIntoInterfaces(ifaces, tunnels);
+    const list = ifaces.get("a1")!;
+    expect(list).toContainEqual({ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up" });
+    expect(list).toContainEqual({ ifName: "VPN_DR", ifType: "tunnel", operStatus: "up" });
+    expect(list).toHaveLength(3);
+  });
+
+  it("creates an interface list for an asset that had none", () => {
+    const ifaces = new Map<string, ResolverInterface[]>();
+    const tunnels = new Map<string, TunnelObservation[]>([["a1", [tn("VPN_HQ")]]]);
+    mergeTunnelsIntoInterfaces(ifaces, tunnels);
+    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up" }]);
+  });
+
+  it("de-dupes against a tunnel SNMP already captured as a real interface", () => {
+    const ifaces = new Map<string, ResolverInterface[]>([
+      ["a1", [iface("VPN_HQ", "tunnel", false)]], // real IF-MIB row, down
+    ]);
+    const tunnels = new Map<string, TunnelObservation[]>([["a1", [tn("VPN_HQ", "up")]]]);
+    mergeTunnelsIntoInterfaces(ifaces, tunnels);
+    // No duplicate added; the existing real row is preserved as-is.
+    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "down" }]);
+  });
+
+  it("maps only fully-down status to operStatus down; up/partial/dynamic → up", () => {
+    const ifaces = new Map<string, ResolverInterface[]>([["a1", []]]);
+    const tunnels = new Map<string, TunnelObservation[]>([[
+      "a1",
+      [tn("t_up", "up"), tn("t_part", "partial"), tn("t_dyn", "dynamic"), tn("t_down", "down"), tn("t_null", null)],
+    ]]);
+    mergeTunnelsIntoInterfaces(ifaces, tunnels);
+    const byName = new Map(ifaces.get("a1")!.map((i) => [i.ifName, i.operStatus]));
+    expect(byName.get("t_up")).toBe("up");
+    expect(byName.get("t_part")).toBe("up");
+    expect(byName.get("t_dyn")).toBe("up");
+    expect(byName.get("t_null")).toBe("up");
+    expect(byName.get("t_down")).toBe("down");
+  });
+
+  it("skips empty tunnel lists and blank tunnel names", () => {
+    const ifaces = new Map<string, ResolverInterface[]>([["a1", [iface("wan1")]]]);
+    const tunnels = new Map<string, TunnelObservation[]>([
+      ["a1", []],
+      ["a2", [tn("")]],
+    ]);
+    mergeTunnelsIntoInterfaces(ifaces, tunnels);
+    expect(ifaces.get("a1")).toEqual([iface("wan1")]);
+    expect(ifaces.get("a2")).toEqual([]); // a2 list created but blank name skipped
+  });
+
+  it("makes synthetic tunnels resolvable by name and by type", () => {
+    const ifaces = new Map<string, ResolverInterface[]>([["a1", [iface("wan1")]]]);
+    mergeTunnelsIntoInterfaces(ifaces, new Map([["a1", [tn("VPN_HQ"), tn("VPN_DR", "down")]]]));
+    const list = ifaces.get("a1")!;
+    expect(resolvePinnedInterfaces({ byNames: { names: ["VPN_HQ"] } }, list)).toEqual(["VPN_HQ"]);
+    // By type with onlyUp drops the down tunnel.
+    expect(
+      resolvePinnedInterfaces({ byTypes: { types: ["tunnel"], onlyUp: true } }, list).sort(),
+    ).toEqual(["VPN_HQ"]);
+    // onlyUp=false keeps both.
+    expect(
+      resolvePinnedInterfaces({ byTypes: { types: ["tunnel"], onlyUp: false } }, list).sort(),
+    ).toEqual(["VPN_DR", "VPN_HQ"]);
   });
 });
