@@ -1410,11 +1410,39 @@ function closeModal() {
 
 function showConfirm(message) {
   return new Promise(function (resolve) {
-    var body = '<p style="font-size:0.9rem;color:var(--color-text-secondary)">' + escapeHtml(message) + '</p>';
-    var footer = '<button class="btn btn-secondary" id="confirm-cancel">Cancel</button><button class="btn btn-danger" id="confirm-ok">Confirm</button>';
-    openModal("Confirm", body, footer);
-    document.getElementById("confirm-cancel").onclick = function () { closeModal(); resolve(false); };
-    document.getElementById("confirm-ok").onclick = function () { closeModal(); resolve(true); };
+    // Build a dedicated overlay rather than reusing openModal's single shared
+    // #modal-overlay. openModal overwrites that element's body/footer innerHTML,
+    // so calling it while another modal is open (e.g. the Edit Integration
+    // auto-monitor guards) would destroy that modal's form DOM. A standalone
+    // overlay at a higher z-index STACKS above any open modal, leaving its
+    // markup intact so a save flow can still read the form after the confirm
+    // resolves. white-space:pre-wrap preserves \n line breaks in the message.
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.style.zIndex = "1300";
+    overlay.innerHTML =
+      '<div class="modal">' +
+        '<div class="modal-header"><h3>Confirm</h3></div>' +
+        '<div class="modal-body"><p style="font-size:0.9rem;color:var(--color-text-secondary);white-space:pre-wrap"></p></div>' +
+        '<div class="modal-footer">' +
+          '<button class="btn btn-secondary" data-confirm="cancel">Cancel</button>' +
+          '<button class="btn btn-danger" data-confirm="ok">Confirm</button>' +
+        '</div>' +
+      '</div>';
+    overlay.querySelector(".modal-body p").textContent = message;
+    document.body.appendChild(overlay);
+    function done(val) {
+      overlay.classList.remove("open");
+      overlay.addEventListener("transitionend", function () {
+        if (overlay.parentNode) overlay.remove();
+      }, { once: true });
+      // Fallback in case the transition doesn't fire (reduced-motion, etc.).
+      setTimeout(function () { if (overlay.parentNode) overlay.remove(); }, 400);
+      resolve(val);
+    }
+    overlay.querySelector('[data-confirm="cancel"]').onclick = function () { done(false); };
+    overlay.querySelector('[data-confirm="ok"]').onclick = function () { done(true); };
+    requestAnimationFrame(function () { overlay.classList.add("open"); });
   });
 }
 

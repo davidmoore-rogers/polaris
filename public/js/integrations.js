@@ -4072,7 +4072,7 @@ async function openEditModal(id) {
                 var protectedNote = d.overridden > 0 ? " (" + d.overridden + " protected by per-asset override)" : "";
                 return "  • " + humanClass[d.k] + ": " + d.wouldDisable + " asset(s) will stop being monitored" + protectedNote;
               });
-              var ok = window.confirm(
+              var ok = await showConfirm(
                 "Disabling Auto-Monitoring will sweep monitoring OFF for previously-discovered assets:\n\n" +
                 lines.join("\n") + "\n\n" +
                 "Per-asset overrides are preserved. Continue?"
@@ -4134,7 +4134,7 @@ async function openEditModal(id) {
             if (Number.isFinite(n)) totalEstimate += n;
           });
           if (totalEstimate > AUTO_MONITOR_INTERFACE_WARN_THRESHOLD) {
-            var ok = window.confirm(
+            var ok = await showConfirm(
               "Auto-Monitor will pin approximately " + totalEstimate + " interfaces across the discovered devices.\n\n" +
               "Each pin gets scraped on the response-time cadence (default 60s). Large pin counts add load to the database and to the monitored devices.\n\n" +
               "Continue applying now?"
