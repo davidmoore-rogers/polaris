@@ -1411,6 +1411,7 @@ function _amonCanonicalize(sel) {
     out.byTypes = {
       types:  coerced.byTypes.types.slice().sort(),
       onlyUp: coerced.byTypes.onlyUp === true,
+      includeDownTunnels: coerced.byTypes.includeDownTunnels === true,
     };
   }
   if (coerced.byLldp && Array.isArray(coerced.byLldp.neighborTypes)) {
@@ -1418,6 +1419,27 @@ function _amonCanonicalize(sel) {
   }
   if (Object.keys(out).length === 0) return "null";
   return JSON.stringify(out);
+}
+
+// Renders one "By interface type" row. For the tunnel row it appends an
+// inline "Include down tunnels" control (id `<prefix>types-includeDown`,
+// wrapped in `<prefix>types-includeDown-wrap` for show/hide) to the right of
+// the type label — visible only when tunnel is checked, since a down IPsec
+// tunnel is something operators commonly want to monitor even with "Only
+// currently up" on. Shared by the initial saved render and the post-aggregate
+// re-render so the two never diverge.
+function _amonTypeRowHTML(idPrefix, name, checked, inclDownChecked, inclDownVisible) {
+  var label = '<label style="display:flex;align-items:center;gap:6px;font-size:0.88rem;margin-bottom:0.25rem">' +
+                '<input type="checkbox" data-type-checkbox="1" id="' + idPrefix + 'type-' + name + '" value="' + name + '"' + (checked ? " checked" : "") + ' style="width:auto"> ' + name +
+              '</label>';
+  if (name !== "tunnel") return label;
+  var incl = '<span id="' + idPrefix + 'types-includeDown-wrap" style="display:' + (inclDownVisible ? "inline-flex" : "none") + ';align-items:center;margin-bottom:0.25rem">' +
+               '<label style="display:flex;align-items:center;gap:6px;font-size:0.84rem;margin:0;cursor:pointer">' +
+                 '<input type="checkbox" id="' + idPrefix + 'types-includeDown"' + (inclDownChecked ? " checked" : "") + ' style="width:auto"> Include down tunnels' +
+                 ' <span class="hint" style="margin:0;font-size:0.78rem">(otherwise excluded by &quot;Only currently up&quot;)</span>' +
+               '</label>' +
+             '</span>';
+  return '<div style="display:flex;align-items:center;gap:14px">' + label + incl + '</div>';
 }
 
 function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defaultMode, hasIntegrationId) {
@@ -1501,13 +1523,15 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
   // replaces this with the observed set.
   var typeOnlyUp = byTypes ? byTypes.onlyUp !== false : true;
   var savedTypes = byTypes ? byTypes.types.slice() : [];
+  var savedInclDown = !!(byTypes && byTypes.includeDownTunnels === true);
   // Stash for the loader so it can preserve saved-but-not-yet-rendered types
   // even before the user has opened this panel.
   window["__autoMon_typeSeed_" + idPrefix] = savedTypes;
+  window["__autoMon_inclDownSeed_" + idPrefix] = savedInclDown;
   function _initialTypeBox(name) {
-    return '<label style="display:flex;align-items:center;gap:6px;font-size:0.88rem;margin-bottom:0.25rem">' +
-             '<input type="checkbox" data-type-checkbox="1" id="' + idPrefix + 'type-' + name + '" value="' + name + '" checked style="width:auto"> ' + name +
-           '</label>';
+    // Initial render checks every saved type, so the tunnel row (if saved) is
+    // checked → its include-down control is visible.
+    return _amonTypeRowHTML(idPrefix, name, true, savedInclDown, true);
   }
   var initialTypesHtml = savedTypes.length > 0
     ? savedTypes.map(_initialTypeBox).join("")
@@ -1614,6 +1638,12 @@ function _readAutoMonitorInterfaces(idPrefix) {
     if (types.length > 0) {
       var ou2El = document.getElementById(idPrefix + "types-onlyUp");
       out.byTypes = { types: types, onlyUp: ou2El ? ou2El.checked === true : true };
+      // Tunnel-only: pin fully-down IPsec tunnels too. Only meaningful when
+      // "tunnel" is selected; omit the flag otherwise so it stays default-off.
+      if (types.indexOf("tunnel") !== -1) {
+        var inclEl = document.getElementById(idPrefix + "types-includeDown");
+        if (inclEl && inclEl.checked === true) out.byTypes.includeDownTunnels = true;
+      }
     }
   }
 
@@ -1658,6 +1688,10 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
   // Canonical IfType order — matches IF_TYPES in src/services/autoMonitorInterfacesService.ts.
   // Backend Zod schema rejects values outside this set, so the UI mirrors it.
   var CANONICAL_IF_TYPES = ["physical", "aggregate", "vlan", "loopback", "tunnel"];
+  // Tracks the "Include down tunnels" checkbox across type-list re-renders
+  // (renderTypesList rebuilds innerHTML, destroying the DOM element). Seeded
+  // from the saved selection; updated by the include-down change handler.
+  var inclDownState = window["__autoMon_inclDownSeed_" + idPrefix] === true;
 
   function syncMasterVisibility() {
     var anyEnabled = false;
@@ -1669,6 +1703,27 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
       if ((key === "names" || key === "types") && checked && !aggregateLoaded && integrationId) loadAggregate();
     }
     return anyEnabled;
+  }
+
+  // (Re)binds the tunnel row's "Include down tunnels" control: tunnel checkbox
+  // toggles its visibility; the include-down checkbox updates inclDownState +
+  // re-previews. Called after every type-list render (initial + dynamic) since
+  // the elements are recreated each time.
+  function wireInclDown() {
+    var tunnelBox = document.getElementById(idPrefix + "type-tunnel");
+    var wrap = document.getElementById(idPrefix + "types-includeDown-wrap");
+    var inclBox = document.getElementById(idPrefix + "types-includeDown");
+    if (tunnelBox && wrap) {
+      tunnelBox.addEventListener("change", function () {
+        wrap.style.display = tunnelBox.checked ? "inline-flex" : "none";
+      });
+    }
+    if (inclBox) {
+      inclBox.addEventListener("change", function () {
+        inclDownState = inclBox.checked === true;
+        schedulePreview();
+      });
+    }
   }
 
   // Renders the dynamic "By interface type" checklist from cached aggregate
@@ -1701,15 +1756,16 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
       return;
     }
     optsEl.innerHTML = rendered.map(function (name) {
-      var on = existingChecked.has(name) ? " checked" : "";
-      return '<label style="display:flex;align-items:center;gap:6px;font-size:0.88rem;margin-bottom:0.25rem">' +
-               '<input type="checkbox" data-type-checkbox="1" id="' + idPrefix + 'type-' + name + '" value="' + name + '"' + on + ' style="width:auto"> ' + name +
-             '</label>';
+      var on = existingChecked.has(name);
+      // Tunnel row's include-down control: checked from the tracked closure
+      // state (survives re-renders), visible only when tunnel itself is checked.
+      return _amonTypeRowHTML(idPrefix, name, on, inclDownState, on);
     }).join("");
     var boxes = optsEl.querySelectorAll('input[data-type-checkbox="1"]');
     for (var b = 0; b < boxes.length; b++) {
       boxes[b].addEventListener("change", schedulePreview);
     }
+    wireInclDown();
   }
 
   function loadAggregate(force) {
@@ -1929,6 +1985,9 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
   for (var t = 0; t < typeBoxes.length; t++) typeBoxes[t].addEventListener("change", schedulePreview);
   var typesOnlyUp = document.getElementById(idPrefix + "types-onlyUp");
   if (typesOnlyUp) typesOnlyUp.addEventListener("change", schedulePreview);
+  // Wire the include-down control on the initial (saved) render; renderTypesList
+  // re-wires it after a dynamic re-render.
+  wireInclDown();
 
   // LLDP block.
   var lldpBoxes = document.querySelectorAll('input[data-lldp-checkbox="1"][id^="' + idPrefix + 'lldp-"]');

@@ -293,6 +293,9 @@ const ByPatternsSchema = z.object({
 const ByTypesSchema = z.object({
   types:  z.array(z.enum(["physical", "aggregate", "vlan", "loopback", "tunnel"])).min(1),
   onlyUp: z.boolean().optional().default(true),
+  // Tunnel-only exception to onlyUp: pin fully-down IPsec tunnels too. No-op
+  // unless "tunnel" is among `types` AND onlyUp is true.
+  includeDownTunnels: z.boolean().optional().default(false),
 }).strict();
 const ByLldpSchema = z.object({
   neighborTypes: z.array(z.enum(["firewall", "switch", "access_point", "server", "workstation", "router", "printer", "other"])).min(1),
