@@ -42,6 +42,7 @@ import {
   initUpdateStatus,
   isUpdateMechanismAvailable,
   getRecentCommits,
+  getUpdateRepoInfo,
   restartService,
 } from "../../services/updateService.js";
 import { getPublicUrlPort } from "../../utils/publicUrl.js";
@@ -1262,6 +1263,17 @@ router.get("/updates/check", async (_req, res, next) => {
 
 router.get("/updates/status", (_req, res) => {
   res.json(getUpdateStatus());
+});
+
+// Which git repo the updater pulls from + where that choice comes from
+// (POLARIS_UPDATE_REPO env override vs. the install's existing origin remote).
+// Drives the "Update source" row on the Application Updates card.
+router.get("/updates/repo", async (_req, res, next) => {
+  try {
+    res.json(await getUpdateRepoInfo());
+  } catch (err) {
+    next(err);
+  }
 });
 
 router.post("/updates/apply", async (req, res, next) => {

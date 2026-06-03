@@ -637,6 +637,7 @@ const api = {
     applyUpdate:     (password) => request("POST", "/server-settings/updates/apply", password ? { password: password } : undefined),
     dismissUpdate:   () => request("POST", "/server-settings/updates/dismiss"),
     getUpdateHistory: (limit) => request("GET", "/server-settings/updates/history" + (limit ? "?limit=" + limit : "")),
+    getUpdateRepo:   () => request("GET", "/server-settings/updates/repo"),
     getUpdateSettings: () => request("GET", "/server-settings/updates/settings"),
     setUpdateSettings: (body) => request("PUT", "/server-settings/updates/settings", body),
   },

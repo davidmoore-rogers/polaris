@@ -4,7 +4,7 @@ This guide covers fresh installs on **RHEL / Rocky / AlmaLinux 9**, **Ubuntu / D
 
 If you're upgrading an existing install rather than installing fresh, use the in-app updater under **Server Settings → Maintenance → Updates**. Don't follow this document for upgrades.
 
-> **Update source repo.** Both the in-app updater and the `deploy/update-{linux.sh,windows.ps1}` fallback scripts fetch from the canonical upstream (`https://github.com/davidmoore-rogers/polaris.git`) by default. To track a fork or an internal mirror, set `POLARIS_UPDATE_REPO=<git-url>` in `/opt/polaris/.env` (Linux) or `C:\polaris\.env` (Windows) — it's applied to the `origin` remote before every fetch/pull. Leave it unset for the default.
+> **Update source repo.** By default both the in-app updater and the `deploy/update-{linux.sh,windows.ps1}` fallback scripts update from the install's existing `origin` git remote — i.e. whatever it was cloned from. To force a different source (a fork or an internal mirror), set `POLARIS_UPDATE_REPO=<git-url>` in `/opt/polaris/.env` (Linux) or `C:\polaris\.env` (Windows); it's applied to the `origin` remote before every fetch/pull. Leave it unset to keep using the cloned-from origin. The active repo and its source are shown on the Application Updates card (Server Settings → Maintenance).
 
 ---
 

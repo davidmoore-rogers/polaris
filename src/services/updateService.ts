@@ -33,38 +33,65 @@ const STATUS_FILE = join(APP_DIR, ".update-status.json");
 const BACKUP_DIR = join(APP_DIR, "data", "backups");
 
 // Git repository the in-app updater fetches/pulls from. Operators can point
-// installs at a fork or internal mirror via POLARIS_UPDATE_REPO in .env;
-// unset falls back to the canonical upstream. The URL is applied to the
-// `origin` remote before every fetch/pull (see ensureUpdateRemote), so all the
-// downstream `origin/HEAD || origin/main || origin/master` plumbing in
-// checkForUpdates/applyUpdate keeps working unchanged.
-const DEFAULT_UPDATE_REPO = "https://github.com/davidmoore-rogers/polaris.git";
+// installs at a fork or internal mirror by setting POLARIS_UPDATE_REPO in .env.
+// When set, the URL is applied to the `origin` remote before every fetch/pull
+// (see ensureUpdateRemote), so all the downstream
+// `origin/HEAD || origin/main || origin/master` plumbing keeps working
+// unchanged. When UNSET, the install's existing `origin` is left untouched —
+// i.e. it updates from whatever it was cloned from (the canonical upstream for
+// a normal install, or a fork's own origin for a fork-based install).
 
-function configuredUpdateRepo(): string {
-  const raw = (process.env.POLARIS_UPDATE_REPO || "").trim();
-  return raw || DEFAULT_UPDATE_REPO;
+/** The configured override, or null when POLARIS_UPDATE_REPO is unset/empty. */
+function configuredUpdateRepo(): string | null {
+  return (process.env.POLARIS_UPDATE_REPO || "").trim() || null;
 }
 
-/**
- * Point the `origin` remote at the configured update repo before a
- * fetch/pull. Idempotent — only rewrites the URL when it differs from what
- * git already has, so a fresh clone from the same repo is a no-op. Non-fatal:
- * a failure here just leaves the existing remote in place and is logged.
- */
-async function ensureUpdateRemote(): Promise<void> {
-  const desired = configuredUpdateRepo();
+/** Read the install's current `origin` remote URL (null if none / git fails). */
+async function currentOriginUrl(): Promise<string | null> {
   try {
     const { stdout } = await execAsync("git remote get-url origin", {
       cwd: APP_DIR,
       timeout: 10000,
     });
-    const current = stdout.trim();
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The repo the updater will pull from, and where that choice comes from.
+ * `source: "env"` → POLARIS_UPDATE_REPO is set and overrides origin;
+ * `source: "origin"` → unset, so the existing `origin` remote is used as-is.
+ * Surfaced on the Application Updates card so operators can see + trust it.
+ */
+export async function getUpdateRepoInfo(): Promise<{
+  url: string | null;
+  source: "env" | "origin";
+}> {
+  const env = configuredUpdateRepo();
+  if (env) return { url: env, source: "env" };
+  return { url: await currentOriginUrl(), source: "origin" };
+}
+
+/**
+ * Point the `origin` remote at POLARIS_UPDATE_REPO before a fetch/pull. No-op
+ * when the var is unset (leaves the install's cloned-from origin untouched).
+ * Idempotent — only rewrites the URL when it differs from what git already
+ * has. Non-fatal: a failure here just leaves the existing remote in place and
+ * is logged.
+ */
+async function ensureUpdateRemote(): Promise<void> {
+  const desired = configuredUpdateRepo();
+  if (!desired) return; // unset → update from the existing origin as-is
+  try {
+    const current = await currentOriginUrl();
     if (current === desired) return;
     await execAsync(`git remote set-url origin "${desired}"`, {
       cwd: APP_DIR,
       timeout: 10000,
     });
-    logger.info({ from: current, to: desired }, "In-app update: repointed origin remote to configured update repo");
+    logger.info({ from: current, to: desired }, "In-app update: repointed origin remote to POLARIS_UPDATE_REPO");
   } catch (err: any) {
     // No origin remote yet, or set-url failed — add it. If even that fails,
     // leave whatever's there and let the fetch surface a clear error.
@@ -73,7 +100,7 @@ async function ensureUpdateRemote(): Promise<void> {
         cwd: APP_DIR,
         timeout: 10000,
       });
-      logger.info({ to: desired }, "In-app update: added origin remote for configured update repo");
+      logger.info({ to: desired }, "In-app update: added origin remote for POLARIS_UPDATE_REPO");
     } catch (addErr: any) {
       logger.warn(
         { err: err?.message, addErr: addErr?.message, desired },

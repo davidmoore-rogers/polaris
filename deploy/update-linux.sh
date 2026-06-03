@@ -180,20 +180,22 @@ fi
 # ─── 3. Pull latest code ────────────────────────────────────────────────────
 step "3/9  Pulling latest code..."
 
-# Point origin at the configured update repo before fetching. Mirrors
-# ensureUpdateRemote() in src/services/updateService.ts: POLARIS_UPDATE_REPO in
-# .env (if set) overrides whatever origin was cloned from; unset falls back to
-# the canonical upstream. Idempotent — only rewrites when the URL differs.
-UPDATE_REPO="https://github.com/davidmoore-rogers/polaris.git"
+# Point origin at POLARIS_UPDATE_REPO before fetching, if it's set. Mirrors
+# ensureUpdateRemote() in src/services/updateService.ts: when set, the var
+# overrides whatever origin was cloned from; when UNSET, leave the existing
+# origin untouched (update from wherever the install was cloned). Idempotent —
+# only rewrites when the URL differs.
+ENV_REPO=""
 if [[ -f "$APP_DIR/.env" ]]; then
   ENV_REPO=$(grep -E '^[[:space:]]*POLARIS_UPDATE_REPO=' "$APP_DIR/.env" | tail -1 | cut -d= -f2- | tr -d "\"' \t\r" || true)
-  [[ -n "$ENV_REPO" ]] && UPDATE_REPO="$ENV_REPO"
 fi
-CURRENT_REPO=$(sudo -u "$APP_USER" git remote get-url origin 2>/dev/null || echo "")
-if [[ "$CURRENT_REPO" != "$UPDATE_REPO" ]]; then
-  info "Repointing origin remote: ${CURRENT_REPO:-<none>} -> $UPDATE_REPO"
-  sudo -u "$APP_USER" git remote set-url origin "$UPDATE_REPO" 2>/dev/null \
-    || sudo -u "$APP_USER" git remote add origin "$UPDATE_REPO"
+if [[ -n "$ENV_REPO" ]]; then
+  CURRENT_REPO=$(sudo -u "$APP_USER" git remote get-url origin 2>/dev/null || echo "")
+  if [[ "$CURRENT_REPO" != "$ENV_REPO" ]]; then
+    info "Repointing origin remote (POLARIS_UPDATE_REPO): ${CURRENT_REPO:-<none>} -> $ENV_REPO"
+    sudo -u "$APP_USER" git remote set-url origin "$ENV_REPO" 2>/dev/null \
+      || sudo -u "$APP_USER" git remote add origin "$ENV_REPO"
+  fi
 fi
 
 sudo -u "$APP_USER" git fetch --all --prune

@@ -1887,6 +1887,10 @@ async function loadDatabaseInfo() {
             '<span id="update-check-status" style="font-size:0.82rem"></span>' +
           '</div>' +
         '</div>' +
+        // Update source — which git repo updates are pulled from, and whether
+        // that comes from POLARIS_UPDATE_REPO (.env) or the install's origin.
+        // Lives outside #update-status-area so it survives status re-renders.
+        '<div id="update-repo-info" style="margin-top:0.75rem;font-size:0.8rem;color:var(--color-text-tertiary)"></div>' +
         '<div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
           '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">' +
             '<input type="checkbox" id="update-backup-checkbox" style="width:15px;height:15px;flex-shrink:0">' +
@@ -2462,6 +2466,9 @@ var _updatePollTimer = null;
 function initUpdateControls() {
   document.getElementById("btn-check-updates").addEventListener("click", checkForUpdatesUI);
 
+  // Show which repo updates are pulled from + where that's configured.
+  loadUpdateRepoInfo();
+
   // Load and wire the backup checkbox
   var backupCheckbox = document.getElementById("update-backup-checkbox");
   if (backupCheckbox) {
@@ -2522,6 +2529,28 @@ function renderUpdateDisabled(status) {
         ? '<div style="font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(status.method) + '</div>'
         : '') +
     '</div>';
+}
+
+async function loadUpdateRepoInfo() {
+  var el = document.getElementById("update-repo-info");
+  if (!el) return;
+  try {
+    var info = await api.serverSettings.getUpdateRepo();
+    if (!info || !info.url) {
+      // Disabled/Docker installs or no origin remote — nothing useful to show.
+      el.innerHTML = "";
+      return;
+    }
+    var src = info.source === "env"
+      ? 'configured via <span class="mono">POLARIS_UPDATE_REPO</span> in <span class="mono">.env</span>'
+      : 'from the <span class="mono">origin</span> git remote (set <span class="mono">POLARIS_UPDATE_REPO</span> in <span class="mono">.env</span> to override)';
+    el.innerHTML =
+      '<span style="font-weight:600">Update source:</span> ' +
+      '<span class="mono" style="color:var(--color-text-secondary)">' + escapeHtml(info.url) + '</span>' +
+      '<br><span style="font-size:0.76rem">' + src + '</span>';
+  } catch (err) {
+    el.innerHTML = "";
+  }
 }
 
 async function loadUpdateHistory() {

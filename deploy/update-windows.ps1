@@ -171,24 +171,26 @@ if (Test-Command "pg_dump") {
 # ─── 3. Pull latest code ────────────────────────────────────────────────────
 Write-Step "3/8  Pulling latest code..."
 
-# Point origin at the configured update repo before fetching. Mirrors
-# ensureUpdateRemote() in src/services/updateService.ts: POLARIS_UPDATE_REPO in
-# .env (if set) overrides whatever origin was cloned from; unset falls back to
-# the canonical upstream. Idempotent — only rewrites when the URL differs.
-$UpdateRepo = "https://github.com/davidmoore-rogers/polaris.git"
+# Point origin at POLARIS_UPDATE_REPO before fetching, if it's set. Mirrors
+# ensureUpdateRemote() in src/services/updateService.ts: when set, the var
+# overrides whatever origin was cloned from; when UNSET, leave the existing
+# origin untouched (update from wherever the install was cloned). Idempotent —
+# only rewrites when the URL differs.
+$UpdateRepo = ""
 $EnvFile = Join-Path $AppDir ".env"
 if (Test-Path $EnvFile) {
     $envLine = Select-String -Path $EnvFile -Pattern '^\s*POLARIS_UPDATE_REPO=' | Select-Object -Last 1
     if ($envLine) {
-        $val = ($envLine.Line -replace '^\s*POLARIS_UPDATE_REPO=', '').Trim().Trim('"').Trim("'")
-        if ($val) { $UpdateRepo = $val }
+        $UpdateRepo = ($envLine.Line -replace '^\s*POLARIS_UPDATE_REPO=', '').Trim().Trim('"').Trim("'")
     }
 }
-$CurrentRepo = (& git remote get-url origin 2>$null)
-if ($CurrentRepo -ne $UpdateRepo) {
-    Write-Info "Repointing origin remote to $UpdateRepo"
-    & git remote set-url origin $UpdateRepo 2>$null
-    if ($LASTEXITCODE -ne 0) { & git remote add origin $UpdateRepo }
+if ($UpdateRepo) {
+    $CurrentRepo = (& git remote get-url origin 2>$null)
+    if ($CurrentRepo -ne $UpdateRepo) {
+        Write-Info "Repointing origin remote (POLARIS_UPDATE_REPO) to $UpdateRepo"
+        & git remote set-url origin $UpdateRepo 2>$null
+        if ($LASTEXITCODE -ne 0) { & git remote add origin $UpdateRepo }
+    }
 }
 
 & git fetch --all --prune

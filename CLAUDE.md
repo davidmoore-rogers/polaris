@@ -317,13 +317,14 @@ TIMESCALE_COMPRESS_AFTER_DAYS=7
 # public/uploads all live under this dir (Docker pins to /app/state).
 POLARIS_STATE_DIR=
 
-# Git repository the in-app updater fetches/pulls from. Applied to the `origin`
-# remote before every update check/apply (ensureUpdateRemote in
-# src/services/updateService.ts), so it overrides whatever the install was
-# cloned from. Unset falls back to the canonical upstream
-# (https://github.com/davidmoore-rogers/polaris.git). Point at a fork or
-# internal mirror here. The deploy/update-{linux.sh,windows.ps1} fallback
-# scripts read the same var and repoint origin in lockstep.
+# Git repository the in-app updater fetches/pulls from. When SET, it's applied
+# to the `origin` remote before every update check/apply (ensureUpdateRemote in
+# src/services/updateService.ts), overriding whatever the install was cloned
+# from — point at a fork or internal mirror. When UNSET, the existing `origin`
+# remote is left untouched (updates come from wherever the install was cloned).
+# The Application Updates card surfaces the active repo + its source
+# (GET /server-settings/updates/repo). The deploy/update-{linux.sh,windows.ps1}
+# fallback scripts read the same var and repoint origin in lockstep.
 POLARIS_UPDATE_REPO=
 ```
 
