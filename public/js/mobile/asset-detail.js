@@ -307,7 +307,7 @@
     host.innerHTML = ''
       + '<div class="asset-hero">'
       + (heroBits.length ? '  <div class="hero-sub">' + heroBits.join(" · ") + '</div>' : '')
-      + '  <div style="margin-top:' + (heroBits.length ? '12px' : '0') + ';">' + monitorPillHtml + '</div>'
+      + '  <div id="asset-hero-pill" style="margin-top:' + (heroBits.length ? '12px' : '0') + ';">' + monitorPillHtml + '</div>'
       + '</div>'
 
       // Response Time section — collapsed by default; subtitle shows
@@ -978,6 +978,17 @@
       loadMonitor(id, st);
       loadTelemetry(id, st);
       loadSystemInfo(id, st);
+      // probeNow ran the state machine, so monitorStatus may have flipped
+      // (e.g. down → up). Re-fetch the asset row and re-render the status pill
+      // + header dot — otherwise they keep showing the stale state the sheet
+      // opened with even though every chart refreshed.
+      api.assets.get(id).then(function (fresh) {
+        if (!fresh || _openId !== id) return;
+        _assetCache[id] = fresh;
+        var pillHost = document.getElementById("asset-hero-pill");
+        if (pillHost) pillHost.innerHTML = renderMonitorPill(fresh);
+        setHeader(fresh);
+      }).catch(function () { /* pill stays as-is; charts already refreshed */ });
     }).catch(function (err) {
       var msg = (err && err.message) ? err.message : "Refresh failed";
       PolarisTabs.showSnackbar("Refresh failed — " + msg, { error: true });
@@ -1074,6 +1085,15 @@
       loadMonitor(id, st);
       loadTelemetry(id, st);
       loadSystemInfo(id, st);
+      // Re-render the status pill + header dot from the freshly-probed asset
+      // so a down → up flip is reflected (see onRefresh for the rationale).
+      api.assets.get(id).then(function (fresh) {
+        if (!fresh || _openId !== id) return;
+        _assetCache[id] = fresh;
+        var pillHost = document.getElementById("asset-hero-pill");
+        if (pillHost) pillHost.innerHTML = renderMonitorPill(fresh);
+        setHeader(fresh);
+      }).catch(function () { /* pill stays as-is; charts already refreshed */ });
     }).catch(function (err) {
       var msg = (err && err.message) ? err.message : "Refresh failed";
       PolarisTabs.showSnackbar("Refresh failed — " + msg, { error: true });
