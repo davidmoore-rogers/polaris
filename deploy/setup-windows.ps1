@@ -281,7 +281,10 @@ Write-Info "Installing dependencies..."
 if ($LASTEXITCODE -ne 0) { Write-Err "npm ci failed" }
 
 Write-Info "Building TypeScript..."
-& npx tsc
+# `npm run build` (not bare tsc) so scripts/copy-build-assets.mjs runs and the
+# bundled std MIB .txt files land in dist/services/stdMibs/ — without them the
+# SNMP Walk tab's standard MIBs (LLDP-MIB etc.) report "not installed".
+& npm run build
 if ($LASTEXITCODE -ne 0) { Write-Err "TypeScript build failed" }
 
 Write-Info "Running database migrations..."

@@ -596,6 +596,12 @@ export async function applyUpdate(password?: string | null): Promise<void> {
     // generated-client files Prisma renamed between versions) can't shadow
     // the fresh tsc output. tsc itself is non-destructive — without this,
     // a file that exists in `dist/` but no longer in `src/` lingers forever.
+    //
+    // Build via `npm run build` (not bare `npx tsc`) so the post-tsc asset
+    // copy in scripts/copy-build-assets.mjs runs — it mirrors the bundled
+    // std MIB .txt files into dist/services/stdMibs/, which tsc won't emit.
+    // Without that, every std SNMP-walk (LLDP-MIB etc.) on the updated
+    // install fails with "Standard MIB ... is not installed on the server".
     setStep(4, "running");
     try {
       const distDir = join(APP_DIR, "dist");
@@ -609,7 +615,7 @@ export async function applyUpdate(password?: string | null): Promise<void> {
           );
         });
       }
-      await execAsync("npx tsc", { cwd: APP_DIR, timeout: 120000 });
+      await execAsync("npm run build", { cwd: APP_DIR, timeout: 120000 });
       setStep(4, "done");
     } catch (err: any) {
       failUpdate(4, "TypeScript build failed: " + (err.stderr || err.message).slice(0, 500));
