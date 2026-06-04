@@ -7215,8 +7215,9 @@ export async function recordProbeResult(
   // hook) all run synchronously on in-memory values so audit + latency-
   // optimization paths don't wait for the flush. Stamp monitorStatusChangedAt
   // on every state change (up↔warning↔recovering↔down, including
-  // unknown→anything). The Event log still fires only on up↔down; this
-  // column is the source for the Dashboard Monitor Alerts duration.
+  // unknown→anything). The Event log fires on transitions into up / warning /
+  // down (see below); this column is the source for the Dashboard Monitor
+  // Alerts duration.
   enqueueProbePatch(assetId, {
     monitorStatus: nextStatus,
     lastMonitorAt: now,
@@ -7226,13 +7227,21 @@ export async function recordProbeResult(
     monitorStatusChangedAt: previousStatus !== nextStatus ? now : undefined,
   });
 
-  if (previousStatus !== nextStatus && (nextStatus === "up" || nextStatus === "down")) {
+  // Edge-triggered audit events. We log on the transition INTO up / warning /
+  // down — never per-poll (up→up, warning→warning, etc. don't fire because
+  // previousStatus === nextStatus). This yields exactly: the first successful
+  // poll (→up, including the back-up-after-down recovery), the first warning
+  // (→warning), and the first down (→down). "recovering" and "unknown" are
+  // intermediate and never logged. The propagate / retry side-effects below
+  // stay gated to confirmed up/down only — a "warning" is not a confirmed
+  // up/down edge for dependency suppression or queued-push retry.
+  if (previousStatus !== nextStatus && (nextStatus === "up" || nextStatus === "warning" || nextStatus === "down")) {
     logEvent({
       action: "monitor.status_changed",
       resourceType: "asset",
       resourceId: assetId,
       resourceName: asset.hostname || undefined,
-      level: nextStatus === "down" ? "warning" : "info",
+      level: nextStatus === "up" ? "info" : "warning",
       message:
         `Monitor: ${asset.hostname || assetId} ${previousStatus} → ${nextStatus}` +
         (result.error ? ` (${result.error})` : ""),
@@ -7245,6 +7254,9 @@ export async function recordProbeResult(
         consecutiveSuccesses: newCs,
       },
     });
+  }
+
+  if (previousStatus !== nextStatus && (nextStatus === "up" || nextStatus === "down")) {
     // Fire-and-forget latency hook: propagate the confirmed-up / confirmed-down
     // edge into descendant `dependencySuppressed` state immediately so heavy
     // cadences pause within milliseconds of the parent flipping to "down"

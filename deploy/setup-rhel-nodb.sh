@@ -223,7 +223,10 @@ info "Installing dependencies..."
 sudo -u "$APP_USER" npm ci --production=false
 
 info "Building TypeScript..."
-sudo -u "$APP_USER" npx tsc
+# `npm run build` (not bare tsc) so scripts/copy-build-assets.mjs runs and the
+# bundled std MIB .txt files land in dist/services/stdMibs/ — without them the
+# SNMP Walk tab's standard MIBs (LLDP-MIB etc.) report "not installed".
+sudo -u "$APP_USER" npm run build
 
 info "Running database migrations..."
 sudo -u "$APP_USER" npx prisma migrate deploy

@@ -1459,8 +1459,12 @@ function _amonCanonicalize(sel) {
 // wrapped in `<prefix>types-includeDown-wrap` for show/hide) to the right of
 // the type label — visible only when tunnel is checked, since a down IPsec
 // tunnel is something operators commonly want to monitor even with "Only
-// currently up" on. Shared by the initial saved render and the post-aggregate
-// re-render so the two never diverge.
+// currently up" on. The tunnel row also carries a sub-hint noting that
+// "tunnel" covers FortiOS IPsec tunnels: when selected, those pins route to
+// Asset.monitoredIpsecTunnels (the IPsec sampler's fast-poll list) rather than
+// the IF-MIB monitoredInterfaces list — see splitPinsByProvenance in
+// src/services/autoMonitorInterfacesService.ts. Shared by the initial saved
+// render and the post-aggregate re-render so the two never diverge.
 function _amonTypeRowHTML(idPrefix, name, checked, inclDownChecked, inclDownVisible) {
   var label = '<label style="display:flex;align-items:center;gap:6px;font-size:0.88rem;margin-bottom:0.25rem">' +
                 '<input type="checkbox" data-type-checkbox="1" id="' + idPrefix + 'type-' + name + '" value="' + name + '"' + (checked ? " checked" : "") + ' style="width:auto"> ' + name +
@@ -1472,10 +1476,17 @@ function _amonTypeRowHTML(idPrefix, name, checked, inclDownChecked, inclDownVisi
                  ' <span class="hint" style="margin:0;font-size:0.78rem">(otherwise excluded by &quot;Only currently up&quot;)</span>' +
                '</label>' +
              '</span>';
-  return '<div style="display:flex;align-items:center;gap:14px">' + label + incl + '</div>';
+  var ipsecHint = '<p class="hint" style="margin:0 0 0.35rem 1.6rem;font-size:0.78rem">' +
+                    'Includes FortiOS IPsec tunnels — selecting this pins them for fast IPsec polling.' +
+                  '</p>';
+  return '<div style="display:flex;align-items:center;gap:14px">' + label + incl + '</div>' + ipsecHint;
 }
 
-function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defaultMode, hasIntegrationId) {
+function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defaultMode, hasIntegrationId, opts) {
+  // opts.hideLldp — omit the "By LLDP" block. AD/Entra-monitored endpoints
+  // report interfaces via the Polaris Agent and carry no LLDP neighbor data,
+  // so the block would never match; hide it to avoid a misleading control.
+  var hideLldp = !!(opts && opts.hideLldp);
   var sel = _amonCoerceLegacy(currentSelection) || {};
   var byNames    = sel.byNames    || null;
   var byPatterns = sel.byPatterns || null;
@@ -1613,8 +1624,9 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
       patternsPanel +
       masterBox("types",    "By interface type",  "types seen on this integration's devices",         !!byTypes) +
       typesPanel +
-      masterBox("lldp",     "By LLDP (includes inferred interfaces)",   "pin where a monitored neighbor is connected (LLDP or FortiOS topology inference)",  !!byLldp) +
-      lldpPanel +
+      (hideLldp ? "" :
+        masterBox("lldp",     "By LLDP (includes inferred interfaces)",   "pin where a monitored neighbor is connected (LLDP or FortiOS topology inference)",  !!byLldp) +
+        lldpPanel) +
       previewPanel +
     '</div>' +
     '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
@@ -1694,6 +1706,280 @@ function _readAutoMonitorInterfaces(idPrefix) {
   // If nothing usable was captured, persist null (= feature off for this class).
   if (!out.byNames && !out.byPatterns && !out.byTypes && !out.byLldp) return null;
   return out;
+}
+
+// ─── Auto-Monitor Storage card (AD / Entra workstation+server) ─────────────
+// Storage-mount analog of _autoMonitorInterfacesHTML. Three independent blocks
+// (By mount name / By pattern / All mounts); the union is pinned into
+// Asset.monitoredStorage at discovery time. Mounts come from the Polaris Agent,
+// so the "By name" checklist populates only after agents report.
+function _autoMonitorStorageHTML(idPrefix, kindLabel, currentSelection, hasIntegrationId) {
+  var sel = currentSelection && typeof currentSelection === "object" ? currentSelection : {};
+  var byNames    = sel.byNames    || null;
+  var byPatterns = sel.byPatterns || null;
+  var all        = !!(sel.all && sel.all.all === true);
+  window["__autoMonStor_savedSelection_" + idPrefix] = (byNames || byPatterns || all) ? sel : null;
+
+  function masterBox(value, label, hint, checked) {
+    return '<label style="display:flex;align-items:center;gap:6px;margin-bottom:0.35rem;font-weight:500;cursor:pointer">' +
+             '<input type="checkbox" data-stor-master="1" name="' + idPrefix + 'enable" value="' + value + '"' + (checked ? " checked" : "") + ' style="width:auto"> ' + escapeHtml(label) +
+             (hint ? ' <span style="color:var(--color-text-tertiary);font-weight:400;font-size:0.82rem">— ' + escapeHtml(hint) + '</span>' : '') +
+           '</label>';
+  }
+
+  var namesPanel = '<div id="' + idPrefix + 'panel-names" style="display:' + (byNames ? '' : 'none') + ';margin:0.35rem 0 0.6rem 1.5rem">' +
+    (hasIntegrationId
+      ? '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">' +
+          '<button type="button" class="btn btn-secondary" id="' + idPrefix + 'reload" style="font-size:0.78rem;padding:4px 10px">Refresh from latest discovery</button>' +
+          '<span class="hint" id="' + idPrefix + 'names-counter" style="margin:0">Selected: 0</span>' +
+        '</div>' +
+        '<div id="' + idPrefix + 'names-list" style="max-height:240px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
+          '<p class="hint" style="margin:0">Loading…</p>' +
+        '</div>' +
+        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from mounts already reported by agents on this integration\'s ' + escapeHtml(kindLabel) + 's. Examples: <code>/</code>, <code>/var</code>, <code>C:</code>.</p>'
+      : '<p class="hint" style="margin:0;color:var(--color-warning)">Save the integration and let agents report first — mounts are aggregated from already-discovered devices.</p>'
+    ) +
+  '</div>';
+
+  var patternText = byPatterns ? byPatterns.patterns.join("\n") : "";
+  var patternIsRegex = !!(byPatterns && byPatterns.regex === true);
+  var patternsExample = patternIsRegex ? '^/var(/.*)?$&#10;^C:$' : '/var*&#10;C:';
+  var patternsPanel = '<div id="' + idPrefix + 'panel-patterns" style="display:' + (byPatterns ? '' : 'none') + ';margin:0.35rem 0 0.6rem 1.5rem">' +
+    '<div style="display:flex;align-items:center;gap:1.25rem;margin-bottom:0.4rem;font-size:0.86rem">' +
+      '<label style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer">' +
+        '<input type="radio" name="' + idPrefix + 'patterns-mode" value="wildcard"' + (patternIsRegex ? "" : " checked") + ' style="width:auto"> Wildcard' +
+        ' <span class="hint" style="margin:0;font-size:0.78rem">(<code>*</code> any, <code>?</code> one)</span>' +
+      '</label>' +
+      '<label style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer">' +
+        '<input type="radio" name="' + idPrefix + 'patterns-mode" value="regex"' + (patternIsRegex ? " checked" : "") + ' style="width:auto"> Regex' +
+      '</label>' +
+    '</div>' +
+    '<div class="form-group" style="margin-bottom:0.4rem">' +
+      '<textarea id="' + idPrefix + 'patterns" rows="3" style="font-family:monospace;font-size:0.85rem;width:100%" placeholder="' + patternsExample + '">' + escapeHtml(patternText) + '</textarea>' +
+    '</div>' +
+  '</div>';
+
+  var allPanel = '<div id="' + idPrefix + 'panel-all" style="display:' + (all ? '' : 'none') + ';margin:0.1rem 0 0.6rem 1.5rem">' +
+    '<p class="hint" style="margin:0;font-size:0.8rem">Every mount observed on each device gets pinned. Strictly additive across cycles.</p>' +
+  '</div>';
+
+  var previewPanel = '<div id="' + idPrefix + 'preview" class="form-group" style="margin-top:0.8rem;padding:0.5rem 0.7rem;background:var(--color-bg-tertiary);border-radius:var(--radius-sm);border:1px solid var(--color-border);font-size:0.84rem;color:var(--color-text-secondary);min-height:1.4em">' +
+    (hasIntegrationId ? '<em>Enable a block to preview matches.</em>' : '<em>Preview becomes available after the integration is saved and agents report.</em>') +
+  '</div>';
+
+  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Auto-monitor storage</p>' +
+    '<div style="background:rgba(79,195,247,0.06);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.2rem 0">Pin storage mounts on every ' + escapeHtml(kindLabel) + ' discovered by this integration. Selected mounts are re-walked on the fast cadence. Operator-pinned mounts on individual assets are preserved.</p>' +
+      '<p class="hint" style="margin:0 0 0.6rem 0;font-size:0.78rem">Strictly additive — removing a selection here does <strong>not</strong> unpin mounts already pinned on existing assets.</p>' +
+      masterBox("names",    "By mount name", "explicit mounts reported by agents",   !!byNames) +
+      namesPanel +
+      masterBox("patterns", "By pattern",    "wildcard or regex match on mount path", !!byPatterns) +
+      patternsPanel +
+      masterBox("all",      "All mounts",    "pin every observed mount",              all) +
+      allPanel +
+      previewPanel +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
+}
+
+// Reads the storage card into an AutoMonitorStorageSelection or null. Returns
+// undefined when the card didn't render (subtab never opened).
+function _readAutoMonitorStorage(idPrefix) {
+  var masters = document.getElementsByName(idPrefix + "enable");
+  if (!masters || masters.length === 0) return undefined;
+  var enabled = { names: false, patterns: false, all: false };
+  for (var m = 0; m < masters.length; m++) { if (masters[m].checked) enabled[masters[m].value] = true; }
+  var out = {};
+  if (enabled.names) {
+    var checks = document.querySelectorAll('input[data-stor-name-checkbox="1"][data-prefix="' + idPrefix + '"]:checked');
+    var names = [];
+    for (var j = 0; j < checks.length; j++) names.push(checks[j].value);
+    if (names.length > 0) out.byNames = { names: names };
+  }
+  if (enabled.patterns) {
+    var ta = document.getElementById(idPrefix + "patterns");
+    var raw = ta ? String(ta.value || "") : "";
+    var patterns = raw.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+    if (patterns.length > 0) {
+      var modeRadios = document.getElementsByName(idPrefix + "patterns-mode");
+      var isRegex = false;
+      for (var r = 0; r < modeRadios.length; r++) { if (modeRadios[r].checked && modeRadios[r].value === "regex") { isRegex = true; break; } }
+      out.byPatterns = { patterns: patterns, regex: isRegex };
+    }
+  }
+  if (enabled.all) out.all = { all: true };
+  if (!out.byNames && !out.byPatterns && !out.all) return null;
+  return out;
+}
+
+// ─── Agent Auto-Deploy card (AD / Entra workstation+server) ────────────────
+// Toggle + SSH/WinRM credential pickers + max-concurrent. Default OFF, with a
+// prominent warning: enabling pushes the Polaris Agent to every newly-
+// discovered, agent-less device of this class during discovery.
+function _agentDeployHTML(idPrefix, kindLabel, currentCfg, credentials) {
+  var cfg = currentCfg && typeof currentCfg === "object" ? currentCfg : null;
+  var enabled = !!(cfg && cfg.enabled === true);
+  var maxConc = (cfg && Number.isFinite(cfg.maxConcurrent)) ? cfg.maxConcurrent : 4;
+  function credSelect(type, label, selectId, selectedId) {
+    var rows = (credentials || []).filter(function (c) { return c.type === type; });
+    var options = '<option value="">— none —</option>' +
+      rows.map(function (c) {
+        var s = (selectedId && c.id === selectedId) ? " selected" : "";
+        return '<option value="' + escapeHtml(c.id) + '"' + s + '>' + escapeHtml(c.name) + '</option>';
+      }).join("");
+    var emptyHint = rows.length === 0
+      ? '<p class="hint" style="color:var(--color-warning);margin:0.2rem 0 0 0">No ' + escapeHtml(label) + ' credentials defined — add one under Server Settings &gt; Credentials.</p>' : '';
+    return '<div class="form-group" style="margin-bottom:0.6rem">' +
+        '<label>' + escapeHtml(label) + ' credential</label>' +
+        '<select id="' + selectId + '">' + options + '</select>' + emptyHint +
+      '</div>';
+  }
+  var bodyHidden = enabled ? "" : "display:none";
+  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Agent auto-deploy</p>' +
+    '<div style="background:rgba(255,193,7,0.06);border:1px solid rgba(255,193,7,0.3);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<input type="checkbox" id="' + idPrefix + 'enabled" ' + (enabled ? "checked" : "") + ' style="width:auto">' +
+        '<label for="' + idPrefix + 'enabled" style="margin:0;font-weight:500">Auto-deploy the Polaris Agent to discovered ' + escapeHtml(kindLabel) + 's</label>' +
+      '</div>' +
+      '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-warning)">⚠ Pushes the Polaris Agent over SSH/WinRM to every newly-discovered, agent-less ' + escapeHtml(kindLabel) + ' during discovery. Test on a small OU first; a human should review rollout scope before enabling fleet-wide. Rollout is paced — at most a few new installs per discovery cycle.</p>' +
+      '<div id="' + idPrefix + 'body" style="' + bodyHidden + '">' +
+        '<p class="hint" style="margin:0 0 0.5rem 0;font-size:0.8rem">Platform is inferred from each device\'s OS. Windows uses WinRM (or SSH if no WinRM credential); Linux/macOS use SSH.</p>' +
+        credSelect("ssh",   "SSH",   idPrefix + "sshCredentialId",   cfg ? cfg.sshCredentialId   : null) +
+        credSelect("winrm", "WinRM", idPrefix + "winrmCredentialId", cfg ? cfg.winrmCredentialId : null) +
+        '<div class="form-group" style="margin-bottom:0">' +
+          '<label>Max concurrent installs per cycle</label>' +
+          '<input type="number" id="' + idPrefix + 'maxConcurrent" min="1" max="20" value="' + maxConc + '" style="width:90px">' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+}
+
+// Reads the agent-deploy card into an agentDeploy block or null. Returns
+// undefined when the card didn't render. When the toggle is off but a config
+// existed, we still return {enabled:false,...} so the operator's stored
+// credential picks survive a save with the feature toggled off.
+function _readAgentDeploy(idPrefix) {
+  var toggle = document.getElementById(idPrefix + "enabled");
+  if (!toggle) return undefined;
+  var ssh = document.getElementById(idPrefix + "sshCredentialId");
+  var winrm = document.getElementById(idPrefix + "winrmCredentialId");
+  var maxEl = document.getElementById(idPrefix + "maxConcurrent");
+  var maxConcurrent = maxEl ? parseInt(maxEl.value, 10) : 4;
+  if (!Number.isFinite(maxConcurrent) || maxConcurrent < 1) maxConcurrent = 4;
+  if (maxConcurrent > 20) maxConcurrent = 20;
+  return {
+    enabled:           toggle.checked === true,
+    sshCredentialId:   (ssh && ssh.value)   ? ssh.value   : null,
+    winrmCredentialId: (winrm && winrm.value) ? winrm.value : null,
+    maxConcurrent:     maxConcurrent,
+  };
+}
+
+// Wires the storage card: master-toggle panel visibility, lazy aggregate load
+// for the "By name" checklist, and a debounced live preview. Mirrors the
+// interface card's wiring but with the storage endpoints + selection shape.
+function _wireAutoMonitorStorageCard(idPrefix, klass, integrationId) {
+  var masters = document.getElementsByName(idPrefix + "enable");
+  if (!masters || masters.length === 0) return;
+  var panels = {
+    names:    document.getElementById(idPrefix + "panel-names"),
+    patterns: document.getElementById(idPrefix + "panel-patterns"),
+    all:      document.getElementById(idPrefix + "panel-all"),
+  };
+  var preview = document.getElementById(idPrefix + "preview");
+  var aggregateLoaded = false;
+
+  function updateCounter() {
+    var counter = document.getElementById(idPrefix + "names-counter");
+    if (!counter) return;
+    var total = document.querySelectorAll('input[data-stor-name-checkbox="1"][data-prefix="' + idPrefix + '"]').length;
+    var picked = document.querySelectorAll('input[data-stor-name-checkbox="1"][data-prefix="' + idPrefix + '"]:checked').length;
+    counter.textContent = "Selected: " + picked + " / " + total;
+  }
+
+  function renderNamesList(rows) {
+    var listEl = document.getElementById(idPrefix + "names-list");
+    if (!listEl) return;
+    var existingChecked = new Set();
+    var existing = document.querySelectorAll('input[data-stor-name-checkbox="1"][data-prefix="' + idPrefix + '"]:checked');
+    for (var i = 0; i < existing.length; i++) existingChecked.add(existing[i].value);
+    var seed = window["__autoMonStor_seed_" + idPrefix];
+    if (seed && seed.length) seed.forEach(function (n) { existingChecked.add(n); });
+    if (rows.length === 0) {
+      listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-warning)">No mount samples yet. Once agents report storage on each discovered device, mounts appear here.</p>';
+    } else {
+      listEl.innerHTML = rows.map(function (r) {
+        var checked = existingChecked.has(r.mountPath) ? " checked" : "";
+        return '<label style="display:flex;align-items:center;gap:6px;padding:2px 0;font-size:0.86rem">' +
+                 '<input type="checkbox" data-stor-name-checkbox="1" data-prefix="' + idPrefix + '" value="' + escapeHtml(r.mountPath) + '"' + checked + ' style="width:auto">' +
+                 '<span style="font-family:monospace">' + escapeHtml(r.mountPath) + '</span>' +
+                 '<span class="hint" style="margin:0 0 0 auto;font-size:0.78rem">' + r.deviceCount + ' device' + (r.deviceCount === 1 ? "" : "s") + '</span>' +
+               '</label>';
+      }).join("");
+    }
+    var boxes = listEl.querySelectorAll('input[data-stor-name-checkbox="1"]');
+    for (var b = 0; b < boxes.length; b++) boxes[b].addEventListener("change", function () { updateCounter(); schedulePreview(); });
+    updateCounter();
+    schedulePreview();
+  }
+
+  function loadAggregate(force) {
+    if (!integrationId) return;
+    if (!force && aggregateLoaded) return;
+    var listEl = document.getElementById(idPrefix + "names-list");
+    if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0">Loading…</p>';
+    api.integrations.storageAggregate(integrationId, klass).then(function (resp) {
+      aggregateLoaded = true;
+      renderNamesList((resp && resp.rows) || []);
+    }).catch(function (err) {
+      if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-error)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
+    });
+  }
+
+  function syncMasterVisibility() {
+    for (var m = 0; m < masters.length; m++) {
+      var checked = masters[m].checked;
+      var key = masters[m].value;
+      if (panels[key]) panels[key].style.display = checked ? "" : "none";
+      if (key === "names" && checked && !aggregateLoaded && integrationId) loadAggregate();
+    }
+  }
+
+  var previewTimer = null;
+  function schedulePreview() {
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(runPreview, 250);
+  }
+  function runPreview() {
+    if (!preview) return;
+    if (!integrationId) { preview.innerHTML = '<em>Preview becomes available after the integration is saved and agents report.</em>'; return; }
+    var selection = _readAutoMonitorStorage(idPrefix);
+    if (!selection) { preview.innerHTML = '<em>Enable a block and add at least one value to preview matches.</em>'; return; }
+    api.integrations.storageAggregatePreview(integrationId, { class: klass, selection: selection }).then(function (r) {
+      if (!r || r.deviceCount === 0) { preview.innerHTML = '<em>No mounts match yet.</em>'; return; }
+      var sample = (r.sampleDevices || []).map(function (d) { return escapeHtml(d.hostname || "(unnamed)") + " (" + d.pinNames.length + ")"; }).join(", ");
+      preview.innerHTML = '<strong>' + r.mountCount + '</strong> mount(s) across <strong>' + r.deviceCount + '</strong> device(s)' + (sample ? ' — e.g. ' + sample : '');
+    }).catch(function (err) {
+      preview.innerHTML = '<span style="color:var(--color-error)">Preview failed: ' + escapeHtml(err.message || "unknown error") + '</span>';
+    });
+  }
+
+  for (var m = 0; m < masters.length; m++) masters[m].addEventListener("change", function () { syncMasterVisibility(); schedulePreview(); });
+  var ta = document.getElementById(idPrefix + "patterns");
+  if (ta) ta.addEventListener("input", schedulePreview);
+  var modeRadios = document.getElementsByName(idPrefix + "patterns-mode");
+  for (var mr = 0; mr < modeRadios.length; mr++) modeRadios[mr].addEventListener("change", schedulePreview);
+  var reload = document.getElementById(idPrefix + "reload");
+  if (reload) reload.addEventListener("click", function () { loadAggregate(true); });
+  syncMasterVisibility();
+  // Wire the agent-deploy toggle to reveal its body. The deploy card shares the
+  // ws/server subtab; its prefix swaps -stor- → -deploy-.
+  var deployPrefix = idPrefix.replace(/-stor-$/, "-deploy-");
+  var deployToggle = document.getElementById(deployPrefix + "enabled");
+  var deployBody = document.getElementById(deployPrefix + "body");
+  if (deployToggle && deployBody) {
+    deployToggle.addEventListener("change", function () { deployBody.style.display = deployToggle.checked ? "" : "none"; });
+  }
 }
 
 // Wires change-listeners on a freshly-rendered auto-monitor card. Toggles
@@ -2199,16 +2485,27 @@ function monitorSettingsFormHTML(s, opts) {
   var serverCfg      = opts.serverMonitor     || { addAsMonitored: false, autoMonitorInterfaces: null };
 
   // Stash auto-monitor name seeds for the lazy-loaded checklists.
+  function _amonSeedNames(sel) {
+    if (!sel) return [];
+    if (sel.byNames && Array.isArray(sel.byNames.names)) return sel.byNames.names.slice();
+    if (sel.mode === "names" && Array.isArray(sel.names)) return sel.names.slice();
+    return [];
+  }
+  // Storage "By name" seed — only the byNames block carries mount names.
+  function _storSeedNames(sel) {
+    if (sel && sel.byNames && Array.isArray(sel.byNames.names)) return sel.byNames.names.slice();
+    return [];
+  }
   if (typeof window !== "undefined" && isFmgFgt) {
-    function _amonSeedNames(sel) {
-      if (!sel) return [];
-      if (sel.byNames && Array.isArray(sel.byNames.names)) return sel.byNames.names.slice();
-      if (sel.mode === "names" && Array.isArray(sel.names)) return sel.names.slice();
-      return [];
-    }
     window["__autoMon_seed_f-mon-fortigate-amon-"]   = _amonSeedNames(fwFgCfg.autoMonitorInterfaces);
     window["__autoMon_seed_f-mon-fortiswitch-amon-"] = _amonSeedNames(fwSwCfg.autoMonitorInterfaces);
     window["__autoMon_seed_f-mon-fortiap-amon-"]     = _amonSeedNames(fwApCfg.autoMonitorInterfaces);
+  }
+  if (typeof window !== "undefined" && (integrationType === "activedirectory" || integrationType === "entraid")) {
+    window["__autoMon_seed_f-mon-workstation-amon-"] = _amonSeedNames(workstationCfg.autoMonitorInterfaces);
+    window["__autoMon_seed_f-mon-server-amon-"]      = _amonSeedNames(serverCfg.autoMonitorInterfaces);
+    window["__autoMonStor_seed_f-mon-workstation-stor-"] = _storSeedNames(workstationCfg.autoMonitorStorage);
+    window["__autoMonStor_seed_f-mon-server-stor-"]      = _storSeedNames(serverCfg.autoMonitorStorage);
   }
 
   // Class subtab header content (Discovery defaults at top, then optional
@@ -2303,32 +2600,47 @@ function monitorSettingsFormHTML(s, opts) {
           _classDirectPollHTML("f-mon-fortiap-", "FortiAP", credentials, fwApCfg.enabled === true, fwApCfg.snmpCredentialId || null, fwApCfg.sshCredentialId || null) +
         '</section>';
     }
-    // AD / Entra / Windows Server Workstations + Servers subtabs. Currently
-    // these integrations always discover (no `enabled` toggle) and the
-    // addAsMonitored flag is persisted but NOT yet consulted by the AD /
-    // Entra / WinSrv discovery code — a backend follow-up will wire it.
-    // Auto-Monitor Interfaces is the FortiGate-discovery feature; surface
-    // it on workstations/servers would mislead since AD/Entra-discovered
-    // endpoints don't have an authoritative interface roster to apply
-    // against, so we omit that card entirely here.
+    // AD / Entra Workstations + Servers subtabs. addAsMonitored is honored by
+    // discovery (monitorOverrideService); when it's on, the Auto-Monitor
+    // Interfaces + Storage cards become available (gated like the FortiGate
+    // branch). These devices report interfaces/mounts via the Polaris Agent, so
+    // the pickers populate only after agents are deployed and reporting; the
+    // discovery-time apply pass pins whatever exists each cycle. Below the
+    // monitoring cards sits the Agent Auto-Deploy card (independent of
+    // addAsMonitored — deploying the agent IS how these devices get monitored).
+    // WindowsServer keeps the simple addAsMonitored-only card (no agent deploy
+    // / auto-monitor wiring on that path yet).
+    var wsLikeAdEntra = (integrationType === "activedirectory" || integrationType === "entraid");
     if (klass === "workstations" || klass === "workstation") {
+      if (!wsLikeAdEntra) {
+        return '<section style="margin-bottom:1.25rem">' + autoMonitoringHeader() +
+          _classAddAsMonitoredHTML("f-mon-workstation-", "workstation", workstationCfg.addAsMonitored === true) + '</section>';
+      }
+      var wsWrapHidden = (workstationCfg.addAsMonitored === true) ? "" : "display:none";
       return '<section style="margin-bottom:1.25rem">' +
           autoMonitoringHeader() +
           _classAddAsMonitoredHTML("f-mon-workstation-", "workstation", workstationCfg.addAsMonitored === true) +
-          '<p class="hint" style="margin:-0.25rem 0 0 0;color:var(--color-text-tertiary)">' +
-            "Flag is persisted today but not yet honored by discovery — a backend follow-up will wire it. " +
-            "In the meantime, flip <code>monitored</code> per-asset from the assets table." +
-          '</p>' +
+          '<div id="f-mon-workstation-automon-wrap" style="' + wsWrapHidden + '">' +
+            _autoMonitorInterfacesHTML("f-mon-workstation-amon-", "workstation", workstationCfg.autoMonitorInterfaces || null, "names", hasId, { hideLldp: true }) +
+            _autoMonitorStorageHTML("f-mon-workstation-stor-", "workstation", workstationCfg.autoMonitorStorage || null, hasId) +
+          '</div>' +
+          _agentDeployHTML("f-mon-workstation-deploy-", "workstation", workstationCfg.agentDeploy || null, credentials) +
         '</section>';
     }
     if (klass === "servers" || klass === "server") {
+      if (!wsLikeAdEntra) {
+        return '<section style="margin-bottom:1.25rem">' + autoMonitoringHeader() +
+          _classAddAsMonitoredHTML("f-mon-server-", "server", serverCfg.addAsMonitored === true) + '</section>';
+      }
+      var srvWrapHidden = (serverCfg.addAsMonitored === true) ? "" : "display:none";
       return '<section style="margin-bottom:1.25rem">' +
           autoMonitoringHeader() +
           _classAddAsMonitoredHTML("f-mon-server-", "server", serverCfg.addAsMonitored === true) +
-          '<p class="hint" style="margin:-0.25rem 0 0 0;color:var(--color-text-tertiary)">' +
-            "Flag is persisted today but not yet honored by discovery — a backend follow-up will wire it. " +
-            "In the meantime, flip <code>monitored</code> per-asset from the assets table." +
-          '</p>' +
+          '<div id="f-mon-server-automon-wrap" style="' + srvWrapHidden + '">' +
+            _autoMonitorInterfacesHTML("f-mon-server-amon-", "server", serverCfg.autoMonitorInterfaces || null, "names", hasId, { hideLldp: true }) +
+            _autoMonitorStorageHTML("f-mon-server-stor-", "server", serverCfg.autoMonitorStorage || null, hasId) +
+          '</div>' +
+          _agentDeployHTML("f-mon-server-deploy-", "server", serverCfg.agentDeploy || null, credentials) +
         '</section>';
     }
     return "";
@@ -2566,19 +2878,25 @@ function _wireMonitoringTabSubtabs(integrationType) {
     // (fortigate / fortiswitch / fortiap) has its own checkbox + its own
     // wrapper id; classes without one (AD / Entra / WinSrv) skip this.
     var addAsMonitoredId = null;
+    var automonPrefix = null; // DOM id prefix for this class's addAsMonitored + automon-wrap
     if (integrationType === "fortimanager" || integrationType === "fortigate") {
       if (c.key === "fortigate"   || c.key === "fortiswitch" || c.key === "fortiap") {
-        addAsMonitoredId = "f-mon-" + c.key + "-addAsMonitored";
+        automonPrefix = "f-mon-" + c.key + "-";
       }
+    } else if (integrationType === "activedirectory" || integrationType === "entraid") {
+      // Spec keys are plural (workstations / servers); DOM ids use singular.
+      if (c.key === "workstations") automonPrefix = "f-mon-workstation-";
+      else if (c.key === "servers") automonPrefix = "f-mon-server-";
     }
+    if (automonPrefix) addAsMonitoredId = automonPrefix + "addAsMonitored";
     if (addAsMonitoredId) {
-      var automonWrapId = "f-mon-" + c.key + "-automon-wrap";
+      var automonWrapId = automonPrefix + "automon-wrap";
       var addEl = document.getElementById(addAsMonitoredId);
       var automonWrapEl = document.getElementById(automonWrapId);
       if (addEl && automonWrapEl) {
-        addEl.addEventListener("change", function () {
-          automonWrapEl.style.display = addEl.checked ? "" : "none";
-        });
+        (function (a, w) {
+          a.addEventListener("change", function () { w.style.display = a.checked ? "" : "none"; });
+        })(addEl, automonWrapEl);
       }
     }
   });
@@ -2677,6 +2995,19 @@ function wireAutoMonitorCards(integrationId) {
   _wireAutoMonitorCard("f-mon-fortigate-amon-",   "fortigate",   integrationId || null);
   _wireAutoMonitorCard("f-mon-fortiswitch-amon-", "fortiswitch", integrationId || null);
   _wireAutoMonitorCard("f-mon-fortiap-amon-",     "fortiap",     integrationId || null);
+}
+
+// AD/Entra analog: wire the Workstations + Servers subtab cards (interface
+// auto-monitor reused with hideLldp, storage auto-monitor, agent auto-deploy).
+// Safe to call with null integrationId (Create modal) — previews/aggregates are
+// suppressed inside the wiring helpers. The interface cards use the shared
+// _wireAutoMonitorCard with the workstation/server class param so the aggregate
+// + preview endpoints dispatch on assetType.
+function wireWorkstationServerCards(integrationId) {
+  _wireAutoMonitorCard("f-mon-workstation-amon-", "workstation", integrationId || null);
+  _wireAutoMonitorCard("f-mon-server-amon-",      "server",      integrationId || null);
+  _wireAutoMonitorStorageCard("f-mon-workstation-stor-", "workstation", integrationId || null);
+  _wireAutoMonitorStorageCard("f-mon-server-stor-",      "server",      integrationId || null);
 }
 
 // Reads the eight integration-tier cadence + retention fields from the
@@ -2937,9 +3268,19 @@ function _readFortigateMonitorBlock(prefix, opts) {
 function _readWorkstationServerMonitorBlock(prefix, opts) {
   var addMonEl = document.getElementById(prefix + "addAsMonitored");
   if (!addMonEl) return null;
+  // Interface + storage auto-monitor selections and the agent-deploy block.
+  // Each reader returns undefined when its card never rendered (e.g. the
+  // WindowsServer path or a subtab the operator never opened) — coalesce to
+  // null so the saved block carries an explicit "off" rather than dropping a
+  // previously-stored value silently.
+  var ami = _readAutoMonitorInterfaces(prefix + "amon-");
+  var ams = _readAutoMonitorStorage(prefix + "stor-");
+  var dep = _readAgentDeploy(prefix + "deploy-");
   var out = {
     addAsMonitored: addMonEl.checked === true,
-    autoMonitorInterfaces: null,
+    autoMonitorInterfaces: (ami === undefined ? null : ami),
+    autoMonitorStorage:    (ams === undefined ? null : ams),
+    agentDeploy:           (dep === undefined ? null : dep),
   };
   if (opts && opts.klass) {
     out.streams = _readClassStreamSubtabs(opts.klass, opts.isPrimary === true, true);
@@ -3623,6 +3964,7 @@ async function openCreateModal(type) {
   } else if (isAd || isEntra || isWin) {
     _intWireModalTabs("intg-edit");
     _wireMonitoringTabSubtabs(type);
+    if (isAd || isEntra) wireWorkstationServerCards(null);
     _wireProbeTimeoutWarning();
   }
 
@@ -4027,6 +4369,7 @@ async function openEditModal(id) {
     } else if (isAd || isEntra || isWin) {
       _intWireModalTabs("intg-edit");
       _wireMonitoringTabSubtabs(intg.type);
+      if (isAd || isEntra) wireWorkstationServerCards(id);
       _wireProbeTimeoutWarning();
     }
 

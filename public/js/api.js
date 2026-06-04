@@ -422,6 +422,9 @@ const api = {
     interfaceAggregate:        (id, klass) => request("GET", `/integrations/${id}/interface-aggregate?class=${encodeURIComponent(klass)}`),
     interfaceAggregatePreview: (id, body)  => request("POST", `/integrations/${id}/interface-aggregate/preview`, body),
     interfaceAggregateApply:   (id, klass) => trackedRequest("Applying auto-monitor interfaces", "POST", `/integrations/${id}/interface-aggregate/apply`, { class: klass }),
+    storageAggregate:          (id, klass) => request("GET", `/integrations/${id}/storage-aggregate?class=${encodeURIComponent(klass)}`),
+    storageAggregatePreview:   (id, body)  => request("POST", `/integrations/${id}/storage-aggregate/preview`, body),
+    storageAggregateApply:     (id, klass) => trackedRequest("Applying auto-monitor storage", "POST", `/integrations/${id}/storage-aggregate/apply`, { class: klass }),
     autoMonitorAssetsPreflight: (id, proposed) => request("POST", `/integrations/${id}/auto-monitor-assets/preflight`, { proposed: proposed }),
   },
   monitorSettings: {

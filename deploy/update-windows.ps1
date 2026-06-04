@@ -100,7 +100,9 @@ function Invoke-Rollback {
     if (Test-Path (Join-Path $AppDir "dist")) {
         Remove-Item -Recurse -Force (Join-Path $AppDir "dist") -ErrorAction SilentlyContinue
     }
-    & npx tsc 2>$null
+    # `npm run build` (not bare tsc) so the post-tsc asset copy runs and the
+    # rolled-back dist/ regains its bundled std MIB .txt files.
+    & npm run build 2>$null
 
     # Restore database if migration failed
     if ($FailedAt -match "migration" -and $BackupFile -and (Test-Path $BackupFile)) {
@@ -252,7 +254,10 @@ Write-Step "6/8  Building TypeScript..."
 if (Test-Path (Join-Path $AppDir "dist")) {
     Remove-Item -Recurse -Force (Join-Path $AppDir "dist") -ErrorAction Stop
 }
-& npx tsc
+# `npm run build` (not bare tsc) so scripts/copy-build-assets.mjs runs after
+# the compile and mirrors the bundled std MIB .txt files into dist/ — tsc
+# alone won't emit them and std SNMP-walks would fail post-update.
+& npm run build
 if ($LASTEXITCODE -ne 0) { Invoke-Rollback "TypeScript build" }
 
 Write-Info "Build successful — stopping service for migration"

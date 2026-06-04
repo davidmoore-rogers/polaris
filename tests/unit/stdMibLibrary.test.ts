@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import {
   STD_MIBS,
@@ -11,6 +14,23 @@ describe("stdMibLibrary", () => {
   describe("registry", () => {
     it("lists 7 standard MIBs", () => {
       expect(listStdMibs().length).toBe(7);
+    });
+
+    // Guards the build/deploy bug where the bundled .txt files never made it
+    // into dist/ (tsc doesn't copy assets), so every std walk failed with
+    // "Standard MIB ... is not installed on the server". Every distinct
+    // filename a STD_MIBS def references must exist on disk; the copy step in
+    // scripts/copy-build-assets.mjs then mirrors exactly these into dist/.
+    it("has every declared std MIB file present on disk", () => {
+      const stdMibsDir = join(
+        dirname(fileURLToPath(import.meta.url)),
+        "../../src/services/stdMibs",
+      );
+      const filenames = [...new Set(STD_MIBS.map((m) => m.filename))];
+      expect(filenames.length).toBeGreaterThan(0);
+      for (const filename of filenames) {
+        expect(existsSync(join(stdMibsDir, filename)), `missing std MIB file: ${filename}`).toBe(true);
+      }
     });
 
     it("returns null for unknown keys", () => {

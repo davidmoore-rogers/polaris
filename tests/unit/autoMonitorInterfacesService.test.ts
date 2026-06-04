@@ -11,6 +11,7 @@ import {
   compileWildcard,
   compilePattern,
   resolvePinnedInterfaces,
+  splitPinsByProvenance,
   coerceLegacySelection,
   mergeTunnelsIntoInterfaces,
   type ResolverInterface,
@@ -360,8 +361,8 @@ describe("mergeTunnelsIntoInterfaces", () => {
     ]);
     mergeTunnelsIntoInterfaces(ifaces, tunnels);
     const list = ifaces.get("a1")!;
-    expect(list).toContainEqual({ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up" });
-    expect(list).toContainEqual({ ifName: "VPN_DR", ifType: "tunnel", operStatus: "up" });
+    expect(list).toContainEqual({ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true });
+    expect(list).toContainEqual({ ifName: "VPN_DR", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true });
     expect(list).toHaveLength(3);
   });
 
@@ -369,17 +370,43 @@ describe("mergeTunnelsIntoInterfaces", () => {
     const ifaces = new Map<string, ResolverInterface[]>();
     const tunnels = new Map<string, TunnelObservation[]>([["a1", [tn("VPN_HQ")]]]);
     mergeTunnelsIntoInterfaces(ifaces, tunnels);
-    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up" }]);
+    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true }]);
   });
 
-  it("de-dupes against a tunnel SNMP already captured as a real interface", () => {
+  it("on a name collision, overrides the real row with the authoritative SA status (no duplicate)", () => {
     const ifaces = new Map<string, ResolverInterface[]>([
-      ["a1", [iface("VPN_HQ", "tunnel", false)]], // real IF-MIB row, down
+      ["a1", [iface("VPN_HQ", "tunnel", false)]], // real IF-MIB row, reports down
     ]);
     const tunnels = new Map<string, TunnelObservation[]>([["a1", [tn("VPN_HQ", "up")]]]);
     mergeTunnelsIntoInterfaces(ifaces, tunnels);
-    // No duplicate added; the existing real row is preserved as-is.
-    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "down" }]);
+    // No duplicate; the single row is overridden to the SA status ("up") and tagged IPsec.
+    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true }]);
+  });
+
+  it("SA status wins over an always-up SNMP IF-MIB row — a down tunnel becomes operStatus down", () => {
+    // The reported bug: SNMP IF-MIB reports an IPsec tunnel interface as always
+    // "up" regardless of SA state. The IPsec SA status ("down") must override so
+    // onlyUp correctly excludes it.
+    const ifaces = new Map<string, ResolverInterface[]>([
+      ["a1", [iface("Overlay-1", "tunnel", true)]], // SNMP says up (lies)
+    ]);
+    mergeTunnelsIntoInterfaces(ifaces, new Map([["a1", [tn("Overlay-1", "down")]]]));
+    const list = ifaces.get("a1")!;
+    expect(list).toEqual([{ ifName: "Overlay-1", ifType: "tunnel", operStatus: "down", isIpsecTunnel: true }]);
+    // onlyUp without includeDownTunnels now correctly drops the down tunnel.
+    expect(resolvePinnedInterfaces({ byTypes: { types: ["tunnel"], onlyUp: true } }, list)).toEqual([]);
+    // includeDownTunnels still rescues it, and it routes to the IPsec field.
+    const picked = resolvePinnedInterfaces({ byTypes: { types: ["tunnel"], onlyUp: true, includeDownTunnels: true } }, list);
+    expect(picked).toEqual(["Overlay-1"]);
+    expect(splitPinsByProvenance(picked, list)).toEqual({ interfaces: [], ipsecTunnels: ["Overlay-1"] });
+  });
+
+  it("fills ifType when the colliding real row had a null ifType", () => {
+    const ifaces = new Map<string, ResolverInterface[]>([
+      ["a1", [{ ifName: "VPN_X", ifType: null, operStatus: "up" }]],
+    ]);
+    mergeTunnelsIntoInterfaces(ifaces, new Map([["a1", [tn("VPN_X", "down")]]]));
+    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_X", ifType: "tunnel", operStatus: "down", isIpsecTunnel: true }]);
   });
 
   it("maps only fully-down status to operStatus down; up/partial/dynamic → up", () => {
@@ -421,5 +448,83 @@ describe("mergeTunnelsIntoInterfaces", () => {
     expect(
       resolvePinnedInterfaces({ byTypes: { types: ["tunnel"], onlyUp: false } }, list).sort(),
     ).toEqual(["VPN_DR", "VPN_HQ"]);
+  });
+});
+
+describe("splitPinsByProvenance", () => {
+  it("routes synthetic IPsec tunnel rows to ipsecTunnels, real rows to interfaces", () => {
+    const ifs: ResolverInterface[] = [
+      iface("wan1", "physical"),
+      iface("vlan100", "vlan"),
+      { ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true },
+      { ifName: "VPN_DR", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true },
+    ];
+    const picked = ["wan1", "vlan100", "VPN_HQ", "VPN_DR"];
+    const out = splitPinsByProvenance(picked, ifs);
+    expect(out.interfaces.sort()).toEqual(["vlan100", "wan1"]);
+    expect(out.ipsecTunnels.sort()).toEqual(["VPN_DR", "VPN_HQ"]);
+  });
+
+  it("treats a real IF-MIB tunnel row (no isIpsecTunnel) as an interface, not an IPsec tunnel", () => {
+    // On an SNMP gate, a tunnel comes from IF-MIB as a real row — it must stay
+    // in monitoredInterfaces, not get routed to monitoredIpsecTunnels.
+    const ifs: ResolverInterface[] = [iface("tun0", "tunnel")]; // real row, isIpsecTunnel undefined
+    const out = splitPinsByProvenance(["tun0"], ifs);
+    expect(out.interfaces).toEqual(["tun0"]);
+    expect(out.ipsecTunnels).toEqual([]);
+  });
+
+  it("only routes picked names — unpicked tunnels don't appear", () => {
+    const ifs: ResolverInterface[] = [
+      iface("wan1", "physical"),
+      { ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true },
+    ];
+    const out = splitPinsByProvenance(["wan1"], ifs);
+    expect(out.interfaces).toEqual(["wan1"]);
+    expect(out.ipsecTunnels).toEqual([]);
+  });
+
+  it("defaults an unknown picked name to interfaces (no matching row)", () => {
+    const out = splitPinsByProvenance(["ghost"], [iface("wan1")]);
+    expect(out.interfaces).toEqual(["ghost"]);
+    expect(out.ipsecTunnels).toEqual([]);
+  });
+
+  it("returns empty buckets for an empty pick set", () => {
+    const out = splitPinsByProvenance([], [iface("wan1")]);
+    expect(out).toEqual({ interfaces: [], ipsecTunnels: [] });
+  });
+
+  it("end-to-end: a By type:tunnel pick over a merged list routes tunnels to ipsecTunnels", () => {
+    // Build the same shape the apply path sees: real interfaces + merged tunnels.
+    const byAsset = new Map<string, ResolverInterface[]>([
+      ["a1", [iface("wan1", "physical"), iface("port1", "physical", false)]],
+    ]);
+    mergeTunnelsIntoInterfaces(byAsset, new Map([["a1", [{ tunnelName: "VPN_HQ", status: "up" }]]]));
+    const list = byAsset.get("a1")!;
+    const picked = resolvePinnedInterfaces({ byTypes: { types: ["tunnel"], onlyUp: false } }, list);
+    const out = splitPinsByProvenance(picked, list);
+    expect(out.interfaces).toEqual([]);
+    expect(out.ipsecTunnels).toEqual(["VPN_HQ"]);
+  });
+});
+
+describe("resolver is class-agnostic (workstation/server reuse)", () => {
+  // AD/Entra workstation+server classes reuse this resolver against agent-
+  // reported interfaces (no Fortinet ifTypes). Confirm byNames / byPatterns
+  // work on generic Linux-style ifNames the same way.
+  const wsIfaces: ResolverInterface[] = [
+    { ifName: "eth0", ifType: null, operStatus: "up" },
+    { ifName: "eth1", ifType: null, operStatus: "down" },
+    { ifName: "lo", ifType: null, operStatus: "up" },
+  ];
+  it("byNames works without ifType data", () => {
+    expect(resolvePinnedInterfaces({ byNames: { names: ["eth0", "eth1"] } }, wsIfaces).sort()).toEqual(["eth0", "eth1"]);
+  });
+  it("byPatterns wildcard works on generic ifNames", () => {
+    expect(resolvePinnedInterfaces({ byPatterns: { patterns: ["eth*"], regex: false, onlyUp: false } }, wsIfaces).sort()).toEqual(["eth0", "eth1"]);
+  });
+  it("byPatterns onlyUp filters down interfaces", () => {
+    expect(resolvePinnedInterfaces({ byPatterns: { patterns: ["eth*"], regex: false, onlyUp: true } }, wsIfaces)).toEqual(["eth0"]);
   });
 });

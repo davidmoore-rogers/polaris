@@ -182,6 +182,8 @@ Rate limiting: 10 login attempts / 15 min per IP. Azure SAML SSO is optional; us
 
 Five integration types feed discovery: **FortiManager** (multi-FortiGate via FMG; proxy or direct realtime per `useProxy`), **standalone FortiGate** (single device via REST), **Entra ID / Intune** (Microsoft Graph), **on-prem Active Directory** (LDAP/LDAPS), and **Windows Server** (WinRM DHCP). All produce assets and (for FMG/FortiGate) subnets / reservations / VIPs. Discovery is triggered manually or by `discoveryScheduler.ts` on each integration's `pollInterval`.
 
+The **AD/Entra** Monitoring-tab Workstations/Servers subtabs additionally support, per class: **agent auto-deploy** (opt-in, default off — pushes the Polaris Agent to newly-discovered, agent-less devices over SSH/WinRM during discovery, bounded + paced + idempotent; `agentAutoDeployService.ts`) and **interface + storage auto-monitor** (`autoMonitorInterfacesService` reused for the `workstation`/`server` classes + new `autoMonitorStorageService` pinning `Asset.monitoredStorage`). Both run as post-sync passes in `runDiscovery`. Storage auto-monitor is AD/Entra-only (not on the Fortinet classes). Since these devices only report interfaces/mounts via the agent, auto-monitor pins land the cycle after the agent first reports — self-healing.
+
 Assets converge via the multi-source model: every discovery pathway upserts `AssetSource` rows keyed on `(sourceKind, externalId)`, then `projectAssetFromSources()` derives the projected Asset row (hostname, serialNumber, manufacturer, model, os, osVersion, learnedLocation, ipAddress, lat/long, snmpLocation, learnedAddress) by priority — `polaris-agent` (host-truth) > AD-FQDN > Intune > Entra > FortiGate sources. Inline writers still update `Asset.macAddress` / `assetType` / operator-owned fields.
 
 Hybrid-join detection links AD and Entra/Intune via on-prem SID (`ad.observed.objectSid` ↔ `entra.observed.onPremisesSecurityIdentifier`). Re-discovery key precedence: AssetSource `(sourceKind, externalId)` → SID match → Ethernet MAC match (Entra only) → hostname collision (raises a Conflict).
@@ -217,7 +219,7 @@ Hybrid-join detection links AD and Entra/Intune via on-prem SID (`ad.observed.ob
 
 ## Frontend
 
-Vanilla JavaScript SPA served from `/public/`. No build step — plain ES modules. Multi-page layout with client-side navigation (`app.js`), light/dark theme, real-time discovery polling, bulk operations, PDF/CSV export, conflict resolution slide-over, first-run setup wizard, Device Map with edit-regions polygon mode, five-state Status pill with click-to-toggle, asset details modal (General + System + Sources + SNMP Walk tabs), Server Settings (Credentials / Identification / Maintenance tabs).
+Vanilla JavaScript SPA served from `/public/`. No build step — plain ES modules. Multi-page layout with client-side navigation (`app.js`), light/dark theme, real-time discovery polling, bulk operations, PDF/CSV export, conflict resolution slide-over, first-run setup wizard, Device Map with edit-regions polygon mode, five-state Status pill with click-to-toggle, asset details modal (General + System + Sources + Events + SNMP Walk tabs), Server Settings (Credentials / Identification / Maintenance tabs).
 
 > Detailed UI behavior (asset modal sections, slide-over patterns, persistence keys, MIB Browse + Walk surface, Manufacturer Profiles editor, Capacity Advisor + Sample Retention cards, Device Map region polygon editor): [ARCHITECTURE.md → Frontend](ARCHITECTURE.md#frontend).
 

@@ -2813,6 +2813,13 @@ async function openViewModal(id) {
       tabs.push({ key: "sdwan", label: "SD-WAN", html: _assetSdwanTabHTML(a, sdwanRules, sdwanLinks, sdwanMembers) });
     }
     tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id, sightings, ipHistory) });
+    // Events tab — audit history scoped to this asset (resourceType=asset,
+    // resourceId=a.id). Lazy-loaded on first tab click (see _wireAssetEventsTab)
+    // so the modal doesn't fire an extra /events query on every open. Gated on
+    // events-read to mirror the GET /events backend permission.
+    if (permAtLeast("events", "read")) {
+      tabs.push({ key: "events", label: "Events", html: _assetEventsTabHTML(a.id) });
+    }
     // Custom MIB tab — present whenever the asset's manufacturer has at least
     // one custom widget defined under its ManufacturerProfile. The tab body
     // is rendered async from /assets/:id/custom-widgets; if the manufacturer
@@ -2858,6 +2865,7 @@ async function openViewModal(id) {
     if (isAdmin()) _wireSnmpWalkTab(a);
     if (canManageAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
+    if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
     // Mount the dependency tree into its placeholder div on the General tab.
     var depMount = document.getElementById("asset-dep-tree-mount-" + a.id);
     if (depMount) {
@@ -2975,6 +2983,22 @@ async function openViewModal(id) {
             _loadMonitorHistoryFor(a.id, _currentMonitorSelection(), { silent: true }),
             _loadSystemTabFor(a.id, _currentSystemTabRange(), a, { silent: true }),
           ]);
+
+          // Re-render the Status pill from the freshly-probed asset. probeNow
+          // ran the state machine in recordProbeResult, so monitorStatus may
+          // have flipped (e.g. down → recovering/up). Without this, the pill
+          // keeps showing the stale state the modal opened with even though
+          // everything else on the panel refreshed. Mutate `a` in place so the
+          // cached object every handler closes over (and _currentAssetForRefresh,
+          // which points at it) stays consistent.
+          try {
+            var fresh = await api.assets.get(a.id);
+            if (fresh && _isCurrentAsset(a.id)) {
+              Object.assign(a, fresh);
+              var pillWrap = document.getElementById("asset-status-pill-wrap");
+              if (pillWrap) pillWrap.innerHTML = assetMonitorBadge(a) + _assetOverrideBadge(a);
+            }
+          } catch (e) { /* pill stays as-is; chart/system already refreshed */ }
         } catch (err) {
           showToast(err.message || "Refresh failed", "error");
         } finally {
@@ -6403,8 +6427,12 @@ function assetMonitoringViewHTML(a) {
     '<div class="asset-view-grid">' +
       // Status uses a raw-HTML row because viewRow() escapes its value and
       // would render the badge markup as text.
+      // The pill + override badge live in an id'd wrapper so the Refresh
+      // button's probe-now handler can re-render just the Status after a probe
+      // (a down→up flip would otherwise leave the pill stale). depTestBtn sits
+      // outside the wrapper — a probe never changes the dependency-test state.
       '<div class="detail-row"><span class="detail-label">Status</span>' +
-        '<span class="detail-value">' + probeBtn + pill + overridePill + depTestBtn + '</span></div>' +
+        '<span class="detail-value">' + probeBtn + '<span id="asset-status-pill-wrap">' + pill + overridePill + '</span>' + depTestBtn + '</span></div>' +
       // Last hour intermittency bar — one cell per probe sample, colored
       // by the resolved monitor state at that point. Sits in a single
       // grid column (half the panel); the value cell is flex:1 so the bar
@@ -11234,6 +11262,324 @@ function _ipHistoryTableHTML(rows) {
       '</tr>';
     }).join("") +
     '</tbody></table>';
+}
+
+// ─── Events tab (asset-scoped audit history) ────────────────────────────────
+// Self-contained reimplementation of the Events-page table + change-Detail
+// popup, scoped to one asset (resourceType=asset, resourceId baked into every
+// fetch). events.js is only loaded on events.html, so its renderTable /
+// showEventDetail / TableSF wiring aren't available here — these mirror
+// public/js/events.js. Follows TEMPLATES.md → "Sortable + filterable data
+// table (server-side mode)" + offset pagination outside TableSF, and
+// applyTableLayout for the column resize/chooser (dynamic-table variant).
+var _assetEventsCurrentPage = [];   // current page of rows (Detail lookup by idx)
+var _assetEventsAssetId = null;     // asset this tab is bound to
+var _assetEventsSF = null;          // TableSF instance (server-side mode)
+var _assetEventsLayout = null;      // applyTableLayout handle
+var _assetEventsPageSize = 15;
+var _assetEventsOffset = 0;
+var _assetEventsTotal = 0;
+var _assetEventsLoaded = false;     // lazy-load guard (first tab click)
+
+function _assetEventsTabHTML(assetId) {
+  return '<div class="section-block">' +
+    '<div class="filter-bar" style="justify-content:flex-end;margin-bottom:0.5rem">' +
+      '<label>Show</label>' +
+      '<select id="asset-view-events-pagesize" style="width:auto">' +
+        '<option value="15" selected>15</option>' +
+        '<option value="25">25</option>' +
+        '<option value="50">50</option>' +
+        '<option value="100">100</option>' +
+      '</select>' +
+      '<button class="btn btn-secondary btn-sm" id="asset-view-events-refresh">Refresh</button>' +
+    '</div>' +
+    '<div class="table-wrapper">' +
+      '<table id="asset-view-events-table">' +
+        '<thead><tr>' +
+          '<th style="width:160px" data-col-id="timestamp" data-sf-key="timestamp" data-sf-type="date">Timestamp</th>' +
+          '<th style="width:70px"  data-col-id="level"     data-sf-key="level"     data-sf-type="string" data-sf-options="info|warning|error">Level</th>' +
+          '<th style="width:140px" data-col-id="action"    data-sf-key="action"    data-sf-type="string">Action</th>' +
+          '<th style="width:100px" data-col-id="resource"  data-sf-key="resourceType" data-sf-type="string">Resource</th>' +
+          '<th                      data-col-id="message"  data-sf-key="message"   data-sf-type="string">Message</th>' +
+          '<th style="width:100px" data-col-id="user"      data-sf-key="actor"     data-sf-type="string">User</th>' +
+          '<th style="width:60px"  data-col-id="actions" data-col-required="true"></th>' +
+        '</tr></thead>' +
+        '<tbody id="asset-view-events-tbody">' +
+          '<tr><td colspan="7" class="empty-state">Loading…</td></tr>' +
+        '</tbody>' +
+      '</table>' +
+    '</div>' +
+    '<div id="asset-view-events-pagination" style="display:flex;align-items:center;gap:12px;justify-content:center;padding:1rem 0"></div>' +
+  '</div>';
+}
+
+function _renderAssetEventRow(ev, idx) {
+  var ts = new Date(ev.timestamp);
+  var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
+    " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  var levelClass = "badge-level-" + (ev.level || "info");
+  var levelLabel = (ev.level || "info").toUpperCase();
+
+  var resourceLabel = ev.resourceType || "-";
+  var resourceName = ev.resourceName ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">(' + escapeHtml(ev.resourceName) + ')</span>' : "";
+
+  var detailBtn = ev.details && ev.details.changes
+    ? '<button class="btn btn-secondary btn-sm btn-event-detail" data-event-idx="' + idx + '" style="padding:2px 8px;font-size:0.75rem">Detail</button>'
+    : '';
+
+  return '<tr>' +
+    '<td style="font-family:var(--font-mono);font-size:0.82rem;white-space:nowrap">' + escapeHtml(timeStr) + '</td>' +
+    '<td><span class="badge ' + levelClass + '">' + levelLabel + '</span></td>' +
+    '<td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ev.action || "") + '</td>' +
+    '<td>' + escapeHtml(resourceLabel) + resourceName + '</td>' +
+    '<td>' + escapeHtml(ev.message || "") + '</td>' +
+    '<td>' + escapeHtml(ev.actor || "-") + '</td>' +
+    '<td>' + detailBtn + '</td>' +
+    '</tr>';
+}
+
+// Translate the live TableSF filter + sort state into GET /events params,
+// with resourceType/resourceId pinned to this asset. Mirrors events.js
+// _buildEventsQuery (server-side mode). The Resource column filter is left
+// unwired — every row in this view is resourceType=asset by construction.
+function _buildAssetEventsQuery() {
+  var filters = _assetEventsSF ? _assetEventsSF._filters || {} : {};
+  var params = {
+    resourceType: "asset",
+    resourceId: _assetEventsAssetId,
+    limit: _assetEventsPageSize,
+    offset: _assetEventsOffset,
+  };
+  if (Array.isArray(filters.level) && filters.level.length) params.level = filters.level.join(",");
+
+  function pushText(field, raw) {
+    if (raw == null) return;
+    if (typeof raw === "string") {
+      var v = raw.trim();
+      if (v) params[field] = v;
+    } else if (typeof raw === "object") {
+      if (raw.op === "empty") {
+        params[field + "Op"] = "empty";
+      } else if (raw.op === "notempty") {
+        params[field + "Op"] = "is_not_empty";
+      } else if (raw.op === "not-contains") {
+        var q = (raw.q || "").trim();
+        if (q) { params[field] = q; params[field + "Op"] = "not_contains"; }
+      }
+    }
+  }
+  pushText("action", filters.action);
+  pushText("actor", filters.actor);
+  pushText("message", filters.message);
+
+  if (filters.timestamp && filters.timestamp.type === "date") {
+    if (filters.timestamp.from) params.since = filters.timestamp.from + "T00:00:00";
+    if (filters.timestamp.to)   params.until = filters.timestamp.to   + "T23:59:59.999";
+  }
+  if (_assetEventsSF && _assetEventsSF._sortKey) {
+    params.sortBy = _assetEventsSF._sortKey;
+    params.sortDir = _assetEventsSF._sortDir === "asc" ? "asc" : "desc";
+  }
+  return params;
+}
+
+async function _loadAssetEventsTabFor() {
+  var tbody = document.getElementById("asset-view-events-tbody");
+  if (!tbody || !_assetEventsAssetId) return;
+  try {
+    var data = await api.events.list(_buildAssetEventsQuery());
+    var events = (data && data.events) || [];
+    _assetEventsTotal = (data && data.total) || 0;
+    _assetEventsCurrentPage = events;
+    tbody.innerHTML = events.length
+      ? events.map(_renderAssetEventRow).join("")
+      : '<tr><td colspan="7" class="empty-state">No events found</td></tr>';
+    _renderAssetEventsPagination();
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load events</td></tr>';
+  }
+}
+
+function _renderAssetEventsPagination() {
+  var container = document.getElementById("asset-view-events-pagination");
+  if (!container) return;
+  var total = _assetEventsTotal;
+  var pageSize = _assetEventsPageSize;
+  var totalPages = Math.max(1, Math.ceil(total / pageSize));
+  var currentPage = Math.floor(_assetEventsOffset / pageSize) + 1;
+
+  var pageButtons = "";
+  var startPage = Math.max(1, currentPage - 2);
+  var endPage = Math.min(totalPages, startPage + 4);
+  if (endPage - startPage < 4) startPage = Math.max(1, endPage - 4);
+  if (startPage > 1) {
+    pageButtons += '<button class="btn btn-secondary btn-sm ae-page-btn" data-page="1">1</button>';
+    if (startPage > 2) pageButtons += '<span style="color:var(--color-text-tertiary)">…</span>';
+  }
+  for (var p = startPage; p <= endPage; p++) {
+    pageButtons += p === currentPage
+      ? '<button class="btn btn-primary btn-sm ae-page-btn" data-page="' + p + '" disabled>' + p + '</button>'
+      : '<button class="btn btn-secondary btn-sm ae-page-btn" data-page="' + p + '">' + p + '</button>';
+  }
+  if (endPage < totalPages) {
+    if (endPage < totalPages - 1) pageButtons += '<span style="color:var(--color-text-tertiary)">…</span>';
+    pageButtons += '<button class="btn btn-secondary btn-sm ae-page-btn" data-page="' + totalPages + '">' + totalPages + '</button>';
+  }
+
+  container.innerHTML =
+    '<button class="btn btn-secondary btn-sm ae-page-prev" ' + (currentPage <= 1 ? 'disabled' : '') + '>&laquo; Prev</button>' +
+    pageButtons +
+    '<button class="btn btn-secondary btn-sm ae-page-next" ' + (currentPage >= totalPages ? 'disabled' : '') + '>Next &raquo;</button>' +
+    '<span style="font-size:0.82rem;color:var(--color-text-tertiary);margin-left:8px">' + total + ' events</span>';
+
+  var prev = container.querySelector(".ae-page-prev");
+  if (prev) prev.addEventListener("click", function () {
+    if (_assetEventsOffset >= pageSize) { _assetEventsOffset -= pageSize; _loadAssetEventsTabFor(); }
+  });
+  var next = container.querySelector(".ae-page-next");
+  if (next) next.addEventListener("click", function () {
+    if (_assetEventsOffset + pageSize < total) { _assetEventsOffset += pageSize; _loadAssetEventsTabFor(); }
+  });
+  container.querySelectorAll(".ae-page-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var page = parseInt(btn.getAttribute("data-page"), 10);
+      _assetEventsOffset = (page - 1) * pageSize;
+      _loadAssetEventsTabFor();
+    });
+  });
+}
+
+function _saveAssetEventsPrefs() {
+  if (typeof currentUsername === "undefined" || !currentUsername) return;
+  try {
+    // Layout persistence is handled by applyTableLayout under its own
+    // polaris-table-layout-asset-events-<user> key; here we keep pageSize +
+    // filter/sort state. Not per-asset — operators want one Events-tab view.
+    localStorage.setItem("polaris-prefs-asset-events-" + currentUsername, JSON.stringify({
+      pageSize: _assetEventsPageSize,
+      filters: _assetEventsSF ? _assetEventsSF._filters : null,
+      sort: _assetEventsSF ? { key: _assetEventsSF._sortKey, dir: _assetEventsSF._sortDir } : null,
+    }));
+  } catch (_) {}
+}
+
+function _restoreAssetEventsPrefs() {
+  if (typeof currentUsername === "undefined" || !currentUsername) return;
+  var raw;
+  try { raw = localStorage.getItem("polaris-prefs-asset-events-" + currentUsername); } catch (_) { return; }
+  if (!raw) return;
+  try {
+    var p = JSON.parse(raw);
+    if (p.pageSize) {
+      _assetEventsPageSize = p.pageSize;
+      var ps = document.getElementById("asset-view-events-pagesize");
+      if (ps) ps.value = String(p.pageSize);
+    }
+    if (_assetEventsSF) {
+      if (p.filters && typeof p.filters === "object") _assetEventsSF._filters = p.filters;
+      if (p.sort && typeof p.sort === "object") {
+        if (p.sort.key) _assetEventsSF._sortKey = p.sort.key;
+        if (p.sort.dir === "asc" || p.sort.dir === "desc") _assetEventsSF._sortDir = p.sort.dir;
+      }
+      _assetEventsSF.restoreFilterUI();
+      _assetEventsSF._updateIcons();
+    }
+  } catch (_) {}
+}
+
+function _wireAssetEventsTab(assetId) {
+  // Fresh per modal open — the table DOM was just rebuilt by openViewModal.
+  _assetEventsAssetId = assetId;
+  _assetEventsOffset = 0;
+  _assetEventsTotal = 0;
+  _assetEventsCurrentPage = [];
+  _assetEventsLoaded = false;
+
+  var table = document.getElementById("asset-view-events-table");
+  if (!table) return;
+  _assetEventsLayout = applyTableLayout(table, "asset-events", { onChange: _saveAssetEventsPrefs });
+  // Server-side mode: never call sf.apply(); onChange resets offset + refetches.
+  _assetEventsSF = new TableSF("asset-view-events-tbody", function () {
+    _assetEventsOffset = 0;
+    _loadAssetEventsTabFor();
+    _saveAssetEventsPrefs();
+  });
+  _restoreAssetEventsPrefs();
+
+  var ps = document.getElementById("asset-view-events-pagesize");
+  if (ps) ps.addEventListener("change", function () {
+    _assetEventsPageSize = parseInt(this.value, 10) || 15;
+    _assetEventsOffset = 0;
+    _loadAssetEventsTabFor();
+    _saveAssetEventsPrefs();
+  });
+  var refresh = document.getElementById("asset-view-events-refresh");
+  if (refresh) refresh.addEventListener("click", function () { _loadAssetEventsTabFor(); });
+
+  // Lazy first fetch on first Events-tab click (avoids an extra /events query
+  // on every modal open). Subsequent loads come from TableSF/pagination.
+  var btn = document.querySelector('#asset-view-tabs .page-tab[data-tab="events"]');
+  if (btn) btn.addEventListener("click", function () {
+    if (_assetEventsLoaded) return;
+    _assetEventsLoaded = true;
+    _loadAssetEventsTabFor();
+  });
+
+  var tbody = document.getElementById("asset-view-events-tbody");
+  if (tbody) tbody.addEventListener("click", function (e) {
+    var detailBtn = e.target.closest(".btn-event-detail");
+    if (!detailBtn) return;
+    var idx = parseInt(detailBtn.getAttribute("data-event-idx"), 10);
+    if (_assetEventsCurrentPage[idx]) _showAssetEventDetail(_assetEventsCurrentPage[idx]);
+  });
+}
+
+function _formatEventFieldName(field) {
+  return field.replace(/([A-Z])/g, " $1").replace(/^./, function (c) { return c.toUpperCase(); });
+}
+
+function _formatEventDetailValue(val) {
+  if (Array.isArray(val)) return val.join(", ") || "none";
+  if (val instanceof Object) return JSON.stringify(val);
+  return String(val);
+}
+
+function _showAssetEventDetail(ev) {
+  var changes = ev.details && ev.details.changes ? ev.details.changes : {};
+  var keys = Object.keys(changes);
+  if (!keys.length) return;
+
+  var rows = keys.map(function (field) {
+    var c = changes[field];
+    var from = c.from === null || c.from === "" ? '<span style="color:var(--color-text-tertiary);font-style:italic">empty</span>' : escapeHtml(_formatEventDetailValue(c.from));
+    var to = c.to === null || c.to === "" ? '<span style="color:var(--color-text-tertiary);font-style:italic">empty</span>' : escapeHtml(_formatEventDetailValue(c.to));
+    return '<tr>' +
+      '<td style="font-weight:500;white-space:nowrap">' + escapeHtml(_formatEventFieldName(field)) + '</td>' +
+      '<td style="color:var(--color-danger)">' + from + '</td>' +
+      '<td style="color:var(--color-success)">' + to + '</td>' +
+      '</tr>';
+  }).join("");
+
+  var ts = new Date(ev.timestamp);
+  var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
+    " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  var body =
+    '<div style="margin-bottom:1rem;font-size:0.85rem;color:var(--color-text-secondary)">' +
+      '<span style="font-family:var(--font-mono)">' + escapeHtml(ev.action) + '</span> by <strong>' + escapeHtml(ev.actor || "unknown") + '</strong> at ' + escapeHtml(timeStr) +
+    '</div>' +
+    '<table style="width:100%">' +
+      '<thead><tr>' +
+        '<th style="width:120px">Field</th>' +
+        '<th>Before</th>' +
+        '<th>After</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>';
+
+  var title = "Change Detail" + (ev.resourceName ? " — " + ev.resourceName : "");
+  openModal(title, body, '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
 }
 
 function _assetSourcesTabHTML(sources, assetId, sightings, ipHistory) {

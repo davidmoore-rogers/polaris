@@ -232,7 +232,9 @@ rollback() {
   # cross-cutting/schema-migrations-and-prisma-client-lifecycle in TOUCHES.md.
   sudo -u "$APP_USER" npx prisma generate 2>/dev/null
   sudo -u "$APP_USER" rm -rf "$APP_DIR/dist" 2>/dev/null
-  sudo -u "$APP_USER" npx tsc 2>/dev/null
+  # `npm run build` (not bare tsc) so the post-tsc asset copy runs and the
+  # rolled-back dist/ regains its bundled std MIB .txt files.
+  sudo -u "$APP_USER" npm run build 2>/dev/null
 
   # Restore database if migration failed and we have a backup
   if [[ "$1" == *"migration"* && -n "$BACKUP_FILE" && -f "$BACKUP_FILE" ]]; then
@@ -294,7 +296,10 @@ sudo -u "$APP_USER" npx prisma generate || rollback "prisma generate"
 step "6/9  Building TypeScript..."
 
 sudo -u "$APP_USER" rm -rf "$APP_DIR/dist" || rollback "dist cleanup"
-sudo -u "$APP_USER" npx tsc || rollback "TypeScript build"
+# `npm run build` (not bare tsc) so scripts/copy-build-assets.mjs runs after
+# the compile and mirrors the bundled std MIB .txt files into dist/ — tsc
+# alone won't emit them and std SNMP-walks would fail post-update.
+sudo -u "$APP_USER" npm run build || rollback "TypeScript build"
 
 info "Build successful — stopping service for migration"
 

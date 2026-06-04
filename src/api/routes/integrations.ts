@@ -44,6 +44,8 @@ import { releaseDnsResolvedAt } from "../../services/dnsResolvedReservationServi
 import { recordDiscovery, observeDiscoveryPhase } from "../../metrics.js";
 import { getAdMonitorProtocol, invalidateMonitorSettingsCache } from "../../services/monitoringService.js";
 import * as autoMonitor from "../../services/autoMonitorInterfacesService.js";
+import * as autoMonitorStorage from "../../services/autoMonitorStorageService.js";
+import * as agentAutoDeploy from "../../services/agentAutoDeployService.js";
 import { recomputeDependencyTree } from "../../services/dependencyTreeService.js";
 import { reconcileMapRegions } from "../../services/mapRegionService.js";
 import {
@@ -320,6 +322,35 @@ const AutoMonitorInterfacesSchema = z.preprocess(
   }).strict().nullable().optional().default(null),
 );
 
+// Auto-monitor STORAGE selection (AD / Entra workstation+server classes).
+// Net-new — no legacy stored shape exists, so (unlike interfaces) there is no
+// preprocess coercion. Storage's only sample dimension is `mountPath`
+// (AssetStorageSample.mountPath), so the selection is mountPath-shaped:
+//   byNames    — exact mountPaths picked from the discovered aggregate
+//   byPatterns — wildcard (default) or regex matched against mountPath
+//   all        — pin every observed mount on every device of the class
+//                (safe here: mount counts per device are small, unlike the
+//                hundreds of interfaces a firewall carries — so interfaces
+//                deliberately never offered an `all` block, storage does)
+// Resolved/applied by src/services/autoMonitorStorageService.ts; the matched
+// mountPaths are unioned (strictly additive) into Asset.monitoredStorage.
+const StorageByNamesSchema = z.object({
+  names: z.array(z.string().trim().min(1)).min(1, "Pick at least one mount").max(200, "Too many mounts — pick at most 200"),
+}).strict();
+const StorageByPatternsSchema = z.object({
+  patterns: z.array(z.string().trim().min(1)).min(1, "Add at least one pattern").max(50, "Too many patterns — keep it under 50"),
+  regex:    z.boolean().optional().default(false),
+}).strict();
+const StorageAllSchema = z.object({
+  all: z.literal(true),
+}).strict();
+
+const AutoMonitorStorageSchema = z.object({
+  byNames:    StorageByNamesSchema.optional(),
+  byPatterns: StorageByPatternsSchema.optional(),
+  all:        StorageAllSchema.optional(),
+}).strict().nullable().optional().default(null);
+
 // Per-class per-stream config block (Phase 2). Each integration carries one
 // per asset class (FortiGate / FortiSwitch / FortiAP / Workstations / Servers
 // depending on type). Every field is nullable so an operator can leave
@@ -551,13 +582,35 @@ const FortiGateConfigSchema = z.object({
 // shape — no `enabled` toggle (those integrations always discover),
 // no per-class snmpCredentialId / sshCredentialId at the block level
 // (per-stream credentials inside `streams` cover those), and no FortiGate-
-// specific pullSnmpLocation / pushGeocodedCoords / autoMonitorInterfaces.
+// specific pullSnmpLocation / pushGeocodedCoords.
+//
+// `autoMonitorInterfaces` / `autoMonitorStorage`: post-discovery the matching
+// interfaces / storage mounts are unioned into Asset.monitoredInterfaces /
+// Asset.monitoredStorage (strictly additive, runs every discovery). These
+// devices only produce interface/storage samples once the Polaris Agent is
+// deployed and reporting, so the pins land on the discovery cycle after the
+// agent first checks in — self-healing by design.
+//
+// `agentDeploy`: opt-in (default off). When enabled, discovery pushes the
+// Polaris Agent to newly-discovered, agent-less devices of this class using
+// the chosen SSH and/or WinRM credential (platform inferred from the device
+// OS). Bounded concurrency + a per-run kickoff ceiling pace the rollout. See
+// src/services/agentAutoDeployService.ts.
+const AgentDeploySchema = z.object({
+  enabled:           z.boolean().optional().default(false),
+  sshCredentialId:   z.string().uuid().nullable().optional(),
+  winrmCredentialId: z.string().uuid().nullable().optional(),
+  maxConcurrent:     z.number().int().min(1).max(20).optional().default(4),
+}).strict().nullable().optional().default(null);
+
 const WorkstationServerClassMonitorSchema = z.object({
   enabled:               z.boolean().optional().default(true),
   addAsMonitored:        z.boolean().optional().default(false),
   autoMonitorInterfaces: AutoMonitorInterfacesSchema,
+  autoMonitorStorage:    AutoMonitorStorageSchema,
+  agentDeploy:           AgentDeploySchema,
   streams:               ClassStreamsSchema.optional(),
-}).optional().default({ enabled: true, addAsMonitored: false, autoMonitorInterfaces: null });
+}).optional().default({ enabled: true, addAsMonitored: false, autoMonitorInterfaces: null, autoMonitorStorage: null, agentDeploy: null });
 
 const WindowsServerConfigSchema = z.object({
   host:      z.string().optional().default(""),
@@ -1329,7 +1382,21 @@ router.post("/:id/query", async (req, res, next) => {
 // fortigateMonitor / fortiswitchMonitor / fortiapMonitor as
 // `autoMonitorInterfaces` and validated by the existing PUT handler.
 
-const ClassQuerySchema = z.enum(["fortigate", "fortiswitch", "fortiap"]);
+// fortigate/fortiswitch/fortiap = FMG/FortiGate classes; workstation/server =
+// AD/Entra classes (interface auto-monitor is class-agnostic in the service).
+const ClassQuerySchema = z.enum(["fortigate", "fortiswitch", "fortiap", "workstation", "server"]);
+
+// Map an auto-monitor class to the Integration.config block that holds its
+// `autoMonitorInterfaces` / `autoMonitorStorage` selection.
+function classToBlockKey(klass: z.infer<typeof ClassQuerySchema>): string {
+  switch (klass) {
+    case "fortigate":   return "fortigateMonitor";
+    case "fortiswitch": return "fortiswitchMonitor";
+    case "fortiap":     return "fortiapMonitor";
+    case "workstation": return "workstationMonitor";
+    case "server":      return "serverMonitor";
+  }
+}
 
 // Mirrors AutoMonitorInterfacesSchema from the top of the file but for the
 // in-flight live preview that fires on every keystroke before Save. Same
@@ -1400,9 +1467,7 @@ router.post("/:id/interface-aggregate/apply", async (req, res, next) => {
     const integ = await prisma.integration.findUnique({ where: { id: req.params.id } });
     if (!integ) throw new AppError(404, "Integration not found");
     const cfg = (integ.config ?? {}) as Record<string, any>;
-    const blockKey = klass === "fortigate" ? "fortigateMonitor"
-                    : klass === "fortiswitch" ? "fortiswitchMonitor"
-                    : "fortiapMonitor";
+    const blockKey = classToBlockKey(klass);
     // Coerce legacy `{mode, ...}` rows on the fly so apply works even before
     // the one-shot migration job has rewritten this integration's config.
     const selection = autoMonitor.coerceLegacySelection(cfg[blockKey]?.autoMonitorInterfaces ?? null);
@@ -1416,6 +1481,82 @@ router.post("/:id/interface-aggregate/apply", async (req, res, next) => {
         actor:        (req as any).session?.username,
         message:      `Auto-monitor interfaces applied for "${integ.name}" (${klass}) — ${result.devices} device(s), ${result.interfacesAdded} interface(s) added`,
         details:      { class: klass, devices: result.devices, interfacesAdded: result.interfacesAdded },
+      });
+    }
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Auto-Monitor Storage (AD / Entra workstation+server classes) ────────────
+// Storage-mount analog of the interface routes above. AD/Entra only — storage
+// auto-monitor is not offered on the Fortinet classes, so the class param is
+// the narrower workstation|server enum. Selection persists on
+// Integration.config under workstationMonitor / serverMonitor as
+// `autoMonitorStorage` and is validated by the PUT handler.
+//   - GET  ../storage-aggregate?class=...   → "By name" checklist source
+//   - POST ../storage-aggregate/preview     → live preview while editing
+//   - POST ../storage-aggregate/apply       → "Save and apply now" trigger
+
+const StorageClassQuerySchema = z.enum(["workstation", "server"]);
+
+const StoragePreviewBodySchema = z.object({
+  class:     StorageClassQuerySchema,
+  selection: AutoMonitorStorageSchema,
+});
+
+router.get("/:id/storage-aggregate", async (req, res, next) => {
+  try {
+    const klass = StorageClassQuerySchema.parse(req.query.class);
+    const integ = await prisma.integration.findUnique({ where: { id: req.params.id } });
+    if (!integ) throw new AppError(404, "Integration not found");
+    const rows = await autoMonitorStorage.getStorageAggregate(req.params.id, klass);
+    res.json({ rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/storage-aggregate/preview", async (req, res, next) => {
+  try {
+    const body = StoragePreviewBodySchema.parse(req.body);
+    const integ = await prisma.integration.findUnique({ where: { id: req.params.id } });
+    if (!integ) throw new AppError(404, "Integration not found");
+    // Cross-check patterns syntactically up front for a clear 400 in the editor.
+    const byPatterns = body.selection?.byPatterns;
+    if (byPatterns) {
+      for (const pat of byPatterns.patterns) autoMonitor.compilePattern(pat, byPatterns.regex === true);
+    }
+    const result = await autoMonitorStorage.previewAutoMonitorStorageForClass(
+      req.params.id,
+      body.class,
+      body.selection ?? null,
+    );
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/storage-aggregate/apply", async (req, res, next) => {
+  try {
+    const klass = StorageClassQuerySchema.parse(req.body?.class);
+    const integ = await prisma.integration.findUnique({ where: { id: req.params.id } });
+    if (!integ) throw new AppError(404, "Integration not found");
+    const cfg = (integ.config ?? {}) as Record<string, any>;
+    const blockKey = klass === "workstation" ? "workstationMonitor" : "serverMonitor";
+    const selection = (cfg[blockKey]?.autoMonitorStorage ?? null) as autoMonitorStorage.AutoMonitorStorageSelection;
+    const result = await autoMonitorStorage.applyAutoMonitorStorageForClass(req.params.id, klass, selection, (req as any).session?.username);
+    if (result.mountsAdded > 0) {
+      logEvent({
+        action:       "integration.auto_monitor_storage.applied",
+        resourceType: "integration",
+        resourceId:   integ.id,
+        resourceName: integ.name,
+        actor:        (req as any).session?.username,
+        message:      `Auto-monitor storage applied for "${integ.name}" (${klass}) — ${result.devices} device(s), ${result.mountsAdded} mount(s) added`,
+        details:      { class: klass, devices: result.devices, mountsAdded: result.mountsAdded },
       });
     }
     res.json(result);
@@ -1937,6 +2078,26 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
     }
 
     const assetsOnly = integration.type === "entraid" || integration.type === "activedirectory";
+
+    // ── AD/Entra post-sync passes (agent auto-deploy + interface/storage
+    // auto-monitor) ──────────────────────────────────────────────────────────
+    // Sibling to syncDhcpSubnets' Phase 2c (FMG/FortiGate interface auto-monitor),
+    // which never runs for these assets-only integrations. Runs only when the
+    // sync completed (not aborted). Each pass is wrapped so a failure logs and
+    // continues — neither poisons the discovery run's success/abort accounting.
+    if (assetsOnly && !ac.signal.aborted) {
+      // 1) Agent auto-deploy FIRST so newly-discovered, agent-less devices get
+      //    the Polaris Agent kicked off this cycle; their interface/storage
+      //    samples (and thus the pins below) land on the NEXT discovery.
+      await runWorkstationServerAgentAutoDeploy(integrationId, integrationName, integration.type, config, actor)
+        .catch((err: any) => {
+          logEvent({ action: "agent.autodeploy.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `Agent auto-deploy failed for "${integrationName}": ${err?.message || "Unknown error"}` });
+        });
+      // 2) Interface + storage auto-monitor — pin whatever samples exist now
+      //    (strictly additive, self-healing across cycles).
+      await applyWorkstationServerAutoMonitor(integrationId, integrationName, config, actor);
+    }
+
     if (ac.signal.aborted) {
       const abortSuffix = assetsOnly ? "" : " (stale-subnet deprecation skipped)";
       logEvent({ action: "integration.discover.aborted", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "warning", message: `${label} ${kindLabel} aborted for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${abortSuffix}` });
@@ -1968,6 +2129,91 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
   } finally {
     clearInterval(cancelTimer);
     clearInterval(heartbeatTimer);
+  }
+}
+
+// Post-sync interface + storage auto-monitor pass for AD/Entra workstation +
+// server classes. Sibling to syncDhcpSubnets' Phase 2c (which is FMG/FortiGate-
+// only). For each class block, resolve its autoMonitorInterfaces /
+// autoMonitorStorage selection against the assets' latest samples and union the
+// matches into Asset.monitoredInterfaces / monitoredStorage (strictly additive).
+// Each apply is wrapped so one class/stream failing doesn't skip the others.
+async function applyWorkstationServerAutoMonitor(
+  integrationId: string,
+  integrationName: string,
+  config: Record<string, unknown>,
+  actor: string,
+): Promise<void> {
+  const cfg = (config ?? {}) as Record<string, any>;
+  for (const [klass, blockKey] of [
+    ["workstation", "workstationMonitor"],
+    ["server",      "serverMonitor"],
+  ] as const) {
+    const block = cfg[blockKey];
+    if (!block) continue;
+    // Interfaces (reuse the FMG service — class-agnostic resolver).
+    const ifSel = autoMonitor.coerceLegacySelection(block.autoMonitorInterfaces ?? null);
+    if (ifSel) {
+      try {
+        const r = await autoMonitor.applyAutoMonitorForClass(integrationId, klass, ifSel, actor);
+        if (r.interfacesAdded > 0) {
+          logEvent({ action: "integration.auto_monitor_interfaces.applied", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `Auto-monitor interfaces applied for "${integrationName}" (${klass}) — ${r.devices} device(s), ${r.interfacesAdded} interface(s) added`, details: { class: klass, devices: r.devices, interfacesAdded: r.interfacesAdded } });
+        }
+      } catch (err: any) {
+        logEvent({ action: "integration.auto_monitor_interfaces.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `Auto-monitor interfaces (${klass}) failed for "${integrationName}": ${err?.message || "Unknown error"}` });
+      }
+    }
+    // Storage (new service).
+    const stSel = (block.autoMonitorStorage ?? null) as autoMonitorStorage.AutoMonitorStorageSelection;
+    if (stSel) {
+      try {
+        const r = await autoMonitorStorage.applyAutoMonitorStorageForClass(integrationId, klass, stSel, actor);
+        if (r.mountsAdded > 0) {
+          logEvent({ action: "integration.auto_monitor_storage.applied", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `Auto-monitor storage applied for "${integrationName}" (${klass}) — ${r.devices} device(s), ${r.mountsAdded} mount(s) added`, details: { class: klass, devices: r.devices, mountsAdded: r.mountsAdded } });
+        }
+      } catch (err: any) {
+        logEvent({ action: "integration.auto_monitor_storage.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `Auto-monitor storage (${klass}) failed for "${integrationName}": ${err?.message || "Unknown error"}` });
+      }
+    }
+  }
+}
+
+// Post-sync agent auto-deploy pass for AD/Entra workstation + server classes.
+// Reads each class block's `agentDeploy` config; if neither class opts in, this
+// is a no-op. Run-level preconditions (HTTPS cert + callback URL) are checked
+// ONCE up front so a misconfigured server skips with a single warning rather
+// than minting rows that all fail enrollment. Per-class deploy is delegated to
+// agentAutoDeployService (eligibility / inference / bounded concurrency / audit).
+async function runWorkstationServerAgentAutoDeploy(
+  integrationId: string,
+  integrationName: string,
+  integrationType: string,
+  config: Record<string, unknown>,
+  actor: string,
+): Promise<void> {
+  const cfg = (config ?? {}) as Record<string, any>;
+  const classes = [
+    { klass: "workstation" as const, assetType: "workstation", deploy: cfg.workstationMonitor?.agentDeploy },
+    { klass: "server" as const,      assetType: "server",      deploy: cfg.serverMonitor?.agentDeploy },
+  ].filter((c) => c.deploy?.enabled === true);
+  if (classes.length === 0) return;
+
+  const pre = await agentAutoDeploy.checkAutoDeployPreconditions();
+  if (!pre.ok) {
+    logEvent({ action: "agent.autodeploy.skipped", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "warning", message: `Agent auto-deploy skipped for "${integrationName}" — ${pre.reason}` });
+    return;
+  }
+
+  for (const c of classes) {
+    await agentAutoDeploy.runAutoDeployForClass({
+      integrationId,
+      integrationName,
+      integrationType,
+      klass: c.klass,
+      assetType: c.assetType,
+      cfg: c.deploy,
+      actor,
+    });
   }
 }
 

@@ -1064,6 +1064,21 @@ const INTEGRATIONS = [
         lldpPolling: "disabled",
         storagePolling: "disabled",
       },
+      // Per-class auto-monitor + agent auto-deploy (AD/Entra workstation+server).
+      // Servers: monitored on discovery, pin every storage mount + the primary
+      // NIC by name, and auto-deploy the agent over WinRM to agent-less servers.
+      serverMonitor: {
+        addAsMonitored: true,
+        autoMonitorInterfaces: { byNames: { names: ["eth0"] } },
+        autoMonitorStorage: { all: { all: true } },
+        agentDeploy: { enabled: true, sshCredentialId: null, winrmCredentialId: null, maxConcurrent: 4 },
+      },
+      workstationMonitor: {
+        addAsMonitored: false,
+        autoMonitorInterfaces: null,
+        autoMonitorStorage: { byPatterns: { patterns: ["C:"], regex: false } },
+        agentDeploy: null,
+      },
     },
     enabled: false,
     pollInterval: 12,
