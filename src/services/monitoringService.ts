@@ -73,6 +73,8 @@ import {
   enqueueInterfaceSamples,
   enqueueStorageSamples,
   enqueueIpsecTunnelSamples,
+  enqueuePerfSlaSamples,
+  enqueueSdwanRuleSamples,
 } from "./sampleWriteBuffer.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import {
@@ -2991,6 +2993,47 @@ export interface IpsecTunnelSample {
 }
 
 /**
+ * One SD-WAN Performance SLA health-check reading for a single WAN member.
+ * Read from /api/v2/monitor/virtual-wan/health-check. One sample per
+ * (health-check, member link). latency/jitter/packetLoss are instantaneous
+ * gauges (null when the member reported no value, e.g. link down).
+ */
+export interface PerfSlaSample {
+  healthCheck: string;
+  link:        string;
+  state:       "up" | "down";
+  latencyMs:   number | null;
+  jitterMs:    number | null;
+  packetLoss:  number | null;
+  // SLA target thresholds for the parent health-check (per-health-check config,
+  // not per-member). Null when that metric has no configured threshold.
+  latencyThresholdMs:  number | null;
+  jitterThresholdMs:   number | null;
+  packetLossThreshold: number | null;
+}
+
+/**
+ * One SD-WAN service rule's selection state. Rule definition (name, mode,
+ * candidate members) from /api/v2/cmdb/system/sdwan; `selectedMember` is the
+ * runtime-active member when resolvable, else null (collector degrades
+ * gracefully). One sample per (asset, rule); the detail series is the
+ * failover timeline.
+ */
+export interface SdwanRuleSample {
+  ruleName:         string;
+  ruleId:           string | null;
+  seq:              number | null;
+  enabled:          boolean | null;
+  mode:             string | null;
+  criteria:         string | null;
+  healthChecks:     string[];
+  dst:              string[];
+  status:           "up" | "down";
+  selectedMember:   string | null;
+  availableMembers: string[];
+}
+
+/**
  * One LLDP neighbor seen on a local interface. Replaces (per-asset) on each
  * system-info pass that successfully queried LLDP. `localIfName` is the
  * interface on *this* asset that saw the neighbor; the chassis/port fields
@@ -3037,6 +3080,17 @@ export interface SystemInfoSample {
   interfaces:    InterfaceSample[];
   storage:       StorageSample[];
   ipsecTunnels?: IpsecTunnelSample[];
+  /**
+   * SD-WAN Performance SLA health-check readings. `undefined` means the
+   * collector didn't try (toggle off / fast-cadence skip); `[]` means the
+   * device was queried and reported no health-check members.
+   */
+  perfSla?:      PerfSlaSample[];
+  /**
+   * SD-WAN service-rule selection snapshots. Same undefined/[] semantics as
+   * perfSla. Gated by Integration.config.pullSdwan.
+   */
+  sdwanRules?:   SdwanRuleSample[];
   /**
    * LLDP neighbors observed during this scrape. `undefined` means the
    * collector didn't try (unsupported transport / fast-cadence skip);
@@ -3685,9 +3739,10 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
         data = await collectSystemInfoFortinet(targetIp, integration as any, {
           includeIpsec: true,
           includeLldp:  lldpPolling === "rest_api",
+          includeSdwan: ((integration as any)?.config as any)?.pullSdwan === true,
           timeoutMs:    sysInfoTimeout,
         });
-        endRest({ interfaces: data.interfaces.length, ipsec: data.ipsecTunnels?.length ?? null, lldp: data.lldpNeighbors?.length ?? null });
+        endRest({ interfaces: data.interfaces.length, ipsec: data.ipsecTunnels?.length ?? null, lldp: data.lldpNeighbors?.length ?? null, perfSla: data.perfSla?.length ?? null, sdwanRules: data.sdwanRules?.length ?? null });
       }
       // Cross-transport LLDP overlay: when the chosen LLDP source differs
       // from the interfaces source we already used above.
@@ -3846,7 +3901,7 @@ function clampPct(n: number): number {
 async function collectSystemInfoFortinet(
   host: string,
   integration: { type: string; config: Record<string, unknown> },
-  opts: { includeIpsec?: boolean; includeLldp?: boolean; timeoutMs?: number } = {},
+  opts: { includeIpsec?: boolean; includeLldp?: boolean; includeSdwan?: boolean; timeoutMs?: number } = {},
 ): Promise<SystemInfoSample> {
   const fg = buildFortinetConfig(host, integration);
   if ("error" in fg) throw new Error(fg.error);
@@ -3892,12 +3947,21 @@ async function collectSystemInfoFortinet(
           .then((neighbors) => { endLldp({ neighbors: neighbors?.length ?? null }); return neighbors; });
       })()
     : Promise.resolve<LldpNeighborSample[] | undefined>(undefined);
+  const sdwanPromise = opts.includeSdwan
+    ? (() => {
+        const endSdwan = startPhase("systeminfo.rest.sdwan");
+        return collectSdwanFortinet(fg, timeoutMs)
+          .catch(() => ({ perfSla: [] as PerfSlaSample[], sdwanRules: [] as SdwanRuleSample[] }))
+          .then((sdwan) => { endSdwan({ perfSla: sdwan.perfSla.length, rules: sdwan.sdwanRules.length }); return sdwan; });
+      })()
+    : Promise.resolve<{ perfSla: PerfSlaSample[]; sdwanRules: SdwanRuleSample[] } | undefined>(undefined);
 
-  const [cmdbRes, monitorOutcome, ipsecTunnels, lldpNeighbors] = await Promise.all([
+  const [cmdbRes, monitorOutcome, ipsecTunnels, lldpNeighbors, sdwan] = await Promise.all([
     cmdbInterfacePromise,
     monitorInterfacePromise,
     ipsecPromise,
     lldpPromise,
+    sdwanPromise,
   ]);
 
   // Build cmdbByName from the CMDB response. Non-fatal failure → empty map
@@ -4047,7 +4111,12 @@ async function collectSystemInfoFortinet(
   // leaves existing rows alone. `includeLldp: false` lets the caller skip
   // this when the operator routed LLDP to SNMP; the caller overlays the
   // SNMP result onto the returned sample.
-  return { interfaces, storage: [], ipsecTunnels, lldpNeighbors, lldpSource: opts.includeLldp !== false ? "fortios" : undefined };
+  return {
+    interfaces, storage: [], ipsecTunnels, lldpNeighbors,
+    lldpSource: opts.includeLldp !== false ? "fortios" : undefined,
+    perfSla:    sdwan?.perfSla,
+    sdwanRules: sdwan?.sdwanRules,
+  };
 }
 
 /**
@@ -4227,6 +4296,250 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig, timeoutMs?: numb
     });
   }
   return out;
+}
+
+/** Normalize a FortiOS SD-WAN member liveness value to "up"/"down". FortiOS
+ *  health-check members report "alive"/"dead" on some versions, "up"/"down"
+ *  or a numeric/boolean flag on others. */
+function normalizeSdwanState(v: unknown): "up" | "down" {
+  if (typeof v === "number")  return v > 0 ? "up" : "down";
+  if (typeof v === "boolean") return v ? "up" : "down";
+  const s = String(v ?? "").trim().toLowerCase();
+  return s === "up" || s === "alive" || s === "1" || s === "true" ? "up" : "down";
+}
+
+/**
+ * SD-WAN collector (FortiOS only; gated by Integration.config.pullSdwan, rides
+ * the system-info cadence). Pulls two things in parallel:
+ *   - Performance SLA health-check readings (/api/v2/monitor/virtual-wan/health-check):
+ *     one PerfSlaSample per (health-check, WAN member) with latency/jitter/
+ *     packet-loss gauges + link state.
+ *   - SD-WAN service rules (/api/v2/cmdb/system/sdwan → `service`): each rule's
+ *     mode + configured candidate members in priority order (seq-nums resolved
+ *     to interface names via the global `members` table).
+ *
+ * The runtime selected member is INFERRED best-effort: the first candidate (in
+ * priority order) that is up per the health-check data. FortiOS exposes no clean
+ * REST endpoint for per-rule member selection, so `selectedMember` is null when
+ * it can't be resolved (no health-check data covering the candidates). This is
+ * good enough for sla / priority modes; load-balance spreads traffic so the
+ * inferred "selected" is only the top healthy member — the UI shows `mode` so
+ * the operator has context.
+ *
+ * Each sub-fetch degrades independently (one failing → [] for that half), like
+ * collectIpsecTunnelsFortinet's CMDB-optional handling. Older firmwares 404 the
+ * endpoints → empty result → the SD-WAN tab just hides the section.
+ *
+ * NOTE (verify on a real FortiOS 7.x device): the health-check JSON shape, the
+ * member-state field name (status vs state; "up"/"alive"/numeric), and the CMDB
+ * service member-reference shape (members[].seq-num vs priority-members) vary by
+ * version — the parsing here is defensive but should be confirmed.
+ */
+async function collectSdwanFortinet(
+  fg: FortiGateConfig,
+  timeoutMs?: number,
+): Promise<{ perfSla: PerfSlaSample[]; sdwanRules: SdwanRuleSample[] }> {
+  const [hcRes, sdwanRes] = await Promise.all([
+    fgRequest<any>(fg, "GET", "/api/v2/monitor/virtual-wan/health-check", { query: { scope: "vdom" }, timeoutMs })
+      .catch(() => null as any),
+    fgRequest<any>(fg, "GET", "/api/v2/cmdb/system/sdwan", { query: { vdom: "root" }, timeoutMs })
+      .catch(() => null as any),
+  ]);
+  const thresholds = parseSdwanSlaThresholds(sdwanRes);
+  const { perfSla, memberUp } = parsePerfSlaHealthCheck(hcRes, thresholds);
+  const sdwanRules = parseSdwanRules(sdwanRes, memberUp);
+  return { perfSla, sdwanRules };
+}
+
+export interface SlaThreshold { latencyMs: number | null; jitterMs: number | null; packetLoss: number | null; }
+
+/**
+ * Build a healthCheck-name → SLA threshold map from the CMDB system/sdwan
+ * `health-check[].sla` targets. FortiOS allows multiple SLA rows per
+ * health-check; we take the max configured threshold per metric (a member
+ * passes the strictest target). A 0 / absent threshold means "unset" for that
+ * metric → null (no chart line). Exported for unit testing; pure.
+ */
+export function parseSdwanSlaThresholds(sdwanRes: unknown): Map<string, SlaThreshold> {
+  const out = new Map<string, SlaThreshold>();
+  const root = (sdwanRes && typeof sdwanRes === "object" && (sdwanRes as any).results && typeof (sdwanRes as any).results === "object")
+    ? (sdwanRes as any).results
+    : sdwanRes;
+  if (!root || typeof root !== "object") return out;
+  const hcs = Array.isArray((root as any)["health-check"]) ? (root as any)["health-check"] : [];
+  for (const hc of hcs) {
+    if (!hc || typeof hc !== "object") continue;
+    const name = typeof (hc as any).name === "string" ? (hc as any).name.trim() : "";
+    if (!name) continue;
+    const slas = Array.isArray((hc as any).sla) ? (hc as any).sla : [];
+    let lat: number | null = null, jit: number | null = null, loss: number | null = null;
+    const take = (cur: number | null, raw: unknown): number | null => {
+      const n = pickFiniteNumber(raw);
+      if (n == null || n <= 0) return cur;
+      return cur == null ? n : Math.max(cur, n);
+    };
+    for (const sla of slas) {
+      if (!sla || typeof sla !== "object") continue;
+      lat  = take(lat,  (sla as any)["latency-threshold"]);
+      jit  = take(jit,  (sla as any)["jitter-threshold"]);
+      loss = take(loss, (sla as any)["packetloss-threshold"]);
+    }
+    out.set(name, { latencyMs: lat, jitterMs: jit, packetLoss: loss });
+  }
+  return out;
+}
+
+/**
+ * Parse a /api/v2/monitor/virtual-wan/health-check response into PerfSlaSamples.
+ * Response shape: { results: { "<hc-name>": { "<member-iface>": { latency,
+ * jitter, packet_loss, status, ... }, ... }, ... } } (also accepts the
+ * un-enveloped object). Returns the samples plus a member-interface → up map
+ * (true if the member is up in ANY health-check) used to infer rule selection.
+ * Exported for unit testing; pure (no I/O).
+ */
+export function parsePerfSlaHealthCheck(
+  hcRes: unknown,
+  thresholds?: Map<string, SlaThreshold>,
+): { perfSla: PerfSlaSample[]; memberUp: Map<string, boolean> } {
+  const perfSla: PerfSlaSample[] = [];
+  const memberUp = new Map<string, boolean>();
+  const hcRoot = (hcRes && typeof hcRes === "object" && (hcRes as any).results && typeof (hcRes as any).results === "object")
+    ? (hcRes as any).results
+    : hcRes;
+  if (hcRoot && typeof hcRoot === "object") {
+    for (const [hcName, members] of Object.entries(hcRoot as Record<string, any>)) {
+      if (!hcName || !members || typeof members !== "object") continue;
+      const thr = thresholds?.get(hcName) ?? null;
+      for (const [link, m] of Object.entries(members as Record<string, any>)) {
+        if (!link || !m || typeof m !== "object") continue;
+        const state = normalizeSdwanState((m as any).status ?? (m as any).state ?? (m as any).alive);
+        const latencyMs  = pickFiniteNumber((m as any).latency);
+        const jitterMs   = pickFiniteNumber((m as any).jitter);
+        const packetLoss = pickFiniteNumber((m as any).packet_loss ?? (m as any).packetloss);
+        perfSla.push({
+          healthCheck: hcName, link, state, latencyMs, jitterMs, packetLoss,
+          latencyThresholdMs:  thr?.latencyMs ?? null,
+          jitterThresholdMs:   thr?.jitterMs ?? null,
+          packetLossThreshold: thr?.packetLoss ?? null,
+        });
+        if (state === "up") memberUp.set(link, true);
+        else if (!memberUp.has(link)) memberUp.set(link, false);
+      }
+    }
+  }
+  return { perfSla, memberUp };
+}
+
+/**
+ * Parse a /api/v2/cmdb/system/sdwan response into SdwanRuleSamples. `config
+ * system sdwan` is a single complex object carrying a global `members` array
+ * (seq-num → interface) and a `service` array of the SD-WAN rules. The runtime
+ * selected member is inferred from `memberUp` (first candidate in priority order
+ * that is up); null when none resolvable. Exported for unit testing; pure.
+ */
+export function parseSdwanRules(sdwanRes: unknown, memberUp: Map<string, boolean>): SdwanRuleSample[] {
+  const sdwanRules: SdwanRuleSample[] = [];
+  const sdwanRoot = (sdwanRes && typeof sdwanRes === "object" && (sdwanRes as any).results && typeof (sdwanRes as any).results === "object")
+    ? (sdwanRes as any).results
+    : sdwanRes;
+  if (!sdwanRoot || typeof sdwanRoot !== "object") return sdwanRules;
+  const seqToIface = new Map<string, string>();
+  const globalMembers = Array.isArray((sdwanRoot as any).members) ? (sdwanRoot as any).members : [];
+  for (const gm of globalMembers) {
+    if (!gm || typeof gm !== "object") continue;
+    const seq   = (gm as any)["seq-num"] ?? (gm as any).seq_num;
+    const iface = typeof (gm as any).interface === "string" ? (gm as any).interface.trim() : "";
+    if (seq != null && iface) seqToIface.set(String(seq), iface);
+  }
+  const services = Array.isArray((sdwanRoot as any).service) ? (sdwanRoot as any).service : [];
+  services.forEach((svc: any, seqIdx: number) => {
+    if (!svc || typeof svc !== "object") return;
+    const ruleName = typeof svc.name === "string" && svc.name.trim()
+      ? svc.name.trim()
+      : (svc.id != null ? `rule-${svc.id}` : "");
+    if (!ruleName) return;
+    const ruleId = svc.id != null ? String(svc.id) : null;
+    const mode = typeof svc.mode === "string" && svc.mode.trim() ? svc.mode.trim() : null;
+    const enabled = svc.status == null ? null : (String(svc.status).toLowerCase() === "enable" || svc.status === true);
+    const criteria = deriveSdwanCriteria(svc);
+    const healthChecks = collectSdwanNameList(svc["health-check"]);
+    // Destination can come from address objects + Internet-Service (ISDB) +
+    // application-control entries — gather names from all the common fields.
+    const dst = ([] as string[]).concat(
+      collectSdwanNameList(svc.dst),
+      collectSdwanNameList(svc["internet-service-name"]),
+      collectSdwanNameList(svc["internet-service-custom"]),
+      collectSdwanNameList(svc["internet-service-app-ctrl"]),
+      collectSdwanNameList(svc["internet-service-app-ctrl-group"]),
+    ).filter((v, i, arr) => v && arr.indexOf(v) === i);
+    // Candidate members in priority order. FortiOS uses `members` (array of
+    // { seq-num }) on most versions; some use `priority-members`. Resolve each
+    // seq-num to its interface via the global members table; accept a literal
+    // interface string as a fallback.
+    const rawMembers =
+      Array.isArray(svc.members)            ? svc.members :
+      Array.isArray(svc["priority-members"]) ? svc["priority-members"] : [];
+    const availableMembers: string[] = [];
+    for (const rm of rawMembers) {
+      let iface: string | null = null;
+      if (typeof rm === "string") iface = rm.trim() || null;
+      else if (rm && typeof rm === "object") {
+        const seq = (rm as any)["seq-num"] ?? (rm as any).seq_num;
+        if (seq != null && seqToIface.has(String(seq))) iface = seqToIface.get(String(seq))!;
+        else if (typeof (rm as any).interface === "string") iface = (rm as any).interface.trim() || null;
+      }
+      if (iface && !availableMembers.includes(iface)) availableMembers.push(iface);
+    }
+    let selectedMember: string | null = null;
+    for (const m of availableMembers) {
+      if (memberUp.get(m) === true) { selectedMember = m; break; }
+    }
+    const status: "up" | "down" = selectedMember ? "up" : "down";
+    sdwanRules.push({
+      ruleName, ruleId, seq: seqIdx, enabled, mode, criteria, healthChecks, dst,
+      status, selectedMember, availableMembers,
+    });
+  });
+  return sdwanRules;
+}
+
+/** Collect a list of names from a FortiOS CMDB reference field, which may be
+ *  an array of { name } objects, an array of strings, or a single string. */
+function collectSdwanNameList(raw: unknown): string[] {
+  const out: string[] = [];
+  const push = (v: unknown) => { if (typeof v === "string" && v.trim()) out.push(v.trim()); };
+  if (Array.isArray(raw)) {
+    for (const e of raw) {
+      if (typeof e === "string") push(e);
+      else if (e && typeof e === "object") push((e as any).name ?? (e as any)["q_origin_key"]);
+    }
+  } else if (typeof raw === "string") {
+    push(raw);
+  }
+  return out;
+}
+
+/** Best-effort operator-facing criteria label, mirroring the FortiGate GUI's
+ *  "Criteria" column. Derived from the service rule's mode + link-cost-factor.
+ *  FortiOS field shapes vary by version — verify on a real device. */
+function deriveSdwanCriteria(svc: any): string | null {
+  const lcf = typeof svc["link-cost-factor"] === "string" ? svc["link-cost-factor"].trim().toLowerCase() : "";
+  const lcfLabel: Record<string, string> = {
+    latency: "Latency",
+    jitter: "Jitter",
+    "packet-loss": "Packet Loss",
+    inbandwidth: "Bandwidth (in)",
+    outbandwidth: "Bandwidth (out)",
+    bibandwidth: "Bandwidth",
+    "custom-profile-1": "Customized Profile",
+  };
+  if (lcf && lcfLabel[lcf]) return lcfLabel[lcf];
+  const mode = typeof svc.mode === "string" ? svc.mode.trim().toLowerCase() : "";
+  if (mode === "load-balance") return "Source IP";
+  if (mode === "manual")       return "Manual";
+  if (mode === "priority")     return "Best Quality";
+  if (mode === "sla")          return "SLA";
+  return null;
 }
 
 function pickFiniteNumber(v: unknown): number | null {
@@ -5980,6 +6293,48 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
           incomingBytes:   t.incomingBytes != null ? BigInt(Math.round(t.incomingBytes)) : null,
           outgoingBytes:   t.outgoingBytes != null ? BigInt(Math.round(t.outgoingBytes)) : null,
           proxyIdCount:    t.proxyIdCount,
+        })),
+      );
+    }
+    // SD-WAN streams (gated by Integration.config.pullSdwan, only present when
+    // collectSdwanFortinet ran on this heavy pass). No pinned-subset concept —
+    // every row is stamped "fast" so the rollup (which filters cadence='fast')
+    // includes it and prune treats them all uniformly.
+    if (Array.isArray(d.perfSla) && d.perfSla.length > 0) {
+      enqueuePerfSlaSamples(
+        d.perfSla.map((p) => ({
+          assetId,
+          timestamp:   now,
+          cadence:     "fast" as const,
+          healthCheck: p.healthCheck,
+          link:        p.link,
+          state:       p.state,
+          latencyMs:   p.latencyMs,
+          jitterMs:    p.jitterMs,
+          packetLoss:  p.packetLoss,
+          latencyThresholdMs:  p.latencyThresholdMs,
+          jitterThresholdMs:   p.jitterThresholdMs,
+          packetLossThreshold: p.packetLossThreshold,
+        })),
+      );
+    }
+    if (Array.isArray(d.sdwanRules) && d.sdwanRules.length > 0) {
+      enqueueSdwanRuleSamples(
+        d.sdwanRules.map((r) => ({
+          assetId,
+          timestamp:        now,
+          cadence:          "fast" as const,
+          ruleName:         r.ruleName,
+          ruleId:           r.ruleId,
+          seq:              r.seq,
+          enabled:          r.enabled,
+          mode:             r.mode,
+          criteria:         r.criteria,
+          healthChecks:     r.healthChecks,
+          dst:              r.dst,
+          status:           r.status,
+          selectedMember:   r.selectedMember,
+          availableMembers: r.availableMembers,
         })),
       );
     }
@@ -7945,7 +8300,10 @@ export async function pruneTelemetrySamples(): Promise<number> {
  */
 export async function pruneSystemInfoSamples(): Promise<number> {
   const r = await getSampleRetention();
-  const [iDetail, iHourly, iDaily, sDetail, sHourly, sDaily, ipDetail, ipHourly, ipDaily, lldp] = await Promise.all([
+  const [
+    iDetail, iHourly, iDaily, sDetail, sHourly, sDaily, ipDetail, ipHourly, ipDaily,
+    psDetail, psHourly, psDaily, srDetail, srHourly, srDaily, lldp,
+  ] = await Promise.all([
     // interfaces — detail is selection-aware (selected=configured, unselected=24h)
     pruneSelectionAwareDetail((w) => prisma.assetInterfaceSample.deleteMany({ where: w as any }), r.interfaces.detail, "asset_interface_samples"),
     pruneTierByDays((w) => prisma.assetInterfaceSampleHourly.deleteMany({ where: w as any }), r.interfaces.hourly, "bucketStart", "asset_interface_samples_hourly"),
@@ -7958,11 +8316,21 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     pruneSelectionAwareDetail((w) => prisma.assetIpsecTunnelSample.deleteMany({ where: w as any }), r.ipsec.detail, "asset_ipsec_tunnel_samples"),
     pruneTierByDays((w) => prisma.assetIpsecTunnelSampleHourly.deleteMany({ where: w as any }), r.ipsec.hourly, "bucketStart", "asset_ipsec_tunnel_samples_hourly"),
     pruneTierByDays((w) => prisma.assetIpsecTunnelSampleDaily.deleteMany({  where: w as any }), r.ipsec.daily,  "bucketStart", "asset_ipsec_tunnel_samples_daily"),
+    // SD-WAN perf-SLA — not selection-aware (no pin concept); every detail row
+    // is stamped "fast" so the plain by-days prune is correct for all of them.
+    pruneTierByDays((w) => prisma.assetPerfSlaSample.deleteMany({       where: w as any }), r.perfSla.detail, "timestamp",   "asset_perf_sla_samples"),
+    pruneTierByDays((w) => prisma.assetPerfSlaSampleHourly.deleteMany({ where: w as any }), r.perfSla.hourly, "bucketStart", "asset_perf_sla_samples_hourly"),
+    pruneTierByDays((w) => prisma.assetPerfSlaSampleDaily.deleteMany({  where: w as any }), r.perfSla.daily,  "bucketStart", "asset_perf_sla_samples_daily"),
+    // SD-WAN service rules
+    pruneTierByDays((w) => prisma.assetSdwanRuleSample.deleteMany({       where: w as any }), r.sdwanRule.detail, "timestamp",   "asset_sdwan_rule_samples"),
+    pruneTierByDays((w) => prisma.assetSdwanRuleSampleHourly.deleteMany({ where: w as any }), r.sdwanRule.hourly, "bucketStart", "asset_sdwan_rule_samples_hourly"),
+    pruneTierByDays((w) => prisma.assetSdwanRuleSampleDaily.deleteMany({  where: w as any }), r.sdwanRule.daily,  "bucketStart", "asset_sdwan_rule_samples_daily"),
     // LLDP neighbors are current-state (per-asset, no rollup, no cadence) — prune
     // by the interfaces detail window as the system-info umbrella.
     pruneLldpNeighbors(r.interfaces.detail),
   ]);
-  return iDetail + iHourly + iDaily + sDetail + sHourly + sDaily + ipDetail + ipHourly + ipDaily + lldp;
+  return iDetail + iHourly + iDaily + sDetail + sHourly + sDaily + ipDetail + ipHourly + ipDaily
+    + psDetail + psHourly + psDaily + srDetail + srHourly + srDaily + lldp;
 }
 
 async function pruneLldpNeighbors(days: number): Promise<number> {

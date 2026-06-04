@@ -783,6 +783,39 @@ function _readPushReservationsToggle() {
   return !!el.checked;
 }
 
+// SD-WAN tab body. Single master toggle (config.pullSdwan). When enabled, each
+// system-info pass for FortiGates owned by this integration also pulls SD-WAN
+// Performance SLA health-check metrics + service-rule member selection, which
+// surface on the asset's SD-WAN tab. FortiOS-only; read-only on the device.
+function sdwanFormHTML(pullSdwan) {
+  var checked = pullSdwan === true ? "checked" : "";
+  return '<section style="margin-bottom:1.5rem">' +
+      '<h4 style="margin:0 0 0.25rem 0">SD-WAN Monitoring</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">When enabled, Polaris pulls SD-WAN data from each FortiGate on its system-info polling cadence and shows it on the asset\'s <strong>SD-WAN</strong> tab. Read-only &mdash; nothing is written back to the device.</p>' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<input type="checkbox" id="f-pullSdwan" ' + checked + ' style="width:auto">' +
+        '<label for="f-pullSdwan" style="margin:0">Pull SD-WAN Performance SLA + rule selection</label>' +
+      '</div>' +
+      '<ul class="hint" style="margin:0.25rem 0 0 1.2rem;padding:0">' +
+        '<li><strong>Performance SLA health-checks.</strong> Per WAN-member latency, jitter and packet-loss from <code>/api/v2/monitor/virtual-wan/health-check</code>, charted over time.</li>' +
+        '<li><strong>SD-WAN rules.</strong> Each service rule\'s configured members (priority order) and which member is currently selected, from <code>/api/v2/cmdb/system/sdwan</code>, with a selection-history timeline. The active member is inferred from health-check state when FortiOS doesn\'t expose it directly.</li>' +
+      '</ul>' +
+    '</section>' +
+    '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    '<section>' +
+      '<h4 style="margin:0 0 0.25rem 0">Required Read Access</h4>' +
+      '<p class="hint" style="margin:0;color:var(--color-text-tertiary)">The API token needs read access to <strong>System &rarr; SD-WAN</strong> (CMDB) and the SD-WAN monitor endpoints. No write access is required &mdash; this stream never modifies device configuration. FortiGates without SD-WAN configured simply report no data and the tab stays hidden.</p>' +
+    '</section>';
+}
+
+// Read the SD-WAN toggle out of its tab. Returns undefined when the tab didn't
+// render (non-FortiGate/FMG types) so the caller leaves the config alone.
+function _readPullSdwanToggle() {
+  var el = document.getElementById("f-pullSdwan");
+  if (!el) return undefined;
+  return !!el.checked;
+}
+
 // Quarantine Push tab body. Renders the master toggle plus transport-mode
 // guidance. When enabled, quarantining an asset pushes MAC-based
 // address-group entries to every FortiGate sighted by this integration.
@@ -3550,6 +3583,8 @@ async function openCreateModal(type) {
     // pass true so the FMG copy doesn't render an irrelevant "direct" warning.
     addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true) });
     addTabs.push({ key: "quarantine-push", label: "Quarantine Push", html: quarantinePushFormHTML(false, true) });
+    // SD-WAN tab (FMG + standalone FortiGate). Default off.
+    addTabs.push({ key: "sdwan", label: "SD-WAN", html: sdwanFormHTML(false) });
     // Geographic Location tab (FMG + standalone FortiGate). Carries the
     // pull-from-SNMP and push-geocoded-coords toggles previously surfaced
     // inside Monitoring → FortiGate. DOM ids preserved so the existing save
@@ -3666,6 +3701,8 @@ async function openCreateModal(type) {
         if (pushToggleNew !== undefined) createConfig.pushReservations = pushToggleNew;
         var quarantinePushToggleNew = _readPushQuarantineToggle();
         if (quarantinePushToggleNew !== undefined) createConfig.pushQuarantine = quarantinePushToggleNew;
+        var sdwanToggleNew = _readPullSdwanToggle();
+        if (sdwanToggleNew !== undefined) createConfig.pullSdwan = sdwanToggleNew;
       }
       var input = {
         type: type,
@@ -3950,6 +3987,11 @@ async function openEditModal(id) {
           label: "Quarantine Push",
           html: quarantinePushFormHTML(config.pushQuarantine === true, pushUseProxy),
         });
+        editTabs.push({
+          key: "sdwan",
+          label: "SD-WAN",
+          html: sdwanFormHTML(config.pullSdwan === true),
+        });
         // Geographic Location tab (FMG + standalone FortiGate). Carries the
         // pull-from-SNMP and push-geocoded-coords toggles previously surfaced
         // inside Monitoring → FortiGate. DOM ids preserved so the existing
@@ -4065,6 +4107,8 @@ async function openEditModal(id) {
         if (pushToggle !== undefined) editConfig.pushReservations = pushToggle;
         var quarantinePushToggle = _readPushQuarantineToggle();
         if (quarantinePushToggle !== undefined) editConfig.pushQuarantine = quarantinePushToggle;
+        var sdwanToggle = _readPullSdwanToggle();
+        if (sdwanToggle !== undefined) editConfig.pullSdwan = sdwanToggle;
       }
       if (isAd || isEntra || isWin) {
         // AD / Entra / Windows Server per-class blocks. Workstations is the

@@ -885,12 +885,42 @@ AssetIpsecTunnelSample          -- System tab per-tunnel IPsec snapshot, written
   @@index([assetId, timestamp])
   @@index([assetId, tunnelName, timestamp])
 
+AssetPerfSlaSample              -- SD-WAN Performance SLA health-check snapshot, written on the system-info cadence. FortiOS only, gated by Integration.config.pullSdwan — read from /api/v2/monitor/virtual-wan/health-check (per-member latency/jitter/packet-loss + link state), with SLA target thresholds joined in from the /api/v2/cmdb/system/sdwan health-check `sla` config. One row per (health-check, WAN-member link). latency/jitter/packetLoss are instantaneous gauges (averaged in rollups, not counter-diffed). Collected by monitoringService.collectSdwanFortinet (pure parser parsePerfSlaHealthCheck) on the heavy pass, written via sampleWriteBuffer.enqueuePerfSlaSamples (cadence always "fast"). Read by `GET /assets/:id/perf-sla-history?healthCheck=&link=` (charts) + `GET /assets/:id/perf-sla-links` (selector + data-exists gate, carries latest thresholds). Surfaced on the asset modal's SD-WAN tab; the latency/jitter/loss charts draw a dashed SLA threshold line on whichever metric the health-check targets.
+  id           UUID PK
+  assetId      UUID FK → Asset (cascade delete)
+  timestamp    DateTime        @default(now())
+  healthCheck  String
+  link         String          -- WAN member interface (e.g. "wan1", "Overlay-7")
+  state        String          -- "up" | "down"
+  latencyMs    Float?
+  jitterMs     Float?
+  packetLoss   Float?
+  latency/jitter/packetLoss Threshold -- per-health-check SLA targets (null when unset)
+  @@index([assetId, timestamp])
+  @@index([assetId, healthCheck, link, timestamp])
+
+AssetSdwanRuleSample            -- SD-WAN service-rule selection snapshot, written on the system-info cadence. FortiOS only, gated by Integration.config.pullSdwan — rule definitions from /api/v2/cmdb/system/sdwan `service` (name, mode, criteria, health-checks, destination, candidate members in priority order). One row per (asset, rule); the detail series is the member-selection failover timeline. `selectedMember` is INFERRED best-effort (first candidate up in priority order per the health-check state) when FortiOS doesn't expose the selected route over REST — verify on a real device. Collected by collectSdwanFortinet (pure parser parseSdwanRules; SLA thresholds via parseSdwanSlaThresholds), written via sampleWriteBuffer.enqueueSdwanRuleSamples (cadence "fast"). Read by `GET /assets/:id/sdwan-rules` (latest-snapshot per rule, ordered by FortiOS sequence — drives the rules table) + `GET /assets/:id/sdwan-rule-history?ruleName=` (selection timeline). The rules table uses the canonical applyTableLayout column template.
+  id               UUID PK
+  assetId          UUID FK → Asset (cascade delete)
+  timestamp        DateTime    @default(now())
+  ruleName         String
+  ruleId/seq/enabled/mode/criteria -- rule identity + admin/selection config
+  healthChecks     String[]    -- referenced Performance SLA health-check names
+  dst              String[]    -- destination address / ISDB / app names
+  status           String      -- "up" | "down" (runtime: has a usable selected member)
+  selectedMember   String?     -- inferred active member (see header)
+  availableMembers String[]    -- configured candidates, priority order
+  @@index([assetId, timestamp])
+  @@index([assetId, ruleName, timestamp])
+
 -- ─── Sample rollup tables (hourly + daily aggregates) ────────────────────
--- Twelve tables: each of the six sample tables above has a `*_hourly`
+-- Sixteen tables: each of the eight sample tables above has a `*_hourly`
 -- and `*_daily` companion (see prisma/schema.prisma starting at
 -- `model AssetMonitorSampleHourly`). Populated by the runSampleRollup
 -- job via INSERT...ON CONFLICT DO UPDATE every 30 minutes (hourly tier)
 -- and once a day at 02:30 UTC (daily tier, reading from the hourly tier).
+-- The SD-WAN rule rollup additionally carries `selectionChangeCount` (failover
+-- frequency via LAG over the per-rule timeline) and last-seen selection state.
 -- Common shape across all twelve:
 --   id           String   @default(uuid())     -- synthetic PK for hypertable partitioning
 --   assetId      String                        -- FK Asset, cascade delete
@@ -1434,6 +1464,11 @@ Operator-extensible asset-type registry. The eight historical built-ins (server 
 - `GET    /assets/:id/temperature-history?range=...[&sensorName=...]`  — Per-sensor temperature time-series. Returns `{ samples, stats: { total, avgCelsius, minCelsius, maxCelsius } }`. Shared with telemetry retention.
 - `GET    /assets/:id/storage-history?mountPath=...&range=...`  — Per-mountpoint usage samples. SNMP-monitored assets only.
 - `GET    /assets/:id/ipsec-history?tunnelName=...&range=...`  — Per-tunnel IPsec samples (status timeline + cumulative bytes). FortiOS-monitored assets only.
+- `GET    /assets/:id/sdwan-members`  — Per-WAN-member health summary (aggregate up/down, per-health-check latency/jitter/loss, recent up/down status strip, + IP/link/bytes joined from the latest interface sample). Drives the "SD-WAN Members" table above the rules.
+- `GET    /assets/:id/perf-sla-links`  — Distinct (healthCheck, link) pairs + latest SLA thresholds. SD-WAN data-exists gate + selector source for the SD-WAN tab.
+- `GET    /assets/:id/perf-sla-history?healthCheck=...&link=...&range=...`  — Per-member SD-WAN Performance SLA latency/jitter/packet-loss gauges over time (tier-aware).
+- `GET    /assets/:id/sdwan-rules`  — Latest snapshot of SD-WAN service rules (selected member + members/criteria/health-checks/destination/status), ordered by FortiOS rule priority.
+- `GET    /assets/:id/sdwan-rule-history?ruleName=...&range=...`  — Selected-member failover timeline for one SD-WAN rule (tier-aware).
 The assets list and single-GET attach a synthesized `ipContext` field to each row: `{ subnetId, subnetCidr, reservation: { id, createdBy, sourceType } | null } | null` (null when the asset has no IP, or no non-deprecated subnet contains the IP). The Assets page reads it to render a **View Lease** button on rows whose IP lives in a known subnet — clicking it navigates to `/subnets.html#ip=<subnetId>@<ipAddress>`, where the network slide-over opens scrolled to that IP's row. To reserve or release IPs, operators use the network slide-over directly (no asset-row Reserve/Unreserve buttons).
 
 #### Quarantine (admin + assetsadmin, or bearer token with `assets:quarantine` scope)

@@ -2791,6 +2791,27 @@ async function openViewModal(id) {
     if (a.assetType === "access_point" && a.monitored) {
       tabs.push({ key: "stations", label: "Stations", html: _assetStationsTabHTML(a) });
     }
+    // SD-WAN tab — FortiGate firewalls discovered via FortiManager/FortiGate
+    // with the pullSdwan toggle on. Shown only when the device actually
+    // reported SD-WAN data (rules or health-check links exist). Fetched here so
+    // the tab is present (and pre-populated) on first paint.
+    var sdwanRules = [];
+    var sdwanLinks = [];
+    var sdwanMembers = [];
+    if (a.monitored && a.assetType === "firewall" &&
+        (function () { var sk = (a.discoveredByIntegration && a.discoveredByIntegration.type) || "manual"; return sk === "fortimanager" || sk === "fortigate"; }())) {
+      var sdwanAux = await Promise.all([
+        api.assets.sdwanRules(a.id).catch(function (err) { console.warn("Failed to load SD-WAN rules", err); return { rules: [] }; }),
+        api.assets.perfSlaLinks(a.id).catch(function (err) { console.warn("Failed to load SD-WAN perf-SLA links", err); return { links: [] }; }),
+        api.assets.sdwanMembers(a.id).catch(function (err) { console.warn("Failed to load SD-WAN members", err); return { members: [] }; }),
+      ]);
+      sdwanRules = (sdwanAux[0] && sdwanAux[0].rules) || [];
+      sdwanLinks = (sdwanAux[1] && sdwanAux[1].links) || [];
+      sdwanMembers = (sdwanAux[2] && sdwanAux[2].members) || [];
+    }
+    if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) {
+      tabs.push({ key: "sdwan", label: "SD-WAN", html: _assetSdwanTabHTML(a, sdwanRules, sdwanLinks, sdwanMembers) });
+    }
     tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id, sightings, ipHistory) });
     // Custom MIB tab — present whenever the asset's manufacturer has at least
     // one custom widget defined under its ManufacturerProfile. The tab body
@@ -2836,6 +2857,7 @@ async function openViewModal(id) {
     _wireModalTabs("asset-view");
     if (isAdmin()) _wireSnmpWalkTab(a);
     if (canManageAssets()) _wireQuarantineTab(a);
+    if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
     // Mount the dependency tree into its placeholder div on the General tab.
     var depMount = document.getElementById("asset-dep-tree-mount-" + a.id);
     if (depMount) {
@@ -8101,6 +8123,539 @@ function _renderIpsecBpsChart(container, derived, side, opts) {
   });
   _addChartScreenshotButton(container, side === "in" ? "IPsec incoming" : "IPsec outgoing", { yAxis: "Throughput (bps)", subject: opts.subject });
   _observeChartResize(container, function (c) { _renderIpsecBpsChart(c, derived, side, opts); });
+}
+
+// ─── SD-WAN tab (FortiOS Performance SLA + service rules) ───────────────────
+//
+// Rendered as a conditional asset-modal tab (not a slide-over) when a FortiGate
+// firewall reports SD-WAN data. Two sections: a service-rules table (current
+// selected member per rule + click-through to a member-selection timeline) and
+// a Performance SLA section (per health-check/member latency / jitter / packet-
+// loss charts over time). Data comes from the perf-SLA + sdwan-rule sample
+// streams via the asset history endpoints.
+
+var _SDWAN_MEMBER_COLORS = ["#2a9d8f", "#4361ee", "#f4a261", "#9b5de5", "#e76f51", "#43aa8b", "#577590", "#bc6c25"];
+function _sdwanMemberColor(name, members) {
+  if (!name) return "#7b8794";
+  var idx = (members || []).indexOf(name);
+  if (idx < 0) idx = 0;
+  return _SDWAN_MEMBER_COLORS[idx % _SDWAN_MEMBER_COLORS.length];
+}
+
+// Compact green/red "Health Check Status" strip — one segment per recent scrape.
+function _sdwanStatusStripHTML(recent) {
+  if (!recent || !recent.length) return '<span style="color:var(--color-text-tertiary)">—</span>';
+  var segs = recent.map(function (r) {
+    var c = r.up ? "#2ecc40" : "#e02020";
+    return '<span title="' + escapeHtml(_fmtTooltipTs(r.timestamp)) + (r.up ? ' — up' : ' — down') +
+      '" style="flex:1 1 auto;min-width:2px;height:16px;background:' + c + '"></span>';
+  }).join("");
+  return '<span style="display:flex;gap:1px;align-items:stretch;min-width:120px;max-width:340px">' + segs + '</span>';
+}
+
+// SD-WAN Members table body — canonical applyTableLayout column template.
+function _sdwanMembersTableHTML(members) {
+  function statusDot(up) {
+    return '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:' +
+      (up ? "#2a9d8f" : "#d32f2f") + '"></span>';
+  }
+  var rows = members.map(function (m) {
+    var hcChips = (m.healthChecks || []).map(function (h) {
+      var c = h.state === "up" ? "#2a9d8f" : "#d32f2f";
+      var lat = (typeof h.latencyMs === "number") ? (Math.round(h.latencyMs * 100) / 100) + "ms" : "—";
+      return '<span title="' + escapeHtml(h.healthCheck) +
+        ' · jitter ' + (typeof h.jitterMs === "number" ? (Math.round(h.jitterMs * 100) / 100) + "ms" : "—") +
+        ' · loss ' + (typeof h.packetLoss === "number" ? h.packetLoss + "%" : "—") +
+        '" style="display:inline-block;margin:0 4px 2px 0;padding:1px 6px;border-radius:10px;font-size:0.74rem;background:var(--color-bg-elevated);border:1px solid var(--color-border)">' +
+        '<span style="color:' + c + '">●</span> ' + escapeHtml(h.healthCheck) + ' ' + lat + '</span>';
+    }).join("") || '<span style="color:var(--color-text-tertiary)">—</span>';
+    var link = m.linkUp == null
+      ? '<span style="color:var(--color-text-tertiary)">—</span>'
+      : (m.linkUp
+          ? '<span style="color:#2a9d8f">▲ ' + (m.linkSpeedBps ? _fmtBitsPerSec(m.linkSpeedBps) : "up") + '</span>'
+          : '<span style="color:#d32f2f">▼ down</span>');
+    var bytes = (m.txBytes != null || m.rxBytes != null)
+      ? (m.txBytes != null ? _fmtBytes(m.txBytes) : "—") + ' / ' + (m.rxBytes != null ? _fmtBytes(m.rxBytes) : "—")
+      : '<span style="color:var(--color-text-tertiary)">—</span>';
+    return '<tr>' +
+        '<td data-col-id="member" data-col-required="true">' + statusDot(m.state === "up") + escapeHtml(m.link) + '</td>' +
+        '<td data-col-id="ip">' + (m.ip ? escapeHtml(m.ip) : '<span style="color:var(--color-text-tertiary)">—</span>') + '</td>' +
+        '<td data-col-id="hcstatus">' + _sdwanStatusStripHTML(m.recent) + '</td>' +
+        '<td data-col-id="checks">' + hcChips + '</td>' +
+        '<td data-col-id="bytes">' + bytes + '</td>' +
+        '<td data-col-id="link">' + link + '</td>' +
+      '</tr>';
+  }).join("");
+  return '<div class="table-wrapper"><table id="sdwan-members-table" class="data-table" style="font-size:0.82rem"><thead><tr>' +
+      '<th data-col-id="member" data-col-required="true">Member</th>' +
+      '<th data-col-id="ip">IP</th>' +
+      '<th data-col-id="hcstatus">Health Check Status</th>' +
+      '<th data-col-id="checks">Health Checks</th>' +
+      '<th data-col-id="bytes">Bytes (Sent/Received)</th>' +
+      '<th data-col-id="link">Link</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+function _assetSdwanTabHTML(a, rules, links, members) {
+  rules = rules || [];
+  links = links || [];
+  members = members || [];
+  var html = '<div style="padding:0.25rem 0">';
+
+  // ── SD-WAN Members table (above the rules) ──
+  if (members.length) {
+    html +=
+      '<section style="margin-bottom:1.25rem">' +
+        '<h4 style="margin:0 0 0.5rem 0">SD-WAN Members</h4>' +
+        '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">WAN members (interfaces + overlays) with per-health-check status. The Health Check Status strip shows recent up/down per scrape; IP / link / bytes come from the latest interface poll.</p>' +
+        _sdwanMembersTableHTML(members) +
+      '</section>' +
+      ((rules.length || links.length) ? '<hr style="margin:1.25rem 0;border:none;border-top:1px solid var(--color-border)">' : '');
+  }
+
+  // ── SD-WAN Rules table ── (canonical column-layout template: data-col-id on
+  // every <th>, anchors marked data-col-required, applyTableLayout() wired in
+  // _wireSdwanTab after the body lands in the DOM.)
+  if (rules.length) {
+    function _pillList(items, joinStr) {
+      if (!items || !items.length) return '<span style="color:var(--color-text-tertiary)">—</span>';
+      return items.map(function (m) { return escapeHtml(m); }).join(joinStr);
+    }
+    var ruleRows = rules.map(function (r) {
+      var members = Array.isArray(r.availableMembers) ? r.availableMembers : [];
+      var pills = members.length
+        ? members.map(function (m) {
+            var sel = m === r.selectedMember;
+            return '<span style="display:inline-block;margin:0 4px 2px 0;padding:1px 7px;border-radius:10px;font-size:0.76rem;' +
+              (sel
+                ? 'background:' + _sdwanMemberColor(m, members) + ';color:#fff;font-weight:600'
+                : 'background:var(--color-bg-elevated);border:1px solid var(--color-border);color:var(--color-text-secondary)') +
+              '">' + escapeHtml(m) + (sel ? ' ✓' : '') + '</span>';
+          }).join("")
+        : '<span style="color:var(--color-text-tertiary)">—</span>';
+      var enabledCell = r.enabled == null
+        ? '<span style="color:var(--color-text-tertiary)">—</span>'
+        : (r.enabled
+            ? '<span style="color:#2a9d8f">● Enabled</span>'
+            : '<span style="color:var(--color-text-tertiary)">○ Disabled</span>');
+      return '<tr class="sdwan-rule-row" data-rule="' + escapeHtml(r.ruleName) + '" style="cursor:pointer">' +
+          '<td data-col-id="id">' + (r.ruleId != null ? escapeHtml(String(r.ruleId)) : '—') + '</td>' +
+          '<td data-col-id="name" style="font-weight:600">' + escapeHtml(r.ruleName) + '</td>' +
+          '<td data-col-id="dst">' + _pillList(r.dst, ", ") + '</td>' +
+          '<td data-col-id="members">' + pills + '</td>' +
+          '<td data-col-id="criteria">' + (r.criteria ? escapeHtml(r.criteria) : '—') + '</td>' +
+          '<td data-col-id="perfsla">' + _pillList(r.healthChecks, ", ") + '</td>' +
+          '<td data-col-id="status">' + enabledCell + '</td>' +
+        '</tr>';
+    }).join("");
+    html +=
+      '<section style="margin-bottom:1.25rem">' +
+        '<h4 style="margin:0 0 0.5rem 0">SD-WAN Rules</h4>' +
+        '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Service rules in FortiGate priority order, with the currently selected member highlighted in <strong>Members</strong>. Click a rule to see its member-selection history. The active member is inferred from health-check state when FortiOS does not report the selected route directly.</p>' +
+        '<div class="table-wrapper"><table id="sdwan-rules-table" class="data-table" style="font-size:0.82rem"><thead><tr>' +
+          '<th data-col-id="id" style="width:48px">ID</th>' +
+          '<th data-col-id="name" data-col-required="true">Name</th>' +
+          '<th data-col-id="dst">Destination</th>' +
+          '<th data-col-id="members" data-col-required="true">Members</th>' +
+          '<th data-col-id="criteria">Criteria</th>' +
+          '<th data-col-id="perfsla">Performance SLA</th>' +
+          '<th data-col-id="status">Status</th>' +
+        '</tr></thead><tbody>' + ruleRows + '</tbody></table></div>' +
+        '<div id="sdwan-rule-timeline" style="margin-top:0.75rem"></div>' +
+      '</section>';
+  }
+
+  // ── Performance SLA section ──
+  if (links.length) {
+    var rangeBtns = _chartRangeBtnsHTML("sdwan-range-btn", [
+      { value: "1h",  label: "1h"  },
+      { value: "24h", label: "24h" },
+      { value: "7d",  label: "7d"  },
+      { value: "30d", label: "30d" },
+    ], "assetSdwan", "24h");
+    // One option per health-check (members are overlaid on each chart).
+    var hcOrder = [];
+    links.forEach(function (l) { if (hcOrder.indexOf(l.healthCheck) < 0) hcOrder.push(l.healthCheck); });
+    var options = hcOrder.map(function (hc) {
+      var n = links.filter(function (l) { return l.healthCheck === hc; }).length;
+      return '<option value="' + escapeHtml(hc) + '">' + escapeHtml(hc) + ' (' + n + ' member' + (n === 1 ? '' : 's') + ')</option>';
+    }).join("");
+    if (rules.length) {
+      html += '<hr style="margin:1.25rem 0;border:none;border-top:1px solid var(--color-border)">';
+    }
+    html +=
+      '<section>' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem">' +
+          '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +
+            '<h4 style="margin:0">Performance SLA</h4>' +
+            '<select id="sdwan-perfsla-select" class="form-input" style="padding:2px 6px;font-size:0.82rem">' + options + '</select>' +
+          '</div>' +
+          '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
+        '</div>' +
+        '<div id="sdwan-perfsla-stats" style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
+        '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Latency (ms)</h5>' +
+        '<div id="sdwan-latency-chart" class="sdwan-chart-box"></div>' +
+        '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Jitter (ms)</h5>' +
+        '<div id="sdwan-jitter-chart" class="sdwan-chart-box"></div>' +
+        '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Packet loss (%)</h5>' +
+        '<div id="sdwan-loss-chart" class="sdwan-chart-box"></div>' +
+      '</section>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+// Holds the current SD-WAN tab selection state (link list + selected rule) so
+// the shared range buttons can reload whichever sub-view is showing.
+var _sdwanTabState = null;
+
+function _wireSdwanTab(a, rules, links) {
+  links = links || [];
+  // Group health-check members so a single selection overlays every member of
+  // a health-check on the charts.
+  var linksByHc = {};
+  var hcNames = [];
+  links.forEach(function (l) {
+    if (!linksByHc[l.healthCheck]) { linksByHc[l.healthCheck] = []; hcNames.push(l.healthCheck); }
+    linksByHc[l.healthCheck].push(l);
+  });
+  _sdwanTabState = { assetId: a.id, links: links, linksByHc: linksByHc, hcNames: hcNames, hcName: hcNames[0] || null, rules: rules || [], ruleName: null };
+  // Style chart boxes (same treatment as the IPsec panel).
+  document.querySelectorAll(".sdwan-chart-box").forEach(function (el) {
+    el.style.background = "var(--color-bg-elevated)";
+    el.style.border = "1px solid var(--color-border)";
+    el.style.borderRadius = "6px";
+    el.style.padding = "0.5rem";
+    el.style.minHeight = "140px";
+    el.style.display = "flex";
+    el.style.alignItems = "center";
+    el.style.justifyContent = "center";
+    el.style.color = "var(--color-text-secondary)";
+    el.style.fontSize = "0.85rem";
+  });
+
+  var range = _getChartRangePref("assetSdwan", "24h");
+
+  // Perf-SLA health-check selector + initial load (overlays all members).
+  var sel = document.getElementById("sdwan-perfsla-select");
+  if (sel && hcNames.length) {
+    sel.addEventListener("change", function () {
+      _sdwanTabState.hcName = sel.value;
+      _loadPerfSlaForHealthCheck(a.id, sel.value, linksByHc[sel.value] || [], _getChartRangePref("assetSdwan", "24h"));
+    });
+    _loadPerfSlaForHealthCheck(a.id, hcNames[0], linksByHc[hcNames[0]] || [], range);
+  }
+
+  // Canonical column-layout template (resize + hover-gear chooser), persisted
+  // by table-type so widths apply across every FortiGate's SD-WAN tab.
+  if (typeof applyTableLayout === "function") {
+    var membersTable = document.getElementById("sdwan-members-table");
+    if (membersTable) applyTableLayout(membersTable, "asset-sdwan-members");
+    var rulesTable = document.getElementById("sdwan-rules-table");
+    if (rulesTable) applyTableLayout(rulesTable, "asset-sdwan-rules");
+  }
+
+  // Rule rows → load selection timeline.
+  document.querySelectorAll(".sdwan-rule-row").forEach(function (row) {
+    row.addEventListener("click", function () {
+      var rn = row.getAttribute("data-rule");
+      _sdwanTabState.ruleName = rn;
+      document.querySelectorAll(".sdwan-rule-row").forEach(function (r) { r.style.background = ""; });
+      row.style.background = "var(--color-bg-elevated)";
+      _loadSdwanRuleTimelineFor(a.id, rn, _getChartRangePref("assetSdwan", "24h"));
+    });
+  });
+
+  // Shared range buttons — reload whichever sub-views are active.
+  document.querySelectorAll(".sdwan-range-btn").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var r = b.getAttribute("data-range");
+      document.querySelectorAll(".sdwan-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+      b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+      _setChartRangePref("assetSdwan", r);
+      if (_sdwanTabState.hcName) _loadPerfSlaForHealthCheck(a.id, _sdwanTabState.hcName, _sdwanTabState.linksByHc[_sdwanTabState.hcName] || [], r);
+      if (_sdwanTabState.ruleName) _loadSdwanRuleTimelineFor(a.id, _sdwanTabState.ruleName, r);
+    });
+  });
+}
+
+// Load every member of a health-check in parallel and overlay them on the
+// three metric charts (one colored line per member). `members` is the array of
+// link objects (from /perf-sla-links) for this health-check; they share the
+// same SLA thresholds.
+async function _loadPerfSlaForHealthCheck(assetId, hcName, members, range) {
+  var latEl  = document.getElementById("sdwan-latency-chart");
+  var jitEl  = document.getElementById("sdwan-jitter-chart");
+  var lossEl = document.getElementById("sdwan-loss-chart");
+  var stats  = document.getElementById("sdwan-perfsla-stats");
+  if (!latEl || !members || !members.length) return;
+  latEl.textContent = jitEl.textContent = lossEl.textContent = "Loading samples…";
+  if (stats) stats.textContent = "Loading…";
+  var opts = (typeof range === "string" || !range) ? { range: range || "24h" } : range;
+  var memberNames = members.map(function (m) { return m.link; });
+  try {
+    var results = await Promise.all(members.map(function (m) {
+      return api.assets.perfSlaHistory(assetId, m.healthCheck, m.link, opts)
+        .then(function (data) { return { link: m.link, data: data, samples: data.samples || [] }; })
+        .catch(function () { return { link: m.link, data: null, samples: [] }; });
+    }));
+    var series = results.map(function (r) {
+      return { label: r.link, color: _sdwanMemberColor(r.link, memberNames), samples: r.samples, data: r.data };
+    });
+    var first = results.find(function (r) { return r.data; }) || results[0];
+    var copts = { since: first && first.data ? first.data.since : undefined, until: first && first.data ? first.data.until : undefined, subject: hcName };
+    var thr = members[0] || {};
+    // Stash render state so the clickable legend can re-render all three charts
+    // on toggle. Reset per-member visibility whenever the health-check changes.
+    _sdwanTabState.perfSla = { series: series, copts: copts, thr: thr, data: first && first.data };
+    _sdwanTabState.hiddenMembers = new Set();
+    _renderPerfSlaStats(stats, series, first && first.data, hcName);
+    _renderAllPerfSlaCharts();
+  } catch (err) {
+    latEl.textContent = jitEl.textContent = lossEl.textContent = "Error: " + (err.message || "failed to load");
+    if (stats) stats.textContent = "";
+  }
+}
+
+function _renderPerfSlaStats(container, series, data, subject) {
+  if (!container) return;
+  var total = series.reduce(function (n, s) { return n + s.samples.length; }, 0);
+  if (!total) { _renderChartStats(container, 0, []); return; }
+  function avg(key) {
+    var vals = [];
+    series.forEach(function (s) { s.samples.forEach(function (x) { if (typeof x[key] === "number") vals.push(x[key]); }); });
+    if (!vals.length) return null;
+    return vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+  }
+  function fmt(v, unit) { return v == null ? null : (Math.round(v * 100) / 100) + " " + unit; }
+  var parts = [
+    { label: "Members", value: String(series.length) },
+    { label: "Avg latency", value: fmt(avg("latencyMs"), "ms") },
+    { label: "Avg jitter",  value: fmt(avg("jitterMs"), "ms") },
+    { label: "Avg loss",    value: fmt(avg("packetLoss"), "%") },
+  ];
+  var tierPart = _tierStatsPart(data);
+  if (tierPart) parts.unshift(tierPart);
+  _renderChartStats(container, total, parts);
+}
+
+// Re-render all three Performance SLA charts from the stashed state (honors the
+// current per-member hidden set). Called on initial load + on legend toggle.
+function _renderAllPerfSlaCharts() {
+  var st = _sdwanTabState;
+  if (!st || !st.perfSla) return;
+  var ps = st.perfSla;
+  var latEl  = document.getElementById("sdwan-latency-chart");
+  var jitEl  = document.getElementById("sdwan-jitter-chart");
+  var lossEl = document.getElementById("sdwan-loss-chart");
+  if (latEl)  _renderPerfSlaMultiChart(latEl,  ps.series, "latencyMs",  { label: "Latency", unit: "ms", threshold: ps.thr.latencyThresholdMs }, ps.copts);
+  if (jitEl)  _renderPerfSlaMultiChart(jitEl,  ps.series, "jitterMs",   { label: "Jitter",  unit: "ms", threshold: ps.thr.jitterThresholdMs }, ps.copts);
+  if (lossEl) _renderPerfSlaMultiChart(lossEl, ps.series, "packetLoss", { label: "Packet loss", unit: "%", threshold: ps.thr.packetLossThreshold }, ps.copts);
+}
+
+// Toggle one member's visibility across all three Performance SLA charts.
+function _togglePerfSlaMember(label) {
+  var st = _sdwanTabState;
+  if (!st) return;
+  if (!st.hiddenMembers) st.hiddenMembers = new Set();
+  if (st.hiddenMembers.has(label)) st.hiddenMembers.delete(label);
+  else st.hiddenMembers.add(label);
+  _renderAllPerfSlaCharts();
+}
+
+// Multi-series gauge chart: one polyline per member (`series[].samples`), a
+// clickable per-member color legend (click to hide/show on every chart), and
+// the shared dashed SLA threshold line. The hidden set lives on
+// `_sdwanTabState.hiddenMembers` so it persists across resize re-renders and is
+// shared by all three charts.
+function _renderPerfSlaMultiChart(container, series, metricKey, meta, opts) {
+  opts = opts || {};
+  meta = meta || {};
+  // Build per-series value arrays; drop members with no numeric points.
+  var drawn = series.map(function (s) {
+    return {
+      label: s.label, color: s.color,
+      values: s.samples.map(function (x) { return { ts: x.timestamp, v: x[metricKey] }; })
+                        .filter(function (e) { return typeof e.v === "number"; }),
+    };
+  }).filter(function (s) { return s.values.length; });
+  if (!drawn.length) { container.textContent = "No samples in this range yet."; return; }
+  // Per-member hidden set (shared across all three charts; lives on tab state).
+  var hidden = (_sdwanTabState && _sdwanTabState.hiddenMembers) || new Set();
+  var visible = drawn.filter(function (s) { return !hidden.has(s.label); });
+  var W = container.clientWidth || 600, H = 160;
+  var padL = 52, padR = 10, padT = 10, padB = 40; // extra bottom pad for legend
+  var innerW = W - padL - padR, innerH = H - padT - padB;
+  var allTs = [];
+  drawn.forEach(function (s) { s.values.forEach(function (e) { allTs.push({ timestamp: e.ts }); }); });
+  var bounds = _chartTimeBounds(allTs, opts.since, opts.until);
+  var t0 = bounds.t0, t1 = bounds.t1;
+  var spanMs = t1 - t0, oneDayMs = 86400000;
+  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  function fmtTick(ts) { var d = new Date(ts); return spanMs <= oneDayMs ? pad2(d.getHours()) + ":" + pad2(d.getMinutes()) : (d.getMonth() + 1) + "/" + d.getDate(); }
+  var hasThreshold = typeof meta.threshold === "number" && meta.threshold > 0;
+  // Scale the y-axis to the VISIBLE series so hiding a high member rescales the
+  // rest (fall back to all members when everything is hidden).
+  var maxV = 1;
+  (visible.length ? visible : drawn).forEach(function (s) { s.values.forEach(function (e) { if (e.v > maxV) maxV = e.v; }); });
+  if (hasThreshold) maxV = Math.max(maxV, meta.threshold * 1.05);
+  function tidyCeil(n) { var exp = Math.pow(10, Math.floor(Math.log10(n))); var mant = n / exp; var step = mant <= 1 ? 1 : mant <= 2 ? 2 : mant <= 5 ? 5 : 10; return step * exp; }
+  var ceil = tidyCeil(maxV);
+  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
+  function yFor(v) { return padT + innerH - (v / ceil) * innerH; }
+  var thresholdLine = "";
+  if (hasThreshold) {
+    var ty = yFor(meta.threshold);
+    thresholdLine =
+      '<line x1="' + padL + '" y1="' + ty + '" x2="' + (W - padR) + '" y2="' + ty + '" stroke="#e9a23b" stroke-width="1.25" stroke-dasharray="5,4"/>' +
+      '<text x="' + (W - padR) + '" y="' + (ty - 3) + '" text-anchor="end" font-size="9" fill="#e9a23b">SLA ' + (Math.round(meta.threshold * 100) / 100) + ' ' + escapeHtml(meta.unit || "") + '</text>';
+  }
+  var seriesSvg = visible.map(function (s) {
+    var pts = s.values.map(function (e) { return xFor(e.ts) + "," + yFor(e.v); }).join(" ");
+    var dots = s.values.map(function (e) {
+      return '<circle class="chart-hit" cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="5" fill="transparent" style="cursor:crosshair"' +
+        ' data-ts="' + escapeHtml(String(e.ts)) + '" data-v="' + e.v + '" data-member="' + escapeHtml(s.label) + '"/>';
+    }).join("");
+    return '<polyline points="' + pts + '" fill="none" stroke="' + s.color + '" stroke-width="1.5"/>' + dots;
+  }).join("");
+  var ticks = "";
+  for (var i = 0; i <= 4; i++) {
+    var v = ceil * i / 4;
+    var y = padT + innerH - (i / 4) * innerH;
+    ticks +=
+      '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
+      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + (Math.round(v * 100) / 100) + '</text>';
+  }
+  var xTicks = "";
+  for (var j = 0; j <= 5; j++) {
+    var tsTick = t0 + (t1 - t0) * (j / 5);
+    var xPos = padL + (j / 5) * innerW;
+    xTicks +=
+      '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
+      '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
+  }
+  // Legend row beneath the x-axis — one clickable swatch+label per member.
+  // Click toggles that member's visibility on every chart; hidden members grey
+  // out + strike through. Each item is a <g class="sdwan-legend-item"> with a
+  // transparent hit rect so the whole chip is the click target.
+  var legendY = padT + innerH + 30;
+  var lx = padL;
+  var legend = '<g font-size="10">' + drawn.map(function (s) {
+    var isHidden = hidden.has(s.label);
+    var w = 16 + s.label.length * 6.5;
+    var item = '<g class="sdwan-legend-item" data-member="' + escapeHtml(s.label) + '" style="cursor:pointer" opacity="' + (isHidden ? "0.4" : "1") + '">' +
+      '<rect x="' + lx + '" y="' + (legendY - 11) + '" width="' + w + '" height="14" fill="transparent"/>' +
+      '<rect x="' + lx + '" y="' + (legendY - 7) + '" width="10" height="6" fill="' + s.color + '"/>' +
+      '<text x="' + (lx + 14) + '" y="' + legendY + '" fill="currentColor"' + (isHidden ? ' text-decoration="line-through"' : '') + '>' + escapeHtml(s.label) + '</text>' +
+      '</g>';
+    lx += w + 8;
+    return item;
+  }).join("") + '</g>';
+  var clipId = _chartClipId("sdwanGauge");
+  container.innerHTML =
+    '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      ticks + xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      '<g ' + _chartClipAttr(clipId) + '>' +
+        thresholdLine +
+        seriesSvg +
+      '</g>' +
+      legend +
+    '</svg>' + CHART_TOOLTIP_HTML;
+  container.style.position = "relative";
+  container.style.alignItems = "stretch";
+  container.style.justifyContent = "flex-start";
+  _wireChartTooltip(container, function (target) {
+    return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(target.getAttribute("data-member")) + '</div>' +
+      '<div>' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+      '<div>' + escapeHtml(meta.label || metricKey) + ': ' + escapeHtml(target.getAttribute("data-v")) + ' ' + escapeHtml(meta.unit || "") + '</div>';
+  });
+  _addChartScreenshotButton(container, "SD-WAN " + (meta.label || metricKey), { yAxis: (meta.label || "") + " (" + (meta.unit || "") + ")", subject: opts.subject });
+  // Clickable legend → toggle the member across all three charts.
+  container.querySelectorAll(".sdwan-legend-item").forEach(function (g) {
+    g.addEventListener("click", function () { _togglePerfSlaMember(g.getAttribute("data-member")); });
+  });
+  _observeChartResize(container, function (c) { _renderPerfSlaMultiChart(c, series, metricKey, meta, opts); });
+}
+
+async function _loadSdwanRuleTimelineFor(assetId, ruleName, range) {
+  var el = document.getElementById("sdwan-rule-timeline");
+  if (!el) return;
+  el.innerHTML = '<div class="sdwan-chart-box" style="min-height:70px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem">Loading…</div>';
+  var opts = (typeof range === "string" || !range) ? { range: range || "24h" } : range;
+  try {
+    var data = await api.assets.sdwanRuleHistory(assetId, ruleName, opts);
+    var samples = data.samples || [];
+    el.innerHTML =
+      '<h5 style="margin:0.25rem 0 0.25rem;font-size:0.85rem">Selected member — ' + escapeHtml(ruleName) + '</h5>' +
+      '<div id="sdwan-timeline-chart" class="sdwan-chart-box" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:80px;position:relative"></div>';
+    _renderSdwanSelectionTimeline(document.getElementById("sdwan-timeline-chart"), samples, { since: data.since, until: data.until, subject: ruleName });
+  } catch (err) {
+    el.innerHTML = '<div class="sdwan-chart-box" style="min-height:70px;color:var(--color-text-secondary);font-size:0.85rem;padding:0.5rem">Error: ' + escapeHtml(err.message || "failed to load") + '</div>';
+  }
+}
+
+// Categorical step chart of which member was selected over time (one colored
+// band per sample, colored by member). Mirrors _renderIpsecStatusChart.
+function _renderSdwanSelectionTimeline(container, samples, opts) {
+  opts = opts || {};
+  if (!container) return;
+  if (samples.length === 0) { container.textContent = "No selection samples in this range yet."; return; }
+  // Distinct members for the legend + color mapping.
+  var members = [];
+  samples.forEach(function (s) { if (s.selectedMember && members.indexOf(s.selectedMember) < 0) members.push(s.selectedMember); });
+  var W = container.clientWidth || 600, H = 64;
+  var padL = 10, padR = 10, padT = 18, padB = 22;
+  var innerW = W - padL - padR, innerH = H - padT - padB;
+  var bounds = _chartTimeBounds(samples, opts.since, opts.until);
+  var t0 = bounds.t0, t1 = bounds.t1;
+  var lastStepMs = samples.length > 1
+    ? (new Date(samples[samples.length - 1].timestamp).getTime() - new Date(samples[samples.length - 2].timestamp).getTime())
+    : 600000;
+  var spanMs = t1 - t0, oneDayMs = 86400000;
+  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  function fmtTick(ts) { var d = new Date(ts); return spanMs <= oneDayMs ? pad2(d.getHours()) + ":" + pad2(d.getMinutes()) : (d.getMonth() + 1) + "/" + d.getDate(); }
+  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
+  var bars = samples.map(function (s, i) {
+    var x = xFor(s.timestamp);
+    var x2 = (i + 1 < samples.length) ? xFor(samples[i + 1].timestamp) : Math.min(padL + innerW, xFor(new Date(s.timestamp).getTime() + lastStepMs));
+    var w = Math.max(1, x2 - x);
+    var col = s.selectedMember ? _sdwanMemberColor(s.selectedMember, members) : "#7b8794";
+    return '<rect class="chart-hit" x="' + x + '" y="' + padT + '" width="' + w + '" height="' + innerH + '" fill="' + col + '" opacity="0.85" style="cursor:crosshair"' +
+      ' data-ts="' + escapeHtml(String(s.timestamp)) + '"' +
+      ' data-member="' + escapeHtml(s.selectedMember || "none") + '"/>';
+  }).join("");
+  var xTicks = "";
+  for (var j = 0; j <= 5; j++) {
+    var tsTick = t0 + (t1 - t0) * (j / 5);
+    var xPos = padL + (j / 5) * innerW;
+    xTicks +=
+      '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
+      '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
+  }
+  var legend = '<g font-size="10" fill="currentColor">' +
+    members.map(function (m, k) {
+      var lx = padL + k * 90;
+      return '<rect x="' + lx + '" y="2" width="10" height="6" fill="' + _sdwanMemberColor(m, members) + '"/><text x="' + (lx + 14) + '" y="8">' + escapeHtml(m) + '</text>';
+    }).join("") + '</g>';
+  var clipId = _chartClipId("sdwanSel");
+  container.innerHTML =
+    '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      '<g ' + _chartClipAttr(clipId) + '>' + bars + '</g>' +
+      legend +
+    '</svg>' + CHART_TOOLTIP_HTML;
+  container.style.position = "relative";
+  _wireChartTooltip(container, function (target) {
+    return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+      '<div>Member: ' + escapeHtml(target.getAttribute("data-member")) + '</div>';
+  });
+  _addChartScreenshotButton(container, "SD-WAN selection", { yAxis: "Selected member", subject: opts.subject });
+  _observeChartResize(container, function (c) { _renderSdwanSelectionTimeline(c, samples, opts); });
 }
 
 // ─── Storage mountpoint slide-over ─────────────────────────────────────────

@@ -83,6 +83,9 @@ function legacyStreamToTier(raw: unknown, fallback: TierRetention): TierRetentio
           interfaces:  legacyStreamToTier(raw.systemInfo, def.interfaces),
           storage:     legacyStreamToTier(raw.systemInfo, def.storage),
           ipsec:       legacyStreamToTier(raw.systemInfo, def.ipsec),
+          // SD-WAN streams also ride the system-info pass.
+          perfSla:     legacyStreamToTier(raw.systemInfo, def.perfSla),
+          sdwanRule:   legacyStreamToTier(raw.systemInfo, def.sdwanRule),
         };
       } else {
         // No row / unrecognized → seed entity defaults.

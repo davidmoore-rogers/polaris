@@ -356,6 +356,34 @@ const api = {
       }
       return request("GET", `/assets/${id}/ipsec-history?` + qs.join("&"));
     },
+    // SD-WAN (FortiOS, gated by Integration.config.pullSdwan).
+    sdwanMembers:         (id) => request("GET", `/assets/${id}/sdwan-members`),
+    perfSlaLinks:         (id) => request("GET", `/assets/${id}/perf-sla-links`),
+    perfSlaHistory:       (id, healthCheck, link, opts) => {
+      if (typeof opts === "string") opts = { range: opts };
+      opts = opts || {};
+      var qs = ["healthCheck=" + encodeURIComponent(healthCheck), "link=" + encodeURIComponent(link)];
+      if (opts.from && opts.to) {
+        qs.push("from=" + encodeURIComponent(opts.from));
+        qs.push("to="   + encodeURIComponent(opts.to));
+      } else if (opts.range) {
+        qs.push("range=" + encodeURIComponent(opts.range));
+      }
+      return request("GET", `/assets/${id}/perf-sla-history?` + qs.join("&"));
+    },
+    sdwanRules:           (id) => request("GET", `/assets/${id}/sdwan-rules`),
+    sdwanRuleHistory:     (id, ruleName, opts) => {
+      if (typeof opts === "string") opts = { range: opts };
+      opts = opts || {};
+      var qs = ["ruleName=" + encodeURIComponent(ruleName)];
+      if (opts.from && opts.to) {
+        qs.push("from=" + encodeURIComponent(opts.from));
+        qs.push("to="   + encodeURIComponent(opts.to));
+      } else if (opts.range) {
+        qs.push("range=" + encodeURIComponent(opts.range));
+      }
+      return request("GET", `/assets/${id}/sdwan-rule-history?` + qs.join("&"));
+    },
     // Polaris Agent — operator-facing endpoints (see CLAUDE.md "Polaris
     // Agent API surface"). `agent.get` returns 404 when no agent is
     // installed yet; the caller should treat that as "no install" rather

@@ -697,3 +697,259 @@ export async function readIpsecHistory(
     }),
   };
 }
+
+// ─── SD-WAN Performance SLA history (gauge per health-check member) ───────────
+
+export interface PerfSlaHistoryRow {
+  timestamp:  Date;
+  state:      string; // "up" | "down" (detail value, or dominant in bucket)
+  latencyMs:  number | null;
+  jitterMs:   number | null;
+  packetLoss: number | null;
+  // Rollup-tier extras (bucket spread); omitted on detail tier.
+  minLatencyMs?:  number | null;
+  maxLatencyMs?:  number | null;
+  minJitterMs?:   number | null;
+  maxJitterMs?:   number | null;
+  minPacketLoss?: number | null;
+  maxPacketLoss?: number | null;
+  stateUpCount?:   number;
+  stateDownCount?: number;
+  sampleCount?:    number;
+}
+
+export async function readPerfSlaHistory(
+  assetId: string,
+  since: Date,
+  until: Date,
+  tier: SampleTier,
+  healthCheck: string,
+  link: string,
+  fetchSince?: Date,
+): Promise<{ samples: PerfSlaHistoryRow[] }> {
+  const queryFrom = fetchSince ?? since;
+  if (tier === "detail") {
+    const samples = await prisma.assetPerfSlaSample.findMany({
+      where: { assetId, healthCheck, link, timestamp: { gte: queryFrom, lte: until } },
+      orderBy: { timestamp: "asc" },
+    });
+    return {
+      samples: samples.map((s) => ({
+        timestamp:  s.timestamp,
+        state:      s.state,
+        latencyMs:  s.latencyMs,
+        jitterMs:   s.jitterMs,
+        packetLoss: s.packetLoss,
+      })),
+    };
+  }
+
+  const table = tier === "hourly" ? "asset_perf_sla_samples_hourly" : "asset_perf_sla_samples_daily";
+  const rows = await prisma.$queryRawUnsafe<Array<{
+    bucketStart: Date;
+    sampleCount: number;
+    stateUpCount: number; stateDownCount: number;
+    avgLatencyMs: number | null; minLatencyMs: number | null; maxLatencyMs: number | null;
+    avgJitterMs: number | null; minJitterMs: number | null; maxJitterMs: number | null;
+    avgPacketLoss: number | null; minPacketLoss: number | null; maxPacketLoss: number | null;
+  }>>(
+    `SELECT "bucketStart", "sampleCount", "stateUpCount", "stateDownCount",
+            "avgLatencyMs", "minLatencyMs", "maxLatencyMs",
+            "avgJitterMs", "minJitterMs", "maxJitterMs",
+            "avgPacketLoss", "minPacketLoss", "maxPacketLoss"
+     FROM "${table}"
+     WHERE "assetId" = $1 AND "healthCheck" = $2 AND "link" = $3 AND "bucketStart" >= $4 AND "bucketStart" <= $5
+     ORDER BY "bucketStart" ASC`,
+    assetId, healthCheck, link, queryFrom, until,
+  );
+
+  return {
+    samples: rows.map((r) => ({
+      timestamp:      r.bucketStart,
+      state:          r.stateDownCount > r.stateUpCount ? "down" : "up",
+      latencyMs:      r.avgLatencyMs,
+      jitterMs:       r.avgJitterMs,
+      packetLoss:     r.avgPacketLoss,
+      minLatencyMs:   r.minLatencyMs,
+      maxLatencyMs:   r.maxLatencyMs,
+      minJitterMs:    r.minJitterMs,
+      maxJitterMs:    r.maxJitterMs,
+      minPacketLoss:  r.minPacketLoss,
+      maxPacketLoss:  r.maxPacketLoss,
+      stateUpCount:   r.stateUpCount,
+      stateDownCount: r.stateDownCount,
+      sampleCount:    r.sampleCount,
+    })),
+  };
+}
+
+// ─── SD-WAN rule selection history (categorical — selected member) ────────────
+
+export interface SdwanRuleHistoryRow {
+  timestamp:        Date;
+  selectedMember:   string | null;
+  status:           string; // "up" | "down"
+  // Detail-tier extras.
+  availableMembers?: string[];
+  mode?:             string | null;
+  // Rollup-tier extras.
+  selectionChangeCount?: number;
+  statusUpCount?:        number;
+  statusDownCount?:      number;
+  sampleCount?:          number;
+}
+
+export async function readSdwanRuleHistory(
+  assetId: string,
+  since: Date,
+  until: Date,
+  tier: SampleTier,
+  ruleName: string,
+  fetchSince?: Date,
+): Promise<{ samples: SdwanRuleHistoryRow[] }> {
+  const queryFrom = fetchSince ?? since;
+  if (tier === "detail") {
+    const samples = await prisma.assetSdwanRuleSample.findMany({
+      where: { assetId, ruleName, timestamp: { gte: queryFrom, lte: until } },
+      orderBy: { timestamp: "asc" },
+    });
+    return {
+      samples: samples.map((s) => ({
+        timestamp:        s.timestamp,
+        selectedMember:   s.selectedMember,
+        status:           s.status,
+        availableMembers: s.availableMembers,
+        mode:             s.mode,
+      })),
+    };
+  }
+
+  const table = tier === "hourly" ? "asset_sdwan_rule_samples_hourly" : "asset_sdwan_rule_samples_daily";
+  const rows = await prisma.$queryRawUnsafe<Array<{
+    bucketStart: Date;
+    sampleCount: number;
+    statusUpCount: number; statusDownCount: number; selectionChangeCount: number;
+    lastSelectedMember: string | null; lastMode: string | null;
+    lastAvailableMembers: string[];
+  }>>(
+    `SELECT "bucketStart", "sampleCount", "statusUpCount", "statusDownCount",
+            "selectionChangeCount", "lastSelectedMember", "lastMode", "lastAvailableMembers"
+     FROM "${table}"
+     WHERE "assetId" = $1 AND "ruleName" = $2 AND "bucketStart" >= $3 AND "bucketStart" <= $4
+     ORDER BY "bucketStart" ASC`,
+    assetId, ruleName, queryFrom, until,
+  );
+
+  return {
+    samples: rows.map((r) => ({
+      timestamp:            r.bucketStart,
+      selectedMember:       r.lastSelectedMember,
+      status:               r.statusDownCount > r.statusUpCount ? "down" : "up",
+      availableMembers:     r.lastAvailableMembers,
+      mode:                 r.lastMode,
+      selectionChangeCount: r.selectionChangeCount,
+      statusUpCount:        r.statusUpCount,
+      statusDownCount:      r.statusDownCount,
+      sampleCount:          r.sampleCount,
+    })),
+  };
+}
+
+// ─── SD-WAN members (per-interface health-check summary) ─────────────────────
+
+export interface SdwanMemberHealthCheck {
+  healthCheck: string;
+  state:       string;        // "up" | "down"
+  latencyMs:   number | null;
+  jitterMs:    number | null;
+  packetLoss:  number | null;
+}
+export interface SdwanMemberRow {
+  link:         string;       // WAN member interface name
+  state:        string;       // aggregate latest: "up" iff up in every health-check it's in
+  ip:           string | null;
+  linkSpeedBps: number | null;
+  linkUp:       boolean | null;
+  txBytes:      number | null; // interface outOctets (cumulative)
+  rxBytes:      number | null; // interface inOctets (cumulative)
+  healthChecks: SdwanMemberHealthCheck[];
+  recent:       Array<{ timestamp: Date; up: boolean }>; // recent per-scrape up/down for the status strip
+}
+
+/**
+ * Per-member SD-WAN health summary for the asset modal's "SD-WAN Members" table.
+ * Aggregates the perfSla stream by WAN member (a member can appear in several
+ * health-checks) and joins the latest interface sample for IP / link / byte
+ * counters. `recent` powers the green/red health-check status strip — one entry
+ * per scrape over the last ~90 min, `up` = up in every health-check at that time.
+ * Reads the `perfSla` (+ `interfaces`) retention entities; current values come
+ * from the latest rows, the strip from recent detail samples.
+ */
+export async function readSdwanMembers(assetId: string): Promise<{ members: SdwanMemberRow[] }> {
+  // A: latest sample per (member, health-check).
+  const latest = await prisma.$queryRawUnsafe<Array<{
+    link: string; healthCheck: string; state: string;
+    latencyMs: number | null; jitterMs: number | null; packetLoss: number | null;
+  }>>(
+    `SELECT DISTINCT ON ("link", "healthCheck")
+            "link", "healthCheck", "state", "latencyMs", "jitterMs", "packetLoss"
+     FROM "asset_perf_sla_samples" WHERE "assetId" = $1
+     ORDER BY "link", "healthCheck", "timestamp" DESC`,
+    assetId,
+  );
+  if (latest.length === 0) return { members: [] };
+
+  // B: recent per-(member, scrape) aggregated up/down for the status strip.
+  const recentRows = await prisma.$queryRawUnsafe<Array<{ link: string; timestamp: Date; up: boolean }>>(
+    `SELECT "link", "timestamp", bool_and("state" = 'up') AS up
+     FROM "asset_perf_sla_samples"
+     WHERE "assetId" = $1 AND "timestamp" > now() - interval '90 minutes'
+     GROUP BY "link", "timestamp" ORDER BY "link", "timestamp" ASC`,
+    assetId,
+  );
+
+  // C: latest interface sample per member ifName (IP / speed / link state / bytes).
+  const links = Array.from(new Set(latest.map((r) => r.link)));
+  const ifaceRows = await prisma.$queryRawUnsafe<Array<{
+    ifName: string; ipAddress: string | null; speedBps: bigint | null;
+    operStatus: string | null; inOctets: bigint | null; outOctets: bigint | null;
+  }>>(
+    `SELECT DISTINCT ON ("ifName")
+            "ifName", "ipAddress", "speedBps", "operStatus", "inOctets", "outOctets"
+     FROM "asset_interface_samples" WHERE "assetId" = $1 AND "ifName" = ANY($2::text[])
+     ORDER BY "ifName", "timestamp" DESC`,
+    assetId, links,
+  );
+  const ifaceByName = new Map(ifaceRows.map((r) => [r.ifName, r]));
+  const recentByLink = new Map<string, Array<{ timestamp: Date; up: boolean }>>();
+  for (const r of recentRows) {
+    if (!recentByLink.has(r.link)) recentByLink.set(r.link, []);
+    recentByLink.get(r.link)!.push({ timestamp: r.timestamp, up: r.up });
+  }
+
+  const hcByLink = new Map<string, SdwanMemberHealthCheck[]>();
+  for (const r of latest) {
+    if (!hcByLink.has(r.link)) hcByLink.set(r.link, []);
+    hcByLink.get(r.link)!.push({ healthCheck: r.healthCheck, state: r.state, latencyMs: r.latencyMs, jitterMs: r.jitterMs, packetLoss: r.packetLoss });
+  }
+
+  const members: SdwanMemberRow[] = links.map((link) => {
+    const hcs = hcByLink.get(link) ?? [];
+    const iface = ifaceByName.get(link) ?? null;
+    const recent = (recentByLink.get(link) ?? []).slice(-48);
+    return {
+      link,
+      state:        hcs.length && hcs.every((h) => h.state === "up") ? "up" : "down",
+      ip:           iface?.ipAddress ?? null,
+      linkSpeedBps: iface?.speedBps != null ? Number(iface.speedBps) : null,
+      linkUp:       iface ? iface.operStatus === "up" : null,
+      txBytes:      iface?.outOctets != null ? Number(iface.outOctets) : null,
+      rxBytes:      iface?.inOctets  != null ? Number(iface.inOctets)  : null,
+      healthChecks: hcs,
+      recent,
+    };
+  });
+  // Sort: physical/WAN members first (those with an IP), then by name.
+  members.sort((a, b) => (a.ip ? 0 : 1) - (b.ip ? 0 : 1) || a.link.localeCompare(b.link));
+  return { members };
+}

@@ -1720,6 +1720,8 @@ var SAMPLE_RETENTION_ENTITIES = [
   { key: "interfaces",  label: "Interfaces",     hint: "Per-interface counters.", selectionAware: true },
   { key: "storage",     label: "Storage",        hint: "Per-volume usage.",       selectionAware: true },
   { key: "ipsec",       label: "IPsec tunnels",  hint: "Per-tunnel state.",       selectionAware: true },
+  { key: "perfSla",     label: "SD-WAN Perf SLA", hint: "Per health-check member latency / jitter / loss." },
+  { key: "sdwanRule",   label: "SD-WAN rules",    hint: "Per-rule selected-member timeline." },
 ];
 var SAMPLE_RETENTION_TIERS   = [
   { key: "detail", label: "Detail"      },

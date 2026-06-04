@@ -41,6 +41,9 @@ import {
   readInterfaceHistory,
   readStorageHistory,
   readIpsecHistory,
+  readPerfSlaHistory,
+  readSdwanRuleHistory,
+  readSdwanMembers,
 } from "../../services/sampleHistoryService.js";
 import {
   type PollingMethod,
@@ -1447,6 +1450,121 @@ router.get("/:id/ipsec-history", requirePermission("assets", "read"), async (req
     res.json({
       range: rangeLabel,
       tunnelName,
+      since,
+      until,
+      tier: pick.tier,
+      bucketSeconds: pick.bucketSeconds,
+      samples: result.samples,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/perf-sla-links — distinct (healthCheck, link) pairs seen in
+// the perf-SLA detail window. Doubles as the "does SD-WAN data exist?" gate for
+// the asset modal's SD-WAN tab and the source for its health-check/link selector.
+router.get("/:id/perf-sla-links", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    // Latest sample per (healthCheck, link) so the SLA thresholds reflect the
+    // current health-check config. DISTINCT ON keeps the newest row per pair.
+    const rows = await prisma.$queryRawUnsafe<Array<{
+      healthCheck: string; link: string;
+      latencyThresholdMs: number | null; jitterThresholdMs: number | null; packetLossThreshold: number | null;
+    }>>(
+      `SELECT DISTINCT ON ("healthCheck", "link")
+              "healthCheck", "link",
+              "latencyThresholdMs", "jitterThresholdMs", "packetLossThreshold"
+       FROM "asset_perf_sla_samples"
+       WHERE "assetId" = $1
+       ORDER BY "healthCheck" ASC, "link" ASC, "timestamp" DESC`,
+      id,
+    );
+    res.json({ links: rows });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/sdwan-members — per-WAN-member health summary (status, per
+// health-check latency/jitter/loss, recent status strip, + IP/link/bytes from
+// the latest interface sample). Drives the "SD-WAN Members" table.
+router.get("/:id/sdwan-members", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const result = await readSdwanMembers(id);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/perf-sla-history?healthCheck=...&link=...&range=... — per-member
+// latency/jitter/packet-loss gauges over time.
+router.get("/:id/perf-sla-history", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const healthCheck = req.query.healthCheck ? String(req.query.healthCheck) : null;
+    const link = req.query.link ? String(req.query.link) : null;
+    if (!healthCheck) throw new AppError(400, "healthCheck query parameter is required");
+    if (!link) throw new AppError(400, "link query parameter is required");
+    const { since, until, rangeLabel } = resolveRange(req);
+    const pick = await pickSampleTierForAsset(id, "perfSla", since);
+    const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
+    const result = await readPerfSlaHistory(id, since, until, pick.tier, healthCheck, link, fetchSince);
+    res.json({
+      range: rangeLabel,
+      healthCheck,
+      link,
+      since,
+      until,
+      tier: pick.tier,
+      bucketSeconds: pick.bucketSeconds,
+      samples: result.samples,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/sdwan-rules — latest-snapshot of SD-WAN service rules (one
+// row per ruleName = most-recent sample's selected member + configured members
+// + mode + status). The current-state table for the SD-WAN tab + the "data
+// exists?" gate + the rule list for the selection-history selector.
+router.get("/:id/sdwan-rules", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    // DISTINCT ON (ruleName) ... ORDER BY ruleName, timestamp DESC → the newest
+    // sample per rule. Postgres-specific; this is a read-only projection table.
+    // Re-sort by the rule's FortiOS sequence (priority) so the table matches the
+    // device GUI ordering.
+    const rows = await prisma.$queryRawUnsafe<Array<{
+      ruleName: string; ruleId: string | null; seq: number | null; enabled: boolean | null;
+      mode: string | null; criteria: string | null; healthChecks: string[]; dst: string[];
+      status: string; selectedMember: string | null; availableMembers: string[]; timestamp: Date;
+    }>>(
+      `SELECT * FROM (
+         SELECT DISTINCT ON ("ruleName")
+                "ruleName", "ruleId", "seq", "enabled", "mode", "criteria",
+                "healthChecks", "dst", "status", "selectedMember", "availableMembers", "timestamp"
+         FROM "asset_sdwan_rule_samples"
+         WHERE "assetId" = $1
+         ORDER BY "ruleName" ASC, "timestamp" DESC
+       ) latest
+       ORDER BY "seq" ASC NULLS LAST, "ruleName" ASC`,
+      id,
+    );
+    res.json({ rules: rows });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/sdwan-rule-history?ruleName=...&range=... — selected-member
+// failover timeline for one SD-WAN rule.
+router.get("/:id/sdwan-rule-history", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const ruleName = req.query.ruleName ? String(req.query.ruleName) : null;
+    if (!ruleName) throw new AppError(400, "ruleName query parameter is required");
+    const { since, until, rangeLabel } = resolveRange(req);
+    const pick = await pickSampleTierForAsset(id, "sdwanRule", since);
+    const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
+    const result = await readSdwanRuleHistory(id, since, until, pick.tier, ruleName, fetchSince);
+    res.json({
+      range: rangeLabel,
+      ruleName,
       since,
       until,
       tier: pick.tier,

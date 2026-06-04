@@ -501,6 +501,12 @@ const FortiManagerConfigSchema = z.object({
   // opt in explicitly because quarantine push requires write access to the
   // FortiGate's address-group configuration.
   pushQuarantine: z.boolean().optional().default(false),
+  // When true, each system-info pass for FortiGates owned by this integration
+  // also pulls SD-WAN data: Performance SLA health-check metrics
+  // (/api/v2/monitor/virtual-wan/health-check) and SD-WAN service-rule member
+  // selection (/api/v2/cmdb/system/sdwan). Surfaced on the asset's SD-WAN tab.
+  // FortiOS-only; default off. Mirrored on FortiGateConfigSchema for parity.
+  pullSdwan: z.boolean().optional().default(false),
   // When true, the next discovery cycle AND every monitor job published for
   // assets owned by this integration will emit step-by-step structured logs
   // to pino at info level (visible in `journalctl -u polaris`). High log
@@ -531,6 +537,10 @@ const FortiGateConfigSchema = z.object({
   fortigateMonitor:   FortiGateClassMonitorSchema,
   fortiswitchMonitor: FortinetClassMonitorSchema,
   fortiapMonitor:     FortinetClassMonitorSchema,
+  // Pull SD-WAN Performance SLA health-check metrics + service-rule member
+  // selection on each system-info pass. See FortiManagerConfigSchema.pullSdwan
+  // for shape + semantics. FortiOS-only; default off.
+  pullSdwan: z.boolean().optional().default(false),
   // Per-integration verbose debug logging — see FortiManagerConfigSchema for
   // shape + semantics. Default false.
   verboseLogging: z.boolean().optional().default(false),

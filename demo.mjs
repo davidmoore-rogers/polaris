@@ -754,6 +754,8 @@ const INTEGRATIONS = [
           byTypes: { types: ["physical"], onlyUp: true },
         },
       },
+      // SD-WAN monitoring on for FortiGates discovered through this FMG.
+      pullSdwan: true,
     },
     enabled: true,
     pollInterval: 12,
@@ -807,6 +809,9 @@ const INTEGRATIONS = [
         addAsMonitored: false,
         autoMonitorInterfaces: { byNames: { names: ["wan1"] } },
       },
+      // SD-WAN monitoring on (Performance SLA + service-rule selection on the
+      // system-info cadence; surfaces on the asset's SD-WAN tab).
+      pullSdwan: true,
     },
     enabled: true,
     pollInterval: 12,

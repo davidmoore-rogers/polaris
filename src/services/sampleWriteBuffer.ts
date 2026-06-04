@@ -25,13 +25,15 @@
  * graceful-shutdown hook in `app.ts` so the in-flight buffer drains
  * before the process exits.
  *
- * Six append-only tables are batched here:
+ * Eight append-only tables are batched here:
  *   - asset_monitor_samples         (probe outcomes)
  *   - asset_telemetry_samples       (CPU + memory)
  *   - asset_temperature_samples     (per-sensor)
  *   - asset_interface_samples       (per-interface scrape)
  *   - asset_storage_samples         (per-mountpoint)
  *   - asset_ipsec_tunnel_samples    (per-tunnel)
+ *   - asset_perf_sla_samples        (per SD-WAN health-check member)
+ *   - asset_sdwan_rule_samples      (per SD-WAN service rule)
  *
  * Not batched here (separate handling): `asset_associated_ips` (per-asset
  * delete+create transaction inside `recordSystemInfoResult`) and
@@ -128,6 +130,38 @@ export interface IpsecTunnelSampleRow {
   proxyIdCount: number | null;
 }
 
+export interface PerfSlaSampleRow {
+  assetId: string;
+  timestamp: Date;
+  cadence: SampleCadence;
+  healthCheck: string;
+  link: string;
+  state: string;
+  latencyMs: number | null;
+  jitterMs: number | null;
+  packetLoss: number | null;
+  latencyThresholdMs: number | null;
+  jitterThresholdMs: number | null;
+  packetLossThreshold: number | null;
+}
+
+export interface SdwanRuleSampleRow {
+  assetId: string;
+  timestamp: Date;
+  cadence: SampleCadence;
+  ruleName: string;
+  ruleId: string | null;
+  seq: number | null;
+  enabled: boolean | null;
+  mode: string | null;
+  criteria: string | null;
+  healthChecks: string[];
+  dst: string[];
+  status: string;
+  selectedMember: string | null;
+  availableMembers: string[];
+}
+
 // ─── Per-table buffer state ───────────────────────────────────────────────
 
 const buffers = {
@@ -137,6 +171,8 @@ const buffers = {
   iface:          [] as InterfaceSampleRow[],
   storage:        [] as StorageSampleRow[],
   ipsecTunnel:    [] as IpsecTunnelSampleRow[],
+  perfSla:        [] as PerfSlaSampleRow[],
+  sdwanRule:      [] as SdwanRuleSampleRow[],
 };
 
 // Map each buffer key to its `polaris_sample_buffer_depth{table=...}` label
@@ -152,6 +188,8 @@ const TABLE_LABEL: Record<BufferKey, string> = {
   iface:       "asset_interface_samples",
   storage:     "asset_storage_samples",
   ipsecTunnel: "asset_ipsec_tunnel_samples",
+  perfSla:     "asset_perf_sla_samples",
+  sdwanRule:   "asset_sdwan_rule_samples",
 };
 
 // Flush early if any single table's depth exceeds this — keeps RSS bounded
@@ -211,6 +249,20 @@ export function enqueueIpsecTunnelSamples(rows: IpsecTunnelSampleRow[]): void {
   if (buffers.ipsecTunnel.length >= SIZE_THRESHOLD) void flushTable("ipsecTunnel");
 }
 
+export function enqueuePerfSlaSamples(rows: PerfSlaSampleRow[]): void {
+  if (rows.length === 0) return;
+  buffers.perfSla.push(...rows);
+  setSampleBufferDepth(TABLE_LABEL.perfSla, buffers.perfSla.length);
+  if (buffers.perfSla.length >= SIZE_THRESHOLD) void flushTable("perfSla");
+}
+
+export function enqueueSdwanRuleSamples(rows: SdwanRuleSampleRow[]): void {
+  if (rows.length === 0) return;
+  buffers.sdwanRule.push(...rows);
+  setSampleBufferDepth(TABLE_LABEL.sdwanRule, buffers.sdwanRule.length);
+  if (buffers.sdwanRule.length >= SIZE_THRESHOLD) void flushTable("sdwanRule");
+}
+
 // ─── Flush ────────────────────────────────────────────────────────────────
 //
 // One flush per table per call so a slow table (e.g. interfaces, which can
@@ -220,6 +272,7 @@ export function enqueueIpsecTunnelSamples(rows: IpsecTunnelSampleRow[]): void {
 const flushing: Record<BufferKey, boolean> = {
   monitor: false, telemetry: false, temperature: false,
   iface: false, storage: false, ipsecTunnel: false,
+  perfSla: false, sdwanRule: false,
 };
 
 async function flushTable(key: BufferKey): Promise<void> {
@@ -276,6 +329,12 @@ async function writeBatch(key: BufferKey, batch: unknown[]): Promise<void> {
       return;
     case "ipsecTunnel":
       await prisma.assetIpsecTunnelSample.createMany({ data: batch as IpsecTunnelSampleRow[] });
+      return;
+    case "perfSla":
+      await prisma.assetPerfSlaSample.createMany({ data: batch as PerfSlaSampleRow[] });
+      return;
+    case "sdwanRule":
+      await prisma.assetSdwanRuleSample.createMany({ data: batch as SdwanRuleSampleRow[] });
       return;
   }
 }

@@ -719,6 +719,11 @@ model Asset {
   storageSamples      AssetStorageSample[]
   temperatureSamples  AssetTemperatureSample[]
   ipsecTunnelSamples  AssetIpsecTunnelSample[]
+  // SD-WAN sample streams (FortiOS only, gated by Integration.config.pullSdwan).
+  // perfSla = per-WAN-link health-check gauges; sdwanRule = per-service-rule
+  // member-selection timeline. Both ride the system-info cadence like IPsec.
+  perfSlaSamples      AssetPerfSlaSample[]
+  sdwanRuleSamples    AssetSdwanRuleSample[]
   // Tiered sample rollups (hourly + daily aggregates). Populated by the
   // sampleRollup job from the source tables above. Cascade-delete with the
   // asset so a removed device's history vanishes from every tier at once.
@@ -734,6 +739,10 @@ model Asset {
   storageSamplesDaily      AssetStorageSampleDaily[]
   ipsecTunnelSamplesHourly AssetIpsecTunnelSampleHourly[]
   ipsecTunnelSamplesDaily  AssetIpsecTunnelSampleDaily[]
+  perfSlaSamplesHourly     AssetPerfSlaSampleHourly[]
+  perfSlaSamplesDaily      AssetPerfSlaSampleDaily[]
+  sdwanRuleSamplesHourly   AssetSdwanRuleSampleHourly[]
+  sdwanRuleSamplesDaily    AssetSdwanRuleSampleDaily[]
   lldpNeighbors       AssetLldpNeighbor[]      @relation("AssetLldpNeighbors")
   lldpNeighborMatches AssetLldpNeighbor[]      @relation("AssetLldpNeighborMatch")
   // Wireless stations connected to this asset (when it's a FortiAP) and
@@ -1036,6 +1045,89 @@ model AssetIpsecTunnelSample {
   @@index([assetId, timestamp])
   @@index([assetId, tunnelName, timestamp])
   @@map("asset_ipsec_tunnel_samples")
+}
+
+// Per-WAN-link SD-WAN Performance SLA health-check snapshot, written on the
+// system-info cadence. FortiOS only (read from
+// /api/v2/monitor/virtual-wan/health-check), gated by Integration.config.pullSdwan.
+// One row per (health-check, member link). latency/jitter/packetLoss are
+// instantaneous gauges (not counters) — averaged, not diffed, in rollups.
+model AssetPerfSlaSample {
+  id          String   @default(uuid())
+  assetId     String
+  asset       Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  timestamp   DateTime @default(now())
+  // Health-check name (the SD-WAN performance-SLA object) + the WAN member
+  // interface it probed over (e.g. "wan1", "port2").
+  healthCheck String
+  link        String
+  // "up" = link alive / SLA member reachable; "down" otherwise.
+  state       String
+  // Instantaneous gauges from the health-check. Null when the member reported
+  // no value (e.g. link down, or FortiOS omitted the field).
+  latencyMs   Float?
+  jitterMs    Float?
+  packetLoss  Float?
+  // SLA target thresholds for the parent health-check (from CMDB
+  // system/sdwan health-check `sla`). Same value across every member of a
+  // health-check. Null when that metric has no configured SLA threshold;
+  // the chart draws a dashed threshold line only where set.
+  latencyThresholdMs    Float?
+  jitterThresholdMs     Float?
+  packetLossThreshold   Float?
+  // Cadence discriminator (see AssetIpsecTunnelSample.cadence). Always "fast"
+  // for SD-WAN (no pinned-subset concept) so rollups include every row.
+  cadence     String?
+
+  @@id([id, timestamp])
+  @@index([assetId, timestamp])
+  @@index([assetId, healthCheck, link, timestamp])
+  @@map("asset_perf_sla_samples")
+}
+
+// Per-service-rule SD-WAN selection snapshot, written on the system-info
+// cadence. FortiOS only (rule definitions from /api/v2/cmdb/system/sdwan,
+// runtime selection merged in when resolvable), gated by Integration.config.pullSdwan.
+// One row per (asset, rule). The detail series is the failover timeline:
+// `selectedMember` is the member currently carrying the rule's traffic.
+// `availableMembers` is the configured candidate list in priority order.
+model AssetSdwanRuleSample {
+  id               String   @default(uuid())
+  assetId          String
+  asset            Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  timestamp        DateTime @default(now())
+  ruleName         String
+  ruleId           String?
+  // 0-based position in the FortiOS `service` array = the rule's evaluation
+  // priority. Used to order the rules table to match the FortiGate GUI.
+  seq              Int?
+  // Admin enable state (CMDB `status` = "enable"/"disable").
+  enabled          Boolean?
+  // Rule mode from CMDB (e.g. "sla" | "priority" | "load-balance" | "manual").
+  mode             String?
+  // Operator-facing selection-criteria label derived from mode + link-cost-factor
+  // (e.g. "Latency" | "Packet Loss" | "Customized Profile" | "Source IP").
+  criteria         String?
+  // Performance-SLA health-check name(s) the rule references (the GUI
+  // "Performance SLA" column).
+  healthChecks     String[] @default([])
+  // Destination objects the rule matches (address / ISDB / app names).
+  dst              String[] @default([])
+  // "up" = rule has a usable selected member; "down" otherwise. Runtime health,
+  // distinct from `enabled` (admin state).
+  status           String
+  // The member currently selected for the rule. Null when FortiOS doesn't
+  // expose runtime selection (collector degrades gracefully — see
+  // collectSdwanFortinet).
+  selectedMember   String?
+  // Configured candidate members in priority order.
+  availableMembers String[] @default([])
+  cadence          String?
+
+  @@id([id, timestamp])
+  @@index([assetId, timestamp])
+  @@index([assetId, ruleName, timestamp])
+  @@map("asset_sdwan_rule_samples")
 }
 
 // LLDP neighbor table — current-state per (asset, local interface). Replaced
@@ -1491,6 +1583,114 @@ model AssetIpsecTunnelSampleDaily {
   @@index([assetId, bucketStart])
   @@index([assetId, tunnelName, bucketStart])
   @@map("asset_ipsec_tunnel_samples_daily")
+}
+
+model AssetPerfSlaSampleHourly {
+  id             String   @default(uuid())
+  assetId        String
+  asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  bucketStart    DateTime
+  healthCheck    String
+  link           String
+  sampleCount    Int
+  // Per-state sample counts across the bucket (link flap visibility).
+  stateUpCount   Int      @default(0)
+  stateDownCount Int      @default(0)
+  // Gauge aggregates over the bucket (averaged, not counter-diffed).
+  avgLatencyMs   Float?
+  minLatencyMs   Float?
+  maxLatencyMs   Float?
+  avgJitterMs    Float?
+  minJitterMs    Float?
+  maxJitterMs    Float?
+  avgPacketLoss  Float?
+  minPacketLoss  Float?
+  maxPacketLoss  Float?
+  lastBucketSampleAt DateTime
+
+  @@id([id, bucketStart])
+  @@unique([bucketStart, assetId, healthCheck, link])
+  @@index([assetId, bucketStart])
+  @@index([assetId, healthCheck, link, bucketStart])
+  @@map("asset_perf_sla_samples_hourly")
+}
+
+model AssetPerfSlaSampleDaily {
+  id             String   @default(uuid())
+  assetId        String
+  asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  bucketStart    DateTime
+  healthCheck    String
+  link           String
+  sampleCount    Int
+  stateUpCount   Int      @default(0)
+  stateDownCount Int      @default(0)
+  avgLatencyMs   Float?
+  minLatencyMs   Float?
+  maxLatencyMs   Float?
+  avgJitterMs    Float?
+  minJitterMs    Float?
+  maxJitterMs    Float?
+  avgPacketLoss  Float?
+  minPacketLoss  Float?
+  maxPacketLoss  Float?
+  lastBucketSampleAt DateTime
+
+  @@id([id, bucketStart])
+  @@unique([bucketStart, assetId, healthCheck, link])
+  @@index([assetId, bucketStart])
+  @@index([assetId, healthCheck, link, bucketStart])
+  @@map("asset_perf_sla_samples_daily")
+}
+
+model AssetSdwanRuleSampleHourly {
+  id                   String   @default(uuid())
+  assetId              String
+  asset                Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  bucketStart          DateTime
+  ruleName             String
+  sampleCount          Int
+  statusUpCount        Int      @default(0)
+  statusDownCount      Int      @default(0)
+  // Number of times selectedMember changed within the bucket (failover count).
+  selectionChangeCount Int      @default(0)
+  lastSelectedMember   String?
+  lastStatus           String?
+  lastMode             String?
+  // Not populated by the rollup (ARRAY_AGG of an array column can't be
+  // subscripted back to text[]); stays default []. The candidate-member list
+  // is only needed at detail resolution (rules snapshot reads the detail table).
+  lastAvailableMembers String[] @default([])
+  lastBucketSampleAt   DateTime
+
+  @@id([id, bucketStart])
+  @@unique([bucketStart, assetId, ruleName])
+  @@index([assetId, bucketStart])
+  @@index([assetId, ruleName, bucketStart])
+  @@map("asset_sdwan_rule_samples_hourly")
+}
+
+model AssetSdwanRuleSampleDaily {
+  id                   String   @default(uuid())
+  assetId              String
+  asset                Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  bucketStart          DateTime
+  ruleName             String
+  sampleCount          Int
+  statusUpCount        Int      @default(0)
+  statusDownCount      Int      @default(0)
+  selectionChangeCount Int      @default(0)
+  lastSelectedMember   String?
+  lastStatus           String?
+  lastMode             String?
+  lastAvailableMembers String[] @default([])
+  lastBucketSampleAt   DateTime
+
+  @@id([id, bucketStart])
+  @@unique([bucketStart, assetId, ruleName])
+  @@index([assetId, bucketStart])
+  @@index([assetId, ruleName, bucketStart])
+  @@map("asset_sdwan_rule_samples_daily")
 }
 
 model AssetIpHistory {
