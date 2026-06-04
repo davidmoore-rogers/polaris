@@ -11,6 +11,7 @@ import {
   compileWildcard,
   compilePattern,
   resolvePinnedInterfaces,
+  splitPinsByProvenance,
   coerceLegacySelection,
   mergeTunnelsIntoInterfaces,
   type ResolverInterface,
@@ -360,8 +361,8 @@ describe("mergeTunnelsIntoInterfaces", () => {
     ]);
     mergeTunnelsIntoInterfaces(ifaces, tunnels);
     const list = ifaces.get("a1")!;
-    expect(list).toContainEqual({ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up" });
-    expect(list).toContainEqual({ ifName: "VPN_DR", ifType: "tunnel", operStatus: "up" });
+    expect(list).toContainEqual({ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true });
+    expect(list).toContainEqual({ ifName: "VPN_DR", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true });
     expect(list).toHaveLength(3);
   });
 
@@ -369,7 +370,7 @@ describe("mergeTunnelsIntoInterfaces", () => {
     const ifaces = new Map<string, ResolverInterface[]>();
     const tunnels = new Map<string, TunnelObservation[]>([["a1", [tn("VPN_HQ")]]]);
     mergeTunnelsIntoInterfaces(ifaces, tunnels);
-    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up" }]);
+    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true }]);
   });
 
   it("de-dupes against a tunnel SNMP already captured as a real interface", () => {
@@ -421,6 +422,64 @@ describe("mergeTunnelsIntoInterfaces", () => {
     expect(
       resolvePinnedInterfaces({ byTypes: { types: ["tunnel"], onlyUp: false } }, list).sort(),
     ).toEqual(["VPN_DR", "VPN_HQ"]);
+  });
+});
+
+describe("splitPinsByProvenance", () => {
+  it("routes synthetic IPsec tunnel rows to ipsecTunnels, real rows to interfaces", () => {
+    const ifs: ResolverInterface[] = [
+      iface("wan1", "physical"),
+      iface("vlan100", "vlan"),
+      { ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true },
+      { ifName: "VPN_DR", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true },
+    ];
+    const picked = ["wan1", "vlan100", "VPN_HQ", "VPN_DR"];
+    const out = splitPinsByProvenance(picked, ifs);
+    expect(out.interfaces.sort()).toEqual(["vlan100", "wan1"]);
+    expect(out.ipsecTunnels.sort()).toEqual(["VPN_DR", "VPN_HQ"]);
+  });
+
+  it("treats a real IF-MIB tunnel row (no isIpsecTunnel) as an interface, not an IPsec tunnel", () => {
+    // On an SNMP gate, a tunnel comes from IF-MIB as a real row — it must stay
+    // in monitoredInterfaces, not get routed to monitoredIpsecTunnels.
+    const ifs: ResolverInterface[] = [iface("tun0", "tunnel")]; // real row, isIpsecTunnel undefined
+    const out = splitPinsByProvenance(["tun0"], ifs);
+    expect(out.interfaces).toEqual(["tun0"]);
+    expect(out.ipsecTunnels).toEqual([]);
+  });
+
+  it("only routes picked names — unpicked tunnels don't appear", () => {
+    const ifs: ResolverInterface[] = [
+      iface("wan1", "physical"),
+      { ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true },
+    ];
+    const out = splitPinsByProvenance(["wan1"], ifs);
+    expect(out.interfaces).toEqual(["wan1"]);
+    expect(out.ipsecTunnels).toEqual([]);
+  });
+
+  it("defaults an unknown picked name to interfaces (no matching row)", () => {
+    const out = splitPinsByProvenance(["ghost"], [iface("wan1")]);
+    expect(out.interfaces).toEqual(["ghost"]);
+    expect(out.ipsecTunnels).toEqual([]);
+  });
+
+  it("returns empty buckets for an empty pick set", () => {
+    const out = splitPinsByProvenance([], [iface("wan1")]);
+    expect(out).toEqual({ interfaces: [], ipsecTunnels: [] });
+  });
+
+  it("end-to-end: a By type:tunnel pick over a merged list routes tunnels to ipsecTunnels", () => {
+    // Build the same shape the apply path sees: real interfaces + merged tunnels.
+    const byAsset = new Map<string, ResolverInterface[]>([
+      ["a1", [iface("wan1", "physical"), iface("port1", "physical", false)]],
+    ]);
+    mergeTunnelsIntoInterfaces(byAsset, new Map([["a1", [{ tunnelName: "VPN_HQ", status: "up" }]]]));
+    const list = byAsset.get("a1")!;
+    const picked = resolvePinnedInterfaces({ byTypes: { types: ["tunnel"], onlyUp: false } }, list);
+    const out = splitPinsByProvenance(picked, list);
+    expect(out.interfaces).toEqual([]);
+    expect(out.ipsecTunnels).toEqual(["VPN_HQ"]);
   });
 });
 

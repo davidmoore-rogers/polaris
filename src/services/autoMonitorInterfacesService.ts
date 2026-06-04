@@ -16,7 +16,9 @@
  *   byNames    : explicit ifNames the operator picked from an aggregated list
  *   byPatterns : pattern strings; regex=false treats them as shell wildcards
  *                (* and ?), regex=true treats them as raw anchor-free regex
- *   byTypes    : ifType set (physical / aggregate / vlan / loopback / tunnel)
+ *   byTypes    : ifType set (physical / aggregate / vlan / loopback / tunnel).
+ *                `tunnel` also covers FortiOS IPsec phase1-interface tunnels
+ *                (surfaced as synthetic rows — see below).
  *   byLldp     : neighbor-assetType set; pins any interface whose LLDP
  *                neighbor matched a monitored Polaris asset of one of the
  *                selected types
@@ -27,10 +29,13 @@
  * tunnel (see mergeTunnelsIntoInterfaces) — FortiOS phase1-interface tunnels
  * are real `config system interface` entries but the REST monitor endpoint
  * omits them, so they'd otherwise never appear in the "By name" / "By type"
- * pickers. The apply pass is strictly additive: it never strips existing pins.
- * This is deliberate; Asset.monitoredInterfaces is operator-owned and removing
- * items from it on every discovery would surprise anyone who pinned something
- * by hand.
+ * pickers. Those synthetic rows are tagged `isIpsecTunnel`, and the apply pass
+ * routes their pins to `Asset.monitoredIpsecTunnels` (read by the IPsec
+ * sampler) while real interface pins go to `Asset.monitoredInterfaces` (IF-MIB)
+ * — `splitPinsByProvenance` does the partition. The apply pass is strictly
+ * additive on BOTH fields: it never strips existing pins. This is deliberate;
+ * both arrays are operator-owned and removing items on every discovery would
+ * surprise anyone who pinned something by hand.
  */
 
 import { prisma } from "../db.js";
@@ -90,6 +95,16 @@ export interface ResolverInterface {
   ifName: string;
   ifType: string | null;
   operStatus: string | null;
+  /**
+   * True only for synthetic rows produced by `mergeTunnelsIntoInterfaces` —
+   * i.e. FortiOS phase1-interface IPsec tunnels surfaced from
+   * asset_ipsec_tunnel_samples. Drives write-time routing: a pinned name
+   * whose row carries this flag is written to `Asset.monitoredIpsecTunnels`
+   * (the field the IPsec sampler reads) instead of `Asset.monitoredInterfaces`
+   * (IF-MIB). Absent/false on real AssetInterfaceSample rows. See
+   * `splitPinsByProvenance` and the module header.
+   */
+  isIpsecTunnel?: boolean;
 }
 
 /**
@@ -226,6 +241,41 @@ export function resolvePinnedInterfaces(
   return Array.from(picked);
 }
 
+/** Result of partitioning a pin set by interface provenance. */
+export interface PinsByProvenance {
+  /** Names that pin to `Asset.monitoredInterfaces` (real IF-MIB interfaces). */
+  interfaces: string[];
+  /** Names that pin to `Asset.monitoredIpsecTunnels` (synthetic IPsec rows). */
+  ipsecTunnels: string[];
+}
+
+/**
+ * Partition a resolved pin set into the two destination fields by looking up
+ * each picked name's source row in `interfaces`. A name whose row carries
+ * `isIpsecTunnel` goes to `ipsecTunnels` (→ Asset.monitoredIpsecTunnels);
+ * everything else goes to `interfaces` (→ Asset.monitoredInterfaces). Per asset
+ * a name is unambiguous: `mergeTunnelsIntoInterfaces` de-dupes against real rows
+ * (real wins), so the same ifName is never both a real interface and a synthetic
+ * tunnel on one device. A picked name with no matching row (shouldn't happen —
+ * picks come from this same list) defaults to `interfaces`, preserving the
+ * pre-routing behavior. Pure: no DB, no I/O.
+ */
+export function splitPinsByProvenance(
+  picked: string[],
+  interfaces: ResolverInterface[],
+): PinsByProvenance {
+  if (picked.length === 0) return { interfaces: [], ipsecTunnels: [] };
+  const tunnelNames = new Set<string>();
+  for (const i of interfaces) if (i.isIpsecTunnel) tunnelNames.add(i.ifName);
+  const ifaces: string[] = [];
+  const tunnels: string[] = [];
+  for (const name of picked) {
+    if (tunnelNames.has(name)) tunnels.push(name);
+    else ifaces.push(name);
+  }
+  return { interfaces: ifaces, ipsecTunnels: tunnels };
+}
+
 // ─── IPsec tunnel → synthetic interface merge (pure) ─────────────────────────
 
 /** Latest IPsec tunnel observation the merge helper consumes. */
@@ -242,10 +292,13 @@ export interface TunnelObservation {
  * interface tunnels are real `config system interface` entries of type
  * `tunnel`, but the REST `/api/v2/monitor/system/interface` endpoint omits
  * them — so on REST-polled FortiGates they never reach asset_interface_samples
- * and would otherwise be invisible here. Their byte counters live in the
- * dedicated IPsec section (asset_ipsec_tunnel_samples); pinning one only adds
- * it to Asset.monitoredInterfaces, which yields IF-MIB counters on SNMP and
- * nothing on REST. See the module header.
+ * and would otherwise be invisible here. Each synthetic row carries
+ * `isIpsecTunnel: true`; at apply time `splitPinsByProvenance` routes those
+ * pins to `Asset.monitoredIpsecTunnels` (the field the dedicated IPsec sampler
+ * in asset_ipsec_tunnel_samples reads for fast-cadence polling) rather than
+ * `Asset.monitoredInterfaces` (IF-MIB). This is what makes a "By type: tunnel"
+ * selection actually fast-poll IPsec tunnels on REST-polled gates, where an
+ * IF-MIB pin would yield nothing. See the module header.
  *
  * Pure: mutates `interfacesByAsset` in place and returns it. De-dupes per
  * asset against existing ifNames so a tunnel SNMP already captured as a real
@@ -269,9 +322,10 @@ export function mergeTunnelsIntoInterfaces(
       if (!t.tunnelName || existing.has(t.tunnelName)) continue;
       existing.add(t.tunnelName);
       list.push({
-        ifName:     t.tunnelName,
-        ifType:     "tunnel",
-        operStatus: t.status === "down" ? "down" : "up",
+        ifName:       t.tunnelName,
+        ifType:       "tunnel",
+        operStatus:   t.status === "down" ? "down" : "up",
+        isIpsecTunnel: true,
       });
     }
   }
@@ -782,7 +836,7 @@ export async function applyAutoMonitorForClass(
   const assetType = CLASS_TO_ASSET_TYPE[klass];
   const assets = await prisma.asset.findMany({
     where: { discoveredByIntegrationId: integrationId, assetType: assetType as any },
-    select: { id: true, hostname: true, monitoredInterfaces: true },
+    select: { id: true, hostname: true, monitoredInterfaces: true, monitoredIpsecTunnels: true },
   });
   if (assets.length === 0) return empty;
   const ids = assets.map((a) => a.id);
@@ -813,30 +867,39 @@ export async function applyAutoMonitorForClass(
   interface PendingUpdate {
     assetId:   string;
     hostname:  string | null;
-    fresh:     string[];
-    unionedLength: number;
-    unionedNext:   string[];
+    // Fresh names per destination field (computed pins not already pinned).
+    freshIfaces:  string[];
+    freshTunnels: string[];
+    // Full arrays to write. Only the field with fresh additions is rebuilt;
+    // the other is passed through unchanged (idempotent — same value re-set).
+    unionedIfaces:  string[];
+    unionedTunnels: string[];
   }
   const pending: PendingUpdate[] = [];
   let perDeviceMax = 0;
   for (const a of assets) {
-    const computed = resolvePinnedInterfaces(
-      selection,
-      interfacesByAsset.get(a.id) ?? [],
-      lldpByAsset.get(a.id),
-    );
+    const ifaceList = interfacesByAsset.get(a.id) ?? [];
+    const computed = resolvePinnedInterfaces(selection, ifaceList, lldpByAsset.get(a.id));
     if (computed.length === 0) continue;
-    const existing = new Set(a.monitoredInterfaces);
-    const fresh = computed.filter((n) => !existing.has(n));
-    if (fresh.length === 0) continue;
-    const unioned = [...a.monitoredInterfaces, ...fresh];
-    if (unioned.length > perDeviceMax) perDeviceMax = unioned.length;
+    // Route each pin to its destination field by provenance: synthetic IPsec
+    // tunnel rows → monitoredIpsecTunnels, real interfaces → monitoredInterfaces.
+    const { interfaces: pickedIfaces, ipsecTunnels: pickedTunnels } = splitPinsByProvenance(computed, ifaceList);
+    const existingIf  = new Set(a.monitoredInterfaces);
+    const existingTun = new Set(a.monitoredIpsecTunnels);
+    const freshIfaces  = pickedIfaces.filter((n) => !existingIf.has(n));
+    const freshTunnels = pickedTunnels.filter((n) => !existingTun.has(n));
+    if (freshIfaces.length === 0 && freshTunnels.length === 0) continue;
+    const unionedIfaces  = freshIfaces.length  ? [...a.monitoredInterfaces, ...freshIfaces]    : a.monitoredInterfaces;
+    const unionedTunnels = freshTunnels.length ? [...a.monitoredIpsecTunnels, ...freshTunnels] : a.monitoredIpsecTunnels;
+    const totalPins = unionedIfaces.length + unionedTunnels.length;
+    if (totalPins > perDeviceMax) perDeviceMax = totalPins;
     pending.push({
-      assetId:       a.id,
-      hostname:      a.hostname,
-      fresh,
-      unionedLength: unioned.length,
-      unionedNext:   unioned,
+      assetId:        a.id,
+      hostname:       a.hostname,
+      freshIfaces,
+      freshTunnels,
+      unionedIfaces,
+      unionedTunnels,
     });
   }
   if (pending.length === 0) return { devices: 0, interfacesAdded: 0, perDeviceMax: 0, sampleDevices: [] };
@@ -854,7 +917,10 @@ export async function applyAutoMonitorForClass(
       chunk.map((p) =>
         prisma.asset.update({
           where: { id: p.assetId },
-          data:  { monitoredInterfaces: p.unionedNext },
+          // Write both fields: interface pins to monitoredInterfaces, IPsec
+          // tunnel pins to monitoredIpsecTunnels. The unchanged field is re-set
+          // to its current value (harmless / idempotent).
+          data:  { monitoredInterfaces: p.unionedIfaces, monitoredIpsecTunnels: p.unionedTunnels },
         }),
       ),
     );
@@ -864,7 +930,9 @@ export async function applyAutoMonitorForClass(
       if (!r || !p) continue;
       if (r.status === "fulfilled") {
         devices += 1;
-        interfacesAdded += p.fresh.length;
+        // interfacesAdded reports total fresh fast-poll pins added across both
+        // fields (real interfaces + IPsec tunnels) — a pin is a pin to the toast.
+        interfacesAdded += p.freshIfaces.length + p.freshTunnels.length;
       }
     }
   }
@@ -875,7 +943,7 @@ export async function applyAutoMonitorForClass(
   const sampleDevices: ApplyResult["sampleDevices"] = pending.slice(0, 5).map((p) => ({
     assetId:  p.assetId,
     hostname: p.hostname,
-    pinNames: p.fresh,
+    pinNames: [...p.freshIfaces, ...p.freshTunnels],
   }));
 
   return { devices, interfacesAdded, perDeviceMax, sampleDevices };

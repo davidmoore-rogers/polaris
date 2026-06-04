@@ -1426,8 +1426,12 @@ function _amonCanonicalize(sel) {
 // wrapped in `<prefix>types-includeDown-wrap` for show/hide) to the right of
 // the type label — visible only when tunnel is checked, since a down IPsec
 // tunnel is something operators commonly want to monitor even with "Only
-// currently up" on. Shared by the initial saved render and the post-aggregate
-// re-render so the two never diverge.
+// currently up" on. The tunnel row also carries a sub-hint noting that
+// "tunnel" covers FortiOS IPsec tunnels: when selected, those pins route to
+// Asset.monitoredIpsecTunnels (the IPsec sampler's fast-poll list) rather than
+// the IF-MIB monitoredInterfaces list — see splitPinsByProvenance in
+// src/services/autoMonitorInterfacesService.ts. Shared by the initial saved
+// render and the post-aggregate re-render so the two never diverge.
 function _amonTypeRowHTML(idPrefix, name, checked, inclDownChecked, inclDownVisible) {
   var label = '<label style="display:flex;align-items:center;gap:6px;font-size:0.88rem;margin-bottom:0.25rem">' +
                 '<input type="checkbox" data-type-checkbox="1" id="' + idPrefix + 'type-' + name + '" value="' + name + '"' + (checked ? " checked" : "") + ' style="width:auto"> ' + name +
@@ -1439,7 +1443,10 @@ function _amonTypeRowHTML(idPrefix, name, checked, inclDownChecked, inclDownVisi
                  ' <span class="hint" style="margin:0;font-size:0.78rem">(otherwise excluded by &quot;Only currently up&quot;)</span>' +
                '</label>' +
              '</span>';
-  return '<div style="display:flex;align-items:center;gap:14px">' + label + incl + '</div>';
+  var ipsecHint = '<p class="hint" style="margin:0 0 0.35rem 1.6rem;font-size:0.78rem">' +
+                    'Includes FortiOS IPsec tunnels — selecting this pins them for fast IPsec polling.' +
+                  '</p>';
+  return '<div style="display:flex;align-items:center;gap:14px">' + label + incl + '</div>' + ipsecHint;
 }
 
 function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defaultMode, hasIntegrationId, opts) {
