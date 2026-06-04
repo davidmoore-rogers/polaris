@@ -373,14 +373,40 @@ describe("mergeTunnelsIntoInterfaces", () => {
     expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true }]);
   });
 
-  it("de-dupes against a tunnel SNMP already captured as a real interface", () => {
+  it("on a name collision, overrides the real row with the authoritative SA status (no duplicate)", () => {
     const ifaces = new Map<string, ResolverInterface[]>([
-      ["a1", [iface("VPN_HQ", "tunnel", false)]], // real IF-MIB row, down
+      ["a1", [iface("VPN_HQ", "tunnel", false)]], // real IF-MIB row, reports down
     ]);
     const tunnels = new Map<string, TunnelObservation[]>([["a1", [tn("VPN_HQ", "up")]]]);
     mergeTunnelsIntoInterfaces(ifaces, tunnels);
-    // No duplicate added; the existing real row is preserved as-is.
-    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "down" }]);
+    // No duplicate; the single row is overridden to the SA status ("up") and tagged IPsec.
+    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_HQ", ifType: "tunnel", operStatus: "up", isIpsecTunnel: true }]);
+  });
+
+  it("SA status wins over an always-up SNMP IF-MIB row — a down tunnel becomes operStatus down", () => {
+    // The reported bug: SNMP IF-MIB reports an IPsec tunnel interface as always
+    // "up" regardless of SA state. The IPsec SA status ("down") must override so
+    // onlyUp correctly excludes it.
+    const ifaces = new Map<string, ResolverInterface[]>([
+      ["a1", [iface("Overlay-1", "tunnel", true)]], // SNMP says up (lies)
+    ]);
+    mergeTunnelsIntoInterfaces(ifaces, new Map([["a1", [tn("Overlay-1", "down")]]]));
+    const list = ifaces.get("a1")!;
+    expect(list).toEqual([{ ifName: "Overlay-1", ifType: "tunnel", operStatus: "down", isIpsecTunnel: true }]);
+    // onlyUp without includeDownTunnels now correctly drops the down tunnel.
+    expect(resolvePinnedInterfaces({ byTypes: { types: ["tunnel"], onlyUp: true } }, list)).toEqual([]);
+    // includeDownTunnels still rescues it, and it routes to the IPsec field.
+    const picked = resolvePinnedInterfaces({ byTypes: { types: ["tunnel"], onlyUp: true, includeDownTunnels: true } }, list);
+    expect(picked).toEqual(["Overlay-1"]);
+    expect(splitPinsByProvenance(picked, list)).toEqual({ interfaces: [], ipsecTunnels: ["Overlay-1"] });
+  });
+
+  it("fills ifType when the colliding real row had a null ifType", () => {
+    const ifaces = new Map<string, ResolverInterface[]>([
+      ["a1", [{ ifName: "VPN_X", ifType: null, operStatus: "up" }]],
+    ]);
+    mergeTunnelsIntoInterfaces(ifaces, new Map([["a1", [tn("VPN_X", "down")]]]));
+    expect(ifaces.get("a1")).toEqual([{ ifName: "VPN_X", ifType: "tunnel", operStatus: "down", isIpsecTunnel: true }]);
   });
 
   it("maps only fully-down status to operStatus down; up/partial/dynamic → up", () => {

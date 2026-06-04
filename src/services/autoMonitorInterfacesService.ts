@@ -300,9 +300,18 @@ export interface TunnelObservation {
  * selection actually fast-poll IPsec tunnels on REST-polled gates, where an
  * IF-MIB pin would yield nothing. See the module header.
  *
- * Pure: mutates `interfacesByAsset` in place and returns it. De-dupes per
- * asset against existing ifNames so a tunnel SNMP already captured as a real
- * interface row (ifType tunnel via IF-MIB ifType 131) isn't double-counted.
+ * Pure: mutates `interfacesByAsset` in place and returns it.
+ *
+ * Collision handling — the IPsec SA status is AUTHORITATIVE. A tunnel can also
+ * appear as a real `asset_interface_samples` row (e.g. an SNMP-polled gate
+ * whose IF-MIB enumerates the tunnel as ifType 131). SNMP `ifOperStatus`
+ * reports an IPsec tunnel interface as **always "up"** regardless of the actual
+ * phase-1 SA state, so trusting that row would make `onlyUp` pin a tunnel whose
+ * SA is down. So instead of skipping on a name collision, we OVERRIDE the
+ * existing row's `operStatus` with the SA-derived value and tag it
+ * `isIpsecTunnel` (which also routes its pin to `Asset.monitoredIpsecTunnels`
+ * via `splitPinsByProvenance`, the correct field for an IPsec tunnel). New
+ * tunnels with no real row are appended as before.
  *
  * operStatus mapping: only a fully-`down` tunnel maps to "down"; up / partial
  * / dynamic all map to "up" so the "only currently-up" filter on By type /
@@ -317,16 +326,28 @@ export function mergeTunnelsIntoInterfaces(
     if (tunnels.length === 0) continue;
     let list = interfacesByAsset.get(assetId);
     if (!list) { list = []; interfacesByAsset.set(assetId, list); }
-    const existing = new Set(list.map((i) => i.ifName));
+    const byName = new Map(list.map((i) => [i.ifName, i]));
     for (const t of tunnels) {
-      if (!t.tunnelName || existing.has(t.tunnelName)) continue;
-      existing.add(t.tunnelName);
-      list.push({
-        ifName:       t.tunnelName,
-        ifType:       "tunnel",
-        operStatus:   t.status === "down" ? "down" : "up",
+      if (!t.tunnelName) continue;
+      // SA status wins: fully-down SA → "down"; up/partial/dynamic/null → "up".
+      const saOperStatus = t.status === "down" ? "down" : "up";
+      const existingRow = byName.get(t.tunnelName);
+      if (existingRow) {
+        // Real interface row for this tunnel (e.g. always-"up" SNMP IF-MIB):
+        // override with the authoritative SA status and mark it as IPsec.
+        existingRow.operStatus = saOperStatus;
+        existingRow.isIpsecTunnel = true;
+        if (existingRow.ifType == null) existingRow.ifType = "tunnel";
+        continue;
+      }
+      const row: ResolverInterface = {
+        ifName:        t.tunnelName,
+        ifType:        "tunnel",
+        operStatus:    saOperStatus,
         isIpsecTunnel: true,
-      });
+      };
+      list.push(row);
+      byName.set(t.tunnelName, row);
     }
   }
   return interfacesByAsset;
