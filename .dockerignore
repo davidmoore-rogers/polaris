@@ -12,7 +12,12 @@ public/uploads
 .vscode
 .idea
 tests
-scripts
+# Exclude dev/test scripts from the image, but keep copy-build-assets.mjs —
+# `npm run build` runs it in the builder stage to mirror bundled std MIBs into
+# dist/ (see scripts/copy-build-assets.mjs + Dockerfile). A blanket `scripts`
+# exclusion broke the Docker build's `COPY scripts ./scripts`.
+scripts/*
+!scripts/copy-build-assets.mjs
 deploy
 demo.mjs
 *.log
