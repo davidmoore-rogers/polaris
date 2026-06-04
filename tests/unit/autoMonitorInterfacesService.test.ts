@@ -423,3 +423,23 @@ describe("mergeTunnelsIntoInterfaces", () => {
     ).toEqual(["VPN_DR", "VPN_HQ"]);
   });
 });
+
+describe("resolver is class-agnostic (workstation/server reuse)", () => {
+  // AD/Entra workstation+server classes reuse this resolver against agent-
+  // reported interfaces (no Fortinet ifTypes). Confirm byNames / byPatterns
+  // work on generic Linux-style ifNames the same way.
+  const wsIfaces: ResolverInterface[] = [
+    { ifName: "eth0", ifType: null, operStatus: "up" },
+    { ifName: "eth1", ifType: null, operStatus: "down" },
+    { ifName: "lo", ifType: null, operStatus: "up" },
+  ];
+  it("byNames works without ifType data", () => {
+    expect(resolvePinnedInterfaces({ byNames: { names: ["eth0", "eth1"] } }, wsIfaces).sort()).toEqual(["eth0", "eth1"]);
+  });
+  it("byPatterns wildcard works on generic ifNames", () => {
+    expect(resolvePinnedInterfaces({ byPatterns: { patterns: ["eth*"], regex: false, onlyUp: false } }, wsIfaces).sort()).toEqual(["eth0", "eth1"]);
+  });
+  it("byPatterns onlyUp filters down interfaces", () => {
+    expect(resolvePinnedInterfaces({ byPatterns: { patterns: ["eth*"], regex: false, onlyUp: true } }, wsIfaces)).toEqual(["eth0"]);
+  });
+});

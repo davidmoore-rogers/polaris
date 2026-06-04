@@ -79,7 +79,11 @@ export type AutoMonitorSelection = {
   byLldp?:     ByLldpBlock;
 } | null;
 
-export type AutoMonitorClass = "fortigate" | "fortiswitch" | "fortiap";
+// Fortinet classes (FMG / FortiGate) plus the AD/Entra workstation+server
+// classes. Interface auto-monitor is class-agnostic — it resolves a selection
+// against each asset's latest AssetInterfaceSample rows regardless of source —
+// so the only per-class knowledge is the Asset.assetType each maps to.
+export type AutoMonitorClass = "fortigate" | "fortiswitch" | "fortiap" | "workstation" | "server";
 
 /** Minimal interface shape consumed by the resolver. */
 export interface ResolverInterface {
@@ -106,6 +110,8 @@ const CLASS_TO_ASSET_TYPE: Record<AutoMonitorClass, string> = {
   fortigate: "firewall",
   fortiswitch: "switch",
   fortiap: "access_point",
+  workstation: "workstation",
+  server: "server",
 };
 
 // ─── Pattern compilation (wildcard vs regex) ────────────────────────────────
