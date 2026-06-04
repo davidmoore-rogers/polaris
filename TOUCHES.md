@@ -39,7 +39,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 **What it is:** Asset.monitorStatus ∈ {up, warning, recovering, down, unknown} driven by consecutiveFailures/consecutiveSuccesses counters (see "Five-state monitor machine" in CLAUDE.md).
 
 **Writers** (files that mutate or emit this state):
-- `src/services/monitoringService.ts` — runProbeFor() updates Asset.monitorStatus/consecutiveFailures/consecutiveSuccesses after each probe result, stamps Asset.monitorStatusChangedAt whenever monitorStatus changes value (any-to-any, not just up↔down), emits monitor.status_changed Event on up↔down transitions, fires propagateAfterStatusChange() to push the edge into descendant dependencySuppressed state
+- `src/services/monitoringService.ts` — runProbeFor() updates Asset.monitorStatus/consecutiveFailures/consecutiveSuccesses after each probe result, stamps Asset.monitorStatusChangedAt whenever monitorStatus changes value (any-to-any, not just up↔down), emits monitor.status_changed Event on transitions INTO up/warning/down (not recovering/unknown, never per-poll), fires propagateAfterStatusChange() — but only on the confirmed up/down edge, NOT on the warning edge — to push the change into descendant dependencySuppressed state
 - `src/jobs/monitorAssets.ts` — Light/heavy ticking loops invoke runMonitorPass() which dispatches probe collection
 - `src/jobs/backfillMonitorStatusChangedAt.ts` — One-shot startup (60s after boot): seeds Asset.monitorStatusChangedAt for pre-existing warning/down/recovering assets from the latest monitor.status_changed Event when one is still within the 7-day retention window
 - `src/api/routes/assets.ts` — recordProbeResult() on manual /probe-now endpoint
@@ -61,15 +61,15 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - Transition to "down" happens when consecutiveFailures ≥ failureThreshold; to "up" when consecutiveSuccesses ≥ failureThreshold (same threshold both directions).
 - "recovering" is the transient mid-recovery state (was-down, now succeeding). Exits to "up" once the success threshold is crossed.
 - "warning" is mid-degradation (was-up, now accumulating failures but below threshold). Exits to "down" when threshold crossed, back to "up" on success.
-- monitor.status_changed Event fires ONLY on up↔down transitions, not on warning/recovering churn. propagateAfterStatusChange() fires from the same edge so dependency suppression follows the confirmed-down edge — never the flap.
-- monitorStatusChangedAt is stamped on EVERY transition (any-to-any), independent of the Event audit trail. The Event log is the up/down-only audit record; the column is the source for the Dashboard's "how long has this been warning/down" duration. Backfill from the Event log is best-effort because events prune at 7 days; older outages render "—".
+- monitor.status_changed Event is edge-triggered: it fires on the transition INTO up / warning / down (so an operator sees the first successful poll, the first warning, and the first down — plus recovery, which is a →up edge). It never fires per-poll (up→up etc. are suppressed by previousStatus===nextStatus) and never fires for the intermediate "recovering"/"unknown" states. Level is "info" for →up, "warning" for →warning and →down. propagateAfterStatusChange() and triggerRetryAfterStatusChange() are decoupled from the event: they fire from a SEPARATE guard gated to the confirmed up/down edge only (a "warning" edge logs an event but does NOT propagate suppression or kick the retry job) — dependency suppression still follows the confirmed-down edge, never the flap.
+- monitorStatusChangedAt is stamped on EVERY transition (any-to-any), independent of the Event audit trail. The column is the source for the Dashboard's "how long has this been warning/down" duration. Backfill from the Event log seeds it from the latest monitor.status_changed Event still within the 7-day window; older outages render "—".
 - Heavy cadences (telemetry/systemInfo/fastFiltered) are suppressed when monitorStatus ≠ "up" OR dependencySuppressed. The probe runs at 2× cadence when dependencySuppressed AND responseTimePolling !== "disabled".
 - Response-time probe runs in every state; it's the cheap path that detects recovery.
 
 **When changing this:**
 - Verify every state assignment matches the rules above (no bypass paths).
 - Check assets.js intermittency-bar replay logic replays the five-state machine forward correctly (must use same failureThreshold).
-- Confirm monitor.status_changed Event audit trail only has up/down transitions (search logs for other values = bug).
+- Confirm monitor.status_changed Event audit trail only has →up / →warning / →down transitions (never →recovering, →unknown, or same-state per-poll repeats = bug).
 - Test manual /probe-now against a down asset — should advance consecutiveSuccesses and possibly transition to recovering within one call.
 - Check Map topology endpoint colors match asset list Status pills (monitorStatusToHealth must be consistent).
 - Verify clamp logic in db.ts doesn't interfere: disable should reset, but re-enable (flip to active) should not auto-resume monitoring.
@@ -758,7 +758,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 **Writers** (files that mutate or emit this state):
 - `src/services/dependencyTreeService.ts` — recomputeDependencyTree() rebuilds source="computed" rows in AssetDependencyParent + Asset.dependencyLayer at end of every FMG/FortiGate discovery cycle. Source="override" rows are operator-managed (admin override endpoints — to be added in API commit) and never touched by recompute.
 - `src/services/dependencyTreeService.ts` — reconcileDependencySuppression() is the source of truth for Asset.dependencySuppressed; emits monitor.dependency_suppressed / monitor.dependency_resumed Events on transitions.
-- `src/services/dependencyTreeService.ts` — propagateAfterStatusChange() is the latency-optimization hook called from recordProbeResult after every monitor.status_changed Event.
+- `src/services/dependencyTreeService.ts` — propagateAfterStatusChange() is the latency-optimization hook called from recordProbeResult on the confirmed up/down edge (a separate guard from the monitor.status_changed Event emission, which also covers the warning edge — propagate does NOT fire on warning).
 - `src/jobs/dependencyReconciler.ts` — 60s tick that calls reconcileDependencySuppression(); the source of truth catches anything the event hook missed.
 - `src/jobs/backfillDependencyTree.ts` — one-shot startup runs recomputeDependencyTree() so existing installs see populated rows without waiting 4h.
 - `src/api/routes/integrations.ts` — Phase 12 of syncDhcpSubnets calls recomputeDependencyTree(integrationId) on mode in {full, finalize}.
@@ -774,7 +774,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/api/routes/map.ts:GET /sites` and `GET /sites/:id/topology` — Stamps the same fields on each pin / topology node. (The topology endpoint still computes edges via per-request BFS through `interfaceTopologyService` — full DAG-as-source-of-truth refactor is a follow-up; current state is "DAG drives suppression, BFS still drives graph rendering.")
 
 **Invariants:**
-- Suppression follows the **confirmed-down** edge only. monitor.status_changed Event fires solely on up↔down transitions, and propagateAfterStatusChange() is called only from that same emission point. Warning / recovering flapping does NOT propagate.
+- Suppression follows the **confirmed-down** edge only. propagateAfterStatusChange() is called only from the up/down guard in recordProbeResult — NOT from the monitor.status_changed Event emission (which also logs the →warning edge). Warning / recovering flapping logs an event but does NOT propagate.
 - "All-down" multi-parent: an asset with N effective parents suppresses iff every parent is down or itself dependencySuppressed. Empty parent set = never suppressed.
 - Override resolution: if any source="override" row exists for an asset, those are the effective parents (computed rows ignored). Empty override set = explicit "no parents" pin (asset opts out entirely).
 - Unmonitored parents are transparent — the suppression walk skips them and continues to their grandparents. A monitored ancestor must say "down" before suppression can fire.
@@ -784,7 +784,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 **When changing this:**
 - Mirror cadence-dispatch changes in BOTH src/services/monitoringService.ts AND src/jobs/monitorAssets.ts. The two are parallel implementations and must stay in lock-step.
-- Verify the propagateAfterStatusChange() hook still fires only from the up↔down emission point — never from warning/recovering churn.
+- Verify the propagateAfterStatusChange() hook still fires only from the confirmed up/down guard — never from the warning edge (which logs an event but must not propagate) or recovering churn.
 - Run the dependencyTreeService.test.ts suite — covers BFS layers, MCLAG siblings, dual-homed multi-parent, all-down semantics, transparent unmonitored parents, confirmed-down-only edge.
 - Smoke-test on dev: pick a live FortiGate, set monitorStatus="down" via direct DB write, wait one reconciler tick (≤60s); confirm child switches/APs flip to dependencySuppressed and emit monitor.dependency_suppressed Events.
 - If the topology endpoint refactor lands: hit /api/v1/map/sites/:id/topology before/after; edge sets must match (same FG→switch / switch→AP edges) modulo the new dependencySuppressed flag on each node.
