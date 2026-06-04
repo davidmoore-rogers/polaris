@@ -2792,6 +2792,13 @@ async function openViewModal(id) {
       tabs.push({ key: "stations", label: "Stations", html: _assetStationsTabHTML(a) });
     }
     tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id, sightings, ipHistory) });
+    // Events tab — audit history scoped to this asset (resourceType=asset,
+    // resourceId=a.id). Lazy-loaded on first tab click (see _wireAssetEventsTab)
+    // so the modal doesn't fire an extra /events query on every open. Gated on
+    // events-read to mirror the GET /events backend permission.
+    if (permAtLeast("events", "read")) {
+      tabs.push({ key: "events", label: "Events", html: _assetEventsTabHTML(a.id) });
+    }
     // Custom MIB tab — present whenever the asset's manufacturer has at least
     // one custom widget defined under its ManufacturerProfile. The tab body
     // is rendered async from /assets/:id/custom-widgets; if the manufacturer
@@ -2836,6 +2843,7 @@ async function openViewModal(id) {
     _wireModalTabs("asset-view");
     if (isAdmin()) _wireSnmpWalkTab(a);
     if (canManageAssets()) _wireQuarantineTab(a);
+    if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
     // Mount the dependency tree into its placeholder div on the General tab.
     var depMount = document.getElementById("asset-dep-tree-mount-" + a.id);
     if (depMount) {
@@ -10679,6 +10687,149 @@ function _ipHistoryTableHTML(rows) {
       '</tr>';
     }).join("") +
     '</tbody></table>';
+}
+
+// ─── Events tab (asset-scoped audit history) ────────────────────────────────
+// Self-contained reimplementation of the Events-page table + change-Detail
+// popup. events.js is only loaded on events.html, so its renderTable /
+// showEventDetail helpers aren't available here — these mirror
+// public/js/events.js (row markup ~205-229, detail popup ~1487-1532).
+
+// Most-recent page of asset events, keyed so the delegated Detail handler can
+// look an event up by row index without re-fetching.
+var _assetEventsCurrentPage = [];
+
+function _assetEventsTabHTML(assetId) {
+  return '<div class="section-block">' +
+    '<table>' +
+      '<thead><tr>' +
+        '<th style="width:160px">Timestamp</th>' +
+        '<th style="width:70px">Level</th>' +
+        '<th style="width:140px">Action</th>' +
+        '<th style="width:100px">Resource</th>' +
+        '<th>Message</th>' +
+        '<th style="width:100px">User</th>' +
+        '<th style="width:60px"></th>' +
+      '</tr></thead>' +
+      '<tbody id="asset-view-events-tbody-' + escapeHtml(assetId) + '">' +
+        '<tr><td colspan="7" class="empty-state">Loading…</td></tr>' +
+      '</tbody>' +
+    '</table>' +
+  '</div>';
+}
+
+function _renderAssetEventRow(ev, idx) {
+  var ts = new Date(ev.timestamp);
+  var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
+    " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  var levelClass = "badge-level-" + (ev.level || "info");
+  var levelLabel = (ev.level || "info").toUpperCase();
+
+  var resourceLabel = ev.resourceType || "-";
+  var resourceName = ev.resourceName ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">(' + escapeHtml(ev.resourceName) + ')</span>' : "";
+
+  var detailBtn = ev.details && ev.details.changes
+    ? '<button class="btn btn-secondary btn-sm btn-event-detail" data-event-idx="' + idx + '" style="padding:2px 8px;font-size:0.75rem">Detail</button>'
+    : '';
+
+  return '<tr>' +
+    '<td style="font-family:var(--font-mono);font-size:0.82rem;white-space:nowrap">' + escapeHtml(timeStr) + '</td>' +
+    '<td><span class="badge ' + levelClass + '">' + levelLabel + '</span></td>' +
+    '<td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ev.action || "") + '</td>' +
+    '<td>' + escapeHtml(resourceLabel) + resourceName + '</td>' +
+    '<td>' + escapeHtml(ev.message || "") + '</td>' +
+    '<td>' + escapeHtml(ev.actor || "-") + '</td>' +
+    '<td>' + detailBtn + '</td>' +
+    '</tr>';
+}
+
+async function _loadAssetEventsTabFor(assetId) {
+  var tbody = document.getElementById("asset-view-events-tbody-" + assetId);
+  if (!tbody || tbody.getAttribute("data-loaded") === "1") return;
+  tbody.setAttribute("data-loaded", "1");
+  try {
+    var data = await api.events.list({
+      resourceType: "asset",
+      resourceId: assetId,
+      sortBy: "timestamp",
+      sortDir: "desc",
+      limit: 100,
+    });
+    var events = (data && data.events) || [];
+    _assetEventsCurrentPage = events;
+    if (!events.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No events found</td></tr>';
+      return;
+    }
+    tbody.innerHTML = events.map(_renderAssetEventRow).join("");
+  } catch (err) {
+    tbody.setAttribute("data-loaded", "0"); // allow a retry on next click
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load events</td></tr>';
+  }
+}
+
+function _wireAssetEventsTab(assetId) {
+  var btn = document.querySelector('#asset-view-tabs .page-tab[data-tab="events"]');
+  if (btn) {
+    btn.addEventListener("click", function () { _loadAssetEventsTabFor(assetId); });
+  }
+  var tbody = document.getElementById("asset-view-events-tbody-" + assetId);
+  if (tbody) {
+    tbody.addEventListener("click", function (e) {
+      var detailBtn = e.target.closest(".btn-event-detail");
+      if (!detailBtn) return;
+      var idx = parseInt(detailBtn.getAttribute("data-event-idx"), 10);
+      if (_assetEventsCurrentPage[idx]) _showAssetEventDetail(_assetEventsCurrentPage[idx]);
+    });
+  }
+}
+
+function _formatEventFieldName(field) {
+  return field.replace(/([A-Z])/g, " $1").replace(/^./, function (c) { return c.toUpperCase(); });
+}
+
+function _formatEventDetailValue(val) {
+  if (Array.isArray(val)) return val.join(", ") || "none";
+  if (val instanceof Object) return JSON.stringify(val);
+  return String(val);
+}
+
+function _showAssetEventDetail(ev) {
+  var changes = ev.details && ev.details.changes ? ev.details.changes : {};
+  var keys = Object.keys(changes);
+  if (!keys.length) return;
+
+  var rows = keys.map(function (field) {
+    var c = changes[field];
+    var from = c.from === null || c.from === "" ? '<span style="color:var(--color-text-tertiary);font-style:italic">empty</span>' : escapeHtml(_formatEventDetailValue(c.from));
+    var to = c.to === null || c.to === "" ? '<span style="color:var(--color-text-tertiary);font-style:italic">empty</span>' : escapeHtml(_formatEventDetailValue(c.to));
+    return '<tr>' +
+      '<td style="font-weight:500;white-space:nowrap">' + escapeHtml(_formatEventFieldName(field)) + '</td>' +
+      '<td style="color:var(--color-danger)">' + from + '</td>' +
+      '<td style="color:var(--color-success)">' + to + '</td>' +
+      '</tr>';
+  }).join("");
+
+  var ts = new Date(ev.timestamp);
+  var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
+    " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  var body =
+    '<div style="margin-bottom:1rem;font-size:0.85rem;color:var(--color-text-secondary)">' +
+      '<span style="font-family:var(--font-mono)">' + escapeHtml(ev.action) + '</span> by <strong>' + escapeHtml(ev.actor || "unknown") + '</strong> at ' + escapeHtml(timeStr) +
+    '</div>' +
+    '<table style="width:100%">' +
+      '<thead><tr>' +
+        '<th style="width:120px">Field</th>' +
+        '<th>Before</th>' +
+        '<th>After</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table>';
+
+  var title = "Change Detail" + (ev.resourceName ? " — " + ev.resourceName : "");
+  openModal(title, body, '<button class="btn btn-secondary" onclick="closeModal()">Close</button>');
 }
 
 function _assetSourcesTabHTML(sources, assetId, sightings, ipHistory) {
