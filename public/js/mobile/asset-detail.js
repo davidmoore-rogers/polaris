@@ -13,11 +13,21 @@
 //     assetsQuarantine read; degrades to a muted note otherwise)
 //   - IP history list
 //
+// Hero also carries a "View SD-WAN" button for FortiGate firewalls that
+// reported SD-WAN data (perf-SLA links / rules / members exist). Tapping it
+// slides up a second bottom sheet (stacked on the asset sheet, like the
+// interface sheet) with SD-WAN Members + Rules current-state lists and a
+// Performance SLA section (per-member latency / jitter / packet-loss charts
+// over a selectable health-check + range). See openSdwanSheet.
+//
 // Out of scope for v1 (desktop-only):
 //   - Per-interface throughput + errors charts
 //   - Per-interface comments editor
 //   - IPsec tunnels
 //   - SNMP walk
+//   - SD-WAN rule member-selection categorical timeline (the mobile chart
+//     helper is numeric-only; the SD-WAN sheet shows the current selected
+//     member per rule, not its failover history)
 //   - Per-source observed blob view (mobile shows the source summary, not the
 //     full observed key/value table)
 
@@ -41,6 +51,21 @@
     "polaris-agent":      "Polaris Agent",
     "manual":             "Manual / other",
   };
+
+  // SD-WAN member palette — mirrors `_SDWAN_MEMBER_COLORS` in the desktop
+  // assets.js so a given WAN member gets the same color on both surfaces.
+  var _SDWAN_MEMBER_COLORS = ["#2a9d8f", "#4361ee", "#f4a261", "#9b5de5", "#e76f51", "#43aa8b", "#577590", "#bc6c25"];
+  function sdwanColor(name, names) {
+    if (!name) return "#7b8794";
+    var i = (names || []).indexOf(name);
+    if (i < 0) i = 0;
+    return _SDWAN_MEMBER_COLORS[i % _SDWAN_MEMBER_COLORS.length];
+  }
+
+  // Per-asset cache of the SD-WAN gate fetch (members + rules + perf-SLA
+  // links) so openSdwanSheet renders the current-state lists without a
+  // re-fetch. Populated by loadSdwanGate; only set when data actually exists.
+  var _sdwanCache = Object.create(null);
 
   // Per-mount state keyed by asset id so navigating back from another tab
   // remembers which sections were collapsed and which range was active.
@@ -206,6 +231,10 @@
   function dismiss() {
     _openId = null;
     _state = "closed";
+    // Tear down any stacked child sheets first so they don't orphan over the
+    // backdrop once the asset sheet is gone.
+    closeSdwanSheet();
+    closeInterfaceSheet();
     var s = document.getElementById("asset-sheet");
     var sc = document.getElementById("asset-sheet-scrim");
     if (s) s.remove();
@@ -240,6 +269,7 @@
       loadSources(id, st);
       loadSightings(id, st);
       loadIpHistory(id, st);
+      loadSdwanGate(id, st, asset);
     }).catch(function (err) {
       if (_openId !== id) return;
       var msg = (err && err.message) ? err.message : "Failed to load asset";
@@ -308,6 +338,12 @@
       + '<div class="asset-hero">'
       + (heroBits.length ? '  <div class="hero-sub">' + heroBits.join(" · ") + '</div>' : '')
       + '  <div id="asset-hero-pill" style="margin-top:' + (heroBits.length ? '12px' : '0') + ';">' + monitorPillHtml + '</div>'
+      // SD-WAN entry button — hidden until loadSdwanGate confirms this
+      // FortiGate firewall actually reported SD-WAN data, then revealed +
+      // wired to openSdwanSheet.
+      + '  <div id="asset-sdwan-btn-wrap" style="margin-top:12px;display:none;">'
+      + '    <button class="btn btn-tonal btn-block" id="asset-sdwan-btn"><svg viewBox="0 0 24 24"><use href="#i-router"/></svg>View SD-WAN</button>'
+      + '  </div>'
       + '</div>'
 
       // Response Time section — collapsed by default; subtitle shows
@@ -834,6 +870,314 @@
     if (n >= 1e6) return (n / 1e6) + " Mbps";
     if (n >= 1e3) return (n / 1e3) + " Kbps";
     return n + " bps";
+  }
+
+  // ─── SD-WAN ──────────────────────────────────────────────────────────────
+  // Gate: SD-WAN sample streams only exist for monitored FortiGate firewalls
+  // with the per-integration `pullSdwan` toggle on. We gate cheaply on
+  // assetType + monitored (a non-FortiGate firewall simply returns empty
+  // streams), fetch the three current-state endpoints, and reveal the hero
+  // button only when the device actually reported data — mirroring the
+  // prefetch-then-conditional pattern of the desktop SD-WAN tab.
+  function loadSdwanGate(id, st, asset) {
+    if (!asset || !asset.monitored || asset.assetType !== "firewall") return;
+    // Only FortiManager / standalone-FortiGate firewalls can carry SD-WAN
+    // sample streams — skip the gate fetch for any other discovery source
+    // (mirrors the desktop SD-WAN tab's type check).
+    var srcType = (asset.discoveredByIntegration && asset.discoveredByIntegration.type) || "manual";
+    if (srcType !== "fortimanager" && srcType !== "fortigate") return;
+    Promise.all([
+      api.assets.sdwanMembers(id).catch(function () { return { members: [] }; }),
+      api.assets.sdwanRules(id).catch(function () { return { rules: [] }; }),
+      api.assets.perfSlaLinks(id).catch(function () { return { links: [] }; }),
+    ]).then(function (r) {
+      if (_openId !== id) return;   // bail if a newer asset replaced us
+      var members = (r[0] && r[0].members) || [];
+      var rules   = (r[1] && r[1].rules) || [];
+      var links   = (r[2] && r[2].links) || [];
+      if (!members.length && !rules.length && !links.length) return;
+      _sdwanCache[id] = { members: members, rules: rules, links: links };
+      var wrap = document.getElementById("asset-sdwan-btn-wrap");
+      var btn  = document.getElementById("asset-sdwan-btn");
+      if (wrap) wrap.style.display = "";
+      if (btn) btn.onclick = function () { openSdwanSheet(id); };
+    }).catch(function () { /* gate is best-effort — no button on failure */ });
+  }
+
+  // Holds the open SD-WAN sheet's perf-SLA selection (health-check grouping +
+  // active range) so the range segmented control can reload the charts.
+  var _sdwanSheetState = null;
+
+  // ─── SD-WAN bottom sheet ───────────────────────────────────────────────
+  // Stacked on top of the asset sheet using the generic .sheet/.scrim pattern
+  // (same as openInterfaceSheet). Sections: Members + Rules current-state
+  // lists, then a Performance SLA section with per-member latency / jitter /
+  // packet-loss charts for a selectable health-check + range.
+  function openSdwanSheet(assetId) {
+    closeSdwanSheet();
+    var cache = _sdwanCache[assetId];
+    if (!cache) return;
+    var members = cache.members || [];
+    var rules   = cache.rules || [];
+    var links   = cache.links || [];
+
+    // Group perf-SLA links by health-check — selecting a health-check overlays
+    // every member belonging to it on the charts (matches the desktop tab).
+    var linksByHc = {};
+    var hcNames = [];
+    links.forEach(function (l) {
+      if (!linksByHc[l.healthCheck]) { linksByHc[l.healthCheck] = []; hcNames.push(l.healthCheck); }
+      linksByHc[l.healthCheck].push(l);
+    });
+    _sdwanSheetState = {
+      assetId: assetId,
+      linksByHc: linksByHc,
+      hcNames: hcNames,
+      hcName: hcNames[0] || null,
+      range: "24h",
+    };
+
+    var scrim = document.createElement("div");
+    scrim.className = "scrim";
+    scrim.id = "sdwan-sheet-scrim";
+
+    var sheet = document.createElement("div");
+    sheet.className = "sheet";
+    sheet.id = "sdwan-sheet";
+
+    var sections = "";
+
+    if (members.length) {
+      sections += ''
+        + '<div style="font-weight:500;margin:8px 0 4px;">Members</div>'
+        + renderSdwanMembersList(members);
+    }
+
+    if (rules.length) {
+      sections += ''
+        + '<div style="font-weight:500;margin:20px 0 4px;">Rules</div>'
+        + '<div class="muted" style="font-size:12px;margin-bottom:4px;">The selected member is inferred from health-check state when FortiOS doesn’t report the active route directly.</div>'
+        + renderSdwanRulesList(rules);
+    }
+
+    if (hcNames.length) {
+      var rangeButtons = ["1h", "24h", "7d", "30d"].map(function (rr) {
+        return '<button class="seg-item' + (rr === _sdwanSheetState.range ? " on" : "") + '" data-range="' + rr + '">' + rr + '</button>';
+      }).join("");
+      var hcOptions = hcNames.map(function (hc) {
+        var n = (linksByHc[hc] || []).length;
+        return '<option value="' + escapeHtml(hc) + '">' + escapeHtml(hc) + ' (' + n + ' member' + (n === 1 ? '' : 's') + ')</option>';
+      }).join("");
+      sections += ''
+        + '<div style="font-weight:500;margin:20px 0 8px;">Performance SLA</div>'
+        + '<select id="sdwan-hc-select" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--md-outline);background:var(--md-surface-cont-high);color:var(--md-on-surface);font-size:14px;margin-bottom:8px;">' + hcOptions + '</select>'
+        + '<div class="seg" id="sdwan-range-seg" style="display:inline-flex;border:1px solid var(--md-outline);border-radius:var(--shape-full);overflow:hidden;margin-bottom:8px;">' + rangeButtons + '</div>'
+        + '<div id="sdwan-perfsla-legend" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;"></div>'
+        + '<div id="sdwan-perfsla-stats" class="muted" style="font-size:12px;margin-bottom:8px;">Loading…</div>'
+        + '<div class="card-filled" style="padding:12px;margin-bottom:8px;"><div style="font-size:13px;margin-bottom:4px;">Latency (ms)</div><div id="sdwan-lat-chart" style="min-height:120px;"></div></div>'
+        + '<div class="card-filled" style="padding:12px;margin-bottom:8px;"><div style="font-size:13px;margin-bottom:4px;">Jitter (ms)</div><div id="sdwan-jit-chart" style="min-height:120px;"></div></div>'
+        + '<div class="card-filled" style="padding:12px;margin-bottom:8px;"><div style="font-size:13px;margin-bottom:4px;">Packet loss (%)</div><div id="sdwan-loss-chart" style="min-height:120px;"></div></div>';
+    }
+
+    sheet.innerHTML = ''
+      + '<div class="sheet-handle"></div>'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;">'
+      + '  <h3 class="sheet-title" style="margin:0;">SD-WAN</h3>'
+      + '  <button class="icon-btn" id="sdwan-sheet-close" aria-label="Close"><svg viewBox="0 0 24 24"><use href="#i-close"/></svg></button>'
+      + '</div>'
+      + sections;
+
+    document.body.appendChild(scrim);
+    document.body.appendChild(sheet);
+
+    scrim.addEventListener("click", closeSdwanSheet);
+    document.getElementById("sdwan-sheet-close").addEventListener("click", closeSdwanSheet);
+    PolarisTabs.attachSwipeToDismiss(sheet, closeSdwanSheet);
+
+    // Wire the perf-SLA controls + initial load.
+    if (hcNames.length) {
+      var sel = document.getElementById("sdwan-hc-select");
+      if (sel) sel.addEventListener("change", function () {
+        _sdwanSheetState.hcName = sel.value;
+        loadSdwanPerfSla(assetId, _sdwanSheetState.hcName, _sdwanSheetState.range);
+      });
+      var seg = document.getElementById("sdwan-range-seg");
+      if (seg) seg.querySelectorAll(".seg-item").forEach(function (b) {
+        b.addEventListener("click", function () {
+          if (b.dataset.range === _sdwanSheetState.range) return;
+          _sdwanSheetState.range = b.dataset.range;
+          seg.querySelectorAll(".seg-item").forEach(function (x) {
+            x.classList.toggle("on", x.dataset.range === _sdwanSheetState.range);
+          });
+          loadSdwanPerfSla(assetId, _sdwanSheetState.hcName, _sdwanSheetState.range);
+        });
+      });
+      loadSdwanPerfSla(assetId, _sdwanSheetState.hcName, _sdwanSheetState.range);
+    }
+  }
+
+  function closeSdwanSheet() {
+    _sdwanSheetState = null;
+    var s = document.getElementById("sdwan-sheet");
+    var sc = document.getElementById("sdwan-sheet-scrim");
+    if (s) s.remove();
+    if (sc) sc.remove();
+  }
+
+  // Members list — status dot + member name (+ zone), IP / link / speed, and
+  // per-health-check chips with current latency.
+  function renderSdwanMembersList(members) {
+    return members.map(function (m, i) {
+      var up = m.state === "up";
+      var sub = [];
+      if (m.ip) sub.push('<span class="mono">' + escapeHtml(m.ip) + '</span>');
+      if (m.zone) sub.push(escapeHtml(m.zone));
+      if (m.linkUp != null) sub.push(m.linkUp ? ("link up" + (m.linkSpeedBps ? " · " + escapeHtml(formatBps(m.linkSpeedBps)) : "")) : "link down");
+      var hcChips = (m.healthChecks || []).map(function (h) {
+        var c = h.state === "up" ? "var(--md-success)" : "var(--md-error)";
+        var lat = (typeof h.latencyMs === "number") ? (Math.round(h.latencyMs * 100) / 100) + "ms" : "—";
+        return '<span style="display:inline-block;margin:2px 4px 0 0;padding:1px 7px;border-radius:10px;font-size:11px;background:var(--md-surface-cont-highest);color:var(--md-on-surface-variant);">'
+          + '<span style="color:' + c + '">●</span> ' + escapeHtml(h.healthCheck) + ' ' + escapeHtml(lat) + '</span>';
+      }).join("");
+      return ''
+        + '<div class="list-item two-line" style="padding-left:0;padding-right:0;align-items:flex-start;">'
+        + '  <span class="leading" style="margin-top:2px;"><span class="dot ' + (up ? "up" : "down") + '" style="display:inline-block;width:10px;height:10px;border-radius:50%;"></span></span>'
+        + '  <div class="content">'
+        + '    <div class="headline">' + escapeHtml(m.link || "(member)") + '</div>'
+        + (sub.length ? '    <div class="supporting">' + sub.join(" · ") + '</div>' : '')
+        + (hcChips ? '    <div style="margin-top:2px;">' + hcChips + '</div>' : '')
+        + '  </div>'
+        + '</div>'
+        + (i < members.length - 1 ? '<div class="list-divider"></div>' : '');
+    }).join("");
+  }
+
+  // Rules list — rule name + id, destination / criteria, member pills with the
+  // selected member highlighted, and enabled state.
+  function renderSdwanRulesList(rules) {
+    return rules.map(function (r, i) {
+      var avail = Array.isArray(r.availableMembers) ? r.availableMembers : [];
+      var pills = avail.length
+        ? avail.map(function (m) {
+            var seld = m === r.selectedMember;
+            return '<span style="display:inline-block;margin:2px 4px 0 0;padding:1px 8px;border-radius:10px;font-size:12px;'
+              + (seld
+                  ? 'background:' + sdwanColor(m, avail) + ';color:#fff;font-weight:600'
+                  : 'background:var(--md-surface-cont-highest);color:var(--md-on-surface-variant)')
+              + '">' + escapeHtml(m) + (seld ? ' ✓' : '') + '</span>';
+          }).join("")
+        : '<span class="muted">—</span>';
+      var sub = [];
+      if (r.dst && r.dst.length) sub.push(escapeHtml(r.dst.join(", ")));
+      if (r.criteria) sub.push(escapeHtml(r.criteria));
+      var enabled = r.enabled == null
+        ? ''
+        : (r.enabled
+            ? '<span style="color:var(--md-success);">● Enabled</span>'
+            : '<span class="muted">○ Disabled</span>');
+      return ''
+        + '<div style="padding:8px 0;">'
+        + '  <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;">'
+        + '    <div style="font-weight:600;min-width:0;">' + escapeHtml(r.ruleName || "(rule)") + (r.ruleId != null ? ' <span class="muted" style="font-weight:400;font-size:12px;">#' + escapeHtml(String(r.ruleId)) + '</span>' : '') + '</div>'
+        + '    <div style="font-size:12px;white-space:nowrap;">' + enabled + '</div>'
+        + '  </div>'
+        + (sub.length ? '  <div class="supporting" style="margin-top:2px;">' + sub.join(" · ") + '</div>' : '')
+        + '  <div style="margin-top:4px;">' + pills + '</div>'
+        + '</div>'
+        + (i < rules.length - 1 ? '<div class="list-divider"></div>' : '');
+    }).join("");
+  }
+
+  // Load every member of the selected health-check in parallel and overlay
+  // them (one colored line per member) on the latency / jitter / loss charts.
+  function loadSdwanPerfSla(assetId, hcName, range) {
+    var latEl    = document.getElementById("sdwan-lat-chart");
+    var jitEl    = document.getElementById("sdwan-jit-chart");
+    var lossEl   = document.getElementById("sdwan-loss-chart");
+    var statsEl  = document.getElementById("sdwan-perfsla-stats");
+    var legendEl = document.getElementById("sdwan-perfsla-legend");
+    if (!latEl || !_sdwanSheetState || !hcName) return;
+    var members = _sdwanSheetState.linksByHc[hcName] || [];
+    var memberNames = members.map(function (m) { return m.link; });
+    var spinner = '<div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div>';
+    latEl.innerHTML = jitEl.innerHTML = lossEl.innerHTML = spinner;
+    if (statsEl) statsEl.textContent = "Loading…";
+    if (legendEl) legendEl.innerHTML = "";
+
+    Promise.all(members.map(function (m) {
+      return api.assets.perfSlaHistory(assetId, m.healthCheck, m.link, { range: range })
+        .then(function (data) { return { link: m.link, samples: (data && data.samples) || [] }; })
+        .catch(function () { return { link: m.link, samples: [] }; });
+    })).then(function (results) {
+      // Bail if the operator switched health-check/range or closed the sheet
+      // while this fetch was in flight.
+      if (!_sdwanSheetState || _sdwanSheetState.hcName !== hcName || _sdwanSheetState.range !== range) return;
+
+      function chartFor(host, key, unit, yMax) {
+        var series = results.map(function (r) {
+          return {
+            color: sdwanColor(r.link, memberNames),
+            values: r.samples
+              .filter(function (s) { return s[key] != null; })
+              .map(function (s) { return { ts: s.timestamp, v: s[key] }; }),
+          };
+        });
+        host.innerHTML = PolarisCharts.lineChart({
+          series: series,
+          height: 120,
+          yMin: 0,
+          yMax: yMax,
+          yUnit: unit,
+          ariaLabel: hcName + " " + key + " over " + range,
+        });
+      }
+      chartFor(latEl,  "latencyMs",  "ms", undefined);
+      chartFor(jitEl,  "jitterMs",   "ms", undefined);
+      chartFor(lossEl, "packetLoss", "%",  100);
+
+      // Legend — one colored chip per member.
+      if (legendEl) {
+        legendEl.innerHTML = memberNames.map(function (name) {
+          return '<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;">'
+            + '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + sdwanColor(name, memberNames) + ';"></span>'
+            + escapeHtml(name) + '</span>';
+        }).join("");
+      }
+
+      // Stats line — member count, cross-member averages, and the SLA
+      // thresholds (shared across the members of a health-check).
+      if (statsEl) {
+        var total = results.reduce(function (n, r) { return n + r.samples.length; }, 0);
+        if (!total) {
+          statsEl.textContent = "No samples in this window.";
+        } else {
+          function avg(key) {
+            var vals = [];
+            results.forEach(function (r) { r.samples.forEach(function (s) { if (typeof s[key] === "number") vals.push(s[key]); }); });
+            if (!vals.length) return null;
+            return vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+          }
+          function fmt(v, unit) { return v == null ? "—" : (Math.round(v * 100) / 100) + unit; }
+          var bits = [members.length + " member" + (members.length === 1 ? "" : "s")];
+          bits.push("avg lat " + fmt(avg("latencyMs"), "ms"));
+          bits.push("jitter " + fmt(avg("jitterMs"), "ms"));
+          bits.push("loss " + fmt(avg("packetLoss"), "%"));
+          var thr = members[0] || {};
+          var thrBits = [];
+          if (thr.latencyThresholdMs != null)  thrBits.push("lat ≤ " + thr.latencyThresholdMs + "ms");
+          if (thr.jitterThresholdMs != null)   thrBits.push("jitter ≤ " + thr.jitterThresholdMs + "ms");
+          if (thr.packetLossThreshold != null) thrBits.push("loss ≤ " + thr.packetLossThreshold + "%");
+          statsEl.innerHTML = escapeHtml(bits.join(" · ")) + (thrBits.length ? '<br><span style="opacity:.8;">SLA: ' + escapeHtml(thrBits.join(" · ")) + '</span>' : '');
+        }
+      }
+    }).catch(function (err) {
+      if (!_sdwanSheetState) return;
+      var msg = (err && err.message) ? err.message : "error";
+      if (latEl)  latEl.innerHTML  = '<div class="muted" style="font-size:13px;padding:8px 0;">Couldn’t load perf-SLA: ' + escapeHtml(msg) + '</div>';
+      if (jitEl)  jitEl.innerHTML  = '';
+      if (lossEl) lossEl.innerHTML = '';
+      if (statsEl) statsEl.textContent = "—";
+    });
   }
 
   // Discovery sources — which integrations independently reported this asset.
