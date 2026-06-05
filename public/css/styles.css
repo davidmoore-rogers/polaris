@@ -1185,6 +1185,24 @@ td.actions > *:last-child {
 
 /* ─── Column Sort + Filter (TableSF) ──────────────────────────────────────── */
 th.sf-th { vertical-align: top; white-space: normal; padding-bottom: 6px; }
+/* Resizable data tables truncate cell content with an ellipsis instead of
+   wrapping; widen the column (drag the handle) to reveal the rest. Scoped to
+   TableSF-managed tables so non-resizable tables (capacity advisor, etc.) keep
+   wrapping. .actions (button groups) and the tiny cb/fav columns are exempt.
+   Truncation only renders once the table is in table-layout:fixed, which
+   setupColumnLayout seeds on first visible render. */
+table[data-sf-table-id] > tbody > tr > td:not(.actions):not(.cb-col):not(.fav-col) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Let the header label shrink + ellipsize inside the flex header on narrow
+   columns (min-width:0 overrides the default flex min-width:auto). */
+table[data-sf-table-id] .sf-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .sf-header {
   display: flex;
   align-items: center;
@@ -1472,8 +1490,10 @@ table thead:hover .sf-col-gear-wrap,
   color: var(--color-text-secondary);
   flex: 1;
 }
-th.cb-col, td.cb-col { width: 36px; text-align: center; padding: 0 4px; }
-th.fav-col, td.fav-col { width: 32px; text-align: center; padding: 0 2px; }
+/* Fixed, non-resizable utility columns. Pinned to a 20px floor (the resize
+   logic in table-sf.js skips them entirely — no drag handle, never absorbed). */
+th.cb-col, td.cb-col { width: 20px; min-width: 20px; text-align: center; padding: 0 2px; }
+th.fav-col, td.fav-col { width: 20px; min-width: 20px; text-align: center; padding: 0 1px; }
 .fav-star {
   background: none;
   border: 0;

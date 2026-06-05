@@ -643,8 +643,15 @@ function setupColumnLayout(tableEl, options) {
   });
 
   var required = {};
+  // Fixed utility columns (checkbox / favorite star): never hidden, never
+  // resized — no drag handle of their own and skipped when a neighboring drag
+  // looks for the column to absorb its delta. Pinned to FIXED_COL_W below.
+  var noResize = {};
   ths.forEach(function (th, i) {
-    if (th.classList.contains("cb-col") || th.classList.contains("fav-col")) required[colIds[i]] = true;
+    if (th.classList.contains("cb-col") || th.classList.contains("fav-col")) {
+      required[colIds[i]] = true;
+      noResize[colIds[i]] = true;
+    }
     if (th.getAttribute("data-col-required") === "true") required[colIds[i]] = true;
   });
 
@@ -673,8 +680,14 @@ function setupColumnLayout(tableEl, options) {
     document.head.appendChild(styleEl);
   }
 
+  var FIXED_COL_W = 20;
   var widths = {};
   var hidden = {};
+
+  // Pin fixed utility columns to FIXED_COL_W up front so every applyWidths()
+  // call honors them — otherwise, in table-layout:fixed, a column with no
+  // width entry would absorb leftover space and balloon past its 20px floor.
+  colIds.forEach(function (id) { if (noResize[id]) widths[id] = FIXED_COL_W; });
 
   // Seed default-hidden columns. A <th data-col-default-hidden="true"> starts
   // hidden until the user enables it. Saved prefs override this via setPrefs:
@@ -727,6 +740,7 @@ function setupColumnLayout(tableEl, options) {
   }
 
   ths.forEach(function (th, i) {
+    if (noResize[colIds[i]]) return;               // cb/fav columns are not resizable
     if (th.querySelector(".sf-resize-handle")) return;
     if (!th.style.position) th.style.position = "relative";
     var handle = document.createElement("span");
@@ -747,7 +761,7 @@ function setupColumnLayout(tableEl, options) {
       // neighbor — fall back to growing this column alone.
       var nextIdx = -1;
       for (var j = i + 1; j < colIds.length; j++) {
-        if (!hidden[colIds[j]]) { nextIdx = j; break; }
+        if (!hidden[colIds[j]] && !noResize[colIds[j]]) { nextIdx = j; break; }
       }
       var nextId = nextIdx >= 0 ? colIds[nextIdx] : null;
       var startNextW = nextId
@@ -778,6 +792,31 @@ function setupColumnLayout(tableEl, options) {
       document.addEventListener("mouseup", onUp);
     });
   });
+
+  // Seed table-layout:fixed so cells can truncate (an ellipsis only renders
+  // with a bounded column width). Measure each visible column's natural render
+  // width and lock it in; the cb/fav utility columns are pinned to FIXED_COL_W.
+  // Bail if any visible column measures 0 — that means the table was rendered
+  // off-screen (inactive SPA section, getBoundingClientRect == 0); leaving it
+  // in auto-layout avoids collapsing columns, and a later visible re-render (or
+  // setPrefs restoring saved widths) seeds it then. Saved prefs still override
+  // per-column afterward via setPrefs. cb/fav are already pinned to FIXED_COL_W.
+  (function seedFixedLayout() {
+    var measured = {};
+    var visibleIds = colIds.filter(function (id) { return !hidden[id]; });
+    var ok = visibleIds.every(function (id) {
+      if (noResize[id]) return true; // already pinned to FIXED_COL_W
+      var idx = colIds.indexOf(id);
+      var w = ths[idx].getBoundingClientRect().width;
+      if (w > 0) { measured[id] = Math.round(w); return true; }
+      return false;
+    });
+    if (!ok) return;
+    visibleIds.forEach(function (id) {
+      if (widths[id] == null) widths[id] = measured[id];
+    });
+    applyWidths();
+  })();
 
   // Inline gear icon at the right edge of the header row. Appears on
   // <thead> hover (CSS) and stays visible while the chooser is open.
@@ -921,6 +960,7 @@ function setupColumnLayout(tableEl, options) {
       if (!p) return;
       if (p.widths && typeof p.widths === "object") {
         Object.keys(p.widths).forEach(function (id) {
+          if (noResize[id]) return; // fixed columns stay pinned; ignore stale saved widths
           var v = p.widths[id];
           if (typeof v === "number" && v > 0) widths[id] = v;
         });
