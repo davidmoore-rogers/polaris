@@ -876,10 +876,6 @@ function buildPgRecommended(): Record<string, { min: number; unit: string; displ
     work_mem:            { min: workMem,        unit: "bytes", display: fmt(workMem) },
     effective_cache_size:{ min: effectiveCache, unit: "bytes", display: fmt(effectiveCache) },
     random_page_cost:    { min: -1,             unit: "cost",  display: "1.1" },
-    // Boolean GUC (RELOAD, no restart). Required so the capacity service can
-    // measure real disk-read wait (blk_read_time) for the db_io_pressure
-    // reason; negligible overhead on vDSO clocks (verify with pg_test_timing).
-    track_io_timing:     { min: -1,             unit: "bool",  display: "on" },
   };
 }
 
@@ -932,7 +928,7 @@ async function computePgTuning(): Promise<PgTuningResult | null> {
   if (!triggered.length) return null;
 
   const pgSettings = await prisma.$queryRawUnsafe<{ name: string; setting: string; unit: string | null }[]>(
-    `SELECT name, setting, unit FROM pg_settings WHERE name IN ('shared_buffers', 'work_mem', 'effective_cache_size', 'random_page_cost', 'track_io_timing', 'config_file')`
+    `SELECT name, setting, unit FROM pg_settings WHERE name IN ('shared_buffers', 'work_mem', 'effective_cache_size', 'random_page_cost', 'config_file')`
   );
   const pgConfigFile = pgSettings.find((s) => s.name === "config_file")?.setting || null;
 
@@ -947,12 +943,6 @@ async function computePgTuning(): Promise<PgTuningResult | null> {
       const val = parseFloat(s.setting);
       ok = val <= 1.1;
       return { name: s.name, current: String(val), recommended: rec.display, ok };
-    }
-    if (s.name === "track_io_timing") {
-      // Boolean GUC — "on" when enabled. Needed so db_io_pressure can measure
-      // real disk-read wait; "off" contributes to the pg_tuning_needed reason.
-      ok = s.setting === "on";
-      return { name: s.name, current: s.setting, recommended: rec.display, ok };
     }
     if (s.unit === "8kB") {
       currentBytes = parseInt(s.setting, 10) * 8192;

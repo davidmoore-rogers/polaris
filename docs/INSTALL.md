@@ -868,7 +868,9 @@ How it works in practice:
 
 1. Tick the rows you want to apply. Each row shows current vs recommended; rows already at-or-above recommendation render with an OK pill and a disabled checkbox.
 2. Click **Stage selected**. Polaris writes the chosen env-driven values to `.env` and (for the queue-mode lever) updates `Setting.monitor.queueMode`. **Restart Polaris** to pick up the changes.
-3. Advisory-only rows (PostgreSQL `max_connections`, `shared_buffers`, `effective_cache_size`, `work_mem`, `random_page_cost`, `track_io_timing`) are display-only because Polaris can't edit `postgresql.conf`. Edit it and restart PostgreSQL to apply — except `track_io_timing = on`, which only needs a **reload** (`SELECT pg_reload_conf();` or `systemctl reload postgresql`). Enabling `track_io_timing` is what lets Polaris measure real disk-read wait for the `db_io_pressure` capacity reason; overhead is negligible on modern hardware (verify with `pg_test_timing`), and until it's on, Polaris shows a `track_io_timing_off` watch when the database is larger than host RAM.
+3. Advisory-only rows (PostgreSQL `max_connections`, `shared_buffers`, `effective_cache_size`, `work_mem`, `random_page_cost`) are display-only because Polaris can't edit `postgresql.conf`. Edit it and restart PostgreSQL to apply.
+
+Separately, the **Database card** shows a `track_io_timing_off` watch when the database is larger than host RAM and PostgreSQL's `track_io_timing` is off. Enabling `track_io_timing = on` (a **reload** — `SELECT pg_reload_conf();` or `systemctl reload postgresql`, no restart) is what lets Polaris measure real disk-read wait and decide whether more RAM would actually help (the `db_io_pressure` reason); overhead is negligible on modern hardware (verify with `pg_test_timing`).
 
 The env vars surfaced by the advisor have safe defaults out of the box, so a fresh install starts at sensible values:
 
