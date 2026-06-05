@@ -197,6 +197,7 @@ Per-pattern sections:
 - For list pages using `setupColumnLayout` directly: persist via the page's own `polaris-prefs-<scope>-<username>` blob (call `layout.getPrefs()` in `_save…Prefs` and `layout.setPrefs(p.layout)` in `_restore…Prefs`). The standalone "Columns ▾" button is gone — the gear replaces it.
 - For dynamic-rendered tables: use `applyTableLayout(table, typeKey)` instead. Persistence is by-table-type, NOT by-page or by-asset — operators want one set of widths for "Interfaces" everywhere, not per asset.
 - Last column should remain present at all times in the header DOM even when hidden — the gear auto-relocates left to the next visible `<th>` via `positionGear()`.
+- Drag-to-resize is **pair-adjacent** (spreadsheet-style): dragging a handle grows the column on its left by the delta and shrinks the next *visible* column on its right by the same amount, so the table's total width stays constant and no other column shifts. Both columns floor at 40px. The rightmost handle has no right neighbor and falls back to growing its own column alone.
 
 **When adding a new instance:**
 - Long-lived static table on a list page → call `setupColumnLayout(tableEl, { onChange: _saveYourPagePrefs })` once after the `<thead>` is in the DOM; thread its `getPrefs/setPrefs` into the existing per-page prefs JSON.

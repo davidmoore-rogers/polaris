@@ -741,9 +741,30 @@ function setupColumnLayout(tableEl, options) {
       var id = colIds[i];
       var startX = e.clientX;
       var startW = widths[id] || ths[i].getBoundingClientRect().width;
+      // Pair-resize: the column to the right of the handle absorbs the delta so
+      // the table's total width stays constant and no other column moves. Find
+      // the next VISIBLE column (skip hidden ones). The rightmost handle has no
+      // neighbor — fall back to growing this column alone.
+      var nextIdx = -1;
+      for (var j = i + 1; j < colIds.length; j++) {
+        if (!hidden[colIds[j]]) { nextIdx = j; break; }
+      }
+      var nextId = nextIdx >= 0 ? colIds[nextIdx] : null;
+      var startNextW = nextId
+        ? (widths[nextId] || ths[nextIdx].getBoundingClientRect().width)
+        : 0;
+      var MIN_W = 40;
       function onMove(ev) {
-        var w = Math.max(40, Math.round(startW + (ev.clientX - startX)));
-        widths[id] = w;
+        var dx = ev.clientX - startX;
+        if (nextId) {
+          // Clamp so neither the dragged column nor its neighbor drops below MIN_W.
+          if (dx > startNextW - MIN_W) dx = startNextW - MIN_W;
+          if (dx < -(startW - MIN_W)) dx = -(startW - MIN_W);
+          widths[id] = Math.round(startW + dx);
+          widths[nextId] = Math.round(startNextW - dx);
+        } else {
+          widths[id] = Math.max(MIN_W, Math.round(startW + dx));
+        }
         applyWidths();
       }
       function onUp() {
