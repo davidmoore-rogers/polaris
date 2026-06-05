@@ -894,6 +894,7 @@ AssetPerfSlaSample              -- SD-WAN Performance SLA health-check snapshot,
   timestamp    DateTime        @default(now())
   healthCheck  String
   link         String          -- WAN member interface (e.g. "wan1", "Overlay-7")
+  zone         String?         -- SD-WAN zone (CMDB members[].zone, e.g. "virtual-wan-link"/"overlay"); shown as "interface (zone)" in the Members table
   state        String          -- "up" | "down"
   latencyMs    Float?
   jitterMs     Float?

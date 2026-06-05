@@ -1061,6 +1061,9 @@ model AssetPerfSlaSample {
   // interface it probed over (e.g. "wan1", "port2").
   healthCheck String
   link        String
+  // SD-WAN zone the member belongs to (from `config system sdwan` members[].zone,
+  // e.g. "virtual-wan-link" / "overlay"). Null when the CMDB lookup is unavailable.
+  zone        String?
   // "up" = link alive / SLA member reachable; "down" otherwise.
   state       String
   // Instantaneous gauges from the health-check. Null when the member reported

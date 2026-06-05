@@ -136,6 +136,7 @@ export interface PerfSlaSampleRow {
   cadence: SampleCadence;
   healthCheck: string;
   link: string;
+  zone: string | null;
   state: string;
   latencyMs: number | null;
   jitterMs: number | null;

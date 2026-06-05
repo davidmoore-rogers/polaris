@@ -866,6 +866,7 @@ export interface SdwanMemberHealthCheck {
 }
 export interface SdwanMemberRow {
   link:         string;       // WAN member interface name
+  zone:         string | null; // SD-WAN zone the member belongs to
   state:        string;       // aggregate latest: "up" iff up in every health-check it's in
   ip:           string | null;
   linkSpeedBps: number | null;
@@ -888,11 +889,11 @@ export interface SdwanMemberRow {
 export async function readSdwanMembers(assetId: string): Promise<{ members: SdwanMemberRow[] }> {
   // A: latest sample per (member, health-check).
   const latest = await prisma.$queryRawUnsafe<Array<{
-    link: string; healthCheck: string; state: string;
+    link: string; healthCheck: string; zone: string | null; state: string;
     latencyMs: number | null; jitterMs: number | null; packetLoss: number | null;
   }>>(
     `SELECT DISTINCT ON ("link", "healthCheck")
-            "link", "healthCheck", "state", "latencyMs", "jitterMs", "packetLoss"
+            "link", "healthCheck", "zone", "state", "latencyMs", "jitterMs", "packetLoss"
      FROM "asset_perf_sla_samples" WHERE "assetId" = $1
      ORDER BY "link", "healthCheck", "timestamp" DESC`,
     assetId,
@@ -928,9 +929,11 @@ export async function readSdwanMembers(assetId: string): Promise<{ members: Sdwa
   }
 
   const hcByLink = new Map<string, SdwanMemberHealthCheck[]>();
+  const zoneByLink = new Map<string, string>();
   for (const r of latest) {
     if (!hcByLink.has(r.link)) hcByLink.set(r.link, []);
     hcByLink.get(r.link)!.push({ healthCheck: r.healthCheck, state: r.state, latencyMs: r.latencyMs, jitterMs: r.jitterMs, packetLoss: r.packetLoss });
+    if (r.zone && !zoneByLink.has(r.link)) zoneByLink.set(r.link, r.zone);
   }
 
   const members: SdwanMemberRow[] = links.map((link) => {
@@ -939,6 +942,7 @@ export async function readSdwanMembers(assetId: string): Promise<{ members: Sdwa
     const recent = (recentByLink.get(link) ?? []).slice(-48);
     return {
       link,
+      zone:         zoneByLink.get(link) ?? null,
       state:        hcs.length && hcs.every((h) => h.state === "up") ? "up" : "down",
       ip:           iface?.ipAddress ?? null,
       linkSpeedBps: iface?.speedBps != null ? Number(iface.speedBps) : null,

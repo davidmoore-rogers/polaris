@@ -8183,7 +8183,8 @@ function _sdwanMembersTableHTML(members) {
       ? (m.txBytes != null ? _fmtBytes(m.txBytes) : "—") + ' / ' + (m.rxBytes != null ? _fmtBytes(m.rxBytes) : "—")
       : '<span style="color:var(--color-text-tertiary)">—</span>';
     return '<tr>' +
-        '<td data-col-id="member" data-col-required="true">' + statusDot(m.state === "up") + escapeHtml(m.link) + '</td>' +
+        '<td data-col-id="member" data-col-required="true">' + statusDot(m.state === "up") + escapeHtml(m.link) +
+          (m.zone ? ' <span style="color:var(--color-text-tertiary)">(' + escapeHtml(m.zone) + ')</span>' : '') + '</td>' +
         '<td data-col-id="ip">' + (m.ip ? escapeHtml(m.ip) : '<span style="color:var(--color-text-tertiary)">—</span>') + '</td>' +
         '<td data-col-id="hcstatus">' + _sdwanStatusStripHTML(m.recent) + '</td>' +
         '<td data-col-id="checks">' + hcChips + '</td>' +

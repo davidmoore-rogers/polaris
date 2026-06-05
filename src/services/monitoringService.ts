@@ -3001,6 +3001,8 @@ export interface IpsecTunnelSample {
 export interface PerfSlaSample {
   healthCheck: string;
   link:        string;
+  // SD-WAN zone the member belongs to (CMDB members[].zone). Null when unknown.
+  zone:        string | null;
   state:       "up" | "down";
   latencyMs:   number | null;
   jitterMs:    number | null;
@@ -4346,9 +4348,32 @@ async function collectSdwanFortinet(
       .catch(() => null as any),
   ]);
   const thresholds = parseSdwanSlaThresholds(sdwanRes);
-  const { perfSla, memberUp } = parsePerfSlaHealthCheck(hcRes, thresholds);
+  const zones = parseSdwanMemberZones(sdwanRes);
+  const { perfSla, memberUp } = parsePerfSlaHealthCheck(hcRes, thresholds, zones);
   const sdwanRules = parseSdwanRules(sdwanRes, memberUp);
   return { perfSla, sdwanRules };
+}
+
+/**
+ * Build a member-interface → SD-WAN zone map from the CMDB system/sdwan
+ * `members[]` (each carries `interface` + `zone`, e.g. "virtual-wan-link" /
+ * "overlay"). Used to label Performance-SLA members by zone. Exported for unit
+ * testing; pure.
+ */
+export function parseSdwanMemberZones(sdwanRes: unknown): Map<string, string> {
+  const out = new Map<string, string>();
+  const root = (sdwanRes && typeof sdwanRes === "object" && (sdwanRes as any).results && typeof (sdwanRes as any).results === "object")
+    ? (sdwanRes as any).results
+    : sdwanRes;
+  if (!root || typeof root !== "object") return out;
+  const members = Array.isArray((root as any).members) ? (root as any).members : [];
+  for (const m of members) {
+    if (!m || typeof m !== "object") continue;
+    const iface = typeof (m as any).interface === "string" ? (m as any).interface.trim() : "";
+    const zone  = typeof (m as any).zone === "string" ? (m as any).zone.trim() : "";
+    if (iface && zone && !out.has(iface)) out.set(iface, zone);
+  }
+  return out;
 }
 
 export interface SlaThreshold { latencyMs: number | null; jitterMs: number | null; packetLoss: number | null; }
@@ -4400,6 +4425,7 @@ export function parseSdwanSlaThresholds(sdwanRes: unknown): Map<string, SlaThres
 export function parsePerfSlaHealthCheck(
   hcRes: unknown,
   thresholds?: Map<string, SlaThreshold>,
+  zones?: Map<string, string>,
 ): { perfSla: PerfSlaSample[]; memberUp: Map<string, boolean> } {
   const perfSla: PerfSlaSample[] = [];
   const memberUp = new Map<string, boolean>();
@@ -4417,7 +4443,7 @@ export function parsePerfSlaHealthCheck(
         const jitterMs   = pickFiniteNumber((m as any).jitter);
         const packetLoss = pickFiniteNumber((m as any).packet_loss ?? (m as any).packetloss);
         perfSla.push({
-          healthCheck: hcName, link, state, latencyMs, jitterMs, packetLoss,
+          healthCheck: hcName, link, zone: zones?.get(link) ?? null, state, latencyMs, jitterMs, packetLoss,
           latencyThresholdMs:  thr?.latencyMs ?? null,
           jitterThresholdMs:   thr?.jitterMs ?? null,
           packetLossThreshold: thr?.packetLoss ?? null,
@@ -6308,6 +6334,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
           cadence:     "fast" as const,
           healthCheck: p.healthCheck,
           link:        p.link,
+          zone:        p.zone,
           state:       p.state,
           latencyMs:   p.latencyMs,
           jitterMs:    p.jitterMs,

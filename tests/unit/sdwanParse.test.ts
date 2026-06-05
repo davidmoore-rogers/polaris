@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { parsePerfSlaHealthCheck, parseSdwanRules, parseSdwanSlaThresholds } from "../../src/services/monitoringService.js";
+import { parsePerfSlaHealthCheck, parseSdwanRules, parseSdwanSlaThresholds, parseSdwanMemberZones } from "../../src/services/monitoringService.js";
 
 describe("parsePerfSlaHealthCheck", () => {
   it("flattens results.<hc>.<member> into one sample per (hc, link)", () => {
@@ -81,6 +81,32 @@ describe("parseSdwanSlaThresholds", () => {
   it("returns an empty map for null / no health-check", () => {
     expect(parseSdwanSlaThresholds(null).size).toBe(0);
     expect(parseSdwanSlaThresholds({ results: {} }).size).toBe(0);
+  });
+});
+
+describe("parseSdwanMemberZones", () => {
+  it("maps each member interface to its SD-WAN zone", () => {
+    const sdwan = { results: { members: [
+      { "seq-num": 1, interface: "wan1", zone: "virtual-wan-link" },
+      { "seq-num": 2, interface: "Overlay-7", zone: "overlay" },
+      { "seq-num": 3, interface: "x1" }, // no zone → skipped
+    ] } };
+    const z = parseSdwanMemberZones(sdwan);
+    expect(z.get("wan1")).toBe("virtual-wan-link");
+    expect(z.get("Overlay-7")).toBe("overlay");
+    expect(z.has("x1")).toBe(false);
+  });
+
+  it("stamps the zone onto each perfSla sample for that member", () => {
+    const res = { results: { Metrocenter: { "Overlay-7": { status: "up", latency: 40 } } } };
+    const zones = new Map([["Overlay-7", "overlay"]]);
+    const { perfSla } = parsePerfSlaHealthCheck(res, undefined, zones);
+    expect(perfSla[0]).toMatchObject({ link: "Overlay-7", zone: "overlay" });
+  });
+
+  it("returns an empty map for null / no members", () => {
+    expect(parseSdwanMemberZones(null).size).toBe(0);
+    expect(parseSdwanMemberZones({ results: {} }).size).toBe(0);
   });
 });
 
