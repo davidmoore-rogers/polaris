@@ -78,6 +78,47 @@ describe("parseSdwanSlaThresholds", () => {
     expect(m.get("Microsoft")).toEqual({ latencyMs: 250, jitterMs: null, packetLoss: 3 });
   });
 
+  it("drops thresholds for metrics not in the SLA link-cost-factor (disabled SLA)", () => {
+    // jitter-threshold is FortiOS's default 5 but jitter is NOT in
+    // link-cost-factor → the SLA is disabled and must not surface a line.
+    const sdwan = {
+      results: {
+        "health-check": [
+          { name: "Metrocenter", sla: [{
+            "link-cost-factor": "latency packet-loss",
+            "latency-threshold": 250, "jitter-threshold": 5, "packetloss-threshold": 2,
+          }] },
+        ],
+      },
+    };
+    expect(parseSdwanSlaThresholds(sdwan).get("Metrocenter")).toEqual({ latencyMs: 250, jitterMs: null, packetLoss: 2 });
+  });
+
+  it("accepts link-cost-factor as an array and gates per metric", () => {
+    const sdwan = {
+      results: {
+        "health-check": [
+          { name: "Microsoft", sla: [{
+            "link-cost-factor": ["jitter"],
+            "latency-threshold": 200, "jitter-threshold": 30, "packetloss-threshold": 5,
+          }] },
+        ],
+      },
+    };
+    expect(parseSdwanSlaThresholds(sdwan).get("Microsoft")).toEqual({ latencyMs: null, jitterMs: 30, packetLoss: null });
+  });
+
+  it("falls back to all metrics when link-cost-factor is absent (older FortiOS)", () => {
+    const sdwan = {
+      results: {
+        "health-check": [
+          { name: "Legacy", sla: [{ "latency-threshold": 200, "jitter-threshold": 50, "packetloss-threshold": 0 }] },
+        ],
+      },
+    };
+    expect(parseSdwanSlaThresholds(sdwan).get("Legacy")).toEqual({ latencyMs: 200, jitterMs: 50, packetLoss: null });
+  });
+
   it("returns an empty map for null / no health-check", () => {
     expect(parseSdwanSlaThresholds(null).size).toBe(0);
     expect(parseSdwanSlaThresholds({ results: {} }).size).toBe(0);

@@ -4383,7 +4383,17 @@ export interface SlaThreshold { latencyMs: number | null; jitterMs: number | nul
  * `health-check[].sla` targets. FortiOS allows multiple SLA rows per
  * health-check; we take the max configured threshold per metric (a member
  * passes the strictest target). A 0 / absent threshold means "unset" for that
- * metric → null (no chart line). Exported for unit testing; pure.
+ * metric → null (no chart line).
+ *
+ * Each SLA row carries thresholds for ALL three metrics regardless of which are
+ * actually enforced — FortiOS keeps a default `jitter-threshold` of 5ms even
+ * when jitter isn't part of the SLA. The `link-cost-factor` field on the SLA
+ * row names the metrics the SLA actually measures (`latency` / `jitter` /
+ * `packet-loss`); a threshold for a metric NOT listed there is a disabled SLA
+ * and must not surface as a chart line. We only take a metric's threshold when
+ * its link-cost-factor token is present. Older FortiOS that omits the field
+ * (null/empty) falls back to "all metrics enabled" so existing installs are
+ * unaffected. Exported for unit testing; pure.
  */
 export function parseSdwanSlaThresholds(sdwanRes: unknown): Map<string, SlaThreshold> {
   const out = new Map<string, SlaThreshold>();
@@ -4405,13 +4415,31 @@ export function parseSdwanSlaThresholds(sdwanRes: unknown): Map<string, SlaThres
     };
     for (const sla of slas) {
       if (!sla || typeof sla !== "object") continue;
-      lat  = take(lat,  (sla as any)["latency-threshold"]);
-      jit  = take(jit,  (sla as any)["jitter-threshold"]);
-      loss = take(loss, (sla as any)["packetloss-threshold"]);
+      const factors = parseSlaLinkCostFactors((sla as any)["link-cost-factor"]);
+      // factors == null → field absent/empty → treat all metrics as enabled.
+      const on = (...names: string[]) => factors == null || names.some((n) => factors.has(n));
+      if (on("latency"))                    lat  = take(lat,  (sla as any)["latency-threshold"]);
+      if (on("jitter"))                     jit  = take(jit,  (sla as any)["jitter-threshold"]);
+      if (on("packet-loss", "packetloss"))  loss = take(loss, (sla as any)["packetloss-threshold"]);
     }
     out.set(name, { latencyMs: lat, jitterMs: jit, packetLoss: loss });
   }
   return out;
+}
+
+/** Parse a FortiOS SLA-target `link-cost-factor` field into the set of metric
+ *  tokens the SLA enforces. May arrive as a space/comma-separated string
+ *  ("latency packet-loss") or an array of tokens. Returns null when the field
+ *  is absent/empty so callers can fall back to "all metrics enabled" for older
+ *  FortiOS that omits it. */
+function parseSlaLinkCostFactors(raw: unknown): Set<string> | null {
+  const tokens: string[] = [];
+  if (Array.isArray(raw)) {
+    for (const t of raw) if (typeof t === "string" && t.trim()) tokens.push(t.trim().toLowerCase());
+  } else if (typeof raw === "string" && raw.trim()) {
+    for (const t of raw.trim().toLowerCase().split(/[\s,]+/)) if (t) tokens.push(t);
+  }
+  return tokens.length ? new Set(tokens) : null;
 }
 
 /**
