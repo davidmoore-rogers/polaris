@@ -2268,7 +2268,7 @@ Listed alphabetically.
 **Used by:** `src/api/routes/search.ts — GET /api/v1/search endpoint`. Total 1 call site.
 
 **Invariants:**
-- MAC normalization handles any whitespace/colon/dash separator; result is uppercase colon form.
+- MAC normalization (`normalizeMac`) handles any whitespace/colon/dash/dot separator (so `00:00:00:00:00:00`, `000000000000`, `00-00-00-00-00-00`, and Cisco `0000.0000.0000` all resolve); result is uppercase colon form. The DB match against a normalized MAC is **case-insensitive** (`{ equals, mode: "insensitive" }` on both `Asset.macAddress` and `AssetMacAddress.mac`) because stored MAC case is inconsistent — monitoring/FMG-CMDB paths uppercase, FMG endpoint-client discovery stores the device value verbatim (often lowercase).
 - CIDR vs plain IP vs MAC classification is hierarchical: CIDR requires `/` with `/\d{1,2}$` pattern; IP uses `isValidIpAddress()` fallback; MAC is compact 12-hex-digit match with any separator.
 - PER_GROUP_LIMIT (8) caps all six hit groups (blocks/subnets/reservations/assets/ips/sites) in the default unscoped path; order is stable (name/hostname/cidr asc).
 - **Scope prefixes** parsed by `parseSearchScope` short-circuit `searchAll`: `block:` / `b:` → only `blocks`; `network:` / `n:` → only `subnets`; `asset:` / `a:` → only `assets` (with origin-FortiGate decoration intact); `reservation:` / `r:` → only `reservations`; `map:` / `m:` → only `sites` (pinned firewalls). Other groups return empty arrays in the scoped path. Cap is lifted from 8 to `SCOPED_LIMIT` (200). Min query length drops to 1 char after the prefix so `block:f` works; unscoped queries still require 2 chars. `results.query` echoes the original raw input (prefix included) so the desktop dropdown's stale-response check holds. Scope prefixes are case-insensitive and tolerate whitespace after the colon. They DO NOT collide with the `entra:` / `ad:` / `fgt:` / `intune:` / `fortiswitch:` / `fortiap:` source-kind prefix consumed inside `stripSourceKindPrefix` — none of those start with the scope letters.
@@ -2286,7 +2286,7 @@ Listed alphabetically.
 - Check PER_GROUP_LIMIT doesn't regress for the unscoped path; dropdown expects exactly 8 per group on bare typeahead.
 - Adding a new scope prefix: extend `parseSearchScope`'s regex (long form + short form, both case-insensitive), the `SearchScope` union, the scope-branch dispatcher in `searchAll`, AND the matching hint chips on desktop (`_showSearchShortcutHints` in `public/js/app.js`) + mobile (`renderSearchEmpty` in `public/js/mobile/tabs.js`). The chips' wiring assumes a `<prefix>:` shape — keep that contract. Both renderers also gate their virtual-Device-Map injection on a scope-prefix regex (`_renderSearchDropdown` in `public/js/app.js`, `renderSearchResults` in `public/js/mobile/tabs.js`) — when scope is non-map the synthesized site rows from asset hits are suppressed so a scoped `a:` / `r:` / `n:` / `b:` query doesn't bleed into the Device Map section. Add any new non-map prefix to both regexes.
 - Adjusting `SCOPED_LIMIT` — current 200 is "bounded but generous"; the asset path runs five parallel queries each capped at `limit`, so going much higher (>500) is when fan-out cost starts mattering.
-- Validate MAC normalization handles all common formats (colon, dash, no separator).
+- Validate MAC normalization handles all common formats (colon, dash, dot, no separator) and that the stored-value match stays case-insensitive (`tests/unit/normalizeMac.test.ts`).
 
 ---
 

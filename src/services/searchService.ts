@@ -330,7 +330,12 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any,
     { department: { contains: like, mode: "insensitive" as const } },
   ];
   if (mac) {
-    or.push({ macAddress: mac });
+    // Stored MAC case is inconsistent — some discovery paths uppercase
+    // (monitoringService, FMG CMDB), others store the device-reported value
+    // as-is (FMG endpoint clients, often lowercase). Match case-insensitively
+    // so all four typed forms (colon / dash / dot / bare) resolve regardless
+    // of stored case.
+    or.push({ macAddress: { equals: mac, mode: "insensitive" as const } });
   } else {
     or.push({ macAddress: { contains: like, mode: "insensitive" as const } });
   }
@@ -365,7 +370,9 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any,
     // would otherwise be invisible to search.
     prisma.assetMacAddress.findMany({
       where: {
-        mac: mac ?? { contains: like, mode: "insensitive" as const },
+        mac: mac
+          ? { equals: mac, mode: "insensitive" as const }
+          : { contains: like, mode: "insensitive" as const },
         asset: baseFilter,
       },
       include: { asset: true },
