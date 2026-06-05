@@ -37,7 +37,6 @@
     "express-rate-limit": "^8.3.2",
     "express-session": "^1.19.0",
     "helmet": "^8.1.0",
-    "ip-cidr": "^3.1.0",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.7",
     "ldapts": "^8.1.7",
@@ -85,5 +84,8 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "overrides": {
+    "@hono/node-server": "^1.19.14"
   }
 }

@@ -4,7 +4,6 @@
  * All IP math lives here. Never do string manipulation on IPs elsewhere.
  */
 
-import IPCIDR from "ip-cidr";
 import { Netmask } from "netmask";
 
 export type IpVersion = "v4" | "v6";
