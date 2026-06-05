@@ -267,14 +267,32 @@ func interfacesLoop(ctx context.Context, cfg *config.Config, client *transport.C
 	}
 }
 
+// collectionTimeout is the maximum time we allow an OS-level collector
+// (StorageOnce, InterfacesOnce) to run before abandoning it. These
+// collectors call statfs()/ioctl() syscalls that can block indefinitely
+// on a hung filesystem or stalled kernel subsystem — without this guard
+// the loop goroutine freezes and stops sending all subsequent samples.
+// The spawned sub-goroutine leaks on timeout but will eventually unblock
+// when the kernel gives up; the loop itself continues to the next tick.
+const collectionTimeout = 30 * time.Second
+
 func pushInterfacesOne(client *transport.Client) {
-	samples := collectors.InterfacesOnce()
-	if len(samples) == 0 {
+	type res struct{ s []*transport.InterfaceSample }
+	ch := make(chan res, 1)
+	go func() { ch <- res{collectors.InterfacesOnce()} }()
+	var r res
+	select {
+	case r = <-ch:
+	case <-time.After(collectionTimeout):
+		log.Printf("push interfaces samples: collector timed out after %.0fs", collectionTimeout.Seconds())
+		return
+	}
+	if len(r.s) == 0 {
 		return
 	}
 	_, err := client.PushSamples(&transport.SamplesBody{
 		Stream:  "interfaces",
-		Samples: samples,
+		Samples: r.s,
 	})
 	if err != nil {
 		log.Printf("push interfaces samples: %v", err)
@@ -304,13 +322,22 @@ func storageLoop(ctx context.Context, cfg *config.Config, client *transport.Clie
 }
 
 func pushStorageOne(client *transport.Client) {
-	samples := collectors.StorageOnce()
-	if len(samples) == 0 {
+	type res struct{ s []*transport.StorageSample }
+	ch := make(chan res, 1)
+	go func() { ch <- res{collectors.StorageOnce()} }()
+	var r res
+	select {
+	case r = <-ch:
+	case <-time.After(collectionTimeout):
+		log.Printf("push storage samples: collector timed out after %.0fs", collectionTimeout.Seconds())
+		return
+	}
+	if len(r.s) == 0 {
 		return
 	}
 	_, err := client.PushSamples(&transport.SamplesBody{
 		Stream:  "storage",
-		Samples: samples,
+		Samples: r.s,
 	})
 	if err != nil {
 		log.Printf("push storage samples: %v", err)
