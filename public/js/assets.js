@@ -2775,12 +2775,16 @@ async function openViewModal(id) {
       api.assets.agent(a.id).catch(function (err) { console.warn("Failed to load managed agent", err); return null; }),
       api.assets.getSightings(a.id).catch(function (err) { console.warn("Failed to load asset sightings", err); return []; }),
       api.assets.getIpHistory(a.id).catch(function (err) { console.warn("Failed to load asset IP history", err); return []; }),
+      a.manufacturer
+        ? api.assets.customWidgets(a.id).catch(function (err) { console.warn("Failed to load custom widgets", err); return null; })
+        : Promise.resolve(null),
     ]);
     var sources         = auxResults[0] || [];
     var dependencies    = auxResults[1];
     var managedAgent    = auxResults[2];
     var sightings       = Array.isArray(auxResults[3]) ? auxResults[3] : (auxResults[3] && auxResults[3].sightings) || [];
     var ipHistory       = auxResults[4] || [];
+    var customWidgetPayload = auxResults[5];
     agentSubpanelHTML   = assetAgentSubpanelHTML(a, managedAgent);
     // Stations tab — visible on FortiAPs that have wireless clients
     // reported by the most recent SNMP fapStationTable scrape. The
@@ -2820,15 +2824,15 @@ async function openViewModal(id) {
     if (permAtLeast("events", "read")) {
       tabs.push({ key: "events", label: "Events", html: _assetEventsTabHTML(a.id) });
     }
-    // Custom MIB tab — present whenever the asset's manufacturer has at least
-    // one custom widget defined under its ManufacturerProfile. The tab body
-    // is rendered async from /assets/:id/custom-widgets; if the manufacturer
-    // has no widgets the endpoint returns an empty array and the tab
-    // suppresses itself by removing its <li>. Cheaper than gating tab
-    // visibility on a synchronous "does this manufacturer have widgets"
-    // lookup, since that data isn't on the asset row.
-    if (a.manufacturer) {
-      tabs.push({ key: "customMib", label: "Custom MIB", html: _assetCustomMibTabHTML(a) });
+    // Custom MIB tab — shown only when the asset's manufacturer actually has
+    // at least one ManufacturerCustomWidget defined under its
+    // ManufacturerProfile. The widget payload is fetched up front in the
+    // parallel auxResults pass (above), so the tab is present + pre-populated
+    // on first paint and never flashes-then-vanishes for manufacturers with
+    // no custom widgets. Mirrors the SD-WAN tab's prefetch-then-conditional
+    // pattern.
+    if (customWidgetPayload && customWidgetPayload.widgets && customWidgetPayload.widgets.length) {
+      tabs.push({ key: "customMib", label: "Custom MIB", html: _customMibTabHTML(customWidgetPayload) });
     }
     // SNMP Walk tab — admin-only, mirrors the backend gate. Loads credentials
     // before render so the picker isn't empty on first paint.
@@ -2898,7 +2902,6 @@ async function openViewModal(id) {
     if (a.monitored) _loadSystemTabFor(a.id, _getChartRangePref("assetSystem", "1h"), a);
     if (a.monitored) _renderIntermittencyBar(a.id);
     if (a.monitored) _updateStreamSourceBadgesFromEffective(a.id, a);
-    if (a.manufacturer) _loadCustomMibTabFor(a);
     document.querySelectorAll(".asset-system-range-btn").forEach(function (b) {
       b.addEventListener("click", function () {
         var range = b.getAttribute("data-range");
@@ -4790,32 +4793,6 @@ function _renderWirelessStationsCard(container, si, asset) {
 // The Polaris collector probes each widget on the customWidget cadence
 // (default 60s); the renderer doesn't poll — it shows the freshest sample
 // the server has. Operator clicks Refresh on the System tab to force-fetch.
-
-function _assetCustomMibTabHTML(_a) {
-  return '<div id="asset-custom-mib-mount">' +
-    '<span class="empty-state" style="padding:1rem 0">Loading custom widgets…</span>' +
-    '</div>';
-}
-
-async function _loadCustomMibTabFor(asset) {
-  var mount = document.getElementById("asset-custom-mib-mount");
-  if (!mount) return;
-  try {
-    var resp = await api.assets.customWidgets(asset.id);
-    var widgets = (resp && resp.widgets) || [];
-    if (widgets.length === 0) {
-      // Manufacturer has no widgets — suppress the tab entirely.
-      var li = document.querySelector('li[data-tab-key="customMib"]');
-      if (li) li.style.display = "none";
-      mount.innerHTML = "";
-      return;
-    }
-    mount.innerHTML = _customMibTabHTML(resp);
-  } catch (err) {
-    mount.innerHTML = '<p class="empty-state" style="padding:1rem 0;color:var(--color-danger)">' +
-      escapeHtml((err && err.message) || "Failed to load widgets") + '</p>';
-  }
-}
 
 function _customMibTabHTML(payload) {
   var hint = 'Widgets from <b>' + escapeHtml(payload.manufacturer || "this manufacturer") + '</b> ' +
