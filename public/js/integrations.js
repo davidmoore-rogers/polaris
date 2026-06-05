@@ -1518,6 +1518,7 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
           '<button type="button" class="btn btn-secondary" id="' + idPrefix + 'reload" style="font-size:0.78rem;padding:4px 10px">Refresh from latest discovery</button>' +
           '<span class="hint" id="' + idPrefix + 'names-counter" style="margin:0">Selected: 0</span>' +
         '</div>' +
+        '<input type="text" id="' + idPrefix + 'names-filter" placeholder="Filter interface names…" autocomplete="off" style="width:100%;box-sizing:border-box;margin-bottom:0.4rem;padding:4px 8px;font-size:0.84rem">' +
         '<div id="' + idPrefix + 'names-list" style="max-height:280px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
           '<p class="hint" style="margin:0">Loading…</p>' +
         '</div>' +
@@ -1611,7 +1612,7 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
 
   // ─── Live preview (unioned across enabled blocks) ─────────────────────────
   var previewPanel = '<div id="' + idPrefix + 'preview" class="form-group" style="margin-top:0.8rem;padding:0.5rem 0.7rem;background:var(--color-bg-tertiary);border-radius:var(--radius-sm);border:1px solid var(--color-border);font-size:0.84rem;color:var(--color-text-secondary);min-height:1.4em">' +
-    (hasIntegrationId ? '<em>Enable a block to preview matches.</em>' : '<em>Preview becomes available after the integration is saved and discovery has run at least once.</em>') +
+    (hasIntegrationId ? '<em>Change a selection above to preview matches.</em>' : '<em>Preview becomes available after the integration is saved and discovery has run at least once.</em>') +
   '</div>';
 
   return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Auto-monitor interfaces</p>' +
@@ -2004,6 +2005,12 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
   // state. Initial baseline = saved selection at modal open (stashed by
   // _autoMonitorInterfacesHTML), so the first preview-on-open shows no diff.
   var lastSentSelection = window["__autoMon_savedSelection_" + idPrefix] || null;
+  // The live preview box (interface/device counts, "Change since last edit"
+  // diff, "First matches") stays quiet until the operator actually changes a
+  // selection. Automatic renders (initial wire, aggregate load, reload) call
+  // schedulePreview but no-op while this is false, so opening the modal on a
+  // saved selection doesn't flash a full preview the operator didn't ask for.
+  var userHasEdited = false;
   // Canonical IfType order — matches IF_TYPES in src/services/autoMonitorInterfacesService.ts.
   // Backend Zod schema rejects values outside this set, so the UI mirrors it.
   var CANONICAL_IF_TYPES = ["physical", "aggregate", "vlan", "loopback", "tunnel"];
@@ -2040,7 +2047,7 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
     if (inclBox) {
       inclBox.addEventListener("change", function () {
         inclDownState = inclBox.checked === true;
-        schedulePreview();
+        onUserChange();
       });
     }
   }
@@ -2082,7 +2089,7 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
     }).join("");
     var boxes = optsEl.querySelectorAll('input[data-type-checkbox="1"]');
     for (var b = 0; b < boxes.length; b++) {
-      boxes[b].addEventListener("change", schedulePreview);
+      boxes[b].addEventListener("change", onUserChange);
     }
     wireInclDown();
   }
@@ -2135,9 +2142,10 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
     // Hand-roll the change listener — fires the preview + selected counter.
     var boxes = listEl.querySelectorAll('input[data-name-checkbox="1"]');
     for (var b = 0; b < boxes.length; b++) {
-      boxes[b].addEventListener("change", function () { updateNamesCounter(); schedulePreview(); });
+      boxes[b].addEventListener("change", function () { updateNamesCounter(); onUserChange(); });
     }
     updateNamesCounter();
+    applyNamesFilter();
     schedulePreview();
   }
 
@@ -2149,15 +2157,42 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
     counter.textContent = "Selected: " + picked + " / " + total;
   }
 
+  // View-only filter over the "By name" checklist. Substring-matches the
+  // ifName (case-insensitive) and hides non-matching rows; never touches the
+  // checkboxes themselves, so a row hidden by the filter keeps its selection.
+  // Re-applied after every renderNamesList so a reload preserves the filter.
+  function applyNamesFilter() {
+    var input = document.getElementById(idPrefix + "names-filter");
+    var listEl = document.getElementById(idPrefix + "names-list");
+    if (!input || !listEl) return;
+    var q = String(input.value || "").trim().toLowerCase();
+    var rows = listEl.querySelectorAll('label');
+    for (var i = 0; i < rows.length; i++) {
+      var cb = rows[i].querySelector('input[data-name-checkbox="1"]');
+      if (!cb) continue;
+      var match = !q || String(cb.value || "").toLowerCase().indexOf(q) !== -1;
+      rows[i].style.display = match ? "" : "none";
+    }
+  }
+
   // Debounced preview fetch.
   var previewTimer = null;
   function schedulePreview() {
     if (previewTimer) clearTimeout(previewTimer);
     previewTimer = setTimeout(runPreview, 250);
   }
+  // Marks an operator-driven change and schedules the preview. Wired to every
+  // selection control so the preview box populates on real edits, while the
+  // automatic schedulePreview() calls (initial wire / aggregate load) stay no-ops.
+  function onUserChange() {
+    userHasEdited = true;
+    schedulePreview();
+  }
 
   function runPreview() {
     if (!preview) return;
+    // Stay quiet until the operator changes a selection (see userHasEdited).
+    if (!userHasEdited) return;
     if (!integrationId) {
       preview.innerHTML = '<em>Preview becomes available after the integration is saved and discovery has run at least once.</em>';
       return;
@@ -2235,7 +2270,7 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
 
   // Wire master checkboxes — each one toggles its panel and re-runs preview.
   for (var i = 0; i < masters.length; i++) {
-    masters[i].addEventListener("change", function () { syncMasterVisibility(); schedulePreview(); });
+    masters[i].addEventListener("change", function () { syncMasterVisibility(); onUserChange(); });
   }
 
   // Patterns block — textarea, regex/wildcard radio, onlyUp.
@@ -2245,12 +2280,12 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
   ];
   patternsEls.forEach(function (el) {
     if (!el) return;
-    el.addEventListener("input", schedulePreview);
-    el.addEventListener("change", schedulePreview);
+    el.addEventListener("input", onUserChange);
+    el.addEventListener("change", onUserChange);
   });
   var patternsModeRadios = document.getElementsByName(idPrefix + "patterns-mode");
   for (var pm = 0; pm < patternsModeRadios.length; pm++) {
-    patternsModeRadios[pm].addEventListener("change", schedulePreview);
+    patternsModeRadios[pm].addEventListener("change", onUserChange);
   }
 
   // Test button — preview the patterns block in isolation so the operator can
@@ -2301,20 +2336,24 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
 
   // Types block.
   var typeBoxes = document.querySelectorAll('input[data-type-checkbox="1"][id^="' + idPrefix + 'type-"]');
-  for (var t = 0; t < typeBoxes.length; t++) typeBoxes[t].addEventListener("change", schedulePreview);
+  for (var t = 0; t < typeBoxes.length; t++) typeBoxes[t].addEventListener("change", onUserChange);
   var typesOnlyUp = document.getElementById(idPrefix + "types-onlyUp");
-  if (typesOnlyUp) typesOnlyUp.addEventListener("change", schedulePreview);
+  if (typesOnlyUp) typesOnlyUp.addEventListener("change", onUserChange);
   // Wire the include-down control on the initial (saved) render; renderTypesList
   // re-wires it after a dynamic re-render.
   wireInclDown();
 
   // LLDP block.
   var lldpBoxes = document.querySelectorAll('input[data-lldp-checkbox="1"][id^="' + idPrefix + 'lldp-"]');
-  for (var lb = 0; lb < lldpBoxes.length; lb++) lldpBoxes[lb].addEventListener("change", schedulePreview);
+  for (var lb = 0; lb < lldpBoxes.length; lb++) lldpBoxes[lb].addEventListener("change", onUserChange);
 
   // Reload (By name).
   var reload = document.getElementById(idPrefix + "reload");
   if (reload) reload.addEventListener("click", function () { aggregateLoaded = false; loadAggregate(true); });
+
+  // Filter (By name) — view-only, debounce-free; never marks an edit.
+  var namesFilter = document.getElementById(idPrefix + "names-filter");
+  if (namesFilter) namesFilter.addEventListener("input", applyNamesFilter);
 
   // Initial visibility sync.
   syncMasterVisibility();
@@ -4416,10 +4455,11 @@ async function openEditModal(id) {
       }
     });
 
-    // Builds the request body, PUTs it, and returns the editConfig so the
-    // caller can drive the auto-monitor apply pass for any class with a
-    // non-null selection.
-    async function performSave() {
+    // Reads the form into an editConfig WITHOUT persisting it. Split from
+    // commitSave so the Auto-Monitor capacity-warning confirm can run BEFORE
+    // the PUT — previously the integration was already saved by the time the
+    // confirm appeared, so cancelling it still left the change persisted.
+    function buildEditConfig() {
       var autoDiscoverEl = document.getElementById("f-autoDiscover");
       var editConfig = formGetter();
       if (isFmgOrFgt) {
@@ -4465,11 +4505,19 @@ async function openEditModal(id) {
         if (wsBlock)  editConfig.workstationMonitor = wsBlock;
         if (srvBlock) editConfig.serverMonitor      = srvBlock;
       }
+      return { editConfig: editConfig, autoDiscoverEl: autoDiscoverEl };
+    }
+
+    // PUTs a previously-built editConfig (from buildEditConfig) plus the
+    // integration-tier monitor settings, and returns the result so the caller
+    // can drive the auto-monitor apply pass for any class with a non-null
+    // selection.
+    async function commitSave(built) {
       var input = {
         name: val("f-name"),
-        config: editConfig,
+        config: built.editConfig,
         enabled: document.getElementById("f-enabled").checked,
-        autoDiscover: autoDiscoverEl ? autoDiscoverEl.checked : true,
+        autoDiscover: built.autoDiscoverEl ? built.autoDiscoverEl.checked : true,
         pollInterval: parseInt(document.getElementById("f-pollInterval").value, 10) || 4,
       };
       var result = await api.integrations.update(id, input);
@@ -4480,7 +4528,7 @@ async function openEditModal(id) {
         try { await api.monitorSettings.setIntegration(id, getMonitorSettingsFromForm()); }
         catch (e) { showToast("Integration updated, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
       }
-      return { result: result, editConfig: editConfig };
+      return { result: result, editConfig: built.editConfig };
     }
 
     document.getElementById("btn-save").addEventListener("click", async function () {
@@ -4536,11 +4584,14 @@ async function openEditModal(id) {
           }
         }
 
-        var saved = await performSave();
+        // Build the editConfig from the form, but DON'T save yet — the
+        // Auto-Monitor capacity-warning confirm has to gate the PUT so that
+        // cancelling it leaves the integration unsaved and the edit modal open.
+        var built = buildEditConfig();
         var classes = isFmgOrFgt ? [
-          ["fortigate",   saved.editConfig.fortigateMonitor],
-          ["fortiswitch", saved.editConfig.fortiswitchMonitor],
-          ["fortiap",     saved.editConfig.fortiapMonitor],
+          ["fortigate",   built.editConfig.fortigateMonitor],
+          ["fortiswitch", built.editConfig.fortiswitchMonitor],
+          ["fortiap",     built.editConfig.fortiapMonitor],
         ] : [];
 
         // Fire apply only for per-class blocks whose autoMonitorInterfaces
@@ -4549,8 +4600,8 @@ async function openEditModal(id) {
         // tier edit) used to re-fire apply for every block that had ANY
         // selection — expensive on big fleets and surprising to operators.
         // Baseline = saved selection stashed at modal-open by
-        // _autoMonitorInterfacesHTML; post-save = whatever editConfig holds
-        // (what we just PUT). Equality goes through _amonCanonicalize so
+        // _autoMonitorInterfacesHTML; proposed = whatever editConfig holds
+        // (what we're about to PUT). Equality goes through _amonCanonicalize so
         // array reordering / null-vs-empty-object don't read as a change.
         var classToBaselinePrefix = {
           fortigate:   "f-mon-fortigate-amon-",
@@ -4564,12 +4615,14 @@ async function openEditModal(id) {
           return _amonCanonicalize(baseline) !== _amonCanonicalize(entry[1].autoMonitorInterfaces);
         });
 
+        // Capacity guard: warn BEFORE saving when the changed selections would
+        // pin a large number of interfaces. We sniff the cached count from each
+        // preview block; missing/stale values just skip the warning. Scoped to
+        // the blocks that ARE changing — a class whose selection didn't change
+        // this session shouldn't contribute to the estimate. Cancelling here
+        // returns to the edit modal with NOTHING saved (the finally block
+        // re-enables the Save button).
         if (activeApplies.length > 0) {
-          // Capacity guard: warn before applying selections that would pin
-          // a large number of interfaces. We sniff the cached count from
-          // each preview block; missing/stale values just skip the warning.
-          // Scoped to the blocks that ARE changing — a class whose selection
-          // didn't change this session shouldn't contribute to the estimate.
           var changedPrefixes = activeApplies
             .map(function (e) { return classToBaselinePrefix[e[0]]; })
             .filter(Boolean);
@@ -4583,15 +4636,19 @@ async function openEditModal(id) {
             var ok = await showConfirm(
               "Auto-Monitor will pin approximately " + totalEstimate + " interfaces across the discovered devices.\n\n" +
               "Each pin gets scraped on the response-time cadence (default 60s). Large pin counts add load to the database and to the monitored devices.\n\n" +
-              "Continue applying now?"
+              "Continue saving and applying now?"
             );
             if (!ok) {
-              closeModal();
-              showToast("Integration updated; auto-monitor not applied");
-              loadIntegrations();
+              showToast("Cancelled — nothing saved");
               return;
             }
           }
+        }
+
+        // Confirm cleared (or wasn't needed) — persist now.
+        var saved = await commitSave(built);
+
+        if (activeApplies.length > 0) {
           btn.textContent = "Applying...";
           // Run the per-class applies in parallel. Each call is independent
           // (different assetType slice of the integration's assets), the
