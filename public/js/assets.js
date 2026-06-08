@@ -1168,16 +1168,21 @@ async function openAssetMergeModal(assetId) {
   _mergeThisAsset = null; _mergeOtherAsset = null;
   _mergeThisSources = []; _mergeOtherSources = [];
 
+  // xl modals zero out .modal-body padding (`.modal.modal-xl .modal-body` in
+  // styles.css — other xl modals run full-bleed tables / sticky tab strips),
+  // so wrap our content in our own padded container to keep text off the edges.
   var body =
-    '<p style="margin:0 0 0.75rem;color:var(--color-text-secondary);font-size:0.85rem">' +
-      'Merge another asset into this one. Search for the duplicate, review the differences, ' +
-      'choose which asset survives and which value wins for each field, then confirm.' +
-    '</p>' +
-    '<div class="form-group" style="margin-bottom:0.5rem">' +
-      '<input type="text" id="merge-search" placeholder="Search hostname, IP, MAC, serial, asset tag, owner..." autocomplete="off" style="width:100%">' +
-    '</div>' +
-    '<div id="merge-search-results" style="max-height:280px;overflow:auto"></div>' +
-    '<div id="merge-compare"></div>';
+    '<div style="padding:1.25rem">' +
+      '<p style="margin:0 0 0.75rem;color:var(--color-text-secondary);font-size:0.85rem">' +
+        'Merge another asset into this one. Search for the duplicate, review the differences, ' +
+        'choose which asset survives and which value wins for each field, then confirm.' +
+      '</p>' +
+      '<div class="form-group" style="margin-bottom:0.5rem">' +
+        '<input type="text" id="merge-search" placeholder="Search hostname, IP, MAC, serial, asset tag, owner..." autocomplete="off" style="width:100%">' +
+      '</div>' +
+      '<div id="merge-search-results" style="max-height:280px;overflow:auto"></div>' +
+      '<div id="merge-compare"></div>' +
+    '</div>';
 
   var footer =
     '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
