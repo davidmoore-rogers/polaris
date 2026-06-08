@@ -944,6 +944,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/services/sampleRollupService.ts:rollupHourly() / rollupDaily()` — INSERT...ON CONFLICT DO UPDATE per (table, tier). Driven by `src/jobs/runSampleRollup.ts` (hourly tick every 30 min, daily tick at 02:30 UTC). Sources for daily reads from `*_hourly`, not detail, so the daily tick stays bounded on big fleets.
 - `src/services/monitoringService.ts:pruneMonitorSamples / pruneTelemetrySamples / pruneSystemInfoSamples` — fire from `src/jobs/monitorAssets.ts` heavy-loop daily prune; each helper calls `pruneOneTable` once per (table × tier × class) with retention from `getSampleRetention()`.
   - **Selection-aware detail prune (`pruneSelectionAwareDetail`, interfaces/storage/ipsec) MUST NOT row-DELETE inside a compressed chunk.** The unselected/slow deleteMany is lower-bounded at the compressed-chunk frontier via `unselectedSlowPruneWindow(now, getEffectiveCompressAfterDays(table))` (sampleRetentionService + timescaleService). A DELETE matching rows in a compressed TimescaleDB chunk decompresses the whole chunk into its rowstore heap → un-truncatable low-density bloat (prod incident 2026-06-08). Slow rows past the frontier ride compressed until `drop_chunks` removes the whole chunk at the selected window. If you change the compress-after window source or the 1-day chunk interval, re-check this bound.
+- `src/jobs/reclaimBloatedChunks.ts` — daily safety net that `VACUUM (FULL)`s already-compressed selection-aware chunks whose on-disk heap dwarfs their compressed bytes (the residue of any decompress-on-DELETE that slipped past the prune bound, plus pre-fix bloat). Read-only detection via `chunk_compression_stats()`; bounded + `lock_timeout`-guarded on a dedicated `getDirectDatabaseUrl()` connection. Registered under `cfg.runsSchedulers` in `src/app.ts`.
 
 **Readers:**
 - `src/services/sampleHistoryService.ts:read*History` — six tier-aware readers, one per source. Detail tier returns raw rows; rollup tiers translate aggregate columns back to source field names so existing chart renderers consume both shapes with no per-tier branching except for counter-rate pre-computation.
@@ -2374,7 +2375,7 @@ Listed alphabetically.
 
 **Cross-service deps:** none.
 
-**Used by:** `src/app.ts` — boot detection and hypertable migration; `src/services/monitoringService.ts` — `dropChunks` calls in pruning + `getEffectiveCompressAfterDays` to lower-bound the selection-aware slow prune off compressed chunks; `src/services/capacityService.ts` — hypertable status for capacity snapshot.
+**Used by:** `src/app.ts` — boot detection and hypertable migration; `src/services/monitoringService.ts` — `dropChunks` calls in pruning + `getEffectiveCompressAfterDays` to lower-bound the selection-aware slow prune off compressed chunks; `src/services/capacityService.ts` — hypertable status for capacity snapshot; `src/jobs/reclaimBloatedChunks.ts` — `isHypertable` gate before scanning for compressed-chunk heap bloat.
 
 **Invariants:**
 - **Boot-time detection cache:** `detectTimescale()` caches result; cache updates only on successful probe. Re-detection runs after `migrateToHypertables()` completes so `isHypertable()` reflects post-conversion state.

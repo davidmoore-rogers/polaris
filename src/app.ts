@@ -713,6 +713,7 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/reconcileMapRegions.js",
       "./jobs/reconcileDnsResolvedReservations.js",
       "./jobs/runSampleRollup.js",
+      "./jobs/reclaimBloatedChunks.js",
       "./jobs/autoBuildAgents.js",
       "./jobs/discoveryRunReaper.js",
       // integrationConnectionTester DISABLED 2026-06-02: the 10-min synthetic
