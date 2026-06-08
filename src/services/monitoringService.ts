@@ -6841,16 +6841,25 @@ async function persistWirelessStations(
   // these — they're operator-visible breadcrumbs, not load-bearing data —
   // but await so the System tab sees the change on the next refresh.
   //
-  // retryOnDeadlock: this transaction updates OTHER assets' rows (the matched
-  // endpoints), so two APs whose stations match an overlapping endpoint set —
-  // or this txn vs the probe-patch bulk Asset UPDATE — can deadlock (40P01).
-  // The probe-patch path already retries; without this wrap the loser here
-  // crashed the whole system-info scrape. Idempotent (last-write-wins stamp),
-  // so re-run is safe. (Deterministic lock ordering is a follow-up.)
+  // Deterministic lock ordering: sort the updates by asset id so EVERY
+  // concurrent endpoint-stamp transaction acquires its `assets` row locks in
+  // the same order. The PG deadlock log showed a 3-way cycle where all three
+  // participants were exactly this lastSeenAp UPDATE — two/three APs whose
+  // stations match an overlapping endpoint set were locking those rows in
+  // different (Map-insertion) order. Sorting by id makes the cycle
+  // impossible. `$transaction([...])` executes the array sequentially, so the
+  // sort order IS the lock-acquisition order.
+  //
+  // retryOnDeadlock stays as a backstop for any residual collision (e.g. this
+  // txn vs the probe-patch bulk Asset UPDATE, which locks in its own order).
+  // The op is idempotent (last-write-wins stamp) so re-run is safe.
   if (endpointStamps.size > 0) {
+    const orderedStamps = [...endpointStamps.entries()].sort(([a], [b]) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
     await retryOnDeadlock(() =>
       prisma.$transaction(
-        [...endpointStamps.entries()].map(([endpointId, ap]) =>
+        orderedStamps.map(([endpointId, ap]) =>
           prisma.asset.update({ where: { id: endpointId }, data: { lastSeenAp: ap } }),
         ),
       ),

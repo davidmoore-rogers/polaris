@@ -846,14 +846,35 @@ export async function nextAvailableReservation(input: NextAvailableReservationIn
 // ─── Expire (called by scheduled job) ────────────────────────────────────────
 
 export async function expireStaleReservations(): Promise<number> {
-  const result = await prisma.reservation.updateMany({
-    where: {
-      status: "active",
-      expiresAt: { lt: new Date() },
-    },
-    data: { status: "expired" },
+  const now = new Date();
+  return prisma.$transaction(async (tx) => {
+    // @@unique([subnetId, ipAddress, status]) permits only ONE `expired` row
+    // per IP. A reserve → expire → re-reserve → expire cycle leaves a stale
+    // `expired` row that collides when we flip the new active row to expired —
+    // and because the flip is a single updateMany, ONE collision (P2002)
+    // aborts the entire batch, so NOTHING expires and the job fails on every
+    // 15-minute run (observed in prod: 10.0.80.24 wedged the whole sweep).
+    // Drop the colliding historical `expired` rows first. Set-based
+    // DELETE…USING so it scales to a large backlog without an N-clause OR; the
+    // stale row carries nothing not already in the audit log — same rationale
+    // as releaseReservation's pre-delete of prior `released` rows. NULL
+    // ipAddress (full-subnet reservations) never collides — Postgres treats
+    // NULL as distinct in unique indexes — and the `=` join excludes those.
+    await tx.$executeRaw`
+      DELETE FROM "reservations" AS stale
+      USING "reservations" AS expiring
+      WHERE stale.status::text = 'expired'
+        AND expiring.status::text = 'active'
+        AND expiring."expiresAt" < ${now}
+        AND stale."subnetId" = expiring."subnetId"
+        AND stale."ipAddress" = expiring."ipAddress"
+    `;
+    const result = await tx.reservation.updateMany({
+      where: { status: "active", expiresAt: { lt: now } },
+      data: { status: "expired" },
+    });
+    return result.count;
   });
-  return result.count;
 }
 
 // ─── Queued Push Queue View ──────────────────────────────────────────────────

@@ -4692,7 +4692,9 @@ function _renderInterfacesTable(container, si, asset) {
     // per class. `assetType` is the eight-value enum-ish string from the
     // registry; null/empty falls back to "other".
     var ifaceTypeKey = "asset-interfaces-" + ((asset && asset.assetType) || "other");
-    applyTableLayout(container.querySelector("table"), ifaceTypeKey);
+    applyTableLayout(container.querySelector("table"), ifaceTypeKey, {
+      onScreenshot: function (t) { _screenshotTableEl(t, "Interfaces", { hiddenNoun: "interface" }); },
+    });
   }
 
   // Restore per-user, per-asset collapsed state for nested rows.
@@ -4909,7 +4911,9 @@ function _renderStorageTable(container, si, asset) {
       '<th data-col-id="usedPct">Used %</th>' +
     '</tr></thead><tbody>' + body + '</tbody></table></div>';
   if (typeof applyTableLayout === "function") {
-    applyTableLayout(container.querySelector("table"), "asset-storage");
+    applyTableLayout(container.querySelector("table"), "asset-storage", {
+      onScreenshot: function (t) { _screenshotTableEl(t, "Storage"); },
+    });
   }
 
   if (canEdit && asset) {
@@ -5027,7 +5031,9 @@ function _renderTemperatures(container, si, asset) {
     toggleHTML;
   if (typeof applyTableLayout === "function") {
     container.querySelectorAll("table").forEach(function (t) {
-      applyTableLayout(t, "asset-temperatures");
+      applyTableLayout(t, "asset-temperatures", {
+        onScreenshot: function (tbl) { _screenshotTableEl(tbl, "Temperatures"); },
+      });
     });
   }
 
@@ -5101,7 +5107,9 @@ function _renderLldpNeighborsCard(container, si, asset) {
       '<th data-col-id="capabilities">Capabilities</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';
   if (typeof applyTableLayout === "function") {
-    applyTableLayout(container.querySelector("table"), "asset-lldp");
+    applyTableLayout(container.querySelector("table"), "asset-lldp", {
+      onScreenshot: function (t) { _screenshotTableEl(t, "LLDP Neighbors"); },
+    });
   }
 
   // Click-through on matched-asset links opens the matched asset's
@@ -5195,7 +5203,9 @@ function _renderWirelessStationsCard(container, si, asset) {
       '<th style="text-align:right" data-col-id="signal">Signal</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';
   if (typeof applyTableLayout === "function") {
-    applyTableLayout(container.querySelector("table"), "asset-wireless-stations");
+    applyTableLayout(container.querySelector("table"), "asset-wireless-stations", {
+      onScreenshot: function (t) { _screenshotTableEl(t, "Wireless Stations"); },
+    });
   }
 
   // Click-through on matched-endpoint links — opens the endpoint asset's
@@ -8783,9 +8793,13 @@ function _wireSdwanTab(a, rules, links) {
   // by table-type so widths apply across every FortiGate's SD-WAN tab.
   if (typeof applyTableLayout === "function") {
     var membersTable = document.getElementById("sdwan-members-table");
-    if (membersTable) applyTableLayout(membersTable, "asset-sdwan-members");
+    if (membersTable) applyTableLayout(membersTable, "asset-sdwan-members", {
+      onScreenshot: function (t) { _screenshotTableEl(t, "SD-WAN Members"); },
+    });
     var rulesTable = document.getElementById("sdwan-rules-table");
-    if (rulesTable) applyTableLayout(rulesTable, "asset-sdwan-rules");
+    if (rulesTable) applyTableLayout(rulesTable, "asset-sdwan-rules", {
+      onScreenshot: function (t) { _screenshotTableEl(t, "SD-WAN Rules"); },
+    });
   }
 
   // Rule rows → load selection timeline.
@@ -9806,14 +9820,23 @@ function _activeAssetTabLabel() {
   return btn ? (btn.innerText || btn.textContent || '').trim() : '';
 }
 
-// Walk the active tab panel and extract structured content blocks. Three
-// block shapes power both copy and screenshot:
+// Walk the active tab panel and extract structured content blocks. Five
+// block shapes power copy and screenshot:
 //   { type: 'kv',      label, value }   from .detail-row pairs (General tab)
 //   { type: 'table',   headers, rows }  from any <table> (System/Quarantine/etc.)
 //   { type: 'heading', text }           from .section-label and <h1>-<h6>
-// Anything else (charts, buttons, hidden nodes) is skipped.
+//   { type: 'chart',   svg }            from any rendered chart <svg>
+//   { type: 'text',    lines }          free-form panel text (Polaris Agent
+//                                       block, chart stat lines, source badges)
+//                                       with interactive/icon subtrees stripped
+// Buttons, inputs, the gear/screenshot wraps, and hidden nodes are skipped.
+// `text`/`chart` only matter for the screenshot/copy of the System tab; on
+// other tabs (mostly .detail-row + <table>) they rarely fire.
 function _extractTabBlocks(root) {
   if (!root) return [];
+  // Interactive + icon scaffolding: never carries content worth capturing, and
+  // (gear/screenshot wraps, resize handles) would otherwise leak into text.
+  var SKIP_SEL = 'button,input,select,textarea,.sf-col-gear-wrap,.chart-screenshot-btn,.sf-resize-handle,script,style';
   var blocks = [];
   function isHidden(el) {
     if (!el) return true;
@@ -9822,10 +9845,67 @@ function _extractTabBlocks(root) {
       : null;
     return cs && (cs.display === 'none' || cs.visibility === 'hidden');
   }
+  // Collect visible, non-interactive text from a free-form subtree, one line
+  // per block-level leaf so the Polaris Agent grid ("Version: …", "Platform: …")
+  // and stat strips render as readable lines rather than one run-on string.
+  function collectTextLines(el) {
+    var lines = [];
+    function isBlockish(c) {
+      var cs = el.ownerDocument.defaultView.getComputedStyle(c);
+      var d = cs ? cs.display : '';
+      return d === 'block' || d === 'flex' || d === 'grid' || d === 'list-item' ||
+        /^(DIV|P|LI|TR|SECTION|UL|OL|H[1-6])$/.test(c.tagName);
+    }
+    function hasBlockChild(node) {
+      for (var i = 0; i < node.children.length; i++) {
+        var c = node.children[i];
+        if (isHidden(c) || (c.matches && c.matches(SKIP_SEL))) continue;
+        if (isBlockish(c)) return true;
+      }
+      return false;
+    }
+    function pushLeaf(node) {
+      var clone = node.cloneNode(true);
+      if (clone.querySelectorAll) {
+        Array.prototype.forEach.call(clone.querySelectorAll(SKIP_SEL), function (n) {
+          if (n.parentNode) n.parentNode.removeChild(n);
+        });
+      }
+      var t = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t) lines.push(t);
+    }
+    function rec(node) {
+      if (hasBlockChild(node)) {
+        for (var i = 0; i < node.childNodes.length; i++) {
+          var c = node.childNodes[i];
+          if (c.nodeType === 3) {
+            var t = c.nodeValue.replace(/\s+/g, ' ').trim();
+            if (t) lines.push(t);
+          } else if (c.nodeType === 1 && !isHidden(c) && !(c.matches && c.matches(SKIP_SEL))) {
+            rec(c);
+          }
+        }
+      } else {
+        pushLeaf(node);
+      }
+    }
+    rec(el);
+    return lines;
+  }
   function walk(node) {
     if (!node || node.nodeType !== 1) return;
     var el = node;
     if (isHidden(el)) return;
+    // Rendered chart SVG → image block. Skip the camera button's own icon svg
+    // and any small decorative/icon svg (charts are large; icons ~14-24px).
+    if (el.tagName && el.tagName.toLowerCase() === 'svg') {
+      if (!el.closest || !el.closest('.chart-screenshot-btn')) {
+        var sr = el.getBoundingClientRect();
+        if (sr.width >= 80 && sr.height >= 60) blocks.push({ type: 'chart', svg: el });
+      }
+      return;
+    }
+    if (el.matches && el.matches(SKIP_SEL)) return;
     if (el.classList && el.classList.contains('detail-row')) {
       var lbl = el.querySelector('.detail-label');
       var val = el.querySelector('.detail-value');
@@ -9864,6 +9944,12 @@ function _extractTabBlocks(root) {
       if (ht) blocks.push({ type: 'heading', text: ht });
       return;
     }
+    // Free-form leaf (no structural descendants we handle separately) → text.
+    if (!el.querySelector('.detail-row, table, .section-label, h1, h2, h3, h4, h5, h6, svg')) {
+      var lines = collectTextLines(el);
+      if (lines.length) blocks.push({ type: 'text', lines: lines });
+      return;
+    }
     for (var i = 0; i < el.childNodes.length; i++) walk(el.childNodes[i]);
   }
   walk(root);
@@ -9886,10 +9972,13 @@ function _copyAssetDetails() {
       } else {
         lines.push(b.label + ': ' + (b.value || '-'));
       }
+    } else if (b.type === 'text') {
+      (b.lines || []).forEach(function (line) { if (line) lines.push(line); });
     } else if (b.type === 'table') {
       if (b.headers && b.headers.length) lines.push(b.headers.join(' | '));
       b.rows.forEach(function (r) { lines.push(r.join(' | ')); });
     }
+    // 'chart' blocks are images — nothing to put in a plaintext copy.
   });
   navigator.clipboard.writeText(lines.join('\n')).then(function () {
     showToast("Asset details copied to clipboard");
@@ -9898,10 +9987,30 @@ function _copyAssetDetails() {
   });
 }
 
+// Charts are SVGs that rasterize asynchronously (Image.onload), so the
+// screenshot is a two-step process: rasterize every chart block first, then
+// hand the (now image-bearing) blocks to the synchronous canvas composer.
 function _screenshotAssetDetails(asset) {
   var blocks = _extractTabBlocks(_activeAssetPanel());
   if (blocks.length === 0) { showToast("Nothing to screenshot", "error"); return; }
 
+  var charts = blocks.filter(function (b) { return b.type === 'chart'; });
+  if (charts.length === 0) { _composeAssetDetailsCanvas(asset, blocks); return; }
+
+  var pending = charts.length;
+  charts.forEach(function (b) {
+    _rasterizeChartSvgToImage(b.svg.parentNode || b.svg, function (res) {
+      if (res) { b._img = res.img; b._imgW = res.width; b._imgH = res.height; b._url = res.url; }
+      if (--pending === 0) _composeAssetDetailsCanvas(asset, blocks);
+    });
+  });
+}
+
+// Synchronous canvas composer. Lays out kv / heading / table / text / chart
+// blocks top-to-bottom in document order, sizes the canvas exactly, draws, and
+// copies the PNG to the clipboard. Chart blocks must already carry a loaded
+// `_img` (set by _screenshotAssetDetails); any without one are skipped.
+function _composeAssetDetailsCanvas(asset, blocks) {
   var cs = getComputedStyle(document.documentElement);
   var bgPrimary = cs.getPropertyValue("--color-bg-primary").trim() || "#ffffff";
   var bgSurface = cs.getPropertyValue("--color-surface").trim() || "#f5f5f5";
@@ -9921,12 +10030,12 @@ function _screenshotAssetDetails(asset) {
   var tableHeaderH = 26;
   var tableRowH = 22;
   var tableGap = 12;
+  var chartGap = 14;
   var w = contentW + pad * 2;
 
-  // Pre-measure each block so the canvas is sized exactly.
-  // Use a throwaway context so font metrics line up with the final draw.
-  var measureCanvas = document.createElement("canvas");
-  var measureCtx = measureCanvas.getContext("2d");
+  function releaseCharts() {
+    blocks.forEach(function (b) { if (b._url) { URL.revokeObjectURL(b._url); b._url = null; } });
+  }
 
   var laidOut = blocks.map(function (b) {
     if (b.type === 'heading') {
@@ -9936,6 +10045,17 @@ function _screenshotAssetDetails(asset) {
       var lines = b.value.split('\n').map(function (l) { return l.trim(); }).filter(function (l) { return l.length > 0; });
       if (lines.length === 0) lines = ['-'];
       return { block: b, lines: lines, h: Math.max(30, lines.length * lineH + rowPadV) };
+    }
+    if (b.type === 'text') {
+      var tlines = (b.lines || []).filter(function (l) { return l && l.length > 0; });
+      if (tlines.length === 0) return { block: b, lines: [], h: 0 };
+      return { block: b, lines: tlines, h: tlines.length * lineH + rowPadV };
+    }
+    if (b.type === 'chart') {
+      if (!b._img || !b._imgW) return { block: b, h: 0, skip: true };
+      var drawW = contentW;
+      var drawH = Math.max(1, Math.round(b._imgH * (contentW / b._imgW)));
+      return { block: b, drawW: drawW, drawH: drawH, h: drawH + chartGap };
     }
     if (b.type === 'table') {
       var cols = Math.max(1, (b.headers && b.headers.length) || (b.rows[0] ? b.rows[0].length : 1));
@@ -9981,6 +10101,24 @@ function _screenshotAssetDetails(asset) {
       ctx.fillStyle = clrText;
       ctx.font = "600 13px system-ui,-apple-system,sans-serif";
       ctx.fillText(b.text, pad, y + 22);
+      y += l.h;
+      kvRowIndex = 0;
+      return;
+    }
+    if (b.type === 'text') {
+      if (!l.lines.length) return;
+      ctx.fillStyle = clrText;
+      ctx.font = "13px system-ui,-apple-system,sans-serif";
+      l.lines.forEach(function (line, li) {
+        ctx.fillText(fitText(line, contentW - 20), pad + 10, y + 16 + li * lineH);
+      });
+      y += l.h;
+      kvRowIndex = 0;
+      return;
+    }
+    if (b.type === 'chart') {
+      if (l.skip) { y += l.h; return; }
+      ctx.drawImage(b._img, pad, y, l.drawW, l.drawH);
       y += l.h;
       kvRowIndex = 0;
       return;
@@ -10042,6 +10180,8 @@ function _screenshotAssetDetails(asset) {
     }
   });
 
+  releaseCharts();
+
   canvas.toBlob(function (blob) {
     if (!blob) { showToast("Screenshot failed", "error"); return; }
     if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
@@ -10050,6 +10190,173 @@ function _screenshotAssetDetails(asset) {
     }
     navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
       showToast("Screenshot copied to clipboard");
+    }).catch(function () {
+      showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+    });
+  }, "image/png");
+}
+
+// Per-table screenshot (the camera button injected to the left of a table's
+// column-chooser gear by setupColumnLayout). Captures only that table — visible
+// columns + headers — titled with the table label and the current asset name,
+// then copies the PNG to the clipboard. Column widths auto-fit the content.
+function _screenshotTableEl(tableEl, label, opts) {
+  if (!tableEl) { showToast("Nothing to screenshot", "error"); return; }
+  opts = opts || {};
+  var hiddenNoun = opts.hiddenNoun || "row";
+  var view = (tableEl.ownerDocument && tableEl.ownerDocument.defaultView) || window;
+  function visible(el) {
+    var cs = view.getComputedStyle(el);
+    return !cs || (cs.display !== 'none' && cs.visibility !== 'hidden');
+  }
+  var ths = Array.prototype.slice.call(tableEl.querySelectorAll('thead th'));
+  var visMask = ths.map(visible);
+  var headers = [];
+  ths.forEach(function (th, i) {
+    if (visMask[i]) headers.push((th.innerText || th.textContent || '').trim());
+  });
+  var rows = [];
+  // Count data rows the operator has hidden (inactive-interface toggle off, or a
+  // collapsed parent). They're left out of the image but we note their count so
+  // the screenshot can't be mistaken for the full set — reveal them, then re-shoot.
+  var hiddenCount = 0;
+  tableEl.querySelectorAll('tbody > tr').forEach(function (tr) {
+    if (!visible(tr)) {
+      // Skip control rows (toggle / section headers span all columns via colspan).
+      if (tr.id && /toggle/i.test(tr.id)) return;
+      var tds = tr.querySelectorAll(':scope > td');
+      if (tds.length === 0) return;
+      if (tds.length === 1 && tds[0].hasAttribute('colspan')) return;
+      hiddenCount++;
+      return;
+    }
+    var row = [];
+    tr.querySelectorAll(':scope > td').forEach(function (td, i) {
+      if (visMask[i] === false) return;   // skip hidden columns
+      row.push((td.innerText || td.textContent || '').trim().replace(/\s+/g, ' '));
+    });
+    if (row.length) rows.push(row);
+  });
+  if (!rows.length) { showToast("Nothing to screenshot", "error"); return; }
+
+  var hiddenNote = hiddenCount > 0
+    ? "+ " + hiddenCount + " hidden " + hiddenNoun + (hiddenCount === 1 ? "" : "s") +
+      " not shown — reveal them before screenshotting to include"
+    : "";
+
+  var a = _currentAssetForRefresh;
+  var assetName = a ? (a.hostname || a.dnsName || a.ipAddress || a.id || "") : "";
+
+  var cs = getComputedStyle(document.documentElement);
+  var bgPrimary = cs.getPropertyValue("--color-bg-primary").trim() || "#ffffff";
+  var bgSurface = cs.getPropertyValue("--color-surface").trim() || "#f5f5f5";
+  var clrBorder = cs.getPropertyValue("--color-border").trim() || "#e0e0e0";
+  var clrText   = cs.getPropertyValue("--color-text-primary").trim() || "#111";
+  var clrMuted  = cs.getPropertyValue("--color-text-tertiary").trim() || "#888";
+
+  var scale = 2;
+  var pad = 20;
+  var headerLines = (assetName ? 2 : 1);
+  var titleH = headerLines === 2 ? 48 : 32;
+  var tableHeaderH = 26;
+  var tableRowH = 22;
+  var cellPadX = 10;
+  var fontFamily = "system-ui,-apple-system,sans-serif";
+
+  var cols = Math.max(1, headers.length || (rows[0] ? rows[0].length : 1));
+  var measureCtx = document.createElement("canvas").getContext("2d");
+  var colW = [];
+  for (var c = 0; c < cols; c++) {
+    measureCtx.font = "600 10px " + fontFamily;
+    var maxW = headers[c] ? measureCtx.measureText(headers[c].toUpperCase()).width : 0;
+    measureCtx.font = "12px " + fontFamily;
+    for (var r = 0; r < rows.length; r++) {
+      var cell = rows[r][c] || '';
+      var cw = measureCtx.measureText(cell).width;
+      if (cw > maxW) maxW = cw;
+    }
+    colW[c] = Math.min(360, Math.max(64, Math.ceil(maxW) + cellPadX * 2));
+  }
+  var contentW = colW.reduce(function (acc, x) { return acc + x; }, 0);
+  var noteH = hiddenNote ? 24 : 0;
+  // The note can be wider than the (auto-fit) table — widen the canvas for it.
+  var noteW = 0;
+  if (hiddenNote) { measureCtx.font = "italic 12px " + fontFamily; noteW = measureCtx.measureText(hiddenNote).width; }
+  var w = Math.max(contentW, Math.ceil(noteW)) + pad * 2;
+  var hdrH = headers.length ? tableHeaderH : 0;
+  var h = titleH + hdrH + rows.length * tableRowH + noteH + pad;
+
+  var canvas = document.createElement("canvas");
+  canvas.width = w * scale;
+  canvas.height = h * scale;
+  var ctx = canvas.getContext("2d");
+  ctx.scale(scale, scale);
+  ctx.fillStyle = bgPrimary;
+  ctx.fillRect(0, 0, w, h);
+
+  function fitText(text, maxTextW) {
+    var t = String(text == null ? '' : text);
+    while (ctx.measureText(t).width > maxTextW && t.length > 3) {
+      t = t.slice(0, -4) + '…';
+    }
+    return t;
+  }
+
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = clrText;
+  ctx.font = "bold 15px " + fontFamily;
+  ctx.fillText(label || "Table", pad, 22);
+  if (assetName) {
+    ctx.fillStyle = clrMuted;
+    ctx.font = "12px " + fontFamily;
+    ctx.fillText(assetName, pad, 40);
+  }
+
+  var ty = titleH;
+  if (headers.length) {
+    ctx.fillStyle = bgSurface;
+    ctx.fillRect(pad, ty, contentW, tableHeaderH);
+    ctx.fillStyle = clrMuted;
+    ctx.font = "600 10px " + fontFamily;
+    var hx = pad;
+    for (var hi = 0; hi < cols; hi++) {
+      ctx.fillText(fitText((headers[hi] || '').toUpperCase(), colW[hi] - cellPadX * 2), hx + cellPadX, ty + 17);
+      hx += colW[hi];
+    }
+    ty += tableHeaderH;
+  }
+  ctx.font = "12px " + fontFamily;
+  rows.forEach(function (row, ri) {
+    if (ri % 2 === 1) {
+      ctx.fillStyle = bgSurface;
+      ctx.fillRect(pad, ty, contentW, tableRowH);
+    }
+    ctx.fillStyle = clrText;
+    var cx = pad;
+    for (var ci = 0; ci < cols; ci++) {
+      ctx.fillText(fitText(row[ci] || '', colW[ci] - cellPadX * 2), cx + cellPadX, ty + 15);
+      cx += colW[ci];
+    }
+    ty += tableRowH;
+  });
+  ctx.strokeStyle = clrBorder;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(pad + 0.5, titleH + 0.5, contentW - 1, ty - titleH - 1);
+
+  if (hiddenNote) {
+    ctx.fillStyle = clrMuted;
+    ctx.font = "italic 12px " + fontFamily;
+    ctx.fillText(hiddenNote, pad, ty + 16);
+  }
+
+  canvas.toBlob(function (blob) {
+    if (!blob) { showToast("Screenshot failed", "error"); return; }
+    if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
+      showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+      return;
+    }
+    navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
+      showToast((label || "Table") + " copied to clipboard");
     }).catch(function () {
       showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
     });
@@ -11902,7 +12209,10 @@ function _wireAssetEventsTab(assetId) {
 
   var table = document.getElementById("asset-view-events-table");
   if (!table) return;
-  _assetEventsLayout = applyTableLayout(table, "asset-events", { onChange: _saveAssetEventsPrefs });
+  _assetEventsLayout = applyTableLayout(table, "asset-events", {
+    onChange: _saveAssetEventsPrefs,
+    onScreenshot: function (t) { _screenshotTableEl(t, "Events"); },
+  });
   // Server-side mode: never call sf.apply(); onChange resets offset + refetches.
   _assetEventsSF = new TableSF("asset-view-events-tbody", function () {
     _assetEventsOffset = 0;

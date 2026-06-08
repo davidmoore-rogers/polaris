@@ -435,7 +435,9 @@
     var showFullBtn = document.getElementById("topology-show-full");
     var searchInput = document.getElementById("topology-search-input");
     closeBtn.addEventListener("click", closeTopology);
-    if (screenshotBtn) screenshotBtn.addEventListener("click", screenshotTopology);
+    // Header camera = whole-modal (map + details) screenshot. The map-only
+    // screenshot lives on the floating button inside the map area.
+    if (screenshotBtn) screenshotBtn.addEventListener("click", screenshotTopologyModal);
     if (fullscreenBtn) fullscreenBtn.addEventListener("click", toggleFullscreenTopology);
     if (refreshBtn) refreshBtn.addEventListener("click", refreshTopology);
     if (resetBtn) resetBtn.addEventListener("click", resetTopologyLayout);
@@ -524,6 +526,217 @@
     }).catch(function () {
       if (typeof showToast === "function") showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
     });
+  }
+
+  // Whole-modal screenshot: the cytoscape map (cy.png) on the left, the info
+  // panel rendered as text on the right, titled with the site. The map is a
+  // canvas and the info panel is HTML, so we composite them onto one canvas
+  // rather than rasterizing the live DOM (no html2canvas dependency).
+  function screenshotTopologyModal() {
+    if (!cyInstance) {
+      if (typeof showToast === "function") showToast("Topology not loaded", "error");
+      return;
+    }
+    var rootCs = getComputedStyle(document.documentElement);
+    var pick = function (n, f) { var v = rootCs.getPropertyValue(n).trim(); return v || f; };
+    var bg = pick("--color-bg-primary", pick("--color-surface", "#ffffff"));
+    var uri = cyInstance.png({ output: "base64uri", scale: 2, full: true, bg: bg });
+    var mapImg = new Image();
+    mapImg.onload = function () { _composeTopologyModalCanvas(mapImg, pick); };
+    mapImg.onerror = function () {
+      if (typeof showToast === "function") showToast("Screenshot failed", "error");
+    };
+    mapImg.src = uri;
+  }
+
+  // Extract the topology info-panel (#topology-info) into ordered blocks:
+  //   { type: 'title',   text }            the <h4> FortiGate name
+  //   { type: 'kv',      label, value }    the top .detail-row pairs
+  //   { type: 'heading', text }            each .topology-section <h5>
+  //   { type: 'item',    primary, meta, indent }  each <li> (expanded endpoint
+  //                                        sub-lists are included, indented)
+  function _extractTopologyInfoBlocks(infoEl) {
+    var blocks = [];
+    if (!infoEl) return blocks;
+    var h4 = infoEl.querySelector("h4");
+    if (h4) blocks.push({ type: "title", text: (h4.textContent || "").trim() });
+    infoEl.querySelectorAll(":scope > .detail-row").forEach(function (dr) {
+      var l = dr.querySelector(".label");
+      var v = dr.querySelector(".value");
+      blocks.push({
+        type: "kv",
+        label: (l ? l.textContent : "").trim(),
+        value: (v ? v.textContent : "").trim(),
+      });
+    });
+    function liText(li) {
+      // Primary label = li text minus the trailing .meta span and any nested list.
+      var clone = li.cloneNode(true);
+      Array.prototype.forEach.call(clone.querySelectorAll(".meta, ul, details"), function (n) {
+        if (n.parentNode) n.parentNode.removeChild(n);
+      });
+      return (clone.textContent || "").replace(/\s+/g, " ").trim();
+    }
+    infoEl.querySelectorAll(".topology-section").forEach(function (sec) {
+      var h5 = sec.querySelector("h5");
+      if (h5) blocks.push({ type: "heading", text: (h5.textContent || "").trim() });
+      var topList = sec.querySelector(":scope > ul");
+      if (!topList) return;
+      Array.prototype.forEach.call(topList.children, function (li) {
+        if (li.tagName !== "LI") return;
+        var details = li.querySelector(":scope > details");
+        if (details) {
+          var summary = details.querySelector("summary");
+          blocks.push({ type: "item", primary: summary ? (summary.textContent || "").trim() : "", meta: "", indent: 0 });
+          if (details.hasAttribute("open")) {
+            var subList = details.querySelector("ul");
+            if (subList) {
+              Array.prototype.forEach.call(subList.children, function (sub) {
+                if (sub.tagName !== "LI") return;
+                var subMeta = sub.querySelector(":scope > .meta");
+                blocks.push({ type: "item", primary: liText(sub), meta: subMeta ? (subMeta.textContent || "").trim() : "", indent: 1 });
+              });
+            }
+          }
+          return;
+        }
+        var meta = li.querySelector(":scope > .meta");
+        blocks.push({ type: "item", primary: liText(li), meta: meta ? (meta.textContent || "").trim() : "", indent: 0 });
+      });
+    });
+    return blocks;
+  }
+
+  function _composeTopologyModalCanvas(mapImg, pick) {
+    var bgPrimary = pick("--color-bg-primary", "#ffffff");
+    var bgSurface = pick("--color-surface", "#f5f5f5");
+    var clrBorder = pick("--color-border", "#e0e0e0");
+    var clrText   = pick("--color-text-primary", "#111");
+    var clrMuted  = pick("--color-text-tertiary", "#888");
+    var accent    = pick("--color-accent", "#4fc3f7");
+
+    var fontFamily = "system-ui,-apple-system,sans-serif";
+    var scale = 2;
+    var pad = 20;
+    var gap = 24;
+    var titleH = 40;
+    var infoColW = 340;
+    var lineH = 19;
+
+    var titleEl = document.getElementById("topology-title");
+    var title = titleEl ? (titleEl.textContent || "").trim() : "Site topology";
+
+    var blocks = _extractTopologyInfoBlocks(document.getElementById("topology-info"));
+
+    // cy.png is rendered at 2x; treat its logical size as half so text drawn at
+    // 2x stays crisp alongside a near-native map.
+    var mapLogW = mapImg.width / 2;
+    var mapLogH = mapImg.height / 2;
+    var maxMapW = 1100;
+    var mapDrawW = Math.min(mapLogW, maxMapW);
+    var mapDrawH = mapLogW ? mapLogH * (mapDrawW / mapLogW) : mapLogH;
+
+    var measureCtx = document.createElement("canvas").getContext("2d");
+    function fit(text, maxW, font) {
+      measureCtx.font = font;
+      var t = String(text == null ? "" : text);
+      while (measureCtx.measureText(t).width > maxW && t.length > 3) t = t.slice(0, -4) + "…";
+      return t;
+    }
+
+    // Measure info column height.
+    var infoH = 0;
+    blocks.forEach(function (b) {
+      if (b.type === "title") infoH += 26;
+      else if (b.type === "heading") infoH += 28;
+      else infoH += lineH;
+    });
+
+    var contentH = Math.max(mapDrawH, infoH);
+    var w = pad + mapDrawW + gap + infoColW + pad;
+    var h = titleH + contentH + pad;
+
+    var canvas = document.createElement("canvas");
+    canvas.width = w * scale;
+    canvas.height = h * scale;
+    var ctx = canvas.getContext("2d");
+    ctx.scale(scale, scale);
+    ctx.fillStyle = bgPrimary;
+    ctx.fillRect(0, 0, w, h);
+
+    // Title.
+    ctx.fillStyle = clrText;
+    ctx.font = "bold 16px " + fontFamily;
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText(fit(title, w - pad * 2, "bold 16px " + fontFamily), pad, 26);
+
+    // Map.
+    ctx.drawImage(mapImg, pad, titleH, mapDrawW, mapDrawH);
+    ctx.strokeStyle = clrBorder;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(pad + 0.5, titleH + 0.5, mapDrawW - 1, mapDrawH - 1);
+
+    // Info column.
+    var ix = pad + mapDrawW + gap;
+    var iw = infoColW;
+    var y = titleH;
+    blocks.forEach(function (b) {
+      if (b.type === "title") {
+        ctx.fillStyle = accent;
+        ctx.font = "bold 14px " + fontFamily;
+        ctx.fillText(fit(b.text, iw, "bold 14px " + fontFamily), ix, y + 16);
+        y += 26;
+        return;
+      }
+      if (b.type === "heading") {
+        y += 8;
+        ctx.fillStyle = clrMuted;
+        ctx.font = "600 10px " + fontFamily;
+        ctx.fillText(fit(b.text.toUpperCase(), iw, "600 10px " + fontFamily), ix, y + 12);
+        y += 20;
+        return;
+      }
+      if (b.type === "kv") {
+        ctx.fillStyle = clrMuted;
+        ctx.font = "11px " + fontFamily;
+        ctx.fillText(fit(b.label, 110, "11px " + fontFamily), ix, y + 14);
+        ctx.fillStyle = clrText;
+        ctx.font = "12px " + fontFamily;
+        ctx.textAlign = "right";
+        ctx.fillText(fit(b.value || "—", iw - 120, "12px " + fontFamily), ix + iw, y + 14);
+        ctx.textAlign = "left";
+        y += lineH;
+        return;
+      }
+      // item
+      var indentX = ix + (b.indent ? 14 : 0);
+      ctx.fillStyle = clrText;
+      ctx.font = "12px " + fontFamily;
+      measureCtx.font = "11px " + fontFamily;
+      var metaW = b.meta ? measureCtx.measureText(b.meta).width + 12 : 0;
+      ctx.fillText(fit(b.primary, iw - (indentX - ix) - metaW, "12px " + fontFamily), indentX, y + 14);
+      if (b.meta) {
+        ctx.fillStyle = clrMuted;
+        ctx.font = "11px " + fontFamily;
+        ctx.textAlign = "right";
+        ctx.fillText(fit(b.meta, iw - 60, "11px " + fontFamily), ix + iw, y + 14);
+        ctx.textAlign = "left";
+      }
+      y += lineH;
+    });
+
+    canvas.toBlob(function (blob) {
+      if (!blob) { if (typeof showToast === "function") showToast("Screenshot failed", "error"); return; }
+      if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
+        if (typeof showToast === "function") showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+        return;
+      }
+      navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
+        if (typeof showToast === "function") showToast("Topology view copied to clipboard");
+      }).catch(function () {
+        if (typeof showToast === "function") showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+      });
+    }, "image/png");
   }
 
   async function openTopology(id, hostname) {
@@ -1226,6 +1439,36 @@
       moveEdgeTooltip(orig.clientX, orig.clientY);
     });
     cyInstance.on("mouseout", "edge", function () { hideEdgeTooltip(); });
+
+    // Map-only screenshot button, overlaid at the top-right of the graph area.
+    // (openTopology wipes #topology-graph's innerHTML and cytoscape re-mounts,
+    // so it's re-added here on every render rather than living in static HTML.)
+    _ensureTopologyMapShotButton();
+  }
+
+  // Adds the floating "copy map as image" camera button into #topology-graph.
+  // Guarded so refresh (which keeps the button) doesn't stack duplicates.
+  function _ensureTopologyMapShotButton() {
+    var graph = document.getElementById("topology-graph");
+    if (!graph || document.getElementById("topology-map-screenshot")) return;
+    if (!graph.style.position) graph.style.position = "relative";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.id = "topology-map-screenshot";
+    btn.className = "btn-icon topology-map-shot";
+    btn.title = "Copy map as image";
+    btn.setAttribute("aria-label", "Copy map as image");
+    btn.innerHTML =
+      '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>' +
+        '<circle cx="12" cy="13" r="4"/>' +
+      '</svg>';
+    btn.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      screenshotTopology();
+    });
+    graph.appendChild(btn);
   }
 
   // ── Edge hover tooltip ─────────────────────────────────────────────────────

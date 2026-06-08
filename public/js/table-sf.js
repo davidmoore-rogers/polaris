@@ -865,6 +865,29 @@ function setupColumnLayout(tableEl, options) {
         }
       }
     });
+    // Optional per-table screenshot button, sits to the LEFT of the gear and
+    // rides along when the gear auto-relocates. Wired only when the caller
+    // passes options.onScreenshot (asset-detail tables); other tables get the
+    // gear alone, unchanged.
+    if (typeof options.onScreenshot === "function") {
+      var shotBtn = document.createElement("button");
+      shotBtn.type = "button";
+      shotBtn.className = "sf-col-gear sf-col-shot";
+      shotBtn.title = "Copy this table as an image";
+      shotBtn.setAttribute("aria-label", "Copy this table as an image");
+      shotBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">' +
+        '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>' +
+        '<circle cx="12" cy="13" r="4"/>' +
+        '</svg>';
+      shotBtn.addEventListener("mousedown", function (e) { e.stopPropagation(); });
+      shotBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        try { options.onScreenshot(tableEl); } catch (_) {}
+      });
+      gearWrap.appendChild(shotBtn);
+    }
     gearWrap.appendChild(gearBtn);
     positionGear();
   }
@@ -1001,6 +1024,7 @@ function applyTableLayout(tableEl, typeKey, options) {
   var storageKey = "polaris-table-layout-" + typeKey + "-" + user;
   var layout = setupColumnLayout(tableEl, {
     labelFor: options.labelFor,
+    onScreenshot: options.onScreenshot,
     onChange: function () {
       try { localStorage.setItem(storageKey, JSON.stringify(layout.getPrefs())); } catch (_) {}
       if (typeof options.onChange === "function") options.onChange();
