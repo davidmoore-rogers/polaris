@@ -65,6 +65,12 @@ type Config struct {
 	TelemetryIntervalSec    int
 	InterfacesIntervalSec   int
 	StorageIntervalSec      int
+
+	// Verbose turns on per-push lifecycle logging (connect / send / validate
+	// / disconnect) for the sample streams. Diagnostic only — set
+	// `verbose = true` in agent.conf. Default false so production agents
+	// stay quiet (success paths normally log nothing).
+	Verbose bool
 }
 
 // DefaultPath returns the canonical agent.conf path for the running OS.
@@ -145,6 +151,9 @@ func Load(path string) (*Config, error) {
 			fmt.Sscanf(val, "%d", &cfg.InterfacesIntervalSec)
 		case "storage_interval_sec":
 			fmt.Sscanf(val, "%d", &cfg.StorageIntervalSec)
+		case "verbose":
+			v := strings.ToLower(val)
+			cfg.Verbose = v == "true" || v == "1" || v == "yes" || v == "on"
 		default:
 			// Unknown key — ignored to stay forward-compatible with newer
 			// installer scripts writing keys this agent version doesn't read.
@@ -262,6 +271,9 @@ func (c *Config) Save() error {
 	}
 	if c.StorageIntervalSec > 0 {
 		fmt.Fprintf(w, "storage_interval_sec       = %d\n", c.StorageIntervalSec)
+	}
+	if c.Verbose {
+		fmt.Fprintln(w, "verbose                    = true")
 	}
 	if err := w.Flush(); err != nil {
 		return fmt.Errorf("flush: %w", err)

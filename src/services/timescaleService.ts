@@ -187,9 +187,18 @@ function resolveCompressAfterDays(): number {
  *   2. Enable / refresh column compression. Idempotent ALTER TABLE.
  *      `compress_segmentby = "assetId"` keeps the read pattern (filter by
  *      asset, range over time) efficient inside compressed chunks.
- *   3. Drop any existing compression policy and re-add with the current
- *      `TIMESCALE_COMPRESS_AFTER_DAYS` window — so changing the env var
- *      between boots actually takes effect.
+ *   3. Ensure the compression policy matches the current
+ *      `TIMESCALE_COMPRESS_AFTER_DAYS` window — but only remove + re-add when
+ *      the window actually CHANGED (compressionPolicyMatches). An unconditional
+ *      recreate on every boot resets the policy's next_start ~12h out, so a
+ *      host that reboots more often (in-app updates cycle polaris.target) would
+ *      never let the policy reach its first run and chunks would never compress.
+ *
+ * After the per-table loop, a self-heal pass (compressEligibleBacklog)
+ * compresses any chunks already past their window but still uncompressed —
+ * doing immediately what the 12h policy scheduler otherwise might never get to.
+ * This is what prevents the uncompressed delete-churn bloat that ballooned
+ * asset_interface_samples to 114 GB in prod (a single 63 GB uncompressed chunk).
  *
  * Source tables partition by `timestamp`; rollup tables partition by
  * `bucketStart`. The compression `orderby` clause uses the same column so
@@ -214,6 +223,116 @@ const SELECTION_AWARE_SOURCE_TABLES = new Set<string>([
 ]);
 const SELECTION_AWARE_CHUNK_INTERVAL = "1 day";
 const SELECTION_AWARE_MIN_COMPRESS_AFTER_DAYS = 2;
+
+/** Max chunks compressed per table per boot by the self-heal backlog pass.
+ *  Bounds a large first-run / post-outage backlog so it can't stall boot or
+ *  fire dozens of parallel-ish compress_chunk calls. Steady state has 0-1
+ *  eligible chunks per table; the cap only bites on first deploy of this code
+ *  or after a long compression outage. Overflow is logged + retried next boot. */
+const MAX_BACKLOG_COMPRESS_CHUNKS_PER_TABLE = 8;
+
+/** Resolve the effective compress-after window for a table. Selection-aware
+ *  tables (interface/storage/ipsec) floor at SELECTION_AWARE_MIN_COMPRESS_AFTER_DAYS
+ *  so the unselected 24h deleteMany never has to touch a compressed chunk;
+ *  0 (compression disabled) passes through unchanged. */
+function effectiveCompressAfterFor(table: string, compressAfterDays: number): number {
+  const selectionAware = SELECTION_AWARE_SOURCE_TABLES.has(table);
+  return selectionAware && compressAfterDays > 0
+    ? Math.max(compressAfterDays, SELECTION_AWARE_MIN_COMPRESS_AFTER_DAYS)
+    : compressAfterDays;
+}
+
+/**
+ * True when `table` already carries a compression policy whose `compress_after`
+ * window equals `${days} days`. Lets migrateToHypertables SKIP the
+ * remove+re-add when nothing changed.
+ *
+ * Why this matters: re-adding a compression policy resets the job's next_start
+ * to `now() + schedule_interval` (12h). migrateToHypertables runs on every
+ * web-role boot, so a host that reboots more often than 12h (in-app updates
+ * cycle polaris.target; crash loops) would perpetually reset the policy before
+ * its first real run ever fires — and the backlog never compresses. Skipping
+ * the recreate when the window is unchanged lets the policy's schedule survive
+ * across restarts.
+ */
+async function compressionPolicyMatches(table: string, days: number): Promise<boolean> {
+  try {
+    const rows = await prisma.$queryRawUnsafe<{ matches: boolean }[]>(
+      `SELECT ((config->>'compress_after')::interval = ($2 || ' days')::interval) AS matches
+         FROM timescaledb_information.jobs
+        WHERE proc_name = 'policy_compression'
+          AND hypertable_name = $1`,
+      table,
+      String(days),
+    );
+    return rows.length > 0 && rows.every((r) => r.matches === true);
+  } catch (err) {
+    // Introspection failed (view shape differs across TS versions) — fall back
+    // to recreating the policy, which is always correct, just not idempotent.
+    logger.debug({ err, table }, "compression policy introspection failed; will recreate");
+    return false;
+  }
+}
+
+/**
+ * Self-heal pass: compress chunks that have already aged past `compressAfterDays`
+ * but are still uncompressed. Does immediately, at boot, what the TimescaleDB
+ * compression POLICY would only do on its 12h schedule — so a frequently
+ * restarted host (whose policy timer keeps resetting; see
+ * compressionPolicyMatches) doesn't accumulate uncompressed delete-churn bloat.
+ * Interface samples are the canonical victim: ~64M rows/day written, nearly all
+ * unselected rows DELETEd at 24h out of live uncompressed heap, which never
+ * shrinks back to the OS — a single uncompressed chunk reached 63 GB in prod.
+ *
+ * Sequential + oldest-first + capped at MAX_BACKLOG_COMPRESS_CHUNKS_PER_TABLE.
+ * Only touches chunks older than the window, so it never compresses a chunk the
+ * unselected 24h deleteMany still needs to write to. Per-chunk errors are
+ * swallowed (logged); compress_chunk is atomic per chunk, so partial progress
+ * (e.g. interrupted by a restart) is durable and resumes next boot.
+ */
+async function compressEligibleBacklog(table: string, compressAfterDays: number): Promise<void> {
+  if (compressAfterDays <= 0) return;
+  // Compute the cutoff in JS (UTC) and compare against the view's timestamptz
+  // range_end — avoids session-timezone ambiguity. A few hours of imprecision
+  // is harmless: the window is >= 2 days and chunks are 1d/7d wide.
+  const cutoff = new Date(Date.now() - compressAfterDays * 24 * 3600 * 1000);
+  let eligible: { qualified: string }[];
+  try {
+    eligible = await prisma.$queryRawUnsafe<{ qualified: string }[]>(
+      `SELECT format('%I.%I', chunk_schema, chunk_name) AS "qualified"
+         FROM timescaledb_information.chunks
+        WHERE hypertable_name = $1
+          AND is_compressed = false
+          AND range_end <= $2::timestamptz
+        ORDER BY range_start ASC`,
+      table,
+      cutoff.toISOString(),
+    );
+  } catch (err) {
+    logger.debug({ err, table }, "backlog chunk introspection failed; skipping backlog compression");
+    return;
+  }
+  if (eligible.length === 0) return;
+
+  const toCompress = eligible.slice(0, MAX_BACKLOG_COMPRESS_CHUNKS_PER_TABLE);
+  const start = Date.now();
+  let compressed = 0;
+  for (const chunk of toCompress) {
+    try {
+      await prisma.$executeRawUnsafe(`SELECT compress_chunk($1::regclass)`, chunk.qualified);
+      compressed++;
+    } catch (err) {
+      logger.warn({ err, table, chunk: chunk.qualified }, "backlog compress_chunk failed");
+    }
+  }
+  const remaining = eligible.length - compressed;
+  logger.info(
+    { table, eligibleChunks: eligible.length, compressed, remaining, durationMs: Date.now() - start },
+    remaining > 0
+      ? `Compressed ${compressed} backlog chunk(s) on ${table}; ${remaining} remain (resume next boot / policy)`
+      : `Compressed ${compressed} backlog chunk(s) on ${table}`,
+  );
+}
 
 export async function migrateToHypertables(): Promise<void> {
   if (!isTimescaleAvailable()) return;
@@ -258,24 +377,29 @@ export async function migrateToHypertables(): Promise<void> {
         `ALTER TABLE "${table}" SET (timescaledb.compress = on, timescaledb.compress_segmentby = '"assetId"', timescaledb.compress_orderby = '"${partitionColumn}" DESC')`,
       );
 
-      // Compression policy. Always remove + re-add so the operator's current
-      // TIMESCALE_COMPRESS_AFTER_DAYS value is what's enforced after a boot
-      // — `add_compression_policy(if_not_exists => TRUE)` would silently
-      // keep the old window even if the env var changed.
-      await prisma.$executeRawUnsafe(
-        `SELECT remove_compression_policy($1::regclass, if_exists => TRUE)`,
-        table,
-      );
-      // Selection-aware tables keep the recent window uncompressed long enough
-      // that the unselected 24h deleteMany never hits a compressed chunk. When
-      // compression is disabled globally (0), leave it disabled.
-      const effectiveCompressAfter =
-        selectionAware && compressAfterDays > 0
-          ? Math.max(compressAfterDays, SELECTION_AWARE_MIN_COMPRESS_AFTER_DAYS)
-          : compressAfterDays;
+      // Compression policy. Selection-aware tables keep the recent window
+      // uncompressed long enough that the unselected 24h deleteMany never hits
+      // a compressed chunk. When compression is disabled globally (0), ensure
+      // no policy lingers.
+      const effectiveCompressAfter = effectiveCompressAfterFor(table, compressAfterDays);
       if (effectiveCompressAfter > 0) {
+        // Only remove + re-add when the window actually changed. An
+        // unconditional recreate resets the policy's next_start to ~12h out;
+        // on a host that reboots more often than that the policy would never
+        // reach its first run. See compressionPolicyMatches.
+        if (!(await compressionPolicyMatches(table, effectiveCompressAfter))) {
+          await prisma.$executeRawUnsafe(
+            `SELECT remove_compression_policy($1::regclass, if_exists => TRUE)`,
+            table,
+          );
+          await prisma.$executeRawUnsafe(
+            `SELECT add_compression_policy($1::regclass, INTERVAL '${effectiveCompressAfter} days')`,
+            table,
+          );
+        }
+      } else {
         await prisma.$executeRawUnsafe(
-          `SELECT add_compression_policy($1::regclass, INTERVAL '${effectiveCompressAfter} days')`,
+          `SELECT remove_compression_policy($1::regclass, if_exists => TRUE)`,
           table,
         );
       }
@@ -296,4 +420,13 @@ export async function migrateToHypertables(): Promise<void> {
   // Re-detect so isHypertable() reflects the post-conversion state for the
   // prune layer + the capacity snapshot.
   await detectTimescale();
+
+  // Self-heal pass: compress any already-eligible-but-uncompressed chunks now,
+  // rather than waiting on the 12h policy scheduler (which a frequently
+  // restarted host never lets fire). Runs after the DDL loop so every policy is
+  // in place first; sequential per table so a large backlog can't saturate the
+  // DB. Best-effort — failures are logged inside the helper, never thrown.
+  for (const { table } of targets) {
+    await compressEligibleBacklog(table, effectiveCompressAfterFor(table, compressAfterDays));
+  }
 }

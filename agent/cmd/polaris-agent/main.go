@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -32,6 +33,34 @@ import (
 	"github.com/polaris/agent/internal/config"
 	"github.com/polaris/agent/internal/transport"
 )
+
+// verbose mirrors cfg.Verbose, set once in runAgent before the loops start.
+// When true, the sample push paths emit the connect / send / validate /
+// disconnect lifecycle lines. Read-only after startup so no syncing needed.
+var verbose bool
+
+// fmtFloatPtr / fmtU64Ptr / fmtIntPtr render the nil-able sample fields for
+// the verbose log lines without panicking on a missing reading.
+func fmtFloatPtr(p *float64) string {
+	if p == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%.1f", *p)
+}
+
+func fmtU64Ptr(p *uint64) string {
+	if p == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%d", *p)
+}
+
+func fmtIntPtr(p *int) string {
+	if p == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%d", *p)
+}
 
 // version is stamped at build time via -ldflags='-X main.version=<x>'.
 // Default value is the literal contents of agent/VERSION at the moment
@@ -90,6 +119,14 @@ func runAgent(ctx context.Context, confPath string) {
 	// Stamp the ldflag-set version into the client so /enroll and
 	// /heartbeat report the version this binary was built at.
 	client.AgentVersion = version
+
+	// Latch verbose lifecycle logging from agent.conf. Diagnostic only —
+	// off by default; an operator sets `verbose = true` to trace the
+	// telemetry round-trip on a single host.
+	verbose = cfg.Verbose
+	if verbose {
+		log.Printf("verbose logging enabled — tracing sample push lifecycle to %s", client.BaseURL())
+	}
 
 	// Step 1: enroll if we don't have a bearer yet.
 	if cfg.BearerToken == "" {
@@ -177,7 +214,7 @@ func pushOne(client *transport.Client) {
 		_, err := client.Heartbeat()
 		return err
 	})
-	_, err := client.PushSamples(&transport.SamplesBody{
+	resp, err := client.PushSamples(&transport.SamplesBody{
 		Stream:  "responseTime",
 		Samples: []*transport.ResponseTimeSample{sample},
 	})
@@ -186,6 +223,11 @@ func pushOne(client *transport.Client) {
 		// the host's journal but mustn't crash the agent (transient 5xx
 		// is normal during Polaris restart).
 		log.Printf("push responseTime sample: %v", err)
+		return
+	}
+	if verbose {
+		log.Printf("responseTime sent: success=%v rttMs=%s -> accepted=%d rejected=%d",
+			sample.Success, fmtIntPtr(sample.ResponseTimeMs), resp.Accepted, resp.Rejected)
 	}
 }
 
@@ -235,12 +277,33 @@ func telemetryLoop(ctx context.Context, cfg *config.Config, client *transport.Cl
 
 func pushTelemetryOne(client *transport.Client) {
 	sample := collectors.TelemetryOnce()
-	_, err := client.PushSamples(&transport.SamplesBody{
+	if verbose {
+		log.Printf("connecting to server (%s)", client.BaseURL())
+		log.Printf("sending telemetry: cpuPct=%s memPct=%s memUsedBytes=%s memTotalBytes=%s temperatures=%d",
+			fmtFloatPtr(sample.CPUPct), fmtFloatPtr(sample.MemPct),
+			fmtU64Ptr(sample.MemUsedBytes), fmtU64Ptr(sample.MemTotalBytes), len(sample.Temperatures))
+	}
+	resp, err := client.PushSamples(&transport.SamplesBody{
 		Stream:  "telemetry",
 		Samples: []*transport.TelemetrySample{sample},
 	})
 	if err != nil {
-		log.Printf("push telemetry sample: %v", err)
+		if verbose {
+			log.Printf("server disconnected — telemetry send FAILED: %v", err)
+		} else {
+			log.Printf("push telemetry sample: %v", err)
+		}
+		return
+	}
+	if verbose {
+		log.Printf("server connected — telemetry sent (1 sample)")
+		log.Printf("validating telemetry was received correctly...")
+		if resp.Accepted >= 1 && resp.Rejected == 0 {
+			log.Printf("telemetry received correctly by server (accepted=%d rejected=%d)", resp.Accepted, resp.Rejected)
+		} else {
+			log.Printf("WARNING: telemetry NOT fully received (sent=1 accepted=%d rejected=%d)", resp.Accepted, resp.Rejected)
+		}
+		log.Printf("server disconnected (request complete)")
 	}
 }
 
@@ -288,14 +351,21 @@ func pushInterfacesOne(client *transport.Client) {
 		return
 	}
 	if len(r.s) == 0 {
+		if verbose {
+			log.Printf("interfaces: collector returned 0 rows — nothing to send")
+		}
 		return
 	}
-	_, err := client.PushSamples(&transport.SamplesBody{
+	resp, err := client.PushSamples(&transport.SamplesBody{
 		Stream:  "interfaces",
 		Samples: r.s,
 	})
 	if err != nil {
 		log.Printf("push interfaces samples: %v", err)
+		return
+	}
+	if verbose {
+		log.Printf("interfaces sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
 	}
 }
 
@@ -333,14 +403,21 @@ func pushStorageOne(client *transport.Client) {
 		return
 	}
 	if len(r.s) == 0 {
+		if verbose {
+			log.Printf("storage: collector returned 0 rows — nothing to send")
+		}
 		return
 	}
-	_, err := client.PushSamples(&transport.SamplesBody{
+	resp, err := client.PushSamples(&transport.SamplesBody{
 		Stream:  "storage",
 		Samples: r.s,
 	})
 	if err != nil {
 		log.Printf("push storage samples: %v", err)
+		return
+	}
+	if verbose {
+		log.Printf("storage sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
 	}
 }
 

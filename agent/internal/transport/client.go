@@ -63,6 +63,11 @@ func NewClient(baseURL string, certPins []string, bearer string) *Client {
 // Called once after /enroll returns the long-lived bearer.
 func (c *Client) SetBearer(b string) { c.bearer = b }
 
+// BaseURL returns the normalized server base URL (no trailing slash). Used
+// by the verbose lifecycle logging in main so the "connecting to server"
+// line names the target.
+func (c *Client) BaseURL() string { return c.baseURL }
+
 // ─── Enroll ───────────────────────────────────────────────────────────
 
 type EnrollRequest struct {

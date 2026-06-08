@@ -229,6 +229,22 @@
   border-right: 1px solid var(--color-border);
 }
 
+/* Floating map-only screenshot button, top-right of the graph area. */
+.topology-map-shot {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  color: var(--color-text-secondary);
+  opacity: 0.85;
+  line-height: 0;
+}
+.topology-map-shot:hover { opacity: 1; color: var(--color-accent); border-color: var(--color-accent); }
+
 .topology-legend {
   position: absolute;
   bottom: 12px;

@@ -222,6 +222,25 @@ agentsRouter.post("/samples", async (req, res, next) => {
     let accepted = 0;
     const now = new Date();
 
+    // Diagnostic receive-logging, opt-in via POLARIS_AGENT_SAMPLE_LOG=1 on the
+    // web role. Off by default so production stays quiet; only agent traffic
+    // reaches this handler, so the volume is one line per push per agent.
+    const sampleLog = process.env.POLARIS_AGENT_SAMPLE_LOG === "1";
+    if (sampleLog) {
+      const first =
+        body.stream === "telemetry" && body.samples.length > 0
+          ? {
+              cpuPct: body.samples[0].cpuPct,
+              memPct: body.samples[0].memPct,
+              temps: body.samples[0].temperatures?.length ?? 0,
+            }
+          : undefined;
+      logger.info(
+        { assetId, stream: body.stream, received: body.samples.length, first },
+        "agent /samples received",
+      );
+    }
+
     if (body.stream === "responseTime") {
       for (const s of body.samples) {
         const ts = s.timestamp ? new Date(s.timestamp) : now;
@@ -265,6 +284,12 @@ agentsRouter.post("/samples", async (req, res, next) => {
       }
       // Bump lastTelemetryAt so the System tab reflects freshness.
       await prisma.asset.update({ where: { id: assetId }, data: { lastTelemetryAt: now } });
+      if (sampleLog) {
+        logger.info(
+          { assetId, enqueued: accepted },
+          "agent telemetry samples enqueued to write buffer",
+        );
+      }
     } else if (body.stream === "interfaces") {
       // Selection-aware cadence: the agent reports the host's full NIC table,
       // so stamp pinned interfaces "fast" (full retention + rollup) and the
