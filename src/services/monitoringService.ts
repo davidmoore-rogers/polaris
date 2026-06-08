@@ -64,8 +64,8 @@ import {
   setQueueDepth,
   startSampleWriteTimer,
 } from "../metrics.js";
-import { dropChunks } from "./timescaleService.js";
-import { getSampleRetention, FOREVER, UNSELECTED_DETAIL_HOURS } from "./sampleRetentionService.js";
+import { dropChunks, getEffectiveCompressAfterDays } from "./timescaleService.js";
+import { getSampleRetention, FOREVER, unselectedSlowPruneWindow } from "./sampleRetentionService.js";
 import {
   enqueueMonitorSample,
   enqueueTelemetrySample,
@@ -8341,11 +8341,16 @@ async function pruneSelectionAwareDetail(
     total += (await fn({ cadence: "fast", timestamp: { lt: sel } })).count;
   }
   // Unselected = "slow" or legacy NULL. `{ not: "fast" }` excludes NULL in SQL,
-  // so NULL is matched explicitly.
-  const slowCutoff = new Date(now - UNSELECTED_DETAIL_HOURS * 3600 * 1000);
+  // so NULL is matched explicitly. Lower-bound the window at the compressed-
+  // chunk frontier (getEffectiveCompressAfterDays) so this DELETE can never
+  // match rows inside a compressed chunk — doing so would decompress the whole
+  // chunk into its rowstore heap and leave un-truncatable low-density bloat
+  // (prod incident 2026-06-08). Slow rows past the frontier ride compressed
+  // until drop_chunks removes the whole chunk at the selected window above.
+  const { gte, lt } = unselectedSlowPruneWindow(now, getEffectiveCompressAfterDays(hypertableName));
   total += (await fn({
     OR: [{ cadence: null }, { cadence: { not: "fast" } }],
-    timestamp: { lt: slowCutoff },
+    timestamp: gte ? { gte, lt } : { lt },
   })).count;
   return total;
 }
