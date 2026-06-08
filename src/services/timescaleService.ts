@@ -214,8 +214,13 @@ function resolveCompressAfterDays(): number {
 // prune trims to 24h via a per-row deleteMany. Two requirements fall out:
 //   - a small (1-day) chunk interval so drop_chunks peels selected history at
 //     day granularity and the slow 24h trim lands in small recent chunks;
-//   - compress-after >= 2 days so the 24h deleteMany never has to touch a
-//     compressed chunk (rows in compressed chunks can't be DELETEd).
+//   - compress-after >= 2 days as a backstop. The PRIMARY guarantee that the
+//     slow deleteMany never touches a compressed chunk is on the prune side:
+//     it lower-bounds its window at getEffectiveCompressAfterDays() (see
+//     unselectedSlowPruneWindow). A row-level DELETE matching rows in a
+//     compressed chunk forces TimescaleDB to decompress the whole chunk into
+//     its rowstore heap, leaving multi-GB of un-truncatable low-density heap
+//     (prod incident 2026-06-08 — chunks at 0 live tuples / 10 GB on disk).
 const SELECTION_AWARE_SOURCE_TABLES = new Set<string>([
   "asset_interface_samples",
   "asset_storage_samples",
@@ -232,14 +237,31 @@ const SELECTION_AWARE_MIN_COMPRESS_AFTER_DAYS = 2;
 const MAX_BACKLOG_COMPRESS_CHUNKS_PER_TABLE = 8;
 
 /** Resolve the effective compress-after window for a table. Selection-aware
- *  tables (interface/storage/ipsec) floor at SELECTION_AWARE_MIN_COMPRESS_AFTER_DAYS
- *  so the unselected 24h deleteMany never has to touch a compressed chunk;
- *  0 (compression disabled) passes through unchanged. */
+ *  tables (interface/storage/ipsec) floor at SELECTION_AWARE_MIN_COMPRESS_AFTER_DAYS;
+ *  the prune lower-bounds its unselected deleteMany at this same window so it
+ *  never decompresses a compressed chunk. 0 (compression disabled) passes
+ *  through unchanged. */
 function effectiveCompressAfterFor(table: string, compressAfterDays: number): number {
   const selectionAware = SELECTION_AWARE_SOURCE_TABLES.has(table);
   return selectionAware && compressAfterDays > 0
     ? Math.max(compressAfterDays, SELECTION_AWARE_MIN_COMPRESS_AFTER_DAYS)
     : compressAfterDays;
+}
+
+/**
+ * Public: the effective compress-after window (in days) Polaris applies to a
+ * hypertable, folding the operator's `TIMESCALE_COMPRESS_AFTER_DAYS` with the
+ * selection-aware floor. Returns 0 when compression is disabled.
+ *
+ * The retention prune calls this to lower-bound its unselected-row deleteMany
+ * (see `unselectedSlowPruneWindow` in sampleRetentionService): a row-level
+ * DELETE that matches rows inside a COMPRESSED chunk forces TimescaleDB to
+ * decompress the whole chunk into its rowstore heap, leaving multi-GB of
+ * un-truncatable low-density heap (prod incident 2026-06-08). Bounding the
+ * delete at this frontier keeps it on uncompressed chunks only.
+ */
+export function getEffectiveCompressAfterDays(table: string): number {
+  return effectiveCompressAfterFor(table, resolveCompressAfterDays());
 }
 
 /**

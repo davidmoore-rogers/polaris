@@ -52,6 +52,43 @@ export const FOREVER = -1;
  *  Not operator-configurable — a property of being unselected. No rollup. */
 export const UNSELECTED_DETAIL_HOURS = 24;
 
+const DAY_MS = 24 * 3600 * 1000;
+
+/**
+ * Time window for the unselected/slow detail prune (interface / storage / ipsec).
+ * Slow rows (cadence="slow" or legacy NULL) older than UNSELECTED_DETAIL_HOURS
+ * are deleted — but ONLY back to the compressed-chunk frontier.
+ *
+ * Why the lower bound: a row-level DELETE that matches rows inside a COMPRESSED
+ * TimescaleDB chunk forces the whole chunk to be decompressed into its rowstore
+ * heap to perform the delete; autovacuum then reclaims the dead tuples to the
+ * FSM but never returns the pages to the OS, leaving multi-GB of un-truncatable
+ * low-density heap (prod incident 2026-06-08: chunks at 0 live tuples / 10 GB
+ * on disk holding ~350 MB of real compressed data). Slow rows that age past the
+ * compress-after window therefore ride along compressed (negligible bytes)
+ * until drop_chunks removes the whole chunk at the selected-retention boundary.
+ *
+ * Returns `{ gte, lt }`: delete slow rows with `gte <= timestamp < lt`.
+ * `gte` is null (legacy unbounded behavior) when:
+ *   - compression is disabled (`compressAfterDays <= 0`) — no chunk is ever
+ *     compressed, so the delete can safely reach all the way back; or
+ *   - the compress frontier is not strictly older than the 24h cutoff
+ *     (`compressAfterDays <= 1`) — bounding there would make the window empty
+ *     and slow rows would never prune. Selection-aware tables floor compress-
+ *     after at 2 days, so in practice `gte` is always set for them.
+ *
+ * Pure / side-effect-free for unit testing — pass `Date.now()` as `nowMs`.
+ */
+export function unselectedSlowPruneWindow(
+  nowMs: number,
+  compressAfterDays: number,
+): { gte: Date | null; lt: Date } {
+  const lt = new Date(nowMs - UNSELECTED_DETAIL_HOURS * 3600 * 1000);
+  const frontierMs = nowMs - compressAfterDays * DAY_MS;
+  const gte = compressAfterDays > 0 && frontierMs < lt.getTime() ? new Date(frontierMs) : null;
+  return { gte, lt };
+}
+
 export type RetentionEntity =
   | "assets"
   | "cpuMem"

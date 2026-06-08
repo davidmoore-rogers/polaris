@@ -89,6 +89,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `src/api/routes/integrations.ts` — Active Directory / Windows Server discovery paths upsert ad / windowsserver source rows
 - `src/jobs/backfillAssetSources.ts` — One-shot startup: derives sources from legacy assetTag / sid: / ad-guid: tag conventions
 - `src/utils/assetSourceDerivation.ts` — deriveAssetSources() implements source derivation rules for both shadow-write and backfill
+- `src/services/assetMergeService.ts` — mergeAssets() re-binds ALL of an absorbed asset's AssetSource rows onto the survivor (operator-driven merge, `POST /assets/:id/merge`) — the inverse of the per-source Split (`POST /assets/:id/sources/:sourceId/split`, which re-binds ONE source onto a fresh asset). Both rely on the global `(sourceKind, externalId)` uniqueness so a re-bind can never collide. Unlike the automatic `mergeDuplicateHostnameAssets` job / `acceptAssetConflict`, merge PRESERVES the ghost's sources (re-bind) rather than cascade-deleting them.
 
 **Readers** (files that consume it):
 - `src/utils/assetProjection.ts` — projectAssetFromSources() reads AssetSource rows and applies priority rules to build ProjectedAsset shape
@@ -110,6 +111,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 **When changing this:**
 - Modify priority rules only if tuned against real drift logs and agreed with operators (don't guess).
 - If adding a new discovery source kind, pair it with an AssetSource upsert in the discovery path AND update deriveAssetSources() rules for backfill coverage.
+- Adding a new mergeable Asset scalar field? Add it to `MERGEABLE_FIELDS` in `src/services/assetMergeService.ts` AND the `_mergeCompareFields` list in `public/js/assets.js` (they must stay in sync — the modal and the service agree on what's diffable/winner-pickable).
 - Test shadow-write: create an asset with assetTag, verify AssetSource row exists; update assetTag, verify the row is refreshed.
 - Run projectionDriftService on next discovery cycle and check pino logs for "asset.projection.drift" — should be silent on stable sources.
 - Verify backfill catches the new source kind: run startup job, spot-check a few assets have the right AssetSource rows.
@@ -730,6 +732,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 **Operator writers:**
 - `src/api/routes/assets.ts:PUT /assets/:id` — primary edit path; accepts `tags: string[]` and writes it as-is.
 - `src/api/routes/assets.ts:POST /assets/:id/sources/:sourceId/split` — clones tag set when splitting an asset.
+- `src/services/assetMergeService.ts` (`POST /assets/:id/merge`) — union-merges the absorbed asset's tags onto the survivor (operator merge).
 - `public/js/assets.js` bulk-edit modal — calls `PUT /assets/:id` per row with "Add" / "Replace" semantics.
 
 **System writers (managed namespaces):**
@@ -944,6 +947,8 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - **SD-WAN stream change-checklist** (mirror the IPsec stream end-to-end): `prisma/schema.prisma` (detail + `*Hourly`/`*Daily`) → migration → `monitoringService` (`PerfSlaSample`/`SdwanRuleSample` interfaces, `collectSdwanFortinet` + pure parsers `parsePerfSlaHealthCheck`/`parseSdwanRules`/`parseSdwanSlaThresholds`, `includeSdwan` gate in `collectSystemInfoFortinet`, persist in `recordSystemInfoResult`, prune in `pruneSystemInfoSamples`) → `sampleWriteBuffer` (row type + buffer key + `TABLE_LABEL` + `flushing` + enqueue + `writeBatch` case) → `sampleRollupService` (`DEFS` + `SourceTable` + `buildSql` + SQL helpers) → `sampleRetentionService` (`RetentionEntity` + `RETENTION_ENTITIES` + default) → `sampleHistoryService` (`readPerfSlaHistory`/`readSdwanRuleHistory`) → `assets.ts` routes → `public/js/{api,assets,integrations,server-settings}.js`. The integration toggle `pullSdwan` is added to BOTH `FortiManagerConfigSchema` + `FortiGateConfigSchema` (parity).
 - `src/services/sampleRollupService.ts:rollupHourly() / rollupDaily()` — INSERT...ON CONFLICT DO UPDATE per (table, tier). Driven by `src/jobs/runSampleRollup.ts` (hourly tick every 30 min, daily tick at 02:30 UTC). Sources for daily reads from `*_hourly`, not detail, so the daily tick stays bounded on big fleets.
 - `src/services/monitoringService.ts:pruneMonitorSamples / pruneTelemetrySamples / pruneSystemInfoSamples` — fire from `src/jobs/monitorAssets.ts` heavy-loop daily prune; each helper calls `pruneOneTable` once per (table × tier × class) with retention from `getSampleRetention()`.
+  - **Selection-aware detail prune (`pruneSelectionAwareDetail`, interfaces/storage/ipsec) MUST NOT row-DELETE inside a compressed chunk.** The unselected/slow deleteMany is lower-bounded at the compressed-chunk frontier via `unselectedSlowPruneWindow(now, getEffectiveCompressAfterDays(table))` (sampleRetentionService + timescaleService). A DELETE matching rows in a compressed TimescaleDB chunk decompresses the whole chunk into its rowstore heap → un-truncatable low-density bloat (prod incident 2026-06-08). Slow rows past the frontier ride compressed until `drop_chunks` removes the whole chunk at the selected window. If you change the compress-after window source or the 1-day chunk interval, re-check this bound.
+- `src/jobs/reclaimBloatedChunks.ts` — daily safety net that `VACUUM (FULL)`s already-compressed selection-aware chunks whose on-disk heap dwarfs their compressed bytes (the residue of any decompress-on-DELETE that slipped past the prune bound, plus pre-fix bloat). Read-only detection via `chunk_compression_stats()`; bounded + `lock_timeout`-guarded on a dedicated `getDirectDatabaseUrl()` connection. Registered under `cfg.runsSchedulers` in `src/app.ts`.
 
 **Readers:**
 - `src/services/sampleHistoryService.ts:read*History` — six tier-aware readers, one per source. Detail tier returns raw rows; rollup tiers translate aggregate columns back to source field names so existing chart renderers consume both shapes with no per-tier branching except for counter-rate pre-computation.
@@ -2370,11 +2375,11 @@ Listed alphabetically.
 
 **What it owns:** TimescaleDB extension detection and hypertable migration for six sample tables; `dropChunks` pre-filter for retention pruning. Boot-time detection caches hypertable status; subsequent `isHypertable()` checks return cached value without round-tripping.
 
-**Public API:** `detectTimescale`, `isTimescaleAvailable`, `isHypertable`, `getDetectionState`, `dropChunks`, `migrateToHypertables`, `SAMPLE_TABLES`, `SampleTableName`, `DetectionState`.
+**Public API:** `detectTimescale`, `isTimescaleAvailable`, `isHypertable`, `getDetectionState`, `dropChunks`, `getEffectiveCompressAfterDays`, `migrateToHypertables`, `SAMPLE_TABLES`, `SampleTableName`, `DetectionState`.
 
 **Cross-service deps:** none.
 
-**Used by:** `src/app.ts` — boot detection and hypertable migration; `src/services/monitoringService.ts` — `dropChunks` calls in pruning; `src/services/capacityService.ts` — hypertable status for capacity snapshot.
+**Used by:** `src/app.ts` — boot detection and hypertable migration; `src/services/monitoringService.ts` — `dropChunks` calls in pruning + `getEffectiveCompressAfterDays` to lower-bound the selection-aware slow prune off compressed chunks; `src/services/capacityService.ts` — hypertable status for capacity snapshot; `src/jobs/reclaimBloatedChunks.ts` — `isHypertable` gate before scanning for compressed-chunk heap bloat.
 
 **Invariants:**
 - **Boot-time detection cache:** `detectTimescale()` caches result; cache updates only on successful probe. Re-detection runs after `migrateToHypertables()` completes so `isHypertable()` reflects post-conversion state.
