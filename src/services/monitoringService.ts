@@ -6409,15 +6409,21 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     if (monitorAssocEntries.length > 0) {
       const stopWrite = startSampleWriteTimer("asset_associated_ips");
       const endAssoc = startPhase("systeminfo.persist.assoc_ips_txn");
-      await prisma.$transaction([
-        prisma.assetAssociatedIp.deleteMany({
-          where: { assetId, source: { not: "manual" } },
-        }),
-        prisma.assetAssociatedIp.createMany({
-          data: monitorAssocEntries.map((e) => ({ ...e, assetId })),
-          skipDuplicates: true,
-        }),
-      ]);
+      // retryOnDeadlock: a concurrent system-info / probe-patch writer can
+      // win a deadlock against this delete+insert pair (40P01). The op is
+      // idempotent (full-replace of the asset's non-manual IPs), so re-run on
+      // deadlock instead of crashing the whole system-info scrape.
+      await retryOnDeadlock(() =>
+        prisma.$transaction([
+          prisma.assetAssociatedIp.deleteMany({
+            where: { assetId, source: { not: "manual" } },
+          }),
+          prisma.assetAssociatedIp.createMany({
+            data: monitorAssocEntries.map((e) => ({ ...e, assetId })),
+            skipDuplicates: true,
+          }),
+        ]),
+      );
       endAssoc({ rows: monitorAssocEntries.length });
       stopWrite();
     }
@@ -6613,7 +6619,9 @@ async function persistLldpNeighbors(
   }
   if (toDelete.length > 0) {
     const endDelete = startPhase("systeminfo.persist.lldp_deleteMany");
-    await prisma.assetLldpNeighbor.deleteMany({ where: { id: { in: toDelete } } });
+    await retryOnDeadlock(() =>
+      prisma.assetLldpNeighbor.deleteMany({ where: { id: { in: toDelete } } }),
+    );
     endDelete({ rows: toDelete.length });
   }
 }
@@ -6824,16 +6832,27 @@ async function persistWirelessStations(
     await bulkUpsertWirelessStations(apAssetId, toUpsert, new Date());
   }
   if (toDelete.length > 0) {
-    await prisma.assetWirelessStation.deleteMany({ where: { id: { in: toDelete } } });
+    await retryOnDeadlock(() =>
+      prisma.assetWirelessStation.deleteMany({ where: { id: { in: toDelete } } }),
+    );
   }
 
   // Stamp each matched endpoint's lastSeenAp. Don't block the persist on
   // these — they're operator-visible breadcrumbs, not load-bearing data —
   // but await so the System tab sees the change on the next refresh.
+  //
+  // retryOnDeadlock: this transaction updates OTHER assets' rows (the matched
+  // endpoints), so two APs whose stations match an overlapping endpoint set —
+  // or this txn vs the probe-patch bulk Asset UPDATE — can deadlock (40P01).
+  // The probe-patch path already retries; without this wrap the loser here
+  // crashed the whole system-info scrape. Idempotent (last-write-wins stamp),
+  // so re-run is safe. (Deterministic lock ordering is a follow-up.)
   if (endpointStamps.size > 0) {
-    await prisma.$transaction(
-      [...endpointStamps.entries()].map(([endpointId, ap]) =>
-        prisma.asset.update({ where: { id: endpointId }, data: { lastSeenAp: ap } }),
+    await retryOnDeadlock(() =>
+      prisma.$transaction(
+        [...endpointStamps.entries()].map(([endpointId, ap]) =>
+          prisma.asset.update({ where: { id: endpointId }, data: { lastSeenAp: ap } }),
+        ),
       ),
     );
   }
