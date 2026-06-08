@@ -227,22 +227,40 @@
       _cy = null;
     }
 
-    _cy = window.cytoscape({
-      container: document.getElementById("topo-graph"),
-      elements: elements,
-      // Mobile users don't shift+drag — disable box-select to keep tap
-      // targets crisp. Pinch-zoom + two-finger pan come for free.
-      boxSelectionEnabled: false,
-      autoungrabify: true, // nodes stay where dagre placed them; no manual drag
-      wheelSensitivity: 0.5,
-      layout: {
+    // Deterministic column layout (shared solver with desktop). Phone
+    // viewport is tall, so map depth → vertical (firewall on top) and
+    // lane → horizontal — the transpose of desktop's left-to-right. Falls
+    // back to dagre TB when there's no firewall root to anchor the solver.
+    var DEPTH_SPACING = 110;
+    var LANE_SPACING = 70;
+    var columns = window.PolarisTopologyRender.computeTopologyColumns(elements);
+    var layoutConfig;
+    if (columns) {
+      var positions = {};
+      Object.keys(columns).forEach(function (id) {
+        positions[id] = { x: columns[id].lane * LANE_SPACING, y: columns[id].depth * DEPTH_SPACING };
+      });
+      layoutConfig = { name: "preset", positions: positions, fit: false, padding: 30 };
+    } else {
+      layoutConfig = {
         name: "dagre",
         rankDir: "TB", // top-to-bottom — phone viewport is tall
         nodeSep: 50,
         rankSep: 110,
         fit: false, // we'll center on the focus node ourselves
         padding: 30,
-      },
+      };
+    }
+
+    _cy = window.cytoscape({
+      container: document.getElementById("topo-graph"),
+      elements: elements,
+      // Mobile users don't shift+drag — disable box-select to keep tap
+      // targets crisp. Pinch-zoom + two-finger pan come for free.
+      boxSelectionEnabled: false,
+      autoungrabify: true, // nodes stay where the layout placed them; no manual drag
+      wheelSensitivity: 0.5,
+      layout: layoutConfig,
       // includeEndpointOverlay registers the .dimmed (display:none) and
       // synthetic-endpoint round-rectangle styles used by the connection-path
       // overlay when the operator deep-links here via global search on a

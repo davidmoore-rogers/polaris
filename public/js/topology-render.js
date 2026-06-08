@@ -19,7 +19,7 @@
   // suppressed-but-actually-down node still renders red.
   function fortinetNodeColor(asset) {
     if (!asset || !asset.monitored) return "#757575"; // gray — unmonitored
-    if (asset.dependencySuppressed && asset.monitorHealth !== "down") return "#607d8b"; // slate — Dep. Down
+    if (asset.dependencySuppressed && asset.monitorHealth !== "down") return "#9e9e9e"; // gray — Dep. Down (upstream parent offline)
     switch (asset.monitorHealth) {
       case "up":       return "#2e7d32"; // green
       case "degraded": return "#f9a825"; // amber
@@ -60,6 +60,20 @@
         },
       });
     });
+    // AP id set — used to detect wireless MESH: a leaf AP shows up in the
+    // station table of its ROOT AP (the root sees its mesh child as an
+    // associated client; the leaf does not list the root). Only APs ever
+    // appear in another AP's station list — a switch never does — so the mesh
+    // match is AP-only. When a station resolves to another AP in this site we
+    // draw a mesh edge root→leaf instead of a client diamond.
+    var apIdSet = {};
+    (data.aps || []).forEach(function (a) { if (a && a.id) apIdSet[a.id] = true; });
+    // Mesh leaves (filled in the AP loop below). Their wired fallback edge from
+    // the FortiGate is bogus — superseded by the mesh edge — so it's skipped
+    // when emitting controller edges so the graph doesn't show a stray gray
+    // line crossing to the leaf.
+    var meshLeafIds = {};
+
     (data.aps || []).forEach(function (a) {
       elements.push({
         data: {
@@ -77,6 +91,21 @@
       // hostname as the label and the asset id as a tap target; unmatched
       // stations show their MAC (the only identity available).
       (a.stations || []).forEach(function (s) {
+        // Mesh child: this "station" is actually another FortiAP (mesh leaf).
+        // Draw a mesh edge root(a) → leaf(s.id) and skip the client diamond —
+        // the leaf already has its own fortiap node.
+        if (s.id && apIdSet[s.id] && s.id !== a.id) {
+          meshLeafIds[s.id] = true;
+          elements.push({
+            data: {
+              id: "mesh-" + a.id + "-" + s.id,
+              source: a.id, target: s.id,
+              label: s.ssid || "mesh",
+              isMesh: 1,
+            },
+          });
+          return;
+        }
         var stationNodeId = "wsta-" + a.id + "-" + s.macAddress;
         elements.push({
           data: {
@@ -99,12 +128,35 @@
         });
       });
     });
+    // Wireless-bridge edges (server-detected via LLDP): a FortiLink switch
+    // behind a FortiAP. Rendered like a mesh edge AP→switch; the switch is
+    // marked a mesh/bridge leaf so its FortiLink controller edge is skipped
+    // below and the solver routes it behind the AP.
+    (data.bridgeEdges || []).forEach(function (e, i) {
+      meshLeafIds[e.target] = true;
+      elements.push({
+        data: {
+          id: "br" + i, source: e.source, target: e.target,
+          label: e.label || "", reason: e.reason || "",
+          isMesh: 1,
+        },
+      });
+    });
     (data.edges || []).forEach(function (e, i) {
+      // Skip the bogus wired uplink to a mesh/bridge leaf — the mesh edge
+      // already connects it (and from the correct parent AP).
+      if (meshLeafIds[e.target]) return;
       elements.push({
         data: {
           id: "e" + i, source: e.source, target: e.target,
           label: e.label || "",
           reason: e.reason || "",
+          // FG→switch controller edge with a physically-confirmed (interface/
+          // LLDP-backed) link — treated as a verified uplink by the column
+          // solver so the switch isn't mistaken for a FortiLink fallback.
+          isVerifiedUplink: e.verifiedUplink ? 1 : 0,
+          srcIf: e.srcIf || null,
+          tgtIf: e.tgtIf || null,
         },
       });
     });
@@ -130,6 +182,8 @@
           id: "le" + i, source: e.source, target: e.target,
           label: e.label || "", isLldp: 1,
           reason: e.reason || "",
+          srcIf: e.srcIf || null,
+          tgtIf: e.tgtIf || null,
         },
       });
     });
@@ -139,6 +193,8 @@
           id: "ie" + i, source: e.source, target: e.target,
           label: e.label || "", isIface: 1,
           reason: e.reason || "",
+          srcIf: e.srcIf || null,
+          tgtIf: e.tgtIf || null,
         },
       });
     });
@@ -314,6 +370,19 @@
           opacity: 0.7,
         },
       },
+      // Wireless mesh backhaul: root AP → leaf AP. Heavier dashed violet with a
+      // directional arrow so it reads as an authoritative uplink (the leaf
+      // depends on the root), distinct from the lighter cyan client wireless.
+      {
+        selector: 'edge[isMesh = 1]',
+        style: {
+          "line-style": "dashed",
+          "line-color": "#a78bfa",
+          "target-arrow-color": "#a78bfa",
+          "target-arrow-shape": "triangle",
+          width: 2.2,
+        },
+      },
       {
         selector: 'node.topology-pulse',
         style: {
@@ -399,7 +468,7 @@
         { label: "Up",                color: "#2e7d32" },
         { label: "Degraded",          color: "#f9a825" },
         { label: "Down",              color: "#c62828" },
-        { label: "Dep. Down",         color: "#607d8b" },
+        { label: "Dep. Down",         color: "#9e9e9e" },
         { label: "Unmonitored",       color: "#757575" },
       ],
       edges: [
@@ -407,8 +476,287 @@
         { label: "Interface-inferred",color: "#14b8a6", style: "solid",  desc: "Naming-convention peer link" },
         { label: "LLDP",              color: "#f59e0b", style: "dashed" },
         { label: "Wireless",          color: "#22d3ee", style: "dashed", desc: "AP → station" },
+        { label: "Mesh / bridge",     color: "#a78bfa", style: "dashed", desc: "AP → mesh leaf AP / bridged switch" },
       ],
     };
+  }
+
+  // Per-device-type weights for the Dijkstra column solver. Infrastructure
+  // (firewall / switch / AP) carries the operator's intended hierarchy weight;
+  // every leaf kind (wired endpoint, wireless station, LLDP ghost, cross-site
+  // remote asset) is treated as an endpoint (4) so it lands in an odd "leaf"
+  // column to the right of the infra node it hangs off.
+  var TOPOLOGY_NODE_WEIGHT = {
+    fortigate: 1,
+    fortiswitch: 2,
+    fortiap: 3,
+    endpoint: 4,
+    "wireless-station": 4,
+    lldp: 4,
+    "remote-asset": 4,
+  };
+  // Roles that occupy EVEN columns by weighted depth. Everything else is a
+  // leaf and occupies the ODD column immediately right of its infra parent.
+  var TOPOLOGY_INFRA_ROLES = { fortigate: true, fortiswitch: true, fortiap: true };
+
+  function topologyNodeWeight(role) {
+    return TOPOLOGY_NODE_WEIGHT[role] != null ? TOPOLOGY_NODE_WEIGHT[role] : 4;
+  }
+
+  // Compute a column ("depth") + within-column ordinal ("lane") for every node
+  // in a /topology element set, used by both the desktop and mobile surfaces to
+  // position nodes deterministically instead of letting dagre auto-rank them.
+  //
+  // Algorithm:
+  //   1. Node-weighted Dijkstra from the FortiGate root (firewall=1, switch=2,
+  //      AP=3, leaf=4). Each node's cumulative path value is the sum of the
+  //      weights of every node on its shortest path, both endpoints included
+  //      (firewall=1; switch-on-fw=3; switch-on-switch=5; AP-on-switch=6; …).
+  //   2. The DISTINCT cumulative values among infra nodes, sorted ascending,
+  //      map to contiguous ranks; an infra node's column = rank * 2 (so infra
+  //      lands on even columns 0,2,4,… with empty weighted-depth gaps squeezed
+  //      out — "nothing in column 2 → move it left").
+  //   3. Leaf nodes take the ODD column one right of their nearest infra
+  //      ancestor (parent even column + 1).
+  //   4. Disconnected nodes (no path to the firewall) drop into a rightmost
+  //      orphan column so they stay visible.
+  //   5. A single barycenter pass orders nodes within each column by the mean
+  //      lane of their already-placed lower-column neighbors to reduce edge
+  //      crossings.
+  //
+  // Returns { [nodeId]: { depth, lane } }, or null when there is no FortiGate
+  // root (caller should fall back to its previous layout).
+  function computeTopologyColumns(elements) {
+    if (!Array.isArray(elements) || elements.length === 0) return null;
+
+    var roleById = {};
+    var nodeIds = [];
+    var adj = {}; // undirected adjacency: id -> [neighborId, ...]
+    var rootId = null;
+
+    elements.forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.id) return;
+      if (d.source && d.target) return; // edge — handled below
+      roleById[d.id] = d.role || null;
+      nodeIds.push(d.id);
+      adj[d.id] = adj[d.id] || [];
+      if (d.role === "fortigate" && !rootId) rootId = d.id;
+    });
+    if (!rootId) return null; // no firewall — let the caller keep dagre
+
+    // Mesh pre-pass: a mesh edge (root AP → leaf AP) makes the leaf a mesh
+    // child. Its real uplink is wireless to the root AP, so any controller/
+    // fallback edge that wired it to a FortiGate/FortiSwitch is bogus and must
+    // be suppressed — otherwise Dijkstra would route the leaf off that switch
+    // (or the FG fallback) instead of through its mesh parent.
+    var meshLeaf = {};
+    elements.forEach(function (el) {
+      var d = el && el.data;
+      if (d && d.source && d.target && d.isMesh) meshLeaf[d.target] = true;
+    });
+
+    // Full adjacency (every edge) drives depth; physical adjacency (interface-
+    // inferred + LLDP edges only) drives "is this switch's uplink to the
+    // firewall actually verified?" A controller/FortiLink edge is NOT physical
+    // proof — FortiOS reports `fortilink` on every managed switch whether or
+    // not we can see the real cable, so a switch reachable ONLY through
+    // controller edges is a fallback (placed in the negative columns below).
+    var physicalAdj = {};
+    var edgeList = []; // every DRAWN edge (id pairs) — used to keep endpoint
+                       // nodes off connection lines that pass through them.
+    elements.forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.source || !d.target) return; // node — already handled
+      if (!(d.source in adj) || !(d.target in adj)) return; // dangling edge
+      edgeList.push([d.source, d.target]);
+      // Suppress a mesh leaf's bogus wired uplink: a non-mesh edge joining the
+      // leaf to an infra node (FG/switch). Keep the mesh edge itself and the
+      // leaf's downstream client edges (target is a wireless-station node).
+      if (!d.isMesh) {
+        var srcLeaf = meshLeaf[d.source] && TOPOLOGY_INFRA_ROLES[roleById[d.target]];
+        var tgtLeaf = meshLeaf[d.target] && TOPOLOGY_INFRA_ROLES[roleById[d.source]];
+        if (srcLeaf || tgtLeaf) return;
+      }
+      adj[d.source].push(d.target);
+      adj[d.target].push(d.source);
+      // Physical proof of a real link: interface-inferred, LLDP, OR a
+      // controller edge flagged verifiedUplink (the FG↔switch interface edge
+      // deduped into it). Mesh is wireless backhaul, deliberately NOT physical
+      // proof of a switch's wired uplink.
+      if (d.isIface || d.isLldp || d.isVerifiedUplink) {
+        (physicalAdj[d.source] = physicalAdj[d.source] || []).push(d.target);
+        (physicalAdj[d.target] = physicalAdj[d.target] || []).push(d.source);
+      }
+    });
+
+    // --- 1. Node-weighted Dijkstra from the firewall -----------------------
+    var INF = Infinity;
+    var dist = {};
+    var pred = {};
+    nodeIds.forEach(function (id) { dist[id] = INF; pred[id] = null; });
+    dist[rootId] = topologyNodeWeight(roleById[rootId]);
+    var visited = {};
+    // Small per-site graphs — a linear-scan extract-min is plenty.
+    for (var iter = 0; iter < nodeIds.length; iter++) {
+      var u = null;
+      var best = INF;
+      for (var i = 0; i < nodeIds.length; i++) {
+        var cand = nodeIds[i];
+        if (!visited[cand] && dist[cand] < best) { best = dist[cand]; u = cand; }
+      }
+      if (u === null) break; // remaining nodes unreachable
+      visited[u] = true;
+      (adj[u] || []).forEach(function (v) {
+        var nd = dist[u] + topologyNodeWeight(roleById[v]);
+        if (nd < dist[v]) { dist[v] = nd; pred[v] = u; }
+      });
+    }
+
+    // --- 2. Physical-verification: which switches reach the firewall over
+    //        interface/LLDP edges? BFS from the root over physicalAdj only. ---
+    var physicallyVerified = {};
+    physicallyVerified[rootId] = true;
+    var pq = [rootId];
+    while (pq.length) {
+      var pcur = pq.shift();
+      (physicalAdj[pcur] || []).forEach(function (n) {
+        if (!physicallyVerified[n]) { physicallyVerified[n] = true; pq.push(n); }
+      });
+    }
+    // A FortiSwitch that is reachable in the full graph (so not an orphan) but
+    // NOT physically verified to the firewall is a FortiLink fallback — its
+    // real cable can't be proven, so it's exiled to the negative columns.
+    var FALLBACK_SWITCH_COL = -2; // even, mirrors verified switch parity
+    var FALLBACK_ENDPOINT_COL = -3; // odd, mirrors verified endpoint parity
+    function isFallbackSwitch(id) {
+      // A bridge-leaf switch (FortiLink switch behind a FortiAP, reached via a
+      // mesh/bridge edge) is a legitimate node placed via its AP, NOT a
+      // FortiLink fallback.
+      return roleById[id] === "fortiswitch" && dist[id] !== INF && !physicallyVerified[id] && !meshLeaf[id];
+    }
+
+    // --- 3. Verified infra cumulative values -> even columns ---------------
+    // Fallback switches are excluded so they don't consume a positive rank.
+    var infraValues = {};
+    nodeIds.forEach(function (id) {
+      if (TOPOLOGY_INFRA_ROLES[roleById[id]] && dist[id] !== INF && !isFallbackSwitch(id)) {
+        infraValues[dist[id]] = true;
+      }
+    });
+    var sortedVals = Object.keys(infraValues)
+      .map(Number)
+      .sort(function (a, b) { return a - b; });
+    var evenColByValue = {};
+    sortedVals.forEach(function (val, idx) { evenColByValue[val] = idx * 2; });
+
+    // Nearest infra ancestor for a leaf, walking the Dijkstra predecessor chain.
+    // Returns the ancestor's id (so the caller can tell verified vs fallback).
+    function nearestInfraAncestor(id) {
+      var cur = pred[id];
+      var guard = 0;
+      while (cur && guard++ < nodeIds.length) {
+        if (TOPOLOGY_INFRA_ROLES[roleById[cur]] && dist[cur] !== INF) return cur;
+        cur = pred[cur];
+      }
+      return null;
+    }
+
+    // --- 4. Assign a depth to every node -----------------------------------
+    var depth = {};
+    var maxInfraCol = sortedVals.length > 0 ? (sortedVals.length - 1) * 2 : 0;
+    var orphanCol = maxInfraCol + 1;
+    nodeIds.forEach(function (id) {
+      if (isFallbackSwitch(id)) {
+        depth[id] = FALLBACK_SWITCH_COL;
+      } else if (TOPOLOGY_INFRA_ROLES[roleById[id]] && dist[id] !== INF) {
+        depth[id] = evenColByValue[dist[id]];
+      } else if (dist[id] !== INF) {
+        var anc = nearestInfraAncestor(id);
+        if (anc == null) depth[id] = orphanCol;
+        else if (isFallbackSwitch(anc)) depth[id] = FALLBACK_ENDPOINT_COL; // leaf on a fallback switch
+        else depth[id] = evenColByValue[dist[anc]] + 1; // verified leaf → odd col right of parent
+      } else {
+        depth[id] = orphanCol; // disconnected — keep visible at the right edge
+      }
+    });
+
+    // --- 5. Barycenter lane ordering within each column --------------------
+    var byDepth = {};
+    nodeIds.forEach(function (id) {
+      (byDepth[depth[id]] = byDepth[depth[id]] || []).push(id);
+    });
+    var depthsAsc = Object.keys(byDepth).map(Number).sort(function (a, b) { return a - b; });
+    var lane = {};
+    depthsAsc.forEach(function (dpt, colIdx) {
+      var ids = byDepth[dpt];
+      if (colIdx === 0) {
+        ids.forEach(function (id, k) { lane[id] = k; });
+        return;
+      }
+      var withBary = ids.map(function (id, k) {
+        var lanesOfLowerNeighbors = [];
+        (adj[id] || []).forEach(function (n) {
+          if (depth[n] < dpt && lane[n] != null) lanesOfLowerNeighbors.push(lane[n]);
+        });
+        var bary = lanesOfLowerNeighbors.length
+          ? lanesOfLowerNeighbors.reduce(function (s, x) { return s + x; }, 0) / lanesOfLowerNeighbors.length
+          : Number.MAX_SAFE_INTEGER; // no anchor — sink to the bottom, stable
+        return { id: id, bary: bary, order: k };
+      });
+      withBary.sort(function (a, b) {
+        if (a.bary !== b.bary) return a.bary - b.bary;
+        return a.order - b.order;
+      });
+      withBary.forEach(function (entry, k) { lane[entry.id] = k; });
+    });
+
+    // --- 6. Keep endpoint nodes off connection lines -----------------------
+    // A leaf endpoint placed in an odd column can land directly on a wired/mesh
+    // edge that passes THROUGH that column (e.g. a wireless station in the
+    // column between a root AP and its mesh-leaf AP sits on the mesh backhaul
+    // line). Nudge any such endpoint to the nearest free lane that no
+    // pass-through edge crosses. Only leaf endpoints move — infra stays put.
+    var occupied = {};
+    nodeIds.forEach(function (id) {
+      (occupied[depth[id]] = occupied[depth[id]] || {})[lane[id]] = true;
+    });
+    // Interpolated lane of an edge where it crosses integer column `col`, or
+    // null when the edge doesn't strictly pass through that column.
+    function edgeLaneAt(s, t, col) {
+      var ds = depth[s], dt = depth[t];
+      if (ds === dt) return null;
+      if (col <= Math.min(ds, dt) || col >= Math.max(ds, dt)) return null;
+      return lane[s] + ((col - ds) / (dt - ds)) * (lane[t] - lane[s]);
+    }
+    function laneCollides(id, col, L) {
+      for (var e = 0; e < edgeList.length; e++) {
+        var s = edgeList[e][0], t = edgeList[e][1];
+        if (s === id || t === id) continue; // edges that terminate here are fine
+        var el = edgeLaneAt(s, t, col);
+        if (el != null && Math.abs(el - L) < 0.45) return true;
+      }
+      return false;
+    }
+    nodeIds.forEach(function (id) {
+      if (TOPOLOGY_INFRA_ROLES[roleById[id]]) return; // only nudge leaf endpoints
+      var col = depth[id];
+      if (!laneCollides(id, col, lane[id])) return;
+      occupied[col][lane[id]] = false; // vacate, search for a clear lane nearby
+      var picked = lane[id];
+      for (var step = 1; step <= 16; step++) {
+        var down = lane[id] + step;
+        if (!occupied[col][down] && !laneCollides(id, col, down)) { picked = down; break; }
+        var up = lane[id] - step;
+        if (!occupied[col][up] && !laneCollides(id, col, up)) { picked = up; break; }
+      }
+      lane[id] = picked;
+      occupied[col][picked] = true;
+    });
+
+    var out = {};
+    nodeIds.forEach(function (id) { out[id] = { depth: depth[id], lane: lane[id] }; });
+    return out;
   }
 
   window.PolarisTopologyRender = {
@@ -416,5 +764,7 @@
     buildTopologyElements: buildTopologyElements,
     topologyStylesheet: topologyStylesheet,
     topologyLegendSpec: topologyLegendSpec,
+    computeTopologyColumns: computeTopologyColumns,
+    topologyNodeWeight: topologyNodeWeight,
   };
 })();

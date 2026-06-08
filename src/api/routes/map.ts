@@ -454,7 +454,12 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     //
     // `reason` populates the hover tooltip — the operator can audit
     // EXACTLY which rule + which evidence drew each edge.
-    type Edge = { source: string; target: string; label?: string; reason?: string };
+    // `verifiedUplink` marks an FG→switch controller edge whose link to the
+    // FortiGate is physically confirmed (interface- or LLDP-backed). The
+    // FG↔switch interface edge itself is deduped into this controller edge, so
+    // this flag is the only surviving "this is a real cable, not just FortiLink
+    // fallback" signal the topology layout can read.
+    type Edge = { source: string; target: string; label?: string; reason?: string; verifiedUplink?: boolean };
     let edges: Edge[] = [];
     const switchHostById = new Map<string, string | null>();
     for (const s of switches) switchHostById.set(s.id, s.hostname);
@@ -696,6 +701,41 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       ...edges.map((e) => `${e.source}|${e.target}`),
       ...interfaceEdges.map((e) => `${e.source}|${e.target}`),
     ]);
+
+    // Wireless-bridge detection: a FortiLink-managed switch sitting BEHIND a
+    // FortiAP (its wired uplink lands on the AP's LAN port) shows up as an LLDP
+    // neighbor of that AP — the inverse of the normal switch→AP uplink. We
+    // detect it as an LLDP adjacency between an AP and a switch where the switch
+    // is NOT the AP's controller parent, render it as a bridge edge AP→switch,
+    // and (client-side) route the switch behind the AP, demoting its FortiLink
+    // edge. Normal switch→AP uplinks (switch IS the AP's parentSwitch) are left
+    // to the controller data as before.
+    type BridgeEdge = { source: string; target: string; label?: string; reason?: string };
+    const bridgeEdges: BridgeEdge[] = [];
+    const apObjById = new Map(aps.map((a) => [a.id, a]));
+    const switchObjById = new Map(switches.map((s) => [s.id, s]));
+    const seenBridge = new Set<string>();
+    for (const n of lldpRows) {
+      if (!n.matchedAsset || !n.matchedAsset.id) continue;
+      if (!siblingIds.has(n.matchedAsset.id)) continue; // both ends in-site
+      let ap = apObjById.get(n.assetId) ?? apObjById.get(n.matchedAsset.id);
+      let sw = switchObjById.get(n.assetId) ?? switchObjById.get(n.matchedAsset.id);
+      if (!ap || !sw) continue; // not an AP↔switch pair
+      // Normal switch→AP uplink (AP behind switch) — controller data covers it.
+      if (ap.peerSwitch && sw.hostname && ap.peerSwitch.toLowerCase() === sw.hostname.toLowerCase()) continue;
+      const key = `${ap.id}|${sw.id}`;
+      if (seenBridge.has(key)) continue;
+      seenBridge.add(key);
+      bridgeEdges.push({
+        source: ap.id,
+        target: sw.id,
+        label: portLabel(n.localIfName, n.portId),
+        reason:
+          `Rule: wireless-bridge edge — FortiLink switch behind a FortiAP.\n` +
+          `Evidence: ${ap.hostname || ap.id} reports LLDP neighbor ${sw.hostname || sw.id} on local port "${n.localIfName || "?"}", ` +
+          `and that switch is not the AP's controller uplink — so the switch is bridged behind the AP.`,
+      });
+    }
     type LldpEdge = {
       source: string;
       target: string;
@@ -928,6 +968,63 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       });
     }
 
+    // Tag surviving FG→switch controller edges as physically-confirmed when the
+    // switch is interface-confirmed-direct OR an FG LLDP neighbor. Chained
+    // switches reach the FG through their (un-deduped) inter-switch interface
+    // edges, so only the chain-head FG edges need the flag.
+    const physConfirmedSwitchIds = new Set<string>([...interfaceConfirmedFgPeers, ...fgSiblingNeighbors]);
+    const switchIdSetFinal = new Set(switches.map((s) => s.id));
+    for (const e of edges) {
+      if (e.source === fg.id && switchIdSetFinal.has(e.target) && physConfirmedSwitchIds.has(e.target)) {
+        e.verifiedUplink = true;
+      }
+    }
+
+    // Per-edge interface details for the hover tooltip: speed / oper status /
+    // error counters for the named interface on each side. One DISTINCT-ON
+    // query (latest sample per assetId+ifName, 1h window — same pattern as the
+    // interface-inference query) then a label-parse attach. FortiOS has no
+    // duplex field, so duplex isn't available. Logical/unknown ports
+    // ("fortilink" → "unknown") and cross-site ghosts simply get no detail.
+    const ifMetricRows = await prisma.$queryRaw<
+      Array<{ assetId: string; ifName: string; speedBps: bigint | null; operStatus: string | null; inErrors: bigint | null; outErrors: bigint | null }>
+    >`
+      SELECT DISTINCT ON ("assetId", "ifName") "assetId", "ifName", "speedBps", "operStatus", "inErrors", "outErrors"
+      FROM asset_interface_samples
+      WHERE "assetId" = ANY(${siteAssetIds}::text[])
+        AND "timestamp" > NOW() - INTERVAL '1 hour'
+      ORDER BY "assetId", "ifName", "timestamp" DESC
+    `;
+    const ifMetricByKey = new Map<string, { speedBps: number | null; operStatus: string | null; inErrors: number | null; outErrors: number | null }>();
+    for (const r of ifMetricRows) {
+      ifMetricByKey.set(`${r.assetId}|${r.ifName}`, {
+        speedBps:  r.speedBps  != null ? Number(r.speedBps)  : null,
+        operStatus: r.operStatus,
+        inErrors:  r.inErrors  != null ? Number(r.inErrors)  : null,
+        outErrors: r.outErrors != null ? Number(r.outErrors) : null,
+      });
+    }
+    const ifDetail = (assetId: string, rawName: string | undefined) => {
+      if (!assetId || !rawName) return null;
+      const name = rawName.trim();
+      if (!name || name === "unknown") return null;
+      const m = ifMetricByKey.get(`${assetId}|${name}`);
+      if (!m) return null;
+      return { name, ...m };
+    };
+    const attachIfDetails = (arr: Array<{ source: string; target: string; label?: string }>) => {
+      for (const e of arr) {
+        const parts = String(e.label || "").split(" ↔ ");
+        const s = ifDetail(e.source, parts[0]);
+        const t = ifDetail(e.target, parts[1]);
+        if (s) (e as Record<string, unknown>).srcIf = s;
+        if (t) (e as Record<string, unknown>).tgtIf = t;
+      }
+    };
+    attachIfDetails(edges);
+    attachIfDetails(interfaceEdges);
+    attachIfDetails(lldpEdges);
+
     res.json({
       fortigate: {
         id: fg.id,
@@ -971,6 +1068,10 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       // Cytoscape nodes and the graph would error out on load.
       remoteAssetNodes: Array.from(remoteAssetNodes.values()),
       lldpEdges,
+      // Wireless-bridge edges: a FortiLink switch reached behind a FortiAP
+      // (LLDP-detected). Rendered like a mesh edge AP→switch; the switch routes
+      // behind the AP and its FortiLink controller edge is demoted client-side.
+      bridgeEdges,
     });
   } catch (err) {
     next(err);

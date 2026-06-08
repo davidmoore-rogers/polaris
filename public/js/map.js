@@ -21,6 +21,12 @@
   var topoSearchDebounce = null;
   var topoSuggestState  = { open: false, items: [], index: -1 };
   var POSITION_STORAGE_PREFIX = "polaris.topology.positions:";
+  // Column-layout spacing (shared by the base preset layout + the
+  // connection-path overlay so an endpoint lands exactly one column right of
+  // its access switch/AP). depth → x (px between adjacent columns),
+  // lane → y (px between stacked nodes in a column).
+  var TOPO_COL_SPACING = 130;
+  var TOPO_ROW_SPACING = 95;
   // Legend overlay: per-user (singleton) — same key for every site, since
   // the legend describes the rendering rules, not site-specific content.
   // Persisted state is `{visible, x, y}` so opening the modal restores the
@@ -576,9 +582,9 @@
   }
 
   // Drop the operator's saved node positions for this site and re-run the
-  // dagre layout against the cached topology data. Used when manual drags
+  // column layout against the cached topology data. Used when manual drags
   // have produced a layout the operator wants to abandon (e.g. inherited
-  // positions from before a tuning change to dagre's nodeSep / rankSep).
+  // positions from before a column-spacing change).
   function resetTopologyLayout() {
     if (!topoState.siteId || !topoState.data) return;
     try { localStorage.removeItem(POSITION_STORAGE_PREFIX + topoState.siteId); }
@@ -947,13 +953,15 @@
 
     cyInstance.elements().not(pathElements).addClass("dimmed");
 
-    // Snapshot the path nodes' original positions, then collapse them into a
-    // tight vertical chain (firewall on top → endpoint on bottom) just for
-    // the overlay. The base dagre layout spaces nodes across the whole site
-    // graph, so path nodes can land far apart with empty space between them —
-    // even after fit-to-path zooms in, the operator still has to scan a huge
-    // canvas. Positions are restored on overlay clear and before any save so
-    // the persisted layout is untouched.
+    // Snapshot the path nodes' original positions, then lay the path out
+    // left-to-right along the column grid: each real node keeps its solver
+    // column (x) and is flattened onto a single row (y=0) so the chain reads
+    // firewall → switch → AP → endpoint. The synthetic endpoint sits in its
+    // ODD column — one column right of the access switch/AP it plugs into
+    // (hops[1]) — matching the base layout's even-infra / odd-endpoint grid.
+    // The base layout spaces nodes across the whole site, so without this the
+    // dimmed path could land scattered across a huge canvas. Positions are
+    // restored on overlay clear so the persisted layout is untouched.
     var savedPositions = {};
     pathNodeIds.forEach(function (id) {
       var n = cyInstance.getElementById(id);
@@ -962,19 +970,28 @@
         if (p && typeof p.x === "number" && typeof p.y === "number") {
           savedPositions[id] = { x: p.x, y: p.y };
         }
+        // Flatten every path node onto one row; real nodes already sit at
+        // their column x from the base layout. A synthetic endpoint (added
+        // above with no real column) is repositioned explicitly below.
+        n.position("y", 0);
       }
     });
-    var orderedTopDown = pathNodeIds.slice().reverse(); // firewall → endpoint
-    var anchorX = 0;
-    if (orderedTopDown.length > 0) {
-      var topNode = cyInstance.getElementById(orderedTopDown[0]);
-      if (topNode.length > 0) anchorX = topNode.position().x;
+    // Synthetic endpoint → odd column, one column right of its first real hop
+    // (hops[1]). Skip when the searched node is a real infra node (no synthetic
+    // node was added) so we don't yank a switch/AP out of its own column.
+    var epNode = cyInstance.getElementById(ep.id);
+    if (nextHop && epNode.length > 0 && epNode.data("synthetic")) {
+      var hopNode = cyInstance.getElementById(nextHop.id);
+      if (hopNode.length > 0) {
+        // Place the endpoint one column further from the firewall than its
+        // switch — right for a verified switch (positive column), left for a
+        // FortiLink-fallback switch (negative column → endpoint lands in the
+        // odd col -3). Firewall itself (x≈0) defaults to the right.
+        var hopX = hopNode.position().x;
+        var dir = hopX < 0 ? -1 : 1;
+        epNode.position({ x: hopX + dir * TOPO_COL_SPACING, y: 0 });
+      }
     }
-    var chainSpacing = 160;
-    orderedTopDown.forEach(function (id, idx) {
-      var n = cyInstance.getElementById(id);
-      if (n.length > 0) n.position({ x: anchorX, y: idx * chainSpacing });
-    });
 
     topoState.pathOverlay = {
       endpointId: ep.id,
@@ -1163,14 +1180,28 @@
       try { cyInstance.fit(undefined, 30); } catch (e) {}
     });
 
-    cyInstance.layout({
-      name: "dagre",
-      rankDir: "LR",
-      nodeSep: 30,
-      rankSep: 160,
-      fit: true,
-      padding: 30,
-    }).run();
+    // Deterministic column layout: Dijkstra-weighted depth from the firewall
+    // places infra (firewall/switch/AP) on even columns and leaf nodes
+    // (endpoints/wireless/ghosts/remote) on the odd column right of their
+    // parent. Left-to-right here: depth → x, lane → y. Falls back to dagre
+    // when there's no firewall root to anchor the solver.
+    var columns = window.PolarisTopologyRender.computeTopologyColumns(elements);
+    if (columns) {
+      var positions = {};
+      Object.keys(columns).forEach(function (id) {
+        positions[id] = { x: columns[id].depth * TOPO_COL_SPACING, y: columns[id].lane * TOPO_ROW_SPACING };
+      });
+      cyInstance.layout({ name: "preset", positions: positions, fit: true, padding: 30 }).run();
+    } else {
+      cyInstance.layout({
+        name: "dagre",
+        rankDir: "LR",
+        nodeSep: 30,
+        rankSep: 160,
+        fit: true,
+        padding: 30,
+      }).run();
+    }
 
     // Persist node position on every drag-stop so a refresh / reopen
     // restores the operator's manual layout. Debounced via the timer
@@ -1190,12 +1221,35 @@
       }, 250);
     });
 
-    // Click-through on cross-site Polaris asset nodes — open the asset details
-    // slide-over. Other node kinds (firewall, switch, AP, ghost-LLDP) don't
-    // have a navigation target so we skip.
-    cyInstance.on("tap", 'node[role="remote-asset"]', function (evt) {
-      var assetId = evt.target.data("assetId");
+    // Single-click selects a node (Cytoscape's built-in selection highlight);
+    // DOUBLE-click opens its asset details. Cytoscape has no native double-tap,
+    // so we detect two taps on the same node within a short window. Resolves
+    // the asset id from the node: firewall/switch/AP/endpoint use the node id
+    // (which IS the asset id); cross-site remotes + matched wireless stations
+    // carry it in `assetId`; LLDP ghosts and unmatched stations have no asset.
+    function _openAssetForNode(node) {
+      var role = node.data("role");
+      if (role === "lldp") return; // ghost neighbor — no Polaris asset
+      var assetId;
+      if (role === "wireless-station" || role === "remote-asset") {
+        assetId = node.data("assetId");
+      } else {
+        assetId = node.data("assetId") || node.id();
+      }
       if (assetId) openViewModal(assetId);
+    }
+    var _lastNodeTap = { id: null, t: 0 };
+    cyInstance.on("tap", "node", function (evt) {
+      var node = evt.target;
+      var id = node.id();
+      var now = (window.performance && window.performance.now) ? window.performance.now() : Date.now();
+      if (_lastNodeTap.id === id && (now - _lastNodeTap.t) < 350) {
+        _lastNodeTap = { id: null, t: 0 };
+        _openAssetForNode(node);
+        return;
+      }
+      _lastNodeTap = { id: id, t: now };
+      // Single tap: selection highlight is handled by Cytoscape automatically.
     });
 
     // Auto-clear the connection-path dim if the operator taps any node
@@ -1206,17 +1260,16 @@
       if (topoState.pathOverlay) clearConnectionPathOverlay();
     });
 
-    // Hover tooltip on edges — explains the rule + evidence behind each
-    // connection. Backend stamps a `reason` data field on every edge
-    // (controller, interface-inferred, LLDP). The tooltip lets the
-    // operator audit the topology layer without reading code.
+    // Hover tooltip on edges — concise: the two devices, the interface on each
+    // side, and a one-line connection kind. Works for every edge type
+    // (controller / interface / LLDP / mesh / wireless).
     cyInstance.on("mouseover", "edge", function (evt) {
-      var reason = evt.target.data("reason");
-      if (!reason) return;
+      var html = buildEdgeTooltipHtml(evt.target);
+      if (!html) return;
       var orig = evt.originalEvent;
       var x = orig && typeof orig.clientX === "number" ? orig.clientX : 0;
       var y = orig && typeof orig.clientY === "number" ? orig.clientY : 0;
-      showEdgeTooltip(reason, x, y);
+      showEdgeTooltip(html, x, y);
     });
     cyInstance.on("mousemove", "edge", function (evt) {
       // Track the cursor so the tooltip follows the edge as the operator
@@ -1226,6 +1279,59 @@
       moveEdgeTooltip(orig.clientX, orig.clientY);
     });
     cyInstance.on("mouseout", "edge", function () { hideEdgeTooltip(); });
+  }
+
+  // Humanize an interface speed in bits/sec → "1 Gbps" / "100 Mbps" etc.
+  function _humanizeSpeedBps(bps) {
+    if (bps == null || bps <= 0) return "";
+    if (bps >= 1e9) return (bps % 1e9 === 0 ? (bps / 1e9).toFixed(0) : (bps / 1e9).toFixed(1)) + " Gbps";
+    if (bps >= 1e6) return (bps % 1e6 === 0 ? (bps / 1e6).toFixed(0) : (bps / 1e6).toFixed(1)) + " Mbps";
+    if (bps >= 1e3) return (bps / 1e3).toFixed(0) + " Kbps";
+    return bps + " bps";
+  }
+  // One-line interface detail: "lan1 · 1 Gbps · up · errors ↓3 ↑1" (speed/
+  // status omitted when unknown; errors shown only when nonzero).
+  function _formatIfDetail(d) {
+    if (!d || !d.name) return "";
+    var bits = [d.name];
+    var sp = _humanizeSpeedBps(d.speedBps);
+    if (sp) bits.push(sp);
+    if (d.operStatus) bits.push(d.operStatus);
+    var ie = d.inErrors || 0, oe = d.outErrors || 0;
+    if (ie > 0 || oe > 0) bits.push("errors ↓" + ie + " ↑" + oe);
+    return bits.join(" · ");
+  }
+
+  // Build the concise edge tooltip: "DeviceA  ⇄  DeviceB" on top, the per-side
+  // interface ports next, a one-line connection kind, then per-side interface
+  // details (speed / status / errors) when available. Reads device names from
+  // the endpoint nodes and the port pair from the edge label
+  // ("<srcPort> ↔ <tgtPort>"). Returns null when there's nothing useful.
+  function buildEdgeTooltipHtml(edge) {
+    if (!cyInstance || !edge) return null;
+    var srcId = edge.data("source");
+    var tgtId = edge.data("target");
+    var srcLabel = (cyInstance.getElementById(srcId).data("label")) || srcId || "?";
+    var tgtLabel = (cyInstance.getElementById(tgtId).data("label")) || tgtId || "?";
+    var ports = String(edge.data("label") || "").trim();
+    var kind = edge.data("isMesh")     ? "Wireless mesh / bridge"
+             : edge.data("isWireless") ? "Wireless client"
+             : edge.data("isIface")    ? "Interface-confirmed peer link"
+             : edge.data("isLldp")     ? "LLDP neighbor"
+             :                            "FortiLink controller";
+    var html =
+      '<div style="font-weight:600">' + escapeHtml(srcLabel) +
+      ' <span style="opacity:0.7">⇄</span> ' + escapeHtml(tgtLabel) + '</div>';
+    if (ports && ports !== "unknown ↔ unknown") {
+      html += '<div style="font-family:var(--font-mono,monospace);font-size:0.82em;margin-top:2px">' +
+        escapeHtml(ports) + '</div>';
+    }
+    html += '<div style="opacity:0.7;font-size:0.82em;margin-top:2px">' + escapeHtml(kind) + '</div>';
+    var sd = _formatIfDetail(edge.data("srcIf"));
+    var td = _formatIfDetail(edge.data("tgtIf"));
+    if (sd) html += '<div style="font-size:0.78em;opacity:0.85;margin-top:3px">' + escapeHtml(sd) + '</div>';
+    if (td) html += '<div style="font-size:0.78em;opacity:0.85">' + escapeHtml(td) + '</div>';
+    return html;
   }
 
   // ── Edge hover tooltip ─────────────────────────────────────────────────────
@@ -1242,11 +1348,11 @@
     _edgeTooltipEl = el;
     return el;
   }
-  function showEdgeTooltip(text, clientX, clientY) {
+  function showEdgeTooltip(html, clientX, clientY) {
     var el = ensureEdgeTooltip();
-    // Preserve newlines from the backend reason — pre-wrap renders them
-    // and CSS clamps the width.
-    el.textContent = text;
+    // Structured (escaped) HTML built by buildEdgeTooltipHtml — device names,
+    // interface ports, and connection kind.
+    el.innerHTML = html;
     el.classList.add("visible");
     moveEdgeTooltip(clientX, clientY);
   }
