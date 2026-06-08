@@ -1324,6 +1324,7 @@ body.sf-resizing * { user-select: none !important; }
   transform: translateY(-50%);
   z-index: 6;
   display: none;
+  gap: 4px;            /* space between the optional screenshot button and the gear */
   pointer-events: auto;
 }
 table thead:hover .sf-col-gear-wrap,
