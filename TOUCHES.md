@@ -89,6 +89,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `src/api/routes/integrations.ts` — Active Directory / Windows Server discovery paths upsert ad / windowsserver source rows
 - `src/jobs/backfillAssetSources.ts` — One-shot startup: derives sources from legacy assetTag / sid: / ad-guid: tag conventions
 - `src/utils/assetSourceDerivation.ts` — deriveAssetSources() implements source derivation rules for both shadow-write and backfill
+- `src/services/assetMergeService.ts` — mergeAssets() re-binds ALL of an absorbed asset's AssetSource rows onto the survivor (operator-driven merge, `POST /assets/:id/merge`) — the inverse of the per-source Split (`POST /assets/:id/sources/:sourceId/split`, which re-binds ONE source onto a fresh asset). Both rely on the global `(sourceKind, externalId)` uniqueness so a re-bind can never collide. Unlike the automatic `mergeDuplicateHostnameAssets` job / `acceptAssetConflict`, merge PRESERVES the ghost's sources (re-bind) rather than cascade-deleting them.
 
 **Readers** (files that consume it):
 - `src/utils/assetProjection.ts` — projectAssetFromSources() reads AssetSource rows and applies priority rules to build ProjectedAsset shape
@@ -110,6 +111,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 **When changing this:**
 - Modify priority rules only if tuned against real drift logs and agreed with operators (don't guess).
 - If adding a new discovery source kind, pair it with an AssetSource upsert in the discovery path AND update deriveAssetSources() rules for backfill coverage.
+- Adding a new mergeable Asset scalar field? Add it to `MERGEABLE_FIELDS` in `src/services/assetMergeService.ts` AND the `_mergeCompareFields` list in `public/js/assets.js` (they must stay in sync — the modal and the service agree on what's diffable/winner-pickable).
 - Test shadow-write: create an asset with assetTag, verify AssetSource row exists; update assetTag, verify the row is refreshed.
 - Run projectionDriftService on next discovery cycle and check pino logs for "asset.projection.drift" — should be silent on stable sources.
 - Verify backfill catches the new source kind: run startup job, spot-check a few assets have the right AssetSource rows.
@@ -730,6 +732,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 **Operator writers:**
 - `src/api/routes/assets.ts:PUT /assets/:id` — primary edit path; accepts `tags: string[]` and writes it as-is.
 - `src/api/routes/assets.ts:POST /assets/:id/sources/:sourceId/split` — clones tag set when splitting an asset.
+- `src/services/assetMergeService.ts` (`POST /assets/:id/merge`) — union-merges the absorbed asset's tags onto the survivor (operator merge).
 - `public/js/assets.js` bulk-edit modal — calls `PUT /assets/:id` per row with "Add" / "Replace" semantics.
 
 **System writers (managed namespaces):**

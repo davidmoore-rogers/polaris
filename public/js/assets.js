@@ -1114,6 +1114,432 @@ async function splitAssetSource(assetId, sourceId, sourceLabel) {
   }
 }
 
+// ─── Asset merge (admin) — inverse of Split ─────────────────────────────────
+// Absorbs another asset into the one being viewed. The operator searches for
+// the other asset, sees an extensive field-by-field comparison marking every
+// difference, picks which side survives + which value wins per differing
+// field, then confirms. Backend: POST /assets/:id/merge (assetMergeService).
+
+// Fields the comparison diffs and the operator can pick a winner for. Kept in
+// sync with MERGEABLE_FIELDS in src/services/assetMergeService.ts. `date:true`
+// formats with formatDate; everything else is shown as-is.
+var _mergeCompareFields = [
+  { key: "hostname",        label: "Hostname" },
+  { key: "dnsName",         label: "DNS Name" },
+  { key: "ipAddress",       label: "IP Address" },
+  { key: "macAddress",      label: "MAC Address" },
+  { key: "serialNumber",    label: "Serial Number" },
+  { key: "manufacturer",    label: "Manufacturer" },
+  { key: "model",           label: "Model" },
+  { key: "assetType",       label: "Type" },
+  { key: "status",          label: "Status" },
+  { key: "location",        label: "Location" },
+  { key: "learnedLocation", label: "Learned Location" },
+  { key: "department",      label: "Department" },
+  { key: "assignedTo",      label: "Assigned To" },
+  { key: "os",              label: "OS" },
+  { key: "osVersion",       label: "OS Version" },
+  { key: "snmpLocation",    label: "SNMP Location" },
+  { key: "learnedAddress",  label: "Address" },
+  { key: "purchaseOrder",   label: "Purchase Order" },
+  { key: "notes",           label: "Notes" },
+  { key: "acquiredAt",      label: "Acquired",        date: true },
+  { key: "warrantyExpiry",  label: "Warranty Expiry", date: true }
+];
+
+// Module-level state for the open merge modal.
+var _mergeThisAsset = null;        // the asset whose modal is open ("this"/A)
+var _mergeOtherAsset = null;       // the selected merge target ("other"/B)
+var _mergeThisSources = [];
+var _mergeOtherSources = [];
+var _mergeSearchTimer = null;
+
+function _mergeFieldVal(asset, f) {
+  var v = asset ? asset[f.key] : null;
+  if (v === null || v === undefined || v === "") return "";
+  if (f.date) return formatDate(v);
+  return String(v);
+}
+
+function _mergeIsEmpty(v) { return v === null || v === undefined || (typeof v === "string" && v.trim() === ""); }
+
+async function openAssetMergeModal(assetId) {
+  if (!isAdmin()) return;
+  _mergeThisAsset = null; _mergeOtherAsset = null;
+  _mergeThisSources = []; _mergeOtherSources = [];
+
+  var body =
+    '<p style="margin:0 0 0.75rem;color:var(--color-text-secondary);font-size:0.85rem">' +
+      'Merge another asset into this one. Search for the duplicate, review the differences, ' +
+      'choose which asset survives and which value wins for each field, then confirm.' +
+    '</p>' +
+    '<div class="form-group" style="margin-bottom:0.5rem">' +
+      '<input type="text" id="merge-search" placeholder="Search hostname, IP, MAC, serial, asset tag, owner..." autocomplete="off" style="width:100%">' +
+    '</div>' +
+    '<div id="merge-search-results" style="max-height:280px;overflow:auto"></div>' +
+    '<div id="merge-compare"></div>';
+
+  var footer =
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="merge-confirm-btn" style="display:none">Merge</button>';
+
+  openModal("Merge Asset", body, footer, { xl: true });
+
+  // Load the current ("this") asset + its sources up front so the comparison
+  // renders the moment a target is chosen.
+  try {
+    var fetched = await Promise.all([
+      api.assets.get(assetId),
+      api.assets.getSources(assetId).catch(function () { return []; })
+    ]);
+    _mergeThisAsset = fetched[0];
+    _mergeThisSources = Array.isArray(fetched[1]) ? fetched[1] : [];
+  } catch (err) {
+    var rs = document.getElementById("merge-search-results");
+    if (rs) rs.innerHTML = '<div class="empty-state" style="padding:1rem">Failed to load this asset: ' + escapeHtml(err.message || "error") + '</div>';
+    return;
+  }
+
+  var input = document.getElementById("merge-search");
+  if (input) {
+    input.addEventListener("input", function () {
+      if (_mergeSearchTimer) clearTimeout(_mergeSearchTimer);
+      var q = this.value.trim();
+      _mergeSearchTimer = setTimeout(function () { _mergeRunSearch(assetId, q); }, 250);
+    });
+    input.focus();
+  }
+}
+
+async function _mergeRunSearch(thisId, q) {
+  var box = document.getElementById("merge-search-results");
+  if (!box) return;
+  if (q.length < 2) { box.innerHTML = '<div class="empty-state" style="padding:0.75rem;font-size:0.85rem">Type at least 2 characters to search.</div>'; return; }
+  box.innerHTML = '<div class="empty-state" style="padding:0.75rem;font-size:0.85rem">Searching...</div>';
+  try {
+    var rows = await api.assets.list({ search: q, limit: 25 });
+    var list = Array.isArray(rows) ? rows : (rows && rows.assets) || [];
+    list = list.filter(function (a) { return a.id !== thisId; });
+    if (!list.length) { box.innerHTML = '<div class="empty-state" style="padding:0.75rem;font-size:0.85rem">No other assets match.</div>'; return; }
+    box.innerHTML = list.map(function (a) {
+      var sub = [a.ipAddress, a.macAddress, a.serialNumber, a.assetType].filter(Boolean).map(escapeHtml).join(" · ");
+      return '<div class="merge-result-row" onclick="selectMergeTarget(\'' + a.id + '\')" ' +
+        'style="padding:0.45rem 0.6rem;border:1px solid var(--color-border);border-radius:6px;margin-bottom:0.35rem;cursor:pointer">' +
+        '<div style="font-weight:600">' + escapeHtml(a.hostname || a.dnsName || a.ipAddress || "(unnamed)") + '</div>' +
+        (sub ? '<div style="font-size:0.78rem;color:var(--color-text-secondary)">' + sub + '</div>' : '') +
+      '</div>';
+    }).join("");
+  } catch (err) {
+    box.innerHTML = '<div class="empty-state" style="padding:0.75rem">Search failed: ' + escapeHtml(err.message || "error") + '</div>';
+  }
+}
+
+async function selectMergeTarget(otherId) {
+  var box = document.getElementById("merge-search-results");
+  var cmp = document.getElementById("merge-compare");
+  if (cmp) cmp.innerHTML = '<div class="empty-state" style="padding:1rem">Loading comparison...</div>';
+  try {
+    var fetched = await Promise.all([
+      api.assets.get(otherId),
+      api.assets.getSources(otherId).catch(function () { return []; })
+    ]);
+    _mergeOtherAsset = fetched[0];
+    _mergeOtherSources = Array.isArray(fetched[1]) ? fetched[1] : [];
+  } catch (err) {
+    if (cmp) cmp.innerHTML = '<div class="empty-state" style="padding:1rem">Failed to load asset: ' + escapeHtml(err.message || "error") + '</div>';
+    return;
+  }
+  // Collapse the search list once a target is chosen; offer a way back.
+  if (box) box.innerHTML = '<button class="btn btn-sm btn-secondary" onclick="_mergeReopenSearch()">&larr; Choose a different asset</button>';
+  _renderMergeComparison();
+  var btn = document.getElementById("merge-confirm-btn");
+  if (btn) btn.style.display = "";
+}
+
+function _mergeReopenSearch() {
+  _mergeOtherAsset = null; _mergeOtherSources = [];
+  var cmp = document.getElementById("merge-compare");
+  if (cmp) cmp.innerHTML = "";
+  var btn = document.getElementById("merge-confirm-btn");
+  if (btn) btn.style.display = "none";
+  var box = document.getElementById("merge-search-results");
+  if (box) box.innerHTML = "";
+  var input = document.getElementById("merge-search");
+  if (input) { input.value = ""; input.focus(); }
+}
+
+function _mergeAssetLabel(a) {
+  return escapeHtml(a.hostname || a.dnsName || a.ipAddress || a.id);
+}
+
+function _mergeSourcesSummary(sources) {
+  if (!sources || !sources.length) return '<em style="color:var(--color-text-secondary)">none</em>';
+  return sources.map(function (s) {
+    var lbl = (_assetSourceLabels && _assetSourceLabels[s.sourceKind]) || s.sourceKind;
+    return '<span class="badge badge-active" style="margin:0 0.2rem 0.2rem 0">' + escapeHtml(lbl) + '</span>';
+  }).join("");
+}
+
+function _renderMergeComparison() {
+  var cmp = document.getElementById("merge-compare");
+  if (!cmp || !_mergeThisAsset || !_mergeOtherAsset) return;
+  var A = _mergeThisAsset, B = _mergeOtherAsset;
+
+  // Survivor selector — which row's identity, monitoring history, dependency
+  // edges and FKs are kept. The absorbed row's sample history is deleted.
+  var survivorHTML =
+    '<div class="section-block" style="margin-bottom:0.75rem;padding:0.6rem 0.75rem">' +
+      '<div class="section-label" style="margin-bottom:0.4rem">Which asset survives?</div>' +
+      '<label style="display:block;margin-bottom:0.25rem;cursor:pointer">' +
+        '<input type="radio" name="merge-survivor" value="this" checked> Keep <strong>' + _mergeAssetLabel(A) + '</strong> (this asset)' +
+      '</label>' +
+      '<label style="display:block;cursor:pointer">' +
+        '<input type="radio" name="merge-survivor" value="other"> Keep <strong>' + _mergeAssetLabel(B) + '</strong> (the other asset)' +
+      '</label>' +
+      '<p class="hint" style="margin:0.4rem 0 0">The survivor keeps its monitoring history, dependency edges and quarantine state. ' +
+        'The absorbed asset\'s sample/telemetry history and interface-comment overrides are <strong>permanently deleted</strong>. ' +
+        'Discovery sources, MAC / IP / sighting history from both assets are combined onto the survivor.</p>' +
+    '</div>';
+
+  // Context rows (no winner choice) — help the operator pick the survivor.
+  function ctxRow(label, av, bv) {
+    return '<tr>' +
+      '<th style="text-align:left;padding:0.3rem 0.6rem 0.3rem 0;color:var(--color-text-secondary);font-weight:500;vertical-align:top;white-space:nowrap">' + escapeHtml(label) + '</th>' +
+      '<td style="padding:0.3rem 0.6rem;vertical-align:top">' + av + '</td>' +
+      '<td style="padding:0.3rem 0.6rem;vertical-align:top">' + bv + '</td>' +
+      '<td></td>' +
+    '</tr>';
+  }
+  var monA = A.monitored ? '<span class="badge badge-active">monitored</span>' + (A.monitorStatus ? ' ' + escapeHtml(A.monitorStatus) : "") : '<span style="color:var(--color-text-secondary)">not monitored</span>';
+  var monB = B.monitored ? '<span class="badge badge-active">monitored</span>' + (B.monitorStatus ? ' ' + escapeHtml(B.monitorStatus) : "") : '<span style="color:var(--color-text-secondary)">not monitored</span>';
+  var contextRows =
+    ctxRow("Monitored", monA, monB) +
+    ctxRow("Sources", _mergeSourcesSummary(_mergeThisSources), _mergeSourcesSummary(_mergeOtherSources)) +
+    ctxRow("Last Seen", escapeHtml(A.lastSeen ? formatDate(A.lastSeen) : "-"), escapeHtml(B.lastSeen ? formatDate(B.lastSeen) : "-")) +
+    ctxRow("Tags", (A.tags && A.tags.length ? A.tags.map(escapeHtml).join(", ") : "-"), (B.tags && B.tags.length ? B.tags.map(escapeHtml).join(", ") : "-"));
+
+  // Field rows — every mergeable field. Differences get a highlight + winner
+  // radios; equal values render plainly. Empty-vs-value also counts as a diff.
+  var diffCount = 0;
+  var fieldRows = _mergeCompareFields.map(function (f) {
+    var avRaw = _mergeFieldVal(A, f), bvRaw = _mergeFieldVal(B, f);
+    var differs = avRaw !== bvRaw;
+    if (differs) diffCount++;
+    var av = avRaw === "" ? '<em style="color:var(--color-text-secondary)">empty</em>' : escapeHtml(avRaw);
+    var bv = bvRaw === "" ? '<em style="color:var(--color-text-secondary)">empty</em>' : escapeHtml(bvRaw);
+    var winnerCell = "";
+    if (differs) {
+      // Default winner: the side with a value; if both have values, default to
+      // "this". Stored as data-field so confirm can gather them.
+      var defThis = _mergeIsEmpty(B[f.key]) || !_mergeIsEmpty(A[f.key]);
+      winnerCell =
+        '<div style="display:flex;gap:0.5rem;white-space:nowrap">' +
+          '<label style="cursor:pointer"><input type="radio" name="mw-' + f.key + '" value="this"' + (defThis ? " checked" : "") + '> A</label>' +
+          '<label style="cursor:pointer"><input type="radio" name="mw-' + f.key + '" value="other"' + (!defThis ? " checked" : "") + '> B</label>' +
+        '</div>';
+    }
+    var rowStyle = differs ? ' style="background:var(--color-warning-bg, rgba(255,193,7,0.12))"' : '';
+    return '<tr' + rowStyle + '>' +
+      '<th style="text-align:left;padding:0.3rem 0.6rem 0.3rem 0;color:var(--color-text-secondary);font-weight:500;vertical-align:top;white-space:nowrap">' + escapeHtml(f.label) + (differs ? ' <span title="Differs">&#9679;</span>' : '') + '</th>' +
+      '<td style="padding:0.3rem 0.6rem;vertical-align:top;word-break:break-word">' + av + '</td>' +
+      '<td style="padding:0.3rem 0.6rem;vertical-align:top;word-break:break-word">' + bv + '</td>' +
+      '<td style="padding:0.3rem 0;vertical-align:top">' + winnerCell + '</td>' +
+    '</tr>';
+  }).join("");
+
+  cmp.innerHTML =
+    survivorHTML +
+    '<div style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:0.4rem">' +
+      (diffCount === 0 ? 'No field differences — the two assets agree on every field.' : diffCount + ' field' + (diffCount === 1 ? '' : 's') + ' differ (highlighted). Pick the winning value for each.') +
+    '</div>' +
+    '<div style="overflow:auto">' +
+      '<table style="width:100%;font-size:0.85rem;border-collapse:collapse">' +
+        '<thead><tr>' +
+          '<th style="text-align:left;padding:0 0.6rem 0.4rem 0">Field</th>' +
+          '<th style="text-align:left;padding:0 0.6rem 0.4rem">A: ' + _mergeAssetLabel(A) + '</th>' +
+          '<th style="text-align:left;padding:0 0.6rem 0.4rem">B: ' + _mergeAssetLabel(B) + '</th>' +
+          '<th style="text-align:left;padding:0 0 0.4rem">Keep</th>' +
+        '</tr></thead>' +
+        '<tbody>' + contextRows + fieldRows + '</tbody>' +
+      '</table>' +
+    '</div>';
+
+  var btn = document.getElementById("merge-confirm-btn");
+  if (btn && !btn._mergeBound) {
+    btn._mergeBound = true;
+    btn.addEventListener("click", _confirmMerge);
+  }
+}
+
+// Resolve the merge plan from the operator's survivor + per-field winner
+// choices. Mirrors the server's resolution (assetMergeService.mergeAssets):
+// a field only OVERWRITES the survivor when the winning side has a non-empty
+// value that differs from the survivor's current value. Picking the empty
+// side never blanks the survivor (the backend guards this), so we don't show
+// it as a change either.
+function _buildMergePlan(survivor, fieldWinners) {
+  var survivorAsset = survivor === "this" ? _mergeThisAsset : _mergeOtherAsset;
+  var absorbedAsset = survivor === "this" ? _mergeOtherAsset : _mergeThisAsset;
+  var absorbedSources = survivor === "this" ? _mergeOtherSources : _mergeThisSources;
+
+  var overwrites = [];
+  _mergeCompareFields.forEach(function (f) {
+    var who = fieldWinners[f.key];           // "this" | "other" | undefined
+    if (!who) return;                        // field didn't differ → no radio
+    var winnerAsset = who === "this" ? _mergeThisAsset : _mergeOtherAsset;
+    var winRaw = winnerAsset[f.key];
+    // Empty winner can't overwrite a value (backend keeps the survivor's).
+    var toAsset = _mergeIsEmpty(winRaw) ? survivorAsset : winnerAsset;
+    var fromVal = _mergeFieldVal(survivorAsset, f);
+    var toVal = _mergeFieldVal(toAsset, f);
+    if (fromVal !== toVal) {
+      overwrites.push({ label: f.label, from: fromVal, to: toVal });
+    }
+  });
+
+  // Tags the union will ADD to the survivor (absorbed tags not already held).
+  var survTags = (survivorAsset.tags || []);
+  var have = {};
+  survTags.forEach(function (t) { have[t] = true; });
+  var tagsAdded = (absorbedAsset.tags || []).filter(function (t) { return !have[t]; });
+
+  return {
+    survivorAsset: survivorAsset,
+    absorbedAsset: absorbedAsset,
+    absorbedSources: absorbedSources || [],
+    overwrites: overwrites,
+    tagsAdded: tagsAdded
+  };
+}
+
+// Stacked confirmation modal (own overlay at a higher z-index, like
+// showConfirm) so the comparison modal underneath stays intact — "Back"
+// just dismisses this layer. Resolves true on confirm, false otherwise.
+function _showMergeReviewModal(survivor, fieldWinners) {
+  return new Promise(function (resolve) {
+    var plan = _buildMergePlan(survivor, fieldWinners);
+    var survLabel = _mergeAssetLabel(plan.survivorAsset);
+    var absLabel = _mergeAssetLabel(plan.absorbedAsset);
+
+    var overwriteHTML;
+    if (plan.overwrites.length === 0) {
+      overwriteHTML = '<p style="margin:0;color:var(--color-text-secondary);font-size:0.85rem">No fields on <strong>' + survLabel + '</strong> will change — every winning value matches what it already has.</p>';
+    } else {
+      overwriteHTML =
+        '<table style="width:100%;font-size:0.85rem;border-collapse:collapse">' +
+          '<thead><tr>' +
+            '<th style="text-align:left;padding:0 0.6rem 0.35rem 0">Field</th>' +
+            '<th style="text-align:left;padding:0 0.6rem 0.35rem">Current</th>' +
+            '<th style="text-align:left;padding:0 0 0.35rem">New value</th>' +
+          '</tr></thead><tbody>' +
+          plan.overwrites.map(function (o) {
+            var from = o.from === "" ? '<em style="color:var(--color-text-secondary)">empty</em>' : escapeHtml(o.from);
+            var to = o.to === "" ? '<em style="color:var(--color-text-secondary)">empty</em>' : escapeHtml(o.to);
+            return '<tr>' +
+              '<th style="text-align:left;padding:0.25rem 0.6rem 0.25rem 0;color:var(--color-text-secondary);font-weight:500;white-space:nowrap;vertical-align:top">' + escapeHtml(o.label) + '</th>' +
+              '<td style="padding:0.25rem 0.6rem;vertical-align:top;word-break:break-word;color:var(--color-danger)">' + from + '</td>' +
+              '<td style="padding:0.25rem 0;vertical-align:top;word-break:break-word;color:var(--color-success)">' + to + '</td>' +
+            '</tr>';
+          }).join("") +
+          '</tbody></table>';
+    }
+
+    var combinedBits = [];
+    if (plan.absorbedSources.length) {
+      var kinds = plan.absorbedSources.map(function (s) { return (_assetSourceLabels && _assetSourceLabels[s.sourceKind]) || s.sourceKind; });
+      combinedBits.push(plan.absorbedSources.length + ' discovery source' + (plan.absorbedSources.length === 1 ? '' : 's') + ' (' + escapeHtml(kinds.join(", ")) + ')');
+    }
+    combinedBits.push('MAC, IP and firewall-sighting history');
+    if (plan.tagsAdded.length) {
+      combinedBits.push('tags: ' + plan.tagsAdded.map(escapeHtml).join(", "));
+    }
+
+    var bodyHTML =
+      '<p style="margin:0 0 0.85rem;font-size:0.9rem">Merging <strong>' + absLabel + '</strong> into <strong>' + survLabel + '</strong>. Review the changes before confirming.</p>' +
+
+      '<div class="section-block" style="margin-bottom:0.75rem;padding:0.6rem 0.75rem">' +
+        '<div class="section-label" style="margin-bottom:0.4rem">Will be overwritten on ' + survLabel + (plan.overwrites.length ? ' (' + plan.overwrites.length + ')' : '') + '</div>' +
+        overwriteHTML +
+      '</div>' +
+
+      '<div class="section-block" style="margin-bottom:0.75rem;padding:0.6rem 0.75rem">' +
+        '<div class="section-label" style="margin-bottom:0.4rem">Combined onto ' + survLabel + '</div>' +
+        '<ul style="margin:0;padding-left:1.1rem;font-size:0.85rem;color:var(--color-text-secondary)">' +
+          combinedBits.map(function (b) { return '<li>' + b + '</li>'; }).join("") +
+        '</ul>' +
+      '</div>' +
+
+      '<div class="section-block" style="margin-bottom:0;padding:0.6rem 0.75rem;border-left:3px solid var(--color-danger)">' +
+        '<div class="section-label" style="margin-bottom:0.4rem;color:var(--color-danger)">Permanently deleted</div>' +
+        '<ul style="margin:0;padding-left:1.1rem;font-size:0.85rem;color:var(--color-text-secondary)">' +
+          '<li>The absorbed asset <strong>' + absLabel + '</strong> (its row is removed)</li>' +
+          '<li>Its monitoring / telemetry / sample history and interface-comment overrides</li>' +
+        '</ul>' +
+        '<p style="margin:0.5rem 0 0;font-size:0.82rem;color:var(--color-text-secondary)">This cannot be undone. Use <strong>Split</strong> afterward if you need to separate a source again.</p>' +
+      '</div>';
+
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.style.zIndex = "1300";
+    overlay.innerHTML =
+      '<div class="modal modal-wide">' +
+        '<div class="modal-header"><h3>Confirm merge</h3></div>' +
+        '<div class="modal-body">' + bodyHTML + '</div>' +
+        '<div class="modal-footer">' +
+          '<button class="btn btn-secondary" data-merge-review="back">Back</button>' +
+          '<button class="btn btn-danger" data-merge-review="ok">Confirm merge</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    function done(val) {
+      overlay.classList.remove("open");
+      overlay.addEventListener("transitionend", function () { if (overlay.parentNode) overlay.remove(); }, { once: true });
+      setTimeout(function () { if (overlay.parentNode) overlay.remove(); }, 400);
+      resolve(val);
+    }
+    overlay.querySelector('[data-merge-review="back"]').onclick = function () { done(false); };
+    overlay.querySelector('[data-merge-review="ok"]').onclick = function () { done(true); };
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) done(false); });
+    requestAnimationFrame(function () { overlay.classList.add("open"); });
+  });
+}
+
+async function _confirmMerge() {
+  if (!_mergeThisAsset || !_mergeOtherAsset) return;
+  var survEl = document.querySelector('input[name="merge-survivor"]:checked');
+  var survivor = survEl ? survEl.value : "this";
+  var fieldWinners = {};
+  _mergeCompareFields.forEach(function (f) {
+    var sel = document.querySelector('input[name="mw-' + f.key + '"]:checked');
+    if (sel) fieldWinners[f.key] = sel.value; // "this" | "other"
+  });
+
+  // Open the review modal: it shows exactly what will be overwritten on the
+  // survivor (given the per-field winners), what gets combined, and what is
+  // permanently deleted. Returns true only when the operator confirms.
+  var ok = await _showMergeReviewModal(survivor, fieldWinners);
+  if (!ok) return;
+
+  var btn = document.getElementById("merge-confirm-btn");
+  if (btn) btn.disabled = true;
+  try {
+    var result = await api.assets.merge(_mergeThisAsset.id, {
+      otherAssetId: _mergeOtherAsset.id,
+      survivor: survivor,
+      fieldWinners: fieldWinners
+    });
+    closeModal();
+    showToast('Assets merged — moved ' + result.movedSources + ' source(s)');
+    await loadAssets();
+    // Re-open the survivor so the operator sees the combined record.
+    window.location.hash = 'view=asset:' + result.survivorId;
+    openViewModal(result.survivorId);
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showToast(err.message || 'Merge failed', 'error');
+  }
+}
+
 async function bulkQuarantineAssets() {
   var ids = Array.from(_assetsSelected);
   if (!ids.length) return;
@@ -11564,8 +11990,18 @@ function _assetSourcesTabHTML(sources, assetId, sightings, ipHistory) {
   sources = Array.isArray(sources) ? sources : [];
   sightings = Array.isArray(sightings) ? sightings : [];
   ipHistory = Array.isArray(ipHistory) ? ipHistory : [];
+  // Admin-only Merge action — absorb a duplicate asset into this one (the
+  // inverse of the per-source Split below). Asset-level, so it's offered
+  // regardless of source count (a manually-created single-source asset can
+  // still be merged with a discovered duplicate).
+  var mergeToolbar = isAdmin()
+    ? '<div style="display:flex;justify-content:flex-end;margin-bottom:0.75rem">' +
+        '<button class="btn btn-sm btn-secondary" onclick="openAssetMergeModal(\'' + assetId + '\')" ' +
+        'title="Merge a duplicate asset into this one (combines discovery sources; the inverse of Split)">Merge asset...</button>' +
+      '</div>'
+    : '';
   if (sources.length === 0 && sightings.length === 0 && ipHistory.length === 0) {
-    return '<div class="empty-state" style="padding:1rem">No source rows on file for this asset. Phase-1 backfill runs at startup; check the Events log if you expected entries here.</div>';
+    return mergeToolbar + '<div class="empty-state" style="padding:1rem">No source rows on file for this asset. Phase-1 backfill runs at startup; check the Events log if you expected entries here.</div>';
   }
   // History sections appended below the per-source cards: which firewalls have
   // seen this asset, and which IPs it has held over time. Folded in here so
@@ -11638,7 +12074,7 @@ function _assetSourcesTabHTML(sources, assetId, sightings, ipHistory) {
       '</div>'
     );
   }).join("");
-  return sourceCards + historyHTML;
+  return mergeToolbar + sourceCards + historyHTML;
 }
 
 // ─── Quarantine tab ─────────────────────────────────────────────────────────

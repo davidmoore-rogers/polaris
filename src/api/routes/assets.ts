@@ -20,6 +20,7 @@ import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../..
 import { isValidIpAddress, cidrContains } from "../../utils/cidr.js";
 import { isKnownAssetType } from "../../utils/assetTypes.js";
 import { recomputeMonitorOverrideForAssets } from "../../services/monitorOverrideService.js";
+import { mergeAssets, MERGEABLE_FIELDS, type MergeableField, type FieldWinner } from "../../services/assetMergeService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
 import {
@@ -2453,6 +2454,86 @@ router.post("/:id/sources/:sourceId/split", requirePermission("assets", "write")
       movedSourceId: target.id,
       newAsset: result.newAsset,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/assets/:id/merge — operator-driven asset merge (the inverse of
+// the per-source Split action above). Absorbs another asset into this one,
+// re-binding the absorbed asset's discovery sources / MAC / IP / sighting
+// history onto the survivor and deleting the absorbed row. The operator picks
+// which side survives and resolves each differing field in the comparison UI.
+//
+// Body:
+//   - otherAssetId: the asset to merge with this one (required)
+//   - survivor: "this" (default — the :id asset survives) | "other"
+//   - fieldWinners: { <field>: "this" | "other" } — per-field overrides; any
+//     field omitted defaults to blank-fill (keep survivor, fill from absorbed
+//     only when the survivor's value is empty)
+//
+// The absorbed asset's monitoring/telemetry sample history, interface comment
+// overrides, dependency edges, and pending conflicts cascade-delete with it —
+// the survivor keeps its own (the UI warns about this and surfaces which side
+// is monitored so the operator picks the right survivor).
+const mergeBodySchema = z.object({
+  otherAssetId: z.string().min(1),
+  survivor: z.enum(["this", "other"]).default("this"),
+  fieldWinners: z.record(z.enum(["this", "other"])).optional(),
+});
+router.post("/:id/merge", requirePermission("assets", "write"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const { otherAssetId, survivor, fieldWinners } = mergeBodySchema.parse(req.body);
+    if (id === otherAssetId) throw new AppError(400, "Cannot merge an asset into itself");
+
+    // Resolve survivor (canonical) vs. absorbed (ghost) from the operator's
+    // choice, then translate the "this"/"other" field winners into the
+    // service's "canonical"/"ghost" vocabulary.
+    const canonicalId = survivor === "this" ? id : otherAssetId;
+    const ghostId = survivor === "this" ? otherAssetId : id;
+    const thisIsCanonical = survivor === "this";
+    const resolvedWinners: Partial<Record<MergeableField, FieldWinner>> = {};
+    for (const [field, who] of Object.entries(fieldWinners ?? {})) {
+      if (!(MERGEABLE_FIELDS as readonly string[]).includes(field)) continue;
+      // who === "this" means the :id asset wins for this field.
+      const winnerIsThis = who === "this";
+      resolvedWinners[field as MergeableField] =
+        winnerIsThis === thisIsCanonical ? "canonical" : "ghost";
+    }
+
+    const [survivorBefore, absorbedBefore] = await Promise.all([
+      prisma.asset.findUnique({ where: { id: canonicalId }, select: { id: true, hostname: true } }),
+      prisma.asset.findUnique({ where: { id: ghostId }, select: { id: true, hostname: true } }),
+    ]);
+    if (!survivorBefore) throw new AppError(404, "Survivor asset not found");
+    if (!absorbedBefore) throw new AppError(404, "Absorbed asset not found");
+
+    const result = await mergeAssets({ canonicalId, ghostId, fieldWinners: resolvedWinners });
+
+    await logEvent({
+      action: "asset.merged",
+      resourceType: "asset",
+      resourceId: result.survivorId,
+      resourceName: survivorBefore.hostname || undefined,
+      actor: req.session?.username,
+      level: "info",
+      message: `Merged asset ${absorbedBefore.hostname || result.absorbedId} into ${survivorBefore.hostname || result.survivorId} — moved ${result.movedSources} source(s)`,
+      details: {
+        survivorId: result.survivorId,
+        absorbedId: result.absorbedId,
+        movedSources: result.movedSources,
+        movedMacs: result.movedMacs,
+        movedIps: result.movedIps,
+        movedIpHistory: result.movedIpHistory,
+        movedSightings: result.movedSightings,
+        movedManagedAgent: result.movedManagedAgent,
+        appliedFields: result.appliedFields,
+        fieldWinners: resolvedWinners,
+      },
+    });
+
+    res.json(result);
   } catch (err) {
     next(err);
   }
