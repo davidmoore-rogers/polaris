@@ -1710,7 +1710,7 @@ and `src/app.ts` branches on the capability flags at boot.
 | Role | Boots | Notes |
 |---|---|---|
 | `all` (default, unset) | everything | Local dev (`npm run dev`) — runs everything in one process for fast iteration. Not a production deployment target since Phase 3 (no `polaris.service` unit is shipped). |
-| `web` | Express/HTTPS/agent-WS, **all singleton schedulers**, one-shot migrations, pg-boss **producer** connection | Single instance — the control plane. Owns the in-app updater (restarts the whole group). |
+| `web` | Express/HTTPS/agent-WS, **all singleton schedulers**, one-shot migrations, pg-boss **producer** connection, **sample/probe write buffers** (the Polaris Agent `/samples` + `/probe-now` endpoints ingest here, so the web role must run the flush tick or agent-sourced rows never persist) | Single instance — the control plane. Owns the in-app updater (restarts the whole group). |
 | `monitor` | pg-boss **monitor-queue consumers** + floating pool, sample/probe write buffers | Run **N replicas** — pg-boss hands each job to exactly one worker, so replicas never double-execute. |
 | `discovery` | pg-boss **discovery-queue consumer** (`runDiscovery`) | Executes discovery runs off the `polaris-discovery-run` queue. |
 

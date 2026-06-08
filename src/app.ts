@@ -191,8 +191,11 @@ initializeQueue()
   });
 
 // Sample-write + probe-patch buffers batch the per-probe sample inserts and
-// state updates produced by the monitor consumers. They ride with the consumer
-// role; the web/discovery processes don't produce monitor samples.
+// state updates. The monitor consumers produce them via SNMP/REST probes, AND
+// the web role produces them via the Polaris Agent `/samples` + `/probe-now`
+// endpoints (mounted on the HTTP listener) — both roles must run the flush
+// tick or agent-sourced rows sit in the in-process buffer and only land on
+// graceful shutdown. runsWriteBuffers is true for monitor + web (+ all).
 if (cfg.runsWriteBuffers) {
   // Sample-write buffer: batches the six append-only sample tables (monitor /
   // telemetry / temperature / interface / storage / ipsec tunnel) into one

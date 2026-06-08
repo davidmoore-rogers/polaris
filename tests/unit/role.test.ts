@@ -53,14 +53,17 @@ describe("roleConfig — capability matrix", () => {
     });
   });
 
-  it("web = HTTP + schedulers + migrations only (control plane)", () => {
+  it("web = HTTP + schedulers + migrations + write buffers (ingests agent samples)", () => {
     expect(roleConfig("web")).toMatchObject({
       runsHttp: true,
       runsSchedulers: true,
       runsMigrations: true,
       runsMonitorConsumers: false,
       runsDiscoveryConsumers: false,
-      runsWriteBuffers: false,
+      // The Polaris Agent /samples + /probe-now endpoints live on the HTTP
+      // listener and enqueue into the sample/probe-patch buffers, so the web
+      // role MUST run the flush tick or agent-sourced rows never persist.
+      runsWriteBuffers: true,
     });
   });
 

@@ -36,7 +36,12 @@ export interface RoleConfig {
   runsSchedulers: boolean;
   /** One-shot startup migrate/seed/backfill jobs + TimescaleDB hypertable DDL. */
   runsMigrations: boolean;
-  /** sampleWriteBuffer + probePatchBuffer flush loops. */
+  /** sampleWriteBuffer + probePatchBuffer flush loops. Needed by BOTH the
+   *  monitor role (SNMP/REST probe + telemetry + system-info samples) AND the
+   *  web role — the Polaris Agent `/samples` + `/probe-now` endpoints are
+   *  mounted on the HTTP listener and enqueue into the same in-process
+   *  buffers; without the flush tick those agent-sourced rows sit in memory
+   *  and only land on graceful shutdown. */
   runsWriteBuffers: boolean;
 }
 
@@ -86,7 +91,7 @@ export function roleConfig(role: PolarisRole = getRole()): RoleConfig {
     runsDiscoveryConsumers: all || role === "discovery",
     runsSchedulers: all || role === "web",
     runsMigrations: all || role === "web",
-    runsWriteBuffers: all || role === "monitor",
+    runsWriteBuffers: all || role === "monitor" || role === "web",
   };
 }
 
