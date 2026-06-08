@@ -33,7 +33,7 @@ import { logger } from "../utils/logger.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type DependencyDetectedVia = "controller" | "interface" | "lldp" | "manual";
+export type DependencyDetectedVia = "controller" | "interface" | "lldp" | "mesh" | "manual";
 export type DependencySource = "computed" | "override";
 
 /** Pure-function input — one Fortinet infra asset. */
@@ -55,6 +55,17 @@ export interface DepInterfaceEdge {
 export interface DepLldpEdge {
   assetId:        string;  // local asset
   matchedAssetId: string;  // resolved peer
+}
+
+/**
+ * Pure-function input — one wireless-mesh backhaul link. A mesh LEAF AP shows
+ * up as an associated station on its ROOT AP (the root sees its mesh child as
+ * a client; the leaf does not list the root). This makes the leaf depend on
+ * the root AP, NOT on whatever switch discovery wrongly resolved for it.
+ */
+export interface DepMeshEdge {
+  rootApId: string;  // the AP whose station table lists the leaf
+  leafApId: string;  // the mesh child AP (matched station asset)
 }
 
 /** Output of edge construction — one directed parent→child edge. */
@@ -88,6 +99,11 @@ export function buildDependencyEdgesFromInputs(
   assets: DepAsset[],
   interfaceEdges: DepInterfaceEdge[],
   lldpEdges: DepLldpEdge[],
+  meshEdges: DepMeshEdge[] = [],
+  /** Switch ids that are bridged behind a FortiAP (LLDP-detected). Their
+   * FortiLink controller edge is suppressed so they depend on the AP via the
+   * LLDP edge instead of on the FortiGate. */
+  bridgeLeafSwitchIds: Set<string> = new Set(),
 ): DependencyEdge[] {
   const byHostname = new Map<string, DepAsset>();
   for (const a of assets) {
@@ -95,6 +111,17 @@ export function buildDependencyEdgesFromInputs(
   }
   const byId = new Map<string, DepAsset>();
   for (const a of assets) byId.set(a.id, a);
+
+  // Mesh leaves: APs whose real uplink is wireless to a root AP. Their
+  // controller-derived edge (to a switch / FG) is BACKWARDS — the leaf depends
+  // on the root AP, not the switch — so we suppress it below and emit the mesh
+  // edge instead.
+  const meshLeafSet = new Set<string>();
+  for (const m of meshEdges) {
+    if (byId.has(m.rootApId) && byId.has(m.leafApId) && m.rootApId !== m.leafApId) {
+      meshLeafSet.add(m.leafApId);
+    }
+  }
 
   // Emit one edge per (child, parent, detectedVia) tuple. Same pair surfaced
   // via multiple signals (e.g. a FortiSwitch reachable via both its FortiLink
@@ -118,12 +145,19 @@ export function buildDependencyEdgesFromInputs(
     const top = a.fortinetTopology as Record<string, unknown> | null;
     if (!top) continue;
     if (a.assetType === "switch") {
+      // Bridged-behind-an-AP switch: its FortiLink edge is the logical-mgmt
+      // path, not the physical uplink — skip it; the LLDP edge to the AP (added
+      // below) makes it depend on the AP instead.
+      if (bridgeLeafSwitchIds.has(a.id)) continue;
       const parentHost = typeof top.controllerFortigate === "string" ? top.controllerFortigate.toLowerCase() : null;
       if (parentHost) {
         const parent = byHostname.get(parentHost);
         if (parent && parent.assetType === "firewall") add(a.id, parent.id, "controller");
       }
     } else if (a.assetType === "access_point") {
+      // Mesh leaf: its switch/FG controller edge is backwards — skip it; the
+      // mesh edge (added below) makes it depend on its root AP instead.
+      if (meshLeafSet.has(a.id)) continue;
       const parentSwitchHost = typeof top.parentSwitch === "string" ? top.parentSwitch.toLowerCase() : null;
       const parentFgHost = typeof top.controllerFortigate === "string" ? top.controllerFortigate.toLowerCase() : null;
       if (parentSwitchHost) {
@@ -135,6 +169,13 @@ export function buildDependencyEdgesFromInputs(
         if (parent && parent.assetType === "firewall") add(a.id, parent.id, "controller");
       }
     }
+  }
+
+  // 1b) Mesh-derived edges (directed root AP → leaf AP, authoritative for the
+  // leaf). Treated as the strongest signal so it wins the prune tiebreak and,
+  // via `assignLayers`' physical adjacency, layers the leaf off its root AP.
+  for (const m of meshEdges) {
+    if (byId.has(m.rootApId) && byId.has(m.leafApId)) add(m.leafApId, m.rootApId, "mesh");
   }
 
   // 2) Interface-derived edges (bidirectional — emit both directions and
@@ -166,6 +207,7 @@ export function buildDependencyEdgesFromInputs(
  *  evidence of a real cable, with controller (logical FortiLink management)
  *  as the weakest fallback. */
 function physicalRank(detectedVia: DependencyDetectedVia): number {
+  if (detectedVia === "mesh")      return 4; // authoritative wireless backhaul
   if (detectedVia === "interface") return 3;
   if (detectedVia === "lldp")      return 2;
   if (detectedVia === "controller") return 1;
@@ -207,7 +249,10 @@ export function assignLayers(
     adj.get(a)!.add(b);
   }
   for (const e of edges) {
-    const isPhysical = e.detectedVia === "interface" || e.detectedVia === "lldp";
+    // Mesh counts as physical (a real, if wireless, backhaul link) so the
+    // leaf AP layers off its root AP in the physical-first BFS rather than
+    // collapsing onto a controller-resolved switch.
+    const isPhysical = e.detectedVia === "interface" || e.detectedVia === "lldp" || e.detectedVia === "mesh";
     const target = isPhysical ? physicalAdj : controllerAdj;
     link(target, e.childAssetId, e.parentAssetId);
     link(target, e.parentAssetId, e.childAssetId);
@@ -531,8 +576,47 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
     .filter((r): r is { assetId: string; matchedAssetId: string } => !!r.matchedAssetId)
     .map(r => ({ assetId: r.assetId, matchedAssetId: r.matchedAssetId }));
 
+  // Mesh edges — a leaf AP appears as a matched wireless station on its root
+  // AP. Both sides must be APs. This is the authoritative uplink for a mesh
+  // leaf (overrides the wrong switch/FG controller edge discovery resolved).
+  const meshRows = await prisma.assetWirelessStation.findMany({
+    where: {
+      matchedAssetId: { not: null },
+      apAsset:      { assetType: "access_point" },
+      matchedAsset: { assetType: "access_point" },
+    },
+    select: { apAssetId: true, matchedAssetId: true },
+  });
+  const meshEdges: DepMeshEdge[] = meshRows
+    .filter((r): r is { apAssetId: string; matchedAssetId: string } => !!r.matchedAssetId)
+    .map(r => ({ rootApId: r.apAssetId, leafApId: r.matchedAssetId }));
+
+  // Bridge leaves — a FortiLink switch physically behind a FortiAP shows up as
+  // an LLDP neighbor of that AP (the inverse of a normal switch→AP uplink). A
+  // switch on either side of an AP↔switch LLDP adjacency, where the switch is
+  // NOT that AP's controller parent, is bridged behind the AP → its FortiLink
+  // edge is suppressed so it depends on the AP via LLDP.
+  const invById = new Map(inventory.map(a => [a.id, a]));
+  const apParentSwitchOf = (a: typeof inventory[number]) => {
+    const t = a.fortinetTopology as Record<string, unknown> | null;
+    return t && typeof t.parentSwitch === "string" ? t.parentSwitch.toLowerCase() : null;
+  };
+  const bridgeLeafSwitchIds = new Set<string>();
+  for (const e of lldpEdges) {
+    const a = invById.get(e.assetId);
+    const b = invById.get(e.matchedAssetId);
+    if (!a || !b) continue;
+    let ap: typeof inventory[number] | undefined;
+    let sw: typeof inventory[number] | undefined;
+    if (a.assetType === "access_point" && b.assetType === "switch") { ap = a; sw = b; }
+    else if (b.assetType === "access_point" && a.assetType === "switch") { ap = b; sw = a; }
+    if (!ap || !sw) continue;
+    if (sw.hostname && apParentSwitchOf(ap) === sw.hostname.toLowerCase()) continue; // normal switch→AP uplink
+    bridgeLeafSwitchIds.add(sw.id);
+  }
+
   // Build, layer, prune.
-  const candidateEdges = buildDependencyEdgesFromInputs(depAssets, interfaceEdges, lldpEdges);
+  const candidateEdges = buildDependencyEdgesFromInputs(depAssets, interfaceEdges, lldpEdges, meshEdges, bridgeLeafSwitchIds);
   const { layers, keptEdges, unresolved } = assignLayers(depAssets, candidateEdges);
 
   // Restrict the writeback to in-scope assets. An out-of-scope asset's

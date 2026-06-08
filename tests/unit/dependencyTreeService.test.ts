@@ -54,6 +54,49 @@ describe("buildDependencyEdgesFromInputs", () => {
     ]);
   });
 
+  it("makes a mesh leaf AP depend on its root AP, not the controller-resolved switch", () => {
+    const assets = [
+      fg("fg1", "FG-EDGE-01"),
+      sw("sw1", "FS-CORE-01", "FG-EDGE-01"),
+      ap("apRoot", "FAP-ROOT", "FS-CORE-01"), // root AP genuinely on the switch
+      ap("apLeaf", "FAP-LEAF", "FS-CORE-01"), // discovery WRONGLY put the leaf on the switch
+    ];
+    const meshEdges = [{ rootApId: "apRoot", leafApId: "apLeaf" }];
+    const edges = buildDependencyEdgesFromInputs(assets, [], [], meshEdges);
+    // Leaf gets NO controller edge to the switch...
+    expect(edges).not.toContainEqual({ childAssetId: "apLeaf", parentAssetId: "sw1", detectedVia: "controller" });
+    // ...and instead a mesh edge to its root AP.
+    expect(edges).toContainEqual({ childAssetId: "apLeaf", parentAssetId: "apRoot", detectedVia: "mesh" });
+
+    const { layers, keptEdges } = assignLayers(assets, edges);
+    // fg=1, sw=2, apRoot=3, apLeaf=4 (one layer below its root AP).
+    expect(layers.get("apRoot")).toBe(3);
+    expect(layers.get("apLeaf")).toBe(4);
+    const leafParent = keptEdges.find((e) => e.childAssetId === "apLeaf");
+    expect(leafParent).toEqual({ childAssetId: "apLeaf", parentAssetId: "apRoot", detectedVia: "mesh" });
+  });
+
+  it("makes a switch bridged behind an AP depend on the AP, not the FortiGate", () => {
+    const assets = [
+      fg("fg1", "FG-EDGE-01"),
+      ap("apX", "FAP-REMOTE", undefined, "FG-EDGE-01"), // remote AP, no parentSwitch
+      sw("swBridge", "FS-REMOTE", "FG-EDGE-01"), // FortiLink-managed switch behind apX
+    ];
+    const lldpEdges = [{ assetId: "apX", matchedAssetId: "swBridge" }];
+    const bridgeLeaves = new Set(["swBridge"]);
+    const edges = buildDependencyEdgesFromInputs(assets, [], lldpEdges, [], bridgeLeaves);
+    // FortiLink controller edge to the FortiGate is suppressed...
+    expect(edges).not.toContainEqual({ childAssetId: "swBridge", parentAssetId: "fg1", detectedVia: "controller" });
+    // ...replaced by an LLDP edge to the AP.
+    expect(edges).toContainEqual({ childAssetId: "swBridge", parentAssetId: "apX", detectedVia: "lldp" });
+
+    const { layers, keptEdges } = assignLayers(assets, edges);
+    expect(layers.get("apX")).toBe(2); // AP off the FortiGate
+    expect(layers.get("swBridge")).toBe(3); // bridged switch off the AP
+    const leafParent = keptEdges.find((e) => e.childAssetId === "swBridge");
+    expect(leafParent).toEqual({ childAssetId: "swBridge", parentAssetId: "apX", detectedVia: "lldp" });
+  });
+
   it("emits switch→AP edges from fortinetTopology.parentSwitch", () => {
     const assets = [
       fg("fg1", "FG-EDGE-01"),
