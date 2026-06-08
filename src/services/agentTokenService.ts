@@ -206,7 +206,7 @@ export async function verifyBearer(
       bearerHash: { not: null },
       bearerRevokedAt: null,
     },
-    select: { id: true, assetId: true, bearerHash: true },
+    select: { id: true, assetId: true, bearerHash: true, installStatus: true },
   });
 
   for (const row of candidates) {
@@ -214,12 +214,23 @@ export async function verifyBearer(
     const { valid } = await verifyPassword(rawBearer, row.bearerHash);
     if (!valid) continue;
 
-    // Best-effort liveness stamp.
+    // Best-effort liveness stamp. Self-heal a stuck "enrolling" status while
+    // we're here: an agent presenting a valid, non-revoked bearer is by
+    // definition past enrollment. This can happen when a re-install/re-push
+    // resets installStatus to "enrolling" but the agent reuses the bearer
+    // already in agent.conf and short-circuits the /enroll call (only /enroll
+    // otherwise flips → "active"). Normal fresh installs never hit this:
+    // /enroll sets "active" before any bearer-gated call reaches verifyBearer.
+    const data: { lastSeenAt: Date; lastSeenIp: string | null; installStatus?: string; installError?: null } = {
+      lastSeenAt: new Date(),
+      lastSeenIp: callerIp ?? null,
+    };
+    if (row.installStatus === "enrolling") {
+      data.installStatus = "active";
+      data.installError = null;
+    }
     prisma.managedAgent
-      .update({
-        where: { id: row.id },
-        data: { lastSeenAt: new Date(), lastSeenIp: callerIp ?? null },
-      })
+      .update({ where: { id: row.id }, data })
       .catch(() => {
         /* ignore */
       });

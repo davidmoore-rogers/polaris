@@ -1288,7 +1288,7 @@ ManagedAgent                    -- Polaris Agent install record; one row per ass
   installedAt           DateTime
   installCredentialId   UUID? FK → Credential (set null on delete) -- SSH/WinRM creds, reused by the default remote-uninstall path
   installTransport      String          -- "ssh" | "winrm"; chosen at install time. linux/darwin = ssh only; windows defaults to winrm but can be ssh when the target runs OpenSSH Server. Persisted so retry / uninstall / upgrade replay the same transport.
-  installStatus         String          -- pending → uploading → enrolling → active; plus uninstalling / uninstall_failed / upgrading / upgrade_failed / revoked
+  installStatus         String          -- pending → uploading → enrolling → active; plus uninstalling / uninstall_failed / upgrading / upgrade_failed / revoked. `/enroll` is the normal enrolling→active transition; `verifyBearer` ALSO self-heals enrolling→active on any bearer-gated call, covering a re-push that reset status to "enrolling" while the agent reused its existing bearer and skipped /enroll.
   installError          String?
   enrollmentTokenHash   String?         -- one-shot 10-min enrollment token (argon2id); NULLed atomically on successful POST /agents/enroll
   enrollmentTokenPrefix String?
