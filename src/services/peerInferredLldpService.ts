@@ -209,15 +209,45 @@ export async function buildInferredNeighborsForAsset(assetId: string): Promise<I
 // on the same (assetId, localIfName, matchedAssetId). Real LLDP wins;
 // inferred fills the gap. A real row with no matchedAsset.id does not
 // suppress inferred rows for that port — different peers on shared media.
+//
+// `aggregateParentByMember` (member ifName → parent aggregate ifName) lets a
+// real LLDP row learned on an aggregate's *member* port suppress an inferred
+// row emitted on the *aggregate* itself. FortiLink is the canonical case: the
+// FortiGate→FortiSwitch uplink is synthesized on the aggregate ("fortilink")
+// from `fgt_peer_intf_name`, but the FortiGate's real LLDP lands on the
+// physical member port ("a") — same physical link, so the learned row should
+// win. We register the parent-aggregate key for every real row sitting on a
+// known member port so the inferred-on-aggregate row dedupes against it.
 export function dedupeInferredNeighbors<T extends { localIfName: string | null; matchedAsset?: { id: string } | null }>(
   real: T[],
   inferred: InferredLldpNeighbor[],
+  aggregateParentByMember?: Map<string, string> | null,
 ): InferredLldpNeighbor[] {
   const realKeys = new Set<string>();
   for (const r of real) {
     if (r.matchedAsset?.id && r.localIfName) {
       realKeys.add(`${r.localIfName}|${r.matchedAsset.id}`);
+      const parent = aggregateParentByMember?.get(r.localIfName);
+      if (parent) realKeys.add(`${parent}|${r.matchedAsset.id}`);
     }
   }
   return inferred.filter((i) => !realKeys.has(`${i.localIfName}|${i.matchedAsset.id}`));
+}
+
+// Build a member-ifName → aggregate-ifName map from a set of interface rows.
+// Only true aggregate members are included (the parent's ifType is
+// "aggregate"), so VLAN sub-interfaces — which also carry `ifParent` — don't
+// leak in. Shared by both LLDP-merge call sites.
+export function aggregateMembershipMap(
+  interfaces: { ifName: string; ifType: string | null; ifParent: string | null }[],
+): Map<string, string> {
+  const aggregateNames = new Set<string>();
+  for (const i of interfaces) {
+    if (i.ifType === "aggregate") aggregateNames.add(i.ifName);
+  }
+  const map = new Map<string, string>();
+  for (const i of interfaces) {
+    if (i.ifParent && aggregateNames.has(i.ifParent)) map.set(i.ifName, i.ifParent);
+  }
+  return map;
 }
