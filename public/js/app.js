@@ -426,6 +426,7 @@ function renderGlobalSearch() {
   wrap.className = "global-search";
   wrap.innerHTML =
     '<input type="search" id="global-search-input" autocomplete="off" spellcheck="false" placeholder="' + escapeHtml(_searchPlaceholder()) + '">' +
+    '<span id="global-search-spinner" class="global-search-spinner" hidden aria-hidden="true"></span>' +
     '<div id="global-search-dropdown" class="global-search-dropdown" style="display:none"></div>';
 
   // Insert between h2 and page-header-actions (if present)
@@ -448,6 +449,7 @@ function renderGlobalSearch() {
       else { dropdown.style.display = "none"; dropdown.innerHTML = ""; }
       _searchLastQuery = "";
       _searchActiveResults = null;
+      _setSearchBusy(false);
       return;
     }
     _searchDebounceTimer = setTimeout(function () { _performSearch(q); }, 180);
@@ -479,17 +481,27 @@ function renderGlobalSearch() {
   });
 }
 
+// Toggle the in-flight spinner on the right edge of the search bar.
+function _setSearchBusy(busy) {
+  var spinner = document.getElementById("global-search-spinner");
+  if (spinner) spinner.hidden = !busy;
+}
+
 async function _performSearch(q) {
   var dropdown = document.getElementById("global-search-dropdown");
   _searchLastQuery = q;
+  _setSearchBusy(true);
   try {
     var results = await api.search.query(q);
-    if (results.query !== _searchLastQuery) return; // stale response
+    if (results.query !== _searchLastQuery) return; // stale response — a newer query owns the spinner
     _searchActiveResults = results;
     _renderSearchDropdown(results);
+    _setSearchBusy(false);
   } catch (err) {
+    if (q !== _searchLastQuery) return; // stale failure — don't clear a newer query's spinner
     dropdown.innerHTML = '<div class="global-search-empty">Search failed: ' + escapeHtml(err.message || "Unknown error") + '</div>';
     dropdown.style.display = "block";
+    _setSearchBusy(false);
   }
 }
 
@@ -1344,6 +1356,11 @@ function showToast(message, type) {
 
 var _modalDrag = { active: false, startX: 0, startY: 0, offsetX: 0, offsetY: 0 };
 
+// Escalating "use the X" hint: each off-modal click flashes the close button
+// brighter than the last. Resets after 2s of no off-clicks (or on close).
+var _modalFlashLevel = 0;
+var _modalFlashResetTimer = null;
+
 function openModal(title, bodyHTML, footerHTML, options) {
   let overlay = document.getElementById("modal-overlay");
   if (!overlay) {
@@ -1356,8 +1373,22 @@ function openModal(title, bodyHTML, footerHTML, options) {
       if (e.target === overlay) {
         var closeBtn = overlay.querySelector(".modal-close");
         if (closeBtn) {
+          // Each subsequent off-click ramps the flash brighter (capped), so the
+          // hint to use the X gets more insistent the more the user clicks off.
+          var lvl = (_modalFlashLevel = Math.min(_modalFlashLevel + 1, 8));
+          // Ramp decays: 2s after the last off-click the brightness resets.
+          if (_modalFlashResetTimer) clearTimeout(_modalFlashResetTimer);
+          _modalFlashResetTimer = setTimeout(function () { _modalFlashLevel = 0; }, 2000);
+          closeBtn.style.background = "rgba(255,77,109," + Math.min(0.25 + lvl * 0.09, 0.95) + ")";
+          closeBtn.style.filter = "brightness(" + (1 + lvl * 0.18) + ")";
+          closeBtn.style.textShadow = "0 0 " + (lvl * 3) + "px rgba(255,77,109,0.9)";
           closeBtn.classList.add("flash");
-          setTimeout(function () { closeBtn.classList.remove("flash"); }, 600);
+          setTimeout(function () {
+            closeBtn.classList.remove("flash");
+            closeBtn.style.background = "";
+            closeBtn.style.filter = "";
+            closeBtn.style.textShadow = "";
+          }, 600);
         }
       }
     });
@@ -1406,6 +1437,8 @@ function closeModal() {
     overlay.classList.remove("open");
     overlay.classList.remove("above-slideover");
   }
+  if (_modalFlashResetTimer) clearTimeout(_modalFlashResetTimer);
+  _modalFlashLevel = 0;
 }
 
 // ─── Confirm Dialog ───────────────────────────────────────────────────────────

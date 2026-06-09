@@ -712,37 +712,16 @@ model Asset {
   conflicts           Conflict[]
   ipHistory           AssetIpHistory[]
   fortigateSightings  AssetFortigateSighting[]
-  monitorSamples      AssetMonitorSample[]
-  telemetrySamples    AssetTelemetrySample[]
-  interfaceSamples    AssetInterfaceSample[]
   interfaceOverrides  AssetInterfaceOverride[]
-  storageSamples      AssetStorageSample[]
-  temperatureSamples  AssetTemperatureSample[]
-  ipsecTunnelSamples  AssetIpsecTunnelSample[]
-  // SD-WAN sample streams (FortiOS only, gated by Integration.config.pullSdwan).
-  // perfSla = per-WAN-link health-check gauges; sdwanRule = per-service-rule
-  // member-selection timeline. Both ride the system-info cadence like IPsec.
-  perfSlaSamples      AssetPerfSlaSample[]
-  sdwanRuleSamples    AssetSdwanRuleSample[]
-  // Tiered sample rollups (hourly + daily aggregates). Populated by the
-  // sampleRollup job from the source tables above. Cascade-delete with the
-  // asset so a removed device's history vanishes from every tier at once.
-  monitorSamplesHourly     AssetMonitorSampleHourly[]
-  monitorSamplesDaily      AssetMonitorSampleDaily[]
-  telemetrySamplesHourly   AssetTelemetrySampleHourly[]
-  telemetrySamplesDaily    AssetTelemetrySampleDaily[]
-  temperatureSamplesHourly AssetTemperatureSampleHourly[]
-  temperatureSamplesDaily  AssetTemperatureSampleDaily[]
-  interfaceSamplesHourly   AssetInterfaceSampleHourly[]
-  interfaceSamplesDaily    AssetInterfaceSampleDaily[]
-  storageSamplesHourly     AssetStorageSampleHourly[]
-  storageSamplesDaily      AssetStorageSampleDaily[]
-  ipsecTunnelSamplesHourly AssetIpsecTunnelSampleHourly[]
-  ipsecTunnelSamplesDaily  AssetIpsecTunnelSampleDaily[]
-  perfSlaSamplesHourly     AssetPerfSlaSampleHourly[]
-  perfSlaSamplesDaily      AssetPerfSlaSampleDaily[]
-  sdwanRuleSamplesHourly   AssetSdwanRuleSampleHourly[]
-  sdwanRuleSamplesDaily    AssetSdwanRuleSampleDaily[]
+  // NOTE: the append-only sample/rollup time-series (AssetMonitorSample,
+  // *InterfaceSample, the *Hourly/*Daily rollups, AssetCustomWidgetSample, etc.)
+  // intentionally have NO relation to Asset and NO foreign key (dropped in
+  // migration 20260615000000). They are TimescaleDB hypertables: a cascade
+  // DELETE matching rows in a compressed chunk decompresses the whole chunk into
+  // un-truncatable heap bloat (prod incident 2026-06-08). Deleting an Asset
+  // leaves its sample rows orphaned (queried only by assetId, never via the
+  // gone Asset) to age out via drop_chunks. They keep `assetId String` + an
+  // @@index([assetId, ...]) for query perf. DON'T re-add @relation to them.
   lldpNeighbors       AssetLldpNeighbor[]      @relation("AssetLldpNeighbors")
   lldpNeighborMatches AssetLldpNeighbor[]      @relation("AssetLldpNeighborMatch")
   // Wireless stations connected to this asset (when it's a FortiAP) and
@@ -751,7 +730,6 @@ model Asset {
   wirelessStations         AssetWirelessStation[] @relation("AssetWirelessStationsOnAp")
   wirelessStationMatches   AssetWirelessStation[] @relation("AssetWirelessStationMatch")
   mibFiles                 MibFile[]              @relation("MibFilesOnAsset")
-  customWidgetSamples      AssetCustomWidgetSample[] @relation("AssetCustomWidgetSamples")
   sources             AssetSource[]
   associatedIpRows    AssetAssociatedIp[]
   macAddressRows      AssetMacAddress[]
@@ -780,7 +758,6 @@ model Asset {
 model AssetMonitorSample {
   id             String   @default(uuid())
   assetId        String
-  asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   timestamp      DateTime @default(now())
   success        Boolean
   responseTimeMs Int?
@@ -802,7 +779,6 @@ model AssetMonitorSample {
 model AssetTelemetrySample {
   id            String   @default(uuid())
   assetId       String
-  asset         Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   timestamp     DateTime @default(now())
   cpuPct        Float?
   // memPct is populated when the source reports memory only as a percentage
@@ -825,7 +801,6 @@ model AssetTelemetrySample {
 model AssetInterfaceSample {
   id          String   @default(uuid())
   assetId     String
-  asset       Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   timestamp   DateTime @default(now())
   ifName      String
   adminStatus String?
@@ -936,6 +911,9 @@ model AssetAssociatedIp {
 //   - AD computer-object sync (source="ad")
 //   - Conflict ghost-merge (preserved from the deleted ghost asset)
 //   - Manual edits via the asset edit panel (source="manual")
+//   - System-info scrape, for the MAC of each operator-pinned monitored
+//     interface (source="monitor-interface"; additive via addMacAddresses,
+//     never a full-replace, so it can't wipe rows owned by other sources)
 //
 // `Asset.macAddress` (the scalar column on Asset) remains the asset's
 // primary MAC — typically the most recently-seen entry. The relation
@@ -1001,7 +979,6 @@ model AssetInterfaceOverride {
 model AssetTemperatureSample {
   id         String   @default(uuid())
   assetId    String
-  asset      Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   timestamp  DateTime @default(now())
   sensorName String
   celsius    Float?
@@ -1019,7 +996,6 @@ model AssetTemperatureSample {
 model AssetIpsecTunnelSample {
   id              String   @default(uuid())
   assetId         String
-  asset           Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   timestamp       DateTime @default(now())
   tunnelName      String
   // Parent interface from `config vpn ipsec phase1-interface` (the FortiOS
@@ -1055,7 +1031,6 @@ model AssetIpsecTunnelSample {
 model AssetPerfSlaSample {
   id          String   @default(uuid())
   assetId     String
-  asset       Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   timestamp   DateTime @default(now())
   // Health-check name (the SD-WAN performance-SLA object) + the WAN member
   // interface it probed over (e.g. "wan1", "port2").
@@ -1097,7 +1072,6 @@ model AssetPerfSlaSample {
 model AssetSdwanRuleSample {
   id               String   @default(uuid())
   assetId          String
-  asset            Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   timestamp        DateTime @default(now())
   ruleName         String
   ruleId           String?
@@ -1235,7 +1209,6 @@ model AssetWirelessStation {
 model AssetCustomWidgetSample {
   id        String   @id @default(uuid())
   assetId   String
-  asset     Asset    @relation("AssetCustomWidgetSamples", fields: [assetId], references: [id], onDelete: Cascade)
   widgetId  String   // stable UUID from ManufacturerCustomWidget; NOT an FK so
                      // a widget delete doesn't cascade-blow historical samples
                      // (the Custom MIB tab still shows the last-known values
@@ -1254,7 +1227,6 @@ model AssetCustomWidgetSample {
 model AssetStorageSample {
   id         String   @default(uuid())
   assetId    String
-  asset      Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   timestamp  DateTime @default(now())
   mountPath  String
   totalBytes BigInt?
@@ -1299,7 +1271,6 @@ model AssetStorageSample {
 model AssetMonitorSampleHourly {
   id                String   @default(uuid())
   assetId           String
-  asset             Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart       DateTime
   sampleCount       Int
   successCount      Int
@@ -1319,7 +1290,6 @@ model AssetMonitorSampleHourly {
 model AssetMonitorSampleDaily {
   id                String   @default(uuid())
   assetId           String
-  asset             Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart       DateTime
   sampleCount       Int
   successCount      Int
@@ -1337,7 +1307,6 @@ model AssetMonitorSampleDaily {
 model AssetTelemetrySampleHourly {
   id                String   @default(uuid())
   assetId           String
-  asset             Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart       DateTime
   sampleCount       Int
   avgCpuPct         Float?
@@ -1361,7 +1330,6 @@ model AssetTelemetrySampleHourly {
 model AssetTelemetrySampleDaily {
   id                String   @default(uuid())
   assetId           String
-  asset             Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart       DateTime
   sampleCount       Int
   avgCpuPct         Float?
@@ -1383,7 +1351,6 @@ model AssetTelemetrySampleDaily {
 model AssetTemperatureSampleHourly {
   id          String   @default(uuid())
   assetId     String
-  asset       Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart DateTime
   sensorName  String
   sampleCount Int
@@ -1401,7 +1368,6 @@ model AssetTemperatureSampleHourly {
 model AssetTemperatureSampleDaily {
   id          String   @default(uuid())
   assetId     String
-  asset       Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart DateTime
   sensorName  String
   sampleCount Int
@@ -1419,7 +1385,6 @@ model AssetTemperatureSampleDaily {
 model AssetInterfaceSampleHourly {
   id                  String   @default(uuid())
   assetId             String
-  asset               Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart         DateTime
   ifName              String
   sampleCount         Int
@@ -1461,7 +1426,6 @@ model AssetInterfaceSampleHourly {
 model AssetInterfaceSampleDaily {
   id                  String   @default(uuid())
   assetId             String
-  asset               Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart         DateTime
   ifName              String
   sampleCount         Int
@@ -1495,7 +1459,6 @@ model AssetInterfaceSampleDaily {
 model AssetStorageSampleHourly {
   id             String   @default(uuid())
   assetId        String
-  asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart    DateTime
   mountPath      String
   sampleCount    Int
@@ -1514,7 +1477,6 @@ model AssetStorageSampleHourly {
 model AssetStorageSampleDaily {
   id             String   @default(uuid())
   assetId        String
-  asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart    DateTime
   mountPath      String
   sampleCount    Int
@@ -1533,7 +1495,6 @@ model AssetStorageSampleDaily {
 model AssetIpsecTunnelSampleHourly {
   id                  String   @default(uuid())
   assetId             String
-  asset               Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart         DateTime
   tunnelName          String
   sampleCount         Int
@@ -1564,7 +1525,6 @@ model AssetIpsecTunnelSampleHourly {
 model AssetIpsecTunnelSampleDaily {
   id                  String   @default(uuid())
   assetId             String
-  asset               Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart         DateTime
   tunnelName          String
   sampleCount         Int
@@ -1591,7 +1551,6 @@ model AssetIpsecTunnelSampleDaily {
 model AssetPerfSlaSampleHourly {
   id             String   @default(uuid())
   assetId        String
-  asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart    DateTime
   healthCheck    String
   link           String
@@ -1621,7 +1580,6 @@ model AssetPerfSlaSampleHourly {
 model AssetPerfSlaSampleDaily {
   id             String   @default(uuid())
   assetId        String
-  asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart    DateTime
   healthCheck    String
   link           String
@@ -1649,7 +1607,6 @@ model AssetPerfSlaSampleDaily {
 model AssetSdwanRuleSampleHourly {
   id                   String   @default(uuid())
   assetId              String
-  asset                Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart          DateTime
   ruleName             String
   sampleCount          Int
@@ -1676,7 +1633,6 @@ model AssetSdwanRuleSampleHourly {
 model AssetSdwanRuleSampleDaily {
   id                   String   @default(uuid())
   assetId              String
-  asset                Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
   bucketStart          DateTime
   ruleName             String
   sampleCount          Int
