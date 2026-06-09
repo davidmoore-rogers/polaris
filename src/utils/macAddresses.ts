@@ -161,6 +161,70 @@ export async function reconcileMacAddresses(
 }
 
 /**
+ * Normalize a MAC to canonical upper-colon form ("AA:BB:CC:DD:EE:FF"), the
+ * shape every row in this side table is stored as. Returns null for anything
+ * that isn't exactly 12 hex digits. Kept dependency-free (no import of the
+ * service-layer normalizers) so this util stays a leaf module.
+ */
+function macColonUpper(mac: string | null | undefined): string | null {
+  if (!mac) return null;
+  const hex = String(mac).replace(/[^0-9A-Fa-f]/g, "").toUpperCase();
+  if (hex.length !== 12) return null;
+  return hex.match(/.{2}/g)!.join(":");
+}
+
+/**
+ * Additively upsert MAC rows for one asset WITHOUT deleting anything. Unlike
+ * `reconcileMacAddresses` (a full-replace that drops rows missing from the
+ * list), this only inserts new (assetId, mac) pairs and bumps `lastSeen` on
+ * any that already exist — the existing `source`/`device`/subnet metadata is
+ * preserved, so a MAC first seen by discovery keeps its discovery source.
+ *
+ * Used by the system-info scrape to fold the MAC of each operator-pinned
+ * monitored interface into the asset's Associated MACs list. Discovery/agent
+ * writers hydrate-existing → merge → reconcile, so rows added here survive
+ * their reconciles rather than being churned away.
+ *
+ * MACs are normalized to canonical upper-colon and deduped; invalid entries
+ * are skipped. One bulk INSERT ... ON CONFLICT statement regardless of count;
+ * no-op (no DB round-trip) when the input yields no valid MACs.
+ */
+export async function addMacAddresses(
+  assetId: string,
+  macs: ReadonlyArray<{ mac: string | null | undefined; source?: string }>,
+  now: Date = new Date(),
+): Promise<void> {
+  const seen = new Set<string>();
+  const rows: Array<{ mac: string; source: string }> = [];
+  for (const m of macs) {
+    const norm = macColonUpper(m.mac);
+    if (!norm || seen.has(norm)) continue;
+    seen.add(norm);
+    rows.push({ mac: norm, source: m.source || "unknown" });
+  }
+  if (rows.length === 0) return;
+
+  const nowIso = now.toISOString();
+  const params: unknown[] = [];
+  const tuples: string[] = [];
+  let p = 1;
+  for (const r of rows) {
+    tuples.push(
+      `(gen_random_uuid()::text, $${p++}, $${p++}, $${p++}, $${p++}::timestamp, $${p++}::timestamp)`,
+    );
+    params.push(assetId, r.mac, r.source, nowIso, nowIso);
+  }
+  // ON CONFLICT bumps only lastSeen — existing source/device/subnet metadata
+  // is intentionally left untouched so an additive monitor write never clobbers
+  // a richer discovery-sourced row.
+  const sql =
+    `INSERT INTO "asset_mac_addresses" ("id", "assetId", "mac", "source", "lastSeen", "firstSeen") ` +
+    `VALUES ${tuples.join(", ")} ` +
+    `ON CONFLICT ("assetId", "mac") DO UPDATE SET "lastSeen" = EXCLUDED."lastSeen"`;
+  await retryOnDeadlock(() => prisma.$executeRawUnsafe(sql, ...params));
+}
+
+/**
  * Helper for the create-time path: convert a list of MAC entries into the
  * `macAddressRows.create` array Prisma expects on a nested create. Avoids
  * a separate post-create reconcile call when the asset is brand new.

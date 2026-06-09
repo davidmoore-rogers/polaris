@@ -35,6 +35,7 @@ import { Client as SshClient } from "ssh2";
 
 import { prisma } from "../db.js";
 import { retryOnDeadlock } from "../utils/dbRetry.js";
+import { addMacAddresses } from "../utils/macAddresses.js";
 import { fgRequest, type FortiGateConfig } from "./fortigateService.js";
 import {
   fmgProxyRest,
@@ -6321,6 +6322,22 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
           description: i.description ?? null,
         })),
       );
+      // Fold the MAC of each operator-pinned monitored interface into the
+      // asset's Associated MACs list (AssetMacAddress). Additive-only — never
+      // wipes rows owned by discovery/agent/manual sources; just inserts new
+      // (assetId, mac) pairs and bumps lastSeen on existing ones. Gated on the
+      // pinned-with-MAC set being non-empty so the no-pinned-interface common
+      // case costs zero extra DB round-trips on the ~10-min slow cadence.
+      const pinnedMacs = d.interfaces
+        .filter((i) => pinnedIfaces.has(i.ifName) && i.macAddress)
+        .map((i) => ({ mac: i.macAddress, source: "monitor-interface" }));
+      if (pinnedMacs.length > 0) {
+        const stopMacWrite = startSampleWriteTimer("asset_mac_addresses");
+        const endMac = startPhase("systeminfo.persist.iface_macs");
+        await addMacAddresses(assetId, pinnedMacs, now);
+        endMac({ rows: pinnedMacs.length });
+        stopMacWrite();
+      }
     }
     if (d.storage.length > 0) {
       enqueueStorageSamples(
