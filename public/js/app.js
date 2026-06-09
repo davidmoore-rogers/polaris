@@ -426,6 +426,7 @@ function renderGlobalSearch() {
   wrap.className = "global-search";
   wrap.innerHTML =
     '<input type="search" id="global-search-input" autocomplete="off" spellcheck="false" placeholder="' + escapeHtml(_searchPlaceholder()) + '">' +
+    '<span id="global-search-spinner" class="global-search-spinner" hidden aria-hidden="true"></span>' +
     '<div id="global-search-dropdown" class="global-search-dropdown" style="display:none"></div>';
 
   // Insert between h2 and page-header-actions (if present)
@@ -448,6 +449,7 @@ function renderGlobalSearch() {
       else { dropdown.style.display = "none"; dropdown.innerHTML = ""; }
       _searchLastQuery = "";
       _searchActiveResults = null;
+      _setSearchBusy(false);
       return;
     }
     _searchDebounceTimer = setTimeout(function () { _performSearch(q); }, 180);
@@ -479,17 +481,27 @@ function renderGlobalSearch() {
   });
 }
 
+// Toggle the in-flight spinner on the right edge of the search bar.
+function _setSearchBusy(busy) {
+  var spinner = document.getElementById("global-search-spinner");
+  if (spinner) spinner.hidden = !busy;
+}
+
 async function _performSearch(q) {
   var dropdown = document.getElementById("global-search-dropdown");
   _searchLastQuery = q;
+  _setSearchBusy(true);
   try {
     var results = await api.search.query(q);
-    if (results.query !== _searchLastQuery) return; // stale response
+    if (results.query !== _searchLastQuery) return; // stale response — a newer query owns the spinner
     _searchActiveResults = results;
     _renderSearchDropdown(results);
+    _setSearchBusy(false);
   } catch (err) {
+    if (q !== _searchLastQuery) return; // stale failure — don't clear a newer query's spinner
     dropdown.innerHTML = '<div class="global-search-empty">Search failed: ' + escapeHtml(err.message || "Unknown error") + '</div>';
     dropdown.style.display = "block";
+    _setSearchBusy(false);
   }
 }
 
