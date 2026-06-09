@@ -2885,7 +2885,7 @@ async function openEditModal(id) {
     var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
       '<button class="btn btn-primary" id="btn-save">Save Changes</button>';
     var title = "Edit Asset" + (asset.hostname ? " — " + asset.hostname : "");
-    openModal(title, body, footer);
+    openModal(title, body, footer, { wide: true });
     _wireModalTabs("asset-edit");
     wireTagPicker();
     _wireMonitorEditTab(asset);
