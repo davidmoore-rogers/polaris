@@ -158,19 +158,18 @@
         },
       });
     });
-    (data.lldpNodes || []).forEach(function (n) {
-      var label = n.hostname || n.managementIp || n.chassisId || "Unknown";
-      elements.push({
-        data: { id: n.id, label: label, role: "lldp" },
-      });
-    });
-    // Cross-site remote assets that are workstations/servers are endpoints —
-    // omit them (and any edge to them) so the topology stays FG/switch/AP only.
-    // Remote firewalls/switches/APs (and other infra) still render.
+    // LLDP ghost neighbors (non-Polaris devices — IP phones, third-party gear,
+    // etc.) are NOT rendered: the topology is a managed FG/switch/AP backbone.
+    // (lldpNodes intentionally skipped.)
+    //
+    // Cross-site remote assets render ONLY when they're infra (firewall /
+    // switch / access_point); workstations / servers / "other" / phones / etc.
+    // are dropped, along with any edge to them, so the backbone stays clean.
+    var INFRA_REMOTE = { firewall: true, switch: true, access_point: true };
     var droppedRemoteIds = {};
     (data.remoteAssetNodes || []).forEach(function (n) {
       var rt = (n.assetType || "").toLowerCase();
-      if (rt === "workstation" || rt === "server") { droppedRemoteIds[n.id] = true; return; }
+      if (!INFRA_REMOTE[rt]) { droppedRemoteIds[n.id] = true; return; }
       var label = n.hostname || n.ipAddress || n.id;
       elements.push({
         data: {
@@ -181,6 +180,9 @@
       });
     });
     (data.lldpEdges || []).forEach(function (e, i) {
+      // Skip edges to a ghost (non-asset neighbor) or to a dropped non-infra
+      // remote — those nodes aren't rendered.
+      if (!e.targetIsAsset) return;
       if (droppedRemoteIds[e.source] || droppedRemoteIds[e.target]) return;
       elements.push({
         data: {
@@ -478,8 +480,7 @@
         { label: "FortiSwitch",       kind: "circle",          size: "md", fill: "data(nodeColor)" },
         { label: "FortiAP",           kind: "circle",          size: "sm", fill: "data(nodeColor)" },
         { label: "Endpoint",          kind: "round-rectangle", size: "md", fill: "data(nodeColor)", desc: "Only via endpoint search" },
-        { label: "LLDP ghost",        kind: "circle",          size: "md", fill: "#7a4f1a", border: "#f59e0b", borderStyle: "dashed", desc: "Non-Polaris device" },
-        { label: "Remote asset",      kind: "circle",          size: "md", fill: "#1e3a5f", border: "#4fc3f7", desc: "Polaris asset at another site" },
+        { label: "Remote asset",      kind: "circle",          size: "md", fill: "#1e3a5f", border: "#4fc3f7", desc: "Infra (FW/switch/AP) at another site" },
       ],
       health: [
         { label: "Up",                color: "#2e7d32" },
