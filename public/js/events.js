@@ -70,11 +70,29 @@ var _eventsSF = null;
     onChange: _saveEventsPrefs,
   });
 
-  // Cached set of distinct resourceType values seen in the latest response —
-  // used to populate the dynamic multi-select on the Resource column. Refreshed
-  // every fetch (cheap: <=10 entries in practice) so newly observed types
-  // appear in the filter as soon as they're written.
+  // Cached set of distinct resourceType values for the Resource-column
+  // multi-select. Seeded once from GET /events/resource-types (the full
+  // distinct set across the whole retention window, so every option is
+  // selectable even when it isn't on the current page) and then merged with
+  // each fetch's page-seen values so a brand-new type appears in the filter as
+  // soon as it's written.
   var _resourceTypeOptions = [];
+
+  // Seed the Resource filter with the full distinct set from the backend so
+  // the dropdown shows every option, not just those on the current page.
+  async function _seedResourceTypeOptions() {
+    if (!_eventsSF) return;
+    try {
+      var data = await api.events.resourceTypes();
+      var types = (data && data.resourceTypes) || [];
+      if (!types.length) return;
+      var seen = {};
+      _resourceTypeOptions.forEach(function (v) { seen[v] = true; });
+      types.forEach(function (v) { if (v) seen[v] = true; });
+      _resourceTypeOptions = Object.keys(seen).sort();
+      _eventsSF.setColumnOptions("resourceType", _resourceTypeOptions);
+    } catch (_) {}
+  }
 
   /**
    * Translate the live TableSF filter + sort state into API query params for
@@ -320,8 +338,11 @@ var _eventsSF = null;
   var settingsBtn = document.getElementById("btn-event-settings");
   if (settingsBtn) settingsBtn.addEventListener("click", openEventSettingsModal);
 
-  // Initial load — wait for restored prefs so pageSize matches the dropdown
+  // Initial load — wait for restored prefs so pageSize matches the dropdown.
+  // Seed the Resource filter's full option set in parallel (independent of the
+  // row fetch) so the dropdown lists every resourceType, not just the page's.
   prefsReady.then(loadEvents);
+  prefsReady.then(_seedResourceTypeOptions);
 })();
 
 // ─── Settings Modal (Tabbed) ────────────────────────────────────────────────

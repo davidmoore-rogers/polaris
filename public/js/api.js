@@ -467,6 +467,7 @@ const api = {
   },
   events: {
     list: (params) => request("GET", "/events" + toQuery(params)),
+    resourceTypes: () => request("GET", "/events/resource-types"),
     getArchiveSettings: () => request("GET", "/events/archive-settings"),
     updateArchiveSettings: (body) => request("PUT", "/events/archive-settings", body),
     testArchiveConnection: (body) => trackedRequest("Testing archive connection", "POST", "/events/archive-test", body),
