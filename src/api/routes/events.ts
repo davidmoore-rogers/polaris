@@ -178,6 +178,30 @@ router.get("/", requirePermission("events", "read"), async (req, res, next) => {
   }
 });
 
+// GET /api/v1/events/resource-types — distinct resourceType values across the
+// whole (retention-window) event table. Feeds the Resource-column multi-select
+// filter on the Events page so every option is selectable even when it isn't
+// present on the current page of rows. Low cardinality (a handful of entity
+// kinds), so groupBy over the retention window is cheap; called once per page
+// load. Bounded by the same retention floor as the list endpoint.
+router.get("/resource-types", requirePermission("events", "read"), async (_req, res, next) => {
+  try {
+    const { retentionDays } = await getRetentionSettings();
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+    const grouped = await prisma.event.groupBy({
+      by: ["resourceType"],
+      where: { timestamp: { gte: cutoff }, resourceType: { not: null } },
+    });
+    const resourceTypes = grouped
+      .map((g) => g.resourceType)
+      .filter((v): v is string => !!v)
+      .sort();
+    res.json({ resourceTypes });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/v1/events/archive-settings — get archive export settings
 // Reveals SSH host/username/path; admin-only even with password masked.
 router.get("/archive-settings", requirePermission("events", "write"), async (_req, res, next) => {

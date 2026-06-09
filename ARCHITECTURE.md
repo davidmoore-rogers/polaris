@@ -1577,6 +1577,7 @@ The integration's Monitoring tab additionally carries a **Discovery Defaults** s
 
 ### Events — mixed scoping
 - `GET    /events`                              *(auth)* — Audit log (filter by level, action, resourceType, message — message is case-insensitive substring)
+- `GET    /events/resource-types`               *(auth)* — distinct `resourceType` values across the retention window; feeds the full Resource-column filter option set on the Events page
 - `GET    /events/archive-settings`             *(admin)* — reveals SSH host/user/path even with password masked
 - `PUT    /events/archive-settings`             *(admin)*
 - `POST   /events/archive-test`                 *(admin)*
