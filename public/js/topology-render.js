@@ -104,28 +104,10 @@
               isMesh: 1,
             },
           });
-          return;
         }
-        var stationNodeId = "wsta-" + a.id + "-" + s.macAddress;
-        elements.push({
-          data: {
-            id:        stationNodeId,
-            label:     s.hostname || s.macAddress,
-            role:      "wireless-station",
-            assetId:   s.id || null,
-            assetType: s.assetType || null,
-            ssid:      s.ssid || null,
-            mac:       s.macAddress,
-          },
-        });
-        elements.push({
-          data: {
-            id: "we-" + a.id + "-" + s.macAddress,
-            source: a.id, target: stationNodeId,
-            label: s.ssid || "",
-            isWireless: 1,
-          },
-        });
+        // Wireless CLIENT stations (workstations / servers / phones / etc.) are
+        // intentionally NOT rendered — the topology shows the FG / switch / AP
+        // backbone only. The endpoint search reveals a specific host on demand.
       });
     });
     // Wireless-bridge edges (server-detected via LLDP): a FortiLink switch
@@ -142,19 +124,35 @@
         },
       });
     });
+    // FortiGate id + switch id set so we can label/style the FortiGate→switch
+    // FortiLink uplinks. FortiOS reports `fortilink` (a logical meta-interface,
+    // not a physical port) on those, so the raw label is "unknown ↔ unknown" —
+    // relabel it to "fortilink", and dash-gray the UNVERIFIED ones (no
+    // interface/LLDP-backed cable) to read as a virtual/management link.
+    var fgId = data.fortigate ? data.fortigate.id : null;
+    var switchIdSet = {};
+    (data.switches || []).forEach(function (s) { if (s && s.id) switchIdSet[s.id] = true; });
     (data.edges || []).forEach(function (e, i) {
       // Skip the bogus wired uplink to a mesh/bridge leaf — the mesh edge
       // already connects it (and from the correct parent AP).
       if (meshLeafIds[e.target]) return;
+      var isFgSwitch = fgId && e.source === fgId && switchIdSet[e.target];
+      var label = e.label || "";
+      var fortilinkFallback = 0;
+      if (isFgSwitch) {
+        label = "fortilink"; // logical FortiLink uplink, not a physical port pair
+        if (!e.verifiedUplink) fortilinkFallback = 1; // unverified → virtual (dashed gray)
+      }
       elements.push({
         data: {
           id: "e" + i, source: e.source, target: e.target,
-          label: e.label || "",
+          label: label,
           reason: e.reason || "",
           // FG→switch controller edge with a physically-confirmed (interface/
           // LLDP-backed) link — treated as a verified uplink by the column
           // solver so the switch isn't mistaken for a FortiLink fallback.
           isVerifiedUplink: e.verifiedUplink ? 1 : 0,
+          isFortilinkFallback: fortilinkFallback,
           srcIf: e.srcIf || null,
           tgtIf: e.tgtIf || null,
         },
@@ -166,7 +164,13 @@
         data: { id: n.id, label: label, role: "lldp" },
       });
     });
+    // Cross-site remote assets that are workstations/servers are endpoints —
+    // omit them (and any edge to them) so the topology stays FG/switch/AP only.
+    // Remote firewalls/switches/APs (and other infra) still render.
+    var droppedRemoteIds = {};
     (data.remoteAssetNodes || []).forEach(function (n) {
+      var rt = (n.assetType || "").toLowerCase();
+      if (rt === "workstation" || rt === "server") { droppedRemoteIds[n.id] = true; return; }
       var label = n.hostname || n.ipAddress || n.id;
       elements.push({
         data: {
@@ -177,6 +181,7 @@
       });
     });
     (data.lldpEdges || []).forEach(function (e, i) {
+      if (droppedRemoteIds[e.source] || droppedRemoteIds[e.target]) return;
       elements.push({
         data: {
           id: "le" + i, source: e.source, target: e.target,
@@ -188,6 +193,7 @@
       });
     });
     (data.interfaceEdges || []).forEach(function (e, i) {
+      if (droppedRemoteIds[e.source] || droppedRemoteIds[e.target]) return;
       elements.push({
         data: {
           id: "ie" + i, source: e.source, target: e.target,
@@ -383,6 +389,18 @@
           width: 2.2,
         },
       },
+      // Unverified FortiLink uplink (FortiGate→switch with no interface/LLDP-
+      // confirmed cable): a logical/management link, drawn dashed + dimmed gray
+      // so it reads as virtual versus the solid controller/physical edges.
+      {
+        selector: 'edge[isFortilinkFallback = 1]',
+        style: {
+          "line-style": "dashed",
+          "line-color": "#6a7388",
+          "target-arrow-color": "#6a7388",
+          opacity: 0.7,
+        },
+      },
       {
         selector: 'node.topology-pulse',
         style: {
@@ -459,8 +477,7 @@
         { label: "FortiGate",         kind: "circle",          size: "lg", fill: "data(nodeColor)", desc: "Color = monitor health" },
         { label: "FortiSwitch",       kind: "circle",          size: "md", fill: "data(nodeColor)" },
         { label: "FortiAP",           kind: "circle",          size: "sm", fill: "data(nodeColor)" },
-        { label: "Endpoint",          kind: "round-rectangle", size: "md", fill: "data(nodeColor)", desc: "Color = monitor health (when monitored)" },
-        { label: "Wireless station",  kind: "diamond",         size: "sm", fill: "#0e2a3a", border: "#22d3ee" },
+        { label: "Endpoint",          kind: "round-rectangle", size: "md", fill: "data(nodeColor)", desc: "Only via endpoint search" },
         { label: "LLDP ghost",        kind: "circle",          size: "md", fill: "#7a4f1a", border: "#f59e0b", borderStyle: "dashed", desc: "Non-Polaris device" },
         { label: "Remote asset",      kind: "circle",          size: "md", fill: "#1e3a5f", border: "#4fc3f7", desc: "Polaris asset at another site" },
       ],
@@ -473,9 +490,9 @@
       ],
       edges: [
         { label: "Controller",        color: "#6a7388", style: "solid",  desc: "FortiLink / managed-AP authoritative" },
+        { label: "FortiLink (virtual)",color: "#6a7388", style: "dashed", desc: "Unverified FortiLink uplink — no physical cable confirmed" },
         { label: "Interface-inferred",color: "#14b8a6", style: "solid",  desc: "Naming-convention peer link" },
         { label: "LLDP",              color: "#f59e0b", style: "dashed" },
-        { label: "Wireless",          color: "#22d3ee", style: "dashed", desc: "AP → station" },
         { label: "Mesh / bridge",     color: "#a78bfa", style: "dashed", desc: "AP → mesh leaf AP / bridged switch" },
       ],
     };
