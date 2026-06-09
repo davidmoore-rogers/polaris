@@ -1514,15 +1514,15 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
   // ─── By name panel ────────────────────────────────────────────────────────
   var namesPanel = '<div id="' + idPrefix + 'panel-names" style="display:' + (byNames ? '' : 'none') + ';margin:0.35rem 0 0.6rem 1.5rem">' +
     (hasIntegrationId
-      ? '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">' +
-          '<button type="button" class="btn btn-secondary" id="' + idPrefix + 'reload" style="font-size:0.78rem;padding:4px 10px">Refresh from latest discovery</button>' +
+      ? '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem;gap:8px">' +
+          '<span class="hint" id="' + idPrefix + 'names-asof" style="margin:0;font-size:0.78rem"></span>' +
           '<span class="hint" id="' + idPrefix + 'names-counter" style="margin:0">Selected: 0</span>' +
         '</div>' +
         '<input type="text" id="' + idPrefix + 'names-filter" placeholder="Filter interface names…" autocomplete="off" style="width:100%;box-sizing:border-box;margin-bottom:0.4rem;padding:4px 8px;font-size:0.84rem">' +
-        '<div id="' + idPrefix + 'names-list" style="max-height:280px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
+        '<div id="' + idPrefix + 'names-list" style="display:flex;flex-direction:column;max-height:280px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
           '<p class="hint" style="margin:0">Loading…</p>' +
         '</div>' +
-        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from interfaces already seen on this integration\'s ' + escapeHtml(kindLabel) + 's. Examples: <code>wan1</code>, <code>port1</code>, <code>FortiLink</code>.</p>'
+        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from interfaces seen on this integration\'s ' + escapeHtml(kindLabel) + 's, refreshed automatically at the end of each discovery run. Examples: <code>wan1</code>, <code>port1</code>, <code>FortiLink</code>.</p>'
       : '<p class="hint" style="margin:0;color:var(--color-warning)">Save the integration and run discovery first — interface names are aggregated from already-discovered devices.</p>'
     ) +
   '</div>';
@@ -1730,14 +1730,14 @@ function _autoMonitorStorageHTML(idPrefix, kindLabel, currentSelection, hasInteg
 
   var namesPanel = '<div id="' + idPrefix + 'panel-names" style="display:' + (byNames ? '' : 'none') + ';margin:0.35rem 0 0.6rem 1.5rem">' +
     (hasIntegrationId
-      ? '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">' +
-          '<button type="button" class="btn btn-secondary" id="' + idPrefix + 'reload" style="font-size:0.78rem;padding:4px 10px">Refresh from latest discovery</button>' +
+      ? '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem;gap:8px">' +
+          '<span class="hint" id="' + idPrefix + 'names-asof" style="margin:0;font-size:0.78rem"></span>' +
           '<span class="hint" id="' + idPrefix + 'names-counter" style="margin:0">Selected: 0</span>' +
         '</div>' +
-        '<div id="' + idPrefix + 'names-list" style="max-height:240px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
+        '<div id="' + idPrefix + 'names-list" style="display:flex;flex-direction:column;max-height:240px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
           '<p class="hint" style="margin:0">Loading…</p>' +
         '</div>' +
-        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from mounts already reported by agents on this integration\'s ' + escapeHtml(kindLabel) + 's. Examples: <code>/</code>, <code>/var</code>, <code>C:</code>.</p>'
+        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from mounts reported by agents on this integration\'s ' + escapeHtml(kindLabel) + 's, refreshed automatically at the end of each discovery run. Examples: <code>/</code>, <code>/var</code>, <code>C:</code>.</p>'
       : '<p class="hint" style="margin:0;color:var(--color-warning)">Save the integration and let agents report first — mounts are aggregated from already-discovered devices.</p>'
     ) +
   '</div>';
@@ -1931,6 +1931,8 @@ function _wireAutoMonitorStorageCard(idPrefix, klass, integrationId) {
     if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0">Loading…</p>';
     api.integrations.storageAggregate(integrationId, klass).then(function (resp) {
       aggregateLoaded = true;
+      var asof = document.getElementById(idPrefix + "names-asof");
+      if (asof) asof.textContent = (resp && resp.computedAt) ? ("As of last discovery: " + new Date(resp.computedAt).toLocaleString()) : "";
       renderNamesList((resp && resp.rows) || []);
     }).catch(function (err) {
       if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-error)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
@@ -1970,8 +1972,6 @@ function _wireAutoMonitorStorageCard(idPrefix, klass, integrationId) {
   if (ta) ta.addEventListener("input", schedulePreview);
   var modeRadios = document.getElementsByName(idPrefix + "patterns-mode");
   for (var mr = 0; mr < modeRadios.length; mr++) modeRadios[mr].addEventListener("change", schedulePreview);
-  var reload = document.getElementById(idPrefix + "reload");
-  if (reload) reload.addEventListener("click", function () { loadAggregate(true); });
   syncMasterVisibility();
   // Wire the agent-deploy toggle to reveal its body. The deploy card shares the
   // ws/server subtab; its prefix swaps -stor- → -deploy-.
@@ -2105,6 +2105,8 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
       aggregateLoaded = true;
       var rows = (resp && resp.rows) || [];
       aggregateRows = rows;
+      var asof = document.getElementById(idPrefix + "names-asof");
+      if (asof) asof.textContent = (resp && resp.computedAt) ? ("As of last discovery: " + new Date(resp.computedAt).toLocaleString()) : "";
       renderNamesList(rows);
       renderTypesList();
     }).catch(function (err) {
@@ -2346,10 +2348,6 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
   // LLDP block.
   var lldpBoxes = document.querySelectorAll('input[data-lldp-checkbox="1"][id^="' + idPrefix + 'lldp-"]');
   for (var lb = 0; lb < lldpBoxes.length; lb++) lldpBoxes[lb].addEventListener("change", onUserChange);
-
-  // Reload (By name).
-  var reload = document.getElementById(idPrefix + "reload");
-  if (reload) reload.addEventListener("click", function () { aggregateLoaded = false; loadAggregate(true); });
 
   // Filter (By name) — view-only, debounce-free; never marks an edit.
   var namesFilter = document.getElementById(idPrefix + "names-filter");
