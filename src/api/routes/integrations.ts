@@ -1420,8 +1420,16 @@ router.get("/:id/interface-aggregate", async (req, res, next) => {
     const klass = ClassQuerySchema.parse(req.query.class);
     const integ = await prisma.integration.findUnique({ where: { id: req.params.id } });
     if (!integ) throw new AppError(404, "Integration not found");
+    // Serve the precomputed cache (refreshed at the end of each discovery run).
+    // Fall back to a live compute only when the cache has no entry for this class
+    // yet — the window before the integration's first post-feature discovery.
+    const cached = await autoMonitor.getCachedInterfaceAggregate(req.params.id, klass);
+    if (cached) {
+      res.json({ rows: cached.rows, computedAt: cached.computedAt });
+      return;
+    }
     const rows = await autoMonitor.getInterfaceAggregate(req.params.id, klass);
-    res.json({ rows });
+    res.json({ rows: rows.map((r) => ({ ifName: r.ifName, ifType: r.ifType, deviceCount: r.deviceCount })), computedAt: null });
   } catch (err) {
     next(err);
   }
@@ -1511,8 +1519,15 @@ router.get("/:id/storage-aggregate", async (req, res, next) => {
     const klass = StorageClassQuerySchema.parse(req.query.class);
     const integ = await prisma.integration.findUnique({ where: { id: req.params.id } });
     if (!integ) throw new AppError(404, "Integration not found");
+    // Serve the precomputed cache; live-compute fallback only before the first
+    // post-feature discovery run has populated it for this class.
+    const cached = await autoMonitorStorage.getCachedStorageAggregate(req.params.id, klass);
+    if (cached) {
+      res.json({ rows: cached.rows, computedAt: cached.computedAt });
+      return;
+    }
     const rows = await autoMonitorStorage.getStorageAggregate(req.params.id, klass);
-    res.json({ rows });
+    res.json({ rows: rows.map((r) => ({ mountPath: r.mountPath, deviceCount: r.deviceCount })), computedAt: null });
   } catch (err) {
     next(err);
   }
@@ -2113,6 +2128,16 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
       // the rolling average used to compute the "slow" threshold.
       recordSample(integrationId, Date.now() - runStartedAt).catch(() => {});
       recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "success");
+      // Refresh the precomputed "By name" checklist sources for the Auto-Monitor
+      // cards so the edit modal loads them instantly (no fleet-wide DISTINCT ON on
+      // open). Best-effort — a cache failure must never fail an otherwise-good run.
+      const aggregateComputedAt = new Date().toISOString();
+      await Promise.all([
+        autoMonitor.computeAndCacheInterfaceAggregate(integrationId, integrationType, aggregateComputedAt)
+          .catch((e: any) => logEvent({ action: "integration.aggregate_cache.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "warning", message: `Interface aggregate cache refresh failed for "${integrationName}": ${e?.message || "unknown error"}` })),
+        autoMonitorStorage.computeAndCacheStorageAggregate(integrationId, integrationType, aggregateComputedAt)
+          .catch((e: any) => logEvent({ action: "integration.aggregate_cache.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "warning", message: `Storage aggregate cache refresh failed for "${integrationName}": ${e?.message || "unknown error"}` })),
+      ]);
       await finishRun(integrationId, "completed");
     }
   } catch (err: any) {

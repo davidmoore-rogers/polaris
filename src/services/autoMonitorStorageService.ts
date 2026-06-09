@@ -174,6 +174,75 @@ export async function getStorageAggregate(
   });
 }
 
+// ─── Precomputed aggregate cache ─────────────────────────────────────────────
+// Mirror of autoMonitorInterfacesService's cache: recomputed at the tail of every
+// successful discovery run and stashed on Integration.storageAggregateCache so the
+// edit modal's mount-path checklist loads instantly. Storage auto-monitor is
+// AD/Entra-only, so the only classes that carry a cache are workstation/server.
+
+/** Which storage classes each integration type carries (drives the cache build). */
+const STORAGE_CLASSES_BY_TYPE: Record<string, StorageClass[]> = {
+  entraid:         ["workstation", "server"],
+  activedirectory: ["workstation", "server"],
+  windowsserver:   ["workstation", "server"],
+};
+
+export interface CachedStorageRow {
+  mountPath: string;
+  deviceCount: number;
+}
+
+export interface StorageAggregateCacheEntry {
+  computedAt: string; // ISO8601
+  rows: CachedStorageRow[];
+}
+
+/** Map keyed by StorageClass; the persisted shape of Integration.storageAggregateCache. */
+export type StorageAggregateCache = Record<string, StorageAggregateCacheEntry>;
+
+/**
+ * Recompute the mount-path aggregate for every storage class this integration
+ * carries and persist it to Integration.storageAggregateCache. Best-effort —
+ * Fortinet integration types have no storage classes and are a no-op.
+ */
+export async function computeAndCacheStorageAggregate(
+  integrationId: string,
+  integrationType: string,
+  computedAtIso?: string,
+): Promise<void> {
+  const classes = STORAGE_CLASSES_BY_TYPE[integrationType];
+  if (!classes) return;
+  const computedAt = computedAtIso ?? new Date().toISOString();
+  const cache: StorageAggregateCache = {};
+  for (const klass of classes) {
+    const rows = await getStorageAggregate(integrationId, klass);
+    cache[klass] = {
+      computedAt,
+      rows: rows.map((r) => ({ mountPath: r.mountPath, deviceCount: r.deviceCount })),
+    };
+  }
+  await prisma.integration.update({
+    where: { id: integrationId },
+    data: { storageAggregateCache: cache as any },
+  });
+}
+
+/**
+ * Read the precomputed mount aggregate for one class. Null when absent so the
+ * route can fall back to a live compute (before the first post-feature discovery).
+ */
+export async function getCachedStorageAggregate(
+  integrationId: string,
+  klass: StorageClass,
+): Promise<StorageAggregateCacheEntry | null> {
+  const integ = await prisma.integration.findUnique({
+    where: { id: integrationId },
+    select: { storageAggregateCache: true },
+  });
+  const cache = (integ?.storageAggregateCache ?? null) as StorageAggregateCache | null;
+  return cache?.[klass] ?? null;
+}
+
 // ─── Preview (does not write) ────────────────────────────────────────────────
 
 export interface StoragePreviewResult {
