@@ -10,6 +10,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   dedupeInferredNeighbors,
+  aggregateMembershipMap,
   type InferredLldpNeighbor,
 } from "../../src/services/peerInferredLldpService.js";
 
@@ -86,5 +87,61 @@ describe("dedupeInferredNeighbors", () => {
       [inferred("port1", "ap-a")],
     );
     expect(out).toHaveLength(1);
+  });
+
+  it("suppresses an inferred row on an aggregate when a real row exists on a member port (FortiLink)", () => {
+    // Inferred FortiLink uplink lands on the aggregate "fortilink"; the real
+    // LLDP row was learned on member port "a". Same physical link → learned wins.
+    const out = dedupeInferredNeighbors(
+      [real("a", "switch-x")],
+      [inferred("fortilink", "switch-x")],
+      new Map([["a", "fortilink"]]),
+    );
+    expect(out).toHaveLength(0);
+  });
+
+  it("keeps the inferred aggregate row when no membership map is supplied (regression guard)", () => {
+    const out = dedupeInferredNeighbors(
+      [real("a", "switch-x")],
+      [inferred("fortilink", "switch-x")],
+    );
+    expect(out).toHaveLength(1);
+  });
+
+  it("does not suppress across aggregates — member maps to a different aggregate", () => {
+    const out = dedupeInferredNeighbors(
+      [real("a", "switch-x")],
+      [inferred("fortilink", "switch-x")],
+      new Map([["a", "agg2"]]),
+    );
+    expect(out).toHaveLength(1);
+  });
+});
+
+describe("aggregateMembershipMap", () => {
+  it("maps member ports to their aggregate parent", () => {
+    const map = aggregateMembershipMap([
+      { ifName: "fortilink", ifType: "aggregate", ifParent: null },
+      { ifName: "a", ifType: "physical", ifParent: "fortilink" },
+      { ifName: "b", ifType: "physical", ifParent: "fortilink" },
+    ]);
+    expect(map.get("a")).toBe("fortilink");
+    expect(map.get("b")).toBe("fortilink");
+  });
+
+  it("excludes VLAN sub-interfaces whose parent is not an aggregate", () => {
+    const map = aggregateMembershipMap([
+      { ifName: "port1", ifType: "physical", ifParent: null },
+      { ifName: "port1.100", ifType: "vlan", ifParent: "port1" },
+    ]);
+    expect(map.has("port1.100")).toBe(false);
+    expect(map.size).toBe(0);
+  });
+
+  it("returns an empty map when there are no aggregates", () => {
+    const map = aggregateMembershipMap([
+      { ifName: "port1", ifType: "physical", ifParent: null },
+    ]);
+    expect(map.size).toBe(0);
   });
 });

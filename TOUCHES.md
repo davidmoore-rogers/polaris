@@ -2048,13 +2048,13 @@ Listed alphabetically.
 
 **What it owns:** Read-time supplementation of the persisted `AssetLldpNeighbor` set with neighbor rows synthesized from `Asset.fortinetTopology` so the System tab Neighbor column reflects topology Polaris already knows about (most importantly: managed FortiAPs that the FortiSwitch's SNMP LLDP-MIB silently consumes without re-publishing).
 
-**Public API:** `buildInferredNeighborsForAsset(assetId)`, `dedupeInferredNeighbors(real, inferred)`, `InferredLldpNeighbor`.
+**Public API:** `buildInferredNeighborsForAsset(assetId)`, `dedupeInferredNeighbors(real, inferred, aggregateParentByMember?)`, `aggregateMembershipMap(interfaces)`, `InferredLldpNeighbor`.
 
 **Cross-service deps:** Reads `Asset` rows + `fortinetTopology` JSON via Prisma. The FortiAP branch additionally reads recent `AssetInterfaceSample` rows for the AP itself and passes them through `src/utils/fortiapInterfaceAlias.ts:normalizeFortiapInterfaceName` so the synthesized `localIfName` matches the AP's SNMP-canonical naming (`eth0`) rather than discovery's FortiAP-CLI form (`lan1`).
 
 **Used by:**
 - `src/api/routes/assets.ts` — `GET /assets/:id/system-info` (merges into `lldpNeighbors` response array)
-- `src/api/routes/assets.ts` — `GET /assets/:id/interface-history` (filters inferred set to the requested ifName, then merges)
+- `src/api/routes/assets.ts` — `GET /assets/:id/interface-history` (filters inferred set to the requested ifName, then merges; fetches all real LLDP rows for the asset — not just the requested ifName — so a member-port row can suppress an aggregate's inferred row, and loads the latest full interface snapshot via `lastSystemInfoAt` for the membership map)
 
 **Invariants:**
 - Never writes the `AssetLldpNeighbor` table; rows exist only in the HTTP response body.
@@ -2065,14 +2065,14 @@ Listed alphabetically.
   - Asset is `access_point` → if `self.fortinetTopology.parentSwitch` + `uplinkInterface` both set, resolve the switch by hostname and emit on the AP's local port normalized via `normalizeFortiapInterfaceName` against the AP's known SNMP ifNames (prefers `eth0` form when present so the inferred row lines up with the System tab's interface table).
 - Direct-attached FortiAPs (controllerFortigate set, no parentSwitch) are intentionally skipped — `uplinkInterface` on an AP is the AP's own port, not the FortiGate's, so we can't pin the row to a FortiGate interface.
 - Skip on missing data: empty self hostname → return []; missing `parentPort` / `uplinkInterface` on the peer side → skip that row.
-- Dedup rule (applied by callers via `dedupeInferredNeighbors`): drop inferred row when a real LLDP row exists on the same `(localIfName, matchedAssetId)`. Real LLDP wins. A real row with no `matchedAsset.id` does NOT suppress inferred rows.
+- Dedup rule (applied by callers via `dedupeInferredNeighbors`): drop inferred row when a real LLDP row exists on the same `(localIfName, matchedAssetId)`. Real LLDP wins. A real row with no `matchedAsset.id` does NOT suppress inferred rows. **Aggregate-aware:** when callers pass an `aggregateParentByMember` map (member ifName → parent aggregate ifName, built by `aggregateMembershipMap(interfaces)`), a real row learned on an aggregate's *member* port also suppresses an inferred row emitted on the *aggregate* itself — the FortiLink case, where the FortiGate→FortiSwitch uplink is synthesized on `fortilink` but the real LLDP lands on physical member `a`. The map includes only members whose parent's `ifType === "aggregate"` (VLAN sub-interfaces, which also carry `ifParent`, are excluded).
 - Hostname comparison is case-exact (Prisma `path: ["..."], equals: ...`) — matches what `connectionPathService` does. FortiOS-sourced hostnames are consistent across the surfaces Polaris discovers.
 - `firstSeen` and `lastSeen` are stamped at request time — they're not persistent state, just shaped to match the real-row contract.
 
 **When changing this:**
 - Verify the three asset-type branches still cover the topology shapes you care about. If FortiAP direct-attached attribution becomes resolvable (e.g. a future discovery enhancement captures the FortiGate's physical port for direct APs), add the fourth branch and update the "intentionally skipped" docstring.
 - Don't add upsert/cache layers without measuring — at branch-class fleet sizes (~2000 assets total, ~50 APs per site) the per-request findMany is sub-100ms and the cache invalidation surface isn't worth it.
-- The dedup rule lives in the route handler, not the service. If you call from a new route, remember to merge with `dedupeInferredNeighbors(real, inferred)` before serializing.
+- The dedup rule lives in the route handler, not the service. If you call from a new route, remember to merge with `dedupeInferredNeighbors(real, inferred, aggregateMembershipMap(interfaces))` before serializing — pass the membership map (and the asset's full real-LLDP set, not just the per-interface slice) or aggregate/member duplicates leak through.
 
 ---
 
