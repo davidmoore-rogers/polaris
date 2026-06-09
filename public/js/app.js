@@ -1368,6 +1368,18 @@ function openModal(title, bodyHTML, footerHTML, options) {
     overlay.id = "modal-overlay";
     overlay.className = "modal-overlay";
     overlay.innerHTML = '<div class="modal"><div class="modal-header"><h3></h3><button class="btn-icon modal-close">&times;</button></div><div class="modal-body"></div><div class="modal-footer"></div></div>';
+    // Bloom lives on the overlay (NOT inside .modal, which clips its overflow),
+    // appended last so it paints on top and the glow spills past the corner.
+    // All visual styles are set inline here — not via a CSS class — so a stale
+    // cached stylesheet can't render it invisible.
+    var bloomEl = document.createElement("div");
+    bloomEl.className = "modal-close-bloom";
+    bloomEl.style.cssText =
+      "position:fixed;border-radius:50%;pointer-events:none;opacity:0;" +
+      "transform:translate(-50%,-50%);mix-blend-mode:screen;" +
+      "background:radial-gradient(circle,rgba(255,77,109,0.85) 0%,rgba(255,77,109,0.6) 32%,rgba(255,77,109,0) 70%);" +
+      "transition:opacity 0.45s ease-out,width 0.08s,height 0.08s;";
+    overlay.appendChild(bloomEl);
     document.body.appendChild(overlay);
     overlay.addEventListener("click", function (e) {
       if (e.target === overlay) {
@@ -1383,11 +1395,25 @@ function openModal(title, bodyHTML, footerHTML, options) {
           closeBtn.style.filter = "brightness(" + (1 + lvl * 0.18) + ")";
           closeBtn.style.textShadow = "0 0 " + (lvl * 3) + "px rgba(255,77,109,0.9)";
           closeBtn.classList.add("flash");
+          // Position the fixed bloom over the X — getBoundingClientRect returns
+          // viewport coords, which map straight into position:fixed.
+          var bloom = overlay.querySelector(".modal-close-bloom");
+          if (bloom) {
+            var r = closeBtn.getBoundingClientRect();
+            // Start large enough to clear the corner on the first click, then grow.
+            var size = 110 + lvl * 34;
+            bloom.style.left = (r.left + r.width / 2) + "px";
+            bloom.style.top = (r.top + r.height / 2) + "px";
+            bloom.style.width = size + "px";
+            bloom.style.height = size + "px";
+            bloom.style.opacity = String(Math.min(0.35 + lvl * 0.08, 0.95));
+          }
           setTimeout(function () {
             closeBtn.classList.remove("flash");
             closeBtn.style.background = "";
             closeBtn.style.filter = "";
             closeBtn.style.textShadow = "";
+            if (bloom) bloom.style.opacity = "0";
           }, 600);
         }
       }
