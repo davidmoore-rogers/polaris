@@ -1635,6 +1635,21 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
 
 // Reads the auto-monitor card into a server-shaped AutoMonitorSelection or
 // null. Returns undefined when the card didn't render (subtab never opened).
+// Client-side mirrors of the server's pattern compilers (autoMonitorInterfacesService
+// compileWildcard / compilePattern), used by the instant cache-based preview so a
+// "By pattern" selection can be matched against the cached ifName list without a
+// server round-trip. Kept in lockstep with the server semantics: wildcard escapes
+// regex metacharacters then maps * -> .* and ? -> . and anchors; regex mode is the
+// raw (anchor-free) expression.
+function _amonWildcardToRegex(pattern) {
+  var escaped = String(pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  escaped = escaped.replace(/\\\*/g, ".*").replace(/\\\?/g, ".");
+  try { return new RegExp("^" + escaped + "$"); } catch (e) { return null; }
+}
+function _amonRegexFromString(pattern) {
+  try { return new RegExp(pattern); } catch (e) { return null; }
+}
+
 // Multi-block: each master checkbox gates its own block; the result is the
 // union. An enabled block with no inner values populated (e.g. patterns
 // master ticked but textarea empty) is dropped — server-side schema would
@@ -1958,6 +1973,9 @@ function _wireAutoMonitorStorageCard(idPrefix, klass, integrationId) {
     if (!integrationId) { preview.innerHTML = '<em>Preview becomes available after the integration is saved and agents report.</em>'; return; }
     var selection = _readAutoMonitorStorage(idPrefix);
     if (!selection) { preview.innerHTML = '<em>Enable a block and add at least one value to preview matches.</em>'; return; }
+    // Placeholder while the live resolve runs — on a large fleet it can take a
+    // moment, and a blank box reads as broken.
+    preview.innerHTML = '<em>Computing matches…</em>';
     api.integrations.storageAggregatePreview(integrationId, { class: klass, selection: selection }).then(function (r) {
       if (!r || r.deviceCount === 0) { preview.innerHTML = '<em>No mounts match yet.</em>'; return; }
       var sample = (r.sampleDevices || []).map(function (d) { return escapeHtml(d.hostname || "(unnamed)") + " (" + d.pinNames.length + ")"; }).join(", ");
@@ -2191,6 +2209,89 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
     schedulePreview();
   }
 
+  // Map of ifName -> deviceCount from the last cache-based preview, for the
+  // instant per-edit diff (no server round-trip).
+  var lastClientMatched = null;
+
+  // Instant preview computed from the cached aggregate (aggregateRows) — no
+  // server round-trip. Exact for By name (names always pin regardless of link
+  // state). For By pattern / By type it can't honor onlyUp (the cache holds no
+  // per-device operStatus), so the count is an upper bound, flagged `approx`.
+  // Returns null when the selection needs live data the cache doesn't hold
+  // (By LLDP → topology) so the caller falls back to the live server preview.
+  function computeClientPreview(selection) {
+    if (!selection || selection.byLldp) return null;
+    if (!aggregateLoaded) return null; // rows not loaded yet — caller loads + retries
+    var byName = {};
+    for (var i = 0; i < aggregateRows.length; i++) byName[aggregateRows[i].ifName] = aggregateRows[i];
+    var matched = {}; // ifName -> deviceCount (union across blocks; each name once)
+    if (selection.byNames) {
+      selection.byNames.names.forEach(function (n) {
+        matched[n] = byName[n] ? (byName[n].deviceCount || 0) : 0;
+      });
+    }
+    if (selection.byPatterns) {
+      var res = selection.byPatterns.patterns.map(function (p) {
+        return selection.byPatterns.regex ? _amonRegexFromString(p) : _amonWildcardToRegex(p);
+      }).filter(Boolean);
+      aggregateRows.forEach(function (row) {
+        if (res.some(function (re) { return re.test(row.ifName); })) matched[row.ifName] = row.deviceCount || 0;
+      });
+    }
+    if (selection.byTypes) {
+      var typeSet = {};
+      selection.byTypes.types.forEach(function (t) { typeSet[t] = 1; });
+      aggregateRows.forEach(function (row) {
+        if (row.ifType && typeSet[row.ifType]) matched[row.ifName] = row.deviceCount || 0;
+      });
+    }
+    var approx = (selection.byPatterns && selection.byPatterns.onlyUp === true) ||
+                 (selection.byTypes && selection.byTypes.onlyUp !== false);
+    return { matched: matched, approx: !!approx };
+  }
+
+  // Render the instant cache-based preview + an ifName-level diff vs the last
+  // client preview. Pin count for a name = its fleet deviceCount.
+  function renderClientPreview(client) {
+    var matched = client.matched;
+    var names = Object.keys(matched);
+    var interfaceCount = 0;
+    names.forEach(function (n) { interfaceCount += matched[n] || 0; });
+    var warn = interfaceCount > AUTO_MONITOR_INTERFACE_WARN_THRESHOLD;
+
+    var diffHtml = "";
+    if (lastClientMatched) {
+      var addedPins = 0, removedPins = 0, addedNames = [], removedNames = [];
+      names.forEach(function (n) {
+        if (!(n in lastClientMatched)) { addedPins += matched[n] || 0; if (addedNames.length < 3) addedNames.push(n); }
+      });
+      Object.keys(lastClientMatched).forEach(function (n) {
+        if (!(n in matched)) { removedPins += lastClientMatched[n] || 0; if (removedNames.length < 3) removedNames.push(n); }
+      });
+      if (addedPins > 0 || removedPins > 0) {
+        var parts = [];
+        if (addedPins > 0) parts.push('<span style="color:var(--color-success);font-weight:600">+' + addedPins + ' added</span>');
+        if (removedPins > 0) parts.push('<span style="color:var(--color-warning);font-weight:600">−' + removedPins + ' removed</span>');
+        var sampleParts = addedNames.map(function (n) { return '<span style="color:var(--color-success)">+' + escapeHtml(n) + '</span>'; })
+          .concat(removedNames.map(function (n) { return '<span style="color:var(--color-warning)">−' + escapeHtml(n) + '</span>'; }));
+        diffHtml = '<div style="margin-top:0.3rem;font-size:0.82rem">Change since last edit: ' + parts.join(" · ") +
+          (sampleParts.length ? ' <span class="hint" style="margin:0 0 0 6px;font-size:0.78rem">(' + sampleParts.join(" · ") + ')</span>' : '') + '</div>';
+      }
+    }
+    lastClientMatched = matched;
+
+    preview.innerHTML =
+      '<div><strong>' + interfaceCount + '</strong> interface' + (interfaceCount === 1 ? "" : "s") +
+      ' across <strong>' + names.length + '</strong> name' + (names.length === 1 ? "" : "s") +
+      (client.approx ? ' <span class="hint" style="margin:0 0 0 6px;font-size:0.78rem">(upper bound — only-when-up applied at save)</span>' : '') +
+      (warn ? ' <span style="color:var(--color-warning);margin-left:6px">⚠ above warn threshold (' + AUTO_MONITOR_INTERFACE_WARN_THRESHOLD + ')</span>' : '') +
+      '</div>' +
+      diffHtml +
+      '<div class="hint" style="margin-top:0.3rem;font-size:0.78rem">From the last discovery interface set.</div>';
+    preview.style.borderColor = warn ? "var(--color-warning)" : "";
+    preview.dataset.interfaceCount = String(interfaceCount);
+  }
+
   function runPreview() {
     if (!preview) return;
     // Stay quiet until the operator changes a selection (see userHasEdited).
@@ -2203,17 +2304,35 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
     if (!selection) {
       preview.innerHTML = '<em>Enable a block and add at least one value to preview matches.</em>';
       preview.style.borderColor = "";
-      // Keep lastSentSelection in sync so the next toggle's diff is "from
-      // empty" instead of "from a stale earlier selection."
+      // Keep both baselines in sync so the next toggle's diff is "from empty".
       lastSentSelection = null;
+      lastClientMatched = null;
+      preview.dataset.interfaceCount = "0";
       return;
     }
+
+    // Fast path: everything except By LLDP can be previewed instantly from the
+    // cached aggregate already loaded into this card — no server round-trip,
+    // which on a large fleet was a multi-second-to-minutes live query that left
+    // the box blank while it ran.
+    if (!selection.byLldp) {
+      if (!aggregateLoaded) {
+        // Cache (instant) hasn't loaded for this card yet — e.g. a By pattern-
+        // only selection where the names/types panels never triggered it. Load
+        // it; renderNamesList re-fires the preview once rows are in.
+        preview.innerHTML = '<em>Loading interface data…</em>';
+        loadAggregate();
+        return;
+      }
+      var client = computeClientPreview(selection);
+      if (client) { renderClientPreview(client); return; }
+    }
+
+    // By LLDP needs topology the cache doesn't hold → live server preview.
     // Pass the previously-sent selection as the baseline. Backend computes
     // both pin sets in one DB fetch and returns a `diff` block with the
-    // per-(asset, ifName) add/remove counts. On the very first preview-after-
-    // open, baseline = saved selection at modal open (so diff is 0); on every
-    // subsequent toggle, baseline = the prior in-flight selection (so diff
-    // shows what that toggle just changed).
+    // per-(asset, ifName) add/remove counts.
+    preview.innerHTML = '<em>Computing matches…</em>';
     var requestBaseline = lastSentSelection;
     api.integrations.interfaceAggregatePreview(integrationId, { class: klass, selection: selection, baselineSelection: requestBaseline }).then(function (r) {
       // Update the baseline for the NEXT request right after a successful
@@ -4647,37 +4766,27 @@ async function openEditModal(id) {
         var saved = await commitSave(built);
 
         if (activeApplies.length > 0) {
-          btn.textContent = "Applying...";
-          // Run the per-class applies in parallel. Each call is independent
-          // (different assetType slice of the integration's assets), the
-          // backend's chunked Promise.allSettled handles its own per-class
-          // concurrency, and waiting for them serially used to leave the
-          // modal stuck on "Applying..." for minutes on big fleets — one
-          // class with a few hundred switches could take 30-60s on its own
-          // under the old sequential-update path.
+          // Kick each per-class apply. The endpoint now returns 202 immediately
+          // and resolves the selection against the fleet in the BACKGROUND —
+          // on big fleets the resolve is a multi-second-to-minutes query, so
+          // awaiting it here used to wedge the modal on "Applying..." for
+          // minutes. The apply is additive + idempotent and also re-runs on the
+          // next discovery, so we just confirm it started.
           var applyResults = await Promise.all(activeApplies.map(function (entry) {
             return api.integrations.interfaceAggregateApply(id, entry[0]).then(
-              function (r) { return { ok: true,  klass: entry[0], r: r }; },
+              function () { return { ok: true,  klass: entry[0] }; },
               function (err) { return { ok: false, klass: entry[0], err: err }; },
             );
           }));
-          var totalDevices = 0;
-          var totalIfaces = 0;
           var failures = [];
           for (var c = 0; c < applyResults.length; c++) {
-            var result = applyResults[c];
-            if (result.ok) {
-              totalDevices += result.r.devices || 0;
-              totalIfaces  += result.r.interfacesAdded || 0;
-            } else {
-              failures.push(result.klass + ": " + (result.err.message || "failed"));
-            }
+            if (!applyResults[c].ok) failures.push(applyResults[c].klass + ": " + (applyResults[c].err.message || "failed"));
           }
           closeModal();
           if (failures.length === 0) {
-            showToast("Integration updated · pinned " + totalIfaces + " interface(s) on " + totalDevices + " device(s)", "success");
+            showToast("Integration updated · auto-monitor is applying in the background", "success");
           } else {
-            showToast("Saved, but apply had errors — " + failures.join("; "), "error");
+            showToast("Saved, but apply couldn't start — " + failures.join("; "), "error");
           }
         } else {
           closeModal();
