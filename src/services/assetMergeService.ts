@@ -26,11 +26,17 @@
  *     AssetAssociatedIp, AssetIpHistory, AssetFortigateSighting (all
  *     delete-on-conflict against the survivor's existing rows), and the
  *     ManagedAgent enrollment IFF the survivor has none.
- *   - Cascade-DELETED with the ghost: monitoring/telemetry/interface/storage/
- *     temperature/IPsec/SD-WAN samples + every *Hourly/*Daily rollup, LLDP
- *     neighbors, wireless stations, custom-widget samples, interface comment
- *     overrides, dependency edges, and pending Conflicts. The survivor keeps
- *     its own. This is intentional and called out in the confirm dialog.
+ *   - Cascade-DELETED with the ghost (FK kept): LLDP neighbors, wireless
+ *     stations, interface comment overrides, dependency edges, and pending
+ *     Conflicts. The survivor keeps its own. Called out in the confirm dialog.
+ *   - ORPHANED + aged out (no FK since migration 20260615000000): all
+ *     monitoring/telemetry/interface/storage/temperature/IPsec/SD-WAN/custom-
+ *     widget samples + every *Hourly/*Daily rollup. These are TimescaleDB
+ *     hypertables; a cascade DELETE matching compressed-chunk rows would
+ *     decompress them into un-truncatable bloat (prod incident 2026-06-08), so
+ *     the ghost's sample rows are left orphaned (never queried) and removed by
+ *     drop_chunks on the retention schedule. Net effect matches the old cascade
+ *     (the ghost's history isn't carried onto the survivor), just bloat-free.
  *
  * Scale note: every transfer is bounded by ONE ghost asset's side-table rows
  * (tens, not thousands) inside a single transaction. Not a ticking job — a

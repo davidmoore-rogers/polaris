@@ -62,12 +62,7 @@
  * Cascade-deletes when the ghost is removed (no transfer needed):
  *   - AssetSource (the canonical's sources are authoritative; next discovery
  *     re-observes anything still live)
- *   - AssetMonitorSample + every other AssetXxxSample / *Hourly / *Daily
- *     (workstation + endpoint ghosts aren't monitored; fortiswitch/fortiap
- *     ghosts only ever appeared as fortigate-endpoint siblings of the real
- *     monitored device, so the ghost has no samples either)
  *   - AssetLldpNeighbor + AssetWirelessStation
- *   - AssetCustomWidgetSample
  *   - AssetInterfaceOverride (operator-set comments — rare on a ghost; this
  *     job documents the loss in the log line; preserving them would require
  *     transferring with conflict-handling on (assetId, ifName))
@@ -75,6 +70,17 @@
  *     the queue empties naturally on next discovery)
  *   - AssetDependencyParent (both sides; the 60s dependencyReconciler tick
  *     recomputes from authoritative topology data)
+ *
+ * NOT cascade-deleted (no FK anymore — migration 20260615000000): every
+ * AssetXxxSample / *Hourly / *Daily time-series + AssetCustomWidgetSample.
+ * Those tables are TimescaleDB hypertables; a cascade DELETE matching rows in a
+ * compressed chunk would decompress it into multi-GB of un-truncatable heap
+ * bloat (prod incident 2026-06-08). The ghost's sample rows are simply left
+ * orphaned (assetId points at the deleted ghost, never queried) and age out via
+ * drop_chunks on the normal retention schedule — same net effect as the old
+ * cascade (the ghost's history isn't transferred to the canonical), just
+ * compression-safe. Almost always empty anyway (ghosts are usually unmonitored
+ * workstation/endpoint duplicates).
  *
  * Scalar-field absorption onto the canonical (only when the canonical's
  * field is empty/null and the ghost has a value): macAddress, ipAddress,
@@ -499,12 +505,13 @@ async function mergeGhostIntoCanonical(canonical: AssetRow, ghost: AssetRow): Pr
       await tx.asset.update({ where: { id: canonical.id }, data: update });
     }
 
-    // Cascade-delete the ghost. Everything still pointing at it goes:
+    // Cascade-delete the ghost. Everything with an FK still pointing at it goes:
     //   - AssetSource rows (the canonical's are authoritative; next discovery
     //     re-observes anything still live).
-    //   - All AssetXxxSample / hourly / daily rollup rows (empty for ghosts —
-    //     workstation + endpoint ghosts aren't monitored).
-    //   - AssetLldpNeighbor / AssetWirelessStation / AssetCustomWidgetSample.
+    //   - AssetLldpNeighbor / AssetWirelessStation (current-state, FK kept).
+    //   Sample/rollup time-series have NO FK (migration 20260615000000) — they
+    //   are NOT deleted here; they orphan and age out via drop_chunks (a cascade
+    //   delete would decompress their TimescaleDB chunks → bloat).
     //   - AssetInterfaceOverride (rare on a ghost; loss is logged via the
     //     summary line above).
     //   - Conflict rows pointing at the ghost via assetId (pending sibling

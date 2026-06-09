@@ -43,13 +43,26 @@ import { logger } from "../utils/logger.js";
 import { isHypertable } from "../services/timescaleService.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
-const INTERVAL_MS = 24 * 60 * 60 * 1000;     // daily
+const INTERVAL_MS = 6 * 60 * 60 * 1000;      // every 6h — fast self-heal without hammering locks
 const STARTUP_DELAY_MS = 10 * 60 * 1000;     // 10 min after boot — clear of the boot-time compression self-heal pass
 const MIN_BLOAT_BYTES = 256 * 1024 * 1024;   // ignore compressed chunks under 256 MB on disk
 const BLOAT_RATIO = 3;                        // on-disk must exceed 3× the compressed bytes to count as bloat
 const MAX_CHUNKS_PER_RUN = 12;
+// VACUUM FULL needs AccessExclusiveLock, which the resolver's interface-sample
+// reads (AccessShareLock, sometimes minutes long) keep stealing. Keep the
+// per-attempt lock_timeout SHORT so we never queue ahead of and block live
+// reads for more than this; instead RETRY across the run — a read gap opens
+// within a few attempts, and once acquired the rewrite of a 0-live chunk is
+// seconds. (The daily 5s-once version skipped every chunk in prod 2026-06-08.)
 const LOCK_TIMEOUT_MS = 5000;
+const RETRY_ATTEMPTS = 6;                     // per chunk
+const RETRY_BACKOFF_MS = 30 * 1000;           // wait between lock-timeout retries
 const STATEMENT_TIMEOUT_MS = 10 * 60 * 1000; // generous per-chunk ceiling; 0-live rewrites finish in seconds
+
+/** Sleep helper for retry backoff. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // The selection-aware sample tables are the only ones with the row-level
 // delete-churn that decompresses chunks; the SD-WAN / monitor / telemetry
@@ -111,24 +124,43 @@ async function reclaim(candidates: BloatCandidate[]): Promise<{ count: number; r
     await client.query(`SET lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
     await client.query(`SET statement_timeout = '${STATEMENT_TIMEOUT_MS}ms'`);
     for (const c of candidates) {
-      try {
-        // qualified is catalog-derived and %I-quoted by Postgres' format(); VACUUM
-        // cannot be parameterized, so it is interpolated. No user input reaches here.
-        await client.query(`VACUUM (FULL) ${c.qualified}`);
-        const after = await client.query<{ sz: string }>(
-          `SELECT pg_total_relation_size($1::regclass) AS sz`,
-          [c.qualified],
-        );
-        const delta = c.onDiskBytes - Number(after.rows[0]?.sz ?? c.onDiskBytes);
-        if (delta > 0) reclaimedBytes += delta;
-        count++;
-        logger.info(
-          { chunk: c.qualified, beforeBytes: c.onDiskBytes, reclaimedBytes: delta },
-          "Reclaimed bloated compressed chunk",
-        );
-      } catch (err) {
-        // lock_timeout / statement_timeout / transient — skip; retried next run.
-        logger.warn({ err, chunk: c.qualified }, "VACUUM FULL on bloated chunk skipped");
+      let done = false;
+      for (let attempt = 1; attempt <= RETRY_ATTEMPTS && !done; attempt++) {
+        try {
+          // qualified is catalog-derived and %I-quoted by Postgres' format(); VACUUM
+          // cannot be parameterized, so it is interpolated. No user input reaches here.
+          await client.query(`VACUUM (FULL) ${c.qualified}`);
+          const after = await client.query<{ sz: string }>(
+            `SELECT pg_total_relation_size($1::regclass) AS sz`,
+            [c.qualified],
+          );
+          const delta = c.onDiskBytes - Number(after.rows[0]?.sz ?? c.onDiskBytes);
+          if (delta > 0) reclaimedBytes += delta;
+          count++;
+          done = true;
+          logger.info(
+            { chunk: c.qualified, beforeBytes: c.onDiskBytes, reclaimedBytes: delta, attempt },
+            "Reclaimed bloated compressed chunk",
+          );
+        } catch (err) {
+          // 55P03 = lock_timeout: a long read holds the chunk. Back off and retry
+          // — a gap usually opens within a few attempts. Any other error is not
+          // lock contention, so stop retrying this chunk.
+          const code = (err as { code?: string } | null)?.code;
+          if (code === "55P03" && attempt < RETRY_ATTEMPTS) {
+            logger.debug(
+              { chunk: c.qualified, attempt },
+              "VACUUM FULL lock_timeout; backing off and retrying",
+            );
+            await delay(RETRY_BACKOFF_MS);
+            continue;
+          }
+          logger.warn(
+            { err, chunk: c.qualified, attempts: attempt },
+            "VACUUM FULL on bloated chunk skipped (will retry next run)",
+          );
+          break;
+        }
       }
     }
   } finally {
@@ -158,7 +190,7 @@ async function runReclaimBloatedChunks(): Promise<void> {
 }
 
 // Delay the first run past boot so it doesn't race the compression self-heal
-// pass, then run daily.
+// pass, then run every 6h.
 setTimeout(() => {
   void runReclaimBloatedChunks();
   setInterval(() => void runReclaimBloatedChunks(), INTERVAL_MS);
