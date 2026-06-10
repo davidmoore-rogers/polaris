@@ -1224,16 +1224,17 @@ Listed alphabetically.
 
 ## services/assetIpHistoryService.ts
 
-**What it owns:** Asset IP history reads, Settings-backed retention policy, pruning sweep (auto-populated by Prisma query extension in `src/db.ts`).
+**What it owns:** Asset IP history reads, Settings-backed retention policy, pruning sweep, and the batch writer for *associated* interface IPs (`recordIpHistoryEntries`). The primary-IP rows are still written by the Prisma query extension in `src/db.ts` (`recordIpHistory`).
 
-**Public API:** `getIpHistory(), pruneOldHistory(), getHistorySettings(), updateHistorySettings()`
+**Public API:** `getIpHistory(), recordIpHistoryEntries(), prepareIpHistoryEntries(), pruneOldHistory(), getHistorySettings(), updateHistorySettings()`
 
-**Cross-service deps:** None.
+**Cross-service deps:** None. (`recordIpHistoryEntries` is called by `monitoringService.recordSystemInfoResult`.)
 
-**Used by:** `src/api/routes/assets.ts — fetch IP history for asset detail modal`, `src/api/routes/assets.ts — prune endpoint (manual trigger)`
+**Used by:** `src/api/routes/assets.ts — fetch IP history for asset detail modal`, `src/api/routes/assets.ts — prune endpoint (manual trigger)`, `src/services/monitoringService.ts — recordIpHistoryEntries() after the asset_associated_ips persist`
 
 **Invariants:**
-- History is auto-populated on every Asset write that touches `ipAddress`; this service reads + prunes only.
+- History has two writers: (1) the `src/db.ts` Prisma extension on every Asset write that touches the primary `ipAddress`; (2) `recordIpHistoryEntries()`, called from the systemInfo scrape persist with the asset's interface IPs (incl. public WAN / secondary addresses). The batch writer **skips the asset's primary `ipAddress`** (already owned by writer 1) so the two never flip `source` back and forth and churn `firstSeen`.
+- `recordIpHistoryEntries()` is best-effort (swallows DB errors) and fire-and-forget — it must never block or fail the scrape. Single multi-row `INSERT … ON CONFLICT` per call (one round-trip regardless of interface count — scale-safe at thousands of assets). `prepareIpHistoryEntries()` is the pure (testable) dedupe/skip-primary half.
 - Retention is Setting-backed (`retentionDays`, default 0 = keep forever); `getIpHistory()` filters on read, stored rows never auto-delete unless `pruneOldHistory()` is called.
 - `pruneOldHistory()` is a manual operation (not yet hooked to a background job); operator triggers via Server Settings → Maintenance → Prune old IP history.
 - Setting persists across app restarts; read-time filtering is applied client-side by `getIpHistory()` calls.

@@ -667,10 +667,14 @@ ApiToken                        -- Long-lived bearer tokens for external callers
   -- Available scopes: assets:quarantine, assets:read
 
 AssetIpHistory                  -- Auto-populated log of every IP each asset has held
-  id            UUID PK
+  id            UUID PK           -- two writers: (1) db.ts Prisma extension recordIpHistory() on Asset.ipAddress
+                                  --   change (the primary IP); (2) assetIpHistoryService.recordIpHistoryEntries(),
+                                  --   called from the systemInfo scrape persist, folds in the asset's *associated*
+                                  --   interface IPs (incl. public WAN / secondary addresses, which never become the
+                                  --   primary ipAddress) — skipping the primary IP so the two writers don't churn firstSeen.
   assetId       UUID FK → Asset (cascade delete)
   ip            String
-  source        String          -- "manual", "fortimanager", "fortigate", "dns", etc.
+  source        String          -- "manual", "fortimanager", "fortigate", "dns", "monitor-system-info" (associated IPs), etc.
   firstSeen     DateTime
   lastSeen      DateTime
   @@unique([assetId, ip])       -- one row per (asset, ip); lastSeen and source update on re-sighting
