@@ -1109,6 +1109,7 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
         trunksAllVlans: i.trunksAllVlans === true,
         alias:       i.alias       ?? null,
         description: i.description ?? null,
+        addressingMode: i.addressingMode ?? null,
       })),
       storage: storage.map((s) => ({
         timestamp:  s.timestamp,

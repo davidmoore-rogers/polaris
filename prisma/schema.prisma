@@ -852,6 +852,12 @@ model AssetInterfaceSample {
   // Operator-set free-text comment surfaced on the interface slide-over.
   // FortiOS CMDB `description`; SNMP has no equivalent and leaves this null.
   description String?
+  // L3 addressing mode of the interface: "static" | "dhcp" | "pppoe".
+  // FortiOS CMDB `system/interface.mode`; SNMP / Polaris Agent have no
+  // equivalent and leave this null (rendered as "—" in the UI, like the
+  // FortiSwitch-only VLAN columns). Config metadata — shown only in the live
+  // System-tab snapshot, not rolled up.
+  addressingMode String?
   // Cadence discriminator for selection-aware retention. "fast" = this row came
   // from the response-time re-walk of an operator-pinned interface
   // (monitoredInterfaces); "slow" = the full system-info scrape. NULL = legacy

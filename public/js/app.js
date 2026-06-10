@@ -193,6 +193,7 @@ function renderNav() {
     <div style="margin-top:auto">
       <div id="role-review-status" class="query-status role-review-status" style="display:none"></div>
       <div id="integration-failed-status" class="query-status integration-failed-status" style="display:none"></div>
+      <div id="update-status" class="query-status update-status" style="display:none"></div>
       <div id="query-status" class="query-status" style="display:none"></div>
       <div id="capacity-critical-alert" class="capacity-critical-alert" style="display:none"></div>
       ${(isAdmin() || canManageAssets()) ? `<div style="padding:0.5rem 0.5rem 0;border-top:1px solid var(--color-border-light)">
@@ -283,6 +284,39 @@ function renderNav() {
   setInterval(pollFailedIntegrations, 30000);
   window._pollFailedIntegrations = pollFailedIntegrations;
   window._getFailedIntegrations = function () { return _failedIntegrations; };
+
+  // ─── In-app update progress ───────────────────────────────────────────
+  // Sidebar panel that mirrors the discovery indicator while an in-app
+  // update is being applied (Server Settings → Maintenance kicks it off,
+  // but it should be visible from any page). Reads the same in-memory
+  // /updates/status the Maintenance card polls; surfaced only while the
+  // update is actually running (state applying/restarting). Admin-only,
+  // matching checkSidebarUpdate — the status route is serverSettingsSystem-
+  // gated, so polling it as a non-admin would only earn 403s.
+  var _updateStatus = null;
+  async function pollUpdateProgress() {
+    if (!isAdmin()) return;
+    try {
+      _updateStatus = await api.serverSettings.getUpdateStatus();
+    } catch (_) {
+      // Mid-restart the web process is briefly unreachable and the poll
+      // fails. Keep the last known status so the panel persists across the
+      // restart window instead of flickering out; only clear it when we
+      // weren't already mid-update.
+      if (!(_updateStatus && (_updateStatus.state === "applying" || _updateStatus.state === "restarting"))) {
+        _updateStatus = null;
+      }
+    }
+    renderUpdateStatus();
+  }
+  if (isAdmin()) {
+    pollUpdateProgress();
+    // 5 s — responsive enough to track per-step progress; the status route
+    // just returns an in-memory object so the poll is cheap.
+    setInterval(pollUpdateProgress, 5000);
+  }
+  window._pollUpdateProgress = pollUpdateProgress;
+  window._getUpdateStatus = function () { return _updateStatus; };
 
   // Inject global search bar + user badge into page header
   renderGlobalSearch();
@@ -605,6 +639,7 @@ function _showSearchShortcutHints() {
     '<div class="gs-group gs-hint-group">' +
     '  <div class="gs-group-label">Search shortcuts — scoped searches return up to 200 results (no top-8 cap)</div>' +
     rows +
+    '  <div class="gs-hint-foot">Type multiple words to match all of them · wrap a phrase in "quotes" to keep spaces</div>' +
     '</div>';
   dropdown.style.display = "block";
 
@@ -1220,6 +1255,63 @@ function renderIntegrationFailedStatus() {
   container.onclick = function (e) {
     if (e.target && e.target.tagName === "BUTTON") return;
     window.location.href = "/integrations.html";
+  };
+}
+
+// ─── In-app update progress ─────────────────────────────────────────────────
+// Renders the sidebar panel shown while an in-app update is being applied.
+// Reads the closure-scoped _updateStatus populated by pollUpdateProgress.
+// Only visible while state is "applying" or "restarting" — the "available"
+// badge near the version (checkSidebarUpdate) handles the not-yet-started
+// case, and complete/failed are surfaced on the Maintenance card. Lists each
+// update step with a status glyph mirroring server-settings.js renderSteps.
+// The whole panel clicks through to the Maintenance tab for detailed output.
+
+function renderUpdateStatus() {
+  var container = document.getElementById("update-status");
+  if (!container) return;
+  var status = (window._getUpdateStatus && window._getUpdateStatus()) || null;
+  var active = status && (status.state === "applying" || status.state === "restarting");
+  if (!active) {
+    container.style.display = "none";
+    container.innerHTML = "";
+    container.onclick = null;
+    return;
+  }
+
+  function stepGlyph(s) {
+    if (s === "done") return '<span class="update-step-icon update-step-done">&#10003;</span>';
+    if (s === "running") return '<span class="update-step-icon update-step-running">&#9679;</span>';
+    if (s === "failed") return '<span class="update-step-icon update-step-failed">&#10007;</span>';
+    return '<span class="update-step-icon update-step-pending">&#9675;</span>';
+  }
+
+  var label = status.state === "restarting" ? "Update — restarting" : "Applying update";
+  var steps = Array.isArray(status.steps) ? status.steps : [];
+
+  container.style.display = "block";
+  container.innerHTML =
+    '<div class="query-status-header update-status-header">' +
+      '<span class="query-spinner"></span>' +
+      '<span class="query-status-label">' + escapeHtml(label) + '</span>' +
+    '</div>' +
+    (steps.length
+      ? '<ul class="query-status-list">' +
+          steps.map(function (st) {
+            var nameCls = st.status === "running" ? "query-status-name update-step-active" : "query-status-name";
+            return '<li><div style="min-width:0;flex:1">' +
+              '<span class="' + nameCls + '">' + stepGlyph(st.status) + ' ' + escapeHtml(st.name || "") + '</span>' +
+              (st.message ? '<span class="query-status-progress">' + escapeHtml(st.message) + '</span>' : '') +
+              '</div></li>';
+          }).join("") +
+        '</ul>'
+      : (status.step
+          ? '<ul class="query-status-list"><li><span class="query-status-name">' + escapeHtml(status.step) + '</span></li></ul>'
+          : ""));
+
+  container.style.cursor = "pointer";
+  container.onclick = function () {
+    window.location.href = "/server-settings.html?tab=database";
   };
 }
 

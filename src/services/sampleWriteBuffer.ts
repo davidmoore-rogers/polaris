@@ -109,6 +109,7 @@ export interface InterfaceSampleRow {
   trunksAllVlans: boolean;
   alias: string | null;
   description: string | null;
+  addressingMode: string | null;
 }
 
 export interface StorageSampleRow {

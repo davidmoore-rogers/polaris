@@ -4382,7 +4382,7 @@ function _renderInterfacesTable(container, si, asset) {
     var hasOut = iface.outOctets != null && iface.outOctets > 0;
     return !hasIn && !hasOut;
   }
-  var COLS = 10 + (showVlanCols ? 2 : 0);
+  var COLS = 11 + (showVlanCols ? 2 : 0);
   // Group LLDP neighbors by local interface so the row builder can stamp the
   // first neighbor's label inline. Most ports only ever see one neighbor; a
   // "+N" badge appears when more are present and the slide-over enumerates them.
@@ -4460,6 +4460,23 @@ function _renderInterfacesTable(container, si, asset) {
     return nativeCell + taggedCell;
   }
 
+  // L3 addressing mode pill (FortiOS CMDB `system/interface.mode`). Only the
+  // FortiOS REST path populates this; SNMP / Polaris Agent rows leave it null
+  // and render "—" (same convention as the FortiSwitch-only VLAN columns).
+  function addressingCell(iface) {
+    var m = iface.addressingMode;
+    if (!m) return "<td>—</td>";
+    var cfgs = {
+      dhcp:   ["DHCP",   "#3b82f6"],
+      static: ["Static", "#6b7280"],
+      pppoe:  ["PPPoE",  "#8b5cf6"],
+    };
+    var cfg = cfgs[String(m).toLowerCase()];
+    if (!cfg) return '<td>' + escapeHtml(String(m)) + "</td>";
+    var c = cfg[1];
+    return '<td><span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:' + c + '18;color:' + c + ';border:1px solid ' + c + '30;white-space:nowrap">' + cfg[0] + "</span></td>";
+  }
+
   function buildRow(iface, opts) {
     opts = opts || {};
     var checked  = monitored.has(iface.ifName) ? " checked" : "";
@@ -4511,6 +4528,7 @@ function _renderInterfacesTable(container, si, asset) {
       "<td>" + statusCell(iface) + "</td>" +
       "<td>" + speed + "</td>" +
       '<td class="mono">' + escapeHtml(iface.ipAddress  || "—") + "</td>" +
+      addressingCell(iface) +
       '<td class="mono">' + escapeHtml(iface.macAddress || "—") + "</td>" +
       vlanCellsHTML(iface) +
       "<td>" + (iface.inOctets  != null ? _fmtBytes(iface.inOctets)  : "—") + "</td>" +
@@ -4573,6 +4591,7 @@ function _renderInterfacesTable(container, si, asset) {
       "<td>" + statusPill + "</td>" +
       "<td>—</td>" +
       '<td class="mono">' + escapeHtml(tn.remoteGateway || "—") + "</td>" +
+      "<td>—</td>" +
       '<td class="mono">—</td>' +
       vlanPlaceholders +
       "<td>" + (tn.incomingBytes != null ? _fmtBytes(tn.incomingBytes) : "—") + "</td>" +
@@ -4708,6 +4727,7 @@ function _renderInterfacesTable(container, si, asset) {
       '<th data-col-id="status">Status</th>' +
       '<th data-col-id="speed">Speed</th>' +
       '<th data-col-id="ip">IP</th>' +
+      '<th data-col-id="addressing" title="L3 addressing mode — FortiOS only (CMDB system/interface mode). DHCP, Static, or PPPoE; other sources show —">Addressing</th>' +
       '<th data-col-id="mac">MAC</th>' +
       vlanHeader +
       '<th data-col-id="in">In</th>' +

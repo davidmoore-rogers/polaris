@@ -3258,18 +3258,36 @@ async function routeAPI(method, path, params, body, res, req) {
       return json(res, { query: q, blocks: [], subnets: [], reservations: [], assets: [], ips: [] });
     }
     const LIMIT = 8;
-    const lq = q.toLowerCase();
-    const compactMac = q.replace(/[\s:\-.]/g, "").toLowerCase();
+    // Tokenize into AND-combined terms; double-quoted runs stay whole, dangling
+    // quote tolerated. Mirrors parseSearchTerms in src/services/searchService.ts.
+    const terms = [];
+    const _re = /"([^"]*)"?|(\S+)/g;
+    let _m;
+    while ((_m = _re.exec(q)) !== null) {
+      if (_m.index === _re.lastIndex) _re.lastIndex++;
+      const t = (_m[1] !== undefined ? _m[1] : _m[2] || "").trim();
+      if (t) terms.push(t);
+    }
+    if (terms.length === 0) {
+      return json(res, { query: q, blocks: [], subnets: [], reservations: [], assets: [], ips: [] });
+    }
+    const singleTerm = terms.length === 1;
+    const compactMac = singleTerm ? q.replace(/[\s:\-.]/g, "").toLowerCase() : "";
     const mac = /^[0-9a-f]{12}$/.test(compactMac) ? compactMac.toUpperCase().match(/.{2}/g).join(":") : null;
-    const contains = (v) => typeof v === "string" && v.toLowerCase().includes(lq);
+    const lterms = terms.map((t) => t.toLowerCase());
+    // Every term must appear in at least one of the supplied field values.
+    const matchAll = (...vals) => {
+      const hay = vals.filter((v) => typeof v === "string").map((v) => v.toLowerCase());
+      return lterms.every((t) => hay.some((h) => h.includes(t)));
+    };
 
-    const blocks = BLOCKS.filter((b) => contains(b.name) || contains(b.description) || contains(b.cidr)).slice(0, LIMIT)
+    const blocks = BLOCKS.filter((b) => matchAll(b.name, b.description, b.cidr)).slice(0, LIMIT)
       .map((b) => ({ type: "block", id: b.id, title: b.name, subtitle: b.cidr + (b.description ? " — " + b.description : "") }));
-    const subnets = SUBNETS.filter((s) => contains(s.name) || contains(s.cidr) || contains(s.purpose) || contains(s.fortigateDevice)).slice(0, LIMIT)
+    const subnets = SUBNETS.filter((s) => matchAll(s.name, s.cidr, s.purpose, s.fortigateDevice)).slice(0, LIMIT)
       .map((s) => ({ type: "subnet", id: s.id, title: s.name, subtitle: s.cidr + (s.purpose ? " — " + s.purpose : ""), context: { cidr: s.cidr } }));
-    const reservations = RESERVATIONS.filter((r) => r.status === "active" && (
-      contains(r.hostname) || contains(r.owner) || contains(r.projectRef) || contains(r.notes) || contains(r.ipAddress)
-    )).slice(0, LIMIT).map((r) => {
+    const reservations = RESERVATIONS.filter((r) => r.status === "active" &&
+      matchAll(r.hostname, r.owner, r.projectRef, r.notes, r.ipAddress)
+    ).slice(0, LIMIT).map((r) => {
       const sub = SUBNETS.find((s) => s.id === r.subnetId);
       return {
         type: "reservation",
@@ -3281,8 +3299,8 @@ async function routeAPI(method, path, params, body, res, req) {
     });
     const assets = ASSETS.filter((a) => {
       if (mac && a.macAddress === mac) return true;
-      return contains(a.hostname) || contains(a.dnsName) || contains(a.assetTag) || contains(a.serialNumber) ||
-        contains(a.ipAddress) || contains(a.macAddress) || contains(a.manufacturer) || contains(a.model);
+      return matchAll(a.hostname, a.dnsName, a.assetTag, a.serialNumber,
+        a.ipAddress, a.macAddress, a.manufacturer, a.model);
     }).slice(0, LIMIT).map((a) => ({
       type: "asset",
       id: a.id,

@@ -2972,6 +2972,8 @@ export interface InterfaceSample {
   alias?:       string | null;
   /** Operator-set free-text comment. FortiOS CMDB `description`; SNMP has no equivalent. */
   description?: string | null;
+  /** L3 addressing mode: "static" | "dhcp" | "pppoe". FortiOS CMDB `system/interface.mode`; SNMP / agent leave null. */
+  addressingMode?: string | null;
 }
 
 export interface StorageSample {
@@ -3550,6 +3552,7 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
         trunksAllVlans: i.trunksAllVlans === true,
         alias:       i.alias       ?? null,
         description: i.description ?? null,
+        addressingMode: null,
       })),
     );
   }
@@ -4036,7 +4039,7 @@ async function collectSystemInfoFortinet(
 
   // Build cmdbByName from the CMDB response. Non-fatal failure → empty map
   // → falls back to monitor-only types (same as the original try/catch).
-  const cmdbByName = new Map<string, { type: string | null; parent: string | null; vlanId: number | null; members: string[]; alias: string | null; description: string | null }>();
+  const cmdbByName = new Map<string, { type: string | null; parent: string | null; vlanId: number | null; members: string[]; alias: string | null; description: string | null; addressingMode: string | null }>();
   // FortiLink-enabled interface set (fortilink-flagged interfaces + their member
   // ports) from the same CMDB response — fed back to the caller so the LLDP
   // exclusion filter can drop FortiLink links without a second CMDB fetch.
@@ -4066,6 +4069,11 @@ async function collectSystemInfoFortinet(
         : [];
       const alias       = typeof c.alias       === "string" && c.alias.trim()       ? c.alias.trim()       : null;
       const description = typeof c.description === "string" && c.description.trim() ? c.description.trim() : null;
+      // L3 addressing mode — CMDB `mode` is "static" | "dhcp" | "pppoe". Keep
+      // only known values so a firmware-specific surprise doesn't leak into the
+      // UI; anything else (or absent) leaves addressingMode null.
+      const rawMode = typeof c.mode === "string" ? c.mode.trim().toLowerCase() : "";
+      const addressingMode = (rawMode === "static" || rawMode === "dhcp" || rawMode === "pppoe") ? rawMode : null;
       cmdbByName.set(c.name, {
         type:    t,
         parent:  t === "vlan" && typeof c.interface === "string" ? c.interface : null,
@@ -4073,6 +4081,7 @@ async function collectSystemInfoFortinet(
         members,
         alias,
         description,
+        addressingMode,
       });
     }
   }
@@ -4115,6 +4124,7 @@ async function collectSystemInfoFortinet(
         vlanId:      rawVlanId,
         alias:       cmdbEntry?.alias       ?? null,
         description: cmdbEntry?.description ?? null,
+        addressingMode: cmdbEntry?.addressingMode ?? null,
       });
     }
     // Back-fill ifParent on member ports of aggregate / hard-switch /
@@ -6507,6 +6517,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
           trunksAllVlans: i.trunksAllVlans === true,
           alias:       i.alias       ?? null,
           description: i.description ?? null,
+          addressingMode: i.addressingMode ?? null,
         })),
       );
       // Fold the MAC of each operator-pinned monitored interface into the

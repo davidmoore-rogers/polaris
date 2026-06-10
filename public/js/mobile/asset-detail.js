@@ -789,6 +789,10 @@
     row("Speed", iface.speedBps != null ? formatBps(iface.speedBps) : null);
     if (iface.ifType) row("Type", iface.ifType + (iface.vlanId != null ? " · VLAN " + iface.vlanId : ""));
     row("IP",  iface.ipAddress, true);
+    if (iface.addressingMode) {
+      var amLabel = { dhcp: "DHCP", static: "Static", pppoe: "PPPoE" }[String(iface.addressingMode).toLowerCase()] || iface.addressingMode;
+      row("Addressing", amLabel);
+    }
     row("MAC", iface.macAddress, true);
     row("In errors",  iface.inErrors  != null ? String(iface.inErrors)  : null);
     row("Out errors", iface.outErrors != null ? String(iface.outErrors) : null);
