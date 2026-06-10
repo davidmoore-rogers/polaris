@@ -3034,6 +3034,11 @@ export interface SdwanRuleSample {
   status:           "up" | "down";
   selectedMember:   string | null;
   availableMembers: string[];
+  // SD-WAN zone(s) the rule prefers, in priority order, when configured for
+  // zone-based selection (`priority-zone`). Empty for interface-member rules.
+  // When set, `availableMembers` is resolved from the member interfaces of
+  // these zones so the UI can group them by zone.
+  priorityZones:    string[];
 }
 
 /**
@@ -4351,7 +4356,7 @@ async function collectSdwanFortinet(
   const thresholds = parseSdwanSlaThresholds(sdwanRes);
   const zones = parseSdwanMemberZones(sdwanRes);
   const { perfSla, memberUp } = parsePerfSlaHealthCheck(hcRes, thresholds, zones);
-  const sdwanRules = parseSdwanRules(sdwanRes, memberUp);
+  const sdwanRules = parseSdwanRules(sdwanRes, memberUp, zones);
   return { perfSla, sdwanRules };
 }
 
@@ -4490,21 +4495,44 @@ export function parsePerfSlaHealthCheck(
  * system sdwan` is a single complex object carrying a global `members` array
  * (seq-num → interface) and a `service` array of the SD-WAN rules. The runtime
  * selected member is inferred from `memberUp` (first candidate in priority order
- * that is up); null when none resolvable. Exported for unit testing; pure.
+ * that is up); null when none resolvable. Rules configured for zone-based
+ * selection (`priority-zone`) carry no interface members — their candidates are
+ * resolved from `memberZones` (interface → zone, from parseSdwanMemberZones)
+ * preserving global-member priority order. Exported for unit testing; pure.
  */
-export function parseSdwanRules(sdwanRes: unknown, memberUp: Map<string, boolean>): SdwanRuleSample[] {
+export function parseSdwanRules(
+  sdwanRes: unknown,
+  memberUp: Map<string, boolean>,
+  memberZones?: Map<string, string>,
+): SdwanRuleSample[] {
   const sdwanRules: SdwanRuleSample[] = [];
   const sdwanRoot = (sdwanRes && typeof sdwanRes === "object" && (sdwanRes as any).results && typeof (sdwanRes as any).results === "object")
     ? (sdwanRes as any).results
     : sdwanRes;
   if (!sdwanRoot || typeof sdwanRoot !== "object") return sdwanRules;
   const seqToIface = new Map<string, string>();
+  // Ordered interface list in global-member (= priority) order, used to resolve
+  // a zone into its member interfaces for zone-preference rules.
+  const orderedIfaces: string[] = [];
   const globalMembers = Array.isArray((sdwanRoot as any).members) ? (sdwanRoot as any).members : [];
   for (const gm of globalMembers) {
     if (!gm || typeof gm !== "object") continue;
     const seq   = (gm as any)["seq-num"] ?? (gm as any).seq_num;
     const iface = typeof (gm as any).interface === "string" ? (gm as any).interface.trim() : "";
     if (seq != null && iface) seqToIface.set(String(seq), iface);
+    if (iface && !orderedIfaces.includes(iface)) orderedIfaces.push(iface);
+  }
+  // zone → member interfaces in priority order (built from the interface→zone
+  // map + global-member ordering above).
+  const zoneToIfaces = new Map<string, string[]>();
+  if (memberZones) {
+    for (const iface of orderedIfaces) {
+      const zone = memberZones.get(iface);
+      if (!zone) continue;
+      const list = zoneToIfaces.get(zone) ?? [];
+      if (!list.includes(iface)) list.push(iface);
+      zoneToIfaces.set(zone, list);
+    }
   }
   const services = Array.isArray((sdwanRoot as any).service) ? (sdwanRoot as any).service : [];
   services.forEach((svc: any, seqIdx: number) => {
@@ -4545,6 +4573,19 @@ export function parseSdwanRules(sdwanRes: unknown, memberUp: Map<string, boolean
       }
       if (iface && !availableMembers.includes(iface)) availableMembers.push(iface);
     }
+    // Zone-based selection: FortiOS puts the preference in `priority-zone`
+    // (zone names in priority order) and leaves the interface-member arrays
+    // empty. When that's the case, expand each preferred zone into its member
+    // interfaces (global-member priority order) so the rule still reports
+    // candidates — without this the Members column renders empty.
+    const priorityZones = collectSdwanNameList(svc["priority-zone"]);
+    if (availableMembers.length === 0 && priorityZones.length > 0) {
+      for (const zone of priorityZones) {
+        for (const iface of zoneToIfaces.get(zone) ?? []) {
+          if (!availableMembers.includes(iface)) availableMembers.push(iface);
+        }
+      }
+    }
     let selectedMember: string | null = null;
     for (const m of availableMembers) {
       if (memberUp.get(m) === true) { selectedMember = m; break; }
@@ -4552,7 +4593,7 @@ export function parseSdwanRules(sdwanRes: unknown, memberUp: Map<string, boolean
     const status: "up" | "down" = selectedMember ? "up" : "down";
     sdwanRules.push({
       ruleName, ruleId, seq: seqIdx, enabled, mode, criteria, healthChecks, dst,
-      status, selectedMember, availableMembers,
+      status, selectedMember, availableMembers, priorityZones,
     });
   });
   return sdwanRules;
@@ -6407,6 +6448,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
           status:           r.status,
           selectedMember:   r.selectedMember,
           availableMembers: r.availableMembers,
+          priorityZones:    r.priorityZones,
         })),
       );
     }

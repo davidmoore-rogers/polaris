@@ -1108,6 +1108,10 @@ model AssetSdwanRuleSample {
   selectedMember   String?
   // Configured candidate members in priority order.
   availableMembers String[] @default([])
+  // SD-WAN zone(s) the rule prefers, in priority order, when configured for
+  // zone-based selection (`priority-zone`). Empty for interface-member rules.
+  // When set, availableMembers is resolved from these zones' member interfaces.
+  priorityZones    String[] @default([])
   cadence          String?
 
   @@id([id, timestamp])

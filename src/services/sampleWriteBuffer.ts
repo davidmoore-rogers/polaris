@@ -161,6 +161,7 @@ export interface SdwanRuleSampleRow {
   status: string;
   selectedMember: string | null;
   availableMembers: string[];
+  priorityZones: string[];
 }
 
 // ─── Per-table buffer state ───────────────────────────────────────────────

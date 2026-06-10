@@ -1558,12 +1558,14 @@ router.get("/:id/sdwan-rules", requirePermission("assets", "read"), async (req, 
     const rows = await prisma.$queryRawUnsafe<Array<{
       ruleName: string; ruleId: string | null; seq: number | null; enabled: boolean | null;
       mode: string | null; criteria: string | null; healthChecks: string[]; dst: string[];
-      status: string; selectedMember: string | null; availableMembers: string[]; timestamp: Date;
+      status: string; selectedMember: string | null; availableMembers: string[];
+      priorityZones: string[]; timestamp: Date;
     }>>(
       `SELECT * FROM (
          SELECT DISTINCT ON ("ruleName")
                 "ruleName", "ruleId", "seq", "enabled", "mode", "criteria",
-                "healthChecks", "dst", "status", "selectedMember", "availableMembers", "timestamp"
+                "healthChecks", "dst", "status", "selectedMember", "availableMembers",
+                "priorityZones", "timestamp"
          FROM "asset_sdwan_rule_samples"
          WHERE "assetId" = $1
          ORDER BY "ruleName" ASC, "timestamp" DESC

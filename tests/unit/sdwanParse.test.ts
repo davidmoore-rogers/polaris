@@ -211,4 +211,71 @@ describe("parseSdwanRules", () => {
     expect(parseSdwanRules(null, new Map())).toEqual([]);
     expect(parseSdwanRules({ results: {} }, new Map())).toEqual([]);
   });
+
+  it("carries an empty priorityZones for interface-member rules", () => {
+    const rules = parseSdwanRules(sdwan, new Map());
+    expect(rules[0].priorityZones).toEqual([]);
+    expect(rules[1].priorityZones).toEqual([]);
+  });
+});
+
+describe("parseSdwanRules — zone preference", () => {
+  // Zone-based rule: no interface members; candidates live in `priority-zone`.
+  const zonedSdwan = {
+    results: {
+      members: [
+        { "seq-num": 1, interface: "wan1", zone: "underlay" },
+        { "seq-num": 2, interface: "wan2", zone: "underlay" },
+        { "seq-num": 3, interface: "Overlay-7", zone: "overlay" },
+      ],
+      service: [
+        {
+          id: 9, name: "ZonePref", mode: "sla", status: "enable",
+          "priority-zone": [{ name: "overlay" }, { name: "underlay" }],
+          // no members / priority-members — selection is zone-driven
+        },
+      ],
+    },
+  };
+
+  it("captures priorityZones and resolves availableMembers from the zones' members", () => {
+    const zones = parseSdwanMemberZones(zonedSdwan);
+    const rule = parseSdwanRules(zonedSdwan, new Map(), zones)[0];
+    // Zones in configured priority order.
+    expect(rule.priorityZones).toEqual(["overlay", "underlay"]);
+    // Members resolved zone-by-zone, each zone's members in global priority order.
+    expect(rule.availableMembers).toEqual(["Overlay-7", "wan1", "wan2"]);
+  });
+
+  it("infers the selected member among the zone's resolved candidates", () => {
+    const zones = parseSdwanMemberZones(zonedSdwan);
+    // Overlay-7 down, wan1 up → first up candidate in priority order is wan1.
+    const up = new Map<string, boolean>([["Overlay-7", false], ["wan1", true], ["wan2", true]]);
+    const rule = parseSdwanRules(zonedSdwan, up, zones)[0];
+    expect(rule).toMatchObject({ selectedMember: "wan1", status: "up" });
+  });
+
+  it("captures priorityZones but leaves members empty when no zone map is supplied", () => {
+    const rule = parseSdwanRules(zonedSdwan, new Map())[0];
+    expect(rule.priorityZones).toEqual(["overlay", "underlay"]);
+    expect(rule.availableMembers).toEqual([]);
+  });
+
+  it("does not overwrite explicit interface members with zone members", () => {
+    // A rule with BOTH members and priority-zone keeps its explicit members.
+    const mixed = {
+      results: {
+        members: zonedSdwan.results.members,
+        service: [{
+          id: 10, name: "Mixed", mode: "sla", status: "enable",
+          "priority-zone": [{ name: "underlay" }],
+          members: [{ "seq-num": 3 }],
+        }],
+      },
+    };
+    const zones = parseSdwanMemberZones(mixed);
+    const rule = parseSdwanRules(mixed, new Map(), zones)[0];
+    expect(rule.availableMembers).toEqual(["Overlay-7"]);
+    expect(rule.priorityZones).toEqual(["underlay"]);
+  });
 });
