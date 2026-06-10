@@ -62,8 +62,12 @@ export interface DiskQuery {
  */
 export interface TemperatureQuery {
   symbol: string;                       // symbolic OID name resolved via oidRegistry
-  mode: "scalar";                       // only single-scalar form supported here; table-walk vendors hit ENTITY-SENSOR-MIB
-  /** Display label for the synthesized TemperatureSample row. Defaults to "System" when omitted. */
+  // "scalar" = single .0 Celsius reading (FortiAP fapTemperature).
+  // "table"  = operator pointed the Hardware Sensors metric at a sensor table
+  //            (e.g. fgHwSensorTable); the SNMP collector runs the full
+  //            hardware-table walk instead of a (broken) scalar GET.
+  mode: "scalar" | "table";
+  /** Display label for the synthesized hardware-sensor row. Defaults to "System" when omitted. */
   sensorName?: string;
 }
 

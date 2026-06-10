@@ -1716,7 +1716,7 @@ function renderCapacityCard(capacity, dbInfo, pgTuning) {
 var SAMPLE_RETENTION_ENTITIES = [
   { key: "assets",      label: "Response time",  hint: "Per-asset response-time probe (asset_monitor_samples)." },
   { key: "cpuMem",      label: "CPU & memory",   hint: "Per-asset CPU / memory telemetry." },
-  { key: "temperature", label: "Temperature",    hint: "Per-asset temperature sensors." },
+  { key: "hardware",    label: "Hardware sensors", hint: "Per-asset hardware sensors (temperature / fan / voltage / power / disk)." },
   { key: "interfaces",  label: "Interfaces",     hint: "Per-interface counters.", selectionAware: true },
   { key: "storage",     label: "Storage",        hint: "Per-volume usage.",       selectionAware: true },
   { key: "ipsec",       label: "IPsec tunnels",  hint: "Per-tunnel state.",       selectionAware: true },
@@ -5979,7 +5979,7 @@ async function deleteApiToken(id, name) {
 var METRIC_KEY_LABELS = {
   cpu:               "CPU",
   memory:            "Memory",
-  temperature:       "Temperature",
+  temperature:       "Hardware Sensors",
   interfaces:        "Interfaces",
   lldp:              "LLDP",
   storage:           "Storage",

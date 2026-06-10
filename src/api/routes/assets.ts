@@ -26,7 +26,7 @@ import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils
 import {
   probeAsset, recordProbeResult,
   collectTelemetry, recordTelemetryResult,
-  collectTemperatures, recordTemperatureResult,
+  collectHardwareSensors, recordHardwareSensorResult,
   collectSystemInfo, recordSystemInfoResult,
   snmpWalkRaw,
   resolveMonitorSettingsWithProvenance,
@@ -38,7 +38,7 @@ import { pickSampleTierForAsset } from "../../services/sampleQueryRouter.js";
 import {
   readMonitorHistory,
   readTelemetryHistory,
-  readTemperatureHistory,
+  readHardwareSensorHistory,
   readInterfaceHistory,
   readStorageHistory,
   readIpsecHistory,
@@ -768,25 +768,25 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
     // returns a properly-typed CollectionResult so the union below has `data`
     // on every branch (TS narrowing was complaining otherwise).
     type TelResult  = Awaited<ReturnType<typeof collectTelemetry>>;
-    type TempResult = Awaited<ReturnType<typeof collectTemperatures>>;
+    type HwResult   = Awaited<ReturnType<typeof collectHardwareSensors>>;
     type SysResult  = Awaited<ReturnType<typeof collectSystemInfo>>;
     const tr_p:    Promise<TelResult>  = collectTelemetry(id).catch((err: any): TelResult  => ({ supported: true, error: err?.message || "Telemetry collection failed" }));
-    const tempR_p: Promise<TempResult> = collectTemperatures(id).catch((err: any): TempResult => ({ supported: true, error: err?.message || "Temperature collection failed" }));
+    const hwR_p:   Promise<HwResult>   = collectHardwareSensors(id).catch((err: any): HwResult => ({ supported: true, error: err?.message || "Hardware sensor collection failed" }));
     const sr_p:    Promise<SysResult>  = collectSystemInfo(id).catch((err: any): SysResult  => ({ supported: true, error: err?.message || "System info collection failed" }));
-    const [tr, tempR, sr] = [await tr_p, await tempR_p, await sr_p];
+    const [tr, hwR, sr] = [await tr_p, await hwR_p, await sr_p];
     await Promise.all([
       recordTelemetryResult(id, tr),
-      recordTemperatureResult(id, tempR),
+      recordHardwareSensorResult(id, hwR),
       recordSystemInfoResult(id, sr),
     ]);
     const telemetry   = { supported: tr.supported,    collected: !!tr.data,                                       error: tr.error };
-    // Temperature is "collected" when the device actually returned sensor
+    // Hardware sensors are "collected" when the device actually returned sensor
     // rows. An empty array (sensor-less device) is supported-but-empty —
     // surfaced as n/a rather than failure so the toast doesn't nag on devices
-    // that simply don't publish temperature.
-    const tempData    = Array.isArray(tempR.data) ? tempR.data : null;
-    const temperature = { supported: tempR.supported, collected: !!tempData && tempData.length > 0,               error: tempR.error };
-    const tempNoData  = !!(tempR.supported && tempData && tempData.length === 0);
+    // that simply don't publish hardware sensors.
+    const hwData      = Array.isArray(hwR.data) ? hwR.data : null;
+    const hardware    = { supported: hwR.supported, collected: !!hwData && hwData.length > 0,                    error: hwR.error };
+    const hwNoData    = !!(hwR.supported && hwData && hwData.length === 0);
     const systemInfo  = { supported: sr.supported,    collected: !!sr.data,                                       error: sr.error };
 
     // Audit the manual refresh. The periodic monitorAssets job only writes
@@ -801,12 +801,12 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
     const streamSummary: string[] = [];
     streamSummary.push(`probe ${ok ? probe.responseTimeMs + " ms" : "failed: " + (probe.error || "unknown")}`);
     streamSummary.push(`telemetry ${telemetry.collected ? "ok" : (telemetry.supported ? "failed: " + (telemetry.error || "no data") : "n/a")}`);
-    streamSummary.push(`temperature ${temperature.collected ? "ok" : (tempNoData ? "n/a (no sensors)" : (temperature.supported ? "failed: " + (temperature.error || "no data") : "n/a"))}`);
+    streamSummary.push(`hardware ${hardware.collected ? "ok" : (hwNoData ? "n/a (no sensors)" : (hardware.supported ? "failed: " + (hardware.error || "no data") : "n/a"))}`);
     streamSummary.push(`interfaces ${systemInfo.collected ? "ok" : (systemInfo.supported ? "failed: " + (systemInfo.error || "no data") : "n/a")}`);
     const anyFail = !ok ||
-      (telemetry.supported   && !telemetry.collected) ||
-      (temperature.supported && !temperature.collected && !tempNoData) ||
-      (systemInfo.supported  && !systemInfo.collected);
+      (telemetry.supported && !telemetry.collected) ||
+      (hardware.supported  && !hardware.collected && !hwNoData) ||
+      (systemInfo.supported && !systemInfo.collected);
     logEvent({
       action: "asset.refresh",
       resourceType: "asset",
@@ -815,10 +815,10 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
       actor: req.session?.username,
       level: anyFail ? "warning" : "info",
       message: `Refresh: ${label} — ${streamSummary.join("; ")}`,
-      details: { probe, telemetry, temperature, systemInfo },
+      details: { probe, telemetry, hardware, systemInfo },
     });
 
-    res.json({ ...probe, telemetry, temperature, systemInfo });
+    res.json({ ...probe, telemetry, hardware, systemInfo });
   } catch (err) { next(err); }
 });
 
@@ -981,7 +981,7 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
     });
     if (!asset) throw new AppError(404, "Asset not found");
 
-    const [latestTelemetry, latestIfaceMeta, latestStorageMeta, latestTempMeta, latestIpsecMeta, lldpNeighbors, wirelessStations, inferredNeighbors] = await Promise.all([
+    const [latestTelemetry, latestIfaceMeta, latestStorageMeta, latestHwMeta, latestIpsecMeta, lldpNeighbors, wirelessStations, inferredNeighbors] = await Promise.all([
       prisma.assetTelemetrySample.findFirst({
         where: { assetId: id },
         orderBy: { timestamp: "desc" },
@@ -996,7 +996,7 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
         orderBy: { timestamp: "desc" },
         select: { timestamp: true },
       }),
-      prisma.assetTemperatureSample.findFirst({
+      prisma.assetHardwareSensorSample.findFirst({
         where: { assetId: id },
         orderBy: { timestamp: "desc" },
         select: { timestamp: true },
@@ -1064,10 +1064,10 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
           orderBy: { mountPath: "asc" },
         })
       : [];
-    const temperatures = latestTempMeta
-      ? await prisma.assetTemperatureSample.findMany({
-          where: { assetId: id, timestamp: latestTempMeta.timestamp },
-          orderBy: { sensorName: "asc" },
+    const hardwareSensors = latestHwMeta
+      ? await prisma.assetHardwareSensorSample.findMany({
+          where: { assetId: id, timestamp: latestHwMeta.timestamp },
+          orderBy: [{ sensorClass: "asc" }, { sensorName: "asc" }],
         })
       : [];
     const ipsecTunnels = latestIpsecMeta
@@ -1080,7 +1080,7 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
     res.json({
       monitored: asset.monitored,
       lastTelemetryAt: asset.lastTelemetryAt,
-      lastTemperatureAt: latestTempMeta?.timestamp ?? null,
+      lastTemperatureAt: latestHwMeta?.timestamp ?? null,
       lastSystemInfoAt: asset.lastSystemInfoAt,
       telemetry: latestTelemetry ? {
         timestamp:     latestTelemetry.timestamp,
@@ -1116,10 +1116,13 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
         totalBytes: bigIntToNumber(s.totalBytes),
         usedBytes:  bigIntToNumber(s.usedBytes),
       })),
-      temperatures: temperatures.map((t) => ({
-        timestamp:  t.timestamp,
-        sensorName: t.sensorName,
-        celsius:    t.celsius,
+      hardwareSensors: hardwareSensors.map((s) => ({
+        timestamp:   s.timestamp,
+        sensorName:  s.sensorName,
+        sensorClass: s.sensorClass,
+        value:       s.value,
+        unit:        s.unit,
+        alarmStatus: s.alarmStatus,
       })),
       ipsecTunnels: ipsecTunnels.map((t) => ({
         timestamp:       t.timestamp,
@@ -1439,15 +1442,15 @@ router.put("/:id/interfaces/:ifName/comment", requirePermission("assets", "write
   } catch (err) { next(err); }
 });
 
-// GET /assets/:id/temperature-history?range=... [&sensorName=...] — per-sensor temperatures
-router.get("/:id/temperature-history", requirePermission("assets", "read"), async (req, res, next) => {
+// GET /assets/:id/hardware-history?range=... [&sensorName=...] — per-sensor hardware readings
+router.get("/:id/hardware-history", requirePermission("assets", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const sensorName = req.query.sensorName ? String(req.query.sensorName) : null;
     const { since, until, rangeLabel } = resolveRange(req);
-    const pick = await pickSampleTierForAsset(id, "temperature", since);
+    const pick = await pickSampleTierForAsset(id, "hardware", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
-    const result = await readTemperatureHistory(id, since, until, pick.tier, sensorName, fetchSince);
+    const result = await readHardwareSensorHistory(id, since, until, pick.tier, sensorName, fetchSince);
     res.json({
       range: rangeLabel,
       sensorName,

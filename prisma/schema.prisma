@@ -981,21 +981,35 @@ model AssetInterfaceOverride {
   @@map("asset_interface_overrides")
 }
 
-// Per-sensor temperature snapshot, written alongside telemetry. FortiOS exposes
-// these via /api/v2/monitor/system/sensor-info (filtered to type "temperature").
-// SNMP via ENTITY-SENSOR-MIB (entPhySensorType=8/celsius). Hosts that don't
-// publish either get no rows; the System tab simply hides the section.
-model AssetTemperatureSample {
-  id         String   @default(uuid())
-  assetId    String
-  timestamp  DateTime @default(now())
-  sensorName String
-  celsius    Float?
+// Per-sensor hardware snapshot, written alongside telemetry. Covers the whole
+// hardware-sensor table — temperature, fan, voltage, power/psu, disk, and
+// anything else — one row per sensor per scrape. FortiOS exposes these via
+// /api/v2/monitor/system/sensor-info; SNMP via FORTINET-FORTIGATE-MIB
+// fgHwSensorTable (name/value/alarm) or the standard ENTITY-SENSOR-MIB
+// (entPhySensorType=8/celsius → temperature class). `sensorClass` is a
+// best-effort classification (temperature | fan | voltage | power | disk |
+// other); `unit` is the display unit for `value` (°C, RPM, V, …); `alarmStatus`
+// is the per-row device-reported health when available. Hosts that publish
+// nothing get no rows and the System tab hides the section.
+// NOTE: no FK to Asset — this is a TimescaleDB hypertable; a cascade DELETE
+// matching a compressed chunk decompresses it into un-truncatable bloat
+// (see migration 20260615000000). Deleting an Asset orphans these rows to age
+// out via drop_chunks.
+model AssetHardwareSensorSample {
+  id          String   @default(uuid())
+  assetId     String
+  timestamp   DateTime @default(now())
+  sensorName  String
+  sensorClass String // temperature | fan | voltage | power | disk | other
+  value       Float?
+  unit        String?
+  alarmStatus String?
 
   @@id([id, timestamp])
   @@index([assetId, timestamp])
   @@index([assetId, sensorName, timestamp])
-  @@map("asset_temperature_samples")
+  @@index([assetId, sensorClass, timestamp])
+  @@map("asset_hardware_sensor_samples")
 }
 
 // Per-tunnel IPsec snapshot, written on the system-info cadence. FortiOS only
@@ -1361,38 +1375,42 @@ model AssetTelemetrySampleDaily {
   @@map("asset_telemetry_samples_daily")
 }
 
-model AssetTemperatureSampleHourly {
+model AssetHardwareSensorSampleHourly {
   id          String   @default(uuid())
   assetId     String
   bucketStart DateTime
   sensorName  String
+  sensorClass String
+  unit        String?
   sampleCount Int
-  avgCelsius  Float?
-  minCelsius  Float?
-  maxCelsius  Float?
+  avgValue    Float?
+  minValue    Float?
+  maxValue    Float?
 
   @@id([id, bucketStart])
   @@unique([bucketStart, assetId, sensorName])
   @@index([assetId, bucketStart])
   @@index([assetId, sensorName, bucketStart])
-  @@map("asset_temperature_samples_hourly")
+  @@map("asset_hardware_sensor_samples_hourly")
 }
 
-model AssetTemperatureSampleDaily {
+model AssetHardwareSensorSampleDaily {
   id          String   @default(uuid())
   assetId     String
   bucketStart DateTime
   sensorName  String
+  sensorClass String
+  unit        String?
   sampleCount Int
-  avgCelsius  Float?
-  minCelsius  Float?
-  maxCelsius  Float?
+  avgValue    Float?
+  minValue    Float?
+  maxValue    Float?
 
   @@id([id, bucketStart])
   @@unique([bucketStart, assetId, sensorName])
   @@index([assetId, bucketStart])
   @@index([assetId, sensorName, bucketStart])
-  @@map("asset_temperature_samples_daily")
+  @@map("asset_hardware_sensor_samples_daily")
 }
 
 model AssetInterfaceSampleHourly {
