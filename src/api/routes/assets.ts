@@ -55,6 +55,7 @@ import {
 import {
   buildInferredNeighborsForAsset,
   dedupeInferredNeighbors,
+  aggregateMembershipMap,
 } from "../../services/peerInferredLldpService.js";
 
 const router = Router();
@@ -1038,10 +1039,6 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
       // dedupe by (localIfName, matchedAssetId) below.
       buildInferredNeighborsForAsset(id),
     ]);
-    const mergedNeighbors = [
-      ...lldpNeighbors,
-      ...dedupeInferredNeighbors(lldpNeighbors, inferredNeighbors),
-    ];
 
     // Prefer the full system-info pass timestamp so the table renders every
     // interface — the fast cadence only writes pinned ones, and ordering by
@@ -1053,6 +1050,14 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
           orderBy: { ifName: "asc" },
         })
       : [];
+
+    // Merge inferred neighbors after the interface rows are loaded so an
+    // inferred row on an aggregate (e.g. FortiLink) dedupes against a real
+    // LLDP row learned on one of its member ports — same physical link.
+    const mergedNeighbors = [
+      ...lldpNeighbors,
+      ...dedupeInferredNeighbors(lldpNeighbors, inferredNeighbors, aggregateMembershipMap(interfaces)),
+    ];
     const storage = latestStorageMeta
       ? await prisma.assetStorageSample.findMany({
           where: { assetId: id, timestamp: latestStorageMeta.timestamp },
@@ -1287,6 +1292,12 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
     const { since, until, rangeLabel } = resolveRange(req);
     const pick = await pickSampleTierForAsset(id, "interfaces", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
+    // Full system-info pass timestamp → the complete interface snapshot for
+    // the aggregate-membership map (the fast cadence only writes pinned rows).
+    const assetMeta = await prisma.asset.findUnique({
+      where: { id },
+      select: { lastSystemInfoAt: true },
+    });
 
     // Samples come from the tier-aware reader. LLDP neighbors and the
     // operator-typed comment override are stream-independent — both fetch
@@ -1296,18 +1307,20 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
     // header reflects what was configured during that window; the
     // operator-typed override (Polaris-local) takes precedence for the
     // resolved `description` field shown in the UI.
-    const [history, override, neighbors, inferredAll] = await Promise.all([
+    const [history, override, allNeighbors, inferredAll, interfaceMeta] = await Promise.all([
       readInterfaceHistory(id, since, until, pick.tier, ifName, fetchSince),
       prisma.assetInterfaceOverride.findUnique({
         where: { assetId_ifName: { assetId: id, ifName } },
       }),
-      // LLDP neighbors on this exact local interface — usually 0 or 1 row,
-      // sometimes >1 on shared media or stacked switches reporting two
-      // chassis IDs. Returned with the matched-asset cross-link so the
-      // slide-over can surface a "Go to <hostname>" button.
+      // All real LLDP neighbors for the asset. We display only the rows on the
+      // requested interface (filtered below), but the full set is needed for
+      // dedupe: a row learned on an aggregate's member port must suppress an
+      // inferred row emitted on the aggregate itself (FortiLink). Returned with
+      // the matched-asset cross-link so the slide-over can surface a "Go to
+      // <hostname>" button. Usually a handful of rows at branch-class sizes.
       prisma.assetLldpNeighbor.findMany({
-        where: { assetId: id, localIfName: ifName },
-        orderBy: { systemName: "asc" },
+        where: { assetId: id },
+        orderBy: [{ localIfName: "asc" }, { systemName: "asc" }],
         include: {
           matchedAsset: {
             select: { id: true, hostname: true, ipAddress: true, assetType: true },
@@ -1319,11 +1332,21 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
       // a per-interface query isn't worth the extra surface area on the
       // service.
       buildInferredNeighborsForAsset(id),
+      // Interface metadata (ifType/ifParent) from the latest full snapshot →
+      // aggregate membership map for the inferred-on-aggregate dedupe. Cheap
+      // indexed point-lookup on the snapshot timestamp, not a history scan.
+      assetMeta?.lastSystemInfoAt
+        ? prisma.assetInterfaceSample.findMany({
+            where: { assetId: id, timestamp: assetMeta.lastSystemInfoAt },
+            select: { ifName: true, ifType: true, ifParent: true },
+          })
+        : Promise.resolve([] as { ifName: string; ifType: string | null; ifParent: string | null }[]),
     ]);
+    const neighbors = allNeighbors.filter((n) => n.localIfName === ifName);
     const inferredForIf = inferredAll.filter((n) => n.localIfName === ifName);
     const mergedNeighbors = [
       ...neighbors,
-      ...dedupeInferredNeighbors(neighbors, inferredForIf),
+      ...dedupeInferredNeighbors(allNeighbors, inferredForIf, aggregateMembershipMap(interfaceMeta)),
     ];
     const overrideDescription = override?.description ?? null;
     res.json({

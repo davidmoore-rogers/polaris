@@ -1514,15 +1514,15 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
   // ─── By name panel ────────────────────────────────────────────────────────
   var namesPanel = '<div id="' + idPrefix + 'panel-names" style="display:' + (byNames ? '' : 'none') + ';margin:0.35rem 0 0.6rem 1.5rem">' +
     (hasIntegrationId
-      ? '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">' +
-          '<button type="button" class="btn btn-secondary" id="' + idPrefix + 'reload" style="font-size:0.78rem;padding:4px 10px">Refresh from latest discovery</button>' +
+      ? '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem;gap:8px">' +
+          '<span class="hint" id="' + idPrefix + 'names-asof" style="margin:0;font-size:0.78rem"></span>' +
           '<span class="hint" id="' + idPrefix + 'names-counter" style="margin:0">Selected: 0</span>' +
         '</div>' +
         '<input type="text" id="' + idPrefix + 'names-filter" placeholder="Filter interface names…" autocomplete="off" style="width:100%;box-sizing:border-box;margin-bottom:0.4rem;padding:4px 8px;font-size:0.84rem">' +
-        '<div id="' + idPrefix + 'names-list" style="max-height:280px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
+        '<div id="' + idPrefix + 'names-list" style="display:flex;flex-direction:column;max-height:280px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
           '<p class="hint" style="margin:0">Loading…</p>' +
         '</div>' +
-        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from interfaces already seen on this integration\'s ' + escapeHtml(kindLabel) + 's. Examples: <code>wan1</code>, <code>port1</code>, <code>FortiLink</code>.</p>'
+        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from interfaces seen on this integration\'s ' + escapeHtml(kindLabel) + 's, refreshed automatically at the end of each discovery run. Examples: <code>wan1</code>, <code>port1</code>, <code>FortiLink</code>.</p>'
       : '<p class="hint" style="margin:0;color:var(--color-warning)">Save the integration and run discovery first — interface names are aggregated from already-discovered devices.</p>'
     ) +
   '</div>';
@@ -1635,6 +1635,21 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
 
 // Reads the auto-monitor card into a server-shaped AutoMonitorSelection or
 // null. Returns undefined when the card didn't render (subtab never opened).
+// Client-side mirrors of the server's pattern compilers (autoMonitorInterfacesService
+// compileWildcard / compilePattern), used by the instant cache-based preview so a
+// "By pattern" selection can be matched against the cached ifName list without a
+// server round-trip. Kept in lockstep with the server semantics: wildcard escapes
+// regex metacharacters then maps * -> .* and ? -> . and anchors; regex mode is the
+// raw (anchor-free) expression.
+function _amonWildcardToRegex(pattern) {
+  var escaped = String(pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  escaped = escaped.replace(/\\\*/g, ".*").replace(/\\\?/g, ".");
+  try { return new RegExp("^" + escaped + "$"); } catch (e) { return null; }
+}
+function _amonRegexFromString(pattern) {
+  try { return new RegExp(pattern); } catch (e) { return null; }
+}
+
 // Multi-block: each master checkbox gates its own block; the result is the
 // union. An enabled block with no inner values populated (e.g. patterns
 // master ticked but textarea empty) is dropped — server-side schema would
@@ -1730,14 +1745,14 @@ function _autoMonitorStorageHTML(idPrefix, kindLabel, currentSelection, hasInteg
 
   var namesPanel = '<div id="' + idPrefix + 'panel-names" style="display:' + (byNames ? '' : 'none') + ';margin:0.35rem 0 0.6rem 1.5rem">' +
     (hasIntegrationId
-      ? '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem">' +
-          '<button type="button" class="btn btn-secondary" id="' + idPrefix + 'reload" style="font-size:0.78rem;padding:4px 10px">Refresh from latest discovery</button>' +
+      ? '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.4rem;gap:8px">' +
+          '<span class="hint" id="' + idPrefix + 'names-asof" style="margin:0;font-size:0.78rem"></span>' +
           '<span class="hint" id="' + idPrefix + 'names-counter" style="margin:0">Selected: 0</span>' +
         '</div>' +
-        '<div id="' + idPrefix + 'names-list" style="max-height:240px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
+        '<div id="' + idPrefix + 'names-list" style="display:flex;flex-direction:column;max-height:240px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
           '<p class="hint" style="margin:0">Loading…</p>' +
         '</div>' +
-        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from mounts already reported by agents on this integration\'s ' + escapeHtml(kindLabel) + 's. Examples: <code>/</code>, <code>/var</code>, <code>C:</code>.</p>'
+        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from mounts reported by agents on this integration\'s ' + escapeHtml(kindLabel) + 's, refreshed automatically at the end of each discovery run. Examples: <code>/</code>, <code>/var</code>, <code>C:</code>.</p>'
       : '<p class="hint" style="margin:0;color:var(--color-warning)">Save the integration and let agents report first — mounts are aggregated from already-discovered devices.</p>'
     ) +
   '</div>';
@@ -1931,6 +1946,8 @@ function _wireAutoMonitorStorageCard(idPrefix, klass, integrationId) {
     if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0">Loading…</p>';
     api.integrations.storageAggregate(integrationId, klass).then(function (resp) {
       aggregateLoaded = true;
+      var asof = document.getElementById(idPrefix + "names-asof");
+      if (asof) asof.textContent = (resp && resp.computedAt) ? ("As of last discovery: " + new Date(resp.computedAt).toLocaleString()) : "";
       renderNamesList((resp && resp.rows) || []);
     }).catch(function (err) {
       if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-error)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
@@ -1956,6 +1973,9 @@ function _wireAutoMonitorStorageCard(idPrefix, klass, integrationId) {
     if (!integrationId) { preview.innerHTML = '<em>Preview becomes available after the integration is saved and agents report.</em>'; return; }
     var selection = _readAutoMonitorStorage(idPrefix);
     if (!selection) { preview.innerHTML = '<em>Enable a block and add at least one value to preview matches.</em>'; return; }
+    // Placeholder while the live resolve runs — on a large fleet it can take a
+    // moment, and a blank box reads as broken.
+    preview.innerHTML = '<em>Computing matches…</em>';
     api.integrations.storageAggregatePreview(integrationId, { class: klass, selection: selection }).then(function (r) {
       if (!r || r.deviceCount === 0) { preview.innerHTML = '<em>No mounts match yet.</em>'; return; }
       var sample = (r.sampleDevices || []).map(function (d) { return escapeHtml(d.hostname || "(unnamed)") + " (" + d.pinNames.length + ")"; }).join(", ");
@@ -1970,8 +1990,6 @@ function _wireAutoMonitorStorageCard(idPrefix, klass, integrationId) {
   if (ta) ta.addEventListener("input", schedulePreview);
   var modeRadios = document.getElementsByName(idPrefix + "patterns-mode");
   for (var mr = 0; mr < modeRadios.length; mr++) modeRadios[mr].addEventListener("change", schedulePreview);
-  var reload = document.getElementById(idPrefix + "reload");
-  if (reload) reload.addEventListener("click", function () { loadAggregate(true); });
   syncMasterVisibility();
   // Wire the agent-deploy toggle to reveal its body. The deploy card shares the
   // ws/server subtab; its prefix swaps -stor- → -deploy-.
@@ -2105,6 +2123,8 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
       aggregateLoaded = true;
       var rows = (resp && resp.rows) || [];
       aggregateRows = rows;
+      var asof = document.getElementById(idPrefix + "names-asof");
+      if (asof) asof.textContent = (resp && resp.computedAt) ? ("As of last discovery: " + new Date(resp.computedAt).toLocaleString()) : "";
       renderNamesList(rows);
       renderTypesList();
     }).catch(function (err) {
@@ -2189,6 +2209,89 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
     schedulePreview();
   }
 
+  // Map of ifName -> deviceCount from the last cache-based preview, for the
+  // instant per-edit diff (no server round-trip).
+  var lastClientMatched = null;
+
+  // Instant preview computed from the cached aggregate (aggregateRows) — no
+  // server round-trip. Exact for By name (names always pin regardless of link
+  // state). For By pattern / By type it can't honor onlyUp (the cache holds no
+  // per-device operStatus), so the count is an upper bound, flagged `approx`.
+  // Returns null when the selection needs live data the cache doesn't hold
+  // (By LLDP → topology) so the caller falls back to the live server preview.
+  function computeClientPreview(selection) {
+    if (!selection || selection.byLldp) return null;
+    if (!aggregateLoaded) return null; // rows not loaded yet — caller loads + retries
+    var byName = {};
+    for (var i = 0; i < aggregateRows.length; i++) byName[aggregateRows[i].ifName] = aggregateRows[i];
+    var matched = {}; // ifName -> deviceCount (union across blocks; each name once)
+    if (selection.byNames) {
+      selection.byNames.names.forEach(function (n) {
+        matched[n] = byName[n] ? (byName[n].deviceCount || 0) : 0;
+      });
+    }
+    if (selection.byPatterns) {
+      var res = selection.byPatterns.patterns.map(function (p) {
+        return selection.byPatterns.regex ? _amonRegexFromString(p) : _amonWildcardToRegex(p);
+      }).filter(Boolean);
+      aggregateRows.forEach(function (row) {
+        if (res.some(function (re) { return re.test(row.ifName); })) matched[row.ifName] = row.deviceCount || 0;
+      });
+    }
+    if (selection.byTypes) {
+      var typeSet = {};
+      selection.byTypes.types.forEach(function (t) { typeSet[t] = 1; });
+      aggregateRows.forEach(function (row) {
+        if (row.ifType && typeSet[row.ifType]) matched[row.ifName] = row.deviceCount || 0;
+      });
+    }
+    var approx = (selection.byPatterns && selection.byPatterns.onlyUp === true) ||
+                 (selection.byTypes && selection.byTypes.onlyUp !== false);
+    return { matched: matched, approx: !!approx };
+  }
+
+  // Render the instant cache-based preview + an ifName-level diff vs the last
+  // client preview. Pin count for a name = its fleet deviceCount.
+  function renderClientPreview(client) {
+    var matched = client.matched;
+    var names = Object.keys(matched);
+    var interfaceCount = 0;
+    names.forEach(function (n) { interfaceCount += matched[n] || 0; });
+    var warn = interfaceCount > AUTO_MONITOR_INTERFACE_WARN_THRESHOLD;
+
+    var diffHtml = "";
+    if (lastClientMatched) {
+      var addedPins = 0, removedPins = 0, addedNames = [], removedNames = [];
+      names.forEach(function (n) {
+        if (!(n in lastClientMatched)) { addedPins += matched[n] || 0; if (addedNames.length < 3) addedNames.push(n); }
+      });
+      Object.keys(lastClientMatched).forEach(function (n) {
+        if (!(n in matched)) { removedPins += lastClientMatched[n] || 0; if (removedNames.length < 3) removedNames.push(n); }
+      });
+      if (addedPins > 0 || removedPins > 0) {
+        var parts = [];
+        if (addedPins > 0) parts.push('<span style="color:var(--color-success);font-weight:600">+' + addedPins + ' added</span>');
+        if (removedPins > 0) parts.push('<span style="color:var(--color-warning);font-weight:600">−' + removedPins + ' removed</span>');
+        var sampleParts = addedNames.map(function (n) { return '<span style="color:var(--color-success)">+' + escapeHtml(n) + '</span>'; })
+          .concat(removedNames.map(function (n) { return '<span style="color:var(--color-warning)">−' + escapeHtml(n) + '</span>'; }));
+        diffHtml = '<div style="margin-top:0.3rem;font-size:0.82rem">Change since last edit: ' + parts.join(" · ") +
+          (sampleParts.length ? ' <span class="hint" style="margin:0 0 0 6px;font-size:0.78rem">(' + sampleParts.join(" · ") + ')</span>' : '') + '</div>';
+      }
+    }
+    lastClientMatched = matched;
+
+    preview.innerHTML =
+      '<div><strong>' + interfaceCount + '</strong> interface' + (interfaceCount === 1 ? "" : "s") +
+      ' across <strong>' + names.length + '</strong> name' + (names.length === 1 ? "" : "s") +
+      (client.approx ? ' <span class="hint" style="margin:0 0 0 6px;font-size:0.78rem">(upper bound — only-when-up applied at save)</span>' : '') +
+      (warn ? ' <span style="color:var(--color-warning);margin-left:6px">⚠ above warn threshold (' + AUTO_MONITOR_INTERFACE_WARN_THRESHOLD + ')</span>' : '') +
+      '</div>' +
+      diffHtml +
+      '<div class="hint" style="margin-top:0.3rem;font-size:0.78rem">From the last discovery interface set.</div>';
+    preview.style.borderColor = warn ? "var(--color-warning)" : "";
+    preview.dataset.interfaceCount = String(interfaceCount);
+  }
+
   function runPreview() {
     if (!preview) return;
     // Stay quiet until the operator changes a selection (see userHasEdited).
@@ -2201,17 +2304,35 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
     if (!selection) {
       preview.innerHTML = '<em>Enable a block and add at least one value to preview matches.</em>';
       preview.style.borderColor = "";
-      // Keep lastSentSelection in sync so the next toggle's diff is "from
-      // empty" instead of "from a stale earlier selection."
+      // Keep both baselines in sync so the next toggle's diff is "from empty".
       lastSentSelection = null;
+      lastClientMatched = null;
+      preview.dataset.interfaceCount = "0";
       return;
     }
+
+    // Fast path: everything except By LLDP can be previewed instantly from the
+    // cached aggregate already loaded into this card — no server round-trip,
+    // which on a large fleet was a multi-second-to-minutes live query that left
+    // the box blank while it ran.
+    if (!selection.byLldp) {
+      if (!aggregateLoaded) {
+        // Cache (instant) hasn't loaded for this card yet — e.g. a By pattern-
+        // only selection where the names/types panels never triggered it. Load
+        // it; renderNamesList re-fires the preview once rows are in.
+        preview.innerHTML = '<em>Loading interface data…</em>';
+        loadAggregate();
+        return;
+      }
+      var client = computeClientPreview(selection);
+      if (client) { renderClientPreview(client); return; }
+    }
+
+    // By LLDP needs topology the cache doesn't hold → live server preview.
     // Pass the previously-sent selection as the baseline. Backend computes
     // both pin sets in one DB fetch and returns a `diff` block with the
-    // per-(asset, ifName) add/remove counts. On the very first preview-after-
-    // open, baseline = saved selection at modal open (so diff is 0); on every
-    // subsequent toggle, baseline = the prior in-flight selection (so diff
-    // shows what that toggle just changed).
+    // per-(asset, ifName) add/remove counts.
+    preview.innerHTML = '<em>Computing matches…</em>';
     var requestBaseline = lastSentSelection;
     api.integrations.interfaceAggregatePreview(integrationId, { class: klass, selection: selection, baselineSelection: requestBaseline }).then(function (r) {
       // Update the baseline for the NEXT request right after a successful
@@ -2346,10 +2467,6 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
   // LLDP block.
   var lldpBoxes = document.querySelectorAll('input[data-lldp-checkbox="1"][id^="' + idPrefix + 'lldp-"]');
   for (var lb = 0; lb < lldpBoxes.length; lb++) lldpBoxes[lb].addEventListener("change", onUserChange);
-
-  // Reload (By name).
-  var reload = document.getElementById(idPrefix + "reload");
-  if (reload) reload.addEventListener("click", function () { aggregateLoaded = false; loadAggregate(true); });
 
   // Filter (By name) — view-only, debounce-free; never marks an edit.
   var namesFilter = document.getElementById(idPrefix + "names-filter");
@@ -4649,37 +4766,27 @@ async function openEditModal(id) {
         var saved = await commitSave(built);
 
         if (activeApplies.length > 0) {
-          btn.textContent = "Applying...";
-          // Run the per-class applies in parallel. Each call is independent
-          // (different assetType slice of the integration's assets), the
-          // backend's chunked Promise.allSettled handles its own per-class
-          // concurrency, and waiting for them serially used to leave the
-          // modal stuck on "Applying..." for minutes on big fleets — one
-          // class with a few hundred switches could take 30-60s on its own
-          // under the old sequential-update path.
+          // Kick each per-class apply. The endpoint now returns 202 immediately
+          // and resolves the selection against the fleet in the BACKGROUND —
+          // on big fleets the resolve is a multi-second-to-minutes query, so
+          // awaiting it here used to wedge the modal on "Applying..." for
+          // minutes. The apply is additive + idempotent and also re-runs on the
+          // next discovery, so we just confirm it started.
           var applyResults = await Promise.all(activeApplies.map(function (entry) {
             return api.integrations.interfaceAggregateApply(id, entry[0]).then(
-              function (r) { return { ok: true,  klass: entry[0], r: r }; },
+              function () { return { ok: true,  klass: entry[0] }; },
               function (err) { return { ok: false, klass: entry[0], err: err }; },
             );
           }));
-          var totalDevices = 0;
-          var totalIfaces = 0;
           var failures = [];
           for (var c = 0; c < applyResults.length; c++) {
-            var result = applyResults[c];
-            if (result.ok) {
-              totalDevices += result.r.devices || 0;
-              totalIfaces  += result.r.interfacesAdded || 0;
-            } else {
-              failures.push(result.klass + ": " + (result.err.message || "failed"));
-            }
+            if (!applyResults[c].ok) failures.push(applyResults[c].klass + ": " + (applyResults[c].err.message || "failed"));
           }
           closeModal();
           if (failures.length === 0) {
-            showToast("Integration updated · pinned " + totalIfaces + " interface(s) on " + totalDevices + " device(s)", "success");
+            showToast("Integration updated · auto-monitor is applying in the background", "success");
           } else {
-            showToast("Saved, but apply had errors — " + failures.join("; "), "error");
+            showToast("Saved, but apply couldn't start — " + failures.join("; "), "error");
           }
         } else {
           closeModal();

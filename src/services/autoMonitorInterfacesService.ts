@@ -677,6 +677,81 @@ export async function getInterfaceAggregate(
   });
 }
 
+// ─── Precomputed aggregate cache ─────────────────────────────────────────────
+// The "By name" checklist source is recomputed at the tail of every successful
+// discovery run and stashed on Integration.interfaceAggregateCache, so the edit
+// modal loads it instantly instead of running the fleet-wide DISTINCT ON in
+// loadLatestInterfaces on every open. Only the three fields the UI renders
+// (ifName / ifType / deviceCount) are cached — the heavy per-row devices[] list
+// is dropped, keeping the payload a few KB even on a big FortiGate.
+
+/** Which interface classes each integration type carries (drives the cache build). */
+const INTERFACE_CLASSES_BY_TYPE: Record<string, AutoMonitorClass[]> = {
+  fortimanager:    ["fortigate", "fortiswitch", "fortiap"],
+  fortigate:       ["fortigate", "fortiswitch", "fortiap"],
+  entraid:         ["workstation", "server"],
+  activedirectory: ["workstation", "server"],
+  windowsserver:   ["workstation", "server"],
+};
+
+export interface CachedAggregateRow {
+  ifName: string;
+  ifType: string | null;
+  deviceCount: number;
+}
+
+export interface InterfaceAggregateCacheEntry {
+  computedAt: string; // ISO8601
+  rows: CachedAggregateRow[];
+}
+
+/** Map keyed by AutoMonitorClass; the persisted shape of Integration.interfaceAggregateCache. */
+export type InterfaceAggregateCache = Record<string, InterfaceAggregateCacheEntry>;
+
+/**
+ * Recompute the "By name" aggregate for every interface class this integration
+ * carries and persist it to Integration.interfaceAggregateCache. Best-effort:
+ * callers (the discovery success path) must not let a failure here fail the run.
+ */
+export async function computeAndCacheInterfaceAggregate(
+  integrationId: string,
+  integrationType: string,
+  computedAtIso?: string,
+): Promise<void> {
+  const classes = INTERFACE_CLASSES_BY_TYPE[integrationType];
+  if (!classes) return;
+  const computedAt = computedAtIso ?? new Date().toISOString();
+  const cache: InterfaceAggregateCache = {};
+  for (const klass of classes) {
+    const rows = await getInterfaceAggregate(integrationId, klass);
+    cache[klass] = {
+      computedAt,
+      rows: rows.map((r) => ({ ifName: r.ifName, ifType: r.ifType, deviceCount: r.deviceCount })),
+    };
+  }
+  await prisma.integration.update({
+    where: { id: integrationId },
+    data: { interfaceAggregateCache: cache as any },
+  });
+}
+
+/**
+ * Read the precomputed aggregate for one class. Returns null when the cache is
+ * absent or has no entry for this class (e.g. before the integration's first
+ * post-feature discovery) so the route can fall back to a live compute.
+ */
+export async function getCachedInterfaceAggregate(
+  integrationId: string,
+  klass: AutoMonitorClass,
+): Promise<InterfaceAggregateCacheEntry | null> {
+  const integ = await prisma.integration.findUnique({
+    where: { id: integrationId },
+    select: { interfaceAggregateCache: true },
+  });
+  const cache = (integ?.interfaceAggregateCache ?? null) as InterfaceAggregateCache | null;
+  return cache?.[klass] ?? null;
+}
+
 export interface PreviewResult {
   deviceCount: number;
   interfaceCount: number;

@@ -1420,8 +1420,16 @@ router.get("/:id/interface-aggregate", async (req, res, next) => {
     const klass = ClassQuerySchema.parse(req.query.class);
     const integ = await prisma.integration.findUnique({ where: { id: req.params.id } });
     if (!integ) throw new AppError(404, "Integration not found");
+    // Serve the precomputed cache (refreshed at the end of each discovery run).
+    // Fall back to a live compute only when the cache has no entry for this class
+    // yet — the window before the integration's first post-feature discovery.
+    const cached = await autoMonitor.getCachedInterfaceAggregate(req.params.id, klass);
+    if (cached) {
+      res.json({ rows: cached.rows, computedAt: cached.computedAt });
+      return;
+    }
     const rows = await autoMonitor.getInterfaceAggregate(req.params.id, klass);
-    res.json({ rows });
+    res.json({ rows: rows.map((r) => ({ ifName: r.ifName, ifType: r.ifType, deviceCount: r.deviceCount })), computedAt: null });
   } catch (err) {
     next(err);
   }
@@ -1471,19 +1479,41 @@ router.post("/:id/interface-aggregate/apply", async (req, res, next) => {
     // Coerce legacy `{mode, ...}` rows on the fly so apply works even before
     // the one-shot migration job has rewritten this integration's config.
     const selection = autoMonitor.coerceLegacySelection(cfg[blockKey]?.autoMonitorInterfaces ?? null);
-    const result = await autoMonitor.applyAutoMonitorForClass(req.params.id, klass, selection, (req as any).session?.username);
-    if (result.interfacesAdded > 0) {
-      logEvent({
-        action:       "integration.auto_monitor_interfaces.applied",
-        resourceType: "integration",
-        resourceId:   integ.id,
-        resourceName: integ.name,
-        actor:        (req as any).session?.username,
-        message:      `Auto-monitor interfaces applied for "${integ.name}" (${klass}) — ${result.devices} device(s), ${result.interfacesAdded} interface(s) added`,
-        details:      { class: klass, devices: result.devices, interfacesAdded: result.interfacesAdded },
-      });
-    }
-    res.json(result);
+    const actor = (req as any).session?.username;
+    // Run the apply in the BACKGROUND and return 202 immediately. On a large
+    // fleet applyAutoMonitorForClass resolves the selection against every asset's
+    // latest interface samples (a multi-second-to-minutes query at 2000 assets),
+    // and awaiting it here wedged the modal's "Applying…" state for minutes. The
+    // apply is strictly additive + idempotent AND re-runs on every discovery
+    // (Phase 2c), so a fire-and-forget that loses to a process restart self-heals.
+    void autoMonitor
+      .applyAutoMonitorForClass(req.params.id, klass, selection, actor)
+      .then((result) => {
+        if (result.interfacesAdded > 0) {
+          logEvent({
+            action:       "integration.auto_monitor_interfaces.applied",
+            resourceType: "integration",
+            resourceId:   integ.id,
+            resourceName: integ.name,
+            actor,
+            message:      `Auto-monitor interfaces applied for "${integ.name}" (${klass}) — ${result.devices} device(s), ${result.interfacesAdded} interface(s) added`,
+            details:      { class: klass, devices: result.devices, interfacesAdded: result.interfacesAdded },
+          });
+        }
+      })
+      .catch((e: any) =>
+        logEvent({
+          action:       "integration.auto_monitor_interfaces.error",
+          resourceType: "integration",
+          resourceId:   integ.id,
+          resourceName: integ.name,
+          actor,
+          level:        "warning",
+          message:      `Auto-monitor interfaces apply failed for "${integ.name}" (${klass}): ${e?.message || "unknown error"}`,
+          details:      { class: klass },
+        }),
+      );
+    res.status(202).json({ queued: true });
   } catch (err) {
     next(err);
   }
@@ -1511,8 +1541,15 @@ router.get("/:id/storage-aggregate", async (req, res, next) => {
     const klass = StorageClassQuerySchema.parse(req.query.class);
     const integ = await prisma.integration.findUnique({ where: { id: req.params.id } });
     if (!integ) throw new AppError(404, "Integration not found");
+    // Serve the precomputed cache; live-compute fallback only before the first
+    // post-feature discovery run has populated it for this class.
+    const cached = await autoMonitorStorage.getCachedStorageAggregate(req.params.id, klass);
+    if (cached) {
+      res.json({ rows: cached.rows, computedAt: cached.computedAt });
+      return;
+    }
     const rows = await autoMonitorStorage.getStorageAggregate(req.params.id, klass);
-    res.json({ rows });
+    res.json({ rows: rows.map((r) => ({ mountPath: r.mountPath, deviceCount: r.deviceCount })), computedAt: null });
   } catch (err) {
     next(err);
   }
@@ -1547,19 +1584,38 @@ router.post("/:id/storage-aggregate/apply", async (req, res, next) => {
     const cfg = (integ.config ?? {}) as Record<string, any>;
     const blockKey = klass === "workstation" ? "workstationMonitor" : "serverMonitor";
     const selection = (cfg[blockKey]?.autoMonitorStorage ?? null) as autoMonitorStorage.AutoMonitorStorageSelection;
-    const result = await autoMonitorStorage.applyAutoMonitorStorageForClass(req.params.id, klass, selection, (req as any).session?.username);
-    if (result.mountsAdded > 0) {
-      logEvent({
-        action:       "integration.auto_monitor_storage.applied",
-        resourceType: "integration",
-        resourceId:   integ.id,
-        resourceName: integ.name,
-        actor:        (req as any).session?.username,
-        message:      `Auto-monitor storage applied for "${integ.name}" (${klass}) — ${result.devices} device(s), ${result.mountsAdded} mount(s) added`,
-        details:      { class: klass, devices: result.devices, mountsAdded: result.mountsAdded },
-      });
-    }
-    res.json(result);
+    const actor = (req as any).session?.username;
+    // Background apply + 202, same rationale as interface-aggregate/apply:
+    // additive + idempotent + re-runs on every discovery, so don't block the
+    // request on the fleet-wide resolve.
+    void autoMonitorStorage
+      .applyAutoMonitorStorageForClass(req.params.id, klass, selection, actor)
+      .then((result) => {
+        if (result.mountsAdded > 0) {
+          logEvent({
+            action:       "integration.auto_monitor_storage.applied",
+            resourceType: "integration",
+            resourceId:   integ.id,
+            resourceName: integ.name,
+            actor,
+            message:      `Auto-monitor storage applied for "${integ.name}" (${klass}) — ${result.devices} device(s), ${result.mountsAdded} mount(s) added`,
+            details:      { class: klass, devices: result.devices, mountsAdded: result.mountsAdded },
+          });
+        }
+      })
+      .catch((e: any) =>
+        logEvent({
+          action:       "integration.auto_monitor_storage.error",
+          resourceType: "integration",
+          resourceId:   integ.id,
+          resourceName: integ.name,
+          actor,
+          level:        "warning",
+          message:      `Auto-monitor storage apply failed for "${integ.name}" (${klass}): ${e?.message || "unknown error"}`,
+          details:      { class: klass },
+        }),
+      );
+    res.status(202).json({ queued: true });
   } catch (err) {
     next(err);
   }
@@ -2113,6 +2169,16 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
       // the rolling average used to compute the "slow" threshold.
       recordSample(integrationId, Date.now() - runStartedAt).catch(() => {});
       recordDiscovery(integrationType, (Date.now() - runStartedAt) / 1000, "success");
+      // Refresh the precomputed "By name" checklist sources for the Auto-Monitor
+      // cards so the edit modal loads them instantly (no fleet-wide DISTINCT ON on
+      // open). Best-effort — a cache failure must never fail an otherwise-good run.
+      const aggregateComputedAt = new Date().toISOString();
+      await Promise.all([
+        autoMonitor.computeAndCacheInterfaceAggregate(integrationId, integrationType, aggregateComputedAt)
+          .catch((e: any) => logEvent({ action: "integration.aggregate_cache.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "warning", message: `Interface aggregate cache refresh failed for "${integrationName}": ${e?.message || "unknown error"}` })),
+        autoMonitorStorage.computeAndCacheStorageAggregate(integrationId, integrationType, aggregateComputedAt)
+          .catch((e: any) => logEvent({ action: "integration.aggregate_cache.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "warning", message: `Storage aggregate cache refresh failed for "${integrationName}": ${e?.message || "unknown error"}` })),
+      ]);
       await finishRun(integrationId, "completed");
     }
   } catch (err: any) {

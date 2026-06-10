@@ -206,6 +206,15 @@ model Integration {
   lastTestAt      DateTime?
   lastTestOk      Boolean?
   lastDiscoveryAt DateTime? // Set at the start of each discovery run; used by the scheduler to gate auto-discovery across restarts
+  // Precomputed "By name" checklist sources for the Auto-Monitor cards, refreshed
+  // at the end of every successful discovery run (computeAndCacheInterfaceAggregate /
+  // computeAndCacheStorageAggregate). Shape: { "<class>": { computedAt, rows: [...] } }
+  // keyed by AutoMonitorClass / StorageClass. Lets the edit-modal pickers load
+  // instantly instead of running a fleet-wide DISTINCT ON over the sample tables
+  // on every modal open. Null until the integration's first post-feature discovery
+  // (the GET routes fall back to a live compute in that window).
+  interfaceAggregateCache Json? // { [class]: { computedAt: ISO, rows: [{ifName, ifType, deviceCount}] } }
+  storageAggregateCache   Json? // { [class]: { computedAt: ISO, rows: [{mountPath, deviceCount}] } }
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
