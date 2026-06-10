@@ -4210,17 +4210,30 @@ function _renderSystemSummary(container, tel, si) {
 // stream has its own polling-method override, so a FortiAP on SNMP for
 // temperature must not trip the "not available via REST API" banner just
 // because its interfaces stream is still REST.
+// Resolves the polling method actually in effect for a stream, preferring the
+// cached /effective-monitor-settings walk (which covers the class + integration
+// tiers) over the per-asset override, then the source default. Mirrors the
+// precedence in _resolveStaleStreamSec so the "not available via REST API"
+// empty-state banners agree with the resolved-polling chip. Re-deriving from
+// the asset-level *Polling field alone ignored an integration-tier SNMP
+// override and produced a bogus "switch to SNMP" nag on FortiGates that were
+// already polling temperature via SNMP. Returns null when no method resolves.
+function _resolvedStreamPolling(asset, stream) {
+  if (!asset) return null;
+  var field = _streamFieldPrefix(stream || "interfaces") + "Polling";
+  var eff = asset.id ? _effectiveResolvedByAssetId.get(asset.id) : null;
+  if (eff && eff[field]) return eff[field];
+  if (asset[field]) return asset[field];
+  var sk = (asset.discoveredByIntegration && asset.discoveredByIntegration.type) || "manual";
+  if (!_POLLING_COMPAT[sk]) sk = "manual";
+  return _polarisSourceDefaultPolling(sk, stream || "interfaces");
+}
+
 function _isRestApiManagedNetworkDevice(asset, stream) {
   if (!asset) return false;
   var t = asset.assetType;
   if (t !== "switch" && t !== "access_point") return false;
-  var field = _streamFieldPrefix(stream || "interfaces") + "Polling";
-  var poll = asset[field];
-  if (!poll) {
-    var sk = (asset.discoveredByIntegration && asset.discoveredByIntegration.type) || "manual";
-    poll = (sk === "fortimanager" || sk === "fortigate") ? "rest_api" : null;
-  }
-  return poll === "rest_api";
+  return _resolvedStreamPolling(asset, stream || "interfaces") === "rest_api";
 }
 
 // Resolves the polling interval (in seconds) used to gate the stale-data
@@ -4306,6 +4319,19 @@ function _updateStaleBannersFromEffective(assetId, asset) {
     var resolvedSec = _resolveStaleStreamSec(assetId, asset, streamKey);
     slot.innerHTML = _staleBannerInnerHTML(lastAt, resolvedSec);
   });
+  // The Temperatures section's "not available via REST API" empty state is
+  // decided from the resolved temperature polling method, which the sync
+  // render couldn't see before this effective-settings walk landed. Re-render
+  // it now so a FortiGate whose temperature resolves to SNMP at the
+  // integration tier drops the misleading "switch to SNMP" hint (mirrors the
+  // chip refresh in _updateStreamSourceBadgesFromEffective). Only meaningful
+  // in the no-readings branch; when sensors exist the table renders regardless.
+  // _assetSystemSiCache is nulled on asset switch and only repopulated for the
+  // current asset, so the asset.id === assetId guard keeps si aligned.
+  var tempsEl = document.getElementById("asset-system-temps");
+  if (tempsEl && asset && asset.id === assetId && _assetSystemSiCache) {
+    _renderTemperatures(tempsEl, _assetSystemSiCache, asset);
+  }
 }
 
 // Centred "not available" empty-state for a section whose polling method
@@ -4974,17 +5000,16 @@ function _renderTemperatures(container, si, asset) {
       var tempPolling = _assetMonitorStreamSource(asset, "temperature").polling || "REST API";
       container.innerHTML = _notAvailableViaPollingHTML("Temperature", tempPolling);
     } else {
-      var isFortinetRestFirewall = asset && asset.assetType === "firewall" && (function () {
-        // Check the temperature stream specifically — the dispatcher uses
-        // temperaturePolling, not cpuMemoryPolling, so a firewall whose
-        // CPU/memory is on REST but whose temperature has already been
-        // flipped to SNMP shouldn't show the "switch to SNMP" nag.
-        var tp = asset.temperaturePolling;
-        if (tp === "rest_api") return true;
-        if (tp) return false;
-        var sk = (asset.discoveredByIntegration && asset.discoveredByIntegration.type) || "manual";
-        return sk === "fortimanager" || sk === "fortigate";
-      }());
+      // Check the temperature stream specifically — the dispatcher uses
+      // temperaturePolling, not cpuMemoryPolling, so a firewall whose
+      // CPU/memory is on REST but whose temperature has already been flipped
+      // to SNMP shouldn't show the "switch to SNMP" nag. _resolvedStreamPolling
+      // honors the integration-tier override (via the effective-settings cache)
+      // as well as a per-asset override, so a FortiGate polling temperature via
+      // SNMP at the integration tier drops the banner once that fetch lands —
+      // see the re-render in _updateStaleBannersFromEffective.
+      var isFortinetRestFirewall = asset && asset.assetType === "firewall" &&
+        _resolvedStreamPolling(asset, "temperature") === "rest_api";
       if (isFortinetRestFirewall) {
         var fgTempPolling = _assetMonitorStreamSource(asset, "temperature").polling || "REST API";
         var fgTempDesc = "Lower-end FortiGate models (60F/61F/91G class) do not support the sensor-info endpoint via REST API. " +
