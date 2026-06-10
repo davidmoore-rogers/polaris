@@ -1357,9 +1357,68 @@ function showToast(message, type) {
 var _modalDrag = { active: false, startX: 0, startY: 0, offsetX: 0, offsetY: 0 };
 
 // Escalating "use the X" hint: each off-modal click flashes the close button
-// brighter than the last. Resets after 2s of no off-clicks (or on close).
+// brighter than the last, with a radial bloom that grows in quarter-size
+// increments. Resets after 1s of no off-clicks (or on close). Shared by every
+// modal overlay (IPAM modals via openModal + the Device Map topology modal in
+// map.js), so it's a global helper keyed off whichever close button is passed.
 var _modalFlashLevel = 0;
 var _modalFlashResetTimer = null;
+
+// Flash the given modal close button + bloom one escalation step. closeBtn is
+// the ".modal-close" / equivalent X element of the overlay the user clicked off.
+function flashModalCloseBtn(closeBtn) {
+  if (!closeBtn) return;
+  // Each subsequent off-click ramps brighter (capped); decays 1s after the
+  // last click, so a pause resets the escalation back to the start.
+  var lvl = (_modalFlashLevel = Math.min(_modalFlashLevel + 1, 8));
+  if (_modalFlashResetTimer) clearTimeout(_modalFlashResetTimer);
+  _modalFlashResetTimer = setTimeout(function () { _modalFlashLevel = 0; }, 1000);
+  closeBtn.style.background = "rgba(255,77,109," + Math.min(0.25 + lvl * 0.09, 0.95) + ")";
+  closeBtn.style.filter = "brightness(" + (1 + lvl * 0.18) + ")";
+  closeBtn.style.textShadow = "0 0 " + (lvl * 3) + "px rgba(255,77,109,0.9)";
+  closeBtn.classList.add("flash");
+  // Singleton bloom on <body>: position:fixed + high z-index so it paints over
+  // any modal and spills past the corner unclipped, regardless of which overlay
+  // owns the X. Styles are inline (not a CSS class) so a stale cached
+  // stylesheet can't render it invisible.
+  var bloom = document.getElementById("modal-close-bloom");
+  if (!bloom) {
+    bloom = document.createElement("div");
+    bloom.id = "modal-close-bloom";
+    bloom.style.cssText =
+      "position:fixed;border-radius:50%;pointer-events:none;opacity:0;z-index:100000;" +
+      "transform:translate(-50%,-50%);mix-blend-mode:screen;" +
+      "background:radial-gradient(circle,rgba(255,77,109,0.85) 0%,rgba(255,77,109,0.6) 32%,rgba(255,77,109,0) 70%);" +
+      "transition:opacity 0.45s ease-out,width 0.08s,height 0.08s;";
+  }
+  // A fullscreened element renders in the browser's top layer, which paints
+  // over body-level fixed elements. Re-home the bloom into whatever is
+  // fullscreen (else body) so it still shows over the topology modal there;
+  // a position:fixed child of the top-layer element renders in the top layer.
+  var bloomHost = document.fullscreenElement || document.body;
+  if (bloom.parentNode !== bloomHost) bloomHost.appendChild(bloom);
+  // No bloom on the first off-click; from the 2nd on it starts at 1/4 the full
+  // size and grows by quarter increments to full by the 5th.
+  var steps = Math.min(lvl - 1, 4); // 0..4
+  if (steps <= 0) {
+    bloom.style.opacity = "0";
+  } else {
+    var r = closeBtn.getBoundingClientRect();
+    var size = 280 * steps / 4; // 70px → 280px in quarter steps
+    bloom.style.left = (r.left + r.width / 2) + "px";
+    bloom.style.top = (r.top + r.height / 2) + "px";
+    bloom.style.width = size + "px";
+    bloom.style.height = size + "px";
+    bloom.style.opacity = String(0.35 + steps * 0.15); // 0.5 → 0.95
+  }
+  setTimeout(function () {
+    closeBtn.classList.remove("flash");
+    closeBtn.style.background = "";
+    closeBtn.style.filter = "";
+    closeBtn.style.textShadow = "";
+    bloom.style.opacity = "0";
+  }, 600);
+}
 
 function openModal(title, bodyHTML, footerHTML, options) {
   let overlay = document.getElementById("modal-overlay");
@@ -1368,54 +1427,10 @@ function openModal(title, bodyHTML, footerHTML, options) {
     overlay.id = "modal-overlay";
     overlay.className = "modal-overlay";
     overlay.innerHTML = '<div class="modal"><div class="modal-header"><h3></h3><button class="btn-icon modal-close">&times;</button></div><div class="modal-body"></div><div class="modal-footer"></div></div>';
-    // Bloom lives on the overlay (NOT inside .modal, which clips its overflow),
-    // appended last so it paints on top and the glow spills past the corner.
-    // All visual styles are set inline here — not via a CSS class — so a stale
-    // cached stylesheet can't render it invisible.
-    var bloomEl = document.createElement("div");
-    bloomEl.className = "modal-close-bloom";
-    bloomEl.style.cssText =
-      "position:fixed;border-radius:50%;pointer-events:none;opacity:0;" +
-      "transform:translate(-50%,-50%);mix-blend-mode:screen;" +
-      "background:radial-gradient(circle,rgba(255,77,109,0.85) 0%,rgba(255,77,109,0.6) 32%,rgba(255,77,109,0) 70%);" +
-      "transition:opacity 0.45s ease-out,width 0.08s,height 0.08s;";
-    overlay.appendChild(bloomEl);
     document.body.appendChild(overlay);
     overlay.addEventListener("click", function (e) {
       if (e.target === overlay) {
-        var closeBtn = overlay.querySelector(".modal-close");
-        if (closeBtn) {
-          // Each subsequent off-click ramps the flash brighter (capped), so the
-          // hint to use the X gets more insistent the more the user clicks off.
-          var lvl = (_modalFlashLevel = Math.min(_modalFlashLevel + 1, 8));
-          // Ramp decays: 2s after the last off-click the brightness resets.
-          if (_modalFlashResetTimer) clearTimeout(_modalFlashResetTimer);
-          _modalFlashResetTimer = setTimeout(function () { _modalFlashLevel = 0; }, 2000);
-          closeBtn.style.background = "rgba(255,77,109," + Math.min(0.25 + lvl * 0.09, 0.95) + ")";
-          closeBtn.style.filter = "brightness(" + (1 + lvl * 0.18) + ")";
-          closeBtn.style.textShadow = "0 0 " + (lvl * 3) + "px rgba(255,77,109,0.9)";
-          closeBtn.classList.add("flash");
-          // Position the fixed bloom over the X — getBoundingClientRect returns
-          // viewport coords, which map straight into position:fixed.
-          var bloom = overlay.querySelector(".modal-close-bloom");
-          if (bloom) {
-            var r = closeBtn.getBoundingClientRect();
-            // Start large enough to clear the corner on the first click, then grow.
-            var size = 110 + lvl * 34;
-            bloom.style.left = (r.left + r.width / 2) + "px";
-            bloom.style.top = (r.top + r.height / 2) + "px";
-            bloom.style.width = size + "px";
-            bloom.style.height = size + "px";
-            bloom.style.opacity = String(Math.min(0.35 + lvl * 0.08, 0.95));
-          }
-          setTimeout(function () {
-            closeBtn.classList.remove("flash");
-            closeBtn.style.background = "";
-            closeBtn.style.filter = "";
-            closeBtn.style.textShadow = "";
-            if (bloom) bloom.style.opacity = "0";
-          }, 600);
-        }
+        flashModalCloseBtn(overlay.querySelector(".modal-close"));
       }
     });
     overlay.querySelector(".modal-close").addEventListener("click", closeModal);
