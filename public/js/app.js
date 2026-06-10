@@ -1263,9 +1263,9 @@ function renderIntegrationFailedStatus() {
 // Reads the closure-scoped _updateStatus populated by pollUpdateProgress.
 // Only visible while state is "applying" or "restarting" — the "available"
 // badge near the version (checkSidebarUpdate) handles the not-yet-started
-// case, and complete/failed are surfaced on the Maintenance card. Lists each
-// update step with a status glyph mirroring server-settings.js renderSteps.
-// The whole panel clicks through to the Maintenance tab for detailed output.
+// case, and complete/failed are surfaced on the Maintenance card. Shows just
+// the step the pipeline is currently on (not the full checklist — that lives
+// on the Maintenance card). The whole panel clicks through there for detail.
 
 function renderUpdateStatus() {
   var container = document.getElementById("update-status");
@@ -1279,15 +1279,14 @@ function renderUpdateStatus() {
     return;
   }
 
-  function stepGlyph(s) {
-    if (s === "done") return '<span class="update-step-icon update-step-done">&#10003;</span>';
-    if (s === "running") return '<span class="update-step-icon update-step-running">&#9679;</span>';
-    if (s === "failed") return '<span class="update-step-icon update-step-failed">&#10007;</span>';
-    return '<span class="update-step-icon update-step-pending">&#9675;</span>';
-  }
-
   var label = status.state === "restarting" ? "Update — restarting" : "Applying update";
   var steps = Array.isArray(status.steps) ? status.steps : [];
+  var current = steps.find(function (st) { return st.status === "running"; });
+  // Between steps (or in the restart phase) nothing is mid-flight — fall back
+  // to the coarse status.step string, then to a sensible default.
+  var currentName = (current && current.name) || status.step ||
+    (status.state === "restarting" ? "Restarting service" : "");
+  var currentMsg = current && current.message;
 
   container.style.display = "block";
   container.innerHTML =
@@ -1295,19 +1294,12 @@ function renderUpdateStatus() {
       '<span class="query-spinner"></span>' +
       '<span class="query-status-label">' + escapeHtml(label) + '</span>' +
     '</div>' +
-    (steps.length
-      ? '<ul class="query-status-list">' +
-          steps.map(function (st) {
-            var nameCls = st.status === "running" ? "query-status-name update-step-active" : "query-status-name";
-            return '<li><div style="min-width:0;flex:1">' +
-              '<span class="' + nameCls + '">' + stepGlyph(st.status) + ' ' + escapeHtml(st.name || "") + '</span>' +
-              (st.message ? '<span class="query-status-progress">' + escapeHtml(st.message) + '</span>' : '') +
-              '</div></li>';
-          }).join("") +
-        '</ul>'
-      : (status.step
-          ? '<ul class="query-status-list"><li><span class="query-status-name">' + escapeHtml(status.step) + '</span></li></ul>'
-          : ""));
+    (currentName
+      ? '<ul class="query-status-list"><li><div style="min-width:0;flex:1">' +
+          '<span class="query-status-name">' + escapeHtml(currentName) + '</span>' +
+          (currentMsg ? '<span class="query-status-progress">' + escapeHtml(currentMsg) + '</span>' : '') +
+          '</div></li></ul>'
+      : "");
 
   container.style.cursor = "pointer";
   container.onclick = function () {
