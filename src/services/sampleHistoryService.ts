@@ -298,61 +298,71 @@ export async function readTelemetryHistory(
   };
 }
 
-// ─── Temperature history (per sensor) ────────────────────────────────────────
+// ─── Hardware-sensor history (per sensor; mixed classes/units) ───────────────
+//
+// One series per sensor. `value` is the reading in `unit` (°C, RPM, V, …);
+// `sensorClass` lets the UI group/label. `alarmStatus` rides the detail tier
+// only (not aggregatable). The rollup tiers carry avg/min/max of `value`.
 
-export interface TemperatureHistoryRow {
-  timestamp:   Date;
-  sensorName:  string;
-  celsius:     number | null;
+export interface HardwareSensorHistoryRow {
+  timestamp:    Date;
+  sensorName:   string;
+  sensorClass:  string;
+  unit:         string | null;
+  value:        number | null;
+  alarmStatus?: string | null;
   sampleCount?: number;
-  minCelsius?:  number | null;
-  maxCelsius?:  number | null;
+  minValue?:    number | null;
+  maxValue?:    number | null;
 }
 
-export interface TemperatureHistoryResult {
-  samples: TemperatureHistoryRow[];
+export interface HardwareSensorHistoryResult {
+  samples: HardwareSensorHistoryRow[];
   stats: {
     total: number;
-    avgCelsius: number | null;
-    minCelsius: number | null;
-    maxCelsius: number | null;
+    avgValue: number | null;
+    minValue: number | null;
+    maxValue: number | null;
   };
 }
 
-export async function readTemperatureHistory(
+export async function readHardwareSensorHistory(
   assetId: string,
   since: Date,
   until: Date,
   tier: SampleTier,
   sensorName: string | null,
   fetchSince?: Date,
-): Promise<TemperatureHistoryResult> {
+): Promise<HardwareSensorHistoryResult> {
   const queryFrom = fetchSince ?? since;
   const sinceMs = since.getTime();
   if (tier === "detail") {
-    const samples = await prisma.assetTemperatureSample.findMany({
+    const samples = await prisma.assetHardwareSensorSample.findMany({
       where: { assetId, timestamp: { gte: queryFrom, lte: until }, ...(sensorName ? { sensorName } : {}) },
       orderBy: { timestamp: "asc" },
     });
-    const rows: TemperatureHistoryRow[] = samples.map((s) => ({
-      timestamp:  s.timestamp,
-      sensorName: s.sensorName,
-      celsius:    s.celsius,
+    const rows: HardwareSensorHistoryRow[] = samples.map((s) => ({
+      timestamp:   s.timestamp,
+      sensorName:  s.sensorName,
+      sensorClass: s.sensorClass,
+      unit:        s.unit,
+      value:       s.value,
+      alarmStatus: s.alarmStatus,
     }));
     const visible = rows.filter((r) => r.timestamp.getTime() >= sinceMs);
-    const cs = visible.map((r) => r.celsius).filter((x): x is number => typeof x === "number");
+    const vs = visible.map((r) => r.value).filter((x): x is number => typeof x === "number");
     return {
       samples: rows,
       stats: {
-        total:      visible.length,
-        avgCelsius: cs.length ? cs.reduce((a, b) => a + b, 0) / cs.length : null,
-        minCelsius: cs.length ? Math.min(...cs) : null,
-        maxCelsius: cs.length ? Math.max(...cs) : null,
+        total:    visible.length,
+        avgValue: vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null,
+        minValue: vs.length ? Math.min(...vs) : null,
+        maxValue: vs.length ? Math.max(...vs) : null,
       },
     };
   }
 
-  const table = tier === "hourly" ? "asset_temperature_samples_hourly" : "asset_temperature_samples_daily";
+  const table = tier === "hourly" ? "asset_hardware_sensor_samples_hourly" : "asset_hardware_sensor_samples_daily";
   const params: unknown[] = [assetId, queryFrom, until];
   let where = `"assetId" = $1 AND "bucketStart" >= $2 AND "bucketStart" <= $3`;
   if (sensorName) {
@@ -362,12 +372,14 @@ export async function readTemperatureHistory(
   const rows = await prisma.$queryRawUnsafe<Array<{
     bucketStart: Date;
     sensorName: string;
+    sensorClass: string;
+    unit: string | null;
     sampleCount: number;
-    avgCelsius: number | null;
-    minCelsius: number | null;
-    maxCelsius: number | null;
+    avgValue: number | null;
+    minValue: number | null;
+    maxValue: number | null;
   }>>(
-    `SELECT "bucketStart", "sensorName", "sampleCount", "avgCelsius", "minCelsius", "maxCelsius"
+    `SELECT "bucketStart", "sensorName", "sensorClass", "unit", "sampleCount", "avgValue", "minValue", "maxValue"
      FROM "${table}"
      WHERE ${where}
      ORDER BY "bucketStart" ASC`,
@@ -376,30 +388,32 @@ export async function readTemperatureHistory(
 
   let total = 0;
   let weightedSum = 0, weightedCount = 0;
-  let cmin: number | null = null, cmax: number | null = null;
-  const out: TemperatureHistoryRow[] = rows.map((r) => {
+  let vmin: number | null = null, vmax: number | null = null;
+  const out: HardwareSensorHistoryRow[] = rows.map((r) => {
     if (r.bucketStart.getTime() >= sinceMs) {
       total += r.sampleCount;
-      if (r.avgCelsius != null) { weightedSum += r.avgCelsius * r.sampleCount; weightedCount += r.sampleCount; }
-      if (r.minCelsius != null) cmin = cmin == null ? r.minCelsius : Math.min(cmin, r.minCelsius);
-      if (r.maxCelsius != null) cmax = cmax == null ? r.maxCelsius : Math.max(cmax, r.maxCelsius);
+      if (r.avgValue != null) { weightedSum += r.avgValue * r.sampleCount; weightedCount += r.sampleCount; }
+      if (r.minValue != null) vmin = vmin == null ? r.minValue : Math.min(vmin, r.minValue);
+      if (r.maxValue != null) vmax = vmax == null ? r.maxValue : Math.max(vmax, r.maxValue);
     }
     return {
       timestamp:   r.bucketStart,
       sensorName:  r.sensorName,
-      celsius:     r.avgCelsius,
+      sensorClass: r.sensorClass,
+      unit:        r.unit,
+      value:       r.avgValue,
       sampleCount: r.sampleCount,
-      minCelsius:  r.minCelsius,
-      maxCelsius:  r.maxCelsius,
+      minValue:    r.minValue,
+      maxValue:    r.maxValue,
     };
   });
   return {
     samples: out,
     stats: {
       total,
-      avgCelsius: weightedCount ? weightedSum / weightedCount : null,
-      minCelsius: cmin,
-      maxCelsius: cmax,
+      avgValue: weightedCount ? weightedSum / weightedCount : null,
+      minValue: vmin,
+      maxValue: vmax,
     },
   };
 }

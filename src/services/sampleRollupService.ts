@@ -45,7 +45,7 @@ export type RollupTier = "hourly" | "daily";
 export type SourceTable =
   | "monitor"
   | "telemetry"
-  | "temperature"
+  | "hardware"
   | "interface"
   | "storage"
   | "ipsec"
@@ -65,7 +65,7 @@ interface RollupDef {
 const DEFS: RollupDef[] = [
   { source: "monitor",     detailTable: "asset_monitor_samples",       hourlyTable: "asset_monitor_samples_hourly",       dailyTable: "asset_monitor_samples_daily"       },
   { source: "telemetry",   detailTable: "asset_telemetry_samples",     hourlyTable: "asset_telemetry_samples_hourly",     dailyTable: "asset_telemetry_samples_daily"     },
-  { source: "temperature", detailTable: "asset_temperature_samples",   hourlyTable: "asset_temperature_samples_hourly",   dailyTable: "asset_temperature_samples_daily"   },
+  { source: "hardware",    detailTable: "asset_hardware_sensor_samples", hourlyTable: "asset_hardware_sensor_samples_hourly", dailyTable: "asset_hardware_sensor_samples_daily" },
   { source: "interface",   detailTable: "asset_interface_samples",     hourlyTable: "asset_interface_samples_hourly",     dailyTable: "asset_interface_samples_daily"     },
   { source: "storage",     detailTable: "asset_storage_samples",       hourlyTable: "asset_storage_samples_hourly",       dailyTable: "asset_storage_samples_daily"       },
   { source: "ipsec",       detailTable: "asset_ipsec_tunnel_samples",  hourlyTable: "asset_ipsec_tunnel_samples_hourly",  dailyTable: "asset_ipsec_tunnel_samples_daily"  },
@@ -140,7 +140,7 @@ function buildSql(def: RollupDef, tier: RollupTier): string {
   switch (def.source) {
     case "monitor":      return tier === "hourly" ? sqlMonitorHourly()      : sqlMonitorDaily();
     case "telemetry":    return tier === "hourly" ? sqlTelemetryHourly()    : sqlTelemetryDaily();
-    case "temperature":  return tier === "hourly" ? sqlTemperatureHourly()  : sqlTemperatureDaily();
+    case "hardware":     return tier === "hourly" ? sqlHardwareHourly()     : sqlHardwareDaily();
     case "interface":    return tier === "hourly" ? sqlInterfaceHourly()    : sqlInterfaceDaily();
     case "storage":      return tier === "hourly" ? sqlStorageHourly()      : sqlStorageDaily();
     case "ipsec":        return tier === "hourly" ? sqlIpsecHourly()        : sqlIpsecDaily();
@@ -290,55 +290,69 @@ function sqlTelemetryDaily(): string {
   `;
 }
 
-// ─── Temperature (gauge per sensor) ──────────────────────────────────────────
+// ─── Hardware sensors (gauge per sensor; mixed classes/units) ─────────────────
+//
+// One row per (sensor) per bucket. `value` averages within a class+unit (the
+// rollup is keyed on sensorName, which is class/unit-stable within a device).
+// `sensorClass` and `unit` are descriptive — carried up as the bucket's most
+// recent value. `alarmStatus` is not aggregatable, so it lives only on the
+// detail tier.
 
-function sqlTemperatureHourly(): string {
+function sqlHardwareHourly(): string {
   return `
-    INSERT INTO "asset_temperature_samples_hourly" (
-      "id", "assetId", "bucketStart", "sensorName", "sampleCount",
-      "avgCelsius", "minCelsius", "maxCelsius"
+    INSERT INTO "asset_hardware_sensor_samples_hourly" (
+      "id", "assetId", "bucketStart", "sensorName", "sensorClass", "unit",
+      "sampleCount", "avgValue", "minValue", "maxValue"
     )
     SELECT
       gen_random_uuid()::text,
       "assetId",
       date_trunc('hour', "timestamp") AS bucket_start,
       "sensorName",
+      (ARRAY_AGG("sensorClass" ORDER BY "timestamp" DESC))[1],
+      (ARRAY_AGG("unit"        ORDER BY "timestamp" DESC) FILTER (WHERE "unit" IS NOT NULL))[1],
       COUNT(*)::int,
-      AVG("celsius"), MIN("celsius"), MAX("celsius")
-    FROM "asset_temperature_samples"
+      AVG("value"), MIN("value"), MAX("value")
+    FROM "asset_hardware_sensor_samples"
     WHERE "timestamp" >= $1
     GROUP BY "assetId", bucket_start, "sensorName"
     ON CONFLICT ("bucketStart", "assetId", "sensorName") DO UPDATE SET
+      "sensorClass" = EXCLUDED."sensorClass",
+      "unit"        = EXCLUDED."unit",
       "sampleCount" = EXCLUDED."sampleCount",
-      "avgCelsius"  = EXCLUDED."avgCelsius",
-      "minCelsius"  = EXCLUDED."minCelsius",
-      "maxCelsius"  = EXCLUDED."maxCelsius"
+      "avgValue"    = EXCLUDED."avgValue",
+      "minValue"    = EXCLUDED."minValue",
+      "maxValue"    = EXCLUDED."maxValue"
   `;
 }
 
-function sqlTemperatureDaily(): string {
+function sqlHardwareDaily(): string {
   return `
-    INSERT INTO "asset_temperature_samples_daily" (
-      "id", "assetId", "bucketStart", "sensorName", "sampleCount",
-      "avgCelsius", "minCelsius", "maxCelsius"
+    INSERT INTO "asset_hardware_sensor_samples_daily" (
+      "id", "assetId", "bucketStart", "sensorName", "sensorClass", "unit",
+      "sampleCount", "avgValue", "minValue", "maxValue"
     )
     SELECT
       gen_random_uuid()::text,
       "assetId",
       date_trunc('day', "bucketStart") AS bucket_start,
       "sensorName",
+      (ARRAY_AGG("sensorClass" ORDER BY "bucketStart" DESC))[1],
+      (ARRAY_AGG("unit"        ORDER BY "bucketStart" DESC) FILTER (WHERE "unit" IS NOT NULL))[1],
       SUM("sampleCount")::int,
-      SUM("avgCelsius" * "sampleCount") / NULLIF(SUM("sampleCount"), 0),
-      MIN("minCelsius"),
-      MAX("maxCelsius")
-    FROM "asset_temperature_samples_hourly"
+      SUM("avgValue" * "sampleCount") / NULLIF(SUM("sampleCount"), 0),
+      MIN("minValue"),
+      MAX("maxValue")
+    FROM "asset_hardware_sensor_samples_hourly"
     WHERE "bucketStart" >= $1
     GROUP BY "assetId", bucket_start, "sensorName"
     ON CONFLICT ("bucketStart", "assetId", "sensorName") DO UPDATE SET
+      "sensorClass" = EXCLUDED."sensorClass",
+      "unit"        = EXCLUDED."unit",
       "sampleCount" = EXCLUDED."sampleCount",
-      "avgCelsius"  = EXCLUDED."avgCelsius",
-      "minCelsius"  = EXCLUDED."minCelsius",
-      "maxCelsius"  = EXCLUDED."maxCelsius"
+      "avgValue"    = EXCLUDED."avgValue",
+      "minValue"    = EXCLUDED."minValue",
+      "maxValue"    = EXCLUDED."maxValue"
   `;
 }
 

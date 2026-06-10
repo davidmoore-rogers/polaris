@@ -41,7 +41,7 @@ import {
 import {
   enqueueMonitorSample,
   enqueueTelemetrySample,
-  enqueueTemperatureSamples,
+  enqueueHardwareSensorSamples,
   enqueueInterfaceSamples,
   enqueueStorageSamples,
 } from "../../services/sampleWriteBuffer.js";
@@ -276,8 +276,20 @@ agentsRouter.post("/samples", async (req, res, next) => {
           memTotalBytes: s.memTotalBytes != null ? BigInt(Math.round(s.memTotalBytes)) : null,
         });
         if (s.temperatures && s.temperatures.length > 0) {
-          enqueueTemperatureSamples(
-            s.temperatures.map((t) => ({ assetId, timestamp: ts, sensorName: t.sensorName, celsius: t.celsius })),
+          // The Go agent still posts `temperatures` ({sensorName, celsius}).
+          // Map them forward into the unified hardware-sensor stream as the
+          // temperature class so existing agents keep working without a
+          // binary bump; a richer agent-side sensor payload can land later.
+          enqueueHardwareSensorSamples(
+            s.temperatures.map((t) => ({
+              assetId,
+              timestamp:   ts,
+              sensorName:  t.sensorName,
+              sensorClass: "temperature",
+              value:       t.celsius,
+              unit:        "°C",
+              alarmStatus: null,
+            })),
           );
         }
         accepted++;

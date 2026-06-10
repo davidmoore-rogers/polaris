@@ -372,8 +372,8 @@
       + renderGeneralBody(asset)
       + '</div>'
 
-      // Temperatures section — populated by loadSystemInfo.
-      + sectionHeader("temperatures", "Temperatures", "", st.sections.temperatures)
+      // Hardware Sensors section — populated by loadSystemInfo.
+      + sectionHeader("temperatures", "Hardware Sensors", "", st.sections.temperatures)
       + '<div class="sect-body" data-sect="temperatures"' + (st.sections.temperatures ? '' : ' hidden') + '>'
       + '  <div id="asset-temperatures-host"><div class="loading-screen" style="padding:24px 0;"><div class="spinner"></div></div></div>'
       + '</div>'
@@ -591,7 +591,7 @@
 
     Promise.all([
       api.assets.systemInfo(id).catch(function (e) { return { error: e }; }),
-      api.assets.temperatureHistory(id, { range: "1h" }).catch(function () { return null; }),
+      api.assets.hardwareHistory(id, { range: "1h" }).catch(function () { return null; }),
     ]).then(function (results) {
       if (_openId !== id) return;   // bail if a newer asset replaced us
       var info = results[0] || {};
@@ -599,7 +599,7 @@
 
       if (info.error) {
         var msg = (info.error && info.error.message) ? info.error.message : "error";
-        if (tempsHost)  tempsHost.innerHTML  = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">Couldn’t load temperatures: ' + escapeHtml(msg) + '</div>';
+        if (tempsHost)  tempsHost.innerHTML  = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">Couldn’t load hardware sensors: ' + escapeHtml(msg) + '</div>';
         if (ifacesHost) ifacesHost.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">Couldn’t load interfaces: ' + escapeHtml(msg) + '</div>';
         return;
       }
@@ -621,36 +621,43 @@
   var _assetCache = Object.create(null);
 
   function renderTemperatures(host, info, tempHist) {
-    var temps = (info && info.temperatures) || [];
-    if (temps.length === 0) {
+    var sensors = (info && info.hardwareSensors) || [];
+    if (sensors.length === 0) {
       host.innerHTML = '<div class="muted" style="padding:8px 16px 16px;font-size:13px;">No sensors reported.</div>';
       return;
     }
-    // Aggregate the unfiltered 1h samples by sensorName so we get per-sensor
-    // min/avg/max in one round-trip instead of N. AssetTemperatureSample rows
-    // carry sensorName + celsius directly.
+    function fmtNum(v) {
+      if (typeof v !== "number" || !isFinite(v)) return "—";
+      var a = Math.abs(v);
+      return a >= 100 ? v.toFixed(0) : (a >= 10 ? v.toFixed(1) : v.toFixed(2));
+    }
+    // Aggregate the unfiltered 1h samples by sensorName for per-sensor
+    // min/avg/max in one round-trip. AssetHardwareSensorSample rows carry
+    // sensorName + value directly.
     var byName = Object.create(null);
     var samples = (tempHist && tempHist.samples) || [];
     samples.forEach(function (s) {
-      if (s.celsius == null || !s.sensorName) return;
+      if (s.value == null || !s.sensorName) return;
       var b = byName[s.sensorName] || (byName[s.sensorName] = { sum: 0, n: 0, min: Infinity, max: -Infinity });
-      b.sum += Number(s.celsius);
+      b.sum += Number(s.value);
       b.n   += 1;
-      if (s.celsius < b.min) b.min = Number(s.celsius);
-      if (s.celsius > b.max) b.max = Number(s.celsius);
+      if (s.value < b.min) b.min = Number(s.value);
+      if (s.value > b.max) b.max = Number(s.value);
     });
 
     var html = "";
-    temps.forEach(function (t, i) {
+    sensors.forEach(function (t, i) {
       var b = byName[t.sensorName];
-      var statsLine = "";
+      var unitSuffix = t.unit ? " " + t.unit : "";
+      var statsLine;
       if (b && b.n > 0) {
         var avg = b.sum / b.n;
-        statsLine = "1h · min " + b.min.toFixed(1) + "° · avg " + avg.toFixed(1) + "° · max " + b.max.toFixed(1) + "°";
+        statsLine = "1h · min " + fmtNum(b.min) + " · avg " + fmtNum(avg) + " · max " + fmtNum(b.max) + unitSuffix;
       } else {
         statsLine = "no 1h history";
       }
-      var current = (t.celsius != null) ? Math.round(t.celsius * 10) / 10 + "°C" : "—";
+      if (t.alarmStatus === "alarm") statsLine = "⚠ alarm · " + statsLine;
+      var current = (t.value != null) ? fmtNum(t.value) + unitSuffix : "—";
       html += ''
         + '<div class="list-item two-line" style="padding-left:16px;padding-right:16px;">'
         + '  <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-temp"/></svg></span>'
@@ -660,7 +667,7 @@
         + '  </div>'
         + '  <span class="trailing mono" style="font-weight:600;">' + escapeHtml(current) + '</span>'
         + '</div>'
-        + (i < temps.length - 1 ? '<div class="list-divider"></div>' : '');
+        + (i < sensors.length - 1 ? '<div class="list-divider"></div>' : '');
     });
     host.innerHTML = html;
   }
