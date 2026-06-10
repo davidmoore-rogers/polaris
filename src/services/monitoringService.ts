@@ -92,6 +92,7 @@ import {
 } from "../utils/pollingCompatibility.js";
 import { propagateAfterStatusChange } from "./dependencyTreeService.js";
 import { triggerRetryAfterStatusChange } from "./reservationService.js";
+import { recordIpHistoryEntries } from "./assetIpHistoryService.js";
 
 export interface ProbeResult {
   success: boolean;
@@ -6477,7 +6478,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     // One indexed PK read per scrape on the slow (~10 min) cadence.
     const pinned = await prisma.asset.findUnique({
       where: { id: assetId },
-      select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true },
+      select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true },
     });
     const pinnedIfaces  = new Set(pinned?.monitoredInterfaces ?? []);
     const pinnedStorage = new Set(pinned?.monitoredStorage ?? []);
@@ -6630,6 +6631,18 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
       );
       endAssoc({ rows: monitorAssocEntries.length });
       stopWrite();
+      // Fold the asset's interface IPs into IP History so the timeline captures
+      // every IP the device holds — including public WAN / secondary addresses,
+      // which never become the primary `ipAddress` and so were previously absent
+      // from the history. The primary IP is already recorded by the db.ts Prisma
+      // extension; recordIpHistoryEntries skips it to avoid firstSeen churn on
+      // the shared management address. Fire-and-forget — best-effort, never
+      // blocks or fails the scrape.
+      void recordIpHistoryEntries(
+        assetId,
+        monitorAssocEntries.map((e) => ({ ip: e.ip, source: e.source })),
+        pinned?.ipAddress ?? null,
+      );
     }
     // LLDP neighbors. `undefined` = the collector didn't run / unsupported
     // transport, so leave the existing rows alone. `[]` or a populated array
