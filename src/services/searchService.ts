@@ -349,7 +349,7 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any,
   const sourceQuery = stripSourceKindPrefix(like);
   const likePattern = `%${like}%`;
   const jsonLimit = limit * 4;
-  const [byAsset, sourceHits, macSideHits, ipSideHits, jsonHitIds] = await Promise.all([
+  const [byAsset, sourceHits, macSideHits, ipSideHits, ipHistHits, jsonHitIds] = await Promise.all([
     prisma.asset.findMany({
       where: { ...baseFilter, OR: or },
       take: limit,
@@ -391,6 +391,20 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any,
       take: limit,
       orderBy: { lastSeen: "desc" },
     }),
+    // Historical IPs — the IP-history timeline keeps every IP an asset has
+    // held (primary + associated, incl. public WAN / secondary addresses
+    // folded in by the systemInfo scrape). `Asset.ipAddress` and
+    // AssetAssociatedIp cover only what the asset holds *now*; this branch
+    // makes a since-rotated-off address still resolve to the asset.
+    prisma.assetIpHistory.findMany({
+      where: {
+        ip: { contains: like, mode: "insensitive" as const },
+        asset: baseFilter,
+      },
+      include: { asset: true },
+      take: limit,
+      orderBy: { lastSeen: "desc" },
+    }),
     // JSON-blob substring search across `Asset.associatedUsers` (logged-in
     // users from FortiGate DHCP sightings, shape `[{user, domain?, lastSeen,
     // source?}]`) and `AssetSource.observed` (Entra/AD/Intune raw blobs —
@@ -418,8 +432,9 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any,
       })
     : [];
   // Merge dedup by asset id; the byAsset query wins on hostname-sort order
-  // for ties so existing presentation is preserved. Source/MAC/IP side hits
-  // and JSON-blob hits fill any remaining budget in that order.
+  // for ties so existing presentation is preserved. Source/MAC/current-IP/
+  // historical-IP side hits and JSON-blob hits fill any remaining budget in
+  // that order (current associated IPs rank above since-rotated-off ones).
   const seen = new Set<string>();
   const merged: typeof byAsset = [];
   const tryPush = (a: any) => {
@@ -437,6 +452,10 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any,
     tryPush(m.asset);
   }
   for (const ip of ipSideHits) {
+    if (merged.length >= limit) break;
+    tryPush(ip.asset);
+  }
+  for (const ip of ipHistHits) {
     if (merged.length >= limit) break;
     tryPush(ip.asset);
   }
