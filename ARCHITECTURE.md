@@ -906,7 +906,7 @@ AssetPerfSlaSample              -- SD-WAN Performance SLA health-check snapshot,
   @@index([assetId, timestamp])
   @@index([assetId, healthCheck, link, timestamp])
 
-AssetSdwanRuleSample            -- SD-WAN service-rule selection snapshot, written on the system-info cadence. FortiOS only, gated by Integration.config.pullSdwan — rule definitions from /api/v2/cmdb/system/sdwan `service` (name, mode, criteria, health-checks, destination, candidate members in priority order). One row per (asset, rule); the detail series is the member-selection failover timeline. `selectedMember` is INFERRED best-effort (first candidate up in priority order per the health-check state) when FortiOS doesn't expose the selected route over REST — verify on a real device. Collected by collectSdwanFortinet (pure parser parseSdwanRules; SLA thresholds via parseSdwanSlaThresholds), written via sampleWriteBuffer.enqueueSdwanRuleSamples (cadence "fast"). Read by `GET /assets/:id/sdwan-rules` (latest-snapshot per rule, ordered by FortiOS sequence — drives the rules table) + `GET /assets/:id/sdwan-rule-history?ruleName=` (selection timeline). The rules table uses the canonical applyTableLayout column template.
+AssetSdwanRuleSample            -- SD-WAN service-rule selection snapshot, written on the system-info cadence. FortiOS only, gated by Integration.config.pullSdwan — rule definitions from /api/v2/cmdb/system/sdwan `service` (name, mode, criteria, health-checks, destination, candidate members in priority order). One row per (asset, rule); the detail series is the member-selection failover timeline. `selectedMember` is INFERRED best-effort (first candidate up in priority order per the health-check state) when FortiOS doesn't expose the selected route over REST — verify on a real device. Rules configured for zone-based selection (`priority-zone`) carry no interface members — `parseSdwanRules` records the preferred zones in `priorityZones` and resolves `availableMembers` from those zones' member interfaces (via the interface→zone map from parseSdwanMemberZones, global-member priority order). Collected by collectSdwanFortinet (pure parser parseSdwanRules; SLA thresholds via parseSdwanSlaThresholds), written via sampleWriteBuffer.enqueueSdwanRuleSamples (cadence "fast"). Read by `GET /assets/:id/sdwan-rules` (latest-snapshot per rule, ordered by FortiOS sequence — drives the rules table) + `GET /assets/:id/sdwan-rule-history?ruleName=` (selection timeline). The rules table uses the canonical applyTableLayout column template.
   id               UUID PK
   assetId          UUID FK → Asset (cascade delete)
   timestamp        DateTime    @default(now())
@@ -916,7 +916,8 @@ AssetSdwanRuleSample            -- SD-WAN service-rule selection snapshot, writt
   dst              String[]    -- destination address / ISDB / app names
   status           String      -- "up" | "down" (runtime: has a usable selected member)
   selectedMember   String?     -- inferred active member (see header)
-  availableMembers String[]    -- configured candidates, priority order
+  availableMembers String[]    -- configured candidates, priority order (resolved from priorityZones for zone-based rules)
+  priorityZones    String[]    -- preferred SD-WAN zone(s), priority order (zone-based selection); empty for interface-member rules
   @@index([assetId, timestamp])
   @@index([assetId, ruleName, timestamp])
 
@@ -1474,7 +1475,7 @@ Operator-extensible asset-type registry. The eight historical built-ins (server 
 - `GET    /assets/:id/sdwan-members`  — Per-WAN-member health summary (aggregate up/down, per-health-check latency/jitter/loss, recent up/down status strip, + IP/link/bytes joined from the latest interface sample). Drives the "SD-WAN Members" table above the rules.
 - `GET    /assets/:id/perf-sla-links`  — Distinct (healthCheck, link) pairs + latest SLA thresholds. SD-WAN data-exists gate + selector source for the SD-WAN tab.
 - `GET    /assets/:id/perf-sla-history?healthCheck=...&link=...&range=...`  — Per-member SD-WAN Performance SLA latency/jitter/packet-loss gauges over time (tier-aware).
-- `GET    /assets/:id/sdwan-rules`  — Latest snapshot of SD-WAN service rules (selected member + members/criteria/health-checks/destination/status), ordered by FortiOS rule priority.
+- `GET    /assets/:id/sdwan-rules`  — Latest snapshot of SD-WAN service rules (selected member + members/criteria/health-checks/destination/status + priority zones), ordered by FortiOS rule priority.
 - `GET    /assets/:id/sdwan-rule-history?ruleName=...&range=...`  — Selected-member failover timeline for one SD-WAN rule (tier-aware).
 The assets list and single-GET attach a synthesized `ipContext` field to each row: `{ subnetId, subnetCidr, reservation: { id, createdBy, sourceType } | null } | null` (null when the asset has no IP, or no non-deprecated subnet contains the IP). The Assets page reads it to render a **View Lease** button on rows whose IP lives in a known subnet — clicking it navigates to `/subnets.html#ip=<subnetId>@<ipAddress>`, where the network slide-over opens scrolled to that IP's row. To reserve or release IPs, operators use the network slide-over directly (no asset-row Reserve/Unreserve buttons).
 

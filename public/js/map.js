@@ -470,8 +470,8 @@
     }
     overlay.addEventListener("click", function (e) {
       if (e.target === overlay) {
-        closeBtn.classList.add("flash");
-        setTimeout(function () { closeBtn.classList.remove("flash"); }, 600);
+        // Shared escalating flash + bloom (defined in app.js, loaded first).
+        if (typeof flashModalCloseBtn === "function") flashModalCloseBtn(closeBtn);
       }
     });
     document.addEventListener("keydown", function (e) {

@@ -8600,12 +8600,19 @@ function _sdwanStatusStripHTML(recent) {
 }
 
 // SD-WAN Members table body — canonical applyTableLayout column template.
+// Members are grouped by SD-WAN zone: a full-width zone header row, then that
+// zone's members indented beneath it (dependency-tree style). When no member
+// reports a zone the table renders flat with no headers (unchanged behavior).
 function _sdwanMembersTableHTML(members) {
   function statusDot(up) {
     return '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:' +
       (up ? "#2a9d8f" : "#d32f2f") + '"></span>';
   }
-  var rows = members.map(function (m) {
+  // One member row. `indented` adds a faint tree connector + indent in the
+  // Member cell when the row sits under a zone header. The connector lives in
+  // the cell content (not td padding) so it survives applyTableLayout's
+  // column resize/reorder.
+  function memberRow(m, indented) {
     var hcChips = (m.healthChecks || []).map(function (h) {
       var c = h.state === "up" ? "#2a9d8f" : "#d32f2f";
       var lat = (typeof h.latencyMs === "number") ? (Math.round(h.latencyMs * 100) / 100) + "ms" : "—";
@@ -8623,16 +8630,45 @@ function _sdwanMembersTableHTML(members) {
     var bytes = (m.txBytes != null || m.rxBytes != null)
       ? (m.txBytes != null ? _fmtBytes(m.txBytes) : "—") + ' / ' + (m.rxBytes != null ? _fmtBytes(m.rxBytes) : "—")
       : '<span style="color:var(--color-text-tertiary)">—</span>';
+    var indent = indented
+      ? '<span style="display:inline-block;width:1.25rem;color:var(--color-text-tertiary)">└</span>'
+      : '';
     return '<tr>' +
-        '<td data-col-id="member" data-col-required="true">' + statusDot(m.state === "up") + escapeHtml(m.link) +
-          (m.zone ? ' <span style="color:var(--color-text-tertiary)">(' + escapeHtml(m.zone) + ')</span>' : '') + '</td>' +
+        '<td data-col-id="member" data-col-required="true">' + indent + statusDot(m.state === "up") + escapeHtml(m.link) + '</td>' +
         '<td data-col-id="ip">' + (m.ip ? escapeHtml(m.ip) : '<span style="color:var(--color-text-tertiary)">—</span>') + '</td>' +
         '<td data-col-id="hcstatus">' + _sdwanStatusStripHTML(m.recent) + '</td>' +
         '<td data-col-id="checks">' + hcChips + '</td>' +
         '<td data-col-id="bytes">' + bytes + '</td>' +
         '<td data-col-id="link">' + link + '</td>' +
       '</tr>';
-  }).join("");
+  }
+  // Full-width zone grouping header. No data-col-id cells, so applyTableLayout
+  // (which keys off data-col-id cells) leaves it untouched.
+  function zoneHeader(label) {
+    return '<tr class="sdwan-zone-header"><td colspan="6" style="padding:5px 8px;font-weight:600;' +
+      'background:var(--color-bg-elevated);color:var(--color-text-secondary)">▸ ' + escapeHtml(label) + '</td></tr>';
+  }
+  var rows;
+  if (!members.some(function (m) { return m.zone; })) {
+    // No zones configured — flat table, unchanged.
+    rows = members.map(function (m) { return memberRow(m, false); }).join("");
+  } else {
+    var groups = new Map(); // zone name | null → members[]
+    members.forEach(function (m) {
+      var z = m.zone || null;
+      if (!groups.has(z)) groups.set(z, []);
+      groups.get(z).push(m);
+    });
+    var parts = [];
+    groups.forEach(function (list, z) {
+      if (z === null) return; // null bucket emitted last
+      parts.push(zoneHeader(z) + list.map(function (m) { return memberRow(m, true); }).join(""));
+    });
+    if (groups.has(null)) {
+      parts.push(zoneHeader("No zone") + groups.get(null).map(function (m) { return memberRow(m, true); }).join(""));
+    }
+    rows = parts.join("");
+  }
   return '<div class="table-wrapper"><table id="sdwan-members-table" class="data-table" style="font-size:0.82rem"><thead><tr>' +
       '<th data-col-id="member" data-col-required="true">Member</th>' +
       '<th data-col-id="ip">IP</th>' +
@@ -8668,18 +8704,49 @@ function _assetSdwanTabHTML(a, rules, links, members) {
       if (!items || !items.length) return '<span style="color:var(--color-text-tertiary)">—</span>';
       return items.map(function (m) { return escapeHtml(m); }).join(joinStr);
     }
+    // member interface → SD-WAN zone, from the Members data this tab already
+    // loaded. Lets a zone-preference rule group its candidate members by zone.
+    var memberZoneByName = {};
+    (members || []).forEach(function (mm) { if (mm && mm.link) memberZoneByName[mm.link] = mm.zone || null; });
     var ruleRows = rules.map(function (r) {
-      var members = Array.isArray(r.availableMembers) ? r.availableMembers : [];
-      var pills = members.length
-        ? members.map(function (m) {
-            var sel = m === r.selectedMember;
-            return '<span style="display:inline-block;margin:0 4px 2px 0;padding:1px 7px;border-radius:10px;font-size:0.76rem;' +
-              (sel
-                ? 'background:' + _sdwanMemberColor(m, members) + ';color:#fff;font-weight:600'
-                : 'background:var(--color-bg-elevated);border:1px solid var(--color-border);color:var(--color-text-secondary)') +
-              '">' + escapeHtml(m) + (sel ? ' ✓' : '') + '</span>';
-          }).join("")
-        : '<span style="color:var(--color-text-tertiary)">—</span>';
+      var avail = Array.isArray(r.availableMembers) ? r.availableMembers : [];
+      // One member pill (selected member highlighted). Color basis is the
+      // rule's full candidate list so colors are stable across zone groups.
+      function memberPill(m) {
+        var sel = m === r.selectedMember;
+        return '<span style="display:inline-block;margin:0 4px 2px 0;padding:1px 7px;border-radius:10px;font-size:0.76rem;' +
+          (sel
+            ? 'background:' + _sdwanMemberColor(m, avail) + ';color:#fff;font-weight:600'
+            : 'background:var(--color-bg-elevated);border:1px solid var(--color-border);color:var(--color-text-secondary)') +
+          '">' + escapeHtml(m) + (sel ? ' ✓' : '') + '</span>';
+      }
+      var pills;
+      var zones = Array.isArray(r.priorityZones) ? r.priorityZones : [];
+      if (zones.length) {
+        // Zone-preference rule: one indented group per preferred zone listing
+        // that zone's candidate members, selected one highlighted.
+        var used = {};
+        function zoneLabel(z) {
+          return '<span style="font-size:0.72rem;color:var(--color-text-tertiary);margin-right:4px">' + escapeHtml(z) + ':</span>';
+        }
+        var groupsHtml = zones.map(function (z) {
+          var zMembers = avail.filter(function (m) { return memberZoneByName[m] === z; });
+          zMembers.forEach(function (m) { used[m] = true; });
+          var inner = zMembers.length
+            ? zMembers.map(memberPill).join("")
+            : '<span style="color:var(--color-text-tertiary);font-size:0.74rem">no members</span>';
+          return '<div style="margin:0 0 2px 0">' + zoneLabel(z) + inner + '</div>';
+        }).join("");
+        var leftovers = avail.filter(function (m) { return !used[m]; });
+        if (leftovers.length) {
+          groupsHtml += '<div style="margin:0 0 2px 0">' + zoneLabel("other") + leftovers.map(memberPill).join("") + '</div>';
+        }
+        pills = groupsHtml;
+      } else {
+        pills = avail.length
+          ? avail.map(memberPill).join("")
+          : '<span style="color:var(--color-text-tertiary)">—</span>';
+      }
       var enabledCell = r.enabled == null
         ? '<span style="color:var(--color-text-tertiary)">—</span>'
         : (r.enabled
@@ -8698,7 +8765,7 @@ function _assetSdwanTabHTML(a, rules, links, members) {
     html +=
       '<section style="margin-bottom:1.25rem">' +
         '<h4 style="margin:0 0 0.5rem 0">SD-WAN Rules</h4>' +
-        '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Service rules in FortiGate priority order, with the currently selected member highlighted in <strong>Members</strong>. Click a rule to see its member-selection history. The active member is inferred from health-check state when FortiOS does not report the selected route directly.</p>' +
+        '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Service rules in FortiGate priority order, with the currently selected member highlighted in <strong>Members</strong>. Zone-preference rules list each preferred zone\'s members grouped by zone. Click a rule to see its member-selection history. The active member is inferred from health-check state when FortiOS does not report the selected route directly.</p>' +
         '<div class="table-wrapper"><table id="sdwan-rules-table" class="data-table" style="font-size:0.82rem"><thead><tr>' +
           '<th data-col-id="id" style="width:48px">ID</th>' +
           '<th data-col-id="name" data-col-required="true">Name</th>' +
@@ -8730,12 +8797,21 @@ function _assetSdwanTabHTML(a, rules, links, members) {
     if (rules.length) {
       html += '<hr style="margin:1.25rem 0;border:none;border-top:1px solid var(--color-border)">';
     }
+    // Provenance badge (polling method · cadence · tier) + freshness stamp, same
+    // as every other chart in the modal. SD-WAN rides the system-info pass, so
+    // the "interfaces" stream resolves the cadence and lastSystemInfoAt is the
+    // freshness. _wireSdwanTab upgrades the badge to authoritative provenance.
+    var perfSlaBadge = _streamSourceBadgeHTML(a, "interfaces");
+    var perfSlaUpdatedAt = a.lastSystemInfoAt
+      ? ('<span style="font-size:0.72rem;color:var(--color-text-tertiary)" title="' + escapeHtml(new Date(a.lastSystemInfoAt).toLocaleString()) + '">updated ' + timeAgo(a.lastSystemInfoAt) + '</span>')
+      : '';
     html +=
       '<section>' +
         '<div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.5rem">' +
           '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +
             '<h4 style="margin:0">Performance SLA</h4>' +
             '<select id="sdwan-perfsla-select" class="form-input" style="padding:2px 6px;font-size:0.82rem">' + options + '</select>' +
+            perfSlaBadge + (perfSlaBadge && perfSlaUpdatedAt ? ' ' : '') + perfSlaUpdatedAt +
           '</div>' +
           '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
         '</div>' +
@@ -8768,6 +8844,9 @@ function _wireSdwanTab(a, rules, links) {
     linksByHc[l.healthCheck].push(l);
   });
   _sdwanTabState = { assetId: a.id, links: links, linksByHc: linksByHc, hcNames: hcNames, hcName: hcNames[0] || null, rules: rules || [], ruleName: null };
+  // Upgrade the Performance SLA provenance badge from the coarse sync guess to
+  // the authoritative resolved polling method + tier (covers class overrides).
+  _updateStreamSourceBadgesFromEffective(a.id, a);
   // Style chart boxes (same treatment as the IPsec panel).
   document.querySelectorAll(".sdwan-chart-box").forEach(function (el) {
     el.style.background = "var(--color-bg-elevated)";
