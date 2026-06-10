@@ -993,6 +993,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 **Readers** (the CSP itself):
 - `src/app.ts` — Helmet `contentSecurityPolicy.directives.scriptSrc: ["'self'"]` blocks inline; `scriptSrcAttr: ["'unsafe-inline'"]` keeps `onclick="..."` working because most pages still build HTML via `innerHTML`.
+- `connectSrc` is `'self'` plus exactly two whitelisted hosts: `https://fonts.googleapis.com` + `https://fonts.gstatic.com` — fetch()ed by the asset-details Screenshot button (`_screenshotAssetDetails` in `public/js/assets.js`; the vendored html-to-image inlines the page's webfonts into its DOM snapshot so the captured PNG renders in Inter/Roboto Mono). The capture degrades to fallback system fonts when these hosts are unreachable, so removing them breaks fidelity, not function. Don't widen connectSrc beyond specific origins with a documented consumer.
 
 **Invariants:**
 - Never emit `<script>...code...</script>` from any HTTP route handler or static file. Always use `<script src="/js/something.js"></script>`. If the inline script needs runtime values from the server, render those as `data-*` attributes on a placeholder element and read them in the external script.
