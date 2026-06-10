@@ -6682,7 +6682,11 @@ function _streamCredential(asset, stream, resolvedPolling, effectiveResolved) {
 // system-info column since both ride the system-info pass.
 function _streamIntervalAssetField(stream) {
   if (stream === "responseTime") return "monitorIntervalSec";
-  if (stream === "telemetry")    return "cpuMemoryIntervalSec";
+  // Hardware sensors (internal key "temperature") ride the telemetry cadence —
+  // they're collected alongside CPU/memory in runTelemetryFor — so the badge
+  // shows the telemetry interval as the true poll rate. (If an independent
+  // hardware-sensor cadence ever lands, switch this to temperatureIntervalSec.)
+  if (stream === "telemetry" || stream === "temperature") return "cpuMemoryIntervalSec";
   if (stream === "interfaces" || stream === "lldp") return "systemInfoIntervalSec";
   return null;
 }
@@ -6692,7 +6696,8 @@ function _streamIntervalAssetField(stream) {
 // cadence — same rationale as the per-asset mapping above.
 function _streamIntervalEffectiveField(stream) {
   if (stream === "responseTime") return "intervalSeconds";
-  if (stream === "telemetry")    return "cpuMemoryIntervalSeconds";
+  // Hardware sensors ride the telemetry cadence (see _streamIntervalAssetField).
+  if (stream === "telemetry" || stream === "temperature") return "cpuMemoryIntervalSeconds";
   if (stream === "interfaces" || stream === "lldp") return "systemInfoIntervalSeconds";
   return null;
 }
@@ -9986,18 +9991,18 @@ function _activeAssetTabLabel() {
   return btn ? (btn.innerText || btn.textContent || '').trim() : '';
 }
 
-// Walk the active tab panel and extract structured content blocks. Five
-// block shapes power copy and screenshot:
+// Walk the active tab panel and extract structured content blocks for the
+// plaintext Copy button (the Screenshot button rasterizes the live DOM via
+// html-to-image instead — see _screenshotAssetDetails). Five block shapes:
 //   { type: 'kv',      label, value }   from .detail-row pairs (General tab)
 //   { type: 'table',   headers, rows }  from any <table> (System/Quarantine/etc.)
 //   { type: 'heading', text }           from .section-label and <h1>-<h6>
 //   { type: 'chart',   svg }            from any rendered chart <svg>
+//                                       (skipped by the plaintext copy)
 //   { type: 'text',    lines }          free-form panel text (Polaris Agent
 //                                       block, chart stat lines, source badges)
 //                                       with interactive/icon subtrees stripped
 // Buttons, inputs, the gear/screenshot wraps, and hidden nodes are skipped.
-// `text`/`chart` only matter for the screenshot/copy of the System tab; on
-// other tabs (mostly .detail-row + <table>) they rarely fire.
 function _extractTabBlocks(root) {
   if (!root) return [];
   // Interactive + icon scaffolding: never carries content worth capturing, and
@@ -10153,213 +10158,76 @@ function _copyAssetDetails() {
   });
 }
 
-// Charts are SVGs that rasterize asynchronously (Image.onload), so the
-// screenshot is a two-step process: rasterize every chart block first, then
-// hand the (now image-bearing) blocks to the synchronous canvas composer.
+// Pixel-accurate screenshot of the active tab panel. The live DOM subtree is
+// rasterized as-rendered via the vendored html-to-image library: it deep-
+// clones the panel, inlines computed styles (incl. pseudo-elements) and the
+// page's webfonts, serializes the clone into an SVG <foreignObject>, and lets
+// the browser itself paint it onto a canvas — so the PNG matches the
+// on-screen tab pixel-for-pixel (charts, badges, theme colors, fonts). A
+// small title strip (hostname + tab label) is drawn above the capture so the
+// screenshot self-identifies after copy/paste. Webfont embedding fetches the
+// Google Fonts CSS + woff2 files (allowed by CSP connect-src); when they're
+// unreachable the capture still completes, just with fallback system fonts.
+// One known fidelity gap: inner scrollable regions render scrolled-to-top in
+// the clone (scroll offsets don't survive cloneNode).
 function _screenshotAssetDetails(asset) {
-  var blocks = _extractTabBlocks(_activeAssetPanel());
-  if (blocks.length === 0) { showToast("Nothing to screenshot", "error"); return; }
+  var panel = _activeAssetPanel();
+  if (!panel) { showToast("Nothing to screenshot", "error"); return; }
+  if (typeof htmlToImage === "undefined") {
+    showToast("Screenshot failed — capture library not loaded", "error");
+    return;
+  }
 
-  var charts = blocks.filter(function (b) { return b.type === 'chart'; });
-  if (charts.length === 0) { _composeAssetDetailsCanvas(asset, blocks); return; }
-
-  var pending = charts.length;
-  charts.forEach(function (b) {
-    _rasterizeChartSvgToImage(b.svg.parentNode || b.svg, function (res) {
-      if (res) { b._img = res.img; b._imgW = res.width; b._imgH = res.height; b._url = res.url; }
-      if (--pending === 0) _composeAssetDetailsCanvas(asset, blocks);
-    });
-  });
-}
-
-// Synchronous canvas composer. Lays out kv / heading / table / text / chart
-// blocks top-to-bottom in document order, sizes the canvas exactly, draws, and
-// copies the PNG to the clipboard. Chart blocks must already carry a loaded
-// `_img` (set by _screenshotAssetDetails); any without one are skipped.
-function _composeAssetDetailsCanvas(asset, blocks) {
   var cs = getComputedStyle(document.documentElement);
   var bgPrimary = cs.getPropertyValue("--color-bg-primary").trim() || "#ffffff";
-  var bgSurface = cs.getPropertyValue("--color-surface").trim() || "#f5f5f5";
-  var clrBorder = cs.getPropertyValue("--color-border").trim() || "#e0e0e0";
   var clrText   = cs.getPropertyValue("--color-text-primary").trim() || "#111";
-  var clrMuted  = cs.getPropertyValue("--color-text-tertiary").trim() || "#888";
+  var fontSans  = cs.getPropertyValue("--font-sans").trim() || "system-ui,-apple-system,sans-serif";
+
+  var btn = document.getElementById("btn-asset-screenshot");
+  if (btn) btn.disabled = true;
+  function done() { if (btn) btn.disabled = false; }
 
   var scale = 2;
-  var pad = 24;
-  var titleH = 48;
-  var labelColW = 180;
-  var valueColW = 480;
-  var contentW = labelColW + valueColW;
-  var lineH = 18;
-  var rowPadV = 10;
-  var headingH = 32;
-  var tableHeaderH = 26;
-  var tableRowH = 22;
-  var tableGap = 12;
-  var chartGap = 14;
-  var w = contentW + pad * 2;
-
-  function releaseCharts() {
-    blocks.forEach(function (b) { if (b._url) { URL.revokeObjectURL(b._url); b._url = null; } });
-  }
-
-  var laidOut = blocks.map(function (b) {
-    if (b.type === 'heading') {
-      return { block: b, h: headingH };
-    }
-    if (b.type === 'kv') {
-      var lines = b.value.split('\n').map(function (l) { return l.trim(); }).filter(function (l) { return l.length > 0; });
-      if (lines.length === 0) lines = ['-'];
-      return { block: b, lines: lines, h: Math.max(30, lines.length * lineH + rowPadV) };
-    }
-    if (b.type === 'text') {
-      var tlines = (b.lines || []).filter(function (l) { return l && l.length > 0; });
-      if (tlines.length === 0) return { block: b, lines: [], h: 0 };
-      return { block: b, lines: tlines, h: tlines.length * lineH + rowPadV };
-    }
-    if (b.type === 'chart') {
-      if (!b._img || !b._imgW) return { block: b, h: 0, skip: true };
-      var drawW = contentW;
-      var drawH = Math.max(1, Math.round(b._imgH * (contentW / b._imgW)));
-      return { block: b, drawW: drawW, drawH: drawH, h: drawH + chartGap };
-    }
-    if (b.type === 'table') {
-      var cols = Math.max(1, (b.headers && b.headers.length) || (b.rows[0] ? b.rows[0].length : 1));
-      var bodyH = b.rows.length * tableRowH;
-      var hdrH = b.headers && b.headers.length ? tableHeaderH : 0;
-      return { block: b, cols: cols, h: hdrH + bodyH + tableGap };
-    }
-    return { block: b, h: 0 };
-  });
-
-  var totalH = laidOut.reduce(function (acc, l) { return acc + l.h; }, 0);
-  var h = titleH + totalH + pad;
-
-  var canvas = document.createElement("canvas");
-  canvas.width = w * scale;
-  canvas.height = h * scale;
-  var ctx = canvas.getContext("2d");
-  ctx.scale(scale, scale);
-
-  ctx.fillStyle = bgPrimary;
-  ctx.fillRect(0, 0, w, h);
-
-  ctx.fillStyle = clrText;
-  ctx.font = "bold 17px system-ui,-apple-system,sans-serif";
-  var tabLabel = _activeAssetTabLabel();
-  var title = "Asset Details" + (asset && asset.hostname ? " — " + asset.hostname : "");
-  if (tabLabel) title += " (" + tabLabel + ")";
-  ctx.fillText(title, pad, 32);
-
-  function fitText(text, maxW) {
-    var t = String(text == null ? '' : text);
-    while (ctx.measureText(t).width > maxW && t.length > 3) {
-      t = t.slice(0, -4) + '…';
-    }
-    return t;
-  }
-
-  var y = titleH;
-  var kvRowIndex = 0;
-  laidOut.forEach(function (l) {
-    var b = l.block;
-    if (b.type === 'heading') {
+  htmlToImage.toCanvas(panel, { pixelRatio: scale, backgroundColor: bgPrimary })
+    .then(function (capture) {
+      var titleH = 44;
+      var pad = 16;
+      var w = capture.width / scale;
+      var h = capture.height / scale;
+      var canvas = document.createElement("canvas");
+      canvas.width = capture.width;
+      canvas.height = capture.height + titleH * scale;
+      var ctx = canvas.getContext("2d");
+      ctx.scale(scale, scale);
+      ctx.fillStyle = bgPrimary;
+      ctx.fillRect(0, 0, w, titleH + h);
       ctx.fillStyle = clrText;
-      ctx.font = "600 13px system-ui,-apple-system,sans-serif";
-      ctx.fillText(b.text, pad, y + 22);
-      y += l.h;
-      kvRowIndex = 0;
-      return;
-    }
-    if (b.type === 'text') {
-      if (!l.lines.length) return;
-      ctx.fillStyle = clrText;
-      ctx.font = "13px system-ui,-apple-system,sans-serif";
-      l.lines.forEach(function (line, li) {
-        ctx.fillText(fitText(line, contentW - 20), pad + 10, y + 16 + li * lineH);
-      });
-      y += l.h;
-      kvRowIndex = 0;
-      return;
-    }
-    if (b.type === 'chart') {
-      if (l.skip) { y += l.h; return; }
-      ctx.drawImage(b._img, pad, y, l.drawW, l.drawH);
-      y += l.h;
-      kvRowIndex = 0;
-      return;
-    }
-    if (b.type === 'kv') {
-      if (kvRowIndex % 2 === 1) {
-        ctx.fillStyle = bgSurface;
-        ctx.fillRect(pad, y, contentW, l.h);
-      }
-      ctx.fillStyle = clrMuted;
-      ctx.font = "600 10px system-ui,-apple-system,sans-serif";
-      ctx.fillText(b.label.toUpperCase(), pad + 10, y + 20);
-      ctx.fillStyle = clrText;
-      ctx.font = "13px system-ui,-apple-system,sans-serif";
-      var maxW = valueColW - 20;
-      l.lines.forEach(function (line, li) {
-        ctx.fillText(fitText(line, maxW), pad + labelColW + 10, y + 20 + li * lineH);
-      });
-      ctx.fillStyle = clrBorder;
-      ctx.fillRect(pad, y + l.h - 1, contentW, 1);
-      y += l.h;
-      kvRowIndex += 1;
-      return;
-    }
-    if (b.type === 'table') {
-      var colW = Math.floor(contentW / l.cols);
-      var ty = y;
-      if (b.headers && b.headers.length) {
-        ctx.fillStyle = bgSurface;
-        ctx.fillRect(pad, ty, contentW, tableHeaderH);
-        ctx.fillStyle = clrMuted;
-        ctx.font = "600 10px system-ui,-apple-system,sans-serif";
-        for (var ci = 0; ci < l.cols; ci++) {
-          var label = (b.headers[ci] || '').toUpperCase();
-          ctx.fillText(fitText(label, colW - 16), pad + ci * colW + 8, ty + 17);
+      ctx.font = "bold 17px " + fontSans;
+      var tabLabel = _activeAssetTabLabel();
+      var title = "Asset Details" + (asset && asset.hostname ? " — " + asset.hostname : "");
+      if (tabLabel) title += " (" + tabLabel + ")";
+      ctx.fillText(title, pad, 28);
+      // 1:1 device-pixel blit (w×h CSS px under the 2x transform), so the
+      // captured tab is never resampled.
+      ctx.drawImage(capture, 0, titleH, w, h);
+      canvas.toBlob(function (blob) {
+        done();
+        if (!blob) { showToast("Screenshot failed", "error"); return; }
+        if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
+          showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+          return;
         }
-        ty += tableHeaderH;
-      }
-      ctx.fillStyle = clrText;
-      ctx.font = "12px system-ui,-apple-system,sans-serif";
-      b.rows.forEach(function (row, ri) {
-        if (ri % 2 === 1) {
-          ctx.fillStyle = bgSurface;
-          ctx.fillRect(pad, ty, contentW, tableRowH);
-        }
-        ctx.fillStyle = clrText;
-        for (var c = 0; c < l.cols; c++) {
-          var cell = row[c] || '';
-          ctx.fillText(fitText(cell, colW - 16), pad + c * colW + 8, ty + 15);
-        }
-        ty += tableRowH;
-      });
-      ctx.strokeStyle = clrBorder;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(pad + 0.5, y + 0.5, contentW - 1, ty - y - 1);
-      y += l.h;
-      kvRowIndex = 0;
-      return;
-    }
-  });
-
-  releaseCharts();
-
-  canvas.toBlob(function (blob) {
-    if (!blob) { showToast("Screenshot failed", "error"); return; }
-    if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-      showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-      return;
-    }
-    navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-      showToast("Screenshot copied to clipboard");
-    }).catch(function () {
-      showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+        navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
+          showToast("Screenshot copied to clipboard");
+        }).catch(function () {
+          showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+        });
+      }, "image/png");
+    })
+    .catch(function () {
+      done();
+      showToast("Screenshot failed", "error");
     });
-  }, "image/png");
 }
 
 // Per-table screenshot (the camera button injected to the left of a table's
