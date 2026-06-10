@@ -321,6 +321,9 @@ agentsRouter.post("/samples", async (req, res, next) => {
         trunksAllVlans: false,
         alias:       s.alias ?? null,
         description: s.description ?? null,
+        // The Polaris Agent doesn't report L3 addressing mode (no FortiOS CMDB
+        // equivalent on a generic host); leave null.
+        addressingMode: null,
       }));
       enqueueInterfaceSamples(rows);
       accepted = rows.length;
