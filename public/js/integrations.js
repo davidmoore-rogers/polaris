@@ -3964,7 +3964,7 @@ async function openCreateModal(type) {
     addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true) });
     addTabs.push({ key: "quarantine-push", label: "Quarantine Push", html: quarantinePushFormHTML(false, true) });
     // SD-WAN tab (FMG + standalone FortiGate). Default off.
-    addTabs.push({ key: "sdwan", label: "SD-WAN", html: sdwanFormHTML(false) });
+    addTabs.push({ key: "sdwan", label: "SD‑WAN", html: sdwanFormHTML(false) });
     // Geographic Location tab (FMG + standalone FortiGate). Carries the
     // pull-from-SNMP and push-geocoded-coords toggles previously surfaced
     // inside Monitoring → FortiGate. DOM ids preserved so the existing save
@@ -4370,7 +4370,7 @@ async function openEditModal(id) {
         });
         editTabs.push({
           key: "sdwan",
-          label: "SD-WAN",
+          label: "SD‑WAN",
           html: sdwanFormHTML(config.pullSdwan === true),
         });
         // Geographic Location tab (FMG + standalone FortiGate). Carries the
