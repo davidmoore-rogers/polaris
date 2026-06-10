@@ -70,13 +70,18 @@ import { getSampleRetention, FOREVER, unselectedSlowPruneWindow } from "./sample
 import {
   enqueueMonitorSample,
   enqueueTelemetrySample,
-  enqueueTemperatureSamples,
+  enqueueHardwareSensorSamples,
   enqueueInterfaceSamples,
   enqueueStorageSamples,
   enqueueIpsecTunnelSamples,
   enqueuePerfSlaSamples,
   enqueueSdwanRuleSamples,
 } from "./sampleWriteBuffer.js";
+import {
+  classifyHardwareSensor,
+  normalizeFgAlarmStatus,
+  normalizeRestAlarmStatus,
+} from "../utils/hardwareSensors.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import {
   type PollingMethod,
@@ -87,6 +92,7 @@ import {
 } from "../utils/pollingCompatibility.js";
 import { propagateAfterStatusChange } from "./dependencyTreeService.js";
 import { triggerRetryAfterStatusChange } from "./reservationService.js";
+import { recordIpHistoryEntries } from "./assetIpHistoryService.js";
 
 export interface ProbeResult {
   success: boolean;
@@ -198,7 +204,7 @@ export interface MonitorTierSettings {
   sampleRetentionDays:       number;
   /**
    * Single retention setting shared by AssetTelemetrySample (CPU/memory)
-   * AND AssetTemperatureSample. The stream split affects polling method /
+   * AND AssetHardwareSensorSample. The stream split affects polling method /
    * cadence / credential / MIB / timeout — sample retention is table-level
    * so one knob covers both sample tables.
    */
@@ -2422,11 +2428,11 @@ async function collectTelemetryFortiapRest(
  * cache as collectTelemetryFortiapRest — `sensors_temperatures` is parsed
  * off the same managed_ap row into entry.apTelemetry.sensorTemperatures.
  */
-async function collectTemperaturesFortiapRest(
+async function collectHardwareSensorsFortiapRest(
   asset: { id: string; serialNumber: string | null; fortinetTopology: unknown },
   integration: { id: string; type: string; config: Record<string, unknown> },
   timeoutMs: number,
-): Promise<CollectionResult<TemperatureSample[]>> {
+): Promise<CollectionResult<HardwareSensorSample[]>> {
   const serial = (asset.serialNumber || "").trim();
   if (!serial) return { supported: true, error: "FortiAP has no serial number recorded" };
 
@@ -2448,9 +2454,16 @@ async function collectTemperaturesFortiapRest(
       // the System tab shows "no sensors" rather than an error.
       return { supported: true, data: [] };
     }
+    // The controller cache only exposes temperature sensors for FortiAPs.
     return {
       supported: true,
-      data: sensors.map((s) => ({ sensorName: s.name, celsius: s.celsius })),
+      data: sensors.map((s) => ({
+        sensorName:  s.name,
+        sensorClass: "temperature",
+        value:       s.celsius,
+        unit:        "°C",
+        alarmStatus: null,
+      })),
     };
   } catch (err: any) {
     return { supported: true, error: err?.message || "FortiAP controller query failed" };
@@ -2959,6 +2972,8 @@ export interface InterfaceSample {
   alias?:       string | null;
   /** Operator-set free-text comment. FortiOS CMDB `description`; SNMP has no equivalent. */
   description?: string | null;
+  /** L3 addressing mode: "static" | "dhcp" | "pppoe". FortiOS CMDB `system/interface.mode`; SNMP / agent leave null. */
+  addressingMode?: string | null;
 }
 
 export interface StorageSample {
@@ -2967,10 +2982,16 @@ export interface StorageSample {
   usedBytes?:  number | null;
 }
 
-/** One row per temperature sensor reported by the device. Celsius is null when the sensor is non-readable / not-present. */
-export interface TemperatureSample {
-  sensorName: string;
-  celsius:    number | null;
+/** One row per hardware sensor reported by the device. `value` is the reading
+ *  in `unit` (°C / RPM / V / …), null when the sensor is non-readable /
+ *  not-present. `sensorClass` is the best-effort classification; `alarmStatus`
+ *  is the device-reported health ("ok" / "alarm") when available. */
+export interface HardwareSensorSample {
+  sensorName:  string;
+  sensorClass: string;
+  value:       number | null;
+  unit:        string | null;
+  alarmStatus: string | null;
 }
 
 /**
@@ -3153,11 +3174,11 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
     ...asset,
     discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
   });
-  // CPU/memory dispatch. Temperatures are collected separately by
-  // `collectTemperatures` so operators can run CPU/memory over REST while
-  // temperature scrapes over SNMP (branch-class FortiGate workaround when
-  // /api/v2/monitor/system/sensor-info is unreliable). The two streams share
-  // the telemetry cadence today; an independent temperatureIntervalSeconds
+  // CPU/memory dispatch. Hardware sensors are collected separately by
+  // `collectHardwareSensors` so operators can run CPU/memory over REST while
+  // the hardware-sensor scrape uses SNMP (branch-class FortiGate workaround
+  // when /api/v2/monitor/system/sensor-info is unreliable). The two streams
+  // share the telemetry cadence today; an independent temperatureIntervalSeconds
   // timer can land in a follow-up.
   const polling = effective.cpuMemoryPolling;
   if (!polling) return { supported: false };
@@ -3201,8 +3222,8 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
     if (polling === "snmp") {
       // Per-stream asset credential wins, then asset default, then class-
       // override credential, then integration fallback. CPU/memory reads from
-      // cpuMemoryCredential — temperature has its own credential resolved
-      // inside `collectTemperatures` so the two streams can authenticate
+      // cpuMemoryCredential — hardware sensors have their own credential resolved
+      // inside `collectHardwareSensors` so the two streams can authenticate
       // independently when an operator points each at a different community.
       const effectiveTelemetryCred = asset.cpuMemoryCredential ?? asset.monitorCredential;
       let snmpCfg: Record<string, unknown>;
@@ -3250,7 +3271,7 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
  * streams). An independent temperatureIntervalSeconds timer is a future
  * follow-up — see `temperatureIntervalSec` on the schema.
  */
-export async function collectTemperatures(assetId: string): Promise<CollectionResult<TemperatureSample[]>> {
+export async function collectHardwareSensors(assetId: string): Promise<CollectionResult<HardwareSensorSample[]>> {
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
     include: { monitorCredential: true, temperatureCredential: true, discoveredByIntegration: true },
@@ -3287,11 +3308,11 @@ export async function collectTemperatures(assetId: string): Promise<CollectionRe
       if (!isFortinetSrc || !integration) return { supported: false };
       if (asset.assetType === "switch")   return { supported: false };
       if (asset.assetType === "access_point") {
-        return await collectTemperaturesFortiapRest(asset, integration as any, timeoutMs);
+        return await collectHardwareSensorsFortiapRest(asset, integration as any, timeoutMs);
       }
       const fg = buildFortinetConfig(targetIp, integration as any);
       if ("error" in fg) throw new Error(fg.error);
-      const data = await collectTemperaturesFortinet(fg, timeoutMs);
+      const data = await collectHardwareSensorsFortinet(fg, timeoutMs);
       return { supported: true, data };
     }
     if (polling === "snmp") {
@@ -3313,7 +3334,7 @@ export async function collectTemperatures(assetId: string): Promise<CollectionRe
           return { supported: true, error: "No SNMP credential selected" };
         }
       }
-      const data = await collectTemperaturesViaSnmpSession(
+      const data = await collectHardwareSensorsViaSnmpSession(
         targetIp,
         snmpCfg,
         asset.manufacturer,
@@ -3324,20 +3345,20 @@ export async function collectTemperatures(assetId: string): Promise<CollectionRe
       );
       return { supported: true, data };
     }
-    // winrm / ssh / icmp don't deliver temperature data.
+    // winrm / ssh / icmp don't deliver hardware-sensor data.
     return { supported: false };
   } catch (err: any) {
-    return { supported: true, error: err?.message || "Temperature collection failed" };
+    return { supported: true, error: err?.message || "Hardware sensor collection failed" };
   }
 }
 
 /**
- * Open an SNMP session and run the existing collectTemperaturesSnmp walk
- * inside it. Mirrors collectTelemetrySnmp's MIB-pin pattern so that pinning
- * an uploaded MIB on the temperature stream feeds the right manufacturer /
- * module-name / model into pickVendorProfileMerged.
+ * Open an SNMP session and run the collectHardwareSensorsSnmp walk inside it.
+ * Mirrors collectTelemetrySnmp's MIB-pin pattern so that pinning an uploaded
+ * MIB on the (temperature) stream feeds the right manufacturer / module-name /
+ * model into pickVendorProfileMerged.
  */
-async function collectTemperaturesViaSnmpSession(
+async function collectHardwareSensorsViaSnmpSession(
   host: string,
   config: Record<string, unknown>,
   manufacturer?: string | null,
@@ -3345,7 +3366,7 @@ async function collectTemperaturesViaSnmpSession(
   os?: string | null,
   timeoutMs?: number,
   temperatureMibId?: string | null,
-): Promise<TemperatureSample[]> {
+): Promise<HardwareSensorSample[]> {
   await ensureRegistryLoaded();
   let profileManufacturer = manufacturer;
   let profileModel        = model;
@@ -3364,7 +3385,7 @@ async function collectTemperaturesViaSnmpSession(
   const profile = pickVendorProfileMerged(profileManufacturer, profileOs, profileModel);
   const scope   = { manufacturer, model };
   return await withSnmpSession(host, config, async (session) => {
-    return await collectTemperaturesSnmp(session, manufacturer, profile, scope);
+    return await collectHardwareSensorsSnmp(session, manufacturer, profile, scope);
   }, timeoutMs);
 }
 
@@ -3531,6 +3552,7 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
         trunksAllVlans: i.trunksAllVlans === true,
         alias:       i.alias       ?? null,
         description: i.description ?? null,
+        addressingMode: null,
       })),
     );
   }
@@ -3862,34 +3884,40 @@ async function collectTelemetryFortinet(host: string, integration: { type: strin
   // array of {interval, current, historical} samples or a single object,
   // depending on FortiOS version. Pull whatever's freshest.
   //
-  // Temperatures are NOT pulled here — collectTemperatures dispatches on its
-  // own polling method (which may resolve to SNMP even when CPU/memory is on
-  // REST, e.g. when /api/v2/monitor/system/sensor-info is unreliable on the
-  // branch-class FortiGate and the operator routes temperature to SNMP).
+  // Hardware sensors are NOT pulled here — collectHardwareSensors dispatches on
+  // its own polling method (which may resolve to SNMP even when CPU/memory is
+  // on REST, e.g. when /api/v2/monitor/system/sensor-info is unreliable on the
+  // branch-class FortiGate and the operator routes hardware sensors to SNMP).
   const res = await fgRequest<any>(fg, "GET", "/api/v2/monitor/system/resource/usage", { query: { scope: "global" }, timeoutMs });
   const cpuPct = pickFortinetUsage(res?.cpu);
   const memPct = pickFortinetUsage(res?.mem ?? res?.memory);
   return { cpuPct, memPct, memUsedBytes: null, memTotalBytes: null };
 }
 
-// FortiOS exposes temperature, fan, and power sensors at one endpoint. We
-// filter to type === "temperature" and keep only readable sensors. Older
-// FortiOS firmwares 404 this endpoint — caller swallows the failure.
-async function collectTemperaturesFortinet(fg: FortiGateConfig, timeoutMs?: number): Promise<TemperatureSample[]> {
+// FortiOS exposes temperature, fan, voltage, and power sensors at one endpoint.
+// We keep EVERY sensor (not just temperature), classifying by the device's own
+// `type` field when present (name heuristic otherwise) and capturing the alarm
+// flag. Older FortiOS firmwares 404 this endpoint — caller swallows the failure.
+async function collectHardwareSensorsFortinet(fg: FortiGateConfig, timeoutMs?: number): Promise<HardwareSensorSample[]> {
   const res = await fgRequest<any>(fg, "GET", "/api/v2/monitor/system/sensor-info", { timeoutMs });
-  const list: TemperatureSample[] = [];
+  const list: HardwareSensorSample[] = [];
   const arr = Array.isArray(res) ? res : (Array.isArray(res?.results) ? res.results : []);
   for (const s of arr) {
     if (!s || typeof s !== "object") continue;
-    const type = String((s as any).type || "").toLowerCase();
-    if (type && type !== "temperature") continue;
-    // Older firmwares omit `type` entirely; treat names that look like temp sensors as temperature.
-    const name = String((s as any).name || "").trim();
-    if (!type && !/temp|cpu|board|chassis|°c/i.test(name)) continue;
+    const obj  = s as Record<string, unknown>;
+    const name = String(obj.name || "").trim();
     if (!name) continue;
-    const value = (s as any).value;
+    const restType = obj.type != null ? String(obj.type) : null;
+    const { sensorClass, unit } = classifyHardwareSensor(name, restType);
+    const value = obj.value;
     const n = typeof value === "number" ? value : (typeof value === "string" ? Number(value) : NaN);
-    list.push({ sensorName: name, celsius: Number.isFinite(n) ? Math.round(n * 10) / 10 : null });
+    list.push({
+      sensorName:  name,
+      sensorClass,
+      value:       Number.isFinite(n) ? Math.round((n as number) * 1000) / 1000 : null,
+      unit,
+      alarmStatus: normalizeRestAlarmStatus(obj.alarm ?? obj.alarm_status ?? obj.status),
+    });
   }
   return list;
 }
@@ -4011,7 +4039,7 @@ async function collectSystemInfoFortinet(
 
   // Build cmdbByName from the CMDB response. Non-fatal failure → empty map
   // → falls back to monitor-only types (same as the original try/catch).
-  const cmdbByName = new Map<string, { type: string | null; parent: string | null; vlanId: number | null; members: string[]; alias: string | null; description: string | null }>();
+  const cmdbByName = new Map<string, { type: string | null; parent: string | null; vlanId: number | null; members: string[]; alias: string | null; description: string | null; addressingMode: string | null }>();
   // FortiLink-enabled interface set (fortilink-flagged interfaces + their member
   // ports) from the same CMDB response — fed back to the caller so the LLDP
   // exclusion filter can drop FortiLink links without a second CMDB fetch.
@@ -4041,6 +4069,11 @@ async function collectSystemInfoFortinet(
         : [];
       const alias       = typeof c.alias       === "string" && c.alias.trim()       ? c.alias.trim()       : null;
       const description = typeof c.description === "string" && c.description.trim() ? c.description.trim() : null;
+      // L3 addressing mode — CMDB `mode` is "static" | "dhcp" | "pppoe". Keep
+      // only known values so a firmware-specific surprise doesn't leak into the
+      // UI; anything else (or absent) leaves addressingMode null.
+      const rawMode = typeof c.mode === "string" ? c.mode.trim().toLowerCase() : "";
+      const addressingMode = (rawMode === "static" || rawMode === "dhcp" || rawMode === "pppoe") ? rawMode : null;
       cmdbByName.set(c.name, {
         type:    t,
         parent:  t === "vlan" && typeof c.interface === "string" ? c.interface : null,
@@ -4048,6 +4081,7 @@ async function collectSystemInfoFortinet(
         members,
         alias,
         description,
+        addressingMode,
       });
     }
   }
@@ -4090,6 +4124,7 @@ async function collectSystemInfoFortinet(
         vlanId:      rawVlanId,
         alias:       cmdbEntry?.alias       ?? null,
         description: cmdbEntry?.description ?? null,
+        addressingMode: cmdbEntry?.addressingMode ?? null,
       });
     }
     // Back-fill ifParent on member ports of aggregate / hard-switch /
@@ -4841,11 +4876,13 @@ const OID = {
   // FORTINET-FORTIGATE-MIB::fgHwSensorTable. Branch-class FortiGates
   // (40F/60F/61F/91G/101F) don't populate ENTITY-SENSOR-MIB and 404 the
   // FortiOS REST sensor-info endpoint, but they do publish hardware sensors
-  // here. The table mixes temperature, fan, and voltage sensors — there is
-  // no type column, so callers must filter by name. fgHwSensorEntValue is a
-  // DisplayString carrying a decimal value (e.g. "44.5").
-  fgHwSensorEntName:  "1.3.6.1.4.1.12356.101.4.3.2.1.2",
-  fgHwSensorEntValue: "1.3.6.1.4.1.12356.101.4.3.2.1.3",
+  // here. The table mixes temperature, fan, voltage, and power sensors —
+  // there is no type column, so callers classify by name. fgHwSensorEntValue
+  // is a DisplayString carrying a decimal value (e.g. "44.5"); EntAlarmStatus
+  // is an INTEGER (0 = no alarm, 1 = alarm).
+  fgHwSensorEntName:        "1.3.6.1.4.1.12356.101.4.3.2.1.2",
+  fgHwSensorEntValue:       "1.3.6.1.4.1.12356.101.4.3.2.1.3",
+  fgHwSensorEntAlarmStatus: "1.3.6.1.4.1.12356.101.4.3.2.1.4",
   // LLDP-MIB (RFC 4957). lldpLocPortTable maps localPortNum → ifName/alias so
   // we can stitch lldpRemTable rows back to a real interface. lldpRemTable is
   // indexed by (timeMark, localPortNum, remIndex); we only care about the
@@ -5215,7 +5252,11 @@ function pickVendorProfileMerged(
     }
   }
   if (tempPick && tempPick.symbol) {
-    merged.temperature = { symbol: tempPick.symbol, mode: "scalar" };
+    // `table` makes the SNMP hardware-sensor collector walk the named sensor
+    // table (e.g. fgHwSensorTable) instead of a single scalar GET — the
+    // operator-facing "Hardware Sensors" metric. `scalar` keeps the
+    // single-reading path (FortiAP fapTemperature).
+    merged.temperature = { symbol: tempPick.symbol, mode: tempPick.type === "table" ? "table" : "scalar" };
   }
   return merged;
 }
@@ -5301,9 +5342,9 @@ async function collectTelemetrySnmp(
       memPct = clampPct((memUsedBytes / memTotalBytes) * 100);
     }
 
-    // Temperatures are collected separately by `collectTemperatures`, which
-    // dispatches on temperaturePolling instead of cpuMemoryPolling so an
-    // operator can run CPU/memory over REST and temperature over SNMP (the
+    // Hardware sensors are collected separately by `collectHardwareSensors`,
+    // which dispatches on temperaturePolling instead of cpuMemoryPolling so an
+    // operator can run CPU/memory over REST and hardware sensors over SNMP (the
     // common branch-class FortiGate workaround for an unreliable
     // /api/v2/monitor/system/sensor-info).
     return { cpuPct, memPct, memUsedBytes, memTotalBytes };
@@ -5510,12 +5551,29 @@ function snmpMultiGet(session: any, oids: string[]): Promise<Map<string, unknown
   });
 }
 
-async function collectTemperaturesSnmp(
+async function collectHardwareSensorsSnmp(
   session: any,
   manufacturer?: string | null,
   profile?: VendorTelemetryProfile | null,
   scope?: { manufacturer?: string | null; model?: string | null },
-): Promise<TemperatureSample[]> {
+): Promise<HardwareSensorSample[]> {
+  // 1. FORTINET-FORTIGATE-MIB fgHwSensorTable is the comprehensive source on
+  //    FortiGates (temperature + fan + voltage + power + disk + alarm), so
+  //    prefer it for Fortinet devices, or when the operator explicitly pointed
+  //    the Hardware Sensors metric at a table (mode="table"). FortiSwitches /
+  //    FortiAPs don't populate it → empty → fall through to the paths below.
+  const wantTable =
+    (!!manufacturer && /fortinet/i.test(manufacturer)) ||
+    profile?.temperature?.mode === "table";
+  if (wantTable) {
+    const fgRows = await collectHardwareSensorsFortinetSnmp(session);
+    if (fgRows.length > 0) return fgRows;
+  }
+
+  // 2. ENTITY-SENSOR-MIB (RFC 3433). Standard table on non-Fortinet gear (and
+  //    FortiSwitch). We surface entPhySensorType=8 (celsius) rows as the
+  //    `temperature` class. Non-temperature ENTITY classes (fan/volt) are a
+  //    future enhancement — the FortiGate fleet uses path 1.
   const [types, values, scales, precisions, opers, descrs] = await Promise.all([
     snmpWalk(session, OID.entPhySensorType).catch(() => new Map()),
     snmpWalk(session, OID.entPhySensorValue).catch(() => new Map()),
@@ -5524,7 +5582,7 @@ async function collectTemperaturesSnmp(
     snmpWalk(session, OID.entPhySensorOperStatus).catch(() => new Map()),
     snmpWalk(session, OID.entPhysicalDescr).catch(() => new Map()),
   ]);
-  const out: TemperatureSample[] = [];
+  const out: HardwareSensorSample[] = [];
   // Some agents (notably FortiSwitchOS) stamp entPhySensorType=8 (celsius) on
   // every row in the table — SFP optical readings, fan tachs, voltage rails —
   // not just real temperature sensors. Cross-check the entPhysicalDescr from
@@ -5544,65 +5602,66 @@ async function collectTemperaturesSnmp(
     const prec  = snmpVbToNumber(precisions.get(idx)); // decimal-point shift
     const celsius = scaleEntitySensor(raw, scale, prec);
     out.push({
-      sensorName: descr || `sensor-${idx}`,
-      celsius:    Number.isFinite(celsius) ? Math.round(celsius * 10) / 10 : null,
+      sensorName:  descr || `sensor-${idx}`,
+      sensorClass: "temperature",
+      value:       Number.isFinite(celsius) ? Math.round(celsius * 10) / 10 : null,
+      unit:        "°C",
+      alarmStatus: null,
     });
   }
-  if (out.length === 0 && manufacturer && /fortinet/i.test(manufacturer)) {
-    const fgRows = await collectTemperaturesFortinetSnmp(session);
-    if (fgRows.length > 0) return fgRows;
-  }
-  // Third fallback: profile-driven scalar temperature symbol. Used by vendors
-  // whose hardware publishes a single Celsius scalar rather than the
-  // table-based ENTITY-SENSOR-MIB or fgHwSensorTable forms — currently the
-  // FortiAP (fapTemperature @ 12356.120.3.44).
-  if (out.length === 0 && profile?.temperature?.mode === "scalar") {
+  if (out.length > 0) return out;
+
+  // 3. Profile-driven scalar symbol. Used by vendors whose hardware publishes a
+  //    single Celsius scalar rather than a sensor table — currently the FortiAP
+  //    (fapTemperature @ 12356.120.3.44).
+  if (profile?.temperature?.mode === "scalar") {
     const tempOid = resolveOidSync(profile.temperature.symbol, scope ?? {});
     if (tempOid) {
       const v = await snmpGetScalar(session, tempOid).catch(() => null);
       const n = snmpVbToNumber(v);
       if (n != null && Number.isFinite(n)) {
         out.push({
-          sensorName: profile.temperature.sensorName ?? "System",
-          celsius:    Math.round(n * 10) / 10,
+          sensorName:  profile.temperature.sensorName ?? "System",
+          sensorClass: "temperature",
+          value:       Math.round(n * 10) / 10,
+          unit:        "°C",
+          alarmStatus: null,
         });
       }
     } else {
       logger.debug(
         { vendor: profile.vendor, symbol: profile.temperature.symbol, scope },
-        "vendor temperature symbol unresolved — upload its MIB to enable",
+        "vendor hardware-sensor symbol unresolved — upload its MIB to enable",
       );
     }
   }
   return out;
 }
 
-// FORTINET-FORTIGATE-MIB::fgHwSensorTable fallback for branch FortiGates that
-// don't implement ENTITY-SENSOR-MIB. The table has no sensor-type column, so
-// we keep rows whose name looks like a temperature sensor and whose value
-// parses to a plausible Celsius reading. Common temp sensor names: "DTS CPU0",
-// "ADT7490 ...", "LM75 ...", "MB Temp", "CPU Temp"; we exclude obvious
-// fan/voltage/power rows.
-async function collectTemperaturesFortinetSnmp(session: any): Promise<TemperatureSample[]> {
-  const [names, values] = await Promise.all([
+// FORTINET-FORTIGATE-MIB::fgHwSensorTable walk. The full hardware-sensor table:
+// temperature, fan, voltage, power/PSU, disk. No type column, so each row is
+// classified by name (classifyHardwareSensor); the value is a DisplayString
+// decimal and the alarm column is 0/1. Branch FortiGates that don't implement
+// ENTITY-SENSOR-MIB publish hardware sensors only here.
+async function collectHardwareSensorsFortinetSnmp(session: any): Promise<HardwareSensorSample[]> {
+  const [names, values, alarms] = await Promise.all([
     snmpWalk(session, OID.fgHwSensorEntName).catch(() => new Map()),
     snmpWalk(session, OID.fgHwSensorEntValue).catch(() => new Map()),
+    snmpWalk(session, OID.fgHwSensorEntAlarmStatus).catch(() => new Map()),
   ]);
-  const out: TemperatureSample[] = [];
-  const TEMP_NAME = /temp|dts|adt\d|lm7\d|tmp\d|°c|thermal/i;
-  const NON_TEMP  = /\bfan\b|rpm|\bvolt|^[+-]?\d+(\.\d+)?\s*v\b|vcc|vdd|vrm|psu|power|current|amp/i;
+  const out: HardwareSensorSample[] = [];
   for (const [idx, nameRaw] of names.entries()) {
     const name = snmpVbToString(nameRaw).trim();
     if (!name) continue;
-    if (NON_TEMP.test(name)) continue;
-    if (!TEMP_NAME.test(name)) continue;
+    const { sensorClass, unit } = classifyHardwareSensor(name);
     const valStr = snmpVbToString(values.get(idx)).trim();
     const n = Number(valStr);
-    if (!Number.isFinite(n)) continue;
-    if (n < -40 || n > 200) continue; // sane Celsius range; rejects RPM/voltage caught by name
     out.push({
-      sensorName: name,
-      celsius:    Math.round(n * 10) / 10,
+      sensorName:  name,
+      sensorClass,
+      value:       Number.isFinite(n) ? Math.round(n * 1000) / 1000 : null,
+      unit,
+      alarmStatus: normalizeFgAlarmStatus(snmpVbToNumber(alarms.get(idx))),
     });
   }
   return out;
@@ -6381,31 +6440,38 @@ export async function recordTelemetryResult(assetId: string, result: CollectionR
 }
 
 /**
- * Persist a temperature-stream collection result. Unlike telemetry there is
- * no Asset.lastTemperatureAt column — the System tab derives the last-sample
- * timestamp from the latest AssetTemperatureSample row. If no samples were
+ * Persist a hardware-sensor collection result. Unlike telemetry there is no
+ * Asset.lastHardwareSensorAt column — the System tab derives the last-sample
+ * timestamp from the latest AssetHardwareSensorSample row. If no samples were
  * written (device exposes no sensors, or the scrape failed), the System tab
  * keeps showing the prior timestamp and surfaces an amber "last successful
  * update X ago" badge once it falls behind the resolved cadence.
  */
-export async function recordTemperatureResult(assetId: string, result: CollectionResult<TemperatureSample[]>): Promise<void> {
+export async function recordHardwareSensorResult(assetId: string, result: CollectionResult<HardwareSensorSample[]>): Promise<void> {
   if (!result.supported) return;
   if (Array.isArray(result.data) && result.data.length > 0) {
-    // Drop rows whose celsius reading falls outside a plausible operating
-    // range — covers misinterpreted ENTITY-SENSOR-MIB scale/precision on some
-    // agents (we've seen FortiSwitch sensors report 52000 / 34937). Null
-    // celsius is preserved as the "couldn't read" signal.
+    // Sanity-filter ONLY temperature-class rows to a plausible operating range
+    // — covers misinterpreted ENTITY-SENSOR-MIB scale/precision on some agents
+    // (we've seen FortiSwitch sensors report 52000 / 34937). Other classes
+    // (fan RPM, voltage, presence) have unbounded/different ranges and pass
+    // through. Null value is preserved as the "couldn't read" signal.
     const filtered = result.data.filter(
-      (t) => t.celsius == null || (Number.isFinite(t.celsius) && t.celsius >= -40 && t.celsius <= 200),
+      (s) =>
+        s.sensorClass !== "temperature" ||
+        s.value == null ||
+        (Number.isFinite(s.value) && s.value >= -40 && s.value <= 200),
     );
     if (filtered.length === 0) return;
     const now = new Date();
-    enqueueTemperatureSamples(
-      filtered.map((t) => ({
+    enqueueHardwareSensorSamples(
+      filtered.map((s) => ({
         assetId,
-        timestamp: now,
-        sensorName: t.sensorName,
-        celsius:    t.celsius,
+        timestamp:   now,
+        sensorName:  s.sensorName,
+        sensorClass: s.sensorClass,
+        value:       s.value,
+        unit:        s.unit,
+        alarmStatus: s.alarmStatus,
       })),
     );
   }
@@ -6422,7 +6488,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     // One indexed PK read per scrape on the slow (~10 min) cadence.
     const pinned = await prisma.asset.findUnique({
       where: { id: assetId },
-      select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true },
+      select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true },
     });
     const pinnedIfaces  = new Set(pinned?.monitoredInterfaces ?? []);
     const pinnedStorage = new Set(pinned?.monitoredStorage ?? []);
@@ -6451,6 +6517,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
           trunksAllVlans: i.trunksAllVlans === true,
           alias:       i.alias       ?? null,
           description: i.description ?? null,
+          addressingMode: i.addressingMode ?? null,
         })),
       );
       // Fold the MAC of each operator-pinned monitored interface into the
@@ -6575,6 +6642,18 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
       );
       endAssoc({ rows: monitorAssocEntries.length });
       stopWrite();
+      // Fold the asset's interface IPs into IP History so the timeline captures
+      // every IP the device holds — including public WAN / secondary addresses,
+      // which never become the primary `ipAddress` and so were previously absent
+      // from the history. The primary IP is already recorded by the db.ts Prisma
+      // extension; recordIpHistoryEntries skips it to avoid firstSeen churn on
+      // the shared management address. Fire-and-forget — best-effort, never
+      // blocks or fails the scrape.
+      void recordIpHistoryEntries(
+        assetId,
+        monitorAssocEntries.map((e) => ({ ip: e.ip, source: e.source })),
+        pinned?.ipAddress ?? null,
+      );
     }
     // LLDP neighbors. `undefined` = the collector didn't run / unsupported
     // transport, so leave the existing rows alone. `[]` or a populated array
@@ -7591,9 +7670,9 @@ export async function runProbeFor(assetId: string, labels: WorkItemLabels): Prom
 }
 
 /**
- * Telemetry pull (CPU/memory + temperatures) for one asset. The two streams
- * dispatch independently — cpuMemoryPolling drives CPU/memory while
- * temperaturePolling drives the temperature scrape — but they run together
+ * Telemetry pull (CPU/memory + hardware sensors) for one asset. The two
+ * streams dispatch independently — cpuMemoryPolling drives CPU/memory while
+ * temperaturePolling drives the hardware-sensor scrape — but they run together
  * on the telemetry cadence trigger. Returns `success` on a clean run
  * regardless of whether data was collected (supported=false is a normal
  * outcome for ICMP/SSH-monitored assets). `failure` means at least one
@@ -7612,14 +7691,14 @@ export async function runTelemetryFor(assetId: string, labels: WorkItemLabels): 
         logger.debug({ err, assetId }, "CPU/memory collection threw");
         return { supported: true, error: (err as Error)?.message || "Telemetry collection failed" } as CollectionResult<TelemetrySample>;
       }),
-      collectTemperatures(assetId).catch((err: unknown) => {
-        logger.debug({ err, assetId }, "Temperature collection threw");
-        return { supported: true, error: (err as Error)?.message || "Temperature collection failed" } as CollectionResult<TemperatureSample[]>;
+      collectHardwareSensors(assetId).catch((err: unknown) => {
+        logger.debug({ err, assetId }, "Hardware sensor collection threw");
+        return { supported: true, error: (err as Error)?.message || "Hardware sensor collection failed" } as CollectionResult<HardwareSensorSample[]>;
       }),
     ]);
     await Promise.all([
       recordTelemetryResult(assetId, tr),
-      recordTemperatureResult(assetId, temp),
+      recordHardwareSensorResult(assetId, temp),
     ]);
     // Custom widgets ride the telemetry cadence (Slice 7b). Fire-and-forget
     // so a slow walk on one widget can't drag the telemetry tick — failures
@@ -8431,7 +8510,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
 
 // ─── Retention prune helpers ────────────────────────────────────────────────
 //
-// Retention is per-ENTITY (assets / cpuMem / temperature / interfaces /
+// Retention is per-ENTITY (assets / cpuMem / hardware / interfaces /
 // storage / ipsec) with a detail/hourly/daily tier each. Encoding per tier:
 // positive = N days; 0 = tier off (prune everything); FOREVER (-1) = keep all.
 //
@@ -8439,7 +8518,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
 // retention applies to SELECTED rows (cadence="fast" — operator-pinned). The
 // UNSELECTED/bulk rows (cadence="slow" or legacy NULL) are kept only
 // UNSELECTED_DETAIL_HOURS and are never rolled up. assets / cpuMem /
-// temperature have no selection and prune uniformly.
+// hardware have no selection and prune uniformly.
 
 type SamplePruneFn = (where: Record<string, unknown>) => Promise<{ count: number }>;
 
@@ -8447,7 +8526,7 @@ const DAY_MS = 24 * 3600 * 1000;
 
 /**
  * Prune one tier with a single retention window (no selection split). Used for
- * assets / cpuMem / temperature (all tiers) and the hourly/daily rollup tiers
+ * assets / cpuMem / hardware (all tiers) and the hourly/daily rollup tiers
  * of every entity. `days`: >0 keep N days; 0 keep nothing; FOREVER keep all.
  *
  * When the table is a Timescale hypertable, drop whole chunks older than the
@@ -8521,23 +8600,25 @@ export async function pruneMonitorSamples(): Promise<number> {
 
 /**
  * Trim every tier of AssetTelemetrySample (cpuMem entity) +
- * AssetTemperatureSample (temperature entity). These now have independent
- * per-entity retention — operators can keep temperature longer than CPU/mem
- * (or vice versa) since they're separate rows in the Retention card.
+ * AssetHardwareSensorSample (hardware entity). These have independent
+ * per-entity retention — operators can keep hardware-sensor history longer
+ * than CPU/mem (or vice versa) since they're separate rows in the Retention
+ * card. Hardware sensors are gauges with no selection split, so they prune
+ * uniformly like cpuMem.
  */
 export async function pruneTelemetrySamples(): Promise<number> {
   const ret = await getSampleRetention();
   const cm = ret.cpuMem;
-  const tp = ret.temperature;
-  const [tDetail, tHourly, tDaily, tempDetail, tempHourly, tempDaily] = await Promise.all([
-    pruneTierByDays((w) => prisma.assetTelemetrySample.deleteMany({         where: w as any }), cm.detail, "timestamp",   "asset_telemetry_samples"),
-    pruneTierByDays((w) => prisma.assetTelemetrySampleHourly.deleteMany({   where: w as any }), cm.hourly, "bucketStart", "asset_telemetry_samples_hourly"),
-    pruneTierByDays((w) => prisma.assetTelemetrySampleDaily.deleteMany({    where: w as any }), cm.daily,  "bucketStart", "asset_telemetry_samples_daily"),
-    pruneTierByDays((w) => prisma.assetTemperatureSample.deleteMany({       where: w as any }), tp.detail, "timestamp",   "asset_temperature_samples"),
-    pruneTierByDays((w) => prisma.assetTemperatureSampleHourly.deleteMany({ where: w as any }), tp.hourly, "bucketStart", "asset_temperature_samples_hourly"),
-    pruneTierByDays((w) => prisma.assetTemperatureSampleDaily.deleteMany({  where: w as any }), tp.daily,  "bucketStart", "asset_temperature_samples_daily"),
+  const hw = ret.hardware;
+  const [tDetail, tHourly, tDaily, hwDetail, hwHourly, hwDaily] = await Promise.all([
+    pruneTierByDays((w) => prisma.assetTelemetrySample.deleteMany({            where: w as any }), cm.detail, "timestamp",   "asset_telemetry_samples"),
+    pruneTierByDays((w) => prisma.assetTelemetrySampleHourly.deleteMany({      where: w as any }), cm.hourly, "bucketStart", "asset_telemetry_samples_hourly"),
+    pruneTierByDays((w) => prisma.assetTelemetrySampleDaily.deleteMany({       where: w as any }), cm.daily,  "bucketStart", "asset_telemetry_samples_daily"),
+    pruneTierByDays((w) => prisma.assetHardwareSensorSample.deleteMany({       where: w as any }), hw.detail, "timestamp",   "asset_hardware_sensor_samples"),
+    pruneTierByDays((w) => prisma.assetHardwareSensorSampleHourly.deleteMany({ where: w as any }), hw.hourly, "bucketStart", "asset_hardware_sensor_samples_hourly"),
+    pruneTierByDays((w) => prisma.assetHardwareSensorSampleDaily.deleteMany({  where: w as any }), hw.daily,  "bucketStart", "asset_hardware_sensor_samples_daily"),
   ]);
-  return tDetail + tHourly + tDaily + tempDetail + tempHourly + tempDaily;
+  return tDetail + tHourly + tDaily + hwDetail + hwHourly + hwDaily;
 }
 
 /**

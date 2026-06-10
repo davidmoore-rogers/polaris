@@ -2392,7 +2392,7 @@ function assetMonitoringFormHTML(asset, managedAgent) {
   }
   function bodyTemperature() {
     return streamPollingBlock("temperature", "f-temperaturePolling", "f-temperatureCredential", "f-temperatureMib", pollingCurrent.temperaturePolling, tempCredId, tempMibId, _autoMibNames.temperature) +
-      intervalInput("f-temperatureTimeoutMs", "Temperature Timeout Override (ms)", temperatureTimeout, 1000, 120000, "Per-request timeout for the temperature collector (FortiOS sensor-info / SNMP ENTITY-SENSOR-MIB). Range 1000..120000 ms; default 10000 ms. Inherits when blank.");
+      intervalInput("f-temperatureTimeoutMs", "Hardware Sensor Timeout Override (ms)", temperatureTimeout, 1000, 120000, "Per-request timeout for the hardware-sensor collector (FortiOS sensor-info / SNMP fgHwSensorTable / ENTITY-SENSOR-MIB). Range 1000..120000 ms; default 10000 ms. Inherits when blank.");
   }
   function bodyInterfaces() {
     return streamPollingBlock("interfaces", "f-interfacesPolling", "f-interfacesCredential", "f-interfacesMib", pollingCurrent.interfacesPolling, ifCredId, ifMibId, _autoMibNames.interfaces) +
@@ -2410,7 +2410,7 @@ function assetMonitoringFormHTML(asset, managedAgent) {
   var streamTabs = [
     { key: "responseTime", label: "Response Time", html: bodyResponseTime() },
     { key: "cpuMemory",    label: "CPU/Memory",    html: bodyCpuMemory()    },
-    { key: "temperature",  label: "Temperature",   html: bodyTemperature()  },
+    { key: "temperature",  label: "Hardware Sensors", html: bodyTemperature()  },
     { key: "interfaces",   label: "Interfaces",    html: bodyInterfaces()   },
     { key: "lldp",         label: "LLDP",          html: bodyLldp()         },
     { key: "storage",      label: "Storage",       html: bodyStorage()      },
@@ -3393,12 +3393,12 @@ async function openViewModal(id) {
           if (tel.collected) parts.push("telemetry");
           else if (tel.supported && tel.error) failures.push("telemetry: " + tel.error);
 
-          // Temperature dispatches on its own polling method. supported-but-
-          // empty (sensor-less device) is not a failure — collected===false
+          // Hardware sensors dispatch on their own polling method. supported-
+          // but-empty (sensor-less device) is not a failure — collected===false
           // with no error means "device exposes no sensors", so skip it.
-          var tmp = r.temperature || {};
-          if (tmp.collected) parts.push("temperature");
-          else if (tmp.supported && tmp.error) failures.push("temperature: " + tmp.error);
+          var tmp = r.hardware || {};
+          if (tmp.collected) parts.push("hardware");
+          else if (tmp.supported && tmp.error) failures.push("hardware: " + tmp.error);
 
           var si = r.systemInfo || {};
           if (si.collected) parts.push("interfaces");
@@ -4061,7 +4061,7 @@ function assetSystemViewHTML(a) {
     '<div id="asset-system-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
       'Loading samples…' +
     '</div>' +
-    sectionHeader("Temperatures", temperatureBadgeFull, false) +
+    sectionHeader("Hardware Sensors", temperatureBadgeFull, false) +
     '<div id="asset-system-temps"><span class="empty-state">Loading…</span></div>' +
     sectionHeader("Interfaces", interfacesBadgeFull, false) +
     '<div id="asset-system-interfaces"><span class="empty-state">Loading…</span></div>' +
@@ -4382,7 +4382,7 @@ function _renderInterfacesTable(container, si, asset) {
     var hasOut = iface.outOctets != null && iface.outOctets > 0;
     return !hasIn && !hasOut;
   }
-  var COLS = 10 + (showVlanCols ? 2 : 0);
+  var COLS = 11 + (showVlanCols ? 2 : 0);
   // Group LLDP neighbors by local interface so the row builder can stamp the
   // first neighbor's label inline. Most ports only ever see one neighbor; a
   // "+N" badge appears when more are present and the slide-over enumerates them.
@@ -4460,6 +4460,23 @@ function _renderInterfacesTable(container, si, asset) {
     return nativeCell + taggedCell;
   }
 
+  // L3 addressing mode pill (FortiOS CMDB `system/interface.mode`). Only the
+  // FortiOS REST path populates this; SNMP / Polaris Agent rows leave it null
+  // and render "—" (same convention as the FortiSwitch-only VLAN columns).
+  function addressingCell(iface) {
+    var m = iface.addressingMode;
+    if (!m) return "<td>—</td>";
+    var cfgs = {
+      dhcp:   ["DHCP",   "#3b82f6"],
+      static: ["Static", "#6b7280"],
+      pppoe:  ["PPPoE",  "#8b5cf6"],
+    };
+    var cfg = cfgs[String(m).toLowerCase()];
+    if (!cfg) return '<td>' + escapeHtml(String(m)) + "</td>";
+    var c = cfg[1];
+    return '<td><span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:' + c + '18;color:' + c + ';border:1px solid ' + c + '30;white-space:nowrap">' + cfg[0] + "</span></td>";
+  }
+
   function buildRow(iface, opts) {
     opts = opts || {};
     var checked  = monitored.has(iface.ifName) ? " checked" : "";
@@ -4511,6 +4528,7 @@ function _renderInterfacesTable(container, si, asset) {
       "<td>" + statusCell(iface) + "</td>" +
       "<td>" + speed + "</td>" +
       '<td class="mono">' + escapeHtml(iface.ipAddress  || "—") + "</td>" +
+      addressingCell(iface) +
       '<td class="mono">' + escapeHtml(iface.macAddress || "—") + "</td>" +
       vlanCellsHTML(iface) +
       "<td>" + (iface.inOctets  != null ? _fmtBytes(iface.inOctets)  : "—") + "</td>" +
@@ -4573,6 +4591,7 @@ function _renderInterfacesTable(container, si, asset) {
       "<td>" + statusPill + "</td>" +
       "<td>—</td>" +
       '<td class="mono">' + escapeHtml(tn.remoteGateway || "—") + "</td>" +
+      "<td>—</td>" +
       '<td class="mono">—</td>' +
       vlanPlaceholders +
       "<td>" + (tn.incomingBytes != null ? _fmtBytes(tn.incomingBytes) : "—") + "</td>" +
@@ -4708,6 +4727,7 @@ function _renderInterfacesTable(container, si, asset) {
       '<th data-col-id="status">Status</th>' +
       '<th data-col-id="speed">Speed</th>' +
       '<th data-col-id="ip">IP</th>' +
+      '<th data-col-id="addressing" title="L3 addressing mode — FortiOS only (CMDB system/interface mode). DHCP, Static, or PPPoE; other sources show —">Addressing</th>' +
       '<th data-col-id="mac">MAC</th>' +
       vlanHeader +
       '<th data-col-id="in">In</th>' +
@@ -4977,67 +4997,91 @@ function _renderStorageTable(container, si, asset) {
   });
 }
 
-// Latest-snapshot temperature table. Each sensor name is a clickable link
-// that opens the per-sensor history slide-over (see openSensorDetailPanel).
-// We dropped the shared multi-sensor chart this section used to render — too
-// many sensors on one chart was unreadable; one sensor per modal is clearer.
+// Latest-snapshot hardware-sensor table (temperature / fan / voltage / power /
+// disk) with per-row alarm status. Each sensor name is a clickable link that
+// opens the per-sensor history slide-over (see openSensorDetailPanel). The
+// device's whole fgHwSensorTable / sensor-info table lands here, not just
+// temperatures.
+function _hwClassLabel(cls) {
+  switch (cls) {
+    case "temperature": return "Temp";
+    case "fan":         return "Fan";
+    case "voltage":     return "Voltage";
+    case "power":       return "Power";
+    case "disk":        return "Disk";
+    default:            return "Other";
+  }
+}
+function _hwReadingText(s) {
+  if (typeof s.value !== "number" || !isFinite(s.value)) return "—";
+  // Trim trailing zeros for a clean decimal; append the unit when present.
+  var v = Math.round(s.value * 1000) / 1000;
+  return s.unit ? (v + " " + s.unit) : String(v);
+}
+function _hwStatusCell(s) {
+  if (s.alarmStatus === "alarm") {
+    return '<span style="color:var(--color-danger,#e5484d);font-weight:600">⚠ alarm</span>';
+  }
+  if (s.alarmStatus === "ok") {
+    return '<span style="color:var(--color-success,#46a758)">ok</span>';
+  }
+  return '<span style="color:var(--color-text-tertiary)">—</span>';
+}
 function _renderTemperatures(container, si, asset) {
   if (!container) return;
   _updateTemperatureUpdatedStamp(asset, si);
-  var latestRaw = (si && si.temperatures) || [];
-  // Auto-hide sensors with no usable reading — devices commonly emit 0.0 °C
-  // as a "no value" sentinel for unpopulated SFP cages, missing daughter
-  // boards, etc. Treat null/NaN and exact-zero the same way. The hidden
-  // sensors are reachable via a "Show N sensors with no reading" toggle
-  // below the table.
-  var hasReading = function (t) {
-    return typeof t.celsius === "number" && isFinite(t.celsius) && t.celsius !== 0;
+  var latestRaw = (si && si.hardwareSensors) || [];
+  // Auto-hide sensors with no usable reading (null/NaN value — e.g. an
+  // unpopulated SFP cage or a sensor the agent couldn't read). Unlike the old
+  // temperature-only table we KEEP exact-zero readings: a 0 V rail or a PSU
+  // presence of 0 is meaningful. Hidden sensors stay reachable via the toggle.
+  var hasReading = function (s) {
+    return typeof s.value === "number" && isFinite(s.value);
   };
   var latest = latestRaw.filter(hasReading);
-  var hidden = latestRaw.filter(function (t) { return !hasReading(t); });
+  var hidden = latestRaw.filter(function (s) { return !hasReading(s); });
   if (latest.length === 0) {
     if (_isRestApiManagedNetworkDevice(asset, "temperature")) {
       var tempPolling = _assetMonitorStreamSource(asset, "temperature").polling || "REST API";
-      container.innerHTML = _notAvailableViaPollingHTML("Temperature", tempPolling);
+      container.innerHTML = _notAvailableViaPollingHTML("Hardware Sensors", tempPolling);
     } else {
-      // Check the temperature stream specifically — the dispatcher uses
+      // Check the hardware-sensor stream specifically — the dispatcher uses
       // temperaturePolling, not cpuMemoryPolling, so a firewall whose
-      // CPU/memory is on REST but whose temperature has already been flipped
-      // to SNMP shouldn't show the "switch to SNMP" nag. _resolvedStreamPolling
-      // honors the integration-tier override (via the effective-settings cache)
-      // as well as a per-asset override, so a FortiGate polling temperature via
-      // SNMP at the integration tier drops the banner once that fetch lands —
-      // see the re-render in _updateStaleBannersFromEffective.
+      // CPU/memory is on REST but whose hardware sensors have already been
+      // flipped to SNMP shouldn't show the "switch to SNMP" nag.
       var isFortinetRestFirewall = asset && asset.assetType === "firewall" &&
         _resolvedStreamPolling(asset, "temperature") === "rest_api";
       if (isFortinetRestFirewall) {
         var fgTempPolling = _assetMonitorStreamSource(asset, "temperature").polling || "REST API";
         var fgTempDesc = "Lower-end FortiGate models (60F/61F/91G class) do not support the sensor-info endpoint via REST API. " +
-          "Upgrade FortiOS or switch the <strong>Temperature</strong> polling method to <strong>SNMP</strong> on the integration's Monitoring tab to enable collection on affected models.";
-        container.innerHTML = _notAvailableViaPollingHTML("Temperature", fgTempPolling, fgTempDesc);
+          "Upgrade FortiOS or switch the <strong>Hardware Sensors</strong> polling method to <strong>SNMP</strong> on the integration's Monitoring tab to enable collection on affected models.";
+        container.innerHTML = _notAvailableViaPollingHTML("Hardware Sensors", fgTempPolling, fgTempDesc);
       } else {
-        container.innerHTML = '<p class="empty-state">No temperature sensors reported by this device.</p>';
+        container.innerHTML = '<p class="empty-state">No hardware sensors reported by this device.</p>';
       }
     }
     return;
   }
-  var rowFor = function (t) {
-    var c = (typeof t.celsius === "number") ? t.celsius.toFixed(1) + ' °C' : '—';
-    var name = '<a href="#" class="asset-temp-link" data-name="' + escapeHtml(t.sensorName) + '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(t.sensorName) + '</a>';
+  var rowFor = function (s) {
+    var name = '<a href="#" class="asset-temp-link" data-name="' + escapeHtml(s.sensorName) + '" style="color:var(--color-accent);text-decoration:none">' + escapeHtml(s.sensorName) + '</a>';
     return '<tr>' +
       '<td>' + name + '</td>' +
-      '<td class="mono">' + c + '</td>' +
+      '<td>' + escapeHtml(_hwClassLabel(s.sensorClass)) + '</td>' +
+      '<td class="mono">' + escapeHtml(_hwReadingText(s)) + '</td>' +
+      '<td>' + _hwStatusCell(s) + '</td>' +
     '</tr>';
   };
   var rows = latest.map(rowFor).join("");
   var hiddenRows = hidden.map(rowFor).join("");
   // Stale-state surfaces in the section header's updated stamp instead of a
-  // separate banner — the conflict between "header says 22s ago" and "banner
-  // says 15h ago" was operators reading the telemetry-pass timestamp vs the
-  // sensor-row timestamp. The two diverge whenever CPU/mem succeeds but the
-  // sensor pull fails; one stamp using the table-specific timestamp is
-  // unambiguous.
+  // separate banner — one stamp using the table-specific timestamp is
+  // unambiguous when CPU/mem succeeds but the sensor pull fails.
   _updateTemperatureUpdatedStamp(asset, si);
+  var headCells =
+    '<th data-col-id="sensor" data-col-required="true">Sensor</th>' +
+    '<th data-col-id="class">Class</th>' +
+    '<th data-col-id="reading">Reading</th>' +
+    '<th data-col-id="status">Status</th>';
   var toggleHTML = "";
   if (hidden.length > 0) {
     toggleHTML =
@@ -5046,23 +5090,19 @@ function _renderTemperatures(container, si, asset) {
           'Show ' + hidden.length + ' sensor' + (hidden.length === 1 ? '' : 's') + ' with no reading' +
         '</summary>' +
         '<div class="table-wrapper" style="margin-top:0.4rem">' +
-          '<table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-            '<th data-col-id="sensor" data-col-required="true">Sensor</th>' +
-            '<th data-col-id="reading">Reading</th>' +
+          '<table class="data-table" style="font-size:0.82rem"><thead><tr>' + headCells +
           '</tr></thead><tbody>' + hiddenRows + '</tbody></table>' +
         '</div>' +
       '</details>';
   }
   container.innerHTML =
-    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-      '<th data-col-id="sensor" data-col-required="true">Sensor</th>' +
-      '<th data-col-id="reading">Reading</th>' +
+    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' + headCells +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
     toggleHTML;
   if (typeof applyTableLayout === "function") {
     container.querySelectorAll("table").forEach(function (t) {
-      applyTableLayout(t, "asset-temperatures", {
-        onScreenshot: function (tbl) { _screenshotTableEl(tbl, "Temperatures"); },
+      applyTableLayout(t, "asset-hardware-sensors", {
+        onScreenshot: function (tbl) { _screenshotTableEl(tbl, "Hardware Sensors"); },
       });
     });
   }
@@ -5497,7 +5537,7 @@ async function openSensorDetailPanel(asset, sensorName) {
   var metaEl   = document.getElementById("sensor-panel-meta");
   var bodyEl   = document.getElementById("sensor-panel-body");
   var footerEl = document.getElementById("sensor-panel-footer");
-  titleEl.textContent = "Temperature — " + sensorName;
+  titleEl.textContent = "Sensor — " + sensorName;
   metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
   bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 1.25rem">Loading…</p>';
   footerEl.innerHTML =
@@ -5521,9 +5561,9 @@ async function openSensorDetailPanel(asset, sensorName) {
       '<button class="btn btn-sm btn-primary" id="btn-sensor-custom-apply">Apply</button>' +
     '</div>';
 
-  // Temperature samples are written by collectTelemetry on the same cadence as
-  // CPU/memory, so the section badge tracks the asset's resolved telemetry
-  // polling method (matches the System tab Temperatures section).
+  // Hardware-sensor samples are written by the telemetry pass on the same
+  // cadence as CPU/memory, so the section badge tracks the asset's resolved
+  // telemetry polling method (matches the System tab Hardware Sensors section).
   var sensorBadge = _streamSourceBadgeHTML(asset, "telemetry");
 
   bodyEl.innerHTML =
@@ -5615,14 +5655,16 @@ async function _loadSensorHistoryFor(assetId, sensorName, range, callOpts) {
   var opts = (typeof range === "string" || !range) ? { range: range || "1h" } : range;
   opts.sensorName = sensorName;
   try {
-    var data = await api.assets.temperatureHistory(assetId, opts);
-    var samples = (data.samples || []).filter(function (s) { return typeof s.celsius === "number"; });
+    var data = await api.assets.hardwareHistory(assetId, opts);
+    var samples = (data.samples || []).filter(function (s) { return typeof s.value === "number"; });
+    var unit = (samples[0] && samples[0].unit) || (data.samples && data.samples[0] && data.samples[0].unit) || "";
+    var unitSuffix = unit ? " " + unit : "";
     if (stats) {
       var st = data.stats || {};
       var sensorParts = [
-        { label: "Avg", value: typeof st.avgCelsius === "number" ? st.avgCelsius.toFixed(1) + " °C" : "—" },
-        { label: "Min", value: typeof st.minCelsius === "number" ? st.minCelsius.toFixed(1) + " °C" : "—" },
-        { label: "Max", value: typeof st.maxCelsius === "number" ? st.maxCelsius.toFixed(1) + " °C" : "—" },
+        { label: "Avg", value: typeof st.avgValue === "number" ? _hwFmtNum(st.avgValue) + unitSuffix : "—" },
+        { label: "Min", value: typeof st.minValue === "number" ? _hwFmtNum(st.minValue) + unitSuffix : "—" },
+        { label: "Max", value: typeof st.maxValue === "number" ? _hwFmtNum(st.maxValue) + unitSuffix : "—" },
       ];
       var sensorTierPart = _tierStatsPart(data);
       if (sensorTierPart) sensorParts.unshift(sensorTierPart);
@@ -5632,6 +5674,7 @@ async function _loadSensorHistoryFor(assetId, sensorName, range, callOpts) {
       since:   data.since,
       until:   data.until,
       subject: sensorName,
+      unit:    unit,
     });
     // Stash the active selection on the chart so silent ticks / probe-now
     // refetch the same view (canonical convention from TEMPLATES.md).
@@ -5659,18 +5702,27 @@ async function _loadSensorHistoryFor(assetId, sensorName, range, callOpts) {
   }
   // Custom date ranges are fixed historical windows — do not auto-refresh.
   if (opts.from && opts.to) return;
-  // Schedule next auto-refresh on the resolved telemetry cadence — temperature
-  // samples are written by collectTelemetry, not the response-time probe.
+  // Schedule next auto-refresh on the resolved telemetry cadence —
+  // hardware-sensor samples ride the telemetry pass, not the response-time probe.
   var settings = _monitorSettingsCache || {};
   var asset = _currentAssetForRefresh;
   var ms = _refreshIntervalMs(asset && asset.cpuMemoryIntervalSec, settings.cpuMemoryIntervalSeconds, 60);
   _scheduleSensorRefresh(assetId, sensorName, ms);
 }
 
+function _hwFmtNum(v) {
+  if (typeof v !== "number" || !isFinite(v)) return "—";
+  var a = Math.abs(v);
+  if (a >= 100) return v.toFixed(0);
+  if (a >= 10)  return v.toFixed(1);
+  return v.toFixed(2);
+}
 function _renderSensorChart(container, samples, opts) {
   opts = opts || {};
+  var unit = opts.unit || "";
+  var unitTickSuffix = unit ? (unit === "°C" ? "°C" : " " + unit) : "";
   if (samples.length === 0) {
-    container.textContent = "No temperature samples in this range yet.";
+    container.textContent = "No samples in this range yet.";
     return;
   }
   var W = container.clientWidth || 600, H = 240;
@@ -5688,22 +5740,27 @@ function _renderSensorChart(container, samples, opts) {
     return (d.getMonth() + 1) + "/" + d.getDate();
   }
 
-  var allC = samples.map(function (s) { return s.celsius; });
+  var allC = samples.map(function (s) { return s.value; });
   var minC = Math.min.apply(null, allC);
   var maxC = Math.max.apply(null, allC);
-  if (minC === maxC) { minC -= 1; maxC += 1; }
-  // 5° padding so a rock-steady sensor still gets a visible band
-  minC = Math.floor((minC - 2) / 5) * 5;
-  maxC = Math.ceil((maxC + 2) / 5) * 5;
+  if (minC === maxC) {
+    // Flat series — give it a visible band proportional to the value's scale
+    // (works for °C, RPM, V alike, unlike a fixed ±5° pad).
+    var pad = Math.max(Math.abs(minC) * 0.05, 1);
+    minC -= pad; maxC += pad;
+  } else {
+    var span = maxC - minC;
+    minC -= span * 0.1; maxC += span * 0.1;
+  }
 
   function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
   function yFor(c)  { return padT + innerH - ((c - minC) / (maxC - minC)) * innerH; }
 
-  var pts = samples.map(function (s) { return xFor(s.timestamp) + "," + yFor(s.celsius); }).join(" ");
+  var pts = samples.map(function (s) { return xFor(s.timestamp) + "," + yFor(s.value); }).join(" ");
   var hits = samples.map(function (s) {
-    return '<circle class="chart-hit" cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.celsius) + '" r="6" fill="transparent" style="cursor:crosshair"' +
+    return '<circle class="chart-hit" cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.value) + '" r="6" fill="transparent" style="cursor:crosshair"' +
       ' data-ts="' + escapeHtml(String(s.timestamp)) + '"' +
-      ' data-c="' + s.celsius + '"/>';
+      ' data-c="' + s.value + '"/>';
   }).join("");
 
   var ticks = "";
@@ -5712,7 +5769,7 @@ function _renderSensorChart(container, samples, opts) {
     var y = padT + innerH - (i / 4) * innerH;
     ticks +=
       '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
-      '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + v.toFixed(0) + '°C</text>';
+      '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + _hwFmtNum(v) + unitTickSuffix + '</text>';
   }
   var xTicks = "";
   for (var j = 0; j <= 5; j++) {
@@ -5733,7 +5790,7 @@ function _renderSensorChart(container, samples, opts) {
     '</text>' +
     '<text class="chart-axis-title" x="' + (padL + innerW / 2) + '" y="' + xLabelY + '" text-anchor="middle" font-size="11" fill="currentColor">Time</text>' +
     '<text class="chart-axis-title" x="' + yLabelX + '" y="' + yLabelY + '" text-anchor="middle" font-size="11" fill="currentColor"' +
-      ' transform="rotate(-90 ' + yLabelX + ' ' + yLabelY + ')">Temperature (°C)</text>';
+      ' transform="rotate(-90 ' + yLabelX + ' ' + yLabelY + ')">' + escapeHtml(unit ? "Reading (" + unit + ")" : "Reading") + '</text>';
 
   var clipId = _chartClipId("sensor");
   container.innerHTML =
@@ -5743,7 +5800,7 @@ function _renderSensorChart(container, samples, opts) {
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' +
         '<polyline points="' + pts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
-        samples.map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.celsius) + '" r="1.5" fill="var(--color-accent)"/>'; }).join("") +
+        samples.map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.value) + '" r="1.5" fill="var(--color-accent)"/>'; }).join("") +
         hits +
       '</g>' +
     '</svg>' + CHART_TOOLTIP_HTML;
@@ -5754,9 +5811,9 @@ function _renderSensorChart(container, samples, opts) {
   _wireChartTooltip(container, function (target) {
     var c = Number(target.getAttribute("data-c"));
     return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
-      '<div>' + c.toFixed(1) + ' °C</div>';
+      '<div>' + _hwFmtNum(c) + (unit ? " " + unit : "") + '</div>';
   });
-  _addChartScreenshotButton(container, "Temperature", { yAxis: "Temperature (°C)", subject: opts.subject });
+  _addChartScreenshotButton(container, opts.subject || "Sensor", { yAxis: (unit ? "Reading (" + unit + ")" : "Reading"), subject: opts.subject });
   _observeChartResize(container, function (c) { _renderSensorChart(c, samples, opts); });
 }
 

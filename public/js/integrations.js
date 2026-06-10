@@ -223,7 +223,7 @@ function _polarisPollingFourStreamHTML(idPrefix, source, current, opts) {
   var streams = [
     { key: "responseTime",  label: "Response time",  pollField: "responseTimePolling",  credField: "responseTimeCredentialId",  mibField: "responseTimeMibId"  },
     { key: "telemetry",     label: "CPU/Memory",     pollField: "cpuMemoryPolling",     credField: "cpuMemoryCredentialId",     mibField: "cpuMemoryMibId"     },
-    { key: "temperature",   label: "Temperature",    pollField: "temperaturePolling",   credField: "temperatureCredentialId",   mibField: "temperatureMibId"  },
+    { key: "temperature",   label: "Hardware Sensors", pollField: "temperaturePolling",   credField: "temperatureCredentialId",   mibField: "temperatureMibId"  },
     { key: "interfaces",    label: "Interfaces",     pollField: "interfacesPolling",    credField: "interfacesCredentialId",    mibField: "interfacesMibId"    },
     { key: "storage",       label: "Storage",        pollField: "storagePolling",       credField: "storageCredentialId",       mibField: null,                  noMib: true },
     { key: "lldp",          label: "LLDP neighbors", pollField: "lldpPolling",          credField: "lldpCredentialId",          mibField: "lldpMibId"          },
@@ -1004,7 +1004,7 @@ var _CLASS_SUBTAB_SPECS = {
 var _ALL_STREAMS = [
   { key: "responseTime", label: "Response Time", pollField: "responseTimePolling", mibStreamKey: "responseTime", intervalField: "intervalSeconds",            timeoutField: "probeTimeoutMs",       hasFailure: true },
   { key: "cpuMemory",    label: "CPU/Memory",    pollField: "cpuMemoryPolling",    mibStreamKey: "telemetry",    intervalField: "cpuMemoryIntervalSeconds",   timeoutField: "cpuMemoryTimeoutMs"   },
-  { key: "temperature",  label: "Temperature",   pollField: "temperaturePolling",  mibStreamKey: "temperature",  intervalField: "temperatureIntervalSeconds", timeoutField: "temperatureTimeoutMs" },
+  { key: "temperature",  label: "Hardware Sensors", pollField: "temperaturePolling",  mibStreamKey: "temperature",  intervalField: "temperatureIntervalSeconds", timeoutField: "temperatureTimeoutMs" },
   { key: "interfaces",   label: "Interfaces",    pollField: "interfacesPolling",   mibStreamKey: "interfaces",   intervalField: "systemInfoIntervalSeconds",  timeoutField: "systemInfoTimeoutMs", sharesCadenceWith: null },
   { key: "lldp",         label: "LLDP",          pollField: "lldpPolling",         mibStreamKey: "lldp",         intervalField: "lldpIntervalSeconds",        timeoutField: "lldpTimeoutMs"        },
   { key: "storage",      label: "Storage",       pollField: "storagePolling",      mibStreamKey: null,           intervalField: "storageIntervalSeconds",     timeoutField: "storageTimeoutMs",    noMib: true },

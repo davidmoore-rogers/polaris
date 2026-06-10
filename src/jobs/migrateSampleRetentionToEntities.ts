@@ -79,7 +79,7 @@ function legacyStreamToTier(raw: unknown, fallback: TierRetention): TierRetentio
         migrated = {
           assets:      legacyStreamToTier(raw.sample,     def.assets),
           cpuMem:      legacyStreamToTier(raw.telemetry,  def.cpuMem),
-          temperature: legacyStreamToTier(raw.telemetry,  def.temperature),
+          hardware:    legacyStreamToTier(raw.telemetry,  def.hardware),
           interfaces:  legacyStreamToTier(raw.systemInfo, def.interfaces),
           storage:     legacyStreamToTier(raw.systemInfo, def.storage),
           ipsec:       legacyStreamToTier(raw.systemInfo, def.ipsec),
