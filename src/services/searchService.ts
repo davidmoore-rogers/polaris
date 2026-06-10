@@ -8,6 +8,7 @@
  */
 
 import { prisma } from "../db.js";
+import { Prisma } from "../generated/prisma/client.js";
 import { isValidIpAddress, normalizeCidr, ipInCidr } from "../utils/cidr.js";
 
 export interface SearchHit {
@@ -71,6 +72,31 @@ function parseSearchScope(raw: string): { scope: SearchScope | null; query: stri
   return { scope, query: rest };
 }
 
+/**
+ * Split a (scope-stripped) query into search terms. Whitespace separates
+ * terms; a double-quoted run is kept as a single term so an operator can
+ * search for a value that itself contains spaces (e.g. `"rogers group" metro`
+ * → ["rogers group", "metro"]). A dangling opening quote with no closer is
+ * tolerated — everything after it becomes one phrase. Quote characters are
+ * stripped from the returned terms; empty terms are dropped.
+ *
+ * The returned terms are AND-combined by the query helpers: every term must
+ * match at least one searched column for a row to be returned.
+ */
+export function parseSearchTerms(raw: string): string[] {
+  const terms: string[] = [];
+  // Either a (optionally unterminated) "quoted phrase" or a run of non-space.
+  const re = /"([^"]*)"?|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    // Guard against zero-width matches (e.g. a lone `"`) looping forever.
+    if (m.index === re.lastIndex) re.lastIndex++;
+    const term = (m[1] !== undefined ? m[1] : m[2] ?? "").trim();
+    if (term) terms.push(term);
+  }
+  return terms;
+}
+
 /** Normalize a MAC to UPPER:CASE:COLON:FORM if recognizable, else null. */
 export function normalizeMac(raw: string): string | null {
   const compact = raw.replace(/[\s:\-.]/g, "").toLowerCase();
@@ -106,34 +132,39 @@ export async function searchAll(rawQuery: string): Promise<SearchResults> {
   const q = scopedQuery;
   if (q.length < minLen) return empty;
 
-  const mac = normalizeMac(q);
-  const isIp = isIpLike(q);
-  const isCidr = !isIp && isCidrLike(q) && q.includes("/");
+  // Split into AND-combined terms (quoted phrases stay whole). The IP / CIDR
+  // / MAC special-casing below is a single-value concept, so it only applies
+  // when the operator typed exactly one term — a multi-term query is always a
+  // plain text "match all of these" search.
+  const terms = parseSearchTerms(q);
+  if (terms.length === 0) return empty;
+  const singleTerm = terms.length === 1;
 
-  // Text pattern used for contains-insensitive matches
-  const like = q;
+  const mac = singleTerm ? normalizeMac(q) : null;
+  const isIp = singleTerm && isIpLike(q);
+  const isCidr = singleTerm && !isIp && isCidrLike(q) && q.includes("/");
 
   // Scoped path: run only the requested group's query with the elevated
   // cap and return everything else empty. Operators who pick a scope
   // explicitly want the full enumeration, not the typeahead-tuned top 8.
   if (scope === "block") {
-    const blocks = await searchBlocks(like, SCOPED_LIMIT);
+    const blocks = await searchBlocks(terms, SCOPED_LIMIT);
     return { ...empty, blocks: blocks.map(blockHit) };
   }
   if (scope === "network") {
-    const subnets = await searchSubnets(like, isCidr ? q : null, SCOPED_LIMIT);
+    const subnets = await searchSubnets(terms, isCidr ? q : null, SCOPED_LIMIT);
     return { ...empty, subnets: subnets.map(subnetHit) };
   }
   if (scope === "reservation") {
-    const reservations = await searchReservations(like, isIp ? q : null, SCOPED_LIMIT);
+    const reservations = await searchReservations(terms, isIp ? q : null, SCOPED_LIMIT);
     return { ...empty, reservations: reservations.map(reservationHit) };
   }
   if (scope === "map") {
-    const sites = await searchPinnedFirewalls(like, mac, SCOPED_LIMIT);
+    const sites = await searchPinnedFirewalls(terms, mac, SCOPED_LIMIT);
     return { ...empty, sites: sites.map(siteHit) };
   }
   if (scope === "asset") {
-    const assetRows = await searchAssets(like, mac, SCOPED_LIMIT);
+    const assetRows = await searchAssets(terms, mac, SCOPED_LIMIT);
     const originBySrcId = await resolveOriginFortigates(assetRows.map((a) => a.id));
     const assetHits = assetRows.map((a) => decorateAssetHit(a, originBySrcId.get(a.id)));
     return { ...empty, assets: assetHits };
@@ -144,11 +175,11 @@ export async function searchAll(rawQuery: string): Promise<SearchResults> {
   // they don't get crowded out of `assets` by alphabetically-earlier
   // workstations/switches matching the same site code on large fleets.
   const [blocks, subnets, reservations, assets, sites, ipHit] = await Promise.all([
-    searchBlocks(like),
-    searchSubnets(like, isCidr ? q : null),
-    searchReservations(like, isIp ? q : null),
-    searchAssets(like, mac),
-    searchPinnedFirewalls(like, mac),
+    searchBlocks(terms),
+    searchSubnets(terms, isCidr ? q : null),
+    searchReservations(terms, isIp ? q : null),
+    searchAssets(terms, mac),
+    searchPinnedFirewalls(terms, mac),
     isIp ? resolveIp(q) : Promise.resolve(null),
   ]);
 
@@ -251,53 +282,71 @@ async function resolveOriginFortigates(
 
 // ─── Query helpers ───────────────────────────────────────────────────────────
 
-async function searchBlocks(like: string, limit = PER_GROUP_LIMIT) {
+// Build an `AND: [{ OR: [col contains term, ...] }, ...]` clause: every term
+// must match at least one of the named columns. Each column entry is produced
+// by `cols(term)`. A single term collapses to a one-element AND, preserving
+// the pre-multi-term single-`contains` behavior exactly.
+function andOfTerms(terms: string[], cols: (t: string) => any[]): any[] {
+  return terms.map((t) => ({ OR: cols(t) }));
+}
+
+async function searchBlocks(terms: string[], limit = PER_GROUP_LIMIT) {
   return prisma.ipBlock.findMany({
     where: {
-      OR: [
-        { name: { contains: like, mode: "insensitive" } },
-        { description: { contains: like, mode: "insensitive" } },
-        { cidr: { contains: like, mode: "insensitive" } },
-      ],
+      AND: andOfTerms(terms, (t) => [
+        { name: { contains: t, mode: "insensitive" } },
+        { description: { contains: t, mode: "insensitive" } },
+        { cidr: { contains: t, mode: "insensitive" } },
+      ]),
     },
     take: limit,
     orderBy: { name: "asc" },
   });
 }
 
-async function searchSubnets(like: string, cidrExact: string | null, limit = PER_GROUP_LIMIT) {
+async function searchSubnets(terms: string[], cidrExact: string | null, limit = PER_GROUP_LIMIT) {
   let cidrNormalized: string | null = null;
   if (cidrExact) {
     try { cidrNormalized = normalizeCidr(cidrExact); } catch { /* ignore */ }
   }
 
+  const andClauses = andOfTerms(terms, (t) => [
+    { cidr: { contains: t, mode: "insensitive" as const } },
+    { name: { contains: t, mode: "insensitive" as const } },
+    { purpose: { contains: t, mode: "insensitive" as const } },
+    { fortigateDevice: { contains: t, mode: "insensitive" as const } },
+  ]);
+
   return prisma.subnet.findMany({
-    where: {
-      OR: [
-        ...(cidrNormalized ? [{ cidr: cidrNormalized }] : []),
-        { cidr: { contains: like, mode: "insensitive" as const } },
-        { name: { contains: like, mode: "insensitive" as const } },
-        { purpose: { contains: like, mode: "insensitive" as const } },
-        { fortigateDevice: { contains: like, mode: "insensitive" as const } },
-      ],
-    },
+    // `cidrExact` is only set for single-term CIDR queries; OR the normalized
+    // exact-CIDR match alongside the term scan so `network:10.1.1.0/24` still
+    // resolves the exact subnet even when the stored host bits differ.
+    where: cidrNormalized
+      ? { OR: [{ cidr: cidrNormalized }, { AND: andClauses }] }
+      : { AND: andClauses },
     take: limit,
     orderBy: { name: "asc" },
   });
 }
 
-async function searchReservations(like: string, ipExact: string | null, limit = PER_GROUP_LIMIT) {
+async function searchReservations(terms: string[], ipExact: string | null, limit = PER_GROUP_LIMIT) {
+  const andClauses = andOfTerms(terms, (t) => [
+    { hostname: { contains: t, mode: "insensitive" as const } },
+    { owner: { contains: t, mode: "insensitive" as const } },
+    { projectRef: { contains: t, mode: "insensitive" as const } },
+    { notes: { contains: t, mode: "insensitive" as const } },
+    { ipAddress: { contains: t, mode: "insensitive" as const } },
+  ]);
+
   return prisma.reservation.findMany({
+    // `ipExact` is single-term only; OR the exact-IP match alongside the term
+    // scan so an IP query resolves the reservation regardless of which column
+    // the substring would have hit.
     where: {
       status: "active",
-      OR: [
-        ...(ipExact ? [{ ipAddress: ipExact }] : []),
-        { hostname: { contains: like, mode: "insensitive" as const } },
-        { owner: { contains: like, mode: "insensitive" as const } },
-        { projectRef: { contains: like, mode: "insensitive" as const } },
-        { notes: { contains: like, mode: "insensitive" as const } },
-        ...(ipExact ? [] : [{ ipAddress: { contains: like, mode: "insensitive" as const } }]),
-      ],
+      ...(ipExact
+        ? { OR: [{ ipAddress: ipExact }, { AND: andClauses }] }
+        : { AND: andClauses }),
     },
     include: { subnet: { select: { id: true, cidr: true, name: true } } },
     take: limit,
@@ -305,59 +354,74 @@ async function searchReservations(like: string, ipExact: string | null, limit = 
   });
 }
 
-async function searchAssets(like: string, mac: string | null, limit = PER_GROUP_LIMIT) {
-  return runAssetSearch(like, mac, {}, limit);
+async function searchAssets(terms: string[], mac: string | null, limit = PER_GROUP_LIMIT) {
+  return runAssetSearch(terms, mac, {}, limit);
 }
 
-async function searchPinnedFirewalls(like: string, mac: string | null, limit = PER_GROUP_LIMIT) {
-  return runAssetSearch(like, mac, {
+async function searchPinnedFirewalls(terms: string[], mac: string | null, limit = PER_GROUP_LIMIT) {
+  return runAssetSearch(terms, mac, {
     assetType: "firewall",
     latitude: { not: null },
     longitude: { not: null },
   }, limit);
 }
 
-async function runAssetSearch(like: string, mac: string | null, baseFilter: any, limit = PER_GROUP_LIMIT) {
-  const or: any[] = [
-    { hostname: { contains: like, mode: "insensitive" as const } },
-    { dnsName: { contains: like, mode: "insensitive" as const } },
-    { assetTag: { contains: like, mode: "insensitive" as const } },
-    { serialNumber: { contains: like, mode: "insensitive" as const } },
-    { ipAddress: { contains: like, mode: "insensitive" as const } },
-    { manufacturer: { contains: like, mode: "insensitive" as const } },
-    { model: { contains: like, mode: "insensitive" as const } },
-    { assignedTo: { contains: like, mode: "insensitive" as const } },
-    { department: { contains: like, mode: "insensitive" as const } },
-  ];
-  if (mac) {
-    // Stored MAC case is inconsistent — some discovery paths uppercase
-    // (monitoringService, FMG CMDB), others store the device-reported value
-    // as-is (FMG endpoint clients, often lowercase). Match case-insensitively
-    // so all four typed forms (colon / dash / dot / bare) resolve regardless
-    // of stored case.
-    or.push({ macAddress: { equals: mac, mode: "insensitive" as const } });
-  } else {
-    or.push({ macAddress: { contains: like, mode: "insensitive" as const } });
-  }
+async function runAssetSearch(terms: string[], mac: string | null, baseFilter: any, limit = PER_GROUP_LIMIT) {
+  // Per-term OR across the Asset's own columns. AND-combined below so every
+  // term must hit at least one column (multi-word "match all" search). `mac`
+  // is set only for single-term MAC queries — stored MAC case is inconsistent
+  // (monitoringService / FMG CMDB uppercase; FMG endpoint clients as-is, often
+  // lowercase), so match the normalized form case-insensitively rather than a
+  // substring of the typed separators.
+  const assetCols = (t: string): any[] => {
+    const cols: any[] = [
+      { hostname: { contains: t, mode: "insensitive" as const } },
+      { dnsName: { contains: t, mode: "insensitive" as const } },
+      { assetTag: { contains: t, mode: "insensitive" as const } },
+      { serialNumber: { contains: t, mode: "insensitive" as const } },
+      { ipAddress: { contains: t, mode: "insensitive" as const } },
+      { manufacturer: { contains: t, mode: "insensitive" as const } },
+      { model: { contains: t, mode: "insensitive" as const } },
+      { assignedTo: { contains: t, mode: "insensitive" as const } },
+      { department: { contains: t, mode: "insensitive" as const } },
+    ];
+    cols.push(
+      mac
+        ? { macAddress: { equals: mac, mode: "insensitive" as const } }
+        : { macAddress: { contains: t, mode: "insensitive" as const } },
+    );
+    return cols;
+  };
+  const assetAnd = andOfTerms(terms, assetCols);
+
   // AssetSource cross-search — operator-typed searches by Entra deviceId,
   // AD objectGUID, or FortiGate serial used to hit `Asset.assetTag`
   // (entra:..., ad:..., fgt:... prefixes). After Phase 4d cuts those
   // assetTag writes, the canonical key is on AssetSource.externalId.
   // Run both queries in parallel and merge — old rows still match the
-  // legacy assetTag column, new rows match via AssetSource. Strip the
-  // common "<kind>:" prefix so an operator can paste either form.
-  const sourceQuery = stripSourceKindPrefix(like);
-  const likePattern = `%${like}%`;
+  // legacy assetTag column, new rows match via AssetSource. The "<kind>:"
+  // prefix is a single-token paste form, so only strip it when there's one
+  // term; multi-term searches match each term as-is.
+  const sourceTerms = terms.length === 1 ? [stripSourceKindPrefix(terms[0])] : terms;
   const jsonLimit = limit * 4;
+  // Per-term ILIKE fragments AND-combined within each side of the JSON UNION.
+  const usersWhere = Prisma.join(
+    terms.map((t) => Prisma.sql`"associatedUsers"::text ILIKE ${`%${t}%`}`),
+    " AND ",
+  );
+  const observedWhere = Prisma.join(
+    terms.map((t) => Prisma.sql`observed::text ILIKE ${`%${t}%`}`),
+    " AND ",
+  );
   const [byAsset, sourceHits, macSideHits, ipSideHits, ipHistHits, jsonHitIds] = await Promise.all([
     prisma.asset.findMany({
-      where: { ...baseFilter, OR: or },
+      where: { ...baseFilter, AND: assetAnd },
       take: limit,
       orderBy: { hostname: "asc" },
     }),
     prisma.assetSource.findMany({
       where: {
-        externalId: { contains: sourceQuery, mode: "insensitive" as const },
+        AND: sourceTerms.map((t) => ({ externalId: { contains: t, mode: "insensitive" as const } })),
         asset: baseFilter,
       },
       include: {
@@ -370,9 +434,9 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any,
     // would otherwise be invisible to search.
     prisma.assetMacAddress.findMany({
       where: {
-        mac: mac
-          ? { equals: mac, mode: "insensitive" as const }
-          : { contains: like, mode: "insensitive" as const },
+        ...(mac
+          ? { mac: { equals: mac, mode: "insensitive" as const } }
+          : { AND: terms.map((t) => ({ mac: { contains: t, mode: "insensitive" as const } })) }),
         asset: baseFilter,
       },
       include: { asset: true },
@@ -384,7 +448,7 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any,
     // side table.
     prisma.assetAssociatedIp.findMany({
       where: {
-        ip: { contains: like, mode: "insensitive" as const },
+        AND: terms.map((t) => ({ ip: { contains: t, mode: "insensitive" as const } })),
         asset: baseFilter,
       },
       include: { asset: true },
@@ -398,7 +462,7 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any,
     // makes a since-rotated-off address still resolve to the asset.
     prisma.assetIpHistory.findMany({
       where: {
-        ip: { contains: like, mode: "insensitive" as const },
+        AND: terms.map((t) => ({ ip: { contains: t, mode: "insensitive" as const } })),
         asset: baseFilter,
       },
       include: { asset: true },
@@ -410,13 +474,14 @@ async function runAssetSearch(like: string, mac: string | null, baseFilter: any,
     // source?}]`) and `AssetSource.observed` (Entra/AD/Intune raw blobs —
     // SID, UPN, onPremisesSecurityIdentifier, etc.). Backed by GIN trigram
     // indexes added in 20260507200000_search_json_trgm_indexes; falls back
-    // to a seq scan only for queries shorter than 3 chars.
+    // to a seq scan only for queries shorter than 3 chars. Multi-term ANDs
+    // each term's ILIKE within a single blob (e.g. first + last name).
     prisma.$queryRaw<{ assetId: string }[]>`
       SELECT id AS "assetId" FROM assets
-      WHERE "associatedUsers"::text ILIKE ${likePattern}
+      WHERE ${usersWhere}
       UNION
       SELECT "assetId" FROM asset_sources
-      WHERE observed::text ILIKE ${likePattern}
+      WHERE ${observedWhere}
       LIMIT ${jsonLimit}
     `,
   ]);

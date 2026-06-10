@@ -21,10 +21,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const mocks = vi.hoisted(() => {
   return {
     createMany: {
-      assetMonitorSample:     vi.fn(async () => ({ count: 0 })),
-      assetTelemetrySample:   vi.fn(async () => ({ count: 0 })),
-      assetTemperatureSample: vi.fn(async () => ({ count: 0 })),
-      assetInterfaceSample:   vi.fn(async () => ({ count: 0 })),
+      assetMonitorSample:        vi.fn(async () => ({ count: 0 })),
+      assetTelemetrySample:      vi.fn(async () => ({ count: 0 })),
+      assetHardwareSensorSample: vi.fn(async () => ({ count: 0 })),
+      assetInterfaceSample:      vi.fn(async () => ({ count: 0 })),
       assetStorageSample:     vi.fn(async () => ({ count: 0 })),
       assetIpsecTunnelSample: vi.fn(async () => ({ count: 0 })),
     },
@@ -39,10 +39,10 @@ const startSampleWriteTimer = mocks.startSampleWriteTimer;
 
 vi.mock("../../src/db.js", () => ({
   prisma: {
-    assetMonitorSample:     { createMany: mocks.createMany.assetMonitorSample },
-    assetTelemetrySample:   { createMany: mocks.createMany.assetTelemetrySample },
-    assetTemperatureSample: { createMany: mocks.createMany.assetTemperatureSample },
-    assetInterfaceSample:   { createMany: mocks.createMany.assetInterfaceSample },
+    assetMonitorSample:        { createMany: mocks.createMany.assetMonitorSample },
+    assetTelemetrySample:      { createMany: mocks.createMany.assetTelemetrySample },
+    assetHardwareSensorSample: { createMany: mocks.createMany.assetHardwareSensorSample },
+    assetInterfaceSample:      { createMany: mocks.createMany.assetInterfaceSample },
     assetStorageSample:     { createMany: mocks.createMany.assetStorageSample },
     assetIpsecTunnelSample: { createMany: mocks.createMany.assetIpsecTunnelSample },
   },
@@ -56,7 +56,7 @@ vi.mock("../../src/metrics.js", () => ({
 import {
   enqueueMonitorSample,
   enqueueTelemetrySample,
-  enqueueTemperatureSamples,
+  enqueueHardwareSensorSamples,
   enqueueInterfaceSamples,
   enqueueStorageSamples,
   enqueueIpsecTunnelSamples,
@@ -123,7 +123,7 @@ describe("sampleWriteBuffer — enqueue + flush", () => {
     expect(createManyMocks.assetInterfaceSample.mock.calls[0][0].data).toHaveLength(2);
 
     // Untouched tables shouldn't have fired any write.
-    expect(createManyMocks.assetTemperatureSample).not.toHaveBeenCalled();
+    expect(createManyMocks.assetHardwareSensorSample).not.toHaveBeenCalled();
     expect(createManyMocks.assetStorageSample).not.toHaveBeenCalled();
     expect(createManyMocks.assetIpsecTunnelSample).not.toHaveBeenCalled();
   });
@@ -166,7 +166,7 @@ describe("sampleWriteBuffer — enqueue + flush", () => {
     enqueueMonitorSample(probeRow("a", true));
     await flushAllSampleBuffers();
     expect(createManyMocks.assetTelemetrySample).not.toHaveBeenCalled();
-    expect(createManyMocks.assetTemperatureSample).not.toHaveBeenCalled();
+    expect(createManyMocks.assetHardwareSensorSample).not.toHaveBeenCalled();
     expect(createManyMocks.assetInterfaceSample).not.toHaveBeenCalled();
   });
 });
@@ -223,10 +223,10 @@ describe("sampleWriteBuffer — shutdown", () => {
 });
 
 describe("sampleWriteBuffer — multi-table fan-out", () => {
-  it("temperatures, storage, ipsec all flush in parallel-safe paths", async () => {
-    enqueueTemperatureSamples([
-      { assetId: "a", timestamp: now, sensorName: "cpu0", celsius: 42 },
-      { assetId: "a", timestamp: now, sensorName: "cpu1", celsius: 44 },
+  it("hardware sensors, storage, ipsec all flush in parallel-safe paths", async () => {
+    enqueueHardwareSensorSamples([
+      { assetId: "a", timestamp: now, sensorName: "cpu0", sensorClass: "temperature", value: 42, unit: "°C", alarmStatus: "ok" },
+      { assetId: "a", timestamp: now, sensorName: "FAN 1", sensorClass: "fan", value: 8800, unit: "RPM", alarmStatus: "ok" },
     ]);
     enqueueStorageSamples([
       { assetId: "a", timestamp: now, mountPath: "/", totalBytes: 100n, usedBytes: 30n },
@@ -241,17 +241,17 @@ describe("sampleWriteBuffer — multi-table fan-out", () => {
 
     await flushAllSampleBuffers();
 
-    expect(createManyMocks.assetTemperatureSample.mock.calls[0][0].data).toHaveLength(2);
+    expect(createManyMocks.assetHardwareSensorSample.mock.calls[0][0].data).toHaveLength(2);
     expect(createManyMocks.assetStorageSample.mock.calls[0][0].data).toHaveLength(1);
     expect(createManyMocks.assetIpsecTunnelSample.mock.calls[0][0].data).toHaveLength(1);
   });
 
   it("empty-array enqueues do not trigger a write", async () => {
-    enqueueTemperatureSamples([]);
+    enqueueHardwareSensorSamples([]);
     enqueueStorageSamples([]);
     enqueueIpsecTunnelSamples([]);
     await flushAllSampleBuffers();
-    expect(createManyMocks.assetTemperatureSample).not.toHaveBeenCalled();
+    expect(createManyMocks.assetHardwareSensorSample).not.toHaveBeenCalled();
     expect(createManyMocks.assetStorageSample).not.toHaveBeenCalled();
     expect(createManyMocks.assetIpsecTunnelSample).not.toHaveBeenCalled();
   });

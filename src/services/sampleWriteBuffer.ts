@@ -28,7 +28,7 @@
  * Eight append-only tables are batched here:
  *   - asset_monitor_samples         (probe outcomes)
  *   - asset_telemetry_samples       (CPU + memory)
- *   - asset_temperature_samples     (per-sensor)
+ *   - asset_hardware_sensor_samples (per hardware sensor: temp/fan/voltage/…)
  *   - asset_interface_samples       (per-interface scrape)
  *   - asset_storage_samples         (per-mountpoint)
  *   - asset_ipsec_tunnel_samples    (per-tunnel)
@@ -70,11 +70,14 @@ export interface TelemetrySampleRow {
   memTotalBytes: bigint | null;
 }
 
-export interface TemperatureSampleRow {
+export interface HardwareSensorSampleRow {
   assetId: string;
   timestamp: Date;
   sensorName: string;
-  celsius: number | null;
+  sensorClass: string; // temperature | fan | voltage | power | disk | other
+  value: number | null;
+  unit: string | null;
+  alarmStatus: string | null;
 }
 
 /** Selection cadence for system-info samples (interface / storage / ipsec).
@@ -106,6 +109,7 @@ export interface InterfaceSampleRow {
   trunksAllVlans: boolean;
   alias: string | null;
   description: string | null;
+  addressingMode: string | null;
 }
 
 export interface StorageSampleRow {
@@ -169,7 +173,7 @@ export interface SdwanRuleSampleRow {
 const buffers = {
   monitor:        [] as MonitorSampleRow[],
   telemetry:      [] as TelemetrySampleRow[],
-  temperature:    [] as TemperatureSampleRow[],
+  hardware:       [] as HardwareSensorSampleRow[],
   iface:          [] as InterfaceSampleRow[],
   storage:        [] as StorageSampleRow[],
   ipsecTunnel:    [] as IpsecTunnelSampleRow[],
@@ -186,7 +190,7 @@ type BufferKey = keyof typeof buffers;
 const TABLE_LABEL: Record<BufferKey, string> = {
   monitor:     "asset_monitor_samples",
   telemetry:   "asset_telemetry_samples",
-  temperature: "asset_temperature_samples",
+  hardware:    "asset_hardware_sensor_samples",
   iface:       "asset_interface_samples",
   storage:     "asset_storage_samples",
   ipsecTunnel: "asset_ipsec_tunnel_samples",
@@ -223,11 +227,11 @@ export function enqueueTelemetrySample(row: TelemetrySampleRow): void {
   if (buffers.telemetry.length >= SIZE_THRESHOLD) void flushTable("telemetry");
 }
 
-export function enqueueTemperatureSamples(rows: TemperatureSampleRow[]): void {
+export function enqueueHardwareSensorSamples(rows: HardwareSensorSampleRow[]): void {
   if (rows.length === 0) return;
-  buffers.temperature.push(...rows);
-  setSampleBufferDepth(TABLE_LABEL.temperature, buffers.temperature.length);
-  if (buffers.temperature.length >= SIZE_THRESHOLD) void flushTable("temperature");
+  buffers.hardware.push(...rows);
+  setSampleBufferDepth(TABLE_LABEL.hardware, buffers.hardware.length);
+  if (buffers.hardware.length >= SIZE_THRESHOLD) void flushTable("hardware");
 }
 
 export function enqueueInterfaceSamples(rows: InterfaceSampleRow[]): void {
@@ -272,7 +276,7 @@ export function enqueueSdwanRuleSamples(rows: SdwanRuleSampleRow[]): void {
 // is independently rescheduled if a flush is already running.
 
 const flushing: Record<BufferKey, boolean> = {
-  monitor: false, telemetry: false, temperature: false,
+  monitor: false, telemetry: false, hardware: false,
   iface: false, storage: false, ipsecTunnel: false,
   perfSla: false, sdwanRule: false,
 };
@@ -320,8 +324,8 @@ async function writeBatch(key: BufferKey, batch: unknown[]): Promise<void> {
     case "telemetry":
       await prisma.assetTelemetrySample.createMany({ data: batch as TelemetrySampleRow[] });
       return;
-    case "temperature":
-      await prisma.assetTemperatureSample.createMany({ data: batch as TemperatureSampleRow[] });
+    case "hardware":
+      await prisma.assetHardwareSensorSample.createMany({ data: batch as HardwareSensorSampleRow[] });
       return;
     case "iface":
       await prisma.assetInterfaceSample.createMany({ data: batch as InterfaceSampleRow[] });

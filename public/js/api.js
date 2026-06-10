@@ -332,7 +332,7 @@ const api = {
       }
       return request("GET", `/assets/${id}/storage-history?` + qs.join("&"));
     },
-    temperatureHistory:   (id, opts) => {
+    hardwareHistory:      (id, opts) => {
       if (typeof opts === "string") opts = { range: opts };
       opts = opts || {};
       var qs = [];
@@ -343,7 +343,7 @@ const api = {
       } else if (opts.range) {
         qs.push("range=" + encodeURIComponent(opts.range));
       }
-      return request("GET", `/assets/${id}/temperature-history` + (qs.length ? "?" + qs.join("&") : ""));
+      return request("GET", `/assets/${id}/hardware-history` + (qs.length ? "?" + qs.join("&") : ""));
     },
     ipsecHistory:         (id, tunnelName, opts) => {
       if (typeof opts === "string") opts = { range: opts };

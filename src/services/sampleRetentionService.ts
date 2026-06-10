@@ -15,7 +15,7 @@
  *
  *   assets       — asset_monitor_samples        (per-asset response-time probe)
  *   cpuMem       — asset_telemetry_samples       (per-asset CPU / memory)
- *   temperature  — asset_temperature_samples     (per-asset sensor)
+ *   hardware     — asset_hardware_sensor_samples  (per hardware sensor)
  *   interfaces   — asset_interface_samples        (per-interface)
  *   storage      — asset_storage_samples          (per-volume)
  *   ipsec        — asset_ipsec_tunnel_samples     (per-tunnel)
@@ -25,7 +25,7 @@
  * stamped `cadence="fast"` and kept at full retention with rollups. UNSELECTED
  * (bulk) samples (`cadence="slow"` / legacy NULL) are kept for a FIXED
  * `UNSELECTED_DETAIL_HOURS` and never rolled up; that 24h is a property of being
- * unselected, not a configurable cell. assets / cpuMem / temperature have no
+ * unselected, not a configurable cell. assets / cpuMem / hardware have no
  * selection concept — their retention applies to every row.
  *
  * Encoding (per tier): positive = N days; 0 = tier OFF (pruned away — do not
@@ -92,7 +92,7 @@ export function unselectedSlowPruneWindow(
 export type RetentionEntity =
   | "assets"
   | "cpuMem"
-  | "temperature"
+  | "hardware"
   | "interfaces"
   | "storage"
   | "ipsec"
@@ -103,7 +103,7 @@ export type RetentionTier = "detail" | "hourly" | "daily";
 export const RETENTION_ENTITIES: RetentionEntity[] = [
   "assets",
   "cpuMem",
-  "temperature",
+  "hardware",
   "interfaces",
   "storage",
   "ipsec",
@@ -136,7 +136,7 @@ export function defaultSampleRetention(): SampleRetention {
   return {
     assets:      defaultTier(),
     cpuMem:      defaultTier(),
-    temperature: defaultTier(),
+    hardware:    defaultTier(),
     interfaces:  defaultTier(),
     storage:     defaultTier(),
     ipsec:       defaultTier(),

@@ -605,6 +605,7 @@ function _showSearchShortcutHints() {
     '<div class="gs-group gs-hint-group">' +
     '  <div class="gs-group-label">Search shortcuts — scoped searches return up to 200 results (no top-8 cap)</div>' +
     rows +
+    '  <div class="gs-hint-foot">Type multiple words to match all of them · wrap a phrase in "quotes" to keep spaces</div>' +
     '</div>';
   dropdown.style.display = "block";
 
