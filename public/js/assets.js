@@ -6662,7 +6662,11 @@ function _streamCredential(asset, stream, resolvedPolling, effectiveResolved) {
 // system-info column since both ride the system-info pass.
 function _streamIntervalAssetField(stream) {
   if (stream === "responseTime") return "monitorIntervalSec";
-  if (stream === "telemetry")    return "cpuMemoryIntervalSec";
+  // Hardware sensors (internal key "temperature") ride the telemetry cadence —
+  // they're collected alongside CPU/memory in runTelemetryFor — so the badge
+  // shows the telemetry interval as the true poll rate. (If an independent
+  // hardware-sensor cadence ever lands, switch this to temperatureIntervalSec.)
+  if (stream === "telemetry" || stream === "temperature") return "cpuMemoryIntervalSec";
   if (stream === "interfaces" || stream === "lldp") return "systemInfoIntervalSec";
   return null;
 }
@@ -6672,7 +6676,8 @@ function _streamIntervalAssetField(stream) {
 // cadence — same rationale as the per-asset mapping above.
 function _streamIntervalEffectiveField(stream) {
   if (stream === "responseTime") return "intervalSeconds";
-  if (stream === "telemetry")    return "cpuMemoryIntervalSeconds";
+  // Hardware sensors ride the telemetry cadence (see _streamIntervalAssetField).
+  if (stream === "telemetry" || stream === "temperature") return "cpuMemoryIntervalSeconds";
   if (stream === "interfaces" || stream === "lldp") return "systemInfoIntervalSeconds";
   return null;
 }
