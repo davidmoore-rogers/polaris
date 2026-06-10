@@ -3110,6 +3110,15 @@ export interface SystemInfoSample {
    * assets; FortiOS-REST AP telemetry path stays undefined.
    */
   wirelessStations?: WirelessStationSample[];
+  /**
+   * FortiLink-enabled interface names (the fortilink-flagged interfaces + their
+   * member ports) seen on this FortiGate, from CMDB `system/interface`. Used to
+   * exclude FortiLink links from LLDP when the integration's
+   * `excludeFortilinkLldp` toggle is on. Only populated by the FortiOS REST
+   * path (which fetches CMDB); `[]` when CMDB returned no fortilink interfaces,
+   * `undefined` when CMDB wasn't fetched (SNMP-interfaces path).
+   */
+  fortilinkInterfaces?: string[];
 }
 
 export interface CollectionResult<T> {
@@ -3774,6 +3783,34 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
       if (effective.storagePolling !== "snmp") {
         data.storage = [];
       }
+      // FortiLink LLDP exclusion (opt-in per integration, default off). Drop
+      // LLDP neighbors learned on FortiLink-enabled interfaces — the fortilink
+      // aggregate + its member ports — so internal FortiGate↔FortiSwitch links
+      // don't clutter the Neighbor column. Authoritative source is the CMDB
+      // `fortilink` flag. FortiGate firewalls only (the CMDB query targets the
+      // polled device; managed switches/APs carry no FortiGate CMDB here). The
+      // REST-interfaces path already fetched CMDB (data.fortilinkInterfaces is
+      // set, possibly []); the SNMP-interfaces path didn't, so we make one
+      // gated CMDB call. Peer-inferred FortiLink rows are unaffected — they're
+      // synthesized from topology, not LLDP.
+      if (
+        isFortinetSrc && integration && !isManagedSwitchOrAp &&
+        ((integration as any).config as any)?.excludeFortilinkLldp === true &&
+        Array.isArray(data.lldpNeighbors) && data.lldpNeighbors.length > 0
+      ) {
+        const endFl = startPhase("systeminfo.lldp_fortilink_exclude");
+        let fortilinkSet: Set<string> | null =
+          data.fortilinkInterfaces !== undefined ? new Set(data.fortilinkInterfaces) : null;
+        if (fortilinkSet === null) {
+          const fg = buildFortinetConfig(targetIp, integration as any);
+          fortilinkSet = "error" in fg ? new Set() : await fetchFortilinkInterfaceSet(fg, sysInfoTimeout).catch(() => new Set<string>());
+        }
+        const before = data.lldpNeighbors.length;
+        if (fortilinkSet.size > 0) {
+          data.lldpNeighbors = data.lldpNeighbors.filter((n) => !fortilinkSet!.has(n.localIfName));
+        }
+        endFl({ excluded: before - data.lldpNeighbors.length, fortilinkIfs: fortilinkSet.size });
+      }
       return { supported: true, data };
     }
     // winrm / ssh / icmp — no interfaces / storage / IPsec / LLDP support yet.
@@ -3970,6 +4007,10 @@ async function collectSystemInfoFortinet(
   // Build cmdbByName from the CMDB response. Non-fatal failure → empty map
   // → falls back to monitor-only types (same as the original try/catch).
   const cmdbByName = new Map<string, { type: string | null; parent: string | null; vlanId: number | null; members: string[]; alias: string | null; description: string | null }>();
+  // FortiLink-enabled interface set (fortilink-flagged interfaces + their member
+  // ports) from the same CMDB response — fed back to the caller so the LLDP
+  // exclusion filter can drop FortiLink links without a second CMDB fetch.
+  const fortilinkInterfaces = [...fortilinkInterfaceNamesFromCmdb(cmdbRes)];
   if (cmdbRes) {
     const arr = Array.isArray(cmdbRes) ? cmdbRes : (Array.isArray(cmdbRes?.results) ? cmdbRes.results : []);
     for (const c of arr) {
@@ -4119,6 +4160,7 @@ async function collectSystemInfoFortinet(
     lldpSource: opts.includeLldp !== false ? "fortios" : undefined,
     perfSla:    sdwan?.perfSla,
     sdwanRules: sdwan?.sdwanRules,
+    fortilinkInterfaces,
   };
 }
 
@@ -4203,6 +4245,54 @@ function pickFortiCapabilities(raw: unknown): string[] {
     return raw.split(/[,\s]+/).map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0);
   }
   return [];
+}
+
+/**
+ * FortiLink-enabled interface names from a CMDB `/api/v2/cmdb/system/interface`
+ * response: every interface whose `fortilink` setting is enabled, PLUS the
+ * member ports of those interfaces (FortiLink is an aggregate; its members are
+ * the physical ports — e.g. the `fortilink` aggregate and member `a`). This is
+ * the authoritative definition of a "FortiLink interface" (the CMDB flag), not
+ * a name heuristic. Used to exclude FortiLink links from LLDP collection when
+ * the integration's `excludeFortilinkLldp` toggle is on. Pure + defensive about
+ * the FortiOS member-array shape (same `interface-name` / `q_origin_key`
+ * fallback chain collectSystemInfoFortinet uses).
+ */
+export function fortilinkInterfaceNamesFromCmdb(cmdbRes: unknown): Set<string> {
+  const out = new Set<string>();
+  const arr = Array.isArray(cmdbRes)
+    ? cmdbRes
+    : (Array.isArray((cmdbRes as any)?.results) ? (cmdbRes as any).results : []);
+  for (const c of arr) {
+    if (!c || typeof c !== "object" || typeof (c as any).name !== "string") continue;
+    const fl = (c as any).fortilink;
+    if (!(fl === "enable" || fl === true || fl === 1)) continue;
+    out.add((c as any).name);
+    const member = (c as any).member;
+    if (Array.isArray(member)) {
+      for (const m of member) {
+        if (typeof m === "string") { if (m) out.add(m); continue; }
+        if (m && typeof m === "object") {
+          const v = (m as any)["interface-name"] ?? (m as any).q_origin_key ?? (m as any).interface_name;
+          if (typeof v === "string" && v) out.add(v);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Fetch the FortiLink-enabled interface set directly from CMDB. Used on the
+ * SNMP-interfaces path (which doesn't otherwise fetch CMDB) when the operator
+ * has `excludeFortilinkLldp` on — one extra REST call, gated behind the toggle.
+ * Returns an empty set on any failure (e.g. a token without CMDB scope), so a
+ * failure degrades to "collect all LLDP" rather than dropping neighbors.
+ */
+async function fetchFortilinkInterfaceSet(fg: FortiGateConfig, timeoutMs?: number): Promise<Set<string>> {
+  const res = await fgRequest<any>(fg, "GET", "/api/v2/cmdb/system/interface", { query: { vdom: "root" }, timeoutMs })
+    .catch(() => null as any);
+  return fortilinkInterfaceNamesFromCmdb(res);
 }
 
 /**

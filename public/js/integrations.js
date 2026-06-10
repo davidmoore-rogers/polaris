@@ -816,6 +816,15 @@ function _readPullSdwanToggle() {
   return !!el.checked;
 }
 
+// Read the FortiLink-LLDP-exclusion toggle out of the Monitoring tab's LLDP
+// subtab. Returns undefined when the checkbox didn't render (non-FortiGate/FMG
+// types) so the caller leaves the config field alone.
+function _readExcludeFortilinkLldpToggle() {
+  var el = document.getElementById("f-excludeFortilinkLldp");
+  if (!el) return undefined;
+  return !!el.checked;
+}
+
 // Quarantine Push tab body. Renders the master toggle plus transport-mode
 // guidance. When enabled, quarantining an asset pushes MAC-based
 // address-group entries to every FortiGate sighted by this integration.
@@ -1213,9 +1222,28 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
       '</div>';
   }
 
+  // FortiLink LLDP exclusion — an integration-level toggle surfaced directly
+  // under the LLDP polling method. Rendered only on the FortiGate primary
+  // subtab so there is exactly one checkbox per modal; its value is stored in
+  // integration.config.excludeFortilinkLldp and read on save by
+  // _readExcludeFortilinkLldpToggle(). The filtering happens at collection time
+  // on the backend (monitoringService). FortiOS-only.
+  var fortilinkHtml = "";
+  if (stream.key === "lldp" && klass === "fortigate" && isPrimary) {
+    var flChecked = opts.excludeFortilinkLldp === true ? "checked" : "";
+    fortilinkHtml = '<div class="form-group" style="display:flex;align-items:flex-start;gap:8px;margin-top:0.25rem">' +
+        '<input type="checkbox" id="f-excludeFortilinkLldp" ' + flChecked + ' style="width:auto;margin-top:3px">' +
+        '<div>' +
+          '<label for="f-excludeFortilinkLldp" style="margin:0">Exclude FortiLink interfaces from LLDP collection</label>' +
+          '<p class="hint" style="margin:0.15rem 0 0 0">When on, Polaris drops LLDP neighbors learned on FortiLink-enabled interfaces (the FortiLink aggregate and its member ports) so internal FortiGate-to-FortiSwitch links stay out of the Neighbor column. Detected from the FortiGate CMDB fortilink flag. Inferred topology rows are unaffected.</p>' +
+        '</div>' +
+      '</div>';
+  }
+
   return '<div class="form-group"><label>Polling method</label>' + pollDropdown +
       '<p class="hint">Select the protocol Polaris uses for this stream. "Inherit" falls through to the source default.</p>' +
     '</div>' +
+    fortilinkHtml +
     credRows +
     cadenceHtml +
     failureHtml +
@@ -1279,6 +1307,7 @@ function _classSubtabBodyHTML(opts) {
       html: _classStreamSubtabHTML(echoPrefix, integrationType, klass, stream, perClassSettings, credentials, isPrimary, {
         fmgDirectMode: initialFmgDirectMode,
         showStreamCredentials: opts.showStreamCredentials !== false,
+        excludeFortilinkLldp: opts.excludeFortilinkLldp === true,
       }),
     };
   });
@@ -2833,6 +2862,9 @@ function monitorSettingsFormHTML(s, opts) {
         // Direct Polling block is authoritative for those classes (managed
         // switches and APs use one credential across every stream).
         showStreamCredentials: !(c.key === "fortiswitch" || c.key === "fortiap"),
+        // FortiLink LLDP-exclusion toggle — surfaced on the FortiGate LLDP
+        // stream subtab. Integration-level (config.excludeFortilinkLldp).
+        excludeFortilinkLldp: opts.excludeFortilinkLldp === true,
       }),
     };
   });
@@ -4072,7 +4104,7 @@ async function openCreateModal(type) {
       { key: "general", label: "General", html: generalHtml },
       { key: "filters", label: "Filters", html: filtersHtml },
     ];
-    addTabs.push({ key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, { snmpCredentials: creds, monitorCredentialId: null, integrationId: null, integrationType: type, integrationName: "", fmgDefaults: {} }) });
+    addTabs.push({ key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, { snmpCredentials: creds, monitorCredentialId: null, integrationId: null, integrationType: type, integrationName: "", fmgDefaults: {}, excludeFortilinkLldp: false }) });
     // FMG and standalone FortiGate share the Reservation Push and Quarantine
     // Push tabs. Both default to off. The "useProxy=true" flag in the form
     // helpers labels the active mode for FMG; standalone FortiGate ignores it
@@ -4201,6 +4233,8 @@ async function openCreateModal(type) {
         if (quarantinePushToggleNew !== undefined) createConfig.pushQuarantine = quarantinePushToggleNew;
         var sdwanToggleNew = _readPullSdwanToggle();
         if (sdwanToggleNew !== undefined) createConfig.pullSdwan = sdwanToggleNew;
+        var excludeFortilinkLldpNew = _readExcludeFortilinkLldpToggle();
+        if (excludeFortilinkLldpNew !== undefined) createConfig.excludeFortilinkLldp = excludeFortilinkLldpNew;
       }
       var input = {
         type: type,
@@ -4457,6 +4491,7 @@ async function openEditModal(id) {
           fortigateMonitor:   config.fortigateMonitor   || null,
           fortiswitchMonitor: config.fortiswitchMonitor || null,
           fortiapMonitor:     config.fortiapMonitor     || null,
+          excludeFortilinkLldp: config.excludeFortilinkLldp === true,
           integrationId:      id,
           integrationType:    intg.type,
           integrationName:    intg.name,
@@ -4609,6 +4644,8 @@ async function openEditModal(id) {
         if (quarantinePushToggle !== undefined) editConfig.pushQuarantine = quarantinePushToggle;
         var sdwanToggle = _readPullSdwanToggle();
         if (sdwanToggle !== undefined) editConfig.pullSdwan = sdwanToggle;
+        var excludeFortilinkLldpEdit = _readExcludeFortilinkLldpToggle();
+        if (excludeFortilinkLldpEdit !== undefined) editConfig.excludeFortilinkLldp = excludeFortilinkLldpEdit;
       }
       if (isAd || isEntra || isWin) {
         // AD / Entra / Windows Server per-class blocks. Workstations is the

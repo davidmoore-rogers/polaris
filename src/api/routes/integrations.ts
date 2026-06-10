@@ -538,6 +538,14 @@ const FortiManagerConfigSchema = z.object({
   // selection (/api/v2/cmdb/system/sdwan). Surfaced on the asset's SD-WAN tab.
   // FortiOS-only; default off. Mirrored on FortiGateConfigSchema for parity.
   pullSdwan: z.boolean().optional().default(false),
+  // When true, LLDP collection skips FortiLink-enabled interfaces (the
+  // fortilink-flagged aggregate + its member ports, per the FortiGate CMDB
+  // `fortilink` flag), so internal FortiGate↔FortiSwitch links don't appear in
+  // the asset's LLDP Neighbor column. Filters at collection time on each
+  // system-info pass; excluded neighbors age out on the next per-asset replace.
+  // Peer-inferred FortiLink rows (synthesized from topology) are unaffected.
+  // FortiOS-only; default off. Mirrored on FortiGateConfigSchema for parity.
+  excludeFortilinkLldp: z.boolean().optional().default(false),
   // When true, the next discovery cycle AND every monitor job published for
   // assets owned by this integration will emit step-by-step structured logs
   // to pino at info level (visible in `journalctl -u polaris`). High log
@@ -572,6 +580,10 @@ const FortiGateConfigSchema = z.object({
   // selection on each system-info pass. See FortiManagerConfigSchema.pullSdwan
   // for shape + semantics. FortiOS-only; default off.
   pullSdwan: z.boolean().optional().default(false),
+  // Exclude FortiLink-enabled interfaces from LLDP collection. See
+  // FortiManagerConfigSchema.excludeFortilinkLldp for shape + semantics.
+  // FortiOS-only; default off.
+  excludeFortilinkLldp: z.boolean().optional().default(false),
   // Per-integration verbose debug logging — see FortiManagerConfigSchema for
   // shape + semantics. Default false.
   verboseLogging: z.boolean().optional().default(false),
