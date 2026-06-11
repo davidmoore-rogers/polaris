@@ -362,7 +362,7 @@ model MonitorClassOverride {
   // follow-up release once fleet-wide migration is confirmed.
   sampleRetentionDays       Int?
   // Single retention setting shared by AssetTelemetrySample (CPU/memory)
-  // AND AssetTemperatureSample. The stream split only affects polling
+  // AND AssetHardwareSensorSample. The stream split only affects polling
   // method / cadence / credential / MIB / timeout — sample retention is
   // table-level, so one knob covers both.
   telemetryRetentionDays    Int?
