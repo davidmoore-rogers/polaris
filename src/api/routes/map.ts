@@ -987,15 +987,23 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     // duplex field, so duplex isn't available. Logical/unknown ports
     // ("fortilink" → "unknown") and cross-site ghosts simply get no detail.
     const ifMetricRows = await prisma.$queryRaw<
-      Array<{ assetId: string; ifName: string; speedBps: bigint | null; operStatus: string | null; inErrors: bigint | null; outErrors: bigint | null }>
+      Array<{ assetId: string; ifName: string; ifType: string | null; ifParent: string | null; speedBps: bigint | null; operStatus: string | null; inErrors: bigint | null; outErrors: bigint | null }>
     >`
-      SELECT DISTINCT ON ("assetId", "ifName") "assetId", "ifName", "speedBps", "operStatus", "inErrors", "outErrors"
+      SELECT DISTINCT ON ("assetId", "ifName") "assetId", "ifName", "ifType", "ifParent", "speedBps", "operStatus", "inErrors", "outErrors"
       FROM asset_interface_samples
       WHERE "assetId" = ANY(${siteAssetIds}::text[])
         AND "timestamp" > NOW() - INTERVAL '1 hour'
       ORDER BY "assetId", "ifName", "timestamp" DESC
     `;
     const ifMetricByKey = new Map<string, { speedBps: number | null; operStatus: string | null; inErrors: number | null; outErrors: number | null }>();
+    // Aggregate → physical members, per asset. A FortiLink uplink trunk (and
+    // any auto-ISL aggregate) is named opaquely — for a switch the trunk is
+    // named after its own serial — but the cable terminates at a single
+    // physical port. When the trunk has exactly one physical member we render
+    // that member instead, mirroring interfaceTopologyService.preferPhysical.
+    // The ifParent linkage is populated by the FortiSwitch trunk-member overlay
+    // in monitoringService (and by the FortiGate aggregate back-fill).
+    const physicalByParent = new Map<string, string[]>();
     for (const r of ifMetricRows) {
       ifMetricByKey.set(`${r.assetId}|${r.ifName}`, {
         speedBps:  r.speedBps  != null ? Number(r.speedBps)  : null,
@@ -1003,11 +1011,21 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         inErrors:  r.inErrors  != null ? Number(r.inErrors)  : null,
         outErrors: r.outErrors != null ? Number(r.outErrors) : null,
       });
+      if (r.ifType === "physical" && r.ifParent) {
+        const k = `${r.assetId}|${r.ifParent}`;
+        const list = physicalByParent.get(k);
+        if (list) list.push(r.ifName);
+        else physicalByParent.set(k, [r.ifName]);
+      }
     }
     const ifDetail = (assetId: string, rawName: string | undefined) => {
       if (!assetId || !rawName) return null;
-      const name = rawName.trim();
+      let name = rawName.trim();
       if (!name || name === "unknown") return null;
+      // Single-member aggregate → its physical member (e.g. the serial-named
+      // FortiLink uplink → port52). Report the member's own metrics.
+      const members = physicalByParent.get(`${assetId}|${name}`);
+      if (members && members.length === 1) name = members[0];
       const m = ifMetricByKey.get(`${assetId}|${name}`);
       if (!m) return null;
       return { name, ...m };

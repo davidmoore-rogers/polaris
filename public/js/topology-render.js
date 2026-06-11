@@ -126,9 +126,13 @@
     });
     // FortiGate id + switch id set so we can label/style the FortiGate→switch
     // FortiLink uplinks. FortiOS reports `fortilink` (a logical meta-interface,
-    // not a physical port) on those, so the raw label is "unknown ↔ unknown" —
-    // relabel it to "fortilink", and dash-gray the UNVERIFIED ones (no
-    // interface/LLDP-backed cable) to read as a virtual/management link.
+    // not a physical port) on those, so the raw label is often
+    // "unknown ↔ unknown" — relabel those to "fortilink", and dash-gray the
+    // UNVERIFIED ones (no interface/LLDP-backed cable) to read as a
+    // virtual/management link. When the server resolved interface details on
+    // BOTH ends (srcIf/tgtIf — FG side LLDP-confirmed, switch side resolved
+    // through the trunk→physical-member swap), the link is a known physical
+    // cable: keep a real port-pair label like any normal connection.
     var fgId = data.fortigate ? data.fortigate.id : null;
     var switchIdSet = {};
     (data.switches || []).forEach(function (s) { if (s && s.id) switchIdSet[s.id] = true; });
@@ -140,8 +144,16 @@
       var label = e.label || "";
       var fortilinkFallback = 0;
       if (isFgSwitch) {
-        label = "fortilink"; // logical FortiLink uplink, not a physical port pair
-        if (!e.verifiedUplink) fortilinkFallback = 1; // unverified → virtual (dashed gray)
+        var srcPort = e.srcIf && e.srcIf.name;
+        var tgtPort = e.tgtIf && e.tgtIf.name;
+        if (e.verifiedUplink && srcPort && tgtPort) {
+          // srcIf/tgtIf carry the post-swap names (trunk → single physical
+          // member), so this label matches the tooltip's per-side lines.
+          label = srcPort + " ↔ " + tgtPort;
+        } else {
+          label = "fortilink"; // logical FortiLink uplink, not a physical port pair
+          if (!e.verifiedUplink) fortilinkFallback = 1; // unverified → virtual (dashed gray)
+        }
       }
       elements.push({
         data: {

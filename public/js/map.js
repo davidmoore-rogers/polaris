@@ -1570,10 +1570,15 @@
         escapeHtml(ports) + '</div>';
     }
     html += '<div style="opacity:0.7;font-size:0.82em;margin-top:2px">' + escapeHtml(kind) + '</div>';
+    // Per-side interface detail, each prefixed with its device so the operator
+    // can tell which end "port14" / "port52" lives on (srcIf belongs to the
+    // source node, tgtIf to the target).
     var sd = _formatIfDetail(edge.data("srcIf"));
     var td = _formatIfDetail(edge.data("tgtIf"));
-    if (sd) html += '<div style="font-size:0.78em;opacity:0.85;margin-top:3px">' + escapeHtml(sd) + '</div>';
-    if (td) html += '<div style="font-size:0.78em;opacity:0.85">' + escapeHtml(td) + '</div>';
+    if (sd) html += '<div style="font-size:0.78em;opacity:0.85;margin-top:3px">' +
+      '<span style="opacity:0.7">' + escapeHtml(srcLabel) + ':</span> ' + escapeHtml(sd) + '</div>';
+    if (td) html += '<div style="font-size:0.78em;opacity:0.85">' +
+      '<span style="opacity:0.7">' + escapeHtml(tgtLabel) + ':</span> ' + escapeHtml(td) + '</div>';
     return html;
   }
 
