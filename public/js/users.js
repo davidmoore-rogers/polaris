@@ -367,10 +367,12 @@ function openUserRegionsModal(id, username) {
 
 function openResetPasswordModal(id, username) {
   var body = '<p style="font-size:0.9rem;color:var(--color-text-secondary);margin-bottom:1rem">Set a new password for <strong>' + escapeHtml(username) + '</strong></p>' +
-    '<div class="form-group"><label>New Password *</label><input type="password" id="f-password" placeholder="Enter password">' + passwordChecksHTML("f-pw-checks") + '</div>';
+    '<div class="form-group"><label>New Password *</label><input type="password" id="f-password" placeholder="Enter password">' + passwordChecksHTML("f-pw-checks") + '</div>' +
+    '<div class="form-group"><label>Confirm Password *</label><input type="password" id="f-password-confirm" placeholder="Re-enter password">' + passwordMatchHTML("f-pw-match") + '</div>';
   var footer = '<button class="btn btn-secondary" id="btn-cancel">Cancel</button><button class="btn btn-primary" id="btn-save">Reset Password</button>';
   openModal("Reset Password", body, footer);
   wirePasswordChecks("f-password", "f-pw-checks");
+  wirePasswordMatch("f-password", "f-password-confirm", "f-pw-match");
   document.getElementById("btn-cancel").addEventListener("click", closeModal);
 
   document.getElementById("btn-save").addEventListener("click", async function () {
@@ -378,6 +380,10 @@ function openResetPasswordModal(id, username) {
     var pw = val("f-password");
     if (!checkPasswordField(pw, "f-pw-checks")) {
       showToast("Password does not meet complexity requirements", "error");
+      return;
+    }
+    if (pw !== val("f-password-confirm")) {
+      showToast("Passwords do not match", "error");
       return;
     }
     btn.disabled = true;
