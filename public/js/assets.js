@@ -10164,12 +10164,14 @@ function _copyAssetDetails() {
 // page's webfonts, serializes the clone into an SVG <foreignObject>, and lets
 // the browser itself paint it onto a canvas — so the PNG matches the
 // on-screen tab pixel-for-pixel (charts, badges, theme colors, fonts). A
-// small title strip (hostname + tab label) is drawn above the capture so the
-// screenshot self-identifies after copy/paste. Webfont embedding fetches the
-// Google Fonts CSS + woff2 files (allowed by CSP connect-src); when they're
-// unreachable the capture still completes, just with fallback system fonts.
-// One known fidelity gap: inner scrollable regions render scrolled-to-top in
-// the clone (scroll offsets don't survive cloneNode).
+// small title strip (hostname + tab label) is drawn above the capture and
+// the whole composition gets uniform padding so the screenshot self-
+// identifies and breathes after copy/paste. Scrollbar chrome is excluded via
+// the .screenshot-hide-scrollbars class (see styles.css). Webfont embedding
+// fetches the Google Fonts CSS + woff2 files (allowed by CSP connect-src);
+// when they're unreachable the capture still completes, just with fallback
+// system fonts. One known fidelity gap: inner scrollable regions render
+// scrolled-to-top in the clone (scroll offsets don't survive cloneNode).
 function _screenshotAssetDetails(asset) {
   var panel = _activeAssetPanel();
   if (!panel) { showToast("Nothing to screenshot", "error"); return; }
@@ -10187,29 +10189,38 @@ function _screenshotAssetDetails(asset) {
   if (btn) btn.disabled = true;
   function done() { if (btn) btn.disabled = false; }
 
+  // Hide scrollbar chrome (panel + every inner scrollable table wrap) for the
+  // duration of the capture: html-to-image inlines each live element's
+  // computed styles into the clone, so `scrollbar-width: none` applied here
+  // is what keeps scrollbars out of the PNG. The class comes off as soon as
+  // the rasterization settles (brief on-screen flicker while capturing).
+  panel.classList.add("screenshot-hide-scrollbars");
+  function release() { panel.classList.remove("screenshot-hide-scrollbars"); }
+
   var scale = 2;
   htmlToImage.toCanvas(panel, { pixelRatio: scale, backgroundColor: bgPrimary })
     .then(function (capture) {
-      var titleH = 44;
-      var pad = 16;
+      release();
+      var pad = 24;
+      var titleH = 48;
       var w = capture.width / scale;
       var h = capture.height / scale;
       var canvas = document.createElement("canvas");
-      canvas.width = capture.width;
-      canvas.height = capture.height + titleH * scale;
+      canvas.width = (w + pad * 2) * scale;
+      canvas.height = (titleH + h + pad) * scale;
       var ctx = canvas.getContext("2d");
       ctx.scale(scale, scale);
       ctx.fillStyle = bgPrimary;
-      ctx.fillRect(0, 0, w, titleH + h);
+      ctx.fillRect(0, 0, w + pad * 2, titleH + h + pad);
       ctx.fillStyle = clrText;
       ctx.font = "bold 17px " + fontSans;
       var tabLabel = _activeAssetTabLabel();
       var title = "Asset Details" + (asset && asset.hostname ? " — " + asset.hostname : "");
       if (tabLabel) title += " (" + tabLabel + ")";
-      ctx.fillText(title, pad, 28);
+      ctx.fillText(title, pad, 32);
       // 1:1 device-pixel blit (w×h CSS px under the 2x transform), so the
       // captured tab is never resampled.
-      ctx.drawImage(capture, 0, titleH, w, h);
+      ctx.drawImage(capture, pad, titleH, w, h);
       canvas.toBlob(function (blob) {
         done();
         if (!blob) { showToast("Screenshot failed", "error"); return; }
@@ -10225,6 +10236,7 @@ function _screenshotAssetDetails(asset) {
       }, "image/png");
     })
     .catch(function () {
+      release();
       done();
       showToast("Screenshot failed", "error");
     });
