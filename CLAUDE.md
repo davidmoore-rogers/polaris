@@ -262,7 +262,9 @@ DATABASE_POOL_SIZE=25
 # after this timeout with `SNMP gate timeout for <host:port> after <ms>ms`
 # instead of all blocking the full upstream duration. The wedged slot itself
 # still holds the gate until it returns; this timeout only bounds wait time
-# for queued callers, not the wedge itself.
+# for queued callers, not the wedge itself. Operator snmp-walks override the
+# wait per-call to 50s (SNMP_WALK_GATE_WAIT_MS) to fit the SNMP Walk tab's
+# 60s client countdown.
 POLARIS_SNMP_GATE_WAIT_TIMEOUT_MS=30000
 
 # Process role (multi-process deployment). Unset = "all" = single process runs

@@ -11776,10 +11776,16 @@ function _wireSnmpWalkTab(a) {
           '<p class="empty-state" style="padding:0.75rem 0">' + abortMsg + "</p>";
       } else {
         statusEl.textContent = "";
-        showToast(err.message || "SNMP walk failed", "error");
+        var errMsg = err.message || "SNMP walk failed";
+        // The per-host SNMP gate serializes walks against monitoring polls on
+        // the same device; a gate timeout means the walk never started.
+        if (/SNMP gate timeout/i.test(errMsg)) {
+          errMsg = "Device was busy with another SNMP poll for the entire wait window — the walk never started. Try again in a moment.";
+        }
+        showToast(errMsg, "error");
         document.getElementById("snmp-walk-results").innerHTML =
           '<p class="empty-state" style="padding:0.75rem 0;color:var(--color-danger,#c0392b)">' +
-            escapeHtml(err.message || "SNMP walk failed") +
+            escapeHtml(errMsg) +
           "</p>";
       }
     } finally {
