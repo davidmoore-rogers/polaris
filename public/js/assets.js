@@ -10158,12 +10158,14 @@ function _copyAssetDetails() {
   });
 }
 
-// Pixel-accurate screenshot of the active tab panel. The live DOM subtree is
+// Faithful screenshot of the active tab panel, rendered at a canonical
+// CAPTURE_WIDTH so the output is identical regardless of the operator's
+// display size or drag-resized slide-over. The live DOM subtree is
 // rasterized as-rendered via the vendored html-to-image library: it deep-
 // clones the panel, inlines computed styles (incl. pseudo-elements) and the
 // page's webfonts, serializes the clone into an SVG <foreignObject>, and lets
-// the browser itself paint it onto a canvas — so the PNG matches the
-// on-screen tab pixel-for-pixel (charts, badges, theme colors, fonts). A
+// the browser itself paint it onto a canvas — so the PNG matches how the tab
+// truly renders at that width (charts, badges, theme colors, fonts). A
 // small title strip (hostname + tab label) is drawn above the capture and
 // the whole composition gets uniform padding so the screenshot self-
 // identifies and breathes after copy/paste. Scrollbar chrome is excluded via
@@ -10189,57 +10191,86 @@ function _screenshotAssetDetails(asset) {
   if (btn) btn.disabled = true;
   function done() { if (btn) btn.disabled = false; }
 
+  // Capture at a canonical width so the screenshot is independent of the
+  // operator's display / drag-resized slide-over (initSlideoverResize stamps
+  // an inline width). html-to-image freezes each element's COMPUTED pixel
+  // styles into its clone, so the clone can't be reflowed after the fact —
+  // the live panel itself must lay out at the target width before cloning.
+  // Forcing the slide-over wide also makes every chart re-render at that
+  // width via its ResizeObserver, hence the settle delay below. The
+  // operator's width is restored as soon as the rasterization settles.
+  var CAPTURE_WIDTH = 1100; // px — the slide-over's design max (styles.css clamp)
+  var slideover = panel.closest(".slideover");
+  var prevWidth = slideover ? slideover.style.width : "";
+  if (slideover) slideover.style.width = CAPTURE_WIDTH + "px";
+
   // Hide scrollbar chrome (panel + every inner scrollable table wrap) for the
-  // duration of the capture: html-to-image inlines each live element's
-  // computed styles into the clone, so `scrollbar-width: none` applied here
-  // is what keeps scrollbars out of the PNG. The class comes off as soon as
-  // the rasterization settles (brief on-screen flicker while capturing).
+  // duration of the capture: `scrollbar-width: none` applied to the live
+  // nodes is what the inlined computed styles carry into the clone. On
+  // classic-scrollbar platforms (Windows) this also widens scroll containers
+  // by the bar width — another reflow the settle delay absorbs.
   panel.classList.add("screenshot-hide-scrollbars");
-  function release() { panel.classList.remove("screenshot-hide-scrollbars"); }
+  function release() {
+    panel.classList.remove("screenshot-hide-scrollbars");
+    if (slideover) slideover.style.width = prevWidth;
+  }
+
+  // Double-rAF puts us past the relayout + ResizeObserver delivery for the
+  // width change; the timeout covers the chart re-renders those observers
+  // kick off.
+  function whenSettled(cb) {
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        setTimeout(cb, 300);
+      });
+    });
+  }
 
   var scale = 2;
-  htmlToImage.toCanvas(panel, { pixelRatio: scale, backgroundColor: bgPrimary })
-    .then(function (capture) {
-      release();
-      var pad = 24;
-      var titleH = 48;
-      var w = capture.width / scale;
-      var h = capture.height / scale;
-      var canvas = document.createElement("canvas");
-      canvas.width = (w + pad * 2) * scale;
-      canvas.height = (titleH + h + pad) * scale;
-      var ctx = canvas.getContext("2d");
-      ctx.scale(scale, scale);
-      ctx.fillStyle = bgPrimary;
-      ctx.fillRect(0, 0, w + pad * 2, titleH + h + pad);
-      ctx.fillStyle = clrText;
-      ctx.font = "bold 17px " + fontSans;
-      var tabLabel = _activeAssetTabLabel();
-      var title = "Asset Details" + (asset && asset.hostname ? " — " + asset.hostname : "");
-      if (tabLabel) title += " (" + tabLabel + ")";
-      ctx.fillText(title, pad, 32);
-      // 1:1 device-pixel blit (w×h CSS px under the 2x transform), so the
-      // captured tab is never resampled.
-      ctx.drawImage(capture, pad, titleH, w, h);
-      canvas.toBlob(function (blob) {
+  whenSettled(function () {
+    htmlToImage.toCanvas(panel, { pixelRatio: scale, backgroundColor: bgPrimary })
+      .then(function (capture) {
+        release();
+        var pad = 24;
+        var titleH = 48;
+        var w = capture.width / scale;
+        var h = capture.height / scale;
+        var canvas = document.createElement("canvas");
+        canvas.width = (w + pad * 2) * scale;
+        canvas.height = (titleH + h + pad) * scale;
+        var ctx = canvas.getContext("2d");
+        ctx.scale(scale, scale);
+        ctx.fillStyle = bgPrimary;
+        ctx.fillRect(0, 0, w + pad * 2, titleH + h + pad);
+        ctx.fillStyle = clrText;
+        ctx.font = "bold 17px " + fontSans;
+        var tabLabel = _activeAssetTabLabel();
+        var title = "Asset Details" + (asset && asset.hostname ? " — " + asset.hostname : "");
+        if (tabLabel) title += " (" + tabLabel + ")";
+        ctx.fillText(title, pad, 32);
+        // 1:1 device-pixel blit (w×h CSS px under the 2x transform), so the
+        // captured tab is never resampled.
+        ctx.drawImage(capture, pad, titleH, w, h);
+        canvas.toBlob(function (blob) {
+          done();
+          if (!blob) { showToast("Screenshot failed", "error"); return; }
+          if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
+            showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+            return;
+          }
+          navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
+            showToast("Screenshot copied to clipboard");
+          }).catch(function () {
+            showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+          });
+        }, "image/png");
+      })
+      .catch(function () {
+        release();
         done();
-        if (!blob) { showToast("Screenshot failed", "error"); return; }
-        if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-          showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-          return;
-        }
-        navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-          showToast("Screenshot copied to clipboard");
-        }).catch(function () {
-          showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-        });
-      }, "image/png");
-    })
-    .catch(function () {
-      release();
-      done();
-      showToast("Screenshot failed", "error");
-    });
+        showToast("Screenshot failed", "error");
+      });
+  });
 }
 
 // Per-table screenshot (the camera button injected to the left of a table's
