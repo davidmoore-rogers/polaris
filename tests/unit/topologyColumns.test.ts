@@ -251,4 +251,147 @@ describe("computeTopologyColumns", () => {
     expect(cols.swB.depth).toBe(2);
     expect(cols.swA.lane).not.toBe(cols.swB.lane);
   });
+
+  it("keeps the spine on one row: a chain shares the firewall's lane", () => {
+    const cols = computeTopologyColumns([
+      node("fg", "fortigate"),
+      node("sw1", "fortiswitch"),
+      node("sw2", "fortiswitch"),
+      node("ap", "fortiap"),
+      edge("fg", "sw1"),
+      edge("sw1", "sw2"),
+      edge("sw2", "ap"),
+    ])!;
+    expect(cols.fg.lane).toBe(0);
+    expect(cols.sw1.lane).toBe(0);
+    expect(cols.sw2.lane).toBe(0);
+    expect(cols.ap.lane).toBe(0);
+  });
+
+  it("gives sibling subtrees disjoint row bands", () => {
+    // swA (3 endpoints) and swB (2 endpoints) both on the firewall: every row
+    // in swA's subtree sits strictly above every row in swB's, and swB
+    // continues on its own first endpoint's row.
+    const cols = computeTopologyColumns([
+      node("fg", "fortigate"),
+      node("swA", "fortiswitch"),
+      node("swB", "fortiswitch"),
+      node("a1", "endpoint"),
+      node("a2", "endpoint"),
+      node("a3", "endpoint"),
+      node("b1", "endpoint"),
+      node("b2", "endpoint"),
+      edge("fg", "swA"),
+      edge("fg", "swB"),
+      edge("swA", "a1"),
+      edge("swA", "a2"),
+      edge("swA", "a3"),
+      edge("swB", "b1"),
+      edge("swB", "b2"),
+    ])!;
+    const bandA = [cols.swA, cols.a1, cols.a2, cols.a3].map((c) => c.lane);
+    const bandB = [cols.swB, cols.b1, cols.b2].map((c) => c.lane);
+    expect(Math.max(...bandA)).toBeLessThan(Math.min(...bandB));
+    expect(cols.swB.lane).toBe(cols.b1.lane); // swB's spine continues through its first endpoint
+  });
+
+  it("places every endpoint of one switch on its own row, first one on the switch's row", () => {
+    const cols = computeTopologyColumns([
+      node("fg", "fortigate"),
+      node("sw", "fortiswitch"),
+      node("e1", "endpoint"),
+      node("e2", "endpoint"),
+      node("e3", "endpoint"),
+      node("e4", "endpoint"),
+      edge("fg", "sw"),
+      edge("sw", "e1"),
+      edge("sw", "e2"),
+      edge("sw", "e3"),
+      edge("sw", "e4"),
+    ])!;
+    const lanes = [cols.e1, cols.e2, cols.e3, cols.e4].map((c) => c.lane);
+    expect(new Set(lanes).size).toBe(4); // all distinct rows
+    expect(cols.e1.lane).toBe(cols.sw.lane); // first endpoint continues the switch's row
+    expect(Math.min(...lanes)).toBe(cols.sw.lane); // the rest stack below
+  });
+
+  it("stacks a leaf chained off a leaf (same column) on a distinct row", () => {
+    // ep2 hangs off ep1; both resolve to the same odd column right of the
+    // switch — the spine must NOT collapse them onto one row.
+    const cols = computeTopologyColumns([
+      node("fg", "fortigate"),
+      node("sw", "fortiswitch"),
+      node("ep1", "endpoint"),
+      node("ep2", "endpoint"),
+      edge("fg", "sw"),
+      edge("sw", "ep1"),
+      edge("ep1", "ep2"),
+    ])!;
+    expect(cols.ep1.depth).toBe(3);
+    expect(cols.ep2.depth).toBe(3);
+    expect(cols.ep1.lane).not.toBe(cols.ep2.lane);
+    expect(cols.sw.lane).toBe(cols.ep1.lane); // spine inherits through the rightward leaf
+  });
+
+  it("band-places fallback exiles with their own cursor", () => {
+    // A fallback switch's spine continues through its first endpoint (leftward
+    // band), and two chained fallback switches (same column -2) get distinct rows.
+    const cols = computeTopologyColumns([
+      node("fg", "fortigate"),
+      node("swOk", "fortiswitch"),
+      node("swF1", "fortiswitch"),
+      node("swF2", "fortiswitch"),
+      node("epF", "endpoint"),
+      edge("fg", "swOk"),
+      controllerEdge("fg", "swF1"),
+      controllerEdge("swF1", "swF2"),
+      controllerEdge("swF1", "epF"),
+    ])!;
+    expect(cols.swF1.depth).toBe(-2);
+    expect(cols.swF2.depth).toBe(-2);
+    expect(cols.epF.depth).toBe(-3);
+    expect(cols.swF1.lane).toBe(cols.epF.lane); // exile spine continues leftward
+    expect(cols.swF1.lane).not.toBe(cols.swF2.lane); // same-column chain stacks
+    expect(cols.swF1.lane).toBeGreaterThanOrEqual(0);
+    // The verified spine still owns row 0 — a fallback switch must never steal it.
+    expect(cols.fg.lane).toBe(0);
+    expect(cols.swOk.lane).toBe(0);
+  });
+
+  it("stacks orphans below the main tree so they can't share a row with verified leaves", () => {
+    // The verified leaf `ep` occupies orphanCol (maxInfra=2 → orphanCol=3);
+    // the island lands in the same column and must sit on a lower row.
+    const cols = computeTopologyColumns([
+      node("fg", "fortigate"),
+      node("sw", "fortiswitch"),
+      node("ep", "endpoint"),
+      node("island", "fortiswitch"),
+      edge("fg", "sw"),
+      edge("sw", "ep"),
+    ])!;
+    expect(cols.ep.depth).toBe(3);
+    expect(cols.island.depth).toBe(3);
+    expect(cols.island.lane).toBeGreaterThan(cols.ep.lane);
+  });
+
+  it("is deterministic across repeated calls on the same elements", () => {
+    const els = [
+      node("fg", "fortigate"),
+      node("sw", "fortiswitch"),
+      node("apRoot", "fortiap"),
+      node("apLeaf", "fortiap"),
+      node("sta", "wireless-station"),
+      node("swF", "fortiswitch"),
+      node("e1", "endpoint"),
+      node("e2", "endpoint"),
+      edge("fg", "sw"),
+      edge("sw", "apRoot"),
+      meshEdge("apRoot", "apLeaf"),
+      wirelessEdge("apRoot", "sta"),
+      controllerEdge("fg", "swF"),
+      edge("sw", "e1"),
+      edge("sw", "e2"),
+    ];
+    expect(computeTopologyColumns(els)).toEqual(computeTopologyColumns(els));
+  });
 });
