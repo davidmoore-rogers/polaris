@@ -10158,18 +10158,22 @@ function _copyAssetDetails() {
   });
 }
 
-// Pixel-accurate screenshot of the active tab panel. The live DOM subtree is
+// Faithful screenshot of the active tab panel, rendered at a canonical
+// CAPTURE_WIDTH so the output is identical regardless of the operator's
+// display size or drag-resized slide-over. The live DOM subtree is
 // rasterized as-rendered via the vendored html-to-image library: it deep-
 // clones the panel, inlines computed styles (incl. pseudo-elements) and the
 // page's webfonts, serializes the clone into an SVG <foreignObject>, and lets
-// the browser itself paint it onto a canvas — so the PNG matches the
-// on-screen tab pixel-for-pixel (charts, badges, theme colors, fonts). A
-// small title strip (hostname + tab label) is drawn above the capture so the
-// screenshot self-identifies after copy/paste. Webfont embedding fetches the
-// Google Fonts CSS + woff2 files (allowed by CSP connect-src); when they're
-// unreachable the capture still completes, just with fallback system fonts.
-// One known fidelity gap: inner scrollable regions render scrolled-to-top in
-// the clone (scroll offsets don't survive cloneNode).
+// the browser itself paint it onto a canvas — so the PNG matches how the tab
+// truly renders at that width (charts, badges, theme colors, fonts). A
+// small title strip (hostname + tab label) is drawn above the capture and
+// the whole composition gets uniform padding so the screenshot self-
+// identifies and breathes after copy/paste. Scrollbar chrome is excluded via
+// the .screenshot-hide-scrollbars class (see styles.css). Webfont embedding
+// fetches the Google Fonts CSS + woff2 files (allowed by CSP connect-src);
+// when they're unreachable the capture still completes, just with fallback
+// system fonts. One known fidelity gap: inner scrollable regions render
+// scrolled-to-top in the clone (scroll offsets don't survive cloneNode).
 function _screenshotAssetDetails(asset) {
   var panel = _activeAssetPanel();
   if (!panel) { showToast("Nothing to screenshot", "error"); return; }
@@ -10187,47 +10191,86 @@ function _screenshotAssetDetails(asset) {
   if (btn) btn.disabled = true;
   function done() { if (btn) btn.disabled = false; }
 
-  var scale = 2;
-  htmlToImage.toCanvas(panel, { pixelRatio: scale, backgroundColor: bgPrimary })
-    .then(function (capture) {
-      var titleH = 44;
-      var pad = 16;
-      var w = capture.width / scale;
-      var h = capture.height / scale;
-      var canvas = document.createElement("canvas");
-      canvas.width = capture.width;
-      canvas.height = capture.height + titleH * scale;
-      var ctx = canvas.getContext("2d");
-      ctx.scale(scale, scale);
-      ctx.fillStyle = bgPrimary;
-      ctx.fillRect(0, 0, w, titleH + h);
-      ctx.fillStyle = clrText;
-      ctx.font = "bold 17px " + fontSans;
-      var tabLabel = _activeAssetTabLabel();
-      var title = "Asset Details" + (asset && asset.hostname ? " — " + asset.hostname : "");
-      if (tabLabel) title += " (" + tabLabel + ")";
-      ctx.fillText(title, pad, 28);
-      // 1:1 device-pixel blit (w×h CSS px under the 2x transform), so the
-      // captured tab is never resampled.
-      ctx.drawImage(capture, 0, titleH, w, h);
-      canvas.toBlob(function (blob) {
-        done();
-        if (!blob) { showToast("Screenshot failed", "error"); return; }
-        if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-          showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-          return;
-        }
-        navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-          showToast("Screenshot copied to clipboard");
-        }).catch(function () {
-          showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-        });
-      }, "image/png");
-    })
-    .catch(function () {
-      done();
-      showToast("Screenshot failed", "error");
+  // Capture at a canonical width so the screenshot is independent of the
+  // operator's display / drag-resized slide-over (initSlideoverResize stamps
+  // an inline width). html-to-image freezes each element's COMPUTED pixel
+  // styles into its clone, so the clone can't be reflowed after the fact —
+  // the live panel itself must lay out at the target width before cloning.
+  // Forcing the slide-over wide also makes every chart re-render at that
+  // width via its ResizeObserver, hence the settle delay below. The
+  // operator's width is restored as soon as the rasterization settles.
+  var CAPTURE_WIDTH = 1100; // px — the slide-over's design max (styles.css clamp)
+  var slideover = panel.closest(".slideover");
+  var prevWidth = slideover ? slideover.style.width : "";
+  if (slideover) slideover.style.width = CAPTURE_WIDTH + "px";
+
+  // Hide scrollbar chrome (panel + every inner scrollable table wrap) for the
+  // duration of the capture: `scrollbar-width: none` applied to the live
+  // nodes is what the inlined computed styles carry into the clone. On
+  // classic-scrollbar platforms (Windows) this also widens scroll containers
+  // by the bar width — another reflow the settle delay absorbs.
+  panel.classList.add("screenshot-hide-scrollbars");
+  function release() {
+    panel.classList.remove("screenshot-hide-scrollbars");
+    if (slideover) slideover.style.width = prevWidth;
+  }
+
+  // Double-rAF puts us past the relayout + ResizeObserver delivery for the
+  // width change; the timeout covers the chart re-renders those observers
+  // kick off.
+  function whenSettled(cb) {
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        setTimeout(cb, 300);
+      });
     });
+  }
+
+  var scale = 2;
+  whenSettled(function () {
+    htmlToImage.toCanvas(panel, { pixelRatio: scale, backgroundColor: bgPrimary })
+      .then(function (capture) {
+        release();
+        var pad = 24;
+        var titleH = 48;
+        var w = capture.width / scale;
+        var h = capture.height / scale;
+        var canvas = document.createElement("canvas");
+        canvas.width = (w + pad * 2) * scale;
+        canvas.height = (titleH + h + pad) * scale;
+        var ctx = canvas.getContext("2d");
+        ctx.scale(scale, scale);
+        ctx.fillStyle = bgPrimary;
+        ctx.fillRect(0, 0, w + pad * 2, titleH + h + pad);
+        ctx.fillStyle = clrText;
+        ctx.font = "bold 17px " + fontSans;
+        var tabLabel = _activeAssetTabLabel();
+        var title = "Asset Details" + (asset && asset.hostname ? " — " + asset.hostname : "");
+        if (tabLabel) title += " (" + tabLabel + ")";
+        ctx.fillText(title, pad, 32);
+        // 1:1 device-pixel blit (w×h CSS px under the 2x transform), so the
+        // captured tab is never resampled.
+        ctx.drawImage(capture, pad, titleH, w, h);
+        canvas.toBlob(function (blob) {
+          done();
+          if (!blob) { showToast("Screenshot failed", "error"); return; }
+          if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
+            showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+            return;
+          }
+          navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
+            showToast("Screenshot copied to clipboard");
+          }).catch(function () {
+            showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+          });
+        }, "image/png");
+      })
+      .catch(function () {
+        release();
+        done();
+        showToast("Screenshot failed", "error");
+      });
+  });
 }
 
 // Per-table screenshot (the camera button injected to the left of a table's
@@ -11316,6 +11359,7 @@ function assetSnmpWalkViewHTML(a) {
       '<div style="display:flex;gap:0.5rem;align-items:center">' +
         '<button type="button" class="btn btn-primary btn-sm" id="btn-snmp-walk">Walk</button>' +
         '<button type="button" class="btn btn-danger btn-sm" id="btn-snmp-walk-abort" style="display:none">Abort</button>' +
+        '<span id="snmp-walk-countdown" style="display:none;font-size:0.8rem;color:var(--color-text-secondary);font-variant-numeric:tabular-nums" title="Time remaining before the walk is aborted"></span>' +
         '<button type="button" class="btn btn-secondary btn-sm" id="btn-snmp-walk-copy" disabled>Copy results</button>' +
         '<span id="snmp-walk-status" style="font-size:0.8rem;color:var(--color-text-secondary)"></span>' +
       '</div>' +
@@ -11511,9 +11555,44 @@ function _wireSnmpWalkTab(a) {
   var mibSel      = document.getElementById("snmp-walk-mib");
   var oidLabel    = document.getElementById("snmp-walk-oid-label");
   var oidInput    = document.getElementById("snmp-walk-oid");
+  var countdownEl = document.getElementById("snmp-walk-countdown");
   var lastResult    = null; // raw walk result
   var lastMibResult = null; // MIB-aware walk result
   var activeController = null;
+
+  // Client-enforced walk deadline. There is no end-to-end timeout anywhere
+  // else on this path (nginx allows 3600s; net-snmp's 10s timeout is per
+  // getBulk request, not per walk), so a slow device could otherwise leave
+  // the tab spinning indefinitely. The countdown renders next to the Walk
+  // button and aborts the request when it reaches zero. The server-side walk
+  // keeps running to completion either way — abort only abandons the response.
+  var WALK_TIMEOUT_SEC = 60;
+  var countdownTimer = null;
+  var walkTimedOut = false;
+
+  function _stopCountdown() {
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    if (countdownEl) { countdownEl.style.display = "none"; countdownEl.textContent = ""; }
+  }
+
+  function _startCountdown(controller) {
+    walkTimedOut = false;
+    var remaining = WALK_TIMEOUT_SEC;
+    if (countdownEl) {
+      countdownEl.style.display = "";
+      countdownEl.textContent = remaining + "s";
+    }
+    countdownTimer = setInterval(function () {
+      remaining -= 1;
+      if (remaining <= 0) {
+        _stopCountdown();
+        walkTimedOut = true;
+        controller.abort();
+      } else if (countdownEl) {
+        countdownEl.textContent = remaining + "s";
+      }
+    }, 1000);
+  }
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -11655,8 +11734,7 @@ function _wireSnmpWalkTab(a) {
     walkBtn.disabled = true;
     walkBtn.textContent = "Walking…";
     if (copyBtn) copyBtn.disabled = true;
-    // Abort only works for raw walks (MIB-aware endpoints have no signal support)
-    if (abortBtn) { abortBtn.style.display = mibAware ? "none" : ""; abortBtn.disabled = false; }
+    if (abortBtn) { abortBtn.style.display = ""; abortBtn.disabled = false; }
     statusEl.textContent = "Walking " + a.ipAddress + "…";
     document.getElementById("snmp-walk-results").innerHTML = "";
     lastResult = null;
@@ -11664,13 +11742,14 @@ function _wireSnmpWalkTab(a) {
 
     activeController = new AbortController();
     var thisController = activeController;
+    _startCountdown(thisController);
 
     try {
       if (mibAware) {
         var walkBody = { assetId: a.id, credentialId: credId, objectName: oidOrObj, maxRows: maxRows };
         var mibResult = isStd
-          ? await api.serverSettings.walkStdMib(mibId, walkBody)
-          : await api.serverSettings.walkMib(mibId, walkBody);
+          ? await api.serverSettings.walkStdMib(mibId, walkBody, thisController.signal)
+          : await api.serverSettings.walkMib(mibId, walkBody, thisController.signal);
         lastMibResult = mibResult;
         statusEl.textContent = mibResult.rowCount + " row(s) in " + mibResult.durationMs + " ms" +
           (mibResult.truncated ? " (truncated)" : "") +
@@ -11687,11 +11766,14 @@ function _wireSnmpWalkTab(a) {
     } catch (err) {
       lastResult = null;
       lastMibResult = null;
-      var aborted = !mibAware && err && (err.name === "AbortError" || thisController.signal.aborted);
+      var aborted = err && (err.name === "AbortError" || thisController.signal.aborted);
       if (aborted) {
-        statusEl.textContent = "Walk aborted.";
+        var abortMsg = walkTimedOut
+          ? "Walk timed out after " + WALK_TIMEOUT_SEC + "s."
+          : "Walk aborted.";
+        statusEl.textContent = abortMsg;
         document.getElementById("snmp-walk-results").innerHTML =
-          '<p class="empty-state" style="padding:0.75rem 0">Walk aborted.</p>';
+          '<p class="empty-state" style="padding:0.75rem 0">' + abortMsg + "</p>";
       } else {
         statusEl.textContent = "";
         showToast(err.message || "SNMP walk failed", "error");
@@ -11701,6 +11783,7 @@ function _wireSnmpWalkTab(a) {
           "</p>";
       }
     } finally {
+      _stopCountdown();
       if (activeController === thisController) activeController = null;
       walkBtn.disabled = false;
       walkBtn.textContent = "Walk";
@@ -11708,7 +11791,7 @@ function _wireSnmpWalkTab(a) {
     }
   });
 
-  // ── Abort (raw walks only) ────────────────────────────────────────────────
+  // ── Abort ─────────────────────────────────────────────────────────────────
 
   if (abortBtn) {
     abortBtn.addEventListener("click", function () {

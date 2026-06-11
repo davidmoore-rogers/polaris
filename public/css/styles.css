@@ -2930,6 +2930,22 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   container-type: inline-size;
 }
 
+/* Applied to the asset-details tab panel only while the Screenshot button's
+   DOM capture runs (_screenshotAssetDetails in assets.js). html-to-image
+   inlines each element's COMPUTED styles into its clone, so hiding the live
+   scrollbars via scrollbar-width (Firefox, Chrome 121+) is what keeps
+   scrollbar chrome out of the captured PNG; the ::-webkit-scrollbar rule
+   covers the on-screen flicker on older Chromium. Removed as soon as the
+   rasterization settles. */
+.screenshot-hide-scrollbars,
+.screenshot-hide-scrollbars * {
+  scrollbar-width: none !important;
+}
+.screenshot-hide-scrollbars::-webkit-scrollbar,
+.screenshot-hide-scrollbars *::-webkit-scrollbar {
+  display: none !important;
+}
+
 /* IP panel (reservations slide-in) content padding — match the asset details
    slide-in's doubled left margin so headers/rows align with the slide-over
    header/footer. slideover-body itself stays at padding:0 globally. */
