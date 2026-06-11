@@ -363,6 +363,13 @@ function renderNav() {
   refreshAlertsDot();
   setInterval(refreshAlertsDot, 30000);
   window.refreshAlertsDot = refreshAlertsDot;
+
+  // Re-apply branding when it already loaded — the brand block above renders
+  // visibility:hidden until applyBranding clears it, and on pages that re-run
+  // renderNav after boot (map.js re-renders after its own fetchCurrentUser)
+  // the fetchBranding() apply can land BEFORE that re-render, leaving the
+  // logo / app name / version invisible until the next full page load.
+  if (_branding) applyBranding(_branding, true);
 }
 
 function _getUserInitials(username) {
