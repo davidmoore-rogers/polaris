@@ -7,6 +7,7 @@
 import { Netmask } from "netmask";
 import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
+import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
 import { getFmgWorker } from "./fmgWorker.js";
 import {
@@ -794,6 +795,23 @@ export interface DiscoveredDevice {
   serial: string;
   model: string;
   mgmtIp: string;        // management IP from device list
+  // MAC address of the firewall's management interface, read from
+  // `/api/v2/cmdb/system/interface` (the `macaddr` field) on the same query
+  // that resolves mgmtIp. Colon-separated uppercase, or omitted when the
+  // interface reports no / an all-zero MAC. Consumed by
+  // buildFortigateFirewallObservedBlob + written directly onto Asset.macAddress
+  // (NOT projection-owned) so the firewall is found by MAC in discovery's
+  // in-memory index, preventing a duplicate `fortigate-endpoint` ghost asset
+  // when the firewall's own mgmt MAC is later learned via DHCP/ARP/inventory.
+  // Reflects the currently-active HA member (the box REST reaches via the
+  // cluster IP); only stamped on the primary member's Asset.
+  mgmtMac?: string;
+  // EVERY physical interface MAC on the firewall (deduped, all-zero dropped),
+  // from the same `/api/v2/cmdb/system/interface` read. A peer FortiGate can
+  // sight this firewall on ANY interface (not just the one bearing the mgmt
+  // IP), so the firewall Asset is indexed by all of these to reliably prevent
+  // a duplicate `fortigate-endpoint` ghost. Primary HA member only.
+  interfaceMacs?: string[];
   // FortiOS firmware version. FMG: built from `os_ver` + `mr` + `patch` on the
   // device-list record (e.g. "7.4.5"). Standalone FortiGate: `version` field
   // from /api/v2/monitor/system/status. Consumed by buildFortigateFirewallObservedBlob
@@ -1488,6 +1506,10 @@ export async function discoverDhcpSubnets(
             // (canonical FortiOS version string); fall back to FMG's os_ver/mr/patch
             // when the direct call didn't surface one.
             osVersion: fgResult.devices[0]?.osVersion || buildFmgOsVersion(rawDevice) || "",
+            // mgmt MAC + all interface MACs come only from fortigateService's
+            // direct CMDB read — FMG's device-list record doesn't carry them.
+            ...(fgResult.devices[0]?.mgmtMac ? { mgmtMac: fgResult.devices[0].mgmtMac } : {}),
+            ...(fgResult.devices[0]?.interfaceMacs?.length ? { interfaceMacs: fgResult.devices[0].interfaceMacs } : {}),
             latitude:  fmgCoordsOk ? fmgLat : fgResult.devices[0]?.latitude,
             longitude: fmgCoordsOk ? fmgLng : fgResult.devices[0]?.longitude,
             ...(mv.latitude !== undefined ? { metavarLatitude: mv.latitude } : {}),
@@ -1631,7 +1653,9 @@ export async function discoverDhcpSubnets(
       const mgmtIfacePayload: JsonRpcRequest = {
         id: 6,
         method: "get",
-        params: [{ url: `/pm/config/device/${deviceName}/global/system/interface`, filter: [["name", "==", mgmtIfaceName]], fields: ["name", "ip"], loadsub: 0 }],
+        // No name filter — fetch ALL interfaces so we capture every physical
+        // MAC (see DiscoveredDevice.interfaceMacs), not just the mgmt one.
+        params: [{ url: `/pm/config/device/${deviceName}/global/system/interface`, fields: ["name", "ip", "macaddr"], loadsub: 0 }],
       };
       const mgmtIfaceRes = await rpc(baseUrl, mgmtIfacePayload, apiUser, apiToken, verifySsl, signal, integrationId);
       const ifaceList = mgmtIfaceRes.result?.[0]?.data;
@@ -1647,6 +1671,12 @@ export async function discoverDhcpSubnets(
           else localInterfaceIps.push({ device: deviceName, interfaceName: mgmtIfaceName, ipAddress: rawIp, role: "management" });
           log("discover.device.mgmtip", "info", `${deviceName}: Resolved management IP from ${mgmtIfaceName}: ${rawIp}`, deviceName);
         }
+        // mgmt-interface MAC (scalar identity) + every physical interface MAC
+        // (see DiscoveredDevice.mgmtMac / interfaceMacs).
+        const macNorm = normalizeMacOrNull(found && typeof found.macaddr === "string" ? found.macaddr : null);
+        if (macNorm) localDevice.mgmtMac = macNorm;
+        const ifaceMacs = normalizeMacsDistinct((ifaceList as any[]).map((i) => (typeof i?.macaddr === "string" ? i.macaddr : null)));
+        if (ifaceMacs.length) localDevice.interfaceMacs = ifaceMacs;
       }
     } catch { /* best-effort; keep device.ip as fallback */ }
 

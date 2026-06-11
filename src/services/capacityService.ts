@@ -409,21 +409,21 @@ const SAMPLE_TABLES: Array<{
   // Source (detail) tables
   { name: "asset_monitor_samples",       entity: "assets",      tier: "detail", countKey: "all"        },
   { name: "asset_telemetry_samples",     entity: "cpuMem",      tier: "detail", countKey: "telemetry"  },
-  { name: "asset_temperature_samples",   entity: "temperature", tier: "detail", countKey: "telemetry"  },
+  { name: "asset_hardware_sensor_samples", entity: "hardware",  tier: "detail", countKey: "telemetry"  },
   { name: "asset_interface_samples",     entity: "interfaces",  tier: "detail", countKey: "systemInfo" },
   { name: "asset_storage_samples",       entity: "storage",     tier: "detail", countKey: "systemInfo" },
   { name: "asset_ipsec_tunnel_samples",  entity: "ipsec",       tier: "detail", countKey: "systemInfo" },
   // Hourly rollups
   { name: "asset_monitor_samples_hourly",       entity: "assets",      tier: "hourly", countKey: "all"        },
   { name: "asset_telemetry_samples_hourly",     entity: "cpuMem",      tier: "hourly", countKey: "telemetry"  },
-  { name: "asset_temperature_samples_hourly",   entity: "temperature", tier: "hourly", countKey: "telemetry"  },
+  { name: "asset_hardware_sensor_samples_hourly", entity: "hardware",  tier: "hourly", countKey: "telemetry"  },
   { name: "asset_interface_samples_hourly",     entity: "interfaces",  tier: "hourly", countKey: "systemInfo" },
   { name: "asset_storage_samples_hourly",       entity: "storage",     tier: "hourly", countKey: "systemInfo" },
   { name: "asset_ipsec_tunnel_samples_hourly",  entity: "ipsec",       tier: "hourly", countKey: "systemInfo" },
   // Daily rollups
   { name: "asset_monitor_samples_daily",        entity: "assets",      tier: "daily",  countKey: "all"        },
   { name: "asset_telemetry_samples_daily",      entity: "cpuMem",      tier: "daily",  countKey: "telemetry"  },
-  { name: "asset_temperature_samples_daily",    entity: "temperature", tier: "daily",  countKey: "telemetry"  },
+  { name: "asset_hardware_sensor_samples_daily", entity: "hardware",  tier: "daily",  countKey: "telemetry"  },
   { name: "asset_interface_samples_daily",      entity: "interfaces",  tier: "daily",  countKey: "systemInfo" },
   { name: "asset_storage_samples_daily",        entity: "storage",     tier: "daily",  countKey: "systemInfo" },
   { name: "asset_ipsec_tunnel_samples_daily",   entity: "ipsec",       tier: "daily",  countKey: "systemInfo" },
@@ -444,21 +444,21 @@ const DEFAULT_ROWS_PER_ASSET_PER_DAY: Record<string, (c: CadenceIntervals) => nu
   // Source tables — rate × extra-key multiplier
   asset_monitor_samples:       (c) => 86400 / c.sample,
   asset_telemetry_samples:     (c) => 86400 / c.telemetry,
-  asset_temperature_samples:   (c) => (86400 / c.telemetry)  * 4,   // ~4 sensors
+  asset_hardware_sensor_samples: (c) => (86400 / c.telemetry)  * 12,  // ~12 sensors (FortiGates ~22)
   asset_interface_samples:     (c) => (86400 / c.systemInfo) * 20,  // ~20 ifaces
   asset_storage_samples:       (c) => (86400 / c.systemInfo) * 3,   // ~3 mounts
   asset_ipsec_tunnel_samples:  (c) => (86400 / c.systemInfo) * 1,   // ~1 tunnel
   // Hourly rollups — 24 buckets/day × extra-key multiplier
   asset_monitor_samples_hourly:       () => 24,
   asset_telemetry_samples_hourly:     () => 24,
-  asset_temperature_samples_hourly:   () => 24 * 4,
+  asset_hardware_sensor_samples_hourly: () => 24 * 12,
   asset_interface_samples_hourly:     () => 24 * 20,
   asset_storage_samples_hourly:       () => 24 * 3,
   asset_ipsec_tunnel_samples_hourly:  () => 24,
   // Daily rollups — 1 bucket/day × extra-key multiplier
   asset_monitor_samples_daily:        () => 1,
   asset_telemetry_samples_daily:      () => 1,
-  asset_temperature_samples_daily:    () => 4,
+  asset_hardware_sensor_samples_daily: () => 12,
   asset_interface_samples_daily:      () => 20,
   asset_storage_samples_daily:        () => 3,
   asset_ipsec_tunnel_samples_daily:   () => 1,
@@ -471,7 +471,7 @@ const DEFAULT_ROWS_PER_ASSET_PER_DAY: Record<string, (c: CadenceIntervals) => nu
 const DEFAULT_BYTES_PER_ROW: Record<string, number> = {
   asset_monitor_samples:       310,
   asset_telemetry_samples:     325,
-  asset_temperature_samples:   290,
+  asset_hardware_sensor_samples: 330,
   asset_interface_samples:     395,
   asset_storage_samples:       310,
   asset_ipsec_tunnel_samples:  390,
@@ -480,8 +480,8 @@ const DEFAULT_BYTES_PER_ROW: Record<string, number> = {
   asset_monitor_samples_daily:       280,
   asset_telemetry_samples_hourly:    340,
   asset_telemetry_samples_daily:     340,
-  asset_temperature_samples_hourly:  240,
-  asset_temperature_samples_daily:   240,
+  asset_hardware_sensor_samples_hourly:  280,
+  asset_hardware_sensor_samples_daily:   280,
   asset_interface_samples_hourly:    420,
   asset_interface_samples_daily:     420,
   asset_storage_samples_hourly:      280,
