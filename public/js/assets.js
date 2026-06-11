@@ -11767,6 +11767,7 @@ function assetSnmpWalkViewHTML(a) {
       '<div style="display:flex;gap:0.5rem;align-items:center">' +
         '<button type="button" class="btn btn-primary btn-sm" id="btn-snmp-walk">Walk</button>' +
         '<button type="button" class="btn btn-danger btn-sm" id="btn-snmp-walk-abort" style="display:none">Abort</button>' +
+        '<span id="snmp-walk-countdown" style="display:none;font-size:0.8rem;color:var(--color-text-secondary);font-variant-numeric:tabular-nums" title="Time remaining before the walk is aborted"></span>' +
         '<button type="button" class="btn btn-secondary btn-sm" id="btn-snmp-walk-copy" disabled>Copy results</button>' +
         '<span id="snmp-walk-status" style="font-size:0.8rem;color:var(--color-text-secondary)"></span>' +
       '</div>' +
@@ -11962,9 +11963,44 @@ function _wireSnmpWalkTab(a) {
   var mibSel      = document.getElementById("snmp-walk-mib");
   var oidLabel    = document.getElementById("snmp-walk-oid-label");
   var oidInput    = document.getElementById("snmp-walk-oid");
+  var countdownEl = document.getElementById("snmp-walk-countdown");
   var lastResult    = null; // raw walk result
   var lastMibResult = null; // MIB-aware walk result
   var activeController = null;
+
+  // Client-enforced walk deadline. There is no end-to-end timeout anywhere
+  // else on this path (nginx allows 3600s; net-snmp's 10s timeout is per
+  // getBulk request, not per walk), so a slow device could otherwise leave
+  // the tab spinning indefinitely. The countdown renders next to the Walk
+  // button and aborts the request when it reaches zero. The server-side walk
+  // keeps running to completion either way — abort only abandons the response.
+  var WALK_TIMEOUT_SEC = 60;
+  var countdownTimer = null;
+  var walkTimedOut = false;
+
+  function _stopCountdown() {
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    if (countdownEl) { countdownEl.style.display = "none"; countdownEl.textContent = ""; }
+  }
+
+  function _startCountdown(controller) {
+    walkTimedOut = false;
+    var remaining = WALK_TIMEOUT_SEC;
+    if (countdownEl) {
+      countdownEl.style.display = "";
+      countdownEl.textContent = remaining + "s";
+    }
+    countdownTimer = setInterval(function () {
+      remaining -= 1;
+      if (remaining <= 0) {
+        _stopCountdown();
+        walkTimedOut = true;
+        controller.abort();
+      } else if (countdownEl) {
+        countdownEl.textContent = remaining + "s";
+      }
+    }, 1000);
+  }
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -12106,8 +12142,7 @@ function _wireSnmpWalkTab(a) {
     walkBtn.disabled = true;
     walkBtn.textContent = "Walking…";
     if (copyBtn) copyBtn.disabled = true;
-    // Abort only works for raw walks (MIB-aware endpoints have no signal support)
-    if (abortBtn) { abortBtn.style.display = mibAware ? "none" : ""; abortBtn.disabled = false; }
+    if (abortBtn) { abortBtn.style.display = ""; abortBtn.disabled = false; }
     statusEl.textContent = "Walking " + a.ipAddress + "…";
     document.getElementById("snmp-walk-results").innerHTML = "";
     lastResult = null;
@@ -12115,13 +12150,14 @@ function _wireSnmpWalkTab(a) {
 
     activeController = new AbortController();
     var thisController = activeController;
+    _startCountdown(thisController);
 
     try {
       if (mibAware) {
         var walkBody = { assetId: a.id, credentialId: credId, objectName: oidOrObj, maxRows: maxRows };
         var mibResult = isStd
-          ? await api.serverSettings.walkStdMib(mibId, walkBody)
-          : await api.serverSettings.walkMib(mibId, walkBody);
+          ? await api.serverSettings.walkStdMib(mibId, walkBody, thisController.signal)
+          : await api.serverSettings.walkMib(mibId, walkBody, thisController.signal);
         lastMibResult = mibResult;
         statusEl.textContent = mibResult.rowCount + " row(s) in " + mibResult.durationMs + " ms" +
           (mibResult.truncated ? " (truncated)" : "") +
@@ -12138,20 +12174,30 @@ function _wireSnmpWalkTab(a) {
     } catch (err) {
       lastResult = null;
       lastMibResult = null;
-      var aborted = !mibAware && err && (err.name === "AbortError" || thisController.signal.aborted);
+      var aborted = err && (err.name === "AbortError" || thisController.signal.aborted);
       if (aborted) {
-        statusEl.textContent = "Walk aborted.";
+        var abortMsg = walkTimedOut
+          ? "Walk timed out after " + WALK_TIMEOUT_SEC + "s."
+          : "Walk aborted.";
+        statusEl.textContent = abortMsg;
         document.getElementById("snmp-walk-results").innerHTML =
-          '<p class="empty-state" style="padding:0.75rem 0">Walk aborted.</p>';
+          '<p class="empty-state" style="padding:0.75rem 0">' + abortMsg + "</p>";
       } else {
         statusEl.textContent = "";
-        showToast(err.message || "SNMP walk failed", "error");
+        var errMsg = err.message || "SNMP walk failed";
+        // The per-host SNMP gate serializes walks against monitoring polls on
+        // the same device; a gate timeout means the walk never started.
+        if (/SNMP gate timeout/i.test(errMsg)) {
+          errMsg = "Device was busy with another SNMP poll for the entire wait window — the walk never started. Try again in a moment.";
+        }
+        showToast(errMsg, "error");
         document.getElementById("snmp-walk-results").innerHTML =
           '<p class="empty-state" style="padding:0.75rem 0;color:var(--color-danger,#c0392b)">' +
-            escapeHtml(err.message || "SNMP walk failed") +
+            escapeHtml(errMsg) +
           "</p>";
       }
     } finally {
+      _stopCountdown();
       if (activeController === thisController) activeController = null;
       walkBtn.disabled = false;
       walkBtn.textContent = "Walk";
@@ -12159,7 +12205,7 @@ function _wireSnmpWalkTab(a) {
     }
   });
 
-  // ── Abort (raw walks only) ────────────────────────────────────────────────
+  // ── Abort ─────────────────────────────────────────────────────────────────
 
   if (abortBtn) {
     abortBtn.addEventListener("click", function () {

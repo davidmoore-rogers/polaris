@@ -625,7 +625,7 @@ const api = {
     // MIB-aware walk — body { assetId, credentialId, objectName, maxRows? }
     // Returns either { kind: "scalars", entries: [...] } or
     // { kind: "table", table: { columns, rows: [{ index, cells }] }, ... }.
-    walkMib: (id, body) => request("POST", `/server-settings/mibs/${id}/walk`, body),
+    walkMib: (id, body, signal) => request("POST", `/server-settings/mibs/${id}/walk`, body, signal),
     // Bundled standard MIBs (RFC/IEEE). `key` is the std:* dropdown id; the
     // route strips the `std:` prefix server-side and looks up the parsed
     // structure or runs the MIB-aware walk against the asset. Same response
@@ -634,9 +634,9 @@ const api = {
       var k = key && key.indexOf("std:") === 0 ? key.slice(4) : key;
       return request("GET", "/server-settings/mibs/std/" + encodeURIComponent(k) + "/structure");
     },
-    walkStdMib: (key, body) => {
+    walkStdMib: (key, body, signal) => {
       var k = key && key.indexOf("std:") === 0 ? key.slice(4) : key;
-      return request("POST", "/server-settings/mibs/std/" + encodeURIComponent(k) + "/walk", body);
+      return request("POST", "/server-settings/mibs/std/" + encodeURIComponent(k) + "/walk", body, signal);
     },
     listManufacturerAliases:   ()      => request("GET",    "/manufacturer-aliases"),
     createManufacturerAlias:   (body)  => request("POST",   "/manufacturer-aliases", body),

@@ -160,7 +160,7 @@ After the script finishes the app is live at `http://<server-ip>:3000` — log i
 docker pull ghcr.io/rogers-group-inc/polaris:latest
 ```
 
-Multi-stage image, ~940 MB, x86_64. PostgreSQL is **not** included — run a `postgres:15` container alongside it (or point at any reachable Postgres). Expose container port `3000` (and `3443` if you enable in-app HTTPS). All persistent state lives under `/app/state`, so a single bind mount is enough:
+Multi-stage image, ~940 MB, x86_64. PostgreSQL is **not** included — run a `postgres:15` container alongside it (or point at any reachable Postgres). Expose container port `3000` (HTTP-only; terminate TLS in a reverse proxy in front of the container — see `docker-compose.yml` for the nginx-fronted reference stack). All persistent state lives under `/app/state`, so a single bind mount is enough:
 
 | Container path | Host path | Notes |
 |---|---|---|

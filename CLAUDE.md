@@ -46,7 +46,7 @@ Code lives in `src/` (`api/routes/`, `api/middleware/`, `services/`, `jobs/`, `u
 | Security | helmet, express-rate-limit |
 | File uploads | multer |
 | PDF export | jspdf + jspdf-autotable |
-| DOM screenshots | html-to-image (bundled under `public/js/vendor/`) — SVG-foreignObject capture of the asset-details active tab at a canonical 1100px width (independent of the operator's slide-over size), driven by a section-picker modal (per-section include/exclude via `data-shot-section` wrappers, hidden-interface reveal, temporary chart-range swap with guaranteed restore); CSP `connect-src` whitelists the Google Fonts hosts so webfonts embed into the PNG. The Events tab swaps Screenshot for an asset-scoped CSV/PDF Export dropdown instead |
+| DOM screenshots | html-to-image (bundled under `public/js/vendor/`) — SVG-foreignObject capture of the asset-details active tab at a canonical 1100px width (independent of the operator's slide-over size), driven by a section-picker modal (per-section include/exclude via `data-shot-section` wrappers, hidden-interface reveal, temporary chart-range swap with guaranteed restore); CSP `connect-src` whitelists the Google Fonts hosts so webfonts embed into the PNG. The Events tab swaps Screenshot for an asset-scoped CSV/PDF Export dropdown instead. The mobile SPA reuses html-to-image for the asset sheet's header Screenshot button (natural-width capture, share-sheet → clipboard → download delivery) |
 | Mapping | Leaflet + leaflet.markercluster + leaflet-draw 1.0.4 (region polygon edit mode) + OpenStreetMap tiles (bundled under `public/css/vendor/leaflet/` and `public/js/vendor/leaflet/`) |
 | Graph layout | Cytoscape.js for the Device Map topology modal; nodes positioned by a deterministic Dijkstra-weighted **column solver** (`computeTopologyColumns` in `topology-render.js`) — dagre + cytoscape-dagre (bundled under `public/js/vendor/`) remain the fallback when there's no FortiGate root |
 | Asset monitoring | net-snmp (SNMP v2c/v3 authenticated GETs against `sysUpTime`); ssh2 (SSH connect+authenticate); built-in `node:https` (FortiOS REST + WinRM SOAP Identify); spawn the system `ping` for ICMP |
@@ -262,7 +262,9 @@ DATABASE_POOL_SIZE=25
 # after this timeout with `SNMP gate timeout for <host:port> after <ms>ms`
 # instead of all blocking the full upstream duration. The wedged slot itself
 # still holds the gate until it returns; this timeout only bounds wait time
-# for queued callers, not the wedge itself.
+# for queued callers, not the wedge itself. Operator snmp-walks override the
+# wait per-call to 50s (SNMP_WALK_GATE_WAIT_MS) to fit the SNMP Walk tab's
+# 60s client countdown.
 POLARIS_SNMP_GATE_WAIT_TIMEOUT_MS=30000
 
 # Process role (multi-process deployment). Unset = "all" = single process runs
