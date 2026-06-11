@@ -46,6 +46,7 @@ Code lives in `src/` (`api/routes/`, `api/middleware/`, `services/`, `jobs/`, `u
 | Security | helmet, express-rate-limit |
 | File uploads | multer |
 | PDF export | jspdf + jspdf-autotable |
+| DOM screenshots | html-to-image (bundled under `public/js/vendor/`) — SVG-foreignObject capture of the asset-details active tab at a canonical 1100px width (independent of the operator's slide-over size); CSP `connect-src` whitelists the Google Fonts hosts so webfonts embed into the PNG |
 | Mapping | Leaflet + leaflet.markercluster + leaflet-draw 1.0.4 (region polygon edit mode) + OpenStreetMap tiles (bundled under `public/css/vendor/leaflet/` and `public/js/vendor/leaflet/`) |
 | Graph layout | Cytoscape.js for the Device Map topology modal; nodes positioned by a deterministic Dijkstra-weighted **column solver** (`computeTopologyColumns` in `topology-render.js`) — dagre + cytoscape-dagre (bundled under `public/js/vendor/`) remain the fallback when there's no FortiGate root |
 | Asset monitoring | net-snmp (SNMP v2c/v3 authenticated GETs against `sysUpTime`); ssh2 (SSH connect+authenticate); built-in `node:https` (FortiOS REST + WinRM SOAP Identify); spawn the system `ping` for ICMP |

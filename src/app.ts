@@ -329,7 +329,7 @@ app.use(
         // OpenStreetMap tile servers (light theme) AND CartoDB Dark Matter
         // (dark theme) are whitelisted here so the Device Map page can render
         // a real geographic basemap in both themes. Tiles load as <img>, not
-        // fetch, so connectSrc stays 'self'-only.
+        // fetch, so they don't appear in connectSrc.
         imgSrc: [
           "'self'",
           "data:",
@@ -338,7 +338,17 @@ app.use(
           "https://tile.openstreetmap.org",
           "https://*.basemaps.cartocdn.com",
         ],
-        connectSrc: ["'self'"],
+        // The Google Fonts hosts are fetch()ed (not just <link>-loaded) by the
+        // asset-details Screenshot button: html-to-image inlines the page's
+        // webfonts (CSS from fonts.googleapis.com, woff2 from fonts.gstatic.com)
+        // into its DOM snapshot as data: URLs so the captured PNG renders in
+        // Inter/Roboto Mono. Capture degrades gracefully to fallback fonts when
+        // these hosts are unreachable (e.g. no-internet deployments).
+        connectSrc: [
+          "'self'",
+          "https://fonts.googleapis.com",
+          "https://fonts.gstatic.com",
+        ],
         frameSrc: ["'none'"],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],

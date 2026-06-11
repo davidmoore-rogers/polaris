@@ -452,6 +452,15 @@ code {
   background: rgba(198,40,40,0.12);
 }
 
+/* ─── In-app update progress (admin-only sidebar panel while an update applies) ── */
+.update-status {
+  margin-bottom: 0.5rem;
+  transition: background 0.15s;
+}
+.update-status:hover {
+  background: rgba(79,195,247,0.12);
+}
+
 /* ─── Capacity reason building blocks (shared by sidebar critical alert + inline pg-tuning rows on the card) ── */
 .pg-tuning-header {
   display: flex;
@@ -842,6 +851,13 @@ code {
 .gs-hint-label {
   font-size: 0.82rem;
   color: var(--color-text-secondary);
+}
+.gs-hint-foot {
+  padding: 6px 12px 4px;
+  margin-top: 2px;
+  border-top: 1px solid var(--color-border-light);
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
 }
 
 .user-badge {
@@ -2912,6 +2928,22 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .asset-panel-content {
   padding: 1rem 1.25rem 1rem 2.5rem;
   container-type: inline-size;
+}
+
+/* Applied to the asset-details tab panel only while the Screenshot button's
+   DOM capture runs (_screenshotAssetDetails in assets.js). html-to-image
+   inlines each element's COMPUTED styles into its clone, so hiding the live
+   scrollbars via scrollbar-width (Firefox, Chrome 121+) is what keeps
+   scrollbar chrome out of the captured PNG; the ::-webkit-scrollbar rule
+   covers the on-screen flicker on older Chromium. Removed as soon as the
+   rasterization settles. */
+.screenshot-hide-scrollbars,
+.screenshot-hide-scrollbars * {
+  scrollbar-width: none !important;
+}
+.screenshot-hide-scrollbars::-webkit-scrollbar,
+.screenshot-hide-scrollbars *::-webkit-scrollbar {
+  display: none !important;
 }
 
 /* IP panel (reservations slide-in) content padding — match the asset details
