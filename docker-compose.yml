@@ -24,7 +24,8 @@
 # per-service in this file and kept OUT of .env.
 
 x-polaris-common: &polaris-common
-  image: polaris:latest
+  # Published image; override with POLARIS_IMAGE for a locally-built tag.
+  image: ${POLARIS_IMAGE:-ghcr.io/rogers-group-inc/polaris:latest}
   restart: unless-stopped
   env_file:
     - ./state/.env
