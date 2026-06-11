@@ -1418,16 +1418,30 @@ async function handleEventExport(mode, fmt) {
   }
 
   await trackedPdfExport("Exporting events " + fmt.toUpperCase(), async function (signal) {
+    // GET /events caps limit at 200 (the Zod schema REJECTS larger values
+    // rather than clamping), so multi-page exports fetch in 200-row chunks
+    // up to a 10k export ceiling.
+    async function fetchAllPages(baseParams) {
+      var out = [];
+      var offset = 0;
+      var total = Infinity;
+      while (offset < total && out.length < 10000) {
+        var q = Object.assign({}, baseParams, { limit: 200, offset: offset });
+        var data = await request("GET", "/events" + toQuery(q), undefined, signal);
+        if (signal.aborted) return out;
+        var chunk = (data && data.events) || [];
+        out = out.concat(chunk);
+        total = (data && data.total) || out.length;
+        if (chunk.length === 0) break;
+        offset += chunk.length;
+      }
+      return out;
+    }
     if (mode === "filtered") {
-      var filters = _getEventFilters();
-      filters.limit = 10000;
-      filters.offset = 0;
-      var data = await request("GET", "/events" + toQuery(filters), undefined, signal);
-      events = (data.events || []);
+      events = await fetchAllPages(_getEventFilters());
       label = events.length + " filtered events";
     } else if (mode === "all") {
-      var data = await request("GET", "/events" + toQuery({ limit: 10000, offset: 0 }), undefined, signal);
-      events = (data.events || []);
+      events = await fetchAllPages({});
       label = "all " + events.length + " events";
     }
     if (signal.aborted) return;

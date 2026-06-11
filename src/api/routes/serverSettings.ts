@@ -19,7 +19,7 @@ import { existsSync, unlinkSync, readFileSync, writeFileSync, mkdirSync, createR
 import { pipeline } from "node:stream/promises";
 import { totalmem } from "node:os";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   getNtpSettings,
@@ -61,6 +61,7 @@ import {
   isPgbossInstalled,
 } from "../../services/queueService.js";
 import { BACKUP_DIR, UPLOADS_DIR } from "../../utils/paths.js";
+import { maintenanceLimiter } from "../middleware/rateLimits.js";
 import { getAppVersion } from "../../utils/version.js";
 import { getDirectDatabaseUrl } from "../../utils/dbConnections.js";
 
@@ -237,7 +238,15 @@ router.get("/database", async (_req, res, next) => {
 
 mkdirSync(BACKUP_DIR, { recursive: true });
 
-router.post("/database/backup", async (req, res, next) => {
+// Backup ids are server-generated (`bk-<ts>`), but the delete/download routes
+// accept them from the URL — resolve and require containment under BACKUP_DIR
+// before any filesystem access. Returns null for anything that escapes.
+function backupFilePath(id: unknown): string | null {
+  const p = resolve(BACKUP_DIR, String(id));
+  return p.startsWith(BACKUP_DIR + sep) ? p : null;
+}
+
+router.post("/database/backup", maintenanceLimiter, async (req, res, next) => {
   try {
     // Reject empty/weak passphrases before they become an AES-256-GCM key —
     // see src/utils/backupPassword.ts + the 2026-06-03 review (M5). null = no
@@ -310,13 +319,19 @@ router.post("/database/backup", async (req, res, next) => {
   }
 });
 
-router.post("/database/restore", restoreUpload.single("file"), async (req, res, next) => {
-  // Track upload temp file for cleanup regardless of outcome
-  const uploadedPath: string | undefined = (req.file as any)?.path;
+router.post("/database/restore", maintenanceLimiter, restoreUpload.single("file"), async (req, res, next) => {
+  // Track upload temp file for cleanup regardless of outcome. multer's
+  // diskStorage generates the temp name itself, but the path rides in on
+  // req.file — require containment under tmpdir() before touching it.
+  const rawUploadedPath: string | undefined = (req.file as any)?.path;
+  const uploadedPath: string | undefined =
+    rawUploadedPath && resolve(rawUploadedPath).startsWith(tmpdir() + sep)
+      ? resolve(rawUploadedPath)
+      : undefined;
   let decryptedTempPath: string | null = null;
 
   try {
-    if (!req.file) throw new AppError(400, "No backup file uploaded");
+    if (!req.file || !uploadedPath) throw new AppError(400, "No backup file uploaded");
     if (await hasActiveDiscoveries()) throw new AppError(409, "A discovery is currently running — wait for it to finish or abort it before restoring");
     const password: string | null = req.body?.password || null;
     // psql restore goes direct — see backup-route comment above for why.
@@ -389,20 +404,22 @@ router.post("/database/restore", restoreUpload.single("file"), async (req, res, 
   }
 });
 
-router.get("/database/backups", async (_req, res, next) => {
+router.get("/database/backups", maintenanceLimiter, async (_req, res, next) => {
   try {
     const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
     const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
-    const enriched = history.map((r: any) => ({ ...r, path: join(BACKUP_DIR, r.id) }));
+    const enriched = history.map((r: any) => ({ ...r, path: backupFilePath(r.id) }));
     res.json(enriched.reverse());
   } catch (err) {
     next(err);
   }
 });
 
-router.delete("/database/backups/:id", async (req, res, next) => {
+router.delete("/database/backups/:id", maintenanceLimiter, async (req, res, next) => {
   try {
     const id = req.params.id as string;
+    const safePath = backupFilePath(id);
+    if (!safePath) throw new AppError(400, "Invalid backup id");
     const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
     const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
     const idx = history.findIndex((r: any) => r.id === id);
@@ -415,8 +432,7 @@ router.delete("/database/backups/:id", async (req, res, next) => {
       create: { key: "backup_history", value: history },
     });
 
-    const filePath = join(BACKUP_DIR, id);
-    if (existsSync(filePath)) unlinkSync(filePath);
+    if (existsSync(safePath)) unlinkSync(safePath);
 
     res.status(204).send();
   } catch (err) {
@@ -424,15 +440,16 @@ router.delete("/database/backups/:id", async (req, res, next) => {
   }
 });
 
-router.get("/database/backups/:id/download", async (req, res, next) => {
+router.get("/database/backups/:id/download", maintenanceLimiter, async (req, res, next) => {
   try {
     const id = req.params.id as string;
+    const filePath = backupFilePath(id);
+    if (!filePath) throw new AppError(400, "Invalid backup id");
     const existing = await prisma.setting.findUnique({ where: { key: "backup_history" } });
     const history: any[] = existing?.value && Array.isArray(existing.value) ? existing.value as any[] : [];
     const record = history.find((r: any) => r.id === id);
     if (!record) throw new AppError(404, "Backup not found");
 
-    const filePath = join(BACKUP_DIR, id);
     if (!existsSync(filePath)) throw new AppError(404, "Backup file no longer exists on disk");
 
     const payload = readFileSync(filePath);
@@ -1393,7 +1410,7 @@ router.put("/branding", async (req, res, next) => {
 const LOGO_DIR = UPLOADS_DIR;
 const logoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
-router.post("/branding/logo", logoUpload.single("file"), async (req, res, next) => {
+router.post("/branding/logo", maintenanceLimiter, logoUpload.single("file"), async (req, res, next) => {
   try {
     if (!req.file) throw new AppError(400, "No file uploaded");
     const ext = detectImageMagic(req.file.buffer);
@@ -1417,7 +1434,7 @@ router.post("/branding/logo", logoUpload.single("file"), async (req, res, next) 
   }
 });
 
-router.delete("/branding/logo", async (_req, res, next) => {
+router.delete("/branding/logo", maintenanceLimiter, async (_req, res, next) => {
   try {
     const current = await getBranding();
     // Remove old custom logo file

@@ -2747,7 +2747,10 @@ function processNextSnmpSlot(key: string): void {
     });
 }
 
-export async function withSnmpGate<T>(host: string, port: number, fn: () => Promise<T>): Promise<T> {
+// `waitTimeoutMs` overrides the env-derived gate wait for this one caller.
+// Used by the operator snmp-walk path, whose deadline is the walk tab's
+// 60s client countdown rather than the collectors' fail-fast budget.
+export async function withSnmpGate<T>(host: string, port: number, fn: () => Promise<T>, waitTimeoutMs?: number): Promise<T> {
   const key = `${host}:${port}`;
   return new Promise<T>((resolve, reject) => {
     const slot: SnmpGateSlot = {
@@ -2758,7 +2761,9 @@ export async function withSnmpGate<T>(host: string, port: number, fn: () => Prom
       timer: null,
       timedOut: false,
     };
-    const timeoutMs = snmpGateWaitTimeoutMs();
+    const timeoutMs = (typeof waitTimeoutMs === "number" && waitTimeoutMs > 0)
+      ? waitTimeoutMs
+      : snmpGateWaitTimeoutMs();
     slot.timer = setTimeout(() => {
       if (slot.timedOut) return;
       slot.timedOut = true;
@@ -5136,7 +5141,7 @@ function snmpMacFromBuffer(v: unknown): string | null {
   return Array.from(v).map((b) => b.toString(16).padStart(2, "0").toUpperCase()).join(":");
 }
 
-async function withSnmpSession<T>(host: string, config: Record<string, unknown>, fn: (s: any) => Promise<T>, timeoutMs?: number): Promise<T> {
+async function withSnmpSession<T>(host: string, config: Record<string, unknown>, fn: (s: any) => Promise<T>, timeoutMs?: number, gateWaitTimeoutMs?: number): Promise<T> {
   // Route every heavy SNMP collector (telemetry / systemInfo / LLDP overlay
   // / operator snmp-walk) through the per-host SNMP gate so a heavy walk
   // doesn't overlap with the cheap response-time probe on the same agent.
@@ -5154,7 +5159,7 @@ async function withSnmpSession<T>(host: string, config: Record<string, unknown>,
     } finally {
       try { session.close?.(); } catch {}
     }
-  });
+  }, gateWaitTimeoutMs);
 }
 
 export interface SnmpWalkRow {
@@ -5179,6 +5184,13 @@ export interface SnmpWalkResult {
  * busy device can't run away.
  */
 const SNMP_WALK_HARD_MAX = 5000;
+
+// Gate-wait budget for operator walks. The walk tab's client-side countdown
+// aborts the request at 60s, so let the walk wait up to 50s for the per-host
+// gate (vs. the collectors' 30s fail-fast default) — a walk queued behind a
+// long telemetry/systemInfo scrape on the same device gets the whole
+// countdown window to start instead of dying at 30s with a gate timeout.
+const SNMP_WALK_GATE_WAIT_MS = 50_000;
 
 function snmpTypeName(t: unknown): string {
   if (typeof t !== "number") return "Unknown";
@@ -5247,7 +5259,7 @@ export async function snmpWalkRaw(
         finish(err);
       }
     });
-  });
+  }, undefined, SNMP_WALK_GATE_WAIT_MS);
 }
 
 // Per-asset metric resolution from the editable Manufacturer Profile.

@@ -1066,6 +1066,11 @@ code {
   background: var(--color-border);
   margin: 4px 0;
 }
+/* Variants for menus that live at the bottom/left of the viewport (the asset
+   slide-over footer's Export menu): open upward and anchor to the button's
+   left edge so the menu stays inside the slide-over. */
+.btn-dropdown-menu.drop-up { top: auto; bottom: calc(100% + 4px); }
+.btn-dropdown-menu.anchor-left { left: 0; right: auto; }
 
 /* ─── Searchable Select ───────────────────────────────────────────────────── */
 .search-select {
@@ -2931,7 +2936,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 
 /* Applied to the asset-details tab panel only while the Screenshot button's
-   DOM capture runs (_screenshotAssetDetails in assets.js). html-to-image
+   DOM capture runs (_runScreenshotCapture in assets.js). html-to-image
    inlines each element's COMPUTED styles into its clone, so hiding the live
    scrollbars via scrollbar-width (Firefox, Chrome 121+) is what keeps
    scrollbar chrome out of the captured PNG; the ::-webkit-scrollbar rule

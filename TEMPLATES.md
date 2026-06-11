@@ -143,6 +143,22 @@ Per-pattern sections:
 
 ---
 
+## Screenshot-eligible section (asset-details tabs)
+
+**What it is:** The asset-details Screenshot button opens a section-picker modal whose checkbox list is enumerated from the live panel — any section wrapped in the annotation div participates automatically, with zero modal-side changes.
+
+**Canonical implementation:** the System tab sections in `assetSystemViewHTML` (public/js/assets.js); consumed by `_collectShotSections` / `_openScreenshotOptions` / `_captureWithChoices` in the same file.
+
+**Pattern:** wrap each logical section (its header AND content container together) in a layout-neutral div:
+- `data-shot-section="<key>"` — stable key, unique within the tab (prefs are stored per user+tab under `polaris-prefs-screenshot-<username>`).
+- `data-shot-label="<Label>"` — human label for the checkbox row (escapeHtml dynamic values).
+- `data-shot-chart="assetMonitor|assetSystem|assetSdwan"` — only on chart-bearing sections; adds a 1h/24h/7d/30d/Custom range picker defaulting to the chart's current selection, and requires a matching branch in `_currentChartSelection` + `_captureWithChoices.loadChart`.
+- `data-shot-sub="hiddenIfaces"` — Interfaces only; surfaces the "Include hidden interfaces" sub-checkbox.
+
+**Key conventions:** wrappers with no rendered content (empty async mounts) are skipped by `_collectShotSections`, so conditional sections need no special handling. Excluded sections are pruned from the html-to-image clone via its `filter` option — never hide live DOM for exclusion. The Events tab gets no annotations (its footer button is the Export dropdown, not Screenshot).
+
+---
+
 ## Sortable + filterable data table
 
 **What it is:** A `<table>` with per-column sort, inline filter, and (optionally) multi-select dropdown filters. Used for the assets, subnets, blocks, reservations, integrations, events, users, MIBs, and credentials lists.

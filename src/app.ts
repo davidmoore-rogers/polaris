@@ -473,12 +473,14 @@ app.use(async (req, res, next) => {
 // the desktop UI directly when they need to. The `?desktop=1` query param
 // is the escape hatch the mobile app uses on its "Desktop view" link.
 //
-// `Mobile` covers Chrome/Firefox on phones, `iPhone`/`iPod` covers Safari
-// on iPhone, and the `Android.*Mobile` form catches Android browsers that
-// don't ship the bare token. iPad is intentionally excluded — modern iPad
-// Safari requests desktop layouts by default, and the desktop UI works
-// fine on a tablet-class screen.
-const PHONE_UA_REGEX = /(Mobile|iPhone|iPod|Android.*Mobile)/i;
+// `Mobile` covers Chrome/Firefox on phones (including every Android phone
+// browser — Android phone UAs always carry the `Mobile` token, which is
+// also why the old `Android.*Mobile` alternative was redundant and a
+// polynomial-ReDoS hazard on attacker-supplied UA strings), and
+// `iPhone`/`iPod` covers Safari on iPhone. iPad is intentionally excluded —
+// modern iPad Safari requests desktop layouts by default, and the desktop
+// UI works fine on a tablet-class screen.
+const PHONE_UA_REGEX = /(Mobile|iPhone|iPod)/i;
 app.use((req, res, next) => {
   if (req.path !== "/" && req.path !== "/index.html") return next();
   if (req.query.desktop === "1") return next();

@@ -107,6 +107,27 @@ describe("withSnmpGate", () => {
     expect(fresh).toBe("fresh");
   });
 
+  it("honors a per-call waitTimeoutMs override over the env default", async () => {
+    // Env default would reject waiters at 30ms; the override extends one
+    // specific waiter past the wedge so it runs instead of timing out.
+    // This is the operator snmp-walk path: its budget is the walk tab's
+    // client countdown, not the collectors' fail-fast default.
+    process.env.POLARIS_SNMP_GATE_WAIT_TIMEOUT_MS = "30";
+
+    const wedge = withSnmpGate("10.0.0.7", 161, async () => {
+      await sleep(80);
+      return "wedge";
+    });
+    // Default-budget waiter: times out at ~30ms while the wedge runs.
+    const dead = withSnmpGate("10.0.0.7", 161, async () => "dead");
+    // Override-budget waiter: outlasts the wedge and runs.
+    const patient = withSnmpGate("10.0.0.7", 161, async () => "patient", 500);
+
+    await expect(dead).rejects.toThrow(/SNMP gate timeout/);
+    await expect(patient).resolves.toBe("patient");
+    await expect(wedge).resolves.toBe("wedge");
+  });
+
   it("propagates the underlying fn rejection unchanged", async () => {
     const err = new Error("upstream snmp failure");
     await expect(
