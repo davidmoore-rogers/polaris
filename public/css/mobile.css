@@ -644,7 +644,10 @@ input, select, textarea { font-family: inherit; }
   align-items: center;
   gap: 16px;
   box-shadow: var(--elev-3);
-  z-index: 50;
+  /* Above every sheet/scrim layer (asset sheet 901, navbar 950, generic
+     sheet 1001) — snackbars fire from actions inside open sheets (asset
+     refresh, screenshot delivery) and must stay visible over them. */
+  z-index: 1100;
   font-size: 14px;
   letter-spacing: .25px;
   animation: snack-in .25s ease-out;

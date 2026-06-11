@@ -2119,8 +2119,21 @@ interface FortiswitchPortVlan {
   trunksAllVlans: boolean;
 }
 
-// switchSerialUpper → portName → vlan config
-type FortiswitchControllerPortsMap = Map<string, Map<string, FortiswitchPortVlan>>;
+// Per-switch view of the controller's managed-switch CMDB: per-port VLAN
+// config plus the trunk → physical-member-ports map. The trunk map is the
+// authoritative equivalent of the FortiSwitch's own `config switch trunk`
+// (auto-ISL FortiLink uplinks are auto-named after the switch serial and
+// carry exactly one member); the controller exposes it on the same payload
+// the VLAN overlay already reads, so it costs no extra query.
+interface FortiswitchSwitchPorts {
+  // portName → vlan config
+  vlanByPort: Map<string, FortiswitchPortVlan>;
+  // trunkName → physical member port names (in CMDB order)
+  trunkMembers: Map<string, string[]>;
+}
+
+// switchSerialUpper → per-switch ports view
+type FortiswitchControllerPortsMap = Map<string, FortiswitchSwitchPorts>;
 
 interface FortiswitchControllerPortsCacheEntry {
   fetchedAt: number;
@@ -2199,6 +2212,40 @@ function parseFortiosVlanList(raw: unknown): number[] {
   return Array.from(out).sort((a, b) => a - b);
 }
 
+// Extract a trunk's physical member port names from a managed-switch CMDB
+// port entry. FortiOS represents the member list in several shapes depending
+// on version + datasource flag: an array of objects ({member-name} or
+// {q_origin_key} or {name}), an array of bare strings, or a single
+// space/comma-separated string. Empty / absent on a plain physical port.
+//
+// NOTE: the exact field name + shape for trunk members on the controller's
+// managed-switch CMDB still wants confirmation on a live FortiOS 7.x device
+// (same caveat the SD-WAN collector carries). This parser is deliberately
+// permissive and the overlay that consumes it is best-effort, so an
+// unexpected shape degrades to "no trunk resolved" rather than breaking the
+// interface scrape.
+export function parseFortiosMemberList(raw: unknown): string[] {
+  const out: string[] = [];
+  const push = (v: unknown): void => {
+    const s = typeof v === "string" ? v.trim() : "";
+    if (s && !out.includes(s)) out.push(s);
+  };
+  if (raw == null) return out;
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (typeof entry === "string") {
+        push(entry);
+      } else if (entry && typeof entry === "object") {
+        const o = entry as Record<string, unknown>;
+        push(o["member-name"] ?? o["q_origin_key"] ?? o.name ?? o["interface-name"]);
+      }
+    }
+  } else if (typeof raw === "string") {
+    for (const part of raw.split(/[,\s]+/)) push(part);
+  }
+  return out;
+}
+
 async function fetchFortiswitchControllerPortsCmdb(
   integration: { id: string; type: string; config: Record<string, unknown> },
   deviceName: string,
@@ -2262,6 +2309,7 @@ async function fetchFortiswitchControllerPortsCmdb(
         const portsRaw = r.ports;
         if (!Array.isArray(portsRaw)) continue;
         const portMap = new Map<string, FortiswitchPortVlan>();
+        const trunkMembers = new Map<string, string[]>();
         for (const p of portsRaw) {
           const port = p as Record<string, unknown>;
           const portName = String(port["port-name"] ?? "").trim();
@@ -2279,8 +2327,16 @@ async function fetchFortiswitchControllerPortsCmdb(
             fortiosBool(port["allowed-vlans-all"]) ||
             isFortiosVlanListAll(port["allowed-vlans"]);
           portMap.set(portName, { nativeVlan, taggedVlans: tagged, trunksAllVlans });
+          // Trunk membership: a port entry that lists members IS a trunk
+          // (the auto-ISL FortiLink uplink is named after the switch serial
+          // and carries exactly one member). The interface overlay uses this
+          // to back-fill ifParent on the physical member so the topology
+          // tooltip can render the cable's real physical port instead of the
+          // opaque trunk name.
+          const members = parseFortiosMemberList(port.members ?? port.member);
+          if (members.length > 0) trunkMembers.set(portName, members);
         }
-        map.set(serial.toUpperCase(), portMap);
+        map.set(serial.toUpperCase(), { vlanByPort: portMap, trunkMembers });
       }
 
       fortiswitchControllerPortsCache.set(cacheKey, { fetchedAt: Date.now(), ports: map });
@@ -2292,6 +2348,60 @@ async function fetchFortiswitchControllerPortsCmdb(
 
   inflightFortiswitchPortsFetch.set(cacheKey, fetchPromise);
   return fetchPromise;
+}
+
+/**
+ * Back-fill the trunk → physical-member relationship onto a managed
+ * FortiSwitch's interface list, mirroring what `collectSystemInfoFortinet`
+ * already does for FortiGate aggregates (the `set members "portN"` back-fill).
+ *
+ * SNMP IF-MIB surfaces the FortiLink uplink trunk and its physical member as
+ * flat, unrelated rows — the parent/member edge lives only in the controller
+ * CMDB. For each trunk we:
+ *   - mark the trunk row `ifType="aggregate"` (only when SNMP left it null or
+ *     guessed "physical" — never clobber a real aggregate type)
+ *   - stamp `ifParent=<trunk>` + `ifType="physical"` on each member row,
+ *     synthesizing the row when IF-MIB omitted the subordinate member port.
+ *
+ * Downstream, `interfaceTopologyService.preferPhysical` and the controller-
+ * edge swap in `map.ts` render a single-member trunk as its physical port
+ * (e.g. the serial-named FortiLink uplink → `port52`). Multi-member LACP
+ * bundles keep the trunk name (no single physical port to show).
+ *
+ * Mutates `interfaces` in place; returns the number of member links stamped.
+ */
+export function overlayFortiswitchTrunkMembers(
+  interfaces: InterfaceSample[],
+  trunkMembers: Map<string, string[]>,
+): number {
+  if (trunkMembers.size === 0) return 0;
+  const byName = new Map<string, InterfaceSample>();
+  for (const i of interfaces) byName.set(i.ifName, i);
+  let links = 0;
+  for (const [trunkName, members] of trunkMembers) {
+    if (members.length === 0) continue;
+    const trunkRow = byName.get(trunkName);
+    if (trunkRow && (!trunkRow.ifType || trunkRow.ifType === "physical")) {
+      trunkRow.ifType = "aggregate";
+    }
+    for (const memberName of members) {
+      const existing = byName.get(memberName);
+      if (existing) {
+        if (!existing.ifParent) existing.ifParent = trunkName;
+        if (!existing.ifType) existing.ifType = "physical";
+      } else {
+        const synthetic: InterfaceSample = {
+          ifName:   memberName,
+          ifType:   "physical",
+          ifParent: trunkName,
+        };
+        interfaces.push(synthetic);
+        byName.set(memberName, synthetic);
+      }
+      links++;
+    }
+  }
+  return links;
 }
 
 async function probeFortinetController(
@@ -3703,12 +3813,14 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
           const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any, sysInfoTimeout);
           endIpsec({ tunnels: ipsec?.length ?? null });
           if (ipsec !== undefined) data.ipsecTunnels = ipsec;
-          // FortiSwitch port-VLAN overlay. SNMP IF-MIB gives us per-port
-          // counters but not VLAN membership; the parent FortiGate's
-          // switch-controller CMDB does. One cached call per controller per
-          // 30s, keyed by serial, joined onto the in-memory InterfaceSample
-          // list by port-name == ifName. Best-effort: any failure leaves the
-          // VLAN fields null on every row and the interface scrape proceeds.
+          // FortiSwitch port-VLAN + trunk-member overlay. SNMP IF-MIB gives
+          // us per-port counters but neither VLAN membership nor the
+          // trunk→physical-member mapping; the parent FortiGate's
+          // switch-controller CMDB carries both. One cached call per
+          // controller per 30s, keyed by serial, joined onto the in-memory
+          // InterfaceSample list by port-name == ifName. Best-effort: any
+          // failure leaves the VLAN fields null on every row and the
+          // interface scrape proceeds.
           if (asset.assetType === "switch" && asset.serialNumber) {
             const topology = (asset.fortinetTopology ?? {}) as Record<string, unknown>;
             let controllerName = typeof topology.controllerFortigate === "string"
@@ -3726,17 +3838,21 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
                   sysInfoTimeout,
                 );
                 const portsForSwitch = portsMap.get(asset.serialNumber.toUpperCase());
-                if (portsForSwitch && portsForSwitch.size > 0) {
+                if (portsForSwitch && portsForSwitch.vlanByPort.size > 0) {
                   let overlaid = 0;
                   for (const iface of data.interfaces) {
-                    const cfg = portsForSwitch.get(iface.ifName);
+                    const cfg = portsForSwitch.vlanByPort.get(iface.ifName);
                     if (!cfg) continue;
                     iface.nativeVlan     = cfg.nativeVlan;
                     iface.taggedVlans    = cfg.taggedVlans;
                     iface.trunksAllVlans = cfg.trunksAllVlans;
                     overlaid++;
                   }
-                  endVlan({ overlaid, total: data.interfaces.length });
+                  const trunkOverlaid = overlayFortiswitchTrunkMembers(
+                    data.interfaces,
+                    portsForSwitch.trunkMembers,
+                  );
+                  endVlan({ overlaid, total: data.interfaces.length, trunkLinks: trunkOverlaid });
                 } else {
                   endVlan({ overlaid: 0, total: data.interfaces.length, reason: "switch_not_in_cmdb" });
                 }
