@@ -1,5 +1,8 @@
 // public/js/mobile/asset-detail.js — Asset detail slide-up sheet.
 //
+// Header carries camera (screenshot — see screenshotSheet), refresh and
+// close icon buttons.
+//
 // Sections (top to bottom):
 //   - Hero with status pill + identity bits (name lives in the sheet header)
 //   - Monitor section (response-time chart, status pill, RTT/last poll)
@@ -137,6 +140,7 @@
       + '<div class="asset-sheet-header">'
       + '  <span class="dot" id="asset-sheet-dot" style="display:none;"></span>'
       + '  <div class="asset-sheet-name" id="asset-sheet-name">Asset</div>'
+      + '  <button class="icon-btn" id="asset-sheet-screenshot" aria-label="Screenshot"><svg viewBox="0 0 24 24"><use href="#i-camera"/></svg></button>'
       + '  <button class="icon-btn" id="asset-sheet-refresh" aria-label="Refresh"><svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg></button>'
       + '  <button class="icon-btn" id="asset-sheet-close" aria-label="Close"><svg viewBox="0 0 24 24"><use href="#i-close"/></svg></button>'
       + '</div>'
@@ -150,6 +154,13 @@
     document.getElementById("asset-sheet-close").addEventListener("click", dismiss);
     document.getElementById("asset-sheet-refresh").addEventListener("click", function () {
       if (_openId) onRefresh(_openId, this, mountState(_openId));
+    });
+    // While peeked the header tap handler below re-expands instead (the
+    // camera isn't in its exclusion list) and this guard makes the
+    // screenshot click a no-op, so one tap = expand, second tap = capture.
+    document.getElementById("asset-sheet-screenshot").addEventListener("click", function () {
+      if (_state !== "expanded") return;
+      screenshotSheet(this);
     });
     // Tapping the header while peeked re-expands (ignore taps on the buttons).
     sheet.querySelector(".asset-sheet-header").addEventListener("click", function (e) {
@@ -239,6 +250,130 @@
     var sc = document.getElementById("asset-sheet-scrim");
     if (s) s.remove();
     if (sc) sc.remove();
+  }
+
+  // ─── Screenshot ──────────────────────────────────────────────────────
+  // Camera button in the sheet header. Captures the sheet body (#asset-host
+  // — its FULL content height, including parts scrolled out of view;
+  // collapsed sections stay collapsed, so the capture matches what the
+  // operator chose to expand) via the vendored html-to-image library, draws
+  // a title strip above it (mirrors the desktop _screenshotAssetDetails in
+  // assets.js), then hands the PNG off in mobile-priority order: native
+  // share sheet → clipboard → plain download. Unlike desktop there's no
+  // canonical-width reflow — the sheet captures at its natural mobile width,
+  // which also means no relayout settle delay before rasterizing.
+  function screenshotSheet(btn) {
+    var host = document.getElementById("asset-host");
+    if (!host || !host.firstChild) {
+      PolarisTabs.showSnackbar("Nothing to screenshot", { error: true });
+      return;
+    }
+    if (typeof htmlToImage === "undefined") {
+      PolarisTabs.showSnackbar("Screenshot failed — capture library not loaded", { error: true });
+      return;
+    }
+    var sheet = document.getElementById("asset-sheet");
+    var bg = (sheet && getComputedStyle(sheet).backgroundColor) || "#191c20";
+    var clrText = getComputedStyle(document.documentElement).getPropertyValue("--md-on-surface").trim() || "#e2e2e8";
+    if (btn) btn.disabled = true;
+    function done() { if (btn) btn.disabled = false; }
+
+    // iOS Safari rejects canvases past ~16.7M device pixels (older devices)
+    // and the body can run thousands of CSS px tall with every section
+    // expanded — shrink the pixel ratio just enough to stay under the cap
+    // (title strip + padding included) instead of failing with a blank PNG.
+    var w = host.scrollWidth || host.offsetWidth || 1;
+    var h = host.scrollHeight || host.offsetHeight || 1;
+    var MAX_AREA = 16000000;
+    var scale = Math.min(2, Math.sqrt(MAX_AREA / ((w + 32) * (h + 56))));
+
+    // WebKit (every iOS browser + macOS Safari) intermittently drops images
+    // and webfonts on the FIRST foreignObject rasterization — the standard
+    // workaround is rendering twice and keeping the second pass. Desktop
+    // Chrome/Edge carry "Chrome/" in the UA; iOS Chrome is "CriOS" and IS
+    // WebKit, so it correctly falls into the double-capture branch.
+    var isWebKit = /AppleWebKit/.test(navigator.userAgent) && !/Chrome\//.test(navigator.userAgent);
+    function capture() { return htmlToImage.toCanvas(host, { pixelRatio: scale, backgroundColor: bg }); }
+
+    (isWebKit ? capture().then(capture) : capture()).then(function (cap) {
+      var pad = 16;
+      var titleH = 40;
+      var cw = cap.width / scale;
+      var ch = cap.height / scale;
+      var canvas = document.createElement("canvas");
+      canvas.width = Math.round((cw + pad * 2) * scale);
+      canvas.height = Math.round((titleH + ch + pad) * scale);
+      var ctx = canvas.getContext("2d");
+      ctx.scale(scale, scale);
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, cw + pad * 2, titleH + ch + pad);
+      ctx.fillStyle = clrText;
+      ctx.font = "bold 15px Roboto, system-ui, sans-serif";
+      var name = (document.getElementById("asset-sheet-name") || {}).textContent || "";
+      ctx.fillText("Asset Details" + (name ? " — " + name : ""), pad, 26);
+      // 1:1 device-pixel blit (cw×ch CSS px under the scale transform) so
+      // the captured body is never resampled.
+      ctx.drawImage(cap, pad, titleH, cw, ch);
+      canvas.toBlob(function (blob) {
+        if (!blob) { done(); PolarisTabs.showSnackbar("Screenshot failed", { error: true }); return; }
+        deliverScreenshot(blob, name).then(function (msg) {
+          done();
+          if (msg) PolarisTabs.showSnackbar(msg);
+        }).catch(function () {
+          done();
+          PolarisTabs.showSnackbar("Screenshot failed — couldn't share, copy, or download", { error: true });
+        });
+      }, "image/png");
+    }).catch(function () {
+      done();
+      PolarisTabs.showSnackbar("Screenshot failed", { error: true });
+    });
+  }
+
+  // Hand the PNG off: native share sheet (save to Photos / AirDrop / send)
+  // when the browser can share files, falling back to clipboard, falling
+  // back to an anchor download. Resolves with the snackbar message for the
+  // path that worked — or "" when the user cancelled the share sheet
+  // (cancelling isn't an error, so no toast). Share/clipboard can both
+  // reject when the async rasterization outlived the tap's transient
+  // activation window — the chain absorbs that too.
+  function deliverScreenshot(blob, name) {
+    var fname = "asset-" + (name ? name.replace(/[^\w.-]+/g, "_") + "-" : "") + "details.png";
+    var file = null;
+    try { file = new File([blob], fname, { type: "image/png" }); } catch (_) {}
+    if (file && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      return navigator.share({ files: [file] }).then(function () {
+        return "Screenshot shared";
+      }).catch(function (err) {
+        if (err && err.name === "AbortError") return ""; // user closed the share sheet
+        return copyOrDownloadScreenshot(blob, fname);
+      });
+    }
+    return copyOrDownloadScreenshot(blob, fname);
+  }
+
+  function copyOrDownloadScreenshot(blob, fname) {
+    if (navigator.clipboard && typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
+      return navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
+        return "Screenshot copied to clipboard";
+      }).catch(function () {
+        return downloadScreenshot(blob, fname);
+      });
+    }
+    return Promise.resolve(downloadScreenshot(blob, fname));
+  }
+
+  function downloadScreenshot(blob, fname) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoke late — Safari aborts the save if the URL dies under it.
+    setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
+    return "Screenshot downloaded";
   }
 
   // Public opener. Builds the sheet (if needed), then fetches + renders the
