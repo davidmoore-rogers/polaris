@@ -12,7 +12,7 @@
 
 import { Netmask } from "netmask";
 import { AppError } from "../utils/errors.js";
-import { normalizeMacOrNull } from "../utils/mac.js";
+import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
 import type {
   DiscoveredSubnet,
@@ -244,25 +244,34 @@ export async function discoverDhcpSubnets(
   // We don't know its mgmt IP from /sys/status; fall back to the host we connected to.
   const mgmtIfaceName = config.mgmtInterface || "mgmt";
   let mgmtIp: string | null = null;
-  // MAC of the management interface, read off the same CMDB query. Stamped on
-  // the firewall Asset so discovery's byMac index finds it and never spawns a
-  // duplicate `fortigate-endpoint` ghost for the firewall's own mgmt MAC.
+  // MAC of the management interface (scalar identity) plus EVERY physical
+  // interface's MAC. A peer FortiGate can sight this firewall in its ARP /
+  // device-inventory table on any interface, not just the one bearing the mgmt
+  // IP — so we capture them all and index the firewall by all of them, which
+  // is the only way to reliably stop a duplicate `fortigate-endpoint` ghost.
+  // Read off the same /system/interface query (fetch all, no name filter);
+  // loopback / tunnel interfaces report all-zero MACs and are dropped by
+  // normalizeMacsDistinct.
   let mgmtMac: string | null = null;
+  let interfaceMacs: string[] = [];
   try {
     const ifaceList = await fgRequest<any[]>(config, "GET", "/api/v2/cmdb/system/interface", {
-      query: { ...queryBase, filter: `name==${mgmtIfaceName}` },
+      query: { ...queryBase },
       signal,
     });
     if (Array.isArray(ifaceList) && ifaceList.length > 0) {
-      const iface = ifaceList[0];
-      const rawIp = Array.isArray(iface.ip)
-        ? iface.ip[0]
-        : (typeof iface.ip === "string" ? iface.ip.split(" ")[0] : "");
-      if (rawIp && rawIp !== "0.0.0.0" && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rawIp)) {
-        mgmtIp = rawIp;
-        log("discover.device.mgmtip", "info", `${deviceHostname}: Resolved management IP from ${mgmtIfaceName}: ${rawIp}`, deviceHostname);
+      const mgmtIface = ifaceList.find((i) => i?.name === mgmtIfaceName);
+      if (mgmtIface) {
+        const rawIp = Array.isArray(mgmtIface.ip)
+          ? mgmtIface.ip[0]
+          : (typeof mgmtIface.ip === "string" ? mgmtIface.ip.split(" ")[0] : "");
+        if (rawIp && rawIp !== "0.0.0.0" && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(rawIp)) {
+          mgmtIp = rawIp;
+          log("discover.device.mgmtip", "info", `${deviceHostname}: Resolved management IP from ${mgmtIfaceName}: ${rawIp}`, deviceHostname);
+        }
+        mgmtMac = normalizeMacOrNull(typeof mgmtIface.macaddr === "string" ? mgmtIface.macaddr : null);
       }
-      mgmtMac = normalizeMacOrNull(typeof iface.macaddr === "string" ? iface.macaddr : null);
+      interfaceMacs = normalizeMacsDistinct(ifaceList.map((i) => (typeof i?.macaddr === "string" ? i.macaddr : null)));
     }
   } catch { /* best-effort */ }
 
@@ -309,6 +318,7 @@ export async function discoverDhcpSubnets(
     mgmtIp: mgmtIp || "",
     osVersion: deviceOsVersion,
     ...(mgmtMac ? { mgmtMac } : {}),
+    ...(interfaceMacs.length ? { interfaceMacs } : {}),
     ...(deviceLatitude !== undefined && deviceLongitude !== undefined
       ? { latitude: deviceLatitude, longitude: deviceLongitude }
       : {}),

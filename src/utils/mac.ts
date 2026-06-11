@@ -31,3 +31,24 @@ export function normalizeMacOrNull(raw: string | null | undefined): string | nul
   if (hex === ALL_ZERO_HEX) return null;
   return hex.match(/.{2}/g)!.join(":");
 }
+
+/**
+ * Normalize a list of raw MACs to distinct, valid, colon-uppercase form,
+ * preserving first-seen order. Empty / malformed / all-zero entries are
+ * dropped (loopback and tunnel interfaces report all-zero MACs). Used to
+ * collect every physical interface MAC off a FortiGate so the firewall is
+ * recognized in discovery's byMac index regardless of which interface a peer
+ * sighted it on.
+ */
+export function normalizeMacsDistinct(raws: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of raws) {
+    const norm = normalizeMacOrNull(raw);
+    if (norm && !seen.has(norm)) {
+      seen.add(norm);
+      out.push(norm);
+    }
+  }
+  return out;
+}

@@ -15,6 +15,7 @@ import * as windowsServer from "../../services/windowsServerService.js";
 import * as entraId from "../../services/entraIdService.js";
 import * as activeDirectory from "../../services/activeDirectoryService.js";
 import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps } from "../../utils/cidr.js";
+import { normalizeMacsDistinct } from "../../utils/mac.js";
 import { isBlockedOutboundHost } from "../../utils/netGuard.js";
 import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveredVip, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
@@ -2638,6 +2639,7 @@ function buildFortigateFirewallObservedBlob(
     model?: string;
     mgmtIp?: string;
     mgmtMac?: string;
+    interfaceMacs?: string[];
     osVersion?: string;
     latitude?: number;
     longitude?: number;
@@ -2685,6 +2687,7 @@ function buildFortigateFirewallObservedBlob(
     // Recorded for fidelity (Sources tab). NOT consumed by projection —
     // macAddress is written directly onto the Asset, not projection-owned.
     mgmtMac: device.mgmtMac || null,
+    interfaceMacs: device.interfaceMacs && device.interfaceMacs.length ? device.interfaceMacs : null,
     latitude: Number.isFinite(device.latitude) ? device.latitude : null,
     longitude: Number.isFinite(device.longitude) ? device.longitude : null,
     metavarLatitude: Number.isFinite(device.metavarLatitude) ? device.metavarLatitude : null,
@@ -3715,11 +3718,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           model: device.model,
           osVersion: device.osVersion,
           mgmtIp: member.isPrimary ? device.mgmtIp : "",
-          // mgmt-interface MAC, primary member only — the resolved MAC belongs
-          // to the box REST currently reaches (the active member). Stamping it
-          // on the standby would be wrong. Undefined for the standby + when the
-          // interface query didn't surface a usable MAC.
+          // mgmt-interface MAC + all physical interface MACs, primary member
+          // only — the resolved MACs belong to the box REST currently reaches
+          // (the active member). Stamping them on the standby would be wrong.
+          // Undefined for the standby + when the interface query surfaced none.
           mgmtMac: member.isPrimary ? device.mgmtMac : undefined,
+          interfaceMacs: member.isPrimary ? device.interfaceMacs : undefined,
           latitude: device.latitude,
           longitude: device.longitude,
           // FMG-only metavars + per-device SNMP pull. Undefined when the
@@ -3822,24 +3826,29 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (addressMetavar) {
           updateData.learnedAddress = fwProjected.learnedAddress;
         }
-        // Backfill macAddress + AssetMacAddress from the firewall's own mgmt
-        // interface MAC (primary member only). Mirrors the FortiSwitch backfill
-        // above so discovery's MAC-keyed dedup (Phase 7 device-inventory, Phase
-        // 7.5 MAC-table) recognizes this firewall and never spawns a phantom
-        // `fortigate-endpoint` ghost for its own mgmt MAC. Idempotent — when the
-        // MAC is already in macList, only its lastSeen + source are bumped.
+        // Backfill macAddress + AssetMacAddress from EVERY physical interface
+        // MAC (primary member only). Mirrors the FortiSwitch backfill above.
+        // A peer FortiGate can sight this firewall on any interface, so indexing
+        // all of them is the only reliable way to stop discovery's MAC-keyed
+        // paths (Phase 7 device-inventory, Phase 7.5 MAC-table) from spawning a
+        // phantom `fortigate-endpoint` ghost. Idempotent — MACs already in
+        // macList only get their lastSeen + source bumped. Scalar macAddress is
+        // the mgmt-interface MAC (stable identity) when not already set.
+        const fwMacs = normalizeMacsDistinct([memberDevice.mgmtMac, ...(memberDevice.interfaceMacs ?? [])]);
         let fwMacListForReconcile: MacJsonEntry[] | null = null;
-        if (memberDevice.mgmtMac) {
+        if (fwMacs.length) {
           const macList: MacJsonEntry[] = Array.isArray(existingAsset.macAddresses) ? [...(existingAsset.macAddresses as any)] : [];
-          const existingMacEntry = macList.find((m) => m.mac === memberDevice.mgmtMac);
-          if (existingMacEntry) {
-            existingMacEntry.lastSeen = now;
-            existingMacEntry.source = "fortigate-firewall";
-          } else {
-            macList.push({ mac: memberDevice.mgmtMac, lastSeen: now, source: "fortigate-firewall" });
+          for (const mac of fwMacs) {
+            const existingMacEntry = macList.find((m) => m.mac === mac);
+            if (existingMacEntry) {
+              existingMacEntry.lastSeen = now;
+              existingMacEntry.source = "fortigate-firewall";
+            } else {
+              macList.push({ mac, lastSeen: now, source: "fortigate-firewall" });
+            }
           }
           macList.sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
-          if (!existingAsset.macAddress) updateData.macAddress = macList[0].mac;
+          if (!existingAsset.macAddress) updateData.macAddress = memberDevice.mgmtMac || fwMacs[0];
           existingAsset.macAddresses = macList;
           fwMacListForReconcile = macList;
         }
@@ -3889,9 +3898,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (device.model) existingAsset.model = device.model;
         if (!existingAsset.learnedLocation) existingAsset.learnedLocation = memberDevice.hostname || fgHostname;
         if (existingAsset.status === "decommissioned") existingAsset.status = "active";
-        // Mirror the backfilled mgmt MAC so the same-cycle Phase 7 lookup finds
+        // Mirror the backfilled MACs so the same-cycle Phase 7 lookup finds
         // this firewall byMac (reindex below reads existingAsset.macAddress +
-        // .macAddresses), preventing a ghost even on first discovery.
+        // .macAddresses — the latter already holds every interface MAC from the
+        // merge above), preventing a ghost even on first discovery.
         if (updateData.macAddress) existingAsset.macAddress = updateData.macAddress as string;
         assetIdx.reindex(existingAsset);
         assetNames.push(`${memberDevice.hostname || device.name}${haMembers ? ` (HA ${member.isPrimary ? "primary" : "secondary"})` : ""} (updated)`);
@@ -3910,6 +3920,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         { sourceKind: "fortigate-firewall", inferred: false, observed: fwObserved },
       ]);
       const isStandbyCreate = haMembers != null && !member.isPrimary;
+      // Distinct physical interface MACs to seed (mgmt MAC first as scalar
+      // identity). Empty for the standby (memberDevice carries none) + when the
+      // interface query surfaced nothing usable.
+      const fwCreateMacs = normalizeMacsDistinct([memberDevice.mgmtMac, ...(memberDevice.interfaceMacs ?? [])]);
       const newAsset = await prisma.asset.create({
         data: {
           // Standby member: explicit null (cluster IP only routes to active).
@@ -3919,14 +3933,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             : (fwCreateProjected.ipAddress ? { ipSource: memberDevice.hostname || fgHostname || integrationType } : {})),
           hostname: fwCreateProjected.hostname || memberDevice.hostname || fgHostname,
           serialNumber: fwCreateProjected.serialNumber || member.serial || null,
-          // mgmt-interface MAC (primary member only — memberDevice.mgmtMac is
-          // undefined for the standby). Seeded on create so the next discovery
-          // cycle's MAC-keyed dedup recognizes this firewall and never spawns a
-          // phantom `fortigate-endpoint` asset for its own mgmt MAC.
-          ...(memberDevice.mgmtMac
+          // Every physical interface MAC (primary member only — undefined for
+          // the standby). Seeded on create so the next discovery cycle's
+          // MAC-keyed dedup recognizes this firewall on whichever interface a
+          // peer sighted it and never spawns a phantom `fortigate-endpoint`
+          // asset. Scalar macAddress is the mgmt-interface MAC when present.
+          ...(fwCreateMacs.length
             ? {
-                macAddress: memberDevice.mgmtMac,
-                macAddressRows: { create: buildMacRowsForCreate([{ mac: memberDevice.mgmtMac, lastSeen: now, source: "fortigate-firewall" }]) },
+                macAddress: memberDevice.mgmtMac || fwCreateMacs[0],
+                macAddressRows: { create: buildMacRowsForCreate(fwCreateMacs.map((mac) => ({ mac, lastSeen: now, source: "fortigate-firewall" }))) },
               }
             : {}),
           // Phase 4d: legacy `assetTag = fgt:<serial>` write retired —

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { normalizeMacOrNull } from "../../src/utils/mac.js";
+import { normalizeMacOrNull, normalizeMacsDistinct } from "../../src/utils/mac.js";
 
 describe("normalizeMacOrNull", () => {
   it("normalizes colon-separated lowercase to uppercase", () => {
@@ -45,5 +45,24 @@ describe("normalizeMacOrNull", () => {
 
   it("trims surrounding whitespace via the hex filter", () => {
     expect(normalizeMacOrNull("  38:C0:EA:81:55:0C  ")).toBe("38:C0:EA:81:55:0C");
+  });
+});
+
+describe("normalizeMacsDistinct", () => {
+  it("normalizes, dedupes, and preserves first-seen order", () => {
+    expect(
+      normalizeMacsDistinct(["38:c0:ea:81:55:0c", "38-C0-EA-81-55-0D", "38c0ea81550c"]),
+    ).toEqual(["38:C0:EA:81:55:0C", "38:C0:EA:81:55:0D"]);
+  });
+
+  it("drops all-zero (loopback/tunnel) and invalid entries", () => {
+    expect(
+      normalizeMacsDistinct(["00:00:00:00:00:00", "", null, undefined, "garbage", "38:c0:ea:81:55:0c"]),
+    ).toEqual(["38:C0:EA:81:55:0C"]);
+  });
+
+  it("returns an empty array when nothing is usable", () => {
+    expect(normalizeMacsDistinct(["00:00:00:00:00:00", null, "nope"])).toEqual([]);
+    expect(normalizeMacsDistinct([])).toEqual([]);
   });
 });

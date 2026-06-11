@@ -25,10 +25,11 @@
  *     the switch's MAC is still NULL; once `baseMac` capture stamps it (post
  *     -baseMac landing), the existing job's filter no longer matches but
  *     the duplicate row persists. This job catches those. Firewalls now stamp
- *     their own mgmt-interface MAC at discovery time (from
+ *     ALL of their physical interface MACs at discovery time (from
  *     `/api/v2/cmdb/system/interface`), so new firewall ghosts are prevented at
- *     the source — but pre-existing firewall duplicates (and the rare case of a
- *     mgmt-MAC query failing a cycle) still converge here.
+ *     the source regardless of which interface a peer sighted — but pre-existing
+ *     firewall duplicates (and the rare case of the interface query failing a
+ *     cycle) still converge here.
  *
  * Each cycle of every discovery loop re-raises a "Sibling hostname collision"
  * Conflict against the un-cross-linked sibling — operator queue pressure
