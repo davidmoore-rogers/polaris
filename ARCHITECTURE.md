@@ -1936,7 +1936,7 @@ For each discovery-owned Asset field, the table below lists the ordered set of `
 | `learnedAddress`    | `fortigate-firewall` (`metavarAddress`) — FMG address metavar string, FMG-only. Surfaced as "Address" on the General tab. Only (re)written by discovery when an address metavar is configured that cycle.                                    |
 
 **Fields the projection does NOT own** (and why):
-- `macAddress` / `macAddresses[]` — DHCP discovery + Intune writes feed these directly to Asset; merge happens inline in the discovery sync.
+- `macAddress` / `macAddresses[]` — DHCP discovery + Intune writes feed these directly to Asset; merge happens inline in the discovery sync. Infrastructure management MACs are stamped the same direct way: FortiSwitch/FortiAP `baseMac` and the FortiGate firewall's mgmt-interface MAC (read from `/api/v2/cmdb/system/interface`'s `macaddr` on the same query that resolves mgmtIp; primary HA member only). The firewall stamp exists so discovery's in-memory `byMac` index recognizes the firewall and never spawns a duplicate `fortigate-endpoint` ghost for the firewall's own mgmt MAC — the observed blob also records `mgmtMac` for the Sources tab, but projection does not consume it.
 - `status` / `quarantine*` — multi-actor (discovery / quarantine code / decommission job / manual operator) — too many writers for projection to arbitrate.
 - `assetType` — usually inferred at create time from OS string and stable thereafter; manual recategorization is sticky.
 - `location`, `department`, `assignedTo`, `notes`, `tags`, `monitor*`, `dnsName` — operator-owned or system-owned, not from discovery sources.

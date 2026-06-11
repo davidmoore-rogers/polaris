@@ -12,6 +12,7 @@
 
 import { Netmask } from "netmask";
 import { AppError } from "../utils/errors.js";
+import { normalizeMacOrNull } from "../utils/mac.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
 import type {
   DiscoveredSubnet,
@@ -243,6 +244,10 @@ export async function discoverDhcpSubnets(
   // We don't know its mgmt IP from /sys/status; fall back to the host we connected to.
   const mgmtIfaceName = config.mgmtInterface || "mgmt";
   let mgmtIp: string | null = null;
+  // MAC of the management interface, read off the same CMDB query. Stamped on
+  // the firewall Asset so discovery's byMac index finds it and never spawns a
+  // duplicate `fortigate-endpoint` ghost for the firewall's own mgmt MAC.
+  let mgmtMac: string | null = null;
   try {
     const ifaceList = await fgRequest<any[]>(config, "GET", "/api/v2/cmdb/system/interface", {
       query: { ...queryBase, filter: `name==${mgmtIfaceName}` },
@@ -257,6 +262,7 @@ export async function discoverDhcpSubnets(
         mgmtIp = rawIp;
         log("discover.device.mgmtip", "info", `${deviceHostname}: Resolved management IP from ${mgmtIfaceName}: ${rawIp}`, deviceHostname);
       }
+      mgmtMac = normalizeMacOrNull(typeof iface.macaddr === "string" ? iface.macaddr : null);
     }
   } catch { /* best-effort */ }
 
@@ -302,6 +308,7 @@ export async function discoverDhcpSubnets(
     model: deviceModel,
     mgmtIp: mgmtIp || "",
     osVersion: deviceOsVersion,
+    ...(mgmtMac ? { mgmtMac } : {}),
     ...(deviceLatitude !== undefined && deviceLongitude !== undefined
       ? { latitude: deviceLatitude, longitude: deviceLongitude }
       : {}),

@@ -2637,6 +2637,7 @@ function buildFortigateFirewallObservedBlob(
     serial?: string;
     model?: string;
     mgmtIp?: string;
+    mgmtMac?: string;
     osVersion?: string;
     latitude?: number;
     longitude?: number;
@@ -2681,6 +2682,9 @@ function buildFortigateFirewallObservedBlob(
     model: device.model || null,
     osVersion: device.osVersion || null,
     mgmtIp: device.mgmtIp || null,
+    // Recorded for fidelity (Sources tab). NOT consumed by projection —
+    // macAddress is written directly onto the Asset, not projection-owned.
+    mgmtMac: device.mgmtMac || null,
     latitude: Number.isFinite(device.latitude) ? device.latitude : null,
     longitude: Number.isFinite(device.longitude) ? device.longitude : null,
     metavarLatitude: Number.isFinite(device.metavarLatitude) ? device.metavarLatitude : null,
@@ -3711,6 +3715,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           model: device.model,
           osVersion: device.osVersion,
           mgmtIp: member.isPrimary ? device.mgmtIp : "",
+          // mgmt-interface MAC, primary member only — the resolved MAC belongs
+          // to the box REST currently reaches (the active member). Stamping it
+          // on the standby would be wrong. Undefined for the standby + when the
+          // interface query didn't surface a usable MAC.
+          mgmtMac: member.isPrimary ? device.mgmtMac : undefined,
           latitude: device.latitude,
           longitude: device.longitude,
           // FMG-only metavars + per-device SNMP pull. Undefined when the
@@ -3813,6 +3822,27 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (addressMetavar) {
           updateData.learnedAddress = fwProjected.learnedAddress;
         }
+        // Backfill macAddress + AssetMacAddress from the firewall's own mgmt
+        // interface MAC (primary member only). Mirrors the FortiSwitch backfill
+        // above so discovery's MAC-keyed dedup (Phase 7 device-inventory, Phase
+        // 7.5 MAC-table) recognizes this firewall and never spawns a phantom
+        // `fortigate-endpoint` ghost for its own mgmt MAC. Idempotent — when the
+        // MAC is already in macList, only its lastSeen + source are bumped.
+        let fwMacListForReconcile: MacJsonEntry[] | null = null;
+        if (memberDevice.mgmtMac) {
+          const macList: MacJsonEntry[] = Array.isArray(existingAsset.macAddresses) ? [...(existingAsset.macAddresses as any)] : [];
+          const existingMacEntry = macList.find((m) => m.mac === memberDevice.mgmtMac);
+          if (existingMacEntry) {
+            existingMacEntry.lastSeen = now;
+            existingMacEntry.source = "fortigate-firewall";
+          } else {
+            macList.push({ mac: memberDevice.mgmtMac, lastSeen: now, source: "fortigate-firewall" });
+          }
+          macList.sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
+          if (!existingAsset.macAddress) updateData.macAddress = macList[0].mac;
+          existingAsset.macAddresses = macList;
+          fwMacListForReconcile = macList;
+        }
         clampAcquiredToLastSeen(updateData, existingAsset);
         // Auto-Monitor sweep: enforce monitored = fortigateAddAsMonitored on
         // every cycle unless the operator has set a divergent override.
@@ -3824,6 +3854,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // recomputes membership.
         const previousHostname: string | null = existingAsset.hostname || null;
         await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
+        if (fwMacListForReconcile) {
+          await reconcileMacAddresses(existingAsset.id, fwMacListForReconcile);
+        }
         // Rename rotation + tag registry seeding — only meaningful for the
         // PRIMARY member. Endpoint sightings tag with the FMG device name
         // (cluster identity, stable), and the standby never has endpoints
@@ -3856,6 +3889,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (device.model) existingAsset.model = device.model;
         if (!existingAsset.learnedLocation) existingAsset.learnedLocation = memberDevice.hostname || fgHostname;
         if (existingAsset.status === "decommissioned") existingAsset.status = "active";
+        // Mirror the backfilled mgmt MAC so the same-cycle Phase 7 lookup finds
+        // this firewall byMac (reindex below reads existingAsset.macAddress +
+        // .macAddresses), preventing a ghost even on first discovery.
+        if (updateData.macAddress) existingAsset.macAddress = updateData.macAddress as string;
         assetIdx.reindex(existingAsset);
         assetNames.push(`${memberDevice.hostname || device.name}${haMembers ? ` (HA ${member.isPrimary ? "primary" : "secondary"})` : ""} (updated)`);
         continue;
@@ -3882,6 +3919,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             : (fwCreateProjected.ipAddress ? { ipSource: memberDevice.hostname || fgHostname || integrationType } : {})),
           hostname: fwCreateProjected.hostname || memberDevice.hostname || fgHostname,
           serialNumber: fwCreateProjected.serialNumber || member.serial || null,
+          // mgmt-interface MAC (primary member only — memberDevice.mgmtMac is
+          // undefined for the standby). Seeded on create so the next discovery
+          // cycle's MAC-keyed dedup recognizes this firewall and never spawns a
+          // phantom `fortigate-endpoint` asset for its own mgmt MAC.
+          ...(memberDevice.mgmtMac
+            ? {
+                macAddress: memberDevice.mgmtMac,
+                macAddressRows: { create: buildMacRowsForCreate([{ mac: memberDevice.mgmtMac, lastSeen: now, source: "fortigate-firewall" }]) },
+              }
+            : {}),
           // Phase 4d: legacy `assetTag = fgt:<serial>` write retired —
           // AssetSource (sourceKind="fortigate-firewall", externalId=serial)
           // upserted just below is the canonical identity link.
