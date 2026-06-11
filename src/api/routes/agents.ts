@@ -30,6 +30,7 @@ import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { AGENT_BIN_DIR } from "../../utils/paths.js";
 import { requireAgentBearer } from "../middleware/auth.js";
+import { agentApiLimiter, agentBinaryLimiter } from "../middleware/rateLimits.js";
 import {
   consumeEnrollmentToken,
 } from "../../services/agentTokenService.js";
@@ -152,6 +153,7 @@ agentsEnrollRouter.post("/", async (req, res, next) => {
 // ─── Bearer-gated routes ──────────────────────────────────────────────
 
 export const agentsRouter = Router();
+agentsRouter.use(agentApiLimiter);
 agentsRouter.use(requireAgentBearer);
 
 // ─── Sample wire shapes ───────────────────────────────────────────────
@@ -745,7 +747,7 @@ export function __debugLogger() { return logger; }
 
 export const agentsBinaryRouter = Router();
 
-agentsBinaryRouter.get("/:filename", async (req, res, next) => {
+agentsBinaryRouter.get("/:filename", agentBinaryLimiter, async (req, res, next) => {
   try {
     const filename = req.params.filename as string;
     // Defense-in-depth path-traversal check (the whitelist below is the

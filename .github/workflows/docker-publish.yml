@@ -10,6 +10,11 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# Default to read-only; the build job widens its own permissions for the
+# GHCR push + attestation.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

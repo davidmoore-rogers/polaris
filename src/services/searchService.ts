@@ -59,7 +59,10 @@ type SearchScope = "block" | "asset" | "reservation" | "map" | "network";
 // consumed inside `stripSourceKindPrefix` — none of those start with the
 // scope letters.
 function parseSearchScope(raw: string): { scope: SearchScope | null; query: string } {
-  const m = raw.match(/^(block|asset|reservation|map|network|b|a|r|m|n):\s*(.*)$/i);
+  // No `\s*` before the capture — `\s*(.*)$` backtracks polynomially on
+  // long runs of whitespace (CodeQL js/polynomial-redos); the .trim() on
+  // the captured rest below handles the post-colon whitespace instead.
+  const m = raw.match(/^(block|asset|reservation|map|network|b|a|r|m|n):(.*)$/i);
   if (!m) return { scope: null, query: raw };
   const prefix = m[1].toLowerCase();
   const rest = m[2].trim();

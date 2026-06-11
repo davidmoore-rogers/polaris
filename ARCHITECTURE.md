@@ -96,6 +96,7 @@ polaris/
 │   │   │   ├── auth.ts              # Session auth + RBAC middleware
 │   │   │   ├── csrf.ts              # Synchronizer-token CSRF protection (`polaris_csrf` cookie + `X-CSRF-Token` header)
 │   │   │   ├── validate.ts          # Zod request validation middleware
+│   │   │   ├── rateLimits.ts        # Shared per-route rate limiters (TOTP code attempts, OIDC login kick-off, admin maintenance/backup, agent bearer router + binary downloads). The login limiter predates this file and stays in `src/app.ts`.
 │   │   │   └── errorHandler.ts      # Global error handler
 │   │   └── routes/
 │   │       ├── auth.ts              # Login, logout, Azure SAML SSO

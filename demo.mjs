@@ -10,7 +10,7 @@ import { createServer as createHttpsServer } from "node:https";
 import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdtempSync } from "node:fs";
 import { join, extname } from "node:path";
 import { tmpdir } from "node:os";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createGzip, createGunzip, gzipSync, gunzipSync } from "node:zlib";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash, X509Certificate } from "node:crypto";
@@ -4786,11 +4786,16 @@ async function routeAPI(method, path, params, body, res, req) {
     const keyPath = join(tmp, "server.key");
     const certPath = join(tmp, "server.crt");
     try {
-      const subj = "/CN=" + cn.replace(/['"\\]/g, "");
-      const san = "subjectAltName=DNS:" + cn.replace(/['"\\]/g, "");
-      execSync(
-        'openssl req -x509 -newkey rsa:2048 -keyout "' + keyPath + '" -out "' + certPath +
-        '" -days ' + days + ' -nodes -subj "' + subj + '" -addext "' + san + '"',
+      // execFileSync with an arg array — no shell, so the user-supplied CN
+      // can't inject commands (CodeQL js/command-line-injection). Constrain
+      // the CN to hostname-safe characters as well.
+      const safeCn = cn.replace(/[^A-Za-z0-9.*-]/g, "");
+      const subj = "/CN=" + safeCn;
+      const san = "subjectAltName=DNS:" + safeCn;
+      execFileSync(
+        "openssl",
+        ["req", "-x509", "-newkey", "rsa:2048", "-keyout", keyPath, "-out", certPath,
+         "-days", String(days), "-nodes", "-subj", subj, "-addext", san],
         { stdio: "pipe" },
       );
       const certPem = readFileSync(certPath, "utf-8");

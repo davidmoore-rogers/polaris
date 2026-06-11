@@ -185,6 +185,22 @@ function readStoredTransform(value: unknown): TransformKind | CombinerKind | nul
   return null;
 }
 
+// modelPattern is an operator-authored regex by design (matched against
+// device model strings). Validate it compiles and cap its length so a
+// pathological pattern can't be stored — the 2026-06-11 CodeQL sweep
+// dismissed the js/regex-injection alerts on these sites as intended
+// behavior (admin-gated feature) with this cap as hardening.
+function assertValidModelPattern(pattern: string): void {
+  if (pattern.length > 512) {
+    throw new AppError(400, "modelPattern is too long (max 512 characters)");
+  }
+  try {
+    new RegExp(pattern);
+  } catch {
+    throw new AppError(400, "modelPattern must be a valid regex");
+  }
+}
+
 function trimOrNull(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const t = value.trim();
@@ -502,11 +518,7 @@ export async function createOverride(
   if (!input.modelPattern || !input.modelPattern.trim()) {
     throw new AppError(400, "modelPattern is required");
   }
-  try {
-    new RegExp(input.modelPattern);
-  } catch {
-    throw new AppError(400, "modelPattern must be a valid regex");
-  }
+  assertValidModelPattern(input.modelPattern);
   const stdKey = asStdMibKeyOrNull(input.mibStdKey ?? null);
   if (input.mibId && stdKey) {
     throw new AppError(400, "mibId and mibStdKey are mutually exclusive");
@@ -575,9 +587,7 @@ export async function updateOverride(
   }
   if (input.modelPattern !== undefined) {
     if (!input.modelPattern.trim()) throw new AppError(400, "modelPattern is required");
-    try { new RegExp(input.modelPattern); } catch {
-      throw new AppError(400, "modelPattern must be a valid regex");
-    }
+    assertValidModelPattern(input.modelPattern);
   }
 
   const nextType      = input.type      === undefined ? asMetricRowType(existing.type) : asMetricRowType(input.type);
@@ -653,9 +663,7 @@ export async function createWidget(
   if (!input.symbol || !input.symbol.trim()) throw new AppError(400, "symbol is required");
   if (!input.mibId) throw new AppError(400, "mibId is required for custom widgets");
   if (input.modelPattern) {
-    try { new RegExp(input.modelPattern); } catch {
-      throw new AppError(400, "modelPattern must be a valid regex");
-    }
+    assertValidModelPattern(input.modelPattern);
   }
   const created = await (prisma as any).manufacturerCustomWidget.create({
     data: {
@@ -694,9 +702,7 @@ export async function updateWidget(
   const existing = await (prisma as any).manufacturerCustomWidget.findUnique({ where: { id: widgetId } });
   if (!existing) throw new AppError(404, "Widget not found");
   if (input.modelPattern) {
-    try { new RegExp(input.modelPattern); } catch {
-      throw new AppError(400, "modelPattern must be a valid regex");
-    }
+    assertValidModelPattern(input.modelPattern);
   }
   const updated = await (prisma as any).manufacturerCustomWidget.update({
     where: { id: widgetId },

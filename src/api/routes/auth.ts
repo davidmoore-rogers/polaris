@@ -47,6 +47,8 @@ import {
 } from "../../services/oidcAuthService.js";
 import { resolveGroupsToAccess } from "../../services/groupMappingService.js";
 import { unionTags } from "../../utils/tagNormalize.js";
+import { isBlockedOutboundHost } from "../../utils/netGuard.js";
+import { totpCodeLimiter, ssoEntryLimiter } from "../middleware/rateLimits.js";
 import { logEvent } from "./events.js";
 
 const router = Router();
@@ -612,9 +614,19 @@ router.post("/azure/test", requireAuth, requirePermission("serverSettingsSystem"
     // ── Check IdP Login URL reachability ──
     if (settings.idpLoginUrl) {
       try {
+        // SSRF guard: the URL is operator-supplied — only probe plain
+        // http(s) targets outside the blocked ranges (loopback, link-local
+        // metadata, multicast). Same policy as integration hosts (netGuard).
+        const idpUrl = new URL(settings.idpLoginUrl);
+        if (idpUrl.protocol !== "https:" && idpUrl.protocol !== "http:") {
+          throw new Error(`Unsupported URL scheme "${idpUrl.protocol}" — must be http(s)`);
+        }
+        if (isBlockedOutboundHost(idpUrl.hostname)) {
+          throw new Error(`Host "${idpUrl.hostname}" is in a blocked range (loopback / link-local / multicast)`);
+        }
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 8000);
-        const resp = await fetch(settings.idpLoginUrl, {
+        const resp = await fetch(idpUrl, {
           method: "HEAD",
           signal: controller.signal,
           redirect: "manual",
@@ -699,7 +711,7 @@ router.get("/oidc/config", async (_req, res) => {
 
 // GET /api/v1/auth/oidc/login — redirect to the IdP authorization endpoint.
 // state / nonce / PKCE verifier are stashed in the session for the callback.
-router.get("/oidc/login", async (req, res) => {
+router.get("/oidc/login", ssoEntryLimiter, async (req, res) => {
   try {
     if (!(await isOidcEnabled())) return res.redirect("/login.html?error=oidc_not_configured");
     const { url, state, nonce, codeVerifier } = await buildOidcAuthorizationUrl();
@@ -843,7 +855,7 @@ router.post("/totp/enroll", requireAuth, async (req, res, next) => {
 
 // POST /api/v1/auth/totp/confirm — finalize enrollment by proving the user
 // configured their authenticator correctly (verify first 6-digit code)
-router.post("/totp/confirm", requireAuth, async (req, res, next) => {
+router.post("/totp/confirm", requireAuth, totpCodeLimiter, async (req, res, next) => {
   try {
     const { code } = TotpConfirmSchema.parse(req.body);
     const userId = req.session.userId!;
@@ -885,7 +897,7 @@ router.post("/totp/confirm", requireAuth, async (req, res, next) => {
 
 // DELETE /api/v1/auth/totp — self-disable. Requires a valid current TOTP or
 // backup code so a stolen session can't silently drop MFA.
-router.delete("/totp", requireAuth, async (req, res, next) => {
+router.delete("/totp", requireAuth, totpCodeLimiter, async (req, res, next) => {
   try {
     const { code, isBackupCode } = TotpDisableSchema.parse(req.body);
     const userId = req.session.userId!;

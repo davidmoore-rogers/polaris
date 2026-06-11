@@ -7376,7 +7376,7 @@ function _renderMonitorChart(container, data, transitions) {
     var rtt = target.getAttribute("data-rtt");
     var ok = target.getAttribute("data-ok") === "1";
     var err = target.getAttribute("data-err");
-    var rttLine = ok && rtt !== "" ? (rtt + " ms") : '<span style="color:var(--color-danger,#d32f2f)">no response</span>';
+    var rttLine = ok && rtt !== "" ? (escapeHtml(rtt) + " ms") : '<span style="color:var(--color-danger,#d32f2f)">no response</span>';
     var lossLine = ok ? "no" : '<span style="color:var(--color-danger,#d32f2f)">yes</span>';
     var errLine = !ok && err ? '<div style="color:var(--color-text-secondary);margin-top:2px">' + escapeHtml(err) + '</div>' : '';
     tip.innerHTML =

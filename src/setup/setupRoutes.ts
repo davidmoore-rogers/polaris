@@ -14,10 +14,21 @@ import pg from "pg";
 import { markSetupComplete } from "./detectSetup.js";
 import { hashPassword } from "../utils/password.js";
 import { ENV_FILE, STATE_DIR } from "../utils/paths.js";
+import { makeRateLimiter } from "../api/middleware/rateLimits.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const router = Router();
+
+// The wizard is unauthenticated by design (first-run only, see the
+// .setup-complete boot lock) — keep the DB-touching routes tightly
+// rate-limited so a network neighbor can't use them as a connect proxy
+// or brute-force surface while setup is in progress.
+const setupActionLimiter = makeRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: "Too many setup attempts. Please wait 15 minutes and try again.",
+});
 
 const DbConfigSchema = z.object({
   host: z.string().min(1),
@@ -251,7 +262,7 @@ router.post("/generate-secret", (_req, res) => {
 });
 
 // POST /api/setup/test-connection
-router.post("/test-connection", async (req, res) => {
+router.post("/test-connection", setupActionLimiter, async (req, res) => {
   try {
     const db = DbConfigSchema.parse(req.body);
 
@@ -295,7 +306,7 @@ router.post("/test-connection", async (req, res) => {
 });
 
 // POST /api/setup/finalize
-router.post("/finalize", async (req, res) => {
+router.post("/finalize", setupActionLimiter, async (req, res) => {
   try {
     const { db, admin, app } = FinalizeSchema.parse(req.body);
 

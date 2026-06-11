@@ -617,7 +617,9 @@ function _renderIpList(data) {
   // Scroll-to-row on focus IP. Cleared after one render so paginating away
   // doesn't snap back to the original IP.
   if (_ipPanelFocusIp) {
-    var target = body.querySelector('tr[data-ip="' + _ipPanelFocusIp.replace(/"/g, '\\"') + '"]');
+    // Escape backslashes before quotes — quote-only escaping lets a
+    // trailing backslash break out of the attribute selector string.
+    var target = body.querySelector('tr[data-ip="' + _ipPanelFocusIp.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"]');
     if (target) {
       target.classList.add("row-panel-active");
       target.scrollIntoView({ block: "center", behavior: "auto" });

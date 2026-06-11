@@ -9,6 +9,7 @@ import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { requirePermission, requireSessionOrTokenPermission } from "../middleware/permissions.js";
+import { machineApiLimiter } from "../middleware/rateLimits.js";
 import { logEvent, buildChanges } from "./events.js";
 import { assetMatchesIntegrationFilter } from "../../utils/integrationFilter.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
@@ -3141,7 +3142,7 @@ router.delete("/:id/quarantine", requireSessionOrTokenPermission("assetsQuaranti
 });
 
 // POST /api/v1/assets/:id/quarantine/verify — read-back drift check (admin, assets admin, or token)
-router.post("/:id/quarantine/verify", requireSessionOrTokenPermission("assetsQuarantine", "write", "assets:quarantine"), async (req, res, next) => {
+router.post("/:id/quarantine/verify", machineApiLimiter, requireSessionOrTokenPermission("assetsQuarantine", "write", "assets:quarantine"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const verifyResult = await verifyAssetQuarantine(id, req.apiToken?.integrationIds);
