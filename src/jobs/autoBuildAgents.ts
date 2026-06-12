@@ -39,6 +39,7 @@ import { getAgentVersion } from "../utils/version.js";
 import { goAvailable, startBuild } from "../services/agentBuildService.js";
 import { logEvent } from "../api/routes/events.js";
 import { logger } from "../utils/logger.js";
+import { runInstrumentedJob } from "./_metrics.js";
 
 const STARTUP_DELAY_MS = 60_000;
 const SETTING_KEY = "agent.autoBuildOnVersionMismatch";
@@ -123,7 +124,8 @@ async function isAutoBuildDisabled(): Promise<boolean> {
 
 // Side-effect registration — runs when the module is imported from app.ts.
 setTimeout(() => {
-  autoBuildIfStale().catch((err) => logger.warn({ err }, "Auto-build job crashed"));
+  runInstrumentedJob("autoBuildAgents", autoBuildIfStale)
+    .catch((err) => logger.warn({ err }, "Auto-build job crashed"));
 }, STARTUP_DELAY_MS);
 
 logger.debug({ delayMs: STARTUP_DELAY_MS }, "Auto-build agent job scheduled");
