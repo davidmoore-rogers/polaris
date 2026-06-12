@@ -59,21 +59,39 @@ const ListQuerySchema = z.object({
   sortDir: z.enum(["asc", "desc"]).optional(),
 });
 
-/** Translate a text-filter op + value into a Prisma `where` clause fragment. */
-function buildTextFilter(value: string | undefined, op: string | undefined): unknown {
+/**
+ * Translate a text-filter op + value into a Prisma `where`-level fragment for
+ * `field`, or undefined when the filter is a no-op. Fragments are where-level
+ * (`{ field: ... }` / `{ OR: [...] }`) rather than field-level because
+ * empty / is_not_empty need OR / AND composition, which Prisma only accepts at
+ * the where level; the call site ANDs the fragments together. `actor` is the
+ * one nullable column — its blank checks carry a null arm, while non-nullable
+ * action / message compare against "" only (Prisma rejects `equals: null` on a
+ * non-nullable field).
+ */
+function buildTextFilter(
+  field: "action" | "actor" | "message",
+  value: string | undefined,
+  op: string | undefined,
+): Record<string, unknown> | undefined {
   const operator = op && TEXT_OPS.has(op) ? op : "contains";
+  const nullable = field === "actor";
   if (operator === "empty") {
-    return { OR: [{ equals: null }, { equals: "" }] };
+    return nullable ? { OR: [{ [field]: null }, { [field]: "" }] } : { [field]: "" };
   }
   if (operator === "is_not_empty") {
-    return { AND: [{ not: null }, { not: "" }] };
+    return nullable
+      ? { AND: [{ [field]: { not: null } }, { [field]: { not: "" } }] }
+      : { [field]: { not: "" } };
   }
   const v = (value || "").trim();
   if (!v) return undefined;
   if (operator === "not_contains") {
-    return { not: { contains: v, mode: "insensitive" } };
+    // `mode` is a sibling of `not` in Prisma's string filter — nesting it
+    // inside the `not` object is rejected by the client.
+    return { [field]: { not: { contains: v }, mode: "insensitive" } };
   }
-  return { contains: v, mode: "insensitive" };
+  return { [field]: { contains: v, mode: "insensitive" } };
 }
 
 /** CSV → string[]; empty entries dropped; returns undefined for no value. */
@@ -138,14 +156,12 @@ router.get("/", requirePermission("events", "read"), async (req, res, next) => {
     // optional <field>Op param; missing op → contains (default). The actor
     // filter was silently dropped pre-this-change (frontend already sent it,
     // backend schema didn't define it) — adding it here is a drive-by fix.
-    const actionFilter = buildTextFilter(q.action, q.actionOp);
-    if (actionFilter !== undefined) where.action = actionFilter;
-
-    const actorFilter = buildTextFilter(q.actor, q.actorOp);
-    if (actorFilter !== undefined) where.actor = actorFilter;
-
-    const messageFilter = buildTextFilter(q.message, q.messageOp);
-    if (messageFilter !== undefined) where.message = messageFilter;
+    const textFilters = [
+      buildTextFilter("action", q.action, q.actionOp),
+      buildTextFilter("actor", q.actor, q.actorOp),
+      buildTextFilter("message", q.message, q.messageOp),
+    ].filter((f): f is Record<string, unknown> => f !== undefined);
+    if (textFilters.length) where.AND = textFilters;
 
     // Sort whitelist. Reject anything outside the catalogue with a 400 —
     // Prisma orderBy must never accept user-supplied strings unvalidated.
