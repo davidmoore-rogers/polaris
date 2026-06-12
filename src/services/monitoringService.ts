@@ -36,6 +36,7 @@ import { Client as SshClient } from "ssh2";
 import { prisma } from "../db.js";
 import { retryOnDeadlock } from "../utils/dbRetry.js";
 import { addMacAddresses } from "../utils/macAddresses.js";
+import { pingHost } from "../utils/icmpPing.js";
 import { fgRequest, type FortiGateConfig } from "./fortigateService.js";
 import {
   fmgProxyRest,
@@ -2581,33 +2582,8 @@ async function collectHardwareSensorsFortiapRest(
 }
 
 async function probeIcmp(host: string, start: number, timeoutMs: number): Promise<ProbeResult> {
-  return await new Promise<ProbeResult>((resolve) => {
-    const isWindows = process.platform === "win32";
-    const args = isWindows
-      ? ["-n", "1", "-w", String(timeoutMs), host]
-      : ["-c", "1", "-W", String(Math.ceil(timeoutMs / 1000)), host];
-    const child = spawn("ping", args, { stdio: ["ignore", "pipe", "pipe"] });
-    let resolved = false;
-    const timer = setTimeout(() => {
-      if (resolved) return;
-      resolved = true;
-      try { child.kill(); } catch {}
-      resolve(finish(start, false, "ping timed out"));
-    }, timeoutMs + 2_000);
-    child.on("error", (err) => {
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timer);
-      resolve(finish(start, false, err.message));
-    });
-    child.on("close", (code) => {
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timer);
-      if (code === 0) resolve(finish(start, true));
-      else resolve(finish(start, false, `ping exit ${code}`));
-    });
-  });
+  const r = await pingHost(host, timeoutMs);
+  return finish(start, r.success, r.error);
 }
 
 function mapSnmpAuthProtocol(value: unknown): unknown {
