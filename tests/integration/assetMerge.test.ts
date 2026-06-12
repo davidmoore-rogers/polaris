@@ -49,10 +49,15 @@ beforeEach(async () => {
 
 // Create asset A (survivor candidate) + asset B (absorb candidate) with
 // distinct sources, MACs and tags so every transfer path is observable.
+// Each asset's assetTag matches its nested source row: the db.ts shadow-write
+// extension derives AssetSource rows from assetTag on every asset.create, and
+// without a recognized prefix it synthesizes an extra "manual" fallback source
+// (fire-and-forget, so also racy) that would skew movedSources / source lists.
 async function seedPair() {
   const a = await prisma.asset.create({
     data: {
       hostname:     `${HOST_PREFIX}a`,
+      assetTag:     `ad:${HOST_PREFIX}ad-a`,
       assetType:    "workstation",
       status:       "active",
       ipAddress:    "10.50.0.10",
@@ -68,6 +73,7 @@ async function seedPair() {
   const b = await prisma.asset.create({
     data: {
       hostname:     `${HOST_PREFIX}b`,
+      assetTag:     `entra:${HOST_PREFIX}entra-b`,
       assetType:    "workstation",
       status:       "active",
       serialNumber: "SN-FROM-B",

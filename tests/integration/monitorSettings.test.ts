@@ -57,14 +57,20 @@ beforeEach(async () => {
  */
 function defaultTierSettings(): Record<string, unknown> {
   return {
-    intervalSeconds:           60,
-    failureThreshold:          3,
-    probeTimeoutMs:            5000,
-    telemetryIntervalSeconds:  60,
-    systemInfoIntervalSeconds: 600,
-    sampleRetentionDays:       30,
-    telemetryRetentionDays:    30,
-    systemInfoRetentionDays:   30,
+    intervalSeconds:            60,
+    failureThreshold:           3,
+    probeTimeoutMs:             5000,
+    // The telemetry stream split into cpuMemory + temperature; both interval
+    // fields are now required by TierSettingsSchema.
+    cpuMemoryIntervalSeconds:   60,
+    temperatureIntervalSeconds: 60,
+    systemInfoIntervalSeconds:  600,
+    // Retention moved to Setting("sampleRetention") — these keys are still
+    // tolerated on input (and dropped before persistence), so keep sending
+    // them to exercise that path.
+    sampleRetentionDays:        30,
+    telemetryRetentionDays:     30,
+    systemInfoRetentionDays:    30,
   };
 }
 
@@ -76,7 +82,7 @@ d("PUT /api/v1/monitor-settings/manual", () => {
     const body = {
       ...defaultTierSettings(),
       responseTimePolling: "snmp",
-      telemetryPolling:    null,
+      cpuMemoryPolling:    null,
       interfacesPolling:   "winrm",
       lldpPolling:         null,
     };
@@ -142,11 +148,11 @@ d("PUT /api/v1/monitor-settings/integration/:id", () => {
     const resp = await agent
       .put(`/api/v1/monitor-settings/integration/${integ.id}`)
       .set("X-CSRF-Token", csrf)
-      .send({ ...defaultTierSettings(), telemetryPolling: "snmp" });
+      .send({ ...defaultTierSettings(), cpuMemoryPolling: "snmp" });
     expect(resp.status).toBe(200);
     const fresh = await prisma.integration.findUnique({ where: { id: integ.id } });
     const cfg = fresh!.config as Record<string, unknown>;
-    expect((cfg.monitorSettings as any).telemetryPolling).toBe("snmp");
+    expect((cfg.monitorSettings as any).cpuMemoryPolling).toBe("snmp");
     // Existing config keys are preserved.
     expect(cfg.useProxy).toBe(true);
   });
@@ -252,10 +258,10 @@ d("PUT /api/v1/assets/:id (polling fields)", () => {
     const resp = await agent
       .put(`/api/v1/assets/${asset.id}`)
       .set("X-CSRF-Token", csrf)
-      .send({ telemetryPolling: "snmp" });
+      .send({ cpuMemoryPolling: "snmp" });
     expect(resp.status).toBe(200);
     const fresh = await prisma.asset.findUnique({ where: { id: asset.id } });
-    expect(fresh!.telemetryPolling).toBe("snmp");
+    expect(fresh!.cpuMemoryPolling).toBe("snmp");
   });
 
   it("recomputes monitorOverride after a PUT that includes the monitored field — no integration link → stays false", async () => {
@@ -293,16 +299,20 @@ d("PUT /api/v1/assets/:id (polling fields)", () => {
 // ─── Effective settings + provenance resolver ──────────────────────────────
 
 d("GET /api/v1/assets/:id/effective-monitor-settings", () => {
-  it("returns the source-default polling for an asset under the manual tier with no overrides", async () => {
+  it("returns null polling (source-default sentinel) for an asset under the manual tier with no overrides", async () => {
     const { agent } = await authedAgent(app);
     const asset = await prisma.asset.create({
       data: { hostname: "manual-host", assetType: "server" },
     });
     const resp = await agent.get(`/api/v1/assets/${asset.id}/effective-monitor-settings`);
     expect(resp.status).toBe(200);
-    // Manual tier source default for response-time = icmp; other streams null.
-    expect(resp.body.resolved.responseTimePolling).toBe("icmp");
-    expect(resp.body.resolved.telemetryPolling).toBeNull();
+    // Polling fields stay null at every tier when unset — null means "source
+    // default", which is applied at dispatch time by defaultPollingForSource
+    // (manual → icmp for response-time) and mirrored client-side in the UI.
+    // The provenance endpoint reports the stored tier values, not the
+    // materialized defaults.
+    expect(resp.body.resolved.responseTimePolling).toBeNull();
+    expect(resp.body.resolved.cpuMemoryPolling).toBeNull();
     expect(resp.body.tier3Source).toBe("manual");
   });
 
@@ -323,14 +333,15 @@ d("GET /api/v1/assets/:id/effective-monitor-settings", () => {
     await agent
       .put(`/api/v1/assets/${asset.id}`)
       .set("X-CSRF-Token", csrf)
-      .send({ telemetryPolling: "snmp" });
+      .send({ cpuMemoryPolling: "snmp" });
 
     const resp = await agent.get(`/api/v1/assets/${asset.id}/effective-monitor-settings`);
     expect(resp.status).toBe(200);
-    expect(resp.body.resolved.telemetryPolling).toBe("snmp");
-    expect(resp.body.provenance.telemetryPolling).toBe("asset");
-    // Source default still drives unset streams.
-    expect(resp.body.resolved.responseTimePolling).toBe("rest_api");
+    expect(resp.body.resolved.cpuMemoryPolling).toBe("snmp");
+    expect(resp.body.provenance.cpuMemoryPolling).toBe("asset");
+    // Unset streams stay null (source default is applied at dispatch time,
+    // not here); provenance reports the tier-3 baseline for them.
+    expect(resp.body.resolved.responseTimePolling).toBeNull();
     expect(resp.body.provenance.responseTimePolling).toBe("integration");
     expect(resp.body.tier3Source).toBe("integration");
   });
@@ -339,17 +350,19 @@ d("GET /api/v1/assets/:id/effective-monitor-settings", () => {
 // ─── Auth required across the surface ──────────────────────────────────────
 
 d("monitor-settings routes require authentication", () => {
-  it("returns 401 from PUT /manual without a session", async () => {
+  it("rejects PUT /manual without a session", async () => {
     const resp = await request(app)
       .put("/api/v1/monitor-settings/manual")
       .send(defaultTierSettings());
-    expect(resp.status).toBe(401);
+    // CSRF middleware runs before auth, so a sessionless mutation is rejected
+    // with 403 (missing token) rather than 401 — either way it must not land.
+    expect([401, 403]).toContain(resp.status);
   });
 
-  it("returns 401 from POST /class-overrides without a session", async () => {
+  it("rejects POST /class-overrides without a session", async () => {
     const resp = await request(app)
       .post("/api/v1/monitor-settings/class-overrides")
       .send({ integrationId: null, assetType: "server" });
-    expect(resp.status).toBe(401);
+    expect([401, 403]).toContain(resp.status);
   });
 });

@@ -148,8 +148,9 @@ d("GET /api/v1/subnets", () => {
     await agent.post("/api/v1/subnets").set("X-CSRF-Token", csrf).send({ blockId: block.id, cidr: "10.30.2.0/24", name: "B" });
     const resp = await agent.get("/api/v1/subnets");
     expect(resp.status).toBe(200);
-    expect(Array.isArray(resp.body)).toBe(true);
-    expect(resp.body.length).toBeGreaterThanOrEqual(2);
+    // listSubnets returns a pagination envelope { subnets, total, limit, offset }
+    expect(Array.isArray(resp.body.subnets)).toBe(true);
+    expect(resp.body.subnets.length).toBeGreaterThanOrEqual(2);
   });
 
   it("filters by blockId", async () => {
@@ -160,8 +161,8 @@ d("GET /api/v1/subnets", () => {
     await agent.post("/api/v1/subnets").set("X-CSRF-Token", csrf).send({ blockId: b.id, cidr: "10.41.1.0/24", name: "in-B" });
     const resp = await agent.get(`/api/v1/subnets?blockId=${a.id}`);
     expect(resp.status).toBe(200);
-    expect(resp.body.every((s: any) => s.blockId === a.id)).toBe(true);
-    expect(resp.body.length).toBe(1);
+    expect(resp.body.subnets.every((s: any) => s.blockId === a.id)).toBe(true);
+    expect(resp.body.subnets.length).toBe(1);
   });
 
   it("filters by status", async () => {
@@ -171,9 +172,9 @@ d("GET /api/v1/subnets", () => {
     await agent.put(`/api/v1/subnets/${sub.body.id}`).set("X-CSRF-Token", csrf).send({ status: "deprecated" });
     const dep = await agent.get("/api/v1/subnets?status=deprecated");
     const avl = await agent.get("/api/v1/subnets?status=available");
-    expect(dep.body.every((s: any) => s.status === "deprecated")).toBe(true);
-    expect(dep.body.length).toBe(1);
-    expect(avl.body.find((s: any) => s.id === sub.body.id)).toBeUndefined();
+    expect(dep.body.subnets.every((s: any) => s.status === "deprecated")).toBe(true);
+    expect(dep.body.subnets.length).toBe(1);
+    expect(avl.body.subnets.find((s: any) => s.id === sub.body.id)).toBeUndefined();
   });
 });
 
