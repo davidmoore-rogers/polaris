@@ -3471,11 +3471,11 @@ async function openViewModal(id) {
     if (probeBtn) {
       probeBtn.addEventListener("click", async function () {
         probeBtn.disabled = true;
-        probeBtn.textContent = "Refreshing…";
+        probeBtn.textContent = "Polling…";
         try {
           var r = await api.assets.probeNow(a.id);
           // Build a per-stream summary so the toast names exactly which streams
-          // refreshed and which failed (and why). The probe-now endpoint returns:
+          // polled and which failed (and why). The probe-now endpoint returns:
           //   { success, responseTimeMs, error?,
           //     telemetry: {supported,collected,error?},
           //     temperature: {supported,collected,error?},
@@ -3501,7 +3501,7 @@ async function openViewModal(id) {
           else if (si.supported && si.error) failures.push("interfaces: " + si.error);
 
           var anyFail = failures.length > 0;
-          var label = anyFail ? "Refresh partial" : "Refreshed";
+          var label = anyFail ? "Poll partial" : "Polled";
           var msg = label + (parts.length ? " (" + parts.join(" · ") + ")" : "");
           if (anyFail) msg += " — " + failures.join("; ");
           // No "warning" toast class exists — fall back to "error" on any
@@ -3530,10 +3530,10 @@ async function openViewModal(id) {
             }
           } catch (e) { /* pill stays as-is; chart/system already refreshed */ }
         } catch (err) {
-          showToast(err.message || "Refresh failed", "error");
+          showToast(err.message || "Poll failed", "error");
         } finally {
           probeBtn.disabled = false;
-          probeBtn.textContent = "Refresh";
+          probeBtn.textContent = "Poll Now";
         }
       });
     }
@@ -5404,7 +5404,7 @@ function _renderWirelessStationsCard(container, si, asset) {
 //   * table — flat table of the latest row array
 // The Polaris collector probes each widget on the customWidget cadence
 // (default 60s); the renderer doesn't poll — it shows the freshest sample
-// the server has. Operator clicks Refresh on the System tab to force-fetch.
+// the server has. Operator clicks Poll Now on the System tab to force-fetch.
 
 function _customMibTabHTML(payload) {
   var hint = 'Widgets from <b>' + escapeHtml(payload.manufacturer || "this manufacturer") + '</b> ' +
@@ -7003,7 +7003,7 @@ function assetMonitoringViewHTML(a) {
     else sourceLabel = rtPolling.toUpperCase();
   }
   var probeBtn = isUserOrAbove()
-    ? '<button class="btn btn-sm btn-primary" id="btn-asset-probe-now" style="margin-right:6px" title="Run a response-time probe and pull fresh telemetry + interface data">Refresh</button>'
+    ? '<button class="btn btn-sm btn-primary" id="btn-asset-probe-now" style="margin-right:6px" title="Poll the device now: run a response-time probe and pull fresh telemetry + interface data">Poll Now</button>'
     : '';
   // Admin-only "Dependency Test" trigger lives next to the Status pill on
   // the System tab. Eligible for Fortinet infra only — workstations etc.

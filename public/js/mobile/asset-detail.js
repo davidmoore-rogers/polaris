@@ -1448,7 +1448,7 @@
     btn.innerHTML = '<span class="spinner" style="width:18px;height:18px;border-width:2px;"></span>';
     api.assets.probeNow(id).then(function (resp) {
       // Reflect what each stream did so the operator knows whether it
-      // was a partial failure (matches desktop "Refresh partial" toast).
+      // was a partial failure (matches desktop "Poll partial" toast).
       var bits = [];
       if (resp.success) bits.push("probe " + (resp.responseTimeMs != null ? resp.responseTimeMs + " ms" : "ok"));
       else if (resp.error) bits.push("probe failed");
@@ -1463,7 +1463,7 @@
       var anyFailure = (resp.success === false) ||
         (resp.telemetry && resp.telemetry.collected === false && resp.telemetry.error) ||
         (resp.systemInfo && resp.systemInfo.collected === false && resp.systemInfo.error);
-      PolarisTabs.showSnackbar((anyFailure ? "Refresh partial — " : "Refresh ok — ") + bits.join(" · "), { error: !!anyFailure });
+      PolarisTabs.showSnackbar((anyFailure ? "Poll partial — " : "Poll ok — ") + bits.join(" · "), { error: !!anyFailure });
       // Repull the charts + system-info sections.
       loadMonitor(id, st);
       loadTelemetry(id, st);
@@ -1480,8 +1480,8 @@
         setHeader(fresh);
       }).catch(function () { /* pill stays as-is; charts already refreshed */ });
     }).catch(function (err) {
-      var msg = (err && err.message) ? err.message : "Refresh failed";
-      PolarisTabs.showSnackbar("Refresh failed — " + msg, { error: true });
+      var msg = (err && err.message) ? err.message : "Poll failed";
+      PolarisTabs.showSnackbar("Poll failed — " + msg, { error: true });
     }).finally(function () {
       btn.disabled = false;
       btn.innerHTML = '<svg viewBox="0 0 24 24"><use href="#i-refresh"/></svg>';
@@ -1571,7 +1571,7 @@
       var anyFailure = (resp.success === false) ||
         (resp.telemetry && resp.telemetry.collected === false && resp.telemetry.error) ||
         (resp.systemInfo && resp.systemInfo.collected === false && resp.systemInfo.error);
-      PolarisTabs.showSnackbar((anyFailure ? "Refresh partial — " : "Refresh ok — ") + bits.join(" · "), { error: !!anyFailure });
+      PolarisTabs.showSnackbar((anyFailure ? "Poll partial — " : "Poll ok — ") + bits.join(" · "), { error: !!anyFailure });
       loadMonitor(id, st);
       loadTelemetry(id, st);
       loadSystemInfo(id, st);
@@ -1585,8 +1585,8 @@
         setHeader(fresh);
       }).catch(function () { /* pill stays as-is; charts already refreshed */ });
     }).catch(function (err) {
-      var msg = (err && err.message) ? err.message : "Refresh failed";
-      PolarisTabs.showSnackbar("Refresh failed — " + msg, { error: true });
+      var msg = (err && err.message) ? err.message : "Poll failed";
+      PolarisTabs.showSnackbar("Poll failed — " + msg, { error: true });
     });
   }
 
