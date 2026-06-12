@@ -140,6 +140,7 @@ type AssetRow = {
   learnedLocation: string | null;
   acquiredAt: Date | null;
   lastSeen: Date | null;
+  lastSeenSource: string | null;
   updatedAt: Date;
   tags: string[];
   sources: { sourceKind: string }[];
@@ -252,6 +253,7 @@ async function mergeDuplicateHostnameAssets(): Promise<void> {
           learnedLocation: true,
           acquiredAt: true,
           lastSeen: true,
+          lastSeenSource: true,
           updatedAt: true,
           tags: true,
           sources: { select: { sourceKind: true } },
@@ -488,9 +490,11 @@ async function mergeGhostIntoCanonical(canonical: AssetRow, ghost: AssetRow): Pr
       update.learnedLocation = ghost.learnedLocation;
     if (!canonical.acquiredAt && ghost.acquiredAt) update.acquiredAt = ghost.acquiredAt;
     // lastSeen — keep the more recent of the two so the canonical reflects
-    // any sighting from the ghost the canonical didn't have.
+    // any sighting from the ghost the canonical didn't have (provenance
+    // label travels with it).
     if (ghost.lastSeen && (!canonical.lastSeen || ghost.lastSeen > canonical.lastSeen)) {
       update.lastSeen = ghost.lastSeen;
+      if (ghost.lastSeenSource) update.lastSeenSource = ghost.lastSeenSource;
     }
     // tags — union, preserving canonical's order.
     const cTags = new Set(canonical.tags);

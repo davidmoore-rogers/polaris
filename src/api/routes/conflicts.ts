@@ -32,7 +32,7 @@ import { AppError } from "../../utils/errors.js";
 import { requireAuth } from "../middleware/auth.js";
 import { hasPermission } from "../middleware/permissions.js";
 import { logEvent } from "./events.js";
-import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
+import { clampAcquiredToLastSeen, bumpLastSeen } from "../../utils/assetInvariants.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
 import { MAC_ROW_SELECT, reconcileMacAddresses, shapeMacRows } from "../../utils/macAddresses.js";
 
@@ -360,7 +360,7 @@ async function acceptAssetConflict(
   if (!existing.dnsName && proposed.dnsName) update.dnsName = proposed.dnsName;
   if (!existing.location && !existing.learnedLocation && proposed.learnedLocation) update.learnedLocation = proposed.learnedLocation;
   if (!existing.notes && proposed.notes) update.notes = proposed.notes;
-  if (proposed.lastSeen) update.lastSeen = new Date(proposed.lastSeen);
+  if (proposed.lastSeen) bumpLastSeen(update, existing, new Date(proposed.lastSeen), "conflict-accept");
   if (!existing.acquiredAt && proposed.registrationDateTime) {
     update.acquiredAt = new Date(proposed.registrationDateTime);
   }
@@ -416,7 +416,10 @@ async function acceptAssetConflict(
     if (!update.osVersion && ghost.osVersion) update.osVersion = ghost.osVersion;
     if (!update.assignedTo && !existing.assignedTo && ghost.assignedTo) update.assignedTo = ghost.assignedTo;
     if (!update.notes && !existing.notes && ghost.notes) update.notes = ghost.notes;
-    if (!update.lastSeen && !existing.lastSeen && ghost.lastSeen) update.lastSeen = ghost.lastSeen;
+    if (!update.lastSeen && !existing.lastSeen && ghost.lastSeen) {
+      update.lastSeen = ghost.lastSeen;
+      if (ghost.lastSeenSource) update.lastSeenSource = ghost.lastSeenSource;
+    }
     // Merge ghost's MAC history into the accept target. Side-table reconcile
     // happens AFTER the asset.update below — assembling the merged shape
     // here so we can run a single reconcile call.
@@ -512,6 +515,7 @@ async function rejectAssetConflict(conflict: any, actor?: string) {
     assignedTo: proposed.assignedTo || null,
     learnedLocation: proposed.learnedLocation || null,
     lastSeen: proposed.lastSeen ? new Date(proposed.lastSeen) : null,
+    ...(proposed.lastSeen ? { lastSeenSource: "conflict-reject" } : {}),
     acquiredAt: proposed.registrationDateTime ? new Date(proposed.registrationDateTime) : null,
     notes: proposed.notes || `Auto-created after hostname collision was rejected — ${sourceLabel} ${conflict.proposedDeviceId}`,
     tags,
