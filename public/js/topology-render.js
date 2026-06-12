@@ -550,9 +550,15 @@
   //      ancestor (parent even column + 1).
   //   4. Disconnected nodes (no path to the firewall) drop into a rightmost
   //      orphan column so they stay visible.
-  //   5. A single barycenter pass orders nodes within each column by the mean
-  //      lane of their already-placed lower-column neighbors to reduce edge
-  //      crossings.
+  //   5. Lanes (rows) come from a tidy-tree pass over the Dijkstra predecessor
+  //      tree: a node's FIRST child (infra before leaves, then tallest subtree,
+  //      then element order) is placed first and the node inherits its lane, so
+  //      the spine continues on one row; every other node takes the next free
+  //      row from a global cursor, giving each sibling subtree a disjoint row
+  //      band — tree edges never cross or overlap. Fallback exiles get the same
+  //      treatment with their own cursor; orphans stack below the main tree.
+  //   6. A final pass nudges leaf endpoints off non-tree edges (mesh backhaul,
+  //      LLDP cross-links) that pass through their column.
   //
   // Returns { [nodeId]: { depth, lane } }, or null when there is no FortiGate
   // root (caller should fall back to its previous layout).
@@ -711,34 +717,98 @@
       }
     });
 
-    // --- 5. Barycenter lane ordering within each column --------------------
-    var byDepth = {};
+    // --- 5. Tidy-tree lane assignment over the Dijkstra predecessor tree ---
+    // A node's FIRST child continues on the node's own row (the spine stays
+    // flat); every other node claims a fresh row from a global cursor, so each
+    // sibling subtree owns a disjoint contiguous row band — tree edges never
+    // cross, no two fan-out edges are collinear, and edge labels spread out.
+    var children = {};
     nodeIds.forEach(function (id) {
-      (byDepth[depth[id]] = byDepth[depth[id]] || []).push(id);
-    });
-    var depthsAsc = Object.keys(byDepth).map(Number).sort(function (a, b) { return a - b; });
-    var lane = {};
-    depthsAsc.forEach(function (dpt, colIdx) {
-      var ids = byDepth[dpt];
-      if (colIdx === 0) {
-        ids.forEach(function (id, k) { lane[id] = k; });
-        return;
+      if (pred[id] != null && dist[id] !== INF) {
+        (children[pred[id]] = children[pred[id]] || []).push(id);
       }
-      var withBary = ids.map(function (id, k) {
-        var lanesOfLowerNeighbors = [];
-        (adj[id] || []).forEach(function (n) {
-          if (depth[n] < dpt && lane[n] != null) lanesOfLowerNeighbors.push(lane[n]);
-        });
-        var bary = lanesOfLowerNeighbors.length
-          ? lanesOfLowerNeighbors.reduce(function (s, x) { return s + x; }, 0) / lanesOfLowerNeighbors.length
-          : Number.MAX_SAFE_INTEGER; // no anchor — sink to the bottom, stable
-        return { id: id, bary: bary, order: k };
+    });
+    var orderIdx = {};
+    nodeIds.forEach(function (id, k) { orderIdx[id] = k; });
+    var inFallbackRegion = {};
+    nodeIds.forEach(function (id) { if (depth[id] < 0) inFallbackRegion[id] = true; });
+
+    // Longest pred-chain below a node, self included (memoized).
+    var heightMemo = {};
+    function subtreeHeight(id) {
+      if (heightMemo[id] != null) return heightMemo[id];
+      heightMemo[id] = 1; // guard — pred tree is acyclic, but cheap insurance
+      var h = 1;
+      (children[id] || []).forEach(function (c) {
+        var ch = 1 + subtreeHeight(c);
+        if (ch > h) h = ch;
       });
-      withBary.sort(function (a, b) {
-        if (a.bary !== b.bary) return a.bary - b.bary;
-        return a.order - b.order;
+      heightMemo[id] = h;
+      return h;
+    }
+
+    // Children within one region (verified tree vs fallback exile), ordered so
+    // the spine continues through infra (switch/AP) before endpoints, then the
+    // tallest subtree (the longest chain holds the row), then element order
+    // for determinism. The region filter is load-bearing: a fallback switch is
+    // infra-role and would otherwise sort first among the FortiGate's children
+    // and drag the spine into the negative columns.
+    function orderedChildren(id, fallbackRegion) {
+      var kids = (children[id] || []).filter(function (c) {
+        return !!inFallbackRegion[c] === fallbackRegion;
       });
-      withBary.forEach(function (entry, k) { lane[entry.id] = k; });
+      kids.sort(function (a, b) {
+        var ia = TOPOLOGY_INFRA_ROLES[roleById[a]] ? 0 : 1;
+        var ib = TOPOLOGY_INFRA_ROLES[roleById[b]] ? 0 : 1;
+        if (ia !== ib) return ia - ib;
+        var ha = subtreeHeight(a);
+        var hb = subtreeHeight(b);
+        if (ha !== hb) return hb - ha;
+        return orderIdx[a] - orderIdx[b];
+      });
+      return kids;
+    }
+
+    var lane = {};
+    var nextRow = 0;
+    function placeSubtree(id, fallbackRegion) {
+      if (lane[id] != null) return; // safety — pred tree visits each node once
+      var kids = orderedChildren(id, fallbackRegion);
+      // The spine child — the first ordered child in a DIFFERENT column — is
+      // placed first and the node inherits its row, so the chain stays flat.
+      // A same-column child (leaf chained off a leaf, switch chained off a
+      // fallback switch) can never continue the row: it would overlap.
+      var spine = null;
+      for (var ks = 0; ks < kids.length; ks++) {
+        if (depth[kids[ks]] !== depth[id]) { spine = kids[ks]; break; }
+      }
+      if (spine != null) {
+        placeSubtree(spine, fallbackRegion);
+        lane[id] = lane[spine];
+      } else {
+        lane[id] = nextRow++;
+      }
+      for (var ki = 0; ki < kids.length; ki++) placeSubtree(kids[ki], fallbackRegion);
+    }
+    placeSubtree(rootId, false);
+    var mainRows = nextRow;
+
+    // Fallback exiles (negative columns): same recursion with its own cursor
+    // so the exile cluster top-aligns with the root. Row numbers repeat but x
+    // is negative (column -1 is always empty), so nothing overlaps spatially.
+    nextRow = 0;
+    nodeIds.forEach(function (id) {
+      if (inFallbackRegion[id] && (pred[id] == null || !inFallbackRegion[pred[id]])) {
+        placeSubtree(id, true);
+      }
+    });
+
+    // Orphans (no path to the firewall → no pred) and any stragglers: stack
+    // BELOW the main tree. orphanCol is shared with the rightmost verified
+    // leaves, so restarting this cursor at 0 would collide with them.
+    nextRow = mainRows;
+    nodeIds.forEach(function (id) {
+      if (lane[id] == null) lane[id] = nextRow++;
     });
 
     // --- 6. Keep endpoint nodes off connection lines -----------------------

@@ -9,12 +9,22 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import setupRoutes from "./setupRoutes.js";
+import { makeRateLimiter } from "../api/middleware/rateLimits.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export function startSetupServer(): void {
   const app = express();
   app.use(express.json());
+
+  // The setup server is unauthenticated and single-operator — a generous
+  // per-IP ceiling covers the wizard's full asset + API traffic while
+  // bounding anyone else poking at it.
+  app.use(makeRateLimiter({
+    windowMs: 5 * 60 * 1000,
+    max: 600,
+    message: "Too many requests to the setup server — retry shortly.",
+  }));
 
   const publicDir = path.resolve(__dirname, "..", "..", "public");
 

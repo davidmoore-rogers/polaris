@@ -134,6 +134,30 @@ function _setCollapsedIfaces(assetId, collapsedSet) {
   } catch (_) {}
 }
 
+// Screenshot-options persistence (the section-picker modal behind the asset
+// details Screenshot button). Storage shape, keyed by tab key:
+//   { "system": { sections: { interfaces: false, ... }, includeHiddenIfaces: true } }
+// A missing section key means checked. Chart ranges are intentionally NOT
+// persisted — they default to whatever the live chart shows when the modal
+// opens. Writes replace the tab's entry wholesale with only the keys present
+// in the live panel, so section keys from assets that no longer render a
+// given section age out naturally.
+function _getScreenshotPrefs() {
+  if (!currentUsername) return {};
+  try {
+    var raw = localStorage.getItem("polaris-prefs-screenshot-" + currentUsername);
+    return raw ? (JSON.parse(raw) || {}) : {};
+  } catch (_) { return {}; }
+}
+function _setScreenshotPrefs(tabKey, obj) {
+  if (!currentUsername || !tabKey) return;
+  try {
+    var p = _getScreenshotPrefs();
+    p[tabKey] = obj;
+    localStorage.setItem("polaris-prefs-screenshot-" + currentUsername, JSON.stringify(p));
+  } catch (_) {}
+}
+
 // Render a chart range-button bar with the saved (or default) range marked as
 // primary. `entries` is a list of { value, label, id? }; each rendered button
 // carries `data-range="<value>"` so existing click handlers work unchanged.
@@ -3140,9 +3164,9 @@ async function openViewModal(id) {
     // openViewModal awaits api.assets.getDependencies(id) below. Rendered
     // beneath the details table so the at-a-glance facts (hostname / IP /
     // status) come first.
-    var dependencyTreeMountHTML = '<div id="asset-dep-tree-mount-' + escapeHtml(a.id) + '"></div>';
+    var dependencyTreeMountHTML = '<div data-shot-section="depTree" data-shot-label="Dependency Tree"><div id="asset-dep-tree-mount-' + escapeHtml(a.id) + '"></div></div>';
 
-    var generalHTML = '<div class="asset-view-grid">' +
+    var generalHTML = '<div data-shot-section="details" data-shot-label="Details"><div class="asset-view-grid">' +
       (a.ipAddress && !a.hostname
         ? '<div class="detail-row"><span class="detail-label">Hostname</span><span class="detail-value">- <button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\')" title="Reverse DNS lookup (PTR record)">PTR Lookup</button></span></div>'
         : viewRow("Hostname", a.hostname, false, false, true)) +
@@ -3181,17 +3205,18 @@ async function openViewModal(id) {
       viewRow("Notes", a.notes, false, true) +
       viewRow("Created", formatDate(a.createdAt)) +
       viewRow("Updated", formatDate(a.updatedAt)) +
-    '</div>' + dependencyTreeMountHTML;
+    '</div></div>' + dependencyTreeMountHTML;
 
     var monitoringHTML = assetMonitoringViewHTML(a);
     var agentSubpanelHTML = ""; // filled in after the parallel load below
+    var agentMountHTML = '<div data-shot-section="agent" data-shot-label="Polaris Agent"><div id="asset-agent-panel-mount"></div></div>';
     var systemHTML     = a.monitored
       ? monitoringHTML +
         '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
-        '<div id="asset-agent-panel-mount"></div>' +
+        agentMountHTML +
         assetSystemViewHTML(a)
       : monitoringHTML +
-        '<div id="asset-agent-panel-mount"></div>'; // unmonitored assets still see the panel when an agent is mid-install
+        agentMountHTML; // unmonitored assets still see the panel when an agent is mid-install
     var tabs = [
       { key: "general", label: "General", html: generalHTML },
       { key: "system",  label: "System",  html: systemHTML },
@@ -3289,15 +3314,43 @@ async function openViewModal(id) {
 
     // IP history + firewall sightings now live in the Sources tab (no longer a
     // standalone modal). See _assetSourcesTabHTML.
+    // On the Events tab the Screenshot button gives way to an Export dropdown
+    // (same page/all × CSV/PDF shape as the Events page export, scoped to
+    // this asset). Both are rendered up front; _syncAssetFooterButtons flips
+    // visibility on tab clicks. The menu opens upward (drop-up) since the
+    // footer sits at the bottom of the viewport, and anchors left so it
+    // stays inside the slide-over.
     var copyBtns =
       '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-copy">Copy</button>' +
-      '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-screenshot">Screenshot</button>';
+      '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-screenshot">Screenshot</button>' +
+      '<span class="btn-dropdown-wrap" id="asset-export-wrap" style="display:none">' +
+        '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-export">Export &#9662;</button>' +
+        '<div class="btn-dropdown-menu drop-up anchor-left" id="asset-export-menu">' +
+          '<div class="dropdown-heading">PDF</div>' +
+          '<button data-export="page" data-fmt="pdf">Current page</button>' +
+          '<button data-export="all" data-fmt="pdf">All events for this asset</button>' +
+          '<div class="dropdown-divider"></div>' +
+          '<div class="dropdown-heading">CSV</div>' +
+          '<button data-export="page" data-fmt="csv">Current page</button>' +
+          '<button data-export="all" data-fmt="csv">All events for this asset</button>' +
+        '</div>' +
+      '</span>';
     var leftBtns = copyBtns;
     var rightBtns = '<button class="btn btn-sm btn-secondary" id="btn-asset-panel-close-btn">Close</button>' +
       (canManageAssets() ? '<button class="btn btn-sm btn-primary" id="btn-asset-panel-edit-btn">Edit</button>' : '');
     footerEl.innerHTML = leftBtns + '<span style="flex:1"></span>' + rightBtns;
 
     _wireModalTabs("asset-view");
+    // Footer button swap (Screenshot ↔ Export) rides on every tab click;
+    // _wireModalTabs has no change hook, so a delegated listener on the tab
+    // bar does it. The immediate call covers the initial (General) state.
+    var assetTabBar = document.getElementById("asset-view-tabs");
+    if (assetTabBar) {
+      assetTabBar.addEventListener("click", function (e) {
+        if (e.target.closest(".page-tab")) _syncAssetFooterButtons();
+      });
+    }
+    _syncAssetFooterButtons();
     if (isAdmin()) _wireSnmpWalkTab(a);
     if (canManageAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
@@ -3337,8 +3390,33 @@ async function openViewModal(id) {
     bodyEl.addEventListener("click", _handleCopyClick);
     document.getElementById("btn-asset-copy").addEventListener("click", _copyAssetDetails);
     document.getElementById("btn-asset-screenshot").addEventListener("click", function () {
-      _screenshotAssetDetails(a);
+      _openScreenshotOptions(a);
     });
+    // Export dropdown (Events tab) — same open/close mechanics as the Events
+    // page export menu. The document-level closer is registered once per
+    // page load (module guard), not once per modal open.
+    var exportBtn = document.getElementById("btn-asset-export");
+    var exportMenu = document.getElementById("asset-export-menu");
+    if (exportBtn && exportMenu) {
+      exportBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        exportMenu.classList.toggle("open");
+      });
+      exportMenu.addEventListener("click", function (e) { e.stopPropagation(); });
+      exportMenu.querySelectorAll("button[data-export]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          exportMenu.classList.remove("open");
+          _handleAssetEventExport(b.getAttribute("data-export"), b.getAttribute("data-fmt"), a);
+        });
+      });
+      if (!_assetExportCloserWired) {
+        _assetExportCloserWired = true;
+        document.addEventListener("click", function () {
+          var m = document.getElementById("asset-export-menu");
+          if (m) m.classList.remove("open");
+        });
+      }
+    }
     document.getElementById("btn-asset-panel-close-btn").addEventListener("click", closeAssetPanel);
     var editBtn = document.getElementById("btn-asset-panel-edit-btn");
     if (editBtn) {
@@ -4067,6 +4145,7 @@ function assetSystemViewHTML(a) {
     '</div>';
   }
   return (
+    '<div data-shot-section="cpuMemory" data-shot-label="CPU &amp; Memory" data-shot-chart="assetSystem">' +
     sectionHeader("CPU &amp; Memory", telemetryBadgeFull, true) +
     '<div id="asset-system-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
       '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="asset-system-from" class="form-input" style="padding:2px 6px"></label>' +
@@ -4079,14 +4158,23 @@ function assetSystemViewHTML(a) {
     '<div id="asset-system-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
       'Loading samples…' +
     '</div>' +
+    '</div>' +
+    '<div data-shot-section="sensors" data-shot-label="Hardware Sensors">' +
     sectionHeader("Hardware Sensors", temperatureBadgeFull, false) +
     '<div id="asset-system-temps"><span class="empty-state">Loading…</span></div>' +
+    '</div>' +
+    '<div data-shot-section="interfaces" data-shot-label="Interfaces" data-shot-sub="hiddenIfaces">' +
     sectionHeader("Interfaces", interfacesBadgeFull, false) +
     '<div id="asset-system-interfaces"><span class="empty-state">Loading…</span></div>' +
-    (isRestApiInterfaces ? '' : sectionHeader("Storage", interfacesBadgeFull, false) +
-    '<div id="asset-system-storage"><span class="empty-state">Loading…</span></div>') +
+    '</div>' +
+    (isRestApiInterfaces ? '' : '<div data-shot-section="storage" data-shot-label="Storage">' +
+    sectionHeader("Storage", interfacesBadgeFull, false) +
+    '<div id="asset-system-storage"><span class="empty-state">Loading…</span></div>' +
+    '</div>') +
+    '<div data-shot-section="lldp" data-shot-label="LLDP Neighbors">' +
     sectionHeader("LLDP Neighbors", lldpBadgeFull, false) +
-    '<div id="asset-system-lldp"><span class="empty-state">Loading…</span></div>'
+    '<div id="asset-system-lldp"><span class="empty-state">Loading…</span></div>' +
+    '</div>'
   );
 }
 
@@ -5221,9 +5309,9 @@ function _assetStationsTabHTML(a) {
   if (!a.monitored) {
     return '<p class="empty-state" style="padding:1rem 0">Monitoring is disabled for this AP — enable it to start collecting wireless station data via the FORTINET-FORTIAP-MIB fapStationTable SNMP walk.</p>';
   }
-  return '<div id="asset-system-stations">' +
+  return '<div data-shot-section="stations" data-shot-label="Wireless Stations"><div id="asset-system-stations">' +
     '<span class="empty-state">Loading wireless stations…</span>' +
-    '</div>';
+    '</div></div>';
 }
 
 // Short band label for the Stations table. The backend derives band from the
@@ -5329,7 +5417,7 @@ function _customMibTabHTML(payload) {
   var html = '<div style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:0.75rem">' + hint + '</div>';
   html += '<div class="custom-mib-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px">';
   payload.widgets.forEach(function (w) {
-    html += '<div class="custom-mib-card" style="border:1px solid var(--color-border);border-radius:6px;padding:10px;background:var(--color-bg-secondary,rgba(0,0,0,0.03))">' +
+    html += '<div class="custom-mib-card" data-shot-section="mib:' + escapeHtml(w.symbol) + '" data-shot-label="' + escapeHtml(w.name) + '" style="border:1px solid var(--color-border);border-radius:6px;padding:10px;background:var(--color-bg-secondary,rgba(0,0,0,0.03))">' +
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
         '<span style="font-weight:600">' + escapeHtml(w.name) + '</span>' +
         '<span style="font-size:0.72rem;color:var(--color-text-tertiary);font-family:var(--font-mono)">' + escapeHtml(w.symbol) + '</span>' +
@@ -6947,6 +7035,7 @@ function assetMonitoringViewHTML(a) {
       '<button class="btn btn-sm btn-primary" id="btn-asset-monitor-custom-apply">Apply</button>' +
     '</div>';
   return (
+    '<div data-shot-section="status" data-shot-label="Status &amp; Monitoring">' +
     '<div class="asset-view-grid">' +
       // Status uses a raw-HTML row because viewRow() escapes its value and
       // would render the badge markup as text.
@@ -6971,6 +7060,8 @@ function assetMonitoringViewHTML(a) {
         : '') +
       viewRow("Source", sourceLabel) +
     '</div>' +
+    '</div>' +
+    '<div data-shot-section="responseTime" data-shot-label="Response Time" data-shot-chart="assetMonitor">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;margin:1.5rem 0 0.5rem">' +
       '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +
         '<h4 style="margin:0">Response time</h4>' +
@@ -6982,6 +7073,7 @@ function assetMonitoringViewHTML(a) {
     '<div id="asset-monitor-stats" style="display:flex;gap:1.25rem;flex-wrap:wrap;font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem"></div>' +
     '<div id="asset-monitor-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
       'Loading samples…' +
+    '</div>' +
     '</div>'
   );
 }
@@ -7394,7 +7486,7 @@ function _renderMonitorChart(container, data, transitions) {
     var rtt = target.getAttribute("data-rtt");
     var ok = target.getAttribute("data-ok") === "1";
     var err = target.getAttribute("data-err");
-    var rttLine = ok && rtt !== "" ? (rtt + " ms") : '<span style="color:var(--color-danger,#d32f2f)">no response</span>';
+    var rttLine = ok && rtt !== "" ? (escapeHtml(rtt) + " ms") : '<span style="color:var(--color-danger,#d32f2f)">no response</span>';
     var lossLine = ok ? "no" : '<span style="color:var(--color-danger,#d32f2f)">yes</span>';
     var errLine = !ok && err ? '<div style="color:var(--color-text-secondary);margin-top:2px">' + escapeHtml(err) + '</div>' : '';
     tip.innerHTML =
@@ -8793,12 +8885,14 @@ function _assetSdwanTabHTML(a, rules, links, members) {
   // ── SD-WAN Members table (above the rules) ──
   if (members.length) {
     html +=
+      '<div data-shot-section="sdwanMembers" data-shot-label="SD-WAN Members">' +
       '<section style="margin-bottom:1.25rem">' +
         '<h4 style="margin:0 0 0.5rem 0">SD-WAN Members</h4>' +
         '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">WAN members (interfaces + overlays) with per-health-check status. The Health Check Status strip shows recent up/down per scrape; IP / link / bytes come from the latest interface poll.</p>' +
         _sdwanMembersTableHTML(members) +
       '</section>' +
-      ((rules.length || links.length) ? '<hr style="margin:1.25rem 0;border:none;border-top:1px solid var(--color-border)">' : '');
+      ((rules.length || links.length) ? '<hr style="margin:1.25rem 0;border:none;border-top:1px solid var(--color-border)">' : '') +
+      '</div>';
   }
 
   // ── SD-WAN Rules table ── (canonical column-layout template: data-col-id on
@@ -8868,6 +8962,7 @@ function _assetSdwanTabHTML(a, rules, links, members) {
         '</tr>';
     }).join("");
     html +=
+      '<div data-shot-section="sdwanRules" data-shot-label="SD-WAN Rules">' +
       '<section style="margin-bottom:1.25rem">' +
         '<h4 style="margin:0 0 0.5rem 0">SD-WAN Rules</h4>' +
         '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Service rules in FortiGate priority order, with the currently selected member highlighted in <strong>Members</strong>. Zone-preference rules list each preferred zone\'s members grouped by zone. Click a rule to see its member-selection history. The active member is inferred from health-check state when FortiOS does not report the selected route directly.</p>' +
@@ -8881,7 +8976,8 @@ function _assetSdwanTabHTML(a, rules, links, members) {
           '<th data-col-id="status">Status</th>' +
         '</tr></thead><tbody>' + ruleRows + '</tbody></table></div>' +
         '<div id="sdwan-rule-timeline" style="margin-top:0.75rem"></div>' +
-      '</section>';
+      '</section>' +
+      '</div>';
   }
 
   // ── Performance SLA section ──
@@ -8899,6 +8995,7 @@ function _assetSdwanTabHTML(a, rules, links, members) {
       var n = links.filter(function (l) { return l.healthCheck === hc; }).length;
       return '<option value="' + escapeHtml(hc) + '">' + escapeHtml(hc) + ' (' + n + ' member' + (n === 1 ? '' : 's') + ')</option>';
     }).join("");
+    html += '<div data-shot-section="perfSla" data-shot-label="Performance SLA" data-shot-chart="assetSdwan">';
     if (rules.length) {
       html += '<hr style="margin:1.25rem 0;border:none;border-top:1px solid var(--color-border)">';
     }
@@ -8927,7 +9024,8 @@ function _assetSdwanTabHTML(a, rules, links, members) {
         '<div id="sdwan-jitter-chart" class="sdwan-chart-box"></div>' +
         '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Packet loss (%)</h5>' +
         '<div id="sdwan-loss-chart" class="sdwan-chart-box"></div>' +
-      '</section>';
+      '</section>' +
+      '</div>';
   }
 
   html += '</div>';
@@ -10011,7 +10109,7 @@ function _activeAssetTabLabel() {
 
 // Walk the active tab panel and extract structured content blocks for the
 // plaintext Copy button (the Screenshot button rasterizes the live DOM via
-// html-to-image instead — see _screenshotAssetDetails). Five block shapes:
+// html-to-image instead — see _runScreenshotCapture). Five block shapes:
 //   { type: 'kv',      label, value }   from .detail-row pairs (General tab)
 //   { type: 'table',   headers, rows }  from any <table> (System/Quarantine/etc.)
 //   { type: 'heading', text }           from .section-label and <h1>-<h6>
@@ -10192,12 +10290,18 @@ function _copyAssetDetails() {
 // when they're unreachable the capture still completes, just with fallback
 // system fonts. One known fidelity gap: inner scrollable regions render
 // scrolled-to-top in the clone (scroll offsets don't survive cloneNode).
-function _screenshotAssetDetails(asset) {
+//
+// `opts.filter` (optional) is forwarded to html-to-image — return false for a
+// node to prune it and its whole subtree from the clone. The options modal
+// uses it to drop deselected sections. Returns a Promise that resolves when
+// the capture has finished (success or toast'd failure — it never rejects).
+function _runScreenshotCapture(asset, opts) {
+  opts = opts || {};
   var panel = _activeAssetPanel();
-  if (!panel) { showToast("Nothing to screenshot", "error"); return; }
+  if (!panel) { showToast("Nothing to screenshot", "error"); return Promise.resolve(); }
   if (typeof htmlToImage === "undefined") {
     showToast("Screenshot failed — capture library not loaded", "error");
-    return;
+    return Promise.resolve();
   }
 
   var cs = getComputedStyle(document.documentElement);
@@ -10245,49 +10349,353 @@ function _screenshotAssetDetails(asset) {
   }
 
   var scale = 2;
-  whenSettled(function () {
-    htmlToImage.toCanvas(panel, { pixelRatio: scale, backgroundColor: bgPrimary })
-      .then(function (capture) {
-        release();
-        var pad = 24;
-        var titleH = 48;
-        var w = capture.width / scale;
-        var h = capture.height / scale;
-        var canvas = document.createElement("canvas");
-        canvas.width = (w + pad * 2) * scale;
-        canvas.height = (titleH + h + pad) * scale;
-        var ctx = canvas.getContext("2d");
-        ctx.scale(scale, scale);
-        ctx.fillStyle = bgPrimary;
-        ctx.fillRect(0, 0, w + pad * 2, titleH + h + pad);
-        ctx.fillStyle = clrText;
-        ctx.font = "bold 17px " + fontSans;
-        var tabLabel = _activeAssetTabLabel();
-        var title = "Asset Details" + (asset && asset.hostname ? " — " + asset.hostname : "");
-        if (tabLabel) title += " (" + tabLabel + ")";
-        ctx.fillText(title, pad, 32);
-        // 1:1 device-pixel blit (w×h CSS px under the 2x transform), so the
-        // captured tab is never resampled.
-        ctx.drawImage(capture, pad, titleH, w, h);
-        canvas.toBlob(function (blob) {
+  return new Promise(function (resolve) {
+    whenSettled(function () {
+      var captureOpts = { pixelRatio: scale, backgroundColor: bgPrimary };
+      if (typeof opts.filter === "function") captureOpts.filter = opts.filter;
+      htmlToImage.toCanvas(panel, captureOpts)
+        .then(function (capture) {
+          release();
+          var pad = 24;
+          var titleH = 48;
+          var w = capture.width / scale;
+          var h = capture.height / scale;
+          var canvas = document.createElement("canvas");
+          canvas.width = (w + pad * 2) * scale;
+          canvas.height = (titleH + h + pad) * scale;
+          var ctx = canvas.getContext("2d");
+          ctx.scale(scale, scale);
+          ctx.fillStyle = bgPrimary;
+          ctx.fillRect(0, 0, w + pad * 2, titleH + h + pad);
+          ctx.fillStyle = clrText;
+          ctx.font = "bold 17px " + fontSans;
+          var tabLabel = _activeAssetTabLabel();
+          var title = "Asset Details" + (asset && asset.hostname ? " — " + asset.hostname : "");
+          if (tabLabel) title += " (" + tabLabel + ")";
+          ctx.fillText(title, pad, 32);
+          // 1:1 device-pixel blit (w×h CSS px under the 2x transform), so the
+          // captured tab is never resampled.
+          ctx.drawImage(capture, pad, titleH, w, h);
+          canvas.toBlob(function (blob) {
+            done();
+            if (!blob) { showToast("Screenshot failed", "error"); resolve(); return; }
+            if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
+              showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+              resolve();
+              return;
+            }
+            navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
+              showToast("Screenshot copied to clipboard");
+              resolve();
+            }).catch(function () {
+              showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
+              resolve();
+            });
+          }, "image/png");
+        })
+        .catch(function () {
+          release();
           done();
-          if (!blob) { showToast("Screenshot failed", "error"); return; }
-          if (!navigator.clipboard || typeof ClipboardItem === "undefined" || !navigator.clipboard.write) {
-            showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-            return;
-          }
-          navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).then(function () {
-            showToast("Screenshot copied to clipboard");
-          }).catch(function () {
-            showToast("Screenshot failed — requires HTTPS or clipboard permission", "error");
-          });
-        }, "image/png");
-      })
-      .catch(function () {
-        release();
-        done();
-        showToast("Screenshot failed", "error");
-      });
+          showToast("Screenshot failed", "error");
+          resolve();
+        });
+    });
+  });
+}
+
+// Enumerate the active tab's screenshot-eligible sections from the live DOM.
+// Every tab builder wraps each logical section in a
+// `<div data-shot-section="<key>" data-shot-label="<Label>">` (chart-bearing
+// sections add data-shot-chart, Interfaces adds data-shot-sub) — so the
+// options modal needs no per-tab knowledge: sections absent on this asset
+// simply don't render and never appear. Wrappers that are hidden or have no
+// real content (an empty async mount like the dependency tree on a
+// non-Fortinet asset, or the agent panel with no agent) are skipped.
+function _collectShotSections(panel) {
+  if (!panel) return [];
+  var out = [];
+  var els = panel.querySelectorAll("[data-shot-section]");
+  for (var i = 0; i < els.length; i++) {
+    var el = els[i];
+    if (el.offsetParent === null) continue; // hidden
+    var hasContent = (el.textContent || "").trim() !== "" || !!el.querySelector("svg,canvas,img,table");
+    if (!hasContent) continue;
+    var hasHiddenIfaceSub = false;
+    if (el.getAttribute("data-shot-sub") === "hiddenIfaces") {
+      var rows = el.querySelectorAll(".iface-inactive,.iface-child");
+      for (var r = 0; r < rows.length; r++) {
+        if (rows[r].style.display === "none") { hasHiddenIfaceSub = true; break; }
+      }
+    }
+    out.push({
+      key: el.getAttribute("data-shot-section"),
+      label: el.getAttribute("data-shot-label") || el.getAttribute("data-shot-section"),
+      el: el,
+      chartKey: el.getAttribute("data-shot-chart") || null,
+      hasHiddenIfaceSub: hasHiddenIfaceSub,
+    });
+  }
+  return out;
+}
+
+// Current on-screen selection for a chart key — a range string ("1h"…"30d")
+// or {from, to} for a custom window. Dispatches to each chart's existing
+// getter so the options modal's range pickers default to what's displayed.
+function _currentChartSelection(chartKey) {
+  if (chartKey === "assetMonitor") return _currentMonitorSelection();
+  if (chartKey === "assetSystem") return _currentSystemTabRange();
+  if (chartKey === "assetSdwan") {
+    var btn = document.querySelector(".sdwan-range-btn.btn-primary");
+    return (btn && btn.getAttribute("data-range")) || _getChartRangePref("assetSdwan", "24h");
+  }
+  return "24h";
+}
+
+// Range-swap + capture + restore orchestration behind the options modal's
+// Capture button. `choices` is:
+//   { exclude: [section wrapper els], hiddenIfaces: bool,
+//     charts: [{ chartKey, desired }] }   // desired = string range or {from,to}
+// Charts re-render at the desired range (their loaders cancel their own
+// auto-refresh timers on entry), hidden interface rows are revealed for the
+// capture only, and EVERYTHING is restored in the finally — the operator's
+// on-screen ranges, row visibility, and range-button state end unchanged
+// (buttons + _setChartRangePref are never touched at all).
+var _screenshotBusy = false; // re-entrancy guard across the whole swap→capture→restore span
+async function _captureWithChoices(asset, choices) {
+  if (_screenshotBusy) return;
+  _screenshotBusy = true;
+  var shotBtn = document.getElementById("btn-asset-screenshot");
+  if (shotBtn) shotBtn.disabled = true;
+  try {
+    await _captureWithChoicesInner(asset, choices);
+  } finally {
+    _screenshotBusy = false;
+    shotBtn = document.getElementById("btn-asset-screenshot");
+    if (shotBtn) shotBtn.disabled = false;
+  }
+}
+
+async function _captureWithChoicesInner(asset, choices) {
+  choices = choices || {};
+  var charts = choices.charts || [];
+  var priors = {};
+  var i;
+
+  async function loadChart(chartKey, selection) {
+    if (chartKey === "assetMonitor") {
+      await _loadMonitorHistoryFor(asset.id, selection, { silent: true });
+    } else if (chartKey === "assetSystem") {
+      await _loadSystemTabFor(asset.id, selection, asset, { chartOnly: !!_assetSystemSiCache, silent: true });
+    } else if (chartKey === "assetSdwan") {
+      var st = _sdwanTabState;
+      if (st && st.hcName) {
+        await _loadPerfSlaForHealthCheck(asset.id, st.hcName, (st.linksByHc && st.linksByHc[st.hcName]) || [], selection);
+      }
+      if (st && st.ruleName) await _loadSdwanRuleTimelineFor(asset.id, st.ruleName, selection);
+    }
+  }
+
+  // Swap each chart to the desired range. Sequential keeps the failure
+  // story simple; these are sub-second history fetches.
+  for (i = 0; i < charts.length; i++) {
+    priors[charts[i].chartKey] = _currentChartSelection(charts[i].chartKey);
+    await loadChart(charts[i].chartKey, charts[i].desired);
+  }
+
+  // Reveal hidden interface rows for the capture. Queried NOW (not at
+  // modal-confirm) so an interfaces-table rebuild in between can't orphan
+  // the row references.
+  var revealed = [];
+  var excl = new Set(choices.exclude || []);
+
+  // A swapped chart's range buttons still highlight the operator's on-screen
+  // selection (deliberately untouched), which would contradict the captured
+  // window — drop the buttons (and any open custom-range panel) from the
+  // image for swapped charts only.
+  var CHART_UI = {
+    assetMonitor: { btnSel: ".asset-monitor-range-btn", panelId: "asset-monitor-custom-panel" },
+    assetSystem:  { btnSel: ".asset-system-range-btn",  panelId: "asset-system-custom-panel" },
+    assetSdwan:   { btnSel: ".sdwan-range-btn",         panelId: null },
+  };
+  charts.forEach(function (c) {
+    var ui = CHART_UI[c.chartKey];
+    if (!ui) return;
+    document.querySelectorAll(ui.btnSel).forEach(function (b) { excl.add(b); });
+    if (ui.panelId) {
+      var p = document.getElementById(ui.panelId);
+      if (p) excl.add(p);
+    }
+  });
+  if (choices.hiddenIfaces) {
+    var ifaceWrap = document.querySelector('#asset-view-tab-system [data-shot-section="interfaces"]');
+    if (ifaceWrap && !excl.has(ifaceWrap)) {
+      var rows = ifaceWrap.querySelectorAll(".iface-inactive,.iface-child");
+      for (i = 0; i < rows.length; i++) {
+        if (rows[i].style.display === "none") {
+          revealed.push(rows[i]);
+          rows[i].style.display = "";
+        }
+      }
+      // The "Show N inactive interfaces" button row would contradict the
+      // now-visible rows — drop it from the capture.
+      var toggleRow = document.getElementById("iface-inactive-toggle-row");
+      if (toggleRow) excl.add(toggleRow);
+    }
+  }
+
+  try {
+    await _runScreenshotCapture(asset, {
+      filter: function (node) { return !(node && excl.has(node)); },
+    });
+  } finally {
+    for (i = 0; i < revealed.length; i++) revealed[i].style.display = "none";
+    for (i = 0; i < charts.length; i++) {
+      try {
+        await loadChart(charts[i].chartKey, priors[charts[i].chartKey]);
+      } catch (_) { /* one chart failing to restore shouldn't strand the rest */ }
+    }
+  }
+}
+
+// Screenshot options modal — the footer Screenshot button lands here. Lists
+// the active tab's sections (from the data-shot-section wrappers) with
+// include/exclude checkboxes, an "Include hidden interfaces" sub-option on
+// the Interfaces section, and a time-range picker (1h/24h/7d/30d/Custom)
+// under each chart-bearing section defaulting to the chart's current
+// on-screen selection. Checkbox + hidden-iface choices persist per user+tab
+// (polaris-prefs-screenshot-<user>); ranges intentionally don't. Tabs with a
+// single plain section (SNMP Walk, Stations) skip the modal entirely.
+function _openScreenshotOptions(asset) {
+  var panel = _activeAssetPanel();
+  if (!panel) { showToast("Nothing to screenshot", "error"); return; }
+  if (typeof htmlToImage === "undefined") {
+    showToast("Screenshot failed — capture library not loaded", "error");
+    return;
+  }
+  if (_screenshotBusy) return;
+  var sections = _collectShotSections(panel);
+  var hasOptions = sections.some(function (s) { return s.chartKey || s.hasHiddenIfaceSub; });
+  if (sections.length <= 1 && !hasOptions) {
+    // Route through the orchestrator (no swaps/exclusions) for its
+    // re-entrancy guard.
+    _captureWithChoices(asset, {});
+    return;
+  }
+
+  var activeTabBtn = document.querySelector("#asset-view-tabs .page-tab.active");
+  var tabKey = activeTabBtn ? (activeTabBtn.getAttribute("data-tab") || "tab") : "tab";
+  var prefs = _getScreenshotPrefs()[tabKey] || {};
+  var savedSections = prefs.sections || {};
+
+  var RANGES = ["1h", "24h", "7d", "30d"];
+  function rangeSelectHTML(s) {
+    var cur = _currentChartSelection(s.chartKey);
+    var isCustom = typeof cur !== "string";
+    var opts = RANGES.map(function (r) {
+      return '<option value="' + r + '"' + (!isCustom && cur === r ? " selected" : "") + '>' + r + '</option>';
+    }).join("") + '<option value="custom"' + (isCustom ? " selected" : "") + '>Custom…</option>';
+    var fromVal = isCustom ? _toLocalDatetimeInput(new Date(cur.from)) : "";
+    var toVal   = isCustom ? _toLocalDatetimeInput(new Date(cur.to))   : "";
+    return '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+      '<span style="font-size:0.8rem;color:var(--color-text-secondary)">Time range</span>' +
+      '<select class="form-input shot-range" data-chart="' + s.chartKey + '" style="padding:2px 6px;font-size:0.82rem;width:auto">' + opts + '</select>' +
+      '<span class="shot-custom-wrap" data-chart="' + s.chartKey + '" style="display:' + (isCustom ? "inline-flex" : "none") + ';align-items:center;gap:4px;font-size:0.8rem">' +
+        'From <input type="datetime-local" class="form-input shot-from" data-chart="' + s.chartKey + '" value="' + fromVal + '" style="padding:2px 6px">' +
+        'To <input type="datetime-local" class="form-input shot-to" data-chart="' + s.chartKey + '" value="' + toVal + '" style="padding:2px 6px">' +
+      '</span>' +
+    '</div>';
+  }
+
+  var rowsHtml = sections.map(function (s, idx) {
+    var checked = savedSections[s.key] !== false;
+    var subs = "";
+    if (s.hasHiddenIfaceSub) {
+      subs += '<label style="display:flex;align-items:center;gap:6px;font-size:0.85rem">' +
+        '<input type="checkbox" id="shot-sub-hidden-ifaces"' + (prefs.includeHiddenIfaces === true ? " checked" : "") + '> Include hidden interfaces' +
+      '</label>';
+    }
+    if (s.chartKey) subs += rangeSelectHTML(s);
+    var subBlock = subs
+      ? '<div class="shot-sub" data-idx="' + idx + '" style="margin:0.35rem 0 0 1.6rem;display:' + (checked ? "flex" : "none") + ';flex-direction:column;gap:0.35rem">' + subs + '</div>'
+      : "";
+    return '<div style="padding:0.45rem 0;border-bottom:1px solid var(--color-border)">' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
+        '<input type="checkbox" class="shot-sec" data-key="' + escapeHtml(s.key) + '" data-idx="' + idx + '"' + (checked ? " checked" : "") + '>' +
+        '<span style="font-weight:500">' + escapeHtml(s.label) + '</span>' +
+      '</label>' +
+      subBlock +
+    '</div>';
+  }).join("");
+
+  var body =
+    '<p style="margin:0 0 0.5rem;font-size:0.85rem;color:var(--color-text-secondary)">Choose which sections of this tab to include in the screenshot.</p>' +
+    '<div id="shot-section-list">' + rowsHtml + '</div>';
+  var footer =
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="btn-shot-capture">Capture</button>';
+  openModal("Screenshot — " + _activeAssetTabLabel(), body, footer);
+
+  var list = document.getElementById("shot-section-list");
+  list.querySelectorAll(".shot-sec").forEach(function (cb) {
+    cb.addEventListener("change", function () {
+      var sub = list.querySelector('.shot-sub[data-idx="' + cb.getAttribute("data-idx") + '"]');
+      if (sub) sub.style.display = cb.checked ? "flex" : "none";
+    });
+  });
+  list.querySelectorAll(".shot-range").forEach(function (sel) {
+    sel.addEventListener("change", function () {
+      var wrap = list.querySelector('.shot-custom-wrap[data-chart="' + sel.getAttribute("data-chart") + '"]');
+      if (wrap) wrap.style.display = sel.value === "custom" ? "inline-flex" : "none";
+    });
+  });
+
+  document.getElementById("btn-shot-capture").addEventListener("click", async function () {
+    var secState = {};
+    var excludeEls = [];
+    var anyChecked = false;
+    list.querySelectorAll(".shot-sec").forEach(function (cb) {
+      var idx = Number(cb.getAttribute("data-idx"));
+      secState[sections[idx].key] = cb.checked;
+      if (cb.checked) anyChecked = true;
+      else excludeEls.push(sections[idx].el);
+    });
+    if (!anyChecked) { showToast("Select at least one section", "error"); return; }
+
+    // Resolve each checked chart section's desired range; validate customs.
+    var chartChoices = [];
+    var invalid = false;
+    sections.forEach(function (s) {
+      if (!s.chartKey || secState[s.key] === false) return;
+      var sel = list.querySelector('.shot-range[data-chart="' + s.chartKey + '"]');
+      if (!sel) return;
+      var desired;
+      if (sel.value === "custom") {
+        var fromEl = list.querySelector('.shot-from[data-chart="' + s.chartKey + '"]');
+        var toEl   = list.querySelector('.shot-to[data-chart="' + s.chartKey + '"]');
+        if (!fromEl.value || !toEl.value) { invalid = true; return; }
+        var fromD = new Date(fromEl.value);
+        var toD   = new Date(toEl.value);
+        if (!(fromD < toD)) { invalid = true; return; }
+        desired = { from: fromD.toISOString(), to: toD.toISOString() };
+      } else {
+        desired = sel.value;
+      }
+      // Skip charts already showing the desired window — no swap, no restore.
+      var cur = _currentChartSelection(s.chartKey);
+      var same = (typeof desired === "string")
+        ? desired === cur
+        : (typeof cur !== "string" && cur && cur.from === desired.from && cur.to === desired.to);
+      if (!same) chartChoices.push({ chartKey: s.chartKey, desired: desired });
+    });
+    if (invalid) { showToast("Custom range needs valid From/To with From before To", "error"); return; }
+
+    var hiddenIfaces = false;
+    var hiddenCb = document.getElementById("shot-sub-hidden-ifaces");
+    if (hiddenCb && hiddenCb.checked && secState.interfaces !== false) hiddenIfaces = true;
+
+    _setScreenshotPrefs(tabKey, { sections: secState, includeHiddenIfaces: hiddenCb ? hiddenCb.checked : prefs.includeHiddenIfaces === true });
+    closeModal();
+    await _captureWithChoices(asset, { exclude: excludeEls, hiddenIfaces: hiddenIfaces, charts: chartChoices });
   });
 }
 
@@ -11374,7 +11782,7 @@ function assetSnmpWalkViewHTML(a) {
   var oidLabelText = mibAware ? "Object name" : "Base OID";
   var oidPlaceholder = mibAware ? "e.g. sysDescr, ifTable, lldpRemTable" : "1.3.6.1.2.1.1";
   return (
-    '<div style="display:flex;flex-direction:column;gap:0.75rem">' +
+    '<div data-shot-section="snmpWalk" data-shot-label="SNMP Walk" style="display:flex;flex-direction:column;gap:0.75rem">' +
       '<div style="font-size:0.85rem;color:var(--color-text-secondary)">' +
         'Walks <code>' + escapeHtml(a.ipAddress) + '</code> using the selected SNMP credential. Admin-only — every walk is audited. Walks are capped at 5,000 rows.' +
       '</div>' +
@@ -12412,6 +12820,160 @@ function _wireAssetEventsTab(assetId) {
   });
 }
 
+// ── Events-tab export (footer Export dropdown) ──────────────────────────────
+// The footer's Screenshot button becomes an Export dropdown while the Events
+// tab is active (_syncAssetFooterButtons). Mirrors the Events page export
+// (events.js handleEventExport / generateEventCsv / generateEventPdf) but is
+// scoped to this asset via _buildAssetEventsQuery — "all" honors the
+// operator's active column filters + sort, pinned to resourceType=asset.
+// The generators live here (with an _asset prefix) because events.js is not
+// loaded on assets.html / map.html.
+
+var _assetExportCloserWired = false; // document-level menu closer, once per page
+
+// Hostname → filename-safe fragment for the export filenames.
+function _assetExportSubject(asset) {
+  var s = (asset && (asset.hostname || asset.id)) || "asset";
+  return String(s).replace(/[^A-Za-z0-9._-]+/g, "-");
+}
+
+function _syncAssetFooterButtons() {
+  var active = document.querySelector("#asset-view-tabs .page-tab.active");
+  var isEvents = !!(active && active.getAttribute("data-tab") === "events");
+  var shot = document.getElementById("btn-asset-screenshot");
+  var wrap = document.getElementById("asset-export-wrap");
+  if (shot) shot.style.display = isEvents ? "none" : "";
+  if (wrap) wrap.style.display = isEvents ? "" : "none";
+}
+
+async function _handleAssetEventExport(mode, fmt, asset) {
+  var events, label, ok;
+  if (mode === "page") {
+    events = _assetEventsCurrentPage;
+    if (!events || events.length === 0) { showToast("No events to export", "error"); return; }
+    label = "page " + (Math.floor(_assetEventsOffset / _assetEventsPageSize) + 1);
+  } else if (mode === "all") {
+    if (_assetEventsTotal > 100) {
+      ok = await showConfirm("This will export " + _assetEventsTotal + " events. Continue?");
+      if (!ok) return;
+    }
+  }
+
+  await trackedPdfExport("Exporting asset events " + fmt.toUpperCase(), async function (signal) {
+    if (mode === "all") {
+      // GET /events caps limit at 200 (Zod schema rejects, not clamps,
+      // anything larger) — page through in 200-row chunks up to a 10k
+      // export ceiling.
+      events = [];
+      var offset = 0;
+      var total = Infinity;
+      while (offset < total && events.length < 10000) {
+        var q = _buildAssetEventsQuery();
+        q.limit = 200;
+        q.offset = offset;
+        var data = await request("GET", "/events" + toQuery(q), undefined, signal);
+        if (signal.aborted) return;
+        var chunk = (data && data.events) || [];
+        events = events.concat(chunk);
+        total = (data && data.total) || events.length;
+        if (chunk.length === 0) break;
+        offset += chunk.length;
+      }
+      label = "all " + events.length + " events";
+    }
+    if (signal.aborted) return;
+    if (!events || events.length === 0) { showToast("No events to export", "error"); return; }
+    if (fmt === "csv") _generateAssetEventCsv(events, asset);
+    else _generateAssetEventPdf(events, label, asset);
+  });
+}
+
+function _generateAssetEventCsv(events, asset) {
+  var headers = ["Timestamp", "Level", "Action", "Resource Type", "Resource Name", "Message", "User"];
+  var rows = events.map(function (ev) {
+    var ts = new Date(ev.timestamp);
+    var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
+      " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return [
+      timeStr, (ev.level || "info").toUpperCase(), ev.action || "",
+      ev.resourceType || "", ev.resourceName || "", ev.message || "", ev.actor || "",
+    ];
+  });
+  var subject = _assetExportSubject(asset);
+  var filename = "polaris-asset-events-" + subject + "-" + new Date().toISOString().slice(0, 10) + ".csv";
+  downloadCsv(headers, rows, filename);
+  showToast("Exported " + events.length + " events to " + filename);
+}
+
+function _generateAssetEventPdf(events, label, asset) {
+  if (!window.jspdf || !window.jspdf.jsPDF) {
+    throw new Error("PDF library not loaded. Check your internet connection and reload the page.");
+  }
+  var jsPDF = window.jspdf.jsPDF;
+  var doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "letter" });
+
+  var now = new Date();
+  var timestamp = now.toLocaleDateString() + " " + now.toLocaleTimeString();
+  var subject = _assetExportSubject(asset);
+
+  doc.setFontSize(16);
+  doc.setTextColor(40, 40, 40);
+  doc.text((_branding ? _branding.appName : "Polaris") + " — Event Log — " + subject, 40, 36);
+  doc.setFontSize(9);
+  doc.setTextColor(120, 120, 120);
+  doc.text("Generated: " + timestamp + "  |  Scope: " + label + "  |  Count: " + events.length, 40, 52);
+
+  var head = [["Timestamp", "Level", "Action", "Resource", "Message", "User"]];
+  var body = events.map(function (ev) {
+    var ts = new Date(ev.timestamp);
+    var timeStr = ts.toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
+      " " + ts.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    var resource = ev.resourceType || "-";
+    if (ev.resourceName) resource += " (" + ev.resourceName + ")";
+    return [
+      timeStr,
+      (ev.level || "info").toUpperCase(),
+      ev.action || "-",
+      resource,
+      ev.message || "-",
+      ev.actor || "-",
+    ];
+  });
+
+  doc.autoTable({
+    startY: 64,
+    head: head,
+    body: body,
+    theme: "grid",
+    styles: { fontSize: 7.5, cellPadding: 4, overflow: "linebreak" },
+    headStyles: { fillColor: [30, 30, 54], textColor: [230, 230, 230], fontStyle: "bold" },
+    alternateRowStyles: { fillColor: [245, 245, 250] },
+    margin: { left: 40, right: 40 },
+    columnStyles: {
+      0: { cellWidth: 100 },
+      1: { cellWidth: 42 },
+      2: { cellWidth: 90 },
+      3: { cellWidth: 80 },
+      5: { cellWidth: 60 },
+    },
+    didDrawPage: function (data) {
+      var pageNum = doc.internal.getNumberOfPages();
+      doc.setFontSize(8);
+      doc.setTextColor(150, 150, 150);
+      doc.text(
+        "Page " + data.pageNumber + " of " + pageNum + "  |  " + (_branding ? _branding.appName : "Polaris") + " Event Log",
+        doc.internal.pageSize.getWidth() / 2,
+        doc.internal.pageSize.getHeight() - 20,
+        { align: "center" }
+      );
+    },
+  });
+
+  var filename = "polaris-asset-events-" + subject + "-" + now.toISOString().slice(0, 10) + ".pdf";
+  doc.save(filename);
+  showToast("Exported " + events.length + " events to " + filename);
+}
+
 function _formatEventFieldName(field) {
   return field.replace(/([A-Z])/g, " $1").replace(/^./, function (c) { return c.toUpperCase(); });
 }
@@ -12481,13 +13043,17 @@ function _assetSourcesTabHTML(sources, assetId, sightings, ipHistory) {
   // they're visible to anyone who can view the asset (the Quarantine tab's
   // sighting copy is assets-admin-only and serves the push fan-out workflow).
   var historyHTML =
+    '<div data-shot-section="sightings" data-shot-label="Firewall Sightings">' +
     '<div class="section-block" style="margin-bottom:1rem">' +
       '<div class="section-label" style="margin-bottom:0.25rem">Firewall Sightings</div>' +
       _sightingsTableHTML(sightings) +
     '</div>' +
+    '</div>' +
+    '<div data-shot-section="ipHistory" data-shot-label="IP History">' +
     '<div class="section-block" style="margin-bottom:1rem">' +
       '<div class="section-label" style="margin-bottom:0.25rem">IP History</div>' +
       _ipHistoryTableHTML(ipHistory) +
+    '</div>' +
     '</div>';
 
   // Split is admin-only and only meaningful when there's more than one
@@ -12547,7 +13113,7 @@ function _assetSourcesTabHTML(sources, assetId, sightings, ipHistory) {
       '</div>'
     );
   }).join("");
-  return mergeToolbar + sourceCards + historyHTML;
+  return '<div data-shot-section="sources" data-shot-label="Discovery Sources">' + mergeToolbar + sourceCards + '</div>' + historyHTML;
 }
 
 // ─── Quarantine tab ─────────────────────────────────────────────────────────
@@ -12579,12 +13145,14 @@ function _assetQuarantineTabHTML(a) {
       : '<p class="empty-state" style="margin:0.5rem 0 0">No push targets recorded.</p>';
 
     statusSection =
+      '<div data-shot-section="qStatus" data-shot-label="Quarantine Status">' +
       '<div class="section-block" style="margin-bottom:1rem">' +
         '<div class="section-label" style="margin-bottom:0.25rem">Quarantine Status</div>' +
         (a.quarantineReason ? '<p style="margin:0 0 0.5rem;color:var(--color-text-secondary)">Reason: ' + escapeHtml(a.quarantineReason) + '</p>' : '') +
         (a.quarantinedAt ? '<p style="margin:0 0 0.5rem;font-size:0.82rem;color:var(--color-text-secondary)">Quarantined ' + formatDate(a.quarantinedAt) + (a.quarantinedBy ? ' by ' + escapeHtml(a.quarantinedBy) : '') + '</p>' : '') +
         '<div class="section-label" style="margin:0.75rem 0 0.25rem">FortiGate Push Targets</div>' +
         targetsHtml +
+      '</div>' +
       '</div>';
   }
 
@@ -12593,9 +13161,11 @@ function _assetQuarantineTabHTML(a) {
     : '<em style="color:var(--color-text-secondary)">No MACs on record — quarantine push requires at least one MAC.</em>';
 
   var sightingsSection =
+    '<div data-shot-section="qSightings" data-shot-label="DHCP Sightings">' +
     '<div class="section-block" style="margin-bottom:1rem">' +
       '<div class="section-label" style="margin-bottom:0.25rem">DHCP Sightings</div>' +
       '<div id="asset-sightings-container"><em style="color:var(--color-text-secondary)">Loading…</em></div>' +
+    '</div>' +
     '</div>';
 
   var isInfra = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
@@ -12606,9 +13176,11 @@ function _assetQuarantineTabHTML(a) {
 
   return '<div style="padding:0.5rem 0">' +
     statusSection +
+    '<div data-shot-section="qMacs" data-shot-label="Associated MACs">' +
     '<div class="section-block" style="margin-bottom:1rem">' +
       '<div class="section-label" style="margin-bottom:0.25rem">Associated MACs</div>' +
       macsHtml +
+    '</div>' +
     '</div>' +
     sightingsSection +
     '<div style="display:flex;gap:8px;flex-wrap:wrap">' + actionBtn + verifyBtn + '</div>' +

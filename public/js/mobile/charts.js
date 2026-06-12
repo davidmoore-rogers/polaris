@@ -30,6 +30,17 @@
   var BOTTOM_GUTTER = 18;
   var TOP_GUTTER    = 4;
 
+  // The returned markup lands in innerHTML, and ariaLabel can carry
+  // API-sourced names (e.g. SD-WAN health-check names) — escape anything
+  // interpolated into an attribute.
+  function escapeAttr(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
   function lineChart(opts) {
     opts = opts || {};
     var series = opts.series || [];
@@ -79,7 +90,7 @@
     function y(v) { return plotHeight - pad - (plotHeight - 2 * pad) * ((v - yMin) / (yMax - yMin)); }
 
     var svgParts = [];
-    svgParts.push('<svg class="chart-svg" viewBox="0 0 ' + viewWidth + ' ' + plotHeight + '" preserveAspectRatio="none" role="img" aria-label="' + (opts.ariaLabel || "Chart") + '">');
+    svgParts.push('<svg class="chart-svg" viewBox="0 0 ' + viewWidth + ' ' + plotHeight + '" preserveAspectRatio="none" role="img" aria-label="' + escapeAttr(opts.ariaLabel || "Chart") + '">');
 
     // Faint y midline so the eye has something to anchor on.
     svgParts.push('<line x1="0" x2="' + viewWidth + '" y1="' + (plotHeight / 2).toFixed(1) + '" y2="' + (plotHeight / 2).toFixed(1) + '" stroke="var(--md-outline-variant)" stroke-width="0.5" stroke-dasharray="2,2" opacity="0.5"/>');

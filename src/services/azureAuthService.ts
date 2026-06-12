@@ -109,7 +109,10 @@ async function getSamlClient(): Promise<SAML> {
     throw new Error("SAML SSO requires an Application URL — set it in Authentication Settings");
   }
 
-  const baseUrl = settings.spEntityId.replace(/\/+$/, "");
+  // Trim trailing slashes without a `/\/+$/` regex (polynomial backtracking
+  // on adversarial input — CodeQL js/polynomial-redos).
+  let baseUrl = settings.spEntityId;
+  while (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
   const config: SamlConfig = {
     idpCert: settings.idpCertificate,
     issuer: baseUrl,

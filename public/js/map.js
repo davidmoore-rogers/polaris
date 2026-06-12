@@ -33,6 +33,21 @@
   // operator's last spot. Drag offsets are clamped on render to keep the
   // panel inside the graph if the modal was resized between sessions.
   var LEGEND_STORAGE_KEY = "polaris.topology.legend";
+  // Device-type visibility toggles (floating chips at the top-right of the
+  // graph area): per-user singleton like the legend — hidden types persist
+  // across sites/sessions. Stored as an array of role strings. The fortigate
+  // root is intentionally NOT toggleable: it anchors the column solver, and
+  // hiding it would drop the whole layout back to dagre.
+  var TYPE_FILTER_STORAGE_KEY = "polaris.topology.hiddenRoles";
+  // Toggleable roles, in chip display order. Only roles that buildTopologyElements
+  // actually renders as nodes belong here (wireless clients / LLDP ghosts are
+  // never drawn, and wired endpoints only appear as synthetic search-overlay
+  // nodes, which bypass the filter by design).
+  var TOPO_TYPE_TOGGLES = [
+    { role: "fortiswitch",  label: "Switches" },
+    { role: "fortiap",      label: "APs" },
+    { role: "remote-asset", label: "Remote" },
+  ];
 
   // Register cytoscape-dagre once. Both globals are populated by the UMD builds
   // loaded in map.html. Guarded so hot-reload doesn't throw.
@@ -1339,6 +1354,28 @@
     // off-path elements and adds a synthetic round-rectangle endpoint node.
     var elements = window.PolarisTopologyRender.buildTopologyElements(data);
 
+    // Device-type visibility filter: drop nodes of hidden roles (and edges
+    // touching them) BEFORE the column solver runs, so the layout recomputes
+    // compactly for what's actually shown instead of leaving holes where the
+    // hidden devices' rows were. Counts come from the UNFILTERED set so a
+    // hidden type's chip stays available to re-show it. Two passes because
+    // mesh edges can precede their target AP node in the element order.
+    var hiddenRoles = _readHiddenRoles();
+    var roleCounts = {};
+    var visibleIds = {};
+    elements.forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.id || d.source) return; // edges handled below
+      roleCounts[d.role] = (roleCounts[d.role] || 0) + 1;
+      if (!hiddenRoles[d.role]) visibleIds[d.id] = true;
+    });
+    elements = elements.filter(function (el) {
+      var d = el && el.data;
+      if (!d) return false;
+      if (d.source && d.target) return !!(visibleIds[d.source] && visibleIds[d.target]);
+      return !!visibleIds[d.id];
+    });
+
     // Topology graph follows the per-user MAP theme (not the global app
     // theme) so the toolbar toggle drives both the basemap and the
     // modal coherently.
@@ -1497,6 +1534,64 @@
     // (openTopology wipes #topology-graph's innerHTML and cytoscape re-mounts,
     // so it's re-added here on every render rather than living in static HTML.)
     _ensureTopologyMapShotButton();
+    _renderTopologyTypeToggles(roleCounts, hiddenRoles);
+  }
+
+  // ── Device-type visibility toggles ─────────────────────────────────────────
+  function _readHiddenRoles() {
+    try {
+      var raw = JSON.parse(localStorage.getItem(TYPE_FILTER_STORAGE_KEY) || "[]");
+      if (Array.isArray(raw)) {
+        var map = {};
+        raw.forEach(function (r) { if (typeof r === "string") map[r] = true; });
+        return map;
+      }
+    } catch (e) { /* corrupt / private mode — treat as nothing hidden */ }
+    return {};
+  }
+  function _writeHiddenRoles(map) {
+    try { localStorage.setItem(TYPE_FILTER_STORAGE_KEY, JSON.stringify(Object.keys(map))); }
+    catch (e) { /* quota / private mode — toggle still applies this session */ }
+  }
+
+  // Floating show/hide chips for device types, top-right of the graph area
+  // (left of the map-only camera button). One chip per toggleable role present
+  // on THIS site; clicking re-renders the graph through the normal pipeline so
+  // the column/row solver lays the visible subset out compactly. Rebuilt on
+  // every render — openTopology wipes #topology-graph's innerHTML, and the
+  // per-site role counts change anyway.
+  function _renderTopologyTypeToggles(roleCounts, hiddenRoles) {
+    var graph = document.getElementById("topology-graph");
+    if (!graph) return;
+    if (!graph.style.position) graph.style.position = "relative";
+    var wrap = document.getElementById("topology-type-toggles");
+    if (!wrap) {
+      wrap = document.createElement("div");
+      wrap.id = "topology-type-toggles";
+      wrap.className = "topology-type-toggles";
+      graph.appendChild(wrap);
+    }
+    wrap.innerHTML = "";
+    TOPO_TYPE_TOGGLES.forEach(function (t) {
+      var count = roleCounts[t.role] || 0;
+      if (count === 0) return; // nothing of this type on this site
+      var hidden = !!hiddenRoles[t.role];
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "topology-type-chip" + (hidden ? " is-off" : "");
+      chip.setAttribute("aria-pressed", hidden ? "false" : "true");
+      chip.title = (hidden ? "Show " : "Hide ") + t.label.toLowerCase() + " (saved per user)";
+      chip.textContent = t.label + " (" + count + ")";
+      chip.addEventListener("click", function () {
+        var next = _readHiddenRoles();
+        if (next[t.role]) delete next[t.role];
+        else next[t.role] = true;
+        _writeHiddenRoles(next);
+        if (topoState.data) renderTopologyGraph(topoState.data);
+      });
+      wrap.appendChild(chip);
+    });
+    wrap.hidden = wrap.children.length === 0;
   }
 
   // Adds the floating "copy map as image" camera button into #topology-graph.

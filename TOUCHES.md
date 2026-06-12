@@ -2467,7 +2467,7 @@ Listed alphabetically.
 **Invariants:**
 - TOTP secret must be base32-encoded; verify operations accept ±1 step (30s drift tolerance) to absorb client/server clock skew.
 - Backup codes are 10 hex pairs (XXXX-XXXX format), argon2id-hashed on generation, never returned in plaintext after enrollment.
-- Backup code consumption is stateless (caller must persist the returned array); no rate limiting on individual code attempts — the login lockout gate (5 failures, 15 min) protects the flow.
+- Backup code consumption is stateless (caller must persist the returned array). Login-time code attempts are protected by the login lockout gate (5 failures, 15 min); the enrollment-confirm and self-disable routes (`POST /totp/confirm`, `DELETE /totp`) are additionally rate-limited by `totpCodeLimiter` (10 / 15 min per IP, `src/api/middleware/rateLimits.ts`).
 - Two-phase login flow: password success → pendingToken issued; TOTP/backup-code step consumes pendingToken and upgrades to full session.
 
 **When changing this:**

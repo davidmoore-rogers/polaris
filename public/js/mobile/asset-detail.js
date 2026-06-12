@@ -257,7 +257,7 @@
   // — its FULL content height, including parts scrolled out of view;
   // collapsed sections stay collapsed, so the capture matches what the
   // operator chose to expand) via the vendored html-to-image library, draws
-  // a title strip above it (mirrors the desktop _screenshotAssetDetails in
+  // a title strip above it (mirrors the desktop _runScreenshotCapture in
   // assets.js), then hands the PNG off in mobile-priority order: native
   // share sheet → clipboard → plain download. Unlike desktop there's no
   // canonical-width reflow — the sheet captures at its natural mobile width,

@@ -31,14 +31,15 @@ try {
       ? String((r.config as Record<string, unknown>).apiToken ?? "")
       : "";
     const len = token.length;
-    const prefix = token.slice(0, 8);
     const looksMasked = /^[•*●]+$/.test(token);
     const looksEmpty = len === 0;
+    // Diagnose by length/shape only — never print token material, even a
+    // prefix (CodeQL js/clear-text-logging; output can land in shell logs).
     const verdict = looksEmpty
       ? "EMPTY — token missing, integration won't work"
       : looksMasked
         ? "MASK — token was corrupted by a save path (this is the bug)"
-        : `OK — ${len} chars, starts "${prefix}…"`;
+        : `OK — ${len} chars`;
 
     console.log(`[${r.type}] ${r.name}`);
     console.log(`  token:     ${verdict}`);
