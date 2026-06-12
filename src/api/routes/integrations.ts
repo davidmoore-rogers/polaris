@@ -4616,7 +4616,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     for (const vip of result.vips) {
       const matchExt = findSubnetForIp(vip.extip);
       if (matchExt) currentVipKeys.add(reservationKey(matchExt.id, vip.extip));
-      for (const ip of vip.mappedips) {
+      for (const ip of [...vip.mappedips, ...vip.realservers]) {
         const matchMap = findSubnetForIp(ip);
         if (matchMap) currentVipKeys.add(reservationKey(matchMap.id, ip));
       }
@@ -4625,10 +4625,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
   if (result.vips && result.vips.length > 0) {
     for (const vip of result.vips) {
-      const ipsToReserve: Array<{ ip: string; role: "external" | "mapped" }> = [
+      const ipsToReserve: Array<{ ip: string; role: "external" | "mapped" | "realserver" }> = [
         { ip: vip.extip, role: "external" },
         ...vip.mappedips.map((ip) => ({ ip, role: "mapped" as const })),
+        ...vip.realservers.map((ip) => ({ ip, role: "realserver" as const })),
       ];
+      // Load-balance Virtual Servers get their own canonical owner / notes /
+      // projectRef so operators can tell a VS (and its realserver pool
+      // members) apart from a plain DNAT VIP at a glance. Phase 5's
+      // VIP-succession path treats both spellings as canonical placeholders.
+      const kindLabel = vip.isVirtualServer ? "Virtual server" : "Firewall VIP";
 
       for (const { ip, role } of ipsToReserve) {
         const matchingSubnet = findSubnetForIp(ip);
@@ -4636,9 +4642,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
         const key = reservationKey(matchingSubnet.id, ip);
         const proposedHostname = vip.name;
-        const proposedOwner = "fortimanager-vip";
-        const proposedProjectRef = `VIP: ${vip.device}`;
-        const proposedNotes = `Firewall VIP "${vip.name}" (${role}) on ${vip.device} — ext: ${vip.extip}`;
+        const proposedOwner = vip.isVirtualServer ? "fortimanager-vs" : "fortimanager-vip";
+        const proposedProjectRef = `${vip.isVirtualServer ? "VS" : "VIP"}: ${vip.device}`;
+        const proposedNotes = `${kindLabel} "${vip.name}" (${role}) on ${vip.device} — ext: ${vip.extip}`;
 
         const existingRes = activeResMap.get(key);
         if (existingRes) {
@@ -4650,9 +4656,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             // operator-editable via the Reserve modal, so discovery must not
             // overwrite them; the VIP's current name stays visible via the
             // vip badge tooltip rendered from vipInfo.
-            const newVipInfo = { name: vip.name, device: vip.device, extip: vip.extip, role };
+            const newVipInfo = { name: vip.name, device: vip.device, extip: vip.extip, role, isVirtualServer: vip.isVirtualServer };
             const cur = existingRes.vipInfo as any;
-            if (!cur || cur.name !== newVipInfo.name || cur.device !== newVipInfo.device || cur.role !== newVipInfo.role) {
+            if (!cur || cur.name !== newVipInfo.name || cur.device !== newVipInfo.device || cur.role !== newVipInfo.role || !!cur.isVirtualServer !== newVipInfo.isVirtualServer) {
               await prisma.reservation.update({
                 where: { id: existingRes.id },
                 data: { vipInfo: newVipInfo },
@@ -4666,9 +4672,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             // conflict so they can review folding the VIP metadata into
             // this row. upsertConflict's 30-day re-raise guard prevents
             // nagging every discovery cycle once resolved.
-            const newVipInfo = { name: vip.name, device: vip.device, extip: vip.extip, role };
+            const newVipInfo = { name: vip.name, device: vip.device, extip: vip.extip, role, isVirtualServer: vip.isVirtualServer };
             const cur = existingRes.vipInfo as any;
-            if (!cur || cur.name !== newVipInfo.name || cur.device !== newVipInfo.device || cur.role !== newVipInfo.role) {
+            if (!cur || cur.name !== newVipInfo.name || cur.device !== newVipInfo.device || cur.role !== newVipInfo.role || !!cur.isVirtualServer !== newVipInfo.isVirtualServer) {
               await prisma.reservation.update({
                 where: { id: existingRes.id },
                 data: { vipInfo: newVipInfo },
@@ -4687,6 +4693,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
 
         try {
           await releaseDnsResolvedAt(matchingSubnet.id, ip);
+          // vipInfo stamped at create (not just on the next cycle's refresh
+          // branch) so the VIP/VS badge renders and the Phase 5b stale sweep
+          // is armed from the row's first cycle.
           const newRes = await prisma.reservation.create({
             data: {
               subnetId: matchingSubnet.id,
@@ -4697,6 +4706,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               notes: proposedNotes,
               status: "active",
               sourceType: "vip",
+              vipInfo: { name: vip.name, device: vip.device, extip: vip.extip, role, isVirtualServer: vip.isVirtualServer },
             },
           });
           activeResMap.set(key, newRes);
@@ -5006,10 +5016,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             // current state. Operator-typed owner / notes / hostname
             // survive; only the canonical VIP-discovery placeholders are
             // overwritten by the DHCP-discovery equivalents.
-            const isCanonicalVipOwner = existingRes.owner === "fortimanager-vip";
+            const isCanonicalVipOwner = existingRes.owner === "fortimanager-vip" || existingRes.owner === "fortimanager-vs";
             const isCanonicalVipNotes =
               !existingRes.notes ||
-              (typeof existingRes.notes === "string" && existingRes.notes.startsWith("Firewall VIP "));
+              (typeof existingRes.notes === "string" &&
+                (existingRes.notes.startsWith("Firewall VIP ") || existingRes.notes.startsWith("Virtual server ")));
             const updateData: Record<string, unknown> = {
               sourceType: proposedSourceType,
               vipInfo: null,

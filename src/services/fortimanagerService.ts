@@ -976,6 +976,36 @@ export interface DiscoveredVip {
   extip: string;       // External IP address
   mappedips: string[]; // Internal mapped IP addresses
   extintf: string;     // External interface name
+  // FortiOS load-balance Virtual Servers live in the same firewall/vip CMDB
+  // table (`type: server-load-balance`). Their backend pool is the
+  // `realservers` child table (not `mappedip`), so they get their own array
+  // and a flag the sync phase uses to label reservations "fortimanager-vs"
+  // instead of "fortimanager-vip". Detection is structural-first (non-empty
+  // realservers) with the type string as confirmation — FMG encodes CMDB
+  // enums inconsistently across releases, so we never rely on type alone.
+  isVirtualServer: boolean;
+  realservers: string[]; // Virtual-server backend pool member IPs
+}
+
+// Classify a raw firewall/vip row as a load-balance Virtual Server and
+// extract its realserver pool IPs. Shared by the FMG proxy path and the
+// standalone FortiGate REST path (fortigateService imports it) so the two
+// transports can't drift on field handling. FortiOS REST returns `type` as
+// a string; FMG JSON-RPC has returned CMDB enums as integers on some
+// releases, so a non-empty realservers pool is the primary signal and the
+// string match only catches VSes whose pool is currently empty. Pool
+// members sharing one IP on different ports collapse to a single entry.
+export function parseVipServerInfo(vip: any): { isVirtualServer: boolean; realservers: string[] } {
+  const realservers: string[] = [];
+  if (Array.isArray(vip?.realservers)) {
+    for (const rs of vip.realservers) {
+      const raw = Array.isArray(rs?.ip) ? rs.ip[0] : rs?.ip;
+      const ip = parseRangeFirstIp(String(raw || ""));
+      if (ip && !realservers.includes(ip)) realservers.push(ip);
+    }
+  }
+  const isVirtualServer = realservers.length > 0 || String(vip?.type || "") === "server-load-balance";
+  return { isVirtualServer, realservers };
 }
 
 // Per-port MAC learnings from each managed FortiSwitch under this FortiGate's
@@ -2314,7 +2344,7 @@ export async function discoverDhcpSubnets(
       const vipPayload: JsonRpcRequest = {
         id: 11,
         method: "get",
-        params: [{ url: `/pm/config/device/${deviceName}/vdom/root/firewall/vip`, fields: ["name", "extip", "mappedip", "extintf"] }],
+        params: [{ url: `/pm/config/device/${deviceName}/vdom/root/firewall/vip`, fields: ["name", "extip", "mappedip", "extintf", "type", "realservers"] }],
       };
       const vipRes = await rpc(baseUrl, vipPayload, apiUser, apiToken, verifySsl, signal, integrationId);
       didVipQuery = true;
@@ -2324,16 +2354,25 @@ export async function discoverDhcpSubnets(
         for (const vip of vipData) {
           const name = vip.name || "";
           if (!name) continue;
-          const extip = parseRangeFirstIp(String(vip.extip || ""));
+          // FMG's fields-projected get flattens extip/extintf to
+          // single-element string arrays and the mappedip child table to
+          // flat range strings (verified against FMG 7.x / FortiOS 7.x);
+          // the FortiOS-REST encoding is plain strings + { range } objects.
+          // Handle both — the { range } form was the only one parsed
+          // historically, which silently dropped mapped IPs in proxy mode.
+          const extipRaw = Array.isArray(vip.extip) ? vip.extip[0] : vip.extip;
+          const extip = parseRangeFirstIp(String(extipRaw || ""));
           if (!extip) continue;
           const mappedips: string[] = [];
           if (Array.isArray(vip.mappedip)) {
             for (const m of vip.mappedip) {
-              const ip = parseRangeFirstIp(String(m.range || ""));
+              const ip = parseRangeFirstIp(String((typeof m === "string" ? m : m?.range) || ""));
               if (ip) mappedips.push(ip);
             }
           }
-          localVips.push({ device: deviceName, name, extip, mappedips, extintf: vip.extintf || "" });
+          const extintfRaw = Array.isArray(vip.extintf) ? vip.extintf[0] : vip.extintf;
+          const { isVirtualServer, realservers } = parseVipServerInfo(vip);
+          localVips.push({ device: deviceName, name, extip, mappedips, extintf: String(extintfRaw || ""), isVirtualServer, realservers });
           vipCount++;
         }
       }

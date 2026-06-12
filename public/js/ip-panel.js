@@ -344,8 +344,9 @@ function _renderIpList(data) {
     var vipBadge = "";
     if (r && r.vipInfo) {
       var vi = r.vipInfo;
-      var vipTip = "VIP: " + escapeHtml(vi.name || "") + " (" + escapeHtml(vi.role || "") + ") on " + escapeHtml(vi.device || "") + " — ext: " + escapeHtml(vi.extip || "");
-      vipBadge = ' <span class="vip-badge" title="' + vipTip + '">VIP</span>';
+      var vipKind = vi.isVirtualServer ? "Virtual server" : "VIP";
+      var vipTip = vipKind + ": " + escapeHtml(vi.name || "") + " (" + escapeHtml(vi.role || "") + ") on " + escapeHtml(vi.device || "") + " — ext: " + escapeHtml(vi.extip || "");
+      vipBadge = ' <span class="vip-badge" title="' + vipTip + '">' + (vi.isVirtualServer ? "VS" : "VIP") + '</span>';
     }
     var hostname = hostnameText + vipBadge;
     var macRaw = (r && r.macAddress) || (r && r.notes ? (r.notes.match(/MAC:\s*([\w:]+)/) || [])[1] : null) || null;
@@ -1051,8 +1052,9 @@ function _openVipReserveModal(reservationId) {
     var subnetLabel = r.subnet ? escapeHtml(r.subnet.name) + " (" + escapeHtml(r.subnet.cidr) + ")" : r.subnetId;
     var expiresVal = r.expiresAt ? _toDatetimeLocal(r.expiresAt) : "";
     var vip = r.vipInfo || {};
-    var vipBlurb = '<p class="hint" style="margin-bottom:12px">Attach a reservation to this FortiGate VIP. Hostname, owner, and notes are operator-editable and survive discovery cycles.' +
-      (vip.name ? ' <strong>VIP:</strong> ' + escapeHtml(vip.name) + (vip.device ? ' on ' + escapeHtml(vip.device) : '') : '') +
+    var vipKindLabel = vip.isVirtualServer ? "virtual server" : "VIP";
+    var vipBlurb = '<p class="hint" style="margin-bottom:12px">Attach a reservation to this FortiGate ' + vipKindLabel + '. Hostname, owner, and notes are operator-editable and survive discovery cycles.' +
+      (vip.name ? ' <strong>' + (vip.isVirtualServer ? 'Virtual server' : 'VIP') + ':</strong> ' + escapeHtml(vip.name) + (vip.device ? ' on ' + escapeHtml(vip.device) : '') : '') +
       '</p>';
     var body = vipBlurb +
       '<div class="form-group"><label>Network</label><input type="text" value="' + subnetLabel + '" disabled></div>' +
