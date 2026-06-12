@@ -1631,7 +1631,7 @@ Listed alphabetically.
 **Used by:** `src/jobs/pruneEvents.ts,25 — scheduled archive/export`; `src/jobs/decommissionStaleAssets.ts — inactivity threshold`; `src/api/routes/events.ts — admin CRUD endpoints`; `capacityService.ts — capacity transition Event creation`. ~8 call sites.
 
 **Invariants:**
-- All successful Events are written to `prisma.event.create()` by callers (routes, services, jobs); eventArchiveService does not write Events, only manages their export/retention. The canonical helper is `logEvent` in [src/api/routes/events.ts](src/api/routes/events.ts) — it consults `getCachedRetentionSettings().minLevel` to drop sub-threshold events, and stamps the numeric `levelRank` (0=info, 1=warning, 2=error) at write time so the Events list endpoint's `sortBy=level` can dispatch to `orderBy: { levelRank }` for severity-ordered sort. Direct `prisma.event.create()` callers must stamp `levelRank` themselves; nothing in-tree bypasses `logEvent` today.
+- All successful Events are written to `prisma.event.create()` by callers (routes, services, jobs); eventArchiveService does not write Events, only manages their export/retention. The canonical helper is `logEvent` in [src/services/eventLogService.ts](src/services/eventLogService.ts) (re-exported from `src/api/routes/events.ts` for legacy importers) — it consults `getCachedRetentionSettings().minLevel` to drop sub-threshold events, and stamps the numeric `levelRank` (0=info, 1=warning, 2=error) at write time so the Events list endpoint's `sortBy=level` can dispatch to `orderBy: { levelRank }` for severity-ordered sort. Direct `prisma.event.create()` callers must stamp `levelRank` themselves; nothing in-tree bypasses `logEvent` today.
 - Archive export (SFTP/SCP) reads Events older than cutoff, writes JSON file, transfers via ssh/sftp spawn, then deletes from DB (via pruneEvents job).
 - Retention cache (1 min TTL) avoids DB read on every Event write; callers using `getCachedRetentionSettings()` must accept stale data.
 - Asset decommission threshold (0 = disabled) is in months; lastSeen older than that triggers `decommissioned` status in a separate 24h job.
@@ -1644,6 +1644,27 @@ Listed alphabetically.
 - Check asset decommission query doesn't accidentally mark live assets as stale (lastSeen >= cutoff).
 - Confirm syslog test messages arrive with the right facility/severity/format.
 - Validate SFTP injection prevention doesn't reject legitimate Windows paths with backslashes.
+
+---
+
+## services/eventLogService.ts
+
+**What it owns:** The shared audit-event writer. `logEvent` (never throws; drops rows below the operator-configured min level; stamps `levelRank` at write time), `buildChanges` (before/after diff for `.updated` events), `LogEventInput`.
+
+**Public API:** `logEvent`, `buildChanges`, `LogEventInput`.
+
+**Cross-service deps:** `eventArchiveService.getCachedRetentionSettings` (cached min-level read).
+
+**Used by:** ~42 modules across routes / services / jobs. Most import via the back-compat re-export in `src/api/routes/events.ts`; new code should import from here directly so services never depend on the route layer.
+
+**Invariants:**
+- `logEvent` must never throw — event logging can't be allowed to break the operation it audits. Failures are swallowed.
+- `levelRank` is stamped here (0=info, 1=warning, 2=error); the Events list endpoint's `sortBy=level` depends on it.
+- Sub-`minLevel` events are dropped silently (cached settings read, 60s TTL — accept staleness).
+
+**When changing this:**
+- The events.ts re-export must stay in lockstep (same symbol names) until the legacy importers are migrated.
+- Anything that makes `logEvent` throw or block breaks every mutating route in the app — keep it best-effort.
 
 ---
 
