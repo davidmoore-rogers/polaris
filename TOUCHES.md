@@ -27,7 +27,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 
 ## Sections
 
-- [Cross-cutting concerns](#cross-cutting-concerns) (17)
+- [Cross-cutting concerns](#cross-cutting-concerns) (18)
 - [Per-service touches](#per-service-touches) — alphabetical; covers the highest-traffic of the 65 services in `src/services/` (not every service has a section)
 
 ---
@@ -577,6 +577,41 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - Test the order: create an asset with status=decommissioned, monitored=true, consecutiveFailures=5; verify monitored flips to false and counter resets.
 - Verify alias cache is warmed: set a new alias, restart the app, create an asset with the old name; spot-check it got normalized.
 - Check IP history on duplicate IP: same asset, new source; verify firstSeen was reset (CASE expression in SQL working) and lastSeen bumped.
+
+---
+
+## cross-cutting/asset-last-seen-presence
+
+**What it is:** `Asset.lastSeen` means **verified network presence** — the last time Polaris had direct evidence the device was alive on the network — with `Asset.lastSeenSource` carrying the evidence label. Every write routes through `src/utils/assetInvariants.ts → bumpLastSeen()` (no-regress: only advances; stamps provenance). Directory timestamps (Entra `lastSyncDateTime`, AD `lastLogonTimestamp`) are deliberately NOT presence — they live on `AssetSource.lastSeen` and render separately as "Last Directory Activity".
+
+**Writers** (files that mutate this state):
+- `src/api/routes/integrations.ts → syncDhcpSubnets` — FMG/standalone-FortiGate sync stamps:
+  - Phase 5 DHCP: gated on `entry.seenLeased` (live lease), source `"dhcp-lease"`. Offline static reservations neither bump nor flip status.
+  - Phase 7 device inventory: evidence is the FortiGate's per-client `last_seen` (or `now` when `is_online`), source `"device-inventory"`. Resurrection (`decommissioned → active`) requires `is_online`.
+  - Firewall / FortiSwitch / FortiAP phases: source `"discovery"`; switch gated on `sw.connected`, AP on `apOnline` (status "connected" or blank), firewall implicit (FMG parse already skips `conn_status !== 1` devices).
+- `src/api/routes/integrations.ts → syncEntraDevices / syncActiveDirectoryDevices` — do NOT write lastSeen (cut over in the directory-decoupling change). Directory activity goes to `AssetSource.lastSeen` via the source upserts.
+- `src/services/presenceVerificationService.ts → runPresenceVerification` — AD/Entra post-sync pass (default on, `config.verifyPresence`): sources `"agent"` (ManagedAgent heartbeat), `"probe"` (answering monitor probe), `"ping"` (ICMP fallback). Ping failure writes nothing.
+- `src/api/routes/conflicts.ts` — accept path (`"conflict-accept"`, via bumpLastSeen), reject-creates-asset path (`"conflict-reject"`), ghost absorption carries the ghost's source along.
+- `src/services/assetMergeService.ts` + `src/jobs/mergeDuplicateHostnameAssets.ts` — max(lastSeen) winner carries its `lastSeenSource` onto the survivor.
+
+**Readers** (files that consume it):
+- `src/jobs/decommissionStaleAssets.ts` — `lastSeen < cutoff` eligibility, with a **veto** when any `entra`/`intune`/`ad`/`polaris-agent` AssetSource row has `lastSeen >= cutoff` (cloud-only laptops / agent-reporting hosts stay alive). Null lastSeen is never eligible.
+- `src/api/routes/integrations.ts → buildEntraSyncIndex.directoryActivityByAssetId` — the Entra duplicate-registration tiebreaker compares **directory activity** (AssetSource.lastSeen), not Asset.lastSeen.
+- `public/js/assets.js` — slide-over "Last Seen" row renders `lastSeen + " · via " + LAST_SEEN_SOURCE_LABELS[lastSeenSource]`; "Last Directory Activity" row computed from the sources fetch; assets table + CSV/PDF exports show the date only.
+- `src/services/presenceVerificationService.ts → classifyPresenceSignal` — "already fresh" short-circuit reads it.
+
+**Invariants:**
+- Never write `Asset.lastSeen` / `lastSeenSource` directly — route through `bumpLastSeen(data, existing, evidenceAt, source)`. Creates may set both literally (nothing to regress).
+- lastSeen never moves backward. A stale evidence source (FortiOS remembering a device from weeks ago) must not regress a fresher sighting.
+- Absence of evidence is not evidence of absence: failed pings, offline inventory rows, and disconnected switch/AP entries leave lastSeen (and status) untouched.
+- Presence evidence gates resurrection: only an online sighting may flip `decommissioned → active`.
+- `clampAcquiredToLastSeen` still applies after any bump (acquiredAt ≤ lastSeen).
+
+**When changing this:**
+- Adding a new evidence source: use `bumpLastSeen`, pick a label, add it to `LastSeenSource` in `assetInvariants.ts` AND `LAST_SEEN_SOURCE_LABELS` in `public/js/assets.js`.
+- Adding a new discovery pathway: classify its evidence — is it "device on the wire right now" (bump) or "registry/config knows about the device" (don't)?
+- If you change the decommission job's eligibility, re-check the veto subquery covers every activity-bearing sourceKind.
+- Scale-check any new reader/writer at 2000 assets — the presence pass batches via `$transaction` and bounds ping fan-out; keep it that way.
 
 ---
 
@@ -1806,7 +1841,7 @@ Listed alphabetically.
 - Direct mode (`useProxy: false`) requires valid fortigateApiUser/fortigateApiToken on the FMG integration; mgmt IPs come from either the warm cache (monitor-up firewall Asset rows) or `resolveDeviceMgmtIpViaFmg` for cache-cold/new devices. Cache-cold mgmt-IP resolves now run concurrently across the worker pool (native lane is unbounded) — fresh installs no longer pay the serial-resolve penalty before per-device discovery can start.
 - All FMG-bound calls go through `rpc()`, which inspects the JSON-RPC payload's first param URL and routes to `getFmgWorker(integrationId).submitProxy` (when it's `/sys/proxy/json`) or `submitNative` (every other URL). Per-device direct-FortiGate calls do NOT touch FMG and fan out up to `discoveryParallelism` wide independently of the worker.
 - Transport-level resilience (`rpcInner`/`rpcAttempt`): retries **transient** failures only — HTTP 5xx + network/timeout — up to 2 times with exponential backoff (500ms, 1500ms), serialized INSIDE the FmgWorker lane slot so the proxy lane stays concurrency=1 and a struggling FMG isn't piled on. **Permanent** failures fail fast with no retry: HTTP 401/403/404/405 and the FMG RPC `-11` surfaced by callers. Outward `AppError.httpStatus` stays 502 for every transport fault — the upstream HTTP code is encoded in the message and used only to decide retryability, never re-exposed to Polaris's own clients (a raw 401 would trip the frontend's session-expired logout). An external abort (integration re-saved) short-circuits without retrying. This is a transport-layer policy beneath the discovery callers; do NOT add a second app-level retry loop on top (see `fetchFortigateSysLocation` note).
-- Projected CMDB `get` calls pass `loadsub: 0` to skip child-table loads (FMG API Best Practices Guide), EXCEPT where a child table is intentionally needed: `system/interface` (secondary-ip) and `firewall/vip` (mappedip). Do NOT add a `fields` list to the `/dvmdb/.../device` full-device-record fetch or `system/dhcp/server` — naming restricted fields like `latitude` makes this FMG authorize each field individually and fail the whole query with `-11`.
+- Projected CMDB `get` calls pass `loadsub: 0` to skip child-table loads (FMG API Best Practices Guide), EXCEPT where a child table is intentionally needed: `system/interface` (secondary-ip) and `firewall/vip` (mappedip + realservers — the latter is the Virtual-Server pool consumed by `parseVipServerInfo`). Do NOT add a `fields` list to the `/dvmdb/.../device` full-device-record fetch or `system/dhcp/server` — naming restricted fields like `latitude` makes this FMG authorize each field individually and fail the whole query with `-11`.
 - Parity invariant: both FMG and standalone FortiGate return identical DiscoveryResult shape for sync pipeline compatibility.
 - FortiAP `/api/v2/monitor/wifi/managed_ap` row parsing centralized in `src/utils/fortiapMonitorRow.ts` (`parseFortiapMonitorRow` + `FORTIAP_MONITOR_FORMAT`) — shared with the standalone FortiGate path. Captures IP / MAC (with `board_mac` fallback) / model (with `deriveFortiapModelFromSerial` for blank-model APs) / `apUplinkInterface` (from `wan_status[].interface` then LLDP `local_port`) plus the live telemetry snapshot (`cpu_usage` / `mem_free` / `mem_total` / `sensors_temperatures`) which feeds the AssetSource observed blob and the runtime AP REST telemetry collector.
 - Step 3d.5's detected-device loop additionally builds `switchMacByName: Map<switch_id, mac>` from rows where `is_fortilink_peer===true` and stamps each managed FortiSwitch's `baseMac` field after the AP-attribution pass. Zero extra `/sys/proxy/json` calls — joined from the existing query response, so the FMG proxy lane stays at the same call count. Parity-mirrored in `fortigateService.ts` Chain C.

@@ -344,6 +344,10 @@ code {
   padding: 2px 0;
 }
 .query-status-name {
+  /* block, not inline: text-overflow only truncates non-inline boxes, and the
+     role-review / failed-integration / update panels nest this span inside a
+     plain div (it's a flex item — already blockified — in the queries panel) */
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

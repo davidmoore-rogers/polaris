@@ -28,6 +28,7 @@ import type {
   DiscoveryResult,
   DiscoveryProgressCallback,
 } from "./fortimanagerService.js";
+import { parseVipServerInfo } from "./fortimanagerService.js";
 
 export interface FortiGateConfig {
   host: string;
@@ -858,12 +859,15 @@ export async function discoverDhcpSubnets(
           }
         }
 
+        const { isVirtualServer, realservers } = parseVipServerInfo(vip);
         vips.push({
           device: deviceName,
           name,
           extip,
           mappedips,
           extintf: vip.extintf || "",
+          isVirtualServer,
+          realservers,
         });
         vipCount++;
       }

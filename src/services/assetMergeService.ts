@@ -123,6 +123,7 @@ const ASSET_SELECT = {
   acquiredAt: true,
   warrantyExpiry: true,
   lastSeen: true,
+  lastSeenSource: true,
   tags: true,
   managedAgent: { select: { id: true } },
 } as const;
@@ -175,9 +176,11 @@ export async function mergeAssets(opts: {
   }
 
   // lastSeen — always keep the more recent so the survivor reflects the
-  // ghost's sightings. tags — always union, preserving the canonical order.
+  // ghost's sightings (provenance label travels with it). tags — always
+  // union, preserving the canonical order.
   if (g.lastSeen && (!c.lastSeen || g.lastSeen > c.lastSeen)) {
     update.lastSeen = g.lastSeen;
+    if (g.lastSeenSource) update.lastSeenSource = g.lastSeenSource;
   }
   const cTags = new Set(c.tags);
   const mergedTags = [...c.tags];
