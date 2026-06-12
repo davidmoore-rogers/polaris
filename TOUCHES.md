@@ -954,7 +954,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 **Readers:**
 - `src/services/sampleHistoryService.ts:read*History` — six tier-aware readers, one per source. Detail tier returns raw rows; rollup tiers translate aggregate columns back to source field names so existing chart renderers consume both shapes with no per-tier branching except for counter-rate pre-computation.
 - `src/api/routes/assets.ts` — six `/assets/:id/*-history` endpoints dispatch to the right reader via `pickSampleTierForAsset(assetId, stream, since)` from `sampleQueryRouter`.
-- `src/services/capacityService.ts:projectSteadyStateSize` — enumerates all 18 tables and multiplies retention × rows/asset/day × bytes/row per (stream, tier, default class) for the steady-state footprint projection.
+- `src/services/capacityService.ts:projectSteadyStateSize` — enumerates all 24 tables and multiplies retention × rows/asset/day × bytes/row per (stream, tier, default class) for the steady-state footprint projection.
 
 **Settings store:**
 - `Setting("sampleRetention")` — flat `{stream: {tier: {class: days}}}` shape, 27 numbers total. Defaults 7/30/365. Backed by `src/services/sampleRetentionService.ts` with a 5 s in-process cache (chart endpoints read on every request).

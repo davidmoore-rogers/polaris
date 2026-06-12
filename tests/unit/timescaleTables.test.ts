@@ -77,6 +77,25 @@ describe("timescaleService managed-table inventory", () => {
     expect(unmanaged).toEqual([]);
   });
 
+  it("capacityService's local projection map covers every managed table", () => {
+    // capacityService keeps its own per-table list (entity/tier/countKey) plus
+    // DEFAULT_ROWS_PER_ASSET_PER_DAY / DEFAULT_BYTES_PER_ROW maps. The rows
+    // map is dereferenced WITHOUT a fallback (`DEFAULT_ROWS_PER_ASSET_PER_DAY
+    // [def.name](intervals)`), so a managed table missing there throws inside
+    // the capacity snapshot. The maps use unquoted identifier keys, so match
+    // bare words rather than string literals.
+    const src = readFileSync(join(ROOT, "src", "services", "capacityService.ts"), "utf8");
+    const re = /\basset_[a-z_]+_samples(?:_hourly|_daily)?\b/g;
+    const referenced = new Set<string>();
+    for (const m of src.matchAll(re)) referenced.add(m[0]);
+
+    const missing = ALL_HYPERTABLE_CANDIDATES.filter((t) => !referenced.has(t));
+    expect(missing).toEqual([]);
+
+    const unmanaged = [...referenced].filter((t) => !managed.has(t) && !EXEMPT.has(t)).sort();
+    expect(unmanaged).toEqual([]);
+  });
+
   it("every sample-shaped table in prisma/schema.prisma is Timescale-managed or explicitly exempt", () => {
     const schema = readFileSync(join(ROOT, "prisma", "schema.prisma"), "utf8");
     const re = /@@map\("(asset_[a-z_]+_samples(?:_hourly|_daily)?)"\)/g;
