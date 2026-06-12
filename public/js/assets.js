@@ -3172,7 +3172,8 @@ async function openViewModal(id) {
       viewRow("Last Seen Switch", a.lastSeenSwitch) +
       viewRow("Last Seen AP", a.lastSeenAp) +
       associatedUsersViewHTML(a.associatedUsers) +
-      viewRow("Last Seen", a.lastSeen ? formatDate(a.lastSeen) : null) +
+      viewRow("Last Seen", lastSeenWithSource(a.lastSeen, a.lastSeenSource)) +
+      '<div id="asset-dir-activity-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
       viewRow("Acquired", (a.acquiredAt || a.createdAt) ? formatDate(a.acquiredAt || a.createdAt) : null) +
       viewRow("Warranty Expires", a.warrantyExpiry ? formatDate(a.warrantyExpiry) : null) +
       viewRow("Purchase Order", a.purchaseOrder) +
@@ -3306,6 +3307,23 @@ async function openViewModal(id) {
     if (depMount) {
       depMount.innerHTML = renderDependencyTreeBlock(dependencies, a.id);
       _wireDependencyTreeLinks(depMount);
+    }
+    // Last Directory Activity row (General tab) — freshest entra/intune/ad
+    // AssetSource lastSeen. Deliberately separate from Last Seen: directory
+    // activity (an Intune sync, an AD logon) proves the device is alive, not
+    // that it's on the network. Hidden when the asset has no directory source.
+    var dirMount = document.getElementById("asset-dir-activity-mount-" + a.id);
+    if (dirMount) {
+      var dirActivityMs = 0;
+      (sources || []).forEach(function (s) {
+        if ((s.sourceKind === "entra" || s.sourceKind === "intune" || s.sourceKind === "ad") && s.lastSeen) {
+          var t = new Date(s.lastSeen).getTime();
+          if (t > dirActivityMs) dirActivityMs = t;
+        }
+      });
+      if (dirActivityMs > 0) {
+        dirMount.innerHTML = viewRow("Last Directory Activity", formatDate(new Date(dirActivityMs).toISOString()));
+      }
     }
     // Mount the Polaris Agent panel into the System tab placeholder + wire
     // its buttons. The wiring helper also starts the install-progress
@@ -10462,6 +10480,28 @@ function ipViewRow(asset) {
     : '';
   return '<div class="detail-row"><span class="detail-label">IP Address</span>' +
     '<span class="detail-value mono">' + ipCellHTML(asset) + src + '</span></div>';
+}
+
+// Operator-facing labels for Asset.lastSeenSource — the evidence that
+// produced the current Last Seen value (stamped by the backend's
+// bumpLastSeen). Unknown values render verbatim so new backend sources
+// degrade gracefully.
+var LAST_SEEN_SOURCE_LABELS = {
+  "dhcp-lease":       "DHCP lease",
+  "device-inventory": "FortiGate inventory",
+  "discovery":        "discovery",
+  "agent":            "agent heartbeat",
+  "probe":            "monitor probe",
+  "ping":             "ping",
+  "conflict-accept":  "conflict resolution",
+  "conflict-reject":  "conflict resolution",
+};
+
+function lastSeenWithSource(lastSeen, lastSeenSource) {
+  if (!lastSeen) return null;
+  var s = formatDate(lastSeen);
+  if (lastSeenSource) s += " · via " + (LAST_SEEN_SOURCE_LABELS[lastSeenSource] || lastSeenSource);
+  return s;
 }
 
 function viewRow(label, value, mono, alignRight, copy) {
