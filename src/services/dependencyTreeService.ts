@@ -821,17 +821,22 @@ export async function reconcileDependencySuppression(): Promise<{
   const hostnameById = new Map<string, string | null>();
   for (const a of assets) hostnameById.set(a.id, a.hostname);
 
-  await prisma.$transaction(async tx => {
-    for (const t of transitions) {
-      await tx.asset.update({
-        where: { id: t.id },
-        data: {
-          dependencySuppressed:   t.to,
-          dependencySuppressedAt: t.to ? now : null,
-        },
-      });
-    }
-  });
+  // Two bucketed updateMany calls instead of a per-row update loop: this
+  // runs inside the 60s reconciler tick, and a broad outage can flip
+  // hundreds of assets in one pass (per-row updates at 2000 monitored
+  // assets would hold the transaction open across N round-trips).
+  const suppressIds = transitions.filter((t) => t.to).map((t) => t.id);
+  const resumeIds   = transitions.filter((t) => !t.to).map((t) => t.id);
+  await prisma.$transaction([
+    ...(suppressIds.length ? [prisma.asset.updateMany({
+      where: { id: { in: suppressIds } },
+      data:  { dependencySuppressed: true, dependencySuppressedAt: now },
+    })] : []),
+    ...(resumeIds.length ? [prisma.asset.updateMany({
+      where: { id: { in: resumeIds } },
+      data:  { dependencySuppressed: false, dependencySuppressedAt: null },
+    })] : []),
+  ]);
 
   // Events fire AFTER the DB write so anyone reading on the back of the
   // event sees the new state. Only emit for monitored assets. We `await`
