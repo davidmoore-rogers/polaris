@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
+import { AppError } from "../utils/errors.js";
 
 // Spawn a child process with an explicit argv — no shell — and resolve with
 // its stdout/stderr. Rejects on non-zero exit or timeout.
@@ -61,7 +62,7 @@ function sshCommonOptions(keyPath?: string): string[] {
 // admin smuggle extra sftp commands into the batch.
 function assertSafeSftpPath(p: string, label: string): void {
   if (/["\n\r]/.test(p)) {
-    throw new Error(`${label} may not contain quotes or newlines`);
+    throw new AppError(400, `${label} may not contain quotes or newlines`);
   }
 }
 

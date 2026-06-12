@@ -19,6 +19,7 @@
 
 import { spawn } from "node:child_process";
 import { writeFileSync, mkdirSync, existsSync, chmodSync } from "node:fs";
+import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 
 const WRAPPER_PATH = "/usr/local/sbin/polaris-nginx-apply";
@@ -53,7 +54,7 @@ export async function runNginxApply(
       break;
     case "verify-listening":
       if (!Number.isInteger(cmd.port) || cmd.port < 1 || cmd.port > 65535) {
-        throw new Error(`verify-listening: invalid port ${cmd.port}`);
+        throw new AppError(500, `verify-listening: invalid port ${cmd.port}`);
       }
       args.push("verify-listening", String(cmd.port));
       break;

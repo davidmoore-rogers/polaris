@@ -10,6 +10,7 @@ import { SAML, type SamlConfig, type Profile, ValidateInResponseTo } from "@node
 import { randomBytes } from "node:crypto";
 import { prisma } from "../db.js";
 import { hashPassword } from "../utils/password.js";
+import { AppError } from "../utils/errors.js";
 
 // ─── SSO Settings (stored in Setting table) ─────────────────────────────────
 
@@ -103,10 +104,10 @@ async function getSamlClient(): Promise<SAML> {
 
   const settings = await getSsoSettings();
   if (!settings.idpEntityId || !settings.idpLoginUrl || !settings.idpCertificate) {
-    throw new Error("SAML SSO is not configured");
+    throw new AppError(400, "SAML SSO is not configured");
   }
   if (!settings.spEntityId) {
-    throw new Error("SAML SSO requires an Application URL — set it in Authentication Settings");
+    throw new AppError(400, "SAML SSO requires an Application URL — set it in Authentication Settings");
   }
 
   // Trim trailing slashes without a `/\/+$/` regex (polynomial backtracking
@@ -144,7 +145,7 @@ export async function getSamlLoginUrl(relayState: string): Promise<string> {
 export async function validateSamlResponse(body: Record<string, string>): Promise<Profile> {
   const client = await getSamlClient();
   const { profile } = await client.validatePostResponseAsync(body);
-  if (!profile) throw new Error("SAML assertion validation failed — no profile returned");
+  if (!profile) throw new AppError(401, "SAML assertion validation failed — no profile returned");
   return profile;
 }
 
@@ -179,7 +180,7 @@ export async function findOrProvisionSamlUser(profile: Profile) {
     (profile.nameID as string) ||
     "";
 
-  if (!oid) throw new Error("SAML assertion missing user identifier");
+  if (!oid) throw new AppError(502, "SAML assertion missing user identifier");
 
   // Look up by Azure OID
   const existing = await prisma.user.findUnique({ where: { azureOid: oid }, include: { role: true } });
@@ -216,7 +217,7 @@ export async function findOrProvisionSamlUser(profile: Profile) {
   const placeholderHash = await hashPassword(randomBytes(32).toString("hex"));
   const defaultRole = await prisma.role.findUnique({ where: { name: "readonly" } });
   if (!defaultRole) {
-    throw new Error("SAML auto-provision: built-in 'readonly' role not found — Polaris is mis-seeded");
+    throw new AppError(500, "SAML auto-provision: built-in 'readonly' role not found — Polaris is mis-seeded");
   }
 
   return prisma.user.create({

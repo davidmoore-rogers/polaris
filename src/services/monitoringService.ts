@@ -35,6 +35,7 @@ import { Client as SshClient } from "ssh2";
 
 import { prisma } from "../db.js";
 import { retryOnDeadlock } from "../utils/dbRetry.js";
+import { AppError } from "../utils/errors.js";
 import { addMacAddresses } from "../utils/macAddresses.js";
 import { pingHost } from "../utils/icmpPing.js";
 import { fgRequest, type FortiGateConfig } from "./fortigateService.js";
@@ -1497,10 +1498,10 @@ async function loadSnmpCredentialConfigForFortinetAsset(
     ? (integration.config as Record<string, unknown>)
     : {};
   const credId = typeof intCfg.monitorCredentialId === "string" ? intCfg.monitorCredentialId : null;
-  if (!credId) throw new Error("Transport set to SNMP but no SNMP credential is configured on the asset or integration");
+  if (!credId) throw new AppError(409, "Transport set to SNMP but no SNMP credential is configured on the asset or integration");
   const cred = await prisma.credential.findUnique({ where: { id: credId } });
-  if (!cred) throw new Error("Integration's monitor credential not found");
-  if (cred.type !== "snmp") throw new Error(`Integration's monitor credential must be SNMP (got "${cred.type}")`);
+  if (!cred) throw new AppError(404, "Integration's monitor credential not found");
+  if (cred.type !== "snmp") throw new AppError(409, `Integration's monitor credential must be SNMP (got "${cred.type}")`);
   return (cred.config as Record<string, unknown>) || {};
 }
 
@@ -1903,20 +1904,23 @@ async function fetchFortinetControllerInventory(
         // silently re-enables itself and overruns FMG's session limit."
         if (fmgConfig.useProxy === false) {
           if (!fmgConfig.fortigateApiToken) {
-            throw new Error(
+            throw new AppError(
+              409,
               "Direct mode is enabled (useProxy=false) but no FortiGate API token is configured on the integration. " +
               "Set fortigateApiToken on the integration's Settings tab, or re-enable proxy mode.",
             );
           }
           if (!fmgConfig.mgmtInterface?.trim()) {
-            throw new Error(
+            throw new AppError(
+              409,
               "Direct mode is enabled (useProxy=false) but mgmtInterface is empty. " +
               "Set the FortiGate management interface name (e.g. \"mgmt\", \"port1\") on the integration's Settings tab.",
             );
           }
           const mgmtIp = await resolveControllerMgmtIp(integration.id, deviceName, fmgConfig);
           if (!mgmtIp) {
-            throw new Error(
+            throw new AppError(
+              502,
               `Direct mode: could not resolve ${deviceName}'s management IP ` +
               `(not found in Polaris asset inventory or FMG CMDB interface "${fmgConfig.mgmtInterface || "mgmt"}").`,
             );
@@ -1943,7 +1947,7 @@ async function fetchFortinetControllerInventory(
       } else if (integration.type === "fortigate") {
         rawRows = await fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
       } else {
-        throw new Error(`Unsupported integration type for Fortinet controller probe: ${integration.type}`);
+        throw new AppError(500, `Unsupported integration type for Fortinet controller probe: ${integration.type}`);
       }
 
       const rows: unknown[] = Array.isArray(rawRows)
@@ -2049,10 +2053,10 @@ async function fetchFortinetWifiClients(
         const fmgConfig = integration.config as unknown as FortiManagerConfig;
         if (fmgConfig.useProxy === false) {
           if (!fmgConfig.fortigateApiToken || !fmgConfig.mgmtInterface?.trim()) {
-            throw new Error("Direct-mode prerequisites missing for wifi/client fetch");
+            throw new AppError(409, "Direct-mode prerequisites missing for wifi/client fetch");
           }
           const mgmtIp = await resolveControllerMgmtIp(integration.id, deviceName, fmgConfig);
-          if (!mgmtIp) throw new Error(`Could not resolve ${deviceName}'s management IP`);
+          if (!mgmtIp) throw new AppError(502, `Could not resolve ${deviceName}'s management IP`);
           const directConfig: FortiGateConfig = {
             host: mgmtIp,
             port: 443,
@@ -2073,7 +2077,7 @@ async function fetchFortinetWifiClients(
       } else if (integration.type === "fortigate") {
         rawRows = await fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
       } else {
-        throw new Error(`Unsupported integration type for wifi/client fetch: ${integration.type}`);
+        throw new AppError(500, `Unsupported integration type for wifi/client fetch: ${integration.type}`);
       }
 
       const rows: unknown[] = Array.isArray(rawRows)
@@ -2272,10 +2276,10 @@ async function fetchFortiswitchControllerPortsCmdb(
         const fmgConfig = integration.config as unknown as FortiManagerConfig;
         if (fmgConfig.useProxy === false) {
           if (!fmgConfig.fortigateApiToken || !fmgConfig.mgmtInterface?.trim()) {
-            throw new Error("Direct-mode prerequisites missing for FortiSwitch CMDB ports fetch");
+            throw new AppError(409, "Direct-mode prerequisites missing for FortiSwitch CMDB ports fetch");
           }
           const mgmtIp = await resolveControllerMgmtIp(integration.id, deviceName, fmgConfig);
-          if (!mgmtIp) throw new Error(`Could not resolve ${deviceName}'s management IP`);
+          if (!mgmtIp) throw new AppError(502, `Could not resolve ${deviceName}'s management IP`);
           const directConfig: FortiGateConfig = {
             host: mgmtIp,
             port: 443,
@@ -2296,7 +2300,7 @@ async function fetchFortiswitchControllerPortsCmdb(
       } else if (integration.type === "fortigate") {
         rawRows = await fgRequest<unknown>(integration.config as unknown as FortiGateConfig, "GET", path, { timeoutMs });
       } else {
-        throw new Error(`Unsupported integration type for FortiSwitch CMDB ports fetch: ${integration.type}`);
+        throw new AppError(500, `Unsupported integration type for FortiSwitch CMDB ports fetch: ${integration.type}`);
       }
 
       const rows: unknown[] = Array.isArray(rawRows)
@@ -2594,7 +2598,7 @@ function mapSnmpAuthProtocol(value: unknown): unknown {
     case "SHA256": return snmp.AuthProtocols.sha256;
     case "SHA384": return snmp.AuthProtocols.sha384;
     case "SHA512": return snmp.AuthProtocols.sha512;
-    default: throw new Error(`Unsupported SNMP v3 authProtocol "${String(value)}"`);
+    default: throw new AppError(400, `Unsupported SNMP v3 authProtocol "${String(value)}"`);
   }
 }
 
@@ -2604,7 +2608,7 @@ function mapSnmpPrivProtocol(value: unknown): unknown {
     case "AES":     return snmp.PrivProtocols.aes;
     case "AES256B": return snmp.PrivProtocols.aes256b;
     case "AES256R": return snmp.PrivProtocols.aes256r;
-    default: throw new Error(`Unsupported SNMP v3 privProtocol "${String(value)}"`);
+    default: throw new AppError(400, `Unsupported SNMP v3 privProtocol "${String(value)}"`);
   }
 }
 
@@ -3402,7 +3406,7 @@ export async function collectHardwareSensors(assetId: string): Promise<Collectio
         return await collectHardwareSensorsFortiapRest(asset, integration as any, timeoutMs);
       }
       const fg = buildFortinetConfig(targetIp, integration as any);
-      if ("error" in fg) throw new Error(fg.error);
+      if ("error" in fg) throw new AppError(409, fg.error);
       const data = await collectHardwareSensorsFortinet(fg, timeoutMs);
       return { supported: true, data };
     }
@@ -3974,7 +3978,7 @@ function buildFortinetConfig(host: string, integration: { type: string; config: 
 
 async function collectTelemetryFortinet(host: string, integration: { type: string; config: Record<string, unknown> }, timeoutMs?: number): Promise<TelemetrySample> {
   const fg = buildFortinetConfig(host, integration);
-  if ("error" in fg) throw new Error(fg.error);
+  if ("error" in fg) throw new AppError(409, fg.error);
 
   // /api/v2/monitor/system/resource/usage returns a `results` object keyed by
   // resource name (cpu, mem, disk, session, ...). Each entry can be either an
@@ -4074,7 +4078,7 @@ async function collectSystemInfoFortinet(
   opts: { includeIpsec?: boolean; includeLldp?: boolean; includeSdwan?: boolean; timeoutMs?: number } = {},
 ): Promise<SystemInfoSample> {
   const fg = buildFortinetConfig(host, integration);
-  if ("error" in fg) throw new Error(fg.error);
+  if ("error" in fg) throw new AppError(409, fg.error);
   const timeoutMs = opts.timeoutMs;
 
   // Fan out every independent FortiOS REST call in parallel. The merge logic
@@ -4313,7 +4317,7 @@ export async function collectLldpOnlyFortinet(
   timeoutMs?: number,
 ): Promise<LldpNeighborSample[] | undefined> {
   const fg = buildFortinetConfig(host, integration);
-  if ("error" in fg) throw new Error(fg.error);
+  if ("error" in fg) throw new AppError(409, fg.error);
   return await collectLldpNeighborsFortinet(fg, timeoutMs).catch(() => undefined);
 }
 

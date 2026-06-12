@@ -46,6 +46,7 @@
 
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
+import { AppError } from "../utils/errors.js";
 import { setEnvVar } from "../utils/envFile.js";
 import { getMonitorWorkHistogramValues, type HistogramBucketValue } from "../metrics.js";
 import { setQueueMode, isPgbossInstalled, QUEUE_NAMES } from "./queueService.js";
@@ -1168,10 +1169,10 @@ export async function stageAdvisorState(
       if (r.applyMode === "queue-mode-endpoint") {
         const mode = String(r.recommended) as "cursor" | "pgboss";
         if (mode !== "cursor" && mode !== "pgboss") {
-          throw new Error(`invalid queue mode: ${mode}`);
+          throw new AppError(500, `invalid queue mode: ${mode}`);
         }
         if (mode === "pgboss" && !isPgbossInstalled()) {
-          throw new Error("pg-boss is not installed in this build");
+          throw new AppError(409, "pg-boss is not installed in this build");
         }
         await setQueueMode(mode);
         results.push({
@@ -1182,7 +1183,7 @@ export async function stageAdvisorState(
         });
       } else if (r.applyMode === "env") {
         const envName = ENV_KEY_MAP[key];
-        if (!envName) throw new Error(`no env mapping for ${key}`);
+        if (!envName) throw new AppError(500, `no env mapping for ${key}`);
         setEnvVar(envName, String(r.recommended));
         results.push({
           key,

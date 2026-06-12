@@ -646,7 +646,7 @@ interface SshInstallParams {
 
 async function sshInstall(p: SshInstallParams): Promise<void> {
   if (p.testOverrides?.fakeSshSucceed) return;
-  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+  if (p.testOverrides?.fakeSshFail) throw new AppError(502, p.testOverrides.fakeSshFail);
 
   await withSshClient(p.host, p.cred, async (client) => {
     // 1. SFTP upload binary + installer script to /tmp.
@@ -661,7 +661,7 @@ async function sshInstall(p: SshInstallParams): Promise<void> {
     //    password the install hangs; the timeout below trips it.
     const out = await sshExec(client, "sudo -n bash /tmp/polaris-agent-install.sh", 60_000);
     if (out.exitCode !== 0) {
-      throw new Error(`Installer exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
+      throw new AppError(502, `Installer exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
     }
   });
 }
@@ -675,13 +675,13 @@ interface SshUninstallParams {
 
 async function sshUninstall(p: SshUninstallParams): Promise<void> {
   if (p.testOverrides?.fakeSshSucceed) return;
-  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+  if (p.testOverrides?.fakeSshFail) throw new AppError(502, p.testOverrides.fakeSshFail);
 
   await withSshClient(p.host, p.cred, async (client) => {
     await sftpPut(client, "/tmp/polaris-agent-uninstall.sh", uninstallerScript(p.platform), 0o700);
     const out = await sshExec(client, "sudo -n bash /tmp/polaris-agent-uninstall.sh", 60_000);
     if (out.exitCode !== 0) {
-      throw new Error(`Uninstaller exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
+      throw new AppError(502, `Uninstaller exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
     }
   });
 }
@@ -1117,7 +1117,7 @@ interface WinRmUninstallParams {
 
 async function winrmInstall(p: WinRmInstallParams): Promise<void> {
   if (p.testOverrides?.fakeSshSucceed) return; // tests reuse the same flag for both transports
-  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+  if (p.testOverrides?.fakeSshFail) throw new AppError(502, p.testOverrides.fakeSshFail);
 
   const conn = winrmConnectionFromCred(p.host, p.cred);
 
@@ -1142,13 +1142,13 @@ async function winrmInstall(p: WinRmInstallParams): Promise<void> {
     "-EncodedCommand", encoded,
   ]);
   if (out.exitCode !== 0) {
-    throw new Error(`Windows installer exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
+    throw new AppError(502, `Windows installer exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
   }
 }
 
 async function winrmUninstall(p: WinRmUninstallParams): Promise<void> {
   if (p.testOverrides?.fakeSshSucceed) return;
-  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+  if (p.testOverrides?.fakeSshFail) throw new AppError(502, p.testOverrides.fakeSshFail);
 
   const conn = winrmConnectionFromCred(p.host, p.cred);
   const encoded = Buffer.from(WINDOWS_UNINSTALL_PS, "utf16le").toString("base64");
@@ -1157,7 +1157,7 @@ async function winrmUninstall(p: WinRmUninstallParams): Promise<void> {
     "-EncodedCommand", encoded,
   ]);
   if (out.exitCode !== 0) {
-    throw new Error(`Windows uninstaller exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
+    throw new AppError(502, `Windows uninstaller exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
   }
 }
 
@@ -1211,7 +1211,7 @@ interface SshWindowsUpgradeParams {
 
 async function sshWindowsInstall(p: SshWindowsInstallParams): Promise<void> {
   if (p.testOverrides?.fakeSshSucceed) return;
-  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+  if (p.testOverrides?.fakeSshFail) throw new AppError(502, p.testOverrides.fakeSshFail);
 
   const confB64 = Buffer.from(p.agentConfBody, "utf8").toString("base64");
   const ps = WINDOWS_INSTALL_PS
@@ -1224,13 +1224,13 @@ async function sshWindowsInstall(p: SshWindowsInstallParams): Promise<void> {
 
 async function sshWindowsUninstall(p: SshWindowsUninstallParams): Promise<void> {
   if (p.testOverrides?.fakeSshSucceed) return;
-  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+  if (p.testOverrides?.fakeSshFail) throw new AppError(502, p.testOverrides.fakeSshFail);
   await runPowerShellOverSsh(p.host, p.cred, WINDOWS_UNINSTALL_PS, "polaris-agent-uninstall.ps1", 60_000);
 }
 
 async function sshWindowsUpgrade(p: SshWindowsUpgradeParams): Promise<void> {
   if (p.testOverrides?.fakeSshSucceed) return;
-  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+  if (p.testOverrides?.fakeSshFail) throw new AppError(502, p.testOverrides.fakeSshFail);
 
   const ps = WINDOWS_UPGRADE_PS
     .replace(/__SERVER_URL__/g,       p.serverUrl)
@@ -1261,7 +1261,7 @@ async function runPowerShellOverSsh(
     await sftpPut(client, remotePath, body, 0o600);
     const out = await sshExec(client, cmd, timeoutMs);
     if (out.exitCode !== 0) {
-      throw new Error(`PowerShell exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
+      throw new AppError(502, `PowerShell exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
     }
     // Best-effort cleanup. Not fatal if it fails (Windows\Temp is fair game
     // for orphans, and an admin re-run will overwrite the file anyway).
@@ -1275,7 +1275,7 @@ function winrmConnectionFromCred(host: string, config: Record<string, unknown>):
   const username = String(config.username || "");
   const password = String(config.password || "");
   if (!username || !password) {
-    throw new Error("WinRM credential is missing username or password");
+    throw new AppError(400, "WinRM credential is missing username or password");
   }
   return {
     host,
@@ -1522,14 +1522,14 @@ interface SshUpgradeParams {
 
 async function sshUpgrade(p: SshUpgradeParams): Promise<void> {
   if (p.testOverrides?.fakeSshSucceed) return;
-  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+  if (p.testOverrides?.fakeSshFail) throw new AppError(502, p.testOverrides.fakeSshFail);
 
   await withSshClient(p.host, p.cred, async (client) => {
     await sftpPut(client, "/tmp/polaris-agent.new",         p.binaryBytes, 0o755);
     await sftpPut(client, "/tmp/polaris-agent-upgrade.sh",  upgradeScript(p.platform), 0o700);
     const out = await sshExec(client, "sudo -n bash /tmp/polaris-agent-upgrade.sh", 60_000);
     if (out.exitCode !== 0) {
-      throw new Error(`Upgrade exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
+      throw new AppError(502, `Upgrade exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
     }
   });
 }
@@ -1545,7 +1545,7 @@ interface WinRmUpgradeParams {
 
 async function winrmUpgrade(p: WinRmUpgradeParams): Promise<void> {
   if (p.testOverrides?.fakeSshSucceed) return;
-  if (p.testOverrides?.fakeSshFail) throw new Error(p.testOverrides.fakeSshFail);
+  if (p.testOverrides?.fakeSshFail) throw new AppError(502, p.testOverrides.fakeSshFail);
 
   const conn = winrmConnectionFromCred(p.host, p.cred);
   const ps = WINDOWS_UPGRADE_PS
@@ -1558,7 +1558,7 @@ async function winrmUpgrade(p: WinRmUpgradeParams): Promise<void> {
     "-EncodedCommand", encoded,
   ]);
   if (out.exitCode !== 0) {
-    throw new Error(`Windows upgrade exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
+    throw new AppError(502, `Windows upgrade exited ${out.exitCode}: ${truncate(out.stderr || out.stdout, 400)}`);
   }
 }
 

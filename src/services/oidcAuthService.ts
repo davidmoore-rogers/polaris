@@ -19,6 +19,7 @@
 
 import * as client from "openid-client";
 import { prisma } from "../db.js";
+import { AppError } from "../utils/errors.js";
 import { provisionExternalUser } from "./ssoProvisioning.js";
 
 export interface OidcSettings {
@@ -69,7 +70,7 @@ export async function getOidcSettings(): Promise<OidcSettings> {
 export function getRedirectUri(): string {
   const base = (process.env.POLARIS_PUBLIC_URL || "").trim().replace(/\/+$/, "");
   if (!base) {
-    throw new Error("POLARIS_PUBLIC_URL must be set for OIDC login (it derives the redirect URI).");
+    throw new AppError(400, "POLARIS_PUBLIC_URL must be set for OIDC login (it derives the redirect URI).");
   }
   return `${base}${CALLBACK_PATH}`;
 }
@@ -124,7 +125,7 @@ async function getConfig(): Promise<client.Configuration> {
   if (_config) return _config;
   const s = await getOidcSettings();
   if (!s.discoveryUrl || !s.clientId || !s.clientSecret) {
-    throw new Error("OIDC is not configured");
+    throw new AppError(400, "OIDC is not configured");
   }
   _config = await client.discovery(issuerUrl(s.discoveryUrl), s.clientId, s.clientSecret);
   return _config;
@@ -189,7 +190,7 @@ export async function handleCallback(
 
   const idClaims = (tokens.claims() ?? {}) as Record<string, unknown>;
   const sub = String(idClaims.sub || "");
-  if (!sub) throw new Error("OIDC ID token missing `sub` claim");
+  if (!sub) throw new AppError(502, "OIDC ID token missing `sub` claim");
 
   // Groups + profile claims may live in userinfo rather than the ID token.
   // Merge userinfo when an access token is present (best-effort).

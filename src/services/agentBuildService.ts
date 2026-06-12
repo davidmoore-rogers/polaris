@@ -29,6 +29,7 @@ import { mkdir, rename, writeFile, stat, readdir, rm } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 import { AGENT_BIN_DIR, STATE_DIR } from "../utils/paths.js";
+import { AppError } from "../utils/errors.js";
 import { getAgentVersion, getAgentSourceDir } from "../utils/version.js";
 import { logEvent } from "../api/routes/events.js";
 import { logger } from "../utils/logger.js";
@@ -506,7 +507,7 @@ function gcFinishedStates(): void {
 async function doRun(state: BuildState): Promise<void> {
   const agentSourceDir = getAgentSourceDir();
   if (!agentSourceDir) {
-    throw new Error("agent/ source directory not found — is the release tarball complete?");
+    throw new AppError(500, "agent/ source directory not found — is the release tarball complete?");
   }
 
   // Phase: preparing
@@ -561,7 +562,7 @@ async function doRun(state: BuildState): Promise<void> {
       // distinguish it from a real failure (state.phase → cancelled vs
       // failed, different event severity).
       if (err instanceof CancelledError) throw err;
-      throw new Error(`go build failed for ${os}/${arch}: ${step.error}`);
+      throw new AppError(500, `go build failed for ${os}/${arch}: ${step.error}`);
     }
   }
 

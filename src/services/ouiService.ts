@@ -10,6 +10,7 @@
 
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
+import { AppError } from "../utils/errors.js";
 
 const OUI_CSV_URL = "https://standards-oui.ieee.org/oui/oui.csv";
 const SETTING_KEY = "oui_database";
@@ -122,7 +123,7 @@ export async function refreshOuiDatabase(): Promise<{ entries: number; sizeKb: n
   let csv: string;
   try {
     const res = await fetch(OUI_CSV_URL, { signal: controller.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    if (!res.ok) throw new AppError(502, `HTTP ${res.status}: ${res.statusText}`);
     csv = await res.text();
   } finally {
     clearTimeout(timer);
@@ -208,7 +209,7 @@ export async function setOuiOverride(
   device?: string,
 ): Promise<OuiOverride> {
   const normalized = normalizeMacPrefix(prefixInput + ":00:00:00"); // pad so normalizer works
-  if (!normalized) throw new Error("Invalid MAC prefix");
+  if (!normalized) throw new AppError(400, "Invalid MAC prefix");
   await ensureOverridesLoaded();
   const entry: OverrideEntry = { manufacturer };
   if (device) entry.device = device;
@@ -224,7 +225,7 @@ export async function setOuiOverride(
  */
 export async function deleteOuiOverride(prefixInput: string): Promise<void> {
   const normalized = normalizeMacPrefix(prefixInput + ":00:00:00");
-  if (!normalized) throw new Error("Invalid MAC prefix");
+  if (!normalized) throw new AppError(400, "Invalid MAC prefix");
   await ensureOverridesLoaded();
   _overridesMap.delete(normalized);
   await persistOverrides();

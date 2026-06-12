@@ -18,6 +18,7 @@
 
 import { randomBytes } from "node:crypto";
 import { prisma } from "../db.js";
+import { AppError } from "../utils/errors.js";
 import { hashPassword } from "../utils/password.js";
 import { resolveGroupsToAccess, normalizeGroupKey } from "./groupMappingService.js";
 
@@ -60,7 +61,7 @@ function normalizeGroupList(provider: string, groups: string[]): string[] {
  */
 export async function provisionExternalUser(profile: ExternalUserProfile) {
   const { provider, externalIdField, externalId } = profile;
-  if (!externalId) throw new Error(`${provider} login: missing stable user identifier`);
+  if (!externalId) throw new AppError(502, `${provider} login: missing stable user identifier`);
 
   const access = await resolveGroupsToAccess(provider, profile.groups);
   const ssoGroups = normalizeGroupList(provider, profile.groups);
@@ -104,7 +105,7 @@ export async function provisionExternalUser(profile: ExternalUserProfile) {
   if (!roleId) {
     const readonly = await prisma.role.findUnique({ where: { name: "readonly" } });
     if (!readonly) {
-      throw new Error(`${provider} auto-provision: built-in 'readonly' role not found — Polaris is mis-seeded`);
+      throw new AppError(500, `${provider} auto-provision: built-in 'readonly' role not found — Polaris is mis-seeded`);
     }
     roleId = readonly.id;
   }

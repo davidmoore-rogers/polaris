@@ -21,6 +21,7 @@
 
 import { type Entry } from "ldapts";
 import { prisma } from "../db.js";
+import { AppError } from "../utils/errors.js";
 import {
   withBoundLdapClient,
   escapeLdapFilterValue,
@@ -168,9 +169,9 @@ export interface LdapAuthResult {
  */
 export async function authenticateLdapUser(username: string, password: string): Promise<LdapAuthResult> {
   // SECURITY: reject empty password before binding (unauthenticated-bind trap).
-  if (!password) throw new Error("Password is required");
+  if (!password) throw new AppError(401, "Password is required");
   const s = await getLdapSettings();
-  if (!s.enabled || !s.url || !s.bindDn || !s.searchBase) throw new Error("LDAP is not configured");
+  if (!s.enabled || !s.url || !s.bindDn || !s.searchBase) throw new AppError(400, "LDAP is not configured");
 
   const idAttr = s.userIdAttribute || "objectGUID";
   const idAttrLc = idAttr.toLowerCase();
@@ -191,10 +192,10 @@ export async function authenticateLdapUser(username: string, password: string): 
     if (searchEntries.length !== 1) return null;
     return searchEntries[0];
   });
-  if (!entry) throw new Error("Invalid username or password");
+  if (!entry) throw new AppError(401, "Invalid username or password");
 
   const userDn = String(entry.dn || "");
-  if (!userDn) throw new Error("LDAP entry has no DN");
+  if (!userDn) throw new AppError(502, "LDAP entry has no DN");
 
   // Phase 2: re-bind AS the user with the supplied password (fresh client) to
   // verify credentials. A failed bind throws → caught by the caller.
