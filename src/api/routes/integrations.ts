@@ -23,7 +23,7 @@ import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
 import { logEvent } from "./events.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
-import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
+import { clampAcquiredToLastSeen, bumpLastSeen } from "../../utils/assetInvariants.js";
 import { recordSample, getBaselines, type Baseline } from "../../services/discoveryDurationService.js";
 import { isPgbossRunning, publishDiscoveryJob } from "../../services/queueService.js";
 import {
@@ -47,6 +47,7 @@ import { getAdMonitorProtocol, invalidateMonitorSettingsCache } from "../../serv
 import * as autoMonitor from "../../services/autoMonitorInterfacesService.js";
 import * as autoMonitorStorage from "../../services/autoMonitorStorageService.js";
 import * as agentAutoDeploy from "../../services/agentAutoDeployService.js";
+import * as presenceVerification from "../../services/presenceVerificationService.js";
 import { recomputeDependencyTree } from "../../services/dependencyTreeService.js";
 import { reconcileMapRegions } from "../../services/mapRegionService.js";
 import {
@@ -648,6 +649,11 @@ const EntraIdConfigSchema = z.object({
   enableIntune:  z.boolean().optional().default(false),
   deviceInclude: z.array(z.string()).optional().default([]),
   deviceExclude: z.array(z.string()).optional().default([]),
+  // Post-sync network-presence verification (agent/probe signals + ICMP
+  // fallback) — keeps Asset.lastSeen honest now that directory timestamps
+  // no longer write it. Default ON (read-only against the targets); see
+  // src/services/presenceVerificationService.ts.
+  verifyPresence: z.boolean().optional().default(true),
   workstationMonitor: WorkstationServerClassMonitorSchema,
   serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
@@ -668,6 +674,8 @@ const ActiveDirectoryConfigSchema = z.object({
   ouInclude:       z.array(z.string()).optional().default([]),
   ouExclude:       z.array(z.string()).optional().default([]),
   includeDisabled: z.boolean().optional().default(true),
+  // Post-sync network-presence verification — see EntraIdConfigSchema note.
+  verifyPresence:  z.boolean().optional().default(true),
   workstationMonitor: WorkstationServerClassMonitorSchema,
   serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
@@ -2165,6 +2173,23 @@ export async function runDiscovery(integrationId: string, actor: string): Promis
       // 2) Interface + storage auto-monitor — pin whatever samples exist now
       //    (strictly additive, self-healing across cycles).
       await applyWorkstationServerAutoMonitor(integrationId, integrationName, config, actor);
+      // 3) Network-presence verification — directory timestamps no longer
+      //    write Asset.lastSeen, so this pass establishes presence from
+      //    agent-heartbeat / monitor-probe signals with an ICMP fallback.
+      //    Read-only against the targets; default on (config.verifyPresence).
+      if ((config as Record<string, unknown>).verifyPresence !== false) {
+        await presenceVerification
+          .runPresenceVerification({
+            integrationId,
+            integrationName,
+            pollIntervalHours: integration.pollInterval,
+            actor,
+            signal: ac.signal,
+          })
+          .catch((err: any) => {
+            logEvent({ action: "integration.presence_verification.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `Presence verification failed for "${integrationName}": ${err?.message || "Unknown error"}` });
+          });
+      }
     }
 
     if (ac.signal.aborted) {
@@ -3782,11 +3807,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // sysLocation string is captured separately on Asset.snmpLocation
           // and surfaced on the details General tab.
           learnedLocation: memberDevice.hostname || fgHostname || existingAsset.learnedLocation,
-          lastSeen: new Date(now),
           fortinetTopology: memberTopology,
           discoveredByIntegrationId: integrationId,
           ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
         };
+        // A firewall reaching this branch answered the FMG/REST queries that
+        // produced this payload — that response is the presence evidence.
+        bumpLastSeen(updateData, existingAsset, new Date(now), "discovery");
         // Discovery-owned fields from projection.
         if (fwProjected.hostname !== null) updateData.hostname = fwProjected.hostname;
         if (fwProjected.model !== null) updateData.model = fwProjected.model;
@@ -3961,6 +3988,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           learnedLocation: memberDevice.hostname || fgHostname,
           osVersion: fwCreateProjected.osVersion,
           lastSeen: new Date(now),
+          lastSeenSource: "discovery",
           // Stamp the discovering integration. The polling-method resolver
           // picks the source default (REST API for fortimanager / fortigate)
           // unless an operator overrides per-asset on the Monitoring tab.
@@ -4213,13 +4241,23 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         );
 
         const updateData: Record<string, unknown> = {
-          status: swStatus,
-          ...(swStatus !== existingAsset.status ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
-          lastSeen: new Date(now),
+          // Resurrection of a decommissioned switch requires it to be
+          // connected right now; ordinary active↔storage state sync is
+          // unaffected.
+          ...(existingAsset.status !== "decommissioned" || sw.connected
+            ? {
+                status: swStatus,
+                ...(swStatus !== existingAsset.status ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
+              }
+            : {}),
           fortinetTopology: swTopology,
           ...(acquiredAtUpdate ? { acquiredAt: acquiredAtUpdate } : {}),
           ...buildClassMonitorStamp(switchMonitorCfg, existingAsset),
         };
+        // Presence gate: the managed-switch table includes FortiLink-
+        // configured switches that are currently offline (status !=
+        // "Connected"). Only a connected switch is evidence it's on the wire.
+        if (sw.connected) bumpLastSeen(updateData, existingAsset, new Date(now), "discovery");
         // Correct assetType when an existing asset was created via a different
         // pathway (device-inventory, DHCP) before FortiSwitch discovery linked
         // up. Without this, the asset stays "other" forever and the endpoint
@@ -4273,7 +4311,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           await reconcileMacAddresses(existingAsset.id, swMacListForReconcile);
         }
         if (sw.ipAddress) existingAsset.ipAddress = sw.ipAddress;
-        if (reactivate) existingAsset.status = swStatus;
+        if (reactivate && sw.connected) existingAsset.status = swStatus;
         assetIdx.reindex(existingAsset);
         assetNames.push(`${sw.name} (updated${reactivate ? " — reactivated" : ""})`);
       } else {
@@ -4310,7 +4348,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           ...buildClassMonitorStamp(switchMonitorCfg),
           learnedLocation: swCreateProjected.learnedLocation,
           acquiredAt: swJoinDate,
-          lastSeen: new Date(now),
+          ...(sw.connected ? { lastSeen: new Date(now), lastSeenSource: "discovery" } : {}),
           fortinetTopology: swTopology,
           notes: swNotes,
           tags: ["fortiswitch", "auto-discovered"],
@@ -4407,6 +4445,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         meshUplink: ap.meshUplink ?? null,
         parentApSerial: ap.parentApSerial ?? null,
       };
+      // Presence gate: the managed-AP table includes configured-but-offline
+      // WTPs. FortiOS reports status "connected" for online APs; firmware
+      // variants that omit the field get the benefit of the doubt so a
+      // payload quirk doesn't silently freeze lastSeen for a whole fleet.
+      const apOnline = !ap.status || /^connected$/i.test(ap.status.trim());
       if (existingAsset) {
         // Phase 3b.1 cutover: projection-driven discovery fields.
         if (ap.serial) {
@@ -4431,11 +4474,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         );
 
         const updateData: Record<string, unknown> = {
-          lastSeen: new Date(now),
           fortinetTopology: apTopology,
-          ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
+          // Resurrection, like the lastSeen bump below, requires the AP to
+          // be connected — an offline WTP entry must not undo a decommission.
+          ...(existingAsset.status === "decommissioned" && apOnline ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
           ...buildClassMonitorStamp(apMonitorCfg, existingAsset),
         };
+        if (apOnline) bumpLastSeen(updateData, existingAsset, new Date(now), "discovery");
         // Mirror the resolved wired-uplink switch/port (from LLDP first, then
         // the detected-device MAC table fallback) into `lastSeenSwitch` so the
         // asset details panel shows where the AP is plugged in. Same
@@ -4470,7 +4515,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         clampAcquiredToLastSeen(updateData, existingAsset);
         await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
         if (resolvedIp) existingAsset.ipAddress = resolvedIp;
-        if (existingAsset.status === "decommissioned") existingAsset.status = "active";
+        if (existingAsset.status === "decommissioned" && apOnline) existingAsset.status = "active";
         assetIdx.reindex(existingAsset);
         assetNames.push(`${ap.name} (updated)`);
       } else {
@@ -4498,7 +4543,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             statusChangedBy: integrationLabel,
             osVersion: apCreateProjected.osVersion,
             learnedLocation: apCreateProjected.learnedLocation,
-            lastSeen: new Date(now),
+            ...(apOnline ? { lastSeen: new Date(now), lastSeenSource: "discovery" } : {}),
             fortinetTopology: apTopology,
             ...(ap.peerSwitch && ap.peerPort ? { lastSeenSwitch: `${ap.peerSwitch}/${ap.peerPort}` } : {}),
             ...buildClassMonitorStamp(apMonitorCfg),
@@ -5451,10 +5496,18 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // reconcile call inside batchSettled, not as a JSON column write.
       const updateData: Record<string, unknown> = {
         macAddress: macList[0].mac,
-        status: "active",
-        ...(asset.status !== "active" ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
-        lastSeen: new Date(now),
+        // Presence gate: dhcp-lease rows are currently-held leases and
+        // seenLeased marks static reservations confirmed actively held. A
+        // reservation whose target is offline is config, not presence — it
+        // neither bumps lastSeen nor flips the asset's status.
+        ...(entry.seenLeased
+          ? {
+              status: "active",
+              ...(asset.status !== "active" ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
+            }
+          : {}),
       };
+      if (entry.seenLeased) bumpLastSeen(updateData, asset, new Date(now), "dhcp-lease");
       if (!isInfraAsset) {
         updateData.ipAddress = entry.ipAddress;
         updateData.ipSource = entry.device || integrationType;
@@ -5473,8 +5526,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         asset.ipAddress = entry.ipAddress;
         if (entry.device) asset.learnedLocation = entry.device;
       }
-      asset.status = "active";
-      asset.lastSeen = now;
+      if (entry.seenLeased) asset.status = "active";
+      if (updateData.lastSeen) asset.lastSeen = updateData.lastSeen;
       assetIdx.reindex(asset);
 
       // Queue reservation cross-update (in-memory lookup, no DB query).
@@ -5638,9 +5691,21 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         : null;
       const apConn = inv.apName || null;
 
+      // Presence evidence is the FortiGate's own per-client last_seen — NOT
+      // the discovery-run time. FortiOS keeps remembered-but-offline clients
+      // in this inventory (bounded by inventoryMaxAgeHours), so stamping
+      // `now` would freshen devices that left the network days ago. An
+      // is_online client is on the wire right now → evidence is `now`.
+      const invSeenAt = inv.isOnline ? new Date(now) : new Date(inv.lastSeen);
+      const invSeenValid = !Number.isNaN(invSeenAt.getTime());
+
       if (existingAsset) {
-        const updateData: Record<string, unknown> = { lastSeen: new Date(now) };
-        if (existingAsset.status === "decommissioned") {
+        const updateData: Record<string, unknown> = {};
+        if (invSeenValid) bumpLastSeen(updateData, existingAsset, invSeenAt, "device-inventory");
+        // Resurrection requires the device to be online right now — a
+        // remembered-but-offline inventory row must not undo an operator's
+        // (or the stale-sweep's) decommission.
+        if (existingAsset.status === "decommissioned" && inv.isOnline) {
         updateData.status = "active";
         updateData.statusChangedAt = new Date(now);
         updateData.statusChangedBy = integrationLabel;
@@ -5754,7 +5819,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
               lastSeenSwitch: switchConn,
               lastSeenAp: apConn,
               associatedUsers: userList,
-              lastSeen: new Date(now),
+              // Honest timestamp on create too — the FortiGate's per-client
+              // last_seen, or `now` only when the client is online right now.
+              lastSeen: invSeenValid ? invSeenAt : null,
+              ...(invSeenValid ? { lastSeenSource: "device-inventory" } : {}),
               notes: `Auto-discovered from FortiGate device inventory (${inv.device})`,
               tags: ["device-inventory", "auto-discovered"],
             },
@@ -6557,6 +6625,15 @@ async function buildEntraSyncIndex(
    * pattern after Phase 4d cut the assetTag write path.
    */
   entraDeviceIdByAssetId: Map<string, string>;
+  /**
+   * Asset id → freshest directory-activity timestamp (epoch ms) across the
+   * asset's entra/intune source rows (AssetSource.lastSeen carries the
+   * Graph-reported lastSyncDateTime/approximateLastSignInDateTime). The
+   * duplicate-registration auto-resolve compares directory activity against
+   * directory activity — Asset.lastSeen is verified network presence now
+   * and no longer the right operand.
+   */
+  directoryActivityByAssetId: Map<string, number>;
 }> {
   const assetById = new Map<string, any>();
   for (const a of allAssets) assetById.set(a.id, a);
@@ -6570,6 +6647,7 @@ async function buildEntraSyncIndex(
   const assetIdsWithEntraSource = new Set<string>();
   const assetIdsWithAdSource = new Set<string>();
   const entraDeviceIdByAssetId = new Map<string, string>();
+  const directoryActivityByAssetId = new Map<string, number>();
 
   for (const src of sources) {
     const obs = (src.observed as Record<string, unknown> | null) || {};
@@ -6581,6 +6659,10 @@ async function buildEntraSyncIndex(
       // externalId namespace so we don't double-stamp.
       if (!entraDeviceIdByAssetId.has(src.assetId)) {
         entraDeviceIdByAssetId.set(src.assetId, src.externalId.toLowerCase());
+      }
+      const seenMs = src.lastSeen?.getTime();
+      if (seenMs && seenMs > (directoryActivityByAssetId.get(src.assetId) ?? 0)) {
+        directoryActivityByAssetId.set(src.assetId, seenMs);
       }
       const sid =
         typeof obs.onPremisesSecurityIdentifier === "string"
@@ -6594,7 +6676,7 @@ async function buildEntraSyncIndex(
     }
   }
 
-  return { assetByEntraDeviceId, assetIdBySid, assetIdsWithEntraSource, assetIdsWithAdSource, assetById, entraDeviceIdByAssetId };
+  return { assetByEntraDeviceId, assetIdBySid, assetIdsWithEntraSource, assetIdsWithAdSource, assetById, entraDeviceIdByAssetId, directoryActivityByAssetId };
 }
 
 async function syncEntraDevices(
@@ -6641,6 +6723,7 @@ async function syncEntraDevices(
     assetIdsWithAdSource,
     assetById,
     entraDeviceIdByAssetId,
+    directoryActivityByAssetId,
   } = await buildEntraSyncIndex(allAssets);
 
   // Untagged-collision map: assets with neither an entra/intune nor an ad
@@ -6807,6 +6890,12 @@ async function syncEntraDevices(
       // projected fields.
       try {
         await upsertEntraIntuneSources(existing.id, integrationId, dev, now, lastSeen ?? now);
+        // Keep the in-memory directory-activity map in step with the source
+        // row we just upserted — later dup-resolve comparisons read it.
+        const actMs = (lastSeen ?? now).getTime();
+        if (actMs > (directoryActivityByAssetId.get(existing.id) ?? 0)) {
+          directoryActivityByAssetId.set(existing.id, actMs);
+        }
       } catch (err: any) {
         syncLog("warning", `Failed to upsert Entra/Intune AssetSource row(s) for ${dev.displayName || dev.deviceId}: ${err.message || "Unknown error"}`);
       }
@@ -6823,8 +6912,13 @@ async function syncEntraDevices(
       );
 
       // Update the existing asset (either Entra-sourced, or SID-matched take-over)
+      // Directory activity (lastSyncDateTime / approximateLastSignInDateTime)
+      // is NOT network presence — an Intune sync can come from anywhere on
+      // the internet. It lives on the entra/intune AssetSource rows (upserted
+      // above) and is surfaced separately in the UI; Asset.lastSeen is only
+      // written by presence evidence (FortiGate sightings, agent heartbeat,
+      // monitor probes, the post-sync presence-verification pass).
       const updateData: Record<string, unknown> = {
-        lastSeen: lastSeen || existing.lastSeen,
         status,
         ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
       };
@@ -6910,7 +7004,11 @@ async function syncEntraDevices(
           // captures both deviceIds for audit, and the AssetSource
           // sweep removes the stale source row from the loser.
           const siblingId = entraDeviceIdByAssetId.get(dupEntraSibling.asset.id) || "<unknown>";
-          const siblingLastSeen = dupEntraSibling.asset.lastSeen ? new Date(dupEntraSibling.asset.lastSeen as any) : null;
+          // Compare directory activity against directory activity — the
+          // sibling's Graph-reported timestamp lives on its entra/intune
+          // AssetSource rows, not on Asset.lastSeen (which is now presence).
+          const siblingActivityMs = directoryActivityByAssetId.get(dupEntraSibling.asset.id);
+          const siblingLastSeen = siblingActivityMs ? new Date(siblingActivityMs) : null;
           const incomingWins = lastSeen != null && (siblingLastSeen == null || lastSeen > siblingLastSeen);
           try {
             if (incomingWins) {
@@ -6970,7 +7068,10 @@ async function syncEntraDevices(
         // row so the prior identity can't re-link a future discovery.
         // Tombstone conflict records in both directions prevent re-queuing.
         const existingEntraId = entraDeviceIdByAssetId.get(dupEntra.asset.id) || "<unknown>";
-        const existingLastSeen = dupEntra.asset.lastSeen ? new Date(dupEntra.asset.lastSeen as any) : null;
+        // Directory-activity vs directory-activity comparison (see the
+        // sibling-resolve note above) — Asset.lastSeen is presence now.
+        const existingActivityMs = directoryActivityByAssetId.get(dupEntra.asset.id);
+        const existingLastSeen = existingActivityMs ? new Date(existingActivityMs) : null;
         const incomingWins = lastSeen != null && (existingLastSeen == null || lastSeen > existingLastSeen);
         try {
           if (incomingWins) {
@@ -7002,7 +7103,8 @@ async function syncEntraDevices(
               // Phase 4d: assetTag write retired — AssetSource.externalId on
               // the upserted entra source row above is the authoritative
               // identity link. Prior assetTag is preserved on the row.
-              lastSeen,
+              // (No lastSeen — directory activity stays on the AssetSource
+              // rows; Asset.lastSeen is verified network presence.)
               status,
               ...(status !== dupEntra.asset.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
               tags: newTags,
@@ -7046,6 +7148,7 @@ async function syncEntraDevices(
             assetByEntraDeviceId.delete(existingEntraId.toLowerCase());
             assetByEntraDeviceId.set(deviceIdKey, dupEntra.asset);
             entraDeviceIdByAssetId.set(dupEntra.asset.id, deviceIdKey);
+            if (lastSeen) directoryActivityByAssetId.set(dupEntra.asset.id, lastSeen.getTime());
             updated.push(dev.displayName || dev.deviceId);
             syncLog("info", `Auto-resolved duplicate Entra registration "${dev.displayName}" — incoming ${dev.deviceId} (${lastSeen?.toISOString()}) newer than existing ${existingEntraId} (${existingLastSeen?.toISOString() ?? "never"}). Asset updated; prior identity retired.`);
           } else {
@@ -7108,7 +7211,9 @@ async function syncEntraDevices(
         osVersion: projected.osVersion,
         learnedLocation: projected.learnedLocation,
         assignedTo: dev.userPrincipalName || null,
-        lastSeen,
+        // lastSeen stays null on create — directory activity lives on the
+        // AssetSource rows; presence evidence (FortiGate sighting, agent,
+        // probe, or the post-sync presence-verification ping) fills it in.
         acquiredAt,
         notes: `Auto-discovered from Entra ID integration "${integrationName}"${dev.trustType ? ` (trust: ${dev.trustType})` : ""}`,
         tags,
@@ -7501,13 +7606,12 @@ async function syncActiveDirectoryDevices(
       if (projected.model !== null) updateData.model = projected.model;
       // dnsName is AD-specific (not in projection — separate Asset column).
       if (dev.dnsHostName) updateData.dnsName = dev.dnsHostName;
-      // lastSeen: don't regress a newer existing value (e.g. Entra/Intune had fresher data).
-      if (lastLogon) {
-        const existingLastSeen = existing.lastSeen ? new Date(existing.lastSeen) : null;
-        if (!existingLastSeen || lastLogon > existingLastSeen) {
-          updateData.lastSeen = lastLogon;
-        }
-      }
+      // lastSeen: NOT written from AD. lastLogonTimestamp is replication-lazy
+      // (can trail real logons by up to ~14 days) and is directory activity,
+      // not network presence — it lives on the AD AssetSource row (upserted
+      // above) and is surfaced separately in the UI. Asset.lastSeen is only
+      // advanced by presence evidence (FortiGate sightings, agent heartbeat,
+      // monitor probes, the post-sync presence-verification pass).
       // acquiredAt: backfill with AD whenCreated only if older than current.
       if (whenCreated && (!existing.acquiredAt || whenCreated < new Date(existing.acquiredAt))) {
         updateData.acquiredAt = whenCreated;
@@ -7653,7 +7757,8 @@ async function syncActiveDirectoryDevices(
         osVersion: projected.osVersion,
         learnedLocation: projected.learnedLocation,
         notes: dev.description || `Auto-discovered from Active Directory integration "${integrationName}"`,
-        lastSeen: lastLogon,
+        // lastSeen stays null on create — lastLogonTimestamp is directory
+        // activity (on the AD AssetSource row), not network presence.
         acquiredAt: whenCreated,
         tags,
         // Stamp the AD source link on realm-monitorable hosts so the

@@ -825,6 +825,15 @@ function _readExcludeFortilinkLldpToggle() {
   return !!el.checked;
 }
 
+// Read the presence-verification toggle from the AD/Entra Monitoring tab.
+// Returns undefined when the checkbox didn't render (other integration types)
+// so the caller leaves the config field alone.
+function _readVerifyPresenceToggle() {
+  var el = document.getElementById("f-verifyPresence");
+  if (!el) return undefined;
+  return !!el.checked;
+}
+
 // Quarantine Push tab body. Renders the master toggle plus transport-mode
 // guidance. When enabled, quarantining an asset pushes MAC-based
 // address-group entries to every FortiGate sighted by this integration.
@@ -2869,11 +2878,29 @@ function monitorSettingsFormHTML(s, opts) {
     };
   });
 
+  // Integration-level presence-verification toggle (AD / Entra only).
+  // Directory timestamps don't update Asset.lastSeen; this post-discovery
+  // pass establishes network presence instead (agent heartbeat → monitor
+  // probe → single-ping fallback). Stored as config.verifyPresence; read on
+  // save by _readVerifyPresenceToggle(). Default ON.
+  var verifyPresenceHtml = "";
+  if (integrationType === "activedirectory" || integrationType === "entraid") {
+    var vpChecked = opts.verifyPresence === false ? "" : "checked";
+    verifyPresenceHtml = '<div class="form-group" style="display:flex;align-items:flex-start;gap:8px;margin:0 0 1rem 0">' +
+        '<input type="checkbox" id="f-verifyPresence" ' + vpChecked + ' style="width:auto;margin-top:3px">' +
+        '<div>' +
+          '<label for="f-verifyPresence" style="margin:0">Verify network presence after discovery (ICMP fallback)</label>' +
+          '<p class="hint" style="margin:0.15rem 0 0 0">Directory timestamps (Intune sync, AD last logon) are activity signals, not network presence, and do not update an asset&rsquo;s Last Seen. After each discovery Polaris confirms presence from the agent heartbeat or monitor probes, falling back to a single ping for devices with neither. A failed ping never marks a device stale &mdash; it simply leaves Last Seen unchanged.</p>' +
+        '</div>' +
+      '</div>';
+  }
+
   return '<section>' +
       '<p class="hint" style="margin:0 0 0.85rem 0;color:var(--color-text-tertiary)">' +
         "Per-class polling, cadences, and credentials for assets discovered by this integration. " +
         "A class override (Assets page → Monitoring Settings) or a per-asset override on the asset itself takes priority." +
       '</p>' +
+      verifyPresenceHtml +
       _intRenderTabbedBody("intg-mon-class", classTabs) +
     '</section>';
 }
@@ -4225,6 +4252,8 @@ async function openCreateModal(type) {
         var srvBlockNew = _readWorkstationServerMonitorBlock("f-mon-server-",     { klass: "servers",      isPrimary: false });
         if (wsBlockNew)  createConfig.workstationMonitor = wsBlockNew;
         if (srvBlockNew) createConfig.serverMonitor      = srvBlockNew;
+        var verifyPresenceNew = _readVerifyPresenceToggle();
+        if (verifyPresenceNew !== undefined) createConfig.verifyPresence = verifyPresenceNew;
       }
       if (isFmg || isFgt) {
         var pushToggleNew = _readPushReservationsToggle();
@@ -4462,6 +4491,7 @@ async function openEditModal(id) {
           // an empty object → overlay no-ops → flat baseline shows through.
           workstationMonitor: config.workstationMonitor || null,
           serverMonitor:      config.serverMonitor      || null,
+          verifyPresence:     config.verifyPresence,
         }) },
       ];
       body = _intRenderTabbedBody("intg-edit", nonFortinetTabs);
@@ -4658,6 +4688,8 @@ async function openEditModal(id) {
         var srvBlock = _readWorkstationServerMonitorBlock("f-mon-server-",      { klass: "servers",      isPrimary: false });
         if (wsBlock)  editConfig.workstationMonitor = wsBlock;
         if (srvBlock) editConfig.serverMonitor      = srvBlock;
+        var verifyPresenceEdit = _readVerifyPresenceToggle();
+        if (verifyPresenceEdit !== undefined) editConfig.verifyPresence = verifyPresenceEdit;
       }
       return { editConfig: editConfig, autoDiscoverEl: autoDiscoverEl };
     }

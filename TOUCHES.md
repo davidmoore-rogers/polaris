@@ -27,7 +27,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 
 ## Sections
 
-- [Cross-cutting concerns](#cross-cutting-concerns) (17)
+- [Cross-cutting concerns](#cross-cutting-concerns) (18)
 - [Per-service touches](#per-service-touches) — alphabetical; covers the highest-traffic of the 65 services in `src/services/` (not every service has a section)
 
 ---
@@ -577,6 +577,41 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - Test the order: create an asset with status=decommissioned, monitored=true, consecutiveFailures=5; verify monitored flips to false and counter resets.
 - Verify alias cache is warmed: set a new alias, restart the app, create an asset with the old name; spot-check it got normalized.
 - Check IP history on duplicate IP: same asset, new source; verify firstSeen was reset (CASE expression in SQL working) and lastSeen bumped.
+
+---
+
+## cross-cutting/asset-last-seen-presence
+
+**What it is:** `Asset.lastSeen` means **verified network presence** — the last time Polaris had direct evidence the device was alive on the network — with `Asset.lastSeenSource` carrying the evidence label. Every write routes through `src/utils/assetInvariants.ts → bumpLastSeen()` (no-regress: only advances; stamps provenance). Directory timestamps (Entra `lastSyncDateTime`, AD `lastLogonTimestamp`) are deliberately NOT presence — they live on `AssetSource.lastSeen` and render separately as "Last Directory Activity".
+
+**Writers** (files that mutate this state):
+- `src/api/routes/integrations.ts → syncDhcpSubnets` — FMG/standalone-FortiGate sync stamps:
+  - Phase 5 DHCP: gated on `entry.seenLeased` (live lease), source `"dhcp-lease"`. Offline static reservations neither bump nor flip status.
+  - Phase 7 device inventory: evidence is the FortiGate's per-client `last_seen` (or `now` when `is_online`), source `"device-inventory"`. Resurrection (`decommissioned → active`) requires `is_online`.
+  - Firewall / FortiSwitch / FortiAP phases: source `"discovery"`; switch gated on `sw.connected`, AP on `apOnline` (status "connected" or blank), firewall implicit (FMG parse already skips `conn_status !== 1` devices).
+- `src/api/routes/integrations.ts → syncEntraDevices / syncActiveDirectoryDevices` — do NOT write lastSeen (cut over in the directory-decoupling change). Directory activity goes to `AssetSource.lastSeen` via the source upserts.
+- `src/services/presenceVerificationService.ts → runPresenceVerification` — AD/Entra post-sync pass (default on, `config.verifyPresence`): sources `"agent"` (ManagedAgent heartbeat), `"probe"` (answering monitor probe), `"ping"` (ICMP fallback). Ping failure writes nothing.
+- `src/api/routes/conflicts.ts` — accept path (`"conflict-accept"`, via bumpLastSeen), reject-creates-asset path (`"conflict-reject"`), ghost absorption carries the ghost's source along.
+- `src/services/assetMergeService.ts` + `src/jobs/mergeDuplicateHostnameAssets.ts` — max(lastSeen) winner carries its `lastSeenSource` onto the survivor.
+
+**Readers** (files that consume it):
+- `src/jobs/decommissionStaleAssets.ts` — `lastSeen < cutoff` eligibility, with a **veto** when any `entra`/`intune`/`ad`/`polaris-agent` AssetSource row has `lastSeen >= cutoff` (cloud-only laptops / agent-reporting hosts stay alive). Null lastSeen is never eligible.
+- `src/api/routes/integrations.ts → buildEntraSyncIndex.directoryActivityByAssetId` — the Entra duplicate-registration tiebreaker compares **directory activity** (AssetSource.lastSeen), not Asset.lastSeen.
+- `public/js/assets.js` — slide-over "Last Seen" row renders `lastSeen + " · via " + LAST_SEEN_SOURCE_LABELS[lastSeenSource]`; "Last Directory Activity" row computed from the sources fetch; assets table + CSV/PDF exports show the date only.
+- `src/services/presenceVerificationService.ts → classifyPresenceSignal` — "already fresh" short-circuit reads it.
+
+**Invariants:**
+- Never write `Asset.lastSeen` / `lastSeenSource` directly — route through `bumpLastSeen(data, existing, evidenceAt, source)`. Creates may set both literally (nothing to regress).
+- lastSeen never moves backward. A stale evidence source (FortiOS remembering a device from weeks ago) must not regress a fresher sighting.
+- Absence of evidence is not evidence of absence: failed pings, offline inventory rows, and disconnected switch/AP entries leave lastSeen (and status) untouched.
+- Presence evidence gates resurrection: only an online sighting may flip `decommissioned → active`.
+- `clampAcquiredToLastSeen` still applies after any bump (acquiredAt ≤ lastSeen).
+
+**When changing this:**
+- Adding a new evidence source: use `bumpLastSeen`, pick a label, add it to `LastSeenSource` in `assetInvariants.ts` AND `LAST_SEEN_SOURCE_LABELS` in `public/js/assets.js`.
+- Adding a new discovery pathway: classify its evidence — is it "device on the wire right now" (bump) or "registry/config knows about the device" (don't)?
+- If you change the decommission job's eligibility, re-check the veto subquery covers every activity-bearing sourceKind.
+- Scale-check any new reader/writer at 2000 assets — the presence pass batches via `$transaction` and bounds ping fan-out; keep it that way.
 
 ---
 
