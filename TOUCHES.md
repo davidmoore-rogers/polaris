@@ -2282,11 +2282,11 @@ Listed alphabetically.
 
 **What it owns:** Global typeahead search across all domain entities, with input classification (IP/CIDR/MAC/text), whitespace/quoted-phrase tokenization into AND-combined terms, parallel entity-specific queries capped at 8 results per group, AND scope-prefix shortcuts (`block:`/`b:`, `network:`/`n:`, `asset:`/`a:`, `reservation:`/`r:`, `map:`/`m:`) that bypass the per-group cap.
 
-**Public API:** `searchAll`, `normalizeMac`, `parseSearchTerms`.
+**Public API:** `searchAll(rawQuery, allowed?)`, `SearchAllowed`, `normalizeMac`, `parseSearchTerms`.
 
 **Cross-service deps:** none (uses cidr.js utils and prisma directly).
 
-**Used by:** `src/api/routes/search.ts — GET /api/v1/search endpoint`. Total 1 call site.
+**Used by:** `src/api/routes/search.ts — GET /api/v1/search endpoint`. Total 1 call site. The route derives the optional `allowed` group map from the caller's role (`blocks`→ipBlocks, `subnets`→subnets, `reservations`→reservations, `assets`→assets, `sites`→deviceMap; `ips` needs subnets AND reservations) — denied groups return empty without running their query helpers, in both scoped and unscoped paths. Omitting `allowed` = all-allowed (historical behavior for non-route callers).
 
 **Invariants:**
 - **Multi-term AND** (`parseSearchTerms`): the post-scope-strip query is tokenized on whitespace, double-quoted runs kept whole (`"rogers group" metro` → two terms; a dangling opening quote swallows the rest as one phrase; quotes stripped, empty terms dropped). `searchAll` returns empty when zero terms survive. Every query helper builds `AND: terms.map(t => ({ OR: [cols…] }))` via the `andOfTerms(terms, cols)` helper, so a row must satisfy **every** term (each in at least one of its columns). A single term collapses to a one-element AND — byte-for-byte the pre-multi-term `OR`-of-columns behavior. **IP/CIDR/MAC classification, the `cidrExact`/`ipExact` exact-match boosts, and MAC normalization only fire for single-term queries** (`singleTerm = terms.length === 1`); multi-term is always plain text. In `runAssetSearch`, the side-table pathways (`externalId`/`mac`/`ip`) and the JSON-blob raw scan AND each term **within their single field/blob** (so cross-pathway AND — term A in hostname, term B in a side-table MAC — is not matched; the asset's own columns are the only cross-column AND). The JSON raw SQL builds its per-term ILIKE list with `Prisma.join(…, " AND ")` on each side of the UNION; `parseSearchTerms`'s non-empty guarantee keeps those `WHERE` fragments from going empty. The `<kind>:` source prefix is only stripped in single-term mode.

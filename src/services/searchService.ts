@@ -117,7 +117,30 @@ function isIpLike(s: string): boolean {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-export async function searchAll(rawQuery: string): Promise<SearchResults> {
+/**
+ * Per-group visibility for a search call, derived from the caller's role at
+ * the route layer (blocks→ipBlocks, subnets→subnets, reservations→reservations,
+ * assets→assets, sites→deviceMap; the ips group needs subnets AND reservations
+ * since resolveIp reveals both). Denied groups come back empty — the query
+ * helpers for them are never executed. Defaults to all-allowed so non-route
+ * callers keep the historical behavior.
+ */
+export interface SearchAllowed {
+  blocks: boolean;
+  subnets: boolean;
+  reservations: boolean;
+  assets: boolean;
+  sites: boolean;
+}
+
+const ALLOW_ALL: SearchAllowed = {
+  blocks: true, subnets: true, reservations: true, assets: true, sites: true,
+};
+
+export async function searchAll(
+  rawQuery: string,
+  allowed: SearchAllowed = ALLOW_ALL,
+): Promise<SearchResults> {
   const trimmed = rawQuery.trim();
   // Always echo the original query back to the client; the dropdown
   // stale-response check compares against what was typed, not the
@@ -151,22 +174,27 @@ export async function searchAll(rawQuery: string): Promise<SearchResults> {
   // cap and return everything else empty. Operators who pick a scope
   // explicitly want the full enumeration, not the typeahead-tuned top 8.
   if (scope === "block") {
+    if (!allowed.blocks) return empty;
     const blocks = await searchBlocks(terms, SCOPED_LIMIT);
     return { ...empty, blocks: blocks.map(blockHit) };
   }
   if (scope === "network") {
+    if (!allowed.subnets) return empty;
     const subnets = await searchSubnets(terms, isCidr ? q : null, SCOPED_LIMIT);
     return { ...empty, subnets: subnets.map(subnetHit) };
   }
   if (scope === "reservation") {
+    if (!allowed.reservations) return empty;
     const reservations = await searchReservations(terms, isIp ? q : null, SCOPED_LIMIT);
     return { ...empty, reservations: reservations.map(reservationHit) };
   }
   if (scope === "map") {
+    if (!allowed.sites) return empty;
     const sites = await searchPinnedFirewalls(terms, mac, SCOPED_LIMIT);
     return { ...empty, sites: sites.map(siteHit) };
   }
   if (scope === "asset") {
+    if (!allowed.assets) return empty;
     const assetRows = await searchAssets(terms, mac, SCOPED_LIMIT);
     const originBySrcId = await resolveOriginFortigates(assetRows.map((a) => a.id));
     const assetHits = assetRows.map((a) => decorateAssetHit(a, originBySrcId.get(a.id)));
@@ -178,12 +206,12 @@ export async function searchAll(rawQuery: string): Promise<SearchResults> {
   // they don't get crowded out of `assets` by alphabetically-earlier
   // workstations/switches matching the same site code on large fleets.
   const [blocks, subnets, reservations, assets, sites, ipHit] = await Promise.all([
-    searchBlocks(terms),
-    searchSubnets(terms, isCidr ? q : null),
-    searchReservations(terms, isIp ? q : null),
-    searchAssets(terms, mac),
-    searchPinnedFirewalls(terms, mac),
-    isIp ? resolveIp(q) : Promise.resolve(null),
+    allowed.blocks       ? searchBlocks(terms)                          : Promise.resolve([]),
+    allowed.subnets      ? searchSubnets(terms, isCidr ? q : null)      : Promise.resolve([]),
+    allowed.reservations ? searchReservations(terms, isIp ? q : null)   : Promise.resolve([]),
+    allowed.assets       ? searchAssets(terms, mac)                     : Promise.resolve([]),
+    allowed.sites        ? searchPinnedFirewalls(terms, mac)            : Promise.resolve([]),
+    isIp && allowed.subnets && allowed.reservations ? resolveIp(q) : Promise.resolve(null),
   ]);
 
   const assetsWithoutSites = assets;
