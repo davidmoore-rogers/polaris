@@ -16,12 +16,9 @@ import {
   testSyslogConnection,
   getRetentionSettings,
   updateRetentionSettings,
-  getCachedRetentionSettings,
   getAssetDecommissionSettings,
   updateAssetDecommissionSettings,
 } from "../../services/eventArchiveService.js";
-
-const LEVEL_ORDER: Record<string, number> = { info: 0, warning: 1, error: 2 };
 
 // Sort whitelist — Prisma orderBy must never accept user-supplied strings
 // unvalidated. `level` is mapped onto `levelRank` so severity sort matches
@@ -59,21 +56,39 @@ const ListQuerySchema = z.object({
   sortDir: z.enum(["asc", "desc"]).optional(),
 });
 
-/** Translate a text-filter op + value into a Prisma `where` clause fragment. */
-function buildTextFilter(value: string | undefined, op: string | undefined): unknown {
+/**
+ * Translate a text-filter op + value into a Prisma `where`-level fragment for
+ * `field`, or undefined when the filter is a no-op. Fragments are where-level
+ * (`{ field: ... }` / `{ OR: [...] }`) rather than field-level because
+ * empty / is_not_empty need OR / AND composition, which Prisma only accepts at
+ * the where level; the call site ANDs the fragments together. `actor` is the
+ * one nullable column — its blank checks carry a null arm, while non-nullable
+ * action / message compare against "" only (Prisma rejects `equals: null` on a
+ * non-nullable field).
+ */
+function buildTextFilter(
+  field: "action" | "actor" | "message",
+  value: string | undefined,
+  op: string | undefined,
+): Record<string, unknown> | undefined {
   const operator = op && TEXT_OPS.has(op) ? op : "contains";
+  const nullable = field === "actor";
   if (operator === "empty") {
-    return { OR: [{ equals: null }, { equals: "" }] };
+    return nullable ? { OR: [{ [field]: null }, { [field]: "" }] } : { [field]: "" };
   }
   if (operator === "is_not_empty") {
-    return { AND: [{ not: null }, { not: "" }] };
+    return nullable
+      ? { AND: [{ [field]: { not: null } }, { [field]: { not: "" } }] }
+      : { [field]: { not: "" } };
   }
   const v = (value || "").trim();
   if (!v) return undefined;
   if (operator === "not_contains") {
-    return { not: { contains: v, mode: "insensitive" } };
+    // `mode` is a sibling of `not` in Prisma's string filter — nesting it
+    // inside the `not` object is rejected by the client.
+    return { [field]: { not: { contains: v }, mode: "insensitive" } };
   }
-  return { contains: v, mode: "insensitive" };
+  return { [field]: { contains: v, mode: "insensitive" } };
 }
 
 /** CSV → string[]; empty entries dropped; returns undefined for no value. */
@@ -138,14 +153,12 @@ router.get("/", requirePermission("events", "read"), async (req, res, next) => {
     // optional <field>Op param; missing op → contains (default). The actor
     // filter was silently dropped pre-this-change (frontend already sent it,
     // backend schema didn't define it) — adding it here is a drive-by fix.
-    const actionFilter = buildTextFilter(q.action, q.actionOp);
-    if (actionFilter !== undefined) where.action = actionFilter;
-
-    const actorFilter = buildTextFilter(q.actor, q.actorOp);
-    if (actorFilter !== undefined) where.actor = actorFilter;
-
-    const messageFilter = buildTextFilter(q.message, q.messageOp);
-    if (messageFilter !== undefined) where.message = messageFilter;
+    const textFilters = [
+      buildTextFilter("action", q.action, q.actionOp),
+      buildTextFilter("actor", q.actor, q.actorOp),
+      buildTextFilter("message", q.message, q.messageOp),
+    ].filter((f): f is Record<string, unknown> => f !== undefined);
+    if (textFilters.length) where.AND = textFilters;
 
     // Sort whitelist. Reject anything outside the catalogue with a 400 —
     // Prisma orderBy must never accept user-supplied strings unvalidated.
@@ -316,57 +329,12 @@ router.put("/asset-decommission-settings", requirePermission("events", "write"),
 
 export default router;
 
-// ─── Shared Event Logger ────────────────────────────────────────────────────
+// ─── Shared Event Logger (moved) ─────────────────────────────────────────────
+//
+// logEvent / buildChanges / LogEventInput live in
+// src/services/eventLogService.ts now — services must not import from the
+// route layer to write audit rows. Re-exported here so the ~42 existing
+// importers keep working; new code should import from the service directly.
 
-export interface LogEventInput {
-  action: string;
-  resourceType?: string;
-  resourceId?: string;
-  resourceName?: string;
-  actor?: string;
-  message: string;
-  level?: "info" | "warning" | "error";
-  details?: Record<string, unknown>;
-}
-
-export async function logEvent(input: LogEventInput): Promise<void> {
-  try {
-    const { minLevel } = await getCachedRetentionSettings();
-    if ((LEVEL_ORDER[input.level ?? "info"] ?? 0) < (LEVEL_ORDER[minLevel] ?? 0)) return;
-    const level = input.level || "info";
-    await prisma.event.create({
-      data: {
-        action: input.action,
-        resourceType: input.resourceType,
-        resourceId: input.resourceId,
-        resourceName: input.resourceName,
-        actor: input.actor,
-        message: input.message,
-        level,
-        // Numeric severity stamped at write time. The list endpoint's
-        // sortBy=level dispatches to orderBy: { levelRank } so the operator
-        // sees severity order, not alphabetical. Falls back to 0 (info) for
-        // any unknown level string.
-        levelRank: LEVEL_ORDER[level] ?? 0,
-        details: input.details as any,
-      },
-    });
-  } catch {
-    // Never let event logging break the main request
-  }
-}
-
-export function buildChanges(
-  before: Record<string, unknown>,
-  after: Record<string, unknown>,
-): Record<string, { from: unknown; to: unknown }> | undefined {
-  const changes: Record<string, { from: unknown; to: unknown }> = {};
-  for (const key of Object.keys(after)) {
-    const a = before[key];
-    const b = after[key];
-    const aStr = JSON.stringify(a ?? null);
-    const bStr = JSON.stringify(b ?? null);
-    if (aStr !== bStr) changes[key] = { from: a ?? null, to: b ?? null };
-  }
-  return Object.keys(changes).length ? changes : undefined;
-}
+export { logEvent, buildChanges } from "../../services/eventLogService.js";
+export type { LogEventInput } from "../../services/eventLogService.js";

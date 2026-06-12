@@ -12,6 +12,7 @@
 import { Router } from "express";
 import { prisma } from "../../db.js";
 import * as utilizationService from "../../services/utilizationService.js";
+import { ensureSessionRoleSnapshot, hasPermission } from "../middleware/permissions.js";
 
 const router = Router();
 
@@ -45,16 +46,31 @@ function parseSourceTypesParam(raw: unknown): string[] | undefined {
 
 router.get("/summary", async (req, res, next) => {
   try {
+    // Filter, don't 403: the dashboard is the redirect target for users
+    // bounced off gated pages, so it must render for every role. Each widget
+    // section is gated on the read access of the function that owns its data;
+    // denied sections come back as empty arrays with the response shape
+    // unchanged. Bearer-token callers have no role snapshot → all-empty.
+    await ensureSessionRoleSnapshot(req);
+    const canBlocks       = hasPermission(req, "ipBlocks", "read");
+    const canReservations = hasPermission(req, "reservations", "read");
+    const canAssets       = hasPermission(req, "assets", "read");
+
     const sourceTypes = parseSourceTypesParam(req.query.recentSourceTypes);
+    const emptyAssetRows: never[] = [];
     const [global, recentReservations, assetTypeCountsRaw, monitorAlertsRaw] = await Promise.all([
-      utilizationService.getGlobalUtilization(),
-      utilizationService.getRecentManualReservations(10, sourceTypes),
-      prisma.asset.groupBy({
+      canBlocks
+        ? utilizationService.getGlobalUtilization()
+        : Promise.resolve({ blockUtilization: [] }),
+      canReservations
+        ? utilizationService.getRecentManualReservations(10, sourceTypes)
+        : Promise.resolve([]),
+      canAssets ? prisma.asset.groupBy({
         by: ["assetType"],
         _count: { _all: true },
         where: { status: { notIn: ["decommissioned", "disabled"] } },
-      }),
-      prisma.asset.findMany({
+      }) : Promise.resolve(emptyAssetRows),
+      canAssets ? prisma.asset.findMany({
         where: {
           monitored: true,
           monitorStatus: { in: ["warning", "down"] },
@@ -73,7 +89,7 @@ router.get("/summary", async (req, res, next) => {
         // pre-backfill assets) sink to the bottom.
         orderBy: [{ monitorStatusChangedAt: { sort: "desc", nulls: "last" } }],
         take: MONITOR_ALERT_CAP + 1,
-      }),
+      }) : Promise.resolve(emptyAssetRows),
     ]);
 
     const overflow = monitorAlertsRaw.length > MONITOR_ALERT_CAP;

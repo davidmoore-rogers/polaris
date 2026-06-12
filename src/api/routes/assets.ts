@@ -2323,7 +2323,7 @@ router.get("/:id/sources", requirePermission("assets", "read"), async (req, res,
     // History tables on the same Sources tab.
     const seen = new Set<string>();
     const deduped = rows.filter((r) => {
-      const key = `${r.sourceKind} ${r.integrationId ?? ""}`;
+      const key = `${r.sourceKind}\u0000${r.integrationId ?? ""}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;

@@ -72,7 +72,13 @@ router.use("/blocks", blocksRouter);
 router.use("/subnets", subnetsRouter);
 router.use("/allocation-templates", allocationTemplatesRouter);
 router.use("/reservations", reservationsRouter);
-router.use("/utilization", utilizationRouter);
+// Utilization reports enumerate the IP space, so they carry the same read
+// gate as the blocks they describe. Blanket-gated at the mount: bearer tokens
+// (no role snapshot) and ipBlocks=none roles get a 403.
+router.use("/utilization", requirePermission("ipBlocks", "read"), utilizationRouter);
+// /dashboard/summary is deliberately NOT 403-gated — it's the redirect target
+// for users bounced off gated pages. The handler filters sections by the
+// caller's per-function read access instead (denied sections come back empty).
 router.use("/dashboard", dashboardRouter);
 router.use("/me/dashboard", userDashboardRouter);
 router.use("/users", requirePermission("users", "read"), usersRouter);

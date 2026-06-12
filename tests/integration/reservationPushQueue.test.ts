@@ -177,7 +177,7 @@ d("DELETE /reservations/:id for a queued row", () => {
     const del = await agent
       .delete(`/api/v1/reservations/${queued.id}`)
       .set("X-CSRF-Token", csrf);
-    expect(del.status).toBe(200);
+    expect(del.status).toBe(204); // release returns 204 No Content
     const after = await prisma.reservation.findUnique({ where: { id: queued.id } });
     expect(after?.status).toBe("released");
     expect(after?.pushStatus).toBeNull();

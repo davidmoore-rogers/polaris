@@ -27,6 +27,11 @@ beforeAll(async () => {
   if (!dbReachable) return;
   await prisma.$connect();
   await ensureTestUser();
+  // Warm the process-cached agent up front: the first login writes an
+  // auth.login.local audit Event, and doing it here lets beforeEach wipe it.
+  // Logging in mid-test instead would contaminate the exact-total assertions
+  // (the seeded counts assume the table holds only seedEvents() rows).
+  await authedAgent(app);
 });
 
 afterAll(async () => {

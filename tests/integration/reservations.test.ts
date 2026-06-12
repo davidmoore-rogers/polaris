@@ -113,6 +113,8 @@ d("POST /api/v1/reservations", () => {
 // ─── GET /api/v1/reservations ─────────────────────────────────────────────────
 
 d("GET /api/v1/reservations", () => {
+  // The list endpoint returns a paginated envelope { reservations, total,
+  // limit, offset } rather than a bare array (pagination cutover, 5a5ed32).
   it("lists all reservations", async () => {
     const { agent, csrf } = await authedAgent(app);
     const { subnet } = await scaffold(agent, csrf, "10.60.0.0/16", "10.60.1.0/24");
@@ -120,8 +122,9 @@ d("GET /api/v1/reservations", () => {
     await agent.post("/api/v1/reservations").set("X-CSRF-Token", csrf).send({ subnetId: subnet.id, ipAddress: "10.60.1.6", hostname: "h2" });
     const resp = await agent.get("/api/v1/reservations");
     expect(resp.status).toBe(200);
-    expect(Array.isArray(resp.body)).toBe(true);
-    expect(resp.body.length).toBeGreaterThanOrEqual(2);
+    expect(Array.isArray(resp.body.reservations)).toBe(true);
+    expect(resp.body.reservations.length).toBeGreaterThanOrEqual(2);
+    expect(resp.body.total).toBeGreaterThanOrEqual(2);
   });
 
   it("filters by owner", async () => {
@@ -131,8 +134,8 @@ d("GET /api/v1/reservations", () => {
     await agent.post("/api/v1/reservations").set("X-CSRF-Token", csrf).send({ subnetId: subnet.id, ipAddress: "10.70.1.6", hostname: "h2", owner: "bob" });
     const resp = await agent.get("/api/v1/reservations?owner=alice");
     expect(resp.status).toBe(200);
-    expect(resp.body.every((r: any) => r.owner === "alice")).toBe(true);
-    expect(resp.body.length).toBe(1);
+    expect(resp.body.reservations.every((r: any) => r.owner === "alice")).toBe(true);
+    expect(resp.body.reservations.length).toBe(1);
   });
 
   it("filters by projectRef", async () => {
@@ -141,8 +144,8 @@ d("GET /api/v1/reservations", () => {
     await agent.post("/api/v1/reservations").set("X-CSRF-Token", csrf).send({ subnetId: subnet.id, ipAddress: "10.80.1.5", hostname: "h1", owner: "x", projectRef: "proj-a" });
     await agent.post("/api/v1/reservations").set("X-CSRF-Token", csrf).send({ subnetId: subnet.id, ipAddress: "10.80.1.6", hostname: "h2", owner: "y", projectRef: "proj-b" });
     const resp = await agent.get("/api/v1/reservations?projectRef=proj-a");
-    expect(resp.body.every((r: any) => r.projectRef === "proj-a")).toBe(true);
-    expect(resp.body.length).toBe(1);
+    expect(resp.body.reservations.every((r: any) => r.projectRef === "proj-a")).toBe(true);
+    expect(resp.body.reservations.length).toBe(1);
   });
 
   it("filters by status (active by default)", async () => {
@@ -152,8 +155,8 @@ d("GET /api/v1/reservations", () => {
     await agent.delete(`/api/v1/reservations/${r.body.id}`).set("X-CSRF-Token", csrf);
     const released = await agent.get("/api/v1/reservations?status=released");
     const active = await agent.get("/api/v1/reservations?status=active");
-    expect(released.body.length).toBe(1);
-    expect(active.body.find((x: any) => x.id === r.body.id)).toBeUndefined();
+    expect(released.body.reservations.length).toBe(1);
+    expect(active.body.reservations.find((x: any) => x.id === r.body.id)).toBeUndefined();
   });
 });
 

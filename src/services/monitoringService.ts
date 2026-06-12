@@ -5096,7 +5096,7 @@ function snmpWalk(session: any, baseOid: string): Promise<Map<string, any>> {
 
 function snmpVbToString(v: unknown): string {
   if (v == null) return "";
-  if (Buffer.isBuffer(v)) return v.toString("utf8").replace(/ +$/, "");
+  if (Buffer.isBuffer(v)) return v.toString("utf8").replace(/\u0000+$/, "");
   return String(v);
 }
 
@@ -6876,7 +6876,7 @@ async function persistLldpNeighbors(
   endFind({ rows: existing.length });
   const seen = new Set<string>();
   const keyOf = (li: string, ci: string | null | undefined, pi: string | null | undefined) =>
-    `${li}${ci ?? ""}${pi ?? ""}`;
+    `${li}\u0001${ci ?? ""}\u0001${pi ?? ""}`;
   const existingByKey = new Map<string, typeof existing[number]>();
   for (const e of existing) existingByKey.set(keyOf(e.localIfName, e.chassisId, e.portId), e);
 

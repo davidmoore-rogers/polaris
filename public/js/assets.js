@@ -10543,11 +10543,28 @@ async function _captureWithChoicesInner(asset, choices) {
     }
   }
 
+  // html-to-image's filter only removes excluded nodes from the CLONE — the
+  // live panel's computed height (frozen into the clone's inlined styles)
+  // still includes them, so the capture keeps full height with blank gaps
+  // where the sections were. Hide the exclusions in the live DOM instead so
+  // the panel genuinely reflows before rasterization (_runScreenshotCapture's
+  // settle delay absorbs the relayout); the filter stays on as a cheap
+  // skip-clone for the same nodes. Prior inline display values are restored
+  // in the finally.
+  var hiddenForCapture = [];
+  excl.forEach(function (el) {
+    hiddenForCapture.push({ el: el, prev: el.style.display });
+    el.style.display = "none";
+  });
+
   try {
     await _runScreenshotCapture(asset, {
       filter: function (node) { return !(node && excl.has(node)); },
     });
   } finally {
+    for (i = 0; i < hiddenForCapture.length; i++) {
+      hiddenForCapture[i].el.style.display = hiddenForCapture[i].prev;
+    }
     for (i = 0; i < revealed.length; i++) revealed[i].style.display = "none";
     for (i = 0; i < charts.length; i++) {
       try {

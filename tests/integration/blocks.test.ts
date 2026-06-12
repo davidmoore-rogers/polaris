@@ -213,9 +213,11 @@ d("DELETE /api/v1/blocks/:id", () => {
 // ─── Auth ──────────────────────────────────────────────────────────────────
 
 d("POST/PUT/DELETE /blocks require networkadmin", () => {
-  it("returns 401 from POST /blocks without a session", async () => {
+  it("rejects POST /blocks without a session", async () => {
     const request = (await import("supertest")).default;
     const resp = await request(app).post("/api/v1/blocks").send({ name: "X", cidr: "10.130.0.0/16" });
-    expect(resp.status).toBe(401);
+    // CSRF middleware runs before auth, so a sessionless mutation is rejected
+    // with 403 (missing token) rather than 401 — either way it must not land.
+    expect([401, 403]).toContain(resp.status);
   });
 });

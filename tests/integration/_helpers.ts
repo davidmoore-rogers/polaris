@@ -31,7 +31,11 @@ export const dbReachable: boolean = await (async () => {
   try {
     await prisma.$queryRaw`SELECT 1`;
     return true;
-  } catch {
+  } catch (err) {
+    // Surface the real failure: without this, "DB down" and "DB up but the
+    // probe crashed" look identical (suites silently skip either way).
+    // eslint-disable-next-line no-console
+    console.error("[integration tests] DATABASE_URL is set but the probe failed:", err);
     return false;
   }
 })();
@@ -53,11 +57,20 @@ export async function ensureTestUser(): Promise<{ username: string; password: st
   if (!dbReachable) return { username: TEST_USERNAME, password: TEST_PASSWORD };
   const existing = await prisma.user.findUnique({ where: { username: TEST_USERNAME } });
   if (!existing) {
+    // Post-cutover RBAC: the User.role enum column is gone — users join the
+    // Role table via roleId. The built-in roles are seeded by the
+    // roles-table-cutover migration, so a migrated test DB always has "admin".
+    const adminRole = await prisma.role.findUnique({ where: { name: "admin" } });
+    if (!adminRole) {
+      throw new Error(
+        "built-in 'admin' Role row missing — run `npx prisma migrate deploy` against the test DB first",
+      );
+    }
     await prisma.user.create({
       data: {
         username:     TEST_USERNAME,
         passwordHash: await hashPassword(TEST_PASSWORD),
-        role:         "admin",
+        roleId:       adminRole.id,
         authProvider: "local",
       },
     });
@@ -80,11 +93,20 @@ export async function deleteTestUser(): Promise<void> {
  * session cookie + the polaris_csrf cookie across requests; the returned
  * `csrf` string is what mutating requests must echo in the `X-CSRF-Token`
  * header.
+ *
+ * The result is CACHED per process (vitest forks one process per file, so:
+ * one login per suite). The login rate limiter allows 10 attempts / 15 min
+ * per IP — a per-test login blows through that mid-suite. Pass
+ * `{ fresh: true }` for a test that genuinely needs its own session (it
+ * spends one login attempt from the same budget).
  */
-export async function authedAgent(app: Express): Promise<{
+let cachedAuthed: { agent: ReturnType<typeof request.agent>; csrf: string } | null = null;
+
+export async function authedAgent(app: Express, opts?: { fresh?: boolean }): Promise<{
   agent: ReturnType<typeof request.agent>;
   csrf:  string;
 }> {
+  if (!opts?.fresh && cachedAuthed) return cachedAuthed;
   const agent = request.agent(app);
   // GET first so the session-pinned CSRF cookie gets set before login.
   await agent.get("/api/v1/auth/me");
@@ -95,8 +117,18 @@ export async function authedAgent(app: Express): Promise<{
   if (loginResp.status !== 200) {
     throw new Error(`Login failed (${loginResp.status}): ${JSON.stringify(loginResp.body)}`);
   }
-  const cookies = (agent.jar as any).getCookies("http://127.0.0.1/");
-  const csrf = (cookies.find((c: any) => c.key === "polaris_csrf") || {}).value || "";
+  // Login regenerates the session (fixation defense), which discards the
+  // pre-login CSRF token; the regenerated session only mints its token on the
+  // NEXT request. One follow-up GET refreshes the cookie to the live value —
+  // the same thing the SPA does naturally after login.
+  await agent.get("/api/v1/auth/me");
+  // cookiejar's getCookies takes a CookieAccessInfo-shaped object, not a URL
+  // string (a string silently matches nothing). supertest binds the agent to
+  // 127.0.0.1; the CSRF cookie is host-scoped with path "/".
+  const cookies = (agent.jar as any).getCookies({ domain: "127.0.0.1", path: "/", secure: false, script: false });
+  const csrf = (cookies.find((c: any) => c.name === "polaris_csrf") || {}).value || "";
   if (!csrf) throw new Error("CSRF cookie not set after login");
-  return { agent, csrf };
+  const result = { agent, csrf };
+  if (!opts?.fresh) cachedAuthed = result;
+  return result;
 }

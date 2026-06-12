@@ -362,7 +362,7 @@ model MonitorClassOverride {
   // follow-up release once fleet-wide migration is confirmed.
   sampleRetentionDays       Int?
   // Single retention setting shared by AssetTelemetrySample (CPU/memory)
-  // AND AssetTemperatureSample. The stream split only affects polling
+  // AND AssetHardwareSensorSample. The stream split only affects polling
   // method / cadence / credential / MIB / timeout — sample retention is
   // table-level, so one knob covers both.
   telemetryRetentionDays    Int?
@@ -1251,9 +1251,14 @@ model AssetWirelessStation {
 // Slice 7 — time-series of custom-widget samples. Each row is one
 // ManufacturerCustomWidget probe result against one asset. `kind` is
 // "scalar" or "table" (mirrors the widget definition); `value` holds either
-// a single number (scalar) or an array of row objects (table). Pruned on
-// the system-info retention cadence — same retention knob as interfaces
-// since both ride the heavy loop.
+// a single number (scalar) or an array of row objects (table).
+// KNOWN GAP (2026-06 review): no prune path and no Timescale management —
+// rows accumulate until manually cleared. The originally intended
+// system-info-cadence prune was never implemented. Follow-up needs a
+// retention-knob decision (pruning is destructive for installs keeping
+// history) plus a composite-PK migration to (id, timestamp) before this
+// table can join timescaleService's managed inventory — see the EXEMPT
+// list in tests/unit/timescaleTables.test.ts.
 model AssetCustomWidgetSample {
   id        String   @id @default(uuid())
   assetId   String

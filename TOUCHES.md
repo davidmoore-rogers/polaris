@@ -971,12 +971,12 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 ## cross-cutting/tiered-sample-retention
 
-**What it is:** Two-axis storage policy for the six monitor sample tables. **Tier axis**: detail (raw samples) → hourly aggregates → daily aggregates. **Retention axis**: each tier has its own days-to-keep, per device class (default / switch / accessPoint), per stream (sample / telemetry / systemInfo). Chart history requests at long ranges read from the rollup tiers (cheap), short ranges read from detail (raw). Phase rollout 0–6 retired the per-tier monitor-settings retention fields in favor of a single global `Setting("sampleRetention")` edited from Server Settings → Maintenance.
+**What it is:** Two-axis storage policy for the eight monitor sample tables. **Tier axis**: detail (raw samples) → hourly aggregates → daily aggregates. **Retention axis**: each tier has its own days-to-keep, per device class (default / switch / accessPoint), per stream (sample / telemetry / systemInfo). Chart history requests at long ranges read from the rollup tiers (cheap), short ranges read from detail (raw). Phase rollout 0–6 retired the per-tier monitor-settings retention fields in favor of a single global `Setting("sampleRetention")` edited from Server Settings → Maintenance.
 
 **Schema:**
-- Six source tables (`asset_*_samples`) — unchanged shape, partitioned by `timestamp`.
-- Twelve rollup tables (`asset_*_samples_hourly` + `asset_*_samples_daily`) — partitioned by `bucketStart`. Gauge tables carry avg/min/max; counter tables carry first/last endpoints + `lastBucketSampleAt` so rate = `(last - first) / (lastBucketSampleAt - bucketStart in seconds)`, dropping negative deltas as counter resets.
-- All 18 tables can be Timescale hypertables (`timescaleService.ALL_HYPERTABLE_CANDIDATES`); plain Postgres works just as well, just without chunk-drop pruning.
+- Eight source tables (`asset_*_samples`) — unchanged shape, partitioned by `timestamp`.
+- Sixteen rollup tables (`asset_*_samples_hourly` + `asset_*_samples_daily`) — partitioned by `bucketStart`. Gauge tables carry avg/min/max; counter tables carry first/last endpoints + `lastBucketSampleAt` so rate = `(last - first) / (lastBucketSampleAt - bucketStart in seconds)`, dropping negative deltas as counter resets.
+- All 24 tables can be Timescale hypertables (`timescaleService.ALL_HYPERTABLE_CANDIDATES`); plain Postgres works just as well, just without chunk-drop pruning. (`tests/unit/timescaleTables.test.ts` drift-guards the inventory: rollup-writer / prune-layer / schema table references must stay ⊆ the managed lists.)
 
 **Writers:**
 - `src/services/sampleWriteBuffer.ts:enqueue*` — eight detail tables via batched createMany every 2 s. Append-only, no upsert. (The two SD-WAN streams — `asset_perf_sla_samples` / `asset_sdwan_rule_samples` — were added alongside `enqueuePerfSlaSamples` / `enqueueSdwanRuleSamples`; both fed from `recordSystemInfoResult` when `collectSdwanFortinet` ran, gated by `Integration.config.pullSdwan`.)
@@ -989,7 +989,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 **Readers:**
 - `src/services/sampleHistoryService.ts:read*History` — six tier-aware readers, one per source. Detail tier returns raw rows; rollup tiers translate aggregate columns back to source field names so existing chart renderers consume both shapes with no per-tier branching except for counter-rate pre-computation.
 - `src/api/routes/assets.ts` — six `/assets/:id/*-history` endpoints dispatch to the right reader via `pickSampleTierForAsset(assetId, stream, since)` from `sampleQueryRouter`.
-- `src/services/capacityService.ts:projectSteadyStateSize` — enumerates all 18 tables and multiplies retention × rows/asset/day × bytes/row per (stream, tier, default class) for the steady-state footprint projection.
+- `src/services/capacityService.ts:projectSteadyStateSize` — enumerates all 24 tables and multiplies retention × rows/asset/day × bytes/row per (stream, tier, default class) for the steady-state footprint projection.
 
 **Settings store:**
 - `Setting("sampleRetention")` — flat `{stream: {tier: {class: days}}}` shape, 27 numbers total. Defaults 7/30/365. Backed by `src/services/sampleRetentionService.ts` with a 5 s in-process cache (chart endpoints read on every request).
@@ -1005,7 +1005,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - **Counter rate convention.** First/last + lastBucketSampleAt is the contract. Negative deltas drop as resets — matches detail-tier client-side diff in `_derivePerIntervalSeries` / `_deriveIpsecThroughput`.
 - **Retention is global.** Cadence / polling method / credentials / MIB hints / timeouts stay in the per-tier monitor-settings hierarchy (`MonitorClassOverride`, `Integration.config.monitorSettings`, `Setting("manualMonitorSettings")`); only retention is global. Don't re-introduce per-integration retention.
 - **Rollup writes are upsert.** Don't try to push rollup writes through `sampleWriteBuffer` — the buffer's append-only contract intentionally has no upsert path.
-- **Sample/rollup tables have NO foreign key to Asset (migration `20260615000000`). Never re-add `@relation`/`onDelete: Cascade`, and never row-DELETE/UPDATE sample rows inside a compressed chunk.** Any per-row DML matching a compressed TimescaleDB chunk decompresses the whole chunk → un-truncatable heap bloat (prod incident 2026-06-08; root cause was the asset-delete cascade hitting compressed sample chunks). Deleting an Asset now leaves its sample rows orphaned (`assetId` → gone Asset, queried only by assetId so never surfaced) and they age out via `drop_chunks` on the retention schedule — the only compression-safe deletion. Consequence: a deleted asset's sample storage is freed at retention time, not instantly. Retention stays compression-safe via the bounded slow-prune (`unselectedSlowPruneWindow`) + `drop_chunks`; `reclaimBloatedChunks` (every 6h) is the residual-bloat net. Applies to every `Asset*Sample` + `*Hourly`/`*Daily` + `AssetCustomWidgetSample`.
+- **Sample/rollup tables have NO foreign key to Asset (migration `20260615000000`). Never re-add `@relation`/`onDelete: Cascade`, and never row-DELETE/UPDATE sample rows inside a compressed chunk.** Any per-row DML matching a compressed TimescaleDB chunk decompresses the whole chunk → un-truncatable heap bloat (prod incident 2026-06-08; root cause was the asset-delete cascade hitting compressed sample chunks). Deleting an Asset now leaves its sample rows orphaned (`assetId` → gone Asset, queried only by assetId so never surfaced) and they age out via `drop_chunks` on the retention schedule — the only compression-safe deletion. Consequence: a deleted asset's sample storage is freed at retention time, not instantly. Retention stays compression-safe via the bounded slow-prune (`unselectedSlowPruneWindow`) + `drop_chunks`; `reclaimBloatedChunks` (every 6h) is the residual-bloat net. Applies to every `Asset*Sample` + `*Hourly`/`*Daily` + `AssetCustomWidgetSample` (note: `AssetCustomWidgetSample` has no prune path and is not Timescale-managed — its orphaned rows persist indefinitely; known gap, see the model comment in prisma/schema.prisma).
 
 **Observability:**
 - `polaris_sample_rollup_duration_seconds{tier,table}` (histogram) — per-INSERT wall-clock from sampleRollupService.
@@ -1666,7 +1666,7 @@ Listed alphabetically.
 **Used by:** `src/jobs/pruneEvents.ts,25 — scheduled archive/export`; `src/jobs/decommissionStaleAssets.ts — inactivity threshold`; `src/api/routes/events.ts — admin CRUD endpoints`; `capacityService.ts — capacity transition Event creation`. ~8 call sites.
 
 **Invariants:**
-- All successful Events are written to `prisma.event.create()` by callers (routes, services, jobs); eventArchiveService does not write Events, only manages their export/retention. The canonical helper is `logEvent` in [src/api/routes/events.ts](src/api/routes/events.ts) — it consults `getCachedRetentionSettings().minLevel` to drop sub-threshold events, and stamps the numeric `levelRank` (0=info, 1=warning, 2=error) at write time so the Events list endpoint's `sortBy=level` can dispatch to `orderBy: { levelRank }` for severity-ordered sort. Direct `prisma.event.create()` callers must stamp `levelRank` themselves; nothing in-tree bypasses `logEvent` today.
+- All successful Events are written to `prisma.event.create()` by callers (routes, services, jobs); eventArchiveService does not write Events, only manages their export/retention. The canonical helper is `logEvent` in [src/services/eventLogService.ts](src/services/eventLogService.ts) (re-exported from `src/api/routes/events.ts` for legacy importers) — it consults `getCachedRetentionSettings().minLevel` to drop sub-threshold events, and stamps the numeric `levelRank` (0=info, 1=warning, 2=error) at write time so the Events list endpoint's `sortBy=level` can dispatch to `orderBy: { levelRank }` for severity-ordered sort. Direct `prisma.event.create()` callers must stamp `levelRank` themselves; nothing in-tree bypasses `logEvent` today.
 - Archive export (SFTP/SCP) reads Events older than cutoff, writes JSON file, transfers via ssh/sftp spawn, then deletes from DB (via pruneEvents job).
 - Retention cache (1 min TTL) avoids DB read on every Event write; callers using `getCachedRetentionSettings()` must accept stale data.
 - Asset decommission threshold (0 = disabled) is in months; lastSeen older than that triggers `decommissioned` status in a separate 24h job.
@@ -1679,6 +1679,27 @@ Listed alphabetically.
 - Check asset decommission query doesn't accidentally mark live assets as stale (lastSeen >= cutoff).
 - Confirm syslog test messages arrive with the right facility/severity/format.
 - Validate SFTP injection prevention doesn't reject legitimate Windows paths with backslashes.
+
+---
+
+## services/eventLogService.ts
+
+**What it owns:** The shared audit-event writer. `logEvent` (never throws; drops rows below the operator-configured min level; stamps `levelRank` at write time), `buildChanges` (before/after diff for `.updated` events), `LogEventInput`.
+
+**Public API:** `logEvent`, `buildChanges`, `LogEventInput`.
+
+**Cross-service deps:** `eventArchiveService.getCachedRetentionSettings` (cached min-level read).
+
+**Used by:** ~42 modules across routes / services / jobs. Most import via the back-compat re-export in `src/api/routes/events.ts`; new code should import from here directly so services never depend on the route layer.
+
+**Invariants:**
+- `logEvent` must never throw — event logging can't be allowed to break the operation it audits. Failures are swallowed.
+- `levelRank` is stamped here (0=info, 1=warning, 2=error); the Events list endpoint's `sortBy=level` depends on it.
+- Sub-`minLevel` events are dropped silently (cached settings read, 60s TTL — accept staleness).
+
+**When changing this:**
+- The events.ts re-export must stay in lockstep (same symbol names) until the legacy importers are migrated.
+- Anything that makes `logEvent` throw or block breaks every mutating route in the app — keep it best-effort.
 
 ---
 
@@ -2317,11 +2338,11 @@ Listed alphabetically.
 
 **What it owns:** Global typeahead search across all domain entities, with input classification (IP/CIDR/MAC/text), whitespace/quoted-phrase tokenization into AND-combined terms, parallel entity-specific queries capped at 8 results per group, AND scope-prefix shortcuts (`block:`/`b:`, `network:`/`n:`, `asset:`/`a:`, `reservation:`/`r:`, `map:`/`m:`) that bypass the per-group cap.
 
-**Public API:** `searchAll`, `normalizeMac`, `parseSearchTerms`.
+**Public API:** `searchAll(rawQuery, allowed?)`, `SearchAllowed`, `normalizeMac`, `parseSearchTerms`.
 
 **Cross-service deps:** none (uses cidr.js utils and prisma directly).
 
-**Used by:** `src/api/routes/search.ts — GET /api/v1/search endpoint`. Total 1 call site.
+**Used by:** `src/api/routes/search.ts — GET /api/v1/search endpoint`. Total 1 call site. The route derives the optional `allowed` group map from the caller's role (`blocks`→ipBlocks, `subnets`→subnets, `reservations`→reservations, `assets`→assets, `sites`→deviceMap; `ips` needs subnets AND reservations) — denied groups return empty without running their query helpers, in both scoped and unscoped paths. Omitting `allowed` = all-allowed (historical behavior for non-route callers).
 
 **Invariants:**
 - **Multi-term AND** (`parseSearchTerms`): the post-scope-strip query is tokenized on whitespace, double-quoted runs kept whole (`"rogers group" metro` → two terms; a dangling opening quote swallows the rest as one phrase; quotes stripped, empty terms dropped). `searchAll` returns empty when zero terms survive. Every query helper builds `AND: terms.map(t => ({ OR: [cols…] }))` via the `andOfTerms(terms, cols)` helper, so a row must satisfy **every** term (each in at least one of its columns). A single term collapses to a one-element AND — byte-for-byte the pre-multi-term `OR`-of-columns behavior. **IP/CIDR/MAC classification, the `cidrExact`/`ipExact` exact-match boosts, and MAC normalization only fire for single-term queries** (`singleTerm = terms.length === 1`); multi-term is always plain text. In `runAssetSearch`, the side-table pathways (`externalId`/`mac`/`ip`) and the JSON-blob raw scan AND each term **within their single field/blob** (so cross-pathway AND — term A in hostname, term B in a side-table MAC — is not matched; the asset's own columns are the only cross-column AND). The JSON raw SQL builds its per-term ILIKE list with `Prisma.join(…, " AND ")` on each side of the UNION; `parseSearchTerms`'s non-empty guarantee keeps those `WHERE` fragments from going empty. The `<kind>:` source prefix is only stripped in single-term mode.
@@ -2422,9 +2443,9 @@ Listed alphabetically.
 
 ## services/timescaleService.ts
 
-**What it owns:** TimescaleDB extension detection and hypertable migration for six sample tables; `dropChunks` pre-filter for retention pruning. Boot-time detection caches hypertable status; subsequent `isHypertable()` checks return cached value without round-tripping.
+**What it owns:** TimescaleDB extension detection and hypertable migration for the eight sample tables + sixteen rollup tables (24 hypertable candidates); `dropChunks` pre-filter for retention pruning. Boot-time detection caches hypertable status; subsequent `isHypertable()` checks return cached value without round-tripping.
 
-**Public API:** `detectTimescale`, `isTimescaleAvailable`, `isHypertable`, `getDetectionState`, `dropChunks`, `getEffectiveCompressAfterDays`, `migrateToHypertables`, `SAMPLE_TABLES`, `SampleTableName`, `DetectionState`.
+**Public API:** `detectTimescale`, `isTimescaleAvailable`, `isHypertable`, `getDetectionState`, `dropChunks`, `getEffectiveCompressAfterDays`, `migrateToHypertables`, `SAMPLE_TABLES`, `ROLLUP_TABLES`, `ALL_HYPERTABLE_CANDIDATES`, `SampleTableName`, `RollupTableName`, `ManagedHypertableName`, `DetectionState`.
 
 **Cross-service deps:** none.
 
@@ -2439,7 +2460,7 @@ Listed alphabetically.
 
 **When changing this:**
 - Verify `detectTimescale()` is called before any sample write so hypertable status is fresh.
-- If modifying `SAMPLE_TABLES`, keep in sync across detection, pruning, and migration logic.
+- If modifying `SAMPLE_TABLES` / `ROLLUP_TABLES`, keep in sync across detection, pruning, and migration logic, plus capacityService's local per-table projection map. `tests/unit/timescaleTables.test.ts` drift-guards the inventory against sampleRollupService, the monitoringService prune layer, and prisma/schema.prisma (with an explicit exemption list — `asset_custom_widget_samples` is the one known unmanaged sample table).
 - Test plain-Postgres fallback path: verify `dropChunks` no-op and `deleteMany` handles all pruning when extension unavailable.
 - Check compression policy drift if operators change `TIMESCALE_COMPRESS_AFTER_DAYS` mid-boot cycle (only takes effect next restart).
 - If TimescaleDB ever renames the compression-policy config key (`compress_after`), update `compressionPolicyMatches` — but its catch-all returns `false` (recreate) on any introspection failure, so a key rename degrades to the old always-recreate behavior + the backlog pass, never breaks.

@@ -292,18 +292,23 @@ export async function flagStaleReservations(): Promise<number> {
   if (settings.staleAfterDays === 0) return 0;
 
   const stale = await listStaleReservations();
-  let emitted = 0;
+  const toNotify = stale.filter((row) => !row.staleNotifiedAt);
+  if (toNotify.length === 0) return 0;
   const now = new Date();
 
-  for (const row of stale) {
-    if (row.staleNotifiedAt) continue;
-
+  // Emit all events in parallel (allSettled — one failed event write must not
+  // block the rest or the stamp), THEN stamp staleNotifiedAt in a single
+  // updateMany. The prior per-row `await logEvent` + `await update` loop was
+  // 2N sequential round-trips — a 6h scan on a large fleet can surface
+  // hundreds of rows at once. Event-before-stamp keeps the original
+  // at-least-once alerting bias: a crash between the two refires next run
+  // rather than losing alerts.
+  await Promise.allSettled(toNotify.map((row) => {
     const ipLabel = row.ipAddress ?? "(no IP)";
     const sinceLabel = row.lastSeenLeased
       ? `${row.daysSinceSeen} day${row.daysSinceSeen === 1 ? "" : "s"} since last seen leased`
       : `never seen leased — ${row.daysSinceSeen} day${row.daysSinceSeen === 1 ? "" : "s"} since detection baseline`;
-
-    await logEvent({
+    return logEvent({
       action: "reservation.stale",
       level: "warning",
       resourceType: "reservation",
@@ -323,12 +328,11 @@ export async function flagStaleReservations(): Promise<number> {
         staleAfterDays: settings.staleAfterDays,
       },
     });
+  }));
 
-    await prisma.reservation.update({
-      where: { id: row.id },
-      data: { staleNotifiedAt: now },
-    });
-    emitted++;
-  }
-  return emitted;
+  await prisma.reservation.updateMany({
+    where: { id: { in: toNotify.map((row) => row.id) } },
+    data:  { staleNotifiedAt: now },
+  });
+  return toNotify.length;
 }
