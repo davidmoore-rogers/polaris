@@ -15,7 +15,7 @@ import {
   classifyPushError,
   type PushReservationResult,
 } from "./reservationPushService.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent, buildChanges } from "./eventLogService.js";
 import { releaseDnsResolvedAt } from "./dnsResolvedReservationService.js";
 
 export interface CreateReservationInput {
@@ -32,6 +32,8 @@ export interface CreateReservationInput {
   // reservations on the FortiGate are MAC→IP, so a missing MAC aborts the
   // create. Optional for everything else.
   macAddress?: string;
+  /** Discriminates the audit message — nextAvailableReservation sets "auto-allocate". */
+  via?: "auto-allocate";
 }
 
 export interface UpdateReservationInput {
@@ -151,6 +153,32 @@ function resolvePushEligibility(
 }
 
 export async function createReservation(input: CreateReservationInput) {
+  const reservation = await createReservationFlow(input);
+  // ONE reservation.created audit row, after the full create(+push) flow
+  // resolves so the message can report the final push outcome. The flow's
+  // own push-lifecycle events (push.queued / push.failed / ...) are separate
+  // detail rows and unchanged.
+  const pushedSuffix = reservation.pushStatus === "synced"
+    ? ` and pushed to FortiGate`
+    : reservation.pushStatus === "pending"
+      ? ` — queued for push (FortiGate unreachable; will retry automatically)`
+      : "";
+  void logEvent({
+    action: "reservation.created",
+    resourceType: "reservation",
+    resourceId: reservation.id,
+    resourceName: input.via === "auto-allocate"
+      ? (reservation.hostname || reservation.ipAddress || undefined)
+      : (input.hostname || input.ipAddress),
+    actor: input.createdBy,
+    message: input.via === "auto-allocate"
+      ? `Reservation auto-allocated for ${reservation.ipAddress} (${input.owner || "no owner"})${pushedSuffix}`
+      : `Reservation created for ${input.ipAddress || "subnet"} (${input.owner})${pushedSuffix}`,
+  });
+  return reservation;
+}
+
+async function createReservationFlow(input: CreateReservationInput) {
   // 1. Load the target subnet (with integration for push eligibility)
   const subnet = await prisma.subnet.findUnique({
     where: { id: input.subnetId },
@@ -586,7 +614,7 @@ export async function updateReservation(
     }
   }
 
-  return prisma.reservation.update({
+  const updated = await prisma.reservation.update({
     where: { id },
     data: {
       hostname: input.hostname,
@@ -598,11 +626,25 @@ export async function updateReservation(
       ...(pushStateUpdates ?? {}),
     },
   });
+  const changes = buildChanges(
+    { hostname: reservation.hostname, owner: reservation.owner, macAddress: reservation.macAddress, projectRef: reservation.projectRef, expiresAt: reservation.expiresAt, notes: reservation.notes },
+    { hostname: updated.hostname, owner: updated.owner, macAddress: updated.macAddress, projectRef: updated.projectRef, expiresAt: updated.expiresAt, notes: updated.notes },
+  );
+  void logEvent({
+    action: "reservation.updated",
+    resourceType: "reservation",
+    resourceId: id,
+    resourceName: input.hostname,
+    actor: actor || undefined,
+    message: `Reservation updated`,
+    details: changes ? { changes } : undefined,
+  });
+  return updated;
 }
 
 // ─── Release ──────────────────────────────────────────────────────────────────
 
-export async function releaseReservation(id: string) {
+export async function releaseReservation(id: string, actor?: string) {
   const reservation = await prisma.reservation.findUnique({
     where: { id },
     include: {
@@ -745,7 +787,7 @@ export async function releaseReservation(id: string) {
     }
   }
 
-  return prisma.$transaction(async (tx) => {
+  const releasedRow = await prisma.$transaction(async (tx) => {
     // The @@unique([subnetId, ipAddress, status]) constraint means we can't
     // have two released rows for the same IP. Reserve→unreserve→reserve→
     // unreserve cycles would otherwise collide on the second release. The
@@ -790,6 +832,20 @@ export async function releaseReservation(id: string) {
 
     return released;
   });
+
+  // Emitted after the transaction commits (phantom-on-rollback otherwise).
+  // The queued path's reservation.push.queued.released Event above is the
+  // push-lifecycle detail row; this is the top-level audit row — both fire,
+  // matching the historical route + service split.
+  void logEvent({
+    action: "reservation.released",
+    resourceType: "reservation",
+    resourceId: id,
+    resourceName: reservation.hostname || reservation.ipAddress || undefined,
+    actor,
+    message: `Reservation released`,
+  });
+  return releasedRow;
 }
 
 // ─── Next Available IP ────────────────────────────────────────────────────────
@@ -840,7 +896,7 @@ export async function nextAvailableReservation(input: NextAvailableReservationIn
 
   if (!found) throw new AppError(409, `No available IP addresses in subnet ${subnet.cidr}`);
 
-  return createReservation({ ...input, ipAddress: found });
+  return createReservation({ ...input, ipAddress: found, via: "auto-allocate" });
 }
 
 // ─── Expire (called by scheduled job) ────────────────────────────────────────

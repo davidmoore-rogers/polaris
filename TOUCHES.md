@@ -2218,7 +2218,7 @@ Listed alphabetically.
 
 ## services/reservationService.ts
 
-**What it owns:** Reservation creation, updates, release, expiry, and DHCP push orchestration.
+**What it owns:** Reservation creation, updates, release, expiry, and DHCP push orchestration — including ALL the reservation audit Events: the push-lifecycle detail rows AND the top-level `reservation.created` / `reservation.updated` / `reservation.released` CRUD rows (createReservation is a thin wrapper around the internal flow that emits the one created-Event with the final push outcome in its message; `via: "auto-allocate"` discriminates the nextAvailableReservation message; releaseReservation takes `(id, actor?)` and emits after its transaction commits).
 
 **Public API:** listReservations, getReservation, createReservation, updateReservation, releaseReservation, nextAvailableReservation, expireStaleReservations.
 
@@ -2244,12 +2244,13 @@ Listed alphabetically.
 - Verify releaseReservation's transaction scope (unpush, lease release, subnet status reset)
 - Check expireStaleReservations is called every 15 min via jobs/expireReservations.ts
 - Audit the atomic create-and-push path for rollback edge cases (orphaned device entries)
+- Exactly ONE top-level CRUD Event per mutation, in-service (route layer emits nothing) — `tests/integration/reservations.test.ts` asserts the contract. A queued release intentionally writes TWO rows (`reservation.released` top-level + `reservation.push.queued.released` detail) — historical behavior, preserved.
 
 ---
 
 ## services/reservationStaleService.ts
 
-**What it owns:** Stale DHCP-reservation detection, alerting, and alert management (snooze, ignore).
+**What it owns:** Stale DHCP-reservation detection, alerting, and alert management (snooze, ignore) — including the lifecycle audit Events (`reservation.stale-settings.updated` / `reservation.stale.snoozed` / `reservation.stale.ignored` / `reservation.stale.unignored`), emitted in-service with the route passing `actor`.
 
 **Public API:** getStaleSettings, updateStaleSettings, listStaleReservations, snoozeReservation, setStaleIgnored, flagStaleReservations.
 

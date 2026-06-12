@@ -13,7 +13,6 @@ import * as reservationService from "../../services/reservationService.js";
 import * as staleService from "../../services/reservationStaleService.js";
 import { AppError } from "../../utils/errors.js";
 import { requirePermission, requireOwnership } from "../middleware/permissions.js";
-import { logEvent, buildChanges } from "./events.js";
 
 const router = Router();
 
@@ -89,14 +88,7 @@ router.get("/stale-settings", requirePermission("staleReservations", "read"), as
 router.put("/stale-settings", requirePermission("staleReservations", "write"), async (req, res, next) => {
   try {
     const input = StaleSettingsSchema.parse(req.body);
-    const updated = await staleService.updateStaleSettings(input);
-    logEvent({
-      action: "reservation.stale-settings.updated",
-      resourceType: "setting",
-      actor: req.session?.username,
-      message: `Reservation stale-detection threshold set to ${updated.staleAfterDays} day(s)${updated.staleAfterDays === 0 ? " — alerts disabled" : ""}`,
-      details: { staleAfterDays: updated.staleAfterDays },
-    });
+    const updated = await staleService.updateStaleSettings(input, req.session?.username);
     res.json(updated);
   } catch (err) { next(err); }
 });
@@ -125,15 +117,7 @@ router.get("/alerts/count", requirePermission("staleReservations", "read"), asyn
 // Open to any user-or-above so operators can quiet noise without admin escalation.
 router.post("/:id/snooze", requirePermission("staleReservations", "write"), async (req, res, next) => {
   try {
-    const result = await staleService.snoozeReservation(req.params.id as string);
-    logEvent({
-      action: "reservation.stale.snoozed",
-      resourceType: "reservation",
-      resourceId: result.reservationId,
-      actor: req.session?.username,
-      message: `Stale-reservation alert snoozed for ${result.daysAdded} day(s); next alert eligibility ${result.snoozedUntil.toISOString()}`,
-      details: { snoozedUntil: result.snoozedUntil.toISOString(), daysAdded: result.daysAdded },
-    });
+    const result = await staleService.snoozeReservation(req.params.id as string, req.session?.username);
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -144,28 +128,14 @@ router.post("/:id/snooze", requirePermission("staleReservations", "write"), asyn
 // intent is durable. Reachable via the admin filter view in the Alerts panel.
 router.post("/:id/stale-ignore", requirePermission("staleReservations", "write"), async (req, res, next) => {
   try {
-    const result = await staleService.setStaleIgnored(req.params.id as string, true);
-    logEvent({
-      action: "reservation.stale.ignored",
-      resourceType: "reservation",
-      resourceId: result.reservationId,
-      actor: req.session?.username,
-      message: `Stale-reservation alert permanently ignored — operator opted out of future notifications for this row`,
-    });
+    const result = await staleService.setStaleIgnored(req.params.id as string, true, req.session?.username);
     res.json(result);
   } catch (err) { next(err); }
 });
 
 router.delete("/:id/stale-ignore", requirePermission("staleReservations", "write"), async (req, res, next) => {
   try {
-    const result = await staleService.setStaleIgnored(req.params.id as string, false);
-    logEvent({
-      action: "reservation.stale.unignored",
-      resourceType: "reservation",
-      resourceId: result.reservationId,
-      actor: req.session?.username,
-      message: `Stale-reservation alert un-ignored — row will alert again on the next stale crossing`,
-    });
+    const result = await staleService.setStaleIgnored(req.params.id as string, false, req.session?.username);
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -217,12 +187,6 @@ router.post("/next-available", requireOwnership("reservations"), async (req, res
       ...input,
       createdBy: req.session?.username,
     });
-    const pushedSuffix = reservation.pushStatus === "synced"
-      ? ` and pushed to FortiGate`
-      : reservation.pushStatus === "pending"
-        ? ` — queued for push (FortiGate unreachable; will retry automatically)`
-        : "";
-    logEvent({ action: "reservation.created", resourceType: "reservation", resourceId: reservation.id, resourceName: reservation.hostname || reservation.ipAddress || undefined, actor: req.session?.username, message: `Reservation auto-allocated for ${reservation.ipAddress} (${input.owner || "no owner"})${pushedSuffix}` });
     res.status(201).json(reservation);
   } catch (err) {
     next(err);
@@ -262,12 +226,6 @@ router.post("/", requireOwnership("reservations"), async (req, res, next) => {
       ...input,
       createdBy: req.session?.username,
     });
-    const pushedSuffix = reservation.pushStatus === "synced"
-      ? ` and pushed to FortiGate`
-      : reservation.pushStatus === "pending"
-        ? ` — queued for push (FortiGate unreachable; will retry automatically)`
-        : "";
-    logEvent({ action: "reservation.created", resourceType: "reservation", resourceId: reservation.id, resourceName: input.hostname || input.ipAddress, actor: req.session?.username, message: `Reservation created for ${input.ipAddress || "subnet"} (${input.owner})${pushedSuffix}` });
     res.status(201).json(reservation);
   } catch (err) {
     next(err);
@@ -285,11 +243,6 @@ router.put("/:id", requireOwnership("reservations"), async (req, res, next) => {
     const reservation = await reservationService.updateReservation(id, input, {
       actor: req.session?.username ?? null,
     });
-    const changes = buildChanges(
-      { hostname: before.hostname, owner: before.owner, macAddress: before.macAddress, projectRef: before.projectRef, expiresAt: before.expiresAt, notes: before.notes },
-      { hostname: reservation.hostname, owner: reservation.owner, macAddress: reservation.macAddress, projectRef: reservation.projectRef, expiresAt: reservation.expiresAt, notes: reservation.notes },
-    );
-    logEvent({ action: "reservation.updated", resourceType: "reservation", resourceId: id, resourceName: input.hostname, actor: req.session?.username, message: `Reservation updated`, details: changes ? { changes } : undefined });
     res.json(reservation);
   } catch (err) {
     next(err);
@@ -305,8 +258,7 @@ router.delete("/:id", requireOwnership("reservations"), async (req, res, next) =
         throw new AppError(403, "Forbidden — you can only release reservations you created");
       }
     }
-    await reservationService.releaseReservation(id);
-    logEvent({ action: "reservation.released", resourceType: "reservation", resourceId: id, actor: req.session?.username, message: `Reservation released` });
+    await reservationService.releaseReservation(id, req.session?.username);
     res.status(204).send();
   } catch (err) {
     next(err);

@@ -8,7 +8,7 @@
 import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { app } from "../../src/app.js";
 import { prisma } from "../../src/db.js";
-import { authedAgent, dbDescribe, dbReachable, ensureTestUser } from "./_helpers.js";
+import { authedAgent, dbDescribe, dbReachable, ensureTestUser, waitForEventCount } from "./_helpers.js";
 
 const d = dbDescribe;
 
@@ -276,5 +276,70 @@ d("DELETE /api/v1/reservations/:id", () => {
     await agent.delete(`/api/v1/reservations/${r.body.id}`).set("X-CSRF-Token", csrf);
     const resp = await agent.delete(`/api/v1/reservations/${r.body.id}`).set("X-CSRF-Token", csrf);
     expect(resp.status).toBe(409);
+  });
+});
+
+// ─── Audit events (service-layer logging) ───────────────────────────────────
+
+d("reservation mutations write exactly one audit Event each", () => {
+  beforeEach(async () => {
+    await prisma.event.deleteMany({ where: { action: { startsWith: "reservation." } } });
+  });
+
+  it("create, auto-allocate, update, and release each write one Event", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.90.0.0/16", "10.90.1.0/24");
+
+    const created = await agent
+      .post("/api/v1/reservations")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, ipAddress: "10.90.1.5", hostname: "evt-host", owner: "alice" });
+    expect(created.status).toBe(201);
+    expect(await waitForEventCount("reservation.created", 1, created.body.id)).toBe(1);
+    const createdEvt = await prisma.event.findFirst({ where: { action: "reservation.created", resourceId: created.body.id } });
+    expect(createdEvt?.message).toContain("created for 10.90.1.5");
+
+    const auto = await agent
+      .post("/api/v1/reservations/next-available")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, hostname: "evt-auto", owner: "bob" });
+    expect(auto.status).toBe(201);
+    expect(await waitForEventCount("reservation.created", 1, auto.body.id)).toBe(1);
+    const autoEvt = await prisma.event.findFirst({ where: { action: "reservation.created", resourceId: auto.body.id } });
+    expect(autoEvt?.message).toContain("auto-allocated");
+
+    const updated = await agent
+      .put(`/api/v1/reservations/${created.body.id}`)
+      .set("X-CSRF-Token", csrf)
+      .send({ notes: "updated note" });
+    expect(updated.status).toBe(200);
+    expect(await waitForEventCount("reservation.updated", 1, created.body.id)).toBe(1);
+    const updEvt = await prisma.event.findFirst({ where: { action: "reservation.updated", resourceId: created.body.id } });
+    expect((updEvt?.details as any)?.changes?.notes?.to).toBe("updated note");
+
+    const released = await agent
+      .delete(`/api/v1/reservations/${created.body.id}`)
+      .set("X-CSRF-Token", csrf);
+    expect(released.status).toBe(204);
+    expect(await waitForEventCount("reservation.released", 1, created.body.id)).toBe(1);
+  });
+
+  it("a failed create (duplicate IP) writes no Event", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.91.0.0/16", "10.91.1.0/24");
+    const first = await agent
+      .post("/api/v1/reservations")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, ipAddress: "10.91.1.5", hostname: "evt-dup", owner: "alice" });
+    expect(first.status).toBe(201);
+    await waitForEventCount("reservation.created", 1, first.body.id);
+
+    const dup = await agent
+      .post("/api/v1/reservations")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, ipAddress: "10.91.1.5", hostname: "evt-dup-2", owner: "bob" });
+    expect(dup.status).toBe(409);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await prisma.event.count({ where: { action: "reservation.created" } })).toBe(1);
   });
 });

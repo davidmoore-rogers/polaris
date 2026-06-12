@@ -21,7 +21,7 @@
  */
 
 import { prisma } from "../db.js";
-import { logEvent } from "../api/routes/events.js";
+import { logEvent } from "./eventLogService.js";
 
 const SETTINGS_KEY = "reservationStale";
 const DETECTION_STARTED_AT_KEY = "reservationStaleDetectionStartedAt";
@@ -46,6 +46,7 @@ export async function getStaleSettings(): Promise<ReservationStaleSettings> {
 
 export async function updateStaleSettings(
   settings: Partial<ReservationStaleSettings>,
+  actor?: string,
 ): Promise<ReservationStaleSettings> {
   const days = Number(settings.staleAfterDays);
   const merged: ReservationStaleSettings = {
@@ -55,6 +56,13 @@ export async function updateStaleSettings(
     where: { key: SETTINGS_KEY },
     create: { key: SETTINGS_KEY, value: merged as any },
     update: { value: merged as any },
+  });
+  void logEvent({
+    action: "reservation.stale-settings.updated",
+    resourceType: "setting",
+    actor,
+    message: `Reservation stale-detection threshold set to ${merged.staleAfterDays} day(s)${merged.staleAfterDays === 0 ? " — alerts disabled" : ""}`,
+    details: { staleAfterDays: merged.staleAfterDays },
   });
   return merged;
 }
@@ -117,7 +125,7 @@ export interface SnoozeReservationResult {
  * an already-snoozed row extends from "now" rather than from the current
  * snoozedUntil, so repeated clicks always give exactly one full window.
  */
-export async function snoozeReservation(reservationId: string): Promise<SnoozeReservationResult> {
+export async function snoozeReservation(reservationId: string, actor?: string): Promise<SnoozeReservationResult> {
   const settings = await getStaleSettings();
   if (settings.staleAfterDays === 0) {
     const { AppError } = await import("../utils/errors.js");
@@ -137,6 +145,14 @@ export async function snoozeReservation(reservationId: string): Promise<SnoozeRe
   await prisma.reservation.update({
     where: { id: reservationId },
     data: { staleSnoozedUntil: snoozedUntil, staleNotifiedAt: null },
+  });
+  void logEvent({
+    action: "reservation.stale.snoozed",
+    resourceType: "reservation",
+    resourceId: reservationId,
+    actor,
+    message: `Stale-reservation alert snoozed for ${settings.staleAfterDays} day(s); next alert eligibility ${snoozedUntil.toISOString()}`,
+    details: { snoozedUntil: snoozedUntil.toISOString(), daysAdded: settings.staleAfterDays },
   });
   return { reservationId, snoozedUntil, daysAdded: settings.staleAfterDays };
 }
@@ -257,6 +273,7 @@ export interface IgnoreReservationResult {
 export async function setStaleIgnored(
   reservationId: string,
   staleIgnored: boolean,
+  actor?: string,
 ): Promise<IgnoreReservationResult> {
   const { AppError } = await import("../utils/errors.js");
   const row = await prisma.reservation.findUnique({
@@ -277,6 +294,15 @@ export async function setStaleIgnored(
       // up the row fresh.
       ...(staleIgnored ? { staleSnoozedUntil: null, staleNotifiedAt: null } : {}),
     },
+  });
+  void logEvent({
+    action: staleIgnored ? "reservation.stale.ignored" : "reservation.stale.unignored",
+    resourceType: "reservation",
+    resourceId: reservationId,
+    actor,
+    message: staleIgnored
+      ? `Stale-reservation alert permanently ignored — operator opted out of future notifications for this row`
+      : `Stale-reservation alert un-ignored — row will alert again on the next stale crossing`,
   });
   return { reservationId, staleIgnored };
 }
