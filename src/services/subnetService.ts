@@ -5,6 +5,7 @@
 import type { SubnetStatus } from "../generated/prisma/client.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
+import { logEvent, buildChanges } from "./eventLogService.js";
 import {
   normalizeCidr,
   isValidCidr,
@@ -24,6 +25,10 @@ export interface CreateSubnetInput {
   vlan?: number;
   tags?: string[];
   createdBy?: string;
+  /** Session username stamped on the audit Event; omit for system callers. */
+  actor?: string;
+  /** Discriminates the audit message — allocateNextSubnet sets "auto-allocate". */
+  via?: "auto-allocate";
 }
 
 export interface UpdateSubnetInput {
@@ -34,6 +39,7 @@ export interface UpdateSubnetInput {
   tags?: string[];
   convertToManual?: boolean;
   mergeIntegration?: boolean;
+  actor?: string;
 }
 
 export interface ListSubnetsFilter {
@@ -128,7 +134,7 @@ export async function createSubnet(input: CreateSubnetInput) {
       `Subnet ${normalizedCidr} overlaps with existing subnet ${overlap.cidr}`
     );
 
-  return prisma.subnet.create({
+  const created = await prisma.subnet.create({
     data: {
       blockId: input.blockId,
       cidr: normalizedCidr,
@@ -140,6 +146,17 @@ export async function createSubnet(input: CreateSubnetInput) {
       createdBy: input.createdBy,
     },
   });
+  void logEvent({
+    action: "subnet.created",
+    resourceType: "subnet",
+    resourceId: created.id,
+    resourceName: input.name,
+    actor: input.actor,
+    message: input.via === "auto-allocate"
+      ? `Subnet "${input.name}" (${created.cidr}) auto-allocated`
+      : `Subnet "${input.name}" (${input.cidr}) created`,
+  });
+  return created;
 }
 
 // ─── Auto-allocate next available ────────────────────────────────────────────
@@ -175,7 +192,7 @@ export async function allocateNextSubnet(
       `No available /${prefixLength} subnet found in block ${block.cidr}`
     );
 
-  return createSubnet({ ...metadata, blockId, cidr: nextCidr });
+  return createSubnet({ ...metadata, blockId, cidr: nextCidr, via: "auto-allocate" });
 }
 
 // ─── Bulk allocation from a template ─────────────────────────────────────────
@@ -208,6 +225,8 @@ export interface BulkAllocateInput {
    */
   anchorPrefix?: number;
   createdBy?: string;
+  /** Session username stamped on the audit Event; omit for system callers. */
+  actor?: string;
 }
 
 export interface BulkAllocateResult {
@@ -266,7 +285,7 @@ export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAlloca
 
   // Compute the packed CIDRs under a transaction. Re-query existing subnets
   // inside the transaction so concurrent allocations don't race with us.
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const existing = await tx.subnet.findMany({
       where: { blockId: input.blockId },
       select: { cidr: true },
@@ -321,6 +340,19 @@ export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAlloca
       effectiveAnchorPrefix: packed.effectiveAnchorPrefix,
     };
   });
+
+  // ONE event for the whole batch, emitted strictly AFTER the transaction
+  // commits — an event from inside would be a phantom on rollback. The
+  // per-subnet tx.subnet.create calls intentionally emit nothing.
+  const cidrs = result.created.map((s) => s.cidr).join(", ");
+  void logEvent({
+    action: "subnet.bulk-allocated",
+    resourceType: "subnet",
+    actor: input.actor,
+    message: `Bulk-allocated ${result.created.length} subnet(s) with prefix "${input.prefix}" inside anchor ${result.anchorCidr}: ${cidrs}`,
+    details: { created: result.created, anchorCidr: result.anchorCidr, effectiveAnchorPrefix: result.effectiveAnchorPrefix },
+  });
+  return result;
 }
 
 // ─── Preview (read-only sibling of bulkAllocate) ─────────────────────────────
@@ -469,7 +501,21 @@ export async function updateSubnet(id: string, input: UpdateSubnetInput) {
     data.fortigateDevice = null;
   }
 
-  return prisma.subnet.update({ where: { id }, data });
+  const updated = await prisma.subnet.update({ where: { id }, data });
+  const changes = buildChanges(
+    { name: subnet.name, purpose: subnet.purpose, status: subnet.status, vlan: subnet.vlan, tags: subnet.tags },
+    { name: updated.name, purpose: updated.purpose, status: updated.status, vlan: updated.vlan, tags: updated.tags },
+  );
+  void logEvent({
+    action: "subnet.updated",
+    resourceType: "subnet",
+    resourceId: id,
+    resourceName: input.name || updated.name,
+    actor: input.actor,
+    message: `Subnet "${input.name || updated.name}" updated`,
+    details: changes ? { changes } : undefined,
+  });
+  return updated;
 }
 
 // ─── IP Enumeration ──────────────────────────────────────────────────────────
@@ -655,7 +701,7 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
 
 // ─── Delete ───────────────────────────────────────────────────────────────────
 
-export async function deleteSubnet(id: string) {
+export async function deleteSubnet(id: string, actor?: string) {
   const subnet = await prisma.subnet.findUnique({
     where: { id },
     include: {
@@ -679,5 +725,17 @@ export async function deleteSubnet(id: string) {
   const deletedReservations = subnet.reservations;
   await prisma.subnet.delete({ where: { id } });
 
+  const resCount = deletedReservations.length;
+  void logEvent({
+    action: "subnet.deleted",
+    resourceType: "subnet",
+    resourceId: id,
+    resourceName: subnet.name,
+    actor,
+    message: resCount > 0
+      ? `Subnet "${subnet.name}" (${subnet.cidr}) deleted with ${resCount} reservation(s)`
+      : `Subnet "${subnet.name}" (${subnet.cidr}) deleted`,
+    details: resCount > 0 ? { deletedReservations } : undefined,
+  });
   return { ...subnet, deletedReservations };
 }

@@ -8,7 +8,7 @@
 import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { app } from "../../src/app.js";
 import { prisma } from "../../src/db.js";
-import { authedAgent, dbDescribe, dbReachable, ensureTestUser } from "./_helpers.js";
+import { authedAgent, dbDescribe, dbReachable, ensureTestUser, waitForEventCount } from "./_helpers.js";
 
 const d = dbDescribe;
 
@@ -259,5 +259,92 @@ d("DELETE /api/v1/subnets/:id", () => {
       .send({ subnetId: sub.body.id, ipAddress: "10.81.1.5", hostname: "h01" });
     const resp = await agent.delete(`/api/v1/subnets/${sub.body.id}`).set("X-CSRF-Token", csrf);
     expect(resp.status).toBe(409);
+  });
+});
+
+// ─── Audit events (service-layer logging) ───────────────────────────────────
+
+d("subnet mutations write exactly one audit Event each", () => {
+  beforeEach(async () => {
+    await prisma.event.deleteMany({ where: { action: { startsWith: "subnet." } } });
+  });
+
+  it("manual create and auto-allocate write one subnet.created each, with distinct messages", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const block = await createBlock(agent, csrf, "Evt Block", "10.82.0.0/16");
+
+    const manual = await agent
+      .post("/api/v1/subnets")
+      .set("X-CSRF-Token", csrf)
+      .send({ blockId: block.id, cidr: "10.82.1.0/24", name: "evt-manual" });
+    expect(manual.status).toBe(201);
+    expect(await waitForEventCount("subnet.created", 1, manual.body.id)).toBe(1);
+    const manualEvt = await prisma.event.findFirst({ where: { action: "subnet.created", resourceId: manual.body.id } });
+    expect(manualEvt?.message).toContain("created");
+
+    const auto = await agent
+      .post("/api/v1/subnets/next-available")
+      .set("X-CSRF-Token", csrf)
+      .send({ blockId: block.id, prefixLength: 24, name: "evt-auto" });
+    expect(auto.status).toBe(201);
+    expect(await waitForEventCount("subnet.created", 1, auto.body.id)).toBe(1);
+    const autoEvt = await prisma.event.findFirst({ where: { action: "subnet.created", resourceId: auto.body.id } });
+    expect(autoEvt?.message).toContain("auto-allocated");
+  });
+
+  it("bulk-allocate writes ONE subnet.bulk-allocated and zero per-subnet events", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const block = await createBlock(agent, csrf, "Evt Bulk Block", "10.83.0.0/16");
+
+    const resp = await agent
+      .post("/api/v1/subnets/bulk-allocate")
+      .set("X-CSRF-Token", csrf)
+      .send({
+        blockId: block.id,
+        prefix: "EVT",
+        entries: [
+          { name: "a", prefixLength: 26 },
+          { name: "b", prefixLength: 26 },
+          { name: "c", prefixLength: 27 },
+        ],
+      });
+    expect(resp.status).toBe(201);
+    expect(resp.body.created.length).toBe(3);
+    expect(await waitForEventCount("subnet.bulk-allocated", 1)).toBe(1);
+    // The three tx.subnet.create calls inside the transaction must not emit.
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await prisma.event.count({ where: { action: "subnet.created" } })).toBe(0);
+  });
+
+  it("update and delete each write one Event; validation failure writes none", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const block = await createBlock(agent, csrf, "Evt CRUD Block", "10.84.0.0/16");
+    const sub = await agent
+      .post("/api/v1/subnets")
+      .set("X-CSRF-Token", csrf)
+      .send({ blockId: block.id, cidr: "10.84.1.0/24", name: "evt-crud" });
+    expect(sub.status).toBe(201);
+    const id = sub.body.id as string;
+
+    const updated = await agent
+      .put(`/api/v1/subnets/${id}`)
+      .set("X-CSRF-Token", csrf)
+      .send({ name: "evt-crud-2" });
+    expect(updated.status).toBe(200);
+    expect(await waitForEventCount("subnet.updated", 1, id)).toBe(1);
+
+    // Overlap = validation failure -> zero additional subnet.created rows
+    // beyond the one from the seed create above.
+    const overlap = await agent
+      .post("/api/v1/subnets")
+      .set("X-CSRF-Token", csrf)
+      .send({ blockId: block.id, cidr: "10.84.1.0/25", name: "evt-overlap" });
+    expect(overlap.status).toBe(409);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await prisma.event.count({ where: { action: "subnet.created" } })).toBe(1);
+
+    const del = await agent.delete(`/api/v1/subnets/${id}`).set("X-CSRF-Token", csrf);
+    expect(del.status).toBe(204);
+    expect(await waitForEventCount("subnet.deleted", 1, id)).toBe(1);
   });
 });

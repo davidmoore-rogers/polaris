@@ -89,6 +89,27 @@ export async function deleteTestUser(): Promise<void> {
 }
 
 /**
+ * Audit Events are written fire-and-forget (`void logEvent(...)`), so a test
+ * asserting on Event rows right after a mutation response races the insert.
+ * Poll until the count for `action` (optionally scoped to a resourceId)
+ * reaches `expected`, or ~1s elapses; returns the final count either way so
+ * the caller's expect() reports the real number.
+ */
+export async function waitForEventCount(
+  action: string,
+  expected: number,
+  resourceId?: string,
+): Promise<number> {
+  const where = { action, ...(resourceId ? { resourceId } : {}) };
+  for (let i = 0; i < 20; i++) {
+    const n = await prisma.event.count({ where });
+    if (n >= expected) return n;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return prisma.event.count({ where });
+}
+
+/**
  * Build a logged-in supertest agent. The agent's cookie jar holds the
  * session cookie + the polaris_csrf cookie across requests; the returned
  * `csrf` string is what mutating requests must echo in the `X-CSRF-Token`

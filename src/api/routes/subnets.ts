@@ -8,7 +8,6 @@ import * as subnetService from "../../services/subnetService.js";
 import { refreshSubnet } from "../../services/subnetRefreshService.js";
 import { requirePermission, requireOwnership } from "../middleware/permissions.js";
 import { AppError } from "../../utils/errors.js";
-import { logEvent, buildChanges } from "./events.js";
 
 const router = Router();
 
@@ -78,8 +77,11 @@ router.get("/", requirePermission("subnets", "read"), async (req, res, next) => 
 router.post("/next-available", requireOwnership("subnets"), async (req, res, next) => {
   try {
     const { blockId, prefixLength, ...metadata } = AllocateNextSchema.parse(req.body);
-    const subnet = await subnetService.allocateNextSubnet(blockId, prefixLength, { ...metadata, createdBy: req.session?.username ?? undefined });
-    logEvent({ action: "subnet.created", resourceType: "subnet", resourceId: subnet.id, resourceName: metadata.name, actor: req.session?.username, message: `Subnet "${metadata.name}" (${subnet.cidr}) auto-allocated` });
+    const subnet = await subnetService.allocateNextSubnet(blockId, prefixLength, {
+      ...metadata,
+      createdBy: req.session?.username ?? undefined,
+      actor: req.session?.username,
+    });
     res.status(201).json(subnet);
   } catch (err) {
     next(err);
@@ -114,14 +116,10 @@ router.post("/bulk-allocate/preview", requireOwnership("subnets"), async (req, r
 router.post("/bulk-allocate", requireOwnership("subnets"), async (req, res, next) => {
   try {
     const input = BulkAllocateSchema.parse(req.body);
-    const result = await subnetService.bulkAllocate({ ...input, createdBy: req.session?.username ?? undefined });
-    const cidrs = result.created.map((s) => s.cidr).join(", ");
-    logEvent({
-      action: "subnet.bulk-allocated",
-      resourceType: "subnet",
+    const result = await subnetService.bulkAllocate({
+      ...input,
+      createdBy: req.session?.username ?? undefined,
       actor: req.session?.username,
-      message: `Bulk-allocated ${result.created.length} subnet(s) with prefix "${input.prefix}" inside anchor ${result.anchorCidr}: ${cidrs}`,
-      details: { created: result.created, anchorCidr: result.anchorCidr, effectiveAnchorPrefix: result.effectiveAnchorPrefix },
     });
     res.status(201).json(result);
   } catch (err) {
@@ -171,8 +169,11 @@ router.get("/:id", requirePermission("subnets", "read"), async (req, res, next) 
 router.post("/", requireOwnership("subnets"), async (req, res, next) => {
   try {
     const input = CreateSubnetSchema.parse(req.body);
-    const subnet = await subnetService.createSubnet({ ...input, createdBy: req.session?.username ?? undefined });
-    logEvent({ action: "subnet.created", resourceType: "subnet", resourceId: subnet.id, resourceName: input.name, actor: req.session?.username, message: `Subnet "${input.name}" (${input.cidr}) created` });
+    const subnet = await subnetService.createSubnet({
+      ...input,
+      createdBy: req.session?.username ?? undefined,
+      actor: req.session?.username,
+    });
     res.status(201).json(subnet);
   } catch (err) {
     next(err);
@@ -188,12 +189,11 @@ router.put("/:id", requireOwnership("subnets"), async (req, res, next) => {
     if (req.permissionLevel !== "fullwrite" && before.createdBy !== req.session?.username) {
       throw new AppError(403, "Forbidden — you can only edit networks you created");
     }
-    const subnet = await subnetService.updateSubnet(id, { ...input, vlan: input.vlan ?? undefined });
-    const changes = buildChanges(
-      { name: before.name, purpose: before.purpose, status: before.status, vlan: before.vlan, tags: before.tags },
-      { name: subnet.name, purpose: subnet.purpose, status: subnet.status, vlan: subnet.vlan, tags: subnet.tags },
-    );
-    logEvent({ action: "subnet.updated", resourceType: "subnet", resourceId: id, resourceName: input.name || subnet.name, actor: req.session?.username, message: `Subnet "${input.name || subnet.name}" updated`, details: changes ? { changes } : undefined });
+    const subnet = await subnetService.updateSubnet(id, {
+      ...input,
+      vlan: input.vlan ?? undefined,
+      actor: req.session?.username,
+    });
     res.json(subnet);
   } catch (err) {
     next(err);
@@ -210,20 +210,7 @@ router.delete("/:id", requireOwnership("subnets"), async (req, res, next) => {
         throw new AppError(403, "Forbidden — you can only delete networks you created");
       }
     }
-    const result = await subnetService.deleteSubnet(id);
-    const resCount = result.deletedReservations.length;
-    const message = resCount > 0
-      ? `Subnet "${result.name}" (${result.cidr}) deleted with ${resCount} reservation(s)`
-      : `Subnet "${result.name}" (${result.cidr}) deleted`;
-    logEvent({
-      action: "subnet.deleted",
-      resourceType: "subnet",
-      resourceId: id,
-      resourceName: result.name,
-      actor: req.session?.username,
-      message,
-      details: resCount > 0 ? { deletedReservations: result.deletedReservations } : undefined,
-    });
+    await subnetService.deleteSubnet(id, req.session?.username);
     res.status(204).send();
   } catch (err) {
     next(err);

@@ -1421,7 +1421,7 @@ Listed alphabetically.
 
 ## services/blockService.ts
 
-**What it owns:** IP block CRUD and metadata (name, tags, description).
+**What it owns:** IP block CRUD and metadata (name, tags, description), plus the `block.created` / `block.updated` / `block.deleted` audit Events (emitted in-service after each mutation resolves; create/update inputs carry `actor?`, deleteBlock takes `(id, actor?)`).
 
 **Public API:** listBlocks, getBlock, createBlock, updateBlock, deleteBlock.
 
@@ -1432,6 +1432,7 @@ Listed alphabetically.
 - CIDR must be normalized and unique
 - IP version immutable after creation (v4 vs v6)
 - Tags are optional arrays, filtered client-side in listBlocks
+- Exactly ONE audit Event per mutation, fired `void` after the write resolves — never from the route layer (double-logging) and never before/inside the write (phantom on failure). `tests/integration/blocks.test.ts` asserts the one-per-mutation + zero-on-validation-failure contract.
 
 **When changing this:**
 - Verify deleteBlock's active-reservation cascade check (affects data integrity)
@@ -2416,7 +2417,7 @@ Listed alphabetically.
 
 ## services/subnetService.ts
 
-**What it owns:** Subnet creation, allocation, bulk templates, and lifecycle (manual vs discovered).
+**What it owns:** Subnet creation, allocation, bulk templates, and lifecycle (manual vs discovered), plus the `subnet.created` / `subnet.updated` / `subnet.deleted` / `subnet.bulk-allocated` audit Events (emitted in-service; inputs carry `actor?`, and `via: "auto-allocate"` discriminates the allocateNextSubnet message from a manual create).
 
 **Public API:** listSubnets, getSubnet, createSubnet, allocateNextSubnet, bulkAllocate, previewBulkAllocate, updateSubnet, getSubnetIps, deleteSubnet.
 
@@ -2438,6 +2439,7 @@ Listed alphabetically.
 - Verify bulkAllocate's anchor-aligned packing (all-or-nothing transaction)
 - Check updateSubnet does not allow status changes that violate reservation constraints
 - Review overlapping-sibling check performance for large blocks
+- **bulkAllocate's single `subnet.bulk-allocated` Event must stay AFTER the `$transaction` resolves** (an event from inside would be a phantom on rollback), and the per-subnet `tx.subnet.create` calls must stay event-free — `tests/integration/subnets.test.ts` asserts one-bulk-event + zero-per-subnet-events. allocateNextSubnet delegates to createSubnet, so it must keep passing `via: "auto-allocate"` rather than emitting its own event.
 
 ---
 

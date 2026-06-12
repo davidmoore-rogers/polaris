@@ -6,7 +6,6 @@ import { Router } from "express";
 import { z } from "zod";
 import * as blockService from "../../services/blockService.js";
 import { requirePermission } from "../middleware/permissions.js";
-import { logEvent, buildChanges } from "./events.js";
 
 const router = Router();
 
@@ -47,8 +46,7 @@ router.get("/:id", requirePermission("ipBlocks", "read"), async (req, res, next)
 router.post("/", requirePermission("ipBlocks", "write"), async (req, res, next) => {
   try {
     const input = CreateBlockSchema.parse(req.body);
-    const block = await blockService.createBlock(input);
-    logEvent({ action: "block.created", resourceType: "block", resourceId: block.id, resourceName: input.name, actor: req.session?.username, message: `Block "${input.name}" (${input.cidr}) created` });
+    const block = await blockService.createBlock({ ...input, actor: req.session?.username });
     res.status(201).json(block);
   } catch (err) {
     next(err);
@@ -59,13 +57,7 @@ router.put("/:id", requirePermission("ipBlocks", "write"), async (req, res, next
   try {
     const id = req.params.id as string;
     const input = UpdateBlockSchema.parse(req.body);
-    const before = await blockService.getBlock(id);
-    const block = await blockService.updateBlock(id, input);
-    const changes = buildChanges(
-      { name: before.name, description: before.description, tags: before.tags },
-      { name: block.name, description: block.description, tags: block.tags },
-    );
-    logEvent({ action: "block.updated", resourceType: "block", resourceId: id, resourceName: input.name || block.name, actor: req.session?.username, message: `Block "${input.name || block.name}" updated`, details: changes ? { changes } : undefined });
+    const block = await blockService.updateBlock(id, { ...input, actor: req.session?.username });
     res.json(block);
   } catch (err) {
     next(err);
@@ -75,8 +67,7 @@ router.put("/:id", requirePermission("ipBlocks", "write"), async (req, res, next
 router.delete("/:id", requirePermission("ipBlocks", "write"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
-    await blockService.deleteBlock(id);
-    logEvent({ action: "block.deleted", resourceType: "block", resourceId: id, actor: req.session?.username, message: `Block deleted` });
+    await blockService.deleteBlock(id, req.session?.username);
     res.status(204).send();
   } catch (err) {
     next(err);

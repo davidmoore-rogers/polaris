@@ -4,6 +4,7 @@
 
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
+import { logEvent, buildChanges } from "./eventLogService.js";
 import {
   normalizeCidr,
   isValidCidr,
@@ -15,12 +16,15 @@ export interface CreateBlockInput {
   cidr: string;
   description?: string;
   tags?: string[];
+  /** Session username stamped on the audit Event; omit for system callers. */
+  actor?: string;
 }
 
 export interface UpdateBlockInput {
   name?: string;
   description?: string;
   tags?: string[];
+  actor?: string;
 }
 
 export interface ListBlocksFilter {
@@ -70,7 +74,7 @@ export async function createBlock(input: CreateBlockInput) {
   if (existing)
     throw new AppError(409, `IP Block with CIDR ${normalizedCidr} already exists`);
 
-  return prisma.ipBlock.create({
+  const created = await prisma.ipBlock.create({
     data: {
       name: input.name,
       cidr: normalizedCidr,
@@ -79,6 +83,15 @@ export async function createBlock(input: CreateBlockInput) {
       tags: input.tags ?? [],
     },
   });
+  void logEvent({
+    action: "block.created",
+    resourceType: "block",
+    resourceId: created.id,
+    resourceName: input.name,
+    actor: input.actor,
+    message: `Block "${input.name}" (${input.cidr}) created`,
+  });
+  return created;
 }
 
 // ─── Update ───────────────────────────────────────────────────────────────────
@@ -87,7 +100,7 @@ export async function updateBlock(id: string, input: UpdateBlockInput) {
   const block = await prisma.ipBlock.findUnique({ where: { id } });
   if (!block) throw new AppError(404, `IP Block ${id} not found`);
 
-  return prisma.ipBlock.update({
+  const updated = await prisma.ipBlock.update({
     where: { id },
     data: {
       name: input.name,
@@ -95,11 +108,25 @@ export async function updateBlock(id: string, input: UpdateBlockInput) {
       tags: input.tags,
     },
   });
+  const changes = buildChanges(
+    { name: block.name, description: block.description, tags: block.tags },
+    { name: updated.name, description: updated.description, tags: updated.tags },
+  );
+  void logEvent({
+    action: "block.updated",
+    resourceType: "block",
+    resourceId: id,
+    resourceName: input.name || updated.name,
+    actor: input.actor,
+    message: `Block "${input.name || updated.name}" updated`,
+    details: changes ? { changes } : undefined,
+  });
+  return updated;
 }
 
 // ─── Delete ───────────────────────────────────────────────────────────────────
 
-export async function deleteBlock(id: string) {
+export async function deleteBlock(id: string, actor?: string) {
   const block = await prisma.ipBlock.findUnique({
     where: { id },
     include: { subnets: { select: { id: true } } },
@@ -120,5 +147,14 @@ export async function deleteBlock(id: string) {
       `Cannot delete block ${block.cidr} — it has ${activeReservations} active reservation(s) across its subnets`
     );
 
-  return prisma.ipBlock.delete({ where: { id } });
+  const deleted = await prisma.ipBlock.delete({ where: { id } });
+  void logEvent({
+    action: "block.deleted",
+    resourceType: "block",
+    resourceId: id,
+    resourceName: block.name,
+    actor,
+    message: `Block deleted`,
+  });
+  return deleted;
 }

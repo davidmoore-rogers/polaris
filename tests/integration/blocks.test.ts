@@ -8,7 +8,7 @@
 import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { app } from "../../src/app.js";
 import { prisma } from "../../src/db.js";
-import { authedAgent, dbDescribe, dbReachable, ensureTestUser } from "./_helpers.js";
+import { authedAgent, dbDescribe, dbReachable, ensureTestUser, waitForEventCount } from "./_helpers.js";
 
 const d = dbDescribe;
 
@@ -219,5 +219,51 @@ d("POST/PUT/DELETE /blocks require networkadmin", () => {
     // CSRF middleware runs before auth, so a sessionless mutation is rejected
     // with 403 (missing token) rather than 401 — either way it must not land.
     expect([401, 403]).toContain(resp.status);
+  });
+});
+
+// ─── Audit events (service-layer logging) ───────────────────────────────────
+
+d("block mutations write exactly one audit Event each", () => {
+  beforeEach(async () => {
+    await prisma.event.deleteMany({ where: { action: { startsWith: "block." } } });
+  });
+
+  it("create, update, and delete each write one Event with the session actor", async () => {
+    const { agent, csrf } = await authedAgent(app);
+
+    const created = await agent
+      .post("/api/v1/blocks")
+      .set("X-CSRF-Token", csrf)
+      .send({ name: "Event Block", cidr: "10.150.0.0/16" });
+    expect(created.status).toBe(201);
+    const id = created.body.id as string;
+    expect(await waitForEventCount("block.created", 1, id)).toBe(1);
+
+    const updated = await agent
+      .put(`/api/v1/blocks/${id}`)
+      .set("X-CSRF-Token", csrf)
+      .send({ name: "Event Block 2" });
+    expect(updated.status).toBe(200);
+    expect(await waitForEventCount("block.updated", 1, id)).toBe(1);
+    const updateEvent = await prisma.event.findFirst({ where: { action: "block.updated", resourceId: id } });
+    expect(updateEvent?.actor).toBeTruthy();
+    expect((updateEvent?.details as any)?.changes?.name?.to).toBe("Event Block 2");
+
+    const deleted = await agent.delete(`/api/v1/blocks/${id}`).set("X-CSRF-Token", csrf);
+    expect(deleted.status).toBe(204);
+    expect(await waitForEventCount("block.deleted", 1, id)).toBe(1);
+  });
+
+  it("a validation failure writes no Event", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const resp = await agent
+      .post("/api/v1/blocks")
+      .set("X-CSRF-Token", csrf)
+      .send({ name: "Bad", cidr: "not-a-cidr" });
+    expect(resp.status).toBe(400);
+    // Give a would-be stray event time to land before asserting zero.
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await prisma.event.count({ where: { action: "block.created" } })).toBe(0);
   });
 });
