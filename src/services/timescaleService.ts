@@ -4,9 +4,9 @@
  * TimescaleDB detection and hypertable utilities. Polaris's monitoring
  * sample tables (asset_monitor_samples, asset_telemetry_samples,
  * asset_hardware_sensor_samples, asset_interface_samples, asset_storage_samples,
- * asset_ipsec_tunnel_samples) work as plain Postgres tables OR as Timescale
- * hypertables; the prune layer dispatches on hypertable status so the same
- * code path works in both modes.
+ * asset_ipsec_tunnel_samples, asset_perf_sla_samples, asset_sdwan_rule_samples)
+ * work as plain Postgres tables OR as Timescale hypertables; the prune layer
+ * dispatches on hypertable status so the same code path works in both modes.
  *
  * Detection runs once at startup via `detectTimescale()` and caches the
  * result + per-table hypertable status. Subsequent calls return the cached
@@ -29,6 +29,8 @@ export const SAMPLE_TABLES = [
   "asset_interface_samples",
   "asset_storage_samples",
   "asset_ipsec_tunnel_samples",
+  "asset_perf_sla_samples",
+  "asset_sdwan_rule_samples",
 ] as const;
 
 /**
@@ -50,6 +52,10 @@ export const ROLLUP_TABLES = [
   "asset_storage_samples_daily",
   "asset_ipsec_tunnel_samples_hourly",
   "asset_ipsec_tunnel_samples_daily",
+  "asset_perf_sla_samples_hourly",
+  "asset_perf_sla_samples_daily",
+  "asset_sdwan_rule_samples_hourly",
+  "asset_sdwan_rule_samples_daily",
 ] as const;
 
 /** Every table we manage as a hypertable — source + rollup. */

@@ -936,12 +936,12 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 ## cross-cutting/tiered-sample-retention
 
-**What it is:** Two-axis storage policy for the six monitor sample tables. **Tier axis**: detail (raw samples) → hourly aggregates → daily aggregates. **Retention axis**: each tier has its own days-to-keep, per device class (default / switch / accessPoint), per stream (sample / telemetry / systemInfo). Chart history requests at long ranges read from the rollup tiers (cheap), short ranges read from detail (raw). Phase rollout 0–6 retired the per-tier monitor-settings retention fields in favor of a single global `Setting("sampleRetention")` edited from Server Settings → Maintenance.
+**What it is:** Two-axis storage policy for the eight monitor sample tables. **Tier axis**: detail (raw samples) → hourly aggregates → daily aggregates. **Retention axis**: each tier has its own days-to-keep, per device class (default / switch / accessPoint), per stream (sample / telemetry / systemInfo). Chart history requests at long ranges read from the rollup tiers (cheap), short ranges read from detail (raw). Phase rollout 0–6 retired the per-tier monitor-settings retention fields in favor of a single global `Setting("sampleRetention")` edited from Server Settings → Maintenance.
 
 **Schema:**
-- Six source tables (`asset_*_samples`) — unchanged shape, partitioned by `timestamp`.
-- Twelve rollup tables (`asset_*_samples_hourly` + `asset_*_samples_daily`) — partitioned by `bucketStart`. Gauge tables carry avg/min/max; counter tables carry first/last endpoints + `lastBucketSampleAt` so rate = `(last - first) / (lastBucketSampleAt - bucketStart in seconds)`, dropping negative deltas as counter resets.
-- All 18 tables can be Timescale hypertables (`timescaleService.ALL_HYPERTABLE_CANDIDATES`); plain Postgres works just as well, just without chunk-drop pruning.
+- Eight source tables (`asset_*_samples`) — unchanged shape, partitioned by `timestamp`.
+- Sixteen rollup tables (`asset_*_samples_hourly` + `asset_*_samples_daily`) — partitioned by `bucketStart`. Gauge tables carry avg/min/max; counter tables carry first/last endpoints + `lastBucketSampleAt` so rate = `(last - first) / (lastBucketSampleAt - bucketStart in seconds)`, dropping negative deltas as counter resets.
+- All 24 tables can be Timescale hypertables (`timescaleService.ALL_HYPERTABLE_CANDIDATES`); plain Postgres works just as well, just without chunk-drop pruning. (`tests/unit/timescaleTables.test.ts` drift-guards the inventory: rollup-writer / prune-layer / schema table references must stay ⊆ the managed lists.)
 
 **Writers:**
 - `src/services/sampleWriteBuffer.ts:enqueue*` — eight detail tables via batched createMany every 2 s. Append-only, no upsert. (The two SD-WAN streams — `asset_perf_sla_samples` / `asset_sdwan_rule_samples` — were added alongside `enqueuePerfSlaSamples` / `enqueueSdwanRuleSamples`; both fed from `recordSystemInfoResult` when `collectSdwanFortinet` ran, gated by `Integration.config.pullSdwan`.)
@@ -2387,9 +2387,9 @@ Listed alphabetically.
 
 ## services/timescaleService.ts
 
-**What it owns:** TimescaleDB extension detection and hypertable migration for six sample tables; `dropChunks` pre-filter for retention pruning. Boot-time detection caches hypertable status; subsequent `isHypertable()` checks return cached value without round-tripping.
+**What it owns:** TimescaleDB extension detection and hypertable migration for the eight sample tables + sixteen rollup tables (24 hypertable candidates); `dropChunks` pre-filter for retention pruning. Boot-time detection caches hypertable status; subsequent `isHypertable()` checks return cached value without round-tripping.
 
-**Public API:** `detectTimescale`, `isTimescaleAvailable`, `isHypertable`, `getDetectionState`, `dropChunks`, `getEffectiveCompressAfterDays`, `migrateToHypertables`, `SAMPLE_TABLES`, `SampleTableName`, `DetectionState`.
+**Public API:** `detectTimescale`, `isTimescaleAvailable`, `isHypertable`, `getDetectionState`, `dropChunks`, `getEffectiveCompressAfterDays`, `migrateToHypertables`, `SAMPLE_TABLES`, `ROLLUP_TABLES`, `ALL_HYPERTABLE_CANDIDATES`, `SampleTableName`, `RollupTableName`, `ManagedHypertableName`, `DetectionState`.
 
 **Cross-service deps:** none.
 
@@ -2404,7 +2404,7 @@ Listed alphabetically.
 
 **When changing this:**
 - Verify `detectTimescale()` is called before any sample write so hypertable status is fresh.
-- If modifying `SAMPLE_TABLES`, keep in sync across detection, pruning, and migration logic.
+- If modifying `SAMPLE_TABLES` / `ROLLUP_TABLES`, keep in sync across detection, pruning, and migration logic, plus capacityService's local per-table projection map. `tests/unit/timescaleTables.test.ts` drift-guards the inventory against sampleRollupService, the monitoringService prune layer, and prisma/schema.prisma (with an explicit exemption list — `asset_custom_widget_samples` is the one known unmanaged sample table).
 - Test plain-Postgres fallback path: verify `dropChunks` no-op and `deleteMany` handles all pruning when extension unavailable.
 - Check compression policy drift if operators change `TIMESCALE_COMPRESS_AFTER_DAYS` mid-boot cycle (only takes effect next restart).
 - If TimescaleDB ever renames the compression-policy config key (`compress_after`), update `compressionPolicyMatches` — but its catch-all returns `false` (recreate) on any introspection failure, so a key rename degrades to the old always-recreate behavior + the backlog pass, never breaks.
