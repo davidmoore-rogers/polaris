@@ -1942,6 +1942,30 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   display: block;
 }
 
+/* ─── Full-screen blocking overlay ───────────────────────────────────────────
+   Topmost layer in the z-index scheme: modal-overlay 1000 < slideover 1075 <
+   sf-multi-popover 1200 < toast 2000 < blocking-overlay 2100. Used for an
+   unavoidable, app-wide "wait" state (e.g. restarting Polaris) that must sit
+   above everything including toasts. See TEMPLATES.md "Full-screen blocking
+   overlay". */
+.blocking-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2100;
+}
+.blocking-overlay-card {
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 1.5rem 2rem;
+  min-width: 320px;
+  text-align: center;
+}
+
 /* ─── Toast ────────────────────────────────────────────────────────────────── */
 .toast-container {
   position: fixed;

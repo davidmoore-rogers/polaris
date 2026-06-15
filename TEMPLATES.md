@@ -26,6 +26,7 @@ Per-pattern sections:
 
 - [Time-series chart (SVG)](#time-series-chart-svg)
 - [Modal](#modal)
+- [Full-screen blocking overlay](#full-screen-blocking-overlay)
 - [Slide-over panel](#slide-over-panel)
 - [Sortable + filterable data table](#sortable--filterable-data-table)
 - [Per-instance multi-lane worker (constrained + unconstrained endpoints)](#per-instance-multi-lane-worker-constrained--unconstrained-endpoints)
@@ -109,6 +110,24 @@ Per-pattern sections:
 - For destructive actions, wrap with `await showConfirm(...)` first.
 - For wide forms (multi-column / tabbed), pass `{ wide: true }`; reserve `{ xl: true }` for genuinely dense UIs (allocation preview, etc.).
 - Re-bind any DOM listeners after each open — the body HTML is replaced wholesale.
+
+---
+
+## Full-screen blocking overlay
+
+**What it is:** An unavoidable, app-wide "wait" curtain over the entire viewport — used when the app is briefly unusable and the operator must just wait (currently: restarting Polaris from the Capacity Advisor / Maintenance restart buttons). Distinct from a modal: no dismiss, no header chrome, sits above *everything* including toasts.
+
+**Canonical implementation:** the `.blocking-overlay` + `.blocking-overlay-card` classes in `public/css/styles.css`; built inline by `pollUntilServerReachable()` in `public/js/server-settings.js`.
+
+**Key conventions:**
+- DOM shape: `<div class="blocking-overlay"><div class="blocking-overlay-card">…</div></div>` appended to `document.body`.
+- Z-index `2100` — the documented top of the layering scheme (modal 1000 < slideover 1075 < sf-multi-popover 1200 < toast 2000 < blocking-overlay 2100). Do NOT hand-pick a magic number like `9999`; if you need to sit above the blocking overlay, extend the scheme in `styles.css` and update both lists.
+- All visual styling lives in the two CSS classes — the JS sets `className` and inner HTML only, no inline `position/inset/background/z-index`.
+- Removed by reloading the page (the restart poller calls `location.reload()` once the server answers) rather than an explicit close.
+
+**When adding a new instance:**
+- Reuse `.blocking-overlay` / `.blocking-overlay-card`; put a `.spinner` + a `<strong>` title + an optional status `<p>` in the card.
+- Only for genuinely app-blocking states (restart, irreversible migration). For a dismissible dialog use the Modal; for a non-blocking status use a toast.
 
 ---
 

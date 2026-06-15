@@ -916,36 +916,33 @@ async function handleProxyApply() {
 // ─── Rotate certificate modal: dual-pin stage → swap → retire workflow ──────
 
 function openRotateCertModal() {
-  var modal = document.createElement("div");
-  modal.className = "modal-overlay";
-  modal.id = "rotate-cert-modal";
-  modal.innerHTML =
-    '<div class="modal-content" style="max-width:620px">' +
-      '<h3>Rotate HTTPS certificate</h3>' +
-      '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
-        'Four-step zero-downtime rotation: ' +
-        '(1) upload the replacement pair; ' +
-        '(2) stage the new pin on every active agent so they accept both old + new; ' +
-        '(3) swap the cert file + reload nginx; ' +
-        '(4) retire the old pin once you\'re confident every agent has reconnected.' +
-      '</p>' +
-      '<div class="form-group"><label for="rotate-cert-file">Certificate (.pem / .crt)</label>' +
-        '<input type="file" id="rotate-cert-file" accept=".pem,.crt,.cer">' +
-      '</div>' +
-      '<div class="form-group"><label for="rotate-key-file">Private key (.pem / .key)</label>' +
-        '<input type="file" id="rotate-key-file" accept=".pem,.key">' +
-      '</div>' +
-      '<div id="rotate-preflight" style="display:none;background:var(--color-surface-alt);padding:0.8rem;border-radius:4px;margin-bottom:1rem;font-size:0.82rem"></div>' +
-      '<div id="rotate-error" style="display:none;color:#ef4444;font-size:0.85rem;margin-bottom:1rem"></div>' +
-      '<div style="display:flex;gap:0.5rem;justify-content:flex-end;flex-wrap:wrap">' +
-        '<button class="btn-secondary" id="rotate-cancel-btn">Cancel</button>' +
-        '<button class="btn-secondary" id="rotate-preflight-btn">1. Preflight</button>' +
-        '<button class="btn-secondary" id="rotate-stage-btn" disabled>2. Stage pin</button>' +
-        '<button class="btn-primary" id="rotate-swap-btn" disabled>3. Swap cert</button>' +
-        '<button class="btn-secondary" id="rotate-retire-btn" disabled>4. Retire old pin</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(modal);
+  // Uses the canonical openModal() (.modal structure) so it picks up the shared
+  // modal CSS, drag, scrim-close, and accessibility behavior — was previously a
+  // hand-rolled .modal-overlay/.modal-content that the canonical styles didn't
+  // reach.
+  var body =
+    '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+      'Four-step zero-downtime rotation: ' +
+      '(1) upload the replacement pair; ' +
+      '(2) stage the new pin on every active agent so they accept both old + new; ' +
+      '(3) swap the cert file + reload nginx; ' +
+      '(4) retire the old pin once you\'re confident every agent has reconnected.' +
+    '</p>' +
+    '<div class="form-group"><label for="rotate-cert-file">Certificate (.pem / .crt)</label>' +
+      '<input type="file" id="rotate-cert-file" accept=".pem,.crt,.cer">' +
+    '</div>' +
+    '<div class="form-group"><label for="rotate-key-file">Private key (.pem / .key)</label>' +
+      '<input type="file" id="rotate-key-file" accept=".pem,.key">' +
+    '</div>' +
+    '<div id="rotate-preflight" style="display:none;background:var(--color-surface-alt);padding:0.8rem;border-radius:4px;margin-bottom:1rem;font-size:0.82rem"></div>' +
+    '<div id="rotate-error" style="display:none;color:var(--color-danger);font-size:0.85rem;margin-bottom:1rem"></div>';
+  var footer =
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-secondary" id="rotate-preflight-btn">1. Preflight</button>' +
+    '<button class="btn btn-secondary" id="rotate-stage-btn" disabled>2. Stage pin</button>' +
+    '<button class="btn btn-primary" id="rotate-swap-btn" disabled>3. Swap cert</button>' +
+    '<button class="btn btn-secondary" id="rotate-retire-btn" disabled>4. Retire old pin</button>';
+  openModal("Rotate HTTPS certificate", body, footer, { wide: true });
 
   var state = { preflight: null, oldFingerprint: null };
 
@@ -971,10 +968,6 @@ function openRotateCertModal() {
       '</div>' +
       (extraNote || "");
   }
-
-  document.getElementById("rotate-cancel-btn").addEventListener("click", function () {
-    document.body.removeChild(modal);
-  });
 
   document.getElementById("rotate-preflight-btn").addEventListener("click", async function () {
     clearError();
@@ -1062,7 +1055,7 @@ function openRotateCertModal() {
       var msg = "Retired on " + result.removed + " agent(s)";
       if (result.lastPinSkipped > 0) msg += "; " + result.lastPinSkipped + " skipped (would have been last pin)";
       alert(msg + ". Rotation complete.");
-      document.body.removeChild(modal);
+      closeModal();
       await loadCertificates();
     } catch (err) {
       showError(err.message || "Retire failed");
@@ -2891,11 +2884,9 @@ function pollUntilServerReachable() {
   // Full-screen overlay so the operator can see something is happening even
   // when the click happened from a non-update card.
   var overlay = document.createElement("div");
-  overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.55);" +
-    "display:flex;align-items:center;justify-content:center;z-index:9999;";
+  overlay.className = "blocking-overlay";
   overlay.innerHTML =
-    '<div style="background:var(--color-bg-primary);border:1px solid var(--color-border);' +
-      'border-radius:var(--radius-md);padding:1.5rem 2rem;min-width:320px;text-align:center">' +
+    '<div class="blocking-overlay-card">' +
       '<div class="spinner" style="width:28px;height:28px;margin:0 auto 0.75rem"></div>' +
       '<strong>Restarting Polaris...</strong>' +
       '<p id="restart-poll-msg" style="font-size:0.82rem;margin-top:0.5rem;color:var(--color-text-secondary)">' +
