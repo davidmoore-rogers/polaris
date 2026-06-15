@@ -152,6 +152,9 @@ async function runPreflight(dbHost) {
   }
 }
 
+// Self-contained copy: setup.html runs the first-run wizard standalone and
+// does NOT load api.js, so it can't use api.js's canonical escapeHtml. Keep
+// this in sync with that one (same & < > " ' coverage).
 function escapeHtml(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;")

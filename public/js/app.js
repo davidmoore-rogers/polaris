@@ -1713,10 +1713,7 @@ function renderPageControls(containerId, total, pageSize, currentPage, onPageCha
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function escapeHtml(str) {
-  if (!str) return "";
-  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
+// escapeHtml is the canonical global from api.js (loaded first on every page).
 
 function timeAgo(dateStr) {
   var diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);

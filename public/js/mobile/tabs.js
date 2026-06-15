@@ -330,6 +330,9 @@
       });
   }
 
+  // Intentionally a local helper, not table-sf.js's generic debounce():
+  // table-sf.js isn't loaded on mobile.html, and this variant closes over the
+  // per-keystroke query `q` (the generic one wraps a fixed fn with no args).
   function debounceSearch(q) {
     clearTimeout(_searchDebounce);
     _searchDebounce = setTimeout(function () { runSearch(q); }, 200);
@@ -411,12 +414,7 @@
   ];
 
   // ─── helpers ───────────────────────────────────────────────────────────
-  function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
+  // escapeHtml is the canonical global from api.js (loaded first on every page).
 
   // ─── Sheet swipe-to-dismiss ────────────────────────────────────────────
   // Touch-drag the sheet downward to dismiss. Companion to the X button

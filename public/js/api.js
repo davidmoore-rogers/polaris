@@ -4,6 +4,41 @@
 
 const API_BASE = "/api/v1";
 
+// ─── Shared HTML escaper ────────────────────────────────────────────────────
+//
+// Canonical escapeHtml for the whole front-end. api.js loads first on every
+// page (index/assets/blocks/subnets/events/integrations/ipam/map/users/
+// server-settings + mobile.html), so this global is available to app.js,
+// map.js, and every mobile module — each of which previously carried its own
+// near-identical copy (with two different apostrophe encodings). Escapes the
+// full set & < > " ' so it's safe in both text and attribute contexts.
+// setup.html does NOT load api.js (wizard runs standalone), so setup.js keeps
+// its own self-contained copy.
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+if (typeof window !== "undefined") window.escapeHtml = escapeHtml;
+
+// Shared YYYY-MM-DD formatter for the mobile SPA (asset sheet "Acquired",
+// reservations "Expires" + edit-form value). Local-time — a date the operator
+// set should render as the day they meant regardless of the browser TZ; a
+// date-only value parses to local midnight and round-trips unchanged. Empty /
+// unparseable → "". The desktop `formatDate` in app.js is a different,
+// locale-pretty format ("Jul 4, 2026") and stays separate.
+function mobileFormatDate(iso) {
+  if (!iso) return "";
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+}
+if (typeof window !== "undefined") window.mobileFormatDate = mobileFormatDate;
+
 // ─── Active Query Tracker ───────────────────────────────────────────────────
 
 var activeQueries = [];

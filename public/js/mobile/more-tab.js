@@ -31,12 +31,7 @@
     if (!btn) return;
     btn.addEventListener("click", function () { PolarisRouter.go("more"); });
   }
-  function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
+  // escapeHtml is the canonical global from api.js (loaded first on every page).
   function formatTimeAgo(iso) {
     if (!iso) return "";
     var d = new Date(iso);

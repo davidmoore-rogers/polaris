@@ -704,12 +704,7 @@
     }
   }
 
-  function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
+  // escapeHtml is the canonical global from api.js (loaded first on every page).
 
   // ─── Public surface ────────────────────────────────────────────────────
   window.PolarisTopologyTab = {

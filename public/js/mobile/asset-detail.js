@@ -1534,19 +1534,12 @@
     if (sec < 86400) return Math.floor(sec / 3600) + "h ago";
     return Math.floor(sec / 86400) + "d ago";
   }
-  function formatDate(iso) {
-    if (!iso) return "";
-    var d = new Date(iso);
-    if (isNaN(d.getTime())) return "";
-    return d.toISOString().slice(0, 10);
-  }
+  // formatDate is the shared mobileFormatDate global from api.js (local-time
+  // YYYY-MM-DD). Was a UTC .toISOString().slice here — local is the correct
+  // day for the operator's "Acquired" display.
+  var formatDate = mobileFormatDate;
 
-  function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
+  // escapeHtml is the canonical global from api.js (loaded first on every page).
 
   // Pull-to-refresh path — same backend work the topbar Refresh button
   // does (probe-now + repull monitor/telemetry/system-info), but returns a

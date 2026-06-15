@@ -53,12 +53,7 @@
     });
   }
 
-  function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
+  // escapeHtml is the canonical global from api.js (loaded first on every page).
 
   // Each detail spec carries an optional `parentTab` so app.js can keep
   // the corresponding nav-bar item visually active while the operator is

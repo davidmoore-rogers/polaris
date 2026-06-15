@@ -550,12 +550,7 @@
     }).catch(function () { /* ignore */ });
   }
 
-  function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
+  // escapeHtml is the canonical global from api.js (loaded first on every page).
 
   // Pull-to-refresh — for FortiGate-discovered subnets that the caller can
   // write to, this fires the same single-scope refresh as the topbar

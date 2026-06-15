@@ -561,20 +561,13 @@
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────
-  function formatDate(iso) {
-    if (!iso) return "";
-    var d = new Date(iso);
-    if (isNaN(d.getTime())) return String(iso);
-    var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
-    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
-  }
+  // formatDate is the shared mobileFormatDate global from api.js (same local-
+  // time YYYY-MM-DD this used; unparseable now yields "" instead of the raw
+  // string, which the escapeHtml-wrapped "Expires" cell + edit-form value
+  // both render cleanly).
+  var formatDate = mobileFormatDate;
 
-  function escapeHtml(s) {
-    if (s == null) return "";
-    return String(s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
+  // escapeHtml is the canonical global from api.js (loaded first on every page).
 
   window.PolarisReservationsTab = { spec: Reservations };
 

@@ -1927,14 +1927,7 @@
     if (el) el.textContent = text;
   }
 
-  function escapeHtml(s) {
-    return String(s == null ? "" : s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-  }
+  // escapeHtml is the canonical global from api.js (loaded first on every page).
 
   // Filter out FortiOS meta-interface names that don't add useful
   // information to the topology view. "fortilink" is the software-managed
