@@ -104,11 +104,15 @@ AssetStatus:             active | maintenance | decommissioned | storage | disab
 - **MibFile** — admin-uploaded SNMP MIBs used by `oidRegistry` + `vendorTelemetryProfiles`.
 - **ManufacturerProfile** / **ManufacturerProfileMetric** / **ManufacturerProfileMetricOverride** / **ManufacturerCustomWidget** — operator-editable per-manufacturer telemetry profile + custom widget definitions.
 - **ManufacturerAlias** — vendor-name canonicalization map.
+- **DeviceIcon** — operator-uploaded topology icon blobs (scope + key), served to the Device Map / topology renderer.
 - **AssetTypeDef** — operator-extensible asset-type registry (replaces the prior `AssetType` enum).
 - **User** / **Role** — dynamic-role RBAC; `User.roleId` → `Role`; permissions matrix on Role over 25 function keys.
+- **GroupMapping** — IdP group → role + tags map for OIDC / LDAP / SAML SSO login (`provider` + `groupKey`; nullable `roleId` for tags-only mappings).
+- **ManagedAgent** — Polaris Agent install record per Asset (os/arch, agent version, install credential, cert-pin set for dual-pin rotation).
 - **UserDashboard** — per-user dashboard layout (widget set + positions).
 - **Event** — audit log, 7-day rolling retention.
 - **Conflict** — discovery-vs-existing conflicts (reservation + asset variants).
+- **DiscoveryRun** — per-integration discovery-run state (status / actor / progress counts / timestamps); one row per integration (`integrationId` unique).
 - **Setting** — key-value config store (`manualMonitorSettings`, `sampleRetention`, `mapRegions`, etc.).
 - **MonitorClassOverride** — tier-2 of the monitor settings hierarchy; manual-scope only post-Phase-2.
 - **Tag** / **GeocodeCache** — registry tables.
@@ -125,12 +129,16 @@ Resource groupings (route file in `src/api/routes/`):
 - **blocks** / **subnets** / **reservations** (IP-space CRUD + per-subnet refresh + stale-reservation alerts + queued-push lifecycle)
 - **utilization** / **dashboard** (reporting)
 - **users** / **roles** / **apiTokens** / **credentials** (identity + access)
+- **groupMappings** (`/group-mappings`, IdP group → role/tags map; gated `users=fullwrite`)
+- **userDashboard** (`/me/dashboard`, per-user dashboard layout CRUD)
 - **integrations** (FMG / FortiGate / Entra ID / AD / Windows Server config + discovery + auto-monitor preflight)
 - **assetTypes** (registry CRUD, mounted before `/assets`)
 - **assets** (CRUD + monitor history endpoints + per-asset agent install + dependencies + quarantine + system-info + SNMP walk)
+- **agents** (`/agents`, `/agents/enroll`, `/agents/binary` — Polaris Agent enroll / config / sample-push / binary download, gated by `requireAgentBearer`; the `/agents/ws` WebSocket upgrade handler in `agentsWs.ts` is attached at the HTTP-server level in `src/app.ts`, not via the REST router)
 - **events** / **conflicts** / **search** (audit + resolution + global typeahead)
 - **map** / **mapRegions** / **allocationTemplates** (Device Map + map-region polygons + saved subnet allocations)
 - **serverSettings** (HTTPS, branding, backup/restore, capacity advisor, sample retention, queue mode, security tokens)
+- **proxySettings** (`/server-settings/proxy` — in-app nginx GUI config + cert preflight/rotate)
 - **mibs** (`/server-settings/mibs` and `/server-settings/mibs/std`)
 - **manufacturerProfiles** / **manufacturerAliases** / **deviceIcons** (telemetry profile + alias map + topology icons)
 - **monitorSettings** (manual + integration + class overrides + asset overrides + per-stream resolver)
@@ -167,7 +175,7 @@ Sessions are PostgreSQL-backed (`connect-pg-simple`), 8-hour max age, HttpOnly/S
 
 **Bearer-token hybrid (`requireSessionOrTokenPermission`).** Routes that an external system needs to reach (asset quarantine push) accept either a session whose role grants the required `(functionKey, level)` OR a bearer token whose scopes include the named scope (e.g. `assets:quarantine`). Lives in `permissions.ts`.
 
-**Last-admin invariant.** `userService.lastAdminEquivalent` refuses any operation that would leave Polaris with zero users holding `users=fullwrite` AND `roles=fullwrite`. Enforced on `PUT /users/:id/role` and `DELETE /users/:id`.
+**Last-admin invariant.** `roleService.countAdminEquivalentUsers` + `roleService.isAdminEquivalentRole` (in `src/services/roleService.ts`) back the guard that refuses any operation that would leave Polaris with zero users holding `users=fullwrite` AND `roles=fullwrite`. Enforced in `src/api/routes/users.ts` on `PUT /users/:id/role` and `DELETE /users/:id`.
 
 Rate limiting: 10 login attempts / 15 min per IP (limiter in `src/app.ts`). Additional per-surface limiters live in `src/api/middleware/rateLimits.ts`: TOTP confirm/disable (10 / 15 min, mirrors login), OIDC login kick-off (30 / 15 min), admin maintenance/backup/logo routes (120 / 5 min), SIEM quarantine verify (300 / 5 min), agent bearer router (1200 / 5 min — per-IP, far above any healthy agent's cadence), agent binary downloads (60 / 5 min). The first-run setup server has its own limiters (whole server 600 / 5 min; DB-touching wizard routes 30 / 15 min) built from the same `makeRateLimiter` factory. Azure SAML SSO is optional; users are auto-provisioned on first login with the `readonly` role.
 
@@ -195,7 +203,7 @@ Hybrid-join detection links AD and Entra/Intune via on-prem SID (`ad.observed.ob
 
 ## Background Jobs
 
-~48 files in `src/jobs/` (47 jobs + the `_metrics.ts` `runInstrumentedJob` helper): continuous ticks (`monitorAssets` light + heavy loops, `dependencyReconciler`, `retryQueuedReservationPushes`), periodic safety nets (`capacityWatch`, `reconcileMapRegions`, `discoverySlowCheck`, `flagStaleReservations`, `decommissionStaleAssets`, `mergeDuplicateHostnameAssets`), nightly maintenance (`pruneEvents`, sample-table prune, `runSampleRollup` hourly + daily ticks, `reclaimBloatedChunks` compressed-chunk heap reclaim), and one-shot startup migrations (manufacturer-alias seed, asset-source backfill, the `mergeFortiswitchEndpointGhosts` NULL-MAC ghost cleanup, monitor-settings hierarchy migrations).
+~46 files in `src/jobs/` (45 jobs + the `_metrics.ts` `runInstrumentedJob` helper): continuous ticks (`monitorAssets` light + heavy loops, `dependencyReconciler`, `retryQueuedReservationPushes`), periodic safety nets (`capacityWatch`, `reconcileMapRegions`, `discoverySlowCheck`, `flagStaleReservations`, `decommissionStaleAssets`, `mergeDuplicateHostnameAssets`), nightly maintenance (`pruneEvents`, sample-table prune, `runSampleRollup` hourly + daily ticks, `reclaimBloatedChunks` compressed-chunk heap reclaim), and one-shot startup migrations (manufacturer-alias seed, asset-source backfill, the `mergeFortiswitchEndpointGhosts` NULL-MAC ghost cleanup, monitor-settings hierarchy migrations).
 
 > Full table with schedule + per-job purpose: [ARCHITECTURE.md → Background Jobs](ARCHITECTURE.md#background-jobs).
 
@@ -335,6 +343,31 @@ POLARIS_STATE_DIR=
 # (GET /server-settings/updates/repo). The deploy/update-{linux.sh,windows.ps1}
 # fallback scripts read the same var and repoint origin in lockstep.
 POLARIS_UPDATE_REPO=
+
+# Public hostname the agent embeds in agent.conf when POLARIS_PUBLIC_URL isn't
+# set (no scheme/port override). POLARIS_PUBLIC_URL wins when both are set.
+POLARIS_PUBLIC_HOST=
+
+# How many old agent binary versions to retain under data/agents/ when the
+# Maintenance → Polaris Agent → Clean up button (or post-build auto-prune)
+# runs. Newest-first; excludes the current manifest version + any in use by a
+# live ManagedAgent. Default 3 (two rollback targets). 0 = prune all removable.
+POLARIS_AGENT_KEEP_VERSIONS=3
+
+# Diagnostic: "1" makes the web role log one info line per inbound agent
+# /samples push (stream, count, first telemetry cpu/mem) + an enqueue line.
+# Off by default; pair with the agent-side `verbose = true` to trace a round-trip.
+POLARIS_AGENT_SAMPLE_LOG=
+
+# Go toolchain for the in-app agent Build feature (forwarded to GOTOOLCHAIN on
+# `go build`). Default "local" uses the host Go; "auto" downloads the version
+# pinned in agent/go.mod on demand. Offline hosts must stay on "local".
+GOTOOLCHAIN=local
+
+# Diagnostic: "1"/"true" makes the ghost-merge job (collapsing duplicate-hostname
+# NULL-MAC AssetSources into the canonical asset) log what it WOULD merge with no
+# writes. Use when investigating unexpected merge behavior. Unset for normal ops.
+POLARIS_GHOST_MERGE_DRY_RUN=
 ```
 
 Configured via the UI, not env vars: Azure SAML SSO (Server Settings → Security → Identification), syslog forwarding + SFTP archival (Server Settings → Integrations). HTTPS is managed by nginx — the cert at `POLARIS_PROXY_CERT_PATH` is operator-owned; Polaris reads it for the agent-pin fingerprint exposure only.

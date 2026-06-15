@@ -1227,6 +1227,115 @@ Listed alphabetically.
 
 ---
 
+## services/agentAutoDeployService.ts
+
+**What it owns:** Discovers agent-less devices during integration sync and auto-kicks off installs per configured class settings. Bounded, paced, and idempotent — checks preconditions, infers platform/transport+credential, and fires installs.
+
+**Public API:** `inferAgentPlatform`, `pickTransportAndCredential`, `checkAutoDeployPreconditions`, `runAutoDeployForClass`, `AgentOsPlatform`, `AgentTransport`, `AgentDeployClassConfig`, `DeployTarget`, `AutoDeployResult`
+
+**Cross-service deps:** `credentialService.getCredential`, `agentInstallService.startInstall`, `certInfo.getServerCertFingerprint`, `logEvent`, polling-compatibility utils.
+
+**Used by:** `src/api/routes/integrations.ts` — discovery post-sync pass (calls `checkAutoDeployPreconditions` then `runAutoDeployForClass` per workstation/server class when the class's `agentDeploy` is enabled).
+
+**Invariants:**
+- Opt-in, default off (UI warns to test on a small OU first).
+- Eligibility guarded by `ManagedAgent.assetId @unique` — an asset that already has any ManagedAgent row (pending/active/failed) is never re-kicked.
+- Per-run kicks off at most `maxConcurrent` new installs (clamped low single digits) plus a hard RUN_CEILING backstop.
+- Platform inferred from the asset OS string; fires fire-and-forget to `startInstall()` (no retry — failures are operator's to re-kick via manual reinstall).
+
+**When changing this:**
+- Adding transport/platform logic: validate in both `inferAgentPlatform` and `pickTransportAndCredential`.
+- The idempotency guard (no existing ManagedAgent row) is non-negotiable — never re-kick an enrolled or in-flight asset.
+
+---
+
+## services/agentBuildService.ts
+
+**What it owns:** In-app build pipeline that compiles the agent binaries (six platform/arch combos via `go build`) one build at a time, with a small FIFO queue, manifest.json publication, and old-version auto-prune. Stateful in-memory build map + single active-build mutex.
+
+**Public API:** `startBuild`, `cancelBuild`, `getBuild`, `getCurrentBuild`, `getCurrentBuildAndQueue`, `goAvailable`, `getInventory`, `pruneOldAgentVersions`, `PLATFORMS`, `QUEUE_DEPTH`, `BuildPhase`, `BuildState`, `BuildStep`, `GoAvailability`, `BuildQueueFullError`, `GoUnavailableError`, `BuildAlreadyFinishedError`, `BuildNotFoundError`, `InventoryResult`, `PruneResult`
+
+**Cross-service deps:** `agentInstallService.inferOwnServerUrl`, `version` (agent version + source dir), `certInfo.getServerCertHostnames`, `publicUrl` port helper, `prisma` (settings + auto-upgrade hook).
+
+**Used by:** `src/api/routes/serverSettings.ts` (build/inventory/upgrade-all/prune endpoints), `src/jobs/autoBuildAgents.ts`.
+
+**Invariants:**
+- Single active build; concurrent requests queue FIFO up to `QUEUE_DEPTH` (then a `BuildQueueFullError` → 409).
+- One build runs all six platform/arch combos serially (parallel `go build` thrashes the module cache); operator Cancel checks fire between platforms.
+- Manifest version stamped from live source at start-of-run; auto-prune keeps last N versions (skips in-use + manifest-current) and fails closed if manifest reads fail.
+- Optional post-build auto-upgrade is fire-and-forget, gated on a Setting.
+
+**When changing this:**
+- Go env (HOME/GOCACHE/GOMODCACHE) must stay in sync between module-resolve and build steps.
+- Queue advance happens in the finally block — guard against deleted/cancelled entries.
+
+---
+
+## services/agentChannelService.ts
+
+**What it owns:** In-memory `managedAgentId → WebSocket` registry for live agents: attach/detach lifecycle, heartbeat ping/pong, server-initiated probe-now requests, and config-refresh frames.
+
+**Public API:** `attach`, `detach`, `isAttached`, `sendProbeNow`, `refreshConfig`, `liveSessionCount`, `shutdownAllSessions`, `ProbeNowResult`
+
+**Cross-service deps:** `prisma` (managed-agent updates), `logEvent`.
+
+**Used by:** `src/api/routes/agentsWs.ts` (attach on authenticated WS upgrade), `src/api/routes/serverSettings.ts` + `src/services/monitoringService.ts` (`sendProbeNow` / `refreshConfig`), app shutdown hook (`shutdownAllSessions`).
+
+**Invariants:**
+- Attach replaces any existing session for the same agentId (idempotent).
+- Heartbeat ping interval + pong-timeout force-close and detach a silent agent.
+- Probe-now is request-id correlated with a timeout reject; detach clears pending probes and is a no-op when not attached.
+- Frame envelope is a JSON `{ type, id, payload }` — a wire protocol shared with the Go agent.
+
+**When changing this:**
+- The frame format is the agent wire protocol — any change breaks deployed agents.
+- Pending-probe map must be cleaned up in teardown to avoid leaks.
+
+---
+
+## services/agentInstallService.ts
+
+**What it owns:** Fire-and-forget remote install / uninstall / upgrade of the Polaris Agent over SSH (Linux/macOS/Windows) or WinRM (Windows): resolves credentials, mints an enrollment token, uploads the binary + a rendered `agent.conf`, runs platform scripts, and drives the ManagedAgent lifecycle (pending → uploading → enrolling → active | failed).
+
+**Public API:** `startInstall`, `startUninstall`, `startUpgrade`, `upgradeAllOutdated`, `renderAgentConf`, `inferOwnServerUrl`, `inferOwnServerUrlSync`, `AGENT_SERVER_URL_SETTING_KEY`, `StartInstallInput`, `StartUninstallInput`, `StartUpgradeInput`, `UpgradeAllResult`
+
+**Cross-service deps:** `credentialService.getCredential`, `agentTokenService.mintEnrollmentToken`, `agentBuildService.getInventory`, `certInfo.getServerCertHostnames`, `publicUrl` port helper, `logEvent`, `prisma`, WinRM helper.
+
+**Used by:** `src/api/routes/assets.ts` (per-asset install / reinstall / upgrade / uninstall), `src/api/routes/serverSettings.ts` (upgrade-all), `src/services/agentAutoDeployService.ts` (`startInstall`), `src/services/agentBuildService.ts` (auto-upgrade hook).
+
+**Invariants:**
+- Fire-and-forget: kicks off an async runner, returns immediately.
+- Platform/arch drives binary selection (inferred from `Asset.os`, arch defaults amd64); SSH needs username + (password OR privateKey), WinRM needs username + password.
+- Uninstall hard-deletes the ManagedAgent row on success and clears polling columns so source defaults resume; upgrade replaces the binary only — `agent.conf` (bearer + pin) is untouched so the agent keeps its identity.
+- Server-URL resolution order: Setting override → `POLARIS_PUBLIC_URL` → cert hostnames → fallback → localhost.
+
+**When changing this:**
+- `agent.conf` templating must stay in sync with the Go agent (pin set + enrollment-token format).
+- Concurrent upgrades are pool-bounded so a fleet upgrade doesn't overwhelm hosts; `testOverrides` allow fake SSH for unit tests.
+
+---
+
+## services/agentTokenService.ts
+
+**What it owns:** Mints/verifies the two managed-agent token types — enrollment (one-shot, short TTL, consumed at `/enroll`) and bearer (long-lived, revoked on uninstall) — stored as argon2id hashes + an indexed prefix, with the bearer bound to a single assetId.
+
+**Public API:** `mintEnrollmentToken`, `consumeEnrollmentToken`, `verifyBearer`, `revokeBearer`, `ConsumedEnrollment`, `VerifiedAgent`
+
+**Cross-service deps:** `prisma` (managedAgent), password hash/verify util.
+
+**Used by:** `src/api/middleware/auth.ts` (`verifyBearer` for agent endpoints), `src/api/routes/agents.ts` (`consumeEnrollmentToken` at `/enroll`), `src/api/routes/agentsWs.ts` (`verifyBearer` on WS upgrade), `src/api/routes/assets.ts` (`revokeBearer` on uninstall), `src/services/agentInstallService.ts` (`mintEnrollmentToken`).
+
+**Invariants:**
+- Token format `polaris_<random>` with an indexed prefix for O(1) candidate lookup; full secret stored only as an argon2id hash.
+- Enrollment has a short TTL and is idempotent to re-mint (Reinstall overwrites a stale token); `consumeEnrollmentToken` atomically clears enrollment fields, mints the bearer, flips installStatus→active, and stamps polling columns.
+- `verifyBearer` self-heals a stuck "enrolling" status (an agent reusing an existing bearer skips `/enroll`); `revokeBearer` is idempotent.
+- Bearer is bound to `assetId @unique` as cross-asset-reuse defense; dual-pin enroll validates against the canonical fingerprint while additional pins stage in `additionalServerCertFingerprints`.
+
+**When changing this:**
+- Enrollment expiry is load-bearing for install-retry safety (operator re-mints via Reinstall) — don't make it permanent.
+
+---
+
 ## services/apiTokenService.ts
 
 **What it owns:** Long-lived bearer-token CRUD for external API access; argon2id hash + tokenPrefix-based lookup; scope validation (assets:quarantine, assets:read); integrationIds enforcement for quarantine scope.
@@ -1281,6 +1390,47 @@ Listed alphabetically.
 - Verify Prisma extension in `src/db.ts` still writes `AssetIpHistory` on Asset.ipAddress changes.
 - Check assets.html History tab UI for retentionDays Setting control + prune button.
 - Ensure Prisma schema AssetIpHistory._unique_ constraint on (assetId, ip) handles re-sight updates (lastSeen bump).
+
+---
+
+## services/assetMergeService.ts
+
+**What it owns:** Operator-driven asset merge (inverse of split) — re-binds an absorbed ("ghost") asset's multi-source discovery rows + side tables onto a survivor ("canonical") asset, applies per-field winners, then deletes the ghost.
+
+**Public API:** `MERGEABLE_FIELDS`, `MergeableField`, `FieldWinner`, `MergeAssetsResult`, `mergeAssets`
+
+**Cross-service deps:** `prisma`, `AppError`, `clampAcquiredToLastSeen`.
+
+**Used by:** `src/api/routes/assets.ts` — `POST /assets/:id/merge`.
+
+**Invariants:**
+- Canonical and ghost must be distinct IDs; all transfers run in a single `$transaction`.
+- Ghost `AssetSource` rows re-bind to canonical (global `(sourceKind, externalId)` uniqueness means no collision); `AssetMacAddress` / `AssetAssociatedIp` / `AssetIpHistory` / `AssetFortigateSighting` delete-on-conflict when duplicates exist.
+- `ManagedAgent` transfers only if the survivor has none; `lastSeen` keeps the more recent value; tags union; `acquiredAt` clamped to stay ≤ `lastSeen`.
+- Ghost's TimescaleDB sample rows are orphaned (no FK) and age out via `drop_chunks` — never row-deleted here.
+
+**When changing this:**
+- Keep `MERGEABLE_FIELDS` in sync with the comparison UI in `public/js/assets.js`.
+
+---
+
+## services/assetTypeService.ts
+
+**What it owns:** CRUD + in-memory cache for the `AssetTypeDef` registry (replaces the retired `AssetType` enum). Eight built-in types are protected; custom types support transactional rename and use-checked delete.
+
+**Public API:** `AssetTypeRow`, `listAssetTypes`, `getAssetType`, `createAssetType`, `updateAssetType`, `deleteAssetType`, `refreshCache`, `seedBuiltInAssetTypes`
+
+**Cross-service deps:** `prisma`, `AppError`, `setAssetTypeRegistry` + asset-type validate/normalize helpers + `BUILT_IN_ASSET_TYPES` (utils/assetTypes).
+
+**Used by:** `src/api/routes/assetTypes.ts` (registry CRUD), `src/jobs/seedAssetTypes.ts` (boot seed).
+
+**Invariants:**
+- Built-in rows (`isBuiltIn` + `isProtected`) can't be renamed, edited, or deleted; reserved built-in names are preserved across operator edits.
+- Custom rename is atomic: every `Asset.assetType` rewrite happens in the same transaction as the registry row update (Asset.assetType is a String, not a relation).
+- Delete refuses with 409 when any Asset references the type; cache refreshed on every write and at boot.
+
+**When changing this:**
+- Built-in type names are hardcoded in branch logic elsewhere (dependency tree, topology, polling defaults) — don't rename them.
 
 ---
 
@@ -1419,6 +1569,106 @@ Listed alphabetically.
 
 ---
 
+## services/groupMappingService.ts
+
+**What it owns:** CRUD over the `GroupMapping` table + the login-time resolver that turns IdP group claims into a role + region/other tags. Highest-privilege role wins across matched groups; tags union. Enabled-mappings are cached per provider.
+
+**Public API:** `resolveGroupsToAccess`, `normalizeGroupKey`, `listGroupMappings`, `getGroupMapping`, `createGroupMapping`, `updateGroupMapping`, `deleteGroupMapping`, `GROUP_MAPPING_PROVIDERS`
+
+**Cross-service deps:** permissions helpers (`normalizePermissions`, admin-equivalent check, highest-privilege picker), `logEvent`, `tagNormalize` (normalize + union).
+
+**Used by:** `src/services/ssoProvisioning.ts` + `src/api/routes/auth.ts` (`resolveGroupsToAccess` at login), `src/api/routes/groupMappings.ts` (CRUD, gated on `users=fullwrite`).
+
+**Invariants:**
+- `normalizeGroupKey` is applied identically on write (stored key) and read (incoming claim) so matching never diverges; LDAP keys lowercase for case-insensitive match, OIDC/SAML trim-only.
+- Enabled-mappings cache invalidates on every write; highest-privilege role chosen when matched groups disagree.
+- A mapping pointing at an admin-equivalent role emits a warning Event (the audit trail for IdP→admin paths); a `roleId=null` tag-only mapping contributes tags without a role.
+
+**When changing this:**
+- Changing `GROUP_MAPPING_PROVIDERS` needs a migration; `normalizeGroupKey` changes risk breaking already-stored keys.
+
+---
+
+## services/ldapClient.ts
+
+**What it owns:** Shared `ldapts` connection helpers (TLS, bind/unbind lifecycle, AbortSignal, RFC-4515 escaping, objectGUID decode) — one code path used by both on-prem AD discovery and LDAP user auth.
+
+**Public API:** `buildLdapUrl`, `newLdapClient`, `withBoundLdapClient`, `escapeLdapFilterValue`, `decodeObjectGuid`, `formatLdapError`
+
+**Cross-service deps:** none (ldapts, node:crypto).
+
+**Used by:** `src/services/ldapAuthService.ts` and `src/services/activeDirectoryService.ts` (bind + search helpers).
+
+**Invariants:**
+- Single TLS decision: `rejectUnauthorized = !!config.verifyTls`; default ports 389/636; bounded connect + general timeouts.
+- No referral chasing (referrals surface as non-results, not recursive binds).
+- `escapeLdapFilterValue` runs on every user-supplied filter value — order: backslash first, then `*`, `(`, `)`, null.
+
+**When changing this:**
+- Don't add referral chasing without threat-modeling attacker-influenced server binding; don't weaken the filter escape.
+
+---
+
+## services/ldapAuthService.ts
+
+**What it owns:** LDAP/AD bind-as-user authentication + group lookup; provisions the Polaris user with group-derived role/tags via `ssoProvisioning`. Settings live in a Setting row with `bindPassword` masked on read.
+
+**Public API:** `getLdapSettings`, `getLdapSettingsMasked`, `updateLdapSettings`, `isLdapEnabled`, `authenticateLdapUser`, `findOrProvisionLdapUser`, `testLdapConnection`
+
+**Cross-service deps:** `ldapClient` (bound-client + escape + GUID decode + error format), `ssoProvisioning.provisionExternalUser`.
+
+**Used by:** `src/api/routes/auth.ts` (LDAP login via `POST /auth/login`, LDAP test + settings endpoints).
+
+**Invariants:**
+- Empty password is rejected BEFORE any bind (unauthenticated-bind trap); username is RFC-4515-escaped before filter substitution.
+- Two-phase: service-account bind locates the user, then a rebind AS the user verifies credentials; optional reverse group search catches groups missing from `memberOf`.
+- Stable user id is objectGUID (hex) or entryUUID, falling back to DN; settings cache has a short TTL and preserves the bindPassword mask on write unless changed.
+
+**When changing this:**
+- Keep the empty-password check first, before any network I/O.
+
+---
+
+## services/oidcAuthService.ts
+
+**What it owns:** OpenID Connect (Authorization Code + PKCE/S256) login via `openid-client` v6 — discovery, JWKS, ID-token signature/iss/aud/exp/nonce validation, config storage, redirect-URI derivation, and group-to-role provisioning.
+
+**Public API:** `getOidcSettings`, `getOidcSettingsForUi`, `updateOidcSettings`, `isOidcEnabled`, `getRedirectUri`, `buildAuthorizationUrl`, `handleCallback`, `findOrProvisionOidcUser`, `testOidcConnection`
+
+**Cross-service deps:** `ssoProvisioning.provisionExternalUser`.
+
+**Used by:** `src/api/routes/auth.ts` (OIDC login kick-off, callback, settings, test endpoints).
+
+**Invariants:**
+- `state` (CSRF) / `nonce` (replay) / `codeVerifier` (PKCE) live in the PG-backed session between login and callback; the callback is a top-level GET so SameSite=Lax cookies are sent.
+- Callback never honors a caller-supplied return path — always redirects to `/`; `clientSecret` masked on read, preserved-on-unchanged on write.
+- Redirect URI is derived from `POLARIS_PUBLIC_URL` (missing → throws with a clear message); userinfo claims merge into ID-token claims when present.
+
+**When changing this:**
+- Never add a caller-supplied return_uri / open-redirect surface to the callback.
+
+---
+
+## services/ssoProvisioning.ts
+
+**What it owns:** Shared find-or-provision for OIDC and LDAP users — resolves IdP groups to role + tags, matches or creates the Polaris user, applies the highest-privilege role, and records normalized groups in `User.ssoGroups`.
+
+**Public API:** `provisionExternalUser`, `ExternalUserProfile`
+
+**Cross-service deps:** `groupMappingService` (`resolveGroupsToAccess`, `normalizeGroupKey`).
+
+**Used by:** `src/services/ldapAuthService.ts` and `src/services/oidcAuthService.ts` (find-or-provision).
+
+**Invariants:**
+- `ssoGroups` capped (anti-bloat) and normalized per provider; they do NOT write to the user's own `regionTags`/`otherTags` (those stay operator-owned and union at read time).
+- Existing user: role overridden only when groups resolve a role (a manual admin assignment survives a no-match login); new user: group-resolved role else built-in `readonly`, always flagged `needsRoleReview`.
+- Username collisions resolve via base → base-provider → provider-externalId; SSO/LDAP users get a random placeholder password hash that is never checked at login.
+
+**When changing this:**
+- Don't change the role-override rule — a no-match login must never demote an existing admin.
+
+---
+
 ## services/blockService.ts
 
 **What it owns:** IP block CRUD and metadata (name, tags, description), plus the `block.created` / `block.updated` / `block.deleted` audit Events (emitted in-service after each mutation resolves; create/update inputs carry `actor?`, deleteBlock takes `(id, actor?)`).
@@ -1438,6 +1688,46 @@ Listed alphabetically.
 - Verify deleteBlock's active-reservation cascade check (affects data integrity)
 - Test CIDR normalization in createBlock (e.g., 10.1.1.5/24 → 10.1.1.0/24)
 - Check block-listing performance if tag filtering is optimized
+
+---
+
+## services/capacityAdvisorService.ts
+
+**What it owns:** Derives recommended worker counts, pool sizes, PostgreSQL settings, and queue mode from observable workload (monitored-asset count, per-cadence P90 work duration, integration load, observed peak connections, host RAM). Advisory by default; a Stage POST writes the env-driven levers.
+
+**Public API:** `buildAdvisorState`, `recomputeAdvisorFromSnapshot`, `stageAdvisorState`, `summarizeAdvisorGaps`, `getCachedAdvisorState`, `percentile`, `roundUpToNearest`, `AdvisorState`, `AdvisorRecommendation`, `CadenceKey`, `AdvisorLeverKey`, `ApplyMode`
+
+**Cross-service deps:** `prisma`, `AppError`, `setEnvVar`, monitor-work histogram reader (metrics), `queueService` (queue mode + names), `capacityService` (CapacitySnapshot), `logEvent`.
+
+**Used by:** `src/api/routes/serverSettings.ts` (`GET /capacity-advisor`, `POST /capacity-advisor/stage`), `src/jobs/capacityWatch.ts` + `src/services/capacityService.ts` (`recomputeAdvisorFromSnapshot` in the capacity-watch loop).
+
+**Invariants:**
+- Never recommends shrinking — `changeRequired` only when recommended > current.
+- Cold-start substitutes a fixed P90 when the work-duration histogram has too few samples.
+- Handler-timeout-pressure fires when P90 approaches the pg-boss `expire_seconds` cap; some worker levers are blocked behind a queue-mode flip until restart.
+
+**When changing this:**
+- P90 math depends on the metric's histogram buckets — keep in sync with `src/metrics.ts`.
+- PG tuning recommendations come from an external builder in `serverSettings.ts`; cadence intervals resolve through `capacityService.workload`.
+
+---
+
+## services/capacityDbIo.ts
+
+**What it owns:** Pure disk-read-pressure rate math — samples `pg_stat_database.blk_read_time` and turns deltas into a normalized "backends continuously blocked in read()" rate, making the signal storage-medium-aware. Only meaningful when `track_io_timing = on`.
+
+**Public API:** `deriveDbIoVerdict`, `DbIoReading`, `DbIoVerdict`, `MIN_IO_WINDOW_MS`, `IO_VERDICT_STALE_MS`, `DB_IO_WATCH_BACKENDS`, `DB_IO_WARNING_BACKENDS`
+
+**Cross-service deps:** none.
+
+**Used by:** `src/services/capacityService.ts` — reads the counter via Prisma, computes the verdict, and feeds watch-reason thresholds.
+
+**Invariants:**
+- First call or a window < `MIN_IO_WINDOW_MS` returns `measured:false` (don't alarm); a counter reset (current < prev) returns unmeasured.
+- Rate = Δblk_read_time / Δelapsed; verdict goes stale after `IO_VERDICT_STALE_MS`.
+
+**When changing this:**
+- WATCH/WARNING backend thresholds are tunable module exports consumed by capacityService.
 
 ---
 
@@ -1475,6 +1765,27 @@ Listed alphabetically.
 - Test fallback PG data directory candidates on RHEL/Windows when `SHOW data_directory` fails (non-superuser app role).
 - When adding a new reason, ALWAYS pick a `family` if it overlaps with any existing reason about the same concern — otherwise both reasons render side-by-side and re-introduce the noise the collapse pass was built to fix. Reasons that are genuinely orthogonal (no overlap) leave `family` undefined.
 - Stick to the `<Subject> <state> (<metric>). <Action>.` wording pattern when adding reasons; the collapse pass concatenates suggestions across family members and the result reads poorly if one reason's suggestion ends mid-sentence or carries the metric inside the action.
+
+---
+
+## services/certInfo.ts
+
+**What it owns:** Single source of truth for the leaf cert nginx serves (`POLARIS_PROXY_CERT_PATH`). Layered cache (keyed on raw-file SHA-256) + last-known-good fallback tolerates the atomic-rename window during rotation. Exposes the SHA-256 fingerprint (agent pin), cert hostnames (URL inference), and expiry.
+
+**Public API:** `getServerCertFingerprint`, `getServerCertHostnames`, `getServerCertExpiry`, `invalidateCache`, `__resetCertInfoCacheForTests`
+
+**Cross-service deps:** none (node:fs, node:crypto, logger).
+
+**Used by:** `src/api/routes/proxySettings.ts` + `src/api/routes/serverSettings.ts` (fingerprint/expiry display), `src/api/routes/assets.ts`, `src/services/agentInstallService.ts` + `src/services/agentAutoDeployService.ts` (stamp the pin into `agent.conf`), `src/services/nginxApplyService.ts` (post-rotate cache invalidation).
+
+**Invariants:**
+- All accessors are synchronous — 20+ callers rely on sync reads; never make them async.
+- Read failures retry briefly and fall back to last-good so a transient read during rotation doesn't break agents mid-connection; repeat-failure warn logs are suppressed until success resumes.
+- Fingerprint is `sha256:<hex>` of the cert DER, stable for agent pinning.
+
+**When changing this:**
+- If `POLARIS_PROXY_CERT_PATH` ever becomes mutable at runtime, the setter must call `invalidateCache`.
+- `__resetCertInfoCacheForTests` is test-only — never call it from production code.
 
 ---
 
@@ -1540,6 +1851,27 @@ Listed alphabetically.
 
 ---
 
+## services/dependencyTreeService.ts
+
+**What it owns:** Fortinet dependency-DAG computation and multi-parent suppression semantics — assigns layers via BFS from FortiGate roots, prefers the most-physical edge per (child,parent) pair, and reconciles `Asset.dependencySuppressed` on the reconciler cadence.
+
+**Public API:** `DependencyDetectedVia`, `DependencySource`, `DepAsset`, `DependencyEdge`, `LayerAssignment`, `buildDependencyEdgesFromInputs`, `assignLayers`, `evaluateSuppression`, `recomputeDependencyTree`, `reconcileDependencySuppression`, `propagateAfterStatusChange`, `SuppressionAssetState`
+
+**Cross-service deps:** `prisma`, `interfaceTopologyService`, `logEvent`, `logger`.
+
+**Used by:** `src/api/routes/integrations.ts` + `src/api/routes/assets.ts` (dependency test / admin endpoints), `src/services/monitoringService.ts` (suppression queries), `src/jobs/dependencyReconciler.ts` (reconciler tick), `src/jobs/backfillDependencyTree.ts` (migration).
+
+**Invariants:**
+- All-down semantics: an asset suppresses only when ALL effective parents are down/suppressed; unmonitored parents are transparent (walk continues to grandparents).
+- Only a confirmed-down edge propagates — warning/recovering flapping does not.
+- Operator override rows take precedence over computed rows; the admin Dependency-Test overlay (`dependencyTestUntil`) is a what-if that auto-expires + emits an Event.
+- `assignLayers` keeps only parent-edges (`parent.layer === child.layer - 1`); preferred edge is interface > lldp > mesh > controller.
+
+**When changing this:**
+- `propagateAfterStatusChange` is a latency optimization; `reconcileDependencySuppression` is the source of truth.
+
+---
+
 ## services/deviceIconService.ts
 
 **What it owns:** Operator-uploaded device icons (PNG/JPEG/WebP/SVG; 256KB cap raster, 32KB cap SVG; magic-byte check for raster, pattern-reject validation for SVG); bytes-in-DB storage. Every icon is keyed to (manufacturer, type-or-model); resolution priority is `manufacturer-model: <mfr>/<model>` → `manufacturer-type: <mfr>/<assetType>`. Manufacturer values canonicalized through `manufacturerAlias` map at both upload and resolution time.
@@ -1597,6 +1929,26 @@ Listed alphabetically.
 - Check getBaselines() batch reads are correct (no off-by-one in map population).
 - Confirm recordSample() ignores invalid input (negative ms, non-finite values).
 - Test edge case: if all 10 samples are identical, stddev=0 and threshold should still be avg + 60s (floor wins).
+
+---
+
+## services/discoveryRunState.ts
+
+**What it owns:** DB-backed live state for discovery runs (replaces the prior in-memory `activeDiscovery` Map). The discovery worker coalesces hot progress writes through a `RunAccumulator`; the web role reads the rows for the `/discoveries` list, slow-run detection, and cancel signalling.
+
+**Public API:** `DiscoveryRunStatus`, `ActiveDeviceEntry`, `RunAccumulator`, `newRunAccumulator`, `upsertQueuedRun`, `markRunStarted`, `flushRunProgress`, `touchWorkerHeartbeat`, `finishRun`, `isRunActive`, `anyRunActive`, `isCancelRequested`, `requestCancel`, `listActiveRuns`, `persistSlowFlags`, `reapStaleRuns`, `DiscoveryRunRow`
+
+**Cross-service deps:** `prisma`, `logger`.
+
+**Used by:** `src/api/routes/integrations.ts` (discovery control + `/discoveries` list + backup-restore guard), `src/jobs/discoveryRunReaper.ts` (stale-run reaping).
+
+**Invariants:**
+- Hot progress is coalesced in the accumulator (mutates synchronously, flushes throttled + on terminal transitions); `flushRunProgress` / `touchWorkerHeartbeat` are best-effort and never kill a run on a transient DB hiccup.
+- Slow-alert flags are owned by the web-role slow check, never touched by the worker flush; `createdAt` resets on every upsert so elapsed-time math reflects current run age.
+- `reapStaleRuns` marks any queued/running row with a stale heartbeat as error.
+
+**When changing this:**
+- The worker heartbeat timer detects stalled phases — keep it shorter than the reaper's stale window.
 
 ---
 
@@ -1962,6 +2314,44 @@ Listed alphabetically.
 
 ---
 
+## services/manufacturerProfileService.ts
+
+**What it owns:** CRUD + cached resolver for the editable per-manufacturer telemetry profiles (metric rows, per-metric overrides, custom widgets). A synchronous `getProfileFor` serves the hot probe path after a boot warm-up.
+
+**Public API:** `MetricKey`, `MetricRowType`, `MetricOverrideRow`, `MetricRow`, `CustomWidgetRow`, `ProfileSummary`, `ProfileFull`, `refreshProfileCache`, `getProfileFor`, `listProfiles`, `getProfile`, `createProfile`, `updateMetricRow`, `createOverride`, `updateOverride`, `deleteOverride`, `createWidget`, `updateWidget`, `deleteWidget`, `deleteProfile`, `STD_MIB_KEYS`, `METRIC_KEYS`
+
+**Cross-service deps:** `prisma`, `normalizeManufacturer`, transform/combiner-kind guards, `AppError`, `logger`.
+
+**Used by:** `src/api/routes/manufacturerProfiles.ts` (full CRUD), `src/api/routes/assets.ts` (profile read), `src/services/monitoringService.ts` (metric resolver), `src/jobs/seedManufacturerProfiles.ts` + `src/jobs/backfillManufacturerProfileMemoryComposition.ts`.
+
+**Invariants:**
+- Metric row type gates transform validity (scalar/table take a unary transform; double_scalar takes a combiner); override rows always carry a symbol while metric rows may be unconfigured (null = use built-in seed).
+- `defaultMibId` and `defaultMibStdKey` are mutually exclusive; `modelPattern` is operator regex (validated + length-capped).
+- The cache `getProfileFor` reads is keyed by normalized-lowercase manufacturer and returns null until the boot warm-up completes.
+
+**When changing this:**
+- `touchProfile` (updatedAt bump) is best-effort and must not fail the operation.
+
+---
+
+## services/mibParserUtils.ts
+
+**What it owns:** Shared ASN.1/SMI comment stripper — collapses comments to whitespace (preserving line numbers) and is string-literal aware.
+
+**Public API:** `stripComments`
+
+**Cross-service deps:** none.
+
+**Used by:** `src/services/mibService.ts` and `src/services/oidRegistry.ts` (SMI text parsing).
+
+**Invariants:**
+- Comments become space/newline equivalents (not deleted) so line numbers stay correct for parser errors; both `--…<newline>` and `--…--` styles handled; `--` inside quoted strings is preserved.
+
+**When changing this:**
+- Test pathological cases: nested/escaped quotes, comment at EOF.
+
+---
+
 ## services/mibService.ts
 
 **What it owns:** Parsing, validation, and CRUD for uploaded SNMP MIB modules. The light validator (`parseMib`) gates uploads (1MB cap, rejects binaries, extracts moduleName + IMPORTS). The heavier peer (`parseMibStructured`) drives the Browse + MIB-aware Walk surface — extracts SYNTAX, INTEGER enum value labels, ACCESS, STATUS, DESCRIPTION, INDEX clauses, and SEQUENCE OF table structure. Per-(manufacturer, model, moduleName) uniqueness is enforced at create.
@@ -1990,6 +2380,26 @@ Listed alphabetically.
 
 ---
 
+## services/monitorOverrideService.ts
+
+**What it owns:** Monitor-override semantics — `Asset.monitorOverride` tracks whether the operator's `monitored` choice diverges from the per-class `addAsMonitored` flag in the owning integration's config, so discovery sweeps don't clobber operator intent.
+
+**Public API:** `AddAsMonitoredAssetType`, `getAddAsMonitoredFromConfig`, `computeMonitorOverride`, `resolveMonitorOverride`, `classBlockKeyForAssetType`, `snapshotAddAsMonitoredByAssetType`, `recomputeMonitorOverrideForAssets`, `sweepMonitoredForIntegration`, `recomputeMonitorOverrideForIntegration`, `buildMonitoredSweep`, `AUTO_MONITOR_ASSET_TYPES`
+
+**Cross-service deps:** none (pure helpers + raw SQL via the caller's prisma).
+
+**Used by:** `src/api/routes/assets.ts` (status-pill toggle / `PUT /assets/:id`), `src/api/routes/integrations.ts` (save flow + preflight), `src/jobs/backfillMonitorOverride.ts`.
+
+**Invariants:**
+- Override auto-clears when the operator choice converges with `addAsMonitored` (either side moving to equality satisfies it).
+- Only five asset types participate (`firewall` / `switch` / `access_point` / `workstation` / `server`); each maps to a type-specific config block (`fortigateMonitor` / `fortiswitchMonitor` / `fortiapMonitor` / `workstationMonitor` / `serverMonitor`).
+- `sweepMonitoredForIntegration` leaves `override=true` assets alone (operator wins) and otherwise sets `monitored` per the class flag.
+
+**When changing this:**
+- The raw-SQL JSON-path block keys must stay in sync with `classBlockKeyForAssetType` and the cutover migration.
+
+---
+
 ## services/monitoringService.ts
 
 **What it owns:** Asset health monitoring via probes, telemetry collection, and state machine transitions across five monitor states (unknown → recovering → up → warning → down).
@@ -2009,7 +2419,7 @@ Listed alphabetically.
 - **Per-host SNMP gate:** every SNMP path (probeSnmp + the `withSnmpSession` helper that fronts collectTelemetrySnmp / collectSystemInfoSnmp / collectLldpNeighborsSnmp / operator snmpWalkRaw) acquires a per-`host:port` FIFO lock so probe and heavy walks don't overlap on a single-threaded agent. Without it, a 10-min systemInfo IF-MIB+LLDP walk pins the agent and the cheap sysUpTime probe stretches from <50ms to 3-5 s (often past the probe timeout → reads as packet loss). Keyed on host:port not assetId so two assets sharing one SNMP target don't collide. FortiOS REST and FMG calls aren't routed through this gate — they have their own concurrency models. **probeSnmp resets `start = performance.now()` inside the gate's callback** so the reported `responseTimeMs` reflects only the device round-trip, not the FIFO wait behind a concurrent walk — otherwise probes queued behind a 20 s fastFiltered IF-MIB walk reported as ~20 s on the chart, producing a perfect zig-zag against the bare-probe ~2 ms samples.
 - **vendorTelemetryProfiles + oidRegistry consumers:** collectTelemetry/collectHardwareSensors/collectSystemInfo/collectLldpOnlySnmp call `pickVendorProfile()` and `resolveOidSync()` for SNMP walks; boot calls `ensureRegistryLoaded()` for warm cache.
 - **Credential fallback chain:** asset-level credential → integration-stored token/SNMP → inherited from FMG on FMG-discovered firewalls.
-- **Sample writes are async-buffered, status writes are synchronous.** The six append-only sample tables (asset_monitor / asset_telemetry / asset_hardware_sensor / asset_interface / asset_storage / asset_ipsec_tunnel) go through `sampleWriteBuffer.enqueue*` and flush every 2 s. `Asset.update` for `monitorStatus` / counters / `last*At` and the per-asset `$transaction` for `assetAssociatedIp` and `persistLldpNeighbors` stay synchronous because they need read-modify-write or per-asset replace semantics that an append-only buffer can't provide. Future contributors adding a new cadence must NOT batch the asset.update — the state machine reads counters then writes new ones, and batching would break that. **These synchronous system-info persists are wrapped in `retryOnDeadlock`** (the `assetAssociatedIp` delete+insert `$transaction`, the LLDP/wireless `deleteMany`s, and the wireless endpoint-stamp `$transaction` that updates OTHER assets' `lastSeenAp`). They can lose a 40P01 deadlock against a concurrent system-info pass or the probe-patch bulk `Asset` UPDATE; the bulk LLDP/wireless upserts were already retried, but these were not, and the loser crashed the entire scrape (`runSystemInfoFor` → "System info collection crashed", ~126/day observed on the split-role monitor). Each op is idempotent (full-replace / last-write-wins) so re-run on deadlock is safe. **The wireless endpoint-stamp updates are additionally sorted by asset id** so every concurrent endpoint-stamp `$transaction` acquires its `assets` row locks in the same order — the PG deadlock log showed a 3-way cycle whose three participants were ALL exactly this `lastSeenAp` UPDATE (APs with overlapping matched-endpoint sets locking in different Map-insertion order). Ordering makes that cycle impossible; retryOnDeadlock is the backstop for any residual cross-path collision (e.g. vs the probe-patch bulk Asset UPDATE).
+- **Sample writes are async-buffered, status writes are synchronous.** The eight append-only sample tables (asset_monitor / asset_telemetry / asset_hardware_sensor / asset_interface / asset_storage / asset_ipsec_tunnel / asset_perf_sla / asset_sdwan_rule) go through `sampleWriteBuffer.enqueue*` and flush every 2 s. `Asset.update` for `monitorStatus` / counters / `last*At` and the per-asset `$transaction` for `assetAssociatedIp` and `persistLldpNeighbors` stay synchronous because they need read-modify-write or per-asset replace semantics that an append-only buffer can't provide. Future contributors adding a new cadence must NOT batch the asset.update — the state machine reads counters then writes new ones, and batching would break that. **These synchronous system-info persists are wrapped in `retryOnDeadlock`** (the `assetAssociatedIp` delete+insert `$transaction`, the LLDP/wireless `deleteMany`s, and the wireless endpoint-stamp `$transaction` that updates OTHER assets' `lastSeenAp`). They can lose a 40P01 deadlock against a concurrent system-info pass or the probe-patch bulk `Asset` UPDATE; the bulk LLDP/wireless upserts were already retried, but these were not, and the loser crashed the entire scrape (`runSystemInfoFor` → "System info collection crashed", ~126/day observed on the split-role monitor). Each op is idempotent (full-replace / last-write-wins) so re-run on deadlock is safe. **The wireless endpoint-stamp updates are additionally sorted by asset id** so every concurrent endpoint-stamp `$transaction` acquires its `assets` row locks in the same order — the PG deadlock log showed a 3-way cycle whose three participants were ALL exactly this `lastSeenAp` UPDATE (APs with overlapping matched-endpoint sets locking in different Map-insertion order). Ordering makes that cycle impossible; retryOnDeadlock is the backstop for any residual cross-path collision (e.g. vs the probe-patch bulk Asset UPDATE).
 - **One Asset findUnique per probe.** `probeAsset(assetId, out?)` populates `out.snapshot` with the asset row it already loaded (with credential + integration includes). `recordProbeResult(assetId, result, preloadedAsset?)` accepts that snapshot to skip its own findUnique. Hot-path callers (runProbeFor) pass the out-object; the operator /probe-now route doesn't bother and pays the extra read.
 - **FortiLink LLDP exclusion (`config.excludeFortilinkLldp`, default off).** The system-info dispatch (`resolveAndCollectSystemInfo`) drops `data.lldpNeighbors` whose `localIfName` is a FortiLink interface before returning, when the owning integration's toggle is on. FortiGate firewalls only (`isFortinetSrc && !isManagedSwitchOrAp`). The FortiLink set is authoritative from the CMDB `fortilink` flag via the pure `fortilinkInterfaceNamesFromCmdb` (fortilink-flagged interfaces + their member ports). The REST-interfaces path reuses CMDB already fetched in `collectSystemInfoFortinet` (`SystemInfoSample.fortilinkInterfaces`, always `[]`+ on the REST path); the SNMP-interfaces path leaves it `undefined` and the dispatch makes one gated CMDB call (`fetchFortilinkInterfaceSet`) only when the toggle is on — `undefined` vs `[]` is the signal for which path ran. Added to BOTH `FortiManagerConfigSchema` + `FortiGateConfigSchema` (parity) and read in the create + FMG/FortiGate-edit `monitorSettingsFormHTML` opts → rendered as a checkbox on the FortiGate LLDP stream subtab (`public/js/integrations.js`, `_readExcludeFortilinkLldpToggle`). Peer-inferred FortiLink rows (`peerInferredLldpService`) are unaffected.
 - **LLDP asset match index is module-cached.** `persistLldpNeighbors` reads through `getLldpAssetMatchIndex()` which caches the index for 60 s and dedupes concurrent rebuilders via an inflight Promise. Stale-cache risk is one cycle of "LLDP neighbor matched to wrong asset" — self-corrects on next scrape. Discovery code that bulk-renames assets / rotates IPs / mass-MAC-edits can call `invalidateLldpMatchCache()` before its next sync if it wants the immediate refresh; the 60 s TTL is the safety net otherwise.
@@ -2135,6 +2545,122 @@ Listed alphabetically.
 - Verify the three asset-type branches still cover the topology shapes you care about. If FortiAP direct-attached attribution becomes resolvable (e.g. a future discovery enhancement captures the FortiGate's physical port for direct APs), add the fourth branch and update the "intentionally skipped" docstring.
 - Don't add upsert/cache layers without measuring — at branch-class fleet sizes (~2000 assets total, ~50 APs per site) the per-request findMany is sub-100ms and the cache invalidation surface isn't worth it.
 - The dedup rule lives in the route handler, not the service. If you call from a new route, remember to merge with `dedupeInferredNeighbors(real, inferred, aggregateMembershipMap(interfaces))` before serializing — pass the membership map (and the asset's full real-LLDP set, not just the per-interface slice) or aggregate/member duplicates leak through.
+
+---
+
+## services/presenceVerificationService.ts
+
+**What it owns:** Post-discovery network-presence verification for AD/Entra/Intune assets — a cheapest-first signal cascade (already-fresh → agent heartbeat → answering monitor probe → single ICMP) that establishes `Asset.lastSeen`, with bounded ICMP concurrency and a hard pass deadline.
+
+**Public API:** `PresenceCandidate`, `PresenceSignal`, `PresenceVerificationSummary`, `classifyPresenceSignal`, `runPresenceVerification`
+
+**Cross-service deps:** `prisma`, `logger`, `logEvent`, `bumpLastSeen`, `pingHost`.
+
+**Used by:** `src/api/routes/integrations.ts` — discovery post-sync pass / `verify-presence` (integration `config.verifyPresence` toggle).
+
+**Invariants:**
+- A failed ping writes NOTHING (Windows hosts commonly drop ICMP; no pong ≠ absence) — `lastSeen` advances only on positive evidence via `bumpLastSeen`.
+- ICMP is concurrency-capped with a per-ping timeout and a hard pass deadline; `lastSeen` writes are batched in chunked transactions.
+- Ping target priority is dnsName > hostname > ipAddress (stored ipAddress is often stale on directory-discovered assets).
+
+**When changing this:**
+- Agent-heartbeat and monitor-probe steps are best-effort; keep the no-write-on-ping-failure rule.
+
+---
+
+## services/nginxApplyService.ts
+
+**What it owns:** Orchestrator that combines config persistence, rendering, the privileged sysadmin wrapper, and cert-info invalidation into the operator-facing operations: apply config, rotate cert, bootstrap, and report drift.
+
+**Public API:** `applyProxyConfig`, `rotateCertAndKey`, `preflightCertRotation`, `bootstrapProxyConfig`, `getDriftStatus`
+
+**Cross-service deps:** `nginxRenderer.renderNginxConfig`, `nginxConfigParser.parseNginxConfig`, `privilegedSysadmin` (stage + apply + wrapper-available), `proxyConfigService` (get/save/row-exists), `certInfo` (invalidate + fingerprint).
+
+**Used by:** `src/api/routes/proxySettings.ts` (apply / rotate-cert), `src/jobs/bootstrapProxyConfig.ts` (startup bootstrap).
+
+**Invariants:**
+- Cert-pair validation is SPKI-only and happens before any graceful-reload attempt; the privileged wrapper owns the atomic rename + `nginx -t` + reload.
+- The rendered config's SHA-256 is matched against `lastAppliedHash` for drift; `preflightCertRotation` is validation-only (touches no disk).
+- `managedMode=false` blocks apply and surfaces the adopt-required flow.
+
+**When changing this:**
+- Hash computation must be byte-for-byte identical across platforms (CRLF normalization in the renderer).
+
+---
+
+## services/nginxConfigParser.ts
+
+**What it owns:** Best-effort regex parse of the six operator-settable directives from a live nginx config; used at bootstrap to seed `proxyConfig` and to detect customization beyond those six (drift markers).
+
+**Public API:** `parseNginxConfig`, `parseNginxConfigText`
+
+**Cross-service deps:** none (proxyConfig types only).
+
+**Used by:** `src/services/nginxApplyService.ts` (bootstrap + drift status), `tests/unit/nginxConfigParser.test.ts`.
+
+**Invariants:**
+- Whole-line comments are stripped before matching so comment text doesn't trip drift detection; drift reports unknown `proxy_pass` targets, unknown `add_header` keys, or a location-block count ≠ 5.
+- Missing file returns defaults with `managedMode=false`; `KNOWN_PROXY_PASS_PATTERNS` + `KNOWN_ADD_HEADERS` define the template's expected schema.
+
+**When changing this:**
+- Update the KNOWN_* sets in lockstep with the nginx template, and keep regexes tight to avoid false-positive drift.
+
+---
+
+## services/nginxRenderer.ts
+
+**What it owns:** Renders `proxyConfig` + env-derived values into a complete nginx server config (from `deploy/nginx/polaris.conf.template`), with a deterministic SHA-256 so the updater and apply service can detect drift.
+
+**Public API:** `renderNginxConfig`
+
+**Cross-service deps:** none (reads the on-disk template at runtime).
+
+**Used by:** `src/services/nginxApplyService.ts` (apply + drift status), `tests/unit/nginxRenderer.test.ts`.
+
+**Invariants:**
+- Rendered bytes are identical for a given input (deterministic hash — no timestamps/random); CRLF is normalized at read time so Windows checkouts match Linux renders.
+- Placeholders are `{{TOKEN}}` substituted by split/join (never regex); togglable directives are whole-line replacements.
+
+**When changing this:**
+- Verify the template path resolves in both `src/` (tsx dev) and `dist/` (tsc prod) layouts; substitution token names must match the template exactly.
+
+---
+
+## services/proxyConfigService.ts
+
+**What it owns:** Persistence + validation of the operator-settable `proxyConfig` (single Setting row) with a short-TTL in-process cache — httpsPort, TLS protocols, HTTP/3 toggle, HSTS, Prometheus allow-list, and `managedMode`.
+
+**Public API:** `getProxyConfig`, `proxyConfigRowExists`, `saveProxyConfig`, `invalidateProxyConfigCache`
+
+**Cross-service deps:** none (prisma, proxyConfig types, AppError).
+
+**Used by:** `src/services/nginxApplyService.ts` (apply / bootstrap / drift), `src/api/routes/proxySettings.ts`.
+
+**Invariants:**
+- Single cached row per process with a short TTL; `invalidateProxyConfigCache()` clears it synchronously and writes always invalidate.
+- Validation: httpsPort 1–65535, TLS protocols a non-empty subset of {TLSv1.2, TLSv1.3}, HTTP/3 requires TLSv1.3, allow-list entries parse as IPs; partial updates merge into current state.
+
+**When changing this:**
+- Port/IP/protocol validation is security-relevant; new fields need defaults + merge/validate handling. Don't change the Setting key without a migration.
+
+---
+
+## services/privilegedSysadmin.ts
+
+**What it owns:** Thin TypeScript wrapper around the `sudo /usr/local/sbin/polaris-nginx-apply` shell script — stages files into the run dir and spawns the privileged wrapper with bounded output capture. The wrapper (not this module) is the entire privileged surface.
+
+**Public API:** `NginxApplySubcommand`, `WrapperResult`, `runNginxApply`, `stageNginxConfig`, `stageCertAndKey`, `isWrapperAvailable`
+
+**Cross-service deps:** none (node spawn/fs, AppError, logger).
+
+**Used by:** `src/services/nginxApplyService.ts` (config apply + cert rotation).
+
+**Invariants:**
+- All subcommand/arg validation lives in the shell script — this module only stages files + spawns; captured output is size-capped with a truncation flag.
+- Stage dir/files are written with restrictive modes; `ensureStageDir` is a defensive fallback when systemd-tmpfiles didn't run.
+
+**When changing this:**
+- `isWrapperAvailable()` lets route handlers short-circuit on dev boxes that lack the wrapper.
 
 ---
 
@@ -2300,11 +2826,127 @@ Listed alphabetically.
 
 ---
 
+## services/roleService.ts
+
+**What it owns:** CRUD over the `Role` table for the dynamic-role RBAC model — enforces protected/built-in/custom invariants, normalizes the permission matrix + tags, emits `role.*` Events, and bumps the role-version cache so live sessions refresh.
+
+**Public API:** `RoleSummary`, `CreateRoleInput`, `UpdateRoleInput`, `listRoles`, `getRole`, `getRoleByName`, `createRole`, `updateRole`, `deleteRole`, `countAdminEquivalentUsers`, `isAdminEquivalentRole`
+
+**Cross-service deps:** `prisma`, `AppError`, `logEvent`, `tagNormalize`, `bumpRoleVersion` + `normalizePermissions` + `FUNCTION_KEYS` (permissions middleware).
+
+**Used by:** `src/api/routes/roles.ts` (CRUD + `GET /roles/functions`), `src/api/routes/users.ts` (role assignment + admin-equivalent checks).
+
+**Invariants:**
+- Protected roles (`admin`, `readonly`) can't be edited/renamed/deleted; built-in roles (`networkadmin`, `assetsadmin`, `user`) can be edited but not deleted; reserved names are case-insensitively protected even for new custom roles.
+- Delete refuses with 409 when any user holds the role; `regionTags`/`otherTags` are normalized (trim/dedupe/cap); badge color is `#rrggbb` or null.
+- Every write bumps the role-version cache via `bumpRoleVersion` (live sessions refresh on next request) and emits a per-field diff Event.
+
+**When changing this:**
+- `countAdminEquivalentUsers` filters in JS (role counts are tiny) and backs the last-admin invariant alongside `userService`.
+
+---
+
+## services/probePatchBuffer.ts
+
+**What it owns:** Batching buffer for per-probe Asset state writes (`monitorStatus`, `consecutiveFailures`/`Successes`, `lastMonitorAt`, `lastResponseTimeMs`) — collapses N per-tick `Asset.update`s into one bulk `UPDATE … FROM (VALUES …)` per ~2 s window with last-write-wins merge.
+
+**Public API:** `enqueueProbePatch`, `getPendingProbePatch`, `flushProbePatchBuffer`, `startProbePatchBuffer`, `shutdownFlushProbePatchBuffer`, `ProbePatch`, `FLUSH_INTERVAL_MS`
+
+**Cross-service deps:** `prisma`, `logger`, `retryOnDeadlock`, metrics (write timer + buffer depth).
+
+**Used by:** `src/services/monitoringService.ts` (`recordProbeResult` enqueues + overlays the pending patch for read-your-writes), `src/app.ts` (boot start + SIGTERM drain).
+
+**Invariants:**
+- Last-write-wins per asset within a window EXCEPT `monitorStatusChangedAt`, which is preserved on merge when the new patch omits it.
+- Read-your-writes: `recordProbeResult` overlays the pending patch before running the state machine; re-entrant safe (concurrent enqueues during flush land in a fresh buffer); on flush failure the snapshot is re-prepended only for assets not already overwritten.
+- A size threshold triggers an early flush; the shutdown hook must drain before process exit.
+
+**When changing this:**
+- `FLUSH_INTERVAL_MS` matches `sampleWriteBuffer` for consistent UI lag — keep them aligned.
+
+---
+
+## services/sampleQueryRouter.ts
+
+**What it owns:** Pure tier-selection — routes a chart-history query to the detail / hourly / daily tier based on the requested range and the operator-configured retention windows. No I/O.
+
+**Public API:** `pickSampleTier`, `pickSampleTierForAsset`, `SampleTier`, `TierPick`, `DEFAULT_TIER_RETENTION`
+
+**Cross-service deps:** `sampleRetentionService` (retention windows + FOREVER + entities).
+
+**Used by:** `src/services/sampleHistoryService.ts` (`SampleTier` type) and `src/api/routes/assets.ts` (history endpoints dispatch through `pickSampleTierForAsset`).
+
+**Invariants:**
+- Tier decision uses ONLY the `since` timestamp (the oldest point binds the tier), not `until`; `DEFAULT_TIER_RETENTION` applies when per-asset overrides aren't available.
+- The returned `bucketSeconds` (0 / 3600 / 86400) signals to the client whether rates are pre-computed (rollup) or client-diffed (detail).
+
+**When changing this:**
+- Retention edits flow through `sampleRetentionService` (read per call behind its short cache); tier-picking logic itself rarely changes.
+
+---
+
+## services/sampleRetentionService.ts
+
+**What it owns:** Global per-entity sample-retention policy (Server Settings → Retention), stored in `Setting("sampleRetention")`. Axis is per-entity (assets / cpuMem / hardware / interfaces / storage / ipsec / perfSla / sdwanRule), not per-asset-class; selection-aware entities apply configured retention only to selected/monitored rows.
+
+**Public API:** `getSampleRetention`, `updateSampleRetention`, `invalidateSampleRetentionCache`, `getRetentionDays`, `defaultSampleRetention`, `unselectedSlowPruneWindow`, `SETTING_KEY`, `FOREVER`, `UNSELECTED_DETAIL_HOURS`, `RetentionEntity`, `RETENTION_ENTITIES`, `SELECTION_AWARE_ENTITIES`
+
+**Cross-service deps:** `prisma`.
+
+**Used by:** `src/services/sampleQueryRouter.ts`, `src/api/routes/serverSettings.ts` (`GET`/`PUT /sample-retention`), `src/services/capacityService.ts` + `src/services/monitoringService.ts`, `src/jobs/migrateSampleRetentionToEntities.ts`.
+
+**Invariants:**
+- Encoding: positive = N days, 0 = tier off (pruned), `FOREVER` = -1 (keep forever); short in-process cache TTL, invalidated on every write; partial PUT merges into stored value.
+- Unselected rows keep a fixed short detail window with no rollup; the unselected-slow-prune window respects the compress-after frontier to avoid expensive decompression.
+
+**When changing this:**
+- `RETENTION_ENTITIES` has eight entries (the two SD-WAN streams included) — keep it aligned with the sample-table inventory.
+
+---
+
+## services/sampleRollupService.ts
+
+**What it owns:** Rolls the eight source sample tables up into hourly and daily aggregates (sixteen rollup tables, 2 tiers × 8 sources); the daily tier reads from the hourly tier, not from detail. Counter tables store first/last for rate derivation, gauges store avg/min/max, categorical fields carry last-seen + counts.
+
+**Public API:** `rollupHourly`, `rollupDaily`, `RollupTier`, `SourceTable`
+
+**Cross-service deps:** `prisma`, `logger`, metrics (rollup timer).
+
+**Used by:** `src/jobs/runSampleRollup.ts` (hourly + daily ticks).
+
+**Invariants:**
+- `INSERT … ON CONFLICT DO UPDATE` (idempotent — re-running the same window rewrites buckets in place); hourly uses a short lookback for late-arriving samples, daily a longer one.
+- Counter rate = (last − first) / elapsed with negative deltas treated as resets; daily aggregates are sampleCount-weighted.
+
+**When changing this:**
+- A new sample source needs a new `SourceTable` variant, a `DEFS` entry, and matching hourly + daily SQL builders — the SQL is brittle (verify bucket cardinality + aggregate semantics).
+
+---
+
+## services/sampleHistoryService.ts
+
+**What it owns:** Tier-aware readers for the asset chart-history endpoints (monitor, telemetry, hardware sensors, storage, interfaces, IPsec, perf-SLA, SD-WAN rules) — returns serialized rows + stats matching the chart renderers, with overflow-boundary points for unbroken polylines.
+
+**Public API:** `readMonitorHistory`, `readTelemetryHistory`, `readHardwareSensorHistory`, `readStorageHistory`, `readInterfaceHistory`, `readIpsecHistory`, `readPerfSlaHistory`, `readSdwanRuleHistory`, `readSdwanMembers`
+
+**Cross-service deps:** `sampleQueryRouter` (`SampleTier`), `prisma`.
+
+**Used by:** `src/api/routes/assets.ts` (`/assets/:id/*-history` + `/sdwan-members` endpoints).
+
+**Invariants:**
+- Detail tier reads the source tables; hourly/daily tiers read rollups and translate aggregate columns back to source field names so renderers consume both shapes.
+- Counter tables (interface, ipsec) return values for client/rollup rate computation; gauge tables return avg/min/max; BigInt coerced to number with a safe-integer cap; the fetch-since window can extend past `since` for chart continuity while stats stay within the visible range.
+
+**When changing this:**
+- Rollup schema changes require matching SQL in `sampleRollupService`; a new stream needs schema + a tier-aware reader + rollup SQL + router support.
+
+---
+
 ## services/sampleWriteBuffer.ts
 
-**What it owns:** Periodic batch-flush buffer for the six append-only monitor sample tables (asset_monitor_samples / asset_telemetry_samples / asset_hardware_sensor_samples / asset_interface_samples / asset_storage_samples / asset_ipsec_tunnel_samples). Collapses per-work-item `prisma.<table>.create*` calls into one `createMany` per 2 s flush window so the monitor hot loop stops eating DB pool capacity per probe.
+**What it owns:** Periodic batch-flush buffer for the eight append-only monitor sample tables (asset_monitor_samples / asset_telemetry_samples / asset_hardware_sensor_samples / asset_interface_samples / asset_storage_samples / asset_ipsec_tunnel_samples / asset_perf_sla_samples / asset_sdwan_rule_samples). Collapses per-work-item `prisma.<table>.create*` calls into one `createMany` per 2 s flush window so the monitor hot loop stops eating DB pool capacity per probe.
 
-**Public API:** `enqueueMonitorSample`, `enqueueTelemetrySample`, `enqueueHardwareSensorSamples`, `enqueueInterfaceSamples`, `enqueueStorageSamples`, `enqueueIpsecTunnelSamples`, `flushAllSampleBuffers`, `startSampleWriteBuffer`, `shutdownFlushSampleBuffers`, `FLUSH_INTERVAL_MS`, all six row-type interfaces.
+**Public API:** `enqueueMonitorSample`, `enqueueTelemetrySample`, `enqueueHardwareSensorSamples`, `enqueueInterfaceSamples`, `enqueueStorageSamples`, `enqueueIpsecTunnelSamples`, `enqueuePerfSlaSamples`, `enqueueSdwanRuleSamples`, `flushAllSampleBuffers`, `startSampleWriteBuffer`, `shutdownFlushSampleBuffers`, `FLUSH_INTERVAL_MS`, all eight row-type interfaces.
 
 **Cross-service deps:** `prisma` (db.js), `retryOnDeadlock` (utils/dbRetry.js), `startSampleWriteTimer` + `setSampleBufferDepth` (metrics.js), `logger` (utils/logger.js).
 
@@ -2312,7 +2954,7 @@ Listed alphabetically.
 - `src/services/monitoringService.ts:recordProbeResult` — `enqueueMonitorSample` for the probe outcome row.
 - `src/services/monitoringService.ts:recordTelemetryResult` — `enqueueTelemetrySample` (CPU/memory only).
 - `src/services/monitoringService.ts:recordHardwareSensorResult` — `enqueueHardwareSensorSamples` (per-sensor; dispatched by the separate `collectHardwareSensors` call that `runTelemetryFor` issues in parallel with `collectTelemetry`).
-- `src/services/monitoringService.ts:recordSystemInfoResult` — `enqueueInterfaceSamples`, `enqueueStorageSamples`, `enqueueIpsecTunnelSamples`. Also additively folds the MAC of each operator-pinned monitored interface into `AssetMacAddress` (source="monitor-interface") via `addMacAddresses` — additive-only, so unlike discovery's `reconcileMacAddresses` it never wipes rows owned by other sources, and discovery/agent reconciles (which hydrate-existing → merge) preserve it.
+- `src/services/monitoringService.ts:recordSystemInfoResult` — `enqueueInterfaceSamples`, `enqueueStorageSamples`, `enqueueIpsecTunnelSamples`, plus `enqueuePerfSlaSamples` + `enqueueSdwanRuleSamples` when the heavy pass ran `collectSdwanFortinet` (gated by `Integration.config.pullSdwan`; SD-WAN rows are all stamped cadence="fast"). Also additively folds the MAC of each operator-pinned monitored interface into `AssetMacAddress` (source="monitor-interface") via `addMacAddresses` — additive-only, so unlike discovery's `reconcileMacAddresses` it never wipes rows owned by other sources, and discovery/agent reconciles (which hydrate-existing → merge) preserve it.
 - `src/services/monitoringService.ts:recordFastFilteredResult` — same three as systemInfo, smaller subset (pinned interfaces only).
 - `src/api/routes/agents.ts:POST /samples` — the Polaris Agent ingestion path: `enqueueMonitorSample` (responseTime, also via `recordProbeResult`), `enqueueTelemetrySample` + `enqueueHardwareSensorSamples` (telemetry), `enqueueInterfaceSamples`, `enqueueStorageSamples`. **This writer runs on the `web` role**, not monitor — which is why the web role must also run the flush tick (see Boot).
 
@@ -2327,7 +2969,7 @@ Listed alphabetically.
 - **Snapshot-on-flush.** `flushTable` splices the current array up front so concurrent enqueues during the awaited `createMany` land in a fresh array. On retry-exhausted failure the snapshot is re-prepended for the next tick.
 - **Per-table flush guard.** `flushing[key]` prevents re-entry on the same table — a 2 s tick that fires while a slow flush is still mid-write becomes a no-op for that table, no concurrent writer per table.
 - **Trade-off documented:** up to 2 s of sample rows lost on hard crash. Acceptable because samples are an append-only time series and the next cadence tick re-supplies. Asset-level state (status pill, counters, lastMonitorAt) is buffered separately by `src/services/probePatchBuffer.ts` with last-write-wins semantics — same 2 s window, different shape because state needs replace + read-your-writes, the append-only contract here doesn't fit.
-- **Detail tier only.** This buffer covers the six SOURCE tables. The twelve `*_hourly` / `*_daily` rollup tables use INSERT...ON CONFLICT DO UPDATE from `sampleRollupService.ts` instead — rollup writes are inherently upsert (idempotent re-runs over the same window must rewrite buckets in place) and the append-only buffer contract has no upsert path.
+- **Detail tier only.** This buffer covers the eight SOURCE tables. The sixteen `*_hourly` / `*_daily` rollup tables use INSERT...ON CONFLICT DO UPDATE from `sampleRollupService.ts` instead — rollup writes are inherently upsert (idempotent re-runs over the same window must rewrite buckets in place) and the append-only buffer contract has no upsert path.
 
 **When changing this:**
 - New sample table → add a `BufferKey`, an `enqueueXxx` helper, a `TABLE_LABEL` entry, and a `switch` arm in `writeBatch`. Touch the test file too — same shape.

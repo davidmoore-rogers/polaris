@@ -87,12 +87,13 @@ Server Settings → Maintenance shows host CPU/RAM/disk, database size with samp
 |----------|----------------------|-----------------------------------------------|
 | CPU | 2 vCPU | 4 vCPU |
 | RAM | 4 GB | 8 GB |
-| Disk | 20 GB SSD | 50 GB SSD |
+| DB data volume | 50 GB SSD | 100 GB+ SSD |
+| App / state volume | 5 GB | 20 GB |
 | OS | Windows Server 2019+, RHEL 9, Ubuntu 22.04+ | Windows Server 2022, RHEL 9, Ubuntu 22.04+ |
 | PostgreSQL | 15+ | 15+ |
 | Node.js | 20 LTS | 20 LTS |
 
-Discovery pre-loads subnets, reservations, and assets for O(1) lookups; peak memory is ~200–400 MB on top of the Node.js base. Monitoring sample tables grow proportionally with monitored asset count × cadence × retention; the Capacity card on Server Settings → Maintenance projects this at runtime.
+Discovery pre-loads subnets, reservations, and assets for O(1) lookups; peak memory is ~200–400 MB on top of the Node.js base. Monitoring sample tables grow proportionally with monitored asset count × cadence × retention; the Capacity card on Server Settings → Maintenance projects this at runtime. The **DB data volume** (where PostgreSQL stores its `data_directory`) is the number that matters most — Postgres degrades hard when its volume hits 100%. See [docs/INSTALL.md](docs/INSTALL.md) → "Disk sizing — read this first" for the authoritative per-volume sizing table and platform-specific data-directory paths.
 
 **PostgreSQL tuning for large deployments**: open Server Settings → Maintenance → **Capacity Advisor** after the host has been monitoring for ~15 minutes. It computes recommended values for `shared_buffers` / `work_mem` / `effective_cache_size` / `random_page_cost` / `max_connections` based on observed workload, host RAM, and connection peak, then surfaces them alongside Polaris's own pool and worker tunables. For headless installs, see `docs/INSTALL.md` → "Capacity tuning — use the Capacity Advisor."
 
@@ -183,12 +184,24 @@ The flow: snapshot the commit → `pg_dump` backup (last 10 kept in `backups/`) 
 
 ### Managing the service
 
-**Linux (systemd):** `systemctl status|restart polaris`, `journalctl -u polaris -f`
-**Windows (NSSM):** `nssm status|restart Polaris`, logs in `C:\polaris\logs\service-stdout.log`
+Production installs run the split-role layout (web / monitor / discovery), fronted
+by nginx for TLS termination — it's the **default and only supported production
+layout** on Linux. The setup scripts install it automatically; the legacy
+single-process `polaris.service` unit is no longer shipped.
 
-> Running the optional multi-process split (web / monitor / discovery)? Manage
-> the group with `systemctl status|restart polaris.target` instead. See
-> [docs/INSTALL.md](docs/INSTALL.md) → "Optional: Multi-process deployment".
+**Linux (systemd):** manage the whole group via the target:
+`systemctl status|restart polaris.target`, `journalctl -u polaris-web -f` (or
+`-u polaris-monitor@1` / `-u polaris-discovery` for the other roles). See
+[docs/INSTALL.md](docs/INSTALL.md) → "The split-role deployment (web / monitor /
+discovery)" for the layout and customization details.
+
+**Windows (NSSM):** one service per role (`PolarisWeb` / `PolarisMonitor1` /
+`PolarisDiscovery`) — `nssm status|restart PolarisWeb`, logs in
+`C:\polaris\logs\service-stdout.log`.
+
+> Local development (`npm run dev`, `POLARIS_ROLE` unset) still runs everything
+> in one process — the single-process "all" role exists only for dev, never in
+> production.
 
 ## API overview
 

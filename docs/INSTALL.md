@@ -395,7 +395,8 @@ If `C:` has less than 50 GB free, **install PGDATA on a different drive** during
 ### 2. Database + user
 
 ```powershell
-& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres
+# Replace <version> with your installed major version (15 or newer)
+& "C:\Program Files\PostgreSQL\<version>\bin\psql.exe" -U postgres
 ```
 
 ```sql
@@ -438,7 +439,7 @@ Polaris on Windows runs under [NSSM](https://nssm.cc/) (Non-Sucking Service Mana
 ```powershell
 nssm install Polaris "C:\Program Files\nodejs\node.exe" "C:\Polaris\dist\index.js"
 nssm set Polaris AppDirectory "C:\Polaris"
-nssm set Polaris DependOnService postgresql-x64-17
+nssm set Polaris DependOnService postgresql-x64-<version>
 nssm set Polaris Start SERVICE_AUTO_START
 nssm start Polaris
 ```
@@ -502,6 +503,42 @@ sudo systemctl enable --now polaris.target     # "Start Everything"
 
 `systemctl start polaris.target` brings up migrate → web → monitor@1..N →
 discovery; `systemctl stop polaris.target` stops the group.
+
+### Upgrading a legacy single-process install
+
+Installs provisioned before the Phase 3 cutover ran a single
+`polaris.service` unit (one process, every subsystem). Those are no longer
+shipped, so the one-time move to the split-role layout is operator-driven:
+
+1. **Take the in-app update first** (Server Settings → Maintenance → Updates),
+   or pull the new code manually. The in-app updater syncs the shipped
+   `deploy/polaris-*.service` + `polaris.target` files into
+   `/etc/systemd/system/` and runs `daemon-reload` on every restart — but it
+   restarts `polaris.target`, which a legacy install hasn't enabled yet, so
+   the unit files land but the group isn't brought up automatically.
+2. **Stop and disable the old unit**, then enable the new role units +
+   target (mirrors the manual systemd block above):
+
+   ```bash
+   sudo systemctl disable --now polaris.service
+   sudo systemctl enable polaris-web polaris-discovery polaris-migrate
+   sudo systemctl enable polaris-monitor@1 polaris-monitor@2
+   sudo systemctl enable --now polaris.target
+   ```
+
+3. **Set `POLARIS_MONITOR_REPLICAS`** in `/opt/polaris/.env` to match the
+   number of `polaris-monitor@N` instances you enabled, so the Capacity
+   Advisor sizes pools + `max_connections` correctly (the web role warns at
+   boot when it's unset in split-role mode), then `sudo systemctl restart
+   polaris.target`.
+4. **Then move to nginx** (TLS termination) with
+   `deploy/migrate-to-nginx.sh` — see the [nginx front-end](#nginx-front-end-tls-termination)
+   section below. That script requires the split-role layout to already be
+   enabled, which steps 1–3 establish.
+
+Once on the split-role + nginx layout, all future updates flow through the
+in-app updater with no further manual unit work — it keeps the unit files and
+nginx config in sync on every restart.
 
 **Per-role `/metrics` listeners.** prom-client registries are per-process. The
 web role serves `/metrics` on the main HTTPS port; monitor and discovery boot a
