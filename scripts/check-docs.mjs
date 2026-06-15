@@ -67,6 +67,21 @@ for (const d of ["TOUCHES.md", "TEMPLATES.md"]) {
   }
 }
 
+// === Check 1b: no prose "(line N)" refs that evade the file:line regex ===
+// `(line 85)`, `(lines ~834-900)`, `(around line 5381)` drift just as badly as
+// file.ts:NNN but slip past Check 1. Use `path -> symbolName()` instead.
+const PROSE_LINE_REF = /\((?:around\s+)?lines?\s+~?\d+/gi;
+for (const d of ["TOUCHES.md", "TEMPLATES.md"]) {
+  const hits = [...docText[d].matchAll(PROSE_LINE_REF)].map((m) => m[0]);
+  if (hits.length) {
+    fail(
+      "no-line-numbers",
+      `${d} has ${hits.length} prose line-number reference(s) (e.g. ${[...new Set(hits)].slice(0, 5).join(", ")}). ` +
+        `Use "path/file.ts -> symbolName()" instead — line numbers drift.`,
+    );
+  }
+}
+
 // === Check 2: every Prisma model is documented in ARCHITECTURE.md ===
 if (exists("prisma/schema.prisma")) {
   const models = [...read("prisma/schema.prisma").matchAll(/^model\s+(\w+)\s*\{/gm)].map((m) => m[1]);
@@ -127,6 +142,45 @@ if (deadPaths.size) {
   fail(
     "paths-exist",
     `${deadPaths.size} doc-referenced path(s) don't exist on disk:\n      ` + [...deadPaths].join("\n      "),
+  );
+}
+
+// === Check 6: every src/services file has a TOUCHES.md per-service entry ===
+// TOUCHES.md is the writer/reader/invariant map; a service with no
+// `## services/<name>.ts` section is invisible to "if I change X, what else
+// touches it?". Add an entry (see existing ones for the format) or, for a
+// genuinely trivial/standalone module, add it to TOUCHES_EXEMPT with a reason.
+const TOUCHES = docText["TOUCHES.md"];
+const TOUCHES_EXEMPT = new Set([
+  // (none today — every service carries an entry)
+]);
+const undocServices = tsFiles("src/services")
+  .filter((base) => !TOUCHES_EXEMPT.has(base))
+  .filter((base) => !TOUCHES.includes(`services/${base}.ts`));
+if (undocServices.length) {
+  fail(
+    "touches-service-coverage",
+    `${undocServices.length} service(s) have no "## services/<name>.ts" entry in TOUCHES.md:\n      ` +
+      undocServices.map((s) => `services/${s}.ts`).join("\n      ") +
+      `\n    Add a per-service entry (What it owns / Public API / Used by / Invariants / When changing this).`,
+  );
+}
+
+// === Check 7 (WARN-only): src/utils with exports lacking a unit test ===
+// Convention: "write a unit test for every public function in src/utils/".
+// Warn rather than fail — backfilling every util test is a long tail — but
+// surface the gap so new utils don't silently ship untested.
+const utilTestWarnings = [];
+for (const base of tsFiles("src/utils")) {
+  const src = read(`src/utils/${base}.ts`);
+  if (!/\bexport\s+(async\s+)?(function|const|class)\b/.test(src)) continue; // type-only / no runtime exports
+  if (!exists(`tests/unit/${base}.test.ts`)) utilTestWarnings.push(`src/utils/${base}.ts`);
+}
+if (utilTestWarnings.length) {
+  console.warn(
+    `\n⚠ check-docs (warn): ${utilTestWarnings.length} src/utils file(s) with exports lack a tests/unit/<name>.test.ts:\n      ` +
+      utilTestWarnings.join("\n      ") +
+      `\n    Not a failure — but add coverage when you next touch one.\n`,
   );
 }
 
