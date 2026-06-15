@@ -27,6 +27,7 @@ vi.mock("../../src/db.js", () => ({
 import {
   SAMPLE_TABLES,
   ROLLUP_TABLES,
+  STANDALONE_SAMPLE_TABLES,
   ALL_HYPERTABLE_CANDIDATES,
 } from "../../src/services/timescaleService.js";
 import { RETENTION_ENTITIES } from "../../src/services/sampleRetentionService.js";
@@ -34,13 +35,12 @@ import { RETENTION_ENTITIES } from "../../src/services/sampleRetentionService.js
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
- * Sample-shaped tables that intentionally are NOT Timescale-managed (yet).
- * asset_custom_widget_samples: written by the manufacturer-custom-widget
- * probe loop but has no retention entity and no prune path — known gap from
- * the 2026-06 review, tracked for follow-up. Remove from this list when it
- * gains hypertable management.
+ * Sample-shaped tables that intentionally are NOT Timescale-managed. Empty
+ * today — asset_custom_widget_samples was the last holdout and is now a
+ * STANDALONE_SAMPLE_TABLES hypertable. Add a name here only with a comment
+ * justifying why it can't be a hypertable.
  */
-const EXEMPT = new Set<string>(["asset_custom_widget_samples"]);
+const EXEMPT = new Set<string>([]);
 
 const managed = new Set<string>(ALL_HYPERTABLE_CANDIDATES);
 
@@ -54,13 +54,16 @@ function tablesReferencedIn(relPath: string): string[] {
 }
 
 describe("timescaleService managed-table inventory", () => {
-  it("covers one detail + hourly + daily table per retention entity", () => {
-    // 8 retention entities × 3 tiers = 24 managed hypertables. A new sample
-    // stream must land in SAMPLE_TABLES + ROLLUP_TABLES alongside its
-    // RETENTION_ENTITIES entry, or this count diverges.
+  it("covers one detail + hourly + daily table per retention entity, plus standalones", () => {
+    // 8 retention entities × 3 tiers = 24 tiered hypertables. A new tiered
+    // sample stream must land in SAMPLE_TABLES + ROLLUP_TABLES alongside its
+    // RETENTION_ENTITIES entry, or this count diverges. Detail-only streams
+    // with no rollups live in STANDALONE_SAMPLE_TABLES instead.
     expect(SAMPLE_TABLES.length).toBe(RETENTION_ENTITIES.length);
     expect(ROLLUP_TABLES.length).toBe(RETENTION_ENTITIES.length * 2);
-    expect(ALL_HYPERTABLE_CANDIDATES.length).toBe(RETENTION_ENTITIES.length * 3);
+    expect(ALL_HYPERTABLE_CANDIDATES.length).toBe(
+      RETENTION_ENTITIES.length * 3 + STANDALONE_SAMPLE_TABLES.length,
+    );
   });
 
   it("every table the rollup writer touches is Timescale-managed", () => {
@@ -77,19 +80,24 @@ describe("timescaleService managed-table inventory", () => {
     expect(unmanaged).toEqual([]);
   });
 
-  it("capacityService's local projection map covers every managed table", () => {
+  it("capacityService's local projection map covers every TIERED managed table", () => {
     // capacityService keeps its own per-table list (entity/tier/countKey) plus
     // DEFAULT_ROWS_PER_ASSET_PER_DAY / DEFAULT_BYTES_PER_ROW maps. The rows
     // map is dereferenced WITHOUT a fallback (`DEFAULT_ROWS_PER_ASSET_PER_DAY
     // [def.name](intervals)`), so a managed table missing there throws inside
     // the capacity snapshot. The maps use unquoted identifier keys, so match
     // bare words rather than string literals.
+    // Scope: the TIERED tables only. STANDALONE_SAMPLE_TABLES are deliberately
+    // excluded from the steady-state size projection — they have no
+    // RetentionEntity (the projection keys retention off entity/tier) and are
+    // small (custom-widget samples only exist when operators define widgets).
+    const tiered = new Set<string>([...SAMPLE_TABLES, ...ROLLUP_TABLES]);
     const src = readFileSync(join(ROOT, "src", "services", "capacityService.ts"), "utf8");
     const re = /\basset_[a-z_]+_samples(?:_hourly|_daily)?\b/g;
     const referenced = new Set<string>();
     for (const m of src.matchAll(re)) referenced.add(m[0]);
 
-    const missing = ALL_HYPERTABLE_CANDIDATES.filter((t) => !referenced.has(t));
+    const missing = [...tiered].filter((t) => !referenced.has(t)).sort();
     expect(missing).toEqual([]);
 
     const unmanaged = [...referenced].filter((t) => !managed.has(t) && !EXEMPT.has(t)).sort();

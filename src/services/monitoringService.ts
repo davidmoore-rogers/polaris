@@ -8744,7 +8744,7 @@ export async function pruneSystemInfoSamples(): Promise<number> {
   const r = await getSampleRetention();
   const [
     iDetail, iHourly, iDaily, sDetail, sHourly, sDaily, ipDetail, ipHourly, ipDaily,
-    psDetail, psHourly, psDaily, srDetail, srHourly, srDaily, lldp,
+    psDetail, psHourly, psDaily, srDetail, srHourly, srDaily, lldp, customWidget,
   ] = await Promise.all([
     // interfaces — detail is selection-aware (selected=configured, unselected=24h)
     pruneSelectionAwareDetail((w) => prisma.assetInterfaceSample.deleteMany({ where: w as any }), r.interfaces.detail, "asset_interface_samples"),
@@ -8770,9 +8770,13 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     // LLDP neighbors are current-state (per-asset, no rollup, no cadence) — prune
     // by the interfaces detail window as the system-info umbrella.
     pruneLldpNeighbors(r.interfaces.detail),
+    // Custom-widget samples are a standalone detail-only hypertable (no rollup
+    // tiers). Prune on the same interfaces detail umbrella window as LLDP via
+    // the compression-safe drop_chunks + residue path.
+    pruneTierByDays((w) => prisma.assetCustomWidgetSample.deleteMany({ where: w as any }), r.interfaces.detail, "timestamp", "asset_custom_widget_samples"),
   ]);
   return iDetail + iHourly + iDaily + sDetail + sHourly + sDaily + ipDetail + ipHourly + ipDaily
-    + psDetail + psHourly + psDaily + srDetail + srHourly + srDaily + lldp;
+    + psDetail + psHourly + psDaily + srDetail + srHourly + srDaily + lldp + customWidget;
 }
 
 async function pruneLldpNeighbors(days: number): Promise<number> {

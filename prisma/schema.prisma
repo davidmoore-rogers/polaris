@@ -1252,15 +1252,14 @@ model AssetWirelessStation {
 // ManufacturerCustomWidget probe result against one asset. `kind` is
 // "scalar" or "table" (mirrors the widget definition); `value` holds either
 // a single number (scalar) or an array of row objects (table).
-// KNOWN GAP (2026-06 review): no prune path and no Timescale management —
-// rows accumulate until manually cleared. The originally intended
-// system-info-cadence prune was never implemented. Follow-up needs a
-// retention-knob decision (pruning is destructive for installs keeping
-// history) plus a composite-PK migration to (id, timestamp) before this
-// table can join timescaleService's managed inventory — see the EXEMPT
-// list in tests/unit/timescaleTables.test.ts.
+// Detail-only time-series (no hourly/daily rollups). Managed as a STANDALONE
+// TimescaleDB hypertable (timescaleService.STANDALONE_SAMPLE_TABLES) and pruned
+// on the system-info umbrella window (interfaces detail retention) by
+// pruneSystemInfoSamples — same compression-safe drop_chunks path as the tiered
+// tables. Composite PK (id, timestamp) so the partition column is in the PK,
+// which create_hypertable requires.
 model AssetCustomWidgetSample {
-  id        String   @id @default(uuid())
+  id        String   @default(uuid())
   assetId   String
   widgetId  String   // stable UUID from ManufacturerCustomWidget; NOT an FK so
                      // a widget delete doesn't cascade-blow historical samples
@@ -1270,6 +1269,7 @@ model AssetCustomWidgetSample {
   kind      String   // "scalar" | "table"
   value     Json     // number for scalar; row array for table
 
+  @@id([id, timestamp])
   @@index([assetId, timestamp])
   @@index([assetId, widgetId, timestamp])
   @@index([widgetId])

@@ -58,14 +58,29 @@ export const ROLLUP_TABLES = [
   "asset_sdwan_rule_samples_daily",
 ] as const;
 
-/** Every table we manage as a hypertable — source + rollup. */
+/**
+ * Detail-only sample tables that are hypertable-managed but live OUTSIDE the
+ * tiered detail→hourly→daily rollup model (no rollup companions, not a
+ * RETENTION_ENTITY). They get hypertable conversion + compression + drop_chunks
+ * pruning like the others, but their retention rides an umbrella window rather
+ * than a per-entity tier. `asset_custom_widget_samples` is the only member:
+ * one row per ManufacturerCustomWidget probe, pruned on the system-info
+ * umbrella window by pruneSystemInfoSamples.
+ */
+export const STANDALONE_SAMPLE_TABLES = [
+  "asset_custom_widget_samples",
+] as const;
+
+/** Every table we manage as a hypertable — tiered source + rollup + standalone. */
 export const ALL_HYPERTABLE_CANDIDATES = [
   ...SAMPLE_TABLES,
   ...ROLLUP_TABLES,
+  ...STANDALONE_SAMPLE_TABLES,
 ] as const;
 
 export type SampleTableName = typeof SAMPLE_TABLES[number];
 export type RollupTableName = typeof ROLLUP_TABLES[number];
+export type StandaloneSampleTableName = typeof STANDALONE_SAMPLE_TABLES[number];
 export type ManagedHypertableName = typeof ALL_HYPERTABLE_CANDIDATES[number];
 
 interface DetectionState {
@@ -369,6 +384,7 @@ export async function migrateToHypertables(): Promise<void> {
   const targets: Array<{ table: string; partitionColumn: "timestamp" | "bucketStart" }> = [
     ...SAMPLE_TABLES.map((t) => ({ table: t, partitionColumn: "timestamp" as const })),
     ...ROLLUP_TABLES.map((t) => ({ table: t, partitionColumn: "bucketStart" as const })),
+    ...STANDALONE_SAMPLE_TABLES.map((t) => ({ table: t, partitionColumn: "timestamp" as const })),
   ];
 
   for (const { table, partitionColumn } of targets) {
