@@ -1,0 +1,28 @@
+# EditorConfig — https://editorconfig.org
+# Canonical line ending in git is LF (.gitattributes `* text=auto`); editors
+# should write LF so diffs stay clean regardless of the OS checkout setting.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Markdown: two trailing spaces is a hard line break — don't strip them.
+[*.md]
+trim_trailing_whitespace = false
+
+# Go (the Polaris Agent) is gofmt'd: real tabs, no size coercion.
+[*.go]
+indent_style = tab
+
+# Makefiles require literal tabs.
+[Makefile]
+indent_style = tab
+
+# Shell + PowerShell deploy scripts (eol pinned in .gitattributes too).
+[*.{sh,ps1}]
+indent_size = 2
