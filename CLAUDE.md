@@ -423,7 +423,7 @@ npm run lint
 - All IP math lives in `src/utils/cidr.ts`. **Never** do string manipulation on IPs elsewhere.
 - Services (`src/services/`) contain **all business logic**. Route handlers are thin — validate input, call a service, return a response.
 - All Zod schemas live co-located with their route file (top of file).
-- Database calls go through service functions only — never raw Prisma in route handlers.
+- Database calls go through service functions only — never raw Prisma in route handlers. **Interim state (2026-06):** several legacy route files still carry inline Prisma (heaviest in `agents.ts`, `assets.ts`, `integrations.ts`, `serverSettings.ts`, `users.ts`). New endpoints MUST use services; when you touch a legacy route, extract opportunistically. Until a handler is extracted, any audit-worthy mutation it makes must still write an `Event` inline (these files already import `logEvent`) — auditability is the part that can't wait for the refactor.
 - All errors thrown by services must be instances of `AppError` (`src/utils/errors.ts`) with an `httpStatus` property.
 - Use `async/await` throughout; avoid `.then()` chains.
 - Write a unit test for every public function in `src/utils/` and `src/services/`.

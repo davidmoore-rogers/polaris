@@ -202,6 +202,15 @@ router.put("/:id/password", requirePermission("users", "write"), async (req, res
       data: { passwordHash },
     });
     clearLockout(user.username);
+    logEvent({
+      action: "user.password_reset",
+      level: "warning",
+      resourceType: "user",
+      resourceId: id,
+      resourceName: user.username,
+      actor: req.session?.username,
+      message: `Password reset for user "${user.username}" by an administrator`,
+    });
     res.json({ ok: true });
   } catch (err) {
     next(err);
@@ -306,6 +315,15 @@ router.delete("/:id/totp", requirePermission("users", "write"), async (req, res,
     await prisma.user.update({
       where: { id },
       data: { totpSecret: null, totpEnabledAt: null, totpBackupCodes: [] },
+    });
+    logEvent({
+      action: "user.totp_reset",
+      level: "warning",
+      resourceType: "user",
+      resourceId: id,
+      resourceName: user.username,
+      actor: req.session?.username,
+      message: `Two-factor auth reset for user "${user.username}" by an administrator`,
     });
 
     res.json({ ok: true });

@@ -310,6 +310,16 @@ router.post("/database/backup", maintenanceLimiter, async (req, res, next) => {
       create: { key: "backup_history", value: history },
     });
 
+    await logEvent({
+      level: "info",
+      action: "server.backup.created",
+      resourceType: "backup",
+      resourceId: backupId,
+      resourceName: filename,
+      actor: req.session?.username,
+      message: `Database backup created: ${filename} (${payload.length} bytes${password ? ", encrypted" : ""})`,
+    });
+
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.setHeader("Content-Length", payload.length);
@@ -425,6 +435,7 @@ router.delete("/database/backups/:id", maintenanceLimiter, async (req, res, next
     const idx = history.findIndex((r: any) => r.id === id);
     if (idx === -1) throw new AppError(404, "Backup not found");
 
+    const removed = history[idx];
     history.splice(idx, 1);
     await prisma.setting.upsert({
       where: { key: "backup_history" },
@@ -433,6 +444,16 @@ router.delete("/database/backups/:id", maintenanceLimiter, async (req, res, next
     });
 
     if (existsSync(safePath)) unlinkSync(safePath);
+
+    await logEvent({
+      level: "warning",
+      action: "server.backup.deleted",
+      resourceType: "backup",
+      resourceId: id,
+      resourceName: removed?.filename || id,
+      actor: req.session?.username,
+      message: `Database backup deleted: ${removed?.filename || id}`,
+    });
 
     res.status(204).send();
   } catch (err) {
@@ -488,6 +509,15 @@ router.post("/tags", async (req, res, next) => {
         color: req.body.color || randomTagColor(),
       },
     });
+    await logEvent({
+      level: "info",
+      action: "tag.created",
+      resourceType: "tag",
+      resourceId: tag.id,
+      resourceName: tag.name,
+      actor: req.session?.username,
+      message: `Tag created: "${tag.name}" (category ${tag.category})`,
+    });
     res.status(201).json(tag);
   } catch (err) {
     next(err);
@@ -510,6 +540,14 @@ router.put("/tags/settings", async (req, res, next) => {
       where: { key: "tagSettings" },
       update: { value },
       create: { key: "tagSettings", value },
+    });
+    await logEvent({
+      level: "info",
+      action: "tag.settings.updated",
+      resourceType: "setting",
+      resourceName: "tagSettings",
+      actor: req.session?.username,
+      message: `Tag enforcement ${value.enforce ? "enabled" : "disabled"}`,
     });
     res.json(row.value);
   } catch (err) {
@@ -550,6 +588,18 @@ router.put("/tags/:id", async (req, res, next) => {
       ]);
     }
 
+    await logEvent({
+      level: "info",
+      action: "tag.updated",
+      resourceType: "tag",
+      resourceId: tag.id,
+      resourceName: tag.name,
+      actor: req.session?.username,
+      message: renamed
+        ? `Tag renamed: "${existing.name}" → "${tag.name}" (rewritten across blocks/subnets/assets)`
+        : `Tag updated: "${tag.name}"`,
+    });
+
     res.json(tag);
   } catch (err) {
     next(err);
@@ -561,6 +611,15 @@ router.delete("/tags/:id", async (req, res, next) => {
     const tag = await prisma.tag.findUnique({ where: { id: req.params.id } });
     if (!tag) throw new AppError(404, "Tag not found");
     await prisma.tag.delete({ where: { id: req.params.id } });
+    await logEvent({
+      level: "warning",
+      action: "tag.deleted",
+      resourceType: "tag",
+      resourceId: tag.id,
+      resourceName: tag.name,
+      actor: req.session?.username,
+      message: `Tag deleted: "${tag.name}"`,
+    });
     res.status(204).send();
   } catch (err) {
     next(err);
@@ -824,6 +883,16 @@ router.post("/oui/overrides", async (req, res, next) => {
       data: updateData,
     });
 
+    await logEvent({
+      level: "info",
+      action: "oui.override.set",
+      resourceType: "ouiOverride",
+      resourceId: clean,
+      resourceName: macPrefix,
+      actor: req.session?.username,
+      message: `OUI override set for ${macPrefix} → ${manufacturer.trim()}${deviceTrim ? ` / ${deviceTrim}` : ""} (${updated.count} assets rewritten)`,
+    });
+
     res.json({ ...result, assetsUpdated: updated.count });
   } catch (err) {
     next(err);
@@ -833,6 +902,15 @@ router.post("/oui/overrides", async (req, res, next) => {
 router.delete("/oui/overrides/:prefix", async (req, res, next) => {
   try {
     await deleteOuiOverride(req.params.prefix);
+    await logEvent({
+      level: "info",
+      action: "oui.override.removed",
+      resourceType: "ouiOverride",
+      resourceId: req.params.prefix,
+      resourceName: req.params.prefix,
+      actor: req.session?.username,
+      message: `OUI override removed for ${req.params.prefix}`,
+    });
     res.status(204).send();
   } catch (err) {
     next(err);
@@ -1340,6 +1418,15 @@ router.put("/updates/settings", async (req, res, next) => {
       update: { value: skipBackup },
       create: { key: "update.skip_backup", value: skipBackup },
     });
+    await logEvent({
+      level: skipBackup ? "warning" : "info",
+      action: "update.settings.changed",
+      resourceType: "setting",
+      resourceName: "update.skip_backup",
+      actor: req.session?.username,
+      message: `Pre-update backup ${skipBackup ? "DISABLED — updates will apply without a safety backup" : "enabled"}`,
+      details: { skipBackup },
+    });
     res.json({ skipBackup });
   } catch (err) {
     next(err);
@@ -1401,6 +1488,14 @@ router.put("/branding", async (req, res, next) => {
       update: { value: updated as any },
       create: { key: "branding", value: updated as any },
     });
+    await logEvent({
+      level: "info",
+      action: "branding.updated",
+      resourceType: "setting",
+      resourceName: "branding",
+      actor: req.session?.username,
+      message: `Branding updated: appName="${updated.appName}", subtitle="${updated.subtitle}"`,
+    });
     res.json({ ...updated, version: APP_VERSION });
   } catch (err) {
     next(err);
@@ -1428,13 +1523,21 @@ router.post("/branding/logo", maintenanceLimiter, logoUpload.single("file"), asy
       update: { value: updated as any },
       create: { key: "branding", value: updated as any },
     });
+    await logEvent({
+      level: "info",
+      action: "branding.logo.updated",
+      resourceType: "setting",
+      resourceName: "branding",
+      actor: req.session?.username,
+      message: `Custom logo set (${filename})`,
+    });
     res.json({ ...updated, version: APP_VERSION });
   } catch (err) {
     next(err);
   }
 });
 
-router.delete("/branding/logo", maintenanceLimiter, async (_req, res, next) => {
+router.delete("/branding/logo", maintenanceLimiter, async (req, res, next) => {
   try {
     const current = await getBranding();
     // Remove old custom logo file
@@ -1447,6 +1550,14 @@ router.delete("/branding/logo", maintenanceLimiter, async (_req, res, next) => {
       where:  { key: "branding" },
       update: { value: updated as any },
       create: { key: "branding", value: updated as any },
+    });
+    await logEvent({
+      level: "info",
+      action: "branding.logo.removed",
+      resourceType: "setting",
+      resourceName: "branding",
+      actor: req.session?.username,
+      message: "Custom logo removed — reverted to default",
     });
     res.json({ ...updated, version: APP_VERSION });
   } catch (err) {
@@ -1594,6 +1705,14 @@ router.put("/agents/auto-build-setting", async (req, res, next) => {
       update: { value: { enabled } as any },
       create: { key: "agent.autoBuildOnVersionMismatch", value: { enabled } as any },
     });
+    await logEvent({
+      level: "info",
+      action: "agent.auto_build_setting.changed",
+      resourceType: "setting",
+      resourceName: "agent.autoBuildOnVersionMismatch",
+      actor: req.session?.username,
+      message: `Agent auto-build on version mismatch ${enabled ? "enabled" : "disabled"}`,
+    });
     res.json({ enabled });
   } catch (err) { next(err); }
 });
@@ -1621,6 +1740,14 @@ router.put("/agents/auto-upgrade-setting", async (req, res, next) => {
       where:  { key: "agent.autoUpgradeOnNewBuild" },
       update: { value: { enabled } as any },
       create: { key: "agent.autoUpgradeOnNewBuild", value: { enabled } as any },
+    });
+    await logEvent({
+      level: "warning",
+      action: "agent.auto_upgrade_setting.changed",
+      resourceType: "setting",
+      resourceName: "agent.autoUpgradeOnNewBuild",
+      actor: req.session?.username,
+      message: `Agent auto-upgrade on new build ${enabled ? "ENABLED — new builds will fan out upgrades to the agent fleet" : "disabled"}`,
     });
     res.json({ enabled });
   } catch (err) { next(err); }
