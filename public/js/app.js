@@ -1511,13 +1511,42 @@ function flashModalCloseBtn(closeBtn) {
   }, 600);
 }
 
+// ─── Modal accessibility (focus trap + restore + Escape) ──────────────────────
+// Shared helpers so every openModal / showConfirm caller gets dialog semantics,
+// a Tab focus-trap, Escape-to-close, and focus restoration for free.
+function _focusableIn(container) {
+  var sel = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  return Array.prototype.slice.call(container.querySelectorAll(sel))
+    .filter(function (el) { return el.offsetParent !== null; });
+}
+// Trap Tab within `container`; call `onEscape` on Escape. Returns a teardown fn.
+function _trapFocus(container, onEscape) {
+  function onKey(e) {
+    if (e.key === "Escape") { e.preventDefault(); onEscape(); return; }
+    if (e.key !== "Tab") return;
+    var f = _focusableIn(container);
+    if (!f.length) { e.preventDefault(); container.focus(); return; }
+    var first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+  document.addEventListener("keydown", onKey, true);
+  return function () { document.removeEventListener("keydown", onKey, true); };
+}
+function _focusFirstIn(container) {
+  var f = _focusableIn(container);
+  if (f.length) f[0].focus(); else container.focus();
+}
+var _modalReturnFocus = null;  // element refocused when the shared modal closes
+var _modalKeyTeardown = null;  // active focus-trap teardown for the shared modal
+
 function openModal(title, bodyHTML, footerHTML, options) {
   let overlay = document.getElementById("modal-overlay");
   if (!overlay) {
     overlay = document.createElement("div");
     overlay.id = "modal-overlay";
     overlay.className = "modal-overlay";
-    overlay.innerHTML = '<div class="modal"><div class="modal-header"><h3></h3><button class="btn-icon modal-close">&times;</button></div><div class="modal-body"></div><div class="modal-footer"></div></div>';
+    overlay.innerHTML = '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1"><div class="modal-header"><h3 id="modal-title"></h3><button class="btn-icon modal-close" aria-label="Close dialog">&times;</button></div><div class="modal-body"></div><div class="modal-footer"></div></div>';
     document.body.appendChild(overlay);
     overlay.addEventListener("click", function (e) {
       if (e.target === overlay) {
@@ -1560,7 +1589,15 @@ function openModal(title, bodyHTML, footerHTML, options) {
   overlay.querySelector(".modal-footer").innerHTML = footerHTML || "";
   var slideoverOpen = !!document.querySelector(".slideover-overlay.open");
   overlay.classList.toggle("above-slideover", slideoverOpen);
-  requestAnimationFrame(function () { overlay.classList.add("open"); });
+  // Remember what had focus so closeModal can restore it; trap Tab + Escape
+  // inside the dialog while it's open.
+  _modalReturnFocus = document.activeElement;
+  if (_modalKeyTeardown) { _modalKeyTeardown(); }
+  _modalKeyTeardown = _trapFocus(modal, closeModal);
+  requestAnimationFrame(function () {
+    overlay.classList.add("open");
+    _focusFirstIn(modal);
+  });
 }
 
 function closeModal() {
@@ -1569,6 +1606,11 @@ function closeModal() {
     overlay.classList.remove("open");
     overlay.classList.remove("above-slideover");
   }
+  if (_modalKeyTeardown) { _modalKeyTeardown(); _modalKeyTeardown = null; }
+  if (_modalReturnFocus && typeof _modalReturnFocus.focus === "function") {
+    try { _modalReturnFocus.focus(); } catch (_) { /* element gone */ }
+  }
+  _modalReturnFocus = null;
   if (_modalFlashResetTimer) clearTimeout(_modalFlashResetTimer);
   _modalFlashLevel = 0;
 }
@@ -1588,7 +1630,7 @@ function showConfirm(message) {
     overlay.className = "modal-overlay";
     overlay.style.zIndex = "1300";
     overlay.innerHTML =
-      '<div class="modal">' +
+      '<div class="modal" role="dialog" aria-modal="true" aria-label="Confirm" tabindex="-1">' +
         '<div class="modal-header"><h3>Confirm</h3></div>' +
         '<div class="modal-body"><p style="font-size:0.9rem;color:var(--color-text-secondary);white-space:pre-wrap"></p></div>' +
         '<div class="modal-footer">' +
@@ -1598,18 +1640,28 @@ function showConfirm(message) {
       '</div>';
     overlay.querySelector(".modal-body p").textContent = message;
     document.body.appendChild(overlay);
+    var dialog = overlay.querySelector(".modal");
+    var prevFocus = document.activeElement;
+    var teardownTrap = _trapFocus(dialog, function () { done(false); });
     function done(val) {
+      teardownTrap();
       overlay.classList.remove("open");
       overlay.addEventListener("transitionend", function () {
         if (overlay.parentNode) overlay.remove();
       }, { once: true });
       // Fallback in case the transition doesn't fire (reduced-motion, etc.).
       setTimeout(function () { if (overlay.parentNode) overlay.remove(); }, 400);
+      if (prevFocus && typeof prevFocus.focus === "function") {
+        try { prevFocus.focus(); } catch (_) { /* element gone */ }
+      }
       resolve(val);
     }
     overlay.querySelector('[data-confirm="cancel"]').onclick = function () { done(false); };
     overlay.querySelector('[data-confirm="ok"]').onclick = function () { done(true); };
-    requestAnimationFrame(function () { overlay.classList.add("open"); });
+    requestAnimationFrame(function () {
+      overlay.classList.add("open");
+      _focusFirstIn(dialog);
+    });
   });
 }
 

@@ -103,6 +103,7 @@ Per-pattern sections:
 - Backdrop click flashes the close button instead of dismissing — explicit close only, to protect in-progress edits.
 - Confirms use `showConfirm()`, which returns a Promise — never use `window.confirm()` (won't render in some browser/embed contexts).
 - Z-index layering: `.modal-overlay` is 1000 by default; if `openModal` detects an open `.slideover-overlay` (1050), it adds the `.above-slideover` class to bump the modal to 1075. Lets modals opened from inside a slide-in (e.g. Reserve IP from the IP panel) render in front. `closeModal` clears the class.
+- Accessibility (built into `openModal`/`closeModal` + `showConfirm`, so every caller gets it): the `.modal` carries `role="dialog"` + `aria-modal="true"` + `aria-labelledby="modal-title"` (the header `<h3 id="modal-title">`); on open, focus moves to the first focusable element and Tab is trapped within the dialog (`_trapFocus` in `app.js`); Escape closes; on close, focus is restored to whatever was focused before open. The close button has `aria-label="Close dialog"`. `showConfirm` mirrors this on its own stacked overlay (Escape = Cancel). The static topology modal in `map.html` carries the same ARIA attributes.
 
 **When adding a new instance:**
 - Call `openModal(title, bodyHTML, footerHTML, options)` — do not hand-roll a new overlay element.
@@ -152,6 +153,7 @@ Per-pattern sections:
 - Open animation: append/build, then `requestAnimationFrame(() => overlay.classList.add("open"))` on the next frame to trigger the CSS transition.
 - Auto-refresh timers (e.g. monitor chart, system tab) gate on `_isOverlayOpen("<panel-overlay>")` and `_isCurrentAsset(id)` — close cancels pending ticks via `_clearAssetRefreshTimers()` so a closed panel never fires API requests.
 - Nested slide-overs (interface / storage / sensor / IPsec drilldowns) layer on top of the asset panel and only the topmost closes on the close button — see the interface slide-over pattern in assets.js for the layering rules.
+- Accessibility: the `.slideover` carries `role="dialog"` + `aria-labelledby` (its header `<h3>`) + `tabindex="-1"`; on open focus moves into the panel and `openViewModal` records the trigger element so `closeAssetPanel` restores focus. Escape closes — but guarded so it fires only when the panel is topmost (an open nested drilldown or a stacked modal intercepts first). Deliberately NOT `aria-modal` / no hard focus trap: a slide-over is a resizable panel meant to coexist with the page, unlike the Modal.
 
 **When adding a new instance:**
 - Reuse the `slideover-*` CSS classes; do not invent new container styles.

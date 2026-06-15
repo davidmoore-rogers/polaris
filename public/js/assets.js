@@ -3083,12 +3083,12 @@ function _ensureAssetPanelDOM() {
   overlay.id = "asset-panel-overlay";
   overlay.className = "slideover-overlay";
   overlay.innerHTML =
-    '<div class="slideover" id="asset-panel">' +
+    '<div class="slideover" id="asset-panel" role="dialog" aria-labelledby="asset-panel-title" tabindex="-1">' +
       '<div class="slideover-resize-handle"></div>' +
       '<div class="slideover-header">' +
         '<div class="slideover-header-top">' +
           '<h3 id="asset-panel-title">Asset Details</h3>' +
-          '<button class="btn-icon" id="asset-panel-close" title="Close">&times;</button>' +
+          '<button class="btn-icon" id="asset-panel-close" title="Close" aria-label="Close asset details">&times;</button>' +
         '</div>' +
         '<div class="slideover-meta" id="asset-panel-meta"></div>' +
       '</div>' +
@@ -3102,14 +3102,34 @@ function _ensureAssetPanelDOM() {
   });
   document.getElementById("asset-panel-close").addEventListener("click", closeAssetPanel);
 
+  // Escape closes the panel — but only when it's the topmost layer. Nested
+  // drilldowns (interface / storage / sensor / IPsec slide-overs) install their
+  // own capture-phase Escape handlers that close themselves first; this guard
+  // keeps Escape from closing the whole asset panel out from under an open
+  // nested panel. Not a hard focus trap: the asset panel is a resizable side
+  // panel meant to coexist with the page, so role="dialog" without aria-modal.
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    if (!overlay.classList.contains("open")) return;
+    if (document.querySelector(".slideover-overlay.slideover-nested.open")) return;
+    if (document.getElementById("modal-overlay") && document.getElementById("modal-overlay").classList.contains("open")) return;
+    closeAssetPanel();
+  });
+
   initSlideoverResize(document.getElementById("asset-panel"), "polaris.panel.width.asset");
 }
+
+var _assetPanelReturnFocus = null;  // element refocused when the asset panel closes
 
 function closeAssetPanel() {
   var overlay = document.getElementById("asset-panel-overlay");
   if (overlay) overlay.classList.remove("open");
   _clearAssetRefreshTimers();
   _currentAssetForRefresh = null;
+  if (_assetPanelReturnFocus && typeof _assetPanelReturnFocus.focus === "function") {
+    try { _assetPanelReturnFocus.focus(); } catch (_) { /* element gone */ }
+  }
+  _assetPanelReturnFocus = null;
 }
 
 // Open the asset details modal by serial number — used by HA peer links on
@@ -3134,6 +3154,9 @@ window.openAssetBySerial = async function (serial) {
 
 async function openViewModal(id) {
   _ensureAssetPanelDOM();
+  // Remember the trigger (table row action, search hit, etc.) so closing the
+  // panel returns focus there.
+  _assetPanelReturnFocus = document.activeElement;
   var titleEl  = document.getElementById("asset-panel-title");
   var metaEl   = document.getElementById("asset-panel-meta");
   var bodyEl   = document.getElementById("asset-panel-body");
@@ -3143,7 +3166,10 @@ async function openViewModal(id) {
   bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 1.25rem">Loading...</p>';
   footerEl.innerHTML = "";
   requestAnimationFrame(function () {
-    document.getElementById("asset-panel-overlay").classList.add("open");
+    var ov = document.getElementById("asset-panel-overlay");
+    ov.classList.add("open");
+    var panel = document.getElementById("asset-panel");
+    if (panel) panel.focus();
   });
 
   try {
