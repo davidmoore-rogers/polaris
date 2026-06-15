@@ -135,8 +135,9 @@ if (cfg.role === "web") {
 // the producer connection so schedulers can publish (runsSchedulers).
 // initializeQueue() runs in every role (cheap cache warm). Non-fatal — failure
 // leaves Polaris on the cursor (default) queue.
-initializeQueue()
-  .then(async () => {
+void (async () => {
+  try {
+    await initializeQueue();
     if (cfg.runsMonitorConsumers) {
       await startPgbossWorkers().catch((err) => {
         const msg = String(err?.message || "");
@@ -185,10 +186,10 @@ initializeQueue()
         logger.warn({ err: err?.message }, "pg-boss producer init failed; publishing disabled");
       });
     }
-  })
-  .catch((err) => {
+  } catch (err: any) {
     logger.warn({ err: err?.message }, "Queue initialization failed; defaulting to cursor mode");
-  });
+  }
+})();
 
 // Sample-write + probe-patch buffers batch the per-probe sample inserts and
 // state updates. The monitor consumers produce them via SNMP/REST probes, AND

@@ -45,9 +45,14 @@ function getDnsResolvedSvc() {
 function fireDnsResolvedReconcile(assetId: string | undefined): void {
   if (!assetId) return;
   // Best-effort, fire-and-forget. Failures are swallowed inside the service.
-  getDnsResolvedSvc()
-    .then((svc) => svc.reconcileDnsResolvedForAsset(assetId))
-    .catch(() => {});
+  void (async () => {
+    try {
+      const svc = await getDnsResolvedSvc();
+      await svc.reconcileDnsResolvedForAsset(assetId);
+    } catch {
+      /* swallowed — reconcile is best-effort */
+    }
+  })();
 }
 async function fireDnsResolvedRelease(assetId: string | undefined): Promise<void> {
   if (!assetId) return;

@@ -2718,6 +2718,10 @@ function processNextSnmpSlot(key: string): void {
   // the agent) or actively walking (= this asset's SNMP agent slow).
   const endPhase = startPhase("snmp.gate_wait");
   endPhase({ host: key, waitMs });
+  // INTENTIONAL .then() chain — this is the per-host SNMP serialization gate's
+  // slot runner: run fn(), settle the caller's promise, then release the gate
+  // and pull the next queued slot. Do NOT rewrite to an async IIFE; the
+  // run→settle→process-next ordering is the gate's contract.
   Promise.resolve()
     .then(() => slot.fn())
     .then(slot.resolve, slot.reject)

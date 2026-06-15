@@ -641,20 +641,25 @@ async function doRun(state: BuildState): Promise<void> {
   // safely on disk + manifest. Now's the time to drop older versions
   // beyond the keep-last-N window. Failure here doesn't fail the build —
   // the new binaries are already published; cleanup is bonus.
-  pruneOldAgentVersions().then((r) => {
-    if (r.removed.length > 0) {
-      const totalBytes = r.removed.reduce((sum, e) => sum + e.bytes, 0);
-      logger.info({ removed: r.removed.length, totalBytes }, "Auto-pruned old agent versions");
-      void logEvent({
-        action:       "agent.versions.pruned",
-        level:        "info",
-        actor:        state.actor,
-        resourceType: "polaris-agent",
-        message:      `Auto-pruned ${r.removed.length} old agent version(s), freed ${(totalBytes / (1024*1024)).toFixed(1)} MiB`,
-        details:      { removed: r.removed, protected: r.protected, trigger: "post-build" },
-      });
+  void (async () => {
+    try {
+      const r = await pruneOldAgentVersions();
+      if (r.removed.length > 0) {
+        const totalBytes = r.removed.reduce((sum, e) => sum + e.bytes, 0);
+        logger.info({ removed: r.removed.length, totalBytes }, "Auto-pruned old agent versions");
+        void logEvent({
+          action:       "agent.versions.pruned",
+          level:        "info",
+          actor:        state.actor,
+          resourceType: "polaris-agent",
+          message:      `Auto-pruned ${r.removed.length} old agent version(s), freed ${(totalBytes / (1024*1024)).toFixed(1)} MiB`,
+          details:      { removed: r.removed, protected: r.protected, trigger: "post-build" },
+        });
+      }
+    } catch (err) {
+      logger.warn({ err }, "Post-build prune failed");
     }
-  }).catch((err) => logger.warn({ err }, "Post-build prune failed"));
+  })();
 }
 
 // ─── Read helpers (route layer + UI) ──────────────────────────────────

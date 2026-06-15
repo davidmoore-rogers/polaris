@@ -48,6 +48,9 @@ function normalizeQuery(raw: string): string {
 // `lastChain` is the tail of a Promise chain. Each request awaits it, fires,
 // then sleeps for RATE_LIMIT_MS before resolving the next step. Module-level
 // so it serializes across every discovery cycle in the process.
+// INTENTIONAL .then() serialization queue — this is the rate-limiter itself,
+// not a fire-and-forget; do NOT rewrite to an async IIFE (would break the
+// chaining that enforces one-request-per-RATE_LIMIT_MS ordering).
 let lastChain: Promise<void> = Promise.resolve();
 
 function acquireRateSlot(): Promise<void> {

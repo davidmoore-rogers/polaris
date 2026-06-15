@@ -1507,9 +1507,9 @@ router.post("/:id/interface-aggregate/apply", async (req, res, next) => {
     // and awaiting it here wedged the modal's "Applying…" state for minutes. The
     // apply is strictly additive + idempotent AND re-runs on every discovery
     // (Phase 2c), so a fire-and-forget that loses to a process restart self-heals.
-    void autoMonitor
-      .applyAutoMonitorForClass(req.params.id, klass, selection, actor)
-      .then((result) => {
+    void (async () => {
+      try {
+        const result = await autoMonitor.applyAutoMonitorForClass(req.params.id, klass, selection, actor);
         if (result.interfacesAdded > 0) {
           logEvent({
             action:       "integration.auto_monitor_interfaces.applied",
@@ -1521,8 +1521,7 @@ router.post("/:id/interface-aggregate/apply", async (req, res, next) => {
             details:      { class: klass, devices: result.devices, interfacesAdded: result.interfacesAdded },
           });
         }
-      })
-      .catch((e: any) =>
+      } catch (e: any) {
         logEvent({
           action:       "integration.auto_monitor_interfaces.error",
           resourceType: "integration",
@@ -1532,8 +1531,9 @@ router.post("/:id/interface-aggregate/apply", async (req, res, next) => {
           level:        "warning",
           message:      `Auto-monitor interfaces apply failed for "${integ.name}" (${klass}): ${e?.message || "unknown error"}`,
           details:      { class: klass },
-        }),
-      );
+        });
+      }
+    })();
     res.status(202).json({ queued: true });
   } catch (err) {
     next(err);
@@ -1609,9 +1609,9 @@ router.post("/:id/storage-aggregate/apply", async (req, res, next) => {
     // Background apply + 202, same rationale as interface-aggregate/apply:
     // additive + idempotent + re-runs on every discovery, so don't block the
     // request on the fleet-wide resolve.
-    void autoMonitorStorage
-      .applyAutoMonitorStorageForClass(req.params.id, klass, selection, actor)
-      .then((result) => {
+    void (async () => {
+      try {
+        const result = await autoMonitorStorage.applyAutoMonitorStorageForClass(req.params.id, klass, selection, actor);
         if (result.mountsAdded > 0) {
           logEvent({
             action:       "integration.auto_monitor_storage.applied",
@@ -1623,8 +1623,7 @@ router.post("/:id/storage-aggregate/apply", async (req, res, next) => {
             details:      { class: klass, devices: result.devices, mountsAdded: result.mountsAdded },
           });
         }
-      })
-      .catch((e: any) =>
+      } catch (e: any) {
         logEvent({
           action:       "integration.auto_monitor_storage.error",
           resourceType: "integration",
@@ -1634,8 +1633,9 @@ router.post("/:id/storage-aggregate/apply", async (req, res, next) => {
           level:        "warning",
           message:      `Auto-monitor storage apply failed for "${integ.name}" (${klass}): ${e?.message || "unknown error"}`,
           details:      { class: klass },
-        }),
-      );
+        });
+      }
+    })();
     res.status(202).json({ queued: true });
   } catch (err) {
     next(err);
