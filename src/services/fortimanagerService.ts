@@ -8,6 +8,7 @@ import { Netmask } from "netmask";
 import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
+import { parseRangeFirstIp } from "../utils/cidr.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
 import { getFmgWorker } from "./fmgWorker.js";
 import {
@@ -2647,13 +2648,6 @@ export async function discoverDhcpSubnets(
   };
 }
 
-/** Extract the first (start) IP from a range string like "1.2.3.4-1.2.3.5" or a plain IP. */
-function parseRangeFirstIp(rangeStr: string): string | null {
-  if (!rangeStr) return null;
-  const ip = rangeStr.split("-")[0].trim();
-  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip) && ip !== "0.0.0.0") return ip;
-  return null;
-}
 
 function matchesWildcard(pattern: string, value: string): boolean {
   const p = pattern.toLowerCase();

@@ -13,6 +13,7 @@
 import { Netmask } from "netmask";
 import { AppError } from "../utils/errors.js";
 import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
+import { parseRangeFirstIp } from "../utils/cidr.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
 import type {
   DiscoveredSubnet,
@@ -998,12 +999,6 @@ export async function discoverDhcpSubnets(
   };
 }
 
-function parseRangeFirstIp(rangeStr: string): string | null {
-  if (!rangeStr) return null;
-  const ip = rangeStr.split("-")[0].trim();
-  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip) && ip !== "0.0.0.0") return ip;
-  return null;
-}
 
 function matchesWildcard(pattern: string, value: string): boolean {
   const p = pattern.toLowerCase();

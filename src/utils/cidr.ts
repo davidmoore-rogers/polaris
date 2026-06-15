@@ -58,6 +58,62 @@ export function isValidIpAddress(ip: string): boolean {
   return ipv6Regex.test(ip);
 }
 
+/**
+ * RFC 1918 private-range check (10/8, 172.16/12, 192.168/16). IPv4 only —
+ * returns false for IPv6 or anything that isn't a valid address.
+ */
+export function isPrivateIpv4(ip: string): boolean {
+  if (!isValidIpAddress(ip) || ip.includes(":")) return false;
+  const parts = ip.split(".").map(Number);
+  if (parts[0] === 10) return true;
+  if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+  if (parts[0] === 192 && parts[1] === 168) return true;
+  return false;
+}
+
+/**
+ * First IPv4 address of a FortiOS "a.b.c.d-e.f.g.h" range string (a bare IP
+ * is treated as a single-address range). Null for empty / non-IPv4 input and
+ * for the FortiOS "any" placeholder 0.0.0.0.
+ */
+export function parseRangeFirstIp(rangeStr: string): string | null {
+  if (!rangeStr) return null;
+  const ip = rangeStr.split("-")[0].trim();
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip) && ip !== "0.0.0.0") return ip;
+  return null;
+}
+
+/**
+ * Fully expand an IPv6 address: `::` filled with zero groups, every group
+ * zero-padded to 4 hex digits. Input is assumed syntactically valid.
+ */
+export function expandIpv6(ip: string): string {
+  const halves = ip.split("::");
+  let groups: string[];
+  if (halves.length === 2) {
+    const left = halves[0] ? halves[0].split(":") : [];
+    const right = halves[1] ? halves[1].split(":") : [];
+    const missing = 8 - left.length - right.length;
+    groups = [...left, ...Array(missing).fill("0000"), ...right];
+  } else {
+    groups = ip.split(":");
+  }
+  return groups.map((g) => g.padStart(4, "0")).join(":");
+}
+
+/**
+ * Reverse-DNS PTR query name for an IPv4 or IPv6 address
+ * (`d.c.b.a.in-addr.arpa` / nibble-reversed `ip6.arpa`).
+ */
+export function ipToPtrName(ip: string): string {
+  if (ip.includes(":")) {
+    const full = expandIpv6(ip);
+    const hex = full.replace(/:/g, "");
+    return hex.split("").reverse().join(".") + ".ip6.arpa";
+  }
+  return ip.split(".").reverse().join(".") + ".in-addr.arpa";
+}
+
 // ─── Containment & Overlap ────────────────────────────────────────────────────
 
 /**

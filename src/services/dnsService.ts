@@ -18,6 +18,7 @@ import dns from "node:dns/promises";
 import https from "node:https";
 import tls from "node:tls";
 import { prisma } from "../db.js";
+import { ipToPtrName } from "../utils/cidr.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -165,31 +166,7 @@ export async function getConfiguredResolver(): Promise<ResolverLike> {
   return createResolver(await getDnsSettings());
 }
 
-// ─── IP → PTR Name ─────────────────────────────────────────────────────────
-
-function ipToPtrName(ip: string): string {
-  if (ip.includes(":")) {
-    // IPv6: expand, strip colons, reverse nibbles
-    const full = expandIpv6(ip);
-    const hex = full.replace(/:/g, "");
-    return hex.split("").reverse().join(".") + ".ip6.arpa";
-  }
-  return ip.split(".").reverse().join(".") + ".in-addr.arpa";
-}
-
-function expandIpv6(ip: string): string {
-  const halves = ip.split("::");
-  let groups: string[];
-  if (halves.length === 2) {
-    const left = halves[0] ? halves[0].split(":") : [];
-    const right = halves[1] ? halves[1].split(":") : [];
-    const missing = 8 - left.length - right.length;
-    groups = [...left, ...Array(missing).fill("0000"), ...right];
-  } else {
-    groups = ip.split(":");
-  }
-  return groups.map((g) => g.padStart(4, "0")).join(":");
-}
+// IP → PTR name (in-addr.arpa / ip6.arpa) lives in utils/cidr.ts (ipToPtrName).
 
 // ─── DNS over HTTPS (DoH) ──────────────────────────────────────────────────
 //

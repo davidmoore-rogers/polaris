@@ -14,7 +14,7 @@ import * as fortigate from "../../services/fortigateService.js";
 import * as windowsServer from "../../services/windowsServerService.js";
 import * as entraId from "../../services/entraIdService.js";
 import * as activeDirectory from "../../services/activeDirectoryService.js";
-import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps } from "../../utils/cidr.js";
+import { isValidIpAddress, ipInCidr, normalizeCidr, cidrContains, cidrOverlaps, isPrivateIpv4 } from "../../utils/cidr.js";
 import { normalizeMacsDistinct } from "../../utils/mac.js";
 import { isBlockedOutboundHost } from "../../utils/netGuard.js";
 import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveredVip, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
@@ -2398,18 +2398,6 @@ router.post("/test", async (req, res, next) => {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function isPrivateIp(ip: string): boolean {
-  if (!isValidIpAddress(ip)) return false;
-  const parts = ip.split(".").map(Number);
-  // 10.0.0.0/8
-  if (parts[0] === 10) return true;
-  // 172.16.0.0/12
-  if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
-  // 192.168.0.0/16
-  if (parts[0] === 192 && parts[1] === 168) return true;
-  return false;
-}
-
 interface ConflictEntry {
   type: "reservation";
   existing: Record<string, unknown>;
@@ -2427,7 +2415,7 @@ async function registerFortinetHost(integrationType: string, host: string, integ
   const subnets = await prisma.subnet.findMany();
   const matchingSubnet = subnets.find((s) => ipInCidr(host, s.cidr));
 
-  if (!matchingSubnet && !isPrivateIp(host)) return { conflicts: [], created: [] };
+  if (!matchingSubnet && !isPrivateIpv4(host)) return { conflicts: [], created: [] };
 
   const conflicts: ConflictEntry[] = [];
   const created: string[] = [];

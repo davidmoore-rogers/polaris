@@ -15,6 +15,10 @@ import {
   detectIpVersion,
   packTemplateEntries,
   packIntoAnchor,
+  isPrivateIpv4,
+  parseRangeFirstIp,
+  expandIpv6,
+  ipToPtrName,
 } from "../../src/utils/cidr.js";
 
 describe("normalizeCidr", () => {
@@ -221,5 +225,66 @@ describe("packIntoAnchor (bulk allocation)", () => {
       24
     );
     expect(result).toBeNull();
+  });
+});
+
+describe("isPrivateIpv4", () => {
+  it("accepts the three RFC 1918 ranges", () => {
+    expect(isPrivateIpv4("10.0.0.1")).toBe(true);
+    expect(isPrivateIpv4("10.255.255.255")).toBe(true);
+    expect(isPrivateIpv4("172.16.0.1")).toBe(true);
+    expect(isPrivateIpv4("172.31.255.254")).toBe(true);
+    expect(isPrivateIpv4("192.168.1.1")).toBe(true);
+  });
+
+  it("rejects public, boundary-adjacent, and non-IPv4 input", () => {
+    expect(isPrivateIpv4("8.8.8.8")).toBe(false);
+    expect(isPrivateIpv4("172.15.0.1")).toBe(false);
+    expect(isPrivateIpv4("172.32.0.1")).toBe(false);
+    expect(isPrivateIpv4("192.169.0.1")).toBe(false);
+    expect(isPrivateIpv4("11.0.0.1")).toBe(false);
+    expect(isPrivateIpv4("not-an-ip")).toBe(false);
+    expect(isPrivateIpv4("")).toBe(false);
+    expect(isPrivateIpv4("fd00::1")).toBe(false); // ULA is private but v6 — out of scope
+    expect(isPrivateIpv4("10.0.0.256")).toBe(false); // invalid octet
+  });
+});
+
+describe("parseRangeFirstIp", () => {
+  it("extracts the start of a FortiOS range and accepts a bare IP", () => {
+    expect(parseRangeFirstIp("10.1.2.3-10.1.2.9")).toBe("10.1.2.3");
+    expect(parseRangeFirstIp("10.1.2.3")).toBe("10.1.2.3");
+    expect(parseRangeFirstIp(" 10.1.2.3 - 10.1.2.9 ")).toBe("10.1.2.3");
+  });
+
+  it("returns null for empty, invalid, and the 0.0.0.0 placeholder", () => {
+    expect(parseRangeFirstIp("")).toBeNull();
+    expect(parseRangeFirstIp("0.0.0.0")).toBeNull();
+    expect(parseRangeFirstIp("0.0.0.0-10.0.0.1")).toBeNull();
+    expect(parseRangeFirstIp("not-a-range")).toBeNull();
+  });
+});
+
+describe("expandIpv6", () => {
+  it("expands :: and zero-pads every group", () => {
+    expect(expandIpv6("2001:db8::1")).toBe("2001:0db8:0000:0000:0000:0000:0000:0001");
+    expect(expandIpv6("::1")).toBe("0000:0000:0000:0000:0000:0000:0000:0001");
+    expect(expandIpv6("fe80::")).toBe("fe80:0000:0000:0000:0000:0000:0000:0000");
+  });
+
+  it("pads an already-full address without altering group order", () => {
+    expect(expandIpv6("2001:db8:0:0:0:0:0:1")).toBe("2001:0db8:0000:0000:0000:0000:0000:0001");
+  });
+});
+
+describe("ipToPtrName", () => {
+  it("builds in-addr.arpa names for IPv4", () => {
+    expect(ipToPtrName("10.1.2.3")).toBe("3.2.1.10.in-addr.arpa");
+  });
+
+  it("builds nibble-reversed ip6.arpa names for IPv6", () => {
+    expect(ipToPtrName("2001:db8::1")).toBe(
+      "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa",
+    );
   });
 });
