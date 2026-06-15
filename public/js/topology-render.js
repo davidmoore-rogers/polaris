@@ -13,18 +13,33 @@
 // mobile module — this file only exposes shared building blocks.
 
 (function () {
+  // Topology node-health palette. Shared by fortinetNodeColor() and the legend
+  // here, AND by map.js's endpointNodeColor() (which loads after this file and
+  // reads it off window.PolarisTopologyRender). These hues are deliberately
+  // distinct from the CSS --color-* theme variables and from the assets-page
+  // monitor-state palette — do NOT remap them. Extracting them here only
+  // deduplicates the literals across the two files; the rendered values are
+  // unchanged.
+  var HEALTH_NODE_COLORS = {
+    up:          "#2e7d32", // green
+    degraded:    "#f9a825", // amber
+    down:        "#c62828", // red
+    unknown:     "#9e9e9e", // gray — unknown / dep-suppressed
+    unmonitored: "#757575", // gray — unmonitored
+  };
+
   // Color a Fortinet-infrastructure node (FortiGate, FortiSwitch, FortiAP)
   // from its monitor health. Same priority as the asset list Status pill:
   // confirmed-down probe wins over the dependency-suppression flag, so a
   // suppressed-but-actually-down node still renders red.
   function fortinetNodeColor(asset) {
-    if (!asset || !asset.monitored) return "#757575"; // gray — unmonitored
-    if (asset.dependencySuppressed && asset.monitorHealth !== "down") return "#9e9e9e"; // gray — Dep. Down (upstream parent offline)
+    if (!asset || !asset.monitored) return HEALTH_NODE_COLORS.unmonitored;
+    if (asset.dependencySuppressed && asset.monitorHealth !== "down") return HEALTH_NODE_COLORS.unknown; // Dep. Down (upstream parent offline)
     switch (asset.monitorHealth) {
-      case "up":       return "#2e7d32"; // green
-      case "degraded": return "#f9a825"; // amber
-      case "down":     return "#c62828"; // red
-      default:         return "#9e9e9e"; // unknown
+      case "up":       return HEALTH_NODE_COLORS.up;
+      case "degraded": return HEALTH_NODE_COLORS.degraded;
+      case "down":     return HEALTH_NODE_COLORS.down;
+      default:         return HEALTH_NODE_COLORS.unknown;
     }
   }
 
@@ -495,11 +510,11 @@
         { label: "Remote asset",      kind: "circle",          size: "md", fill: "#1e3a5f", border: "#4fc3f7", desc: "Infra (FW/switch/AP) at another site" },
       ],
       health: [
-        { label: "Up",                color: "#2e7d32" },
-        { label: "Degraded",          color: "#f9a825" },
-        { label: "Down",              color: "#c62828" },
-        { label: "Dep. Down",         color: "#9e9e9e" },
-        { label: "Unmonitored",       color: "#757575" },
+        { label: "Up",                color: HEALTH_NODE_COLORS.up },
+        { label: "Degraded",          color: HEALTH_NODE_COLORS.degraded },
+        { label: "Down",              color: HEALTH_NODE_COLORS.down },
+        { label: "Dep. Down",         color: HEALTH_NODE_COLORS.unknown },
+        { label: "Unmonitored",       color: HEALTH_NODE_COLORS.unmonitored },
       ],
       edges: [
         { label: "Controller",        color: "#6a7388", style: "solid",  desc: "FortiLink / managed-AP authoritative" },
@@ -860,6 +875,7 @@
   }
 
   window.PolarisTopologyRender = {
+    HEALTH_NODE_COLORS: HEALTH_NODE_COLORS,
     fortinetNodeColor: fortinetNodeColor,
     buildTopologyElements: buildTopologyElements,
     topologyStylesheet: topologyStylesheet,

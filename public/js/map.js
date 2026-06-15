@@ -876,7 +876,7 @@
       var size = row.size === "lg" ? 22 : (row.size === "sm" ? 14 : 18);
       var border = row.border ? row.border : "rgba(255,255,255,0.85)";
       var borderStyle = row.borderStyle === "dashed" ? "dashed" : "solid";
-      var fill = row.fill === "data(nodeColor)" ? "#2e7d32" : row.fill;
+      var fill = row.fill === "data(nodeColor)" ? window.PolarisTopologyRender.HEALTH_NODE_COLORS.up : row.fill;
       var shape = "";
       if (row.kind === "diamond") {
         shape = '<div style="width:' + size + 'px;height:' + size + 'px;background:' + fill +
@@ -1273,13 +1273,16 @@
   // palette the firewall / switch / AP nodes use, so the path reads as a
   // single visual scheme.
   function endpointNodeColor(hop) {
-    if (!hop || !hop.monitored) return "#757575"; // gray — unmonitored
+    // Shared node-health palette lives in topology-render.js (loaded first);
+    // "recovering" (#0288d1) is endpoint-only and stays a local literal.
+    var P = window.PolarisTopologyRender.HEALTH_NODE_COLORS;
+    if (!hop || !hop.monitored) return P.unmonitored;
     switch (hop.monitorStatus) {
-      case "up":         return "#2e7d32";
-      case "warning":    return "#f9a825";
-      case "down":       return "#c62828";
+      case "up":         return P.up;
+      case "warning":    return P.degraded;
+      case "down":       return P.down;
       case "recovering": return "#0288d1";
-      default:           return "#9e9e9e";
+      default:           return P.unknown;
     }
   }
 

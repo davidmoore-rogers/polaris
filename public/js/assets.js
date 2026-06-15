@@ -9,6 +9,14 @@ var _assetsSF = null;
 var _assetsLayout = null;
 var _assetsSelected = new Set();
 
+// Monitor-state palette — green=up, red=down, orange=warning/partial. Shared by
+// every chart/legend/status-dot builder that renders a monitor or SD-WAN
+// up/down/partial state on this page. These are deliberately distinct from the
+// CSS --color-* theme variables (which differ per light/dark and per semantic
+// context); do NOT remap onto var(--color-*). Extracting these into one place
+// only deduplicates the literals — the rendered values are unchanged.
+var MONITOR_STATE_COLORS = { up: "#2a9d8f", down: "#d32f2f", warning: "#f4a261" };
+
 function _saveAssetsPrefs() {
   if (!currentUsername) return;
   try {
@@ -8659,10 +8667,10 @@ function _renderIpsecStatusChart(container, samples, opts) {
     return (d.getMonth() + 1) + "/" + d.getDate();
   }
   function colorFor(s) {
-    if (s === "up") return "#2a9d8f";
-    if (s === "down") return "#d32f2f";
+    if (s === "up") return MONITOR_STATE_COLORS.up;
+    if (s === "down") return MONITOR_STATE_COLORS.down;
     if (s === "dynamic") return "#7b8794"; // dial-up server template — neutral gray
-    return "#f4a261";
+    return MONITOR_STATE_COLORS.warning;
   }
   function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
   // Each sample covers from its own x to the next sample's x (or the chart edge).
@@ -8690,9 +8698,9 @@ function _renderIpsecStatusChart(container, samples, opts) {
   var hasDynamic = samples.some(function (s) { return s.status === "dynamic"; });
   var legend =
     '<g font-size="10" fill="currentColor">' +
-      '<rect x="' + padL + '" y="2" width="10" height="6" fill="#2a9d8f"/><text x="' + (padL + 14) + '" y="8">up</text>' +
-      '<rect x="' + (padL + 50) + '" y="2" width="10" height="6" fill="#f4a261"/><text x="' + (padL + 64) + '" y="8">partial</text>' +
-      '<rect x="' + (padL + 110) + '" y="2" width="10" height="6" fill="#d32f2f"/><text x="' + (padL + 124) + '" y="8">down</text>' +
+      '<rect x="' + padL + '" y="2" width="10" height="6" fill="' + MONITOR_STATE_COLORS.up + '"/><text x="' + (padL + 14) + '" y="8">up</text>' +
+      '<rect x="' + (padL + 50) + '" y="2" width="10" height="6" fill="' + MONITOR_STATE_COLORS.warning + '"/><text x="' + (padL + 64) + '" y="8">partial</text>' +
+      '<rect x="' + (padL + 110) + '" y="2" width="10" height="6" fill="' + MONITOR_STATE_COLORS.down + '"/><text x="' + (padL + 124) + '" y="8">down</text>' +
       (hasDynamic ? '<rect x="' + (padL + 160) + '" y="2" width="10" height="6" fill="#7b8794"/><text x="' + (padL + 174) + '" y="8">dynamic</text>' : '') +
     '</g>';
   var clipId = _chartClipId("ipsecStat");
@@ -8829,7 +8837,7 @@ function _sdwanStatusStripHTML(recent) {
 function _sdwanMembersTableHTML(members) {
   function statusDot(up) {
     return '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:' +
-      (up ? "#2a9d8f" : "#d32f2f") + '"></span>';
+      (up ? MONITOR_STATE_COLORS.up : MONITOR_STATE_COLORS.down) + '"></span>';
   }
   // One member row. `indented` adds a faint tree connector + indent in the
   // Member cell when the row sits under a zone header. The connector lives in
@@ -8837,7 +8845,7 @@ function _sdwanMembersTableHTML(members) {
   // column resize/reorder.
   function memberRow(m, indented) {
     var hcChips = (m.healthChecks || []).map(function (h) {
-      var c = h.state === "up" ? "#2a9d8f" : "#d32f2f";
+      var c = h.state === "up" ? MONITOR_STATE_COLORS.up : MONITOR_STATE_COLORS.down;
       var lat = (typeof h.latencyMs === "number") ? (Math.round(h.latencyMs * 100) / 100) + "ms" : "—";
       return '<span title="' + escapeHtml(h.healthCheck) +
         ' · jitter ' + (typeof h.jitterMs === "number" ? (Math.round(h.jitterMs * 100) / 100) + "ms" : "—") +
@@ -8848,8 +8856,8 @@ function _sdwanMembersTableHTML(members) {
     var link = m.linkUp == null
       ? '<span style="color:var(--color-text-tertiary)">—</span>'
       : (m.linkUp
-          ? '<span style="color:#2a9d8f">▲ ' + (m.linkSpeedBps ? _fmtBitsPerSec(m.linkSpeedBps) : "up") + '</span>'
-          : '<span style="color:#d32f2f">▼ down</span>');
+          ? '<span style="color:' + MONITOR_STATE_COLORS.up + '">▲ ' + (m.linkSpeedBps ? _fmtBitsPerSec(m.linkSpeedBps) : "up") + '</span>'
+          : '<span style="color:' + MONITOR_STATE_COLORS.down + '">▼ down</span>');
     var bytes = (m.txBytes != null || m.rxBytes != null)
       ? (m.txBytes != null ? _fmtBytes(m.txBytes) : "—") + ' / ' + (m.rxBytes != null ? _fmtBytes(m.rxBytes) : "—")
       : '<span style="color:var(--color-text-tertiary)">—</span>';
@@ -8975,7 +8983,7 @@ function _assetSdwanTabHTML(a, rules, links, members) {
       var enabledCell = r.enabled == null
         ? '<span style="color:var(--color-text-tertiary)">—</span>'
         : (r.enabled
-            ? '<span style="color:#2a9d8f">● Enabled</span>'
+            ? '<span style="color:' + MONITOR_STATE_COLORS.up + '">● Enabled</span>'
             : '<span style="color:var(--color-text-tertiary)">○ Disabled</span>');
       return '<tr class="sdwan-rule-row" data-rule="' + escapeHtml(r.ruleName) + '" style="cursor:pointer">' +
           '<td data-col-id="id">' + (r.ruleId != null ? escapeHtml(String(r.ruleId)) : '—') + '</td>' +
