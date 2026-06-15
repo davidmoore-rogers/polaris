@@ -288,7 +288,7 @@ interface MigrationOutcome {
             if (polling === "ssh")    return ck.sshCred  ?? null;
             return null;
           };
-          let streams = streamsFromFlat(seedSource, pickCred);
+          const streams = streamsFromFlat(seedSource, pickCred);
           if (!ck.includeStorage) {
             delete streams.storage;
           }

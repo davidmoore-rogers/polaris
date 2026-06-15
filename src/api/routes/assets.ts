@@ -1761,7 +1761,7 @@ router.post("/dns-lookup", requirePermission("assets", "write"), async (req, res
 
     // Only query IPs whose cached PTR has expired (or was never fetched)
     const needsPrimary = primaryAssets.filter((a) => isPtrExpired(a.dnsNameFetchedAt, a.dnsNameTtl, now));
-    let skippedPrimary = primaryAssets.length - needsPrimary.length;
+    const skippedPrimary = primaryAssets.length - needsPrimary.length;
 
     let resolved = 0;
     let failed = 0;

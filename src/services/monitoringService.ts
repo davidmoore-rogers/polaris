@@ -6042,7 +6042,7 @@ async function collectFastFilteredSnmp(
     // to its index; pinned-but-missing names are dropped silently (same
     // behavior as the full walk: the stored sample just doesn't include
     // that ifName on this tick).
-    let ifIndexByName = new Map<string, string>();
+    const ifIndexByName = new Map<string, string>();
     const endIfaceDiscovery = startPhase("fastfiltered.snmp.iface_discovery");
     try {
       const [names, descrs] = await Promise.all([
@@ -6071,7 +6071,7 @@ async function collectFastFilteredSnmp(
     // Storage column rows are also small (one per disk/partition); only walk
     // when at least one mountPath is pinned to avoid burning a round-trip
     // on iface-only fast pins.
-    let storageIndexByMount = new Map<string, string>();
+    const storageIndexByMount = new Map<string, string>();
     if (wantedStorageSet.size > 0) {
       const endStorageDiscovery = startPhase("fastfiltered.snmp.storage_discovery");
       try {
@@ -6121,7 +6121,7 @@ async function collectFastFilteredSnmp(
     // to walk it. Tiny on most devices (one varbind per IPv4 address). Skip
     // when no interfaces are pinned (storage-only fast cadence is rare but
     // technically possible).
-    let ipByIfIndex = new Map<string, string>();
+    const ipByIfIndex = new Map<string, string>();
     if (ifIndexByName.size > 0) {
       const endIpWalk = startPhase("fastfiltered.snmp.ip_walk");
       try {

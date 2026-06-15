@@ -18,7 +18,8 @@
     "db:reset": "prisma migrate reset --force && npm run db:seed",
     "demo": "node demo.mjs",
     "test:fmg": "node scripts/test-fmg.mjs",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
     "typecheck": "tsc --noEmit",
     "check:docs": "node scripts/check-docs.mjs"
   },
@@ -74,12 +75,14 @@
     "cytoscape": "^3.30.2",
     "cytoscape-dagre": "^2.5.0",
     "dagre": "^0.8.5",
+    "eslint": "^9.39.4",
     "leaflet": "^1.9.4",
     "leaflet.markercluster": "^1.5.3",
     "prisma": "^7.8.0",
     "supertest": "^7.0.0",
     "tsx": "^4.15.6",
     "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.0",
     "vitest": "^4.1.4"
   },
   "engines": {

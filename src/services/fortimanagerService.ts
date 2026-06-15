@@ -1496,7 +1496,7 @@ export async function discoverDhcpSubnets(
       // Retry-once loop: if the FIRST attempt's IP came from the warm cache
       // and the call fails, re-resolve via the FMG worker and retry. Any
       // subsequent failure is treated as a real outage.
-      // eslint-disable-next-line no-constant-condition
+       
       while (true) {
         try {
           const fgResult = await discoverViaFortigate(fgConfig, signal, log, inventoryMaxAgeHours, undefined, true);

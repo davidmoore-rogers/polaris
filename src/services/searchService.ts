@@ -269,7 +269,7 @@ async function resolveOriginFortigates(
   // learnedLocation fallback for assets without DHCP sightings (e.g.
   // Entra/AD-discovered with no FortiGate dance yet).
   const fallbackAssets = assetIds.filter((id) => !sightingByAsset.has(id));
-  let learnedByAsset = new Map<string, string>();
+  const learnedByAsset = new Map<string, string>();
   if (fallbackAssets.length > 0) {
     const rows = await prisma.asset.findMany({
       where: { id: { in: fallbackAssets }, learnedLocation: { not: null } },

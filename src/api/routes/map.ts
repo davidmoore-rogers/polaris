@@ -718,8 +718,8 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     for (const n of lldpRows) {
       if (!n.matchedAsset || !n.matchedAsset.id) continue;
       if (!siblingIds.has(n.matchedAsset.id)) continue; // both ends in-site
-      let ap = apObjById.get(n.assetId) ?? apObjById.get(n.matchedAsset.id);
-      let sw = switchObjById.get(n.assetId) ?? switchObjById.get(n.matchedAsset.id);
+      const ap = apObjById.get(n.assetId) ?? apObjById.get(n.matchedAsset.id);
+      const sw = switchObjById.get(n.assetId) ?? switchObjById.get(n.matchedAsset.id);
       if (!ap || !sw) continue; // not an AP↔switch pair
       // Normal switch→AP uplink (AP behind switch) — controller data covers it.
       if (ap.peerSwitch && sw.hostname && ap.peerSwitch.toLowerCase() === sw.hostname.toLowerCase()) continue;

@@ -32,7 +32,7 @@ export interface ParsedMib {
  */
 export function parseMib(raw: string): ParsedMib {
   // BOM strip — some Windows-saved MIBs ship with a UTF-8 BOM
-  let text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
 
   if (text.length === 0) throw new AppError(400, "MIB file is empty");
   if (text.length > MAX_BYTES) {
