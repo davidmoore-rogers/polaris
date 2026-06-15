@@ -742,7 +742,7 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
           resourceName: filterAsset.hostname || filterAsset.ipAddress || undefined,
           actor: req.session?.username,
           level: "warning",
-          message: `Refresh blocked: ${label} — ${reason}`,
+          message: `Poll blocked: ${label} — ${reason}`,
           details: { integrationId: filterAsset.discoveredByIntegration.id, integrationType: filterAsset.discoveredByIntegration.type, reason },
         });
         res.status(409).json({
@@ -790,7 +790,7 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
     const hwNoData    = !!(hwR.supported && hwData && hwData.length === 0);
     const systemInfo  = { supported: sr.supported,    collected: !!sr.data,                                       error: sr.error };
 
-    // Audit the manual refresh. The periodic monitorAssets job only writes
+    // Audit the manual poll. The periodic monitorAssets job only writes
     // events on up/down transitions; this endpoint is operator-initiated, so
     // each click should leave a trace regardless of status change.
     const asset = await prisma.asset.findUnique({
@@ -815,7 +815,7 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
       resourceName: asset?.hostname || asset?.ipAddress || undefined,
       actor: req.session?.username,
       level: anyFail ? "warning" : "info",
-      message: `Refresh: ${label} — ${streamSummary.join("; ")}`,
+      message: `Poll: ${label} — ${streamSummary.join("; ")}`,
       details: { probe, telemetry, hardware, systemInfo },
     });
 
