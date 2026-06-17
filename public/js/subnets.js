@@ -1194,8 +1194,22 @@ async function handleNetworkExport(mode, fmt) {
 
   await trackedPdfExport("Exporting networks " + fmt.toUpperCase(), async function (signal) {
     if (mode === "all") {
-      var allResult = await request("GET", "/subnets?limit=200", undefined, signal);
-      networks = allResult.subnets || allResult;
+      // "Entire Network List" must export EVERY known network, not just the
+      // first page. The /subnets endpoint caps a single response at 10000 rows
+      // (subnetService.listSubnets) and returns `total`, so page through until
+      // we've collected them all rather than hardcoding a single limit.
+      networks = [];
+      var pageSize = 10000;
+      var offset = 0;
+      for (;;) {
+        if (signal.aborted) return;
+        var allResult = await request("GET", "/subnets?limit=" + pageSize + "&offset=" + offset, undefined, signal);
+        var batch = allResult.subnets || allResult;
+        networks = networks.concat(batch);
+        var total = allResult.total;
+        offset += batch.length;
+        if (typeof total !== "number" || batch.length === 0 || networks.length >= total) break;
+      }
       label = "all " + networks.length + " networks";
     }
     if (signal.aborted) return;
