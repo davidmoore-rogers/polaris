@@ -8985,7 +8985,7 @@ function _assetSdwanTabHTML(a, rules, links, members) {
         : (r.enabled
             ? '<span style="color:' + MONITOR_STATE_COLORS.up + '">● Enabled</span>'
             : '<span style="color:var(--color-text-tertiary)">○ Disabled</span>');
-      return '<tr class="sdwan-rule-row" data-rule="' + escapeHtml(r.ruleName) + '" style="cursor:pointer">' +
+      return '<tr>' +
           '<td data-col-id="id">' + (r.ruleId != null ? escapeHtml(String(r.ruleId)) : '—') + '</td>' +
           '<td data-col-id="name" style="font-weight:600">' + escapeHtml(r.ruleName) + '</td>' +
           '<td data-col-id="dst">' + _pillList(r.dst, ", ") + '</td>' +
@@ -8999,7 +8999,7 @@ function _assetSdwanTabHTML(a, rules, links, members) {
       '<div data-shot-section="sdwanRules" data-shot-label="SD-WAN Rules">' +
       '<section style="margin-bottom:1.25rem">' +
         '<h4 style="margin:0 0 0.5rem 0">SD-WAN Rules</h4>' +
-        '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Service rules in FortiGate priority order, with the currently selected member highlighted in <strong>Members</strong>. Zone-preference rules list each preferred zone\'s members grouped by zone. Click a rule to see its member-selection history. The active member is inferred from health-check state when FortiOS does not report the selected route directly.</p>' +
+        '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Service rules in FortiGate priority order, with the currently selected member highlighted in <strong>Members</strong>. Zone-preference rules list each preferred zone\'s members grouped by zone. The active member is inferred from health-check state when FortiOS does not report the selected route directly.</p>' +
         '<div class="table-wrapper"><table id="sdwan-rules-table" class="data-table" style="font-size:0.82rem"><thead><tr>' +
           '<th data-col-id="id" style="width:48px">ID</th>' +
           '<th data-col-id="name" data-col-required="true">Name</th>' +
@@ -9009,7 +9009,6 @@ function _assetSdwanTabHTML(a, rules, links, members) {
           '<th data-col-id="perfsla">Performance SLA</th>' +
           '<th data-col-id="status">Status</th>' +
         '</tr></thead><tbody>' + ruleRows + '</tbody></table></div>' +
-        '<div id="sdwan-rule-timeline" style="margin-top:0.75rem"></div>' +
       '</section>' +
       '</div>';
   }
@@ -9080,7 +9079,7 @@ function _wireSdwanTab(a, rules, links) {
     if (!linksByHc[l.healthCheck]) { linksByHc[l.healthCheck] = []; hcNames.push(l.healthCheck); }
     linksByHc[l.healthCheck].push(l);
   });
-  _sdwanTabState = { assetId: a.id, links: links, linksByHc: linksByHc, hcNames: hcNames, hcName: hcNames[0] || null, rules: rules || [], ruleName: null };
+  _sdwanTabState = { assetId: a.id, links: links, linksByHc: linksByHc, hcNames: hcNames, hcName: hcNames[0] || null, rules: rules || [] };
   // Upgrade the Performance SLA provenance badge from the coarse sync guess to
   // the authoritative resolved polling method + tier (covers class overrides).
   _updateStreamSourceBadgesFromEffective(a.id, a);
@@ -9123,18 +9122,8 @@ function _wireSdwanTab(a, rules, links) {
     });
   }
 
-  // Rule rows → load selection timeline.
-  document.querySelectorAll(".sdwan-rule-row").forEach(function (row) {
-    row.addEventListener("click", function () {
-      var rn = row.getAttribute("data-rule");
-      _sdwanTabState.ruleName = rn;
-      document.querySelectorAll(".sdwan-rule-row").forEach(function (r) { r.style.background = ""; });
-      row.style.background = "var(--color-bg-elevated)";
-      _loadSdwanRuleTimelineFor(a.id, rn, _getChartRangePref("assetSdwan", "24h"));
-    });
-  });
-
-  // Shared range buttons — reload whichever sub-views are active.
+  // Shared range buttons — reload the Performance SLA charts (SD-WAN rules are
+  // current-state, so they don't reload on range change).
   document.querySelectorAll(".sdwan-range-btn").forEach(function (b) {
     b.addEventListener("click", function () {
       var r = b.getAttribute("data-range");
@@ -9142,7 +9131,6 @@ function _wireSdwanTab(a, rules, links) {
       b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
       _setChartRangePref("assetSdwan", r);
       if (_sdwanTabState.hcName) _loadPerfSlaForHealthCheck(a.id, _sdwanTabState.hcName, _sdwanTabState.linksByHc[_sdwanTabState.hcName] || [], r);
-      if (_sdwanTabState.ruleName) _loadSdwanRuleTimelineFor(a.id, _sdwanTabState.ruleName, r);
     });
   });
 }
@@ -9345,84 +9333,6 @@ function _renderPerfSlaMultiChart(container, series, metricKey, meta, opts) {
     g.addEventListener("click", function () { _togglePerfSlaMember(g.getAttribute("data-member")); });
   });
   _observeChartResize(container, function (c) { _renderPerfSlaMultiChart(c, series, metricKey, meta, opts); });
-}
-
-async function _loadSdwanRuleTimelineFor(assetId, ruleName, range) {
-  var el = document.getElementById("sdwan-rule-timeline");
-  if (!el) return;
-  el.innerHTML = '<div class="sdwan-chart-box" style="min-height:70px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem">Loading…</div>';
-  var opts = (typeof range === "string" || !range) ? { range: range || "24h" } : range;
-  try {
-    var data = await api.assets.sdwanRuleHistory(assetId, ruleName, opts);
-    var samples = data.samples || [];
-    el.innerHTML =
-      '<h5 style="margin:0.25rem 0 0.25rem;font-size:0.85rem">Selected member — ' + escapeHtml(ruleName) + '</h5>' +
-      '<div id="sdwan-timeline-chart" class="sdwan-chart-box" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:80px;position:relative"></div>';
-    _renderSdwanSelectionTimeline(document.getElementById("sdwan-timeline-chart"), samples, { since: data.since, until: data.until, subject: ruleName });
-  } catch (err) {
-    el.innerHTML = '<div class="sdwan-chart-box" style="min-height:70px;color:var(--color-text-secondary);font-size:0.85rem;padding:0.5rem">Error: ' + escapeHtml(err.message || "failed to load") + '</div>';
-  }
-}
-
-// Categorical step chart of which member was selected over time (one colored
-// band per sample, colored by member). Mirrors _renderIpsecStatusChart.
-function _renderSdwanSelectionTimeline(container, samples, opts) {
-  opts = opts || {};
-  if (!container) return;
-  if (samples.length === 0) { container.textContent = "No selection samples in this range yet."; return; }
-  // Distinct members for the legend + color mapping.
-  var members = [];
-  samples.forEach(function (s) { if (s.selectedMember && members.indexOf(s.selectedMember) < 0) members.push(s.selectedMember); });
-  var W = container.clientWidth || 600, H = 64;
-  var padL = 10, padR = 10, padT = 18, padB = 22;
-  var innerW = W - padL - padR, innerH = H - padT - padB;
-  var bounds = _chartTimeBounds(samples, opts.since, opts.until);
-  var t0 = bounds.t0, t1 = bounds.t1;
-  var lastStepMs = samples.length > 1
-    ? (new Date(samples[samples.length - 1].timestamp).getTime() - new Date(samples[samples.length - 2].timestamp).getTime())
-    : 600000;
-  var spanMs = t1 - t0, oneDayMs = 86400000;
-  function pad2(n) { return n < 10 ? "0" + n : String(n); }
-  function fmtTick(ts) { var d = new Date(ts); return spanMs <= oneDayMs ? pad2(d.getHours()) + ":" + pad2(d.getMinutes()) : (d.getMonth() + 1) + "/" + d.getDate(); }
-  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
-  var bars = samples.map(function (s, i) {
-    var x = xFor(s.timestamp);
-    var x2 = (i + 1 < samples.length) ? xFor(samples[i + 1].timestamp) : Math.min(padL + innerW, xFor(new Date(s.timestamp).getTime() + lastStepMs));
-    var w = Math.max(1, x2 - x);
-    var col = s.selectedMember ? _sdwanMemberColor(s.selectedMember, members) : "#7b8794";
-    return '<rect class="chart-hit" x="' + x + '" y="' + padT + '" width="' + w + '" height="' + innerH + '" fill="' + col + '" opacity="0.85" style="cursor:crosshair"' +
-      ' data-ts="' + escapeHtml(String(s.timestamp)) + '"' +
-      ' data-member="' + escapeHtml(s.selectedMember || "none") + '"/>';
-  }).join("");
-  var xTicks = "";
-  for (var j = 0; j <= 5; j++) {
-    var tsTick = t0 + (t1 - t0) * (j / 5);
-    var xPos = padL + (j / 5) * innerW;
-    xTicks +=
-      '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
-      '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
-  }
-  var legend = '<g font-size="10" fill="currentColor">' +
-    members.map(function (m, k) {
-      var lx = padL + k * 90;
-      return '<rect x="' + lx + '" y="2" width="10" height="6" fill="' + _sdwanMemberColor(m, members) + '"/><text x="' + (lx + 14) + '" y="8">' + escapeHtml(m) + '</text>';
-    }).join("") + '</g>';
-  var clipId = _chartClipId("sdwanSel");
-  container.innerHTML =
-    '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
-      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
-      xTicks +
-      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
-      '<g ' + _chartClipAttr(clipId) + '>' + bars + '</g>' +
-      legend +
-    '</svg>' + CHART_TOOLTIP_HTML;
-  container.style.position = "relative";
-  _wireChartTooltip(container, function (target) {
-    return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
-      '<div>Member: ' + escapeHtml(target.getAttribute("data-member")) + '</div>';
-  });
-  _addChartScreenshotButton(container, "SD-WAN selection", { yAxis: "Selected member", subject: opts.subject });
-  _observeChartResize(container, function (c) { _renderSdwanSelectionTimeline(c, samples, opts); });
 }
 
 // ─── Storage mountpoint slide-over ─────────────────────────────────────────
@@ -10525,7 +10435,6 @@ async function _captureWithChoicesInner(asset, choices) {
       if (st && st.hcName) {
         await _loadPerfSlaForHealthCheck(asset.id, st.hcName, (st.linksByHc && st.linksByHc[st.hcName]) || [], selection);
       }
-      if (st && st.ruleName) await _loadSdwanRuleTimelineFor(asset.id, st.ruleName, selection);
     }
   }
 

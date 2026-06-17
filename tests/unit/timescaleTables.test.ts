@@ -55,10 +55,12 @@ function tablesReferencedIn(relPath: string): string[] {
 
 describe("timescaleService managed-table inventory", () => {
   it("covers one detail + hourly + daily table per retention entity, plus standalones", () => {
-    // 8 retention entities × 3 tiers = 24 tiered hypertables. A new tiered
-    // sample stream must land in SAMPLE_TABLES + ROLLUP_TABLES alongside its
-    // RETENTION_ENTITIES entry, or this count diverges. Detail-only streams
-    // with no rollups live in STANDALONE_SAMPLE_TABLES instead.
+    // 7 retention entities × 3 tiers = 21 tiered hypertables (+ 1 standalone
+    // = 22 ALL_HYPERTABLE_CANDIDATES). A new tiered sample stream must land in
+    // SAMPLE_TABLES + ROLLUP_TABLES alongside its RETENTION_ENTITIES entry, or
+    // this count diverges. Detail-only streams with no rollups live in
+    // STANDALONE_SAMPLE_TABLES instead. (SD-WAN rules became a current-state
+    // plain table — asset_sdwan_rules — and are NOT a managed hypertable.)
     expect(SAMPLE_TABLES.length).toBe(RETENTION_ENTITIES.length);
     expect(ROLLUP_TABLES.length).toBe(RETENTION_ENTITIES.length * 2);
     expect(ALL_HYPERTABLE_CANDIDATES.length).toBe(

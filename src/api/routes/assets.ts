@@ -44,7 +44,6 @@ import {
   readStorageHistory,
   readIpsecHistory,
   readPerfSlaHistory,
-  readSdwanRuleHistory,
   readSdwanMembers,
 } from "../../services/sampleHistoryService.js";
 import {
@@ -1549,59 +1548,24 @@ router.get("/:id/perf-sla-history", requirePermission("assets", "read"), async (
   } catch (err) { next(err); }
 });
 
-// GET /assets/:id/sdwan-rules — latest-snapshot of SD-WAN service rules (one
-// row per ruleName = most-recent sample's selected member + configured members
-// + mode + status). The current-state table for the SD-WAN tab + the "data
-// exists?" gate + the rule list for the selection-history selector.
+// GET /assets/:id/sdwan-rules — current-state SD-WAN service rules (one row per
+// rule, replaced per scrape by persistSdwanRules). The SD-WAN tab table + the
+// "data exists?" gate. Ordered by the rule's FortiOS sequence (priority) so the
+// table matches the device GUI ordering. No history — SD-WAN rules are
+// current-state (only the SLA-metrics stream is a time-series).
 router.get("/:id/sdwan-rules", requirePermission("assets", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
-    // DISTINCT ON (ruleName) ... ORDER BY ruleName, timestamp DESC → the newest
-    // sample per rule. Postgres-specific; this is a read-only projection table.
-    // Re-sort by the rule's FortiOS sequence (priority) so the table matches the
-    // device GUI ordering.
-    const rows = await prisma.$queryRawUnsafe<Array<{
-      ruleName: string; ruleId: string | null; seq: number | null; enabled: boolean | null;
-      mode: string | null; criteria: string | null; healthChecks: string[]; dst: string[];
-      status: string; selectedMember: string | null; availableMembers: string[];
-      priorityZones: string[]; timestamp: Date;
-    }>>(
-      `SELECT * FROM (
-         SELECT DISTINCT ON ("ruleName")
-                "ruleName", "ruleId", "seq", "enabled", "mode", "criteria",
-                "healthChecks", "dst", "status", "selectedMember", "availableMembers",
-                "priorityZones", "timestamp"
-         FROM "asset_sdwan_rule_samples"
-         WHERE "assetId" = $1
-         ORDER BY "ruleName" ASC, "timestamp" DESC
-       ) latest
-       ORDER BY "seq" ASC NULLS LAST, "ruleName" ASC`,
-      id,
-    );
-    res.json({ rules: rows });
-  } catch (err) { next(err); }
-});
-
-// GET /assets/:id/sdwan-rule-history?ruleName=...&range=... — selected-member
-// failover timeline for one SD-WAN rule.
-router.get("/:id/sdwan-rule-history", requirePermission("assets", "read"), async (req, res, next) => {
-  try {
-    const id = req.params.id as string;
-    const ruleName = req.query.ruleName ? String(req.query.ruleName) : null;
-    if (!ruleName) throw new AppError(400, "ruleName query parameter is required");
-    const { since, until, rangeLabel } = resolveRange(req);
-    const pick = await pickSampleTierForAsset(id, "sdwanRule", since);
-    const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
-    const result = await readSdwanRuleHistory(id, since, until, pick.tier, ruleName, fetchSince);
-    res.json({
-      range: rangeLabel,
-      ruleName,
-      since,
-      until,
-      tier: pick.tier,
-      bucketSeconds: pick.bucketSeconds,
-      samples: result.samples,
+    const rows = await prisma.assetSdwanRule.findMany({
+      where: { assetId: id },
+      orderBy: [{ seq: "asc" }, { ruleName: "asc" }],
+      select: {
+        ruleName: true, ruleId: true, seq: true, enabled: true, mode: true,
+        criteria: true, healthChecks: true, dst: true, status: true,
+        selectedMember: true, availableMembers: true, priorityZones: true,
+      },
     });
+    res.json({ rules: rows });
   } catch (err) { next(err); }
 });
 

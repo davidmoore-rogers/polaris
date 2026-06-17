@@ -49,8 +49,7 @@ export type SourceTable =
   | "interface"
   | "storage"
   | "ipsec"
-  | "perfSla"
-  | "sdwanRule";
+  | "perfSla";
 
 interface RollupDef {
   source:        SourceTable;
@@ -70,7 +69,6 @@ const DEFS: RollupDef[] = [
   { source: "storage",     detailTable: "asset_storage_samples",       hourlyTable: "asset_storage_samples_hourly",       dailyTable: "asset_storage_samples_daily"       },
   { source: "ipsec",       detailTable: "asset_ipsec_tunnel_samples",  hourlyTable: "asset_ipsec_tunnel_samples_hourly",  dailyTable: "asset_ipsec_tunnel_samples_daily"  },
   { source: "perfSla",     detailTable: "asset_perf_sla_samples",      hourlyTable: "asset_perf_sla_samples_hourly",      dailyTable: "asset_perf_sla_samples_daily"      },
-  { source: "sdwanRule",   detailTable: "asset_sdwan_rule_samples",    hourlyTable: "asset_sdwan_rule_samples_hourly",    dailyTable: "asset_sdwan_rule_samples_daily"    },
 ];
 
 export interface RollupResult {
@@ -145,7 +143,6 @@ function buildSql(def: RollupDef, tier: RollupTier): string {
     case "storage":      return tier === "hourly" ? sqlStorageHourly()      : sqlStorageDaily();
     case "ipsec":        return tier === "hourly" ? sqlIpsecHourly()        : sqlIpsecDaily();
     case "perfSla":      return tier === "hourly" ? sqlPerfSlaHourly()      : sqlPerfSlaDaily();
-    case "sdwanRule":    return tier === "hourly" ? sqlSdwanRuleHourly()    : sqlSdwanRuleDaily();
   }
 }
 
@@ -744,97 +741,5 @@ function sqlPerfSlaDaily(): string {
       "minPacketLoss"      = EXCLUDED."minPacketLoss",
       "maxPacketLoss"      = EXCLUDED."maxPacketLoss",
       "lastBucketSampleAt" = EXCLUDED."lastBucketSampleAt"
-  `;
-}
-
-// ─── SD-WAN service rules (categorical — selected member) ─────────────────────
-//
-// selectedMember is categorical, so there's nothing to average. The rollup
-// keeps the last-seen selection (+ status/mode/availableMembers) for a coarse
-// view and a `selectionChangeCount` failover metric computed via LAG over the
-// per-rule timeline. The detail tier remains the authoritative failover
-// timeline. selectionChangeCount is approximate at the oldest in-window bucket
-// boundary (the LAG for that bucket's first sample sees no prior row inside the
-// lookback window); the detail series is exact.
-
-function sqlSdwanRuleHourly(): string {
-  return `
-    WITH ordered AS (
-      SELECT
-        "assetId", "ruleName", "timestamp",
-        "selectedMember", "status", "mode", "availableMembers",
-        date_trunc('hour', "timestamp") AS bucket_start,
-        LAG("selectedMember") OVER (PARTITION BY "assetId", "ruleName" ORDER BY "timestamp") AS prev_member
-      FROM "asset_sdwan_rule_samples"
-      WHERE "timestamp" >= $1 AND "cadence" = 'fast'
-    )
-    INSERT INTO "asset_sdwan_rule_samples_hourly" (
-      "id", "assetId", "bucketStart", "ruleName", "sampleCount",
-      "statusUpCount", "statusDownCount", "selectionChangeCount",
-      "lastSelectedMember", "lastStatus", "lastMode",
-      "lastBucketSampleAt"
-    )
-    SELECT
-      gen_random_uuid()::text,
-      "assetId",
-      bucket_start,
-      "ruleName",
-      COUNT(*)::int,
-      COUNT(*) FILTER (WHERE status = 'up')::int,
-      COUNT(*) FILTER (WHERE status = 'down')::int,
-      SUM(CASE WHEN "selectedMember" IS DISTINCT FROM prev_member AND prev_member IS NOT NULL THEN 1 ELSE 0 END)::int,
-      (ARRAY_AGG("selectedMember"   ORDER BY "timestamp" DESC) FILTER (WHERE "selectedMember" IS NOT NULL))[1],
-      (ARRAY_AGG("status"           ORDER BY "timestamp" DESC))[1],
-      (ARRAY_AGG("mode"             ORDER BY "timestamp" DESC) FILTER (WHERE "mode" IS NOT NULL))[1],
-      MAX("timestamp")
-    FROM ordered
-    GROUP BY "assetId", bucket_start, "ruleName"
-    ON CONFLICT ("bucketStart", "assetId", "ruleName") DO UPDATE SET
-      "sampleCount"          = EXCLUDED."sampleCount",
-      "statusUpCount"        = EXCLUDED."statusUpCount",
-      "statusDownCount"      = EXCLUDED."statusDownCount",
-      "selectionChangeCount" = EXCLUDED."selectionChangeCount",
-      "lastSelectedMember"   = EXCLUDED."lastSelectedMember",
-      "lastStatus"           = EXCLUDED."lastStatus",
-      "lastMode"             = EXCLUDED."lastMode",
-      "lastBucketSampleAt"   = EXCLUDED."lastBucketSampleAt"
-  `;
-}
-
-function sqlSdwanRuleDaily(): string {
-  // Cross-hour failovers are already attributed to the later hourly bucket by
-  // the detail-granularity LAG above, so summing hourly counts is exact.
-  return `
-    INSERT INTO "asset_sdwan_rule_samples_daily" (
-      "id", "assetId", "bucketStart", "ruleName", "sampleCount",
-      "statusUpCount", "statusDownCount", "selectionChangeCount",
-      "lastSelectedMember", "lastStatus", "lastMode",
-      "lastBucketSampleAt"
-    )
-    SELECT
-      gen_random_uuid()::text,
-      "assetId",
-      date_trunc('day', "bucketStart") AS bucket_start,
-      "ruleName",
-      SUM("sampleCount")::int,
-      SUM("statusUpCount")::int,
-      SUM("statusDownCount")::int,
-      SUM("selectionChangeCount")::int,
-      (ARRAY_AGG("lastSelectedMember"   ORDER BY "bucketStart" DESC) FILTER (WHERE "lastSelectedMember" IS NOT NULL))[1],
-      (ARRAY_AGG("lastStatus"           ORDER BY "bucketStart" DESC) FILTER (WHERE "lastStatus" IS NOT NULL))[1],
-      (ARRAY_AGG("lastMode"             ORDER BY "bucketStart" DESC) FILTER (WHERE "lastMode" IS NOT NULL))[1],
-      MAX("lastBucketSampleAt")
-    FROM "asset_sdwan_rule_samples_hourly"
-    WHERE "bucketStart" >= $1
-    GROUP BY "assetId", bucket_start, "ruleName"
-    ON CONFLICT ("bucketStart", "assetId", "ruleName") DO UPDATE SET
-      "sampleCount"          = EXCLUDED."sampleCount",
-      "statusUpCount"        = EXCLUDED."statusUpCount",
-      "statusDownCount"      = EXCLUDED."statusDownCount",
-      "selectionChangeCount" = EXCLUDED."selectionChangeCount",
-      "lastSelectedMember"   = EXCLUDED."lastSelectedMember",
-      "lastStatus"           = EXCLUDED."lastStatus",
-      "lastMode"             = EXCLUDED."lastMode",
-      "lastBucketSampleAt"   = EXCLUDED."lastBucketSampleAt"
   `;
 }

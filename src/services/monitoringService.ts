@@ -77,7 +77,6 @@ import {
   enqueueStorageSamples,
   enqueueIpsecTunnelSamples,
   enqueuePerfSlaSamples,
-  enqueueSdwanRuleSamples,
 } from "./sampleWriteBuffer.js";
 import {
   classifyHardwareSensor,
@@ -6700,26 +6699,17 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
         })),
       );
     }
-    if (Array.isArray(d.sdwanRules) && d.sdwanRules.length > 0) {
-      enqueueSdwanRuleSamples(
-        d.sdwanRules.map((r) => ({
-          assetId,
-          timestamp:        now,
-          cadence:          "fast" as const,
-          ruleName:         r.ruleName,
-          ruleId:           r.ruleId,
-          seq:              r.seq,
-          enabled:          r.enabled,
-          mode:             r.mode,
-          criteria:         r.criteria,
-          healthChecks:     r.healthChecks,
-          dst:              r.dst,
-          status:           r.status,
-          selectedMember:   r.selectedMember,
-          availableMembers: r.availableMembers,
-          priorityZones:    r.priorityZones,
-        })),
-      );
+    // SD-WAN rules are CURRENT-STATE (no history): replace the asset's rows on
+    // every pass that collected SD-WAN data. `undefined` = collector didn't run
+    // → leave existing rows alone; an array (even empty) = full-replace. Mirrors
+    // the LLDP / wireless-station delete-replace pattern. (The SLA-metrics
+    // stream above stays a time-series.)
+    if (Array.isArray(d.sdwanRules)) {
+      const stopWrite = startSampleWriteTimer("asset_sdwan_rules");
+      const endSdwan = startPhase("systeminfo.persist.sdwan_rules");
+      await persistSdwanRules(assetId, d.sdwanRules);
+      endSdwan({ rules: d.sdwanRules.length });
+      stopWrite();
     }
     // Mirror per-interface IPs+MACs into the asset_associated_ips side
     // table. Replaces the legacy JSONB read-modify-write pattern. Discovery
@@ -6805,6 +6795,45 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
       endUpdate();
     }
   }
+}
+
+/**
+ * Replace the asset's SD-WAN rule rows with the latest scrape. CURRENT-STATE,
+ * not a time-series: SD-WAN rules carry no history (only the SLA-metrics stream
+ * does). Mirrors the LLDP / wireless-station delete-replace pattern — wipe the
+ * asset's rows and re-insert the fresh set in one atomic transaction so a
+ * concurrent reader sees either the old set or the new set, never an empty
+ * intermediate. `asset_sdwan_rules` is a PLAIN table (not a hypertable), so the
+ * delete-replace is compression-safe.
+ */
+async function persistSdwanRules(
+  assetId: string,
+  rules: SdwanRuleSample[],
+): Promise<void> {
+  const data = rules.map((r) => ({
+    id:               randomUUID(),
+    assetId,
+    ruleName:         r.ruleName,
+    ruleId:           r.ruleId,
+    seq:              r.seq,
+    enabled:          r.enabled,
+    mode:             r.mode,
+    criteria:         r.criteria,
+    healthChecks:     r.healthChecks,
+    dst:              r.dst,
+    status:           r.status,
+    selectedMember:   r.selectedMember,
+    availableMembers: r.availableMembers,
+    priorityZones:    r.priorityZones,
+  }));
+  await retryOnDeadlock(() =>
+    prisma.$transaction([
+      prisma.assetSdwanRule.deleteMany({ where: { assetId } }),
+      ...(data.length > 0
+        ? [prisma.assetSdwanRule.createMany({ data, skipDuplicates: true })]
+        : []),
+    ]),
+  );
 }
 
 /**
@@ -8744,7 +8773,7 @@ export async function pruneSystemInfoSamples(): Promise<number> {
   const r = await getSampleRetention();
   const [
     iDetail, iHourly, iDaily, sDetail, sHourly, sDaily, ipDetail, ipHourly, ipDaily,
-    psDetail, psHourly, psDaily, srDetail, srHourly, srDaily, lldp, customWidget,
+    psDetail, psHourly, psDaily, lldp, customWidget,
   ] = await Promise.all([
     // interfaces — detail is selection-aware (selected=configured, unselected=24h)
     pruneSelectionAwareDetail((w) => prisma.assetInterfaceSample.deleteMany({ where: w as any }), r.interfaces.detail, "asset_interface_samples"),
@@ -8763,10 +8792,9 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     pruneTierByDays((w) => prisma.assetPerfSlaSample.deleteMany({       where: w as any }), r.perfSla.detail, "timestamp",   "asset_perf_sla_samples"),
     pruneTierByDays((w) => prisma.assetPerfSlaSampleHourly.deleteMany({ where: w as any }), r.perfSla.hourly, "bucketStart", "asset_perf_sla_samples_hourly"),
     pruneTierByDays((w) => prisma.assetPerfSlaSampleDaily.deleteMany({  where: w as any }), r.perfSla.daily,  "bucketStart", "asset_perf_sla_samples_daily"),
-    // SD-WAN service rules
-    pruneTierByDays((w) => prisma.assetSdwanRuleSample.deleteMany({       where: w as any }), r.sdwanRule.detail, "timestamp",   "asset_sdwan_rule_samples"),
-    pruneTierByDays((w) => prisma.assetSdwanRuleSampleHourly.deleteMany({ where: w as any }), r.sdwanRule.hourly, "bucketStart", "asset_sdwan_rule_samples_hourly"),
-    pruneTierByDays((w) => prisma.assetSdwanRuleSampleDaily.deleteMany({  where: w as any }), r.sdwanRule.daily,  "bucketStart", "asset_sdwan_rule_samples_daily"),
+    // SD-WAN service rules are now CURRENT-STATE (asset_sdwan_rules, a plain
+    // table replaced per scrape by persistSdwanRules) — no retention prune,
+    // same as LLDP / wireless-station current-state tables.
     // LLDP neighbors are current-state (per-asset, no rollup, no cadence) — prune
     // by the interfaces detail window as the system-info umbrella.
     pruneLldpNeighbors(r.interfaces.detail),
@@ -8776,7 +8804,7 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     pruneTierByDays((w) => prisma.assetCustomWidgetSample.deleteMany({ where: w as any }), r.interfaces.detail, "timestamp", "asset_custom_widget_samples"),
   ]);
   return iDetail + iHourly + iDaily + sDetail + sHourly + sDaily + ipDetail + ipHourly + ipDaily
-    + psDetail + psHourly + psDaily + srDetail + srHourly + srDaily + lldp + customWidget;
+    + psDetail + psHourly + psDaily + lldp + customWidget;
 }
 
 async function pruneLldpNeighbors(days: number): Promise<number> {

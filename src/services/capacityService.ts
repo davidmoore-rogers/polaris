@@ -418,7 +418,7 @@ const SAMPLE_TABLES: Array<{
   // mixed fleets; learned avg bytes/row + actual row counts take over as soon
   // as the tables are non-empty.
   { name: "asset_perf_sla_samples",      entity: "perfSla",     tier: "detail", countKey: "systemInfo" },
-  { name: "asset_sdwan_rule_samples",    entity: "sdwanRule",   tier: "detail", countKey: "systemInfo" },
+  // (asset_sdwan_rules is current-state, not a sample table — excluded from the projection.)
   // Hourly rollups
   { name: "asset_monitor_samples_hourly",       entity: "assets",      tier: "hourly", countKey: "all"        },
   { name: "asset_telemetry_samples_hourly",     entity: "cpuMem",      tier: "hourly", countKey: "telemetry"  },
@@ -427,7 +427,6 @@ const SAMPLE_TABLES: Array<{
   { name: "asset_storage_samples_hourly",       entity: "storage",     tier: "hourly", countKey: "systemInfo" },
   { name: "asset_ipsec_tunnel_samples_hourly",  entity: "ipsec",       tier: "hourly", countKey: "systemInfo" },
   { name: "asset_perf_sla_samples_hourly",      entity: "perfSla",     tier: "hourly", countKey: "systemInfo" },
-  { name: "asset_sdwan_rule_samples_hourly",    entity: "sdwanRule",   tier: "hourly", countKey: "systemInfo" },
   // Daily rollups
   { name: "asset_monitor_samples_daily",        entity: "assets",      tier: "daily",  countKey: "all"        },
   { name: "asset_telemetry_samples_daily",      entity: "cpuMem",      tier: "daily",  countKey: "telemetry"  },
@@ -436,7 +435,6 @@ const SAMPLE_TABLES: Array<{
   { name: "asset_storage_samples_daily",        entity: "storage",     tier: "daily",  countKey: "systemInfo" },
   { name: "asset_ipsec_tunnel_samples_daily",   entity: "ipsec",       tier: "daily",  countKey: "systemInfo" },
   { name: "asset_perf_sla_samples_daily",       entity: "perfSla",     tier: "daily",  countKey: "systemInfo" },
-  { name: "asset_sdwan_rule_samples_daily",     entity: "sdwanRule",   tier: "daily",  countKey: "systemInfo" },
 ];
 
 // Cadence intervals consumed by the rows-per-asset-per-day calc. Source
@@ -459,7 +457,6 @@ const DEFAULT_ROWS_PER_ASSET_PER_DAY: Record<string, (c: CadenceIntervals) => nu
   asset_storage_samples:       (c) => (86400 / c.systemInfo) * 3,   // ~3 mounts
   asset_ipsec_tunnel_samples:  (c) => (86400 / c.systemInfo) * 1,   // ~1 tunnel
   asset_perf_sla_samples:      (c) => (86400 / c.systemInfo) * 4,   // ~2 health-checks × 2 WAN members (SD-WAN FortiGates only)
-  asset_sdwan_rule_samples:    (c) => (86400 / c.systemInfo) * 4,   // ~4 service rules (SD-WAN FortiGates only)
   // Hourly rollups — 24 buckets/day × extra-key multiplier
   asset_monitor_samples_hourly:       () => 24,
   asset_telemetry_samples_hourly:     () => 24,
@@ -468,7 +465,6 @@ const DEFAULT_ROWS_PER_ASSET_PER_DAY: Record<string, (c: CadenceIntervals) => nu
   asset_storage_samples_hourly:       () => 24 * 3,
   asset_ipsec_tunnel_samples_hourly:  () => 24,
   asset_perf_sla_samples_hourly:      () => 24 * 4,
-  asset_sdwan_rule_samples_hourly:    () => 24 * 4,
   // Daily rollups — 1 bucket/day × extra-key multiplier
   asset_monitor_samples_daily:        () => 1,
   asset_telemetry_samples_daily:      () => 1,
@@ -477,7 +473,6 @@ const DEFAULT_ROWS_PER_ASSET_PER_DAY: Record<string, (c: CadenceIntervals) => nu
   asset_storage_samples_daily:        () => 3,
   asset_ipsec_tunnel_samples_daily:   () => 1,
   asset_perf_sla_samples_daily:       () => 4,
-  asset_sdwan_rule_samples_daily:     () => 4,
 };
 
 // Defaults used only when a table has zero rows (so avg bytes/row is unknown).
@@ -492,7 +487,6 @@ const DEFAULT_BYTES_PER_ROW: Record<string, number> = {
   asset_storage_samples:       310,
   asset_ipsec_tunnel_samples:  390,
   asset_perf_sla_samples:      360,
-  asset_sdwan_rule_samples:    450,
   // Hourly + daily rollup defaults share the same shape per source.
   asset_monitor_samples_hourly:      280,
   asset_monitor_samples_daily:       280,
@@ -508,8 +502,6 @@ const DEFAULT_BYTES_PER_ROW: Record<string, number> = {
   asset_ipsec_tunnel_samples_daily:  360,
   asset_perf_sla_samples_hourly:     360,
   asset_perf_sla_samples_daily:      360,
-  asset_sdwan_rule_samples_hourly:   400,
-  asset_sdwan_rule_samples_daily:    400,
 };
 
 const APP_DIR = dirname(fileURLToPath(import.meta.url));

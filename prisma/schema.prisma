@@ -1107,16 +1107,19 @@ model AssetPerfSlaSample {
   @@map("asset_perf_sla_samples")
 }
 
-// Per-service-rule SD-WAN selection snapshot, written on the system-info
-// cadence. FortiOS only (rule definitions from /api/v2/cmdb/system/sdwan,
-// runtime selection merged in when resolvable), gated by Integration.config.pullSdwan.
-// One row per (asset, rule). The detail series is the failover timeline:
-// `selectedMember` is the member currently carrying the rule's traffic.
+// Per-service-rule SD-WAN selection snapshot — CURRENT-STATE per (asset, rule),
+// replaced in full on every system-info pass that successfully collected SD-WAN
+// data (mirrors AssetLldpNeighbor / AssetWirelessStation, NOT a time-series).
+// FortiOS only (rule definitions from /api/v2/cmdb/system/sdwan, runtime
+// selection merged in when resolvable), gated by Integration.config.pullSdwan.
+// `selectedMember` is the member currently carrying the rule's traffic;
 // `availableMembers` is the configured candidate list in priority order.
-model AssetSdwanRuleSample {
-  id               String   @default(uuid())
+// History/timeline was dropped per product decision (2026-06) — only the
+// SD-WAN SLA metrics stream (AssetPerfSlaSample) remains a time-series.
+// PLAIN Postgres table (NOT a hypertable).
+model AssetSdwanRule {
+  id               String   @id @default(uuid())
   assetId          String
-  timestamp        DateTime @default(now())
   ruleName         String
   ruleId           String?
   // 0-based position in the FortiOS `service` array = the rule's evaluation
@@ -1147,12 +1150,11 @@ model AssetSdwanRuleSample {
   // zone-based selection (`priority-zone`). Empty for interface-member rules.
   // When set, availableMembers is resolved from these zones' member interfaces.
   priorityZones    String[] @default([])
-  cadence          String?
+  updatedAt        DateTime @updatedAt
 
-  @@id([id, timestamp])
-  @@index([assetId, timestamp])
-  @@index([assetId, ruleName, timestamp])
-  @@map("asset_sdwan_rule_samples")
+  @@unique([assetId, ruleName])
+  @@index([assetId])
+  @@map("asset_sdwan_rules")
 }
 
 // LLDP neighbor table — current-state per (asset, local interface). Replaced
@@ -1659,54 +1661,6 @@ model AssetPerfSlaSampleDaily {
   @@index([assetId, bucketStart])
   @@index([assetId, healthCheck, link, bucketStart])
   @@map("asset_perf_sla_samples_daily")
-}
-
-model AssetSdwanRuleSampleHourly {
-  id                   String   @default(uuid())
-  assetId              String
-  bucketStart          DateTime
-  ruleName             String
-  sampleCount          Int
-  statusUpCount        Int      @default(0)
-  statusDownCount      Int      @default(0)
-  // Number of times selectedMember changed within the bucket (failover count).
-  selectionChangeCount Int      @default(0)
-  lastSelectedMember   String?
-  lastStatus           String?
-  lastMode             String?
-  // Not populated by the rollup (ARRAY_AGG of an array column can't be
-  // subscripted back to text[]); stays default []. The candidate-member list
-  // is only needed at detail resolution (rules snapshot reads the detail table).
-  lastAvailableMembers String[] @default([])
-  lastBucketSampleAt   DateTime
-
-  @@id([id, bucketStart])
-  @@unique([bucketStart, assetId, ruleName])
-  @@index([assetId, bucketStart])
-  @@index([assetId, ruleName, bucketStart])
-  @@map("asset_sdwan_rule_samples_hourly")
-}
-
-model AssetSdwanRuleSampleDaily {
-  id                   String   @default(uuid())
-  assetId              String
-  bucketStart          DateTime
-  ruleName             String
-  sampleCount          Int
-  statusUpCount        Int      @default(0)
-  statusDownCount      Int      @default(0)
-  selectionChangeCount Int      @default(0)
-  lastSelectedMember   String?
-  lastStatus           String?
-  lastMode             String?
-  lastAvailableMembers String[] @default([])
-  lastBucketSampleAt   DateTime
-
-  @@id([id, bucketStart])
-  @@unique([bucketStart, assetId, ruleName])
-  @@index([assetId, bucketStart])
-  @@index([assetId, ruleName, bucketStart])
-  @@map("asset_sdwan_rule_samples_daily")
 }
 
 model AssetIpHistory {

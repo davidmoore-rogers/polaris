@@ -96,8 +96,7 @@ export type RetentionEntity =
   | "interfaces"
   | "storage"
   | "ipsec"
-  | "perfSla"
-  | "sdwanRule";
+  | "perfSla";
 export type RetentionTier = "detail" | "hourly" | "daily";
 
 export const RETENTION_ENTITIES: RetentionEntity[] = [
@@ -108,7 +107,6 @@ export const RETENTION_ENTITIES: RetentionEntity[] = [
   "storage",
   "ipsec",
   "perfSla",
-  "sdwanRule",
 ];
 
 /** Entities whose configured retention applies to SELECTED rows only
@@ -141,7 +139,6 @@ export function defaultSampleRetention(): SampleRetention {
     storage:     defaultTier(),
     ipsec:       defaultTier(),
     perfSla:     defaultTier(),
-    sdwanRule:   defaultTier(),
   };
 }
 
