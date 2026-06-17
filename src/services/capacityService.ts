@@ -41,7 +41,7 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { prisma } from "../db.js";
 import { getMonitorSettings, type MonitorSettings } from "./monitoringService.js";
-import { isTimescaleAvailable, isHypertable, ALL_HYPERTABLE_CANDIDATES } from "./timescaleService.js";
+import { isTimescaleAvailable, isHypertable, ALL_HYPERTABLE_CANDIDATES, getEffectiveCompressAfterDays } from "./timescaleService.js";
 import { getSampleRetention, SELECTION_AWARE_ENTITIES, UNSELECTED_DETAIL_HOURS, type RetentionEntity, type RetentionTier, type SampleRetention } from "./sampleRetentionService.js";
 import { isPgbossInstalled, getBootTimeMode, getQueueMode } from "./queueService.js";
 import { getDeploymentContext } from "../utils/deploymentContext.js";
@@ -745,6 +745,95 @@ async function getSampleTableStats(): Promise<CapacitySampleTable[]> {
   });
 }
 
+/** Median of a non-empty numeric array (robust to a single bloated outlier). */
+function median(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+const DETAIL_TABLE_NAMES: readonly string[] = SAMPLE_TABLES.filter((d) => d.tier === "detail").map((d) => d.name);
+
+/**
+ * Measure the real per-day on-disk footprint of each DETAIL hypertable from its
+ * recent SETTLED, UNCOMPRESSED chunks. Returns bytes/day per table (median over
+ * up to 5 recent chunks); tables with no qualifying chunk are omitted (caller
+ * falls back to the workload model).
+ *
+ * Why measure instead of the count×rows×bytesPerRow workload model: that model
+ * can't see index + page overhead and relies on hardcoded per-asset multipliers
+ * (interfaces/sensors/mounts per asset) that are wildly fleet-specific — on a
+ * real fleet it underprojected interface detail ~33× (2026-06: assumed 20
+ * ifaces × 24h unselected cap × 395 B/row vs. reality 9,418 pinned interfaces ×
+ * 7-day retention × ~1.1 kB/row on disk). A settled uncompressed chunk's size
+ * IS the true daily footprint, indexes and all.
+ *
+ * Why "settled" (range_end older than 24h): excludes the current partial day
+ * AND the unselected/slow detail rows that prune at UNSELECTED_DETAIL_HOURS, so
+ * we measure the steady selected daily rate. Why "uncompressed": detail tiers
+ * whose retention ≤ compress-after never compress, so their chunks are the
+ * dense uncompressed footprint; measuring only uncompressed chunks avoids the
+ * compressed-bytes distortion that made the old relpages/tuples measurement
+ * garbage (the bug Fix A removed). Median over several chunks tolerates a single
+ * decompression-bloated outlier.
+ */
+async function measureDetailDailyBytes(): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  for (const name of DETAIL_TABLE_NAMES) {
+    if (!isHypertable(name)) continue;
+    try {
+      const rows = await prisma.$queryRawUnsafe<{ bytes: bigint | null; span_secs: number | null }[]>(
+        `SELECT pg_total_relation_size(format('%I.%I', chunk_schema, chunk_name)::regclass) AS bytes,
+                EXTRACT(epoch FROM (range_end - range_start)) AS span_secs
+           FROM timescaledb_information.chunks
+          WHERE hypertable_name = $1
+            AND NOT is_compressed
+            AND range_end < now() - interval '24 hours'
+          ORDER BY range_start DESC
+          LIMIT 5`,
+        name,
+      );
+      const dailyRates = rows
+        .map((r) => {
+          const bytes = Number(r.bytes ?? 0);
+          const spanDays = Number(r.span_secs ?? 0) / 86400;
+          return spanDays > 0 ? bytes / spanDays : 0;
+        })
+        .filter((v) => v > 0);
+      if (dailyRates.length > 0) out[name] = median(dailyRates);
+    } catch (err) {
+      logger.debug({ err, table: name }, "measureDetailDailyBytes: chunk scan failed; using workload model");
+    }
+  }
+  return out;
+}
+
+/**
+ * Bytes for a single DETAIL tier. Prefers the measured uncompressed daily rate
+ * (× retention) when the tier genuinely never compresses (retention ≤
+ * compress-after, or compression disabled) — that's the accurate on-disk
+ * footprint. Otherwise (no measurement, or retention reaches past the frontier
+ * so part of the data IS compressed and the uncompressed rate would
+ * over-project) falls back to the supplied workload-model estimate. Pure for
+ * unit testing.
+ */
+export function projectDetailBytes(opts: {
+  measuredDailyBytes: number | null;
+  retentionDays: number;
+  compressAfterDays: number;
+  workloadFallbackBytes: number;
+}): number {
+  const { measuredDailyBytes, retentionDays, compressAfterDays, workloadFallbackBytes } = opts;
+  if (
+    measuredDailyBytes != null &&
+    measuredDailyBytes > 0 &&
+    (compressAfterDays <= 0 || retentionDays <= compressAfterDays)
+  ) {
+    return measuredDailyBytes * retentionDays;
+  }
+  return workloadFallbackBytes;
+}
+
 export function projectSteadyStateSize(args: {
   currentDbBytes: number;
   sampleTables: CapacitySampleTable[];
@@ -757,8 +846,15 @@ export function projectSteadyStateSize(args: {
   systemInfoEligibleCount: number;
   monitor: MonitorSettings;
   retention: SampleRetention;
+  /** Measured uncompressed daily bytes per DETAIL table (from settled chunks).
+   *  When present for a never-compressing detail tier, used instead of the
+   *  workload model. Omitted → pure workload model (existing behavior). */
+  measuredDetailDailyBytes?: Record<string, number>;
+  /** Effective compress-after window (days) per table; gates the measured-rate
+   *  path (only trusted when retention ≤ this). */
+  compressAfterByTable?: Record<string, number>;
 }): number {
-  const { currentDbBytes, sampleTables, monitoredCount, telemetryEligibleCount, systemInfoEligibleCount, monitor, retention } = args;
+  const { currentDbBytes, sampleTables, monitoredCount, telemetryEligibleCount, systemInfoEligibleCount, monitor, retention, measuredDetailDailyBytes, compressAfterByTable } = args;
 
   // Subtract current sample-table bytes so we don't double-count when adding
   // the projected sample-table bytes back in.
@@ -789,33 +885,43 @@ export function projectSteadyStateSize(args: {
     const rowsPerAssetPerDay = DEFAULT_ROWS_PER_ASSET_PER_DAY[def.name](intervals);
     // Per-entity retention. FOREVER (-1) has no finite steady state, so it's
     // treated as 0 here (an unbounded tier can't be projected); 0 = tier off = 0.
-    let retentionDays = Math.max(0, retention[def.entity][def.tier]);
-    // Selection split: the DETAIL tier of interfaces/storage/ipsec is dominated
-    // by UNSELECTED rows kept only UNSELECTED_DETAIL_HOURS (24h) — the configured
-    // (selected) retention applies to the small operator-pinned subset only. So
-    // cap the detail projection at the unselected window; the selected long-tail
-    // (a handful of pinned entities × full retention) is negligible against the
-    // per-entity bulk and is intentionally omitted. Hourly/daily tiers are
-    // selected-only (rollup filters cadence="fast") and keep their configured
-    // retention.
-    if (def.tier === "detail" && (SELECTION_AWARE_ENTITIES as readonly string[]).includes(def.entity)) {
-      retentionDays = Math.min(retentionDays || UNSELECTED_DETAIL_HOURS / 24, UNSELECTED_DETAIL_HOURS / 24);
-    }
-    // Per-row size: use the CALIBRATED default, never the live-measured
-    // `t.avgBytesPerRow`. The measured value (relpages / pg_stat tuples) is
-    // unreliable for these tables — relpages count bloated/empty pages and
-    // TimescaleDB-compressed TOAST data the tuple estimate can't see, and the
-    // estimate itself swings as autovacuum/ANALYZE churn under write load. It
-    // routinely lands at 10–180 kB/row for ~400-byte rows, which made this
-    // projection produce phantom 14–218 TB steady-states that flip-flopped
-    // between snapshots (2026-06). Steady-state is a WORKLOAD model — assets ×
-    // cadence × retention × a stable per-row size — not an extrapolation of the
-    // current bloated/compressed physical state, so the calibrated default is
-    // both more correct and stable. `t` is still required (skip tables with no
-    // stats row yet, e.g. fresh install); its measured bytes feed the table
+    const fullRetentionDays = Math.max(0, retention[def.entity][def.tier]);
+    // Per-row size for the workload model: use the CALIBRATED default, never the
+    // live-measured `t.avgBytesPerRow`. That value (relpages / pg_stat tuples) is
+    // unreliable — relpages count bloated/empty pages + TimescaleDB-compressed
+    // TOAST the tuple estimate can't see, and it swings as autovacuum/ANALYZE
+    // churn under write load, routinely landing at 10–180 kB/row for ~400-byte
+    // rows (phantom 14–218 TB steady-states, 2026-06). `t` is still required
+    // (skip tables with no stats row yet); its measured bytes feed the table
     // breakdown display only.
     const bytesPerRow = DEFAULT_BYTES_PER_ROW[def.name] ?? 300;
-    projectedSampleBytes += count * rowsPerAssetPerDay * retentionDays * bytesPerRow;
+
+    if (def.tier === "detail") {
+      // DETAIL tier: prefer the MEASURED uncompressed daily byte-rate × full
+      // retention when the tier never compresses (retention ≤ compress-after) —
+      // that captures the true on-disk footprint (indexes + overhead + the real
+      // pinned-interface/cadence/asset mix) the workload model can't see. The
+      // workload model is the fallback, and for selection-aware entities it
+      // keeps the conservative UNSELECTED_DETAIL_HOURS (24h) cap (the bulk of
+      // unmeasured detail is unselected rows pruned at 24h; the pinned subset is
+      // omitted as negligible — only used on fresh installs with no chunk yet).
+      let fallbackRetentionDays = fullRetentionDays;
+      if ((SELECTION_AWARE_ENTITIES as readonly string[]).includes(def.entity)) {
+        fallbackRetentionDays = Math.min(fullRetentionDays || UNSELECTED_DETAIL_HOURS / 24, UNSELECTED_DETAIL_HOURS / 24);
+      }
+      const workloadFallbackBytes = count * rowsPerAssetPerDay * fallbackRetentionDays * bytesPerRow;
+      projectedSampleBytes += projectDetailBytes({
+        measuredDailyBytes: measuredDetailDailyBytes?.[def.name] ?? null,
+        retentionDays: fullRetentionDays,
+        compressAfterDays: compressAfterByTable?.[def.name] ?? 0,
+        workloadFallbackBytes,
+      });
+    } else {
+      // Rollup tiers (hourly/daily) are bucket-fixed (24/day, 1/day) and mostly
+      // COMPRESSED at steady state, so the measured-uncompressed approach would
+      // over-project — keep the stable workload model.
+      projectedSampleBytes += count * rowsPerAssetPerDay * fullRetentionDays * bytesPerRow;
+    }
   }
 
   return baseBytes + projectedSampleBytes;
@@ -1498,6 +1604,17 @@ export async function getCapacitySnapshot(opts: {
     systemInfoDays: sampleRetention.interfaces.detail,
   };
 
+  // Measure the real daily footprint of each detail hypertable (settled,
+  // uncompressed chunks) so the projection reflects actual on-disk size —
+  // indexes, overhead, and the true pinned-interface/cadence mix — instead of
+  // the hardcoded workload multipliers. Per-table compress-after gates which
+  // detail tiers can trust the measurement (only those that never compress).
+  const measuredDetailDailyBytes = await measureDetailDailyBytes();
+  const compressAfterByTable: Record<string, number> = {};
+  for (const def of SAMPLE_TABLES) {
+    if (def.tier === "detail") compressAfterByTable[def.name] = getEffectiveCompressAfterDays(def.name);
+  }
+
   const steadyStateSizeBytes = projectSteadyStateSize({
     currentDbBytes: dbSizeBytes,
     sampleTables,
@@ -1506,6 +1623,8 @@ export async function getCapacitySnapshot(opts: {
     systemInfoEligibleCount,
     monitor,
     retention: sampleRetention,
+    measuredDetailDailyBytes,
+    compressAfterByTable,
   });
 
   const snap: CapacitySnapshot = {
