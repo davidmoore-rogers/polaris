@@ -36,6 +36,14 @@ document.addEventListener("DOMContentLoaded", function () {
       document.querySelectorAll(".page-tab-panel").forEach(function (p) { p.classList.remove("active"); });
       tab.classList.add("active");
       document.getElementById("tab-" + target).classList.add("active");
+      // Persist the active tab in the URL so a page refresh restores it
+      // (read back via the ?tab= handler below on load). replaceState keeps
+      // it out of the back/forward history.
+      try {
+        var u = new URL(window.location.href);
+        u.searchParams.set("tab", target);
+        window.history.replaceState(null, "", u);
+      } catch (e) { /* non-fatal: tab still switches */ }
       // Lazy-load tabs on first click
       if (target === "ntp" && !_ntpLoaded) loadNtpSettings();
       if (target === "certificates" && !_certsLoaded) loadCertificates();
