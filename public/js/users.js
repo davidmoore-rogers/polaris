@@ -1435,7 +1435,7 @@ function buildRoleSlideoverHtml(role, isCreate, isProtected, permissions) {
       '</td>';
     }).join("");
     var ownershipNote = f.hasOwnershipDimension
-      ? ' <span title="Read-Write = edit own only; Full Read-Write = edit any" style="color:var(--color-text-tertiary);font-size:0.85em">(own / any)</span>'
+      ? ' <span title="Read-Write = create/edit/delete your own rows only; Full Read-Write = create/edit/delete any row" style="color:var(--color-text-tertiary);font-size:0.85em">(Read-Write = own · Full Read-Write = any)</span>'
       : '';
     return '<tr>' +
       '<td>' +

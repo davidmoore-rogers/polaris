@@ -60,8 +60,8 @@ export interface FunctionKeyDef {
 
 export const FUNCTION_KEYS: readonly FunctionKeyDef[] = [
   { key: "ipBlocks", label: "IP Blocks", description: "Top-level CIDR blocks. Read = list/view; write = create/edit/delete." },
-  { key: "subnets", label: "Subnets", description: "Child subnets. Read-Write = create + edit own only; Full Read-Write = edit any.", hasOwnershipDimension: true },
-  { key: "reservations", label: "Reservations", description: "IP reservations. Read-Write = create + edit own only; Full Read-Write = edit any.", hasOwnershipDimension: true },
+  { key: "subnets", label: "Subnets", description: "Child subnets. Read-Write = create + edit/delete own only; Full Read-Write = create + edit/delete any.", hasOwnershipDimension: true },
+  { key: "reservations", label: "Reservations", description: "IP reservations. Read-Write = create + edit/delete own only; Full Read-Write = create + edit/delete any.", hasOwnershipDimension: true },
   { key: "reservationPush", label: "DHCP Reservation Push", description: "Push manual reservations to FortiGate (the DHCP Push toggle on FMG / standalone FortiGate integrations)." },
   { key: "allocationTemplates", label: "Allocation Templates", description: "Saved multi-subnet allocation templates used by the bulk-allocate modal." },
   { key: "assets", label: "Assets", description: "Asset inventory CRUD + PDF/CSV export." },
