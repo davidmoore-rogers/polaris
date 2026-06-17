@@ -89,6 +89,61 @@ export function unselectedSlowPruneWindow(
   return { gte, lt };
 }
 
+/**
+ * Window for a by-days tier prune — the hourly/daily rollup tiers of every
+ * entity, plus the detail tiers of the non-selection-aware streams (monitor /
+ * cpuMem / hardware / perfSla). Mirrors `unselectedSlowPruneWindow`'s
+ * compression-frontier safety, generalized for the common rollup case where
+ * the retention cutoff is much OLDER than the compression frontier.
+ *
+ * `drop_chunks(cutoff)` (called by the prune layer regardless of this result)
+ * removes whole chunks entirely older than the cutoff in O(1). What's left to
+ * clean is the residue inside the single chunk straddling the cutoff. The
+ * danger: that straddling chunk is usually COMPRESSED (it sits well past the
+ * compress-after frontier for long-retention rollup tiers), and a row-level
+ * DELETE matching compressed rows forces TimescaleDB to decompress the whole
+ * chunk into its rowstore heap — leaving multi-GB of un-truncatable low-density
+ * heap. This is the exact mechanism behind the 2026-06-08 and 2026-06-17 prod
+ * incidents (the latter: a 30-day `asset_interface_samples_hourly` deleteMany
+ * decompressing chunks, fanning into a tuple-lock pile-up that pinned the xmin
+ * horizon and pegged every core).
+ *
+ * Returns `{ cutoff, gte, skipRowDelete }`:
+ *  - `cutoff`         — the retention boundary; the caller passes it to drop_chunks.
+ *  - `skipRowDelete`  — true when EVERY row older than the cutoff is at/beyond the
+ *                       compression frontier (the rollup case). No row-DELETE runs;
+ *                       drop_chunks alone reclaims the data once the straddling
+ *                       chunk fully ages past the cutoff (≤ one chunk_interval of
+ *                       harmless over-retention).
+ *  - `gte`            — when the cutoff is NEWER than the frontier (short retention,
+ *                       e.g. an operator-shortened tier), the row-DELETE is bounded
+ *                       to the uncompressed window `[frontier, cutoff)`; rows older
+ *                       than the frontier ride compressed until drop_chunks. `gte`
+ *                       is null when compression is disabled — then the residue
+ *                       DELETE is unbounded (`< cutoff`), which is safe.
+ *
+ * Pure / side-effect-free for unit testing — pass `Date.now()` as `nowMs`.
+ */
+export function tieredPruneWindow(
+  nowMs: number,
+  retentionDays: number,
+  compressAfterDays: number,
+): { cutoff: Date; gte: Date | null; skipRowDelete: boolean } {
+  const cutoff = new Date(retentionDays <= 0 ? nowMs : nowMs - retentionDays * DAY_MS);
+  if (compressAfterDays <= 0) {
+    // No compression policy → no chunk can be decompressed; delete all residue.
+    return { cutoff, gte: null, skipRowDelete: false };
+  }
+  const frontierMs = nowMs - compressAfterDays * DAY_MS;
+  if (frontierMs >= cutoff.getTime()) {
+    // Everything we'd delete sits at/beyond the compression frontier — leave it
+    // to drop_chunks, never row-DELETE into a compressed chunk.
+    return { cutoff, gte: null, skipRowDelete: true };
+  }
+  // Cutoff is newer than the frontier: delete only the uncompressed window.
+  return { cutoff, gte: new Date(frontierMs), skipRowDelete: false };
+}
+
 export type RetentionEntity =
   | "assets"
   | "cpuMem"

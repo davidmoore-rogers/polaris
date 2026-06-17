@@ -67,8 +67,10 @@ import {
   setQueueDepth,
   startSampleWriteTimer,
 } from "../metrics.js";
+import pg from "pg";
 import { dropChunks, getEffectiveCompressAfterDays } from "./timescaleService.js";
-import { getSampleRetention, FOREVER, unselectedSlowPruneWindow } from "./sampleRetentionService.js";
+import { getSampleRetention, FOREVER, unselectedSlowPruneWindow, tieredPruneWindow } from "./sampleRetentionService.js";
+import { getDirectDatabaseUrl } from "../utils/dbConnections.js";
 import {
   enqueueMonitorSample,
   enqueueTelemetrySample,
@@ -8671,8 +8673,13 @@ const DAY_MS = 24 * 3600 * 1000;
  * of every entity. `days`: >0 keep N days; 0 keep nothing; FOREVER keep all.
  *
  * When the table is a Timescale hypertable, drop whole chunks older than the
- * cutoff first (O(1), no seq-scan / lock contention), then deleteMany the
- * residue inside the partial chunk. No-op drop on plain Postgres.
+ * cutoff first (O(1), no seq-scan / lock contention). The residue inside the
+ * chunk straddling the cutoff is then handled by `tieredPruneWindow`, which
+ * keeps the row-DELETE strictly on the UNCOMPRESSED side of the compression
+ * frontier — or skips it entirely when the whole delete set is past the
+ * frontier (the common rollup case). A blanket `lt: cutoff` deleteMany here
+ * would decompress chunks and bloat the heap (prod incidents 2026-06-08 and
+ * 2026-06-17). No-op drop on plain Postgres.
  */
 async function pruneTierByDays(
   fn: SamplePruneFn,
@@ -8681,9 +8688,16 @@ async function pruneTierByDays(
   hypertableName?: string,
 ): Promise<number> {
   if (days === FOREVER) return 0;
-  const cutoff = days <= 0 ? new Date() : new Date(Date.now() - days * DAY_MS);
-  if (hypertableName) await dropChunks(hypertableName, cutoff);
-  const { count } = await fn({ [timeColumn]: { lt: cutoff } });
+  const compressAfter = hypertableName ? getEffectiveCompressAfterDays(hypertableName) : 0;
+  const win = tieredPruneWindow(Date.now(), days, compressAfter);
+  // drop_chunks always runs at the retention cutoff — even when the row-DELETE
+  // is skipped, whole aged chunks must still drop in O(1).
+  if (hypertableName) await dropChunks(hypertableName, win.cutoff);
+  if (win.skipRowDelete) return 0;
+  const where = win.gte
+    ? { [timeColumn]: { gte: win.gte, lt: win.cutoff } }
+    : { [timeColumn]: { lt: win.cutoff } };
+  const { count } = await fn(where);
   return count;
 }
 
@@ -8812,4 +8826,115 @@ async function pruneLldpNeighbors(days: number): Promise<number> {
   const cutoff = days <= 0 ? new Date() : new Date(Date.now() - days * DAY_MS);
   const { count } = await prisma.assetLldpNeighbor.deleteMany({ where: { lastSeen: { lt: cutoff } } });
   return count;
+}
+
+// ─── Coordinated retention prune (single-flight across the monitor fleet) ────
+//
+// The retention prune is a FLEET-WIDE maintenance task, not a per-process one:
+// it trims global sample tables. In the split-role deployment every
+// `polaris-monitor@N` replica runs the same heavy tick, so without
+// coordination N replicas fire the same prune concurrently — N overlapping
+// `deleteMany`s on the same rollup tables, serializing on tuple locks. Worse,
+// the previous trigger (`lastPruneAt = 0` initialized in monitorAssets) fired
+// the prune on the FIRST heavy tick after every process start, so a crash/
+// restart loop re-issued the prune every ~30s. That cascade pinned the xmin
+// horizon and pegged every core (prod incident 2026-06-17).
+//
+// Two coordination mechanisms close that gap:
+//  1. A PERSISTED last-run timestamp (Setting row) — survives restarts, so a
+//     frequently-cycled host prunes 24h after the last SUCCESSFUL prune, not
+//     24h after each boot, and never on boot.
+//  2. A Postgres session-level ADVISORY LOCK held on a dedicated side
+//     connection (NOT a transaction — that would re-pin xmin for the whole
+//     prune) so only one replica prunes at a time; the rest skip cheaply.
+//
+// The advisory-lock key is a fixed Polaris-reserved (classid, objid) pair,
+// distinct from pg-boss's single-bigint keyspace.
+const PRUNE_LOCK_CLASSID = 0x504c5253; // "PLRS"
+const PRUNE_LOCK_OBJID = 1; // retention prune
+const RETENTION_PRUNE_SETTING_KEY = "lastRetentionPruneAt";
+
+/** Default cadence between retention prunes. Overridable by the caller. */
+export const RETENTION_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+export interface RetentionPruneResult {
+  monitor: number;
+  telemetry: number;
+  systemInfo: number;
+  /** true when this replica did NOT prune (not due, or another replica held the lock). */
+  skipped: boolean;
+  reason?: "not-due" | "lock-held";
+}
+
+async function getLastRetentionPruneAt(): Promise<number> {
+  const row = await prisma.setting.findUnique({ where: { key: RETENTION_PRUNE_SETTING_KEY } });
+  const v = row?.value as { at?: unknown } | null | undefined;
+  return typeof v?.at === "number" ? v.at : 0;
+}
+
+async function setLastRetentionPruneAt(at: number): Promise<void> {
+  await prisma.setting.upsert({
+    where: { key: RETENTION_PRUNE_SETTING_KEY },
+    update: { value: { at } },
+    create: { key: RETENTION_PRUNE_SETTING_KEY, value: { at } },
+  });
+}
+
+/**
+ * Run `fn` while holding the prune advisory lock on a dedicated connection.
+ * Returns `fn()`'s result, or `null` when another replica already holds the
+ * lock (caller should treat that as "skipped"). The lock is session-level and
+ * released on a `finally`, and the connection is always closed — so a crash
+ * mid-prune drops the connection and the lock with it.
+ */
+async function withPruneLock<T>(fn: () => Promise<T>): Promise<T | null> {
+  const url = getDirectDatabaseUrl();
+  // No URL (shouldn't happen in a running app) → run uncoordinated rather than
+  // silently skip maintenance. Single-process dev has exactly one caller anyway.
+  if (!url) return fn();
+  const client = new pg.Client({ connectionString: url });
+  await client.connect();
+  try {
+    const res = await client.query<{ locked: boolean }>(
+      "SELECT pg_try_advisory_lock($1, $2) AS locked",
+      [PRUNE_LOCK_CLASSID, PRUNE_LOCK_OBJID],
+    );
+    if (!res.rows[0]?.locked) return null;
+    try {
+      return await fn();
+    } finally {
+      await client.query("SELECT pg_advisory_unlock($1, $2)", [PRUNE_LOCK_CLASSID, PRUNE_LOCK_OBJID]);
+    }
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * Fleet-coordinated retention prune. Call this on every heavy tick; it decides
+ * whether a prune is due (persisted timestamp) and, if so, takes the advisory
+ * lock and runs the three prune passes exactly once across the fleet. Cheap and
+ * safe to call every ~30s — the not-due path is a single indexed Setting read.
+ */
+export async function runRetentionPrune(
+  intervalMs: number = RETENTION_PRUNE_INTERVAL_MS,
+): Promise<RetentionPruneResult> {
+  const zero: RetentionPruneResult = { monitor: 0, telemetry: 0, systemInfo: 0, skipped: true };
+  if (Date.now() - (await getLastRetentionPruneAt()) < intervalMs) {
+    return { ...zero, reason: "not-due" };
+  }
+  const result = await withPruneLock(async () => {
+    // Re-check inside the lock: another replica may have just pruned and
+    // bumped the timestamp while we waited to acquire.
+    if (Date.now() - (await getLastRetentionPruneAt()) < intervalMs) return null;
+    const [monitor, telemetry, systemInfo] = await Promise.all([
+      pruneMonitorSamples(),
+      pruneTelemetrySamples(),
+      pruneSystemInfoSamples(),
+    ]);
+    await setLastRetentionPruneAt(Date.now());
+    return { monitor, telemetry, systemInfo };
+  });
+  if (result === null) return { ...zero, reason: "lock-held" };
+  return { ...result, skipped: false };
 }

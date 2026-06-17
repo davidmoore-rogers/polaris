@@ -38,9 +38,7 @@
 import { cpus } from "node:os";
 import {
   runMonitorPass,
-  pruneMonitorSamples,
-  pruneTelemetrySamples,
-  pruneSystemInfoSamples,
+  runRetentionPrune,
   resolveMonitorSettings,
   type MonitorCadence,
 } from "../services/monitoringService.js";
@@ -52,7 +50,6 @@ import { logger } from "../utils/logger.js";
 
 const PROBE_TICK_MS = 5_000;
 const HEAVY_TICK_MS = 30_000;
-const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function resolveConcurrency(envName: string, fallback: number): number {
   const raw = process.env[envName];
@@ -90,7 +87,6 @@ setMonitorWorkers({
 
 let runningProbe = false;
 let runningHeavy = false;
-let lastPruneAt = 0;
 
 /**
  * pg-boss publisher. Queries the same candidate set as runMonitorPass, runs
@@ -311,16 +307,19 @@ async function heavyTick(): Promise<void> {
           logger.debug({ stats }, "Heavy monitor pass complete");
         }
       }
-      if (Date.now() - lastPruneAt >= PRUNE_INTERVAL_MS) {
-        const [pruned, telPruned, sysPruned] = await Promise.all([
-          pruneMonitorSamples(),
-          pruneTelemetrySamples(),
-          pruneSystemInfoSamples(),
-        ]);
-        lastPruneAt = Date.now();
-        if (pruned > 0 || telPruned > 0 || sysPruned > 0) {
-          logger.info({ pruned, telPruned, sysPruned }, "Pruned old monitor samples");
-        }
+      // Fleet-coordinated retention prune. runRetentionPrune owns the
+      // due-check (persisted timestamp) + the cross-replica advisory lock, so
+      // this is cheap and safe to call every heavy tick: the common not-due
+      // path is a single indexed Setting read, and at most one monitor replica
+      // fleet-wide ever runs the actual prune. (Replaces the old in-memory
+      // `lastPruneAt = 0` trigger that fired on every process boot and, under a
+      // restart loop, fanned into the 2026-06-17 DELETE pile-up.)
+      const prune = await runRetentionPrune();
+      if (!prune.skipped && (prune.monitor > 0 || prune.telemetry > 0 || prune.systemInfo > 0)) {
+        logger.info(
+          { pruned: prune.monitor, telPruned: prune.telemetry, sysPruned: prune.systemInfo },
+          "Pruned old monitor samples",
+        );
       }
     });
   } catch (err) {
