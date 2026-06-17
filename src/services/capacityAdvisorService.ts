@@ -92,6 +92,11 @@ export interface AdvisorRecommendation {
   /** True when the queue mode this lever applies to does not match the active mode.
    *  UI uses this to dim "applies after queue-mode flip" rows. */
   appliesAfterQueueModeFlip?: boolean;
+  /** True when the current value is an explicit ALTER SYSTEM override
+   *  (postgresql.auto.conf). UI renders these "operator-set" rather than
+   *  flagging a change, since the advisory recommendation is intentionally
+   *  overridden. Only set on the advisory-only pg-tuning levers. */
+  operatorOverride?: boolean;
 }
 
 export interface CadenceObservation {
@@ -156,6 +161,10 @@ export interface PgRecommendation {
   recommended: string;
   /** True when current is below recommended. */
   changeRequired: boolean;
+  /** True when the current value was set explicitly via ALTER SYSTEM
+   *  (postgresql.auto.conf) — a deliberate operator override the advisor honors
+   *  rather than recommending a change. */
+  operatorOverride?: boolean;
 }
 
 export interface AdvisorInputs {
@@ -682,6 +691,7 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
     recommended: pgTuning.sharedBuffers.recommended,
     rationale: "25% of host RAM, minimum 128 MB. Requires a PostgreSQL restart.",
     changeRequired: pgTuning.sharedBuffers.changeRequired,
+    operatorOverride: pgTuning.sharedBuffers.operatorOverride,
   });
   recommendations.push({
     key: "PG_EFFECTIVE_CACHE_SIZE",
@@ -690,6 +700,7 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
     recommended: pgTuning.effectiveCacheSize.recommended,
     rationale: "75% of host RAM, minimum 256 MB. Requires a PostgreSQL reload.",
     changeRequired: pgTuning.effectiveCacheSize.changeRequired,
+    operatorOverride: pgTuning.effectiveCacheSize.operatorOverride,
   });
   recommendations.push({
     key: "PG_WORK_MEM",
@@ -698,6 +709,7 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
     recommended: pgTuning.workMem.recommended,
     rationale: "RAM/128, capped at 256 MB, minimum 32 MB. Requires a PostgreSQL reload.",
     changeRequired: pgTuning.workMem.changeRequired,
+    operatorOverride: pgTuning.workMem.operatorOverride,
   });
   recommendations.push({
     key: "PG_RANDOM_PAGE_COST",
@@ -706,6 +718,7 @@ export function buildAdvisorState(inputs: AdvisorInputs): AdvisorState {
     recommended: pgTuning.randomPageCost.recommended,
     rationale: "1.1 on SSD. Requires a PostgreSQL reload.",
     changeRequired: pgTuning.randomPageCost.changeRequired,
+    operatorOverride: pgTuning.randomPageCost.operatorOverride,
   });
 
   const anyChangeRequired = recommendations.some((r) => r.changeRequired);

@@ -1381,8 +1381,20 @@ function _advisorRowHtml(rec, advisor, pgConfigFile) {
   var label = _advisorLabel(rec.key);
   var current = rec.current === null || rec.current === undefined ? "—" : String(rec.current);
   var recommended = String(rec.recommended);
-  var pillCls = rec.changeRequired ? "advisor-pill advisor-pill-change" : "advisor-pill advisor-pill-ok";
-  var pillLabel = rec.changeRequired ? "Stage" : "OK";
+  // operatorOverride wins: the value was set explicitly via ALTER SYSTEM
+  // (postgresql.auto.conf), so it's a deliberate choice the advisor honors —
+  // never "Stage", even when it differs from the heuristic recommendation.
+  var pillCls, pillLabel;
+  if (rec.operatorOverride) {
+    pillCls = "advisor-pill advisor-pill-ok";
+    pillLabel = "Operator-set";
+  } else if (rec.changeRequired) {
+    pillCls = "advisor-pill advisor-pill-change";
+    pillLabel = "Stage";
+  } else {
+    pillCls = "advisor-pill advisor-pill-ok";
+    pillLabel = "OK";
+  }
 
   // Cold-start badge for cadence-driven rows.
   var coldStartBadge = "";
@@ -1396,16 +1408,19 @@ function _advisorRowHtml(rec, advisor, pgConfigFile) {
   if (rec.appliesAfterQueueModeFlip) {
     modeFlipHint = ' <span class="advisor-cold-badge" title="Takes effect after the queue-mode flip is applied">post-flip</span>';
   }
+  var overrideNote = rec.operatorOverride
+    ? " — set explicitly via ALTER SYSTEM (postgresql.auto.conf); advisory recommendation overridden"
+    : "";
   var tooltip = "";
   if (rec.breakdown && typeof rec.breakdown === "object") {
     try {
       var parts = Object.keys(rec.breakdown).map(function (k) { return k + "=" + rec.breakdown[k]; });
-      tooltip = ' title="' + escapeHtml(rec.rationale + " — " + parts.join(", ")) + '"';
+      tooltip = ' title="' + escapeHtml(rec.rationale + " — " + parts.join(", ") + overrideNote) + '"';
     } catch (e) {
-      tooltip = ' title="' + escapeHtml(rec.rationale || "") + '"';
+      tooltip = ' title="' + escapeHtml((rec.rationale || "") + overrideNote) + '"';
     }
-  } else if (rec.rationale) {
-    tooltip = ' title="' + escapeHtml(rec.rationale) + '"';
+  } else if (rec.rationale || overrideNote) {
+    tooltip = ' title="' + escapeHtml((rec.rationale || "") + overrideNote) + '"';
   }
 
   // Checkbox column: shown only on env / queue rows where changeRequired = true.

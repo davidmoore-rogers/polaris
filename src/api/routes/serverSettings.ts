@@ -1003,6 +1003,22 @@ interface PgTuningRow {
   current: string;
   recommended: string;
   ok: boolean;
+  /** True when the current value was set explicitly via ALTER SYSTEM
+   *  (postgresql.auto.conf). Such a value is a deliberate operator choice, so
+   *  the advisor treats it as OK even when below its heuristic recommendation —
+   *  otherwise an operator who intentionally lowered work_mem (e.g. to stop
+   *  swapping) gets a permanent false "Stage" nag, and staging would write to
+   *  postgresql.conf which auto.conf overrides anyway. */
+  operatorOverride: boolean;
+}
+
+/**
+ * True when a pg_settings row's value comes from postgresql.auto.conf — i.e. it
+ * was set by ALTER SYSTEM. Postgres reports such values with
+ * source='configuration file' and a sourcefile ending in postgresql.auto.conf.
+ */
+function isAutoConfOverride(s: { sourcefile: string | null }): boolean {
+  return !!s.sourcefile && /postgresql\.auto\.conf$/.test(s.sourcefile.replace(/\\/g, "/"));
 }
 interface PgTuningResult {
   settings: PgTuningRow[];
@@ -1022,8 +1038,8 @@ async function computePgTuning(): Promise<PgTuningResult | null> {
   if (reservationCount >= PG_TUNING_THRESHOLDS.reservations) triggered.push("reservations");
   if (!triggered.length) return null;
 
-  const pgSettings = await prisma.$queryRawUnsafe<{ name: string; setting: string; unit: string | null }[]>(
-    `SELECT name, setting, unit FROM pg_settings WHERE name IN ('shared_buffers', 'work_mem', 'effective_cache_size', 'random_page_cost', 'config_file')`
+  const pgSettings = await prisma.$queryRawUnsafe<{ name: string; setting: string; unit: string | null; sourcefile: string | null }[]>(
+    `SELECT name, setting, unit, sourcefile FROM pg_settings WHERE name IN ('shared_buffers', 'work_mem', 'effective_cache_size', 'random_page_cost', 'config_file')`
   );
   const pgConfigFile = pgSettings.find((s) => s.name === "config_file")?.setting || null;
 
@@ -1032,12 +1048,15 @@ async function computePgTuning(): Promise<PgTuningResult | null> {
     if (s.name === "config_file") return null;
     const rec = PG_RECOMMENDED[s.name];
     if (!rec) return null;
+    // An explicit ALTER SYSTEM override is a deliberate operator choice — never
+    // flag it as needing change, regardless of the heuristic recommendation.
+    const operatorOverride = isAutoConfOverride(s);
     let currentBytes: number;
     let ok: boolean;
     if (s.name === "random_page_cost") {
       const val = parseFloat(s.setting);
-      ok = val <= 1.1;
-      return { name: s.name, current: String(val), recommended: rec.display, ok };
+      ok = operatorOverride || val <= 1.1;
+      return { name: s.name, current: String(val), recommended: rec.display, ok, operatorOverride };
     }
     if (s.unit === "8kB") {
       currentBytes = parseInt(s.setting, 10) * 8192;
@@ -1046,12 +1065,12 @@ async function computePgTuning(): Promise<PgTuningResult | null> {
     } else {
       currentBytes = parsePgBytes(s.setting);
     }
-    ok = currentBytes >= rec.min;
+    ok = operatorOverride || currentBytes >= rec.min;
     let currentDisplay: string;
     if (currentBytes >= 1024 * 1024 * 1024) currentDisplay = (currentBytes / (1024 * 1024 * 1024)).toFixed(1).replace(/\.0$/, "") + "GB";
     else if (currentBytes >= 1024 * 1024) currentDisplay = (currentBytes / (1024 * 1024)).toFixed(0) + "MB";
     else currentDisplay = (currentBytes / 1024).toFixed(0) + "kB";
-    return { name: s.name, current: currentDisplay, recommended: rec.display, ok };
+    return { name: s.name, current: currentDisplay, recommended: rec.display, ok, operatorOverride };
   }).filter((s): s is PgTuningRow => s !== null);
 
   const allOk = settings.every((s) => s.ok);
@@ -1072,21 +1091,25 @@ function pgTuningToAdvisorShape(t: PgTuningResult | null): import("../../service
       current: sb?.current ?? null,
       recommended: sb?.recommended ?? PG_DEFAULTS.shared_buffers.display,
       changeRequired: sb ? !sb.ok : false,
+      operatorOverride: sb?.operatorOverride ?? false,
     },
     effectiveCacheSize: {
       current: ec?.current ?? null,
       recommended: ec?.recommended ?? PG_DEFAULTS.effective_cache_size.display,
       changeRequired: ec ? !ec.ok : false,
+      operatorOverride: ec?.operatorOverride ?? false,
     },
     workMem: {
       current: wm?.current ?? null,
       recommended: wm?.recommended ?? PG_DEFAULTS.work_mem.display,
       changeRequired: wm ? !wm.ok : false,
+      operatorOverride: wm?.operatorOverride ?? false,
     },
     randomPageCost: {
       current: rp?.current ?? null,
       recommended: rp?.recommended ?? PG_DEFAULTS.random_page_cost.display,
       changeRequired: rp ? !rp.ok : false,
+      operatorOverride: rp?.operatorOverride ?? false,
     },
   };
 }
