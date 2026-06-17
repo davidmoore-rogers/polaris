@@ -2,7 +2,7 @@
  * src/jobs/reclaimBloatedChunks.ts
  *
  * Nightly maintenance: reclaim orphaned heap left behind in ALREADY-compressed
- * TimescaleDB chunks of the selection-aware sample tables.
+ * TimescaleDB chunks of ANY sample hypertable (detail + hourly/daily rollups).
  *
  * Mechanism (prod incident 2026-06-08): a row-level DELETE that matches rows
  * inside a compressed chunk forces TimescaleDB to decompress the whole chunk
@@ -11,7 +11,11 @@
  * multi-GB low-density heap whose real (columnstore) data is only a few hundred
  * MB. `compress_chunk` is a no-op on such a chunk ("already columnstore"), so
  * only a relation rewrite (VACUUM FULL) reclaims it. We saw four interface
- * chunks at 0 live tuples / ~10 GB on disk each holding ~350 MB of real data.
+ * detail chunks at 0 live tuples / ~10 GB on disk each holding ~350 MB of real
+ * data — and again on 2026-06-17 a single `asset_interface_samples_hourly`
+ * chunk at 10 GB / 323 MB after the unguarded rollup-tier deleteMany. The scan
+ * now covers every hypertable (`ALL_HYPERTABLE_CANDIDATES`), not just the
+ * selection-aware detail tables, so rollup-tier residue self-heals too.
  *
  * The prune-side fix (`unselectedSlowPruneWindow` / `pruneSelectionAwareDetail`)
  * prevents NEW occurrences by keeping the slow deleteMany off compressed
@@ -40,7 +44,7 @@ import pg from "pg";
 import { getDirectDatabaseUrl } from "../utils/dbConnections.js";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { isHypertable } from "../services/timescaleService.js";
+import { isHypertable, ALL_HYPERTABLE_CANDIDATES } from "../services/timescaleService.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
 const INTERVAL_MS = 6 * 60 * 60 * 1000;      // every 6h — fast self-heal without hammering locks
@@ -64,14 +68,20 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// The selection-aware sample tables are the only ones with the row-level
-// delete-churn that decompresses chunks; the SD-WAN / monitor / telemetry
-// streams prune purely by drop_chunks (whole-chunk, no decompression).
-const SELECTION_AWARE_TABLES = [
-  "asset_interface_samples",
-  "asset_storage_samples",
-  "asset_ipsec_tunnel_samples",
-];
+// Scan EVERY hypertable for decompression bloat, not just the selection-aware
+// detail tables. The original list covered only the detail tables whose
+// unselected/slow row-DELETE churn decompressed chunks (2026-06-08). But the
+// 2026-06-17 incident decompressed a chunk of a *rollup* table
+// (`asset_interface_samples_hourly`, via the unguarded `pruneTierByDays`
+// deleteMany) — which the detail-only list left stranded (one 10 GB chunk
+// holding 323 MB of real data). The prune-side fixes (`tieredPruneWindow` +
+// `pruneSelectionAwareDetail`) now keep BOTH detail and rollup row-DELETEs off
+// compressed chunks, so going forward nothing should decompress — but this
+// job is the self-healing net for the existing residue and any future manual
+// op / backfill on ANY hypertable. Detection is read-only and the VACUUM FULL
+// only fires on genuinely bloated chunks (> MIN_BLOAT_BYTES AND > BLOAT_RATIO×
+// their compressed bytes), so widening the scan is cheap and safe.
+const BLOAT_SCAN_TABLES = ALL_HYPERTABLE_CANDIDATES;
 
 interface BloatCandidate {
   qualified: string; // already %I-quoted schema.table from format() in Postgres
@@ -82,7 +92,7 @@ interface BloatCandidate {
 /** Read-only scan for compressed chunks whose heap dwarfs their compressed data. */
 async function findBloatedChunks(): Promise<BloatCandidate[]> {
   const candidates: BloatCandidate[] = [];
-  for (const table of SELECTION_AWARE_TABLES) {
+  for (const table of BLOAT_SCAN_TABLES) {
     if (!isHypertable(table)) continue; // plain Postgres / not yet migrated
     let rows: { qualified: string; on_disk: bigint | null; compressed: bigint | null }[];
     try {
