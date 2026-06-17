@@ -753,7 +753,7 @@ async function getSampleTableStats(): Promise<CapacitySampleTable[]> {
   });
 }
 
-function projectSteadyStateSize(args: {
+export function projectSteadyStateSize(args: {
   currentDbBytes: number;
   sampleTables: CapacitySampleTable[];
   monitoredCount: number;
@@ -809,7 +809,21 @@ function projectSteadyStateSize(args: {
     if (def.tier === "detail" && (SELECTION_AWARE_ENTITIES as readonly string[]).includes(def.entity)) {
       retentionDays = Math.min(retentionDays || UNSELECTED_DETAIL_HOURS / 24, UNSELECTED_DETAIL_HOURS / 24);
     }
-    projectedSampleBytes += count * rowsPerAssetPerDay * retentionDays * t.avgBytesPerRow;
+    // Per-row size: use the CALIBRATED default, never the live-measured
+    // `t.avgBytesPerRow`. The measured value (relpages / pg_stat tuples) is
+    // unreliable for these tables — relpages count bloated/empty pages and
+    // TimescaleDB-compressed TOAST data the tuple estimate can't see, and the
+    // estimate itself swings as autovacuum/ANALYZE churn under write load. It
+    // routinely lands at 10–180 kB/row for ~400-byte rows, which made this
+    // projection produce phantom 14–218 TB steady-states that flip-flopped
+    // between snapshots (2026-06). Steady-state is a WORKLOAD model — assets ×
+    // cadence × retention × a stable per-row size — not an extrapolation of the
+    // current bloated/compressed physical state, so the calibrated default is
+    // both more correct and stable. `t` is still required (skip tables with no
+    // stats row yet, e.g. fresh install); its measured bytes feed the table
+    // breakdown display only.
+    const bytesPerRow = DEFAULT_BYTES_PER_ROW[def.name] ?? 300;
+    projectedSampleBytes += count * rowsPerAssetPerDay * retentionDays * bytesPerRow;
   }
 
   return baseBytes + projectedSampleBytes;
