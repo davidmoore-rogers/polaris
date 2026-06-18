@@ -13,9 +13,48 @@
 import { describe, it, expect } from "vitest";
 import {
   parseFortiosMemberList,
+  buildFortiswitchTrunkMembers,
+  findFortiswitchUplinkPorts,
   overlayFortiswitchTrunkMembers,
   type InterfaceSample,
 } from "../../src/services/monitoringService.js";
+
+// Minimal managed-switch CMDB port entries mirroring the shapes confirmed on a
+// live FortiOS 7.6 switch-controller payload: access ports carry `members: []`,
+// and auto-ISL uplink ports express their trunk membership ONLY via
+// `isl-local-trunk-name` (with empty `members` + `trunk-member: 0`).
+const accessPort = (name: string) => ({
+  "port-name": name,
+  "trunk-member": 0,
+  "isl-local-trunk-name": "",
+  members: [],
+});
+const islPort = (name: string, trunk: string, peerSn: string, peerPort: string) => ({
+  "port-name": name,
+  "trunk-member": 0,
+  "isl-local-trunk-name": trunk,
+  "isl-peer-port-name": peerPort,
+  "isl-peer-device-sn": peerSn,
+  members: [],
+});
+const lacpTrunkPort = (name: string, memberNames: string[]) => ({
+  "port-name": name,
+  "trunk-member": 0,
+  "isl-local-trunk-name": "",
+  members: memberNames.map((m) => ({ "member-name": m })),
+});
+// The directly-cabled FortiLink uplink port: fortilink-port flag set + names
+// the FortiGate in fgt-peer-device-name (fgt-peer-port-name is the FGT's
+// logical "fortilink" interface, not a physical port).
+const fgtUplinkPort = (name: string, fgtSn: string) => ({
+  "port-name": name,
+  "trunk-member": 0,
+  "fortilink-port": 1,
+  "fgt-peer-port-name": "fortilink",
+  "fgt-peer-device-name": fgtSn,
+  "isl-local-trunk-name": "",
+  members: [],
+});
 
 describe("parseFortiosMemberList", () => {
   it("reads an array of { member-name } objects", () => {
@@ -46,6 +85,109 @@ describe("parseFortiosMemberList", () => {
     expect(parseFortiosMemberList(undefined)).toEqual([]);
     expect(parseFortiosMemberList(42)).toEqual([]);
     expect(parseFortiosMemberList([null, {}, 7])).toEqual([]);
+  });
+});
+
+describe("buildFortiswitchTrunkMembers", () => {
+  it("maps a FortiLink auto-ISL trunk to its single physical member", () => {
+    // TESTSWITCH-2 port50 ↔ TESTSWITCH-3, port52 ↔ TESTSWITCH-1 (real shape:
+    // each ISL port names a different peer-serial trunk; `members` is empty).
+    const ports = [
+      accessPort("port1"),
+      islPort("port50", "8FFTF25005384-0", "S148FFTF25005384", "port51"),
+      islPort("port52", "8FFTF25005352-0", "S148FFTF25005352", "port51"),
+    ];
+    const map = buildFortiswitchTrunkMembers(ports);
+    expect(map.get("8FFTF25005384-0")).toEqual(["port50"]);
+    expect(map.get("8FFTF25005352-0")).toEqual(["port52"]);
+    // Access ports contribute nothing.
+    expect(map.has("port1")).toBe(false);
+    expect(map.size).toBe(2);
+  });
+
+  it("still maps operator LACP/static bundles via the members field", () => {
+    const ports = [lacpTrunkPort("Trunk1", ["port1", "port2"]), accessPort("port3")];
+    const map = buildFortiswitchTrunkMembers(ports);
+    expect(map.get("Trunk1")).toEqual(["port1", "port2"]);
+    expect(map.size).toBe(1);
+  });
+
+  it("handles a switch carrying both an LACP bundle and an auto-ISL uplink", () => {
+    const ports = [
+      lacpTrunkPort("Trunk1", ["port1", "port2"]),
+      islPort("port51", "8FFTF25011393-0", "S148FFTF25011393", "port52"),
+    ];
+    const map = buildFortiswitchTrunkMembers(ports);
+    expect(map.get("Trunk1")).toEqual(["port1", "port2"]);
+    expect(map.get("8FFTF25011393-0")).toEqual(["port51"]);
+  });
+
+  it("feeds overlayFortiswitchTrunkMembers end-to-end so ifParent lands on the physical port", () => {
+    // The opaque ISL trunk name is what LLDP / interface-name inference report
+    // as the edge endpoint; the overlay must stamp ifParent on port50 so the
+    // topology layer's preferPhysical swaps the label to the physical port.
+    const trunkMembers = buildFortiswitchTrunkMembers([
+      islPort("port50", "8FFTF25005384-0", "S148FFTF25005384", "port51"),
+    ]);
+    const ifaces: InterfaceSample[] = [
+      { ifName: "8FFTF25005384-0", ifType: null, operStatus: "up" }, // trunk as IF-MIB surfaced it
+      { ifName: "port50", ifType: "physical", operStatus: "up" },
+    ];
+    const links = overlayFortiswitchTrunkMembers(ifaces, trunkMembers);
+    expect(links).toBe(1);
+    expect(ifaces.find((i) => i.ifName === "8FFTF25005384-0")!.ifType).toBe("aggregate");
+    expect(ifaces.find((i) => i.ifName === "port50")!.ifParent).toBe("8FFTF25005384-0");
+  });
+
+  it("is null/garbage tolerant", () => {
+    expect(buildFortiswitchTrunkMembers(null).size).toBe(0);
+    expect(buildFortiswitchTrunkMembers(undefined).size).toBe(0);
+    expect(buildFortiswitchTrunkMembers(42).size).toBe(0);
+    expect(buildFortiswitchTrunkMembers([null, {}, 7, { "port-name": "" }]).size).toBe(0);
+  });
+});
+
+describe("findFortiswitchUplinkPorts", () => {
+  it("finds the directly-cabled FortiLink uplink port (chain-head switch)", () => {
+    // TESTSWITCH-1: port47 is the FGT uplink; port51 is an ISL to TESTSWITCH-2.
+    const ports = [
+      accessPort("port1"),
+      islPort("port51", "8FFTF25011393-0", "S148FFTF25011393", "port52"),
+      fgtUplinkPort("port47", "FGT91GTK25008577"),
+    ];
+    expect(findFortiswitchUplinkPorts(ports)).toEqual(["port47"]);
+  });
+
+  it("returns [] for a chained switch with no direct FortiGate uplink", () => {
+    // TESTSWITCH-2/3 reach the FGT over ISL trunks only — no fortilink-port.
+    const ports = [
+      accessPort("port1"),
+      islPort("port50", "8FFTF25005384-0", "S148FFTF25005384", "port51"),
+      islPort("port52", "8FFTF25005352-0", "S148FFTF25005352", "port51"),
+    ];
+    expect(findFortiswitchUplinkPorts(ports)).toEqual([]);
+  });
+
+  it("detects the uplink via fgt-peer-device-name even if fortilink-port is unset", () => {
+    const ports = [{
+      "port-name": "port24",
+      "fortilink-port": 0,
+      "fgt-peer-device-name": "FGT-CORE-1",
+      "fgt-peer-port-name": "fortilink",
+    }];
+    expect(findFortiswitchUplinkPorts(ports)).toEqual(["port24"]);
+  });
+
+  it("returns both ports for a dual-homed switch (caller treats >1 as ambiguous)", () => {
+    const ports = [fgtUplinkPort("port47", "FGT-A"), fgtUplinkPort("port48", "FGT-A")];
+    expect(findFortiswitchUplinkPorts(ports)).toEqual(["port47", "port48"]);
+  });
+
+  it("is null/garbage tolerant", () => {
+    expect(findFortiswitchUplinkPorts(null)).toEqual([]);
+    expect(findFortiswitchUplinkPorts(undefined)).toEqual([]);
+    expect(findFortiswitchUplinkPorts(42)).toEqual([]);
+    expect(findFortiswitchUplinkPorts([null, {}, { "port-name": "" }])).toEqual([]);
   });
 });
 

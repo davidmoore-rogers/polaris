@@ -1,0 +1,134 @@
+/**
+ * src/utils/fortiswitchCmdb.ts
+ *
+ * Pure parsers over a FortiGate switch-controller managed-switch CMDB `ports`
+ * array (`/api/v2/cmdb/switch-controller/managed-switch`). Dependency-free so
+ * both the monitoring pass (`monitoringService.fetchFortiswitchControllerPortsCmdb`)
+ * and the discovery collectors (`fortigateService` / `fortimanagerService`) can
+ * share them without an import cycle — monitoringService imports fgRequest from
+ * fortigateService, so the FortiSwitch port helpers can't live there if the
+ * collectors are to reuse them.
+ *
+ * Field shapes confirmed against a live FortiOS 7.6 switch-controller CMDB.
+ */
+
+// FortiOS coerces booleans inconsistently across endpoints — sometimes
+// "enable"/"disable", sometimes "yes"/"no", sometimes real true/false, and
+// integer flags like `fortilink-port: 1`. Normalize them all.
+export function fortiosBool(raw: unknown): boolean {
+  if (raw === true) return true;
+  if (typeof raw === "number") return raw !== 0;
+  if (typeof raw !== "string") return false;
+  const s = raw.trim().toLowerCase();
+  return s === "enable" || s === "yes" || s === "true" || s === "1";
+}
+
+// Extract a trunk's physical member port names from a managed-switch CMDB
+// port entry. FortiOS represents the member list in several shapes depending
+// on version + datasource flag: an array of objects ({member-name} or
+// {q_origin_key} or {name}), an array of bare strings, or a single
+// space/comma-separated string. Empty / absent on a plain physical port.
+//
+// Deliberately permissive — the overlay that consumes it is best-effort, so an
+// unexpected shape degrades to "no trunk resolved" rather than breaking the
+// interface scrape.
+export function parseFortiosMemberList(raw: unknown): string[] {
+  const out: string[] = [];
+  const push = (v: unknown): void => {
+    const s = typeof v === "string" ? v.trim() : "";
+    if (s && !out.includes(s)) out.push(s);
+  };
+  if (raw == null) return out;
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (typeof entry === "string") {
+        push(entry);
+      } else if (entry && typeof entry === "object") {
+        const o = entry as Record<string, unknown>;
+        push(o["member-name"] ?? o["q_origin_key"] ?? o.name ?? o["interface-name"]);
+      }
+    }
+  } else if (typeof raw === "string") {
+    for (const part of raw.split(/[,\s]+/)) push(part);
+  }
+  return out;
+}
+
+// Build the trunk → physical-member-ports map for a managed switch from its
+// CMDB `ports` array. Two distinct FortiOS representations feed the same map,
+// and `overlayFortiswitchTrunkMembers` consumes both identically:
+//
+//   1. Operator-built static / LACP trunks — a port entry that IS the trunk
+//      lists its bundle members in `members` (keyed by the trunk port's own
+//      name). Can be multi-member.
+//   2. FortiLink auto-ISL trunks between managed FortiSwitches — the trunk
+//      itself carries NO `members` (the field is `[]` and `trunk-member` is 0
+//      on a live FortiOS 7.6 switch-controller CMDB). Instead each *physical*
+//      uplink port names the auto-trunk it belongs to in `isl-local-trunk-name`
+//      (peer switch + port live in `isl-peer-device-sn` / `isl-peer-port-name`).
+//      The two ends of one ISL get DIFFERENT trunk names — each side names the
+//      peer's serial fragment — so they can't be joined by trunk name. But each
+//      side's `<physical port> → <its own local trunk name>` is exactly the
+//      single-member mapping the overlay needs to back-fill `ifParent`, which
+//      then lets the topology renderer's `preferPhysical` swap the opaque
+//      serial-named trunk label (e.g. `8FFTF25005384-0`) for the real physical
+//      port (e.g. `port50`) on the inter-switch edge.
+//
+// Keyed by trunk-interface name; auto-ISL names ("8FFTF...-0") never collide
+// with physical port names ("portN") or operator LACP-trunk names, so the two
+// representations coexist safely in one map.
+export function buildFortiswitchTrunkMembers(ports: unknown): Map<string, string[]> {
+  const trunkMembers = new Map<string, string[]>();
+  if (!Array.isArray(ports)) return trunkMembers;
+  for (const p of ports) {
+    if (!p || typeof p !== "object") continue;
+    const port = p as Record<string, unknown>;
+    const portName = String(port["port-name"] ?? "").trim();
+    if (!portName) continue;
+    // (1) LACP / static bundle: this port IS the trunk and lists its members.
+    const members = parseFortiosMemberList(port.members ?? port.member);
+    if (members.length > 0) trunkMembers.set(portName, members);
+    // (2) FortiLink auto-ISL: this physical port belongs to a named trunk.
+    const islTrunk = String(port["isl-local-trunk-name"] ?? "").trim();
+    if (islTrunk) {
+      const existing = trunkMembers.get(islTrunk);
+      if (existing) {
+        if (!existing.includes(portName)) existing.push(portName);
+      } else {
+        trunkMembers.set(islTrunk, [portName]);
+      }
+    }
+  }
+  return trunkMembers;
+}
+
+// Identify a managed FortiSwitch's physical uplink port(s) to its controller
+// FortiGate from the switch-controller CMDB `ports` array. The directly-cabled
+// FortiLink uplink port carries `fortilink-port: 1` AND names the FortiGate in
+// `fgt-peer-device-name` / `fgt-peer-port-name` (the latter is the FortiGate's
+// LOGICAL interface — almost always "fortilink" — not a physical port, so it's
+// not useful as the FortiGate-side label; the FortiGate-side physical port is
+// resolved separately from LLDP). A switch chained behind another FortiSwitch
+// has NO such port — its path to the FortiGate runs over an ISL trunk, so this
+// returns [] for it (correct: only directly-cabled chain-head switches get a
+// real FG↔switch uplink edge; map.ts demotes the rest).
+//
+// Returns every qualifying physical port (normally one; dual-homed switches
+// can have two). The caller uses it only when there's exactly one — an
+// unambiguous single uplink port — and otherwise leaves the switch-side label
+// to the LLDP backfill.
+export function findFortiswitchUplinkPorts(ports: unknown): string[] {
+  const out: string[] = [];
+  if (!Array.isArray(ports)) return out;
+  for (const p of ports) {
+    if (!p || typeof p !== "object") continue;
+    const port = p as Record<string, unknown>;
+    const portName = String(port["port-name"] ?? "").trim();
+    if (!portName) continue;
+    const isUplink =
+      fortiosBool(port["fortilink-port"]) ||
+      String(port["fgt-peer-device-name"] ?? "").trim() !== "";
+    if (isUplink && !out.includes(portName)) out.push(portName);
+  }
+  return out;
+}

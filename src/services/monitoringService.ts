@@ -38,6 +38,15 @@ import { retryOnDeadlock } from "../utils/dbRetry.js";
 import { AppError } from "../utils/errors.js";
 import { addMacAddresses } from "../utils/macAddresses.js";
 import { pingHost } from "../utils/icmpPing.js";
+import {
+  fortiosBool,
+  parseFortiosMemberList,
+  buildFortiswitchTrunkMembers,
+  findFortiswitchUplinkPorts,
+} from "../utils/fortiswitchCmdb.js";
+// Re-exported so existing import sites (unit tests, etc.) keep resolving these
+// from monitoringService; implementations live in utils/fortiswitchCmdb.ts.
+export { parseFortiosMemberList, buildFortiswitchTrunkMembers, findFortiswitchUplinkPorts };
 import { fgRequest, type FortiGateConfig } from "./fortigateService.js";
 import {
   fmgProxyRest,
@@ -2299,18 +2308,6 @@ function fortiswitchPortsCacheKey(integrationId: string, deviceName: string): st
   return `${integrationId}::${deviceName}::fsw-ports`;
 }
 
-// FortiOS coerces booleans inconsistently across endpoints — sometimes
-// "enable"/"disable", sometimes "yes"/"no", sometimes real true/false. This
-// helper normalizes them so callers don't have to repeat the case-fold +
-// string-equality dance.
-function fortiosBool(raw: unknown): boolean {
-  if (raw === true) return true;
-  if (typeof raw === "number") return raw !== 0;
-  if (typeof raw !== "string") return false;
-  const s = raw.trim().toLowerCase();
-  return s === "enable" || s === "yes" || s === "true" || s === "1";
-}
-
 // "all"-sentinel detector for FortiOS VLAN list fields. Older FortiOS
 // versions return the literal string "all" instead of an empty array +
 // sibling allowed-vlans-all="enable". Either form must map to "this port
@@ -2362,40 +2359,6 @@ function parseFortiosVlanList(raw: unknown): number[] {
     }
   }
   return Array.from(out).sort((a, b) => a - b);
-}
-
-// Extract a trunk's physical member port names from a managed-switch CMDB
-// port entry. FortiOS represents the member list in several shapes depending
-// on version + datasource flag: an array of objects ({member-name} or
-// {q_origin_key} or {name}), an array of bare strings, or a single
-// space/comma-separated string. Empty / absent on a plain physical port.
-//
-// NOTE: the exact field name + shape for trunk members on the controller's
-// managed-switch CMDB still wants confirmation on a live FortiOS 7.x device
-// (same caveat the SD-WAN collector carries). This parser is deliberately
-// permissive and the overlay that consumes it is best-effort, so an
-// unexpected shape degrades to "no trunk resolved" rather than breaking the
-// interface scrape.
-export function parseFortiosMemberList(raw: unknown): string[] {
-  const out: string[] = [];
-  const push = (v: unknown): void => {
-    const s = typeof v === "string" ? v.trim() : "";
-    if (s && !out.includes(s)) out.push(s);
-  };
-  if (raw == null) return out;
-  if (Array.isArray(raw)) {
-    for (const entry of raw) {
-      if (typeof entry === "string") {
-        push(entry);
-      } else if (entry && typeof entry === "object") {
-        const o = entry as Record<string, unknown>;
-        push(o["member-name"] ?? o["q_origin_key"] ?? o.name ?? o["interface-name"]);
-      }
-    }
-  } else if (typeof raw === "string") {
-    for (const part of raw.split(/[,\s]+/)) push(part);
-  }
-  return out;
 }
 
 async function fetchFortiswitchControllerPortsCmdb(
@@ -2461,7 +2424,6 @@ async function fetchFortiswitchControllerPortsCmdb(
         const portsRaw = r.ports;
         if (!Array.isArray(portsRaw)) continue;
         const portMap = new Map<string, FortiswitchPortVlan>();
-        const trunkMembers = new Map<string, string[]>();
         for (const p of portsRaw) {
           const port = p as Record<string, unknown>;
           const portName = String(port["port-name"] ?? "").trim();
@@ -2479,15 +2441,13 @@ async function fetchFortiswitchControllerPortsCmdb(
             fortiosBool(port["allowed-vlans-all"]) ||
             isFortiosVlanListAll(port["allowed-vlans"]);
           portMap.set(portName, { nativeVlan, taggedVlans: tagged, trunksAllVlans });
-          // Trunk membership: a port entry that lists members IS a trunk
-          // (the auto-ISL FortiLink uplink is named after the switch serial
-          // and carries exactly one member). The interface overlay uses this
-          // to back-fill ifParent on the physical member so the topology
-          // tooltip can render the cable's real physical port instead of the
-          // opaque trunk name.
-          const members = parseFortiosMemberList(port.members ?? port.member);
-          if (members.length > 0) trunkMembers.set(portName, members);
         }
+        // Trunk → physical-member map: operator LACP bundles (`members`) +
+        // FortiLink auto-ISL uplinks (`isl-local-trunk-name` on each physical
+        // member). The interface overlay uses this to back-fill ifParent so
+        // the topology renderer swaps the opaque trunk name for the real
+        // physical port. See buildFortiswitchTrunkMembers.
+        const trunkMembers = buildFortiswitchTrunkMembers(portsRaw);
         map.set(serial.toUpperCase(), { vlanByPort: portMap, trunkMembers });
       }
 
