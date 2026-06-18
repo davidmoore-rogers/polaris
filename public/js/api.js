@@ -329,6 +329,26 @@ const api = {
     // System tab — telemetry, system-info snapshot, per-interface counters, per-mountpoint storage.
     systemInfo:           (id)  => request("GET", `/assets/${id}/system-info`),
     processes:            (id)  => request("GET", `/assets/${id}/processes`),
+    processHistory:       (id, name, opts) => {
+      if (typeof opts === "string") opts = { range: opts };
+      opts = opts || {};
+      var qs = ["name=" + encodeURIComponent(name)];
+      if (opts.from && opts.to) {
+        qs.push("from=" + encodeURIComponent(opts.from));
+        qs.push("to="   + encodeURIComponent(opts.to));
+      } else if (opts.range) {
+        qs.push("range=" + encodeURIComponent(opts.range));
+      }
+      return request("GET", `/assets/${id}/process-history?` + qs.join("&"));
+    },
+    processLogs:          (id, name, opts) => {
+      opts = opts || {};
+      var qs = ["name=" + encodeURIComponent(name)];
+      if (opts.since) qs.push("since=" + encodeURIComponent(opts.since));
+      if (opts.limit) qs.push("limit=" + encodeURIComponent(opts.limit));
+      return request("GET", `/assets/${id}/process-logs?` + qs.join("&"));
+    },
+    setProcessConfig:     (id, name, body) => request("PUT", `/assets/${id}/processes/${encodeURIComponent(name)}/config`, body),
     customWidgets:        (id)  => request("GET", `/assets/${id}/custom-widgets`),
     telemetryHistory:     (id, opts) => {
       if (typeof opts === "string") opts = { range: opts };

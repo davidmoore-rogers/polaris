@@ -1503,10 +1503,19 @@ router.get("/:id/processes", requirePermission("assets", "read"), async (req, re
       select: { monitoredProcesses: true, alertWatchedProcesses: true },
     });
     if (!asset) throw new AppError(404, "Asset not found");
-    const rows = await prisma.assetProcess.findMany({
-      where: { assetId: id },
-      orderBy: [{ cpuPct: "desc" }, { name: "asc" }],
-    });
+    const [rows, configs] = await Promise.all([
+      prisma.assetProcess.findMany({
+        where: { assetId: id },
+        orderBy: [{ cpuPct: "desc" }, { name: "asc" }],
+      }),
+      prisma.assetProcessConfig.findMany({ where: { assetId: id } }),
+    ]);
+    // Per-program log config keyed by name, so the detail slide-in can pre-fill
+    // the log-path field without a second call.
+    const configsByName: Record<string, { logSource: string | null; logPathGlob: string | null; detectedUnit: string | null; notes: string | null }> = {};
+    for (const c of configs) {
+      configsByName[c.name] = { logSource: c.logSource, logPathGlob: c.logPathGlob, detectedUnit: c.detectedUnit, notes: c.notes };
+    }
     res.json({
       processes: rows.map((p) => ({
         name:          p.name,
@@ -1519,6 +1528,7 @@ router.get("/:id/processes", requirePermission("assets", "read"), async (req, re
         serviceUnit:   p.serviceUnit,
         controllable:  p.controllable,
       })),
+      configs: configsByName,
       monitoredProcesses:    (asset.monitoredProcesses    ?? []) as string[],
       alertWatchedProcesses: (asset.alertWatchedProcesses ?? []) as string[],
     });

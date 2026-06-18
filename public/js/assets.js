@@ -3518,7 +3518,7 @@ async function openViewModal(id) {
     if (isAdmin()) _wireSnmpWalkTab(a);
     if (canManageAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
-    if (!isInfraProc) _wireAssetProcessesTab(a.id);
+    if (!isInfraProc) _wireAssetProcessesTab(a);
     if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
     // Mount the dependency tree into its placeholder div on the General tab.
     var depMount = document.getElementById("asset-dep-tree-mount-" + a.id);
@@ -12735,12 +12735,14 @@ function _assetProcessesTabHTML(assetId) {
   '</div>';
 }
 
-function _wireAssetProcessesTab(assetId) {
+function _wireAssetProcessesTab(asset) {
+  var assetId = asset && asset.id ? asset.id : asset; // tolerate id-or-object
   var btn = document.querySelector('#asset-view-tabs [data-tab="processes"]');
   if (!btn) return;
   var loaded = false;
   var sf = null;
   var rows = [];
+  var configs = {};
   var monitored = new Set();
   var alerted = new Set();
 
@@ -12761,7 +12763,7 @@ function _wireAssetProcessesTab(assetId) {
       return '<tr>' +
         '<td style="text-align:center"><input type="checkbox" class="asset-proc-monitor-toggle" data-proc-name="' + nm + '"' + monChecked + '></td>' +
         '<td style="text-align:center"><input type="checkbox" class="asset-proc-alert-toggle" data-proc-name="' + nm + '"' + altChecked + '></td>' +
-        '<td title="' + escapeHtml(p.exePath || "") + '">' + nm + '</td>' +
+        '<td title="' + escapeHtml(p.exePath || "") + '"><a href="#" class="asset-proc-name-link" data-proc-name="' + nm + '">' + nm + '</a></td>' +
         '<td>' + (p.instanceCount != null ? p.instanceCount : "—") + '</td>' +
         '<td>' + fmtPct(p.cpuPct) + '</td>' +
         '<td>' + ram + '</td>' +
@@ -12799,6 +12801,7 @@ function _wireAssetProcessesTab(assetId) {
     try {
       var resp = await api.assets.processes(assetId);
       rows = (resp && resp.processes) || [];
+      configs = (resp && resp.configs) || {};
       monitored = new Set((resp && resp.monitoredProcesses) || []);
       alerted = new Set((resp && resp.alertWatchedProcesses) || []);
       if (!sf && typeof TableSF !== "undefined") {
@@ -12820,6 +12823,14 @@ function _wireAssetProcessesTab(assetId) {
       if (cb.classList.contains("asset-proc-monitor-toggle")) togglePin("monitor", name, cb.checked);
       else if (cb.classList.contains("asset-proc-alert-toggle")) togglePin("alert", name, cb.checked);
     });
+    // Name click → per-process detail slide-in (charts + logs + log config).
+    tbody.addEventListener("click", function (e) {
+      var link = e.target.closest ? e.target.closest(".asset-proc-name-link") : null;
+      if (!link) return;
+      e.preventDefault();
+      var name = link.getAttribute("data-proc-name");
+      if (name) openProcessDetailPanel(asset, name, configs[name] || null);
+    });
   }
   var refreshBtn = document.getElementById("asset-view-proc-refresh");
   if (refreshBtn) refreshBtn.addEventListener("click", load);
@@ -12829,6 +12840,189 @@ function _wireAssetProcessesTab(assetId) {
     loaded = true;
     load();
   });
+}
+
+// ─── Per-process detail slide-in (nested slide-over) ─────────────────────────
+// CPU/RAM charts (reusing _renderSensorChart) + an editable log-path config +
+// a log viewer. Opened from the Processes-tab name link. Mirrors the interface
+// detail panel's nested-slideover + range-button pattern.
+function _ensureProcPanelDOM() {
+  if (document.getElementById("proc-panel-overlay")) return;
+  var overlay = document.createElement("div");
+  overlay.id = "proc-panel-overlay";
+  overlay.className = "slideover-overlay slideover-nested";
+  overlay.style.zIndex = "1099";
+  overlay.innerHTML =
+    '<div class="slideover" id="proc-panel" style="z-index:1100">' +
+      '<div class="slideover-resize-handle"></div>' +
+      '<div class="slideover-header">' +
+        '<div class="slideover-header-top">' +
+          '<h3 id="proc-panel-title">Process</h3>' +
+          '<button class="btn-icon" id="proc-panel-close" title="Close">&times;</button>' +
+        '</div>' +
+        '<div class="slideover-meta" id="proc-panel-meta"></div>' +
+      '</div>' +
+      '<div class="slideover-body" id="proc-panel-body"><p class="empty-state" style="padding:1rem 1.25rem">Loading…</p></div>' +
+      '<div class="slideover-footer" id="proc-panel-footer"></div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener("click", function (e) { if (e.target === overlay) _closeProcPanel(); });
+  document.getElementById("proc-panel-close").addEventListener("click", _closeProcPanel);
+  if (typeof initSlideoverResize === "function") {
+    initSlideoverResize(document.getElementById("proc-panel"), "polaris.panel.width.process");
+  }
+}
+
+function _closeProcPanel() {
+  var ov = document.getElementById("proc-panel-overlay");
+  if (ov) ov.classList.remove("open");
+}
+
+async function openProcessDetailPanel(asset, name, cfg) {
+  if (!asset || !name) return;
+  _ensureProcPanelDOM();
+  var titleEl = document.getElementById("proc-panel-title");
+  var metaEl  = document.getElementById("proc-panel-meta");
+  var bodyEl  = document.getElementById("proc-panel-body");
+  var footerEl = document.getElementById("proc-panel-footer");
+  titleEl.textContent = "Process — " + name;
+  metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
+  footerEl.innerHTML = '<span style="flex:1"></span><button class="btn btn-sm btn-secondary" id="btn-proc-panel-close-btn">Close</button>';
+  requestAnimationFrame(function () {
+    document.getElementById("proc-panel-overlay").classList.add("open");
+  });
+  document.getElementById("btn-proc-panel-close-btn").addEventListener("click", _closeProcPanel);
+
+  var rangeBtns = _chartRangeBtnsHTML("proc-range-btn", [
+    { value: "1h",  label: "1h" },
+    { value: "24h", label: "24h" },
+    { value: "7d",  label: "7d" },
+    { value: "30d", label: "30d" },
+  ], "assetProcess", "1h");
+
+  var canEdit = canManageAssets();
+  var c = cfg || {};
+  var glob = c.logPathGlob || "";
+  var src = c.logSource || "auto";
+  function srcOpt(v, label) { return '<option value="' + v + '"' + (src === v ? " selected" : "") + '>' + label + '</option>'; }
+
+  bodyEl.innerHTML =
+    '<div style="padding:1rem 1.25rem">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
+        '<h4 style="margin:0">CPU &amp; Memory</h4>' +
+        '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
+      '</div>' +
+      '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">CPU (%)</h5>' +
+      '<div id="proc-cpu-stats" style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
+      '<div id="proc-cpu-chart" class="proc-chart-box"></div>' +
+      '<h5 style="margin:0.75rem 0 0.25rem;font-size:0.85rem">Memory (MB, RSS)</h5>' +
+      '<div id="proc-mem-stats" style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
+      '<div id="proc-mem-chart" class="proc-chart-box"></div>' +
+      '<div style="margin-top:1rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
+        '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem">' +
+          '<h4 style="margin:0">Logs</h4>' +
+          '<button class="btn btn-sm btn-secondary" id="btn-proc-logs-refresh">Refresh</button>' +
+        '</div>' +
+        '<div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin:0.4rem 0">' +
+          '<label style="font-size:0.78rem;color:var(--color-text-secondary)">Source' +
+            '<select id="proc-log-source" style="display:block;margin-top:2px"' + (canEdit ? "" : " disabled") + '>' +
+              srcOpt("auto", "Auto") + srcOpt("journald-unit", "journald (Linux)") + srcOpt("file-glob", "File path/glob") +
+            '</select>' +
+          '</label>' +
+          '<label style="flex:1;min-width:220px;font-size:0.78rem;color:var(--color-text-secondary)">Log path / wildcard' +
+            '<input type="text" id="proc-log-glob" value="' + escapeHtml(glob) + '" placeholder="/var/log/' + escapeHtml(name) + '/*.log" style="display:block;width:100%;box-sizing:border-box;margin-top:2px"' + (canEdit ? "" : " disabled") + '>' +
+          '</label>' +
+          (canEdit ? '<button class="btn btn-sm btn-primary" id="btn-proc-log-config-save">Save</button>' : '') +
+        '</div>' +
+        (c.detectedUnit ? '<p class="hint" style="font-size:0.74rem">Auto-detected unit: <code>' + escapeHtml(c.detectedUnit) + '</code></p>' : '') +
+        '<div id="proc-logs-view" style="max-height:300px;overflow:auto;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;font-family:var(--font-mono);font-size:0.78rem;white-space:pre-wrap;color:var(--color-text-secondary)">Loading…</div>' +
+      '</div>' +
+    '</div>';
+  document.querySelectorAll(".proc-chart-box").forEach(function (el) {
+    el.style.background = "var(--color-bg-elevated)";
+    el.style.border = "1px solid var(--color-border)";
+    el.style.borderRadius = "6px";
+    el.style.padding = "0.5rem";
+    el.style.minHeight = "160px";
+  });
+
+  await _loadProcessHistoryFor(asset.id, name, _getChartRangePref("assetProcess", "1h"));
+  _loadProcessLogsFor(asset.id, name);
+
+  document.querySelectorAll(".proc-range-btn").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var range = b.getAttribute("data-range");
+      document.querySelectorAll(".proc-range-btn").forEach(function (x) { x.classList.remove("btn-primary"); x.classList.add("btn-secondary"); });
+      b.classList.remove("btn-secondary"); b.classList.add("btn-primary");
+      _setChartRangePref("assetProcess", range);
+      _loadProcessHistoryFor(asset.id, name, range);
+    });
+  });
+  var refreshLogs = document.getElementById("btn-proc-logs-refresh");
+  if (refreshLogs) refreshLogs.addEventListener("click", function () { _loadProcessLogsFor(asset.id, name); });
+  var saveCfg = document.getElementById("btn-proc-log-config-save");
+  if (saveCfg) {
+    saveCfg.addEventListener("click", async function () {
+      var body = {
+        logSource:   document.getElementById("proc-log-source").value,
+        logPathGlob: document.getElementById("proc-log-glob").value || null,
+      };
+      saveCfg.disabled = true;
+      try {
+        await api.assets.setProcessConfig(asset.id, name, body);
+        showToast("Log config saved for " + name, "success");
+        _loadProcessLogsFor(asset.id, name);
+      } catch (err) {
+        showToast(err && err.message ? err.message : "Save failed", "error");
+      } finally {
+        saveCfg.disabled = false;
+      }
+    });
+  }
+}
+
+async function _loadProcessHistoryFor(assetId, name, range) {
+  var cpuEl = document.getElementById("proc-cpu-chart");
+  var memEl = document.getElementById("proc-mem-chart");
+  var cpuStats = document.getElementById("proc-cpu-stats");
+  var memStats = document.getElementById("proc-mem-stats");
+  if (!cpuEl || !memEl) return;
+  try {
+    var data = await api.assets.processHistory(assetId, name, range || "1h");
+    var samples = data.samples || [];
+    var cpu = samples.filter(function (s) { return typeof s.cpuPct === "number"; })
+      .map(function (s) { return { timestamp: s.timestamp, value: s.cpuPct }; });
+    var mem = samples.filter(function (s) { return s.memRssBytes != null; })
+      .map(function (s) { return { timestamp: s.timestamp, value: Number(s.memRssBytes) / 1048576 }; });
+    if (cpuStats) _renderChartStats(cpuStats, cpu.length, [{ label: "Max", value: cpu.length ? Math.max.apply(null, cpu.map(function (p) { return p.value; })).toFixed(1) + "%" : "—" }]);
+    if (memStats) _renderChartStats(memStats, mem.length, [{ label: "Max", value: mem.length ? Math.max.apply(null, mem.map(function (p) { return p.value; })).toFixed(0) + " MB" : "—" }]);
+    _renderSensorChart(cpuEl, cpu, { since: data.since, until: data.until, subject: name + " CPU", unit: "%" });
+    _renderSensorChart(memEl, mem, { since: data.since, until: data.until, subject: name + " RAM", unit: "MB" });
+  } catch (err) {
+    cpuEl.textContent = "Error: " + (err.message || "failed to load");
+    memEl.textContent = "";
+  }
+}
+
+async function _loadProcessLogsFor(assetId, name) {
+  var el = document.getElementById("proc-logs-view");
+  if (!el) return;
+  try {
+    var data = await api.assets.processLogs(assetId, name, { limit: 300 });
+    var logs = data.logs || [];
+    if (!logs.length) {
+      el.textContent = "No log lines collected yet. Set a log source/path above (or enable journald on Linux) and check that the program is pinned for Monitor.";
+      return;
+    }
+    // Server returns newest-first; show oldest-first in the viewer.
+    el.innerHTML = logs.slice().reverse().map(function (l) {
+      var ts = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "";
+      var lvl = l.level ? "[" + escapeHtml(l.level) + "] " : "";
+      return '<div>' + '<span style="color:var(--color-text-tertiary)">' + escapeHtml(ts) + '</span> ' + lvl + escapeHtml(l.message || "") + '</div>';
+    }).join("");
+  } catch (err) {
+    el.textContent = "Error: " + (err.message || "failed to load logs");
+  }
 }
 
 function _assetEventsTabHTML(assetId) {
