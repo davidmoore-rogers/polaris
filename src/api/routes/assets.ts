@@ -1043,7 +1043,19 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
     // Prefer the full system-info pass timestamp so the table renders every
     // interface — the fast cadence only writes pinned ones, and ordering by
     // raw timestamp would otherwise hide unpinned interfaces.
-    const ifaceTimestamp = asset.lastSystemInfoAt ?? latestIfaceMeta?.timestamp ?? null;
+    let ifaceTimestamp = asset.lastSystemInfoAt ?? latestIfaceMeta?.timestamp ?? null;
+    // Guard against lastSystemInfoAt being newer than the newest interface
+    // sample: the SNMP/FortiOS path writes interfaces + storage in one pass so
+    // the two always agree, but the Polaris Agent sends interfaces and storage
+    // in independent pushes — a storage push bumps lastSystemInfoAt to a time
+    // with no interface rows, which would empty this table until the next
+    // interface push. When the anchor is ahead of the latest interface sample,
+    // fall back to that sample's timestamp (for the agent every push is the
+    // full NIC table, so it's safe; for SNMP the full pass is never ahead of
+    // its own rows, so this branch never fires there).
+    if (ifaceTimestamp && latestIfaceMeta?.timestamp && ifaceTimestamp > latestIfaceMeta.timestamp) {
+      ifaceTimestamp = latestIfaceMeta.timestamp;
+    }
     const interfaces = ifaceTimestamp
       ? await prisma.assetInterfaceSample.findMany({
           where: { assetId: id, timestamp: ifaceTimestamp },

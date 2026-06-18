@@ -311,9 +311,19 @@ agentsRouter.post("/samples", async (req, res, next) => {
       const pinnedIfaces = new Set(
         (await prisma.asset.findUnique({ where: { id: assetId }, select: { monitoredInterfaces: true } }))?.monitoredInterfaces ?? [],
       );
+      // Anchor every row AND lastSystemInfoAt to ONE shared timestamp. The agent
+      // sends its full NIC table in a single push (all rows share one collection
+      // time), and the /system-info GET endpoint loads interfaces with an exact
+      // equality match `timestamp = lastSystemInfoAt`. If the rows carry the
+      // agent's clock while lastSystemInfoAt carries the server's `now`, the two
+      // never match and the System tab interface table renders empty for every
+      // agent-monitored asset (platform-independent). Use the agent's reported
+      // timestamp when present (more accurate for the time-series/rollups),
+      // falling back to server `now`, and pin lastSystemInfoAt to the same value.
+      const sampleTs = body.samples[0]?.timestamp ? new Date(body.samples[0].timestamp) : now;
       const rows = body.samples.map((s) => ({
         assetId,
-        timestamp:   s.timestamp ? new Date(s.timestamp) : now,
+        timestamp:   sampleTs,
         cadence:     pinnedIfaces.has(s.ifName) ? ("fast" as const) : ("slow" as const),
         ifName:      s.ifName,
         adminStatus: s.adminStatus ?? null,
@@ -341,7 +351,7 @@ agentsRouter.post("/samples", async (req, res, next) => {
       }));
       enqueueInterfaceSamples(rows);
       accepted = rows.length;
-      await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: now } });
+      await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: sampleTs } });
     } else {
       // storage
       const pinnedStorage = new Set(
