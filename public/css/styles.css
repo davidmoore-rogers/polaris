@@ -380,6 +380,22 @@ code {
   opacity: 1;
   font-weight: 500;
 }
+/* Clickable FortiGate name in the discovery popup — opens the asset slide-over.
+   Keeps the truncating block layout of .query-status-device; just adds the
+   affordance (pointer + hover) and a focus ring for keyboard activation. */
+.query-status-device-link {
+  cursor: pointer;
+}
+.query-status-device-link:hover {
+  opacity: 1;
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+.query-status-device-link:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
 .query-abort-btn {
   background: none;
   border: 1px solid rgba(255,23,68,0.3);

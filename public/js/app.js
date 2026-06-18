@@ -1112,9 +1112,13 @@ function renderQueryStatus() {
           '<span class="' + nameClass + '"' + nameTitle + '>Discovering ' + escapeHtml(d.name) + (d.slow ? ' — slow' : '') + '</span>' +
           progressLine +
           (d.activeDevices && d.activeDevices.length ? d.activeDevices.map(function (dev) {
-            var cls = slowSet[dev] ? 'query-status-device query-status-device-slow' : 'query-status-device';
-            var t = slowSet[dev] ? ' title="This FortiGate is taking longer than normal"' : '';
-            return '<span class="' + cls + '"' + t + '>' + escapeHtml(dev) + '</span>';
+            var cls = 'query-status-device query-status-device-link' + (slowSet[dev] ? ' query-status-device-slow' : '');
+            var t = slowSet[dev]
+              ? ' title="This FortiGate is taking longer than normal — click to open asset details"'
+              : ' title="Open asset details"';
+            return '<span class="' + cls + '"' + t +
+              ' role="button" tabindex="0" data-device-name="' + escapeHtml(dev) + '">' +
+              escapeHtml(dev) + '</span>';
           }).join('') : '') +
           '</div>' +
           '<button class="query-abort-btn" data-discovery-id="' + escapeHtml(d.id) + '" data-discovery-name="' + escapeHtml(d.name) + '" title="Abort">&#x2715;</button>' +
@@ -1151,6 +1155,54 @@ function renderQueryStatus() {
       var ok = await showConfirm("Abort all running operations?");
       if (ok) abortAllQueries();
     });
+  }
+
+  // Clicking (or Enter/Space on) a FortiGate name in the discovery popup opens
+  // that firewall's asset slide-over.
+  container.querySelectorAll(".query-status-device-link").forEach(function (el) {
+    el.addEventListener("click", function () {
+      openDiscoveryDevice(el.getAttribute("data-device-name"));
+    });
+    el.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openDiscoveryDevice(el.getAttribute("data-device-name"));
+      }
+    });
+  });
+}
+
+// Resolve a discovery "currently querying" FortiGate name to its Asset and open
+// the asset details slide-over. The popup surfaces FortiGate device names, which
+// equal the firewall Asset's hostname (see connectionPathService's hostname
+// lookup). On the Assets page we open the slide-over in place; elsewhere we
+// route through the same #view=asset: hash the global search uses, so
+// processSearchHash opens it after navigation. No match (the transient FMG
+// self-entry, or a FortiGate not yet inventoried) surfaces a toast rather than
+// failing silently.
+async function openDiscoveryDevice(name) {
+  if (!name) return;
+  var list;
+  try {
+    var rows = await api.assets.list({ search: name, limit: 25 });
+    list = Array.isArray(rows) ? rows : (rows && rows.assets) || [];
+  } catch (_) {
+    showToast("Couldn't look up " + name, "error");
+    return;
+  }
+  var lower = name.toLowerCase();
+  var match =
+    list.find(function (a) { return (a.hostname || "").toLowerCase() === lower && a.assetType === "firewall"; }) ||
+    list.find(function (a) { return (a.hostname || "").toLowerCase() === lower; }) ||
+    list.find(function (a) { return (a.dnsName || "").toLowerCase() === lower; });
+  if (!match) {
+    showToast("No matching asset for " + name, "error");
+    return;
+  }
+  if (typeof openViewModal === "function") {
+    openViewModal(match.id);
+  } else {
+    window.location.href = "/assets.html#view=asset:" + encodeURIComponent(match.id);
   }
 }
 
