@@ -4212,6 +4212,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         role: "fortiswitch" as const,
         controllerFortigate: sw.device || null,
         uplinkInterface: sw.fgtInterface || null,
+        // Physical uplink port to the controller FortiGate (e.g. "port47"),
+        // from the managed-switch CMDB. Distinct from uplinkInterface (the
+        // FortiGate-side logical "fortilink"). Lets the Device Map label the
+        // FG↔switch edge's switch side with the real port. Null for chained /
+        // dual-homed switches (left to LLDP). See findFortiswitchUplinkPorts.
+        uplinkPhysicalPort: sw.uplinkPhysicalPort ?? null,
       };
       if (existingAsset) {
         // Snapshot before the branch retypes assetType / mutates status below.

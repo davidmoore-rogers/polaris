@@ -24,6 +24,11 @@ type TopologyMeta = {
   role?: "fortigate" | "fortiswitch" | "fortiap";
   controllerFortigate?: string | null;
   uplinkInterface?: string | null;
+  // Switch's PHYSICAL uplink port to its controller FortiGate (e.g. "port47"),
+  // from the managed-switch CMDB. Distinct from uplinkInterface (the FortiGate-
+  // side logical "fortilink"). Used to label the switch side of the FG↔switch
+  // edge; null for chained / dual-homed switches (FG-side + those fall to LLDP).
+  uplinkPhysicalPort?: string | null;
   parentSwitch?: string | null;
   parentPort?: string | null;
   parentVlan?: number | null;
@@ -270,6 +275,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           status: s.status,
           lastSeen: s.lastSeen,
           uplinkInterface: t.uplinkInterface ?? null,
+          uplinkPhysicalPort: t.uplinkPhysicalPort ?? null,
           monitored: s.monitored,
           monitorHealth: s.monitored ? monitorStatusToHealth(s.monitorStatus) : null,
           dependencyLayer: s.dependencyLayer,
@@ -471,17 +477,22 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       const ifLabel = s.uplinkInterface || "fortilink";
       const swLabel = s.hostname || s.id;
       const fgLabel = fg.hostname || fg.id;
+      // Switch side: the real physical uplink port (e.g. "port47") from the
+      // managed-switch CMDB when discovery resolved exactly one, else the
+      // logical "fortilink" (normalized to "unknown"). FG side stays null →
+      // the LLDP backfill below fills it (it only overwrites "unknown" halves),
+      // so a CMDB switch-side port and an LLDP FG-side port compose cleanly.
+      const swSidePort = s.uplinkPhysicalPort || s.uplinkInterface;
       edges.push({
         source: fg.id,
         target: s.id,
-        // FG-side port is not surfaced by managed-switch/status — only the
-        // switch's view of its uplink (fgt_peer_intf_name) is. Use
-        // "unknown" for the FG side until LLDP cross-reference is wired.
-        label: portLabel(null, s.uplinkInterface),
+        label: portLabel(null, swSidePort),
         reason:
           `Rule: controller-data FG→switch edge.\n` +
           `Evidence: switch ${swLabel} carries Asset.fortinetTopology.controllerFortigate = "${fgLabel}" ` +
-          `and uplinkInterface = "${ifLabel}" (sourced from managed-switch/status.fgt_peer_intf_name during discovery).\n` +
+          `and uplinkInterface = "${ifLabel}"` +
+          (s.uplinkPhysicalPort ? `, physical uplink port "${s.uplinkPhysicalPort}" (managed-switch CMDB)` : "") +
+          ` (sourced from managed-switch/status.fgt_peer_intf_name during discovery).\n` +
           `Caveat: FortiOS reports "fortilink" on every managed switch — direct or chained — so this signal alone over-connects multi-switch fleets. ` +
           `If a more specific signal (interface-name peer-aggregate, see teal edges) marks a different switch as the direct uplink, this edge is demoted automatically.`,
       });

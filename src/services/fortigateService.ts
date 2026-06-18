@@ -30,6 +30,7 @@ import type {
   DiscoveryProgressCallback,
 } from "./fortimanagerService.js";
 import { parseVipServerInfo } from "./fortimanagerService.js";
+import { findFortiswitchUplinkPorts } from "../utils/fortiswitchCmdb.js";
 
 export interface FortiGateConfig {
   host: string;
@@ -181,6 +182,38 @@ export async function proxyQuery(
 }
 
 // ─── Discovery ──────────────────────────────────────────────────────────────
+
+/**
+ * Read the switch-controller managed-switch CMDB and return a map of
+ * switch serial (UPPERCASE) → its single physical uplink port to the
+ * FortiGate (e.g. "port47"). The status endpoint discovery already queries
+ * only exposes the FortiGate-side logical interface ("fortilink"); the
+ * physical uplink port lives in the CMDB. Switches with zero (chained behind
+ * another switch over ISL) or more than one (dual-homed, ambiguous) uplink
+ * port are omitted — the FG↔switch edge label falls back to LLDP for those.
+ * Best-effort: any failure yields an empty map.
+ */
+async function fetchFortiswitchUplinkPorts(
+  config: FortiGateConfig,
+  queryBase: Record<string, string>,
+  signal: AbortSignal | undefined,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  try {
+    const rows = await fgRequest<any[]>(config, "GET", "/api/v2/cmdb/switch-controller/managed-switch", {
+      query: { ...queryBase, datasource: "1" },
+      signal,
+    });
+    if (!Array.isArray(rows)) return out;
+    for (const row of rows) {
+      const serial = String(row?.sn || row?.["switch-id"] || row?.name || "").trim();
+      if (!serial) continue;
+      const uplinks = findFortiswitchUplinkPorts(row?.ports);
+      if (uplinks.length === 1) out.set(serial.toUpperCase(), uplinks[0]);
+    }
+  } catch { /* best-effort — leave uplinkPhysicalPort null, fall back to LLDP */ }
+  return out;
+}
 
 /**
  * Query a single FortiGate directly for its DHCP configuration, interfaces,
@@ -634,6 +667,12 @@ export async function discoverDhcpSubnets(
           signal,
         });
     didSwitchQuery = true;
+    // Switch-side physical uplink ports come from the managed-switch CMDB (the
+    // status endpoint only carries fgt_peer_intf_name = "fortilink"). One extra
+    // read per controller per run; serial → single uplink port (skip ambiguous
+    // multi-uplink switches, leaving those to LLDP). Best-effort: a failure
+    // just leaves uplinkPhysicalPort null and the FG↔switch edge falls back.
+    const uplinkBySerial = await fetchFortiswitchUplinkPorts(config, queryBase, signal);
     let switchCount = 0;
     if (Array.isArray(swResults)) {
       for (const sw of swResults) {
@@ -647,6 +686,7 @@ export async function discoverDhcpSubnets(
           joinTime: Number.isFinite(sw.join_time) && sw.join_time > 0 ? sw.join_time : undefined,
           state: sw.state || "",
           connected: sw.status === "Connected",
+          uplinkPhysicalPort: uplinkBySerial.get((sw.serial || "").toUpperCase()) ?? null,
         });
         switchCount++;
       }

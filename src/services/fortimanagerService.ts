@@ -10,6 +10,7 @@ import { logger } from "../utils/logger.js";
 import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
 import { parseRangeFirstIp } from "../utils/cidr.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
+import { findFortiswitchUplinkPorts } from "../utils/fortiswitchCmdb.js";
 import { getFmgWorker } from "./fmgWorker.js";
 import {
   discoverDhcpSubnets as discoverViaFortigate,
@@ -944,6 +945,16 @@ export interface DiscoveredFortiSwitch {
   // management MAC creates a phantom "fortigate-endpoint" asset alongside
   // the authoritative "fortiswitch" asset.
   baseMac?: string;
+  // The switch's PHYSICAL uplink port to its controller FortiGate (e.g.
+  // "port47"), resolved from the switch-controller managed-switch CMDB
+  // (`findFortiswitchUplinkPorts`). Distinct from `fgtInterface`, which is the
+  // FortiGate-side logical "fortilink" interface. Only set when the switch has
+  // exactly one directly-cabled uplink port (chain-head switches); null for
+  // switches chained behind another FortiSwitch over an ISL trunk, or when the
+  // CMDB read was unavailable. Stamped onto Asset.fortinetTopology.uplinkPhysicalPort
+  // so the Device Map labels the FortiGate↔switch edge's switch side with the
+  // real port instead of the opaque "fortilink".
+  uplinkPhysicalPort?: string | null;
 }
 
 export interface DiscoveredFortiAP {
@@ -2137,6 +2148,39 @@ export async function discoverDhcpSubnets(
         log("discover.fortiswitches", "info", `${deviceName}: switch-controller not available (proxy status ${switchProxyStatus}, HTTP ${switchHttpStatus}) — skipping`, deviceName);
       } else if (Array.isArray(switchResults)) {
         didSwitchQuery = true;
+        // Switch-side physical uplink ports come from the managed-switch CMDB
+        // (the status query above only carries fgt_peer_intf_name = "fortilink").
+        // One extra proxy read per controller; serial → single uplink port
+        // (chained / dual-homed switches are omitted, leaving the FG↔switch
+        // edge label to LLDP). Best-effort — a failure just leaves it null.
+        // Mirrors fetchFortiswitchUplinkPorts in fortigateService (direct path).
+        const uplinkBySerial = new Map<string, string>();
+        try {
+          const cmdbPayload: JsonRpcRequest = {
+            id: 9,
+            method: "exec",
+            params: [{
+              url: `/sys/proxy/json`,
+              data: {
+                target: [`/adom/${adom}/device/${deviceName}`],
+                action: "get",
+                resource: "/api/v2/cmdb/switch-controller/managed-switch?datasource=1",
+              },
+            }],
+          };
+          const cmdbRes = await rpc(baseUrl, cmdbPayload, apiUser, apiToken, verifySsl, signal, integrationId);
+          const cmdbData = cmdbRes.result?.[0]?.data;
+          const cmdbEntry = Array.isArray(cmdbData) ? cmdbData[0] : cmdbData as any;
+          const cmdbRows = cmdbEntry?.response?.results;
+          if (Array.isArray(cmdbRows)) {
+            for (const row of cmdbRows) {
+              const serial = String(row?.sn || row?.["switch-id"] || row?.name || "").trim();
+              if (!serial) continue;
+              const uplinks = findFortiswitchUplinkPorts(row?.ports);
+              if (uplinks.length === 1) uplinkBySerial.set(serial.toUpperCase(), uplinks[0]);
+            }
+          }
+        } catch { /* best-effort — fall back to LLDP for the switch-side label */ }
         for (const sw of switchResults) {
           localSwitches.push({
             device: deviceName,
@@ -2148,6 +2192,7 @@ export async function discoverDhcpSubnets(
             joinTime: Number.isFinite(sw.join_time) && sw.join_time > 0 ? sw.join_time : undefined,
             state: sw.state || "",
             connected: sw.status === "Connected",
+            uplinkPhysicalPort: uplinkBySerial.get((sw.serial || "").toUpperCase()) ?? null,
           });
           switchCount++;
         }
