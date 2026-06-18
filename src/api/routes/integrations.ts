@@ -20,7 +20,12 @@ import { isBlockedOutboundHost } from "../../utils/netGuard.js";
 import type { DiscoveredSubnet, DiscoveryResult, DiscoveredDevice, DiscoveredInterfaceIp, DiscoveredDhcpEntry, DiscoveredInventoryDevice, DiscoveredVip, DiscoveryProgressCallback } from "../../services/fortimanagerService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
-import { logEvent } from "./events.js";
+import {
+  logEvent,
+  snapshotMaterialAssetFields,
+  logDiscoveryAssetCreated,
+  logDiscoveryAssetUpdated,
+} from "./events.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen, bumpLastSeen } from "../../utils/assetInvariants.js";
@@ -3763,6 +3768,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         existingAsset = assetIdx.findByEntry(undefined, fgHostname, device.mgmtIp || undefined);
       }
       if (existingAsset) {
+        // Snapshot material fields before the branch mutates existingAsset in
+        // place (macAddresses / status below) so the per-asset audit diff is
+        // computed against the true pre-write state.
+        const fwBefore = snapshotMaterialAssetFields(existingAsset);
         // Phase 3b.1 cutover: discovery-owned fields come from projection.
         // Same shape as AD/Entra cutovers — upsert source first, fetch all
         // sources, project, single Asset.update.
@@ -3878,6 +3887,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // recomputes membership.
         const previousHostname: string | null = existingAsset.hostname || null;
         await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
+        logDiscoveryAssetUpdated(fwBefore, updateData, existingAsset.id, memberDevice.hostname || device.name, {
+          integrationName, integrationId, sourceKind: "fortigate-firewall", actor,
+        });
         if (fwMacListForReconcile) {
           await reconcileMacAddresses(existingAsset.id, fwMacListForReconcile);
         }
@@ -4014,6 +4026,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           syncLog("error", `Created FortiGate asset ${memberDevice.hostname || device.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
         }
       }
+      logDiscoveryAssetCreated(newAsset.id, memberDevice.hostname || device.name, {
+        integrationName, integrationId, sourceKind: "fortigate-firewall", actor,
+      });
       // Seed the `firewall:<hostname>` Tag registry row so the asset-edit
       // tag picker carries the entry from day one — only meaningful for
       // the primary (endpoints are sighted through the active member).
@@ -4199,6 +4214,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         uplinkInterface: sw.fgtInterface || null,
       };
       if (existingAsset) {
+        // Snapshot before the branch retypes assetType / mutates status below.
+        const swBefore = snapshotMaterialAssetFields(existingAsset);
         const acquiredAtUpdate = swJoinDate && (!existingAsset.acquiredAt || swJoinDate < new Date(existingAsset.acquiredAt))
           ? swJoinDate : undefined;
         // Re-discovery resurrects a previously-decommissioned asset back to
@@ -4295,6 +4312,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
         clampAcquiredToLastSeen(updateData, existingAsset);
         await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
+        logDiscoveryAssetUpdated(swBefore, updateData, existingAsset.id, sw.name || sw.serial, {
+          integrationName, integrationId, sourceKind: "fortiswitch", actor,
+        });
         if (swMacListForReconcile) {
           await reconcileMacAddresses(existingAsset.id, swMacListForReconcile);
         }
@@ -4350,6 +4370,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             syncLog("error", `Created FortiSwitch asset ${sw.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
           }
         }
+        logDiscoveryAssetCreated(newAsset.id, sw.name || sw.serial, {
+          integrationName, integrationId, sourceKind: "fortiswitch", actor,
+        });
         assetIdx.add(newAsset);
         assetNames.push(sw.name || sw.serial);
       }
@@ -4439,6 +4462,8 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // payload quirk doesn't silently freeze lastSeen for a whole fleet.
       const apOnline = !ap.status || /^connected$/i.test(ap.status.trim());
       if (existingAsset) {
+        // Snapshot before the branch retypes assetType / mutates status below.
+        const apBefore = snapshotMaterialAssetFields(existingAsset);
         // Phase 3b.1 cutover: projection-driven discovery fields.
         if (ap.serial) {
           try {
@@ -4502,6 +4527,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
         clampAcquiredToLastSeen(updateData, existingAsset);
         await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
+        logDiscoveryAssetUpdated(apBefore, updateData, existingAsset.id, ap.name || ap.serial, {
+          integrationName, integrationId, sourceKind: "fortiap", actor,
+        });
         if (resolvedIp) existingAsset.ipAddress = resolvedIp;
         if (existingAsset.status === "decommissioned" && apOnline) existingAsset.status = "active";
         assetIdx.reindex(existingAsset);
@@ -4546,6 +4574,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             syncLog("error", `Created FortiAP asset ${ap.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
           }
         }
+        logDiscoveryAssetCreated(newAsset.id, ap.name || ap.serial, {
+          integrationName, integrationId, sourceKind: "fortiap", actor,
+        });
         assetIdx.add(newAsset);
         assetNames.push(ap.name || ap.serial);
       }
@@ -5828,6 +5859,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           });
           assetIdx.add(newAsset);
           inventoryAssets.push(inv.hostname || normalizedMac || inv.ipAddress);
+          logDiscoveryAssetCreated(newAsset.id, inv.hostname || normalizedMac || inv.ipAddress, {
+            integrationName, integrationId, sourceKind: "fortigate-endpoint", actor,
+          });
           if (newAsset.assetType !== "firewall" && newAsset.assetType !== "switch" && newAsset.assetType !== "access_point") {
             fortigateEndpointAssetIds.add(newAsset.id);
           }
@@ -6917,6 +6951,8 @@ async function syncEntraDevices(
       // above) and is surfaced separately in the UI; Asset.lastSeen is only
       // written by presence evidence (FortiGate sightings, agent heartbeat,
       // monitor probes, the post-sync presence-verification pass).
+      // Pre-write snapshot for the per-asset discovery audit diff.
+      const entraBefore = snapshotMaterialAssetFields(existing);
       const updateData: Record<string, unknown> = {
         status,
         ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
@@ -6964,6 +7000,9 @@ async function syncEntraDevices(
       try {
         clampAcquiredToLastSeen(updateData, existing);
         await prisma.asset.update({ where: { id: existing.id }, data: updateData });
+        logDiscoveryAssetUpdated(entraBefore, updateData, existing.id, dev.displayName || dev.deviceId, {
+          integrationName, integrationId, sourceKind: "entra", actor,
+        });
         if (entraMergedMacs) await reconcileMacAddresses(existing.id, entraMergedMacs);
         // (AssetSource rows already upserted above the projection step.)
         updated.push(dev.displayName || dev.deviceId);
@@ -7233,6 +7272,9 @@ async function syncEntraDevices(
       } catch (err: any) {
         syncLog("warning", `Created asset for Entra device ${dev.displayName || dev.deviceId} but failed to upsert AssetSource row(s): ${err.message || "Unknown error"}`);
       }
+      logDiscoveryAssetCreated(newAsset.id, dev.displayName || dev.deviceId, {
+        integrationName, integrationId, sourceKind: "entra", actor,
+      });
       // Refresh the in-memory indexes so later devices in this run see the
       // new asset (sibling-collision detection, SID matches, etc.).
       assetById.set(newAsset.id, newAsset);
@@ -7589,6 +7631,8 @@ async function syncActiveDirectoryDevices(
         })),
       );
 
+      // Pre-write snapshot for the per-asset discovery audit diff.
+      const adBefore = snapshotMaterialAssetFields(existing);
       const updateData: Record<string, unknown> = {
         status,
         ...(status !== existing.status ? { statusChangedAt: now, statusChangedBy: integrationName } : {}),
@@ -7655,6 +7699,9 @@ async function syncActiveDirectoryDevices(
         Object.assign(updateData, buildMonitoredSweep(resolveAddAs(sweepAssetType), existing));
         clampAcquiredToLastSeen(updateData, existing);
         await prisma.asset.update({ where: { id: existing.id }, data: updateData });
+        logDiscoveryAssetUpdated(adBefore, updateData, existing.id, displayName || dev.objectGuid, {
+          integrationName, integrationId, sourceKind: "ad", actor,
+        });
         // (AssetSource upsert already happened above the projection step
         //  so the projected fields reflect this run's AD data.)
         updated.push(displayName || dev.objectGuid);
@@ -7784,6 +7831,9 @@ async function syncActiveDirectoryDevices(
       } catch (err: any) {
         syncLog("warning", `Created asset for AD computer ${displayName || dev.objectGuid} but failed to upsert AssetSource row: ${err.message || "Unknown error"}`);
       }
+      logDiscoveryAssetCreated(newAsset.id, displayName || dev.objectGuid, {
+        integrationName, integrationId, sourceKind: "ad", actor,
+      });
       // Refresh the in-memory indexes so subsequent devices in this run see
       // the new asset (e.g. duplicate-registration detection, SID match).
       assetById.set(newAsset.id, newAsset);

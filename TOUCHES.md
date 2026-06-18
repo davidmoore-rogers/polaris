@@ -2045,18 +2045,19 @@ Listed alphabetically.
 
 ## services/eventLogService.ts
 
-**What it owns:** The shared audit-event writer. `logEvent` (never throws; drops rows below the operator-configured min level; stamps `levelRank` at write time), `buildChanges` (before/after diff for `.updated` events), `LogEventInput`.
+**What it owns:** The shared audit-event writer. `logEvent` (never throws; drops rows below the operator-configured min level; stamps `levelRank` at write time), `buildChanges` (before/after diff for `.updated` events), `LogEventInput`. Plus the discovery per-asset audit helpers: `snapshotMaterialAssetFields` (capture material fields before a discovery branch mutates the in-memory asset), `computeMaterialAssetChanges` (pure diff over the material-field whitelist), `logDiscoveryAssetCreated` (`asset.discovered`), `logDiscoveryAssetUpdated` (`asset.discovery_updated` — fires only when a material field changed), `DiscoveryAuditContext`.
 
-**Public API:** `logEvent`, `buildChanges`, `LogEventInput`.
+**Public API:** `logEvent`, `buildChanges`, `LogEventInput`, `snapshotMaterialAssetFields`, `computeMaterialAssetChanges`, `logDiscoveryAssetCreated`, `logDiscoveryAssetUpdated`, `DiscoveryAuditContext`.
 
 **Cross-service deps:** `eventArchiveService.getCachedRetentionSettings` (cached min-level read).
 
-**Used by:** ~42 modules across routes / services / jobs. Most import via the back-compat re-export in `src/api/routes/events.ts`; new code should import from here directly so services never depend on the route layer.
+**Used by:** ~42 modules across routes / services / jobs. Most import via the back-compat re-export in `src/api/routes/events.ts`; new code should import from here directly so services never depend on the route layer. The discovery audit helpers are called from every asset create/update site in `integrations.ts` (firewall / FortiSwitch / FortiAP / Entra / AD update + create, plus FortiGate device-inventory endpoint create).
 
 **Invariants:**
 - `logEvent` must never throw — event logging can't be allowed to break the operation it audits. Failures are swallowed.
 - `levelRank` is stamped here (0=info, 1=warning, 2=error); the Events list endpoint's `sortBy=level` depends on it.
 - Sub-`minLevel` events are dropped silently (cached settings read, 60s TTL — accept staleness).
+- The discovery audit MATERIAL_ASSET_FIELDS whitelist is the flood guard: discovery bumps `lastSeen` / fetched-at / monitor stamp every cycle on nearly every asset, so diffing those would write an event per asset per cycle (catastrophic at 2000 assets vs. 7-day Event retention). Only identity/classification/location fields are diffed; an unchanged pass emits nothing. The endpoint **update** path is intentionally NOT instrumented (it reassigns `macAddress` to the most-recently-sorted MAC each cycle → spurious diffs); only endpoint **create** is.
 
 **When changing this:**
 - The events.ts re-export must stay in lockstep (same symbol names) until the legacy importers are migrated.

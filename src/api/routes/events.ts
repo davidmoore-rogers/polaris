@@ -336,5 +336,11 @@ export default router;
 // route layer to write audit rows. Re-exported here so the ~42 existing
 // importers keep working; new code should import from the service directly.
 
-export { logEvent, buildChanges } from "../../services/eventLogService.js";
-export type { LogEventInput } from "../../services/eventLogService.js";
+export {
+  logEvent,
+  buildChanges,
+  snapshotMaterialAssetFields,
+  logDiscoveryAssetCreated,
+  logDiscoveryAssetUpdated,
+} from "../../services/eventLogService.js";
+export type { LogEventInput, DiscoveryAuditContext } from "../../services/eventLogService.js";
