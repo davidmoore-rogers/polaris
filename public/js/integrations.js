@@ -2664,6 +2664,14 @@ function geographicLocationFormHTML(currentPullSnmpLocation, currentPushGeocoded
         ? 'writes to both the FortiManager coordinate metavars and the FortiGate\'s CMDB <code>gui-device-latitude</code> / <code>gui-device-longitude</code>. In FortiManager mode the change lands in FMG\'s CMDB but won\'t reach the live FortiGate until an operator runs Install Device Configuration in FMG.'
         : 'writes the FortiGate\'s CMDB <code>gui-device-latitude</code> / <code>gui-device-longitude</code>.') +
     '</p>' +
+    (isFmg
+      ? '<p class="hint" style="margin:0.5rem 0 0 0;padding:0.5rem 0.75rem;border-left:3px solid var(--color-warning, #d9822b);background:var(--color-bg-subtle, rgba(217,130,43,0.08))">' +
+          '<strong>FortiManager permission required:</strong> writing coordinates back to the per-device metavariables needs ' +
+          '<strong>Read-Write</strong> access to <strong>Policy &amp; Objects</strong> (Policy Package &amp; Objects) in the API user\'s ' +
+          'JSON API admin profile on FortiManager (<em>System Settings → Admin → Profile</em>). With read-only access Polaris can ' +
+          'still pull and geocode locations, but the write-back will fail.' +
+        '</p>'
+      : '') +
     metavarBlock;
 }
 
