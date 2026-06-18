@@ -150,6 +150,28 @@ export interface PerfSlaSampleRow {
   packetLossThreshold: number | null;
 }
 
+// Pinned-process CPU/RAM time-series (Feature C). cadence is always "fast"
+// (only operator-pinned programs are sampled), included for shape uniformity.
+export interface ProcessSampleRow {
+  assetId: string;
+  timestamp: Date;
+  cadence: SampleCadence;
+  name: string;
+  cpuPct: number | null;
+  memRssBytes: bigint | null;
+  instanceCount: number | null;
+}
+
+// Pinned-process log lines (Feature C). Standalone detail-only table.
+export interface ProcessLogRow {
+  assetId: string;
+  timestamp: Date;
+  name: string;
+  level: string | null;
+  message: string;
+  source: string | null;
+}
+
 // ─── Per-table buffer state ───────────────────────────────────────────────
 
 const buffers = {
@@ -160,6 +182,8 @@ const buffers = {
   storage:        [] as StorageSampleRow[],
   ipsecTunnel:    [] as IpsecTunnelSampleRow[],
   perfSla:        [] as PerfSlaSampleRow[],
+  process:        [] as ProcessSampleRow[],
+  processLog:     [] as ProcessLogRow[],
 };
 
 // Map each buffer key to its `polaris_sample_buffer_depth{table=...}` label
@@ -176,6 +200,8 @@ const TABLE_LABEL: Record<BufferKey, string> = {
   storage:     "asset_storage_samples",
   ipsecTunnel: "asset_ipsec_tunnel_samples",
   perfSla:     "asset_perf_sla_samples",
+  process:     "asset_process_samples",
+  processLog:  "asset_process_log_samples",
 };
 
 // Flush early if any single table's depth exceeds this — keeps RSS bounded
@@ -242,6 +268,20 @@ export function enqueuePerfSlaSamples(rows: PerfSlaSampleRow[]): void {
   if (buffers.perfSla.length >= SIZE_THRESHOLD) void flushTable("perfSla");
 }
 
+export function enqueueProcessSamples(rows: ProcessSampleRow[]): void {
+  if (rows.length === 0) return;
+  buffers.process.push(...rows);
+  setSampleBufferDepth(TABLE_LABEL.process, buffers.process.length);
+  if (buffers.process.length >= SIZE_THRESHOLD) void flushTable("process");
+}
+
+export function enqueueProcessLogSamples(rows: ProcessLogRow[]): void {
+  if (rows.length === 0) return;
+  buffers.processLog.push(...rows);
+  setSampleBufferDepth(TABLE_LABEL.processLog, buffers.processLog.length);
+  if (buffers.processLog.length >= SIZE_THRESHOLD) void flushTable("processLog");
+}
+
 // ─── Flush ────────────────────────────────────────────────────────────────
 //
 // One flush per table per call so a slow table (e.g. interfaces, which can
@@ -251,7 +291,7 @@ export function enqueuePerfSlaSamples(rows: PerfSlaSampleRow[]): void {
 const flushing: Record<BufferKey, boolean> = {
   monitor: false, telemetry: false, hardware: false,
   iface: false, storage: false, ipsecTunnel: false,
-  perfSla: false,
+  perfSla: false, process: false, processLog: false,
 };
 
 async function flushTable(key: BufferKey): Promise<void> {
@@ -311,6 +351,12 @@ async function writeBatch(key: BufferKey, batch: unknown[]): Promise<void> {
       return;
     case "perfSla":
       await prisma.assetPerfSlaSample.createMany({ data: batch as PerfSlaSampleRow[] });
+      return;
+    case "process":
+      await prisma.assetProcessSample.createMany({ data: batch as ProcessSampleRow[] });
+      return;
+    case "processLog":
+      await prisma.assetProcessLogSample.createMany({ data: batch as ProcessLogRow[] });
       return;
   }
 }

@@ -27,8 +27,8 @@ import { pickSampleTier } from "../../src/services/sampleQueryRouter.js";
 const daysAgo = (d: number) => new Date(Date.now() - d * 24 * 3600 * 1000);
 
 describe("sampleRetentionService — entity model + encoding", () => {
-  it("exposes the seven entities, three of them selection-aware", () => {
-    expect(RETENTION_ENTITIES).toEqual(["assets", "cpuMem", "hardware", "interfaces", "storage", "ipsec", "perfSla"]);
+  it("exposes the eight entities, three of them selection-aware", () => {
+    expect(RETENTION_ENTITIES).toEqual(["assets", "cpuMem", "hardware", "interfaces", "storage", "ipsec", "perfSla", "process"]);
     expect(SELECTION_AWARE_ENTITIES).toEqual(["interfaces", "storage", "ipsec"]);
     expect(FOREVER).toBe(-1);
     expect(UNSELECTED_DETAIL_HOURS).toBe(24);

@@ -1052,6 +1052,30 @@ model AssetInterfaceOverride {
   @@map("asset_interface_overrides")
 }
 
+// Per-pinned-process log configuration (Feature C). One row per (asset, program
+// name). `logSource` = "auto" (agent resolves: Linux systemd unit → journald,
+// else file-glob) | "journald-unit" | "file-glob". `logPathGlob` is the
+// operator-typed wildcard path used when not journald; `detectedUnit` is the
+// agent-reported systemd unit when auto-resolution succeeded (shown as a hint).
+// No FK to Asset (matches the other process tables); orphans for a deleted
+// asset are harmless and rare.
+model AssetProcessConfig {
+  id           String   @id @default(uuid())
+  assetId      String
+  name         String
+  logSource    String?
+  logPathGlob  String?
+  detectedUnit String?
+  notes        String?  @db.VarChar(255)
+  updatedBy    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([assetId, name])
+  @@index([assetId])
+  @@map("asset_process_configs")
+}
+
 // Per-sensor hardware snapshot, written alongside telemetry. Covers the whole
 // hardware-sensor table — temperature, fan, voltage, power/psu, disk, and
 // anything else — one row per sensor per scrape. FortiOS exposes these via
@@ -1380,6 +1404,47 @@ model AssetStorageSample {
   @@map("asset_storage_samples")
 }
 
+// Per-pinned-program CPU/RAM time-series (Feature C). Only programs the operator
+// pinned via Asset.monitoredProcesses are sampled (~1/min by the agent), so
+// every row is effectively cadence="fast" (kept for the selection-aware
+// retention machinery's uniformity). Hypertable; NO FK to Asset (cascade-bloat
+// rule). cpuPct/memRssBytes are SUMMED across the program's instances at sample
+// time (matches the inventory aggregation).
+model AssetProcessSample {
+  id            String   @default(uuid())
+  assetId       String
+  timestamp     DateTime @default(now())
+  name          String
+  cpuPct        Float?
+  memRssBytes   BigInt?
+  instanceCount Int?
+  cadence       String?
+
+  @@id([id, timestamp])
+  @@index([assetId, timestamp])
+  @@index([assetId, name, timestamp])
+  @@map("asset_process_samples")
+}
+
+// Per-pinned-program log lines (Feature C). Standalone detail-only hypertable
+// (like AssetCustomWidgetSample) — no rollups; pruned on the system-info
+// umbrella window. NO FK to Asset. `source` records where the line came from
+// (journald unit / file path). `level` is best-effort when the line parses.
+model AssetProcessLogSample {
+  id        String   @default(uuid())
+  assetId   String
+  timestamp DateTime @default(now())
+  name      String
+  level     String?
+  message   String   @db.Text
+  source    String?
+
+  @@id([id, timestamp])
+  @@index([assetId, timestamp])
+  @@index([assetId, name, timestamp])
+  @@map("asset_process_log_samples")
+}
+
 // ─── Sample rollups (tiered retention: hourly + daily aggregates) ───────────
 //
 // Per-source aggregate tables populated by the sampleRollup job (custom
@@ -1633,6 +1698,48 @@ model AssetStorageSampleDaily {
   @@index([assetId, bucketStart])
   @@index([assetId, mountPath, bucketStart])
   @@map("asset_storage_samples_daily")
+}
+
+// Process CPU/RAM rollups (gauge aggregates: avg/min/max + sampleCount), keyed
+// by program name. Mirror the storage rollups.
+model AssetProcessSampleHourly {
+  id             String   @default(uuid())
+  assetId        String
+  bucketStart    DateTime
+  name           String
+  sampleCount    Int
+  avgCpuPct      Float?
+  minCpuPct      Float?
+  maxCpuPct      Float?
+  avgMemRssBytes BigInt?
+  minMemRssBytes BigInt?
+  maxMemRssBytes BigInt?
+
+  @@id([id, bucketStart])
+  @@unique([bucketStart, assetId, name])
+  @@index([assetId, bucketStart])
+  @@index([assetId, name, bucketStart])
+  @@map("asset_process_samples_hourly")
+}
+
+model AssetProcessSampleDaily {
+  id             String   @default(uuid())
+  assetId        String
+  bucketStart    DateTime
+  name           String
+  sampleCount    Int
+  avgCpuPct      Float?
+  minCpuPct      Float?
+  maxCpuPct      Float?
+  avgMemRssBytes BigInt?
+  minMemRssBytes BigInt?
+  maxMemRssBytes BigInt?
+
+  @@id([id, bucketStart])
+  @@unique([bucketStart, assetId, name])
+  @@index([assetId, bucketStart])
+  @@index([assetId, name, bucketStart])
+  @@map("asset_process_samples_daily")
 }
 
 model AssetIpsecTunnelSampleHourly {

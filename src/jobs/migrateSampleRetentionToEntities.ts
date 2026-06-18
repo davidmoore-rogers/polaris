@@ -86,6 +86,9 @@ function legacyStreamToTier(raw: unknown, fallback: TierRetention): TierRetentio
           // The SD-WAN SLA-metrics stream also rides the system-info pass.
           // (SD-WAN rules are current-state now, not a retention entity.)
           perfSla:     legacyStreamToTier(raw.systemInfo, def.perfSla),
+          // Process telemetry postdates the legacy class shape — no legacy key
+          // to migrate; take the default.
+          process:     def.process,
         };
       } else {
         // No row / unrecognized → seed entity defaults.

@@ -8957,15 +8957,21 @@ export async function pruneTelemetrySamples(): Promise<number> {
   const ret = await getSampleRetention();
   const cm = ret.cpuMem;
   const hw = ret.hardware;
-  const [tDetail, tHourly, tDaily, hwDetail, hwHourly, hwDaily] = await Promise.all([
+  const pr = ret.process;
+  const [tDetail, tHourly, tDaily, hwDetail, hwHourly, hwDaily, pDetail, pHourly, pDaily] = await Promise.all([
     pruneTierByDays((w) => prisma.assetTelemetrySample.deleteMany({            where: w as any }), cm.detail, "timestamp",   "asset_telemetry_samples"),
     pruneTierByDays((w) => prisma.assetTelemetrySampleHourly.deleteMany({      where: w as any }), cm.hourly, "bucketStart", "asset_telemetry_samples_hourly"),
     pruneTierByDays((w) => prisma.assetTelemetrySampleDaily.deleteMany({       where: w as any }), cm.daily,  "bucketStart", "asset_telemetry_samples_daily"),
     pruneTierByDays((w) => prisma.assetHardwareSensorSample.deleteMany({       where: w as any }), hw.detail, "timestamp",   "asset_hardware_sensor_samples"),
     pruneTierByDays((w) => prisma.assetHardwareSensorSampleHourly.deleteMany({ where: w as any }), hw.hourly, "bucketStart", "asset_hardware_sensor_samples_hourly"),
     pruneTierByDays((w) => prisma.assetHardwareSensorSampleDaily.deleteMany({  where: w as any }), hw.daily,  "bucketStart", "asset_hardware_sensor_samples_daily"),
+    // Pinned-process CPU/RAM (gauge; not selection-aware — only pinned programs
+    // are sampled, so every detail row is "fast").
+    pruneTierByDays((w) => prisma.assetProcessSample.deleteMany({       where: w as any }), pr.detail, "timestamp",   "asset_process_samples"),
+    pruneTierByDays((w) => prisma.assetProcessSampleHourly.deleteMany({ where: w as any }), pr.hourly, "bucketStart", "asset_process_samples_hourly"),
+    pruneTierByDays((w) => prisma.assetProcessSampleDaily.deleteMany({  where: w as any }), pr.daily,  "bucketStart", "asset_process_samples_daily"),
   ]);
-  return tDetail + tHourly + tDaily + hwDetail + hwHourly + hwDaily;
+  return tDetail + tHourly + tDaily + hwDetail + hwHourly + hwDaily + pDetail + pHourly + pDaily;
 }
 
 /**
@@ -8979,7 +8985,7 @@ export async function pruneSystemInfoSamples(): Promise<number> {
   const r = await getSampleRetention();
   const [
     iDetail, iHourly, iDaily, sDetail, sHourly, sDaily, ipDetail, ipHourly, ipDaily,
-    psDetail, psHourly, psDaily, lldp, customWidget,
+    psDetail, psHourly, psDaily, lldp, customWidget, processLog,
   ] = await Promise.all([
     // interfaces — detail is selection-aware (selected=configured, unselected=24h)
     pruneSelectionAwareDetail((w) => prisma.assetInterfaceSample.deleteMany({ where: w as any }), r.interfaces.detail, "asset_interface_samples"),
@@ -9008,9 +9014,12 @@ export async function pruneSystemInfoSamples(): Promise<number> {
     // tiers). Prune on the same interfaces detail umbrella window as LLDP via
     // the compression-safe drop_chunks + residue path.
     pruneTierByDays((w) => prisma.assetCustomWidgetSample.deleteMany({ where: w as any }), r.interfaces.detail, "timestamp", "asset_custom_widget_samples"),
+    // Process logs are a standalone detail-only hypertable (no rollups) — prune
+    // on the process entity's detail window via the same compression-safe path.
+    pruneTierByDays((w) => prisma.assetProcessLogSample.deleteMany({ where: w as any }), r.process.detail, "timestamp", "asset_process_log_samples"),
   ]);
   return iDetail + iHourly + iDaily + sDetail + sHourly + sDaily + ipDetail + ipHourly + ipDaily
-    + psDetail + psHourly + psDaily + lldp + customWidget;
+    + psDetail + psHourly + psDaily + lldp + customWidget + processLog;
 }
 
 async function pruneLldpNeighbors(days: number): Promise<number> {

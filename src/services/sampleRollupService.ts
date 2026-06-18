@@ -49,7 +49,8 @@ export type SourceTable =
   | "interface"
   | "storage"
   | "ipsec"
-  | "perfSla";
+  | "perfSla"
+  | "process";
 
 interface RollupDef {
   source:        SourceTable;
@@ -69,6 +70,7 @@ const DEFS: RollupDef[] = [
   { source: "storage",     detailTable: "asset_storage_samples",       hourlyTable: "asset_storage_samples_hourly",       dailyTable: "asset_storage_samples_daily"       },
   { source: "ipsec",       detailTable: "asset_ipsec_tunnel_samples",  hourlyTable: "asset_ipsec_tunnel_samples_hourly",  dailyTable: "asset_ipsec_tunnel_samples_daily"  },
   { source: "perfSla",     detailTable: "asset_perf_sla_samples",      hourlyTable: "asset_perf_sla_samples_hourly",      dailyTable: "asset_perf_sla_samples_daily"      },
+  { source: "process",     detailTable: "asset_process_samples",       hourlyTable: "asset_process_samples_hourly",       dailyTable: "asset_process_samples_daily"       },
 ];
 
 export interface RollupResult {
@@ -143,7 +145,76 @@ function buildSql(def: RollupDef, tier: RollupTier): string {
     case "storage":      return tier === "hourly" ? sqlStorageHourly()      : sqlStorageDaily();
     case "ipsec":        return tier === "hourly" ? sqlIpsecHourly()        : sqlIpsecDaily();
     case "perfSla":      return tier === "hourly" ? sqlPerfSlaHourly()      : sqlPerfSlaDaily();
+    case "process":      return tier === "hourly" ? sqlProcessHourly()      : sqlProcessDaily();
   }
+}
+
+// ─── Process (gauges — cpu%, rss bytes — keyed by program name) ──────────────
+
+function sqlProcessHourly(): string {
+  return `
+    INSERT INTO "asset_process_samples_hourly" (
+      "id", "assetId", "bucketStart", "name", "sampleCount",
+      "avgCpuPct", "minCpuPct", "maxCpuPct",
+      "avgMemRssBytes", "minMemRssBytes", "maxMemRssBytes"
+    )
+    SELECT
+      gen_random_uuid()::text,
+      "assetId",
+      date_trunc('hour', "timestamp") AS bucket_start,
+      "name",
+      COUNT(*)::int,
+      AVG("cpuPct"),
+      MIN("cpuPct"),
+      MAX("cpuPct"),
+      AVG("memRssBytes")::bigint,
+      MIN("memRssBytes"),
+      MAX("memRssBytes")
+    FROM "asset_process_samples"
+    WHERE "timestamp" >= $1
+    GROUP BY "assetId", bucket_start, "name"
+    ON CONFLICT ("bucketStart", "assetId", "name") DO UPDATE SET
+      "sampleCount"    = EXCLUDED."sampleCount",
+      "avgCpuPct"      = EXCLUDED."avgCpuPct",
+      "minCpuPct"      = EXCLUDED."minCpuPct",
+      "maxCpuPct"      = EXCLUDED."maxCpuPct",
+      "avgMemRssBytes" = EXCLUDED."avgMemRssBytes",
+      "minMemRssBytes" = EXCLUDED."minMemRssBytes",
+      "maxMemRssBytes" = EXCLUDED."maxMemRssBytes"
+  `;
+}
+
+function sqlProcessDaily(): string {
+  return `
+    INSERT INTO "asset_process_samples_daily" (
+      "id", "assetId", "bucketStart", "name", "sampleCount",
+      "avgCpuPct", "minCpuPct", "maxCpuPct",
+      "avgMemRssBytes", "minMemRssBytes", "maxMemRssBytes"
+    )
+    SELECT
+      gen_random_uuid()::text,
+      "assetId",
+      date_trunc('day', "bucketStart") AS bucket_start,
+      "name",
+      SUM("sampleCount")::int,
+      SUM("avgCpuPct" * "sampleCount") / NULLIF(SUM("sampleCount"), 0),
+      MIN("minCpuPct"),
+      MAX("maxCpuPct"),
+      (SUM("avgMemRssBytes" * "sampleCount") / NULLIF(SUM("sampleCount"), 0))::bigint,
+      MIN("minMemRssBytes"),
+      MAX("maxMemRssBytes")
+    FROM "asset_process_samples_hourly"
+    WHERE "bucketStart" >= $1
+    GROUP BY "assetId", bucket_start, "name"
+    ON CONFLICT ("bucketStart", "assetId", "name") DO UPDATE SET
+      "sampleCount"    = EXCLUDED."sampleCount",
+      "avgCpuPct"      = EXCLUDED."avgCpuPct",
+      "minCpuPct"      = EXCLUDED."minCpuPct",
+      "maxCpuPct"      = EXCLUDED."maxCpuPct",
+      "avgMemRssBytes" = EXCLUDED."avgMemRssBytes",
+      "minMemRssBytes" = EXCLUDED."minMemRssBytes",
+      "maxMemRssBytes" = EXCLUDED."maxMemRssBytes"
+  `;
 }
 
 // ─── Monitor (gauge — response time) ─────────────────────────────────────────
