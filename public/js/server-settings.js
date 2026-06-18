@@ -1179,14 +1179,99 @@ async function loadRetentionTab() {
   if (!container) return;
   container.innerHTML = '<div class="settings-card"><p class="empty-state">Loading retention settings…</p></div>';
   try {
-    var resp = await api.serverSettings.getSampleRetention();
-    var retention = resp && resp.retention ? resp.retention : null;
+    var results = await Promise.allSettled([
+      api.serverSettings.getSampleRetention(),
+      api.serverSettings.getAgentEventLog(),
+    ]);
+    if (results[0].status === "rejected") throw results[0].reason;
+    var retention = results[0].value && results[0].value.retention ? results[0].value.retention : null;
+    var eventLogCfg = results[1].status === "fulfilled" && results[1].value && results[1].value.config
+      ? results[1].value.config
+      : null;
     _retentionLoaded = true;
-    container.innerHTML = renderSampleRetentionCard(retention);
+    container.innerHTML = renderSampleRetentionCard(retention) + renderAgentEventLogCard(eventLogCfg);
     _wireSampleRetentionCard();
+    _wireAgentEventLogCard();
   } catch (err) {
     container.innerHTML = '<div class="settings-card"><p class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</p></div>';
   }
+}
+
+// ─── Agent OS event-log collection card ───────────────────────────────────
+// Global master switch + curation filter for the OS event-log → audit Events
+// ingest. Default disabled; opt-in. Sits on the Retention tab because it
+// governs how much host-event data flows into the (retention-bounded) audit
+// log. Backed by Setting("agentEventLog") via api.serverSettings.getAgentEventLog().
+function renderAgentEventLogCard(cfg) {
+  var c = cfg || {};
+  var enabled = c.enabled === true;
+  var minLevel = c.minLevel === "info" || c.minLevel === "warning" || c.minLevel === "error" ? c.minLevel : "error";
+  var channels = Array.isArray(c.windowsChannels) ? c.windowsChannels.join(", ") : "System, Application";
+  var linuxPri = (typeof c.linuxMinPriority === "number") ? c.linuxMinPriority : 3;
+  var maxPush  = (typeof c.maxPerPush === "number") ? c.maxPerPush : 100;
+  var hourlyCap = (typeof c.perAssetHourlyCap === "number") ? c.perAssetHourlyCap : 500;
+  function lvlOpt(v, label) { return '<option value="' + v + '"' + (minLevel === v ? " selected" : "") + '>' + label + '</option>'; }
+  return '<div class="settings-card" id="agent-event-log-card" style="margin-top:1rem">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
+      '<h4 style="margin:0">Agent OS Event Log</h4>' +
+      '<button class="btn btn-primary" id="btn-agent-event-log-save">Save</button>' +
+    '</div>' +
+    '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:0.85rem">' +
+      'When enabled, Polaris Agents ship matching OS event-log entries (Windows Event Log / Linux journald) which appear on each asset\'s <strong>Events</strong> tab and forward through your syslog / SFTP archival. Off by default. ' +
+      'Event messages can contain hostnames or sensitive text — keep the severity filter tight and review before relying on it for compliance.' +
+    '</p>' +
+    '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;margin-bottom:0.85rem">' +
+      '<input type="checkbox" id="ael-enabled" style="width:15px;height:15px"' + (enabled ? " checked" : "") + '>' +
+      '<span style="font-size:0.9rem;font-weight:600">Collect OS event logs from agents</span>' +
+    '</label>' +
+    '<div class="form-row" style="gap:14px;flex-wrap:wrap">' +
+      '<div style="min-width:160px"><label for="ael-min-level">Minimum severity</label>' +
+        '<select id="ael-min-level">' + lvlOpt("error", "Error + Critical") + lvlOpt("warning", "Warning and up") + lvlOpt("info", "Info and up") + '</select>' +
+        '<p class="hint" style="font-size:0.74rem">Lower = more volume in the audit log.</p>' +
+      '</div>' +
+      '<div style="min-width:120px"><label for="ael-linux-pri">Linux journald priority ≤</label>' +
+        '<input type="number" id="ael-linux-pri" min="0" max="7" value="' + linuxPri + '" style="width:90px">' +
+        '<p class="hint" style="font-size:0.74rem">0 emerg … 7 debug (3 = err).</p>' +
+      '</div>' +
+    '</div>' +
+    '<div class="form-group" style="margin-top:0.6rem"><label for="ael-win-channels">Windows channels</label>' +
+      '<input type="text" id="ael-win-channels" value="' + escapeHtml(channels) + '" placeholder="System, Application" style="width:100%;max-width:420px">' +
+      '<p class="hint" style="font-size:0.74rem">Comma-separated Windows Event Log channel names.</p>' +
+    '</div>' +
+    '<div class="form-row" style="gap:14px;flex-wrap:wrap;margin-top:0.6rem">' +
+      '<div style="min-width:140px"><label for="ael-max-push">Max entries per push</label>' +
+        '<input type="number" id="ael-max-push" min="1" max="5000" value="' + maxPush + '" style="width:110px"></div>' +
+      '<div style="min-width:160px"><label for="ael-hourly-cap">Per-asset hourly cap</label>' +
+        '<input type="number" id="ael-hourly-cap" min="1" max="100000" value="' + hourlyCap + '" style="width:120px">' +
+        '<p class="hint" style="font-size:0.74rem">Overflow is summarized into one event.</p>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+function _wireAgentEventLogCard() {
+  var saveBtn = document.getElementById("btn-agent-event-log-save");
+  if (!saveBtn) return;
+  saveBtn.addEventListener("click", async function () {
+    var channelsRaw = (document.getElementById("ael-win-channels").value || "");
+    var payload = {
+      enabled: document.getElementById("ael-enabled").checked === true,
+      minLevel: document.getElementById("ael-min-level").value,
+      windowsChannels: channelsRaw.split(",").map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; }),
+      linuxMinPriority: parseInt(document.getElementById("ael-linux-pri").value, 10),
+      maxPerPush: parseInt(document.getElementById("ael-max-push").value, 10),
+      perAssetHourlyCap: parseInt(document.getElementById("ael-hourly-cap").value, 10),
+    };
+    saveBtn.disabled = true;
+    try {
+      await api.serverSettings.setAgentEventLog(payload);
+      showToast("Agent OS event-log settings saved", "success");
+    } catch (err) {
+      showToast("Save failed: " + (err && err.message ? err.message : String(err)), "error");
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
 }
 
 function _capacityFormatBytes(b) {

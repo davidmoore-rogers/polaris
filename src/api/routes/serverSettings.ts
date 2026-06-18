@@ -54,6 +54,7 @@ import { hasActiveDiscoveries } from "./integrations.js";
 import { logger } from "../../utils/logger.js";
 import { getCapacitySnapshot, recordCapacityTransition } from "../../services/capacityService.js";
 import { getSampleRetention, updateSampleRetention } from "../../services/sampleRetentionService.js";
+import { getAgentEventLogConfig, updateAgentEventLogConfig } from "../../services/osEventLogService.js";
 import {
   getBootTimeMode,
   getQueueMode,
@@ -1225,6 +1226,39 @@ router.put("/sample-retention", async (req, res, next) => {
       details: { retention: updated as any },
     });
     res.json({ retention: updated });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Agent OS event-log config ────────────────────────────────────────────
+//
+// Global master switch + curation filter for the OS event-log → audit Events
+// ingest (osEventLogService). Default disabled — operator opts in. Delivered to
+// agents via GET /agents/config and applied server-side at /samples ingest.
+
+router.get("/agent-event-log", async (_req, res, next) => {
+  try {
+    res.json({ config: await getAgentEventLogConfig() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/agent-event-log", async (req, res, next) => {
+  try {
+    const body = (req.body && typeof req.body === "object") ? req.body : {};
+    const updated = await updateAgentEventLogConfig(body);
+    await logEvent({
+      level: "info",
+      action: "agent_event_log.updated",
+      resourceType: "setting",
+      resourceName: "agentEventLog",
+      actor: req.session?.username,
+      message: `Agent OS event-log collection ${updated.enabled ? "enabled" : "disabled"} (min level: ${updated.minLevel})`,
+      details: { config: updated as any },
+    });
+    res.json({ config: updated });
   } catch (err) {
     next(err);
   }

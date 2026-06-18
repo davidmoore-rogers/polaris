@@ -2048,11 +2048,11 @@ Listed alphabetically.
 
 **What it owns:** The OS event-log → audit Event ingest. Transport-agnostic: curates host event-log entries (Windows Event Log channels / Linux journald / FortiOS device log) into `os_event.<channel>` audit Events (resourceType=asset) so they surface in the asset Events tab and ride the existing syslog/SFTP archival. **First and only external-event-ingestion path** — every other Event is Polaris-generated. Also owns the operator-tuned global config `Setting("agentEventLog")`.
 
-**Public API:** `ingestOsEventLog(assetId, hostname, entries, cfg)` → `{accepted, suppressed}`; `getAgentEventLogConfig()`; `DEFAULT_AGENT_EVENT_LOG_CONFIG`; pure helpers `mapOsLevelToAudit` / `meetsMinAuditLevel` / `dedupeEntries` / `sanitizeChannel` / `buildAuditInputs`; types `AgentEventLogConfig` / `OsEventLogEntry` / `IngestResult`.
+**Public API:** `ingestOsEventLog(assetId, hostname, entries, cfg)` → `{accepted, suppressed}`; `getAgentEventLogConfig()`; `updateAgentEventLogConfig(patch)` (clamps + merges + persists, returns full config); `DEFAULT_AGENT_EVENT_LOG_CONFIG`; pure helpers `mapOsLevelToAudit` / `meetsMinAuditLevel` / `dedupeEntries` / `sanitizeChannel` / `buildAuditInputs`; types `AgentEventLogConfig` / `OsEventLogEntry` / `IngestResult`.
 
-**Cross-service deps:** `eventLogService.logEventsBatch` (batched audit write); `prisma.event.count` (per-asset rolling-hour rate cap); `prisma.setting` (config read).
+**Cross-service deps:** `eventLogService.logEventsBatch` (batched audit write); `prisma.event.count` (per-asset rolling-hour rate cap); `prisma.setting` (config read/upsert).
 
-**Used by:** `src/api/routes/agents.ts:POST /samples` (the `eventLog` stream branch). Later phases: the SSH / WinRM / FortiOS-REST pollers in `monitoringService.ts` call the same ingest so curated audit rows behave identically regardless of transport.
+**Used by:** `src/api/routes/agents.ts:POST /samples` (the `eventLog` stream branch) + `GET /config` (ships the filter via `getAgentEventLogConfig`); `src/api/routes/serverSettings.ts` (`GET`/`PUT /server-settings/agent-event-log` → the Retention-tab **Agent OS Event Log** card). Later phases: the SSH / WinRM / FortiOS-REST pollers in `monitoringService.ts` call the same ingest so curated audit rows behave identically regardless of transport.
 
 **Invariants:**
 - Volume discipline (the audit Event table is NOT a hypertable): min-level filter → dedupe (collapse identical, sum count) → per-push cap (`maxPerPush`) → per-asset rolling-hour cap (`perAssetHourlyCap`). Overflow is summarized into ONE `os_event.suppressed` Event (no silent truncation).
