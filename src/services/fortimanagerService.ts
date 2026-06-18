@@ -663,45 +663,6 @@ export async function fmgProxyRest<T = unknown>(
 // ─── Native FMG write helpers (no /sys/proxy/json) ─────────────────────────
 
 /**
- * Set per-device FMG metavariables ("meta fields"). Used by the FortiGate
- * coord write-back path when SNMP-geocoded coords need to land on the
- * operator's existing `Latitude` / `Longitude` metavar convention.
- *
- * Native FMG endpoint (no `/sys/proxy/json` wrapper) — goes through the
- * worker's native lane and doesn't share the proxy-lane concurrency=1
- * constraint. The metavar schema is expected to already exist in FMG
- * (operators define `Latitude` / `Longitude` once under Device Manager
- * → Metadata Variables); the per-device set call won't auto-create new
- * fields on stricter FMG versions, so an unknown metavar name surfaces as
- * a non-zero FMG status code which this function throws on.
- *
- * Values are strings — FMG stores every metavar value as text.
- */
-export async function setFmgDeviceMetaFields(
-  config: FortiManagerConfig,
-  deviceName: string,
-  fields: Record<string, string>,
-  integrationId?: string,
-): Promise<void> {
-  const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
-  const adom = config.adom || "root";
-  const payload: JsonRpcRequest = {
-    id: 1,
-    method: "update",
-    params: [{
-      url: `/dvmdb/adom/${adom}/device/${deviceName}`,
-      data: { "meta fields": fields },
-    }],
-  };
-  const res = await rpc(baseUrl, payload, config.apiUser, config.apiToken, config.verifySsl, undefined, integrationId);
-  const code = res.result?.[0]?.status?.code;
-  if (code !== 0) {
-    const msg = res.result?.[0]?.status?.message || "FortiManager rejected meta fields update";
-    throw new AppError(502, `FortiManager metavar write failed: ${msg}`);
-  }
-}
-
-/**
  * Write a managed FortiGate's `gui-device-latitude` / `gui-device-longitude`
  * via FMG's CMDB tree. Same path the discovery geo fetcher reads from.
  *
@@ -737,6 +698,65 @@ export async function setFmgDeviceCmdbGuiCoords(
   if (code !== 0) {
     const msg = res.result?.[0]?.status?.message || "FortiManager rejected CMDB coord update";
     throw new AppError(502, `FortiManager CMDB coord write failed: ${msg}`);
+  }
+}
+
+/**
+ * Write per-device coordinate values into FMG's Policy & Objects metadata
+ * variables (Object Configurations → Advanced → Metadata Variables) — the
+ * modern FMG home for operator metavariables, where per-device values live as
+ * `dynamic_mapping` entries scoped by device name. This is NOT the legacy
+ * `dvmdb` device "meta fields" location (which `setFmgDeviceMetaFields` writes
+ * and which returns -10/-3 on installs that moved metavars to Policy &
+ * Objects). Used by the FortiGate coord write-back path.
+ *
+ * One JSON-RPC request, one `set` param per coordinate variable. `set` on the
+ * `.../dynamic_mapping` sub-path UPSERTS only the entry matching this device's
+ * `_scope` — it does NOT replace the whole mapping list (verified on a live
+ * FMG), and unlike `update` it does not require the entry to pre-exist
+ * (`update` fails with -3 when the device has no entry yet). `oid` is
+ * FMG-assigned and deliberately omitted.
+ *
+ * The coordinate variables themselves must already be defined on the ADOM; an
+ * undefined variable surfaces as a non-zero per-param status which throws.
+ *
+ * vdom is "global" — these system-level coordinate metavariables are not
+ * per-VDOM (matches the `_scope` shape FMG returns for them).
+ */
+export async function setFmgDeviceMetavarCoords(
+  config: FortiManagerConfig,
+  deviceName: string,
+  latitude: number,
+  longitude: number,
+  latMetavar = "Latitude",
+  lngMetavar = "Longitude",
+  integrationId?: string,
+): Promise<void> {
+  const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
+  const adom = config.adom || "root";
+  const latKey = latMetavar.trim() || "Latitude";
+  const lngKey = lngMetavar.trim() || "Longitude";
+  const mkEntry = (value: string) => [{ _scope: [{ name: deviceName, vdom: "global" }], value }];
+
+  const payload: JsonRpcRequest = {
+    id: 1,
+    method: "set",
+    params: [
+      { url: `/pm/config/adom/${adom}/obj/fmg/variable/${latKey}/dynamic_mapping`, data: mkEntry(latitude.toFixed(6)) },
+      { url: `/pm/config/adom/${adom}/obj/fmg/variable/${lngKey}/dynamic_mapping`, data: mkEntry(longitude.toFixed(6)) },
+    ],
+  };
+  const res = await rpc(baseUrl, payload, config.apiUser, config.apiToken, config.verifySsl, undefined, integrationId);
+  const failures: string[] = [];
+  [latKey, lngKey].forEach((name, i) => {
+    const code = res.result?.[i]?.status?.code;
+    if (code !== 0) {
+      const msg = res.result?.[i]?.status?.message || "rejected";
+      failures.push(`${name}: ${msg}${code !== undefined ? ` (code ${code})` : ""}`);
+    }
+  });
+  if (failures.length > 0) {
+    throw new AppError(502, `FortiManager metavar coord write failed — ${failures.join("; ")}`);
   }
 }
 
@@ -1232,6 +1252,98 @@ export function extractMetavarCoordsFromFmgDevice(
 }
 
 /**
+ * Parse a single FMG metadata-variable object (the `data` from
+ * `GET /pm/config/adom/<adom>/obj/fmg/variable/<name>`) into a per-device
+ * value map keyed by the LOWERCASED FMG device name found in each
+ * `dynamic_mapping` entry's `_scope`. Modern FMG (Policy & Objects → Object
+ * Configurations → Advanced → Metadata Variables) stores per-device metavar
+ * values here, not in `dvmdb` device "meta fields".
+ *
+ * The top-level `value` (the ADOM-wide default) is deliberately NOT applied
+ * per-device — it's the same point for every firewall and would pin the whole
+ * fleet to one coordinate. Only explicit per-device `dynamic_mapping` entries
+ * are surfaced.
+ */
+export function parseFmgVariableDynamicMapping(varData: any): Map<string, string> {
+  const out = new Map<string, string>();
+  const mappings = varData?.dynamic_mapping;
+  if (!Array.isArray(mappings)) return out;
+  for (const m of mappings) {
+    const value = m?.value;
+    if (typeof value !== "string" || value === "") continue;
+    const scopes = Array.isArray(m?._scope) ? m._scope : [];
+    for (const s of scopes) {
+      const name = s?.name;
+      if (typeof name === "string" && name) out.set(name.toLowerCase(), value);
+    }
+  }
+  return out;
+}
+
+/**
+ * Fetch operator-defined coordinate metadata variables from FMG's Policy &
+ * Objects object DB and build a per-device coord map keyed by lowercased FMG
+ * device name. This is the PRIMARY source for the Phase 11.5 coord resolution
+ * chain on modern FMG installs; `extractMetavarCoordsFromFmgDevice` (legacy
+ * `dvmdb` device "meta fields") remains a per-device fallback.
+ *
+ * One JSON-RPC `get` request, one param per defined coord variable (lat/lng,
+ * plus the optional address variable when configured). A per-param status of
+ * -3 ("object does not exist") is tolerated — that variable simply isn't
+ * defined on this ADOM. Best-effort: any RPC/parse failure yields an empty map
+ * so discovery proceeds with the existing fallbacks. Never throws.
+ */
+export async function fetchFmgMetavarCoordMap(
+  config: FortiManagerConfig,
+  latMetavar: string,
+  lngMetavar: string,
+  addrMetavar: string,
+  signal?: AbortSignal,
+  integrationId?: string,
+): Promise<Map<string, { latitude?: number; longitude?: number; address?: string }>> {
+  const out = new Map<string, { latitude?: number; longitude?: number; address?: string }>();
+  const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
+  const adom = config.adom || "root";
+
+  const wanted: Array<{ key: "latitude" | "longitude" | "address"; name: string }> = [
+    { key: "latitude", name: latMetavar.trim() || "Latitude" },
+    { key: "longitude", name: lngMetavar.trim() || "Longitude" },
+  ];
+  if (addrMetavar.trim()) wanted.push({ key: "address", name: addrMetavar.trim() });
+
+  // FMG expects the raw (un-encoded) name in the JSON `url` field, matching
+  // every other URL built in this file.
+  const params = wanted.map((w) => ({ url: `/pm/config/adom/${adom}/obj/fmg/variable/${w.name}` }));
+
+  let res: JsonRpcResponse;
+  try {
+    res = await rpc(baseUrl, { id: 1, method: "get", params }, config.apiUser, config.apiToken, config.verifySsl, signal, integrationId);
+  } catch (err: any) {
+    logger.warn({ integrationId, err: err?.message }, "fmg_metavar_coords.fetch_failed");
+    return out;
+  }
+
+  wanted.forEach((w, i) => {
+    const entry = res.result?.[i];
+    if (!entry || entry.status?.code !== 0) return;
+    const perDevice = parseFmgVariableDynamicMapping(entry.data);
+    for (const [name, valueStr] of perDevice) {
+      const rec = out.get(name) || {};
+      if (w.key === "address") {
+        const trimmed = valueStr.trim();
+        if (trimmed) rec.address = trimmed;
+      } else {
+        const num = Number(valueStr);
+        if (Number.isFinite(num)) rec[w.key] = num;
+      }
+      out.set(name, rec);
+    }
+  });
+
+  return out;
+}
+
+/**
  * Build a FortiOS version string ("7.4.5") from a raw FMG `/dvmdb/adom/<adom>/device`
  * record. FMG splits the version across three integer fields: `os_ver` (major),
  * `mr` (minor release), `patch`. Returns "" when the major version is missing
@@ -1278,6 +1390,21 @@ export async function discoverDhcpSubnets(
   const latMetavar = config.fortigateMonitor?.latitudeMetavar?.trim() || "Latitude";
   const lngMetavar = config.fortigateMonitor?.longitudeMetavar?.trim() || "Longitude";
   const addrMetavar = config.fortigateMonitor?.addressMetavar?.trim() || "";
+
+  // Per-device coord metavars live in FMG's Policy & Objects metadata variables
+  // (dynamic_mapping), not `dvmdb` device "meta fields". Fetch the whole fleet's
+  // map once per run (best-effort — empty on any failure) and prefer it, falling
+  // back to the legacy dvmdb meta-fields read per device for backward compat.
+  const metavarCoordMap = await fetchFmgMetavarCoordMap(config, latMetavar, lngMetavar, addrMetavar, signal, integrationId);
+  const resolveMetavarCoords = (rawDevice: any, deviceName: string): { latitude?: number; longitude?: number; address?: string } => {
+    const dyn = metavarCoordMap.get(deviceName.toLowerCase()) || {};
+    const legacy = extractMetavarCoordsFromFmgDevice(rawDevice, latMetavar, lngMetavar, addrMetavar);
+    return {
+      latitude: dyn.latitude ?? legacy.latitude,
+      longitude: dyn.longitude ?? legacy.longitude,
+      address: dyn.address ?? legacy.address,
+    };
+  };
 
   // Step 1: List managed devices in the ADOM. We deliberately do NOT filter on
   // conn_status server-side — we need the full roster (online + offline) so the
@@ -1526,7 +1653,7 @@ export async function discoverDhcpSubnets(
           // when FMG didn't surface one (older FMG releases, missing perms).
           const fmgHa = extractHaFromFmgDevice(rawDevice);
           const haFromFmg = fmgHa.haMembers.length > 0;
-          const mv = extractMetavarCoordsFromFmgDevice(rawDevice, latMetavar, lngMetavar, addrMetavar);
+          const mv = resolveMetavarCoords(rawDevice, deviceName);
           const localDev: DiscoveredDevice = {
             name: deviceName,
             hostname: rawDevice.hostname || deviceName,
@@ -1628,7 +1755,7 @@ export async function discoverDhcpSubnets(
     // has no per-device fortigateService call to fall back on, so this is
     // the only source. Standalone or missing → haMode: "standalone".
     const fmgHa = extractHaFromFmgDevice(rawDevice);
-    const mv = extractMetavarCoordsFromFmgDevice(rawDevice, latMetavar, lngMetavar, addrMetavar);
+    const mv = resolveMetavarCoords(rawDevice, deviceName);
     const localDevice: DiscoveredDevice = {
       name: deviceName,
       hostname: rawDevice.hostname || deviceName,

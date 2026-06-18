@@ -7,9 +7,12 @@
  *
  * Behavior per integration type:
  *   - `fortimanager`: writes BOTH targets natively against FMG:
- *       1. Per-device metavars (named by `latMetavar` / `lngMetavar`, defaulting
- *          to `Latitude` / `Longitude`) on
- *          `/dvmdb/adom/<adom>/device/<n>` (operator-existing convention)
+ *       1. Per-device coordinate metadata variables (named by `latMetavar` /
+ *          `lngMetavar`, defaulting to `Latitude` / `Longitude`) as
+ *          `dynamic_mapping` entries on
+ *          `/pm/config/adom/<adom>/obj/fmg/variable/<name>` — the Policy &
+ *          Objects metadata-variable location modern FMG uses (NOT the legacy
+ *          `dvmdb` device "meta fields", which returns -10/-3 on those installs)
  *       2. CMDB GUI coords `gui-device-latitude` / `gui-device-longitude` on
  *          `/pm/config/device/<n>/global/system/global` (drives FMG's map +
  *          the FortiGate's GUI map after an operator-initiated Install
@@ -28,7 +31,7 @@
  */
 import { logger } from "../utils/logger.js";
 import {
-  setFmgDeviceMetaFields,
+  setFmgDeviceMetavarCoords,
   setFmgDeviceCmdbGuiCoords,
   type FortiManagerConfig,
 } from "./fortimanagerService.js";
@@ -60,10 +63,13 @@ export async function pushCoordsToFortigate(
     const lngKey = lngMetavar.trim() || "Longitude";
 
     try {
-      await setFmgDeviceMetaFields(
+      await setFmgDeviceMetavarCoords(
         cfg,
         deviceName,
-        { [latKey]: latStr, [lngKey]: lngStr },
+        latitude,
+        longitude,
+        latKey,
+        lngKey,
         integration.id,
       );
       targets.push("fmg_metavars");
