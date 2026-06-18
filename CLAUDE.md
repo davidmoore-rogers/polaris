@@ -230,7 +230,7 @@ Hybrid-join detection links AD and Entra/Intune via on-prem SID (`ad.observed.ob
 
 ## Frontend
 
-Vanilla JavaScript SPA served from `/public/`. No build step — plain ES modules. Multi-page layout with client-side navigation (`app.js`), light/dark theme, real-time discovery polling, bulk operations, PDF/CSV export, conflict resolution slide-over, first-run setup wizard, Device Map with edit-regions polygon mode, five-state Status pill with click-to-toggle, asset details modal (General + System + Sources + Events + SNMP Walk tabs), Server Settings (Credentials / Identification / Maintenance tabs).
+Vanilla JavaScript SPA served from `/public/`. No build step — plain ES modules. Multi-page layout with client-side navigation (`app.js`), light/dark theme, real-time discovery polling, bulk operations, PDF/CSV export, conflict resolution slide-over, first-run setup wizard, Device Map with edit-regions polygon mode, five-state Status pill with click-to-toggle, asset details modal (General + System + Sources + Events + SNMP Walk tabs), multi-asset Compare slide-over (bulk-bar → metric picker → overlaid telemetry charts), per-user lock toggle on every modal/slide-over (locked = backdrop click won't dismiss), Server Settings (Credentials / Identification / Maintenance tabs).
 
 > Detailed UI behavior (asset modal sections, slide-over patterns, persistence keys, MIB Browse + Walk surface, Manufacturer Profiles editor, Capacity Advisor + Sample Retention cards, Device Map region polygon editor): [ARCHITECTURE.md → Frontend](ARCHITECTURE.md#frontend).
 

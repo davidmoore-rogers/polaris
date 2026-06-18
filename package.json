@@ -16,6 +16,7 @@
     "db:seed": "node --env-file=.env --import tsx/esm prisma/seed.ts",
     "db:studio": "prisma studio",
     "db:reset": "prisma migrate reset --force && npm run db:seed",
+    "mock:compare": "node --env-file=.env --import tsx/esm prisma/mock-compare.ts",
     "demo": "node demo.mjs",
     "test:fmg": "node scripts/test-fmg.mjs",
     "lint": "eslint src",
