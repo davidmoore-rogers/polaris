@@ -2091,6 +2091,30 @@ Listed alphabetically.
 
 ---
 
+## services/agentCommandService.ts
+
+**What it owns:** The process-control command queue (Phase 4) — the `AgentCommand` table + its lifecycle. Turns operator Stop/Start/Restart requests into commands the agent fetches, executes, and reports on.
+
+**Public API:** `requestProcessControl(assetId, name, action, actor)` (enqueue + audit); `fetchPendingCommands(managedAgentId)` (agent poll; marks sent); `recordCommandResult(managedAgentId, commandId, success, error, resultState)` (agent report + audit); `getCommandStatus(assetId, commandId)` (UI poll); type `ControlAction`.
+
+**Cross-service deps:** `eventLogService.logEvent` (`asset.process.*`); `prisma.assetProcess` (controllable check), `prisma.managedAgent` (active-agent check), `prisma.agentCommand`.
+
+**Used by:** `src/api/routes/assets.ts` (`POST /assets/:id/processes/:name/control` gated `processControl:write`; `GET /assets/:id/process-command/:commandId`); `src/api/routes/agents.ts` (bearer `GET /agents/commands` + `POST /agents/command-result`).
+
+**Invariants:**
+- **Services/units only** — `requestProcessControl` 409s unless `AssetProcess.controllable` + `serviceUnit` are set. Raw process kill is intentionally NOT supported.
+- **Operator-initiated only** — commands are created exclusively by the gated control route; the agent endpoints never originate an action, only fetch/report.
+- The `processControl` RBAC key gates the request route; the agent never self-acts. Every transition is audited (`.requested` warning / `.result` info|warning).
+- `fetchPendingCommands` flips pending→sent atomically so a slow agent doesn't double-execute.
+- `recordCommandResult` verifies the command belongs to the reporting agent (managedAgentId match).
+
+**When changing this:**
+- Adding a WS push (to wake the agent sooner than its poll): keep the poll path as the source of truth + fallback; the WS frame is just a nudge to call `/commands`.
+- New action beyond stop/start/restart: extend the route Zod enum + the agent executor + the UI buttons in lockstep.
+- `controllable`/`serviceUnit` are set by the agent's process-inventory collector — control is inert until the agent reports a resolved unit.
+
+---
+
 ## services/logFlagRuleService.ts
 
 **What it owns:** User-defined log-flag rules (Feature C) — operator rules that FLAG matching process-log lines. Owns the `LogFlagRule` table, the compiled-rule cache, the read-time evaluator, and CRUD.

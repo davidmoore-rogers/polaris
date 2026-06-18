@@ -1,0 +1,117 @@
+/**
+ * src/services/agentCommandService.ts — process-control command queue (Phase 4).
+ *
+ * Operator Stop/Start/Restart requests against a service-backed process become
+ * AgentCommand rows. The agent polls pending commands, executes via the OS
+ * service manager, and reports the outcome. Operator-initiated only — the agent
+ * never self-acts. Every transition writes an audit Event.
+ *
+ * Safety rails (the actuation is high-blast-radius): the request path requires a
+ * RESOLVED service/unit (controllable=true) — raw process kill is intentionally
+ * NOT supported — an active agent, and the `processControl` RBAC gate at the
+ * route layer.
+ */
+
+import { prisma } from "../db.js";
+import { logEvent } from "./eventLogService.js";
+import { AppError } from "../utils/errors.js";
+
+export type ControlAction = "stop" | "start" | "restart";
+
+export interface AgentCommandView {
+  id: string;
+  action: string;
+  target: string;
+}
+
+/**
+ * Enqueue a control command for one process. Validates the process is
+ * service-backed (controllable) and the asset has an active agent. Returns the
+ * created command.
+ */
+export async function requestProcessControl(
+  assetId: string,
+  name: string,
+  action: ControlAction,
+  actor: string | undefined,
+): Promise<{ id: string; target: string }> {
+  const proc = await prisma.assetProcess.findUnique({ where: { assetId_name: { assetId, name } } });
+  if (!proc) throw new AppError(404, `Process "${name}" not found in this asset's inventory`);
+  if (!proc.controllable || !proc.serviceUnit) {
+    throw new AppError(409, `"${name}" has no resolved service/unit — start/stop/restart isn't available for it`);
+  }
+  const agent = await prisma.managedAgent.findUnique({ where: { assetId }, select: { id: true, installStatus: true } });
+  if (!agent) throw new AppError(409, "This asset has no Polaris Agent — process control requires an installed agent");
+  if (agent.installStatus !== "active") throw new AppError(409, "The Polaris Agent on this asset isn't active");
+
+  const cmd = await prisma.agentCommand.create({
+    data: { assetId, managedAgentId: agent.id, action, target: proc.serviceUnit, requestedBy: actor ?? null },
+  });
+  await logEvent({
+    action: `asset.process.${action}.requested`,
+    resourceType: "asset",
+    resourceId: assetId,
+    resourceName: name,
+    actor,
+    level: "warning",
+    message: `Process ${action} requested for "${name}" (${proc.serviceUnit})`,
+    details: { commandId: cmd.id, target: proc.serviceUnit },
+  });
+  return { id: cmd.id, target: proc.serviceUnit };
+}
+
+/**
+ * Agent poll: return this agent's pending commands and atomically mark them
+ * "sent" so a slow agent doesn't re-execute them on the next poll. Bounded.
+ */
+export async function fetchPendingCommands(managedAgentId: string): Promise<AgentCommandView[]> {
+  const cmds = await prisma.agentCommand.findMany({
+    where: { managedAgentId, status: "pending" },
+    orderBy: { requestedAt: "asc" },
+    take: 20,
+    select: { id: true, action: true, target: true },
+  });
+  if (cmds.length > 0) {
+    await prisma.agentCommand.updateMany({
+      where: { id: { in: cmds.map((c) => c.id) } },
+      data: { status: "sent", sentAt: new Date() },
+    });
+  }
+  return cmds;
+}
+
+/** Agent result report. Bound to the agent's own commands; audited. */
+export async function recordCommandResult(
+  managedAgentId: string,
+  commandId: string,
+  success: boolean,
+  error: string | null,
+  resultState: string | null,
+): Promise<void> {
+  const cmd = await prisma.agentCommand.findUnique({ where: { id: commandId } });
+  if (!cmd || cmd.managedAgentId !== managedAgentId) {
+    throw new AppError(404, "Command not found for this agent");
+  }
+  await prisma.agentCommand.update({
+    where: { id: commandId },
+    data: { status: success ? "succeeded" : "failed", completedAt: new Date(), error, resultState },
+  });
+  await logEvent({
+    action: `asset.process.${cmd.action}.result`,
+    resourceType: "asset",
+    resourceId: cmd.assetId,
+    actor: cmd.requestedBy ?? undefined,
+    level: success ? "info" : "warning",
+    message: `Process ${cmd.action} of "${cmd.target}" ${success ? "succeeded" : "failed"}${error ? `: ${error}` : ""}`,
+    details: { commandId, resultState },
+  });
+}
+
+/** UI status poll for one command (scoped to the asset). */
+export async function getCommandStatus(assetId: string, commandId: string): Promise<{
+  id: string; action: string; target: string; status: string; error: string | null; resultState: string | null;
+} | null> {
+  const cmd = await prisma.agentCommand.findUnique({ where: { id: commandId } });
+  if (!cmd || cmd.assetId !== assetId) return null;
+  return { id: cmd.id, action: cmd.action, target: cmd.target, status: cmd.status, error: cmd.error, resultState: cmd.resultState };
+}

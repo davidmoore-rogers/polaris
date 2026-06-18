@@ -52,6 +52,7 @@ import {
 import { reconcileMacAddresses } from "../../utils/macAddresses.js";
 import { logEvent } from "./events.js";
 import { ingestOsEventLog, getAgentEventLogConfig } from "../../services/osEventLogService.js";
+import { fetchPendingCommands, recordCommandResult } from "../../services/agentCommandService.js";
 import { logger } from "../../utils/logger.js";
 
 // ─── /enroll (public) ─────────────────────────────────────────────────
@@ -711,6 +712,39 @@ agentsRouter.post("/heartbeat", async (req, res, next) => {
     }
     // verifyBearer already bumped lastSeenAt/lastSeenIp opportunistically.
     res.json({ ok: true, configEtag: await computeConfigEtag(req.managedAgent!.assetId) });
+  } catch (err) { next(err); }
+});
+
+// ─── /commands + /command-result (bearer) — Phase 4 process control ───
+//
+// The agent polls /commands for pending Stop/Start/Restart requests (poll
+// fallback; a WS push can wake it sooner later), executes each via the OS
+// service manager, and reports the outcome to /command-result. Operator-
+// initiated only — these endpoints never originate an action.
+agentsRouter.get("/commands", async (req, res, next) => {
+  try {
+    const commands = await fetchPendingCommands(req.managedAgent!.managedAgentId);
+    res.json({ commands });
+  } catch (err) { next(err); }
+});
+
+const CommandResultSchema = z.object({
+  commandId:   z.string().uuid(),
+  success:     z.boolean(),
+  error:       z.string().max(2048).nullable().optional(),
+  resultState: z.string().max(128).nullable().optional(),
+});
+agentsRouter.post("/command-result", async (req, res, next) => {
+  try {
+    const body = CommandResultSchema.parse(req.body);
+    await recordCommandResult(
+      req.managedAgent!.managedAgentId,
+      body.commandId,
+      body.success,
+      body.error ?? null,
+      body.resultState ?? null,
+    );
+    res.json({ ok: true });
   } catch (err) { next(err); }
 });
 

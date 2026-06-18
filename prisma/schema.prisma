@@ -2643,6 +2643,31 @@ model ManagedAgent {
   @@map("managed_agents")
 }
 
+// Operator-issued process-control commands (Phase 4). One row per Stop/Start/
+// Restart request against a service-backed process on an agent host. The agent
+// fetches pending commands (GET /agents/commands), executes via the OS service
+// manager (Windows SCM / systemd), and reports the outcome (POST
+// /agents/command-result). Operator-initiated only — the agent never self-acts.
+// Every transition is audited (asset.process.<action>.requested / .result).
+model AgentCommand {
+  id             String   @id @default(uuid())
+  assetId        String
+  managedAgentId String
+  action         String   // "stop" | "start" | "restart"
+  target         String   // the resolved service/unit name to act on
+  status         String   @default("pending") // pending | sent | succeeded | failed
+  requestedBy    String?  // operator username
+  requestedAt    DateTime @default(now())
+  sentAt         DateTime?
+  completedAt    DateTime?
+  error          String?  // failure detail reported by the agent
+  resultState    String?  // post-action service state the agent observed
+
+  @@index([managedAgentId, status])
+  @@index([assetId])
+  @@map("agent_commands")
+}
+
 // Geocode result cache. Populated by `geocoderService.geocode()` when
 // discovery falls back from a malformed CMDB coord to the FortiGate's SNMP
 // sysLocation string. Negative results (no geocoder hit) are stored too so

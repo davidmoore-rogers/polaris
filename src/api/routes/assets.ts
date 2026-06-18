@@ -45,6 +45,7 @@ import {
   readProcessHistory,
 } from "../../services/sampleHistoryService.js";
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
+import { requestProcessControl, getCommandStatus } from "../../services/agentCommandService.js";
 import {
   readIpsecHistory,
   readPerfSlaHistory,
@@ -2009,6 +2010,30 @@ router.put("/:id/processes/:name/config", requirePermission("assets", "write"), 
       details: { name, logSource: updated.logSource, logPathGlob: updated.logPathGlob },
     });
     res.json({ config: { name: updated.name, logSource: updated.logSource, logPathGlob: updated.logPathGlob, detectedUnit: updated.detectedUnit, notes: updated.notes } });
+  } catch (err) { next(err); }
+});
+
+// POST /assets/:id/processes/:name/control — Phase 4 process control. Enqueues
+// a Stop/Start/Restart command for a service-backed process. Gated on the
+// dedicated processControl RBAC key (operator-initiated, confirmed client-side,
+// fully audited; the agent never self-acts). Returns the command id to poll.
+const ProcessControlSchema = z.object({ action: z.enum(["stop", "start", "restart"]) });
+router.post("/:id/processes/:name/control", requirePermission("processControl", "write"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const name = String(req.params.name);
+    const { action } = ProcessControlSchema.parse(req.body);
+    const cmd = await requestProcessControl(id, name, action, req.session?.username);
+    res.status(202).json({ command: cmd });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/process-command/:commandId — poll a control command's status.
+router.get("/:id/process-command/:commandId", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const status = await getCommandStatus(req.params.id as string, String(req.params.commandId));
+    if (!status) throw new AppError(404, "Command not found");
+    res.json({ command: status });
   } catch (err) { next(err); }
 });
 

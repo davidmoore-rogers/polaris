@@ -108,7 +108,8 @@ AssetStatus:             active | maintenance | decommissioned | storage | disab
 - **ManufacturerAlias** — vendor-name canonicalization map.
 - **DeviceIcon** — operator-uploaded topology icon blobs (scope + key), served to the Device Map / topology renderer.
 - **AssetTypeDef** — operator-extensible asset-type registry (replaces the prior `AssetType` enum).
-- **User** / **Role** — dynamic-role RBAC; `User.roleId` → `Role`; permissions matrix on Role over 25 function keys.
+- **User** / **Role** — dynamic-role RBAC; `User.roleId` → `Role`; permissions matrix on Role over 26 function keys.
+- **AgentCommand** — operator-issued process-control commands (Phase 4): one row per Stop/Start/Restart against a service-backed process. Agent polls `GET /agents/commands`, executes via Windows SCM / systemd, reports `POST /agents/command-result`. Gated by the `processControl` RBAC key; operator-initiated + confirmed + audited (`asset.process.<action>.requested|result`); the agent never self-acts.
 - **GroupMapping** — IdP group → role + tags map for OIDC / LDAP / SAML SSO login (`provider` + `groupKey`; nullable `roleId` for tags-only mappings).
 - **ManagedAgent** — Polaris Agent install record per Asset (os/arch, agent version, install credential, cert-pin set for dual-pin rotation).
 - **UserDashboard** — per-user dashboard layout (widget set + positions).
@@ -155,7 +156,7 @@ Resource groupings (route file in `src/api/routes/`):
 
 Sessions are PostgreSQL-backed (`connect-pg-simple`), 8-hour max age, HttpOnly/Secure/SameSite=Lax cookies.
 
-**Dynamic-role model (post-cutover).** RBAC is enforced via `requirePermission(functionKey, level)` from [src/api/middleware/permissions.ts](src/api/middleware/permissions.ts). Each route declares the function key it gates + the required access level; the resolver consults the caller's `Role.permissions` matrix denormalized into `req.session.roleSnapshot` at login. The matrix is `{ [functionKey]: "none" | "read" | "write" | "fullwrite" }` over a 25-key catalogue. The five built-in roles (`admin` / `readonly` / `networkadmin` / `assetsadmin` / `user`) are seeded by `prisma/migrations/20260524000000_roles_table_cutover` so existing accounts keep their pre-cutover access exactly. Admin creates custom roles from the Roles section under Users → Manage Roles.
+**Dynamic-role model (post-cutover).** RBAC is enforced via `requirePermission(functionKey, level)` from [src/api/middleware/permissions.ts](src/api/middleware/permissions.ts). Each route declares the function key it gates + the required access level; the resolver consults the caller's `Role.permissions` matrix denormalized into `req.session.roleSnapshot` at login. The matrix is `{ [functionKey]: "none" | "read" | "write" | "fullwrite" }` over a 26-key catalogue. The five built-in roles (`admin` / `readonly` / `networkadmin` / `assetsadmin` / `user`) are seeded by `prisma/migrations/20260524000000_roles_table_cutover` so existing accounts keep their pre-cutover access exactly. Admin creates custom roles from the Roles section under Users → Manage Roles.
 
 | Built-in role | Locked? | Pre-cutover behavior preserved |
 |---|---|---|
@@ -167,7 +168,7 @@ Sessions are PostgreSQL-backed (`connect-pg-simple`), 8-hour max age, HttpOnly/S
 
 **Ownership model for networks and reservations.** `subnets` and `reservations` carry an ownership dimension: `write` lets the caller edit only rows where `createdBy` matches their username; `fullwrite` bypasses the ownership filter. Built-in `user` and `assetsadmin` are seeded with `write`, `networkadmin` and `admin` with `fullwrite`. Route handlers branch on `req.permissionLevel` (set by `requireOwnership(functionKey)`).
 
-**Function-key catalogue (25 keys).** Single source of truth in `src/api/middleware/permissions.ts:FUNCTION_KEYS`. Exposed at `GET /api/v1/roles/functions` so the frontend matrix UI renders without hardcoding the list. Adding a new key requires a migration to seed it on every existing Role + a corresponding guard at the route layer.
+**Function-key catalogue (26 keys).** Single source of truth in `src/api/middleware/permissions.ts:FUNCTION_KEYS`. (Newest: `processControl` — Phase 4 process Start/Stop/Restart, defaulted admin=fullwrite + assetsadmin=write by migration `20260627000000_process_control`.) Exposed at `GET /api/v1/roles/functions` so the frontend matrix UI renders without hardcoding the list. Adding a new key requires a migration to seed it on every existing Role + a corresponding guard at the route layer.
 
 **Session role snapshot + cache invalidation.** `req.session` carries `roleId` + a denormalized `roleSnapshot` stamped at login. Every `requirePermission` call hits a module-level `Map<roleId, updatedAt>` cache first (O(1)); a Role write bumps the map via `bumpRoleVersion(roleId, updatedAt)` and the next request from any session holding the stale snapshot triggers ONE Prisma fetch + `req.session.save()` to refresh. Changing a user's `roleId` takes effect on next login; changing a role's permissions takes effect on the next request for every session that holds the role.
 

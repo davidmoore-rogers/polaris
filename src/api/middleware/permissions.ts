@@ -9,7 +9,7 @@
  * been edited since the snapshot was taken.
  *
  * What this module owns:
- *   - The 25-entry function-key catalogue (exported as FUNCTION_KEYS).
+ *   - The 26-entry function-key catalogue (exported as FUNCTION_KEYS).
  *   - The access-level ordering (none < read < write < fullwrite).
  *   - requirePermission / hasPermission / requireOwnership middleware factories.
  *   - The session-snapshot refresh path (Map<roleId, updatedAt> cache + Prisma fetch).
@@ -68,6 +68,7 @@ export const FUNCTION_KEYS: readonly FunctionKeyDef[] = [
   { key: "assetsQuarantine", label: "Asset Quarantine", description: "Push MAC quarantine to FortiGates + release + verify." },
   { key: "assetsProbe", label: "Asset Probes", description: "Manual probe-now, SNMP walk, forward/reverse DNS lookup on a specific asset." },
   { key: "assetMonitorSettings", label: "Asset Monitor Settings", description: "Per-asset / class / integration / manual monitor cadence + retention overrides." },
+  { key: "processControl", label: "Process Control", description: "Start / stop / restart a service-backed process on a host via the Polaris Agent. Operator-initiated, confirmed, and audited; the agent never self-acts." },
   { key: "mibDatabase", label: "MIB Database", description: "Upload / browse / walk SNMP MIB modules." },
   { key: "manufacturerProfiles", label: "Manufacturer Profiles", description: "Per-vendor telemetry profile (CPU/memory/temperature OIDs + custom widgets)." },
   { key: "manufacturerAliases", label: "Manufacturer Aliases", description: "Vendor-name normalization map." },
