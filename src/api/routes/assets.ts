@@ -212,6 +212,11 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // /api/v2/monitor/vpn/ipsec endpoint can be slow on busy gateways so it's
   // skipped on the fast cadence by default; pinning issues a targeted scrape.
   monitoredIpsecTunnels: z.array(z.string().min(1)).max(64).optional(),
+  // Process names pinned for per-minute CPU/RAM telemetry + log tailing
+  // (Processes-tab "Monitor" checkbox). Same 64 cap.
+  monitoredProcesses:    z.array(z.string().min(1)).max(64).optional(),
+  // Process names flagged for future alerting (Processes-tab "Alert" checkbox).
+  alertWatchedProcesses: z.array(z.string().min(1)).max(64).optional(),
 });
 
 /**
@@ -1199,6 +1204,40 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
       monitoredInterfaces:   (asset.monitoredInterfaces   ?? []) as string[],
       monitoredStorage:      (asset.monitoredStorage      ?? []) as string[],
       monitoredIpsecTunnels: (asset.monitoredIpsecTunnels ?? []) as string[],
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/processes — Processes tab: current-state process inventory
+// (one row per program, aggregated by name) plus the operator's pin sets so the
+// table can render the Monitor / Alert checkbox state without a second call.
+// Ordered by summed CPU desc then name so the busiest programs surface first.
+router.get("/:id/processes", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: { monitoredProcesses: true, alertWatchedProcesses: true },
+    });
+    if (!asset) throw new AppError(404, "Asset not found");
+    const rows = await prisma.assetProcess.findMany({
+      where: { assetId: id },
+      orderBy: [{ cpuPct: "desc" }, { name: "asc" }],
+    });
+    res.json({
+      processes: rows.map((p) => ({
+        name:          p.name,
+        instanceCount: p.instanceCount,
+        cpuPct:        p.cpuPct,
+        memRssBytes:   p.memRssBytes != null ? p.memRssBytes.toString() : null,
+        exePath:       p.exePath,
+        username:      p.username,
+        startedAt:     p.startedAt,
+        serviceUnit:   p.serviceUnit,
+        controllable:  p.controllable,
+      })),
+      monitoredProcesses:    (asset.monitoredProcesses    ?? []) as string[],
+      alertWatchedProcesses: (asset.alertWatchedProcesses ?? []) as string[],
     });
   } catch (err) { next(err); }
 });

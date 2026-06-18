@@ -719,6 +719,17 @@ model Asset {
   // a targeted scrape that filters down to just that phase-1.
   monitoredIpsecTunnels String[] @default([])
 
+  // Process names (the AssetProcess.name key — program/exe, aggregated across
+  // PIDs) the operator pinned for per-minute CPU/RAM telemetry + log tailing.
+  // Drives the Processes-tab "Monitor" checkbox + the processTelemetry/processLog
+  // agent streams (Feature C).
+  monitoredProcesses String[] @default([])
+
+  // Process names flagged for future alerting/notifications (the Processes-tab
+  // "Alert" checkbox). Storage-only for now — the alerting consumer lands with
+  // the notifications feature; pinning here just persists operator intent.
+  alertWatchedProcesses String[] @default([])
+
   // Quarantine. When non-null the asset is currently quarantined on one or
   // more FortiGates (per quarantineTargets). statusBeforeQuarantine stores
   // the prior AssetStatus so release can pop it back; null pops to active.
@@ -1189,6 +1200,40 @@ model AssetSdwanRule {
   @@unique([assetId, ruleName])
   @@index([assetId])
   @@map("asset_sdwan_rules")
+}
+
+// CURRENT-STATE process inventory — one row per running program (aggregated by
+// name/exe across PIDs) per asset. Plain table, NOT a hypertable: replaced in
+// full per scrape by persistAssetProcesses (delete-replace, like
+// AssetSdwanRule / AssetLldpNeighbor). Per-program CPU/RAM are a snapshot
+// (the time-series for PINNED programs lives in AssetProcessSample, Feature C).
+// No FK to Asset — the delete-replace + per-asset queries don't need it, and
+// it matches the AssetSdwanRule convention.
+model AssetProcess {
+  id            String   @id @default(uuid())
+  assetId       String
+  // Aggregation key: the program name (e.g. "nginx", "sqlservr"). Pinning in
+  // Asset.monitoredProcesses / alertWatchedProcesses is by this name.
+  name          String
+  // Number of live PIDs sharing this name at scrape time.
+  instanceCount Int      @default(1)
+  // Summed CPU% (0..100×cores possible) + resident memory across instances.
+  cpuPct        Float?
+  memRssBytes   BigInt?
+  // Representative executable path / owning user / earliest start time.
+  exePath       String?
+  username      String?
+  startedAt     DateTime?
+  // Resolved Windows service / systemd unit backing this program, when the
+  // collector could map it. Drives the Processes-tab control buttons (Phase 4).
+  serviceUnit   String?
+  // True when serviceUnit resolved → start/stop/restart is possible.
+  controllable  Boolean  @default(false)
+  updatedAt     DateTime @updatedAt
+
+  @@unique([assetId, name])
+  @@index([assetId])
+  @@map("asset_processes")
 }
 
 // LLDP neighbor table — current-state per (asset, local interface). Replaced

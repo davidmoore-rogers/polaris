@@ -6984,6 +6984,52 @@ async function persistSdwanRules(
   );
 }
 
+/** One aggregated-by-name program row for the current-state process inventory. */
+export interface AssetProcessInput {
+  name:          string;
+  instanceCount: number;
+  cpuPct:        number | null;
+  memRssBytes:   bigint | null;
+  exePath:       string | null;
+  username:      string | null;
+  startedAt:     Date | null;
+  serviceUnit:   string | null;
+  controllable:  boolean;
+}
+
+/**
+ * Current-state process inventory full-replace for one asset. Mirrors
+ * persistSdwanRules: delete-then-insert in one $transaction (retryOnDeadlock),
+ * so a reader sees either the old set or the new set, never an empty
+ * intermediate. An empty `rows` is a valid delete-only scrape.
+ */
+export async function persistAssetProcesses(
+  assetId: string,
+  rows: AssetProcessInput[],
+): Promise<void> {
+  const data = rows.map((r) => ({
+    id:            randomUUID(),
+    assetId,
+    name:          r.name,
+    instanceCount: r.instanceCount,
+    cpuPct:        r.cpuPct,
+    memRssBytes:   r.memRssBytes,
+    exePath:       r.exePath,
+    username:      r.username,
+    startedAt:     r.startedAt,
+    serviceUnit:   r.serviceUnit,
+    controllable:  r.controllable,
+  }));
+  await retryOnDeadlock(() =>
+    prisma.$transaction([
+      prisma.assetProcess.deleteMany({ where: { assetId } }),
+      ...(data.length > 0
+        ? [prisma.assetProcess.createMany({ data, skipDuplicates: true })]
+        : []),
+    ]),
+  );
+}
+
 /**
  * Replace the asset's LLDP neighbor rows with the latest scrape. Idempotent:
  * existing rows that match (assetId, localIfName, chassisId, portId) are

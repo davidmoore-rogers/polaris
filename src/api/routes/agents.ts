@@ -38,6 +38,7 @@ import {
   recordProbeResult,
   resolveMonitorSettings,
   invalidateMonitorSettingsCache,
+  persistAssetProcesses,
 } from "../../services/monitoringService.js";
 import {
   enqueueMonitorSample,
@@ -223,12 +224,28 @@ const EventLogSampleSchema = z.object({
   count:     z.number().int().min(1).nullable().optional(),
 });
 
+// Current-state process inventory — one row per program (aggregated by name
+// across PIDs). Replaces the asset's whole inventory per push.
+const ProcessSampleSchema = z.object({
+  name:          z.string().min(1).max(255),
+  instanceCount: z.number().int().min(1).max(100000).optional(),
+  cpuPct:        z.number().nullable().optional(),
+  memRssBytes:   z.number().int().nullable().optional(),
+  exePath:       z.string().max(1024).nullable().optional(),
+  username:      z.string().max(255).nullable().optional(),
+  startedAt:     z.string().datetime().nullable().optional(),
+  serviceUnit:   z.string().max(255).nullable().optional(),
+});
+
 const SamplesBodySchema = z.discriminatedUnion("stream", [
   z.object({ stream: z.literal("responseTime"), samples: z.array(ResponseTimeSampleSchema).min(1).max(500) }),
   z.object({ stream: z.literal("telemetry"),    samples: z.array(TelemetrySampleSchema).min(1).max(500) }),
   z.object({ stream: z.literal("interfaces"),   samples: z.array(InterfaceSampleSchema).min(1).max(5000) }),
   z.object({ stream: z.literal("storage"),      samples: z.array(StorageSampleSchema).min(1).max(500) }),
   z.object({ stream: z.literal("eventLog"),     samples: z.array(EventLogSampleSchema).min(1).max(500) }),
+  // A host can run thousands of processes; the agent already aggregates by
+  // name, but cap generously so a pathological host can't OOM the handler.
+  z.object({ stream: z.literal("processInventory"), samples: z.array(ProcessSampleSchema).max(10000) }),
 ]);
 
 agentsRouter.post("/samples", async (req, res, next) => {
@@ -399,6 +416,25 @@ agentsRouter.post("/samples", async (req, res, next) => {
           logger.info({ assetId, accepted: result.accepted, suppressed: result.suppressed }, "agent eventLog ingested");
         }
       }
+    } else if (body.stream === "processInventory") {
+      // Current-state inventory: full-replace the asset's process rows. The
+      // agent aggregates by name; serviceUnit/controllable resolution lands in
+      // Phase 4 (the agent doesn't report it yet, so controllable stays false).
+      await persistAssetProcesses(
+        assetId,
+        body.samples.map((s) => ({
+          name:          s.name,
+          instanceCount: s.instanceCount ?? 1,
+          cpuPct:        s.cpuPct ?? null,
+          memRssBytes:   s.memRssBytes != null ? BigInt(Math.round(s.memRssBytes)) : null,
+          exePath:       s.exePath ?? null,
+          username:      s.username ?? null,
+          startedAt:     s.startedAt ? new Date(s.startedAt) : null,
+          serviceUnit:   s.serviceUnit ?? null,
+          controllable:  Boolean(s.serviceUnit),
+        })),
+      );
+      accepted = body.samples.length;
     } else {
       // storage
       const pinnedStorage = new Set(
@@ -558,6 +594,14 @@ agentsRouter.get("/config", async (req, res, next) => {
           windowsChannels: eventLogConfig?.windowsChannels ?? ["System", "Application"],
           linuxMinPriority: eventLogConfig?.linuxMinPriority ?? 3,
           maxPerPush:      eventLogConfig?.maxPerPush ?? 100,
+        },
+        processes: {
+          // Process inventory + (Feature C) pinned-process telemetry. Enabled
+          // when the processes stream resolves to agent. Agentless transports
+          // (SNMP/SSH/WinRM) collect server-side and never reach the agent.
+          enabled:     eff.processesPolling === "agent",
+          intervalSec: eff.processesIntervalSeconds,
+          timeoutMs:   eff.processesTimeoutMs,
         },
       },
       monitored: asset.monitored,
