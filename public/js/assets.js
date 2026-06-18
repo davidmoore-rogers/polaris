@@ -3430,6 +3430,14 @@ async function openViewModal(id) {
       tabs.push({ key: "sdwan", label: "SD-WAN", html: _assetSdwanTabHTML(a, sdwanRules, sdwanLinks, sdwanMembers) });
     }
     tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id, sightings, ipHistory) });
+    // Processes tab — current-state process inventory + the Monitor/Alert pin
+    // checkboxes. Lazy-loaded on first click (see _wireAssetProcessesTab). Not
+    // shown on Fortinet infrastructure (firewall/switch/access_point) — those
+    // appliances don't report a host process table.
+    var isInfraProc = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
+    if (!isInfraProc) {
+      tabs.push({ key: "processes", label: "Processes", html: _assetProcessesTabHTML(a.id) });
+    }
     // Events tab — audit history scoped to this asset (resourceType=asset,
     // resourceId=a.id). Lazy-loaded on first tab click (see _wireAssetEventsTab)
     // so the modal doesn't fire an extra /events query on every open. Gated on
@@ -3510,6 +3518,7 @@ async function openViewModal(id) {
     if (isAdmin()) _wireSnmpWalkTab(a);
     if (canManageAssets()) _wireQuarantineTab(a);
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
+    if (!isInfraProc) _wireAssetProcessesTab(a.id);
     if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
     // Mount the dependency tree into its placeholder div on the General tab.
     var depMount = document.getElementById("asset-dep-tree-mount-" + a.id);
@@ -12698,6 +12707,133 @@ var _assetEventsPageSize = 15;
 var _assetEventsOffset = 0;
 var _assetEventsTotal = 0;
 var _assetEventsLoaded = false;     // lazy-load guard (first tab click)
+
+// ─── Processes tab ─────────────────────────────────────────────────────────
+// Current-state process inventory (one row per program, aggregated by name)
+// with two pin checkboxes: Monitor (per-minute CPU/RAM + logs — Feature C) and
+// Alert (flag for future alerting). Client-side TableSF for sort/filter since
+// the row set is small + fetched in one call. Lazy-loaded on first tab click.
+function _assetProcessesTabHTML(assetId) {
+  return '<div class="section-block">' +
+    '<div class="filter-bar" style="justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:0.5rem">' +
+      '<p class="hint" style="margin:0;max-width:640px">Check <strong>Monitor</strong> to collect CPU/RAM history and logs for a program (sampled once a minute). Check <strong>Alert</strong> to flag it for future alerting/notifications.</p>' +
+      '<button class="btn btn-secondary btn-sm" id="asset-view-proc-refresh">Refresh</button>' +
+    '</div>' +
+    '<div class="table-wrapper">' +
+      '<table id="asset-view-proc-table">' +
+        '<thead><tr>' +
+          '<th style="width:64px"  data-col-id="monitor">Monitor</th>' +
+          '<th style="width:54px"  data-col-id="alert">Alert</th>' +
+          '<th                      data-col-id="name"      data-sf-key="name"          data-sf-type="string">Name</th>' +
+          '<th style="width:80px"  data-col-id="instances" data-sf-key="instanceCount" data-sf-type="number">Instances</th>' +
+          '<th style="width:80px"  data-col-id="cpu"       data-sf-key="cpuPct"        data-sf-type="number">CPU %</th>' +
+          '<th style="width:110px" data-col-id="ram"       data-sf-key="memRssBytes"   data-sf-type="number">RAM</th>' +
+          '<th style="width:120px" data-col-id="user"      data-sf-key="username"      data-sf-type="string">User</th>' +
+          '<th                      data-col-id="service"   data-sf-key="serviceUnit"   data-sf-type="string">Service/Unit</th>' +
+        '</tr></thead>' +
+        '<tbody id="asset-view-proc-tbody">' +
+          '<tr><td colspan="8" class="empty-state">Loading…</td></tr>' +
+        '</tbody>' +
+      '</table>' +
+    '</div>' +
+  '</div>';
+}
+
+function _wireAssetProcessesTab(assetId) {
+  var btn = document.querySelector('#asset-view-tabs [data-tab="processes"]');
+  if (!btn) return;
+  var loaded = false;
+  var sf = null;
+  var rows = [];
+  var monitored = new Set();
+  var alerted = new Set();
+
+  function fmtPct(v) { return v == null ? "—" : Number(v).toFixed(1); }
+
+  function renderRows(data) {
+    var tbody = document.getElementById("asset-view-proc-tbody");
+    if (!tbody) return;
+    if (!data.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No processes reported yet. Processes appear once an agent (or an SNMP/SSH/WinRM poll) reports this host\'s process list.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.map(function (p) {
+      var nm = escapeHtml(p.name);
+      var monChecked = monitored.has(p.name) ? " checked" : "";
+      var altChecked = alerted.has(p.name) ? " checked" : "";
+      var ram = (p.memRssBytes != null) ? _fmtBytes(Number(p.memRssBytes)) : "—";
+      return '<tr>' +
+        '<td style="text-align:center"><input type="checkbox" class="asset-proc-monitor-toggle" data-proc-name="' + nm + '"' + monChecked + '></td>' +
+        '<td style="text-align:center"><input type="checkbox" class="asset-proc-alert-toggle" data-proc-name="' + nm + '"' + altChecked + '></td>' +
+        '<td title="' + escapeHtml(p.exePath || "") + '">' + nm + '</td>' +
+        '<td>' + (p.instanceCount != null ? p.instanceCount : "—") + '</td>' +
+        '<td>' + fmtPct(p.cpuPct) + '</td>' +
+        '<td>' + ram + '</td>' +
+        '<td>' + escapeHtml(p.username || "—") + '</td>' +
+        '<td>' + (p.serviceUnit ? escapeHtml(p.serviceUnit) : '<span style="color:var(--color-text-tertiary)">—</span>') + '</td>' +
+      '</tr>';
+    }).join("");
+  }
+
+  function apply() { renderRows(sf ? sf.apply(rows) : rows); }
+
+  // Persist a pin-set change. `which` selects which array/field to write.
+  async function togglePin(which, name, on) {
+    var set = which === "monitor" ? monitored : alerted;
+    var field = which === "monitor" ? "monitoredProcesses" : "alertWatchedProcesses";
+    var next = new Set(set);
+    if (on) next.add(name); else next.delete(name);
+    try {
+      var body = {};
+      body[field] = Array.from(next);
+      await api.assets.update(assetId, body);
+      if (which === "monitor") monitored = next; else alerted = next;
+      showToast(on
+        ? (which === "monitor" ? ("Monitoring " + name + " (CPU/RAM + logs)") : ("Flagged " + name + " for alerting"))
+        : (which === "monitor" ? ("Stopped monitoring " + name) : ("Unflagged " + name)),
+        "success");
+    } catch (err) {
+      showToast(err && err.message ? err.message : "Failed to update", "error");
+      apply(); // revert the checkbox to the persisted state
+    }
+  }
+
+  async function load() {
+    var tbody = document.getElementById("asset-view-proc-tbody");
+    try {
+      var resp = await api.assets.processes(assetId);
+      rows = (resp && resp.processes) || [];
+      monitored = new Set((resp && resp.monitoredProcesses) || []);
+      alerted = new Set((resp && resp.alertWatchedProcesses) || []);
+      if (!sf && typeof TableSF !== "undefined") {
+        sf = new TableSF("asset-view-proc-tbody", apply);
+      }
+      apply();
+    } catch (err) {
+      if (tbody) tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Error: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</td></tr>';
+    }
+  }
+
+  // Delegated checkbox handler (survives re-render).
+  var tbody = document.getElementById("asset-view-proc-tbody");
+  if (tbody) {
+    tbody.addEventListener("change", function (e) {
+      var cb = e.target;
+      var name = cb && cb.getAttribute ? cb.getAttribute("data-proc-name") : null;
+      if (!name) return;
+      if (cb.classList.contains("asset-proc-monitor-toggle")) togglePin("monitor", name, cb.checked);
+      else if (cb.classList.contains("asset-proc-alert-toggle")) togglePin("alert", name, cb.checked);
+    });
+  }
+  var refreshBtn = document.getElementById("asset-view-proc-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", load);
+
+  btn.addEventListener("click", function () {
+    if (loaded) return;
+    loaded = true;
+    load();
+  });
+}
 
 function _assetEventsTabHTML(assetId) {
   return '<div class="section-block">' +
