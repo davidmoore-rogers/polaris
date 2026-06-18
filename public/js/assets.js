@@ -4,10 +4,20 @@
 
 var _assetsPageSize = 15;
 var _assetsPage = 1;
+// _assetsData holds ONLY the current page of rows (server-side pagination).
+// The assets page runs TableSF in server-side mode — filter/sort/page state is
+// translated into API params by _buildAssetsQuery() and only one page is
+// fetched, mirroring the Events page. _assetsTotal is the server's full
+// matching count, used to render the pagination controls.
 var _assetsData = [];
+var _assetsTotal = 0;
 var _assetsSF = null;
 var _assetsLayout = null;
 var _assetsSelected = new Set();
+// Selection can span pages, but _assetsData only holds the current page, so we
+// remember a little metadata (status, assetType) for every selected asset to
+// drive the bulk-bar button visibility even after the operator pages away.
+var _assetsSelectedMeta = {};
 
 // Monitor-state palette — green=up, red=down, orange=warning/partial. Shared by
 // every chart/legend/status-dot builder that renders a monitor or SD-WAN
@@ -263,7 +273,9 @@ document.addEventListener("DOMContentLoaded", async function () {
   // (they append to document.body) so the panel still works without this
   // init having run.
   if (!document.getElementById("assets-tbody")) return;
-  _assetsSF = new TableSF("assets-tbody", function () { _assetsPage = 1; renderAssetsPage(); _saveAssetsPrefs(); });
+  // Server-side mode: never call sf.apply(). Any filter/sort change resets to
+  // page 1 and re-fetches with the new state translated into API params.
+  _assetsSF = new TableSF("assets-tbody", function () { _assetsPage = 1; fetchAssetsPage(); _saveAssetsPrefs(); });
   var assetsTable = document.querySelector("#assets-tbody").closest("table");
   _assetsLayout = setupColumnLayout(assetsTable, {
     onChange: _saveAssetsPrefs,
@@ -283,6 +295,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   var bDeselect = document.getElementById("assets-bulk-deselect-btn");
   if (bDeselect) bDeselect.addEventListener("click", function () {
     _assetsSelected.clear();
+    _assetsSelectedMeta = {};
     document.querySelectorAll("#assets-tbody input.row-cb").forEach(function (cb) { cb.checked = false; });
     _assetsUpdateSelectAll();
     _assetsUpdateBulkBar();
@@ -300,8 +313,9 @@ document.addEventListener("DOMContentLoaded", async function () {
     var chk = this.checked;
     cbs.forEach(function (cb) {
       cb.checked = chk;
-      if (chk) _assetsSelected.add(cb.getAttribute("data-id"));
-      else _assetsSelected.delete(cb.getAttribute("data-id"));
+      var id = cb.getAttribute("data-id");
+      if (chk) { _assetsSelected.add(id); _assetsRememberSelection(id); }
+      else { _assetsSelected.delete(id); delete _assetsSelectedMeta[id]; }
     });
     _assetsUpdateBulkBar();
   });
@@ -309,8 +323,8 @@ document.addEventListener("DOMContentLoaded", async function () {
     var cb = e.target;
     if (!cb.classList.contains("row-cb")) return;
     var id = cb.getAttribute("data-id");
-    if (cb.checked) _assetsSelected.add(id);
-    else _assetsSelected.delete(id);
+    if (cb.checked) { _assetsSelected.add(id); _assetsRememberSelection(id); }
+    else { _assetsSelected.delete(id); delete _assetsSelectedMeta[id]; }
     _assetsUpdateSelectAll();
     _assetsUpdateBulkBar();
   });
@@ -320,7 +334,9 @@ document.addEventListener("DOMContentLoaded", async function () {
     e.preventDefault();
     openViewModal(link.getAttribute("data-asset-id"));
   });
-  wireFavoriteClicks("assets-tbody", function () { renderAssetsPage(); });
+  // Favorites-first ordering is resolved server-side, so toggling a star must
+  // re-fetch to re-order the page.
+  wireFavoriteClicks("assets-tbody", function () { fetchAssetsPage(); });
 
   var addBtn = document.getElementById("btn-add-asset");
   if (addBtn) addBtn.addEventListener("click", openCreateModal);
@@ -350,13 +366,13 @@ document.addEventListener("DOMContentLoaded", async function () {
   if (clearFiltersBtn) clearFiltersBtn.addEventListener("click", function () {
     if (_assetsSF) { _assetsSF.clearFilters(); }
     _assetsPage = 1;
-    renderAssetsPage();
+    fetchAssetsPage();
     _saveAssetsPrefs();
   });
   document.getElementById("filter-pagesize").addEventListener("change", function () {
     _assetsPageSize = parseInt(this.value, 10) || 15;
     _assetsPage = 1;
-    renderAssetsPage();
+    fetchAssetsPage();
     _saveAssetsPrefs();
   });
 });
@@ -415,22 +431,95 @@ function _applyAssetsHashFilters() {
   }
 }
 
-async function loadAssets() {
-  _assetsSelected.clear();
-  _assetsUpdateBulkBar();
+// Translate the live TableSF filter + sort state + pagination + favorites into
+// query params for GET /api/v1/assets (server-side mode). Mirrors the Events
+// page's _buildEventsQuery. The saved-filter localStorage prefs are unchanged —
+// they still live in _assetsSF._filters / _sortKey / _sortDir; this just maps
+// that same state onto the wire instead of applying it client-side.
+function _buildAssetsQuery() {
+  var filters = _assetsSF ? (_assetsSF._filters || {}) : {};
+  var params = {
+    limit: _assetsPageSize,
+    offset: (_assetsPage - 1) * _assetsPageSize,
+  };
+
+  // Multi-select enum columns → CSV.
+  if (Array.isArray(filters.status) && filters.status.length) params.status = filters.status.join(",");
+  if (Array.isArray(filters.assetType) && filters.assetType.length) params.assetType = filters.assetType.join(",");
+  if (Array.isArray(filters._monitor) && filters._monitor.length) params.monitor = filters._monitor.join(",");
+
+  // Operator-aware text columns. Param name == column key, except _server→server.
+  var textCols = ["hostname", "ipAddress", "serialNumber", "assetTag", "manufacturer",
+    "model", "os", "macAddress", "assignedTo", "purchaseOrder", "dnsName"];
+  textCols.forEach(function (key) { _pushAssetText(params, key, filters[key]); });
+  _pushAssetText(params, "server", filters._server);
+
+  // lastSeen date-range column.
+  if (filters.lastSeen && filters.lastSeen.type === "date") {
+    if (filters.lastSeen.from) params.lastSeenFrom = filters.lastSeen.from;
+    if (filters.lastSeen.to)   params.lastSeenTo = filters.lastSeen.to;
+  }
+
+  // Favorites-first ordering: send the operator's starred ids so they float to
+  // the top of the whole result set (not just the current page).
+  if (typeof getFavorites === "function") {
+    var favs = getFavorites("assets");
+    if (favs && favs.size) params.favoriteIds = Array.from(favs).join(",");
+  }
+
+  // Sort whitelist.
+  if (_assetsSF && _assetsSF._sortKey) {
+    params.sortBy = _assetsSF._sortKey;
+    params.sortDir = _assetsSF._sortDir === "asc" ? "asc" : "desc";
+  }
+  return params;
+}
+
+// Map one TableSF text-filter value onto <param> / <param>Op. Handles the
+// plain-string contains form, the "!"-prefix negation, and the object forms
+// ({op:"not-contains",q}, {op:"empty"}, {op:"notempty"}) that table-sf stores.
+function _pushAssetText(params, paramKey, raw) {
+  if (raw == null) return;
+  if (typeof raw === "string") {
+    var v = raw.trim();
+    if (!v) return;
+    if (v.charAt(0) === "!") {
+      var rest = v.slice(1).trim();
+      if (!rest) return;
+      params[paramKey] = rest;
+      params[paramKey + "Op"] = "not_contains";
+    } else {
+      params[paramKey] = v; // op defaults to contains server-side
+    }
+  } else if (typeof raw === "object") {
+    if (raw.op === "empty") {
+      params[paramKey + "Op"] = "empty";
+    } else if (raw.op === "notempty") {
+      params[paramKey + "Op"] = "is_not_empty";
+    } else if (raw.op === "not-contains") {
+      var q = (raw.q || "").trim();
+      if (!q) return;
+      params[paramKey] = q;
+      params[paramKey + "Op"] = "not_contains";
+    }
+  }
+}
+
+// Fetch + render the current page. Preserves the cross-page selection set —
+// callers that want a clean slate (post-mutation refresh, Refresh button) go
+// through loadAssets() instead, which clears the selection first.
+async function fetchAssetsPage() {
   var tbody = document.getElementById("assets-tbody");
   try {
-    var PAGE = 10000;
-    var first = await api.assets.list({ limit: PAGE, offset: 0 });
-    var all = first.assets || first;
-    var total = first.total || all.length;
-    if (total > PAGE) {
-      var pages = [];
-      for (var off = PAGE; off < total; off += PAGE) {
-        pages.push(api.assets.list({ limit: PAGE, offset: off }));
-      }
-      var rest = await Promise.all(pages);
-      rest.forEach(function (r) { all = all.concat(r.assets || r); });
+    var data = await api.assets.list(_buildAssetsQuery());
+    var all = data.assets || [];
+    _assetsTotal = (typeof data.total === "number") ? data.total : all.length;
+    // Paged past the end (e.g. after deletions or a narrowing filter while on a
+    // high page) → clamp to the last page and refetch once.
+    var lastPage = Math.max(1, Math.ceil(_assetsTotal / _assetsPageSize));
+    if (all.length === 0 && _assetsTotal > 0 && _assetsPage > lastPage) {
+      _assetsPage = lastPage;
+      return fetchAssetsPage();
     }
     function _mapAsset(a) {
       a._server = a.location || a.learnedLocation || "";
@@ -461,6 +550,17 @@ async function loadAssets() {
   } catch (err) {
     tbody.innerHTML = '<tr><td colspan="19" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
+}
+
+// Full reload: drop the selection and fetch the current page fresh. Used by the
+// Refresh button and by every post-mutation refresh (create / edit / delete /
+// bulk / quarantine / import). Page navigation + filter/sort changes call
+// fetchAssetsPage() directly so they keep the selection.
+async function loadAssets() {
+  _assetsSelected.clear();
+  _assetsSelectedMeta = {};
+  _assetsUpdateBulkBar();
+  await fetchAssetsPage();
 }
 
 function _copyableCell(value) {
@@ -790,24 +890,21 @@ function renderAssetsPage() {
   tbody.addEventListener("click", _handleMonitorPillClick);
   tbody.removeEventListener("click", _handleTypePillClick);
   tbody.addEventListener("click", _handleTypePillClick);
+  // Server-side mode: _assetsData is already the filtered, sorted, favorites-
+  // first current page. Don't re-filter / re-sort / re-slice it client-side.
   if (_assetsData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="19" class="empty-state">No assets found. Add one to get started.</td></tr>';
+    var hasFilters = _assetsSF && _assetsSF._filters && Object.keys(_assetsSF._filters).length > 0;
+    tbody.innerHTML = hasFilters
+      ? '<tr><td colspan="19" class="empty-state">No results match the current filters.</td></tr>'
+      : '<tr><td colspan="19" class="empty-state">No assets found. Add one to get started.</td></tr>';
     clearPageControls("pagination");
     _assetsUpdateSelectAll();
     return;
   }
-  var sfData = _assetsSF ? _assetsSF.apply(_assetsData) : _assetsData;
-  if (sfData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="19" class="empty-state">No results match the current filters.</td></tr>';
-    clearPageControls("pagination");
-    _assetsUpdateSelectAll();
-    return;
-  }
-  sfData = sortFavoritesFirst(sfData, "assets");
-  var start = (_assetsPage - 1) * _assetsPageSize;
-  var page = sfData.slice(start, start + _assetsPageSize);
+  var page = _assetsData;
   tbody.innerHTML = page.map(function (a) {
     var checked = _assetsSelected.has(a.id) ? ' checked' : '';
+    if (checked) _assetsRememberSelection(a.id);
     return '<tr>' +
       '<td class="cb-col"><input type="checkbox" class="row-cb"' + checked + ' data-id="' + a.id + '"></td>' +
       starCellHTML("assets", a.id) +
@@ -844,9 +941,9 @@ function renderAssetsPage() {
     el.addEventListener('mouseleave', _handleMacLeave);
   });
   _assetsUpdateSelectAll();
-  renderPageControls("pagination", sfData.length, _assetsPageSize, _assetsPage, function (p) {
+  renderPageControls("pagination", _assetsTotal, _assetsPageSize, _assetsPage, function (p) {
     _assetsPage = p;
-    renderAssetsPage();
+    fetchAssetsPage();
   }, null, {
     actionButtons: [
       {
@@ -858,12 +955,20 @@ function renderAssetsPage() {
         onClick: function () {
           if (_assetsSF) _assetsSF.clearFilters();
           _assetsPage = 1;
-          renderAssetsPage();
+          fetchAssetsPage();
           _saveAssetsPrefs();
         },
       },
     ],
   });
+}
+
+// Capture lightweight metadata for a selected asset from the current page, so
+// the bulk bar's quarantine/release button logic still works after the operator
+// pages away from the row (selection spans pages; _assetsData does not).
+function _assetsRememberSelection(id) {
+  var a = _assetsData.find(function (x) { return x.id === id; });
+  if (a) _assetsSelectedMeta[id] = { status: a.status, assetType: a.assetType };
 }
 
 function _assetsUpdateSelectAll() {
@@ -893,8 +998,12 @@ function _assetsUpdateBulkBar() {
   // Infrastructure types (firewall/switch/access_point) are excluded from the
   // Quarantine button — they can't be quarantined — but stay eligible for
   // Release in case one was quarantined before this guard was added.
-  if (canManageAssets() && _assetsData && _assetsData.length) {
-    var selected = _assetsData.filter(function (a) { return _assetsSelected.has(a.id); });
+  if (canManageAssets()) {
+    // Use the remembered selection metadata (not _assetsData, which is only the
+    // current page) so the buttons stay correct across paged-away selections.
+    var selected = Object.keys(_assetsSelectedMeta)
+      .filter(function (id) { return _assetsSelected.has(id); })
+      .map(function (id) { return _assetsSelectedMeta[id]; });
     var hasQuarantineable = selected.some(function (a) {
       return a.status !== "quarantined"
         && a.assetType !== "firewall"
@@ -11062,17 +11171,19 @@ async function singleForwardLookup(id, name) {
 /* ─── OUI Lookup ────────────────────────────────────────────────────────── */
 
 async function bulkOuiLookup() {
-  var missing = _assetsData.filter(function (a) { return a.macAddress && !a.manufacturer; });
-  if (missing.length === 0) {
-    showToast("All assets with MACs already have a manufacturer", "success");
-    return;
-  }
-  var ok = await showConfirm("Run OUI manufacturer lookup for " + missing.length + " assets missing a manufacturer?");
+  // The lookup itself is server-side and scans the whole fleet (ouiLookupAll),
+  // so the confirm can't be scoped to the current page — ask generically and
+  // let the server report how many were missing / resolved.
+  var ok = await showConfirm("Run OUI manufacturer lookup for all assets missing a manufacturer?");
   if (!ok) return;
 
   try {
     var result = await api.assets.ouiLookupAll();
-    showToast("OUI resolved " + result.resolved + " of " + result.total + " assets", "success");
+    if (!result.total) {
+      showToast("All assets with MACs already have a manufacturer", "success");
+    } else {
+      showToast("OUI resolved " + result.resolved + " of " + result.total + " assets", "success");
+    }
     if (result.resolved > 0) loadAssets();
   } catch (err) {
     showToast(err.message, "error");
@@ -11119,17 +11230,44 @@ async function singleOuiLookup(id, mac) {
   });
 })();
 
+// Page through GET /assets in 10k-row chunks (the route's max limit) up to a
+// hard ceiling, for the "filtered" / "all" export modes. Server-side paging
+// means the browser no longer holds the whole table, so export re-fetches.
+async function _fetchAssetsForExport(baseParams, signal) {
+  var CHUNK = 10000;
+  var CEILING = 100000;
+  var params = Object.assign({}, baseParams);
+  delete params.favoriteIds; // ordering is irrelevant for an export
+  params.limit = CHUNK;
+  var out = [];
+  var total = Infinity;
+  while (out.length < total && out.length < CEILING) {
+    if (signal && signal.aborted) break;
+    params.offset = out.length;
+    var data = await request("GET", "/assets" + toQuery(params), undefined, signal);
+    var rows = data.assets || [];
+    total = (typeof data.total === "number") ? data.total : rows.length;
+    if (!rows.length) break;
+    out = out.concat(rows);
+  }
+  return { assets: out, total: total };
+}
+
 async function handleAssetExport(mode, fmt) {
   var assets, label, ok;
 
   if (mode === "page") {
-    assets = _assetsData.slice((_assetsPage - 1) * _assetsPageSize, _assetsPage * _assetsPageSize);
+    // _assetsData is already exactly the current page under server-side paging.
+    assets = _assetsData;
     label = "page " + _assetsPage;
   } else if (mode === "filtered") {
-    assets = _assetsData;
-    label = assets.length + " filtered assets";
-    if (assets.length > 100) {
-      ok = await showConfirm("This will export " + assets.length + " assets. Continue?");
+    // Probe the total for the current filter set before committing to export.
+    var probe = await api.assets.list(Object.assign(_buildAssetsQuery(), { limit: 1, offset: 0 }));
+    var filteredTotal = probe.total || 0;
+    if (filteredTotal === 0) { showToast("No assets to export", "error"); return; }
+    label = filteredTotal + " filtered assets";
+    if (filteredTotal > 100) {
+      ok = await showConfirm("This will export " + filteredTotal + " assets. Continue?");
       if (!ok) return;
     }
   } else if (mode === "all") {
@@ -11138,9 +11276,13 @@ async function handleAssetExport(mode, fmt) {
   }
 
   await trackedPdfExport("Exporting assets " + fmt.toUpperCase(), async function (signal) {
-    if (mode === "all") {
-      var allResult = await request("GET", "/assets?limit=200", undefined, signal);
-      assets = allResult.assets || allResult;
+    if (mode === "filtered") {
+      var fr = await _fetchAssetsForExport(_buildAssetsQuery(), signal);
+      assets = fr.assets;
+      label = assets.length + " filtered assets";
+    } else if (mode === "all") {
+      var ar = await _fetchAssetsForExport({}, signal);
+      assets = ar.assets;
       label = "all " + assets.length + " assets";
     }
     if (signal.aborted) return;

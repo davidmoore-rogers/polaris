@@ -302,83 +302,358 @@ async function buildIpContexts(ips: string[]): Promise<Map<string, IpContext>> {
   return out;
 }
 
+// ─── Asset list: server-side filter / sort / pagination ────────────────────
+//
+// The assets table runs TableSF in *server-side mode* (mirrors the Events page,
+// see TEMPLATES.md → "Sortable + filterable data table (server-side mode)"):
+// every filter + sort the operator sets on a column header is translated into
+// query params here, and only one page of rows is shipped to the browser. This
+// is what keeps the page fast at 12k+ assets — the prior frontend pulled the
+// entire table into memory and filtered/sorted/paginated in JS.
+
+// Sort whitelist — Prisma orderBy must never accept user-supplied strings
+// unvalidated. Keys are the table's data-sf-key values; values are the real
+// Asset column. `_monitor` → monitorStatus, `_server` → location (handled
+// specially below so the learnedLocation fallback participates).
+const ASSET_SORT_COLUMNS: Record<string, string> = {
+  hostname: "hostname",
+  ipAddress: "ipAddress",
+  serialNumber: "serialNumber",
+  assetType: "assetType",
+  status: "status",
+  _monitor: "monitorStatus",
+  _server: "location",
+  assetTag: "assetTag",
+  manufacturer: "manufacturer",
+  model: "model",
+  os: "os",
+  macAddress: "macAddress",
+  assignedTo: "assignedTo",
+  purchaseOrder: "purchaseOrder",
+  dnsName: "dnsName",
+  lastSeen: "lastSeen",
+  createdAt: "createdAt",
+};
+
+// Operator-aware text-filter columns (column key → Asset column). Every one is
+// a nullable String on Asset, so empty / is_not_empty carry a null arm.
+const ASSET_TEXT_COLUMNS: Record<string, string> = {
+  hostname: "hostname",
+  ipAddress: "ipAddress",
+  serialNumber: "serialNumber",
+  assetTag: "assetTag",
+  manufacturer: "manufacturer",
+  model: "model",
+  os: "os",
+  macAddress: "macAddress",
+  assignedTo: "assignedTo",
+  purchaseOrder: "purchaseOrder",
+  dnsName: "dnsName",
+};
+
+const ASSET_TEXT_OPS = new Set(["contains", "not_contains", "empty", "is_not_empty"]);
+
+/** CSV → string[]; empty entries dropped; returns undefined for no value. */
+function csvToArray(raw: string | undefined): string[] | undefined {
+  if (!raw) return undefined;
+  const parts = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  return parts.length ? parts : undefined;
+}
+
+/**
+ * Translate a text-filter op + value into a where fragment for a nullable
+ * Asset string column, or undefined for a no-op. Where-level (not field-level)
+ * because empty / is_not_empty need OR / AND composition; the caller ANDs the
+ * fragments together.
+ */
+function buildAssetTextFilter(
+  field: string,
+  value: string | undefined,
+  op: string | undefined,
+): Record<string, unknown> | undefined {
+  const operator = op && ASSET_TEXT_OPS.has(op) ? op : "contains";
+  if (operator === "empty") return { OR: [{ [field]: null }, { [field]: "" }] };
+  if (operator === "is_not_empty") {
+    return { AND: [{ [field]: { not: null } }, { [field]: { not: "" } }] };
+  }
+  const v = (value || "").trim();
+  if (!v) return undefined;
+  if (operator === "not_contains") {
+    return { [field]: { not: { contains: v }, mode: "insensitive" } };
+  }
+  return { [field]: { contains: v, mode: "insensitive" } };
+}
+
+/**
+ * The `_server` column displays `location || learnedLocation`, so its filter
+ * spans both columns: contains → match either, not_contains → match neither,
+ * empty → both blank, is_not_empty → either set.
+ */
+function buildServerFilter(
+  value: string | undefined,
+  op: string | undefined,
+): Record<string, unknown> | undefined {
+  const operator = op && ASSET_TEXT_OPS.has(op) ? op : "contains";
+  const cols = ["location", "learnedLocation"];
+  if (operator === "empty") {
+    return { AND: cols.map((c) => ({ OR: [{ [c]: null }, { [c]: "" }] })) };
+  }
+  if (operator === "is_not_empty") {
+    return { OR: cols.map((c) => ({ AND: [{ [c]: { not: null } }, { [c]: { not: "" } }] })) };
+  }
+  const v = (value || "").trim();
+  if (!v) return undefined;
+  if (operator === "not_contains") {
+    return { AND: cols.map((c) => ({ [c]: { not: { contains: v }, mode: "insensitive" } })) };
+  }
+  return { OR: cols.map((c) => ({ [c]: { contains: v, mode: "insensitive" } })) };
+}
+
+/**
+ * Translate one `_monitor` synthetic-column chip into a where fragment. Mirrors
+ * the client's `_mapAsset` mapping: "Monitored"/"Unmonitored" gate on the
+ * `monitored` flag; the directional chips additionally pin monitorStatus;
+ * "Pending" is everything monitored that hasn't landed a directional status
+ * yet. Multiple selected chips are OR-ed by the caller.
+ */
+function monitorClause(v: string): Record<string, unknown> | null {
+  switch (v) {
+    case "Unmonitored": return { monitored: false };
+    case "Monitored":   return { monitored: true };
+    case "Up":          return { monitored: true, monitorStatus: "up" };
+    case "Warning":     return { monitored: true, monitorStatus: "warning" };
+    case "Down":        return { monitored: true, monitorStatus: "down" };
+    case "Recovering":  return { monitored: true, monitorStatus: "recovering" };
+    case "Pending":     return { monitored: true, monitorStatus: { notIn: ["up", "warning", "down", "recovering"] } };
+    default:            return null;
+  }
+}
+
+// Shared list payload select. Omits heavy fields (notes, associatedUsers) and
+// anything the list table + CSV/PDF export never reference; the single-asset
+// GET /:id below still returns the full record for the view/edit modal.
+const ASSET_LIST_SELECT = {
+  id: true,
+  hostname: true,
+  dnsName: true,
+  assetTag: true,
+  ipAddress: true,
+  macAddress: true,
+  macAddressRows: { select: MAC_ROW_SELECT },
+  associatedIpRows: { select: ASSOCIATED_IP_SELECT },
+  serialNumber: true,
+  manufacturer: true,
+  model: true,
+  os: true,
+  osVersion: true,
+  assignedTo: true,
+  purchaseOrder: true,
+  assetType: true,
+  status: true,
+  statusChangedAt: true,
+  statusChangedBy: true,
+  location: true,
+  learnedLocation: true,
+  lastSeen: true,
+  acquiredAt: true,
+  createdAt: true,
+  monitored: true,
+  monitorStatus: true,
+  lastMonitorAt: true,
+  lastResponseTimeMs: true,
+  discoveredByIntegrationId: true,
+  dependencyLayer: true,
+  dependencySuppressed: true,
+  dependencyTestUntil: true,
+} as const;
+
+const ASSET_LIST_DEFAULT_LIMIT = 50;
+const ASSET_LIST_MAX_LIMIT = 10000;
+// Defensive cap on the favorites-first id list (operator-curated; realistically
+// dozens). Keeps the IN/NOT IN clause bounded if the localStorage set is huge.
+const ASSET_FAVORITES_MAX = 5000;
+
+const AssetListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(ASSET_LIST_MAX_LIMIT).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  // Multi-value enum filters (CSV). Single value → { equals }, many → { in }.
+  status: z.string().optional(),
+  assetType: z.string().optional(),
+  monitor: z.string().optional(),
+  // Existing scalar filters.
+  department: z.string().optional(),
+  createdBy: z.string().optional(),
+  search: z.string().optional(),
+  // lastSeen date range (YYYY-MM-DD from the date-column popover).
+  lastSeenFrom: z.string().optional(),
+  lastSeenTo: z.string().optional(),
+  // Favorites-first ordering: the operator's starred asset ids (CSV).
+  favoriteIds: z.string().optional(),
+  // Sort whitelist; validated below.
+  sortBy: z.string().optional(),
+  sortDir: z.enum(["asc", "desc"]).optional(),
+}).passthrough(); // per-column text filters (<col>, <col>Op) read off req.query
+
+/**
+ * Build the Prisma `where` from validated list-query params. Shared by the list
+ * endpoint and the "export filtered" path so both honor exactly the same
+ * filters.
+ */
+function buildAssetListWhere(
+  q: z.infer<typeof AssetListQuerySchema>,
+  raw: Record<string, unknown>,
+  sessionUsername: string | undefined,
+): Record<string, unknown> {
+  const where: Record<string, unknown> = {};
+  const and: Record<string, unknown>[] = [];
+
+  const statuses = csvToArray(q.status);
+  if (statuses) where.status = statuses.length === 1 ? statuses[0] : { in: statuses };
+
+  const assetTypes = csvToArray(q.assetType);
+  if (assetTypes) where.assetType = assetTypes.length === 1 ? assetTypes[0] : { in: assetTypes };
+
+  if (q.department) where.department = { contains: q.department, mode: "insensitive" };
+  if (q.createdBy === "me") where.createdBy = sessionUsername ?? null;
+  else if (q.createdBy) where.createdBy = q.createdBy;
+
+  if (q.search) {
+    where.OR = [
+      { hostname:   { contains: q.search, mode: "insensitive" } },
+      { dnsName:    { contains: q.search, mode: "insensitive" } },
+      { ipAddress:  { contains: q.search, mode: "insensitive" } },
+      { macAddress: { contains: q.search, mode: "insensitive" } },
+      { assetTag:   { contains: q.search, mode: "insensitive" } },
+      { assignedTo: { contains: q.search, mode: "insensitive" } },
+    ];
+  }
+
+  // Per-column operator-aware text filters.
+  for (const [key, column] of Object.entries(ASSET_TEXT_COLUMNS)) {
+    const value = typeof raw[key] === "string" ? (raw[key] as string) : undefined;
+    const op = typeof raw[key + "Op"] === "string" ? (raw[key + "Op"] as string) : undefined;
+    if (value == null && op == null) continue;
+    const frag = buildAssetTextFilter(column, value, op);
+    if (frag) and.push(frag);
+  }
+  // `_server` spans location + learnedLocation.
+  const serverVal = typeof raw["server"] === "string" ? (raw["server"] as string) : undefined;
+  const serverOp = typeof raw["serverOp"] === "string" ? (raw["serverOp"] as string) : undefined;
+  if (serverVal != null || serverOp != null) {
+    const frag = buildServerFilter(serverVal, serverOp);
+    if (frag) and.push(frag);
+  }
+
+  // `_monitor` multi-select → OR of chip clauses.
+  const monitorVals = csvToArray(q.monitor);
+  if (monitorVals) {
+    const clauses = monitorVals.map(monitorClause).filter((c): c is Record<string, unknown> => c !== null);
+    if (clauses.length) and.push(clauses.length === 1 ? clauses[0] : { OR: clauses });
+  }
+
+  // lastSeen date range.
+  if (q.lastSeenFrom || q.lastSeenTo) {
+    const range: Record<string, Date> = {};
+    if (q.lastSeenFrom) {
+      const d = new Date(q.lastSeenFrom + "T00:00:00");
+      if (!isNaN(+d)) range.gte = d;
+    }
+    if (q.lastSeenTo) {
+      const d = new Date(q.lastSeenTo + "T23:59:59.999");
+      if (!isNaN(+d)) range.lte = d;
+    }
+    if (range.gte || range.lte) where.lastSeen = range;
+  }
+
+  if (and.length) where.AND = and;
+  return where;
+}
+
+/** Resolve a validated sort param into a Prisma orderBy. */
+function buildAssetOrderBy(
+  sortBy: string | undefined,
+  sortDir: "asc" | "desc" | undefined,
+): Record<string, "asc" | "desc"> | Record<string, "asc" | "desc">[] {
+  if (!sortBy) return { createdAt: "desc" };
+  if (!ASSET_SORT_COLUMNS[sortBy]) throw new AppError(400, `Invalid sortBy: ${sortBy}`);
+  const dir: "asc" | "desc" = sortDir ?? "asc";
+  // `_server` orders by location then its learnedLocation fallback.
+  if (sortBy === "_server") return [{ location: dir }, { learnedLocation: dir }];
+  return { [ASSET_SORT_COLUMNS[sortBy]]: dir };
+}
+
+function enrichAssetList(
+  assets: Array<{ ipAddress: string | null; associatedIpRows: unknown; macAddressRows: unknown } & Record<string, unknown>>,
+  ipCtx: Map<string, IpContext>,
+) {
+  return assets.map(({ associatedIpRows, macAddressRows, ...a }) => ({
+    ...a,
+    associatedIps: shapeAssociatedIps(associatedIpRows as never),
+    macAddresses: shapeMacRows(macAddressRows as never),
+    ipContext: a.ipAddress ? (ipCtx.get(a.ipAddress) || null) : null,
+  }));
+}
+
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
-// GET /api/v1/assets — list all assets (all authenticated users, paginated)
+// GET /api/v1/assets — list assets (all authenticated users). Server-side
+// filter / sort / pagination; favorites-first ordering when `favoriteIds` is
+// supplied (operator's starred ids float to the top of the whole result set,
+// not just the current page).
 router.get("/", requirePermission("assets", "read"), async (req, res, next) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 10000);
-    const offset = parseInt(req.query.offset as string, 10) || 0;
-    const { status, assetType, department, search, createdBy } = req.query as Record<string, string>;
-    const where: Record<string, unknown> = {};
-    if (status) where.status = status;
-    if (assetType) where.assetType = assetType;
-    if (department) where.department = { contains: department, mode: "insensitive" };
-    if (createdBy === "me") where.createdBy = req.session?.username ?? null;
-    else if (createdBy) where.createdBy = createdBy;
-    if (search) {
-      where.OR = [
-        { hostname:  { contains: search, mode: "insensitive" } },
-        { dnsName:   { contains: search, mode: "insensitive" } },
-        { ipAddress: { contains: search, mode: "insensitive" } },
-        { macAddress:{ contains: search, mode: "insensitive" } },
-        { assetTag:  { contains: search, mode: "insensitive" } },
-        { assignedTo:{ contains: search, mode: "insensitive" } },
-      ];
+    const parsed = AssetListQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      throw new AppError(400, "Invalid query: " + parsed.error.issues[0].message);
     }
-    // Trim list payload: omit heavy fields (notes, associatedUsers) and fields
-    // the list table + CSV export never reference. The single-asset GET /:id
-    // below still returns the full record for the view/edit modal.
-    const [assets, total] = await Promise.all([
-      prisma.asset.findMany({
-        where,
-        orderBy: { createdAt: "desc" },
-        skip: offset,
-        take: limit,
-        select: {
-          id: true,
-          hostname: true,
-          dnsName: true,
-          assetTag: true,
-          ipAddress: true,
-          macAddress: true,
-          macAddressRows: { select: MAC_ROW_SELECT },
-          associatedIpRows: { select: ASSOCIATED_IP_SELECT },
-          serialNumber: true,
-          manufacturer: true,
-          model: true,
-          os: true,
-          osVersion: true,
-          assignedTo: true,
-          purchaseOrder: true,
-          assetType: true,
-          status: true,
-          statusChangedAt: true,
-          statusChangedBy: true,
-          location: true,
-          learnedLocation: true,
-          lastSeen: true,
-          acquiredAt: true,
-          createdAt: true,
-          monitored: true,
-          monitorStatus: true,
-          lastMonitorAt: true,
-          lastResponseTimeMs: true,
-          discoveredByIntegrationId: true,
-          dependencyLayer: true,
-          dependencySuppressed: true,
-          dependencyTestUntil: true,
-        },
-      }),
-      prisma.asset.count({ where }),
-    ]);
-    const ipCtx = await buildIpContexts(assets.map((a) => a.ipAddress).filter(Boolean) as string[]);
-    const enriched = assets.map(({ associatedIpRows, macAddressRows, ...a }) => ({
-      ...a,
-      associatedIps: shapeAssociatedIps(associatedIpRows),
-      macAddresses: shapeMacRows(macAddressRows),
-      ipContext: a.ipAddress ? (ipCtx.get(a.ipAddress) || null) : null,
-    }));
+    const q = parsed.data;
+    const limit = Math.min(q.limit ?? ASSET_LIST_DEFAULT_LIMIT, ASSET_LIST_MAX_LIMIT);
+    const offset = q.offset ?? 0;
+
+    const where = buildAssetListWhere(q, req.query as Record<string, unknown>, req.session?.username);
+    const orderBy = buildAssetOrderBy(q.sortBy, q.sortDir);
+
+    let favoriteIds = csvToArray(q.favoriteIds);
+    if (favoriteIds && favoriteIds.length > ASSET_FAVORITES_MAX) {
+      favoriteIds = favoriteIds.slice(0, ASSET_FAVORITES_MAX);
+    }
+
+    let assets: Array<Record<string, unknown>>;
+    let total: number;
+
+    if (favoriteIds && favoriteIds.length) {
+      // Two-bucket ordering: favorites (matching the active filters, sorted)
+      // occupy virtual positions [0, favTotal); non-favorites follow. The
+      // requested window may straddle the boundary, so query each bucket with
+      // the appropriate skip/take and concatenate.
+      const favWhere = { AND: [where, { id: { in: favoriteIds } }] };
+      const nonFavWhere = { AND: [where, { id: { notIn: favoriteIds } }] };
+      const [favTotal, totalCount] = await Promise.all([
+        prisma.asset.count({ where: favWhere }),
+        prisma.asset.count({ where }),
+      ]);
+      total = totalCount;
+      const favPart = offset < favTotal
+        ? await prisma.asset.findMany({ where: favWhere, orderBy, skip: offset, take: limit, select: ASSET_LIST_SELECT })
+        : [];
+      const remaining = limit - favPart.length;
+      let nonFavPart: typeof favPart = [];
+      if (remaining > 0) {
+        const nonFavSkip = Math.max(0, offset - favTotal);
+        nonFavPart = await prisma.asset.findMany({ where: nonFavWhere, orderBy, skip: nonFavSkip, take: remaining, select: ASSET_LIST_SELECT });
+      }
+      assets = [...favPart, ...nonFavPart];
+    } else {
+      const [rows, totalCount] = await Promise.all([
+        prisma.asset.findMany({ where, orderBy, skip: offset, take: limit, select: ASSET_LIST_SELECT }),
+        prisma.asset.count({ where }),
+      ]);
+      assets = rows;
+      total = totalCount;
+    }
+
+    const ipCtx = await buildIpContexts(assets.map((a) => a.ipAddress as string | null).filter(Boolean) as string[]);
+    const enriched = enrichAssetList(assets as never, ipCtx);
     res.json({ assets: enriched, total, limit, offset });
   } catch (err) {
     next(err);

@@ -201,7 +201,7 @@ Per-pattern sections:
 
 **What it is:** A `<table>` with per-column sort, inline filter, and (optionally) multi-select dropdown filters. Used for the assets, subnets, blocks, reservations, integrations, events, users, MIBs, and credentials lists.
 
-**Canonical implementation:** `TableSF` in `public/js/table-sf.js`. Used by every list page; the assets table at `public/assets.html` + `public/js/assets.js` is the most feature-complete example.
+**Canonical implementation:** `TableSF` in `public/js/table-sf.js`. Used by every list page. The subnets / blocks / reservations lists are the reference for **client-side mode** (whole dataset in the browser, `sf.apply()` filters/sorts/paginates in JS). The **assets** and **events** lists run in **server-side mode** (see below) — assets moved off client-side mode because at 12k+ rows shipping the whole table was slow.
 
 **Key conventions:**
 - Mark sortable/filterable columns on `<th>` with:
@@ -221,7 +221,7 @@ Per-pattern sections:
 - Pagination, if needed, lives **outside** `TableSF` (apply pagination after `sf.apply()`).
 - Always wire `onChange` to the render function so filter/sort updates live-refresh.
 
-**Server-side mode (for high-volume tables).** When the table is too large to ship to the browser (Events at 235k–350k rows in a 7-day window is the canonical case; future telemetry/sample admin views would qualify too), keep using `TableSF` for its header UI but route every filter + sort + page operation through the API. The mode is a consumer convention — no changes to `public/js/table-sf.js` are needed. Canonical implementation: [public/js/events.js](public/js/events.js) + [public/events.html](public/events.html).
+**Server-side mode (for high-volume tables).** When the table is too large to ship to the browser (Events at 235k–350k rows in a 7-day window, and the assets list at 12k+ rows, are the canonical cases; future telemetry/sample admin views would qualify too), keep using `TableSF` for its header UI but route every filter + sort + page operation through the API. The mode is a consumer convention — no changes to `public/js/table-sf.js` are needed. Canonical implementations: [public/js/events.js](public/js/events.js) + [public/events.html](public/events.html) (simplest), and [public/js/assets.js](public/js/assets.js) (`_buildAssetsQuery` / `fetchAssetsPage`) which adds the favorites-first + cross-page-selection wrinkles below.
 
 - Instantiate once: `_sf = new TableSF("<tbody-id>", onChange)`. **Never call `sf.apply()`** — every row that reaches the tbody came from the server already filtered + sorted.
 - The `onChange` callback reads `sf._sortKey`, `sf._sortDir`, `sf._filters` directly, resets offset to 0, and re-fetches. Translate state into API params:
@@ -232,7 +232,9 @@ Per-pattern sections:
 - Dynamic multi-select options (operator-extensible enums like resourceType) — call `sf.setColumnOptions("<key>", values)` after each fetch. Pre-this-change checked values are preserved if they're still in the new option set.
 - Persist filter + sort state in the page's `polaris-prefs-<scope>-<username>` localStorage blob alongside the column layout — match the other list pages. Restore via `sf._filters = saved.filters; sf._sortKey = saved.sort.key; sf._sortDir = saved.sort.dir; sf.restoreFilterUI();` before the first fetch.
 - Offset-based pagination still lives outside `TableSF` — wire prev/next/page-buttons to bump a module-scope offset and call the same fetch helper.
-- Any non-tbody consumer of filter state (PDF/CSV export's "All filtered results" path) must read from `sf._filters`, not the (now-deleted) DOM filter strip.
+- Any non-tbody consumer of filter state (PDF/CSV export's "All filtered results" path) must read from `sf._filters`, not the (now-deleted) DOM filter strip. With only one page in memory, "export filtered/all" re-fetches from the server in chunks (assets.js `_fetchAssetsForExport` pages in 10k-row windows up to a ceiling); "export page" just uses the in-memory page array.
+- **Favorites-first across pages** (assets.js): when the page has a localStorage favorites set, send the starred ids as `?favoriteIds=` (CSV) so the server floats them to the top of the *whole* result set, not just the current page. The route resolves this with a two-bucket query — favorites (matching the active filters, sorted) occupy virtual positions `[0, favTotal)`, non-favorites follow; the requested `[offset, offset+limit)` window is split across the boundary. Skip the param (and the second query) when the set is empty.
+- **Cross-page bulk selection** (assets.js): the selection `Set` of ids survives page navigation (page changes call the fetch helper directly, *not* the selection-clearing reload). Because only the current page is in memory, keep a parallel `id → {status, assetType}` metadata map (`_assetsSelectedMeta`) captured at check time so the bulk-action bar's button-visibility logic still works for selected rows the operator has paged away from.
 
 ---
 

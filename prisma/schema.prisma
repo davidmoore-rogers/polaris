@@ -819,6 +819,11 @@ model Asset {
   @@index([monitored])
   @@index([monitored, lastMonitorAt])
   @@index([dependencySuppressed])
+  // Server-side list ordering: createdAt is the default sort on every load;
+  // lastSeen is a common "what's gone stale" sort. Indexed so the paged
+  // ORDER BY ... LIMIT stays cheap as the fleet grows past a few thousand.
+  @@index([createdAt])
+  @@index([lastSeen])
   @@map("assets")
 }
 
