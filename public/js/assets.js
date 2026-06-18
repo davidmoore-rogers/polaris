@@ -7283,41 +7283,37 @@ async function _renderIntermittencyBar(assetId) {
     slot.innerHTML = '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">No samples in the last 30 minutes</span>';
     return;
   }
-  // Replay the state machine forward across the FULL hour of samples, then
-  // slice the trailing 30 for display — gives the replay ~30 samples of
-  // warm-up so the visible window starts in a settled state instead of a
-  // blue "recovering" run while the success counter climbs to threshold.
+  // Per-sample coloring (NOT a replay of the Status pill's hysteresis state
+  // machine): each block reflects that single sample's outcome so the bar
+  // reads literally. A success is green immediately — no recovery smear.
+  // A failure is yellow (warning); once it's the Nth consecutive failure
+  // (N = failureThreshold, the same count the pill uses to declare down) it
+  // flips red and stays red while the run continues. Worked examples at
+  // threshold 3: one missed poll → green, yellow, green; a device going down
+  // → green, yellow, yellow, red. We still walk the FULL hour and slice the
+  // trailing 30 so the consecutive-failure counter is warmed up across the
+  // 30-sample boundary (a dip that started before the visible window keeps
+  // its correct red/yellow color).
   var cf = 0;
-  var cs = 0;
-  var prev = "unknown";
   var allStates = allSamples.map(function (s) {
+    var status;
     if (s.success) {
-      cf = 0; cs += 1;
-      if (prev === "up") {
-        // stay up
-      } else if (prev === "warning" || prev === "recovering") {
-        if (cs >= threshold) prev = "up";
-      } else {
-        // unknown / down → start the recovery counter at recovering.
-        prev = (cs >= threshold) ? "up" : "recovering";
-      }
+      cf = 0;
+      status = "up";
     } else {
-      cs = 0; cf += 1;
-      if (cf >= threshold) prev = "down";
-      else if (prev === "up" || prev === "unknown") prev = "warning";
-      // recovering / warning / down stay
+      cf += 1;
+      status = (cf >= threshold) ? "down" : "warning";
     }
-    return { timestamp: s.timestamp, status: prev };
+    return { timestamp: s.timestamp, status: status };
   });
   var states = allStates.slice(-30);
 
   // Color map mirrors badge-monitor-* hues so the bar reads as the same
-  // visual vocabulary as the pill above it. Recovering and unknown share
-  // the blue treatment (different labels in the pill, same color here).
+  // visual vocabulary as the pill above it. This bar only ever emits
+  // up / warning / down per sample; unknown remains the fallback color.
   var colors = {
     up:         "rgba(0,200,83,0.65)",
     warning:    "rgba(255,193,7,0.75)",
-    recovering: "rgba(79,195,247,0.65)",
     down:       "rgba(211,47,47,0.75)",
     unknown:    "rgba(117,117,117,0.45)",
   };
