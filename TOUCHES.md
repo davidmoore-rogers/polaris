@@ -2091,6 +2091,28 @@ Listed alphabetically.
 
 ---
 
+## services/logFlagRuleService.ts
+
+**What it owns:** User-defined log-flag rules (Feature C) — operator rules that FLAG matching process-log lines. Owns the `LogFlagRule` table, the compiled-rule cache, the read-time evaluator, and CRUD.
+
+**Public API:** `evaluateLogFlags(assetId, name, rows, onlyFlagged)` (annotate log rows with matched rules); `listLogFlagRules` / `createLogFlagRule` / `updateLogFlagRule` / `deleteLogFlagRule`; `invalidateLogFlagRuleCache`; pure helpers `globToRegExp` / `compileRule` / `applicableRules`; types `LogFlagRuleRow` / `CompiledRule` / `LogFlagRuleInput` / `FlaggedLogLine`.
+
+**Cross-service deps:** `eventLogService.logEvent` (audit `logflagrule.*`); `prisma.logFlagRule`.
+
+**Used by:** `src/api/routes/logFlagRules.ts` (CRUD at `/api/v1/log-flag-rules`); `src/api/routes/assets.ts:GET /assets/:id/process-logs` (annotates returned lines via `evaluateLogFlags`; `?flagged=1` → only matches).
+
+**Invariants:**
+- **Read-time eval, no persisted flag** — flags are computed per fetch over the bounded log window, so a new/edited rule retroactively flags history and edits take effect on the next fetch (no backfill).
+- The compiled-rule cache MUST be invalidated on every rule write (`invalidateLogFlagRuleCache` is called inside each CRUD) or stale rules apply.
+- An invalid regex pattern compiles to a never-matching matcher (never throws on the read path).
+- minLevel gate suppresses only when the line's level is KNOWN and below the floor; unknown level is not suppressed.
+
+**When changing this:**
+- New matchType: extend `compileRule` + the route Zod enum + the modal's match-type select in lockstep.
+- Applying rules to OS event logs (Feature A) later: reuse `evaluateLogFlags` against those rows — the engine is transport-agnostic.
+
+---
+
 ## services/eventLogService.ts
 
 **What it owns:** The shared audit-event writer. `logEvent` (never throws; drops rows below the operator-configured min level; stamps `levelRank` at write time), `buildChanges` (before/after diff for `.updated` events), `LogEventInput`. Plus the discovery per-asset audit helpers: `snapshotMaterialAssetFields` (capture material fields before a discovery branch mutates the in-memory asset), `computeMaterialAssetChanges` (pure diff over the material-field whitelist), `logDiscoveryAssetCreated` (`asset.discovered`), `logDiscoveryAssetUpdated` (`asset.discovery_updated` — fires only when a material field changed), `DiscoveryAuditContext`.

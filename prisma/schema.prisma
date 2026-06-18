@@ -1076,6 +1076,36 @@ model AssetProcessConfig {
   @@map("asset_process_configs")
 }
 
+// Operator-defined rules that FLAG matching log lines (Feature C). Evaluated at
+// READ time over the process-log query window (no per-row persisted flag) so a
+// new/edited rule retroactively flags history with no backfill. Scope: global
+// (all process logs) | asset (one asset) | process (one asset+program). matchType
+// substring|regex|glob over the message text. No FK — global rules have no asset.
+model LogFlagRule {
+  id            String   @id @default(uuid())
+  name          String
+  enabled       Boolean  @default(true)
+  scope         String   @default("global") // "global" | "asset" | "process"
+  assetId       String? // set when scope = asset | process
+  processName   String? // set when scope = process
+  matchType     String   @default("substring") // "substring" | "regex" | "glob"
+  pattern       String
+  caseSensitive Boolean  @default(false)
+  // Optional severity floor — only flag lines at/above this level (when the
+  // line's level is known). null = any level.
+  minLevel      String?
+  // Operator-facing label + optional UI color for the flag badge.
+  label         String?
+  color         String?
+  createdBy     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([enabled])
+  @@index([assetId])
+  @@map("log_flag_rules")
+}
+
 // Per-sensor hardware snapshot, written alongside telemetry. Covers the whole
 // hardware-sensor table — temperature, fan, voltage, power/psu, disk, and
 // anything else — one row per sensor per scrape. FortiOS exposes these via

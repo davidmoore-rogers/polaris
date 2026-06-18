@@ -502,6 +502,12 @@ const api = {
       return request("GET", "/monitor-settings/asset-overrides" + (qs.length ? "?" + qs.join("&") : ""));
     },
   },
+  logFlagRules: {
+    list:   ()        => request("GET", "/log-flag-rules"),
+    create: (body)    => request("POST", "/log-flag-rules", body),
+    update: (id, body) => request("PUT", `/log-flag-rules/${id}`, body),
+    remove: (id)      => request("DELETE", `/log-flag-rules/${id}`),
+  },
   conflicts: {
     list:   (params) => request("GET", "/conflicts" + toQuery(params)),
     count:  ()       => request("GET", "/conflicts/count"),

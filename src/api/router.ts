@@ -11,6 +11,7 @@ import utilizationRouter from "./routes/utilization.js";
 import usersRouter from "./routes/users.js";
 import integrationsRouter from "./routes/integrations.js";
 import assetsRouter from "./routes/assets.js";
+import logFlagRulesRouter from "./routes/logFlagRules.js";
 import eventsRouter from "./routes/events.js";
 import conflictsRouter from "./routes/conflicts.js";
 import serverSettingsRouter from "./routes/serverSettings.js";
@@ -92,6 +93,7 @@ router.use("/integrations", requirePermission("integrations", "read"), integrati
 // built-ins are seeded as isProtected=true and reject rename/delete.
 router.use("/asset-types", assetTypesRouter);
 router.use("/assets", assetsRouter);
+router.use("/log-flag-rules", logFlagRulesRouter);
 router.use("/events", eventsRouter);
 router.use("/search", searchRouter);
 // Region routes are mounted BEFORE /map so Express's first-match routing picks

@@ -12919,9 +12919,13 @@ async function openProcessDetailPanel(asset, name, cfg) {
       '<div id="proc-mem-stats" style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">Loading…</div>' +
       '<div id="proc-mem-chart" class="proc-chart-box"></div>' +
       '<div style="margin-top:1rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
-        '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem">' +
+        '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem;gap:8px;flex-wrap:wrap">' +
           '<h4 style="margin:0">Logs</h4>' +
-          '<button class="btn btn-sm btn-secondary" id="btn-proc-logs-refresh">Refresh</button>' +
+          '<div style="display:flex;align-items:center;gap:10px">' +
+            '<label style="font-size:0.78rem;display:flex;align-items:center;gap:4px"><input type="checkbox" id="proc-logs-flagged-only">Flagged only</label>' +
+            (canEdit ? '<button class="btn btn-sm btn-secondary" id="btn-proc-flag-rules">Manage flag rules</button>' : '') +
+            '<button class="btn btn-sm btn-secondary" id="btn-proc-logs-refresh">Refresh</button>' +
+          '</div>' +
         '</div>' +
         '<div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin:0.4rem 0">' +
           '<label style="font-size:0.78rem;color:var(--color-text-secondary)">Source' +
@@ -12960,6 +12964,10 @@ async function openProcessDetailPanel(asset, name, cfg) {
   });
   var refreshLogs = document.getElementById("btn-proc-logs-refresh");
   if (refreshLogs) refreshLogs.addEventListener("click", function () { _loadProcessLogsFor(asset.id, name); });
+  var flaggedOnly = document.getElementById("proc-logs-flagged-only");
+  if (flaggedOnly) flaggedOnly.addEventListener("change", function () { _loadProcessLogsFor(asset.id, name); });
+  var manageRules = document.getElementById("btn-proc-flag-rules");
+  if (manageRules) manageRules.addEventListener("click", function () { openLogFlagRulesModal(asset, name, function () { _loadProcessLogsFor(asset.id, name); }); });
   var saveCfg = document.getElementById("btn-proc-log-config-save");
   if (saveCfg) {
     saveCfg.addEventListener("click", async function () {
@@ -13007,22 +13015,135 @@ async function _loadProcessHistoryFor(assetId, name, range) {
 async function _loadProcessLogsFor(assetId, name) {
   var el = document.getElementById("proc-logs-view");
   if (!el) return;
+  var flaggedToggle = document.getElementById("proc-logs-flagged-only");
+  var flaggedOnly = !!(flaggedToggle && flaggedToggle.checked);
   try {
-    var data = await api.assets.processLogs(assetId, name, { limit: 300 });
+    var data = await api.assets.processLogs(assetId, name, { limit: 300, flagged: flaggedOnly ? 1 : undefined });
     var logs = data.logs || [];
     if (!logs.length) {
-      el.textContent = "No log lines collected yet. Set a log source/path above (or enable journald on Linux) and check that the program is pinned for Monitor.";
+      el.textContent = flaggedOnly
+        ? "No flagged log lines in this window."
+        : "No log lines collected yet. Set a log source/path above (or enable journald on Linux) and check that the program is pinned for Monitor.";
       return;
     }
     // Server returns newest-first; show oldest-first in the viewer.
     el.innerHTML = logs.slice().reverse().map(function (l) {
       var ts = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "";
       var lvl = l.level ? "[" + escapeHtml(l.level) + "] " : "";
-      return '<div>' + '<span style="color:var(--color-text-tertiary)">' + escapeHtml(ts) + '</span> ' + lvl + escapeHtml(l.message || "") + '</div>';
+      var flags = Array.isArray(l.flags) ? l.flags : [];
+      var badges = flags.map(function (f) {
+        var col = f.color || "var(--color-warning)";
+        return '<span style="display:inline-block;margin-left:6px;padding:0 5px;border-radius:3px;font-size:0.7rem;background:' + col + ';color:#000">' + escapeHtml(f.label || f.name) + '</span>';
+      }).join("");
+      var hl = flags.length ? ';background:rgba(245,158,11,0.12);border-left:2px solid var(--color-warning);padding-left:4px' : "";
+      return '<div style="' + hl + '"><span style="color:var(--color-text-tertiary)">' + escapeHtml(ts) + '</span> ' + lvl + escapeHtml(l.message || "") + badges + '</div>';
     }).join("");
   } catch (err) {
     el.textContent = "Error: " + (err.message || "failed to load logs");
   }
+}
+
+// Manage-flag-rules modal: list rules (scoped to global + this asset/program),
+// add a rule prefilled for this process, toggle enable, delete. onChange is
+// invoked after any write so the caller can re-fetch the flagged view.
+function openLogFlagRulesModal(asset, processName, onChange) {
+  var bodyHTML =
+    '<div id="lfr-modal">' +
+      '<p class="hint" style="margin-top:0">Rules flag matching log lines at read time. Scope to all logs, this asset, or this program.</p>' +
+      '<div id="lfr-list" style="margin-bottom:1rem">Loading…</div>' +
+      '<h4 style="margin:0.5rem 0">Add rule</h4>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' +
+        '<label style="font-size:0.8rem">Name<input type="text" id="lfr-name" style="width:100%;box-sizing:border-box"></label>' +
+        '<label style="font-size:0.8rem">Scope<select id="lfr-scope" style="width:100%">' +
+          '<option value="process">This program (' + escapeHtml(processName) + ')</option>' +
+          '<option value="asset">This asset</option>' +
+          '<option value="global">All process logs</option>' +
+        '</select></label>' +
+        '<label style="font-size:0.8rem">Match type<select id="lfr-matchtype" style="width:100%"><option value="substring">Contains</option><option value="regex">Regex</option><option value="glob">Glob</option></select></label>' +
+        '<label style="font-size:0.8rem">Min level<select id="lfr-minlevel" style="width:100%"><option value="">Any</option><option value="warning">Warning+</option><option value="error">Error+</option><option value="critical">Critical</option></select></label>' +
+        '<label style="font-size:0.8rem;grid-column:1/3">Pattern<input type="text" id="lfr-pattern" style="width:100%;box-sizing:border-box" placeholder="e.g. error  |  out of memory  |  *timeout*"></label>' +
+        '<label style="font-size:0.8rem">Label<input type="text" id="lfr-label" style="width:100%;box-sizing:border-box" placeholder="optional"></label>' +
+        '<label style="font-size:0.8rem;display:flex;align-items:center;gap:6px;margin-top:1.2rem"><input type="checkbox" id="lfr-case">Case-sensitive</label>' +
+      '</div>' +
+      '<div style="display:flex;justify-content:flex-end;margin-top:0.6rem"><button class="btn btn-sm btn-primary" id="lfr-add">Add rule</button></div>' +
+    '</div>';
+  openModal("Log flag rules — " + processName, bodyHTML, '<button class="btn btn-secondary" id="lfr-close">Close</button>');
+  var closeBtn = document.getElementById("lfr-close");
+  if (closeBtn) closeBtn.addEventListener("click", closeModal);
+
+  async function refreshList() {
+    var listEl = document.getElementById("lfr-list");
+    if (!listEl) return;
+    try {
+      var resp = await api.logFlagRules.list();
+      var rules = (resp && resp.rules) || [];
+      // Show rules relevant to this view: global + this asset (+ its programs).
+      rules = rules.filter(function (r) {
+        return r.scope === "global" || r.assetId === asset.id;
+      });
+      if (!rules.length) { listEl.innerHTML = '<p class="empty-state" style="margin:0">No rules yet.</p>'; return; }
+      listEl.innerHTML = '<table class="data-table" style="font-size:0.8rem;width:100%"><thead><tr><th>On</th><th>Name</th><th>Scope</th><th>Match</th><th>Pattern</th><th></th></tr></thead><tbody>' +
+        rules.map(function (r) {
+          var scopeLabel = r.scope === "process" ? ("program: " + escapeHtml(r.processName || "?")) : r.scope === "asset" ? "this asset" : "global";
+          return '<tr>' +
+            '<td><input type="checkbox" class="lfr-enable" data-id="' + r.id + '"' + (r.enabled ? " checked" : "") + '></td>' +
+            '<td>' + escapeHtml(r.name) + '</td>' +
+            '<td>' + scopeLabel + '</td>' +
+            '<td>' + escapeHtml(r.matchType) + '</td>' +
+            '<td class="mono">' + escapeHtml(r.pattern) + '</td>' +
+            '<td><button class="btn btn-sm btn-danger lfr-del" data-id="' + r.id + '">Delete</button></td>' +
+          '</tr>';
+        }).join("") + '</tbody></table>';
+      listEl.querySelectorAll(".lfr-enable").forEach(function (cb) {
+        cb.addEventListener("change", async function () {
+          try { await api.logFlagRules.update(cb.getAttribute("data-id"), { enabled: cb.checked }); if (onChange) onChange(); }
+          catch (err) { showToast(err.message || "Update failed", "error"); cb.checked = !cb.checked; }
+        });
+      });
+      listEl.querySelectorAll(".lfr-del").forEach(function (b) {
+        b.addEventListener("click", async function () {
+          try { await api.logFlagRules.remove(b.getAttribute("data-id")); refreshList(); if (onChange) onChange(); }
+          catch (err) { showToast(err.message || "Delete failed", "error"); }
+        });
+      });
+    } catch (err) {
+      listEl.textContent = "Error: " + (err.message || "failed to load rules");
+    }
+  }
+
+  var addBtn = document.getElementById("lfr-add");
+  if (addBtn) {
+    addBtn.addEventListener("click", async function () {
+      var scope = document.getElementById("lfr-scope").value;
+      var body = {
+        name:        document.getElementById("lfr-name").value.trim(),
+        scope:       scope,
+        assetId:     scope === "global" ? null : asset.id,
+        processName: scope === "process" ? processName : null,
+        matchType:   document.getElementById("lfr-matchtype").value,
+        pattern:     document.getElementById("lfr-pattern").value,
+        caseSensitive: document.getElementById("lfr-case").checked,
+        minLevel:    document.getElementById("lfr-minlevel").value || null,
+        label:       document.getElementById("lfr-label").value.trim() || null,
+      };
+      if (!body.name || !body.pattern) { showToast("Name and pattern are required", "error"); return; }
+      addBtn.disabled = true;
+      try {
+        await api.logFlagRules.create(body);
+        showToast("Rule added", "success");
+        document.getElementById("lfr-name").value = "";
+        document.getElementById("lfr-pattern").value = "";
+        document.getElementById("lfr-label").value = "";
+        refreshList();
+        if (onChange) onChange();
+      } catch (err) {
+        showToast(err.message || "Failed to add rule", "error");
+      } finally {
+        addBtn.disabled = false;
+      }
+    });
+  }
+  refreshList();
 }
 
 function _assetEventsTabHTML(assetId) {

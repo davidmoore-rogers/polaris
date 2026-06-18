@@ -43,6 +43,9 @@ import {
   readInterfaceHistory,
   readStorageHistory,
   readProcessHistory,
+} from "../../services/sampleHistoryService.js";
+import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
+import {
   readIpsecHistory,
   readPerfSlaHistory,
   readSdwanMembers,
@@ -1967,20 +1970,21 @@ router.get("/:id/process-logs", requirePermission("assets", "read"), async (req,
     if (!name) throw new AppError(400, "name query parameter is required");
     const limit = Math.min(2000, Math.max(1, parseInt(String(req.query.limit ?? "500"), 10) || 500));
     const since = req.query.since ? new Date(String(req.query.since)) : null;
+    const onlyFlagged = String(req.query.flagged ?? "") === "1";
     const rows = await prisma.assetProcessLogSample.findMany({
       where: { assetId: id, name, ...(since && !isNaN(since.getTime()) ? { timestamp: { gte: since } } : {}) },
       orderBy: { timestamp: "desc" },
       take: limit,
     });
-    res.json({
+    // Annotate each line with the operator-defined flag rules it matches
+    // (read-time eval — see logFlagRuleService). ?flagged=1 returns only matches.
+    const logs = await evaluateLogFlags(
+      id,
       name,
-      logs: rows.map((r) => ({
-        timestamp: r.timestamp,
-        level:     r.level,
-        message:   r.message,
-        source:    r.source,
-      })),
-    });
+      rows.map((r) => ({ timestamp: r.timestamp, level: r.level, message: r.message, source: r.source })),
+      onlyFlagged,
+    );
+    res.json({ name, logs });
   } catch (err) { next(err); }
 });
 
