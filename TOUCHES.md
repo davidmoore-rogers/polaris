@@ -588,8 +588,8 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 **Writers** (files that mutate this state):
 - `src/api/routes/integrations.ts → syncDhcpSubnets` — FMG/standalone-FortiGate sync stamps:
-  - Phase 5 DHCP: gated on `entry.seenLeased` (live lease), source `"dhcp-lease"`. Offline static reservations neither bump nor flip status.
-  - Phase 7 device inventory: evidence is the FortiGate's per-client `last_seen` (or `now` when `is_online`), source `"device-inventory"`. Resurrection (`decommissioned → active`) requires `is_online`.
+  - Phase 6 DHCP: gated on `entry.seenLeased` (live lease), source `"dhcp-lease"`. Offline static reservations neither bump nor flip status. **Defers to device inventory**: when the entry's MAC is in this cycle's `result.deviceInventory` (the `inventoryMacSet`), the lease bump + status flip are skipped so Phase 7's real `last_seen`/`is_online` wins — a bound-but-idle lease must not stamp `now` (no-regress would otherwise let it beat the older-but-real inventory timestamp). Lease-only assets (inventory disabled / MAC not in the device table) keep the lease bump.
+  - Phase 7 device inventory: evidence is the FortiGate's per-client `last_seen` (or `now` when `is_online`), source `"device-inventory"`. Resurrection (`decommissioned → active`) requires `is_online`. **Authoritative over the lease** for any MAC it covers.
   - Firewall / FortiSwitch / FortiAP phases: source `"discovery"`; switch gated on `sw.connected`, AP on `apOnline` (status "connected" or blank), firewall implicit (FMG parse already skips `conn_status !== 1` devices).
 - `src/api/routes/integrations.ts → syncEntraDevices / syncActiveDirectoryDevices` — do NOT write lastSeen (cut over in the directory-decoupling change). Directory activity goes to `AssetSource.lastSeen` via the source upserts.
 - `src/services/presenceVerificationService.ts → runPresenceVerification` — AD/Entra post-sync pass (default on, `config.verifyPresence`): sources `"agent"` (ManagedAgent heartbeat), `"probe"` (answering monitor probe), `"ping"` (ICMP fallback). Ping failure writes nothing.

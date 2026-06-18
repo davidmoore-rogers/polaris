@@ -5466,6 +5466,19 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     // forget — sighting recording must not fail the discovery sync.
     const sightingRows: sightings.SightingInput[] = [];
 
+    // MACs the device-inventory pass (Phase 7) will stamp with the FortiGate's
+    // real per-client last_seen / is_online. DHCP-lease presence defers to
+    // these: a lease only proves an unexpired binding, so a device that leased
+    // an IP and went home still shows a bound lease all week — stamping `now`
+    // from it overstates Last Seen. When the MAC is covered by inventory this
+    // cycle, Phase 7 supplies the authoritative timestamp instead. Lease-only
+    // assets (inventory disabled / device not in the table) keep the lease bump.
+    const inventoryMacSet = new Set<string>(
+      (result.deviceInventory || [])
+        .map((d) => (d.macAddress ? d.macAddress.toUpperCase().replace(/-/g, ":") : ""))
+        .filter(Boolean),
+    );
+
     for (const entry of result.dhcpEntries) {
       if (!entry.macAddress || !entry.ipAddress) continue;
       const normalized = entry.macAddress.toUpperCase().replace(/-/g, ":");
@@ -5522,22 +5535,26 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       }
       macList.sort((a: any, b: any) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
 
+      // Presence gate: dhcp-lease rows are currently-held leases and
+      // seenLeased marks static reservations confirmed actively held. A
+      // reservation whose target is offline is config, not presence. And
+      // when device inventory covers this MAC, defer presence (lastSeen +
+      // status) to Phase 7's authoritative real-last_seen / is_online signal
+      // rather than stamping `now` off a possibly-idle lease binding.
+      const leasePresence = entry.seenLeased && !inventoryMacSet.has(normalized);
+
       // Queue asset update. macAddresses go to the side table via the
       // reconcile call inside batchSettled, not as a JSON column write.
       const updateData: Record<string, unknown> = {
         macAddress: macList[0].mac,
-        // Presence gate: dhcp-lease rows are currently-held leases and
-        // seenLeased marks static reservations confirmed actively held. A
-        // reservation whose target is offline is config, not presence — it
-        // neither bumps lastSeen nor flips the asset's status.
-        ...(entry.seenLeased
+        ...(leasePresence
           ? {
               status: "active",
               ...(asset.status !== "active" ? { statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
             }
           : {}),
       };
-      if (entry.seenLeased) bumpLastSeen(updateData, asset, new Date(now), "dhcp-lease");
+      if (leasePresence) bumpLastSeen(updateData, asset, new Date(now), "dhcp-lease");
       if (!isInfraAsset) {
         updateData.ipAddress = entry.ipAddress;
         updateData.ipSource = entry.device || integrationType;
@@ -5556,7 +5573,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         asset.ipAddress = entry.ipAddress;
         if (entry.device) asset.learnedLocation = entry.device;
       }
-      if (entry.seenLeased) asset.status = "active";
+      if (leasePresence) asset.status = "active";
       if (updateData.lastSeen) asset.lastSeen = updateData.lastSeen;
       assetIdx.reindex(asset);
 
