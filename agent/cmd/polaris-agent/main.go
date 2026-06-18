@@ -86,6 +86,9 @@ const (
 	// so this only matters once an operator enables it; 60 s keeps fresh errors
 	// flowing without hammering wevtutil/journalctl.
 	defaultEventLogIntervalSec     = 60
+	// Process-inventory snapshot cadence. Heavier enumeration (every PID) +
+	// current-state (no history), so a slower default than telemetry.
+	defaultProcessInventoryIntervalSec = 300
 )
 
 // ─── Server-pushed stream config (Phase 0 plumbing) ────────────────────────
@@ -103,8 +106,15 @@ type eventLogRuntimeCfg struct {
 	maxPerPush       int
 }
 
+// processesRuntimeCfg holds the resolved processes-stream state from /config.
+// The inventory + (Feature C) telemetry loops gate on `enabled`.
+type processesRuntimeCfg struct {
+	enabled bool
+}
+
 var (
 	eventLogCfg      atomic.Value // eventLogRuntimeCfg
+	processesCfg     atomic.Value // processesRuntimeCfg
 	cachedConfigETag atomic.Value // string
 )
 
@@ -113,6 +123,13 @@ func loadEventLogCfg() eventLogRuntimeCfg {
 		return v.(eventLogRuntimeCfg)
 	}
 	return eventLogRuntimeCfg{} // disabled until the first /config apply
+}
+
+func loadProcessesCfg() processesRuntimeCfg {
+	if v := processesCfg.Load(); v != nil {
+		return v.(processesRuntimeCfg)
+	}
+	return processesRuntimeCfg{} // disabled until the first /config apply
 }
 
 func loadConfigETag() string {
@@ -129,18 +146,22 @@ func applyServerStreams(resp *transport.ConfigResponse) {
 		return
 	}
 	cachedConfigETag.Store(resp.ETag)
-	s, ok := resp.Streams["eventLog"]
-	if !ok {
+	if s, ok := resp.Streams["eventLog"]; ok {
+		eventLogCfg.Store(eventLogRuntimeCfg{
+			enabled:          s.Enabled,
+			minLevel:         s.MinLevel,
+			channels:         s.WindowsChannels,
+			linuxMinPriority: s.LinuxMinPriority,
+			maxPerPush:       s.MaxPerPush,
+		})
+	} else {
 		eventLogCfg.Store(eventLogRuntimeCfg{})
-		return
 	}
-	eventLogCfg.Store(eventLogRuntimeCfg{
-		enabled:          s.Enabled,
-		minLevel:         s.MinLevel,
-		channels:         s.WindowsChannels,
-		linuxMinPriority: s.LinuxMinPriority,
-		maxPerPush:       s.MaxPerPush,
-	})
+	if s, ok := resp.Streams["processes"]; ok {
+		processesCfg.Store(processesRuntimeCfg{enabled: s.Enabled})
+	} else {
+		processesCfg.Store(processesRuntimeCfg{})
+	}
 }
 
 // refreshConfig fetches /config (using the cached ETag for a 304 short-circuit)
@@ -227,6 +248,7 @@ func runAgent(ctx context.Context, confPath string) {
 	go storageLoop(ctx, cfg, client)
 	go systemInfoLoop(ctx, cfg, client)
 	go eventLogLoop(ctx, cfg, client)
+	go processInventoryLoop(ctx, cfg, client)
 	go wsLoop(ctx, cfg, client)
 
 	<-ctx.Done()
@@ -571,6 +593,61 @@ func pushEventLogOne(client *transport.Client, stateDir string) {
 	}
 	if verbose {
 		log.Printf("eventLog sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
+	}
+}
+
+// processInventoryLoop ships the current-state process inventory (one row per
+// program, aggregated by name) when the server has resolved the processes
+// stream to "agent". Like eventLog, the goroutine always starts but stays idle
+// until the server enables the stream — toggling takes effect live via the
+// config refresh. Default cadence 300 s (process_inventory_interval_sec in
+// agent.conf overrides). Sends an empty list too, so unpinning the last process
+// and stopping a program clears stale inventory rows server-side.
+func processInventoryLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
+	interval := time.Duration(cfg.ProcessInventoryIntervalSec) * time.Second
+	if interval == 0 {
+		interval = defaultProcessInventoryIntervalSec * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	pushProcessInventoryOne(client)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pushProcessInventoryOne(client)
+		}
+	}
+}
+
+func pushProcessInventoryOne(client *transport.Client) {
+	if !loadProcessesCfg().enabled {
+		return // processes stream not resolved to agent — nothing to collect
+	}
+	type res struct{ s []*transport.ProcessSample }
+	ch := make(chan res, 1)
+	go func() { ch <- res{collectors.ProcessInventoryOnce()} }()
+	var r res
+	select {
+	case r = <-ch:
+	case <-time.After(collectionTimeout):
+		log.Printf("push processInventory samples: collector timed out after %.0fs", collectionTimeout.Seconds())
+		return
+	}
+	if r.s == nil {
+		return // collector failed to read the process table — skip (don't wipe inventory)
+	}
+	resp, err := client.PushSamples(&transport.SamplesBody{
+		Stream:  "processInventory",
+		Samples: r.s,
+	})
+	if err != nil {
+		log.Printf("push processInventory samples: %v", err)
+		return
+	}
+	if verbose {
+		log.Printf("processInventory sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
 	}
 }
 

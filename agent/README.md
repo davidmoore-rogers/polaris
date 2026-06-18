@@ -77,3 +77,4 @@ For development you can run the binary directly:
 | 4 | Remote install via SSH/WinRM from the Polaris UI |
 | 5 | Telemetry / interfaces / storage / LLDP collectors |
 | 6 | OS event-log collector (opt-in `eventLog` stream): wevtutil (Windows) / journalctl (Linux), per-channel cursor in `eventlog-cursors.json`, server-pushed enable flag + curation filter honored via `applyServerStreams`. Server curates entries into the audit Events tab. |
+| 7 | Process inventory (`processInventory` stream, gated on `processes` stream = agent): gopsutil enumeration aggregated by program name, current-state full-replace into the asset Processes tab. |

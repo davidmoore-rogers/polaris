@@ -182,6 +182,21 @@ type EventLogSample struct {
 	Count     int     `json:"count"`
 }
 
+// ProcessSample matches the server's ProcessSampleSchema. One row per program
+// (aggregated by name across PIDs). Current-state inventory — the server
+// full-replaces the asset's rows per push. cpuPct/memRssBytes are summed across
+// instances. ServiceUnit is reserved for the Phase 4 control work (nil today).
+type ProcessSample struct {
+	Name          string   `json:"name"`
+	InstanceCount int      `json:"instanceCount,omitempty"`
+	CpuPct        *float64 `json:"cpuPct,omitempty"`
+	MemRssBytes   *uint64  `json:"memRssBytes,omitempty"`
+	ExePath       *string  `json:"exePath,omitempty"`
+	Username      *string  `json:"username,omitempty"`
+	StartedAt     *string  `json:"startedAt,omitempty"`
+	ServiceUnit   *string  `json:"serviceUnit,omitempty"`
+}
+
 type SamplesResponse struct {
 	Accepted int `json:"accepted"`
 	Rejected int `json:"rejected"`
