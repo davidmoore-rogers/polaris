@@ -222,7 +222,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `public/js/assets.js:_confirmUninstallAgent` — wraps `showConfirm` Promise; on resolve(true) calls `api.assets.deleteAgent(id, {force})`.
 - `src/api/routes/agents.ts:POST /enroll` — consumes the enrollment token, mints a long-lived bearer, transitions installStatus → "active"; emits `agent.enrolled`. Cert-pin mismatch sets installStatus="failed" and emits `agent.install_failed`.
 - `src/services/agentTokenService.ts:verifyBearer` — runs on EVERY bearer-gated call; best-effort bumps `lastSeenAt`/`lastSeenIp`, AND self-heals a stuck `installStatus="enrolling"` → `"active"`. This covers the re-install/re-push case where `startInstall` reset status to "enrolling" but the agent reused the bearer already in agent.conf and short-circuited `/enroll` (so nothing else would ever flip it active). Scoped to "enrolling" only — never touches upgrading/uninstalling/failed states.
-- `src/api/routes/agents.ts:POST /samples` — bumps lastSeenAt (via verifyBearer) + lastTelemetryAt / lastSystemInfoAt per stream; calls recordProbeResult({fromAgent:true}) for the responseTime stream so the five-state machine runs on agent-pushed RTTs.
+- `src/api/routes/agents.ts:POST /samples` — bumps lastSeenAt (via verifyBearer) + lastTelemetryAt / lastSystemInfoAt per stream; calls recordProbeResult({fromAgent:true}) for the responseTime stream so the five-state machine runs on agent-pushed RTTs. The `eventLog` stream branch is NOT a sample table — it calls `osEventLogService.ingestOsEventLog` to curate entries into the audit Event table (`os_event.*`, resourceType=asset), gated by the `Setting("agentEventLog").enabled` master switch (drops a stale agent's push when off). See cross-cutting/osEventLog.
 - `src/api/routes/agents.ts:POST /system-info` — upserts the `polaris-agent` AssetSource row (externalId = managedAgent.id, observed = full host identity blob), then re-projects hostname / serialNumber / manufacturer / model / os / osVersion against all sources for the asset. Also writes MAC inline: normalize `primaryMac` → colon-upper, merge into `AssetMacAddress` via `reconcileMacAddresses` preserving entries from other sources, set `Asset.macAddress` to the freshest entry by `lastSeen`. MAC isn't owned by `projectAssetFromSources` — every discovery path writes it inline; the agent path matches that convention. Opportunistically bumps `ManagedAgent.agentVersion` when the body carries it.
 - `src/api/routes/agents.ts:POST /heartbeat` — refresh agentVersion + bump lastSeenAt.
 - `src/services/agentTokenService.ts` — `mintEnrollmentToken` (10-min TTL), `consumeEnrollmentToken` (atomic swap → bearer + stamps asset's 5 per-stream `*Polling` columns to `"agent"` in the same transaction so the active agent owns every stream), `revokeBearer` (sets bearerRevokedAt).
@@ -2041,6 +2041,28 @@ Listed alphabetically.
 - Check asset decommission query doesn't accidentally mark live assets as stale (lastSeen >= cutoff).
 - Confirm syslog test messages arrive with the right facility/severity/format.
 - Validate SFTP injection prevention doesn't reject legitimate Windows paths with backslashes.
+
+---
+
+## services/osEventLogService.ts
+
+**What it owns:** The OS event-log → audit Event ingest. Transport-agnostic: curates host event-log entries (Windows Event Log channels / Linux journald / FortiOS device log) into `os_event.<channel>` audit Events (resourceType=asset) so they surface in the asset Events tab and ride the existing syslog/SFTP archival. **First and only external-event-ingestion path** — every other Event is Polaris-generated. Also owns the operator-tuned global config `Setting("agentEventLog")`.
+
+**Public API:** `ingestOsEventLog(assetId, hostname, entries, cfg)` → `{accepted, suppressed}`; `getAgentEventLogConfig()`; `DEFAULT_AGENT_EVENT_LOG_CONFIG`; pure helpers `mapOsLevelToAudit` / `meetsMinAuditLevel` / `dedupeEntries` / `sanitizeChannel` / `buildAuditInputs`; types `AgentEventLogConfig` / `OsEventLogEntry` / `IngestResult`.
+
+**Cross-service deps:** `eventLogService.logEventsBatch` (batched audit write); `prisma.event.count` (per-asset rolling-hour rate cap); `prisma.setting` (config read).
+
+**Used by:** `src/api/routes/agents.ts:POST /samples` (the `eventLog` stream branch). Later phases: the SSH / WinRM / FortiOS-REST pollers in `monitoringService.ts` call the same ingest so curated audit rows behave identically regardless of transport.
+
+**Invariants:**
+- Volume discipline (the audit Event table is NOT a hypertable): min-level filter → dedupe (collapse identical, sum count) → per-push cap (`maxPerPush`) → per-asset rolling-hour cap (`perAssetHourlyCap`). Overflow is summarized into ONE `os_event.suppressed` Event (no silent truncation).
+- The agent already filters/dedupes/caps; this layer re-applies the same gates as defense-in-depth so a buggy or stale agent can't flood the audit log.
+- `enabled` master switch lives on the caller side (the `/samples` branch drops when off) AND `minLevel` defends here; default config is OFF.
+- Never throws — `logEventsBatch` swallows write errors, and the rate-cap COUNT failure falls back to the per-push cap rather than blocking ingest.
+
+**When changing this:**
+- New transport (SSH/WinRM/REST) feeding event logs: build the entry list to the `OsEventLogEntry` shape and call `ingestOsEventLog` — do NOT re-implement curation.
+- Changing the action namespace (`os_event.*`) ripples to the Events-tab action filter + any operator-saved filters; keep it stable.
 
 ---
 

@@ -48,6 +48,7 @@ import {
 } from "../../services/sampleWriteBuffer.js";
 import { reconcileMacAddresses } from "../../utils/macAddresses.js";
 import { logEvent } from "./events.js";
+import { ingestOsEventLog, getAgentEventLogConfig } from "../../services/osEventLogService.js";
 import { logger } from "../../utils/logger.js";
 
 // ─── /enroll (public) ─────────────────────────────────────────────────
@@ -209,11 +210,25 @@ const StorageSampleSchema = z.object({
   usedBytes:  z.number().int().nullable().optional(),
 });
 
+// OS event-log entries — curated host events folded into the audit Event table
+// (NOT a sample table). The agent normalizes severity to
+// critical/error/warning/info and dedupes within a poll (count >= 1).
+const EventLogSampleSchema = z.object({
+  timestamp: z.string().datetime().optional(),
+  channel:   z.string().min(1).max(128),
+  provider:  z.string().max(255).nullable().optional(),
+  eventId:   z.number().int().nullable().optional(),
+  level:     z.string().max(32),
+  message:   z.string().max(8192),
+  count:     z.number().int().min(1).nullable().optional(),
+});
+
 const SamplesBodySchema = z.discriminatedUnion("stream", [
   z.object({ stream: z.literal("responseTime"), samples: z.array(ResponseTimeSampleSchema).min(1).max(500) }),
   z.object({ stream: z.literal("telemetry"),    samples: z.array(TelemetrySampleSchema).min(1).max(500) }),
   z.object({ stream: z.literal("interfaces"),   samples: z.array(InterfaceSampleSchema).min(1).max(5000) }),
   z.object({ stream: z.literal("storage"),      samples: z.array(StorageSampleSchema).min(1).max(500) }),
+  z.object({ stream: z.literal("eventLog"),     samples: z.array(EventLogSampleSchema).min(1).max(500) }),
 ]);
 
 agentsRouter.post("/samples", async (req, res, next) => {
@@ -352,6 +367,38 @@ agentsRouter.post("/samples", async (req, res, next) => {
       enqueueInterfaceSamples(rows);
       accepted = rows.length;
       await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: sampleTs } });
+    } else if (body.stream === "eventLog") {
+      // OS event-log entries are curated into the audit Event table (not a
+      // sample table) so they appear in the asset Events tab + ride syslog/SFTP
+      // archival. Gated by the global agentEventLog master switch — if an
+      // operator turned it off, a stale agent's push is dropped rather than
+      // flooding the audit log. ingestOsEventLog applies the min-level filter,
+      // dedupe, per-push cap, and per-asset hourly rate cap.
+      const cfg = await getAgentEventLogConfig();
+      if (!cfg.enabled) {
+        accepted = 0;
+      } else {
+        const hostname =
+          (await prisma.asset.findUnique({ where: { id: assetId }, select: { hostname: true } }))?.hostname ?? null;
+        const result = await ingestOsEventLog(
+          assetId,
+          hostname,
+          body.samples.map((s) => ({
+            timestamp: s.timestamp ?? null,
+            channel:   s.channel,
+            provider:  s.provider ?? null,
+            eventId:   s.eventId ?? null,
+            level:     s.level,
+            message:   s.message,
+            count:     s.count ?? null,
+          })),
+          cfg,
+        );
+        accepted = result.accepted;
+        if (sampleLog) {
+          logger.info({ assetId, accepted: result.accepted, suppressed: result.suppressed }, "agent eventLog ingested");
+        }
+      }
     } else {
       // storage
       const pinnedStorage = new Set(

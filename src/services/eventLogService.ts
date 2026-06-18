@@ -55,6 +55,43 @@ export async function logEvent(input: LogEventInput): Promise<void> {
   }
 }
 
+/**
+ * Batch variant of logEvent — writes many audit rows in ONE `createMany`
+ * instead of N awaited `create`s. Applies the same min-level drop + `levelRank`
+ * stamping as logEvent. Use for high-fan-in audit sources (e.g. agent/poller OS
+ * event-log ingest) where a per-row await would be a scale anti-pattern. Never
+ * throws — a write failure is swallowed like logEvent. Returns the number of
+ * rows actually written (after the min-level filter).
+ */
+export async function logEventsBatch(inputs: LogEventInput[]): Promise<number> {
+  if (inputs.length === 0) return 0;
+  try {
+    const { minLevel } = await getCachedRetentionSettings();
+    const floor = LEVEL_ORDER[minLevel] ?? 0;
+    const rows = inputs
+      .filter((i) => (LEVEL_ORDER[i.level ?? "info"] ?? 0) >= floor)
+      .map((i) => {
+        const level = i.level || "info";
+        return {
+          action: i.action,
+          resourceType: i.resourceType,
+          resourceId: i.resourceId,
+          resourceName: i.resourceName,
+          actor: i.actor,
+          message: i.message,
+          level,
+          levelRank: LEVEL_ORDER[level] ?? 0,
+          details: i.details as any,
+        };
+      });
+    if (rows.length === 0) return 0;
+    await prisma.event.createMany({ data: rows });
+    return rows.length;
+  } catch {
+    return 0;
+  }
+}
+
 export function buildChanges(
   before: Record<string, unknown>,
   after: Record<string, unknown>,

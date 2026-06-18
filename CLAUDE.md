@@ -114,7 +114,7 @@ AssetStatus:             active | maintenance | decommissioned | storage | disab
 - **Event** — audit log, 7-day rolling retention.
 - **Conflict** — discovery-vs-existing conflicts (reservation + asset variants).
 - **DiscoveryRun** — per-integration discovery-run state (status / actor / progress counts / timestamps); one row per integration (`integrationId` unique).
-- **Setting** — key-value config store (`manualMonitorSettings`, `sampleRetention`, `mapRegions`, etc.).
+- **Setting** — key-value config store (`manualMonitorSettings`, `sampleRetention`, `mapRegions`, `agentEventLog`, etc.). `agentEventLog` (`{enabled, minLevel, windowsChannels, linuxMinPriority, maxPerPush, perAssetHourlyCap}`, default disabled) tunes the OS event-log → audit Event ingest (`osEventLogService`); ingested host events become `os_event.<channel>` Events (resourceType=asset) visible in the Events tab.
 - **MonitorClassOverride** — tier-2 of the monitor settings hierarchy; manual-scope only post-Phase-2.
 - **Tag** / **GeocodeCache** — registry tables.
 
