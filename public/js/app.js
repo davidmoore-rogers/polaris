@@ -1592,6 +1592,142 @@ function _focusFirstIn(container) {
 var _modalReturnFocus = null;  // element refocused when the shared modal closes
 var _modalKeyTeardown = null;  // active focus-trap teardown for the shared modal
 
+// ─── Panel lock (per-user, app-wide) ────────────────────────────────────────
+//
+// A lock toggle next to the X on every modal and slide-over. Locking is global
+// per type — one switch governs ALL modals, another ALL slide-overs — and is
+// saved per user in localStorage. When locked, clicking the backdrop (off the
+// panel) does NOT dismiss it; when unlocked, an off-click closes it (the
+// default). The X and Escape always close regardless of lock.
+//
+// Modals route through openModal (handled inline below). Slide-overs each wire
+// their own backdrop-close handler, so a capture-phase document listener blocks
+// that close when locked instead of editing every panel. Lock buttons are
+// injected generically by a MutationObserver, so new panels get one for free.
+var _panelLock = { modal: false, slideover: false };
+
+function _panelLockKey() { return "polaris.panellock." + (currentUsername || "anon"); }
+
+function _loadPanelLock() {
+  try {
+    var v = JSON.parse(localStorage.getItem(_panelLockKey()) || "null");
+    _panelLock = { modal: !!(v && v.modal), slideover: !!(v && v.slideover) };
+  } catch (_) { _panelLock = { modal: false, slideover: false }; }
+  _syncAllLockButtons();
+}
+
+function _savePanelLock() {
+  try { localStorage.setItem(_panelLockKey(), JSON.stringify(_panelLock)); } catch (_) {}
+}
+
+function _togglePanelLock(type) {
+  _panelLock[type] = !_panelLock[type];
+  _savePanelLock();
+  _syncAllLockButtons(type);
+}
+
+function _lockBtnSvg(locked) {
+  var attrs = 'width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+  var body = locked
+    ? '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>'
+    : '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>';
+  return '<svg ' + attrs + '>' + body + '</svg>';
+}
+
+function _syncLockButton(btn) {
+  if (!btn) return;
+  var type = btn.getAttribute("data-lock-type");
+  var locked = !!_panelLock[type];
+  var noun = type === "modal" ? "dialogs" : "panels";
+  btn.innerHTML = _lockBtnSvg(locked);
+  btn.classList.toggle("locked", locked);
+  btn.style.color = locked ? "var(--color-accent)" : "";
+  btn.setAttribute("aria-pressed", locked ? "true" : "false");
+  btn.setAttribute("aria-label", locked ? ("Unlock " + noun) : ("Lock " + noun));
+  btn.title = locked
+    ? ("Locked — clicking outside won’t close " + noun + ". Saved for your account. Click to unlock.")
+    : ("Unlocked — clicking outside closes it. Click to lock all " + noun + " (saved for your account).");
+}
+
+function _syncAllLockButtons(type) {
+  var sel = ".panel-lock-btn" + (type ? '[data-lock-type="' + type + '"]' : "");
+  document.querySelectorAll(sel).forEach(_syncLockButton);
+}
+
+// Insert a lock button immediately before the close (X) button in a panel
+// header. Idempotent — re-running skips headers that already have one.
+function _ensureLockButton(headerEl, type) {
+  if (!headerEl || headerEl.querySelector(".panel-lock-btn")) return;
+  var closeBtn = type === "modal"
+    ? headerEl.querySelector(".modal-close")
+    : headerEl.querySelector(".btn-icon");
+  if (!closeBtn) return;
+  var btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "btn-icon panel-lock-btn";
+  btn.setAttribute("data-lock-type", type);
+  // Headers are flex with space-between; margin-left:auto absorbs the free
+  // space so the lock sits flush against the X instead of centered.
+  btn.style.marginLeft = "auto";
+  btn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    e.preventDefault();
+    _togglePanelLock(type);
+  });
+  closeBtn.parentNode.insertBefore(btn, closeBtn);
+  _syncLockButton(btn);
+}
+
+function _injectPanelLockButtons() {
+  document.querySelectorAll(".slideover .slideover-header-top").forEach(function (h) {
+    _ensureLockButton(h, "slideover");
+  });
+  var mh = document.querySelector("#modal-overlay .modal-header");
+  if (mh) _ensureLockButton(mh, "modal");
+}
+
+// Wire the observer (injects lock buttons into newly-created panels) + the
+// capture-phase backdrop guard for slide-overs. Idempotent — guarded so it
+// only runs once even if called from multiple page init paths.
+var _panelLockWired = false;
+function _initPanelLock() {
+  if (_panelLockWired) return;
+  _panelLockWired = true;
+
+  // Block slide-over backdrop-close when locked. Capture phase runs before the
+  // panel's own (bubbling) overlay handler, so stopping propagation here keeps
+  // it open. e.target is the overlay itself only on a genuine backdrop click.
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    if (t && t.classList && t.classList.contains("slideover-overlay") && _panelLock.slideover) {
+      e.stopPropagation();
+      // Same glow/bloom the modal X gives on an off-click while locked — flash
+      // this slide-over's close button (the btn-icon that isn't the lock).
+      var closeBtn = t.querySelector(".slideover-header-top .btn-icon:not(.panel-lock-btn)");
+      flashModalCloseBtn(closeBtn);
+    }
+  }, true);
+
+  if (window.MutationObserver) {
+    var obs = new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var added = muts[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          var n = added[j];
+          if (n.nodeType !== 1) continue;
+          var isOverlay = n.classList && (n.classList.contains("slideover-overlay") || n.classList.contains("modal-overlay"));
+          if (isOverlay || (n.querySelector && n.querySelector(".slideover-overlay, .modal-overlay"))) {
+            _injectPanelLockButtons();
+            return;
+          }
+        }
+      }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+  _injectPanelLockButtons();
+}
+
 function openModal(title, bodyHTML, footerHTML, options) {
   let overlay = document.getElementById("modal-overlay");
   if (!overlay) {
@@ -1602,14 +1738,20 @@ function openModal(title, bodyHTML, footerHTML, options) {
     document.body.appendChild(overlay);
     overlay.addEventListener("click", function (e) {
       if (e.target === overlay) {
-        flashModalCloseBtn(overlay.querySelector(".modal-close"));
+        // Locked → keep the dialog open (flash the X as a hint); unlocked →
+        // an off-click dismisses it. See "Panel lock" above.
+        if (_panelLock.modal) {
+          flashModalCloseBtn(overlay.querySelector(".modal-close"));
+        } else {
+          closeModal();
+        }
       }
     });
     overlay.querySelector(".modal-close").addEventListener("click", closeModal);
     var modalEl = overlay.querySelector(".modal");
     var headerEl = overlay.querySelector(".modal-header");
     headerEl.addEventListener("mousedown", function (e) {
-      if (e.target.closest(".modal-close")) return;
+      if (e.target.closest(".modal-close") || e.target.closest(".panel-lock-btn")) return;
       _modalDrag.active = true;
       _modalDrag.startX = e.clientX - _modalDrag.offsetX;
       _modalDrag.startY = e.clientY - _modalDrag.offsetY;
@@ -1641,6 +1783,8 @@ function openModal(title, bodyHTML, footerHTML, options) {
   overlay.querySelector(".modal-footer").innerHTML = footerHTML || "";
   var slideoverOpen = !!document.querySelector(".slideover-overlay.open");
   overlay.classList.toggle("above-slideover", slideoverOpen);
+  _initPanelLock();
+  _injectPanelLockButtons();
   // Remember what had focus so closeModal can restore it; trap Tab + Escape
   // inside the dialog while it's open.
   _modalReturnFocus = document.activeElement;
@@ -2247,7 +2391,13 @@ document.addEventListener("DOMContentLoaded", async function () {
     }
   } catch (_) {}
 
+  _initPanelLock();
+  _loadPanelLock();
+
   await fetchCurrentUser();
+
+  // Re-load the lock state under the authoritative username + re-sync buttons.
+  _loadPanelLock();
 
   // Re-render if the cache was cold OR the role name changed OR the matrix
   // shifted (an admin edited the role since the last cached snapshot).

@@ -273,6 +273,8 @@ document.addEventListener("DOMContentLoaded", async function () {
   document.addEventListener("click", _handleMacDeleteClick);
   document.getElementById("assets-bulk-delete-btn").addEventListener("click", bulkDeleteAssets);
   document.getElementById("assets-bulk-tags-btn").addEventListener("click", openBulkTagsModal);
+  var bCompare = document.getElementById("assets-bulk-compare-btn");
+  if (bCompare) bCompare.addEventListener("click", openCompareModal);
   _wireBulkBarDropdowns();
   var bQuarantine   = document.getElementById("assets-bulk-quarantine-btn");
   var bUnquarantine = document.getElementById("assets-bulk-unquarantine-btn");
@@ -880,6 +882,11 @@ function _assetsUpdateBulkBar() {
   bar.style.display = count > 0 ? "flex" : "none";
   var el = bar.querySelector(".bulk-bar-count");
   if (el) el.textContent = count + " selected";
+
+  // Compare needs at least two assets to overlay. Available to any role that
+  // can view assets — comparing telemetry is read-only.
+  var bCompare = document.getElementById("assets-bulk-compare-btn");
+  if (bCompare) bCompare.style.display = count >= 2 ? "" : "none";
 
   // Show quarantine/release buttons only for assets-admins. Determine which
   // buttons are relevant based on the statuses of the selected assets.
