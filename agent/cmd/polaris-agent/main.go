@@ -91,6 +91,8 @@ const (
 	defaultProcessInventoryIntervalSec = 300
 	// Per-pinned-program CPU/RAM cadence — 60 s like host telemetry.
 	defaultProcessTelemetryIntervalSec = 60
+	// Per-pinned-program log-tail cadence — 60 s.
+	defaultProcessLogIntervalSec       = 60
 )
 
 // ─── Server-pushed stream config (Phase 0 plumbing) ────────────────────────
@@ -254,6 +256,7 @@ func runAgent(ctx context.Context, confPath string) {
 	go eventLogLoop(ctx, cfg, client)
 	go processInventoryLoop(ctx, cfg, client)
 	go processTelemetryLoop(ctx, cfg, client)
+	go processLogLoop(ctx, cfg, client)
 	go wsLoop(ctx, cfg, client)
 
 	<-ctx.Done()
@@ -709,6 +712,58 @@ func pushProcessTelemetryOne(client *transport.Client) {
 	}
 	if verbose {
 		log.Printf("processTelemetry sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
+	}
+}
+
+// processLogLoop tails logs for the operator-pinned programs (Feature C).
+// Gated on the processes stream resolving to agent AND >=1 pinned program.
+func processLogLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
+	interval := time.Duration(cfg.ProcessLogIntervalSec) * time.Second
+	if interval == 0 {
+		interval = defaultProcessLogIntervalSec * time.Second
+	}
+	stateDir := filepath.Dir(cfg.Path())
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	pushProcessLogOne(client, stateDir)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pushProcessLogOne(client, stateDir)
+		}
+	}
+}
+
+func pushProcessLogOne(client *transport.Client, stateDir string) {
+	pc := loadProcessesCfg()
+	if !pc.enabled || len(pc.pinned) == 0 {
+		return
+	}
+	type res struct{ s []*transport.ProcessLogSample }
+	ch := make(chan res, 1)
+	go func() { ch <- res{collectors.ProcessLogOnce(stateDir, pc.pinned, 0)} }()
+	var r res
+	select {
+	case r = <-ch:
+	case <-time.After(collectionTimeout):
+		log.Printf("push processLog samples: collector timed out after %.0fs", collectionTimeout.Seconds())
+		return
+	}
+	if len(r.s) == 0 {
+		return
+	}
+	resp, err := client.PushSamples(&transport.SamplesBody{
+		Stream:  "processLog",
+		Samples: r.s,
+	})
+	if err != nil {
+		log.Printf("push processLog samples: %v", err)
+		return
+	}
+	if verbose {
+		log.Printf("processLog sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
 	}
 }
 

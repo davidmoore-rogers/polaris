@@ -68,6 +68,7 @@ type Config struct {
 	EventLogIntervalSec     int
 	ProcessInventoryIntervalSec int
 	ProcessTelemetryIntervalSec int
+	ProcessLogIntervalSec       int
 
 	// Verbose turns on per-push lifecycle logging (connect / send / validate
 	// / disconnect) for the sample streams. Diagnostic only — set
@@ -160,6 +161,8 @@ func Load(path string) (*Config, error) {
 			fmt.Sscanf(val, "%d", &cfg.ProcessInventoryIntervalSec)
 		case "process_telemetry_interval_sec":
 			fmt.Sscanf(val, "%d", &cfg.ProcessTelemetryIntervalSec)
+		case "process_log_interval_sec":
+			fmt.Sscanf(val, "%d", &cfg.ProcessLogIntervalSec)
 		case "verbose":
 			v := strings.ToLower(val)
 			cfg.Verbose = v == "true" || v == "1" || v == "yes" || v == "on"
@@ -289,6 +292,9 @@ func (c *Config) Save() error {
 	}
 	if c.ProcessTelemetryIntervalSec > 0 {
 		fmt.Fprintf(w, "process_telemetry_interval_sec = %d\n", c.ProcessTelemetryIntervalSec)
+	}
+	if c.ProcessLogIntervalSec > 0 {
+		fmt.Fprintf(w, "process_log_interval_sec       = %d\n", c.ProcessLogIntervalSec)
 	}
 	if c.Verbose {
 		fmt.Fprintln(w, "verbose                    = true")
