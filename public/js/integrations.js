@@ -739,6 +739,31 @@ function _intWireModalTabs(prefix) {
   });
 }
 
+// Shared emphasis callout for the integration modal tabs. Every highlighted
+// note (security blast-radius warnings, tip/alternative boxes, permission
+// requirements) renders through this one helper so the modal reads as a single
+// design language instead of a grab-bag of ad-hoc boxes. `variant` selects the
+// accent from real theme tokens (so it adapts to light/dark); the faint tint is
+// derived from that same token via color-mix. `title` is the bold lead row
+// (icon prepended automatically); `bodyHtml` is raw HTML rendered as hint text.
+var CALLOUT_VARIANTS = {
+  warning: { color: "var(--color-warning)", icon: "&#9888;" },        // warning sign — security / silent-failure caveats
+  tip:     { color: "var(--color-accent)", icon: "&#128161;" },       // light bulb — alternatives / suggestions
+  note:    { color: "var(--color-text-secondary)", icon: "" },        // neutral informational
+};
+function calloutHTML(variant, title, bodyHtml) {
+  var v = CALLOUT_VARIANTS[variant] || CALLOUT_VARIANTS.note;
+  return '<div style="border-left:3px solid ' + v.color + ';' +
+      'background:color-mix(in srgb, ' + v.color + ' 9%, transparent);' +
+      'border-radius:0 var(--radius-sm) var(--radius-sm) 0;padding:0.6rem 0.8rem;margin-top:0.75rem">' +
+      (title
+        ? '<p style="margin:0 0 0.4rem 0;font-weight:600;color:' + v.color + '">' +
+            (v.icon ? v.icon + " " : "") + title + '</p>'
+        : '') +
+      '<p class="hint" style="margin:0">' + bodyHtml + '</p>' +
+    '</div>';
+}
+
 // DHCP Push tab body. Renders the master toggle plus mode-aware guidance:
 // when useProxy is on the call lands on the FortiGate via FMG's REST proxy
 // in real time; when it's off it goes direct to the FortiGate's REST API
@@ -789,14 +814,8 @@ function reservationPushFormHTML(pushReservations, useProxy) {
         '<li><strong>Policy &amp; Objects</strong> &mdash; leave at Read-Only or None</li>' +
         '<li style="margin-left:1.2rem"><strong>Install Policy Package or Device Configuration</strong> &rarr; None &nbsp;<span style="color:var(--color-text-tertiary)">&larr; Polaris never triggers installs</span></li>' +
       '</ul>' +
-      '<div style="background:var(--color-warning-bg, rgba(255,193,7,0.08));border:1px solid var(--color-warning, #ffc107);border-radius:4px;padding:0.6rem 0.8rem;margin-bottom:0.5rem">' +
-        '<p style="margin:0 0 0.4rem 0;font-weight:500;color:var(--color-warning, #ffc107)">&#9888; Blast radius</p>' +
-        '<p class="hint" style="margin:0">FortiManager admin profiles do not have a per-object permission for DHCP reservations. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. A compromised Polaris API token could in principle modify other device-level config &mdash; interfaces, routing, other DHCP scopes &mdash; not just the reservations Polaris pushes. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.</p>' +
-      '</div>' +
-      '<div style="background:var(--color-info-bg, rgba(33,150,243,0.06));border:1px solid var(--color-info, #2196f3);border-radius:4px;padding:0.6rem 0.8rem">' +
-        '<p style="margin:0 0 0.4rem 0;font-weight:500;color:var(--color-info, #2196f3)">&#128161; Tighter scope alternative</p>' +
-        '<p class="hint" style="margin:0">For tighter scope, switch to direct mode (uncheck <em>Query each FortiGate directly (bypass FortiManager proxy)</em> on the Settings tab) and configure a per-FortiGate REST API admin with <strong>Network &rarr; Custom &rarr; Configuration</strong> set to Read/Write. This scopes write access to one FortiGate\'s network-configuration bucket instead of every CMDB tree on every device in the ADOM.</p>' +
-      '</div>' +
+      calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for DHCP reservations. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. A compromised Polaris API token could in principle modify other device-level config &mdash; interfaces, routing, other DHCP scopes &mdash; not just the reservations Polaris pushes. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.") +
+      calloutHTML("tip", "Tighter scope alternative", "For tighter scope, switch to direct mode (uncheck <em>Query each FortiGate directly (bypass FortiManager proxy)</em> on the Settings tab) and configure a per-FortiGate REST API admin with <strong>Network &rarr; Custom &rarr; Configuration</strong> set to Read/Write. This scopes write access to one FortiGate's network-configuration bucket instead of every CMDB tree on every device in the ADOM.") +
     '</section>';
 }
 
@@ -896,10 +915,7 @@ function quarantinePushFormHTML(pushQuarantine, useProxy) {
         '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write</li>' +
         '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
       '</ul>' +
-      '<div style="background:var(--color-warning-bg, rgba(255,193,7,0.08));border:1px solid var(--color-warning, #ffc107);border-radius:4px;padding:0.6rem 0.8rem">' +
-        '<p style="margin:0 0 0.4rem 0;font-weight:500;color:var(--color-warning, #ffc107)">&#9888; Blast radius</p>' +
-        '<p class="hint" style="margin:0">FortiManager admin profiles do not have a per-object permission for quarantine. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.</p>' +
-      '</div>' +
+      calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for quarantine. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.") +
     '</section>';
 }
 
@@ -2665,13 +2681,12 @@ function geographicLocationFormHTML(currentPullSnmpLocation, currentPushGeocoded
         : 'writes the FortiGate\'s CMDB <code>gui-device-latitude</code> / <code>gui-device-longitude</code>.') +
     '</p>' +
     (isFmg
-      ? '<p class="hint" style="margin:0.5rem 0 0 0;padding:0.5rem 0.75rem;border-left:3px solid var(--color-warning, #d9822b);background:var(--color-bg-subtle, rgba(217,130,43,0.08))">' +
-          '<strong>FortiManager permission required:</strong> writing coordinates back to the per-device metavariables needs ' +
-          '<strong>Read-Write</strong> access to <strong>Policy &amp; Objects</strong> (Policy Package &amp; Objects) in the API user\'s ' +
-          'JSON API admin profile on FortiManager (<em>System Settings → Admin → Profile</em>). With read-only access Polaris can ' +
-          'still pull and geocode locations, but the write-back will fail.' +
-        '</p>'
-      : '') +
+      ? calloutHTML("warning", "FortiManager permission required",
+          "Writing coordinates back to the per-device metavariables needs " +
+          "<strong>Read-Write</strong> access to <strong>Policy &amp; Objects</strong> (Policy Package &amp; Objects) in the API user's " +
+          "JSON API admin profile on FortiManager (<em>System Settings &rarr; Admin &rarr; Profile</em>). With read-only access Polaris can " +
+          "still pull and geocode locations, but the write-back will fail.")
+      : "") +
     metavarBlock;
 }
 
