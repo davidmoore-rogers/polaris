@@ -918,6 +918,12 @@ function _viewLeaseActionHTML(a) {
 
 function viewAssetLease(id) {
   var a = (_assetsData || []).find(function (x) { return x.id === id; });
+  // Fall back to the asset currently shown in the details slide-over — it
+  // carries a fresh ipContext and covers the case where the asset was opened
+  // via deep-link rather than the table (so it isn't in _assetsData).
+  if ((!a || !a.ipContext) && _currentAssetForRefresh && _currentAssetForRefresh.id === id) {
+    a = _currentAssetForRefresh;
+  }
   if (!a || !a.ipAddress || !a.ipContext || !a.ipContext.subnetId) return;
   openLeasePanel(a);
 }
@@ -3230,7 +3236,7 @@ async function openViewModal(id) {
       viewRow("Last Seen Switch", a.lastSeenSwitch) +
       viewRow("Last Seen AP", a.lastSeenAp) +
       associatedUsersViewHTML(a.associatedUsers) +
-      viewRow("Last Seen", lastSeenWithSource(a.lastSeen, a.lastSeenSource)) +
+      lastSeenRowHTML(a) +
       '<div id="asset-dir-activity-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
       viewRow("Acquired", (a.acquiredAt || a.createdAt) ? formatDate(a.acquiredAt || a.createdAt) : null) +
       viewRow("Warranty Expires", a.warrantyExpiry ? formatDate(a.warrantyExpiry) : null) +
@@ -10865,11 +10871,32 @@ var LAST_SEEN_SOURCE_LABELS = {
   "conflict-reject":  "conflict resolution",
 };
 
-function lastSeenWithSource(lastSeen, lastSeenSource) {
-  if (!lastSeen) return null;
-  var s = formatDate(lastSeen);
-  if (lastSeenSource) s += " · via " + (LAST_SEEN_SOURCE_LABELS[lastSeenSource] || lastSeenSource);
-  return s;
+// Build the General-tab "Last Seen" detail row. The date renders as plain
+// text; the provenance label ("via DHCP lease" etc.) becomes a link into the
+// lease slide-over when the asset's IP resolves to a containing subnet — the
+// same gate (and target) the table's "View Lease" row action uses. With no
+// resolvable network context the label stays plain text.
+function lastSeenRowHTML(a) {
+  var valueInner;
+  if (!a.lastSeen) {
+    valueInner = "-";
+  } else {
+    valueInner = escapeHtml(formatDate(a.lastSeen));
+    if (a.lastSeenSource) {
+      var srcLabel = LAST_SEEN_SOURCE_LABELS[a.lastSeenSource] || a.lastSeenSource;
+      var ctx = a.ipContext;
+      if (ctx && ctx.subnetId) {
+        var title = "View this IP in " + (ctx.subnetCidr || "its network");
+        valueInner += ' · via <a href="#" class="last-seen-source-link" ' +
+          'onclick="viewAssetLease(\'' + a.id + '\');return false;" ' +
+          'title="' + escapeHtml(title) + '">' + escapeHtml(srcLabel) + '</a>';
+      } else {
+        valueInner += " · via " + escapeHtml(srcLabel);
+      }
+    }
+  }
+  return '<div class="detail-row"><span class="detail-label">Last Seen</span>' +
+    '<span class="detail-value">' + valueInner + '</span></div>';
 }
 
 function viewRow(label, value, mono, alignRight, copy) {

@@ -2402,6 +2402,12 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   text-decoration: none;
 }
 .dep-tree-link:hover { text-decoration: underline; }
+.last-seen-source-link {
+  color: var(--color-accent);
+  cursor: pointer;
+  text-decoration: none;
+}
+.last-seen-source-link:hover { text-decoration: underline; }
 .dep-tree-type {
   color: var(--color-text-secondary);
   font-size: 0.78rem;
