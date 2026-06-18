@@ -230,7 +230,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 
 **Readers** (consume state):
 - `src/api/middleware/auth.ts:requireAgentBearer` — verifies the bearer against the ManagedAgent token store and attaches `{managedAgentId, assetId}` to `req.managedAgent`. Used by every `/api/v1/agents/*` route except `/enroll`.
-- `src/api/routes/agents.ts:GET /config` — resolves the asset's monitor settings via `resolveMonitorSettings` and returns the per-stream `enabled` (true when that stream is `polling==="agent"`), cadences, and timeouts; carries an ETag so the agent can short-circuit unchanged polls.
+- `src/api/routes/agents.ts:GET /config` — resolves the asset's monitor settings via `resolveMonitorSettings` and returns the per-stream `enabled` (true when that stream is `polling==="agent"`), cadences, and timeouts; carries an ETag so the agent can short-circuit unchanged polls. The `eventLog` block additionally carries the curation filter (`minLevel` / `windowsChannels` / `linuxMinPriority` / `maxPerPush`) read from `Setting("agentEventLog")` via `getAgentEventLogConfig()`, and is `enabled` only when the stream resolves to agent AND the global master switch is on (the filter is part of the ETag, so a config change invalidates the 304).
 - `src/services/monitoringService.ts:probeAsset / collectTelemetry / collectHardwareSensors / collectSystemInfo / collectFastFiltered` — early-return on agent-mode so the periodic puller doesn't touch hosts that the agent owns.
 - `src/services/monitoringService.ts:recordProbeResult` — agent-mode guard skipped only when `opts.fromAgent === true`.
 

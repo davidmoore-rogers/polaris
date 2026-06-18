@@ -509,6 +509,14 @@ agentsRouter.get("/config", async (req, res, next) => {
       ? [managedAgent.serverCertFingerprint, ...managedAgent.additionalServerCertFingerprints]
       : [];
 
+    // OS event-log stream config — only delivered when this asset resolves the
+    // eventLog stream to "agent". Carries the operator-tuned filter (min-level
+    // + Windows channels + Linux priority + per-push cap) so the agent collects
+    // only what's wanted. Gated on the master switch too: when agentEventLog is
+    // globally disabled, ship enabled:false regardless of the resolved method.
+    const eventLogConfig =
+      eff.eventLogPolling === "agent" ? await getAgentEventLogConfig() : null;
+
     const payload = {
       streams: {
         responseTime: {
@@ -537,6 +545,19 @@ agentsRouter.get("/config", async (req, res, next) => {
           enabled:     eff.lldpPolling === "agent",
           intervalSec: eff.systemInfoIntervalSeconds,
           timeoutMs:   eff.systemInfoTimeoutMs,
+        },
+        eventLog: {
+          // Enabled only when the stream resolves to agent AND the global
+          // agentEventLog master switch is on. The agent reads channels /
+          // minLevel / maxPerPush from here; SNMP/SSH/WinRM/REST collection is
+          // server-side and never reaches the agent.
+          enabled:     eff.eventLogPolling === "agent" && eventLogConfig?.enabled === true,
+          intervalSec: eff.eventLogIntervalSeconds,
+          timeoutMs:   eff.eventLogTimeoutMs,
+          minLevel:        eventLogConfig?.minLevel ?? "error",
+          windowsChannels: eventLogConfig?.windowsChannels ?? ["System", "Application"],
+          linuxMinPriority: eventLogConfig?.linuxMinPriority ?? 3,
+          maxPerPush:      eventLogConfig?.maxPerPush ?? 100,
         },
       },
       monitored: asset.monitored,
