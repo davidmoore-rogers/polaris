@@ -479,6 +479,76 @@ export async function readStorageHistory(
   };
 }
 
+// ─── Process history (per pinned program — two gauges: cpu%, rss bytes) ──────
+
+export interface ProcessHistoryRow {
+  timestamp:     Date;
+  cpuPct:        number | null;
+  memRssBytes:   number | null;
+  instanceCount?: number | null;
+  sampleCount?:  number;
+  minCpuPct?:    number | null;
+  maxCpuPct?:    number | null;
+  minMemRssBytes?: number | null;
+  maxMemRssBytes?: number | null;
+}
+
+export async function readProcessHistory(
+  assetId: string,
+  since: Date,
+  until: Date,
+  tier: SampleTier,
+  name: string,
+  fetchSince?: Date,
+): Promise<{ samples: ProcessHistoryRow[] }> {
+  const queryFrom = fetchSince ?? since;
+  if (tier === "detail") {
+    const samples = await prisma.assetProcessSample.findMany({
+      where: { assetId, name, timestamp: { gte: queryFrom, lte: until } },
+      orderBy: { timestamp: "asc" },
+    });
+    return {
+      samples: samples.map((s) => ({
+        timestamp:     s.timestamp,
+        cpuPct:        s.cpuPct,
+        memRssBytes:   bn(s.memRssBytes),
+        instanceCount: s.instanceCount,
+      })),
+    };
+  }
+
+  const table = tier === "hourly" ? "asset_process_samples_hourly" : "asset_process_samples_daily";
+  const rows = await prisma.$queryRawUnsafe<Array<{
+    bucketStart: Date;
+    sampleCount: number;
+    avgCpuPct: number | null;
+    minCpuPct: number | null;
+    maxCpuPct: number | null;
+    avgMemRssBytes: bigint | null;
+    minMemRssBytes: bigint | null;
+    maxMemRssBytes: bigint | null;
+  }>>(
+    `SELECT "bucketStart", "sampleCount", "avgCpuPct", "minCpuPct", "maxCpuPct",
+            "avgMemRssBytes", "minMemRssBytes", "maxMemRssBytes"
+     FROM "${table}"
+     WHERE "assetId" = $1 AND "name" = $2 AND "bucketStart" >= $3 AND "bucketStart" <= $4
+     ORDER BY "bucketStart" ASC`,
+    assetId, name, queryFrom, until,
+  );
+  return {
+    samples: rows.map((r) => ({
+      timestamp:       r.bucketStart,
+      cpuPct:          r.avgCpuPct,
+      memRssBytes:     bn(r.avgMemRssBytes),
+      sampleCount:     r.sampleCount,
+      minCpuPct:       r.minCpuPct,
+      maxCpuPct:       r.maxCpuPct,
+      minMemRssBytes:  bn(r.minMemRssBytes),
+      maxMemRssBytes:  bn(r.maxMemRssBytes),
+    })),
+  };
+}
+
 // ─── Interface history (counter table) ───────────────────────────────────────
 
 export interface InterfaceHistoryRow {

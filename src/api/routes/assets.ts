@@ -42,6 +42,7 @@ import {
   readHardwareSensorHistory,
   readInterfaceHistory,
   readStorageHistory,
+  readProcessHistory,
   readIpsecHistory,
   readPerfSlaHistory,
   readSdwanMembers,
@@ -217,6 +218,13 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   monitoredProcesses:    z.array(z.string().min(1)).max(64).optional(),
   // Process names flagged for future alerting (Processes-tab "Alert" checkbox).
   alertWatchedProcesses: z.array(z.string().min(1)).max(64).optional(),
+});
+
+// Per-pinned-process log config (PUT /assets/:id/processes/:name/config).
+const ProcessConfigSchema = z.object({
+  logSource:   z.enum(["auto", "journald-unit", "file-glob"]).optional(),
+  logPathGlob: z.string().max(1024).nullable().optional(),
+  notes:       z.string().max(255).nullable().optional(),
 });
 
 /**
@@ -1914,6 +1922,79 @@ router.get("/:id/storage-history", requirePermission("assets", "read"), async (r
       bucketSeconds: pick.bucketSeconds,
       samples: result.samples,
     });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/process-history?name=...&range=... — per-pinned-program
+// CPU/RAM history, tier-routed (detail → hourly → daily) by the requested range.
+router.get("/:id/process-history", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const name = req.query.name ? String(req.query.name) : null;
+    if (!name) throw new AppError(400, "name query parameter is required");
+    const { since, until, rangeLabel } = resolveRange(req);
+    const pick = await pickSampleTierForAsset(id, "process", since);
+    const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
+    const result = await readProcessHistory(id, since, until, pick.tier, name, fetchSince);
+    res.json({
+      range: rangeLabel,
+      name,
+      since,
+      until,
+      tier: pick.tier,
+      bucketSeconds: pick.bucketSeconds,
+      samples: result.samples,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/process-logs?name=...&since=...&limit=... — recent log lines
+// for a pinned program (detail-only table, newest-first, capped).
+router.get("/:id/process-logs", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const name = req.query.name ? String(req.query.name) : null;
+    if (!name) throw new AppError(400, "name query parameter is required");
+    const limit = Math.min(2000, Math.max(1, parseInt(String(req.query.limit ?? "500"), 10) || 500));
+    const since = req.query.since ? new Date(String(req.query.since)) : null;
+    const rows = await prisma.assetProcessLogSample.findMany({
+      where: { assetId: id, name, ...(since && !isNaN(since.getTime()) ? { timestamp: { gte: since } } : {}) },
+      orderBy: { timestamp: "desc" },
+      take: limit,
+    });
+    res.json({
+      name,
+      logs: rows.map((r) => ({
+        timestamp: r.timestamp,
+        level:     r.level,
+        message:   r.message,
+        source:    r.source,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+// PUT /assets/:id/processes/:name/config — operator log-path config for a
+// pinned program (log source + wildcard glob). Upserts AssetProcessConfig.
+router.put("/:id/processes/:name/config", requirePermission("assets", "write"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const name = String(req.params.name);
+    const body = ProcessConfigSchema.parse(req.body);
+    const updated = await prisma.assetProcessConfig.upsert({
+      where:  { assetId_name: { assetId: id, name } },
+      update: { logSource: body.logSource, logPathGlob: body.logPathGlob ?? null, notes: body.notes ?? null, updatedBy: req.session?.username ?? null },
+      create: { assetId: id, name, logSource: body.logSource ?? "auto", logPathGlob: body.logPathGlob ?? null, notes: body.notes ?? null, updatedBy: req.session?.username ?? null },
+    });
+    logEvent({
+      action: "asset.process.log_config_set",
+      resourceType: "asset",
+      resourceId: id,
+      actor: req.session?.username,
+      message: `Log config set for process "${name}"`,
+      details: { name, logSource: updated.logSource, logPathGlob: updated.logPathGlob },
+    });
+    res.json({ config: { name: updated.name, logSource: updated.logSource, logPathGlob: updated.logPathGlob, detectedUnit: updated.detectedUnit, notes: updated.notes } });
   } catch (err) { next(err); }
 });
 

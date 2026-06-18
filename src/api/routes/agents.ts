@@ -46,6 +46,8 @@ import {
   enqueueHardwareSensorSamples,
   enqueueInterfaceSamples,
   enqueueStorageSamples,
+  enqueueProcessSamples,
+  enqueueProcessLogSamples,
 } from "../../services/sampleWriteBuffer.js";
 import { reconcileMacAddresses } from "../../utils/macAddresses.js";
 import { logEvent } from "./events.js";
@@ -237,6 +239,25 @@ const ProcessSampleSchema = z.object({
   serviceUnit:   z.string().max(255).nullable().optional(),
 });
 
+// Per-pinned-program CPU/RAM (Feature C). One row per pinned program per
+// minute; cpu/mem summed across instances.
+const ProcessTelemetrySampleSchema = z.object({
+  timestamp:     z.string().datetime().optional(),
+  name:          z.string().min(1).max(255),
+  cpuPct:        z.number().nullable().optional(),
+  memRssBytes:   z.number().int().nullable().optional(),
+  instanceCount: z.number().int().nullable().optional(),
+});
+
+// Per-pinned-program log lines (Feature C).
+const ProcessLogSampleSchema = z.object({
+  timestamp: z.string().datetime().optional(),
+  name:      z.string().min(1).max(255),
+  level:     z.string().max(32).nullable().optional(),
+  message:   z.string().max(8192),
+  source:    z.string().max(512).nullable().optional(),
+});
+
 const SamplesBodySchema = z.discriminatedUnion("stream", [
   z.object({ stream: z.literal("responseTime"), samples: z.array(ResponseTimeSampleSchema).min(1).max(500) }),
   z.object({ stream: z.literal("telemetry"),    samples: z.array(TelemetrySampleSchema).min(1).max(500) }),
@@ -246,6 +267,8 @@ const SamplesBodySchema = z.discriminatedUnion("stream", [
   // A host can run thousands of processes; the agent already aggregates by
   // name, but cap generously so a pathological host can't OOM the handler.
   z.object({ stream: z.literal("processInventory"), samples: z.array(ProcessSampleSchema).max(10000) }),
+  z.object({ stream: z.literal("processTelemetry"), samples: z.array(ProcessTelemetrySampleSchema).min(1).max(500) }),
+  z.object({ stream: z.literal("processLog"),       samples: z.array(ProcessLogSampleSchema).min(1).max(2000) }),
 ]);
 
 agentsRouter.post("/samples", async (req, res, next) => {
@@ -435,6 +458,32 @@ agentsRouter.post("/samples", async (req, res, next) => {
         })),
       );
       accepted = body.samples.length;
+    } else if (body.stream === "processTelemetry") {
+      // Per-pinned-program CPU/RAM time-series. All rows cadence="fast" (only
+      // pinned programs are sampled). Bumps lastSystemInfoAt like other
+      // system-info-class streams so freshness reflects.
+      const rows = body.samples.map((s) => ({
+        assetId,
+        timestamp:     s.timestamp ? new Date(s.timestamp) : now,
+        cadence:       "fast" as const,
+        name:          s.name,
+        cpuPct:        s.cpuPct ?? null,
+        memRssBytes:   s.memRssBytes != null ? BigInt(Math.round(s.memRssBytes)) : null,
+        instanceCount: s.instanceCount ?? null,
+      }));
+      enqueueProcessSamples(rows);
+      accepted = rows.length;
+    } else if (body.stream === "processLog") {
+      const rows = body.samples.map((s) => ({
+        assetId,
+        timestamp: s.timestamp ? new Date(s.timestamp) : now,
+        name:      s.name,
+        level:     s.level ?? null,
+        message:   s.message,
+        source:    s.source ?? null,
+      }));
+      enqueueProcessLogSamples(rows);
+      accepted = rows.length;
     } else {
       // storage
       const pinnedStorage = new Set(
@@ -553,6 +602,31 @@ agentsRouter.get("/config", async (req, res, next) => {
     const eventLogConfig =
       eff.eventLogPolling === "agent" ? await getAgentEventLogConfig() : null;
 
+    // Pinned-process list for the Feature-C telemetry + log loops. Only when
+    // the processes stream resolves to agent. Each entry pairs an operator-
+    // pinned program name with its log config (auto-detect by default; an
+    // operator-typed glob/unit overrides). Empty when the stream isn't agent
+    // or nothing is pinned. Part of the ETag so a pin/config change refreshes.
+    const pinnedProcessNames = eff.processesPolling === "agent"
+      ? ((asset.monitoredProcesses ?? []) as string[])
+      : [];
+    let pinnedProcesses: Array<{ name: string; logSource: string; logPathGlob: string | null }> = [];
+    if (pinnedProcessNames.length > 0) {
+      const cfgs = await prisma.assetProcessConfig.findMany({
+        where: { assetId, name: { in: pinnedProcessNames } },
+        select: { name: true, logSource: true, logPathGlob: true },
+      });
+      const byName = new Map(cfgs.map((c) => [c.name, c]));
+      pinnedProcesses = pinnedProcessNames.map((name) => {
+        const c = byName.get(name);
+        return {
+          name,
+          logSource:   c?.logSource ?? "auto",
+          logPathGlob: c?.logPathGlob ?? null,
+        };
+      });
+    }
+
     const payload = {
       streams: {
         responseTime: {
@@ -606,6 +680,7 @@ agentsRouter.get("/config", async (req, res, next) => {
       },
       monitored: asset.monitored,
       certFingerprints,
+      pinnedProcesses,
     };
     const etag = computeEtag(payload);
 
