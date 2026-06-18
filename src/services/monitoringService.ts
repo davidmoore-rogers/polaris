@@ -89,8 +89,10 @@ import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import {
   type PollingMethod,
   type AssetSourceKind,
+  type Stream,
   isPollingMethod,
   isPollingMethodCompatible,
+  isMethodValidForStream,
   assetSourceKindFromIntegrationType,
 } from "../utils/pollingCompatibility.js";
 import { propagateAfterStatusChange } from "./dependencyTreeService.js";
@@ -204,6 +206,17 @@ export interface MonitorTierSettings {
    */
   storageIntervalSeconds:    number;
   storageTimeoutMs:          number;
+  /**
+   * Cross-transport streams (agent / SNMP / SSH / WinRM / REST). Each rides its
+   * own cadence + timeout like LLDP / Storage. processes = running-program
+   * inventory + per-program CPU/RAM; eventLog = curated OS event-log entries
+   * folded into the audit Event table. Method sets enforced by
+   * utils/pollingCompatibility STREAM_METHODS.
+   */
+  processesIntervalSeconds:  number;
+  processesTimeoutMs:        number;
+  eventLogIntervalSeconds:   number;
+  eventLogTimeoutMs:         number;
   sampleRetentionDays:       number;
   /**
    * Single retention setting shared by AssetTelemetrySample (CPU/memory)
@@ -225,6 +238,8 @@ export interface MonitorTierSettings {
   temperaturePolling:        PollingMethod | null;
   interfacesPolling:         PollingMethod | null;
   lldpPolling:               PollingMethod | null;
+  processesPolling:          PollingMethod | null;
+  eventLogPolling:           PollingMethod | null;
   /**
    * Storage stream — SNMP-only when enabled (HOST-RESOURCES-MIB hrStorageTable
    * plus vendor disk fallbacks). Independent of `interfacesPolling` so
@@ -251,6 +266,7 @@ export interface MonitorTierSettings {
   temperatureMibId:          string | null;
   interfacesMibId:           string | null;
   lldpMibId:                 string | null;
+  processesMibId:            string | null;
   /**
    * Per-stream Credential FK ids. Only the class-override tier (tier-2) stores
    * these — tier-3 (integration / manual) keeps its credential out-of-band on
@@ -264,6 +280,8 @@ export interface MonitorTierSettings {
   temperatureCredentialId:   string | null;
   interfacesCredentialId:    string | null;
   lldpCredentialId:          string | null;
+  processesCredentialId:     string | null;
+  eventLogCredentialId:      string | null;
 }
 
 export type MonitorOverrideSettings = Partial<MonitorTierSettings>;
@@ -294,6 +312,13 @@ const HARDCODED_FLOOR: MonitorTierSettings = {
   lldpTimeoutMs:             10_000,
   storageIntervalSeconds:    600,
   storageTimeoutMs:          10_000,
+  // Cross-transport streams default to the system-info baseline cadence at the
+  // floor. They resolve to "disabled" until an operator opts in at some tier,
+  // so the cadence only matters once a method is selected.
+  processesIntervalSeconds:  600,
+  processesTimeoutMs:        10_000,
+  eventLogIntervalSeconds:   600,
+  eventLogTimeoutMs:         10_000,
   sampleRetentionDays:       30,
   telemetryRetentionDays:    30,
   systemInfoRetentionDays:   30,
@@ -307,6 +332,8 @@ const HARDCODED_FLOOR: MonitorTierSettings = {
   interfacesPolling:         null,
   lldpPolling:               null,
   storagePolling:            null,
+  processesPolling:          null,
+  eventLogPolling:           null,
   // MIB ID hints default to null at the floor — vendor profile selection
   // uses the asset's own manufacturer/model when no tier supplies a MIB.
   responseTimeMibId:         null,
@@ -314,6 +341,7 @@ const HARDCODED_FLOOR: MonitorTierSettings = {
   temperatureMibId:          null,
   interfacesMibId:           null,
   lldpMibId:                 null,
+  processesMibId:            null,
   // Per-stream credential IDs only exist on the class-override tier; tier-3
   // and the floor always carry null and dispatchers fall through.
   responseTimeCredentialId:  null,
@@ -321,6 +349,8 @@ const HARDCODED_FLOOR: MonitorTierSettings = {
   temperatureCredentialId:   null,
   interfacesCredentialId:    null,
   lldpCredentialId:          null,
+  processesCredentialId:     null,
+  eventLogCredentialId:      null,
 };
 
 // ─── Legacy global-tier types (transitional, scheduled for removal) ────────
@@ -627,6 +657,10 @@ function tierFromJson(v: Record<string, unknown> | null | undefined): MonitorTie
     lldpTimeoutMs:              toPositiveInt(o.lldpTimeoutMs,             HARDCODED_FLOOR.lldpTimeoutMs),
     storageIntervalSeconds:     toPositiveInt(o.storageIntervalSeconds,    HARDCODED_FLOOR.storageIntervalSeconds),
     storageTimeoutMs:           toPositiveInt(o.storageTimeoutMs,          HARDCODED_FLOOR.storageTimeoutMs),
+    processesIntervalSeconds:   toPositiveInt(o.processesIntervalSeconds,  HARDCODED_FLOOR.processesIntervalSeconds),
+    processesTimeoutMs:         toPositiveInt(o.processesTimeoutMs,        HARDCODED_FLOOR.processesTimeoutMs),
+    eventLogIntervalSeconds:    toPositiveInt(o.eventLogIntervalSeconds,   HARDCODED_FLOOR.eventLogIntervalSeconds),
+    eventLogTimeoutMs:          toPositiveInt(o.eventLogTimeoutMs,         HARDCODED_FLOOR.eventLogTimeoutMs),
     sampleRetentionDays:        toPositiveInt(o.sampleRetentionDays,       HARDCODED_FLOOR.sampleRetentionDays),
     telemetryRetentionDays:     toPositiveInt(o.telemetryRetentionDays,    HARDCODED_FLOOR.telemetryRetentionDays),
     systemInfoRetentionDays:    toPositiveInt(o.systemInfoRetentionDays,   HARDCODED_FLOOR.systemInfoRetentionDays),
@@ -636,11 +670,14 @@ function tierFromJson(v: Record<string, unknown> | null | undefined): MonitorTie
     interfacesPolling:          readPollingFromJson(pollingBlock, "interfaces")   ?? readPollingFromJson(flat, "interfacesPolling"),
     lldpPolling:                readPollingFromJson(pollingBlock, "lldp")         ?? readPollingFromJson(flat, "lldpPolling"),
     storagePolling:             readPollingFromJson(pollingBlock, "storage")      ?? readPollingFromJson(flat, "storagePolling"),
+    processesPolling:           readPollingFromJson(pollingBlock, "processes")    ?? readPollingFromJson(flat, "processesPolling"),
+    eventLogPolling:            readPollingFromJson(pollingBlock, "eventLog")     ?? readPollingFromJson(flat, "eventLogPolling"),
     responseTimeMibId:          readMibIdFromJson(flat.responseTimeMibId),
     cpuMemoryMibId:             readMibIdFromJson(flat.cpuMemoryMibId)   ?? readMibIdFromJson(flat.telemetryMibId),
     temperatureMibId:           readMibIdFromJson(flat.temperatureMibId) ?? readMibIdFromJson(flat.telemetryMibId),
     interfacesMibId:            readMibIdFromJson(flat.interfacesMibId),
     lldpMibId:                  readMibIdFromJson(flat.lldpMibId),
+    processesMibId:             readMibIdFromJson(flat.processesMibId),
     // Tier-3 storage doesn't carry per-stream credentials — they only live
     // on the class-override row (tier-2). Always null here; loadClassOverride
     // surfaces the real values, and resolveMonitorSettings merges them onto
@@ -650,6 +687,8 @@ function tierFromJson(v: Record<string, unknown> | null | undefined): MonitorTie
     temperatureCredentialId:    null,
     interfacesCredentialId:     null,
     lldpCredentialId:           null,
+    processesCredentialId:      null,
+    eventLogCredentialId:       null,
   };
 }
 
@@ -683,8 +722,13 @@ function readMibIdFromJson(v: unknown): string | null {
  */
 function defaultPollingForSource(
   source: AssetSourceKind,
-  stream: "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage",
+  stream: Stream,
 ): PollingMethod | null {
+  // Cross-transport streams default to "disabled" everywhere — they're opt-in
+  // (operator picks agent / SNMP / SSH / WinRM, or REST for eventLog on a
+  // FortiGate). Keeping them off by default means no behavior change for
+  // existing fleets until an operator turns them on at some tier.
+  if (stream === "processes" || stream === "eventLog") return "disabled";
   if (source === "fortimanager" || source === "fortigate") {
     // FortiOS exposes lldp-neighbors but most fleets don't enable LLDP per
     // interface, so the endpoint returns nothing on every probe. Default
@@ -758,7 +802,7 @@ function applyClassStreamsOverlay(
   streams: Record<string, unknown> | undefined,
 ): MonitorTierSettings {
   if (!streams) return base;
-  type StreamKey = "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage";
+  type StreamKey = "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage" | "processes" | "eventLog";
   type StreamCells = {
     pollingField:        keyof MonitorTierSettings;
     credentialField:     keyof MonitorTierSettings;
@@ -774,6 +818,8 @@ function applyClassStreamsOverlay(
     interfaces:   { pollingField: "interfacesPolling",   credentialField: "interfacesCredentialId",   intervalField: "systemInfoIntervalSeconds",  timeoutField: "systemInfoTimeoutMs",   mibField: "interfacesMibId" },
     lldp:         { pollingField: "lldpPolling",         credentialField: "lldpCredentialId",         intervalField: "lldpIntervalSeconds",        timeoutField: "lldpTimeoutMs",         mibField: "lldpMibId" },
     storage:      { pollingField: "storagePolling",      credentialField: "interfacesCredentialId",   intervalField: "storageIntervalSeconds",     timeoutField: "storageTimeoutMs" },
+    processes:    { pollingField: "processesPolling",    credentialField: "processesCredentialId",    intervalField: "processesIntervalSeconds",   timeoutField: "processesTimeoutMs",    mibField: "processesMibId" },
+    eventLog:     { pollingField: "eventLogPolling",     credentialField: "eventLogCredentialId",     intervalField: "eventLogIntervalSeconds",    timeoutField: "eventLogTimeoutMs" },
   };
   for (const key of Object.keys(map) as StreamKey[]) {
     const stream = streams[key] as Record<string, unknown> | null | undefined;
@@ -812,7 +858,7 @@ function detectPerClassFieldOrigins(
   streams: Record<string, unknown>,
 ): Partial<Record<keyof MonitorTierSettings, true>> {
   const out: Partial<Record<keyof MonitorTierSettings, true>> = {};
-  type StreamKey = "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage";
+  type StreamKey = "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage" | "processes" | "eventLog";
   type StreamCellMap = {
     polling?:         keyof MonitorTierSettings;
     credentialId?:    keyof MonitorTierSettings;
@@ -828,6 +874,8 @@ function detectPerClassFieldOrigins(
     interfaces:   { polling: "interfacesPolling",   credentialId: "interfacesCredentialId",   intervalSeconds: "systemInfoIntervalSeconds",  timeoutMs: "systemInfoTimeoutMs",                                      mibId: "interfacesMibId" },
     lldp:         { polling: "lldpPolling",         credentialId: "lldpCredentialId",         intervalSeconds: "lldpIntervalSeconds",        timeoutMs: "lldpTimeoutMs",                                            mibId: "lldpMibId" },
     storage:      { polling: "storagePolling",      credentialId: "interfacesCredentialId",   intervalSeconds: "storageIntervalSeconds",     timeoutMs: "storageTimeoutMs" },
+    processes:    { polling: "processesPolling",    credentialId: "processesCredentialId",    intervalSeconds: "processesIntervalSeconds",   timeoutMs: "processesTimeoutMs",                                       mibId: "processesMibId" },
+    eventLog:     { polling: "eventLogPolling",     credentialId: "eventLogCredentialId",     intervalSeconds: "eventLogIntervalSeconds",    timeoutMs: "eventLogTimeoutMs" },
   };
   for (const key of Object.keys(map) as StreamKey[]) {
     const stream = streams[key] as Record<string, unknown> | null | undefined;
@@ -954,16 +1002,25 @@ async function loadClassOverride(
       interfacesPolling:          true,
       lldpPolling:                true,
       storagePolling:             true,
+      processesPolling:           true,
+      eventLogPolling:            true,
       responseTimeMibId:          true,
       cpuMemoryMibId:             true,
       temperatureMibId:           true,
       interfacesMibId:            true,
       lldpMibId:                  true,
+      processesMibId:             true,
       responseTimeCredentialId:   true,
       cpuMemoryCredentialId:      true,
       temperatureCredentialId:    true,
       interfacesCredentialId:     true,
       lldpCredentialId:           true,
+      processesCredentialId:      true,
+      eventLogCredentialId:       true,
+      processesIntervalSeconds:   true,
+      eventLogIntervalSeconds:    true,
+      processesTimeoutMs:         true,
+      eventLogTimeoutMs:          true,
     },
   });
   let result: MonitorOverrideSettings | null = null;
@@ -991,16 +1048,25 @@ async function loadClassOverride(
     if (isPollingMethod(row.interfacesPolling))   result.interfacesPolling   = row.interfacesPolling;
     if (isPollingMethod(row.lldpPolling))         result.lldpPolling         = row.lldpPolling;
     if (isPollingMethod(row.storagePolling))      result.storagePolling      = row.storagePolling;
+    if (isPollingMethod(row.processesPolling))    result.processesPolling    = row.processesPolling;
+    if (isPollingMethod(row.eventLogPolling))     result.eventLogPolling     = row.eventLogPolling;
     if (row.responseTimeMibId)                    result.responseTimeMibId   = row.responseTimeMibId;
     if (row.cpuMemoryMibId)                       result.cpuMemoryMibId      = row.cpuMemoryMibId;
     if (row.temperatureMibId)                     result.temperatureMibId    = row.temperatureMibId;
     if (row.interfacesMibId)                      result.interfacesMibId     = row.interfacesMibId;
     if (row.lldpMibId)                            result.lldpMibId           = row.lldpMibId;
+    if (row.processesMibId)                       result.processesMibId      = row.processesMibId;
     if (row.responseTimeCredentialId)             result.responseTimeCredentialId  = row.responseTimeCredentialId;
     if (row.cpuMemoryCredentialId)                result.cpuMemoryCredentialId     = row.cpuMemoryCredentialId;
     if (row.temperatureCredentialId)              result.temperatureCredentialId   = row.temperatureCredentialId;
     if (row.interfacesCredentialId)               result.interfacesCredentialId    = row.interfacesCredentialId;
     if (row.lldpCredentialId)                     result.lldpCredentialId          = row.lldpCredentialId;
+    if (row.processesCredentialId)                result.processesCredentialId     = row.processesCredentialId;
+    if (row.eventLogCredentialId)                 result.eventLogCredentialId      = row.eventLogCredentialId;
+    if (row.processesIntervalSeconds   != null)   result.processesIntervalSeconds  = row.processesIntervalSeconds;
+    if (row.eventLogIntervalSeconds    != null)   result.eventLogIntervalSeconds   = row.eventLogIntervalSeconds;
+    if (row.processesTimeoutMs         != null)   result.processesTimeoutMs        = row.processesTimeoutMs;
+    if (row.eventLogTimeoutMs          != null)   result.eventLogTimeoutMs         = row.eventLogTimeoutMs;
   }
   classOverrideCache.set(key, result);
   return result;
@@ -1025,6 +1091,9 @@ export interface AssetMonitorContext {
   lldpIntervalSec?:          number | null;
   /** Phase 2 — per-asset Storage cadence override (sec). null = inherit. */
   storageIntervalSec?:       number | null;
+  /** Per-asset cross-transport cadence overrides (sec). null = inherit. */
+  processesIntervalSec?:     number | null;
+  eventLogIntervalSec?:      number | null;
   probeTimeoutMs:            number | null;
   /** Per-asset CPU+memory collector timeout override (ms). null = inherit. */
   cpuMemoryTimeoutMs?:       number | null;
@@ -1032,6 +1101,9 @@ export interface AssetMonitorContext {
   temperatureTimeoutMs?:     number | null;
   /** Per-asset interface/storage/LLDP collector timeout override (ms). null = inherit. */
   systemInfoTimeoutMs?:      number | null;
+  /** Per-asset cross-transport collector timeout overrides (ms). null = inherit. */
+  processesTimeoutMs?:       number | null;
+  eventLogTimeoutMs?:        number | null;
   // Per-stream polling overrides on the asset itself. null = inherit.
   // String? on disk so legacy values can sit alongside; resolver adopts
   // them only when they pass isPollingMethod().
@@ -1041,6 +1113,8 @@ export interface AssetMonitorContext {
   interfacesPolling?:        string | null;
   lldpPolling?:              string | null;
   storagePolling?:           string | null;
+  processesPolling?:         string | null;
+  eventLogPolling?:          string | null;
   // Per-stream MIB id overrides on the asset itself. null = inherit.
   // Either `"std:<key>"` (UI hint only) or an uploaded MibFile UUID
   // (consumed by `collectCpuMemorySnmp` / `collectTemperatureSnmp` to override
@@ -1050,6 +1124,7 @@ export interface AssetMonitorContext {
   temperatureMibId?:         string | null;
   interfacesMibId?:          string | null;
   lldpMibId?:                string | null;
+  processesMibId?:           string | null;
 }
 
 /**
@@ -1119,19 +1194,25 @@ export async function resolveMonitorSettings(asset: AssetMonitorContext): Promis
 
   // Per-stream polling resolution — see header comment above for rules.
   function resolveStream(
-    stream: "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage",
+    stream: Stream,
     tierVal: PollingMethod | null,
     classVal: PollingMethod | null | undefined,
     assetVal: string | null | undefined,
   ): PollingMethod | null {
+    // A tier's method is adopted only when it's valid for BOTH the asset's
+    // source (compatibility matrix) AND the stream (cross-transport streams
+    // restrict the method set — e.g. eventLog can't ride SNMP, processes can't
+    // ride REST). Incompatible values are silently skipped — the layer below
+    // stays in place.
+    const ok = (m: PollingMethod) => isPollingMethodCompatible(sourceKind, m) && isMethodValidForStream(stream, m);
     let resolved: PollingMethod | null = defaultPollingForSource(sourceKind, stream);
-    if (tierVal && isPollingMethodCompatible(sourceKind, tierVal)) {
+    if (tierVal && ok(tierVal)) {
       resolved = tierVal;
     }
-    if (classVal && isPollingMethodCompatible(sourceKind, classVal)) {
+    if (classVal && ok(classVal)) {
       resolved = classVal;
     }
-    if (isPollingMethod(assetVal) && isPollingMethodCompatible(sourceKind, assetVal)) {
+    if (isPollingMethod(assetVal) && ok(assetVal)) {
       resolved = assetVal;
     }
     return resolved;
@@ -1173,6 +1254,29 @@ export async function resolveMonitorSettings(asset: AssetMonitorContext): Promis
     classOverride?.storagePolling ?? null,
     asset.storagePolling,
   );
+  merged.processesPolling = resolveStream(
+    "processes",
+    tier3.processesPolling,
+    classOverride?.processesPolling ?? null,
+    asset.processesPolling,
+  );
+  merged.eventLogPolling = resolveStream(
+    "eventLog",
+    tier3.eventLogPolling,
+    classOverride?.eventLogPolling ?? null,
+    asset.eventLogPolling,
+  );
+
+  // Cross-transport cadences/timeouts: tier-3 baseline → class override →
+  // per-asset, mirroring LLDP/Storage.
+  if (classOverride?.processesIntervalSeconds != null) merged.processesIntervalSeconds = classOverride.processesIntervalSeconds;
+  if (classOverride?.eventLogIntervalSeconds  != null) merged.eventLogIntervalSeconds  = classOverride.eventLogIntervalSeconds;
+  if (classOverride?.processesTimeoutMs       != null) merged.processesTimeoutMs       = classOverride.processesTimeoutMs;
+  if (classOverride?.eventLogTimeoutMs        != null) merged.eventLogTimeoutMs        = classOverride.eventLogTimeoutMs;
+  if (asset.processesIntervalSec != null) merged.processesIntervalSeconds = asset.processesIntervalSec;
+  if (asset.eventLogIntervalSec  != null) merged.eventLogIntervalSeconds  = asset.eventLogIntervalSec;
+  if (asset.processesTimeoutMs   != null) merged.processesTimeoutMs       = asset.processesTimeoutMs;
+  if (asset.eventLogTimeoutMs    != null) merged.eventLogTimeoutMs        = asset.eventLogTimeoutMs;
 
   // Per-stream MIB id resolution. Same tier order as polling, but no
   // compatibility check — the MIB id is a hint that gets consumed downstream
@@ -1193,6 +1297,7 @@ export async function resolveMonitorSettings(asset: AssetMonitorContext): Promis
   merged.temperatureMibId  = resolveMibId(tier3.temperatureMibId,  classOverride?.temperatureMibId,  asset.temperatureMibId);
   merged.interfacesMibId   = resolveMibId(tier3.interfacesMibId,   classOverride?.interfacesMibId,   asset.interfacesMibId);
   merged.lldpMibId         = resolveMibId(tier3.lldpMibId,         classOverride?.lldpMibId,         asset.lldpMibId);
+  merged.processesMibId    = resolveMibId(tier3.processesMibId,    classOverride?.processesMibId,    asset.processesMibId);
 
   // Per-stream credential IDs from the class override. Per-asset overrides
   // come from the Prisma `include` on each dispatcher, not the resolver.
@@ -1201,6 +1306,8 @@ export async function resolveMonitorSettings(asset: AssetMonitorContext): Promis
   merged.temperatureCredentialId  = classOverride?.temperatureCredentialId  ?? null;
   merged.interfacesCredentialId   = classOverride?.interfacesCredentialId   ?? null;
   merged.lldpCredentialId         = classOverride?.lldpCredentialId         ?? null;
+  merged.processesCredentialId    = classOverride?.processesCredentialId    ?? null;
+  merged.eventLogCredentialId     = classOverride?.eventLogCredentialId     ?? null;
 
   return merged;
 }
@@ -1317,6 +1424,10 @@ export async function resolveMonitorSettingsWithProvenance(
     lldpTimeoutMs:              tier3Source,
     storageIntervalSeconds:     tier3Source,
     storageTimeoutMs:           tier3Source,
+    processesIntervalSeconds:   tier3Source,
+    processesTimeoutMs:         tier3Source,
+    eventLogIntervalSeconds:    tier3Source,
+    eventLogTimeoutMs:          tier3Source,
     sampleRetentionDays:        tier3Source,
     telemetryRetentionDays:     tier3Source,
     systemInfoRetentionDays:    tier3Source,
@@ -1326,11 +1437,14 @@ export async function resolveMonitorSettingsWithProvenance(
     interfacesPolling:          tier3Source,
     lldpPolling:                tier3Source,
     storagePolling:             tier3Source,
+    processesPolling:           tier3Source,
+    eventLogPolling:            tier3Source,
     responseTimeMibId:          tier3Source,
     cpuMemoryMibId:             tier3Source,
     temperatureMibId:           tier3Source,
     interfacesMibId:            tier3Source,
     lldpMibId:                  tier3Source,
+    processesMibId:             tier3Source,
     // Credential IDs are class-override only; UI badges treat the resolved
     // value as "class" when set, but the initial label tracks the tier-3
     // source for consistency. The dispatcher walks the same fallback chain.
@@ -1339,6 +1453,8 @@ export async function resolveMonitorSettingsWithProvenance(
     temperatureCredentialId:    tier3Source,
     interfacesCredentialId:     tier3Source,
     lldpCredentialId:           tier3Source,
+    processesCredentialId:      tier3Source,
+    eventLogCredentialId:       tier3Source,
   };
 
   // Stamp "integration-class" on every field the per-class streams block
@@ -1373,6 +1489,12 @@ export async function resolveMonitorSettingsWithProvenance(
     if (classOverride.interfacesPolling)           { resolved.interfacesPolling   = classOverride.interfacesPolling;   provenance.interfacesPolling   = "class"; }
     if (classOverride.lldpPolling)                 { resolved.lldpPolling         = classOverride.lldpPolling;         provenance.lldpPolling         = "class"; }
     if (classOverride.storagePolling)              { resolved.storagePolling      = classOverride.storagePolling;      provenance.storagePolling      = "class"; }
+    if (classOverride.processesPolling)            { resolved.processesPolling    = classOverride.processesPolling;    provenance.processesPolling    = "class"; }
+    if (classOverride.eventLogPolling)             { resolved.eventLogPolling     = classOverride.eventLogPolling;     provenance.eventLogPolling     = "class"; }
+    if (classOverride.processesIntervalSeconds   != null) { resolved.processesIntervalSeconds = classOverride.processesIntervalSeconds; provenance.processesIntervalSeconds = "class"; }
+    if (classOverride.eventLogIntervalSeconds    != null) { resolved.eventLogIntervalSeconds  = classOverride.eventLogIntervalSeconds;  provenance.eventLogIntervalSeconds  = "class"; }
+    if (classOverride.processesTimeoutMs         != null) { resolved.processesTimeoutMs       = classOverride.processesTimeoutMs;       provenance.processesTimeoutMs       = "class"; }
+    if (classOverride.eventLogTimeoutMs          != null) { resolved.eventLogTimeoutMs        = classOverride.eventLogTimeoutMs;        provenance.eventLogTimeoutMs        = "class"; }
     if (classOverride.responseTimeMibId)           { resolved.responseTimeMibId   = classOverride.responseTimeMibId;   provenance.responseTimeMibId   = "class"; }
     if (classOverride.cpuMemoryMibId)              { resolved.cpuMemoryMibId      = classOverride.cpuMemoryMibId;      provenance.cpuMemoryMibId      = "class"; }
     if (classOverride.temperatureMibId)            { resolved.temperatureMibId    = classOverride.temperatureMibId;    provenance.temperatureMibId    = "class"; }
@@ -1383,6 +1505,9 @@ export async function resolveMonitorSettingsWithProvenance(
     if (classOverride.temperatureCredentialId)     { resolved.temperatureCredentialId   = classOverride.temperatureCredentialId;   provenance.temperatureCredentialId   = "class"; }
     if (classOverride.interfacesCredentialId)      { resolved.interfacesCredentialId    = classOverride.interfacesCredentialId;    provenance.interfacesCredentialId    = "class"; }
     if (classOverride.lldpCredentialId)            { resolved.lldpCredentialId          = classOverride.lldpCredentialId;          provenance.lldpCredentialId          = "class"; }
+    if (classOverride.processesMibId)              { resolved.processesMibId            = classOverride.processesMibId;            provenance.processesMibId            = "class"; }
+    if (classOverride.processesCredentialId)       { resolved.processesCredentialId     = classOverride.processesCredentialId;     provenance.processesCredentialId     = "class"; }
+    if (classOverride.eventLogCredentialId)        { resolved.eventLogCredentialId      = classOverride.eventLogCredentialId;      provenance.eventLogCredentialId      = "class"; }
   }
 
   // Per-asset (only the cadence + timeout overrides).
@@ -1426,15 +1551,33 @@ export async function resolveMonitorSettingsWithProvenance(
     resolved.systemInfoTimeoutMs = asset.systemInfoTimeoutMs;
     provenance.systemInfoTimeoutMs = "asset";
   }
+  if (asset.processesIntervalSec != null) {
+    resolved.processesIntervalSeconds = asset.processesIntervalSec;
+    provenance.processesIntervalSeconds = "asset";
+  }
+  if (asset.eventLogIntervalSec != null) {
+    resolved.eventLogIntervalSeconds = asset.eventLogIntervalSec;
+    provenance.eventLogIntervalSeconds = "asset";
+  }
+  if (asset.processesTimeoutMs != null) {
+    resolved.processesTimeoutMs = asset.processesTimeoutMs;
+    provenance.processesTimeoutMs = "asset";
+  }
+  if (asset.eventLogTimeoutMs != null) {
+    resolved.eventLogTimeoutMs = asset.eventLogTimeoutMs;
+    provenance.eventLogTimeoutMs = "asset";
+  }
   // Per-asset polling overrides — only adopted when they're a real
-  // PollingMethod string. Compatibility check happens here too: a stale
-  // legacy "rest" or an incompatible value silently falls through to the
-  // class/tier value.
+  // PollingMethod string AND valid for the asset's source AND the stream.
+  // A stale legacy "rest" or an incompatible value silently falls through to
+  // the class/tier value. The Stream name is derived from the field by
+  // stripping the "Polling" suffix.
   const sourceKindForAsset = assetSourceKindFromIntegrationType(asset.discoveredByIntegrationType ?? null);
-  function takeAssetPolling(stream: keyof Pick<MonitorTierSettings, "responseTimePolling" | "cpuMemoryPolling" | "temperaturePolling" | "interfacesPolling" | "lldpPolling" | "storagePolling">, raw: string | null | undefined) {
-    if (isPollingMethod(raw) && isPollingMethodCompatible(sourceKindForAsset, raw)) {
-      resolved[stream] = raw;
-      provenance[stream] = "asset";
+  function takeAssetPolling(field: keyof Pick<MonitorTierSettings, "responseTimePolling" | "cpuMemoryPolling" | "temperaturePolling" | "interfacesPolling" | "lldpPolling" | "storagePolling" | "processesPolling" | "eventLogPolling">, raw: string | null | undefined) {
+    const streamName = field.replace(/Polling$/, "") as Stream;
+    if (isPollingMethod(raw) && isPollingMethodCompatible(sourceKindForAsset, raw) && isMethodValidForStream(streamName, raw)) {
+      resolved[field] = raw;
+      provenance[field] = "asset";
     }
   }
   takeAssetPolling("responseTimePolling", asset.responseTimePolling);
@@ -1443,10 +1586,12 @@ export async function resolveMonitorSettingsWithProvenance(
   takeAssetPolling("interfacesPolling",   asset.interfacesPolling);
   takeAssetPolling("lldpPolling",         asset.lldpPolling);
   takeAssetPolling("storagePolling",      asset.storagePolling);
+  takeAssetPolling("processesPolling",    asset.processesPolling);
+  takeAssetPolling("eventLogPolling",     asset.eventLogPolling);
 
   // Per-asset MIB id overrides. Empty strings are treated as inherit; only
   // non-empty values take effect (matches the resolver's resolveMibId rule).
-  function takeAssetMibId(stream: keyof Pick<MonitorTierSettings, "responseTimeMibId" | "cpuMemoryMibId" | "temperatureMibId" | "interfacesMibId" | "lldpMibId">, raw: string | null | undefined) {
+  function takeAssetMibId(stream: keyof Pick<MonitorTierSettings, "responseTimeMibId" | "cpuMemoryMibId" | "temperatureMibId" | "interfacesMibId" | "lldpMibId" | "processesMibId">, raw: string | null | undefined) {
     if (typeof raw === "string" && raw.trim().length > 0) {
       resolved[stream] = raw;
       provenance[stream] = "asset";
@@ -1457,6 +1602,7 @@ export async function resolveMonitorSettingsWithProvenance(
   takeAssetMibId("temperatureMibId",  asset.temperatureMibId);
   takeAssetMibId("interfacesMibId",   asset.interfacesMibId);
   takeAssetMibId("lldpMibId",         asset.lldpMibId);
+  takeAssetMibId("processesMibId",    asset.processesMibId);
 
   return { resolved, provenance, tier3Source, classOverrideId };
 }

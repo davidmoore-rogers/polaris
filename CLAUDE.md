@@ -142,7 +142,7 @@ Resource groupings (route file in `src/api/routes/`):
 - **proxySettings** (`/server-settings/proxy` — in-app nginx GUI config + cert preflight/rotate)
 - **mibs** (`/server-settings/mibs` and `/server-settings/mibs/std`)
 - **manufacturerProfiles** / **manufacturerAliases** / **deviceIcons** (telemetry profile + alias map + topology icons)
-- **monitorSettings** (manual + integration + class overrides + asset overrides + per-stream resolver)
+- **monitorSettings** (manual + integration + class overrides + asset overrides + per-stream resolver). Streams: `responseTime` / `cpuMemory` / `temperature` / `interfaces` / `lldp` / `storage`, plus the cross-transport **`processes`** + **`eventLog`** streams (collectable via agent / SNMP / SSH / WinRM / REST per a per-stream method matrix in `utils/pollingCompatibility.ts`; default `disabled`, opt-in; surface as stream tabs next to Storage on the integration Monitoring tab).
 
 > Full endpoint catalog with bodies, response shapes, role gates, and per-endpoint quirks: [ARCHITECTURE.md → API Endpoints](ARCHITECTURE.md#api-endpoints).
 >

@@ -288,6 +288,8 @@ model Credential {
   interfacesAssets             Asset[]                @relation("AssetInterfacesCred")
   lldpAssets                   Asset[]                @relation("AssetLldpCred")
   customWidgetAssets           Asset[]                @relation("AssetCustomWidgetCred")
+  processesAssets              Asset[]                @relation("AssetProcessesCred")
+  eventLogAssets               Asset[]                @relation("AssetEventLogCred")
   // Back-relations for per-stream class override credentials
   classOverrideRTAssets        MonitorClassOverride[] @relation("ClassOverrideRTCred")
   classOverrideCpuMemAssets    MonitorClassOverride[] @relation("ClassOverrideCpuMemCred")
@@ -295,6 +297,8 @@ model Credential {
   classOverrideIfAssets        MonitorClassOverride[] @relation("ClassOverrideIfCred")
   classOverrideLldpAssets      MonitorClassOverride[] @relation("ClassOverrideLldpCred")
   classOverrideCustomWidgetAssets MonitorClassOverride[] @relation("ClassOverrideCustomWidgetCred")
+  classOverrideProcessesAssets MonitorClassOverride[] @relation("ClassOverrideProcessesCred")
+  classOverrideEventLogAssets  MonitorClassOverride[] @relation("ClassOverrideEventLogCred")
   // Back-relation for the Polaris Agent install credential (one per
   // ManagedAgent row). SetNull on credential delete so removing a
   // credential doesn't block a stuck agent install — operator falls
@@ -354,6 +358,11 @@ model MonitorClassOverride {
   customWidgetIntervalSeconds Int?
   // Custom-widget per-request timeout (ms). null = inherit.
   customWidgetTimeoutMs       Int?
+  // Cross-transport process / event-log cadences + timeouts. null = inherit.
+  processesIntervalSeconds    Int?
+  eventLogIntervalSeconds     Int?
+  processesTimeoutMs          Int?
+  eventLogTimeoutMs           Int?
   // ─── Legacy retention columns (single-tier) ─────────────────────────────
   // Phase 1 keeps these alongside the new detail/hourly/daily columns so the
   // resolver + prune layer keep working unchanged until the tier-aware
@@ -393,6 +402,10 @@ model MonitorClassOverride {
   lldpPolling               String?
   storagePolling            String?
   customWidgetPolling       String?
+  // Cross-transport streams (agent / SNMP / SSH / WinRM / REST). See
+  // utils/pollingCompatibility STREAM_METHODS for the per-stream method set.
+  processesPolling          String?
+  eventLogPolling           String?
   // Per-stream credential overrides (FK to Credential, null = inherit)
   responseTimeCredentialId  String?
   responseTimeCredential    Credential?  @relation("ClassOverrideRTCred", fields: [responseTimeCredentialId], references: [id], onDelete: SetNull)
@@ -406,12 +419,17 @@ model MonitorClassOverride {
   lldpCredential            Credential?  @relation("ClassOverrideLldpCred", fields: [lldpCredentialId], references: [id], onDelete: SetNull)
   customWidgetCredentialId  String?
   customWidgetCredential    Credential?  @relation("ClassOverrideCustomWidgetCred", fields: [customWidgetCredentialId], references: [id], onDelete: SetNull)
+  processesCredentialId     String?
+  processesCredential       Credential?  @relation("ClassOverrideProcessesCred", fields: [processesCredentialId], references: [id], onDelete: SetNull)
+  eventLogCredentialId      String?
+  eventLogCredential        Credential?  @relation("ClassOverrideEventLogCred", fields: [eventLogCredentialId], references: [id], onDelete: SetNull)
   // Per-stream MIB overrides (String: "std:<key>" or uploaded MIB UUID or null)
   responseTimeMibId         String?
   cpuMemoryMibId            String?
   temperatureMibId          String?
   interfacesMibId           String?
   lldpMibId                 String?
+  processesMibId            String?
   createdAt                 DateTime     @default(now())
   updatedAt                 DateTime     @updatedAt
 
@@ -581,12 +599,17 @@ model Asset {
   lldpCredential           Credential? @relation("AssetLldpCred", fields: [lldpCredentialId], references: [id], onDelete: SetNull)
   customWidgetCredentialId String?
   customWidgetCredential   Credential? @relation("AssetCustomWidgetCred", fields: [customWidgetCredentialId], references: [id], onDelete: SetNull)
+  processesCredentialId    String?
+  processesCredential      Credential? @relation("AssetProcessesCred", fields: [processesCredentialId], references: [id], onDelete: SetNull)
+  eventLogCredentialId     String?
+  eventLogCredential       Credential? @relation("AssetEventLogCred", fields: [eventLogCredentialId], references: [id], onDelete: SetNull)
   // Per-stream MIB overrides (String: "std:<key>" or uploaded MIB UUID or null)
   responseTimeMibId        String?
   cpuMemoryMibId           String?
   temperatureMibId         String?
   interfacesMibId          String?
   lldpMibId                String?
+  processesMibId           String?
   monitorIntervalSec       Int? // Per-asset override for response-time probes; falls back to the resolved tier-3 setting
   // Per-asset override for the probe TCP/UDP/HTTP timeout in milliseconds.
   // Range 100..60000; null = inherit from the resolved tier-3 setting (default 5000ms).
@@ -635,6 +658,10 @@ model Asset {
   interfacesPolling   String?
   lldpPolling         String?
   storagePolling      String?
+  // Cross-transport streams (agent / SNMP / SSH / WinRM / REST). null = inherit.
+  // Per-stream method set enforced by utils/pollingCompatibility STREAM_METHODS.
+  processesPolling    String?
+  eventLogPolling     String?
   // Slice 7 — custom-widget cadence. When the asset's manufacturer has at
   // least one ManufacturerCustomWidget AND this resolves to a non-"disabled"
   // method, collectCustomWidgets fires on the heavy loop. Compatible methods:
@@ -657,6 +684,13 @@ model Asset {
   storageIntervalSec     Int?
   // Slice 7 — per-asset custom-widget probe cadence (seconds). null = inherit.
   customWidgetIntervalSec Int?
+  // Cross-transport process / event-log cadences (seconds) + request timeouts
+  // (ms). null = inherit. For agent assets these mirror the agent loop intervals;
+  // for SNMP/SSH/WinRM/REST they bound the agentless poll cadence.
+  processesIntervalSec   Int?
+  eventLogIntervalSec    Int?
+  processesTimeoutMs     Int?
+  eventLogTimeoutMs      Int?
   lastTelemetryAt       DateTime?
   lastSystemInfoAt      DateTime?
   // Per-cadence last-touched stamps for the LLDP + Storage queues. Bumped by

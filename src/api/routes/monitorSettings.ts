@@ -27,8 +27,10 @@ import { AppError } from "../../utils/errors.js";
 import {
   type PollingMethod,
   type AssetSourceKind,
+  type Stream,
   assetSourceKindFromIntegrationType,
   isPollingMethodCompatible,
+  isMethodValidForStream,
   pollingMethodLabel,
 } from "../../utils/pollingCompatibility.js";
 import { isKnownAssetType } from "../../utils/assetTypes.js";
@@ -91,18 +93,28 @@ const TierSettingsSchema = z.object({
   sampleRetentionDays:        z.unknown().optional(),
   telemetryRetentionDays:     z.unknown().optional(),
   systemInfoRetentionDays:    z.unknown().optional(),
+  // Cross-transport streams (Phase: processes + event log). Same cadence/timeout
+  // shape as LLDP/Storage; method set restricted by STREAM_METHODS + validated
+  // in assertPollingCompatible.
+  processesIntervalSeconds:   z.number().int().min(60).max(86400).nullable().optional(),
+  processesTimeoutMs:         z.number().int().min(100).max(120000).nullable().optional(),
+  eventLogIntervalSeconds:    z.number().int().min(60).max(86400).nullable().optional(),
+  eventLogTimeoutMs:          z.number().int().min(100).max(120000).nullable().optional(),
   responseTimePolling:        PollingMethodEnum.nullable().optional(),
   cpuMemoryPolling:           PollingMethodEnum.nullable().optional(),
   temperaturePolling:         PollingMethodEnum.nullable().optional(),
   interfacesPolling:          PollingMethodEnum.nullable().optional(),
   lldpPolling:                PollingMethodEnum.nullable().optional(),
   storagePolling:             PollingMethodEnum.nullable().optional(),
+  processesPolling:           PollingMethodEnum.nullable().optional(),
+  eventLogPolling:            PollingMethodEnum.nullable().optional(),
   // Per-stream MIB IDs stored in the JSON blob ("std:<key>" | uploaded UUID | null)
   responseTimeMibId:          z.string().nullable().optional(),
   cpuMemoryMibId:             z.string().nullable().optional(),
   temperatureMibId:           z.string().nullable().optional(),
   interfacesMibId:            z.string().nullable().optional(),
   lldpMibId:                  z.string().nullable().optional(),
+  processesMibId:             z.string().nullable().optional(),
 });
 
 // Integration-tier variant: systemInfoIntervalSeconds becomes nullable.
@@ -131,6 +143,10 @@ const OverrideSettingsSchema = z.object({
   lldpTimeoutMs:              z.number().int().min(100).max(120000).nullable().optional(),
   storageIntervalSeconds:     z.number().int().min(60).max(86400).nullable().optional(),
   storageTimeoutMs:           z.number().int().min(100).max(120000).nullable().optional(),
+  processesIntervalSeconds:   z.number().int().min(60).max(86400).nullable().optional(),
+  processesTimeoutMs:         z.number().int().min(100).max(120000).nullable().optional(),
+  eventLogIntervalSeconds:    z.number().int().min(60).max(86400).nullable().optional(),
+  eventLogTimeoutMs:          z.number().int().min(100).max(120000).nullable().optional(),
   // Class-override retention is dead — see the comment on the matching
   // fields in TierSettingsSchema above. Tolerated on input, dropped before
   // persistence; retention now lives globally in Setting("sampleRetention").
@@ -143,18 +159,23 @@ const OverrideSettingsSchema = z.object({
   interfacesPolling:          PollingMethodEnum.nullable().optional(),
   lldpPolling:                PollingMethodEnum.nullable().optional(),
   storagePolling:             PollingMethodEnum.nullable().optional(),
+  processesPolling:           PollingMethodEnum.nullable().optional(),
+  eventLogPolling:            PollingMethodEnum.nullable().optional(),
   // Per-stream credential IDs (FK to Credential, null = inherit)
   responseTimeCredentialId:   z.string().uuid().nullable().optional(),
   cpuMemoryCredentialId:      z.string().uuid().nullable().optional(),
   temperatureCredentialId:    z.string().uuid().nullable().optional(),
   interfacesCredentialId:     z.string().uuid().nullable().optional(),
   lldpCredentialId:           z.string().uuid().nullable().optional(),
+  processesCredentialId:      z.string().uuid().nullable().optional(),
+  eventLogCredentialId:       z.string().uuid().nullable().optional(),
   // Per-stream MIB IDs ("std:<key>" | uploaded UUID | null = inherit)
   responseTimeMibId:          z.string().nullable().optional(),
   cpuMemoryMibId:             z.string().nullable().optional(),
   temperatureMibId:           z.string().nullable().optional(),
   interfacesMibId:            z.string().nullable().optional(),
   lldpMibId:                  z.string().nullable().optional(),
+  processesMibId:             z.string().nullable().optional(),
 });
 
 // Polling-method compatibility check shared by integration-tier and
@@ -163,7 +184,7 @@ const OverrideSettingsSchema = z.object({
 // apply on the assets it covers — the resolver would silently fall through
 // and the operator would never see why their setting "didn't take." Manual
 // tier accepts every method (it covers any source).
-const POLLING_FIELDS = ["responseTimePolling", "cpuMemoryPolling", "temperaturePolling", "interfacesPolling", "lldpPolling", "storagePolling"] as const;
+const POLLING_FIELDS = ["responseTimePolling", "cpuMemoryPolling", "temperaturePolling", "interfacesPolling", "lldpPolling", "storagePolling", "processesPolling", "eventLogPolling"] as const;
 type PollingField = (typeof POLLING_FIELDS)[number];
 
 function assertPollingCompatible(
@@ -177,6 +198,18 @@ function assertPollingCompatible(
       throw new AppError(
         400,
         `${pollingMethodLabel(v)} polling is not supported for ${source} assets (field: ${field})`,
+      );
+    }
+    // Per-stream method restriction: the cross-transport streams (processes,
+    // eventLog) accept only a subset of methods — processes can't ride REST,
+    // eventLog can't ride SNMP, neither rides ICMP. The Stream name is the
+    // field minus its "Polling" suffix. Streams without a restriction (the
+    // original six) pass through unchanged.
+    const stream = field.replace(/Polling$/, "") as Stream;
+    if (!isMethodValidForStream(stream, v)) {
+      throw new AppError(
+        400,
+        `${pollingMethodLabel(v)} polling is not supported for the ${stream} stream (field: ${field})`,
       );
     }
     // ICMP is only meaningful for the response-time probe — for telemetry /

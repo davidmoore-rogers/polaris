@@ -16,6 +16,8 @@ import {
   isPollingMethod,
   pollingMethodLabel,
   assetSourceKindFromIntegrationType,
+  isMethodValidForStream,
+  methodsForStream,
 } from "../../src/utils/pollingCompatibility.js";
 
 describe("compatibility matrix — locked values per asset source", () => {
@@ -98,6 +100,33 @@ describe("isPollingMethod type guard", () => {
     expect(isPollingMethod(undefined)).toBe(false);
     expect(isPollingMethod(42)).toBe(false);
     expect(isPollingMethod({})).toBe(false);
+  });
+});
+
+describe("per-stream method restrictions (cross-transport streams)", () => {
+  it("original six streams impose no per-stream restriction (any method allowed)", () => {
+    (["responseTime", "cpuMemory", "temperature", "interfaces", "lldp", "storage"] as const).forEach((s) => {
+      allPollingMethods().forEach((m) => expect(isMethodValidForStream(s, m)).toBe(true));
+      expect(methodsForStream(s)).toEqual(allPollingMethods());
+    });
+  });
+  it("processes: agent/SNMP/SSH/WinRM only — no REST or ICMP", () => {
+    expect(methodsForStream("processes")).toEqual(["snmp", "winrm", "ssh", "disabled", "agent"]);
+    expect(isMethodValidForStream("processes", "agent")).toBe(true);
+    expect(isMethodValidForStream("processes", "snmp")).toBe(true);
+    expect(isMethodValidForStream("processes", "ssh")).toBe(true);
+    expect(isMethodValidForStream("processes", "winrm")).toBe(true);
+    expect(isMethodValidForStream("processes", "rest_api")).toBe(false);
+    expect(isMethodValidForStream("processes", "icmp")).toBe(false);
+  });
+  it("eventLog: agent/SSH/WinRM/REST only — no SNMP or ICMP", () => {
+    expect(methodsForStream("eventLog")).toEqual(["rest_api", "winrm", "ssh", "disabled", "agent"]);
+    expect(isMethodValidForStream("eventLog", "agent")).toBe(true);
+    expect(isMethodValidForStream("eventLog", "ssh")).toBe(true);
+    expect(isMethodValidForStream("eventLog", "winrm")).toBe(true);
+    expect(isMethodValidForStream("eventLog", "rest_api")).toBe(true);
+    expect(isMethodValidForStream("eventLog", "snmp")).toBe(false);
+    expect(isMethodValidForStream("eventLog", "icmp")).toBe(false);
   });
 });
 

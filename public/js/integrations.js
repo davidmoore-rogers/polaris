@@ -36,9 +36,21 @@ var _POLLING_COMPAT = {
   manual:          ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled"],
 };
 
+// Per-stream method restriction — mirrors STREAM_METHODS in
+// src/utils/pollingCompatibility.ts. Streams not listed here impose no
+// restriction (the source matrix above + the icmp-responseTime-only rule
+// apply). The cross-transport streams (processes / eventLog) accept only a
+// subset; an offered method must be in BOTH the source list AND this set.
+var _STREAM_METHODS = {
+  processes: ["agent", "snmp", "ssh", "winrm", "disabled"],
+  eventLog:  ["agent", "ssh", "winrm", "rest_api", "disabled"],
+};
+
 // Source-default polling for one stream. Mirrors defaultPollingForSource() in
 // src/services/monitoringService.ts. Used to label the "Inherit" option.
 function _polarisSourceDefaultPolling(source, stream) {
+  // Cross-transport streams are opt-in everywhere — default "disabled".
+  if (stream === "processes" || stream === "eventLog") return "disabled";
   if (source === "fortimanager" || source === "fortigate") {
     if (stream === "lldp") return "disabled";
     // FortiOS appliances don't expose meaningful mountable storage; default
@@ -52,6 +64,17 @@ function _polarisSourceDefaultPolling(source, stream) {
   }
   if (stream === "responseTime") return "icmp";
   return null; // telemetry/interfaces/lldp/storage not delivered on AD/Entra/Win/Manual by default
+}
+
+// Methods offered for a stream = source-compatible methods intersected with the
+// stream's restriction (if any). Mirrors the resolver's combined gate.
+function _streamAllowedMethods(source, stream) {
+  var allowed = _POLLING_COMPAT[source] || _POLLING_COMPAT.manual;
+  var restrict = _STREAM_METHODS[stream];
+  if (restrict) {
+    allowed = allowed.filter(function (m) { return restrict.indexOf(m) !== -1; });
+  }
+  return allowed;
 }
 
 // Source-label table for the "Inherit" option. ICMP is universal for response-
@@ -84,7 +107,7 @@ function _polarisSourceLabel(source, opts) {
 // validateStreamPollingMethod() applies the same filter on writes.
 function _polarisPollingDropdownHTML(id, source, stream, currentValue, opts) {
   opts = opts || {};
-  var allowed = _POLLING_COMPAT[source] || _POLLING_COMPAT.manual;
+  var allowed = _streamAllowedMethods(source, stream);
   if (stream !== "responseTime") {
     allowed = allowed.filter(function (m) { return m !== "icmp"; });
   }
@@ -290,6 +313,8 @@ function _polarisReadPollingFourStream(idPrefix) {
     interfacesPolling:   _polarisReadPollingDropdown(idPrefix + "interfacesPolling"),
     lldpPolling:         _polarisReadPollingDropdown(idPrefix + "lldpPolling"),
     storagePolling:      _polarisReadPollingDropdown(idPrefix + "storagePolling"),
+    processesPolling:    _polarisReadPollingDropdown(idPrefix + "processesPolling"),
+    eventLogPolling:     _polarisReadPollingDropdown(idPrefix + "eventLogPolling"),
   };
 }
 
@@ -307,6 +332,7 @@ function _polarisReadMibFourStream(idPrefix) {
     temperatureMibId:  mibVal("temperature"),
     interfacesMibId:   mibVal("interfaces"),
     lldpMibId:         mibVal("lldp"),
+    processesMibId:    mibVal("processes"),
   };
 }
 
@@ -1017,6 +1043,8 @@ var _ALL_STREAMS = [
   { key: "interfaces",   label: "Interfaces",    pollField: "interfacesPolling",   mibStreamKey: "interfaces",   intervalField: "systemInfoIntervalSeconds",  timeoutField: "systemInfoTimeoutMs", sharesCadenceWith: null },
   { key: "lldp",         label: "LLDP",          pollField: "lldpPolling",         mibStreamKey: "lldp",         intervalField: "lldpIntervalSeconds",        timeoutField: "lldpTimeoutMs"        },
   { key: "storage",      label: "Storage",       pollField: "storagePolling",      mibStreamKey: null,           intervalField: "storageIntervalSeconds",     timeoutField: "storageTimeoutMs",    noMib: true },
+  { key: "processes",    label: "Processes",     pollField: "processesPolling",    mibStreamKey: "processes",    intervalField: "processesIntervalSeconds",   timeoutField: "processesTimeoutMs" },
+  { key: "eventLog",     label: "Event Log",     pollField: "eventLogPolling",     mibStreamKey: null,           intervalField: "eventLogIntervalSeconds",    timeoutField: "eventLogTimeoutMs",   noMib: true },
 ];
 
 // Phase 2 — pick the saved per-class `streams` block matching this class
@@ -1064,12 +1092,25 @@ function _classSettingsOverlay(flatSettings, classStreams) {
   // Storage shares the interfaces credential at the backend overlay layer,
   // so the pre-select uses interfacesCredentialId — matching the resolver.
   pickStream("storage",      { poll: "storagePolling",      interval: "storageIntervalSeconds",     timeout: "storageTimeoutMs",     cred: "interfacesCredentialId" });
+  pickStream("processes",    { poll: "processesPolling",    interval: "processesIntervalSeconds",   timeout: "processesTimeoutMs",   mib: "processesMibId",    cred: "processesCredentialId" });
+  pickStream("eventLog",     { poll: "eventLogPolling",     interval: "eventLogIntervalSeconds",    timeout: "eventLogTimeoutMs",    cred: "eventLogCredentialId" });
   return out;
 }
 
 function _streamsForClass(klass) {
-  if (klass === "fortiap") return _ALL_STREAMS.filter(function (s) { return s.key !== "storage"; });
-  return _ALL_STREAMS;
+  // Cross-transport stream applicability per class:
+  //   workstation / server (AD/Entra/Windows) → processes + event log
+  //   fortigate                               → event log only (FortiOS device
+  //                                              log via REST; no host process API)
+  //   fortiswitch / fortiap / other appliances → neither
+  var allowProcesses = (klass === "workstation" || klass === "server");
+  var allowEventLog  = (klass === "workstation" || klass === "server" || klass === "fortigate");
+  return _ALL_STREAMS.filter(function (s) {
+    if (s.key === "storage" && klass === "fortiap") return false; // FortiAP has no mountable storage
+    if (s.key === "processes") return allowProcesses;
+    if (s.key === "eventLog")  return allowEventLog;
+    return true;
+  });
 }
 
 // Renders the polling-method + credential + interval + timeout block for ONE
@@ -1110,6 +1151,8 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
     stream.key === "interfaces"   ? "interfacesCredentialId"   :
     stream.key === "lldp"         ? "lldpCredentialId"         :
     stream.key === "storage"      ? "interfacesCredentialId"   :
+    stream.key === "processes"    ? "processesCredentialId"    :
+    stream.key === "eventLog"     ? "eventLogCredentialId"     :
     null;
   var savedStreamCredId = streamCredField ? (settings[streamCredField] || "") : "";
 
@@ -3402,6 +3445,29 @@ function _readClassStreamSubtabs(klass, isPrimary, includeStorage) {
       credentialId:    credVal("storagePolling"),
       intervalSeconds: numVal("storageIntervalSeconds"),
       timeoutMs:       numVal("storageTimeoutMs"),
+    });
+  }
+  // Cross-transport streams — only serialized for classes that render them
+  // (see _streamsForClass): workstation/server get both, fortigate gets
+  // eventLog only, appliances get neither. Reading absent inputs would return
+  // all-undefined and emit an empty {} cell, so gate on applicability.
+  var applicable = {};
+  _streamsForClass(klass).forEach(function (s) { applicable[s.key] = true; });
+  if (applicable.processes) {
+    streams.processes = cell({
+      polling:         pollVal("processesPolling"),
+      credentialId:    credVal("processesPolling"),
+      intervalSeconds: numVal("processesIntervalSeconds"),
+      timeoutMs:       numVal("processesTimeoutMs"),
+      mibId:           mibVal("processes"),
+    });
+  }
+  if (applicable.eventLog) {
+    streams.eventLog = cell({
+      polling:         pollVal("eventLogPolling"),
+      credentialId:    credVal("eventLogPolling"),
+      intervalSeconds: numVal("eventLogIntervalSeconds"),
+      timeoutMs:       numVal("eventLogTimeoutMs"),
     });
   }
   return streams;

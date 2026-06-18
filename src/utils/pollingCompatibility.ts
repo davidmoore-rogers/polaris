@@ -33,7 +33,15 @@
 export type PollingMethod = "rest_api" | "snmp" | "winrm" | "ssh" | "icmp" | "disabled" | "agent";
 
 /** Streams resolved independently by the four-tier monitor settings hierarchy. */
-export type Stream = "responseTime" | "cpuMemory" | "temperature" | "interfaces" | "lldp" | "storage";
+export type Stream =
+  | "responseTime"
+  | "cpuMemory"
+  | "temperature"
+  | "interfaces"
+  | "lldp"
+  | "storage"
+  | "processes"
+  | "eventLog";
 export type AssetSourceKind =
   | "fortimanager"
   | "fortigate"
@@ -76,9 +84,41 @@ export function assetSourceKindFromIntegrationType(integrationType: string | nul
   }
 }
 
+// Per-stream method restrictions for streams that genuinely cannot use every
+// method their source otherwise allows. Streams NOT listed here impose no
+// per-stream restriction (only the source matrix above + the responseTime-only
+// ICMP rule in the routes apply), preserving pre-existing behavior for the six
+// original streams. The two cross-transport streams:
+//   processes — agent/SNMP (hrSWRunTable)/SSH (ps,tasklist)/WinRM (Get-Process).
+//               No REST (no host-process FortiOS endpoint) and no ICMP.
+//   eventLog  — agent/SSH (journalctl,Get-WinEvent)/WinRM (Get-WinEvent)/REST
+//               (FortiOS device log API). No SNMP (no MIB) and no ICMP.
+// "disabled" is always allowed (means "don't poll this stream").
+const STREAM_METHODS: Partial<Record<Stream, ReadonlySet<PollingMethod>>> = {
+  processes: new Set<PollingMethod>(["agent", "snmp", "ssh", "winrm", "disabled"]),
+  eventLog:  new Set<PollingMethod>(["agent", "ssh", "winrm", "rest_api", "disabled"]),
+};
+
 /** True when `method` is a valid polling method for the given asset source. */
 export function isPollingMethodCompatible(source: AssetSourceKind, method: PollingMethod): boolean {
   return COMPATIBILITY[source].has(method);
+}
+
+/**
+ * True when `method` is valid for `stream`. Streams without an explicit
+ * restriction allow any method (the source matrix + route-level ICMP rule
+ * still apply). Used by the resolver, the monitorSettings routes, and the UI
+ * to gate the cross-transport streams (processes / eventLog).
+ */
+export function isMethodValidForStream(stream: Stream, method: PollingMethod): boolean {
+  const allowed = STREAM_METHODS[stream];
+  return allowed ? allowed.has(method) : true;
+}
+
+/** Methods valid for `stream`, in display order. Empty restriction → all methods. */
+export function methodsForStream(stream: Stream): ReadonlyArray<PollingMethod> {
+  const allowed = STREAM_METHODS[stream];
+  return allowed ? ALL_METHODS.filter((m) => allowed.has(m)) : ALL_METHODS;
 }
 
 /** Returns the methods valid for `source`, in display order (matches ALL_METHODS). */

@@ -60,6 +60,11 @@ const FLOOR = {
   lldpTimeoutMs:              10000,
   storageIntervalSeconds:     600,
   storageTimeoutMs:           10000,
+  // Cross-transport streams — cadence/timeout fall through to the floor.
+  processesIntervalSeconds:   600,
+  processesTimeoutMs:         10000,
+  eventLogIntervalSeconds:    600,
+  eventLogTimeoutMs:          10000,
   sampleRetentionDays:        30,
   telemetryRetentionDays:     30,
   systemInfoRetentionDays:    30,
@@ -75,6 +80,7 @@ const FLOOR = {
   temperatureMibId:           null,
   interfacesMibId:            null,
   lldpMibId:                  null,
+  processesMibId:             null,
   // Per-stream credential IDs are class-override-only, but the resolver
   // unconditionally writes null for them at every other tier so toEqual()
   // sees a stable shape.
@@ -83,6 +89,8 @@ const FLOOR = {
   temperatureCredentialId:    null,
   interfacesCredentialId:     null,
   lldpCredentialId:           null,
+  processesCredentialId:      null,
+  eventLogCredentialId:       null,
 };
 
 const TUNED_TIER = {
@@ -104,6 +112,10 @@ const TUNED_TIER = {
   lldpTimeoutMs:              10000,
   storageIntervalSeconds:     600,
   storageTimeoutMs:           10000,
+  processesIntervalSeconds:   600,
+  processesTimeoutMs:         10000,
+  eventLogIntervalSeconds:    600,
+  eventLogTimeoutMs:          10000,
   sampleRetentionDays:        60,
   telemetryRetentionDays:     14,
   systemInfoRetentionDays:    14,
@@ -117,11 +129,14 @@ const TUNED_TIER = {
   temperatureMibId:           null,
   interfacesMibId:            null,
   lldpMibId:                  null,
+  processesMibId:             null,
   responseTimeCredentialId:   null,
   cpuMemoryCredentialId:      null,
   temperatureCredentialId:    null,
   interfacesCredentialId:     null,
   lldpCredentialId:           null,
+  processesCredentialId:      null,
+  eventLogCredentialId:       null,
 };
 
 // Per-stream polling defaults the resolver applies for a given source kind.
@@ -133,6 +148,9 @@ const MANUAL_POLLING_DEFAULT = {
   interfacesPolling:   null,
   lldpPolling:         null,
   storagePolling:      null,
+  // Cross-transport streams default to "disabled" across every source.
+  processesPolling:    "disabled" as const,
+  eventLogPolling:     "disabled" as const,
 };
 const FORTI_POLLING_DEFAULT = {
   // Response time defaults to ICMP across every source kind — the cheapest
@@ -150,6 +168,9 @@ const FORTI_POLLING_DEFAULT = {
   // appliances don't expose meaningful mountable storage; operators opt in
   // per-asset when they have a device that does.
   storagePolling:      "disabled" as const,
+  // Cross-transport streams default to "disabled" across every source.
+  processesPolling:    "disabled" as const,
+  eventLogPolling:     "disabled" as const,
 };
 
 beforeEach(() => {
