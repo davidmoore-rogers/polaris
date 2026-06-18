@@ -89,6 +89,8 @@ const (
 	// Process-inventory snapshot cadence. Heavier enumeration (every PID) +
 	// current-state (no history), so a slower default than telemetry.
 	defaultProcessInventoryIntervalSec = 300
+	// Per-pinned-program CPU/RAM cadence — 60 s like host telemetry.
+	defaultProcessTelemetryIntervalSec = 60
 )
 
 // ─── Server-pushed stream config (Phase 0 plumbing) ────────────────────────
@@ -107,9 +109,11 @@ type eventLogRuntimeCfg struct {
 }
 
 // processesRuntimeCfg holds the resolved processes-stream state from /config.
-// The inventory + (Feature C) telemetry loops gate on `enabled`.
+// The inventory + telemetry + log loops gate on `enabled`; `pinned` lists the
+// operator-pinned programs (with log config) the telemetry/log loops collect.
 type processesRuntimeCfg struct {
 	enabled bool
+	pinned  []transport.PinnedProcess
 }
 
 var (
@@ -158,9 +162,9 @@ func applyServerStreams(resp *transport.ConfigResponse) {
 		eventLogCfg.Store(eventLogRuntimeCfg{})
 	}
 	if s, ok := resp.Streams["processes"]; ok {
-		processesCfg.Store(processesRuntimeCfg{enabled: s.Enabled})
+		processesCfg.Store(processesRuntimeCfg{enabled: s.Enabled, pinned: resp.PinnedProcesses})
 	} else {
-		processesCfg.Store(processesRuntimeCfg{})
+		processesCfg.Store(processesRuntimeCfg{pinned: resp.PinnedProcesses})
 	}
 }
 
@@ -249,6 +253,7 @@ func runAgent(ctx context.Context, confPath string) {
 	go systemInfoLoop(ctx, cfg, client)
 	go eventLogLoop(ctx, cfg, client)
 	go processInventoryLoop(ctx, cfg, client)
+	go processTelemetryLoop(ctx, cfg, client)
 	go wsLoop(ctx, cfg, client)
 
 	<-ctx.Done()
@@ -648,6 +653,62 @@ func pushProcessInventoryOne(client *transport.Client) {
 	}
 	if verbose {
 		log.Printf("processInventory sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
+	}
+}
+
+// processTelemetryLoop samples CPU/RAM for the operator-pinned programs once a
+// minute (Feature C). Gated on the processes stream resolving to agent AND at
+// least one pinned program; otherwise idle.
+func processTelemetryLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
+	interval := time.Duration(cfg.ProcessTelemetryIntervalSec) * time.Second
+	if interval == 0 {
+		interval = defaultProcessTelemetryIntervalSec * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	pushProcessTelemetryOne(client)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pushProcessTelemetryOne(client)
+		}
+	}
+}
+
+func pushProcessTelemetryOne(client *transport.Client) {
+	pc := loadProcessesCfg()
+	if !pc.enabled || len(pc.pinned) == 0 {
+		return
+	}
+	names := make([]string, 0, len(pc.pinned))
+	for _, p := range pc.pinned {
+		names = append(names, p.Name)
+	}
+	type res struct{ s []*transport.ProcessTelemetrySample }
+	ch := make(chan res, 1)
+	go func() { ch <- res{collectors.ProcessTelemetryOnce(names)} }()
+	var r res
+	select {
+	case r = <-ch:
+	case <-time.After(collectionTimeout):
+		log.Printf("push processTelemetry samples: collector timed out after %.0fs", collectionTimeout.Seconds())
+		return
+	}
+	if len(r.s) == 0 {
+		return
+	}
+	resp, err := client.PushSamples(&transport.SamplesBody{
+		Stream:  "processTelemetry",
+		Samples: r.s,
+	})
+	if err != nil {
+		log.Printf("push processTelemetry samples: %v", err)
+		return
+	}
+	if verbose {
+		log.Printf("processTelemetry sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
 	}
 }
 

@@ -78,3 +78,4 @@ For development you can run the binary directly:
 | 5 | Telemetry / interfaces / storage / LLDP collectors |
 | 6 | OS event-log collector (opt-in `eventLog` stream): wevtutil (Windows) / journalctl (Linux), per-channel cursor in `eventlog-cursors.json`, server-pushed enable flag + curation filter honored via `applyServerStreams`. Server curates entries into the audit Events tab. |
 | 7 | Process inventory (`processInventory` stream, gated on `processes` stream = agent): gopsutil enumeration aggregated by program name, current-state full-replace into the asset Processes tab. |
+| 7b | Per-pinned-program CPU/RAM telemetry (`processTelemetry` stream, 1/min): instantaneous CPU via prime→sleep→read delta over the pinned PIDs, summed by name, into the AssetProcessSample time-series. Pinned set + log config delivered via `/config`'s `pinnedProcesses`. (Process log tailing is the next slice.) |

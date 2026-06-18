@@ -197,6 +197,26 @@ type ProcessSample struct {
 	ServiceUnit   *string  `json:"serviceUnit,omitempty"`
 }
 
+// ProcessTelemetrySample matches the server's ProcessTelemetrySampleSchema —
+// per-pinned-program CPU/RAM, summed across the program's instances.
+type ProcessTelemetrySample struct {
+	Timestamp     string   `json:"timestamp,omitempty"`
+	Name          string   `json:"name"`
+	CpuPct        *float64 `json:"cpuPct,omitempty"`
+	MemRssBytes   *uint64  `json:"memRssBytes,omitempty"`
+	InstanceCount int      `json:"instanceCount,omitempty"`
+}
+
+// ProcessLogSample matches the server's ProcessLogSampleSchema — one row per
+// tailed log line for a pinned program.
+type ProcessLogSample struct {
+	Timestamp string  `json:"timestamp,omitempty"`
+	Name      string  `json:"name"`
+	Level     *string `json:"level,omitempty"`
+	Message   string  `json:"message"`
+	Source    *string `json:"source,omitempty"`
+}
+
 type SamplesResponse struct {
 	Accepted int `json:"accepted"`
 	Rejected int `json:"rejected"`
@@ -288,10 +308,21 @@ type StreamConfig struct {
 	MaxPerPush       int      `json:"maxPerPush,omitempty"`
 }
 
+// PinnedProcess is one operator-pinned program the agent should collect
+// per-minute CPU/RAM + logs for (Feature C). LogSource = "auto" | "journald-unit"
+// | "file-glob"; LogPathGlob is the operator-typed wildcard path (empty = auto).
+type PinnedProcess struct {
+	Name        string `json:"name"`
+	LogSource   string `json:"logSource"`
+	LogPathGlob string `json:"logPathGlob"`
+}
+
 type ConfigResponse struct {
 	ETag    string                  `json:"etag"`
 	Streams map[string]StreamConfig `json:"streams"`
 	Monitored bool                  `json:"monitored"`
+	// Feature C — programs pinned for per-minute telemetry + log tailing.
+	PinnedProcesses []PinnedProcess `json:"pinnedProcesses,omitempty"`
 	// Phase 2 dual-pin: the current set of acceptable leaf-cert SHA-256
 	// fingerprints (canonical pin + any operator-staged additional pins).
 	// Empty slice means "field not present" — older Phase 1 servers don't
