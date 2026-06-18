@@ -167,6 +167,21 @@ type StorageSample struct {
 	UsedBytes  *uint64 `json:"usedBytes,omitempty"`
 }
 
+// EventLogSample matches the server's EventLogSampleSchema. One row per
+// distinct OS event-log entry (Windows Event Log channel / Linux journald).
+// Level is agent-normalized to "critical"|"error"|"warning"|"info"; Count
+// collapses identical repeats within one poll. The host-side read cursor is
+// NOT on the wire — it lives in a local state file.
+type EventLogSample struct {
+	Timestamp string  `json:"timestamp,omitempty"`
+	Channel   string  `json:"channel"`
+	Provider  *string `json:"provider,omitempty"`
+	EventID   *int64  `json:"eventId,omitempty"`
+	Level     string  `json:"level"`
+	Message   string  `json:"message"`
+	Count     int     `json:"count"`
+}
+
 type SamplesResponse struct {
 	Accepted int `json:"accepted"`
 	Rejected int `json:"rejected"`
@@ -249,6 +264,13 @@ type StreamConfig struct {
 	Enabled     bool `json:"enabled"`
 	IntervalSec int  `json:"intervalSec"`
 	TimeoutMs   int  `json:"timeoutMs"`
+	// eventLog-only curation filter (other streams omit these). Delivered so
+	// the agent collects only the channels/severity the operator wants. All
+	// omitempty so the wire stays compact + older servers parse fine.
+	MinLevel         string   `json:"minLevel,omitempty"`
+	WindowsChannels  []string `json:"windowsChannels,omitempty"`
+	LinuxMinPriority int      `json:"linuxMinPriority,omitempty"`
+	MaxPerPush       int      `json:"maxPerPush,omitempty"`
 }
 
 type ConfigResponse struct {

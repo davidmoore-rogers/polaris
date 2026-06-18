@@ -65,6 +65,7 @@ type Config struct {
 	TelemetryIntervalSec    int
 	InterfacesIntervalSec   int
 	StorageIntervalSec      int
+	EventLogIntervalSec     int
 
 	// Verbose turns on per-push lifecycle logging (connect / send / validate
 	// / disconnect) for the sample streams. Diagnostic only — set
@@ -151,6 +152,8 @@ func Load(path string) (*Config, error) {
 			fmt.Sscanf(val, "%d", &cfg.InterfacesIntervalSec)
 		case "storage_interval_sec":
 			fmt.Sscanf(val, "%d", &cfg.StorageIntervalSec)
+		case "event_log_interval_sec":
+			fmt.Sscanf(val, "%d", &cfg.EventLogIntervalSec)
 		case "verbose":
 			v := strings.ToLower(val)
 			cfg.Verbose = v == "true" || v == "1" || v == "yes" || v == "on"
@@ -271,6 +274,9 @@ func (c *Config) Save() error {
 	}
 	if c.StorageIntervalSec > 0 {
 		fmt.Fprintf(w, "storage_interval_sec       = %d\n", c.StorageIntervalSec)
+	}
+	if c.EventLogIntervalSec > 0 {
+		fmt.Fprintf(w, "event_log_interval_sec     = %d\n", c.EventLogIntervalSec)
 	}
 	if c.Verbose {
 		fmt.Fprintln(w, "verbose                    = true")

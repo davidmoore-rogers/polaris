@@ -76,3 +76,4 @@ For development you can run the binary directly:
 | 3b (current) | WebSocket pull side: outbound dial w/ pinned TLS, reconnect-with-backoff, probe-now-request / probe-now-response, refresh-config |
 | 4 | Remote install via SSH/WinRM from the Polaris UI |
 | 5 | Telemetry / interfaces / storage / LLDP collectors |
+| 6 | OS event-log collector (opt-in `eventLog` stream): wevtutil (Windows) / journalctl (Linux), per-channel cursor in `eventlog-cursors.json`, server-pushed enable flag + curation filter honored via `applyServerStreams`. Server curates entries into the audit Events tab. |

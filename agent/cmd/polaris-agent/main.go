@@ -26,6 +26,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -80,7 +82,83 @@ const (
 	defaultTelemetryIntervalSec    = 60
 	defaultInterfacesIntervalSec   = 600
 	defaultStorageIntervalSec      = 600
+	// OS event-log poll cadence. The stream is opt-in (default OFF server-side)
+	// so this only matters once an operator enables it; 60 s keeps fresh errors
+	// flowing without hammering wevtutil/journalctl.
+	defaultEventLogIntervalSec     = 60
 )
+
+// ─── Server-pushed stream config (Phase 0 plumbing) ────────────────────────
+//
+// The agent historically ignored the /config `streams` map and ran every loop
+// unconditionally. The opt-in eventLog stream changes that: it must honor the
+// server's enabled flag + curation filter, delivered via /config and refreshed
+// live on heartbeat-etag change and the WebSocket refresh-config frame.
+
+type eventLogRuntimeCfg struct {
+	enabled          bool
+	minLevel         string
+	channels         []string
+	linuxMinPriority int
+	maxPerPush       int
+}
+
+var (
+	eventLogCfg      atomic.Value // eventLogRuntimeCfg
+	cachedConfigETag atomic.Value // string
+)
+
+func loadEventLogCfg() eventLogRuntimeCfg {
+	if v := eventLogCfg.Load(); v != nil {
+		return v.(eventLogRuntimeCfg)
+	}
+	return eventLogRuntimeCfg{} // disabled until the first /config apply
+}
+
+func loadConfigETag() string {
+	if v := cachedConfigETag.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// applyServerStreams stores the eventLog stream config from a /config response.
+// Absent block → disabled. Idempotent; safe to call from multiple goroutines.
+func applyServerStreams(resp *transport.ConfigResponse) {
+	if resp == nil {
+		return
+	}
+	cachedConfigETag.Store(resp.ETag)
+	s, ok := resp.Streams["eventLog"]
+	if !ok {
+		eventLogCfg.Store(eventLogRuntimeCfg{})
+		return
+	}
+	eventLogCfg.Store(eventLogRuntimeCfg{
+		enabled:          s.Enabled,
+		minLevel:         s.MinLevel,
+		channels:         s.WindowsChannels,
+		linuxMinPriority: s.LinuxMinPriority,
+		maxPerPush:       s.MaxPerPush,
+	})
+}
+
+// refreshConfig fetches /config (using the cached ETag for a 304 short-circuit)
+// and applies any change. Best-effort — a failure just means we keep the
+// current config until the next refresh.
+func refreshConfig(client *transport.Client) {
+	resp, err := client.FetchConfig(loadConfigETag())
+	if err != nil {
+		if verbose {
+			log.Printf("config refresh failed: %v", err)
+		}
+		return
+	}
+	if resp == nil {
+		return // 304 — unchanged
+	}
+	applyServerStreams(resp)
+}
 
 func main() {
 	confPath := flag.String("conf", config.DefaultPath(), "path to agent.conf")
@@ -148,6 +226,7 @@ func runAgent(ctx context.Context, confPath string) {
 	go interfacesLoop(ctx, cfg, client)
 	go storageLoop(ctx, cfg, client)
 	go systemInfoLoop(ctx, cfg, client)
+	go eventLogLoop(ctx, cfg, client)
 	go wsLoop(ctx, cfg, client)
 
 	<-ctx.Done()
@@ -240,13 +319,22 @@ func heartbeatLoop(ctx context.Context, cfg *config.Config, client *transport.Cl
 	defer t.Stop()
 
 	_, _ = client.Heartbeat() // immediate one so the UI sees us live on startup
+	// Pull the initial stream config so opt-in streams (eventLog) know their
+	// state before their first tick. Previously the heartbeat ETag was ignored
+	// entirely; now we refresh /config on startup and whenever it changes.
+	refreshConfig(client)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if _, err := client.Heartbeat(); err != nil {
+			hb, err := client.Heartbeat()
+			if err != nil {
 				log.Printf("heartbeat: %v", err)
+				continue
+			}
+			if hb != nil && hb.ConfigETag != "" && hb.ConfigETag != loadConfigETag() {
+				refreshConfig(client)
 			}
 		}
 	}
@@ -421,6 +509,71 @@ func pushStorageOne(client *transport.Client) {
 	}
 }
 
+// eventLogLoop ships curated OS event-log entries when the server has enabled
+// the eventLog stream for this asset. The loop goroutine always starts but
+// stays idle (pushEventLogOne returns early) until the server flips enabled —
+// so toggling collection on/off takes effect live via the heartbeat/WS config
+// refresh, no agent restart needed. Default cadence 60 s; agent.conf can
+// override via event_log_interval_sec.
+func eventLogLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
+	interval := time.Duration(cfg.EventLogIntervalSec) * time.Second
+	if interval == 0 {
+		interval = defaultEventLogIntervalSec * time.Second
+	}
+	stateDir := filepath.Dir(cfg.Path())
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	pushEventLogOne(client, stateDir)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pushEventLogOne(client, stateDir)
+		}
+	}
+}
+
+func pushEventLogOne(client *transport.Client, stateDir string) {
+	ec := loadEventLogCfg()
+	if !ec.enabled {
+		return // stream off — nothing to collect
+	}
+	filter := collectors.EventLogFilter{
+		MinLevel:         ec.minLevel,
+		Channels:         ec.channels,
+		LinuxMinPriority: ec.linuxMinPriority,
+		MaxPerPush:       ec.maxPerPush,
+	}
+	// Guard the OS collector with the shared 30 s timeout — wevtutil /
+	// journalctl can stall on a wedged subsystem; the spawned goroutine leaks
+	// on timeout but the loop continues (same trade-off as interfaces/storage).
+	type res struct{ s []*transport.EventLogSample }
+	ch := make(chan res, 1)
+	go func() { ch <- res{collectors.EventLogOnce(stateDir, filter)} }()
+	var r res
+	select {
+	case r = <-ch:
+	case <-time.After(collectionTimeout):
+		log.Printf("push eventLog samples: collector timed out after %.0fs", collectionTimeout.Seconds())
+		return
+	}
+	if len(r.s) == 0 {
+		return // no new entries — normal, send nothing
+	}
+	resp, err := client.PushSamples(&transport.SamplesBody{
+		Stream:  "eventLog",
+		Samples: r.s,
+	})
+	if err != nil {
+		log.Printf("push eventLog samples: %v", err)
+		return
+	}
+	if verbose {
+		log.Printf("eventLog sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
+	}
+}
+
 // systemInfoLoop pushes host identity (hostname / OS / vendor / model
 // / serial) on the heartbeat cadence (default 300 s). Host identity
 // doesn't change between firmware updates, so most pushes are no-ops
@@ -492,6 +645,10 @@ func wsLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
 				log.Printf("ws: refresh-config: fetch failed: %v", err)
 				return nil
 			}
+			// Apply any stream-config change (e.g. operator toggled the
+			// eventLog stream or its filter) live without waiting for the
+			// next heartbeat.
+			applyServerStreams(resp)
 			// Phase 2 dual-pin: if the server's pin set differs from what we
 			// have on disk, save the new pin set and exit cleanly so systemd
 			// cycles us with the updated agent.conf live. The reconnect
