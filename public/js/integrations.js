@@ -5259,6 +5259,10 @@ function openApiQueryModal(id, adom, useProxy) {
         '<select id="fmg-method" style="width:auto">' +
           '<option value="exec">exec</option>' +
           '<option value="get">get</option>' +
+          '<option value="add">add</option>' +
+          '<option value="set">set</option>' +
+          '<option value="update">update</option>' +
+          '<option value="delete">delete</option>' +
         '</select>' +
       '</div>' +
       '<div class="form-group">' +
