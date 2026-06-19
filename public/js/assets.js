@@ -65,6 +65,19 @@ function _restoreAssetsPrefs() {
   } catch (_) {}
 }
 
+// Per-asset-type table-layout key for asset-detail tables (Interfaces, Storage,
+// Hardware Sensors, LLDP, Wireless Stations, SD-WAN). These tables differ in
+// shape by device class — a FortiGate's interface list looks nothing like a
+// switch's, a firewall's sensor set differs from an AP's — so operators want
+// column widths/visibility persisted independently per class, not one shared
+// view. applyTableLayout() already namespaces by username; this adds the
+// asset-type dimension to the typeKey. `assetType` is the registry string;
+// null/empty falls back to "other". The Events tab deliberately opts OUT (its
+// columns are type-invariant) and keeps a single shared "asset-events" key.
+function _assetTableTypeKey(base, asset) {
+  return base + "-" + ((asset && asset.assetType) || "other");
+}
+
 // Per-chart-type "last selected range" persistence (per-user via localStorage,
 // matching the polaris-prefs-<scope>-<username> convention used elsewhere).
 // One JSON map per user keyed by chart id (e.g. "assetMonitor", "assetSystem")
@@ -5011,9 +5024,8 @@ function _renderInterfacesTable(container, si, asset) {
     // generic endpoints have very different interface tables (aggregate
     // names + IPsec rows on firewalls; dozens of `port1..portN` on switches;
     // 2-3 short names on APs) so operators want independent column widths
-    // per class. `assetType` is the eight-value enum-ish string from the
-    // registry; null/empty falls back to "other".
-    var ifaceTypeKey = "asset-interfaces-" + ((asset && asset.assetType) || "other");
+    // per class. See _assetTableTypeKey.
+    var ifaceTypeKey = _assetTableTypeKey("asset-interfaces", asset);
     applyTableLayout(container.querySelector("table"), ifaceTypeKey, {
       onScreenshot: function (t) { _screenshotTableEl(t, "Interfaces", { hiddenNoun: "interface" }); },
     });
@@ -5233,7 +5245,7 @@ function _renderStorageTable(container, si, asset) {
       '<th data-col-id="usedPct">Used %</th>' +
     '</tr></thead><tbody>' + body + '</tbody></table></div>';
   if (typeof applyTableLayout === "function") {
-    applyTableLayout(container.querySelector("table"), "asset-storage", {
+    applyTableLayout(container.querySelector("table"), _assetTableTypeKey("asset-storage", asset), {
       onScreenshot: function (t) { _screenshotTableEl(t, "Storage"); },
     });
   }
@@ -5372,7 +5384,7 @@ function _renderTemperatures(container, si, asset) {
     toggleHTML;
   if (typeof applyTableLayout === "function") {
     container.querySelectorAll("table").forEach(function (t) {
-      applyTableLayout(t, "asset-hardware-sensors", {
+      applyTableLayout(t, _assetTableTypeKey("asset-hardware-sensors", asset), {
         onScreenshot: function (tbl) { _screenshotTableEl(tbl, "Hardware Sensors"); },
       });
     });
@@ -5448,7 +5460,7 @@ function _renderLldpNeighborsCard(container, si, asset) {
       '<th data-col-id="capabilities">Capabilities</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';
   if (typeof applyTableLayout === "function") {
-    applyTableLayout(container.querySelector("table"), "asset-lldp", {
+    applyTableLayout(container.querySelector("table"), _assetTableTypeKey("asset-lldp", asset), {
       onScreenshot: function (t) { _screenshotTableEl(t, "LLDP Neighbors"); },
     });
   }
@@ -5544,7 +5556,7 @@ function _renderWirelessStationsCard(container, si, asset) {
       '<th style="text-align:right" data-col-id="signal">Signal</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';
   if (typeof applyTableLayout === "function") {
-    applyTableLayout(container.querySelector("table"), "asset-wireless-stations", {
+    applyTableLayout(container.querySelector("table"), _assetTableTypeKey("asset-wireless-stations", asset), {
       onScreenshot: function (t) { _screenshotTableEl(t, "Wireless Stations"); },
     });
   }
@@ -9240,11 +9252,11 @@ function _wireSdwanTab(a, rules, links) {
   // by table-type so widths apply across every FortiGate's SD-WAN tab.
   if (typeof applyTableLayout === "function") {
     var membersTable = document.getElementById("sdwan-members-table");
-    if (membersTable) applyTableLayout(membersTable, "asset-sdwan-members", {
+    if (membersTable) applyTableLayout(membersTable, _assetTableTypeKey("asset-sdwan-members", a), {
       onScreenshot: function (t) { _screenshotTableEl(t, "SD-WAN Members"); },
     });
     var rulesTable = document.getElementById("sdwan-rules-table");
-    if (rulesTable) applyTableLayout(rulesTable, "asset-sdwan-rules", {
+    if (rulesTable) applyTableLayout(rulesTable, _assetTableTypeKey("asset-sdwan-rules", a), {
       onScreenshot: function (t) { _screenshotTableEl(t, "SD-WAN Rules"); },
     });
   }
