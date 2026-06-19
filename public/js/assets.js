@@ -12910,7 +12910,7 @@ function _wireAssetProcessesTab(asset) {
       var name = link.getAttribute("data-proc-name");
       if (!name) return;
       var procRow = rows.filter(function (r) { return r.name === name; })[0] || null;
-      openProcessDetailPanel(asset, name, configs[name] || null, procRow);
+      openProcessDetailPanel(asset, name, configs[name] || null, procRow, monitored.has(name));
     });
   }
   var refreshBtn = document.getElementById("asset-view-proc-refresh");
@@ -12959,7 +12959,7 @@ function _closeProcPanel() {
   if (ov) ov.classList.remove("open");
 }
 
-async function openProcessDetailPanel(asset, name, cfg, procRow) {
+async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned) {
   if (!asset || !name) return;
   _ensureProcPanelDOM();
   var titleEl = document.getElementById("proc-panel-title");
@@ -13005,9 +13005,20 @@ async function openProcessDetailPanel(asset, name, cfg, procRow) {
       '</div>';
   }
 
+  // CPU/RAM charts + logs are collected per-minute ONLY for pinned programs
+  // (the Monitor checkbox in the Processes tab). The inventory snapshot in the
+  // table is separate from this charted time-series — so when the program
+  // isn't pinned, make it obvious why the charts are empty rather than showing
+  // a blank box.
+  var pinBanner = isPinned ? "" :
+    '<div style="margin-bottom:0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--color-border);border-left:3px solid var(--color-warning);border-radius:6px;background:rgba(245,158,11,0.08);font-size:0.82rem;color:var(--color-text-secondary)">' +
+      'This process isn’t pinned for monitoring. Check its <strong>Monitor</strong> box in the Processes tab to start collecting per-minute CPU/RAM and logs — data appears within a minute or two.' +
+    '</div>';
+
   bodyEl.innerHTML =
     '<div style="padding:1rem 1.25rem">' +
       controlBlock +
+      pinBanner +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
         '<h4 style="margin:0">CPU &amp; Memory</h4>' +
         '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
@@ -13109,8 +13120,12 @@ async function _loadProcessHistoryFor(assetId, name, range) {
       .map(function (s) { return { timestamp: s.timestamp, value: Number(s.memRssBytes) / 1048576 }; });
     if (cpuStats) _renderChartStats(cpuStats, cpu.length, [{ label: "Max", value: cpu.length ? Math.max.apply(null, cpu.map(function (p) { return p.value; })).toFixed(1) + "%" : "—" }]);
     if (memStats) _renderChartStats(memStats, mem.length, [{ label: "Max", value: mem.length ? Math.max.apply(null, mem.map(function (p) { return p.value; })).toFixed(0) + " MB" : "—" }]);
-    _renderSensorChart(cpuEl, cpu, { since: data.since, until: data.until, subject: name + " CPU", unit: "%" });
-    _renderSensorChart(memEl, mem, { since: data.since, until: data.until, subject: name + " RAM", unit: "MB" });
+    // No samples in range: per-process telemetry is only collected for pinned
+    // programs, so an empty series almost always means "not pinned yet" or
+    // "pinned moments ago." Render a hint rather than an empty chart box.
+    var emptyMsg = '<div style="display:flex;align-items:center;justify-content:center;height:150px;color:var(--color-text-tertiary);font-size:0.82rem;text-align:center;padding:0 1rem">No CPU/RAM samples in this range yet — pin the process (Monitor) and allow a minute or two for collection.</div>';
+    if (!cpu.length) { cpuEl.innerHTML = emptyMsg; } else { _renderSensorChart(cpuEl, cpu, { since: data.since, until: data.until, subject: name + " CPU", unit: "%" }); }
+    if (!mem.length) { memEl.innerHTML = emptyMsg; } else { _renderSensorChart(memEl, mem, { since: data.since, until: data.until, subject: name + " RAM", unit: "MB" }); }
   } catch (err) {
     cpuEl.textContent = "Error: " + (err.message || "failed to load");
     memEl.textContent = "";
