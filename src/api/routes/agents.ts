@@ -949,6 +949,16 @@ async function computeConfigEtag(assetId: string): Promise<string> {
     tel:   [eff.cpuMemoryPolling,    eff.cpuMemoryIntervalSeconds,  eff.cpuMemoryTimeoutMs],
     ifc:   [eff.interfacesPolling,   eff.systemInfoIntervalSeconds, eff.systemInfoTimeoutMs],
     lldp:  [eff.lldpPolling,         eff.systemInfoIntervalSeconds, eff.systemInfoTimeoutMs],
+    // storage / processes / eventLog MUST be in the change-detector too — a
+    // running agent only re-fetches /config when this heartbeat etag changes,
+    // and the /config self-heal that flips processes to agent only runs on that
+    // re-fetch. Omitting them deadlocked process collection on already-running
+    // agents (they'd only pick it up on restart). pinned-process count is folded
+    // in so adding/removing a Monitor pin also wakes the telemetry/log loops.
+    sto:   [eff.storagePolling,      eff.storageIntervalSeconds,    eff.storageTimeoutMs],
+    proc:  [eff.processesPolling,    eff.processesIntervalSeconds],
+    evt:   [eff.eventLogPolling,     eff.eventLogIntervalSeconds],
+    pins:  (asset.monitoredProcesses ?? []).length,
     mon:   asset.monitored,
   };
   return computeEtag(compact);

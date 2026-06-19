@@ -160,6 +160,9 @@ export async function consumeEnrollmentToken(
           interfacesPolling:   "agent",
           lldpPolling:         "agent",
           storagePolling:      "agent",
+          // Process inventory is collected by default whenever an agent is
+          // present (operator decision) — eventLog stays opt-in/OFF (PII).
+          processesPolling:    "agent",
         },
       }),
     ]);
