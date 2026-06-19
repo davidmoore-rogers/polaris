@@ -12829,7 +12829,9 @@ function _wireAssetProcessesTab(asset) {
       if (!link) return;
       e.preventDefault();
       var name = link.getAttribute("data-proc-name");
-      if (name) openProcessDetailPanel(asset, name, configs[name] || null);
+      if (!name) return;
+      var procRow = rows.filter(function (r) { return r.name === name; })[0] || null;
+      openProcessDetailPanel(asset, name, configs[name] || null, procRow);
     });
   }
   var refreshBtn = document.getElementById("asset-view-proc-refresh");
@@ -12878,7 +12880,7 @@ function _closeProcPanel() {
   if (ov) ov.classList.remove("open");
 }
 
-async function openProcessDetailPanel(asset, name, cfg) {
+async function openProcessDetailPanel(asset, name, cfg, procRow) {
   if (!asset || !name) return;
   _ensureProcPanelDOM();
   var titleEl = document.getElementById("proc-panel-title");
@@ -12906,8 +12908,27 @@ async function openProcessDetailPanel(asset, name, cfg) {
   var src = c.logSource || "auto";
   function srcOpt(v, label) { return '<option value="' + v + '"' + (src === v ? " selected" : "") + '>' + label + '</option>'; }
 
+  // Process control (Phase 4) — only when the process resolves to a service/
+  // unit AND the operator holds the processControl permission. Buttons confirm
+  // before acting; result polls the command status.
+  var canControl = !!(procRow && procRow.controllable && procRow.serviceUnit && permAtLeast("processControl", "write"));
+  var controlBlock = "";
+  if (procRow && procRow.serviceUnit) {
+    var ctlButtons = canControl
+      ? '<button class="btn btn-sm btn-secondary proc-ctl-btn" data-action="restart">Restart</button>' +
+        '<button class="btn btn-sm btn-secondary proc-ctl-btn" data-action="stop">Stop</button>' +
+        '<button class="btn btn-sm btn-secondary proc-ctl-btn" data-action="start">Start</button>'
+      : '<span class="hint" style="font-size:0.75rem">' + (permAtLeast("processControl", "write") ? "" : "Requires the Process Control permission.") + '</span>';
+    controlBlock =
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:0.75rem;padding-bottom:0.6rem;border-bottom:1px solid var(--color-border)">' +
+        '<div style="font-size:0.82rem;color:var(--color-text-secondary)">Service / unit: <code>' + escapeHtml(procRow.serviceUnit) + '</code> <span id="proc-ctl-status"></span></div>' +
+        '<div style="display:flex;gap:6px">' + ctlButtons + '</div>' +
+      '</div>';
+  }
+
   bodyEl.innerHTML =
     '<div style="padding:1rem 1.25rem">' +
+      controlBlock +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">' +
         '<h4 style="margin:0">CPU &amp; Memory</h4>' +
         '<div style="display:flex;gap:6px">' + rangeBtns + '</div>' +
@@ -12968,6 +12989,11 @@ async function openProcessDetailPanel(asset, name, cfg) {
   if (flaggedOnly) flaggedOnly.addEventListener("change", function () { _loadProcessLogsFor(asset.id, name); });
   var manageRules = document.getElementById("btn-proc-flag-rules");
   if (manageRules) manageRules.addEventListener("click", function () { openLogFlagRulesModal(asset, name, function () { _loadProcessLogsFor(asset.id, name); }); });
+  if (canControl) {
+    document.querySelectorAll(".proc-ctl-btn").forEach(function (b) {
+      b.addEventListener("click", function () { _runProcessControl(asset.id, name, b.getAttribute("data-action")); });
+    });
+  }
   var saveCfg = document.getElementById("btn-proc-log-config-save");
   if (saveCfg) {
     saveCfg.addEventListener("click", async function () {
@@ -13010,6 +13036,47 @@ async function _loadProcessHistoryFor(assetId, name, range) {
     cpuEl.textContent = "Error: " + (err.message || "failed to load");
     memEl.textContent = "";
   }
+}
+
+// Phase 4: issue a Stop/Start/Restart for a service-backed process, then poll
+// the command to completion. Confirm first — this acts on the live host.
+async function _runProcessControl(assetId, name, action) {
+  var verb = action.charAt(0).toUpperCase() + action.slice(1);
+  var ok = await showConfirm(verb + ' "' + name + '" on this host? This runs against the live service.');
+  if (!ok) return;
+  var statusEl = document.getElementById("proc-ctl-status");
+  if (statusEl) statusEl.textContent = " — " + action + "ing…";
+  try {
+    var resp = await api.assets.controlProcess(assetId, name, action);
+    var cmdId = resp && resp.command && resp.command.id;
+    showToast(verb + " requested for " + name, "success");
+    if (cmdId) _pollProcessCommand(assetId, cmdId, statusEl, 0);
+  } catch (err) {
+    showToast(err.message || "Control request failed", "error");
+    if (statusEl) statusEl.textContent = "";
+  }
+}
+
+function _pollProcessCommand(assetId, commandId, statusEl, tries) {
+  api.assets.processCommand(assetId, commandId).then(function (r) {
+    var st = r && r.command;
+    if (!st) return;
+    if (st.status === "succeeded") {
+      if (statusEl) statusEl.textContent = " — done" + (st.resultState ? " (" + escapeHtml(st.resultState) + ")" : "");
+      showToast(st.action + " of " + st.target + " succeeded", "success");
+      return;
+    }
+    if (st.status === "failed") {
+      if (statusEl) statusEl.textContent = " — failed";
+      showToast(st.error || (st.action + " failed"), "error");
+      return;
+    }
+    if (tries < 15) {
+      setTimeout(function () { _pollProcessCommand(assetId, commandId, statusEl, tries + 1); }, 2000);
+    } else if (statusEl) {
+      statusEl.textContent = " — still pending (agent may be offline)";
+    }
+  }).catch(function () { /* transient — leave the last status */ });
 }
 
 async function _loadProcessLogsFor(assetId, name) {

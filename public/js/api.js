@@ -349,6 +349,8 @@ const api = {
       return request("GET", `/assets/${id}/process-logs?` + qs.join("&"));
     },
     setProcessConfig:     (id, name, body) => request("PUT", `/assets/${id}/processes/${encodeURIComponent(name)}/config`, body),
+    controlProcess:       (id, name, action) => request("POST", `/assets/${id}/processes/${encodeURIComponent(name)}/control`, { action: action }),
+    processCommand:       (id, commandId) => request("GET", `/assets/${id}/process-command/${commandId}`),
     customWidgets:        (id)  => request("GET", `/assets/${id}/custom-widgets`),
     telemetryHistory:     (id, opts) => {
       if (typeof opts === "string") opts = { range: opts };
