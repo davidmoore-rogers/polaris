@@ -1438,6 +1438,12 @@ function _directPollingInitialStateFor(integrationType, klass, opts) {
 // The Save Changes path runs a preflight against the proposed addAsMonitored
 // values and shows a confirm modal when wouldDisable > 0 on any class —
 // see `_promptAutoMonitorAssetsConfirm` below.
+// Pluralize a Fortinet kind label for UI copy. The English -es rule covers
+// both kinds this card serves: "FortiSwitch" → "FortiSwitches" (ends in -ch),
+// "FortiAP" → "FortiAPs".
+function _kindPlural(kindLabel) {
+  return /(?:s|x|z|ch|sh)$/i.test(kindLabel) ? kindLabel + "es" : kindLabel + "s";
+}
 function _classAddAsMonitoredHTML(idPrefix, kindLabel, currentAddAsMonitored) {
   var enabled = currentAddAsMonitored === true;
   var btnClass = enabled ? "btn-danger" : "btn-primary";
@@ -1447,9 +1453,9 @@ function _classAddAsMonitoredHTML(idPrefix, kindLabel, currentAddAsMonitored) {
         // Hidden input preserves the existing save-path read pattern (_getCheckbox).
         '<input type="checkbox" id="' + idPrefix + 'addAsMonitored" ' + (enabled ? "checked" : "") + ' style="display:none">' +
         '<button type="button" class="btn ' + btnClass + '" data-auto-monitor-toggle="' + idPrefix + 'addAsMonitored" style="min-width:200px">' + btnLabel + '</button>' +
-        '<div style="font-weight:500">Auto-Monitor ' + escapeHtml(kindLabel) + 's</div>' +
+        '<div style="font-weight:500">Auto-Monitor ' + escapeHtml(_kindPlural(kindLabel)) + '</div>' +
       '</div>' +
-      '<p class="hint" style="margin:0">When enabled, every discovered ' + escapeHtml(kindLabel) + ' is monitored. Disabling sweeps existing ' + escapeHtml(kindLabel) + 's off monitoring on the next discovery cycle unless an operator has set a per-asset override. You\'ll be asked to confirm at Save Changes.</p>' +
+      '<p class="hint" style="margin:0">When enabled, every discovered ' + escapeHtml(kindLabel) + ' is monitored. Disabling sweeps existing ' + escapeHtml(_kindPlural(kindLabel)) + ' off monitoring on the next discovery cycle unless an operator has set a per-asset override. You\'ll be asked to confirm at Save Changes.</p>' +
     '</div>';
 }
 
@@ -1481,10 +1487,10 @@ function _classDirectPollHTML(idPrefix, kindLabel, credentials, currentEnabled, 
   }
   return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Direct polling</p>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
-      '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.6rem 0">Managed ' + escapeHtml(kindLabel) + 's in FortiLink mode usually keep their own management plane locked down. Polaris can\'t reach them through the controller FortiGate, so direct polling only works when the matching protocol has been explicitly enabled on the ' + escapeHtml(kindLabel) + ' itself.</p>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.6rem 0">Managed ' + escapeHtml(_kindPlural(kindLabel)) + ' in FortiLink mode usually keep their own management plane locked down. Polaris can\'t reach them through the controller FortiGate REST API, so direct polling only works when the matching protocol has been explicitly enabled on the ' + escapeHtml(kindLabel) + ' itself.</p>' +
       '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.6rem">' +
         '<input type="checkbox" id="' + idPrefix + 'enabled" ' + (currentEnabled ? "checked" : "") + ' style="width:auto">' +
-        '<label for="' + idPrefix + 'enabled" style="margin:0;font-weight:500">Enable direct polling of managed ' + escapeHtml(kindLabel) + 's</label>' +
+        '<label for="' + idPrefix + 'enabled" style="margin:0;font-weight:500">Enable direct polling of managed ' + escapeHtml(_kindPlural(kindLabel)) + '</label>' +
       '</div>' +
       credRow("snmp", "SNMP", idPrefix + "credentialId",    currentSnmpCredId) +
       credRow("ssh",  "SSH",  idPrefix + "sshCredentialId", currentSshCredId)  +
@@ -1619,7 +1625,7 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
         '<div id="' + idPrefix + 'names-list" style="display:flex;flex-direction:column;max-height:280px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
           '<p class="hint" style="margin:0">Loading…</p>' +
         '</div>' +
-        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from interfaces seen on this integration\'s ' + escapeHtml(kindLabel) + 's, refreshed automatically at the end of each discovery run. Examples: <code>wan1</code>, <code>port1</code>, <code>FortiLink</code>.</p>'
+        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from interfaces seen on this integration\'s ' + escapeHtml(_kindPlural(kindLabel)) + ', refreshed automatically at the end of each discovery run. Examples: <code>wan1</code>, <code>port1</code>, <code>FortiLink</code>.</p>'
       : '<p class="hint" style="margin:0;color:var(--color-warning)">Save the integration and run discovery first — interface names are aggregated from already-discovered devices.</p>'
     ) +
   '</div>';
@@ -1686,7 +1692,7 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
       '<input type="checkbox" id="' + idPrefix + 'types-onlyUp"' + (typeOnlyUp ? " checked" : "") + ' style="width:auto"> Only currently up' +
       ' <span class="hint" style="margin:0;font-size:0.78rem">(skips disabled / disconnected ports)</span>' +
     '</label>' +
-    '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Only interface types observed on this integration\'s ' + escapeHtml(kindLabel) + 's are listed.</p>' +
+    '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Only interface types observed on this integration\'s ' + escapeHtml(_kindPlural(kindLabel)) + ' are listed.</p>' +
   '</div>';
 
   // ─── By LLDP neighbor panel ───────────────────────────────────────────────
@@ -1849,7 +1855,7 @@ function _autoMonitorStorageHTML(idPrefix, kindLabel, currentSelection, hasInteg
         '<div id="' + idPrefix + 'names-list" style="display:flex;flex-direction:column;max-height:240px;overflow:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0.5rem;background:var(--color-bg-tertiary)">' +
           '<p class="hint" style="margin:0">Loading…</p>' +
         '</div>' +
-        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from mounts reported by agents on this integration\'s ' + escapeHtml(kindLabel) + 's, refreshed automatically at the end of each discovery run. Examples: <code>/</code>, <code>/var</code>, <code>C:</code>.</p>'
+        '<p class="hint" style="margin:0.35rem 0 0 0;font-size:0.78rem">Aggregated from mounts reported by agents on this integration\'s ' + escapeHtml(_kindPlural(kindLabel)) + ', refreshed automatically at the end of each discovery run. Examples: <code>/</code>, <code>/var</code>, <code>C:</code>.</p>'
       : '<p class="hint" style="margin:0;color:var(--color-warning)">Save the integration and let agents report first — mounts are aggregated from already-discovered devices.</p>'
     ) +
   '</div>';
@@ -1952,7 +1958,7 @@ function _agentDeployHTML(idPrefix, kindLabel, currentCfg, credentials) {
     '<div style="background:rgba(255,193,7,0.06);border:1px solid rgba(255,193,7,0.3);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
       '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<input type="checkbox" id="' + idPrefix + 'enabled" ' + (enabled ? "checked" : "") + ' style="width:auto">' +
-        '<label for="' + idPrefix + 'enabled" style="margin:0;font-weight:500">Auto-deploy the Polaris Agent to discovered ' + escapeHtml(kindLabel) + 's</label>' +
+        '<label for="' + idPrefix + 'enabled" style="margin:0;font-weight:500">Auto-deploy the Polaris Agent to discovered ' + escapeHtml(_kindPlural(kindLabel)) + '</label>' +
       '</div>' +
       '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-warning)">⚠ Pushes the Polaris Agent over SSH/WinRM to every newly-discovered, agent-less ' + escapeHtml(kindLabel) + ' during discovery. Test on a small OU first; a human should review rollout scope before enabling fleet-wide. Rollout is paced — at most a few new installs per discovery cycle.</p>' +
       '<div id="' + idPrefix + 'body" style="' + bodyHidden + '">' +
