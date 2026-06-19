@@ -3364,6 +3364,7 @@ async function openViewModal(id) {
       haTopologyHTML(a) +
       viewRow("Last Seen Switch", a.lastSeenSwitch) +
       viewRow("Last Seen AP", a.lastSeenAp) +
+      '<div class="detail-row"><span class="detail-label">Last Seen Firewall</span><span class="detail-value" id="asset-last-fw-' + escapeHtml(a.id) + '">-</span></div>' +
       associatedUsersViewHTML(a.associatedUsers) +
       lastSeenRowHTML(a) +
       '<div id="asset-dir-activity-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
@@ -3555,6 +3556,22 @@ async function openViewModal(id) {
       if (dirActivityMs > 0) {
         dirMount.innerHTML = viewRow("Last Directory Activity", formatDate(new Date(dirActivityMs).toISOString()));
       }
+    }
+    // Last Seen Firewall row (General tab) — the FortiGate device from the
+    // most-recent AssetFortigateSighting. Mirrors lastSeenSwitch/lastSeenAp
+    // (which name the upstream switch/AP from discovery); this names the
+    // upstream firewall. The exact timestamp + every firewall that has seen
+    // the asset live in the Sources tab's sightings table. Left as "-" when no
+    // firewall has ever sighted the asset.
+    var fwCell = document.getElementById("asset-last-fw-" + a.id);
+    if (fwCell) {
+      var bestFw = null, bestMs = -1;
+      (sightings || []).forEach(function (s) {
+        if (!s.fortigateDevice) return;
+        var t = s.lastSeen ? new Date(s.lastSeen).getTime() : 0;
+        if (t >= bestMs) { bestMs = t; bestFw = s.fortigateDevice; }
+      });
+      if (bestFw) fwCell.textContent = bestFw;
     }
     // Mount the Polaris Agent panel into the System tab placeholder + wire
     // its buttons. The wiring helper also starts the install-progress
@@ -12730,9 +12747,9 @@ function _assetProcessesTabHTML(assetId) {
     '<div class="table-wrapper">' +
       '<table id="asset-view-proc-table">' +
         '<thead><tr>' +
-          '<th style="width:64px"  data-col-id="monitor">Monitor</th>' +
-          '<th style="width:54px"  data-col-id="alert">Alert</th>' +
-          '<th                      data-col-id="name"      data-sf-key="name"          data-sf-type="string">Name</th>' +
+          '<th style="width:64px"  data-col-id="monitor" data-col-required="true">Monitor</th>' +
+          '<th style="width:54px"  data-col-id="alert"   data-col-required="true">Alert</th>' +
+          '<th                      data-col-id="name"    data-col-required="true" data-sf-key="name"          data-sf-type="string">Name</th>' +
           '<th style="width:80px"  data-col-id="instances" data-sf-key="instanceCount" data-sf-type="number">Instances</th>' +
           '<th style="width:80px"  data-col-id="cpu"       data-sf-key="cpuPct"        data-sf-type="number">CPU %</th>' +
           '<th style="width:110px" data-col-id="ram"       data-sf-key="memRssBytes"   data-sf-type="number">RAM</th>' +
@@ -12752,6 +12769,7 @@ function _wireAssetProcessesTab(asset) {
   var btn = document.querySelector('#asset-view-tabs [data-tab="processes"]');
   if (!btn) return;
   var loaded = false;
+  var layoutApplied = false;
   var sf = null;
   var rows = [];
   var configs = {};
@@ -12816,6 +12834,18 @@ function _wireAssetProcessesTab(asset) {
       configs = (resp && resp.configs) || {};
       monitored = new Set((resp && resp.monitoredProcesses) || []);
       alerted = new Set((resp && resp.alertWatchedProcesses) || []);
+      // Resizable/choosable columns (rightmost right-edge pinned to the
+      // border) — applied once, before TableSF, like the Events tab. Persists
+      // across tbody re-renders since it operates on the thead/colgroup.
+      if (!layoutApplied && typeof applyTableLayout === "function") {
+        var procTable = document.getElementById("asset-view-proc-table");
+        if (procTable) {
+          applyTableLayout(procTable, "asset-processes", {
+            onScreenshot: function (t) { _screenshotTableEl(t, "Processes"); },
+          });
+          layoutApplied = true;
+        }
+      }
       if (!sf && typeof TableSF !== "undefined") {
         sf = new TableSF("asset-view-proc-tbody", apply);
       }
