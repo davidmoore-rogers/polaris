@@ -1119,8 +1119,12 @@ function _streamsForClass(klass) {
   //   fortigate                               → event log only (FortiOS device
   //                                              log via REST; no host process API)
   //   fortiswitch / fortiap / other appliances → neither
-  var allowProcesses = (klass === "workstation" || klass === "server");
-  var allowEventLog  = (klass === "workstation" || klass === "server" || klass === "fortigate");
+  // NOTE: the integration Monitoring tab uses PLURAL class keys ("workstations"
+  // / "servers"); accept both plural and singular so the subtabs actually render
+  // (the asset.assetType the resolver keys off is singular).
+  var isHostClass = (klass === "workstation" || klass === "workstations" || klass === "server" || klass === "servers");
+  var allowProcesses = isHostClass;
+  var allowEventLog  = isHostClass || klass === "fortigate";
   return _ALL_STREAMS.filter(function (s) {
     if (s.key === "storage" && klass === "fortiap") return false; // FortiAP has no mountable storage
     if (s.key === "processes") return allowProcesses;
