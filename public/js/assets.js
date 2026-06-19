@@ -11128,7 +11128,7 @@ function macAddressesViewHTML(macAddresses) {
   var rows = shown.map(function (m) {
     var sourceLabel = formatMacSource(m.source);
     return '<div style="display:flex;gap:12px;align-items:center;padding:3px 0">' +
-      '<code style="font-size:0.82rem">' + escapeHtml(m.mac) + '</code>' +
+      '<code class="copy-cell" style="font-size:0.82rem" title="Click to copy" data-copy="' + escapeHtml(m.mac) + '">' + escapeHtml(m.mac) + '</code>' +
       '<span style="font-size:0.75rem;color:var(--color-text-tertiary)">' +
         (sourceLabel ? escapeHtml(sourceLabel) : '') +
         (m.lastSeen ? (sourceLabel ? ' &middot; ' : '') + formatDate(m.lastSeen) : '') +
@@ -12865,9 +12865,15 @@ function _wireAssetProcessesTab(asset) {
       configs = (resp && resp.configs) || {};
       monitored = new Set((resp && resp.monitoredProcesses) || []);
       alerted = new Set((resp && resp.alertWatchedProcesses) || []);
-      // Resizable/choosable columns (rightmost right-edge pinned to the
-      // border) — applied once, before TableSF, like the Events tab. Persists
-      // across tbody re-renders since it operates on the thead/colgroup.
+      // Order matters: construct TableSF FIRST — it rewrites each data-sf-key
+      // header's innerHTML (sort caret + filter UI), which wipes any resize
+      // handle added earlier. applyTableLayout runs AFTER so its
+      // .sf-resize-handle spans are appended last and survive on EVERY column
+      // (otherwise only the non-sortable Monitor/Alert columns stay resizable).
+      // Both run once; apply()/refresh only swaps the tbody.
+      if (!sf && typeof TableSF !== "undefined") {
+        sf = new TableSF("asset-view-proc-tbody", apply);
+      }
       if (!layoutApplied && typeof applyTableLayout === "function") {
         var procTable = document.getElementById("asset-view-proc-table");
         if (procTable) {
@@ -12876,9 +12882,6 @@ function _wireAssetProcessesTab(asset) {
           });
           layoutApplied = true;
         }
-      }
-      if (!sf && typeof TableSF !== "undefined") {
-        sf = new TableSF("asset-view-proc-tbody", apply);
       }
       apply();
     } catch (err) {
