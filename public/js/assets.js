@@ -11118,9 +11118,14 @@ function formatMacSource(source) {
   }
 }
 
+var _MAC_VIEW_VISIBLE = 3;
+
 function macAddressesViewHTML(macAddresses) {
   if (!macAddresses || macAddresses.length === 0) return '';
-  var rows = macAddresses.map(function (m) {
+  var shown = macAddresses.slice(0, _MAC_VIEW_VISIBLE);
+  var hidden = macAddresses.slice(_MAC_VIEW_VISIBLE);
+
+  var rows = shown.map(function (m) {
     var sourceLabel = formatMacSource(m.source);
     return '<div style="display:flex;gap:12px;align-items:center;padding:3px 0">' +
       '<code style="font-size:0.82rem">' + escapeHtml(m.mac) + '</code>' +
@@ -11130,6 +11135,32 @@ function macAddressesViewHTML(macAddresses) {
       '</span>' +
     '</div>';
   }).join("");
+
+  // Overflow MACs collapse into a "+N" badge with a hover tooltip listing the
+  // rest — mirrors the IP address cell (ipCellHTML). Hover wiring is attached
+  // by _wireHoverTriggersIn over the modal body.
+  if (hidden.length > 0) {
+    var tooltipRows = hidden.map(function (m) {
+      var sourceLine = escapeHtml(formatMacSource(m.source)) +
+        (m.lastSeen ? ' &middot; ' + formatDate(m.lastSeen) : '');
+      return '<div class="mac-tooltip-row">' +
+        '<span class="mono copy-cell" title="Click to copy" data-copy="' + escapeHtml(m.mac) + '">' + escapeHtml(m.mac) + '</span>' +
+        '<span class="mac-tooltip-meta">' +
+          '<span class="mac-tooltip-source">' + sourceLine + '</span>' +
+        '</span>' +
+      '</div>';
+    }).join("");
+    rows += '<div style="padding:3px 0">' +
+      '<span class="mac-hover-trigger">' +
+        '<span class="mac-badge-count" style="margin-left:0">+' + hidden.length + '</span>' +
+        '<div class="mac-tooltip">' +
+          '<div class="mac-tooltip-header">' + hidden.length + ' more MAC' + (hidden.length === 1 ? '' : 's') + '</div>' +
+          tooltipRows +
+        '</div>' +
+      '</span>' +
+    '</div>';
+  }
+
   var label = macAddresses.length === 1 ? 'MAC History' : 'All MACs (' + macAddresses.length + ')';
   return '<div class="detail-row"><span class="detail-label">' + label + '</span>' +
     '<span class="detail-value">' + rows + '</span></div>';
