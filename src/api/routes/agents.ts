@@ -527,13 +527,19 @@ agentsRouter.get("/config", async (req, res, next) => {
     // agree without requiring a Reinstall. Cheap: at-most one UPDATE per
     // drifted asset, after which the per-minute /config polls find no
     // drift and skip the write.
+    // `processes` is stamped to "agent" by default too: an installed agent
+    // collects its host's process inventory as part of doing its job (like
+    // interfaces/storage) — no operator toggle required. (eventLog is NOT
+    // self-healed: it stays opt-in via the global agentEventLog switch because
+    // host log text can carry PII and is high-volume.)
     const drift =
       asset.responseTimePolling !== "agent" ||
       asset.cpuMemoryPolling    !== "agent" ||
       asset.temperaturePolling  !== "agent" ||
       asset.interfacesPolling   !== "agent" ||
       asset.lldpPolling         !== "agent" ||
-      asset.storagePolling      !== "agent";
+      asset.storagePolling      !== "agent" ||
+      asset.processesPolling    !== "agent";
     if (drift) {
       const before = {
         responseTimePolling: asset.responseTimePolling,
@@ -542,6 +548,7 @@ agentsRouter.get("/config", async (req, res, next) => {
         interfacesPolling:   asset.interfacesPolling,
         lldpPolling:         asset.lldpPolling,
         storagePolling:      asset.storagePolling,
+        processesPolling:    asset.processesPolling,
       };
       await prisma.asset.update({
         where: { id: assetId },
@@ -552,6 +559,7 @@ agentsRouter.get("/config", async (req, res, next) => {
           interfacesPolling:   "agent",
           lldpPolling:         "agent",
           storagePolling:      "agent",
+          processesPolling:    "agent",
         },
       });
       invalidateMonitorSettingsCache({
@@ -564,6 +572,7 @@ agentsRouter.get("/config", async (req, res, next) => {
       asset.interfacesPolling   = "agent";
       asset.lldpPolling         = "agent";
       asset.storagePolling      = "agent";
+      asset.processesPolling    = "agent";
       await logEvent({
         action:       "monitor.polling_overridden_by_agent",
         resourceType: "asset",
