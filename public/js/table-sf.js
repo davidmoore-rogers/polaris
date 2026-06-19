@@ -715,16 +715,40 @@ function setupColumnLayout(tableEl, options) {
     if (typeof positionGear === "function") positionGear();
   }
 
+  // Index of the rightmost visible, resizable (non-utility) column. This
+  // column is deliberately left without an explicit width so it auto-fills the
+  // remaining space — keeping its right edge pinned to the table border (no
+  // trailing gap). It recomputes as columns are hidden/shown.
+  function lastVisibleResizableIdx() {
+    for (var k = colIds.length - 1; k >= 0; k--) {
+      if (!hidden[colIds[k]] && !noResize[colIds[k]]) return k;
+    }
+    return -1;
+  }
+
   function applyWidths() {
+    var lastIdx = lastVisibleResizableIdx();
     var anyWidth = false;
     colIds.forEach(function (id, i) {
-      var w = widths[id];
-      if (typeof w === "number" && w > 0) {
-        cols[i].style.width = w + "px";
-        anyWidth = true;
-      } else {
+      if (i === lastIdx) {
+        // Auto-fill: pins the table's right edge to the border. When the other
+        // (fixed-width) columns sum wider than the container the table grows
+        // past 100% and the wrapper's overflow-x:auto shows a scrollbar.
         cols[i].style.width = "";
+      } else {
+        var w = widths[id];
+        if (typeof w === "number" && w > 0) {
+          cols[i].style.width = w + "px";
+          anyWidth = true;
+        } else {
+          cols[i].style.width = "";
+        }
       }
+      // The auto-fill column's handle is inert (nothing to its right to push
+      // into); hide it so the user can't drag the table's right edge off the
+      // border. Every other resizable column keeps its handle.
+      var handle = ths[i] && ths[i].querySelector(".sf-resize-handle");
+      if (handle) handle.style.display = (i === lastIdx) ? "none" : "";
     });
     tableEl.style.tableLayout = anyWidth ? "fixed" : "";
   }
@@ -751,34 +775,22 @@ function setupColumnLayout(tableEl, options) {
     handle.addEventListener("mousedown", function (e) {
       e.preventDefault();
       e.stopPropagation();
+      // The rightmost visible column auto-fills to keep the table's right edge
+      // on the border, so its handle does nothing — bail before starting a drag.
+      if (i === lastVisibleResizableIdx()) return;
       ensureAllWidthsMeasured();
       var id = colIds[i];
       var startX = e.clientX;
       var startW = widths[id] || ths[i].getBoundingClientRect().width;
-      // Pair-resize: the column to the right of the handle absorbs the delta so
-      // the table's total width stays constant and no other column moves. Find
-      // the next VISIBLE column (skip hidden ones). The rightmost handle has no
-      // neighbor — fall back to growing this column alone.
-      var nextIdx = -1;
-      for (var j = i + 1; j < colIds.length; j++) {
-        if (!hidden[colIds[j]] && !noResize[colIds[j]]) { nextIdx = j; break; }
-      }
-      var nextId = nextIdx >= 0 ? colIds[nextIdx] : null;
-      var startNextW = nextId
-        ? (widths[nextId] || ths[nextIdx].getBoundingClientRect().width)
-        : 0;
       var MIN_W = 40;
       function onMove(ev) {
         var dx = ev.clientX - startX;
-        if (nextId) {
-          // Clamp so neither the dragged column nor its neighbor drops below MIN_W.
-          if (dx > startNextW - MIN_W) dx = startNextW - MIN_W;
-          if (dx < -(startW - MIN_W)) dx = -(startW - MIN_W);
-          widths[id] = Math.round(startW + dx);
-          widths[nextId] = Math.round(startNextW - dx);
-        } else {
-          widths[id] = Math.max(MIN_W, Math.round(startW + dx));
-        }
+        // Independent resize: only this column's width changes. Columns to its
+        // right shift over and the auto-fill last column absorbs the delta, so
+        // the right edge stays pinned to the border. When the fixed columns
+        // grow wider than the container the table overflows and the wrapper
+        // shows a horizontal scrollbar.
+        widths[id] = Math.max(MIN_W, Math.round(startW + dx));
         applyWidths();
       }
       function onUp() {
@@ -906,6 +918,7 @@ function setupColumnLayout(tableEl, options) {
       if (e.target.checked) delete hidden[id];
       else hidden[id] = true;
       rewriteHideStyle();
+      applyWidths();   // recompute which column auto-fills to the right edge
       if (typeof options.onChange === "function") options.onChange();
     });
     document.body.appendChild(chooserPop);
