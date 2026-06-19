@@ -532,6 +532,38 @@ router.get("/sites/:id/topology", async (req, res, next) => {
 
     const siteAssetIds = [fg.id, ...switches.map((s) => s.id), ...aps.map((a) => a.id)];
 
+    // HA standby members are their own firewall Assets (ipAddress=null,
+    // fortinetTopology.haRole="secondary"; see the per-member write loop in
+    // integrations.ts) but are redundant on the topology — the cluster is
+    // represented by its active/primary member, which already carries every
+    // FortiLink edge. The standby would otherwise surface as an LLDP- or
+    // interface-matched remote node hanging off the same switches as the
+    // primary, duplicating the cluster. Collect standby ids so we can drop
+    // them (and any edge that targets them) from the graph. Keyed on haRole so
+    // it covers both the FMG and standalone-FortiGate discovery paths, which
+    // share the per-member write loop.
+    const standbyMembers = await prisma.asset.findMany({
+      where: {
+        assetType: "firewall",
+        fortinetTopology: { path: ["haRole"], equals: "secondary" },
+      },
+      select: { id: true, hostname: true },
+    });
+    const standbyIds = new Set(standbyMembers.map((a) => a.id));
+    // Standby hostnames (+ short-form) catch the case where an LLDP row for the
+    // standby never matched a Polaris asset and would otherwise render as a
+    // ghost node bearing the standby's name. Mirrors the FQDN/short-form
+    // handling used for sibling dedupe below.
+    const standbyHostnames = new Set<string>();
+    for (const m of standbyMembers) {
+      if (!m.hostname) continue;
+      const lower = m.hostname.toLowerCase().trim();
+      if (!lower) continue;
+      standbyHostnames.add(lower);
+      const dotIdx = lower.indexOf(".");
+      if (dotIdx > 0) standbyHostnames.add(lower.slice(0, dotIdx));
+    }
+
     // CMDB-inferred edges from FortiOS interface naming conventions —
     // peer-serial aggregates (FortiLink-auto) plus operator-named
     // hostname aggregates (custom MCLAG between non-stacked pairs). Run
@@ -603,6 +635,8 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     const interfaceEdges: InterfaceEdge[] = [];
     const seenIfacePair = new Set<string>();
     for (const e of ifaceInference.edges) {
+      // Don't draw edges to an HA standby member — it's suppressed as a node.
+      if (standbyIds.has(e.sourceAssetId) || standbyIds.has(e.targetAssetId)) continue;
       // Don't redraw an edge that fortinetTopology already covered.
       const key = `${e.sourceAssetId}|${e.targetAssetId}`;
       const reverseKey = `${e.targetAssetId}|${e.sourceAssetId}`;
@@ -656,6 +690,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     };
     const remoteAssetNodes = new Map<string, RemoteAssetNode>();
     for (const r of ifaceInference.remoteAssets.values()) {
+      if (standbyIds.has(r.id)) continue; // HA standby member — redundant with the primary
       remoteAssetNodes.set(r.id, {
         id: r.id,
         hostname: r.hostname,
@@ -895,6 +930,9 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         const siblingId = siblingByHostname.get(lower)
           ?? (lower.includes(".") ? siblingByHostname.get(lower.split(".")[0]) : undefined);
         if (siblingId) continue;
+        // Unmatched neighbor whose name is a known HA standby member — suppress
+        // the ghost node (the primary already represents the cluster).
+        if (standbyHostnames.has(lower) || (lower.includes(".") && standbyHostnames.has(lower.split(".")[0]))) continue;
       }
       if (n.matchedAsset && n.matchedAsset.id) {
         // Skip neighbors that resolve back to a sibling node — fortinetTopology
@@ -903,6 +941,9 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         // LLDP edge when the matched asset is OUTSIDE this site (e.g. a
         // separate firewall) — that's the whole point.
         if (siblingIds.has(n.matchedAsset.id)) continue;
+        // Suppress HA standby members — the active/primary cluster member is
+        // already on the graph and carries the same uplinks.
+        if (standbyIds.has(n.matchedAsset.id)) continue;
         targetId = n.matchedAsset.id;
         targetLabel = n.matchedAsset.hostname || n.matchedAsset.ipAddress || n.matchedAsset.id;
         targetIsAsset = true;
