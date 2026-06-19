@@ -3443,7 +3443,6 @@ async function openViewModal(id) {
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) {
       tabs.push({ key: "sdwan", label: "SD-WAN", html: _assetSdwanTabHTML(a, sdwanRules, sdwanLinks, sdwanMembers) });
     }
-    tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id, sightings, ipHistory) });
     // Processes tab — current-state process inventory + the Monitor/Alert pin
     // checkboxes. Lazy-loaded on first click (see _wireAssetProcessesTab). Not
     // shown on Fortinet infrastructure (firewall/switch/access_point) — those
@@ -3451,6 +3450,15 @@ async function openViewModal(id) {
     var isInfraProc = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
     if (!isInfraProc) {
       tabs.push({ key: "processes", label: "Processes", html: _assetProcessesTabHTML(a.id) });
+    }
+    // Quarantine tab — assets-admin only, shown for any asset that has MACs or is quarantined.
+    // Infrastructure assets (firewall/switch/access_point) only get the tab if they're
+    // already quarantined (so Release stays reachable); they can't be newly quarantined.
+    // Ordered right after Processes.
+    var isInfraQ = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
+    var hasMac = !!(a.macAddress || (a.macAddresses && a.macAddresses.length));
+    if (canManageAssets() && (a.status === "quarantined" || (hasMac && !isInfraQ))) {
+      tabs.push({ key: "quarantine", label: a.status === "quarantined" ? "Quarantine ⚠" : "Quarantine", html: _assetQuarantineTabHTML(a) });
     }
     // Events tab — audit history scoped to this asset (resourceType=asset,
     // resourceId=a.id). Lazy-loaded on first tab click (see _wireAssetEventsTab)
@@ -3475,14 +3483,9 @@ async function openViewModal(id) {
       await _ensureCredentials();
       tabs.push({ key: "snmp", label: "SNMP Walk", html: assetSnmpWalkViewHTML(a) });
     }
-    // Quarantine tab — assets-admin only, shown for any asset that has MACs or is quarantined.
-    // Infrastructure assets (firewall/switch/access_point) only get the tab if they're
-    // already quarantined (so Release stays reachable); they can't be newly quarantined.
-    var isInfraQ = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
-    var hasMac = !!(a.macAddress || (a.macAddresses && a.macAddresses.length));
-    if (canManageAssets() && (a.status === "quarantined" || (hasMac && !isInfraQ))) {
-      tabs.push({ key: "quarantine", label: a.status === "quarantined" ? "Quarantine ⚠" : "Quarantine", html: _assetQuarantineTabHTML(a) });
-    }
+    // Sources tab — moved to the end so the operational tabs (Processes /
+    // Quarantine / Events) come first; discovery-source provenance lives last.
+    tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id, sightings, ipHistory) });
     var tabsHTML = _renderTabbedBody("asset-view", tabs);
     bodyEl.innerHTML = '<div class="asset-panel-content">' + tabsHTML + '</div>';
 
