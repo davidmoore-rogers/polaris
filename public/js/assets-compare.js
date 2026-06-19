@@ -28,10 +28,18 @@ var _CMP_COLORS = [
 // axis to 0–100%; `perInterface` marks the streams that need an interface-name
 // selection; `needsStorage` marks the stream that resolves a mountpoint.
 var _CMP_METRICS = [
-  { key: "response",     label: "Response time",        unit: "ms" },
-  { key: "cpu",          label: "CPU usage",            unit: "%",   pct: true },
-  { key: "memory",       label: "Memory usage",         unit: "%",   pct: true },
-  { key: "storage",      label: "Storage usage",        unit: "%",   pct: true, needsStorage: true },
+  { key: "response",   label: "Response time",            unit: "ms" },
+  { key: "cpu",        label: "CPU usage",                unit: "%",   pct: true },
+  { key: "memory",     label: "Memory usage",             unit: "%",   pct: true },
+  { key: "storage",    label: "Storage usage",            unit: "%",   pct: true, needsStorage: true },
+  // Single toggle covering both interface streams — expands into the two
+  // chartable sub-metrics below at chart-build time.
+  { key: "interfaces", label: "Interface throughput & errors", perInterface: true },
+];
+
+// The combined "interfaces" toggle fans out into these chartable sub-metrics
+// (different units → distinct charts). metricKey on a series is one of these.
+var _CMP_IFACE_SUBMETRICS = [
   { key: "ifThroughput", label: "Interface throughput", unit: "bps", perInterface: true },
   { key: "ifErrors",     label: "Interface errors",     unit: "err", perInterface: true },
 ];
@@ -40,6 +48,35 @@ function _cmpMetric(key) {
   for (var i = 0; i < _CMP_METRICS.length; i++) {
     if (_CMP_METRICS[i].key === key) return _CMP_METRICS[i];
   }
+  return null;
+}
+
+// Expand the user-selected metric keys into chartable metric objects: the
+// "interfaces" toggle becomes throughput + errors; everything else maps 1:1.
+function _cmpChartableMetrics() {
+  var out = [];
+  _cmpPanel.metrics.forEach(function (k) {
+    if (k === "interfaces") { _CMP_IFACE_SUBMETRICS.forEach(function (sm) { out.push(sm); }); }
+    else { var m = _cmpMetric(k); if (m) out.push(m); }
+  });
+  return out;
+}
+
+// alias / aggregate annotation for one (asset, interface) row, shown in parens.
+function _cmpIfaceAnnotation(row) {
+  if (!row) return "";
+  var bits = [];
+  if (row.alias && String(row.alias).trim() && row.alias !== row.ifName) bits.push("alias: " + row.alias);
+  if (row.ifParent && row.ifParent !== row.ifName) {
+    bits.push((row.ifType === "vlan" ? "VLAN on " : "member of ") + row.ifParent);
+  }
+  return bits.length ? " (" + bits.join("; ") + ")" : "";
+}
+
+function _cmpIfaceRow(siMap, assetId, ifName) {
+  var si = siMap[assetId];
+  var rows = (si && si.interfaces) || [];
+  for (var i = 0; i < rows.length; i++) if (rows[i].ifName === ifName) return rows[i];
   return null;
 }
 
@@ -84,9 +121,16 @@ function openCompareModal() {
         metricRows +
       '</div>' +
       '<div id="cmp-iface-section" style="display:none">' +
-        '<div style="font-weight:600;margin-bottom:4px">Interfaces</div>' +
-        '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-bottom:6px">Only interfaces present on the selected assets are comparable — pick interface names shared across assets.</div>' +
-        '<div id="cmp-iface-list" style="display:flex;flex-direction:column;gap:2px;max-height:180px;overflow:auto">Loading interfaces…</div>' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">' +
+          '<span style="font-weight:600">Interfaces</span>' +
+          '<span style="display:flex;gap:6px">' +
+            '<button type="button" class="btn btn-sm btn-secondary" id="cmp-iface-all">Select all</button>' +
+            '<button type="button" class="btn btn-sm btn-secondary" id="cmp-iface-none">Deselect all</button>' +
+          '</span>' +
+        '</div>' +
+        '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-bottom:6px">Only interfaces present on the selected assets are comparable — pick interface names shared across assets. Each interface lists its assets (alias / aggregate shown in parentheses) with recent average throughput so you can tell which carry traffic.</div>' +
+        '<div id="cmp-iface-preview-slot" style="margin-bottom:6px"></div>' +
+        '<div id="cmp-iface-list" style="display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto">Loading interfaces…</div>' +
       '</div>' +
       '<div>' +
         '<div style="font-weight:600;margin-bottom:4px">Layout</div>' +
@@ -127,7 +171,13 @@ function openCompareModal() {
     if (needsIf) {
       interfaces = Array.prototype.filter.call(document.querySelectorAll(".cmp-iface-cb"), function (cb) { return cb.checked; })
         .map(function (cb) { return cb.value; });
-      if (!interfaces.length) { showToast("Pick at least one interface to compare, or unselect the interface metrics", "error"); return; }
+      // Deselecting all interfaces is allowed — interface charts just won't
+      // render. Only block when interfaces is the only thing to compare.
+      var onlyIf = metrics.every(function (k) { var m = _cmpMetric(k); return m && m.perInterface; });
+      if (!interfaces.length && onlyIf) {
+        showToast("Select at least one interface, or pick another metric", "error");
+        return;
+      }
     }
     closeModal();
     openComparePanel({ assets: _cmpState.assets, metrics: metrics, interfaces: interfaces, layout: layout, si: _cmpState.si });
@@ -146,6 +196,11 @@ async function _cmpEnsureSystemInfo(assets, cache) {
   }));
 }
 
+// Auto-fetch the usage preview when the (asset × interface) pair count is at or
+// below this; above it, gate behind a button so opening the modal stays cheap
+// at fleet scale.
+var _CMP_IFACE_PREVIEW_CAP = 60;
+
 async function _cmpLoadInterfaceUnion() {
   var listEl = document.getElementById("cmp-iface-list");
   if (!listEl) return;
@@ -156,7 +211,9 @@ async function _cmpLoadInterfaceUnion() {
   listEl = document.getElementById("cmp-iface-list");
   if (!listEl) return;
 
-  var counts = {};
+  // Union of interface names → the assets that carry each.
+  var byName = {};
+  var order = [];
   _cmpState.assets.forEach(function (a) {
     var si = _cmpState.si[a.id];
     var ifaces = (si && si.interfaces) || [];
@@ -165,27 +222,101 @@ async function _cmpLoadInterfaceUnion() {
       var n = i && i.ifName;
       if (!n || seen[n]) return;
       seen[n] = 1;
-      counts[n] = (counts[n] || 0) + 1;
+      if (!byName[n]) { byName[n] = []; order.push(n); }
+      byName[n].push(a);
     });
   });
-  var names = Object.keys(counts).sort(function (a, b) {
-    if (counts[b] !== counts[a]) return counts[b] - counts[a];
+  var total = _cmpState.assets.length;
+  order.sort(function (a, b) {
+    if (byName[b].length !== byName[a].length) return byName[b].length - byName[a].length;
     return a.localeCompare(b, undefined, { numeric: true });
   });
-  if (!names.length) {
+  if (!order.length) {
     listEl.innerHTML = '<span class="empty-state">No interfaces reported by the selected assets yet.</span>';
     return;
   }
-  var total = _cmpState.assets.length;
-  listEl.innerHTML = names.map(function (n) {
-    // Pre-check interface names shared by every asset — those compare cleanly.
-    var checked = counts[n] === total ? " checked" : "";
-    return '<label style="display:flex;align-items:center;gap:8px">' +
-      '<input type="checkbox" class="cmp-iface-cb" value="' + escapeHtml(n) + '"' + checked + '> ' +
-      '<span class="mono">' + escapeHtml(n) + '</span> ' +
-      '<span style="font-size:0.75rem;color:var(--color-text-secondary)">' + counts[n] + ' of ' + total + ' assets</span>' +
-      '</label>';
+
+  // Per-interface model with each asset's alias/aggregate annotation (from the
+  // system-info already fetched — no extra calls).
+  var ifaceData = order.map(function (n) {
+    var perAsset = byName[n].map(function (a) {
+      var row = _cmpIfaceRow(_cmpState.si, a.id, n);
+      return { asset: a, row: row, annotation: _cmpIfaceAnnotation(row) };
+    });
+    return { name: n, perAsset: perAsset };
+  });
+
+  listEl.innerHTML = ifaceData.map(function (iface, i) {
+    // Pre-check names present on every asset — those compare cleanly.
+    var checked = iface.perAsset.length === total ? " checked" : "";
+    var assetLines = iface.perAsset.map(function (pa, j) {
+      return '<div style="display:flex;gap:6px;font-size:0.76rem;color:var(--color-text-secondary);padding-left:24px">' +
+        '<span>' + escapeHtml(_cmpLabel(pa.asset)) + escapeHtml(pa.annotation) + '</span>' +
+        '<span id="cmp-ifuse-' + i + '-' + j + '"></span>' +
+        '</div>';
+    }).join("");
+    return '<div class="cmp-iface-item">' +
+      '<label style="display:flex;align-items:center;gap:8px">' +
+        '<input type="checkbox" class="cmp-iface-cb" value="' + escapeHtml(iface.name) + '"' + checked + '> ' +
+        '<span class="mono" style="font-weight:600">' + escapeHtml(iface.name) + '</span> ' +
+        '<span style="font-size:0.75rem;color:var(--color-text-secondary)">' + iface.perAsset.length + ' of ' + total + ' assets</span>' +
+      '</label>' +
+      assetLines +
+    '</div>';
   }).join("");
+
+  var allBtn = document.getElementById("cmp-iface-all");
+  var noneBtn = document.getElementById("cmp-iface-none");
+  if (allBtn) allBtn.onclick = function () { listEl.querySelectorAll(".cmp-iface-cb").forEach(function (cb) { cb.checked = true; }); };
+  if (noneBtn) noneBtn.onclick = function () { listEl.querySelectorAll(".cmp-iface-cb").forEach(function (cb) { cb.checked = false; }); };
+
+  // Usage preview — cheap when few pairs, button-gated otherwise.
+  var pairs = ifaceData.reduce(function (acc, iface) { return acc + iface.perAsset.length; }, 0);
+  var slot = document.getElementById("cmp-iface-preview-slot");
+  if (slot) slot.innerHTML = "";
+  if (pairs <= _CMP_IFACE_PREVIEW_CAP) {
+    _cmpLoadIfaceUsage(ifaceData);
+  } else if (slot) {
+    slot.innerHTML = '<button type="button" class="btn btn-sm btn-secondary" id="cmp-iface-preview-btn">Load usage preview (' + pairs + ' interface readings)</button>';
+    var pbtn = document.getElementById("cmp-iface-preview-btn");
+    if (pbtn) pbtn.onclick = function () {
+      pbtn.disabled = true; pbtn.textContent = "Loading usage…";
+      _cmpLoadIfaceUsage(ifaceData).then(function () { if (slot) slot.innerHTML = ""; });
+    };
+  }
+}
+
+// Fill each per-asset sub-line with recent (1h) average throughput so the
+// operator can tell which interfaces carry traffic. Down interfaces skip the
+// fetch; failures / empty windows read "no data". Bounded by the caller.
+async function _cmpLoadIfaceUsage(ifaceData) {
+  var tasks = [];
+  ifaceData.forEach(function (iface, i) {
+    iface.perAsset.forEach(function (pa, j) {
+      var span = document.getElementById("cmp-ifuse-" + i + "-" + j);
+      if (span) span.textContent = "· …";
+      var oper = pa.row && pa.row.operStatus;
+      if (oper && String(oper).toLowerCase() !== "up") {
+        if (span) span.textContent = "· down";
+        return;
+      }
+      tasks.push(
+        api.assets.interfaceHistory(pa.asset.id, iface.name, "1h").then(function (d) {
+          var derived = _derivePerIntervalSeries((d && d.samples) || [], d);
+          var sum = 0, n = 0;
+          derived.forEach(function (x) {
+            if (typeof x.inBps === "number" || typeof x.outBps === "number") { sum += (x.inBps || 0) + (x.outBps || 0); n++; }
+          });
+          var el = document.getElementById("cmp-ifuse-" + i + "-" + j);
+          if (el) el.textContent = n ? "· " + _fmtBitsPerSec(sum / n) + " avg" : "· no data";
+        }).catch(function () {
+          var el = document.getElementById("cmp-ifuse-" + i + "-" + j);
+          if (el) el.textContent = "· no data";
+        })
+      );
+    });
+  });
+  await Promise.all(tasks);
 }
 
 // ─── Comparison slide-over ──────────────────────────────────────────────────
@@ -363,9 +494,7 @@ function _cmpChartSpecs() {
     // [×interface] drawn as its own line. Colors cycle across the chart's series.
     var byUnit = {};
     var unitOrder = [];
-    p.metrics.forEach(function (k) {
-      var m = _cmpMetric(k);
-      if (!m) return;
+    _cmpChartableMetrics().forEach(function (m) {
       if (!byUnit[m.unit]) { byUnit[m.unit] = []; unitOrder.push(m.unit); }
       byUnit[m.unit].push(m);
     });
@@ -394,9 +523,7 @@ function _cmpChartSpecs() {
 
   // perMetric: one chart per metric (assets overlaid, colored by asset). Interface
   // metrics fan out to one chart per selected interface name.
-  p.metrics.forEach(function (k) {
-    var m = _cmpMetric(k);
-    if (!m) return;
+  _cmpChartableMetrics().forEach(function (m) {
     if (m.perInterface) {
       p.interfaces.forEach(function (ifName) {
         var series = [];
