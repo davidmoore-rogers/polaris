@@ -93,6 +93,9 @@ const (
 	defaultProcessTelemetryIntervalSec = 60
 	// Per-pinned-program log-tail cadence — 60 s.
 	defaultProcessLogIntervalSec       = 60
+	// Process-control command poll cadence — 20 s (operator clicks Stop/Start/
+	// Restart and expects it to act within seconds, not a minute).
+	defaultCommandPollIntervalSec      = 20
 )
 
 // ─── Server-pushed stream config (Phase 0 plumbing) ────────────────────────
@@ -257,6 +260,7 @@ func runAgent(ctx context.Context, confPath string) {
 	go processInventoryLoop(ctx, cfg, client)
 	go processTelemetryLoop(ctx, cfg, client)
 	go processLogLoop(ctx, cfg, client)
+	go commandLoop(ctx, cfg, client)
 	go wsLoop(ctx, cfg, client)
 
 	<-ctx.Done()
@@ -764,6 +768,50 @@ func pushProcessLogOne(client *transport.Client, stateDir string) {
 	}
 	if verbose {
 		log.Printf("processLog sent: rows=%d -> accepted=%d rejected=%d", len(r.s), resp.Accepted, resp.Rejected)
+	}
+}
+
+// commandLoop polls for operator-issued process-control commands and executes
+// them via the OS service manager (Phase 4). The server only ever queues a
+// command for a resolved, controllable service/unit; the agent re-validates the
+// action + target before acting and reports the outcome. No config gate — the
+// poll is cheap and the server returns commands only for this agent.
+func commandLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
+	interval := time.Duration(cfg.CommandPollIntervalSec) * time.Second
+	if interval == 0 {
+		interval = defaultCommandPollIntervalSec * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pollAndRunCommands(client)
+		}
+	}
+}
+
+func pollAndRunCommands(client *transport.Client) {
+	cmds, err := client.FetchCommands()
+	if err != nil {
+		if verbose {
+			log.Printf("command poll failed: %v", err)
+		}
+		return
+	}
+	for _, c := range cmds {
+		state, execErr := collectors.RunServiceControl(c.Action, c.Target)
+		success := execErr == nil
+		errMsg := ""
+		if execErr != nil {
+			errMsg = execErr.Error()
+		}
+		if rerr := client.ReportCommandResult(c.ID, success, errMsg, state); rerr != nil {
+			log.Printf("command result report failed (id=%s): %v", c.ID, rerr)
+		}
+		log.Printf("process control: %s %s -> success=%v state=%q", c.Action, c.Target, success, state)
 	}
 }
 

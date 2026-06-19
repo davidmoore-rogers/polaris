@@ -277,6 +277,49 @@ func (c *Client) PushSystemInfo(body *SystemInfoBody) error {
 	return nil
 }
 
+// ─── Process-control commands (Phase 4) ───────────────────────────────
+
+// Command is one pending process-control request from the server.
+type Command struct {
+	ID     string `json:"id"`
+	Action string `json:"action"` // "stop" | "start" | "restart"
+	Target string `json:"target"` // service/unit name to act on
+}
+
+// FetchCommands polls for pending process-control commands. The server marks
+// them "sent" so a slow agent doesn't re-run them.
+func (c *Client) FetchCommands() ([]Command, error) {
+	if c.bearer == "" {
+		return nil, errors.New("FetchCommands called without a bearer token — enroll first")
+	}
+	var out struct {
+		Commands []Command `json:"commands"`
+	}
+	if err := c.do("GET", "/api/v1/agents/commands", nil, &out, true); err != nil {
+		return nil, fmt.Errorf("commands: %w", err)
+	}
+	return out.Commands, nil
+}
+
+// ReportCommandResult posts the outcome of executing one command.
+func (c *Client) ReportCommandResult(commandID string, success bool, errMsg, resultState string) error {
+	if c.bearer == "" {
+		return errors.New("ReportCommandResult called without a bearer token — enroll first")
+	}
+	body := map[string]interface{}{"commandId": commandID, "success": success}
+	if errMsg != "" {
+		body["error"] = errMsg
+	}
+	if resultState != "" {
+		body["resultState"] = resultState
+	}
+	var out struct{ OK bool `json:"ok"` }
+	if err := c.do("POST", "/api/v1/agents/command-result", body, &out, true); err != nil {
+		return fmt.Errorf("command-result: %w", err)
+	}
+	return nil
+}
+
 // Heartbeat is the fallback the agent uses to bump lastSeenAt + refresh
 // agentVersion when there's no live WebSocket. The returned ConfigETag
 // lets the agent know whether it needs to refresh /config — when it

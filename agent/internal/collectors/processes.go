@@ -30,12 +30,14 @@ func msecToRFC3339(ms int64) string {
 // procRaw is one PID's reading before aggregation. Exported field names keep
 // aggregateByName unit-testable without a live process table.
 type procRaw struct {
-	Name       string
-	CPUPct     float64
-	RSSBytes   uint64
-	Username   string
-	Exe        string
-	CreateMsec int64 // process start, ms since epoch (gopsutil CreateTime)
+	Pid         int32
+	Name        string
+	CPUPct      float64
+	RSSBytes    uint64
+	Username    string
+	Exe         string
+	CreateMsec  int64  // process start, ms since epoch (gopsutil CreateTime)
+	ServiceUnit string // resolved Windows service / systemd unit (Phase 4); "" if none
 }
 
 // ProcessInventoryOnce enumerates running processes and returns one aggregated
@@ -46,12 +48,13 @@ func ProcessInventoryOnce() []*transport.ProcessSample {
 		return nil
 	}
 	raws := make([]procRaw, 0, len(procs))
+	pids := make([]int32, 0, len(procs))
 	for _, p := range procs {
 		name, err := p.Name()
 		if err != nil || name == "" {
 			continue
 		}
-		r := procRaw{Name: name}
+		r := procRaw{Pid: p.Pid, Name: name}
 		if v, err := p.CPUPercent(); err == nil {
 			r.CPUPct = v
 		}
@@ -68,6 +71,18 @@ func ProcessInventoryOnce() []*transport.ProcessSample {
 			r.CreateMsec = ct
 		}
 		raws = append(raws, r)
+		pids = append(pids, p.Pid)
+	}
+	// Resolve the backing service/unit per PID (Phase 4 control). Batch call —
+	// Linux reads /proc/<pid>/cgroup; Windows parses one `tasklist /svc`; other
+	// OSes return an empty map. Best-effort; "" → not controllable.
+	units := resolveServiceUnits(pids)
+	if len(units) > 0 {
+		for i := range raws {
+			if u, ok := units[raws[i].Pid]; ok {
+				raws[i].ServiceUnit = u
+			}
+		}
 	}
 	return aggregateByName(raws)
 }
@@ -79,13 +94,14 @@ func ProcessInventoryOnce() []*transport.ProcessSample {
 // straightforward to unit-test.
 func aggregateByName(raws []procRaw) []*transport.ProcessSample {
 	type agg struct {
-		count      int
-		cpu        float64
-		rss        uint64
-		exe        string
-		username   string
-		createMsec int64
-		hasCreate  bool
+		count       int
+		cpu         float64
+		rss         uint64
+		exe         string
+		username    string
+		serviceUnit string
+		createMsec  int64
+		hasCreate   bool
 	}
 	byName := make(map[string]*agg)
 	order := make([]string, 0)
@@ -104,6 +120,9 @@ func aggregateByName(raws []procRaw) []*transport.ProcessSample {
 		}
 		if a.username == "" && r.Username != "" {
 			a.username = r.Username
+		}
+		if a.serviceUnit == "" && r.ServiceUnit != "" {
+			a.serviceUnit = r.ServiceUnit
 		}
 		if r.CreateMsec > 0 && (!a.hasCreate || r.CreateMsec < a.createMsec) {
 			a.createMsec = r.CreateMsec
@@ -129,6 +148,10 @@ func aggregateByName(raws []procRaw) []*transport.ProcessSample {
 		if a.username != "" {
 			u := a.username
 			s.Username = &u
+		}
+		if a.serviceUnit != "" {
+			su := a.serviceUnit
+			s.ServiceUnit = &su
 		}
 		if a.hasCreate {
 			ts := msecToRFC3339(a.createMsec)
