@@ -114,6 +114,13 @@ export interface ProbeResult {
   responseTimeMs: number;
   /** Short human-readable reason on failure; null on success. */
   error?: string;
+  /**
+   * Device sysUpTime in whole seconds, set only by the SNMP probe (which
+   * reads sysUpTime as its reachability OID anyway). undefined for every other
+   * transport. recordProbeResult uses it for reboot detection — see
+   * Asset.lastUptimeSec / lastRebootAt.
+   */
+  uptimeSec?: number;
 }
 
 /**
@@ -131,6 +138,8 @@ export interface AssetMonitorSnapshot {
   assetType: string;
   monitored: boolean;
   monitorStatus: string | null;
+  /** Last SNMP sysUpTime reading (whole seconds); drives reboot detection. */
+  lastUptimeSec?: number | null;
   consecutiveFailures: number;
   consecutiveSuccesses: number;
   discoveredByIntegrationId: string | null;
@@ -2936,7 +2945,12 @@ async function probeSnmp(host: string, config: Record<string, unknown>, start: n
         if (snmp.isVarbindError(vb)) {
           return finishOnce(finish(start, false, snmp.varbindError(vb)));
         }
-        finishOnce(finish(start, true));
+        // sysUpTime is a TimeTicks (hundredths of a second since boot). Capture
+        // it for reboot detection; a non-finite / negative value is ignored.
+        const ok = finish(start, true);
+        const ticks = Number(vb.value);
+        if (Number.isFinite(ticks) && ticks >= 0) ok.uptimeSec = Math.floor(ticks / 100);
+        finishOnce(ok);
       });
     } catch (err: any) {
       clearTimeout(timer);
@@ -7708,6 +7722,7 @@ export async function recordProbeResult(
       assetType: true,
       monitored: true,
       monitorStatus: true,
+      lastUptimeSec: true,
       consecutiveFailures: true,
       consecutiveSuccesses: true,
       discoveredByIntegrationId: true,
@@ -7804,12 +7819,21 @@ export async function recordProbeResult(
   // window into one createMany. Cuts per-probe pool acquisitions from
   // (read + create + update) to (read + update); the sample inserts
   // collapse from N individual creates to one createMany per flush.
+  // Reboot detection: the SNMP probe reads sysUpTime as its reachability OID;
+  // a decrease vs. the last reading means the device rebooted between probes.
+  // A small tolerance avoids false positives from counter wrap / clock skew on
+  // a flat reading. Only meaningful when this probe carried an uptime value.
+  const uptimeSec = result.success && typeof result.uptimeSec === "number" ? result.uptimeSec : null;
+  const prevUptimeSec = asset.lastUptimeSec ?? null;
+  const rebooted = uptimeSec !== null && prevUptimeSec !== null && uptimeSec < prevUptimeSec - 60;
+
   enqueueMonitorSample({
     assetId,
     timestamp: now,
     success: result.success,
     responseTimeMs: result.success ? result.responseTimeMs : null,
     error: result.success ? null : (result.error ?? null),
+    uptimeSec,
   });
 
   // Buffer the state write — the periodic flush in probePatchBuffer collapses
@@ -7831,7 +7855,27 @@ export async function recordProbeResult(
     consecutiveFailures: newCf,
     consecutiveSuccesses: newCs,
     monitorStatusChangedAt: previousStatus !== nextStatus ? now : undefined,
+    // Advance the stored uptime to this reading (undefined leaves it
+    // untouched on non-SNMP probes — see the COALESCE in probePatchBuffer);
+    // stamp the reboot timestamp only when a drop was detected this tick.
+    lastUptimeSec: uptimeSec ?? undefined,
+    lastRebootAt: rebooted ? now : undefined,
   });
+
+  // Reboot is an edge-triggered audit event, like monitor.status_changed.
+  // resourceName/details carry hostname + IP so the Recent Reboots widget can
+  // render without re-reading the Asset.
+  if (rebooted) {
+    logEvent({
+      action: "device.reboot",
+      resourceType: "asset",
+      resourceId: assetId,
+      resourceName: asset.hostname || undefined,
+      level: "warning",
+      message: `Reboot detected: ${asset.hostname || assetId} uptime ${prevUptimeSec}s → ${uptimeSec}s`,
+      details: { hostname: asset.hostname ?? null, previousUptimeSec: prevUptimeSec, uptimeSec },
+    });
+  }
 
   // Edge-triggered audit events. We log on the transition INTO up / warning /
   // down — never per-poll (up→up, warning→warning, etc. don't fire because

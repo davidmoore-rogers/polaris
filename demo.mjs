@@ -2871,6 +2871,87 @@ function json(res, data, status = 200) {
   res.end(JSON.stringify(data));
 }
 
+// ── Demo dashboard / NOC widgets ──────────────────────────────────────────
+// In-memory per-session dashboard layout, pre-seeded with the NOC widget set
+// so a fresh demo login lands on a populated SolarWinds-style board.
+let DEMO_DASHBOARD_LAYOUT = {
+  version: 1,
+  widgets: [
+    { id: "d-status", type: "statusSummary",   col: 0, row: 0, width: 6,  height: 1, config: {} },
+    { id: "d-sites",  type: "sitesWithIssues", col: 6, row: 0, width: 6,  height: 1, config: {} },
+    { id: "d-down",   type: "downNodes",       col: 0, row: 1, width: 6,  height: 1, config: {} },
+    { id: "d-alert",  type: "activeAlerts",    col: 6, row: 1, width: 6,  height: 1, config: {} },
+    { id: "d-cpu",    type: "topCpu",          col: 0, row: 2, width: 4,  height: 1, config: {} },
+    { id: "d-mem",    type: "topMemory",       col: 4, row: 2, width: 4,  height: 1, config: {} },
+    { id: "d-resp",   type: "slowestResponse", col: 8, row: 2, width: 4,  height: 1, config: {} },
+    { id: "d-loss",   type: "packetLoss",      col: 0, row: 3, width: 4,  height: 1, config: {} },
+    { id: "d-stale",  type: "stalePolls",      col: 4, row: 3, width: 4,  height: 1, config: {} },
+    { id: "d-reboot", type: "recentReboots",   col: 8, row: 3, width: 4,  height: 1, config: {} },
+    { id: "d-map",    type: "siteMap",         col: 0, row: 4, width: 12, height: 2, config: {} },
+  ],
+};
+
+function _iso(minsAgo) { return new Date(Date.now() - minsAgo * 60000).toISOString(); }
+
+function demoNocSummary() {
+  return {
+    statusCounts: { total: 312, up: 296, down: 5, warning: 8, unknown: 3, recovering: 0 },
+    uptimePercent: 98.4,
+    activeAlertCount: 9,
+    downNodes: [
+      { id: "a1", hostname: "fs-aisle-3", ipAddress: "10.1.2.5", assetType: "switch", site: "Plant A", division: "Ops", monitorStatus: "down", monitorStatusChangedAt: _iso(12) },
+      { id: "a2", hostname: "fap-conf-rm", ipAddress: "10.1.2.42", assetType: "access_point", site: "Plant A", division: "Ops", monitorStatus: "down", monitorStatusChangedAt: _iso(26) },
+      { id: "a3", hostname: "rtr-wan-2", ipAddress: "10.9.0.1", assetType: "router", site: "DC West", division: "Core", monitorStatus: "down", monitorStatusChangedAt: _iso(140) },
+    ],
+    topCpu: [
+      { id: "a4", hostname: "db-srv-04", ipAddress: "10.3.0.4", value: 94 },
+      { id: "a5", hostname: "vm-host-09", ipAddress: "10.3.0.9", value: 81 },
+      { id: "a6", hostname: "core-sw-01", ipAddress: "10.0.0.1", value: 57 },
+    ],
+    topMemory: [
+      { id: "a4", hostname: "db-srv-04", ipAddress: "10.3.0.4", value: 96 },
+      { id: "a7", hostname: "app-srv-11", ipAddress: "10.3.0.11", value: 72 },
+    ],
+    slowestResponse: [
+      { id: "a3", hostname: "rtr-wan-2", ipAddress: "10.9.0.1", value: 680 },
+      { id: "a8", hostname: "branch-fw-22", ipAddress: "10.8.0.1", value: 240 },
+    ],
+    packetLoss: [
+      { id: "a3", hostname: "rtr-wan-2", ipAddress: "10.9.0.1", value: 38 },
+      { id: "a8", hostname: "branch-fw-22", ipAddress: "10.8.0.1", value: 6.5 },
+    ],
+    stalePolls: [
+      { id: "a9", hostname: "old-switch-7", ipAddress: "10.2.0.7", lastPolledAt: _iso(28), expectedIntervalSec: 60 },
+    ],
+    recentReboots: [
+      { id: "a6", hostname: "core-sw-01", ipAddress: "10.0.0.1", rebootedAt: _iso(45) },
+      { id: "a8", hostname: "branch-fw-22", ipAddress: "10.8.0.1", rebootedAt: _iso(310) },
+    ],
+    activeAlerts: [
+      { id: "e1", hostname: "fs-aisle-3", message: "Monitor: fs-aisle-3 up → down", severity: "warning", raisedAt: _iso(12) },
+      { id: "e2", hostname: null, message: "FortiManager DC discovery aborted", severity: "error", raisedAt: _iso(40) },
+      { id: "e3", hostname: "core-sw-01", message: "Reboot detected: core-sw-01 uptime 812000s → 45s", severity: "warning", raisedAt: _iso(45) },
+    ],
+    sitesWithIssues: [
+      { site: "Plant A", division: "Ops", downCount: 2, warningCount: 1, total: 14, lat: 36.16, lng: -86.78, nodes: [
+        { id: "a1", hostname: "fs-aisle-3", monitorStatus: "down" },
+        { id: "a2", hostname: "fap-conf-rm", monitorStatus: "down" },
+      ] },
+      { site: "DC West", division: "Core", downCount: 1, warningCount: 0, total: 8, lat: 39.74, lng: -104.99, nodes: [
+        { id: "a3", hostname: "rtr-wan-2", monitorStatus: "down" },
+      ] },
+    ],
+  };
+}
+
+function demoMapSites() {
+  return [
+    { id: "a1", hostname: "fgt-plant-a", model: "FortiGate 100F", latitude: 36.16, longitude: -86.78, monitored: true, monitorHealth: "down", monitorRecentSamples: 10, monitorRecentFailures: 10, dependencySuppressed: false, subnetCount: 6 },
+    { id: "a3", hostname: "fgt-dc-west", model: "FortiGate 200F", latitude: 39.74, longitude: -104.99, monitored: true, monitorHealth: "degraded", monitorRecentSamples: 10, monitorRecentFailures: 3, dependencySuppressed: false, subnetCount: 9 },
+    { id: "a6", hostname: "fgt-hq", model: "FortiGate 600F", latitude: 41.88, longitude: -87.63, monitored: true, monitorHealth: "up", monitorRecentSamples: 10, monitorRecentFailures: 0, dependencySuppressed: false, subnetCount: 21 },
+  ];
+}
+
 function serveStatic(res, urlPath) {
   let filePath = join(PUBLIC, urlPath === "/" ? "index.html" : urlPath);
   if (!existsSync(filePath)) {
@@ -3008,6 +3089,27 @@ async function routeAPI(method, path, params, body, res, req) {
   }, {});
   const sessionUser = cookies["polaris-session"] ? USERS.find((u) => u.username === cookies["polaris-session"]) : null;
   const isLoggedIn = !!sessionUser;
+
+  // ── Dashboard (home page widget canvas) ──
+  // Per-user layout, persisted in-memory for the demo so drag/resize survives
+  // a reload within the session. Pre-seeded with a NOC-style layout so the new
+  // widgets render immediately.
+  if (path === "/api/v1/me/dashboard" && method === "GET") {
+    return json(res, DEMO_DASHBOARD_LAYOUT);
+  }
+  if (path === "/api/v1/me/dashboard" && method === "PUT") {
+    DEMO_DASHBOARD_LAYOUT = body && body.widgets ? body : DEMO_DASHBOARD_LAYOUT;
+    return json(res, DEMO_DASHBOARD_LAYOUT);
+  }
+  if (path === "/api/v1/dashboard/noc-summary" && method === "GET") {
+    return json(res, demoNocSummary());
+  }
+  if (path === "/api/v1/dashboard/summary" && method === "GET") {
+    return json(res, { blockUtilization: [], recentReservations: [], assetTypeCounts: [], monitorAlerts: [], monitorAlertsOverflow: false });
+  }
+  if (path === "/api/v1/map/sites" && method === "GET") {
+    return json(res, demoMapSites());
+  }
 
   if (path === "/api/v1/auth/login" && method === "POST") {
     const loginUser = USERS.find((u) => u.username === (body.username || "admin")) || USERS[0];
