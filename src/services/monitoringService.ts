@@ -7901,6 +7901,13 @@ export async function recordProbeResult(
     // detected this tick.
     lastUptimeSec: uptimeSec ?? undefined,
     lastRebootAt: rebooted ? now : undefined,
+    // Presence: a successful probe IS the authoritative "last online" signal
+    // for a monitored asset (bumpLastSeen defers discovery-origin evidence on
+    // monitored assets to this). `now` is always the freshest evidence, so set
+    // unconditionally on success; a failed probe leaves both undefined so the
+    // flush COALESCE freezes lastSeen at the last successful poll.
+    lastSeen: result.success ? now : undefined,
+    lastSeenSource: result.success ? "probe" : undefined,
   });
 
   // Reboot is an edge-triggered audit event, like monitor.status_changed.

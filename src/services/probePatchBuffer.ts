@@ -77,6 +77,12 @@ export interface ProbePatch {
   lastUptimeSec?: number;
   /** Set only when a reboot was detected this tick; undefined preserves the prior stamp. */
   lastRebootAt?: Date;
+  /** Set only on a SUCCESSFUL probe — advances Asset.lastSeen/lastSeenSource so
+   *  polling is the authority for presence on monitored assets. Undefined on a
+   *  failed probe so a down asset's lastSeen freezes at its last success
+   *  (the flush COALESCEs to preserve the prior value rather than nulling it). */
+  lastSeen?: Date;
+  lastSeenSource?: string;
 }
 
 // Module-level buffer. One in-flight patch per asset; new patches collapse
@@ -130,6 +136,10 @@ export function enqueueProbePatch(assetId: string, patch: ProbePatch): void {
       // uptime/reboot stamps.
       lastUptimeSec: patch.lastUptimeSec ?? existing.lastUptimeSec,
       lastRebootAt: patch.lastRebootAt ?? existing.lastRebootAt,
+      // A failed probe (no lastSeen) merging onto a successful one in the same
+      // window must not erase the success's presence stamp.
+      lastSeen: patch.lastSeen ?? existing.lastSeen,
+      lastSeenSource: patch.lastSeenSource ?? existing.lastSeenSource,
     });
   } else {
     buffer.set(assetId, patch);
@@ -191,7 +201,7 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
     tuples.push(
       `($${p++}::text, $${p++}::text, $${p++}::timestamp, ` +
       `$${p++}::int, $${p++}::int, $${p++}::int, $${p++}::timestamp, ` +
-      `$${p++}::int, $${p++}::timestamp)`,
+      `$${p++}::int, $${p++}::timestamp, $${p++}::timestamp, $${p++}::text)`,
     );
     params.push(
       id,
@@ -205,6 +215,8 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
         : null,
       patch.lastUptimeSec ?? null,
       patch.lastRebootAt ? patch.lastRebootAt.toISOString() : null,
+      patch.lastSeen ? patch.lastSeen.toISOString() : null,
+      patch.lastSeenSource ?? null,
     );
   }
   const sql =
@@ -215,12 +227,16 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
     `"consecutiveFailures"    = v.cf, ` +
     `"consecutiveSuccesses"   = v.cs, ` +
     `"monitorStatusChangedAt" = COALESCE(v.changed_at, t."monitorStatusChangedAt"), ` +
-    // Both columns preserve the prior row value when this patch didn't carry
-    // one (no uptime reported / no reboot) — same COALESCE pattern as changed_at.
+    // These columns preserve the prior row value when this patch didn't carry
+    // one (no uptime reported / no reboot / failed probe) — same COALESCE
+    // pattern as changed_at. A failed probe omits lastSeen so a down asset's
+    // presence stamp freezes at its last successful poll.
     `"lastUptimeSec"          = COALESCE(v.uptime_sec, t."lastUptimeSec"), ` +
-    `"lastRebootAt"           = COALESCE(v.reboot_at, t."lastRebootAt") ` +
+    `"lastRebootAt"           = COALESCE(v.reboot_at, t."lastRebootAt"), ` +
+    `"lastSeen"               = COALESCE(v.last_seen, t."lastSeen"), ` +
+    `"lastSeenSource"         = COALESCE(v.last_seen_source, t."lastSeenSource") ` +
     `FROM (VALUES ${tuples.join(", ")}) ` +
-    `AS v(id, status, last_monitor_at, rt, cf, cs, changed_at, uptime_sec, reboot_at) ` +
+    `AS v(id, status, last_monitor_at, rt, cf, cs, changed_at, uptime_sec, reboot_at, last_seen, last_seen_source) ` +
     `WHERE t."id" = v.id`;
   await prisma.$executeRawUnsafe(sql, ...params);
 }

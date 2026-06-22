@@ -605,15 +605,18 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 ## cross-cutting/asset-last-seen-presence
 
-**What it is:** `Asset.lastSeen` means **verified network presence** — the last time Polaris had direct evidence the device was alive on the network — with `Asset.lastSeenSource` carrying the evidence label. Every write routes through `src/utils/assetInvariants.ts → bumpLastSeen()` (no-regress: only advances; stamps provenance). Directory timestamps (Entra `lastSyncDateTime`, AD `lastLogonTimestamp`) are deliberately NOT presence — they live on `AssetSource.lastSeen` and render separately as "Last Directory Activity".
+**What it is:** `Asset.lastSeen` means **verified network presence** — the last time Polaris had direct evidence the device was alive on the network — with `Asset.lastSeenSource` carrying the evidence label. Every write routes through `src/utils/assetInvariants.ts → bumpLastSeen()` (no-regress: only advances; stamps provenance) EXCEPT the monitor hot path, which writes through the `probePatchBuffer` bulk-update (see below). Directory timestamps (Entra `lastSyncDateTime`, AD `lastLogonTimestamp`) are deliberately NOT presence — they live on `AssetSource.lastSeen` and render separately as "Last Directory Activity".
+
+**Polling is authoritative for monitored assets:** when `Asset.monitored === true`, `bumpLastSeen` refuses the discovery-origin sources (`POLLING_DEFERRED_SOURCES` = `discovery` / `device-inventory` / `dhcp-lease`) so only the monitor probe drives presence. A monitored-but-down device's `lastSeen` freezes at its last successful poll regardless of what discovery reports. The device-inventory-outranks-lease ordering below only matters for UNmonitored assets.
 
 **Writers** (files that mutate this state):
-- `src/api/routes/integrations.ts → syncDhcpSubnets` — FMG/standalone-FortiGate sync stamps:
-  - Phase 6 DHCP: gated on `entry.seenLeased` (live lease), source `"dhcp-lease"`. Offline static reservations neither bump nor flip status. **Defers to device inventory**: when the entry's MAC is in this cycle's `result.deviceInventory` (the `inventoryMacSet`), the lease bump + status flip are skipped so Phase 7's real `last_seen`/`is_online` wins — a bound-but-idle lease must not stamp `now` (no-regress would otherwise let it beat the older-but-real inventory timestamp). Lease-only assets (inventory disabled / MAC not in the device table) keep the lease bump.
-  - Phase 7 device inventory: evidence is the FortiGate's per-client `last_seen` (or `now` when `is_online`), source `"device-inventory"`. Resurrection (`decommissioned → active`) requires `is_online`. **Authoritative over the lease** for any MAC it covers.
-  - Firewall / FortiSwitch / FortiAP phases: source `"discovery"`; switch gated on `sw.connected`, AP on `apOnline` (status "connected" or blank), firewall implicit (FMG parse already skips `conn_status !== 1` devices).
+- `src/services/monitoringService.ts → recordProbeResult` — **monitor hot path**: a successful probe stamps `lastSeen = now, lastSeenSource = "probe"` via `enqueueProbePatch` (the `probePatchBuffer` bulk `UPDATE ... FROM VALUES` flush, NOT a Prisma write / not `bumpLastSeen`). A failed probe omits both, so the flush's `COALESCE(v.last_seen, t."lastSeen")` freezes presence at the last success. This is the sole presence authority for any monitored asset.
+- `src/api/routes/integrations.ts → syncDhcpSubnets` — FMG/standalone-FortiGate sync stamps (all gated by `bumpLastSeen`, so suppressed on monitored assets):
+  - Phase 6 DHCP: gated on `entry.seenLeased` (live lease), source `"dhcp-lease"`. Offline static reservations neither bump nor flip status. **Defers to device inventory** (unmonitored): when the entry's MAC is in this cycle's `result.deviceInventory` (the `inventoryMacSet`), the lease bump + status flip are skipped so Phase 7's real `last_seen`/`is_online` wins — a bound-but-idle lease must not stamp `now`. Lease-only assets (inventory disabled / MAC not in the device table) keep the lease bump.
+  - Phase 7 device inventory: evidence is the FortiGate's per-client `last_seen` (or `now` when `is_online`), source `"device-inventory"`. Resurrection (`decommissioned → active`) requires `is_online`. **Authoritative over the lease** for any MAC it covers (unmonitored). On monitored assets `bumpLastSeen` drops it — the probe owns presence.
+  - Firewall / FortiSwitch / FortiAP phases: source `"discovery"`; switch gated on `sw.connected`, AP on `apOnline` (status "connected" or blank), firewall implicit (FMG parse already skips `conn_status !== 1` devices). Suppressed on monitored assets.
 - `src/api/routes/integrations.ts → syncEntraDevices / syncActiveDirectoryDevices` — do NOT write lastSeen (cut over in the directory-decoupling change). Directory activity goes to `AssetSource.lastSeen` via the source upserts.
-- `src/services/presenceVerificationService.ts → runPresenceVerification` — AD/Entra post-sync pass (default on, `config.verifyPresence`): sources `"agent"` (ManagedAgent heartbeat), `"probe"` (answering monitor probe), `"ping"` (ICMP fallback). Ping failure writes nothing.
+- `src/services/presenceVerificationService.ts → runPresenceVerification` — AD/Entra post-sync pass (default on, `config.verifyPresence`): sources `"agent"` (ManagedAgent heartbeat), `"probe"` (answering monitor probe via `lastMonitorAt`), `"ping"` (ICMP fallback). Ping failure writes nothing. Now that the hot path stamps `"probe"` directly, monitored assets typically hit the "already fresh" short-circuit here.
 - `src/api/routes/conflicts.ts` — accept path (`"conflict-accept"`, via bumpLastSeen), reject-creates-asset path (`"conflict-reject"`), ghost absorption carries the ghost's source along.
 - `src/services/assetMergeService.ts` + `src/jobs/mergeDuplicateHostnameAssets.ts` — max(lastSeen) winner carries its `lastSeenSource` onto the survivor.
 
@@ -624,9 +627,10 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/services/presenceVerificationService.ts → classifyPresenceSignal` — "already fresh" short-circuit reads it.
 
 **Invariants:**
-- Never write `Asset.lastSeen` / `lastSeenSource` directly — route through `bumpLastSeen(data, existing, evidenceAt, source)`. Creates may set both literally (nothing to regress).
+- Never write `Asset.lastSeen` / `lastSeenSource` directly — route through `bumpLastSeen(data, existing, evidenceAt, source)`. The ONE exception is the monitor hot path (`recordProbeResult` → `probePatchBuffer`), which stamps `"probe"` on success through the bulk UPDATE; the buffer's COALESCE provides the same no-regress guarantee on the failed-probe path.
+- For monitored assets, polling wins: `bumpLastSeen` returns false for `discovery`/`device-inventory`/`dhcp-lease` when `existing.monitored === true`. Pass an `existing` that carries `monitored` from discovery call sites (the sync preloads all asset scalar fields, so it does).
 - lastSeen never moves backward. A stale evidence source (FortiOS remembering a device from weeks ago) must not regress a fresher sighting.
-- Absence of evidence is not evidence of absence: failed pings, offline inventory rows, and disconnected switch/AP entries leave lastSeen (and status) untouched.
+- Absence of evidence is not evidence of absence: failed pings, offline inventory rows, disconnected switch/AP entries, and failed probes leave lastSeen (and status) untouched.
 - Presence evidence gates resurrection: only an online sighting may flip `decommissioned → active`.
 - `clampAcquiredToLastSeen` still applies after any bump (acquiredAt ≤ lastSeen).
 
@@ -2970,7 +2974,7 @@ Listed alphabetically.
 
 ## services/probePatchBuffer.ts
 
-**What it owns:** Batching buffer for per-probe Asset state writes (`monitorStatus`, `consecutiveFailures`/`Successes`, `lastMonitorAt`, `lastResponseTimeMs`, `lastUptimeSec`/`lastRebootAt`) — collapses N per-tick `Asset.update`s into one bulk `UPDATE … FROM (VALUES …)` per ~2 s window with last-write-wins merge. `monitorStatusChangedAt`, `lastUptimeSec`, and `lastRebootAt` are merge-preserved + flushed via `COALESCE(v.x, t.x)` so a probe that didn't carry a transition / uptime / reboot keeps the prior DB value instead of NULL-erasing it.
+**What it owns:** Batching buffer for per-probe Asset state writes (`monitorStatus`, `consecutiveFailures`/`Successes`, `lastMonitorAt`, `lastResponseTimeMs`, `lastUptimeSec`, `lastRebootAt`, and on a successful probe `lastSeen`/`lastSeenSource = "probe"`) — collapses N per-tick `Asset.update`s into one bulk `UPDATE … FROM (VALUES …)` per ~2 s window with last-write-wins merge. `monitorStatusChangedAt`, `lastUptimeSec`, `lastRebootAt`, `lastSeen`, and `lastSeenSource` are merge-preserved + flushed via `COALESCE(v.x, t.x)` so a probe that didn't carry a transition / uptime / reboot / success keeps the prior DB value instead of NULL-erasing it. The `lastSeen`/`lastSeenSource` columns make this the presence authority for monitored assets (see cross-cutting/asset-last-seen-presence); a failed probe omits them and freezes presence at the last successful poll.
 
 **Public API:** `enqueueProbePatch`, `getPendingProbePatch`, `flushProbePatchBuffer`, `startProbePatchBuffer`, `shutdownFlushProbePatchBuffer`, `ProbePatch`, `FLUSH_INTERVAL_MS`
 
@@ -2979,7 +2983,7 @@ Listed alphabetically.
 **Used by:** `src/services/monitoringService.ts` (`recordProbeResult` enqueues + overlays the pending patch for read-your-writes), `src/app.ts` (boot start + SIGTERM drain).
 
 **Invariants:**
-- Last-write-wins per asset within a window EXCEPT `monitorStatusChangedAt`, which is preserved on merge when the new patch omits it.
+- Last-write-wins per asset within a window EXCEPT `monitorStatusChangedAt`, `lastUptimeSec`, `lastRebootAt`, `lastSeen`, and `lastSeenSource`, which are preserved on merge when the new patch omits them (so a failed probe doesn't erase a successful probe's presence/uptime stamps within the same window).
 - Read-your-writes: `recordProbeResult` overlays the pending patch before running the state machine; re-entrant safe (concurrent enqueues during flush land in a fresh buffer); on flush failure the snapshot is re-prepended only for assets not already overwritten.
 - A size threshold triggers an early flush; the shutdown hook must drain before process exit.
 
