@@ -881,6 +881,19 @@ AssetWirelessStation            -- Current-state table of wireless clients conne
   lastSeen       DateTime
   @@unique([apAssetId, staMacAddr])
 
+AssetMclagPeer                  -- Current-state table of MCLAG (Multi-Chassis LAG) Inter-Chassis-Link peers, one row per local physical ICL port on a FortiSwitch (the ICL can be a multi-link aggregate → several rows to the same peer). Plain table (NOT a hypertable), full-replaced per scrape per asset by `monitoringService.persistMclagPeers` (delete-then-`createMany` in one `retryOnDeadlock($transaction)`) — same delete-replace pattern as AssetLldpNeighbor / AssetSdwanRule. Parsed by `utils/fortiswitchCmdb.parseFortiswitchMclagPeers` from the parent FortiGate's `switch-controller/managed-switch` CMDB (`ports[]` rows where `mclag-icl-port` is truthy), read off the SAME cached payload the FortiSwitch VLAN/trunk overlay already fetches in `fetchFortiswitchControllerPortsCmdb` (no extra query; works on FortiManager + standalone FortiGate). The discriminator is `mclag-icl-port`; `peerSn` (`isl-peer-device-sn`) is the canonical pairing key (port names aren't unique across the two chassis) and is resolved to `matchedAssetId` via a serial lookup at persist time. Surfaced via `GET /assets/:id/mclag-peers` (asset-detail General-tab "MCLAG Peer" row, switch-only, one grouped row per peer with ICL port pairs) and `GET /map/sites/:id/topology` (`mclagEdges` — one undirected fuchsia sibling ICL edge per pair; the LLDP/interface representations of the same adjacency are stripped server-side so it renders once and the column solver treats it as visual-only — peers never become parent/child). Case B (the downstream `mclag:enable` trunks for dual-homed endpoints) is intentionally NOT parsed yet.
+  id             UUID PK
+  assetId        UUID FK → Asset (cascade delete)
+  localPort      String          -- local physical ICL port, e.g. "port51"
+  iclTrunk       String?         -- isl-local-trunk-name, e.g. "_FlInK1_ICL0_"
+  peerSn         String          -- isl-peer-device-sn — the pairing key
+  peerName       String?         -- isl-peer-device-name
+  peerPort       String?         -- isl-peer-port-name (peer's port on the far end)
+  matchedAssetId UUID? FK → Asset (set null on delete) -- resolved from peerSn at persist time; powers clickable topology + the "MCLAG Peer" link
+  firstSeen      DateTime
+  lastSeen       DateTime
+  @@unique([assetId, localPort])
+
 AssetCustomWidgetSample         -- Time-series of ManufacturerCustomWidget probe results (Slice 7). One row per (asset, widget) per probe tick — scalar widgets store a single number, table widgets store a row-array. The Custom MIB tab on the asset details modal consumes the latest sample + a short window for line charts via `GET /assets/:id/custom-widgets`. `widgetId` is NOT an FK so deleting a widget from its parent ManufacturerProfile doesn't cascade-blow historical samples — the tab keeps showing the last known values until retention prunes them. Retention (added 2026-06, migration `20260621000000`): a STANDALONE detail-only TimescaleDB hypertable (`timescaleService.STANDALONE_SAMPLE_TABLES` — no hourly/daily rollups), pruned by `pruneSystemInfoSamples` on the system-info umbrella window (the interfaces detail retention) via the compression-safe `drop_chunks` + residue path, same as LLDP. Composite PK `(id, timestamp)` so the partition column is in the PK (create_hypertable requirement).
   id        UUID PK
   assetId   UUID FK → Asset (cascade delete)
@@ -1495,6 +1508,7 @@ Operator-extensible asset-type registry. The eight historical built-ins (server 
 - `GET    /assets/:id/perf-sla-links`  — Distinct (healthCheck, link) pairs + latest SLA thresholds. SD-WAN data-exists gate + selector source for the SD-WAN tab.
 - `GET    /assets/:id/perf-sla-history?healthCheck=...&link=...&range=...`  — Per-member SD-WAN Performance SLA latency/jitter/packet-loss gauges over time (tier-aware).
 - `GET    /assets/:id/sdwan-rules`  — Current-state SD-WAN service rules (selected member + members/criteria/health-checks/destination/status + priority zones), one row per rule from the `asset_sdwan_rules` table, ordered by FortiOS rule priority. No history endpoint — SD-WAN rules are current-state.
+- `GET    /assets/:id/mclag-peers`  — Current-state MCLAG ICL peers from the `asset_mclag_peers` table (FortiSwitch only; empty for switches not in an MCLAG pair), one row per local ICL port ordered by port name. Each row carries `localPort` / `iclTrunk` / `peerSn` / `peerName` / `peerPort` + `matchedAsset { id, hostname }` (the peer switch resolved by serial, for a clickable link). No history — current-state.
 - `GET    /assets/:id/processes`  — Current-state process inventory (one row per program, cpuPct desc) + the `monitoredProcesses` / `alertWatchedProcesses` pin arrays. Drives the Processes tab + its Monitor/Alert checkbox state.
 - `GET    /assets/:id/process-history?name=...&range=...`  — Per-pinned-program CPU/RAM history, tier-routed (detail → hourly → daily) via `readProcessHistory` + `pickSampleTierForAsset("process")`. Drives the per-process detail slide-in charts.
 - `GET    /assets/:id/process-logs?name=...&since=...&limit=...&flagged=1`  — Recent log lines for a pinned program (newest-first, capped), from the standalone `asset_process_log_samples` table, each annotated with the `LogFlagRule`s it matches (read-time eval via `evaluateLogFlags`). `flagged=1` returns only matched lines. Drives the slide-in log viewer + its Flagged-only toggle.

@@ -1917,6 +1917,25 @@ router.get("/:id/sdwan-rules", requirePermission("assets", "read"), async (req, 
   } catch (err) { next(err); }
 });
 
+// GET /assets/:id/mclag-peers — current-state MCLAG ICL peers (one row per
+// local ICL port, replaced per scrape by persistMclagPeers). FortiSwitch only;
+// empty for switches not in an MCLAG pair. `matchedAsset` resolves the peer
+// switch (by serial) for a clickable link in the asset detail / topology.
+router.get("/:id/mclag-peers", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const rows = await prisma.assetMclagPeer.findMany({
+      where: { assetId: id },
+      orderBy: [{ localPort: "asc" }],
+      select: {
+        localPort: true, iclTrunk: true, peerSn: true, peerName: true, peerPort: true,
+        matchedAsset: { select: { id: true, hostname: true } },
+      },
+    });
+    res.json({ peers: rows });
+  } catch (err) { next(err); }
+});
+
 // GET /assets/:id/storage-history?mountPath=...&range=... — per-mountpoint usage
 router.get("/:id/storage-history", requirePermission("assets", "read"), async (req, res, next) => {
   try {

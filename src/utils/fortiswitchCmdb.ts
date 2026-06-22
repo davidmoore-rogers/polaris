@@ -102,6 +102,57 @@ export function buildFortiswitchTrunkMembers(ports: unknown): Map<string, string
   return trunkMembers;
 }
 
+// One ICL (Inter-Chassis Link) leg between two MCLAG-peer FortiSwitches, as
+// seen from the local switch. A switch can carry more than one (the ICL is
+// often itself an aggregate of two physical links) — one entry per local
+// physical port flagged `mclag-icl-port`.
+export interface FortiswitchMclagPeer {
+  // Local physical port forming this ICL leg, e.g. "port51".
+  localPort: string;
+  // Auto-ISL trunk this leg belongs to, e.g. "_FlInK1_ICL0_". Null if absent.
+  iclTrunk: string | null;
+  // Peer switch serial — the canonical pairing key (port names aren't globally
+  // unique across the two chassis, serials are). Required: a leg with no peer
+  // serial can't be paired, so it's dropped.
+  peerSn: string;
+  // Peer switch name + the peer's port on the other end of this leg. Best-
+  // effort labels; null when the firmware variant omits them.
+  peerName: string | null;
+  peerPort: string | null;
+}
+
+// Extract the MCLAG ICL legs from a managed-switch CMDB `ports` array. The
+// discriminator is `mclag-icl-port` (truthy on the physical port(s) that form
+// the Inter-Chassis Link to the MCLAG peer); each such port names the peer in
+// `isl-peer-device-sn` / `isl-peer-device-name` / `isl-peer-port-name` and the
+// local ICL trunk in `isl-local-trunk-name`. The peer switch's CMDB mirrors the
+// relationship back (its `isl-peer-device-sn` points at THIS switch), so two
+// switches are MCLAG peers iff each names the other's serial.
+//
+// NOTE: the ICL is ALSO a FortiLink auto-ISL trunk, so these same ports flow
+// through `buildFortiswitchTrunkMembers` via `isl-local-trunk-name`. The
+// `mclag-icl-port` flag is what distinguishes an MCLAG ICL from a plain
+// inter-switch auto-ISL. Pure / dependency-free, mirroring the helpers above.
+export function parseFortiswitchMclagPeers(ports: unknown): FortiswitchMclagPeer[] {
+  const out: FortiswitchMclagPeer[] = [];
+  if (!Array.isArray(ports)) return out;
+  for (const p of ports) {
+    if (!p || typeof p !== "object") continue;
+    const port = p as Record<string, unknown>;
+    if (!fortiosBool(port["mclag-icl-port"])) continue;
+    const localPort = String(port["port-name"] ?? "").trim();
+    const peerSn    = String(port["isl-peer-device-sn"] ?? "").trim();
+    // Both are required: no local port → nothing to anchor the edge to; no peer
+    // serial → can't pair the switches (the entire point of the table).
+    if (!localPort || !peerSn) continue;
+    const iclTrunk = String(port["isl-local-trunk-name"] ?? "").trim() || null;
+    const peerName = String(port["isl-peer-device-name"] ?? "").trim() || null;
+    const peerPort = String(port["isl-peer-port-name"] ?? "").trim() || null;
+    out.push({ localPort, iclTrunk, peerSn, peerName, peerPort });
+  }
+  return out;
+}
+
 // Identify a managed FortiSwitch's physical uplink port(s) to its controller
 // FortiGate from the switch-controller CMDB `ports` array. The directly-cabled
 // FortiLink uplink port carries `fortilink-port: 1` AND names the FortiGate in

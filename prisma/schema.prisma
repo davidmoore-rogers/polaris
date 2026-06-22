@@ -798,6 +798,10 @@ model Asset {
   // fapStationTable scrape.
   wirelessStations         AssetWirelessStation[] @relation("AssetWirelessStationsOnAp")
   wirelessStationMatches   AssetWirelessStation[] @relation("AssetWirelessStationMatch")
+  // MCLAG ICL peers (when this asset is a FortiSwitch in an MCLAG pair) and
+  // the back-link for the switch on the far end of each ICL leg.
+  mclagPeers               AssetMclagPeer[]       @relation("AssetMclagPeers")
+  mclagPeerMatches         AssetMclagPeer[]       @relation("AssetMclagPeerMatch")
   mibFiles                 MibFile[]              @relation("MibFilesOnAsset")
   sources             AssetSource[]
   associatedIpRows    AssetAssociatedIp[]
@@ -1340,6 +1344,44 @@ model AssetLldpNeighbor {
   @@index([assetId, localIfName])
   @@index([matchedAssetId])
   @@map("asset_lldp_neighbors")
+}
+
+// MCLAG (Multi-Chassis LAG) Inter-Chassis-Link peers, one row per local
+// physical ICL port on a FortiSwitch (the ICL can be a multi-link aggregate,
+// so a switch may have several rows to the same peer). Current-state table,
+// full-replaced per scrape by `persistMclagPeers` — same delete-replace
+// pattern as AssetLldpNeighbor / AssetSdwanRule, NOT a hypertable, no history.
+//
+// Populated from the parent FortiGate's switch-controller managed-switch CMDB
+// (`/api/v2/cmdb/switch-controller/managed-switch`): a port with
+// `mclag-icl-port` set names its peer in `isl-peer-device-sn` (the canonical
+// pairing key — port names aren't unique across the two chassis). The peer
+// switch's CMDB mirrors the relationship back. `matchedAssetId` resolves
+// `peerSn` → the peer's Asset row so the topology renderer can draw a clickable
+// sibling edge and the dependency tree can mark MCLAG siblings definitively
+// (vs. the prior same-controller/same-layer heuristic).
+model AssetMclagPeer {
+  id          String @id @default(uuid())
+  assetId     String
+  asset       Asset  @relation("AssetMclagPeers", fields: [assetId], references: [id], onDelete: Cascade)
+  localPort   String // local physical ICL port, e.g. "port51"
+
+  iclTrunk    String? // isl-local-trunk-name, e.g. "_FlInK1_ICL0_"
+  peerSn      String  // isl-peer-device-sn — the pairing key
+  peerName    String? // isl-peer-device-name
+  peerPort    String? // isl-peer-port-name (peer's port on the far end)
+
+  matchedAssetId String?
+  matchedAsset   Asset?  @relation("AssetMclagPeerMatch", fields: [matchedAssetId], references: [id], onDelete: SetNull)
+
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @default(now())
+
+  @@unique([assetId, localPort])
+  @@index([assetId])
+  @@index([peerSn])
+  @@index([matchedAssetId])
+  @@map("asset_mclag_peers")
 }
 
 // Wireless stations connected to a FortiAP. Populated from SNMP

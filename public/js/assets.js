@@ -3365,6 +3365,7 @@ async function openViewModal(id) {
       viewRow("Last Seen Switch", a.lastSeenSwitch) +
       viewRow("Last Seen AP", a.lastSeenAp) +
       '<div class="detail-row"><span class="detail-label">Last Seen Firewall</span><span class="detail-value" id="asset-last-fw-' + escapeHtml(a.id) + '">-</span></div>' +
+      '<div id="asset-mclag-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
       associatedUsersViewHTML(a.associatedUsers) +
       lastSeenRowHTML(a) +
       '<div id="asset-dir-activity-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
@@ -3575,6 +3576,35 @@ async function openViewModal(id) {
         if (t >= bestMs) { bestMs = t; bestFw = s.fortigateDevice; }
       });
       if (bestFw) fwCell.textContent = bestFw;
+    }
+    // MCLAG Peer row (General tab) — FortiSwitch ICL peers, current-state from
+    // the switch-controller CMDB. Switch-only, async-fetched, and the row is
+    // only rendered when the switch is actually in an MCLAG pair (most aren't).
+    // One row per distinct peer switch; each lists the ICL port pair(s) and
+    // links to the peer's asset detail when discovered.
+    var mclagMount = document.getElementById("asset-mclag-mount-" + a.id);
+    if (mclagMount && a.assetType === "switch") {
+      api.assets.mclagPeers(a.id).then(function (res) {
+        var peers = (res && res.peers) || [];
+        if (!peers.length) return;
+        // Group ICL legs by peer switch (a multi-link ICL has several legs).
+        var byPeer = {};
+        peers.forEach(function (p) {
+          var key = (p.matchedAsset && p.matchedAsset.id) || p.peerSn;
+          if (!byPeer[key]) byPeer[key] = { name: (p.matchedAsset && p.matchedAsset.hostname) || p.peerName || p.peerSn, id: p.matchedAsset && p.matchedAsset.id, legs: [] };
+          byPeer[key].legs.push((p.localPort || "?") + " ↔ " + (p.peerPort || "?"));
+        });
+        var html = Object.keys(byPeer).map(function (key) {
+          var g = byPeer[key];
+          var nameHtml = g.id
+            ? '<a href="#" class="dep-tree-link" data-asset-id="' + escapeHtml(g.id) + '">' + escapeHtml(g.name) + '</a>'
+            : escapeHtml(g.name);
+          return '<div class="detail-row"><span class="detail-label">MCLAG Peer</span><span class="detail-value">' +
+            nameHtml + ' <span style="color:var(--color-text-secondary)">(' + escapeHtml(g.legs.join(", ")) + ')</span></span></div>';
+        }).join("");
+        mclagMount.innerHTML = html;
+        _wireDependencyTreeLinks(mclagMount);
+      }).catch(function (err) { console.warn("Failed to load MCLAG peers", err); });
     }
     // Mount the Polaris Agent panel into the System tab placeholder + wire
     // its buttons. The wiring helper also starts the install-progress

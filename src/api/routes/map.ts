@@ -1095,6 +1095,48 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     attachIfDetails(interfaceEdges);
     attachIfDetails(lldpEdges);
 
+    // MCLAG ICL edges between paired FortiSwitches. Each switch reports the ICL
+    // from its own side (one asset_mclag_peers row per local mclag-icl-port), so
+    // a pair yields mirror rows pointing at each other — dedupe to one undirected
+    // edge per pair. Both endpoints are managed switches already on the graph
+    // (matchedAssetId resolved by peer serial at persist time), so we only draw
+    // when both ids are in-site switch nodes. This is the AUTHORITATIVE rendering
+    // of the inter-switch link for an MCLAG pair: because the ICL is also a
+    // FortiLink auto-ISL trunk, the same adjacency can surface as an LLDP or
+    // interface-inferred edge — we strip those for MCLAG pairs below so the link
+    // renders exactly once (as a sibling ICL, never as a parent/child uplink).
+    const mclagRows = await prisma.assetMclagPeer.findMany({
+      where: { assetId: { in: siteAssetIds }, matchedAssetId: { not: null } },
+      select: { assetId: true, localPort: true, peerPort: true, matchedAssetId: true },
+    });
+    type MclagEdge = { source: string; target: string; label?: string; via: "mclag"; reason: string };
+    const mclagEdges: MclagEdge[] = [];
+    const mclagPairKeys = new Set<string>();
+    for (const r of mclagRows) {
+      const peerId = r.matchedAssetId as string;
+      if (!switchObjById.has(r.assetId) || !switchObjById.has(peerId)) continue; // both ends in-site switches
+      const pairKey = [r.assetId, peerId].sort().join("|");
+      if (mclagPairKeys.has(pairKey)) continue;
+      mclagPairKeys.add(pairKey);
+      const a = switchObjById.get(r.assetId)!;
+      const b = switchObjById.get(peerId)!;
+      mclagEdges.push({
+        source: r.assetId,
+        target: peerId,
+        label: r.localPort && r.peerPort ? `${r.localPort} ↔ ${r.peerPort}` : (r.localPort || undefined),
+        via: "mclag",
+        reason:
+          `Rule: MCLAG Inter-Chassis Link — ${a.hostname || a.id} and ${b.hostname || b.id} are MCLAG peers (siblings, same layer).\n` +
+          `Evidence: ${a.hostname || a.id} port "${r.localPort}" is flagged mclag-icl-port and resolves to peer ` +
+          `${b.hostname || b.id}${r.peerPort ? ` port "${r.peerPort}"` : ""} by serial.`,
+      });
+    }
+    // Strip any LLDP / interface-inferred edge between an MCLAG pair (either
+    // direction) — the ICL is fully represented by the mclagEdge above.
+    const isMclagPair = (s: string, t: string) => mclagPairKeys.has([s, t].sort().join("|"));
+    const lldpEdgesOut = lldpEdges.filter((e) => !isMclagPair(e.source, e.target));
+    const interfaceEdgesOut = interfaceEdges.filter((e) => !isMclagPair(e.source, e.target));
+
     res.json({
       fortigate: {
         id: fg.id,
@@ -1124,7 +1166,11 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       // FortiOS itself; rendered with their own visual style on the
       // topology graph. Each edge references nodes already in this
       // payload (siblings or `remoteAssetNodes`).
-      interfaceEdges,
+      interfaceEdges: interfaceEdgesOut,
+      // MCLAG ICL edges between sibling FortiSwitch pairs. Rendered as a distinct
+      // peer/sibling link (not a parent/child uplink); the LLDP / interface
+      // representations of the same ICL are stripped above so it shows once.
+      mclagEdges,
       // LLDP additions: rendered separately by the topology modal so the
       // styling can distinguish authoritative fortinetTopology edges from
       // observed LLDP edges. `lldpNodes` is the array form of the Map above.
@@ -1137,7 +1183,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       // target is a cross-site asset id would reference nonexistent
       // Cytoscape nodes and the graph would error out on load.
       remoteAssetNodes: Array.from(remoteAssetNodes.values()),
-      lldpEdges,
+      lldpEdges: lldpEdgesOut,
       // Wireless-bridge edges: a FortiLink switch reached behind a FortiAP
       // (LLDP-detected). Rendered like a mesh edge AP→switch; the switch routes
       // behind the AP and its FortiLink controller edge is demoted client-side.

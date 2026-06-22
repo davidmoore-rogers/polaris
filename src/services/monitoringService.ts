@@ -43,6 +43,8 @@ import {
   parseFortiosMemberList,
   buildFortiswitchTrunkMembers,
   findFortiswitchUplinkPorts,
+  parseFortiswitchMclagPeers,
+  type FortiswitchMclagPeer,
 } from "../utils/fortiswitchCmdb.js";
 // Re-exported so existing import sites (unit tests, etc.) keep resolving these
 // from monitoringService; implementations live in utils/fortiswitchCmdb.ts.
@@ -2291,6 +2293,10 @@ interface FortiswitchSwitchPorts {
   vlanByPort: Map<string, FortiswitchPortVlan>;
   // trunkName → physical member port names (in CMDB order)
   trunkMembers: Map<string, string[]>;
+  // MCLAG ICL legs to the peer switch (one per local mclag-icl-port). Empty on
+  // switches not in an MCLAG pair. Read from the same payload the VLAN/trunk
+  // maps already parse, so it costs no extra query.
+  mclagPeers: FortiswitchMclagPeer[];
 }
 
 // switchSerialUpper → per-switch ports view
@@ -2448,7 +2454,8 @@ async function fetchFortiswitchControllerPortsCmdb(
         // the topology renderer swaps the opaque trunk name for the real
         // physical port. See buildFortiswitchTrunkMembers.
         const trunkMembers = buildFortiswitchTrunkMembers(portsRaw);
-        map.set(serial.toUpperCase(), { vlanByPort: portMap, trunkMembers });
+        const mclagPeers = parseFortiswitchMclagPeers(portsRaw);
+        map.set(serial.toUpperCase(), { vlanByPort: portMap, trunkMembers, mclagPeers });
       }
 
       fortiswitchControllerPortsCache.set(cacheKey, { fetchedAt: Date.now(), ports: map });
@@ -3343,6 +3350,13 @@ export interface SystemInfoSample {
    */
   wirelessStations?: WirelessStationSample[];
   /**
+   * MCLAG ICL peers (FortiSwitch only), from the parent FortiGate's
+   * switch-controller managed-switch CMDB. Same undefined/[] semantics as LLDP:
+   * `undefined` = not collected (leave stored rows alone), an array (even empty)
+   * = full-replace the asset's ICL-peer rows. Current-state, no history.
+   */
+  mclagPeers?: FortiswitchMclagPeer[];
+  /**
    * FortiLink-enabled interface names (the fortilink-flagged interfaces + their
    * member ports) seen on this FortiGate, from CMDB `system/interface`. Used to
    * exclude FortiLink links from LLDP when the integration's
@@ -3929,6 +3943,14 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
                   sysInfoTimeout,
                 );
                 const portsForSwitch = portsMap.get(asset.serialNumber.toUpperCase());
+                // When the switch is present in the controller CMDB we know its
+                // MCLAG state definitively — stamp it (empty array = wipe stale
+                // ICL rows) even if the VLAN map is empty. Leaving it undefined
+                // when the switch isn't in CMDB preserves stored rows (no-wipe),
+                // matching the LLDP undefined-vs-[] convention.
+                if (portsForSwitch) {
+                  data.mclagPeers = portsForSwitch.mclagPeers;
+                }
                 if (portsForSwitch && portsForSwitch.vlanByPort.size > 0) {
                   let overlaid = 0;
                   for (const iface of data.interfaces) {
@@ -3943,7 +3965,7 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
                     data.interfaces,
                     portsForSwitch.trunkMembers,
                   );
-                  endVlan({ overlaid, total: data.interfaces.length, trunkLinks: trunkOverlaid });
+                  endVlan({ overlaid, total: data.interfaces.length, trunkLinks: trunkOverlaid, mclagPeers: portsForSwitch.mclagPeers.length });
                 } else {
                   endVlan({ overlaid: 0, total: data.interfaces.length, reason: "switch_not_in_cmdb" });
                 }
@@ -6886,6 +6908,16 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
       endWireless({ stations: d.wirelessStations.length });
       stopWrite();
     }
+    // MCLAG ICL peers (FortiSwitch only). Same undefined/[] semantics as LLDP:
+    // undefined = not collected (switch not in CMDB / fetch failed) → leave rows
+    // alone; an array (even empty) = full-replace this switch's ICL-peer rows.
+    if (Array.isArray(d.mclagPeers)) {
+      const stopWrite = startSampleWriteTimer("asset_mclag_peers");
+      const endMclag = startPhase("systeminfo.persist.mclag_peers");
+      await persistMclagPeers(assetId, d.mclagPeers);
+      endMclag({ peers: d.mclagPeers.length });
+      stopWrite();
+    }
     // Only bump lastSystemInfoAt when the scrape returned interfaces. The
     // /system-info GET endpoint anchors its interface query to this
     // timestamp, so bumping it on an empty interfaces[] silently empties the
@@ -6939,6 +6971,54 @@ async function persistSdwanRules(
       prisma.assetSdwanRule.deleteMany({ where: { assetId } }),
       ...(data.length > 0
         ? [prisma.assetSdwanRule.createMany({ data, skipDuplicates: true })]
+        : []),
+    ]),
+  );
+}
+
+/**
+ * Replace the switch's MCLAG ICL-peer rows with the latest scrape. CURRENT-
+ * STATE delete-replace, mirroring persistSdwanRules / persistLldpNeighbors:
+ * wipe + re-insert in one atomic transaction so a reader sees either the old or
+ * new set, never an empty intermediate. `asset_mclag_peers` is a PLAIN table
+ * (not a hypertable). Each row's `peerSn` is resolved to the peer switch's
+ * Asset id (`matchedAssetId`) via a single serial lookup so the topology
+ * renderer can draw a clickable sibling edge; unresolved serials (peer not yet
+ * discovered) leave matchedAssetId null and self-heal on a later scrape.
+ */
+async function persistMclagPeers(
+  assetId: string,
+  peers: FortiswitchMclagPeer[],
+): Promise<void> {
+  // Resolve peer serials → asset ids in one query. Serials are compared
+  // case-insensitively (CMDB and stored serials are normally uppercase, but
+  // don't assume). Usually 1-2 distinct serials, so the IN clause stays tiny.
+  const serialToId = new Map<string, string>();
+  const distinctSerials = [...new Set(peers.map((p) => p.peerSn))];
+  if (distinctSerials.length > 0) {
+    const matches = await prisma.asset.findMany({
+      where: { serialNumber: { in: distinctSerials, mode: "insensitive" } },
+      select: { id: true, serialNumber: true },
+    });
+    for (const m of matches) {
+      if (m.serialNumber) serialToId.set(m.serialNumber.toUpperCase(), m.id);
+    }
+  }
+  const data = peers.map((p) => ({
+    id:             randomUUID(),
+    assetId,
+    localPort:      p.localPort,
+    iclTrunk:       p.iclTrunk,
+    peerSn:         p.peerSn,
+    peerName:       p.peerName,
+    peerPort:       p.peerPort,
+    matchedAssetId: serialToId.get(p.peerSn.toUpperCase()) ?? null,
+  }));
+  await retryOnDeadlock(() =>
+    prisma.$transaction([
+      prisma.assetMclagPeer.deleteMany({ where: { assetId } }),
+      ...(data.length > 0
+        ? [prisma.assetMclagPeer.createMany({ data, skipDuplicates: true })]
         : []),
     ]),
   );

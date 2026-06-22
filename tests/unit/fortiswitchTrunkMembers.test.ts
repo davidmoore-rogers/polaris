@@ -18,6 +18,7 @@ import {
   overlayFortiswitchTrunkMembers,
   type InterfaceSample,
 } from "../../src/services/monitoringService.js";
+import { parseFortiswitchMclagPeers } from "../../src/utils/fortiswitchCmdb.js";
 
 // Minimal managed-switch CMDB port entries mirroring the shapes confirmed on a
 // live FortiOS 7.6 switch-controller payload: access ports carry `members: []`,
@@ -188,6 +189,90 @@ describe("findFortiswitchUplinkPorts", () => {
     expect(findFortiswitchUplinkPorts(undefined)).toEqual([]);
     expect(findFortiswitchUplinkPorts(42)).toEqual([]);
     expect(findFortiswitchUplinkPorts([null, {}, { "port-name": "" }])).toEqual([]);
+  });
+});
+
+describe("parseFortiswitchMclagPeers", () => {
+  // An MCLAG ICL port: mclag-icl-port set + names the peer switch by serial.
+  // It's also an auto-ISL trunk (isl-local-trunk-name), which is what
+  // distinguishes it from a normal access/uplink port.
+  const iclPort = (
+    name: string,
+    trunk: string,
+    peerSn: string,
+    peerName: string,
+    peerPort: string,
+  ) => ({
+    "port-name": name,
+    "mclag-icl-port": 1,
+    "isl-local-trunk-name": trunk,
+    "isl-peer-device-sn": peerSn,
+    "isl-peer-device-name": peerName,
+    "isl-peer-port-name": peerPort,
+  });
+
+  it("extracts an ICL leg keyed by peer serial", () => {
+    const ports = [
+      accessPort("port1"),
+      iclPort("port51", "_FlInK1_ICL0_", "FS1E48T420001255", "METRO-1048E-2", "port51"),
+    ];
+    expect(parseFortiswitchMclagPeers(ports)).toEqual([
+      {
+        localPort: "port51",
+        iclTrunk: "_FlInK1_ICL0_",
+        peerSn: "FS1E48T420001255",
+        peerName: "METRO-1048E-2",
+        peerPort: "port51",
+      },
+    ]);
+  });
+
+  it("returns one entry per physical ICL leg (multi-link ICL aggregate)", () => {
+    const ports = [
+      iclPort("port51", "_FlInK1_ICL0_", "FS1E48T420001255", "METRO-1048E-2", "port51"),
+      iclPort("port52", "_FlInK1_ICL0_", "FS1E48T420001255", "METRO-1048E-2", "port52"),
+    ];
+    const peers = parseFortiswitchMclagPeers(ports);
+    expect(peers).toHaveLength(2);
+    expect(peers.map((p) => p.localPort)).toEqual(["port51", "port52"]);
+    expect(new Set(peers.map((p) => p.peerSn))).toEqual(new Set(["FS1E48T420001255"]));
+  });
+
+  it("ignores ports that aren't mclag-icl-port (plain auto-ISL uplinks)", () => {
+    const ports = [
+      islPort("port50", "8FFTF25005384-0", "S148FFTF25005384", "port51"),
+      lacpTrunkPort("Trunk1", ["port1", "port2"]),
+      accessPort("port3"),
+    ];
+    expect(parseFortiswitchMclagPeers(ports)).toEqual([]);
+  });
+
+  it("honors string/'enable' forms of the mclag-icl-port flag", () => {
+    const ports = [{
+      "port-name": "port51",
+      "mclag-icl-port": "enable",
+      "isl-local-trunk-name": "_FlInK1_ICL0_",
+      "isl-peer-device-sn": "FS1E48T420001255",
+    }];
+    expect(parseFortiswitchMclagPeers(ports)).toEqual([
+      { localPort: "port51", iclTrunk: "_FlInK1_ICL0_", peerSn: "FS1E48T420001255", peerName: null, peerPort: null },
+    ]);
+  });
+
+  it("drops an ICL leg with no peer serial (can't be paired)", () => {
+    const ports = [{
+      "port-name": "port51",
+      "mclag-icl-port": 1,
+      "isl-local-trunk-name": "_FlInK1_ICL0_",
+    }];
+    expect(parseFortiswitchMclagPeers(ports)).toEqual([]);
+  });
+
+  it("is null/garbage tolerant", () => {
+    expect(parseFortiswitchMclagPeers(null)).toEqual([]);
+    expect(parseFortiswitchMclagPeers(undefined)).toEqual([]);
+    expect(parseFortiswitchMclagPeers(42)).toEqual([]);
+    expect(parseFortiswitchMclagPeers([null, {}, 7, { "port-name": "" }])).toEqual([]);
   });
 });
 

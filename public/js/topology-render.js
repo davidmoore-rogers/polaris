@@ -233,6 +233,21 @@
         },
       });
     });
+    // MCLAG ICL edges: a peer/sibling link between two FortiSwitches in an
+    // MCLAG pair (not a parent/child uplink). Rendered as a distinct fuchsia
+    // edge; flagged isMclag so the column solver treats it as visual-only
+    // (excluded from depth adjacency) and never makes one peer the other's
+    // parent.
+    (data.mclagEdges || []).forEach(function (e, i) {
+      if (droppedRemoteIds[e.source] || droppedRemoteIds[e.target]) return;
+      elements.push({
+        data: {
+          id: "me" + i, source: e.source, target: e.target,
+          label: e.label ? "MCLAG " + e.label : "MCLAG", isMclag: 1,
+          reason: e.reason || "",
+        },
+      });
+    });
 
     return elements;
   }
@@ -392,6 +407,20 @@
           width: 2.4,
         },
       },
+      // MCLAG ICL edge: a sibling/peer link between two FortiSwitches. Fuchsia,
+      // dashed, no arrowhead (no hierarchy — they're peers), heavier than the
+      // observed edges so it reads as an authoritative interconnect distinct
+      // from the amber LLDP / teal interface / violet mesh edges.
+      {
+        selector: 'edge[isMclag = 1]',
+        style: {
+          "line-style": "dashed",
+          "line-color": "#d946ef",
+          "target-arrow-color": "#d946ef",
+          "target-arrow-shape": "none",
+          width: 2.4,
+        },
+      },
       // Wireless edge: AP → connected station. Dashed cyan, lighter than
       // the wired controller / interface edges so the eye doesn't read
       // station-cluster fanout as critical topology.
@@ -521,6 +550,7 @@
         { label: "FortiLink (virtual)",color: "#6a7388", style: "dashed", desc: "Unverified FortiLink uplink — no physical cable confirmed" },
         { label: "Interface-inferred",color: "#14b8a6", style: "solid",  desc: "Naming-convention peer link" },
         { label: "LLDP",              color: "#f59e0b", style: "dashed" },
+        { label: "MCLAG ICL",         color: "#d946ef", style: "dashed", desc: "Inter-Chassis Link between MCLAG-peer switches" },
         { label: "Mesh / bridge",     color: "#a78bfa", style: "dashed", desc: "AP → mesh leaf AP / bridged switch" },
       ],
     };
@@ -621,6 +651,11 @@
       if (!d || !d.source || !d.target) return; // node — already handled
       if (!(d.source in adj) || !(d.target in adj)) return; // dangling edge
       edgeList.push([d.source, d.target]);
+      // MCLAG ICL edges are sibling links, not uplinks: keep them in edgeList
+      // (so connection-path overlays route around them) but exclude from the
+      // depth/physical adjacency so neither peer becomes the other's parent and
+      // the pair lands on the same column.
+      if (d.isMclag) return;
       // Suppress a mesh leaf's bogus wired uplink: a non-mesh edge joining the
       // leaf to an infra node (FG/switch). Keep the mesh edge itself and the
       // leaf's downstream client edges (target is a wireless-station node).

@@ -431,6 +431,7 @@ const api = {
       return request("GET", `/assets/${id}/perf-sla-history?` + qs.join("&"));
     },
     sdwanRules:           (id) => request("GET", `/assets/${id}/sdwan-rules`),
+    mclagPeers:           (id) => request("GET", `/assets/${id}/mclag-peers`),
     // Polaris Agent — operator-facing endpoints (see CLAUDE.md "Polaris
     // Agent API surface"). `agent.get` returns 404 when no agent is
     // installed yet; the caller should treat that as "no install" rather
