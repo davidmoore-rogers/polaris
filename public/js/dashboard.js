@@ -88,6 +88,16 @@
     } catch (_err) {
       state.layout = { version: 1, widgets: [] };
     }
+    // Drop-silently: widgets whose type is no longer registered (removed
+    // widgets like monitorAlerts / recentEvents, or types from a newer layout)
+    // are filtered out of the saved layout on load — no placeholder shell. If
+    // anything was dropped we persist the cleaned layout so it doesn't keep
+    // getting re-evaluated on every load.
+    var beforeCount = state.layout.widgets.length;
+    state.layout.widgets = state.layout.widgets.filter(function (w) {
+      return PolarisWidgets.getByType(w.type) != null;
+    });
+    if (state.layout.widgets.length !== beforeCount) queueSave();
     if (state.layout.widgets.length === 0) {
       showEmpty();
     } else {
@@ -374,7 +384,7 @@
     // payload; others have their own fetchData. If any built-in widget is
     // present we fetch once and share.
     var needsSummary = state.layout.widgets.some(function (w) {
-      return ["monitorAlerts", "recentReservations", "assetTypes", "blockUtilization"].indexOf(w.type) !== -1;
+      return ["recentReservations", "assetTypes", "blockUtilization"].indexOf(w.type) !== -1;
     });
     if (!needsSummary) { state.summary = null; return; }
     try {

@@ -174,7 +174,7 @@ const ResponseTimeSampleSchema = z.object({
   success:        z.boolean(),
   responseTimeMs: z.number().int().nullable().optional(), // null = packet loss
   error:          z.string().max(500).nullable().optional(),
-  uptimeSeconds:  z.number().int().nonnegative().nullable().optional(), // host uptime → Asset.lastUptime*
+  uptimeSec:      z.number().int().nonnegative().nullable().optional(), // host uptime → Asset.lastUptimeSec + reboot detection
 });
 
 const TelemetrySampleSchema = z.object({
@@ -316,8 +316,8 @@ agentsRouter.post("/samples", async (req, res, next) => {
         await recordProbeResult(
           assetId,
           s.success
-            ? { success: true,  responseTimeMs: s.responseTimeMs ?? 0, uptimeSeconds: s.uptimeSeconds ?? null }
-            : { success: false, responseTimeMs: 0, error: s.error ?? "Agent reported failure", uptimeSeconds: s.uptimeSeconds ?? null },
+            ? { success: true,  responseTimeMs: s.responseTimeMs ?? 0, uptimeSec: s.uptimeSec ?? undefined }
+            : { success: false, responseTimeMs: 0, error: s.error ?? "Agent reported failure", uptimeSec: s.uptimeSec ?? undefined },
           null,
           { fromAgent: true },
         );

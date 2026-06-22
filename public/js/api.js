@@ -236,6 +236,10 @@ const api = {
       }
       return request("GET", "/dashboard/summary" + q);
     },
+    // One round-trip feed for the NOC widgets (status tiles, down nodes,
+    // top CPU/mem, slowest response, packet loss, stale polls, recent
+    // reboots, active alerts, sites with issues).
+    nocSummary: () => request("GET", "/dashboard/noc-summary"),
   },
   me: {
     dashboard: {

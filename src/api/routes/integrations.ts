@@ -54,6 +54,7 @@ import * as autoMonitorStorage from "../../services/autoMonitorStorageService.js
 import * as agentAutoDeploy from "../../services/agentAutoDeployService.js";
 import * as presenceVerification from "../../services/presenceVerificationService.js";
 import { recomputeDependencyTree } from "../../services/dependencyTreeService.js";
+import { collectManagementAccess, type DeviceAccessGroup } from "../../services/fortinetManagementAccessService.js";
 import { reconcileMapRegions } from "../../services/mapRegionService.js";
 import {
   reconcileFirewallTagsForIntegration,
@@ -545,6 +546,11 @@ const FortiManagerConfigSchema = z.object({
   // selection (/api/v2/cmdb/system/sdwan). Surfaced on the asset's SD-WAN tab.
   // FortiOS-only; default off. Mirrored on FortiGateConfigSchema for parity.
   pullSdwan: z.boolean().optional().default(false),
+  // Interface name to read for a managed FortiSwitch's management-access
+  // (allowaccess) during the Phase 13.6 read. Defaults to "internal" at read
+  // time when unset. The firewall's own management interface reuses
+  // `mgmtInterface` above. FortiOS-only; mirrored on FortiGateConfigSchema.
+  switchManagementInterface: z.string().trim().optional(),
   // When true, LLDP collection skips FortiLink-enabled interfaces (the
   // fortilink-flagged aggregate + its member ports, per the FortiGate CMDB
   // `fortilink` flag), so internal FortiGate↔FortiSwitch links don't appear in
@@ -587,6 +593,10 @@ const FortiGateConfigSchema = z.object({
   // selection on each system-info pass. See FortiManagerConfigSchema.pullSdwan
   // for shape + semantics. FortiOS-only; default off.
   pullSdwan: z.boolean().optional().default(false),
+  // Interface name to read for a managed FortiSwitch's management-access
+  // (allowaccess) during the Phase 13.6 read. Defaults to "internal" when
+  // unset. See FortiManagerConfigSchema.switchManagementInterface.
+  switchManagementInterface: z.string().trim().optional(),
   // Exclude FortiLink-enabled interfaces from LLDP collection. See
   // FortiManagerConfigSchema.excludeFortilinkLldp for shape + semantics.
   // FortiOS-only; default off.
@@ -6334,6 +6344,78 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       }
     } catch (err: any) {
       syncLog("error", `Firewall tag reconcile failed: ${err?.message || "Unknown error"}`);
+    }
+
+    phaseMark("13.6");
+    // Phase 13.6 — Read management-access (`allowaccess`) config for Fortinet
+    // devices and stamp Asset.managementAccess. Firewall: the operator-named
+    // management interface's allowaccess. FortiAP: the AP's wtp-profile
+    // allowaccess. FortiSwitch: the switch's internal/custom interface (best
+    // effort — see fortinetManagementAccessService). Drives the slide-over's
+    // Open HTTPS / Open SSH buttons + the FortiAP "SNMP not enabled" warning.
+    // Read-only; never writes the device. FMG/FortiGate only. Best-effort —
+    // failures are logged and never block the sync. Gated to {full, finalize}
+    // so it runs once with the full fleet known (like Phases 12/13).
+    if (integrationType === "fortimanager" || integrationType === "fortigate") {
+      try {
+        const integrationRow = await prisma.integration.findUnique({
+          where: { id: integrationId },
+          select: { id: true, type: true, config: true },
+        });
+        if (integrationRow) {
+          const cfg = (integrationRow.config ?? {}) as Record<string, any>;
+          const groupMap = new Map<string, DeviceAccessGroup>();
+          const ensureGroup = (name: string): DeviceAccessGroup => {
+            let g = groupMap.get(name);
+            if (!g) { g = { deviceName: name, firewall: null, switches: [], aps: [] }; groupMap.set(name, g); }
+            return g;
+          };
+          for (const dev of result.devices) {
+            if (dev?.name && dev?.serial) ensureGroup(dev.name).firewall = { serial: dev.serial, mgmtIp: dev.mgmtIp || null };
+          }
+          for (const sw of result.fortiSwitches || []) {
+            if (sw?.device && sw?.serial) ensureGroup(sw.device).switches.push({ serial: sw.serial, ipAddress: sw.ipAddress || null });
+          }
+          for (const ap of result.fortiAps || []) {
+            if (ap?.device && ap?.serial) ensureGroup(ap.device).aps.push({ serial: ap.serial, ipAddress: ap.ipAddress || null });
+          }
+
+          if (groupMap.size > 0) {
+            const summaries = await collectManagementAccess(integrationRow, [...groupMap.values()], {
+              mgmtInterface: typeof cfg.mgmtInterface === "string" ? cfg.mgmtInterface : null,
+              switchManagementInterface: typeof cfg.switchManagementInterface === "string" ? cfg.switchManagementInterface : null,
+            });
+            if (summaries.size > 0) {
+              // Map device serial → assetId via the AssetSource rows discovery
+              // just wrote (externalId === serial for these sourceKinds), then
+              // batch the Asset.managementAccess writes in chunked transactions
+              // (no per-row awaits — bounded at the 2000-asset end of the range).
+              const sources = await prisma.assetSource.findMany({
+                where: {
+                  integrationId,
+                  sourceKind: { in: ["fortigate-firewall", "fortiswitch", "fortiap"] },
+                  externalId: { in: [...summaries.keys()] },
+                },
+                select: { assetId: true, externalId: true },
+              });
+              const seen = new Set<string>();
+              const updates: Array<ReturnType<typeof prisma.asset.update>> = [];
+              for (const src of sources) {
+                const summary = summaries.get(src.externalId);
+                if (!summary || seen.has(src.assetId)) continue;
+                seen.add(src.assetId);
+                updates.push(prisma.asset.update({ where: { id: src.assetId }, data: { managementAccess: summary as any } }));
+              }
+              for (let i = 0; i < updates.length; i += 200) {
+                await prisma.$transaction(updates.slice(i, i + 200));
+              }
+              if (updates.length > 0) syncLog("info", `Management-access: read allowaccess for ${updates.length} device(s)`);
+            }
+          }
+        }
+      } catch (err: any) {
+        syncLog("error", `Management-access read failed: ${err?.message || "Unknown error"}`);
+      }
     }
   }
 

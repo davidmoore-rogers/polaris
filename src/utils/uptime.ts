@@ -2,10 +2,11 @@
  * src/utils/uptime.ts — device-uptime helpers.
  *
  * Uptime is captured on the probe path (SNMP sysUpTime / FortiOS system
- * status / Polaris Agent host.Uptime) and stored on Asset.lastUptimeSeconds
- * + lastUptimeAt. These pure helpers convert raw probe values into seconds
- * and render a compact human-readable duration. The frontend keeps a mirror
- * of formatUptime() in public/js/app.js (vanilla JS, no module imports).
+ * status / Polaris Agent host.Uptime) and stored on Asset.lastUptimeSec.
+ * These pure helpers convert raw probe values into seconds and render a
+ * compact human-readable duration. snmpTicksToSeconds feeds the SNMP probe
+ * capture in monitoringService; the frontend keeps a mirror of formatUptime()
+ * in public/js/app.js (vanilla JS, no module imports).
  */
 
 /**

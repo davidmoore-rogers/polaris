@@ -3335,7 +3335,9 @@ async function openViewModal(id) {
     // status) come first.
     var dependencyTreeMountHTML = '<div data-shot-section="depTree" data-shot-label="Dependency Tree"><div id="asset-dep-tree-mount-' + escapeHtml(a.id) + '"></div></div>';
 
-    var generalHTML = '<div data-shot-section="details" data-shot-label="Details"><div class="asset-view-grid">' +
+    var generalHTML = '<div data-shot-section="details" data-shot-label="Details">' +
+      _managementAccessNoticeHTML(a) +
+      '<div class="asset-view-grid">' +
       (a.ipAddress && !a.hostname
         ? '<div class="detail-row"><span class="detail-label">Hostname</span><span class="detail-value">- <button class="btn btn-sm btn-secondary" onclick="singleDnsLookup(\'' + a.id + '\')" title="Reverse DNS lookup (PTR record)">PTR Lookup</button></span></div>'
         : viewRow("Hostname", a.hostname, false, false, true)) +
@@ -3516,7 +3518,7 @@ async function openViewModal(id) {
           '<button data-export="all" data-fmt="csv">All events for this asset</button>' +
         '</div>' +
       '</span>';
-    var leftBtns = copyBtns;
+    var leftBtns = copyBtns + _managementAccessButtonsHTML(a);
     var rightBtns = '<button class="btn btn-sm btn-secondary" id="btn-asset-panel-close-btn">Close</button>' +
       (canManageAssets() ? '<button class="btn btn-sm btn-primary" id="btn-asset-panel-edit-btn">Edit</button>' : '');
     footerEl.innerHTML = leftBtns + '<span style="flex:1"></span>' + rightBtns;
@@ -3615,6 +3617,7 @@ async function openViewModal(id) {
         });
       }
     }
+    _wireManagementAccessButtons(a);
     document.getElementById("btn-asset-panel-close-btn").addEventListener("click", closeAssetPanel);
     var editBtn = document.getElementById("btn-asset-panel-edit-btn");
     if (editBtn) {
@@ -7340,21 +7343,23 @@ function assetMonitoringViewHTML(a) {
       '<button class="btn btn-sm btn-primary" id="btn-asset-monitor-custom-apply">Apply</button>' +
     '</div>';
   // Uptime row — only rendered when the probe path captured uptime (SNMP /
-  // FortiOS / agent; ICMP/SSH/WinRM-only assets show no row). The stored
-  // value is the observed uptime AT lastUptimeAt; extrapolate to "now" unless
+  // FortiOS / agent; ICMP/SSH/WinRM-only assets show no row). lastUptimeSec is
+  // the reading at the last probe (lastMonitorAt); extrapolate to "now" unless
   // the asset is down (a dead box's uptime shouldn't keep climbing). The
-  // "since" reboot timestamp is the true boot instant (obsAt − observed
-  // uptime), stable regardless of extrapolation.
+  // "since" reboot timestamp prefers the reboot-detected lastRebootAt; absent
+  // that, it's the boot instant derived from the reading (stable across
+  // extrapolation).
   var uptimeRow = "";
-  if (a.lastUptimeSeconds != null && a.lastUptimeAt) {
-    var _obsUp = Number(a.lastUptimeSeconds);
-    var _obsAt = new Date(a.lastUptimeAt).getTime();
+  if (a.lastUptimeSec != null && a.lastMonitorAt) {
+    var _obsUp = Number(a.lastUptimeSec);
+    var _obsAt = new Date(a.lastMonitorAt).getTime();
     var _elapsed = Math.max(0, Math.floor((Date.now() - _obsAt) / 1000));
     var _upNow = a.monitorStatus === "down" ? _obsUp : _obsUp + _elapsed;
-    var _since = new Date(_obsAt - _obsUp * 1000).toLocaleString("en-US",
+    var _sinceMs = a.lastRebootAt ? new Date(a.lastRebootAt).getTime() : (_obsAt - _obsUp * 1000);
+    var _since = new Date(_sinceMs).toLocaleString("en-US",
       { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     uptimeRow =
-      '<div class="detail-row" title="' + escapeHtml("Uptime as of " + timeAgo(a.lastUptimeAt)) + '">' +
+      '<div class="detail-row" title="' + escapeHtml("Uptime as of " + timeAgo(a.lastMonitorAt)) + '">' +
         '<span class="detail-label">Uptime</span>' +
         '<span class="detail-value">' + escapeHtml(formatUptime(_upNow)) +
           ' <span style="color:var(--color-text-tertiary)">· since ' + escapeHtml(_since) + '</span>' +
@@ -11139,6 +11144,157 @@ function ipViewRow(asset) {
     '<span class="detail-value mono">' + ipCellHTML(asset) + src + '</span></div>';
 }
 
+// ─── Management access (allowaccess) — Open HTTPS / Open SSH + AP warning ──────
+// Asset.managementAccess is read during FMG/FortiGate discovery (Phase 13.6).
+// Shape: { source, interfaceName, profileName, mgmtIp, protocols, https, ssh,
+// snmp, checkedAt }. protocols === null means the access list could not be read
+// (best-effort switch path) — we then render buttons optimistically.
+function _assetMgmtAccess(asset) {
+  var ma = asset && asset.managementAccess;
+  if (!ma || typeof ma !== "object") return null;
+  var mgmtIp = ma.mgmtIp || asset.ipAddress || null;
+  if (!mgmtIp) return null;
+  var unknown = ma.protocols == null; // null/undefined → couldn't read (switch)
+  return {
+    ma: ma,
+    mgmtIp: mgmtIp,
+    showHttps: !!(ma.https || unknown),
+    showSsh: !!(ma.ssh || unknown),
+    unknown: unknown,
+  };
+}
+
+// AP-only warning banner: surfaces management protocols disabled in the AP's
+// wtp-profile, emphasizing SNMP since it gates monitoring. Rendered at the top
+// of the General tab. Returns "" for non-APs or when the profile couldn't be read.
+function _managementAccessNoticeHTML(asset) {
+  if (!asset || asset.assetType !== "access_point") return "";
+  var ma = asset.managementAccess;
+  if (!ma || typeof ma !== "object" || ma.protocols == null) return "";
+  var disabled = [];
+  if (!ma.snmp)  disabled.push("SNMP");
+  if (!ma.https) disabled.push("HTTPS");
+  if (!ma.ssh)   disabled.push("SSH");
+  if (disabled.length === 0) return "";
+  var profile = ma.profileName ? ' (profile "' + escapeHtml(ma.profileName) + '")' : "";
+  var msg = !ma.snmp
+    ? "SNMP is not enabled in this access point's profile" + profile +
+      " — SNMP-based monitoring will not work. Disabled: " + disabled.join(", ") + "."
+    : "Management access disabled in this access point's profile" + profile + ": " + disabled.join(", ") + ".";
+  return '<div style="margin-bottom:0.75rem;padding:0.5rem 0.75rem;background:rgba(245,127,23,0.08);' +
+    'border:1px solid rgba(245,127,23,0.3);border-radius:6px;font-size:0.8rem;color:var(--color-warning)">' +
+    '&#9888; ' + msg + '</div>';
+}
+
+// Footer action buttons: Open HTTPS + an Open SSH split-button (caret menu for
+// ssh:// vs copy-command vs set-default-user). Returns "" when there's no
+// management surface to act on.
+function _managementAccessButtonsHTML(asset) {
+  var info = _assetMgmtAccess(asset);
+  if (!info) return "";
+  var html = "";
+  if (info.showHttps) {
+    html += '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-https" ' +
+      'title="Open https://' + escapeHtml(info.mgmtIp) + ' in a new tab">Open HTTPS</button>';
+  }
+  if (info.showSsh) {
+    var hint = info.unknown
+      ? '<div class="dropdown-heading">Access state unverified for this device</div>'
+      : "";
+    html += '<span class="btn-dropdown-wrap" id="asset-ssh-wrap">' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-ssh" ' +
+        'title="Open an SSH session to ' + escapeHtml(info.mgmtIp) + '">Open SSH</button>' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-ssh-caret" ' +
+        'title="SSH options" style="padding-left:6px;padding-right:6px">&#9662;</button>' +
+      '<div class="btn-dropdown-menu drop-up anchor-left" id="asset-ssh-menu">' +
+        hint +
+        '<button data-ssh="uri">Open ssh:// link</button>' +
+        '<button data-ssh="copy">Copy ssh command</button>' +
+        '<div class="dropdown-divider"></div>' +
+        '<button data-ssh="setuser">Set default SSH user&hellip;</button>' +
+      '</div>' +
+    '</span>';
+  }
+  return html;
+}
+
+// Per-user SSH preferences live in localStorage (no backend) — same model as
+// other per-user UI prefs. `polaris.ssh.action` ∈ {uri, copy}; `polaris.ssh.user`
+// is an optional default username prepended to ssh:// links + copied commands.
+function _sshUser() {
+  try { return (localStorage.getItem("polaris.ssh.user") || "").trim(); } catch (e) { return ""; }
+}
+function _sshAction() {
+  try { return localStorage.getItem("polaris.ssh.action") === "copy" ? "copy" : "uri"; } catch (e) { return "uri"; }
+}
+function _sshTarget(mgmtIp) {
+  var user = _sshUser();
+  return (user ? user + "@" : "") + mgmtIp;
+}
+function _doSshLaunch(mgmtIp, action) {
+  var target = _sshTarget(mgmtIp);
+  if (action === "copy") {
+    var cmd = "ssh " + target;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(cmd).then(
+        function () { showToast("Copied: " + cmd); },
+        function () { showToast("Copy failed — " + cmd, "error"); },
+      );
+    } else {
+      showToast(cmd);
+    }
+  } else {
+    // Browsers are sandboxed: this hands ssh://user@host to whatever app the OS
+    // has registered for the ssh:// scheme (PuTTY, Windows Terminal, Konsole…).
+    window.location.href = "ssh://" + target;
+  }
+}
+function _wireManagementAccessButtons(asset) {
+  var info = _assetMgmtAccess(asset);
+  if (!info) return;
+  var httpsBtn = document.getElementById("btn-asset-https");
+  if (httpsBtn) {
+    httpsBtn.addEventListener("click", function () {
+      window.open("https://" + info.mgmtIp, "_blank", "noopener");
+    });
+  }
+  var sshBtn = document.getElementById("btn-asset-ssh");
+  if (sshBtn) {
+    sshBtn.addEventListener("click", function () { _doSshLaunch(info.mgmtIp, _sshAction()); });
+  }
+  var sshCaret = document.getElementById("btn-asset-ssh-caret");
+  var sshMenu = document.getElementById("asset-ssh-menu");
+  if (sshCaret && sshMenu) {
+    sshCaret.addEventListener("click", function (e) { e.stopPropagation(); sshMenu.classList.toggle("open"); });
+    sshMenu.addEventListener("click", function (e) { e.stopPropagation(); });
+    sshMenu.querySelectorAll("button[data-ssh]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        sshMenu.classList.remove("open");
+        var act = b.getAttribute("data-ssh");
+        if (act === "setuser") {
+          var cur = _sshUser();
+          var v = window.prompt("Default SSH username for ssh:// links and copied commands (leave blank for none):", cur);
+          if (v !== null) {
+            try { localStorage.setItem("polaris.ssh.user", v.trim()); } catch (e) {}
+            showToast(v.trim() ? "SSH user set to " + v.trim() : "SSH user cleared");
+          }
+          return;
+        }
+        // uri | copy: remember as the new default, then perform it now.
+        try { localStorage.setItem("polaris.ssh.action", act); } catch (e) {}
+        _doSshLaunch(info.mgmtIp, act);
+      });
+    });
+    if (!_assetSshCloserWired) {
+      _assetSshCloserWired = true;
+      document.addEventListener("click", function () {
+        var m = document.getElementById("asset-ssh-menu");
+        if (m) m.classList.remove("open");
+      });
+    }
+  }
+}
+
 // Operator-facing labels for Asset.lastSeenSource — the evidence that
 // produced the current Last Seen value (stamped by the backend's
 // bumpLastSeen). Unknown values render verbatim so new backend sources
@@ -13704,6 +13860,7 @@ function _wireAssetEventsTab(assetId) {
 // loaded on assets.html / map.html.
 
 var _assetExportCloserWired = false; // document-level menu closer, once per page
+var _assetSshCloserWired = false;    // document-level closer for the SSH options menu
 
 // Hostname → filename-safe fragment for the export filenames.
 function _assetExportSubject(asset) {

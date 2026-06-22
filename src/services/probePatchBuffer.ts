@@ -71,14 +71,12 @@ export interface ProbePatch {
   consecutiveSuccesses: number;
   /** Set only on a status transition; undefined means "no change this tick — keep the prior stamp". */
   monitorStatusChangedAt?: Date;
-  /**
-   * Device uptime (seconds) + the instant it was observed. Set together, only
-   * when the probe transport reported uptime (SNMP / FortiOS / agent). Omitted
-   * means "no uptime this tick — keep the prior value" (handled by merge +
-   * COALESCE on flush, same pattern as monitorStatusChangedAt).
-   */
-  lastUptimeSeconds?: number | null;
-  lastUptimeAt?: Date;
+  /** Latest device uptime reading (whole seconds); undefined on a probe that
+   *  didn't report uptime — the flush COALESCEs to keep the prior value rather
+   *  than nulling it. Captured by the SNMP / FortiOS / agent probe paths. */
+  lastUptimeSec?: number;
+  /** Set only when a reboot was detected this tick; undefined preserves the prior stamp. */
+  lastRebootAt?: Date;
 }
 
 // Module-level buffer. One in-flight patch per asset; new patches collapse
@@ -123,14 +121,15 @@ export function getPendingProbePatch(assetId: string): ProbePatch | null {
 export function enqueueProbePatch(assetId: string, patch: ProbePatch): void {
   const existing = buffer.get(assetId);
   if (existing) {
-    const hasUptime = patch.lastUptimeSeconds != null;
     buffer.set(assetId, {
       ...patch,
       monitorStatusChangedAt:
         patch.monitorStatusChangedAt ?? existing.monitorStatusChangedAt,
-      // Preserve the prior uptime observation when this patch didn't carry one.
-      lastUptimeSeconds: hasUptime ? patch.lastUptimeSeconds : existing.lastUptimeSeconds,
-      lastUptimeAt:      hasUptime ? patch.lastUptimeAt      : existing.lastUptimeAt,
+      // Preserve-on-absent: a probe that didn't report uptime (or didn't
+      // detect a reboot) merging onto a prior patch must not erase its
+      // uptime/reboot stamps.
+      lastUptimeSec: patch.lastUptimeSec ?? existing.lastUptimeSec,
+      lastRebootAt: patch.lastRebootAt ?? existing.lastRebootAt,
     });
   } else {
     buffer.set(assetId, patch);
@@ -204,8 +203,8 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
       patch.monitorStatusChangedAt
         ? patch.monitorStatusChangedAt.toISOString()
         : null,
-      patch.lastUptimeSeconds ?? null,
-      patch.lastUptimeAt ? patch.lastUptimeAt.toISOString() : null,
+      patch.lastUptimeSec ?? null,
+      patch.lastRebootAt ? patch.lastRebootAt.toISOString() : null,
     );
   }
   const sql =
@@ -216,10 +215,12 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
     `"consecutiveFailures"    = v.cf, ` +
     `"consecutiveSuccesses"   = v.cs, ` +
     `"monitorStatusChangedAt" = COALESCE(v.changed_at, t."monitorStatusChangedAt"), ` +
-    `"lastUptimeSeconds"      = COALESCE(v.uptime_seconds, t."lastUptimeSeconds"), ` +
-    `"lastUptimeAt"           = COALESCE(v.uptime_at, t."lastUptimeAt") ` +
+    // Both columns preserve the prior row value when this patch didn't carry
+    // one (no uptime reported / no reboot) — same COALESCE pattern as changed_at.
+    `"lastUptimeSec"          = COALESCE(v.uptime_sec, t."lastUptimeSec"), ` +
+    `"lastRebootAt"           = COALESCE(v.reboot_at, t."lastRebootAt") ` +
     `FROM (VALUES ${tuples.join(", ")}) ` +
-    `AS v(id, status, last_monitor_at, rt, cf, cs, changed_at, uptime_seconds, uptime_at) ` +
+    `AS v(id, status, last_monitor_at, rt, cf, cs, changed_at, uptime_sec, reboot_at) ` +
     `WHERE t."id" = v.id`;
   await prisma.$executeRawUnsafe(sql, ...params);
 }
