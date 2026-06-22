@@ -1,0 +1,128 @@
+/**
+ * widgets/sitesWithIssues.js — sites that have one or more monitored assets in
+ * down/warning, worst first (SolarWinds "Sites with Issues"). Each site row
+ * expands inline to list its affected nodes. Node detail arrives inline in the
+ * payload, so expansion needs no second fetch (unlike monitorAlerts). Data
+ * from /dashboard/noc-summary sitesWithIssues[].
+ */
+
+(function () {
+  // Per-instance expand state keyed by widget element (same technique as
+  // monitorAlerts) so a 30s re-tick doesn't collapse the open site.
+  var _state = new WeakMap();
+  function getState(el) {
+    var s = _state.get(el);
+    if (!s) { s = { expanded: null }; _state.set(el, s); }
+    return s;
+  }
+
+  function statusPip(status) {
+    var color = status === "down" ? "#ef5350" : status === "warning" ? "#ffa726" : "#90a4ae";
+    return '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:6px"></span>';
+  }
+
+  function render(el, sites, config) {
+    sites = sites || [];
+    var st = getState(el);
+    var rowLimit = (config && config.rowLimit) || 10;
+    var sortBy = (config && config.sortBy) || "downCount";
+    var sorted = sites.slice().sort(function (a, b) {
+      if (sortBy === "name") return (a.site || "").localeCompare(b.site || "");
+      return (b.downCount - a.downCount) || (b.warningCount - a.warningCount);
+    });
+    sorted = sorted.slice(0, rowLimit);
+    if (!sorted.length) { el.innerHTML = '<p class="empty-state">No sites with issues</p>'; return; }
+    if (st.expanded && !sorted.some(function (s) { return s.site === st.expanded; })) st.expanded = null;
+
+    el.innerHTML = sorted.map(function (s) {
+      var isOpen = st.expanded === s.site;
+      var pills = '<span class="widget-pill widget-pill-red">' + s.downCount + ' down</span>' +
+        (s.warningCount > 0 ? ' <span class="widget-pill widget-pill-amber">' + s.warningCount + ' warn</span>' : '');
+      var head = '<button type="button" class="dash-alert-row" data-site="' + escapeHtml(s.site) + '" aria-expanded="' + (isOpen ? "true" : "false") + '" style="width:100%">' +
+        '<div class="dash-alert-body">' +
+          '<div class="dash-alert-title">' + escapeHtml(s.site) + (s.division ? ' <span style="color:var(--color-text-secondary);font-weight:400">· ' + escapeHtml(s.division) + '</span>' : '') + '</div>' +
+          '<div class="dash-alert-sub">' + pills + ' <span style="color:var(--color-text-tertiary)">of ' + s.total + '</span></div>' +
+        '</div>' +
+      '</button>';
+      var body = "";
+      if (isOpen) {
+        var nodes = (s.nodes || []).slice().sort(function (a, b) {
+          // down before warning
+          if (a.monitorStatus === b.monitorStatus) return 0;
+          return a.monitorStatus === "down" ? -1 : 1;
+        });
+        body = '<div class="dash-alert-expand">' + (nodes.length ? nodes.map(function (n) {
+          var name = n.hostname || n.id;
+          var href = '/assets.html#view=asset:' + encodeURIComponent(n.id);
+          return '<div style="padding:2px 0">' + statusPip(n.monitorStatus) + '<a class="dep-tree-link" href="' + href + '">' + escapeHtml(name) + '</a></div>';
+        }).join("") : '<div class="empty-state" style="text-align:left;padding:0">No node detail</div>') + '</div>';
+      }
+      return '<div class="dash-alert-item' + (isOpen ? ' is-expanded' : '') + '">' + head + body + '</div>';
+    }).join("");
+  }
+
+  function wire(el, getData, config) {
+    el.addEventListener("click", function (ev) {
+      if (ev.target.closest(".dash-alert-expand a")) return; // let node links navigate
+      var btn = ev.target.closest(".dash-alert-row");
+      if (!btn || !el.contains(btn)) return;
+      var site = btn.getAttribute("data-site");
+      var st = getState(el);
+      st.expanded = st.expanded === site ? null : site;
+      render(el, getData(), config);
+    });
+  }
+
+  PolarisWidgets.register({
+    type: "sitesWithIssues",
+    label: "Sites with Issues",
+    description: "Sites with monitored assets down or in warning, worst first. Expand a site for its nodes.",
+    defaultSize: { width: 6, height: 1 },
+    minSize: { width: 4, height: 1 },
+    defaultConfig: { rowLimit: 10, sortBy: "downCount" },
+    requiredPermission: { key: "assets", level: "read" },
+
+    fetchData: function () {
+      return PolarisWidgets.getNocSummary().then(function (d) { return (d && d.sitesWithIssues) || []; }).catch(function () { return []; });
+    },
+
+    renderInstance: function (el, config, data, ctx) {
+      var current = data || [];
+      render(el, current, config);
+      wire(el, function () { return current; }, config);
+      var timer = setInterval(function () {
+        PolarisWidgets.getNocSummary().then(function (d) { current = (d && d.sitesWithIssues) || []; render(el, current, config); }).catch(function () {});
+      }, 30000);
+      ctx.onUnmount(function () { clearInterval(timer); _state.delete(el); });
+    },
+
+    renderPreview: function (el) {
+      render(el, [
+        { site: "Plant A", division: "Ops", downCount: 3, warningCount: 1, total: 12, nodes: [
+          { id: "n1", hostname: "fs-aisle-3", monitorStatus: "down" },
+          { id: "n2", hostname: "fap-conf-rm", monitorStatus: "down" },
+        ] },
+        { site: "DC West", division: "Core", downCount: 1, warningCount: 0, total: 8, nodes: [] },
+      ], { rowLimit: 5, sortBy: "downCount" });
+    },
+
+    renderConfig: function (el, config, onChange) {
+      el.innerHTML =
+        '<label>Sort by</label>' +
+        '<select data-k="sortBy">' +
+          '<option value="downCount"' + ((config.sortBy || "downCount") === "downCount" ? " selected" : "") + '>Down count</option>' +
+          '<option value="name"' + (config.sortBy === "name" ? " selected" : "") + '>Site name</option>' +
+        '</select>' +
+        '<label>Row limit</label>' +
+        '<select data-k="rowLimit">' +
+          [5, 10, 20].map(function (n) { return '<option value="' + n + '"' + (config.rowLimit === n ? " selected" : "") + '>' + n + '</option>'; }).join("") +
+        '</select>';
+      el.querySelectorAll("[data-k]").forEach(function (s) {
+        s.addEventListener("change", function () {
+          var k = s.getAttribute("data-k");
+          onChange(k, k === "rowLimit" ? parseInt(s.value, 10) : s.value);
+        });
+      });
+    },
+  });
+})();

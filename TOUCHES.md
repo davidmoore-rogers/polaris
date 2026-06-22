@@ -39,7 +39,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 **What it is:** Asset.monitorStatus ∈ {up, warning, recovering, down, unknown} driven by consecutiveFailures/consecutiveSuccesses counters (see "Five-state monitor machine" in CLAUDE.md).
 
 **Writers** (files that mutate or emit this state):
-- `src/services/monitoringService.ts` — runProbeFor() updates Asset.monitorStatus/consecutiveFailures/consecutiveSuccesses after each probe result, stamps Asset.monitorStatusChangedAt whenever monitorStatus changes value (any-to-any, not just up↔down), emits monitor.status_changed Event on transitions INTO up/warning/down (not recovering/unknown, never per-poll), fires propagateAfterStatusChange() — but only on the confirmed up/down edge, NOT on the warning edge — to push the change into descendant dependencySuppressed state
+- `src/services/monitoringService.ts` — runProbeFor() updates Asset.monitorStatus/consecutiveFailures/consecutiveSuccesses after each probe result, stamps Asset.monitorStatusChangedAt whenever monitorStatus changes value (any-to-any, not just up↔down), emits monitor.status_changed Event on transitions INTO up/warning/down (not recovering/unknown, never per-poll), fires propagateAfterStatusChange() — but only on the confirmed up/down edge, NOT on the warning edge — to push the change into descendant dependencySuppressed state. **Reboot detection:** the SNMP probe (probeSnmp) now keeps the sysUpTime TimeTicks it already reads as its reachability OID and returns it as ProbeResult.uptimeSec; recordProbeResult stamps it onto the AssetMonitorSample (uptimeSec) + Asset.lastUptimeSec via the probe-patch buffer, and when the reading drops vs. the cached lastUptimeSec (>60s tolerance) sets Asset.lastRebootAt and emits a `device.reboot` Event (level warning). Non-SNMP probes carry no uptime — the probePatchBuffer flush COALESCEs lastUptimeSec/lastRebootAt so they're preserved, not nulled.
 - `src/jobs/monitorAssets.ts` — Light/heavy ticking loops invoke runMonitorPass() which dispatches probe collection
 - `src/jobs/backfillMonitorStatusChangedAt.ts` — One-shot startup (60s after boot): seeds Asset.monitorStatusChangedAt for pre-existing warning/down/recovering assets from the latest monitor.status_changed Event when one is still within the 7-day retention window
 - `src/api/routes/assets.ts` — recordProbeResult() on manual /probe-now endpoint
@@ -54,6 +54,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `src/api/routes/map.ts` — Device Map topology endpoint reads monitorStatus for FortiGate/switch/AP health coloring via monitorStatusToHealth()
 - `src/jobs/monitorAssets.ts` — Queue eligibility check consults monitorStatus + dependencySuppressed
 - `src/api/routes/dashboard.ts` — `/dashboard/summary` reads `monitored=true AND monitorStatus in (warning, down)` for the Monitor Alerts card and orders by `monitorStatusChangedAt asc nulls last` so the oldest outages surface first
+- `src/services/nocDashboardService.ts` — `/dashboard/noc-summary` reads monitorStatus (status tiles, down nodes, sites-with-issues), lastResponseTimeMs (slowest response), lastMonitorAt (stale polls), and the `device.reboot` Events (recent reboots) for the NOC widgets
 - `public/js/dashboard.js` — Monitor Alerts card renders the duration since monitorStatusChangedAt; re-ticks the label every 30s without re-fetching
 
 **Invariants:**
@@ -222,7 +223,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `public/js/assets.js:_confirmUninstallAgent` — wraps `showConfirm` Promise; on resolve(true) calls `api.assets.deleteAgent(id, {force})`.
 - `src/api/routes/agents.ts:POST /enroll` — consumes the enrollment token, mints a long-lived bearer, transitions installStatus → "active"; emits `agent.enrolled`. Cert-pin mismatch sets installStatus="failed" and emits `agent.install_failed`.
 - `src/services/agentTokenService.ts:verifyBearer` — runs on EVERY bearer-gated call; best-effort bumps `lastSeenAt`/`lastSeenIp`, AND self-heals a stuck `installStatus="enrolling"` → `"active"`. This covers the re-install/re-push case where `startInstall` reset status to "enrolling" but the agent reused the bearer already in agent.conf and short-circuited `/enroll` (so nothing else would ever flip it active). Scoped to "enrolling" only — never touches upgrading/uninstalling/failed states.
-- `src/api/routes/agents.ts:POST /samples` — bumps lastSeenAt (via verifyBearer) + lastTelemetryAt / lastSystemInfoAt per stream; calls recordProbeResult({fromAgent:true}) for the responseTime stream so the five-state machine runs on agent-pushed RTTs. The `eventLog` stream branch is NOT a sample table — it calls `osEventLogService.ingestOsEventLog` to curate entries into the audit Event table (`os_event.*`, resourceType=asset), gated by the `Setting("agentEventLog").enabled` master switch (drops a stale agent's push when off). See cross-cutting/osEventLog. **Process streams (Feature C):** `processInventory` → `persistAssetProcesses` (current-state full-replace); `processTelemetry` → `enqueueProcessSamples` (per-pinned-program CPU/RAM, cadence="fast"); `processLog` → `enqueueProcessLogSamples`. `GET /config` ships `streams.processes.enabled` (= processesPolling resolves to agent) + a `pinnedProcesses` array (`Asset.monitoredProcesses` joined to `AssetProcessConfig` → `{name, logSource, logPathGlob}`) so the agent telemetry/log loops know which programs to sample + where their logs are.
+- `src/api/routes/agents.ts:POST /samples` — bumps lastSeenAt (via verifyBearer) + lastTelemetryAt / lastSystemInfoAt per stream; calls recordProbeResult({fromAgent:true}) for the responseTime stream so the five-state machine runs on agent-pushed RTTs. The responseTime sample also carries `uptimeSec` (Go agent's `host.Uptime()`); it's passed into the ProbeResult so the agent host's uptime lands on `Asset.lastUptimeSec` (+ reboot detection) via the same probe path SNMP/FortiOS use. The `eventLog` stream branch is NOT a sample table — it calls `osEventLogService.ingestOsEventLog` to curate entries into the audit Event table (`os_event.*`, resourceType=asset), gated by the `Setting("agentEventLog").enabled` master switch (drops a stale agent's push when off). See cross-cutting/osEventLog. **Process streams (Feature C):** `processInventory` → `persistAssetProcesses` (current-state full-replace); `processTelemetry` → `enqueueProcessSamples` (per-pinned-program CPU/RAM, cadence="fast"); `processLog` → `enqueueProcessLogSamples`. `GET /config` ships `streams.processes.enabled` (= processesPolling resolves to agent) + a `pinnedProcesses` array (`Asset.monitoredProcesses` joined to `AssetProcessConfig` → `{name, logSource, logPathGlob}`) so the agent telemetry/log loops know which programs to sample + where their logs are.
 - `src/api/routes/agents.ts:POST /system-info` — upserts the `polaris-agent` AssetSource row (externalId = managedAgent.id, observed = full host identity blob), then re-projects hostname / serialNumber / manufacturer / model / os / osVersion against all sources for the asset. Also writes MAC inline: normalize `primaryMac` → colon-upper, merge into `AssetMacAddress` via `reconcileMacAddresses` preserving entries from other sources, set `Asset.macAddress` to the freshest entry by `lastSeen`. MAC isn't owned by `projectAssetFromSources` — every discovery path writes it inline; the agent path matches that convention. Opportunistically bumps `ManagedAgent.agentVersion` when the body carries it.
 - `src/api/routes/agents.ts:POST /heartbeat` — refresh agentVersion + bump lastSeenAt.
 - `src/services/agentTokenService.ts` — `mintEnrollmentToken` (10-min TTL), `consumeEnrollmentToken` (atomic swap → bearer + stamps asset's 5 per-stream `*Polling` columns to `"agent"` in the same transaction so the active agent owns every stream), `revokeBearer` (sets bearerRevokedAt).
@@ -584,17 +585,38 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 ---
 
-## cross-cutting/asset-last-seen-presence
+## cross-cutting/asset-management-access
 
-**What it is:** `Asset.lastSeen` means **verified network presence** — the last time Polaris had direct evidence the device was alive on the network — with `Asset.lastSeenSource` carrying the evidence label. Every write routes through `src/utils/assetInvariants.ts → bumpLastSeen()` (no-regress: only advances; stamps provenance). Directory timestamps (Entra `lastSyncDateTime`, AD `lastLogonTimestamp`) are deliberately NOT presence — they live on `AssetSource.lastSeen` and render separately as "Last Directory Activity".
+**What it is:** `Asset.managementAccess` is a read-only summary of a Fortinet device's management-access (`allowaccess`) config: `{ source, interfaceName, profileName, mgmtIp, protocols: string[] | null, https, ssh, snmp, checkedAt }`. Read during FMG/FortiGate discovery; drives the asset slide-over's Open HTTPS / Open SSH buttons and the FortiAP SNMP-disabled warning. Monitor/discovery-owned — never projected from `AssetSource`.
 
 **Writers** (files that mutate this state):
-- `src/api/routes/integrations.ts → syncDhcpSubnets` — FMG/standalone-FortiGate sync stamps:
-  - Phase 6 DHCP: gated on `entry.seenLeased` (live lease), source `"dhcp-lease"`. Offline static reservations neither bump nor flip status. **Defers to device inventory**: when the entry's MAC is in this cycle's `result.deviceInventory` (the `inventoryMacSet`), the lease bump + status flip are skipped so Phase 7's real `last_seen`/`is_online` wins — a bound-but-idle lease must not stamp `now` (no-regress would otherwise let it beat the older-but-real inventory timestamp). Lease-only assets (inventory disabled / MAC not in the device table) keep the lease bump.
-  - Phase 7 device inventory: evidence is the FortiGate's per-client `last_seen` (or `now` when `is_online`), source `"device-inventory"`. Resurrection (`decommissioned → active`) requires `is_online`. **Authoritative over the lease** for any MAC it covers.
-  - Firewall / FortiSwitch / FortiAP phases: source `"discovery"`; switch gated on `sw.connected`, AP on `apOnline` (status "connected" or blank), firewall implicit (FMG parse already skips `conn_status !== 1` devices).
+- `src/services/fortinetManagementAccessService.ts → collectManagementAccess` — builds the summaries from FortiOS CMDB reads (firewall `system/interface`, FortiAP `wireless-controller/{wtp-profile,wtp}`, FortiSwitch `switch-controller/managed-switch`). Pure parsers exported + unit-tested. Read-only against the device.
+- `src/api/routes/integrations.ts → syncDhcpSubnets` Phase 13.6 — groups discovered firewalls/switches/APs by controller FortiGate, calls `collectManagementAccess`, joins `Map<serial, summary>` to assets via the `AssetSource` rows (externalId === serial), writes in chunked `$transaction` batches. Gated `mode in {full, finalize}`; always-on; FMG/FortiGate only; best-effort.
+
+**Readers** (files that consume it):
+- `public/js/assets.js` — `_assetMgmtAccess` / `_managementAccessButtonsHTML` (footer Open HTTPS + Open SSH split-button) + `_managementAccessNoticeHTML` (AP warning banner). SSH launch via `ssh://[user@]host` URI or copy-command, per-user prefs in localStorage (`polaris.ssh.action`, `polaris.ssh.user`). `managementAccess` rides on the `GET /assets/:id` payload (full-row `include`, no narrowing select).
+
+**Invariants:**
+- Read-only — nothing here writes the device. `protocols: null` means the access list couldn't be read (best-effort switch path); the UI renders buttons optimistically with an "unverified" note rather than hiding them.
+- Firewall management interface is the operator-named `Integration.config.mgmtInterface` (reused, not a new field). FortiSwitch defaults to `internal` (override: `config.switchManagementInterface`).
+- FortiSwitch + FortiAP REST field shapes are **not yet verified on a live FortiOS 7.x device** — keep parsers defensive (never throw; degrade to `protocols: null`).
+
+---
+
+## cross-cutting/asset-last-seen-presence
+
+**What it is:** `Asset.lastSeen` means **verified network presence** — the last time Polaris had direct evidence the device was alive on the network — with `Asset.lastSeenSource` carrying the evidence label. Every write routes through `src/utils/assetInvariants.ts → bumpLastSeen()` (no-regress: only advances; stamps provenance) EXCEPT the monitor hot path, which writes through the `probePatchBuffer` bulk-update (see below). Directory timestamps (Entra `lastSyncDateTime`, AD `lastLogonTimestamp`) are deliberately NOT presence — they live on `AssetSource.lastSeen` and render separately as "Last Directory Activity".
+
+**Polling is authoritative for monitored assets:** when `Asset.monitored === true`, `bumpLastSeen` refuses the discovery-origin sources (`POLLING_DEFERRED_SOURCES` = `discovery` / `device-inventory` / `dhcp-lease`) so only the monitor probe drives presence. A monitored-but-down device's `lastSeen` freezes at its last successful poll regardless of what discovery reports. The device-inventory-outranks-lease ordering below only matters for UNmonitored assets.
+
+**Writers** (files that mutate this state):
+- `src/services/monitoringService.ts → recordProbeResult` — **monitor hot path**: a successful probe stamps `lastSeen = now, lastSeenSource = "probe"` via `enqueueProbePatch` (the `probePatchBuffer` bulk `UPDATE ... FROM VALUES` flush, NOT a Prisma write / not `bumpLastSeen`). A failed probe omits both, so the flush's `COALESCE(v.last_seen, t."lastSeen")` freezes presence at the last success. This is the sole presence authority for any monitored asset.
+- `src/api/routes/integrations.ts → syncDhcpSubnets` — FMG/standalone-FortiGate sync stamps (all gated by `bumpLastSeen`, so suppressed on monitored assets):
+  - Phase 6 DHCP: gated on `entry.seenLeased` (live lease), source `"dhcp-lease"`. Offline static reservations neither bump nor flip status. **Defers to device inventory** (unmonitored): when the entry's MAC is in this cycle's `result.deviceInventory` (the `inventoryMacSet`), the lease bump + status flip are skipped so Phase 7's real `last_seen`/`is_online` wins — a bound-but-idle lease must not stamp `now`. Lease-only assets (inventory disabled / MAC not in the device table) keep the lease bump.
+  - Phase 7 device inventory: evidence is the FortiGate's per-client `last_seen` (or `now` when `is_online`), source `"device-inventory"`. Resurrection (`decommissioned → active`) requires `is_online`. **Authoritative over the lease** for any MAC it covers (unmonitored). On monitored assets `bumpLastSeen` drops it — the probe owns presence.
+  - Firewall / FortiSwitch / FortiAP phases: source `"discovery"`; switch gated on `sw.connected`, AP on `apOnline` (status "connected" or blank), firewall implicit (FMG parse already skips `conn_status !== 1` devices). Suppressed on monitored assets.
 - `src/api/routes/integrations.ts → syncEntraDevices / syncActiveDirectoryDevices` — do NOT write lastSeen (cut over in the directory-decoupling change). Directory activity goes to `AssetSource.lastSeen` via the source upserts.
-- `src/services/presenceVerificationService.ts → runPresenceVerification` — AD/Entra post-sync pass (default on, `config.verifyPresence`): sources `"agent"` (ManagedAgent heartbeat), `"probe"` (answering monitor probe), `"ping"` (ICMP fallback). Ping failure writes nothing.
+- `src/services/presenceVerificationService.ts → runPresenceVerification` — AD/Entra post-sync pass (default on, `config.verifyPresence`): sources `"agent"` (ManagedAgent heartbeat), `"probe"` (answering monitor probe via `lastMonitorAt`), `"ping"` (ICMP fallback). Ping failure writes nothing. Now that the hot path stamps `"probe"` directly, monitored assets typically hit the "already fresh" short-circuit here.
 - `src/api/routes/conflicts.ts` — accept path (`"conflict-accept"`, via bumpLastSeen), reject-creates-asset path (`"conflict-reject"`), ghost absorption carries the ghost's source along.
 - `src/services/assetMergeService.ts` + `src/jobs/mergeDuplicateHostnameAssets.ts` — max(lastSeen) winner carries its `lastSeenSource` onto the survivor.
 
@@ -605,9 +627,10 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/services/presenceVerificationService.ts → classifyPresenceSignal` — "already fresh" short-circuit reads it.
 
 **Invariants:**
-- Never write `Asset.lastSeen` / `lastSeenSource` directly — route through `bumpLastSeen(data, existing, evidenceAt, source)`. Creates may set both literally (nothing to regress).
+- Never write `Asset.lastSeen` / `lastSeenSource` directly — route through `bumpLastSeen(data, existing, evidenceAt, source)`. The ONE exception is the monitor hot path (`recordProbeResult` → `probePatchBuffer`), which stamps `"probe"` on success through the bulk UPDATE; the buffer's COALESCE provides the same no-regress guarantee on the failed-probe path.
+- For monitored assets, polling wins: `bumpLastSeen` returns false for `discovery`/`device-inventory`/`dhcp-lease` when `existing.monitored === true`. Pass an `existing` that carries `monitored` from discovery call sites (the sync preloads all asset scalar fields, so it does).
 - lastSeen never moves backward. A stale evidence source (FortiOS remembering a device from weeks ago) must not regress a fresher sighting.
-- Absence of evidence is not evidence of absence: failed pings, offline inventory rows, and disconnected switch/AP entries leave lastSeen (and status) untouched.
+- Absence of evidence is not evidence of absence: failed pings, offline inventory rows, disconnected switch/AP entries, and failed probes leave lastSeen (and status) untouched.
 - Presence evidence gates resurrection: only an online sighting may flip `decommissioned → active`.
 - `clampAcquiredToLastSeen` still applies after any bump (acquiredAt ≤ lastSeen).
 
@@ -2952,7 +2975,7 @@ Listed alphabetically.
 
 ## services/probePatchBuffer.ts
 
-**What it owns:** Batching buffer for per-probe Asset state writes (`monitorStatus`, `consecutiveFailures`/`Successes`, `lastMonitorAt`, `lastResponseTimeMs`) — collapses N per-tick `Asset.update`s into one bulk `UPDATE … FROM (VALUES …)` per ~2 s window with last-write-wins merge.
+**What it owns:** Batching buffer for per-probe Asset state writes (`monitorStatus`, `consecutiveFailures`/`Successes`, `lastMonitorAt`, `lastResponseTimeMs`, `lastUptimeSec`, `lastRebootAt`, and on a successful probe `lastSeen`/`lastSeenSource = "probe"`) — collapses N per-tick `Asset.update`s into one bulk `UPDATE … FROM (VALUES …)` per ~2 s window with last-write-wins merge. `monitorStatusChangedAt`, `lastUptimeSec`, `lastRebootAt`, `lastSeen`, and `lastSeenSource` are merge-preserved + flushed via `COALESCE(v.x, t.x)` so a probe that didn't carry a transition / uptime / reboot / success keeps the prior DB value instead of NULL-erasing it. The `lastSeen`/`lastSeenSource` columns make this the presence authority for monitored assets (see cross-cutting/asset-last-seen-presence); a failed probe omits them and freezes presence at the last successful poll.
 
 **Public API:** `enqueueProbePatch`, `getPendingProbePatch`, `flushProbePatchBuffer`, `startProbePatchBuffer`, `shutdownFlushProbePatchBuffer`, `ProbePatch`, `FLUSH_INTERVAL_MS`
 
@@ -2961,7 +2984,7 @@ Listed alphabetically.
 **Used by:** `src/services/monitoringService.ts` (`recordProbeResult` enqueues + overlays the pending patch for read-your-writes), `src/app.ts` (boot start + SIGTERM drain).
 
 **Invariants:**
-- Last-write-wins per asset within a window EXCEPT `monitorStatusChangedAt`, which is preserved on merge when the new patch omits it.
+- Last-write-wins per asset within a window EXCEPT `monitorStatusChangedAt`, `lastUptimeSec`, `lastRebootAt`, `lastSeen`, and `lastSeenSource`, which are preserved on merge when the new patch omits them (so a failed probe doesn't erase a successful probe's presence/uptime stamps within the same window).
 - Read-your-writes: `recordProbeResult` overlays the pending patch before running the state machine; re-entrant safe (concurrent enqueues during flush land in a fresh buffer); on flush failure the snapshot is re-prepended only for assets not already overwritten.
 - A size threshold triggers an early flush; the shutdown hook must drain before process exit.
 
@@ -3298,6 +3321,28 @@ Listed alphabetically.
 - Test large fleet performance (blocks query with full subnet tree may be slow with 100k+ subnets)
 - Verify usagePercent calculation (allocatedAddresses / blockAddresses) matches business intent
 - Check that deprecated subnets are correctly filtered from block capacity
+
+---
+
+## services/nocDashboardService.ts
+
+**What it owns:** Fleet-wide read-only aggregates for the SolarWinds-style NOC dashboard widgets, surfaced via `GET /dashboard/noc-summary`.
+
+**Public API:** `getStatusSummary`, `getDownNodes`, `getHighestCpu`, `getHighestMemory`, `getSlowestResponse`, `getPacketLoss`, `getStalePolls`, `getRecentReboots`, `getRecentAlerts`, `getSitesWithIssues` (+ exported result interfaces).
+
+**Used by:** `src/api/routes/dashboard.ts` (`/dashboard/noc-summary`, all sections fanned out in one `Promise.all`). Frontend NOC widgets read the combined payload via `PolarisWidgets.getNocSummary()` (15s memoized) in `public/js/widgets/`.
+
+**Reads:** `Asset` (monitorStatus, monitored, dependencySuppressed, assetType, location/learnedLocation/snmpLocation, department, lastResponseTimeMs, lastMonitorAt, latitude/longitude); `asset_telemetry_samples` + `asset_monitor_samples` hypertables (read-only DISTINCT-ON / groupBy, never write/delete); `Event` (`device.reboot` for reboots, `levelRank>=1` for active alerts). Calls `monitoringService.resolveMonitorSettings` for stale-poll cadence.
+
+**Invariants:**
+- `activeAlertCount` uses the EXACT `monitorAlerts` where-clause (`monitored, monitorStatus in [warning,down], dependencySuppressed:false`) so the tile count and the alert list agree.
+- Top-N CPU/Memory and packet-loss windows scan only recent (chunk-excluded) hypertable rows via a `now() - interval` predicate; names hydrated in ONE `findMany` (no per-row lookup). Never row-DELETE/UPDATE the sample tables.
+- `getStalePolls` pre-filters with `@@index([monitored, lastMonitorAt])` then resolves the exact cadence per candidate via the cached `resolveMonitorSettings` — don't reimplement the tier hierarchy; suppressed assets use 2× interval (mirrors monitorAssets).
+- `getSitesWithIssues` coalesces `location > learnedLocation > snmpLocation > "(unknown)"`; the same coalesce key buckets the node detail rows.
+
+**When changing this:**
+- Scale-check at 2000 assets — keep every feed to groupBy/count/one windowed aggregate/one bounded findMany.
+- Recent Reboots depends on `device.reboot` Events emitted by `recordProbeResult` (sysUptime drop) — see cross-cutting reboot-detection notes; the widget never scans the hypertable.
 
 ---
 

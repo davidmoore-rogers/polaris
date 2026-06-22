@@ -109,6 +109,7 @@ import {
 import { propagateAfterStatusChange } from "./dependencyTreeService.js";
 import { triggerRetryAfterStatusChange } from "./reservationService.js";
 import { recordIpHistoryEntries } from "./assetIpHistoryService.js";
+import { snmpTicksToSeconds } from "../utils/uptime.js";
 
 export interface ProbeResult {
   success: boolean;
@@ -116,6 +117,15 @@ export interface ProbeResult {
   responseTimeMs: number;
   /** Short human-readable reason on failure; null on success. */
   error?: string;
+  /**
+   * Device uptime in whole seconds, when the probe transport can supply it
+   * for free: SNMP sysUpTime (read as the reachability OID anyway), FortiOS
+   * system status, and the Polaris Agent (host.Uptime via the responseTime
+   * stream). undefined for transports that don't report it (ICMP/SSH/WinRM).
+   * recordProbeResult stamps Asset.lastUptimeSec + drives reboot detection
+   * (lastRebootAt + device.reboot Event) from it.
+   */
+  uptimeSec?: number;
 }
 
 /**
@@ -133,6 +143,8 @@ export interface AssetMonitorSnapshot {
   assetType: string;
   monitored: boolean;
   monitorStatus: string | null;
+  /** Last SNMP sysUpTime reading (whole seconds); drives reboot detection. */
+  lastUptimeSec?: number | null;
   consecutiveFailures: number;
   consecutiveSuccesses: number;
   discoveredByIntegrationId: string | null;
@@ -1886,11 +1898,36 @@ async function probeFortinet(
   };
 
   try {
-    await fgRequest<unknown>(fgConfig, "GET", "/api/v2/monitor/system/status", { timeoutMs });
-    return finish(start, true);
+    // /api/v2/monitor/system/status doubles as our liveness check; capture
+    // the body so we can read device uptime for free instead of discarding it.
+    const res = await fgRequest<any>(fgConfig, "GET", "/api/v2/monitor/system/status", { timeoutMs });
+    const ok = finish(start, true);
+    const up = fortinetUptimeSecondsFromStatus(res);
+    if (up !== null) ok.uptimeSec = up;
+    return ok;
   } catch (err: any) {
     return finish(start, false, err?.message || "FortiOS request failed");
   }
+}
+
+/**
+ * Pull device uptime (seconds) from a FortiOS /api/v2/monitor/system/status
+ * response. FortiOS surfaces uptime under a few shapes across versions; we
+ * probe the known candidates and treat any plain number as seconds.
+ *
+ * VERIFY on a real FortiOS 7.x device — confirm which field is populated and
+ * its unit (compare against `get system performance status`). If system/status
+ * doesn't carry uptime on the deployed version, move this capture into
+ * collectTelemetryFortinet (which already calls resource/usage) instead.
+ */
+function fortinetUptimeSecondsFromStatus(res: any): number | null {
+  if (res == null || typeof res !== "object") return null;
+  const candidates = [res.uptime, res.results?.uptime, res.results?.system_uptime, res.system_uptime];
+  for (const c of candidates) {
+    const n = typeof c === "number" ? c : Number(c);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  return null;
 }
 
 // ─── Fortinet controller-status probe (managed switches & APs) ──────────────
@@ -2943,7 +2980,13 @@ async function probeSnmp(host: string, config: Record<string, unknown>, start: n
         if (snmp.isVarbindError(vb)) {
           return finishOnce(finish(start, false, snmp.varbindError(vb)));
         }
-        finishOnce(finish(start, true));
+        // sysUpTime is TimeTicks (hundredths of a second since boot) — capture
+        // it for free (the probe already fetched it for the liveness check);
+        // drives reboot detection. snmpTicksToSeconds ignores non-finite/neg.
+        const ok = finish(start, true);
+        const up = snmpTicksToSeconds(vb?.value);
+        if (up !== null) ok.uptimeSec = up;
+        finishOnce(ok);
       });
     } catch (err: any) {
       clearTimeout(timer);
@@ -3154,6 +3197,8 @@ export interface TelemetrySample {
   memPct?:        number | null;
   memUsedBytes?:  number | null;
   memTotalBytes?: number | null;
+  /** Active session count (FortiGate only). Null for every other source. */
+  sessionCount?:  number | null;
 }
 
 export interface InterfaceSample {
@@ -4125,7 +4170,10 @@ async function collectTelemetryFortinet(host: string, integration: { type: strin
   const res = await fgRequest<any>(fg, "GET", "/api/v2/monitor/system/resource/usage", { query: { scope: "global" }, timeoutMs });
   const cpuPct = pickFortinetUsage(res?.cpu);
   const memPct = pickFortinetUsage(res?.mem ?? res?.memory);
-  return { cpuPct, memPct, memUsedBytes: null, memTotalBytes: null };
+  // Session count rides the same response. It's an absolute count, not a
+  // percentage — pull it without the 0-100 clamp.
+  const sessionCount = pickFortinetUsage(res?.session, false);
+  return { cpuPct, memPct, memUsedBytes: null, memTotalBytes: null, sessionCount };
 }
 
 // FortiOS exposes temperature, fan, voltage, and power sensors at one endpoint.
@@ -4156,18 +4204,23 @@ async function collectHardwareSensorsFortinet(fg: FortiGateConfig, timeoutMs?: n
   return list;
 }
 
-function pickFortinetUsage(node: unknown): number | null {
+// Extract the freshest gauge value from a FortiOS resource/usage node.
+// `clamp` (default true) folds the value into 0-100 for percentages (cpu/mem);
+// pass false for absolute counts (e.g. session count).
+function pickFortinetUsage(node: unknown, clamp = true): number | null {
+  const conv = (n: number): number | null =>
+    clamp ? clampPct(n) : (Number.isFinite(n) ? n : null);
   if (node == null) return null;
   // Flat number?
-  if (typeof node === "number" && Number.isFinite(node)) return clampPct(node);
+  if (typeof node === "number" && Number.isFinite(node)) return conv(node);
   // Object with `current`?
   if (typeof node === "object" && !Array.isArray(node)) {
     const obj = node as Record<string, unknown>;
-    if (typeof obj.current === "number") return clampPct(obj.current);
+    if (typeof obj.current === "number") return conv(obj.current);
     // historical may be the freshest; take the last entry
     if (Array.isArray(obj.historical) && obj.historical.length > 0) {
       const last = obj.historical[obj.historical.length - 1];
-      if (typeof last === "number") return clampPct(last);
+      if (typeof last === "number") return conv(last);
     }
   }
   // Array of {interval, current, historical} — pick the entry with shortest
@@ -4176,10 +4229,10 @@ function pickFortinetUsage(node: unknown): number | null {
     const sorted = [...node].sort((a, b) => intervalRank(a?.interval) - intervalRank(b?.interval));
     for (const entry of sorted) {
       if (entry == null) continue;
-      if (typeof entry.current === "number") return clampPct(entry.current);
+      if (typeof entry.current === "number") return conv(entry.current);
       if (Array.isArray(entry.historical) && entry.historical.length > 0) {
         const last = entry.historical[entry.historical.length - 1];
-        if (typeof last === "number") return clampPct(last);
+        if (typeof last === "number") return conv(last);
       }
     }
   }
@@ -6673,6 +6726,7 @@ export async function recordTelemetryResult(assetId: string, result: CollectionR
       memPct:        d.memPct ?? null,
       memUsedBytes:  d.memUsedBytes  != null ? BigInt(Math.round(d.memUsedBytes))  : null,
       memTotalBytes: d.memTotalBytes != null ? BigInt(Math.round(d.memTotalBytes)) : null,
+      sessionCount:  d.sessionCount ?? null,
     });
   }
   // Always advance the cadence stamp so a transient failure doesn't make us
@@ -7788,6 +7842,7 @@ export async function recordProbeResult(
       assetType: true,
       monitored: true,
       monitorStatus: true,
+      lastUptimeSec: true,
       consecutiveFailures: true,
       consecutiveSuccesses: true,
       discoveredByIntegrationId: true,
@@ -7884,12 +7939,21 @@ export async function recordProbeResult(
   // window into one createMany. Cuts per-probe pool acquisitions from
   // (read + create + update) to (read + update); the sample inserts
   // collapse from N individual creates to one createMany per flush.
+  // Reboot detection: the SNMP probe reads sysUpTime as its reachability OID;
+  // a decrease vs. the last reading means the device rebooted between probes.
+  // A small tolerance avoids false positives from counter wrap / clock skew on
+  // a flat reading. Only meaningful when this probe carried an uptime value.
+  const uptimeSec = result.success && typeof result.uptimeSec === "number" ? result.uptimeSec : null;
+  const prevUptimeSec = asset.lastUptimeSec ?? null;
+  const rebooted = uptimeSec !== null && prevUptimeSec !== null && uptimeSec < prevUptimeSec - 60;
+
   enqueueMonitorSample({
     assetId,
     timestamp: now,
     success: result.success,
     responseTimeMs: result.success ? result.responseTimeMs : null,
     error: result.success ? null : (result.error ?? null),
+    uptimeSec,
   });
 
   // Buffer the state write — the periodic flush in probePatchBuffer collapses
@@ -7911,7 +7975,35 @@ export async function recordProbeResult(
     consecutiveFailures: newCf,
     consecutiveSuccesses: newCs,
     monitorStatusChangedAt: previousStatus !== nextStatus ? now : undefined,
+    // Advance the stored uptime to this reading (undefined leaves it
+    // untouched on probes that didn't report uptime — see the COALESCE in
+    // probePatchBuffer); stamp the reboot timestamp only when a drop was
+    // detected this tick.
+    lastUptimeSec: uptimeSec ?? undefined,
+    lastRebootAt: rebooted ? now : undefined,
+    // Presence: a successful probe IS the authoritative "last online" signal
+    // for a monitored asset (bumpLastSeen defers discovery-origin evidence on
+    // monitored assets to this). `now` is always the freshest evidence, so set
+    // unconditionally on success; a failed probe leaves both undefined so the
+    // flush COALESCE freezes lastSeen at the last successful poll.
+    lastSeen: result.success ? now : undefined,
+    lastSeenSource: result.success ? "probe" : undefined,
   });
+
+  // Reboot is an edge-triggered audit event, like monitor.status_changed.
+  // resourceName/details carry hostname + IP so the Recent Reboots widget can
+  // render without re-reading the Asset.
+  if (rebooted) {
+    logEvent({
+      action: "device.reboot",
+      resourceType: "asset",
+      resourceId: assetId,
+      resourceName: asset.hostname || undefined,
+      level: "warning",
+      message: `Reboot detected: ${asset.hostname || assetId} uptime ${prevUptimeSec}s → ${uptimeSec}s`,
+      details: { hostname: asset.hostname ?? null, previousUptimeSec: prevUptimeSec, uptimeSec },
+    });
+  }
 
   // Edge-triggered audit events. We log on the transition INTO up / warning /
   // down — never per-poll (up→up, warning→warning, etc. don't fire because

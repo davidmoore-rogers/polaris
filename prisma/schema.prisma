@@ -639,6 +639,17 @@ model Asset {
   monitorStatusChangedAt   DateTime?
   lastMonitorAt            DateTime?
   lastResponseTimeMs       Int?
+  // Last device-uptime reading (whole seconds) captured on the probe path,
+  // and the timestamp Polaris last detected that reading decrease (a reboot).
+  // Captured from SNMP sysUpTime, FortiOS system status, and the Polaris
+  // Agent (host.Uptime via the responseTime stream). lastUptimeSec is
+  // compared against the next probe's reading in recordProbeResult; a
+  // decrease stamps lastRebootAt=now and emits a device.reboot Event. Both
+  // null for assets whose probe transport never reports uptime
+  // (ICMP/SSH/WinRM). The System-tab Uptime row renders the live value
+  // (lastUptimeSec + elapsed since lastMonitorAt) + the lastRebootAt "since".
+  lastUptimeSec            Int?
+  lastRebootAt             DateTime?
   consecutiveFailures      Int         @default(0)
   // Counts probe successes since the last failure. Drives the
   // pending/warning -> up transition: an asset stays in pending or warning
@@ -693,6 +704,12 @@ model Asset {
   eventLogTimeoutMs      Int?
   lastTelemetryAt       DateTime?
   lastSystemInfoAt      DateTime?
+  // Management-access summary read during discovery for Fortinet devices:
+  // { source, interfaceName, profileName, mgmtIp, protocols: string[],
+  //   https, ssh, snmp, checkedAt }. Drives the asset slide-over's Open HTTPS /
+  //   Open SSH buttons and the FortiAP "SNMP not enabled in profile" warning.
+  // Monitor/discovery-owned (like lastSystemInfoAt), never projected from AssetSource.
+  managementAccess      Json?
   // Per-cadence last-touched stamps for the LLDP + Storage queues. Bumped by
   // runLldpFor / runStorageFor on every successful pass; publisher reads them
   // to decide when the next job is due.
@@ -840,6 +857,12 @@ model AssetMonitorSample {
   success        Boolean
   responseTimeMs Int?
   error          String?  @db.Text
+  // Device sysUpTime at probe time, in whole seconds (SNMP probes only; null
+  // for ICMP/TCP/REST probes that don't read sysUpTime). A decrease between
+  // consecutive samples is the reboot signal — see Asset.lastRebootAt and the
+  // device.reboot Event emitted by recordProbeResult. Nullable column added
+  // post-hoc; safe on the TimescaleDB hypertable (no row rewrite).
+  uptimeSec      Int?
 
   // Composite PK (id, timestamp) — required by TimescaleDB hypertables to
   // include the partitioning column. Works fine on plain Postgres too;
@@ -866,6 +889,10 @@ model AssetTelemetrySample {
   memPct        Float?
   memUsedBytes  BigInt?
   memTotalBytes BigInt?
+  // Active session count (FortiGate only — read from the same
+  // /api/v2/monitor/system/resource/usage `session` resource the CPU/mem
+  // collector already fetches). Null for every other source.
+  sessionCount  Float?
 
   @@id([id, timestamp])
   @@index([assetId, timestamp])
@@ -1596,6 +1623,9 @@ model AssetTelemetrySampleHourly {
   // last-seen total (memory size is effectively a constant per host;
   // tracking last value rather than avg keeps the chart axis stable).
   lastMemTotalBytes BigInt?
+  avgSessionCount   Float?
+  minSessionCount   Float?
+  maxSessionCount   Float?
 
   @@id([id, bucketStart])
   @@unique([bucketStart, assetId])
@@ -1617,6 +1647,9 @@ model AssetTelemetrySampleDaily {
   avgMemUsedBytes   BigInt?
   maxMemUsedBytes   BigInt?
   lastMemTotalBytes BigInt?
+  avgSessionCount   Float?
+  minSessionCount   Float?
+  maxSessionCount   Float?
 
   @@id([id, bucketStart])
   @@unique([bucketStart, assetId])

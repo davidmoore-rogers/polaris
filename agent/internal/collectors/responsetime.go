@@ -19,6 +19,8 @@ package collectors
 import (
 	"time"
 
+	"github.com/shirou/gopsutil/v3/host"
+
 	"github.com/polaris/agent/internal/transport"
 )
 
@@ -45,6 +47,14 @@ func ResponseTimeOnce(probe func() error) *transport.ResponseTimeSample {
 	} else {
 		msg := err.Error()
 		sample.Error = &msg
+	}
+
+	// Host uptime rides the response-time push (server stamps it onto
+	// Asset.lastUptimeSec + reboot detection via the same recordProbeResult
+	// path SNMP/FortiOS use). Reported even on a failed probe — the host is
+	// clearly up if the agent ran.
+	if up, uerr := host.Uptime(); uerr == nil {
+		sample.UptimeSec = &up
 	}
 	return sample
 }

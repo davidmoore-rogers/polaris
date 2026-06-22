@@ -59,6 +59,8 @@ export interface MonitorSampleRow {
   success: boolean;
   responseTimeMs: number | null;
   error: string | null;
+  /** Device sysUpTime in whole seconds (SNMP probes only); null otherwise. */
+  uptimeSec?: number | null;
 }
 
 export interface TelemetrySampleRow {
@@ -68,6 +70,7 @@ export interface TelemetrySampleRow {
   memPct: number | null;
   memUsedBytes: bigint | null;
   memTotalBytes: bigint | null;
+  sessionCount: number | null;
 }
 
 export interface HardwareSensorSampleRow {

@@ -1,0 +1,52 @@
+/**
+ * widgets/topCpu.js — top-N monitored assets by latest CPU%. Thin wrapper over
+ * the shared _topnBar renderer; data from /dashboard/noc-summary topCpu[].
+ */
+
+(function () {
+  var THRESHOLDS = [{ over: 90, color: "#ff1744" }, { over: 75, color: "#ffd600" }];
+  var EMPTY = "No CPU telemetry";
+
+  function render(el, config, rows) {
+    PolarisTopN.renderRows(el, rows || [], {
+      unit: "%", thresholds: THRESHOLDS, baseColor: "#4fc3f7", emptyText: EMPTY, config: config || {},
+    });
+  }
+
+  PolarisWidgets.register({
+    type: "topCpu",
+    label: "Highest CPU",
+    description: "Monitored assets with the highest recent CPU load.",
+    defaultSize: { width: 4, height: 1 },
+    minSize: { width: 3, height: 1 },
+    defaultConfig: { rowLimit: 5, threshold: null },
+    requiredPermission: { key: "assets", level: "read" },
+
+    fetchData: function () {
+      return PolarisWidgets.getNocSummary().then(function (d) { return (d && d.topCpu) || []; }).catch(function () { return []; });
+    },
+
+    renderInstance: function (el, config, data, ctx) {
+      render(el, config, data);
+      var timer = setInterval(function () {
+        PolarisWidgets.getNocSummary().then(function (d) { render(el, config, (d && d.topCpu) || []); }).catch(function () {});
+      }, 60000);
+      ctx.onUnmount(function () { clearInterval(timer); });
+    },
+
+    renderPreview: function (el) {
+      render(el, { rowLimit: 3 }, [
+        { id: "p1", hostname: "core-sw-01", value: 93 },
+        { id: "p2", hostname: "edge-fw-02", value: 78 },
+        { id: "p3", hostname: "app-srv-11", value: 54 },
+      ]);
+    },
+
+    renderConfig: function (el, config, onChange) {
+      PolarisTopN.renderConfig(el, config, onChange, {
+        thresholdLabel: "Hide below %",
+        thresholdOptions: [{ value: "", label: "Show all" }, { value: 50, label: "50%" }, { value: 75, label: "75%" }, { value: 90, label: "90%" }],
+      });
+    },
+  });
+})();

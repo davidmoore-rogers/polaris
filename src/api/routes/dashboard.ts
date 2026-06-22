@@ -12,6 +12,7 @@
 import { Router } from "express";
 import { prisma } from "../../db.js";
 import * as utilizationService from "../../services/utilizationService.js";
+import * as nocDashboardService from "../../services/nocDashboardService.js";
 import { ensureSessionRoleSnapshot, hasPermission } from "../middleware/permissions.js";
 
 const router = Router();
@@ -104,6 +105,59 @@ router.get("/summary", async (req, res, next) => {
       })),
       monitorAlerts,
       monitorAlertsOverflow: overflow,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /noc-summary — one round-trip feed for the SolarWinds-style NOC widgets.
+ * Same filter-don't-403 contract as /summary: asset-sourced sections gate on
+ * assets:read, Event-sourced sections (active alerts, recent reboots) gate on
+ * events:read; denied sections return empty/zero with the shape unchanged.
+ */
+router.get("/noc-summary", async (req, res, next) => {
+  try {
+    await ensureSessionRoleSnapshot(req);
+    const canAssets = hasPermission(req, "assets", "read");
+    const canEvents = hasPermission(req, "events", "read");
+
+    const emptyStatus = {
+      statusCounts: { total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0 },
+      uptimePercent: null as number | null,
+      activeAlertCount: 0,
+    };
+
+    const [
+      status, downNodes, topCpu, topMemory, slowestResponse, packetLoss, stalePolls, sitesWithIssues,
+      recentReboots, activeAlerts,
+    ] = await Promise.all([
+      canAssets ? nocDashboardService.getStatusSummary()    : Promise.resolve(emptyStatus),
+      canAssets ? nocDashboardService.getDownNodes()        : Promise.resolve({ nodes: [], total: 0 }),
+      canAssets ? nocDashboardService.getHighestCpu()       : Promise.resolve([]),
+      canAssets ? nocDashboardService.getHighestMemory()    : Promise.resolve([]),
+      canAssets ? nocDashboardService.getSlowestResponse()  : Promise.resolve([]),
+      canAssets ? nocDashboardService.getPacketLoss()       : Promise.resolve([]),
+      canAssets ? nocDashboardService.getStalePolls()       : Promise.resolve([]),
+      canAssets ? nocDashboardService.getSitesWithIssues()  : Promise.resolve([]),
+      canEvents ? nocDashboardService.getRecentReboots()    : Promise.resolve([]),
+      canEvents ? nocDashboardService.getRecentAlerts()     : Promise.resolve([]),
+    ]);
+
+    res.json({
+      statusCounts:     status.statusCounts,
+      uptimePercent:    status.uptimePercent,
+      activeAlertCount: status.activeAlertCount,
+      downNodes:        downNodes.nodes,
+      topCpu,
+      topMemory,
+      slowestResponse,
+      packetLoss,
+      stalePolls,
+      recentReboots,
+      activeAlerts,
+      sitesWithIssues,
     });
   } catch (err) {
     next(err);

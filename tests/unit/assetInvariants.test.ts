@@ -74,4 +74,42 @@ describe("bumpLastSeen", () => {
     expect(bumpLastSeen(data, { lastSeen: T0 }, "not-a-date", "ping")).toBe(false);
     expect("lastSeen" in data).toBe(false);
   });
+
+  describe("monitored assets — polling is authoritative", () => {
+    it("defers discovery-origin sources on a monitored asset", () => {
+      for (const source of ["discovery", "device-inventory", "dhcp-lease"]) {
+        const data: Record<string, unknown> = {};
+        const applied = bumpLastSeen(data, { lastSeen: T0, monitored: true }, T2, source);
+        expect(applied, source).toBe(false);
+        expect("lastSeen" in data, source).toBe(false);
+        expect("lastSeenSource" in data, source).toBe(false);
+      }
+    });
+
+    it("still lets the monitor probe advance lastSeen on a monitored asset", () => {
+      const data: Record<string, unknown> = {};
+      expect(bumpLastSeen(data, { lastSeen: T0, monitored: true }, T2, "probe")).toBe(true);
+      expect(data.lastSeen).toEqual(T2);
+      expect(data.lastSeenSource).toBe("probe");
+    });
+
+    it("lets active/operator sources through on a monitored asset", () => {
+      for (const source of ["agent", "ping", "conflict-accept"]) {
+        const data: Record<string, unknown> = {};
+        expect(bumpLastSeen(data, { lastSeen: T0, monitored: true }, T2, source), source).toBe(true);
+      }
+    });
+
+    it("does not defer discovery-origin sources on an UNmonitored asset", () => {
+      const data: Record<string, unknown> = {};
+      expect(bumpLastSeen(data, { lastSeen: T0, monitored: false }, T2, "device-inventory")).toBe(true);
+      expect(data.lastSeen).toEqual(T2);
+    });
+
+    it("does not defer when monitored is absent (back-compat)", () => {
+      const data: Record<string, unknown> = {};
+      expect(bumpLastSeen(data, { lastSeen: T0 }, T2, "device-inventory")).toBe(true);
+      expect(data.lastSeen).toEqual(T2);
+    });
+  });
 });

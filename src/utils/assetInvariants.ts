@@ -42,6 +42,17 @@ export type LastSeenSource =
   | "conflict-reject";  // separate asset created from a rejected conflict's proposed values
 
 /**
+ * Discovery-origin evidence sources. For a MONITORED asset these must not
+ * advance lastSeen — the monitor probe is the sole authority for presence
+ * (the "use polling to determine last online" rule). A monitored device that's
+ * failing its probe keeps lastSeen frozen at its last successful poll even if a
+ * FortiGate still remembers it online in device inventory / a held lease / a
+ * remembered-connected controller entry. Active/operator sources (probe, agent,
+ * ping, conflict-*) are never deferred — they ARE the polling/operator signal.
+ */
+const POLLING_DEFERRED_SOURCES = new Set<string>(["discovery", "device-inventory", "dhcp-lease"]);
+
+/**
  * Single write path for Asset.lastSeen: advance it to `evidenceAt` (stamping
  * `lastSeenSource` alongside) only when the evidence is newer than what the
  * row already holds. lastSeen never moves backward — a stale evidence source
@@ -49,17 +60,20 @@ export type LastSeenSource =
  * fresher sighting from another source.
  *
  * Mutates `data` (the pending update payload). `existing` supplies the
- * current row value; pass null/omit for creates. Returns true when the bump
- * was applied.
+ * current row value (and `monitored` flag); pass null/omit for creates.
+ * Returns true when the bump was applied.
  */
 export function bumpLastSeen(
   data: Record<string, unknown>,
-  existing: { lastSeen?: DateLike } | null | undefined,
+  existing: { lastSeen?: DateLike; monitored?: boolean } | null | undefined,
   evidenceAt: Date | string,
   source: LastSeenSource | string,
 ): boolean {
   const ev = evidenceAt instanceof Date ? evidenceAt : new Date(evidenceAt);
   if (Number.isNaN(ev.getTime())) return false;
+  // Polling is authoritative for monitored assets: discovery-origin evidence
+  // can't advance lastSeen. The monitor probe (source "probe") owns it.
+  if (existing?.monitored === true && POLLING_DEFERRED_SOURCES.has(source)) return false;
   // The freshest value already staged on this payload wins over the row.
   const stagedRaw = "lastSeen" in data ? (data.lastSeen as DateLike) : null;
   const currentRaw = stagedRaw ?? existing?.lastSeen ?? null;

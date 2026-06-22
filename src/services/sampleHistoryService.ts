@@ -186,11 +186,17 @@ export interface TelemetryHistoryRow {
   memPct:           number | null;
   memUsedBytes:     number | null;
   memTotalBytes:    number | null;
+  // FortiGate active session count (null for other sources). On detail tier
+  // this is the raw value; on rollup tiers it's the bucket average, with
+  // min/max alongside.
+  sessionCount?:    number | null;
   sampleCount?:     number;
   minCpuPct?:       number | null;
   maxCpuPct?:       number | null;
   minMemPct?:       number | null;
   maxMemPct?:       number | null;
+  minSessionCount?: number | null;
+  maxSessionCount?: number | null;
 }
 
 export interface TelemetryHistoryResult {
@@ -217,7 +223,7 @@ export async function readTelemetryHistory(
     const samples = await prisma.assetTelemetrySample.findMany({
       where: { assetId, timestamp: { gte: queryFrom, lte: until } },
       orderBy: { timestamp: "asc" },
-      select: { timestamp: true, cpuPct: true, memPct: true, memUsedBytes: true, memTotalBytes: true },
+      select: { timestamp: true, cpuPct: true, memPct: true, memUsedBytes: true, memTotalBytes: true, sessionCount: true },
     });
     const rows: TelemetryHistoryRow[] = samples.map((s) => ({
       timestamp:     s.timestamp,
@@ -225,6 +231,7 @@ export async function readTelemetryHistory(
       memPct:        s.memPct,
       memUsedBytes:  bn(s.memUsedBytes),
       memTotalBytes: bn(s.memTotalBytes),
+      sessionCount:  s.sessionCount,
     }));
     const visible = rows.filter((r) => r.timestamp.getTime() >= sinceMs);
     const cpus = visible.map((r) => r.cpuPct).filter((x): x is number => typeof x === "number");
@@ -251,11 +258,13 @@ export async function readTelemetryHistory(
     avgMemUsedBytes: bigint | null;
     maxMemUsedBytes: bigint | null;
     lastMemTotalBytes: bigint | null;
+    avgSessionCount: number | null; minSessionCount: number | null; maxSessionCount: number | null;
   }>>(
     `SELECT "bucketStart", "sampleCount",
             "avgCpuPct", "minCpuPct", "maxCpuPct",
             "avgMemPct", "minMemPct", "maxMemPct",
-            "avgMemUsedBytes", "maxMemUsedBytes", "lastMemTotalBytes"
+            "avgMemUsedBytes", "maxMemUsedBytes", "lastMemTotalBytes",
+            "avgSessionCount", "minSessionCount", "maxSessionCount"
      FROM "${table}"
      WHERE "assetId" = $1 AND "bucketStart" >= $2 AND "bucketStart" <= $3
      ORDER BY "bucketStart" ASC`,
@@ -279,11 +288,14 @@ export async function readTelemetryHistory(
       memPct:        r.avgMemPct,
       memUsedBytes:  bn(r.avgMemUsedBytes),
       memTotalBytes: bn(r.lastMemTotalBytes),
+      sessionCount:  r.avgSessionCount,
       sampleCount:   r.sampleCount,
       minCpuPct:     r.minCpuPct,
       maxCpuPct:     r.maxCpuPct,
       minMemPct:     r.minMemPct,
       maxMemPct:     r.maxMemPct,
+      minSessionCount: r.minSessionCount,
+      maxSessionCount: r.maxSessionCount,
     };
   });
   return {

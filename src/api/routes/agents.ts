@@ -174,6 +174,7 @@ const ResponseTimeSampleSchema = z.object({
   success:        z.boolean(),
   responseTimeMs: z.number().int().nullable().optional(), // null = packet loss
   error:          z.string().max(500).nullable().optional(),
+  uptimeSec:      z.number().int().nonnegative().nullable().optional(), // host uptime → Asset.lastUptimeSec + reboot detection
 });
 
 const TelemetrySampleSchema = z.object({
@@ -315,8 +316,8 @@ agentsRouter.post("/samples", async (req, res, next) => {
         await recordProbeResult(
           assetId,
           s.success
-            ? { success: true,  responseTimeMs: s.responseTimeMs ?? 0 }
-            : { success: false, responseTimeMs: 0, error: s.error ?? "Agent reported failure" },
+            ? { success: true,  responseTimeMs: s.responseTimeMs ?? 0, uptimeSec: s.uptimeSec ?? undefined }
+            : { success: false, responseTimeMs: 0, error: s.error ?? "Agent reported failure", uptimeSec: s.uptimeSec ?? undefined },
           null,
           { fromAgent: true },
         );
@@ -332,6 +333,7 @@ agentsRouter.post("/samples", async (req, res, next) => {
           memPct:        s.memPct ?? null,
           memUsedBytes:  s.memUsedBytes  != null ? BigInt(Math.round(s.memUsedBytes))  : null,
           memTotalBytes: s.memTotalBytes != null ? BigInt(Math.round(s.memTotalBytes)) : null,
+          sessionCount:  null, // FortiGate-only metric; agents don't report it
         });
         if (s.temperatures && s.temperatures.length > 0) {
           // The Go agent still posts `temperatures` ({sensorName, celsius}).

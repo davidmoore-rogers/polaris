@@ -48,6 +48,33 @@
     },
   };
 
+  // Shared NOC-summary accessor. Many NOC widgets read the same
+  // /dashboard/noc-summary payload on their own refresh timers; this memoizes
+  // the result for a short TTL and dedupes concurrent in-flight requests so a
+  // dashboard full of NOC widgets makes one fetch per window, not one per
+  // widget. force=true bypasses the cache (used by a widget's manual refresh).
+  var _nocCache = { at: 0, data: null, inflight: null };
+  var NOC_TTL_MS = 15000;
+  window.PolarisWidgets.getNocSummary = function (force) {
+    var now = Date.now();
+    if (!force && _nocCache.data && now - _nocCache.at < NOC_TTL_MS) {
+      return Promise.resolve(_nocCache.data);
+    }
+    if (_nocCache.inflight) return _nocCache.inflight;
+    _nocCache.inflight = api.dashboard.nocSummary()
+      .then(function (data) {
+        _nocCache.at = Date.now();
+        _nocCache.data = data;
+        _nocCache.inflight = null;
+        return data;
+      })
+      .catch(function (err) {
+        _nocCache.inflight = null;
+        throw err;
+      });
+    return _nocCache.inflight;
+  };
+
   // RFC4122 v4 (good-enough; not crypto). Used for widget instance ids.
   window.PolarisWidgets.uuid = function () {
     if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
