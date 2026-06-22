@@ -1427,6 +1427,20 @@ const ASSETS = [
     // ({mode:"names", names:["wan1","wan2"]}). Fast-cadence polling for the
     // two WAN uplinks on top of the regular ~10 min full system-info pass.
     monitoredInterfaces: ["wan1", "wan2"],
+    // Management-access summary read during FMG/FortiGate discovery — drives the
+    // slide-over's Open HTTPS / Open SSH buttons. https + ssh allowed on the
+    // operator-named management interface, so both buttons render.
+    managementAccess: {
+      source: "firewall-interface",
+      interfaceName: "mgmt",
+      profileName: null,
+      mgmtIp: "192.168.1.1",
+      protocols: ["ping", "https", "ssh", "snmp"],
+      https: true,
+      ssh: true,
+      snmp: true,
+      checkedAt: "2026-04-15T10:00:00.000Z",
+    },
     createdAt: "2026-01-20T15:30:00.000Z",
     updatedAt: "2026-01-20T15:30:00.000Z",
   },

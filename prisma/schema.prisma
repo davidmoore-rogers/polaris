@@ -700,6 +700,12 @@ model Asset {
   eventLogTimeoutMs      Int?
   lastTelemetryAt       DateTime?
   lastSystemInfoAt      DateTime?
+  // Management-access summary read during discovery for Fortinet devices:
+  // { source, interfaceName, profileName, mgmtIp, protocols: string[],
+  //   https, ssh, snmp, checkedAt }. Drives the asset slide-over's Open HTTPS /
+  //   Open SSH buttons and the FortiAP "SNMP not enabled in profile" warning.
+  // Monitor/discovery-owned (like lastSystemInfoAt), never projected from AssetSource.
+  managementAccess      Json?
   // Per-cadence last-touched stamps for the LLDP + Storage queues. Bumped by
   // runLldpFor / runStorageFor on every successful pass; publisher reads them
   // to decide when the next job is due.

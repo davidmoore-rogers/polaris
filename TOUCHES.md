@@ -585,6 +585,24 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 ---
 
+## cross-cutting/asset-management-access
+
+**What it is:** `Asset.managementAccess` is a read-only summary of a Fortinet device's management-access (`allowaccess`) config: `{ source, interfaceName, profileName, mgmtIp, protocols: string[] | null, https, ssh, snmp, checkedAt }`. Read during FMG/FortiGate discovery; drives the asset slide-over's Open HTTPS / Open SSH buttons and the FortiAP SNMP-disabled warning. Monitor/discovery-owned — never projected from `AssetSource`.
+
+**Writers** (files that mutate this state):
+- `src/services/fortinetManagementAccessService.ts → collectManagementAccess` — builds the summaries from FortiOS CMDB reads (firewall `system/interface`, FortiAP `wireless-controller/{wtp-profile,wtp}`, FortiSwitch `switch-controller/managed-switch`). Pure parsers exported + unit-tested. Read-only against the device.
+- `src/api/routes/integrations.ts → syncDhcpSubnets` Phase 13.6 — groups discovered firewalls/switches/APs by controller FortiGate, calls `collectManagementAccess`, joins `Map<serial, summary>` to assets via the `AssetSource` rows (externalId === serial), writes in chunked `$transaction` batches. Gated `mode in {full, finalize}`; always-on; FMG/FortiGate only; best-effort.
+
+**Readers** (files that consume it):
+- `public/js/assets.js` — `_assetMgmtAccess` / `_managementAccessButtonsHTML` (footer Open HTTPS + Open SSH split-button) + `_managementAccessNoticeHTML` (AP warning banner). SSH launch via `ssh://[user@]host` URI or copy-command, per-user prefs in localStorage (`polaris.ssh.action`, `polaris.ssh.user`). `managementAccess` rides on the `GET /assets/:id` payload (full-row `include`, no narrowing select).
+
+**Invariants:**
+- Read-only — nothing here writes the device. `protocols: null` means the access list couldn't be read (best-effort switch path); the UI renders buttons optimistically with an "unverified" note rather than hiding them.
+- Firewall management interface is the operator-named `Integration.config.mgmtInterface` (reused, not a new field). FortiSwitch defaults to `internal` (override: `config.switchManagementInterface`).
+- FortiSwitch + FortiAP REST field shapes are **not yet verified on a live FortiOS 7.x device** — keep parsers defensive (never throw; degrade to `protocols: null`).
+
+---
+
 ## cross-cutting/asset-last-seen-presence
 
 **What it is:** `Asset.lastSeen` means **verified network presence** — the last time Polaris had direct evidence the device was alive on the network — with `Asset.lastSeenSource` carrying the evidence label. Every write routes through `src/utils/assetInvariants.ts → bumpLastSeen()` (no-regress: only advances; stamps provenance). Directory timestamps (Entra `lastSyncDateTime`, AD `lastLogonTimestamp`) are deliberately NOT presence — they live on `AssetSource.lastSeen` and render separately as "Last Directory Activity".
