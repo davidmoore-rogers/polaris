@@ -113,6 +113,7 @@ type ResponseTimeSample struct {
 	Success        bool    `json:"success"`
 	ResponseTimeMs *int    `json:"responseTimeMs,omitempty"` // pointer so we can send explicit null on failure
 	Error          *string `json:"error,omitempty"`
+	UptimeSeconds  *uint64 `json:"uptimeSeconds,omitempty"` // host uptime; rides the probe path to Asset.lastUptime*
 }
 
 type SamplesBody struct {

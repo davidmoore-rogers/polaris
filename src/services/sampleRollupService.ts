@@ -290,7 +290,8 @@ function sqlTelemetryHourly(): string {
       "id", "assetId", "bucketStart", "sampleCount",
       "avgCpuPct", "minCpuPct", "maxCpuPct",
       "avgMemPct", "minMemPct", "maxMemPct",
-      "avgMemUsedBytes", "maxMemUsedBytes", "lastMemTotalBytes"
+      "avgMemUsedBytes", "maxMemUsedBytes", "lastMemTotalBytes",
+      "avgSessionCount", "minSessionCount", "maxSessionCount"
     )
     SELECT
       gen_random_uuid()::text,
@@ -300,7 +301,8 @@ function sqlTelemetryHourly(): string {
       AVG("cpuPct"), MIN("cpuPct"), MAX("cpuPct"),
       AVG("memPct"), MIN("memPct"), MAX("memPct"),
       AVG("memUsedBytes")::bigint, MAX("memUsedBytes"),
-      (ARRAY_AGG("memTotalBytes" ORDER BY "timestamp" DESC) FILTER (WHERE "memTotalBytes" IS NOT NULL))[1]
+      (ARRAY_AGG("memTotalBytes" ORDER BY "timestamp" DESC) FILTER (WHERE "memTotalBytes" IS NOT NULL))[1],
+      AVG("sessionCount"), MIN("sessionCount"), MAX("sessionCount")
     FROM "asset_telemetry_samples"
     WHERE "timestamp" >= $1
     GROUP BY "assetId", bucket_start
@@ -314,7 +316,10 @@ function sqlTelemetryHourly(): string {
       "maxMemPct"         = EXCLUDED."maxMemPct",
       "avgMemUsedBytes"   = EXCLUDED."avgMemUsedBytes",
       "maxMemUsedBytes"   = EXCLUDED."maxMemUsedBytes",
-      "lastMemTotalBytes" = EXCLUDED."lastMemTotalBytes"
+      "lastMemTotalBytes" = EXCLUDED."lastMemTotalBytes",
+      "avgSessionCount"   = EXCLUDED."avgSessionCount",
+      "minSessionCount"   = EXCLUDED."minSessionCount",
+      "maxSessionCount"   = EXCLUDED."maxSessionCount"
   `;
 }
 
@@ -325,7 +330,8 @@ function sqlTelemetryDaily(): string {
       "id", "assetId", "bucketStart", "sampleCount",
       "avgCpuPct", "minCpuPct", "maxCpuPct",
       "avgMemPct", "minMemPct", "maxMemPct",
-      "avgMemUsedBytes", "maxMemUsedBytes", "lastMemTotalBytes"
+      "avgMemUsedBytes", "maxMemUsedBytes", "lastMemTotalBytes",
+      "avgSessionCount", "minSessionCount", "maxSessionCount"
     )
     SELECT
       gen_random_uuid()::text,
@@ -340,7 +346,10 @@ function sqlTelemetryDaily(): string {
       MAX("maxMemPct"),
       (SUM("avgMemUsedBytes" * "sampleCount") / NULLIF(SUM("sampleCount"), 0))::bigint,
       MAX("maxMemUsedBytes"),
-      (ARRAY_AGG("lastMemTotalBytes" ORDER BY "bucketStart" DESC) FILTER (WHERE "lastMemTotalBytes" IS NOT NULL))[1]
+      (ARRAY_AGG("lastMemTotalBytes" ORDER BY "bucketStart" DESC) FILTER (WHERE "lastMemTotalBytes" IS NOT NULL))[1],
+      SUM("avgSessionCount" * "sampleCount") / NULLIF(SUM("sampleCount"), 0),
+      MIN("minSessionCount"),
+      MAX("maxSessionCount")
     FROM "asset_telemetry_samples_hourly"
     WHERE "bucketStart" >= $1
     GROUP BY "assetId", bucket_start
@@ -354,7 +363,10 @@ function sqlTelemetryDaily(): string {
       "maxMemPct"         = EXCLUDED."maxMemPct",
       "avgMemUsedBytes"   = EXCLUDED."avgMemUsedBytes",
       "maxMemUsedBytes"   = EXCLUDED."maxMemUsedBytes",
-      "lastMemTotalBytes" = EXCLUDED."lastMemTotalBytes"
+      "lastMemTotalBytes" = EXCLUDED."lastMemTotalBytes",
+      "avgSessionCount"   = EXCLUDED."avgSessionCount",
+      "minSessionCount"   = EXCLUDED."minSessionCount",
+      "maxSessionCount"   = EXCLUDED."maxSessionCount"
   `;
 }
 

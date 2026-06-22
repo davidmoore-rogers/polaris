@@ -1977,6 +1977,21 @@ function formatDate(dateStr) {
   return new Date(dateStr).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+// Compact device-uptime duration: "42d 6h" / "6h 12m" / "12m" / "<1m".
+// Shows the two most-significant non-zero units. Mirror of the server-side
+// formatUptime in src/utils/uptime.ts. Returns "—" for null/invalid input.
+function formatUptime(seconds) {
+  if (seconds == null || !isFinite(seconds) || seconds < 0) return "—";
+  var s = Math.floor(seconds);
+  if (s < 60) return "<1m";
+  var days = Math.floor(s / 86400);
+  var hours = Math.floor((s % 86400) / 3600);
+  var mins = Math.floor((s % 3600) / 60);
+  if (days > 0) return hours > 0 ? days + "d " + hours + "h" : days + "d";
+  if (hours > 0) return mins > 0 ? hours + "h " + mins + "m" : hours + "h";
+  return mins + "m";
+}
+
 function statusBadge(status) {
   return '<span class="badge badge-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>';
 }

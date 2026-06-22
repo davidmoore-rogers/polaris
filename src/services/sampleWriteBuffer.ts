@@ -68,6 +68,7 @@ export interface TelemetrySampleRow {
   memPct: number | null;
   memUsedBytes: bigint | null;
   memTotalBytes: bigint | null;
+  sessionCount: number | null;
 }
 
 export interface HardwareSensorSampleRow {

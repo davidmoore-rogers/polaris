@@ -4357,6 +4357,17 @@ function assetSystemViewHTML(a) {
       'Loading samples…' +
     '</div>' +
     '</div>' +
+    // Active Sessions chart — FortiGate firewalls only. Starts hidden;
+    // _renderSessionsChart reveals it once the telemetry history carries
+    // sessionCount data (and re-hides it for assets that never report it).
+    (a.assetType === "firewall"
+      ? '<div id="asset-system-sessions-section" data-shot-section="sessions" data-shot-label="Active Sessions" data-shot-chart="assetSystem" style="display:none">' +
+          sectionHeader("Active Sessions", telemetryBadgeFull, false) +
+          '<div id="asset-system-sessions-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
+            'Loading samples…' +
+          '</div>' +
+        '</div>'
+      : '') +
     '<div data-shot-section="sensors" data-shot-label="Hardware Sensors">' +
     sectionHeader("Hardware Sensors", temperatureBadgeFull, false) +
     '<div id="asset-system-temps"><span class="empty-state">Loading…</span></div>' +
@@ -4445,6 +4456,8 @@ async function _loadSystemTabFor(assetId, range, asset, opts) {
     }
 
     _renderSystemChart(chart, tel, asset, si);
+    var sessionsChart = document.getElementById("asset-system-sessions-chart");
+    if (sessionsChart) _renderSessionsChart(sessionsChart, tel, asset);
     _renderSystemSummary(summary, tel, si);
     if (!chartOnly) {
       _renderInterfacesTable(ifaces, si, asset);
@@ -6810,6 +6823,101 @@ function _renderSystemChart(container, data, asset, si) {
   _observeChartResize(container, function (c) { _renderSystemChart(c, data, asset, si); });
 }
 
+// FortiGate active-session count chart. Reuses the telemetry-history payload
+// (sessionCount rides the same rows as CPU/mem). Single auto-scaled series —
+// sessions are an absolute count, not a 0-100% gauge. Hides its whole section
+// when the asset reports no sessions (non-FortiGate, or no data in range).
+function _renderSessionsChart(container, data, asset) {
+  var section = document.getElementById("asset-system-sessions-section");
+  var samples = (data && data.samples) || [];
+  var vals = samples.map(function (s) { return { s: s, v: typeof s.sessionCount === "number" ? s.sessionCount : null }; })
+                    .filter(function (e) { return typeof e.v === "number"; });
+  if (vals.length === 0) {
+    if (section) section.style.display = "none";
+    return;
+  }
+  if (section) section.style.display = "";
+
+  var since = data && data.since, until = data && data.until;
+  var W = container.clientWidth || 600;
+  var H = 200;
+  var padL = 50, padR = 10, padT = 14, padB = 28;
+  var innerW = W - padL - padR;
+  var innerH = H - padT - padB;
+  var bounds = _chartTimeBounds(samples, since, until);
+  var t0 = bounds.t0, t1 = bounds.t1;
+  var spanMs = t1 - t0, oneDayMs = 86400000;
+  function pad2(n) { return n < 10 ? "0" + n : String(n); }
+  function fmtTick(ts) {
+    var d = new Date(ts);
+    if (spanMs <= oneDayMs) return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+    return (d.getMonth() + 1) + "/" + d.getDate();
+  }
+  function fmtCount(n) {
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k";
+    return String(Math.round(n));
+  }
+
+  var maxV = 0;
+  vals.forEach(function (e) { if (e.v > maxV) maxV = e.v; });
+  var yMin = 0, yMax = maxV > 0 ? maxV * 1.1 : 1;
+  function xFor(ts) { return padL + ((new Date(ts).getTime() - t0) / (t1 - t0)) * innerW; }
+  function yFor(v)  { return padT + innerH - ((v - yMin) / (yMax - yMin)) * innerH; }
+  var pts = vals.map(function (e) { return xFor(e.s.timestamp) + "," + yFor(e.v); }).join(" ");
+
+  var sorted = vals.slice().sort(function (a, b) { return new Date(a.s.timestamp).getTime() - new Date(b.s.timestamp).getTime(); });
+  var hits = sorted.map(function (h, i) {
+    var x = xFor(h.s.timestamp);
+    var leftEdge  = i === 0 ? padL : (xFor(sorted[i - 1].s.timestamp) + x) / 2;
+    var rightEdge = i === sorted.length - 1 ? (W - padR) : (xFor(sorted[i + 1].s.timestamp) + x) / 2;
+    return '<rect class="chart-hit" x="' + leftEdge + '" y="' + padT + '" width="' + (rightEdge - leftEdge) + '" height="' + innerH + '" fill="transparent" style="cursor:crosshair"' +
+      ' data-ts="' + escapeHtml(String(h.s.timestamp)) + '" data-sc="' + h.v + '"/>';
+  }).join("");
+
+  var ticks = "";
+  for (var i = 0; i <= 4; i++) {
+    var v = yMin + (yMax - yMin) * (i / 4);
+    var y = padT + innerH - (i / 4) * innerH;
+    ticks +=
+      '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(127,127,127,0.15)"/>' +
+      '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" text-anchor="end" font-size="10" fill="currentColor">' + fmtCount(v) + '</text>';
+  }
+  var xTicks = "";
+  for (var j = 0; j <= 5; j++) {
+    var tsTick = t0 + (t1 - t0) * (j / 5);
+    var xPos = padL + (j / 5) * innerW;
+    xTicks +=
+      '<line x1="' + xPos + '" y1="' + (padT + innerH) + '" x2="' + xPos + '" y2="' + (padT + innerH + 3) + '" stroke="rgba(127,127,127,0.4)"/>' +
+      '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
+  }
+  var color = "#2a9d8f";
+  var clipId = _chartClipId("sessions");
+  container.innerHTML =
+    '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      ticks + xTicks +
+      _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
+      '<g ' + _chartClipAttr(clipId) + '>' +
+        (pts ? '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/>' : '') +
+        vals.map(function (e) { return '<circle cx="' + xFor(e.s.timestamp) + '" cy="' + yFor(e.v) + '" r="1.5" fill="' + color + '"/>'; }).join("") +
+        hits +
+      '</g>' +
+    '</svg>' + CHART_TOOLTIP_HTML;
+  container.style.position = "relative";
+  container.style.alignItems = "stretch";
+  container.style.justifyContent = "flex-start";
+  container.style.flexDirection = "column";
+
+  _wireChartTooltip(container, function (target) {
+    var ts = target.getAttribute("data-ts");
+    var sc = target.getAttribute("data-sc");
+    return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(ts)) + '</div>' +
+      '<div>Sessions: ' + (sc !== "" ? Number(sc).toLocaleString() : "—") + '</div>';
+  });
+  _addChartScreenshotButton(container, "Active Sessions", { yAxis: "Sessions" });
+  _observeChartResize(container, function (c) { _renderSessionsChart(c, data, asset); });
+}
+
 // Human-readable label for the polling method behind the response-time
 // chart. Reads the per-asset responseTimePolling override first; falls
 // back to the source default ("rest_api" for Fortinet, "icmp" for the
@@ -7231,6 +7339,27 @@ function assetMonitoringViewHTML(a) {
       '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="asset-monitor-to" class="form-input" style="padding:2px 6px"></label>' +
       '<button class="btn btn-sm btn-primary" id="btn-asset-monitor-custom-apply">Apply</button>' +
     '</div>';
+  // Uptime row — only rendered when the probe path captured uptime (SNMP /
+  // FortiOS / agent; ICMP/SSH/WinRM-only assets show no row). The stored
+  // value is the observed uptime AT lastUptimeAt; extrapolate to "now" unless
+  // the asset is down (a dead box's uptime shouldn't keep climbing). The
+  // "since" reboot timestamp is the true boot instant (obsAt − observed
+  // uptime), stable regardless of extrapolation.
+  var uptimeRow = "";
+  if (a.lastUptimeSeconds != null && a.lastUptimeAt) {
+    var _obsUp = Number(a.lastUptimeSeconds);
+    var _obsAt = new Date(a.lastUptimeAt).getTime();
+    var _elapsed = Math.max(0, Math.floor((Date.now() - _obsAt) / 1000));
+    var _upNow = a.monitorStatus === "down" ? _obsUp : _obsUp + _elapsed;
+    var _since = new Date(_obsAt - _obsUp * 1000).toLocaleString("en-US",
+      { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    uptimeRow =
+      '<div class="detail-row" title="' + escapeHtml("Uptime as of " + timeAgo(a.lastUptimeAt)) + '">' +
+        '<span class="detail-label">Uptime</span>' +
+        '<span class="detail-value">' + escapeHtml(formatUptime(_upNow)) +
+          ' <span style="color:var(--color-text-tertiary)">· since ' + escapeHtml(_since) + '</span>' +
+        '</span></div>';
+  }
   return (
     '<div data-shot-section="status" data-shot-label="Status &amp; Monitoring">' +
     '<div class="asset-view-grid">' +
@@ -7256,6 +7385,7 @@ function assetMonitoringViewHTML(a) {
             '</span></div>'
         : '') +
       viewRow("Source", sourceLabel) +
+      uptimeRow +
     '</div>' +
     '</div>' +
     '<div data-shot-section="responseTime" data-shot-label="Response Time" data-shot-chart="assetMonitor">' +

@@ -291,6 +291,7 @@ polaris/
 │       ├── dbRetry.ts              # Deadlock-retry helper (retryOnDeadlock): N attempts with jittered backoff; used by sampleWriteBuffer / reconcileMacAddresses and other write-contention-prone paths.
 │       ├── schemaSanityCheck.ts    # Boot-time Prisma-client-vs-DB schema drift check; logs mismatches so a missed migration surfaces clearly instead of as a cryptic runtime error.
 │       ├── version.ts              # Version resolution: `<major>.<minor>` from package.json + patch = POLARIS_BUILD_COMMIT_COUNT (Docker) or `git rev-list --count HEAD`.
+│       ├── uptime.ts               # Device-uptime helpers: `snmpTicksToSeconds(ticks)` (SNMP sysUpTime centiseconds → seconds) + `formatUptime(seconds)` (compact "42d 6h"/"6h 12m"/"<1m"; frontend mirrors it in public/js/app.js). Uptime is captured on the probe path and stored on Asset.lastUptimeSeconds/lastUptimeAt.
 │       └── startupDiskCheck.ts     # Cross-platform boot-time disk diagnostic. Statfs's the app dir, state dir, backups dir, plus conventional PostgreSQL data directory candidates per platform (RHEL `/var/lib/pgsql`, Debian/Ubuntu `/var/lib/postgresql/<ver>/main`, Windows `C:\Program Files\PostgreSQL\<ver>\data`). Logs at info/warn/error per volume depending on free percent. Non-fatal — never blocks boot; the value is turning a "polaris flapping with cryptic Prisma error" symptom into a clear "DB volume X has Y MB free" log line. The runtime `capacityService` resolves PGDATA authoritatively via `SHOW data_directory` once the DB connection is up.
 └── tests/
     ├── unit/
@@ -530,6 +531,8 @@ Asset
   monitorStatusChangedAt DateTime? -- Bumped on every monitorStatus transition (any-to-any, not just up↔down). Drives the "how long has this been warning/down" duration on the Dashboard's Monitor Alerts card. Null until the first transition. Stamped inside the same recordProbeResult Asset.update that writes monitorStatus. The one-shot backfillMonitorStatusChangedAt startup job seeds existing warning/down assets from the latest `monitor.status_changed` Event when one is still inside the 7-day retention window.
   lastMonitorAt   DateTime?
   lastResponseTimeMs Int?         -- Most recent successful probe RTT; null while in flux or after a failure
+  lastUptimeSeconds Int?          -- Device uptime (seconds) observed at lastUptimeAt; live value = lastUptimeSeconds + (now - lastUptimeAt). Captured on the probe path: SNMP sysUpTime (free — already fetched for liveness), FortiOS system/status, Polaris Agent host.Uptime (rides the responseTime stream). Stamped via probePatchBuffer ONLY on a probe that reported uptime (ICMP/SSH/WinRM leave the prior value intact, never null it). System-tab "Uptime" row (formatUptime in utils/uptime.ts + public/js/app.js) renders the duration + an absolute "since <reboot>" timestamp.
+  lastUptimeAt    DateTime?       -- When lastUptimeSeconds was observed
   consecutiveFailures Int         @default(0)
   consecutiveSuccesses Int        @default(0) -- Drives recovering/warning -> up. Reset to 0 on any failure; failureThreshold doubles as the recovery threshold (same number of confirmations gates up <-> down both ways).
   -- Per-stream polling-method overrides — top tier of the polling-method
@@ -757,6 +760,7 @@ AssetTelemetrySample            -- System tab CPU+memory snapshot (~60s cadence)
   memPct        Float?          -- Set when the source reports memory only as a percentage (FortiOS)
   memUsedBytes  BigInt?         -- Set when the source reports absolute bytes (SNMP HOST-RESOURCES-MIB hrStorageRam, WMI)
   memTotalBytes BigInt?
+  sessionCount  Float?          -- FortiGate active-session count (read from the same /api/v2/monitor/system/resource/usage `session` resource collectTelemetryFortinet already fetches; null for every other source). Rolled up (avg/min/max) into the *Hourly/*Daily companions; surfaced as the System-tab "Active Sessions" chart (FortiGate firewalls only).
   @@index([assetId, timestamp])
 
 AssetInterfaceSample            -- System tab per-interface scrape (~600s cadence). Many rows per scrape (one per interface). recordSystemInfoResult also mirrors {ip, interfaceName, mac} into Asset.associatedIps with source "monitor-system-info" — manual entries are preserved. Pinned interfaces (Asset.monitoredInterfaces) get extra rows on the response-time cadence (~60s) via collectFastFiltered. The same fast pass also writes extra AssetStorageSample / AssetIpsecTunnelSample rows for any mountPaths in Asset.monitoredStorage and any tunnel names in Asset.monitoredIpsecTunnels.

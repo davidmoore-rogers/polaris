@@ -639,6 +639,14 @@ model Asset {
   monitorStatusChangedAt   DateTime?
   lastMonitorAt            DateTime?
   lastResponseTimeMs       Int?
+  // Device uptime captured on the probe path (SNMP sysUpTime / FortiOS
+  // system status / Polaris Agent host.Uptime). lastUptimeSeconds is the
+  // observed uptime in seconds AT lastUptimeAt; the live value is computed
+  // at render time as lastUptimeSeconds + (now - lastUptimeAt). Stamped only
+  // on a successful probe that actually reports uptime (ICMP/SSH/WinRM leave
+  // the prior value intact — never nulled). Int is ample (2^31 s ~= 68 yr).
+  lastUptimeSeconds        Int?
+  lastUptimeAt             DateTime?
   consecutiveFailures      Int         @default(0)
   // Counts probe successes since the last failure. Drives the
   // pending/warning -> up transition: an asset stays in pending or warning
@@ -862,6 +870,10 @@ model AssetTelemetrySample {
   memPct        Float?
   memUsedBytes  BigInt?
   memTotalBytes BigInt?
+  // Active session count (FortiGate only — read from the same
+  // /api/v2/monitor/system/resource/usage `session` resource the CPU/mem
+  // collector already fetches). Null for every other source.
+  sessionCount  Float?
 
   @@id([id, timestamp])
   @@index([assetId, timestamp])
@@ -1554,6 +1566,9 @@ model AssetTelemetrySampleHourly {
   // last-seen total (memory size is effectively a constant per host;
   // tracking last value rather than avg keeps the chart axis stable).
   lastMemTotalBytes BigInt?
+  avgSessionCount   Float?
+  minSessionCount   Float?
+  maxSessionCount   Float?
 
   @@id([id, bucketStart])
   @@unique([bucketStart, assetId])
@@ -1575,6 +1590,9 @@ model AssetTelemetrySampleDaily {
   avgMemUsedBytes   BigInt?
   maxMemUsedBytes   BigInt?
   lastMemTotalBytes BigInt?
+  avgSessionCount   Float?
+  minSessionCount   Float?
+  maxSessionCount   Float?
 
   @@id([id, bucketStart])
   @@unique([bucketStart, assetId])

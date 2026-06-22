@@ -107,6 +107,7 @@ import {
 import { propagateAfterStatusChange } from "./dependencyTreeService.js";
 import { triggerRetryAfterStatusChange } from "./reservationService.js";
 import { recordIpHistoryEntries } from "./assetIpHistoryService.js";
+import { snmpTicksToSeconds } from "../utils/uptime.js";
 
 export interface ProbeResult {
   success: boolean;
@@ -114,6 +115,14 @@ export interface ProbeResult {
   responseTimeMs: number;
   /** Short human-readable reason on failure; null on success. */
   error?: string;
+  /**
+   * Device uptime in seconds, when the probe transport can supply it for
+   * free (SNMP sysUpTime, FortiOS system status, Polaris Agent host.Uptime).
+   * Undefined/null for transports that don't report it (ICMP/SSH/WinRM) —
+   * recordProbeResult only stamps Asset.lastUptime* when this is non-null,
+   * so a non-reporting probe leaves the prior value intact.
+   */
+  uptimeSeconds?: number | null;
 }
 
 /**
@@ -1844,9 +1853,11 @@ export async function probeAsset(
   }
 }
 
-function finish(startedAt: number, success: boolean, error?: string): ProbeResult {
+function finish(startedAt: number, success: boolean, error?: string, uptimeSeconds?: number | null): ProbeResult {
   const ms = Math.max(0, Math.round(performance.now() - startedAt));
-  return success ? { success, responseTimeMs: ms } : { success: false, responseTimeMs: ms, error };
+  return success
+    ? { success, responseTimeMs: ms, uptimeSeconds: uptimeSeconds ?? null }
+    : { success: false, responseTimeMs: ms, error };
 }
 
 // ─── Probe implementations ──────────────────────────────────────────────────
@@ -1884,11 +1895,33 @@ async function probeFortinet(
   };
 
   try {
-    await fgRequest<unknown>(fgConfig, "GET", "/api/v2/monitor/system/status", { timeoutMs });
-    return finish(start, true);
+    // /api/v2/monitor/system/status doubles as our liveness check; capture
+    // the body so we can read device uptime for free instead of discarding it.
+    const res = await fgRequest<any>(fgConfig, "GET", "/api/v2/monitor/system/status", { timeoutMs });
+    return finish(start, true, undefined, fortinetUptimeSecondsFromStatus(res));
   } catch (err: any) {
     return finish(start, false, err?.message || "FortiOS request failed");
   }
+}
+
+/**
+ * Pull device uptime (seconds) from a FortiOS /api/v2/monitor/system/status
+ * response. FortiOS surfaces uptime under a few shapes across versions; we
+ * probe the known candidates and treat any plain number as seconds.
+ *
+ * VERIFY on a real FortiOS 7.x device — confirm which field is populated and
+ * its unit (compare against `get system performance status`). If system/status
+ * doesn't carry uptime on the deployed version, move this capture into
+ * collectTelemetryFortinet (which already calls resource/usage) instead.
+ */
+function fortinetUptimeSecondsFromStatus(res: any): number | null {
+  if (res == null || typeof res !== "object") return null;
+  const candidates = [res.uptime, res.results?.uptime, res.results?.system_uptime, res.system_uptime];
+  for (const c of candidates) {
+    const n = typeof c === "number" ? c : Number(c);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  return null;
 }
 
 // ─── Fortinet controller-status probe (managed switches & APs) ──────────────
@@ -2936,7 +2969,9 @@ async function probeSnmp(host: string, config: Record<string, unknown>, start: n
         if (snmp.isVarbindError(vb)) {
           return finishOnce(finish(start, false, snmp.varbindError(vb)));
         }
-        finishOnce(finish(start, true));
+        // sysUpTime is TimeTicks (centiseconds) — capture it for free; the
+        // probe already had to fetch it for the liveness check.
+        finishOnce(finish(start, true, undefined, snmpTicksToSeconds(vb?.value)));
       });
     } catch (err: any) {
       clearTimeout(timer);
@@ -3147,6 +3182,8 @@ export interface TelemetrySample {
   memPct?:        number | null;
   memUsedBytes?:  number | null;
   memTotalBytes?: number | null;
+  /** Active session count (FortiGate only). Null for every other source. */
+  sessionCount?:  number | null;
 }
 
 export interface InterfaceSample {
@@ -4103,7 +4140,10 @@ async function collectTelemetryFortinet(host: string, integration: { type: strin
   const res = await fgRequest<any>(fg, "GET", "/api/v2/monitor/system/resource/usage", { query: { scope: "global" }, timeoutMs });
   const cpuPct = pickFortinetUsage(res?.cpu);
   const memPct = pickFortinetUsage(res?.mem ?? res?.memory);
-  return { cpuPct, memPct, memUsedBytes: null, memTotalBytes: null };
+  // Session count rides the same response. It's an absolute count, not a
+  // percentage — pull it without the 0-100 clamp.
+  const sessionCount = pickFortinetUsage(res?.session, false);
+  return { cpuPct, memPct, memUsedBytes: null, memTotalBytes: null, sessionCount };
 }
 
 // FortiOS exposes temperature, fan, voltage, and power sensors at one endpoint.
@@ -4134,18 +4174,23 @@ async function collectHardwareSensorsFortinet(fg: FortiGateConfig, timeoutMs?: n
   return list;
 }
 
-function pickFortinetUsage(node: unknown): number | null {
+// Extract the freshest gauge value from a FortiOS resource/usage node.
+// `clamp` (default true) folds the value into 0-100 for percentages (cpu/mem);
+// pass false for absolute counts (e.g. session count).
+function pickFortinetUsage(node: unknown, clamp = true): number | null {
+  const conv = (n: number): number | null =>
+    clamp ? clampPct(n) : (Number.isFinite(n) ? n : null);
   if (node == null) return null;
   // Flat number?
-  if (typeof node === "number" && Number.isFinite(node)) return clampPct(node);
+  if (typeof node === "number" && Number.isFinite(node)) return conv(node);
   // Object with `current`?
   if (typeof node === "object" && !Array.isArray(node)) {
     const obj = node as Record<string, unknown>;
-    if (typeof obj.current === "number") return clampPct(obj.current);
+    if (typeof obj.current === "number") return conv(obj.current);
     // historical may be the freshest; take the last entry
     if (Array.isArray(obj.historical) && obj.historical.length > 0) {
       const last = obj.historical[obj.historical.length - 1];
-      if (typeof last === "number") return clampPct(last);
+      if (typeof last === "number") return conv(last);
     }
   }
   // Array of {interval, current, historical} — pick the entry with shortest
@@ -4154,10 +4199,10 @@ function pickFortinetUsage(node: unknown): number | null {
     const sorted = [...node].sort((a, b) => intervalRank(a?.interval) - intervalRank(b?.interval));
     for (const entry of sorted) {
       if (entry == null) continue;
-      if (typeof entry.current === "number") return clampPct(entry.current);
+      if (typeof entry.current === "number") return conv(entry.current);
       if (Array.isArray(entry.historical) && entry.historical.length > 0) {
         const last = entry.historical[entry.historical.length - 1];
-        if (typeof last === "number") return clampPct(last);
+        if (typeof last === "number") return conv(last);
       }
     }
   }
@@ -6651,6 +6696,7 @@ export async function recordTelemetryResult(assetId: string, result: CollectionR
       memPct:        d.memPct ?? null,
       memUsedBytes:  d.memUsedBytes  != null ? BigInt(Math.round(d.memUsedBytes))  : null,
       memTotalBytes: d.memTotalBytes != null ? BigInt(Math.round(d.memTotalBytes)) : null,
+      sessionCount:  d.sessionCount ?? null,
     });
   }
   // Always advance the cadence stamp so a transient failure doesn't make us
@@ -7831,6 +7877,12 @@ export async function recordProbeResult(
     consecutiveFailures: newCf,
     consecutiveSuccesses: newCs,
     monitorStatusChangedAt: previousStatus !== nextStatus ? now : undefined,
+    // Stamp uptime only when the transport actually reported it (SNMP /
+    // FortiOS / agent). A null/undefined value (ICMP/SSH/WinRM, or a failed
+    // probe) leaves the prior Asset.lastUptime* untouched.
+    ...(result.uptimeSeconds != null
+      ? { lastUptimeSeconds: result.uptimeSeconds, lastUptimeAt: now }
+      : {}),
   });
 
   // Edge-triggered audit events. We log on the transition INTO up / warning /
