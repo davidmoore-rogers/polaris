@@ -39,7 +39,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 **What it is:** Asset.monitorStatus ∈ {up, warning, recovering, down, unknown} driven by consecutiveFailures/consecutiveSuccesses counters (see "Five-state monitor machine" in CLAUDE.md).
 
 **Writers** (files that mutate or emit this state):
-- `src/services/monitoringService.ts` — runProbeFor() updates Asset.monitorStatus/consecutiveFailures/consecutiveSuccesses after each probe result, stamps Asset.monitorStatusChangedAt whenever monitorStatus changes value (any-to-any, not just up↔down), emits monitor.status_changed Event on transitions INTO up/warning/down (not recovering/unknown, never per-poll), fires propagateAfterStatusChange() — but only on the confirmed up/down edge, NOT on the warning edge — to push the change into descendant dependencySuppressed state
+- `src/services/monitoringService.ts` — runProbeFor() updates Asset.monitorStatus/consecutiveFailures/consecutiveSuccesses after each probe result, stamps Asset.monitorStatusChangedAt whenever monitorStatus changes value (any-to-any, not just up↔down), emits monitor.status_changed Event on transitions INTO up/warning/down (not recovering/unknown, never per-poll), fires propagateAfterStatusChange() — but only on the confirmed up/down edge, NOT on the warning edge — to push the change into descendant dependencySuppressed state. **Reboot detection:** the SNMP probe (probeSnmp) now keeps the sysUpTime TimeTicks it already reads as its reachability OID and returns it as ProbeResult.uptimeSec; recordProbeResult stamps it onto the AssetMonitorSample (uptimeSec) + Asset.lastUptimeSec via the probe-patch buffer, and when the reading drops vs. the cached lastUptimeSec (>60s tolerance) sets Asset.lastRebootAt and emits a `device.reboot` Event (level warning). Non-SNMP probes carry no uptime — the probePatchBuffer flush COALESCEs lastUptimeSec/lastRebootAt so they're preserved, not nulled.
 - `src/jobs/monitorAssets.ts` — Light/heavy ticking loops invoke runMonitorPass() which dispatches probe collection
 - `src/jobs/backfillMonitorStatusChangedAt.ts` — One-shot startup (60s after boot): seeds Asset.monitorStatusChangedAt for pre-existing warning/down/recovering assets from the latest monitor.status_changed Event when one is still within the 7-day retention window
 - `src/api/routes/assets.ts` — recordProbeResult() on manual /probe-now endpoint
@@ -54,6 +54,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `src/api/routes/map.ts` — Device Map topology endpoint reads monitorStatus for FortiGate/switch/AP health coloring via monitorStatusToHealth()
 - `src/jobs/monitorAssets.ts` — Queue eligibility check consults monitorStatus + dependencySuppressed
 - `src/api/routes/dashboard.ts` — `/dashboard/summary` reads `monitored=true AND monitorStatus in (warning, down)` for the Monitor Alerts card and orders by `monitorStatusChangedAt asc nulls last` so the oldest outages surface first
+- `src/services/nocDashboardService.ts` — `/dashboard/noc-summary` reads monitorStatus (status tiles, down nodes, sites-with-issues), lastResponseTimeMs (slowest response), lastMonitorAt (stale polls), and the `device.reboot` Events (recent reboots) for the NOC widgets
 - `public/js/dashboard.js` — Monitor Alerts card renders the duration since monitorStatusChangedAt; re-ticks the label every 30s without re-fetching
 
 **Invariants:**
@@ -3297,6 +3298,28 @@ Listed alphabetically.
 - Test large fleet performance (blocks query with full subnet tree may be slow with 100k+ subnets)
 - Verify usagePercent calculation (allocatedAddresses / blockAddresses) matches business intent
 - Check that deprecated subnets are correctly filtered from block capacity
+
+---
+
+## services/nocDashboardService.ts
+
+**What it owns:** Fleet-wide read-only aggregates for the SolarWinds-style NOC dashboard widgets, surfaced via `GET /dashboard/noc-summary`.
+
+**Public API:** `getStatusSummary`, `getDownNodes`, `getHighestCpu`, `getHighestMemory`, `getSlowestResponse`, `getPacketLoss`, `getStalePolls`, `getRecentReboots`, `getRecentAlerts`, `getSitesWithIssues` (+ exported result interfaces).
+
+**Used by:** `src/api/routes/dashboard.ts` (`/dashboard/noc-summary`, all sections fanned out in one `Promise.all`). Frontend NOC widgets read the combined payload via `PolarisWidgets.getNocSummary()` (15s memoized) in `public/js/widgets/`.
+
+**Reads:** `Asset` (monitorStatus, monitored, dependencySuppressed, assetType, location/learnedLocation/snmpLocation, department, lastResponseTimeMs, lastMonitorAt, latitude/longitude); `asset_telemetry_samples` + `asset_monitor_samples` hypertables (read-only DISTINCT-ON / groupBy, never write/delete); `Event` (`device.reboot` for reboots, `levelRank>=1` for active alerts). Calls `monitoringService.resolveMonitorSettings` for stale-poll cadence.
+
+**Invariants:**
+- `activeAlertCount` uses the EXACT `monitorAlerts` where-clause (`monitored, monitorStatus in [warning,down], dependencySuppressed:false`) so the tile count and the alert list agree.
+- Top-N CPU/Memory and packet-loss windows scan only recent (chunk-excluded) hypertable rows via a `now() - interval` predicate; names hydrated in ONE `findMany` (no per-row lookup). Never row-DELETE/UPDATE the sample tables.
+- `getStalePolls` pre-filters with `@@index([monitored, lastMonitorAt])` then resolves the exact cadence per candidate via the cached `resolveMonitorSettings` — don't reimplement the tier hierarchy; suppressed assets use 2× interval (mirrors monitorAssets).
+- `getSitesWithIssues` coalesces `location > learnedLocation > snmpLocation > "(unknown)"`; the same coalesce key buckets the node detail rows.
+
+**When changing this:**
+- Scale-check at 2000 assets — keep every feed to groupBy/count/one windowed aggregate/one bounded findMany.
+- Recent Reboots depends on `device.reboot` Events emitted by `recordProbeResult` (sysUptime drop) — see cross-cutting reboot-detection notes; the widget never scans the hypertable.
 
 ---
 

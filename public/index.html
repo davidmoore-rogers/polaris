@@ -8,6 +8,10 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="icon" type="image/png" href="/logo.png">
   <link rel="stylesheet" href="/css/styles.css">
+  <!-- Leaflet + markercluster for the siteMap dashboard widget. -->
+  <link rel="stylesheet" href="/css/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/css/vendor/leaflet/MarkerCluster.css">
+  <link rel="stylesheet" href="/css/vendor/leaflet/MarkerCluster.Default.css">
 </head>
 <body>
   <div class="layout">
@@ -41,10 +45,14 @@
     </aside>
   </div>
 
+  <script src="/js/vendor/leaflet/leaflet.js"></script>
+  <script src="/js/vendor/leaflet/leaflet.markercluster.js"></script>
   <script src="/js/api.js"></script>
   <script src="/js/app.js"></script>
   <script src="/js/widgets/index.js"></script>
-  <script src="/js/widgets/monitorAlerts.js"></script>
+  <!-- Shared helper before its consumers. -->
+  <script src="/js/widgets/_topnBar.js"></script>
+  <!-- IPAM / system widgets. -->
   <script src="/js/widgets/recentReservations.js"></script>
   <script src="/js/widgets/assetTypes.js"></script>
   <script src="/js/widgets/blockUtilization.js"></script>
@@ -52,7 +60,18 @@
   <script src="/js/widgets/capacityHealth.js"></script>
   <script src="/js/widgets/discoveryActivity.js"></script>
   <script src="/js/widgets/conflictQueue.js"></script>
-  <script src="/js/widgets/recentEvents.js"></script>
+  <!-- NOC widgets. -->
+  <script src="/js/widgets/statusSummary.js"></script>
+  <script src="/js/widgets/downNodes.js"></script>
+  <script src="/js/widgets/topCpu.js"></script>
+  <script src="/js/widgets/topMemory.js"></script>
+  <script src="/js/widgets/slowestResponse.js"></script>
+  <script src="/js/widgets/packetLoss.js"></script>
+  <script src="/js/widgets/stalePolls.js"></script>
+  <script src="/js/widgets/recentReboots.js"></script>
+  <script src="/js/widgets/activeAlerts.js"></script>
+  <script src="/js/widgets/sitesWithIssues.js"></script>
+  <script src="/js/widgets/siteMap.js"></script>
   <script src="/js/widget-library.js"></script>
   <script src="/js/dashboard.js"></script>
 </body>

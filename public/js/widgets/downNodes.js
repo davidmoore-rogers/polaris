@@ -1,0 +1,119 @@
+/**
+ * widgets/downNodes.js — monitored assets currently down, grouped by site or
+ * division (SolarWinds "Down Nodes" panel). Reuses the monitorAlerts row
+ * markup (statusDot + dash-alert classes). Data from noc-summary downNodes[].
+ */
+
+(function () {
+  var TYPE_LABELS = PolarisWidgets.ASSET_TYPE_LABELS;
+
+  function statusDot(status) {
+    if (status === "down") return '<span class="dash-alert-dot dash-alert-down" title="Down"></span>';
+    if (status === "warning") return '<span class="dash-alert-dot dash-alert-warning" title="Warning"></span>';
+    return '<span class="dash-alert-dot" title="' + escapeHtml(status || "") + '"></span>';
+  }
+
+  function groupKey(node, groupBy) {
+    if (groupBy === "division") return node.division || "Ungrouped";
+    if (groupBy === "none") return null;
+    return node.site || "(unknown)";
+  }
+
+  function nodeRowHTML(n) {
+    var typeLabel = TYPE_LABELS[n.assetType] || n.assetType || "asset";
+    var name = n.hostname || n.ipAddress || "(unnamed)";
+    var sub = [escapeHtml(typeLabel)];
+    if (n.ipAddress) sub.push('<span class="dash-alert-ip">' + escapeHtml(n.ipAddress) + '</span>');
+    var href = '/assets.html#view=asset:' + encodeURIComponent(n.id);
+    return '<a class="dash-alert-item" href="' + href + '" style="text-decoration:none">' +
+      '<div class="dash-alert-row" style="width:100%">' +
+        statusDot(n.monitorStatus) +
+        '<div class="dash-alert-body">' +
+          '<div class="dash-alert-title">' + escapeHtml(name) + '</div>' +
+          '<div class="dash-alert-sub">' + sub.join(" · ") + '</div>' +
+        '</div>' +
+        '<div class="dash-alert-time" data-changed-at="' + (n.monitorStatusChangedAt || "") + '">' + PolarisWidgets.durationSince(n.monitorStatusChangedAt) + '</div>' +
+      '</div>' +
+    '</a>';
+  }
+
+  function render(el, nodes, config) {
+    nodes = nodes || [];
+    if (!nodes.length) { el.innerHTML = '<p class="empty-state">No nodes down</p>'; return; }
+    var rowLimit = (config && config.rowLimit) || 10;
+    var groupBy = (config && config.groupBy) || "site";
+    var clipped = nodes.slice(0, rowLimit);
+
+    if (groupBy === "none") {
+      el.innerHTML = clipped.map(nodeRowHTML).join("");
+      return;
+    }
+    // Bucket into groups preserving first-seen order; sort groups by size desc.
+    var groups = {};
+    var order = [];
+    clipped.forEach(function (n) {
+      var k = groupKey(n, groupBy);
+      if (!groups[k]) { groups[k] = []; order.push(k); }
+      groups[k].push(n);
+    });
+    order.sort(function (a, b) { return groups[b].length - groups[a].length; });
+    el.innerHTML = order.map(function (k) {
+      var list = groups[k];
+      return '<div class="dash-alert-group-header" style="display:flex;align-items:center;gap:8px;margin:6px 0 4px;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.03em;color:var(--color-text-secondary)">' +
+        '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(k) + '</span>' +
+        '<span class="widget-pill widget-pill-red">' + list.length + '</span>' +
+      '</div>' + list.map(nodeRowHTML).join("");
+    }).join("");
+  }
+
+  PolarisWidgets.register({
+    type: "downNodes",
+    label: "Down Nodes",
+    description: "Monitored assets currently down, grouped by site or division.",
+    defaultSize: { width: 6, height: 1 },
+    minSize: { width: 4, height: 1 },
+    defaultConfig: { groupBy: "site", rowLimit: 10 },
+    requiredPermission: { key: "assets", level: "read" },
+
+    fetchData: function () {
+      return PolarisWidgets.getNocSummary().then(function (d) { return (d && d.downNodes) || []; }).catch(function () { return []; });
+    },
+
+    renderInstance: function (el, config, data, ctx) {
+      render(el, data, config);
+      var timer = setInterval(function () {
+        PolarisWidgets.getNocSummary().then(function (d) { render(el, (d && d.downNodes) || [], config); }).catch(function () {});
+      }, 30000);
+      ctx.onUnmount(function () { clearInterval(timer); });
+    },
+
+    renderPreview: function (el) {
+      var now = Date.now();
+      render(el, [
+        { id: "p1", hostname: "fs-aisle-3", ipAddress: "10.1.2.5", assetType: "switch", site: "Plant A", division: "Ops", monitorStatus: "down", monitorStatusChangedAt: new Date(now - 9 * 60000).toISOString() },
+        { id: "p2", hostname: "fap-conf-rm", ipAddress: "10.1.2.42", assetType: "access_point", site: "Plant A", division: "Ops", monitorStatus: "down", monitorStatusChangedAt: new Date(now - 22 * 60000).toISOString() },
+        { id: "p3", hostname: "rtr-wan-2", ipAddress: "10.9.0.1", assetType: "router", site: "DC West", division: "Core", monitorStatus: "down", monitorStatusChangedAt: new Date(now - 2 * 3600000).toISOString() },
+      ], { groupBy: "site", rowLimit: 5 });
+    },
+
+    renderConfig: function (el, config, onChange) {
+      el.innerHTML =
+        '<label>Group by</label>' +
+        '<select data-k="groupBy">' +
+          '<option value="site"' + ((config.groupBy || "site") === "site" ? " selected" : "") + '>Site</option>' +
+          '<option value="division"' + (config.groupBy === "division" ? " selected" : "") + '>Division</option>' +
+          '<option value="none"' + (config.groupBy === "none" ? " selected" : "") + '>None</option>' +
+        '</select>' +
+        '<label>Row limit</label>' +
+        '<select data-k="rowLimit">' +
+          [5, 10, 20].map(function (n) { return '<option value="' + n + '"' + (config.rowLimit === n ? " selected" : "") + '>' + n + '</option>'; }).join("") +
+        '</select>';
+      el.querySelectorAll("[data-k]").forEach(function (s) {
+        s.addEventListener("change", function () {
+          var k = s.getAttribute("data-k");
+          onChange(k, k === "rowLimit" ? parseInt(s.value, 10) : s.value);
+        });
+      });
+    },
+  });
+})();

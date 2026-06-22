@@ -639,6 +639,13 @@ model Asset {
   monitorStatusChangedAt   DateTime?
   lastMonitorAt            DateTime?
   lastResponseTimeMs       Int?
+  // Last sysUpTime reading (whole seconds) from an SNMP response-time probe,
+  // and the timestamp Polaris last detected that reading decrease (a reboot).
+  // lastUptimeSec is compared against the next SNMP probe's reading in
+  // recordProbeResult; a decrease stamps lastRebootAt=now and emits a
+  // device.reboot Event. Both null for assets never SNMP-probed.
+  lastUptimeSec            Int?
+  lastRebootAt             DateTime?
   consecutiveFailures      Int         @default(0)
   // Counts probe successes since the last failure. Drives the
   // pending/warning -> up transition: an asset stays in pending or warning
@@ -836,6 +843,12 @@ model AssetMonitorSample {
   success        Boolean
   responseTimeMs Int?
   error          String?  @db.Text
+  // Device sysUpTime at probe time, in whole seconds (SNMP probes only; null
+  // for ICMP/TCP/REST probes that don't read sysUpTime). A decrease between
+  // consecutive samples is the reboot signal — see Asset.lastRebootAt and the
+  // device.reboot Event emitted by recordProbeResult. Nullable column added
+  // post-hoc; safe on the TimescaleDB hypertable (no row rewrite).
+  uptimeSec      Int?
 
   // Composite PK (id, timestamp) — required by TimescaleDB hypertables to
   // include the partitioning column. Works fine on plain Postgres too;

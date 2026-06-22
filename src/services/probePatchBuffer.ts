@@ -71,6 +71,11 @@ export interface ProbePatch {
   consecutiveSuccesses: number;
   /** Set only on a status transition; undefined means "no change this tick — keep the prior stamp". */
   monitorStatusChangedAt?: Date;
+  /** Latest SNMP sysUpTime reading (sec); undefined on non-SNMP probes — the
+   *  flush COALESCEs to keep the prior value rather than nulling it. */
+  lastUptimeSec?: number;
+  /** Set only when a reboot was detected this tick; undefined preserves the prior stamp. */
+  lastRebootAt?: Date;
 }
 
 // Module-level buffer. One in-flight patch per asset; new patches collapse
@@ -119,6 +124,10 @@ export function enqueueProbePatch(assetId: string, patch: ProbePatch): void {
       ...patch,
       monitorStatusChangedAt:
         patch.monitorStatusChangedAt ?? existing.monitorStatusChangedAt,
+      // Same preserve-on-absent rule: a non-SNMP probe (no uptime) merging
+      // onto an SNMP probe's patch must not erase the uptime/reboot stamps.
+      lastUptimeSec: patch.lastUptimeSec ?? existing.lastUptimeSec,
+      lastRebootAt: patch.lastRebootAt ?? existing.lastRebootAt,
     });
   } else {
     buffer.set(assetId, patch);
@@ -179,7 +188,8 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
   for (const [id, patch] of rows) {
     tuples.push(
       `($${p++}::text, $${p++}::text, $${p++}::timestamp, ` +
-      `$${p++}::int, $${p++}::int, $${p++}::int, $${p++}::timestamp)`,
+      `$${p++}::int, $${p++}::int, $${p++}::int, $${p++}::timestamp, ` +
+      `$${p++}::int, $${p++}::timestamp)`,
     );
     params.push(
       id,
@@ -191,6 +201,8 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
       patch.monitorStatusChangedAt
         ? patch.monitorStatusChangedAt.toISOString()
         : null,
+      patch.lastUptimeSec ?? null,
+      patch.lastRebootAt ? patch.lastRebootAt.toISOString() : null,
     );
   }
   const sql =
@@ -200,9 +212,13 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
     `"lastResponseTimeMs"     = v.rt, ` +
     `"consecutiveFailures"    = v.cf, ` +
     `"consecutiveSuccesses"   = v.cs, ` +
-    `"monitorStatusChangedAt" = COALESCE(v.changed_at, t."monitorStatusChangedAt") ` +
+    `"monitorStatusChangedAt" = COALESCE(v.changed_at, t."monitorStatusChangedAt"), ` +
+    // Both columns preserve the prior row value when this patch didn't carry
+    // one (non-SNMP probe / no reboot) — same COALESCE pattern as changed_at.
+    `"lastUptimeSec"          = COALESCE(v.uptime_sec, t."lastUptimeSec"), ` +
+    `"lastRebootAt"           = COALESCE(v.reboot_at, t."lastRebootAt") ` +
     `FROM (VALUES ${tuples.join(", ")}) ` +
-    `AS v(id, status, last_monitor_at, rt, cf, cs, changed_at) ` +
+    `AS v(id, status, last_monitor_at, rt, cf, cs, changed_at, uptime_sec, reboot_at) ` +
     `WHERE t."id" = v.id`;
   await prisma.$executeRawUnsafe(sql, ...params);
 }
