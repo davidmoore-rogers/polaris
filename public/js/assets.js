@@ -7702,7 +7702,26 @@ function _renderMonitorChart(container, data, transitions) {
     return d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate();
   }
 
-  var oks = samples.filter(function (s) { return s.success && typeof s.responseTimeMs === "number"; });
+  // Tier-aware sample classification. The detail tier carries a per-sample
+  // `success` boolean; the rollup tiers (hourly/daily) instead carry
+  // successCount/failureCount per bucket with the bucket average in
+  // responseTimeMs. A sample "has a response" (gets a dot + joins the line)
+  // when it's a successful detail sample OR a rollup bucket with ≥1 success and
+  // a numeric average. A sample is a "failure" (red line) only when it's a
+  // failed detail sample OR a *fully*-failed rollup bucket (successCount === 0);
+  // a partial-loss bucket still plots its average instead of reading as a total
+  // outage. Without this the renderer keyed off `success` alone, so every
+  // rollup bucket (no `success` field) became a failure line and none plotted.
+  function ptHasResponse(s) {
+    if (typeof s.successCount === "number") return s.successCount > 0 && typeof s.responseTimeMs === "number";
+    return s.success && typeof s.responseTimeMs === "number";
+  }
+  function ptIsFailure(s) {
+    if (typeof s.successCount === "number") return s.sampleCount > 0 && s.successCount === 0;
+    return !s.success;
+  }
+
+  var oks = samples.filter(ptHasResponse);
   var maxRtt = oks.length ? Math.max.apply(null, oks.map(function (s) { return s.responseTimeMs; })) : 100;
   if (maxRtt < 50) maxRtt = 50;
   // round up to a tidy ceiling
@@ -7713,7 +7732,7 @@ function _renderMonitorChart(container, data, transitions) {
   function yFor(ms) { return padT + innerH - (ms / ceil) * innerH; }
 
   var pointsAttr = oks.map(function (s) { return xFor(s.timestamp) + "," + yFor(s.responseTimeMs); }).join(" ");
-  var failureLines = samples.filter(function (s) { return !s.success; }).map(function (s) {
+  var failureLines = samples.filter(ptIsFailure).map(function (s) {
     var x = xFor(s.timestamp);
     return '<line x1="' + x + '" y1="' + padT + '" x2="' + x + '" y2="' + (padT + innerH) + '" stroke="rgba(211,47,47,0.35)" stroke-width="1"/>';
   }).join("");
@@ -7724,10 +7743,21 @@ function _renderMonitorChart(container, data, transitions) {
       " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
   }
   function hitAttrs(s) {
-    return ' data-ts="' + escapeHtml(String(s.timestamp)) +
+    var attrs = ' data-ts="' + escapeHtml(String(s.timestamp)) +
       '" data-rtt="' + (typeof s.responseTimeMs === "number" ? s.responseTimeMs : "") +
-      '" data-ok="' + (s.success ? "1" : "0") +
+      '" data-ok="' + (ptHasResponse(s) ? "1" : "0") +
       '" data-err="' + escapeHtml(s.error || "") + '"';
+    // Rollup buckets carry aggregate stats — surface them in the tooltip so an
+    // "Hourly avg"/"Daily avg" point reads as an average + min/max band + the
+    // bucket's real packet-loss %, not a single-sample hit.
+    if (typeof s.successCount === "number") {
+      var lossPct = s.sampleCount ? (s.failureCount / s.sampleCount) * 100 : 0;
+      attrs += ' data-rollup="1"' +
+        ' data-loss="' + lossPct.toFixed(1) + '"' +
+        ' data-min="' + (typeof s.minResponseTimeMs === "number" ? s.minResponseTimeMs : "") + '"' +
+        ' data-max="' + (typeof s.maxResponseTimeMs === "number" ? s.maxResponseTimeMs : "") + '"';
+    }
+    return attrs;
   }
   // Transparent hit targets so hover is forgiving for the 1.5px dots and the
   // 1px failure lines. Successful samples use a 7px circle centered on the
@@ -7737,7 +7767,7 @@ function _renderMonitorChart(container, data, transitions) {
   // didn't). Same pattern as the polling-method transition rect above.
   var hitTargets = samples.map(function (s) {
     var x = xFor(s.timestamp);
-    if (s.success && typeof s.responseTimeMs === "number") {
+    if (ptHasResponse(s)) {
       return '<circle class="monitor-hit" cx="' + x + '" cy="' + yFor(s.responseTimeMs) + '" r="7" fill="transparent" style="cursor:crosshair"' + hitAttrs(s) + '/>';
     }
     return '<rect class="monitor-hit" x="' + (x - 5) + '" y="' + padT + '" width="10" height="' + innerH + '" fill="transparent" style="cursor:crosshair"' + hitAttrs(s) + '/>';
@@ -7844,8 +7874,25 @@ function _renderMonitorChart(container, data, transitions) {
     var rtt = target.getAttribute("data-rtt");
     var ok = target.getAttribute("data-ok") === "1";
     var err = target.getAttribute("data-err");
-    var rttLine = ok && rtt !== "" ? (escapeHtml(rtt) + " ms") : '<span style="color:var(--color-danger,#d32f2f)">no response</span>';
-    var lossLine = ok ? "no" : '<span style="color:var(--color-danger,#d32f2f)">yes</span>';
+    var danger = 'style="color:var(--color-danger,#d32f2f)"';
+    if (target.getAttribute("data-rollup") === "1") {
+      // Aggregated bucket: avg (+ min/max band) and the bucket's packet-loss %.
+      var mn = target.getAttribute("data-min");
+      var mx = target.getAttribute("data-max");
+      var loss = parseFloat(target.getAttribute("data-loss") || "0");
+      var band = (mn !== "" && mx !== "") ? ' <span style="color:var(--color-text-secondary)">(' + escapeHtml(mn) + '–' + escapeHtml(mx) + ' ms)</span>' : '';
+      var rRttLine = ok && rtt !== "" ? (escapeHtml(rtt) + " ms avg" + band) : '<span ' + danger + '>no response</span>';
+      var rLossLine = loss > 0 ? '<span ' + danger + '>' + loss.toFixed(1) + '%</span>' : '0%';
+      tip.innerHTML =
+        '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(fmtTooltipTs(ts)) + '</div>' +
+        '<div>Response: ' + rRttLine + '</div>' +
+        '<div>Packet loss: ' + rLossLine + '</div>';
+      tip.style.display = "block";
+      positionTip(evt);
+      return;
+    }
+    var rttLine = ok && rtt !== "" ? (escapeHtml(rtt) + " ms") : '<span ' + danger + '>no response</span>';
+    var lossLine = ok ? "no" : '<span ' + danger + '>yes</span>';
     var errLine = !ok && err ? '<div style="color:var(--color-text-secondary);margin-top:2px">' + escapeHtml(err) + '</div>' : '';
     tip.innerHTML =
       '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(fmtTooltipTs(ts)) + '</div>' +

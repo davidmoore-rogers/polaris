@@ -607,7 +607,14 @@ async function _cmpFetchSeriesRaw(s) {
     if (s.metricKey === "response") {
       var d = await api.assets.monitorHistory(s.assetId, range);
       return _cmpPack(d, (d.samples || []).map(function (x) {
-        return { t: x.timestamp, v: (x.success && typeof x.responseTimeMs === "number") ? x.responseTimeMs : null };
+        // Rollup tiers (hourly/daily, used by the wider ranges) carry
+        // successCount + the bucket average in responseTimeMs and have no
+        // per-sample `success`; detail tier carries `success`. Without the
+        // tier check the response series vanished entirely on 7d/30d.
+        var v = (typeof x.successCount === "number")
+          ? (x.successCount > 0 && typeof x.responseTimeMs === "number" ? x.responseTimeMs : null)
+          : ((x.success && typeof x.responseTimeMs === "number") ? x.responseTimeMs : null);
+        return { t: x.timestamp, v: v };
       }));
     }
     if (s.metricKey === "cpu" || s.metricKey === "memory") {
