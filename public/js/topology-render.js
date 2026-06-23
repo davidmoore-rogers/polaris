@@ -570,8 +570,13 @@
     lldp: 4,
     "remote-asset": 4,
   };
-  // Roles that occupy EVEN columns by weighted depth. Everything else is a
-  // leaf and occupies the ODD column immediately right of its infra parent.
+  // Roles eligible to occupy EVEN columns by weighted depth. A FortiAP only
+  // claims its own column when it's a *branch* AP — a wireless-mesh root or the
+  // uplink for a bridged switch (see isLeafAp() in the solver). A terminal
+  // managed AP hanging off a switch port is a LEAF and lands in the odd column
+  // immediately right of that switch, stacked directly beneath it — otherwise
+  // each AP's weighted depth would interleave its own column between the
+  // switches and fan a FortiGate's switch chain across the whole canvas.
   var TOPOLOGY_INFRA_ROLES = { fortigate: true, fortiswitch: true, fortiap: true };
 
   function topologyNodeWeight(role) {
@@ -587,23 +592,28 @@
   //      AP=3, leaf=4). Each node's cumulative path value is the sum of the
   //      weights of every node on its shortest path, both endpoints included
   //      (firewall=1; switch-on-fw=3; switch-on-switch=5; AP-on-switch=6; …).
-  //   2. The DISTINCT cumulative values among infra nodes, sorted ascending,
-  //      map to contiguous ranks; an infra node's column = rank * 2 (so infra
-  //      lands on even columns 0,2,4,… with empty weighted-depth gaps squeezed
-  //      out — "nothing in column 2 → move it left").
-  //   3. Leaf nodes take the ODD column one right of their nearest infra
-  //      ancestor (parent even column + 1).
+  //   2. The DISTINCT cumulative values among COLUMN-ANCHOR nodes (infra that
+  //      isn't a terminal leaf AP — see isLeafAp), sorted ascending, map to
+  //      contiguous ranks; an anchor's column = rank * 2 (so anchors land on
+  //      even columns 0,2,4,… with empty weighted-depth gaps squeezed out —
+  //      "nothing in column 2 → move it left").
+  //   3. Leaf nodes — wired endpoints, wireless stations, AND terminal managed
+  //      APs — take the ODD column one right of their nearest anchor ancestor
+  //      (parent even column + 1). This is what keeps the switch chain tight:
+  //      a switch's APs hang one column to its right rather than each pushing
+  //      the next switch further across the canvas.
   //   4. Disconnected nodes (no path to the firewall) drop into a rightmost
   //      orphan column so they stay visible.
-  //   5. Lanes (rows) come from a tidy-tree pass over the Dijkstra predecessor
-  //      tree: a node's FIRST child (infra before leaves, then tallest subtree,
-  //      then element order) is placed first and the node inherits its lane, so
-  //      the spine continues on one row; every other node takes the next free
-  //      row from a global cursor, giving each sibling subtree a disjoint row
-  //      band — tree edges never cross or overlap. Fallback exiles get the same
-  //      treatment with their own cursor; orphans stack below the main tree.
-  //   6. A final pass nudges leaf endpoints off non-tree edges (mesh backhaul,
-  //      LLDP cross-links) that pass through their column.
+  //   5. Lanes (rows) in two passes:
+  //      (a) Tidy-tree over ANCHORS only: a node's first anchor child in a
+  //          different column continues the node's row (spine stays flat);
+  //          every other anchor claims a fresh row, giving each sibling subtree
+  //          a disjoint row band. Fallback exiles get their own cursor.
+  //      (b) Leaf pass: each leaf stacks downward from its parent's row using a
+  //          PER-COLUMN cursor, pushed down only to dodge an occupied lane or a
+  //          drawn edge passing through the column. Per-column (not global)
+  //          cursors line up each switch's AP stack just below it instead of
+  //          staircasing the stacks across the canvas. Orphans stack below all.
   //
   // Returns { [nodeId]: { depth, lane } }, or null when there is no FortiGate
   // root (caller should fall back to its previous layout).
@@ -632,10 +642,25 @@
     // be suppressed — otherwise Dijkstra would route the leaf off that switch
     // (or the FG fallback) instead of through its mesh parent.
     var meshLeaf = {};
+    var meshSource = {}; // AP that is the ROOT/source of a mesh or bridge edge
     elements.forEach(function (el) {
       var d = el && el.data;
-      if (d && d.source && d.target && d.isMesh) meshLeaf[d.target] = true;
+      if (d && d.source && d.target && d.isMesh) {
+        meshLeaf[d.target] = true;
+        meshSource[d.source] = true;
+      }
     });
+
+    // A "leaf AP" is a terminal managed FortiAP: a Fortiap whose uplink is a
+    // wired switch/FortiGate port (NOT a mesh leaf hanging off another AP) and
+    // which has no wireless-mesh/bridge children of its own. It's placed like
+    // any other leaf — odd column right of its parent switch, stacked beneath
+    // it — instead of claiming its own even column. Mesh-root APs (meshSource)
+    // and mesh-leaf APs (meshLeaf) stay column anchors so the wireless backhaul
+    // hierarchy keeps its real columns.
+    function isLeafAp(id) {
+      return roleById[id] === "fortiap" && !meshSource[id] && !meshLeaf[id];
+    }
 
     // Full adjacency (every edge) drives depth; physical adjacency (interface-
     // inferred + LLDP edges only) drives "is this switch's uplink to the
@@ -721,12 +746,18 @@
       // FortiLink fallback.
       return roleById[id] === "fortiswitch" && dist[id] !== INF && !physicallyVerified[id] && !meshLeaf[id];
     }
+    // A column anchor owns an even (or fallback) column and is positioned by the
+    // tidy-tree lane pass. Terminal leaf APs are NOT anchors — they hang off
+    // their parent switch in the leaf pass like endpoints and stations do.
+    function isAnchor(id) {
+      return TOPOLOGY_INFRA_ROLES[roleById[id]] && dist[id] !== INF && !isLeafAp(id);
+    }
 
     // --- 3. Verified infra cumulative values -> even columns ---------------
     // Fallback switches are excluded so they don't consume a positive rank.
     var infraValues = {};
     nodeIds.forEach(function (id) {
-      if (TOPOLOGY_INFRA_ROLES[roleById[id]] && dist[id] !== INF && !isFallbackSwitch(id)) {
+      if (isAnchor(id) && !isFallbackSwitch(id)) {
         infraValues[dist[id]] = true;
       }
     });
@@ -736,13 +767,15 @@
     var evenColByValue = {};
     sortedVals.forEach(function (val, idx) { evenColByValue[val] = idx * 2; });
 
-    // Nearest infra ancestor for a leaf, walking the Dijkstra predecessor chain.
-    // Returns the ancestor's id (so the caller can tell verified vs fallback).
+    // Nearest column-anchor ancestor for a leaf, walking the Dijkstra
+    // predecessor chain. Returns the ancestor's id (so the caller can tell
+    // verified vs fallback). Leaf APs are skipped — a station hanging off a
+    // leaf AP resolves up to the AP's parent switch.
     function nearestInfraAncestor(id) {
       var cur = pred[id];
       var guard = 0;
       while (cur && guard++ < nodeIds.length) {
-        if (TOPOLOGY_INFRA_ROLES[roleById[cur]] && dist[cur] !== INF) return cur;
+        if (isAnchor(cur)) return cur;
         cur = pred[cur];
       }
       return null;
@@ -755,7 +788,7 @@
     nodeIds.forEach(function (id) {
       if (isFallbackSwitch(id)) {
         depth[id] = FALLBACK_SWITCH_COL;
-      } else if (TOPOLOGY_INFRA_ROLES[roleById[id]] && dist[id] !== INF) {
+      } else if (isAnchor(id)) {
         depth[id] = evenColByValue[dist[id]];
       } else if (dist[id] !== INF) {
         var anc = nearestInfraAncestor(id);
@@ -767,11 +800,12 @@
       }
     });
 
-    // --- 5. Tidy-tree lane assignment over the Dijkstra predecessor tree ---
-    // A node's FIRST child continues on the node's own row (the spine stays
-    // flat); every other node claims a fresh row from a global cursor, so each
-    // sibling subtree owns a disjoint contiguous row band — tree edges never
-    // cross, no two fan-out edges are collinear, and edge labels spread out.
+    // --- 5a. Tidy-tree lane assignment over COLUMN ANCHORS -----------------
+    // An anchor's FIRST anchor child in a different column continues the
+    // anchor's own row (the spine stays flat); every other anchor claims a
+    // fresh row from a global cursor, so each sibling subtree owns a disjoint
+    // contiguous row band. Leaves (endpoints, stations, terminal APs) are NOT
+    // placed here — they hang off their parent in pass 5b.
     var children = {};
     nodeIds.forEach(function (id) {
       if (pred[id] != null && dist[id] !== INF) {
@@ -797,20 +831,16 @@
       return h;
     }
 
-    // Children within one region (verified tree vs fallback exile), ordered so
-    // the spine continues through infra (switch/AP) before endpoints, then the
-    // tallest subtree (the longest chain holds the row), then element order
-    // for determinism. The region filter is load-bearing: a fallback switch is
-    // infra-role and would otherwise sort first among the FortiGate's children
-    // and drag the spine into the negative columns.
-    function orderedChildren(id, fallbackRegion) {
+    // Anchor children within one region (verified tree vs fallback exile),
+    // tallest subtree first (the longest chain holds the spine row), then
+    // element order for determinism. The region filter is load-bearing: a
+    // fallback switch is an anchor and would otherwise sort among the
+    // FortiGate's children and drag the spine into the negative columns.
+    function orderedAnchorChildren(id, fallbackRegion) {
       var kids = (children[id] || []).filter(function (c) {
-        return !!inFallbackRegion[c] === fallbackRegion;
+        return isAnchor(c) && (!!inFallbackRegion[c] === fallbackRegion);
       });
       kids.sort(function (a, b) {
-        var ia = TOPOLOGY_INFRA_ROLES[roleById[a]] ? 0 : 1;
-        var ib = TOPOLOGY_INFRA_ROLES[roleById[b]] ? 0 : 1;
-        if (ia !== ib) return ia - ib;
         var ha = subtreeHeight(a);
         var hb = subtreeHeight(b);
         if (ha !== hb) return hb - ha;
@@ -821,26 +851,26 @@
 
     var lane = {};
     var nextRow = 0;
-    function placeSubtree(id, fallbackRegion) {
-      if (lane[id] != null) return; // safety — pred tree visits each node once
-      var kids = orderedChildren(id, fallbackRegion);
-      // The spine child — the first ordered child in a DIFFERENT column — is
-      // placed first and the node inherits its row, so the chain stays flat.
-      // A same-column child (leaf chained off a leaf, switch chained off a
-      // fallback switch) can never continue the row: it would overlap.
+    function placeAnchorSubtree(id, fallbackRegion) {
+      if (lane[id] != null) return; // safety — pred tree visits each anchor once
+      var kids = orderedAnchorChildren(id, fallbackRegion);
+      // The spine child — the first anchor child in a DIFFERENT column — is
+      // placed first and the node inherits its row, so the chain stays flat. A
+      // same-column anchor child (switch chained off a fallback switch) can't
+      // continue the row; it takes a fresh one.
       var spine = null;
       for (var ks = 0; ks < kids.length; ks++) {
         if (depth[kids[ks]] !== depth[id]) { spine = kids[ks]; break; }
       }
       if (spine != null) {
-        placeSubtree(spine, fallbackRegion);
+        placeAnchorSubtree(spine, fallbackRegion);
         lane[id] = lane[spine];
       } else {
         lane[id] = nextRow++;
       }
-      for (var ki = 0; ki < kids.length; ki++) placeSubtree(kids[ki], fallbackRegion);
+      for (var ki = 0; ki < kids.length; ki++) placeAnchorSubtree(kids[ki], fallbackRegion);
     }
-    placeSubtree(rootId, false);
+    placeAnchorSubtree(rootId, false);
     var mainRows = nextRow;
 
     // Fallback exiles (negative columns): same recursion with its own cursor
@@ -848,38 +878,36 @@
     // is negative (column -1 is always empty), so nothing overlaps spatially.
     nextRow = 0;
     nodeIds.forEach(function (id) {
-      if (inFallbackRegion[id] && (pred[id] == null || !inFallbackRegion[pred[id]])) {
-        placeSubtree(id, true);
+      if (isAnchor(id) && inFallbackRegion[id] &&
+          !(pred[id] != null && isAnchor(pred[id]) && inFallbackRegion[pred[id]])) {
+        placeAnchorSubtree(id, true);
       }
     });
 
-    // Orphans (no path to the firewall → no pred) and any stragglers: stack
-    // BELOW the main tree. orphanCol is shared with the rightmost verified
-    // leaves, so restarting this cursor at 0 would collide with them.
-    nextRow = mainRows;
-    nodeIds.forEach(function (id) {
-      if (lane[id] == null) lane[id] = nextRow++;
-    });
-
-    // --- 6. Keep endpoint nodes off connection lines -----------------------
-    // A leaf endpoint placed in an odd column can land directly on a wired/mesh
-    // edge that passes THROUGH that column (e.g. a wireless station in the
-    // column between a root AP and its mesh-leaf AP sits on the mesh backhaul
-    // line). Nudge any such endpoint to the nearest free lane that no
-    // pass-through edge crosses. Only leaf endpoints move — infra stays put.
+    // --- 5b. Leaf pass: stack each leaf below its parent, per column --------
+    // Seed occupancy from the anchors already laid out, then place every leaf
+    // (endpoint / station / terminal AP) in the odd column right of its parent.
+    // A parent's leaves start at the parent's own row and only push downward to
+    // dodge a lane already taken in that column OR a drawn edge (spine uplink,
+    // mesh backhaul, LLDP cross-link) passing through it. Per-column cursors —
+    // not a global one — line each switch's AP stack up just below the switch
+    // instead of staircasing the stacks rightward across the canvas.
     var occupied = {};
     nodeIds.forEach(function (id) {
-      (occupied[depth[id]] = occupied[depth[id]] || {})[lane[id]] = true;
+      if (lane[id] != null) (occupied[depth[id]] = occupied[depth[id]] || {})[lane[id]] = true;
     });
     // Interpolated lane of an edge where it crosses integer column `col`, or
-    // null when the edge doesn't strictly pass through that column.
+    // null when the edge doesn't strictly pass through that column (or an
+    // endpoint isn't positioned yet).
     function edgeLaneAt(s, t, col) {
       var ds = depth[s], dt = depth[t];
+      if (lane[s] == null || lane[t] == null || ds == null || dt == null) return null;
       if (ds === dt) return null;
       if (col <= Math.min(ds, dt) || col >= Math.max(ds, dt)) return null;
       return lane[s] + ((col - ds) / (dt - ds)) * (lane[t] - lane[s]);
     }
-    function laneCollides(id, col, L) {
+    function laneBlocked(id, col, L) {
+      if (occupied[col] && occupied[col][L]) return true;
       for (var e = 0; e < edgeList.length; e++) {
         var s = edgeList[e][0], t = edgeList[e][1];
         if (s === id || t === id) continue; // edges that terminate here are fine
@@ -888,20 +916,35 @@
       }
       return false;
     }
+    // Place leaves parent-before-child (a leaf can chain off another leaf in
+    // the same column), repeating until no leaf becomes newly placeable.
+    var pendingLeaves = nodeIds.filter(function (id) {
+      return lane[id] == null && dist[id] !== INF && pred[id] != null;
+    });
+    var advanced = true;
+    while (advanced) {
+      advanced = false;
+      pendingLeaves.forEach(function (id) {
+        if (lane[id] != null) return;
+        var P = pred[id];
+        if (lane[P] == null) return; // parent not placed yet — a later wave gets it
+        var col = depth[id];
+        var L = lane[P]; // stacks start at the parent's own row…
+        while (laneBlocked(id, col, L)) L++; // …pushed down past taken lanes / edges
+        lane[id] = L;
+        (occupied[col] = occupied[col] || {})[L] = true;
+        advanced = true;
+      });
+    }
+
+    // Orphans (no path to the firewall → no pred) and any straggler the waves
+    // couldn't reach: stack strictly below everything already placed so they
+    // can't share a row with a positioned node in the same column.
+    var maxLane = -1;
+    nodeIds.forEach(function (id) { if (lane[id] != null && lane[id] > maxLane) maxLane = lane[id]; });
+    nextRow = Math.max(mainRows, maxLane + 1);
     nodeIds.forEach(function (id) {
-      if (TOPOLOGY_INFRA_ROLES[roleById[id]]) return; // only nudge leaf endpoints
-      var col = depth[id];
-      if (!laneCollides(id, col, lane[id])) return;
-      occupied[col][lane[id]] = false; // vacate, search for a clear lane nearby
-      var picked = lane[id];
-      for (var step = 1; step <= 16; step++) {
-        var down = lane[id] + step;
-        if (!occupied[col][down] && !laneCollides(id, col, down)) { picked = down; break; }
-        var up = lane[id] - step;
-        if (!occupied[col][up] && !laneCollides(id, col, up)) { picked = up; break; }
-      }
-      lane[id] = picked;
-      occupied[col][picked] = true;
+      if (lane[id] == null) lane[id] = nextRow++;
     });
 
     var out = {};

@@ -66,39 +66,97 @@ describe("computeTopologyColumns", () => {
   });
 
   it("puts infra on even columns by weighted depth, compacting gaps", () => {
-    // fw(1) → sw1(1+2=3) → sw2(3+2=5) → ap on sw2 (5+3=8)
-    // distinct infra values {1,3,5,8} → ranks 0,1,2,3 → even cols 0,2,4,6
+    // fw(1) → sw1(1+2=3) → sw2(3+2=5) → sw3(5+2=7)
+    // distinct anchor values {1,3,5,7} → ranks 0,1,2,3 → even cols 0,2,4,6
     const cols = computeTopologyColumns([
       node("fg", "fortigate"),
       node("sw1", "fortiswitch"),
       node("sw2", "fortiswitch"),
-      node("ap", "fortiap"),
+      node("sw3", "fortiswitch"),
       edge("fg", "sw1"),
       edge("sw1", "sw2"),
-      edge("sw2", "ap"),
+      edge("sw2", "sw3"),
     ])!;
     expect(cols.fg.depth).toBe(0);
     expect(cols.sw1.depth).toBe(2);
     expect(cols.sw2.depth).toBe(4);
-    expect(cols.ap.depth).toBe(6);
-    // every infra column is even
-    [cols.fg, cols.sw1, cols.sw2, cols.ap].forEach((c) => expect(c.depth % 2).toBe(0));
+    expect(cols.sw3.depth).toBe(6);
+    // every anchor column is even
+    [cols.fg, cols.sw1, cols.sw2, cols.sw3].forEach((c) => expect(c.depth % 2).toBe(0));
   });
 
-  it("places a leaf (wireless station) in the odd column right of its parent", () => {
-    // fw(1) → sw(3) → ap(3+3=6); ap infra rank → col 4; station leaf → col 5
+  it("places a terminal AP as a leaf in the odd column right of its switch", () => {
+    // A managed AP hanging off a switch port is NOT its own column anchor — it
+    // hangs one column right of the switch, so the switch chain stays tight.
+    // fw(1) → sw(3); ap is a terminal leaf → col 3 (sw col 2 + 1), not col 4.
     const cols = computeTopologyColumns([
       node("fg", "fortigate"),
       node("sw", "fortiswitch"),
       node("ap", "fortiap"),
-      node("sta", "wireless-station"),
       edge("fg", "sw"),
       edge("sw", "ap"),
-      edge("ap", "sta"),
     ])!;
-    expect(cols.ap.depth).toBe(4);
-    expect(cols.sta.depth).toBe(5); // odd, one right of the AP
-    expect(cols.sta.depth % 2).toBe(1);
+    expect(cols.sw.depth).toBe(2);
+    expect(cols.ap.depth).toBe(3); // odd, one right of the switch
+    expect(cols.ap.depth % 2).toBe(1);
+  });
+
+  it("packs a switch chain into consecutive columns with APs stacked below each switch", () => {
+    // Mirrors the real CKYSMA topology: FortiGate → three daisy-chained
+    // FortiSwitches (verified uplinks), each switch carrying terminal APs.
+    // The switches must land in tight consecutive even columns (0,2,4,6); each
+    // switch's APs hang in the odd column immediately right of it (3,5,7); and
+    // each switch's AP stack lines up just below that switch rather than
+    // staircasing across the canvas (no AP column lands past the last switch's
+    // column except its own leaf column).
+    const els = [
+      node("fg", "fortigate"),
+      node("sw1", "fortiswitch"),
+      node("sw2", "fortiswitch"),
+      node("sw3", "fortiswitch"),
+      edge("fg", "sw1"),
+      edge("sw1", "sw2"),
+      edge("sw2", "sw3"),
+    ];
+    const apsBySwitch: Record<string, string[]> = {
+      sw1: ["a1a", "a1b", "a1c"],
+      sw2: ["a2a", "a2b", "a2c"],
+      sw3: ["a3a", "a3b", "a3c", "a3d"],
+    };
+    for (const [sw, aps] of Object.entries(apsBySwitch)) {
+      for (const ap of aps) {
+        els.push(node(ap, "fortiap"));
+        els.push(edge(sw, ap));
+      }
+    }
+    const cols = computeTopologyColumns(els)!;
+
+    // Tight switch chain.
+    expect(cols.fg.depth).toBe(0);
+    expect(cols.sw1.depth).toBe(2);
+    expect(cols.sw2.depth).toBe(4);
+    expect(cols.sw3.depth).toBe(6);
+    // Switch chain shares row 0 (the flat spine).
+    [cols.fg, cols.sw1, cols.sw2, cols.sw3].forEach((c) => expect(c.lane).toBe(0));
+
+    // Each switch's APs hang in the odd column one right of that switch…
+    const expectStack = (sw: string, aps: string[]) => {
+      const swCol = cols[sw].depth;
+      aps.forEach((ap) => expect(cols[ap].depth).toBe(swCol + 1));
+      // …on distinct rows, and the stack starts within a row of the switch
+      // (i.e. it is NOT staircased far down the canvas).
+      const lanes = aps.map((ap) => cols[ap].lane).sort((a, b) => a - b);
+      expect(new Set(lanes).size).toBe(aps.length);
+      expect(Math.min(...lanes)).toBeLessThanOrEqual(cols[sw].lane + 1);
+    };
+    expectStack("sw1", apsBySwitch.sw1);
+    expectStack("sw2", apsBySwitch.sw2);
+    expectStack("sw3", apsBySwitch.sw3);
+
+    // No node is pushed past the last switch's own AP column — proves the
+    // stacks aren't fanned rightward the way the all-APs-are-infra layout did.
+    const maxDepth = Math.max(...Object.values(cols).map((c) => c.depth));
+    expect(maxDepth).toBe(cols.sw3.depth + 1);
   });
 
   it("walks to the nearest infra ancestor for a leaf one hop past a leaf", () => {
@@ -268,10 +326,12 @@ describe("computeTopologyColumns", () => {
     expect(cols.ap.lane).toBe(0);
   });
 
-  it("gives sibling subtrees disjoint row bands", () => {
-    // swA (3 endpoints) and swB (2 endpoints) both on the firewall: every row
-    // in swA's subtree sits strictly above every row in swB's, and swB
-    // continues on its own first endpoint's row.
+  it("stacks endpoints of same-column sibling switches without overlap", () => {
+    // swA (3 endpoints) and swB (2 endpoints) both directly on the firewall →
+    // both at column 2, so their endpoints share column 3. The switches take
+    // distinct rows, and every endpoint in the shared column occupies its own
+    // distinct lane (no two stacked nodes collide), with each switch's stack
+    // grouped contiguously.
     const cols = computeTopologyColumns([
       node("fg", "fortigate"),
       node("swA", "fortiswitch"),
@@ -289,10 +349,21 @@ describe("computeTopologyColumns", () => {
       edge("swB", "b1"),
       edge("swB", "b2"),
     ])!;
-    const bandA = [cols.swA, cols.a1, cols.a2, cols.a3].map((c) => c.lane);
-    const bandB = [cols.swB, cols.b1, cols.b2].map((c) => c.lane);
-    expect(Math.max(...bandA)).toBeLessThan(Math.min(...bandB));
-    expect(cols.swB.lane).toBe(cols.b1.lane); // swB's spine continues through its first endpoint
+    expect(cols.swA.depth).toBe(2);
+    expect(cols.swB.depth).toBe(2);
+    expect(cols.swA.lane).not.toBe(cols.swB.lane); // sibling switches on distinct rows
+    // All five endpoints live in column 3, each on its own lane.
+    const epIds = ["a1", "a2", "a3", "b1", "b2"];
+    epIds.forEach((id) => expect(cols[id].depth).toBe(3));
+    const epLanes = epIds.map((id) => cols[id].lane);
+    expect(new Set(epLanes).size).toBe(epIds.length);
+    // Each switch's endpoints are a contiguous block (no interleaving between
+    // the two switches' stacks).
+    const aLanes = ["a1", "a2", "a3"].map((id) => cols[id].lane).sort((x, y) => x - y);
+    const bLanes = ["b1", "b2"].map((id) => cols[id].lane).sort((x, y) => x - y);
+    const contiguous = (ls: number[]) => ls.every((l, i) => i === 0 || l === ls[i - 1] + 1);
+    expect(contiguous(aLanes)).toBe(true);
+    expect(contiguous(bLanes)).toBe(true);
   });
 
   it("places every endpoint of one switch on its own row, first one on the switch's row", () => {
