@@ -3754,7 +3754,9 @@ export async function collectFastFiltered(assetId: string): Promise<CollectionRe
       // depth behavior as the heavy cadence.
       if (isFortinetSrc && integration) {
         applyFortiInterfaceFilter(full.interfaces, integration as any);
-        if (wantedTunnels.length > 0) {
+        // Skip managed FortiSwitches / FortiAPs — not directly REST-able, no IPsec.
+        // See the matching guard + rationale in collectSystemInfo.
+        if (!isManagedSwitchOrAp && wantedTunnels.length > 0) {
           const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any, sysInfoTimeout);
           if (ipsec !== undefined) full.ipsecTunnels = ipsec;
         }
@@ -3959,10 +3961,20 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
         if (isFortinetSrc && integration) {
           applyFortiInterfaceFilter(data.interfaces, integration as any);
           // IPsec always via REST when the source is Fortinet — SNMP has no equivalent.
-          const endIpsec = startPhase("systeminfo.snmp.ipsec_overlay_rest");
-          const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any, sysInfoTimeout);
-          endIpsec({ tunnels: ipsec?.length ?? null });
-          if (ipsec !== undefined) data.ipsecTunnels = ipsec;
+          // BUT skip managed FortiSwitches / FortiAPs: they aren't directly REST-able
+          // (their telemetry / system-info lives on the parent FortiGate) and they have
+          // no IPsec. Without this guard the overlay fires a FortiOS REST call straight
+          // at the switch/AP's own IP:443 every system-info pass — a standalone GUI
+          // listener accepts the TCP/TLS handshake but never answers the API call,
+          // leaving idle sockets and hammering the device's weak management CPU
+          // (prod incident: FortiSwitch ICMP packet loss). Same !isManagedSwitchOrAp
+          // guard the REST telemetry / system-info / fast-filtered paths already use.
+          if (!isManagedSwitchOrAp) {
+            const endIpsec = startPhase("systeminfo.snmp.ipsec_overlay_rest");
+            const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any, sysInfoTimeout);
+            endIpsec({ tunnels: ipsec?.length ?? null });
+            if (ipsec !== undefined) data.ipsecTunnels = ipsec;
+          }
           // FortiSwitch port-VLAN + trunk-member overlay. SNMP IF-MIB gives
           // us per-port counters but neither VLAN membership nor the
           // trunk→physical-member mapping; the parent FortiGate's
