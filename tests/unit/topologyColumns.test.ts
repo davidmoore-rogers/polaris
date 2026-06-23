@@ -310,6 +310,65 @@ describe("computeTopologyColumns", () => {
     expect(cols.swA.lane).not.toBe(cols.swB.lane);
   });
 
+  it("keeps each switch's APs in one contiguous block when siblings share a column and APs arrive interleaved", () => {
+    // Mirrors the BOONE site: three switches all hang off one parent switch
+    // (so they share column 4) and their APs share column 5. The /topology
+    // payload lists APs interleaved across switches (A1, B1, C1, A2, C2) — the
+    // solver must still group each switch's APs into one contiguous block and
+    // never split a switch's APs apart with another switch's APs.
+    const els = [
+      node("fg", "fortigate"),
+      node("s0", "fortiswitch"),
+      node("swA", "fortiswitch"),
+      node("swB", "fortiswitch"),
+      node("swC", "fortiswitch"),
+      edge("fg", "s0"),
+      edge("s0", "swA"),
+      edge("s0", "swB"),
+      edge("s0", "swC"),
+    ];
+    // Interleaved AP element order — the crux of the regression.
+    const apEdges: [string, string][] = [
+      ["swA", "a1"], ["swB", "b1"], ["swC", "c1"], ["swA", "a2"], ["swC", "c2"],
+    ];
+    const apsBySwitch: Record<string, string[]> = { swA: ["a1", "a2"], swB: ["b1"], swC: ["c1", "c2"] };
+    for (const [sw, ap] of apEdges) {
+      els.push(node(ap, "fortiap"));
+      els.push(edge(sw, ap));
+    }
+    const cols = computeTopologyColumns(els)!;
+
+    // The three switches share column 4; their APs share column 5.
+    ["swA", "swB", "swC"].forEach((s) => expect(cols[s].depth).toBe(4));
+    ["a1", "a2", "b1", "c1", "c2"].forEach((a) => expect(cols[a].depth).toBe(5));
+
+    // Each switch's APs form a contiguous lane block...
+    const contiguous = (ls: number[]) => {
+      const s = [...ls].sort((x, y) => x - y);
+      return s.every((l, i) => i === 0 || l === s[i - 1] + 1);
+    };
+    for (const aps of Object.values(apsBySwitch)) {
+      expect(contiguous(aps.map((a) => cols[a].lane))).toBe(true);
+    }
+    // ...and no other switch's AP falls between a switch's min and max lane
+    // (i.e. the blocks don't interleave).
+    const block = (aps: string[]) => {
+      const ls = aps.map((a) => cols[a].lane);
+      return { lo: Math.min(...ls), hi: Math.max(...ls) };
+    };
+    const bA = block(apsBySwitch.swA), bB = block(apsBySwitch.swB), bC = block(apsBySwitch.swC);
+    const disjoint = (x: { lo: number; hi: number }, y: { lo: number; hi: number }) =>
+      x.hi < y.lo || y.hi < x.lo;
+    expect(disjoint(bA, bB)).toBe(true);
+    expect(disjoint(bA, bC)).toBe(true);
+    expect(disjoint(bB, bC)).toBe(true);
+
+    // Each switch sits at the top of its own AP block (reserved row spacing).
+    expect(cols.swA.lane).toBe(bA.lo);
+    expect(cols.swB.lane).toBe(bB.lo);
+    expect(cols.swC.lane).toBe(bC.lo);
+  });
+
   it("keeps the spine on one row: a chain shares the firewall's lane", () => {
     const cols = computeTopologyColumns([
       node("fg", "fortigate"),

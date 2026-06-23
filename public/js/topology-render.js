@@ -803,9 +803,11 @@
     // --- 5a. Tidy-tree lane assignment over COLUMN ANCHORS -----------------
     // An anchor's FIRST anchor child in a different column continues the
     // anchor's own row (the spine stays flat); every other anchor claims a
-    // fresh row from a global cursor, so each sibling subtree owns a disjoint
-    // contiguous row band. Leaves (endpoints, stations, terminal APs) are NOT
-    // placed here — they hang off their parent in pass 5b.
+    // fresh row. Each fresh-row anchor reserves as many rows as it has leaf
+    // children (its APs), so same-column sibling switches are spaced far enough
+    // apart that each one's AP block fits directly beneath it without colliding
+    // with the next switch's block. Leaves (endpoints, stations, terminal APs)
+    // are NOT placed here — they hang off their parent in pass 5b.
     var children = {};
     nodeIds.forEach(function (id) {
       if (pred[id] != null && dist[id] !== INF) {
@@ -816,6 +818,15 @@
     nodeIds.forEach(function (id, k) { orderIdx[id] = k; });
     var inFallbackRegion = {};
     nodeIds.forEach(function (id) { if (depth[id] < 0) inFallbackRegion[id] = true; });
+    // Direct leaf children (APs / endpoints / stations) of each node — the
+    // row-span an anchor needs reserved for its own leaf stack.
+    var leafChildCount = {};
+    nodeIds.forEach(function (id) {
+      var c = children[id] || [];
+      var n = 0;
+      for (var i = 0; i < c.length; i++) if (!isAnchor(c[i])) n++;
+      leafChildCount[id] = n;
+    });
 
     // Longest pred-chain below a node, self included (memoized).
     var heightMemo = {};
@@ -866,7 +877,10 @@
         placeAnchorSubtree(spine, fallbackRegion);
         lane[id] = lane[spine];
       } else {
-        lane[id] = nextRow++;
+        // Fresh row, plus enough rows below for this anchor's own AP stack so a
+        // following same-column sibling clears it.
+        lane[id] = nextRow;
+        nextRow += Math.max(1, leafChildCount[id] || 0);
       }
       for (var ki = 0; ki < kids.length; ki++) placeAnchorSubtree(kids[ki], fallbackRegion);
     }
@@ -884,14 +898,17 @@
       }
     });
 
-    // --- 5b. Leaf pass: stack each leaf below its parent, per column --------
+    // --- 5b. Leaf pass: stack each parent's leaves as a contiguous block ----
     // Seed occupancy from the anchors already laid out, then place every leaf
     // (endpoint / station / terminal AP) in the odd column right of its parent.
-    // A parent's leaves start at the parent's own row and only push downward to
-    // dodge a lane already taken in that column OR a drawn edge (spine uplink,
-    // mesh backhaul, LLDP cross-link) passing through it. Per-column cursors —
-    // not a global one — line each switch's AP stack up just below the switch
-    // instead of staircasing the stacks rightward across the canvas.
+    // Leaves are grouped BY PARENT and placed one whole parent at a time, so a
+    // switch's APs always form one contiguous block and never get split apart
+    // by another switch's APs sharing the column. Each block starts at its
+    // parent's own row (so the AP stack lines up beneath the switch), pushed
+    // down only to dodge a lane already taken in that column OR a drawn edge
+    // (spine uplink, mesh backhaul, LLDP cross-link) passing through it. Blocks
+    // are placed in parent-row order, so a higher switch's block sits above a
+    // lower switch's — no staircasing, no interleaving.
     var occupied = {};
     nodeIds.forEach(function (id) {
       if (lane[id] != null) (occupied[depth[id]] = occupied[depth[id]] || {})[lane[id]] = true;
@@ -916,24 +933,38 @@
       }
       return false;
     }
-    // Place leaves parent-before-child (a leaf can chain off another leaf in
-    // the same column), repeating until no leaf becomes newly placeable.
-    var pendingLeaves = nodeIds.filter(function (id) {
-      return lane[id] == null && dist[id] !== INF && pred[id] != null;
+    // Leaves grouped by parent. Placed parent-before-child via waves (a leaf
+    // can chain off another leaf), each parent's leaves laid down as one block.
+    var leavesByParent = {};
+    nodeIds.forEach(function (id) {
+      if (lane[id] == null && dist[id] !== INF && pred[id] != null) {
+        (leavesByParent[pred[id]] = leavesByParent[pred[id]] || []).push(id);
+      }
     });
-    var advanced = true;
-    while (advanced) {
-      advanced = false;
-      pendingLeaves.forEach(function (id) {
-        if (lane[id] != null) return;
-        var P = pred[id];
-        if (lane[P] == null) return; // parent not placed yet — a later wave gets it
-        var col = depth[id];
-        var L = lane[P]; // stacks start at the parent's own row…
-        while (laneBlocked(id, col, L)) L++; // …pushed down past taken lanes / edges
-        lane[id] = L;
-        (occupied[col] = occupied[col] || {})[L] = true;
-        advanced = true;
+    var progressed = true;
+    while (progressed) {
+      progressed = false;
+      // Parents whose row is known and that still have unplaced leaves, in
+      // row order so blocks stack top-to-bottom by parent position.
+      var readyParents = Object.keys(leavesByParent).filter(function (p) {
+        return lane[p] != null && leavesByParent[p].some(function (l) { return lane[l] == null; });
+      });
+      readyParents.sort(function (a, b) {
+        if (lane[a] !== lane[b]) return lane[a] - lane[b];
+        return orderIdx[a] - orderIdx[b];
+      });
+      readyParents.forEach(function (p) {
+        var cursor = lane[p]; // block starts at the parent's own row…
+        leavesByParent[p].forEach(function (leaf) {
+          if (lane[leaf] != null) return;
+          var col = depth[leaf];
+          var L = cursor;
+          while (laneBlocked(leaf, col, L)) L++; // …pushed past taken lanes / edges
+          lane[leaf] = L;
+          (occupied[col] = occupied[col] || {})[L] = true;
+          cursor = L + 1; // next leaf of THIS parent stacks immediately below
+          progressed = true;
+        });
       });
     }
 
