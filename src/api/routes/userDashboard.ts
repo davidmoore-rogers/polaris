@@ -36,7 +36,7 @@ const MAX_COLUMNS = 12;
 const WidgetInstanceSchema = z.object({
   id:     z.string().uuid("widget id must be a uuid"),
   type:   z.string().min(1).max(64),
-  height: z.union([z.literal(1), z.literal(2)]),
+  height: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   config: z.record(z.unknown()).default({}),
 });
 
