@@ -112,6 +112,38 @@
       wxPane.style.zIndex = 450;
       wxPane.style.pointerEvents = "none";
 
+      // Leader lines: a dashed connector from each down site's (draggable)
+      // label back to its red dot, so a label pulled aside still shows which
+      // dot it belongs to. Drawn in container coords in an overlay SVG and
+      // recomputed on pan/zoom/resize and live while a label is dragged.
+      var SVGNS = "http://www.w3.org/2000/svg";
+      var leaderSvg = document.createElementNS(SVGNS, "svg");
+      leaderSvg.setAttribute("class", "sitemap-leaders");
+      leaderSvg.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:640;overflow:visible";
+      mapDiv.appendChild(leaderSvg);
+      var downMarkers = [];
+      function updateLeaders() {
+        while (leaderSvg.firstChild) leaderSvg.removeChild(leaderSvg.firstChild);
+        var mr = mapDiv.getBoundingClientRect();
+        downMarkers.forEach(function (m) {
+          var tt = m.getTooltip(); if (!tt) return;
+          var tEl = tt.getElement(); if (!tEl) return;
+          var p = map.latLngToContainerPoint(m.getLatLng());
+          var tr = tEl.getBoundingClientRect();
+          var tx = tr.left - mr.left + tr.width / 2;   // label bottom-centre (its tail point)
+          var ty = tr.bottom - mr.top - 1;
+          var line = document.createElementNS(SVGNS, "line");
+          line.setAttribute("x1", p.x); line.setAttribute("y1", p.y);
+          line.setAttribute("x2", tx); line.setAttribute("y2", ty);
+          line.setAttribute("stroke", "#ff1744");
+          line.setAttribute("stroke-width", "1.5");
+          line.setAttribute("stroke-dasharray", "3 3");
+          line.setAttribute("opacity", "0.9");
+          leaderSvg.appendChild(line);
+        });
+      }
+      map.on("move zoomend viewreset resize", updateLeaders);
+
       // ── Markers (status dots + pulse) ──────────────────────────────────
       var markerRefs = [];
       // Per-site dragged tooltip offsets, persisted across the 60s refresh so a
@@ -134,7 +166,7 @@
           var base = (tt.options.offset || [0, 0]).slice();
           function onMove(ev) {
             var off = [base[0] + (ev.clientX - startX), base[1] + (ev.clientY - startY)];
-            tt.options.offset = off; tt.update(); draggedOffsets[key] = off;
+            tt.options.offset = off; tt.update(); draggedOffsets[key] = off; updateLeaders();
           }
           function onUp() {
             map.dragging.enable();
@@ -150,6 +182,7 @@
       function buildMarkers(sites) {
         markersLayer.clearLayers();
         markerRefs = [];
+        downMarkers = [];
         var rows = (sites || []).filter(function (s) { return s.latitude != null && s.longitude != null; });
         if (config && config.issuesOnly) rows = rows.filter(hasIssue);
         var latlngs = [];
@@ -193,9 +226,11 @@
           );
           if (down) dot.on("tooltipopen", function () { attachTooltipDrag(dot, s.id); });
           dot.addTo(markersLayer);
+          if (down) downMarkers.push(dot);
           markerRefs.push({ lat: s.latitude, lng: s.longitude });
           latlngs.push([s.latitude, s.longitude]);
         });
+        requestAnimationFrame(updateLeaders);
         return latlngs;
       }
       function refit(latlngs) { if (latlngs.length) map.fitBounds(L.latLngBounds(latlngs).pad(0.12), { maxZoom: 10 }); }
