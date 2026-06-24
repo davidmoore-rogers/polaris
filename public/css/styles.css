@@ -3976,11 +3976,16 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .sitemap-popup-row span { color: var(--color-text-tertiary); }
 .sitemap-popup-link { display: inline-block; margin-top: 6px; font-size: 0.8rem; color: #4fc3f7; text-decoration: none; }
 .leaflet-tooltip.sitemap-tip { background: var(--color-bg-elevated, #1c1f24); color: var(--color-text-primary); border: 1px solid var(--color-border, rgba(255,255,255,0.12)); font-size: 0.75rem; font-weight: 600; }
-.leaflet-tooltip.sitemap-tip::before { display: none; }
+/* Hover labels (transient, sit right over the dot) keep Leaflet's built-in
+   speech-bubble tail, colored to match the bubble. */
+.leaflet-tooltip.sitemap-tip.leaflet-tooltip-top::before { border-top-color: var(--color-bg-elevated, #1c1f24); }
 /* Permanent red tooltip on down sites — always visible, names what's down,
-   and draggable so overlapping labels can be pulled apart. */
+   and draggable so overlapping labels can be pulled apart. The static tail is
+   hidden here; a dashed leader line (.sitemap-leaders) connects it to its dot
+   instead, so the connection holds even after the label is dragged aside. */
 .leaflet-tooltip.sitemap-tip-down { background: rgba(40,8,12,0.92); border-color: #ff1744; color: #ff6b85; pointer-events: auto; cursor: grab; }
 .leaflet-tooltip.sitemap-tip-down.dragging { cursor: grabbing; }
+.leaflet-tooltip.sitemap-tip-down.leaflet-tooltip-top::before { display: none; }
 
 /* Fullscreen: the widget body fills the viewport. !important beats the inline
    position:relative set on the body at render time. */
