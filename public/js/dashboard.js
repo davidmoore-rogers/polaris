@@ -253,6 +253,10 @@
     // container; height 1 → 280px, height 2 → 576px (2 rows + the gap).
     article.style.height = (w.height === 2 ? (2 * ROW_HEIGHT_PX + GAP_PX) : ROW_HEIGHT_PX) + "px";
 
+    // In edit mode a dedicated grip is the drag handle — a clear, easy target
+    // for dragging the widget to another column (the title alone was too easy
+    // to miss). The whole widget can move across columns from here.
+    var grip = state.editing ? '<span class="dashboard-widget-grip" draggable="true" title="Drag to move (to any column)">⠿</span>' : "";
     var editControls = state.editing
       ? '<button type="button" class="dashboard-widget-height-toggle" data-action="height" title="Toggle height">' + (w.height === 2 ? "▾" : "▴") + '</button>' +
         '<button type="button" class="dashboard-widget-action" data-action="gear" title="Configure">⚙</button>' +
@@ -260,14 +264,15 @@
       : "";
     article.innerHTML =
       '<div class="dashboard-widget-header">' +
-        '<div class="dashboard-widget-title"' + (state.editing ? ' draggable="true"' : '') + '>' + escapeHtml(label) + '</div>' +
+        grip +
+        '<div class="dashboard-widget-title">' + escapeHtml(label) + '</div>' +
         editControls +
       '</div>' +
       '<div class="dashboard-widget-body"></div>';
 
     if (state.editing) {
-      var titleEl = article.querySelector(".dashboard-widget-title");
-      titleEl.addEventListener("dragstart", function (e) {
+      var gripEl = article.querySelector(".dashboard-widget-grip");
+      gripEl.addEventListener("dragstart", function (e) {
         e.dataTransfer.effectAllowed = "move";
         e.dataTransfer.setData("application/x-polaris-widget-move", w.id);
         e.dataTransfer.setData("text/plain", w.id);
@@ -276,7 +281,7 @@
         article.classList.add("lifted");
         canvasEl.classList.add("is-dragging");
       });
-      titleEl.addEventListener("dragend", clearDragState);
+      gripEl.addEventListener("dragend", clearDragState);
 
       article.querySelector('[data-action="gear"]').addEventListener("click", function (ev) {
         ev.stopPropagation();

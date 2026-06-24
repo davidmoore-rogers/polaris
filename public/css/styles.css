@@ -733,6 +733,20 @@ code {
   align-items: center;
   margin-bottom: 1.5rem;
 }
+/* Frozen top bar (Dashboard): the header stays pinned while the widgets scroll,
+   so Add Widgets / Done Editing / search stay reachable. z-index sits above the
+   widgets + their Leaflet panes/controls (~1000) but below the widget picker
+   (1100), gear popover (1200), and the Status Map fullscreen (4000). The page
+   background + bottom border keep scrolled content from showing through. */
+.page-header-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 1050;
+  background: var(--color-bg, #0f1115);
+  padding: 1rem 0 0.85rem;
+  margin-top: -1rem;
+  border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.08));
+}
 .page-header h2 {
   font-size: 1.35rem;
   font-weight: 700;
@@ -3638,6 +3652,13 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 .dashboard-widget-title[draggable="true"] { cursor: grab; }
 .dashboard-widget-title[draggable="true"]:active { cursor: grabbing; }
+/* Drag handle (edit mode) — the grab target for moving a widget to any column. */
+.dashboard-widget-grip {
+  cursor: grab; user-select: none; color: var(--color-text-tertiary);
+  font-size: 1rem; line-height: 1; padding: 2px 4px; border-radius: 4px; flex-shrink: 0;
+}
+.dashboard-widget-grip:hover { color: var(--color-text-primary); background: rgba(255,255,255,0.06); }
+.dashboard-widget-grip:active { cursor: grabbing; }
 .dashboard-widget-action {
   background: transparent;
   border: 0;

@@ -67,7 +67,7 @@
   PolarisWidgets.register({
     type: "siteMap",
     category: "NOC",
-    label: "Site Map",
+    label: "Status Map",
     description: "Geographic map of monitored sites — status dots + live weather radar.",
     defaultSize: { width: 6, height: 2 },
     minSize: { width: 4, height: 1 },
@@ -383,7 +383,7 @@
 
     renderPreview: function (el) {
       el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;min-height:120px;flex-direction:column;gap:6px;color:var(--color-text-secondary)">' +
-        '<div style="font-size:2rem">🗺️</div><div style="font-size:0.82rem">Site map · status dots + weather radar</div></div>';
+        '<div style="font-size:2rem">🗺️</div><div style="font-size:0.82rem">Status map · status dots + weather radar</div></div>';
     },
 
     renderConfig: function (el, config, onChange) {
