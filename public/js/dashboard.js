@@ -523,16 +523,25 @@
     var colEls = Array.prototype.slice.call(canvasEl.querySelectorAll(".dashboard-column"));
     if (!colEls.length) return { newColumn: true };
 
-    // Pick the column under the cursor x; if past the last column, the
-    // new-column target (handled above) or the last column wins.
+    // Pick the column whose box contains the cursor in BOTH axes. Columns wrap
+    // into multiple rows, and a Full-width column spans the entire row width —
+    // so an x-only test would always match it and trap every drop in the first
+    // (top) column. Require y to be inside the column too; if the cursor is in
+    // a gap / below everything, fall back to the nearest column by centre.
     var colEl = null;
     for (var i = 0; i < colEls.length; i++) {
       var r = colEls[i].getBoundingClientRect();
-      if (clientX >= r.left && clientX <= r.right) { colEl = colEls[i]; break; }
+      if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) { colEl = colEls[i]; break; }
     }
     if (!colEl) {
-      // Left of all columns → first; right of all → last.
-      colEl = clientX < colEls[0].getBoundingClientRect().left ? colEls[0] : colEls[colEls.length - 1];
+      var bestD = Infinity;
+      for (var k = 0; k < colEls.length; k++) {
+        var rr = colEls[k].getBoundingClientRect();
+        var dx = clientX - (rr.left + rr.width / 2);
+        var dy = clientY - (rr.top + rr.height / 2);
+        var d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; colEl = colEls[k]; }
+      }
     }
     var ci = colEls.indexOf(colEl);
     var cards = Array.prototype.slice.call(colEl.querySelectorAll(".dashboard-widget"));
