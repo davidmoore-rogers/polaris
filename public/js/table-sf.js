@@ -751,6 +751,43 @@ function setupColumnLayout(tableEl, options) {
       if (handle) handle.style.display = (i === lastIdx) ? "none" : "";
     });
     tableEl.style.tableLayout = anyWidth ? "fixed" : "";
+    scheduleAutoFillPin();
+  }
+
+  // table-layout:fixed sizes an auto-width column from its cell in the first
+  // <tbody> row. When that row is a colspan cell (e.g. the interfaces table's
+  // "Interfaces (30)" section header) the auto-fill (rightmost) column has no
+  // per-column width basis, so fixed layout strands the leftover space as a
+  // trailing gap instead of growing the column to the border. Detect that case
+  // after layout settles and pin the column to an explicit computed width so
+  // its right edge meets the table border. No-op for the common case (no
+  // colspan first row) — there the column auto-fills correctly and we leave it
+  // width:auto so it stays responsive without recomputation.
+  var MIN_LAST_COL_W = 40;
+  var pinScheduled = false;
+  function pinAutoFillColumn() {
+    var lastIdx = lastVisibleResizableIdx();
+    if (lastIdx < 0) return;
+    var lastCol = cols[lastIdx];
+    lastCol.style.width = "";                       // measure the auto-fill result
+    var tableRect = tableEl.getBoundingClientRect();
+    if (!tableRect.width) return;                   // off-screen; nothing to measure
+    var lastTh = ths[lastIdx];
+    if (!lastTh) return;
+    if (tableRect.right - lastTh.getBoundingClientRect().right <= 1) return; // auto-fill worked
+    var used = 0;
+    cols.forEach(function (c, i) {
+      if (i === lastIdx || hidden[colIds[i]]) return;
+      used += c.getBoundingClientRect().width;
+    });
+    var target = Math.floor(tableRect.width - used);
+    if (target >= MIN_LAST_COL_W) lastCol.style.width = target + "px";
+  }
+  function scheduleAutoFillPin() {
+    if (typeof requestAnimationFrame !== "function") { pinAutoFillColumn(); return; }
+    if (pinScheduled) return;
+    pinScheduled = true;
+    requestAnimationFrame(function () { pinScheduled = false; pinAutoFillColumn(); });
   }
 
   function ensureAllWidthsMeasured() {
@@ -829,6 +866,18 @@ function setupColumnLayout(tableEl, options) {
     });
     applyWidths();
   })();
+
+  // Re-pin the auto-fill column when the table becomes measurable (revealed
+  // from an inactive tab) or the container resizes. Self-disconnects once the
+  // table is detached (every re-render builds a fresh table + observer), so
+  // observers don't accumulate across the interface table's refresh ticks.
+  if (typeof ResizeObserver === "function") {
+    var autoFillRo = new ResizeObserver(function () {
+      if (!tableEl.isConnected) { autoFillRo.disconnect(); return; }
+      scheduleAutoFillPin();
+    });
+    autoFillRo.observe(tableEl);
+  }
 
   // Inline gear icon at the right edge of the header row. Appears on
   // <thead> hover (CSS) and stays visible while the chooser is open.
