@@ -29,10 +29,17 @@
     return _mounts[id];
   }
 
-  // Roles that can create reservations.
-  var WRITE_ROLES = ["admin", "networkadmin", "assetsadmin", "user"];
+  // Can the user create reservations? Gate on the permission matrix
+  // (reservations >= write), NOT the role name — custom/renamed roles
+  // that grant reservations=write must pass, exactly like the desktop's
+  // permAtLeast("reservations", "write"). See app.js canReserveIps().
+  var _PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 };
+  function permAtLeast(user, key, level) {
+    var have = (user && user.permissions && user.permissions[key]) || "none";
+    return (_PERM_RANK[have] || 0) >= (_PERM_RANK[level] || 0);
+  }
   function canWrite(user) {
-    return !!(user && user.role && WRITE_ROLES.indexOf(user.role) !== -1);
+    return permAtLeast(user, "reservations", "write");
   }
 
   // ─── Top-level renderers ───────────────────────────────────────────────
