@@ -2889,19 +2889,23 @@ function json(res, data, status = 200) {
 // In-memory per-session dashboard layout, pre-seeded with the NOC widget set
 // so a fresh demo login lands on a populated SolarWinds-style board.
 let DEMO_DASHBOARD_LAYOUT = {
-  version: 1,
-  widgets: [
-    { id: "d-status", type: "statusSummary",   col: 0, row: 0, width: 6,  height: 1, config: {} },
-    { id: "d-sites",  type: "sitesWithIssues", col: 6, row: 0, width: 6,  height: 1, config: {} },
-    { id: "d-down",   type: "downNodes",       col: 0, row: 1, width: 6,  height: 1, config: {} },
-    { id: "d-alert",  type: "activeAlerts",    col: 6, row: 1, width: 6,  height: 1, config: {} },
-    { id: "d-cpu",    type: "topCpu",          col: 0, row: 2, width: 4,  height: 1, config: {} },
-    { id: "d-mem",    type: "topMemory",       col: 4, row: 2, width: 4,  height: 1, config: {} },
-    { id: "d-resp",   type: "slowestResponse", col: 8, row: 2, width: 4,  height: 1, config: {} },
-    { id: "d-loss",   type: "packetLoss",      col: 0, row: 3, width: 4,  height: 1, config: {} },
-    { id: "d-stale",  type: "stalePolls",      col: 4, row: 3, width: 4,  height: 1, config: {} },
-    { id: "d-reboot", type: "recentReboots",   col: 8, row: 3, width: 4,  height: 1, config: {} },
-    { id: "d-map",    type: "siteMap",         col: 0, row: 4, width: 12, height: 2, config: {} },
+  version: 2,
+  columns: [
+    { id: "c-left", width: 6, widgets: [
+      { id: "d-status", type: "statusSummary",   height: 1, config: {} },
+      { id: "d-down",   type: "downNodes",        height: 1, config: {} },
+      { id: "d-cpu",    type: "topCpu",           height: 1, config: {} },
+      { id: "d-resp",   type: "slowestResponse",  height: 1, config: {} },
+    ] },
+    { id: "c-right", width: 6, widgets: [
+      { id: "d-sites",  type: "sitesWithIssues",  height: 1, config: {} },
+      { id: "d-alert",  type: "activeAlerts",     height: 1, config: {} },
+      { id: "d-mem",    type: "topMemory",        height: 1, config: {} },
+      { id: "d-loss",   type: "packetLoss",       height: 1, config: {} },
+    ] },
+    { id: "c-map", width: 12, widgets: [
+      { id: "d-map",    type: "siteMap",          height: 2, config: {} },
+    ] },
   ],
 };
 
@@ -3112,7 +3116,7 @@ async function routeAPI(method, path, params, body, res, req) {
     return json(res, DEMO_DASHBOARD_LAYOUT);
   }
   if (path === "/api/v1/me/dashboard" && method === "PUT") {
-    DEMO_DASHBOARD_LAYOUT = body && body.widgets ? body : DEMO_DASHBOARD_LAYOUT;
+    DEMO_DASHBOARD_LAYOUT = body && body.columns ? body : DEMO_DASHBOARD_LAYOUT;
     return json(res, DEMO_DASHBOARD_LAYOUT);
   }
   if (path === "/api/v1/dashboard/noc-summary" && method === "GET") {

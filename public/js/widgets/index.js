@@ -10,6 +10,7 @@
  *     type:            string                              // stable id, used in saved layouts
  *     label:           string                              // display name
  *     description:     string                              // 1-line library blurb
+ *     category?:       string                              // picker Group-By bucket (default "Other")
  *     defaultSize:     { width, height }                   // grid cells (width ∈ 3|4|6|12, height ∈ 1|2)
  *     minSize?:        { width, height }                   // optional resize floor
  *     requiredPermission?: { key, level }                  // gates library visibility AND instance render

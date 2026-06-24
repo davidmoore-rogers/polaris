@@ -36,6 +36,7 @@
 
   PolarisWidgets.register({
     type: "discoveryActivity",
+    category: "Discovery",
     label: "Discovery activity",
     description: "In-flight integration discoveries with per-run progress and slow-run amber telemetry.",
     defaultSize: { width: 4, height: 1 },

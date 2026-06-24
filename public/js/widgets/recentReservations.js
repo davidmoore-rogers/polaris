@@ -38,6 +38,7 @@
 
   PolarisWidgets.register({
     type: "recentReservations",
+    category: "IP Space",
     label: "Recently reserved",
     description: "Most-recent reservations. Filter by source type (manual, DHCP, VIPs, ...) from the gear menu.",
     defaultSize: { width: 6, height: 1 },

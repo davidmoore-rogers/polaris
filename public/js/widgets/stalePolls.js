@@ -28,6 +28,7 @@
 
   PolarisWidgets.register({
     type: "stalePolls",
+    category: "Monitoring",
     label: "Stale Polls",
     description: "Monitored assets overdue for their next response-time probe.",
     defaultSize: { width: 4, height: 1 },

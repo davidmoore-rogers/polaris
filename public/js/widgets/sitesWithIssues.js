@@ -75,6 +75,7 @@
 
   PolarisWidgets.register({
     type: "sitesWithIssues",
+    category: "NOC",
     label: "Sites with Issues",
     description: "Sites with monitored assets down or in warning, worst first. Expand a site for its nodes.",
     defaultSize: { width: 6, height: 1 },

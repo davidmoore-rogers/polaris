@@ -23,6 +23,7 @@
 
   PolarisWidgets.register({
     type: "recentReboots",
+    category: "Monitoring",
     label: "Recent Reboots",
     description: "Devices that rebooted recently (detected from SNMP sysUpTime drops).",
     defaultSize: { width: 4, height: 1 },

@@ -31,6 +31,7 @@
 
   PolarisWidgets.register({
     type: "conflictQueue",
+    category: "Discovery",
     label: "Conflict queue",
     description: "Pending discovery conflicts. Role-scoped — you only see the ones your role can resolve.",
     defaultSize: { width: 4, height: 1 },

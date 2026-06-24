@@ -15,6 +15,7 @@
 
   PolarisWidgets.register({
     type: "topCpu",
+    category: "Monitoring",
     label: "Highest CPU",
     description: "Monitored assets with the highest recent CPU load.",
     defaultSize: { width: 4, height: 1 },

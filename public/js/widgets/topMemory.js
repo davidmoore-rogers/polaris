@@ -15,6 +15,7 @@
 
   PolarisWidgets.register({
     type: "topMemory",
+    category: "Monitoring",
     label: "Highest Memory",
     description: "Monitored assets with the highest recent memory usage.",
     defaultSize: { width: 4, height: 1 },

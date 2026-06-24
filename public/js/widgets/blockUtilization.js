@@ -38,6 +38,7 @@
 
   PolarisWidgets.register({
     type: "blockUtilization",
+    category: "IP Space",
     label: "Block utilization",
     description: "IP block address-space utilization. Busiest blocks float to the top by default.",
     defaultSize: { width: 6, height: 1 },

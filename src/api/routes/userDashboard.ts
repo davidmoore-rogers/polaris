@@ -7,9 +7,13 @@
  * preference, not security-relevant.
  *
  * GET  /me/dashboard — returns the caller's layout, or the empty layout
- *                       ({version:1,widgets:[]}) when no row exists yet.
- * PUT  /me/dashboard — Zod-validates the full layout, upserts, returns
- *                       the saved shape so the client sees what landed.
+ *                       ({version:2,columns:[]}) when no row exists yet. A
+ *                       legacy v1 row is returned untouched (GET is not
+ *                       validated) and migrated to v2 client-side.
+ * PUT  /me/dashboard — Zod-validates the full v2 layout, upserts, returns
+ *                       the saved shape so the client sees what landed. The
+ *                       client always migrates v1→v2 before saving, so PUT
+ *                       only ever needs to accept v2.
  */
 
 import { Router } from "express";
@@ -24,25 +28,35 @@ import {
 
 const router = Router();
 
-// Layout caps. Generous on widget count (12-col grid × N rows can fit
-// dozens) but bounded so a malicious caller can't push a 10 MB blob.
+// Layout caps. Generous on widget count but bounded so a malicious caller
+// can't push a 10 MB blob.
 const MAX_WIDGETS = 64;
-const MAX_ROW = 200;
+const MAX_COLUMNS = 12;
 
 const WidgetInstanceSchema = z.object({
   id:     z.string().uuid("widget id must be a uuid"),
   type:   z.string().min(1).max(64),
-  col:    z.number().int().min(0).max(11),
-  row:    z.number().int().min(0).max(MAX_ROW),
-  width:  z.union([z.literal(3), z.literal(4), z.literal(6), z.literal(12)]),
   height: z.union([z.literal(1), z.literal(2)]),
   config: z.record(z.unknown()).default({}),
 });
 
-const LayoutSchema = z.object({
-  version: z.literal(1),
+const ColumnSchema = z.object({
+  id:      z.string().uuid("column id must be a uuid"),
+  width:   z.union([z.literal(3), z.literal(4), z.literal(6), z.literal(12)]),
   widgets: z.array(WidgetInstanceSchema).max(MAX_WIDGETS),
 });
+
+const LayoutSchema = z
+  .object({
+    version: z.literal(2),
+    columns: z.array(ColumnSchema).max(MAX_COLUMNS),
+  })
+  .superRefine((layout, ctx) => {
+    const total = layout.columns.reduce((n, c) => n + c.widgets.length, 0);
+    if (total > MAX_WIDGETS) {
+      ctx.addIssue({ code: "custom", message: `too many widgets (max ${MAX_WIDGETS})` });
+    }
+  });
 
 router.get("/", async (req, res, next) => {
   try {

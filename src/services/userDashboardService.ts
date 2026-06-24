@@ -10,22 +10,32 @@
 import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
 
+// Layout schema v2 — column-based (SolarWinds-style). A dashboard is an
+// ordered list of columns; each column has a 12-grid width and an ordered
+// vertical stack of widgets. Replaces the v1 free-grid shape (per-widget
+// col/row). v1 rows still load via GET (round-tripped untouched) and are
+// migrated to v2 client-side in dashboard.js bootstrap().
 export interface DashboardLayout {
-  version: 1;
+  version: 2;
+  columns: DashboardColumn[];
+}
+
+export interface DashboardColumn {
+  id: string;
+  /** 12-grid width units: 3 | 4 | 6 | 12. */
+  width: number;
   widgets: DashboardWidgetInstance[];
 }
 
 export interface DashboardWidgetInstance {
   id: string;
   type: string;
-  col: number;
-  row: number;
-  width: number;
+  /** Row-step height: 1 | 2 (→ 280px / 576px). */
   height: number;
   config: Record<string, unknown>;
 }
 
-export const EMPTY_LAYOUT: DashboardLayout = { version: 1, widgets: [] };
+export const EMPTY_LAYOUT: DashboardLayout = { version: 2, columns: [] };
 
 /**
  * Returns the caller's layout, or the empty layout if no row exists yet.

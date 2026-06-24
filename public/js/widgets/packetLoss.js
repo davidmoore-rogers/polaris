@@ -16,6 +16,7 @@
 
   PolarisWidgets.register({
     type: "packetLoss",
+    category: "Monitoring",
     label: "Packet Loss",
     description: "Monitored assets with the highest recent probe loss (failed-probe ratio).",
     defaultSize: { width: 4, height: 1 },

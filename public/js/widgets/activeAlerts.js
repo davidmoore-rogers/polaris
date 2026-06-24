@@ -30,6 +30,7 @@
 
   PolarisWidgets.register({
     type: "activeAlerts",
+    category: "NOC",
     label: "Active Alerts",
     description: "Recent warning/error events needing attention, newest first.",
     defaultSize: { width: 6, height: 1 },
