@@ -22,21 +22,27 @@
 
 (function () {
   var LIST_LIMIT = 200;
-  var CREATE_ROLES = ["admin", "networkadmin", "assetsadmin", "user"];
-  var ADMIN_ROLES  = ["admin", "networkadmin"];
 
   var _state = { rows: [], expandedId: null, user: null };
 
-  function canCreate(user) {
-    return !!(user && user.role && CREATE_ROLES.indexOf(user.role) !== -1);
+  // Gate on the permission matrix (reservations level), NOT the role name —
+  // custom/renamed roles that grant reservations=write must pass, exactly
+  // like the desktop's permAtLeast / canEditReservation. See app.js.
+  var _PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 };
+  function permAtLeast(user, key, level) {
+    var have = (user && user.permissions && user.permissions[key]) || "none";
+    return (_PERM_RANK[have] || 0) >= (_PERM_RANK[level] || 0);
   }
-  // Edit / Free: admin + networkadmin pass unconditionally; user +
-  // assetsadmin only when they created the row. Matches the
-  // requireUserOrAbove + isNetworkAdminOrAbove guards on the backend
-  // (see src/api/routes/reservations.ts).
+  function canCreate(user) {
+    return permAtLeast(user, "reservations", "write");
+  }
+  // Edit / Free: fullwrite passes unconditionally; write passes only when
+  // the caller created the row (ownership model). Mirrors the backend's
+  // requireOwnership("reservations") + req.permissionLevel branch and the
+  // desktop canEditReservation().
   function canModify(user, row) {
-    if (!canCreate(user)) return false;
-    if (ADMIN_ROLES.indexOf(user.role) !== -1) return true;
+    if (permAtLeast(user, "reservations", "fullwrite")) return true;
+    if (!permAtLeast(user, "reservations", "write")) return false;
     return !!(row && row.createdBy && user.username && row.createdBy === user.username);
   }
 
