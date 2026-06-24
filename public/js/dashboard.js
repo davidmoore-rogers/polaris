@@ -1,74 +1,79 @@
 /**
- * public/js/dashboard.js — Dashboard orchestrator.
+ * public/js/dashboard.js — Dashboard orchestrator (column layout, v2).
  *
- * Owns the layout state (widget list + per-widget positions/sizes/config),
- * mounts each widget module into the 12-col canvas, and handles:
- *   - drag from the +Widget slide-in onto the canvas
- *   - drag within the canvas to reorder (insertion-shift via reflow)
- *   - resize via the bottom-right grip (snaps to width 3/4/6/12 × height 1/2)
- *   - per-widget gear popover with widget-module-supplied config inputs
- *   - debounced PUT /me/dashboard on every state change
+ * SolarWinds-style model:
+ *   - The dashboard is an ordered list of COLUMNS; each column has a 12-grid
+ *     width (3|4|6|12) and a vertical stack of widgets. Array order is the
+ *     layout — there is no free-grid reflow.
+ *   - EDIT MODE is explicit: the page is read-only until "Customize Page";
+ *     edit mode reveals drag handles, remove ×, width/height controls, the
+ *     "+ new column" drop target, and the gear config. "Done Editing" saves
+ *     and exits.
+ *   - Drag a widget (from the picker or an existing one) → a green "+"
+ *     insertion placeholder marks the target slot; a trailing empty column is
+ *     a "new column" drop target. The dragged widget lifts (shadow).
  *
- * Layout state shape mirrors the server: { version: 1, widgets: [...] }.
- * Widget order in the array is the canonical placement order; col/row are
- * derived by reflow() on every state change. This keeps the model simple
- * — drag/resize/remove all just rewrite the ordered list and reflow.
+ * Layout state mirrors the server: { version: 2, columns: [ { id, width,
+ * widgets: [ { id, type, height, config } ] } ] }. Legacy v1 layouts are
+ * migrated to v2 on load (migrateV1ToV2). Per-widget render lifecycle
+ * (fetchData → renderInstance → ctx.onUnmount) is unchanged from v1.
  */
 
 (function () {
-  var GRID_COLS = 12;
   var ROW_HEIGHT_PX = 280;
   var GAP_PX = 16;
   var SAVE_DEBOUNCE_MS = 800;
+  var WIDTH_STEPS = [3, 4, 6, 12];
+  var HEIGHT_STEPS = [1, 2];
 
   var state = {
-    layout: { version: 1, widgets: [] },
+    layout: { version: 2, columns: [] },
+    editing: false,
     saving: false,
     saveTimer: null,
-    summary: null, // cached /dashboard/summary payload (shared by all four built-in widgets)
+    summary: null, // cached /dashboard/summary payload (shared by built-in widgets)
     unmounts: {},  // widget instance id → cleanup fn
-    gridOverlay: null, // overlay DOM during drag/resize
-    dropPreview: null, // child of gridOverlay; sized to dragged widget at target slot
   };
 
   var canvasEl = null;
   var emptyEl = null;
-  var addBtnEl = null;
+  var customizeBtn = null;
+  var addWidgetsBtn = null;
+  var doneBtn = null;
   var openPopover = null;
 
+  // Drag stashes — dataTransfer.getData() is unreadable during dragover, so
+  // the dragged type/id are stashed module-level at dragstart, cleared at
+  // dragend. `_placeholder` is the single green "+" insertion marker.
+  var _dragStashId = null;
+  var _dragStashType = null;
+  var _placeholder = null;
+
   document.addEventListener("DOMContentLoaded", function () {
-    canvasEl = document.getElementById("dashboard-canvas");
-    emptyEl  = document.getElementById("dashboard-empty-state");
-    addBtnEl = document.getElementById("dashboard-add-widget");
+    canvasEl     = document.getElementById("dashboard-canvas");
+    emptyEl      = document.getElementById("dashboard-empty-state");
+    customizeBtn = document.getElementById("dashboard-customize");
+    addWidgetsBtn = document.getElementById("dashboard-add-widgets");
+    doneBtn      = document.getElementById("dashboard-done");
 
-    if (!canvasEl || !emptyEl || !addBtnEl) return;
+    if (!canvasEl || !emptyEl || !customizeBtn) return;
 
-    addBtnEl.addEventListener("click", function () {
-      WidgetLibrary.open(handleTapToAdd);
-    });
+    customizeBtn.addEventListener("click", enterEditMode);
+    if (addWidgetsBtn) addWidgetsBtn.addEventListener("click", function () { WidgetLibrary.open(handleTapToAdd); });
+    if (doneBtn) doneBtn.addEventListener("click", exitEditMode);
 
-    // Wire drag-from-slide-in onto the canvas.
     canvasEl.addEventListener("dragover", onCanvasDragOver);
     canvasEl.addEventListener("dragleave", onCanvasDragLeave);
     canvasEl.addEventListener("drop", onCanvasDrop);
 
-    // Library-card dragstarts happen outside the canvas (in the +Widget
-    // slide-in), so we capture them at the document level to stash the type
-    // for the drop-preview's default-size lookup. dataTransfer.getData() is
-    // unreadable during dragover for security reasons.
+    // Library-card dragstarts happen in the picker overlay (outside the
+    // canvas), so capture at the document level to stash the type.
     document.addEventListener("dragstart", function (e) {
       var card = e.target && e.target.closest ? e.target.closest(".widget-library-card[data-type]") : null;
-      if (card) _dragStashType = card.getAttribute("data-type");
+      if (card) { _dragStashType = card.getAttribute("data-type"); _dragStashId = null; }
     });
-    document.addEventListener("dragend", function (e) {
-      if (e.target && e.target.closest && e.target.closest(".widget-library-card")) {
-        _dragStashType = null;
-        canvasEl.classList.remove("drop-target");
-        hideGridOverlay();
-      }
-    });
+    document.addEventListener("dragend", clearDragState);
 
-    // Close popover on outside-click.
     document.addEventListener("click", function (e) {
       if (!openPopover) return;
       if (openPopover.el.contains(e.target)) return;
@@ -79,33 +84,106 @@
     bootstrap();
   });
 
-  // ─── Bootstrap ──────────────────────────────────────────────────────────
+  // ─── Bootstrap + migration ──────────────────────────────────────────────
 
   async function bootstrap() {
+    var loaded;
     try {
-      var data = await api.me.dashboard.get();
-      state.layout = data && data.widgets ? data : { version: 1, widgets: [] };
+      loaded = await api.me.dashboard.get();
     } catch (_err) {
-      state.layout = { version: 1, widgets: [] };
+      loaded = null;
     }
-    // Drop-silently: widgets whose type is no longer registered (removed
-    // widgets like monitorAlerts / recentEvents, or types from a newer layout)
-    // are filtered out of the saved layout on load — no placeholder shell. If
-    // anything was dropped we persist the cleaned layout so it doesn't keep
-    // getting re-evaluated on every load.
-    var beforeCount = state.layout.widgets.length;
-    state.layout.widgets = state.layout.widgets.filter(function (w) {
-      return PolarisWidgets.getByType(w.type) != null;
+    state.layout = normalizeLayout(loaded);
+
+    // Drop-silently: widget types no longer registered are filtered out of
+    // every column; empty columns are dropped. Persist if anything changed.
+    var before = JSON.stringify(state.layout.columns);
+    state.layout.columns.forEach(function (col) {
+      col.widgets = col.widgets.filter(function (w) { return PolarisWidgets.getByType(w.type) != null; });
     });
-    if (state.layout.widgets.length !== beforeCount) queueSave();
-    if (state.layout.widgets.length === 0) {
-      showEmpty();
-    } else {
-      hideEmpty();
-      await refetchSummaryIfNeeded();
-      reflow(state.layout.widgets);
-      renderCanvas();
+    state.layout.columns = state.layout.columns.filter(function (col) { return col.widgets.length > 0; });
+    if (JSON.stringify(state.layout.columns) !== before) queueSave();
+
+    setHeaderMode();
+    renderRoot();
+  }
+
+  // Accept a v2 layout as-is, migrate a v1 layout, or fall back to empty.
+  function normalizeLayout(data) {
+    if (data && data.version === 2 && Array.isArray(data.columns)) return data;
+    if (data && data.version === 1 && Array.isArray(data.widgets)) return migrateV1ToV2(data);
+    return { version: 2, columns: [] };
+  }
+
+  // v1 {widgets:[{col,row,width,height}]} → v2 columns: bucket by col-start,
+  // order by row within each, column width = closest snap of the widest
+  // widget. Everything (id/type/config) preserved; empty fallback on error.
+  function migrateV1ToV2(v1) {
+    try {
+      var byCol = {};
+      v1.widgets.forEach(function (w) {
+        var k = (w.col == null ? 0 : w.col);
+        (byCol[k] = byCol[k] || []).push(w);
+      });
+      var starts = Object.keys(byCol).map(Number).sort(function (a, b) { return a - b; });
+      var columns = starts.map(function (cs) {
+        var ws = byCol[cs].slice().sort(function (a, b) { return (a.row || 0) - (b.row || 0); });
+        var maxW = ws.reduce(function (m, w) { return Math.max(m, w.width || 6); }, 0);
+        return {
+          id: PolarisWidgets.uuid(),
+          width: snapWidth(maxW),
+          widgets: ws.map(function (w) {
+            return { id: w.id || PolarisWidgets.uuid(), type: w.type, height: (w.height === 2 ? 2 : 1), config: w.config || {} };
+          }),
+        };
+      });
+      return { version: 2, columns: columns };
+    } catch (_e) {
+      return { version: 2, columns: [] };
     }
+  }
+
+  function snapWidth(n) {
+    var best = WIDTH_STEPS[0], bestD = Infinity;
+    WIDTH_STEPS.forEach(function (s) { var d = Math.abs(n - s); if (d < bestD) { bestD = d; best = s; } });
+    return best;
+  }
+
+  function totalWidgets() {
+    return state.layout.columns.reduce(function (n, c) { return n + c.widgets.length; }, 0);
+  }
+
+  // ─── Edit mode ────────────────────────────────────────────────────────────
+
+  function enterEditMode() { state.editing = true; setHeaderMode(); renderRoot(); }
+  function exitEditMode() {
+    state.editing = false;
+    setHeaderMode();
+    WidgetLibrary.close();
+    if (state.saveTimer) saveNow();
+    renderRoot();
+  }
+  function setHeaderMode() {
+    if (customizeBtn)   customizeBtn.hidden   = state.editing;
+    if (addWidgetsBtn)  addWidgetsBtn.hidden  = !state.editing;
+    if (doneBtn)        doneBtn.hidden        = !state.editing;
+    canvasEl.classList.toggle("is-editing", state.editing);
+  }
+
+  // ─── Render ─────────────────────────────────────────────────────────────
+
+  function unmountAll() {
+    Object.keys(state.unmounts).forEach(function (id) {
+      try { state.unmounts[id](); } catch (_) {}
+    });
+    state.unmounts = {};
+  }
+
+  // Choose between the empty-state prompt and the canvas, then render.
+  function renderRoot() {
+    if (!state.editing && totalWidgets() === 0) { showEmpty(); return; }
+    hideEmpty();
+    renderCanvas();
   }
 
   function showEmpty() {
@@ -119,233 +197,119 @@
     canvasEl.hidden = false;
   }
 
-  // ─── Layout maths ───────────────────────────────────────────────────────
-
-  // Row-major packer. For each widget in order, find the leftmost-topmost
-  // free slot that fits its width × height and place it there. Mutates
-  // each widget's col/row in place.
-  function reflow(widgets) {
-    var occupied = {}; // "row,col" → true
-    function rowKey(r) { return r; }
-    function isFree(r, c, w, h) {
-      for (var rr = r; rr < r + h; rr++) {
-        for (var cc = c; cc < c + w; cc++) {
-          if (cc >= GRID_COLS) return false;
-          if (occupied[rr + "," + cc]) return false;
-        }
-      }
-      return true;
-    }
-    function mark(r, c, w, h) {
-      for (var rr = r; rr < r + h; rr++) {
-        for (var cc = c; cc < c + w; cc++) {
-          occupied[rr + "," + cc] = true;
-        }
-      }
-    }
-    widgets.forEach(function (w) {
-      // Clamp width to grid.
-      if (w.width > GRID_COLS) w.width = GRID_COLS;
-      var placed = false;
-      for (var r = 0; !placed; r++) {
-        for (var c = 0; c <= GRID_COLS - w.width; c++) {
-          if (isFree(r, c, w.width, w.height)) {
-            w.col = c;
-            w.row = r;
-            mark(r, c, w.width, w.height);
-            placed = true;
-            break;
-          }
-        }
-      }
-    });
-  }
-
-  // Insertion-index from cursor pixel position. Returns the index in the
-  // ordered widget array where a new widget should be inserted to land at
-  // the cursor's grid cell. Walks widgets in order and finds the first one
-  // whose row-major position is *strictly after* the cursor's cell.
-  function insertIndexFromCursor(clientX, clientY) {
-    var rect = canvasEl.getBoundingClientRect();
-    var x = Math.max(0, clientX - rect.left);
-    var y = Math.max(0, clientY - rect.top);
-    var colWidth = (rect.width - GAP_PX * (GRID_COLS - 1)) / GRID_COLS;
-    var col = Math.max(0, Math.min(GRID_COLS - 1, Math.floor(x / (colWidth + GAP_PX))));
-    var row = Math.max(0, Math.floor(y / (ROW_HEIGHT_PX + GAP_PX)));
-    var widgets = state.layout.widgets;
-    for (var i = 0; i < widgets.length; i++) {
-      var w = widgets[i];
-      // "Strictly after" in row-major terms.
-      if (w.row > row || (w.row === row && w.col > col)) return i;
-    }
-    return widgets.length;
-  }
-
-  // ─── State mutations ────────────────────────────────────────────────────
-
-  function applyChange(mutator) {
-    mutator();
-    reflow(state.layout.widgets);
-    renderCanvas();
-    queueSave();
-  }
-
-  function queueSave() {
-    if (state.saveTimer) clearTimeout(state.saveTimer);
-    state.saveTimer = setTimeout(saveNow, SAVE_DEBOUNCE_MS);
-  }
-  async function saveNow() {
-    state.saveTimer = null;
-    state.saving = true;
-    try {
-      await api.me.dashboard.put(state.layout);
-    } catch (err) {
-      if (typeof showToast === "function") showToast("Failed to save dashboard: " + (err.message || err), "error");
-    } finally {
-      state.saving = false;
-    }
-  }
-
-  function addWidget(type, atIndex) {
-    var module = PolarisWidgets.getByType(type);
-    if (!module) return;
-    var instance = {
-      id:    PolarisWidgets.uuid(),
-      type:  module.type,
-      col:   0,
-      row:   0,
-      width: module.defaultSize.width,
-      height: module.defaultSize.height,
-      config: Object.assign({}, module.defaultConfig || {}),
-    };
-    var idx = (atIndex == null || atIndex < 0) ? state.layout.widgets.length : atIndex;
-    state.layout.widgets.splice(idx, 0, instance);
-    reflow(state.layout.widgets);
-    hideEmpty();
-    // Refetch the shared summary BEFORE rendering so any built-in widgets
-    // (existing or newly added) get fresh data; non-summary widgets fetch
-    // their own data inside renderWidget anyway.
-    refetchSummaryIfNeeded().then(renderCanvas);
-    queueSave();
-  }
-
-  function removeWidget(id) {
-    applyChange(function () {
-      state.layout.widgets = state.layout.widgets.filter(function (w) { return w.id !== id; });
-    });
-    if (state.layout.widgets.length === 0) showEmpty();
-  }
-
-  function moveWidget(id, toIndex) {
-    applyChange(function () {
-      var widgets = state.layout.widgets;
-      var fromIdx = widgets.findIndex(function (w) { return w.id === id; });
-      if (fromIdx === -1) return;
-      var moved = widgets.splice(fromIdx, 1)[0];
-      // After removal, adjust toIndex when the source was before the target.
-      var insertAt = toIndex;
-      if (fromIdx < toIndex) insertAt = Math.max(0, toIndex - 1);
-      widgets.splice(insertAt, 0, moved);
-    });
-  }
-
-  function resizeWidget(id, width, height) {
-    var w = state.layout.widgets.find(function (x) { return x.id === id; });
-    if (!w) return;
-    if (w.width === width && w.height === height) return;
-    applyChange(function () {
-      w.width = width;
-      w.height = height;
-    });
-  }
-
-  function updateConfig(id, key, value) {
-    var w = state.layout.widgets.find(function (x) { return x.id === id; });
-    if (!w) return;
-    w.config = Object.assign({}, w.config || {}, { [key]: value });
-    queueSave();
-    // Re-render that one widget with the new config.
-    renderWidget(w);
-  }
-
-  // ─── Render ─────────────────────────────────────────────────────────────
-
-  function unmountAll() {
-    Object.keys(state.unmounts).forEach(function (id) {
-      try { state.unmounts[id](); } catch (_) {}
-    });
-    state.unmounts = {};
-  }
-
   function renderCanvas() {
     unmountAll();
     canvasEl.innerHTML = "";
-    state.layout.widgets.forEach(function (w) {
-      var el = mountWidgetShell(w);
-      canvasEl.appendChild(el);
-      renderWidget(w);
+    _placeholder = null;
+    state.layout.columns.forEach(function (col, ci) {
+      canvasEl.appendChild(mountColumnShell(col, ci));
     });
+    if (state.editing) canvasEl.appendChild(buildNewColumnTarget());
+    // Mount widget bodies after all shells are in the DOM.
+    state.layout.columns.forEach(function (col) { col.widgets.forEach(renderWidget); });
+  }
+
+  function mountColumnShell(col, ci) {
+    var colEl = document.createElement("section");
+    colEl.className = "dashboard-column";
+    colEl.setAttribute("data-col-id", col.id);
+    colEl.style.gridColumn = "span " + col.width;
+
+    if (state.editing) {
+      var header = document.createElement("div");
+      header.className = "dashboard-column-header";
+      header.innerHTML = widthCtlHTML(col.width) +
+        '<button type="button" class="dashboard-column-remove" data-action="remove-column" title="Remove column">&times;</button>';
+      header.querySelectorAll("[data-w]").forEach(function (btn) {
+        btn.addEventListener("click", function () { setColumnWidth(col.id, parseInt(btn.getAttribute("data-w"), 10)); });
+      });
+      header.querySelector('[data-action="remove-column"]').addEventListener("click", function () { removeColumn(col.id); });
+      colEl.appendChild(header);
+    }
+
+    var stack = document.createElement("div");
+    stack.className = "dashboard-column-stack";
+    col.widgets.forEach(function (w) { stack.appendChild(mountWidgetShell(w)); });
+    colEl.appendChild(stack);
+    return colEl;
+  }
+
+  var WIDTH_LABELS = { 3: "¼", 4: "⅓", 6: "½", 12: "Full" };
+  function widthCtlHTML(active) {
+    return '<div class="dashboard-column-width-ctl">' + WIDTH_STEPS.map(function (w) {
+      return '<button type="button" data-w="' + w + '"' + (w === active ? ' class="active"' : '') +
+        ' title="Width ' + w + '/12">' + WIDTH_LABELS[w] + '</button>';
+    }).join("") + '</div>';
   }
 
   function mountWidgetShell(w) {
     var module = PolarisWidgets.getByType(w.type);
-    // Even unknown widgets get a placeholder so the operator can remove them.
     var label = module ? module.label : (w.type + " (unknown widget)");
     var article = document.createElement("article");
     article.className = "dashboard-widget";
     article.setAttribute("data-id", w.id);
     article.setAttribute("data-type", w.type);
-    article.style.gridColumn = (w.col + 1) + " / span " + w.width;
-    article.style.gridRow    = (w.row + 1) + " / span " + w.height;
+    // Fixed pixel height so widget bodies (charts, Leaflet map) get a sized
+    // container; height 1 → 280px, height 2 → 576px (2 rows + the gap).
+    article.style.height = (w.height === 2 ? (2 * ROW_HEIGHT_PX + GAP_PX) : ROW_HEIGHT_PX) + "px";
 
+    var editControls = state.editing
+      ? '<button type="button" class="dashboard-widget-height-toggle" data-action="height" title="Toggle height">' + (w.height === 2 ? "▾" : "▴") + '</button>' +
+        '<button type="button" class="dashboard-widget-action" data-action="gear" title="Configure">⚙</button>' +
+        '<button type="button" class="dashboard-widget-remove" data-action="remove" title="Remove">&times;</button>'
+      : "";
     article.innerHTML =
       '<div class="dashboard-widget-header">' +
-        '<div class="dashboard-widget-title" draggable="true">' + escapeHtml(label) + '</div>' +
-        '<button type="button" class="dashboard-widget-action" data-action="gear" title="Configure">⚙</button>' +
+        '<div class="dashboard-widget-title"' + (state.editing ? ' draggable="true"' : '') + '>' + escapeHtml(label) + '</div>' +
+        editControls +
       '</div>' +
-      '<div class="dashboard-widget-body"></div>' +
-      '<div class="dashboard-widget-resize" data-action="resize" title="Resize"></div>';
+      '<div class="dashboard-widget-body"></div>';
 
-    // Drag this widget to reorder.
-    var titleEl = article.querySelector(".dashboard-widget-title");
-    titleEl.addEventListener("dragstart", function (e) {
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("application/x-polaris-widget-move", w.id);
-      e.dataTransfer.setData("text/plain", w.id);
-      article.classList.add("dragging");
-      _dragStashId = w.id;
-      _dragStashType = null;
-      canvasEl.classList.add("is-dragging");
-      showGridOverlay();
-    });
-    titleEl.addEventListener("dragend", function () {
-      article.classList.remove("dragging");
-      _dragStashId = null;
-      _dragStashType = null;
-      canvasEl.classList.remove("is-dragging");
-      canvasEl.classList.remove("drop-target");
-      hideGridOverlay();
-    });
+    if (state.editing) {
+      var titleEl = article.querySelector(".dashboard-widget-title");
+      titleEl.addEventListener("dragstart", function (e) {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("application/x-polaris-widget-move", w.id);
+        e.dataTransfer.setData("text/plain", w.id);
+        _dragStashId = w.id;
+        _dragStashType = null;
+        article.classList.add("lifted");
+        canvasEl.classList.add("is-dragging");
+      });
+      titleEl.addEventListener("dragend", clearDragState);
 
-    article.querySelector('[data-action="gear"]').addEventListener("click", function (ev) {
-      ev.stopPropagation();
-      openGearPopover(w, ev.currentTarget);
-    });
-
-    // Resize handle.
-    var resizeEl = article.querySelector('[data-action="resize"]');
-    resizeEl.addEventListener("pointerdown", function (ev) { startResize(ev, w, article); });
-
+      article.querySelector('[data-action="gear"]').addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        openGearPopover(w, ev.currentTarget);
+      });
+      article.querySelector('[data-action="height"]').addEventListener("click", function () {
+        setWidgetHeight(w.id, w.height === 2 ? 1 : 2);
+      });
+      article.querySelector('[data-action="remove"]').addEventListener("click", function () { removeWidget(w.id); });
+    }
     return article;
   }
 
+  function buildNewColumnTarget() {
+    var el = document.createElement("div");
+    el.className = "dashboard-newcol-target";
+    el.setAttribute("data-newcol", "1");
+    el.innerHTML = '<span>+ New column</span>';
+    // Click-to-add a new empty column (keyboard/touch parity with drag).
+    el.addEventListener("click", function () {
+      if (!_dragStashId && !_dragStashType) WidgetLibrary.open(handleTapToAdd);
+    });
+    return el;
+  }
+
+  // renderWidget — per-widget mount lifecycle. UNCHANGED from v1: clears the
+  // body, runs fetchData → renderInstance, registers cleanup via ctx.onUnmount.
   function renderWidget(w) {
     var article = canvasEl.querySelector('.dashboard-widget[data-id="' + cssEscape(w.id) + '"]');
     if (!article) return;
     var body = article.querySelector(".dashboard-widget-body");
     body.innerHTML = "";
 
-    // Cleanup previous timers etc.
     if (state.unmounts[w.id]) {
       try { state.unmounts[w.id](); } catch (_) {}
       delete state.unmounts[w.id];
@@ -360,6 +324,12 @@
     if (!module) {
       body.innerHTML = '<p class="empty-state">Unknown widget: ' + escapeHtml(w.type) + '</p>';
       return;
+    }
+    // NOC-style auto-scroll: when a widget's content overflows, slowly creep
+    // through it and loop (like noc.rogersgroupinc.com). Read-only only —
+    // never while editing. Self-activates when/if content overflows.
+    if (!state.editing) {
+      unmountFns.push(startAutoScroll(body, article));
     }
     var dataPromise;
     try {
@@ -380,17 +350,131 @@
   }
 
   async function refetchSummaryIfNeeded() {
-    // Only the four built-in widgets read the shared /dashboard/summary
-    // payload; others have their own fetchData. If any built-in widget is
-    // present we fetch once and share.
-    var needsSummary = state.layout.widgets.some(function (w) {
-      return ["recentReservations", "assetTypes", "blockUtilization"].indexOf(w.type) !== -1;
+    var needsSummary = state.layout.columns.some(function (col) {
+      return col.widgets.some(function (w) {
+        return ["recentReservations", "assetTypes", "blockUtilization"].indexOf(w.type) !== -1;
+      });
     });
     if (!needsSummary) { state.summary = null; return; }
     try {
       state.summary = await api.dashboard.summary();
     } catch (_err) {
       state.summary = null;
+    }
+  }
+
+  // ─── State mutations ──────────────────────────────────────────────────────
+
+  function applyChange(mutator) {
+    mutator();
+    renderRoot();
+    queueSave();
+  }
+
+  function queueSave() {
+    if (state.saveTimer) clearTimeout(state.saveTimer);
+    state.saveTimer = setTimeout(saveNow, SAVE_DEBOUNCE_MS);
+  }
+  async function saveNow() {
+    state.saveTimer = null;
+    state.saving = true;
+    try {
+      await api.me.dashboard.put(state.layout);
+    } catch (err) {
+      if (typeof showToast === "function") showToast("Failed to save dashboard: " + (err.message || err), "error");
+    } finally {
+      state.saving = false;
+    }
+  }
+
+  function findWidget(id) {
+    for (var ci = 0; ci < state.layout.columns.length; ci++) {
+      var idx = state.layout.columns[ci].widgets.findIndex(function (w) { return w.id === id; });
+      if (idx !== -1) return { colIndex: ci, idx: idx, widget: state.layout.columns[ci].widgets[idx] };
+    }
+    return null;
+  }
+
+  function newColumn(widthHint, widgets) {
+    return { id: PolarisWidgets.uuid(), width: snapWidth(widthHint || 6), widgets: widgets || [] };
+  }
+
+  function addWidgetAt(type, target) {
+    var module = PolarisWidgets.getByType(type);
+    if (!module) return;
+    var inst = {
+      id: PolarisWidgets.uuid(),
+      type: module.type,
+      height: module.defaultSize.height === 2 ? 2 : 1,
+      config: Object.assign({}, module.defaultConfig || {}),
+    };
+    if (!target || target.newColumn || !state.layout.columns.length) {
+      state.layout.columns.push(newColumn(module.defaultSize.width, [inst]));
+    } else {
+      state.layout.columns[target.columnIndex].widgets.splice(target.insertionIndex, 0, inst);
+    }
+    hideEmpty();
+    refetchSummaryIfNeeded().then(function () { renderRoot(); });
+    queueSave();
+  }
+
+  function moveWidgetTo(id, target) {
+    var src = findWidget(id);
+    if (!src || !target) return;
+    applyChange(function () {
+      state.layout.columns[src.colIndex].widgets.splice(src.idx, 1);
+      if (target.newColumn) {
+        state.layout.columns.push(newColumn(6, [src.widget]));
+      } else {
+        var at = target.insertionIndex;
+        // Same-column move past the removed slot shifts the index down by one.
+        if (target.columnIndex === src.colIndex && src.idx < at) at--;
+        state.layout.columns[target.columnIndex].widgets.splice(at, 0, src.widget);
+      }
+      state.layout.columns = state.layout.columns.filter(function (c) { return c.widgets.length > 0; });
+    });
+  }
+
+  function removeWidget(id) {
+    applyChange(function () {
+      state.layout.columns.forEach(function (c) { c.widgets = c.widgets.filter(function (w) { return w.id !== id; }); });
+      state.layout.columns = state.layout.columns.filter(function (c) { return c.widgets.length > 0; });
+    });
+  }
+
+  function removeColumn(colId) {
+    applyChange(function () {
+      state.layout.columns = state.layout.columns.filter(function (c) { return c.id !== colId; });
+    });
+  }
+
+  function setColumnWidth(colId, width) {
+    var col = state.layout.columns.find(function (c) { return c.id === colId; });
+    if (!col || col.width === width) return;
+    applyChange(function () { col.width = width; });
+  }
+
+  function setWidgetHeight(id, height) {
+    var src = findWidget(id);
+    if (!src || src.widget.height === height) return;
+    applyChange(function () { src.widget.height = height; });
+  }
+
+  function updateConfig(id, key, value) {
+    var src = findWidget(id);
+    if (!src) return;
+    src.widget.config = Object.assign({}, src.widget.config || {}, { [key]: value });
+    queueSave();
+    renderWidget(src.widget);
+  }
+
+  function handleTapToAdd(type) {
+    // Click-to-add from the picker: append to the last column, or start one.
+    if (state.layout.columns.length) {
+      var last = state.layout.columns.length - 1;
+      addWidgetAt(type, { columnIndex: last, insertionIndex: state.layout.columns[last].widgets.length });
+    } else {
+      addWidgetAt(type, { newColumn: true });
     }
   }
 
@@ -402,193 +486,103 @@
     var isAdd  = types.indexOf("application/x-polaris-widget") !== -1;
     var isMove = types.indexOf("application/x-polaris-widget-move") !== -1;
     if (!isAdd && !isMove) return;
+    if (!state.editing) return;
     ev.preventDefault();
     ev.dataTransfer.dropEffect = isAdd ? "copy" : "move";
-    canvasEl.classList.add("drop-target");
-    // dragstart for library cards happens outside this orchestrator's reach,
-    // so library-drags don't yet have an overlay — lazily mount one here.
-    if (!state.gridOverlay) showGridOverlay();
-    var movingId = isMove ? readWidgetIdFromDataTransfer(ev.dataTransfer) : null;
-    var moving   = movingId ? state.layout.widgets.find(function (x) { return x.id === movingId; }) : null;
-    var size;
-    if (moving) {
-      size = { width: moving.width, height: moving.height };
-    } else if (isAdd) {
-      // Library drag — best-guess preview using the type's defaultSize.
-      var type = readWidgetIdFromDataTransfer(ev.dataTransfer, "application/x-polaris-widget");
-      var mod  = type ? PolarisWidgets.getByType(type) : null;
-      size = (mod && mod.defaultSize) || { width: 6, height: 1 };
-    } else {
-      size = { width: 6, height: 1 };
-    }
-    updateDropPreviewAt(ev.clientX, ev.clientY, size);
+    showPlaceholderAt(ev.clientX, ev.clientY);
   }
 
   function onCanvasDragLeave(ev) {
     if (ev.relatedTarget && canvasEl.contains(ev.relatedTarget)) return;
-    canvasEl.classList.remove("drop-target");
-    // The drop will fire next (and clean up) on a successful drag; the
-    // dragend handler on the widget article clears for cancelled drags.
+    clearPlaceholder();
   }
 
   function onCanvasDrop(ev) {
-    canvasEl.classList.remove("drop-target");
-    hideGridOverlay();
-    var addType  = ev.dataTransfer.getData("application/x-polaris-widget");
-    var moveId   = ev.dataTransfer.getData("application/x-polaris-widget-move");
+    if (!state.editing) return;
+    var addType = ev.dataTransfer.getData("application/x-polaris-widget");
+    var moveId  = ev.dataTransfer.getData("application/x-polaris-widget-move");
     if (!addType && !moveId) return;
     ev.preventDefault();
-    var idx = insertIndexFromCursor(ev.clientX, ev.clientY);
-    if (addType) {
-      addWidget(addType, idx);
-      WidgetLibrary.close();
-    } else if (moveId) {
-      moveWidget(moveId, idx);
-    }
+    var target = dropTargetFromCursor(ev.clientX, ev.clientY);
+    clearDragState();
+    if (!target) return;
+    if (addType) { addWidgetAt(addType, target); WidgetLibrary.close(); }
+    else if (moveId) { moveWidgetTo(moveId, target); }
   }
 
-  // dataTransfer.getData() is only readable during the `drop` event — during
-  // dragover it's empty for security reasons. We do have `types`, which lists
-  // the registered formats, so the moving-widget id has to come from elsewhere.
-  // We stash the id on a module-level variable during dragstart and clear on
-  // dragend. Library-drag types: same pattern.
-  var _dragStashId = null;
-  var _dragStashType = null;
-  function readWidgetIdFromDataTransfer(_dt, format) {
-    if (format === "application/x-polaris-widget") return _dragStashType;
-    return _dragStashId;
+  // Resolve the cursor to { columnIndex, insertionIndex } or { newColumn:true }.
+  function dropTargetFromCursor(clientX, clientY) {
+    var newColEl = canvasEl.querySelector(".dashboard-newcol-target");
+    if (newColEl && withinRect(newColEl, clientX, clientY)) return { newColumn: true };
+
+    var colEls = Array.prototype.slice.call(canvasEl.querySelectorAll(".dashboard-column"));
+    if (!colEls.length) return { newColumn: true };
+
+    // Pick the column under the cursor x; if past the last column, the
+    // new-column target (handled above) or the last column wins.
+    var colEl = null;
+    for (var i = 0; i < colEls.length; i++) {
+      var r = colEls[i].getBoundingClientRect();
+      if (clientX >= r.left && clientX <= r.right) { colEl = colEls[i]; break; }
+    }
+    if (!colEl) {
+      // Left of all columns → first; right of all → last.
+      colEl = clientX < colEls[0].getBoundingClientRect().left ? colEls[0] : colEls[colEls.length - 1];
+    }
+    var ci = colEls.indexOf(colEl);
+    var cards = Array.prototype.slice.call(colEl.querySelectorAll(".dashboard-widget"));
+    var idx = cards.length;
+    for (var j = 0; j < cards.length; j++) {
+      var cr = cards[j].getBoundingClientRect();
+      if (clientY < cr.top + cr.height / 2) { idx = j; break; }
+    }
+    return { columnIndex: ci, insertionIndex: idx };
   }
 
-  // ─── Grid overlay + drop-preview ────────────────────────────────────────
-
-  function showGridOverlay() {
-    if (state.gridOverlay) return;
-    var rect = canvasEl.getBoundingClientRect();
-    var colWidth = (rect.width - GAP_PX * (GRID_COLS - 1)) / GRID_COLS;
-    var rowStride = ROW_HEIGHT_PX + GAP_PX;
-
-    var overlay = document.createElement("div");
-    overlay.className = "dashboard-grid-overlay";
-
-    // Column cells — one per column, full height. The cell's own border
-    // outlines the column's left + right edges.
-    for (var c = 0; c < GRID_COLS; c++) {
-      var col = document.createElement("div");
-      col.className = "dashboard-grid-col";
-      col.style.left = (c * (colWidth + GAP_PX)) + "px";
-      col.style.width = colWidth + "px";
-      overlay.appendChild(col);
-    }
-
-    // Horizontal row separators. Draw enough to cover the current canvas
-    // height plus one extra row for new-bottom-row drop targets.
-    var height = Math.max(rect.height, rowStride * 2);
-    var rowCount = Math.ceil(height / rowStride) + 1;
-    for (var r = 1; r <= rowCount; r++) {
-      var row = document.createElement("div");
-      row.className = "dashboard-grid-row";
-      // Land the line on the row-boundary gap-center: each row occupies
-      // (r-1)*rowStride .. r*rowStride - GAP_PX, then GAP_PX of gap.
-      row.style.top = (r * rowStride - GAP_PX - 1) + "px";
-      overlay.appendChild(row);
-    }
-
-    var preview = document.createElement("div");
-    preview.className = "dashboard-drop-preview";
-    preview.style.display = "none";
-    overlay.appendChild(preview);
-
-    canvasEl.appendChild(overlay);
-    state.gridOverlay = overlay;
-    state.dropPreview = preview;
+  function withinRect(el, x, y) {
+    var r = el.getBoundingClientRect();
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
   }
 
-  function hideGridOverlay() {
-    if (!state.gridOverlay) return;
-    try { canvasEl.removeChild(state.gridOverlay); } catch (_) {}
-    state.gridOverlay = null;
-    state.dropPreview = null;
+  function ensurePlaceholder() {
+    if (_placeholder) return _placeholder;
+    _placeholder = document.createElement("div");
+    _placeholder.className = "dashboard-drop-placeholder";
+    return _placeholder;
   }
 
-  function updateDropPreviewAt(clientX, clientY, size) {
-    if (!state.dropPreview) return;
-    var rect = canvasEl.getBoundingClientRect();
-    var x = Math.max(0, clientX - rect.left);
-    var y = Math.max(0, clientY - rect.top);
-    var colWidth = (rect.width - GAP_PX * (GRID_COLS - 1)) / GRID_COLS;
-    var rowStride = ROW_HEIGHT_PX + GAP_PX;
-    var w = (size && size.width) || 6;
-    var h = (size && size.height) || 1;
-    // Snap the cursor to its column; clamp so the preview never overshoots
-    // the right edge of the grid.
-    var col = Math.max(0, Math.min(GRID_COLS - w, Math.floor(x / (colWidth + GAP_PX))));
-    var row = Math.max(0, Math.floor(y / rowStride));
-    state.dropPreview.style.display = "block";
-    state.dropPreview.style.left   = (col * (colWidth + GAP_PX)) + "px";
-    state.dropPreview.style.top    = (row * rowStride) + "px";
-    state.dropPreview.style.width  = (w * colWidth + (w - 1) * GAP_PX) + "px";
-    state.dropPreview.style.height = (h * ROW_HEIGHT_PX + (h - 1) * GAP_PX) + "px";
+  function showPlaceholderAt(clientX, clientY) {
+    var target = dropTargetFromCursor(clientX, clientY);
+    canvasEl.querySelectorAll(".dashboard-column.drag-over, .dashboard-newcol-target.drag-over")
+      .forEach(function (e) { e.classList.remove("drag-over"); });
+    var ph = ensurePlaceholder();
+    if (!target || target.newColumn) {
+      var nc = canvasEl.querySelector(".dashboard-newcol-target");
+      if (nc) nc.classList.add("drag-over");
+      if (ph.parentNode) ph.parentNode.removeChild(ph);
+      return;
+    }
+    var colEls = canvasEl.querySelectorAll(".dashboard-column");
+    var colEl = colEls[target.columnIndex];
+    if (!colEl) return;
+    colEl.classList.add("drag-over");
+    var stack = colEl.querySelector(".dashboard-column-stack");
+    var cards = stack.querySelectorAll(".dashboard-widget");
+    if (target.insertionIndex >= cards.length) stack.appendChild(ph);
+    else stack.insertBefore(ph, cards[target.insertionIndex]);
   }
 
-  function handleTapToAdd(type) {
-    // Tap-to-add fallback (used on small viewports / touch): append at end.
-    addWidget(type, state.layout.widgets.length);
+  function clearPlaceholder() {
+    if (_placeholder && _placeholder.parentNode) _placeholder.parentNode.removeChild(_placeholder);
+    canvasEl.querySelectorAll(".drag-over").forEach(function (e) { e.classList.remove("drag-over"); });
   }
 
-  // ─── Resize ─────────────────────────────────────────────────────────────
-
-  function startResize(ev, w, article) {
-    ev.preventDefault();
-    var rect = article.getBoundingClientRect();
-    var canvasRect = canvasEl.getBoundingClientRect();
-    var colWidth = (canvasRect.width - GAP_PX * (GRID_COLS - 1)) / GRID_COLS;
-    var startW = w.width;
-    var startH = w.height;
-    var widthSteps = [3, 4, 6, 12];
-    var heightSteps = [1, 2];
-    canvasEl.classList.add("is-resizing");
-    showGridOverlay();
-
-    function pickClosest(target, steps) {
-      var best = steps[0], bestDist = Infinity;
-      steps.forEach(function (s) {
-        var d = Math.abs(target - s);
-        if (d < bestDist) { bestDist = d; best = s; }
-      });
-      return best;
-    }
-
-    function onMove(mv) {
-      var newPxW = mv.clientX - rect.left;
-      var newPxH = mv.clientY - rect.top;
-      var newColW = (newPxW + GAP_PX) / (colWidth + GAP_PX);
-      var newRowH = (newPxH + GAP_PX) / (ROW_HEIGHT_PX + GAP_PX);
-      var targetW = pickClosest(newColW, widthSteps);
-      var targetH = pickClosest(newRowH, heightSteps);
-      var module = PolarisWidgets.getByType(w.type);
-      var minW = (module && module.minSize && module.minSize.width) || 3;
-      var minH = (module && module.minSize && module.minSize.height) || 1;
-      if (targetW < minW) targetW = minW;
-      if (targetH < minH) targetH = minH;
-      // Live-preview without committing reflow.
-      article.style.gridColumn = (w.col + 1) + " / span " + targetW;
-      article.style.gridRow    = (w.row + 1) + " / span " + targetH;
-      article.setAttribute("data-preview-w", targetW);
-      article.setAttribute("data-preview-h", targetH);
-    }
-    function onUp() {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
-      canvasEl.classList.remove("is-resizing");
-      hideGridOverlay();
-      var finalW = parseInt(article.getAttribute("data-preview-w") || startW, 10);
-      var finalH = parseInt(article.getAttribute("data-preview-h") || startH, 10);
-      article.removeAttribute("data-preview-w");
-      article.removeAttribute("data-preview-h");
-      resizeWidget(w.id, finalW, finalH);
-    }
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onUp);
+  function clearDragState() {
+    _dragStashId = null;
+    _dragStashType = null;
+    clearPlaceholder();
+    canvasEl.classList.remove("is-dragging");
+    canvasEl.querySelectorAll(".dashboard-widget.lifted").forEach(function (e) { e.classList.remove("lifted"); });
   }
 
   // ─── Gear popover ───────────────────────────────────────────────────────
@@ -609,24 +603,16 @@
     var fieldsEl = pop.querySelector(".widget-config-fields");
     if (module.renderConfig) {
       try {
-        module.renderConfig(fieldsEl, w.config || {}, function (key, value) {
-          updateConfig(w.id, key, value);
-        });
+        module.renderConfig(fieldsEl, w.config || {}, function (key, value) { updateConfig(w.id, key, value); });
       } catch (err) {
         fieldsEl.innerHTML = '<p class="empty-state">Config failed to render.</p>';
       }
     } else {
       fieldsEl.innerHTML = '<p style="font-size:0.82rem;color:var(--color-text-secondary)">This widget has no configurable options.</p>';
     }
-    pop.querySelector('[data-action="remove"]').addEventListener("click", function () {
-      closePopover();
-      removeWidget(w.id);
-    });
+    pop.querySelector('[data-action="remove"]').addEventListener("click", function () { closePopover(); removeWidget(w.id); });
     pop.querySelector('[data-action="close"]').addEventListener("click", closePopover);
 
-    // Position next to the gear icon — prefer to the left of the gear so the
-    // popover hangs into the widget area; fall back to the right when the
-    // widget hugs the left edge of the viewport.
     var anchorRect = anchorEl.getBoundingClientRect();
     var width = 260;
     pop.style.width = width + "px";
@@ -645,6 +631,53 @@
     if (!openPopover) return;
     try { document.body.removeChild(openPopover.el); } catch (_) {}
     openPopover = null;
+  }
+
+  // ─── NOC-style auto-scroll ───────────────────────────────────────────────
+  // Mirrors the SolarWinds NOC wall display (noc.rogersgroupinc.com): pause
+  // ~3s at the top, creep down 1px per tick, dwell ~3s at the bottom, reset to
+  // the top (glide), repeat — but only while the content actually overflows.
+  // NOC uses translateY on an inner wrapper; we drive scrollTop on the
+  // overflow:auto widget body instead (no DOM wrapper needed). Pauses while
+  // the operator hovers the widget so they can read / click without it moving.
+  function startAutoScroll(scrollEl, hoverEl) {
+    var STEP_MS = 80;                              // tick cadence (NOC metric-box speed)
+    var TOP_PAUSE_TICKS = Math.ceil(3000 / STEP_MS); // ~3s dwell at the top
+    var BOTTOM_DWELL = 40;                          // extra ticks held at the bottom (~3.2s)
+    var offset = 0;
+    var pause = TOP_PAUSE_TICKS;
+    var hovered = false;
+
+    function onEnter() { hovered = true; }
+    function onLeave() { hovered = false; }
+    hoverEl.addEventListener("mouseenter", onEnter);
+    hoverEl.addEventListener("mouseleave", onLeave);
+
+    var timer = setInterval(function () {
+      var maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+      if (maxScroll <= 4) {                         // content fits → nothing to scroll
+        if (scrollEl.scrollTop !== 0) scrollEl.scrollTop = 0;
+        offset = 0; pause = TOP_PAUSE_TICKS;
+        return;
+      }
+      if (hovered) return;                          // operator is reading — hold
+      if (pause > 0) { pause--; return; }
+      offset += 1;
+      if (offset > maxScroll + BOTTOM_DWELL) {       // past bottom + dwell → glide home, re-pause
+        offset = 0;
+        pause = TOP_PAUSE_TICKS;
+        try { scrollEl.scrollTo({ top: 0, behavior: "smooth" }); }
+        catch (_) { scrollEl.scrollTop = 0; }
+        return;
+      }
+      scrollEl.scrollTop = Math.min(offset, maxScroll);
+    }, STEP_MS);
+
+    return function cleanup() {
+      clearInterval(timer);
+      hoverEl.removeEventListener("mouseenter", onEnter);
+      hoverEl.removeEventListener("mouseleave", onLeave);
+    };
   }
 
   // CSS.escape polyfill — old browsers + safe escape for our use case.

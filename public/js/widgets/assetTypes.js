@@ -85,6 +85,7 @@
 
   PolarisWidgets.register({
     type: "assetTypes",
+    category: "Assets",
     label: "Assets by type",
     description: "Breakdown of monitored assets by type. Click a slice to drill into the matching asset list.",
     defaultSize: { width: 6, height: 1 },

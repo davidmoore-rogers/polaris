@@ -34,6 +34,7 @@
 
   PolarisWidgets.register({
     type: "capacityHealth",
+    category: "IP Space",
     label: "Capacity health",
     description: "Overall capacity severity pill + the top reasons driving it. Admin-only.",
     defaultSize: { width: 4, height: 1 },

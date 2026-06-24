@@ -16,6 +16,7 @@
 
   PolarisWidgets.register({
     type: "slowestResponse",
+    category: "Monitoring",
     label: "Slowest Response",
     description: "Monitored assets with the highest last-probe response time.",
     defaultSize: { width: 4, height: 1 },

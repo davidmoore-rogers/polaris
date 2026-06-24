@@ -338,6 +338,9 @@ app.use(
           "https://*.tile.openstreetmap.org",
           "https://tile.openstreetmap.org",
           "https://*.basemaps.cartocdn.com",
+          // RainViewer precipitation-radar tiles for the Site Map widget's
+          // weather overlay (loaded as <img>, served from tilecache.rainviewer.com).
+          "https://*.rainviewer.com",
         ],
         // The Google Fonts hosts are fetch()ed (not just <link>-loaded) by the
         // asset-details Screenshot button: html-to-image inlines the page's
@@ -349,6 +352,11 @@ app.use(
           "'self'",
           "https://fonts.googleapis.com",
           "https://fonts.gstatic.com",
+          // Site Map widget weather overlay: RainViewer radar frame index +
+          // Open-Meteo current-temperature lookups (both fetch()ed). Sends
+          // only approximate site lat/long; degrades gracefully when offline.
+          "https://api.rainviewer.com",
+          "https://api.open-meteo.com",
         ],
         frameSrc: ["'none'"],
         objectSrc: ["'none'"],

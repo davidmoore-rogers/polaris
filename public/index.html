@@ -20,29 +20,39 @@
       <div class="page-header">
         <h2>Dashboard</h2>
         <div class="page-header-actions">
-          <button type="button" id="dashboard-add-widget" class="btn btn-primary">+ Widget</button>
+          <button type="button" id="dashboard-customize" class="btn btn-primary">Customize Page</button>
+          <button type="button" id="dashboard-add-widgets" class="btn btn-primary" hidden>Add Widgets</button>
+          <button type="button" id="dashboard-done" class="btn btn-secondary" hidden>Done Editing</button>
         </div>
       </div>
 
       <div id="dashboard-empty-state" class="dashboard-empty">
-        Use the + Widget button to get started
+        Click <strong>Customize Page</strong>, then <strong>Add Widgets</strong>, to build your dashboard.
       </div>
       <div id="dashboard-canvas" class="dashboard-canvas" hidden></div>
     </main>
   </div>
 
-  <div class="slideover-overlay" id="widget-library-overlay" aria-hidden="true">
-    <aside class="slideover" id="widget-library-panel" role="dialog" aria-labelledby="widget-library-title">
-      <div class="slideover-resize-handle"></div>
-      <div class="slideover-header">
-        <div class="slideover-header-top">
-          <h3 id="widget-library-title">Add a Widget</h3>
-          <button type="button" class="btn btn-icon slideover-close" id="widget-library-close" aria-label="Close">&times;</button>
-        </div>
-        <p class="slideover-meta">Drag a widget onto the dashboard, or click to add it at the next open slot.</p>
+  <!-- Add-Widgets picker: translucent overlay (dashboard shows through) docking
+       a Group-By list + searchable/sortable/favoritable widget list. -->
+  <div class="widget-picker-overlay" id="widget-library-overlay" aria-hidden="true">
+    <div class="widget-picker" role="dialog" aria-labelledby="widget-picker-title">
+      <div class="widget-picker-header">
+        <h3 id="widget-picker-title">Add Widgets</h3>
+        <button type="button" class="btn btn-icon" id="widget-library-close" aria-label="Close">&times;</button>
       </div>
-      <div class="slideover-body" id="widget-library-body"></div>
-    </aside>
+      <div class="widget-picker-toolbar">
+        <input type="search" id="widget-picker-search" placeholder="Search widgets…" aria-label="Search widgets">
+        <select id="widget-picker-sort" aria-label="Sort widgets">
+          <option value="name-asc">Name (A–Z)</option>
+          <option value="name-desc">Name (Z–A)</option>
+        </select>
+      </div>
+      <div class="widget-picker-body">
+        <ul class="widget-picker-groups" id="widget-picker-groups"></ul>
+        <div class="widget-picker-list" id="widget-library-body"></div>
+      </div>
+    </div>
   </div>
 
   <script src="/js/vendor/leaflet/leaflet.js"></script>
@@ -72,6 +82,7 @@
   <script src="/js/widgets/activeAlerts.js"></script>
   <script src="/js/widgets/sitesWithIssues.js"></script>
   <script src="/js/widgets/siteMap.js"></script>
+  <script src="/js/favorites.js"></script>
   <script src="/js/widget-library.js"></script>
   <script src="/js/dashboard.js"></script>
 </body>

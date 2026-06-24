@@ -3491,59 +3491,117 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   letter-spacing: 0.3px;
 }
 
+/* Column canvas. The dashboard is a 12-col grid of COLUMNS; each column is a
+   grid item spanning its width and holding a vertical widget stack. Columns
+   whose spans exceed 12 wrap to the next grid row (no horizontal scroll). */
 .dashboard-canvas {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
-  grid-auto-rows: 280px;
   gap: 16px;
   align-items: start;
   position: relative;
-  min-height: 280px;
-}
-.dashboard-canvas.drop-target {
-  outline: 2px dashed rgba(79,195,247,0.40);
-  outline-offset: 4px;
-  border-radius: 6px;
+  min-height: 120px;
 }
 
-/* Drag/resize grid overlay — only visible while the canvas carries
-   .is-dragging or .is-resizing. Children are absolutely positioned
-   relative to this overlay (which itself fills the canvas). pointer-events
-   are off so the overlay never intercepts the drag's own events. */
-.dashboard-grid-overlay {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 1;
+.dashboard-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
 }
-.dashboard-grid-col {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  border-left:  1px dashed rgba(79,195,247,0.22);
-  border-right: 1px dashed rgba(79,195,247,0.22);
-}
-.dashboard-grid-row {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: rgba(79,195,247,0.18);
-}
-.dashboard-drop-preview {
-  position: absolute;
-  background: rgba(79,195,247,0.10);
-  border: 2px dashed rgba(79,195,247,0.65);
+.dashboard-canvas.is-editing .dashboard-column {
+  outline: 1px dashed rgba(79,195,247,0.20);
+  outline-offset: 6px;
   border-radius: 6px;
-  transition: left 90ms ease-out, top 90ms ease-out, width 90ms ease-out, height 90ms ease-out;
-  box-shadow: 0 0 0 1px rgba(79,195,247,0.18) inset;
 }
-/* While dragging, gently dim the widget being moved so the drop preview
-   reads as the focal point. .dashboard-widget.dragging already exists for
-   this on the article level; this rule layers a second hint at the canvas
-   level for the library-drag case where no specific widget is "dragging". */
-.dashboard-canvas.is-dragging .dashboard-widget:not(.dragging) {
-  opacity: 0.85;
+.dashboard-canvas.is-editing .dashboard-column.drag-over {
+  outline-color: rgba(102,187,106,0.7);
+}
+.dashboard-column-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 40px;
+}
+.dashboard-column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.dashboard-column-width-ctl {
+  display: inline-flex;
+  border: 1px solid var(--color-border, rgba(255,255,255,0.10));
+  border-radius: 4px;
+  overflow: hidden;
+}
+.dashboard-column-width-ctl button {
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--color-border, rgba(255,255,255,0.10));
+  color: var(--color-text-secondary);
+  padding: 3px 8px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  line-height: 1.2;
+}
+.dashboard-column-width-ctl button:last-child { border-right: 0; }
+.dashboard-column-width-ctl button.active {
+  background: rgba(79,195,247,0.18);
+  color: #4fc3f7;
+}
+.dashboard-column-remove {
+  background: transparent;
+  border: 0;
+  color: var(--color-text-tertiary);
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.dashboard-column-remove:hover { color: #ef5350; background: rgba(255,255,255,0.06); }
+
+/* Trailing "new column" drop target — only in edit mode. */
+.dashboard-newcol-target {
+  grid-column: span 3;
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--color-border, rgba(255,255,255,0.14));
+  border-radius: 6px;
+  color: var(--color-text-tertiary);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.dashboard-newcol-target:hover,
+.dashboard-newcol-target.drag-over {
+  border-color: rgba(102,187,106,0.7);
+  color: #81c784;
+  background: rgba(102,187,106,0.06);
+}
+
+/* Green "+" insertion placeholder between widgets in a column. */
+.dashboard-drop-placeholder {
+  height: 6px;
+  border-radius: 3px;
+  background: #66bb6a;
+  box-shadow: 0 0 0 3px rgba(102,187,106,0.22);
+  position: relative;
+}
+.dashboard-drop-placeholder::before {
+  content: "+";
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 18px; height: 18px;
+  line-height: 18px; text-align: center;
+  border-radius: 50%;
+  background: #66bb6a;
+  color: #06210e;
+  font-weight: 700;
+  font-size: 13px;
 }
 
 .dashboard-widget {
@@ -3557,19 +3615,11 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   min-height: 0;          /* allow body to shrink */
   overflow: hidden;
 }
-.dashboard-widget.dragging {
-  opacity: 0.45;
-  outline: 2px dashed rgba(79,195,247,0.55);
-}
-.dashboard-widget.shifting {
-  transition: transform 180ms ease-out;
-}
-.dashboard-widget-placeholder {
-  background: rgba(79,195,247,0.08);
-  border: 2px dashed rgba(79,195,247,0.55);
-  border-radius: 6px;
-  pointer-events: none;
-  transition: transform 180ms ease-out;
+/* The dragged widget lifts with a shadow while moving. */
+.dashboard-widget.lifted {
+  opacity: 0.5;
+  box-shadow: 0 12px 28px rgba(0,0,0,0.45);
+  outline: 2px solid rgba(79,195,247,0.5);
 }
 
 .dashboard-widget-header {
@@ -3584,10 +3634,10 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   font-weight: 600;
   color: var(--color-text-primary);
   letter-spacing: 0.2px;
-  cursor: grab;
   user-select: none;
 }
-.dashboard-widget-header[data-dragging="true"] .dashboard-widget-title { cursor: grabbing; }
+.dashboard-widget-title[draggable="true"] { cursor: grab; }
+.dashboard-widget-title[draggable="true"]:active { cursor: grabbing; }
 .dashboard-widget-action {
   background: transparent;
   border: 0;
@@ -3609,19 +3659,20 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   overflow: auto;
 }
 
-.dashboard-widget-resize {
-  position: absolute;
-  right: 2px;
-  bottom: 2px;
-  width: 18px;
-  height: 18px;
-  cursor: nwse-resize;
-  background:
-    linear-gradient(135deg, transparent 45%, var(--color-text-tertiary) 45%, var(--color-text-tertiary) 55%, transparent 55%, transparent 65%, var(--color-text-tertiary) 65%, var(--color-text-tertiary) 75%, transparent 75%, transparent 85%, var(--color-text-tertiary) 85%, var(--color-text-tertiary) 95%, transparent 95%);
-  opacity: 0.75;
-  border-radius: 0 0 6px 0;
+/* Edit-mode widget controls: height 1↔2 toggle + remove ×. */
+.dashboard-widget-height-toggle,
+.dashboard-widget-remove {
+  background: transparent;
+  border: 0;
+  color: var(--color-text-tertiary);
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
 }
-.dashboard-widget-resize:hover { opacity: 1; }
+.dashboard-widget-height-toggle:hover { color: var(--color-text-primary); background: rgba(255,255,255,0.06); }
+.dashboard-widget-remove:hover { color: #ef5350; background: rgba(255,255,255,0.06); }
 
 /* Widget-specific body wrappers reuse the rolled-up styles from the old
    dashboard surface — kept under .dashboard-widget-body so layout still
@@ -3677,11 +3728,120 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   border-top: 1px solid var(--color-border, rgba(255,255,255,0.08));
 }
 
-/* Widget library slide-in cards. Reuses .slideover-* for the panel chrome;
-   these styles only cover the per-widget catalog entries. */
+/* ── Add-Widgets picker ──────────────────────────────────────────────────
+   Translucent overlay (the dashboard shows through, dimmed) docking a panel
+   on the right with a Group-By list + searchable/sortable widget list. */
+.widget-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  background: rgba(0,0,0,0.45);
+  display: none;
+  justify-content: flex-end;
+  /* Backdrop is pass-through so a card dragged out of the panel reaches the
+     dashboard canvas underneath (HTML5 drag events hit-test through
+     pointer-events:none elements). The panel re-enables pointer events below.
+     Trade-off: no click-on-backdrop-to-close — the × button and Esc close. */
+  pointer-events: none;
+}
+.widget-picker-overlay.open { display: flex; }
+/* While a card is being dragged out, hide the whole picker so the dashboard
+   (incl. columns behind the panel) is fully exposed as a drop target.
+   After .open so it wins on equal specificity. */
+.widget-picker-overlay.drag-hidden { display: none; }
+.widget-picker {
+  width: 56vw;
+  max-width: 920px;
+  min-width: 420px;
+  height: 100%;
+  background: var(--color-bg, #0f1115);
+  border-left: 1px solid var(--color-border, rgba(255,255,255,0.10));
+  box-shadow: -8px 0 28px rgba(0,0,0,0.40);
+  display: flex;
+  flex-direction: column;
+  pointer-events: auto;
+}
+.widget-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.08));
+}
+.widget-picker-header h3 { margin: 0; font-size: 1.05rem; }
+.widget-picker-toolbar {
+  display: flex;
+  gap: 10px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.08));
+}
+.widget-picker-toolbar input[type="search"] {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--color-bg-elevated, #1c1f24);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border, rgba(255,255,255,0.10));
+  border-radius: 4px;
+}
+.widget-picker-toolbar select {
+  padding: 6px 8px;
+  background: var(--color-bg-elevated, #1c1f24);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border, rgba(255,255,255,0.10));
+  border-radius: 4px;
+}
+.widget-picker-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.widget-picker-groups {
+  width: 200px;
+  flex: 0 0 200px;
+  margin: 0;
+  padding: 10px 0;
+  list-style: none;
+  border-right: 1px solid var(--color-border, rgba(255,255,255,0.08));
+  overflow-y: auto;
+}
+.widget-picker-group {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  color: var(--color-text-secondary);
+  padding: 8px 18px;
+  font-size: 0.88rem;
+  cursor: pointer;
+  text-align: left;
+}
+.widget-picker-group:hover { background: rgba(255,255,255,0.04); color: var(--color-text-primary); }
+.widget-picker-group.active {
+  color: #4fc3f7;
+  box-shadow: inset 3px 0 0 #4fc3f7;
+  background: rgba(79,195,247,0.08);
+}
+.widget-picker-group-count {
+  font-size: 0.72rem;
+  color: var(--color-text-tertiary);
+  background: rgba(255,255,255,0.06);
+  border-radius: 8px;
+  padding: 0 7px;
+}
+.widget-picker-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 18px;
+}
+
+/* Catalog cards: [star] [info] [preview]. Keep `.widget-library-card` +
+   data-type + draggable so the dashboard drag/drop wiring is unchanged. */
 .widget-library-card {
+  position: relative;
   display: grid;
-  grid-template-columns: 1fr 240px;
+  grid-template-columns: 28px 1fr 200px;
   gap: 12px;
   align-items: stretch;
   padding: 12px;
@@ -3691,10 +3851,19 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   border-radius: 6px;
   cursor: grab;
 }
-.widget-library-card:hover {
-  border-color: rgba(79,195,247,0.40);
-}
+.widget-library-card:hover { border-color: rgba(79,195,247,0.40); }
 .widget-library-card[draggable="true"]:active { cursor: grabbing; }
+.widget-fav-star {
+  background: transparent;
+  border: 0;
+  color: var(--color-text-tertiary);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  align-self: start;
+  padding: 2px;
+}
+.widget-fav-star.fav-on { color: #ffd54f; }
 .widget-library-card-info {
   display: flex;
   flex-direction: column;
@@ -3702,25 +3871,12 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   gap: 4px;
   min-width: 0;
 }
-.widget-library-card-title {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-.widget-library-card-desc {
-  font-size: 0.82rem;
-  color: var(--color-text-secondary);
-  line-height: 1.35;
-}
-.widget-library-card-tag {
-  font-size: 0.72rem;
-  color: var(--color-text-tertiary);
-  letter-spacing: 0.3px;
-  text-transform: uppercase;
-}
+.widget-library-card-title { font-size: 0.95rem; font-weight: 600; color: var(--color-text-primary); }
+.widget-library-card-desc { font-size: 0.82rem; color: var(--color-text-secondary); line-height: 1.35; }
+.widget-library-card-tag { font-size: 0.72rem; color: var(--color-text-tertiary); letter-spacing: 0.3px; text-transform: uppercase; }
 .widget-library-preview {
-  width: 240px;
-  height: 150px;
+  width: 200px;
+  height: 130px;
   background: var(--color-bg, #0f1115);
   border: 1px solid var(--color-border, rgba(255,255,255,0.06));
   border-radius: 4px;
@@ -3729,6 +3885,11 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   pointer-events: none;
   position: relative;
   font-size: 0.72rem;
+}
+@media (max-width: 720px) {
+  .widget-picker { width: 100%; min-width: 0; }
+  .widget-library-card { grid-template-columns: 28px 1fr; }
+  .widget-library-preview { display: none; }
 }
 
 /* Small status-pill colors used in the Capacity Health + Discovery Activity widgets.
@@ -3768,4 +3929,75 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .fg-cluster.monitor-degraded    { background: #f9a825; color: #222; }
 .fg-cluster.monitor-down        { background: #c62828; }
 .fg-cluster.monitor-dep-down    { background: #607d8b; }
+
+/* ── Site Map widget (SolarWinds-style status dots + weather) ───────────── */
+/* Darken the basemap only in dark theme so dots/radar pop; light theme renders normally. */
+.sitemap-body.sitemap-dark .leaflet-tile-pane { filter: brightness(0.6) saturate(0.55) contrast(1.1); }
+
+/* Pulsing ring under a down site's dot. */
+@keyframes sitemap-pulse-ring { 0% { transform: scale(1); opacity: 0.6; } 100% { transform: scale(4); opacity: 0; } }
+.sitemap-pulse {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: #ff1744; animation: sitemap-pulse-ring 2s ease-out infinite; pointer-events: none;
+}
+
+/* Open-Meteo temperature label. */
+.sitemap-temp {
+  color: #fff; font-family: "Roboto Mono", monospace; font-size: 11px; font-weight: 700;
+  text-shadow: 0 0 3px #000, 0 0 3px #000, 1px 1px 2px #000; white-space: nowrap; pointer-events: none;
+}
+
+/* Dark popup + name tooltip. */
+.sitemap-body .leaflet-popup-content-wrapper { background: var(--color-bg-elevated, #1c1f24); color: var(--color-text-primary); border: 1px solid var(--color-border, rgba(255,255,255,0.12)); border-radius: 8px; }
+.sitemap-body .leaflet-popup-tip { background: var(--color-bg-elevated, #1c1f24); }
+.sitemap-popup-title { font-weight: 700; font-size: 0.92rem; margin-bottom: 4px; }
+.sitemap-popup-row { font-size: 0.8rem; color: var(--color-text-secondary); display: flex; gap: 8px; }
+.sitemap-popup-row span { color: var(--color-text-tertiary); }
+.sitemap-popup-link { display: inline-block; margin-top: 6px; font-size: 0.8rem; color: #4fc3f7; text-decoration: none; }
+.leaflet-tooltip.sitemap-tip { background: var(--color-bg-elevated, #1c1f24); color: var(--color-text-primary); border: 1px solid var(--color-border, rgba(255,255,255,0.12)); font-size: 0.75rem; font-weight: 600; }
+.leaflet-tooltip.sitemap-tip::before { display: none; }
+/* Permanent red tooltip on down sites — always visible, names what's down,
+   and draggable so overlapping labels can be pulled apart. */
+.leaflet-tooltip.sitemap-tip-down { background: rgba(40,8,12,0.92); border-color: #ff1744; color: #ff6b85; pointer-events: auto; cursor: grab; }
+.leaflet-tooltip.sitemap-tip-down.dragging { cursor: grabbing; }
+
+/* Fullscreen: the widget body fills the viewport. !important beats the inline
+   position:relative set on the body at render time. */
+.sitemap-body.sitemap-fullscreen {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 4000 !important;
+  height: auto !important;
+  max-height: none !important;
+  background: var(--color-bg, #0f1115);
+}
+
+/* Overlay controls (legend bottom-left, weather/theme top-right, radar clock). */
+.sitemap-controls { position: absolute; inset: 0; pointer-events: none; z-index: 1000; }
+.sitemap-legend {
+  position: absolute; left: 8px; bottom: 8px; pointer-events: auto;
+  display: flex; flex-direction: column; gap: 3px;
+  background: rgba(13,16,22,0.82); border: 1px solid rgba(255,255,255,0.22);
+  border-radius: 5px; padding: 6px 8px; font-size: 0.72rem; color: #f1f3f5;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.45);
+}
+.sitemap-legend span { display: flex; align-items: center; gap: 6px; }
+.sitemap-legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; box-shadow: 0 0 0 1px rgba(0,0,0,0.4); }
+.sitemap-wx { position: absolute; right: 8px; top: 8px; pointer-events: auto; display: flex; gap: 4px; }
+.sitemap-wx button {
+  background: rgba(13,16,22,0.92); border: 1px solid rgba(255,255,255,0.3);
+  color: #ffffff; border-radius: 3px; padding: 3px 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
+  cursor: pointer; font-family: inherit; box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+.sitemap-wx button:hover { border-color: #4fc3f7; }
+/* Active keeps the same dark chip as every other button; the cyan text + border
+   mark it on (readable now that the chip is near-opaque, unlike the old
+   cyan-on-cyan-tint). */
+.sitemap-wx button.active { border-color: #4fc3f7; color: #4fc3f7; }
+.sitemap-radar-clock {
+  position: absolute; right: 8px; top: 40px; pointer-events: none; display: none;
+  background: rgba(13,16,22,0.82); border: 1px solid rgba(255,255,255,0.22);
+  border-radius: 3px; padding: 3px 7px; font-size: 10px; font-weight: 600; font-family: "Roboto Mono", monospace; color: #f1f3f5;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.45);
+}
 

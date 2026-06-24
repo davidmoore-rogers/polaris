@@ -68,6 +68,7 @@
 
   PolarisWidgets.register({
     type: "downNodes",
+    category: "Monitoring",
     label: "Down Nodes",
     description: "Monitored assets currently down, grouped by site or division.",
     defaultSize: { width: 6, height: 1 },

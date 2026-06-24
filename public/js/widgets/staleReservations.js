@@ -30,6 +30,7 @@
 
   PolarisWidgets.register({
     type: "staleReservations",
+    category: "IP Space",
     label: "Stale reservations",
     description: "DHCP reservations whose client hasn't held the IP recently — candidates for cleanup.",
     defaultSize: { width: 4, height: 1 },

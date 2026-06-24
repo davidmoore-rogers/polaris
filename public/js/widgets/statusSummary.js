@@ -51,6 +51,7 @@
 
   PolarisWidgets.register({
     type: "statusSummary",
+    category: "Monitoring",
     label: "Status summary",
     description: "At-a-glance counts of monitored assets by state, plus infra uptime % and active alerts.",
     defaultSize: { width: 6, height: 1 },
