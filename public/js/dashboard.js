@@ -24,7 +24,7 @@
   var GAP_PX = 16;
   var SAVE_DEBOUNCE_MS = 800;
   var WIDTH_STEPS = [3, 4, 6, 12];
-  var HEIGHT_STEPS = [1, 2];
+  var HEIGHT_STEPS = [1, 2, 3];
 
   var state = {
     layout: { version: 2, columns: [] },
@@ -250,15 +250,16 @@
     article.setAttribute("data-id", w.id);
     article.setAttribute("data-type", w.type);
     // Fixed pixel height so widget bodies (charts, Leaflet map) get a sized
-    // container; height 1 → 280px, height 2 → 576px (2 rows + the gap).
-    article.style.height = (w.height === 2 ? (2 * ROW_HEIGHT_PX + GAP_PX) : ROW_HEIGHT_PX) + "px";
+    // container. height 1/2/3 rows → 280 / 576 / 872px (N rows + the gaps).
+    var hRows = Math.min(3, Math.max(1, w.height || 1));
+    article.style.height = (hRows * ROW_HEIGHT_PX + (hRows - 1) * GAP_PX) + "px";
 
     // In edit mode a dedicated grip is the drag handle — a clear, easy target
     // for dragging the widget to another column (the title alone was too easy
     // to miss). The whole widget can move across columns from here.
     var grip = state.editing ? '<span class="dashboard-widget-grip" draggable="true" title="Drag to move (to any column)">⠿</span>' : "";
     var editControls = state.editing
-      ? '<button type="button" class="dashboard-widget-height-toggle" data-action="height" title="Toggle height">' + (w.height === 2 ? "▾" : "▴") + '</button>' +
+      ? '<button type="button" class="dashboard-widget-height-toggle" data-action="height" title="Height (click to cycle 1×/2×/3×)">' + (Math.min(3, Math.max(1, w.height || 1))) + '×</button>' +
         '<button type="button" class="dashboard-widget-action" data-action="gear" title="Configure">⚙</button>' +
         '<button type="button" class="dashboard-widget-remove" data-action="remove" title="Remove">&times;</button>'
       : "";
@@ -288,7 +289,8 @@
         openGearPopover(w, ev.currentTarget);
       });
       article.querySelector('[data-action="height"]').addEventListener("click", function () {
-        setWidgetHeight(w.id, w.height === 2 ? 1 : 2);
+        // Cycle 1× → 2× → 3× → 1×.
+        setWidgetHeight(w.id, (Math.min(3, Math.max(1, w.height || 1)) % 3) + 1);
       });
       article.querySelector('[data-action="remove"]').addEventListener("click", function () { removeWidget(w.id); });
     }

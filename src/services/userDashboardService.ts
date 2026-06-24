@@ -30,7 +30,7 @@ export interface DashboardColumn {
 export interface DashboardWidgetInstance {
   id: string;
   type: string;
-  /** Row-step height: 1 | 2 (→ 280px / 576px). */
+  /** Row-step height: 1 | 2 | 3 (→ 280 / 576 / 872px). */
   height: number;
   config: Record<string, unknown>;
 }
