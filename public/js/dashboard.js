@@ -301,7 +301,7 @@
     var el = document.createElement("div");
     el.className = "dashboard-newcol-target";
     el.setAttribute("data-newcol", "1");
-    el.innerHTML = '<span>+ New column</span>';
+    el.innerHTML = '<span>+ New block</span>';
     // Click-to-add a new empty column (keyboard/touch parity with drag).
     el.addEventListener("click", function () {
       if (!_dragStashId && !_dragStashType) WidgetLibrary.open(handleTapToAdd);
