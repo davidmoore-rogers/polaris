@@ -76,6 +76,11 @@
   function initMap() {
     map = L.map("map", {
       worldCopyJump: true,
+      // Fractional zoom so fitBounds fills the viewport instead of rounding
+      // down to the nearest integer zoom (which left a large empty border
+      // around the fleet on the default load).
+      zoomSnap: 0.25,
+      zoomDelta: 0.5,
       // Continental-US starting view — bounds will tighten once data loads
       center: [39.5, -95],
       zoom: 4,
