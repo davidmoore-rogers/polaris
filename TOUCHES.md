@@ -2512,21 +2512,23 @@ Listed alphabetically.
 
 ## services/monitorOverrideService.ts
 
-**What it owns:** Monitor-override semantics — `Asset.monitorOverride` tracks whether the operator's `monitored` choice diverges from the per-class `addAsMonitored` flag in the owning integration's config, so discovery sweeps don't clobber operator intent.
+**What it owns:** Monitor-override semantics — `Asset.monitorOverride` is an **explicit operator-intent bit** (true when an operator deliberately set `monitored` away from the owning integration's per-class `addAsMonitored` default), so discovery sweeps don't clobber operator intent. Crucially it is WRITTEN only at operator-action time and never re-derived from incidental divergence.
 
-**Public API:** `AddAsMonitoredAssetType`, `getAddAsMonitoredFromConfig`, `computeMonitorOverride`, `resolveMonitorOverride`, `classBlockKeyForAssetType`, `snapshotAddAsMonitoredByAssetType`, `recomputeMonitorOverrideForAssets`, `sweepMonitoredForIntegration`, `recomputeMonitorOverrideForIntegration`, `buildMonitoredSweep`, `AUTO_MONITOR_ASSET_TYPES`
+**Public API:** `AddAsMonitoredAssetType`, `getAddAsMonitoredFromConfig`, `computeMonitorOverride`, `resolveMonitorOverride`, `classBlockKeyForAssetType`, `snapshotAddAsMonitoredByAssetType`, `recomputeMonitorOverrideForAssets`, `sweepMonitoredForIntegration`, `buildMonitoredSweep`, `AUTO_MONITOR_ASSET_TYPES`
 
 **Cross-service deps:** none (pure helpers + raw SQL via the caller's prisma).
 
-**Used by:** `src/api/routes/assets.ts` (status-pill toggle / `PUT /assets/:id`), `src/api/routes/integrations.ts` (save flow + preflight), `src/jobs/backfillMonitorOverride.ts`.
+**Used by:** `src/api/routes/assets.ts` (status-pill toggle / `PUT /assets/:id` → `recomputeMonitorOverrideForAssets`; `POST /assets/:id/monitor-override/reset` → `getAddAsMonitoredFromConfig`), `src/api/routes/integrations.ts` (save flow `sweepMonitoredForIntegration` + preflight `snapshotAddAsMonitoredByAssetType`).
 
 **Invariants:**
-- Override auto-clears when the operator choice converges with `addAsMonitored` (either side moving to equality satisfies it).
+- `monitorOverride` is written ONLY by operator write paths and the reset endpoint. NOTHING re-derives it from incidental state (no boot job, no integration-save recompute) — incidental divergence (decommission clamp, created-before-flag-enabled, HA standby) leaves it false so the next discovery sweep self-heals the asset. (This is the explicit-intent fix; the prior convergent model's every-boot/every-save re-derivation stranded such assets.)
+- Operator write paths capture intent as `monitored XOR addAsMonitored` at action time; re-aligning monitored to the flag clears it on the same write.
 - Only five asset types participate (`firewall` / `switch` / `access_point` / `workstation` / `server`); each maps to a type-specific config block (`fortigateMonitor` / `fortiswitchMonitor` / `fortiapMonitor` / `workstationMonitor` / `serverMonitor`).
-- `sweepMonitoredForIntegration` leaves `override=true` assets alone (operator wins) and otherwise sets `monitored` per the class flag.
+- `sweepMonitoredForIntegration` leaves `override=true` assets alone (operator pins win) and otherwise sets `monitored` per the class flag; it does NOT recompute overrides — a flag flip respects pins.
 
 **When changing this:**
 - The raw-SQL JSON-path block keys must stay in sync with `classBlockKeyForAssetType` and the cutover migration.
+- Do NOT re-introduce a job/handler that recomputes `monitorOverride` across all assets — that is the bug the explicit-intent model fixed.
 
 ---
 

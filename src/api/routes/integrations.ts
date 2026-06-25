@@ -73,7 +73,6 @@ import {
   buildMonitoredSweep,
   snapshotAddAsMonitoredByAssetType,
   sweepMonitoredForIntegration,
-  recomputeMonitorOverrideForIntegration,
 } from "../../services/monitorOverrideService.js";
 import {
   MAC_ROW_SELECT,
@@ -1120,14 +1119,18 @@ router.put("/:id", async (req, res, next) => {
     invalidateMonitorSettingsCache({ integrationId: req.params.id });
 
     // Auto-Monitor flag change sweep — if any per-class addAsMonitored value
-    // flipped, sweep `monitored` on affected non-override assets immediately
-    // (without waiting for the next discovery cycle) and refresh the
-    // monitorOverride flag on every asset this integration owns so the UI
-    // pill state is current. The frontend protects the operator from
-    // accidental fleet-wide disables via a confirm modal at Save Changes;
-    // by the time we get here the operator has already confirmed (or no
-    // disable transition is happening). Cheap when nothing changed — both
-    // helpers no-op via their WHERE clauses when no diff is found.
+    // flipped, sweep `monitored` on affected NON-override assets immediately
+    // (without waiting for the next discovery cycle). Override assets are
+    // left untouched: `monitorOverride` is an explicit operator pin, so a
+    // flag flip respects it (operators re-align a pinned asset per-asset via
+    // the Reset-to-integration-default action). We deliberately do NOT
+    // recompute monitorOverride here — re-deriving it from the current
+    // (monitored, flag) divergence would re-stamp pins onto assets whose
+    // `monitored` only diverged for incidental reasons (decommission clamp,
+    // created-before-flag-enabled, HA standby), which is exactly the bug the
+    // explicit-intent model fixes. The frontend protects the operator from
+    // accidental fleet-wide disables via a confirm modal at Save Changes.
+    // Cheap when nothing changed — the sweep no-ops via its WHERE clause.
     {
       const oldSnap = snapshotAddAsMonitoredByAssetType(existing.type, existing.config as Record<string, unknown>);
       const newSnap = snapshotAddAsMonitoredByAssetType(existing.type, updated.config as Record<string, unknown>);
@@ -1139,7 +1142,6 @@ router.put("/:id", async (req, res, next) => {
         oldSnap.server       !== newSnap.server;
       if (flipped) {
         const swept = await sweepMonitoredForIntegration(prisma, req.params.id);
-        await recomputeMonitorOverrideForIntegration(prisma, req.params.id);
         if (swept > 0) {
           logEvent({
             action: "integration.auto_monitor_swept",

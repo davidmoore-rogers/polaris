@@ -20,7 +20,7 @@ import { getSightingsForAsset, getSightingSettings, updateSightingSettings } fro
 import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
 import { isValidIpAddress, cidrContains } from "../../utils/cidr.js";
 import { isKnownAssetType } from "../../utils/assetTypes.js";
-import { recomputeMonitorOverrideForAssets } from "../../services/monitorOverrideService.js";
+import { recomputeMonitorOverrideForAssets, getAddAsMonitoredFromConfig } from "../../services/monitorOverrideService.js";
 import { mergeAssets, MERGEABLE_FIELDS, type MergeableField, type FieldWinner } from "../../services/assetMergeService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
@@ -2159,6 +2159,64 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }
     const changes = buildChanges(before, after);
     logEvent({ action: "asset.updated", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: req.session?.username, message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated`, details: changes ? { changes } : undefined });
+    res.json(asset);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/assets/:id/monitor-override/reset — clear an explicit
+// monitor-override pin and realign the asset to its discovering integration's
+// per-class Auto-Monitor default. Sets `monitored = <addAsMonitored flag>`
+// and `monitorOverride = false`, so discovery resumes auto-managing the asset
+// on the next cycle. This is the operator's escape hatch for an asset that
+// shows the "Asset Override" badge but shouldn't be pinned.
+router.post("/:id/monitor-override/reset", requirePermission("assets", "write"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const existing = await prisma.asset.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        hostname: true,
+        ipAddress: true,
+        assetType: true,
+        monitored: true,
+        monitorOverride: true,
+        discoveredByIntegrationId: true,
+      },
+    });
+    if (!existing) throw new AppError(404, "Asset not found");
+    if (!existing.discoveredByIntegrationId) {
+      throw new AppError(400, "Asset has no discovering integration — there is no Auto-Monitor default to reset to");
+    }
+    const integration = await prisma.integration.findUnique({
+      where: { id: existing.discoveredByIntegrationId },
+      select: { type: true, config: true },
+    });
+    const flag = getAddAsMonitoredFromConfig(
+      integration?.type ?? null,
+      (integration?.config as Record<string, unknown> | null) ?? null,
+      existing.assetType,
+    );
+    if (flag === null) {
+      throw new AppError(400, "Asset type is not subject to integration Auto-Monitor — nothing to reset");
+    }
+    // Realign to the flag and drop the pin. The DB-layer clamp still forces
+    // monitored=false for decommissioned/disabled assets; that's fine — the
+    // override is cleared either way and discovery won't monitor them.
+    const asset = await prisma.asset.update({
+      where: { id },
+      data: { monitored: flag, monitorOverride: false },
+    });
+    logEvent({
+      action: "monitor.override_reset",
+      resourceType: "asset",
+      resourceId: id,
+      resourceName: asset.hostname || asset.ipAddress || undefined,
+      actor: req.session?.username,
+      message: `Reset monitor override on "${asset.hostname || asset.ipAddress || "unknown"}" to integration default (monitored=${flag})`,
+    });
     res.json(asset);
   } catch (err) {
     next(err);

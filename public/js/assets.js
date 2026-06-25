@@ -3656,6 +3656,29 @@ async function openViewModal(id) {
         openEditModal(a.id);
       });
     }
+    var monitorResetBtn = document.getElementById("btn-asset-monitor-reset");
+    if (monitorResetBtn) {
+      monitorResetBtn.addEventListener("click", async function () {
+        monitorResetBtn.disabled = true;
+        monitorResetBtn.textContent = "Resetting…";
+        try {
+          var updated = await api.assets.resetMonitorOverride(a.id);
+          showToast(
+            updated.monitored
+              ? "Override cleared — discovery will auto-monitor this asset"
+              : "Override cleared — asset follows the integration default (not monitored)",
+            "success",
+          );
+          // Re-open the panel so the System tab re-renders from the fresh asset
+          // (monitored/override state, charts, and the badge all change).
+          openViewModal(a.id);
+        } catch (err) {
+          showToast("Failed to reset override: " + (err && err.message ? err.message : "unknown"), "error");
+          monitorResetBtn.disabled = false;
+          monitorResetBtn.textContent = "Reset to integration default";
+        }
+      });
+    }
     if (a.monitored) _loadMonitorHistoryFor(a.id, _getChartRangePref("assetMonitor", "24h"));
     if (a.monitored) _loadSystemTabFor(a.id, _getChartRangePref("assetSystem", "1h"), a);
     if (a.monitored) _renderIntermittencyBar(a.id);
@@ -7307,26 +7330,38 @@ async function _updateStreamSourceBadgesFromEffective(assetId, asset) {
 }
 
 // "Asset Override" badge rendered next to the Monitor Status pill on the
-// asset details System tab when the operator's `monitored` choice diverges
-// from the discovering integration's per-class addAsMonitored. Replaces
-// the legacy sticky monitoredOperatorSet flag with a convergent model: the
-// badge shows up the moment the two disagree and disappears when they
-// converge (either side moving satisfies the equality). Hidden for assets
-// with no discoveredByIntegrationId (manual assets have nothing to override).
+// asset details System tab. `monitorOverride` is an EXPLICIT operator-intent
+// bit (set only at the moment an operator changes this asset's monitored
+// state to something other than its integration's Auto-Monitor default) — it
+// is no longer re-derived from incidental divergence, so the badge means
+// "an operator deliberately pinned this," not merely "monitored happens to
+// disagree with the flag right now." Discovery skips pinned assets. The
+// adjacent Reset button clears the pin. Hidden for assets with no override.
 function _assetOverrideBadge(a) {
   if (!a || a.monitorOverride !== true) return "";
-  var tip = "This asset's monitored state diverges from the discovering integration's Auto-Monitor setting. Discovery won't sweep this asset until the operator re-aligns the choice (or flips Auto-Monitor in the integration).";
+  var tip = "An operator pinned this asset's monitored state, overriding the discovering integration's Auto-Monitor default. Discovery won't change it until the pin is reset.";
   return '<span class="badge badge-warning" title="' + escapeHtml(tip) + '" style="margin-left:6px">Asset Override</span>';
+}
+
+// "Reset to integration default" button — clears the override pin and
+// realigns the asset to its integration's per-class Auto-Monitor flag.
+// Shown only when a pin exists and the user can write.
+function _assetOverrideResetBtn(a) {
+  if (!a || a.monitorOverride !== true || !isUserOrAbove()) return "";
+  return '<button class="btn btn-sm btn-secondary" id="btn-asset-monitor-reset" style="margin-left:8px" ' +
+    'title="Clear this override and let discovery auto-manage the asset per the integration’s Auto-Monitor setting">Reset to integration default</button>';
 }
 
 function assetMonitoringViewHTML(a) {
   if (!a) return '<p class="empty-state">No data.</p>';
   var pill = assetMonitorBadge(a);
   var overridePill = _assetOverrideBadge(a);
+  var overrideReset = _assetOverrideResetBtn(a);
   if (!a.monitored) {
     return '<div style="padding:1rem 0">' +
       pill + overridePill + ' &nbsp; ' +
       '<span style="color:var(--color-text-secondary)">Monitoring is disabled for this asset. Enable it from the Edit modal’s Monitoring tab.</span>' +
+      overrideReset +
     '</div>';
   }
   // Source label: integration name (with parent FortiGate appended for
@@ -7405,7 +7440,7 @@ function assetMonitoringViewHTML(a) {
       // (a down→up flip would otherwise leave the pill stale). depTestBtn sits
       // outside the wrapper — a probe never changes the dependency-test state.
       '<div class="detail-row"><span class="detail-label">Status</span>' +
-        '<span class="detail-value">' + probeBtn + '<span id="asset-status-pill-wrap">' + pill + overridePill + '</span>' + depTestBtn + '</span></div>' +
+        '<span class="detail-value">' + probeBtn + '<span id="asset-status-pill-wrap">' + pill + overridePill + '</span>' + overrideReset + depTestBtn + '</span></div>' +
       // Last hour intermittency bar — one cell per probe sample, colored
       // by the resolved monitor state at that point. Sits in a single
       // grid column (half the panel); the value cell is flex:1 so the bar
