@@ -412,6 +412,14 @@ interface UsageInputs {
   classRows: CredRow[];
   /** integrationId → default monitorCredentialId (or null) */
   intDefaultCred: Map<string, string | null>;
+  /**
+   * integrationId → every credential id referenced anywhere in its config
+   * (monitorCredentialId, sshCredentialId, per-class snmp/ssh credential ids).
+   * Discovery stamps one of these onto each discovered asset's
+   * `monitorCredentialId`, so an asset default that matches a member of this
+   * set was inherited from the integration, not set per-asset.
+   */
+  intCredSets: Map<string, Set<string>>;
   intName: Map<string, string>;
 }
 
@@ -444,14 +452,35 @@ async function loadUsageInputs(): Promise<UsageInputs> {
     classByKey.set(`${(ov.integrationId as string | null) ?? ""}|${ov.assetType as string}`, ov);
   }
   const intDefaultCred = new Map<string, string | null>();
+  const intCredSets = new Map<string, Set<string>>();
   const intName = new Map<string, string>();
   for (const it of integrations) {
     const cfg = it.config && typeof it.config === "object" ? (it.config as Record<string, unknown>) : {};
     const credId = typeof cfg.monitorCredentialId === "string" ? cfg.monitorCredentialId : null;
     intDefaultCred.set(it.id, credId);
+    const set = new Set<string>();
+    collectCredentialIds(cfg, set);
+    intCredSets.set(it.id, set);
     intName.set(it.id, it.name);
   }
-  return { assets, classByKey, classRows, intDefaultCred, intName };
+  return { assets, classByKey, classRows, intDefaultCred, intCredSets, intName };
+}
+
+/**
+ * Recursively collect every credential-id string in an integration config —
+ * any key ending in "CredentialId" (monitorCredentialId, sshCredentialId,
+ * snmpCredentialId, …) at any nesting depth (top-level + per-class blocks).
+ */
+function collectCredentialIds(value: unknown, into: Set<string>): void {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const v of value) collectCredentialIds(v, into);
+    return;
+  }
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === "string" && v && /CredentialId$/.test(k)) into.add(v);
+    else if (v && typeof v === "object") collectCredentialIds(v, into);
+  }
 }
 
 function classKeyForAsset(a: CredRow): string {
@@ -523,21 +552,48 @@ export async function getCredentialUsage(id: string): Promise<CredentialUsage> {
   const classGroups = new Map<string, CredentialUsageClassGroup>();
   const intGroups = new Map<string, CredentialUsageIntegrationGroup>();
 
+  const pushIntGroup = (intId: string, a: CredRow, streams: string[]) => {
+    let g = intGroups.get(intId);
+    if (!g) {
+      g = { integrationId: intId, integrationName: inputs.intName.get(intId) ?? intId, assets: [] };
+      intGroups.set(intId, g);
+    }
+    g.assets.push(toUsageAsset(a, streams));
+  };
+
   for (const a of inputs.assets) {
     const classOv = inputs.classByKey.get(classKeyForAsset(a)) ?? null;
     const assetDefault = a.monitorCredentialId as string | null;
+    const intId = a.discoveredByIntegrationId as string | null;
 
-    // ── Asset level: the credential is wired directly on the asset ──────────
+    // Discovery stamps the integration's credential onto the asset's default
+    // `monitorCredentialId`. So a default that matches a credential the asset's
+    // integration provides was inherited from the integration — not a per-asset
+    // choice. Treat it as integration level. Only a default pointing at a
+    // credential the integration doesn't provide (or a manual asset) is a
+    // genuine asset-level override. The per-stream slots are never stamped, so
+    // a per-stream match is always an explicit operator override.
+    const defaultInheritedFromIntegration =
+      assetDefault === id && intId != null && (inputs.intCredSets.get(intId)?.has(id) ?? false);
+
+    // ── Asset level: a genuine per-asset override ───────────────────────────
     const assetStreams: string[] = [];
-    if (assetDefault === id) assetStreams.push("Default");
     for (const s of CREDENTIAL_STREAMS) if ((a[s.field] as string | null) === id) assetStreams.push(s.label);
+    if (assetDefault === id && !defaultInheritedFromIntegration) assetStreams.push("Default");
     if (assetStreams.length > 0) {
       assetLevel.push(toUsageAsset(a, assetStreams));
       continue; // most-specific bucket wins
     }
 
-    // The class/integration tiers only apply when the asset has no default
-    // credential of its own (asset default outranks both).
+    // ── Integration level (stamped default): the asset's default credential
+    //    was inherited from its discovering integration ──────────────────────
+    if (defaultInheritedFromIntegration) {
+      pushIntGroup(intId as string, a, ["Default"]);
+      continue;
+    }
+
+    // The class/integration fall-through tiers only apply when the asset has no
+    // default credential of its own (asset default outranks both).
     if (assetDefault != null) continue;
 
     // ── Class level ─────────────────────────────────────────────────────────
@@ -567,21 +623,13 @@ export async function getCredentialUsage(id: string): Promise<CredentialUsage> {
       }
     }
 
-    // ── Integration level: some stream falls all the way through ────────────
-    const intCredId = intDefaultForAsset(a, inputs);
-    if (intCredId === id) {
+    // ── Integration level: no asset default, some stream falls all the way
+    //    through to the integration's default monitor credential ─────────────
+    if (intId != null && intDefaultForAsset(a, inputs) === id) {
       const fallsThrough = CREDENTIAL_STREAMS.some(
         (s) => (a[s.field] as string | null) == null && (classOv ? (classOv[s.field] as string | null) : null) == null,
       );
-      if (fallsThrough) {
-        const intId = a.discoveredByIntegrationId as string;
-        let g = intGroups.get(intId);
-        if (!g) {
-          g = { integrationId: intId, integrationName: inputs.intName.get(intId) ?? intId, assets: [] };
-          intGroups.set(intId, g);
-        }
-        g.assets.push(toUsageAsset(a, ["Default"]));
-      }
+      if (fallsThrough) pushIntGroup(intId, a, ["Default"]);
     }
   }
 
@@ -591,7 +639,7 @@ export async function getCredentialUsage(id: string): Promise<CredentialUsage> {
     if (CREDENTIAL_STREAMS.some((s) => (ov[s.field] as string | null) === id)) classRefCount += 1;
   }
   let integrationRefCount = 0;
-  for (const credId of inputs.intDefaultCred.values()) if (credId === id) integrationRefCount += 1;
+  for (const set of inputs.intCredSets.values()) if (set.has(id)) integrationRefCount += 1;
 
   assetLevel.sort(byHostname);
   const classLevel = [...classGroups.values()].sort(
