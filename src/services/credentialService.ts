@@ -353,6 +353,11 @@ export async function updateCredential(id: string, input: UpdateCredentialInput)
  * MonitorClassOverride. Storage has no slot of its own (it rides the
  * `interfaces` credential), so it isn't listed here.
  */
+// Badge shown when a credential is wired in the asset's default slot
+// (`monitorCredentialId`) rather than a specific stream — it's the fallback
+// used for every monitoring stream without its own per-stream override.
+const DEFAULT_STREAM_LABEL = "All Polling Methods";
+
 const CREDENTIAL_STREAMS = [
   { field: "responseTimeCredentialId", label: "Response time" },
   { field: "cpuMemoryCredentialId",    label: "CPU / memory" },
@@ -579,7 +584,7 @@ export async function getCredentialUsage(id: string): Promise<CredentialUsage> {
     // ── Asset level: a genuine per-asset override ───────────────────────────
     const assetStreams: string[] = [];
     for (const s of CREDENTIAL_STREAMS) if ((a[s.field] as string | null) === id) assetStreams.push(s.label);
-    if (assetDefault === id && !defaultInheritedFromIntegration) assetStreams.push("Default");
+    if (assetDefault === id && !defaultInheritedFromIntegration) assetStreams.push(DEFAULT_STREAM_LABEL);
     if (assetStreams.length > 0) {
       assetLevel.push(toUsageAsset(a, assetStreams));
       continue; // most-specific bucket wins
@@ -588,7 +593,7 @@ export async function getCredentialUsage(id: string): Promise<CredentialUsage> {
     // ── Integration level (stamped default): the asset's default credential
     //    was inherited from its discovering integration ──────────────────────
     if (defaultInheritedFromIntegration) {
-      pushIntGroup(intId as string, a, ["Default"]);
+      pushIntGroup(intId as string, a, [DEFAULT_STREAM_LABEL]);
       continue;
     }
 
@@ -629,7 +634,7 @@ export async function getCredentialUsage(id: string): Promise<CredentialUsage> {
       const fallsThrough = CREDENTIAL_STREAMS.some(
         (s) => (a[s.field] as string | null) == null && (classOv ? (classOv[s.field] as string | null) : null) == null,
       );
-      if (fallsThrough) pushIntGroup(intId, a, ["Default"]);
+      if (fallsThrough) pushIntGroup(intId, a, [DEFAULT_STREAM_LABEL]);
     }
   }
 

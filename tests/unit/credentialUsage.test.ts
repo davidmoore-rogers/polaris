@@ -112,9 +112,9 @@ describe("getCredentialUsage", () => {
     const u = await getCredentialUsage(CRED_A);
     const a1 = u.assetLevel.find((a) => a.assetId === "a1");
     expect(a1?.streams).toEqual(["Response time"]);
-    // A2's default lands as a "Default" badge at asset level
+    // A2's default lands as an "All Polling Methods" badge at asset level
     const a2 = u.assetLevel.find((a) => a.assetId === "a2");
-    expect(a2?.streams).toContain("Default");
+    expect(a2?.streams).toContain("All Polling Methods");
     // A3 inherits CRED_A via the manual class override -> class level, not asset
     expect(u.assetLevel.some((a) => a.assetId === "a3")).toBe(false);
     const manualClass = u.classLevel.find((g) => g.assetType === "switch");
@@ -154,7 +154,7 @@ describe("getCredentialUsage", () => {
     expect(a4Asset).toBeUndefined();
     const a4Int = u.integrationLevel[0].assets.find((a) => a.assetId === "a4");
     expect(a4Int).toBeDefined();
-    expect(a4Int?.streams).toEqual(["Default"]);
+    expect(a4Int?.streams).toEqual(["All Polling Methods"]);
   });
 
   it("reports config references even when no assets resolve to the credential", async () => {
