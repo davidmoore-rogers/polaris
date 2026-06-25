@@ -987,6 +987,44 @@ function volumeFamilyKey(v: VolumeStat): string {
   return `disk:${v.paths[0] ?? "unknown"}`;
 }
 
+// Dead-tuple ratio at which a sample table is considered bloated enough to
+// warrant attention — shared by the amber `autovacuum_lag` rule and the
+// critical `autovacuum_stale` rule (the latter additionally requires the
+// table to have gone >7d without an autovacuum). Single source so the two
+// rules stay in lockstep.
+export const AUTOVACUUM_BLOAT_DEAD_TUP_RATIO = 0.2;
+
+/**
+ * Is a sample table genuinely suffering stale autovacuum — i.e. a real,
+ * Critical-worthy problem rather than a quiet idle table?
+ *
+ * A table qualifies only when ALL of:
+ *   - it is NOT a TimescaleDB hypertable (those are append-only/immutable
+ *     once compressed and legitimately never autovacuum — exempted so they
+ *     don't trip this red rule permanently),
+ *   - it is populated (`rows > 1000`),
+ *   - it is actually bloated (`deadTupRatio > AUTOVACUUM_BLOAT_DEAD_TUP_RATIO`),
+ *     AND
+ *   - it has a recorded autovacuum that ran more than 7 days ago.
+ *
+ * The dead-tuple gate is the fix for the false-positive this rule produced on
+ * small / low-churn installs (few monitored assets, no TimescaleDB): a plain
+ * rollup table with negligible dead tuples doesn't *need* a vacuum, so
+ * PostgreSQL correctly declines to run one — that is not a problem and must
+ * not surface as Critical. Bloat-present + stale-7d together are the real
+ * "autovacuum is wedged and bloat is climbing unbounded" signal.
+ */
+export function isStaleVacuumTable(
+  t: CapacitySampleTable,
+  isHypertable: boolean,
+  nowMs: number = Date.now(),
+): boolean {
+  if (isHypertable) return false;
+  if (!t.lastAutovacuum || t.rows <= 1000) return false;
+  if (t.deadTupRatio <= AUTOVACUUM_BLOAT_DEAD_TUP_RATIO) return false;
+  return nowMs - new Date(t.lastAutovacuum).getTime() > 7 * 86400 * 1000;
+}
+
 // Message wording convention across all reasons:
 //
 //   `<Subject> <state> (<metric context>). <Action>.`
@@ -1076,20 +1114,18 @@ function computeReasons(
     });
   }
 
-  // Stale autovacuum on a populated sample table — bloat will keep growing.
-  // Collapsed into a single reason listing every affected table so an install
-  // with several bloated sample tables doesn't render the same advice 3-5
-  // times stacked vertically. TimescaleDB hypertables are exempted: their
-  // chunks are append-only and become immutable once the compression policy
-  // runs (default: 7 days), so the parent table legitimately won't autovacuum
-  // and would trip this red rule permanently. The amber `autovacuum_lag`
-  // rule (dead-tup ratio) below is the real signal for those tables.
+  // Stale autovacuum on a populated, BLOATED sample table — bloat will keep
+  // growing. Collapsed into a single reason listing every affected table so an
+  // install with several bloated sample tables doesn't render the same advice
+  // 3-5 times stacked vertically. The qualifying conditions (hypertable
+  // exemption + populated + bloated + >7d stale) live in `isStaleVacuumTable`;
+  // the dead-tuple gate is what keeps a low-churn non-Timescale install from
+  // tripping this red rule on a rollup table that simply has nothing worth
+  // vacuuming.
   const tsHypertables = new Set(snap.database.timescale?.hypertableTables ?? []);
-  const staleTables = snap.database.sampleTables.filter((t) => {
-    if (tsHypertables.has(t.name)) return false;
-    if (!t.lastAutovacuum || t.rows <= 1000) return false;
-    return Date.now() - new Date(t.lastAutovacuum).getTime() > 7 * 86400 * 1000;
-  });
+  const staleTables = snap.database.sampleTables.filter((t) =>
+    isStaleVacuumTable(t, tsHypertables.has(t.name)),
+  );
   if (staleTables.length > 0) {
     const names = staleTables.map((t) => t.name).join(", ");
     reasons.push({
@@ -1119,7 +1155,7 @@ function computeReasons(
   // dead-tuple percentage — multiple bloated sample tables would otherwise
   // each push their own near-identical warning row.
   const laggingTables = snap.database.sampleTables.filter(
-    (t) => t.rows > 1000 && t.deadTupRatio > 0.20,
+    (t) => t.rows > 1000 && t.deadTupRatio > AUTOVACUUM_BLOAT_DEAD_TUP_RATIO,
   );
   if (laggingTables.length > 0) {
     const list = laggingTables

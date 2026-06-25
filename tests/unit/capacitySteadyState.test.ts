@@ -19,7 +19,12 @@ vi.mock("../../src/db.js", () => ({
   getDirectStatsPool: () => null,
 }));
 
-import { projectSteadyStateSize, projectDetailBytes } from "../../src/services/capacityService.js";
+import {
+  projectSteadyStateSize,
+  projectDetailBytes,
+  isStaleVacuumTable,
+  AUTOVACUUM_BLOAT_DEAD_TUP_RATIO,
+} from "../../src/services/capacityService.js";
 import { defaultSampleRetention } from "../../src/services/sampleRetentionService.js";
 
 const monitor = {
@@ -130,5 +135,46 @@ describe("projectSteadyStateSize — measured detail daily rate", () => {
     // interface rowsPerAssetPerDay = (86400/600)*20 = 2880; selection-aware cap = 1 day; 395 B/row.
     const fallback = 2000 * 2880 * 1 * 395;
     expect(projected).toBe(base + fallback);
+  });
+});
+
+describe("isStaleVacuumTable — Critical autovacuum_stale gating", () => {
+  const NOW = Date.parse("2026-06-25T12:00:00Z");
+  const EIGHT_DAYS_AGO = new Date(NOW - 8 * 86400 * 1000).toISOString();
+  const ONE_DAY_AGO = new Date(NOW - 1 * 86400 * 1000).toISOString();
+  const BLOATED = AUTOVACUUM_BLOAT_DEAD_TUP_RATIO + 0.05;
+
+  const table = (over: Partial<any> = {}) => ({
+    name: "asset_interface_samples_daily",
+    rows: 5000,
+    bytes: 5_000_000,
+    avgBytesPerRow: 300,
+    deadTupRatio: BLOATED,
+    lastAutovacuum: EIGHT_DAYS_AGO,
+    ...over,
+  });
+
+  it("fires when a populated plain table is bloated AND >7d stale", () => {
+    expect(isStaleVacuumTable(table(), false, NOW)).toBe(true);
+  });
+
+  it("does NOT fire on a low-churn table with negligible dead tuples (the small-instance false positive)", () => {
+    // The reported case: asset_interface_samples_daily on a 6-asset, non-Timescale
+    // install — vacuumed once long ago, almost no dead tuples since.
+    expect(isStaleVacuumTable(table({ deadTupRatio: 0 }), false, NOW)).toBe(false);
+    expect(isStaleVacuumTable(table({ deadTupRatio: 0.05 }), false, NOW)).toBe(false);
+  });
+
+  it("does NOT fire when bloated but recently autovacuumed (that is amber lag, not critical)", () => {
+    expect(isStaleVacuumTable(table({ lastAutovacuum: ONE_DAY_AGO }), false, NOW)).toBe(false);
+  });
+
+  it("exempts TimescaleDB hypertables regardless of staleness/bloat", () => {
+    expect(isStaleVacuumTable(table(), true, NOW)).toBe(false);
+  });
+
+  it("does NOT fire when never autovacuumed (null) or barely populated", () => {
+    expect(isStaleVacuumTable(table({ lastAutovacuum: null }), false, NOW)).toBe(false);
+    expect(isStaleVacuumTable(table({ rows: 1000 }), false, NOW)).toBe(false);
   });
 });
