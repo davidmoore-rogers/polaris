@@ -648,10 +648,10 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 **Writers** (files that mutate or emit this state):
 - `src/services/reservationPushService.ts:classifyPushError` — Single source of truth for permanent (400/404/409, 502 with "verify mismatch" / "not visible on read-back" / "Authentication failed") vs transient (everything else — defaults to retry-eligible). Used by both create-time and retry-tick paths.
-- `src/services/reservationPushService.ts:pushReservation`/`updatePushedReservation`/`unpushReservation` — buildTransportForIntegration() + create / update / delete + read-back verify on FortiOS.
+- `src/services/reservationPushService.ts:pushReservation`/`updatePushedReservation`/`unpushReservation` — buildTransportForIntegration() + create / update / delete + read-back verify on FortiOS. `unpushReservation` accepts pinned scopeId/entryId OR resolves them (scope-by-CIDR, entry-by-IP) when null — the discovered-row delete path.
 - `src/services/reservationService.ts:createReservation` push branch — Pre-flight: when the firewall Asset is monitored AND `monitorStatus="down"`, skip the transport attempt entirely and queue with `pushStatus="pending"`/`pushQueuedAt=now`/`pushAttempts=0`. On transport attempt: success → stamp `sourceType="dhcp_reservation"`/`pushStatus="synced"`/push pointers + clear queue cols. Transient failure → keep row, stamp `pushStatus="pending"`/`pushQueuedAt`/`pushAttempts=1`/`pushLastAttemptAt`. Permanent failure → existing rollback.
 - `src/services/reservationService.ts:updateReservation` — When `pushStatus="pending"`, skip `updatePushedReservation` entirely; just rewrite the queued payload (MAC, hostname, notes, ...). Retry tick picks up the new values on its next attempt.
-- `src/services/reservationService.ts:releaseReservation` — When `pushStatus="pending"`, skip `unpushReservation` AND `releaseDhcpLease`; clear queue cols + flip to `released`; emit `reservation.push.queued.released` instead of the `reservation.unpush.failed` warning the old path would have logged.
+- `src/services/reservationService.ts:releaseReservation` — When `pushStatus="pending"`, skip `unpushReservation` AND `releaseDhcpLease`; clear queue cols + flip to `released`; emit `reservation.push.queued.released` instead of the `reservation.unpush.failed` warning the old path would have logged. For non-pending dhcp_reservation rows it unpushes (Polaris-pushed: by pinned ids, always; discovered: resolve-by-CIDR/IP, only when pushReservations=true) AND drops the IP's lease via `releaseDhcpLease` — both best-effort, logging `reservation.unpush.*` / `reservation.lease_release.*`.
 - `src/services/reservationService.ts:retryPendingReservations` — 60s retry-tick entry. Eligibility re-check (subnet drift, integration deleted/disabled, pushReservations flipped off, no fortigateDevice) → `pushStatus=null` + emit `reservation.push.queued.cancelled`. Discovery-supersede check (another active row at same IP) → `pushStatus="failed_permanent"` + emit `reservation.push.queued.collided`. Readiness gates (monitored gate must be `monitorStatus="up"`; unmonitored uses exponential backoff `min(60 * 2^(attempts-1), 1800)`s) → skip without attempt increment. Otherwise increment attempts, push, classify, stamp synced / failed_permanent / leave pending. Emits `reservation.push.queued.{succeeded,retry_failed,failed_permanent}` per outcome.
 - `src/services/reservationService.ts:retryReservationNow` — Operator-triggered single-row retry from the IP panel "Retry" button + Events page push-queue panel. Bypasses readiness gates; bumps `failed_permanent` rows back to `pending` first. Emits `reservation.push.queued.retry_manual`.
 - `src/services/reservationService.ts:triggerRetryAfterStatusChange` — Called from `monitoringService.recordProbeResult` when a firewall asset transitions to `up`. Count-gated (zero-pending = early return) so most up-transitions cost one indexed COUNT(*).
@@ -678,9 +678,10 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 **Invariants:**
 - DHCP reservations are MAC→IP pairs; only per-IP (not full-subnet) manual reservations are push-eligible.
-- pushedScopeId + pushedEntryId are resolved AT PUSH TIME and pinned; used at unpush without re-querying the FortiGate.
+- pushedScopeId + pushedEntryId are resolved AT PUSH TIME and pinned for Polaris-pushed rows; used at unpush without re-querying the FortiGate. DISCOVERED (never-pushed) dhcp_reservation rows carry no pointers — on release `unpushReservation` resolves scope-by-CIDR + entry-by-IP at release time (same pattern as `updatePushedReservation`'s discovered path).
 - sourceType flip to "dhcp_reservation" is ONLY set on successful push. While `pushStatus="pending"` the row stays `sourceType="manual"` because nothing's on the device yet.
-- Lease release happens ONLY for dhcp_lease sourceType rows where the originating integration's pushReservations=true AND the row is not pending (queued rows have no device-side state to release).
+- On release of a dhcp_reservation, the device-side entry is deleted (unpush) AND any active lease for the IP is dropped (releaseDhcpLease). Polaris-pushed rows unpush regardless of the current pushReservations toggle (cleanup); DISCOVERED rows unpush+lease-release only when pushReservations=true (read-only-discovery installs leave device config alone). Both are best-effort + skipped entirely for pending rows.
+- Lease release for a discovered dhcp_lease sourceType row happens ONLY where the originating integration's pushReservations=true AND the row is not pending (queued rows have no device-side state to release).
 - pushStatus ∈ {"synced", "drift", "pending", "failed_permanent"}; "synced" = verified on device, "pending" = queued for retry, "failed_permanent" = terminal error (operator must release or retry-now after fixing the root cause), "drift" is reserved by the schema but is no longer the path for "missing on re-discovery" — Phase 5b now RELEASES rather than drift-flags such rows.
 - Queue cols (`pushQueuedAt`, `pushAttempts`, `pushLastAttemptAt`, `pushError`) are reset to defaults on every successful push (synced) and on every release.
 - Retry tick is idempotent: re-runs cancel rows where eligibility dropped, skip rows where readiness gates aren't met, and only push rows where every gate clears.
@@ -701,6 +702,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - Lease-release cadence: toggle pushReservations off mid-deployment, release a dhcp_lease row; confirm unpush is skipped but the Polaris row is freed.
 - Verify read-back verify: FortiGate DHCP create succeeds but the verify read fails (transient device timeout); confirm `classifyPushError` returns "permanent" for the verify-mismatch wording and the row rolls back (NOT queued).
 - Test gate-deleted-on-device release: push a manual reservation (sourceType flips to dhcp_reservation on first discovery), then delete the reserved-address entry on the FortiGate, then re-run discovery. Confirm Phase 5b releases the Polaris row, clears the push pointers, and emits `reservation.dhcp_reservation.released`.
+- Test discovered-reservation release: with pushReservations=true, release a dhcp_reservation that Polaris discovered (no pushedScopeId/pushedEntryId). Confirm unpushReservation resolves scope-by-CIDR + entry-by-IP and DELETEs the device entry, the IP's lease is dropped via releaseDhcpLease, and `reservation.unpush.succeeded` + `reservation.lease_release.succeeded` fire. With pushReservations=false, confirm the device is left untouched (local release only).
 
 ---
 
@@ -2856,7 +2858,7 @@ Listed alphabetically.
 
 **Cross-service deps:** fortigateService (fgRequest), fortimanagerService (fmgProxyRest, resolveDeviceMgmtIpViaFmg).
 
-**Used by:** src/services/reservationService.ts (pushReservation on create, unpushReservation on release, releaseDhcpLease on dhcp_lease release); src/services/subnetRefreshService.ts (read-only per-subnet refresh consumes the transport helpers).
+**Used by:** src/services/reservationService.ts (pushReservation on create, unpushReservation on dhcp_reservation release, releaseDhcpLease on both dhcp_reservation and dhcp_lease release); src/services/subnetRefreshService.ts (read-only per-subnet refresh consumes the transport helpers).
 
 **Invariants:**
 - MAC address must be 48-bit (normalized to xx:xx:xx:xx:xx:xx)
@@ -2897,6 +2899,7 @@ Listed alphabetically.
 - Released reservations clear pushedTo* fields and drop historical released rows (unique constraint relief)
 - `expireStaleReservations` applies the SAME unique-constraint relief for `expired`: inside one `$transaction` it first DELETEs (set-based `DELETE…USING` self-join) any stale `expired` row sharing (subnetId, ipAddress) with an active row about to expire, THEN runs the active→expired `updateMany`. Without the pre-delete a reserve→expire→re-reserve→expire cycle leaves a colliding `expired` row, and since the flip is one bulk updateMany a single P2002 aborts the whole batch (job fails every 15 min, nothing expires). NULL ipAddress (full-subnet) never collides (NULL distinct) and is excluded by the `=` join.
 - Discovered dhcp_lease release attempts bestEffort via releaseDhcpLease (failure does not block Polaris release)
+- Releasing a dhcp_reservation (non-pending) deletes the device-side reserved-address (unpushReservation — pinned ids for Polaris-pushed, resolve-by-CIDR/IP for discovered when pushReservations=true) AND drops the IP's active lease (releaseDhcpLease). Both best-effort; neither blocks the Polaris release.
 
 **When changing this:**
 - Test createReservation's push eligibility detection and MAC validation order

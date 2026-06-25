@@ -685,12 +685,36 @@ export async function releaseReservation(id: string, actor?: string) {
   // unreachable FortiGate doesn't block the operator from releasing — but
   // we surface the failure as a `reservation.unpush.failed` Event so the
   // orphan is auditable.
-  if (
-    !isQueued &&
+  //
+  // A dhcp_reservation entry exists on the device in one of two ways:
+  //   1. Polaris pushed it — pushedTo + pushedScopeId + pushedEntryId pinned;
+  //      unpush deletes it by those ids (fires regardless of the current
+  //      toggle, to clean up what Polaris created).
+  //   2. Discovery learned it from the gate — sourceType "dhcp_reservation"
+  //      with no push pointers. Releasing it should delete it on the device
+  //      too, else the next discovery pass just re-creates the Polaris row.
+  //      Gated on the integration's pushReservations (DHCP writeback) toggle
+  //      so read-only-discovery installs never mutate device config; the scope
+  //      is resolved by CIDR and the entry by IP inside unpushReservation.
+  const integrationConfig =
+    (reservation.subnet.integration?.config as { pushReservations?: boolean } | null) || null;
+  const writebackEnabled = integrationConfig?.pushReservations === true;
+
+  const pinnedUnpush = !!(
     reservation.pushedTo &&
     reservation.pushedScopeId !== null &&
     reservation.pushedEntryId !== null
-  ) {
+  );
+  const discoveredUnpush =
+    !pinnedUnpush &&
+    reservation.sourceType === "dhcp_reservation" &&
+    !!reservation.ipAddress &&
+    !!reservation.subnet.integration &&
+    !!reservation.subnet.fortigateDevice &&
+    writebackEnabled;
+
+  if (!isQueued && (pinnedUnpush || discoveredUnpush)) {
+    const integration = (pinnedUnpush ? reservation.pushedTo : reservation.subnet.integration)!;
     const deviceName = reservation.subnet.fortigateDevice || "";
     if (deviceName) {
       try {
@@ -698,7 +722,9 @@ export async function releaseReservation(id: string, actor?: string) {
           reservationId: id,
           scopeId: reservation.pushedScopeId,
           entryId: reservation.pushedEntryId,
-          integration: reservation.pushedTo,
+          subnetCidr: reservation.subnet.cidr,
+          ip: reservation.ipAddress || undefined,
+          integration,
           deviceName,
         });
         void logEvent({
@@ -708,12 +734,13 @@ export async function releaseReservation(id: string, actor?: string) {
           resourceId: id,
           resourceName: reservation.hostname || reservation.ipAddress || undefined,
           message: result.alreadyAbsent
-            ? `Reservation unpush — entry was already absent on FortiGate "${deviceName}" (scope ${reservation.pushedScopeId}, entry ${reservation.pushedEntryId})`
-            : `Reservation unpushed from FortiGate "${deviceName}" (scope ${reservation.pushedScopeId}, entry ${reservation.pushedEntryId})`,
+            ? `Reservation unpush — entry was already absent on FortiGate "${deviceName}"`
+            : `Reservation unpushed from FortiGate "${deviceName}"${discoveredUnpush ? " (discovered reservation)" : ` (scope ${reservation.pushedScopeId}, entry ${reservation.pushedEntryId})`}`,
           details: {
             deviceName,
             scopeId: reservation.pushedScopeId,
             entryId: reservation.pushedEntryId,
+            discovered: discoveredUnpush,
             alreadyAbsent: result.alreadyAbsent,
           },
         });
@@ -729,9 +756,46 @@ export async function releaseReservation(id: string, actor?: string) {
             deviceName,
             scopeId: reservation.pushedScopeId,
             entryId: reservation.pushedEntryId,
+            discovered: discoveredUnpush,
             error: err?.message || String(err),
           },
         });
+      }
+
+      // Deleting the reserved-address only unbinds the MAC→IP reservation; a
+      // client currently holding the IP keeps its lease until expiry. Drop it
+      // too via the monitor `release-lease` endpoint so the address is fully
+      // freed on the device. Independent best-effort step — a lease-release
+      // failure doesn't undo the unpush or block the Polaris release.
+      if (reservation.ipAddress) {
+        const ip = reservation.ipAddress;
+        try {
+          await releaseDhcpLease({ integration, deviceName, ip });
+          void logEvent({
+            action: "reservation.lease_release.succeeded",
+            level: "info",
+            resourceType: "reservation",
+            resourceId: id,
+            resourceName: reservation.hostname || ip,
+            message: `DHCP lease for ${ip} released on FortiGate "${deviceName}"`,
+            details: { deviceName, ip, integrationId: integration.id },
+          });
+        } catch (err: any) {
+          void logEvent({
+            action: "reservation.lease_release.failed",
+            level: "warning",
+            resourceType: "reservation",
+            resourceId: id,
+            resourceName: reservation.hostname || ip,
+            message: `DHCP lease release for ${ip} on FortiGate "${deviceName}" failed — reservation entry removed but the device may still hold the lease: ${err?.message || "Unknown error"}`,
+            details: {
+              deviceName,
+              ip,
+              integrationId: integration.id,
+              error: err?.message || String(err),
+            },
+          });
+        }
       }
     }
   }
@@ -745,8 +809,6 @@ export async function releaseReservation(id: string, actor?: string) {
   // block the Polaris release — the operator's intent has been recorded and
   // the next discovery pass will rediscover the lease if FortiOS still
   // holds it.
-  const integrationConfig =
-    (reservation.subnet.integration?.config as { pushReservations?: boolean } | null) || null;
   if (
     !isQueued &&
     reservation.sourceType === "dhcp_lease" &&
