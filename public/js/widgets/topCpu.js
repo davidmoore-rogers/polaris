@@ -44,10 +44,8 @@
     },
 
     renderConfig: function (el, config, onChange) {
-      PolarisTopN.renderConfig(el, config, onChange, {
-        thresholdLabel: "Hide below %",
-        thresholdOptions: [{ value: "", label: "Show all" }, { value: 50, label: "50%" }, { value: 75, label: "75%" }, { value: 90, label: "90%" }],
-      });
+      // No "Hide below" control: the list always shows every red row (≥90%) and
+      // pads to a 20-row floor with the next-highest (see _topnBar fillTo).
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });

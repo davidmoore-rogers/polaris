@@ -45,10 +45,8 @@
     },
 
     renderConfig: function (el, config, onChange) {
-      PolarisTopN.renderConfig(el, config, onChange, {
-        thresholdLabel: "Hide below (ms)",
-        thresholdOptions: [{ value: "", label: "Show all" }, { value: 75, label: "75 ms" }, { value: 200, label: "200 ms" }, { value: 500, label: "500 ms" }],
-      });
+      // No "Hide below" control: the list always shows every red row (≥500 ms)
+      // and pads to a 20-row floor with the next-highest (see _topnBar fillTo).
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });

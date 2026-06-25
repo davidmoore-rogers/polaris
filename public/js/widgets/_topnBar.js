@@ -29,23 +29,32 @@
    * rows     — [{ id, hostname, ipAddress, value }]
    * opts     — { unit:"%"|"ms", thresholds, baseColor, emptyText, config, fillTo }
    *            config: { rowLimit, threshold }
-   *            fillTo: when set (e.g. 20), guarantee a floor of that many rows —
-   *            if the threshold filter leaves fewer, pad up to `fillTo` with the
-   *            next-highest below-threshold rows so the widget never looks empty.
-   *            When more rows pass the threshold than `fillTo`, all of them show
-   *            (height + auto-scroll governs). Omit to leave the threshold as a
-   *            hard filter (e.g. Packet Loss, where padding 0%-loss rows misleads).
+   *            fillTo: when set (e.g. 20), the row set is "every RED row, but
+   *            always at least `fillTo`". Red = at/above the top color threshold
+   *            (thresholds[0].over). So: redCount ≥ fillTo → show all red (e.g.
+   *            27 red → 27 rows); redCount < fillTo → show the red rows + the
+   *            next-highest to reach `fillTo` (e.g. 10 red → those 10 + 10 more
+   *            = 20). The gear "Hide below" threshold does NOT apply when fillTo
+   *            is set (the red-tier + floor supersedes it). Omit fillTo to leave
+   *            the threshold as a hard filter (e.g. Packet Loss).
    */
   function renderRows(el, rows, opts) {
     opts = opts || {};
     var cfg = opts.config || {};
     var sorted = (rows || []).slice().sort(function (a, b) { return (b.value || 0) - (a.value || 0); });
-    var shown = sorted;
-    if (cfg.threshold != null) {
-      var passing = sorted.filter(function (r) { return (r.value || 0) >= cfg.threshold; });
-      // fillTo: pad up to the floor with the next-highest rows (sorted is desc,
-      // so the top `fillTo` already = all passing + the next-highest below it).
-      shown = (opts.fillTo && passing.length < opts.fillTo) ? sorted.slice(0, opts.fillTo) : passing;
+    var shown;
+    if (opts.fillTo) {
+      // sorted is desc, so the red rows (≥ the top color threshold) are the
+      // contiguous head — count them, then take max(fillTo, redCount) from the
+      // top: all red when red ≥ fillTo, else red + next-highest up to fillTo.
+      var redOver = (opts.thresholds && opts.thresholds.length) ? opts.thresholds[0].over : Infinity;
+      var redCount = 0;
+      while (redCount < sorted.length && (sorted[redCount].value || 0) >= redOver) redCount++;
+      shown = sorted.slice(0, Math.max(opts.fillTo, redCount));
+    } else if (cfg.threshold != null) {
+      shown = sorted.filter(function (r) { return (r.value || 0) >= cfg.threshold; });
+    } else {
+      shown = sorted;
     }
     // No upper row cap — the widget's fixed height (1×/2×/3×) plus auto-scroll
     // governs how much is visible; all qualifying rows are rendered.
