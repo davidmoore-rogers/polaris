@@ -73,12 +73,15 @@
       var pct = Math.min(100, Math.round((v / scaleMax) * 100));
       var color = pickColor(v, opts.thresholds, opts.baseColor);
       var name = escapeHtml(r.hostname || r.ipAddress || "(unnamed)");
+      // Optional secondary label (e.g. the mount path for Highest Disk Usage),
+      // shown muted after the hostname in the same cell.
+      var detail = r.detail ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">' + escapeHtml(r.detail) + '</span>' : "";
       var label = formatValue(v, opts.unit);
       var tag = r.id ? "a" : "div";
       var nav = r.id ? ' href="/assets.html#view=asset:' + encodeURIComponent(r.id) + '"' : "";
       return "<" + tag + ' class="recent-item' + (r.id ? " recent-item-link" : "") + '"' + nav +
         ' style="display:grid;grid-template-columns:1fr 90px 48px;align-items:center;gap:8px;text-decoration:none">' +
-        '<span class="recent-item-title" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + name + '</span>' +
+        '<span class="recent-item-title" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + name + detail + '</span>' +
         '<div class="util-bar-track"><div class="util-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>' +
         '<span style="font-size:0.82rem;text-align:right;color:var(--color-text-secondary)">' + label + '</span>' +
       "</" + tag + ">";

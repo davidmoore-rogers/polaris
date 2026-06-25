@@ -168,7 +168,7 @@ export async function getDownNodes(limit = 100, assetIds: string[] | null = null
   return { nodes, total: nodes.length };
 }
 
-export interface TopNRow { id: string; hostname: string | null; ipAddress: string | null; value: number }
+export interface TopNRow { id: string; hostname: string | null; ipAddress: string | null; value: number; detail?: string }
 
 // Hydrate a list of assetIds (preserving the incoming order) with display
 // names in ONE findMany — never a per-row lookup.
@@ -278,6 +278,48 @@ export async function getSlowestResponse(limit = 100, assetIds: string[] | null 
   );
   const ordered = rows.map((r) => ({ assetId: r.assetId, value: Math.round(Number(r.avg_ms) * 10) / 10 }));
   return hydrateNames(ordered);
+}
+
+/**
+ * Feed 4b — highest disk usage, PER VOLUME (one row per (asset, mountPath) at
+ * its latest sample's used %). Ranks the fullest filesystems across the fleet
+ * so a NOC operator sees what's about to fill up. Each row's `detail` carries
+ * the mount path (the bar widget shows it beside the hostname). DISTINCT-ON
+ * latest-per-(asset,mount) over asset_storage_samples; the window is wide (48h
+ * default) because the full storage scrape rides the 24h "slow" cadence.
+ */
+export async function getHighestDiskUsage(limit = 100, assetIds: string[] | null = null, sinceMinutes = 2880): Promise<TopNRow[]> {
+  const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
+  const params: unknown[] = [String(sinceMinutes), limit];
+  if (assetIds) params.push(assetIds);
+  const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; mountPath: string; pct: number }>>(
+    `SELECT "assetId", "mountPath", pct FROM (
+       SELECT DISTINCT ON (s."assetId", s."mountPath")
+              s."assetId" AS "assetId", s."mountPath" AS "mountPath",
+              s."usedBytes"::float / s."totalBytes"::float * 100 AS pct
+       FROM "asset_storage_samples" s
+       WHERE s."timestamp" > now() - ($1 || ' minutes')::interval
+         AND s."usedBytes" IS NOT NULL AND s."totalBytes" IS NOT NULL AND s."totalBytes" > 0${idClause}
+       ORDER BY s."assetId", s."mountPath", s."timestamp" DESC
+     ) latest ORDER BY pct DESC LIMIT $2`,
+    ...params,
+  );
+  if (rows.length === 0) return [];
+  // Hydrate names in ONE findMany (an asset appears once per volume, so dedupe
+  // the id set for the lookup), then attach hostname + mount-path detail.
+  const ids = Array.from(new Set(rows.map((r) => r.assetId)));
+  const assets = await prisma.asset.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, hostname: true, ipAddress: true },
+  });
+  const byId = new Map(assets.map((a) => [a.id, a]));
+  return rows
+    .map((r): TopNRow | null => {
+      const a = byId.get(r.assetId);
+      if (!a) return null;
+      return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: Math.round(r.pct * 10) / 10, detail: r.mountPath };
+    })
+    .filter((r): r is TopNRow => r !== null);
 }
 
 /**

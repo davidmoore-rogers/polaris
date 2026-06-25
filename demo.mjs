@@ -2902,6 +2902,7 @@ let DEMO_DASHBOARD_LAYOUT = {
       { id: "d-alert",  type: "activeAlerts",     height: 1, config: {} },
       { id: "d-mem",    type: "topMemory",        height: 1, config: {} },
       { id: "d-loss",   type: "packetLoss",       height: 1, config: {} },
+      { id: "d-disk",   type: "diskUsage",        height: 1, config: {} },
     ] },
     { id: "c-map", width: 12, widgets: [
       { id: "d-map",    type: "siteMap",          height: 2, config: {} },
@@ -2937,6 +2938,11 @@ function demoNocSummary() {
     packetLoss: [
       { id: "a3", hostname: "rtr-wan-2", ipAddress: "10.9.0.1", value: 38 },
       { id: "a8", hostname: "branch-fw-22", ipAddress: "10.8.0.1", value: 6.5 },
+    ],
+    diskUsage: [
+      { id: "a4", hostname: "db-srv-04", ipAddress: "10.3.0.4", value: 96, detail: "/var" },
+      { id: "a4", hostname: "db-srv-04", ipAddress: "10.3.0.4", value: 78, detail: "/" },
+      { id: "a7", hostname: "app-srv-11", ipAddress: "10.3.0.11", value: 64, detail: "C:" },
     ],
     stalePolls: [
       { id: "a9", hostname: "old-switch-7", ipAddress: "10.2.0.7", lastPolledAt: _iso(28), expectedIntervalSec: 60 },
