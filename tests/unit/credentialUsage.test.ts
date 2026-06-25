@@ -69,17 +69,22 @@ function classOv(over: Record<string, unknown>): Record<string, unknown> {
 
 // A1: stream override CRED_A, inherits CRED_B (class cpuMemory), CRED_C (int default)
 const A1 = asset({ id: "a1", hostname: "fw1", discoveredByIntegrationId: INT1, responseTimeCredentialId: CRED_A });
-// A2: asset default CRED_A — outranks the class + integration tiers entirely
+// A2: asset default CRED_A — a genuine override (CRED_A is NOT the integration's
+// credential), so it outranks the class + integration tiers and is asset-level
 const A2 = asset({ id: "a2", hostname: "fw2", discoveredByIntegrationId: INT1, monitorCredentialId: CRED_A });
 // A3: manual asset (no integration), inherits CRED_A from the manual class override's lldp slot
 const A3 = asset({ id: "a3", hostname: "sw3", assetType: "switch", discoveredByIntegrationId: null });
+// A4: discovery STAMPED the integration's own credential (CRED_C) onto the asset
+// default. Even though it's an FK on the asset row, it was inherited from the
+// integration, so it must classify as integration-level, not asset-level.
+const A4 = asset({ id: "a4", hostname: "fw4", discoveredByIntegrationId: INT1, monitorCredentialId: CRED_C });
 
 const CLASS_FW_INT1 = classOv({ integrationId: INT1, assetType: "firewall", cpuMemoryCredentialId: CRED_B });
 const CLASS_SW_MANUAL = classOv({ integrationId: null, assetType: "switch", lldpCredentialId: CRED_A });
 const CLASS_ROUTER_REF = classOv({ integrationId: INT1, assetType: "router", cpuMemoryCredentialId: CRED_D }); // no matching asset
 const INTEGRATIONS = [{ id: INT1, name: "HQ FMG", config: { monitorCredentialId: CRED_C } }];
 
-function seed(assets = [A1, A2, A3], overrides = [CLASS_FW_INT1, CLASS_SW_MANUAL, CLASS_ROUTER_REF], integrations = INTEGRATIONS) {
+function seed(assets = [A1, A2, A3, A4], overrides = [CLASS_FW_INT1, CLASS_SW_MANUAL, CLASS_ROUTER_REF], integrations = INTEGRATIONS) {
   credFindUnique.mockImplementation((args: { where: { id: string } }) => Promise.resolve({ id: args.where.id }));
   assetFindMany.mockResolvedValue(assets);
   classFindMany.mockResolvedValue(overrides);
@@ -94,10 +99,10 @@ beforeEach(() => {
 describe("getCredentialUsageCounts", () => {
   it("counts effective usage across tiers, deduping per asset", async () => {
     const counts = await getCredentialUsageCounts();
-    // A1 uses A (stream) + B (class) + C (int); A2 uses A (default only); A3 uses A (manual class)
+    // A1 uses A (stream) + B (class) + C (int); A2 uses A (default only); A3 uses A (manual class); A4 uses C (stamped default)
     expect(counts[CRED_A]).toBe(3); // A1, A2, A3
     expect(counts[CRED_B]).toBe(1); // A1
-    expect(counts[CRED_C]).toBe(1); // A1 (via 6 streams, but deduped to one asset)
+    expect(counts[CRED_C]).toBe(2); // A1 (fall-through) + A4 (stamped default), deduped per asset
     expect(counts[CRED_D]).toBeUndefined(); // referenced by a class override with no matching asset
   });
 });
@@ -128,14 +133,28 @@ describe("getCredentialUsage", () => {
     expect(u.total).toBe(1);
   });
 
-  it("puts integration-default-inherited assets under integration level", async () => {
+  it("puts integration-default-inherited and stamped-default assets under integration level", async () => {
     const u = await getCredentialUsage(CRED_C);
     expect(u.integrationLevel).toHaveLength(1);
     expect(u.integrationLevel[0].integrationName).toBe("HQ FMG");
-    expect(u.integrationLevel[0].assets.map((a) => a.assetId)).toEqual(["a1"]);
-    // A2 does NOT appear: its asset default (CRED_A) outranks the integration tier
-    expect(u.total).toBe(1);
+    // a1 inherits CRED_C via fall-through; a4 has it STAMPED as its default FK —
+    // both classify as integration-level, neither as asset-level
+    expect(u.integrationLevel[0].assets.map((a) => a.assetId)).toEqual(["a1", "a4"]);
+    expect(u.assetLevel.some((a) => a.assetId === "a4")).toBe(false);
+    // A2 does NOT appear: its asset default (CRED_A) is a genuine override
+    expect(u.total).toBe(2);
     expect(u.integrationRefCount).toBe(1);
+  });
+
+  it("treats a stamped default (asset FK == integration's own credential) as integration-level, not asset-level", async () => {
+    // The bug the user hit: every discovered asset showed 'asset level' because
+    // discovery stamps the integration credential onto Asset.monitorCredentialId.
+    const u = await getCredentialUsage(CRED_C);
+    const a4Asset = u.assetLevel.find((a) => a.assetId === "a4");
+    expect(a4Asset).toBeUndefined();
+    const a4Int = u.integrationLevel[0].assets.find((a) => a.assetId === "a4");
+    expect(a4Int).toBeDefined();
+    expect(a4Int?.streams).toEqual(["Default"]);
   });
 
   it("reports config references even when no assets resolve to the credential", async () => {
