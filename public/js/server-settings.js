@@ -5481,7 +5481,7 @@ async function openCredUsagePanel(credId, credName) {
   var bodyEl = document.getElementById("cred-usage-body");
   titleEl.textContent = credName ? credName : "Credential usage";
   metaEl.textContent = "";
-  bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 0">Loading...</p>';
+  bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 1.25rem">Loading...</p>';
 
   requestAnimationFrame(function () {
     var ov = document.getElementById("cred-usage-overlay");
@@ -5498,10 +5498,12 @@ async function openCredUsagePanel(credId, credName) {
 
     if (total === 0 && !u.classRefCount && !u.integrationRefCount) {
       bodyEl.innerHTML =
-        '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0.5rem 0 0.75rem">' +
-          'This shows where the credential is configured across the monitor-settings tiers — not a live probe trace.' +
-        '</p>' +
-        '<p class="empty-state" style="padding:1rem 0">No assets use this credential, and it is not referenced by any class or integration setting.</p>';
+        '<div style="padding:1rem 1.25rem">' +
+          '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0 0 0.75rem">' +
+            'This shows where the credential is configured across the monitor-settings tiers — not a live probe trace.' +
+          '</p>' +
+          '<p class="empty-state" style="padding:1rem 0">No assets use this credential, and it is not referenced by any class or integration setting.</p>' +
+        '</div>';
       return;
     }
 
@@ -5553,9 +5555,9 @@ async function openCredUsagePanel(credId, credName) {
         refs.join(" and ") + '.</p>';
     }
 
-    bodyEl.innerHTML = html;
+    bodyEl.innerHTML = '<div style="padding:0.75rem 1.25rem 1.25rem">' + html + '</div>';
   } catch (err) {
-    bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 0">Error: ' + escapeHtml(err.message) + '</p>';
+    bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 1.25rem">Error: ' + escapeHtml(err.message) + '</p>';
   }
 }
 
