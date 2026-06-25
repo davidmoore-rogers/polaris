@@ -147,7 +147,7 @@ router.get("/noc-summary", async (req, res, next) => {
     };
 
     const [
-      status, downNodes, topCpu, topMemory, slowestResponse, packetLoss, stalePolls, sitesWithIssues,
+      status, downNodes, topCpu, topMemory, slowestResponse, packetLoss, diskUsage, stalePolls, sitesWithIssues,
       recentReboots, activeAlerts,
     ] = await Promise.all([
       canAssets ? nocDashboardService.getStatusSummary(assetIds)        : Promise.resolve(emptyStatus),
@@ -156,6 +156,7 @@ router.get("/noc-summary", async (req, res, next) => {
       canAssets ? nocDashboardService.getHighestMemory(100, 60, assetIds) : Promise.resolve([]),
       canAssets ? nocDashboardService.getSlowestResponse(100, assetIds) : Promise.resolve([]),
       canAssets ? nocDashboardService.getPacketLoss(100, 15, assetIds)  : Promise.resolve([]),
+      canAssets ? nocDashboardService.getHighestDiskUsage(100, assetIds) : Promise.resolve([]),
       canAssets ? nocDashboardService.getStalePolls(3, 50, assetIds)    : Promise.resolve([]),
       canAssets ? nocDashboardService.getSitesWithIssues(25, assetIds)  : Promise.resolve([]),
       canEvents ? nocDashboardService.getRecentReboots(72, 20, assetIds) : Promise.resolve([]),
@@ -171,6 +172,7 @@ router.get("/noc-summary", async (req, res, next) => {
       topMemory,
       slowestResponse,
       packetLoss,
+      diskUsage,
       stalePolls,
       recentReboots,
       activeAlerts,

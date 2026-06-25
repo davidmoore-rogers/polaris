@@ -54,7 +54,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `src/api/routes/map.ts` — Device Map topology endpoint reads monitorStatus for FortiGate/switch/AP health coloring via monitorStatusToHealth()
 - `src/jobs/monitorAssets.ts` — Queue eligibility check consults monitorStatus + dependencySuppressed
 - `src/api/routes/dashboard.ts` — `/dashboard/summary` reads `monitored=true AND monitorStatus in (warning, down)` for the Monitor Alerts card and orders by `monitorStatusChangedAt asc nulls last` so the oldest outages surface first
-- `src/services/nocDashboardService.ts` — `/dashboard/noc-summary` reads monitorStatus (status tiles, down nodes, sites-with-issues), asset_monitor_samples.responseTimeMs (slowest response = avg of each asset's most-recent 10 probes), lastMonitorAt (stale polls), and the `device.reboot` Events (recent reboots) for the NOC widgets. Per-widget filters: `resolveFilteredAssetIds` reads `Asset.assetType` + `Asset.tags` (region:<name>) to constrain every feed
+- `src/services/nocDashboardService.ts` — `/dashboard/noc-summary` reads monitorStatus (status tiles, down nodes, sites-with-issues), asset_monitor_samples.responseTimeMs (slowest response = avg of each asset's most-recent 10 probes), asset_storage_samples used/total (highest disk usage, per-volume), lastMonitorAt (stale polls), and the `device.reboot` Events (recent reboots) for the NOC widgets. Per-widget filters: `resolveFilteredAssetIds` reads `Asset.assetType` + `Asset.tags` (region:<name>) to constrain every feed
 - `public/js/dashboard.js` — Monitor Alerts card renders the duration since monitorStatusChangedAt; re-ticks the label every 30s without re-fetching
 
 **Invariants:**
@@ -3337,11 +3337,11 @@ Listed alphabetically.
 
 **What it owns:** Fleet-wide read-only aggregates for the SolarWinds-style NOC dashboard widgets, surfaced via `GET /dashboard/noc-summary`.
 
-**Public API:** `getStatusSummary`, `getDownNodes`, `getHighestCpu`, `getHighestMemory`, `getSlowestResponse`, `getPacketLoss`, `getStalePolls`, `getRecentReboots`, `getRecentAlerts`, `getSitesWithIssues`, `resolveFilteredAssetIds` (+ exported result interfaces). Every feed takes a trailing `assetIds: string[] | null` arg; `resolveFilteredAssetIds({assetTypes, regionNames})` produces that set (or null = unfiltered).
+**Public API:** `getStatusSummary`, `getDownNodes`, `getHighestCpu`, `getHighestMemory`, `getSlowestResponse`, `getPacketLoss`, `getHighestDiskUsage`, `getStalePolls`, `getRecentReboots`, `getRecentAlerts`, `getSitesWithIssues`, `resolveFilteredAssetIds` (+ exported result interfaces). Every feed takes a trailing `assetIds: string[] | null` arg; `resolveFilteredAssetIds({assetTypes, regionNames})` produces that set (or null = unfiltered).
 
 **Used by:** `src/api/routes/dashboard.ts` (`/dashboard/noc-summary`, all sections fanned out in one `Promise.all`; parses `?assetTypes=`/`?regionTags=` → `resolveFilteredAssetIds` → passes `assetIds` to every feed). Frontend NOC widgets read the combined payload via `PolarisWidgets.getNocSummary(opts)` (15s memoized **per filter**) in `public/js/widgets/`.
 
-**Reads:** `Asset` (monitorStatus, monitored, dependencySuppressed, assetType, tags, location/learnedLocation/snmpLocation, department, lastMonitorAt, latitude/longitude); `asset_telemetry_samples` + `asset_monitor_samples` hypertables (read-only DISTINCT-ON / groupBy / windowed `row_number()` for slowest-response avg, never write/delete); `Event` (`device.reboot` for reboots, `levelRank>=1` for active alerts). Calls `monitoringService.resolveMonitorSettings` for stale-poll cadence.
+**Reads:** `Asset` (monitorStatus, monitored, dependencySuppressed, assetType, tags, location/learnedLocation/snmpLocation, department, lastMonitorAt, latitude/longitude); `asset_telemetry_samples` + `asset_monitor_samples` + `asset_storage_samples` hypertables (read-only DISTINCT-ON / groupBy / windowed `row_number()` for the rolling averages + per-volume disk used %, never write/delete); `Event` (`device.reboot` for reboots, `levelRank>=1` for active alerts). Calls `monitoringService.resolveMonitorSettings` for stale-poll cadence.
 
 **Invariants:**
 - `activeAlertCount` uses the EXACT `monitorAlerts` where-clause (`monitored, monitorStatus in [warning,down], dependencySuppressed:false`) so the tile count and the alert list agree.

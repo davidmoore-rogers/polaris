@@ -198,6 +198,34 @@ describe("getSlowestResponse", () => {
   });
 });
 
+describe("getHighestDiskUsage", () => {
+  it("hydrates per-volume rows with hostname + mount-path detail, preserves SQL order, dedupes the id lookup", async () => {
+    rawUnsafe.mockResolvedValueOnce([
+      { assetId: "a", mountPath: "/var", pct: 96.27 },
+      { assetId: "a", mountPath: "/", pct: 71.4 },   // same asset, second volume
+      { assetId: "gone", mountPath: "/data", pct: 88 },
+    ]);
+    findMany.mockResolvedValueOnce([
+      { id: "a", hostname: "db-04", ipAddress: "10.0.0.1" },
+    ]);
+    const r = await noc.getHighestDiskUsage();
+    // 'gone' has no asset row → dropped; both of 'a's volumes kept, order preserved
+    expect(r.map((x) => [x.id, x.detail, x.value])).toEqual([
+      ["a", "/var", 96.3],
+      ["a", "/", 71.4],
+    ]);
+    // id lookup deduped to the distinct asset set
+    expect((findMany.mock.calls[0][0] as { where: { id: { in: string[] } } }).where.id.in).toEqual(["a", "gone"]);
+  });
+
+  it("returns empty without hitting findMany when there are no samples", async () => {
+    rawUnsafe.mockResolvedValueOnce([]);
+    const r = await noc.getHighestDiskUsage();
+    expect(r).toEqual([]);
+    expect(findMany).not.toHaveBeenCalled();
+  });
+});
+
 describe("resolveFilteredAssetIds", () => {
   it("returns null (no narrowing) when neither asset types nor regions filter", async () => {
     const r = await noc.resolveFilteredAssetIds({ assetTypes: null, regionNames: null });
