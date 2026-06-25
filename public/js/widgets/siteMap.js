@@ -89,7 +89,9 @@
       mapDiv.style.cssText = "position:absolute;inset:0";
       el.appendChild(mapDiv);
 
-      var map = L.map(mapDiv, { worldCopyJump: true, center: [39.5, -95], zoom: 4, attributionControl: true, zoomControl: true });
+      // wheelPxPerZoomLevel doubled from Leaflet's 60 default so the scroll
+      // wheel zooms half the distance per notch (gentler than the default).
+      var map = L.map(mapDiv, { worldCopyJump: true, center: [39.5, -95], zoom: 4, attributionControl: true, zoomControl: true, wheelPxPerZoomLevel: 120 });
 
       // Theme-aware basemap: CARTO Dark Matter (dark) or CARTO Positron (light).
       // The .sitemap-dark class drives the basemap darkening filter (CSS), so
