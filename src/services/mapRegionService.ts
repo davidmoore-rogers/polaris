@@ -2,9 +2,13 @@
  * src/services/mapRegionService.ts
  *
  * Map regions — operator-drawn polygons on the Device Map. Each region has a
- * unique name; firewalls whose lat/lng falls inside the polygon (and the
- * FortiSwitches / FortiAPs whose `fortinetTopology.controllerFortigate` matches
- * that firewall's hostname) carry a `region:<name>` tag.
+ * unique name; assets carry a `region:<name>` tag when they belong to it:
+ *   - firewalls whose lat/lng falls inside the polygon,
+ *   - the FortiSwitches / FortiAPs whose `fortinetTopology.controllerFortigate`
+ *     matches an enclosed firewall's hostname, AND
+ *   - any asset whose IP falls in a subnet served by an enclosed firewall
+ *     (Subnet.fortigateDevice = the firewall hostname) — this is how servers /
+ *     workstations / other non-geolocated assets inherit a region.
  *
  * Storage: single JSON blob in Setting under SETTING_KEY (mirrors the
  * allocationTemplateService pattern).
@@ -22,6 +26,7 @@ import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
 import { pointInPolygon, type LatLng } from "../utils/geo.js";
+import { cidrContains } from "../utils/cidr.js";
 
 const SETTING_KEY = "mapRegions";
 const TAG_PREFIX = "region:";
@@ -227,6 +232,30 @@ async function computeMembership(region: MapRegion): Promise<Set<string>> {
     const topo = readTopology(a.fortinetTopology);
     const ctrl = (topo.controllerFortigate || "").trim();
     if (ctrl && enclosedHostnames.has(ctrl)) memberIds.add(a.id);
+  }
+
+  // Subnet propagation: any asset whose IP falls in a subnet served by an
+  // enclosed firewall (Subnet.fortigateDevice = that firewall's hostname)
+  // inherits the region. This is how servers / workstations / standalone
+  // assets — which have no coordinates — get a region.
+  const regionSubnets = await prisma.subnet.findMany({
+    where: { fortigateDevice: { in: Array.from(enclosedHostnames) } },
+    select: { cidr: true },
+  });
+  if (regionSubnets.length > 0) {
+    const ipAssets = await prisma.asset.findMany({
+      where: { ipAddress: { not: null } },
+      select: { id: true, ipAddress: true },
+    });
+    for (const a of ipAssets) {
+      if (memberIds.has(a.id)) continue;
+      const ip = (a.ipAddress || "").split("/")[0].trim();
+      if (!ip) continue;
+      for (const sub of regionSubnets) {
+        // cidrContains is IPv4 (Netmask) — IPv6 assets throw and are skipped.
+        if (cidrContains(sub.cidr, ip + "/32")) { memberIds.add(a.id); break; }
+      }
+    }
   }
   return memberIds;
 }

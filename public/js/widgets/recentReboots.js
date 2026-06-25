@@ -28,19 +28,19 @@
     description: "Devices that rebooted recently (detected from SNMP sysUpTime drops).",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { rowLimit: 10 },
+    defaultConfig: { rowLimit: 10, regionScope: "all" },
     requiredPermission: { key: "events", level: "read" },
 
     fetchData: function (config) {
       var limit = (config && config.rowLimit) || 10;
-      return PolarisWidgets.getNocSummary().then(function (d) { return ((d && d.recentReboots) || []).slice(0, limit); }).catch(function () { return []; });
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return ((d && d.recentReboots) || []).slice(0, limit); }).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
       render(el, data);
       var timer = setInterval(function () {
         var limit = (config && config.rowLimit) || 10;
-        PolarisWidgets.getNocSummary().then(function (d) { render(el, ((d && d.recentReboots) || []).slice(0, limit)); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, ((d && d.recentReboots) || []).slice(0, limit)); }).catch(function () {});
       }, 60000);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
@@ -62,6 +62,7 @@
       el.querySelector('[data-k="rowLimit"]').addEventListener("change", function (e) {
         onChange("rowLimit", parseInt(e.target.value, 10));
       });
+      PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });
 })();

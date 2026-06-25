@@ -35,17 +35,17 @@
     description: "Recent warning/error events needing attention, newest first.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
-    defaultConfig: { severities: ["warning", "error"] },
+    defaultConfig: { severities: ["warning", "error"], regionScope: "all" },
     requiredPermission: { key: "events", level: "read" },
 
-    fetchData: function () {
-      return PolarisWidgets.getNocSummary().then(function (d) { return (d && d.activeAlerts) || []; }).catch(function () { return []; });
+    fetchData: function (config) {
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return (d && d.activeAlerts) || []; }).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
       render(el, data, config);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary().then(function (d) { render(el, (d && d.activeAlerts) || [], config); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, (d && d.activeAlerts) || [], config); }).catch(function () {});
       }, 30000);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
@@ -74,6 +74,7 @@
           onChange("severities", Array.from(current));
         });
       });
+      PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });
 })();

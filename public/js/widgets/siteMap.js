@@ -71,10 +71,13 @@
     description: "Geographic map of monitored sites — status dots + live weather radar.",
     defaultSize: { width: 6, height: 2 },
     minSize: { width: 4, height: 1 },
-    defaultConfig: { issuesOnly: false },
+    defaultConfig: { issuesOnly: false, regionScope: "all" },
     requiredPermission: { key: "assets", level: "read" },
 
-    fetchData: function () { return api.map.sites().catch(function () { return []; }); },
+    fetchData: function (config) {
+      var regions = config && config.regionScope === "mine" ? PolarisWidgets.myRegionNames() : null;
+      return api.map.sites(regions).catch(function () { return []; });
+    },
 
     renderInstance: function (el, config, data, ctx) {
       if (typeof L === "undefined") { el.innerHTML = '<p class="empty-state">Map library unavailable</p>'; return; }
@@ -401,7 +404,8 @@
       ro.observe(el);
 
       var siteTimer = setInterval(function () {
-        api.map.sites().then(function (sites) { buildMarkers(sites); }).catch(function () {});
+        var regions = config && config.regionScope === "mine" ? PolarisWidgets.myRegionNames() : null;
+        api.map.sites(regions).then(function (sites) { buildMarkers(sites); }).catch(function () {});
       }, 60000);
 
       ctx.onUnmount(function () {
@@ -427,6 +431,7 @@
           '<input type="checkbox" data-k="issuesOnly"' + (config.issuesOnly ? " checked" : "") + '> Show only sites with issues' +
         '</label>';
       el.querySelector('[data-k="issuesOnly"]').addEventListener("change", function (e) { onChange("issuesOnly", e.target.checked); });
+      PolarisWidgets.renderNocFilterConfig(el, config, onChange, false);
     },
   });
 })();

@@ -180,3 +180,44 @@ describe("getSitesWithIssues", () => {
     expect(findMany).not.toHaveBeenCalled();
   });
 });
+
+describe("getSlowestResponse", () => {
+  it("returns the server-side averaged response times, hydrates names, preserves order, rounds to 0.1", async () => {
+    rawUnsafe.mockResolvedValueOnce([
+      { assetId: "a", avg_ms: 642.37 },
+      { assetId: "gone", avg_ms: 300 },
+      { assetId: "b", avg_ms: 120 },
+    ]);
+    findMany.mockResolvedValueOnce([
+      { id: "b", hostname: "hb", ipAddress: "10.0.0.2" },
+      { id: "a", hostname: "ha", ipAddress: "10.0.0.1" },
+    ]);
+    const r = await noc.getSlowestResponse();
+    expect(r.map((x) => x.id)).toEqual(["a", "b"]); // 'gone' dropped, SQL order kept
+    expect(r[0].value).toBe(642.4);
+  });
+});
+
+describe("resolveFilteredAssetIds", () => {
+  it("returns null (no narrowing) when neither asset types nor regions filter", async () => {
+    const r = await noc.resolveFilteredAssetIds({ assetTypes: null, regionNames: null });
+    expect(r).toBeNull();
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it("returns null when every built-in type is enabled and there is no region filter", async () => {
+    const all = ["server", "switch", "router", "firewall", "workstation", "printer", "access_point", "other"];
+    const r = await noc.resolveFilteredAssetIds({ assetTypes: all, regionNames: [] });
+    expect(r).toBeNull();
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it("filters by hidden built-in types (notIn) and region tags (hasSome region:<name>)", async () => {
+    findMany.mockResolvedValueOnce([{ id: "x" }, { id: "y" }]);
+    const r = await noc.resolveFilteredAssetIds({ assetTypes: ["server", "switch"], regionNames: ["East"] });
+    expect(r).toEqual(["x", "y"]);
+    const where = (findMany.mock.calls[0][0] as { where: Record<string, unknown> }).where;
+    expect(where.assetType).toEqual({ notIn: ["router", "firewall", "workstation", "printer", "access_point", "other"] });
+    expect(where.tags).toEqual({ hasSome: ["region:East"] });
+  });
+});

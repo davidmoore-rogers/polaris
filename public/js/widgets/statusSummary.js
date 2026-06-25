@@ -56,17 +56,17 @@
     description: "At-a-glance counts of monitored assets by state, plus infra uptime % and active alerts.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { tiles: ALL_IDS.slice() },
+    defaultConfig: { tiles: ALL_IDS.slice(), regionScope: "all" },
     requiredPermission: { key: "assets", level: "read" },
 
-    fetchData: function () {
-      return PolarisWidgets.getNocSummary().catch(function () { return null; });
+    fetchData: function (config) {
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).catch(function () { return null; });
     },
 
     renderInstance: function (el, config, data, ctx) {
       renderTiles(el, data, config);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary().then(function (d) { renderTiles(el, d, config); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { renderTiles(el, d, config); }).catch(function () {});
       }, 30000);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
@@ -91,6 +91,7 @@
           onChange("tiles", Array.from(current));
         });
       });
+      PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });
 })();

@@ -21,17 +21,17 @@
     description: "Monitored assets with the highest recent probe loss (failed-probe ratio).",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { rowLimit: 5, threshold: 1 },
+    defaultConfig: { rowLimit: 5, threshold: 1, regionScope: "all" },
     requiredPermission: { key: "assets", level: "read" },
 
-    fetchData: function () {
-      return PolarisWidgets.getNocSummary().then(function (d) { return (d && d.packetLoss) || []; }).catch(function () { return []; });
+    fetchData: function (config) {
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return (d && d.packetLoss) || []; }).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
       render(el, config, data);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary().then(function (d) { render(el, config, (d && d.packetLoss) || []); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, config, (d && d.packetLoss) || []); }).catch(function () {});
       }, 60000);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
@@ -49,6 +49,7 @@
         thresholdLabel: "Hide below %",
         thresholdOptions: [{ value: "", label: "Show all" }, { value: 1, label: "1%" }, { value: 5, label: "5%" }, { value: 25, label: "25%" }],
       });
+      PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });
 })();

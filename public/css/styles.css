@@ -3505,6 +3505,62 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   letter-spacing: 0.3px;
 }
 
+/* Dashboard tabs (multiple named dashboards) — shown only when >1 exists. */
+.dashboard-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.08));
+  flex-wrap: wrap;
+}
+.dashboard-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--color-text-secondary);
+  padding: 7px 12px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+.dashboard-tab:hover { color: var(--color-text-primary); }
+.dashboard-tab.active {
+  color: #4fc3f7;
+  border-bottom-color: #4fc3f7;
+}
+.dashboard-tab-remove {
+  background: transparent;
+  border: 0;
+  color: var(--color-text-tertiary);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.dashboard-tab-remove:hover { color: #ef5350; background: rgba(255,255,255,0.08); }
+/* Inline rename input on the active tab — looks like the tab text until focused. */
+.dashboard-tab-name-input {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  padding: 1px 4px;
+  cursor: text;
+}
+.dashboard-tab-name-input:hover { border-color: var(--color-border, rgba(255,255,255,0.18)); }
+.dashboard-tab-name-input:focus {
+  outline: none;
+  border-color: #4fc3f7;
+  background: var(--color-bg, #0f1115);
+}
+
 /* Column canvas. The dashboard is a 12-col grid of COLUMNS; each column is a
    grid item spanning its width and holding a vertical widget stack. Columns
    whose spans exceed 12 wrap to the next grid row (no horizontal scroll). */
@@ -3747,6 +3803,29 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   margin-top: 12px;
   padding-top: 10px;
   border-top: 1px solid var(--color-border, rgba(255,255,255,0.08));
+}
+/* Shared per-widget NOC filter controls (region scope + asset-type toggles),
+   rendered by PolarisWidgets.renderNocFilterConfig. The asset-type checkboxes
+   lay out in a compact two-column grid; override the base block-label rule. */
+.widget-config-popover .widget-config-typegrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 12px;
+  margin-top: 2px;
+}
+.widget-config-popover .widget-config-typeopt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0;
+  font-size: 0.82rem;
+  color: var(--color-text-primary);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.widget-config-popover .widget-config-typeopt input[type="checkbox"] {
+  width: auto;
+  margin: 0;
 }
 
 /* ── Add-Widgets picker ──────────────────────────────────────────────────

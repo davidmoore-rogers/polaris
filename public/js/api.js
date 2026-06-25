@@ -241,7 +241,7 @@ const api = {
     // One round-trip feed for the NOC widgets (status tiles, down nodes,
     // top CPU/mem, slowest response, packet loss, stale polls, recent
     // reboots, active alerts, sites with issues).
-    nocSummary: () => request("GET", "/dashboard/noc-summary"),
+    nocSummary: (qs) => request("GET", "/dashboard/noc-summary" + (qs ? "?" + qs : "")),
   },
   me: {
     dashboard: {
@@ -747,7 +747,7 @@ const api = {
     query: (q) => request("GET", `/search?q=${encodeURIComponent(q)}`),
   },
   map: {
-    sites:    ()        => request("GET", "/map/sites"),
+    sites:    (regionNames) => request("GET", "/map/sites" + (regionNames && regionNames.length ? "?regionTags=" + encodeURIComponent(regionNames.slice().sort().join(",")) : "")),
     topology: (id)      => request("GET", `/map/sites/${id}/topology`),
     topologySearch: (id, q) => request("GET", `/map/sites/${id}/topology/search?q=${encodeURIComponent(q)}`),
   },

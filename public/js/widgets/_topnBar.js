@@ -33,12 +33,12 @@
   function renderRows(el, rows, opts) {
     opts = opts || {};
     var cfg = opts.config || {};
-    var rowLimit = cfg.rowLimit || 5;
     var sorted = (rows || []).slice().sort(function (a, b) { return (b.value || 0) - (a.value || 0); });
     if (cfg.threshold != null) {
       sorted = sorted.filter(function (r) { return (r.value || 0) >= cfg.threshold; });
     }
-    sorted = sorted.slice(0, rowLimit);
+    // No row cap — the widget's fixed height (1×/2×/3×) plus auto-scroll
+    // governs how much is visible; all rows are rendered so nothing is hidden.
     if (!sorted.length) {
       el.innerHTML = '<p class="empty-state">' + escapeHtml(opts.emptyText || "Nothing to show") + '</p>';
       return;
@@ -73,11 +73,9 @@
    */
   function renderConfig(el, config, onChange, opts) {
     opts = opts || {};
-    var html =
-      '<label>Row limit</label>' +
-      '<select data-k="rowLimit">' +
-        [5, 10, 20].map(function (n) { return '<option value="' + n + '"' + ((config.rowLimit || 5) === n ? " selected" : "") + '>' + n + '</option>'; }).join("") +
-      '</select>';
+    // No row-limit control — height (1×/2×/3×) + auto-scroll governs visible
+    // rows. Only the optional threshold floor remains.
+    var html = "";
     if (opts.thresholdOptions) {
       html +=
         '<label>' + escapeHtml(opts.thresholdLabel || "Hide below") + '</label>' +

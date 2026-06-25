@@ -106,14 +106,24 @@ async function fetchRecentSampleStats(
 
 // ─── GET /map/sites ────────────────────────────────────────────────────────────
 // Every firewall asset with non-null lat/lng — one pin per managed FortiGate.
-router.get("/sites", async (_req, res, next) => {
+router.get("/sites", async (req, res, next) => {
   try {
+    // Optional "My regions" filter: ?regionTags=East,West restricts to firewalls
+    // carrying the matching region:<name> tag. Empty/absent = all regions.
+    const regionRaw = req.query.regionTags;
+    const regionNames = typeof regionRaw === "string" && regionRaw.length
+      ? regionRaw.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    const regionWhere = regionNames.length
+      ? { tags: { hasSome: regionNames.map((n) => "region:" + n) } }
+      : {};
     const sites = await prisma.asset.findMany({
       where: {
         assetType: "firewall",
         latitude: { not: null },
         longitude: { not: null },
         status: { notIn: ["decommissioned", "disabled"] },
+        ...regionWhere,
       },
       select: {
         id: true,

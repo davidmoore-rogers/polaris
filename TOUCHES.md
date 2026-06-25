@@ -54,7 +54,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - `src/api/routes/map.ts` — Device Map topology endpoint reads monitorStatus for FortiGate/switch/AP health coloring via monitorStatusToHealth()
 - `src/jobs/monitorAssets.ts` — Queue eligibility check consults monitorStatus + dependencySuppressed
 - `src/api/routes/dashboard.ts` — `/dashboard/summary` reads `monitored=true AND monitorStatus in (warning, down)` for the Monitor Alerts card and orders by `monitorStatusChangedAt asc nulls last` so the oldest outages surface first
-- `src/services/nocDashboardService.ts` — `/dashboard/noc-summary` reads monitorStatus (status tiles, down nodes, sites-with-issues), lastResponseTimeMs (slowest response), lastMonitorAt (stale polls), and the `device.reboot` Events (recent reboots) for the NOC widgets
+- `src/services/nocDashboardService.ts` — `/dashboard/noc-summary` reads monitorStatus (status tiles, down nodes, sites-with-issues), asset_monitor_samples.responseTimeMs (slowest response = avg of each asset's most-recent 10 probes), lastMonitorAt (stale polls), and the `device.reboot` Events (recent reboots) for the NOC widgets. Per-widget filters: `resolveFilteredAssetIds` reads `Asset.assetType` + `Asset.tags` (region:<name>) to constrain every feed
 - `public/js/dashboard.js` — Monitor Alerts card renders the duration since monitorStatusChangedAt; re-ticks the label every 30s without re-fetching
 
 **Invariants:**
@@ -1229,11 +1229,11 @@ Listed alphabetically.
 
 ## services/mapRegionService.ts
 
-**What it owns:** Operator-drawn map regions (polygons on the Device Map). CRUD on Setting JSON blob keyed `mapRegions`. Tag-mutation primitives that add `region:<name>` to in-polygon firewalls + cascaded FortiSwitches/FortiAPs and strip it on rename/delete. Tag-registry mirroring (upserts a `Tag` row at `region:<name>` under category "Map Regions" so the asset edit modal's tag picker shows it).
+**What it owns:** Operator-drawn map regions (polygons on the Device Map). CRUD on Setting JSON blob keyed `mapRegions`. Tag-mutation primitives that add `region:<name>` to in-polygon firewalls + cascaded FortiSwitches/FortiAPs + **subnet-propagated assets** (any asset whose primary IPv4 falls in a `Subnet` whose `fortigateDevice` is an enclosed firewall's hostname — gives coordinate-less servers/workstations a region) and strip it on rename/delete. Tag-registry mirroring (upserts a `Tag` row at `region:<name>` under category "Map Regions" so the asset edit modal's tag picker shows it).
 
 **Public API:** MapRegion, SaveRegionInput, ReconcileSummary, listRegions, getRegion, createRegion, updateRegion, deleteRegion, applyRename, applyDelete, applyOneRegion, reconcileMapRegions.
 
-**Cross-service deps:** `src/utils/geo.ts:pointInPolygon`, `prisma.tag` (registry mirror), `prisma.asset` (membership compute + tag mutations).
+**Cross-service deps:** `src/utils/geo.ts:pointInPolygon`, `src/utils/cidr.ts:cidrContains` (subnet propagation), `prisma.tag` (registry mirror), `prisma.subnet` (`fortigateDevice` → CIDR list for subnet propagation), `prisma.asset` (membership compute + tag mutations).
 
 **Used by:**
 - `src/api/routes/mapRegions.ts` — all CRUD endpoints (`GET / POST / PUT / DELETE /map/regions`); each call awaits the appropriate apply* helper before responding.
@@ -3337,15 +3337,15 @@ Listed alphabetically.
 
 **What it owns:** Fleet-wide read-only aggregates for the SolarWinds-style NOC dashboard widgets, surfaced via `GET /dashboard/noc-summary`.
 
-**Public API:** `getStatusSummary`, `getDownNodes`, `getHighestCpu`, `getHighestMemory`, `getSlowestResponse`, `getPacketLoss`, `getStalePolls`, `getRecentReboots`, `getRecentAlerts`, `getSitesWithIssues` (+ exported result interfaces).
+**Public API:** `getStatusSummary`, `getDownNodes`, `getHighestCpu`, `getHighestMemory`, `getSlowestResponse`, `getPacketLoss`, `getStalePolls`, `getRecentReboots`, `getRecentAlerts`, `getSitesWithIssues`, `resolveFilteredAssetIds` (+ exported result interfaces). Every feed takes a trailing `assetIds: string[] | null` arg; `resolveFilteredAssetIds({assetTypes, regionNames})` produces that set (or null = unfiltered).
 
-**Used by:** `src/api/routes/dashboard.ts` (`/dashboard/noc-summary`, all sections fanned out in one `Promise.all`). Frontend NOC widgets read the combined payload via `PolarisWidgets.getNocSummary()` (15s memoized) in `public/js/widgets/`.
+**Used by:** `src/api/routes/dashboard.ts` (`/dashboard/noc-summary`, all sections fanned out in one `Promise.all`; parses `?assetTypes=`/`?regionTags=` → `resolveFilteredAssetIds` → passes `assetIds` to every feed). Frontend NOC widgets read the combined payload via `PolarisWidgets.getNocSummary(opts)` (15s memoized **per filter**) in `public/js/widgets/`.
 
-**Reads:** `Asset` (monitorStatus, monitored, dependencySuppressed, assetType, location/learnedLocation/snmpLocation, department, lastResponseTimeMs, lastMonitorAt, latitude/longitude); `asset_telemetry_samples` + `asset_monitor_samples` hypertables (read-only DISTINCT-ON / groupBy, never write/delete); `Event` (`device.reboot` for reboots, `levelRank>=1` for active alerts). Calls `monitoringService.resolveMonitorSettings` for stale-poll cadence.
+**Reads:** `Asset` (monitorStatus, monitored, dependencySuppressed, assetType, tags, location/learnedLocation/snmpLocation, department, lastMonitorAt, latitude/longitude); `asset_telemetry_samples` + `asset_monitor_samples` hypertables (read-only DISTINCT-ON / groupBy / windowed `row_number()` for slowest-response avg, never write/delete); `Event` (`device.reboot` for reboots, `levelRank>=1` for active alerts). Calls `monitoringService.resolveMonitorSettings` for stale-poll cadence.
 
 **Invariants:**
 - `activeAlertCount` uses the EXACT `monitorAlerts` where-clause (`monitored, monitorStatus in [warning,down], dependencySuppressed:false`) so the tile count and the alert list agree.
-- Top-N CPU/Memory and packet-loss windows scan only recent (chunk-excluded) hypertable rows via a `now() - interval` predicate; names hydrated in ONE `findMany` (no per-row lookup). Never row-DELETE/UPDATE the sample tables.
+- Top-N CPU/Memory and slowest-response are each the **avg of the most-recent 10 samples per asset** (windowed `row_number()<=10` then `avg`); packet-loss is a failed-probe ratio. All scan only recent (chunk-excluded) hypertable rows via a `now() - interval` predicate (CPU/Mem 1h, response 6h); names hydrated in ONE `findMany` (no per-row lookup). Never row-DELETE/UPDATE the sample tables.
 - `getStalePolls` pre-filters with `@@index([monitored, lastMonitorAt])` then resolves the exact cadence per candidate via the cached `resolveMonitorSettings` — don't reimplement the tier hierarchy; suppressed assets use 2× interval (mirrors monitorAssets).
 - `getSitesWithIssues` coalesces `location > learnedLocation > snmpLocation > "(unknown)"`; the same coalesce key buckets the node detail rows.
 
