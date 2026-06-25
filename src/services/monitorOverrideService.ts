@@ -1,16 +1,35 @@
 /**
  * Asset monitor-override semantics.
  *
- * `Asset.monitorOverride` is true exactly when the operator's current
- * `monitored` choice diverges from the discovering integration's per-class
- * `addAsMonitored` flag. Discovery sweeps `monitored` to match the flag on
- * every cycle EXCEPT when the override is set — the override is what
- * protects an explicit operator choice from being clobbered. The flag
- * auto-clears the moment the two converge (either side moving satisfies
- * the equality), which is how `addAsMonitored` ON↔OFF flips on the
- * integration cleanly retake the fleet.
+ * `Asset.monitorOverride` is an EXPLICIT operator-intent bit: it records
+ * that an operator deliberately set this asset's `monitored` state to
+ * something other than its discovering integration's per-class
+ * `addAsMonitored` default. Discovery sweeps `monitored` to match the flag
+ * on every cycle EXCEPT when the override is set — the override is what
+ * protects an explicit operator choice from being clobbered.
  *
- * Replaces the legacy `monitoredOperatorSet` one-way sticky flag.
+ * The value is the (monitored XOR addAsMonitored) divergence, but it is
+ * only ever WRITTEN at the moment of an operator action — the asset-write
+ * paths (`PUT /assets/:id`, `POST /assets/bulk-monitor`, the status-pill
+ * toggle) call `recomputeMonitorOverrideForAssets` for the touched ids, and
+ * the Reset-to-integration-default action clears it. Nothing re-derives it
+ * from incidental state: discovery, the create path, the decommission clamp,
+ * and HA-standby seeding all leave it alone. This is the critical fix over
+ * the original convergent model — a divergence that arose for an INCIDENTAL
+ * reason (a decommission forcing `monitored=false`, an asset created while
+ * the flag was off, a standby member) must NOT masquerade as an operator
+ * override, or discovery would refuse to ever auto-manage it again. Because
+ * incidental divergence leaves the bit false, those cases self-heal: the
+ * next discovery sweep retakes the asset to the flag's value.
+ *
+ * Integration-flag flips (`addAsMonitored` ON↔OFF) sweep only
+ * override-false assets and respect pins — see `sweepMonitoredForIntegration`
+ * + the integration-save handler, which deliberately does NOT recompute
+ * overrides.
+ *
+ * Replaces the legacy `monitoredOperatorSet` one-way sticky flag, and the
+ * subsequent convergent model whose every-boot/every-save re-derivation
+ * stamped incidental divergence as override.
  */
 export type AddAsMonitoredAssetType =
   | "firewall"
@@ -207,9 +226,9 @@ export async function recomputeMonitorOverrideForAssets(
  * per-class `addAsMonitored` flag changed. Walks every Asset whose
  * `discoveredByIntegrationId` points at this integration AND whose
  * `monitorOverride=false`, and writes `monitored = <new addAsMonitored>` per
- * the asset's class. Override-true assets are left alone — operator wins.
- * Pairs with `recomputeMonitorOverrideForIntegration` (called after) which
- * also handles override-true assets that may have converged.
+ * the asset's class. Override-true assets are left alone — operator pins win,
+ * and a flag flip never re-derives or clears them (operators re-align a
+ * pinned asset per-asset via the Reset-to-integration-default action).
  *
  * Returns the count of rows whose `monitored` value actually changed (used
  * by the route handler to emit an Event with the touched-asset count).
@@ -249,40 +268,6 @@ export async function sweepMonitoredForIntegration(
 }
 
 /**
- * Refresh `monitorOverride` for every asset discovered by this integration.
- * Same divergence rule as `recomputeMonitorOverrideForAssets` (monitored XOR
- * addAsMonitored) but scoped by integrationId, so the integration-save flow
- * can run it without enumerating asset ids into JS. Touches override-true
- * assets that may have converged (operator's choice now matches the new
- * addAsMonitored) as well as override-false assets whose `monitored` was
- * just swept and now agrees with the new flag.
- */
-export async function recomputeMonitorOverrideForIntegration(
-  prismaClient: { $executeRaw: (template: TemplateStringsArray, ...args: unknown[]) => Promise<number> },
-  integrationId: string,
-): Promise<void> {
-  await prismaClient.$executeRaw`
-    UPDATE "assets" a
-    SET "monitorOverride" = (
-      a."monitored" IS DISTINCT FROM COALESCE(
-        CASE a."assetType"
-          WHEN 'firewall'     THEN (i."config" #>> '{fortigateMonitor,addAsMonitored}')::boolean
-          WHEN 'switch'       THEN (i."config" #>> '{fortiswitchMonitor,addAsMonitored}')::boolean
-          WHEN 'access_point' THEN (i."config" #>> '{fortiapMonitor,addAsMonitored}')::boolean
-          WHEN 'workstation'  THEN (i."config" #>> '{workstationMonitor,addAsMonitored}')::boolean
-          WHEN 'server'       THEN (i."config" #>> '{serverMonitor,addAsMonitored}')::boolean
-          ELSE NULL
-        END,
-        false
-      )
-    )
-    FROM "integrations" i
-    WHERE a."discoveredByIntegrationId" = i."id"
-      AND i."id" = ${integrationId}::text
-      AND a."assetType" IN ('firewall', 'switch', 'access_point', 'workstation', 'server')
-  `;
-}
-
 /**
  * Discovery-side sweep helper. Given the integration's resolved per-class
  * `addAsMonitored` and the existing asset's `monitored` + `monitorOverride`,

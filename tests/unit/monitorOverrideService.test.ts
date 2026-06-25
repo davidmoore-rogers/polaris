@@ -11,8 +11,11 @@
  *  - AUTO_MONITOR_ASSET_TYPES — the five participating classes.
  *
  * The DB-touching helpers (recomputeMonitorOverrideForAssets,
- * sweepMonitoredForIntegration, recomputeMonitorOverrideForIntegration) are
- * integration territory and are not exercised here.
+ * sweepMonitoredForIntegration) are integration territory and are not
+ * exercised here. `monitorOverride` is now an explicit operator-intent bit:
+ * recompute runs ONLY from operator write paths (the bit is never re-derived
+ * from incidental divergence by a boot job or integration save), but that
+ * wiring is route-level and out of scope for these pure-logic tests.
  */
 
 import { describe, it, expect } from "vitest";

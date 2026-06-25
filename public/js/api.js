@@ -313,6 +313,7 @@ const api = {
       return request("GET", `/assets/${id}/monitor-history` + (qs.length ? "?" + qs.join("&") : ""));
     },
     probeNow:             (id)  => request("POST", `/assets/${id}/probe-now`),
+    resetMonitorOverride: (id)  => request("POST", `/assets/${id}/monitor-override/reset`),
     effectiveMonitorSettings: (id) => request("GET", `/assets/${id}/effective-monitor-settings`),
     snmpWalk:             (id, body, signal) => request("POST", `/assets/${id}/snmp-walk`, body, signal),
     quarantine:           (id, reason) => request("POST", `/assets/${id}/quarantine`, reason !== undefined ? { reason } : {}),
