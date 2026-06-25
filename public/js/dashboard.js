@@ -363,9 +363,26 @@
     }).join("") + '</div>';
   }
 
+  // Widget header title. When a widget's asset-type filter selects a strict
+  // subset of the eight built-ins, the chosen types are appended in parens
+  // (e.g. "Highest CPU (Server, Switch)"); all-on (or no filter) → bare label.
+  function widgetTitleFor(module, w) {
+    var base = module ? module.label : (w.type + " (unknown widget)");
+    var cfg = (w && w.config) || {};
+    var BUILTIN = (window.PolarisWidgets && PolarisWidgets.BUILTIN_ASSET_TYPES) || [];
+    if (Array.isArray(cfg.assetTypes) && cfg.assetTypes.length > 0 && cfg.assetTypes.length < BUILTIN.length) {
+      var labels = (window.PolarisWidgets && PolarisWidgets.ASSET_TYPE_LABELS) || {};
+      var picked = BUILTIN
+        .filter(function (t) { return cfg.assetTypes.indexOf(t) !== -1; })  // preserve built-in order
+        .map(function (t) { return labels[t] || t; });
+      if (picked.length) base += " (" + picked.join(", ") + ")";
+    }
+    return base;
+  }
+
   function mountWidgetShell(w) {
     var module = PolarisWidgets.getByType(w.type);
-    var label = module ? module.label : (w.type + " (unknown widget)");
+    var label = widgetTitleFor(module, w);
     var article = document.createElement("article");
     article.className = "dashboard-widget";
     article.setAttribute("data-id", w.id);
@@ -594,6 +611,11 @@
     src.widget.config = Object.assign({}, src.widget.config || {}, { [key]: value });
     queueSave();
     renderWidget(src.widget);
+    // Header title may depend on the asset-type filter — refresh it in place
+    // (renderWidget only re-renders the body, not the shell header).
+    var article = canvasEl.querySelector('.dashboard-widget[data-id="' + cssEscape(id) + '"]');
+    var titleEl = article && article.querySelector(".dashboard-widget-title");
+    if (titleEl) titleEl.textContent = widgetTitleFor(PolarisWidgets.getByType(src.widget.type), src.widget);
   }
 
   function handleTapToAdd(type) {

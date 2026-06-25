@@ -61,6 +61,16 @@
   <script src="/js/vendor/leaflet/leaflet.markercluster.js"></script>
   <script src="/js/api.js"></script>
   <script src="/js/app.js"></script>
+  <!-- Canonical asset-details slide-in (openViewModal in assets.js), reused
+       in-place by the Down Nodes widget. Same dependency set map.html loads to
+       reuse the same component; assets.js + integrations.js guard their
+       page-init so they stay inert off their own pages (no #assets-tbody here). -->
+  <script src="/js/vendor/jspdf.umd.min.js"></script>
+  <script src="/js/vendor/jspdf.plugin.autotable.min.js"></script>
+  <script src="/js/vendor/html-to-image.min.js"></script>
+  <script src="/js/table-sf.js"></script>
+  <script src="/js/integrations.js"></script>
+  <script src="/js/assets.js"></script>
   <script src="/js/widgets/index.js"></script>
   <!-- Shared helper before its consumers. -->
   <script src="/js/widgets/_topnBar.js"></script>

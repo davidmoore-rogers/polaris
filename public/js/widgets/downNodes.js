@@ -25,7 +25,7 @@
     var sub = [escapeHtml(typeLabel)];
     if (n.ipAddress) sub.push('<span class="dash-alert-ip">' + escapeHtml(n.ipAddress) + '</span>');
     var href = '/assets.html#view=asset:' + encodeURIComponent(n.id);
-    return '<a class="dash-alert-item" href="' + href + '" style="text-decoration:none">' +
+    return '<a class="dash-alert-item" href="' + href + '" data-asset-id="' + escapeHtml(n.id) + '" style="text-decoration:none">' +
       '<div class="dash-alert-row" style="width:100%">' +
         statusDot(n.monitorStatus) +
         '<div class="dash-alert-body">' +
@@ -82,10 +82,23 @@
 
     renderInstance: function (el, config, data, ctx) {
       render(el, data, config);
+      // Click a node → open its asset details slide-in in place (over the
+      // dashboard) when openViewModal is loaded; fall back to navigation. Plain
+      // left-clicks open in place; ctrl/meta/middle-click keep the href so the
+      // operator can still open the Assets page in a new tab. Delegated on el
+      // so it survives the 30s re-render (which replaces el's children).
+      var onClick = function (ev) {
+        if (ev.defaultPrevented || ev.button === 1 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+        var link = ev.target.closest(".dash-alert-item[data-asset-id]");
+        if (!link || !el.contains(link)) return;
+        ev.preventDefault();
+        PolarisWidgets.openAssetDetail(link.getAttribute("data-asset-id"));
+      };
+      el.addEventListener("click", onClick);
       var timer = setInterval(function () {
         PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, (d && d.downNodes) || [], config); }).catch(function () {});
       }, 30000);
-      ctx.onUnmount(function () { clearInterval(timer); });
+      ctx.onUnmount(function () { clearInterval(timer); el.removeEventListener("click", onClick); });
     },
 
     renderPreview: function (el) {

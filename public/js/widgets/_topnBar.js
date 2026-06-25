@@ -27,19 +27,29 @@
   /**
    * el       — widget body
    * rows     — [{ id, hostname, ipAddress, value }]
-   * opts     — { unit:"%"|"ms", thresholds, baseColor, emptyText, config }
+   * opts     — { unit:"%"|"ms", thresholds, baseColor, emptyText, config, fillTo }
    *            config: { rowLimit, threshold }
+   *            fillTo: when set (e.g. 20), guarantee a floor of that many rows —
+   *            if the threshold filter leaves fewer, pad up to `fillTo` with the
+   *            next-highest below-threshold rows so the widget never looks empty.
+   *            When more rows pass the threshold than `fillTo`, all of them show
+   *            (height + auto-scroll governs). Omit to leave the threshold as a
+   *            hard filter (e.g. Packet Loss, where padding 0%-loss rows misleads).
    */
   function renderRows(el, rows, opts) {
     opts = opts || {};
     var cfg = opts.config || {};
     var sorted = (rows || []).slice().sort(function (a, b) { return (b.value || 0) - (a.value || 0); });
+    var shown = sorted;
     if (cfg.threshold != null) {
-      sorted = sorted.filter(function (r) { return (r.value || 0) >= cfg.threshold; });
+      var passing = sorted.filter(function (r) { return (r.value || 0) >= cfg.threshold; });
+      // fillTo: pad up to the floor with the next-highest rows (sorted is desc,
+      // so the top `fillTo` already = all passing + the next-highest below it).
+      shown = (opts.fillTo && passing.length < opts.fillTo) ? sorted.slice(0, opts.fillTo) : passing;
     }
-    // No row cap — the widget's fixed height (1×/2×/3×) plus auto-scroll
-    // governs how much is visible; all rows are rendered so nothing is hidden.
-    if (!sorted.length) {
+    // No upper row cap — the widget's fixed height (1×/2×/3×) plus auto-scroll
+    // governs how much is visible; all qualifying rows are rendered.
+    if (!shown.length) {
       el.innerHTML = '<p class="empty-state">' + escapeHtml(opts.emptyText || "Nothing to show") + '</p>';
       return;
     }
@@ -47,9 +57,9 @@
     // the visible set so the slowest node fills the bar.
     var scaleMax = opts.unit === "%"
       ? 100
-      : (Math.max.apply(null, sorted.map(function (r) { return r.value || 0; })) || 1);
+      : (Math.max.apply(null, shown.map(function (r) { return r.value || 0; })) || 1);
 
-    el.innerHTML = sorted.map(function (r) {
+    el.innerHTML = shown.map(function (r) {
       var v = r.value || 0;
       var pct = Math.min(100, Math.round((v / scaleMax) * 100));
       var color = pickColor(v, opts.thresholds, opts.baseColor);
