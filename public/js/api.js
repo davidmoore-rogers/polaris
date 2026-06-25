@@ -168,6 +168,8 @@ const api = {
     update: (id, b)   => request("PUT",    `/credentials/${id}`, b),
     delete: (id)      => request("DELETE", `/credentials/${id}`),
     test:   (body)    => request("POST",   "/credentials/test", body),
+    usageCounts: ()   => request("GET",    "/credentials/usage"),
+    usage:  (id)      => request("GET",    `/credentials/${id}/usage`),
   },
   apiTokens: {
     list:   ()        => request("GET",    "/api-tokens"),
