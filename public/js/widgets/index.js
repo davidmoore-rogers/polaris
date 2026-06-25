@@ -123,6 +123,18 @@
     return ((typeof currentEffectiveRegions !== "undefined" && currentEffectiveRegions) || []).slice();
   };
 
+  // Open an asset's details slide-in in place when the canonical slide-over
+  // (openViewModal from assets.js) is loaded on the page — it is on the
+  // dashboard (index.html pulls assets.js + deps), map, and assets pages.
+  // Falls back to navigating to the Assets page with the view hash. Returns
+  // true when it opened in place.
+  window.PolarisWidgets.openAssetDetail = function (id) {
+    if (!id) return false;
+    if (typeof window.openViewModal === "function") { window.openViewModal(id); return true; }
+    window.location.href = "/assets.html#view=asset:" + encodeURIComponent(id);
+    return false;
+  };
+
   // Append the shared per-widget filter controls into a gear-popover container.
   // Region scope (All / My regions) goes on every NOC widget; the asset-type
   // toggle grid is added only when includeAssetTypes is true (every NOC widget
