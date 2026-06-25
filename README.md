@@ -63,7 +63,7 @@ Admin-uploaded SNMP MIB modules drive vendor-specific telemetry. Uploads are val
 A built-in alias map collapses IEEE legal forms (`Fortinet, Inc.`) into marketing names (`Fortinet`) consistently across asset rows, MIB scoping, and vendor-profile matching. Ships ~25 default mappings; admins extend the map and existing rows are backfilled in the background.
 
 ### Capacity grading
-Server Settings → Maintenance shows host CPU/RAM/disk, database size with sample-table breakdown and dead-tuple ratios, monitoring workload (asset count, pinned-interface count incl. IPsec tunnels, pinned storage-mount count, cadences, retention), and a steady-state size projection. Critical conditions (disk free <10%, projected DB > 8× host RAM, autovacuum stale on a populated table) drive a non-dismissible sidebar alert; amber and watch conditions render as card-only reason rows.
+Server Settings → Maintenance shows host CPU/RAM/disk, database size with sample-table breakdown and dead-tuple ratios, monitoring workload (asset count, pinned-interface count incl. IPsec tunnels, pinned storage-mount count, cadences, retention), and a steady-state size projection. Critical conditions (disk free <10%, projected DB > 8× host RAM, autovacuum stale on a populated *and bloated* table) drive a non-dismissible sidebar alert; amber and watch conditions render as card-only reason rows.
 
 ### Authentication & RBAC
 - **Local accounts** — argon2id-hashed passwords with strength rules and per-account temporary lockout.
