@@ -538,11 +538,18 @@ export async function updatePushedReservation(
 
 export interface UnpushReservationParams {
   reservationId: string;
-  scopeId: number;
-  entryId: number;
-  // The integration that originally pushed (typically the same as the subnet's
-  // integration; we look it up from `reservation.pushedTo`). FMG or standalone
-  // FortiGate — buildTransportForIntegration handles both.
+  // Pinned device-side identity for Polaris-pushed reservations. When either
+  // is null the helper resolves the scope via `subnetCidr` and finds the entry
+  // by `ip` on the device — covers releasing a DISCOVERED (never-pushed)
+  // dhcp_reservation so the device-side entry is removed too. Mirrors the
+  // pinned-vs-discovered ownership split in `updatePushedReservation`.
+  scopeId?: number | null;
+  entryId?: number | null;
+  subnetCidr?: string;
+  ip?: string;
+  // The integration that owns the device-side entry — `reservation.pushedTo`
+  // for pinned rows, the subnet's integration for discovered rows. FMG or
+  // standalone FortiGate — buildTransportForIntegration handles both.
   integration: { id: string; type: string; config: unknown };
   deviceName: string;
 }
@@ -553,7 +560,15 @@ export interface UnpushReservationResult {
 }
 
 /**
- * Remove a previously-pushed reserved-address entry from the FortiGate.
+ * Remove a reserved-address entry from the FortiGate's DHCP scope.
+ *
+ * Two ownership paths:
+ *   - Polaris-pushed: caller supplies pinned scopeId + entryId; we confirm
+ *     presence then DELETE by id.
+ *   - Discovered (never pushed): caller leaves the ids null + supplies
+ *     subnetCidr + ip; we resolve the scope by CIDR and the entry by IP, then
+ *     DELETE. This is the release counterpart to `pushReservation` so freeing
+ *     a discovered dhcp_reservation in Polaris also clears it on the device.
  *
  * Treats "not found on device" as success-with-warning (the operator may
  * have already deleted it locally). Other failures throw AppError; callers
@@ -564,26 +579,52 @@ export async function unpushReservation(
 ): Promise<UnpushReservationResult> {
   const t = await buildTransportForIntegration(params.integration, params.deviceName);
 
-  // Confirm the entry still exists before issuing DELETE — this lets us
-  // distinguish "operator deleted it on the device" (alreadyAbsent=true,
-  // not an error) from "we couldn't reach the device" (transport error).
-  let stillThere = false;
-  try {
-    const list = await listReservedAddresses(t, params.scopeId);
-    stillThere = list.some((r) => r.id === params.entryId);
-  } catch (err) {
-    // If the read fails, fall through to the DELETE attempt and let the
-    // delete failure mode produce the canonical error.
+  // Resolve the scope: a pinned id from a prior push wins; otherwise resolve
+  // by the subnet CIDR (discovered rows carry no device-side pointers).
+  let scopeId = typeof params.scopeId === "number" ? params.scopeId : null;
+  if (scopeId == null) {
+    if (!params.subnetCidr) {
+      throw new AppError(
+        400,
+        "unpush requires a pinned scopeId or a subnetCidr to resolve the DHCP scope",
+      );
+    }
+    scopeId = (await findScopeIdForCidr(t, params.subnetCidr)).scopeId;
   }
 
-  if (!stillThere) {
-    return { removed: false, alreadyAbsent: true };
+  // Read the scope's reserved-address list once — used to confirm the entry
+  // still exists (pinned path) and to resolve its id by IP (discovered path).
+  let list: FortiOsReservedAddress[] | null = null;
+  try {
+    list = await listReservedAddresses(t, scopeId);
+  } catch {
+    // Read failed — handled per-path below.
+  }
+
+  let entryId = typeof params.entryId === "number" ? params.entryId : null;
+  if (entryId == null) {
+    // Discovered path: we must positively identify the entry by IP before
+    // deleting — a failed/empty read means we can't, so treat as already gone
+    // rather than blind-deleting an unknown id.
+    const match = list?.find((r) => r.ip === params.ip);
+    if (!match) {
+      return { removed: false, alreadyAbsent: true };
+    }
+    entryId = match.id;
+  } else {
+    // Pinned path: only DELETE when the read confirmed the entry is still
+    // there; otherwise treat as already absent (covers both
+    // operator-deleted-on-device and a read we couldn't complete).
+    const stillThere = list?.some((r) => r.id === entryId) ?? false;
+    if (!stillThere) {
+      return { removed: false, alreadyAbsent: true };
+    }
   }
 
   await callFortiOs<unknown>(
     t,
     "DELETE",
-    `/api/v2/cmdb/system.dhcp/server/${params.scopeId}/reserved-address/${params.entryId}`,
+    `/api/v2/cmdb/system.dhcp/server/${scopeId}/reserved-address/${entryId}`,
   );
 
   return { removed: true, alreadyAbsent: false };
