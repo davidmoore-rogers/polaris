@@ -10,13 +10,20 @@
 import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
 
-// Layout schema v2 — column-based (SolarWinds-style). A dashboard is an
-// ordered list of columns; each column has a 12-grid width and an ordered
-// vertical stack of widgets. Replaces the v1 free-grid shape (per-widget
-// col/row). v1 rows still load via GET (round-tripped untouched) and are
-// migrated to v2 client-side in dashboard.js bootstrap().
+// Layout schema v3 — multiple named dashboards (tabs). Each dashboard is a
+// column layout (12-grid columns of stacked widgets); `activeId` marks the
+// shown tab. Replaces v2 (a single column layout) and v1 (free-grid). Older
+// rows still load via GET (round-tripped untouched) and are wrapped into one
+// "Dashboard 1" tab client-side in dashboard.js (normalizeLayout).
 export interface DashboardLayout {
-  version: 2;
+  version: 3;
+  dashboards: Dashboard[];
+  activeId: string;
+}
+
+export interface Dashboard {
+  id: string;
+  name: string;
   columns: DashboardColumn[];
 }
 
@@ -35,7 +42,7 @@ export interface DashboardWidgetInstance {
   config: Record<string, unknown>;
 }
 
-export const EMPTY_LAYOUT: DashboardLayout = { version: 2, columns: [] };
+export const EMPTY_LAYOUT: DashboardLayout = { version: 3, dashboards: [], activeId: "" };
 
 /**
  * Returns the caller's layout, or the empty layout if no row exists yet.

@@ -80,11 +80,11 @@
     description: "Sites with monitored assets down or in warning, worst first. Expand a site for its nodes.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
-    defaultConfig: { rowLimit: 10, sortBy: "downCount" },
+    defaultConfig: { rowLimit: 10, sortBy: "downCount", regionScope: "all" },
     requiredPermission: { key: "assets", level: "read" },
 
-    fetchData: function () {
-      return PolarisWidgets.getNocSummary().then(function (d) { return (d && d.sitesWithIssues) || []; }).catch(function () { return []; });
+    fetchData: function (config) {
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return (d && d.sitesWithIssues) || []; }).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
@@ -92,7 +92,7 @@
       render(el, current, config);
       wire(el, function () { return current; }, config);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary().then(function (d) { current = (d && d.sitesWithIssues) || []; render(el, current, config); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { current = (d && d.sitesWithIssues) || []; render(el, current, config); }).catch(function () {});
       }, 30000);
       ctx.onUnmount(function () { clearInterval(timer); _state.delete(el); });
     },
@@ -124,6 +124,7 @@
           onChange(k, k === "rowLimit" ? parseInt(s.value, 10) : s.value);
         });
       });
+      PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });
 })();

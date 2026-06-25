@@ -26,8 +26,10 @@
   var WIDTH_STEPS = [3, 4, 6, 12];
   var HEIGHT_STEPS = [1, 2, 3];
 
+  // Layout is v3: multiple named dashboards (tabs), each a column layout.
+  //   { version:3, dashboards:[{ id, name, columns:[...] }], activeId }
   var state = {
-    layout: { version: 2, columns: [] },
+    layout: { version: 3, dashboards: [], activeId: null },
     editing: false,
     saving: false,
     saveTimer: null,
@@ -35,11 +37,28 @@
     unmounts: {},  // widget instance id → cleanup fn
   };
 
+  // The currently-shown dashboard. All column/widget logic operates on its
+  // .columns; switching tabs just repoints activeId. Always returns an object
+  // (falls back to the first, or a fresh empty one) so callers never null-check.
+  function activeDash() {
+    var d = state.layout.dashboards;
+    if (!d || !d.length) {
+      state.layout.dashboards = [{ id: PolarisWidgets.uuid(), name: "Dashboard 1", columns: [] }];
+      state.layout.activeId = state.layout.dashboards[0].id;
+      return state.layout.dashboards[0];
+    }
+    var found = d.find(function (x) { return x.id === state.layout.activeId; });
+    if (!found) { found = d[0]; state.layout.activeId = found.id; }
+    return found;
+  }
+
   var canvasEl = null;
   var emptyEl = null;
+  var tabsEl = null;
   var customizeBtn = null;
   var addWidgetsBtn = null;
   var doneBtn = null;
+  var createBtn = null;
   var openPopover = null;
 
   // Drag stashes — dataTransfer.getData() is unreadable during dragover, so
@@ -52,15 +71,18 @@
   document.addEventListener("DOMContentLoaded", function () {
     canvasEl     = document.getElementById("dashboard-canvas");
     emptyEl      = document.getElementById("dashboard-empty-state");
+    tabsEl       = document.getElementById("dashboard-tabs");
     customizeBtn = document.getElementById("dashboard-customize");
     addWidgetsBtn = document.getElementById("dashboard-add-widgets");
     doneBtn      = document.getElementById("dashboard-done");
+    createBtn    = document.getElementById("dashboard-create");
 
     if (!canvasEl || !emptyEl || !customizeBtn) return;
 
     customizeBtn.addEventListener("click", enterEditMode);
     if (addWidgetsBtn) addWidgetsBtn.addEventListener("click", function () { WidgetLibrary.open(handleTapToAdd); });
     if (doneBtn) doneBtn.addEventListener("click", exitEditMode);
+    if (createBtn) createBtn.addEventListener("click", createDashboard);
 
     canvasEl.addEventListener("dragover", onCanvasDragOver);
     canvasEl.addEventListener("dragleave", onCanvasDragLeave);
@@ -95,24 +117,36 @@
     }
     state.layout = normalizeLayout(loaded);
 
-    // Drop-silently: widget types no longer registered are filtered out of
-    // every column; empty columns are dropped. Persist if anything changed.
-    var before = JSON.stringify(state.layout.columns);
-    state.layout.columns.forEach(function (col) {
-      col.widgets = col.widgets.filter(function (w) { return PolarisWidgets.getByType(w.type) != null; });
+    // Drop-silently: across EVERY dashboard, widget types no longer registered
+    // are filtered out and emptied columns dropped. Persist if anything changed.
+    var before = JSON.stringify(state.layout.dashboards);
+    state.layout.dashboards.forEach(function (dash) {
+      dash.columns.forEach(function (col) {
+        col.widgets = col.widgets.filter(function (w) { return PolarisWidgets.getByType(w.type) != null; });
+      });
+      dash.columns = dash.columns.filter(function (col) { return col.widgets.length > 0; });
     });
-    state.layout.columns = state.layout.columns.filter(function (col) { return col.widgets.length > 0; });
-    if (JSON.stringify(state.layout.columns) !== before) queueSave();
+    if (JSON.stringify(state.layout.dashboards) !== before) queueSave();
 
     setHeaderMode();
     renderRoot();
   }
 
-  // Accept a v2 layout as-is, migrate a v1 layout, or fall back to empty.
+  // Normalize any stored layout to v3 (multi-dashboard). v3 passes through;
+  // v2 (single column layout) and v1 (free-grid) are wrapped into one
+  // "Dashboard 1" tab; anything else becomes a single empty dashboard.
   function normalizeLayout(data) {
-    if (data && data.version === 2 && Array.isArray(data.columns)) return data;
-    if (data && data.version === 1 && Array.isArray(data.widgets)) return migrateV1ToV2(data);
-    return { version: 2, columns: [] };
+    if (data && data.version === 3 && Array.isArray(data.dashboards) && data.dashboards.length) {
+      if (!data.activeId || !data.dashboards.some(function (d) { return d.id === data.activeId; })) {
+        data.activeId = data.dashboards[0].id;
+      }
+      return data;
+    }
+    var columns = [];
+    if (data && data.version === 2 && Array.isArray(data.columns)) columns = data.columns;
+    else if (data && data.version === 1 && Array.isArray(data.widgets)) columns = migrateV1ToV2(data).columns;
+    var id = PolarisWidgets.uuid();
+    return { version: 3, dashboards: [{ id: id, name: "Dashboard 1", columns: columns }], activeId: id };
   }
 
   // v1 {widgets:[{col,row,width,height}]} → v2 columns: bucket by col-start,
@@ -150,7 +184,7 @@
   }
 
   function totalWidgets() {
-    return state.layout.columns.reduce(function (n, c) { return n + c.widgets.length; }, 0);
+    return activeDash().columns.reduce(function (n, c) { return n + c.widgets.length; }, 0);
   }
 
   // ─── Edit mode ────────────────────────────────────────────────────────────
@@ -179,11 +213,98 @@
     state.unmounts = {};
   }
 
-  // Choose between the empty-state prompt and the canvas, then render.
+  // Choose between the empty-state prompt and the canvas, then render. The tab
+  // bar (when >1 dashboard) renders above either, independent of empty state.
   function renderRoot() {
+    renderTabs();
     if (!state.editing && totalWidgets() === 0) { showEmpty(); return; }
     hideEmpty();
     renderCanvas();
+  }
+
+  // ─── Dashboards / tabs ────────────────────────────────────────────────────
+
+  // Tab bar appears once there's more than one dashboard. Click a tab to
+  // switch; in edit mode each tab can be renamed (double-click) and removed (×).
+  function renderTabs() {
+    if (!tabsEl) return;
+    var dashes = state.layout.dashboards || [];
+    if (dashes.length <= 1) { tabsEl.hidden = true; tabsEl.innerHTML = ""; return; }
+    tabsEl.hidden = false;
+    tabsEl.innerHTML = dashes.map(function (d) {
+      var active = d.id === state.layout.activeId;
+      // In edit mode the ACTIVE tab's name is an inline text input — click it
+      // and type to rename. Other tabs show a plain name (click to switch).
+      var nameHtml = (state.editing && active)
+        ? '<input type="text" class="dashboard-tab-name-input" data-name="' + escapeHtml(d.id) + '" value="' + escapeHtml(d.name || "") + '" maxlength="60" size="' + Math.max((d.name || "").length, 8) + '" aria-label="Dashboard name">'
+        : '<span class="dashboard-tab-name">' + escapeHtml(d.name || "Untitled") + '</span>';
+      return '<div class="dashboard-tab' + (active ? " active" : "") + '" data-dash="' + escapeHtml(d.id) + '" role="button" tabindex="0">' +
+        nameHtml +
+        (state.editing && dashes.length > 1 ? '<button type="button" class="dashboard-tab-remove" data-remove="' + escapeHtml(d.id) + '" title="Delete dashboard">&times;</button>' : '') +
+      '</div>';
+    }).join("");
+    tabsEl.querySelectorAll(".dashboard-tab").forEach(function (tab) {
+      var id = tab.getAttribute("data-dash");
+      tab.addEventListener("click", function (e) {
+        if (e.target.closest("[data-remove]")) { e.stopPropagation(); deleteDashboard(id); return; }
+        if (e.target.closest(".dashboard-tab-name-input")) return; // editing the active name, don't switch
+        switchDashboard(id);
+      });
+    });
+    // Inline rename on the active tab's input: Enter or blur commits, Esc cancels.
+    var input = tabsEl.querySelector(".dashboard-tab-name-input");
+    if (input) {
+      input.addEventListener("click", function (e) { e.stopPropagation(); });
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        else if (e.key === "Escape") { input.value = nameOf(input.getAttribute("data-name")); input.blur(); }
+      });
+      input.addEventListener("blur", function () { commitTabName(input.getAttribute("data-name"), input.value); });
+    }
+  }
+
+  function nameOf(id) {
+    var d = state.layout.dashboards.find(function (x) { return x.id === id; });
+    return d ? (d.name || "") : "";
+  }
+
+  function commitTabName(id, value) {
+    var d = state.layout.dashboards.find(function (x) { return x.id === id; });
+    if (!d) return;
+    var name = (value || "").trim().slice(0, 60);
+    if (!name || name === d.name) { renderTabs(); return; } // blank/unchanged → restore
+    d.name = name;
+    queueSave();
+    renderTabs();
+  }
+
+  function createDashboard() {
+    var id = PolarisWidgets.uuid();
+    var n = (state.layout.dashboards.length || 0) + 1;
+    state.layout.dashboards.push({ id: id, name: "Dashboard " + n, columns: [] });
+    state.layout.activeId = id;
+    // New tab is empty and ready to edit, per the feature intent.
+    state.editing = true;
+    setHeaderMode();
+    renderRoot();
+    queueSave();
+  }
+
+  function switchDashboard(id) {
+    if (id === state.layout.activeId) return;
+    state.layout.activeId = id;
+    closePopover();
+    renderRoot();
+    queueSave();
+  }
+
+  function deleteDashboard(id) {
+    if (state.layout.dashboards.length <= 1) return; // never remove the last
+    if (!window.confirm("Delete this dashboard and its widgets?")) return;
+    applyChange(function () {
+      state.layout.dashboards = state.layout.dashboards.filter(function (x) { return x.id !== id; });
+      if (state.layout.activeId === id) state.layout.activeId = state.layout.dashboards[0].id;
+    });
   }
 
   function showEmpty() {
@@ -201,12 +322,12 @@
     unmountAll();
     canvasEl.innerHTML = "";
     _placeholder = null;
-    state.layout.columns.forEach(function (col, ci) {
+    activeDash().columns.forEach(function (col, ci) {
       canvasEl.appendChild(mountColumnShell(col, ci));
     });
     if (state.editing) canvasEl.appendChild(buildNewColumnTarget());
     // Mount widget bodies after all shells are in the DOM.
-    state.layout.columns.forEach(function (col) { col.widgets.forEach(renderWidget); });
+    activeDash().columns.forEach(function (col) { col.widgets.forEach(renderWidget); });
   }
 
   function mountColumnShell(col, ci) {
@@ -357,7 +478,7 @@
   }
 
   async function refetchSummaryIfNeeded() {
-    var needsSummary = state.layout.columns.some(function (col) {
+    var needsSummary = activeDash().columns.some(function (col) {
       return col.widgets.some(function (w) {
         return ["recentReservations", "assetTypes", "blockUtilization"].indexOf(w.type) !== -1;
       });
@@ -395,9 +516,9 @@
   }
 
   function findWidget(id) {
-    for (var ci = 0; ci < state.layout.columns.length; ci++) {
-      var idx = state.layout.columns[ci].widgets.findIndex(function (w) { return w.id === id; });
-      if (idx !== -1) return { colIndex: ci, idx: idx, widget: state.layout.columns[ci].widgets[idx] };
+    for (var ci = 0; ci < activeDash().columns.length; ci++) {
+      var idx = activeDash().columns[ci].widgets.findIndex(function (w) { return w.id === id; });
+      if (idx !== -1) return { colIndex: ci, idx: idx, widget: activeDash().columns[ci].widgets[idx] };
     }
     return null;
   }
@@ -415,10 +536,10 @@
       height: module.defaultSize.height === 2 ? 2 : 1,
       config: Object.assign({}, module.defaultConfig || {}),
     };
-    if (!target || target.newColumn || !state.layout.columns.length) {
-      state.layout.columns.push(newColumn(module.defaultSize.width, [inst]));
+    if (!target || target.newColumn || !activeDash().columns.length) {
+      activeDash().columns.push(newColumn(module.defaultSize.width, [inst]));
     } else {
-      state.layout.columns[target.columnIndex].widgets.splice(target.insertionIndex, 0, inst);
+      activeDash().columns[target.columnIndex].widgets.splice(target.insertionIndex, 0, inst);
     }
     hideEmpty();
     refetchSummaryIfNeeded().then(function () { renderRoot(); });
@@ -429,34 +550,34 @@
     var src = findWidget(id);
     if (!src || !target) return;
     applyChange(function () {
-      state.layout.columns[src.colIndex].widgets.splice(src.idx, 1);
+      activeDash().columns[src.colIndex].widgets.splice(src.idx, 1);
       if (target.newColumn) {
-        state.layout.columns.push(newColumn(6, [src.widget]));
+        activeDash().columns.push(newColumn(6, [src.widget]));
       } else {
         var at = target.insertionIndex;
         // Same-column move past the removed slot shifts the index down by one.
         if (target.columnIndex === src.colIndex && src.idx < at) at--;
-        state.layout.columns[target.columnIndex].widgets.splice(at, 0, src.widget);
+        activeDash().columns[target.columnIndex].widgets.splice(at, 0, src.widget);
       }
-      state.layout.columns = state.layout.columns.filter(function (c) { return c.widgets.length > 0; });
+      activeDash().columns = activeDash().columns.filter(function (c) { return c.widgets.length > 0; });
     });
   }
 
   function removeWidget(id) {
     applyChange(function () {
-      state.layout.columns.forEach(function (c) { c.widgets = c.widgets.filter(function (w) { return w.id !== id; }); });
-      state.layout.columns = state.layout.columns.filter(function (c) { return c.widgets.length > 0; });
+      activeDash().columns.forEach(function (c) { c.widgets = c.widgets.filter(function (w) { return w.id !== id; }); });
+      activeDash().columns = activeDash().columns.filter(function (c) { return c.widgets.length > 0; });
     });
   }
 
   function removeColumn(colId) {
     applyChange(function () {
-      state.layout.columns = state.layout.columns.filter(function (c) { return c.id !== colId; });
+      activeDash().columns = activeDash().columns.filter(function (c) { return c.id !== colId; });
     });
   }
 
   function setColumnWidth(colId, width) {
-    var col = state.layout.columns.find(function (c) { return c.id === colId; });
+    var col = activeDash().columns.find(function (c) { return c.id === colId; });
     if (!col || col.width === width) return;
     applyChange(function () { col.width = width; });
   }
@@ -477,9 +598,9 @@
 
   function handleTapToAdd(type) {
     // Click-to-add from the picker: append to the last column, or start one.
-    if (state.layout.columns.length) {
-      var last = state.layout.columns.length - 1;
-      addWidgetAt(type, { columnIndex: last, insertionIndex: state.layout.columns[last].widgets.length });
+    if (activeDash().columns.length) {
+      var last = activeDash().columns.length - 1;
+      addWidgetAt(type, { columnIndex: last, insertionIndex: activeDash().columns[last].widgets.length });
     } else {
       addWidgetAt(type, { newColumn: true });
     }

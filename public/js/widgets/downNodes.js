@@ -73,17 +73,17 @@
     description: "Monitored assets currently down, grouped by site or division.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
-    defaultConfig: { groupBy: "site", rowLimit: 10 },
+    defaultConfig: { groupBy: "site", rowLimit: 10, regionScope: "all" },
     requiredPermission: { key: "assets", level: "read" },
 
-    fetchData: function () {
-      return PolarisWidgets.getNocSummary().then(function (d) { return (d && d.downNodes) || []; }).catch(function () { return []; });
+    fetchData: function (config) {
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return (d && d.downNodes) || []; }).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
       render(el, data, config);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary().then(function (d) { render(el, (d && d.downNodes) || [], config); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, (d && d.downNodes) || [], config); }).catch(function () {});
       }, 30000);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
@@ -115,6 +115,7 @@
           onChange(k, k === "rowLimit" ? parseInt(s.value, 10) : s.value);
         });
       });
+      PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });
 })();

@@ -117,11 +117,28 @@ router.get("/summary", async (req, res, next) => {
  * assets:read, Event-sourced sections (active alerts, recent reboots) gate on
  * events:read; denied sections return empty/zero with the shape unchanged.
  */
+function parseCsvParam(raw: unknown): string[] | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  return parts.length ? parts : null;
+}
+
 router.get("/noc-summary", async (req, res, next) => {
   try {
     await ensureSessionRoleSnapshot(req);
     const canAssets = hasPermission(req, "assets", "read");
     const canEvents = hasPermission(req, "events", "read");
+
+    // Per-widget filters (optional): ?assetTypes=server,switch,... (the ENABLED
+    // built-in types) and ?regionTags=East,West (the caller's "My regions"
+    // names). resolveFilteredAssetIds returns null when neither narrows the set
+    // — the default unfiltered, shared-payload path. The frontend memoizes per
+    // (assetTypes, regionTags) so each distinct filter fetches once.
+    const assetTypes = parseCsvParam(req.query.assetTypes);
+    const regionNames = parseCsvParam(req.query.regionTags);
+    const assetIds = (canAssets || canEvents)
+      ? await nocDashboardService.resolveFilteredAssetIds({ assetTypes, regionNames })
+      : null;
 
     const emptyStatus = {
       statusCounts: { total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0 },
@@ -133,16 +150,16 @@ router.get("/noc-summary", async (req, res, next) => {
       status, downNodes, topCpu, topMemory, slowestResponse, packetLoss, stalePolls, sitesWithIssues,
       recentReboots, activeAlerts,
     ] = await Promise.all([
-      canAssets ? nocDashboardService.getStatusSummary()    : Promise.resolve(emptyStatus),
-      canAssets ? nocDashboardService.getDownNodes()        : Promise.resolve({ nodes: [], total: 0 }),
-      canAssets ? nocDashboardService.getHighestCpu()       : Promise.resolve([]),
-      canAssets ? nocDashboardService.getHighestMemory()    : Promise.resolve([]),
-      canAssets ? nocDashboardService.getSlowestResponse()  : Promise.resolve([]),
-      canAssets ? nocDashboardService.getPacketLoss()       : Promise.resolve([]),
-      canAssets ? nocDashboardService.getStalePolls()       : Promise.resolve([]),
-      canAssets ? nocDashboardService.getSitesWithIssues()  : Promise.resolve([]),
-      canEvents ? nocDashboardService.getRecentReboots()    : Promise.resolve([]),
-      canEvents ? nocDashboardService.getRecentAlerts()     : Promise.resolve([]),
+      canAssets ? nocDashboardService.getStatusSummary(assetIds)        : Promise.resolve(emptyStatus),
+      canAssets ? nocDashboardService.getDownNodes(100, assetIds)       : Promise.resolve({ nodes: [], total: 0 }),
+      canAssets ? nocDashboardService.getHighestCpu(100, 60, assetIds)  : Promise.resolve([]),
+      canAssets ? nocDashboardService.getHighestMemory(100, 60, assetIds) : Promise.resolve([]),
+      canAssets ? nocDashboardService.getSlowestResponse(100, assetIds) : Promise.resolve([]),
+      canAssets ? nocDashboardService.getPacketLoss(100, 15, assetIds)  : Promise.resolve([]),
+      canAssets ? nocDashboardService.getStalePolls(3, 50, assetIds)    : Promise.resolve([]),
+      canAssets ? nocDashboardService.getSitesWithIssues(25, assetIds)  : Promise.resolve([]),
+      canEvents ? nocDashboardService.getRecentReboots(72, 20, assetIds) : Promise.resolve([]),
+      canEvents ? nocDashboardService.getRecentAlerts(30, assetIds)     : Promise.resolve([]),
     ]);
 
     res.json({
