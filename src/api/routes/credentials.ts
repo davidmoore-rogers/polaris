@@ -51,10 +51,27 @@ router.get("/", requirePermission("credentials", "read"), async (_req, res, next
   } catch (err) { next(err); }
 });
 
+// GET /credentials/usage — effective-usage asset count per credential, keyed by
+// credential id. Drives the Assets column on the Stored Credentials table in
+// one round-trip. Registered before /:id so "usage" isn't read as an id.
+router.get("/usage", requirePermission("credentials", "read"), async (_req, res, next) => {
+  try {
+    res.json(await credentialService.getCredentialUsageCounts());
+  } catch (err) { next(err); }
+});
+
 // GET /credentials/:id
 router.get("/:id", requirePermission("credentials", "read"), async (req, res, next) => {
   try {
     res.json(await credentialService.getCredential(req.params.id as string));
+  } catch (err) { next(err); }
+});
+
+// GET /credentials/:id/usage — full usage breakdown grouped by level
+// (asset / class / integration) for the usage slide-in.
+router.get("/:id/usage", requirePermission("credentials", "read"), async (req, res, next) => {
+  try {
+    res.json(await credentialService.getCredentialUsage(req.params.id as string));
   } catch (err) { next(err); }
 });
 

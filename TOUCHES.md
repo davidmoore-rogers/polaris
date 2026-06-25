@@ -1877,18 +1877,20 @@ Listed alphabetically.
 
 ## services/credentialService.ts
 
-**What it owns:** Named-credential store for monitoring probes (SNMP v2c/v3, WinRM, SSH, REST API); type-specific config validation; secret masking on GET; merge-and-preserve logic for PUT to retain secrets when client resubmits mask.
+**What it owns:** Named-credential store for monitoring probes (SNMP v2c/v3, WinRM, SSH, REST API); type-specific config validation; secret masking on GET; merge-and-preserve logic for PUT to retain secrets when client resubmits mask. Also the credential-usage resolver (where is a credential wired across the monitor-settings tiers).
 
-**Public API:** CredentialType, SnmpV2cConfig, SnmpV3Config, SnmpConfig, WinRmConfig, SshConfig, RestApiConfig, CredentialConfig, CredentialRecord, SaveCredentialInput, UpdateCredentialInput, stripSecrets, validateConfig, mergeConfigPreservingSecrets, listCredentials, getCredential, createCredential, updateCredential, deleteCredential.
+**Public API:** CredentialType, SnmpV2cConfig, SnmpV3Config, SnmpConfig, WinRmConfig, SshConfig, RestApiConfig, CredentialConfig, CredentialRecord, SaveCredentialInput, UpdateCredentialInput, CredentialUsage(+ CredentialUsageAsset / CredentialUsageClassGroup / CredentialUsageIntegrationGroup), stripSecrets, validateConfig, mergeConfigPreservingSecrets, listCredentials, getCredential, createCredential, updateCredential, deleteCredential, getCredentialUsageCounts, getCredentialUsage.
 
 **Cross-service deps:** none.
 
 **Used by:**
 - src/api/routes/credentials.ts — GET /credentials, list (secrets masked)
+- src/api/routes/credentials.ts — GET /credentials/usage, effective-usage asset count per credential (table column)
 - src/api/routes/credentials.ts — GET /credentials/:id, fetch one
+- src/api/routes/credentials.ts — GET /credentials/:id/usage, full usage breakdown grouped by tier (usage slide-in)
 - src/api/routes/credentials.ts — POST /credentials, create
 - src/api/routes/credentials.ts — PUT /credentials/:id, update (merge w/ secret preservation)
-- src/api/routes/credentials.ts — DELETE /credentials/:id, revoke (fails 409 if asset references it)
+- src/api/routes/credentials.ts — DELETE /credentials/:id, revoke (fails 409 if effectively used or still referenced)
 - src/api/routes/assets.ts — GET /assets/:id/resolve-monitor-setting, fetch credential for asset monitoring setup
 
 **Invariants:**
@@ -1896,14 +1898,15 @@ Listed alphabetically.
 - SNMP v2c requires community; v3 requires username + security level + auth/priv keys per level.
 - SSH requires username + (password OR privateKey); WinRM requires both username + password.
 - REST API requires baseUrl (http/https only, no trailing slash stored) + apiToken; verifyTls defaults false.
-- Delete fails with 409 if any asset.monitorCredentialId points to it; check all six Asset credential type columns (monitorCredentialId, responseTimeCredentialId, cpuMemoryCredentialId, temperatureCredentialId, interfacesCredentialId, lldpCredentialId). MonitorClassOverride also has five per-stream credential FK columns (responseTimeCredentialId / cpuMemoryCredentialId / temperatureCredentialId / interfacesCredentialId / lldpCredentialId) with ON DELETE SET NULL — Postgres nulls those automatically, no application 409 needed.
+- Delete fails with 409 when the credential is effectively used or still referenced, via `getCredentialUsage` (NOT a hand-maintained column list). Effective usage covers all 8 per-stream Asset credential slots + the `monitorCredentialId` default, plus class-override and integration-default inheritance; a class/integration reference with no matching asset also 409s (deleting would silently SET NULL it). The FK columns themselves are ON DELETE SET NULL, so this guard is the only thing preventing silent unwiring.
+- Credential-usage resolution is by FK wiring (asset stream → asset default → class-override stream → integration `config.monitorCredentialId`), NOT polling-method type-match — it answers "where is this configured." The eight stream slots (`CREDENTIAL_STREAMS`) are responseTime / cpuMemory / temperature / interfaces / lldp / customWidget / processes / eventLog; storage rides `interfaces`. The manual tier (Setting "manualMonitorSettings") carries no default credential, so manual assets resolve through asset + class tiers only.
 - validateConfig is called on CREATE and on PUT (after merge), catching type/field mismatches early.
 
 **When changing this:**
 - Test secret masking round-trip (GET → masked, PUT w/ mask → original preserved).
 - Add new credential types: extend CredentialType union, add SECRET_FIELDS_BY_TYPE entry, add validateXxxConfig branch.
 - Test all SNMP v3 security-level combos (noAuthNoPriv, authNoPriv, authPriv); validate protocol enums.
-- Ensure delete check covers all five asset credential columns; update the test suite when columns change.
+- Add a new per-stream credential slot: add it to `CREDENTIAL_STREAMS` so usage + the delete guard cover it (and to the schema on both Asset and MonitorClassOverride). Tests live in tests/unit/credentialUsage.test.ts.
 - Verify REST API baseUrl normalization (trim, remove trailing slash, require http/https scheme).
 
 ---

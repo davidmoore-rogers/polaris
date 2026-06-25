@@ -330,24 +330,306 @@ export async function updateCredential(id: string, input: UpdateCredentialInput)
   return stripSecrets(updated as unknown as CredentialRecord);
 }
 
+// ─── Credential usage ("where is this credential wired?") ───────────────────
+//
+// A credential reaches a monitored asset through the monitor-settings
+// fall-through. For each of the eight per-stream slots the effective
+// credential is the first non-null of:
+//   1. Asset.<stream>CredentialId   → "asset" level (stream-specific)
+//   2. Asset.monitorCredentialId    → "asset" level (default)
+//   3. MonitorClassOverride.<stream>CredentialId for the asset's
+//        (discoveredByIntegrationId | null, assetType) class → "class" level
+//   4. Integration.config.monitorCredentialId (discovered assets only)
+//        → "integration" level
+// The manual tier (Setting "manualMonitorSettings") carries no default
+// credential, so manual assets resolve through the asset + class tiers only.
+//
+// This resolves by FK wiring; it does NOT check whether a stream's actual
+// polling method needs that credential type. It answers "where is this
+// credential configured" — exactly the admin / delete-safety question.
+
+/**
+ * The eight per-stream credential slots that exist on both Asset and
+ * MonitorClassOverride. Storage has no slot of its own (it rides the
+ * `interfaces` credential), so it isn't listed here.
+ */
+const CREDENTIAL_STREAMS = [
+  { field: "responseTimeCredentialId", label: "Response time" },
+  { field: "cpuMemoryCredentialId",    label: "CPU / memory" },
+  { field: "temperatureCredentialId",  label: "Hardware sensors" },
+  { field: "interfacesCredentialId",   label: "Interfaces / storage" },
+  { field: "lldpCredentialId",         label: "LLDP" },
+  { field: "customWidgetCredentialId", label: "Custom widgets" },
+  { field: "processesCredentialId",    label: "Processes" },
+  { field: "eventLogCredentialId",     label: "Event log" },
+] as const;
+
+type CredRow = Record<string, string | boolean | null | undefined>;
+
+export interface CredentialUsageAsset {
+  assetId: string;
+  hostname: string | null;
+  ipAddress: string | null;
+  assetType: string;
+  monitored: boolean;
+  status: string;
+  /** Stream labels (+ "Default") this credential is wired for at this level. */
+  streams: string[];
+}
+
+export interface CredentialUsageClassGroup {
+  integrationId: string | null;
+  integrationName: string | null; // null when the class override is the manual tier
+  assetType: string;
+  /** Stream labels the class override points at this credential. */
+  streams: string[];
+  assets: CredentialUsageAsset[];
+}
+
+export interface CredentialUsageIntegrationGroup {
+  integrationId: string;
+  integrationName: string;
+  assets: CredentialUsageAsset[];
+}
+
+export interface CredentialUsage {
+  credentialId: string;
+  total: number; // distinct assets effectively using the credential
+  assetLevel: CredentialUsageAsset[];
+  classLevel: CredentialUsageClassGroup[];
+  integrationLevel: CredentialUsageIntegrationGroup[];
+  /** Class overrides referencing the credential (regardless of matching assets). */
+  classRefCount: number;
+  /** Integrations whose default monitor credential is this credential. */
+  integrationRefCount: number;
+}
+
+interface UsageInputs {
+  assets: CredRow[];
+  /** keyed `${integrationId ?? ""}|${assetType}` */
+  classByKey: Map<string, CredRow>;
+  /** all loaded class overrides (for ref counting) */
+  classRows: CredRow[];
+  /** integrationId → default monitorCredentialId (or null) */
+  intDefaultCred: Map<string, string | null>;
+  intName: Map<string, string>;
+}
+
+const ASSET_USAGE_SELECT = {
+  id: true, hostname: true, ipAddress: true, assetType: true,
+  monitored: true, status: true, discoveredByIntegrationId: true,
+  monitorCredentialId: true,
+  responseTimeCredentialId: true, cpuMemoryCredentialId: true,
+  temperatureCredentialId: true, interfacesCredentialId: true,
+  lldpCredentialId: true, customWidgetCredentialId: true,
+  processesCredentialId: true, eventLogCredentialId: true,
+} as const;
+
+const CLASS_USAGE_SELECT = {
+  integrationId: true, assetType: true,
+  responseTimeCredentialId: true, cpuMemoryCredentialId: true,
+  temperatureCredentialId: true, interfacesCredentialId: true,
+  lldpCredentialId: true, customWidgetCredentialId: true,
+  processesCredentialId: true, eventLogCredentialId: true,
+} as const;
+
+async function loadUsageInputs(): Promise<UsageInputs> {
+  const [assets, classRows, integrations] = await Promise.all([
+    prisma.asset.findMany({ select: ASSET_USAGE_SELECT }) as unknown as Promise<CredRow[]>,
+    prisma.monitorClassOverride.findMany({ select: CLASS_USAGE_SELECT }) as unknown as Promise<CredRow[]>,
+    prisma.integration.findMany({ select: { id: true, name: true, config: true } }),
+  ]);
+  const classByKey = new Map<string, CredRow>();
+  for (const ov of classRows) {
+    classByKey.set(`${(ov.integrationId as string | null) ?? ""}|${ov.assetType as string}`, ov);
+  }
+  const intDefaultCred = new Map<string, string | null>();
+  const intName = new Map<string, string>();
+  for (const it of integrations) {
+    const cfg = it.config && typeof it.config === "object" ? (it.config as Record<string, unknown>) : {};
+    const credId = typeof cfg.monitorCredentialId === "string" ? cfg.monitorCredentialId : null;
+    intDefaultCred.set(it.id, credId);
+    intName.set(it.id, it.name);
+  }
+  return { assets, classByKey, classRows, intDefaultCred, intName };
+}
+
+function classKeyForAsset(a: CredRow): string {
+  return `${(a.discoveredByIntegrationId as string | null) ?? ""}|${a.assetType as string}`;
+}
+
+function intDefaultForAsset(a: CredRow, inputs: UsageInputs): string | null {
+  const intId = a.discoveredByIntegrationId as string | null;
+  return intId ? inputs.intDefaultCred.get(intId) ?? null : null;
+}
+
+/** Distinct set of credential ids effectively used by one asset (across all streams). */
+function effectiveCredentialIds(a: CredRow, classOv: CredRow | null, intCredId: string | null): Set<string> {
+  const out = new Set<string>();
+  const assetDefault = a.monitorCredentialId as string | null;
+  for (const s of CREDENTIAL_STREAMS) {
+    const assetStream = a[s.field] as string | null;
+    if (assetStream) { out.add(assetStream); continue; }
+    if (assetDefault) { out.add(assetDefault); continue; }
+    const classStream = classOv ? (classOv[s.field] as string | null) : null;
+    if (classStream) { out.add(classStream); continue; }
+    if (intCredId) { out.add(intCredId); continue; }
+  }
+  return out;
+}
+
+function toUsageAsset(a: CredRow, streams: string[]): CredentialUsageAsset {
+  return {
+    assetId: a.id as string,
+    hostname: (a.hostname as string | null) ?? null,
+    ipAddress: (a.ipAddress as string | null) ?? null,
+    assetType: a.assetType as string,
+    monitored: Boolean(a.monitored),
+    status: a.status as string,
+    streams,
+  };
+}
+
+function byHostname(a: CredentialUsageAsset, b: CredentialUsageAsset): number {
+  return (a.hostname || a.ipAddress || a.assetId).localeCompare(b.hostname || b.ipAddress || b.assetId);
+}
+
+/**
+ * Effective-usage asset count per credential, for the Stored Credentials
+ * table column. One asset findMany + small lookups; resolution is in-memory.
+ */
+export async function getCredentialUsageCounts(): Promise<Record<string, number>> {
+  const inputs = await loadUsageInputs();
+  const counts: Record<string, number> = {};
+  for (const a of inputs.assets) {
+    const classOv = inputs.classByKey.get(classKeyForAsset(a)) ?? null;
+    const credIds = effectiveCredentialIds(a, classOv, intDefaultForAsset(a, inputs));
+    for (const cid of credIds) counts[cid] = (counts[cid] ?? 0) + 1;
+  }
+  return counts;
+}
+
+/**
+ * Full usage breakdown for one credential, grouped by the level each asset
+ * inherits it from (asset / class / integration). Each asset lands in its
+ * most-specific bucket, so `total` is a true distinct count.
+ */
+export async function getCredentialUsage(id: string): Promise<CredentialUsage> {
+  const exists = await prisma.credential.findUnique({ where: { id }, select: { id: true } });
+  if (!exists) throw new AppError(404, "Credential not found");
+
+  const inputs = await loadUsageInputs();
+  const assetLevel: CredentialUsageAsset[] = [];
+  const classGroups = new Map<string, CredentialUsageClassGroup>();
+  const intGroups = new Map<string, CredentialUsageIntegrationGroup>();
+
+  for (const a of inputs.assets) {
+    const classOv = inputs.classByKey.get(classKeyForAsset(a)) ?? null;
+    const assetDefault = a.monitorCredentialId as string | null;
+
+    // ── Asset level: the credential is wired directly on the asset ──────────
+    const assetStreams: string[] = [];
+    if (assetDefault === id) assetStreams.push("Default");
+    for (const s of CREDENTIAL_STREAMS) if ((a[s.field] as string | null) === id) assetStreams.push(s.label);
+    if (assetStreams.length > 0) {
+      assetLevel.push(toUsageAsset(a, assetStreams));
+      continue; // most-specific bucket wins
+    }
+
+    // The class/integration tiers only apply when the asset has no default
+    // credential of its own (asset default outranks both).
+    if (assetDefault != null) continue;
+
+    // ── Class level ─────────────────────────────────────────────────────────
+    if (classOv) {
+      const classStreams: string[] = [];
+      for (const s of CREDENTIAL_STREAMS) {
+        if ((a[s.field] as string | null) == null && (classOv[s.field] as string | null) === id) {
+          classStreams.push(s.label);
+        }
+      }
+      if (classStreams.length > 0) {
+        const key = classKeyForAsset(a);
+        let g = classGroups.get(key);
+        if (!g) {
+          const intId = a.discoveredByIntegrationId as string | null;
+          g = {
+            integrationId: intId,
+            integrationName: intId ? inputs.intName.get(intId) ?? null : null,
+            assetType: a.assetType as string,
+            streams: CREDENTIAL_STREAMS.filter((s) => (classOv[s.field] as string | null) === id).map((s) => s.label),
+            assets: [],
+          };
+          classGroups.set(key, g);
+        }
+        g.assets.push(toUsageAsset(a, classStreams));
+        continue;
+      }
+    }
+
+    // ── Integration level: some stream falls all the way through ────────────
+    const intCredId = intDefaultForAsset(a, inputs);
+    if (intCredId === id) {
+      const fallsThrough = CREDENTIAL_STREAMS.some(
+        (s) => (a[s.field] as string | null) == null && (classOv ? (classOv[s.field] as string | null) : null) == null,
+      );
+      if (fallsThrough) {
+        const intId = a.discoveredByIntegrationId as string;
+        let g = intGroups.get(intId);
+        if (!g) {
+          g = { integrationId: intId, integrationName: inputs.intName.get(intId) ?? intId, assets: [] };
+          intGroups.set(intId, g);
+        }
+        g.assets.push(toUsageAsset(a, ["Default"]));
+      }
+    }
+  }
+
+  // Reference counts (independent of whether assets currently match).
+  let classRefCount = 0;
+  for (const ov of inputs.classRows) {
+    if (CREDENTIAL_STREAMS.some((s) => (ov[s.field] as string | null) === id)) classRefCount += 1;
+  }
+  let integrationRefCount = 0;
+  for (const credId of inputs.intDefaultCred.values()) if (credId === id) integrationRefCount += 1;
+
+  assetLevel.sort(byHostname);
+  const classLevel = [...classGroups.values()].sort(
+    (a, b) => (a.integrationName || "Manual").localeCompare(b.integrationName || "Manual") || a.assetType.localeCompare(b.assetType),
+  );
+  for (const g of classLevel) g.assets.sort(byHostname);
+  const integrationLevel = [...intGroups.values()].sort((a, b) => a.integrationName.localeCompare(b.integrationName));
+  for (const g of integrationLevel) g.assets.sort(byHostname);
+
+  const total =
+    assetLevel.length +
+    classLevel.reduce((n, g) => n + g.assets.length, 0) +
+    integrationLevel.reduce((n, g) => n + g.assets.length, 0);
+
+  return { credentialId: id, total, assetLevel, classLevel, integrationLevel, classRefCount, integrationRefCount };
+}
+
 export async function deleteCredential(id: string): Promise<void> {
-  const inUse = await prisma.asset.count({
-    where: {
-      OR: [
-        { monitorCredentialId:      id },
-        { responseTimeCredentialId: id },
-        { cpuMemoryCredentialId:    id },
-        { temperatureCredentialId:  id },
-        { interfacesCredentialId:   id },
-        { lldpCredentialId:         id },
-      ],
-    },
-  });
-  if (inUse > 0) {
+  const usage = await getCredentialUsage(id); // throws 404 if missing
+  if (usage.total > 0) {
+    const parts: string[] = [];
+    if (usage.assetLevel.length) parts.push(`${usage.assetLevel.length} directly`);
+    const viaClass = usage.classLevel.reduce((n, g) => n + g.assets.length, 0);
+    if (viaClass) parts.push(`${viaClass} via class settings`);
+    const viaInt = usage.integrationLevel.reduce((n, g) => n + g.assets.length, 0);
+    if (viaInt) parts.push(`${viaInt} via integration defaults`);
     throw new AppError(
       409,
-      `Credential is in use by ${inUse} asset${inUse === 1 ? "" : "s"}; clear monitoring there first`,
+      `Credential is in use by ${usage.total} asset${usage.total === 1 ? "" : "s"} (${parts.join(", ")}); clear monitoring there first`,
     );
+  }
+  // No assets resolve to it, but a class override or integration default may
+  // still reference it — deleting would silently null those out.
+  if (usage.classRefCount > 0 || usage.integrationRefCount > 0) {
+    const refs: string[] = [];
+    if (usage.classRefCount) refs.push(`${usage.classRefCount} class override${usage.classRefCount === 1 ? "" : "s"}`);
+    if (usage.integrationRefCount) refs.push(`${usage.integrationRefCount} integration default${usage.integrationRefCount === 1 ? "" : "s"}`);
+    throw new AppError(409, `Credential is referenced by ${refs.join(" and ")}; clear those monitor settings first`);
   }
   try {
     await prisma.credential.delete({ where: { id } });

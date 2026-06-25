@@ -5215,6 +5215,9 @@ async function deleteTag(id) {
 
 var _credsLoaded = false;
 var _credsData = [];
+// credential id → count of assets effectively using it (asset/class/integration
+// tiers resolved server-side). Drives the Assets column + click-through slide-in.
+var _credUsageCounts = {};
 // Mask sentinel must match the server's credentialService.MASK. Secrets
 // arrive pre-masked from GET; the server preserves the real value on PUT
 // whenever the mask (or an empty string) is resubmitted.
@@ -5234,10 +5237,12 @@ async function loadCredentialsTab() {
         api.serverSettings.listMibs().catch(function () { return []; }),
         api.serverSettings.getMibFacets().catch(function () { return { manufacturers: [], modelsByManufacturer: {} }; }),
         api.serverSettings.listManufacturerProfiles().catch(function () { return { profiles: [], transforms: [] }; }),
+        api.credentials.usageCounts().catch(function () { return {}; }),
       ]);
       _credsData = results[0] || [];
       _mibsData = results[1] || [];
       _mibFacets = results[2] || { manufacturers: [], modelsByManufacturer: {} };
+      _credUsageCounts = results[4] || {};
       var profilePayload = results[3] || {};
       _mfgProfiles = profilePayload.profiles || [];
       _mfgProfileTransforms = profilePayload.transforms || [];
@@ -5298,10 +5303,16 @@ function renderCredentialsTab() {
   // ── 1. Stored Credentials (admin-only) ──
   if (adminUser) {
     var rows = _credsData.map(function (c) {
+      var n = _credUsageCounts[c.id] || 0;
+      var assetsCell = n > 0
+        ? '<button type="button" data-action="usage" data-id="' + escapeHtml(c.id) + '" data-name="' + escapeHtml(c.name) + '" title="Show the assets using this credential" ' +
+            'style="background:none;border:none;padding:0;cursor:pointer;color:var(--color-accent);font:inherit;text-decoration:underline">' + n + '</button>'
+        : '<span style="color:var(--color-text-secondary)">0</span>';
       return '<tr>' +
         '<td>' + escapeHtml(c.name) + '</td>' +
         '<td>' + credTypeLabel(c.type) + '</td>' +
         '<td style="color:var(--color-text-secondary);font-size:0.85rem">' + credSummary(c) + '</td>' +
+        '<td>' + assetsCell + '</td>' +
         '<td style="text-align:right">' +
           '<button class="btn btn-sm btn-secondary" data-action="edit" data-id="' + escapeHtml(c.id) + '">Edit</button> ' +
           '<button class="btn btn-sm btn-secondary" data-action="test" data-id="' + escapeHtml(c.id) + '">Test</button> ' +
@@ -5323,7 +5334,7 @@ function renderCredentialsTab() {
         '</p>' +
         (_credsData.length === 0
           ? '<p class="empty-state">No credentials yet. Click "Add Credential" to create one.</p>'
-          : '<table class="data-table"><thead><tr><th>Name</th><th>Type</th><th>Details</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>') +
+          : '<table class="data-table"><thead><tr><th>Name</th><th>Type</th><th>Details</th><th>Assets</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>') +
       '</div>';
   }
 
@@ -5351,6 +5362,11 @@ function renderCredentialsTab() {
         deleteCredential(btn.getAttribute("data-id"), btn.getAttribute("data-name"));
       });
     });
+    container.querySelectorAll('button[data-action="usage"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openCredUsagePanel(btn.getAttribute("data-id"), btn.getAttribute("data-name"));
+      });
+    });
   }
 
   // MIB controls (browse/upload/delete) — admin-only writes enforced by the
@@ -5360,6 +5376,186 @@ function renderCredentialsTab() {
   // Manufacturer profile controls (admin-only) — only rendered above for admin.
   if (adminUser) {
     wireManufacturerProfileControls();
+  }
+}
+
+// ─── Credential usage slide-in ───────────────────────────────────────────────
+// Lists the assets a credential reaches, grouped by the tier each one inherits
+// it from (asset / class / integration). Models the canonical asset-details
+// slide-over (assets.js): append a `.slideover-overlay` to <body>, toggle the
+// `.open` class, reuse initSlideoverResize. Clicking an asset hands off to the
+// global openViewModal() (assets.js is loaded on the same page).
+var _credUsageReturnFocus = null;
+
+function _ensureCredUsagePanelDOM() {
+  if (document.getElementById("cred-usage-overlay")) return;
+  var overlay = document.createElement("div");
+  overlay.id = "cred-usage-overlay";
+  overlay.className = "slideover-overlay";
+  overlay.innerHTML =
+    '<div class="slideover" id="cred-usage-panel">' +
+      '<div class="slideover-resize-handle"></div>' +
+      '<div class="slideover-header">' +
+        '<div class="slideover-header-top">' +
+          '<h3 id="cred-usage-title">Credential usage</h3>' +
+          '<button class="btn-icon" id="cred-usage-close">&times;</button>' +
+        '</div>' +
+        '<div class="slideover-meta" id="cred-usage-meta"></div>' +
+      '</div>' +
+      '<div class="slideover-body" id="cred-usage-body"></div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener("click", function (e) { if (e.target === overlay) closeCredUsagePanel(); });
+  document.getElementById("cred-usage-close").addEventListener("click", closeCredUsagePanel);
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    if (!overlay.classList.contains("open")) return;
+    // Let a nested asset panel grab Escape first.
+    if (document.querySelector(".slideover-overlay.slideover-nested.open")) return;
+    closeCredUsagePanel();
+  });
+
+  // Click-through to asset details. The Assets page isn't loaded here (this is
+  // the Server Settings page), so navigate to it via the canonical
+  // #view=asset:<id> hash that app.js processSearchHash() opens on load —
+  // the same deep link global search / widgets / the map use.
+  document.getElementById("cred-usage-body").addEventListener("click", function (e) {
+    var row = e.target.closest ? e.target.closest("[data-asset-id]") : null;
+    if (!row) return;
+    var assetId = row.getAttribute("data-asset-id");
+    if (!assetId) return;
+    window.location.href = "/assets.html#view=asset:" + encodeURIComponent(assetId);
+  });
+
+  if (typeof initSlideoverResize === "function") {
+    initSlideoverResize(document.getElementById("cred-usage-panel"), "polaris.panel.width.credusage");
+  }
+}
+
+function closeCredUsagePanel() {
+  var overlay = document.getElementById("cred-usage-overlay");
+  if (overlay) overlay.classList.remove("open");
+  if (_credUsageReturnFocus && typeof _credUsageReturnFocus.focus === "function") {
+    try { _credUsageReturnFocus.focus(); } catch (_) { }
+  }
+  _credUsageReturnFocus = null;
+}
+
+function _credStreamBadges(streams) {
+  if (!streams || !streams.length) return "";
+  return streams.map(function (s) {
+    return '<span style="display:inline-block;font-size:0.68rem;padding:0.05rem 0.4rem;border-radius:0.25rem;' +
+      'background:var(--color-bg-tertiary);color:var(--color-text-secondary);margin:0 0.15rem 0.15rem 0;white-space:nowrap">' +
+      escapeHtml(s) + '</span>';
+  }).join("");
+}
+
+function _credUsageAssetRow(a) {
+  var label = a.hostname || a.ipAddress || a.assetId;
+  var sub = [];
+  if (a.ipAddress && a.hostname) sub.push(escapeHtml(a.ipAddress));
+  if (a.assetType) sub.push(escapeHtml(a.assetType));
+  if (!a.monitored) sub.push('<span style="color:var(--color-text-tertiary)">not monitored</span>');
+  return '<div data-asset-id="' + escapeHtml(a.assetId) + '" role="button" tabindex="0" ' +
+    'title="Open asset details" ' +
+    'style="padding:0.5rem 0.6rem;border:1px solid var(--color-border);border-radius:0.35rem;margin-bottom:0.4rem;cursor:pointer;background:var(--color-surface)">' +
+    '<div style="font-weight:500;color:var(--color-accent)">' + escapeHtml(label) + '</div>' +
+    (sub.length ? '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-top:0.1rem">' + sub.join(" · ") + '</div>' : "") +
+    (a.streams && a.streams.length ? '<div style="margin-top:0.3rem">' + _credStreamBadges(a.streams) + '</div>' : "") +
+    '</div>';
+}
+
+function _credUsageSectionHeader(title, count, blurb) {
+  return '<div style="margin:1rem 0 0.5rem">' +
+    '<h4 style="margin:0 0 0.15rem">' + escapeHtml(title) + ' (' + count + ')</h4>' +
+    (blurb ? '<p style="margin:0;font-size:0.78rem;color:var(--color-text-secondary)">' + escapeHtml(blurb) + '</p>' : "") +
+    '</div>';
+}
+
+async function openCredUsagePanel(credId, credName) {
+  _ensureCredUsagePanelDOM();
+  _credUsageReturnFocus = document.activeElement;
+  var titleEl = document.getElementById("cred-usage-title");
+  var metaEl = document.getElementById("cred-usage-meta");
+  var bodyEl = document.getElementById("cred-usage-body");
+  titleEl.textContent = credName ? credName : "Credential usage";
+  metaEl.textContent = "";
+  bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 0">Loading...</p>';
+
+  requestAnimationFrame(function () {
+    var ov = document.getElementById("cred-usage-overlay");
+    ov.classList.add("open");
+    var panel = document.getElementById("cred-usage-panel");
+    if (panel) panel.focus();
+  });
+
+  try {
+    var u = await api.credentials.usage(credId);
+    var total = u.total || 0;
+    metaEl.innerHTML =
+      '<span>' + total + ' asset' + (total === 1 ? "" : "s") + ' use this credential</span>';
+
+    if (total === 0 && !u.classRefCount && !u.integrationRefCount) {
+      bodyEl.innerHTML =
+        '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0.5rem 0 0.75rem">' +
+          'This shows where the credential is configured across the monitor-settings tiers — not a live probe trace.' +
+        '</p>' +
+        '<p class="empty-state" style="padding:1rem 0">No assets use this credential, and it is not referenced by any class or integration setting.</p>';
+      return;
+    }
+
+    var html =
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0.5rem 0 0.25rem">' +
+        'Assets are grouped by the tier they inherit this credential from. Click any asset to open its details.' +
+      '</p>';
+
+    // Asset level
+    if (u.assetLevel && u.assetLevel.length) {
+      html += _credUsageSectionHeader("Asset level", u.assetLevel.length, "Configured directly on the asset.");
+      html += u.assetLevel.map(_credUsageAssetRow).join("");
+    }
+
+    // Class level
+    if (u.classLevel && u.classLevel.length) {
+      var classCount = u.classLevel.reduce(function (n, g) { return n + g.assets.length; }, 0);
+      html += _credUsageSectionHeader("Class level", classCount, "Inherited from a per-class monitor override (integration + asset type).");
+      html += u.classLevel.map(function (g) {
+        var scope = (g.integrationName || "Manual tier") + " · " + g.assetType;
+        return '<div style="margin:0.25rem 0 0.6rem">' +
+          '<div style="font-size:0.82rem;font-weight:500;margin-bottom:0.3rem">' + escapeHtml(scope) +
+            (g.streams && g.streams.length ? ' <span style="font-weight:400;color:var(--color-text-secondary)">— ' + g.streams.map(escapeHtml).join(", ") + '</span>' : "") +
+          '</div>' +
+          g.assets.map(_credUsageAssetRow).join("") +
+          '</div>';
+      }).join("");
+    }
+
+    // Integration level
+    if (u.integrationLevel && u.integrationLevel.length) {
+      var intCount = u.integrationLevel.reduce(function (n, g) { return n + g.assets.length; }, 0);
+      html += _credUsageSectionHeader("Integration level", intCount, "Inherited from the integration's default monitor credential.");
+      html += u.integrationLevel.map(function (g) {
+        return '<div style="margin:0.25rem 0 0.6rem">' +
+          '<div style="font-size:0.82rem;font-weight:500;margin-bottom:0.3rem">' + escapeHtml(g.integrationName) + '</div>' +
+          g.assets.map(_credUsageAssetRow).join("") +
+          '</div>';
+      }).join("");
+    }
+
+    // Config references with no current assets (e.g. a class/integration default
+    // pointing here but no asset matches the class yet).
+    if (total === 0 && (u.classRefCount || u.integrationRefCount)) {
+      var refs = [];
+      if (u.classRefCount) refs.push(u.classRefCount + " class override" + (u.classRefCount === 1 ? "" : "s"));
+      if (u.integrationRefCount) refs.push(u.integrationRefCount + " integration default" + (u.integrationRefCount === 1 ? "" : "s"));
+      html += '<p class="empty-state" style="padding:1rem 0">No assets currently resolve to this credential, but it is referenced by ' +
+        refs.join(" and ") + '.</p>';
+    }
+
+    bodyEl.innerHTML = html;
+  } catch (err) {
+    bodyEl.innerHTML = '<p class="empty-state" style="padding:1rem 0">Error: ' + escapeHtml(err.message) + '</p>';
   }
 }
 
