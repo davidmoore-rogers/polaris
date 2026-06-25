@@ -134,6 +134,7 @@ router.get("/sites", async (req, res, next) => {
         latitude: true,
         longitude: true,
         status: true,
+        monitorStatus: true,
         lastSeen: true,
         learnedLocation: true,
         monitored: true,
@@ -169,7 +170,12 @@ router.get("/sites", async (req, res, next) => {
         return {
           ...s,
           subnetCount: s.hostname ? countByName.get(s.hostname) ?? 0 : 0,
-          monitorHealth: s.monitored ? stats?.health ?? "unknown" : null,
+          // Derive the dot's health from Asset.monitorStatus (the five-state
+          // machine), NOT the raw 10-sample window — so the Status Map's red
+          // "down" dots agree with the Down Nodes / Status Summary widgets,
+          // which key off monitorStatus. The recent sample counts still ride
+          // along for the tooltip's "X/Y samples failed" detail.
+          monitorHealth: s.monitored ? monitorStatusToHealth(s.monitorStatus) : null,
           monitorRecentSamples: stats?.samples ?? 0,
           monitorRecentFailures: stats?.failures ?? 0,
         };

@@ -24,7 +24,11 @@
 
   function healthKey(site) {
     if (!site.monitored) return "unknown";
-    if (site.dependencySuppressed && site.monitorHealth !== "down") return "dep";
+    // Dependency-suppressed sites are excluded from the Down Nodes widget, so
+    // never paint them red here — show the distinct "dep" color instead, even
+    // when the suppressed device's own status is down. Keeps the map's red
+    // dots in lockstep with Down Nodes / Status Summary.
+    if (site.dependencySuppressed) return "dep";
     switch (site.monitorHealth) {
       case "up": return "up";
       case "degraded": return "degraded";
@@ -33,13 +37,13 @@
     }
   }
   function statusColor(site) { return COLOR[healthKey(site)] || COLOR.unknown; }
-  function isDown(site) { return site.monitored && site.monitorHealth === "down"; }
-  function hasIssue(site) { return site.monitored && (site.monitorHealth === "down" || site.monitorHealth === "degraded"); }
+  function isDown(site) { return site.monitored && !site.dependencySuppressed && site.monitorHealth === "down"; }
+  function hasIssue(site) { return site.monitored && !site.dependencySuppressed && (site.monitorHealth === "down" || site.monitorHealth === "degraded"); }
 
   function monitorLine(site) {
     if (!site.monitored) return "Unmonitored";
     var samples = site.monitorRecentSamples || 0, failures = site.monitorRecentFailures || 0;
-    if (site.dependencySuppressed && site.monitorHealth !== "down") return "Dependency down — upstream parent offline";
+    if (site.dependencySuppressed) return "Dependency down — upstream parent offline";
     switch (site.monitorHealth) {
       case "up": return "Up — last " + samples + " samples ok";
       case "degraded": return "Packet loss — " + failures + "/" + samples + " recent samples failed";
