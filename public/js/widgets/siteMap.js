@@ -75,7 +75,7 @@
     description: "Geographic map of monitored sites — status dots + live weather radar.",
     defaultSize: { width: 6, height: 2 },
     minSize: { width: 4, height: 1 },
-    defaultConfig: { issuesOnly: false, regionScope: "all" },
+    defaultConfig: { issuesOnly: false, regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {

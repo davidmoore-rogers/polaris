@@ -80,7 +80,7 @@
     description: "Sites with monitored assets down or in warning, worst first. Expand a site for its nodes.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
-    defaultConfig: { rowLimit: 10, sortBy: "downCount", regionScope: "all" },
+    defaultConfig: { rowLimit: 10, sortBy: "downCount", regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {

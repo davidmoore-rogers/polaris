@@ -35,7 +35,7 @@
     description: "Recent warning/error events needing attention, newest first.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
-    defaultConfig: { severities: ["warning", "error"], regionScope: "all" },
+    defaultConfig: { severities: ["warning", "error"], regionScope: "mine" },
     requiredPermission: { key: "events", level: "read" },
 
     fetchData: function (config) {

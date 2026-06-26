@@ -56,7 +56,7 @@
     description: "At-a-glance counts of monitored assets by state, plus infra uptime % and active alerts.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { tiles: ALL_IDS.slice(), regionScope: "all" },
+    defaultConfig: { tiles: ALL_IDS.slice(), regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {

@@ -28,7 +28,7 @@
     description: "Devices that rebooted recently (detected from SNMP sysUpTime drops).",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { rowLimit: 10, regionScope: "all" },
+    defaultConfig: { rowLimit: 10, regionScope: "mine" },
     requiredPermission: { key: "events", level: "read" },
 
     fetchData: function (config) {

@@ -73,7 +73,7 @@
     description: "Monitored assets currently down, grouped by site or division.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
-    defaultConfig: { groupBy: "site", rowLimit: 10, regionScope: "all" },
+    defaultConfig: { groupBy: "site", rowLimit: 10, regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {

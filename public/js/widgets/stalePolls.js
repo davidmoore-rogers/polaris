@@ -33,7 +33,7 @@
     description: "Monitored assets overdue for their next response-time probe.",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { rowLimit: 10, regionScope: "all" },
+    defaultConfig: { rowLimit: 10, regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
