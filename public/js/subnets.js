@@ -97,12 +97,8 @@ async function _initSubnetsPage() {
     _subnetsUpdateSelectAll();
     _subnetsUpdateBulkBar();
   });
-  document.getElementById("filter-pagesize").addEventListener("change", function () {
-    _subnetsPageSize = parseInt(this.value, 10) || 15;
-    _subnetsPage = 1;
-    renderSubnetsPage();
-    _saveSubnetsPrefs();
-  });
+  // Page-size selector now lives in the pagination row (renderPageControls
+  // onSizeChange) — no standalone #filter-pagesize.
 }
 
 // Reads dashboard / search deep-link hash params and seeds the filter
@@ -202,7 +198,7 @@ async function loadSubnets() {
     _subnetsData = _allSubnetsData;
     renderSubnetsPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="14" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -242,14 +238,14 @@ function _rebuildCreatorColumnOptions() {
 function renderSubnetsPage() {
   var tbody = document.getElementById("subnets-tbody");
   if (_subnetsData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="14" class="empty-state">No networks found. Create one to get started.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No networks found. Create one to get started.</td></tr>';
     clearPageControls("pagination");
     _subnetsUpdateSelectAll();
     return;
   }
   var sfData = _subnetsSF ? _subnetsSF.apply(_subnetsData) : _subnetsData;
   if (sfData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="14" class="empty-state">No results match the current filters.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No results match the current filters.</td></tr>';
     clearPageControls("pagination");
     _subnetsUpdateSelectAll();
     return;
@@ -279,15 +275,17 @@ function renderSubnetsPage() {
       '<td>' + source + '</td>' +
       '<td>' + (s.createdBy ? escapeHtml(s.createdBy) : '<span style="color:var(--color-text-tertiary)">-</span>') + '</td>' +
       '<td>' + (s._count ? s._count.reservations : 0) + '</td>' +
-      '<td class="actions">' +
-        (canEditSubnet(s) ? '<button class="btn btn-sm btn-secondary" onclick="openSubnetEditModal(\'' + s.id + '\')">Edit</button>' +
-        '<button class="btn btn-sm btn-danger" onclick="confirmDeleteSubnet(\'' + s.id + '\', \'' + escapeHtml(s.cidr) + '\', ' + (s._count ? s._count.reservations : 0) + ')">Del</button>' : '') +
-      '</td></tr>';
+      '</tr>';
   }).join("");
   _subnetsUpdateSelectAll();
   renderPageControls("pagination", sfData.length, _subnetsPageSize, _subnetsPage, function (p) {
     _subnetsPage = p;
     renderSubnetsPage();
+  }, function (size) {
+    _subnetsPageSize = size;
+    _subnetsPage = 1;
+    renderSubnetsPage();
+    _saveSubnetsPrefs();
   });
 }
 
@@ -304,9 +302,14 @@ function _subnetsUpdateBulkBar() {
   var bar = document.getElementById("subnets-bulk-bar");
   if (!bar) return;
   var count = _subnetsSelected.size;
-  bar.style.display = count > 0 ? "flex" : "none";
+  // Always visible; neutral (idle) until rows are selected, then accent outline.
+  bar.classList.toggle("bulk-bar-idle", count === 0);
   var el = bar.querySelector(".bulk-bar-count");
-  if (el) el.textContent = count + " selected";
+  if (el) el.textContent = count === 0 ? "No networks selected" : (count + " selected");
+  ["subnets-bulk-edit-btn", "subnets-bulk-delete-btn"].forEach(function (id) {
+    var b = document.getElementById(id);
+    if (b) b.disabled = count === 0;
+  });
 }
 
 async function bulkDeleteSubnets() {

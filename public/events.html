@@ -42,25 +42,29 @@
         </div>
       </div>
 
-      <div class="filter-bar" style="justify-content:flex-end">
-        <label>Show</label>
-        <select id="filter-pagesize" style="width:auto">
-          <option value="15" selected>15</option>
-          <option value="25">25</option>
-          <option value="50">50</option>
-          <option value="100">100</option>
-        </select>
-        <button class="btn btn-secondary" id="btn-refresh">Refresh</button>
+      <!-- One row: pagination centered (middle grid cell), page-size selector +
+           Refresh right-aligned. See TEMPLATES.md → "Paginated list controls row". -->
+      <div style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:12px;padding:0.5rem 0 1rem">
+        <span></span>
+        <div id="pagination-top" style="display:flex;align-items:center;gap:12px;justify-content:center"></div>
+        <div class="filter-bar" style="margin:0;padding:0;justify-self:end">
+          <label>Show</label>
+          <select id="filter-pagesize" style="width:auto">
+            <option value="15" selected>15</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+          <button class="btn btn-secondary" id="btn-refresh">Refresh</button>
+        </div>
       </div>
-
-      <div id="pagination-top" style="display:flex;align-items:center;gap:12px;justify-content:center;padding:0.5rem 0 1rem"></div>
 
       <div class="table-wrapper">
         <table>
           <thead>
             <tr>
-              <th style="width:160px" data-col-id="timestamp"    data-sf-key="timestamp"    data-sf-type="date">Timestamp</th>
-              <th style="width:70px"  data-col-id="level"        data-sf-key="level"        data-sf-type="string" data-sf-options="info|warning|error">Level</th>
+              <th style="width:160px" data-col-no-resize="true" data-col-id="timestamp"    data-sf-key="timestamp"    data-sf-type="date">Timestamp</th>
+              <th style="width:90px"  data-col-no-resize="true" data-col-id="level"        data-sf-key="level"        data-sf-type="string" data-sf-options="info|warning|error">Level</th>
               <th style="width:140px" data-col-id="action"       data-sf-key="action"       data-sf-type="string">Action</th>
               <th style="width:100px" data-col-id="resource"     data-sf-key="resourceType" data-sf-type="string" data-sf-options="">Resource</th>
               <th                       data-col-id="message"    data-sf-key="message"      data-sf-type="string">Message</th>

@@ -61,16 +61,6 @@
           </div>
         </div>
 
-        <div class="filter-bar">
-          <label style="margin-left:auto">Show</label>
-          <select id="filter-pagesize" style="width:auto">
-            <option value="15" selected>15</option>
-            <option value="25">25</option>
-            <option value="50">50</option>
-            <option value="100">100</option>
-          </select>
-        </div>
-
         <div id="pagination-top" style="display:flex;align-items:center;gap:12px;justify-content:center;padding:0.5rem 0 1rem"></div>
 
         <div class="table-wrapper">
@@ -79,12 +69,12 @@
               <tr>
                 <th class="fav-col" title="Favorites pin to the top"></th>
                 <th data-sf-key="name" data-sf-type="string">Name</th>
-                <th data-sf-key="cidr" data-sf-type="ip">CIDR</th>
-                <th data-sf-key="ipVersion" data-sf-type="string" data-sf-options="v4=IPv4|v6=IPv6">Version</th>
+                <th style="width:170px" data-col-no-resize="true" data-sf-key="cidr" data-sf-type="ip">CIDR</th>
+                <th style="width:100px" data-col-no-resize="true" data-sf-key="ipVersion" data-sf-type="string" data-sf-options="v4=IPv4|v6=IPv6">Version</th>
                 <th data-sf-key="description" data-sf-type="string">Description</th>
                 <th data-sf-key="tags" data-sf-type="array">Tags</th>
-                <th data-sf-key="_count.subnets" data-sf-type="number">Networks</th>
-                <th data-sf-key="createdAt" data-sf-type="date">Created</th>
+                <th style="width:110px" data-col-no-resize="true" data-sf-key="_count.subnets" data-sf-type="number">Networks</th>
+                <th style="width:130px" data-col-no-resize="true" data-sf-key="createdAt" data-sf-type="date">Created</th>
                 <th style="width:90px" data-col-id="actions" data-col-required="true">Actions</th>
               </tr>
             </thead>
@@ -105,20 +95,12 @@
           </div>
         </div>
 
-        <div class="filter-bar">
-          <label style="margin-left:auto">Show</label>
-          <select id="filter-pagesize" style="width:auto">
-            <option value="15" selected>15</option>
-            <option value="25">25</option>
-            <option value="50">50</option>
-            <option value="100">100</option>
-          </select>
-        </div>
-
-        <div id="subnets-bulk-bar" class="bulk-bar" style="display:none">
-          <span class="bulk-bar-count">0 selected</span>
-          <button class="btn btn-sm btn-secondary" id="subnets-bulk-edit-btn">Edit Selected</button>
-          <button class="btn btn-sm btn-danger" id="subnets-bulk-delete-btn">Delete Selected</button>
+        <!-- Always-visible selection bar: idle/greyed until rows are selected,
+             then accent outline + enabled actions (same as Assets / Notifications). -->
+        <div id="subnets-bulk-bar" class="bulk-bar bulk-bar-idle">
+          <span class="bulk-bar-count">No networks selected</span>
+          <button class="btn btn-sm btn-secondary" id="subnets-bulk-edit-btn" disabled>Edit Selected</button>
+          <button class="btn btn-sm btn-danger" id="subnets-bulk-delete-btn" disabled>Delete Selected</button>
         </div>
 
         <div id="pagination-top" style="display:flex;align-items:center;gap:12px;justify-content:center;padding:0.5rem 0 1rem"></div>
@@ -133,18 +115,17 @@
                 <th data-sf-key="cidr" data-sf-type="ip">Network</th>
                 <th data-sf-key="block.name" data-sf-type="string" data-sf-options="">Block</th>
                 <th data-sf-key="purpose" data-sf-type="string">Purpose</th>
-                <th data-sf-key="vlan" data-sf-type="number">VLAN</th>
-                <th data-sf-key="status" data-sf-type="string" data-sf-options="available|reserved|deprecated">Status</th>
+                <th style="width:90px"  data-col-no-resize="true" data-sf-key="vlan" data-sf-type="number">VLAN</th>
+                <th style="width:120px" data-col-no-resize="true" data-sf-key="status" data-sf-type="string" data-sf-options="available|reserved|deprecated">Status</th>
                 <th data-sf-key="tags" data-sf-type="array">Tags</th>
                 <th data-sf-key="fortigateDevice" data-sf-type="string">Server</th>
                 <th data-sf-key="_integration" data-sf-type="string" data-sf-options="">Integration</th>
                 <th data-sf-key="createdBy" data-sf-type="string" data-sf-options="">Creator</th>
-                <th data-sf-key="_count.reservations" data-sf-type="number">Reservations</th>
-                <th style="width:90px" data-col-id="actions" data-col-required="true">Actions</th>
+                <th style="width:120px" data-col-no-resize="true" data-sf-key="_count.reservations" data-sf-type="number">Reservations</th>
               </tr>
             </thead>
             <tbody id="subnets-tbody">
-              <tr><td colspan="14" class="empty-state">Loading...</td></tr>
+              <tr><td colspan="13" class="empty-state">Loading...</td></tr>
             </tbody>
           </table>
         </div>
