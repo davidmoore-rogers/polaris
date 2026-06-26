@@ -79,6 +79,8 @@ export const FUNCTION_KEYS: readonly FunctionKeyDef[] = [
   { key: "mapRegions", label: "Map Regions", description: "Draw / edit / delete polygons that auto-tag enclosed FortiGates." },
   { key: "deviceIcons", label: "Device Icons", description: "Operator-uploaded icons overlaid on the topology graph." },
   { key: "events", label: "Events / Audit Log", description: "Audit log + syslog/SFTP archival settings + event retention." },
+  { key: "notifications", label: "Notifications", description: "Triggered notifications (View tab). Read = view; Read-Write = acknowledge; Full Read-Write = clear." },
+  { key: "notificationManagement", label: "Notification Rules", description: "Create / edit / delete notification rules (Manage tab). Full Read-Write = rule CRUD." },
   { key: "staleReservations", label: "Stale Reservations", description: "Snooze / ignore / un-ignore stale DHCP reservation alerts + the threshold setting." },
   { key: "apiTokens", label: "API Tokens", description: "Long-lived bearer tokens for external callers (SIEM quarantine, etc.)." },
   { key: "users", label: "Users", description: "User CRUD + role assignment + TOTP reset." },

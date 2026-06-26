@@ -56,6 +56,8 @@ import {
   type FortiManagerConfig,
 } from "./fortimanagerService.js";
 import { logEvent } from "../api/routes/events.js";
+import { maybeEmitChangeEvents, type ChangeItem } from "./notificationChangeEvents.js";
+import { isChangeActionSubscribed } from "./notificationRuleService.js";
 import { logger } from "../utils/logger.js";
 import { parseFortiapTelemetrySnapshot } from "../utils/fortiapMonitorRow.js";
 import { deriveRadioBand } from "../utils/fortiapRadioBand.js";
@@ -7032,6 +7034,13 @@ async function persistSdwanRules(
     availableMembers: r.availableMembers,
     priorityZones:    r.priorityZones,
   }));
+  // Change detection (gated): capture prior selected-member per rule so we can
+  // emit a failover event when it changes.
+  const watchFailover = await isChangeActionSubscribed("change.sdwan.failover");
+  const priorMembers = watchFailover
+    ? new Map((await prisma.assetSdwanRule.findMany({ where: { assetId }, select: { ruleName: true, selectedMember: true } })).map((r) => [r.ruleName, r.selectedMember]))
+    : null;
+
   await retryOnDeadlock(() =>
     prisma.$transaction([
       prisma.assetSdwanRule.deleteMany({ where: { assetId } }),
@@ -7040,6 +7049,22 @@ async function persistSdwanRules(
         : []),
     ]),
   );
+
+  if (priorMembers) {
+    const failovers: ChangeItem[] = [];
+    for (const r of rules) {
+      if (priorMembers.has(r.ruleName)) {
+        const before = priorMembers.get(r.ruleName) ?? null;
+        if (before && r.selectedMember && before !== r.selectedMember) {
+          failovers.push({ label: `${r.ruleName}: ${before} → ${r.selectedMember}`, details: { ruleName: r.ruleName, from: before, to: r.selectedMember } });
+        }
+      }
+    }
+    if (failovers.length) {
+      const assetName = (await prisma.asset.findUnique({ where: { id: assetId }, select: { hostname: true } }))?.hostname ?? null;
+      await maybeEmitChangeEvents("change.sdwan.failover", assetId, assetName, failovers);
+    }
+  }
 }
 
 /**
@@ -7080,6 +7105,13 @@ async function persistMclagPeers(
     peerPort:       p.peerPort,
     matchedAssetId: serialToId.get(p.peerSn.toUpperCase()) ?? null,
   }));
+  // Change detection (gated): capture prior peer serials so we can emit a
+  // peer-lost event when one disappears.
+  const watchPeerLost = await isChangeActionSubscribed("change.mclag.peer_lost");
+  const priorPeers = watchPeerLost
+    ? await prisma.assetMclagPeer.findMany({ where: { assetId }, select: { peerSn: true, peerName: true, localPort: true } })
+    : null;
+
   await retryOnDeadlock(() =>
     prisma.$transaction([
       prisma.assetMclagPeer.deleteMany({ where: { assetId } }),
@@ -7088,6 +7120,17 @@ async function persistMclagPeers(
         : []),
     ]),
   );
+
+  if (priorPeers) {
+    const newSerials = new Set(peers.map((p) => p.peerSn.toUpperCase()));
+    const lost: ChangeItem[] = priorPeers
+      .filter((p) => !newSerials.has(p.peerSn.toUpperCase()))
+      .map((p) => ({ label: `${p.peerName || p.peerSn} on ${p.localPort}`, details: { peerSn: p.peerSn, peerName: p.peerName, localPort: p.localPort } }));
+    if (lost.length) {
+      const assetName = (await prisma.asset.findUnique({ where: { id: assetId }, select: { hostname: true } }))?.hostname ?? null;
+      await maybeEmitChangeEvents("change.mclag.peer_lost", assetId, assetName, lost);
+    }
+  }
 }
 
 /** One aggregated-by-name program row for the current-state process inventory. */
@@ -7113,6 +7156,15 @@ export async function persistAssetProcesses(
   assetId: string,
   rows: AssetProcessInput[],
 ): Promise<void> {
+  // Change detection (gated): load the prior name set first only when a
+  // started/stopped change rule subscribes, so the common case adds nothing.
+  const watchChanges =
+    (await isChangeActionSubscribed("change.process.started")) ||
+    (await isChangeActionSubscribed("change.process.stopped"));
+  const priorNames = watchChanges
+    ? new Set((await prisma.assetProcess.findMany({ where: { assetId }, select: { name: true } })).map((p) => p.name))
+    : null;
+
   const data = rows.map((r) => ({
     id:            randomUUID(),
     assetId,
@@ -7134,6 +7186,17 @@ export async function persistAssetProcesses(
         : []),
     ]),
   );
+
+  if (priorNames) {
+    const newNames = new Set(rows.map((r) => r.name));
+    const started: ChangeItem[] = rows.filter((r) => !priorNames.has(r.name)).map((r) => ({ label: r.name, details: { name: r.name } }));
+    const stopped: ChangeItem[] = [...priorNames].filter((n) => !newNames.has(n)).map((n) => ({ label: n, details: { name: n } }));
+    if (started.length || stopped.length) {
+      const assetName = (await prisma.asset.findUnique({ where: { id: assetId }, select: { hostname: true } }))?.hostname ?? null;
+      await maybeEmitChangeEvents("change.process.started", assetId, assetName, started);
+      await maybeEmitChangeEvents("change.process.stopped", assetId, assetName, stopped);
+    }
+  }
 }
 
 /**
@@ -7292,6 +7355,27 @@ async function persistLldpNeighbors(
       prisma.assetLldpNeighbor.deleteMany({ where: { id: { in: toDelete } } }),
     );
     endDelete({ rows: toDelete.length });
+  }
+
+  // Change detection → notification engine (gated; no-op when unsubscribed).
+  // Added = neighbor keys not previously present; removed = rows just deleted.
+  const added: ChangeItem[] = [];
+  for (const n of neighbors) {
+    if (!existingByKey.has(keyOf(n.localIfName, n.chassisId ?? null, n.portId ?? null))) {
+      added.push({ label: `${n.systemName || n.chassisId || "neighbor"} on ${n.localIfName}`, details: { localIfName: n.localIfName, systemName: n.systemName, chassisId: n.chassisId } });
+    }
+  }
+  const removed: ChangeItem[] = [];
+  const deleteSet = new Set(toDelete);
+  for (const e of existing) {
+    if (deleteSet.has(e.id)) {
+      removed.push({ label: `${e.systemName || e.chassisId || "neighbor"} on ${e.localIfName}`, details: { localIfName: e.localIfName, systemName: e.systemName, chassisId: e.chassisId } });
+    }
+  }
+  if (added.length || removed.length) {
+    const assetName = (await prisma.asset.findUnique({ where: { id: assetId }, select: { hostname: true } }))?.hostname ?? null;
+    await maybeEmitChangeEvents("change.lldp.neighbor_added", assetId, assetName, added);
+    await maybeEmitChangeEvents("change.lldp.neighbor_removed", assetId, assetName, removed);
   }
 }
 

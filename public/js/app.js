@@ -131,6 +131,7 @@ const NAV_ITEMS = [
   { href: "/ipam.html",       label: "IPAM",         icon: "layers" },
   { href: "/assets.html",         label: "Assets",       icon: "monitor" },
   { href: "/events.html",         label: "Events",       icon: "activity" },
+  { href: "/notifications.html", label: "Notifications", icon: "bell", perm: ["notifications", "read"] },
   { href: "/integrations.html",  label: "Integrations", icon: "plug", networkAdmin: true },
   { href: "/users.html",        label: "Users",        icon: "users", adminOnly: true },
 ];
@@ -145,6 +146,7 @@ const ICONS = {
   activity: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
   plug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 01-12 0V8h12z"/></svg>',
   users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>',
+  bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>',
   logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>',
 };
@@ -157,6 +159,7 @@ function renderNav() {
   const visibleItems = NAV_ITEMS.filter(function (item) {
     if (item.adminOnly) return isAdmin();
     if (item.networkAdmin) return canManageNetworks();
+    if (item.perm) return permAtLeast(item.perm[0], item.perm[1]);
     return true;
   });
 
@@ -1916,14 +1919,32 @@ function renderPageControls(containerId, total, pageSize, currentPage, onPageCha
     pageButtons += '<button class="btn btn-secondary btn-sm pg-btn" data-page="' + totalPages + '">' + totalPages + '</button>';
   }
 
-  var html =
+  var navHtml =
     '<button class="btn btn-secondary btn-sm pg-prev" ' + (currentPage <= 1 ? 'disabled' : '') + '>&laquo; Prev</button>' +
     pageButtons +
     '<button class="btn btn-secondary btn-sm pg-next" ' + (currentPage >= totalPages ? 'disabled' : '') + '>Next &raquo;</button>' +
     '<span style="font-size:0.82rem;color:var(--color-text-tertiary);margin-left:8px">' + total + ' items</span>';
 
+  // Standard list-controls row: a 3-column grid keeps the page navigation
+  // centered across the full width regardless of the right cluster's size.
+  // Left cell empty, center = pagination, right cell = action buttons + the
+  // page-size ("Show N") selector (rendered when onSizeChange is supplied).
+  // Replaces the older absolute-positioned action-button cluster. Documented
+  // in TEMPLATES.md → "Paginated list controls row".
+  var pageSizes = (opts && opts.pageSizes) || [15, 25, 50, 100];
+  var hasTop = !!topEl; // render the size selector only once (top row when present)
+
   containers.forEach(function (container) {
-    container.innerHTML = html;
+    container.style.display = "grid";
+    container.style.gridTemplateColumns = "1fr auto 1fr";
+    container.style.alignItems = "center";
+    container.style.gap = "12px";
+    container.style.position = "";
+    container.innerHTML =
+      '<span></span>' +
+      '<div class="pg-center" style="display:flex;align-items:center;gap:12px;justify-content:center;flex-wrap:wrap">' + navHtml + '</div>' +
+      '<div class="pg-right" style="display:flex;align-items:center;gap:6px;justify-self:end"></div>';
+
     container.querySelector('.pg-prev').addEventListener("click", function () {
       if (currentPage > 1) onPageChange(currentPage - 1);
     });
@@ -1935,18 +1956,32 @@ function renderPageControls(containerId, total, pageSize, currentPage, onPageCha
         onPageChange(parseInt(btn.getAttribute("data-page"), 10));
       });
     });
+
+    var right = container.querySelector('.pg-right');
     if (opts && opts.actionButtons && opts.actionButtons.length) {
-      container.style.position = "relative";
-      var btnWrap = document.createElement("span");
-      btnWrap.style.cssText = "position:absolute;right:0;display:flex;gap:6px;align-items:center;";
       opts.actionButtons.forEach(function (cfg) {
         var btn = document.createElement("button");
         btn.className = "btn btn-secondary btn-sm" + (cfg.className ? " " + cfg.className : "");
         btn.textContent = cfg.label;
         btn.addEventListener("click", cfg.onClick);
-        btnWrap.appendChild(btn);
+        right.appendChild(btn);
       });
-      container.appendChild(btnWrap);
+    }
+    if (typeof onSizeChange === "function" && (!hasTop || container === topEl)) {
+      var lbl = document.createElement("label");
+      lbl.style.cssText = "display:flex;align-items:center;gap:6px;margin:0;font-size:0.82rem;color:var(--color-text-tertiary);text-transform:uppercase;letter-spacing:0.04em";
+      lbl.appendChild(document.createTextNode("Show"));
+      var sel = document.createElement("select");
+      sel.style.width = "auto";
+      pageSizes.forEach(function (s) {
+        var o = document.createElement("option");
+        o.value = String(s); o.textContent = String(s);
+        if (s === pageSize) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.addEventListener("change", function () { onSizeChange(parseInt(sel.value, 10) || pageSize); });
+      lbl.appendChild(sel);
+      right.appendChild(lbl);
     }
   });
 }

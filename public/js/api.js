@@ -290,6 +290,8 @@ const api = {
     bulkDelete:(ids)    => request("DELETE", "/assets", { ids }),
     import:    (rows, dryRun) => request("POST", "/assets/import", { rows, dryRun }),
     importPdf: (assets, dryRun) => request("POST", "/assets/import-pdf", { assets, dryRun }),
+    notifications: (id) => request("GET", `/assets/${id}/notifications`),
+    tags:      ()       => request("GET", "/assets/tags"),
     dnsLookup: (id)     => request("POST", `/assets/${id}/dns-lookup`),
     forwardLookup: (id) => request("POST", `/assets/${id}/forward-lookup`),
     ouiLookup: (id)     => request("POST", `/assets/${id}/oui-lookup`),
@@ -538,6 +540,19 @@ const api = {
     updateRetentionSettings: (body) => request("PUT", "/events/retention-settings", body),
     getAssetDecommissionSettings: () => request("GET", "/events/asset-decommission-settings"),
     updateAssetDecommissionSettings: (body) => request("PUT", "/events/asset-decommission-settings", body),
+  },
+  notifications: {
+    list:        (params) => request("GET", "/notifications" + toQuery(params)),
+    acknowledge: (ids, note) => request("POST", "/notifications/acknowledge", { ids, note }),
+    clear:       (ids)    => request("POST", "/notifications/clear", { ids }),
+  },
+  notificationRules: {
+    list:    ()        => request("GET", "/notification-rules"),
+    schema:  ()        => request("GET", "/notification-rules/schema"),
+    preview: (body)    => request("POST", "/notification-rules/preview", body),
+    create:  (body)    => request("POST", "/notification-rules", body),
+    update:  (id, b)   => request("PUT", `/notification-rules/${id}`, b),
+    delete:  (id)      => request("DELETE", `/notification-rules/${id}`),
   },
   serverSettings: {
     // Polaris Agent — Build button + inventory on Maintenance tab.

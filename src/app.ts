@@ -501,7 +501,7 @@ app.use((req, res, next) => {
 });
 
 // Protect dashboard pages — redirect unauthenticated users to login
-const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/server-settings.html", "/map.html"];
+const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/notifications.html", "/server-settings.html", "/map.html"];
 
 // Page-level gating — each protected page requires at least `read` on the
 // matching function key. Maps to the same matrix the API guards use, so
@@ -512,6 +512,7 @@ const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subn
 const pageRequiredPermission: Record<string, { key: string; level: "read" | "write" }> = {
   "/users.html":           { key: "users",                level: "read" },
   "/integrations.html":    { key: "integrations",         level: "read" },
+  "/notifications.html":   { key: "notifications",        level: "read" },
   "/server-settings.html": { key: "serverSettingsSystem", level: "read" },
 };
 const PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 } as const;
@@ -724,6 +725,8 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/decommissionStaleAssets.js",
       "./jobs/flagStaleReservations.js",
       "./jobs/capacityWatch.js",
+      "./jobs/hostMetricsCollector.js",
+      "./jobs/evaluateNotificationRules.js",
       "./jobs/resolvePolarisPushedConflicts.js",
       "./jobs/resolveStaleReservationConflicts.js",
       "./jobs/cleanupStaleDnsResolvedReleased.js",

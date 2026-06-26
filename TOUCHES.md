@@ -1172,6 +1172,114 @@ See `TEMPLATES.md` → "Permission-gated route + dynamic-role function key" for 
 
 Listed alphabetically.
 
+## services/notificationTypes.ts
+
+**What it owns:** The notifications vocabulary — the discriminated `trigger` Zod union (asset_metric | asset_state | host_metric | event | change), the asset `scope` schema, `ruleInputSchema`, the metric/field/comparator/aggregation/change-type catalogs, and `buildSchemaCatalog()`.
+
+**Public API:** `triggerSchema`, `scopeSchema`, `ruleInputSchema`, `buildSchemaCatalog`, `Trigger`/`RuleScope`/`RuleInput` types, `CHANGE_TYPE_ACTIONS`, `ASSET_SCOPED_TRIGGER_TYPES`, the `*_METRICS`/`*_FIELDS`/`CHANGE_TYPES` constants.
+
+**Used by:** `notificationRules.ts` (validation + schema endpoint), `notificationEngine.ts`, `notificationRuleService.ts`, the builder UI (via `/notification-rules/schema`).
+
+**Invariants:**
+- Single source of truth — engine, routes, and frontend must read the vocabulary here, never hardcode it.
+- `CHANGE_TYPE_ACTIONS` maps each change type to the exact audit Event action the persist* detectors emit AND the event-tail matches; both ends must agree.
+
+**When changing this:** Adding a metric/field → also wire its resolver in `notificationEngine` (else it parses but never reads data). Adding a change type → also emit the matching Event from the relevant persist* function.
+
+---
+
+## services/notificationService.ts
+
+**What it owns:** Triggered-notification read + lifecycle (View tab + asset tab): region-scoped listing, batch acknowledge/clear, the per-asset bundle, region-prefix stripping.
+
+**Public API:** `listNotifications`, `acknowledgeNotifications`, `clearNotifications`, `getAssetNotifications`, `stripRegionPrefix`, `REGION_TAG_PREFIX`.
+
+**Cross-service deps:** `prisma`, `eventLogService.logEvent`, `notificationRuleService.findRulesMatchingAsset`.
+
+**Used by:** `src/api/routes/notifications.ts` (list/ack/clear), `src/api/routes/assets.ts` (`getAssetNotifications` at `/assets/:id/notifications`).
+
+**Invariants:**
+- Region scope: empty viewer tags = unrestricted; else show rows whose snapshotted `regionTags` intersect the viewer's tags PLUS unscoped (empty regionTags) rows.
+- Acknowledge/clear are batch (`updateMany`, no per-row await) and always write an audit Event.
+
+**When changing this:** Keep the region-scope rule in sync with `regionScopeService` (the viewer side) and the engine's `regionSnapshot` (the write side).
+
+---
+
+## services/notificationRuleService.ts
+
+**What it owns:** Notification RULE logic — scope matching, the "rules matching this asset" lookup, rule CRUD, and the change-type subscription cache that gates the persist* change-detectors.
+
+**Public API:** `scopeMatchesAsset`, `findRulesMatchingAsset`, `listRules`/`getRule`/`createRule`/`updateRule`/`deleteRule`, `isChangeActionSubscribed`/`getSubscribedChangeActions`/`bumpChangeSubscriptions`, `ScopeAsset`.
+
+**Cross-service deps:** `prisma`, `eventLogService.logEvent`, `notificationTypes`.
+
+**Used by:** `notificationService` (asset tab), `notificationEngine` (preview scope), `notificationChangeEvents` (subscription gate), `src/api/routes/notificationRules.ts` (CRUD).
+
+**Invariants:**
+- `scopeMatchesAsset`: AND across provided dimensions, OR within each list; `allAssets` short-circuits true; no dimensions + not allAssets ⇒ matches nothing.
+- Every rule write calls `bumpChangeSubscriptions()` so the persist* detectors pick up new/removed change subscriptions.
+
+**When changing this:** The subscription cache has a 60s TTL fallback; a write must bump it so change emission turns on/off promptly.
+
+---
+
+## services/notificationEngine.ts
+
+**What it owns:** The rule evaluator. Threshold/state path (per-metric sample resolvers + the NotificationRuleState machine with forDuration/cooldown/clearBehavior), the event-tail path (cursor over Event rows matching event/change rules), and `previewRule` (dry-run).
+
+**Public API:** `evaluateAllNotificationRules` (job entry), `previewRule`, and the unit-tested pure helpers `compareNum`/`compareValue`/`globToRegExp`/`readingMeets`.
+
+**Cross-service deps:** `prisma` (assets + every sample table + notifications + state + Event + Setting), `eventLogService.logEvent`, `notificationService.REGION_TAG_PREFIX`, `notificationTypes`.
+
+**Used by:** `src/jobs/evaluateNotificationRules.ts`, `src/api/routes/notificationRules.ts` (`previewRule`).
+
+**Invariants:**
+- Fire only on the clear→firing transition; state writes happen only on transition (hot path scales with *changes*, not fleet size).
+- Recovery is acted on only from an explicit not-meeting reading (missing data leaves a firing state alone); `timed` clears purely on its timer.
+- Notification `regionTags` are snapshotted from the asset's `region:` tags at fire time.
+- Scale: batch findMany per sample table (no per-row awaits) — re-check at 2000 assets when adding a metric.
+
+**When changing this:** New metric → add a resolver branch AND the catalog entry in `notificationTypes`. New clear behavior → handle it in both `recover()` and the timed-sweep pass.
+
+---
+
+## services/notificationChangeEvents.ts
+
+**What it owns:** The bridge from current-state persist* functions (LLDP/processes/SD-WAN/MCLAG) to the engine's event path — emits one audit Event per diffed change, gated on an active change subscription.
+
+**Public API:** `maybeEmitChangeEvents(action, assetId, assetName, items)`, `ChangeItem`.
+
+**Cross-service deps:** `eventLogService.logEventsBatch`, `notificationRuleService.isChangeActionSubscribed`.
+
+**Used by:** `monitoringService` persist* functions (`persistLldpNeighbors`, `persistAssetProcesses`, `persistSdwanRules`, `persistMclagPeers`).
+
+**Invariants:**
+- Zero cost when unsubscribed — the subscription check gates BOTH the Event writes here and (in monitoringService) the prior-state load used to compute the diff.
+- `resourceType="asset"` + `resourceId=assetId` so the engine resolves the notification's asset + region scope. Best-effort; never throws into a scrape.
+
+**When changing this:** A new change type needs (1) a `CHANGE_TYPE_ACTIONS` entry, (2) a subscription-gated diff + `maybeEmitChangeEvents` call in the relevant persist function, (3) the change type in `notificationTypes`.
+
+---
+
+## services/regionScopeService.ts
+
+**What it owns:** The shared effective-tag resolver — `union(role, user, group)` for region + other tags.
+
+**Public API:** `resolveTagScopesForUser(u)`, `getEffectiveRegionTags(userId)`, `TagScope`/`UserTagScopes`.
+
+**Cross-service deps:** `prisma` (user + role), `groupMappingService.resolveGroupsToAccess`, `tagNormalize.unionTags`.
+
+**Used by:** `src/api/routes/auth.ts` (`GET /auth/me`), `src/api/routes/notifications.ts` (region-scoped list via `getEffectiveRegionTags`).
+
+**Invariants:**
+- Group-derived tags are re-resolved live from `ssoGroups` each call — never persisted onto the user's own columns.
+- Empty effective tags means "unrestricted" downstream.
+
+**When changing this:** `/auth/me` and the notifications list must stay on this helper so the operator-visible scope and the enforced scope can't drift.
+
+---
+
 ## services/activeDirectoryService.ts
 
 **What it owns:** On-prem Active Directory device discovery via LDAP/LDAPS client (computer objects, OU filtering, SID/GUID identity, disabled-account handling).
