@@ -178,14 +178,12 @@ function renderNav() {
         }
         let dot = "";
         if (item.href === "/events.html") {
+          // Single sidebar alert dot. Lives only on Events — the page that
+          // hosts both the Conflicts and Alerts panels. Combines discovery
+          // conflicts (danger/red) with stale-reservation alerts + queued
+          // pushes (warning/yellow); red takes precedence (see
+          // refreshConflictDot). There is intentionally no second dot.
           dot = '<span class="nav-conflict-dot" id="nav-conflict-dot" style="display:none"></span>';
-        } else if (item.href === "/ipam.html") {
-          // Stale-reservation alert indicator — sourced from
-          // /api/v1/reservations/alerts/count. Polled in lockstep with the
-          // conflict dot below; refreshed after operator actions on the
-          // Alerts panel via window.refreshAlertsDot(). Moved from the
-          // standalone Networks entry when IPAM consolidation landed.
-          dot = '<span class="nav-alerts-dot" id="nav-alerts-dot" style="display:none"></span>';
         }
         return `<li><a href="${item.href}" class="${isActive ? "active" : ""}">${ICONS[item.icon]}<span>${item.label}</span>${dot}</a></li>`;
       }).join("")}
@@ -322,47 +320,41 @@ function renderNav() {
   renderGlobalSearch();
   renderUserBadge();
 
-  // Events dot — poll every 30 s; also exposed so events.js can refresh on
-  // resolve. Combines two Events-page signals: discovery conflicts AND the
-  // reservation push queue (whose Alerts-panel filter view also lives on
-  // Events). Either signal alone is operator-actionable.
+  // Single Events-page sidebar dot — poll every 30 s; exposed on window so
+  // events.js can refresh it after operator actions. Combines every
+  // Events-page alert signal: discovery conflicts (danger) + the reservation
+  // push queue + stale-reservation alerts (both warning). The dot shows red
+  // when there are conflicts and yellow otherwise — red precedence, so a
+  // danger signal is never masked by a warning one. There is no separate
+  // IPAM dot; the legacy window.refreshAlertsDot was folded into this.
   async function refreshConflictDot() {
     var dot = document.getElementById("nav-conflict-dot");
     if (!dot) return;
     try {
-      var both = await Promise.all([
+      var counts = await Promise.all([
         canReviewConflicts()
           ? api.conflicts.count().catch(function () { return { count: 0 }; })
           : Promise.resolve({ count: 0 }),
         api.reservations.pushQueueCount().catch(function () { return { count: 0 }; }),
+        api.reservations.alertsCount().catch(function () { return { count: 0 }; }),
       ]);
-      var conflictCount = (both[0] && both[0].count) || 0;
-      var queueCount = (both[1] && both[1].count) || 0;
-      var total = conflictCount + queueCount;
-      dot.style.display = total > 0 ? "inline-block" : "none";
-      dot.classList.toggle("nav-conflict-dot--warning", conflictCount === 0 && queueCount > 0);
+      var conflictCount = (counts[0] && counts[0].count) || 0;
+      var queueCount = (counts[1] && counts[1].count) || 0;
+      var alertCount = (counts[2] && counts[2].count) || 0;
+      var warningCount = queueCount + alertCount;
+      dot.style.display = (conflictCount + warningCount) > 0 ? "inline-block" : "none";
+      // Red (danger) wins over yellow (warning): only flip to the warning
+      // colour when there are no conflicts but there are stale alerts / pushes.
+      dot.classList.toggle("nav-conflict-dot--warning", conflictCount === 0 && warningCount > 0);
     } catch (_) {}
   }
   refreshConflictDot();
   setInterval(refreshConflictDot, 30000);
   window.refreshConflictDot = refreshConflictDot;
-
-  // Alerts dot on IPAM — same 30 s polling, same flashing-red pattern as
-  // the Events dot. Sources from /reservations/alerts/count which returns
-  // just the active (non-ignored, non-snoozed) stale-reservation count.
-  // Exposed on window so the Events page Alerts panel can refresh it
-  // immediately after Snooze / Free / Ignore / Un-ignore actions.
-  async function refreshAlertsDot() {
-    var dot = document.getElementById("nav-alerts-dot");
-    if (!dot) return;
-    try {
-      var data = await api.reservations.alertsCount();
-      dot.style.display = (data && data.count > 0) ? "inline-block" : "none";
-    } catch (_) {}
-  }
-  refreshAlertsDot();
-  setInterval(refreshAlertsDot, 30000);
-  window.refreshAlertsDot = refreshAlertsDot;
+  // Back-compat alias: events.js still calls window.refreshAlertsDot() after
+  // Alerts-panel actions. With the dots consolidated, both point at the one
+  // refresher so callers don't need to know which signal changed.
+  window.refreshAlertsDot = refreshConflictDot;
 
   // Re-apply branding when it already loaded — the brand block above renders
   // visibility:hidden until applyBranding clears it, and on pages that re-run
