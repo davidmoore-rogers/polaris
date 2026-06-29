@@ -1286,7 +1286,7 @@ Listed alphabetically.
 
 **Public API:** `resolveRecipientUsers(recipientTags)`, `expandDeliveries(notificationId, targets)`, `bumpRecipientIndex()`.
 
-**Cross-service deps:** `regionScopeService.resolveTagScopesForUser` (effective tags per user), `notificationService.stripRegionPrefix`, `prisma` (users + pushSubscriptions + notificationDelivery).
+**Cross-service deps:** `regionScopeService.resolveTagScopesForUser` (effective tags per user), `notificationService.stripRegionPrefix`, `notificationTypes.CHANNEL_TRANSPORT` (channel type → transport), `prisma` (notificationChannel lookup + users + pushSubscriptions + notificationDelivery).
 
 **Used by:** `src/services/notificationEngine.ts` (`fire()` + event-tail, via the best-effort `expandDeliveriesSafe` wrapper).
 
@@ -1306,12 +1306,13 @@ Listed alphabetically.
 
 **Public API:** `drainPendingDeliveries()`.
 
-**Cross-service deps:** the channel senders (`notificationChannels/emailChannel.sendEmail`, `webhookChannel.sendWebhook`, `webPushChannel.sendWebPush`), `prisma` (delivery rows + pushSubscription prune), `eventLogService.logEvent`.
+**Cross-service deps:** the channel senders (`notificationChannels/emailChannel.{sendSmtpEmail,sendM365Email}`, `webhookChannel.sendWebhook`, `pushbulletChannel.sendPushbullet`, `webPushChannel.sendWebPush`), `prisma` (delivery rows + notificationChannel config + pushSubscription prune), `eventLogService.logEvent`.
 
 **Used by:** `src/jobs/deliverNotifications.ts` (15s tick).
 
 **Invariants:**
-- ≤3 attempts per delivery; a row flips to `failed` only when attempts reach the cap, else stays `pending` for the next tick.
+- Each delivery's destination secrets (SMTP password, webhook URL, VAPID key, …) are read from its `NotificationChannel` at send time, NOT stored on the delivery row.
+- A missing/deleted channel (NULL channelId) is a PERMANENT fail (not retried); otherwise ≤3 attempts before flipping to `failed`.
 - A web_push 410/404 prunes the dead `PushSubscription` (by endpoint).
 - Bounded concurrency on sends; one summary audit Event per non-empty drain (no per-delivery Event spam).
 
@@ -1319,22 +1320,23 @@ Listed alphabetically.
 
 ---
 
-## services/notificationConfigService.ts
+## services/notificationChannelService.ts
 
-**What it owns:** Stored config for the three outbound channels (SMTP / Microsoft 365 / Web Push), each a `Setting` row, with secret masking + env override.
+**What it owns:** CRUD + secret handling for the `NotificationChannel` registry (Notifications → Delivery tab) — the operator-managed list of outbound delivery integrations.
 
-**Public API:** `getSmtpConfig`/`getMaskedSmtpConfig`/`saveSmtpConfig`, `getM365Config`/`getMaskedM365Config`/`saveM365Config`, `getWebPushConfig`/`getMaskedWebPushConfig`/`saveWebPushConfig`, `anyEmailChannelEnabled`, `MASK` + key constants.
+**Public API:** `listChannels`/`listChannelsForBuilder`/`getChannel`/`getChannelRaw` (secrets, for senders)/`createChannel`/`updateChannel`/`deleteChannel`/`generateWebPushKeys`/`getWebPushChannel`, `MASK`.
 
-**Cross-service deps:** `prisma` (Setting rows).
+**Cross-service deps:** `prisma` (notification_channels), `notificationTypes.CHANNEL_TYPE_META` (per-type field defs incl. which are secret) + `CHANNEL_TRANSPORT`, `notificationChannels/webPushChannel.generateVapidKeys`.
 
-**Used by:** the channel senders (raw `getXConfig`), `src/api/routes/serverSettings.ts` (masked get / save / test), `src/api/routes/pushSubscriptions.ts` (`/key`).
+**Used by:** `src/api/routes/notificationChannels.ts` (CRUD + test + generate), `src/api/routes/pushSubscriptions.ts` (`/key` via `getWebPushChannel`), the rule builder (channel picker via `listChannels`), `notificationDeliveryService` (reads channel config at send time via a direct prisma lookup).
 
 **Invariants:**
-- Secrets (SMTP password, M365 client secret, VAPID private key) are masked on read and preserved on write when the client echoes the mask.
-- Env vars (`POLARIS_SMTP_PASSWORD` / `POLARIS_M365_CLIENT_SECRET` / `POLARIS_VAPID_PRIVATE_KEY` + public/subject) override the stored value at send time (org Key-Vault pattern).
-- The API never returns an unmasked secret.
+- Secrets (per the type's `secret:true` field defs — SMTP password, M365 client secret, Pushbullet token, Slack/Teams webhook URL, VAPID private key) are masked on read and preserved on write when the client echoes the mask / sends blank.
+- The API never returns an unmasked secret; the web_push private key is never returned at all (only `privateKeySet`).
+- `type` is immutable after create; `web_push` is a singleton (create rejects a second one).
+- Destination secrets live ONLY on the channel — delivery rows reference the channel by id, never copy its secrets.
 
-**When changing this:** if you add a secret field, mask it in the `getMaskedX` path AND honor an env override in `getXConfig`, or it leaks via the API.
+**When changing this:** add a new channel type by extending `CHANNEL_TYPES` + `CHANNEL_TYPE_META` (+ `CHANNEL_TRANSPORT`) in `notificationTypes`, a sender under `notificationChannels/`, and a dispatch arm in `notificationDeliveryService`. Mark secret fields `secret:true` so masking covers them.
 
 ---
 

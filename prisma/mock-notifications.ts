@@ -28,11 +28,23 @@ async function main() {
     process.exit(1);
   }
 
-  // ── Idempotency: clear prior mock rules + demo notifications ──
+  // ── Idempotency: clear prior mock rules + channels + demo notifications ──
   await prisma.notificationRule.deleteMany({ where: { name: { startsWith: "Mock:" } } });
+  await prisma.notificationChannel.deleteMany({ where: { name: { startsWith: "Mock:" } } });
   await prisma.notification.deleteMany({ where: { message: { startsWith: "Mock demo:" } } });
 
   const now = new Date();
+
+  // ── Delivery channels (registry) the mock rules route through ──
+  const emailChannel = await prisma.notificationChannel.create({
+    data: { name: "Mock: NOC email (SMTP)", type: "smtp", enabled: true, createdBy: "system:mock-notifications",
+      config: { host: "smtp.example.com", port: 587, security: "starttls", username: "polaris", password: "mock-secret", from: "polaris@example.com" } },
+  });
+  const slackChannel = await prisma.notificationChannel.create({
+    data: { name: "Mock: NOC Slack", type: "slack", enabled: true, createdBy: "system:mock-notifications",
+      // Point at a https://webhook.site/<id> URL to watch deliveries arrive.
+      config: { webhookUrl: "https://hooks.slack.com/services/MOCK/MOCK/MOCK" } },
+  });
 
   // ── Region-tag a couple of mock assets so the Regions column has data ──
   const fw = await findAsset("core-fw-01");
@@ -75,17 +87,15 @@ async function main() {
       name: "Mock: Polaris host memory high", severity: "error", clearBehavior: "auto",
       trigger: { type: "host_metric", metric: "memUsedPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 85, forDurationSec: 0 },
       scope: {}, messageTemplate: "Polaris host memory at {value}% (threshold {threshold}%)",
-      // email by tag + explicit address — exercises the email delivery path
-      // (only sends once SMTP or M365 is configured in Server Settings).
-      targets: [{ channel: "email", recipientTags: ["region:Atlanta"], addresses: ["oncall@example.com"] }],
+      // email by tag + explicit address — routes through the Mock SMTP channel.
+      targets: [{ channelId: emailChannel.id, recipientTags: ["region:Atlanta"], addresses: ["oncall@example.com"] }],
     },
     {
       name: "Mock: Polaris host CPU high", severity: "warning", clearBehavior: "manual",
       trigger: { type: "host_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 80, forDurationSec: 0 },
       scope: {}, messageTemplate: null,
-      // generic webhook — point at a https://webhook.site/<id> URL to watch
-      // deliveries arrive. SSRF guard blocks internal/loopback targets.
-      targets: [{ channel: "webhook", webhookUrl: "https://webhook.site/00000000-0000-0000-0000-000000000000", webhookKind: "generic" }],
+      // Slack channel — posts to the channel's configured webhook destination.
+      targets: [{ channelId: slackChannel.id }],
     },
     {
       name: "Mock: Server CPU high", severity: "warning", clearBehavior: "manual",

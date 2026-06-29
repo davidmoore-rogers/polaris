@@ -16,7 +16,7 @@ import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { requirePermission } from "../middleware/permissions.js";
-import { getWebPushConfig } from "../../services/notificationConfigService.js";
+import { getWebPushChannel } from "../../services/notificationChannelService.js";
 
 const router = Router();
 
@@ -27,8 +27,11 @@ const subscribeSchema = z.object({
 
 router.get("/key", requirePermission("notifications", "read"), async (_req, res, next) => {
   try {
-    const cfg = await getWebPushConfig();
-    res.json({ enabled: cfg.enabled && !!cfg.publicKey, publicKey: cfg.enabled ? cfg.publicKey : "" });
+    const ch = await getWebPushChannel();
+    const cfg = (ch?.config && typeof ch.config === "object" ? ch.config : {}) as Record<string, unknown>;
+    const publicKey = typeof cfg.publicKey === "string" ? cfg.publicKey : "";
+    const ready = !!ch && ch.enabled && !!publicKey;
+    res.json({ enabled: ready, publicKey: ready ? publicKey : "" });
   } catch (err) {
     next(err);
   }

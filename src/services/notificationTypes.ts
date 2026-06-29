@@ -137,34 +137,91 @@ export const scopeSchema = z
   })
   .strict();
 
-// ─── Delivery targets ───────────────────────────────────────────────────────
-// A rule's outbound delivery. In-app is always implicit (every fire writes a
-// Notification); these route the same fire to external channels. `recipientTags`
-// routes to users whose effective region/other tags intersect; `addresses`
-// (email) / `webhookUrl` (webhook) are explicit. Expanded at fire time by
-// notificationRecipientService.expandDeliveries.
-export const DELIVERY_CHANNELS = ["email", "webhook", "web_push"] as const;
-export const WEBHOOK_KINDS = ["generic", "slack", "teams"] as const;
+// ─── Delivery channels + targets ─────────────────────────────────────────────
+// Channels are operator-configured delivery integrations (NotificationChannel
+// registry, Notifications → Delivery tab). A rule's `targets[]` reference a
+// channel by id. In-app is always implicit (every fire writes a Notification);
+// targets route the same fire out through the configured channels.
+//
+// `transport` is the dispatch family the drain switches on; multiple channel
+// `type`s can share one transport (slack + teams → webhook).
+export const CHANNEL_TYPES = ["smtp", "oauth_m365", "pushbullet", "slack", "teams", "web_push"] as const;
+export type ChannelType = (typeof CHANNEL_TYPES)[number];
+export const CHANNEL_TRANSPORT: Record<ChannelType, "email" | "webhook" | "web_push" | "pushbullet"> = {
+  smtp: "email",
+  oauth_m365: "email",
+  pushbullet: "pushbullet",
+  slack: "webhook",
+  teams: "webhook",
+  web_push: "web_push",
+};
+/** Channel types whose target routes to recipients (tags / addresses); the rest
+ *  post to the channel's own fixed destination (URL / token). */
+export const RECIPIENT_ROUTED_TYPES: ChannelType[] = ["smtp", "oauth_m365", "web_push"];
 
-export const deliveryTargetSchema = z
-  .object({
-    channel: z.enum(DELIVERY_CHANNELS),
-    recipientTags: z.array(z.string().max(100)).max(200).optional(),
-    addresses: z.array(z.string().email().max(320)).max(100).optional(),
-    webhookUrl: z.string().url().max(2000).optional(),
-    webhookKind: z.enum(WEBHOOK_KINDS).optional(),
-  })
-  .superRefine((t, ctx) => {
-    if (t.channel === "webhook" && !t.webhookUrl) {
-      ctx.addIssue({ code: "custom", message: "webhookUrl is required for a webhook target", path: ["webhookUrl"] });
-    }
-    if (t.channel === "email" && (!t.addresses || t.addresses.length === 0) && (!t.recipientTags || t.recipientTags.length === 0)) {
-      ctx.addIssue({ code: "custom", message: "An email target needs recipientTags and/or explicit addresses", path: ["addresses"] });
-    }
-    if (t.channel === "web_push" && (!t.recipientTags || t.recipientTags.length === 0)) {
-      ctx.addIssue({ code: "custom", message: "A web-push target needs recipientTags (it routes to subscribed users)", path: ["recipientTags"] });
-    }
-  });
+// Display metadata for the Delivery-tab add/edit modal: per-type label + the
+// config fields (key, label, kind, whether it's a masked secret).
+export interface ChannelFieldDef {
+  key: string;
+  label: string;
+  kind: "text" | "number" | "password" | "select";
+  secret?: boolean;
+  options?: string[];
+  placeholder?: string;
+}
+export const CHANNEL_TYPE_META: Record<ChannelType, { label: string; transport: string; singleton?: boolean; fields: ChannelFieldDef[] }> = {
+  smtp: {
+    label: "Email — SMTP", transport: "email",
+    fields: [
+      { key: "host", label: "SMTP host", kind: "text", placeholder: "smtp.example.com" },
+      { key: "port", label: "Port", kind: "number" },
+      { key: "security", label: "Security", kind: "select", options: ["none", "starttls", "ssl"] },
+      { key: "username", label: "Username", kind: "text" },
+      { key: "password", label: "Password", kind: "password", secret: true },
+      { key: "from", label: "From address", kind: "text", placeholder: "polaris@example.com" },
+    ],
+  },
+  oauth_m365: {
+    label: "Email — Microsoft 365 (OAuth)", transport: "email",
+    fields: [
+      { key: "tenantId", label: "Tenant ID", kind: "text" },
+      { key: "clientId", label: "Client ID", kind: "text" },
+      { key: "clientSecret", label: "Client secret", kind: "password", secret: true },
+      { key: "fromUserId", label: "Send-as user (UPN or object ID)", kind: "text", placeholder: "alerts@example.com" },
+    ],
+  },
+  pushbullet: {
+    label: "Pushbullet", transport: "pushbullet",
+    fields: [
+      { key: "accessToken", label: "Access token", kind: "password", secret: true },
+    ],
+  },
+  slack: {
+    label: "Slack", transport: "webhook",
+    fields: [
+      { key: "webhookUrl", label: "Incoming webhook URL", kind: "password", secret: true, placeholder: "https://hooks.slack.com/services/…" },
+    ],
+  },
+  teams: {
+    label: "Microsoft Teams", transport: "webhook",
+    fields: [
+      { key: "webhookUrl", label: "Incoming webhook URL", kind: "password", secret: true, placeholder: "https://outlook.office.com/webhook/…" },
+    ],
+  },
+  web_push: {
+    label: "Web Push (browser & mobile)", transport: "web_push", singleton: true,
+    fields: [
+      { key: "subject", label: "Contact subject (mailto: or https:)", kind: "text", placeholder: "mailto:admin@example.com" },
+      // publicKey + privateKey are generated server-side, not free-typed.
+    ],
+  },
+};
+
+export const deliveryTargetSchema = z.object({
+  channelId: z.string().min(1).max(100),
+  recipientTags: z.array(z.string().max(100)).max(200).optional(),
+  addresses: z.array(z.string().email().max(320)).max(100).optional(),
+});
 
 export const ruleInputSchema = z.object({
   name: z.string().min(1).max(200),
@@ -276,8 +333,8 @@ export function buildSchemaCatalog() {
     fieldMeta: FIELD_META,
     changeTypeMeta: CHANGE_TYPE_META,
     metricDimensions: METRIC_DIMENSIONS,
-    deliveryChannels: DELIVERY_CHANNELS,
-    webhookKinds: WEBHOOK_KINDS,
+    channelTypes: CHANNEL_TYPE_META,
+    recipientRoutedTypes: RECIPIENT_ROUTED_TYPES,
     triggerTypes: [
       { type: "asset_metric", label: "Asset metric threshold", scoped: true, metrics: ASSET_METRICS },
       { type: "asset_state", label: "Asset state", scoped: true, fields: ASSET_STATE_FIELDS },
