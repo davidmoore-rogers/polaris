@@ -301,8 +301,14 @@ export async function snoozeReservation(reservationId: string, actor?: string): 
  * `max(createdAt, detectionStartedAt)` is used so the cold-start grace window
  * doesn't flood the alert list before discovery has populated either signal.
  *
+ * Reservations on DEPRECATED subnets are excluded from the active list (and
+ * therefore the badge count): a deprecated subnet means its owning FortiGate
+ * was decommissioned, so the whole network is gone and per-IP stale alerts are
+ * noise rather than actionable signal.
+ *
  * `mode` controls which rows are returned:
- *   "active"  — non-ignored stale rows (default; what the badge counts)
+ *   "active"  — non-ignored stale rows on non-deprecated subnets (default; what
+ *               the badge counts)
  *   "ignored" — rows the operator has set staleIgnored=true on, regardless
  *               of whether they're still stale by the threshold rule
  */
@@ -359,8 +365,24 @@ export async function listStaleReservations(
   // Pull every non-ignored active dhcp_reservation in one go and filter in
   // memory. Volume is bounded by total reservation count — small (low
   // thousands at most) on real deployments.
+  //
+  // Skip reservations on DEPRECATED subnets: when a FortiGate drops out of the
+  // FMG roster, discovery decommissions the firewall AND deprecates every
+  // subnet it owned (Subnet.status="deprecated"; integrations.ts Phase 2).
+  // Those subnets' devices stop being seen entirely (no lease, no asset
+  // presence), so every reservation on them would otherwise flag stale —
+  // flooding the operator with per-IP noise for a network they already
+  // retired by one action. Excluding deprecated subnets matches the existing
+  // convention (e.g. dns_resolved auto-reservations only target non-deprecated
+  // subnets — Business Rule #11). If a subnet was deprecated in error,
+  // rediscovery flips it back to "available" and alerting resumes.
   const rows = await prisma.reservation.findMany({
-    where: { status: "active", sourceType: "dhcp_reservation", staleIgnored: false },
+    where: {
+      status: "active",
+      sourceType: "dhcp_reservation",
+      staleIgnored: false,
+      subnet: { status: { not: "deprecated" } },
+    },
     include: {
       subnet: { select: { id: true, cidr: true, name: true, fortigateDevice: true } },
       pushedTo: { select: { id: true, name: true } },

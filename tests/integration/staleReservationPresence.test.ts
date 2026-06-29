@@ -136,3 +136,35 @@ d("stale-reservation asset presence", () => {
     expect(entry!.assetLastSeen).toBeNull();
   });
 });
+
+d("stale-reservation deprecated-subnet exclusion", () => {
+  it("excludes a stale reservation once its subnet is deprecated (decommissioned firewall)", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const subnet = await scaffold(agent, csrf);
+    const res = await staleCandidate(subnet.id); // genuinely gone: no lease, no asset
+
+    // While the subnet is active, the reservation flags stale.
+    const before = await listStaleReservations("active");
+    expect(before.find((r) => r.id === res.id)).toBeDefined();
+
+    // Decommissioning the owning FortiGate deprecates the subnet — the
+    // reservation must drop out of the active list (and the badge count).
+    await prisma.subnet.update({ where: { id: subnet.id }, data: { status: "deprecated" } });
+
+    const after = await listStaleReservations("active");
+    expect(after.find((r) => r.id === res.id)).toBeUndefined();
+  });
+
+  it("still surfaces a deprecated-subnet reservation in the 'ignored' review list", async () => {
+    // The ignored view is the operator's record of what they silenced — it is
+    // intentionally NOT filtered by subnet status, so an ignored row stays
+    // reviewable even after its subnet is deprecated.
+    const { agent, csrf } = await authedAgent(app);
+    const subnet = await scaffold(agent, csrf);
+    const res = await staleCandidate(subnet.id, { staleIgnored: true });
+    await prisma.subnet.update({ where: { id: subnet.id }, data: { status: "deprecated" } });
+
+    const ignored = await listStaleReservations("ignored");
+    expect(ignored.find((r) => r.id === res.id)).toBeDefined();
+  });
+});

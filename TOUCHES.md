@@ -3123,6 +3123,7 @@ Listed alphabetically.
 - Cold-start grace: effective baseline = max(createdAt, detectionStartedAt) to avoid flooding on first run
 - Effective last signal = freshest of {lastSeenLeased, matched Asset.lastSeen}; baseline is a fallback used only when NEITHER exists (not a floor — a real but old signal still flags during cold-start)
 - A row is stale if effectiveLastSignalMs < (now − threshold) AND (threshold > 0)
+- Active list/count exclude reservations on DEPRECATED subnets (decommissioned-firewall networks) via `where.subnet.status != "deprecated"`; the ignored review list is NOT filtered by subnet status
 - MAC correlation wins over IP (DHCP reservations are MAC→IP, the stable identity); entry carries assetLastSeen + assetPresenceMatch ("mac" | "ip" | null)
 - Snooze extends alert by staleAfterDays from now (not from threshold); clears staleNotifiedAt
 - Ignored rows stay suppressed regardless of threshold; detectionStartedAt persists across runs
