@@ -3085,10 +3085,14 @@ Listed alphabetically.
 
 **Used by:** src/api/routes/reservations.ts (list/snooze/ignore endpoints), src/jobs/flagStaleReservations.ts (flagStaleReservations every 6 hours).
 
+**Reads (cross-signal):** Asset.lastSeen, AssetMacAddress.mac, AssetAssociatedIp.ip — `buildAssetPresenceResolver` correlates each candidate reservation to an Asset (MAC first via `normalizeMacOrNull`, then IP) so a statically-addressed device that never pulls a DHCP lease but is still on the network is NOT flagged stale. Three batched, indexed findMany calls per scan (bounded by candidate-reservation count); no per-row queries.
+
 **Invariants:**
 - Stale threshold (staleAfterDays) defaults to 60 days, 0 = disabled
 - Cold-start grace: effective baseline = max(createdAt, detectionStartedAt) to avoid flooding on first run
-- A row is stale if (lastSeenLeased < threshold OR never seen leased before) AND (threshold > 0)
+- Effective last signal = freshest of {lastSeenLeased, matched Asset.lastSeen}; baseline is a fallback used only when NEITHER exists (not a floor — a real but old signal still flags during cold-start)
+- A row is stale if effectiveLastSignalMs < (now − threshold) AND (threshold > 0)
+- MAC correlation wins over IP (DHCP reservations are MAC→IP, the stable identity); entry carries assetLastSeen + assetPresenceMatch ("mac" | "ip" | null)
 - Snooze extends alert by staleAfterDays from now (not from threshold); clears staleNotifiedAt
 - Ignored rows stay suppressed regardless of threshold; detectionStartedAt persists across runs
 - flagStaleReservations emits one reservation.stale Event per fresh transition (staleNotifiedAt null → timestamp)
@@ -3099,6 +3103,8 @@ Listed alphabetically.
 - Test cold-start grace window (rows pre-dating detectionStartedAt get full threshold window)
 - Check flagStaleReservations only fires on active dhcp_reservation rows (not discovered dhcp_lease)
 - Audit snooze idempotency: repeated snooze clicks should extend from "now" not from prior snooze
+- effectiveLastSignalMs is pure + exported — extend its unit test when changing evidence precedence
+- Keep the presence resolver batched (no per-row asset lookups) — scale-check at 2000 assets
 
 ---
 
