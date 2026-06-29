@@ -201,13 +201,12 @@ d("permission gates — readonly parity with admin", () => {
   });
 });
 
-d("reservation ownership — write-level user vs system/discovery-owned rows", () => {
-  // Regression for the IP-panel "Reserve" take-over: a write-level user
-  // (`user`/`assetsadmin`) must be able to release a discovery-created
-  // reservation (createdBy null / "refresh") even though they didn't "create"
-  // it — but must STILL be blocked from another real user's manual
-  // reservation AND from a system:* row (dns_resolved stays view-only; its
-  // take-over is the internal releaseDnsResolvedAt path, not a gated DELETE).
+d("reservation take-over — write-level user reserves over an observed DHCP lease", () => {
+  // A dhcp_lease is observed device presence, not a user-owned reservation.
+  // A reservations:write user (who didn't "create" the lease) must be able to
+  // reserve that IP: createReservation supersedes the lease server-side, so
+  // it's a plain create — no separate ownership-gated release. An authoritative
+  // hold (another user's manual reservation) is NOT superseded and still 409s.
   async function loginWithCsrf(username: string) {
     const agent = request.agent(app);
     await agent.get("/api/v1/auth/me");
@@ -223,55 +222,40 @@ d("reservation ownership — write-level user vs system/discovery-owned rows", (
     return { agent, csrf };
   }
 
-  it("can release a discovery-owned lease but not another user's or a dns_resolved row", async () => {
+  it("supersedes the observed lease on create, but 409s on another user's manual reservation", async () => {
     const leaseRes = await prisma.reservation.create({
       data: {
         subnetId: seededSubnetId,
-        ipAddress: "10.99.1.50",
+        ipAddress: "10.99.1.60",
         hostname: `${PFX}-lease`,
         sourceType: "dhcp_lease",
         owner: "dhcp-lease",
         // createdBy intentionally null — mirrors the FMG/FortiGate sync path.
       },
     });
-    const otherRes = await prisma.reservation.create({
-      data: {
-        subnetId: seededSubnetId,
-        ipAddress: "10.99.1.51",
-        hostname: `${PFX}-othermanual`,
-        sourceType: "manual",
-        createdBy: "some-other-operator",
-      },
-    });
-    const dnsRes = await prisma.reservation.create({
-      data: {
-        subnetId: seededSubnetId,
-        ipAddress: "10.99.1.52",
-        hostname: `${PFX}-dns`,
-        sourceType: "dns_resolved",
-        createdBy: "system:dns-resolved",
-      },
-    });
 
     const { agent, csrf } = await loginWithCsrf(`${PFX}-user-reswrite`);
 
-    // Discovery-owned (createdBy null) → allowed.
+    // Reserve over the lease → plain create succeeds (lease superseded).
     const okResp = await agent
-      .delete(`/api/v1/reservations/${leaseRes.id}`)
-      .set("X-CSRF-Token", csrf);
-    expect(okResp.status).toBe(204);
+      .post("/api/v1/reservations")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: seededSubnetId, ipAddress: "10.99.1.60", hostname: `${PFX}-claimed` });
+    expect(okResp.status).toBe(201);
+    expect(okResp.body.createdBy).toBe(`${PFX}-user-reswrite`);
+    expect(okResp.body.sourceType).toBe("manual");
 
-    // Another user's manual reservation → forbidden.
-    const otherResp = await agent
-      .delete(`/api/v1/reservations/${otherRes.id}`)
-      .set("X-CSRF-Token", csrf);
-    expect(otherResp.status).toBe(403);
+    // The observed lease row is gone (hard-deleted by releaseSupersededDhcpLeaseAt).
+    const oldLease = await prisma.reservation.findUnique({ where: { id: leaseRes.id } });
+    expect(oldLease).toBeNull();
 
-    // system:* (dns_resolved) → forbidden (view-only for non-admins).
-    const dnsResp = await agent
-      .delete(`/api/v1/reservations/${dnsRes.id}`)
-      .set("X-CSRF-Token", csrf);
-    expect(dnsResp.status).toBe(403);
+    // The seeded manual reservation at 10.99.1.10 (createdBy "permgate") is
+    // authoritative — reserving over it is NOT a silent take-over.
+    const conflictResp = await agent
+      .post("/api/v1/reservations")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: seededSubnetId, ipAddress: "10.99.1.10", hostname: `${PFX}-collide` });
+    expect(conflictResp.status).toBe(409);
   });
 });
 

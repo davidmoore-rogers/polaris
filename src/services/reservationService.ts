@@ -178,6 +178,39 @@ export async function createReservation(input: CreateReservationInput) {
   return reservation;
 }
 
+/**
+ * Supersede an observed dhcp_lease at (subnetId, ipAddress) when a manual
+ * reservation is being created over it. A dhcp_lease is observed device
+ * presence, not a user-owned reservation — claiming the IP is a normal create,
+ * so this runs as part of createReservation rather than a separate
+ * ownership-gated DELETE.
+ *
+ * Delegates to releaseReservation so the behavior is identical to the old
+ * client-driven `api.reservations.release(leaseId)` step it replaces: on
+ * push-enabled subnets it expires the lease on the FortiGate (releaseDhcpLease),
+ * on read-only subnets it's a pure DB release, and the released-slot collision
+ * + audit Event are handled there. The only thing dropped is the route-level
+ * ownership gate — which is correct, because superseding an observed lease is
+ * part of a create the caller is already authorized to make.
+ */
+async function releaseSupersededDhcpLeaseAt(
+  subnetId: string,
+  ipAddress: string,
+  actor: string | null,
+): Promise<void> {
+  const lease = await prisma.reservation.findFirst({
+    where: {
+      subnetId,
+      ipAddress,
+      status: "active",
+      sourceType: "dhcp_lease" as any,
+    },
+    select: { id: true },
+  });
+  if (!lease) return;
+  await releaseReservation(lease.id, actor ?? undefined);
+}
+
 async function createReservationFlow(input: CreateReservationInput) {
   // 1. Load the target subnet (with integration for push eligibility)
   const subnet = await prisma.subnet.findUnique({
@@ -200,16 +233,18 @@ async function createReservationFlow(input: CreateReservationInput) {
       );
 
     // Check for existing active reservation on this IP. dns_resolved rows are
-    // observational fallback markers; a manual create at the same IP is an
-    // explicit operator claim that should take over silently — exclude them
-    // from the collision check here and release them inline below before the
-    // transaction commits.
+    // observational fallback markers and dhcp_lease rows are observed device
+    // leases — neither is a reservation a user "owns". A manual create at the
+    // same IP is an explicit operator claim that should take over silently, so
+    // both are excluded from the collision check here and released inline
+    // below before the transaction commits. dhcp_reservation / vip / interface
+    // / fortiswitch / fortinap / manual rows are authoritative and still 409.
     const existing = await prisma.reservation.findFirst({
       where: {
         subnetId: input.subnetId,
         ipAddress: input.ipAddress,
         status: "active",
-        NOT: { sourceType: "dns_resolved" as any },
+        NOT: { sourceType: { in: ["dns_resolved", "dhcp_lease"] as any } },
       },
     });
     if (existing)
@@ -252,12 +287,17 @@ async function createReservationFlow(input: CreateReservationInput) {
   }
 
   // 4. Create the reservation & mark subnet as reserved if full-subnet.
-  // Release any dns_resolved fallback row at the same target FIRST — the
-  // manual create is the authoritative claim and the unique-on-active
-  // constraint won't let both coexist. Per-IP only; full-subnet reservations
-  // don't collide with the per-IP fallback rows.
+  // Release any dns_resolved fallback row OR observed dhcp_lease at the same
+  // target FIRST — the manual create is the authoritative claim and the
+  // unique-on-active constraint won't let both coexist. A dhcp_lease is
+  // observed device presence, not a user-owned reservation, so superseding it
+  // is part of this create (no separate ownership-gated release). The lease
+  // supersede delegates to releaseReservation, so on push-enabled subnets the
+  // device lease is expired exactly as the old client release+create flow did.
+  // Per-IP only; full-subnet reservations don't collide with the per-IP rows.
   if (input.ipAddress) {
     await releaseDnsResolvedAt(input.subnetId, input.ipAddress);
+    await releaseSupersededDhcpLeaseAt(input.subnetId, input.ipAddress, input.createdBy ?? null);
   }
   const macClean = input.macAddress ? normalizeMac(input.macAddress) : null;
   const reservation = await prisma.$transaction(async (tx) => {

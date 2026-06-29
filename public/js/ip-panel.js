@@ -360,14 +360,7 @@ function _renderIpList(data) {
 
     var actions = "";
     var isOwner = r && r.createdBy === currentUsername;
-    // A discovery-created reservation that no real user owns — createdBy null
-    // (FMG/FortiGate sync) or "refresh" (subnet-refresh sweep). Mirrors
-    // canMutateReservation() on the server so a reservations:write user can
-    // Revoke/Edit an unowned DHCP lease, not just take it over via Reserve.
-    // system:* rows (dns_resolved) are intentionally excluded — view-only for
-    // non-admins; their take-over is the internal releaseDnsResolvedAt path.
-    var isDiscoveryOwned = r && (!r.createdBy || r.createdBy === "refresh");
-    var canEditThis = canManageNetworks() || isOwner || (canReserveIps() && isDiscoveryOwned);
+    var canEditThis = canManageNetworks() || isOwner;
     var assetBtn = ip.assetId
       ? '<button class="btn btn-sm btn-secondary ip-asset-btn" data-aid="' + escapeHtml(ip.assetId) + '" title="Open asset details">View Asset</button>'
       : '';
@@ -947,96 +940,14 @@ function _openReserveModal(subnetId, ipAddress, prefill) {
       _ipPanelDirty = true;
       _fetchIpPage();
     } catch (err) {
-      // The IP the operator typed may already hold an observed DHCP lease (the
-      // server rejects the duplicate with a 409). Offer the same release-and-
-      // replace the per-row green "Reserve" button does, so "+ Reserve IP" and
-      // the row button behave identically. _maybeOfferLeaseTakeover returns true
-      // if it recognized + handled the conflict (suppressing the raw error).
-      var handled = await _maybeOfferLeaseTakeover(err, input, pushEligible, s);
-      if (!handled) showToast(err.message, "error");
+      // A dhcp_lease at the typed IP no longer 409s — createReservation
+      // supersedes it server-side. A 409 here means a genuine authoritative
+      // hold (manual reservation, VIP, dhcp_reservation, …) that must not be
+      // silently clobbered, so surface it.
+      showToast(err.message, "error");
     } finally {
       btn.disabled = false;
     }
-  });
-}
-
-// When createReservation fails with the duplicate-active-reservation 409 and the
-// conflicting row is an *observed* DHCP lease, offer to release it and create the
-// operator's manual reservation in its place — mirroring _openLeaseReserveModal's
-// release+create flow. Anything that isn't a dhcp_lease (manual, dhcp_reservation,
-// vip, …) is never silently clobbered (returns false → caller shows the raw 409).
-// Returns true once the takeover scenario is recognized (whether the operator
-// confirms or cancels), so the caller suppresses the raw error message.
-async function _maybeOfferLeaseTakeover(err, input, pushEligible, subnet) {
-  if (!err || err.status !== 409) return false;
-  if (!input || !input.ipAddress) return false;
-  var m = /reservation:\s*([0-9a-fA-F-]+)\)/.exec(err.message || "");
-  if (!m) return false;
-
-  var existingId = m[1];
-  var existing;
-  try {
-    existing = await api.reservations.get(existingId);
-  } catch (_e) {
-    return false; // can't resolve the conflicting row — fall back to the raw error
-  }
-
-  // Only an observed DHCP *lease* is taken over here — this mirrors exactly
-  // which rows get the per-row green "Reserve" button (_openLeaseReserveModal).
-  // A discovered dhcp_reservation already IS a device-side reservation (the row
-  // UI shows no Reserve for it), and manual / other-source rows must be handled
-  // via explicit edit/release — all of those fall through to the raw 409.
-  if (existing.sourceType !== "dhcp_lease") return false;
-  var kindLabel = "DHCP lease";
-
-  closeModal();
-  var fortigateDevice = (subnet && subnet.fortigateDevice) || "";
-  var confirmed = await _confirmLeaseTakeover(input.ipAddress, kindLabel, existing, pushEligible, fortigateDevice);
-  if (!confirmed) return true; // recognized but operator declined — suppress raw error
-
-  try {
-    await api.reservations.release(existingId);
-    var reservation = await api.reservations.create(input);
-    var pushStatus = reservation && reservation.pushStatus;
-    var msg = "Reservation created";
-    if (pushStatus === "synced") msg = "Reservation created and pushed to FortiGate";
-    else if (pushStatus === "pending") msg = "Reservation created — queued for push (FortiGate unreachable; will retry automatically)";
-    showToast(msg);
-    _ipPanelDirty = true;
-    _fetchIpPage();
-  } catch (err2) {
-    showToast(err2.message, "error");
-  }
-  return true;
-}
-
-// Confirmation for replacing an observed DHCP lease/reservation with a manual
-// reservation. Folds the FortiGate-push warning into the same dialog when the
-// subnet pushes, so the operator sees one prompt rather than two.
-function _confirmLeaseTakeover(ipAddress, kindLabel, existing, pushEligible, fortigateDevice) {
-  return new Promise(function (resolve) {
-    var detail = [];
-    if (existing && existing.hostname) detail.push("hostname <code>" + escapeHtml(existing.hostname) + "</code>");
-    if (existing && existing.macAddress) detail.push("MAC <code>" + escapeHtml(existing.macAddress) + "</code>");
-    var existingDesc = detail.length ? " (" + detail.join(", ") + ")" : "";
-    var body =
-      '<p><code>' + escapeHtml(ipAddress) + '</code> currently has an active ' + kindLabel + existingDesc + '.</p>' +
-      '<p style="margin-top:8px">It will be released and replaced with your manual reservation.</p>' +
-      (pushEligible
-        ? '<p style="margin-top:8px">The new reservation will also be written to FortiGate <strong>' + escapeHtml(fortigateDevice) + '</strong>. If the push fails, the reservation will not be created.</p>'
-        : '');
-    var footer =
-      '<button class="btn btn-secondary" id="btn-takeover-cancel">Cancel</button>' +
-      '<button class="btn btn-primary" id="btn-takeover-confirm">Release &amp; Reserve</button>';
-    openModal("Replace existing " + kindLabel + "?", body, footer);
-    document.getElementById("btn-takeover-confirm").addEventListener("click", function () {
-      closeModal();
-      resolve(true);
-    });
-    document.getElementById("btn-takeover-cancel").addEventListener("click", function () {
-      closeModal();
-      resolve(false);
-    });
   });
 }
 
@@ -1103,7 +1014,11 @@ function _openLeaseReserveModal(subnetId, ipAddress, leaseId, prefillMac, prefil
     }
 
     try {
-      await api.reservations.release(leaseId);
+      // No explicit release of the lease — a dhcp_lease is observed device
+      // presence, not a user-owned reservation. createReservation supersedes
+      // it server-side (releaseSupersededDhcpLeaseAt), so this is a plain
+      // create gated only on the caller's reservations:write. (leaseId is no
+      // longer needed here but kept in the signature for call-site clarity.)
       var reservation = await api.reservations.create(input);
       var pushStatus = reservation && reservation.pushStatus;
       var msg = "Reservation created";
