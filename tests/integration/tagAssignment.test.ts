@@ -58,7 +58,10 @@ async function cleanup() {
   if (!dbReachable) return;
   await prisma.tagAutoAssignment.deleteMany({});
   await prisma.tag.deleteMany({ where: { name: TAG_NAME } });
-  await prisma.asset.deleteMany({ where: { hostname: { startsWith: "tagtest-" } } });
+  // reconcileTag matches its criteria fleet-wide, so the asset table must be
+  // empty of *any* asset another test file may have left behind (e.g. the
+  // Cisco-manufacturer fixture in assets-list.test.ts), not just our own.
+  await prisma.asset.deleteMany();
   await prisma.subnet.deleteMany({ where: { cidr: SUBNET_CIDR } });
   await prisma.ipBlock.deleteMany({ where: { cidr: BLOCK_CIDR } });
 }
