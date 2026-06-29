@@ -5,7 +5,8 @@
 // show owner/subnet/source/notes plus role-gated action buttons:
 //   • Edit  — opens an inline edit sheet (PUT /reservations/:id).
 //             Visible to admin/networkadmin always; user/assetsadmin
-//             only when r.createdBy === user.username.
+//             when r.createdBy === user.username OR the row is
+//             discovery-owned (createdBy null / "refresh").
 //   • Free  — releases the reservation (DELETE /reservations/:id).
 //             Same role gating as Edit.
 //   • Reserve — only on `sourceType="dhcp_lease"` rows. Opens the
@@ -36,14 +37,17 @@
   function canCreate(user) {
     return permAtLeast(user, "reservations", "write");
   }
-  // Edit / Free: fullwrite passes unconditionally; write passes only when
-  // the caller created the row (ownership model). Mirrors the backend's
-  // requireOwnership("reservations") + req.permissionLevel branch and the
-  // desktop canEditReservation().
+  // Edit / Free: fullwrite passes unconditionally; write passes when the
+  // caller created the row OR it's discovery-owned (createdBy null /
+  // "refresh"). Mirrors the backend's canMutateReservation() and the desktop
+  // canEditReservation(). system:* rows (dns_resolved) stay view-only.
   function canModify(user, row) {
     if (permAtLeast(user, "reservations", "fullwrite")) return true;
     if (!permAtLeast(user, "reservations", "write")) return false;
-    return !!(row && row.createdBy && user.username && row.createdBy === user.username);
+    if (!row) return false;
+    if (row.createdBy && user.username && row.createdBy === user.username) return true;
+    // Discovery-owned (no real user owns it).
+    return !row.createdBy || row.createdBy === "refresh";
   }
 
   var Reservations = {

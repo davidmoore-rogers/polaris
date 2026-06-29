@@ -3,7 +3,9 @@
  *
  * Authorization:
  *   - admin / networkadmin: full CRUD on all reservations
- *   - user / assetsadmin: can create reservations and edit/delete only their own (createdBy match)
+ *   - user / assetsadmin: can create reservations and edit/delete their own
+ *     (createdBy match) PLUS system/discovery-owned reservations (see
+ *     canMutateReservation) so the IP-panel "Reserve" take-over flow works
  *   - readonly: read-only
  */
 
@@ -15,6 +17,39 @@ import { AppError } from "../../utils/errors.js";
 import { requirePermission, requireOwnership } from "../middleware/permissions.js";
 
 const router = Router();
+
+/**
+ * A reservation created by *discovery* — `createdBy` left null on the
+ * FMG/FortiGate sync path, or `"refresh"` from the subnet-refresh sweep.
+ * No real user owns these, so the `createdBy` ownership filter (which exists
+ * only to stop write-level users from stepping on *each other's* manual
+ * reservations) must not block a user from claiming/revoking them via the
+ * IP-panel Reserve flow (its take-over releases the lease before creating the
+ * manual row).
+ *
+ * NOTE: `"system:*"` actors (e.g. `system:dns-resolved`) are deliberately NOT
+ * included — dns_resolved rows stay view-only for non-admins, and their
+ * take-over goes through `createReservation` → `releaseDnsResolvedAt()`
+ * internally rather than the ownership-gated DELETE. See TOUCHES.md →
+ * dns-resolved-reservations.
+ */
+function isDiscoveryOwnedReservation(createdBy: string | null | undefined): boolean {
+  return !createdBy || createdBy === "refresh";
+}
+
+/**
+ * Whether the caller may mutate (edit / release / retry) a reservation:
+ * `fullwrite` always; `write` when they created it OR it's discovery-owned.
+ */
+function canMutateReservation(
+  level: string | undefined,
+  createdBy: string | null | undefined,
+  username: string | null | undefined,
+): boolean {
+  if (level === "fullwrite") return true;
+  if (createdBy && username && createdBy === username) return true;
+  return isDiscoveryOwnedReservation(createdBy);
+}
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
@@ -171,7 +206,7 @@ router.post("/:id/retry-push", requireOwnership("reservations"), async (req, res
   try {
     const id = req.params.id as string;
     const before = await reservationService.getReservation(id);
-    if (req.permissionLevel !== "fullwrite" && before.createdBy !== req.session?.username) {
+    if (!canMutateReservation(req.permissionLevel, before.createdBy, req.session?.username)) {
       throw new AppError(403, "Forbidden — you can only retry reservations you created");
     }
     const { outcome, reservation } = await reservationService.retryReservationNow(id, req.session?.username ?? null);
@@ -236,7 +271,7 @@ router.put("/:id", requireOwnership("reservations"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const before = await reservationService.getReservation(id);
-    if (req.permissionLevel !== "fullwrite" && before.createdBy !== req.session?.username) {
+    if (!canMutateReservation(req.permissionLevel, before.createdBy, req.session?.username)) {
       throw new AppError(403, "Forbidden — you can only edit reservations you created");
     }
     const input = UpdateReservationSchema.parse(req.body);
@@ -254,7 +289,7 @@ router.delete("/:id", requireOwnership("reservations"), async (req, res, next) =
     const id = req.params.id as string;
     if (req.permissionLevel !== "fullwrite") {
       const existing = await reservationService.getReservation(id);
-      if (existing.createdBy !== req.session?.username) {
+      if (!canMutateReservation(req.permissionLevel, existing.createdBy, req.session?.username)) {
         throw new AppError(403, "Forbidden — you can only release reservations you created");
       }
     }

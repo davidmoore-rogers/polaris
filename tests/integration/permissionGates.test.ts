@@ -22,6 +22,9 @@ const d = dbDescribe;
 const PFX = "permgate-test";
 const PASSWORD = "permgate-password-not-real";
 
+/** Captured in beforeAll so the reservation-ownership tests can seed rows. */
+let seededSubnetId = "";
+
 /** Build a permissions matrix with every function key at `base`, overridden per `overrides`. */
 function matrix(base: string, overrides: Record<string, string> = {}): Record<string, string> {
   const out: Record<string, string> = {};
@@ -78,6 +81,7 @@ beforeAll(async () => {
   const subnet = await prisma.subnet.create({
     data: { blockId: block.id, name: `${PFX}-subnet`, cidr: "10.99.1.0/24", createdBy: "permgate" },
   });
+  seededSubnetId = subnet.id;
   await prisma.reservation.create({
     data: {
       subnetId: subnet.id,
@@ -93,6 +97,9 @@ beforeAll(async () => {
 
   await createRoleUser("none", matrix("none"));
   await createRoleUser("assetsread", matrix("none", { assets: "read" }));
+  // reservations:write (the `user`/`assetsadmin` ownership level) — read
+  // elsewhere so the row reads/writes resolve.
+  await createRoleUser("reswrite", matrix("read", { reservations: "write" }));
 });
 
 afterAll(async () => {
@@ -191,6 +198,80 @@ d("permission gates — readonly parity with admin", () => {
     ]);
     expect(roSearch.status).toBe(200);
     expect(roSearch.body).toEqual(adminSearch.body);
+  });
+});
+
+d("reservation ownership — write-level user vs system/discovery-owned rows", () => {
+  // Regression for the IP-panel "Reserve" take-over: a write-level user
+  // (`user`/`assetsadmin`) must be able to release a discovery-created
+  // reservation (createdBy null / "refresh") even though they didn't "create"
+  // it — but must STILL be blocked from another real user's manual
+  // reservation AND from a system:* row (dns_resolved stays view-only; its
+  // take-over is the internal releaseDnsResolvedAt path, not a gated DELETE).
+  async function loginWithCsrf(username: string) {
+    const agent = request.agent(app);
+    await agent.get("/api/v1/auth/me");
+    const resp = await agent
+      .post("/api/v1/auth/login")
+      .send({ username, password: PASSWORD })
+      .set("Content-Type", "application/json");
+    if (resp.status !== 200) throw new Error(`login as ${username} failed (${resp.status})`);
+    await agent.get("/api/v1/auth/me");
+    const cookies = (agent.jar as any).getCookies({ domain: "127.0.0.1", path: "/", secure: false, script: false });
+    const csrf = (cookies.find((c: any) => c.name === "polaris_csrf") || {}).value || "";
+    if (!csrf) throw new Error("CSRF cookie not set after login");
+    return { agent, csrf };
+  }
+
+  it("can release a discovery-owned lease but not another user's or a dns_resolved row", async () => {
+    const leaseRes = await prisma.reservation.create({
+      data: {
+        subnetId: seededSubnetId,
+        ipAddress: "10.99.1.50",
+        hostname: `${PFX}-lease`,
+        sourceType: "dhcp_lease",
+        owner: "dhcp-lease",
+        // createdBy intentionally null — mirrors the FMG/FortiGate sync path.
+      },
+    });
+    const otherRes = await prisma.reservation.create({
+      data: {
+        subnetId: seededSubnetId,
+        ipAddress: "10.99.1.51",
+        hostname: `${PFX}-othermanual`,
+        sourceType: "manual",
+        createdBy: "some-other-operator",
+      },
+    });
+    const dnsRes = await prisma.reservation.create({
+      data: {
+        subnetId: seededSubnetId,
+        ipAddress: "10.99.1.52",
+        hostname: `${PFX}-dns`,
+        sourceType: "dns_resolved",
+        createdBy: "system:dns-resolved",
+      },
+    });
+
+    const { agent, csrf } = await loginWithCsrf(`${PFX}-user-reswrite`);
+
+    // Discovery-owned (createdBy null) → allowed.
+    const okResp = await agent
+      .delete(`/api/v1/reservations/${leaseRes.id}`)
+      .set("X-CSRF-Token", csrf);
+    expect(okResp.status).toBe(204);
+
+    // Another user's manual reservation → forbidden.
+    const otherResp = await agent
+      .delete(`/api/v1/reservations/${otherRes.id}`)
+      .set("X-CSRF-Token", csrf);
+    expect(otherResp.status).toBe(403);
+
+    // system:* (dns_resolved) → forbidden (view-only for non-admins).
+    const dnsResp = await agent
+      .delete(`/api/v1/reservations/${dnsRes.id}`)
+      .set("X-CSRF-Token", csrf);
+    expect(dnsResp.status).toBe(403);
   });
 });
 

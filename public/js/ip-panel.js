@@ -360,7 +360,14 @@ function _renderIpList(data) {
 
     var actions = "";
     var isOwner = r && r.createdBy === currentUsername;
-    var canEditThis = canManageNetworks() || isOwner;
+    // A discovery-created reservation that no real user owns — createdBy null
+    // (FMG/FortiGate sync) or "refresh" (subnet-refresh sweep). Mirrors
+    // canMutateReservation() on the server so a reservations:write user can
+    // Revoke/Edit an unowned DHCP lease, not just take it over via Reserve.
+    // system:* rows (dns_resolved) are intentionally excluded — view-only for
+    // non-admins; their take-over is the internal releaseDnsResolvedAt path.
+    var isDiscoveryOwned = r && (!r.createdBy || r.createdBy === "refresh");
+    var canEditThis = canManageNetworks() || isOwner || (canReserveIps() && isDiscoveryOwned);
     var assetBtn = ip.assetId
       ? '<button class="btn btn-sm btn-secondary ip-asset-btn" data-aid="' + escapeHtml(ip.assetId) + '" title="Open asset details">View Asset</button>'
       : '';
