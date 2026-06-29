@@ -685,8 +685,8 @@ function alertsFormHTML(d) {
   return '<div class="form-group">' +
     '<label>Stale DHCP reservation threshold (days)</label>' +
     '<input type="number" id="f-alerts-staleAfterDays" value="' + escapeHtml(String(d.staleAfterDays)) + '" min="0" max="3650" style="max-width:120px">' +
-    '<p class="hint">Polaris flags a discovered <code>dhcp_reservation</code> as stale when its target client has not been seen actively holding the IP within this many days. ' +
-      'When that happens the row appears in the Alerts panel and a one-time <code>reservation.stale</code> Event is written to the audit log. ' +
+    '<p class="hint">Polaris flags a discovered <code>dhcp_reservation</code> as stale when its target client has not been seen within this many days &mdash; counting both DHCP lease activity <em>and</em> network presence of a correlated asset (matched by MAC, then IP), so a statically-addressed device that never pulls a lease but is online stays out of the list. ' +
+      'When a row is flagged it appears in the Alerts panel and a one-time <code>reservation.stale</code> Event is written to the audit log. ' +
       'Set to <strong>0</strong> to disable stale-reservation detection entirely. Default is 60 days.</p>' +
     '<p class="hint" style="color:var(--color-text-tertiary)">A reservation re-arms automatically: if discovery sees the IP active again, the alert is cleared and a future stretch of inactivity will fire one fresh notification rather than being suppressed by the prior one.</p>' +
   '</div>';
@@ -1231,7 +1231,14 @@ function getAlertsFormData() {
     var lastSeen = a.lastSeenLeased
       ? '<div><strong>Last seen leased:</strong> ' + new Date(a.lastSeenLeased).toLocaleString() + '</div>'
       : '<div><strong>Last seen leased:</strong> <span style="color:var(--color-text-tertiary)">never</span></div>';
-    var sinceLine = '<div style="color:var(--color-warning, #ffc107);font-weight:500;margin-top:4px">' + a.daysSinceSeen + ' day' + (a.daysSinceSeen === 1 ? "" : "s") + ' without an active lease</div>';
+    // Cross-signal: when an asset correlated (by MAC/IP) the row is only stale
+    // because that asset is also absent — show its lastSeen so the operator
+    // sees the device is gone from every signal, not just DHCP.
+    var assetSeen = a.assetPresenceMatch
+      ? '<div><strong>Matched asset (by ' + escapeHtml(String(a.assetPresenceMatch).toUpperCase()) + '):</strong> ' +
+          (a.assetLastSeen ? 'last seen ' + new Date(a.assetLastSeen).toLocaleString() : '<span style="color:var(--color-text-tertiary)">never seen</span>') + '</div>'
+      : '';
+    var sinceLine = '<div style="color:var(--color-warning, #ffc107);font-weight:500;margin-top:4px">' + a.daysSinceSeen + ' day' + (a.daysSinceSeen === 1 ? "" : "s") + ' without verified presence</div>';
     var labelName = (a.hostname || ip).replace(/"/g, "&quot;");
     var snoozeDays = (settings && settings.staleAfterDays) || 60;
     var snoozeLabel = "Snooze " + snoozeDays + "d";
@@ -1266,6 +1273,7 @@ function getAlertsFormData() {
         device +
         pushed +
         lastSeen +
+        assetSeen +
         '<div><strong>Created:</strong> ' + new Date(a.createdAt).toLocaleString() + '</div>' +
         sinceLine +
       '</div>' +
