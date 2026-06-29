@@ -45,8 +45,7 @@ import {
   updateOidcSettings,
   testOidcConnection,
 } from "../../services/oidcAuthService.js";
-import { resolveGroupsToAccess } from "../../services/groupMappingService.js";
-import { unionTags } from "../../utils/tagNormalize.js";
+import { resolveTagScopesForUser } from "../../services/regionScopeService.js";
 import { isBlockedOutboundHost } from "../../utils/netGuard.js";
 import { totpCodeLimiter, ssoEntryLimiter } from "../middleware/rateLimits.js";
 import { logEvent } from "./events.js";
@@ -395,23 +394,11 @@ router.get("/me", async (req, res, next) => {
       // best-effort response so the frontend can re-login cleanly.
       return res.json({ authenticated: false });
     }
-    const userRegions = Array.isArray(u.regionTags) ? u.regionTags : [];
-    const roleRegions = Array.isArray(u.role.regionTags) ? u.role.regionTags : [];
-    const userOther = Array.isArray(u.otherTags) ? u.otherTags : [];
-    const roleOther = Array.isArray(u.role.otherTags) ? u.role.otherTags : [];
-
-    // Group-derived tags are re-resolved from the user's last-seen SSO groups
-    // each call, so editing a GroupMapping takes effect on next page load
-    // without re-login. Empty for local users (no ssoGroups). One cached
-    // lookup; /auth/me is per-user, not per-asset. Group-derived tags are
-    // NEVER persisted onto the user's own columns — they only union here.
-    let groupRegions: string[] = [];
-    let groupOther: string[] = [];
-    if (Array.isArray(u.ssoGroups) && u.ssoGroups.length > 0) {
-      const access = await resolveGroupsToAccess(u.authProvider, u.ssoGroups);
-      groupRegions = access.regionTags;
-      groupOther = access.otherTags;
-    }
+    // Effective region/other tag scope — union(role, user, group). Group
+    // tags are re-resolved live from the user's last-seen SSO groups, so a
+    // GroupMapping edit takes effect on next page load without re-login.
+    // Shared with the notifications region-scope filter via regionScopeService.
+    const tagScopes = await resolveTagScopesForUser(u);
 
     res.json({
       authenticated: true,
@@ -431,18 +418,8 @@ router.get("/me", async (req, res, next) => {
         }),
         color: u.role.color ?? null,
       },
-      regionTags: {
-        user: userRegions,
-        role: roleRegions,
-        group: groupRegions,
-        effective: unionTags(roleRegions, userRegions, groupRegions),
-      },
-      otherTags: {
-        user: userOther,
-        role: roleOther,
-        group: groupOther,
-        effective: unionTags(roleOther, userOther, groupOther),
-      },
+      regionTags: tagScopes.regionTags,
+      otherTags: tagScopes.otherTags,
     });
   } catch (err) {
     next(err);

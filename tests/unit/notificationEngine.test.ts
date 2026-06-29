@@ -1,0 +1,148 @@
+/**
+ * tests/unit/notificationEngine.test.ts
+ *
+ * Pure-function coverage for the notification rules engine: comparators, glob
+ * matching, condition evaluation, scope matching, region-prefix stripping, and
+ * the trigger Zod union. The DB-bound evaluation/firing path is exercised by
+ * the integration suite + the podman mock walkthrough.
+ */
+
+import { describe, it, expect } from "vitest";
+import { compareNum, compareValue, globToRegExp, readingMeets } from "../../src/services/notificationEngine.js";
+import { scopeMatchesAsset, type ScopeAsset } from "../../src/services/notificationRuleService.js";
+import { stripRegionPrefix } from "../../src/services/notificationService.js";
+import { ruleInputSchema, buildSchemaCatalog } from "../../src/services/notificationTypes.js";
+
+describe("compareNum", () => {
+  it("evaluates every operator", () => {
+    expect(compareNum(90, ">", 80)).toBe(true);
+    expect(compareNum(80, ">", 80)).toBe(false);
+    expect(compareNum(80, ">=", 80)).toBe(true);
+    expect(compareNum(70, "<", 80)).toBe(true);
+    expect(compareNum(80, "<=", 80)).toBe(true);
+    expect(compareNum(80, "==", 80)).toBe(true);
+    expect(compareNum(80, "!=", 81)).toBe(true);
+    expect(compareNum(80, "??", 80)).toBe(false);
+  });
+});
+
+describe("compareValue", () => {
+  it("compares strings case-insensitively on equality", () => {
+    expect(compareValue("DOWN", "==", "down")).toBe(true);
+    expect(compareValue("up", "!=", "down")).toBe(true);
+  });
+  it("compares booleans via stringification", () => {
+    expect(compareValue(true, "==", "true")).toBe(true);
+    expect(compareValue(false, "==", "true")).toBe(false);
+  });
+  it("falls back to numeric comparison when both coerce to numbers", () => {
+    expect(compareValue(3, ">=", 3)).toBe(true);
+    expect(compareValue("5", ">", "3")).toBe(true);
+  });
+  it("returns false for null/undefined", () => {
+    expect(compareValue(null, "==", "x")).toBe(false);
+    expect(compareValue(undefined as any, "==", "x")).toBe(false);
+  });
+});
+
+describe("globToRegExp", () => {
+  it("matches exact action strings", () => {
+    expect(globToRegExp("monitor.status_changed").test("monitor.status_changed")).toBe(true);
+    expect(globToRegExp("monitor.status_changed").test("monitor.status_other")).toBe(false);
+  });
+  it("treats * as a wildcard and anchors the pattern", () => {
+    const re = globToRegExp("integration.test.*");
+    expect(re.test("integration.test.failed")).toBe(true);
+    expect(re.test("integration.test.recovered")).toBe(true);
+    expect(re.test("integration.discover.error")).toBe(false);
+    // anchored: a prefix-only match must not pass
+    expect(globToRegExp("asset.created").test("asset.created.extra")).toBe(false);
+  });
+});
+
+describe("readingMeets", () => {
+  it("asset_metric / host_metric compare numerically", () => {
+    const t = { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 80, forDurationSec: 0 } as any;
+    expect(readingMeets(t, 92)).toBe(true);
+    expect(readingMeets(t, 70)).toBe(false);
+    expect(readingMeets(t, null)).toBe(false);
+    expect(readingMeets(t, "92")).toBe(false); // non-numeric reading never meets a metric threshold
+  });
+  it("asset_state compares the field value", () => {
+    const t = { type: "asset_state", field: "monitorStatus", operator: "==", value: "down", forDurationSec: 0 } as any;
+    expect(readingMeets(t, "down")).toBe(true);
+    expect(readingMeets(t, "up")).toBe(false);
+  });
+  it("event/change triggers never meet via the threshold path", () => {
+    expect(readingMeets({ type: "event", actionPattern: "x" } as any, 1)).toBe(false);
+    expect(readingMeets({ type: "change", changeType: "lldp_neighbor_added" } as any, 1)).toBe(false);
+  });
+});
+
+describe("scopeMatchesAsset", () => {
+  const asset: ScopeAsset = { id: "a1", assetType: "server", tags: ["region:Atlanta", "prod"], discoveredByIntegrationId: "i1" };
+  it("allAssets matches anything", () => {
+    expect(scopeMatchesAsset({ allAssets: true }, asset)).toBe(true);
+  });
+  it("empty scope (no dimensions, not allAssets) matches nothing", () => {
+    expect(scopeMatchesAsset({}, asset)).toBe(false);
+  });
+  it("AND across dimensions, OR within a list", () => {
+    expect(scopeMatchesAsset({ assetTypes: ["server", "switch"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ assetTypes: ["switch"] }, asset)).toBe(false);
+    // both dimensions must pass
+    expect(scopeMatchesAsset({ assetTypes: ["server"], tags: ["prod"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ assetTypes: ["server"], tags: ["staging"] }, asset)).toBe(false);
+  });
+  it("tag match is case-insensitive", () => {
+    expect(scopeMatchesAsset({ tags: ["REGION:atlanta"] }, asset)).toBe(true);
+  });
+  it("matches by integration id and asset id", () => {
+    expect(scopeMatchesAsset({ integrationIds: ["i1"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ assetIds: ["a1"] }, asset)).toBe(true);
+    expect(scopeMatchesAsset({ assetIds: ["other"] }, asset)).toBe(false);
+  });
+});
+
+describe("stripRegionPrefix", () => {
+  it("strips the region: prefix and leaves plain tags alone", () => {
+    expect(stripRegionPrefix("region:Atlanta")).toBe("Atlanta");
+    expect(stripRegionPrefix("REGION:Boston")).toBe("Boston");
+    expect(stripRegionPrefix("prod")).toBe("prod");
+  });
+});
+
+describe("ruleInputSchema", () => {
+  it("accepts a valid host_metric rule and applies defaults", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "host mem",
+      trigger: { type: "host_metric", metric: "memUsedPct", operator: ">", threshold: 85 },
+    });
+    expect(parsed.severity).toBe("warning");
+    expect(parsed.clearBehavior).toBe("manual");
+    expect(parsed.channels).toEqual(["in_app"]);
+    // trigger defaults
+    expect((parsed.trigger as any).aggregation).toBe("latest");
+    expect((parsed.trigger as any).forDurationSec).toBe(0);
+  });
+  it("accepts asset_metric, asset_state, event, and change triggers", () => {
+    expect(() => ruleInputSchema.parse({ name: "a", trigger: { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 80 }, scope: { allAssets: true } })).not.toThrow();
+    expect(() => ruleInputSchema.parse({ name: "b", trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" }, scope: { assetTypes: ["server"] } })).not.toThrow();
+    expect(() => ruleInputSchema.parse({ name: "c", trigger: { type: "event", actionPattern: "monitor.status_changed" } })).not.toThrow();
+    expect(() => ruleInputSchema.parse({ name: "d", trigger: { type: "change", changeType: "lldp_neighbor_added" }, scope: { allAssets: true } })).not.toThrow();
+  });
+  it("rejects an unknown trigger type and unknown metric", () => {
+    expect(() => ruleInputSchema.parse({ name: "x", trigger: { type: "bogus" } })).toThrow();
+    expect(() => ruleInputSchema.parse({ name: "y", trigger: { type: "host_metric", metric: "nope", operator: ">", threshold: 1 } })).toThrow();
+  });
+});
+
+describe("buildSchemaCatalog", () => {
+  it("exposes all five trigger types with the scoped flag", () => {
+    const cat = buildSchemaCatalog();
+    const types = cat.triggerTypes.map((t) => t.type);
+    expect(types).toEqual(["asset_metric", "asset_state", "host_metric", "event", "change"]);
+    const scoped = cat.triggerTypes.filter((t) => t.scoped).map((t) => t.type);
+    expect(scoped).toEqual(["asset_metric", "asset_state", "change"]);
+  });
+});

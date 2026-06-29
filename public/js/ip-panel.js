@@ -186,7 +186,7 @@ function _renderPanelHeader(data) {
   if (data.ipv6) meta += '<span style="color:var(--color-warning);font-size:0.75rem">IPv6 — showing reservations only</span>';
 
   var headerBtns = '<span style="margin-left:auto;display:flex;gap:6px">' +
-    (canManageNetworks() && !data.ipv6 ? '<button class="btn btn-sm btn-danger" id="ip-panel-free-selected-btn" disabled>Free Selected</button>' : '') +
+    (canManageNetworks() && !data.ipv6 ? '<button class="btn btn-sm btn-danger" id="ip-panel-free-selected-btn" disabled>Release Selected</button>' : '') +
     '<div class="btn-dropdown-wrap">' +
       '<button class="btn btn-sm btn-secondary" id="ip-panel-export-btn">Export &#9662;</button>' +
       '<div class="btn-dropdown-menu" id="ip-panel-export-menu">' +
@@ -645,13 +645,13 @@ function _panelUpdateBulkBar() {
   if (!btn) return;
   var count = _panelSelected.size;
   btn.disabled = count === 0;
-  btn.textContent = count > 0 ? "Free Selected (" + count + ")" : "Free Selected";
+  btn.textContent = count > 0 ? "Release Selected (" + count + ")" : "Release Selected";
 }
 
 async function _bulkReleaseFromPanel() {
   var ids = Array.from(_panelSelected);
   if (!ids.length) return;
-  var ok = await showConfirm("Free " + ids.length + " reservation" + (ids.length !== 1 ? "s" : "") + "? This will release those IPs.");
+  var ok = await showConfirm("Release " + ids.length + " reservation" + (ids.length !== 1 ? "s" : "") + "? This will release those IPs.");
   if (!ok) return;
   var btn = document.getElementById("ip-panel-free-selected-btn");
   if (btn) btn.disabled = true;

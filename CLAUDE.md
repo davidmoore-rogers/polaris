@@ -109,7 +109,13 @@ AssetStatus:             active | maintenance | decommissioned | storage | disab
 - **ManufacturerAlias** — vendor-name canonicalization map.
 - **DeviceIcon** — operator-uploaded topology icon blobs (scope + key), served to the Device Map / topology renderer.
 - **AssetTypeDef** — operator-extensible asset-type registry (replaces the prior `AssetType` enum).
-- **User** / **Role** — dynamic-role RBAC; `User.roleId` → `Role`; permissions matrix on Role over 26 function keys.
+- **User** / **Role** — dynamic-role RBAC; `User.roleId` → `Role`; permissions matrix on Role over 28 function keys.
+- **NotificationRule** — operator-defined alert definition. Flexible discriminated `trigger` (JSON union: `asset_metric` | `asset_state` | `host_metric` | `event` | `change`) + asset `scope`, per-rule `clearBehavior` (manual / auto-resolve / timed), `cooldownSec`, `messageTemplate`, `channels` (default `["in_app"]`), and `targets` (JSON array of outbound deliveries: `{ channel: email|webhook|web_push, recipientTags?, addresses?, webhookUrl?, webhookKind? }`). Evaluated by `notificationEngine` on the `evaluateNotificationRules` job; in-app is always implicit, `targets` drive email/webhook/web-push via `notificationRecipientService` → `NotificationDelivery` → the `deliverNotifications` job. CRUD gated by the `notificationManagement` RBAC key. The trigger/scope/target vocabulary + builder catalog live in `src/services/notificationTypes.ts`.
+- **Notification** — a triggered notification instance (Notifications page View tab + asset-details Notifications tab). Carries snapshotted `regionTags` (stripped of the `region:` prefix → compares directly to a viewer's region tags) + `assetHostname` so it renders/scopes after the asset is deleted. Soft-clear (`cleared`) preserves history. View gated `notifications:read`; acknowledge (note + by/at) gated `notifications:write` (readonly cannot); clear gated `notifications:fullwrite` (admin + assetsadmin).
+- **NotificationRuleState** — per-(rule, asset, dimension) firing state machine (`clear`→`pending`→`firing`) for sustained-duration + debounce + auto-clear. Writes only on transition (capacityWatch-style guard) so the engine hot path scales with *changes*, not fleet size. `assetId=""` for host/global rules.
+- **NotificationDelivery** — one outbound delivery per (notification, channel, concrete recipient). `channel` (email/webhook/web_push) + `target` (address/URL/push endpoint) + `meta` (webhook kind / web_push keys) + `status` (pending/sent/failed) + `attempts`. Expanded at fire time by `notificationRecipientService`; drained (≤3 retries) by the `deliverNotifications` job. Cascades with the Notification. In-app delivery is NOT a row here (it's the Notification itself).
+- **PushSubscription** — a browser/PWA Web Push subscription owned by a User (`endpoint` unique + `p256dh`/`auth` keys). Stored via `POST /push-subscriptions`; the web_push channel sends to a recipient user's endpoints via `web-push` signed with the server VAPID keypair; a 410/404 prunes the row.
+- **HostMetricsSample** — Polaris host CPU / memory / load time-series sampled every 30s by `hostMetricsCollector` (web/all role only); `host_metric` rules read the latest row. Plain prunable table (7-day retention).
 - **AgentCommand** — operator-issued process-control commands (Phase 4): one row per Stop/Start/Restart against a service-backed process. Agent polls `GET /agents/commands`, executes via Windows SCM / systemd, reports `POST /agents/command-result`. Gated by the `processControl` RBAC key; operator-initiated + confirmed + audited (`asset.process.<action>.requested|result`); the agent never self-acts.
 - **GroupMapping** — IdP group → role + tags map for OIDC / LDAP / SAML SSO login (`provider` + `groupKey`; nullable `roleId` for tags-only mappings).
 - **ManagedAgent** — Polaris Agent install record per Asset (os/arch, agent version, install credential, cert-pin set for dual-pin rotation).
@@ -140,6 +146,7 @@ Resource groupings (route file in `src/api/routes/`):
 - **assets** (CRUD + monitor history endpoints + per-asset agent install + dependencies + quarantine + system-info + SNMP walk)
 - **agents** (`/agents`, `/agents/enroll`, `/agents/binary` — Polaris Agent enroll / config / sample-push / binary download, gated by `requireAgentBearer`; the `/agents/ws` WebSocket upgrade handler in `agentsWs.ts` is attached at the HTTP-server level in `src/app.ts`, not via the REST router)
 - **events** / **conflicts** / **search** (audit + resolution + global typeahead)
+- **notifications** (`/notifications` — View-tab list + acknowledge/clear; per-route gates `notifications:read|write|fullwrite`) and **notificationRules** (`/notification-rules` — rule CRUD + `/schema` builder vocabulary + `/preview` dry-run; gated `notificationManagement`). Per-asset bundle at `GET /assets/:id/notifications` (active + matching rules). **pushSubscriptions** (`/push-subscriptions` — VAPID `/key` + per-user subscribe/unsubscribe; gated `notifications:read`). Outbound channel config (SMTP / M365 / Web Push) lives under `/server-settings/notifications/*`.
 - **map** / **mapRegions** / **allocationTemplates** (Device Map + map-region polygons + saved subnet allocations)
 - **serverSettings** (HTTPS, branding, backup/restore, capacity advisor, sample retention, queue mode, security tokens)
 - **proxySettings** (`/server-settings/proxy` — in-app nginx GUI config + cert preflight/rotate)
@@ -157,7 +164,7 @@ Resource groupings (route file in `src/api/routes/`):
 
 Sessions are PostgreSQL-backed (`connect-pg-simple`), 8-hour max age, HttpOnly/Secure/SameSite=Lax cookies.
 
-**Dynamic-role model (post-cutover).** RBAC is enforced via `requirePermission(functionKey, level)` from [src/api/middleware/permissions.ts](src/api/middleware/permissions.ts). Each route declares the function key it gates + the required access level; the resolver consults the caller's `Role.permissions` matrix denormalized into `req.session.roleSnapshot` at login. The matrix is `{ [functionKey]: "none" | "read" | "write" | "fullwrite" }` over a 26-key catalogue. The five built-in roles (`admin` / `readonly` / `networkadmin` / `assetsadmin` / `user`) are seeded by `prisma/migrations/20260524000000_roles_table_cutover` so existing accounts keep their pre-cutover access exactly. Admin creates custom roles from the Roles section under Users → Manage Roles.
+**Dynamic-role model (post-cutover).** RBAC is enforced via `requirePermission(functionKey, level)` from [src/api/middleware/permissions.ts](src/api/middleware/permissions.ts). Each route declares the function key it gates + the required access level; the resolver consults the caller's `Role.permissions` matrix denormalized into `req.session.roleSnapshot` at login. The matrix is `{ [functionKey]: "none" | "read" | "write" | "fullwrite" }` over a 28-key catalogue. The five built-in roles (`admin` / `readonly` / `networkadmin` / `assetsadmin` / `user`) are seeded by `prisma/migrations/20260524000000_roles_table_cutover` so existing accounts keep their pre-cutover access exactly. Admin creates custom roles from the Roles section under Users → Manage Roles.
 
 | Built-in role | Locked? | Pre-cutover behavior preserved |
 |---|---|---|
@@ -169,7 +176,7 @@ Sessions are PostgreSQL-backed (`connect-pg-simple`), 8-hour max age, HttpOnly/S
 
 **Ownership model for networks and reservations.** `subnets` and `reservations` carry an ownership dimension: `write` lets the caller edit only rows where `createdBy` matches their username; `fullwrite` bypasses the ownership filter. Built-in `user` and `assetsadmin` are seeded with `write`, `networkadmin` and `admin` with `fullwrite`. Route handlers branch on `req.permissionLevel` (set by `requireOwnership(functionKey)`).
 
-**Function-key catalogue (26 keys).** Single source of truth in `src/api/middleware/permissions.ts:FUNCTION_KEYS`. (Newest: `processControl` — Phase 4 process Start/Stop/Restart, defaulted admin=fullwrite + assetsadmin=write by migration `20260627000000_process_control`.) Exposed at `GET /api/v1/roles/functions` so the frontend matrix UI renders without hardcoding the list. Adding a new key requires a migration to seed it on every existing Role + a corresponding guard at the route layer.
+**Function-key catalogue (28 keys).** Single source of truth in `src/api/middleware/permissions.ts:FUNCTION_KEYS`. (Newest: `notifications` + `notificationManagement` — the Notifications page View/Manage tabs, seeded by migration `20260628000000_notifications`: `notifications` defaults admin+assetsadmin=fullwrite, networkadmin+user=write, readonly=read; `notificationManagement` defaults admin+assetsadmin=fullwrite, else none. Prior: `processControl` via `20260627000000_process_control`.) Exposed at `GET /api/v1/roles/functions` so the frontend matrix UI renders without hardcoding the list. Adding a new key requires a migration to seed it on every existing Role + a corresponding guard at the route layer.
 
 **Session role snapshot + cache invalidation.** `req.session` carries `roleId` + a denormalized `roleSnapshot` stamped at login. Every `requirePermission` call hits a module-level `Map<roleId, updatedAt>` cache first (O(1)); a Role write bumps the map via `bumpRoleVersion(roleId, updatedAt)` and the next request from any session holding the stale snapshot triggers ONE Prisma fetch + `req.session.save()` to refresh. Changing a user's `roleId` takes effect on next login; changing a role's permissions takes effect on the next request for every session that holds the role.
 
@@ -207,7 +214,7 @@ Hybrid-join detection links AD and Entra/Intune via on-prem SID (`ad.observed.ob
 
 ## Background Jobs
 
-~46 files in `src/jobs/` (45 jobs + the `_metrics.ts` `runInstrumentedJob` helper): continuous ticks (`monitorAssets` light + heavy loops, `dependencyReconciler`, `retryQueuedReservationPushes`), periodic safety nets (`capacityWatch`, `reconcileMapRegions`, `discoverySlowCheck`, `flagStaleReservations`, `decommissionStaleAssets`, `mergeDuplicateHostnameAssets`), nightly maintenance (`pruneEvents`, sample-table prune, `runSampleRollup` hourly + daily ticks, `reclaimBloatedChunks` compressed-chunk heap reclaim), and one-shot startup migrations (manufacturer-alias seed, asset-source backfill, the `mergeFortiswitchEndpointGhosts` NULL-MAC ghost cleanup, monitor-settings hierarchy migrations).
+~49 files in `src/jobs/` (48 jobs + the `_metrics.ts` `runInstrumentedJob` helper): continuous ticks (`monitorAssets` light + heavy loops, `dependencyReconciler`, `retryQueuedReservationPushes`, `deliverNotifications` (15s — drains the `NotificationDelivery` queue to email/webhook/web-push)), periodic safety nets (`capacityWatch`, `evaluateNotificationRules` (60s — drives the notification rules engine), `hostMetricsCollector` (30s — Polaris host CPU/mem/load → `HostMetricsSample`), `reconcileMapRegions`, `discoverySlowCheck`, `flagStaleReservations`, `decommissionStaleAssets`, `mergeDuplicateHostnameAssets`), nightly maintenance (`pruneEvents`, sample-table prune, `runSampleRollup` hourly + daily ticks, `reclaimBloatedChunks` compressed-chunk heap reclaim), and one-shot startup migrations (manufacturer-alias seed, asset-source backfill, the `mergeFortiswitchEndpointGhosts` NULL-MAC ghost cleanup, monitor-settings hierarchy migrations).
 
 > Full table with schedule + per-job purpose: [ARCHITECTURE.md → Background Jobs](ARCHITECTURE.md#background-jobs).
 
@@ -372,6 +379,19 @@ GOTOOLCHAIN=local
 # NULL-MAC AssetSources into the canonical asset) log what it WOULD merge with no
 # writes. Use when investigating unexpected merge behavior. Unset for normal ops.
 POLARIS_GHOST_MERGE_DRY_RUN=
+
+# Notification outbound-channel secrets. The channel config (host/port/from/
+# tenant/etc.) is set in the UI (Server Settings → Notifications), but the
+# SECRETS may instead be supplied here (org Key-Vault/env pattern) — when set,
+# the env value overrides the stored (masked) Setting at send time.
+POLARIS_SMTP_PASSWORD=
+POLARIS_M365_CLIENT_SECRET=
+# Web Push VAPID keypair. Normally generated in the UI; set here to pin a
+# specific keypair (public + private must be a matching pair). POLARIS_VAPID_SUBJECT
+# is the mailto:/https: contact embedded in pushes.
+POLARIS_VAPID_PUBLIC_KEY=
+POLARIS_VAPID_PRIVATE_KEY=
+POLARIS_VAPID_SUBJECT=
 ```
 
 Configured via the UI, not env vars: Azure SAML SSO (Server Settings → Security → Identification), syslog forwarding + SFTP archival (Server Settings → Integrations). HTTPS is managed by nginx — the cert at `POLARIS_PROXY_CERT_PATH` is operator-owned; Polaris reads it for the agent-pin fingerprint exposure only.

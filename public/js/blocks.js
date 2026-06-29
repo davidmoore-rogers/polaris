@@ -74,12 +74,8 @@ async function _initBlocksPage() {
 
   var addBtn = document.getElementById("btn-add-block");
   if (addBtn) addBtn.addEventListener("click", openBlockCreateModal);
-  document.getElementById("filter-pagesize").addEventListener("change", function () {
-    _blocksPageSize = parseInt(this.value, 10) || 15;
-    _blocksPage = 1;
-    renderBlocksPage();
-    _saveBlocksPrefs();
-  });
+  // Page-size selector now lives in the pagination row (renderPageControls
+  // onSizeChange) — no standalone #filter-pagesize.
 }
 
 // export() is invoked by the IPAM orchestrator (ipam.js), which owns the single
@@ -140,6 +136,11 @@ function renderBlocksPage() {
   renderPageControls("pagination", sfData.length, _blocksPageSize, _blocksPage, function (p) {
     _blocksPage = p;
     renderBlocksPage();
+  }, function (size) {
+    _blocksPageSize = size;
+    _blocksPage = 1;
+    renderBlocksPage();
+    _saveBlocksPrefs();
   });
 }
 

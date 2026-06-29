@@ -611,6 +611,8 @@ const FUNCTION_KEYS = [
   { key: "mapRegions",           label: "Map Regions",                        description: "Draw / edit / delete region polygons." },
   { key: "deviceIcons",          label: "Device Icons",                       description: "Operator-uploaded topology icons." },
   { key: "events",               label: "Events / Audit Log",                 description: "Audit log + archival settings." },
+  { key: "notifications",        label: "Notifications",                      description: "Triggered notifications (View tab). Read=view; Write=acknowledge; Full=clear." },
+  { key: "notificationManagement", label: "Notification Rules",               description: "Create / edit / delete notification rules (Manage tab)." },
   { key: "staleReservations",    label: "Stale Reservations",                 description: "Snooze / ignore stale DHCP alerts." },
   { key: "apiTokens",            label: "API Tokens",                         description: "Long-lived bearer tokens." },
   { key: "users",                label: "Users",                              description: "User CRUD + role assignment + TOTP reset." },
@@ -635,7 +637,7 @@ const ROLES = [
   {
     id: "r-readonly", name: "readonly", description: "Read-only on every public-readable function. Locked.",
     permissions: _fillPerms(Object.fromEntries(FUNCTION_KEYS.map((f) => {
-      const adminOnly = ["manufacturerAliases", "integrations", "discoveryConflicts", "mapRegions", "deviceIcons", "apiTokens", "users", "roles", "serverSettingsSystem", "serverSettingsData"];
+      const adminOnly = ["manufacturerAliases", "integrations", "discoveryConflicts", "mapRegions", "deviceIcons", "apiTokens", "users", "roles", "serverSettingsSystem", "serverSettingsData", "notificationManagement"];
       return [f.key, adminOnly.includes(f.key) ? "none" : "read"];
     }))),
     regionTags: [], isBuiltIn: true, isProtected: true,
@@ -648,7 +650,7 @@ const ROLES = [
       allocationTemplates: "write", assets: "read", assetsQuarantine: "read", assetsProbe: "write",
       assetMonitorSettings: "read", mibDatabase: "read", manufacturerProfiles: "read", credentials: "read",
       integrations: "write", discoveryConflicts: "write", deviceMap: "read", mapRegions: "write",
-      events: "read", staleReservations: "write",
+      events: "read", notifications: "write", staleReservations: "write",
     }),
     regionTags: [], isBuiltIn: true, isProtected: false,
     createdAt: "2025-11-15T08:00:00.000Z", updatedAt: "2025-11-15T08:00:00.000Z",
@@ -660,6 +662,7 @@ const ROLES = [
       allocationTemplates: "read", assets: "write", assetsQuarantine: "write", assetsProbe: "write",
       assetMonitorSettings: "write", mibDatabase: "read", manufacturerProfiles: "read", credentials: "read",
       discoveryConflicts: "write", deviceMap: "read", events: "read", staleReservations: "read",
+      notifications: "fullwrite", notificationManagement: "fullwrite",
     }),
     regionTags: [], isBuiltIn: true, isProtected: false,
     createdAt: "2025-11-15T08:00:00.000Z", updatedAt: "2025-11-15T08:00:00.000Z",
@@ -670,11 +673,58 @@ const ROLES = [
       ipBlocks: "read", subnets: "write", reservations: "write", reservationPush: "read",
       allocationTemplates: "read", assets: "read", assetsQuarantine: "read", assetsProbe: "write",
       assetMonitorSettings: "read", mibDatabase: "read", manufacturerProfiles: "read", credentials: "read",
-      deviceMap: "read", events: "read", staleReservations: "write",
+      deviceMap: "read", events: "read", notifications: "write", staleReservations: "write",
     }),
     regionTags: [], isBuiltIn: true, isProtected: false,
     createdAt: "2025-11-15T08:00:00.000Z", updatedAt: "2025-11-15T08:00:00.000Z",
   },
+];
+
+// ── Notifications (mock) ──
+const NOTIFICATION_SCHEMA = {
+  severities: ["info", "warning", "error"],
+  clearBehaviors: ["manual", "auto", "timed"],
+  comparators: [">", ">=", "<", "<=", "==", "!="],
+  aggregations: ["latest", "avg", "min", "max"],
+  deliveryChannels: ["email", "webhook", "web_push"],
+  webhookKinds: ["generic", "slack", "teams"],
+  triggerTypes: [
+    { type: "asset_metric", label: "Asset metric threshold", scoped: true, metrics: ["cpuPct", "memPct", "responseTimeMs", "hwSensorValue", "storageUsedPct", "ifInBps", "sdwanLatencyMs"] },
+    { type: "asset_state", label: "Asset state", scoped: true, fields: ["monitorStatus", "status", "consecutiveFailures", "quarantined", "ifOperStatus", "ipsecStatus", "sdwanRuleStatus"] },
+    { type: "host_metric", label: "Polaris host health", scoped: false, metrics: ["cpuPct", "memUsedPct", "loadAvg1", "procRssBytes"] },
+    { type: "event", label: "Audit event match", scoped: false },
+    { type: "change", label: "Change detection", scoped: true, changeTypes: ["lldp_neighbor_added", "lldp_neighbor_removed", "process_started", "process_stopped", "sdwan_failover", "mclag_peer_lost"] },
+  ],
+};
+let NOTIFICATION_RULES = [
+  { id: "nr-1", name: "Polaris host memory high", description: null, enabled: true, severity: "error",
+    trigger: { type: "host_metric", metric: "memUsedPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 85, forDurationSec: 0 },
+    scope: {}, clearBehavior: "auto", clearAfterSec: null, cooldownSec: null, messageTemplate: null, channels: ["in_app"],
+    targets: [{ channel: "email", recipientTags: ["region:Atlanta"], addresses: ["oncall@example.com"] }],
+    createdBy: "admin", createdAt: "2026-06-20T08:00:00.000Z", updatedAt: "2026-06-20T08:00:00.000Z" },
+  { id: "nr-2", name: "Server CPU high", description: null, enabled: true, severity: "warning",
+    trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 70, forDurationSec: 0 },
+    scope: { assetTypes: ["server"] }, clearBehavior: "manual", clearAfterSec: null, cooldownSec: null, messageTemplate: "{asset} CPU at {value}%", channels: ["in_app"],
+    targets: [{ channel: "webhook", webhookUrl: "https://hooks.slack.com/services/XXX", webhookKind: "slack" }],
+    createdBy: "admin", createdAt: "2026-06-20T08:00:00.000Z", updatedAt: "2026-06-20T08:00:00.000Z" },
+  { id: "nr-3", name: "Monitor status changed", description: null, enabled: true, severity: "warning",
+    trigger: { type: "event", actionPattern: "monitor.status_changed" },
+    scope: {}, clearBehavior: "manual", clearAfterSec: null, cooldownSec: null, messageTemplate: null, channels: ["in_app"],
+    targets: [],
+    createdBy: "admin", createdAt: "2026-06-20T08:00:00.000Z", updatedAt: "2026-06-20T08:00:00.000Z" },
+];
+let _notifIdSeq = 100;
+let NOTIFICATIONS = [
+  { id: "n-1", ruleId: "nr-2", assetId: null, assetHostname: "db-srv-01", severity: "error",
+    message: "db-srv-01 CPU at 92%", regionTags: ["Atlanta"], triggeredAt: new Date(Date.now() - 5 * 60000).toISOString(),
+    acknowledged: false, acknowledgedBy: null, acknowledgedAt: null, acknowledgeNote: null, cleared: false, clearedBy: null, clearedAt: null },
+  { id: "n-2", ruleId: "nr-3", assetId: null, assetHostname: "core-sw-01", severity: "warning",
+    message: "core-sw-01 transitioned up → down", regionTags: [], triggeredAt: new Date(Date.now() - 10 * 60000).toISOString(),
+    acknowledged: true, acknowledgedBy: "demo.admin", acknowledgedAt: new Date(Date.now() - 2 * 60000).toISOString(),
+    acknowledgeNote: "Investigated — transient link flap during maintenance.", cleared: false, clearedBy: null, clearedAt: null },
+  { id: "n-3", ruleId: "nr-1", assetId: null, assetHostname: "Polaris host", severity: "info",
+    message: "Polaris host memory at 91%", regionTags: [], triggeredAt: new Date(Date.now() - 15 * 60000).toISOString(),
+    acknowledged: false, acknowledgedBy: null, acknowledgedAt: null, acknowledgeNote: null, cleared: false, clearedBy: null, clearedAt: null },
 ];
 
 function _roleByName(name) { return ROLES.find((r) => r.name === name) || ROLES[0]; }
@@ -3738,6 +3788,64 @@ async function routeAPI(method, path, params, body, res, req) {
     return json(res, { ok: true, user: _userWithRole(u) });
   }
 
+  // ── Notifications (mock) ──
+  if (path === "/api/v1/notifications" && method === "GET") {
+    const includeCleared = params.includeCleared === "true";
+    let list = NOTIFICATIONS.filter((n) => includeCleared || !n.cleared);
+    if (params.severity) { const sev = String(params.severity).split(","); list = list.filter((n) => sev.includes(n.severity)); }
+    if (params.search) { const q = String(params.search).toLowerCase(); list = list.filter((n) => (n.message || "").toLowerCase().includes(q) || (n.assetHostname || "").toLowerCase().includes(q)); }
+    list = list.slice().sort((a, b) => new Date(b.triggeredAt) - new Date(a.triggeredAt));
+    const limit = parseInt(params.limit || "50", 10);
+    const offset = parseInt(params.offset || "0", 10);
+    return json(res, { notifications: list.slice(offset, offset + limit), total: list.length, limit, offset });
+  }
+  if (path === "/api/v1/notifications/acknowledge" && method === "POST") {
+    const ids = (body && body.ids) || [];
+    let count = 0;
+    NOTIFICATIONS.forEach((n) => { if (ids.includes(n.id) && !n.acknowledged) { n.acknowledged = true; n.acknowledgedBy = sessionUser ? sessionUser.username : "demo"; n.acknowledgedAt = new Date().toISOString(); n.acknowledgeNote = (body && body.note) || null; count++; } });
+    return json(res, { acknowledged: count });
+  }
+  if (path === "/api/v1/notifications/clear" && method === "POST") {
+    const ids = (body && body.ids) || [];
+    let count = 0;
+    NOTIFICATIONS.forEach((n) => { if (ids.includes(n.id) && !n.cleared) { n.cleared = true; n.clearedBy = sessionUser ? sessionUser.username : "demo"; n.clearedAt = new Date().toISOString(); count++; } });
+    return json(res, { cleared: count });
+  }
+  if (path === "/api/v1/notification-rules" && method === "GET") {
+    return json(res, { rules: NOTIFICATION_RULES });
+  }
+  if (path === "/api/v1/notification-rules/schema" && method === "GET") {
+    return json(res, NOTIFICATION_SCHEMA);
+  }
+  if (path === "/api/v1/notification-rules/preview" && method === "POST") {
+    const t = (body && body.trigger) || {};
+    if (t.type === "event" || t.type === "change") return json(res, { supported: false, note: "Event and change rules fire on new audit events; nothing to preview.", totalEvaluated: 0, matches: [] });
+    return json(res, { supported: true, totalEvaluated: 2, matches: [
+      { assetId: "demo", hostname: "db-srv-01", dimension: "", value: 92, meets: true },
+      { assetId: "demo2", hostname: "app-srv-01", dimension: "", value: 58, meets: false },
+    ] });
+  }
+  if (path === "/api/v1/notification-rules" && method === "POST") {
+    const r = body || {};
+    const rule = { id: "nr-" + (++_notifIdSeq), name: r.name, description: r.description || null, enabled: r.enabled !== false, severity: r.severity || "warning", trigger: r.trigger, scope: r.scope || {}, clearBehavior: r.clearBehavior || "manual", clearAfterSec: r.clearAfterSec || null, cooldownSec: r.cooldownSec || null, messageTemplate: r.messageTemplate || null, channels: ["in_app"], createdBy: sessionUser ? sessionUser.username : "demo", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    NOTIFICATION_RULES.push(rule);
+    return json(res, { rule }, 201);
+  }
+  {
+    const m = path.match(/^\/api\/v1\/notification-rules\/([\w-]+)$/);
+    if (m && method === "PUT") {
+      const idx = NOTIFICATION_RULES.findIndex((r) => r.id === m[1]);
+      if (idx < 0) return json(res, { error: "Notification rule not found" }, 404);
+      const r = body || {};
+      NOTIFICATION_RULES[idx] = Object.assign({}, NOTIFICATION_RULES[idx], { name: r.name, description: r.description || null, enabled: r.enabled !== false, severity: r.severity, trigger: r.trigger, scope: r.scope || {}, clearBehavior: r.clearBehavior, clearAfterSec: r.clearAfterSec || null, cooldownSec: r.cooldownSec || null, messageTemplate: r.messageTemplate || null, updatedAt: new Date().toISOString() });
+      return json(res, { rule: NOTIFICATION_RULES[idx] });
+    }
+    if (m && method === "DELETE") {
+      NOTIFICATION_RULES = NOTIFICATION_RULES.filter((r) => r.id !== m[1]);
+      res.writeHead(204); return res.end();
+    }
+  }
+
   // Roles
   if (path === "/api/v1/roles/functions" && method === "GET") {
     return json(res, { accessLevels: ["none", "read", "write", "fullwrite"], functions: FUNCTION_KEYS });
@@ -3984,6 +4092,12 @@ async function routeAPI(method, path, params, body, res, req) {
   // ── Quarantine sightings (per asset) ──────────────────────────────────────
   if (path.match(/^\/api\/v1\/assets\/[\w-]+\/sightings$/) && method === "GET") {
     return json(res, { sightings: [] });
+  }
+  // ── Notifications for an asset (asset-details Notifications tab) ──
+  if (path.match(/^\/api\/v1\/assets\/[\w-]+\/notifications$/) && method === "GET") {
+    const active = NOTIFICATIONS.filter((n) => !n.cleared).slice(0, 3);
+    const matchingRules = NOTIFICATION_RULES.filter((r) => r.trigger && (r.trigger.type === "asset_metric" || r.trigger.type === "asset_state" || r.trigger.type === "change"));
+    return json(res, { active, matchingRules });
   }
   // ── Quarantine status (per asset) ─────────────────────────────────────────
   if (path.match(/^\/api\/v1\/assets\/[\w-]+\/quarantine-status$/) && method === "GET") {
