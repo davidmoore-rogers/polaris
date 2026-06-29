@@ -1,11 +1,12 @@
 /**
- * public/js/notifications.js — Notifications page (View + Manage tabs).
+ * public/js/notifications.js — Notifications page (View + Rules + Delivery tabs).
  *
  * View tab: server-side TableSF list of triggered notifications with multiselect
  * acknowledge/clear (acknowledge gated notifications:write, clear gated
- * notifications:fullwrite) + an optional-note acknowledge modal. Manage tab
- * (gated notificationManagement): rule list + a schema-driven rule builder with
- * a live Test (preview). Mirrors the server-side table pattern in events.js.
+ * notifications:fullwrite) + an optional-note acknowledge modal. Rules tab
+ * (data-tab="manage", gated notificationManagement): rule list + a schema-driven
+ * rule builder with a live Test (preview). Delivery tab: the NotificationChannel
+ * registry. Mirrors the server-side table pattern in events.js.
  */
 
 var _notifPageSize = 15;
