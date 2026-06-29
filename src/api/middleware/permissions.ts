@@ -9,7 +9,7 @@
  * been edited since the snapshot was taken.
  *
  * What this module owns:
- *   - The 26-entry function-key catalogue (exported as FUNCTION_KEYS).
+ *   - The 27-entry function-key catalogue (exported as FUNCTION_KEYS).
  *   - The access-level ordering (none < read < write < fullwrite).
  *   - requirePermission / hasPermission / requireOwnership middleware factories.
  *   - The session-snapshot refresh path (Map<roleId, updatedAt> cache + Prisma fetch).
@@ -61,8 +61,7 @@ export interface FunctionKeyDef {
 export const FUNCTION_KEYS: readonly FunctionKeyDef[] = [
   { key: "ipBlocks", label: "IP Blocks", description: "Top-level CIDR blocks. Read = list/view; write = create/edit/delete." },
   { key: "subnets", label: "Subnets", description: "Child subnets. Read-Write = create + edit/delete own only; Full Read-Write = create + edit/delete any.", hasOwnershipDimension: true },
-  { key: "reservations", label: "Reservations", description: "IP reservations. Read-Write = create + edit/delete own only; Full Read-Write = create + edit/delete any.", hasOwnershipDimension: true },
-  { key: "reservationPush", label: "DHCP Reservation Push", description: "Push manual reservations to FortiGate (the DHCP Push toggle on FMG / standalone FortiGate integrations)." },
+  { key: "reservations", label: "Reservations", description: "IP reservations (incl. DHCP push to FortiGate). Read-Write = create + edit/delete own only; Full Read-Write = create + edit/delete any.", hasOwnershipDimension: true },
   { key: "allocationTemplates", label: "Allocation Templates", description: "Saved multi-subnet allocation templates used by the bulk-allocate modal." },
   { key: "assets", label: "Assets", description: "Asset inventory CRUD + PDF/CSV export." },
   { key: "assetsQuarantine", label: "Asset Quarantine", description: "Push MAC quarantine to FortiGates + release + verify." },
