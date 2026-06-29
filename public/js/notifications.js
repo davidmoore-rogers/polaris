@@ -52,6 +52,43 @@ var _ruleTagList = null;  // cached distinct asset tags for the scope picker
     }
   }
 
+  // ─── Web push enable/disable (any viewer; gated only by browser support
+  //     + server-side Web Push config) ─────────────────────────────────────
+  function setupPushButton() {
+    var btn = document.getElementById("btn-enable-push");
+    if (!btn || !window.polarisPush) return;
+    if (!polarisPush.isSupported()) { btn.style.display = "none"; return; }
+
+    function paint(st) {
+      if (!st.enabledOnServer) {
+        // Server hasn't configured Web Push — keep the control hidden rather
+        // than offer a button that can only error.
+        btn.style.display = "none";
+        return;
+      }
+      btn.style.display = "";
+      btn.textContent = st.subscribed ? "Disable push" : "Enable push";
+      btn.disabled = false;
+    }
+
+    polarisPush.status().then(paint).catch(function () { btn.style.display = "none"; });
+
+    if (!btn._wired) {
+      btn._wired = true;
+      btn.addEventListener("click", async function () {
+        btn.disabled = true;
+        try {
+          var st = await polarisPush.status();
+          if (st.subscribed) { await polarisPush.disable(); showToast("Push notifications disabled", "info"); }
+          else { await polarisPush.enable(); showToast("Push notifications enabled", "success"); }
+        } catch (err) {
+          showToast(err.message || "Push action failed", "error");
+        }
+        polarisPush.status().then(paint).catch(function () {});
+      });
+    }
+  }
+
   // ─── Tabs ──────────────────────────────────────────────────────────────
   document.querySelectorAll("#notif-tabs .page-tab").forEach(function (btn) {
     btn.addEventListener("click", function () {
@@ -340,6 +377,7 @@ var _ruleTagList = null;  // cached distinct asset tags for the scope picker
   } else {
     applyPermGatedUI();
   }
+  setupPushButton();
 
   // ═══════════════════════════════ Manage tab ═════════════════════════════
   function initRulesTab() {
@@ -379,6 +417,7 @@ var _ruleTagList = null;  // cached distinct asset tags for the scope picker
       cooldownSec: r.cooldownSec != null ? r.cooldownSec : null,
       messageTemplate: r.messageTemplate != null ? r.messageTemplate : null,
       channels: r.channels || ["in_app"],
+      targets: Array.isArray(r.targets) ? r.targets : [],
     }, overrides || {});
   }
 
@@ -504,7 +543,11 @@ async function openRuleBuilder(existing) {
     '<div class="form-group"><label>Re-notify cooldown (seconds, optional)</label><input type="number" id="rule-cooldown" value="' + (r.cooldownSec != null ? r.cooldownSec : "") + '" placeholder="0 = suppress while firing"></div>' +
     '<div class="form-group"><label>Message template (optional)</label><input type="text" id="rule-msg" value="' + escapeHtml(r.messageTemplate || "") + '" placeholder="{asset} {metric} = {value} (threshold {threshold})"></div>' +
     '<div class="form-group"><label><input type="checkbox" id="rule-enabled"' + (r.enabled === false ? "" : " checked") + '> Enabled</label></div>' +
-    '<p style="font-size:0.8rem;color:var(--color-text-tertiary)">Delivery: in-app only (email / browser push coming in a later release).</p>' +
+    '<div class="form-group"><label>Notify (delivery targets)</label>' +
+      '<div id="rule-targets"></div>' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="rule-add-target" style="margin-top:6px">+ Add target</button>' +
+      '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:6px">In-app delivery is always on. Email targets need SMTP or Microsoft 365 configured in Server Settings → Notifications; web push needs Web Push configured and recipients who have enabled push on their device. Tag-routed email only reaches matched users who have an email address set.</p>' +
+    '</div>' +
     '<div id="rule-preview" style="margin-top:0.5rem"></div>';
 
   var footer =
@@ -684,6 +727,88 @@ async function openRuleBuilder(existing) {
     return sc;
   }
 
+  // ─── Notify (delivery targets) editor ──────────────────────────────────
+  var WEBHOOK_KINDS = (s.webhookKinds || ["generic", "slack", "teams"]);
+  function tagMultiSelect(selected) {
+    var sel = new Set(selected || []);
+    var opts = (_ruleTagList || []).map(function (tg) {
+      return '<option value="' + escapeHtml(tg) + '"' + (sel.has(tg) ? " selected" : "") + '>' + escapeHtml(tg) + '</option>';
+    }).join("");
+    return '<select multiple class="tg-recipient-tags" size="4" style="width:100%">' + opts + '</select>';
+  }
+  function targetRowHtml(t) {
+    t = t || { channel: "email" };
+    var ch = t.channel || "email";
+    var channelSel = '<select class="tg-channel">' +
+      ['email', 'webhook', 'web_push'].map(function (c) {
+        var lbl = c === "web_push" ? "Web push" : c.charAt(0).toUpperCase() + c.slice(1);
+        return '<option value="' + c + '"' + (c === ch ? " selected" : "") + '>' + lbl + '</option>';
+      }).join("") + '</select>';
+    return '<div class="tg-row" style="border:1px solid var(--color-border);border-radius:6px;padding:0.6rem;margin-bottom:6px">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+        '<label style="margin:0;font-size:0.8rem">Channel</label>' + channelSel +
+        '<button type="button" class="btn btn-sm btn-danger tg-remove" style="margin-left:auto">Remove</button>' +
+      '</div>' +
+      '<div class="tg-fields"></div>' +
+    '</div>';
+  }
+  function renderTargetFields(row, t) {
+    t = t || {};
+    var ch = row.querySelector(".tg-channel").value;
+    var box = row.querySelector(".tg-fields");
+    if (ch === "email") {
+      box.innerHTML =
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Recipient tags (route to matching users)</label>' + tagMultiSelect(t.recipientTags) + '</div>' +
+        '<div class="form-group" style="margin:0"><label style="font-size:0.8rem">Explicit addresses (comma-separated)</label><input type="text" class="tg-addresses" value="' + escapeHtml((t.addresses || []).join(", ")) + '" placeholder="oncall@example.com, noc@example.com"></div>';
+    } else if (ch === "webhook") {
+      box.innerHTML =
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Webhook URL</label><input type="text" class="tg-webhook-url" value="' + escapeHtml(t.webhookUrl || "") + '" placeholder="https://hooks.slack.com/…"></div>' +
+        '<div class="form-group" style="margin:0"><label style="font-size:0.8rem">Format</label><select class="tg-webhook-kind">' +
+          WEBHOOK_KINDS.map(function (k) { return '<option value="' + k + '"' + (k === (t.webhookKind || "generic") ? " selected" : "") + '>' + escapeHtml(k) + '</option>'; }).join("") +
+        '</select></div>';
+    } else {
+      box.innerHTML =
+        '<div class="form-group" style="margin:0"><label style="font-size:0.8rem">Recipient tags (route to subscribed users)</label>' + tagMultiSelect(t.recipientTags) + '</div>';
+    }
+  }
+  function wireTargetRow(row, t) {
+    renderTargetFields(row, t);
+    row.querySelector(".tg-channel").addEventListener("change", function () { renderTargetFields(row, {}); });
+    row.querySelector(".tg-remove").addEventListener("click", function () { row.remove(); });
+  }
+  function addTargetRow(t) {
+    var host = document.getElementById("rule-targets");
+    var tmp = document.createElement("div");
+    tmp.innerHTML = targetRowHtml(t);
+    var row = tmp.firstChild;
+    host.appendChild(row);
+    wireTargetRow(row, t);
+  }
+  function collectTargets() {
+    var out = [];
+    document.querySelectorAll("#rule-targets .tg-row").forEach(function (row) {
+      var ch = row.querySelector(".tg-channel").value;
+      var t = { channel: ch };
+      var tagSel = row.querySelector(".tg-recipient-tags");
+      if (tagSel) {
+        var tags = Array.from(tagSel.selectedOptions).map(function (o) { return o.value; });
+        if (tags.length) t.recipientTags = tags;
+      }
+      if (ch === "email") {
+        var addrs = (row.querySelector(".tg-addresses").value || "").split(",").map(function (a) { return a.trim(); }).filter(Boolean);
+        if (addrs.length) t.addresses = addrs;
+      } else if (ch === "webhook") {
+        var url = (row.querySelector(".tg-webhook-url").value || "").trim();
+        if (url) t.webhookUrl = url;
+        t.webhookKind = row.querySelector(".tg-webhook-kind").value;
+      }
+      out.push(t);
+    });
+    return out;
+  }
+  (r.targets || []).forEach(addTargetRow);
+  document.getElementById("rule-add-target").addEventListener("click", function () { addTargetRow({ channel: "email" }); });
+
   function collectRule() {
     var rule = {
       name: document.getElementById("rule-name").value.trim(),
@@ -697,6 +822,7 @@ async function openRuleBuilder(existing) {
       cooldownSec: numOrUndef("rule-cooldown") != null ? numOrUndef("rule-cooldown") : null,
       messageTemplate: document.getElementById("rule-msg").value.trim() || null,
       channels: ["in_app"],
+      targets: collectTargets(),
     };
     return rule;
   }
@@ -732,6 +858,17 @@ async function openRuleBuilder(existing) {
     var def = findType(tr.type);
     if (def && def.scoped && !sc.allAssets && !(sc.assetTypes && sc.assetTypes.length) && !(sc.tags && sc.tags.length) && !(sc.assetIds && sc.assetIds.length)) {
       return "Pick a scope: All assets, or at least one asset type / tag / asset ID.";
+    }
+    var targets = rule.targets || [];
+    for (var i = 0; i < targets.length; i++) {
+      var t = targets[i]; var n = i + 1;
+      if (t.channel === "webhook" && !t.webhookUrl) return "Target " + n + ": a webhook URL is required.";
+      if (t.channel === "email" && !(t.addresses && t.addresses.length) && !(t.recipientTags && t.recipientTags.length)) {
+        return "Target " + n + ": an email target needs recipient tags and/or explicit addresses.";
+      }
+      if (t.channel === "web_push" && !(t.recipientTags && t.recipientTags.length)) {
+        return "Target " + n + ": a web-push target needs recipient tags.";
+      }
     }
     return null;
   }

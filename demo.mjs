@@ -686,6 +686,8 @@ const NOTIFICATION_SCHEMA = {
   clearBehaviors: ["manual", "auto", "timed"],
   comparators: [">", ">=", "<", "<=", "==", "!="],
   aggregations: ["latest", "avg", "min", "max"],
+  deliveryChannels: ["email", "webhook", "web_push"],
+  webhookKinds: ["generic", "slack", "teams"],
   triggerTypes: [
     { type: "asset_metric", label: "Asset metric threshold", scoped: true, metrics: ["cpuPct", "memPct", "responseTimeMs", "hwSensorValue", "storageUsedPct", "ifInBps", "sdwanLatencyMs"] },
     { type: "asset_state", label: "Asset state", scoped: true, fields: ["monitorStatus", "status", "consecutiveFailures", "quarantined", "ifOperStatus", "ipsecStatus", "sdwanRuleStatus"] },
@@ -698,14 +700,17 @@ let NOTIFICATION_RULES = [
   { id: "nr-1", name: "Polaris host memory high", description: null, enabled: true, severity: "error",
     trigger: { type: "host_metric", metric: "memUsedPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 85, forDurationSec: 0 },
     scope: {}, clearBehavior: "auto", clearAfterSec: null, cooldownSec: null, messageTemplate: null, channels: ["in_app"],
+    targets: [{ channel: "email", recipientTags: ["region:Atlanta"], addresses: ["oncall@example.com"] }],
     createdBy: "admin", createdAt: "2026-06-20T08:00:00.000Z", updatedAt: "2026-06-20T08:00:00.000Z" },
   { id: "nr-2", name: "Server CPU high", description: null, enabled: true, severity: "warning",
     trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 70, forDurationSec: 0 },
     scope: { assetTypes: ["server"] }, clearBehavior: "manual", clearAfterSec: null, cooldownSec: null, messageTemplate: "{asset} CPU at {value}%", channels: ["in_app"],
+    targets: [{ channel: "webhook", webhookUrl: "https://hooks.slack.com/services/XXX", webhookKind: "slack" }],
     createdBy: "admin", createdAt: "2026-06-20T08:00:00.000Z", updatedAt: "2026-06-20T08:00:00.000Z" },
   { id: "nr-3", name: "Monitor status changed", description: null, enabled: true, severity: "warning",
     trigger: { type: "event", actionPattern: "monitor.status_changed" },
     scope: {}, clearBehavior: "manual", clearAfterSec: null, cooldownSec: null, messageTemplate: null, channels: ["in_app"],
+    targets: [],
     createdBy: "admin", createdAt: "2026-06-20T08:00:00.000Z", updatedAt: "2026-06-20T08:00:00.000Z" },
 ];
 let _notifIdSeq = 100;

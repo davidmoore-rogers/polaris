@@ -65,6 +65,15 @@ import { BACKUP_DIR, UPLOADS_DIR } from "../../utils/paths.js";
 import { maintenanceLimiter } from "../middleware/rateLimits.js";
 import { getAppVersion } from "../../utils/version.js";
 import { getDirectDatabaseUrl } from "../../utils/dbConnections.js";
+import { requirePermission } from "../middleware/permissions.js";
+import {
+  getMaskedSmtpConfig, saveSmtpConfig,
+  getMaskedM365Config, saveM365Config,
+  getMaskedWebPushConfig, saveWebPushConfig,
+  type SmtpConfig, type M365Config,
+} from "../../services/notificationConfigService.js";
+import { sendEmail } from "../../services/notificationChannels/emailChannel.js";
+import { generateVapidKeys } from "../../services/notificationChannels/webPushChannel.js";
 
 const TAG_COLORS = ["#4fc3f7","#4ade80","#f59e0b","#f472b6","#a78bfa","#fb923c","#38bdf8","#34d399","#e879f9","#facc15","#f87171","#2dd4bf","#818cf8","#c084fc"];
 function randomTagColor() { return TAG_COLORS[Math.floor(Math.random() * TAG_COLORS.length)]; }
@@ -2101,6 +2110,97 @@ router.delete("/agents/build/:buildId", async (req, res, next) => {
       }
       throw err;
     }
+  } catch (err) { next(err); }
+});
+
+// ─── Notifications: outbound channel config ──────────────────────────────────
+// GET inherits the mount-level serverSettingsSystem=read gate; writes/tests add
+// an explicit write gate. Secrets are masked on GET and preserved on PUT
+// (notificationConfigService); env vars override stored secrets at send time.
+
+const smtpInputSchema = z.object({
+  enabled: z.boolean(),
+  host: z.string().max(255),
+  port: z.number().int().min(1).max(65535),
+  security: z.enum(["none", "starttls", "ssl"]),
+  username: z.string().max(255),
+  password: z.string().max(500),
+  from: z.string().max(320),
+});
+const m365InputSchema = z.object({
+  enabled: z.boolean(),
+  tenantId: z.string().max(255),
+  clientId: z.string().max(255),
+  clientSecret: z.string().max(500),
+  fromUserId: z.string().max(320),
+});
+const webPushInputSchema = z.object({
+  enabled: z.boolean(),
+  publicKey: z.string().max(500),
+  privateKey: z.string().max(500),
+  subject: z.string().max(255),
+});
+
+router.get("/notifications/smtp", async (_req, res, next) => {
+  try { res.json(await getMaskedSmtpConfig()); } catch (err) { next(err); }
+});
+router.put("/notifications/smtp", requirePermission("serverSettingsSystem", "write"), async (req, res, next) => {
+  try {
+    const input = smtpInputSchema.parse(req.body) as SmtpConfig;
+    await saveSmtpConfig(input);
+    await logEvent({ action: "server_settings.notifications.smtp_updated", resourceType: "server-settings", actor: req.session?.username, message: `SMTP notification channel ${input.enabled ? "enabled" : "disabled"}` });
+    res.json(await getMaskedSmtpConfig());
+  } catch (err) { next(err); }
+});
+router.post("/notifications/smtp/test", requirePermission("serverSettingsSystem", "write"), async (req, res, next) => {
+  try {
+    const to = z.string().email().parse(req.body?.to);
+    await sendEmail({ to, subject: "Polaris SMTP test", text: "This is a test email from Polaris notifications (SMTP)." }, "smtp");
+    res.json({ ok: true, message: `Test email sent to ${to}` });
+  } catch (err) { next(err); }
+});
+
+router.get("/notifications/m365", async (_req, res, next) => {
+  try { res.json(await getMaskedM365Config()); } catch (err) { next(err); }
+});
+router.put("/notifications/m365", requirePermission("serverSettingsSystem", "write"), async (req, res, next) => {
+  try {
+    const input = m365InputSchema.parse(req.body) as M365Config;
+    await saveM365Config(input);
+    await logEvent({ action: "server_settings.notifications.m365_updated", resourceType: "server-settings", actor: req.session?.username, message: `Microsoft 365 notification channel ${input.enabled ? "enabled" : "disabled"}` });
+    res.json(await getMaskedM365Config());
+  } catch (err) { next(err); }
+});
+router.post("/notifications/m365/test", requirePermission("serverSettingsSystem", "write"), async (req, res, next) => {
+  try {
+    const cfg = await getMaskedM365Config();
+    const to = req.body?.to ? z.string().email().parse(req.body.to) : cfg.fromUserId;
+    if (!to) throw new AppError(400, "No recipient — set a From user or provide a test address");
+    await sendEmail({ to, subject: "Polaris Microsoft 365 test", text: "This is a test email from Polaris notifications (Microsoft 365 / Graph)." }, "m365");
+    res.json({ ok: true, message: `Test email sent to ${to}` });
+  } catch (err) { next(err); }
+});
+
+router.get("/notifications/webpush", async (_req, res, next) => {
+  try { res.json(await getMaskedWebPushConfig()); } catch (err) { next(err); }
+});
+router.put("/notifications/webpush", requirePermission("serverSettingsSystem", "write"), async (req, res, next) => {
+  try {
+    const input = webPushInputSchema.parse(req.body);
+    await saveWebPushConfig(input);
+    await logEvent({ action: "server_settings.notifications.webpush_updated", resourceType: "server-settings", actor: req.session?.username, message: `Web push notification channel ${input.enabled ? "enabled" : "disabled"}` });
+    res.json(await getMaskedWebPushConfig());
+  } catch (err) { next(err); }
+});
+router.post("/notifications/webpush/generate", requirePermission("serverSettingsSystem", "write"), async (req, res, next) => {
+  try {
+    const keys = generateVapidKeys();
+    // Persist immediately (private key never returned) so a generate→save race
+    // can't lose it; return only the public key + a flag.
+    const current = await getMaskedWebPushConfig();
+    await saveWebPushConfig({ enabled: current.enabled, publicKey: keys.publicKey, privateKey: keys.privateKey, subject: current.subject });
+    await logEvent({ action: "server_settings.notifications.vapid_generated", resourceType: "server-settings", actor: req.session?.username, message: "Generated a new Web Push VAPID keypair" });
+    res.json({ publicKey: keys.publicKey, privateKeySet: true });
   } catch (err) { next(err); }
 });
 

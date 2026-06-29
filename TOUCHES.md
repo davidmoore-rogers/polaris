@@ -1280,6 +1280,64 @@ Listed alphabetically.
 
 ---
 
+## services/notificationRecipientService.ts
+
+**What it owns:** Routing a fired notification to concrete delivery recipients, and expanding a rule's `targets[]` into `NotificationDelivery` rows.
+
+**Public API:** `resolveRecipientUsers(recipientTags)`, `expandDeliveries(notificationId, targets)`, `bumpRecipientIndex()`.
+
+**Cross-service deps:** `regionScopeService.resolveTagScopesForUser` (effective tags per user), `notificationService.stripRegionPrefix`, `prisma` (users + pushSubscriptions + notificationDelivery).
+
+**Used by:** `src/services/notificationEngine.ts` (`fire()` + event-tail, via the best-effort `expandDeliveriesSafe` wrapper).
+
+**Invariants:**
+- Recipient matching strips the `region:` prefix and lower-cases both sides, so a target `region:Atlanta` matches a user whose regionTags include `Atlanta`; region + other tags are matched as one union.
+- Empty `recipientTags` routes to NO users (explicit, not "everyone").
+- Recipients are snapshotted at fire time (delivery rows reflect targets when the rule fired, not when the drain runs).
+- In-app delivery is never a `NotificationDelivery` row — it's the `Notification` itself.
+
+**When changing this:** keep the tag-match semantics aligned with `scopeMatchesAsset` and `regionScopeService` so rule scope and recipient routing read tags the same way. Bump the user-tag index cache (`bumpRecipientIndex`) if a user/role/group-mapping write must take effect immediately.
+
+---
+
+## services/notificationDeliveryService.ts
+
+**What it owns:** Draining pending `NotificationDelivery` rows and dispatching each to its channel.
+
+**Public API:** `drainPendingDeliveries()`.
+
+**Cross-service deps:** the channel senders (`notificationChannels/emailChannel.sendEmail`, `webhookChannel.sendWebhook`, `webPushChannel.sendWebPush`), `prisma` (delivery rows + pushSubscription prune), `eventLogService.logEvent`.
+
+**Used by:** `src/jobs/deliverNotifications.ts` (15s tick).
+
+**Invariants:**
+- ≤3 attempts per delivery; a row flips to `failed` only when attempts reach the cap, else stays `pending` for the next tick.
+- A web_push 410/404 prunes the dead `PushSubscription` (by endpoint).
+- Bounded concurrency on sends; one summary audit Event per non-empty drain (no per-delivery Event spam).
+
+**When changing this:** scale-check at 2000 assets — the batch (`BATCH_SIZE`) + concurrency cap keep a delivery spike from stampeding SMTP/webhook endpoints. Never row-scan the full table; always filter `status=pending, attempts<MAX`.
+
+---
+
+## services/notificationConfigService.ts
+
+**What it owns:** Stored config for the three outbound channels (SMTP / Microsoft 365 / Web Push), each a `Setting` row, with secret masking + env override.
+
+**Public API:** `getSmtpConfig`/`getMaskedSmtpConfig`/`saveSmtpConfig`, `getM365Config`/`getMaskedM365Config`/`saveM365Config`, `getWebPushConfig`/`getMaskedWebPushConfig`/`saveWebPushConfig`, `anyEmailChannelEnabled`, `MASK` + key constants.
+
+**Cross-service deps:** `prisma` (Setting rows).
+
+**Used by:** the channel senders (raw `getXConfig`), `src/api/routes/serverSettings.ts` (masked get / save / test), `src/api/routes/pushSubscriptions.ts` (`/key`).
+
+**Invariants:**
+- Secrets (SMTP password, M365 client secret, VAPID private key) are masked on read and preserved on write when the client echoes the mask.
+- Env vars (`POLARIS_SMTP_PASSWORD` / `POLARIS_M365_CLIENT_SECRET` / `POLARIS_VAPID_PRIVATE_KEY` + public/subject) override the stored value at send time (org Key-Vault pattern).
+- The API never returns an unmasked secret.
+
+**When changing this:** if you add a secret field, mask it in the `getMaskedX` path AND honor an env override in `getXConfig`, or it leaks via the API.
+
+---
+
 ## services/activeDirectoryService.ts
 
 **What it owns:** On-prem Active Directory device discovery via LDAP/LDAPS client (computer objects, OU filtering, SID/GUID identity, disabled-account handling).

@@ -137,6 +137,35 @@ export const scopeSchema = z
   })
   .strict();
 
+// ─── Delivery targets ───────────────────────────────────────────────────────
+// A rule's outbound delivery. In-app is always implicit (every fire writes a
+// Notification); these route the same fire to external channels. `recipientTags`
+// routes to users whose effective region/other tags intersect; `addresses`
+// (email) / `webhookUrl` (webhook) are explicit. Expanded at fire time by
+// notificationRecipientService.expandDeliveries.
+export const DELIVERY_CHANNELS = ["email", "webhook", "web_push"] as const;
+export const WEBHOOK_KINDS = ["generic", "slack", "teams"] as const;
+
+export const deliveryTargetSchema = z
+  .object({
+    channel: z.enum(DELIVERY_CHANNELS),
+    recipientTags: z.array(z.string().max(100)).max(200).optional(),
+    addresses: z.array(z.string().email().max(320)).max(100).optional(),
+    webhookUrl: z.string().url().max(2000).optional(),
+    webhookKind: z.enum(WEBHOOK_KINDS).optional(),
+  })
+  .superRefine((t, ctx) => {
+    if (t.channel === "webhook" && !t.webhookUrl) {
+      ctx.addIssue({ code: "custom", message: "webhookUrl is required for a webhook target", path: ["webhookUrl"] });
+    }
+    if (t.channel === "email" && (!t.addresses || t.addresses.length === 0) && (!t.recipientTags || t.recipientTags.length === 0)) {
+      ctx.addIssue({ code: "custom", message: "An email target needs recipientTags and/or explicit addresses", path: ["addresses"] });
+    }
+    if (t.channel === "web_push" && (!t.recipientTags || t.recipientTags.length === 0)) {
+      ctx.addIssue({ code: "custom", message: "A web-push target needs recipientTags (it routes to subscribed users)", path: ["recipientTags"] });
+    }
+  });
+
 export const ruleInputSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().max(4000).optional().nullable(),
@@ -149,11 +178,13 @@ export const ruleInputSchema = z.object({
   cooldownSec: z.number().int().min(0).max(2592000).optional().nullable(),
   messageTemplate: z.string().max(2000).optional().nullable(),
   channels: z.array(z.string().max(50)).default(["in_app"]),
+  targets: z.array(deliveryTargetSchema).max(50).default([]),
 });
 
 export type Trigger = z.infer<typeof triggerSchema>;
 export type RuleScope = z.infer<typeof scopeSchema>;
 export type RuleInput = z.infer<typeof ruleInputSchema>;
+export type DeliveryTarget = z.infer<typeof deliveryTargetSchema>;
 
 /** Trigger categories that select assets via `scope` (vs. event/host). */
 export const ASSET_SCOPED_TRIGGER_TYPES = ["asset_metric", "asset_state", "change"] as const;
@@ -245,6 +276,8 @@ export function buildSchemaCatalog() {
     fieldMeta: FIELD_META,
     changeTypeMeta: CHANGE_TYPE_META,
     metricDimensions: METRIC_DIMENSIONS,
+    deliveryChannels: DELIVERY_CHANNELS,
+    webhookKinds: WEBHOOK_KINDS,
     triggerTypes: [
       { type: "asset_metric", label: "Asset metric threshold", scoped: true, metrics: ASSET_METRICS },
       { type: "asset_state", label: "Asset state", scoped: true, fields: ASSET_STATE_FIELDS },

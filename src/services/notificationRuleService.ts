@@ -143,6 +143,7 @@ export async function createRule(input: RuleInput, actor?: string) {
       cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null,
       channels: input.channels,
+      targets: input.targets as any,
       createdBy: actor ?? null,
     },
   });
@@ -175,6 +176,7 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
       cooldownSec: input.cooldownSec ?? null,
       messageTemplate: input.messageTemplate ?? null,
       channels: input.channels,
+      targets: input.targets as any,
     },
   });
   bumpChangeSubscriptions();

@@ -2021,7 +2021,8 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  dashboard UserDashboard?
+  dashboard         UserDashboard?
+  pushSubscriptions PushSubscription[]
 
   @@index([roleId])
   @@map("users")
@@ -2796,6 +2797,11 @@ model NotificationRule {
   cooldownSec     Int? // suppress re-fire window (re-notify)
   messageTemplate String? @db.Text // tokens: {asset} {metric} {value} {threshold}
   channels        String[] @default(["in_app"])
+  // Delivery targets — array of { channel, recipientTags?, addresses?,
+  // webhookUrl?, webhookKind? }. In-app delivery stays implicit (every fire
+  // writes a Notification); `targets` drives outbound email/webhook/web_push.
+  // Validated by notificationRuleService; expanded by notificationRecipientService.
+  targets         Json    @default("[]")
   createdBy       String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -2833,10 +2839,59 @@ model Notification {
   clearedBy String? // username, or "system:auto-resolve" / "system:timed"
   clearedAt DateTime?
 
+  deliveries NotificationDelivery[]
+
   @@index([assetId])
   @@index([cleared, acknowledged])
   @@index([triggeredAt])
   @@map("notifications")
+}
+
+// One row per (notification, channel, concrete recipient) for outbound
+// delivery — the deliverNotifications job drains pending rows, dispatches per
+// channel, and records sent/failed + retry count. Snapshotted at fire time by
+// notificationRecipientService.expandDeliveries so recipients reflect the
+// rule's targets when it fired (not when the job runs). In-app delivery is NOT
+// represented here (it's the Notification row itself). Cascade-deleted with
+// the Notification.
+model NotificationDelivery {
+  id             String       @id @default(uuid())
+  notificationId String
+  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  channel        String // email | webhook | web_push
+  target         String       @db.Text // email address / webhook URL / push endpoint
+  // Channel-specific payload snapshot: webhook → { kind }, web_push →
+  // { p256dh, auth }, email → { via? } (smtp|m365). Null for plain targets.
+  meta           Json?
+  status         String       @default("pending") // pending | sent | failed
+  attempts       Int          @default(0)
+  lastAttemptAt  DateTime?
+  error          String?      @db.Text
+  createdAt      DateTime     @default(now())
+
+  @@index([status])
+  @@index([notificationId])
+  @@map("notification_deliveries")
+}
+
+// A browser/PWA Web Push subscription owned by a user. Stored at subscribe
+// time from the PushManager subscription; the deliverNotifications web_push
+// channel sends to each recipient user's endpoints via the `web-push` lib
+// signed with the server VAPID keypair. A 404/410 from the push service prunes
+// the row (endpoint gone).
+model PushSubscription {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint   String   @unique @db.Text
+  p256dh     String   @db.Text
+  auth       String
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("push_subscriptions")
 }
 
 // Per-(rule, asset, dimension) firing state for debounce / sustained-duration /

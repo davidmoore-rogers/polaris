@@ -546,6 +546,11 @@ const api = {
     acknowledge: (ids, note) => request("POST", "/notifications/acknowledge", { ids, note }),
     clear:       (ids)    => request("POST", "/notifications/clear", { ids }),
   },
+  push: {
+    key:         ()       => request("GET", "/push-subscriptions/key"),
+    subscribe:   (sub)    => request("POST", "/push-subscriptions", sub),
+    unsubscribe: (endpoint) => request("DELETE", "/push-subscriptions", { endpoint }),
+  },
   notificationRules: {
     list:    ()        => request("GET", "/notification-rules"),
     schema:  ()        => request("GET", "/notification-rules/schema"),
@@ -555,6 +560,16 @@ const api = {
     delete:  (id)      => request("DELETE", `/notification-rules/${id}`),
   },
   serverSettings: {
+    // Notifications tab — outbound channel config (secrets masked on GET).
+    notifGetSmtp:    ()   => request("GET",  "/server-settings/notifications/smtp"),
+    notifSaveSmtp:   (b)  => request("PUT",  "/server-settings/notifications/smtp", b),
+    notifTestSmtp:   (b)  => request("POST", "/server-settings/notifications/smtp/test", b),
+    notifGetM365:    ()   => request("GET",  "/server-settings/notifications/m365"),
+    notifSaveM365:   (b)  => request("PUT",  "/server-settings/notifications/m365", b),
+    notifTestM365:   ()   => request("POST", "/server-settings/notifications/m365/test"),
+    notifGetWebPush: ()   => request("GET",  "/server-settings/notifications/webpush"),
+    notifSaveWebPush:(b)  => request("PUT",  "/server-settings/notifications/webpush", b),
+    notifGenVapid:   ()   => request("POST", "/server-settings/notifications/webpush/generate"),
     // Polaris Agent — Build button + inventory on Maintenance tab.
     agentInventory:    ()        => request("GET",    "/server-settings/agents/inventory"),
     agentBuildStart:   ()        => request("POST",   "/server-settings/agents/build"),

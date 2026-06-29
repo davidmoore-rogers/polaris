@@ -628,6 +628,28 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 
 ---
 
+## Outbound multi-channel delivery (config + recipient routing + drain job)
+
+**What it is:** Fan one internal event out to external recipients over several channels (email / webhook / web-push), where channel config carries secrets, recipients are resolved from tags, and sends must retry without blocking the producer. The notification delivery layer is the reference.
+
+**Canonical implementation:**
+- **Channel config** (masked secrets + env override): [src/services/notificationConfigService.ts](src/services/notificationConfigService.ts) — one `Setting` row per channel; `getMaskedX`/`saveX` for the API, raw `getXConfig` (env-merged) for senders.
+- **Channel senders** (one file per transport, each throws on failure): [src/services/notificationChannels/](src/services/notificationChannels/) — `emailChannel` (nodemailer SMTP + Graph sendMail), `webhookChannel` (slack/teams/generic body + `netGuard.assertOutboundHostAllowed` SSRF guard), `webPushChannel` (`web-push` VAPID; throws `gone=true` on 410/404).
+- **Recipient routing + queue rows**: [src/services/notificationRecipientService.ts](src/services/notificationRecipientService.ts) — `expandDeliveries(notificationId, targets)` snapshots recipients at fire time into `NotificationDelivery` rows.
+- **Drain job**: [src/services/notificationDeliveryService.ts](src/services/notificationDeliveryService.ts) `drainPendingDeliveries()` + [src/jobs/deliverNotifications.ts](src/jobs/deliverNotifications.ts) (15s tick).
+- **Config UI**: the Notifications tab cards in [public/js/server-settings.js](public/js/server-settings.js) (`loadNotificationChannelsTab`) + routes in [src/api/routes/serverSettings.ts](src/api/routes/serverSettings.ts).
+- **Web push client**: service worker [public/sw.js](public/sw.js) + enrollment helper [public/js/push.js](public/js/push.js) (`window.polarisPush`) + [public/manifest.json](public/manifest.json).
+
+**Key conventions:**
+- **Secrets:** masked on read, preserved-on-write when the client echoes the mask, env-overridable at send time (org Key-Vault pattern). Never return an unmasked secret.
+- **Queue, don't block:** the producer only writes `NotificationDelivery` rows (best-effort, wrapped so an expansion error never breaks the producer); a separate ≤3-retry drain job does the network I/O with bounded concurrency. A web-push 410/404 prunes the dead subscription.
+- **SSRF:** any operator-supplied outbound URL goes through `netGuard.assertOutboundHostAllowed(host)` before the request.
+- **Tag routing:** recipient matching strips the `region:` prefix and lower-cases both sides so a target tag and a user's region scope compare the same way `scopeMatchesAsset` does.
+
+**When adding a new channel:** add it to `DELIVERY_CHANNELS` + the `deliveryTargetSchema` superRefine in `notificationTypes`, a sender file under `notificationChannels/`, a `dispatch()` arm in `notificationDeliveryService`, a builder editor arm in `openRuleBuilder` (notifications.js), and (if it needs config) a card + routes following the SMTP one.
+
+---
+
 ## Integration type (config + discovery + sync + frontend modal)
 
 **What it is:** A new external system that Polaris talks to: a firewall family (FortiGate, Palo Alto), a manager (FortiManager, Panorama), an identity provider (Entra ID, Active Directory), or a DHCP server (Windows Server). Adding a new integration type touches a ~30-callsite catalogue across backend dispatch, frontend modal tabs, polling-method compatibility, asset projection, and source-default polling. Without a single reference shape, each new type drifts on tab layout, config-blob keys, transport dispatch, and projection priority — operators see five different UIs for what should feel like the same thing.

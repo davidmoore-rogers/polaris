@@ -75,11 +75,17 @@ async function main() {
       name: "Mock: Polaris host memory high", severity: "error", clearBehavior: "auto",
       trigger: { type: "host_metric", metric: "memUsedPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 85, forDurationSec: 0 },
       scope: {}, messageTemplate: "Polaris host memory at {value}% (threshold {threshold}%)",
+      // email by tag + explicit address — exercises the email delivery path
+      // (only sends once SMTP or M365 is configured in Server Settings).
+      targets: [{ channel: "email", recipientTags: ["region:Atlanta"], addresses: ["oncall@example.com"] }],
     },
     {
       name: "Mock: Polaris host CPU high", severity: "warning", clearBehavior: "manual",
       trigger: { type: "host_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 80, forDurationSec: 0 },
       scope: {}, messageTemplate: null,
+      // generic webhook — point at a https://webhook.site/<id> URL to watch
+      // deliveries arrive. SSRF guard blocks internal/loopback targets.
+      targets: [{ channel: "webhook", webhookUrl: "https://webhook.site/00000000-0000-0000-0000-000000000000", webhookKind: "generic" }],
     },
     {
       name: "Mock: Server CPU high", severity: "warning", clearBehavior: "manual",
@@ -108,7 +114,7 @@ async function main() {
         name: r.name, severity: r.severity, enabled: true,
         trigger: r.trigger as any, scope: r.scope as any,
         clearBehavior: r.clearBehavior, messageTemplate: r.messageTemplate ?? null,
-        channels: ["in_app"], createdBy: "system:mock-notifications",
+        channels: ["in_app"], targets: (r as any).targets ?? [], createdBy: "system:mock-notifications",
       },
     });
   }

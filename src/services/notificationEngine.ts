@@ -22,6 +22,7 @@
  * (the builder's Test button).
  */
 
+import { randomUUID } from "node:crypto";
 import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { logEvent } from "./eventLogService.js";
@@ -30,8 +31,10 @@ import {
   type Trigger,
   type RuleScope,
   type RuleInput,
+  type DeliveryTarget,
   CHANGE_TYPE_ACTIONS,
 } from "./notificationTypes.js";
+import { expandDeliveries } from "./notificationRecipientService.js";
 
 const LAST_EVENT_SETTING_KEY = "notificationEngine.lastEventCursor";
 const DEFAULT_LOOKBACK_MS = 15 * 60 * 1000; // window to find the "latest" sample
@@ -47,6 +50,25 @@ interface DbRule {
   clearAfterSec: number | null;
   cooldownSec: number | null;
   messageTemplate: string | null;
+  targets: DeliveryTarget[];
+}
+
+/** Best-effort outbound-delivery expansion — never breaks rule evaluation. */
+async function expandDeliveriesSafe(notificationId: string, targets: DeliveryTarget[]): Promise<void> {
+  if (!targets || targets.length === 0) return;
+  try {
+    await expandDeliveries(notificationId, targets);
+  } catch (err) {
+    await logEvent({
+      action: "notification.delivery_expand_error",
+      resourceType: "notification",
+      resourceId: notificationId,
+      actor: "system:notification-engine",
+      level: "warning",
+      message: "Failed to expand notification delivery targets",
+      details: { err: (err as Error)?.message },
+    }).catch(() => {});
+  }
 }
 
 interface ScopeAssetRow {
@@ -469,6 +491,7 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
     create: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey, state: "firing", firedAt: now, lastValue, notificationId: notif.id },
     update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null },
   });
+  await expandDeliveriesSafe(notif.id, rule.targets);
   await logEvent({
     action: "notification.triggered",
     resourceType: "notification",
@@ -554,6 +577,10 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
   });
 
   const toCreate: Prisma.NotificationCreateManyInput[] = [];
+  // Notifications from rules with delivery targets get a client-generated id so
+  // we can expand their deliveries after the batch insert (createMany returns
+  // no ids). Rows without targets keep the DB default.
+  const deliverAfter: { id: string; targets: DeliveryTarget[] }[] = [];
   for (const ev of events) {
     for (const c of compiled) {
       if (!c.re.test(ev.action)) continue;
@@ -568,7 +595,11 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
       const message = tmpl && tmpl.trim()
         ? tmpl.replaceAll("{asset}", ev.resourceName ?? "").replaceAll("{metric}", ev.action).replaceAll("{value}", ev.message)
         : `${c.rule.name}: ${ev.message}`;
+      const hasTargets = Array.isArray(c.rule.targets) && c.rule.targets.length > 0;
+      const id = hasTargets ? randomUUID() : undefined;
+      if (hasTargets && id) deliverAfter.push({ id, targets: c.rule.targets });
       toCreate.push({
+        ...(id ? { id } : {}),
         ruleId: c.rule.id,
         assetId,
         assetHostname: ev.resourceName ?? null,
@@ -581,6 +612,9 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
 
   if (toCreate.length > 0) {
     await prisma.notification.createMany({ data: toCreate });
+  }
+  for (const d of deliverAfter) {
+    await expandDeliveriesSafe(d.id, d.targets);
   }
 
   const newest = events[events.length - 1].timestamp.toISOString();
@@ -616,6 +650,7 @@ export async function evaluateAllNotificationRules(): Promise<void> {
     scope: (r.scope ?? {}) as RuleScope,
     clearBehavior: r.clearBehavior, clearAfterSec: r.clearAfterSec, cooldownSec: r.cooldownSec,
     messageTemplate: r.messageTemplate,
+    targets: Array.isArray(r.targets) ? (r.targets as unknown as DeliveryTarget[]) : [],
   }));
 
   _assetTagCache.clear();
