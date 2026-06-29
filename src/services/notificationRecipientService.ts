@@ -25,7 +25,7 @@ import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { resolveTagScopesForUser } from "./regionScopeService.js";
 import { stripRegionPrefix } from "./notificationService.js";
-import type { DeliveryTarget } from "./notificationTypes.js";
+import { type DeliveryTarget, type ChannelType, CHANNEL_TYPES, CHANNEL_TRANSPORT } from "./notificationTypes.js";
 
 export interface RecipientUser {
   id: string;
@@ -99,47 +99,72 @@ export async function resolveRecipientUsers(recipientTags: string[] | undefined)
 }
 
 /**
- * Expand a fired notification's rule targets into concrete delivery rows.
- * Best-effort: returns the number of rows created. Never throws past a logged
- * failure (the caller wraps it, but we guard the DB write too).
+ * Expand a fired notification's rule targets into concrete delivery rows. Each
+ * target references a configured NotificationChannel by id; the channel's type
+ * decides the transport + how the target fans out:
+ *   - email (smtp/oauth_m365): one row per resolved recipient address
+ *     (tag-matched users' emails + explicit addresses).
+ *   - web_push: one row per recipient user's push subscription (keys snapshotted).
+ *   - webhook (slack/teams) / pushbullet: one row; the destination (URL/token)
+ *     lives on the channel and is read at send time, NOT duplicated here.
+ * Disabled or missing channels are skipped. Best-effort: returns the number of
+ * rows created.
  */
 export async function expandDeliveries(notificationId: string, targets: DeliveryTarget[] | undefined): Promise<number> {
   if (!targets || targets.length === 0) return 0;
 
-  const rows: Prisma.NotificationDeliveryCreateManyInput[] = [];
-  const seen = new Set<string>(); // dedupe channel|target within one notification
+  // Resolve the referenced channels once (type + enabled).
+  const ids = Array.from(new Set(targets.map((t) => t.channelId).filter(Boolean)));
+  if (ids.length === 0) return 0;
+  const channels = await prisma.notificationChannel.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, type: true, enabled: true },
+  });
+  const byId = new Map(channels.map((c) => [c.id, c]));
 
-  const add = (channel: string, target: string, meta?: Prisma.InputJsonValue) => {
-    const key = `${channel}|${target}`;
+  const rows: Prisma.NotificationDeliveryCreateManyInput[] = [];
+  const seen = new Set<string>(); // dedupe channelId|transport|target within one notification
+
+  const add = (channelId: string, transport: string, target: string, meta?: Prisma.InputJsonValue) => {
+    const key = `${channelId}|${transport}|${target}`;
     if (seen.has(key)) return;
     seen.add(key);
-    rows.push({ notificationId, channel, target, meta: meta ?? undefined });
+    rows.push({ notificationId, channelId, transport, target, meta: meta ?? undefined });
   };
 
   for (const t of targets) {
-    if (t.channel === "email") {
+    const channel = byId.get(t.channelId);
+    if (!channel || !channel.enabled || !isChannelType(channel.type)) continue;
+    const transport = CHANNEL_TRANSPORT[channel.type as ChannelType];
+
+    if (transport === "email") {
       const addresses = new Set<string>();
       for (const a of t.addresses ?? []) addresses.add(a.trim().toLowerCase());
       if (t.recipientTags?.length) {
         const users = await resolveRecipientUsers(t.recipientTags);
         for (const u of users) if (u.email) addresses.add(u.email.trim().toLowerCase());
       }
-      for (const addr of addresses) add("email", addr);
-    } else if (t.channel === "webhook") {
-      if (t.webhookUrl) add("webhook", t.webhookUrl, { kind: t.webhookKind ?? "generic" });
-    } else if (t.channel === "web_push") {
+      for (const addr of addresses) add(channel.id, "email", addr);
+    } else if (transport === "web_push") {
       const users = await resolveRecipientUsers(t.recipientTags);
       if (users.length > 0) {
         const subs = await prisma.pushSubscription.findMany({
           where: { userId: { in: users.map((u) => u.id) } },
           select: { endpoint: true, p256dh: true, auth: true },
         });
-        for (const s of subs) add("web_push", s.endpoint, { p256dh: s.p256dh, auth: s.auth });
+        for (const s of subs) add(channel.id, "web_push", s.endpoint, { p256dh: s.p256dh, auth: s.auth });
       }
+    } else {
+      // webhook (slack/teams) + pushbullet: one row, fixed destination on the channel.
+      add(channel.id, transport, "");
     }
   }
 
   if (rows.length === 0) return 0;
   await prisma.notificationDelivery.createMany({ data: rows });
   return rows.length;
+}
+
+function isChannelType(t: string): t is ChannelType {
+  return (CHANNEL_TYPES as readonly string[]).includes(t);
 }

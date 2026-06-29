@@ -18,6 +18,7 @@
         <h2>Notifications</h2>
         <div class="page-header-actions">
           <button class="btn btn-primary" id="btn-new-rule" style="display:none">+ New rule</button>
+          <button class="btn btn-primary" id="btn-add-channel" style="display:none">+ Add channel</button>
           <button class="btn btn-secondary" id="btn-enable-push" style="display:none" title="Receive notifications as desktop/mobile push">Enable push</button>
           <button class="btn btn-secondary" id="btn-refresh">Refresh</button>
         </div>
@@ -26,6 +27,7 @@
       <div class="page-tabs" id="notif-tabs">
         <button type="button" class="page-tab active" data-tab="view">View</button>
         <button type="button" class="page-tab" data-tab="manage" id="notif-tab-manage-btn" style="display:none">Manage</button>
+        <button type="button" class="page-tab" data-tab="delivery" id="notif-tab-delivery-btn" style="display:none">Delivery</button>
       </div>
 
       <!-- ─── View tab ─────────────────────────────────────────────────── -->
@@ -101,6 +103,16 @@
             </tbody>
           </table>
         </div>
+      </div>
+
+      <!-- ─── Delivery tab ─────────────────────────────────────────────────
+           Operator-managed list of outbound delivery channels (email/chat/push),
+           set up like the Integrations page. Rules reference these by id. -->
+      <div class="page-tab-panel" id="notif-tab-delivery">
+        <p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">
+          Configure where notifications are delivered. Add SMTP / Microsoft 365 email, Pushbullet, Slack, Microsoft Teams, or Web Push channels, then reference them from a rule's <strong>Notify</strong> section. In-app notifications (the View tab) are always on.
+        </p>
+        <div id="channels-list"><p class="empty-state">Loading...</p></div>
       </div>
     </main>
   </div>

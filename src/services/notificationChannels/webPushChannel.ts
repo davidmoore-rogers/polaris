@@ -1,9 +1,10 @@
 /**
  * src/services/notificationChannels/webPushChannel.ts
  *
- * Browser / PWA Web Push delivery via the `web-push` library, signed with the
- * server VAPID keypair (notificationWebPush config). The service worker
- * (public/sw.js) receives the push and calls showNotification.
+ * Browser / PWA Web Push delivery via the `web-push` library, signed with a
+ * VAPID keypair passed in by the caller (the web_push NotificationChannel's
+ * config). The service worker (public/sw.js) receives the push and calls
+ * showNotification.
  *
  * A 404/410 from the push service means the subscription is dead — sendWebPush
  * throws an error carrying `gone: true` so the delivery job prunes the
@@ -12,7 +13,12 @@
 
 import webpush from "web-push";
 import { AppError } from "../../utils/errors.js";
-import { getWebPushConfig } from "../notificationConfigService.js";
+
+export interface VapidConfig {
+  publicKey: string;
+  privateKey: string;
+  subject: string; // mailto: or https: contact, per the VAPID spec
+}
 
 export interface WebPushTarget {
   endpoint: string;
@@ -33,21 +39,14 @@ export interface WebPushError extends Error {
   statusCode?: number;
 }
 
-// Re-reads config each send (cheap; web_push deliveries are infrequent) so a
-// key regeneration / enable-toggle takes effect immediately.
-async function ensureVapid(): Promise<void> {
-  const cfg = await getWebPushConfig();
-  if (!cfg.enabled || !cfg.publicKey || !cfg.privateKey) {
-    throw new AppError(400, "Web push is not configured (generate VAPID keys and enable it)");
+export async function sendWebPush(vapid: VapidConfig, target: WebPushTarget, payload: WebPushPayload): Promise<void> {
+  if (!vapid.publicKey || !vapid.privateKey) {
+    throw new AppError(400, "Web Push channel has no VAPID keypair (generate one)");
   }
-  // subject must be a mailto: or https: URI per the VAPID spec; fall back to a
-  // placeholder mailto so a missing subject doesn't hard-fail every send.
-  const subject = cfg.subject && /^(mailto:|https:)/.test(cfg.subject) ? cfg.subject : "mailto:polaris@localhost";
-  webpush.setVapidDetails(subject, cfg.publicKey, cfg.privateKey);
-}
-
-export async function sendWebPush(target: WebPushTarget, payload: WebPushPayload): Promise<void> {
-  await ensureVapid();
+  // subject must be a mailto:/https: URI per the VAPID spec; fall back so a
+  // missing subject doesn't hard-fail every send.
+  const subject = vapid.subject && /^(mailto:|https:)/.test(vapid.subject) ? vapid.subject : "mailto:polaris@localhost";
+  webpush.setVapidDetails(subject, vapid.publicKey, vapid.privateKey);
   try {
     await webpush.sendNotification(
       { endpoint: target.endpoint, keys: { p256dh: target.p256dh, auth: target.auth } },
@@ -62,7 +61,7 @@ export async function sendWebPush(target: WebPushTarget, payload: WebPushPayload
   }
 }
 
-/** Generate a fresh VAPID keypair (Server Settings → Notifications → Web push). */
+/** Generate a fresh VAPID keypair (Delivery tab → Web Push channel). */
 export function generateVapidKeys(): { publicKey: string; privateKey: string } {
   return webpush.generateVAPIDKeys();
 }

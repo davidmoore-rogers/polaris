@@ -630,23 +630,24 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 
 ## Outbound multi-channel delivery (config + recipient routing + drain job)
 
-**What it is:** Fan one internal event out to external recipients over several channels (email / webhook / web-push), where channel config carries secrets, recipients are resolved from tags, and sends must retry without blocking the producer. The notification delivery layer is the reference.
+**What it is:** Fan one internal event out to external recipients over several channels, where an operator-managed **registry** of channel integrations carries the (masked) secrets, recipients are resolved from tags, and sends retry without blocking the producer. The notification delivery layer is the reference — modeled on the Integrations page rather than singleton config rows.
 
 **Canonical implementation:**
-- **Channel config** (masked secrets + env override): [src/services/notificationConfigService.ts](src/services/notificationConfigService.ts) — one `Setting` row per channel; `getMaskedX`/`saveX` for the API, raw `getXConfig` (env-merged) for senders.
-- **Channel senders** (one file per transport, each throws on failure): [src/services/notificationChannels/](src/services/notificationChannels/) — `emailChannel` (nodemailer SMTP + Graph sendMail), `webhookChannel` (slack/teams/generic body + `netGuard.assertOutboundHostAllowed` SSRF guard), `webPushChannel` (`web-push` VAPID; throws `gone=true` on 410/404).
-- **Recipient routing + queue rows**: [src/services/notificationRecipientService.ts](src/services/notificationRecipientService.ts) — `expandDeliveries(notificationId, targets)` snapshots recipients at fire time into `NotificationDelivery` rows.
-- **Drain job**: [src/services/notificationDeliveryService.ts](src/services/notificationDeliveryService.ts) `drainPendingDeliveries()` + [src/jobs/deliverNotifications.ts](src/jobs/deliverNotifications.ts) (15s tick).
-- **Config UI**: the Notifications tab cards in [public/js/server-settings.js](public/js/server-settings.js) (`loadNotificationChannelsTab`) + routes in [src/api/routes/serverSettings.ts](src/api/routes/serverSettings.ts).
+- **Channel registry + secrets**: [src/services/notificationChannelService.ts](src/services/notificationChannelService.ts) — CRUD over the `NotificationChannel` table; secrets (per the type's `secret:true` field defs in `notificationTypes.CHANNEL_TYPE_META`) masked on read / preserved on write; `getChannelRaw` (secrets intact) for senders. CRUD route: [src/api/routes/notificationChannels.ts](src/api/routes/notificationChannels.ts).
+- **Channel senders** (one file per transport, config passed in explicitly, each throws on failure): [src/services/notificationChannels/](src/services/notificationChannels/) — `emailChannel` (`sendSmtpEmail` nodemailer + `sendM365Email` Graph), `webhookChannel` (slack/teams/generic body + `netGuard.assertOutboundHostAllowed` SSRF guard), `pushbulletChannel`, `webPushChannel` (`web-push` VAPID; throws `gone=true` on 410/404).
+- **Recipient routing + queue rows**: [src/services/notificationRecipientService.ts](src/services/notificationRecipientService.ts) — `expandDeliveries(notificationId, targets)` resolves each target's channel and snapshots recipients at fire time into `NotificationDelivery` rows (referencing the channel by id).
+- **Drain job**: [src/services/notificationDeliveryService.ts](src/services/notificationDeliveryService.ts) `drainPendingDeliveries()` (reads each row's channel config at send time) + [src/jobs/deliverNotifications.ts](src/jobs/deliverNotifications.ts) (15s tick).
+- **Registry UI**: the Delivery tab list + add/edit/test modal in [public/js/notifications.js](public/js/notifications.js) (`loadChannelsTab` / `openChannelModal`) — driven by `CHANNEL_TYPE_META` field defs so a new type needs no bespoke UI.
 - **Web push client**: service worker [public/sw.js](public/sw.js) + enrollment helper [public/js/push.js](public/js/push.js) (`window.polarisPush`) + [public/manifest.json](public/manifest.json).
 
 **Key conventions:**
-- **Secrets:** masked on read, preserved-on-write when the client echoes the mask, env-overridable at send time (org Key-Vault pattern). Never return an unmasked secret.
-- **Queue, don't block:** the producer only writes `NotificationDelivery` rows (best-effort, wrapped so an expansion error never breaks the producer); a separate ≤3-retry drain job does the network I/O with bounded concurrency. A web-push 410/404 prunes the dead subscription.
+- **Registry, not singletons:** operators add as many channels as they want; a rule's `targets[]` reference channels by id. Secrets live ONLY on the channel row — delivery rows never copy them.
+- **Secrets:** masked on read, preserved-on-write when the client echoes the mask / sends blank. Never return an unmasked secret. (No env-override — multi-instance registry; secrets live in the DB like Integration/Credential.)
+- **Queue, don't block:** the producer only writes `NotificationDelivery` rows (best-effort, wrapped so an expansion error never breaks the producer); a separate ≤3-retry drain job does the network I/O with bounded concurrency. A missing channel = permanent fail; a web-push 410/404 prunes the dead subscription.
 - **SSRF:** any operator-supplied outbound URL goes through `netGuard.assertOutboundHostAllowed(host)` before the request.
 - **Tag routing:** recipient matching strips the `region:` prefix and lower-cases both sides so a target tag and a user's region scope compare the same way `scopeMatchesAsset` does.
 
-**When adding a new channel:** add it to `DELIVERY_CHANNELS` + the `deliveryTargetSchema` superRefine in `notificationTypes`, a sender file under `notificationChannels/`, a `dispatch()` arm in `notificationDeliveryService`, a builder editor arm in `openRuleBuilder` (notifications.js), and (if it needs config) a card + routes following the SMTP one.
+**When adding a new channel type:** extend `CHANNEL_TYPES` + `CHANNEL_TYPE_META` (field defs, mark secrets) + `CHANNEL_TRANSPORT` in `notificationTypes`, add a sender file under `notificationChannels/`, add a dispatch arm in `notificationDeliveryService` (and a fan-out arm in `notificationRecipientService` if it routes to recipients vs a fixed destination), and a `:id/test` arm. The Delivery-tab modal renders the new type's fields automatically from `CHANNEL_TYPE_META`.
 
 ---
 

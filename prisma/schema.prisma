@@ -2854,14 +2854,41 @@ model Notification {
 // rule's targets when it fired (not when the job runs). In-app delivery is NOT
 // represented here (it's the Notification row itself). Cascade-deleted with
 // the Notification.
+// An operator-configured outbound delivery integration (registry, like
+// Integration but for notifications). One row per configured destination;
+// operators add as many as they want from the Notifications → Delivery tab.
+// `type` selects the transport + config shape; secrets in `config` are masked
+// on read and preserved on write (notificationChannelService). web_push is a
+// singleton (one server VAPID keypair) — the service enforces a single row.
+model NotificationChannel {
+  id        String   @id @default(uuid())
+  name      String
+  type      String // smtp | oauth_m365 | pushbullet | slack | teams | web_push
+  enabled   Boolean  @default(true)
+  config    Json     @default("{}") // type-specific; secrets masked at the API
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deliveries NotificationDelivery[]
+
+  @@index([type])
+  @@map("notification_channels")
+}
+
 model NotificationDelivery {
   id             String       @id @default(uuid())
   notificationId String
   notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
-  channel        String // email | webhook | web_push
-  target         String       @db.Text // email address / webhook URL / push endpoint
-  // Channel-specific payload snapshot: webhook → { kind }, web_push →
-  // { p256dh, auth }, email → { via? } (smtp|m365). Null for plain targets.
+  // The configured channel this delivery goes through. Nullable + SetNull so a
+  // channel can be deleted without orphaning history; a NULL channelId on a
+  // pending row is treated as a permanent failure by the drain (channel gone).
+  channelId      String?
+  channel        NotificationChannel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  transport      String // email | webhook | web_push | pushbullet (dispatch routing)
+  target         String       @db.Text // email address / push endpoint; "" for fixed-destination channels (URL/token live on the channel)
+  // Per-recipient payload snapshot: webhook → { kind }, web_push →
+  // { p256dh, auth }. Destination secrets stay on the channel, NOT here.
   meta           Json?
   status         String       @default("pending") // pending | sent | failed
   attempts       Int          @default(0)
@@ -2871,6 +2898,7 @@ model NotificationDelivery {
 
   @@index([status])
   @@index([notificationId])
+  @@index([channelId])
   @@map("notification_deliveries")
 }
 

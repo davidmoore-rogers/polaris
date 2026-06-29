@@ -1,24 +1,18 @@
 /**
  * src/services/notificationChannels/emailChannel.ts
  *
- * Outbound email for notification delivery. Two transports:
- *   - SMTP via nodemailer (notificationSmtp config)
- *   - Microsoft 365 / Graph sendMail via OAuth client-credentials
- *     (notificationM365 config; needs the Mail.Send application permission)
+ * Outbound email senders, parameterized by an explicit channel config (the
+ * NotificationChannel registry passes the resolved config in — no global
+ * Setting reads). Two transports behind the `email` family:
+ *   - SMTP via nodemailer (smtp channel type)
+ *   - Microsoft 365 / Graph sendMail via OAuth client-credentials (oauth_m365;
+ *     needs the Mail.Send application permission)
  *
- * sendEmail() picks SMTP when enabled+configured, else M365. A per-delivery
- * `via` (in the delivery meta) can force one. Throws on failure so the
- * delivery job records `failed` + retries.
+ * Throws on failure so the delivery drain records `failed` + retries.
  */
 
 import nodemailer from "nodemailer";
 import { AppError } from "../../utils/errors.js";
-import {
-  getSmtpConfig,
-  getM365Config,
-  type SmtpConfig,
-  type M365Config,
-} from "../notificationConfigService.js";
 
 export interface EmailMessage {
   to: string;
@@ -27,10 +21,27 @@ export interface EmailMessage {
   html?: string;
 }
 
-async function sendViaSmtp(cfg: SmtpConfig, msg: EmailMessage): Promise<void> {
+export interface SmtpConfig {
+  host: string;
+  port: number;
+  security: "none" | "starttls" | "ssl";
+  username: string;
+  password: string;
+  from: string;
+}
+
+export interface M365Config {
+  tenantId: string;
+  clientId: string;
+  clientSecret: string;
+  fromUserId: string;
+}
+
+export async function sendSmtpEmail(cfg: SmtpConfig, msg: EmailMessage): Promise<void> {
+  if (!cfg.host) throw new AppError(400, "SMTP channel is missing a host");
   const transport = nodemailer.createTransport({
     host: cfg.host,
-    port: cfg.port,
+    port: Number(cfg.port) || 587,
     secure: cfg.security === "ssl", // 465 implicit TLS; 587 upgrades via STARTTLS
     requireTLS: cfg.security === "starttls",
     auth: cfg.username ? { user: cfg.username, pass: cfg.password } : undefined,
@@ -44,8 +55,8 @@ async function sendViaSmtp(cfg: SmtpConfig, msg: EmailMessage): Promise<void> {
   });
 }
 
-// Minimal Graph client-credentials token fetch (independent of entraIdService's
-// EntraIdConfig so the notification M365 config stays self-contained).
+// Minimal Graph client-credentials token fetch (self-contained so the channel
+// config stays independent of entraIdService's EntraIdConfig type).
 async function m365Token(cfg: M365Config): Promise<string> {
   const url = `https://login.microsoftonline.com/${encodeURIComponent(cfg.tenantId)}/oauth2/v2.0/token`;
   const body = new URLSearchParams({
@@ -80,7 +91,8 @@ async function m365Token(cfg: M365Config): Promise<string> {
   }
 }
 
-async function sendViaM365(cfg: M365Config, msg: EmailMessage): Promise<void> {
+export async function sendM365Email(cfg: M365Config, msg: EmailMessage): Promise<void> {
+  if (!cfg.tenantId || !cfg.clientId || !cfg.fromUserId) throw new AppError(400, "Microsoft 365 channel is missing tenant/client/from");
   const token = await m365Token(cfg);
   const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(cfg.fromUserId)}/sendMail`;
   const controller = new AbortController();
@@ -111,22 +123,4 @@ async function sendViaM365(cfg: M365Config, msg: EmailMessage): Promise<void> {
   } finally {
     clearTimeout(timeout);
   }
-}
-
-/** Send one email via whichever email transport is configured (or `via`). */
-export async function sendEmail(msg: EmailMessage, via?: "smtp" | "m365"): Promise<void> {
-  const [smtp, m365] = await Promise.all([getSmtpConfig(), getM365Config()]);
-  const smtpReady = smtp.enabled && !!smtp.host;
-  const m365Ready = m365.enabled && !!m365.tenantId && !!m365.clientId && !!m365.fromUserId;
-
-  const choice = via ?? (smtpReady ? "smtp" : m365Ready ? "m365" : null);
-  if (choice === "smtp") {
-    if (!smtpReady) throw new AppError(400, "SMTP is not configured");
-    return sendViaSmtp(smtp, msg);
-  }
-  if (choice === "m365") {
-    if (!m365Ready) throw new AppError(400, "Microsoft 365 is not configured");
-    return sendViaM365(m365, msg);
-  }
-  throw new AppError(400, "No email channel is configured (enable SMTP or Microsoft 365)");
 }

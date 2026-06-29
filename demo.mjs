@@ -686,8 +686,21 @@ const NOTIFICATION_SCHEMA = {
   clearBehaviors: ["manual", "auto", "timed"],
   comparators: [">", ">=", "<", "<=", "==", "!="],
   aggregations: ["latest", "avg", "min", "max"],
-  deliveryChannels: ["email", "webhook", "web_push"],
-  webhookKinds: ["generic", "slack", "teams"],
+  recipientRoutedTypes: ["smtp", "oauth_m365", "web_push"],
+  channelTypes: {
+    smtp: { label: "Email — SMTP", transport: "email", fields: [
+      { key: "host", label: "SMTP host", kind: "text" }, { key: "port", label: "Port", kind: "number" },
+      { key: "security", label: "Security", kind: "select", options: ["none", "starttls", "ssl"] },
+      { key: "username", label: "Username", kind: "text" }, { key: "password", label: "Password", kind: "password", secret: true },
+      { key: "from", label: "From address", kind: "text" } ] },
+    oauth_m365: { label: "Email — Microsoft 365 (OAuth)", transport: "email", fields: [
+      { key: "tenantId", label: "Tenant ID", kind: "text" }, { key: "clientId", label: "Client ID", kind: "text" },
+      { key: "clientSecret", label: "Client secret", kind: "password", secret: true }, { key: "fromUserId", label: "Send-as user", kind: "text" } ] },
+    pushbullet: { label: "Pushbullet", transport: "pushbullet", fields: [{ key: "accessToken", label: "Access token", kind: "password", secret: true }] },
+    slack: { label: "Slack", transport: "webhook", fields: [{ key: "webhookUrl", label: "Incoming webhook URL", kind: "password", secret: true }] },
+    teams: { label: "Microsoft Teams", transport: "webhook", fields: [{ key: "webhookUrl", label: "Incoming webhook URL", kind: "password", secret: true }] },
+    web_push: { label: "Web Push (browser & mobile)", transport: "web_push", singleton: true, fields: [{ key: "subject", label: "Contact subject", kind: "text" }] },
+  },
   triggerTypes: [
     { type: "asset_metric", label: "Asset metric threshold", scoped: true, metrics: ["cpuPct", "memPct", "responseTimeMs", "hwSensorValue", "storageUsedPct", "ifInBps", "sdwanLatencyMs"] },
     { type: "asset_state", label: "Asset state", scoped: true, fields: ["monitorStatus", "status", "consecutiveFailures", "quarantined", "ifOperStatus", "ipsecStatus", "sdwanRuleStatus"] },
@@ -696,16 +709,26 @@ const NOTIFICATION_SCHEMA = {
     { type: "change", label: "Change detection", scoped: true, changeTypes: ["lldp_neighbor_added", "lldp_neighbor_removed", "process_started", "process_stopped", "sdwan_failover", "mclag_peer_lost"] },
   ],
 };
+// Delivery channel registry (Notifications → Delivery tab). Secrets masked.
+let NOTIFICATION_CHANNELS = [
+  { id: "nc-1", name: "NOC email (SMTP)", type: "smtp", transport: "email", enabled: true,
+    config: { host: "smtp.example.com", port: 587, security: "starttls", username: "polaris", password: "••••••••", passwordSet: true, from: "polaris@example.com" },
+    createdBy: "admin", createdAt: "2026-06-20T08:00:00.000Z", updatedAt: "2026-06-20T08:00:00.000Z" },
+  { id: "nc-2", name: "NOC Slack", type: "slack", transport: "webhook", enabled: true,
+    config: { webhookUrl: "••••••••", webhookUrlSet: true },
+    createdBy: "admin", createdAt: "2026-06-20T08:00:00.000Z", updatedAt: "2026-06-20T08:00:00.000Z" },
+];
+let _ncSeq = 10;
 let NOTIFICATION_RULES = [
   { id: "nr-1", name: "Polaris host memory high", description: null, enabled: true, severity: "error",
     trigger: { type: "host_metric", metric: "memUsedPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 85, forDurationSec: 0 },
     scope: {}, clearBehavior: "auto", clearAfterSec: null, cooldownSec: null, messageTemplate: null, channels: ["in_app"],
-    targets: [{ channel: "email", recipientTags: ["region:Atlanta"], addresses: ["oncall@example.com"] }],
+    targets: [{ channelId: "nc-1", recipientTags: ["region:Atlanta"], addresses: ["oncall@example.com"] }],
     createdBy: "admin", createdAt: "2026-06-20T08:00:00.000Z", updatedAt: "2026-06-20T08:00:00.000Z" },
   { id: "nr-2", name: "Server CPU high", description: null, enabled: true, severity: "warning",
     trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 70, forDurationSec: 0 },
     scope: { assetTypes: ["server"] }, clearBehavior: "manual", clearAfterSec: null, cooldownSec: null, messageTemplate: "{asset} CPU at {value}%", channels: ["in_app"],
-    targets: [{ channel: "webhook", webhookUrl: "https://hooks.slack.com/services/XXX", webhookKind: "slack" }],
+    targets: [{ channelId: "nc-2" }],
     createdBy: "admin", createdAt: "2026-06-20T08:00:00.000Z", updatedAt: "2026-06-20T08:00:00.000Z" },
   { id: "nr-3", name: "Monitor status changed", description: null, enabled: true, severity: "warning",
     trigger: { type: "event", actionPattern: "monitor.status_changed" },
@@ -3811,6 +3834,54 @@ async function routeAPI(method, path, params, body, res, req) {
     NOTIFICATIONS.forEach((n) => { if (ids.includes(n.id) && !n.cleared) { n.cleared = true; n.clearedBy = sessionUser ? sessionUser.username : "demo"; n.clearedAt = new Date().toISOString(); count++; } });
     return json(res, { cleared: count });
   }
+  // ── Notification delivery channels (registry) ──
+  function _maskChannel(c) {
+    var meta = (NOTIFICATION_SCHEMA.channelTypes || {})[c.type];
+    var secretKeys = meta ? meta.fields.filter((f) => f.secret).map((f) => f.key) : [];
+    var config = Object.assign({}, c.config || {});
+    secretKeys.forEach((k) => { var set = !!config[k]; config[k] = set ? "••••••••" : ""; config[k + "Set"] = set; });
+    if (c.type === "web_push") { var pk = !!config.privateKey; delete config.privateKey; config.privateKeySet = pk; }
+    return Object.assign({}, c, { config });
+  }
+  if (path === "/api/v1/notification-channels" && method === "GET") {
+    return json(res, { channels: NOTIFICATION_CHANNELS.map(_maskChannel) });
+  }
+  if (path === "/api/v1/notification-channels" && method === "POST") {
+    const b = body || {};
+    const transport = ((NOTIFICATION_SCHEMA.channelTypes || {})[b.type] || {}).transport || "email";
+    const c = { id: "nc-" + (++_ncSeq), name: b.name, type: b.type, transport, enabled: b.enabled !== false, config: b.config || {}, createdBy: sessionUser ? sessionUser.username : "demo", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    NOTIFICATION_CHANNELS.push(c);
+    return json(res, _maskChannel(c), 201);
+  }
+  {
+    const m = path.match(/^\/api\/v1\/notification-channels\/([\w-]+)$/);
+    if (m && method === "PUT") {
+      const c = NOTIFICATION_CHANNELS.find((x) => x.id === m[1]);
+      if (!c) return json(res, { error: "Notification channel not found" }, 404);
+      const b = body || {};
+      c.name = b.name != null ? b.name : c.name;
+      c.enabled = b.enabled !== false;
+      if (b.config) Object.keys(b.config).forEach((k) => { if (b.config[k] !== "••••••••" && b.config[k] !== "") c.config[k] = b.config[k]; });
+      c.updatedAt = new Date().toISOString();
+      return json(res, _maskChannel(c));
+    }
+    if (m && method === "DELETE") {
+      NOTIFICATION_CHANNELS = NOTIFICATION_CHANNELS.filter((x) => x.id !== m[1]);
+      return json(res, null, 204);
+    }
+  }
+  {
+    const m = path.match(/^\/api\/v1\/notification-channels\/([\w-]+)\/test$/);
+    if (m && method === "POST") return json(res, { ok: true, message: "Test sent (demo — no real delivery)" });
+  }
+  {
+    const m = path.match(/^\/api\/v1\/notification-channels\/([\w-]+)\/generate-vapid$/);
+    if (m && method === "POST") {
+      const c = NOTIFICATION_CHANNELS.find((x) => x.id === m[1]);
+      if (c) { c.config = Object.assign({}, c.config, { publicKey: "demo-vapid-public-key", privateKey: "demo-vapid-private-key" }); }
+      return json(res, { publicKey: "demo-vapid-public-key", privateKeySet: true });
+    }
+  }
   if (path === "/api/v1/notification-rules" && method === "GET") {
     return json(res, { rules: NOTIFICATION_RULES });
   }
@@ -3827,7 +3898,7 @@ async function routeAPI(method, path, params, body, res, req) {
   }
   if (path === "/api/v1/notification-rules" && method === "POST") {
     const r = body || {};
-    const rule = { id: "nr-" + (++_notifIdSeq), name: r.name, description: r.description || null, enabled: r.enabled !== false, severity: r.severity || "warning", trigger: r.trigger, scope: r.scope || {}, clearBehavior: r.clearBehavior || "manual", clearAfterSec: r.clearAfterSec || null, cooldownSec: r.cooldownSec || null, messageTemplate: r.messageTemplate || null, channels: ["in_app"], createdBy: sessionUser ? sessionUser.username : "demo", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const rule = { id: "nr-" + (++_notifIdSeq), name: r.name, description: r.description || null, enabled: r.enabled !== false, severity: r.severity || "warning", trigger: r.trigger, scope: r.scope || {}, clearBehavior: r.clearBehavior || "manual", clearAfterSec: r.clearAfterSec || null, cooldownSec: r.cooldownSec || null, messageTemplate: r.messageTemplate || null, channels: ["in_app"], targets: r.targets || [], createdBy: sessionUser ? sessionUser.username : "demo", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     NOTIFICATION_RULES.push(rule);
     return json(res, { rule }, 201);
   }
@@ -3837,7 +3908,7 @@ async function routeAPI(method, path, params, body, res, req) {
       const idx = NOTIFICATION_RULES.findIndex((r) => r.id === m[1]);
       if (idx < 0) return json(res, { error: "Notification rule not found" }, 404);
       const r = body || {};
-      NOTIFICATION_RULES[idx] = Object.assign({}, NOTIFICATION_RULES[idx], { name: r.name, description: r.description || null, enabled: r.enabled !== false, severity: r.severity, trigger: r.trigger, scope: r.scope || {}, clearBehavior: r.clearBehavior, clearAfterSec: r.clearAfterSec || null, cooldownSec: r.cooldownSec || null, messageTemplate: r.messageTemplate || null, updatedAt: new Date().toISOString() });
+      NOTIFICATION_RULES[idx] = Object.assign({}, NOTIFICATION_RULES[idx], { name: r.name, description: r.description || null, enabled: r.enabled !== false, severity: r.severity, trigger: r.trigger, scope: r.scope || {}, clearBehavior: r.clearBehavior, clearAfterSec: r.clearAfterSec || null, cooldownSec: r.cooldownSec || null, messageTemplate: r.messageTemplate || null, targets: r.targets || [], updatedAt: new Date().toISOString() });
       return json(res, { rule: NOTIFICATION_RULES[idx] });
     }
     if (m && method === "DELETE") {

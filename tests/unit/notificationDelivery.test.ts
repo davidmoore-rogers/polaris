@@ -12,31 +12,18 @@ import { deliveryTargetSchema } from "../../src/services/notificationTypes.js";
 import { formatBody, type WebhookPayload } from "../../src/services/notificationChannels/webhookChannel.js";
 
 describe("deliveryTargetSchema", () => {
-  it("accepts an email target with explicit addresses", () => {
-    const r = deliveryTargetSchema.safeParse({ channel: "email", addresses: ["a@example.com"] });
-    expect(r.success).toBe(true);
+  it("accepts a target referencing a channel by id", () => {
+    expect(deliveryTargetSchema.safeParse({ channelId: "ch-1" }).success).toBe(true);
   });
-  it("accepts an email target routed by tags", () => {
-    const r = deliveryTargetSchema.safeParse({ channel: "email", recipientTags: ["region:Atlanta"] });
-    expect(r.success).toBe(true);
+  it("accepts recipient routing (tags + explicit addresses)", () => {
+    expect(deliveryTargetSchema.safeParse({ channelId: "ch-1", recipientTags: ["region:Atlanta"], addresses: ["a@example.com"] }).success).toBe(true);
   });
-  it("rejects an email target with neither addresses nor tags", () => {
-    const r = deliveryTargetSchema.safeParse({ channel: "email" });
-    expect(r.success).toBe(false);
-  });
-  it("requires a webhookUrl for a webhook target", () => {
-    expect(deliveryTargetSchema.safeParse({ channel: "webhook" }).success).toBe(false);
-    expect(deliveryTargetSchema.safeParse({ channel: "webhook", webhookUrl: "https://hooks.example.com/x" }).success).toBe(true);
-  });
-  it("rejects a non-URL webhookUrl", () => {
-    expect(deliveryTargetSchema.safeParse({ channel: "webhook", webhookUrl: "not-a-url" }).success).toBe(false);
-  });
-  it("requires recipientTags for a web_push target", () => {
-    expect(deliveryTargetSchema.safeParse({ channel: "web_push" }).success).toBe(false);
-    expect(deliveryTargetSchema.safeParse({ channel: "web_push", recipientTags: ["region:Atlanta"] }).success).toBe(true);
+  it("requires a channelId", () => {
+    expect(deliveryTargetSchema.safeParse({ recipientTags: ["x"] }).success).toBe(false);
+    expect(deliveryTargetSchema.safeParse({ channelId: "" }).success).toBe(false);
   });
   it("rejects an invalid email address", () => {
-    expect(deliveryTargetSchema.safeParse({ channel: "email", addresses: ["nope"] }).success).toBe(false);
+    expect(deliveryTargetSchema.safeParse({ channelId: "ch-1", addresses: ["nope"] }).success).toBe(false);
   });
 });
 

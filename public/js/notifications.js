@@ -15,6 +15,7 @@ var _rulesSF = null;
 var _rulesLayout = null;
 var _ruleSchema = null;
 var _ruleTagList = null;  // cached distinct asset tags for the scope picker
+var _ruleChannels = null; // cached configured delivery channels (rule-builder picker)
 
 (function () {
   // Permissions resolve asynchronously via /auth/me (userReady). Computing
@@ -33,12 +34,19 @@ var _ruleTagList = null;  // cached distinct asset tags for the scope picker
 
     var mb = document.getElementById("notif-tab-manage-btn");
     if (mb) mb.style.display = canManage ? "" : "none";
+    var db = document.getElementById("notif-tab-delivery-btn");
+    if (db) db.style.display = canManage ? "" : "none";
+    var activeKey = (document.querySelector("#notif-tabs .page-tab.active") || {}).getAttribute
+      ? document.querySelector("#notif-tabs .page-tab.active").getAttribute("data-tab") : "view";
     var nr = document.getElementById("btn-new-rule");
     if (nr) {
-      var activeTab = document.querySelector("#notif-tabs .page-tab.active");
-      var onManage = activeTab && activeTab.getAttribute("data-tab") === "manage";
-      nr.style.display = canEditRules && onManage ? "" : "none";
+      nr.style.display = canEditRules && activeKey === "manage" ? "" : "none";
       if (canEditRules && !nr._wired) { nr._wired = true; nr.addEventListener("click", function () { openRuleBuilder(null); }); }
+    }
+    var ac = document.getElementById("btn-add-channel");
+    if (ac) {
+      ac.style.display = canEditRules && activeKey === "delivery" ? "" : "none";
+      if (canEditRules && !ac._wired) { ac._wired = true; ac.addEventListener("click", function () { openChannelModal(null); }); }
     }
     var ackBtn = document.getElementById("notif-bulk-ack");
     if (ackBtn) {
@@ -98,10 +106,13 @@ var _ruleTagList = null;  // cached distinct asset tags for the scope picker
       btn.classList.add("active");
       var panel = document.getElementById("notif-tab-" + key);
       if (panel) panel.classList.add("active");
-      // The "New rule" button only belongs on the Manage tab.
+      // Header buttons are tab-specific: New rule on Manage, Add channel on Delivery.
       var nrBtn = document.getElementById("btn-new-rule");
       if (nrBtn && canEditRules) nrBtn.style.display = key === "manage" ? "" : "none";
+      var acBtn = document.getElementById("btn-add-channel");
+      if (acBtn && canEditRules) acBtn.style.display = key === "delivery" ? "" : "none";
       if (key === "manage" && !_rulesSF) initRulesTab();
+      if (key === "delivery") loadChannelsTab();
     });
   });
 
@@ -517,6 +528,9 @@ async function openRuleBuilder(existing) {
     try { var _td = await api.assets.tags(); _ruleTagList = (_td && _td.tags) || []; }
     catch (_e) { _ruleTagList = []; }
   }
+  // Always refresh channels (operator may have just added one in the Delivery tab).
+  try { var _cd = await api.notificationChannels.list(); _ruleChannels = (_cd && _cd.channels) || []; }
+  catch (_e) { _ruleChannels = _ruleChannels || []; }
   var s = _ruleSchema;
   var r = existing || {};
   var trig = r.trigger || { type: "asset_metric" };
@@ -727,8 +741,15 @@ async function openRuleBuilder(existing) {
     return sc;
   }
 
-  // ─── Notify (delivery targets) editor ──────────────────────────────────
-  var WEBHOOK_KINDS = (s.webhookKinds || ["generic", "slack", "teams"]);
+  // ─── Notify (delivery targets) editor — pick configured channels ─────────
+  var channels = _ruleChannels || [];
+  var routedTypes = s.recipientRoutedTypes || ["smtp", "oauth_m365", "web_push"];
+  var channelMeta = s.channelTypes || {};
+  function chanById(id) { return channels.find(function (c) { return c.id === id; }); }
+  function chanTypeLabel(type) { return (channelMeta[type] && channelMeta[type].label) || type; }
+  function isRouted(type) { return routedTypes.indexOf(type) !== -1; }
+  function isEmailType(type) { return type === "smtp" || type === "oauth_m365"; }
+
   function tagMultiSelect(selected) {
     var sel = new Set(selected || []);
     var opts = (_ruleTagList || []).map(function (tg) {
@@ -736,40 +757,38 @@ async function openRuleBuilder(existing) {
     }).join("");
     return '<select multiple class="tg-recipient-tags" size="4" style="width:100%">' + opts + '</select>';
   }
+  function channelOptions(selId) {
+    if (channels.length === 0) return '<option value="">No channels configured</option>';
+    return channels.map(function (c) {
+      var lbl = c.name + " — " + chanTypeLabel(c.type) + (c.enabled ? "" : " (disabled)");
+      return '<option value="' + escapeHtml(c.id) + '"' + (c.id === selId ? " selected" : "") + '>' + escapeHtml(lbl) + '</option>';
+    }).join("");
+  }
   function targetRowHtml(t) {
-    t = t || { channel: "email" };
-    var ch = t.channel || "email";
-    var channelSel = '<select class="tg-channel">' +
-      ['email', 'webhook', 'web_push'].map(function (c) {
-        var lbl = c === "web_push" ? "Web push" : c.charAt(0).toUpperCase() + c.slice(1);
-        return '<option value="' + c + '"' + (c === ch ? " selected" : "") + '>' + lbl + '</option>';
-      }).join("") + '</select>';
+    t = t || {};
     return '<div class="tg-row" style="border:1px solid var(--color-border);border-radius:6px;padding:0.6rem;margin-bottom:6px">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
-        '<label style="margin:0;font-size:0.8rem">Channel</label>' + channelSel +
-        '<button type="button" class="btn btn-sm btn-danger tg-remove" style="margin-left:auto">Remove</button>' +
+        '<label style="margin:0;font-size:0.8rem">Channel</label>' +
+        '<select class="tg-channel" style="flex:1">' + channelOptions(t.channelId) + '</select>' +
+        '<button type="button" class="btn btn-sm btn-danger tg-remove">Remove</button>' +
       '</div>' +
       '<div class="tg-fields"></div>' +
     '</div>';
   }
   function renderTargetFields(row, t) {
     t = t || {};
-    var ch = row.querySelector(".tg-channel").value;
     var box = row.querySelector(".tg-fields");
-    if (ch === "email") {
-      box.innerHTML =
-        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Recipient tags (route to matching users)</label>' + tagMultiSelect(t.recipientTags) + '</div>' +
-        '<div class="form-group" style="margin:0"><label style="font-size:0.8rem">Explicit addresses (comma-separated)</label><input type="text" class="tg-addresses" value="' + escapeHtml((t.addresses || []).join(", ")) + '" placeholder="oncall@example.com, noc@example.com"></div>';
-    } else if (ch === "webhook") {
-      box.innerHTML =
-        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Webhook URL</label><input type="text" class="tg-webhook-url" value="' + escapeHtml(t.webhookUrl || "") + '" placeholder="https://hooks.slack.com/…"></div>' +
-        '<div class="form-group" style="margin:0"><label style="font-size:0.8rem">Format</label><select class="tg-webhook-kind">' +
-          WEBHOOK_KINDS.map(function (k) { return '<option value="' + k + '"' + (k === (t.webhookKind || "generic") ? " selected" : "") + '>' + escapeHtml(k) + '</option>'; }).join("") +
-        '</select></div>';
-    } else {
-      box.innerHTML =
-        '<div class="form-group" style="margin:0"><label style="font-size:0.8rem">Recipient tags (route to subscribed users)</label>' + tagMultiSelect(t.recipientTags) + '</div>';
+    var ch = chanById(row.querySelector(".tg-channel").value);
+    if (!ch) { box.innerHTML = '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0">Add a channel in the Delivery tab first.</p>'; return; }
+    if (!isRouted(ch.type)) {
+      box.innerHTML = '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0">Posts to this channel’s configured destination.</p>';
+      return;
     }
+    var html = '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Recipient tags (route to matching users)</label>' + tagMultiSelect(t.recipientTags) + '</div>';
+    if (isEmailType(ch.type)) {
+      html += '<div class="form-group" style="margin:0"><label style="font-size:0.8rem">Explicit addresses (comma-separated)</label><input type="text" class="tg-addresses" value="' + escapeHtml((t.addresses || []).join(", ")) + '" placeholder="oncall@example.com, noc@example.com"></div>';
+    }
+    box.innerHTML = html;
   }
   function wireTargetRow(row, t) {
     renderTargetFields(row, t);
@@ -787,27 +806,28 @@ async function openRuleBuilder(existing) {
   function collectTargets() {
     var out = [];
     document.querySelectorAll("#rule-targets .tg-row").forEach(function (row) {
-      var ch = row.querySelector(".tg-channel").value;
-      var t = { channel: ch };
+      var channelId = row.querySelector(".tg-channel").value;
+      if (!channelId) return;
+      var t = { channelId: channelId };
       var tagSel = row.querySelector(".tg-recipient-tags");
       if (tagSel) {
         var tags = Array.from(tagSel.selectedOptions).map(function (o) { return o.value; });
         if (tags.length) t.recipientTags = tags;
       }
-      if (ch === "email") {
-        var addrs = (row.querySelector(".tg-addresses").value || "").split(",").map(function (a) { return a.trim(); }).filter(Boolean);
+      var addrEl = row.querySelector(".tg-addresses");
+      if (addrEl) {
+        var addrs = (addrEl.value || "").split(",").map(function (a) { return a.trim(); }).filter(Boolean);
         if (addrs.length) t.addresses = addrs;
-      } else if (ch === "webhook") {
-        var url = (row.querySelector(".tg-webhook-url").value || "").trim();
-        if (url) t.webhookUrl = url;
-        t.webhookKind = row.querySelector(".tg-webhook-kind").value;
       }
       out.push(t);
     });
     return out;
   }
   (r.targets || []).forEach(addTargetRow);
-  document.getElementById("rule-add-target").addEventListener("click", function () { addTargetRow({ channel: "email" }); });
+  document.getElementById("rule-add-target").addEventListener("click", function () {
+    if (channels.length === 0) { showToast("Add a delivery channel first (Delivery tab)", "info"); return; }
+    addTargetRow({ channelId: channels[0].id });
+  });
 
   function collectRule() {
     var rule = {
@@ -884,6 +904,195 @@ async function openRuleBuilder(existing) {
       closeModal();
       showToast(existing ? "Rule saved" : "Rule created", "success");
       if (window._reloadRules) window._reloadRules();
+    } catch (err) { this.disabled = false; showToast(err.message || "Save failed", "error"); }
+  });
+}
+
+// ═══════════════════════════ Delivery (channels) tab ════════════════════════
+// Operator-managed list of outbound delivery channels, set up like the
+// Integrations page. Backed by /notification-channels; secrets masked on read.
+
+async function loadChannelsTab() {
+  var container = document.getElementById("channels-list");
+  if (!container) return;
+  if (!_ruleSchema) { try { _ruleSchema = await api.notificationRules.schema(); } catch (_e) { /* labels degrade to raw type */ } }
+  container.innerHTML = '<p class="empty-state">Loading…</p>';
+  try {
+    var resp = await api.notificationChannels.list();
+    _ruleChannels = (resp && resp.channels) || [];
+    renderChannelsList(_ruleChannels);
+  } catch (err) {
+    container.innerHTML = '<p class="empty-state">Error: ' + escapeHtml(err.message || "load failed") + '</p>';
+  }
+}
+
+function _chanTypeMeta() { return (_ruleSchema && _ruleSchema.channelTypes) || {}; }
+function channelTypeLabel(type) { var m = _chanTypeMeta()[type]; return (m && m.label) || type; }
+
+function renderChannelsList(channels) {
+  var container = document.getElementById("channels-list");
+  if (!container) return;
+  var canEdit = permAtLeast("notificationManagement", "fullwrite");
+  if (!channels.length) {
+    container.innerHTML = '<div class="settings-card"><p class="empty-state">No delivery channels configured yet.' + (canEdit ? ' Click the “+ Add channel” button to add one.' : '') + '</p></div>';
+    return;
+  }
+  container.innerHTML = channels.map(function (c) {
+    var actions = canEdit
+      ? '<button class="btn btn-sm btn-secondary ch-test" data-id="' + c.id + '">Test</button> ' +
+        '<button class="btn btn-sm btn-secondary ch-edit" data-id="' + c.id + '">Edit</button> ' +
+        '<button class="btn btn-sm btn-danger ch-del" data-id="' + c.id + '">Delete</button>'
+      : '';
+    var dot = c.enabled ? '<span style="color:var(--color-success)" title="Enabled">●</span>' : '<span style="color:var(--color-text-tertiary)" title="Disabled">○</span>';
+    return '<div class="settings-card" style="display:flex;align-items:center;gap:12px">' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-weight:600">' + dot + ' ' + escapeHtml(c.name) + '</div>' +
+        '<div style="font-size:0.82rem;color:var(--color-text-tertiary)">' + escapeHtml(channelTypeLabel(c.type)) + (c.enabled ? '' : ' · disabled') + '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:6px;flex-shrink:0">' + actions + '</div>' +
+    '</div>';
+  }).join("");
+  if (!canEdit) return;
+  container.querySelectorAll(".ch-edit").forEach(function (b) { b.addEventListener("click", function () { openChannelModal(channels.find(function (x) { return x.id === b.dataset.id; })); }); });
+  container.querySelectorAll(".ch-del").forEach(function (b) { b.addEventListener("click", function () { deleteChannel(channels.find(function (x) { return x.id === b.dataset.id; })); }); });
+  container.querySelectorAll(".ch-test").forEach(function (b) { b.addEventListener("click", function () { testChannel(channels.find(function (x) { return x.id === b.dataset.id; }), b); }); });
+}
+
+async function deleteChannel(c) {
+  if (!c) return;
+  if (!window.confirm('Delete delivery channel "' + c.name + '"? Rules referencing it will stop delivering through it.')) return;
+  try { await api.notificationChannels.delete(c.id); showToast("Channel deleted", "success"); loadChannelsTab(); }
+  catch (err) { showToast(err.message || "Delete failed", "error"); }
+}
+
+async function testChannel(c, btn) {
+  if (!c) return;
+  var body = {};
+  if (c.type === "smtp" || c.type === "oauth_m365") {
+    var to = window.prompt("Send a test email to:", "");
+    if (!to) return;
+    body.to = to.trim();
+  } else if (c.type === "web_push") {
+    showToast("Test web push by enabling it on a device (Enable push button)", "info");
+    return;
+  }
+  if (btn) btn.disabled = true;
+  try { var r = await api.notificationChannels.test(c.id, body); showToast(r.message || "Test sent", "success"); }
+  catch (err) { showToast(err.message || "Test failed", "error"); }
+  if (btn) btn.disabled = false;
+}
+
+// Add/edit a channel. `existing` = the masked channel row (edit) or null (add).
+function openChannelModal(existing) {
+  var meta = _chanTypeMeta();
+  var types = Object.keys(meta);
+  if (types.length === 0) { showToast("Channel schema not loaded", "error"); return; }
+  var isEdit = !!existing;
+  var cur = existing || {};
+  var curConfig = (cur.config && typeof cur.config === "object") ? cur.config : {};
+  var initialType = isEdit ? cur.type : types[0];
+
+  function fieldInput(f) {
+    var id = "ch-field-" + f.key;
+    var val = (curConfig[f.key] != null && f.kind !== "password") ? String(curConfig[f.key]) : "";
+    var setFlag = curConfig[f.key + "Set"];
+    if (f.kind === "select") {
+      var opts = (f.options || []).map(function (o) { return '<option value="' + o + '"' + (o === val ? " selected" : "") + '>' + o + '</option>'; }).join("");
+      return '<div class="form-group"><label>' + escapeHtml(f.label) + '</label><select id="' + id + '">' + opts + '</select></div>';
+    }
+    var inputType = f.kind === "password" ? "password" : (f.kind === "number" ? "number" : "text");
+    var ph = f.placeholder || "";
+    if (f.kind === "password" && isEdit && setFlag) ph = "(unchanged)";
+    return '<div class="form-group"><label>' + escapeHtml(f.label) + '</label>' +
+      '<input type="' + inputType + '" id="' + id + '" value="' + escapeHtml(f.kind === "password" ? "" : val) + '" placeholder="' + escapeHtml(ph) + '"' + (f.kind === "password" ? ' autocomplete="new-password"' : '') + '></div>';
+  }
+
+  function webPushExtra() {
+    var pub = curConfig.publicKey ? String(curConfig.publicKey) : "";
+    var keySet = !!curConfig.privateKeySet;
+    return '<div class="form-group"><label>Public key</label><input type="text" id="ch-webpush-public" value="' + escapeHtml(pub) + '" readonly placeholder="(generated on save)"></div>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-tertiary)">Private key: ' + (keySet ? '<span style="color:var(--color-success)">set</span>' : '<span style="color:var(--color-danger)">not set</span>') +
+      (isEdit ? ' — <button type="button" class="btn btn-sm btn-secondary" id="ch-gen-vapid">Regenerate keypair</button>' : ' — generated automatically when you save') + '</p>';
+  }
+
+  function fieldsFor(type) {
+    var defs = (meta[type] && meta[type].fields) || [];
+    var html = defs.map(fieldInput).join("");
+    if (type === "web_push") html += webPushExtra();
+    return html;
+  }
+
+  var typeControl = isEdit
+    ? '<div class="form-group"><label>Type</label><input type="text" value="' + escapeHtml(channelTypeLabel(cur.type)) + '" readonly></div>'
+    : '<div class="form-group"><label>Type</label><select id="ch-type">' + types.map(function (t) { return '<option value="' + t + '">' + escapeHtml(meta[t].label || t) + '</option>'; }).join("") + '</select></div>';
+
+  var body =
+    '<div class="form-group"><label>Name</label><input type="text" id="ch-name" value="' + escapeHtml(cur.name || "") + '" placeholder="e.g. NOC Slack"></div>' +
+    typeControl +
+    '<div class="form-group"><label><input type="checkbox" id="ch-enabled"' + (cur.enabled === false ? "" : " checked") + '> Enabled</label></div>' +
+    '<div id="ch-fields">' + fieldsFor(initialType) + '</div>';
+
+  var footer =
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="ch-save">' + (isEdit ? "Save changes" : "Create channel") + '</button>';
+
+  openModal(isEdit ? "Edit delivery channel" : "Add delivery channel", body, footer, { wide: true });
+
+  var typeSel = document.getElementById("ch-type");
+  function currentType() { return isEdit ? cur.type : (typeSel ? typeSel.value : initialType); }
+  if (typeSel) typeSel.addEventListener("change", function () { document.getElementById("ch-fields").innerHTML = fieldsFor(typeSel.value); wireVapidBtn(); });
+
+  function wireVapidBtn() {
+    var gb = document.getElementById("ch-gen-vapid");
+    if (gb && !gb._wired) {
+      gb._wired = true;
+      gb.addEventListener("click", async function () {
+        gb.disabled = true;
+        try {
+          var r = await api.notificationChannels.generateVapid(cur.id);
+          var pubEl = document.getElementById("ch-webpush-public");
+          if (pubEl) pubEl.value = r.publicKey || "";
+          showToast("New VAPID keypair generated", "success");
+        } catch (err) { showToast(err.message || "Generate failed", "error"); }
+        gb.disabled = false;
+      });
+    }
+  }
+  wireVapidBtn();
+
+  function collectConfig(type) {
+    var defs = (meta[type] && meta[type].fields) || [];
+    var config = {};
+    defs.forEach(function (f) {
+      var el = document.getElementById("ch-field-" + f.key);
+      if (!el) return;
+      var v = el.value;
+      if (f.kind === "password" && v === "") return; // blank secret → server preserves
+      if (f.kind === "number") { config[f.key] = parseInt(v, 10) || 0; return; }
+      config[f.key] = v.trim();
+    });
+    return config;
+  }
+
+  document.getElementById("ch-save").addEventListener("click", async function () {
+    var name = document.getElementById("ch-name").value.trim();
+    if (!name) { showToast("Name is required", "error"); return; }
+    var type = currentType();
+    var payload = { name: name, type: type, enabled: document.getElementById("ch-enabled").checked, config: collectConfig(type) };
+    this.disabled = true;
+    try {
+      if (isEdit) {
+        await api.notificationChannels.update(cur.id, payload);
+      } else {
+        var created = await api.notificationChannels.create(payload);
+        // A brand-new Web Push channel needs a keypair to send — mint one now.
+        if (type === "web_push" && created && created.id) {
+          try { await api.notificationChannels.generateVapid(created.id); } catch (_e) { /* operator can regenerate later */ }
+        }
+      }
+      closeModal();
+      showToast(isEdit ? "Channel saved" : "Channel created", "success");
+      loadChannelsTab();
     } catch (err) { this.disabled = false; showToast(err.message || "Save failed", "error"); }
   });
 }
