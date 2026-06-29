@@ -33,6 +33,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!dbReachable) return;
+  // Don't leave seeded assets behind for downstream test files (the suite runs
+  // --no-file-parallelism against a shared DB; tagAssignment.test.ts reconciles
+  // tag criteria fleet-wide and was matching our Cisco fixture).
+  await prisma.asset.deleteMany();
   await prisma.$disconnect();
 });
 
