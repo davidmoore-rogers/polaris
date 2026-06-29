@@ -126,8 +126,13 @@ function parseCsvParam(raw: unknown): string[] | null {
 router.get("/noc-summary", async (req, res, next) => {
   try {
     await ensureSessionRoleSnapshot(req);
-    const canAssets = hasPermission(req, "assets", "read");
-    const canEvents = hasPermission(req, "events", "read");
+    // A bearer token carrying `dashboard:read` is the no-login NOC kiosk. It has
+    // no role snapshot, so grant it both asset- and event-sourced sections here
+    // (this feed is read-only fleet aggregates). Session callers still gate per
+    // function. Same filter-don't-403 contract: no scope/role → empty sections.
+    const tokenNoc = req.apiToken?.scopes.includes("dashboard:read") ?? false;
+    const canAssets = tokenNoc || hasPermission(req, "assets", "read");
+    const canEvents = tokenNoc || hasPermission(req, "events", "read");
 
     // Per-widget filters (optional): ?assetTypes=server,switch,... (the ENABLED
     // built-in types) and ?regionTags=East,West (the caller's "My regions"

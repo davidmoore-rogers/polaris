@@ -13,6 +13,10 @@
  * Available scopes (extend in `KNOWN_SCOPES` as needed):
  *   - `assets:quarantine` — POST/DELETE /assets/:id/quarantine
  *   - `assets:read`       — GET /assets/* (read-only)
+ *   - `dashboard:read`    — GET /dashboard/noc-summary (read-only NOC fleet
+ *                           aggregates; backs the no-login kiosk dashboard.
+ *                           Map data — /map/sites — is already reachable by any
+ *                           valid token.)
  */
 
 import { randomBytes } from "node:crypto";
@@ -20,7 +24,7 @@ import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
 import { hashPassword, verifyPassword } from "../utils/password.js";
 
-export const KNOWN_SCOPES = ["assets:quarantine", "assets:read"] as const;
+export const KNOWN_SCOPES = ["assets:quarantine", "assets:read", "dashboard:read"] as const;
 export type ApiTokenScope = (typeof KNOWN_SCOPES)[number];
 
 const TOKEN_PREFIX = "polaris_";
