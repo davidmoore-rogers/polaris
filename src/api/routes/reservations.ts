@@ -5,6 +5,13 @@
  *   - admin / networkadmin: full CRUD on all reservations
  *   - user / assetsadmin: can create reservations and edit/delete only their own (createdBy match)
  *   - readonly: read-only
+ *
+ * Note on the IP-panel "Reserve" take-over of a DHCP lease: a dhcp_lease is
+ * observed device presence, not a user-owned reservation, so claiming the IP
+ * is a plain create — `reservationService.createReservation` supersedes the
+ * lease server-side (releaseSupersededDhcpLeaseAt). It does NOT route through
+ * the ownership-gated release below, so a `write`-level user with no claim on
+ * the lease can still reserve the IP.
  */
 
 import { Router } from "express";

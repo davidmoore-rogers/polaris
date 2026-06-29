@@ -22,6 +22,9 @@ const d = dbDescribe;
 const PFX = "permgate-test";
 const PASSWORD = "permgate-password-not-real";
 
+/** Captured in beforeAll so the reservation-ownership tests can seed rows. */
+let seededSubnetId = "";
+
 /** Build a permissions matrix with every function key at `base`, overridden per `overrides`. */
 function matrix(base: string, overrides: Record<string, string> = {}): Record<string, string> {
   const out: Record<string, string> = {};
@@ -78,6 +81,7 @@ beforeAll(async () => {
   const subnet = await prisma.subnet.create({
     data: { blockId: block.id, name: `${PFX}-subnet`, cidr: "10.99.1.0/24", createdBy: "permgate" },
   });
+  seededSubnetId = subnet.id;
   await prisma.reservation.create({
     data: {
       subnetId: subnet.id,
@@ -93,6 +97,9 @@ beforeAll(async () => {
 
   await createRoleUser("none", matrix("none"));
   await createRoleUser("assetsread", matrix("none", { assets: "read" }));
+  // reservations:write (the `user`/`assetsadmin` ownership level) — read
+  // elsewhere so the row reads/writes resolve.
+  await createRoleUser("reswrite", matrix("read", { reservations: "write" }));
 });
 
 afterAll(async () => {
@@ -191,6 +198,64 @@ d("permission gates — readonly parity with admin", () => {
     ]);
     expect(roSearch.status).toBe(200);
     expect(roSearch.body).toEqual(adminSearch.body);
+  });
+});
+
+d("reservation take-over — write-level user reserves over an observed DHCP lease", () => {
+  // A dhcp_lease is observed device presence, not a user-owned reservation.
+  // A reservations:write user (who didn't "create" the lease) must be able to
+  // reserve that IP: createReservation supersedes the lease server-side, so
+  // it's a plain create — no separate ownership-gated release. An authoritative
+  // hold (another user's manual reservation) is NOT superseded and still 409s.
+  async function loginWithCsrf(username: string) {
+    const agent = request.agent(app);
+    await agent.get("/api/v1/auth/me");
+    const resp = await agent
+      .post("/api/v1/auth/login")
+      .send({ username, password: PASSWORD })
+      .set("Content-Type", "application/json");
+    if (resp.status !== 200) throw new Error(`login as ${username} failed (${resp.status})`);
+    await agent.get("/api/v1/auth/me");
+    const cookies = (agent.jar as any).getCookies({ domain: "127.0.0.1", path: "/", secure: false, script: false });
+    const csrf = (cookies.find((c: any) => c.name === "polaris_csrf") || {}).value || "";
+    if (!csrf) throw new Error("CSRF cookie not set after login");
+    return { agent, csrf };
+  }
+
+  it("supersedes the observed lease on create, but 409s on another user's manual reservation", async () => {
+    const leaseRes = await prisma.reservation.create({
+      data: {
+        subnetId: seededSubnetId,
+        ipAddress: "10.99.1.60",
+        hostname: `${PFX}-lease`,
+        sourceType: "dhcp_lease",
+        owner: "dhcp-lease",
+        // createdBy intentionally null — mirrors the FMG/FortiGate sync path.
+      },
+    });
+
+    const { agent, csrf } = await loginWithCsrf(`${PFX}-user-reswrite`);
+
+    // Reserve over the lease → plain create succeeds (lease superseded).
+    const okResp = await agent
+      .post("/api/v1/reservations")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: seededSubnetId, ipAddress: "10.99.1.60", hostname: `${PFX}-claimed` });
+    expect(okResp.status).toBe(201);
+    expect(okResp.body.createdBy).toBe(`${PFX}-user-reswrite`);
+    expect(okResp.body.sourceType).toBe("manual");
+
+    // The observed lease row is gone (hard-deleted by releaseSupersededDhcpLeaseAt).
+    const oldLease = await prisma.reservation.findUnique({ where: { id: leaseRes.id } });
+    expect(oldLease).toBeNull();
+
+    // The seeded manual reservation at 10.99.1.10 (createdBy "permgate") is
+    // authoritative — reserving over it is NOT a silent take-over.
+    const conflictResp = await agent
+      .post("/api/v1/reservations")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: seededSubnetId, ipAddress: "10.99.1.10", hostname: `${PFX}-collide` });
+    expect(conflictResp.status).toBe(409);
   });
 });
 

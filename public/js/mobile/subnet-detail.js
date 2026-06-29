@@ -372,10 +372,11 @@
   //   { ip?, mac?, hostname?, notes? }.
   // opts (optional):
   //   { existingLeaseId, onSuccess }
-  //   existingLeaseId: when set, the lease reservation is released before
-  //     the new manual reservation is created — this is the "promote DHCP
-  //     lease to manual reservation (and push to gate)" flow invoked from
-  //     the Reservations tab.
+  //   existingLeaseId: marks the "promote DHCP lease to manual reservation
+  //     (and push to gate)" flow invoked from the Reservations tab. The lease
+  //     is NOT released here — createReservation supersedes it server-side
+  //     (releaseSupersededDhcpLeaseAt), so the create is gated only on the
+  //     caller's reservations:write. Retained for call-site clarity.
   //   onSuccess: callback fired after a successful create. When omitted,
   //     the subnet-detail page reloads its IP list (legacy behavior).
   function openReserveSheet(subnetId, st, user, prefill, opts) {
@@ -526,18 +527,14 @@
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner" style="width:18px;height:18px;border-width:2px;"></span>';
 
-    // When promoting a DHCP lease, release the lease row first so the
-    // new manual reservation doesn't collide with the
-    // @@unique([subnetId, ipAddress, status]) constraint. If the create
-    // fails after the lease is gone, the operator can retry — the IP is
-    // free at that point.
-    var pre = opts.existingLeaseId
-      ? api.reservations.release(opts.existingLeaseId).catch(function () { /* tolerate already-gone */ })
-      : Promise.resolve();
-
-    pre.then(function () {
-      return api.reservations.create(body);
-    }).then(function () {
+    // Promoting a DHCP lease is a plain create — a dhcp_lease is observed
+    // device presence, not a user-owned reservation, so createReservation
+    // supersedes it server-side (releaseSupersededDhcpLeaseAt) rather than
+    // requiring a separate ownership-gated release. This is what lets a
+    // reservations:write user (who didn't "create" the lease) reserve the IP.
+    // existingLeaseId is no longer needed but kept in the opts contract for
+    // call-site clarity.
+    api.reservations.create(body).then(function () {
       closeReserveSheet();
       PolarisTabs.showSnackbar("Reserved " + ip);
       if (typeof opts.onSuccess === "function") opts.onSuccess();
