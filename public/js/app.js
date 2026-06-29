@@ -1512,6 +1512,14 @@ function flashModalCloseBtn(closeBtn) {
   var lvl = (_modalFlashLevel = Math.min(_modalFlashLevel + 1, 8));
   if (_modalFlashResetTimer) clearTimeout(_modalFlashResetTimer);
   _modalFlashResetTimer = setTimeout(function () { _modalFlashLevel = 0; }, 1000);
+  // Drive the transition inline (matched to the bloom's 0.45s ease-out below)
+  // so the X glow and the radial bloom fade in/out together. Inline so it
+  // applies to both the modal .modal-close and the slide-over .btn-icon, and
+  // survives the class removal in the reset so the fade-OUT is also 0.45s
+  // instead of snapping back via the base .modal-close 0.15s transition.
+  closeBtn.style.transition =
+    "color 0.45s ease-out, background 0.45s ease-out, transform 0.45s ease-out," +
+    "filter 0.45s ease-out, text-shadow 0.45s ease-out";
   closeBtn.style.background = "rgba(255,77,109," + Math.min(0.25 + lvl * 0.09, 0.95) + ")";
   closeBtn.style.filter = "brightness(" + (1 + lvl * 0.18) + ")";
   closeBtn.style.textShadow = "0 0 " + (lvl * 3) + "px rgba(255,77,109,0.9)";
@@ -1556,6 +1564,9 @@ function flashModalCloseBtn(closeBtn) {
     closeBtn.style.filter = "";
     closeBtn.style.textShadow = "";
     bloom.style.opacity = "0";
+    // Let the 0.45s fade-out run, then drop the inline transition so the
+    // button's normal hover snaps back to the base .modal-close 0.15s timing.
+    setTimeout(function () { closeBtn.style.transition = ""; }, 460);
   }, 600);
 }
 

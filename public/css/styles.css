@@ -1982,7 +1982,9 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   color: #ff4d6d;
   background: rgba(255,77,109,0.25);
   transform: scale(1.25);
-  transition: color 0.08s, background 0.08s, transform 0.08s;
+  /* Transition timing is driven inline in flashModalCloseBtn (matched to the
+     bloom's 0.45s ease-out) so it applies to both the modal .modal-close and
+     the slide-over .btn-icon and survives class removal for the fade-out. */
 }
 
 /* ─── Tabs (inside modals) ────────────────────────────────────────────────── */
