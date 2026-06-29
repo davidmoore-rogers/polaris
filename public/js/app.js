@@ -628,6 +628,7 @@ function _showSearchShortcutHints() {
     { prefix: "asset:",       short: "a:", label: "Search assets only" },
     { prefix: "reservation:", short: "r:", label: "Search reservations only" },
     { prefix: "map:",         short: "m:", label: "Search pinned firewalls (Device Map) only" },
+    { prefix: "tag:",         short: "t:", label: "Search by tag across networks & assets" },
   ];
   var rows = hints.map(function (h) {
     return '<div class="gs-hint" data-prefix="' + escapeHtml(h.prefix) + '">' +

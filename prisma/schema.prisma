@@ -2167,10 +2167,33 @@ model Tag {
   category String @default("General")
   color    String @default("#4fc3f7")
 
+  // Optional auto-assignment criteria. NULL = ordinary manual tag (legacy
+  // behavior). When set, the tag is auto-applied to / removed from assets
+  // matching the criteria by tagAssignmentService (managed sync). Shape:
+  // { version, match: "all", rules: [{ field, op, values[] } | { field:"subnet", op:"inCidr", cidrs[] }] }.
+  criteria Json?
+
   createdAt DateTime @default(now())
 
   @@index([category])
   @@map("tags")
+}
+
+// Provenance for criteria-based tag auto-assignment. One row per (tag, asset)
+// pair that tagAssignmentService itself applied. Lets the managed-sync engine
+// strip an auto-applied tag when an asset stops matching WITHOUT touching the
+// same tag name when an operator added it by hand (no provenance row). No FK to
+// Tag/Asset (matches the denormalized tags-by-name design); rows are cleaned by
+// the engine on tag delete / criteria clear / asset drift.
+model TagAutoAssignment {
+  tagId     String
+  assetId   String
+  createdAt DateTime @default(now())
+
+  @@id([tagId, assetId])
+  @@index([assetId])
+  @@index([tagId])
+  @@map("tag_auto_assignments")
 }
 
 // Manufacturer alias map. Normalizes inbound manufacturer strings (from OUI

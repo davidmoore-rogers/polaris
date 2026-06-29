@@ -284,6 +284,9 @@ const api = {
     confirm:    (body) => request("POST",   "/auth/totp/confirm", body),
     disable:    (body) => request("DELETE", "/auth/totp", body),
   },
+  assetTypes: {
+    list:      ()       => request("GET", "/asset-types"),
+  },
   assets: {
     list:      (params) => request("GET", "/assets" + toQuery(params)),
     get:       (id)     => request("GET", `/assets/${id}`),
@@ -659,6 +662,7 @@ const api = {
     deleteTag:   (id)     => request("DELETE", `/server-settings/tags/${id}`),
     getTagSettings: ()    => request("GET", "/server-settings/tags/settings"),
     updateTagSettings: (body) => request("PUT", "/server-settings/tags/settings", body),
+    previewTagCriteria: (body) => request("POST", "/server-settings/tags/preview-criteria", body),
     getBranding:  ()       => request("GET", "/server-settings/branding"),
     updateBranding: (body) => request("PUT", "/server-settings/branding", body),
     uploadLogo: (file) => {

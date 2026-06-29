@@ -803,6 +803,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 **System writers (managed namespaces):**
 - `src/services/mapRegionService.ts` — owns the `region:` prefix. Adds `region:<name>` to in-polygon firewalls + cascaded FortiSwitches/FortiAPs; only strips on rename/delete (never on polygon edit). Sees its own tags via the prefix; never touches operator-set tags. Mirrored to the `Tag` registry under category "Map Regions".
 - `src/services/firewallTagService.ts` — owns the `firewall:` prefix. Reconciles `firewall:<hostname>` on every FortiSwitch / FortiAP / non-infra endpoint at end of FMG / FortiGate discovery (Phase 13.5) using `Asset.fortinetTopology.controllerFortigate` + `AssetFortigateSighting` rows within `sightingMaxAgeDays`. Strips only tags whose hostname is one of THIS integration's currently-known firewalls (cross-integration safe). Inline lifecycle hooks at Phase 2a (decommission strip), Phase 3 firewall create (registry seed), Phase 3 firewall update (rename rotation). Mirrored to the `Tag` registry under category "FortiGate".
+- `src/services/tagAssignmentService.ts` — owns criteria-based auto-assigned tags. Unlike `region:`/`firewall:`, these use NO reserved prefix (they're ordinary operator-named tags), so collision is policed by the `TagAutoAssignment` provenance table instead: a tag is added/removed only on assets matching a `Tag.criteria` rule set, and removed only where the engine itself applied it (provenance row exists) — hand-applied copies survive. Managed sync (add AND remove on drift), fired inline on tag CRUD + asset writes + end-of-discovery (Phase 13.65) + a 6h job. NOT prefix-hidden in the manual picker.
 - Discovery breadcrumb tags — `src/api/routes/integrations.ts` legacy paths still write `entra-disabled`, `ad-disabled`, `prev-*` markers. Some of these (sid:, ad-guid:) are being retired by the multi-source asset model.
 
 **Tag registry mirror (`prisma.tag` rows):**
@@ -1450,6 +1451,36 @@ Listed alphabetically.
 - Endpoint membership depends on the sightings table's `integrationId` index — if `AssetFortigateSighting`'s indexing changes, audit the `findMany` filter for performance regressions.
 - Adding a fourth lifecycle path (e.g. operator-driven hostname rename via PUT /assets/:id on a firewall row) means hooking `applyFirewallRename` in that path too — the projection-driven Phase 3 hook only catches discovery-driven renames.
 - The reconciler currently runs only at Phase 13.5 of FMG/FortiGate discovery. If discovery is ever skipped or disabled long-term, stale tags persist — operators should run a manual reconcile or delete the tag manually. (No periodic safety-net job exists by design — every input is discovery-written.)
+
+---
+
+## services/tagAssignmentService.ts
+
+**What it owns:** Criteria-based tag auto-assignment ("managed sync"). The `Tag.criteria` JSON contract (validation/normalization), the asset-matching engine (DB prefilter + inet subnet membership + in-memory predicate), and the diff-based reconcile that keeps each criteria-bearing tag synced onto matching assets via the `TagAutoAssignment` provenance table. Strictly an asset-tagging service — it never writes block/subnet tags.
+
+**Public API:** `TagCriteria` / `CriteriaRule` types, `normalizeCriteria`, `buildPrefilterWhere`, `assetMatchesCriteria` (pure predicate, test-only convenience), `resolveMatchingAssetIds`, `reconcileTag`, `reconcileAllTags`, `reconcileTagsForAsset`, `previewTagCriteria`, `stripTagAssignments`.
+
+**Cross-service deps:** `compileWildcard` from `autoMonitorInterfacesService.ts` (pattern compile); `isValidCidr` / `isValidIpAddress` from `utils/cidr.ts`; `isKnownAssetType` / `normalizeAssetTypeName` from `utils/assetTypes.ts`; `prisma.asset` (tags[] read-modify-write), `prisma.tag` (criteria read), `prisma.tagAutoAssignment` (provenance), one raw inet `>>=` query for subnet membership.
+
+**Used by:**
+- `src/api/routes/serverSettings.ts` Tag routes — `normalizeCriteria` (validate on POST/PUT), `reconcileTag` (inline after create/edit), `stripTagAssignments` (on delete of a criteria tag), `previewTagCriteria` (`POST /server-settings/tags/preview-criteria`).
+- `src/api/routes/integrations.ts` Phase 13.65 — `reconcileAllTags()` at end of FMG/FortiGate discovery.
+- `src/api/routes/assets.ts` POST/PUT — `reconcileTagsForAsset(id)` (best-effort) on create + on update when a criteria-relevant field changed.
+- `src/jobs/reconcileTagAssignments.ts` — 6h safety-net tick calls `reconcileAllTags()`.
+
+**Invariants:**
+- **The prefilter is a strict SUPERSET of the predicate.** `buildPrefilterWhere` may only ever loosen: exact→insensitive-equals, contains→insensitive-contains, pattern→`startsWith(literalPrefix)` ONLY when every value in the rule has a prefix (else the rule contributes no DB clause); subnet rules are always predicate-only. Never tighten — a candidate dropped by the prefilter is silently never matched.
+- **Managed sync touches only engine-owned copies.** A tag is removed from an asset only when a `TagAutoAssignment` row exists for that (tag, asset). A hand-applied copy of the same tag name on a non-matching asset (no provenance) is preserved forever. This is the manual-vs-auto collision defense — keep the provenance check on every remove path.
+- Decommissioned assets are excluded from the prefilter unless the criteria explicitly target `status`.
+- Subnet membership goes through the family-aware inet query (`cidrContainmentMap`), NOT the v4-only `Netmask`/`ipInCidr` path — IPv6 CIDRs must work.
+- `criteria == null` (manual tag) makes the tag invisible to the engine — it is never added or removed.
+- Reconcile writes are idempotent + batched (chunks of 50 in `$transaction`); skip when the tags array doesn't change. Scale-checked: fleet passes are bounded to (#managed tags) prefilter queries; per-asset path is O(#managed tags) + one inet round-trip.
+
+**When changing this:**
+- Adding a new criteria field: extend `STRING_FIELDS`/`ENUM_FIELDS` (+ domain validation), add the column to `CANDIDATE_SELECT`, ensure `buildPrefilterWhere` stays a superset, and add it to the asset-write hook's `TAG_CRITERIA_FIELDS` list in `assets.ts` + the frontend `TAG_CRITERIA_FIELDS` in `server-settings.js`.
+- The `Tag.criteria` JSON shape is also parsed in `public/js/server-settings.js` (`_collectTagCriteria` / `_tagRuleRowHTML`) — keep the two in sync.
+- Criteria tags are normal registry tags and are deliberately NOT prefix-hidden in the manual tag picker (unlike `region:`/`firewall:`). Don't add them to the `getTagFieldValue` protected-prefix list in `app.js`.
+- See cross-cutting **Asset.tags** for the full writer list (this service is now one of them).
 
 ---
 

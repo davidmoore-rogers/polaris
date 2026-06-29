@@ -50,19 +50,20 @@ const SCOPED_LIMIT = 200;
 
 const MAC_HEX_ONLY = /^[0-9a-f]{12}$/i;
 
-type SearchScope = "block" | "asset" | "reservation" | "map" | "network";
+type SearchScope = "block" | "asset" | "reservation" | "map" | "network" | "tag";
 
-// Recognize `block:` / `asset:` / `reservation:` / `map:` / `network:` and
-// their short forms `b:` / `a:` / `r:` / `m:` / `n:`. Case-insensitive;
-// trims whitespace after the colon so `asset:  foo` works. The scopes are
-// mutually exclusive with the `entra:` / `ad:` / `fgt:` source-kind prefix
-// consumed inside `stripSourceKindPrefix` — none of those start with the
-// scope letters.
+// Recognize `block:` / `asset:` / `reservation:` / `map:` / `network:` / `tag:`
+// and their short forms `b:` / `a:` / `r:` / `m:` / `n:` / `t:`. Case-
+// insensitive; trims whitespace after the colon so `asset:  foo` works. The
+// scopes are mutually exclusive with the `entra:` / `ad:` / `fgt:` source-kind
+// prefix consumed inside `stripSourceKindPrefix` — none of those start with the
+// scope letters. `tag` is listed before the bare `t` so `tag:` binds to the
+// tag scope rather than the short form.
 function parseSearchScope(raw: string): { scope: SearchScope | null; query: string } {
   // No `\s*` before the capture — `\s*(.*)$` backtracks polynomially on
   // long runs of whitespace (CodeQL js/polynomial-redos); the .trim() on
   // the captured rest below handles the post-colon whitespace instead.
-  const m = raw.match(/^(block|asset|reservation|map|network|b|a|r|m|n):(.*)$/i);
+  const m = raw.match(/^(block|asset|reservation|map|network|tag|b|a|r|m|n|t):(.*)$/i);
   if (!m) return { scope: null, query: raw };
   const prefix = m[1].toLowerCase();
   const rest = m[2].trim();
@@ -71,6 +72,7 @@ function parseSearchScope(raw: string): { scope: SearchScope | null; query: stri
   else if (prefix === "asset" || prefix === "a") scope = "asset";
   else if (prefix === "reservation" || prefix === "r") scope = "reservation";
   else if (prefix === "network" || prefix === "n") scope = "network";
+  else if (prefix === "tag" || prefix === "t") scope = "tag";
   else scope = "map";
   return { scope, query: rest };
 }
@@ -199,6 +201,24 @@ export async function searchAll(
     const originBySrcId = await resolveOriginFortigates(assetRows.map((a) => a.id));
     const assetHits = assetRows.map((a) => decorateAssetHit(a, originBySrcId.get(a.id)));
     return { ...empty, assets: assetHits };
+  }
+  if (scope === "tag") {
+    // Tag scope spans every tag-bearing entity (blocks / subnets / assets):
+    // each term must match (ILIKE, substring) at least one tag in the row's
+    // `tags[]` array. Returns all three groups so the dropdown shows tagged
+    // networks and assets together.
+    const [blocks, subnets, assetRows] = await Promise.all([
+      allowed.blocks ? searchBlocksByTag(terms, SCOPED_LIMIT) : Promise.resolve([]),
+      allowed.subnets ? searchSubnetsByTag(terms, SCOPED_LIMIT) : Promise.resolve([]),
+      allowed.assets ? searchAssetsByTag(terms, SCOPED_LIMIT) : Promise.resolve([]),
+    ]);
+    const originBySrcId = await resolveOriginFortigates(assetRows.map((a) => a.id));
+    return {
+      ...empty,
+      blocks: blocks.map(blockHit),
+      subnets: subnets.map(subnetHit),
+      assets: assetRows.map((a) => decorateAssetHit(a, originBySrcId.get(a.id))),
+    };
   }
 
   // Run all queries in parallel. Pinned firewalls are queried as their
@@ -387,6 +407,58 @@ async function searchReservations(terms: string[], ipExact: string | null, limit
 
 async function searchAssets(terms: string[], mac: string | null, limit = PER_GROUP_LIMIT) {
   return runAssetSearch(terms, mac, {}, limit);
+}
+
+// ─── Tag-scope helpers (`tag:` / `t:`) ─────────────────────────────────────────
+
+// AND of per-term EXISTS clauses over a row's `tags text[]` column: every term
+// must match (case-insensitive substring) at least one tag in the array. The
+// `tags` column name is identical across assets / subnets / ip_blocks, so one
+// fragment serves all three. Parameterized — terms are bound, never interpolated.
+function tagExistsAnd(terms: string[]): Prisma.Sql {
+  return Prisma.join(
+    terms.map(
+      (t) => Prisma.sql`EXISTS (SELECT 1 FROM unnest(tags) tg WHERE tg ILIKE ${"%" + t + "%"})`,
+    ),
+    " AND ",
+  );
+}
+
+async function searchAssetsByTag(terms: string[], limit = PER_GROUP_LIMIT) {
+  const where = tagExistsAnd(terms);
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT id FROM assets WHERE ${where} ORDER BY hostname ASC NULLS LAST LIMIT ${limit}
+  `;
+  if (rows.length === 0) return [];
+  const assets = await prisma.asset.findMany({
+    where: { id: { in: rows.map((r) => r.id) } },
+    orderBy: { hostname: "asc" },
+  });
+  return assets;
+}
+
+async function searchSubnetsByTag(terms: string[], limit = PER_GROUP_LIMIT) {
+  const where = tagExistsAnd(terms);
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT id FROM subnets WHERE ${where} ORDER BY name ASC NULLS LAST LIMIT ${limit}
+  `;
+  if (rows.length === 0) return [];
+  return prisma.subnet.findMany({
+    where: { id: { in: rows.map((r) => r.id) } },
+    orderBy: { name: "asc" },
+  });
+}
+
+async function searchBlocksByTag(terms: string[], limit = PER_GROUP_LIMIT) {
+  const where = tagExistsAnd(terms);
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT id FROM ip_blocks WHERE ${where} ORDER BY name ASC NULLS LAST LIMIT ${limit}
+  `;
+  if (rows.length === 0) return [];
+  return prisma.ipBlock.findMany({
+    where: { id: { in: rows.map((r) => r.id) } },
+    orderBy: { name: "asc" },
+  });
 }
 
 async function searchPinnedFirewalls(terms: string[], mac: string | null, limit = PER_GROUP_LIMIT) {

@@ -126,7 +126,7 @@ AssetStatus:             active | maintenance | decommissioned | storage | disab
 - **DiscoveryRun** — per-integration discovery-run state (status / actor / progress counts / timestamps); one row per integration (`integrationId` unique).
 - **Setting** — key-value config store (`manualMonitorSettings`, `sampleRetention`, `mapRegions`, `agentEventLog`, etc.). `agentEventLog` (`{enabled, minLevel, windowsChannels, linuxMinPriority, maxPerPush, perAssetHourlyCap}`, default disabled) tunes the OS event-log → audit Event ingest (`osEventLogService`); ingested host events become `os_event.<channel>` Events (resourceType=asset) visible in the Events tab.
 - **MonitorClassOverride** — tier-2 of the monitor settings hierarchy; manual-scope only post-Phase-2.
-- **Tag** / **GeocodeCache** — registry tables.
+- **Tag** / **GeocodeCache** — registry tables. `Tag` carries an optional `criteria` JSON (auto-assignment rule set: manufacturer/model/os/osVersion/hostname/department/location/assetType/status/subnet); when set, `tagAssignmentService` keeps the tag synced onto matching assets (managed sync — adds AND removes on drift). **TagAutoAssignment** is the per-(tag,asset) provenance table that lets managed sync strip auto-applied copies without ever touching a hand-applied copy of the same tag name.
 
 ---
 
@@ -146,7 +146,7 @@ Resource groupings (route file in `src/api/routes/`):
 - **assetTypes** (registry CRUD, mounted before `/assets`)
 - **assets** (CRUD + monitor history endpoints + per-asset agent install + dependencies + quarantine + system-info + SNMP walk)
 - **agents** (`/agents`, `/agents/enroll`, `/agents/binary` — Polaris Agent enroll / config / sample-push / binary download, gated by `requireAgentBearer`; the `/agents/ws` WebSocket upgrade handler in `agentsWs.ts` is attached at the HTTP-server level in `src/app.ts`, not via the REST router)
-- **events** / **conflicts** / **search** (audit + resolution + global typeahead)
+- **events** / **conflicts** / **search** (audit + resolution + global typeahead; scope prefixes `block:`/`b:`, `network:`/`n:`, `asset:`/`a:`, `reservation:`/`r:`, `map:`/`m:`, `tag:`/`t:` — the last matches tag substrings across blocks/subnets/assets)
 - **notifications** (`/notifications` — View-tab list + acknowledge/clear; per-route gates `notifications:read|write|fullwrite`) and **notificationRules** (`/notification-rules` — rule CRUD + `/schema` builder vocabulary + `/preview` dry-run; gated `notificationManagement`). Per-asset bundle at `GET /assets/:id/notifications` (active + matching rules). **notificationChannels** (`/notification-channels` — delivery-channel registry CRUD + `/:id/test` + `/:id/generate-vapid`; gated `notificationManagement`) and **pushSubscriptions** (`/push-subscriptions` — VAPID `/key` + per-user subscribe/unsubscribe; gated `notifications:read`). Delivery channels are managed on the Notifications → Delivery tab.
 - **map** / **mapRegions** / **allocationTemplates** (Device Map + map-region polygons + saved subnet allocations)
 - **serverSettings** (HTTPS, branding, backup/restore, capacity advisor, sample retention, queue mode, security tokens)

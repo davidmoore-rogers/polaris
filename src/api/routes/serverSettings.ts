@@ -33,6 +33,12 @@ import { getDnsSettings, updateDnsSettings, createResolver } from "../../service
 import type { DnsSettings } from "../../services/dnsService.js";
 import { getOuiStatus, refreshOuiDatabase, getOuiOverrides, setOuiOverride, deleteOuiOverride, lookupOuiDetailed } from "../../services/ouiService.js";
 import { logEvent } from "./events.js";
+import {
+  normalizeCriteria,
+  reconcileTag,
+  previewTagCriteria,
+  stripTagAssignments,
+} from "../../services/tagAssignmentService.js";
 import { setEnvVar } from "../../utils/envFile.js";
 import {
   checkForUpdates,
@@ -52,6 +58,7 @@ import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { hasActiveDiscoveries } from "./integrations.js";
 import { logger } from "../../utils/logger.js";
+import { Prisma } from "../../generated/prisma/client.js";
 import { getCapacitySnapshot, recordCapacityTransition } from "../../services/capacityService.js";
 import { getSampleRetention, updateSampleRetention } from "../../services/sampleRetentionService.js";
 import { getAgentEventLogConfig, updateAgentEventLogConfig } from "../../services/osEventLogService.js";
@@ -503,11 +510,15 @@ router.post("/tags", async (req, res, next) => {
     const existing = await prisma.tag.findUnique({ where: { name } });
     if (existing) throw new AppError(409, `Tag "${name}" already exists`);
 
+    // Validate + normalize optional auto-assignment criteria (null = manual tag).
+    const criteria = normalizeCriteria(req.body.criteria);
+
     const tag = await prisma.tag.create({
       data: {
         name,
         category: req.body.category || "General",
         color: req.body.color || randomTagColor(),
+        criteria: criteria ? (criteria as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       },
     });
     await logEvent({
@@ -517,8 +528,14 @@ router.post("/tags", async (req, res, next) => {
       resourceId: tag.id,
       resourceName: tag.name,
       actor: req.session?.username,
-      message: `Tag created: "${tag.name}" (category ${tag.category})`,
+      message: `Tag created: "${tag.name}" (category ${tag.category})${criteria ? ` with ${criteria.rules.length} auto-assign rule(s)` : ""}`,
     });
+    // Apply criteria immediately (best-effort; the periodic job is the safety net).
+    if (criteria) {
+      reconcileTag(tag.id).catch((err) =>
+        logger.warn({ err: err?.message ?? String(err), tagId: tag.id }, "tag create: reconcile failed"),
+      );
+    }
     res.status(201).json(tag);
   } catch (err) {
     next(err);
@@ -571,12 +588,20 @@ router.put("/tags/:id", async (req, res, next) => {
       if (dupe) throw new AppError(409, `Tag "${name}" already exists`);
     }
 
+    // `criteria` only changes when the key is present in the body. Absent key =
+    // leave as-is; explicit null / empty = clear (becomes a manual tag).
+    const criteriaProvided = Object.prototype.hasOwnProperty.call(req.body, "criteria");
+    const nextCriteria = criteriaProvided ? normalizeCriteria(req.body.criteria) : undefined;
+
     const tag = await prisma.tag.update({
       where: { id },
       data: {
         name,
         category: req.body.category ?? existing.category,
         color: req.body.color ?? existing.color,
+        ...(criteriaProvided
+          ? { criteria: nextCriteria ? (nextCriteria as unknown as Prisma.InputJsonValue) : Prisma.DbNull }
+          : {}),
       },
     });
 
@@ -601,6 +626,14 @@ router.put("/tags/:id", async (req, res, next) => {
         : `Tag updated: "${tag.name}"`,
     });
 
+    // Re-run the managed-sync diff whenever criteria changed (or the tag was
+    // renamed, since provenance is keyed by tagId but the applied string moved).
+    if (criteriaProvided || renamed) {
+      reconcileTag(tag.id).catch((err) =>
+        logger.warn({ err: err?.message ?? String(err), tagId: tag.id }, "tag update: reconcile failed"),
+      );
+    }
+
     res.json(tag);
   } catch (err) {
     next(err);
@@ -611,6 +644,12 @@ router.delete("/tags/:id", async (req, res, next) => {
   try {
     const tag = await prisma.tag.findUnique({ where: { id: req.params.id } });
     if (!tag) throw new AppError(404, "Tag not found");
+    // Strip engine-applied copies (and their provenance) before deleting. Manual
+    // copies on assets the engine never tagged are untouched — same as before.
+    let stripped = 0;
+    if (tag.criteria != null) {
+      stripped = await stripTagAssignments(tag.id, tag.name);
+    }
     await prisma.tag.delete({ where: { id: req.params.id } });
     await logEvent({
       level: "warning",
@@ -619,9 +658,22 @@ router.delete("/tags/:id", async (req, res, next) => {
       resourceId: tag.id,
       resourceName: tag.name,
       actor: req.session?.username,
-      message: `Tag deleted: "${tag.name}"`,
+      message: `Tag deleted: "${tag.name}"${stripped ? ` (removed from ${stripped} auto-assigned asset(s))` : ""}`,
     });
     res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Dry-run a criteria blob: how many assets match, a sample, and (when tagId is
+// given) the +add / -remove delta vs. that tag's current auto-assignments.
+// Drives the live preview line in the tag criteria builder.
+router.post("/tags/preview-criteria", async (req, res, next) => {
+  try {
+    const tagId = typeof req.body.tagId === "string" ? req.body.tagId : undefined;
+    const preview = await previewTagCriteria(req.body.criteria, tagId);
+    res.json(preview);
   } catch (err) {
     next(err);
   }
