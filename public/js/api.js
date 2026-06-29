@@ -123,7 +123,10 @@ async function request(method, path, body, signal) {
   const data = await res.json();
   if (!res.ok) {
     const msg = data?.error || `Request failed (${res.status})`;
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
   return data;
 }
