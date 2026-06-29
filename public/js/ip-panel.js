@@ -186,7 +186,7 @@ function _renderPanelHeader(data) {
   if (data.ipv6) meta += '<span style="color:var(--color-warning);font-size:0.75rem">IPv6 — showing reservations only</span>';
 
   var headerBtns = '<span style="margin-left:auto;display:flex;gap:6px">' +
-    (canManageNetworks() && !data.ipv6 ? '<button class="btn btn-sm btn-danger" id="ip-panel-free-selected-btn" disabled>Release Selected</button>' : '') +
+    (canReserveIps() && !data.ipv6 ? '<button class="btn btn-sm btn-danger" id="ip-panel-free-selected-btn" disabled>Release Selected</button>' : '') +
     '<div class="btn-dropdown-wrap">' +
       '<button class="btn btn-sm btn-secondary" id="ip-panel-export-btn">Export &#9662;</button>' +
       '<div class="btn-dropdown-menu" id="ip-panel-export-menu">' +
@@ -252,7 +252,7 @@ function _renderIpList(data) {
   var reserveBtnClass = pushEligible ? "btn-success" : "btn-primary";
 
   var hasReleasable = data.ips.some(function (ip) {
-    return !ip.type && ip.reservation && ip.reservation.status === "active" && canManageNetworks();
+    return !ip.type && ip.reservation && ip.reservation.status === "active" && canEditReservation(ip.reservation);
   });
 
   var html = '<div class="ip-panel-content"><table class="ip-table" data-sf-table-id="ip-panel"><thead><tr>' +
@@ -359,8 +359,12 @@ function _renderIpList(data) {
     var owner = ownerDisplay;
 
     var actions = "";
-    var isOwner = r && r.createdBy === currentUsername;
-    var canEditThis = canManageNetworks() || isOwner;
+    // Edit/Free/Retry visibility is a RESERVATIONS-permission decision:
+    // reservations=fullwrite edits anyone's row, reservations=write edits only
+    // own (createdBy). Use the shared canEditReservation() helper — NOT
+    // canManageNetworks() (that's subnets=fullwrite and has nothing to do with
+    // reservation rights).
+    var canEditThis = canEditReservation(r);
     var assetBtn = ip.assetId
       ? '<button class="btn btn-sm btn-secondary ip-asset-btn" data-aid="' + escapeHtml(ip.assetId) + '" title="Open asset details">View Asset</button>'
       : '';
@@ -434,7 +438,7 @@ function _renderIpList(data) {
       ? '<span style="font-size:0.75rem">' + escapeHtml(formatDate(r.expiresAt)) + '</span>'
       : '<span style="color:var(--color-text-tertiary)">-</span>';
 
-    var canRelease = !isSpecial && r && r.status === "active" && canManageNetworks();
+    var canRelease = !isSpecial && r && r.status === "active" && canEditReservation(r);
     var cbChecked = canRelease && _panelSelected.has(r.id) ? ' checked' : '';
     var cbCell = canRelease
       ? '<td class="cb-col"><input type="checkbox" class="panel-row-cb"' + cbChecked + ' data-rid="' + r.id + '"></td>'
@@ -1105,12 +1109,14 @@ function _openVipReserveModal(reservationId) {
 }
 
 function _openEditReservationModal(reservationId) {
-  // Owners of dhcp-reservation / dhcp-lease records can edit their own entries
-  // even without canManageNetworks. For simple read-only detection, we treat
-  // anything the user can't write as view-only.
+  // Read-only detection is a RESERVATIONS-permission decision:
+  // reservations=fullwrite edits anyone's row, reservations=write edits only
+  // own (createdBy). canEditReservation() encodes exactly that — earlier code
+  // checked canManageNetworks() (subnets=fullwrite, unrelated) and compared
+  // r.owner (display metadata), so a reservations:fullwrite user couldn't edit
+  // another user's row.
   api.reservations.get(reservationId).then(function (r) {
-    var isOwner = currentUsername && r.owner === currentUsername;
-    var readOnly = !canManageNetworks() && !isOwner;
+    var readOnly = !canEditReservation(r);
     var lock = readOnly ? ' disabled class="field-locked"' : '';
     var subnetLabel = r.subnet ? escapeHtml(r.subnet.name) + " (" + escapeHtml(r.subnet.cidr) + ")" : r.subnetId;
     var expiresVal = r.expiresAt ? _toDatetimeLocal(r.expiresAt) : "";
