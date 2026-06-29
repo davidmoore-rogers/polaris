@@ -1528,6 +1528,14 @@ const TAGS = [
   { id: "tag-017", name: "auto-discovered",category: "System",      color: "#78909c", createdAt: "2026-01-10T09:00:00.000Z" },
   { id: "tag-018", name: "spare",          category: "Status",      color: "#bdbdbd", createdAt: "2026-01-10T09:00:00.000Z" },
   { id: "tag-019", name: "decommissioned", category: "Status",      color: "#9e9e9e", createdAt: "2026-01-10T09:00:00.000Z" },
+  // Criteria-based auto-assigned tags (managed sync). `criteria` rules are
+  // ANDed; values within a rule are ORed. These auto-apply to / are removed
+  // from matching assets by tagAssignmentService — see server-settings →
+  // Identification → Tags → "Auto-assign by criteria".
+  { id: "tag-020", name: "auto:fortigate", category: "Auto", color: "#ee5340", createdAt: "2026-01-10T09:00:00.000Z",
+    criteria: { version: 1, match: "all", rules: [{ field: "assetType", op: "exact", values: ["firewall"] }] } },
+  { id: "tag-021", name: "auto:windows", category: "Auto", color: "#0078d4", createdAt: "2026-01-10T09:00:00.000Z",
+    criteria: { version: 1, match: "all", rules: [{ field: "os", op: "pattern", values: ["*Windows*"] }] } },
 ];
 
 const TAG_SETTINGS = { enforce: false };

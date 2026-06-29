@@ -3738,7 +3738,11 @@ function renderIdentificationTab() {
         html += '<div class="tag-chip-list">';
         tags.forEach(function (t) {
           var colorStyle = t.color ? ' style="background:' + escapeHtml(t.color) + '22;border-color:' + escapeHtml(t.color) + ';color:' + escapeHtml(t.color) + '"' : '';
+          var autoMark = (t.criteria && t.criteria.rules && t.criteria.rules.length)
+            ? '<span title="Auto-assigned by criteria" style="margin-right:4px">&#9881;</span>'
+            : '';
           html += '<span class="tag-chip"' + colorStyle + '>' +
+            autoMark +
             escapeHtml(t.name) +
             (isAdmin() ? '<button class="tag-chip-edit" data-tag-id="' + t.id + '" title="Edit" style="margin-left:4px;background:none;border:none;color:inherit;cursor:pointer;font-size:0.75rem;opacity:0.7;padding:0">&#9998;</button>' : '') +
             (isAdmin() ? '<button class="tag-chip-delete" data-tag-id="' + t.id + '" title="Delete">&times;</button>' : '') +
@@ -4975,6 +4979,216 @@ async function deleteIconUI(id, label) {
 // (mibProfileStatusHTML removed — superseded by the editable Manufacturer
 // Profiles card on the same Identification tab.)
 
+// ─── Tag auto-assignment criteria builder ────────────────────────────────────
+// Shared by the Add Tag and Edit Tag modals. A tag with criteria is
+// auto-applied to / removed from assets matching the rules (managed sync,
+// engine-owned copies only — hand-applied tags are never disturbed).
+
+var TAG_CRITERIA_FIELDS = [
+  { value: "manufacturer", label: "Manufacturer", kind: "string" },
+  { value: "model",        label: "Model",            kind: "string" },
+  { value: "os",           label: "Operating system", kind: "string" },
+  { value: "osVersion",    label: "OS version",       kind: "string" },
+  { value: "hostname",     label: "Hostname",         kind: "string" },
+  { value: "department",   label: "Department",       kind: "string" },
+  { value: "location",     label: "Location",         kind: "string" },
+  { value: "assetType",    label: "Asset type",       kind: "assetType" },
+  { value: "status",       label: "Status",           kind: "status" },
+  { value: "subnet",       label: "Subnet / CIDR",    kind: "subnet" },
+];
+var TAG_STRING_OPS = [
+  { value: "exact",    label: "is" },
+  { value: "contains", label: "contains" },
+  { value: "pattern",  label: "matches (wildcard *)" },
+];
+var TAG_STATUSES = ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"];
+var _tagAssetTypesCache = null;
+var _tagPreviewTimer = null;
+
+function _tagFieldKind(field) {
+  var f = TAG_CRITERIA_FIELDS.find(function (x) { return x.value === field; });
+  return f ? f.kind : "string";
+}
+
+// Build the inner HTML for a single rule row's op + value cells, depending on
+// the selected field. Called on row creation and whenever the field changes.
+function _tagRuleCellsHTML(field, op, valueStr) {
+  var kind = _tagFieldKind(field);
+  var opHtml = "";
+  if (kind === "string") {
+    opHtml = '<select class="tag-rule-op" style="flex:0 0 auto">' +
+      TAG_STRING_OPS.map(function (o) {
+        return '<option value="' + o.value + '"' + (o.value === op ? ' selected' : '') + '>' + escapeHtml(o.label) + '</option>';
+      }).join("") + '</select>';
+  } else if (kind === "subnet") {
+    opHtml = '<span class="tag-rule-op-static" style="flex:0 0 auto;align-self:center;color:var(--color-text-secondary);font-size:0.82rem">in</span>';
+  } else {
+    opHtml = '<span class="tag-rule-op-static" style="flex:0 0 auto;align-self:center;color:var(--color-text-secondary);font-size:0.82rem">is</span>';
+  }
+
+  var placeholder, listAttr = "", listHtml = "";
+  if (kind === "subnet") {
+    placeholder = "10.0.0.0/16, 2001:db8::/32";
+  } else if (kind === "status") {
+    placeholder = "active, maintenance";
+    listAttr = ' list="tag-status-list"';
+  } else if (kind === "assetType") {
+    placeholder = "firewall, switch";
+    listAttr = ' list="tag-assettype-list"';
+  } else {
+    placeholder = "value, another value";
+  }
+  var valHtml = '<input type="text" class="tag-rule-input" style="flex:1"' + listAttr +
+    ' placeholder="' + escapeHtml(placeholder) + '" value="' + escapeHtml(valueStr || "") + '">';
+
+  return opHtml + valHtml + listHtml;
+}
+
+function _tagRuleRowHTML(rule) {
+  var field = rule ? rule.field : "manufacturer";
+  var op = rule ? rule.op : "exact";
+  var valueStr = "";
+  if (rule) {
+    valueStr = rule.field === "subnet"
+      ? (rule.cidrs || []).join(", ")
+      : (rule.values || []).join(", ");
+  }
+  var fieldOpts = TAG_CRITERIA_FIELDS.map(function (f) {
+    return '<option value="' + f.value + '"' + (f.value === field ? ' selected' : '') + '>' + escapeHtml(f.label) + '</option>';
+  }).join("");
+  return '<div class="tag-rule" style="display:flex;gap:6px;margin-bottom:6px;align-items:flex-start">' +
+    '<select class="tag-rule-field" style="flex:0 0 9.5rem">' + fieldOpts + '</select>' +
+    '<div class="tag-rule-cells" style="display:flex;gap:6px;flex:1">' + _tagRuleCellsHTML(field, op, valueStr) + '</div>' +
+    '<button type="button" class="tag-rule-remove btn-icon" title="Remove rule" aria-label="Remove rule" ' +
+      'style="flex:0 0 auto;border:1px solid var(--color-border);border-radius:4px;background:transparent;color:var(--color-text-secondary);cursor:pointer;width:30px;height:30px">×</button>' +
+  '</div>';
+}
+
+function _tagCriteriaSectionHTML(criteria) {
+  var on = !!(criteria && criteria.rules && criteria.rules.length);
+  var rulesHtml = on
+    ? criteria.rules.map(function (r) { return _tagRuleRowHTML(r); }).join("")
+    : _tagRuleRowHTML(null);
+  return '<div class="form-group" style="border-top:1px solid var(--color-border);padding-top:12px;margin-top:4px">' +
+    '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
+      '<input type="checkbox" id="f-tag-auto-toggle"' + (on ? ' checked' : '') + ' style="width:auto">' +
+      '<span>Auto-assign by criteria</span>' +
+    '</label>' +
+    '<p class="hint">When on, this tag is automatically applied to every asset matching ALL of the rules below, and removed when an asset no longer matches. Tags you add by hand are never removed.</p>' +
+    '<div id="f-tag-criteria-body" style="' + (on ? '' : 'display:none;') + '">' +
+      '<div id="f-tag-rules">' + rulesHtml + '</div>' +
+      '<button type="button" id="f-tag-add-rule" class="btn btn-secondary btn-sm" style="margin-top:4px">+ Add rule</button>' +
+      '<div id="f-tag-preview" class="hint" style="margin-top:8px;font-style:italic"></div>' +
+    '</div>' +
+    // Shared datalists for status / asset-type value inputs.
+    '<datalist id="tag-status-list">' + TAG_STATUSES.map(function (s) { return '<option value="' + s + '">'; }).join("") + '</datalist>' +
+    '<datalist id="tag-assettype-list"></datalist>' +
+  '</div>';
+}
+
+// Read the builder DOM into a criteria object (or null when the toggle is off
+// or no usable rules exist).
+function _collectTagCriteria() {
+  var toggle = document.getElementById("f-tag-auto-toggle");
+  if (!toggle || !toggle.checked) return null;
+  var rules = [];
+  document.querySelectorAll("#f-tag-rules .tag-rule").forEach(function (row) {
+    var field = row.querySelector(".tag-rule-field").value;
+    var input = row.querySelector(".tag-rule-input");
+    var parts = (input && input.value ? input.value : "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    if (!parts.length) return;
+    if (field === "subnet") {
+      rules.push({ field: "subnet", op: "inCidr", cidrs: parts });
+    } else {
+      var kind = _tagFieldKind(field);
+      var op = "exact";
+      if (kind === "string") {
+        var opSel = row.querySelector(".tag-rule-op");
+        if (opSel) op = opSel.value;
+      }
+      rules.push({ field: field, op: op, values: parts });
+    }
+  });
+  if (!rules.length) return null;
+  return { version: 1, match: "all", rules: rules };
+}
+
+function _refreshTagCriteriaPreview(tagId) {
+  var el = document.getElementById("f-tag-preview");
+  if (!el) return;
+  var criteria = _collectTagCriteria();
+  if (!criteria) { el.textContent = ""; return; }
+  el.textContent = "Checking…";
+  if (_tagPreviewTimer) clearTimeout(_tagPreviewTimer);
+  _tagPreviewTimer = setTimeout(async function () {
+    try {
+      var body = { criteria: criteria };
+      if (tagId) body.tagId = tagId;
+      var res = await api.serverSettings.previewTagCriteria(body);
+      var msg = res.matchCount + " asset" + (res.matchCount === 1 ? "" : "s") + " match";
+      if (res.diff) msg += " · this save: +" + res.diff.add + " / −" + res.diff.remove;
+      el.textContent = msg;
+    } catch (err) {
+      el.textContent = "Preview unavailable: " + (err && err.message ? err.message : "error");
+    }
+  }, 350);
+}
+
+async function _wireTagCriteriaBuilder(tagId) {
+  // Populate asset-type datalist (best-effort — may be denied for some roles).
+  var dl = document.getElementById("tag-assettype-list");
+  if (dl) {
+    if (!_tagAssetTypesCache) {
+      try { _tagAssetTypesCache = await api.assetTypes.list(); } catch (e) { _tagAssetTypesCache = []; }
+    }
+    dl.innerHTML = (_tagAssetTypesCache || []).map(function (t) {
+      return '<option value="' + escapeHtml(t.name) + '">' + escapeHtml(t.label || t.name) + '</option>';
+    }).join("");
+  }
+
+  var toggle = document.getElementById("f-tag-auto-toggle");
+  var bodyEl = document.getElementById("f-tag-criteria-body");
+  var rulesEl = document.getElementById("f-tag-rules");
+  var addBtn = document.getElementById("f-tag-add-rule");
+
+  if (toggle) toggle.addEventListener("change", function () {
+    bodyEl.style.display = toggle.checked ? "" : "none";
+    if (toggle.checked && rulesEl.children.length === 0) {
+      rulesEl.insertAdjacentHTML("beforeend", _tagRuleRowHTML(null));
+    }
+    _refreshTagCriteriaPreview(tagId);
+  });
+
+  if (addBtn) addBtn.addEventListener("click", function () {
+    rulesEl.insertAdjacentHTML("beforeend", _tagRuleRowHTML(null));
+  });
+
+  // Delegate row interactions: field change rebuilds op/value cells; remove
+  // drops the row; any change/input refreshes the live preview.
+  if (rulesEl) {
+    rulesEl.addEventListener("change", function (e) {
+      var fieldSel = e.target.closest ? e.target.closest(".tag-rule-field") : null;
+      if (fieldSel) {
+        var row = fieldSel.closest(".tag-rule");
+        var cells = row.querySelector(".tag-rule-cells");
+        cells.innerHTML = _tagRuleCellsHTML(fieldSel.value, "exact", "");
+      }
+      _refreshTagCriteriaPreview(tagId);
+    });
+    rulesEl.addEventListener("input", function () { _refreshTagCriteriaPreview(tagId); });
+    rulesEl.addEventListener("click", function (e) {
+      var rm = e.target.closest ? e.target.closest(".tag-rule-remove") : null;
+      if (rm) {
+        var row = rm.closest(".tag-rule");
+        if (row) row.remove();
+        _refreshTagCriteriaPreview(tagId);
+      }
+    });
+  }
+
+  _refreshTagCriteriaPreview(tagId);
+}
+
 async function openAddTagModal() {
   // Collect existing categories (including empty tracked ones) for the dropdown
   var existingCats = [];
@@ -5015,11 +5229,13 @@ async function openAddTagModal() {
         '</button>' +
         '<span id="f-tag-color-hex" style="font-family:var(--font-mono);font-size:0.82rem;color:var(--color-text-secondary)"></span>' +
       '</div>' +
-    '</div>';
+    '</div>' +
+    _tagCriteriaSectionHTML(null);
 
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-save-tag">Add Tag</button>';
   openModal("Add Tag", body, footer);
+  _wireTagCriteriaBuilder(null);
 
   // Toggle new category input
   var catSelect = document.getElementById("f-tag-category-select");
@@ -5065,6 +5281,7 @@ async function openAddTagModal() {
         name: name,
         category: category,
         color: colorInput.value,
+        criteria: _collectTagCriteria(),
       });
       closeModal();
       showToast('Tag "' + name + '" created');
@@ -5121,11 +5338,13 @@ async function openEditTagModal(id) {
         '</button>' +
         '<span id="f-tag-color-hex" style="font-family:var(--font-mono);font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(tag.color || "#4fc3f7") + '</span>' +
       '</div>' +
-    '</div>';
+    '</div>' +
+    _tagCriteriaSectionHTML(tag.criteria || null);
 
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-save-tag">Save Changes</button>';
   openModal("Edit Tag", body, footer);
+  _wireTagCriteriaBuilder(tag.id);
 
   var catSelect = document.getElementById("f-tag-category-select");
   var catNew = document.getElementById("f-tag-category-new");
@@ -5169,6 +5388,7 @@ async function openEditTagModal(id) {
         name: name,
         category: category,
         color: colorInput.value,
+        criteria: _collectTagCriteria(),
       });
       closeModal();
       showToast('Tag "' + name + '" updated');

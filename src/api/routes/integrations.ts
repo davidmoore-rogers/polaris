@@ -56,6 +56,7 @@ import * as presenceVerification from "../../services/presenceVerificationServic
 import { recomputeDependencyTree } from "../../services/dependencyTreeService.js";
 import { collectManagementAccess, type DeviceAccessGroup } from "../../services/fortinetManagementAccessService.js";
 import { reconcileMapRegions } from "../../services/mapRegionService.js";
+import { reconcileAllTags } from "../../services/tagAssignmentService.js";
 import {
   reconcileFirewallTagsForIntegration,
   seedFirewallTagRegistry,
@@ -6346,6 +6347,20 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       }
     } catch (err: any) {
       syncLog("error", `Firewall tag reconcile failed: ${err?.message || "Unknown error"}`);
+    }
+
+    phaseMark("13.65");
+    // Phase 13.65 — Reconcile criteria-based auto-assigned tags. Newly
+    // discovered / changed assets that now match (or no longer match) an
+    // operator-defined tag criteria get the tag added / removed (managed sync,
+    // engine-owned copies only). Best-effort. See src/services/tagAssignmentService.ts.
+    try {
+      const summary = await reconcileAllTags();
+      if (summary.added > 0 || summary.removed > 0) {
+        syncLog("info", `Criteria tags: +${summary.added} / -${summary.removed}`);
+      }
+    } catch (err: any) {
+      syncLog("error", `Tag-assignment reconcile failed: ${err?.message || "Unknown error"}`);
     }
 
     phaseMark("13.6");

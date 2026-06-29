@@ -21,6 +21,7 @@ import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../..
 import { isValidIpAddress, cidrContains } from "../../utils/cidr.js";
 import { isKnownAssetType } from "../../utils/assetTypes.js";
 import { recomputeMonitorOverrideForAssets, getAddAsMonitoredFromConfig } from "../../services/monitorOverrideService.js";
+import { reconcileTagsForAsset } from "../../services/tagAssignmentService.js";
 import { mergeAssets, MERGEABLE_FIELDS, type MergeableField, type FieldWinner } from "../../services/assetMergeService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
@@ -2072,6 +2073,8 @@ router.post("/", requirePermission("assets", "write"), async (req, res, next) =>
     clampAcquiredToLastSeen(data);
     const asset = await prisma.asset.create({ data: data as any });
     logEvent({ action: "asset.created", resourceType: "asset", resourceId: asset.id, resourceName: input.hostname || input.ipAddress, actor: req.session?.username, message: `Asset "${input.hostname || input.ipAddress || "unknown"}" created` });
+    // Apply any criteria-based auto-tags to the new asset (best-effort).
+    reconcileTagsForAsset(asset.id).catch(() => {});
     res.status(201).json(asset);
   } catch (err) {
     next(err);
@@ -2159,6 +2162,12 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }
     const changes = buildChanges(before, after);
     logEvent({ action: "asset.updated", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: req.session?.username, message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated`, details: changes ? { changes } : undefined });
+    // Re-evaluate criteria-based auto-tags when a criteria-relevant field changed
+    // (best-effort; the periodic job is the safety net).
+    const TAG_CRITERIA_FIELDS = ["manufacturer", "model", "os", "osVersion", "hostname", "department", "location", "assetType", "status", "ipAddress"] as const;
+    if (TAG_CRITERIA_FIELDS.some((f) => (input as any)[f] !== undefined)) {
+      reconcileTagsForAsset(id).catch(() => {});
+    }
     res.json(asset);
   } catch (err) {
     next(err);
