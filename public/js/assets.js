@@ -382,12 +382,8 @@ document.addEventListener("DOMContentLoaded", async function () {
     fetchAssetsPage();
     _saveAssetsPrefs();
   });
-  document.getElementById("filter-pagesize").addEventListener("change", function () {
-    _assetsPageSize = parseInt(this.value, 10) || 15;
-    _assetsPage = 1;
-    fetchAssetsPage();
-    _saveAssetsPrefs();
-  });
+  // Page-size selector is now rendered inside the pagination row by
+  // renderPageControls (onSizeChange) — no standalone #filter-pagesize.
 });
 
 var ASSET_TYPE_LABELS = {
@@ -561,7 +557,7 @@ async function fetchAssetsPage() {
     _assetsData = all.map(_mapAsset);
     renderAssetsPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="19" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="18" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -908,8 +904,8 @@ function renderAssetsPage() {
   if (_assetsData.length === 0) {
     var hasFilters = _assetsSF && _assetsSF._filters && Object.keys(_assetsSF._filters).length > 0;
     tbody.innerHTML = hasFilters
-      ? '<tr><td colspan="19" class="empty-state">No results match the current filters.</td></tr>'
-      : '<tr><td colspan="19" class="empty-state">No assets found. Add one to get started.</td></tr>';
+      ? '<tr><td colspan="18" class="empty-state">No results match the current filters.</td></tr>'
+      : '<tr><td colspan="18" class="empty-state">No assets found. Add one to get started.</td></tr>';
     clearPageControls("pagination");
     _assetsUpdateSelectAll();
     return;
@@ -939,15 +935,7 @@ function renderAssetsPage() {
       '<td>' + _copyableCell(a.purchaseOrder) + '</td>' +
       '<td>' + _copyableCell(a.dnsName) + '</td>' +
       '<td>' + (a.lastSeen ? formatDate(a.lastSeen) : "-") + '</td>' +
-      '<td class="actions">' +
-        (canManageAssets() ? '<button class="btn btn-sm btn-secondary" onclick="openEditModal(\'' + a.id + '\')">Edit</button>' : '') +
-        _viewLeaseActionHTML(a) +
-        _quarantineActionHTML(a) +
-        (canManageAssets() ?
-          (a.macAddress && !a.manufacturer ? '<button class="btn btn-sm btn-secondary" onclick="singleOuiLookup(\'' + a.id + '\', \'' + escapeHtml(a.macAddress) + '\')" title="OUI manufacturer lookup">OUI</button>' : '') +
-          '<button class="btn btn-sm btn-danger" onclick="confirmDelete(\'' + a.id + '\', \'' + escapeHtml(a.hostname || a.assetTag || a.ipAddress || "this asset") + '\')">Del</button>'
-        : '') +
-      '</td></tr>';
+      '</tr>';
   }).join("");
   tbody.querySelectorAll('.mac-hover-trigger').forEach(function (el) {
     el.addEventListener('mouseenter', _handleMacEnter);
@@ -957,7 +945,12 @@ function renderAssetsPage() {
   renderPageControls("pagination", _assetsTotal, _assetsPageSize, _assetsPage, function (p) {
     _assetsPage = p;
     fetchAssetsPage();
-  }, null, {
+  }, function (size) {
+    _assetsPageSize = size;
+    _assetsPage = 1;
+    fetchAssetsPage();
+    _saveAssetsPrefs();
+  }, {
     actionButtons: [
       {
         label: "Refresh",
@@ -997,9 +990,16 @@ function _assetsUpdateBulkBar() {
   var bar = document.getElementById("assets-bulk-bar");
   if (!bar) return;
   var count = _assetsSelected.size;
-  bar.style.display = count > 0 ? "flex" : "none";
+  // Always visible; neutral (idle) until something is selected, accent outline
+  // once it is. Action buttons are disabled while idle. (Matches Notifications.)
+  bar.classList.toggle("bulk-bar-idle", count === 0);
   var el = bar.querySelector(".bulk-bar-count");
-  if (el) el.textContent = count + " selected";
+  if (el) el.textContent = count === 0 ? "No assets selected" : (count + " selected");
+  // Disable every bulk action while nothing is selected.
+  ["assets-bulk-deselect-btn", "assets-bulk-type-btn", "assets-bulk-state-btn",
+   "assets-bulk-monitor-btn", "assets-bulk-tags-btn", "assets-bulk-delete-btn",
+   "assets-bulk-compare-btn", "assets-bulk-quarantine-btn", "assets-bulk-unquarantine-btn"
+  ].forEach(function (id) { var b = document.getElementById(id); if (b) b.disabled = count === 0; });
 
   // Compare needs at least two assets to overlay. Available to any role that
   // can view assets — comparing telemetry is read-only.
@@ -3470,6 +3470,12 @@ async function openViewModal(id) {
     if (permAtLeast("events", "read")) {
       tabs.push({ key: "events", label: "Events", html: _assetEventsTabHTML(a.id) });
     }
+    // Notifications tab — active notifications for this asset + the rules whose
+    // scope matches it. Loaded eagerly after render (one cheap query). Gated on
+    // notifications-read to mirror the page's View-tab gate.
+    if (permAtLeast("notifications", "read")) {
+      tabs.push({ key: "notifications", label: "Notifications", html: _assetNotificationsTabHTML() });
+    }
     // Custom MIB tab — shown only when the asset's manufacturer actually has
     // at least one ManufacturerCustomWidget defined under its
     // ManufacturerProfile. The widget payload is fetched up front in the
@@ -3540,6 +3546,7 @@ async function openViewModal(id) {
     if (sdwanRules.length || sdwanLinks.length || sdwanMembers.length) _wireSdwanTab(a, sdwanRules, sdwanLinks, sdwanMembers);
     if (!isInfraProc) _wireAssetProcessesTab(a);
     if (permAtLeast("events", "read")) _wireAssetEventsTab(a.id);
+    if (permAtLeast("notifications", "read")) _loadAssetNotificationsTab(a.id);
     // Mount the dependency tree into its placeholder div on the General tab.
     var depMount = document.getElementById("asset-dep-tree-mount-" + a.id);
     if (depMount) {
@@ -13703,6 +13710,52 @@ function openLogFlagRulesModal(asset, processName, onChange) {
     });
   }
   refreshList();
+}
+
+// Asset-details Notifications tab: active notifications for this asset + the
+// rules whose scope matches it. Both loaded by _loadAssetNotificationsTab.
+function _assetNotificationsTabHTML() {
+  return '<div class="section-block">' +
+    '<h4 style="margin:0 0 0.5rem">Active notifications</h4>' +
+    '<div class="table-wrapper"><table><thead><tr>' +
+      '<th style="width:160px">Time</th><th style="width:80px">Severity</th><th>Message</th><th style="width:160px">Acknowledged</th>' +
+    '</tr></thead><tbody id="asset-notif-active-tbody"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table></div>' +
+    '<h4 style="margin:1rem 0 0.5rem">Rules that can trigger for this asset</h4>' +
+    '<div class="table-wrapper"><table><thead><tr>' +
+      '<th style="width:200px">Name</th><th style="width:130px">Trigger</th><th style="width:90px">Severity</th><th>Scope</th>' +
+    '</tr></thead><tbody id="asset-notif-rules-tbody"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody></table></div>' +
+  '</div>';
+}
+
+function _loadAssetNotificationsTab(assetId) {
+  api.assets.notifications(assetId).then(function (data) {
+    var active = (data && data.active) || [];
+    var rules = (data && data.matchingRules) || [];
+    var aTbody = document.getElementById("asset-notif-active-tbody");
+    if (aTbody) {
+      aTbody.innerHTML = active.length ? active.map(function (n) {
+        var ts = new Date(n.triggeredAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+        var ack = n.acknowledged ? escapeHtml(n.acknowledgedBy || "yes") : '<span style="color:var(--color-text-tertiary)">—</span>';
+        return '<tr><td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ts) + '</td>' +
+          '<td><span class="badge badge-level-' + (n.severity || "info") + '">' + (n.severity || "info").toUpperCase() + '</span></td>' +
+          '<td>' + escapeHtml(n.message || "") + '</td><td>' + ack + '</td></tr>';
+      }).join("") : '<tr><td colspan="4" class="empty-state">No active notifications</td></tr>';
+    }
+    var rTbody = document.getElementById("asset-notif-rules-tbody");
+    if (rTbody) {
+      rTbody.innerHTML = rules.length ? rules.map(function (r) {
+        var tt = (r.trigger && r.trigger.type) || "";
+        var scope = r.scope && r.scope.allAssets ? "All assets"
+          : (r.scope && ((r.scope.assetTypes || []).concat(r.scope.tags || []).join(", "))) || "—";
+        return '<tr><td>' + escapeHtml(r.name) + '</td><td><span class="badge">' + escapeHtml(tt) + '</span></td>' +
+          '<td><span class="badge badge-level-' + (r.severity || "info") + '">' + (r.severity || "info").toUpperCase() + '</span></td>' +
+          '<td style="font-size:0.85rem">' + escapeHtml(scope) + '</td></tr>';
+      }).join("") : '<tr><td colspan="4" class="empty-state">No rules currently match this asset</td></tr>';
+    }
+  }).catch(function () {
+    var aTbody = document.getElementById("asset-notif-active-tbody");
+    if (aTbody) aTbody.innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load</td></tr>';
+  });
 }
 
 function _assetEventsTabHTML(assetId) {

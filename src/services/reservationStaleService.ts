@@ -12,6 +12,18 @@
  * again, so a reservation that comes back online and then goes silent
  * later will re-arm the alert cleanly.
  *
+ * The DHCP lease is not the only presence signal Polaris holds. A device that
+ * is *statically* configured with an IP that also has a DHCP reservation never
+ * pulls a lease, so `lastSeenLeased` stays null forever — yet the device is
+ * online and discovered as an Asset (via FortiGate device inventory / ARP /
+ * monitor probe). To avoid flagging those as stale, detection also folds in
+ * `Asset.lastSeen` (the no-regress verified-presence timestamp from
+ * `bumpLastSeen`) for any Asset that correlates to the reservation by MAC
+ * (authoritative — DHCP reservations are MAC→IP) or, failing that, by IP. The
+ * effective "last signal" is the freshest of the lease and the matched asset;
+ * a device that is genuinely gone has neither a fresh lease nor a fresh asset
+ * lastSeen, so it still flags correctly.
+ *
  * Threshold is admin-tunable via the `reservationStale` Setting
  * (`staleAfterDays`, default 60, 0 = disabled). The grace baseline below
  * absorbs the cold-start case: after the migration deploys, no rows have
@@ -22,6 +34,7 @@
 
 import { prisma } from "../db.js";
 import { logEvent } from "./eventLogService.js";
+import { normalizeMacOrNull } from "../utils/mac.js";
 
 const SETTINGS_KEY = "reservationStale";
 const DETECTION_STARTED_AT_KEY = "reservationStaleDetectionStartedAt";
@@ -102,10 +115,131 @@ export interface ReservationAlertEntry {
   createdAt: Date;
   lastSeenLeased: Date | null;
   staleNotifiedAt: Date | null;
-  daysSinceSeen: number; // since lastSeenLeased OR effective baseline
+  daysSinceSeen: number; // since the freshest of {lease, matched asset} OR baseline
   fortigateDevice: string | null;
   pushedToId: string | null;
   pushedToName: string | null;
+  // Cross-signal presence: the lastSeen of an Asset that correlates to this
+  // reservation (by MAC first, then IP), and how it matched. Null when no
+  // asset correlates. Lets the alert explain that a flagged row's device is
+  // also absent from asset presence — and, more importantly, keeps a
+  // statically-addressed-but-online device OUT of the stale list entirely.
+  assetLastSeen: Date | null;
+  assetPresenceMatch: AssetPresenceMatch;
+}
+
+export type AssetPresenceMatch = "mac" | "ip" | null;
+
+interface AssetPresence {
+  lastSeen: Date | null;
+  match: AssetPresenceMatch;
+}
+
+/**
+ * Pick the freshest "last signal" for a reservation from the available
+ * evidence. The lease timestamp and the matched-asset timestamp are both real
+ * evidence; the baseline is only a fallback used when NO real evidence exists
+ * (cold-start grace — see module header). Pure + exported for unit testing.
+ *
+ * Note the baseline is a fallback, not a floor: a reservation with a genuine
+ * but old lease/asset signal uses that real timestamp even when it predates
+ * the baseline, so a long-dead reservation still flags during the cold-start
+ * window rather than being spared.
+ */
+export function effectiveLastSignalMs(opts: {
+  lastSeenLeasedMs: number | null;
+  assetLastSeenMs: number | null;
+  baselineMs: number;
+}): { ms: number; evidence: "lease" | "asset" | "baseline" } {
+  let best: { ms: number; evidence: "lease" | "asset" } | null = null;
+  if (opts.lastSeenLeasedMs != null) best = { ms: opts.lastSeenLeasedMs, evidence: "lease" };
+  if (opts.assetLastSeenMs != null && (best == null || opts.assetLastSeenMs > best.ms)) {
+    best = { ms: opts.assetLastSeenMs, evidence: "asset" };
+  }
+  return best ?? { ms: opts.baselineMs, evidence: "baseline" };
+}
+
+/**
+ * Build an asset-presence resolver for a batch of reservation rows. Collects
+ * the distinct MACs / IPs across the batch, runs three indexed batched queries
+ * (primary Asset columns + the AssetMacAddress / AssetAssociatedIp side tables
+ * so multi-interface / multi-IP devices still correlate), and returns a closure
+ * that resolves each reservation to its freshest matching Asset.lastSeen.
+ *
+ * Scale: the three queries are bounded by the number of stale-candidate
+ * reservations (itself bounded by total dhcp_reservation count — low thousands
+ * at most), run in parallel, and hit the mac/ip indexes; the per-row resolver
+ * is O(1) map lookups. Safe at both 100 and 2000+ assets.
+ */
+async function buildAssetPresenceResolver(
+  rows: Array<{ macAddress: string | null; ipAddress: string | null }>,
+): Promise<(r: { macAddress: string | null; ipAddress: string | null }) => AssetPresence> {
+  const macs = new Set<string>();
+  const ips = new Set<string>();
+  for (const r of rows) {
+    const m = normalizeMacOrNull(r.macAddress);
+    if (m) macs.add(m);
+    if (r.ipAddress) ips.add(r.ipAddress);
+  }
+
+  const byMac = new Map<string, number>();
+  const byIp = new Map<string, number>();
+  const bump = (map: Map<string, number>, key: string, d: Date | null | undefined) => {
+    if (!d) return;
+    const ms = d.getTime();
+    const prev = map.get(key);
+    if (prev === undefined || ms > prev) map.set(key, ms);
+  };
+
+  const macList = [...macs];
+  const ipList = [...ips];
+  if (macList.length === 0 && ipList.length === 0) {
+    return () => ({ lastSeen: null, match: null });
+  }
+
+  const [assetsByPrimary, macRows, ipRows] = await Promise.all([
+    prisma.asset.findMany({
+      where: {
+        OR: [
+          ...(macList.length ? [{ macAddress: { in: macList } }] : []),
+          ...(ipList.length ? [{ ipAddress: { in: ipList } }] : []),
+        ],
+      },
+      select: { macAddress: true, ipAddress: true, lastSeen: true },
+    }),
+    macList.length
+      ? prisma.assetMacAddress.findMany({
+          where: { mac: { in: macList } },
+          select: { mac: true, asset: { select: { lastSeen: true } } },
+        })
+      : Promise.resolve([] as Array<{ mac: string; asset: { lastSeen: Date | null } }>),
+    ipList.length
+      ? prisma.assetAssociatedIp.findMany({
+          where: { ip: { in: ipList } },
+          select: { ip: true, asset: { select: { lastSeen: true } } },
+        })
+      : Promise.resolve([] as Array<{ ip: string; asset: { lastSeen: Date | null } }>),
+  ]);
+
+  for (const a of assetsByPrimary) {
+    const m = normalizeMacOrNull(a.macAddress);
+    if (m && macs.has(m)) bump(byMac, m, a.lastSeen);
+    if (a.ipAddress && ips.has(a.ipAddress)) bump(byIp, a.ipAddress, a.lastSeen);
+  }
+  for (const row of macRows) {
+    const m = normalizeMacOrNull(row.mac);
+    if (m) bump(byMac, m, row.asset?.lastSeen);
+  }
+  for (const row of ipRows) {
+    bump(byIp, row.ip, row.asset?.lastSeen);
+  }
+
+  return (r) => {
+    const m = normalizeMacOrNull(r.macAddress);
+    if (m && byMac.has(m)) return { lastSeen: new Date(byMac.get(m)!), match: "mac" };
+    if (r.ipAddress && byIp.has(r.ipAddress)) return { lastSeen: new Date(byIp.get(r.ipAddress)!), match: "ip" };
+    return { lastSeen: null, match: null };
+  };
 }
 
 export interface SnoozeReservationResult {
@@ -159,10 +293,13 @@ export async function snoozeReservation(reservationId: string, actor?: string): 
 
 /**
  * List all currently-stale reservations. A row is stale when the threshold
- * is non-zero AND either (a) it has never been seen leased and the effective
- * baseline is older than the threshold, or (b) lastSeenLeased is older than
- * the threshold. The effective baseline is `max(createdAt, detectionStartedAt)`
- * — both conditions widen during the cold-start grace window.
+ * is non-zero AND its freshest presence signal is older than the threshold.
+ * The freshest signal is the most recent of (a) `lastSeenLeased` (the DHCP
+ * lease) and (b) the lastSeen of an Asset that correlates to the reservation
+ * by MAC or IP (so a statically-addressed device that never leases but is up
+ * still clears). When neither exists, the effective baseline
+ * `max(createdAt, detectionStartedAt)` is used so the cold-start grace window
+ * doesn't flood the alert list before discovery has populated either signal.
  *
  * `mode` controls which rows are returned:
  *   "active"  — non-ignored stale rows (default; what the badge counts)
@@ -186,9 +323,15 @@ export async function listStaleReservations(
       },
       orderBy: [{ lastSeenLeased: "asc" }, { createdAt: "asc" }],
     });
+    const resolvePresence = await buildAssetPresenceResolver(rows);
     const nowMs = Date.now();
     return rows.map((r) => {
-      const lastSignalMs = r.lastSeenLeased ? r.lastSeenLeased.getTime() : r.createdAt.getTime();
+      const presence = resolvePresence(r);
+      const { ms: lastSignalMs } = effectiveLastSignalMs({
+        lastSeenLeasedMs: r.lastSeenLeased?.getTime() ?? null,
+        assetLastSeenMs: presence.lastSeen?.getTime() ?? null,
+        baselineMs: r.createdAt.getTime(),
+      });
       return {
         id: r.id,
         ipAddress: r.ipAddress,
@@ -204,6 +347,8 @@ export async function listStaleReservations(
         fortigateDevice: r.subnet.fortigateDevice,
         pushedToId: r.pushedToId,
         pushedToName: r.pushedTo?.name ?? null,
+        assetLastSeen: presence.lastSeen,
+        assetPresenceMatch: presence.match,
       };
     });
   }
@@ -223,6 +368,7 @@ export async function listStaleReservations(
     orderBy: [{ lastSeenLeased: "asc" }, { createdAt: "asc" }],
   });
 
+  const resolvePresence = await buildAssetPresenceResolver(rows);
   const result: ReservationAlertEntry[] = [];
   const nowMs = Date.now();
   for (const r of rows) {
@@ -232,7 +378,12 @@ export async function listStaleReservations(
     const baseline = r.createdAt.getTime() > detectionStartedAt.getTime()
       ? r.createdAt.getTime()
       : detectionStartedAt.getTime();
-    const lastSignalMs = r.lastSeenLeased ? r.lastSeenLeased.getTime() : baseline;
+    const presence = resolvePresence(r);
+    const { ms: lastSignalMs } = effectiveLastSignalMs({
+      lastSeenLeasedMs: r.lastSeenLeased?.getTime() ?? null,
+      assetLastSeenMs: presence.lastSeen?.getTime() ?? null,
+      baselineMs: baseline,
+    });
     if (lastSignalMs > cutoffMs) continue;
 
     const daysSinceSeen = Math.floor((nowMs - lastSignalMs) / (24 * 60 * 60 * 1000));
@@ -251,6 +402,8 @@ export async function listStaleReservations(
       fortigateDevice: r.subnet.fortigateDevice,
       pushedToId: r.pushedToId,
       pushedToName: r.pushedTo?.name ?? null,
+      assetLastSeen: presence.lastSeen,
+      assetPresenceMatch: presence.match,
     });
   }
   return result;
@@ -331,16 +484,23 @@ export async function flagStaleReservations(): Promise<number> {
   // rather than losing alerts.
   await Promise.allSettled(toNotify.map((row) => {
     const ipLabel = row.ipAddress ?? "(no IP)";
+    const dayWord = (n: number) => `${n} day${n === 1 ? "" : "s"}`;
     const sinceLabel = row.lastSeenLeased
-      ? `${row.daysSinceSeen} day${row.daysSinceSeen === 1 ? "" : "s"} since last seen leased`
-      : `never seen leased — ${row.daysSinceSeen} day${row.daysSinceSeen === 1 ? "" : "s"} since detection baseline`;
+      ? `${dayWord(row.daysSinceSeen)} since last seen leased`
+      : `never seen leased — ${dayWord(row.daysSinceSeen)} since detection baseline`;
+    // When an asset correlates, the row is only here because that asset is ALSO
+    // stale (a fresh asset would have excluded it). Say so — it tells the
+    // operator the device is absent from every presence signal, not just DHCP.
+    const assetLabel = row.assetPresenceMatch
+      ? ` Matched asset (by ${row.assetPresenceMatch.toUpperCase()}) last seen ${row.assetLastSeen ? new Date(row.assetLastSeen).toISOString() : "never"}.`
+      : "";
     return logEvent({
       action: "reservation.stale",
       level: "warning",
       resourceType: "reservation",
       resourceId: row.id,
       resourceName: row.hostname || ipLabel,
-      message: `DHCP reservation ${ipLabel} on ${row.subnetCidr}${row.fortigateDevice ? ` (${row.fortigateDevice})` : ""} appears stale — ${sinceLabel}.`,
+      message: `DHCP reservation ${ipLabel} on ${row.subnetCidr}${row.fortigateDevice ? ` (${row.fortigateDevice})` : ""} appears stale — ${sinceLabel}.${assetLabel}`,
       details: {
         subnetCidr: row.subnetCidr,
         subnetName: row.subnetName,
@@ -350,6 +510,8 @@ export async function flagStaleReservations(): Promise<number> {
         fortigateDevice: row.fortigateDevice,
         pushedTo: row.pushedToName,
         lastSeenLeased: row.lastSeenLeased?.toISOString() ?? null,
+        assetLastSeen: row.assetLastSeen?.toISOString() ?? null,
+        assetPresenceMatch: row.assetPresenceMatch,
         daysSinceSeen: row.daysSinceSeen,
         staleAfterDays: settings.staleAfterDays,
       },

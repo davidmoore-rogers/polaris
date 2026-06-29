@@ -123,7 +123,10 @@ async function request(method, path, body, signal) {
   const data = await res.json();
   if (!res.ok) {
     const msg = data?.error || `Request failed (${res.status})`;
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
   return data;
 }
@@ -293,6 +296,8 @@ const api = {
     bulkDelete:(ids)    => request("DELETE", "/assets", { ids }),
     import:    (rows, dryRun) => request("POST", "/assets/import", { rows, dryRun }),
     importPdf: (assets, dryRun) => request("POST", "/assets/import-pdf", { assets, dryRun }),
+    notifications: (id) => request("GET", `/assets/${id}/notifications`),
+    tags:      ()       => request("GET", "/assets/tags"),
     dnsLookup: (id)     => request("POST", `/assets/${id}/dns-lookup`),
     forwardLookup: (id) => request("POST", `/assets/${id}/forward-lookup`),
     ouiLookup: (id)     => request("POST", `/assets/${id}/oui-lookup`),
@@ -541,6 +546,33 @@ const api = {
     updateRetentionSettings: (body) => request("PUT", "/events/retention-settings", body),
     getAssetDecommissionSettings: () => request("GET", "/events/asset-decommission-settings"),
     updateAssetDecommissionSettings: (body) => request("PUT", "/events/asset-decommission-settings", body),
+  },
+  notifications: {
+    list:        (params) => request("GET", "/notifications" + toQuery(params)),
+    acknowledge: (ids, note) => request("POST", "/notifications/acknowledge", { ids, note }),
+    clear:       (ids)    => request("POST", "/notifications/clear", { ids }),
+  },
+  push: {
+    key:         ()       => request("GET", "/push-subscriptions/key"),
+    subscribe:   (sub)    => request("POST", "/push-subscriptions", sub),
+    unsubscribe: (endpoint) => request("DELETE", "/push-subscriptions", { endpoint }),
+  },
+  notificationRules: {
+    list:    ()        => request("GET", "/notification-rules"),
+    schema:  ()        => request("GET", "/notification-rules/schema"),
+    preview: (body)    => request("POST", "/notification-rules/preview", body),
+    create:  (body)    => request("POST", "/notification-rules", body),
+    update:  (id, b)   => request("PUT", `/notification-rules/${id}`, b),
+    delete:  (id)      => request("DELETE", `/notification-rules/${id}`),
+  },
+  notificationChannels: {
+    list:        ()       => request("GET",    "/notification-channels"),
+    get:         (id)     => request("GET",    `/notification-channels/${id}`),
+    create:      (body)   => request("POST",   "/notification-channels", body),
+    update:      (id, b)  => request("PUT",    `/notification-channels/${id}`, b),
+    delete:      (id)     => request("DELETE", `/notification-channels/${id}`),
+    test:        (id, b)  => request("POST",   `/notification-channels/${id}/test`, b || {}),
+    generateVapid:(id)    => request("POST",   `/notification-channels/${id}/generate-vapid`),
   },
   serverSettings: {
     // Polaris Agent — Build button + inventory on Maintenance tab.

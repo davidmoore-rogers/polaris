@@ -46,6 +46,7 @@ import {
   readProcessHistory,
 } from "../../services/sampleHistoryService.js";
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
+import { getAssetNotifications } from "../../services/notificationService.js";
 import { requestProcessControl, getCommandStatus } from "../../services/agentCommandService.js";
 import {
   readIpsecHistory,
@@ -683,6 +684,19 @@ router.get("/ip-history-settings", requirePermission("assets", "read"), async (_
   }
 });
 
+// GET /api/v1/assets/tags — distinct tags across all assets, for autocomplete
+// (notification-rule scope picker, etc.). One scan with a tight select.
+router.get("/tags", requirePermission("assets", "read"), async (_req, res, next) => {
+  try {
+    const rows = await prisma.asset.findMany({ where: { NOT: { tags: { isEmpty: true } } }, select: { tags: true } });
+    const set = new Set<string>();
+    for (const r of rows) for (const t of r.tags) set.add(t);
+    res.json({ tags: Array.from(set).sort() });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // PUT /api/v1/assets/ip-history-settings — update retention settings (assets admin)
 router.put("/ip-history-settings", requirePermission("assets", "write"), async (req, res, next) => {
   try {
@@ -935,6 +949,18 @@ router.get("/:id/ip-history", requirePermission("assets", "read"), async (req, r
     const asset = await prisma.asset.findUnique({ where: { id: req.params.id as string }, select: { id: true } });
     if (!asset) throw new AppError(404, "Asset not found");
     res.json(await getIpHistory(req.params.id as string));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/assets/:id/notifications — active notifications for this asset +
+// the enabled rules whose scope matches it (asset-details Notifications tab).
+router.get("/:id/notifications", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const asset = await prisma.asset.findUnique({ where: { id: req.params.id as string }, select: { id: true } });
+    if (!asset) throw new AppError(404, "Asset not found");
+    res.json(await getAssetNotifications(req.params.id as string));
   } catch (err) {
     next(err);
   }

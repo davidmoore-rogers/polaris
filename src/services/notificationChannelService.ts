@@ -1,0 +1,198 @@
+/**
+ * src/services/notificationChannelService.ts
+ *
+ * CRUD + secret handling for the NotificationChannel registry — the operator-
+ * managed list of outbound delivery integrations (Notifications → Delivery tab).
+ * Mirrors credentialService's masking discipline: secrets (per the channel
+ * type's field defs) are masked on read and preserved on write when the client
+ * echoes the mask back.
+ *
+ * Senders call getChannelRaw() (secrets intact). The Delivery tab + rule builder
+ * call the masked list/get. web_push is a singleton (one server VAPID keypair);
+ * create enforces it, and generateWebPushKeys() mints the keypair.
+ */
+
+import { prisma } from "../db.js";
+import { AppError } from "../utils/errors.js";
+import { logEvent } from "./eventLogService.js";
+import { CHANNEL_TYPE_META, CHANNEL_TRANSPORT, type ChannelType } from "./notificationTypes.js";
+import { generateVapidKeys } from "./notificationChannels/webPushChannel.js";
+
+export const MASK = "••••••••";
+
+type ChannelRow = {
+  id: string;
+  name: string;
+  type: string;
+  enabled: boolean;
+  config: unknown;
+  createdBy: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+function isChannelType(t: string): t is ChannelType {
+  return Object.prototype.hasOwnProperty.call(CHANNEL_TYPE_META, t);
+}
+
+function secretKeys(type: ChannelType): string[] {
+  return CHANNEL_TYPE_META[type].fields.filter((f) => f.secret).map((f) => f.key);
+}
+
+function asObject(v: unknown): Record<string, unknown> {
+  return v && typeof v === "object" ? { ...(v as Record<string, unknown>) } : {};
+}
+
+/** Mask every secret field that has a value; report which are set. */
+function maskConfig(type: ChannelType, config: unknown): Record<string, unknown> {
+  const c = asObject(config);
+  for (const key of secretKeys(type)) {
+    const present = typeof c[key] === "string" && (c[key] as string).length > 0;
+    c[key] = present ? MASK : "";
+    c[`${key}Set`] = present;
+  }
+  // web_push: never return the private key; expose only whether it's set.
+  if (type === "web_push") {
+    const present = typeof c.privateKey === "string" && (c.privateKey as string).length > 0;
+    delete c.privateKey;
+    c.privateKeySet = present;
+  }
+  return c;
+}
+
+/** Merge an incoming config onto the stored one, preserving masked secrets. */
+function mergeConfig(type: ChannelType, incoming: unknown, current: unknown): Record<string, unknown> {
+  const inc = asObject(incoming);
+  const cur = asObject(current);
+  const out: Record<string, unknown> = { ...inc };
+  for (const key of secretKeys(type)) {
+    const v = inc[key];
+    if (typeof v !== "string" || v === MASK || v.trim() === "") {
+      out[key] = cur[key] ?? ""; // keep the stored secret
+    }
+  }
+  // Strip UI-only marker fields + never let the client set web_push keys directly.
+  for (const k of Object.keys(out)) if (k.endsWith("Set")) delete out[k];
+  if (type === "web_push") {
+    out.publicKey = cur.publicKey ?? "";
+    out.privateKey = cur.privateKey ?? "";
+  }
+  return out;
+}
+
+function maskRow(row: ChannelRow) {
+  const type = row.type as ChannelType;
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    transport: isChannelType(row.type) ? CHANNEL_TRANSPORT[type] : "unknown",
+    enabled: row.enabled,
+    config: isChannelType(row.type) ? maskConfig(type, row.config) : {},
+    createdBy: row.createdBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+export async function listChannels() {
+  const rows = (await prisma.notificationChannel.findMany({ orderBy: { createdAt: "asc" } })) as ChannelRow[];
+  return rows.map(maskRow);
+}
+
+/** Lightweight {id,name,type,enabled} list for the rule-builder channel picker. */
+export async function listChannelsForBuilder() {
+  const rows = await prisma.notificationChannel.findMany({
+    orderBy: { name: "asc" },
+    select: { id: true, name: true, type: true, enabled: true },
+  });
+  return rows.map((r) => ({ ...r, transport: isChannelType(r.type) ? CHANNEL_TRANSPORT[r.type as ChannelType] : "unknown" }));
+}
+
+export async function getChannel(id: string) {
+  const row = (await prisma.notificationChannel.findUnique({ where: { id } })) as ChannelRow | null;
+  if (!row) throw new AppError(404, "Notification channel not found");
+  return maskRow(row);
+}
+
+/** Internal: full config WITH secrets, for the senders. */
+export async function getChannelRaw(id: string): Promise<ChannelRow | null> {
+  return (await prisma.notificationChannel.findUnique({ where: { id } })) as ChannelRow | null;
+}
+
+export interface ChannelInput {
+  name: string;
+  type: string;
+  enabled?: boolean;
+  config?: unknown;
+}
+
+export async function createChannel(input: ChannelInput, actor?: string) {
+  if (!isChannelType(input.type)) throw new AppError(400, `Unknown channel type "${input.type}"`);
+  const type = input.type;
+  if (CHANNEL_TYPE_META[type].singleton) {
+    const existing = await prisma.notificationChannel.count({ where: { type } });
+    if (existing > 0) throw new AppError(409, `Only one ${CHANNEL_TYPE_META[type].label} channel can be configured`);
+  }
+  const config = mergeConfig(type, input.config, {});
+  const row = await prisma.notificationChannel.create({
+    data: { name: input.name.trim(), type, enabled: input.enabled ?? true, config: config as any, createdBy: actor ?? null },
+  });
+  await logEvent({
+    action: "notification_channel.created", resourceType: "notification-channel",
+    resourceId: row.id, resourceName: row.name, actor,
+    message: `Notification channel "${row.name}" created (${type})`, details: { type },
+  });
+  return maskRow(row as ChannelRow);
+}
+
+export async function updateChannel(id: string, input: ChannelInput, actor?: string) {
+  const current = (await prisma.notificationChannel.findUnique({ where: { id } })) as ChannelRow | null;
+  if (!current) throw new AppError(404, "Notification channel not found");
+  const type = current.type as ChannelType; // type is immutable after create
+  if (!isChannelType(type)) throw new AppError(400, "Channel has an unknown type");
+  const config = mergeConfig(type, input.config, current.config);
+  const row = await prisma.notificationChannel.update({
+    where: { id },
+    data: { name: (input.name ?? current.name).trim(), enabled: input.enabled ?? current.enabled, config: config as any },
+  });
+  await logEvent({
+    action: "notification_channel.updated", resourceType: "notification-channel",
+    resourceId: id, resourceName: row.name, actor,
+    message: `Notification channel "${row.name}" updated`, details: { enabled: row.enabled },
+  });
+  return maskRow(row as ChannelRow);
+}
+
+export async function deleteChannel(id: string, actor?: string) {
+  const row = await prisma.notificationChannel.findUnique({ where: { id } });
+  if (!row) throw new AppError(404, "Notification channel not found");
+  // Pending deliveries through this channel get channelId=NULL (SetNull) and
+  // the drain marks them failed (channel gone) — no orphaned history.
+  await prisma.notificationChannel.delete({ where: { id } });
+  await logEvent({
+    action: "notification_channel.deleted", resourceType: "notification-channel",
+    resourceId: id, resourceName: row.name, actor, message: `Notification channel "${row.name}" deleted`,
+  });
+}
+
+/** Generate + store a VAPID keypair on the (singleton) web_push channel. */
+export async function generateWebPushKeys(id: string, actor?: string) {
+  const row = (await prisma.notificationChannel.findUnique({ where: { id } })) as ChannelRow | null;
+  if (!row) throw new AppError(404, "Notification channel not found");
+  if (row.type !== "web_push") throw new AppError(400, "VAPID keys only apply to a Web Push channel");
+  const keys = generateVapidKeys();
+  const config = { ...asObject(row.config), publicKey: keys.publicKey, privateKey: keys.privateKey };
+  await prisma.notificationChannel.update({ where: { id }, data: { config: config as any } });
+  await logEvent({
+    action: "notification_channel.vapid_generated", resourceType: "notification-channel",
+    resourceId: id, resourceName: row.name, actor, message: "Generated a new Web Push VAPID keypair",
+  });
+  return { publicKey: keys.publicKey, privateKeySet: true };
+}
+
+/** The singleton web_push channel (enabled + keyed), or null. Used by the
+ *  /push-subscriptions key handoff and the web_push sender. */
+export async function getWebPushChannel(): Promise<ChannelRow | null> {
+  return (await prisma.notificationChannel.findFirst({ where: { type: "web_push" } })) as ChannelRow | null;
+}

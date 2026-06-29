@@ -1,0 +1,100 @@
+/**
+ * src/api/routes/notificationChannels.ts
+ *
+ * CRUD for the NotificationChannel registry (Notifications → Delivery tab) +
+ * per-channel Test send + VAPID keypair generation for the web_push channel.
+ * Gated `notificationManagement` (same as rule CRUD). Secrets are masked on
+ * read and preserved on write by notificationChannelService.
+ */
+
+import { Router } from "express";
+import { z } from "zod";
+import { AppError } from "../../utils/errors.js";
+import { requirePermission } from "../middleware/permissions.js";
+import {
+  listChannels, getChannel, getChannelRaw, createChannel, updateChannel, deleteChannel, generateWebPushKeys,
+} from "../../services/notificationChannelService.js";
+import { CHANNEL_TYPES, type ChannelType } from "../../services/notificationTypes.js";
+import { sendSmtpEmail, sendM365Email } from "../../services/notificationChannels/emailChannel.js";
+import { sendWebhook } from "../../services/notificationChannels/webhookChannel.js";
+import { sendPushbullet } from "../../services/notificationChannels/pushbulletChannel.js";
+
+const router = Router();
+
+const channelInputSchema = z.object({
+  name: z.string().min(1).max(200),
+  type: z.enum(CHANNEL_TYPES),
+  enabled: z.boolean().optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
+});
+const channelUpdateSchema = channelInputSchema.partial({ type: true });
+
+router.get("/", requirePermission("notificationManagement", "read"), async (_req, res, next) => {
+  try { res.json({ channels: await listChannels() }); } catch (err) { next(err); }
+});
+
+router.get("/:id", requirePermission("notificationManagement", "read"), async (req, res, next) => {
+  try { res.json(await getChannel(req.params.id as string)); } catch (err) { next(err); }
+});
+
+router.post("/", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+  try {
+    const input = channelInputSchema.parse(req.body);
+    res.status(201).json(await createChannel(input, req.session?.username));
+  } catch (err) { next(err); }
+});
+
+router.put("/:id", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+  try {
+    const input = channelUpdateSchema.parse(req.body);
+    res.json(await updateChannel(req.params.id as string, input as any, req.session?.username));
+  } catch (err) { next(err); }
+});
+
+router.delete("/:id", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+  try {
+    await deleteChannel(req.params.id as string, req.session?.username);
+    res.status(204).end();
+  } catch (err) { next(err); }
+});
+
+// Generate + store a VAPID keypair on a web_push channel.
+router.post("/:id/generate-vapid", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+  try { res.json(await generateWebPushKeys(req.params.id as string, req.session?.username)); } catch (err) { next(err); }
+});
+
+// Send a test through a channel. Email channels take a `to` address; chat /
+// pushbullet post to the channel's own destination. Uses the STORED config
+// (secrets intact) — save before testing.
+router.post("/:id/test", requirePermission("notificationManagement", "fullwrite"), async (req, res, next) => {
+  try {
+    const ch = await getChannelRaw(req.params.id as string);
+    if (!ch) throw new AppError(404, "Notification channel not found");
+    const cfg = (ch.config && typeof ch.config === "object" ? ch.config : {}) as Record<string, unknown>;
+    const str = (k: string) => (typeof cfg[k] === "string" ? (cfg[k] as string) : "");
+    const type = ch.type as ChannelType;
+    const subject = "Polaris notification test";
+    const text = `This is a test notification from Polaris channel "${ch.name}".`;
+
+    if (type === "smtp") {
+      const to = z.string().email().parse(req.body?.to);
+      await sendSmtpEmail({ host: str("host"), port: Number(cfg.port) || 587, security: (str("security") as any) || "starttls", username: str("username"), password: str("password"), from: str("from") }, { to, subject, text });
+      res.json({ ok: true, message: `Test email sent to ${to}` });
+    } else if (type === "oauth_m365") {
+      const to = req.body?.to ? z.string().email().parse(req.body.to) : str("fromUserId");
+      if (!to) throw new AppError(400, "No recipient — set a send-as user or provide a test address");
+      await sendM365Email({ tenantId: str("tenantId"), clientId: str("clientId"), clientSecret: str("clientSecret"), fromUserId: str("fromUserId") }, { to, subject, text });
+      res.json({ ok: true, message: `Test email sent to ${to}` });
+    } else if (type === "slack" || type === "teams") {
+      await sendWebhook(str("webhookUrl"), type, { title: subject, message: text, severity: "info", assetHostname: null, url: null, triggeredAt: new Date().toISOString() });
+      res.json({ ok: true, message: "Test message posted to the webhook" });
+    } else if (type === "pushbullet") {
+      await sendPushbullet({ accessToken: str("accessToken") }, { title: subject, body: text });
+      res.json({ ok: true, message: "Test push sent to Pushbullet" });
+    } else {
+      throw new AppError(400, "Web Push is tested by enabling it on a device, not from here");
+    }
+  } catch (err) { next(err); }
+});
+
+export default router;

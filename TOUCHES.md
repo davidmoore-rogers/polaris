@@ -1173,6 +1173,174 @@ See `TEMPLATES.md` → "Permission-gated route + dynamic-role function key" for 
 
 Listed alphabetically.
 
+## services/notificationTypes.ts
+
+**What it owns:** The notifications vocabulary — the discriminated `trigger` Zod union (asset_metric | asset_state | host_metric | event | change), the asset `scope` schema, `ruleInputSchema`, the metric/field/comparator/aggregation/change-type catalogs, and `buildSchemaCatalog()`.
+
+**Public API:** `triggerSchema`, `scopeSchema`, `ruleInputSchema`, `buildSchemaCatalog`, `Trigger`/`RuleScope`/`RuleInput` types, `CHANGE_TYPE_ACTIONS`, `ASSET_SCOPED_TRIGGER_TYPES`, the `*_METRICS`/`*_FIELDS`/`CHANGE_TYPES` constants.
+
+**Used by:** `notificationRules.ts` (validation + schema endpoint), `notificationEngine.ts`, `notificationRuleService.ts`, the builder UI (via `/notification-rules/schema`).
+
+**Invariants:**
+- Single source of truth — engine, routes, and frontend must read the vocabulary here, never hardcode it.
+- `CHANGE_TYPE_ACTIONS` maps each change type to the exact audit Event action the persist* detectors emit AND the event-tail matches; both ends must agree.
+
+**When changing this:** Adding a metric/field → also wire its resolver in `notificationEngine` (else it parses but never reads data). Adding a change type → also emit the matching Event from the relevant persist* function.
+
+---
+
+## services/notificationService.ts
+
+**What it owns:** Triggered-notification read + lifecycle (View tab + asset tab): region-scoped listing, batch acknowledge/clear, the per-asset bundle, region-prefix stripping.
+
+**Public API:** `listNotifications`, `acknowledgeNotifications`, `clearNotifications`, `getAssetNotifications`, `stripRegionPrefix`, `REGION_TAG_PREFIX`.
+
+**Cross-service deps:** `prisma`, `eventLogService.logEvent`, `notificationRuleService.findRulesMatchingAsset`.
+
+**Used by:** `src/api/routes/notifications.ts` (list/ack/clear), `src/api/routes/assets.ts` (`getAssetNotifications` at `/assets/:id/notifications`).
+
+**Invariants:**
+- Region scope: empty viewer tags = unrestricted; else show rows whose snapshotted `regionTags` intersect the viewer's tags PLUS unscoped (empty regionTags) rows.
+- Acknowledge/clear are batch (`updateMany`, no per-row await) and always write an audit Event.
+
+**When changing this:** Keep the region-scope rule in sync with `regionScopeService` (the viewer side) and the engine's `regionSnapshot` (the write side).
+
+---
+
+## services/notificationRuleService.ts
+
+**What it owns:** Notification RULE logic — scope matching, the "rules matching this asset" lookup, rule CRUD, and the change-type subscription cache that gates the persist* change-detectors.
+
+**Public API:** `scopeMatchesAsset`, `findRulesMatchingAsset`, `listRules`/`getRule`/`createRule`/`updateRule`/`deleteRule`, `isChangeActionSubscribed`/`getSubscribedChangeActions`/`bumpChangeSubscriptions`, `ScopeAsset`.
+
+**Cross-service deps:** `prisma`, `eventLogService.logEvent`, `notificationTypes`.
+
+**Used by:** `notificationService` (asset tab), `notificationEngine` (preview scope), `notificationChangeEvents` (subscription gate), `src/api/routes/notificationRules.ts` (CRUD).
+
+**Invariants:**
+- `scopeMatchesAsset`: AND across provided dimensions, OR within each list; `allAssets` short-circuits true; no dimensions + not allAssets ⇒ matches nothing.
+- Every rule write calls `bumpChangeSubscriptions()` so the persist* detectors pick up new/removed change subscriptions.
+
+**When changing this:** The subscription cache has a 60s TTL fallback; a write must bump it so change emission turns on/off promptly.
+
+---
+
+## services/notificationEngine.ts
+
+**What it owns:** The rule evaluator. Threshold/state path (per-metric sample resolvers + the NotificationRuleState machine with forDuration/cooldown/clearBehavior), the event-tail path (cursor over Event rows matching event/change rules), and `previewRule` (dry-run).
+
+**Public API:** `evaluateAllNotificationRules` (job entry), `previewRule`, and the unit-tested pure helpers `compareNum`/`compareValue`/`globToRegExp`/`readingMeets`.
+
+**Cross-service deps:** `prisma` (assets + every sample table + notifications + state + Event + Setting), `eventLogService.logEvent`, `notificationService.REGION_TAG_PREFIX`, `notificationTypes`.
+
+**Used by:** `src/jobs/evaluateNotificationRules.ts`, `src/api/routes/notificationRules.ts` (`previewRule`).
+
+**Invariants:**
+- Fire only on the clear→firing transition; state writes happen only on transition (hot path scales with *changes*, not fleet size).
+- Recovery is acted on only from an explicit not-meeting reading (missing data leaves a firing state alone); `timed` clears purely on its timer.
+- Notification `regionTags` are snapshotted from the asset's `region:` tags at fire time.
+- Scale: batch findMany per sample table (no per-row awaits) — re-check at 2000 assets when adding a metric.
+
+**When changing this:** New metric → add a resolver branch AND the catalog entry in `notificationTypes`. New clear behavior → handle it in both `recover()` and the timed-sweep pass.
+
+---
+
+## services/notificationChangeEvents.ts
+
+**What it owns:** The bridge from current-state persist* functions (LLDP/processes/SD-WAN/MCLAG) to the engine's event path — emits one audit Event per diffed change, gated on an active change subscription.
+
+**Public API:** `maybeEmitChangeEvents(action, assetId, assetName, items)`, `ChangeItem`.
+
+**Cross-service deps:** `eventLogService.logEventsBatch`, `notificationRuleService.isChangeActionSubscribed`.
+
+**Used by:** `monitoringService` persist* functions (`persistLldpNeighbors`, `persistAssetProcesses`, `persistSdwanRules`, `persistMclagPeers`).
+
+**Invariants:**
+- Zero cost when unsubscribed — the subscription check gates BOTH the Event writes here and (in monitoringService) the prior-state load used to compute the diff.
+- `resourceType="asset"` + `resourceId=assetId` so the engine resolves the notification's asset + region scope. Best-effort; never throws into a scrape.
+
+**When changing this:** A new change type needs (1) a `CHANGE_TYPE_ACTIONS` entry, (2) a subscription-gated diff + `maybeEmitChangeEvents` call in the relevant persist function, (3) the change type in `notificationTypes`.
+
+---
+
+## services/regionScopeService.ts
+
+**What it owns:** The shared effective-tag resolver — `union(role, user, group)` for region + other tags.
+
+**Public API:** `resolveTagScopesForUser(u)`, `getEffectiveRegionTags(userId)`, `TagScope`/`UserTagScopes`.
+
+**Cross-service deps:** `prisma` (user + role), `groupMappingService.resolveGroupsToAccess`, `tagNormalize.unionTags`.
+
+**Used by:** `src/api/routes/auth.ts` (`GET /auth/me`), `src/api/routes/notifications.ts` (region-scoped list via `getEffectiveRegionTags`).
+
+**Invariants:**
+- Group-derived tags are re-resolved live from `ssoGroups` each call — never persisted onto the user's own columns.
+- Empty effective tags means "unrestricted" downstream.
+
+**When changing this:** `/auth/me` and the notifications list must stay on this helper so the operator-visible scope and the enforced scope can't drift.
+
+---
+
+## services/notificationRecipientService.ts
+
+**What it owns:** Routing a fired notification to concrete delivery recipients, and expanding a rule's `targets[]` into `NotificationDelivery` rows.
+
+**Public API:** `resolveRecipientUsers(recipientTags)`, `expandDeliveries(notificationId, targets)`, `bumpRecipientIndex()`.
+
+**Cross-service deps:** `regionScopeService.resolveTagScopesForUser` (effective tags per user), `notificationService.stripRegionPrefix`, `notificationTypes.CHANNEL_TRANSPORT` (channel type → transport), `prisma` (notificationChannel lookup + users + pushSubscriptions + notificationDelivery).
+
+**Used by:** `src/services/notificationEngine.ts` (`fire()` + event-tail, via the best-effort `expandDeliveriesSafe` wrapper).
+
+**Invariants:**
+- Recipient matching strips the `region:` prefix and lower-cases both sides, so a target `region:Atlanta` matches a user whose regionTags include `Atlanta`; region + other tags are matched as one union.
+- Empty `recipientTags` routes to NO users (explicit, not "everyone").
+- Recipients are snapshotted at fire time (delivery rows reflect targets when the rule fired, not when the drain runs).
+- In-app delivery is never a `NotificationDelivery` row — it's the `Notification` itself.
+
+**When changing this:** keep the tag-match semantics aligned with `scopeMatchesAsset` and `regionScopeService` so rule scope and recipient routing read tags the same way. Bump the user-tag index cache (`bumpRecipientIndex`) if a user/role/group-mapping write must take effect immediately.
+
+---
+
+## services/notificationDeliveryService.ts
+
+**What it owns:** Draining pending `NotificationDelivery` rows and dispatching each to its channel.
+
+**Public API:** `drainPendingDeliveries()`.
+
+**Cross-service deps:** the channel senders (`notificationChannels/emailChannel.{sendSmtpEmail,sendM365Email}`, `webhookChannel.sendWebhook`, `pushbulletChannel.sendPushbullet`, `webPushChannel.sendWebPush`), `prisma` (delivery rows + notificationChannel config + pushSubscription prune), `eventLogService.logEvent`.
+
+**Used by:** `src/jobs/deliverNotifications.ts` (15s tick).
+
+**Invariants:**
+- Each delivery's destination secrets (SMTP password, webhook URL, VAPID key, …) are read from its `NotificationChannel` at send time, NOT stored on the delivery row.
+- A missing/deleted channel (NULL channelId) is a PERMANENT fail (not retried); otherwise ≤3 attempts before flipping to `failed`.
+- A web_push 410/404 prunes the dead `PushSubscription` (by endpoint).
+- Bounded concurrency on sends; one summary audit Event per non-empty drain (no per-delivery Event spam).
+
+**When changing this:** scale-check at 2000 assets — the batch (`BATCH_SIZE`) + concurrency cap keep a delivery spike from stampeding SMTP/webhook endpoints. Never row-scan the full table; always filter `status=pending, attempts<MAX`.
+
+---
+
+## services/notificationChannelService.ts
+
+**What it owns:** CRUD + secret handling for the `NotificationChannel` registry (Notifications → Delivery tab) — the operator-managed list of outbound delivery integrations.
+
+**Public API:** `listChannels`/`listChannelsForBuilder`/`getChannel`/`getChannelRaw` (secrets, for senders)/`createChannel`/`updateChannel`/`deleteChannel`/`generateWebPushKeys`/`getWebPushChannel`, `MASK`.
+
+**Cross-service deps:** `prisma` (notification_channels), `notificationTypes.CHANNEL_TYPE_META` (per-type field defs incl. which are secret) + `CHANNEL_TRANSPORT`, `notificationChannels/webPushChannel.generateVapidKeys`.
+
+**Used by:** `src/api/routes/notificationChannels.ts` (CRUD + test + generate), `src/api/routes/pushSubscriptions.ts` (`/key` via `getWebPushChannel`), the rule builder (channel picker via `listChannels`), `notificationDeliveryService` (reads channel config at send time via a direct prisma lookup).
+
+**Invariants:**
+- Secrets (per the type's `secret:true` field defs — SMTP password, M365 client secret, Pushbullet token, Slack/Teams webhook URL, VAPID private key) are masked on read and preserved on write when the client echoes the mask / sends blank.
+- The API never returns an unmasked secret; the web_push private key is never returned at all (only `privateKeySet`).
+- `type` is immutable after create; `web_push` is a singleton (create rejects a second one).
+- Destination secrets live ONLY on the channel — delivery rows reference the channel by id, never copy its secrets.
+
+**When changing this:** add a new channel type by extending `CHANNEL_TYPES` + `CHANNEL_TYPE_META` (+ `CHANNEL_TRANSPORT`) in `notificationTypes`, a sender under `notificationChannels/`, and a dispatch arm in `notificationDeliveryService`. Mark secret fields `secret:true` so masking covers them.
+
+---
+
 ## services/activeDirectoryService.ts
 
 **What it owns:** On-prem Active Directory device discovery via LDAP/LDAPS client (computer objects, OU filtering, SID/GUID identity, disabled-account handling).
@@ -2948,10 +3116,14 @@ Listed alphabetically.
 
 **Used by:** src/api/routes/reservations.ts (list/snooze/ignore endpoints), src/jobs/flagStaleReservations.ts (flagStaleReservations every 6 hours).
 
+**Reads (cross-signal):** Asset.lastSeen, AssetMacAddress.mac, AssetAssociatedIp.ip — `buildAssetPresenceResolver` correlates each candidate reservation to an Asset (MAC first via `normalizeMacOrNull`, then IP) so a statically-addressed device that never pulls a DHCP lease but is still on the network is NOT flagged stale. Three batched, indexed findMany calls per scan (bounded by candidate-reservation count); no per-row queries.
+
 **Invariants:**
 - Stale threshold (staleAfterDays) defaults to 60 days, 0 = disabled
 - Cold-start grace: effective baseline = max(createdAt, detectionStartedAt) to avoid flooding on first run
-- A row is stale if (lastSeenLeased < threshold OR never seen leased before) AND (threshold > 0)
+- Effective last signal = freshest of {lastSeenLeased, matched Asset.lastSeen}; baseline is a fallback used only when NEITHER exists (not a floor — a real but old signal still flags during cold-start)
+- A row is stale if effectiveLastSignalMs < (now − threshold) AND (threshold > 0)
+- MAC correlation wins over IP (DHCP reservations are MAC→IP, the stable identity); entry carries assetLastSeen + assetPresenceMatch ("mac" | "ip" | null)
 - Snooze extends alert by staleAfterDays from now (not from threshold); clears staleNotifiedAt
 - Ignored rows stay suppressed regardless of threshold; detectionStartedAt persists across runs
 - flagStaleReservations emits one reservation.stale Event per fresh transition (staleNotifiedAt null → timestamp)
@@ -2962,6 +3134,8 @@ Listed alphabetically.
 - Test cold-start grace window (rows pre-dating detectionStartedAt get full threshold window)
 - Check flagStaleReservations only fires on active dhcp_reservation rows (not discovered dhcp_lease)
 - Audit snooze idempotency: repeated snooze clicks should extend from "now" not from prior snooze
+- effectiveLastSignalMs is pure + exported — extend its unit test when changing evidence precedence
+- Keep the presence resolver batched (no per-row asset lookups) — scale-check at 2000 assets
 
 ---
 

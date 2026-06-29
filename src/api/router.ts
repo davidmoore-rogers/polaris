@@ -13,6 +13,10 @@ import integrationsRouter from "./routes/integrations.js";
 import assetsRouter from "./routes/assets.js";
 import logFlagRulesRouter from "./routes/logFlagRules.js";
 import eventsRouter from "./routes/events.js";
+import notificationsRouter from "./routes/notifications.js";
+import notificationRulesRouter from "./routes/notificationRules.js";
+import notificationChannelsRouter from "./routes/notificationChannels.js";
+import pushSubscriptionsRouter from "./routes/pushSubscriptions.js";
 import conflictsRouter from "./routes/conflicts.js";
 import serverSettingsRouter from "./routes/serverSettings.js";
 import proxySettingsRouter from "./routes/proxySettings.js";
@@ -95,6 +99,12 @@ router.use("/asset-types", assetTypesRouter);
 router.use("/assets", assetsRouter);
 router.use("/log-flag-rules", logFlagRulesRouter);
 router.use("/events", eventsRouter);
+// Notifications: View-tab list + acknowledge/clear (per-route gates inside).
+// notification-rules mounted before so it isn't shadowed by /notifications.
+router.use("/notification-rules", notificationRulesRouter);
+router.use("/notification-channels", notificationChannelsRouter);
+router.use("/notifications", notificationsRouter);
+router.use("/push-subscriptions", pushSubscriptionsRouter);
 router.use("/search", searchRouter);
 // Region routes are mounted BEFORE /map so Express's first-match routing picks
 // the more-specific path. Region CRUD is gated by the mapRegions function key;

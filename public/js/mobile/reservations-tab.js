@@ -512,6 +512,29 @@
         return api.reservations.get(ctx.reservationId).then(function (existing) {
           restore();
           var src = (existing && existing.sourceType) || "";
+
+          // A live DHCP lease can be promoted in place: hand off to the shared
+          // reserve sheet with existingLeaseId set — the same flow the per-row
+          // "Reserve" button on a lease uses (startReserveFromLease), which
+          // releases the lease then creates the manual reservation. This keeps
+          // the typed-IP path and the row button behaving identically. Any
+          // other hold (manual reservation, VIP, dhcp_reservation, …) is not
+          // taken over — it falls through to the explanatory toast below.
+          if (src === "dhcp_lease" && canCreate(_state.user)) {
+            closeCreateByIpSheet();
+            PolarisTabs.showSnackbar(ip + " is leased — promote it to a reservation");
+            window.PolarisReserveSheet.open(ctx.subnetId, _state.user, {
+              ip: ip,
+              hostname: hostname || (existing && existing.hostname) || "",
+              mac: mac || (existing && existing.macAddress) || "",
+              notes: notes,
+            }, {
+              existingLeaseId: ctx.reservationId,
+              onSuccess: function () { load(); },
+            });
+            return;
+          }
+
           var msg;
           if (src === "vip") msg = ip + " is in use as a FortiGate VIP";
           else if (src === "dhcp_lease") msg = ip + " is held by an active DHCP lease";

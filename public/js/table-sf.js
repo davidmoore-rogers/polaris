@@ -647,13 +647,22 @@ function setupColumnLayout(tableEl, options) {
   // resized — no drag handle of their own and skipped when a neighboring drag
   // looks for the column to absorb its delta. Pinned to FIXED_COL_W below.
   var noResize = {};
+  // Static-width columns (data-col-no-resize="true"): non-resizable like
+  // noResize, but keep their own width (from the <th> style / measured) rather
+  // than being pinned to the 20px utility width. For columns whose content is a
+  // fixed-size token (enum badge, MAC) so they shouldn't be draggable.
+  var fixedW = {};
   ths.forEach(function (th, i) {
     if (th.classList.contains("cb-col") || th.classList.contains("fav-col")) {
       required[colIds[i]] = true;
       noResize[colIds[i]] = true;
     }
     if (th.getAttribute("data-col-required") === "true") required[colIds[i]] = true;
+    if (th.getAttribute("data-col-no-resize") === "true") fixedW[colIds[i]] = true;
   });
+  // A column the operator can drag — excludes both utility (noResize) and
+  // static-width (fixedW) columns.
+  function isResizableCol(id) { return !noResize[id] && !fixedW[id]; }
 
   // Inject a colgroup so widths apply consistently to header + body.
   var colgroup = tableEl.querySelector("colgroup");
@@ -721,7 +730,7 @@ function setupColumnLayout(tableEl, options) {
   // trailing gap). It recomputes as columns are hidden/shown.
   function lastVisibleResizableIdx() {
     for (var k = colIds.length - 1; k >= 0; k--) {
-      if (!hidden[colIds[k]] && !noResize[colIds[k]]) return k;
+      if (!hidden[colIds[k]] && isResizableCol(colIds[k])) return k;
     }
     return -1;
   }
@@ -801,7 +810,7 @@ function setupColumnLayout(tableEl, options) {
   }
 
   ths.forEach(function (th, i) {
-    if (noResize[colIds[i]]) return;               // cb/fav columns are not resizable
+    if (!isResizableCol(colIds[i])) return;        // utility + static-width columns get no handle
     if (th.querySelector(".sf-resize-handle")) return;
     if (!th.style.position) th.style.position = "relative";
     var handle = document.createElement("span");
@@ -820,14 +829,30 @@ function setupColumnLayout(tableEl, options) {
       var startX = e.clientX;
       var startW = widths[id] || ths[i].getBoundingClientRect().width;
       var MIN_W = 40;
+      // Divider behavior: a drag only affects the column on each side of the
+      // handle. Find the next visible, resizable column to the right — the
+      // "right neighbor" we trade width with (skip hidden / fixed columns).
+      var lastIdx = lastVisibleResizableIdx();
+      var nIdx = -1;
+      for (var nk = i + 1; nk < colIds.length; nk++) {
+        if (!hidden[colIds[nk]] && isResizableCol(colIds[nk])) { nIdx = nk; break; }
+      }
+      // When the right neighbor is the auto-fill (last) column it has no fixed
+      // width — let it absorb the delta naturally (only this column + the
+      // auto-fill column change). Otherwise trade width 1:1 with the neighbor
+      // so every other column stays put.
+      var nId = (nIdx >= 0 && nIdx !== lastIdx) ? colIds[nIdx] : null;
+      var startWNext = nId ? (widths[nId] || ths[nIdx].getBoundingClientRect().width) : null;
       function onMove(ev) {
         var dx = ev.clientX - startX;
-        // Independent resize: only this column's width changes. Columns to its
-        // right shift over and the auto-fill last column absorbs the delta, so
-        // the right edge stays pinned to the border. When the fixed columns
-        // grow wider than the container the table overflows and the wrapper
-        // shows a horizontal scrollbar.
-        widths[id] = Math.max(MIN_W, Math.round(startW + dx));
+        if (startWNext != null) {
+          // Clamp so neither the dragged column nor its neighbor goes below MIN_W.
+          var d = Math.max(-(startW - MIN_W), Math.min(startWNext - MIN_W, dx));
+          widths[id] = Math.round(startW + d);
+          widths[nId] = Math.round(startWNext - d);
+        } else {
+          widths[id] = Math.max(MIN_W, Math.round(startW + dx));
+        }
         applyWidths();
       }
       function onUp() {

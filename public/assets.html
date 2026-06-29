@@ -45,18 +45,11 @@
         </div>
       </div>
 
-      <div class="filter-bar">
-        <label style="margin-left:auto">Show</label>
-        <select id="filter-pagesize" style="width:auto">
-          <option value="15" selected>15</option>
-          <option value="25">25</option>
-          <option value="50">50</option>
-          <option value="100">100</option>
-        </select>
-      </div>
-
-      <div id="assets-bulk-bar" class="bulk-bar" style="display:none">
-        <span class="bulk-bar-count">0 selected</span>
+      <!-- Always-visible selection bar: idle (neutral border) until rows are
+           selected, then it gets the accent outline and its buttons enable.
+           Same pattern as the Notifications View tab. -->
+      <div id="assets-bulk-bar" class="bulk-bar bulk-bar-idle">
+        <span class="bulk-bar-count">No assets selected</span>
         <button class="btn btn-sm btn-secondary" id="assets-bulk-deselect-btn">Deselect All</button>
         <button class="btn btn-sm btn-secondary" id="assets-bulk-compare-btn" title="Compare telemetry of the selected assets" style="display:none">Compare</button>
 
@@ -97,20 +90,19 @@
               <th data-sf-key="hostname" data-sf-type="string">Hostname</th>
               <th data-sf-key="ipAddress" data-sf-type="ip">IP Address</th>
               <th data-sf-key="serialNumber" data-sf-type="string">Serial Number</th>
-              <th data-sf-key="assetType" data-sf-type="string" data-sf-options="server|switch|router|firewall|workstation|printer|access_point=Access Point|other">Type</th>
-              <th data-sf-key="status" data-sf-type="string" data-sf-options="active|maintenance|storage|decommissioned|disabled|quarantined">State</th>
-              <th data-sf-key="_monitor" data-sf-type="string" data-sf-options="Monitored|Unmonitored|Up|Warning|Recovering|Down">Status</th>
+              <th style="width:130px" data-col-no-resize="true" data-sf-key="assetType" data-sf-type="string" data-sf-options="server|switch|router|firewall|workstation|printer|access_point=Access Point|other">Type</th>
+              <th style="width:130px" data-col-no-resize="true" data-sf-key="status" data-sf-type="string" data-sf-options="active|maintenance|storage|decommissioned|disabled|quarantined">State</th>
+              <th style="width:130px" data-col-no-resize="true" data-sf-key="_monitor" data-sf-type="string" data-sf-options="Monitored|Unmonitored|Up|Warning|Recovering|Down">Status</th>
               <th data-sf-key="_server" data-sf-type="string">Server</th>
               <th data-sf-key="assetTag" data-sf-type="string" data-col-default-hidden="true">Asset Tag</th>
               <th data-sf-key="manufacturer" data-sf-type="string" data-col-default-hidden="true">Manufacturer</th>
               <th data-sf-key="model" data-sf-type="string" data-col-default-hidden="true">Model</th>
               <th data-sf-key="os" data-sf-type="string" data-col-default-hidden="true">OS / Firmware</th>
-              <th data-sf-key="macAddress" data-sf-type="string" data-col-default-hidden="true">MAC Address</th>
+              <th style="width:160px" data-col-no-resize="true" data-sf-key="macAddress" data-sf-type="string" data-col-default-hidden="true">MAC Address</th>
               <th data-sf-key="assignedTo" data-sf-type="string" data-col-default-hidden="true">Assigned To</th>
               <th data-sf-key="purchaseOrder" data-sf-type="string" data-col-default-hidden="true">Purchase Order</th>
               <th data-sf-key="dnsName" data-sf-type="string" data-col-default-hidden="true">DNS Name</th>
               <th data-sf-key="lastSeen" data-sf-type="date">Last Seen</th>
-              <th data-col-id="actions" data-col-required="true">Actions</th>
             </tr>
           </thead>
           <tbody id="assets-tbody">
