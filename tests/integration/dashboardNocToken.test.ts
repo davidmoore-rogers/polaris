@@ -70,6 +70,18 @@ d("GET /api/v1/dashboard/noc-summary — bearer token scope gate", () => {
     expect(res.body.downNodes.map((n: { hostname: string }) => n.hostname)).toContain("down-fw-01");
   });
 
+  it("a dashboard:read token can read /filter-options (types + regions)", async () => {
+    const raw = await mintToken(["dashboard:read"]);
+    const res = await request(app)
+      .get("/api/v1/dashboard/filter-options")
+      .set("Authorization", `Bearer ${raw}`);
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.assetTypes)).toBe(true);
+    expect(res.body.assetTypes).toContain("firewall"); // the seeded down-fw-01
+    expect(Array.isArray(res.body.regions)).toBe(true);
+  });
+
   it("a token without dashboard:read gets the shape but empty sections", async () => {
     const raw = await mintToken(["assets:read"]);
     const res = await request(app)

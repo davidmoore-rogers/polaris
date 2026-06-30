@@ -14,6 +14,7 @@ vi.mock("../../src/db.js", () => ({
     asset: { groupBy: vi.fn(), count: vi.fn(), findMany: vi.fn() },
     event: { findMany: vi.fn() },
     $queryRawUnsafe: vi.fn(),
+    $queryRaw: vi.fn(),
   },
 }));
 
@@ -30,6 +31,7 @@ const count = prisma.asset.count as unknown as ReturnType<typeof vi.fn>;
 const findMany = prisma.asset.findMany as unknown as ReturnType<typeof vi.fn>;
 const eventFindMany = prisma.event.findMany as unknown as ReturnType<typeof vi.fn>;
 const rawUnsafe = prisma.$queryRawUnsafe as unknown as ReturnType<typeof vi.fn>;
+const rawQuery = prisma.$queryRaw as unknown as ReturnType<typeof vi.fn>;
 const resolve = resolveMonitorSettings as unknown as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -223,6 +225,18 @@ describe("getHighestDiskUsage", () => {
     const r = await noc.getHighestDiskUsage();
     expect(r).toEqual([]);
     expect(findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("getFilterOptions", () => {
+  it("returns built-in types present (canonical order, custom dropped) and distinct region tags", async () => {
+    findMany.mockResolvedValueOnce([
+      { assetType: "firewall" }, { assetType: "server" }, { assetType: "acme-widget" },
+    ]);
+    rawQuery.mockResolvedValueOnce([{ region: "East" }, { region: "West" }]);
+    const r = await noc.getFilterOptions();
+    expect(r.assetTypes).toEqual(["server", "firewall"]); // builtin order; custom 'acme-widget' dropped
+    expect(r.regions).toEqual(["East", "West"]);
   });
 });
 
