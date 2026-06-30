@@ -79,6 +79,10 @@
 [data-theme="light"] .badge-level-info    { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
 [data-theme="light"] .badge-level-warning { background: rgba(245,127,23,0.10); border-color: rgba(245,127,23,0.30); }
 [data-theme="light"] .badge-level-error   { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
+[data-theme="light"] .badge-level-notice        { background: rgba(100,116,139,0.10); border-color: rgba(100,116,139,0.30); color: #475569; }
+[data-theme="light"] .badge-level-informational { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
+[data-theme="light"] .badge-level-serious       { background: rgba(234,88,12,0.10); border-color: rgba(234,88,12,0.30); color: #c2410c; }
+[data-theme="light"] .badge-level-critical      { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
 [data-theme="light"] .integration-type-badge { background: rgba(230,81,0,0.10); color: #e65100; border-color: rgba(230,81,0,0.30); }
 [data-theme="light"] .modal-overlay { background: rgba(0,0,0,.35); }
 [data-theme="light"] .slideover-overlay { background: rgba(0,0,0,.2); }
@@ -2365,6 +2369,11 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .badge-level-info    { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); font-size: 0.7rem; letter-spacing: 0.5px; }
 .badge-level-warning { background: rgba(255,214,0,0.12); color: var(--color-warning); border: 1px solid rgba(255,214,0,0.25); font-size: 0.7rem; letter-spacing: 0.5px; }
 .badge-level-error   { background: rgba(255,23,68,0.12); color: var(--color-danger); border: 1px solid rgba(255,23,68,0.25); font-size: 0.7rem; letter-spacing: 0.5px; }
+/* Notification severities (notice < informational < warning < serious < critical). */
+.badge-level-notice        { background: rgba(148,163,184,0.14); color: #94a3b8; border: 1px solid rgba(148,163,184,0.30); font-size: 0.7rem; letter-spacing: 0.5px; }
+.badge-level-informational { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); font-size: 0.7rem; letter-spacing: 0.5px; }
+.badge-level-serious       { background: rgba(255,138,0,0.14); color: #ff8a00; border: 1px solid rgba(255,138,0,0.30); font-size: 0.7rem; letter-spacing: 0.5px; }
+.badge-level-critical      { background: rgba(255,23,68,0.12); color: var(--color-danger); border: 1px solid rgba(255,23,68,0.25); font-size: 0.7rem; letter-spacing: 0.5px; }
 
 .asset-tag-label {
   font-family: var(--font-mono);

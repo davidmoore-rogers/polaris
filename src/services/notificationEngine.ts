@@ -34,7 +34,7 @@ import {
   type DeliveryTarget,
   CHANGE_TYPE_ACTIONS,
 } from "./notificationTypes.js";
-import { expandDeliveries } from "./notificationRecipientService.js";
+import { expandDeliveries, scopeRegionTagsOf } from "./notificationRecipientService.js";
 
 const LAST_EVENT_SETTING_KEY = "notificationEngine.lastEventCursor";
 const DEFAULT_LOOKBACK_MS = 15 * 60 * 1000; // window to find the "latest" sample
@@ -54,10 +54,10 @@ interface DbRule {
 }
 
 /** Best-effort outbound-delivery expansion — never breaks rule evaluation. */
-async function expandDeliveriesSafe(notificationId: string, targets: DeliveryTarget[]): Promise<void> {
+async function expandDeliveriesSafe(notificationId: string, targets: DeliveryTarget[], scopeRegionTags?: string[]): Promise<void> {
   if (!targets || targets.length === 0) return;
   try {
-    await expandDeliveries(notificationId, targets);
+    await expandDeliveries(notificationId, targets, scopeRegionTags);
   } catch (err) {
     await logEvent({
       action: "notification.delivery_expand_error",
@@ -491,14 +491,14 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
     create: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey, state: "firing", firedAt: now, lastValue, notificationId: notif.id },
     update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null },
   });
-  await expandDeliveriesSafe(notif.id, rule.targets);
+  await expandDeliveriesSafe(notif.id, rule.targets, scopeRegionTagsOf(rule.scope));
   await logEvent({
     action: "notification.triggered",
     resourceType: "notification",
     resourceId: notif.id,
     resourceName: rule.name,
     actor: "system:notification-engine",
-    level: rule.severity === "error" ? "error" : rule.severity === "warning" ? "warning" : "info",
+    level: (rule.severity === "critical" || rule.severity === "serious") ? "error" : rule.severity === "warning" ? "warning" : "info",
     message: notif.message,
     details: { ruleId: rule.id, assetId: reading.assetId || null, dimension: reading.dimKey },
   });
@@ -580,7 +580,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
   // Notifications from rules with delivery targets get a client-generated id so
   // we can expand their deliveries after the batch insert (createMany returns
   // no ids). Rows without targets keep the DB default.
-  const deliverAfter: { id: string; targets: DeliveryTarget[] }[] = [];
+  const deliverAfter: { id: string; targets: DeliveryTarget[]; scopeRegionTags: string[] }[] = [];
   for (const ev of events) {
     for (const c of compiled) {
       if (!c.re.test(ev.action)) continue;
@@ -597,7 +597,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
         : `${c.rule.name}: ${ev.message}`;
       const hasTargets = Array.isArray(c.rule.targets) && c.rule.targets.length > 0;
       const id = hasTargets ? randomUUID() : undefined;
-      if (hasTargets && id) deliverAfter.push({ id, targets: c.rule.targets });
+      if (hasTargets && id) deliverAfter.push({ id, targets: c.rule.targets, scopeRegionTags: scopeRegionTagsOf(c.rule.scope) });
       toCreate.push({
         ...(id ? { id } : {}),
         ruleId: c.rule.id,
@@ -614,7 +614,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
     await prisma.notification.createMany({ data: toCreate });
   }
   for (const d of deliverAfter) {
-    await expandDeliveriesSafe(d.id, d.targets);
+    await expandDeliveriesSafe(d.id, d.targets, d.scopeRegionTags);
   }
 
   const newest = events[events.length - 1].timestamp.toISOString();

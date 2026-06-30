@@ -11,7 +11,12 @@
 
 import { z } from "zod";
 
-export const SEVERITIES = ["info", "warning", "error"] as const;
+// Notification severity (rule.severity → notification.severity). Ordered
+// least → most severe. NOTE: distinct from EVENT_LEVELS below — that's the
+// audit-Event level vocabulary the `event` trigger's minLevel filters against.
+export const SEVERITIES = ["notice", "informational", "warning", "serious", "critical"] as const;
+// Audit-Event levels (logEvent), used only by the event-trigger minLevel filter.
+export const EVENT_LEVELS = ["info", "warning", "error"] as const;
 export const CLEAR_BEHAVIORS = ["manual", "auto", "timed"] as const;
 export const COMPARATORS = [">", ">=", "<", "<=", "==", "!="] as const;
 export const AGGREGATIONS = ["latest", "avg", "min", "max"] as const;
@@ -109,7 +114,7 @@ const eventTrigger = z.object({
   type: z.literal("event"),
   actionPattern: z.string().min(1).max(200), // glob, e.g. "integration.test.*"
   resourceType: z.string().max(100).optional(),
-  minLevel: z.enum(SEVERITIES).optional(),
+  minLevel: z.enum(EVENT_LEVELS).optional(),
   detailsMatch: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
 });
 
@@ -222,8 +227,12 @@ export const CHANNEL_TYPE_META: Record<ChannelType, { label: string; transport: 
 
 export const deliveryTargetSchema = z.object({
   channelId: z.string().min(1).max(100),
-  recipientTags: z.array(z.string().max(100)).max(200).optional(),
-  addresses: z.array(z.string().email().max(320)).max(100).optional(),
+  // Recipient sources (combine freely; only meaningful for recipient-routed
+  // channel types — email + web_push). Chat/Pushbullet ignore these.
+  recipientUserIds: z.array(z.string().max(100)).max(500).optional(), // specific Polaris users → their email / push subs
+  addresses: z.array(z.string().email().max(320)).max(100).optional(), // custom email addresses (email channels)
+  recipientScopeRegion: z.boolean().optional(), // users whose region tags match the rule's scope region tag(s)
+  recipientTags: z.array(z.string().max(100)).max(200).optional(), // legacy tag-routing (kept for back-compat)
 });
 
 export const ruleInputSchema = z.object({
@@ -329,6 +338,7 @@ export const METRIC_DIMENSIONS: Record<string, string[]> = {
 export function buildSchemaCatalog() {
   return {
     severities: SEVERITIES,
+    eventLevels: EVENT_LEVELS,
     clearBehaviors: CLEAR_BEHAVIORS,
     comparators: COMPARATORS,
     aggregations: AGGREGATIONS,

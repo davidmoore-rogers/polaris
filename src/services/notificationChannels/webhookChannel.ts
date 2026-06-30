@@ -25,7 +25,12 @@ export interface WebhookPayload {
   triggeredAt: string;
 }
 
-const SEVERITY_COLOR: Record<string, string> = { info: "2563eb", warning: "d97706", error: "dc2626" };
+const SEVERITY_COLOR: Record<string, string> = {
+  // current notification severities
+  notice: "6b7280", informational: "2563eb", warning: "d97706", serious: "ea580c", critical: "dc2626",
+  // legacy audit-event levels (pre-migration rows / event payloads)
+  info: "2563eb", error: "dc2626",
+};
 
 export function formatBody(kind: WebhookKind, p: WebhookPayload): unknown {
   if (kind === "slack") {

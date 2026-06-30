@@ -560,6 +560,7 @@ const api = {
   notificationRules: {
     list:    ()        => request("GET", "/notification-rules"),
     schema:  ()        => request("GET", "/notification-rules/schema"),
+    recipientUsers: () => request("GET", "/notification-rules/recipient-users"),
     preview: (body)    => request("POST", "/notification-rules/preview", body),
     create:  (body)    => request("POST", "/notification-rules", body),
     update:  (id, b)   => request("PUT", `/notification-rules/${id}`, b),
