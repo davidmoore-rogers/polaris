@@ -18,6 +18,19 @@ var _ruleSchema = null;
 var _ruleTagList = null;  // cached distinct asset tags for the scope picker
 var _ruleChannels = null; // cached configured delivery channels (rule-builder picker)
 
+// A tag value that looks like a machine identifier — an Entra/Intune GUID
+// (8-4-4-4-12 hex, possibly with a prefix like "prev-entra:<guid>") or a long
+// bare hex object id. Filtered out of the rule-builder tag pickers (scope +
+// recipient tags) so device IDs don't flood them. Human tags
+// (region:Atlanta, firewall:fgt-1, prod) never match.
+function _looksLikeDeviceId(tag) {
+  if (!tag) return false;
+  var t = String(tag);
+  if (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(t)) return true; // GUID anywhere in the value
+  if (/^[0-9a-f]{24,}$/i.test(t)) return true; // long bare hex object id
+  return false;
+}
+
 (function () {
   // Permissions resolve asynchronously via /auth/me (userReady). Computing
   // them at script-load time reads an empty matrix and wrongly hides the
@@ -526,7 +539,10 @@ async function openRuleBuilder(existing) {
     catch (err) { showToast("Failed to load rule schema", "error"); return; }
   }
   if (_ruleTagList === null) {
-    try { var _td = await api.assets.tags(); _ruleTagList = (_td && _td.tags) || []; }
+    // Filter out machine-identifier tags (Entra/Intune GUIDs, long hex object
+    // ids) so device IDs don't flood the scope + recipient-tag pickers. Human
+    // tags (region:Atlanta, firewall:fgt-1, prod) never match.
+    try { var _td = await api.assets.tags(); _ruleTagList = ((_td && _td.tags) || []).filter(function (t) { return !_looksLikeDeviceId(t); }); }
     catch (_e) { _ruleTagList = []; }
   }
   // Always refresh channels (operator may have just added one in the Delivery tab).
