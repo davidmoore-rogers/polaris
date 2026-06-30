@@ -11085,6 +11085,27 @@ function _screenshotTableEl(tableEl, label, opts) {
     var cs = view.getComputedStyle(el);
     return !cs || (cs.display !== 'none' && cs.visibility !== 'hidden');
   }
+  // Extract a cell's text inserting a space at every element boundary so
+  // visually-separated inline badges/pills — which are spaced only by CSS
+  // margin, with no whitespace text node between them — don't run together in
+  // the flattened text (e.g. the interface name link "a" + its "Physical" type
+  // badge would otherwise read "aPhysical"). innerText only inserts breaks at
+  // block boundaries, so inline siblings need this.
+  function cellText(el) {
+    var parts = [];
+    (function walk(node) {
+      node.childNodes.forEach(function (n) {
+        if (n.nodeType === 3) {            // text node
+          if (n.nodeValue) parts.push(n.nodeValue);
+        } else if (n.nodeType === 1) {     // element — pad both sides
+          parts.push(' ');
+          walk(n);
+          parts.push(' ');
+        }
+      });
+    })(el);
+    return parts.join('').replace(/\s+/g, ' ').trim();
+  }
   var ths = Array.prototype.slice.call(tableEl.querySelectorAll('thead th'));
   var visMask = ths.map(visible);
   var headers = [];
@@ -11109,7 +11130,7 @@ function _screenshotTableEl(tableEl, label, opts) {
     var row = [];
     tr.querySelectorAll(':scope > td').forEach(function (td, i) {
       if (visMask[i] === false) return;   // skip hidden columns
-      row.push((td.innerText || td.textContent || '').trim().replace(/\s+/g, ' '));
+      row.push(cellText(td));
     });
     if (row.length) rows.push(row);
   });
