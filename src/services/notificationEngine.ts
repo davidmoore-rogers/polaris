@@ -498,7 +498,7 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
     resourceId: notif.id,
     resourceName: rule.name,
     actor: "system:notification-engine",
-    level: rule.severity === "error" ? "error" : rule.severity === "warning" ? "warning" : "info",
+    level: (rule.severity === "critical" || rule.severity === "serious") ? "error" : rule.severity === "warning" ? "warning" : "info",
     message: notif.message,
     details: { ruleId: rule.id, assetId: reading.assetId || null, dimension: reading.dimKey },
   });

@@ -11,7 +11,12 @@
 
 import { z } from "zod";
 
-export const SEVERITIES = ["info", "warning", "error"] as const;
+// Notification severity (rule.severity → notification.severity). Ordered
+// least → most severe. NOTE: distinct from EVENT_LEVELS below — that's the
+// audit-Event level vocabulary the `event` trigger's minLevel filters against.
+export const SEVERITIES = ["notice", "informational", "warning", "serious", "critical"] as const;
+// Audit-Event levels (logEvent), used only by the event-trigger minLevel filter.
+export const EVENT_LEVELS = ["info", "warning", "error"] as const;
 export const CLEAR_BEHAVIORS = ["manual", "auto", "timed"] as const;
 export const COMPARATORS = [">", ">=", "<", "<=", "==", "!="] as const;
 export const AGGREGATIONS = ["latest", "avg", "min", "max"] as const;
@@ -109,7 +114,7 @@ const eventTrigger = z.object({
   type: z.literal("event"),
   actionPattern: z.string().min(1).max(200), // glob, e.g. "integration.test.*"
   resourceType: z.string().max(100).optional(),
-  minLevel: z.enum(SEVERITIES).optional(),
+  minLevel: z.enum(EVENT_LEVELS).optional(),
   detailsMatch: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
 });
 
@@ -329,6 +334,7 @@ export const METRIC_DIMENSIONS: Record<string, string[]> = {
 export function buildSchemaCatalog() {
   return {
     severities: SEVERITIES,
+    eventLevels: EVENT_LEVELS,
     clearBehaviors: CLEAR_BEHAVIORS,
     comparators: COMPARATORS,
     aggregations: AGGREGATIONS,

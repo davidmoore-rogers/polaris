@@ -627,7 +627,7 @@ async function openRuleBuilder(existing) {
     } else if (t === "event") {
       html += '<div class="form-group"><label>Action pattern (glob)</label><input type="text" id="tf-action" value="' + escapeHtml(cur.actionPattern || "") + '" placeholder="e.g. monitor.status_changed or integration.test.*"></div>';
       html += '<div class="form-group"><label>Resource type (optional)</label><input type="text" id="tf-restype" value="' + escapeHtml(cur.resourceType || "") + '" placeholder="e.g. asset / integration"></div>';
-      html += '<div class="form-group"><label>Minimum level (optional)</label><select id="tf-minlevel"><option value="">(any)</option>' + opt(s.severities, cur.minLevel || "") + '</select></div>';
+      html += '<div class="form-group"><label>Minimum event level (optional)</label><select id="tf-minlevel"><option value="">(any)</option>' + opt(s.eventLevels || ["info", "warning", "error"], cur.minLevel || "") + '</select></div>';
     } else if (t === "change") {
       html += '<div class="form-group"><label>Change type</label><select id="tf-changetype">' + optLabeled(def.changeTypes || [], cur.changeType, changeLabel) + '</select></div>';
     }

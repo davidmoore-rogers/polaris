@@ -682,7 +682,8 @@ const ROLES = [
 
 // ── Notifications (mock) ──
 const NOTIFICATION_SCHEMA = {
-  severities: ["info", "warning", "error"],
+  severities: ["notice", "informational", "warning", "serious", "critical"],
+  eventLevels: ["info", "warning", "error"],
   clearBehaviors: ["manual", "auto", "timed"],
   comparators: [">", ">=", "<", "<=", "==", "!="],
   aggregations: ["latest", "avg", "min", "max"],
@@ -723,7 +724,7 @@ let NOTIFICATION_CHANNELS = [
 ];
 let _ncSeq = 10;
 let NOTIFICATION_RULES = [
-  { id: "nr-1", name: "Polaris host memory high", description: null, enabled: true, severity: "error",
+  { id: "nr-1", name: "Polaris host memory high", description: null, enabled: true, severity: "critical",
     trigger: { type: "host_metric", metric: "memUsedPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 85, forDurationSec: 0 },
     scope: {}, clearBehavior: "auto", clearAfterSec: null, cooldownSec: null, messageTemplate: null, channels: ["in_app"],
     targets: [{ channelId: "nc-1", recipientTags: ["region:Atlanta"], addresses: ["oncall@example.com"] }],
@@ -741,14 +742,14 @@ let NOTIFICATION_RULES = [
 ];
 let _notifIdSeq = 100;
 let NOTIFICATIONS = [
-  { id: "n-1", ruleId: "nr-2", assetId: null, assetHostname: "db-srv-01", severity: "error",
+  { id: "n-1", ruleId: "nr-2", assetId: null, assetHostname: "db-srv-01", severity: "critical",
     message: "db-srv-01 CPU at 92%", regionTags: ["Atlanta"], triggeredAt: new Date(Date.now() - 5 * 60000).toISOString(),
     acknowledged: false, acknowledgedBy: null, acknowledgedAt: null, acknowledgeNote: null, cleared: false, clearedBy: null, clearedAt: null },
   { id: "n-2", ruleId: "nr-3", assetId: null, assetHostname: "core-sw-01", severity: "warning",
     message: "core-sw-01 transitioned up → down", regionTags: [], triggeredAt: new Date(Date.now() - 10 * 60000).toISOString(),
     acknowledged: true, acknowledgedBy: "demo.admin", acknowledgedAt: new Date(Date.now() - 2 * 60000).toISOString(),
     acknowledgeNote: "Investigated — transient link flap during maintenance.", cleared: false, clearedBy: null, clearedAt: null },
-  { id: "n-3", ruleId: "nr-1", assetId: null, assetHostname: "Polaris host", severity: "info",
+  { id: "n-3", ruleId: "nr-1", assetId: null, assetHostname: "Polaris host", severity: "informational",
     message: "Polaris host memory at 91%", regionTags: [], triggeredAt: new Date(Date.now() - 15 * 60000).toISOString(),
     acknowledged: false, acknowledgedBy: null, acknowledgedAt: null, acknowledgeNote: null, cleared: false, clearedBy: null, clearedAt: null },
 ];
