@@ -533,3 +533,39 @@ export async function getSitesWithIssues(maxSites = 25, assetIds: string[] | nul
     nodes: nodesBySite.get(r.site) ?? [],
   }));
 }
+
+export interface FilterOptions {
+  assetTypes: string[];
+  regions: string[];
+}
+
+/**
+ * Options for the NOC dashboard's global filters:
+ *   - assetTypes: the built-in asset types actually present in the fleet, in
+ *     the canonical built-in order. Only built-ins are returned because the
+ *     per-widget `assetTypes` filter (resolveFilteredAssetIds) toggles built-ins
+ *     — custom types are always shown and aren't meaningful filter entries.
+ *   - regions: distinct `region:<name>` tag values across the live fleet, the
+ *     same tags the `regionTags` filter matches. Sorted.
+ * Two cheap queries; safe for a dashboard:read token.
+ */
+export async function getFilterOptions(): Promise<FilterOptions> {
+  const [typeRows, regionRows] = await Promise.all([
+    prisma.asset.findMany({
+      where: { status: { notIn: ["decommissioned", "disabled"] } },
+      select: { assetType: true },
+      distinct: ["assetType"],
+    }),
+    prisma.$queryRaw<Array<{ region: string }>>`
+      SELECT DISTINCT substring(t from 8) AS region
+      FROM "assets", unnest("tags") AS t
+      WHERE t LIKE 'region:%'
+        AND "status" NOT IN ('decommissioned', 'disabled')
+      ORDER BY region`,
+  ]);
+  const present = new Set(typeRows.map((r) => r.assetType));
+  return {
+    assetTypes: BUILTIN_ASSET_TYPES.filter((t) => present.has(t)),
+    regions: regionRows.map((r) => r.region).filter(Boolean),
+  };
+}

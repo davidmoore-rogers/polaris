@@ -188,4 +188,24 @@ router.get("/noc-summary", async (req, res, next) => {
   }
 });
 
+/**
+ * GET /filter-options — available asset types + region tags for the NOC
+ * dashboard's global filter dropdowns. Same dashboard:read-token / assets:read-
+ * session gate as /noc-summary; callers without access get empty lists (not 403).
+ */
+router.get("/filter-options", async (req, res, next) => {
+  try {
+    await ensureSessionRoleSnapshot(req);
+    const tokenNoc = req.apiToken?.scopes.includes("dashboard:read") ?? false;
+    const canAssets = tokenNoc || hasPermission(req, "assets", "read");
+    if (!canAssets) {
+      res.json({ assetTypes: [], regions: [] });
+      return;
+    }
+    res.json(await nocDashboardService.getFilterOptions());
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;
