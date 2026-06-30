@@ -227,8 +227,12 @@ export const CHANNEL_TYPE_META: Record<ChannelType, { label: string; transport: 
 
 export const deliveryTargetSchema = z.object({
   channelId: z.string().min(1).max(100),
-  recipientTags: z.array(z.string().max(100)).max(200).optional(),
-  addresses: z.array(z.string().email().max(320)).max(100).optional(),
+  // Recipient sources (combine freely; only meaningful for recipient-routed
+  // channel types — email + web_push). Chat/Pushbullet ignore these.
+  recipientUserIds: z.array(z.string().max(100)).max(500).optional(), // specific Polaris users → their email / push subs
+  addresses: z.array(z.string().email().max(320)).max(100).optional(), // custom email addresses (email channels)
+  recipientScopeRegion: z.boolean().optional(), // users whose region tags match the rule's scope region tag(s)
+  recipientTags: z.array(z.string().max(100)).max(200).optional(), // legacy tag-routing (kept for back-compat)
 });
 
 export const ruleInputSchema = z.object({

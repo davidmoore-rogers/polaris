@@ -17,6 +17,7 @@ var _rulesLayout = null;
 var _ruleSchema = null;
 var _ruleTagList = null;  // cached distinct asset tags for the scope picker
 var _ruleChannels = null; // cached configured delivery channels (rule-builder picker)
+var _ruleRecipientUsers = null; // cached users for the recipient picker
 
 // A tag value that looks like a machine identifier — an Entra/Intune GUID
 // (8-4-4-4-12 hex, possibly with a prefix like "prev-entra:<guid>") or a long
@@ -548,6 +549,10 @@ async function openRuleBuilder(existing) {
   // Always refresh channels (operator may have just added one in the Delivery tab).
   try { var _cd = await api.notificationChannels.list(); _ruleChannels = (_cd && _cd.channels) || []; }
   catch (_e) { _ruleChannels = _ruleChannels || []; }
+  if (_ruleRecipientUsers === null) {
+    try { var _ru = await api.notificationRules.recipientUsers(); _ruleRecipientUsers = (_ru && _ru.users) || []; }
+    catch (_e) { _ruleRecipientUsers = []; }
+  }
   var s = _ruleSchema;
   var r = existing || {};
   var trig = r.trigger || { type: "asset_metric" };
@@ -767,12 +772,22 @@ async function openRuleBuilder(existing) {
   function isRouted(type) { return routedTypes.indexOf(type) !== -1; }
   function isEmailType(type) { return type === "smtp" || type === "oauth_m365"; }
 
-  function tagMultiSelect(selected) {
-    var sel = new Set(selected || []);
-    var opts = (_ruleTagList || []).map(function (tg) {
-      return '<option value="' + escapeHtml(tg) + '"' + (sel.has(tg) ? " selected" : "") + '>' + escapeHtml(tg) + '</option>';
+  // Region tags currently in this rule's Scope (drives the "users in the
+  // region" recipient option). Read live from the scope tags field.
+  function scopeRegionTagsNow() {
+    var el = document.getElementById("sc-tags");
+    var raw = el ? el.value : ((scope.tags || []).join(", "));
+    return raw.split(",").map(function (x) { return x.trim(); }).filter(function (x) { return /^region:/i.test(x); });
+  }
+  function userMultiSelect(selectedIds) {
+    var sel = new Set(selectedIds || []);
+    var users = _ruleRecipientUsers || [];
+    if (!users.length) return '<select multiple class="tg-recipient-users" size="4" style="width:100%" disabled><option>No users found</option></select>';
+    var opts = users.map(function (u) {
+      var label = (u.displayName || u.username) + (u.email ? " <" + u.email + ">" : " (no email)");
+      return '<option value="' + escapeHtml(u.id) + '"' + (sel.has(u.id) ? " selected" : "") + '>' + escapeHtml(label) + '</option>';
     }).join("");
-    return '<select multiple class="tg-recipient-tags" size="4" style="width:100%">' + opts + '</select>';
+    return '<select multiple class="tg-recipient-users" size="4" style="width:100%">' + opts + '</select>';
   }
   function channelOptions(selId) {
     if (channels.length === 0) return '<option value="">No channels configured</option>';
@@ -801,10 +816,17 @@ async function openRuleBuilder(existing) {
       box.innerHTML = '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0">Posts to this channel’s configured destination.</p>';
       return;
     }
-    var html = '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Recipient tags (route to matching users)</label>' + tagMultiSelect(t.recipientTags) + '</div>';
+    // Recipient sources: individual user accounts, (email) a custom address,
+    // and users associated with the rule's scope region(s).
+    var html = '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Send to user accounts</label>' + userMultiSelect(t.recipientUserIds) + '</div>';
     if (isEmailType(ch.type)) {
-      html += '<div class="form-group" style="margin:0"><label style="font-size:0.8rem">Explicit addresses (comma-separated)</label><input type="text" class="tg-addresses" value="' + escapeHtml((t.addresses || []).join(", ")) + '" placeholder="oncall@example.com, noc@example.com"></div>';
+      html += '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">…or custom email addresses (comma-separated)</label><input type="text" class="tg-addresses" value="' + escapeHtml((t.addresses || []).join(", ")) + '" placeholder="oncall@example.com, noc@example.com"></div>';
     }
+    var regions = scopeRegionTagsNow();
+    var regionLabel = regions.length
+      ? "…or users associated with the rule's region (" + regions.map(function (x) { return x.replace(/^region:/i, ""); }).join(", ") + ")"
+      : "…or users associated with the rule's region (add a region: tag to the Scope above)";
+    html += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="tg-scope-region"' + (t.recipientScopeRegion ? " checked" : "") + (regions.length ? "" : " disabled") + '> ' + escapeHtml(regionLabel) + '</label>';
     box.innerHTML = html;
   }
   function wireTargetRow(row, t) {
@@ -826,16 +848,18 @@ async function openRuleBuilder(existing) {
       var channelId = row.querySelector(".tg-channel").value;
       if (!channelId) return;
       var t = { channelId: channelId };
-      var tagSel = row.querySelector(".tg-recipient-tags");
-      if (tagSel) {
-        var tags = Array.from(tagSel.selectedOptions).map(function (o) { return o.value; });
-        if (tags.length) t.recipientTags = tags;
+      var userSel = row.querySelector(".tg-recipient-users");
+      if (userSel) {
+        var uids = Array.from(userSel.selectedOptions).map(function (o) { return o.value; }).filter(function (v) { return v; });
+        if (uids.length) t.recipientUserIds = uids;
       }
       var addrEl = row.querySelector(".tg-addresses");
       if (addrEl) {
         var addrs = (addrEl.value || "").split(",").map(function (a) { return a.trim(); }).filter(Boolean);
         if (addrs.length) t.addresses = addrs;
       }
+      var regEl = row.querySelector(".tg-scope-region");
+      if (regEl && regEl.checked) t.recipientScopeRegion = true;
       out.push(t);
     });
     return out;
@@ -899,12 +923,12 @@ async function openRuleBuilder(existing) {
     var targets = rule.targets || [];
     for (var i = 0; i < targets.length; i++) {
       var t = targets[i]; var n = i + 1;
-      if (t.channel === "webhook" && !t.webhookUrl) return "Target " + n + ": a webhook URL is required.";
-      if (t.channel === "email" && !(t.addresses && t.addresses.length) && !(t.recipientTags && t.recipientTags.length)) {
-        return "Target " + n + ": an email target needs recipient tags and/or explicit addresses.";
-      }
-      if (t.channel === "web_push" && !(t.recipientTags && t.recipientTags.length)) {
-        return "Target " + n + ": a web-push target needs recipient tags.";
+      if (!t.channelId) return "Delivery " + n + ": pick a channel.";
+      var ch = chanById(t.channelId);
+      if (ch && isRouted(ch.type)) {
+        var hasRecip = (t.recipientUserIds && t.recipientUserIds.length) || (t.addresses && t.addresses.length) ||
+          t.recipientScopeRegion || (t.recipientTags && t.recipientTags.length);
+        if (!hasRecip) return "Delivery " + n + " (" + ch.name + "): choose at least one recipient — user accounts, a custom email, or the rule's region.";
       }
     }
     return null;

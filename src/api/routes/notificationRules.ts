@@ -17,6 +17,7 @@ import { AppError } from "../../utils/errors.js";
 import { ruleInputSchema, buildSchemaCatalog } from "../../services/notificationTypes.js";
 import { listRules, createRule, updateRule, deleteRule } from "../../services/notificationRuleService.js";
 import { previewRule } from "../../services/notificationEngine.js";
+import { listRecipientUsers } from "../../services/notificationRecipientService.js";
 
 export const notificationRulesRouter = Router();
 
@@ -30,6 +31,15 @@ notificationRulesRouter.get("/", requirePermission("notificationManagement", "re
 notificationRulesRouter.get("/schema", requirePermission("notificationManagement", "read"), async (_req, res, next) => {
   try {
     res.json(buildSchemaCatalog());
+  } catch (err) { next(err); }
+});
+
+// Users for the rule-builder recipient picker (individual-account targets).
+// Gated by notificationManagement (a rule editor needs it) rather than
+// users:read, since those are distinct permissions.
+notificationRulesRouter.get("/recipient-users", requirePermission("notificationManagement", "read"), async (_req, res, next) => {
+  try {
+    res.json({ users: await listRecipientUsers() });
   } catch (err) { next(err); }
 });
 

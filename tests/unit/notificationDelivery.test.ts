@@ -10,6 +10,19 @@
 import { describe, it, expect } from "vitest";
 import { deliveryTargetSchema } from "../../src/services/notificationTypes.js";
 import { formatBody, type WebhookPayload } from "../../src/services/notificationChannels/webhookChannel.js";
+import { scopeRegionTagsOf } from "../../src/services/notificationRecipientService.js";
+
+describe("scopeRegionTagsOf", () => {
+  it("extracts only region: tags from a scope", () => {
+    expect(scopeRegionTagsOf({ tags: ["region:Atlanta", "prod", "firewall:fgt-1", "region:Nashville"] }))
+      .toEqual(["region:Atlanta", "region:Nashville"]);
+  });
+  it("returns [] for no scope / no region tags", () => {
+    expect(scopeRegionTagsOf(null)).toEqual([]);
+    expect(scopeRegionTagsOf({ tags: ["prod"] })).toEqual([]);
+    expect(scopeRegionTagsOf({})).toEqual([]);
+  });
+});
 
 describe("deliveryTargetSchema", () => {
   it("accepts a target referencing a channel by id", () => {
@@ -24,6 +37,16 @@ describe("deliveryTargetSchema", () => {
   });
   it("rejects an invalid email address", () => {
     expect(deliveryTargetSchema.safeParse({ channelId: "ch-1", addresses: ["nope"] }).success).toBe(false);
+  });
+  it("accepts individual user-account recipients", () => {
+    expect(deliveryTargetSchema.safeParse({ channelId: "ch-1", recipientUserIds: ["u1", "u2"] }).success).toBe(true);
+  });
+  it("accepts the scope-region recipient flag", () => {
+    expect(deliveryTargetSchema.safeParse({ channelId: "ch-1", recipientScopeRegion: true }).success).toBe(true);
+  });
+  it("accepts a combination of recipient sources", () => {
+    const r = deliveryTargetSchema.safeParse({ channelId: "ch-1", recipientUserIds: ["u1"], addresses: ["a@example.com"], recipientScopeRegion: true });
+    expect(r.success).toBe(true);
   });
 });
 

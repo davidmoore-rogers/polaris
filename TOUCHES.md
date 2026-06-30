@@ -1285,15 +1285,17 @@ Listed alphabetically.
 
 **What it owns:** Routing a fired notification to concrete delivery recipients, and expanding a rule's `targets[]` into `NotificationDelivery` rows.
 
-**Public API:** `resolveRecipientUsers(recipientTags)`, `expandDeliveries(notificationId, targets)`, `bumpRecipientIndex()`.
+**Public API:** `resolveRecipientUsers(recipientTags)`, `resolveRecipientUsersByIds(ids)`, `listRecipientUsers()` (builder picker), `scopeRegionTagsOf(scope)`, `expandDeliveries(notificationId, targets, scopeRegionTags?)`, `bumpRecipientIndex()`.
 
 **Cross-service deps:** `regionScopeService.resolveTagScopesForUser` (effective tags per user), `notificationService.stripRegionPrefix`, `notificationTypes.CHANNEL_TRANSPORT` (channel type → transport), `prisma` (notificationChannel lookup + users + pushSubscriptions + notificationDelivery).
 
-**Used by:** `src/services/notificationEngine.ts` (`fire()` + event-tail, via the best-effort `expandDeliveriesSafe` wrapper).
+**Used by:** `src/services/notificationEngine.ts` (`fire()` + event-tail, via the best-effort `expandDeliveriesSafe` wrapper — passes the rule's `scopeRegionTagsOf(scope)`), `src/api/routes/notificationRules.ts` (`GET /recipient-users`).
 
 **Invariants:**
-- Recipient matching strips the `region:` prefix and lower-cases both sides, so a target `region:Atlanta` matches a user whose regionTags include `Atlanta`; region + other tags are matched as one union.
-- Empty `recipientTags` routes to NO users (explicit, not "everyone").
+- A target's recipients (email/web_push channels) = union of explicit `recipientUserIds` + (when `recipientScopeRegion`) users matching the rule's scope `region:` tag(s) + legacy `recipientTags`, plus explicit `addresses` (email). Deduped by user id.
+- Recipient matching strips the `region:` prefix and lower-cases both sides, so a scope tag `region:Atlanta` matches a user whose regionTags include `Atlanta`; region + other tags are matched as one union.
+- `recipientScopeRegion` resolves against the RULE'S SCOPE region tags (passed in by the engine), not a region chosen in the Notify section.
+- slack/teams/pushbullet ignore recipients entirely (one fixed-destination row).
 - Recipients are snapshotted at fire time (delivery rows reflect targets when the rule fired, not when the drain runs).
 - In-app delivery is never a `NotificationDelivery` row — it's the `Notification` itself.
 

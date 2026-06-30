@@ -727,7 +727,7 @@ let NOTIFICATION_RULES = [
   { id: "nr-1", name: "Polaris host memory high", description: null, enabled: true, severity: "critical",
     trigger: { type: "host_metric", metric: "memUsedPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 85, forDurationSec: 0 },
     scope: {}, clearBehavior: "auto", clearAfterSec: null, cooldownSec: null, messageTemplate: null, channels: ["in_app"],
-    targets: [{ channelId: "nc-1", recipientTags: ["region:Atlanta"], addresses: ["oncall@example.com"] }],
+    targets: [{ channelId: "nc-1", recipientUserIds: ["u5", "u6"], addresses: ["oncall@example.com"] }],
     createdBy: "admin", createdAt: "2026-06-20T08:00:00.000Z", updatedAt: "2026-06-20T08:00:00.000Z" },
   { id: "nr-2", name: "Server CPU high", description: null, enabled: true, severity: "warning",
     trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 70, forDurationSec: 0 },
@@ -3899,6 +3899,9 @@ async function routeAPI(method, path, params, body, res, req) {
   }
   if (path === "/api/v1/notification-rules/schema" && method === "GET") {
     return json(res, NOTIFICATION_SCHEMA);
+  }
+  if (path === "/api/v1/notification-rules/recipient-users" && method === "GET") {
+    return json(res, { users: USERS.map((u) => ({ id: u.id, username: u.username, displayName: u.displayName || null, email: u.email || null })) });
   }
   if (path === "/api/v1/notification-rules/preview" && method === "POST") {
     const t = (body && body.trigger) || {};

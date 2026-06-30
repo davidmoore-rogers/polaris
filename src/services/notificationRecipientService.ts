@@ -98,6 +98,22 @@ export async function resolveRecipientUsers(recipientTags: string[] | undefined)
     .map(({ id, email, displayName }) => ({ id, email, displayName }));
 }
 
+/** Specific users by id (the rule's "individual user accounts" recipients). */
+export async function resolveRecipientUsersByIds(ids: string[] | undefined): Promise<RecipientUser[]> {
+  if (!ids || ids.length === 0) return [];
+  const want = new Set(ids);
+  const index = await loadUserIndex();
+  return index.filter((u) => want.has(u.id)).map(({ id, email, displayName }) => ({ id, email, displayName }));
+}
+
+/** All users for the rule-builder recipient picker (id + name + email). */
+export async function listRecipientUsers(): Promise<{ id: string; username: string; displayName: string | null; email: string | null }[]> {
+  return prisma.user.findMany({
+    select: { id: true, username: true, displayName: true, email: true },
+    orderBy: { username: "asc" },
+  });
+}
+
 /**
  * Expand a fired notification's rule targets into concrete delivery rows. Each
  * target references a configured NotificationChannel by id; the channel's type
@@ -110,7 +126,7 @@ export async function resolveRecipientUsers(recipientTags: string[] | undefined)
  * Disabled or missing channels are skipped. Best-effort: returns the number of
  * rows created.
  */
-export async function expandDeliveries(notificationId: string, targets: DeliveryTarget[] | undefined): Promise<number> {
+export async function expandDeliveries(notificationId: string, targets: DeliveryTarget[] | undefined, scopeRegionTags?: string[]): Promise<number> {
   if (!targets || targets.length === 0) return 0;
 
   // Resolve the referenced channels once (type + enabled).
@@ -132,6 +148,17 @@ export async function expandDeliveries(notificationId: string, targets: Delivery
     rows.push({ notificationId, channelId, transport, target, meta: meta ?? undefined });
   };
 
+  // Recipient users for a target = union of: specific user ids + (if opted in)
+  // users in the rule's scope region(s) + legacy tag-routing. Deduped by id.
+  const usersForTarget = async (t: DeliveryTarget): Promise<RecipientUser[]> => {
+    const map = new Map<string, RecipientUser>();
+    const addUsers = (us: RecipientUser[]) => us.forEach((u) => map.set(u.id, u));
+    if (t.recipientUserIds?.length) addUsers(await resolveRecipientUsersByIds(t.recipientUserIds));
+    if (t.recipientScopeRegion && scopeRegionTags?.length) addUsers(await resolveRecipientUsers(scopeRegionTags));
+    if (t.recipientTags?.length) addUsers(await resolveRecipientUsers(t.recipientTags)); // legacy
+    return Array.from(map.values());
+  };
+
   for (const t of targets) {
     const channel = byId.get(t.channelId);
     if (!channel || !channel.enabled || !isChannelType(channel.type)) continue;
@@ -139,14 +166,11 @@ export async function expandDeliveries(notificationId: string, targets: Delivery
 
     if (transport === "email") {
       const addresses = new Set<string>();
-      for (const a of t.addresses ?? []) addresses.add(a.trim().toLowerCase());
-      if (t.recipientTags?.length) {
-        const users = await resolveRecipientUsers(t.recipientTags);
-        for (const u of users) if (u.email) addresses.add(u.email.trim().toLowerCase());
-      }
+      for (const a of t.addresses ?? []) addresses.add(a.trim().toLowerCase()); // custom emails
+      for (const u of await usersForTarget(t)) if (u.email) addresses.add(u.email.trim().toLowerCase());
       for (const addr of addresses) add(channel.id, "email", addr);
     } else if (transport === "web_push") {
-      const users = await resolveRecipientUsers(t.recipientTags);
+      const users = await usersForTarget(t);
       if (users.length > 0) {
         const subs = await prisma.pushSubscription.findMany({
           where: { userId: { in: users.map((u) => u.id) } },
@@ -163,6 +187,12 @@ export async function expandDeliveries(notificationId: string, targets: Delivery
   if (rows.length === 0) return 0;
   await prisma.notificationDelivery.createMany({ data: rows });
   return rows.length;
+}
+
+/** Extract the `region:`-prefixed tags from a rule's scope (for recipientScopeRegion). */
+export function scopeRegionTagsOf(scope: { tags?: string[] } | null | undefined): string[] {
+  const tags = scope && Array.isArray(scope.tags) ? scope.tags : [];
+  return tags.filter((t) => typeof t === "string" && t.toLowerCase().startsWith("region:"));
 }
 
 function isChannelType(t: string): t is ChannelType {
