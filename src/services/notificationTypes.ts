@@ -169,13 +169,15 @@ export interface ChannelFieldDef {
   options?: string[];
   placeholder?: string;
 }
-export const CHANNEL_TYPE_META: Record<ChannelType, { label: string; transport: string; singleton?: boolean; fields: ChannelFieldDef[] }> = {
+export const CHANNEL_TYPE_META: Record<ChannelType, { label: string; transport: string; singleton?: boolean; help?: string; fields: ChannelFieldDef[] }> = {
   smtp: {
     label: "Email — SMTP", transport: "email",
     fields: [
       { key: "host", label: "SMTP host", kind: "text", placeholder: "smtp.example.com" },
-      { key: "port", label: "Port", kind: "number" },
+      // Security sits above Port: picking a security level auto-fills the
+      // conventional port (none→25, starttls→587, ssl→465) in the UI.
       { key: "security", label: "Security", kind: "select", options: ["none", "starttls", "ssl"] },
+      { key: "port", label: "Port", kind: "number" },
       { key: "username", label: "Username", kind: "text" },
       { key: "password", label: "Password", kind: "password", secret: true },
       { key: "from", label: "From address", kind: "text", placeholder: "polaris@example.com" },
@@ -183,6 +185,7 @@ export const CHANNEL_TYPE_META: Record<ChannelType, { label: string; transport: 
   },
   oauth_m365: {
     label: "Email — Microsoft 365 (OAuth)", transport: "email",
+    help: "Add the Mail.Send application permission to this app's Enterprise application in Azure (App registration → API permissions → Microsoft Graph → Application permissions → Mail.Send) and grant admin consent. The send-as user must be a licensed Exchange Online mailbox.",
     fields: [
       { key: "tenantId", label: "Tenant ID", kind: "text" },
       { key: "clientId", label: "Client ID", kind: "text" },

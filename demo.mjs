@@ -689,11 +689,14 @@ const NOTIFICATION_SCHEMA = {
   recipientRoutedTypes: ["smtp", "oauth_m365", "web_push"],
   channelTypes: {
     smtp: { label: "Email — SMTP", transport: "email", fields: [
-      { key: "host", label: "SMTP host", kind: "text" }, { key: "port", label: "Port", kind: "number" },
+      { key: "host", label: "SMTP host", kind: "text" },
       { key: "security", label: "Security", kind: "select", options: ["none", "starttls", "ssl"] },
+      { key: "port", label: "Port", kind: "number" },
       { key: "username", label: "Username", kind: "text" }, { key: "password", label: "Password", kind: "password", secret: true },
       { key: "from", label: "From address", kind: "text" } ] },
-    oauth_m365: { label: "Email — Microsoft 365 (OAuth)", transport: "email", fields: [
+    oauth_m365: { label: "Email — Microsoft 365 (OAuth)", transport: "email",
+      help: "Add the Mail.Send application permission to this app's Enterprise application in Azure (App registration → API permissions → Microsoft Graph → Application permissions → Mail.Send) and grant admin consent. The send-as user must be a licensed Exchange Online mailbox.",
+      fields: [
       { key: "tenantId", label: "Tenant ID", kind: "text" }, { key: "clientId", label: "Client ID", kind: "text" },
       { key: "clientSecret", label: "Client secret", kind: "password", secret: true }, { key: "fromUserId", label: "Send-as user", kind: "text" } ] },
     pushbullet: { label: "Pushbullet", transport: "pushbullet", fields: [{ key: "accessToken", label: "Access token", kind: "password", secret: true }] },
