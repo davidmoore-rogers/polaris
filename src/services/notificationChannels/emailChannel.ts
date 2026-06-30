@@ -46,13 +46,21 @@ export async function sendSmtpEmail(cfg: SmtpConfig, msg: EmailMessage): Promise
     requireTLS: cfg.security === "starttls",
     auth: cfg.username ? { user: cfg.username, pass: cfg.password } : undefined,
   });
-  await transport.sendMail({
-    from: cfg.from || cfg.username,
-    to: msg.to,
-    subject: msg.subject,
-    text: msg.text,
-    html: msg.html,
-  });
+  try {
+    await transport.sendMail({
+      from: cfg.from || cfg.username,
+      to: msg.to,
+      subject: msg.subject,
+      text: msg.text,
+      html: msg.html,
+    });
+  } catch (err: any) {
+    // Surface the real reason (connection refused, auth failed, TLS, timeout)
+    // as a 502 with detail instead of letting the raw nodemailer error fall
+    // through to the catch-all 500 "Internal server error".
+    const detail = String(err?.response || err?.message || err?.code || "unknown error").split(/\r?\n/)[0];
+    throw new AppError(502, `SMTP send failed: ${detail}`);
+  }
 }
 
 // Minimal Graph client-credentials token fetch (self-contained so the channel

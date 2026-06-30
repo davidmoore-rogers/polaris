@@ -18,6 +18,19 @@ var _ruleSchema = null;
 var _ruleTagList = null;  // cached distinct asset tags for the scope picker
 var _ruleChannels = null; // cached configured delivery channels (rule-builder picker)
 
+// A tag value that looks like a machine identifier — an Entra/Intune GUID
+// (8-4-4-4-12 hex, possibly with a prefix like "prev-entra:<guid>") or a long
+// bare hex object id. Filtered out of the rule-builder tag pickers (scope +
+// recipient tags) so device IDs don't flood them. Human tags
+// (region:Atlanta, firewall:fgt-1, prod) never match.
+function _looksLikeDeviceId(tag) {
+  if (!tag) return false;
+  var t = String(tag);
+  if (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(t)) return true; // GUID anywhere in the value
+  if (/^[0-9a-f]{24,}$/i.test(t)) return true; // long bare hex object id
+  return false;
+}
+
 (function () {
   // Permissions resolve asynchronously via /auth/me (userReady). Computing
   // them at script-load time reads an empty matrix and wrongly hides the
@@ -526,7 +539,10 @@ async function openRuleBuilder(existing) {
     catch (err) { showToast("Failed to load rule schema", "error"); return; }
   }
   if (_ruleTagList === null) {
-    try { var _td = await api.assets.tags(); _ruleTagList = (_td && _td.tags) || []; }
+    // Filter out machine-identifier tags (Entra/Intune GUIDs, long hex object
+    // ids) so device IDs don't flood the scope + recipient-tag pickers. Human
+    // tags (region:Atlanta, firewall:fgt-1, prod) never match.
+    try { var _td = await api.assets.tags(); _ruleTagList = ((_td && _td.tags) || []).filter(function (t) { return !_looksLikeDeviceId(t); }); }
     catch (_e) { _ruleTagList = []; }
   }
   // Always refresh channels (operator may have just added one in the Delivery tab).
@@ -930,12 +946,41 @@ async function loadChannelsTab() {
 function _chanTypeMeta() { return (_ruleSchema && _ruleSchema.channelTypes) || {}; }
 function channelTypeLabel(type) { var m = _chanTypeMeta()[type]; return (m && m.label) || type; }
 
+// Short badge token per channel type for the card header.
+var _CHANNEL_BADGE = { smtp: "SMTP", oauth_m365: "M365", pushbullet: "Pushbullet", slack: "Slack", teams: "Teams", web_push: "Web Push" };
+
+// Detail rows for a channel card — schema-driven from the type's field defs.
+// Non-secret values (host, tenant id, client id, from, send-as user, …) render
+// directly; secret fields show configured/not-set rather than the value.
+function channelDetailRows(c) {
+  var defs = (_chanTypeMeta()[c.type] && _chanTypeMeta()[c.type].fields) || [];
+  var cfg = (c.config && typeof c.config === "object") ? c.config : {};
+  var rows = '<div class="detail-row"><span class="detail-label">Type</span><span class="detail-value">' + escapeHtml(channelTypeLabel(c.type)) + '</span></div>';
+  defs.forEach(function (f) {
+    var val;
+    if (f.secret) {
+      val = cfg[f.key + "Set"] ? '<span class="badge badge-active">configured</span>' : '<span style="color:var(--color-text-tertiary)">not set</span>';
+    } else {
+      var raw = cfg[f.key];
+      if (raw === undefined || raw === null || String(raw) === "") return; // skip empty optional fields
+      val = escapeHtml(String(raw));
+    }
+    rows += '<div class="detail-row"><span class="detail-label">' + escapeHtml(f.label) + '</span><span class="detail-value">' + val + '</span></div>';
+  });
+  if (c.type === "web_push") {
+    rows += '<div class="detail-row"><span class="detail-label">VAPID keypair</span><span class="detail-value">' +
+      (cfg.privateKeySet ? '<span class="badge badge-active">generated</span>' : '<span style="color:var(--color-danger)">not generated</span>') + '</span></div>';
+  }
+  return rows;
+}
+
 function renderChannelsList(channels) {
   var container = document.getElementById("channels-list");
   if (!container) return;
   var canEdit = permAtLeast("notificationManagement", "fullwrite");
   if (!channels.length) {
-    container.innerHTML = '<div class="settings-card"><p class="empty-state">No delivery channels configured yet.' + (canEdit ? ' Click the “+ Add channel” button to add one.' : '') + '</p></div>';
+    container.innerHTML = '<div class="empty-state-card"><p>No delivery channels configured.</p>' +
+      (canEdit ? '<p style="color:var(--color-text-tertiary);font-size:0.85rem;margin-top:0.5rem">Click “+ Add channel” to add an SMTP / Microsoft 365 email, Pushbullet, Slack, Microsoft Teams, or Web Push destination.</p>' : '') + '</div>';
     return;
   }
   container.innerHTML = channels.map(function (c) {
@@ -944,13 +989,21 @@ function renderChannelsList(channels) {
         '<button class="btn btn-sm btn-secondary ch-edit" data-id="' + c.id + '">Edit</button> ' +
         '<button class="btn btn-sm btn-danger ch-del" data-id="' + c.id + '">Delete</button>'
       : '';
-    var dot = c.enabled ? '<span style="color:var(--color-success)" title="Enabled">●</span>' : '<span style="color:var(--color-text-tertiary)" title="Disabled">○</span>';
-    return '<div class="settings-card" style="display:flex;align-items:center;gap:12px">' +
-      '<div style="flex:1;min-width:0">' +
-        '<div style="font-weight:600">' + dot + ' ' + escapeHtml(c.name) + '</div>' +
-        '<div style="font-size:0.82rem;color:var(--color-text-tertiary)">' + escapeHtml(channelTypeLabel(c.type)) + (c.enabled ? '' : ' · disabled') + '</div>' +
+    var statusPill = c.enabled
+      ? '<span class="integration-status dot-ok">Enabled</span>'
+      : '<span class="integration-status dot-unknown">Disabled</span>';
+    return '<div class="integration-card">' +
+      '<div class="integration-card-header">' +
+        '<div class="integration-card-header-top">' +
+          '<div class="integration-card-title">' +
+            '<span class="integration-type-badge">' + escapeHtml(_CHANNEL_BADGE[c.type] || c.type) + '</span>' +
+            '<strong>' + escapeHtml(c.name) + '</strong>' +
+            statusPill +
+          '</div>' +
+          (actions ? '<div class="integration-card-actions">' + actions + '</div>' : '') +
+        '</div>' +
       '</div>' +
-      '<div style="display:flex;gap:6px;flex-shrink:0">' + actions + '</div>' +
+      '<div class="integration-card-details">' + channelDetailRows(c) + '</div>' +
     '</div>';
   }).join("");
   if (!canEdit) return;
@@ -1018,7 +1071,9 @@ function openChannelModal(existing) {
 
   function fieldsFor(type) {
     var defs = (meta[type] && meta[type].fields) || [];
-    var html = defs.map(fieldInput).join("");
+    var help = meta[type] && meta[type].help;
+    var html = help ? '<p style="font-size:0.8rem;color:var(--color-text-tertiary);margin:0 0 0.6rem">' + escapeHtml(help) + '</p>' : "";
+    html += defs.map(fieldInput).join("");
     if (type === "web_push") html += webPushExtra();
     return html;
   }
@@ -1041,7 +1096,22 @@ function openChannelModal(existing) {
 
   var typeSel = document.getElementById("ch-type");
   function currentType() { return isEdit ? cur.type : (typeSel ? typeSel.value : initialType); }
-  if (typeSel) typeSel.addEventListener("change", function () { document.getElementById("ch-fields").innerHTML = fieldsFor(typeSel.value); wireVapidBtn(); });
+  if (typeSel) typeSel.addEventListener("change", function () { document.getElementById("ch-fields").innerHTML = fieldsFor(typeSel.value); wireVapidBtn(); wireSmtpPortAutofill(); });
+
+  // SMTP: selecting a security level auto-fills the conventional port
+  // (none→25, starttls→587, ssl→465). The operator can still edit the port
+  // afterward — we only set it on an explicit security change.
+  function wireSmtpPortAutofill() {
+    var sec = document.getElementById("ch-field-security");
+    var port = document.getElementById("ch-field-port");
+    if (!sec || !port || sec._portWired) return;
+    sec._portWired = true;
+    var PORTS = { none: 25, starttls: 587, ssl: 465 };
+    sec.addEventListener("change", function () {
+      var d = PORTS[sec.value];
+      if (d) port.value = d;
+    });
+  }
 
   function wireVapidBtn() {
     var gb = document.getElementById("ch-gen-vapid");
@@ -1060,6 +1130,7 @@ function openChannelModal(existing) {
     }
   }
   wireVapidBtn();
+  wireSmtpPortAutofill();
 
   function collectConfig(type) {
     var defs = (meta[type] && meta[type].fields) || [];

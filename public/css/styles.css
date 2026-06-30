@@ -2087,13 +2087,16 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 
 /* ─── Integration Cards ───────────────────────────────────────────────────── */
-#integrations-list {
+#integrations-list,
+#channels-list {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 12px;
   align-items: start;
 }
-#integrations-list > p {
+#integrations-list > p,
+#channels-list > p,
+#channels-list > .empty-state-card {
   grid-column: 1 / -1;
 }
 .integration-card {
