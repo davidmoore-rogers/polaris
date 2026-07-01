@@ -119,7 +119,7 @@ FMG Integration Discovery
 │   │   identical 4-row stamp table as FortiSwitch
 │   │
 │   ├─ Switch-port attribution chain:
-│   │     1. LLDP from managed_ap.lldp[] (filter system_description starts "FortiSwitch-")
+│   │     1. LLDP from managed_ap.lldp[] (filter system_description starts "FortiSwitch", incl. Rugged)
 │   │        → parentSwitch = system_name, parentPort = port_id
 │   │     2. Fall back: detected-device MAC table match against AP base_mac
 │   │     3. Neither: AP renders hanging directly off the FortiGate in the topology graph

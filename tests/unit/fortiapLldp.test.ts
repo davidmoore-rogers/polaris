@@ -34,6 +34,29 @@ describe("extractApLldpAndMesh", () => {
     });
   });
 
+  it("picks the FortiSwitch Rugged wired uplink (system_description starts FortiSwitchRugged-)", () => {
+    // Real data from a washplant floor: the FSR family advertises
+    // "FortiSwitchRugged-112F-POE …", which the old "FortiSwitch-" prefix
+    // check dropped — the AP's wired uplink then went unresolved.
+    const row = {
+      lldp: [
+        {
+          local_port: "lan1",
+          chassis_id: "mac 1c:d1:1a:6d:50:47",
+          system_name: "JEFFERSON-112F-WASHPLANT",
+          system_description: "FortiSwitchRugged-112F-POE v7.6.5,build1136,251201 (GA)",
+          port_id: "port7",
+          port_description: "JEFF-432F-WASHPLANT",
+        },
+      ],
+    };
+    expect(extractApLldpAndMesh(row)).toEqual({
+      lldpUplinkSwitch: "JEFFERSON-112F-WASHPLANT",
+      lldpUplinkPort: "port7",
+      lldpLocalPort: "lan1",
+    });
+  });
+
   it("skips wireless-mesh peer LLDP rows (FortiAP system_description)", () => {
     const row = {
       lldp: [
