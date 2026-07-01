@@ -108,3 +108,44 @@ describe("parseFortiapMonitorRow IP picker", () => {
     expect(fields).toContain("connecting_from");
   });
 });
+
+describe("parseFortiapMonitorRow lldpNeighbors pass-through", () => {
+  it("carries the full parsed lldp table alongside the uplink summary", () => {
+    const parsed = parseFortiapMonitorRow({
+      name: "AP-1",
+      lldp: [
+        {
+          local_port: "lan1",
+          chassis_id: "mac e0:23:ff:36:26:ee",
+          system_name: "MORGAN-148E-1",
+          system_description: "FortiSwitch-148E-POE v7.4.8,build0929,250909 (GA)",
+          port_id: "port9",
+        },
+        {
+          local_port: "wbh1",
+          chassis_id: "mac 80:80:2c:ae:99:58",
+          system_name: "MORGAN-234F-1",
+          system_description: "FortiAP-234F v7.4.6,build0771,250814 (GA)",
+          port_id: "80:80:2c:ae:99:58",
+        },
+      ],
+    });
+    // Summary still distills the FortiSwitch uplink only…
+    expect(parsed.peerSwitch).toBe("MORGAN-148E-1");
+    expect(parsed.peerPort).toBe("port9");
+    // …while lldpNeighbors carries every entry, mesh peer included.
+    expect(parsed.lldpNeighbors).toHaveLength(2);
+    expect(parsed.lldpNeighbors![1].systemName).toBe("MORGAN-234F-1");
+  });
+
+  it("omits lldpNeighbors entirely when the row has no lldp array (don't-wipe signal)", () => {
+    const parsed = parseFortiapMonitorRow({ name: "AP-1" });
+    expect(parsed.lldpNeighbors).toBeUndefined();
+    expect("lldpNeighbors" in parsed).toBe(false);
+  });
+
+  it("carries an empty array for a present-but-empty lldp table", () => {
+    const parsed = parseFortiapMonitorRow({ name: "AP-1", lldp: [] });
+    expect(parsed.lldpNeighbors).toEqual([]);
+  });
+});

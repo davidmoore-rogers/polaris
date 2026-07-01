@@ -48,7 +48,7 @@ import {
 } from "../../services/discoveryRunState.js";
 import { releaseDnsResolvedAt } from "../../services/dnsResolvedReservationService.js";
 import { recordDiscovery, observeDiscoveryPhase } from "../../metrics.js";
-import { getAdMonitorProtocol, invalidateMonitorSettingsCache } from "../../services/monitoringService.js";
+import { getAdMonitorProtocol, invalidateMonitorSettingsCache, persistManagedApLldpNeighbors, invalidateLldpMatchCache } from "../../services/monitoringService.js";
 import * as autoMonitor from "../../services/autoMonitorInterfacesService.js";
 import * as autoMonitorStorage from "../../services/autoMonitorStorageService.js";
 import * as agentAutoDeploy from "../../services/agentAutoDeployService.js";
@@ -4461,6 +4461,15 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     }
   }
 
+  // The AP LLDP persist below resolves matchedAssetId through the module-
+  // level match index in monitoringService, which caches for 60s. The
+  // FortiSwitch loop above may have just created the very switches these
+  // neighbors point at — drop the cache once so the first persist rebuilds
+  // against this run's fresh asset set instead of ghosting brand-new switches
+  // until the next cycle.
+  if ((result.fortiAps || []).some((ap) => Array.isArray(ap.lldpNeighbors) && ap.lldpNeighbors.length > 0)) {
+    invalidateLldpMatchCache();
+  }
   for (const ap of result.fortiAps || []) {
     const dhcpFallback = dhcpByHostname.get(ap.name.toLowerCase()) ?? dhcpByHostname.get(ap.serial.toLowerCase()) ?? null;
     const resolvedIp = ap.ipAddress || dhcpFallback?.ip || null;
@@ -4498,6 +4507,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
       // variants that omit the field get the benefit of the doubt so a
       // payload quirk doesn't silently freeze lastSeen for a whole fleet.
       const apOnline = !ap.status || /^connected$/i.test(ap.status.trim());
+      let apAssetId: string | null = null;
       if (existingAsset) {
         // Snapshot before the branch retypes assetType / mutates status below.
         const apBefore = snapshotMaterialAssetFields(existingAsset);
@@ -4571,6 +4581,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (existingAsset.status === "decommissioned" && apOnline) existingAsset.status = "active";
         assetIdx.reindex(existingAsset);
         assetNames.push(`${ap.name} (updated)`);
+        apAssetId = existingAsset.id;
       } else {
         // Phase 3b.1 cutover: project from a synthetic single-source array.
         const apSyncedAt = new Date(now);
@@ -4616,6 +4627,22 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         });
         assetIdx.add(newAsset);
         assetNames.push(ap.name || ap.serial);
+        apAssetId = newAsset.id;
+      }
+
+      // Persist the AP's full LLDP table (managed_ap `lldp` array) as real
+      // AssetLldpNeighbor rows so the asset-details LLDP section and Device
+      // Map show the AP's exact neighbors instead of peer-inferred ones.
+      // Gated on apOnline (offline WTP entries carry stale tables) and on
+      // the field being present (absent = firmware didn't return `lldp` —
+      // must not wipe existing rows). Best-effort: an LLDP persist failure
+      // must not fail the asset sync itself.
+      if (apAssetId && apOnline && Array.isArray(ap.lldpNeighbors)) {
+        try {
+          await persistManagedApLldpNeighbors(apAssetId, ap.lldpNeighbors, new Date(now));
+        } catch (err: any) {
+          syncLog("error", `Failed to persist LLDP neighbors for FortiAP ${ap.name}: ${err?.message || "Unknown error"}`);
+        }
       }
     } catch (err: any) {
       syncLog("error", `Failed to create/update asset for FortiAP ${ap.name}: ${err.message || "Unknown error"}`);

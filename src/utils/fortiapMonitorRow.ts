@@ -24,7 +24,7 @@
  * serial is healthy.
  */
 
-import { extractApLldpAndMesh } from "./fortiapLldp.js";
+import { extractApLldpAndMesh, parseApLldpNeighbors, type ApLldpNeighborSample } from "./fortiapLldp.js";
 
 const ALL_ZERO_MAC = /^0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}$/i;
 
@@ -138,6 +138,11 @@ export interface ParsedFortiapRow {
   meshUplink?:        "ethernet" | "mesh";
   parentApSerial?:    string;
   apUplinkInterface?: string;
+  // Full LLDP neighbor table off the same row (every entry, not just the
+  // FortiSwitch-uplink summary above). Absent when the row carried no
+  // `lldp` array at all — consumers must treat absent as "unknown, don't
+  // wipe" and `[]` as "scraped clean".
+  lldpNeighbors?:     ApLldpNeighborSample[];
   // Telemetry snapshot.
   cpuPct?:             number;
   memFreeMb?:          number;
@@ -160,6 +165,7 @@ export function parseFortiapMonitorRow(row: Record<string, unknown>): ParsedFort
   const rawApMac = str(row.base_mac) || str(row.board_mac) || str(row.mac) || "";
 
   const lldpExt = extractApLldpAndMesh(row as Parameters<typeof extractApLldpAndMesh>[0]);
+  const lldpNeighbors = parseApLldpNeighbors(row as Parameters<typeof parseApLldpNeighbors>[0]);
   const tel = parseFortiapTelemetrySnapshot(row);
 
   const serial = str(row.serial) || str(row.wtp_id) || "";
@@ -187,6 +193,7 @@ export function parseFortiapMonitorRow(row: Record<string, unknown>): ParsedFort
     ...(lldpExt.meshUplink ? { meshUplink: lldpExt.meshUplink } : {}),
     ...(lldpExt.parentApSerial ? { parentApSerial: lldpExt.parentApSerial } : {}),
     ...(apUplinkInterface ? { apUplinkInterface } : {}),
+    ...(lldpNeighbors ? { lldpNeighbors } : {}),
     ...(tel.cpuPct !== undefined ? { cpuPct: tel.cpuPct } : {}),
     ...(tel.memFreeMb !== undefined ? { memFreeMb: tel.memFreeMb } : {}),
     ...(tel.memTotalMb !== undefined ? { memTotalMb: tel.memTotalMb } : {}),

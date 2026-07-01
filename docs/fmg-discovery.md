@@ -139,6 +139,16 @@ FMG Integration Discovery
 │   ├─ Mesh stamp:
 │   │     mesh_uplink + parent_wtp_id from managed_ap → fortinetTopology.parentApSerial
 │   │
+│   ├─ Full LLDP table persist (per online AP):
+│   │     managed_ap.lldp[] — ALL entries, not just the FortiSwitch uplink
+│   │     (mesh FortiAP peers + non-Fortinet gear included)
+│   │       → real AssetLldpNeighbor rows, source "managed-ap"
+│   │         (asset LLDP section shows exact neighbors instead of inferred;
+│   │          Device Map gets ghost nodes / wireless-bridge edges for free)
+│   │     absent lldp field on the row = firmware variance → existing rows kept
+│   │     skipped when a monitored AP's resolved lldpPolling = snmp
+│   │       (the live SNMP stream owns the table)
+│   │
 │   └─ Decommission via wireless-controller/wtp CMDB roster (same logic)
 │
 ├─ Endpoint enrichment (Phase 7.5)

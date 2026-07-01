@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { extractApLldpAndMesh } from "../../src/utils/fortiapLldp.js";
+import { extractApLldpAndMesh, parseApLldpNeighbors } from "../../src/utils/fortiapLldp.js";
 
 describe("extractApLldpAndMesh", () => {
   it("returns empty result for a row with no lldp/mesh fields", () => {
@@ -173,5 +173,117 @@ describe("extractApLldpAndMesh", () => {
       meshUplink: "mesh",
       parentApSerial: "FP234FTF23008545",
     });
+  });
+});
+
+describe("parseApLldpNeighbors", () => {
+  it("returns undefined when the row has no lldp array (don't-wipe signal)", () => {
+    expect(parseApLldpNeighbors({})).toBeUndefined();
+    expect(parseApLldpNeighbors({ lldp: "garbage" } as any)).toBeUndefined();
+  });
+
+  it("returns [] for a present-but-empty lldp array (real no-neighbors scrape)", () => {
+    expect(parseApLldpNeighbors({ lldp: [] })).toEqual([]);
+  });
+
+  it("parses a wired FortiSwitch entry, splitting the FortiOS 'mac <value>' chassis_id packing", () => {
+    const rows = parseApLldpNeighbors({
+      lldp: [
+        {
+          local_port: "lan1",
+          chassis_id: "mac e0:23:ff:36:26:ee",
+          system_name: "MORGAN-148E-1",
+          system_description: "FortiSwitch-148E-POE v7.4.8,build0929,250909 (GA)",
+          port_id: "port9",
+          port_description: "MORGAN-221E-1",
+        },
+      ],
+    });
+    expect(rows).toEqual([
+      {
+        localIfName:       "lan1",
+        chassisIdSubtype:  "macAddress",
+        chassisId:         "E0:23:FF:36:26:EE",
+        portIdSubtype:     "interfaceName",
+        portId:            "port9",
+        portDescription:   "MORGAN-221E-1",
+        systemName:        "MORGAN-148E-1",
+        systemDescription: "FortiSwitch-148E-POE v7.4.8,build0929,250909 (GA)",
+        managementIp:      null,
+        capabilities:      [],
+      },
+    ]);
+  });
+
+  it("keeps ALL entries — mesh FortiAP peers included, unlike the uplink summary", () => {
+    const rows = parseApLldpNeighbors({
+      lldp: [
+        {
+          local_port: "lan1",
+          chassis_id: "mac 94:f3:92:f4:dd:88",
+          system_name: "MORGAN-124F-1",
+          system_description: "FortiSwitch-124F-POE v7.4.8,build0929,250909 (GA)",
+          port_id: "port12",
+        },
+        {
+          local_port: "wbh1",
+          chassis_id: "mac 80:80:2c:ae:99:58",
+          system_name: "MORGAN-234F-1",
+          system_description: "FortiAP-234F v7.4.6,build0771,250814 (GA)",
+          port_id: "80:80:2c:ae:99:58",
+        },
+      ],
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows![0].systemName).toBe("MORGAN-124F-1");
+    // Mesh peer: bare-MAC port_id is inferred as macAddress and normalized
+    // colon-uppercase so persist-time MAC matching can resolve the peer AP.
+    expect(rows![1]).toMatchObject({
+      localIfName:      "wbh1",
+      chassisIdSubtype: "macAddress",
+      chassisId:        "80:80:2C:AE:99:58",
+      portIdSubtype:    "macAddress",
+      portId:           "80:80:2C:AE:99:58",
+      systemName:       "MORGAN-234F-1",
+    });
+  });
+
+  it("infers macAddress for a bare-MAC chassis_id (no FortiOS token prefix)", () => {
+    const rows = parseApLldpNeighbors({
+      lldp: [{ local_port: "lan1", chassis_id: "e0-23-ff-36-26-ee", system_name: "SW1" }],
+    });
+    expect(rows![0].chassisIdSubtype).toBe("macAddress");
+    expect(rows![0].chassisId).toBe("E0:23:FF:36:26:EE");
+  });
+
+  it("falls back to 'local' subtype for a non-MAC chassis_id (hostname-style)", () => {
+    const rows = parseApLldpNeighbors({
+      lldp: [{ local_port: "lan1", chassis_id: "core-switch-01", port_id: "Gi1/0/12" }],
+    });
+    expect(rows![0]).toMatchObject({
+      chassisIdSubtype: "local",
+      chassisId:        "core-switch-01",
+      portIdSubtype:    "interfaceName",
+      portId:           "Gi1/0/12",
+    });
+  });
+
+  it("skips entries with no local_port and entries with no identity fields", () => {
+    const rows = parseApLldpNeighbors({
+      lldp: [
+        { chassis_id: "mac e0:23:ff:36:26:ee", system_name: "NO-ANCHOR" }, // no local_port
+        { local_port: "lan1" },                                            // no identity at all
+        { local_port: "lan1", system_name: "KEEP-ME" },
+      ],
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows![0].systemName).toBe("KEEP-ME");
+  });
+
+  it("parses capability tokens when present (CSV string form)", () => {
+    const rows = parseApLldpNeighbors({
+      lldp: [{ local_port: "lan1", system_name: "SW1", capability: "Bridge, Router" }],
+    });
+    expect(rows![0].capabilities).toEqual(["bridge", "router"]);
   });
 });
