@@ -1,12 +1,15 @@
 // Peer-inferred LLDP neighbor synthesis.
 //
-// Real LLDP scrapes (FortiOS REST or SNMP) populate `AssetLldpNeighbor`,
-// but some links never make it into that table — most notably FortiSwitch
-// ports facing managed FortiAPs: the AP reports its uplink to the FortiGate
-// via /api/v2/monitor/wifi/managed_ap (captured during FMG/FortiGate
-// discovery into `Asset.fortinetTopology.parentSwitch` + `parentPort`),
-// but the FortiSwitch's own SNMP LLDP-MIB doesn't re-publish the neighbor
-// in managed/FortiLink mode.
+// Real LLDP scrapes (FortiOS REST, SNMP, or the managed_ap `lldp` table
+// persisted per discovery run via
+// monitoringService.persistManagedApLldpNeighbors, source "managed-ap")
+// populate `AssetLldpNeighbor`, but some links never make it into that
+// table — most notably FortiSwitch ports facing managed FortiAPs: the AP
+// reports its uplink to the FortiGate via /api/v2/monitor/wifi/managed_ap
+// (captured during FMG/FortiGate discovery into
+// `Asset.fortinetTopology.parentSwitch` + `parentPort`), but the
+// FortiSwitch's own SNMP LLDP-MIB doesn't re-publish the neighbor in
+// managed/FortiLink mode.
 //
 // This service synthesizes neighbor entries at read time from
 // `Asset.fortinetTopology` so the System tab's Neighbor column reflects
@@ -22,9 +25,10 @@
 //      FortiGate-side interface from `fgt_peer_intf_name`, not the
 //      switch's own port.)
 //   3. Asset is a FortiAP → emit a row on the AP's own `uplinkInterface`
-//      (lan1 / wbh0 / ...) pointing at its `parentSwitch`. Covers the
-//      case where REST LLDP came back empty but we still know who the
-//      AP is plugged into.
+//      (lan1 / wbh0 / ...) pointing at its `parentSwitch`. Since the
+//      managed-ap persist landed this mostly covers APs whose firmware
+//      omits the `lldp` array from managed_ap (or whose discovery hasn't
+//      re-run yet) — real "managed-ap" rows dedupe it away otherwise.
 //
 // Direct-attached FortiAPs (controllerFortigate set, no parentSwitch) are
 // intentionally skipped — we'd need to know the FortiGate's physical port

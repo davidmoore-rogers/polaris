@@ -10,6 +10,7 @@ import { logger } from "../utils/logger.js";
 import { normalizeMacOrNull, normalizeMacsDistinct } from "../utils/mac.js";
 import { parseRangeFirstIp } from "../utils/cidr.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
+import type { ApLldpNeighborSample } from "../utils/fortiapLldp.js";
 import { findFortiswitchUplinkPorts } from "../utils/fortiswitchCmdb.js";
 import { getFmgWorker } from "./fmgWorker.js";
 import {
@@ -995,6 +996,16 @@ export interface DiscoveredFortiAP {
   // ports, `wbh*` are virtual wireless bridge interfaces. Drives the
   // FortiAP-side label on the topology edge.
   apUplinkInterface?: string;
+  // Full LLDP neighbor table from the managed_ap row — every entry (the
+  // FortiSwitch uplink, wireless-mesh FortiAP peers, non-Fortinet gear),
+  // not just the single-uplink summary the peer* fields above distill.
+  // The sync layer persists these as real AssetLldpNeighbor rows (source
+  // "managed-ap") via monitoringService.persistManagedApLldpNeighbors so
+  // the asset-details LLDP section and Device Map show the AP's exact
+  // neighbors instead of peer-inferred ones. `undefined` = the row carried
+  // no `lldp` array (firmware variance) — the sync layer must not wipe
+  // existing rows; `[]` = a real "no neighbors" scrape.
+  lldpNeighbors?: ApLldpNeighborSample[];
   // Live telemetry snapshot pulled from /api/v2/monitor/wifi/managed_ap
   // during discovery. None of these write to AssetTelemetrySample from
   // discovery — they ride along in the AssetSource observed blob so the

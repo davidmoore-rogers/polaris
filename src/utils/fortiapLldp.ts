@@ -51,6 +51,25 @@ interface ApLldpEntry {
   port_description?: unknown;
 }
 
+/**
+ * One fully-parsed LLDP neighbor off a managed_ap row — every entry, not
+ * just the FortiSwitch-uplink summary `extractApLldpAndMesh` distills.
+ * Structurally compatible with monitoringService's `LldpNeighborSample`
+ * so the persist layer consumes it as-is.
+ */
+export interface ApLldpNeighborSample {
+  localIfName:        string;
+  chassisIdSubtype?:  string | null;
+  chassisId?:         string | null;
+  portIdSubtype?:     string | null;
+  portId?:            string | null;
+  portDescription?:   string | null;
+  systemName?:        string | null;
+  systemDescription?: string | null;
+  managementIp?:      string | null;
+  capabilities?:      string[];
+}
+
 interface ApRowForLldp {
   lldp?: unknown;
   mesh_uplink?: unknown;
@@ -60,6 +79,53 @@ interface ApRowForLldp {
 
 function asString(v: unknown): string {
   return typeof v === "string" ? v : "";
+}
+
+// Six hex pairs separated by ":" / "-" (FortiOS emits colon form; dash
+// defended). Used to infer the macAddress subtype when FortiOS doesn't
+// carry an explicit one.
+const MAC_SHAPE = /^[0-9a-f]{2}([:\-][0-9a-f]{2}){5}$/i;
+
+// FortiOS managed_ap LLDP entries pack the subtype INTO the value string as
+// a leading word — real payloads show `chassis_id: "mac e0:23:ff:36:26:ee"`.
+// Map the observed FortiOS tokens onto the canonical subtype names the rest
+// of the LLDP pipeline uses (persist-time asset matching keys on
+// `chassisIdSubtype === "macAddress"`; the Device Map's edge-label backfill
+// keys on the name-form portId subtypes).
+const FORTIOS_SUBTYPE_TOKENS: Record<string, string> = {
+  mac:     "macAddress",
+  ip:      "networkAddress",
+  ifname:  "interfaceName",
+  ifalias: "interfaceAlias",
+  local:   "local",
+};
+
+/**
+ * Split an LLDP id value into (subtype, value). Handles the FortiOS
+ * "<token> <value>" packing, then falls back to shape inference: a bare
+ * MAC-looking string is macAddress, anything else non-empty is
+ * interfaceName for port ids / local for chassis ids (callers pass the
+ * fallback). MAC values are normalized colon-uppercase so persist-time
+ * matching lines up with `Asset.macAddress` normalization.
+ */
+function splitLldpId(raw: string, nonMacFallback: string | null): { subtype: string | null; value: string } {
+  const trimmed = raw.trim();
+  const sp = trimmed.indexOf(" ");
+  if (sp > 0) {
+    const token = trimmed.slice(0, sp).toLowerCase();
+    const rest = trimmed.slice(sp + 1).trim();
+    const mapped = FORTIOS_SUBTYPE_TOKENS[token];
+    if (mapped && rest) {
+      const value = mapped === "macAddress" && MAC_SHAPE.test(rest)
+        ? rest.toUpperCase().replace(/-/g, ":")
+        : rest;
+      return { subtype: mapped, value };
+    }
+  }
+  if (MAC_SHAPE.test(trimmed)) {
+    return { subtype: "macAddress", value: trimmed.toUpperCase().replace(/-/g, ":") };
+  }
+  return { subtype: trimmed ? nonMacFallback : null, value: trimmed };
 }
 
 export function extractApLldpAndMesh(row: ApRowForLldp): FortiapLldpResult {
@@ -114,5 +180,65 @@ export function extractApLldpAndMesh(row: ApRowForLldp): FortiapLldpResult {
   const parentWtp = asString(row.parent_wtp_id).trim();
   if (parentWtp) out.parentApSerial = parentWtp;
 
+  return out;
+}
+
+/**
+ * Parse the FULL `lldp` array off a managed_ap row into neighbor samples —
+ * every entry (FortiSwitch uplink, wireless-mesh FortiAP peers, non-Fortinet
+ * gear), unlike `extractApLldpAndMesh` which distills a single-uplink
+ * summary. The sync layer persists these as real `AssetLldpNeighbor` rows
+ * (source "managed-ap") so the asset-details LLDP section and the Device Map
+ * show the AP's exact neighbors instead of peer-inferred ones.
+ *
+ * Returns `undefined` when the row carries no `lldp` array at all (firmware
+ * that doesn't return the field — caller must NOT wipe existing rows), and
+ * `[]` when the array is present but empty (a real "no neighbors seen"
+ * scrape — full-replace semantics apply, subject to the persist layer's
+ * 48-hour stickiness grace).
+ *
+ * `local_port` is kept verbatim (FortiAP-CLI naming, e.g. "lan1"); the
+ * persist wrapper normalizes it against the AP's SNMP ifNames (lan1 ↔ eth0,
+ * see fortiapInterfaceAlias.ts) where the interface table is available.
+ */
+export function parseApLldpNeighbors(row: ApRowForLldp): ApLldpNeighborSample[] | undefined {
+  if (!Array.isArray(row.lldp)) return undefined;
+  const out: ApLldpNeighborSample[] = [];
+  for (const raw of row.lldp as unknown[]) {
+    if (!raw || typeof raw !== "object") continue;
+    const e = raw as ApLldpEntry & { management_ip?: unknown; mgmt_ip?: unknown; capability?: unknown };
+    const localPort = asString(e.local_port).trim();
+    if (!localPort) continue; // no local anchor — row can't render anywhere
+    const chassisRaw = asString(e.chassis_id).trim();
+    const portRaw = asString(e.port_id).trim();
+    const systemName = asString(e.system_name).trim();
+    // Require at least one identity field so all-empty filler rows don't
+    // persist as unmatchable ghosts.
+    if (!chassisRaw && !portRaw && !systemName) continue;
+    const chassis = splitLldpId(chassisRaw, "local");
+    const port = splitLldpId(portRaw, "interfaceName");
+    const portDescription = asString(e.port_description).trim();
+    const systemDescription = asString(e.system_description).trim();
+    const managementIp = asString(e.management_ip).trim() || asString(e.mgmt_ip).trim();
+    // Capability tokens when present (string CSV or array — firmware varies).
+    const capRaw = e.capability;
+    const capabilities = Array.isArray(capRaw)
+      ? capRaw.map((c) => String(c).trim().toLowerCase()).filter((c) => c.length > 0)
+      : typeof capRaw === "string"
+        ? capRaw.split(/[,\s]+/).map((c) => c.trim().toLowerCase()).filter((c) => c.length > 0)
+        : [];
+    out.push({
+      localIfName:       localPort,
+      chassisIdSubtype:  chassis.subtype,
+      chassisId:         chassis.value || null,
+      portIdSubtype:     port.subtype,
+      portId:            port.value || null,
+      portDescription:   portDescription || null,
+      systemName:        systemName || null,
+      systemDescription: systemDescription || null,
+      managementIp:      managementIp || null,
+      capabilities,
+    });
+  }
   return out;
 }

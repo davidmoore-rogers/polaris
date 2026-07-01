@@ -60,6 +60,8 @@ import { maybeEmitChangeEvents, type ChangeItem } from "./notificationChangeEven
 import { isChangeActionSubscribed } from "./notificationRuleService.js";
 import { logger } from "../utils/logger.js";
 import { parseFortiapTelemetrySnapshot } from "../utils/fortiapMonitorRow.js";
+import { normalizeFortiapInterfaceName, fortiapInterfaceAliases } from "../utils/fortiapInterfaceAlias.js";
+import type { ApLldpNeighborSample } from "../utils/fortiapLldp.js";
 import { deriveRadioBand } from "../utils/fortiapRadioBand.js";
 import { resolveOidSync, ensureRegistryLoaded } from "./oidRegistry.js";
 import {
@@ -7377,6 +7379,76 @@ async function persistLldpNeighbors(
     await maybeEmitChangeEvents("change.lldp.neighbor_added", assetId, assetName, added);
     await maybeEmitChangeEvents("change.lldp.neighbor_removed", assetId, assetName, removed);
   }
+}
+
+/**
+ * Persist the LLDP neighbor table a managed FortiAP reported through its
+ * parent FortiGate's /api/v2/monitor/wifi/managed_ap response (parsed by
+ * utils/fortiapLldp.parseApLldpNeighbors, carried on
+ * DiscoveredFortiAP.lldpNeighbors). Called from the FMG/FortiGate discovery
+ * sync layer per online AP — this is how APs get REAL AssetLldpNeighbor rows
+ * (source "managed-ap"), since the agentless LLDP streams can't reach them:
+ * rest_api targets the asset's own IP with a FortiOS endpoint APs don't
+ * serve, and SNMP LLDP-MIB on the AP itself is usually disabled.
+ *
+ * Ownership guard: skips (returns "skipped") when the asset is monitored AND
+ * its resolved lldpPolling is "snmp" — a live SNMP LLDP stream owns the
+ * table, and a second full-replace writer would alternate row sets with it.
+ * rest_api is deliberately NOT treated as an owner (it can never succeed
+ * against an AP, so deferring to it would leave the table empty forever).
+ *
+ * Local port names are normalized against the AP's most recent interface
+ * samples (lan1 ↔ eth0, see utils/fortiapInterfaceAlias.ts) so rows line up
+ * with the System-tab interface table and dedupe against the peer-inferred
+ * synthesizer, which normalizes the same way.
+ */
+export async function persistManagedApLldpNeighbors(
+  assetId: string,
+  neighbors: ApLldpNeighborSample[],
+  now: Date,
+): Promise<"persisted" | "skipped"> {
+  const asset = await prisma.asset.findUnique({
+    where: { id: assetId },
+    include: { discoveredByIntegration: { select: { type: true } } },
+  });
+  if (!asset) return "skipped";
+  if (asset.monitored) {
+    const effective = await resolveMonitorSettings({
+      ...asset,
+      discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+    });
+    if (effective.lldpPolling === "snmp") return "skipped";
+  }
+  const ifRows = await prisma.assetInterfaceSample.findMany({
+    where: { assetId },
+    orderBy: { timestamp: "desc" },
+    select: { ifName: true },
+    take: 64,
+  });
+  const knownIfNames = new Set(ifRows.map((r) => r.ifName));
+  const normalized: LldpNeighborSample[] = neighbors.map((n) => ({
+    ...n,
+    localIfName: normalizeFortiapInterfaceName(n.localIfName, knownIfNames),
+  }));
+  // Drop rows sitting on an ALIAS of a fresh row's port (lan1 vs eth0 name
+  // the same NIC). The normalization outcome can flip between runs — a new
+  // AP persists as "lan1" before its first SNMP interface samples exist,
+  // then "eth0" after — and the stickiness grace in persistLldpNeighbors
+  // would otherwise keep the old-named rows as duplicates for 48 hours.
+  // Safe because this writer owns the AP's table (see the snmp guard above).
+  const aliasPorts = new Set<string>();
+  for (const n of normalized) {
+    for (const a of fortiapInterfaceAliases(n.localIfName)) {
+      if (a !== n.localIfName) aliasPorts.add(a);
+    }
+  }
+  if (aliasPorts.size > 0) {
+    await prisma.assetLldpNeighbor.deleteMany({
+      where: { assetId, localIfName: { in: [...aliasPorts] } },
+    });
+  }
+  await persistLldpNeighbors(assetId, normalized, now, "managed-ap");
+  return "persisted";
 }
 
 type LldpUpsertRow = {
