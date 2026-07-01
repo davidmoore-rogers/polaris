@@ -8,10 +8,13 @@
  * itself, plus its mesh parent serial when applicable.
  *
  * The wired-uplink discriminator is `system_description` starts with
- * "FortiSwitch-" — that filters out wireless backhaul rows (which advertise
+ * "FortiSwitch" — that filters out wireless backhaul rows (which advertise
  * "FortiAP-…" peers) and any other LLDP-speaking gear that isn't a
  * managed FortiSwitch (e.g., upstream non-Fortinet switches stay
- * un-resolved here; they'd need a separate path).
+ * un-resolved here; they'd need a separate path). The bare "FortiSwitch"
+ * prefix (not "FortiSwitch-") is deliberate: the Rugged family advertises
+ * "FortiSwitchRugged-112F-POE …", so requiring the hyphen dropped every
+ * FSR uplink on the floor.
  *
  * `port_id` is the canonical port label ("port9"); `port_description` is
  * operator-set free text and not safe to key on.
@@ -71,7 +74,9 @@ export function extractApLldpAndMesh(row: ApRowForLldp): FortiapLldpResult {
       if (!raw || typeof raw !== "object") continue;
       const e = raw as ApLldpEntry;
       const sysDesc = asString(e.system_description);
-      if (!sysDesc.startsWith("FortiSwitch-")) continue;
+      // Match "FortiSwitch-148E…" and "FortiSwitchRugged-112F…" alike, but
+      // still exclude "FortiAP-…" mesh peers (they don't start "FortiSwitch").
+      if (!sysDesc.startsWith("FortiSwitch")) continue;
       const sysName = asString(e.system_name).trim();
       const portId = asString(e.port_id).trim();
       if (!sysName || !portId) continue;
