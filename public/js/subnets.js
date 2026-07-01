@@ -9,7 +9,6 @@ var _subnetsData = [];
 var _allSubnetsData = [];
 var _subnetsSF = null;
 var _subnetsLayout = null;
-var _subnetsSelected = new Set();
 
 function _saveSubnetsPrefs() {
   if (!currentUsername) return;
@@ -55,8 +54,6 @@ async function _initSubnetsPage() {
   _subnetsLayout = setupColumnLayout(subnetsTable, {
     onChange: _saveSubnetsPrefs,
   });
-  document.getElementById("subnets-bulk-edit-btn").addEventListener("click", openBulkEditSubnetsModal);
-  document.getElementById("subnets-bulk-delete-btn").addEventListener("click", bulkDeleteSubnets);
   await userReady;
   _restoreSubnetsPrefs();
   await loadBlockOptions();
@@ -78,25 +75,6 @@ async function _initSubnetsPage() {
     openIpPanel(link.getAttribute("data-subnet-id"));
   });
   wireFavoriteClicks("subnets-tbody", function () { renderSubnetsPage(); });
-  document.getElementById("subnets-select-all").addEventListener("change", function () {
-    var cbs = document.querySelectorAll("#subnets-tbody input.row-cb");
-    var chk = this.checked;
-    cbs.forEach(function (cb) {
-      cb.checked = chk;
-      if (chk) _subnetsSelected.add(cb.getAttribute("data-id"));
-      else _subnetsSelected.delete(cb.getAttribute("data-id"));
-    });
-    _subnetsUpdateBulkBar();
-  });
-  document.getElementById("subnets-tbody").addEventListener("change", function (e) {
-    var cb = e.target;
-    if (!cb.classList.contains("row-cb")) return;
-    var id = cb.getAttribute("data-id");
-    if (cb.checked) _subnetsSelected.add(id);
-    else _subnetsSelected.delete(id);
-    _subnetsUpdateSelectAll();
-    _subnetsUpdateBulkBar();
-  });
   // Page-size selector now lives in the pagination row (renderPageControls
   // onSizeChange) — no standalone #filter-pagesize.
 }
@@ -180,8 +158,6 @@ function blockSelectHTML(id, required) {
 }
 
 async function loadSubnets() {
-  _subnetsSelected.clear();
-  _subnetsUpdateBulkBar();
   var tbody = document.getElementById("subnets-tbody");
   try {
     // Block and Creator filtering now live in their column header filters
@@ -240,14 +216,12 @@ function renderSubnetsPage() {
   if (_subnetsData.length === 0) {
     tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No networks found. Create one to get started.</td></tr>';
     clearPageControls("pagination");
-    _subnetsUpdateSelectAll();
     return;
   }
   var sfData = _subnetsSF ? _subnetsSF.apply(_subnetsData) : _subnetsData;
   if (sfData.length === 0) {
     tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No results match the current filters.</td></tr>';
     clearPageControls("pagination");
-    _subnetsUpdateSelectAll();
     return;
   }
   sfData = sortFavoritesFirst(sfData, "subnets");
@@ -260,9 +234,13 @@ function renderSubnetsPage() {
     var source = s.integration
       ? escapeHtml(s.integration.name)
       : '<span style="color:var(--color-text-tertiary)">Manual</span>';
-    var checked = _subnetsSelected.has(s.id) ? ' checked' : '';
+    var canEdit = canEditSubnet(s);
+    var resvCount = s._count ? s._count.reservations : 0;
+    var actions = canEdit
+      ? '<button class="btn btn-sm btn-secondary" onclick="openSubnetEditModal(\'' + s.id + '\')">Edit</button>' +
+        '<button class="btn btn-sm btn-danger" onclick="confirmDeleteSubnet(\'' + s.id + '\', \'' + escapeHtml(s.cidr) + '\', ' + resvCount + ')">Del</button>'
+      : '';
     return '<tr>' +
-      '<td class="cb-col"><input type="checkbox" class="row-cb"' + checked + ' data-id="' + s.id + '"></td>' +
       starCellHTML("subnets", s.id) +
       '<td><a href="#" class="subnet-name-link" data-subnet-id="' + s.id + '"><strong>' + escapeHtml(s.name) + '</strong></a></td>' +
       '<td class="mono">' + escapeHtml(s.cidr) + '</td>' +
@@ -274,10 +252,10 @@ function renderSubnetsPage() {
       '<td>' + fgtDevice + '</td>' +
       '<td>' + source + '</td>' +
       '<td>' + (s.createdBy ? escapeHtml(s.createdBy) : '<span style="color:var(--color-text-tertiary)">-</span>') + '</td>' +
-      '<td>' + (s._count ? s._count.reservations : 0) + '</td>' +
+      '<td>' + resvCount + '</td>' +
+      '<td class="actions">' + actions + '</td>' +
       '</tr>';
   }).join("");
-  _subnetsUpdateSelectAll();
   renderPageControls("pagination", sfData.length, _subnetsPageSize, _subnetsPage, function (p) {
     _subnetsPage = p;
     renderSubnetsPage();
@@ -286,141 +264,6 @@ function renderSubnetsPage() {
     _subnetsPage = 1;
     renderSubnetsPage();
     _saveSubnetsPrefs();
-  });
-}
-
-function _subnetsUpdateSelectAll() {
-  var allCbs = document.querySelectorAll("#subnets-tbody input.row-cb");
-  var checked = Array.from(allCbs).filter(function (cb) { return cb.checked; }).length;
-  var sa = document.getElementById("subnets-select-all");
-  if (!sa) return;
-  sa.checked = allCbs.length > 0 && checked === allCbs.length;
-  sa.indeterminate = checked > 0 && checked < allCbs.length;
-}
-
-function _subnetsUpdateBulkBar() {
-  var bar = document.getElementById("subnets-bulk-bar");
-  if (!bar) return;
-  var count = _subnetsSelected.size;
-  // Always visible; neutral (idle) until rows are selected, then accent outline.
-  bar.classList.toggle("bulk-bar-idle", count === 0);
-  var el = bar.querySelector(".bulk-bar-count");
-  if (el) el.textContent = count === 0 ? "No networks selected" : (count + " selected");
-  ["subnets-bulk-edit-btn", "subnets-bulk-delete-btn"].forEach(function (id) {
-    var b = document.getElementById(id);
-    if (b) b.disabled = count === 0;
-  });
-}
-
-async function bulkDeleteSubnets() {
-  var ids = Array.from(_subnetsSelected);
-  if (!ids.length) return;
-  var ok = await showConfirm("Delete " + ids.length + " network" + (ids.length !== 1 ? "s" : "") + "? This cannot be undone.");
-  if (!ok) return;
-  var btn = document.getElementById("subnets-bulk-delete-btn");
-  if (btn) btn.disabled = true;
-  var failed = 0;
-  for (var i = 0; i < ids.length; i++) {
-    try { await api.subnets.delete(ids[i]); }
-    catch (e) { failed++; }
-  }
-  _subnetsSelected.clear();
-  if (btn) btn.disabled = false;
-  if (failed > 0) showToast(failed + " deletion(s) failed", "error");
-  else showToast("Deleted " + ids.length + " network" + (ids.length !== 1 ? "s" : ""));
-  loadSubnets();
-}
-
-async function openBulkEditSubnetsModal() {
-  var ids = Array.from(_subnetsSelected);
-  if (!ids.length) return;
-  await _ensureTagCache();
-
-  var body =
-    '<p style="color:var(--color-text-secondary);margin-bottom:1.25rem">Editing <strong>' + ids.length + '</strong> network' + (ids.length !== 1 ? 's' : '') + '. Leave a field at its default to skip it.</p>' +
-    '<div class="form-group"><label>Status</label>' +
-      '<select id="bulk-f-status">' +
-        '<option value="">— no change —</option>' +
-        '<option value="available">Available</option>' +
-        '<option value="reserved">Reserved</option>' +
-        '<option value="deprecated">Deprecated</option>' +
-      '</select>' +
-    '</div>' +
-    '<div class="form-group"><label>Tags</label>' +
-      '<div style="display:flex;gap:16px;margin-bottom:0.5rem">' +
-        '<label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:normal"><input type="radio" name="bulk-tag-mode" value="none" checked> No change</label>' +
-        '<label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:normal"><input type="radio" name="bulk-tag-mode" value="add"> Add tags</label>' +
-        '<label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:normal"><input type="radio" name="bulk-tag-mode" value="replace"> Replace tags</label>' +
-      '</div>' +
-      '<div id="bulk-tag-picker-wrap" style="display:none">' + tagFieldHTML([]) + '</div>' +
-    '</div>';
-
-  var footer =
-    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-    '<button class="btn btn-primary" id="bulk-edit-save-btn">Apply to ' + ids.length + ' Network' + (ids.length !== 1 ? 's' : '') + '</button>';
-
-  openModal("Edit Selected Networks", body, footer);
-  wireTagPicker();
-
-  document.querySelectorAll('input[name="bulk-tag-mode"]').forEach(function (radio) {
-    radio.addEventListener("change", function () {
-      var wrap = document.getElementById("bulk-tag-picker-wrap");
-      if (wrap) wrap.style.display = this.value !== "none" ? "" : "none";
-    });
-  });
-
-  document.getElementById("bulk-edit-save-btn").addEventListener("click", async function () {
-    var btn = this;
-    var statusVal = document.getElementById("bulk-f-status").value;
-    var tagModeEl = document.querySelector('input[name="bulk-tag-mode"]:checked');
-    var tagMode = tagModeEl ? tagModeEl.value : "none";
-    var selectedTags = tagMode !== "none" ? getTagFieldValue() : null;
-
-    if (!statusVal && tagMode === "none") {
-      showToast("No changes selected", "error");
-      return;
-    }
-
-    btn.disabled = true;
-    btn.textContent = "Applying…";
-
-    var successCount = 0;
-    var errorCount = 0;
-
-    for (var i = 0; i < ids.length; i++) {
-      var id = ids[i];
-      var payload = {};
-      if (statusVal) payload.status = statusVal;
-      if (tagMode !== "none") {
-        if (tagMode === "add") {
-          var existing = _subnetsData.find(function (s) { return s.id === id; }) ||
-                         _allSubnetsData.find(function (s) { return s.id === id; });
-          var existingTags = existing && existing.tags ? existing.tags : [];
-          payload.tags = Array.from(new Set(existingTags.concat(selectedTags)));
-        } else {
-          var existingForReplace = _subnetsData.find(function (s) { return s.id === id; }) ||
-                                   _allSubnetsData.find(function (s) { return s.id === id; });
-          var preserved = (existingForReplace && existingForReplace.tags ? existingForReplace.tags : [])
-            .filter(isProtectedTag);
-          payload.tags = Array.from(new Set(selectedTags.concat(preserved)));
-        }
-      }
-      try {
-        await api.subnets.update(id, payload);
-        successCount++;
-      } catch (_e) {
-        errorCount++;
-      }
-    }
-
-    closeModal();
-    if (errorCount === 0) {
-      showToast("Updated " + successCount + " network" + (successCount !== 1 ? "s" : ""));
-    } else {
-      showToast("Updated " + successCount + ", " + errorCount + " failed", errorCount === ids.length ? "error" : "");
-    }
-    _subnetsSelected.clear();
-    loadSubnets();
   });
 }
 

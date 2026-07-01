@@ -45,19 +45,12 @@
         </select>
       </div>
 
-      <div id="subnets-bulk-bar" class="bulk-bar" style="display:none">
-        <span class="bulk-bar-count">0 selected</span>
-        <button class="btn btn-sm btn-secondary" id="subnets-bulk-edit-btn">Edit Selected</button>
-        <button class="btn btn-sm btn-danger" id="subnets-bulk-delete-btn">Delete Selected</button>
-      </div>
-
       <div id="pagination-top" style="display:flex;align-items:center;gap:12px;justify-content:center;padding:0.5rem 0 1rem"></div>
 
       <div class="table-wrapper">
         <table>
           <thead>
             <tr>
-              <th class="cb-col"><input type="checkbox" id="subnets-select-all" title="Select all on this page"></th>
               <th class="fav-col" title="Favorites pin to the top"></th>
               <th data-sf-key="name" data-sf-type="string">Name</th>
               <th data-sf-key="cidr" data-sf-type="ip">Network</th>
@@ -74,7 +67,7 @@
             </tr>
           </thead>
           <tbody id="subnets-tbody">
-            <tr><td colspan="14" class="empty-state">Loading...</td></tr>
+            <tr><td colspan="13" class="empty-state">Loading...</td></tr>
           </tbody>
         </table>
       </div>
