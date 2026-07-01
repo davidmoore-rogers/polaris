@@ -114,6 +114,33 @@ describe("getDownInterfaces", () => {
   });
 });
 
+describe("getDownIpsecTunnels", () => {
+  it("returns down tunnels with parent interface + gate, keeps SQL order, drops unmonitored owners", async () => {
+    const t = new Date("2026-06-30T00:00:00Z");
+    rawUnsafe.mockResolvedValueOnce([
+      { assetId: "fw", tunnelName: "vpn-hq", parentInterface: "wan1", remoteGateway: "203.0.113.7", lastUpAt: t },
+      { assetId: "fw", tunnelName: "vpn-dr", parentInterface: null, remoteGateway: null, lastUpAt: null },
+      { assetId: "gone", tunnelName: "vpn-x", parentInterface: "wan2", remoteGateway: null, lastUpAt: t }, // owner not monitored → dropped
+    ]);
+    findMany.mockResolvedValueOnce([
+      { id: "fw", hostname: "fgt-dc-west", ipAddress: "10.9.0.1", assetType: "firewall", location: null, learnedLocation: "fmg-01", snmpLocation: null },
+    ]);
+    const r = await noc.getDownIpsecTunnels();
+    expect(r.map((x) => [x.tunnelName, x.parentInterface, x.gate])).toEqual([
+      ["vpn-hq", "wan1", "fgt-dc-west"], // firewall gate = own hostname, not learnedLocation
+      ["vpn-dr", null, "fgt-dc-west"],
+    ]);
+    expect(r[0].remoteGateway).toBe("203.0.113.7");
+  });
+
+  it("returns empty without hitting findMany when no tunnel is down", async () => {
+    rawUnsafe.mockResolvedValueOnce([]);
+    const r = await noc.getDownIpsecTunnels();
+    expect(r).toEqual([]);
+    expect(findMany).not.toHaveBeenCalled();
+  });
+});
+
 describe("getHighestCpu", () => {
   it("preserves the SQL order, rounds to 0.1, and drops ids with no asset row", async () => {
     rawUnsafe.mockResolvedValueOnce([

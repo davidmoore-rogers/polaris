@@ -152,12 +152,13 @@ router.get("/noc-summary", async (req, res, next) => {
     };
 
     const [
-      status, downNodes, downInterfaces, topCpu, topMemory, slowestResponse, packetLoss, diskUsage, stalePolls, sitesWithIssues,
+      status, downNodes, downInterfaces, downIpsecTunnels, topCpu, topMemory, slowestResponse, packetLoss, diskUsage, stalePolls, sitesWithIssues,
       recentReboots, activeAlerts,
     ] = await Promise.all([
       canAssets ? nocDashboardService.getStatusSummary(assetIds)        : Promise.resolve(emptyStatus),
       canAssets ? nocDashboardService.getDownNodes(100, assetIds)       : Promise.resolve({ nodes: [], total: 0 }),
       canAssets ? nocDashboardService.getDownInterfaces(100, 240, assetIds) : Promise.resolve([]),
+      canAssets ? nocDashboardService.getDownIpsecTunnels(100, 240, assetIds) : Promise.resolve([]),
       canAssets ? nocDashboardService.getHighestCpu(100, 60, assetIds)  : Promise.resolve([]),
       canAssets ? nocDashboardService.getHighestMemory(100, 60, assetIds) : Promise.resolve([]),
       canAssets ? nocDashboardService.getSlowestResponse(100, assetIds) : Promise.resolve([]),
@@ -175,6 +176,7 @@ router.get("/noc-summary", async (req, res, next) => {
       activeAlertCount: status.activeAlertCount,
       downNodes:        downNodes.nodes,
       downInterfaces,
+      downIpsecTunnels,
       topCpu,
       topMemory,
       slowestResponse,

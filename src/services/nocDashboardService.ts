@@ -258,6 +258,80 @@ export async function getDownInterfaces(limit = 100, sinceMinutes = 240, assetId
   return out;
 }
 
+export interface DownIpsecTunnel {
+  assetId: string;
+  hostname: string | null;
+  ipAddress: string | null;
+  assetType: string;
+  tunnelName: string;
+  parentInterface: string | null;
+  remoteGateway: string | null;
+  gate: string;
+  lastUpAt: Date | null;
+}
+
+/**
+ * Feed 2c — down IPsec tunnels. Phase-1 tunnels whose every phase-2 selector is
+ * down (status='down'), grouped by the gate they live on, each carrying the
+ * parent physical interface the tunnel rides (the FortiOS phase1-interface WAN
+ * port) so a NOC operator sees which uplink took the tunnel down. Same
+ * shape/scale as getDownInterfaces: one windowed single-pass CTE over
+ * asset_ipsec_tunnel_samples (latest-per-(asset,tunnelName) + last-up
+ * timestamp) then a monitored/non-suppressed hydrate findMany. FortiGate-only
+ * data; the 4h window covers the system-info scrape cadence. `partial`/`dynamic`
+ * tunnels are intentionally excluded — only a fully-down tunnel is an outage.
+ */
+export async function getDownIpsecTunnels(limit = 100, sinceMinutes = 240, assetIds: string[] | null = null): Promise<DownIpsecTunnel[]> {
+  const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
+  const params: unknown[] = [String(sinceMinutes), limit];
+  if (assetIds) params.push(assetIds);
+  const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; tunnelName: string; parentInterface: string | null; remoteGateway: string | null; lastUpAt: Date | null }>>(
+    `WITH win AS (
+       SELECT s."assetId" AS "assetId", s."tunnelName" AS "tunnelName",
+              s."parentInterface" AS "parentInterface", s."remoteGateway" AS "remoteGateway",
+              s."status" AS "status",
+              row_number() OVER (PARTITION BY s."assetId", s."tunnelName" ORDER BY s."timestamp" DESC) AS rn,
+              max(s."timestamp") FILTER (WHERE s."status" = 'up')
+                OVER (PARTITION BY s."assetId", s."tunnelName") AS "lastUpAt"
+       FROM "asset_ipsec_tunnel_samples" s
+       WHERE s."timestamp" > now() - ($1 || ' minutes')::interval${idClause}
+     )
+     SELECT "assetId", "tunnelName", "parentInterface", "remoteGateway", "lastUpAt"
+     FROM win
+     WHERE rn = 1 AND "status" = 'down'
+     ORDER BY "lastUpAt" ASC NULLS FIRST
+     LIMIT $2`,
+    ...params,
+  );
+  if (rows.length === 0) return [];
+  const ids = Array.from(new Set(rows.map((r) => r.assetId)));
+  const assets = await prisma.asset.findMany({
+    where: { id: { in: ids }, monitored: true, dependencySuppressed: false },
+    select: {
+      id: true, hostname: true, ipAddress: true, assetType: true,
+      location: true, learnedLocation: true, snmpLocation: true,
+    },
+  });
+  const byId = new Map(assets.map((a) => [a.id, a]));
+  const out: DownIpsecTunnel[] = [];
+  for (const r of rows) {
+    const a = byId.get(r.assetId);
+    if (!a) continue;
+    out.push({
+      assetId: a.id,
+      hostname: a.hostname,
+      ipAddress: a.ipAddress,
+      assetType: a.assetType,
+      tunnelName: r.tunnelName,
+      parentInterface: r.parentInterface,
+      remoteGateway: r.remoteGateway,
+      gate: gateOf(a),
+      lastUpAt: r.lastUpAt,
+    });
+  }
+  return out;
+}
+
 export interface TopNRow { id: string; hostname: string | null; ipAddress: string | null; value: number; detail?: string }
 
 // Hydrate a list of assetIds (preserving the incoming order) with display

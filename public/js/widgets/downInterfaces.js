@@ -1,33 +1,75 @@
 /**
- * widgets/downInterfaces.js — interfaces that are administratively up but
- * operationally down (a real link fault, not an operator-disabled port),
- * grouped by the gate they live on. Mirrors the Down Nodes widget: same
- * statusDot + dash-alert row markup, same group-header + count-pill grouping,
- * click a row to open the owning asset's details. Data from noc-summary
- * downInterfaces[].
+ * widgets/downInterfaces.js — physical interfaces that are administratively up
+ * but operationally down, PLUS IPsec tunnels that are fully down, grouped by the
+ * gate they live on. Mirrors the Down Nodes widget: same statusDot + dash-alert
+ * row markup, group-header + count-pill grouping, click a row to open the owning
+ * asset. A down tunnel row shows the parent physical interface it rides (the
+ * FortiOS phase1-interface WAN port). Data from noc-summary downInterfaces[] +
+ * downIpsecTunnels[].
  */
 
 (function () {
   var TYPE_LABELS = PolarisWidgets.ASSET_TYPE_LABELS;
 
-  function groupKey(iface, groupBy) {
-    if (groupBy === "none") return null;
-    return iface.gate || "(unknown)";
+  // Normalize the two noc-summary arrays into a single row list with a `kind`
+  // discriminator so render/group/sort treat them uniformly.
+  function mergeRows(d) {
+    var ifaces = ((d && d.downInterfaces) || []).map(function (n) {
+      return {
+        kind: "interface",
+        assetId: n.assetId, hostname: n.hostname, ipAddress: n.ipAddress, assetType: n.assetType,
+        name: n.ifName, label: n.ifLabel, parentInterface: null, remoteGateway: null,
+        gate: n.gate, lastUpAt: n.lastUpAt,
+      };
+    });
+    var tunnels = ((d && d.downIpsecTunnels) || []).map(function (t) {
+      return {
+        kind: "tunnel",
+        assetId: t.assetId, hostname: t.hostname, ipAddress: t.ipAddress, assetType: t.assetType,
+        name: t.tunnelName, label: null, parentInterface: t.parentInterface, remoteGateway: t.remoteGateway,
+        gate: t.gate, lastUpAt: t.lastUpAt,
+      };
+    });
+    // Longest-down first: nulls (no observed up sample in the window) sort ahead
+    // of any timestamp, then oldest lastUpAt first — same order the feeds use.
+    return ifaces.concat(tunnels).sort(function (a, b) {
+      if (!a.lastUpAt && !b.lastUpAt) return 0;
+      if (!a.lastUpAt) return -1;
+      if (!b.lastUpAt) return 1;
+      return new Date(a.lastUpAt) - new Date(b.lastUpAt);
+    });
   }
 
-  function ifaceRowHTML(n) {
+  function groupKey(row, groupBy) {
+    if (groupBy === "none") return null;
+    return row.gate || "(unknown)";
+  }
+
+  function rowHTML(n) {
     var typeLabel = TYPE_LABELS[n.assetType] || n.assetType || "asset";
     var host = n.hostname || n.ipAddress || "(unnamed)";
-    var title = escapeHtml(n.ifName || "(interface)");
-    if (n.ifLabel) title += ' <span class="dash-alert-ip">' + escapeHtml(n.ifLabel) + '</span>';
-    var sub = [escapeHtml(host), escapeHtml(typeLabel)];
+    var title = escapeHtml(n.name || (n.kind === "tunnel" ? "(tunnel)" : "(interface)"));
+    if (n.label) title += ' <span class="dash-alert-ip">' + escapeHtml(n.label) + '</span>';
+    var sub;
+    if (n.kind === "tunnel") {
+      // Lead with the tunnel marker, then the parent physical interface it rides
+      // (the operator's key ask), then the remote gateway when known.
+      var parts = ['<span class="widget-pill">IPsec tunnel</span>'];
+      parts.push(n.parentInterface ? "via " + escapeHtml(n.parentInterface) : "no parent iface");
+      if (n.remoteGateway) parts.push("&rarr; " + escapeHtml(n.remoteGateway));
+      parts.push(escapeHtml(host));
+      sub = parts.join(" · ");
+    } else {
+      sub = [escapeHtml(host), escapeHtml(typeLabel)].join(" · ");
+    }
     var href = '/assets.html#view=asset:' + encodeURIComponent(n.assetId);
+    var dotTitle = n.kind === "tunnel" ? "Tunnel down" : "Interface down";
     return '<a class="dash-alert-item" href="' + href + '" data-asset-id="' + escapeHtml(n.assetId) + '" style="text-decoration:none">' +
       '<div class="dash-alert-row" style="width:100%">' +
-        '<span class="dash-alert-dot dash-alert-down" title="Interface down"></span>' +
+        '<span class="dash-alert-dot dash-alert-down" title="' + dotTitle + '"></span>' +
         '<div class="dash-alert-body">' +
           '<div class="dash-alert-title">' + title + '</div>' +
-          '<div class="dash-alert-sub">' + sub.join(" · ") + '</div>' +
+          '<div class="dash-alert-sub">' + sub + '</div>' +
         '</div>' +
         '<div class="dash-alert-time" data-changed-at="' + (n.lastUpAt || "") + '" title="Down since last seen up">' +
           (n.lastUpAt ? PolarisWidgets.durationSince(n.lastUpAt) : "—") +
@@ -36,15 +78,15 @@
     '</a>';
   }
 
-  function render(el, ifaces, config) {
-    ifaces = ifaces || [];
-    if (!ifaces.length) { el.innerHTML = '<p class="empty-state">No interfaces down</p>'; return; }
+  function render(el, rows, config) {
+    rows = rows || [];
+    if (!rows.length) { el.innerHTML = '<p class="empty-state">No interfaces or tunnels down</p>'; return; }
     var rowLimit = (config && config.rowLimit) || 10;
     var groupBy = (config && config.groupBy) || "gate";
-    var clipped = ifaces.slice(0, rowLimit);
+    var clipped = rows.slice(0, rowLimit);
 
     if (groupBy === "none") {
-      el.innerHTML = clipped.map(ifaceRowHTML).join("");
+      el.innerHTML = clipped.map(rowHTML).join("");
       return;
     }
     // Bucket into groups preserving first-seen order; sort groups by size desc.
@@ -61,22 +103,22 @@
       return '<div class="dash-alert-group-header" style="display:flex;align-items:center;gap:8px;margin:6px 0 4px;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.03em;color:var(--color-text-secondary)">' +
         '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(k) + '</span>' +
         '<span class="widget-pill widget-pill-red">' + list.length + '</span>' +
-      '</div>' + list.map(ifaceRowHTML).join("");
+      '</div>' + list.map(rowHTML).join("");
     }).join("");
   }
 
   PolarisWidgets.register({
     type: "downInterfaces",
     category: "Monitoring",
-    label: "Down Interfaces",
-    description: "Interfaces admin-up but operationally down, grouped by the gate they're on.",
+    label: "Down Interfaces & Tunnels",
+    description: "Interfaces admin-up but operationally down, plus fully-down IPsec tunnels, grouped by the gate they're on.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
     defaultConfig: { groupBy: "gate", rowLimit: 10, regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
-      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return (d && d.downInterfaces) || []; }).catch(function () { return []; });
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(mergeRows).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
@@ -94,18 +136,22 @@
       };
       el.addEventListener("click", onClick);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, (d && d.downInterfaces) || [], config); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, mergeRows(d), config); }).catch(function () {});
       }, 30000);
       ctx.onUnmount(function () { clearInterval(timer); el.removeEventListener("click", onClick); });
     },
 
     renderPreview: function (el) {
       var now = Date.now();
-      render(el, [
-        { assetId: "p1", hostname: "fs-aisle-3", ipAddress: "10.1.2.5", assetType: "switch", ifName: "port12", ifLabel: "AP uplink", gate: "fgt-plant-a", lastUpAt: new Date(now - 9 * 60000).toISOString() },
-        { assetId: "p2", hostname: "fs-aisle-3", ipAddress: "10.1.2.5", assetType: "switch", ifName: "port24", ifLabel: null, gate: "fgt-plant-a", lastUpAt: new Date(now - 41 * 60000).toISOString() },
-        { assetId: "p3", hostname: "fgt-dc-west", ipAddress: "10.9.0.1", assetType: "firewall", ifName: "wan2", ifLabel: "Backup ISP", gate: "fgt-dc-west", lastUpAt: new Date(now - 3 * 3600000).toISOString() },
-      ], { groupBy: "gate", rowLimit: 5 });
+      render(el, mergeRows({
+        downInterfaces: [
+          { assetId: "p1", hostname: "fs-aisle-3", ipAddress: "10.1.2.5", assetType: "switch", ifName: "port12", ifLabel: "AP uplink", gate: "fgt-plant-a", lastUpAt: new Date(now - 9 * 60000).toISOString() },
+          { assetId: "p3", hostname: "fgt-dc-west", ipAddress: "10.9.0.1", assetType: "firewall", ifName: "wan2", ifLabel: "Backup ISP", gate: "fgt-dc-west", lastUpAt: new Date(now - 3 * 3600000).toISOString() },
+        ],
+        downIpsecTunnels: [
+          { assetId: "p3", hostname: "fgt-dc-west", ipAddress: "10.9.0.1", assetType: "firewall", tunnelName: "vpn-hq", parentInterface: "wan1", remoteGateway: "203.0.113.7", gate: "fgt-dc-west", lastUpAt: new Date(now - 47 * 60000).toISOString() },
+        ],
+      }), { groupBy: "gate", rowLimit: 5 });
     },
 
     renderConfig: function (el, config, onChange) {
