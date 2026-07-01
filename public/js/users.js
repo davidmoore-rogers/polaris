@@ -200,7 +200,7 @@ function renderUsersBody() {
     // scan scope at a glance.
     var regionsLabel = "";
     if (Array.isArray(u.regionTags) && u.regionTags.length > 0) {
-      regionsLabel = '<div style="margin-top:0.25rem" title="Per-user region scope">' + regionPillsHtml(u.regionTags) + '</div>';
+      regionsLabel = '<div style="margin-top:0.25rem;display:flex;flex-wrap:wrap;gap:0.25rem" title="Per-user region scope">' + regionPillsHtml(u.regionTags) + '</div>';
     }
     var passwordBtn = u.authProvider === "azure" ? '' :
       '<button class="btn btn-sm btn-secondary" data-action="password" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '">Password</button>';
@@ -1580,7 +1580,7 @@ function regionPillsHtml(names) {
   return names.map(function (n) {
     var hex = regionColorFor(n);
     var rgb = hexToRgbTriplet(hex);
-    return '<span class="badge" style="background:rgba(' + rgb + ',0.18);color:' + hex + ';border:1px solid rgba(' + rgb + ',0.45);margin-right:0.25rem">' +
+    return '<span class="badge" style="background:rgba(' + rgb + ',0.18);color:' + hex + ';border:1px solid rgba(' + rgb + ',0.45)">' +
       escapeHtml(n) +
     '</span>';
   }).join("");
