@@ -7,8 +7,11 @@
  * so the two transports don't drift on field handling.
  *
  * Per-AP IP picker (first non-empty wins, `0.0.0.0` normalized to empty):
- *   ip_addr → ip_address → local_ipv4_address → local_ipv4_addr → wtp_ip →
- *   connecting_ip
+ *   ip_addr → ip_address → local_ipv4_address → local_ipv4_addr → local_addr →
+ *   wtp_ip → connecting_ip → connecting_from
+ * (`local_addr` / `connecting_from` are the field names some FortiOS releases
+ * populate instead of the `local_ipv4*` / `connecting_ip` variants — an AP
+ * whose IP only lands in those keys otherwise projects with no IP.)
  *
  * Per-AP MAC picker (first non-empty wins, all-zero MAC normalized to empty):
  *   base_mac → board_mac → mac
@@ -149,8 +152,10 @@ export function parseFortiapMonitorRow(row: Record<string, unknown>): ParsedFort
     || str(row.ip_address)
     || str(row.local_ipv4_address)
     || str(row.local_ipv4_addr)
+    || str(row.local_addr)
     || str(row.wtp_ip)
     || str(row.connecting_ip)
+    || str(row.connecting_from)
     || "";
   const rawApMac = str(row.base_mac) || str(row.board_mac) || str(row.mac) || "";
 
@@ -194,7 +199,7 @@ export function parseFortiapMonitorRow(row: Record<string, unknown>): ParsedFort
 export const FORTIAP_MONITOR_FORMAT = [
   "name", "wtp_id", "serial", "model", "wtp_profile",
   // IP picker (firmware variance — keep all known field names)
-  "ip_addr", "ip_address", "local_ipv4_address", "local_ipv4_addr", "wtp_ip", "connecting_ip",
+  "ip_addr", "ip_address", "local_ipv4_address", "local_ipv4_addr", "local_addr", "wtp_ip", "connecting_ip", "connecting_from",
   // MAC picker
   "base_mac", "board_mac", "mac",
   "status", "state",

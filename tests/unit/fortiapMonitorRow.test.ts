@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { deriveFortiapModelFromSerial, parseFortiapMonitorRow } from "../../src/utils/fortiapMonitorRow.js";
+import { deriveFortiapModelFromSerial, parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../../src/utils/fortiapMonitorRow.js";
 
 describe("deriveFortiapModelFromSerial", () => {
   it("returns empty for missing/blank serial", () => {
@@ -62,5 +62,49 @@ describe("parseFortiapMonitorRow model derivation", () => {
   it("derives the model from the serial when model + wtp_profile are blank", () => {
     const parsed = parseFortiapMonitorRow({ serial: "FP231K5XYZ12345" });
     expect(parsed.model).toBe("FortiAP-231K");
+  });
+});
+
+describe("parseFortiapMonitorRow IP picker", () => {
+  it("prefers ip_addr over every other variant", () => {
+    const parsed = parseFortiapMonitorRow({
+      ip_addr: "10.0.0.1", local_addr: "10.0.0.2", connecting_from: "10.0.0.3",
+    });
+    expect(parsed.ipAddress).toBe("10.0.0.1");
+  });
+
+  // The reported bug: some FortiOS releases only populate local_addr /
+  // connecting_from, which were not in the picker — the AP projected no IP.
+  it("picks up local_addr when the ipv4 variants are absent", () => {
+    const parsed = parseFortiapMonitorRow({ local_addr: "172.23.19.34" });
+    expect(parsed.ipAddress).toBe("172.23.19.34");
+  });
+
+  it("falls back to connecting_from when nothing else is present", () => {
+    const parsed = parseFortiapMonitorRow({ connecting_from: "172.23.19.34" });
+    expect(parsed.ipAddress).toBe("172.23.19.34");
+  });
+
+  it("prefers local_addr over connecting_from", () => {
+    const parsed = parseFortiapMonitorRow({ local_addr: "10.1.1.1", connecting_from: "203.0.113.9" });
+    expect(parsed.ipAddress).toBe("10.1.1.1");
+  });
+
+  it("normalizes 0.0.0.0 to empty", () => {
+    const parsed = parseFortiapMonitorRow({ local_addr: "0.0.0.0" });
+    expect(parsed.ipAddress).toBe("");
+  });
+
+  it("returns empty when no IP field is present", () => {
+    const parsed = parseFortiapMonitorRow({ name: "AP-1" });
+    expect(parsed.ipAddress).toBe("");
+  });
+
+  // The format= filter must request every key the picker reads, or FortiOS
+  // strips it from the response before the parser ever sees it.
+  it("requests local_addr and connecting_from in the format= filter", () => {
+    const fields = FORTIAP_MONITOR_FORMAT.split("|");
+    expect(fields).toContain("local_addr");
+    expect(fields).toContain("connecting_from");
   });
 });
