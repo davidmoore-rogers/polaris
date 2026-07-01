@@ -53,6 +53,10 @@
       display: none;
     }
     .login-card .btn-primary { width: 100%; justify-content: center; }
+    /* Push the submit button down so its gap from the password field matches
+       the username→password gap (which also includes the password label:
+       0.8rem × 1.5 line-height + 4px label margin). */
+    #login-form .btn-primary { margin-top: calc(0.8rem * 1.5 + 4px); }
     .login-logo {
       display: block;
       margin: 0 auto 1rem;
