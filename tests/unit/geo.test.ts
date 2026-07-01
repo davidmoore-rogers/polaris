@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { pointInPolygon } from "../../src/utils/geo.js";
+import { manualCoordPatchError, pointInPolygon } from "../../src/utils/geo.js";
 
 // Square covering Atlanta-ish: roughly (33.5,-84.7) → (34.0,-84.2)
 const SQUARE: [number, number][] = [
@@ -51,5 +51,46 @@ describe("pointInPolygon", () => {
     expect(pointInPolygon([2, 2], C)).toBe(false);
     // (0.5, 2) is on the back wall → inside
     expect(pointInPolygon([0.5, 2], C)).toBe(true);
+  });
+});
+
+describe("manualCoordPatchError", () => {
+  it("accepts both omitted (no change)", () => {
+    expect(manualCoordPatchError(undefined, undefined)).toBeNull();
+  });
+
+  it("accepts both null (clear)", () => {
+    expect(manualCoordPatchError(null, null)).toBeNull();
+  });
+
+  it("accepts a valid pair", () => {
+    expect(manualCoordPatchError(36.1627, -86.7816)).toBeNull();
+    expect(manualCoordPatchError(-90, 180)).toBeNull();
+  });
+
+  it("rejects one provided without the other", () => {
+    expect(manualCoordPatchError(36.16, undefined)).toMatch(/together/);
+    expect(manualCoordPatchError(undefined, -86.78)).toMatch(/together/);
+  });
+
+  it("rejects one set with the other cleared", () => {
+    expect(manualCoordPatchError(36.16, null)).toMatch(/both/);
+    expect(manualCoordPatchError(null, -86.78)).toMatch(/both/);
+  });
+
+  it("rejects out-of-range values", () => {
+    expect(manualCoordPatchError(91, 0)).toMatch(/decimal degrees/);
+    expect(manualCoordPatchError(-91, 0)).toMatch(/decimal degrees/);
+    expect(manualCoordPatchError(0, 181)).toMatch(/decimal degrees/);
+    expect(manualCoordPatchError(0, -181)).toMatch(/decimal degrees/);
+  });
+
+  it("rejects the (0,0) unset sentinel", () => {
+    expect(manualCoordPatchError(0, 0)).toMatch(/decimal degrees/);
+  });
+
+  it("rejects non-finite numbers", () => {
+    expect(manualCoordPatchError(NaN, 10)).toMatch(/decimal degrees/);
+    expect(manualCoordPatchError(10, Infinity)).toMatch(/decimal degrees/);
   });
 });

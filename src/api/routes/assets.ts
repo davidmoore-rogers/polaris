@@ -22,6 +22,8 @@ import { isValidIpAddress, cidrContains } from "../../utils/cidr.js";
 import { isKnownAssetType } from "../../utils/assetTypes.js";
 import { recomputeMonitorOverrideForAssets, getAddAsMonitoredFromConfig } from "../../services/monitorOverrideService.js";
 import { reconcileTagsForAsset } from "../../services/tagAssignmentService.js";
+import { manualCoordPatchError } from "../../utils/geo.js";
+import { reconcileMapRegions } from "../../services/mapRegionService.js";
 import { mergeAssets, MERGEABLE_FIELDS, type MergeableField, type FieldWinner } from "../../services/assetMergeService.js";
 import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { shapeMacRows, MAC_ROW_SELECT, reconcileMacAddresses } from "../../utils/macAddresses.js";
@@ -151,6 +153,13 @@ const CreateAssetSchema = z.object({
   assetType:     AssetTypeEnum.optional().default("other"),
   status:        AssetStatusEnum.optional().default("storage"),
   location:      z.string().optional(),
+  // Manual geo pin (decimal degrees). Travels as a pair — both numbers, both
+  // null (clear), or both omitted; pair semantics enforced in the handlers
+  // via manualCoordPatchError. Setting stamps coordSource="manual" so the
+  // discovery-projected coords can't overwrite; clearing resets coordSource
+  // so discovery may repopulate on its next cycle.
+  latitude:      z.number().min(-90).max(90).nullable().optional(),
+  longitude:     z.number().min(-180).max(180).nullable().optional(),
   department:    z.string().optional(),
   assignedTo:    z.string().optional(),
   os:            z.string().optional(),
@@ -2087,11 +2096,14 @@ router.get("/:id/process-command/:commandId", requirePermission("assets", "read"
 router.post("/", requirePermission("assets", "write"), async (req, res, next) => {
   try {
     const input = CreateAssetSchema.parse(req.body);
+    const coordErr = manualCoordPatchError(input.latitude, input.longitude);
+    if (coordErr) throw new AppError(400, coordErr);
     const data: Record<string, unknown> = { ...input };
     if (input.macAddress) data.macAddress = input.macAddress.toUpperCase().replace(/-/g, ":");
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
     if (input.ipAddress) data.ipSource = "manual";
+    if (typeof input.latitude === "number") data.coordSource = "manual";
     // Always stamp status tracking on creation (status is always set here)
     data.statusChangedAt = new Date();
     data.statusChangedBy = req.session?.username ?? "manual";
@@ -2101,6 +2113,11 @@ router.post("/", requirePermission("assets", "write"), async (req, res, next) =>
     logEvent({ action: "asset.created", resourceType: "asset", resourceId: asset.id, resourceName: input.hostname || input.ipAddress, actor: req.session?.username, message: `Asset "${input.hostname || input.ipAddress || "unknown"}" created` });
     // Apply any criteria-based auto-tags to the new asset (best-effort).
     reconcileTagsForAsset(asset.id).catch(() => {});
+    // Manual coords on a firewall may move it into/out of a map region —
+    // refresh membership now instead of waiting for the periodic job.
+    if (asset.assetType === "firewall" && typeof input.latitude === "number") {
+      reconcileMapRegions().catch(() => {});
+    }
     res.status(201).json(asset);
   } catch (err) {
     next(err);
@@ -2161,6 +2178,8 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     if (input.status !== undefined && input.status !== "quarantined" && existing.status === "quarantined") {
       throw new AppError(400, "Use DELETE /assets/:id/quarantine to release the quarantine before changing status");
     }
+    const coordErr = manualCoordPatchError(input.latitude, input.longitude);
+    if (coordErr) throw new AppError(400, coordErr);
     const data: Record<string, unknown> = { ...input };
     if (input.macAddress) data.macAddress = input.macAddress.toUpperCase().replace(/-/g, ":");
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
@@ -2168,6 +2187,21 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
     else if (input.warrantyExpiry === undefined) delete data.warrantyExpiry;
     if (input.ipAddress) data.ipSource = "manual";
+    // Manual coordinates: only a real change stamps coordSource — the edit
+    // form echoes the current values back on every save, and silently pinning
+    // discovery-stamped coords as "manual" would freeze discovery updates for
+    // the asset. Clearing (null pair) releases the pin so discovery may
+    // repopulate on its next cycle.
+    let coordChanged = false;
+    if (input.latitude !== undefined) {
+      coordChanged = input.latitude !== existing.latitude || input.longitude !== existing.longitude;
+      if (coordChanged) {
+        data.coordSource = input.latitude === null ? null : "manual";
+      } else {
+        delete data.latitude;
+        delete data.longitude;
+      }
+    }
     if (input.status !== undefined) {
       data.statusChangedAt = new Date();
       data.statusChangedBy = req.session?.username ?? "manual";
@@ -2182,7 +2216,7 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     if (input.monitored !== undefined || input.assetType !== undefined) {
       await recomputeMonitorOverrideForAssets(prisma, [id]);
     }
-    const trackFields = ["hostname", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "notes", "dnsName"] as const;
+    const trackFields = ["hostname", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "dnsName"] as const;
     const before: Record<string, unknown> = {};
     const after: Record<string, unknown> = {};
     for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }
@@ -2193,6 +2227,11 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     const TAG_CRITERIA_FIELDS = ["manufacturer", "model", "os", "osVersion", "hostname", "department", "location", "assetType", "status", "ipAddress"] as const;
     if (TAG_CRITERIA_FIELDS.some((f) => (input as any)[f] !== undefined)) {
       reconcileTagsForAsset(id).catch(() => {});
+    }
+    // A firewall's coords drive map-region membership (region: tags) —
+    // refresh now instead of waiting for the periodic reconcile job.
+    if (coordChanged && asset.assetType === "firewall") {
+      reconcileMapRegions().catch(() => {});
     }
     res.json(asset);
   } catch (err) {

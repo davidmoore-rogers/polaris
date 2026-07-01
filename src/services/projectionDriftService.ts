@@ -81,6 +81,7 @@ export async function detectAndLogDrift(
           ipAddress: true,
           latitude: true,
           longitude: true,
+          coordSource: true,
         },
       }),
       prisma.assetSource.findMany({
@@ -101,6 +102,10 @@ export async function detectAndLogDrift(
 
     const drifts: DriftEntry[] = [];
     for (const field of PROJECTED_FIELDS) {
+      // Operator-pinned manual coordinates deliberately diverge from the
+      // projection (discovery skips its coord write while the pin is set) —
+      // not drift, don't log it every cycle.
+      if ((field === "latitude" || field === "longitude") && asset.coordSource === "manual") continue;
       const projVal = projected[field];
       if (projVal === null || projVal === undefined) continue; // No source opinion — skip
       const curVal = (asset as Record<string, unknown>)[field] ?? null;

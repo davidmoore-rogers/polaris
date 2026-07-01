@@ -3853,8 +3853,14 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           updateData.ipAddress = fwProjected.ipAddress;
           updateData.ipSource = memberDevice.hostname || fgHostname || integrationType;
         }
-        if (fwProjected.latitude !== null) updateData.latitude = fwProjected.latitude;
-        if (fwProjected.longitude !== null) updateData.longitude = fwProjected.longitude;
+        // Operator-typed coordinates (coordSource="manual", set via the asset
+        // edit form) outrank the projected device-side coords — skip the
+        // write so discovery never clobbers a manual pin. Clearing the manual
+        // pair resets coordSource to null, which re-opens this path.
+        if (existingAsset.coordSource !== "manual") {
+          if (fwProjected.latitude !== null) updateData.latitude = fwProjected.latitude;
+          if (fwProjected.longitude !== null) updateData.longitude = fwProjected.longitude;
+        }
         // SNMP sysLocation is projection-owned for display, but the
         // fetched-at timestamp lives outside the projection (no source
         // would naturally own it) — stamp it directly on Asset when we

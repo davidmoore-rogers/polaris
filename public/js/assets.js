@@ -2298,6 +2298,13 @@ function assetFormHTML(defaults) {
     '<div class="form-group"><label>Department</label><input type="text" id="f-department" value="' + escapeHtml(d.department || "") + '" placeholder="e.g. Infrastructure"></div>' +
     '<div class="form-group"><label>Assigned To</label><input type="text" id="f-assignedTo" value="' + escapeHtml(d.assignedTo || "") + '" placeholder="e.g. platform-team"></div>' +
     '<div class="form-group"><label>Operating System</label><input type="text" id="f-os" value="' + escapeHtml(d.os || "") + '" placeholder="e.g. RHEL 9, Windows Server 2022"></div>' +
+    '<div class="form-group"><label>Latitude</label><input type="number" step="any" min="-90" max="90" id="f-latitude" value="' + (d.latitude != null ? String(d.latitude) : "") + '" placeholder="e.g. 36.1627"></div>' +
+    '<div class="form-group"><label>Longitude</label><input type="number" step="any" min="-180" max="180" id="f-longitude" value="' + (d.longitude != null ? String(d.longitude) : "") + '" placeholder="e.g. -86.7816"></div>' +
+    (d.coordSource === "manual"
+      ? '<p class="hint" style="grid-column:1 / -1;margin-top:-0.5rem">Coordinates are manually pinned — clear both fields to resume discovered values.</p>'
+      : (d.latitude != null
+        ? '<p class="hint" style="grid-column:1 / -1;margin-top:-0.5rem">Coordinates were discovered from the device — saving a change pins them as manual.</p>'
+        : '')) +
   '</div>' +
   '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
   '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Procurement</p>' +
@@ -2329,6 +2336,23 @@ function getAssetFormData() {
     notes:         val("f-notes") || undefined,
     tags:          getTagFieldValue(),
   };
+  // Coordinates travel as a pair: both blank → null (clear the manual pin /
+  // leave unset), both filled → numbers. A half-filled pair aborts the save
+  // with a toast (the save handlers catch and surface thrown errors).
+  var latRaw = document.getElementById("f-latitude").value.trim();
+  var lngRaw = document.getElementById("f-longitude").value.trim();
+  if (!latRaw && !lngRaw) {
+    data.latitude = null;
+    data.longitude = null;
+  } else {
+    var lat = parseFloat(latRaw);
+    var lng = parseFloat(lngRaw);
+    if (!isFinite(lat) || !isFinite(lng)) {
+      throw new Error("Latitude and longitude must both be set, or both left blank");
+    }
+    data.latitude = lat;
+    data.longitude = lng;
+  }
   // These fields are only editable on create, not edit
   if (document.getElementById("f-hostname"))     data.hostname     = val("f-hostname") || undefined;
   if (document.getElementById("f-dnsName"))      data.dnsName      = val("f-dnsName") || undefined;
@@ -3356,7 +3380,7 @@ async function openViewModal(id) {
       disabledInHTML(a.tags) +
       viewRow("Location", a.location || a.learnedLocation) +
       ((a.latitude != null && a.longitude != null)
-        ? viewRow("Coordinates", a.latitude.toFixed(4) + ", " + a.longitude.toFixed(4), true)
+        ? viewRow("Coordinates", a.latitude.toFixed(4) + ", " + a.longitude.toFixed(4) + (a.coordSource === "manual" ? " (manual)" : ""), true)
         : "") +
       (a.learnedAddress ? viewRow("Address", a.learnedAddress) : "") +
       (a.snmpLocation ? viewRow("SNMP Location", a.snmpLocation) : "") +

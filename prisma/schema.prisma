@@ -529,8 +529,14 @@ model Asset {
   // "ping" | "conflict-accept" (open set; UI renders verbatim).
   lastSeenSource   String?
   associatedUsers  Json?       @default("[]") // [{user, domain?, lastSeen, source?}] — logged-in / registered users
-  latitude         Float? // FortiGate geo coordinate (decimal degrees); populated from `config system global` on discovery
-  longitude        Float? // FortiGate geo coordinate (decimal degrees)
+  latitude         Float? // Geo coordinate (decimal degrees). Discovery-populated on FortiGate firewalls (from `config system global` / metavars / geocoded sysLocation) OR operator-typed via the asset edit form (any asset type).
+  longitude        Float? // Geo coordinate (decimal degrees)
+  // Provenance of latitude/longitude: "manual" = operator-typed via the asset
+  // edit form — discovery must NOT overwrite (syncDhcpSubnets skips the
+  // projected coord write, projectionDriftService skips lat/long drift).
+  // null = discovery-owned (or unset). Clearing manual coords resets to null
+  // so discovery may repopulate on the next cycle.
+  coordSource      String?
   // Raw SNMP sysLocation (OID 1.3.6.1.2.1.1.6.0) pulled during FMG/standalone
   // FortiGate discovery when `fortigateMonitor.pullSnmpLocation` is enabled
   // on the originating integration. Captured independently of whether
