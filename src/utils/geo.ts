@@ -60,6 +60,34 @@ export function isValidGeoCoord(
 }
 
 /**
+ * Validate an operator-supplied manual coordinate patch from the asset
+ * create/edit form. Coordinates travel as a pair: a request may omit both
+ * (no change), null both (clear — resumes discovery ownership), or set both
+ * to numbers, which must form a valid geographic pair per isValidGeoCoord
+ * (finite, in-range, and not the (0,0) unset sentinel).
+ *
+ * Returns a human-readable error string, or null when the patch is valid.
+ * Pure (no I/O) — route handlers map the string onto an AppError(400).
+ */
+export function manualCoordPatchError(
+  latitude: number | null | undefined,
+  longitude: number | null | undefined,
+): string | null {
+  if (latitude === undefined && longitude === undefined) return null;
+  if (latitude === undefined || longitude === undefined) {
+    return "Latitude and longitude must be provided together";
+  }
+  if (latitude === null && longitude === null) return null;
+  if (latitude === null || longitude === null) {
+    return "Latitude and longitude must both be set or both be cleared";
+  }
+  if (!isValidGeoCoord(latitude, longitude)) {
+    return "Coordinates must be valid decimal degrees (latitude -90 to 90, longitude -180 to 180, and not 0,0)";
+  }
+  return null;
+}
+
+/**
  * Compare two coordinate pairs for "close enough" — used by the FortiGate
  * SNMP-location write-back path to decide whether the geocoded coords match
  * what's currently in the FortiGate's CMDB. A mismatch triggers a write-back
