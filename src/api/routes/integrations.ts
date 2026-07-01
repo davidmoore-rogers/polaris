@@ -3768,6 +3768,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           snmpGeocodedLatitude: devGeocodedLat,
           snmpGeocodedLongitude: devGeocodedLng,
           metavarAddress: device.metavarAddress,
+          // True when this gate was offline in FMG and its config came from
+          // FMG's cached CMDB (see fortimanagerService DiscoveredDevice.offline).
+          // Config-only: withhold presence + decommission-resurrection below.
+          offline: (device as { offline?: boolean }).offline === true,
         };
       // Match by serial first; fall back to hostname/IP for assets that
       // pre-date a serial (e.g. the placeholder created by registerFortinetHost
@@ -3819,11 +3823,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           learnedLocation: memberDevice.hostname || fgHostname || existingAsset.learnedLocation,
           fortinetTopology: memberTopology,
           discoveredByIntegrationId: integrationId,
-          ...(existingAsset.status === "decommissioned" ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
+          // Resurrection: only a live-verified read may flip a decommissioned
+          // firewall back to active. An offline gate's cached CMDB is NOT
+          // presence evidence (business rule #12) — leave a decommissioned
+          // firewall decommissioned when its config came from FMG's cache.
+          ...(existingAsset.status === "decommissioned" && !memberDevice.offline ? { status: "active", statusChangedAt: new Date(now), statusChangedBy: integrationLabel } : {}),
         };
         // A firewall reaching this branch answered the FMG/REST queries that
         // produced this payload — that response is the presence evidence.
-        bumpLastSeen(updateData, existingAsset, new Date(now), "discovery");
+        // Exception: an offline gate's config came from FMG's cached CMDB, not
+        // the device itself, so it is NOT presence — do not advance lastSeen.
+        if (!memberDevice.offline) bumpLastSeen(updateData, existingAsset, new Date(now), "discovery");
         // Discovery-owned fields from projection.
         if (fwProjected.hostname !== null) updateData.hostname = fwProjected.hostname;
         if (fwProjected.model !== null) updateData.model = fwProjected.model;
@@ -4000,8 +4010,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           // separately on Asset.snmpLocation for the details General tab.
           learnedLocation: memberDevice.hostname || fgHostname,
           osVersion: fwCreateProjected.osVersion,
-          lastSeen: new Date(now),
-          lastSeenSource: "discovery",
+          // A first-seen offline gate's config came from FMG's cached CMDB, not
+          // a live query — create it WITHOUT verified presence (lastSeen null),
+          // like directory-only assets. A later live discovery cycle stamps it.
+          ...(memberDevice.offline ? {} : { lastSeen: new Date(now), lastSeenSource: "discovery" }),
           // Stamp the discovering integration. The polling-method resolver
           // picks the source default (REST API for fortimanager / fortigate)
           // unless an operator overrides per-asset on the Monitoring tab.

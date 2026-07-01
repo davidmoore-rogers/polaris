@@ -873,6 +873,11 @@ export interface DiscoveredDevice {
     priority?: number;
     isPrimary: boolean;
   }>;
+  // True when this device was OFFLINE in FMG (conn_status !== 1) and its config
+  // was read from FMG's cached CMDB rather than a live query. Config-only: the
+  // sync must NOT advance Asset.lastSeen or resurrect a decommissioned firewall
+  // from an offline read (business rule #12 — lastSeen = verified presence).
+  offline?: boolean;
 }
 
 export interface DiscoveredInterfaceIp {
@@ -1580,9 +1585,17 @@ export async function discoverDhcpSubnets(
     const deviceName: string = rawDevice.name || rawDevice.hostname;
     if (!deviceName) return null;
 
-    if (rawDevice.conn_status !== undefined && rawDevice.conn_status !== 1) {
-      log("discover.device.skip", "info", `Skipping ${deviceName} — not connected to FortiManager (conn_status=${rawDevice.conn_status})`);
-      return null;
+    // Offline in FMG (conn_status !== 1): the device's live-monitor queries
+    // (/sys/proxy/json → /api/v2/monitor/*) will fail, but FMG still holds a
+    // cached copy of its config in CMDB (/pm/config/device/<name>/...) that
+    // reads fine offline. Instead of skipping the device entirely, we pull the
+    // CMDB config-derived IP info (subnets, static reservations, interface IPs,
+    // VIPs) and skip only the live-monitor blocks. Config-only: an offline pull
+    // must never advance lastSeen or drive decommission (see the `offline`
+    // guards below + the flag-force before this function returns).
+    const offline = rawDevice.conn_status !== undefined && rawDevice.conn_status !== 1;
+    if (offline) {
+      log("discover.device.offline", "info", `${deviceName} is offline in FortiManager (conn_status=${rawDevice.conn_status}) — pulling cached CMDB config only (no live leases/inventory/switch/AP/ARP)`, deviceName);
     }
     if (signal?.aborted) return null;
 
@@ -1595,7 +1608,11 @@ export async function discoverDhcpSubnets(
     // we can't reach). All discovery steps are handled by
     // fortigateService.discoverDhcpSubnets so there's a single source of truth
     // for the FortiGate-side discovery shape.
-    if (!useProxy) {
+    //
+    // Offline gates skip this branch even in direct mode: the device is
+    // unreachable at its mgmt IP, so we fall through to the FMG-native CMDB
+    // path below (FMG's cache is the only available source of its config).
+    if (!useProxy && !offline) {
       if (!config.fortigateApiToken) {
         log("discover.device.skip", "error", `Skipping ${deviceName} — direct mode requires "FortiGate API Token" to be set on the integration`, deviceName);
         return null;
@@ -1781,6 +1798,7 @@ export async function discoverDhcpSubnets(
       ...(fmgHa.haMembers.length > 0
         ? { haMode: fmgHa.haMode, haMembers: fmgHa.haMembers }
         : { haMode: "standalone" as const }),
+      ...(offline ? { offline: true } : {}),
     };
     if (fmgHa.haMembers.length > 0) {
       log("discover.ha", "info", `${deviceName}: HA cluster from FMG — mode=${fmgHa.haMode}, ${fmgHa.haMembers.length} member(s)`, deviceName);
@@ -1916,8 +1934,9 @@ export async function discoverDhcpSubnets(
       log("discover.dhcp", "error", `${deviceName}: Failed to query DHCP server config — ${err.message || "Unknown error"}`, deviceName);
     }
 
-    // Step 3a: Live DHCP monitor — replaces config-based reservation fallback if successful
-    try {
+    // Step 3a: Live DHCP monitor — replaces config-based reservation fallback if successful.
+    // Skipped for offline gates (device unreachable → /sys/proxy/json fails).
+    if (!offline) try {
       const leasePayload: JsonRpcRequest = {
         id: 4,
         method: "exec",
@@ -2066,8 +2085,8 @@ export async function discoverDhcpSubnets(
       log("discover.interfaces", "error", `${deviceName}: Failed to query interfaces — ${err.message || "Unknown error"}`, deviceName);
     }
 
-    // Step 3b: Device inventory
-    try {
+    // Step 3b: Device inventory. Skipped for offline gates (live monitor query).
+    if (!offline) try {
       const inventoryPayload: JsonRpcRequest = {
         id: 5,
         method: "exec",
@@ -2118,8 +2137,11 @@ export async function discoverDhcpSubnets(
       log("discover.inventory", "error", `${deviceName}: Failed to query device inventory — ${err.message || "Unknown error"}`, deviceName);
     }
 
-    // Step 3c: Managed FortiSwitches
-    try {
+    // Step 3c: Managed FortiSwitches (live status). Skipped for offline gates —
+    // this whole block, including the nested /sys/proxy/json CMDB-uplink read,
+    // requires the device to be reachable. The native CMDB switch roster in
+    // Step 3c.5 below still runs offline (decommission protection only).
+    if (!offline) try {
       const switchPayload: JsonRpcRequest = {
         id: 8,
         method: "exec",
@@ -2239,8 +2261,9 @@ export async function discoverDhcpSubnets(
       log("discover.fortiswitches.cmdb", "info", `${deviceName}: CMDB managed-switch roster lookup skipped — ${err.message || "Unknown error"}`, deviceName);
     }
 
-    // Step 3d: Managed FortiAPs
-    try {
+    // Step 3d: Managed FortiAPs (live status). Skipped for offline gates; the
+    // native CMDB AP roster in Step 3d.4 below still runs offline.
+    if (!offline) try {
       const apPayload: JsonRpcRequest = {
         id: 9,
         method: "exec",
@@ -2317,7 +2340,8 @@ export async function discoverDhcpSubnets(
     // Pulls all switch port MAC learnings in one shot and matches each AP's base_mac
     // to its switch + port. APs not seen on any managed switch stay un-peered and
     // will render as hanging off the FortiGate directly in the topology graph.
-    try {
+    // Skipped for offline gates (live monitor query).
+    if (!offline) try {
       const detectedPayload: JsonRpcRequest = {
         id: 12,
         method: "exec",
@@ -2428,7 +2452,8 @@ export async function discoverDhcpSubnets(
     // detected-device tells us "MAC X is on FortiSwitch Y / port Z," ARP
     // tells us "MAC X has IP A right now." Together they let the sync
     // pipeline enrich existing endpoint assets with both location + IP.
-    try {
+    // Skipped for offline gates (live monitor query).
+    if (!offline) try {
       const arpPayload: JsonRpcRequest = {
         id: 14,
         method: "exec",
@@ -2568,6 +2593,23 @@ export async function discoverDhcpSubnets(
         const iface = macToIface.get(norm);
         if (iface) inv.interfaceName = iface;
       }
+    }
+
+    // Offline gates: the CMDB steps above set didDhcpReservationsQuery /
+    // didVipQuery true, but an offline device's cache may predate operator
+    // changes (a VIP/reservation added after it went offline won't be in the
+    // cache). Force every "did-query" flag false so the offline pull is purely
+    // additive/refresh — it can create/refresh rows but can NEVER drive a
+    // release or decommission in the sync's Phase 2b / Phase 5b sweeps.
+    // cmdbSwitchSerials/cmdbApSerials stay populated — they only protect
+    // configured-but-offline switches/APs from decommission, never trigger it.
+    if (offline) {
+      didInventory = false;
+      didSwitchQuery = false;
+      didApQuery = false;
+      didVipQuery = false;
+      didDhcpReservationsQuery = false;
+      didDhcpLeasesQuery = false;
     }
 
     return { device: localDevice, subnets: localSubnets, interfaceIps: localInterfaceIps, dhcpEntries: localDhcpEntries, deviceInventory: localInventory, didInventory, fortiSwitches: localSwitches, fortiAps: localAps, vips: localVips, switchMacTable: localSwitchMacTable, arpTable: localArpTable, cmdbSwitchSerials: localCmdbSwitchSerials, cmdbApSerials: localCmdbApSerials, didSwitchQuery, didApQuery, didVipQuery, didDhcpReservationsQuery, didDhcpLeasesQuery };
@@ -2715,9 +2757,8 @@ export async function discoverDhcpSubnets(
       if (signal?.aborted) return;
       const raw = devicesByName.get(key);
       if (!raw) continue; // defensive — populated synchronously above
-      // Respect FMG's view of online/offline — if FMG says the device is
-      // disconnected, processDevice's standard skip log fires anyway, but
-      // there's no value in attempting the direct call.
+      // If FMG says the device is disconnected, processDevice skips the direct
+      // call and pulls its cached CMDB config from FMG instead (config-only).
       await dispatchDevice(raw);
       dispatched++;
     }
@@ -2782,8 +2823,9 @@ export async function discoverDhcpSubnets(
           log("discover.mgmtip.pre", "error", `${name}: Failed to resolve management IP — ${err.message || "Unknown error"}`, name);
         }
       }
-      // Dispatch disconnected devices and resolve-failures too, so
-      // processDevice emits its standard skip log for each.
+      // Dispatch disconnected devices and resolve-failures too: disconnected
+      // devices get their cached CMDB config pulled from FMG (no mgmt-IP resolve
+      // needed); resolve-failures emit processDevice's standard error.
       await dispatchDevice(raw);
     }
     if (connectedVerifyCount > 0) {

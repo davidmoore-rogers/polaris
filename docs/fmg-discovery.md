@@ -41,20 +41,32 @@ FMG Integration Discovery
 │
 ├─ Per-FortiGate work (parallel up to discoveryParallelism)
 │   │
-│   ├─ CMDB queries — ALWAYS native FMG, never proxied
-│   │     - system/global             (geo coords, hostname)
-│   │     - vdom/root/system/dhcp/server  (configured DHCP scopes)
-│   │     - global/switch-controller/managed-switch  (CMDB switch roster)
-│   │     - vdom/root/wireless-controller/wtp        (CMDB AP roster)
-│   │     - global/system/interface  (interface CMDB; mgmt-IP resolution)
+│   ├─ conn_status !== 1 (OFFLINE in FMG)?
+│   │     → CMDB-only pull: run the native-FMG CMDB queries below (FMG serves
+│   │       the device's cached config even while it's offline) and SKIP every
+│   │       live-monitor query (the device is unreachable). Config-only —
+│   │       does NOT advance the firewall's lastSeen, does NOT resurrect a
+│   │       decommissioned firewall, and every did*Query flag is forced false
+│   │       so an offline gate's cached config can never drive a stale-row
+│   │       release/decommission (purely additive/refresh). Works in direct
+│   │       mode too: an offline gate skips the direct call and reads FMG's
+│   │       cache instead.
 │   │
-│   └─ Live monitor — proxy OR direct per "Transport mode" above
+│   ├─ CMDB queries — ALWAYS native FMG, never proxied (work OFFLINE)
+│   │     - system/global             (geo coords, hostname)
+│   │     - vdom/root/system/dhcp/server  (configured DHCP scopes + static reservations)
+│   │     - vdom/root/system/interface / global/system/interface  (interface IPs, mgmt-IP resolution)
+│   │     - firewall/vip                                 (VIPs)
+│   │     - global/switch-controller/managed-switch      (CMDB switch roster)
+│   │     - vdom/root/wireless-controller/wtp            (CMDB AP roster)
+│   │
+│   └─ Live monitor — proxy OR direct per "Transport mode" above (SKIPPED when offline)
 │         - system/dhcp                              (active leases)
 │         - network/arp                              (IP↔MAC bindings)
 │         - switch-controller/managed-switch/status  (live switch status)
 │         - wifi/managed_ap                          (live AP status + LLDP[] + mesh)
 │         - switch-controller/detected-device        (endpoint MAC table)
-│         - firewall/vip                             (VIPs)
+│         - user/device/query                        (device inventory / endpoints)
 │
 ├─ DHCP scope sync per FortiGate
 │   ├─ dhcpInclude / dhcpExclude filter  (scope name or numeric ID)
