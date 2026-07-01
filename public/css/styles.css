@@ -2407,7 +2407,9 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   padding: 12px 14px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--color-bg-elevated, rgba(255,255,255,0.02));
+  /* Explicit faint overlay (not --color-bg-elevated) so this asset-modal
+     dependency card keeps its pre-token subtle look over the navy slide-over. */
+  background: rgba(255,255,255,0.02);
 }
 .dep-tree-header {
   font-size: 0.78rem;

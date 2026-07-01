@@ -4408,7 +4408,7 @@ function assetSystemViewHTML(a) {
   return (
     '<div data-shot-section="cpuMemory" data-shot-label="CPU &amp; Memory" data-shot-chart="assetSystem">' +
     sectionHeader("CPU &amp; Memory", telemetryBadgeFull, true) +
-    '<div id="asset-system-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
+    '<div id="asset-system-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
       '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="asset-system-from" class="form-input" style="padding:2px 6px"></label>' +
       '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="asset-system-to" class="form-input" style="padding:2px 6px"></label>' +
       '<button class="btn btn-sm btn-primary" id="btn-asset-system-custom-apply">Apply</button>' +
@@ -4416,7 +4416,7 @@ function assetSystemViewHTML(a) {
     '<div id="asset-system-summary" style="display:flex;gap:1.25rem;flex-wrap:wrap;font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem">' +
       '<span>Loading…</span>' +
     '</div>' +
-    '<div id="asset-system-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
+    '<div id="asset-system-chart" style="background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
       'Loading samples…' +
     '</div>' +
     '</div>' +
@@ -4426,7 +4426,7 @@ function assetSystemViewHTML(a) {
     (a.assetType === "firewall"
       ? '<div id="asset-system-sessions-section" data-shot-section="sessions" data-shot-label="Active Sessions" data-shot-chart="assetSystem" style="display:none">' +
           sectionHeader("Active Sessions", telemetryBadgeFull, false) +
-          '<div id="asset-system-sessions-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
+          '<div id="asset-system-sessions-chart" style="background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
             'Loading samples…' +
           '</div>' +
         '</div>'
@@ -5934,7 +5934,7 @@ async function openSensorDetailPanel(asset, sensorName) {
     { value: "custom", label: "Custom…", id: "btn-sensor-custom" },
   ], "assetSensor", "1h");
   var customPanel =
-    '<div id="sensor-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
+    '<div id="sensor-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
       '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="sensor-custom-from" class="form-input" style="padding:2px 6px"></label>' +
       '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="sensor-custom-to" class="form-input" style="padding:2px 6px"></label>' +
       '<button class="btn btn-sm btn-primary" id="btn-sensor-custom-apply">Apply</button>' +
@@ -5960,7 +5960,7 @@ async function openSensorDetailPanel(asset, sensorName) {
     '</div>';
   var box = document.getElementById("sensor-chart");
   if (box) {
-    box.style.background = "var(--color-bg-elevated)";
+    box.style.background = "var(--color-bg-primary)";
     box.style.border = "1px solid var(--color-border)";
     box.style.borderRadius = "6px";
     box.style.padding = "0.5rem";
@@ -6328,8 +6328,8 @@ function _captureChartAsPng(container, meta, callback) {
     return v || fallback;
   };
   // Background matches the page so the screenshot blends with the live UI.
-  // (`--color-bg-elevated` was used previously but isn't defined in the CSS,
-  // so it always fell back to white regardless of theme.)
+  // Uses --color-bg-primary — the same token the chart panels and the
+  // slide-over surface render, so the capture matches what's on screen.
   var bgPrimary  = pickVar("--color-bg-primary", "#ffffff");
   var accent     = pickVar("--color-accent", "#4fc3f7");
   var textSec    = pickVar("--color-text-secondary", "#666666");
@@ -7268,7 +7268,7 @@ function _streamSourceBadgeHTML(asset, stream) {
   var intervalSeconds = (intervalAssetField && asset[intervalAssetField] != null) ? asset[intervalAssetField] : null;
   var label = _streamBadgeText(asset, stream, resolvedRaw, null, intervalSeconds);
   var titleLabel = "Polling method · Where this setting comes from";
-  return '<span class="asset-stream-source-badge" data-asset-id="' + escapeHtml(asset.id) + '" data-stream="' + escapeHtml(stream) + '" title="' + escapeHtml(titleLabel) + '" style="font-size:0.75rem;padding:2px 6px;border-radius:10px;background:var(--color-bg-elevated);border:1px solid var(--color-border);color:var(--color-text-secondary);white-space:nowrap">' +
+  return '<span class="asset-stream-source-badge" data-asset-id="' + escapeHtml(asset.id) + '" data-stream="' + escapeHtml(stream) + '" title="' + escapeHtml(titleLabel) + '" style="font-size:0.75rem;padding:2px 6px;border-radius:10px;background:var(--color-bg-primary);border:1px solid var(--color-border);color:var(--color-text-secondary);white-space:nowrap">' +
     escapeHtml(label) +
   '</span>';
 }
@@ -7409,7 +7409,7 @@ function assetMonitoringViewHTML(a) {
       { value: "custom", label: "Custom…", id: "btn-asset-monitor-custom" },
     ], "assetMonitor", "24h");
   var customPanel =
-    '<div id="asset-monitor-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
+    '<div id="asset-monitor-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
       '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="asset-monitor-from" class="form-input" style="padding:2px 6px"></label>' +
       '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="asset-monitor-to" class="form-input" style="padding:2px 6px"></label>' +
       '<button class="btn btn-sm btn-primary" id="btn-asset-monitor-custom-apply">Apply</button>' +
@@ -7475,7 +7475,7 @@ function assetMonitoringViewHTML(a) {
     '</div>' +
     customPanel +
     '<div id="asset-monitor-stats" style="display:flex;gap:1.25rem;flex-wrap:wrap;font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:0.5rem"></div>' +
-    '<div id="asset-monitor-chart" style="background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
+    '<div id="asset-monitor-chart" style="background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;min-height:200px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">' +
       'Loading samples…' +
     '</div>' +
     '</div>'
@@ -7565,7 +7565,7 @@ async function _renderIntermittencyBar(assetId) {
     return '<div title="' + escapeHtml(ts + " · " + st.status) + '" style="flex:1;background:' + color + '"></div>';
   }).join("");
   slot.innerHTML =
-    '<div style="display:flex;height:14px;width:100%;border:1px solid var(--color-border);border-radius:3px;overflow:hidden;gap:1px;background:var(--color-bg-elevated)">' +
+    '<div style="display:flex;height:14px;width:100%;border:1px solid var(--color-border);border-radius:3px;overflow:hidden;gap:1px;background:var(--color-bg-primary)">' +
       cellHTML +
     '</div>' +
     '<div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--color-text-tertiary);margin-top:2px">' +
@@ -8059,7 +8059,7 @@ async function openInterfaceDetailPanel(asset, ifName, ifaceRow) {
     { value: "custom", label: "Custom…", id: "btn-iface-custom" },
   ], "assetInterface", "1h");
   var ifaceCustomPanel =
-    '<div id="iface-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
+    '<div id="iface-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
       '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="iface-custom-from" class="form-input" style="padding:2px 6px"></label>' +
       '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="iface-custom-to" class="form-input" style="padding:2px 6px"></label>' +
       '<button class="btn btn-sm btn-primary" id="btn-iface-custom-apply">Apply</button>' +
@@ -8075,7 +8075,7 @@ async function openInterfaceDetailPanel(asset, ifName, ifaceRow) {
         '</div>' +
         '<textarea id="iface-comment-input" rows="2" maxlength="255" placeholder="' +
           (canEditComment ? 'Add a comment for this interface (max 255 chars). Polaris-local — not pushed to the device.' : 'Read-only — requires Assets Admin to edit.') +
-          '" style="width:100%;box-sizing:border-box;padding:0.4rem 0.5rem;font-size:0.85rem;font-family:inherit;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;color:var(--color-text);resize:vertical"' +
+          '" style="width:100%;box-sizing:border-box;padding:0.4rem 0.5rem;font-size:0.85rem;font-family:inherit;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;color:var(--color-text);resize:vertical"' +
           (canEditComment ? '' : ' disabled') +
           '></textarea>' +
         '<div id="iface-comment-source" style="margin-top:0.25rem;font-size:0.75rem;color:var(--color-text-secondary)"></div>' +
@@ -8104,7 +8104,7 @@ async function openInterfaceDetailPanel(asset, ifName, ifaceRow) {
       '<div id="iface-err-chart" class="iface-chart-box"></div>' +
     '</div>';
   document.querySelectorAll(".iface-chart-box").forEach(function (el) {
-    el.style.background = "var(--color-bg-elevated)";
+    el.style.background = "var(--color-bg-primary)";
     el.style.border = "1px solid var(--color-border)";
     el.style.borderRadius = "6px";
     el.style.padding = "0.5rem";
@@ -8487,7 +8487,7 @@ function _ifaceVlanBlockHTML(iface) {
   } else {
     taggedBit = "";
   }
-  return '<div style="margin-bottom:0.75rem;padding:0.5rem 0.65rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px">' +
+  return '<div style="margin-bottom:0.75rem;padding:0.5rem 0.65rem;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px">' +
     '<div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:0.25rem">' +
       '<span style="font-size:0.8rem;font-weight:600;color:var(--color-text-secondary)">VLAN</span>' +
       '<span style="font-size:0.7rem;padding:1px 5px;border-radius:3px;background:#0d948818;color:#0d9488;border:1px solid #0d948830">' + escapeHtml(role) + '</span>' +
@@ -8515,7 +8515,7 @@ function _renderIfaceLldpBlock(neighbors) {
   neighbors.forEach(function (n) {
     var inferred = n.source === "peer-inferred";
     var inferredTitle = "Inferred from peer's reported uplink (no direct LLDP from this device)";
-    var cardStyle = "background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem 0.6rem";
+    var cardStyle = "background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem 0.6rem";
     if (inferred) cardStyle += ";font-style:italic";
     var cardTitle = inferred ? ' title="' + escapeHtml(inferredTitle) + '"' : "";
     var label = n.systemName || n.chassisId || n.managementIp || "Unknown neighbor";
@@ -8827,7 +8827,7 @@ async function openIpsecTunnelDetailPanel(asset, tunnelName) {
     { value: "custom", label: "Custom…", id: "btn-ipsec-custom" },
   ], "assetIpsec", "1h");
   var ipsecCustomPanel =
-    '<div id="ipsec-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
+    '<div id="ipsec-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
       '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="ipsec-custom-from" class="form-input" style="padding:2px 6px"></label>' +
       '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="ipsec-custom-to" class="form-input" style="padding:2px 6px"></label>' +
       '<button class="btn btn-sm btn-primary" id="btn-ipsec-custom-apply">Apply</button>' +
@@ -8858,7 +8858,7 @@ async function openIpsecTunnelDetailPanel(asset, tunnelName) {
       '<div id="ipsec-out-chart" class="ipsec-chart-box"></div>' +
     '</div>';
   document.querySelectorAll(".ipsec-chart-box").forEach(function (el) {
-    el.style.background = "var(--color-bg-elevated)";
+    el.style.background = "var(--color-bg-primary)";
     el.style.border = "1px solid var(--color-border)";
     el.style.borderRadius = "6px";
     el.style.padding = "0.5rem";
@@ -9263,7 +9263,7 @@ function _sdwanMembersTableHTML(members) {
       return '<span title="' + escapeHtml(h.healthCheck) +
         ' · jitter ' + (typeof h.jitterMs === "number" ? (Math.round(h.jitterMs * 100) / 100) + "ms" : "—") +
         ' · loss ' + (typeof h.packetLoss === "number" ? h.packetLoss + "%" : "—") +
-        '" style="display:inline-block;margin:0 4px 2px 0;padding:1px 6px;border-radius:10px;font-size:0.74rem;background:var(--color-bg-elevated);border:1px solid var(--color-border)">' +
+        '" style="display:inline-block;margin:0 4px 2px 0;padding:1px 6px;border-radius:10px;font-size:0.74rem;background:var(--color-bg-primary);border:1px solid var(--color-border)">' +
         '<span style="color:' + c + '">●</span> ' + escapeHtml(h.healthCheck) + ' ' + lat + '</span>';
     }).join("") || '<span style="color:var(--color-text-tertiary)">—</span>';
     var link = m.linkUp == null
@@ -9290,7 +9290,7 @@ function _sdwanMembersTableHTML(members) {
   // (which keys off data-col-id cells) leaves it untouched.
   function zoneHeader(label) {
     return '<tr class="sdwan-zone-header"><td colspan="6" style="padding:5px 8px;font-weight:600;' +
-      'background:var(--color-bg-elevated);color:var(--color-text-secondary)">▸ ' + escapeHtml(label) + '</td></tr>';
+      'background:var(--color-bg-primary);color:var(--color-text-secondary)">▸ ' + escapeHtml(label) + '</td></tr>';
   }
   var rows;
   if (!members.some(function (m) { return m.zone; })) {
@@ -9363,7 +9363,7 @@ function _assetSdwanTabHTML(a, rules, links, members) {
         return '<span style="display:inline-block;margin:0 4px 2px 0;padding:1px 7px;border-radius:10px;font-size:0.76rem;' +
           (sel
             ? 'background:' + _sdwanMemberColor(m, avail) + ';color:#fff;font-weight:600'
-            : 'background:var(--color-bg-elevated);border:1px solid var(--color-border);color:var(--color-text-secondary)') +
+            : 'background:var(--color-bg-primary);border:1px solid var(--color-border);color:var(--color-text-secondary)') +
           '">' + escapeHtml(m) + (sel ? ' ✓' : '') + '</span>';
       }
       var pills;
@@ -9498,7 +9498,7 @@ function _wireSdwanTab(a, rules, links) {
   _updateStreamSourceBadgesFromEffective(a.id, a);
   // Style chart boxes (same treatment as the IPsec panel).
   document.querySelectorAll(".sdwan-chart-box").forEach(function (el) {
-    el.style.background = "var(--color-bg-elevated)";
+    el.style.background = "var(--color-bg-primary)";
     el.style.border = "1px solid var(--color-border)";
     el.style.borderRadius = "6px";
     el.style.padding = "0.5rem";
@@ -9826,7 +9826,7 @@ async function openStorageDetailPanel(asset, focusMountPath, storage) {
     { value: "custom", label: "Custom…", id: "btn-storage-custom" },
   ], "assetStorage", "24h");
   var storageCustomPanel =
-    '<div id="storage-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
+    '<div id="storage-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
       '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="storage-custom-from" class="form-input" style="padding:2px 6px"></label>' +
       '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="storage-custom-to" class="form-input" style="padding:2px 6px"></label>' +
       '<button class="btn btn-sm btn-primary" id="btn-storage-custom-apply">Apply</button>' +
@@ -9875,7 +9875,7 @@ async function openStorageDetailPanel(asset, focusMountPath, storage) {
       sectionsHtml +
     '</div>';
   document.querySelectorAll(".storage-chart-box").forEach(function (el) {
-    el.style.background = "var(--color-bg-elevated)";
+    el.style.background = "var(--color-bg-primary)";
     el.style.border = "1px solid var(--color-border)";
     el.style.borderRadius = "6px";
     el.style.padding = "0.5rem";
@@ -13476,11 +13476,11 @@ async function openProcessDetailPanel(asset, name, cfg, procRow, isPinned) {
           (canEdit ? '<button class="btn btn-sm btn-primary" id="btn-proc-log-config-save">Save</button>' : '') +
         '</div>' +
         (c.detectedUnit ? '<p class="hint" style="font-size:0.74rem">Auto-detected unit: <code>' + escapeHtml(c.detectedUnit) + '</code></p>' : '') +
-        '<div id="proc-logs-view" style="max-height:300px;overflow:auto;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;font-family:var(--font-mono);font-size:0.78rem;white-space:pre-wrap;color:var(--color-text-secondary)">Loading…</div>' +
+        '<div id="proc-logs-view" style="max-height:300px;overflow:auto;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;padding:0.5rem;font-family:var(--font-mono);font-size:0.78rem;white-space:pre-wrap;color:var(--color-text-secondary)">Loading…</div>' +
       '</div>' +
     '</div>';
   document.querySelectorAll(".proc-chart-box").forEach(function (el) {
-    el.style.background = "var(--color-bg-elevated)";
+    el.style.background = "var(--color-bg-primary)";
     el.style.border = "1px solid var(--color-border)";
     el.style.borderRadius = "6px";
     el.style.padding = "0.5rem";

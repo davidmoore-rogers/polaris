@@ -383,7 +383,7 @@ async function openComparePanel(opts) {
     { value: "custom", label: "Custom…", id: "cmp-range-custom" },
   ], "assetCompare", "24h");
   var customPanel =
-    '<div id="cmp-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
+    '<div id="cmp-custom-panel" style="display:none;align-items:center;gap:6px;margin:0.5rem 0;padding:0.5rem;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;font-size:0.85rem">' +
       '<label style="display:flex;align-items:center;gap:4px">From <input type="datetime-local" id="cmp-custom-from" class="form-input" style="padding:2px 6px"></label>' +
       '<label style="display:flex;align-items:center;gap:4px">To <input type="datetime-local" id="cmp-custom-to" class="form-input" style="padding:2px 6px"></label>' +
       '<button class="btn btn-sm btn-primary" id="cmp-custom-apply">Apply</button>' +
@@ -663,7 +663,7 @@ async function _cmpReload() {
   }
   // Skeleton cards first so the panel feels responsive while fetches run.
   chartsEl.innerHTML = specs.map(function (sp) {
-    return '<div class="cmp-card" style="margin-bottom:1.25rem;background:var(--color-bg-elevated);border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
+    return '<div class="cmp-card" style="margin-bottom:1.25rem;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
       '<div style="font-weight:600;margin-bottom:0.25rem">' + escapeHtml(sp.title) + '</div>' +
       '<div class="cmp-legend" style="display:flex;flex-wrap:wrap;gap:0.4rem 1rem;font-size:0.78rem;margin-bottom:0.4rem"></div>' +
       '<div class="cmp-chart" style="min-height:220px;display:flex;align-items:center;justify-content:center;color:var(--color-text-secondary);font-size:0.85rem">Loading…</div>' +
