@@ -95,21 +95,12 @@
           </div>
         </div>
 
-        <!-- Always-visible selection bar: idle/greyed until rows are selected,
-             then accent outline + enabled actions (same as Assets / Notifications). -->
-        <div id="subnets-bulk-bar" class="bulk-bar bulk-bar-idle">
-          <span class="bulk-bar-count">No networks selected</span>
-          <button class="btn btn-sm btn-secondary" id="subnets-bulk-edit-btn" disabled>Edit Selected</button>
-          <button class="btn btn-sm btn-danger" id="subnets-bulk-delete-btn" disabled>Delete Selected</button>
-        </div>
-
         <div id="pagination-top" style="display:flex;align-items:center;gap:12px;justify-content:center;padding:0.5rem 0 1rem"></div>
 
         <div class="table-wrapper">
           <table>
             <thead>
               <tr>
-                <th class="cb-col"><input type="checkbox" id="subnets-select-all" title="Select all on this page"></th>
                 <th class="fav-col" title="Favorites pin to the top"></th>
                 <th data-sf-key="name" data-sf-type="string">Name</th>
                 <th data-sf-key="cidr" data-sf-type="ip">Network</th>
@@ -122,6 +113,7 @@
                 <th data-sf-key="_integration" data-sf-type="string" data-sf-options="">Integration</th>
                 <th data-sf-key="createdBy" data-sf-type="string" data-sf-options="">Creator</th>
                 <th style="width:120px" data-col-no-resize="true" data-sf-key="_count.reservations" data-sf-type="number">Reservations</th>
+                <th style="width:90px" data-col-id="actions" data-col-required="true">Actions</th>
               </tr>
             </thead>
             <tbody id="subnets-tbody">
