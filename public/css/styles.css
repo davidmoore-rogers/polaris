@@ -4,6 +4,11 @@
   --color-bg-secondary: #0d0d1a;
   --color-bg-tertiary: #111122;
   --color-surface: #1e1e36;
+  /* One step lighter than --color-surface: floating surfaces (popovers,
+     dropdowns, map/leaflet tooltips) and row hover highlights. Previously
+     undefined — references fell back to a hardcoded grey (#1c1f24) or, where
+     no fallback was given (dashboard hover states), silently did nothing. */
+  --color-bg-elevated: #26264a;
   --color-border: #252540;
   --color-border-light: #1e1e36;
   --color-text-primary: #e6e6e6;
@@ -32,6 +37,7 @@
   --color-bg-secondary: #e8e9f0;
   --color-bg-tertiary: #edeef4;
   --color-surface: #ffffff;
+  --color-bg-elevated: #eceef4;
   --color-border: #d0d1dc;
   --color-border-light: #e2e3ec;
   --color-text-primary: #1a1a2e;
@@ -3736,7 +3742,10 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 
 .dashboard-widget {
   position: relative;
-  background: var(--color-bg-elevated, #1c1f24);
+  /* Match the Assets table surface (.table-wrapper) so cards stay uniform
+     across the app; --color-bg-elevated was never defined and fell back to a
+     grey (#1c1f24) that didn't match the navy table. */
+  background: var(--color-bg-primary);
   border: 1px solid var(--color-border, rgba(255,255,255,0.08));
   border-radius: 6px;
   padding: 14px 16px 16px;
