@@ -168,6 +168,96 @@ export async function getDownNodes(limit = 100, assetIds: string[] | null = null
   return { nodes, total: nodes.length };
 }
 
+export interface DownInterface {
+  assetId: string;
+  hostname: string | null;
+  ipAddress: string | null;
+  assetType: string;
+  ifName: string;
+  ifLabel: string | null;
+  gate: string;
+  lastUpAt: Date | null;
+}
+
+/**
+ * The "gate" an interface lives on. For a FortiGate firewall the interface is
+ * physically on the device itself → its hostname. For a managed FortiSwitch /
+ * FortiAP (and other discovered gear) `learnedLocation` carries the parent
+ * FortiGate device name — the same field the Down Nodes site grouping surfaces
+ * as the gate. Fall back to the remaining site fields, then "(unknown)".
+ */
+function gateOf(a: { assetType: string; hostname: string | null; learnedLocation: string | null; location: string | null; snmpLocation: string | null }): string {
+  if (a.assetType === "firewall") return a.hostname || a.learnedLocation || a.location || a.snmpLocation || "(unknown)";
+  return a.learnedLocation || a.hostname || a.location || a.snmpLocation || "(unknown)";
+}
+
+/**
+ * Feed 2b — down interfaces. Interfaces that are administratively UP but
+ * operationally DOWN (a real link fault, not an operator-disabled port),
+ * grouped by the gate they live on. Two queries, flat at 2000 assets:
+ *   1. ONE windowed single-pass CTE over asset_interface_samples: latest sample
+ *      per (asset, ifName) via row_number(), plus each interface's last "up"
+ *      timestamp via a filtered window aggregate (for the "down for" duration).
+ *      The time window keeps the hypertable scan inside recent (chunk-excluded)
+ *      data; interface samples only exist for interface-polled assets (a
+ *      network-gear subset), so the scan stays small. The 4h default window
+ *      comfortably contains the latest full interface scrape at the default
+ *      600s systemInfo cadence even when an operator slows it.
+ *   2. ONE findMany over the (small) set of assets that own a down interface,
+ *      scoped to monitored + non-suppressed — an interface whose owning asset
+ *      is unmonitored / suppressed / decommissioned drops out here (those assets
+ *      stop being monitored, so only stale samples linger).
+ */
+export async function getDownInterfaces(limit = 100, sinceMinutes = 240, assetIds: string[] | null = null): Promise<DownInterface[]> {
+  const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
+  const params: unknown[] = [String(sinceMinutes), limit];
+  if (assetIds) params.push(assetIds);
+  const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; ifName: string; ifLabel: string | null; lastUpAt: Date | null }>>(
+    `WITH win AS (
+       SELECT s."assetId" AS "assetId", s."ifName" AS "ifName",
+              COALESCE(NULLIF(s."alias", ''), NULLIF(s."description", '')) AS "ifLabel",
+              s."operStatus" AS "operStatus", s."adminStatus" AS "adminStatus",
+              row_number() OVER (PARTITION BY s."assetId", s."ifName" ORDER BY s."timestamp" DESC) AS rn,
+              max(s."timestamp") FILTER (WHERE s."operStatus" = 'up')
+                OVER (PARTITION BY s."assetId", s."ifName") AS "lastUpAt"
+       FROM "asset_interface_samples" s
+       WHERE s."timestamp" > now() - ($1 || ' minutes')::interval${idClause}
+     )
+     SELECT "assetId", "ifName", "ifLabel", "lastUpAt"
+     FROM win
+     WHERE rn = 1 AND "operStatus" = 'down' AND "adminStatus" = 'up'
+     ORDER BY "lastUpAt" ASC NULLS FIRST
+     LIMIT $2`,
+    ...params,
+  );
+  if (rows.length === 0) return [];
+  const ids = Array.from(new Set(rows.map((r) => r.assetId)));
+  const assets = await prisma.asset.findMany({
+    where: { id: { in: ids }, monitored: true, dependencySuppressed: false },
+    select: {
+      id: true, hostname: true, ipAddress: true, assetType: true,
+      location: true, learnedLocation: true, snmpLocation: true,
+    },
+  });
+  const byId = new Map(assets.map((a) => [a.id, a]));
+  const out: DownInterface[] = [];
+  for (const r of rows) {
+    const a = byId.get(r.assetId);
+    if (!a) continue;
+    out.push({
+      assetId: a.id,
+      hostname: a.hostname,
+      ipAddress: a.ipAddress,
+      assetType: a.assetType,
+      ifName: r.ifName,
+      ifLabel: r.ifLabel,
+      gate: gateOf(a),
+      lastUpAt: r.lastUpAt,
+    });
+  }
+  return out;
+}
+
 export interface TopNRow { id: string; hostname: string | null; ipAddress: string | null; value: number; detail?: string }
 
 // Hydrate a list of assetIds (preserving the incoming order) with display

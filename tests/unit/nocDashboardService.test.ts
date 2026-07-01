@@ -85,6 +85,35 @@ describe("getDownNodes", () => {
   });
 });
 
+describe("getDownInterfaces", () => {
+  it("resolves the gate (firewall→hostname, else learnedLocation), keeps SQL order, drops unmonitored owners", async () => {
+    const t = new Date("2026-06-30T00:00:00Z");
+    rawUnsafe.mockResolvedValueOnce([
+      { assetId: "sw", ifName: "port12", ifLabel: "AP uplink", lastUpAt: t },
+      { assetId: "fw", ifName: "wan2", ifLabel: null, lastUpAt: null },
+      { assetId: "gone", ifName: "port3", ifLabel: null, lastUpAt: t }, // owner not monitored → dropped
+    ]);
+    findMany.mockResolvedValueOnce([
+      { id: "sw", hostname: "fs-aisle-3", ipAddress: "10.1.2.5", assetType: "switch", location: null, learnedLocation: "fgt-plant-a", snmpLocation: null },
+      { id: "fw", hostname: "fgt-dc-west", ipAddress: "10.9.0.1", assetType: "firewall", location: null, learnedLocation: "fmg-01", snmpLocation: null },
+    ]);
+    const r = await noc.getDownInterfaces();
+    expect(r.map((x) => [x.assetId, x.ifName, x.gate])).toEqual([
+      ["sw", "port12", "fgt-plant-a"], // switch → parent learnedLocation
+      ["fw", "wan2", "fgt-dc-west"],   // firewall → own hostname, not learnedLocation
+    ]);
+    expect(r[0].lastUpAt).toBe(t);
+    expect(r[1].ifLabel).toBeNull();
+  });
+
+  it("returns empty without hitting findMany when no interface is down", async () => {
+    rawUnsafe.mockResolvedValueOnce([]);
+    const r = await noc.getDownInterfaces();
+    expect(r).toEqual([]);
+    expect(findMany).not.toHaveBeenCalled();
+  });
+});
+
 describe("getHighestCpu", () => {
   it("preserves the SQL order, rounds to 0.1, and drops ids with no asset row", async () => {
     rawUnsafe.mockResolvedValueOnce([
