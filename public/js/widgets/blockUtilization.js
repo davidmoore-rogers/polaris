@@ -44,8 +44,10 @@
     minSize: { width: 4, height: 1 },
     defaultConfig: { rowLimit: 10, sortBy: "percent" },
 
-    fetchData: function (_config, summary) {
-      return Promise.resolve((summary && summary.blockUtilization) || []);
+    fetchData: function (_config) {
+      return PolarisWidgets.getSummary({ sections: ["blocks"] })
+        .then(function (d) { return (d && d.blockUtilization) || []; })
+        .catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data) {

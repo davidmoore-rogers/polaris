@@ -29,14 +29,15 @@
    * rows     — [{ id, hostname, ipAddress, value }]
    * opts     — { unit:"%"|"ms", thresholds, baseColor, emptyText, config, fillTo }
    *            config: { rowLimit, threshold }
-   *            fillTo: when set (e.g. 20), the row set is "every RED row, but
-   *            always at least `fillTo`". Red = at/above the top color threshold
-   *            (thresholds[0].over). So: redCount ≥ fillTo → show all red (e.g.
-   *            27 red → 27 rows); redCount < fillTo → show the red rows + the
-   *            next-highest to reach `fillTo` (e.g. 10 red → those 10 + 10 more
-   *            = 20). The gear "Hide below" threshold does NOT apply when fillTo
-   *            is set (the red-tier + floor supersedes it). Omit fillTo to leave
-   *            the threshold as a hard filter (e.g. Packet Loss).
+   *            fillTo: red-guarantee mode (Highest CPU/Memory/Disk, Slowest
+   *            Response). The operator's Row limit governs how many rows show
+   *            (top-N by value), EXCEPT that every RED row (at/above the top
+   *            color threshold, thresholds[0].over) is always shown even past
+   *            the limit — an alert must never be clipped away. fillTo is the
+   *            fallback row count when the config carries no usable rowLimit.
+   *            The gear "Hide below" threshold does NOT apply in this mode.
+   *            Omit fillTo to leave the threshold as a hard filter + rowLimit
+   *            as a plain cap (e.g. Packet Loss).
    */
   function renderRows(el, rows, opts) {
     opts = opts || {};
@@ -45,21 +46,20 @@
     var shown;
     if (opts.fillTo) {
       // sorted is desc, so the red rows (≥ the top color threshold) are the
-      // contiguous head — count them, then take max(fillTo, redCount) from the
-      // top: all red when red ≥ fillTo, else red + next-highest up to fillTo.
+      // contiguous head — count them, then take max(rowLimit, redCount) from
+      // the top: the operator's limit of rows, extended when there are more
+      // red rows than the limit holds.
       var redOver = (opts.thresholds && opts.thresholds.length) ? opts.thresholds[0].over : Infinity;
       var redCount = 0;
       while (redCount < sorted.length && (sorted[redCount].value || 0) >= redOver) redCount++;
-      shown = sorted.slice(0, Math.max(opts.fillTo, redCount));
+      var limitN = parseInt(cfg.rowLimit, 10);
+      if (isNaN(limitN) || limitN <= 0) limitN = opts.fillTo;
+      shown = sorted.slice(0, Math.max(limitN, redCount));
     } else if (cfg.threshold != null) {
-      shown = sorted.filter(function (r) { return (r.value || 0) >= cfg.threshold; });
+      shown = PolarisWidgets.clip(sorted.filter(function (r) { return (r.value || 0) >= cfg.threshold; }), cfg.rowLimit);
     } else {
-      shown = sorted;
+      shown = PolarisWidgets.clip(sorted, cfg.rowLimit);
     }
-    // Row-limit cap (defaults to the 1000-row ceiling for these widgets, so the
-    // fixed height 1×/2×/3× + auto-scroll governs what's visible unless the
-    // operator picks a smaller cap).
-    shown = PolarisWidgets.clip(shown, cfg.rowLimit);
     if (!shown.length) {
       el.innerHTML = '<p class="empty-state">' + escapeHtml(opts.emptyText || "Nothing to show") + '</p>';
       return;
@@ -78,12 +78,15 @@
       // Optional secondary label (e.g. the mount path for Highest Disk Usage),
       // shown muted after the hostname in the same cell.
       var detail = r.detail ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">' + escapeHtml(r.detail) + '</span>' : "";
+      // The name cell ellipsizes — a native tooltip carries the full name (and
+      // mount detail when present) for rows the column is too narrow to show.
+      var tip = escapeHtml((r.hostname || r.ipAddress || "(unnamed)") + (r.detail ? " — " + r.detail : ""));
       var label = formatValue(v, opts.unit);
       var tag = r.id ? "a" : "div";
       var nav = r.id ? ' href="/assets.html#view=asset:' + encodeURIComponent(r.id) + '"' : "";
       return "<" + tag + ' class="recent-item' + (r.id ? " recent-item-link" : "") + '"' + nav +
         ' style="display:grid;grid-template-columns:1fr 90px 48px;align-items:center;gap:8px;text-decoration:none">' +
-        '<span class="recent-item-title" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + name + detail + '</span>' +
+        '<span class="recent-item-title" title="' + tip + '" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + name + detail + '</span>' +
         '<div class="util-bar-track"><div class="util-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>' +
         '<span style="font-size:0.82rem;text-align:right;color:var(--color-text-secondary)">' + label + '</span>' +
       "</" + tag + ">";
@@ -97,11 +100,11 @@
    */
   function renderConfig(el, config, onChange, opts) {
     opts = opts || {};
-    // Row-limit control (defaults to the 1000-row ceiling) plus the optional
+    // Row-limit control (defaults to the 20-row NOC view) plus the optional
     // threshold floor.
     var html =
       '<label>Row limit</label>' +
-      '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit == null ? 1000 : config.rowLimit) + '</select>';
+      '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit == null ? 20 : config.rowLimit) + '</select>';
     if (opts.thresholdOptions) {
       html +=
         '<label>' + escapeHtml(opts.thresholdLabel || "Hide below") + '</label>' +

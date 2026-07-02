@@ -32,13 +32,13 @@
     requiredPermission: { key: "events", level: "read" },
 
     fetchData: function (config) {
-      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return PolarisWidgets.clip((d && d.recentReboots) || [], config && config.rowLimit); }).catch(function () { return []; });
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["recentReboots"]).then(function (d) { return PolarisWidgets.clip((d && d.recentReboots) || [], config && config.rowLimit); }).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
       render(el, data);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, PolarisWidgets.clip((d && d.recentReboots) || [], config && config.rowLimit)); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["recentReboots"]).then(function (d) { render(el, PolarisWidgets.clip((d && d.recentReboots) || [], config && config.rowLimit)); }).catch(function () {});
       }, 60000);
       ctx.onUnmount(function () { clearInterval(timer); });
     },

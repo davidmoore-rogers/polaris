@@ -83,7 +83,7 @@
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
-      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return (d && d.sitesWithIssues) || []; }).catch(function () { return []; });
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["sitesWithIssues"]).then(function (d) { return (d && d.sitesWithIssues) || []; }).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
@@ -91,7 +91,7 @@
       render(el, current, config);
       wire(el, function () { return current; }, config);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { current = (d && d.sitesWithIssues) || []; render(el, current, config); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["sitesWithIssues"]).then(function (d) { current = (d && d.sitesWithIssues) || []; render(el, current, config); }).catch(function () {});
       }, 30000);
       ctx.onUnmount(function () { clearInterval(timer); _state.delete(el); });
     },
