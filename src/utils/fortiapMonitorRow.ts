@@ -209,7 +209,13 @@ export function parseFortiapMonitorRow(row: Record<string, unknown>): ParsedFort
     status:     str(row.status) || str(row.state) || "",
     authorizationState: str(row.state).trim(),
     osVersion:  str(row.os_version) || str(row.version) || str(row.firmware_version) || "",
-    ...(lldpExt.lldpUplinkSwitch && lldpExt.lldpUplinkPort
+    // A wireless-mesh leaf's uplink is its mesh parent AP, not a switch — an
+    // LLDP-visible FortiSwitch on a mesh leaf is a switch bridged BEHIND the
+    // AP's LAN port (the inverse direction), so stamping it as peerSwitch
+    // would invert the topology. The bridged switch is still represented via
+    // the AP's persisted lldpNeighbors (the Device Map's wireless-bridge edge
+    // and the dependency tree's bridge-leaf detection consume those).
+    ...(lldpExt.meshUplink !== "mesh" && lldpExt.lldpUplinkSwitch && lldpExt.lldpUplinkPort
       ? { peerSwitch: lldpExt.lldpUplinkSwitch, peerPort: lldpExt.lldpUplinkPort, peerSource: "lldp" as const }
       : {}),
     ...(lldpExt.meshUplink ? { meshUplink: lldpExt.meshUplink } : {}),

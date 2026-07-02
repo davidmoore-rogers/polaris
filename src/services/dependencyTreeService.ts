@@ -157,7 +157,13 @@ export function buildDependencyEdgesFromInputs(
     } else if (a.assetType === "access_point") {
       // Mesh leaf: its switch/FG controller edge is backwards — skip it; the
       // mesh edge (added below) makes it depend on its root AP instead.
+      // Two signals: the station-derived meshLeafSet (root AP lists the leaf
+      // as a client) and FortiOS's own mesh_uplink classification stamped on
+      // fortinetTopology — the latter covers leaves whose root AP has no
+      // station scrape, and pre-mesh-fix rows where parentSwitch still names
+      // the switch bridged BEHIND the leaf.
       if (meshLeafSet.has(a.id)) continue;
+      if (top.meshUplink === "mesh") continue;
       const parentSwitchHost = typeof top.parentSwitch === "string" ? top.parentSwitch.toLowerCase() : null;
       const parentFgHost = typeof top.controllerFortigate === "string" ? top.controllerFortigate.toLowerCase() : null;
       if (parentSwitchHost) {
@@ -601,6 +607,10 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
     const t = a.fortinetTopology as Record<string, unknown> | null;
     return t && typeof t.parentSwitch === "string" ? t.parentSwitch.toLowerCase() : null;
   };
+  const apIsMeshLeaf = (a: typeof inventory[number]) => {
+    const t = a.fortinetTopology as Record<string, unknown> | null;
+    return !!t && t.meshUplink === "mesh";
+  };
   const bridgeLeafSwitchIds = new Set<string>();
   for (const e of lldpEdges) {
     const a = invById.get(e.assetId);
@@ -611,7 +621,10 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
     if (a.assetType === "access_point" && b.assetType === "switch") { ap = a; sw = b; }
     else if (b.assetType === "access_point" && a.assetType === "switch") { ap = b; sw = a; }
     if (!ap || !sw) continue;
-    if (sw.hostname && apParentSwitchOf(ap) === sw.hostname.toLowerCase()) continue; // normal switch→AP uplink
+    // Normal switch→AP uplink — unless the AP is a wireless-mesh leaf, whose
+    // wired LLDP adjacency is always a switch bridged behind it (parentSwitch
+    // on a mesh leaf is the pre-mesh-fix inversion, not a real uplink).
+    if (!apIsMeshLeaf(ap) && sw.hostname && apParentSwitchOf(ap) === sw.hostname.toLowerCase()) continue;
     bridgeLeafSwitchIds.add(sw.id);
   }
 
