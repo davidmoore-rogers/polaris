@@ -67,6 +67,8 @@
   var _dragStashId = null;
   var _dragStashType = null;
   var _placeholder = null;
+  // Tab-reorder drag stash (edit mode): the dashboard id being dragged.
+  var _dragTabId = null;
 
   document.addEventListener("DOMContentLoaded", function () {
     canvasEl     = document.getElementById("dashboard-canvas");
@@ -238,7 +240,9 @@
       var nameHtml = (state.editing && active)
         ? '<input type="text" class="dashboard-tab-name-input" data-name="' + escapeHtml(d.id) + '" value="' + escapeHtml(d.name || "") + '" maxlength="60" size="' + Math.max((d.name || "").length, 8) + '" aria-label="Dashboard name">'
         : '<span class="dashboard-tab-name">' + escapeHtml(d.name || "Untitled") + '</span>';
-      return '<div class="dashboard-tab' + (active ? " active" : "") + '" data-dash="' + escapeHtml(d.id) + '" role="button" tabindex="0">' +
+      // In edit mode tabs are draggable to reorder (drag one left/right onto
+      // another). draggable is off outside edit mode so plain clicks switch.
+      return '<div class="dashboard-tab' + (active ? " active" : "") + '" data-dash="' + escapeHtml(d.id) + '" role="button" tabindex="0"' + (state.editing ? ' draggable="true"' : '') + (state.editing ? ' title="Drag to reorder"' : '') + '>' +
         nameHtml +
         (state.editing && dashes.length > 1 ? '<button type="button" class="dashboard-tab-remove" data-remove="' + escapeHtml(d.id) + '" title="Delete dashboard">&times;</button>' : '') +
       '</div>';
@@ -251,6 +255,34 @@
         switchDashboard(id);
       });
     });
+    // Edit mode: wire drag-to-reorder on each tab. A tab dropped on another
+    // slots before/after it depending on which half of the target it lands in.
+    if (state.editing) {
+      tabsEl.querySelectorAll(".dashboard-tab").forEach(function (tab) {
+        var id = tab.getAttribute("data-dash");
+        tab.addEventListener("dragstart", function (e) {
+          _dragTabId = id;
+          if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; try { e.dataTransfer.setData("text/plain", id); } catch (_e) {} }
+          tab.style.opacity = "0.5";
+        });
+        tab.addEventListener("dragend", function () { _dragTabId = null; tab.style.opacity = ""; clearTabDropCues(); });
+        tab.addEventListener("dragover", function (e) {
+          if (!_dragTabId || _dragTabId === id) return;
+          e.preventDefault();
+          if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+          var rect = tab.getBoundingClientRect();
+          tab._dropBefore = (e.clientX - rect.left) < rect.width / 2;
+          clearTabDropCues();
+          tab.style.boxShadow = tab._dropBefore ? "inset 3px 0 0 #4fc3f7" : "inset -3px 0 0 #4fc3f7";
+        });
+        tab.addEventListener("dragleave", function () { tab.style.boxShadow = ""; });
+        tab.addEventListener("drop", function (e) {
+          if (!_dragTabId || _dragTabId === id) { clearTabDropCues(); return; }
+          e.preventDefault();
+          reorderDashboards(_dragTabId, id, tab._dropBefore !== false);
+        });
+      });
+    }
     // Inline rename on the active tab's input: Enter or blur commits, Esc cancels.
     var input = tabsEl.querySelector(".dashboard-tab-name-input");
     if (input) {
@@ -288,6 +320,27 @@
     setHeaderMode();
     renderRoot();
     queueSave();
+  }
+
+  function clearTabDropCues() {
+    if (!tabsEl) return;
+    tabsEl.querySelectorAll(".dashboard-tab").forEach(function (t) { t.style.boxShadow = ""; });
+  }
+
+  // Move dashboard `fromId` to just before/after `toId` in the tab order, then
+  // persist + re-render. Splice-out first so the target index is computed
+  // against the array minus the moved item (indices stay correct).
+  function reorderDashboards(fromId, toId, before) {
+    var arr = state.layout.dashboards;
+    var fromIdx = arr.findIndex(function (d) { return d.id === fromId; });
+    if (fromIdx < 0) return;
+    var moved = arr.splice(fromIdx, 1)[0];
+    var toIdx = arr.findIndex(function (d) { return d.id === toId; });
+    if (toIdx < 0) { arr.splice(fromIdx, 0, moved); return; } // target vanished — restore
+    arr.splice(before ? toIdx : toIdx + 1, 0, moved);
+    clearTabDropCues();
+    queueSave();
+    renderTabs();
   }
 
   function switchDashboard(id) {
@@ -739,6 +792,8 @@
   function clearDragState() {
     _dragStashId = null;
     _dragStashType = null;
+    _dragTabId = null;
+    clearTabDropCues();
     clearPlaceholder();
     canvasEl.classList.remove("is-dragging");
     canvasEl.querySelectorAll(".dashboard-widget.lifted").forEach(function (e) { e.classList.remove("lifted"); });

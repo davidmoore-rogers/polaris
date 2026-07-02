@@ -7,7 +7,7 @@
 (function () {
   function renderRows(el, rows, total, rowLimit) {
     if (!total) { el.innerHTML = '<p class="empty-state">No stale reservations</p>'; return; }
-    var clipped = rows.slice(0, rowLimit);
+    var clipped = PolarisWidgets.clip(rows, rowLimit);
     var pillCls = "widget-pill-watch";
     if (total >= 25) pillCls = "widget-pill-red";
     else if (total >= 10) pillCls = "widget-pill-amber";
@@ -48,7 +48,7 @@
     },
 
     renderInstance: function (el, config, data) {
-      renderRows(el, data.rows || [], data.total || 0, (config && config.rowLimit) || 5);
+      renderRows(el, data.rows || [], data.total || 0, config && config.rowLimit);
     },
 
     renderPreview: function (el) {
@@ -62,11 +62,9 @@
     renderConfig: function (el, config, onChange) {
       el.innerHTML =
         '<label>Row limit</label>' +
-        '<select data-k="rowLimit">' +
-          [5, 10, 20].map(function (n) { return '<option value="' + n + '"' + (config.rowLimit === n ? " selected" : "") + '>' + n + '</option>'; }).join("") +
-        '</select>';
+        '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit) + '</select>';
       el.querySelector('[data-k="rowLimit"]').addEventListener("change", function (e) {
-        onChange("rowLimit", parseInt(e.target.value, 10));
+        onChange("rowLimit", PolarisWidgets.parseRowLimit(e.target.value));
       });
     },
   });

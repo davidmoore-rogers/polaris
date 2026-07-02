@@ -58,13 +58,16 @@ router.get("/summary", async (req, res, next) => {
     const canAssets       = hasPermission(req, "assets", "read");
 
     const sourceTypes = parseSourceTypesParam(req.query.recentSourceTypes);
+    // recentReservations row cap: absent → default 10; "0" → null (No Limit,
+    // server sends everything); any other positive int → that cap.
+    const recentLimit = parseRecentLimitParam(req.query.recentLimit);
     const emptyAssetRows: never[] = [];
     const [global, recentReservations, assetTypeCountsRaw, monitorAlertsRaw] = await Promise.all([
       canBlocks
         ? utilizationService.getGlobalUtilization()
         : Promise.resolve({ blockUtilization: [] }),
       canReservations
-        ? utilizationService.getRecentManualReservations(10, sourceTypes)
+        ? utilizationService.getRecentManualReservations(recentLimit, sourceTypes)
         : Promise.resolve([]),
       canAssets ? prisma.asset.groupBy({
         by: ["assetType"],
@@ -123,6 +126,15 @@ function parseCsvParam(raw: unknown): string[] | null {
   return parts.length ? parts : null;
 }
 
+// Row cap for the summary's recentReservations feed. Absent/invalid → default
+// 10; otherwise the requested count clamped to the 1000-row ceiling.
+function parseRecentLimitParam(raw: unknown): number {
+  if (typeof raw !== "string" || raw.length === 0) return 10;
+  const n = parseInt(raw, 10);
+  if (Number.isNaN(n) || n <= 0) return 10;
+  return Math.min(n, 1000);
+}
+
 router.get("/noc-summary", async (req, res, next) => {
   try {
     await ensureSessionRoleSnapshot(req);
@@ -145,6 +157,14 @@ router.get("/noc-summary", async (req, res, next) => {
       ? await nocDashboardService.resolveFilteredAssetIds({ assetTypes, regionNames })
       : null;
 
+    // A widget wanting more than the default payload (the 1000-row option) sends
+    // ?limit=N; that caps EVERY feed in this (filter-keyed) payload at N, clamped
+    // to a 1000 ceiling. Absent → each feed keeps its own default and widgets
+    // clip client-side. L(n) picks the requested cap or the per-feed default.
+    const reqLimit = parseInt(String(req.query.limit ?? ""), 10);
+    const capLimit = Number.isFinite(reqLimit) && reqLimit > 0 ? Math.min(reqLimit, 1000) : null;
+    const L = (n: number): number => capLimit ?? n;
+
     const emptyStatus = {
       statusCounts: { total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0 },
       uptimePercent: null as number | null,
@@ -156,18 +176,18 @@ router.get("/noc-summary", async (req, res, next) => {
       recentReboots, activeAlerts,
     ] = await Promise.all([
       canAssets ? nocDashboardService.getStatusSummary(assetIds)        : Promise.resolve(emptyStatus),
-      canAssets ? nocDashboardService.getDownNodes(100, assetIds)       : Promise.resolve({ nodes: [], total: 0 }),
-      canAssets ? nocDashboardService.getDownInterfaces(100, 240, assetIds) : Promise.resolve([]),
-      canAssets ? nocDashboardService.getDownIpsecTunnels(100, 240, assetIds) : Promise.resolve([]),
-      canAssets ? nocDashboardService.getHighestCpu(100, 60, assetIds)  : Promise.resolve([]),
-      canAssets ? nocDashboardService.getHighestMemory(100, 60, assetIds) : Promise.resolve([]),
-      canAssets ? nocDashboardService.getSlowestResponse(100, assetIds) : Promise.resolve([]),
-      canAssets ? nocDashboardService.getPacketLoss(100, 15, assetIds)  : Promise.resolve([]),
-      canAssets ? nocDashboardService.getHighestDiskUsage(100, assetIds) : Promise.resolve([]),
-      canAssets ? nocDashboardService.getStalePolls(3, 50, assetIds)    : Promise.resolve([]),
-      canAssets ? nocDashboardService.getSitesWithIssues(25, assetIds)  : Promise.resolve([]),
-      canEvents ? nocDashboardService.getRecentReboots(72, 20, assetIds) : Promise.resolve([]),
-      canEvents ? nocDashboardService.getRecentAlerts(30, assetIds)     : Promise.resolve([]),
+      canAssets ? nocDashboardService.getDownNodes(L(100), assetIds)    : Promise.resolve({ nodes: [], total: 0 }),
+      canAssets ? nocDashboardService.getDownInterfaces(L(100), 240, assetIds) : Promise.resolve([]),
+      canAssets ? nocDashboardService.getDownIpsecTunnels(L(100), 240, assetIds) : Promise.resolve([]),
+      canAssets ? nocDashboardService.getHighestCpu(L(100), 60, assetIds)  : Promise.resolve([]),
+      canAssets ? nocDashboardService.getHighestMemory(L(100), 60, assetIds) : Promise.resolve([]),
+      canAssets ? nocDashboardService.getSlowestResponse(L(100), assetIds) : Promise.resolve([]),
+      canAssets ? nocDashboardService.getPacketLoss(L(100), 15, assetIds)  : Promise.resolve([]),
+      canAssets ? nocDashboardService.getHighestDiskUsage(L(100), assetIds) : Promise.resolve([]),
+      canAssets ? nocDashboardService.getStalePolls(3, L(50), assetIds)    : Promise.resolve([]),
+      canAssets ? nocDashboardService.getSitesWithIssues(L(25), assetIds)  : Promise.resolve([]),
+      canEvents ? nocDashboardService.getRecentReboots(72, L(20), assetIds) : Promise.resolve([]),
+      canEvents ? nocDashboardService.getRecentAlerts(L(30), assetIds)     : Promise.resolve([]),
     ]);
 
     res.json({

@@ -20,7 +20,7 @@
     description: "Monitored assets with the highest average memory usage (last 10 polls).",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { rowLimit: 5, threshold: null, regionScope: "mine" },
+    defaultConfig: { rowLimit: 1000, threshold: null, regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
@@ -46,6 +46,7 @@
     renderConfig: function (el, config, onChange) {
       // No "Hide below" control: the list always shows every red row (≥90%) and
       // pads to a 20-row floor with the next-highest (see _topnBar fillTo).
+      PolarisTopN.renderConfig(el, config, onChange, {});
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });

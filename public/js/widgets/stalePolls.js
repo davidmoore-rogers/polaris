@@ -7,13 +7,12 @@
 (function () {
   function render(el, rows, config) {
     rows = rows || [];
-    var rowLimit = (config && config.rowLimit) || 10;
     if (!rows.length) { el.innerHTML = '<p class="empty-state">No stale polls</p>'; return; }
     var pillCls = rows.length >= 25 ? "widget-pill-red" : rows.length >= 10 ? "widget-pill-amber" : "widget-pill-watch";
     var header = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
       '<span class="widget-pill ' + pillCls + '">' + rows.length + ' overdue</span>' +
     '</div>';
-    var body = rows.slice(0, rowLimit).map(function (r) {
+    var body = PolarisWidgets.clip(rows, config && config.rowLimit).map(function (r) {
       var name = r.hostname || r.ipAddress || "(unnamed)";
       var meta = r.ipAddress && r.hostname ? escapeHtml(r.ipAddress) : ("every " + Math.round((r.expectedIntervalSec || 0)) + "s");
       var overdue = r.lastPolledAt ? PolarisWidgets.durationSince(r.lastPolledAt) : "never";
@@ -59,11 +58,9 @@
     renderConfig: function (el, config, onChange) {
       el.innerHTML =
         '<label>Row limit</label>' +
-        '<select data-k="rowLimit">' +
-          [5, 10, 20].map(function (n) { return '<option value="' + n + '"' + (config.rowLimit === n ? " selected" : "") + '>' + n + '</option>'; }).join("") +
-        '</select>';
+        '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit) + '</select>';
       el.querySelector('[data-k="rowLimit"]').addEventListener("change", function (e) {
-        onChange("rowLimit", parseInt(e.target.value, 10));
+        onChange("rowLimit", PolarisWidgets.parseRowLimit(e.target.value));
       });
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },

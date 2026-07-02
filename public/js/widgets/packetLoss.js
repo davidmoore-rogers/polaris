@@ -21,7 +21,7 @@
     description: "Monitored assets with the highest recent probe loss (failed-probe ratio).",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { rowLimit: 5, threshold: 1, regionScope: "mine" },
+    defaultConfig: { rowLimit: 1000, threshold: 1, regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {

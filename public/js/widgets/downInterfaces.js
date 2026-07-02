@@ -12,9 +12,13 @@
   var TYPE_LABELS = PolarisWidgets.ASSET_TYPE_LABELS;
 
   // Normalize the two noc-summary arrays into a single row list with a `kind`
-  // discriminator so render/group/sort treat them uniformly.
-  function mergeRows(d) {
-    var ifaces = ((d && d.downInterfaces) || []).map(function (n) {
+  // discriminator so render/group/sort treat them uniformly. The physical /
+  // tunnel config toggles (default both on) drop a whole kind before merging.
+  function mergeRows(d, config) {
+    config = config || {};
+    var wantIfaces = config.showInterfaces !== false;
+    var wantTunnels = config.showTunnels !== false;
+    var ifaces = !wantIfaces ? [] : ((d && d.downInterfaces) || []).map(function (n) {
       return {
         kind: "interface",
         assetId: n.assetId, hostname: n.hostname, ipAddress: n.ipAddress, assetType: n.assetType,
@@ -22,7 +26,7 @@
         gate: n.gate, lastUpAt: n.lastUpAt,
       };
     });
-    var tunnels = ((d && d.downIpsecTunnels) || []).map(function (t) {
+    var tunnels = !wantTunnels ? [] : ((d && d.downIpsecTunnels) || []).map(function (t) {
       return {
         kind: "tunnel",
         assetId: t.assetId, hostname: t.hostname, ipAddress: t.ipAddress, assetType: t.assetType,
@@ -81,9 +85,8 @@
   function render(el, rows, config) {
     rows = rows || [];
     if (!rows.length) { el.innerHTML = '<p class="empty-state">No interfaces or tunnels down</p>'; return; }
-    var rowLimit = (config && config.rowLimit) || 10;
     var groupBy = (config && config.groupBy) || "gate";
-    var clipped = rows.slice(0, rowLimit);
+    var clipped = PolarisWidgets.clip(rows, config && config.rowLimit);
 
     if (groupBy === "none") {
       el.innerHTML = clipped.map(rowHTML).join("");
@@ -110,15 +113,15 @@
   PolarisWidgets.register({
     type: "downInterfaces",
     category: "Monitoring",
-    label: "Down Interfaces & Tunnels",
+    label: "Down Interfaces",
     description: "Interfaces admin-up but operationally down, plus fully-down IPsec tunnels, grouped by the gate they're on.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
-    defaultConfig: { groupBy: "gate", rowLimit: 10, regionScope: "mine" },
+    defaultConfig: { groupBy: "gate", rowLimit: 10, regionScope: "mine", showInterfaces: true, showTunnels: true },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
-      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(mergeRows).catch(function () { return []; });
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return mergeRows(d, config); }).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
@@ -136,7 +139,7 @@
       };
       el.addEventListener("click", onClick);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, mergeRows(d), config); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, mergeRows(d, config), config); }).catch(function () {});
       }, 30000);
       ctx.onUnmount(function () { clearInterval(timer); el.removeEventListener("click", onClick); });
     },
@@ -155,20 +158,28 @@
     },
 
     renderConfig: function (el, config, onChange) {
+      var showIf = config.showInterfaces !== false;
+      var showTun = config.showTunnels !== false;
       el.innerHTML =
+        '<label>Show</label>' +
+        '<div class="widget-config-typegrid">' +
+          '<label class="widget-config-typeopt"><input type="checkbox" data-show="showInterfaces"' + (showIf ? " checked" : "") + '> Physical interfaces</label>' +
+          '<label class="widget-config-typeopt"><input type="checkbox" data-show="showTunnels"' + (showTun ? " checked" : "") + '> IPsec tunnels</label>' +
+        '</div>' +
         '<label>Group by</label>' +
         '<select data-k="groupBy">' +
           '<option value="gate"' + ((config.groupBy || "gate") === "gate" ? " selected" : "") + '>Gate</option>' +
           '<option value="none"' + (config.groupBy === "none" ? " selected" : "") + '>None</option>' +
         '</select>' +
         '<label>Row limit</label>' +
-        '<select data-k="rowLimit">' +
-          [5, 10, 20].map(function (n) { return '<option value="' + n + '"' + (config.rowLimit === n ? " selected" : "") + '>' + n + '</option>'; }).join("") +
-        '</select>';
+        '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit) + '</select>';
+      el.querySelectorAll("[data-show]").forEach(function (cb) {
+        cb.addEventListener("change", function () { onChange(cb.getAttribute("data-show"), cb.checked); });
+      });
       el.querySelectorAll("[data-k]").forEach(function (s) {
         s.addEventListener("change", function () {
           var k = s.getAttribute("data-k");
-          onChange(k, k === "rowLimit" ? parseInt(s.value, 10) : s.value);
+          onChange(k, k === "rowLimit" ? PolarisWidgets.parseRowLimit(s.value) : s.value);
         });
       });
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);

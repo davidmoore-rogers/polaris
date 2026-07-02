@@ -85,6 +85,11 @@
       var regions = (typeof currentEffectiveRegions !== "undefined" && currentEffectiveRegions) || [];
       if (regions.length) parts.push("regionTags=" + encodeURIComponent(regions.slice().sort().join(",")));
     }
+    // Ask the server for a larger cap only when a widget wants more than the
+    // default payload holds (>100 → the 1000-row option). Numeric limits ≤100
+    // are omitted so those widgets keep sharing the one default-capped payload
+    // and clip client-side; only the 1000-row widgets fetch their own.
+    if (opts.limit) parts.push("limit=" + encodeURIComponent(opts.limit));
     return parts.join("&");
   }
 
@@ -114,7 +119,50 @@
   // own fetch. Centralized so every widget reads the same two config keys.
   window.PolarisWidgets.nocFilterOpts = function (config) {
     config = config || {};
-    return { assetTypes: config.assetTypes, regionScope: config.regionScope };
+    var n = window.PolarisWidgets.serverRowLimit(config.rowLimit);
+    // Only widgets wanting MORE than the default payload holds (the 1000-row
+    // option) request a larger server cap; ≤100 shares the default payload.
+    return { assetTypes: config.assetTypes, regionScope: config.regionScope, limit: n > 100 ? n : undefined };
+  };
+
+  // ─── Shared row-limit control ───────────────────────────────────────────
+  // Every list widget's "Row limit" dropdown uses the same numeric options
+  // (5/10/20/50/100/1000). Helpers centralize option HTML, parsing, client-side
+  // clipping, and the server-limit translation. 1000 is the hard ceiling — the
+  // server sends at most that many rows per feed.
+  window.PolarisWidgets.ROW_LIMIT_OPTIONS = [
+    { value: "5", label: "5 rows" },
+    { value: "10", label: "10 rows" },
+    { value: "20", label: "20 rows" },
+    { value: "50", label: "50 rows" },
+    { value: "100", label: "100 rows" },
+    { value: "1000", label: "1000 rows" },
+  ];
+
+  // Build the <option> tags for a Row-limit <select>, marking the current value.
+  window.PolarisWidgets.rowLimitOptionsHTML = function (current) {
+    var cur = current == null ? 10 : current;
+    return window.PolarisWidgets.ROW_LIMIT_OPTIONS.map(function (o) {
+      return '<option value="' + o.value + '"' + (String(cur) === o.value ? " selected" : "") + '>' + o.label + '</option>';
+    }).join("");
+  };
+
+  // Parse a Row-limit <select> value into the stored config form (a number).
+  window.PolarisWidgets.parseRowLimit = function (v) {
+    return parseInt(v, 10);
+  };
+
+  // Clip a row array to a rowLimit config value; null/NaN = no clip.
+  window.PolarisWidgets.clip = function (rows, rowLimit) {
+    rows = rows || [];
+    if (rowLimit == null) return rows.slice();
+    var n = parseInt(rowLimit, 10);
+    return isNaN(n) ? rows.slice() : rows.slice(0, n);
+  };
+
+  // Translate a rowLimit config value into a server-side row cap (the number).
+  window.PolarisWidgets.serverRowLimit = function (rowLimit) {
+    return parseInt(rowLimit, 10) || 0;
   };
 
   // The caller's effective region names, or [] when unrestricted. Used by the

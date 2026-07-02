@@ -40,9 +40,8 @@
   function render(el, nodes, config) {
     nodes = nodes || [];
     if (!nodes.length) { el.innerHTML = '<p class="empty-state">No nodes down</p>'; return; }
-    var rowLimit = (config && config.rowLimit) || 10;
     var groupBy = (config && config.groupBy) || "site";
-    var clipped = nodes.slice(0, rowLimit);
+    var clipped = PolarisWidgets.clip(nodes, config && config.rowLimit);
 
     if (groupBy === "none") {
       el.innerHTML = clipped.map(nodeRowHTML).join("");
@@ -119,13 +118,11 @@
           '<option value="none"' + (config.groupBy === "none" ? " selected" : "") + '>None</option>' +
         '</select>' +
         '<label>Row limit</label>' +
-        '<select data-k="rowLimit">' +
-          [5, 10, 20].map(function (n) { return '<option value="' + n + '"' + (config.rowLimit === n ? " selected" : "") + '>' + n + '</option>'; }).join("") +
-        '</select>';
+        '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit) + '</select>';
       el.querySelectorAll("[data-k]").forEach(function (s) {
         s.addEventListener("change", function () {
           var k = s.getAttribute("data-k");
-          onChange(k, k === "rowLimit" ? parseInt(s.value, 10) : s.value);
+          onChange(k, k === "rowLimit" ? PolarisWidgets.parseRowLimit(s.value) : s.value);
         });
       });
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);

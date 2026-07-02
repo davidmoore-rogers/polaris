@@ -20,8 +20,7 @@
     } else {
       sorted.sort(function (a, b) { return (b.usedPercent || 0) - (a.usedPercent || 0); });
     }
-    var rowLimit = (config && config.rowLimit) || 10;
-    sorted = sorted.slice(0, rowLimit);
+    sorted = PolarisWidgets.clip(sorted, config && config.rowLimit);
     el.innerHTML = sorted.map(function (b) {
       var pct = b.usedPercent != null ? b.usedPercent : 0;
       var color = pct > 75 ? "#ff1744" : pct > 50 ? "#ffd600" : "#4fc3f7";
@@ -70,13 +69,11 @@
           '<option value="name"' + (config.sortBy === "name" ? " selected" : "") + '>Name</option>' +
         '</select>' +
         '<label>Row limit</label>' +
-        '<select data-k="rowLimit">' +
-          [5, 10, 20].map(function (n) { return '<option value="' + n + '"' + (config.rowLimit === n ? " selected" : "") + '>' + n + '</option>'; }).join("") +
-        '</select>';
+        '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit) + '</select>';
       el.querySelectorAll("[data-k]").forEach(function (s) {
         s.addEventListener("change", function () {
           var k = s.getAttribute("data-k");
-          onChange(k, k === "rowLimit" ? parseInt(s.value, 10) : s.value);
+          onChange(k, k === "rowLimit" ? PolarisWidgets.parseRowLimit(s.value) : s.value);
         });
       });
     },

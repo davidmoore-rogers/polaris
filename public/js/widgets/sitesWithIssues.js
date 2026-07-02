@@ -24,13 +24,12 @@
   function render(el, sites, config) {
     sites = sites || [];
     var st = getState(el);
-    var rowLimit = (config && config.rowLimit) || 10;
     var sortBy = (config && config.sortBy) || "downCount";
     var sorted = sites.slice().sort(function (a, b) {
       if (sortBy === "name") return (a.site || "").localeCompare(b.site || "");
       return (b.downCount - a.downCount) || (b.warningCount - a.warningCount);
     });
-    sorted = sorted.slice(0, rowLimit);
+    sorted = PolarisWidgets.clip(sorted, config && config.rowLimit);
     if (!sorted.length) { el.innerHTML = '<p class="empty-state">No sites with issues</p>'; return; }
     if (st.expanded && !sorted.some(function (s) { return s.site === st.expanded; })) st.expanded = null;
 
@@ -115,13 +114,11 @@
           '<option value="name"' + (config.sortBy === "name" ? " selected" : "") + '>Site name</option>' +
         '</select>' +
         '<label>Row limit</label>' +
-        '<select data-k="rowLimit">' +
-          [5, 10, 20].map(function (n) { return '<option value="' + n + '"' + (config.rowLimit === n ? " selected" : "") + '>' + n + '</option>'; }).join("") +
-        '</select>';
+        '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit) + '</select>';
       el.querySelectorAll("[data-k]").forEach(function (s) {
         s.addEventListener("change", function () {
           var k = s.getAttribute("data-k");
-          onChange(k, k === "rowLimit" ? parseInt(s.value, 10) : s.value);
+          onChange(k, k === "rowLimit" ? PolarisWidgets.parseRowLimit(s.value) : s.value);
         });
       });
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);

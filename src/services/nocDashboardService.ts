@@ -144,7 +144,7 @@ function siteOf(a: { location: string | null; learnedLocation: string | null; sn
  * nullable columns. dependencySuppressed:false so a down parent's suppressed
  * children don't show as independent outages.
  */
-export async function getDownNodes(limit = 100, assetIds: string[] | null = null): Promise<{ nodes: DownNode[]; total: number }> {
+export async function getDownNodes(limit: number | null = 100, assetIds: string[] | null = null): Promise<{ nodes: DownNode[]; total: number }> {
   const rows = await prisma.asset.findMany({
     where: { monitored: true, monitorStatus: "down", dependencySuppressed: false, ...idWhere(assetIds) },
     select: {
@@ -153,7 +153,7 @@ export async function getDownNodes(limit = 100, assetIds: string[] | null = null
       department: true, monitorStatus: true, monitorStatusChangedAt: true,
     },
     orderBy: [{ monitorStatusChangedAt: { sort: "asc", nulls: "last" } }],
-    take: limit,
+    take: limit ?? undefined,
   });
   const nodes: DownNode[] = rows.map((a) => ({
     id: a.id,
@@ -208,7 +208,7 @@ function gateOf(a: { assetType: string; hostname: string | null; learnedLocation
  *      is unmonitored / suppressed / decommissioned drops out here (those assets
  *      stop being monitored, so only stale samples linger).
  */
-export async function getDownInterfaces(limit = 100, sinceMinutes = 240, assetIds: string[] | null = null): Promise<DownInterface[]> {
+export async function getDownInterfaces(limit: number | null = 100, sinceMinutes = 240, assetIds: string[] | null = null): Promise<DownInterface[]> {
   const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
   const params: unknown[] = [String(sinceMinutes), limit];
   if (assetIds) params.push(assetIds);
@@ -281,7 +281,7 @@ export interface DownIpsecTunnel {
  * data; the 4h window covers the system-info scrape cadence. `partial`/`dynamic`
  * tunnels are intentionally excluded — only a fully-down tunnel is an outage.
  */
-export async function getDownIpsecTunnels(limit = 100, sinceMinutes = 240, assetIds: string[] | null = null): Promise<DownIpsecTunnel[]> {
+export async function getDownIpsecTunnels(limit: number | null = 100, sinceMinutes = 240, assetIds: string[] | null = null): Promise<DownIpsecTunnel[]> {
   const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
   const params: unknown[] = [String(sinceMinutes), limit];
   if (assetIds) params.push(assetIds);
@@ -359,7 +359,7 @@ async function hydrateNames(ordered: Array<{ assetId: string; value: number }>):
  * recent Timescale chunks (~one telemetry sample per asset per cadence).
  * Pattern mirrors sampleHistoryService.readSdwanMembers.
  */
-export async function getHighestCpu(limit = 100, sinceMinutes = 60, assetIds: string[] | null = null): Promise<TopNRow[]> {
+export async function getHighestCpu(limit: number | null = 100, sinceMinutes = 60, assetIds: string[] | null = null): Promise<TopNRow[]> {
   // Average of each asset's most-recent 10 CPU samples (smooths the single-spike
   // ranking the DISTINCT-ON latest-value version surfaced). 1h window keeps the
   // telemetry-hypertable scan chunk-excluded and comfortably contains 10 samples
@@ -388,7 +388,7 @@ export async function getHighestCpu(limit = 100, sinceMinutes = 60, assetIds: st
  * (same windowed pattern as CPU). Prefers memPct; falls back to bytes ratio
  * when only absolute bytes were reported (same preference as sampleHistoryService).
  */
-export async function getHighestMemory(limit = 100, sinceMinutes = 60, assetIds: string[] | null = null): Promise<TopNRow[]> {
+export async function getHighestMemory(limit: number | null = 100, sinceMinutes = 60, assetIds: string[] | null = null): Promise<TopNRow[]> {
   const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
   const params: unknown[] = [String(sinceMinutes), limit];
   if (assetIds) params.push(assetIds);
@@ -415,7 +415,7 @@ export async function getHighestMemory(limit = 100, sinceMinutes = 60, assetIds:
  * Asset.lastResponseTimeMs (stamped by recordProbeResult) — fresher and far
  * cheaper than scanning the monitor-sample hypertable.
  */
-export async function getSlowestResponse(limit = 100, assetIds: string[] | null = null, sinceMinutes = 360): Promise<TopNRow[]> {
+export async function getSlowestResponse(limit: number | null = 100, assetIds: string[] | null = null, sinceMinutes = 360): Promise<TopNRow[]> {
   // Average of each asset's most-recent 10 response times (smooths the single-
   // probe spikes the instantaneous lastResponseTimeMs ranking surfaced). The
   // time window bounds the hypertable scan to recent chunks (TimescaleDB chunk
@@ -452,7 +452,7 @@ export async function getSlowestResponse(limit = 100, assetIds: string[] | null 
  * latest-per-(asset,mount) over asset_storage_samples; the window is wide (48h
  * default) because the full storage scrape rides the 24h "slow" cadence.
  */
-export async function getHighestDiskUsage(limit = 100, assetIds: string[] | null = null, sinceMinutes = 2880): Promise<TopNRow[]> {
+export async function getHighestDiskUsage(limit: number | null = 100, assetIds: string[] | null = null, sinceMinutes = 2880): Promise<TopNRow[]> {
   const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
   const params: unknown[] = [String(sinceMinutes), limit];
   if (assetIds) params.push(assetIds);
@@ -491,7 +491,7 @@ export async function getHighestDiskUsage(limit = 100, assetIds: string[] | null
  * window. One windowed groupBy over asset_monitor_samples; no schema change.
  * (True per-probe loss% via multi-ping is a documented follow-up.)
  */
-export async function getPacketLoss(limit = 100, sinceMinutes = 15, assetIds: string[] | null = null): Promise<TopNRow[]> {
+export async function getPacketLoss(limit: number | null = 100, sinceMinutes = 15, assetIds: string[] | null = null): Promise<TopNRow[]> {
   const idClause = assetIds ? ` AND "assetId" = ANY($3::text[])` : "";
   const params: unknown[] = [String(sinceMinutes), limit];
   if (assetIds) params.push(assetIds);
@@ -524,7 +524,7 @@ export interface StalePoll { id: string; hostname: string | null; ipAddress: str
  *
  * @param grace multiplier on the resolved interval before "stale" (default 3×)
  */
-export async function getStalePolls(grace = 3, limit = 50, assetIds: string[] | null = null): Promise<StalePoll[]> {
+export async function getStalePolls(grace = 3, limit: number | null = 50, assetIds: string[] | null = null): Promise<StalePoll[]> {
   // Coarse pre-filter: anything not polled within COARSE_FLOOR can't be fresh
   // for any realistic interval. Bounds Stage B's candidate set.
   const COARSE_FLOOR_MS = 5 * 60 * 1000; // 5 min — below the shortest sane cadence × grace
@@ -544,7 +544,7 @@ export async function getStalePolls(grace = 3, limit = 50, assetIds: string[] | 
       probeTimeoutMs: true, dependencySuppressed: true,
     },
     orderBy: { lastMonitorAt: { sort: "asc", nulls: "first" } },
-    take: 500,
+    take: limit == null ? undefined : 500,
   });
 
   const out: StalePoll[] = [];
@@ -567,7 +567,7 @@ export async function getStalePolls(grace = 3, limit = 50, assetIds: string[] | 
     const last = a.lastMonitorAt ? a.lastMonitorAt.getTime() : null;
     if (last === null || now - last >= overdueMs) {
       out.push({ id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, lastPolledAt: a.lastMonitorAt, expectedIntervalSec: intervalSec });
-      if (out.length >= limit) break;
+      if (limit != null && out.length >= limit) break;
     }
   }
   return out;
@@ -580,7 +580,7 @@ export interface RebootRow { id: string; hostname: string | null; ipAddress: str
  * path when an asset's sysUptime drops (see monitoringService reboot
  * detection). Event-backed so the widget never scans the hypertable.
  */
-export async function getRecentReboots(sinceHours = 72, limit = 20, assetIds: string[] | null = null): Promise<RebootRow[]> {
+export async function getRecentReboots(sinceHours = 72, limit: number | null = 20, assetIds: string[] | null = null): Promise<RebootRow[]> {
   const cutoff = new Date(Date.now() - sinceHours * 60 * 60 * 1000);
   const events = await prisma.event.findMany({
     where: {
@@ -590,7 +590,7 @@ export async function getRecentReboots(sinceHours = 72, limit = 20, assetIds: st
       ...(assetIds ? { resourceId: { in: assetIds } } : {}),
     },
     orderBy: { timestamp: "desc" },
-    take: limit,
+    take: limit ?? undefined,
   });
   return events.map((e) => {
     const details = (e.details ?? {}) as Record<string, unknown>;
@@ -610,7 +610,7 @@ export interface AlertRow { id: string; hostname: string | null; message: string
  * first. Backed by the [levelRank, timestamp] index; the 7-day Event retention
  * floors the scan automatically.
  */
-export async function getRecentAlerts(limit = 30, assetIds: string[] | null = null): Promise<AlertRow[]> {
+export async function getRecentAlerts(limit: number | null = 30, assetIds: string[] | null = null): Promise<AlertRow[]> {
   const events = await prisma.event.findMany({
     where: {
       levelRank: { gte: 1 },
@@ -619,7 +619,7 @@ export async function getRecentAlerts(limit = 30, assetIds: string[] | null = nu
       ...(assetIds ? { resourceId: { in: assetIds } } : {}),
     },
     orderBy: { timestamp: "desc" },
-    take: limit,
+    take: limit ?? undefined,
   });
   return events.map((e) => ({
     id: e.id,
@@ -646,7 +646,7 @@ export interface SiteWithIssues {
  * for the per-site counts + avg coordinates, then ONE bounded findMany to
  * attach the affected nodes. Two queries total, flat at 2000 assets.
  */
-export async function getSitesWithIssues(maxSites = 25, assetIds: string[] | null = null): Promise<SiteWithIssues[]> {
+export async function getSitesWithIssues(maxSites: number | null = 25, assetIds: string[] | null = null): Promise<SiteWithIssues[]> {
   const idClause = assetIds ? ` AND "id" = ANY($2::text[])` : "";
   const siteParams: unknown[] = [maxSites];
   if (assetIds) siteParams.push(assetIds);

@@ -32,15 +32,13 @@
     requiredPermission: { key: "events", level: "read" },
 
     fetchData: function (config) {
-      var limit = (config && config.rowLimit) || 10;
-      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return ((d && d.recentReboots) || []).slice(0, limit); }).catch(function () { return []; });
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return PolarisWidgets.clip((d && d.recentReboots) || [], config && config.rowLimit); }).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
       render(el, data);
       var timer = setInterval(function () {
-        var limit = (config && config.rowLimit) || 10;
-        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, ((d && d.recentReboots) || []).slice(0, limit)); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, PolarisWidgets.clip((d && d.recentReboots) || [], config && config.rowLimit)); }).catch(function () {});
       }, 60000);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
@@ -56,11 +54,9 @@
     renderConfig: function (el, config, onChange) {
       el.innerHTML =
         '<label>Row limit</label>' +
-        '<select data-k="rowLimit">' +
-          [5, 10, 20].map(function (n) { return '<option value="' + n + '"' + (config.rowLimit === n ? " selected" : "") + '>' + n + '</option>'; }).join("") +
-        '</select>';
+        '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit) + '</select>';
       el.querySelector('[data-k="rowLimit"]').addEventListener("change", function (e) {
-        onChange("rowLimit", parseInt(e.target.value, 10));
+        onChange("rowLimit", PolarisWidgets.parseRowLimit(e.target.value));
       });
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },

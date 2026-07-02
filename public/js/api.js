@@ -131,6 +131,24 @@ async function request(method, path, body, signal) {
   return data;
 }
 
+// An AbortSignal that fires after `ms`, so a slow/large request (e.g. a
+// dashboard feed asking for the 1000-row cap) rejects instead of hanging the
+// widget forever. Prefers AbortSignal.timeout; falls back to a manual
+// controller; returns undefined where neither exists (request just won't time
+// out).
+function timeoutSignal(ms) {
+  try { if (typeof AbortSignal !== "undefined" && AbortSignal.timeout) return AbortSignal.timeout(ms); } catch (_e) {}
+  if (typeof AbortController !== "undefined") {
+    var c = new AbortController();
+    setTimeout(function () { c.abort(); }, ms);
+    return c.signal;
+  }
+  return undefined;
+}
+
+// Wall-clock ceiling for the dashboard feed fetches (noc-summary / summary).
+var DASHBOARD_FETCH_TIMEOUT_MS = 20000;
+
 function trackedRequest(label, method, path, body) {
   var controller = new AbortController();
   var qid = _registerQuery(label, controller);
@@ -235,16 +253,18 @@ const api = {
     // Optional `sourceTypes` array narrows the recentReservations slice of
     // the response. Omitted = the back-compat default (manual only).
     summary: (opts) => {
-      var q = "";
+      var parts = [];
       if (opts && Array.isArray(opts.sourceTypes) && opts.sourceTypes.length) {
-        q = "?recentSourceTypes=" + encodeURIComponent(opts.sourceTypes.join(","));
+        parts.push("recentSourceTypes=" + encodeURIComponent(opts.sourceTypes.join(",")));
       }
-      return request("GET", "/dashboard/summary" + q);
+      // recentLimit: numeric row cap for recentReservations (max 1000).
+      if (opts && opts.recentLimit != null) parts.push("recentLimit=" + encodeURIComponent(opts.recentLimit));
+      return request("GET", "/dashboard/summary" + (parts.length ? "?" + parts.join("&") : ""), undefined, timeoutSignal(DASHBOARD_FETCH_TIMEOUT_MS));
     },
     // One round-trip feed for the NOC widgets (status tiles, down nodes,
     // top CPU/mem, slowest response, packet loss, stale polls, recent
     // reboots, active alerts, sites with issues).
-    nocSummary: (qs) => request("GET", "/dashboard/noc-summary" + (qs ? "?" + qs : "")),
+    nocSummary: (qs) => request("GET", "/dashboard/noc-summary" + (qs ? "?" + qs : ""), undefined, timeoutSignal(DASHBOARD_FETCH_TIMEOUT_MS)),
   },
   me: {
     dashboard: {

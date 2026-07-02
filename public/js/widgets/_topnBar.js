@@ -56,8 +56,10 @@
     } else {
       shown = sorted;
     }
-    // No upper row cap — the widget's fixed height (1×/2×/3×) plus auto-scroll
-    // governs how much is visible; all qualifying rows are rendered.
+    // Row-limit cap (defaults to the 1000-row ceiling for these widgets, so the
+    // fixed height 1×/2×/3× + auto-scroll governs what's visible unless the
+    // operator picks a smaller cap).
+    shown = PolarisWidgets.clip(shown, cfg.rowLimit);
     if (!shown.length) {
       el.innerHTML = '<p class="empty-state">' + escapeHtml(opts.emptyText || "Nothing to show") + '</p>';
       return;
@@ -95,9 +97,11 @@
    */
   function renderConfig(el, config, onChange, opts) {
     opts = opts || {};
-    // No row-limit control — height (1×/2×/3×) + auto-scroll governs visible
-    // rows. Only the optional threshold floor remains.
-    var html = "";
+    // Row-limit control (defaults to the 1000-row ceiling) plus the optional
+    // threshold floor.
+    var html =
+      '<label>Row limit</label>' +
+      '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit == null ? 1000 : config.rowLimit) + '</select>';
     if (opts.thresholdOptions) {
       html +=
         '<label>' + escapeHtml(opts.thresholdLabel || "Hide below") + '</label>' +
@@ -114,7 +118,7 @@
         if (k === "threshold") {
           onChange("threshold", s.value === "" ? null : parseFloat(s.value));
         } else {
-          onChange("rowLimit", parseInt(s.value, 10));
+          onChange("rowLimit", PolarisWidgets.parseRowLimit(s.value));
         }
       });
     });

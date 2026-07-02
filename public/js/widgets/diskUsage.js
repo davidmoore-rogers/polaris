@@ -22,7 +22,7 @@
     description: "Monitored filesystems with the highest used percentage, per volume.",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { regionScope: "mine" },
+    defaultConfig: { rowLimit: 1000, regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
@@ -47,6 +47,7 @@
 
     renderConfig: function (el, config, onChange) {
       // No "Hide below" control: shows every red row (≥90%) + a 20-row floor.
+      PolarisTopN.renderConfig(el, config, onChange, {});
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },
   });

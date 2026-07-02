@@ -11,8 +11,7 @@
   ];
 
   function renderRows(el, rows, config) {
-    var rowLimit = (config && config.rowLimit) || 10;
-    var clipped = rows.slice(0, rowLimit);
+    var clipped = PolarisWidgets.clip(rows, config && config.rowLimit);
     if (!clipped.length) {
       el.innerHTML = '<p class="empty-state">No reservations match this filter</p>';
       return;
@@ -47,14 +46,16 @@
 
     fetchData: function (config, summary) {
       var wanted = (config && Array.isArray(config.sourceTypes)) ? config.sourceTypes : ["manual"];
-      var summaryWanted = ["manual"];
-      // If the widget asked for non-default source types, refetch with the filter.
-      // Otherwise reuse the pre-fetched summary slice (manual rows only).
       var sameAsDefault = wanted.length === 1 && wanted[0] === "manual";
-      if (sameAsDefault) {
+      // The shared summary slice is the default 10 manual rows. Reuse it only
+      // when the widget wants ≤10 default-source rows; otherwise refetch with a
+      // server-side recentLimit (0 = No Limit → the server sends everything).
+      var serverLimit = PolarisWidgets.serverRowLimit(config && config.rowLimit);
+      var needMore = (config && config.rowLimit === "none") || serverLimit > 10;
+      if (sameAsDefault && !needMore) {
         return Promise.resolve(((summary && summary.recentReservations) || []).slice());
       }
-      return api.dashboard.summary({ sourceTypes: wanted })
+      return api.dashboard.summary({ sourceTypes: wanted, recentLimit: serverLimit })
         .then(function (data) { return (data && data.recentReservations) || []; });
     },
 
@@ -84,9 +85,7 @@
           }).join("") +
         '</div>' +
         '<label>Row limit</label>' +
-        '<select data-k="rowLimit">' +
-          [5, 10, 20].map(function (n) { return '<option value="' + n + '"' + (config.rowLimit === n ? " selected" : "") + '>' + n + '</option>'; }).join("") +
-        '</select>';
+        '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit) + '</select>';
       el.querySelectorAll('input[data-st]').forEach(function (cb) {
         cb.addEventListener("change", function () {
           if (cb.checked) current.add(cb.getAttribute("data-st"));
@@ -95,7 +94,7 @@
         });
       });
       el.querySelector('[data-k="rowLimit"]').addEventListener("change", function (e) {
-        onChange("rowLimit", parseInt(e.target.value, 10));
+        onChange("rowLimit", PolarisWidgets.parseRowLimit(e.target.value));
       });
     },
   });

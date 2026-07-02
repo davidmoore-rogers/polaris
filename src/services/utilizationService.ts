@@ -175,7 +175,7 @@ export async function getGlobalUtilization(): Promise<GlobalUtilization> {
 // show full attribution without a second fetch.
 
 export async function getRecentManualReservations(
-  limit = 10,
+  limit: number | null = 10,
   sourceTypes?: string[],
 ): Promise<RecentManualReservation[]> {
   const where: Prisma.ReservationWhereInput = { status: "active" };
@@ -190,7 +190,7 @@ export async function getRecentManualReservations(
   const rows = await prisma.reservation.findMany({
     where,
     orderBy: { createdAt: "desc" },
-    take: limit,
+    take: limit ?? undefined,
     include: {
       subnet: { select: { id: true, cidr: true, name: true, vlan: true } },
     },
