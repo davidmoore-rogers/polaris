@@ -118,7 +118,11 @@ FMG Integration Discovery
 │   │     existing monitorCredentialId differs           → preserve operator choice
 │   │
 │   ├─ fortinetTopology stamp:
-│   │     { role: "fortiswitch", controllerFortigate, uplinkInterface, state, joinTime }
+│   │     { role: "fortiswitch", controllerFortigate, uplinkInterface,
+│   │       uplinkPhysicalPort, state }
+│   │     state = controller admission ("Authorized"/"Unauthorized") →
+│   │       Authorization badge on asset details; "Unauthorized" also lands
+│   │       new switches with status = "storage"
 │   │
 │   └─ Decommission sweep:
 │         controllerFortigate ∈ inventoriedDevices
@@ -138,6 +142,11 @@ FMG Integration Discovery
 │   │
 │   ├─ Mesh stamp:
 │   │     mesh_uplink + parent_wtp_id from managed_ap → fortinetTopology.parentApSerial
+│   │
+│   ├─ Authorization stamp:
+│   │     managed_ap `state` ("authorized"/"discovered"/...) →
+│   │       fortinetTopology.state → Authorization badge on asset details
+│   │     (distinct from `status` = connectivity: connected/online/offline)
 │   │
 │   ├─ Full LLDP table persist (per online AP):
 │   │     managed_ap.lldp[] — ALL entries, not just the FortiSwitch uplink

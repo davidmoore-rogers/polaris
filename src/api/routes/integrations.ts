@@ -2822,6 +2822,7 @@ function buildFortiapObservedBlob(
     ipAddress?: string;
     baseMac?: string;
     status?: string;
+    authorizationState?: string;
     osVersion?: string;
     peerSwitch?: string;
     peerPort?: string;
@@ -2847,6 +2848,9 @@ function buildFortiapObservedBlob(
     mgmtIp: ap.ipAddress || null,
     baseMac: ap.baseMac || null,
     status: ap.status || null,
+    // Controller admission state ("authorized" / "discovered" / ...) —
+    // mirrors the fortiswitch blob's `state` field.
+    state: ap.authorizationState || null,
     controllerFortigate: ap.device || null,
     parentSwitch: ap.peerSwitch || null,
     parentPort: ap.peerPort || null,
@@ -4244,6 +4248,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         role: "fortiswitch" as const,
         controllerFortigate: sw.device || null,
         uplinkInterface: sw.fgtInterface || null,
+        // Controller admission state ("Authorized" | "Unauthorized"). Also
+        // drives the create-path status→storage flip below; surfaced as the
+        // Authorization row on the asset details General tab.
+        state: sw.state || null,
         // Physical uplink port to the controller FortiGate (e.g. "port47"),
         // from the managed-switch CMDB. Distinct from uplinkInterface (the
         // FortiGate-side logical "fortilink"). Lets the Device Map label the
@@ -4487,6 +4495,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         parentSwitch: ap.peerSwitch || null,
         parentPort: ap.peerPort || null,
         parentVlan: ap.peerVlan ?? null,
+        // Controller admission state ("authorized" / "discovered" / ...) from
+        // managed_ap's `state` field — distinct from `status` (connectivity).
+        // Surfaced as the Authorization row on the asset details General tab.
+        state: ap.authorizationState || null,
         // AP-local uplink port (lan1, lan2, wbh0 …) — preferred from
         // wan_status.interface, falls back to LLDP local_port. Mirrors
         // the FortiSwitch fortinetTopology.uplinkInterface convention.

@@ -971,6 +971,12 @@ export interface DiscoveredFortiAP {
   ipAddress: string;
   baseMac: string;
   status: string;
+  // Controller admission state from managed_ap's `state` field ("authorized"
+  // / "discovered" / ...). Distinct from `status` (connectivity). Stamped
+  // onto fortinetTopology.state + the fortiap observed blob; drives the
+  // Authorization row on the asset details General tab. Empty when the
+  // firmware omits the field.
+  authorizationState: string;
   osVersion: string;
   // Wired uplink to the controller. peerSource records HOW we learned it:
   //   "lldp"            — from the AP's own LLDP table (system_description starts with "FortiSwitch-")
