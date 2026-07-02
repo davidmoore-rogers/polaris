@@ -529,10 +529,10 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 
 ## Permission-gated route + dynamic-role function key
 
-**What it is:** A new functional area that needs its own dimension in the per-role permission matrix. Every route gate is `requirePermission(functionKey, level)` from `src/api/middleware/permissions.ts`; bearer-token surfaces use `requireSessionOrTokenPermission(functionKey, level, scope)` instead. The function-key catalogue is the single source of truth that the matrix UI consumes via `GET /api/v1/roles/functions`.
+**What it is:** A new functional area that needs its own dimension in the per-role permission matrix. Every route gate is `requirePermission(functionKey, level)` from `src/api/middleware/permissions.ts` — it covers session callers AND role-bound bearer tokens (a token resolves the Role it was bound to at mint time). The function-key catalogue is the single source of truth that the matrix UI consumes via `GET /api/v1/roles/functions`.
 
 **Canonical implementation:**
-- Middleware: `src/api/middleware/permissions.ts` (`requirePermission` / `requireOwnership` / `hasPermission` / `requireSessionOrTokenPermission`).
+- Middleware: `src/api/middleware/permissions.ts` (`requirePermission` / `requireOwnership` / `hasPermission` / `ensureRoleSnapshot`).
 - Function-key catalogue: `FUNCTION_KEYS` constant in `permissions.ts`.
 - CRUD service template: `src/services/roleService.ts` (built-in protection + cache-version bump + per-field diff Event).
 - Route layer template: `src/api/routes/roles.ts` (per-method `requirePermission` gates; Zod schema for permission shape).

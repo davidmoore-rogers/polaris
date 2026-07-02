@@ -1,12 +1,12 @@
 /**
  * tests/integration/dashboardNocToken.test.ts
  *
- * Covers the bearer-token scope gate on GET /api/v1/dashboard/noc-summary.
- * The no-login NOC kiosk authenticates with an API token carrying the
- * `dashboard:read` scope; the handler grants such a token the asset- and
- * event-sourced sections it otherwise resolves from a session role snapshot
- * (which token callers don't have). A token WITHOUT the scope still gets a
- * 200 with the shape intact but every section empty (filter-don't-403).
+ * Covers the bearer-token gate on GET /api/v1/dashboard/noc-summary.
+ * The no-login NOC kiosk authenticates with an API token bound to a role
+ * granting assets+events read; requirePermission/ensureRoleSnapshot resolve
+ * the token's role matrix exactly like a session snapshot. A token whose
+ * role grants neither still gets a 200 with the shape intact but every
+ * section empty (filter-don't-403).
  *
  * Skips cleanly when DATABASE_URL isn't reachable; see _helpers.ts.
  */
@@ -17,23 +17,43 @@ import { app } from "../../src/app.js";
 import { prisma } from "../../src/db.js";
 import { dbDescribe, dbReachable } from "./_helpers.js";
 import { createToken } from "../../src/services/apiTokenService.js";
+import { createRole, deleteRole } from "../../src/services/roleService.js";
 
 const d = dbDescribe;
+
+const NOC_ROLE = "test-noc-kiosk";
+const NONE_ROLE = "test-noc-none";
+const roleIds: string[] = [];
+
+// Cleanup is scoped to THIS suite's rows (name prefixes) — vitest runs test
+// files in parallel workers against the same DB, so a blanket deleteMany here
+// would yank another suite's tokens/assets out from under it mid-run.
+const TOKEN_NAME_PREFIX = "noc-kiosk-test-";
 
 beforeAll(async () => {
   if (!dbReachable) return;
   await prisma.$connect();
+  await prisma.apiToken.deleteMany({ where: { name: { startsWith: TOKEN_NAME_PREFIX } } });
+  await prisma.role.deleteMany({ where: { name: { in: [NOC_ROLE, NONE_ROLE] } } });
+  const noc = await createRole({
+    name: NOC_ROLE,
+    permissions: { assets: "read", events: "read" },
+  });
+  const none = await createRole({ name: NONE_ROLE, permissions: {} });
+  roleIds.push(noc.id, none.id);
 });
 
 afterAll(async () => {
   if (!dbReachable) return;
+  await prisma.apiToken.deleteMany({ where: { name: { startsWith: TOKEN_NAME_PREFIX } } });
+  for (const id of roleIds) await deleteRole(id).catch(() => {});
   await prisma.$disconnect();
 });
 
 beforeEach(async () => {
   if (!dbReachable) return;
-  await prisma.apiToken.deleteMany();
-  await prisma.asset.deleteMany();
+  await prisma.apiToken.deleteMany({ where: { name: { startsWith: TOKEN_NAME_PREFIX } } });
+  await prisma.asset.deleteMany({ where: { hostname: "down-fw-01" } });
   // One monitored, down, non-suppressed firewall — surfaces in statusCounts.down
   // and downNodes when (and only when) the caller is granted the asset section.
   await prisma.asset.create({
@@ -47,18 +67,20 @@ beforeEach(async () => {
   });
 });
 
-async function mintToken(scopes: string[]): Promise<string> {
+async function mintToken(roleName: string): Promise<string> {
+  const role = await prisma.role.findUnique({ where: { name: roleName } });
+  if (!role) throw new Error(`test role ${roleName} missing`);
   const { rawToken } = await createToken({
-    name: `noc-kiosk-test-${scopes.join("_")}`,
-    scopes,
+    name: `${TOKEN_NAME_PREFIX}${roleName}`,
+    roleId: role.id,
     createdBy: "integration-test",
   });
   return rawToken;
 }
 
-d("GET /api/v1/dashboard/noc-summary — bearer token scope gate", () => {
-  it("a dashboard:read token gets populated asset-sourced sections", async () => {
-    const raw = await mintToken(["dashboard:read"]);
+d("GET /api/v1/dashboard/noc-summary — bearer token role gate", () => {
+  it("a token bound to an assets+events-read role gets populated sections", async () => {
+    const raw = await mintToken(NOC_ROLE);
     const res = await request(app)
       .get("/api/v1/dashboard/noc-summary")
       .set("Authorization", `Bearer ${raw}`);
@@ -70,8 +92,8 @@ d("GET /api/v1/dashboard/noc-summary — bearer token scope gate", () => {
     expect(res.body.downNodes.map((n: { hostname: string }) => n.hostname)).toContain("down-fw-01");
   });
 
-  it("a dashboard:read token can read /filter-options (types + regions)", async () => {
-    const raw = await mintToken(["dashboard:read"]);
+  it("the same token can read /filter-options (types + regions)", async () => {
+    const raw = await mintToken(NOC_ROLE);
     const res = await request(app)
       .get("/api/v1/dashboard/filter-options")
       .set("Authorization", `Bearer ${raw}`);
@@ -82,8 +104,8 @@ d("GET /api/v1/dashboard/noc-summary — bearer token scope gate", () => {
     expect(Array.isArray(res.body.regions)).toBe(true);
   });
 
-  it("a token without dashboard:read gets the shape but empty sections", async () => {
-    const raw = await mintToken(["assets:read"]);
+  it("a token bound to a no-permission role gets the shape but empty sections", async () => {
+    const raw = await mintToken(NONE_ROLE);
     const res = await request(app)
       .get("/api/v1/dashboard/noc-summary")
       .set("Authorization", `Bearer ${raw}`);

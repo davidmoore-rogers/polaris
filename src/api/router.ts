@@ -69,9 +69,9 @@ router.use("/agents/enroll", agentsEnrollRouter);
 router.use("/agents", agentsRouter);
 
 // Everything below requires an active session OR a valid bearer token.
-// Token callers reach further role gates only when a route opts in via
-// requireSessionOrTokenPermission; the standard requirePermission(...)
-// middleware 403s token callers because they have no role snapshot.
+// Both caller kinds pass the same requirePermission(...) gates: sessions
+// resolve their login-stamped role snapshot, tokens resolve the Role they
+// were bound to at mint time. A token reaches exactly what its role grants.
 router.use(requireAuth);
 router.use("/blocks", blocksRouter);
 router.use("/subnets", subnetsRouter);

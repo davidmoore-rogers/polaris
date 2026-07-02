@@ -5,7 +5,8 @@
  *   - isProtected (admin / readonly): cannot be edited, renamed, or deleted.
  *   - isBuiltIn (networkadmin / assetsadmin / user): can be edited, NOT deleted.
  *   - Custom roles: full edit + delete.
- *   - Delete refuses with 409 when any user holds the role (admin reassigns first).
+ *   - Delete refuses with 409 when any user holds the role (admin reassigns
+ *     first) or any API token is bound to it (admin deletes the token first).
  *
  * Every write bumps the in-process role-version cache via bumpRoleVersion()
  * so live sessions holding the old snapshot refresh on their next request.
@@ -313,7 +314,7 @@ export async function updateRole(id: string, input: UpdateRoleInput, actor?: str
 export async function deleteRole(id: string, actor?: string): Promise<void> {
   const before = await prisma.role.findUnique({
     where: { id },
-    include: { _count: { select: { users: true } } },
+    include: { _count: { select: { users: true, apiTokens: true } } },
   });
   if (!before) throw new AppError(404, `Role ${id} not found`);
   if (before.isBuiltIn) {
@@ -321,6 +322,9 @@ export async function deleteRole(id: string, actor?: string): Promise<void> {
   }
   if (before._count.users > 0) {
     throw new AppError(409, `Role "${before.name}" is assigned to ${before._count.users} user(s). Reassign them first.`);
+  }
+  if (before._count.apiTokens > 0) {
+    throw new AppError(409, `Role "${before.name}" is bound to ${before._count.apiTokens} API token(s). Delete those tokens first.`);
   }
   await prisma.role.delete({ where: { id } });
   // bumpRoleVersion not strictly required (no live session can hold a deleted

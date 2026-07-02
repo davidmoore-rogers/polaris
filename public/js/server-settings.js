@@ -6269,7 +6269,7 @@ async function loadApiTokensTab() {
   try {
     var data = await api.apiTokens.list();
     _quarantineIntegrations = data.quarantineIntegrations || [];
-    renderApiTokensTab(data.tokens || [], data.knownScopes || [], _quarantineIntegrations);
+    renderApiTokensTab(data.tokens || [], data.roles || [], _quarantineIntegrations);
   } catch (err) {
     container.innerHTML = '<p class="empty-state" style="color:var(--color-danger,#c0392b);padding:2rem">' + escapeHtml(err.message || "Failed to load API tokens") + '</p>';
   }
@@ -6286,16 +6286,18 @@ function _integrationStatusNote(intg) {
   return '';
 }
 
-function renderApiTokensTab(tokens, knownScopes, quarantineIntegrations) {
+function renderApiTokensTab(tokens, roles, quarantineIntegrations) {
   var container = document.getElementById("tab-api-tokens");
   if (!container) return;
 
   var integrationById = {};
   (quarantineIntegrations || []).forEach(function (i) { integrationById[i.id] = i; });
+  var roleById = {};
+  (roles || []).forEach(function (r) { roleById[r.id] = r; });
 
   var tableHtml = tokens.length
     ? '<div class="table-wrapper"><table class="data-table"><thead><tr>' +
-        '<th>Name</th><th>Prefix</th><th>Scopes</th><th>Integrations</th><th>Created By</th><th>Last Used</th><th>Expires</th><th>Status</th><th>Actions</th>' +
+        '<th>Name</th><th>Prefix</th><th>Role</th><th>Integrations</th><th>Created By</th><th>Last Used</th><th>Expires</th><th>Status</th><th>Actions</th>' +
       '</tr></thead><tbody>' +
       tokens.map(function (t) {
         var statusBadge = t.revokedAt
@@ -6307,6 +6309,11 @@ function renderApiTokensTab(tokens, knownScopes, quarantineIntegrations) {
           ? '<button class="btn btn-sm btn-danger" onclick="deleteApiToken(\'' + t.id + '\',\'' + escapeHtml(t.name) + '\')">Delete</button>'
           : '<button class="btn btn-sm btn-secondary" onclick="revokeApiToken(\'' + t.id + '\',\'' + escapeHtml(t.name) + '\')">Revoke</button>' +
             '<button class="btn btn-sm btn-danger" onclick="deleteApiToken(\'' + t.id + '\',\'' + escapeHtml(t.name) + '\')">Delete</button>';
+        var tokenRole = roleById[t.roleId];
+        var roleHtml = '<span class="badge badge-type">' + escapeHtml(t.roleName || "—") + '</span>' +
+          (tokenRole && tokenRole.adminEquivalent
+            ? '<div style="font-size:0.78rem;color:var(--color-danger,#c0392b)">admin-equivalent</div>'
+            : '');
         var intgHtml = (t.integrationIds && t.integrationIds.length)
           ? t.integrationIds.map(function (id) {
               var intg = integrationById[id];
@@ -6315,13 +6322,13 @@ function renderApiTokensTab(tokens, knownScopes, quarantineIntegrations) {
               }
               return '<div><span class="badge badge-type">' + escapeHtml(_integrationLabel(intg)) + '</span>' + _integrationStatusNote(intg) + '</div>';
             }).join("")
-          : (t.scopes || []).indexOf("assets:quarantine") >= 0
+          : tokenRole && tokenRole.grantsQuarantineWrite
             ? '<span style="color:var(--color-danger,#c0392b)">none — token cannot push</span>'
             : '<span style="color:var(--color-text-secondary)">n/a</span>';
         return '<tr>' +
           '<td><strong>' + escapeHtml(t.name) + '</strong></td>' +
           '<td class="mono">' + escapeHtml(t.tokenPrefix || "—") + '…</td>' +
-          '<td>' + (t.scopes || []).map(function (s) { return '<span class="badge badge-type">' + escapeHtml(s) + '</span> '; }).join("") + '</td>' +
+          '<td>' + roleHtml + '</td>' +
           '<td style="font-size:0.85rem">' + intgHtml + '</td>' +
           '<td>' + escapeHtml(t.createdBy || "—") + '</td>' +
           '<td>' + (t.lastUsedAt ? formatDate(t.lastUsedAt) + (t.lastUsedIp ? ' <span class="mono" style="font-size:0.78rem;color:var(--color-text-secondary)">(' + escapeHtml(t.lastUsedIp) + ')</span>' : '') : "—") + '</td>' +
@@ -6333,26 +6340,23 @@ function renderApiTokensTab(tokens, knownScopes, quarantineIntegrations) {
       '</tbody></table></div>'
     : '<p class="empty-state" style="padding:1.5rem 0">No API tokens yet.</p>';
 
-  // Scope checkboxes: the assets:quarantine row gets a contextual alert
-  // pointing the operator at the integration picker below.
-  var scopeOpts = (knownScopes || []).map(function (s) {
-    var hint = '';
-    if (s === "assets:quarantine") {
-      hint = '<div style="margin-left:22px;font-size:0.82rem;color:var(--color-text-secondary)">Quarantine push targets a specific FortiManager or FortiGate. Pick which integration(s) below — pushes are skipped on disabled integrations or those without the Quarantine Push toggle.</div>';
-    }
-    return '<div style="display:flex;flex-direction:column;gap:2px">' +
-      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="scope" value="' + escapeHtml(s) + '" data-scope="' + escapeHtml(s) + '"> ' + escapeHtml(s) + '</label>' +
-      hint +
-    '</div>';
+  // Role dropdown — the token acts with this role's permission matrix
+  // everywhere in the API. Purpose-built minimal roles (Users → Manage
+  // Roles) are the recommended choice; picking an admin-equivalent role
+  // surfaces a warning banner (and logs a warning Event server-side).
+  var roleOpts = '<option value="">Select a role…</option>' + (roles || []).map(function (r) {
+    return '<option value="' + escapeHtml(r.id) + '">' + escapeHtml(r.name) +
+      (r.adminEquivalent ? " (admin-equivalent)" : "") + '</option>';
   }).join("");
 
-  // Integration picker — only relevant for assets:quarantine. Hidden until
-  // that scope is checked. Required (server enforces non-empty).
+  // Integration picker — only relevant when the chosen role can push
+  // quarantine. Hidden until such a role is selected. Required (server
+  // enforces non-empty).
   var integrationPickerHtml;
   if (!quarantineIntegrations || quarantineIntegrations.length === 0) {
     integrationPickerHtml =
       '<div class="alert alert-warning" style="padding:0.6rem 0.75rem;border-radius:6px;background:rgba(214,137,16,0.12);border:1px solid var(--color-warning,#d68910);color:var(--color-text)">' +
-        'No FortiManager or FortiGate integrations exist yet. Add one (with Quarantine Push enabled) before minting an assets:quarantine token.' +
+        'No FortiManager or FortiGate integrations exist yet. Add one (with Quarantine Push enabled) before minting a token whose role can push quarantine.' +
       '</div>';
   } else {
     integrationPickerHtml = quarantineIntegrations.map(function (intg) {
@@ -6367,6 +6371,7 @@ function renderApiTokensTab(tokens, knownScopes, quarantineIntegrations) {
     '<div class="settings-section">' +
       '<h3 class="settings-section-title">API Tokens</h3>' +
       '<p style="color:var(--color-text-secondary);margin:0 0 1rem">Bearer tokens for external systems (e.g. SIEM) to call the Polaris API. ' +
+        'Each token acts with the permissions of the role it is bound to. ' +
         'The raw token value is shown <strong>once</strong> at creation and cannot be recovered.</p>' +
       tableHtml +
     '</div>' +
@@ -6378,8 +6383,12 @@ function renderApiTokensTab(tokens, knownScopes, quarantineIntegrations) {
           '<input type="text" id="f-token-name" class="form-input" placeholder="e.g. SIEM Quarantine" maxlength="80">' +
         '</div>' +
         '<div>' +
-          '<label class="form-label">Scopes <span style="color:var(--color-danger,#c0392b)">*</span></label>' +
-          '<div style="display:flex;flex-direction:column;gap:0.5rem">' + scopeOpts + '</div>' +
+          '<label class="form-label" for="f-token-role">Acts as role <span style="color:var(--color-danger,#c0392b)">*</span></label>' +
+          '<select id="f-token-role" class="form-input">' + roleOpts + '</select>' +
+          '<div style="font-size:0.82rem;color:var(--color-text-secondary);margin-top:0.3rem">The token can do exactly what this role can. For least privilege, create a purpose-built role under Users → Manage Roles (e.g. assets read-only).</div>' +
+          '<div id="f-token-role-warning" class="alert alert-warning" style="display:none;margin-top:0.4rem;padding:0.6rem 0.75rem;border-radius:6px;background:rgba(192,57,43,0.12);border:1px solid var(--color-danger,#c0392b);color:var(--color-text)">' +
+            'This role is <strong>admin-equivalent</strong> — anyone holding this token has full control of Polaris. Prefer a minimal role.' +
+          '</div>' +
         '</div>' +
         '<div id="f-token-integrations-block" style="display:none">' +
           '<label class="form-label">Integrations <span style="color:var(--color-danger,#c0392b)">*</span></label>' +
@@ -6396,28 +6405,38 @@ function renderApiTokensTab(tokens, knownScopes, quarantineIntegrations) {
 
   document.getElementById("btn-create-api-token").addEventListener("click", createApiToken);
 
-  // Toggle the integration block when assets:quarantine is checked/unchecked.
-  var quarantineCheckbox = container.querySelector('input[data-scope="assets:quarantine"]');
+  // Toggle the integration block + admin warning as the role selection changes.
+  var roleSelect = document.getElementById("f-token-role");
   var integrationsBlock = document.getElementById("f-token-integrations-block");
-  if (quarantineCheckbox && integrationsBlock) {
-    var sync = function () { integrationsBlock.style.display = quarantineCheckbox.checked ? "block" : "none"; };
-    quarantineCheckbox.addEventListener("change", sync);
+  var roleWarning = document.getElementById("f-token-role-warning");
+  if (roleSelect) {
+    var sync = function () {
+      var r = roleById[roleSelect.value];
+      if (integrationsBlock) integrationsBlock.style.display = r && r.grantsQuarantineWrite ? "block" : "none";
+      if (roleWarning) roleWarning.style.display = r && r.adminEquivalent ? "block" : "none";
+    };
+    roleSelect.addEventListener("change", sync);
     sync();
   }
+  // Stash for createApiToken's client-side validation.
+  _apiTokenRolesById = roleById;
 }
+
+var _apiTokenRolesById = {};
 
 async function createApiToken() {
   var name = (document.getElementById("f-token-name").value || "").trim();
   if (!name) { showToast("Token name is required", "error"); return; }
-  var scopes = Array.from(document.querySelectorAll('input[name="scope"]:checked')).map(function (cb) { return cb.value; });
-  if (!scopes.length) { showToast("Select at least one scope", "error"); return; }
+  var roleId = document.getElementById("f-token-role").value;
+  if (!roleId) { showToast("Select a role for the token", "error"); return; }
+  var role = _apiTokenRolesById[roleId];
   var integrationIds = Array.from(document.querySelectorAll('input[name="token-integration"]:checked')).map(function (cb) { return cb.value; });
-  if (scopes.indexOf("assets:quarantine") >= 0 && integrationIds.length === 0) {
-    showToast("Pick at least one integration for assets:quarantine", "error");
+  if (role && role.grantsQuarantineWrite && integrationIds.length === 0) {
+    showToast("Pick at least one integration — this role can push quarantine", "error");
     return;
   }
   var expiresAt = document.getElementById("f-token-expires").value;
-  var body = { name: name, scopes: scopes };
+  var body = { name: name, roleId: roleId };
   if (integrationIds.length) body.integrationIds = integrationIds;
   if (expiresAt) body.expiresAt = new Date(expiresAt).toISOString();
 

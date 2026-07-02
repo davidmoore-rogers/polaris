@@ -2121,6 +2121,7 @@ model Role {
 
   users         User[]
   groupMappings GroupMapping[]
+  apiTokens     ApiToken[]
 
   @@map("roles")
 }
@@ -2476,9 +2477,14 @@ model AssetFortigateSighting {
 }
 
 // Bearer-token authentication for external callers (e.g. SIEM systems) that
-// need to invoke specific Polaris endpoints without a UI session. Tokens are
-// scoped to a fixed list of capabilities (currently: "assets:quarantine",
-// "assets:read") so a leaked token can't be elevated into a full admin login.
+// need to invoke specific Polaris endpoints without a UI session. Each token
+// is bound to a Role at mint time (role cutover migration 20260706000000 —
+// replaced the prior fixed scope strings). requirePermission resolves the
+// token's role matrix exactly like a session role snapshot, so the token can
+// reach whatever the chosen role grants and nothing else. Admins pick (or
+// purpose-build) a minimal role; binding a token to an admin-equivalent role
+// logs a warning Event, since a leaked token would then be a full-control
+// credential.
 //
 // The raw token is only ever shown once at creation; tokenHash is argon2id
 // of the raw token, and tokenPrefix stores the first 8 chars for display in
@@ -2490,9 +2496,13 @@ model ApiToken {
   name           String    @unique
   tokenHash      String // argon2id hash of the raw token
   tokenPrefix    String // first 8 chars of the raw token for UI display
-  scopes         String[]  @default([]) // e.g. ["assets:quarantine", "assets:read"]
-  // Integration ids this token may operate against. Required + non-empty for
-  // tokens with `assets:quarantine`; ignored for read-only scopes. Tokens
+  // Role whose permission matrix this token acts with. Restrict: a role
+  // referenced by any token cannot be deleted (roleService refuses with a
+  // friendly 409 before the FK would error).
+  roleId         String    @map("role_id")
+  role           Role      @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  // Integration ids this token may operate against. Required + non-empty when
+  // the bound role grants assetsQuarantine ≥ write; ignored otherwise. Tokens
   // with this set will only quarantine/release/verify against sightings whose
   // originating integration id is in this list — so a token minted for "Site
   // A FortiGate" can never accidentally push to Site B's gateway.
@@ -2507,6 +2517,7 @@ model ApiToken {
 
   @@index([revokedAt])
   @@index([expiresAt])
+  @@index([roleId])
   @@map("api_tokens")
 }
 

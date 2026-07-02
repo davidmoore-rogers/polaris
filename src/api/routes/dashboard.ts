@@ -13,7 +13,7 @@ import { Router } from "express";
 import { prisma } from "../../db.js";
 import * as utilizationService from "../../services/utilizationService.js";
 import * as nocDashboardService from "../../services/nocDashboardService.js";
-import { ensureSessionRoleSnapshot, hasPermission } from "../middleware/permissions.js";
+import { ensureRoleSnapshot, hasPermission } from "../middleware/permissions.js";
 
 const router = Router();
 
@@ -52,7 +52,7 @@ router.get("/summary", async (req, res, next) => {
     // section is gated on the read access of the function that owns its data;
     // denied sections come back as empty arrays with the response shape
     // unchanged. Bearer-token callers have no role snapshot → all-empty.
-    await ensureSessionRoleSnapshot(req);
+    await ensureRoleSnapshot(req);
     const canBlocks       = hasPermission(req, "ipBlocks", "read");
     const canReservations = hasPermission(req, "reservations", "read");
     const canAssets       = hasPermission(req, "assets", "read");
@@ -137,14 +137,14 @@ function parseRecentLimitParam(raw: unknown): number {
 
 router.get("/noc-summary", async (req, res, next) => {
   try {
-    await ensureSessionRoleSnapshot(req);
-    // A bearer token carrying `dashboard:read` is the no-login NOC kiosk. It has
-    // no role snapshot, so grant it both asset- and event-sourced sections here
-    // (this feed is read-only fleet aggregates). Session callers still gate per
-    // function. Same filter-don't-403 contract: no scope/role → empty sections.
-    const tokenNoc = req.apiToken?.scopes.includes("dashboard:read") ?? false;
-    const canAssets = tokenNoc || hasPermission(req, "assets", "read");
-    const canEvents = tokenNoc || hasPermission(req, "events", "read");
+    await ensureRoleSnapshot(req);
+    // The no-login NOC kiosk authenticates with a bearer token bound to a role
+    // granting assets+events read (the seeded api-noc role for pre-cutover
+    // tokens). ensureRoleSnapshot resolved that role above, so tokens and
+    // sessions gate identically here. Same filter-don't-403 contract: no read
+    // access → empty sections with the shape unchanged.
+    const canAssets = hasPermission(req, "assets", "read");
+    const canEvents = hasPermission(req, "events", "read");
 
     // Per-widget filters (optional): ?assetTypes=server,switch,... (the ENABLED
     // built-in types) and ?regionTags=East,West (the caller's "My regions"
@@ -214,14 +214,14 @@ router.get("/noc-summary", async (req, res, next) => {
 
 /**
  * GET /filter-options — available asset types + region tags for the NOC
- * dashboard's global filter dropdowns. Same dashboard:read-token / assets:read-
- * session gate as /noc-summary; callers without access get empty lists (not 403).
+ * dashboard's global filter dropdowns. Same assets-read gate as /noc-summary
+ * (session role or token-bound role); callers without access get empty lists
+ * (not 403).
  */
 router.get("/filter-options", async (req, res, next) => {
   try {
-    await ensureSessionRoleSnapshot(req);
-    const tokenNoc = req.apiToken?.scopes.includes("dashboard:read") ?? false;
-    const canAssets = tokenNoc || hasPermission(req, "assets", "read");
+    await ensureRoleSnapshot(req);
+    const canAssets = hasPermission(req, "assets", "read");
     if (!canAssets) {
       res.json({ assetTypes: [], regions: [] });
       return;
