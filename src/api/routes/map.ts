@@ -32,6 +32,10 @@ type TopologyMeta = {
   parentSwitch?: string | null;
   parentPort?: string | null;
   parentVlan?: number | null;
+  // FortiOS's own uplink classification for an AP: "ethernet" = wired
+  // uplink, "mesh" = wireless-mesh leaf (uplink is its parent AP; any wired
+  // LLDP adjacency is a switch bridged BEHIND it, not an uplink).
+  meshUplink?: "ethernet" | "mesh" | null;
 };
 
 function readTopology(raw: unknown): TopologyMeta {
@@ -407,6 +411,10 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           // via the FortiSwitch MAC-table fallback. Drives the
           // edge-tooltip wording on the topology graph.
           peerSource: (t as any).peerSource ?? null,
+          // "mesh" marks a wireless-mesh leaf: its real uplink is the mesh
+          // backhaul to its parent AP, so wired controller/LLDP adjacencies
+          // are treated as bridged-behind, not uplinks.
+          meshUplink: t.meshUplink ?? null,
           monitored: s.monitored,
           monitorHealth: s.monitored ? monitorStatusToHealth(s.monitorStatus) : null,
           dependencyLayer: s.dependencyLayer,
@@ -515,7 +523,13 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     }
     for (const ap of aps) {
       const apLabel = ap.hostname || ap.id;
-      if (ap.peerSwitchId) {
+      // A mesh leaf's (parentSwitch, parentPort) — when present from data
+      // stamped before the mesh-aware discovery fix — is INVERTED: the switch
+      // the AP sees over LLDP is bridged behind its LAN port, not upstream.
+      // Don't draw the backwards switch→AP edge; the wireless-bridge edge
+      // below carries the real relationship, and the client suppresses the
+      // FG fallback once the mesh backhaul edge is drawn from station data.
+      if (ap.peerSwitchId && ap.meshUplink !== "mesh") {
         const peerSwLabel = switchHostById.get(ap.peerSwitchId) || ap.peerSwitchId;
         edges.push({
           source: ap.peerSwitchId,
@@ -784,7 +798,11 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       const sw = switchObjById.get(n.assetId) ?? switchObjById.get(n.matchedAsset.id);
       if (!ap || !sw) continue; // not an AP↔switch pair
       // Normal switch→AP uplink (AP behind switch) — controller data covers it.
-      if (ap.peerSwitch && sw.hostname && ap.peerSwitch.toLowerCase() === sw.hostname.toLowerCase()) continue;
+      // EXCEPT for a wireless-mesh leaf: its uplink is the mesh backhaul, so a
+      // wired LLDP adjacency to a switch is always the switch bridged behind
+      // it — even when stale discovery data stamped that switch as the AP's
+      // parentSwitch (the pre-mesh-fix inversion).
+      if (ap.meshUplink !== "mesh" && ap.peerSwitch && sw.hostname && ap.peerSwitch.toLowerCase() === sw.hostname.toLowerCase()) continue;
       const key = `${ap.id}|${sw.id}`;
       if (seenBridge.has(key)) continue;
       seenBridge.add(key);

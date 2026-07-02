@@ -150,6 +150,59 @@ describe("parseFortiapMonitorRow lldpNeighbors pass-through", () => {
   });
 });
 
+describe("parseFortiapMonitorRow mesh-leaf uplink inversion", () => {
+  // A wireless-mesh leaf's uplink is its parent AP over the mesh backhaul.
+  // A FortiSwitch visible in its LLDP table is a switch bridged BEHIND the
+  // AP's LAN port — stamping it as peerSwitch would invert the topology
+  // (the switch would render uplinked to the FortiGate instead of hanging
+  // behind the AP on the Device Map).
+  const meshLeafRow = {
+    name: "FP234FTF21009379",
+    mesh_uplink: "mesh",
+    parent_wtp_id: "FP234FTF21001111",
+    lldp: [
+      {
+        local_port: "eth0",
+        chassis_id: "mac 94:ff:3c:39:31:06",
+        system_name: "S108EFTQ21003618",
+        system_description: "FortiSwitch-108E-POE v7.4.8,build0929,250909 (GA)",
+        port_id: "port8",
+      },
+    ],
+  };
+
+  it("does NOT stamp a mesh leaf's LLDP-visible FortiSwitch as peerSwitch", () => {
+    const parsed = parseFortiapMonitorRow(meshLeafRow);
+    expect(parsed.meshUplink).toBe("mesh");
+    expect(parsed.parentApSerial).toBe("FP234FTF21001111");
+    expect(parsed.peerSwitch).toBeUndefined();
+    expect(parsed.peerPort).toBeUndefined();
+    expect(parsed.peerSource).toBeUndefined();
+  });
+
+  it("still carries the bridged switch in lldpNeighbors for bridge-edge detection", () => {
+    const parsed = parseFortiapMonitorRow(meshLeafRow);
+    expect(parsed.lldpNeighbors).toHaveLength(1);
+    expect(parsed.lldpNeighbors![0].systemName).toBe("S108EFTQ21003618");
+    expect(parsed.lldpNeighbors![0].portId).toBe("port8");
+  });
+
+  it("keeps stamping peerSwitch for an ethernet-uplink AP", () => {
+    const parsed = parseFortiapMonitorRow({ ...meshLeafRow, mesh_uplink: "ethernet", parent_wtp_id: "" });
+    expect(parsed.meshUplink).toBe("ethernet");
+    expect(parsed.peerSwitch).toBe("S108EFTQ21003618");
+    expect(parsed.peerPort).toBe("port8");
+    expect(parsed.peerSource).toBe("lldp");
+  });
+
+  it("keeps stamping peerSwitch when mesh_uplink is absent (firmware omits the field)", () => {
+    const { mesh_uplink: _m, parent_wtp_id: _p, ...bare } = meshLeafRow;
+    const parsed = parseFortiapMonitorRow(bare);
+    expect(parsed.peerSwitch).toBe("S108EFTQ21003618");
+    expect(parsed.peerSource).toBe("lldp");
+  });
+});
+
 describe("parseFortiapMonitorRow authorization state", () => {
   it("captures `state` separately from `status` (FortiOS 7.6.x shape)", () => {
     const parsed = parseFortiapMonitorRow({ name: "AP-1", status: "connected", state: "authorized" });

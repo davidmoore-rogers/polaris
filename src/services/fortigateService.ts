@@ -778,6 +778,9 @@ export async function discoverDhcpSubnets(
           lldpAlreadyCount++;
           continue;
         }
+        // Mesh leaf — a switch seeing this AP's MAC is bridged behind the AP,
+        // not its uplink. Mirrors the fortimanagerService skip.
+        if (ap.meshUplink === "mesh") continue;
         if (!ap.baseMac) continue;
         const norm = ap.baseMac.toUpperCase().replace(/-/g, ":");
         const hit = macMap.get(norm);

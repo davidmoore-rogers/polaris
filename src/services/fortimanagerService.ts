@@ -2428,6 +2428,10 @@ export async function discoverDhcpSubnets(
             lldpAlreadyCount++;
             continue;
           }
+          // A wireless-mesh leaf has no switch uplink — its base MAC showing
+          // up in a switch's MAC table means that switch is bridged BEHIND
+          // the AP (traffic egressing the AP's LAN port), not upstream of it.
+          if (ap.meshUplink === "mesh") continue;
           if (!ap.baseMac) continue;
           const norm = ap.baseMac.toUpperCase().replace(/-/g, ":");
           const hit = macMap.get(norm);
