@@ -49,6 +49,7 @@ import {
 import { releaseDnsResolvedAt } from "../../services/dnsResolvedReservationService.js";
 import { recordDiscovery, observeDiscoveryPhase } from "../../metrics.js";
 import { getAdMonitorProtocol, invalidateMonitorSettingsCache, persistManagedApLldpNeighbors, invalidateLldpMatchCache } from "../../services/monitoringService.js";
+import { isFortiapStatusOnline } from "../../utils/fortiapMonitorRow.js";
 import * as autoMonitor from "../../services/autoMonitorInterfacesService.js";
 import * as autoMonitorStorage from "../../services/autoMonitorStorageService.js";
 import * as agentAutoDeploy from "../../services/agentAutoDeployService.js";
@@ -4503,10 +4504,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         parentApSerial: ap.parentApSerial ?? null,
       };
       // Presence gate: the managed-AP table includes configured-but-offline
-      // WTPs. FortiOS reports status "connected" for online APs; firmware
-      // variants that omit the field get the benefit of the doubt so a
-      // payload quirk doesn't silently freeze lastSeen for a whole fleet.
-      const apOnline = !ap.status || /^connected$/i.test(ap.status.trim());
+      // WTPs. FortiOS reports "online" on most releases and "connected" on
+      // some (same variance the controller-status probe accepts) — the
+      // previous /^connected$/-only check evaluated every healthy AP on an
+      // "online"-reporting fleet as offline, gating off lastSeen bumps,
+      // decommission resurrection, and the LLDP persist below.
+      const apOnline = isFortiapStatusOnline(ap.status);
       let apAssetId: string | null = null;
       if (existingAsset) {
         // Snapshot before the branch retypes assetType / mutates status below.

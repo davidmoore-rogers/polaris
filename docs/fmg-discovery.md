@@ -146,8 +146,9 @@ FMG Integration Discovery
 │   │         (asset LLDP section shows exact neighbors instead of inferred;
 │   │          Device Map gets ghost nodes / wireless-bridge edges for free)
 │   │     absent lldp field on the row = firmware variance → existing rows kept
-│   │     skipped when a monitored AP's resolved lldpPolling = snmp
-│   │       (the live SNMP stream owns the table)
+│   │     skipped when a monitored AP's resolved lldpPolling = snmp AND that
+│   │       stream delivered rows within 48h (a live SNMP stream owns the
+│   │       table; a configured-but-dead one does not block the persist)
 │   │
 │   └─ Decommission via wireless-controller/wtp CMDB roster (same logic)
 │

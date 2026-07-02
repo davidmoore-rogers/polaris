@@ -68,6 +68,21 @@ export function deriveFortiapModelFromSerial(serial: string): string {
   return `FortiAP-${m[1].toUpperCase()}`;
 }
 
+/**
+ * True when a managed_ap `status` value means the AP is currently up.
+ * FortiOS firmware variance: most releases report "online" (the
+ * controller-status probe documents "online" | "offline" | "discovered" |
+ * ...), some report "connected" — accept both, exactly like the probe path
+ * in monitoringService. Empty/missing gets the benefit of the doubt so a
+ * payload quirk doesn't silently freeze lastSeen (or gate off the LLDP
+ * persist) for a whole fleet.
+ */
+export function isFortiapStatusOnline(status: string | null | undefined): boolean {
+  const s = (status ?? "").trim();
+  if (!s) return true;
+  return /^(connected|online)$/i.test(s);
+}
+
 export interface FortiapTelemetrySnapshot {
   cpuPct?: number;
   memFreeMb?: number;
