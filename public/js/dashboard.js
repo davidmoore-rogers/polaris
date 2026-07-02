@@ -33,7 +33,6 @@
     editing: false,
     saving: false,
     saveTimer: null,
-    summary: null, // cached /dashboard/summary payload (shared by built-in widgets)
     unmounts: {},  // widget instance id → cleanup fn
   };
 
@@ -521,7 +520,6 @@
     }
     var unmountFns = [];
     var ctx = {
-      summary: state.summary,
       onUnmount: function (fn) { unmountFns.push(fn); },
     };
 
@@ -538,7 +536,7 @@
     }
     var dataPromise;
     try {
-      dataPromise = module.fetchData ? module.fetchData(w.config || {}, state.summary) : Promise.resolve(null);
+      dataPromise = module.fetchData ? module.fetchData(w.config || {}) : Promise.resolve(null);
     } catch (err) {
       dataPromise = Promise.reject(err);
     }
@@ -552,20 +550,6 @@
       body.innerHTML = '<p class="empty-state" style="color:#ef5350">' + escapeHtml(err.message || "Fetch failed") + '</p>';
     });
     state.unmounts[w.id] = function () { unmountFns.forEach(function (fn) { try { fn(); } catch (_) {} }); };
-  }
-
-  async function refetchSummaryIfNeeded() {
-    var needsSummary = activeDash().columns.some(function (col) {
-      return col.widgets.some(function (w) {
-        return ["recentReservations", "assetTypes", "blockUtilization"].indexOf(w.type) !== -1;
-      });
-    });
-    if (!needsSummary) { state.summary = null; return; }
-    try {
-      state.summary = await api.dashboard.summary();
-    } catch (_err) {
-      state.summary = null;
-    }
   }
 
   // ─── State mutations ──────────────────────────────────────────────────────
@@ -619,7 +603,7 @@
       activeDash().columns[target.columnIndex].widgets.splice(target.insertionIndex, 0, inst);
     }
     hideEmpty();
-    refetchSummaryIfNeeded().then(function () { renderRoot(); });
+    renderRoot();
     queueSave();
   }
 

@@ -92,8 +92,10 @@
     minSize: { width: 4, height: 1 },
     defaultConfig: { chartStyle: "pie", hiddenTypes: [] },
 
-    fetchData: function (_config, summary) {
-      return Promise.resolve((summary && summary.assetTypeCounts) || []);
+    fetchData: function (_config) {
+      return PolarisWidgets.getSummary({ sections: ["assetTypes"] })
+        .then(function (d) { return (d && d.assetTypeCounts) || []; })
+        .catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data) {

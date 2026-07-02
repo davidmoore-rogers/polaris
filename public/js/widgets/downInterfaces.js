@@ -121,7 +121,7 @@
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
-      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return mergeRows(d, config); }).catch(function () { return []; });
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["downInterfaces", "downIpsecTunnels"]).then(function (d) { return mergeRows(d, config); }).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
@@ -139,7 +139,7 @@
       };
       el.addEventListener("click", onClick);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, mergeRows(d, config), config); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["downInterfaces", "downIpsecTunnels"]).then(function (d) { render(el, mergeRows(d, config), config); }).catch(function () {});
       }, 30000);
       ctx.onUnmount(function () { clearInterval(timer); el.removeEventListener("click", onClick); });
     },

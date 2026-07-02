@@ -60,13 +60,13 @@
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
-      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).catch(function () { return null; });
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["status"]).catch(function () { return null; });
     },
 
     renderInstance: function (el, config, data, ctx) {
       renderTiles(el, data, config);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { renderTiles(el, d, config); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["status"]).then(function (d) { renderTiles(el, d, config); }).catch(function () {});
       }, 30000);
       ctx.onUnmount(function () { clearInterval(timer); });
     },

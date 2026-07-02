@@ -1,23 +1,44 @@
 /**
  * src/api/routes/dashboard.ts
  *
- * Single endpoint that backs the new Dashboard home page in one round-trip:
+ * Feeds behind the Dashboard home page. Both endpoints accept a subset param
+ * (?sections= on /summary, ?feeds= on /noc-summary) so each widget fetches
+ * only the data it renders — a widget appears as soon as ITS query finishes
+ * instead of gating on the slowest feed in a monolithic payload. Omitting the
+ * param returns the full legacy shape. Every section/feed is served through a
+ * short server-side TTL cache (see nocDashboardService.NOC_FEED_CACHE_TTL_MS)
+ * so concurrent widgets, tabs, and kiosk walls share one computation.
+ *
+ * /summary sections:
  *   - blockUtilization:  per-block address allocation (reused from utilizationService)
- *   - recentReservations: most recent 10 manual (user-created) reservations
+ *   - recentReservations: most recent N (default 10) reservations by source type
  *   - assetTypeCounts:   counts per AssetType excluding decommissioned/disabled
  *   - monitorAlerts:     monitored assets currently in warning/down state,
- *                         oldest transition first, capped at 50
+ *                         newest transition first, capped at 50
  */
 
 import { Router } from "express";
 import { prisma } from "../../db.js";
 import * as utilizationService from "../../services/utilizationService.js";
 import * as nocDashboardService from "../../services/nocDashboardService.js";
+import { createTtlCache } from "../../utils/ttlCache.js";
 import { ensureSessionRoleSnapshot, hasPermission } from "../middleware/permissions.js";
 
 const router = Router();
 
 const MONITOR_ALERT_CAP = 50;
+
+// Short response cache for the /summary sections (the noc-summary feeds have
+// their own per-feed cache inside nocDashboardService). Keys carry the
+// section's parameters; permission-denied sections never enter the cache.
+const summaryCache = createTtlCache<unknown>({
+  ttlMs: nocDashboardService.NOC_FEED_CACHE_TTL_MS,
+  maxEntries: 64,
+});
+
+// The /summary section names ?sections= may request. Unknown names are
+// dropped silently (same convention as recentSourceTypes).
+const SUMMARY_SECTIONS = new Set(["blocks", "recent", "assetTypes", "monitorAlerts"]);
 
 // Recognized reservation source types — the same enum the Reservation
 // model carries. Anything in the query that isn't one of these is dropped
@@ -57,24 +78,35 @@ router.get("/summary", async (req, res, next) => {
     const canReservations = hasPermission(req, "reservations", "read");
     const canAssets       = hasPermission(req, "assets", "read");
 
+    // ?sections= narrows to the named subset so a widget fetches only what it
+    // renders; absent = every section (legacy shape).
+    const sectionsRaw = parseCsvParam(req.query.sections);
+    const sections = sectionsRaw === null
+      ? SUMMARY_SECTIONS
+      : new Set(sectionsRaw.filter((s) => SUMMARY_SECTIONS.has(s)));
+    const wants = (s: string) => sections.has(s);
+
     const sourceTypes = parseSourceTypesParam(req.query.recentSourceTypes);
     // recentReservations row cap: absent → default 10; "0" → null (No Limit,
     // server sends everything); any other positive int → that cap.
     const recentLimit = parseRecentLimitParam(req.query.recentLimit);
     const emptyAssetRows: never[] = [];
     const [global, recentReservations, assetTypeCountsRaw, monitorAlertsRaw] = await Promise.all([
-      canBlocks
-        ? utilizationService.getGlobalUtilization()
+      wants("blocks") && canBlocks
+        ? summaryCache.getOrCompute("blocks", () => utilizationService.getGlobalUtilization())
         : Promise.resolve({ blockUtilization: [] }),
-      canReservations
-        ? utilizationService.getRecentManualReservations(recentLimit, sourceTypes)
+      wants("recent") && canReservations
+        ? summaryCache.getOrCompute(
+            `recent|${recentLimit ?? ""}|${(sourceTypes ?? ["_default"]).join(",")}`,
+            () => utilizationService.getRecentManualReservations(recentLimit, sourceTypes),
+          )
         : Promise.resolve([]),
-      canAssets ? prisma.asset.groupBy({
+      wants("assetTypes") && canAssets ? summaryCache.getOrCompute("assetTypes", () => prisma.asset.groupBy({
         by: ["assetType"],
         _count: { _all: true },
         where: { status: { notIn: ["decommissioned", "disabled"] } },
-      }) : Promise.resolve(emptyAssetRows),
-      canAssets ? prisma.asset.findMany({
+      })) : Promise.resolve(emptyAssetRows),
+      wants("monitorAlerts") && canAssets ? summaryCache.getOrCompute("monitorAlerts", () => prisma.asset.findMany({
         where: {
           monitored: true,
           monitorStatus: { in: ["warning", "down"] },
@@ -93,32 +125,45 @@ router.get("/summary", async (req, res, next) => {
         // pre-backfill assets) sink to the bottom.
         orderBy: [{ monitorStatusChangedAt: { sort: "desc", nulls: "last" } }],
         take: MONITOR_ALERT_CAP + 1,
-      }) : Promise.resolve(emptyAssetRows),
-    ]);
+      })) : Promise.resolve(emptyAssetRows),
+    ]) as [
+      Awaited<ReturnType<typeof utilizationService.getGlobalUtilization>> | { blockUtilization: never[] },
+      Awaited<ReturnType<typeof utilizationService.getRecentManualReservations>>,
+      Array<{ assetType: string; _count: { _all: number } }>,
+      Array<Record<string, unknown>>,
+    ];
 
     const overflow = monitorAlertsRaw.length > MONITOR_ALERT_CAP;
     const monitorAlerts = overflow ? monitorAlertsRaw.slice(0, MONITOR_ALERT_CAP) : monitorAlertsRaw;
 
-    res.json({
-      blockUtilization:    global.blockUtilization,
-      recentReservations,
-      assetTypeCounts:     assetTypeCountsRaw.map((row) => ({
-        assetType: row.assetType,
-        count:     row._count._all,
-      })),
-      monitorAlerts,
-      monitorAlertsOverflow: overflow,
-    });
+    // Only requested sections appear in the response; the no-param call keeps
+    // the full legacy shape.
+    const body: Record<string, unknown> = {};
+    if (wants("blocks"))     body.blockUtilization = global.blockUtilization;
+    if (wants("recent"))     body.recentReservations = recentReservations;
+    if (wants("assetTypes")) body.assetTypeCounts = assetTypeCountsRaw.map((row) => ({
+      assetType: row.assetType,
+      count:     row._count._all,
+    }));
+    if (wants("monitorAlerts")) {
+      body.monitorAlerts = monitorAlerts;
+      body.monitorAlertsOverflow = overflow;
+    }
+    res.json(body);
   } catch (err) {
     next(err);
   }
 });
 
 /**
- * GET /noc-summary — one round-trip feed for the SolarWinds-style NOC widgets.
+ * GET /noc-summary — the feed endpoint for the SolarWinds-style NOC widgets.
+ * ?feeds=topCpu,downNodes narrows to the named subset (each widget fetches its
+ * own feed so it renders as soon as its data exists); absent = every feed in
+ * one round-trip (legacy shape, still used by external kiosk consumers).
  * Same filter-don't-403 contract as /summary: asset-sourced sections gate on
  * assets:read, Event-sourced sections (active alerts, recent reboots) gate on
  * events:read; denied sections return empty/zero with the shape unchanged.
+ * Feed computation + caching live in nocDashboardService.getNocSummaryPayload.
  */
 function parseCsvParam(raw: unknown): string[] | null {
   if (typeof raw !== "string" || raw.length === 0) return null;
@@ -148,65 +193,26 @@ router.get("/noc-summary", async (req, res, next) => {
 
     // Per-widget filters (optional): ?assetTypes=server,switch,... (the ENABLED
     // built-in types) and ?regionTags=East,West (the caller's "My regions"
-    // names). resolveFilteredAssetIds returns null when neither narrows the set
-    // — the default unfiltered, shared-payload path. The frontend memoizes per
-    // (assetTypes, regionTags) so each distinct filter fetches once.
+    // names). The service resolves them to an asset-id set (cached) — null when
+    // neither narrows, the default unfiltered path. The frontend memoizes per
+    // (feeds, assetTypes, regionTags) so each distinct request fetches once.
     const assetTypes = parseCsvParam(req.query.assetTypes);
     const regionNames = parseCsvParam(req.query.regionTags);
-    const assetIds = (canAssets || canEvents)
-      ? await nocDashboardService.resolveFilteredAssetIds({ assetTypes, regionNames })
-      : null;
 
     // A widget wanting more than the default payload (the 1000-row option) sends
-    // ?limit=N; that caps EVERY feed in this (filter-keyed) payload at N, clamped
-    // to a 1000 ceiling. Absent → each feed keeps its own default and widgets
-    // clip client-side. L(n) picks the requested cap or the per-feed default.
+    // ?limit=N; that caps every REQUESTED feed at N, clamped to a 1000 ceiling.
+    // Absent → each feed keeps its own default and widgets clip client-side.
     const reqLimit = parseInt(String(req.query.limit ?? ""), 10);
     const capLimit = Number.isFinite(reqLimit) && reqLimit > 0 ? Math.min(reqLimit, 1000) : null;
-    const L = (n: number): number => capLimit ?? n;
 
-    const emptyStatus = {
-      statusCounts: { total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0 },
-      uptimePercent: null as number | null,
-      activeAlertCount: 0,
-    };
-
-    const [
-      status, downNodes, downInterfaces, downIpsecTunnels, topCpu, topMemory, slowestResponse, packetLoss, diskUsage, stalePolls, sitesWithIssues,
-      recentReboots, activeAlerts,
-    ] = await Promise.all([
-      canAssets ? nocDashboardService.getStatusSummary(assetIds)        : Promise.resolve(emptyStatus),
-      canAssets ? nocDashboardService.getDownNodes(L(100), assetIds)    : Promise.resolve({ nodes: [], total: 0 }),
-      canAssets ? nocDashboardService.getDownInterfaces(L(100), 240, assetIds) : Promise.resolve([]),
-      canAssets ? nocDashboardService.getDownIpsecTunnels(L(100), 240, assetIds) : Promise.resolve([]),
-      canAssets ? nocDashboardService.getHighestCpu(L(100), 60, assetIds)  : Promise.resolve([]),
-      canAssets ? nocDashboardService.getHighestMemory(L(100), 60, assetIds) : Promise.resolve([]),
-      canAssets ? nocDashboardService.getSlowestResponse(L(100), assetIds) : Promise.resolve([]),
-      canAssets ? nocDashboardService.getPacketLoss(L(100), 15, assetIds)  : Promise.resolve([]),
-      canAssets ? nocDashboardService.getHighestDiskUsage(L(100), assetIds) : Promise.resolve([]),
-      canAssets ? nocDashboardService.getStalePolls(3, L(50), assetIds)    : Promise.resolve([]),
-      canAssets ? nocDashboardService.getSitesWithIssues(L(25), assetIds)  : Promise.resolve([]),
-      canEvents ? nocDashboardService.getRecentReboots(72, L(20), assetIds) : Promise.resolve([]),
-      canEvents ? nocDashboardService.getRecentAlerts(L(30), assetIds)     : Promise.resolve([]),
-    ]);
-
-    res.json({
-      statusCounts:     status.statusCounts,
-      uptimePercent:    status.uptimePercent,
-      activeAlertCount: status.activeAlertCount,
-      downNodes:        downNodes.nodes,
-      downInterfaces,
-      downIpsecTunnels,
-      topCpu,
-      topMemory,
-      slowestResponse,
-      packetLoss,
-      diskUsage,
-      stalePolls,
-      recentReboots,
-      activeAlerts,
-      sitesWithIssues,
-    });
+    res.json(await nocDashboardService.getNocSummaryPayload({
+      feeds: parseCsvParam(req.query.feeds),
+      canAssets,
+      canEvents,
+      assetTypes,
+      regionNames,
+      capLimit,
+    }));
   } catch (err) {
     next(err);
   }
