@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { deriveFortiapModelFromSerial, parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../../src/utils/fortiapMonitorRow.js";
+import { deriveFortiapModelFromSerial, parseFortiapMonitorRow, isFortiapStatusOnline, FORTIAP_MONITOR_FORMAT } from "../../src/utils/fortiapMonitorRow.js";
 
 describe("deriveFortiapModelFromSerial", () => {
   it("returns empty for missing/blank serial", () => {
@@ -147,5 +147,36 @@ describe("parseFortiapMonitorRow lldpNeighbors pass-through", () => {
   it("carries an empty array for a present-but-empty lldp table", () => {
     const parsed = parseFortiapMonitorRow({ name: "AP-1", lldp: [] });
     expect(parsed.lldpNeighbors).toEqual([]);
+  });
+});
+
+describe("isFortiapStatusOnline", () => {
+  // The production bug: FortiOS reports "online" on most releases (the
+  // controller-status probe documents "online" | "offline" | "discovered"),
+  // and the old /^connected$/-only gate evaluated every healthy AP on an
+  // "online"-reporting fleet as offline — freezing lastSeen and gating off
+  // the managed-ap LLDP persist fleet-wide.
+  it("accepts 'online' (the common FortiOS value)", () => {
+    expect(isFortiapStatusOnline("online")).toBe(true);
+    expect(isFortiapStatusOnline("Online")).toBe(true);
+  });
+
+  it("accepts 'connected' (firmware-variant value)", () => {
+    expect(isFortiapStatusOnline("connected")).toBe(true);
+    expect(isFortiapStatusOnline("Connected")).toBe(true);
+  });
+
+  it("gives empty/missing status the benefit of the doubt", () => {
+    expect(isFortiapStatusOnline("")).toBe(true);
+    expect(isFortiapStatusOnline("   ")).toBe(true);
+    expect(isFortiapStatusOnline(null)).toBe(true);
+    expect(isFortiapStatusOnline(undefined)).toBe(true);
+  });
+
+  it("rejects offline / discovered / other states", () => {
+    expect(isFortiapStatusOnline("offline")).toBe(false);
+    expect(isFortiapStatusOnline("discovered")).toBe(false);
+    expect(isFortiapStatusOnline("disconnected")).toBe(false);
+    expect(isFortiapStatusOnline("connecting")).toBe(false);
   });
 });

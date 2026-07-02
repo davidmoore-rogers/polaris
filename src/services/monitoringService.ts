@@ -7391,11 +7391,16 @@ async function persistLldpNeighbors(
  * rest_api targets the asset's own IP with a FortiOS endpoint APs don't
  * serve, and SNMP LLDP-MIB on the AP itself is usually disabled.
  *
- * Ownership guard: skips (returns "skipped") when the asset is monitored AND
- * its resolved lldpPolling is "snmp" — a live SNMP LLDP stream owns the
- * table, and a second full-replace writer would alternate row sets with it.
- * rest_api is deliberately NOT treated as an owner (it can never succeed
- * against an AP, so deferring to it would leave the table empty forever).
+ * Ownership guard: skips (returns "skipped") when the asset is monitored,
+ * its resolved lldpPolling is "snmp", AND that stream is actually delivering
+ * — i.e. rows from another writer (source != "managed-ap") were refreshed
+ * within the 48h stickiness window. A live SNMP LLDP stream owns the table
+ * (two full-replace writers would alternate row sets), but a configured-yet-
+ * dead one must not: FortiAPs usually don't expose LLDP-MIB, so an AP class
+ * whose lldpPolling resolves to snmp (e.g. inherited from the interfaces
+ * transport at some tier) would otherwise defer forever to a stream that
+ * never writes, leaving the table empty. rest_api is deliberately NOT
+ * treated as an owner either (it can never succeed against an AP).
  *
  * Local port names are normalized against the AP's most recent interface
  * samples (lan1 ↔ eth0, see utils/fortiapInterfaceAlias.ts) so rows line up
@@ -7417,7 +7422,17 @@ export async function persistManagedApLldpNeighbors(
       ...asset,
       discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
     });
-    if (effective.lldpPolling === "snmp") return "skipped";
+    if (effective.lldpPolling === "snmp") {
+      const otherWriterFresh = await prisma.assetLldpNeighbor.findFirst({
+        where: {
+          assetId,
+          source: { not: "managed-ap" },
+          lastSeen: { gte: new Date(now.getTime() - 48 * 60 * 60 * 1000) },
+        },
+        select: { id: true },
+      });
+      if (otherWriterFresh) return "skipped";
+    }
   }
   const ifRows = await prisma.assetInterfaceSample.findMany({
     where: { assetId },
