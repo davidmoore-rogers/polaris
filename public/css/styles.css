@@ -4120,6 +4120,13 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   background: #ff1744; animation: sitemap-pulse-ring 2s ease-out infinite; pointer-events: none;
 }
 
+/* Count badge centered on a stacked-sites anchor dot (spiderfy explode). */
+.sitemap-stack-count {
+  width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+  color: #fff; font-family: "Roboto Mono", monospace; font-size: 10px; font-weight: 700;
+  text-shadow: 0 0 3px #000, 0 1px 2px rgba(0, 0, 0, 0.9); pointer-events: none;
+}
+
 /* Open-Meteo temperature label. */
 .sitemap-temp {
   color: #fff; font-family: "Roboto Mono", monospace; font-size: 11px; font-weight: 700;
