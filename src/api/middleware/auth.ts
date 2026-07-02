@@ -6,14 +6,14 @@
  *     `requirePermission(functionKey, level)` from ./permissions.ts, which
  *     consults the session's role snapshot.
  *   - Bearer token (external): `Authorization: Bearer polaris_<...>` from a
- *     long-lived API token, scoped to a fixed list of capabilities.
+ *     long-lived API token bound to a Role at mint time. requirePermission
+ *     resolves the token's role matrix exactly like a session snapshot.
  *
  * The five hardcoded-role helpers (requireAdmin / requireNetworkAdmin /
  * requireAssetsAdmin / requireUserOrAbove / isNetworkAdminOrAbove) were
  * retired in the dynamic-roles cutover (migration
- * 20260524000000_roles_table_cutover). Routes that need the bearer-or-
- * session hybrid now use `requireSessionOrTokenPermission` from
- * ./permissions.ts.
+ * 20260524000000_roles_table_cutover); the parallel token scope-string
+ * system followed in the api-tokens role cutover (20260706000000).
  */
 
 import { Request, Response, NextFunction } from "express";
@@ -28,6 +28,19 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction) {
   next(new AppError(401, "Unauthorized — please log in"));
 }
 
+/**
+ * Display identity for audit Events: the session username when present,
+ * otherwise `api:<token name>` for bearer-token callers. Returns undefined
+ * for unauthenticated callers (logEvent stores a null actor). Use this in
+ * any route handler a role-bound token can reach, so token writes are
+ * attributed to the token instead of "unknown".
+ */
+export function requestActor(req: Request): string | undefined {
+  if (req.session?.username) return req.session.username;
+  if (req.apiToken) return `api:${req.apiToken.name}`;
+  return undefined;
+}
+
 // ─── Bearer-token auth ────────────────────────────────────────────────
 
 function extractBearerToken(req: Request): string | null {
@@ -40,11 +53,11 @@ function extractBearerToken(req: Request): string | null {
 /**
  * Resolve a bearer token (if any) on the request and attach the
  * authenticated identity to `req.apiToken`. Always calls next() — does
- * not enforce auth on its own. Pair with `requireSessionOrTokenScope`
- * for the actual gate.
+ * not enforce auth on its own. `requirePermission` downstream resolves
+ * the token's bound role and applies the actual gate.
  *
  * Mounted globally on the API router below the session/CSRF middleware
- * so every downstream route can opt in via the hybrid guards.
+ * so every downstream route sees the resolved identity.
  */
 export async function attachApiToken(req: Request, _res: Response, next: NextFunction) {
   try {
@@ -84,6 +97,6 @@ export async function requireAgentBearer(req: Request, _res: Response, next: Nex
   }
 }
 
-// requireSessionOrTokenScope retired — see `requireSessionOrTokenPermission`
-// in ./permissions.ts which takes a `(functionKey, level, scope)` triple
-// and consults the session's role snapshot.
+// requireSessionOrTokenScope (and its successor requireSessionOrTokenPermission)
+// retired — bearer tokens carry a roleId and pass the plain requirePermission
+// gate in ./permissions.ts.

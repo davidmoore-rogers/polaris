@@ -541,11 +541,11 @@ app.use(async (req, res, next) => {
     // Old-session self-heal: a session issued before the dynamic-roles
     // cutover has `userId` but no `roleSnapshot`, so the lookup below
     // would silently return "none" and bounce the operator home. Defer
-    // to `ensureSessionRoleSnapshot` which loads the user's role from
+    // to `ensureRoleSnapshot` which loads the user's role from
     // DB and stamps the session in place. One DB hit per surviving old
     // session; the snapshot path is hot after that.
-    const { ensureSessionRoleSnapshot } = await import("./api/middleware/permissions.js");
-    const snap = await ensureSessionRoleSnapshot(req).catch(() => null);
+    const { ensureRoleSnapshot } = await import("./api/middleware/permissions.js");
+    const snap = await ensureRoleSnapshot(req).catch(() => null);
     const perms = (snap?.permissions ?? req.session.roleSnapshot?.permissions ?? {}) as Record<string, "none" | "read" | "write" | "fullwrite">;
     const actual = perms[required.key] ?? "none";
     if (PERM_RANK[actual] < PERM_RANK[required.level]) {

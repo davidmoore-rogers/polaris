@@ -716,7 +716,7 @@ export interface FilterOptions {
  *     — custom types are always shown and aren't meaningful filter entries.
  *   - regions: distinct `region:<name>` tag values across the live fleet, the
  *     same tags the `regionTags` filter matches. Sorted.
- * Two cheap queries; safe for a dashboard:read token.
+ * Two cheap queries; safe for a read-only NOC kiosk token.
  */
 export async function getFilterOptions(): Promise<FilterOptions> {
   const [typeRows, regionRows] = await Promise.all([

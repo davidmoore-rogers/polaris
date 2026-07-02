@@ -2,9 +2,10 @@
  * src/api/routes/apiTokens.ts — CRUD for bearer-token API access.
  *
  * Mounted at /api/v1/api-tokens with `requirePermission("apiTokens","read")`
- * at router.ts; writes here escalate to `apiTokens=write`. Tokens grant
- * scoped access to specific endpoints (e.g. quarantine); the raw token
- * value is shown ONCE on creation and never recoverable.
+ * at router.ts; writes here escalate to `apiTokens=write`. Each token is
+ * bound to a Role at mint time — it acts with that role's permission matrix
+ * everywhere requirePermission gates. The raw token value is shown ONCE on
+ * creation and never recoverable.
  */
 
 import { Router } from "express";
@@ -12,22 +13,23 @@ import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import {
-  KNOWN_SCOPES,
   createToken,
   deleteToken,
   listTokens,
   revokeToken,
 } from "../../services/apiTokenService.js";
 import { logEvent } from "./events.js";
-import { requirePermission } from "../middleware/permissions.js";
+import {
+  requirePermission,
+  normalizePermissions,
+  isAdminEquivalentPermissions,
+} from "../middleware/permissions.js";
 
 const router = Router();
 
-const ScopeEnum = z.enum(KNOWN_SCOPES as unknown as [string, ...string[]]);
-
 const CreateTokenSchema = z.object({
   name: z.string().min(1).max(80),
-  scopes: z.array(ScopeEnum).min(1),
+  roleId: z.string().min(1),
   integrationIds: z.array(z.string().uuid()).optional(),
   expiresAt: z.string().datetime().optional(),
 });
@@ -53,9 +55,25 @@ router.get("/", async (_req, res, next) => {
         pushQuarantineEnabled: cfg.pushQuarantine === true,
       };
     });
+    // Role catalogue for the "acts as role" dropdown. Embedded here (rather
+    // than the UI calling /api/v1/roles) so the tab renders for any caller
+    // holding apiTokens=read regardless of their roles-function access.
+    // grantsQuarantineWrite drives the integration-picker toggle;
+    // adminEquivalent drives the "full control" warning banner.
+    const roles = (await prisma.role.findMany({ orderBy: { name: "asc" } })).map((r) => {
+      const perms = normalizePermissions(r.permissions);
+      return {
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        grantsQuarantineWrite:
+          perms.assetsQuarantine === "write" || perms.assetsQuarantine === "fullwrite",
+        adminEquivalent: isAdminEquivalentPermissions(perms),
+      };
+    });
     res.json({
       tokens: await listTokens(),
-      knownScopes: KNOWN_SCOPES,
+      roles,
       quarantineIntegrations,
     });
   } catch (err) {
@@ -72,7 +90,7 @@ router.post("/", requirePermission("apiTokens", "write"), async (req, res, next)
     }
     const result = await createToken({
       name: input.name,
-      scopes: input.scopes,
+      roleId: input.roleId,
       integrationIds: input.integrationIds,
       expiresAt,
       createdBy: req.session?.username || "unknown",
@@ -83,7 +101,7 @@ router.post("/", requirePermission("apiTokens", "write"), async (req, res, next)
       resourceId: result.token.id,
       resourceName: result.token.name,
       actor: req.session?.username,
-      message: `API token "${result.token.name}" created with scopes ${result.token.scopes.join(", ")}`,
+      message: `API token "${result.token.name}" created with role "${result.token.roleName}"`,
     });
     // The raw token field is the ONLY time the caller sees the value.
     res.status(201).json(result);

@@ -33,10 +33,17 @@ declare module "express-session" {
 declare global {
   namespace Express {
     interface Request {
-      // Set by apiTokenAuth middleware when the request presented a valid
+      // Set by attachApiToken middleware when the request presented a valid
       // bearer token. Mutually exclusive with req.session.userId in
-      // practice — token callers don't get a session.
-      apiToken?: { id: string; name: string; scopes: string[]; integrationIds: string[] };
+      // practice — token callers don't get a session. roleId is the Role the
+      // token was bound to at mint time; requirePermission resolves it.
+      apiToken?: { id: string; name: string; roleId: string; integrationIds: string[] };
+
+      // Resolved role snapshot for THIS request, memoized by the permission
+      // resolver (requirePermission / ensureRoleSnapshot). For token callers
+      // it's the only place the snapshot lives (no session); for session
+      // callers it mirrors req.session.roleSnapshot. hasPermission reads it.
+      roleSnapshot?: SessionRoleSnapshot;
 
       // Set by `requireAgentBearer` when the request presented a valid
       // Polaris Agent bearer (issued at /api/v1/agents/enroll). Mutually

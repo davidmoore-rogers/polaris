@@ -1122,7 +1122,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/api/middleware/permissions.ts` — `loadRoleSnapshot` rewrites `req.session.roleSnapshot` + persists via `req.session.save()` when the cached `updatedAt` is newer than the snapshot. `rankRole` / `pickHighestPrivilegeRoleId` rank roles for highest-privilege-wins group resolution.
 
 **Readers** (consult the matrix or the session snapshot to gate behavior):
-- `src/api/middleware/permissions.ts` — `requirePermission` / `hasPermission` / `requireOwnership` / `requireSessionOrTokenPermission`. All route guards funnel through here.
+- `src/api/middleware/permissions.ts` — `requirePermission` / `hasPermission` / `requireOwnership` / `ensureRoleSnapshot`. All route guards funnel through here, for sessions and role-bound bearer tokens alike.
 - Every route module under `src/api/routes/` — declares its per-route gate via `requirePermission(functionKey, level)`. Ownership-dimensioned routes (`subnets.ts`, `reservations.ts`) additionally branch on `req.permissionLevel === "fullwrite"`.
 - `src/api/routes/conflicts.ts` — `visibleEntityTypes(req)` and `canResolve(req, entityType)` consult `hasPermission(req, "discoveryConflicts", ...)` plus role NAME (`req.session.role`) for back-compat with the historical networkadmin↔reservation / assetsadmin↔asset split. Custom roles with `discoveryConflicts=write` see both entity types by default.
 - `src/app.ts` — Static-page redirect: `/users.html` / `/integrations.html` / `/server-settings.html` consult `req.session.roleSnapshot.permissions[key]` against the matching `pageRequiredPermission` entry; out-of-scope users bounce to `/`.
@@ -1599,11 +1599,11 @@ Listed alphabetically.
 
 ## services/apiTokenService.ts
 
-**What it owns:** Long-lived bearer-token CRUD for external API access; argon2id hash + tokenPrefix-based lookup; scope validation (assets:quarantine, assets:read); integrationIds enforcement for quarantine scope.
+**What it owns:** Long-lived bearer-token CRUD for external API access; argon2id hash + tokenPrefix-based lookup; role binding (each token carries a roleId whose matrix requirePermission resolves like a session snapshot); integrationIds enforcement when the bound role grants assetsQuarantine >= write; api_token.admin_equivalent warning Event on admin-equivalent bindings.
 
-**Public API:** KNOWN_SCOPES, ApiTokenScope, ApiTokenSummary, AuthenticatedToken, CreateTokenInput, CreateTokenResult, createToken, listTokens, revokeToken, deleteToken, verifyToken.
+**Public API:** ApiTokenSummary, AuthenticatedToken, CreateTokenInput, CreateTokenResult, createToken, listTokens, revokeToken, deleteToken, verifyToken.
 
-**Cross-service deps:** none.
+**Cross-service deps:** permissions.ts (normalizePermissions, isAdminEquivalentPermissions), eventLogService (logEvent via routes/events re-export).
 
 **Used by:**
 - src/api/routes/apiTokens.ts — GET /api-tokens, list all tokens
@@ -1616,12 +1616,13 @@ Listed alphabetically.
 **Invariants:**
 - Wire format: `Authorization: Bearer polaris_<32-char-base64url-tail>` (prefix stored separately for fast candidate lookup via index).
 - tokenHash is argon2id; never returned; rawToken shown ONCE at creation (POST response).
-- assets:quarantine scope requires integrationIds (≥1 FortiManager/FortiGate id); assets:read scopes may have empty integrationIds.
+- A bound role granting assetsQuarantine ≥ write requires integrationIds (≥1 FortiManager/FortiGate id); other roles may have empty integrationIds.
+- Roles bound to tokens can't be deleted (roleService counts apiTokens and 409s); role edits propagate to live tokens via the bumpRoleVersion cache on the next request.
 - verifyToken() is best-effort on lastUsedAt/lastUsedIp updates; missed bumps don't fail auth.
 - Expired tokens (expiresAt in past) and revoked tokens (revokedAt set) are silently excluded from lookup; no 401 distinction.
 
 **When changing this:**
-- Audit scope validation (validateIntegrationIds) if adding new integration types to quarantine support.
+- Audit validateIntegrationIds if adding new integration types to quarantine support.
 - Test wire format edge cases (malformed prefix, truncated token, null bearer header).
 - Verify tokenPrefix index is used in verifyToken candidate fetch to keep lookup O(indexed).
 - Check that expiresAt comparison handles null and timezone offsets correctly.

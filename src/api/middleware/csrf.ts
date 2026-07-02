@@ -67,6 +67,17 @@ export function csrfMiddleware(req: Request, res: Response, next: NextFunction) 
   if (SAFE_METHODS.has(req.method)) return next();
   if (EXEMPT_PATH_PREFIXES.some((prefix) => req.path.startsWith(prefix))) return next();
 
+  // Requests carrying an `Authorization: Bearer` header are exempt: CSRF is a
+  // cookie-borne-credential attack, and a cross-site attacker cannot attach a
+  // custom header — form posts can't carry one, and fetch() with one triggers
+  // a CORS preflight we never approve. Any request that has the header
+  // therefore originated from a non-browser client or our own same-origin JS
+  // (which is trusted anyway). Authentication is still fully enforced
+  // downstream: attachApiToken + requirePermission for API tokens,
+  // requireAgentBearer for agents.
+  const authHeader = req.get("authorization") || "";
+  if (/^Bearer\s+\S+$/i.test(authHeader)) return next();
+
   const fromHeader = req.get(HEADER_NAME);
   const fromSession = req.session?.csrfToken;
   if (!fromHeader || !fromSession || fromHeader !== fromSession) {

@@ -8,7 +8,8 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
-import { requirePermission, requireSessionOrTokenPermission } from "../middleware/permissions.js";
+import { requirePermission } from "../middleware/permissions.js";
+import { requestActor } from "../middleware/auth.js";
 import { machineApiLimiter } from "../middleware/rateLimits.js";
 import { logEvent, buildChanges } from "./events.js";
 import { assetMatchesIntegrationFilter } from "../../utils/integrationFilter.js";
@@ -633,7 +634,7 @@ router.get("/", requirePermission("assets", "read"), async (req, res, next) => {
     const limit = Math.min(q.limit ?? ASSET_LIST_DEFAULT_LIMIT, ASSET_LIST_MAX_LIMIT);
     const offset = q.offset ?? 0;
 
-    const where = buildAssetListWhere(q, req.query as Record<string, unknown>, req.session?.username);
+    const where = buildAssetListWhere(q, req.query as Record<string, unknown>, requestActor(req));
     const orderBy = buildAssetOrderBy(q.sortBy, q.sortDir);
 
     let favoriteIds = csvToArray(q.favoriteIds);
@@ -712,7 +713,7 @@ router.put("/ip-history-settings", requirePermission("assets", "write"), async (
     const { retentionDays } = z.object({ retentionDays: z.number().int().min(0).max(3650) }).parse(req.body);
     await updateHistorySettings({ retentionDays });
     const pruned = await pruneOldHistory();
-    logEvent({ action: "asset.history_settings.updated", actor: req.session?.username, message: `IP history retention set to ${retentionDays} day(s)${pruned ? `; pruned ${pruned} old record(s)` : ""}` });
+    logEvent({ action: "asset.history_settings.updated", actor: requestActor(req), message: `IP history retention set to ${retentionDays} day(s)${pruned ? `; pruned ${pruned} old record(s)` : ""}` });
     res.json({ ok: true, pruned });
   } catch (err) {
     next(err);
@@ -793,7 +794,7 @@ router.post("/bulk-monitor", requirePermission("assets", "write"), async (req, r
     logEvent({
       action: body.monitored ? "monitor.bulk_enabled" : "monitor.bulk_disabled",
       resourceType: "asset",
-      actor: req.session?.username,
+      actor: requestActor(req),
       message: `Bulk ${body.monitored ? "enabled" : "disabled"} monitoring on ${updatedCount} asset(s)` + (errors.length ? `; ${errors.length} error(s)` : ""),
       details: errors.length ? { errors } : undefined,
     });
@@ -1067,7 +1068,7 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
           resourceType: "asset",
           resourceId: id,
           resourceName: filterAsset.hostname || filterAsset.ipAddress || undefined,
-          actor: req.session?.username,
+          actor: requestActor(req),
           level: "warning",
           message: `Poll blocked: ${label} — ${reason}`,
           details: { integrationId: filterAsset.discoveredByIntegration.id, integrationType: filterAsset.discoveredByIntegration.type, reason },
@@ -1140,7 +1141,7 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
       resourceType: "asset",
       resourceId: id,
       resourceName: asset?.hostname || asset?.ipAddress || undefined,
-      actor: req.session?.username,
+      actor: requestActor(req),
       level: anyFail ? "warning" : "info",
       message: `Poll: ${label} — ${streamSummary.join("; ")}`,
       details: { probe, telemetry, hardware, systemInfo },
@@ -1192,7 +1193,7 @@ router.post("/:id/snmp-walk", requirePermission("assetsProbe", "write"), async (
         resourceType: "asset",
         resourceId: id,
         resourceName: asset.hostname || asset.ipAddress || undefined,
-        actor: req.session?.username,
+        actor: requestActor(req),
         level: "info",
         message: `SNMP walk: ${label} — ${oid} → ${result.rows.length} row(s)${result.truncated ? " (truncated)" : ""}`,
         details: { oid, credentialName: cred.name, rows: result.rows.length, truncated: result.truncated, durationMs: result.durationMs },
@@ -1205,7 +1206,7 @@ router.post("/:id/snmp-walk", requirePermission("assetsProbe", "write"), async (
         resourceType: "asset",
         resourceId: id,
         resourceName: asset.hostname || asset.ipAddress || undefined,
-        actor: req.session?.username,
+        actor: requestActor(req),
         level: "warning",
         message: `SNMP walk failed: ${label} — ${oid} — ${message}`,
         details: { oid, credentialName: cred.name, error: message },
@@ -1791,7 +1792,7 @@ router.put("/:id/interfaces/:ifName/comment", requirePermission("assets", "write
     const parsed = InterfaceCommentSchema.parse(req.body || {});
     const raw = parsed.description == null ? "" : String(parsed.description);
     const trimmed = raw.trim();
-    const actor = req.session?.username;
+    const actor = requestActor(req);
 
     const asset = await prisma.asset.findUnique({
       where: { id },
@@ -2053,14 +2054,14 @@ router.put("/:id/processes/:name/config", requirePermission("assets", "write"), 
     const body = ProcessConfigSchema.parse(req.body);
     const updated = await prisma.assetProcessConfig.upsert({
       where:  { assetId_name: { assetId: id, name } },
-      update: { logSource: body.logSource, logPathGlob: body.logPathGlob ?? null, notes: body.notes ?? null, updatedBy: req.session?.username ?? null },
-      create: { assetId: id, name, logSource: body.logSource ?? "auto", logPathGlob: body.logPathGlob ?? null, notes: body.notes ?? null, updatedBy: req.session?.username ?? null },
+      update: { logSource: body.logSource, logPathGlob: body.logPathGlob ?? null, notes: body.notes ?? null, updatedBy: requestActor(req) ?? null },
+      create: { assetId: id, name, logSource: body.logSource ?? "auto", logPathGlob: body.logPathGlob ?? null, notes: body.notes ?? null, updatedBy: requestActor(req) ?? null },
     });
     logEvent({
       action: "asset.process.log_config_set",
       resourceType: "asset",
       resourceId: id,
-      actor: req.session?.username,
+      actor: requestActor(req),
       message: `Log config set for process "${name}"`,
       details: { name, logSource: updated.logSource, logPathGlob: updated.logPathGlob },
     });
@@ -2078,7 +2079,7 @@ router.post("/:id/processes/:name/control", requirePermission("processControl", 
     const id = req.params.id as string;
     const name = String(req.params.name);
     const { action } = ProcessControlSchema.parse(req.body);
-    const cmd = await requestProcessControl(id, name, action, req.session?.username);
+    const cmd = await requestProcessControl(id, name, action, requestActor(req));
     res.status(202).json({ command: cmd });
   } catch (err) { next(err); }
 });
@@ -2106,11 +2107,11 @@ router.post("/", requirePermission("assets", "write"), async (req, res, next) =>
     if (typeof input.latitude === "number") data.coordSource = "manual";
     // Always stamp status tracking on creation (status is always set here)
     data.statusChangedAt = new Date();
-    data.statusChangedBy = req.session?.username ?? "manual";
-    data.createdBy = req.session?.username ?? null;
+    data.statusChangedBy = requestActor(req) ?? "manual";
+    data.createdBy = requestActor(req) ?? null;
     clampAcquiredToLastSeen(data);
     const asset = await prisma.asset.create({ data: data as any });
-    logEvent({ action: "asset.created", resourceType: "asset", resourceId: asset.id, resourceName: input.hostname || input.ipAddress, actor: req.session?.username, message: `Asset "${input.hostname || input.ipAddress || "unknown"}" created` });
+    logEvent({ action: "asset.created", resourceType: "asset", resourceId: asset.id, resourceName: input.hostname || input.ipAddress, actor: requestActor(req), message: `Asset "${input.hostname || input.ipAddress || "unknown"}" created` });
     // Apply any criteria-based auto-tags to the new asset (best-effort).
     reconcileTagsForAsset(asset.id).catch(() => {});
     // Manual coords on a firewall may move it into/out of a map region —
@@ -2204,7 +2205,7 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     }
     if (input.status !== undefined) {
       data.statusChangedAt = new Date();
-      data.statusChangedBy = req.session?.username ?? "manual";
+      data.statusChangedBy = requestActor(req) ?? "manual";
     }
     clampMonitoredState(data);
     clampAcquiredToLastSeen(data, existing);
@@ -2221,7 +2222,7 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     const after: Record<string, unknown> = {};
     for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }
     const changes = buildChanges(before, after);
-    logEvent({ action: "asset.updated", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: req.session?.username, message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated`, details: changes ? { changes } : undefined });
+    logEvent({ action: "asset.updated", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: requestActor(req), message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated`, details: changes ? { changes } : undefined });
     // Re-evaluate criteria-based auto-tags when a criteria-relevant field changed
     // (best-effort; the periodic job is the safety net).
     const TAG_CRITERIA_FIELDS = ["manufacturer", "model", "os", "osVersion", "hostname", "department", "location", "assetType", "status", "ipAddress"] as const;
@@ -2288,7 +2289,7 @@ router.post("/:id/monitor-override/reset", requirePermission("assets", "write"),
       resourceType: "asset",
       resourceId: id,
       resourceName: asset.hostname || asset.ipAddress || undefined,
-      actor: req.session?.username,
+      actor: requestActor(req),
       message: `Reset monitor override on "${asset.hostname || asset.ipAddress || "unknown"}" to integration default (monitored=${flag})`,
     });
     res.json(asset);
@@ -2386,7 +2387,7 @@ router.post("/dns-lookup", requirePermission("assets", "write"), async (req, res
     }
 
     logEvent({
-      action: "asset.dns.bulk", resourceType: "asset", actor: req.session?.username,
+      action: "asset.dns.bulk", resourceType: "asset", actor: requestActor(req),
       message: `Bulk DNS lookup: ${resolved} resolved, ${failed} failed, ${skippedPrimary} skipped (TTL); ${assocResolved} associated IP PTR(s) resolved, ${assocSkipped} skipped`,
     });
     res.json({ total: needsPrimary.length, skipped: skippedPrimary, resolved, failed, assocResolved, assocSkipped, results });
@@ -2465,7 +2466,7 @@ router.post("/:id/dns-lookup", requirePermission("assets", "write"), async (req,
     if (assocResolved > 0) parts.push(`${assocResolved} associated IP PTR(s) resolved`);
     const message = parts.join("; ");
 
-    logEvent({ action: "asset.dns.resolved", resourceType: "asset", resourceId: asset.id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: req.session?.username, message: `DNS resolved: ${message}` });
+    logEvent({ action: "asset.dns.resolved", resourceType: "asset", resourceId: asset.id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: requestActor(req), message: `DNS resolved: ${message}` });
     res.json({ ok: true, dnsName, dnsNameTtl, assocResolved, message });
   } catch (err) {
     next(err);
@@ -2493,7 +2494,7 @@ router.post("/:id/forward-lookup", requirePermission("assets", "write"), async (
     const ip = records[0].address;
     await prisma.asset.update({ where: { id: asset.id }, data: { ipAddress: ip, ipSource: "dns" } });
 
-    logEvent({ action: "asset.dns.forward_resolved", resourceType: "asset", resourceId: asset.id, resourceName: asset.hostname || asset.dnsName || undefined, actor: req.session?.username, message: `Forward DNS: ${lookupName} → ${ip} in ${elapsed}ms` });
+    logEvent({ action: "asset.dns.forward_resolved", resourceType: "asset", resourceId: asset.id, resourceName: asset.hostname || asset.dnsName || undefined, actor: requestActor(req), message: `Forward DNS: ${lookupName} → ${ip} in ${elapsed}ms` });
     res.json({ ok: true, ipAddress: ip, message: `${lookupName} → ${ip} in ${elapsed}ms` });
   } catch (err) {
     next(err);
@@ -2527,7 +2528,7 @@ router.post("/oui-lookup", requirePermission("assets", "write"), async (req, res
       }
     }
 
-    logEvent({ action: "asset.oui.bulk", resourceType: "asset", message: `Bulk OUI lookup: ${resolved} resolved, ${failed} unmatched out of ${assets.length} assets`, actor: req.session?.username });
+    logEvent({ action: "asset.oui.bulk", resourceType: "asset", message: `Bulk OUI lookup: ${resolved} resolved, ${failed} unmatched out of ${assets.length} assets`, actor: requestActor(req) });
     res.json({ total: assets.length, resolved, failed, results });
   } catch (err) {
     next(err);
@@ -2553,7 +2554,7 @@ router.post("/:id/oui-lookup", requirePermission("assets", "write"), async (req,
     const msg = data.model
       ? `OUI resolved: ${asset.macAddress} → ${vendor} / ${data.model}`
       : `OUI resolved: ${asset.macAddress} → ${vendor}`;
-    logEvent({ action: "asset.oui.resolved", resourceType: "asset", resourceId: asset.id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: req.session?.username, message: msg });
+    logEvent({ action: "asset.oui.resolved", resourceType: "asset", resourceId: asset.id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: requestActor(req), message: msg });
     res.json({ ok: true, manufacturer: vendor, model: data.model, message: msg });
   } catch (err) {
     next(err);
@@ -2597,7 +2598,7 @@ router.post("/import", requirePermission("assets", "write"), async (req, res, ne
     }
 
     if (!dryRun && updated > 0) {
-      logEvent({ action: "asset.import", resourceType: "asset", actor: req.session?.username, message: `CSV import: updated first-seen date for ${updated} asset(s)` });
+      logEvent({ action: "asset.import", resourceType: "asset", actor: requestActor(req), message: `CSV import: updated first-seen date for ${updated} asset(s)` });
     }
 
     res.json({ preview, updated, notFound, dryRun: !!dryRun });
@@ -2643,7 +2644,7 @@ router.post("/import-pdf", requirePermission("assets", "write"), async (req, res
           const importUpdateData: Record<string, unknown> = { ...updateData };
           if (importUpdateData.status !== undefined) {
             importUpdateData.statusChangedAt = new Date();
-            importUpdateData.statusChangedBy = req.session?.username ?? "manual";
+            importUpdateData.statusChangedBy = requestActor(req) ?? "manual";
           }
           await prisma.asset.update({ where: { id: existing.id }, data: importUpdateData as any });
           updated++;
@@ -2651,14 +2652,14 @@ router.post("/import-pdf", requirePermission("assets", "write"), async (req, res
       } else {
         preview.push({ action: "create", serialNumber: serial, hostname: row.hostname || null, fields });
         if (!dryRun) {
-          await prisma.asset.create({ data: { assetType: "other", status: "storage", statusChangedAt: new Date(), statusChangedBy: req.session?.username ?? "manual", ...updateData } as any });
+          await prisma.asset.create({ data: { assetType: "other", status: "storage", statusChangedAt: new Date(), statusChangedBy: requestActor(req) ?? "manual", ...updateData } as any });
           created++;
         }
       }
     }
 
     if (!dryRun && (created + updated) > 0) {
-      logEvent({ action: "asset.import_pdf", resourceType: "asset", actor: req.session?.username, message: `PDF import: created ${created}, updated ${updated} asset(s)` });
+      logEvent({ action: "asset.import_pdf", resourceType: "asset", actor: requestActor(req), message: `PDF import: created ${created}, updated ${updated} asset(s)` });
     }
 
     res.json({ preview, created, updated, dryRun: !!dryRun });
@@ -2711,7 +2712,7 @@ router.delete("/:id/macs/:mac", requirePermission("assets", "write"), async (req
       resourceType: "asset",
       resourceId: id,
       resourceName: updated.hostname || updated.ipAddress || undefined,
-      actor: req.session?.username,
+      actor: requestActor(req),
       message: `Removed MAC ${normalized} from asset "${updated.hostname || updated.ipAddress || "unknown"}"`,
     });
 
@@ -2739,7 +2740,7 @@ router.delete("/", requirePermission("assets", "write"), async (req, res, next) 
       throw new AppError(409, `Cannot delete quarantined asset(s): ${names.join(", ")}${more}. Release the quarantine first.`);
     }
     const { count } = await prisma.asset.deleteMany({ where: { id: { in: ids as string[] } } });
-    logEvent({ action: "asset.bulk_deleted", resourceType: "asset", actor: req.session?.username, message: `Bulk deleted ${count} asset(s)` });
+    logEvent({ action: "asset.bulk_deleted", resourceType: "asset", actor: requestActor(req), message: `Bulk deleted ${count} asset(s)` });
     res.json({ deleted: count });
   } catch (err) {
     next(err);
@@ -2756,7 +2757,7 @@ router.delete("/:id", requirePermission("assets", "write"), async (req, res, nex
       throw new AppError(409, `Cannot delete quarantined asset "${existing.hostname || existing.ipAddress || id}". Release the quarantine first.`);
     }
     await prisma.asset.delete({ where: { id } });
-    logEvent({ action: "asset.deleted", resourceType: "asset", resourceId: id, resourceName: existing.hostname || existing.ipAddress || undefined, actor: req.session?.username, message: `Asset "${existing.hostname || existing.ipAddress || "unknown"}" deleted` });
+    logEvent({ action: "asset.deleted", resourceType: "asset", resourceId: id, resourceName: existing.hostname || existing.ipAddress || undefined, actor: requestActor(req), message: `Asset "${existing.hostname || existing.ipAddress || "unknown"}" deleted` });
     res.status(204).send();
   } catch (err) {
     next(err);
@@ -2782,7 +2783,7 @@ router.put("/sighting-settings", requirePermission("assetsQuarantine", "write"),
     await updateSightingSettings(input);
     logEvent({
       action: "asset.sighting_settings_updated",
-      actor: req.session?.username,
+      actor: requestActor(req),
       message: `Quarantine sighting max-age set to ${input.sightingMaxAgeDays} day(s)`,
     });
     res.json(input);
@@ -2994,7 +2995,7 @@ router.post("/:id/sources/:sourceId/split", requirePermission("assets", "write")
       assetType,
       status: "active",
       statusChangedAt: new Date(),
-      statusChangedBy: req.session?.username || "system",
+      statusChangedBy: requestActor(req) || "system",
       os: projected.os,
       osVersion: projected.osVersion,
       serialNumber: projected.serialNumber,
@@ -3007,7 +3008,7 @@ router.post("/:id/sources/:sourceId/split", requirePermission("assets", "write")
       tags: Array.from(tagSet),
       notes: `Split from asset ${originalAsset.hostname || originalAsset.id} — ${target.sourceKind} source detached on ${new Date().toISOString()}`,
       ...(target.integrationId ? { discoveredByIntegrationId: target.integrationId } : {}),
-      createdBy: req.session?.username || null,
+      createdBy: requestActor(req) || null,
     };
 
     // Two-step: create the new Asset, then re-bind the source row. Done in a
@@ -3027,7 +3028,7 @@ router.post("/:id/sources/:sourceId/split", requirePermission("assets", "write")
       resourceType: "asset",
       resourceId: id,
       resourceName: originalAsset.hostname || undefined,
-      actor: req.session?.username,
+      actor: requestActor(req),
       level: "info",
       message: `Split ${target.sourceKind} source (externalId ${target.externalId}) off asset ${originalAsset.hostname || id} → new asset ${result.newAsset.id}`,
       details: {
@@ -3107,7 +3108,7 @@ router.post("/:id/merge", requirePermission("assets", "write"), async (req, res,
       resourceType: "asset",
       resourceId: result.survivorId,
       resourceName: survivorBefore.hostname || undefined,
-      actor: req.session?.username,
+      actor: requestActor(req),
       level: "info",
       message: `Merged asset ${absorbedBefore.hostname || result.absorbedId} into ${survivorBefore.hostname || result.survivorId} — moved ${result.movedSources} source(s)`,
       details: {
@@ -3561,7 +3562,7 @@ router.post("/:id/dependency-test", requirePermission("assetsProbe", "write"), a
     }
 
     const until = new Date(Date.now() + durationMinutes * 60_000);
-    const startedBy = req.session?.username || "unknown";
+    const startedBy = requestActor(req) || "unknown";
 
     await prisma.asset.update({
       where: { id },
@@ -3578,7 +3579,7 @@ router.post("/:id/dependency-test", requirePermission("assetsProbe", "write"), a
       resourceType: "asset",
       resourceId:   id,
       resourceName: asset.hostname || undefined,
-      actor:        req.session?.username,
+      actor:        requestActor(req),
       level:        "info",
       message:      `Dependency Test started on ${asset.hostname || id} for ${durationMinutes} min (auto-expires ${until.toISOString()})`,
       details:      { durationMinutes, dependencyTestUntil: until },
@@ -3615,7 +3616,7 @@ router.delete("/:id/dependency-test", requirePermission("assetsProbe", "write"),
       resourceType: "asset",
       resourceId:   id,
       resourceName: asset.hostname || undefined,
-      actor:        req.session?.username,
+      actor:        requestActor(req),
       level:        "info",
       message:      `Dependency Test cleared on ${asset.hostname || id}`,
       details:      { startedBy: asset.dependencyTestStartedBy, scheduledUntil: asset.dependencyTestUntil },
@@ -3668,12 +3669,12 @@ router.get("/:id/quarantine-status", requirePermission("assetsQuarantine", "read
 });
 
 // POST /api/v1/assets/:id/quarantine — admin, assets admin, or token with assets:quarantine scope
-router.post("/:id/quarantine", requireSessionOrTokenPermission("assetsQuarantine", "write", "assets:quarantine"), async (req, res, next) => {
+router.post("/:id/quarantine", requirePermission("assetsQuarantine", "write"), async (req, res, next) => {
   try {
     const Schema = z.object({ reason: z.string().max(500).optional() });
     const input = Schema.parse(req.body ?? {});
     const id = req.params.id as string;
-    const actor = req.apiToken ? `api:${req.apiToken.name}` : `user:${req.session?.username || "unknown"}`;
+    const actor = requestActor(req) || "unknown";
     const result = await quarantineAsset({
       assetId: id,
       actor,
@@ -3687,10 +3688,10 @@ router.post("/:id/quarantine", requireSessionOrTokenPermission("assetsQuarantine
 });
 
 // DELETE /api/v1/assets/:id/quarantine — admin, assets admin, or token with assets:quarantine scope
-router.delete("/:id/quarantine", requireSessionOrTokenPermission("assetsQuarantine", "write", "assets:quarantine"), async (req, res, next) => {
+router.delete("/:id/quarantine", requirePermission("assetsQuarantine", "write"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
-    const actor = req.apiToken ? `api:${req.apiToken.name}` : `user:${req.session?.username || "unknown"}`;
+    const actor = requestActor(req) || "unknown";
     const result = await releaseQuarantine({
       assetId: id,
       actor,
@@ -3703,7 +3704,7 @@ router.delete("/:id/quarantine", requireSessionOrTokenPermission("assetsQuaranti
 });
 
 // POST /api/v1/assets/:id/quarantine/verify — read-back drift check (admin, assets admin, or token)
-router.post("/:id/quarantine/verify", machineApiLimiter, requireSessionOrTokenPermission("assetsQuarantine", "write", "assets:quarantine"), async (req, res, next) => {
+router.post("/:id/quarantine/verify", machineApiLimiter, requirePermission("assetsQuarantine", "write"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const verifyResult = await verifyAssetQuarantine(id, req.apiToken?.integrationIds);
@@ -3714,7 +3715,7 @@ router.post("/:id/quarantine/verify", machineApiLimiter, requireSessionOrTokenPe
         data: { quarantineTargets: verifyResult.targets as any },
       });
       const asset = await prisma.asset.findUnique({ where: { id }, select: { hostname: true, ipAddress: true } });
-      const actor = req.apiToken ? req.apiToken.name : req.session?.username;
+      const actor = requestActor(req);
       logEvent({
         action: "asset.quarantine.drift_detected",
         resourceType: "asset",
@@ -3733,14 +3734,14 @@ router.post("/:id/quarantine/verify", machineApiLimiter, requireSessionOrTokenPe
 });
 
 // POST /api/v1/assets/bulk-quarantine — admin, assets admin, or token with assets:quarantine scope
-router.post("/bulk-quarantine", requireSessionOrTokenPermission("assetsQuarantine", "write", "assets:quarantine"), async (req, res, next) => {
+router.post("/bulk-quarantine", requirePermission("assetsQuarantine", "write"), async (req, res, next) => {
   try {
     const Schema = z.object({
       ids: z.array(z.string()).min(1),
       reason: z.string().max(500).optional(),
     });
     const input = Schema.parse(req.body);
-    const actor = req.apiToken ? `api:${req.apiToken.name}` : `user:${req.session?.username || "unknown"}`;
+    const actor = requestActor(req) || "unknown";
     const results: Array<{ id: string; ok: boolean; message: string; succeededCount?: number; failedCount?: number }> = [];
     for (const id of input.ids) {
       try {
@@ -3757,11 +3758,11 @@ router.post("/bulk-quarantine", requireSessionOrTokenPermission("assetsQuarantin
 });
 
 // POST /api/v1/assets/bulk-quarantine/release — admin, assets admin, or token with assets:quarantine scope
-router.post("/bulk-quarantine/release", requireSessionOrTokenPermission("assetsQuarantine", "write", "assets:quarantine"), async (req, res, next) => {
+router.post("/bulk-quarantine/release", requirePermission("assetsQuarantine", "write"), async (req, res, next) => {
   try {
     const Schema = z.object({ ids: z.array(z.string()).min(1) });
     const input = Schema.parse(req.body);
-    const actor = req.apiToken ? `api:${req.apiToken.name}` : `user:${req.session?.username || "unknown"}`;
+    const actor = requestActor(req) || "unknown";
     const results: Array<{ id: string; ok: boolean; message: string }> = [];
     for (const id of input.ids) {
       try {
@@ -3817,7 +3818,7 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
   try {
     const assetId = req.params.id as string;
     const body = AgentInstallSchema.parse(req.body);
-    const actor = req.session?.username || "unknown";
+    const actor = requestActor(req) || "unknown";
 
     const asset = await prisma.asset.findUnique({
       where: { id: assetId },
@@ -3944,7 +3945,7 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
 router.post("/:id/agent/retry", requirePermission("assets", "write"), async (req, res, next) => {
   try {
     const assetId = req.params.id as string;
-    const actor = req.session?.username || "unknown";
+    const actor = requestActor(req) || "unknown";
 
     const row = await prisma.managedAgent.findUnique({ where: { assetId } });
     if (!row) throw new AppError(404, "No agent row to retry for this asset");
@@ -4001,7 +4002,7 @@ router.post("/:id/agent/upgrade", requirePermission("assets", "write"), async (r
   try {
     const assetId = req.params.id as string;
     const body = AgentUpgradeSchema.parse(req.body ?? {});
-    const actor = req.session?.username || "unknown";
+    const actor = requestActor(req) || "unknown";
 
     const row = await prisma.managedAgent.findUnique({ where: { assetId } });
     if (!row) throw new AppError(404, "No agent installed for this asset");
@@ -4027,7 +4028,7 @@ router.post("/:id/agent/upgrade", requirePermission("assets", "write"), async (r
 router.delete("/:id/agent", requirePermission("assets", "write"), async (req, res, next) => {
   try {
     const assetId = req.params.id as string;
-    const actor = req.session?.username || "unknown";
+    const actor = requestActor(req) || "unknown";
     const force = String(req.query.force ?? "").toLowerCase() === "true";
 
     const row = await prisma.managedAgent.findUnique({ where: { assetId } });
