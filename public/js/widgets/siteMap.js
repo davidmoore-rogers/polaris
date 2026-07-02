@@ -3,7 +3,11 @@
  *
  * Status DOTS (green/amber/red/grey circle markers) colored by monitor health,
  * with a pulsing white-ringed dot for down sites, click popups, and hover
- * name tooltips. Plus a WEATHER overlay matching the NOC wall display:
+ * name tooltips. Sites sharing the same coordinates (several gates geocoded to
+ * one address) collapse into a single STACK dot with a count badge; clicking it
+ * explodes the stack spiderfy-style — each site fans out on a dashed connector
+ * leg so every gate is visible and clickable. Down sites never join a stack
+ * (their pulse ring + permanent draggable label must stay individually visible). Plus a WEATHER overlay matching the NOC wall display:
  * animated RainViewer precipitation radar + Open-Meteo current-temperature
  * labels, with °F / RADAR / LOOP toggles and a radar timestamp. A darkened
  * basemap (CSS filter on the tile pane) keeps the dots and radar legible.
@@ -188,57 +192,146 @@
         });
       }
 
+      // isLeg = the dot is an exploded-stack leg: it sits at a fanned-out
+      // latlng (not the site's true position) and must not bubble clicks to
+      // the map, or the map-click collapse handler would fire on it.
+      function addSiteDot(s, latlng, isLeg) {
+        var color = statusColor(s), down = isDown(s);
+        if (down) {
+          L.marker(latlng, {
+            interactive: false,
+            icon: L.divIcon({ className: "", html: '<div class="sitemap-pulse"></div>', iconSize: [22, 22], iconAnchor: [11, 11] }),
+          }).addTo(markersLayer);
+        }
+        var dot = L.circleMarker(latlng, {
+          radius: down ? 7 : 6,
+          fillColor: color, fillOpacity: down ? 1 : 0.85,
+          color: down ? "#fff" : color, weight: down ? 2 : 1, opacity: down ? 1 : 0.6,
+          bubblingMouseEvents: !isLeg,
+        });
+        var name = escapeHtml(s.hostname || "(unnamed)");
+        dot.bindPopup(
+          '<div class="sitemap-popup-title" style="color:' + color + '">' + name + "</div>" +
+          (s.model ? '<div class="sitemap-popup-row">' + escapeHtml(s.model) + "</div>" : "") +
+          (s.ipAddress ? '<div class="sitemap-popup-row"><span>IP</span><code>' + escapeHtml(s.ipAddress) + "</code></div>" : "") +
+          '<div class="sitemap-popup-row">' + escapeHtml(monitorLine(s)) + "</div>" +
+          (s.subnetCount ? '<div class="sitemap-popup-row">' + s.subnetCount + " subnet" + (s.subnetCount === 1 ? "" : "s") + "</div>" : "") +
+          '<a class="sitemap-popup-link" href="/map.html#site=' + encodeURIComponent(s.id) + '&topology=1">Open device map →</a>',
+          { maxWidth: 280 }
+        );
+        // Down sites get a PERMANENT, DRAGGABLE red tooltip (always visible,
+        // naming the down device) so the outage is readable at a glance and
+        // overlapping labels can be pulled apart; healthy sites show the name
+        // on hover only. Reuse any offset the operator dragged it to.
+        var offset = (down && draggedOffsets[s.id]) ? draggedOffsets[s.id] : [0, down ? -10 : -8];
+        dot.bindTooltip(
+          down ? (name + " — DOWN") : name,
+          {
+            permanent: down,
+            direction: "top",
+            offset: offset,
+            className: down ? "sitemap-tip sitemap-tip-down" : "sitemap-tip",
+            opacity: 1,
+          }
+        );
+        if (down) dot.on("tooltipopen", function () { attachTooltipDrag(dot, s.id); });
+        dot.addTo(markersLayer);
+        if (down) downMarkers.push(dot);
+        return dot;
+      }
+
+      // ── Stacked-site explode (spiderfy) ────────────────────────────────
+      // Sites sharing coordinates render as ONE anchor dot (worst-status
+      // color + count badge). Clicking it fans the members out on dashed
+      // connector legs so each gate gets its own clickable dot. Collapses on
+      // map click or re-click of the anchor; zoom collapses then re-expands
+      // (leg positions are pixel-radius fans, so they must be recomputed).
+      var stacks = {};           // coordKey -> { center, sites }
+      var expandedKey = null;    // survives the 60s rebuild + zoom
+      var expandedLayers = [];
+      function collapseStack(keepKey) {
+        expandedLayers.forEach(function (l) { markersLayer.removeLayer(l); });
+        expandedLayers = [];
+        if (!keepKey) expandedKey = null;
+      }
+      function expandStack(key) {
+        var st = stacks[key]; if (!st) { expandedKey = null; return; }
+        expandedKey = key;
+        var n = st.sites.length;
+        var centerPt = map.latLngToLayerPoint(st.center);
+        st.sites.forEach(function (s, i) {
+          // ≤10 legs: single ring sized to the count. Beyond that, a spiral
+          // (8 legs per turn, radius growing per leg) so legs never overlap.
+          var a, r;
+          if (n <= 10) { a = (2 * Math.PI * i) / n - Math.PI / 2; r = 22 + n * 2; }
+          else { a = (2 * Math.PI / 8) * i - Math.PI / 2; r = 24 + 3.2 * i; }
+          var ll = map.layerPointToLatLng(centerPt.add([r * Math.cos(a), r * Math.sin(a)]));
+          var line = L.polyline([st.center, ll], { color: "#9aa4b2", weight: 1, dashArray: "3 3", opacity: 0.8, interactive: false });
+          line.addTo(markersLayer);
+          expandedLayers.push(line);
+          expandedLayers.push(addSiteDot(s, ll, true));
+        });
+      }
+      function stackColor(sitesArr) {
+        var rank = { degraded: 3, unknown: 2, dep: 1, up: 0 };
+        var worst = "up";
+        sitesArr.forEach(function (s) {
+          var k = healthKey(s);
+          if ((rank[k] || 0) > (rank[worst] || 0)) worst = k;
+        });
+        return COLOR[worst];
+      }
+      function addStack(key, sitesArr) {
+        var center = [sitesArr[0].latitude, sitesArr[0].longitude];
+        stacks[key] = { center: center, sites: sitesArr };
+        var anchor = L.circleMarker(center, {
+          radius: 9, fillColor: stackColor(sitesArr), fillOpacity: 0.9,
+          color: "#fff", weight: 1.5, opacity: 0.9,
+          bubblingMouseEvents: false,
+        });
+        anchor.bindTooltip(sitesArr.length + " sites — click to expand", { direction: "top", offset: [0, -10], className: "sitemap-tip", opacity: 1 });
+        anchor.on("click", function () {
+          var was = expandedKey === key;
+          collapseStack();
+          if (!was) expandStack(key);
+        });
+        anchor.addTo(markersLayer);
+        L.marker(center, {
+          interactive: false,
+          icon: L.divIcon({ className: "", html: '<div class="sitemap-stack-count">' + sitesArr.length + "</div>", iconSize: [18, 18], iconAnchor: [9, 9] }),
+        }).addTo(markersLayer);
+      }
+      map.on("click", function () { collapseStack(); });
+      map.on("zoomstart", function () { collapseStack(true); });
+      map.on("zoomend", function () { if (expandedKey) expandStack(expandedKey); });
+
       function buildMarkers(sites) {
+        collapseStack(true);
         markersLayer.clearLayers();
         markerRefs = [];
         downMarkers = [];
+        stacks = {};
         var rows = (sites || []).filter(function (s) { return s.latitude != null && s.longitude != null; });
         if (config && config.issuesOnly) rows = rows.filter(hasIssue);
         var latlngs = [];
+        var groups = {};
         rows.forEach(function (s) {
-          var color = statusColor(s), down = isDown(s);
-          if (down) {
-            L.marker([s.latitude, s.longitude], {
-              interactive: false,
-              icon: L.divIcon({ className: "", html: '<div class="sitemap-pulse"></div>', iconSize: [22, 22], iconAnchor: [11, 11] }),
-            }).addTo(markersLayer);
-          }
-          var dot = L.circleMarker([s.latitude, s.longitude], {
-            radius: down ? 7 : 6,
-            fillColor: color, fillOpacity: down ? 1 : 0.85,
-            color: down ? "#fff" : color, weight: down ? 2 : 1, opacity: down ? 1 : 0.6,
-          });
-          var name = escapeHtml(s.hostname || "(unnamed)");
-          dot.bindPopup(
-            '<div class="sitemap-popup-title" style="color:' + color + '">' + name + "</div>" +
-            (s.model ? '<div class="sitemap-popup-row">' + escapeHtml(s.model) + "</div>" : "") +
-            (s.ipAddress ? '<div class="sitemap-popup-row"><span>IP</span><code>' + escapeHtml(s.ipAddress) + "</code></div>" : "") +
-            '<div class="sitemap-popup-row">' + escapeHtml(monitorLine(s)) + "</div>" +
-            (s.subnetCount ? '<div class="sitemap-popup-row">' + s.subnetCount + " subnet" + (s.subnetCount === 1 ? "" : "s") + "</div>" : "") +
-            '<a class="sitemap-popup-link" href="/map.html#site=' + encodeURIComponent(s.id) + '&topology=1">Open device map →</a>',
-            { maxWidth: 280 }
-          );
-          // Down sites get a PERMANENT, DRAGGABLE red tooltip (always visible,
-          // naming the down device) so the outage is readable at a glance and
-          // overlapping labels can be pulled apart; healthy sites show the name
-          // on hover only. Reuse any offset the operator dragged it to.
-          var offset = (down && draggedOffsets[s.id]) ? draggedOffsets[s.id] : [0, down ? -10 : -8];
-          dot.bindTooltip(
-            down ? (name + " — DOWN") : name,
-            {
-              permanent: down,
-              direction: "top",
-              offset: offset,
-              className: down ? "sitemap-tip sitemap-tip-down" : "sitemap-tip",
-              opacity: 1,
-            }
-          );
-          if (down) dot.on("tooltipopen", function () { attachTooltipDrag(dot, s.id); });
-          dot.addTo(markersLayer);
-          if (down) downMarkers.push(dot);
           markerRefs.push({ lat: s.latitude, lng: s.longitude });
           latlngs.push([s.latitude, s.longitude]);
+          // Down sites always render individually (pulse ring + permanent
+          // draggable label must stay visible); only healthy/degraded/unknown
+          // dots at identical coordinates group into a stack.
+          if (isDown(s)) { addSiteDot(s, [s.latitude, s.longitude], false); return; }
+          var key = s.latitude.toFixed(5) + "," + s.longitude.toFixed(5);
+          (groups[key] = groups[key] || []).push(s);
         });
+        Object.keys(groups).forEach(function (key) {
+          var g = groups[key];
+          if (g.length === 1) addSiteDot(g[0], [g[0].latitude, g[0].longitude], false);
+          else addStack(key, g);
+        });
+        // A stack the operator had exploded stays exploded across the refresh.
+        if (expandedKey) expandStack(expandedKey);
         requestAnimationFrame(updateLeaders);
         return latlngs;
       }
