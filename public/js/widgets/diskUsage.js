@@ -2,7 +2,8 @@
  * widgets/diskUsage.js — top monitored filesystems by used %. One row PER VOLUME
  * (host + mount path), ranked fullest-first. Thin wrapper over the shared
  * _topnBar renderer; data from /dashboard/noc-summary diskUsage[]. Like Highest
- * CPU/Memory it shows every red row (≥90%) and pads to a 20-row floor.
+ * CPU/Memory the Row limit governs the top-N shown and every red row (≥90%)
+ * always shows even past the limit.
  */
 
 (function () {
@@ -22,17 +23,17 @@
     description: "Monitored filesystems with the highest used percentage, per volume.",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
-    defaultConfig: { rowLimit: 1000, regionScope: "mine" },
+    defaultConfig: { rowLimit: 20, regionScope: "mine" },
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
-      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { return (d && d.diskUsage) || []; }).catch(function () { return []; });
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["diskUsage"]).then(function (d) { return (d && d.diskUsage) || []; }).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
       render(el, config, data);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config)).then(function (d) { render(el, config, (d && d.diskUsage) || []); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["diskUsage"]).then(function (d) { render(el, config, (d && d.diskUsage) || []); }).catch(function () {});
       }, 60000);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
@@ -46,7 +47,8 @@
     },
 
     renderConfig: function (el, config, onChange) {
-      // No "Hide below" control: shows every red row (≥90%) + a 20-row floor.
+      // No "Hide below" control: Row limit governs the top-N shown; every red
+      // row (≥90%) always shows even past the limit.
       PolarisTopN.renderConfig(el, config, onChange, {});
       PolarisWidgets.renderNocFilterConfig(el, config, onChange, true);
     },

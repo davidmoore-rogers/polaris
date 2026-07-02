@@ -296,6 +296,86 @@ describe("getFilterOptions", () => {
   });
 });
 
+describe("getNocSummaryPayload", () => {
+  beforeEach(() => {
+    noc.clearNocFeedCache();
+  });
+
+  function grantAll() {
+    return { canAssets: true, canEvents: true, assetTypes: null, regionNames: null, capLimit: null };
+  }
+
+  it("returns only the requested feeds, flattened to the legacy response keys", async () => {
+    groupBy
+      .mockResolvedValueOnce([{ monitorStatus: "up", _count: { _all: 3 } }]) // status: all monitored
+      .mockResolvedValueOnce([]);                                            // status: infra subset
+    count.mockResolvedValueOnce(0);
+    findMany.mockResolvedValueOnce([
+      { id: "a", hostname: "fw", ipAddress: null, assetType: "firewall", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null },
+    ]);
+
+    const r = await noc.getNocSummaryPayload({ feeds: ["status", "downNodes"], ...grantAll() });
+    expect(Object.keys(r).sort()).toEqual(["activeAlertCount", "downNodes", "statusCounts", "uptimePercent"]);
+    expect((r.statusCounts as { total: number }).total).toBe(3);
+    expect((r.downNodes as Array<{ id: string }>).map((n) => n.id)).toEqual(["a"]);
+  });
+
+  it("null feeds returns the full payload shape", async () => {
+    groupBy.mockResolvedValue([]);
+    count.mockResolvedValue(0);
+    findMany.mockResolvedValue([]);
+    eventFindMany.mockResolvedValue([]);
+    rawUnsafe.mockResolvedValue([]);
+    resolve.mockResolvedValue({ intervalSeconds: 60 });
+
+    const r = await noc.getNocSummaryPayload({ feeds: null, ...grantAll() });
+    expect(Object.keys(r).sort()).toEqual([
+      "activeAlertCount", "activeAlerts", "diskUsage", "downInterfaces", "downIpsecTunnels",
+      "downNodes", "packetLoss", "recentReboots", "sitesWithIssues", "slowestResponse",
+      "stalePolls", "statusCounts", "topCpu", "topMemory", "uptimePercent",
+    ]);
+  });
+
+  it("permission-denied feeds return their empty value without touching the DB", async () => {
+    const r = await noc.getNocSummaryPayload({
+      feeds: null, canAssets: false, canEvents: false, assetTypes: null, regionNames: null, capLimit: null,
+    });
+    expect(r.statusCounts).toEqual({ total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0 });
+    expect(r.downNodes).toEqual([]);
+    expect(r.activeAlerts).toEqual([]);
+    expect(groupBy).not.toHaveBeenCalled();
+    expect(findMany).not.toHaveBeenCalled();
+    expect(eventFindMany).not.toHaveBeenCalled();
+    expect(rawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it("drops unknown feed names silently", async () => {
+    const r = await noc.getNocSummaryPayload({ feeds: ["bogus"], ...grantAll() });
+    expect(r).toEqual({});
+    expect(rawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it("serves repeat requests for the same (feed, filter, cap) from the TTL cache", async () => {
+    rawUnsafe.mockResolvedValue([{ assetId: "a", value: 50 }]);
+    findMany.mockResolvedValue([{ id: "a", hostname: "h", ipAddress: null }]);
+
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll() });
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll() });
+    expect(rawUnsafe).toHaveBeenCalledTimes(1); // second call was a cache hit
+
+    // A different row cap is a different cache entry.
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), capLimit: 1000 });
+    expect(rawUnsafe).toHaveBeenCalledTimes(2);
+  });
+
+  it("applies the caller's capLimit to the feed query", async () => {
+    rawUnsafe.mockResolvedValue([]);
+    await noc.getNocSummaryPayload({ feeds: ["topCpu"], ...grantAll(), capLimit: 1000 });
+    // getHighestCpu binds LIMIT as the 2nd parameter.
+    expect(rawUnsafe.mock.calls[0][2]).toBe(1000);
+  });
+});
+
 describe("resolveFilteredAssetIds", () => {
   it("returns null (no narrowing) when neither asset types nor regions filter", async () => {
     const r = await noc.resolveFilteredAssetIds({ assetTypes: null, regionNames: null });
