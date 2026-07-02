@@ -5415,6 +5415,15 @@ function openApiQueryModal(id, adom, useProxy) {
   var savedQueries = _fmgLoadQueries();
   _fmgRenderSavedSelect(savedQueries, "fmg");
 
+  // Prefill the Target FortiGate with the last device this integration's
+  // query modal sent to (stored on Send). The field starts empty on a fresh
+  // browser; loading a preset never wipes it (see the Load handler).
+  try {
+    var lastDevice = localStorage.getItem("polaris-fmg-query-device-" + id);
+    var deviceInput = document.getElementById("fmg-fgt-device");
+    if (lastDevice && deviceInput && !deviceInput.value) deviceInput.value = lastDevice;
+  } catch (_) { /* private mode */ }
+
   // Mode toggle: when FMG proxy mode is enabled, the "Directly to FortiGate"
   // option is disabled. Lock state is driven by the integration's `useProxy`
   // flag (passed in from the caller; default true). The user can still browse
@@ -5455,7 +5464,11 @@ function openApiQueryModal(id, adom, useProxy) {
         fgtRadio.checked = true; _fmgApplyMode("fortigate");
         document.getElementById("fmg-fgt-method").value = q.method || "GET";
         document.getElementById("fmg-fgt-path").value = q.path || "";
-        document.getElementById("fmg-fgt-device").value = q.deviceName || "";
+        // Only overwrite the Target FortiGate when the saved query actually
+        // carries one — the presets store deviceName:"" (operator fills the
+        // target per query), so loading them must not wipe the device the
+        // operator already typed.
+        if (q.deviceName) document.getElementById("fmg-fgt-device").value = q.deviceName;
         document.getElementById("fmg-fgt-query").value = q.query || "";
       } else {
         showToast("This saved query targets a FortiGate directly — disable FMG proxy on the integration to load it", "error");
@@ -5544,6 +5557,9 @@ function openApiQueryModal(id, adom, useProxy) {
         path: path,
         query: query,
       };
+      // Remember the target per integration so reopening the modal doesn't
+      // force retyping it. Prefilled on modal open below.
+      try { localStorage.setItem("polaris-fmg-query-device-" + id, deviceName); } catch (_) { /* private mode */ }
     } else {
       var method = document.getElementById("fmg-method").value;
       var paramsRaw = document.getElementById("fmg-params").value.trim();
