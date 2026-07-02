@@ -595,6 +595,15 @@
     var rows = [];
     function row(k, v) { if (v != null && v !== "") rows.push({ k: k, v: v }); }
     row("Type", asset.assetType);
+    // Controller admission state for managed FortiSwitches / FortiAPs
+    // (fortinetTopology.state, stamped by FMG/FortiGate discovery).
+    if (asset.assetType === "switch" || asset.assetType === "access_point") {
+      var authState = asset.fortinetTopology && typeof asset.fortinetTopology === "object"
+        ? asset.fortinetTopology.state : null;
+      if (authState && typeof authState === "string") {
+        row("Authorization", escapeHtml(authState.charAt(0).toUpperCase() + authState.slice(1)));
+      }
+    }
     row("IP", asset.ipAddress ? '<span class="mono">' + escapeHtml(asset.ipAddress) + '</span>' : null);
     row("MAC", asset.macAddress ? '<span class="mono">' + escapeHtml(asset.macAddress) + '</span>' : null);
     row("Hostname", asset.hostname);

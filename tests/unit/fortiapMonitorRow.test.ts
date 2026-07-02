@@ -150,6 +150,25 @@ describe("parseFortiapMonitorRow lldpNeighbors pass-through", () => {
   });
 });
 
+describe("parseFortiapMonitorRow authorization state", () => {
+  it("captures `state` separately from `status` (FortiOS 7.6.x shape)", () => {
+    const parsed = parseFortiapMonitorRow({ name: "AP-1", status: "connected", state: "authorized" });
+    expect(parsed.status).toBe("connected");
+    expect(parsed.authorizationState).toBe("authorized");
+  });
+
+  it("still falls back status←state on firmware that omits status, while keeping authorizationState", () => {
+    const parsed = parseFortiapMonitorRow({ name: "AP-1", state: "authorized" });
+    expect(parsed.status).toBe("authorized");
+    expect(parsed.authorizationState).toBe("authorized");
+  });
+
+  it("leaves authorizationState empty when the field is absent", () => {
+    const parsed = parseFortiapMonitorRow({ name: "AP-1", status: "connected" });
+    expect(parsed.authorizationState).toBe("");
+  });
+});
+
 describe("isFortiapStatusOnline", () => {
   // The production bug: FortiOS reports "online" on most releases (the
   // controller-status probe documents "online" | "offline" | "discovered"),

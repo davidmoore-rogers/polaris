@@ -145,6 +145,12 @@ export interface ParsedFortiapRow {
   ipAddress:   string;
   baseMac:     string;
   status:      string;
+  // Controller admission state from the row's `state` field ("authorized" /
+  // "discovered" / ...). Distinct from `status` (connectivity): an AP can be
+  // authorized-but-offline or discovered-but-connected. Empty when the
+  // firmware omits the field. Surfaced as the Authorization row on the
+  // asset details General tab via fortinetTopology.state.
+  authorizationState: string;
   osVersion:   string;
   // Wired uplink + mesh + AP-local port from the LLDP/wan_status block.
   peerSwitch?:        string;
@@ -201,6 +207,7 @@ export function parseFortiapMonitorRow(row: Record<string, unknown>): ParsedFort
     ipAddress:  rawApIp === "0.0.0.0" ? "" : rawApIp,
     baseMac:    ALL_ZERO_MAC.test(rawApMac) ? "" : rawApMac,
     status:     str(row.status) || str(row.state) || "",
+    authorizationState: str(row.state).trim(),
     osVersion:  str(row.os_version) || str(row.version) || str(row.firmware_version) || "",
     ...(lldpExt.lldpUplinkSwitch && lldpExt.lldpUplinkPort
       ? { peerSwitch: lldpExt.lldpUplinkSwitch, peerPort: lldpExt.lldpUplinkPort, peerSource: "lldp" as const }

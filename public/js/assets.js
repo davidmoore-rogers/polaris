@@ -3377,6 +3377,7 @@ async function openViewModal(id) {
       viewRow("Model", a.model) +
       viewRow("Type", ASSET_TYPE_LABELS[a.assetType] || a.assetType) +
       viewRow("Status", a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-") +
+      authorizationRowHTML(a) +
       disabledInHTML(a.tags) +
       viewRow("Location", a.location || a.learnedLocation) +
       ((a.latitude != null && a.longitude != null)
@@ -11510,6 +11511,28 @@ function viewRow(label, value, mono, alignRight, copy) {
   }
   return '<div class="detail-row"><span class="detail-label">' + escapeHtml(label) + '</span>' +
     '<span class="detail-value' + (mono ? ' mono' : '') + '"' + style + '>' + inner + '</span></div>';
+}
+
+// Render the Authorization row on the asset details General tab — the
+// controller admission state discovery stamps onto fortinetTopology.state
+// for managed FortiSwitches ("Authorized" / "Unauthorized") and FortiAPs
+// ("authorized" / "discovered" / ...). Distinct from connectivity status:
+// a device can be authorized-but-offline or discovered-but-connected.
+// Renders nothing for other asset types or when discovery hasn't stamped
+// the field (pre-feature discoveries self-heal on the next cycle).
+function authorizationRowHTML(asset) {
+  if (!asset || (asset.assetType !== "switch" && asset.assetType !== "access_point")) return "";
+  var topo = asset.fortinetTopology;
+  var state = topo && typeof topo === "object" ? topo.state : null;
+  if (!state || typeof state !== "string") return "";
+  var lower = state.toLowerCase();
+  var label = state.charAt(0).toUpperCase() + state.slice(1);
+  var color = lower === "authorized" ? "var(--color-success,#10b981)"
+            : lower === "unauthorized" ? "var(--color-danger,#ef4444)"
+            : "var(--color-warning,#fbbf24)";
+  var badge = '<span style="display:inline-block;padding:1px 8px;border-radius:4px;font-size:0.8rem;background:' +
+    color + ';color:#000;font-weight:600">' + escapeHtml(label) + '</span>';
+  return '<div class="detail-row"><span class="detail-label">Authorization</span><span class="detail-value">' + badge + '</span></div>';
 }
 
 // Render HA cluster topology on the asset details General tab. Three rows
