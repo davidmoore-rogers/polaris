@@ -240,9 +240,13 @@
       var nameHtml = (state.editing && active)
         ? '<input type="text" class="dashboard-tab-name-input" data-name="' + escapeHtml(d.id) + '" value="' + escapeHtml(d.name || "") + '" maxlength="60" size="' + Math.max((d.name || "").length, 8) + '" aria-label="Dashboard name">'
         : '<span class="dashboard-tab-name">' + escapeHtml(d.name || "Untitled") + '</span>';
-      // In edit mode tabs are draggable to reorder (drag one left/right onto
-      // another). draggable is off outside edit mode so plain clicks switch.
-      return '<div class="dashboard-tab' + (active ? " active" : "") + '" data-dash="' + escapeHtml(d.id) + '" role="button" tabindex="0"' + (state.editing ? ' draggable="true"' : '') + (state.editing ? ' title="Drag to reorder"' : '') + '>' +
+      // In edit mode a dedicated grip is the drag handle for reordering —
+      // the tab itself can't be draggable because the active tab is mostly
+      // the rename input (dragging would fight text selection, and there'd
+      // be no obvious place to grab).
+      var grip = state.editing ? '<span class="dashboard-tab-grip" draggable="true" title="Drag to reorder">⠿</span>' : "";
+      return '<div class="dashboard-tab' + (active ? " active" : "") + '" data-dash="' + escapeHtml(d.id) + '" role="button" tabindex="0">' +
+        grip +
         nameHtml +
         (state.editing && dashes.length > 1 ? '<button type="button" class="dashboard-tab-remove" data-remove="' + escapeHtml(d.id) + '" title="Delete dashboard">&times;</button>' : '') +
       '</div>';
@@ -252,20 +256,23 @@
       tab.addEventListener("click", function (e) {
         if (e.target.closest("[data-remove]")) { e.stopPropagation(); deleteDashboard(id); return; }
         if (e.target.closest(".dashboard-tab-name-input")) return; // editing the active name, don't switch
+        if (e.target.closest(".dashboard-tab-grip")) return; // grip is for dragging, not switching
         switchDashboard(id);
       });
     });
-    // Edit mode: wire drag-to-reorder on each tab. A tab dropped on another
-    // slots before/after it depending on which half of the target it lands in.
+    // Edit mode: wire drag-to-reorder. Drags start from the grip only; the
+    // whole tab is the drop target, slotting before/after depending on which
+    // half of it the drop lands in.
     if (state.editing) {
       tabsEl.querySelectorAll(".dashboard-tab").forEach(function (tab) {
         var id = tab.getAttribute("data-dash");
-        tab.addEventListener("dragstart", function (e) {
+        var gripEl = tab.querySelector(".dashboard-tab-grip");
+        gripEl.addEventListener("dragstart", function (e) {
           _dragTabId = id;
           if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; try { e.dataTransfer.setData("text/plain", id); } catch (_e) {} }
           tab.style.opacity = "0.5";
         });
-        tab.addEventListener("dragend", function () { _dragTabId = null; tab.style.opacity = ""; clearTabDropCues(); });
+        gripEl.addEventListener("dragend", function () { _dragTabId = null; tab.style.opacity = ""; clearTabDropCues(); });
         tab.addEventListener("dragover", function (e) {
           if (!_dragTabId || _dragTabId === id) return;
           e.preventDefault();
