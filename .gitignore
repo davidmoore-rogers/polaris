@@ -21,3 +21,10 @@ data/backups/
 
 # Windows Explorer / OneDrive folder metadata
 desktop.ini
+
+# Audit output folder
+Audit/
+
+# Audit report output
+production-readiness.html
+findings.json
