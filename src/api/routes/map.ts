@@ -1118,6 +1118,17 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       if (!m) return null;
       return { name, ...m };
     };
+    // Swap a single-member aggregate interface name for its physical member so
+    // edge LABELS show the real cabled port, not the logical aggregate (e.g.
+    // the FortiOS auto-ISL trunk "2DPTD23005147-0" → "port24"). Multi-member
+    // aggregates (true LACP bundles) keep the aggregate name — there's no one
+    // "the physical port" to show. Mirrors ifDetail's swap and
+    // interfaceTopologyService.preferPhysical.
+    const preferPhysicalMember = (assetId: string, ifName: string | null): string | null => {
+      if (!assetId || !ifName) return ifName;
+      const members = physicalByParent.get(`${assetId}|${ifName}`);
+      return members && members.length === 1 ? members[0] : ifName;
+    };
     const attachIfDetails = (arr: Array<{ source: string; target: string; label?: string }>) => {
       for (const e of arr) {
         const parts = String(e.label || "").split(" ↔ ");
@@ -1192,10 +1203,18 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       const pairKey = [n.assetId, n.matchedAsset.id].sort().join("|");
       if (mclagPairKeys.has(pairKey)) continue;
       const isA = n.assetId === pairKey.split("|")[0];
-      const peerPort =
+      const rawPeerPort =
         n.portId && n.portIdSubtype && PORT_ID_NAME_SUBTYPES.has(n.portIdSubtype) ? n.portId : null;
-      const aPort = isA ? n.localIfName : peerPort;
-      const bPort = isA ? peerPort : n.localIfName;
+      // Resolve aggregate ISL trunk names to their single physical member on
+      // BOTH sides (local against the local asset, advertised peer port
+      // against the peer). This shows the real cabled port AND collapses a
+      // genuine single ISL that surfaced as two rows (one side reporting the
+      // physical port, the other the serial-named aggregate) into one cable —
+      // so it no longer false-renders as parallel links.
+      const localPort = preferPhysicalMember(n.assetId, n.localIfName);
+      const peerPort = preferPhysicalMember(n.matchedAsset.id, rawPeerPort);
+      const aPort = isA ? localPort : peerPort;
+      const bPort = isA ? peerPort : localPort;
       let cables = cablesByPair.get(pairKey);
       if (!cables) {
         cables = new Map();
@@ -1249,6 +1268,17 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       .filter((e) => !isMclagPair(e.source, e.target))
       .filter((e) => !parallelPairs.has([e.source, e.target].sort().join("|")))
       .concat(parallelCableEdges);
+    // Final safety net: rewrite any surviving aggregate interface name in an
+    // inter-switch edge label to its single physical member, so no serial-
+    // named ISL trunk (e.g. "2DPTD23005147-0") leaks through regardless of
+    // which pathway built the edge. No-op on already-physical port names.
+    for (const e of interfaceEdgesOut) {
+      const parts = String(e.label || "").split(" ↔ ");
+      if (parts.length !== 2) continue;
+      const src = preferPhysicalMember(e.source, parts[0] === "unknown" ? null : parts[0]);
+      const tgt = preferPhysicalMember(e.target, parts[1] === "unknown" ? null : parts[1]);
+      e.label = portLabel(src ?? parts[0], tgt ?? parts[1]);
+    }
 
     // Drop redundant FortiLink fallback edges. FortiOS stamps
     // `fgt_peer_intf_name = "fortilink"` on every managed switch — direct or
