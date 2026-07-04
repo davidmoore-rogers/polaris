@@ -1660,10 +1660,12 @@
     var srcLabel = (cyInstance.getElementById(srcId).data("label")) || srcId || "?";
     var tgtLabel = (cyInstance.getElementById(tgtId).data("label")) || tgtId || "?";
     var ports = String(edge.data("label") || "").trim();
-    var kind = edge.data("isMesh")     ? "Wireless mesh / bridge"
+    var kind = edge.data("isMesh")     ? "Wireless mesh backhaul"
+             : edge.data("isBridge")   ? "Switch bridged behind AP (wired)"
              : edge.data("isWireless") ? "Wireless client"
              : edge.data("isIface")    ? "Interface-confirmed peer link"
              : edge.data("isLldp")     ? "LLDP neighbor"
+             : edge.data("isApLink")   ? "AP switch uplink"
              :                            "FortiLink controller";
     var html =
       '<div style="font-weight:600">' + escapeHtml(srcLabel) +

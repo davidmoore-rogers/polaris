@@ -659,7 +659,9 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       sourceIfName: string;
       label: string;
       via: "interface";
-      matchVia: "serial" | "hostname";
+      // "serial" / "hostname" — interface-name inference; "lldp" — a per-cable
+      // edge from the parallel-links expansion below (LLDP port-pair evidence).
+      matchVia: "serial" | "hostname" | "lldp";
       reason: string;
     };
     const interfaceEdges: InterfaceEdge[] = [];
@@ -1169,7 +1171,84 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     // direction) — the ICL is fully represented by the mclagEdge above.
     const isMclagPair = (s: string, t: string) => mclagPairKeys.has([s, t].sort().join("|"));
     const lldpEdgesOut = lldpEdges.filter((e) => !isMclagPair(e.source, e.target));
-    const interfaceEdgesOut = interfaceEdges.filter((e) => !isMclagPair(e.source, e.target));
+
+    // Parallel physical links between two in-site switches. LLDP persists one
+    // row per local port, so two cables between the same two switches surface
+    // as two (assetId, localIfName) rows against the same matched peer — but
+    // the graph draws at most ONE inter-switch edge per pair (interface
+    // inference dedupes by pair), hiding the redundancy. When LLDP shows ≥2
+    // distinct port pairs between two sibling switches, replace the single
+    // inferred edge with one edge per cable so parallel links render as
+    // separate lines. Each cable is keyed on its A-side port (canonical-order
+    // pair) and merged across the two directions via the advertised peer
+    // portId, so the mirror rows don't double-count a cable. MCLAG pairs are
+    // excluded — their ICL is authoritatively rendered as the single mclagEdge.
+    type CableEnds = { aPort: string | null; bPort: string | null };
+    const cablesByPair = new Map<string, Map<string, CableEnds>>();
+    for (const n of lldpRows) {
+      if (!n.matchedAsset?.id || n.matchedAsset.id === n.assetId) continue;
+      if (!switchObjById.has(n.assetId) || !switchObjById.has(n.matchedAsset.id)) continue;
+      if (!n.localIfName) continue;
+      const pairKey = [n.assetId, n.matchedAsset.id].sort().join("|");
+      if (mclagPairKeys.has(pairKey)) continue;
+      const isA = n.assetId === pairKey.split("|")[0];
+      const peerPort =
+        n.portId && n.portIdSubtype && PORT_ID_NAME_SUBTYPES.has(n.portIdSubtype) ? n.portId : null;
+      const aPort = isA ? n.localIfName : peerPort;
+      const bPort = isA ? peerPort : n.localIfName;
+      let cables = cablesByPair.get(pairKey);
+      if (!cables) {
+        cables = new Map();
+        cablesByPair.set(pairKey, cables);
+      }
+      // Canonical cable key: the A-side port when known, else the B-side port.
+      const key = aPort ? `a:${aPort}` : `b:${bPort}`;
+      const entry = cables.get(key) ?? { aPort: null, bPort: null };
+      if (aPort && !entry.aPort) entry.aPort = aPort;
+      if (bPort && !entry.bPort) entry.bPort = bPort;
+      cables.set(key, entry);
+    }
+    const parallelPairs = new Set<string>();
+    const parallelCableEdges: InterfaceEdge[] = [];
+    for (const [pairKey, cables] of cablesByPair) {
+      // A row whose peer portId was missing lands under a "b:" key even when
+      // an "a:"-keyed entry already describes the same cable (the A side saw
+      // the B port in its own row) — drop those duplicates before counting.
+      for (const [k, c] of [...cables]) {
+        if (!k.startsWith("b:") || !c.bPort) continue;
+        for (const [k2, c2] of cables) {
+          if (k2.startsWith("a:") && c2.bPort === c.bPort) {
+            cables.delete(k);
+            break;
+          }
+        }
+      }
+      if (cables.size < 2) continue;
+      parallelPairs.add(pairKey);
+      const [aId, bId] = pairKey.split("|");
+      const aLabel = switchHostById.get(aId) || aId;
+      const bLabel = switchHostById.get(bId) || bId;
+      for (const c of cables.values()) {
+        parallelCableEdges.push({
+          source: aId,
+          target: bId,
+          sourceIfName: c.aPort || "unknown",
+          label: portLabel(c.aPort, c.bPort),
+          via: "interface",
+          matchVia: "lldp",
+          reason:
+            `Rule: parallel physical links — one edge per cable.\n` +
+            `Evidence: LLDP between ${aLabel} and ${bLabel} reports ${cables.size} distinct port pairs; ` +
+            `this edge is the cable ${aLabel} "${c.aPort || "?"}" ↔ ${bLabel} "${c.bPort || "?"}".\n` +
+            `The single inferred inter-switch edge is replaced by per-cable edges so redundant links stay visible.`,
+        });
+      }
+    }
+    attachIfDetails(parallelCableEdges);
+    const interfaceEdgesOut = interfaceEdges
+      .filter((e) => !isMclagPair(e.source, e.target))
+      .filter((e) => !parallelPairs.has([e.source, e.target].sort().join("|")))
+      .concat(parallelCableEdges);
 
     // Drop redundant FortiLink fallback edges. FortiOS stamps
     // `fgt_peer_intf_name = "fortilink"` on every managed switch — direct or

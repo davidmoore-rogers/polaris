@@ -126,16 +126,20 @@
       });
     });
     // Wireless-bridge edges (server-detected via LLDP): a FortiLink switch
-    // behind a FortiAP. Rendered like a mesh edge AP→switch; the switch is
-    // marked a mesh/bridge leaf so its FortiLink controller edge is skipped
-    // below and the solver routes it behind the AP.
+    // behind a FortiAP. A real wired ethernet link (the switch's uplink cable
+    // lands on the AP's LAN port) — styled like the other AP↔switch links
+    // (solid, isApLink) rather than the dashed wireless mesh. isBridge keeps
+    // the mesh-leaf layout semantics: the switch is marked a bridge leaf so
+    // its FortiLink controller edge is skipped below and the solver routes it
+    // behind the AP.
     (data.bridgeEdges || []).forEach(function (e, i) {
       meshLeafIds[e.target] = true;
       elements.push({
         data: {
           id: "br" + i, source: e.source, target: e.target,
           label: e.label || "", reason: e.reason || "",
-          isMesh: 1,
+          isBridge: 1,
+          isApLink: 1,
         },
       });
     });
@@ -170,6 +174,12 @@
           if (!e.verifiedUplink) fortilinkFallback = 1; // unverified → virtual (dashed gray)
         }
       }
+      // Wired AP↔switch link (a managed AP's switch uplink) — styled solid +
+      // colored like the bridge edges so every AP-to-switch cable reads the
+      // same regardless of which side is the parent.
+      var isApSwitchLink =
+        (switchIdSet[e.source] && apIdSet[e.target]) ||
+        (apIdSet[e.source] && switchIdSet[e.target]);
       elements.push({
         data: {
           id: "e" + i, source: e.source, target: e.target,
@@ -180,6 +190,7 @@
           // solver so the switch isn't mistaken for a FortiLink fallback.
           isVerifiedUplink: e.verifiedUplink ? 1 : 0,
           isFortilinkFallback: fortilinkFallback,
+          isApLink: isApSwitchLink ? 1 : 0,
           srcIf: e.srcIf || null,
           tgtIf: e.tgtIf || null,
         },
@@ -249,7 +260,78 @@
       });
     });
 
+    markPhysicalLoops(elements);
     return elements;
+  }
+
+  // Physical-loop detection. Stamps `inLoop: 1` on every WIRED edge that lies
+  // on a cycle so the stylesheet can halo it yellow — a ring of switches (or
+  // any redundant cabling) is a deliberate operator design worth surfacing at
+  // a glance, and it's also the first thing to check when STP is misbehaving.
+  //
+  // Graph-theory rule: an edge lies on some cycle iff it is NOT a bridge
+  // (cut-edge), found via Tarjan's bridge algorithm. The graph is the SIMPLE
+  // graph over wired physical edges only:
+  //   - included: interface-inferred, LLDP, AP↔switch links (uplink + bridged),
+  //     verified FG↔switch uplinks
+  //   - excluded: wireless (mesh backhaul, client), unverified FortiLink
+  //     controller edges (no cable proven), MCLAG ICLs (the redundancy loop
+  //     is the entire point of MCLAG — flagging every pair would be noise)
+  //   - parallel cables between the SAME two devices collapse to one
+  //     adjacency, so an LACP/trunk pair alone doesn't read as an L2 loop
+  function markPhysicalLoops(elements) {
+    function isWired(d) {
+      if (d.isMesh || d.isWireless || d.isMclag) return false;
+      if (d.isIface || d.isLldp || d.isApLink || d.isBridge || d.isVerifiedUplink) return true;
+      return false;
+    }
+    var adj = {}; // simple undirected adjacency: id -> { neighborId: true }
+    var wiredEdges = [];
+    elements.forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.source || !d.target || d.source === d.target) return;
+      if (!isWired(d)) return;
+      wiredEdges.push(d);
+      (adj[d.source] = adj[d.source] || {})[d.target] = true;
+      (adj[d.target] = adj[d.target] || {})[d.source] = true;
+    });
+    if (wiredEdges.length < 3) return; // a simple-graph cycle needs ≥3 nodes
+
+    // Iterative Tarjan bridge-finding (no recursion — rings can be long).
+    var disc = {};
+    var low = {};
+    var time = 1;
+    var bridges = {}; // sorted "a|b" pair keys that are cut-edges
+    Object.keys(adj).forEach(function (start) {
+      if (disc[start]) return;
+      disc[start] = low[start] = time++;
+      var stack = [{ node: start, parent: null, neighbors: Object.keys(adj[start]), idx: 0 }];
+      while (stack.length) {
+        var top = stack[stack.length - 1];
+        if (top.idx < top.neighbors.length) {
+          var v = top.neighbors[top.idx++];
+          if (v === top.parent) continue; // simple graph — one parent edge to skip
+          if (!disc[v]) {
+            disc[v] = low[v] = time++;
+            stack.push({ node: v, parent: top.node, neighbors: Object.keys(adj[v] || {}), idx: 0 });
+          } else if (disc[v] < low[top.node]) {
+            low[top.node] = disc[v]; // back edge
+          }
+        } else {
+          stack.pop();
+          var p = stack.length ? stack[stack.length - 1] : null;
+          if (p) {
+            if (low[top.node] < low[p.node]) low[p.node] = low[top.node];
+            if (low[top.node] > disc[p.node]) {
+              bridges[[p.node, top.node].sort().join("|")] = true;
+            }
+          }
+        }
+      }
+    });
+    wiredEdges.forEach(function (d) {
+      if (!bridges[[d.source, d.target].sort().join("|")]) d.inLoop = 1;
+    });
   }
 
   // Cytoscape stylesheet — node colors per role, edge styles per source
@@ -447,6 +529,20 @@
           width: 2.2,
         },
       },
+      // Wired AP↔switch link: a managed AP's switch uplink (switch → AP) or a
+      // FortiLink switch bridged behind an AP (AP → switch, isBridge). Solid
+      // blue with a directional arrow — a real ethernet cable, distinct from
+      // the dashed violet wireless mesh and the gray controller edges.
+      {
+        selector: 'edge[isApLink = 1]',
+        style: {
+          "line-style": "solid",
+          "line-color": "#3b82f6",
+          "target-arrow-color": "#3b82f6",
+          "target-arrow-shape": "triangle",
+          width: 2.2,
+        },
+      },
       // Unverified FortiLink uplink (FortiGate→switch with no interface/LLDP-
       // confirmed cable): a logical/management link, drawn dashed + dimmed gray
       // so it reads as virtual versus the solid controller/physical edges.
@@ -457,6 +553,17 @@
           "line-color": "#6a7388",
           "target-arrow-color": "#6a7388",
           opacity: 0.7,
+        },
+      },
+      // Physical loop membership (stamped by markPhysicalLoops): a wired edge
+      // lying on a cycle gets a yellow halo AROUND its own line color, so a
+      // switch ring reads at a glance without hiding which signal drew the
+      // edge. Composes with the type styles above — only outline props here.
+      {
+        selector: 'edge[inLoop = 1]',
+        style: {
+          "line-outline-color": "#eab308",
+          "line-outline-width": 2,
         },
       },
       {
@@ -551,7 +658,9 @@
         { label: "Interface-inferred",color: "#14b8a6", style: "solid",  desc: "Naming-convention peer link" },
         { label: "LLDP",              color: "#f59e0b", style: "dashed" },
         { label: "MCLAG ICL",         color: "#d946ef", style: "dashed", desc: "Inter-Chassis Link between MCLAG-peer switches" },
-        { label: "Mesh / bridge",     color: "#a78bfa", style: "dashed", desc: "AP → mesh leaf AP / bridged switch" },
+        { label: "Mesh",              color: "#a78bfa", style: "dashed", desc: "Wireless backhaul: root AP → mesh leaf AP" },
+        { label: "AP ↔ switch",       color: "#3b82f6", style: "solid",  desc: "Wired: AP's switch uplink / switch bridged behind an AP" },
+        { label: "In physical loop",  color: "#eab308", style: "solid",  desc: "Yellow halo: wired edge on a redundant/ring path" },
       ],
     };
   }
@@ -645,7 +754,10 @@
     var meshSource = {}; // AP that is the ROOT/source of a mesh or bridge edge
     elements.forEach(function (el) {
       var d = el && el.data;
-      if (d && d.source && d.target && d.isMesh) {
+      // isMesh = wireless backhaul (root AP → leaf AP); isBridge = wired
+      // switch behind an AP. Both make the target a mesh/bridge leaf whose
+      // controller/fallback uplink is bogus and must route through the AP.
+      if (d && d.source && d.target && (d.isMesh || d.isBridge)) {
         meshLeaf[d.target] = true;
         meshSource[d.source] = true;
       }
@@ -681,10 +793,11 @@
       // depth/physical adjacency so neither peer becomes the other's parent and
       // the pair lands on the same column.
       if (d.isMclag) return;
-      // Suppress a mesh leaf's bogus wired uplink: a non-mesh edge joining the
-      // leaf to an infra node (FG/switch). Keep the mesh edge itself and the
-      // leaf's downstream client edges (target is a wireless-station node).
-      if (!d.isMesh) {
+      // Suppress a mesh/bridge leaf's bogus wired uplink: a non-mesh/bridge
+      // edge joining the leaf to an infra node (FG/switch). Keep the mesh and
+      // bridge edges themselves and the leaf's downstream client edges
+      // (target is a wireless-station node).
+      if (!d.isMesh && !d.isBridge) {
         var srcLeaf = meshLeaf[d.source] && TOPOLOGY_INFRA_ROLES[roleById[d.target]];
         var tgtLeaf = meshLeaf[d.target] && TOPOLOGY_INFRA_ROLES[roleById[d.source]];
         if (srcLeaf || tgtLeaf) return;
@@ -987,6 +1100,7 @@
     HEALTH_NODE_COLORS: HEALTH_NODE_COLORS,
     fortinetNodeColor: fortinetNodeColor,
     buildTopologyElements: buildTopologyElements,
+    markPhysicalLoops: markPhysicalLoops,
     topologyStylesheet: topologyStylesheet,
     topologyLegendSpec: topologyLegendSpec,
     computeTopologyColumns: computeTopologyColumns,
