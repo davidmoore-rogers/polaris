@@ -833,6 +833,9 @@ const INTEGRATIONS = [
       },
       // SD-WAN monitoring on for FortiGates discovered through this FMG.
       pullSdwan: true,
+      // Description sync on (Polaris-primary): Polaris descriptions push to
+      // the devices; device values are only adopted where Polaris has none.
+      syncDescriptions: true,
     },
     enabled: true,
     pollInterval: 12,
@@ -889,6 +892,8 @@ const INTEGRATIONS = [
       // SD-WAN monitoring on (Performance SLA + service-rule selection on the
       // system-info cadence; surfaces on the asset's SD-WAN tab).
       pullSdwan: true,
+      // Description sync (Polaris-primary) — parity with the FMG modal.
+      syncDescriptions: true,
     },
     enabled: true,
     pollInterval: 12,
@@ -1502,6 +1507,11 @@ const ASSETS = [
     warrantyExpiry: "2028-01-15T00:00:00.000Z",
     purchaseOrder: "PO-2025-0005",
     notes: "Edge firewall — AWS VPN termination",
+    // Description sync (Polaris-primary): operator-owned device description,
+    // pushed to the FortiGate's system/global alias by the integration's
+    // syncDescriptions toggle. descriptionSync carries the last push state.
+    description: "DC1 edge firewall",
+    descriptionSync: { status: "synced", at: "2026-04-15T10:00:00.000Z" },
     tags: ["firewall", "edge", "critical"],
     // Pre-pinned by the integration's Auto-Monitor Interfaces selection
     // ({mode:"names", names:["wan1","wan2"]}). Fast-cadence polling for the

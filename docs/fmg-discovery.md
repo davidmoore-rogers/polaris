@@ -203,6 +203,20 @@ FMG Integration Discovery
 │     → push MAC to user.quarantine.targets/<name>/macs on each FortiGate
 │        record per-target status in Asset.quarantineTargets
 │
+├─ Description sync (writeback — syncDescriptions toggle; POLARIS IS PRIMARY)
+│   interface comment saved in Polaris, or Asset.description set/changed,
+│   or the per-discovery reconcile (Phase 13.7) finds device ≠ Polaris
+│   AND syncDescriptions === true on integration
+│     →  Polaris empty + device has a value: adopt the device value into
+│        Polaris (seed once; audited)
+│        Polaris has a value: write it to the device — FortiGate
+│        system/interface description / system/global alias, FortiSwitch
+│        managed-switch + port description, FortiAP wtp comment — and
+│        OVERWRITE any device-side edit (audited with the replaced value)
+│        proxy mode: writes via /sys/proxy/json; direct mode: per-FG REST
+│        verify on read-back; best-effort (Polaris row saves regardless),
+│        transient failures retry on the next discovery reconcile
+│
 └─ Projection apply (Phase 11)
     Re-project every touched asset across all its AssetSource rows:
       hostname  → AD FQDN > Intune > Entra > AD short > FortiGate
@@ -219,6 +233,7 @@ FMG Integration Discovery
 | `fortigateMonitor.addAsMonitored` | `false` | New FGs land monitored. Existing FGs unaffected. |
 | `forti{switch,ap}Monitor.{enabled, addAsMonitored, snmpCredentialId}` | all `false` / `null` | 4-way grid above; operator-override preservation on existing rows. |
 | `pushReservations` / `pushQuarantine` | both `false` | Writeback toggles; off by default. |
+| `syncDescriptions` | `false` | Description writeback (Polaris-primary). Polaris descriptions overwrite the device; device values are only imported where Polaris has none. Needs the same Manage Device Configurations RW (proxy mode) / per-FG REST write access (direct mode) as DHCP push. Enable only once Polaris is where your team edits descriptions — device-side edits get reverted. |
 
 ## Direct mode vs the probe path — same strict behavior
 

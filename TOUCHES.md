@@ -510,7 +510,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 ## cross-cutting/fmg-fortigate-parity-surfaces
 
-**What it is:** FMG and standalone FortiGate integrations share feature surfaces that must move together: integration modal tabs (General / Filters / Monitoring / DHCP Push / Quarantine Push), transport dispatch via buildTransportForIntegration(), and filter helpers. This entry is narrower than [cross-cutting/integration-type-onboarding](#cross-cuttingintegration-type-onboarding) — that one covers adding any new type; this one covers the FMG↔FortiGate paired-feature parity that must move together once both types exist.
+**What it is:** FMG and standalone FortiGate integrations share feature surfaces that must move together: integration modal tabs (General / Filters / Monitoring / DHCP Push / Quarantine Push / Description Sync / SD-WAN / Geographic Location), transport dispatch via buildTransportForIntegration(), and filter helpers. This entry is narrower than [cross-cutting/integration-type-onboarding](#cross-cuttingintegration-type-onboarding) — that one covers adding any new type; this one covers the FMG↔FortiGate paired-feature parity that must move together once both types exist.
 
 **Writers** (files that mutate or emit this state):
 - `src/api/routes/integrations.ts` — POST / PUT integration handlers parse both fortimanager and fortigate integration types, store config.pushReservations / pushQuarantine / monitorSettings / deviceInclude/Exclude in the same JSON shape
@@ -518,7 +518,8 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/services/assetQuarantineService.ts` — quarantineAsset() / releaseQuarantine() use buildTransportForIntegration() for both FMG and FortiGate
 - `src/services/fortigateLocationService.ts` — fetchFortigateSysLocation() uses buildTransportForIntegration() + callFortiOs() for both FMG and FortiGate
 - `src/services/fortigateCoordPushService.ts` — FMG-mode pushes to metavars + CMDB natively (no proxy); standalone pushes CMDB via direct REST. Same source-of-truth dispatch pattern as the other push services.
-- `public/js/integrations.js` — Integration modal tab bodies for General (useProxy, Filters), Monitoring, DHCP Push, Quarantine Push. FortiGates Monitoring subtab now also carries the `pullSnmpLocation` / `pushGeocodedCoords` toggles.
+- `src/services/descriptionSyncService.ts` — description push/adopt (interface comments + device descriptions, Polaris-primary) uses buildTransportForIntegration() + callFortiOs() for both FMG (proxy AND bypass/direct) and standalone FortiGate; gated by config.syncDescriptions on both types.
+- `public/js/integrations.js` — Integration modal tab bodies for General (useProxy, Filters), Monitoring, DHCP Push, Quarantine Push, Description Sync. FortiGates Monitoring subtab now also carries the `pullSnmpLocation` / `pushGeocodedCoords` toggles.
 
 **Readers** (files that consume it):
 - `src/api/routes/integrations.ts` — Discovery sync paths read pushReservations toggle to decide whether to push DHCP changes
@@ -529,7 +530,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/utils/integrationFilter.ts` — assetMatchesIntegrationFilter() checks deviceInclude/Exclude for FMG/FortiGate and ouInclude/Exclude for AD (not shared)
 
 **Invariants:**
-- FMG and FortiGate must have identical modal tab layouts and toggle names (pushReservations, pushQuarantine, monitorSettings JSON, deviceInclude/Exclude).
+- FMG and FortiGate must have identical modal tab layouts and toggle names (pushReservations, pushQuarantine, syncDescriptions, pullSdwan, monitorSettings JSON, deviceInclude/Exclude).
 - buildTransportForIntegration() is the single source of truth for routing push/quarantine calls; all callers must use it, never inline a new transport builder.
 - Standalone FortiGate always routes through direct REST transport (no proxy option); FMG respects the useProxy toggle on the General tab.
 - DHCP Push and Quarantine Push are independent toggles; enabling one doesn't force the other (operators mix-and-match per deployment model).
@@ -2196,6 +2197,33 @@ Listed alphabetically.
 - Image-serve route: any new mimeType added to ALLOWED_MIME_TYPES that could execute (script-bearing text formats) needs the same CSP/nosniff treatment as SVG.
 - Topology renderer style for `node[hasIcon=1]` in `public/js/topology-render.js` fills the node interior with white (`background-color: #ffffff`) so vendor logos pop against any basemap, and carries the status signal via a 5px `border-color: data(nodeColor)` ring instead of the fill. If you change the icon to full-bleed, drop the white fill and restore `background-color: data(nodeColor)` so the status hue isn't lost.
 - Per-role `border-width` for `node[hasIcon=1]` must stay roughly 15% of the role's node `width` so the visible image lands at ~70% of the overall visual diameter. Today: fortigate 10/64, fortiswitch+remote-asset 7/44, fortiap 6/36. Change one without the other and the colored ring is either invisibly thin or so thick the logo disappears.
+
+---
+
+## services/descriptionSyncService.ts
+
+**What it owns:** Description sync between Polaris and Fortinet devices (FMG + standalone FortiGate), gated per-integration by `config.syncDescriptions` (default off). **Polaris-primary policy:** Polaris empty + device value → adopt (device value seeded into Polaris; interface comments don't materialize an override — the `override ?? discovered` display fallback already shows the device value); Polaris non-empty → pushed to the device, overwriting device-side edits (overwritten value recorded in the audit Event). Surfaces: FortiGate `system/interface` description ↔ `AssetInterfaceOverride`; FortiSwitch per-port description (managed-switch child table via parent controller) ↔ `AssetInterfaceOverride` on the switch asset; device-level `Asset.description` ↔ FortiGate `system/global` alias / FortiSwitch managed-switch description / FortiAP wtp comment. FortiOS field shapes are flagged VERIFY-on-real-device in the header (alias cap, child-table PUT patch semantics, wtp `comment` existence — the reconcile gates the FortiAP surface on the attribute actually appearing in the wtp read).
+
+**Public API:** `normalizeDescription`, `decideDescriptionSync(polaris, device): "none"|"push"|"adopt"`, `capDescriptionForTarget` + `DESCRIPTION_CAPS`, `pushInterfaceDescription`, `pushSwitchPortDescription`, `pushDeviceDescription` (all accept an optional pre-built `transport` + `currentDeviceValue` so the reconcile pass reuses its batched reads), `syncDescriptionsOnSave({assetId, scope: "interface"|"device", ifName?, actor?})`, `runDescriptionSyncForIntegration(integration): DescriptionSyncSummary`.
+
+**Cross-service deps:** reservationPushService (imports `buildTransportForIntegration` / `callFortiOs` / `classifyPushError` / `Transport` — never inline a new transport builder), eventLogService (`logEvent`).
+
+**Used by:** src/api/routes/assets.ts (`PUT /:id/interfaces/:ifName/comment` → `syncDescriptionsOnSave(scope:"interface")`, response gains `sync: {attempted, status, error}`; asset PUT → `syncDescriptionsOnSave(scope:"device")` fire-and-forget when `description` changed); src/api/routes/integrations.ts:syncDhcpSubnets Phase 13.7 (`runDescriptionSyncForIntegration`, gated on the toggle — zero cost when off).
+
+**Invariants:**
+- Polaris is primary: `decideDescriptionSync` never returns "adopt" when Polaris holds a non-empty value. Device edits are reverted on the next sync, audited with the overwritten value.
+- All device I/O goes through the shared Transport (both `useProxy` modes + standalone FortiGate). HA-secondary members are skipped (config replicates from the primary).
+- Best-effort, never throws to callers. Transport/read errors leave sync state untouched (quarantine-verify rule); only an actual failed PUT stamps `syncStatus="failed"` + `syncError` (prefixed `[permanent]`/`[transient]` via classifyPushError).
+- Every push verifies by read-back; mismatch = permanent failure.
+- Clearing a Polaris value is local-only (no device-side delete): a cleared interface comment leaves the device description in place; a cleared `Asset.description` nulls `descriptionSync` and re-seeds from the device next discovery.
+- No retry queue — the Phase 13.7 reconcile is the retry path (re-pushes wherever device ≠ non-empty Polaris value). DB writes only on change.
+- Firewall transport deviceName resolves `fortinetTopology.deviceName` (FMG dvmdb name, stamped at discovery) before falling back to hostname; switches/APs route via `fortinetTopology.controllerFortigate`.
+
+**When changing this:**
+- Adding a synced surface: add the target kind + cap, a push function with read-back verify, the reconcile read + decision loop, and events; keep the Transport import (parity rule) and update the Description Sync tab copy in public/js/integrations.js.
+- Test both FMG proxy and direct (bypass) modes plus standalone FortiGate; verify the FortiOS field shapes flagged in the header on a real 7.x device before relying on them in production.
+- The interface-keying is name-only — a device-side rename orphans the override; don't "fix" this by adopting into renamed rows without a stable-ID design.
+- Scale: the reconcile is a few CMDB GETs per FortiGate + work proportional to overrides with changed values. Keep it that way — no per-asset device calls, no unconditional DB writes.
 
 ---
 

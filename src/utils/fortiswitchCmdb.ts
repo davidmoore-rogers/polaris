@@ -153,6 +153,27 @@ export function parseFortiswitchMclagPeers(ports: unknown): FortiswitchMclagPeer
   return out;
 }
 
+// Extract per-port operator descriptions from a managed-switch CMDB `ports`
+// array (`config switch-controller managed-switch … config ports … set
+// description`). One entry per port that carries a non-empty description.
+// Feeds the FortiSwitch interface overlay so switch-port rows get the same
+// "discovered description" display fallback (and description-sync read side)
+// that FortiGate interfaces get from the system/interface CMDB. Pure /
+// dependency-free, mirroring the helpers above.
+export function parseFortiswitchPortDescriptions(ports: unknown): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!Array.isArray(ports)) return out;
+  for (const p of ports) {
+    if (!p || typeof p !== "object") continue;
+    const port = p as Record<string, unknown>;
+    const portName = String(port["port-name"] ?? "").trim();
+    if (!portName) continue;
+    const description = typeof port.description === "string" ? port.description.trim() : "";
+    if (description) out.set(portName, description);
+  }
+  return out;
+}
+
 // Identify a managed FortiSwitch's physical uplink port(s) to its controller
 // FortiGate from the switch-controller CMDB `ports` array. The directly-cabled
 // FortiLink uplink port carries `fortilink-port: 1` AND names the FortiGate in

@@ -2313,6 +2313,8 @@ function assetFormHTML(defaults) {
     '<div class="form-group"><label>Warranty Expires</label><input type="date" id="f-warrantyExpiry" value="' + dateInputVal(d.warrantyExpiry) + '"></div>' +
     '<div class="form-group"><label>Purchase Order</label><input type="text" id="f-purchaseOrder" value="' + escapeHtml(d.purchaseOrder || "") + '" placeholder="PO-12345"></div>' +
   '</div>' +
+  '<div class="form-group"><label>Description</label><input type="text" id="f-description" maxlength="255" value="' + escapeHtml(d.description || "") + '" placeholder="Device description (synced to the device when the integration\'s Description Sync is on)">' +
+    '<p class="hint">On Fortinet assets with Description Sync enabled, this writes to the device (FortiGate alias / FortiSwitch description / FortiAP comment) — Polaris is primary. Leave empty to adopt the device\'s value on the next discovery.</p></div>' +
   '<div class="form-group"><label>Notes</label><textarea id="f-notes" rows="2" placeholder="Optional notes">' + escapeHtml(d.notes || "") + '</textarea></div>' +
   tagFieldHTML(d.tags || []);
 }
@@ -2334,6 +2336,9 @@ function getAssetFormData() {
     warrantyExpiry:war ? new Date(war).toISOString() : undefined,
     purchaseOrder: val("f-purchaseOrder") || undefined,
     notes:         val("f-notes") || undefined,
+    // Always sent (including "") — an emptied Description clears to null
+    // server-side so the device value can re-seed it (description sync).
+    description:   val("f-description"),
     tags:          getTagFieldValue(),
   };
   // Coordinates travel as a pair: both blank → null (clear the manual pin /
@@ -3400,6 +3405,11 @@ async function openViewModal(id) {
       viewRow("Warranty Expires", a.warrantyExpiry ? formatDate(a.warrantyExpiry) : null) +
       viewRow("Purchase Order", a.purchaseOrder) +
       viewRow("Tags", (a.tags || []).join(", ") || null, false, true) +
+      viewRow("Description", a.description
+        ? a.description + (a.descriptionSync && a.descriptionSync.status === "failed"
+            ? " ⚠ (device sync failed)"
+            : (a.descriptionSync && a.descriptionSync.status === "synced" ? " (synced to device)" : ""))
+        : null, false, true) +
       viewRow("Notes", a.notes, false, true) +
       viewRow("Created", formatDate(a.createdAt)) +
       viewRow("Updated", formatDate(a.updatedAt)) +
@@ -8273,6 +8283,11 @@ function _populateInterfaceCommentEditor(assetId, ifName, data, opts) {
         ? "" /* discovered-only, override is empty */
         : "");
   var discoveredDescription = (data && data.discoveredDescription) || "";
+  // Description-sync context from the interface-history response: when the
+  // originating integration syncs descriptions (Polaris-primary), the copy
+  // below flips from "Polaris-local" to "synced to device" and a per-row
+  // status line (synced/failed) renders under the editor.
+  var descriptionSync = (data && data.descriptionSync) || { enabled: false, status: null, lastSyncAt: null, error: null };
 
   // Don't clobber in-progress typing on auto-refresh ticks. Range changes
   // (silent=false) always re-populate so the user sees the latest value.
@@ -8294,6 +8309,7 @@ function _populateInterfaceCommentEditor(assetId, ifName, data, opts) {
     ifName: ifName,
     savedValue: savedValue,
     discoveredDescription: discoveredDescription,
+    descriptionSync: descriptionSync,
     dirty: false,
   };
   input.value = savedValue;
@@ -8303,7 +8319,9 @@ function _populateInterfaceCommentEditor(assetId, ifName, data, opts) {
   if (!input.disabled) {
     input.placeholder = discoveredDescription
       ? "Device says: " + discoveredDescription
-      : "Add a comment for this interface (max 255 chars). Polaris-local — not pushed to the device.";
+      : (descriptionSync.enabled
+          ? "Add a comment for this interface (max 255 chars). Synced to the device — Polaris is primary."
+          : "Add a comment for this interface (max 255 chars). Polaris-local — not pushed to the device.");
   }
   if (countEl) countEl.textContent = input.value.length + " / 255";
   if (saveBtn) saveBtn.disabled = true;
@@ -8339,14 +8357,27 @@ function _populateInterfaceCommentEditor(assetId, ifName, data, opts) {
 function _renderIfaceCommentSource(state) {
   var sourceEl = document.getElementById("iface-comment-source");
   if (!sourceEl || !state) return;
+  var sync = state.descriptionSync || { enabled: false, status: null, lastSyncAt: null, error: null };
   if (state.savedValue) {
-    if (state.discoveredDescription && state.discoveredDescription !== state.savedValue) {
+    if (sync.enabled) {
+      // Synced mode: the comment is pushed to the device (Polaris-primary),
+      // so surface the per-row push status instead of the local-only copy.
+      if (sync.status === "failed") {
+        sourceEl.textContent = "Sync to device failed" + (sync.error ? ": " + sync.error : "") + " — retries on the next discovery cycle.";
+      } else if (sync.status === "synced") {
+        sourceEl.textContent = "Synced to device" + (sync.lastSyncAt ? " " + timeAgo(sync.lastSyncAt) : "") + " — Polaris is primary.";
+      } else {
+        sourceEl.textContent = "Will sync to the device on save — Polaris is primary.";
+      }
+    } else if (state.discoveredDescription && state.discoveredDescription !== state.savedValue) {
       sourceEl.textContent = "Override active. Device reports: " + state.discoveredDescription;
     } else {
       sourceEl.textContent = "Polaris-local override (not pushed to device).";
     }
   } else if (state.discoveredDescription) {
-    sourceEl.textContent = "Showing device-reported description. Type here to override (Polaris-local only).";
+    sourceEl.textContent = sync.enabled
+      ? "Showing device-reported description. Type here to set it from Polaris (synced to the device)."
+      : "Showing device-reported description. Type here to override (Polaris-local only).";
   } else {
     sourceEl.textContent = "No comment set on this interface.";
   }
@@ -8375,9 +8406,25 @@ async function _saveIfaceComment() {
       _ifaceCommentState.dirty = input.value !== newSaved;
       input.value = newSaved;
       if (revertBtn) revertBtn.disabled = !_ifaceCommentState.dirty;
+      // Fold the save-time push outcome into the status line (description
+      // sync — Polaris-primary; `sync.attempted` is false when the toggle is
+      // off or the comment was cleared).
+      var syncResp = resp && resp.sync;
+      if (syncResp && syncResp.attempted && _ifaceCommentState.descriptionSync) {
+        _ifaceCommentState.descriptionSync.status = syncResp.status || null;
+        _ifaceCommentState.descriptionSync.lastSyncAt = new Date().toISOString();
+        _ifaceCommentState.descriptionSync.error = syncResp.error || null;
+      }
       _renderIfaceCommentSource(_ifaceCommentState);
     }
-    showToast("Interface comment saved", "success");
+    var syncOutcome = resp && resp.sync;
+    if (syncOutcome && syncOutcome.attempted && syncOutcome.status === "failed") {
+      showToast("Comment saved in Polaris, but the device push failed — it will retry on the next discovery cycle", "error");
+    } else if (syncOutcome && syncOutcome.attempted) {
+      showToast("Interface comment saved and pushed to device", "success");
+    } else {
+      showToast("Interface comment saved", "success");
+    }
   } catch (err) {
     showToast("Save failed: " + (err && err.message ? err.message : "unknown error"), "error");
   } finally {

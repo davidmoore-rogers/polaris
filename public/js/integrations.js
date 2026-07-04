@@ -926,6 +926,58 @@ function _readPushQuarantineToggle() {
   return !!el.checked;
 }
 
+// Description Sync tab body. Single master toggle (config.syncDescriptions).
+// Polaris-primary: descriptions typed in Polaris are written to the device;
+// device values are only imported where Polaris has none. `syncDescriptions`
+// is the current toggle value; `useProxy` drives the transport-mode label.
+function descriptionSyncFormHTML(syncDescriptions, useProxy) {
+  var checked = syncDescriptions === true ? "checked" : "";
+  var modeLabel = (useProxy === false)
+    ? "Direct to each FortiGate"
+    : "Proxy through FortiManager to each FortiGate";
+  var modeBody = (useProxy === false)
+    ? "Description writes go to each FortiGate's REST API using the per-device API token configured on the Settings tab. FortiManager is bypassed entirely."
+    : "Description writes go through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials.";
+  return '<section style="margin-bottom:1.5rem">' +
+      '<h4 style="margin:0 0 0.25rem 0">Description Sync</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)"><strong style="color:var(--color-text-primary)">Polaris is the primary source.</strong> Descriptions set in Polaris are written to the device and overwrite what is configured there (every overwrite is audited). Device descriptions are only imported into Polaris where Polaris has none.</p>' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<input type="checkbox" id="f-syncDescriptions" ' + checked + ' style="width:auto">' +
+        '<label for="f-syncDescriptions" style="margin:0">Sync descriptions between Polaris and devices (Polaris primary)</label>' +
+      '</div>' +
+      '<ul class="hint" style="margin:0.25rem 0 0 1.2rem;padding:0">' +
+        '<li><strong>Interface comments.</strong> The Interface Comments box on an asset\'s interface panel writes to the FortiGate\'s <code>system/interface</code> description (or the FortiSwitch port description via the parent controller). Clearing a comment in Polaris leaves the device value in place.</li>' +
+        '<li><strong>Device descriptions.</strong> An asset\'s Description field writes to the FortiGate alias, FortiSwitch description, or FortiAP comment. An empty Polaris Description is seeded from the device on the next discovery.</li>' +
+        '<li><strong>When it runs.</strong> Immediately on save, plus a reconcile on every discovery cycle that re-pushes after transient failures and reverts device-side edits.</li>' +
+      '</ul>' +
+    '</section>' +
+    '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    '<section style="margin-bottom:1.5rem">' +
+      '<h4 style="margin:0 0 0.25rem 0">Push Transport</h4>' +
+      '<p class="hint" style="margin:0 0 0.25rem 0;color:var(--color-text-tertiary)">Current setting: <strong style="color:var(--color-text-primary)">' + escapeHtml(modeLabel) + '</strong></p>' +
+      '<p class="hint" style="margin:0;color:var(--color-text-tertiary)">' + modeBody + '</p>' +
+    '</section>' +
+    '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    '<section>' +
+      '<h4 style="margin:0 0 0.25rem 0">Required FortiManager Admin Profile</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">The following permission changes are needed on the FortiManager admin profile Polaris uses:</p>' +
+      '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem">' +
+        '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
+        '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write</li>' +
+        '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
+      '</ul>' +
+      calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for descriptions. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.") +
+      calloutHTML("warning", "Polaris overwrites device edits", "With this toggle on, a description edited directly on a FortiGate / FortiSwitch / FortiAP is <strong>reverted to the Polaris value</strong> on the next sync whenever Polaris holds a non-empty description for it. Make Polaris the place your team edits descriptions before enabling.") +
+    '</section>';
+}
+
+// Read the description sync toggle. Returns undefined when the tab didn't render.
+function _readSyncDescriptionsToggle() {
+  var el = document.getElementById("f-syncDescriptions");
+  if (!el) return undefined;
+  return !!el.checked;
+}
+
 // Per-integration monitoring transport block rendered at the top of the
 // FortiGates subtab on the Monitoring tab. Renders an SNMP credential picker
 // plus four checkboxes that decide which streams (response-time, telemetry,
@@ -4238,6 +4290,8 @@ async function openCreateModal(type) {
     // pass true so the FMG copy doesn't render an irrelevant "direct" warning.
     addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true) });
     addTabs.push({ key: "quarantine-push", label: "Quarantine Push", html: quarantinePushFormHTML(false, true) });
+    // Description Sync tab (FMG + standalone FortiGate). Default off.
+    addTabs.push({ key: "description-sync", label: "Description Sync", html: descriptionSyncFormHTML(false, true) });
     // SD-WAN tab (FMG + standalone FortiGate). Default off.
     addTabs.push({ key: "sdwan", label: "SD‑WAN", html: sdwanFormHTML(false) });
     // Geographic Location tab (FMG + standalone FortiGate). Carries the
@@ -4359,6 +4413,8 @@ async function openCreateModal(type) {
         if (pushToggleNew !== undefined) createConfig.pushReservations = pushToggleNew;
         var quarantinePushToggleNew = _readPushQuarantineToggle();
         if (quarantinePushToggleNew !== undefined) createConfig.pushQuarantine = quarantinePushToggleNew;
+        var syncDescriptionsNew = _readSyncDescriptionsToggle();
+        if (syncDescriptionsNew !== undefined) createConfig.syncDescriptions = syncDescriptionsNew;
         var sdwanToggleNew = _readPullSdwanToggle();
         if (sdwanToggleNew !== undefined) createConfig.pullSdwan = sdwanToggleNew;
         var excludeFortilinkLldpNew = _readExcludeFortilinkLldpToggle();
@@ -4650,6 +4706,11 @@ async function openEditModal(id) {
           html: quarantinePushFormHTML(config.pushQuarantine === true, pushUseProxy),
         });
         editTabs.push({
+          key: "description-sync",
+          label: "Description Sync",
+          html: descriptionSyncFormHTML(config.syncDescriptions === true, pushUseProxy),
+        });
+        editTabs.push({
           key: "sdwan",
           label: "SD‑WAN",
           html: sdwanFormHTML(config.pullSdwan === true),
@@ -4771,6 +4832,8 @@ async function openEditModal(id) {
         if (pushToggle !== undefined) editConfig.pushReservations = pushToggle;
         var quarantinePushToggle = _readPushQuarantineToggle();
         if (quarantinePushToggle !== undefined) editConfig.pushQuarantine = quarantinePushToggle;
+        var syncDescriptionsEdit = _readSyncDescriptionsToggle();
+        if (syncDescriptionsEdit !== undefined) editConfig.syncDescriptions = syncDescriptionsEdit;
         var sdwanToggle = _readPullSdwanToggle();
         if (sdwanToggle !== undefined) editConfig.pullSdwan = sdwanToggle;
         var excludeFortilinkLldpEdit = _readExcludeFortilinkLldpToggle();

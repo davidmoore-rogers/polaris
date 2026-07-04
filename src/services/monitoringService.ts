@@ -44,6 +44,7 @@ import {
   buildFortiswitchTrunkMembers,
   findFortiswitchUplinkPorts,
   parseFortiswitchMclagPeers,
+  parseFortiswitchPortDescriptions,
   type FortiswitchMclagPeer,
 } from "../utils/fortiswitchCmdb.js";
 // Re-exported so existing import sites (unit tests, etc.) keep resolving these
@@ -2338,6 +2339,11 @@ interface FortiswitchSwitchPorts {
   // switches not in an MCLAG pair. Read from the same payload the VLAN/trunk
   // maps already parse, so it costs no extra query.
   mclagPeers: FortiswitchMclagPeer[];
+  // portName → operator-set port description from the controller CMDB. SNMP
+  // IF-MIB has no equivalent, so this overlay is the only way switch-port
+  // rows get a discovered `description` (display fallback for interface
+  // comments + the read side of description sync). Same free payload.
+  descriptionByPort: Map<string, string>;
 }
 
 // switchSerialUpper → per-switch ports view
@@ -2496,7 +2502,8 @@ async function fetchFortiswitchControllerPortsCmdb(
         // physical port. See buildFortiswitchTrunkMembers.
         const trunkMembers = buildFortiswitchTrunkMembers(portsRaw);
         const mclagPeers = parseFortiswitchMclagPeers(portsRaw);
-        map.set(serial.toUpperCase(), { vlanByPort: portMap, trunkMembers, mclagPeers });
+        const descriptionByPort = parseFortiswitchPortDescriptions(portsRaw);
+        map.set(serial.toUpperCase(), { vlanByPort: portMap, trunkMembers, mclagPeers, descriptionByPort });
       }
 
       fortiswitchControllerPortsCache.set(cacheKey, { fetchedAt: Date.now(), ports: map });
@@ -4015,6 +4022,11 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
                 if (portsForSwitch && portsForSwitch.vlanByPort.size > 0) {
                   let overlaid = 0;
                   for (const iface of data.interfaces) {
+                    // Port description comes from the same CMDB payload; SNMP
+                    // leaves description null on every switch-port row, so
+                    // this overlay is its only source.
+                    const desc = portsForSwitch.descriptionByPort.get(iface.ifName);
+                    if (desc && !iface.description) iface.description = desc;
                     const cfg = portsForSwitch.vlanByPort.get(iface.ifName);
                     if (!cfg) continue;
                     iface.nativeVlan     = cfg.nativeVlan;
