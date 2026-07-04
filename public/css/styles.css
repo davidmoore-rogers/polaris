@@ -2665,6 +2665,20 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
      row of tab buttons so content scrolling under the sticky strip has
      ~14px of opaque breathing room instead of touching the buttons. */
   padding: 1.25rem 1.25rem 0.875rem 1.25rem;
+  /* When a modal has more outer tabs than fit its width (e.g. the FMG /
+     FortiGate integration modal: General / Filters / Monitoring / DHCP Push /
+     Quarantine Push / Description Sync / SD-WAN / Geographic Location), keep
+     every tab on a single line at full label width and scroll horizontally
+     instead of letting flex squeeze + wrap + clip them. The scrollbar only
+     appears when the tabs actually overflow, so narrower modals are unchanged. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.modal-body > .page-tabs > .page-tab {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 .page-tab {
   padding: 0.7rem 1.25rem;
