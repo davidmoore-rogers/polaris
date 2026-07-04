@@ -44,6 +44,11 @@ const controllerEdge = (source: string, target: string): El => ({
 const meshEdge = (source: string, target: string): El => ({
   data: { id: `m-${source}-${target}`, source, target, isMesh: 1 },
 });
+// A wired bridge edge AP → switch (FortiLink switch behind a FortiAP). The
+// renderer stamps isBridge (layout semantics) + isApLink (styling).
+const bridgeEdge = (source: string, target: string): El => ({
+  data: { id: `b-${source}-${target}`, source, target, isBridge: 1, isApLink: 1 },
+});
 // A wireless client edge AP → station.
 const wirelessEdge = (source: string, target: string): El => ({
   data: { id: `w-${source}-${target}`, source, target, isWireless: 1 },
@@ -278,8 +283,8 @@ describe("computeTopologyColumns", () => {
   });
 
   it("routes a switch bridged behind an AP through the AP, not as a fallback", () => {
-    // swBridge is reached via a mesh/bridge edge from apRoot and also carries a
-    // bogus FortiLink controller edge. It must route through the AP (positive
+    // swBridge is reached via a wired bridge edge from apRoot and also carries
+    // a bogus FortiLink controller edge. It must route through the AP (positive
     // column), not the -2 FortiLink-fallback column.
     const cols = computeTopologyColumns([
       node("fg", "fortigate"),
@@ -288,7 +293,7 @@ describe("computeTopologyColumns", () => {
       node("swBridge", "fortiswitch"),
       edge("fg", "sw"),
       edge("sw", "apRoot"),
-      meshEdge("apRoot", "swBridge"),
+      bridgeEdge("apRoot", "swBridge"),
       controllerEdge("fg", "swBridge"), // bogus FortiLink — suppressed
     ])!;
     expect(cols.apRoot.depth).toBe(4);
