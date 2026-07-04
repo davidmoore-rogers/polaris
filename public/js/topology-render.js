@@ -273,16 +273,20 @@
   // (cut-edge), found via Tarjan's bridge algorithm. The graph is the SIMPLE
   // graph over wired physical edges only:
   //   - included: interface-inferred, LLDP, AP↔switch links (uplink + bridged),
-  //     verified FG↔switch uplinks
+  //     verified FG↔switch uplinks, AND MCLAG ICLs — the ICL is a real cabled
+  //     link, so when it closes a cycle (the usual MCLAG shape: both peers
+  //     uplink to a common parent, ICL between them) it's genuinely part of a
+  //     physical loop and gets haloed. An ICL with no other path between its
+  //     peers is a bridge (cut-edge) and is NOT flagged, so it only lights up
+  //     when it actually rings.
   //   - excluded: wireless (mesh backhaul, client), unverified FortiLink
-  //     controller edges (no cable proven), MCLAG ICLs (the redundancy loop
-  //     is the entire point of MCLAG — flagging every pair would be noise)
+  //     controller edges (no cable proven)
   //   - parallel cables between the SAME two devices collapse to one
   //     adjacency, so an LACP/trunk pair alone doesn't read as an L2 loop
   function markPhysicalLoops(elements) {
     function isWired(d) {
-      if (d.isMesh || d.isWireless || d.isMclag) return false;
-      if (d.isIface || d.isLldp || d.isApLink || d.isBridge || d.isVerifiedUplink) return true;
+      if (d.isMesh || d.isWireless) return false;
+      if (d.isIface || d.isLldp || d.isApLink || d.isBridge || d.isVerifiedUplink || d.isMclag) return true;
       return false;
     }
     var adj = {}; // simple undirected adjacency: id -> { neighborId: true }
