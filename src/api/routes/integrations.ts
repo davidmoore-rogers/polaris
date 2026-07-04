@@ -56,6 +56,7 @@ import * as agentAutoDeploy from "../../services/agentAutoDeployService.js";
 import * as presenceVerification from "../../services/presenceVerificationService.js";
 import { recomputeDependencyTree } from "../../services/dependencyTreeService.js";
 import { collectManagementAccess, type DeviceAccessGroup } from "../../services/fortinetManagementAccessService.js";
+import { runDescriptionSyncForIntegration } from "../../services/descriptionSyncService.js";
 import { reconcileMapRegions } from "../../services/mapRegionService.js";
 import { reconcileAllTags } from "../../services/tagAssignmentService.js";
 import {
@@ -547,6 +548,18 @@ const FortiManagerConfigSchema = z.object({
   // selection (/api/v2/cmdb/system/sdwan). Surfaced on the asset's SD-WAN tab.
   // FortiOS-only; default off. Mirrored on FortiGateConfigSchema for parity.
   pullSdwan: z.boolean().optional().default(false),
+  // Description sync (Polaris-primary). When true, operator descriptions in
+  // Polaris are written back to the devices this integration discovered —
+  // interface comments (AssetInterfaceOverride) to FortiGate system/interface
+  // `description` / FortiSwitch port `description`, and Asset.description to
+  // the device (FortiGate system/global `alias`, FortiSwitch managed-switch
+  // `description`, FortiAP wtp `comment`). Where Polaris has no value, the
+  // device value is adopted (seeded) instead. Polaris is primary: once it
+  // holds a value, device-side edits are overwritten on the next sync
+  // (audited). Transport follows useProxy, same as pushReservations. Default
+  // off; requires device-config write access on the FMG admin profile / API
+  // token. Mirrored on FortiGateConfigSchema for parity.
+  syncDescriptions: z.boolean().optional().default(false),
   // Interface name to read for a managed FortiSwitch's management-access
   // (allowaccess) during the Phase 13.6 read. Defaults to "internal" at read
   // time when unset. The firewall's own management interface reuses
@@ -594,6 +607,9 @@ const FortiGateConfigSchema = z.object({
   // selection on each system-info pass. See FortiManagerConfigSchema.pullSdwan
   // for shape + semantics. FortiOS-only; default off.
   pullSdwan: z.boolean().optional().default(false),
+  // Description sync (Polaris-primary) — see FortiManagerConfigSchema
+  // .syncDescriptions for shape + semantics. Default off.
+  syncDescriptions: z.boolean().optional().default(false),
   // Interface name to read for a managed FortiSwitch's management-access
   // (allowaccess) during the Phase 13.6 read. Defaults to "internal" when
   // unset. See FortiManagerConfigSchema.switchManagementInterface.
@@ -3727,14 +3743,20 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // Topology JSON is per-member. HA members carry haMode/haRole/
         // haPeerSerial so the asset edit modal + topology graph can show
         // the cluster relationship without re-querying FMG.
+        // `deviceName` is the FMG/dvmdb device name (differs from the member
+        // hostname on renamed devices and on HA members). Stamped so device-
+        // targeted write paths (description sync, and any future push) can
+        // build a transport without a dvmdb lookup; hostname stays the
+        // display identity.
         const memberTopology: Record<string, unknown> = haMembers
           ? {
               role: "fortigate" as const,
+              deviceName: device.name || fgHostname,
               haMode: clusterMode,
               haRole: member.isPrimary ? "primary" : "secondary",
               ...(member.peerSerial ? { haPeerSerial: member.peerSerial } : {}),
             }
-          : { role: "fortigate" as const };
+          : { role: "fortigate" as const, deviceName: device.name || fgHostname };
         const memberHaCtx = haMembers && member.peerSerial
           ? {
               haMode: clusterMode as "a-p" | "a-a",
@@ -6492,6 +6514,32 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
       } catch (err: any) {
         syncLog("error", `Management-access read failed: ${err?.message || "Unknown error"}`);
+      }
+    }
+
+    phaseMark("13.7");
+    // Phase 13.7 — Description sync reconcile (Polaris-primary; gated by the
+    // integration's `syncDescriptions` toggle, default off = zero cost). Per
+    // FortiGate: read the current device-side descriptions (system/interface,
+    // system/global, managed-switch, wtp — through the shared push transport,
+    // so both useProxy modes work), adopt device values where Polaris has
+    // none, and re-push wherever the device drifted from a non-empty Polaris
+    // value. Also the retry path for save-time pushes that failed
+    // transiently. Best-effort — failures are logged and never block the sync.
+    if (integrationType === "fortimanager" || integrationType === "fortigate") {
+      try {
+        const integrationRow = await prisma.integration.findUnique({
+          where: { id: integrationId },
+          select: { id: true, type: true, config: true, name: true },
+        });
+        if (integrationRow && (integrationRow.config as Record<string, any> | null)?.syncDescriptions === true) {
+          const summary = await runDescriptionSyncForIntegration(integrationRow);
+          if (summary.pushed || summary.adopted || summary.failed || summary.skippedDevices) {
+            syncLog("info", `Description sync: pushed ${summary.pushed}, adopted ${summary.adopted}, failed ${summary.failed}${summary.skippedDevices ? `, ${summary.skippedDevices} device(s) skipped` : ""}`);
+          }
+        }
+      } catch (err: any) {
+        syncLog("error", `Description sync failed: ${err?.message || "Unknown error"}`);
       }
     }
   }

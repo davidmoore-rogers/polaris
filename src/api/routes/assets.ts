@@ -19,6 +19,7 @@ import { clampAcquiredToLastSeen } from "../../utils/assetInvariants.js";
 import { getIpHistory, getHistorySettings, updateHistorySettings, pruneOldHistory } from "../../services/assetIpHistoryService.js";
 import { getSightingsForAsset, getSightingSettings, updateSightingSettings } from "../../services/assetSightingService.js";
 import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
+import { syncDescriptionsOnSave } from "../../services/descriptionSyncService.js";
 import { isValidIpAddress, cidrContains } from "../../utils/cidr.js";
 import { isKnownAssetType } from "../../utils/assetTypes.js";
 import { recomputeMonitorOverrideForAssets, getAddAsMonitoredFromConfig } from "../../services/monitorOverrideService.js";
@@ -168,6 +169,11 @@ const CreateAssetSchema = z.object({
   warrantyExpiry:z.string().datetime().optional().or(z.literal("")).transform(v => v || undefined),
   purchaseOrder: z.string().optional(),
   notes:         z.string().optional(),
+  // Operator-owned device description. On Fortinet assets whose originating
+  // integration has `syncDescriptions` on, the PUT handler mirrors it to the
+  // device (Polaris-primary; see descriptionSyncService). Device-side caps
+  // are tighter for some targets (FortiGate alias ~35) — the push truncates.
+  description:   z.string().max(255).optional(),
   tags:          z.array(z.string()).optional(),
 });
 
@@ -1685,7 +1691,13 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
     // the aggregate-membership map (the fast cadence only writes pinned rows).
     const assetMeta = await prisma.asset.findUnique({
       where: { id },
-      select: { lastSystemInfoAt: true },
+      select: {
+        lastSystemInfoAt: true,
+        // Description-sync context: whether the originating integration syncs
+        // interface comments to the device (drives the editor's badge copy).
+        fortinetTopology: true,
+        discoveredByIntegration: { select: { type: true, config: true } },
+      },
     });
 
     // Samples come from the tier-aware reader. LLDP neighbors and the
@@ -1738,6 +1750,16 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
       ...dedupeInferredNeighbors(allNeighbors, inferredForIf, aggregateMembershipMap(interfaceMeta)),
     ];
     const overrideDescription = override?.description ?? null;
+    // Interface comments sync to the device only when the originating
+    // integration's syncDescriptions toggle is on AND the asset is a synced
+    // Fortinet role (FortiGate interface / FortiSwitch port — FortiAPs have
+    // no per-interface description).
+    const dsIntegration = assetMeta?.discoveredByIntegration ?? null;
+    const dsRole = ((assetMeta?.fortinetTopology ?? {}) as { role?: string }).role;
+    const descriptionSyncEnabled =
+      (dsIntegration?.type === "fortimanager" || dsIntegration?.type === "fortigate") &&
+      (dsIntegration?.config as { syncDescriptions?: boolean } | null)?.syncDescriptions === true &&
+      (dsRole === "fortigate" || dsRole === "fortiswitch");
     res.json({
       range: rangeLabel,
       ifName,
@@ -1745,6 +1767,12 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
       description: overrideDescription ?? history.meta.discoveredDescription,
       discoveredDescription: history.meta.discoveredDescription,
       overrideDescription,
+      descriptionSync: {
+        enabled: descriptionSyncEnabled,
+        status: override?.syncStatus ?? null,
+        lastSyncAt: override?.lastSyncAt ?? null,
+        error: override?.syncError ?? null,
+      },
       since,
       until,
       tier: pick.tier,
@@ -1777,9 +1805,12 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
 });
 
 // PUT /assets/:id/interfaces/:ifName/comment — operator-typed override for the
-// interface's "Interface Comments" text box. Polaris-local only — never pushed
-// back to the device. Empty string or null clears the override (the discovered
-// FortiOS CMDB description shows through again).
+// interface's "Interface Comments" text box. Polaris-local by default; when
+// the originating integration's `syncDescriptions` toggle is on, a saved
+// comment is also pushed to the device (Polaris-primary — see
+// descriptionSyncService). Empty string or null clears the override locally
+// only (the device keeps its description; the discovered FortiOS CMDB
+// description shows through again).
 const InterfaceCommentSchema = z.object({
   description: z.string().max(255, "Interface Comments may be at most 255 characters").nullable().optional(),
 });
@@ -1824,7 +1855,16 @@ router.put("/:id/interfaces/:ifName/comment", requirePermission("assets", "write
       details: { ifName, length: trimmed.length },
     });
 
-    res.json({ ok: true, ifName, description: trimmed.length === 0 ? null : trimmed });
+    // Description sync (Polaris-primary): mirror the saved comment to the
+    // device when the originating integration opted in. No-op (attempted:
+    // false) when the toggle is off / asset isn't a synced Fortinet role /
+    // the override was cleared. Best-effort — the override row above is
+    // already persisted either way; a failed push surfaces via `sync`.
+    const sync = trimmed.length > 0
+      ? await syncDescriptionsOnSave({ assetId: id, scope: "interface", ifName, actor })
+      : { attempted: false as const };
+
+    res.json({ ok: true, ifName, description: trimmed.length === 0 ? null : trimmed, sync });
   } catch (err) { next(err); }
 });
 
@@ -2101,6 +2141,10 @@ router.post("/", requirePermission("assets", "write"), async (req, res, next) =>
     if (coordErr) throw new AppError(400, coordErr);
     const data: Record<string, unknown> = { ...input };
     if (input.macAddress) data.macAddress = input.macAddress.toUpperCase().replace(/-/g, ":");
+    // Description: empty string clears to null (an empty Polaris description
+    // is re-seeded from the device on the next discovery when the
+    // integration's syncDescriptions toggle is on).
+    if (typeof input.description === "string") data.description = input.description.trim() || null;
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
     if (input.ipAddress) data.ipSource = "manual";
@@ -2183,6 +2227,10 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     if (coordErr) throw new AppError(400, coordErr);
     const data: Record<string, unknown> = { ...input };
     if (input.macAddress) data.macAddress = input.macAddress.toUpperCase().replace(/-/g, ":");
+    // Description: empty string clears to null (an empty Polaris description
+    // is re-seeded from the device on the next discovery when the
+    // integration's syncDescriptions toggle is on).
+    if (typeof input.description === "string") data.description = input.description.trim() || null;
     if (input.acquiredAt) data.acquiredAt = new Date(input.acquiredAt);
     else if (input.acquiredAt === undefined) delete data.acquiredAt;
     if (input.warrantyExpiry) data.warrantyExpiry = new Date(input.warrantyExpiry);
@@ -2217,12 +2265,20 @@ router.put("/:id", requirePermission("assets", "write"), async (req, res, next) 
     if (input.monitored !== undefined || input.assetType !== undefined) {
       await recomputeMonitorOverrideForAssets(prisma, [id]);
     }
-    const trackFields = ["hostname", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "dnsName"] as const;
+    const trackFields = ["hostname", "ipAddress", "macAddress", "manufacturer", "model", "serialNumber", "assetType", "status", "location", "latitude", "longitude", "notes", "description", "dnsName"] as const;
     const before: Record<string, unknown> = {};
     const after: Record<string, unknown> = {};
     for (const f of trackFields) { before[f] = (existing as any)[f]; after[f] = (asset as any)[f]; }
     const changes = buildChanges(before, after);
     logEvent({ action: "asset.updated", resourceType: "asset", resourceId: id, resourceName: asset.hostname || asset.ipAddress || undefined, actor: requestActor(req), message: `Asset "${asset.hostname || asset.ipAddress || "unknown"}" updated`, details: changes ? { changes } : undefined });
+    // Description sync (Polaris-primary): a changed device description on a
+    // Fortinet asset whose integration opted in is mirrored to the device.
+    // Fire-and-forget — the Polaris row is authoritative and already saved;
+    // failures stamp Asset.descriptionSync + a warning Event inside the
+    // service, and the per-discovery reconcile self-heals.
+    if (input.description !== undefined && (existing as any).description !== asset.description) {
+      syncDescriptionsOnSave({ assetId: id, scope: "device", actor: requestActor(req) ?? undefined }).catch(() => {});
+    }
     // Re-evaluate criteria-based auto-tags when a criteria-relevant field changed
     // (best-effort; the periodic job is the safety net).
     const TAG_CRITERIA_FIELDS = ["manufacturer", "model", "os", "osVersion", "hostname", "department", "location", "assetType", "status", "ipAddress"] as const;

@@ -553,11 +553,24 @@ model Asset {
   // `learnedLocation` (a site/controller label) and `snmpLocation` (raw SNMP
   // sysLocation string). Surfaced as "Address" on the asset details General tab.
   learnedAddress        String?
-  fortinetTopology Json? // { role: "fortigate" | "fortiswitch" | "fortiap", controllerFortigate?, uplinkInterface?, parentSwitch?, parentPort?, parentVlan? } — real connection graph from FMG/FortiGate discovery
+  fortinetTopology Json? // { role: "fortigate" | "fortiswitch" | "fortiap", deviceName?, controllerFortigate?, uplinkInterface?, parentSwitch?, parentPort?, parentVlan? } — real connection graph from FMG/FortiGate discovery. deviceName (firewall role) = FMG/dvmdb device name for device-targeted write paths (description sync)
   acquiredAt       DateTime? // Acquisition / purchase date
   warrantyExpiry   DateTime? // Warranty end date
   purchaseOrder    String? // PO or invoice reference
   notes            String?     @db.Text
+  // Operator-owned device description. When the originating integration's
+  // `syncDescriptions` toggle is on (FMG / standalone FortiGate), this field
+  // is description-synced with the device — Polaris is primary: an empty
+  // Polaris value is seeded (adopted) from the device once, and a non-empty
+  // value is written back to the device, overwriting device-side edits
+  // (audited). Device-side write target depends on fortinetTopology.role:
+  // fortigate → system/global `alias`, fortiswitch → managed-switch
+  // `description`, fortiap → wtp `comment`. See descriptionSyncService.
+  description      String?     @db.VarChar(255)
+  // Device-level description sync state: { status: "synced"|"failed",
+  // at: ISO timestamp, error?: string }. Null = never synced / sync not
+  // enabled. JSON-blob precedent: quarantineTargets.
+  descriptionSync  Json?
   tags             String[]    @default([])
   createdBy        String?
 
@@ -1071,9 +1084,14 @@ model AssetMacAddress {
 
 // Operator-typed override for an interface's "Interface Comments" text box.
 // Takes priority over the discovered AssetInterfaceSample.description (FortiOS
-// CMDB `description`) for display only — Polaris never pushes this back to the
-// device. One row per (assetId, ifName); a null/empty `description` clears the
-// override and the discovered comment shows through again.
+// CMDB `description`) for display. When the originating integration's
+// `syncDescriptions` toggle is off this stays Polaris-local (legacy behavior);
+// when on, the override is description-synced to the device (FortiGate
+// system/interface `description`, or FortiSwitch port `description` via the
+// parent controller) — Polaris is primary, device-side edits are overwritten
+// (audited). One row per (assetId, ifName); a null/empty `description` clears
+// the override and the discovered comment shows through again (the device-side
+// description is NOT deleted on clear). See descriptionSyncService.
 model AssetInterfaceOverride {
   id          String   @id @default(uuid())
   assetId     String
@@ -1081,6 +1099,12 @@ model AssetInterfaceOverride {
   ifName      String
   description String?  @db.VarChar(255)
   updatedBy   String?
+  // Description-sync state (null on all three = Polaris-local / never synced).
+  // syncStatus: "synced" | "failed". Transport/read errors never change these;
+  // only an actual push attempt stamps them (quarantine-verify rule).
+  syncStatus  String?
+  lastSyncAt  DateTime?
+  syncError   String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

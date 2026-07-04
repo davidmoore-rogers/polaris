@@ -18,7 +18,7 @@ import {
   overlayFortiswitchTrunkMembers,
   type InterfaceSample,
 } from "../../src/services/monitoringService.js";
-import { parseFortiswitchMclagPeers } from "../../src/utils/fortiswitchCmdb.js";
+import { parseFortiswitchMclagPeers, parseFortiswitchPortDescriptions } from "../../src/utils/fortiswitchCmdb.js";
 
 // Minimal managed-switch CMDB port entries mirroring the shapes confirmed on a
 // live FortiOS 7.6 switch-controller payload: access ports carry `members: []`,
@@ -330,5 +330,28 @@ describe("overlayFortiswitchTrunkMembers", () => {
     const ifaces: InterfaceSample[] = [mk("port1")];
     expect(overlayFortiswitchTrunkMembers(ifaces, new Map())).toBe(0);
     expect(ifaces).toHaveLength(1);
+  });
+});
+
+describe("parseFortiswitchPortDescriptions", () => {
+  it("collects non-empty trimmed descriptions keyed by port name", () => {
+    const map = parseFortiswitchPortDescriptions([
+      { "port-name": "port1", description: "  AP uplink  " },
+      { "port-name": "port2", description: "printer" },
+      { "port-name": "port3", description: "" },
+      { "port-name": "port4" }, // no description field at all
+    ]);
+    expect(map.get("port1")).toBe("AP uplink");
+    expect(map.get("port2")).toBe("printer");
+    expect(map.has("port3")).toBe(false);
+    expect(map.has("port4")).toBe(false);
+  });
+
+  it("tolerates malformed input shapes", () => {
+    expect(parseFortiswitchPortDescriptions(null).size).toBe(0);
+    expect(parseFortiswitchPortDescriptions("nope").size).toBe(0);
+    expect(parseFortiswitchPortDescriptions([null, 42, { description: "orphan (no port-name)" }]).size).toBe(0);
+    // Non-string description is ignored rather than coerced.
+    expect(parseFortiswitchPortDescriptions([{ "port-name": "port1", description: 7 }]).size).toBe(0);
   });
 });
