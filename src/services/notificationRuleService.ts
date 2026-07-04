@@ -9,6 +9,7 @@
  */
 
 import { prisma } from "../db.js";
+import { Prisma } from "../generated/prisma/client.js";
 import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
 import type { RuleScope, Trigger, RuleInput } from "./notificationTypes.js";
@@ -119,6 +120,27 @@ export async function isChangeActionSubscribed(action: string): Promise<boolean>
 
 // ─── Rule CRUD ──────────────────────────────────────────────────────────────
 
+// Escalation is email-only: every tier must reference an smtp/oauth_m365
+// channel. Validated at save so the sweep never has to guess intent.
+const EMAIL_CHANNEL_TYPES = new Set(["smtp", "oauth_m365"]);
+
+async function assertEscalationChannels(escalation: RuleInput["escalation"]): Promise<void> {
+  if (!escalation || escalation.tiers.length === 0) return;
+  const ids = Array.from(new Set(escalation.tiers.map((t) => t.channelId)));
+  const channels = await prisma.notificationChannel.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, name: true, type: true },
+  });
+  const byId = new Map(channels.map((c) => [c.id, c]));
+  for (const [i, tier] of escalation.tiers.entries()) {
+    const ch = byId.get(tier.channelId);
+    if (!ch) throw new AppError(400, `Escalation tier ${i + 1} references a delivery channel that no longer exists`);
+    if (!EMAIL_CHANNEL_TYPES.has(ch.type)) {
+      throw new AppError(400, `Escalation tier ${i + 1} channel "${ch.name}" is ${ch.type} — escalation emails require an email channel (SMTP or Microsoft 365)`);
+    }
+  }
+}
+
 export async function listRules() {
   return prisma.notificationRule.findMany({ orderBy: { createdAt: "desc" } });
 }
@@ -130,6 +152,7 @@ export async function getRule(id: string) {
 }
 
 export async function createRule(input: RuleInput, actor?: string) {
+  await assertEscalationChannels(input.escalation);
   const rule = await prisma.notificationRule.create({
     data: {
       name: input.name,
@@ -144,6 +167,8 @@ export async function createRule(input: RuleInput, actor?: string) {
       messageTemplate: input.messageTemplate ?? null,
       channels: input.channels,
       targets: input.targets as any,
+      emailComposition: (input.emailComposition ?? undefined) as any,
+      escalation: (input.escalation ?? undefined) as any,
       createdBy: actor ?? null,
     },
   });
@@ -162,6 +187,10 @@ export async function createRule(input: RuleInput, actor?: string) {
 
 export async function updateRule(id: string, input: RuleInput, actor?: string) {
   await getRule(id); // 404 if missing
+  await assertEscalationChannels(input.escalation);
+  // Nullable-Json semantics: undefined (field absent) leaves the stored value
+  // unchanged; explicit null clears it (Prisma.DbNull).
+  const jsonOrClear = (v: unknown) => (v === undefined ? undefined : v === null ? Prisma.DbNull : (v as any));
   const rule = await prisma.notificationRule.update({
     where: { id },
     data: {
@@ -177,6 +206,8 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
       messageTemplate: input.messageTemplate ?? null,
       channels: input.channels,
       targets: input.targets as any,
+      emailComposition: jsonOrClear(input.emailComposition),
+      escalation: jsonOrClear(input.escalation),
     },
   });
   bumpChangeSubscriptions();

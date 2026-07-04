@@ -10,6 +10,7 @@
  */
 
 import { z } from "zod";
+import { TEMPLATE_VARIABLES } from "../utils/notificationTemplate.js";
 
 // Notification severity (rule.severity → notification.severity). Ordered
 // least → most severe. NOTE: distinct from EVENT_LEVELS below — that's the
@@ -235,6 +236,62 @@ export const deliveryTargetSchema = z.object({
   recipientTags: z.array(z.string().max(100)).max(200).optional(), // legacy tag-routing (kept for back-compat)
 });
 
+// ─── Rule-level email composition + escalation ──────────────────────────────
+// emailComposition customizes the OUTBOUND EMAIL a rule's email targets send
+// (subject / text / HTML bodies + Cc/Bcc). Templates render through
+// renderNotificationTemplate (src/utils/notificationTemplate.ts) — single-brace
+// {token} vocabulary, cataloged in TEMPLATE_VARIABLES. When set, each email
+// target sends ONE message (full To list + Cc + Bcc) instead of the default
+// one-email-per-To-address fan-out. NULL = pre-feature default behavior.
+// Email-only: chat/pushbullet/web_push channels ignore it.
+
+const emailRecipientsSchema = z
+  .object({
+    recipientUserIds: z.array(z.string().max(100)).max(500).optional(), // Polaris users → their emails
+    addresses: z.array(z.string().email().max(320)).max(100).optional(), // custom email addresses
+  })
+  .strict();
+
+export const emailCompositionSchema = z
+  .object({
+    subjectTemplate: z.string().max(500).optional().nullable(),
+    bodyTextTemplate: z.string().max(10000).optional().nullable(),
+    bodyHtmlTemplate: z.string().max(20000).optional().nullable(),
+    cc: emailRecipientsSchema.optional().nullable(),
+    bcc: emailRecipientsSchema.optional().nullable(),
+  })
+  .strict();
+
+// Escalation: ordered tiers of follow-up emails while the notification stays
+// unhandled (stopOn: "acknowledge" stops on ack OR clear; "clear" ignores ack).
+// Tier channels must be email-type (validated at rule save). Tier subject/body
+// overrides fall back to the rule's emailComposition, then the defaults.
+// Swept by the escalateNotifications job (60s).
+export const escalationTierSchema = z
+  .object({
+    afterMin: z.number().int().min(1).max(10080), // ≤ 1 week
+    channelId: z.string().min(1).max(100),
+    to: emailRecipientsSchema.refine(
+      (r) => (r.recipientUserIds?.length ?? 0) + (r.addresses?.length ?? 0) > 0,
+      { message: "Escalation tier needs at least one To recipient" },
+    ),
+    cc: emailRecipientsSchema.optional().nullable(),
+    bcc: emailRecipientsSchema.optional().nullable(),
+    subjectTemplate: z.string().max(500).optional().nullable(),
+    bodyTextTemplate: z.string().max(10000).optional().nullable(),
+    bodyHtmlTemplate: z.string().max(20000).optional().nullable(),
+    repeatEveryMin: z.number().int().min(5).max(1440).optional().nullable(),
+    maxRepeats: z.number().int().min(1).max(20).optional().nullable(), // default 5 when repeating
+  })
+  .strict();
+
+export const escalationSchema = z
+  .object({
+    stopOn: z.enum(["acknowledge", "clear"]).default("acknowledge"),
+    tiers: z.array(escalationTierSchema).min(1).max(5),
+  })
+  .strict();
+
 export const ruleInputSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().max(4000).optional().nullable(),
@@ -248,12 +305,18 @@ export const ruleInputSchema = z.object({
   messageTemplate: z.string().max(2000).optional().nullable(),
   channels: z.array(z.string().max(50)).default(["in_app"]),
   targets: z.array(deliveryTargetSchema).max(50).default([]),
+  emailComposition: emailCompositionSchema.optional().nullable(),
+  escalation: escalationSchema.optional().nullable(),
 });
 
 export type Trigger = z.infer<typeof triggerSchema>;
 export type RuleScope = z.infer<typeof scopeSchema>;
 export type RuleInput = z.infer<typeof ruleInputSchema>;
 export type DeliveryTarget = z.infer<typeof deliveryTargetSchema>;
+export type EmailRecipients = z.infer<typeof emailRecipientsSchema>;
+export type EmailComposition = z.infer<typeof emailCompositionSchema>;
+export type EscalationTier = z.infer<typeof escalationTierSchema>;
+export type EscalationConfig = z.infer<typeof escalationSchema>;
 
 /** Trigger categories that select assets via `scope` (vs. event/host). */
 export const ASSET_SCOPED_TRIGGER_TYPES = ["asset_metric", "asset_state", "change"] as const;
@@ -348,6 +411,7 @@ export function buildSchemaCatalog() {
     metricDimensions: METRIC_DIMENSIONS,
     channelTypes: CHANNEL_TYPE_META,
     recipientRoutedTypes: RECIPIENT_ROUTED_TYPES,
+    templateVariables: TEMPLATE_VARIABLES,
     triggerTypes: [
       { type: "asset_metric", label: "Asset metric threshold", scoped: true, metrics: ASSET_METRICS },
       { type: "asset_state", label: "Asset state", scoped: true, fields: ASSET_STATE_FIELDS },

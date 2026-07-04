@@ -15,9 +15,10 @@
 
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
+import { notificationsPageUrl } from "../utils/notificationTemplate.js";
 import { logEvent } from "./eventLogService.js";
 import { type ChannelType } from "./notificationTypes.js";
-import { sendSmtpEmail, sendM365Email } from "./notificationChannels/emailChannel.js";
+import { sendSmtpEmail, sendM365Email, type EmailMessage } from "./notificationChannels/emailChannel.js";
 import { sendWebhook } from "./notificationChannels/webhookChannel.js";
 import { sendPushbullet } from "./notificationChannels/pushbulletChannel.js";
 import { sendWebPush, type WebPushError } from "./notificationChannels/webPushChannel.js";
@@ -49,12 +50,6 @@ interface DeliveryRow {
   };
 }
 
-function notificationUrl(): string | null {
-  const base = process.env.POLARIS_PUBLIC_URL;
-  if (!base) return null;
-  return `${base.replace(/\/$/, "")}/notifications.html`;
-}
-
 function titleFor(n: DeliveryRow["notification"]): string {
   const sev = n.severity.toUpperCase();
   return n.assetHostname ? `[${sev}] ${n.assetHostname}` : `[${sev}] Polaris notification`;
@@ -65,24 +60,54 @@ function cfgStr(config: Record<string, unknown>, key: string): string {
   return typeof v === "string" ? v : "";
 }
 
+function asStringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.length > 0) : [];
+}
+
+/**
+ * Build the EmailMessage for an email-transport delivery row. Composed rows
+ * (meta.composed — rule emailComposition / escalation tiers) carry the full
+ * pre-rendered snapshot; legacy rows (including pre-upgrade pending rows) get
+ * the byte-identical default subject/body.
+ */
+function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, url: string | null): EmailMessage | { error: string } {
+  if (meta.composed === true) {
+    const to = asStringArray(meta.to);
+    if (to.length === 0) return { error: "composed email delivery has no To recipients" };
+    return {
+      to,
+      cc: asStringArray(meta.cc),
+      bcc: asStringArray(meta.bcc),
+      subject: typeof meta.subject === "string" && meta.subject ? meta.subject : titleFor(d.notification),
+      text: typeof meta.text === "string" ? meta.text : d.notification.message,
+      html: typeof meta.html === "string" && meta.html ? meta.html : undefined,
+    };
+  }
+  return { to: d.target, subject: titleFor(d.notification), text: d.notification.message + (url ? `\n\nView: ${url}` : "") };
+}
+
 async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promise<{ ok: true } | { ok: false; error: string; gone?: boolean }> {
   if (!channel) return { ok: false, error: "delivery channel was deleted" };
   if (!channel.enabled) return { ok: false, error: "delivery channel is disabled" };
-  const url = notificationUrl();
+  const url = notificationsPageUrl();
   const cfg = channel.config || {};
   const meta = (d.meta && typeof d.meta === "object" ? d.meta : {}) as Record<string, unknown>;
   const type = channel.type as ChannelType;
   try {
-    if (type === "smtp") {
-      await sendSmtpEmail(
-        { host: cfgStr(cfg, "host"), port: Number(cfg.port) || 587, security: (cfgStr(cfg, "security") as any) || "starttls", username: cfgStr(cfg, "username"), password: cfgStr(cfg, "password"), from: cfgStr(cfg, "from") },
-        { to: d.target, subject: titleFor(d.notification), text: d.notification.message + (url ? `\n\nView: ${url}` : "") },
-      );
-    } else if (type === "oauth_m365") {
-      await sendM365Email(
-        { tenantId: cfgStr(cfg, "tenantId"), clientId: cfgStr(cfg, "clientId"), clientSecret: cfgStr(cfg, "clientSecret"), fromUserId: cfgStr(cfg, "fromUserId") },
-        { to: d.target, subject: titleFor(d.notification), text: d.notification.message + (url ? `\n\nView: ${url}` : "") },
-      );
+    if (type === "smtp" || type === "oauth_m365") {
+      const msg = emailMessageFor(d, meta, url);
+      if ("error" in msg) return { ok: false, error: msg.error };
+      if (type === "smtp") {
+        await sendSmtpEmail(
+          { host: cfgStr(cfg, "host"), port: Number(cfg.port) || 587, security: (cfgStr(cfg, "security") as any) || "starttls", username: cfgStr(cfg, "username"), password: cfgStr(cfg, "password"), from: cfgStr(cfg, "from") },
+          msg,
+        );
+      } else {
+        await sendM365Email(
+          { tenantId: cfgStr(cfg, "tenantId"), clientId: cfgStr(cfg, "clientId"), clientSecret: cfgStr(cfg, "clientSecret"), fromUserId: cfgStr(cfg, "fromUserId") },
+          msg,
+        );
+      }
     } else if (type === "slack" || type === "teams") {
       const webhookUrl = cfgStr(cfg, "webhookUrl");
       if (!webhookUrl) return { ok: false, error: `${type} channel has no webhook URL` };

@@ -32,9 +32,19 @@ import {
   type RuleScope,
   type RuleInput,
   type DeliveryTarget,
+  type EmailComposition,
+  type EscalationConfig,
   CHANGE_TYPE_ACTIONS,
 } from "./notificationTypes.js";
-import { expandDeliveries, scopeRegionTagsOf } from "./notificationRecipientService.js";
+import { expandDeliveries, scopeRegionTagsOf, type ComposedEmail } from "./notificationRecipientService.js";
+import {
+  buildTemplateContext,
+  renderNotificationTemplate,
+  templateNeedsAsset,
+  notificationsPageUrl,
+  type AssetTemplateDetail,
+  type TemplateContextParts,
+} from "../utils/notificationTemplate.js";
 
 const LAST_EVENT_SETTING_KEY = "notificationEngine.lastEventCursor";
 const DEFAULT_LOOKBACK_MS = 15 * 60 * 1000; // window to find the "latest" sample
@@ -43,6 +53,7 @@ const DEFAULT_LOOKBACK_MS = 15 * 60 * 1000; // window to find the "latest" sampl
 interface DbRule {
   id: string;
   name: string;
+  description: string | null;
   severity: string;
   trigger: Trigger;
   scope: RuleScope;
@@ -51,13 +62,15 @@ interface DbRule {
   cooldownSec: number | null;
   messageTemplate: string | null;
   targets: DeliveryTarget[];
+  emailComposition: EmailComposition | null;
+  escalation: EscalationConfig | null;
 }
 
 /** Best-effort outbound-delivery expansion — never breaks rule evaluation. */
-async function expandDeliveriesSafe(notificationId: string, targets: DeliveryTarget[], scopeRegionTags?: string[]): Promise<void> {
+async function expandDeliveriesSafe(notificationId: string, targets: DeliveryTarget[], scopeRegionTags?: string[], composedEmail?: ComposedEmail): Promise<void> {
   if (!targets || targets.length === 0) return;
   try {
-    await expandDeliveries(notificationId, targets, scopeRegionTags);
+    await expandDeliveries(notificationId, targets, scopeRegionTags, composedEmail);
   } catch (err) {
     await logEvent({
       action: "notification.delivery_expand_error",
@@ -360,30 +373,83 @@ export function readingMeets(trigger: Trigger, value: number | string | boolean 
   return false;
 }
 
-// ─── Message templating ─────────────────────────────────────────────────────
+// ─── Message + email templating ─────────────────────────────────────────────
+// All interpolation goes through renderNotificationTemplate (single-brace
+// {token} vocabulary from src/utils/notificationTemplate.ts) so the in-app
+// messageTemplate, the email composition, and escalation overrides share one
+// vocabulary. The built context is snapshotted onto Notification.templateCtx
+// (when the rule has emailComposition/escalation) so escalation emails render
+// later with fire-time values.
 
-function renderMessage(rule: DbRule, reading: Reading): string {
+/** The reading-derived template parts (sans assetDetail/message, added by callers). */
+function readingContextParts(rule: DbRule, reading: Reading, now: Date): TemplateContextParts {
   const trigger = rule.trigger;
   const metric = trigger.type === "asset_metric" || trigger.type === "host_metric" ? trigger.metric
     : trigger.type === "asset_state" ? trigger.field : trigger.type;
   const threshold = trigger.type === "asset_metric" || trigger.type === "host_metric" ? String(trigger.threshold)
     : trigger.type === "asset_state" ? String(trigger.value) : "";
   const valueStr = reading.value === null ? "n/a" : typeof reading.value === "number" ? round2(reading.value) : String(reading.value);
-  const assetStr = reading.hostname || reading.assetId || "host";
-  const dim = reading.dimLabel ? ` [${reading.dimLabel}]` : "";
+  return {
+    asset: reading.hostname || reading.assetId || "host",
+    metric: String(metric),
+    value: valueStr,
+    threshold,
+    dimension: reading.dimLabel || "",
+    severity: rule.severity,
+    time: now,
+    link: notificationsPageUrl(),
+    ruleName: rule.name,
+    ruleDescription: rule.description,
+  };
+}
+
+/** Render the in-app message from a built context (default string when no template). */
+function renderMessage(rule: DbRule, reading: Reading, ctx: Record<string, string>): string {
   if (rule.messageTemplate && rule.messageTemplate.trim()) {
-    return rule.messageTemplate
-      .replaceAll("{asset}", assetStr)
-      .replaceAll("{metric}", String(metric))
-      .replaceAll("{value}", valueStr)
-      .replaceAll("{threshold}", threshold)
-      .replaceAll("{dimension}", reading.dimLabel || "");
+    return renderNotificationTemplate(rule.messageTemplate, ctx);
   }
-  return `${rule.name}: ${assetStr}${dim} — ${metric} = ${valueStr} (threshold ${threshold})`;
+  const dim = reading.dimLabel ? ` [${reading.dimLabel}]` : "";
+  return `${rule.name}: ${ctx["asset"]}${dim} — ${ctx["metric"]} = ${ctx["value"]} (threshold ${ctx["threshold"]})`;
 }
 
 function round2(n: number): string {
   return (Math.round(n * 100) / 100).toString();
+}
+
+/** Does this rule need the fire-time template context (composition/escalation/asset tokens)? */
+function ruleWantsContext(rule: DbRule): boolean {
+  return !!(rule.emailComposition || rule.escalation);
+}
+
+function ruleWantsAssetDetail(rule: DbRule): boolean {
+  const comp = rule.emailComposition;
+  const tierTemplates = (rule.escalation?.tiers ?? []).flatMap((t) => [t.subjectTemplate, t.bodyTextTemplate, t.bodyHtmlTemplate]);
+  return (
+    ruleWantsContext(rule) ||
+    templateNeedsAsset([rule.messageTemplate, comp?.subjectTemplate, comp?.bodyTextTemplate, comp?.bodyHtmlTemplate, ...tierTemplates])
+  );
+}
+
+/**
+ * Render the composed outbound email for a rule from a built context. Unset
+ * pieces fall back to the pre-feature defaults (subject `[SEV] asset`, text =
+ * message + View link). HTML body only when the operator provided one —
+ * interpolated values are HTML-escaped there. cc/bcc pass through unresolved
+ * (the recipient service resolves them at expansion time).
+ * Exported for the escalation sweep + preview.
+ */
+export function buildComposedEmail(comp: EmailComposition, ctx: Record<string, string>): ComposedEmail {
+  const link = ctx["link"] || "";
+  const subject = comp.subjectTemplate && comp.subjectTemplate.trim()
+    ? renderNotificationTemplate(comp.subjectTemplate, ctx)
+    : `[${ctx["severity.upper"] || "NOTIFICATION"}] ${ctx["asset"] || "Polaris notification"}`;
+  const text = comp.bodyTextTemplate && comp.bodyTextTemplate.trim()
+    ? renderNotificationTemplate(comp.bodyTextTemplate, ctx)
+    : (ctx["message"] || "") + (link ? `\n\nView: ${link}` : "");
+  const html = comp.bodyHtmlTemplate && comp.bodyHtmlTemplate.trim()
+    ? renderNotificationTemplate(comp.bodyHtmlTemplate, ctx, { html: true })
+    : undefined;
+  return { subject, text, html, cc: comp.cc ?? undefined, bcc: comp.bcc ?? undefined };
 }
 
 // ─── Threshold / state evaluation ───────────────────────────────────────────
@@ -476,14 +542,22 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
   if (rule.cooldownSec && existing?.firedAt && now.getTime() - existing.firedAt.getTime() < rule.cooldownSec * 1000) {
     return;
   }
+  // Fires are transition-guarded (rare), so the per-fire asset-detail lookup
+  // is negligible even at 2000 assets — the hot evaluate path stays on the
+  // tight SCOPE_SELECT.
+  const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
+  const ctx = buildTemplateContext({ ...readingContextParts(rule, reading, now), assetDetail: detail });
+  const message = renderMessage(rule, reading, ctx);
+  ctx["message"] = message;
   const notif = await prisma.notification.create({
     data: {
       ruleId: rule.id,
       assetId: reading.assetId || null,
       assetHostname: reading.hostname,
       severity: rule.severity,
-      message: renderMessage(rule, reading),
+      message,
       regionTags: regionSnapshot(reading.tags),
+      ...(ruleWantsContext(rule) ? { templateCtx: ctx as any } : {}),
     },
   });
   await prisma.notificationRuleState.upsert({
@@ -491,7 +565,8 @@ async function fire(rule: DbRule, reading: Reading, lastValue: number | null, no
     create: { ruleId: rule.id, assetId: reading.assetId, dimensionKey: reading.dimKey, state: "firing", firedAt: now, lastValue, notificationId: notif.id },
     update: { state: "firing", firedAt: now, lastValue, notificationId: notif.id, conditionMetSince: null },
   });
-  await expandDeliveriesSafe(notif.id, rule.targets, scopeRegionTagsOf(rule.scope));
+  const composed = rule.emailComposition ? buildComposedEmail(rule.emailComposition, ctx) : undefined;
+  await expandDeliveriesSafe(notif.id, rule.targets, scopeRegionTagsOf(rule.scope), composed);
   await logEvent({
     action: "notification.triggered",
     resourceType: "notification",
@@ -580,7 +655,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
   // Notifications from rules with delivery targets get a client-generated id so
   // we can expand their deliveries after the batch insert (createMany returns
   // no ids). Rows without targets keep the DB default.
-  const deliverAfter: { id: string; targets: DeliveryTarget[]; scopeRegionTags: string[] }[] = [];
+  const deliverAfter: { id: string; targets: DeliveryTarget[]; scopeRegionTags: string[]; composedEmail?: ComposedEmail }[] = [];
   for (const ev of events) {
     for (const c of compiled) {
       if (!c.re.test(ev.action)) continue;
@@ -590,14 +665,38 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
         if (c.trigger.detailsMatch && !detailsMatch(ev.details, c.trigger.detailsMatch)) continue;
       }
       const assetId = ev.resourceType === "asset" ? ev.resourceId ?? null : null;
-      const tags = assetId ? await assetTags(assetId) : [];
+      const detail = assetId ? await assetDetail(assetId) : null;
+      const tags = detail?.tags ?? [];
+      // Event-path token mapping: {asset}=resourceName, {metric}=action,
+      // {value}=event message; threshold/dimension are empty.
+      const ctx = buildTemplateContext({
+        asset: ev.resourceName ?? "",
+        metric: ev.action,
+        value: ev.message,
+        threshold: "",
+        dimension: "",
+        severity: c.rule.severity,
+        time: ev.timestamp,
+        link: notificationsPageUrl(),
+        ruleName: c.rule.name,
+        ruleDescription: c.rule.description,
+        assetDetail: detail,
+      });
       const tmpl = c.rule.messageTemplate;
       const message = tmpl && tmpl.trim()
-        ? tmpl.replaceAll("{asset}", ev.resourceName ?? "").replaceAll("{metric}", ev.action).replaceAll("{value}", ev.message)
+        ? renderNotificationTemplate(tmpl, ctx)
         : `${c.rule.name}: ${ev.message}`;
+      ctx["message"] = message;
       const hasTargets = Array.isArray(c.rule.targets) && c.rule.targets.length > 0;
       const id = hasTargets ? randomUUID() : undefined;
-      if (hasTargets && id) deliverAfter.push({ id, targets: c.rule.targets, scopeRegionTags: scopeRegionTagsOf(c.rule.scope) });
+      if (hasTargets && id) {
+        deliverAfter.push({
+          id,
+          targets: c.rule.targets,
+          scopeRegionTags: scopeRegionTagsOf(c.rule.scope),
+          composedEmail: c.rule.emailComposition ? buildComposedEmail(c.rule.emailComposition, ctx) : undefined,
+        });
+      }
       toCreate.push({
         ...(id ? { id } : {}),
         ruleId: c.rule.id,
@@ -606,6 +705,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
         severity: c.rule.severity,
         message,
         regionTags: regionSnapshot(tags),
+        ...(ruleWantsContext(c.rule) ? { templateCtx: ctx } : {}),
       });
     }
   }
@@ -614,7 +714,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
     await prisma.notification.createMany({ data: toCreate });
   }
   for (const d of deliverAfter) {
-    await expandDeliveriesSafe(d.id, d.targets, d.scopeRegionTags);
+    await expandDeliveriesSafe(d.id, d.targets, d.scopeRegionTags, d.composedEmail);
   }
 
   const newest = events[events.length - 1].timestamp.toISOString();
@@ -631,13 +731,28 @@ function detailsMatch(details: unknown, match: Record<string, string | number | 
   return Object.entries(match).every(([k, v]) => String(d[k]) === String(v));
 }
 
-const _assetTagCache = new Map<string, string[]>();
-async function assetTags(assetId: string): Promise<string[]> {
-  if (_assetTagCache.has(assetId)) return _assetTagCache.get(assetId)!;
-  const a = await prisma.asset.findUnique({ where: { id: assetId }, select: { tags: true } });
-  const tags = a?.tags ?? [];
-  _assetTagCache.set(assetId, tags);
-  return tags;
+// Per-tick asset-detail cache: fed by the per-fire lookups (composition /
+// escalation / {asset.*} tokens) and the event-tail's tag reads, so a batch
+// touching the same asset fetches once. Cleared each evaluate tick.
+const ASSET_DETAIL_SELECT = {
+  hostname: true, ipAddress: true, macAddress: true, assetType: true, status: true,
+  location: true, learnedLocation: true, manufacturer: true, model: true,
+  serialNumber: true, os: true, osVersion: true, department: true, assignedTo: true,
+  tags: true,
+} as const;
+
+type AssetDetailRow = AssetTemplateDetail & { hostname: string | null; status: string; tags: string[] };
+
+const _assetDetailCache = new Map<string, AssetDetailRow | null>();
+export function clearAssetDetailCache(): void {
+  _assetDetailCache.clear();
+}
+export async function assetDetail(assetId: string): Promise<AssetDetailRow | null> {
+  if (_assetDetailCache.has(assetId)) return _assetDetailCache.get(assetId)!;
+  const a = await prisma.asset.findUnique({ where: { id: assetId }, select: ASSET_DETAIL_SELECT });
+  const row = a ? { ...a, status: String(a.status) } : null;
+  _assetDetailCache.set(assetId, row);
+  return row;
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────────
@@ -645,15 +760,17 @@ async function assetTags(assetId: string): Promise<string[]> {
 export async function evaluateAllNotificationRules(): Promise<void> {
   const dbRules = await prisma.notificationRule.findMany({ where: { enabled: true } });
   const rules: DbRule[] = dbRules.map((r) => ({
-    id: r.id, name: r.name, severity: r.severity,
+    id: r.id, name: r.name, description: r.description, severity: r.severity,
     trigger: r.trigger as unknown as Trigger,
     scope: (r.scope ?? {}) as RuleScope,
     clearBehavior: r.clearBehavior, clearAfterSec: r.clearAfterSec, cooldownSec: r.cooldownSec,
     messageTemplate: r.messageTemplate,
     targets: Array.isArray(r.targets) ? (r.targets as unknown as DeliveryTarget[]) : [],
+    emailComposition: (r.emailComposition ?? null) as EmailComposition | null,
+    escalation: (r.escalation ?? null) as EscalationConfig | null,
   }));
 
-  _assetTagCache.clear();
+  clearAssetDetailCache();
 
   for (const rule of rules) {
     try {
@@ -687,6 +804,8 @@ export interface PreviewResult {
   note?: string;
   totalEvaluated: number;
   matches: PreviewMatch[];
+  /** Rendered sample of the composed email (first match), when the draft has emailComposition. */
+  emailPreview?: { subject: string; text: string; html?: string };
 }
 
 /** Dry-run a draft rule against current data with NO writes. */
@@ -715,5 +834,31 @@ export async function previewRule(input: RuleInput): Promise<PreviewResult> {
     meets: readingMeets(trigger, r.value),
   }));
   matches.sort((a, b) => Number(b.meets) - Number(a.meets));
-  return { supported: true, totalEvaluated: readings.length, matches: matches.slice(0, 200) };
+
+  // Rendered sample of the composed email against the best reading (first
+  // matching, else first evaluated) — templates only, no recipient resolution.
+  let emailPreview: PreviewResult["emailPreview"];
+  if (input.emailComposition && readings.length > 0) {
+    const draft: DbRule = {
+      id: "", name: input.name, description: input.description ?? null, severity: input.severity,
+      trigger: input.trigger, scope: input.scope,
+      clearBehavior: input.clearBehavior, clearAfterSec: input.clearAfterSec ?? null, cooldownSec: input.cooldownSec ?? null,
+      messageTemplate: input.messageTemplate ?? null, targets: [],
+      emailComposition: input.emailComposition, escalation: input.escalation ?? null,
+    };
+    const sample = readings.find((r) => readingMeets(trigger, r.value)) ?? readings[0];
+    // Direct fetch (not the per-tick cache — preview runs in the web process).
+    const detail = sample.assetId
+      ? await prisma.asset.findUnique({ where: { id: sample.assetId }, select: ASSET_DETAIL_SELECT })
+      : null;
+    const ctx = buildTemplateContext({
+      ...readingContextParts(draft, sample, new Date()),
+      assetDetail: detail ? { ...detail, status: String(detail.status) } : null,
+    });
+    ctx["message"] = renderMessage(draft, sample, ctx);
+    const composed = buildComposedEmail(input.emailComposition, ctx);
+    emailPreview = { subject: composed.subject, text: composed.text, html: composed.html };
+  }
+
+  return { supported: true, totalEvaluated: readings.length, matches: matches.slice(0, 200), emailPreview };
 }

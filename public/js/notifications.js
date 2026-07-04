@@ -238,13 +238,24 @@ function _looksLikeDeviceId(tag) {
           ackCell = '<span style="color:var(--color-text-tertiary)">' + label + '</span>';
         }
       }
+      // Escalation marker — from the escalateNotifications sweep's per-tier state.
+      var escLine = "";
+      if (n.escalationState && n.escalationState.tiers) {
+        var escKeys = Object.keys(n.escalationState.tiers);
+        if (escKeys.length) {
+          var escSent = 0;
+          escKeys.forEach(function (k) { escSent += (n.escalationState.tiers[k].count || 0); });
+          var escTier = Math.max.apply(null, escKeys.map(Number)) + 1;
+          escLine = '<div style="font-size:0.75rem;color:var(--color-danger);margin-top:2px" title="Escalation emails sent while unhandled">Escalated — tier ' + escTier + ', ' + escSent + ' email' + (escSent === 1 ? "" : "s") + ' sent</div>';
+        }
+      }
       return '<tr>' +
         '<td class="cb-col"><input type="checkbox" class="row-cb" data-id="' + n.id + '"' + checked + '></td>' +
         '<td style="font-family:var(--font-mono);font-size:0.82rem;white-space:nowrap">' + escapeHtml(timeStr) + '</td>' +
         '<td><span class="badge badge-level-' + sev + '">' + sev.toUpperCase() + '</span></td>' +
         '<td>' + assetCell + '</td>' +
         '<td>' + (regions || '<span style="color:var(--color-text-tertiary)">-</span>') + '</td>' +
-        '<td>' + escapeHtml(n.message || "") + '</td>' +
+        '<td>' + escapeHtml(n.message || "") + escLine + '</td>' +
         '<td>' + ackCell + '</td>' +
         '</tr>';
     }).join("");
@@ -444,6 +455,8 @@ function _looksLikeDeviceId(tag) {
       messageTemplate: r.messageTemplate != null ? r.messageTemplate : null,
       channels: r.channels || ["in_app"],
       targets: Array.isArray(r.targets) ? r.targets : [],
+      emailComposition: r.emailComposition || null,
+      escalation: r.escalation || null,
     }, overrides || {});
   }
 
@@ -557,6 +570,8 @@ async function openRuleBuilder(existing) {
   var r = existing || {};
   var trig = r.trigger || { type: "asset_metric" };
   var scope = r.scope || {};
+  var comp = r.emailComposition || null;
+  var esc = r.escalation || null;
 
   function opt(list, sel) {
     return list.map(function (v) { return '<option value="' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(v) + '</option>'; }).join("");
@@ -565,6 +580,16 @@ async function openRuleBuilder(existing) {
     return s.triggerTypes.map(function (t) {
       return '<option value="' + t.type + '"' + (t.type === trig.type ? " selected" : "") + '>' + escapeHtml(t.label) + '</option>';
     }).join("");
+  }
+  // Collapsed insert-variable palette (chips insert {token} into the last-
+  // focused .tpl-field — message template, email subject/bodies, tier overrides).
+  function tokenPaletteHtml() {
+    var vars = s.templateVariables || [];
+    if (!vars.length) return "";
+    var chips = vars.map(function (v) {
+      return '<button type="button" class="btn btn-sm btn-secondary tpl-token" data-token="' + escapeHtml(v.token) + '" title="' + escapeHtml(v.description) + '" style="margin:2px 4px 2px 0;font-family:var(--font-mono);font-size:0.72rem;padding:1px 6px">' + escapeHtml(v.token) + '</button>';
+    }).join("");
+    return '<details id="rule-token-palette" style="margin:2px 0 6px"><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Insert variable…</summary><div style="margin-top:4px">' + chips + '</div></details>';
   }
 
   var body =
@@ -577,12 +602,37 @@ async function openRuleBuilder(existing) {
     '<div class="form-group"><label>Clear behavior</label><select id="rule-clear">' + opt(s.clearBehaviors, r.clearBehavior || "manual") + '</select></div>' +
     '<div class="form-group" id="rule-clearafter-wrap" style="display:none"><label>Auto-clear after (seconds)</label><input type="number" id="rule-clearafter" value="' + (r.clearAfterSec || 3600) + '"></div>' +
     '<div class="form-group"><label>Re-notify cooldown (seconds, optional)</label><input type="number" id="rule-cooldown" value="' + (r.cooldownSec != null ? r.cooldownSec : "") + '" placeholder="0 = suppress while firing"></div>' +
-    '<div class="form-group"><label>Message template (optional)</label><input type="text" id="rule-msg" value="' + escapeHtml(r.messageTemplate || "") + '" placeholder="{asset} {metric} = {value} (threshold {threshold})"></div>' +
+    '<div class="form-group"><label>Message template (optional)</label>' + tokenPaletteHtml() + '<input type="text" id="rule-msg" class="tpl-field" value="' + escapeHtml(r.messageTemplate || "") + '" placeholder="{asset} {metric} = {value} (threshold {threshold})"></div>' +
     '<div class="form-group"><label><input type="checkbox" id="rule-enabled"' + (r.enabled === false ? "" : " checked") + '> Enabled</label></div>' +
     '<div class="form-group"><label>Notify (delivery targets)</label>' +
       '<div id="rule-targets"></div>' +
       '<button type="button" class="btn btn-sm btn-secondary" id="rule-add-target" style="margin-top:6px">+ Add target</button>' +
       '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:6px">In-app delivery is always on. Email targets need SMTP or Microsoft 365 configured in Server Settings → Notifications; web push needs Web Push configured and recipients who have enabled push on their device. Tag-routed email only reaches matched users who have an email address set.</p>' +
+    '</div>' +
+    // ── Email composition (rule-level; applies to all email targets) ─────────
+    '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
+      '<label style="font-weight:600;margin:0"><input type="checkbox" id="rule-email-enable"' + (comp ? " checked" : "") + '> Customize outbound email (subject / Cc / Bcc / body)</label>' +
+      '<div id="rule-email-fields" style="display:' + (comp ? "block" : "none") + ';margin-top:8px">' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">Email targets only — other channel types ignore this. To recipients come from each email target above; with customization on, each email target sends ONE message carrying its full To list plus the Cc/Bcc below. Unset fields keep the default subject/body. Insert variables via the palette above the message template.</p>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Subject</label><input type="text" id="rule-email-subject" class="tpl-field" value="' + escapeHtml((comp && comp.subjectTemplate) || "") + '" placeholder="[{severity.upper}] {asset} — {metric} = {value}"></div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Cc — user accounts</label>' + userMultiSelect(comp && comp.cc && comp.cc.recipientUserIds, "ec-cc-users") + '</div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Cc — custom addresses (comma-separated)</label><input type="text" id="rule-email-cc-addr" value="' + escapeHtml(((comp && comp.cc && comp.cc.addresses) || []).join(", ")) + '" placeholder="manager@example.com"></div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Bcc — user accounts</label>' + userMultiSelect(comp && comp.bcc && comp.bcc.recipientUserIds, "ec-bcc-users") + '</div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Bcc — custom addresses (comma-separated)</label><input type="text" id="rule-email-bcc-addr" value="' + escapeHtml(((comp && comp.bcc && comp.bcc.addresses) || []).join(", ")) + '" placeholder="audit@example.com"></div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Body (plain text)</label><textarea id="rule-email-body" class="tpl-field" rows="5" style="width:100%" placeholder="{message} — details: {asset.ip} {asset.location}. View: {link}">' + escapeHtml((comp && comp.bodyTextTemplate) || "") + '</textarea></div>' +
+        '<label style="font-size:0.8rem;display:block"><input type="checkbox" id="rule-email-html-enable"' + (comp && comp.bodyHtmlTemplate ? " checked" : "") + '> Add HTML body (interpolated values are HTML-escaped; Microsoft 365 recipients get HTML only when both bodies are set)</label>' +
+        '<textarea id="rule-email-html" class="tpl-field" rows="5" style="width:100%;display:' + (comp && comp.bodyHtmlTemplate ? "block" : "none") + ';margin-top:4px">' + escapeHtml((comp && comp.bodyHtmlTemplate) || "") + '</textarea>' +
+      '</div>' +
+    '</div>' +
+    // ── Escalation tiers (follow-up emails while unhandled) ──────────────────
+    '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
+      '<label style="font-weight:600;margin:0"><input type="checkbox" id="rule-esc-enable"' + (esc ? " checked" : "") + '> Escalation emails (follow up while unhandled)</label>' +
+      '<div id="rule-esc-fields" style="display:' + (esc ? "block" : "none") + ';margin-top:8px">' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Stop escalating when</label><select id="rule-esc-stopon"><option value="acknowledge">Acknowledged (or cleared)</option><option value="clear">Cleared only — acknowledging does not stop it</option></select></div>' +
+        '<div id="rule-esc-tiers"></div>' +
+        '<button type="button" class="btn btn-sm btn-secondary" id="rule-esc-add" style="margin-top:6px">+ Add tier</button>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:6px">Each tier emails its recipients once its delay elapses (checked every minute), optionally repeating until the notification is handled or max repeats is reached. Tiers use email channels only. Subject/body overrides fall back to the customized email above, then to the default with an [ESCALATION n] subject prefix.</p>' +
+      '</div>' +
     '</div>' +
     '<div id="rule-preview" style="margin-top:0.5rem"></div>';
 
@@ -779,15 +829,16 @@ async function openRuleBuilder(existing) {
     var raw = el ? el.value : ((scope.tags || []).join(", "));
     return raw.split(",").map(function (x) { return x.trim(); }).filter(function (x) { return /^region:/i.test(x); });
   }
-  function userMultiSelect(selectedIds) {
+  function userMultiSelect(selectedIds, cls) {
+    cls = cls || "tg-recipient-users";
     var sel = new Set(selectedIds || []);
     var users = _ruleRecipientUsers || [];
-    if (!users.length) return '<select multiple class="tg-recipient-users" size="4" style="width:100%" disabled><option>No users found</option></select>';
+    if (!users.length) return '<select multiple class="' + cls + '" size="4" style="width:100%" disabled><option>No users found</option></select>';
     var opts = users.map(function (u) {
       var label = (u.displayName || u.username) + (u.email ? " <" + u.email + ">" : " (no email)");
       return '<option value="' + escapeHtml(u.id) + '"' + (sel.has(u.id) ? " selected" : "") + '>' + escapeHtml(label) + '</option>';
     }).join("");
-    return '<select multiple class="tg-recipient-users" size="4" style="width:100%">' + opts + '</select>';
+    return '<select multiple class="' + cls + '" size="4" style="width:100%">' + opts + '</select>';
   }
   function channelOptions(selId) {
     if (channels.length === 0) return '<option value="">No channels configured</option>';
@@ -870,6 +921,143 @@ async function openRuleBuilder(existing) {
     addTargetRow({ channelId: channels[0].id });
   });
 
+  // ─── Token palette wiring — insert {token} at caret of last-focused field ──
+  var _tplFocus = null;
+  function trackTplField(el) {
+    if (el) el.addEventListener("focus", function () { _tplFocus = el; });
+  }
+  document.querySelectorAll(".tpl-field").forEach(trackTplField);
+  document.querySelectorAll("#rule-token-palette .tpl-token").forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      var el = _tplFocus || document.getElementById("rule-msg");
+      if (!el) return;
+      var tok = chip.getAttribute("data-token");
+      if (typeof el.setRangeText === "function" && el.selectionStart != null) {
+        el.setRangeText(tok, el.selectionStart, el.selectionEnd, "end");
+      } else {
+        el.value += tok;
+      }
+      el.focus();
+    });
+  });
+
+  // ─── Email composition section ─────────────────────────────────────────────
+  var emailEnable = document.getElementById("rule-email-enable");
+  emailEnable.addEventListener("change", function () {
+    document.getElementById("rule-email-fields").style.display = this.checked ? "block" : "none";
+  });
+  document.getElementById("rule-email-html-enable").addEventListener("change", function () {
+    document.getElementById("rule-email-html").style.display = this.checked ? "block" : "none";
+  });
+
+  // Users/addresses pair → { recipientUserIds?, addresses? } or null when empty.
+  function recipObj(userSelEl, addrEl) {
+    var o = {};
+    if (userSelEl && !userSelEl.disabled) {
+      var ids = Array.from(userSelEl.selectedOptions).map(function (op) { return op.value; }).filter(Boolean);
+      if (ids.length) o.recipientUserIds = ids;
+    }
+    if (addrEl) {
+      var addrs = (addrEl.value || "").split(",").map(function (a) { return a.trim(); }).filter(Boolean);
+      if (addrs.length) o.addresses = addrs;
+    }
+    return (o.recipientUserIds || o.addresses) ? o : null;
+  }
+
+  function collectEmailComposition() {
+    if (!emailEnable.checked) return null;
+    var c = {};
+    var subj = document.getElementById("rule-email-subject").value.trim(); if (subj) c.subjectTemplate = subj;
+    var bodyTxt = document.getElementById("rule-email-body").value; if (bodyTxt.trim()) c.bodyTextTemplate = bodyTxt;
+    if (document.getElementById("rule-email-html-enable").checked) {
+      var h = document.getElementById("rule-email-html").value; if (h.trim()) c.bodyHtmlTemplate = h;
+    }
+    var cc = recipObj(document.querySelector("#rule-email-fields .ec-cc-users"), document.getElementById("rule-email-cc-addr")); if (cc) c.cc = cc;
+    var bcc = recipObj(document.querySelector("#rule-email-fields .ec-bcc-users"), document.getElementById("rule-email-bcc-addr")); if (bcc) c.bcc = bcc;
+    return c; // {} is valid — explicit opt-in still switches email targets to one-message-per-target
+  }
+
+  // ─── Escalation section ────────────────────────────────────────────────────
+  var escEnable = document.getElementById("rule-esc-enable");
+  escEnable.addEventListener("change", function () {
+    document.getElementById("rule-esc-fields").style.display = this.checked ? "block" : "none";
+  });
+  if (esc && esc.stopOn) document.getElementById("rule-esc-stopon").value = esc.stopOn;
+
+  function emailChannels() { return channels.filter(function (c) { return isEmailType(c.type); }); }
+  function escChannelOptions(selId) {
+    var list = emailChannels();
+    if (!list.length) return '<option value="">No email channels configured</option>';
+    return list.map(function (c) {
+      var lbl = c.name + " — " + chanTypeLabel(c.type) + (c.enabled ? "" : " (disabled)");
+      return '<option value="' + escapeHtml(c.id) + '"' + (c.id === selId ? " selected" : "") + '>' + escapeHtml(lbl) + '</option>';
+    }).join("");
+  }
+  function escTierHtml(t) {
+    t = t || {};
+    return '<div class="esc-tier" style="border:1px solid var(--color-border);border-radius:6px;padding:0.6rem;margin-bottom:6px">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">' +
+        '<label style="margin:0;font-size:0.8rem">After</label>' +
+        '<input type="number" class="esc-after" min="1" value="' + (t.afterMin != null ? t.afterMin : 15) + '" style="width:80px"> min,' +
+        '<label style="margin:0;font-size:0.8rem">send via</label>' +
+        '<select class="esc-channel" style="flex:1;min-width:160px">' + escChannelOptions(t.channelId) + '</select>' +
+        '<button type="button" class="btn btn-sm btn-danger esc-remove">Remove</button>' +
+      '</div>' +
+      '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">To — user accounts</label>' + userMultiSelect(t.to && t.to.recipientUserIds, "esc-to-users") + '</div>' +
+      '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">To — custom addresses (comma-separated)</label><input type="text" class="esc-to-addr" value="' + escapeHtml(((t.to && t.to.addresses) || []).join(", ")) + '" placeholder="supervisor@example.com"></div>' +
+      '<details' + (t.cc || t.bcc || t.subjectTemplate || t.bodyTextTemplate || t.repeatEveryMin ? " open" : "") + '><summary style="font-size:0.78rem;cursor:pointer;color:var(--color-text-tertiary)">Cc / Bcc, subject/body overrides, repeat…</summary>' +
+        '<div style="margin-top:6px">' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Cc — user accounts</label>' + userMultiSelect(t.cc && t.cc.recipientUserIds, "esc-cc-users") + '</div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Cc — custom addresses</label><input type="text" class="esc-cc-addr" value="' + escapeHtml(((t.cc && t.cc.addresses) || []).join(", ")) + '"></div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Bcc — user accounts</label>' + userMultiSelect(t.bcc && t.bcc.recipientUserIds, "esc-bcc-users") + '</div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Bcc — custom addresses</label><input type="text" class="esc-bcc-addr" value="' + escapeHtml(((t.bcc && t.bcc.addresses) || []).join(", ")) + '"></div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Subject override (optional)</label><input type="text" class="esc-subject tpl-field" value="' + escapeHtml(t.subjectTemplate || "") + '" placeholder="[ESCALATION {escalation.tier}] {asset} unhandled for {escalation.elapsed}"></div>' +
+        '<div class="form-group" style="margin-bottom:6px"><label style="font-size:0.8rem">Body override (plain text, optional)</label><textarea class="esc-body tpl-field" rows="3" style="width:100%">' + escapeHtml(t.bodyTextTemplate || "") + '</textarea></div>' +
+        '<div class="form-group" style="margin-bottom:0"><label style="font-size:0.8rem">Repeat every</label> <input type="number" class="esc-repeat" min="5" value="' + (t.repeatEveryMin != null ? t.repeatEveryMin : "") + '" style="width:80px" placeholder="off"> min, <label style="font-size:0.8rem;display:inline">max</label> <input type="number" class="esc-max" min="1" max="20" value="' + (t.maxRepeats != null ? t.maxRepeats : "") + '" style="width:70px" placeholder="5"> repeats</div>' +
+        '</div>' +
+      '</details>' +
+    '</div>';
+  }
+  function addEscTier(t) {
+    var host = document.getElementById("rule-esc-tiers");
+    var tmp = document.createElement("div");
+    tmp.innerHTML = escTierHtml(t);
+    var row = tmp.firstChild;
+    host.appendChild(row);
+    row.querySelector(".esc-remove").addEventListener("click", function () { row.remove(); });
+    row.querySelectorAll(".tpl-field").forEach(trackTplField);
+  }
+  ((esc && esc.tiers) || []).forEach(addEscTier);
+  document.getElementById("rule-esc-add").addEventListener("click", function () {
+    if (emailChannels().length === 0) { showToast("Add an email delivery channel first (Delivery tab)", "info"); return; }
+    if (document.querySelectorAll("#rule-esc-tiers .esc-tier").length >= 5) { showToast("Maximum 5 escalation tiers", "info"); return; }
+    addEscTier({ channelId: emailChannels()[0].id });
+  });
+
+  function collectEscalation() {
+    if (!escEnable.checked) return null;
+    var tiers = [];
+    document.querySelectorAll("#rule-esc-tiers .esc-tier").forEach(function (row) {
+      var t = {
+        afterMin: Number(row.querySelector(".esc-after").value),
+        channelId: row.querySelector(".esc-channel").value,
+        to: recipObj(row.querySelector(".esc-to-users"), row.querySelector(".esc-to-addr")) || {},
+      };
+      var cc = recipObj(row.querySelector(".esc-cc-users"), row.querySelector(".esc-cc-addr")); if (cc) t.cc = cc;
+      var bcc = recipObj(row.querySelector(".esc-bcc-users"), row.querySelector(".esc-bcc-addr")); if (bcc) t.bcc = bcc;
+      var subj = row.querySelector(".esc-subject").value.trim(); if (subj) t.subjectTemplate = subj;
+      var bodyTxt = row.querySelector(".esc-body").value; if (bodyTxt.trim()) t.bodyTextTemplate = bodyTxt;
+      var rep = row.querySelector(".esc-repeat").value;
+      if (rep !== "") {
+        t.repeatEveryMin = Number(rep);
+        var mx = row.querySelector(".esc-max").value;
+        if (mx !== "") t.maxRepeats = Number(mx);
+      }
+      tiers.push(t);
+    });
+    return { stopOn: document.getElementById("rule-esc-stopon").value, tiers: tiers };
+  }
+
   function collectRule() {
     var rule = {
       name: document.getElementById("rule-name").value.trim(),
@@ -884,6 +1072,8 @@ async function openRuleBuilder(existing) {
       messageTemplate: document.getElementById("rule-msg").value.trim() || null,
       channels: ["in_app"],
       targets: collectTargets(),
+      emailComposition: collectEmailComposition(),
+      escalation: collectEscalation(),
     };
     return rule;
   }
@@ -900,6 +1090,14 @@ async function openRuleBuilder(existing) {
       }).join("");
       box.innerHTML = '<p style="font-size:0.85rem"><strong>' + meeting.length + '</strong> of ' + res.totalEvaluated + ' currently match.</p>' +
         '<div class="table-wrapper" style="max-height:200px;overflow:auto"><table><thead><tr><th>Asset</th><th>Dimension</th><th>Value</th><th>Match</th></tr></thead><tbody>' + rowsHtml + '</tbody></table></div>';
+      if (res.emailPreview) {
+        box.innerHTML += '<div style="border:1px solid var(--color-border);border-radius:6px;padding:0.6rem;margin-top:6px">' +
+          '<p style="font-size:0.8rem;margin:0 0 4px"><strong>Composed email preview</strong> (rendered against the first match)</p>' +
+          '<p style="font-size:0.85rem;margin:0 0 4px"><strong>Subject:</strong> ' + escapeHtml(res.emailPreview.subject) + '</p>' +
+          '<pre style="white-space:pre-wrap;font-size:0.8rem;margin:0;max-height:160px;overflow:auto">' + escapeHtml(res.emailPreview.text) + '</pre>' +
+          (res.emailPreview.html ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">+ HTML body (' + res.emailPreview.html.length + ' chars)</p>' : '') +
+          '</div>';
+      }
     } catch (err) { box.innerHTML = '<p style="color:var(--color-danger)">' + escapeHtml(err.message || "Preview failed") + '</p>'; }
   });
 
@@ -931,6 +1129,19 @@ async function openRuleBuilder(existing) {
         if (!hasRecip) return "Delivery " + n + " (" + ch.name + "): choose at least one recipient — user accounts, a custom email, or the rule's region.";
       }
     }
+    if (rule.escalation) {
+      var etiers = rule.escalation.tiers || [];
+      if (!etiers.length) return "Escalation: add at least one tier, or untick escalation.";
+      for (var j = 0; j < etiers.length; j++) {
+        var et = etiers[j]; var tn = j + 1;
+        if (!et.afterMin || isNaN(et.afterMin) || et.afterMin < 1) return "Escalation tier " + tn + ": enter the delay in minutes (1 or more).";
+        if (!et.channelId) return "Escalation tier " + tn + ": pick an email channel.";
+        if (!(et.to.recipientUserIds && et.to.recipientUserIds.length) && !(et.to.addresses && et.to.addresses.length)) {
+          return "Escalation tier " + tn + ": choose at least one To recipient (user accounts or custom addresses).";
+        }
+        if (et.repeatEveryMin != null && (isNaN(et.repeatEveryMin) || et.repeatEveryMin < 5)) return "Escalation tier " + tn + ": repeat interval must be 5 minutes or more.";
+      }
+    }
     return null;
   }
 
@@ -938,6 +1149,14 @@ async function openRuleBuilder(existing) {
     var rule = collectRule();
     var problem = validateRule(rule);
     if (problem) { showToast(problem, "error"); return; }
+    // Non-blocking heads-up: composition without any email target does nothing.
+    if (rule.emailComposition) {
+      var hasEmailTarget = (rule.targets || []).some(function (t) {
+        var ch = chanById(t.channelId);
+        return ch && isEmailType(ch.type);
+      });
+      if (!hasEmailTarget) showToast("Email customization saved, but this rule has no email delivery target — add an SMTP / Microsoft 365 target for it to take effect.", "info");
+    }
     this.disabled = true;
     try {
       if (existing) await api.notificationRules.update(existing.id, rule);
