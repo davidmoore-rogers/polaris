@@ -17,6 +17,7 @@ import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { loadIconResolutionCache, resolveIconUrl } from "../../services/deviceIconService.js";
 import { inferInterfaceTopology } from "../../services/interfaceTopologyService.js";
+import { resolveEffectiveLocation, hasLocationCodes, type LocationCodes } from "../../utils/locationCodes.js";
 
 const router = Router();
 
@@ -36,7 +37,20 @@ type TopologyMeta = {
   // uplink, "mesh" = wireless-mesh leaf (uplink is its parent AP; any wired
   // LLDP adjacency is a switch bridged BEHIND it, not an uplink).
   meshUplink?: "ethernet" | "mesh" | null;
+  // Raw admin description from the managed-switch CMDB / wtp `comment`,
+  // stamped by discovery. Carries b:/f:/r:/jb: location codes — resolved
+  // per node below via resolveEffectiveLocation (notes → Asset.description
+  // → this). notesSyncedFrom is the description→notes sync provenance
+  // marker (consumed by the discovery sync layer, not read here).
+  deviceDescription?: string | null;
+  notesSyncedFrom?: string | null;
 };
+
+// Effective location codes for a topology node, or null when the node
+// carries none — keeps untagged fleets' payloads noise-free.
+function nodeLocation(codes: LocationCodes): LocationCodes | null {
+  return hasLocationCodes(codes) ? codes : null;
+}
 
 function readTopology(raw: unknown): TopologyMeta {
   if (raw && typeof raw === "object") return raw as TopologyMeta;
@@ -193,12 +207,19 @@ router.get("/sites", async (req, res, next) => {
 // ─── GET /map/sites/:id/topology ───────────────────────────────────────────────
 // Graph payload for the click-through modal. Shape:
 //   {
-//     fortigate: { id, hostname, serial, model, ip, status, lastSeen, subnets: [...] },
-//     switches:  [{ id, hostname, serial, ip, uplinkInterface, status, model }, ...],
+//     fortigate: { id, hostname, serial, model, ip, status, lastSeen, location, subnets: [...] },
+//     switches:  [{ id, hostname, serial, ip, uplinkInterface, status, model,
+//                   location, deviceDescription }, ...],
 //     aps:       [{ id, hostname, serial, ip, model, status, peerSwitchId, peerPort,
-//                   peerVlan, peerAssetId }, ...],
+//                   peerVlan, peerAssetId, location, deviceDescription }, ...],
 //     edges:     [{ source, target, label? }, ...]
 //   }
+//
+// `location` is { building, floor, room, junctionBox } (each string|null) or
+// null when the node carries no b:/f:/r:/jb: codes — resolved server-side by
+// utils/locationCodes.ts from notes → Asset.description → the device admin
+// description discovery stamped on fortinetTopology.deviceDescription. Drives
+// the topology modal's grouping hulls + floor views.
 //
 // Every edge references an asset id in this payload, so the frontend can hand
 // the whole object to a graph renderer (Cytoscape) without doing any extra
@@ -225,6 +246,8 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         monitored: true,
         dependencyLayer: true,
         dependencySuppressed: true,
+        notes: true,
+        description: true,
       },
     });
     if (!fg || fg.assetType !== "firewall") {
@@ -268,6 +291,8 @@ router.get("/sites/:id/topology", async (req, res, next) => {
             monitorStatus: true,
             dependencyLayer: true,
             dependencySuppressed: true,
+            notes: true,
+            description: true,
           },
         })
       : [];
@@ -301,6 +326,11 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           dependencyLayer: s.dependencyLayer,
           dependencySuppressed: s.dependencySuppressed,
           iconUrl: resolveIconUrl({ manufacturer: s.manufacturer, model: s.model, assetType: "switch" }, iconCache),
+          // Physical-location codes (b:/f:/r:/jb:) resolved from notes →
+          // Asset.description → device admin description. Drives the Device
+          // Map's grouping hulls + floor views. Null when untagged.
+          location: nodeLocation(resolveEffectiveLocation({ notes: s.notes, description: s.description, deviceDescription: t.deviceDescription })),
+          deviceDescription: t.deviceDescription ?? null,
           endpointCount: 0,
           endpoints: [] as EndpointSummary[],
         };
@@ -420,6 +450,9 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           dependencyLayer: s.dependencyLayer,
           dependencySuppressed: s.dependencySuppressed,
           iconUrl: resolveIconUrl({ manufacturer: s.manufacturer, model: s.model, assetType: "access_point" }, iconCache),
+          // Same location-code resolution as the switch nodes above.
+          location: nodeLocation(resolveEffectiveLocation({ notes: s.notes, description: s.description, deviceDescription: t.deviceDescription })),
+          deviceDescription: t.deviceDescription ?? null,
           stationCount: 0,
           stations: [] as StationSummary[],
         };
@@ -1360,6 +1393,11 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         dependencyLayer: fg.dependencyLayer,
         dependencySuppressed: fg.dependencySuppressed,
         iconUrl: resolveIconUrl({ manufacturer: fg.manufacturer, model: fg.model, assetType: "firewall" }, iconCache),
+        // FortiGates have no discovery-captured device description (their
+        // device-side surface would be the 35-char system/global alias), so
+        // location codes come from notes / Asset.description only — enough
+        // for an operator to pull the FG into a building group.
+        location: nodeLocation(resolveEffectiveLocation({ notes: fg.notes, description: fg.description })),
       },
       switches,
       aps,

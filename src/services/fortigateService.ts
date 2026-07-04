@@ -184,21 +184,23 @@ export async function proxyQuery(
 // ─── Discovery ──────────────────────────────────────────────────────────────
 
 /**
- * Read the switch-controller managed-switch CMDB and return a map of
- * switch serial (UPPERCASE) → its single physical uplink port to the
- * FortiGate (e.g. "port47"). The status endpoint discovery already queries
- * only exposes the FortiGate-side logical interface ("fortilink"); the
- * physical uplink port lives in the CMDB. Switches with zero (chained behind
- * another switch over ISL) or more than one (dual-homed, ambiguous) uplink
- * port are omitted — the FG↔switch edge label falls back to LLDP for those.
+ * Read the switch-controller managed-switch CMDB and return a map of switch
+ * serial (UPPERCASE) → CMDB metadata: the single physical uplink port to the
+ * FortiGate (e.g. "port47") and the operator-set admin description. The
+ * status endpoint discovery already queries only exposes the FortiGate-side
+ * logical interface ("fortilink"); the physical uplink port lives in the
+ * CMDB. Switches with zero (chained behind another switch over ISL) or more
+ * than one (dual-homed, ambiguous) uplink port get uplinkPort null — the
+ * FG↔switch edge label falls back to LLDP for those. The description carries
+ * b:/f:/r:/jb: location codes for the Device Map (utils/locationCodes.ts).
  * Best-effort: any failure yields an empty map.
  */
-async function fetchFortiswitchUplinkPorts(
+async function fetchFortiswitchCmdbMeta(
   config: FortiGateConfig,
   queryBase: Record<string, string>,
   signal: AbortSignal | undefined,
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+): Promise<Map<string, { uplinkPort: string | null; description: string | null }>> {
+  const out = new Map<string, { uplinkPort: string | null; description: string | null }>();
   try {
     const rows = await fgRequest<any[]>(config, "GET", "/api/v2/cmdb/switch-controller/managed-switch", {
       query: { ...queryBase, datasource: "1" },
@@ -209,9 +211,44 @@ async function fetchFortiswitchUplinkPorts(
       const serial = String(row?.sn || row?.["switch-id"] || row?.name || "").trim();
       if (!serial) continue;
       const uplinks = findFortiswitchUplinkPorts(row?.ports);
-      if (uplinks.length === 1) out.set(serial.toUpperCase(), uplinks[0]);
+      const desc = typeof row?.description === "string" ? row.description.trim() : "";
+      out.set(serial.toUpperCase(), {
+        uplinkPort: uplinks.length === 1 ? uplinks[0] : null,
+        description: desc || null,
+      });
     }
-  } catch { /* best-effort — leave uplinkPhysicalPort null, fall back to LLDP */ }
+  } catch { /* best-effort — leave uplinkPhysicalPort/description null, fall back to LLDP */ }
+  return out;
+}
+
+/**
+ * Read the wireless-controller wtp CMDB and return a map of AP serial
+ * (UPPERCASE) → operator-set admin description (the wtp `comment` field —
+ * the managed_ap monitor endpoint doesn't carry it). Same role as the
+ * managed-switch description above: b:/f:/r:/jb: location codes for the
+ * Device Map. Best-effort: a 404 (older FortiOS / wireless-controller
+ * disabled) or any other failure yields an empty map and never fails
+ * discovery. Mirrors the FMG path's wtp CMDB roster read (Step 3d.4).
+ */
+async function fetchFortiapComments(
+  config: FortiGateConfig,
+  queryBase: Record<string, string>,
+  signal: AbortSignal | undefined,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  try {
+    const rows = await fgRequest<any[]>(config, "GET", "/api/v2/cmdb/wireless-controller/wtp", {
+      query: { ...queryBase, datasource: "1" },
+      signal,
+    });
+    if (!Array.isArray(rows)) return out;
+    for (const row of rows) {
+      const serial = String(row?.["wtp-id"] || "").trim();
+      if (!serial) continue;
+      const comment = typeof row?.comment === "string" ? row.comment.trim() : "";
+      if (comment) out.set(serial.toUpperCase(), comment);
+    }
+  } catch { /* best-effort — leave AP descriptions null */ }
   return out;
 }
 
@@ -667,15 +704,17 @@ export async function discoverDhcpSubnets(
           signal,
         });
     didSwitchQuery = true;
-    // Switch-side physical uplink ports come from the managed-switch CMDB (the
-    // status endpoint only carries fgt_peer_intf_name = "fortilink"). One extra
-    // read per controller per run; serial → single uplink port (skip ambiguous
-    // multi-uplink switches, leaving those to LLDP). Best-effort: a failure
-    // just leaves uplinkPhysicalPort null and the FG↔switch edge falls back.
-    const uplinkBySerial = await fetchFortiswitchUplinkPorts(config, queryBase, signal);
+    // Switch-side physical uplink ports + admin descriptions come from the
+    // managed-switch CMDB (the status endpoint only carries
+    // fgt_peer_intf_name = "fortilink"). One extra read per controller per
+    // run; serial → single uplink port (skip ambiguous multi-uplink switches,
+    // leaving those to LLDP) + description (location codes). Best-effort: a
+    // failure just leaves both null and the FG↔switch edge falls back.
+    const cmdbMetaBySerial = await fetchFortiswitchCmdbMeta(config, queryBase, signal);
     let switchCount = 0;
     if (Array.isArray(swResults)) {
       for (const sw of swResults) {
+        const cmdbMeta = cmdbMetaBySerial.get((sw.serial || "").toUpperCase());
         fortiSwitches.push({
           device: deviceName,
           name: sw["switch-id"] || "",
@@ -686,7 +725,8 @@ export async function discoverDhcpSubnets(
           joinTime: Number.isFinite(sw.join_time) && sw.join_time > 0 ? sw.join_time : undefined,
           state: sw.state || "",
           connected: sw.status === "Connected",
-          uplinkPhysicalPort: uplinkBySerial.get((sw.serial || "").toUpperCase()) ?? null,
+          uplinkPhysicalPort: cmdbMeta?.uplinkPort ?? null,
+          description: cmdbMeta?.description ?? null,
         });
         switchCount++;
       }
@@ -710,11 +750,18 @@ export async function discoverDhcpSubnets(
     didApQuery = true;
     let apCount = 0;
     if (Array.isArray(apResults)) {
+      // AP admin descriptions live in the wtp CMDB (`comment`), not the
+      // monitor endpoint — one extra best-effort read per run.
+      const commentBySerial = await fetchFortiapComments(config, queryBase, signal);
       for (const ap of apResults) {
         // Shared parser — same shape across FMG proxy and standalone
         // FortiGate REST paths. See utils/fortiapMonitorRow.ts.
         const parsed = parseFortiapMonitorRow(ap as Record<string, unknown>);
-        fortiAps.push({ device: deviceName, ...parsed });
+        fortiAps.push({
+          device: deviceName,
+          ...parsed,
+          description: commentBySerial.get((parsed.serial || "").toUpperCase()) ?? null,
+        });
         apCount++;
       }
     }

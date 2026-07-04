@@ -136,6 +136,11 @@ const MATERIAL_ASSET_FIELDS = [
   "status",
   "learnedLocation",
   "learnedAddress",
+  // Written by discovery only through the device-description → notes sync
+  // (buildDescriptionSyncStamp in integrations.ts) — i.e. only when the
+  // device-side description actually changed, so this can't flood the
+  // Event table on unchanged passes.
+  "notes",
 ] as const;
 
 export interface DiscoveryAuditContext {

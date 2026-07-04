@@ -961,6 +961,12 @@ export interface DiscoveredFortiSwitch {
   // so the Device Map labels the FortiGate↔switch edge's switch side with the
   // real port instead of the opaque "fortilink".
   uplinkPhysicalPort?: string | null;
+  // Operator-set admin description from the managed-switch CMDB row. Carries
+  // physical-location codes (b:/f:/r:/jb: — see utils/locationCodes.ts) that
+  // drive Device Map grouping. Stamped onto fortinetTopology.deviceDescription
+  // and synced into Asset.notes by the sync layer. null = CMDB read
+  // unavailable or the device has no description.
+  description?: string | null;
 }
 
 export interface DiscoveredFortiAP {
@@ -1022,6 +1028,12 @@ export interface DiscoveredFortiAP {
   memFreeMb?: number;
   memTotalMb?: number;
   sensorTemperatures?: Array<{ name: string; celsius: number }>;
+  // Operator-set admin description from the wireless-controller wtp CMDB row
+  // (`comment` field — the monitor endpoint doesn't carry it). Same role as
+  // DiscoveredFortiSwitch.description: physical-location codes for Device Map
+  // grouping, stamped onto fortinetTopology.deviceDescription + synced into
+  // Asset.notes. null = roster read unavailable or no comment set.
+  description?: string | null;
 }
 
 export interface DiscoveredVip {
@@ -2194,6 +2206,9 @@ export async function discoverDhcpSubnets(
         // edge label to LLDP). Best-effort — a failure just leaves it null.
         // Mirrors fetchFortiswitchUplinkPorts in fortigateService (direct path).
         const uplinkBySerial = new Map<string, string>();
+        // Admin description from the same CMDB rows (already fetched in
+        // full) — carries b:/f:/r:/jb: location codes for the Device Map.
+        const descriptionBySerial = new Map<string, string>();
         try {
           const cmdbPayload: JsonRpcRequest = {
             id: 9,
@@ -2217,6 +2232,8 @@ export async function discoverDhcpSubnets(
               if (!serial) continue;
               const uplinks = findFortiswitchUplinkPorts(row?.ports);
               if (uplinks.length === 1) uplinkBySerial.set(serial.toUpperCase(), uplinks[0]);
+              const desc = typeof row?.description === "string" ? row.description.trim() : "";
+              if (desc) descriptionBySerial.set(serial.toUpperCase(), desc);
             }
           }
         } catch { /* best-effort — fall back to LLDP for the switch-side label */ }
@@ -2232,6 +2249,7 @@ export async function discoverDhcpSubnets(
             state: sw.state || "",
             connected: sw.status === "Connected",
             uplinkPhysicalPort: uplinkBySerial.get((sw.serial || "").toUpperCase()) ?? null,
+            description: descriptionBySerial.get((sw.serial || "").toUpperCase()) ?? null,
           });
           switchCount++;
         }
@@ -2325,7 +2343,10 @@ export async function discoverDhcpSubnets(
 
     // Step 3d.4: CMDB roster of configured FortiAPs (WTPs) for this device.
     // Mirror of Step 3c.5 — native FMG CMDB read, decommission protection
-    // for configured-but-currently-offline APs. Best-effort.
+    // for configured-but-currently-offline APs. Best-effort. Also the only
+    // place the AP admin description lives: the monitor endpoint in Step 3d
+    // doesn't carry it, so the wtp `comment` is joined onto localAps here
+    // (location codes for the Device Map — see utils/locationCodes.ts).
     try {
       const apCmdbRes = await rpc(
         baseUrl,
@@ -2334,7 +2355,7 @@ export async function discoverDhcpSubnets(
           method: "get",
           params: [{
             url: `/pm/config/device/${deviceName}/vdom/root/wireless-controller/wtp`,
-            fields: ["wtp-id", "name"],
+            fields: ["wtp-id", "name", "comment"],
             loadsub: 0,
           }],
         },
@@ -2342,11 +2363,19 @@ export async function discoverDhcpSubnets(
       );
       const apCmdbList = apCmdbRes.result?.[0]?.data;
       if (Array.isArray(apCmdbList)) {
+        const commentBySerial = new Map<string, string>();
         for (const ap of apCmdbList) {
           // FortiAPs are keyed by serial as `wtp-id` in CMDB (matches what
           // the live monitor query reports as `wtp_id` / `serial`).
           const serial = typeof ap["wtp-id"] === "string" ? ap["wtp-id"].trim() : "";
-          if (serial) localCmdbApSerials.push(serial);
+          if (!serial) continue;
+          localCmdbApSerials.push(serial);
+          const comment = typeof ap.comment === "string" ? ap.comment.trim() : "";
+          if (comment) commentBySerial.set(serial.toUpperCase(), comment);
+        }
+        for (const ap of localAps) {
+          if (ap.device !== deviceName) continue;
+          ap.description = commentBySerial.get((ap.serial || "").toUpperCase()) ?? null;
         }
       }
     } catch (err: any) {
