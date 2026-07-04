@@ -1171,6 +1171,46 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     const lldpEdgesOut = lldpEdges.filter((e) => !isMclagPair(e.source, e.target));
     const interfaceEdgesOut = interfaceEdges.filter((e) => !isMclagPair(e.source, e.target));
 
+    // Drop redundant FortiLink fallback edges. FortiOS stamps
+    // `fgt_peer_intf_name = "fortilink"` on every managed switch — direct or
+    // chained — so an UNVERIFIED FG→switch controller edge represents the
+    // FortiGate's fortilink software aggregate, not a cable. When the switch
+    // is still reachable from the FortiGate through the rest of the final
+    // graph (interface-inferred, LLDP, wireless-bridge, MCLAG, or other
+    // controller edges), the fallback only over-connects the map — drop it.
+    // A switch with NO other path to the FortiGate keeps its fallback edge so
+    // it never renders orphaned. verifiedUplink edges (interface- or
+    // FG-LLDP-confirmed) are real cables and are never dropped here.
+    const fallbackFgSwitchEdges = new Set(
+      edges.filter((e) => e.source === fg.id && switchIdSetFinal.has(e.target) && !e.verifiedUplink),
+    );
+    if (fallbackFgSwitchEdges.size > 0) {
+      const adj = new Map<string, Set<string>>();
+      const addAdj = (a: string, b: string) => {
+        if (!adj.has(a)) adj.set(a, new Set());
+        if (!adj.has(b)) adj.set(b, new Set());
+        adj.get(a)!.add(b);
+        adj.get(b)!.add(a);
+      };
+      for (const e of edges) if (!fallbackFgSwitchEdges.has(e)) addAdj(e.source, e.target);
+      for (const e of interfaceEdgesOut) addAdj(e.source, e.target);
+      for (const e of lldpEdgesOut) addAdj(e.source, e.target);
+      for (const e of bridgeEdges) addAdj(e.source, e.target);
+      for (const e of mclagEdges) addAdj(e.source, e.target);
+      const reachable = new Set<string>([fg.id]);
+      const queue = [fg.id];
+      while (queue.length) {
+        const cur = queue.shift()!;
+        for (const n of adj.get(cur) ?? []) {
+          if (!reachable.has(n)) {
+            reachable.add(n);
+            queue.push(n);
+          }
+        }
+      }
+      edges = edges.filter((e) => !(fallbackFgSwitchEdges.has(e) && reachable.has(e.target)));
+    }
+
     res.json({
       fortigate: {
         id: fg.id,
