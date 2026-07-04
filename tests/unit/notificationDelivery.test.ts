@@ -8,9 +8,10 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { deliveryTargetSchema } from "../../src/services/notificationTypes.js";
+import { deliveryTargetSchema, emailCompositionSchema, escalationSchema } from "../../src/services/notificationTypes.js";
 import { formatBody, type WebhookPayload } from "../../src/services/notificationChannels/webhookChannel.js";
-import { scopeRegionTagsOf } from "../../src/services/notificationRecipientService.js";
+import { buildGraphMessage } from "../../src/services/notificationChannels/emailChannel.js";
+import { scopeRegionTagsOf, dedupeEmailRecipients } from "../../src/services/notificationRecipientService.js";
 
 describe("scopeRegionTagsOf", () => {
   it("extracts only region: tags from a scope", () => {
@@ -85,5 +86,101 @@ describe("formatBody", () => {
   it("teams omits the action when there is no url", () => {
     const body = formatBody("teams", { ...payload, url: null }) as Record<string, any>;
     expect(body.potentialAction).toBeUndefined();
+  });
+});
+
+describe("emailCompositionSchema", () => {
+  it("accepts an empty object (explicit opt-in with defaults)", () => {
+    expect(emailCompositionSchema.safeParse({}).success).toBe(true);
+  });
+  it("accepts templates + cc/bcc recipients", () => {
+    const r = emailCompositionSchema.safeParse({
+      subjectTemplate: "[{severity.upper}] {asset}",
+      bodyTextTemplate: "{message}",
+      bodyHtmlTemplate: "<p>{message}</p>",
+      cc: { recipientUserIds: ["u1"], addresses: ["cc@example.com"] },
+      bcc: { addresses: ["audit@example.com"] },
+    });
+    expect(r.success).toBe(true);
+  });
+  it("rejects unknown keys (strict) and bad email addresses", () => {
+    expect(emailCompositionSchema.safeParse({ subject: "x" }).success).toBe(false);
+    expect(emailCompositionSchema.safeParse({ cc: { addresses: ["nope"] } }).success).toBe(false);
+    expect(emailCompositionSchema.safeParse({ cc: { extra: true } }).success).toBe(false);
+  });
+  it("enforces template size caps", () => {
+    expect(emailCompositionSchema.safeParse({ subjectTemplate: "x".repeat(501) }).success).toBe(false);
+    expect(emailCompositionSchema.safeParse({ bodyTextTemplate: "x".repeat(10001) }).success).toBe(false);
+  });
+});
+
+describe("escalationSchema", () => {
+  const tier = { afterMin: 15, channelId: "ch-1", to: { addresses: ["oncall@example.com"] } };
+
+  it("accepts a minimal single-tier escalation and defaults stopOn", () => {
+    const r = escalationSchema.safeParse({ tiers: [tier] });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.stopOn).toBe("acknowledge");
+  });
+  it("accepts overrides + repeat settings", () => {
+    const r = escalationSchema.safeParse({
+      stopOn: "clear",
+      tiers: [{ ...tier, cc: { recipientUserIds: ["u1"] }, subjectTemplate: "[ESCALATION {escalation.tier}] {asset}", bodyTextTemplate: "{message}", repeatEveryMin: 30, maxRepeats: 3 }],
+    });
+    expect(r.success).toBe(true);
+  });
+  it("requires at least one To recipient per tier", () => {
+    expect(escalationSchema.safeParse({ tiers: [{ afterMin: 15, channelId: "ch-1", to: {} }] }).success).toBe(false);
+  });
+  it("bounds tiers (1–5), afterMin, repeatEveryMin, maxRepeats", () => {
+    expect(escalationSchema.safeParse({ tiers: [] }).success).toBe(false);
+    expect(escalationSchema.safeParse({ tiers: Array.from({ length: 6 }, () => tier) }).success).toBe(false);
+    expect(escalationSchema.safeParse({ tiers: [{ ...tier, afterMin: 0 }] }).success).toBe(false);
+    expect(escalationSchema.safeParse({ tiers: [{ ...tier, repeatEveryMin: 4 }] }).success).toBe(false);
+    expect(escalationSchema.safeParse({ tiers: [{ ...tier, repeatEveryMin: 30, maxRepeats: 21 }] }).success).toBe(false);
+  });
+  it("rejects an unknown stopOn", () => {
+    expect(escalationSchema.safeParse({ stopOn: "never", tiers: [tier] }).success).toBe(false);
+  });
+});
+
+describe("dedupeEmailRecipients", () => {
+  it("To wins over Cc; Bcc drops anything visible in To or Cc", () => {
+    const r = dedupeEmailRecipients(
+      ["a@example.com", "b@example.com"],
+      ["b@example.com", "c@example.com"],
+      ["a@example.com", "c@example.com", "d@example.com"],
+    );
+    expect(r.cc).toEqual(["c@example.com"]);
+    expect(r.bcc).toEqual(["d@example.com"]);
+  });
+  it("compares case-insensitively", () => {
+    const r = dedupeEmailRecipients(["A@Example.com"], ["a@example.com"], ["a@EXAMPLE.com"]);
+    expect(r.cc).toEqual([]);
+    expect(r.bcc).toEqual([]);
+  });
+  it("passes disjoint lists through unchanged", () => {
+    const r = dedupeEmailRecipients(["a@x.com"], ["b@x.com"], ["c@x.com"]);
+    expect(r.cc).toEqual(["b@x.com"]);
+    expect(r.bcc).toEqual(["c@x.com"]);
+  });
+});
+
+describe("buildGraphMessage", () => {
+  it("maps to/cc/bcc arrays to Graph recipient objects", () => {
+    const m = buildGraphMessage({ to: ["a@x.com", "b@x.com"], cc: ["c@x.com"], bcc: ["d@x.com"], subject: "S", text: "T" }) as any;
+    expect(m.toRecipients).toEqual([{ emailAddress: { address: "a@x.com" } }, { emailAddress: { address: "b@x.com" } }]);
+    expect(m.ccRecipients).toEqual([{ emailAddress: { address: "c@x.com" } }]);
+    expect(m.bccRecipients).toEqual([{ emailAddress: { address: "d@x.com" } }]);
+  });
+  it("accepts a single To string (legacy rows) and omits empty cc/bcc", () => {
+    const m = buildGraphMessage({ to: "a@x.com", subject: "S", text: "T" }) as any;
+    expect(m.toRecipients).toEqual([{ emailAddress: { address: "a@x.com" } }]);
+    expect(m.ccRecipients).toBeUndefined();
+    expect(m.bccRecipients).toBeUndefined();
+  });
+  it("uses Text body by default and HTML when an html body is present", () => {
+    expect((buildGraphMessage({ to: "a@x.com", subject: "S", text: "T" }) as any).body).toEqual({ contentType: "Text", content: "T" });
+    expect((buildGraphMessage({ to: "a@x.com", subject: "S", text: "T", html: "<p>H</p>" }) as any).body).toEqual({ contentType: "HTML", content: "<p>H</p>" });
   });
 });

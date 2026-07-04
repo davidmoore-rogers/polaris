@@ -25,7 +25,22 @@ import { prisma } from "../db.js";
 import type { Prisma } from "../generated/prisma/client.js";
 import { resolveTagScopesForUser } from "./regionScopeService.js";
 import { stripRegionPrefix } from "./notificationService.js";
-import { type DeliveryTarget, type ChannelType, CHANNEL_TYPES, CHANNEL_TRANSPORT } from "./notificationTypes.js";
+import { type DeliveryTarget, type ChannelType, type EmailRecipients, CHANNEL_TYPES, CHANNEL_TRANSPORT } from "./notificationTypes.js";
+
+/**
+ * A pre-rendered outbound email (subject/text/html built by the engine at fire
+ * time; escalation renders its own at sweep time). cc/bcc arrive UNresolved —
+ * this service resolves them to addresses, since recipients are its job.
+ * Presence of a ComposedEmail switches email targets to the one-email-per-
+ * target model (single delivery row carrying the full To list + Cc + Bcc).
+ */
+export interface ComposedEmail {
+  subject: string;
+  text: string;
+  html?: string;
+  cc?: EmailRecipients | null;
+  bcc?: EmailRecipients | null;
+}
 
 export interface RecipientUser {
   id: string;
@@ -115,18 +130,49 @@ export async function listRecipientUsers(): Promise<{ id: string; username: stri
 }
 
 /**
+ * Resolve an EmailRecipients config (user ids + custom addresses) to a
+ * deduped, lower-cased address list. Shared by the rule-level cc/bcc and the
+ * escalation sweep's tier recipients.
+ */
+export async function resolveEmailRecipients(r: EmailRecipients | null | undefined): Promise<string[]> {
+  if (!r) return [];
+  const out = new Set<string>();
+  for (const a of r.addresses ?? []) if (a.trim()) out.add(a.trim().toLowerCase());
+  for (const u of await resolveRecipientUsersByIds(r.recipientUserIds)) {
+    if (u.email) out.add(u.email.trim().toLowerCase());
+  }
+  return Array.from(out);
+}
+
+/**
+ * Drop cross-list duplicates from a composed email's recipient lists:
+ * To wins over Cc; Bcc drops anything already visible in To or Cc.
+ * Case-insensitive. Pure — exported for unit tests.
+ */
+export function dedupeEmailRecipients(to: string[], cc: string[], bcc: string[]): { cc: string[]; bcc: string[] } {
+  const toSet = new Set(to.map((a) => a.toLowerCase()));
+  const ccOut = cc.filter((a) => !toSet.has(a.toLowerCase()));
+  const visible = new Set([...toSet, ...ccOut.map((a) => a.toLowerCase())]);
+  const bccOut = bcc.filter((a) => !visible.has(a.toLowerCase()));
+  return { cc: ccOut, bcc: bccOut };
+}
+
+/**
  * Expand a fired notification's rule targets into concrete delivery rows. Each
  * target references a configured NotificationChannel by id; the channel's type
  * decides the transport + how the target fans out:
- *   - email (smtp/oauth_m365): one row per resolved recipient address
- *     (tag-matched users' emails + explicit addresses).
+ *   - email (smtp/oauth_m365), no composedEmail: one row per resolved
+ *     recipient address (tag-matched users' emails + explicit addresses).
+ *   - email WITH composedEmail: ONE row per target — `target` is the joined To
+ *     list, and meta snapshots { composed, to, cc, bcc, subject, text, html? }
+ *     for the drain (never channel secrets). Empty To skips the target.
  *   - web_push: one row per recipient user's push subscription (keys snapshotted).
  *   - webhook (slack/teams) / pushbullet: one row; the destination (URL/token)
  *     lives on the channel and is read at send time, NOT duplicated here.
  * Disabled or missing channels are skipped. Best-effort: returns the number of
  * rows created.
  */
-export async function expandDeliveries(notificationId: string, targets: DeliveryTarget[] | undefined, scopeRegionTags?: string[]): Promise<number> {
+export async function expandDeliveries(notificationId: string, targets: DeliveryTarget[] | undefined, scopeRegionTags?: string[], composedEmail?: ComposedEmail): Promise<number> {
   if (!targets || targets.length === 0) return 0;
 
   // Resolve the referenced channels once (type + enabled).
@@ -159,6 +205,10 @@ export async function expandDeliveries(notificationId: string, targets: Delivery
     return Array.from(map.values());
   };
 
+  // Rule-level Cc/Bcc resolve once per notification, then apply per email target.
+  const ccResolved = composedEmail ? await resolveEmailRecipients(composedEmail.cc) : [];
+  const bccResolved = composedEmail ? await resolveEmailRecipients(composedEmail.bcc) : [];
+
   for (const t of targets) {
     const channel = byId.get(t.channelId);
     if (!channel || !channel.enabled || !isChannelType(channel.type)) continue;
@@ -168,7 +218,22 @@ export async function expandDeliveries(notificationId: string, targets: Delivery
       const addresses = new Set<string>();
       for (const a of t.addresses ?? []) addresses.add(a.trim().toLowerCase()); // custom emails
       for (const u of await usersForTarget(t)) if (u.email) addresses.add(u.email.trim().toLowerCase());
-      for (const addr of addresses) add(channel.id, "email", addr);
+      if (composedEmail) {
+        const to = Array.from(addresses);
+        if (to.length === 0) continue; // no recipients = no send (Graph rejects empty To)
+        const { cc, bcc } = dedupeEmailRecipients(to, ccResolved, bccResolved);
+        add(channel.id, "email", to.join(", "), {
+          composed: true,
+          to,
+          cc,
+          bcc,
+          subject: composedEmail.subject,
+          text: composedEmail.text,
+          ...(composedEmail.html ? { html: composedEmail.html } : {}),
+        });
+      } else {
+        for (const addr of addresses) add(channel.id, "email", addr);
+      }
     } else if (transport === "web_push") {
       const users = await usersForTarget(t);
       if (users.length > 0) {

@@ -15,7 +15,10 @@ import nodemailer from "nodemailer";
 import { AppError } from "../../utils/errors.js";
 
 export interface EmailMessage {
-  to: string;
+  /** Single address (legacy per-address fan-out) or full To list (composed sends). */
+  to: string | string[];
+  cc?: string[];
+  bcc?: string[];
   subject: string;
   text: string;
   html?: string;
@@ -49,7 +52,9 @@ export async function sendSmtpEmail(cfg: SmtpConfig, msg: EmailMessage): Promise
   try {
     await transport.sendMail({
       from: cfg.from || cfg.username,
-      to: msg.to,
+      to: msg.to, // nodemailer accepts string | string[]
+      cc: msg.cc?.length ? msg.cc : undefined,
+      bcc: msg.bcc?.length ? msg.bcc : undefined,
       subject: msg.subject,
       text: msg.text,
       html: msg.html,
@@ -99,6 +104,23 @@ async function m365Token(cfg: M365Config): Promise<string> {
   }
 }
 
+/**
+ * Build the Graph sendMail `message` object. Graph carries a single body —
+ * HTML wins when present (SMTP sends multipart; M365 recipients get HTML
+ * only). Pure — exported for unit tests.
+ */
+export function buildGraphMessage(msg: EmailMessage): Record<string, unknown> {
+  const rcpt = (a: string) => ({ emailAddress: { address: a } });
+  const toList = Array.isArray(msg.to) ? msg.to : [msg.to];
+  return {
+    subject: msg.subject,
+    body: { contentType: msg.html ? "HTML" : "Text", content: msg.html ?? msg.text },
+    toRecipients: toList.map(rcpt),
+    ...(msg.cc?.length ? { ccRecipients: msg.cc.map(rcpt) } : {}),
+    ...(msg.bcc?.length ? { bccRecipients: msg.bcc.map(rcpt) } : {}),
+  };
+}
+
 export async function sendM365Email(cfg: M365Config, msg: EmailMessage): Promise<void> {
   if (!cfg.tenantId || !cfg.clientId || !cfg.fromUserId) throw new AppError(400, "Microsoft 365 channel is missing tenant/client/from");
   const token = await m365Token(cfg);
@@ -110,11 +132,7 @@ export async function sendM365Email(cfg: M365Config, msg: EmailMessage): Promise
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        message: {
-          subject: msg.subject,
-          body: { contentType: msg.html ? "HTML" : "Text", content: msg.html ?? msg.text },
-          toRecipients: [{ emailAddress: { address: msg.to } }],
-        },
+        message: buildGraphMessage(msg),
         saveToSentItems: false,
       }),
       signal: controller.signal,

@@ -2842,6 +2842,17 @@ model NotificationRule {
   // writes a Notification); `targets` drives outbound email/webhook/web_push.
   // Validated by notificationRuleService; expanded by notificationRecipientService.
   targets         Json    @default("[]")
+  // Rule-level outbound-email composition: { subjectTemplate?, bodyTextTemplate?,
+  // bodyHtmlTemplate?, cc?: {recipientUserIds?, addresses?}, bcc?: {...} }.
+  // NULL = default subject/body + per-address fan-out (pre-feature behavior).
+  // When set, each email target sends ONE message (full To list + Cc + Bcc).
+  // Validated by emailCompositionSchema in notificationTypes.ts.
+  emailComposition Json?
+  // Escalation config: { stopOn: "acknowledge"|"clear", tiers: [{ afterMin,
+  // channelId, to, cc?, bcc?, subjectTemplate?, bodyTextTemplate?,
+  // bodyHtmlTemplate?, repeatEveryMin?, maxRepeats? }] }. Email-only (tier
+  // channels must be smtp/oauth_m365). Swept by the escalateNotifications job.
+  escalation      Json?
   createdBy       String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -2878,6 +2889,14 @@ model Notification {
   cleared   Boolean   @default(false)
   clearedBy String? // username, or "system:auto-resolve" / "system:timed"
   clearedAt DateTime?
+
+  // Fire-time token→string template context snapshot (written only when the
+  // rule has emailComposition/escalation), so escalation emails render at
+  // T+delay with the exact fire-time metric values even if the asset is gone.
+  templateCtx     Json?
+  // Per-tier escalation progress: { tiers: { "<tierIdx>": { firstSentAt,
+  // lastSentAt, count } } }. Written by the escalateNotifications sweep.
+  escalationState Json?
 
   deliveries NotificationDelivery[]
 

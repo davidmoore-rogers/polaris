@@ -1177,17 +1177,18 @@ Listed alphabetically.
 
 ## services/notificationTypes.ts
 
-**What it owns:** The notifications vocabulary — the discriminated `trigger` Zod union (asset_metric | asset_state | host_metric | event | change), the asset `scope` schema, `ruleInputSchema`, the metric/field/comparator/aggregation/change-type catalogs, and `buildSchemaCatalog()`.
+**What it owns:** The notifications vocabulary — the discriminated `trigger` Zod union (asset_metric | asset_state | host_metric | event | change), the asset `scope` schema, `ruleInputSchema` (incl. `emailCompositionSchema` + `escalationSchema`), the metric/field/comparator/aggregation/change-type catalogs, and `buildSchemaCatalog()`.
 
-**Public API:** `triggerSchema`, `scopeSchema`, `ruleInputSchema`, `buildSchemaCatalog`, `Trigger`/`RuleScope`/`RuleInput` types, `CHANGE_TYPE_ACTIONS`, `ASSET_SCOPED_TRIGGER_TYPES`, the `*_METRICS`/`*_FIELDS`/`CHANGE_TYPES` constants.
+**Public API:** `triggerSchema`, `scopeSchema`, `ruleInputSchema`, `emailCompositionSchema`, `escalationSchema`/`escalationTierSchema`, `buildSchemaCatalog`, `Trigger`/`RuleScope`/`RuleInput`/`EmailRecipients`/`EmailComposition`/`EscalationTier`/`EscalationConfig` types, `CHANGE_TYPE_ACTIONS`, `ASSET_SCOPED_TRIGGER_TYPES`, the `*_METRICS`/`*_FIELDS`/`CHANGE_TYPES` constants.
 
-**Used by:** `notificationRules.ts` (validation + schema endpoint), `notificationEngine.ts`, `notificationRuleService.ts`, the builder UI (via `/notification-rules/schema`).
+**Used by:** `notificationRules.ts` (validation + schema endpoint), `notificationEngine.ts`, `notificationRuleService.ts`, `notificationEscalationService.ts`, `notificationRecipientService.ts`, the builder UI (via `/notification-rules/schema`).
 
 **Invariants:**
 - Single source of truth — engine, routes, and frontend must read the vocabulary here, never hardcode it.
 - `CHANGE_TYPE_ACTIONS` maps each change type to the exact audit Event action the persist* detectors emit AND the event-tail matches; both ends must agree.
+- `buildSchemaCatalog().templateVariables` mirrors `TEMPLATE_VARIABLES` from `src/utils/notificationTemplate.ts` — the builder's insert-variable palette renders from it, never a hardcoded list.
 
-**When changing this:** Adding a metric/field → also wire its resolver in `notificationEngine` (else it parses but never reads data). Adding a change type → also emit the matching Event from the relevant persist* function.
+**When changing this:** Adding a metric/field → also wire its resolver in `notificationEngine` (else it parses but never reads data). Adding a change type → also emit the matching Event from the relevant persist* function. Adding a template token → add it to `TEMPLATE_VARIABLES` + `buildTemplateContext` in the util (and, if asset-sourced, the engine's `ASSET_DETAIL_SELECT`).
 
 ---
 
@@ -1229,21 +1230,23 @@ Listed alphabetically.
 
 ## services/notificationEngine.ts
 
-**What it owns:** The rule evaluator. Threshold/state path (per-metric sample resolvers + the NotificationRuleState machine with forDuration/cooldown/clearBehavior), the event-tail path (cursor over Event rows matching event/change rules), and `previewRule` (dry-run).
+**What it owns:** The rule evaluator. Threshold/state path (per-metric sample resolvers + the NotificationRuleState machine with forDuration/cooldown/clearBehavior), the event-tail path (cursor over Event rows matching event/change rules), all fire-time template rendering (in-app message + composed email via `src/utils/notificationTemplate.ts`), and `previewRule` (dry-run).
 
-**Public API:** `evaluateAllNotificationRules` (job entry), `previewRule`, and the unit-tested pure helpers `compareNum`/`compareValue`/`globToRegExp`/`readingMeets`.
+**Public API:** `evaluateAllNotificationRules` (job entry), `previewRule`, `buildComposedEmail(comp, ctx)` (also used by the escalation sweep), `assetDetail`/`clearAssetDetailCache` (per-tick asset-detail cache), and the unit-tested pure helpers `compareNum`/`compareValue`/`globToRegExp`/`readingMeets`.
 
-**Cross-service deps:** `prisma` (assets + every sample table + notifications + state + Event + Setting), `eventLogService.logEvent`, `notificationService.REGION_TAG_PREFIX`, `notificationTypes`.
+**Cross-service deps:** `prisma` (assets + every sample table + notifications + state + Event + Setting), `eventLogService.logEvent`, `notificationService.REGION_TAG_PREFIX`, `notificationTypes`, `notificationRecipientService` (expandDeliveries + ComposedEmail), `src/utils/notificationTemplate.ts`.
 
-**Used by:** `src/jobs/evaluateNotificationRules.ts`, `src/api/routes/notificationRules.ts` (`previewRule`).
+**Used by:** `src/jobs/evaluateNotificationRules.ts`, `src/api/routes/notificationRules.ts` (`previewRule`), `notificationEscalationService` (`buildComposedEmail`).
 
 **Invariants:**
 - Fire only on the clear→firing transition; state writes happen only on transition (hot path scales with *changes*, not fleet size).
 - Recovery is acted on only from an explicit not-meeting reading (missing data leaves a firing state alone); `timed` clears purely on its timer.
-- Notification `regionTags` are snapshotted from the asset's `region:` tags at fire time.
+- Notification `regionTags` are snapshotted from the asset's `region:` tags at fire time; `templateCtx` is snapshotted only when the rule has emailComposition/escalation (escalation renders from it later, surviving asset deletion).
+- `SCOPE_SELECT` stays tight (hot 60s×2000-asset path); the wider `ASSET_DETAIL_SELECT` fetch runs only on FIRE and only when composition/escalation/{asset.*} tokens need it, through the per-tick cache.
+- All interpolation goes through `renderNotificationTemplate` (single-brace {token}, single pass, unknown tokens literal) — never hand-rolled replaceAll chains.
 - Scale: batch findMany per sample table (no per-row awaits) — re-check at 2000 assets when adding a metric.
 
-**When changing this:** New metric → add a resolver branch AND the catalog entry in `notificationTypes`. New clear behavior → handle it in both `recover()` and the timed-sweep pass.
+**When changing this:** New metric → add a resolver branch AND the catalog entry in `notificationTypes`. New clear behavior → handle it in both `recover()` and the timed-sweep pass. New template token → `TEMPLATE_VARIABLES` + `buildTemplateContext` in the util (+ `ASSET_DETAIL_SELECT` here if asset-sourced).
 
 ---
 
@@ -1287,7 +1290,7 @@ Listed alphabetically.
 
 **What it owns:** Routing a fired notification to concrete delivery recipients, and expanding a rule's `targets[]` into `NotificationDelivery` rows.
 
-**Public API:** `resolveRecipientUsers(recipientTags)`, `resolveRecipientUsersByIds(ids)`, `listRecipientUsers()` (builder picker), `scopeRegionTagsOf(scope)`, `expandDeliveries(notificationId, targets, scopeRegionTags?)`, `bumpRecipientIndex()`.
+**Public API:** `resolveRecipientUsers(recipientTags)`, `resolveRecipientUsersByIds(ids)`, `resolveEmailRecipients({recipientUserIds?, addresses?})`, `dedupeEmailRecipients(to, cc, bcc)` (pure), `listRecipientUsers()` (builder picker), `scopeRegionTagsOf(scope)`, `expandDeliveries(notificationId, targets, scopeRegionTags?, composedEmail?)`, `ComposedEmail` type, `bumpRecipientIndex()`.
 
 **Cross-service deps:** `regionScopeService.resolveTagScopesForUser` (effective tags per user), `notificationService.stripRegionPrefix`, `notificationTypes.CHANNEL_TRANSPORT` (channel type → transport), `prisma` (notificationChannel lookup + users + pushSubscriptions + notificationDelivery).
 
@@ -1299,6 +1302,8 @@ Listed alphabetically.
 - `recipientScopeRegion` resolves against the RULE'S SCOPE region tags (passed in by the engine), not a region chosen in the Notify section.
 - slack/teams/pushbullet ignore recipients entirely (one fixed-destination row).
 - Recipients are snapshotted at fire time (delivery rows reflect targets when the rule fired, not when the drain runs).
+- With a `composedEmail` (rule has emailComposition), each email target gets ONE row (`target` = joined To list, `meta` = {composed, to, cc, bcc, subject, text, html?}); empty To skips the target. Cc/Bcc dedupe: To wins over Cc, Bcc drops anything visible in To/Cc. Without it, the legacy one-row-per-address fan-out is byte-identical.
+- `meta` carries rendered content + recipient addresses only — never channel secrets.
 - In-app delivery is never a `NotificationDelivery` row — it's the `Notification` itself.
 
 **When changing this:** keep the tag-match semantics aligned with `scopeMatchesAsset` and `regionScopeService` so rule scope and recipient routing read tags the same way. Bump the user-tag index cache (`bumpRecipientIndex`) if a user/role/group-mapping write must take effect immediately.
@@ -1318,10 +1323,33 @@ Listed alphabetically.
 **Invariants:**
 - Each delivery's destination secrets (SMTP password, webhook URL, VAPID key, …) are read from its `NotificationChannel` at send time, NOT stored on the delivery row.
 - A missing/deleted channel (NULL channelId) is a PERMANENT fail (not retried); otherwise ≤3 attempts before flipping to `failed`.
+- Email rows branch on `meta.composed`: composed rows send ONE to/cc/bcc message from the meta snapshot (to/cc/bcc coerced through a string-array guard — meta is untyped Json); rows without it (incl. pre-upgrade pending rows) take the legacy `titleFor + message + View link` per-address path, byte-identical.
 - A web_push 410/404 prunes the dead `PushSubscription` (by endpoint).
 - Bounded concurrency on sends; one summary audit Event per non-empty drain (no per-delivery Event spam).
 
 **When changing this:** scale-check at 2000 assets — the batch (`BATCH_SIZE`) + concurrency cap keep a delivery spike from stampeding SMTP/webhook endpoints. Never row-scan the full table; always filter `status=pending, attempts<MAX`.
+
+---
+
+## services/notificationEscalationService.ts
+
+**What it owns:** The escalation sweep — sending each rule's escalation-tier emails while a notification stays unhandled, and the per-notification `escalationState` bookkeeping.
+
+**Public API:** `runEscalationSweep(now?)` (job entry), `tierIsDue(tier, triggeredAt, tierState, now)` (pure, unit-tested).
+
+**Cross-service deps:** `prisma` (rules + notifications + channels + delivery rows), `notificationEngine.buildComposedEmail`, `notificationRecipientService.{resolveEmailRecipients, dedupeEmailRecipients}`, `src/utils/notificationTemplate.ts` (buildTemplateContext/formatElapsed/notificationsPageUrl), `eventLogService.logEvent`.
+
+**Used by:** `src/jobs/escalateNotifications.ts` (60s tick).
+
+**Invariants:**
+- "Unhandled" per the rule's `stopOn`: `acknowledge` stops on ack OR clear; `clear` ignores ack. Cleared always stops (the query excludes cleared rows).
+- Renders from the fire-time `Notification.templateCtx` snapshot (+ live `{escalation.tier}`/`{escalation.elapsed}`); pre-feature notifications fall back to a minimal context from the row. Tier overrides → rule emailComposition → default subject with an `[ESCALATION n]` prefix.
+- Escalation is email-only; tiers whose channel is deleted/disabled/non-email are skipped (logged), never thrown.
+- Repeats: only when `repeatEveryMin` is set, gated by `maxRepeats` (default 5) — a send-once tier never re-fires.
+- Batched writes (`createMany` + one `$transaction` of state updates); tier recipients resolve once per (rule, tier) per sweep. Scales with the active-unhandled notification count, not fleet size.
+- Delivery rows carry the same composed-meta shape the drain already dispatches — no escalation-specific send path.
+
+**When changing this:** state keys in `escalationState.tiers` are tier INDEXES — reordering a rule's tiers re-keys them (an already-sent tier position can re-fire); keep that acceptable or key by content hash. Keep the tier-channel validation in `notificationRuleService.assertEscalationChannels` aligned with the skip logic here.
 
 ---
 
