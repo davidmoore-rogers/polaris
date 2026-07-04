@@ -17,6 +17,7 @@ import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { loadIconResolutionCache, resolveIconUrl } from "../../services/deviceIconService.js";
 import { inferInterfaceTopology } from "../../services/interfaceTopologyService.js";
+import { resolveEffectiveLocation, hasLocationCodes, type LocationCodes } from "../../utils/locationCodes.js";
 
 const router = Router();
 
@@ -36,7 +37,20 @@ type TopologyMeta = {
   // uplink, "mesh" = wireless-mesh leaf (uplink is its parent AP; any wired
   // LLDP adjacency is a switch bridged BEHIND it, not an uplink).
   meshUplink?: "ethernet" | "mesh" | null;
+  // Raw admin description from the managed-switch CMDB / wtp `comment`,
+  // stamped by discovery. Carries b:/f:/r:/jb: location codes — resolved
+  // per node below via resolveEffectiveLocation (notes → Asset.description
+  // → this). notesSyncedFrom is the description→notes sync provenance
+  // marker (consumed by the discovery sync layer, not read here).
+  deviceDescription?: string | null;
+  notesSyncedFrom?: string | null;
 };
+
+// Effective location codes for a topology node, or null when the node
+// carries none — keeps untagged fleets' payloads noise-free.
+function nodeLocation(codes: LocationCodes): LocationCodes | null {
+  return hasLocationCodes(codes) ? codes : null;
+}
 
 function readTopology(raw: unknown): TopologyMeta {
   if (raw && typeof raw === "object") return raw as TopologyMeta;
@@ -193,12 +207,19 @@ router.get("/sites", async (req, res, next) => {
 // ─── GET /map/sites/:id/topology ───────────────────────────────────────────────
 // Graph payload for the click-through modal. Shape:
 //   {
-//     fortigate: { id, hostname, serial, model, ip, status, lastSeen, subnets: [...] },
-//     switches:  [{ id, hostname, serial, ip, uplinkInterface, status, model }, ...],
+//     fortigate: { id, hostname, serial, model, ip, status, lastSeen, location, subnets: [...] },
+//     switches:  [{ id, hostname, serial, ip, uplinkInterface, status, model,
+//                   location, deviceDescription }, ...],
 //     aps:       [{ id, hostname, serial, ip, model, status, peerSwitchId, peerPort,
-//                   peerVlan, peerAssetId }, ...],
+//                   peerVlan, peerAssetId, location, deviceDescription }, ...],
 //     edges:     [{ source, target, label? }, ...]
 //   }
+//
+// `location` is { building, floor, room, junctionBox } (each string|null) or
+// null when the node carries no b:/f:/r:/jb: codes — resolved server-side by
+// utils/locationCodes.ts from notes → Asset.description → the device admin
+// description discovery stamped on fortinetTopology.deviceDescription. Drives
+// the topology modal's grouping hulls + floor views.
 //
 // Every edge references an asset id in this payload, so the frontend can hand
 // the whole object to a graph renderer (Cytoscape) without doing any extra
@@ -225,6 +246,8 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         monitored: true,
         dependencyLayer: true,
         dependencySuppressed: true,
+        notes: true,
+        description: true,
       },
     });
     if (!fg || fg.assetType !== "firewall") {
@@ -268,6 +291,8 @@ router.get("/sites/:id/topology", async (req, res, next) => {
             monitorStatus: true,
             dependencyLayer: true,
             dependencySuppressed: true,
+            notes: true,
+            description: true,
           },
         })
       : [];
@@ -301,6 +326,11 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           dependencyLayer: s.dependencyLayer,
           dependencySuppressed: s.dependencySuppressed,
           iconUrl: resolveIconUrl({ manufacturer: s.manufacturer, model: s.model, assetType: "switch" }, iconCache),
+          // Physical-location codes (b:/f:/r:/jb:) resolved from notes →
+          // Asset.description → device admin description. Drives the Device
+          // Map's grouping hulls + floor views. Null when untagged.
+          location: nodeLocation(resolveEffectiveLocation({ notes: s.notes, description: s.description, deviceDescription: t.deviceDescription })),
+          deviceDescription: t.deviceDescription ?? null,
           endpointCount: 0,
           endpoints: [] as EndpointSummary[],
         };
@@ -420,6 +450,9 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           dependencyLayer: s.dependencyLayer,
           dependencySuppressed: s.dependencySuppressed,
           iconUrl: resolveIconUrl({ manufacturer: s.manufacturer, model: s.model, assetType: "access_point" }, iconCache),
+          // Same location-code resolution as the switch nodes above.
+          location: nodeLocation(resolveEffectiveLocation({ notes: s.notes, description: s.description, deviceDescription: t.deviceDescription })),
+          deviceDescription: t.deviceDescription ?? null,
           stationCount: 0,
           stations: [] as StationSummary[],
         };
@@ -1183,96 +1216,118 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     const isMclagPair = (s: string, t: string) => mclagPairKeys.has([s, t].sort().join("|"));
     const lldpEdgesOut = lldpEdges.filter((e) => !isMclagPair(e.source, e.target));
 
-    // Parallel physical links between two in-site switches. LLDP persists one
-    // row per local port, so two cables between the same two switches surface
-    // as two (assetId, localIfName) rows against the same matched peer — but
-    // the graph draws at most ONE inter-switch edge per pair (interface
-    // inference dedupes by pair), hiding the redundancy. When LLDP shows ≥2
-    // distinct port pairs between two sibling switches, replace the single
-    // inferred edge with one edge per cable so parallel links render as
-    // separate lines. Each cable is keyed on its A-side port (canonical-order
-    // pair) and merged across the two directions via the advertised peer
-    // portId, so the mirror rows don't double-count a cable. MCLAG pairs are
-    // excluded — their ICL is authoritatively rendered as the single mclagEdge.
-    type CableEnds = { aPort: string | null; bPort: string | null };
-    const cablesByPair = new Map<string, Map<string, CableEnds>>();
-    for (const n of lldpRows) {
-      if (!n.matchedAsset?.id || n.matchedAsset.id === n.assetId) continue;
-      if (!switchObjById.has(n.assetId) || !switchObjById.has(n.matchedAsset.id)) continue;
-      if (!n.localIfName) continue;
-      const pairKey = [n.assetId, n.matchedAsset.id].sort().join("|");
-      if (mclagPairKeys.has(pairKey)) continue;
-      const isA = n.assetId === pairKey.split("|")[0];
-      const rawPeerPort =
-        n.portId && n.portIdSubtype && PORT_ID_NAME_SUBTYPES.has(n.portIdSubtype) ? n.portId : null;
-      // Resolve aggregate ISL trunk names to their single physical member on
-      // BOTH sides (local against the local asset, advertised peer port
-      // against the peer). This shows the real cabled port AND collapses a
-      // genuine single ISL that surfaced as two rows (one side reporting the
-      // physical port, the other the serial-named aggregate) into one cable —
-      // so it no longer false-renders as parallel links.
-      const localPort = preferPhysicalMember(n.assetId, n.localIfName);
-      const peerPort = preferPhysicalMember(n.matchedAsset.id, rawPeerPort);
-      const aPort = isA ? localPort : peerPort;
-      const bPort = isA ? peerPort : localPort;
-      let cables = cablesByPair.get(pairKey);
-      if (!cables) {
-        cables = new Map();
-        cablesByPair.set(pairKey, cables);
-      }
-      // Canonical cable key: the A-side port when known, else the B-side port.
-      const key = aPort ? `a:${aPort}` : `b:${bPort}`;
-      const entry = cables.get(key) ?? { aPort: null, bPort: null };
-      if (aPort && !entry.aPort) entry.aPort = aPort;
-      if (bPort && !entry.bPort) entry.bPort = bPort;
-      cables.set(key, entry);
+    // Inter-switch links expanded to one edge per PHYSICAL member. FortiOS
+    // reports an LACP/ISL bundle between two managed FortiSwitches as a single
+    // aggregate interface — usually the opaque serial-named auto-ISL trunk
+    // (e.g. "2DPTD21002999-0"). Operators want the real cabled ports, and an
+    // N-member bundle should render as N separate lines. `physicalByParent`
+    // (back-filled onto interface samples from the managed-switch CMDB trunk
+    // membership — see overlayFortiswitchTrunkMembers) gives each aggregate's
+    // physical member list, so we resolve BOTH sides of every inter-switch
+    // interface edge to their members and draw one edge per member, pairing
+    // the two sides by natural port order. A plain single physical link stays
+    // one edge. MCLAG ICLs are excluded — rendered as the single sibling
+    // mclagEdge. When the CMDB membership isn't available for a side, that
+    // side degrades to the interface name as-is (best effort).
+    const membersOf = (assetId: string, ifName: string | null): string[] => {
+      if (!ifName || ifName === "unknown") return [];
+      const m = physicalByParent.get(`${assetId}|${ifName}`);
+      return m && m.length >= 1 ? [...m] : [ifName];
+    };
+    // Natural port-name order ("port2" before "port10") so the two switches'
+    // member lists pair up deterministically and intuitively.
+    const naturalPort = (a: string, b: string): number => {
+      const na = Number((a.match(/(\d+)\s*$/) || [])[1]);
+      const nb = Number((b.match(/(\d+)\s*$/) || [])[1]);
+      if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return na - nb;
+      return a.localeCompare(b);
+    };
+    const switchSwitchPairKey = (s: string, t: string): string | null => {
+      if (!switchObjById.has(s) || !switchObjById.has(t) || s === t) return null;
+      const key = [s, t].sort().join("|");
+      return mclagPairKeys.has(key) ? null : key;
+    };
+    // Per switch-pair, gather the physical member set on each side. Two
+    // sources, in priority order per side:
+    //   - LLDP local ports: each switch advertises its OWN physical port in
+    //     its neighbor rows, so both sides' real cabled ports come straight
+    //     from LLDP — reliable even when the CMDB trunk membership hasn't been
+    //     scraped. Preferred.
+    //   - interface-inferred edge interface names → CMDB trunk members
+    //     (`membersOf`). Fallback when LLDP gave nothing for that side.
+    // Only pairs that already have an interface-inferred edge are expanded —
+    // we never invent a link that wasn't inferred (LLDP only enriches).
+    const pairIface = new Map<string, Map<string, Set<string>>>();
+    const pairLldp = new Map<string, Map<string, Set<string>>>();
+    const addTo = (map: Map<string, Map<string, Set<string>>>, pairKey: string, assetId: string, ports: string[]) => {
+      let byAsset = map.get(pairKey);
+      if (!byAsset) { byAsset = new Map(); map.set(pairKey, byAsset); }
+      let set = byAsset.get(assetId);
+      if (!set) { set = new Set(); byAsset.set(assetId, set); }
+      for (const p of ports) if (p && p !== "unknown") set.add(p);
+    };
+    for (const e of interfaceEdges) {
+      const key = switchSwitchPairKey(e.source, e.target);
+      if (!key) continue;
+      const parts = String(e.label || "").split(" ↔ ");
+      addTo(pairIface, key, e.source, membersOf(e.source, parts[0] === "unknown" ? null : parts[0]));
+      addTo(pairIface, key, e.target, membersOf(e.target, parts[1] === "unknown" ? null : parts[1]));
     }
-    const parallelPairs = new Set<string>();
-    const parallelCableEdges: InterfaceEdge[] = [];
-    for (const [pairKey, cables] of cablesByPair) {
-      // A row whose peer portId was missing lands under a "b:" key even when
-      // an "a:"-keyed entry already describes the same cable (the A side saw
-      // the B port in its own row) — drop those duplicates before counting.
-      for (const [k, c] of [...cables]) {
-        if (!k.startsWith("b:") || !c.bPort) continue;
-        for (const [k2, c2] of cables) {
-          if (k2.startsWith("a:") && c2.bPort === c.bPort) {
-            cables.delete(k);
-            break;
-          }
-        }
-      }
-      if (cables.size < 2) continue;
-      parallelPairs.add(pairKey);
+    for (const n of lldpRows) {
+      if (!n.matchedAsset?.id || !n.localIfName) continue;
+      const key = switchSwitchPairKey(n.assetId, n.matchedAsset.id);
+      if (!key || !pairIface.has(key)) continue; // enrich inferred pairs only
+      addTo(pairLldp, key, n.assetId, membersOf(n.assetId, n.localIfName));
+    }
+    const expandedSwitchPairs = new Set<string>();
+    const memberCableEdges: InterfaceEdge[] = [];
+    for (const [pairKey, ifaceByAsset] of pairIface) {
       const [aId, bId] = pairKey.split("|");
+      const lldpByAsset = pairLldp.get(pairKey);
+      const sideMembers = (id: string): string[] => {
+        const fromLldp = lldpByAsset?.get(id);
+        if (fromLldp && fromLldp.size) return [...fromLldp].sort(naturalPort);
+        return [...(ifaceByAsset.get(id) ?? [])].sort(naturalPort);
+      };
+      const aMembers = sideMembers(aId);
+      const bMembers = sideMembers(bId);
+      const n = Math.max(aMembers.length, bMembers.length);
+      if (n === 0) continue; // neither side resolved — leave the original edge
+      expandedSwitchPairs.add(pairKey);
       const aLabel = switchHostById.get(aId) || aId;
       const bLabel = switchHostById.get(bId) || bId;
-      for (const c of cables.values()) {
-        parallelCableEdges.push({
+      for (let i = 0; i < n; i++) {
+        // Pad the shorter side by reusing its lone member (single-member
+        // aggregate facing a multi-member peer) so every member line still
+        // carries a label on both ends.
+        const aPort = aMembers[i] ?? (aMembers.length === 1 ? aMembers[0] : null);
+        const bPort = bMembers[i] ?? (bMembers.length === 1 ? bMembers[0] : null);
+        memberCableEdges.push({
           source: aId,
           target: bId,
-          sourceIfName: c.aPort || "unknown",
-          label: portLabel(c.aPort, c.bPort),
+          sourceIfName: aPort || "unknown",
+          label: portLabel(aPort, bPort),
           via: "interface",
           matchVia: "lldp",
           reason:
-            `Rule: parallel physical links — one edge per cable.\n` +
-            `Evidence: LLDP between ${aLabel} and ${bLabel} reports ${cables.size} distinct port pairs; ` +
-            `this edge is the cable ${aLabel} "${c.aPort || "?"}" ↔ ${bLabel} "${c.bPort || "?"}".\n` +
-            `The single inferred inter-switch edge is replaced by per-cable edges so redundant links stay visible.`,
+            `Rule: inter-switch physical member link${n > 1 ? ` (${i + 1} of ${n})` : ""}.\n` +
+            `Evidence: ${aLabel} and ${bLabel} are connected over ${n} physical member port${n > 1 ? "s" : ""} ` +
+            `(LACP/ISL aggregate bundles expanded to their managed-switch CMDB trunk members); ` +
+            `this line is ${aLabel} "${aPort || "?"}" ↔ ${bLabel} "${bPort || "?"}".`,
         });
       }
     }
-    attachIfDetails(parallelCableEdges);
+    attachIfDetails(memberCableEdges);
     const interfaceEdgesOut = interfaceEdges
       .filter((e) => !isMclagPair(e.source, e.target))
-      .filter((e) => !parallelPairs.has([e.source, e.target].sort().join("|")))
-      .concat(parallelCableEdges);
-    // Final safety net: rewrite any surviving aggregate interface name in an
-    // inter-switch edge label to its single physical member, so no serial-
-    // named ISL trunk (e.g. "2DPTD23005147-0") leaks through regardless of
-    // which pathway built the edge. No-op on already-physical port names.
+      .filter((e) => !expandedSwitchPairs.has([e.source, e.target].sort().join("|")))
+      .concat(memberCableEdges);
+    // Final safety net for the non-expanded edges (switch↔cross-site remote,
+    // etc.): swap any single-member aggregate name for its physical member so
+    // no serial-named ISL trunk leaks through. No-op on physical port names
+    // and on the already-expanded member edges above.
     for (const e of interfaceEdgesOut) {
+      if (expandedSwitchPairs.has([e.source, e.target].sort().join("|"))) continue;
       const parts = String(e.label || "").split(" ↔ ");
       if (parts.length !== 2) continue;
       const src = preferPhysicalMember(e.source, parts[0] === "unknown" ? null : parts[0]);
@@ -1338,6 +1393,11 @@ router.get("/sites/:id/topology", async (req, res, next) => {
         dependencyLayer: fg.dependencyLayer,
         dependencySuppressed: fg.dependencySuppressed,
         iconUrl: resolveIconUrl({ manufacturer: fg.manufacturer, model: fg.model, assetType: "firewall" }, iconCache),
+        // FortiGates have no discovery-captured device description (their
+        // device-side surface would be the 35-char system/global alias), so
+        // location codes come from notes / Asset.description only — enough
+        // for an operator to pull the FG into a building group.
+        location: nodeLocation(resolveEffectiveLocation({ notes: fg.notes, description: fg.description })),
       },
       switches,
       aps,

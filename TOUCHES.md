@@ -793,6 +793,37 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 
 ---
 
+## cross-cutting/location-codes
+
+**What it is:** Physical-location codes (`b:` building / `f:` floor / `r:` room / `jb:` junction box, e.g. `b:Shop f:2 r:North Closet jb:112-305`) embedded in FortiSwitch/FortiAP admin descriptions and/or Asset notes/description, parsed server-side by `src/utils/locationCodes.ts` and shipped per topology node as `location: {building, floor, room, junctionBox} | null`. Drives three Device Map features: grouping hulls (building rectangle > floor dashed rounded-rect > room hexagon > jb dashed ellipse — synthetic bottom-layer Cytoscape nodes so `cy.png()` screenshots include them), same-building/floor sibling row clustering in the column solver, and per-(building, floor) floor views with cross-floor portal stubs. Discovery also mirrors the device description into `Asset.notes` while notes aren't operator-authored (CLAUDE.md business rule 15).
+
+**Writers** (files that mutate or emit this state):
+- `src/services/fortimanagerService.ts` — FMG capture: switch `description` from the already-fetched `/sys/proxy/json` managed-switch CMDB rows (`descriptionBySerial`, zero extra RPCs); AP `comment` added to the Step 3d.4 WTP CMDB roster fields and joined onto `localAps` (zero extra RPCs). `DiscoveredFortiSwitch.description` / `DiscoveredFortiAP.description`.
+- `src/services/fortigateService.ts` — standalone capture: `fetchFortiswitchCmdbMeta` (renamed from `fetchFortiswitchUplinkPorts`; returns `Map<serial, {uplinkPort, description}>`) + new best-effort `fetchFortiapComments` (`GET /api/v2/cmdb/wireless-controller/wtp`; 404/any error → empty map, never fails discovery).
+- `src/api/routes/integrations.ts` — `buildDescriptionSyncStamp(description, existingAsset)` computes `{deviceDescription, notesSyncedFrom}` (merged into `swTopology`/`apTopology` every cycle) + the gated `notes` write (gate: `shouldSyncDescriptionToNotes` — empty / previously-synced / `Auto-discovered from FortiGate` boilerplate notes only). `description` also lands in the fortiswitch/fortiap `AssetSource.observed` blobs (Sources-tab truth, not projected).
+- `src/services/eventLogService.ts` — `notes` is in `MATERIAL_ASSET_FIELDS` so the device-driven notes overwrite surfaces via `logDiscoveryAssetUpdated` (only fires when notes actually change — no per-cycle Event flood).
+
+**Readers** (files that consume it):
+- `src/api/routes/map.ts` — topology endpoint selects `notes`/`description` on the FG + sibling queries, reads `fortinetTopology.deviceDescription` (`TopologyMeta`), and emits `location` (via `resolveEffectiveLocation`, per-key precedence notes → `Asset.description` → deviceDescription) + raw `deviceDescription` per node. FortiGate: notes/description only.
+- `public/js/topology-render.js` — `locationData()` stamps `locB/locF/locR/locJb` grouping keys (+ `loc*Name` display casing) onto node data; the solver's `regroupAnchorsByLocation` clusters non-spine sibling anchors (spine selection untouched — cross-subtree adjacency deliberately NOT guaranteed); `computeLocationGroups`/`renderLocationGroups`/`refreshLocationGroups` draw the hulls (`LOC_GROUP_KINDS` padding/shape tiers, `z-compound-depth: bottom`); `computeFloorViews`/`partitionElementsForFloor`/`compareFloors` (underground-aware: `-2 < B1 < 1 < Mezzanine`) build the floor views + portals.
+- `public/js/map.js` — Locations chip (`polaris.topology.showLocations`, default ON, rendered only when codes exist), floor-view switcher chips (top-left; `topoState.activeView`, never persisted), portal tap → `_setTopologyView`, per-view position keys (`polaris.topology.positions:<siteId>[:<viewKey>]`), hull suppression (`suppressKinds: ["building","floor"]`) in floor views, `[isLocGroup]`/`[isPortal]` exclusions in `saveNodePositions` + `_openAssetForNode`.
+- `public/js/mobile/topology-tab.js` — flat hulls only (always-on, rendered on layoutstop; no switcher in v1).
+
+**Invariants:**
+- The grammar lives ONLY in `src/utils/locationCodes.ts` — the client receives resolved display values and normalizes grouping keys with the trivial `locKey()` (trim/collapse/lowercase, mirroring `locationGroupKey`); never re-implement token parsing client-side.
+- `fortinetTopology` is written WHOLESALE by the switch/AP sync blocks — `deviceDescription` + `notesSyncedFrom` must ride every `swTopology`/`apTopology` object or they're silently dropped on the next cycle.
+- The notes sync must never overwrite operator-authored notes; any new "overwritable" notes shape must be added to `shouldSyncDescriptionToNotes`, not inlined at a call site.
+- Synthetic nodes (`isLocGroup`, `isPortal`) must stay out of: position persistence, the column solver input (hulls are added after layout), `computeLocationGroups` membership, asset-open tap handling, and dragfree saves. Portals are the ONLY interactive synthetic nodes.
+- descriptionSyncService interplay (rule 14): with `syncDescriptions` ON and Polaris `Asset.description` non-empty, Polaris overwrites the device description on reconcile — device-typed codes revert. Documented guidance (maintain codes in Polaris in that mode), no code guard.
+
+**When changing this:**
+- Adding a code key (e.g. `ra:` rack)? Extend `TOKEN_RE` + `KEY_TO_FIELD` in locationCodes.ts (longest-match order!), the `LocationCodes` type, `locationData()` stamps, `LOC_GROUP_KINDS` (shape/padding tier), the legend `locations` section, and the parser tests.
+- New discovery pathway for switches/APs? Capture the admin description into `Discovered*.description` and route asset writes through `buildDescriptionSyncStamp` — both FMG and standalone (parity rule).
+- Touching the solver's sibling ordering? `regroupAnchorsByLocation` must stay stable and a no-op on keyless sites — the `topologyColumns.test.ts` legacy-order cases enforce this.
+- FortiOS field variance: managed-switch `description` presence and wtp `comment` support vary by firmware (descriptionSyncService already flags `wtp_comment_unsupported`) — verify on a real device before relying on a new field.
+
+---
+
 ## cross-cutting/asset-tag-mutators
 
 **What it is:** Anything in the codebase that writes `Asset.tags`. The `tags: String[]` column is used by humans (assets-page filtering, search) AND by features that "stamp" managed tags (e.g. `region:<name>` from map regions). Two writer classes coexist: **operator-driven** (asset edit modal, bulk-edit) and **system-driven** (auto-tagging features). The latter must be careful not to step on operator-set values.

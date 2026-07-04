@@ -530,3 +530,137 @@ describe("computeTopologyColumns", () => {
     expect(computeTopologyColumns(els)).toEqual(computeTopologyColumns(els));
   });
 });
+
+// A node stamped with b:/f: location grouping keys (already normalized — in
+// production buildTopologyElements normalizes via locKey()).
+const locNode = (id: string, role: string, locB?: string, locF?: string): El => ({
+  data: { id, role, ...(locB ? { locB } : {}), ...(locF ? { locF } : {}) },
+});
+
+describe("computeTopologyColumns — location-code row clustering", () => {
+  // Shared shape: fg → keyless spine switch sw0 (continues fg's row), plus
+  // four same-column sibling switches whose buildings arrive interleaved
+  // (A, B, A, B). All heights are equal so the legacy sort is element order.
+  const interleavedSiblings = (withCodes: boolean) => [
+    node("fg", "fortigate"),
+    node("sw0", "fortiswitch"),
+    locNode("swA1", "fortiswitch", withCodes ? "shop" : undefined),
+    locNode("swB1", "fortiswitch", withCodes ? "office" : undefined),
+    locNode("swA2", "fortiswitch", withCodes ? "shop" : undefined),
+    locNode("swB2", "fortiswitch", withCodes ? "office" : undefined),
+    edge("fg", "sw0"),
+    edge("fg", "swA1"),
+    edge("fg", "swB1"),
+    edge("fg", "swA2"),
+    edge("fg", "swB2"),
+  ];
+
+  it("packs interleaved same-building siblings into adjacent row bands (A,B,A,B → A,A,B,B)", () => {
+    const cols = computeTopologyColumns(interleavedSiblings(true))!;
+    // Same-building pairs sit on adjacent rows…
+    expect(Math.abs(cols.swA1.lane - cols.swA2.lane)).toBe(1);
+    expect(Math.abs(cols.swB1.lane - cols.swB2.lane)).toBe(1);
+    // …and the two buildings' bands don't interleave.
+    const shop = [cols.swA1.lane, cols.swA2.lane];
+    const office = [cols.swB1.lane, cols.swB2.lane];
+    expect(Math.min(...office) > Math.max(...shop) || Math.min(...shop) > Math.max(...office)).toBe(true);
+    // First-appearance order: shop (swA1 appeared first) above office.
+    expect(Math.max(...shop)).toBeLessThan(Math.min(...office));
+  });
+
+  it("does not change the spine: the first-ordered child still continues the parent's row", () => {
+    const cols = computeTopologyColumns(interleavedSiblings(true))!;
+    expect(cols.fg.lane).toBe(0);
+    expect(cols.sw0.lane).toBe(0); // keyless spine untouched by grouping
+  });
+
+  it("reproduces the legacy element-order layout when no node carries codes", () => {
+    const cols = computeTopologyColumns(interleavedSiblings(false))!;
+    // Legacy: fresh rows claimed in element order after the spine.
+    expect(cols.sw0.lane).toBe(0);
+    expect(cols.swA1.lane).toBe(1);
+    expect(cols.swB1.lane).toBe(2);
+    expect(cols.swA2.lane).toBe(3);
+    expect(cols.swB2.lane).toBe(4);
+  });
+
+  it("sinks keyless siblings to the tail while coded ones cluster", () => {
+    const cols = computeTopologyColumns([
+      node("fg", "fortigate"),
+      node("sw0", "fortiswitch"),
+      locNode("swA1", "fortiswitch", "shop"),
+      node("swPlain", "fortiswitch"),
+      locNode("swA2", "fortiswitch", "shop"),
+      edge("fg", "sw0"),
+      edge("fg", "swA1"),
+      edge("fg", "swPlain"),
+      edge("fg", "swA2"),
+    ])!;
+    expect(Math.abs(cols.swA1.lane - cols.swA2.lane)).toBe(1); // shop pair adjacent
+    expect(cols.swPlain.lane).toBeGreaterThan(Math.max(cols.swA1.lane, cols.swA2.lane)); // keyless at tail
+  });
+
+  it("subgroups by floor within a building", () => {
+    const cols = computeTopologyColumns([
+      node("fg", "fortigate"),
+      node("sw0", "fortiswitch"),
+      locNode("swF2a", "fortiswitch", "shop", "2"),
+      locNode("swF1", "fortiswitch", "shop", "1"),
+      locNode("swF2b", "fortiswitch", "shop", "2"),
+      edge("fg", "sw0"),
+      edge("fg", "swF2a"),
+      edge("fg", "swF1"),
+      edge("fg", "swF2b"),
+    ])!;
+    // Floor-2 pair adjacent (floor 2 appeared first), floor 1 after.
+    expect(Math.abs(cols.swF2a.lane - cols.swF2b.lane)).toBe(1);
+    expect(cols.swF1.lane).toBeGreaterThan(Math.max(cols.swF2a.lane, cols.swF2b.lane));
+  });
+
+  it("keeps each switch's AP block contiguous under it when buildings regroup the switches", () => {
+    const els = [
+      node("fg", "fortigate"),
+      node("sw0", "fortiswitch"),
+      locNode("swA1", "fortiswitch", "shop"),
+      locNode("swB1", "fortiswitch", "office"),
+      locNode("swA2", "fortiswitch", "shop"),
+      edge("fg", "sw0"),
+      edge("fg", "swA1"),
+      edge("fg", "swB1"),
+      edge("fg", "swA2"),
+    ];
+    // sw0 gets an AP too so all four siblings share subtree height — the
+    // height sort then keeps element order and sw0 (first) holds the spine.
+    const apsBySwitch: Record<string, string[]> = {
+      sw0: ["s0a"],
+      swA1: ["a1a", "a1b"],
+      swB1: ["b1a", "b1b"],
+      swA2: ["a2a", "a2b"],
+    };
+    for (const [sw, aps] of Object.entries(apsBySwitch)) {
+      for (const ap of aps) {
+        els.push(node(ap, "fortiap"));
+        els.push(edge(sw, ap));
+      }
+    }
+    const cols = computeTopologyColumns(els)!;
+    const contiguous = (ls: number[]) => {
+      const s = [...ls].sort((x, y) => x - y);
+      return s.every((l, i) => i === 0 || l === s[i - 1] + 1);
+    };
+    for (const [sw, aps] of Object.entries(apsBySwitch)) {
+      const lanes = aps.map((a) => cols[a].lane);
+      expect(contiguous(lanes)).toBe(true); // block intact
+      expect(cols[sw].lane).toBe(Math.min(...lanes)); // switch tops its own block
+    }
+    // Same-building switches (with their reserved AP rows) stay adjacent:
+    // nothing from office lands between shop's two bands.
+    expect(cols.swA2.lane).toBe(cols.swA1.lane + apsBySwitch.swA1.length);
+    expect(cols.swB1.lane).toBeGreaterThan(cols.swA2.lane);
+  });
+
+  it("is deterministic with location codes present", () => {
+    const els = interleavedSiblings(true);
+    expect(computeTopologyColumns(els)).toEqual(computeTopologyColumns(els));
+  });
+});

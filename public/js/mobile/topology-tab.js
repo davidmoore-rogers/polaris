@@ -270,6 +270,14 @@
       style: window.PolarisTopologyRender.topologyStylesheet(theme, { includeEndpointOverlay: true }),
     });
 
+    // Location grouping hulls (building / floor / room / jb shapes from
+    // b:/f:/r:/jb: codes) — always on for mobile (no toggle; flat view
+    // only in v1). Nodes are ungrabbable here so no drag-follow refresh is
+    // needed; the layout is final once it stops.
+    _cy.one("layoutstop", function () {
+      window.PolarisTopologyRender.renderLocationGroups(_cy);
+    });
+
     // Initial focus: zoom to the FortiGate (or the searched node) instead
     // of fitting the whole graph. A site with 30 switches would otherwise
     // be unreadable at the default zoom-to-fit on a 375px screen.

@@ -95,18 +95,33 @@ describe("markPhysicalLoops", () => {
     expect(loopIds(els)).toEqual(["e1", "e2", "e3"]);
   });
 
-  it("ignores MCLAG ICLs, wireless mesh, and unverified controller edges", () => {
-    // Triangle only closed by an MCLAG edge → wired graph is a chain, no loop.
-    const elsMclag = [
+  it("flags the MCLAG ICL when it closes a loop (both peers uplink to a common parent)", () => {
+    // The usual MCLAG shape: swA and swB both uplink to fg, ICL between them.
+    // That's a real physical triangle — every edge, ICL included, is haloed.
+    const els = [
       node("fg"), node("swA"), node("swB"),
       iface("e1", "fg", "swA"),
       iface("e2", "fg", "swB"),
       mclag("e3", "swA", "swB"),
     ];
-    markPhysicalLoops(elsMclag);
-    expect(loopIds(elsMclag)).toEqual([]);
+    markPhysicalLoops(els);
+    expect(loopIds(els)).toEqual(["e1", "e2", "e3"]);
+  });
 
-    // Triangle only closed by a mesh edge → same.
+  it("does NOT flag an isolated MCLAG ICL (no other path between the peers)", () => {
+    // swA-swB joined only by the ICL — a bridge (cut-edge), not a ring.
+    const els = [
+      node("fg"), node("swA"), node("swB"), node("leaf"),
+      iface("e1", "fg", "swA"),
+      mclag("e2", "swA", "swB"),
+      iface("e3", "swB", "leaf"),
+    ];
+    markPhysicalLoops(els);
+    expect(loopIds(els)).toEqual([]);
+  });
+
+  it("ignores wireless mesh and unverified controller edges when they close a triangle", () => {
+    // Triangle only closed by a mesh edge → wired graph is a chain, no loop.
     const elsMesh = [
       node("fg"), node("ap"), node("sw"),
       iface("e1", "fg", "sw"),
