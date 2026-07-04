@@ -17,6 +17,7 @@ This file is the always-loaded project memory. For deeper material, read on dema
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — file-by-file map, full Prisma domain model, full API endpoint catalog, Monitoring Architecture (polling-method resolution, Polaris Agent, FMG/FortiGate workarounds), FMG/FortiGate/Entra/AD discovery phase narratives, background jobs table, frontend details, full Prometheus metric catalogue.
 - **[TOUCHES.md](TOUCHES.md)** — relationship/dependency map: "if I change X, what else touches it?" Per-service writers / readers / invariants / change-checklists, plus cross-cutting concerns.
 - **[TEMPLATES.md](TEMPLATES.md)** — canonical implementations to model new work after. "There are five places that already do this — which one is the reference?"
+- **[DEVELOPMENT.md](DEVELOPMENT.md)** — local dev environment: the `compose.dev.yml` podman/docker stack (Postgres 15 container + bind-mounted app container built from `Dockerfile.dev`), dev env vars, first-run-wizard-vs-DATABASE_URL behavior, host-native alternative, day-to-day npm commands, DB reset.
 - **[docs/INSTALL.md](docs/INSTALL.md)** — fresh-install guide (RHEL/Rocky/AlmaLinux 9, Ubuntu/Debian, Windows Server). Source of truth for disk-sizing minimums.
 - **[docs/fmg-discovery.md](docs/fmg-discovery.md)** — FortiManager discovery decision tree (operator-facing).
 
