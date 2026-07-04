@@ -8,11 +8,19 @@
  * required access level; the snapshot is auto-refreshed when the role has
  * been edited since the snapshot was taken.
  *
+ * Bearer-token callers (ApiToken) resolve through the SAME gate: each token
+ * is bound to a Role at mint time, and requirePermission resolves the token's
+ * role matrix (in-process cache, invalidated by bumpRoleVersion) exactly like
+ * a session snapshot. The prior parallel scope-string system
+ * (requireSessionOrTokenPermission + KNOWN_SCOPES) was retired in the
+ * api-tokens role cutover (migration 20260706000000).
+ *
  * What this module owns:
- *   - The 27-entry function-key catalogue (exported as FUNCTION_KEYS).
+ *   - The function-key catalogue (exported as FUNCTION_KEYS).
  *   - The access-level ordering (none < read < write < fullwrite).
  *   - requirePermission / hasPermission / requireOwnership middleware factories.
- *   - The session-snapshot refresh path (Map<roleId, updatedAt> cache + Prisma fetch).
+ *   - The snapshot refresh path for sessions (Map<roleId, updatedAt> cache +
+ *     Prisma fetch) and tokens (Map<roleId, snapshot> cache, same version map).
  *   - bumpRoleVersion(roleId, updatedAt) — called by roleService after every write.
  *
  * Cache semantics:
@@ -20,10 +28,11 @@
  *     request per role. Subsequent requests are O(1) until the role is edited.
  *   - bumpRoleVersion bumps the entry. Any request whose session snapshot has an
  *     older updatedAt triggers one Prisma fetch + req.session.save() to persist
- *     the fresh snapshot.
+ *     the fresh snapshot. Token snapshots refetch on the same version mismatch.
  *   - Changing a USER's roleId takes effect on next login (we don't iterate the
  *     session store). Changing a ROLE's permissions takes effect on next request
- *     for every session that holds that roleId. The latter is the common case.
+ *     for every session or token that holds that roleId. The latter is the
+ *     common case.
  */
 
 import { Request, Response, NextFunction } from "express";
@@ -232,15 +241,54 @@ export function snapshotFromRole(role: {
 // ─── Snapshot resolution for a request ─────────────────────────────────
 
 /**
- * Returns the up-to-date role snapshot for the current request, refreshing
- * the session snapshot from DB when the cached role version is newer.
- * Returns null when the caller is unauthenticated OR is a bearer-token
- * caller (no session snapshot for tokens — they use scopes instead).
+ * Returns the up-to-date role snapshot for the current request — from the
+ * bearer token's bound role when the caller presented one, otherwise from
+ * the session (refreshing from DB when the cached role version is newer).
+ * Returns null only for unauthenticated callers. The resolved snapshot is
+ * memoized on req.roleSnapshot so later inline checks (hasPermission) are
+ * synchronous.
+ */
+async function resolveSnapshot(req: Request): Promise<SessionRoleSnapshot | null> {
+  if (req.roleSnapshot) return req.roleSnapshot;
+  const snap = req.apiToken
+    ? await resolveTokenSnapshot(req.apiToken.roleId)
+    : await resolveSessionSnapshot(req);
+  if (snap) req.roleSnapshot = snap;
+  return snap;
+}
+
+// Token callers have no session to persist a snapshot into, so resolved
+// snapshots live in an in-process Map keyed by roleId, invalidated through
+// the same roleVersionMap that session snapshots use (bumpRoleVersion on
+// every role write). Bounded by the number of distinct roles bound to live
+// tokens — a handful of entries in practice.
+const tokenSnapshotCache = new Map<string, SessionRoleSnapshot>();
+
+async function resolveTokenSnapshot(roleId: string): Promise<SessionRoleSnapshot> {
+  const cached = tokenSnapshotCache.get(roleId);
+  if (cached) {
+    const ver = roleVersionMap.get(roleId);
+    if (!ver) {
+      // Cold version cache: trust the snapshot and warm the cache (same
+      // anti-stampede reasoning as the session path below).
+      roleVersionMap.set(roleId, cached.updatedAt);
+      return cached;
+    }
+    if (ver === cached.updatedAt) return cached;
+  }
+  const fresh = await loadRoleSnapshot(roleId);
+  tokenSnapshotCache.set(roleId, fresh);
+  return fresh;
+}
+
+/**
+ * Session path: refreshes the session snapshot from DB when the cached role
+ * version is newer. Returns null when there is no logged-in session.
  *
  * Persists session writes via session.save() so the refresh is durable
  * across the response cycle.
  */
-async function resolveSnapshot(req: Request): Promise<SessionRoleSnapshot | null> {
+async function resolveSessionSnapshot(req: Request): Promise<SessionRoleSnapshot | null> {
   if (!req.session?.userId) return null;
   // Old-session self-heal: a session issued before the dynamic-roles
   // cutover (`829b80a`) carries `req.session.userId` + a string
@@ -293,12 +341,13 @@ async function resolveSnapshot(req: Request): Promise<SessionRoleSnapshot | null
 
 /**
  * Exported wrapper around `resolveSnapshot` for callers outside the
- * middleware factories that need the same old-session self-heal — most
- * notably the page-level static-HTML redirect in `app.ts`, which runs
- * before the API router and doesn't go through `requirePermission`.
- * Returns the snapshot or null when the caller has no session at all.
+ * middleware factories that need the same old-session self-heal (and, for
+ * bearer callers, the token role resolution) — the page-level static-HTML
+ * redirect in `app.ts` and the dashboard's filter-don't-403 handlers.
+ * Returns the snapshot or null for unauthenticated callers. After it
+ * resolves, `hasPermission(req, ...)` works for sessions and tokens alike.
  */
-export async function ensureSessionRoleSnapshot(req: Request): Promise<SessionRoleSnapshot | null> {
+export async function ensureRoleSnapshot(req: Request): Promise<SessionRoleSnapshot | null> {
   return resolveSnapshot(req);
 }
 
@@ -310,9 +359,8 @@ function rankMeets(actual: AccessLevel, required: AccessLevel): boolean {
 
 /**
  * Express middleware factory. 403 unless the caller's role grants at
- * least `required` on `functionKey`. Bearer-token callers do NOT pass
- * this gate — they have no role snapshot. Routes that should accept
- * tokens use requireSessionOrTokenPermission instead.
+ * least `required` on `functionKey`. Applies to sessions AND bearer-token
+ * callers alike — a token resolves the Role it was bound to at mint time.
  */
 export function requirePermission(functionKey: string, required: AccessLevel) {
   if (!isValidFunctionKey(functionKey)) {
@@ -322,7 +370,7 @@ export function requirePermission(functionKey: string, required: AccessLevel) {
     try {
       const snap = await resolveSnapshot(req);
       if (!snap) {
-        return next(new AppError(403, "Forbidden — session role required"));
+        return next(new AppError(403, "Forbidden — no role resolved for caller"));
       }
       const actual = snap.permissions[functionKey] ?? "none";
       if (!rankMeets(actual, required)) {
@@ -340,14 +388,15 @@ export function requirePermission(functionKey: string, required: AccessLevel) {
  * Boolean inline check for handlers that need conditional behavior
  * (e.g. "if FullRW, skip the ownership filter"). Returns true when the
  * caller has at least `required` on the functionKey. NEVER throws —
- * returns false on missing session or stale snapshot fallback.
+ * returns false when no snapshot has been resolved yet.
  *
  * Synchronous because it reads the snapshot already attached to the
- * session. Use AFTER a `requirePermission(...)` guard has run, which
- * guarantees the snapshot is fresh.
+ * request (token callers) or session. Use AFTER a `requirePermission(...)`
+ * guard or `ensureRoleSnapshot(req)` has run, which guarantees the
+ * snapshot is fresh.
  */
 export function hasPermission(req: Request, functionKey: string, required: AccessLevel): boolean {
-  const snap = req.session?.roleSnapshot;
+  const snap = req.roleSnapshot ?? req.session?.roleSnapshot;
   if (!snap) return false;
   const actual = snap.permissions[functionKey] ?? "none";
   return rankMeets(actual, required);
@@ -364,42 +413,6 @@ export function requireOwnership(functionKey: string) {
   return requirePermission(functionKey, "write");
 }
 
-// ─── Bearer-token hybrid (replaces requireSessionOrTokenScope) ─────────
-
-/**
- * Hybrid guard: pass if either
- *   (a) the session has at least `level` on `functionKey`, OR
- *   (b) a bearer token whose scopes include `requiredScope` is present.
- *
- * Used by routes that an external system needs to reach (the asset
- * quarantine push surface is the canonical case).
- */
-export function requireSessionOrTokenPermission(
-  functionKey: string,
-  level: AccessLevel,
-  requiredScope: string,
-) {
-  if (!isValidFunctionKey(functionKey)) {
-    throw new Error(`requireSessionOrTokenPermission: unknown functionKey "${functionKey}"`);
-  }
-  return async (req: Request, _res: Response, next: NextFunction) => {
-    try {
-      if (req.apiToken) {
-        if (req.apiToken.scopes.includes(requiredScope)) return next();
-        return next(new AppError(403, `Forbidden — token "${req.apiToken.name}" lacks scope "${requiredScope}"`));
-      }
-      const snap = await resolveSnapshot(req);
-      if (snap) {
-        const actual = snap.permissions[functionKey] ?? "none";
-        if (rankMeets(actual, level)) {
-          req.permissionLevel = actual;
-          return next();
-        }
-        return next(new AppError(403, `Forbidden — your role lacks ${level} access on ${functionKey}`));
-      }
-      next(new AppError(401, "Unauthorized — session login or bearer token required"));
-    } catch (err) {
-      next(err);
-    }
-  };
-}
+// requireSessionOrTokenPermission retired in the api-tokens role cutover —
+// bearer tokens are bound to a Role and pass the plain requirePermission
+// gate; there is no parallel scope-string system anymore.

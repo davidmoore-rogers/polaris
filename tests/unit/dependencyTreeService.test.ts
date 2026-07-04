@@ -97,6 +97,32 @@ describe("buildDependencyEdgesFromInputs", () => {
     expect(leafParent).toEqual({ childAssetId: "swBridge", parentAssetId: "apX", detectedVia: "lldp" });
   });
 
+  it("suppresses a mesh leaf's backwards controller edge via fortinetTopology.meshUplink even without station-derived mesh edges", () => {
+    // The user-reported inversion: a mesh-leaf AP (FortiOS mesh_uplink="mesh")
+    // whose LLDP sees a switch bridged behind its LAN port. Pre-fix discovery
+    // stamped that switch as the leaf's parentSwitch, so the controller edge
+    // pointed BACKWARDS (leaf depends on the bridged switch). The stamped
+    // meshUplink flag alone — no root-AP station scrape required — must
+    // suppress it, and with the switch flagged as a bridge leaf the switch
+    // depends on the AP via LLDP.
+    const meshLeaf: DepAsset = {
+      id: "apLeaf",
+      hostname: "FP234FTF21009379",
+      serialNumber: null,
+      assetType: "access_point",
+      fortinetTopology: { role: "fortiap", parentSwitch: "S108EFTQ21003618", controllerFortigate: "FG-EDGE-01", meshUplink: "mesh" },
+    };
+    const assets = [fg("fg1", "FG-EDGE-01"), sw("swBridge", "S108EFTQ21003618", "FG-EDGE-01"), meshLeaf];
+    const lldpEdges = [{ assetId: "apLeaf", matchedAssetId: "swBridge" }];
+    const edges = buildDependencyEdgesFromInputs(assets, [], lldpEdges, [], new Set(["swBridge"]));
+    // No backwards leaf→bridged-switch controller edge…
+    expect(edges).not.toContainEqual({ childAssetId: "apLeaf", parentAssetId: "swBridge", detectedVia: "controller" });
+    // …and the bridged switch's FortiLink edge stays suppressed in favor of
+    // the LLDP edge to the AP.
+    expect(edges).not.toContainEqual({ childAssetId: "swBridge", parentAssetId: "fg1", detectedVia: "controller" });
+    expect(edges).toContainEqual({ childAssetId: "swBridge", parentAssetId: "apLeaf", detectedVia: "lldp" });
+  });
+
   it("emits switch→AP edges from fortinetTopology.parentSwitch", () => {
     const assets = [
       fg("fg1", "FG-EDGE-01"),

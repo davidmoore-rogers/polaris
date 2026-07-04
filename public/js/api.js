@@ -250,10 +250,16 @@ const api = {
     subnet:  (id) => request("GET", `/utilization/subnets/${id}`),
   },
   dashboard: {
-    // Optional `sourceTypes` array narrows the recentReservations slice of
-    // the response. Omitted = the back-compat default (manual only).
+    // Optional `sections` array narrows the response to the named sections
+    // (blocks | recent | assetTypes | monitorAlerts) so a widget fetches only
+    // what it renders. Optional `sourceTypes` array narrows the
+    // recentReservations slice. Omitted = the back-compat full payload
+    // (manual-only recents).
     summary: (opts) => {
       var parts = [];
+      if (opts && Array.isArray(opts.sections) && opts.sections.length) {
+        parts.push("sections=" + encodeURIComponent(opts.sections.join(",")));
+      }
       if (opts && Array.isArray(opts.sourceTypes) && opts.sourceTypes.length) {
         parts.push("recentSourceTypes=" + encodeURIComponent(opts.sourceTypes.join(",")));
       }
@@ -261,9 +267,10 @@ const api = {
       if (opts && opts.recentLimit != null) parts.push("recentLimit=" + encodeURIComponent(opts.recentLimit));
       return request("GET", "/dashboard/summary" + (parts.length ? "?" + parts.join("&") : ""), undefined, timeoutSignal(DASHBOARD_FETCH_TIMEOUT_MS));
     },
-    // One round-trip feed for the NOC widgets (status tiles, down nodes,
-    // top CPU/mem, slowest response, packet loss, stale polls, recent
-    // reboots, active alerts, sites with issues).
+    // Feed endpoint for the NOC widgets (status tiles, down nodes, top
+    // CPU/mem, slowest response, packet loss, stale polls, recent reboots,
+    // active alerts, sites with issues). qs carries the per-widget filter +
+    // feeds= subset (built by widgets/index.js getNocSummary).
     nocSummary: (qs) => request("GET", "/dashboard/noc-summary" + (qs ? "?" + qs : ""), undefined, timeoutSignal(DASHBOARD_FETCH_TIMEOUT_MS)),
   },
   me: {

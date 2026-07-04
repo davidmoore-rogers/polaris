@@ -4267,14 +4267,27 @@ async function routeAPI(method, path, params, body, res, req) {
 
   // ── API Tokens ─────────────────────────────────────────────────────────────
   if (path === "/api/v1/api-tokens" && method === "GET") {
-    return json(res, { tokens: API_TOKENS, knownScopes: ["assets:quarantine", "assets:read"] });
+    // Role catalogue for the "acts as role" dropdown — mirrors the real
+    // endpoint's { id, name, description, grantsQuarantineWrite, adminEquivalent }.
+    const tokenRoles = ROLES.map((r) => ({
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      grantsQuarantineWrite: r.permissions.assetsQuarantine === "write" || r.permissions.assetsQuarantine === "fullwrite",
+      adminEquivalent: r.permissions.users === "fullwrite" && r.permissions.roles === "fullwrite",
+    }));
+    return json(res, { tokens: API_TOKENS, roles: tokenRoles, quarantineIntegrations: [] });
   }
   if (path === "/api/v1/api-tokens" && method === "POST") {
+    const role = ROLES.find((r) => r.id === body.roleId);
+    if (!role) return json(res, { error: "Role not found" }, 400);
     const token = {
       id: crypto.randomUUID(),
       name: body.name,
       tokenPrefix: "polaris_demoXXXX",
-      scopes: body.scopes || [],
+      roleId: role.id,
+      roleName: role.name,
+      integrationIds: body.integrationIds || [],
       createdBy: "demo",
       createdAt: new Date().toISOString(),
       expiresAt: body.expiresAt || null,

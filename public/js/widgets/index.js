@@ -14,7 +14,8 @@
  *     defaultSize:     { width, height }                   // grid cells (width ∈ 3|4|6|12, height ∈ 1|2)
  *     minSize?:        { width, height }                   // optional resize floor
  *     requiredPermission?: { key, level }                  // gates library visibility AND instance render
- *     fetchData?:      (config, summary) => Promise<any>   // optional — most widgets read pre-fetched summary
+ *     fetchData?:      (config) => Promise<any>            // optional — widgets fetch their own feed/section
+ *                                                          // (getNocSummary(opts, feeds) / getSummary(opts))
  *     renderInstance:  (el, config, data, ctx)             // full render
  *     renderPreview:   (el, ctx)                           // mock-data mini for library
  *     renderConfig?:   (el, config, onChange)              // gear popover
@@ -56,14 +57,13 @@
     "server", "switch", "router", "firewall", "workstation", "printer", "access_point", "other",
   ];
 
-  // Shared NOC-summary accessor. Many NOC widgets read the same
-  // /dashboard/noc-summary payload on their own refresh timers; this memoizes
-  // the result for a short TTL and dedupes concurrent in-flight requests so a
-  // dashboard full of NOC widgets makes one fetch per window, not one per
-  // widget. Now keyed by the per-widget filter (asset types + region scope):
-  // each distinct filter gets its own cache slot + in-flight dedupe, so two
-  // widgets sharing a filter still make one fetch, while differently-filtered
-  // widgets each fetch their own narrowed payload. Pass the opts object from
+  // Shared NOC-summary accessor. Each widget fetches ONLY its own feed(s)
+  // (?feeds=topCpu) so it renders as soon as its data exists instead of
+  // gating on the slowest feed in a monolithic payload. Results are memoized
+  // for a short TTL keyed by (feeds, filter, limit) with in-flight dedupe, so
+  // two widgets sharing a feed + filter still make one fetch. The server adds
+  // its own short per-feed cache on top, so extra requests from many widgets /
+  // tabs / kiosk walls stay cheap. Pass the opts object from
   // PolarisWidgets.nocFilterOpts(config); omit it for the unfiltered payload.
   var _nocCache = {}; // key -> { at, data, inflight }
   var NOC_TTL_MS = 15000;
@@ -93,8 +93,13 @@
     return parts.join("&");
   }
 
-  window.PolarisWidgets.getNocSummary = function (opts) {
+  // feeds: array of feed names the caller renders (e.g. ["topCpu"], or
+  // ["downInterfaces","downIpsecTunnels"]). Omit/empty = the full payload.
+  window.PolarisWidgets.getNocSummary = function (opts, feeds) {
     var qs = nocQueryString(opts);
+    if (Array.isArray(feeds) && feeds.length) {
+      qs = (qs ? qs + "&" : "") + "feeds=" + encodeURIComponent(feeds.slice().sort().join(","));
+    }
     var key = qs || "_default";
     var now = Date.now();
     var slot = _nocCache[key];
@@ -102,6 +107,34 @@
     if (slot && slot.inflight) return slot.inflight;
     slot = _nocCache[key] = slot || { at: 0, data: null, inflight: null };
     slot.inflight = api.dashboard.nocSummary(qs)
+      .then(function (data) {
+        slot.at = Date.now();
+        slot.data = data;
+        slot.inflight = null;
+        return data;
+      })
+      .catch(function (err) {
+        slot.inflight = null;
+        throw err;
+      });
+    return slot.inflight;
+  };
+
+  // Shared /dashboard/summary accessor for the IP-space widgets, same memo +
+  // in-flight-dedupe pattern as getNocSummary. Widgets fetch only their own
+  // section (?sections=blocks|recent|assetTypes) so each renders as soon as
+  // its data exists — nothing depends on the dashboard orchestrator having
+  // pre-fetched a shared payload. opts: { sections, sourceTypes, recentLimit }.
+  var _summaryCache = {}; // key -> { at, data, inflight }
+  window.PolarisWidgets.getSummary = function (opts) {
+    opts = opts || {};
+    var key = JSON.stringify([opts.sections || [], opts.sourceTypes || [], opts.recentLimit == null ? "" : opts.recentLimit]);
+    var now = Date.now();
+    var slot = _summaryCache[key];
+    if (slot && slot.data && now - slot.at < NOC_TTL_MS) return Promise.resolve(slot.data);
+    if (slot && slot.inflight) return slot.inflight;
+    slot = _summaryCache[key] = slot || { at: 0, data: null, inflight: null };
+    slot.inflight = api.dashboard.summary(opts)
       .then(function (data) {
         slot.at = Date.now();
         slot.data = data;

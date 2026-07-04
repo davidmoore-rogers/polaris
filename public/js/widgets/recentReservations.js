@@ -44,19 +44,20 @@
     minSize: { width: 3, height: 1 },
     defaultConfig: { rowLimit: 10, sourceTypes: ["manual"] },
 
-    fetchData: function (config, summary) {
+    fetchData: function (config) {
       var wanted = (config && Array.isArray(config.sourceTypes)) ? config.sourceTypes : ["manual"];
-      var sameAsDefault = wanted.length === 1 && wanted[0] === "manual";
-      // The shared summary slice is the default 10 manual rows. Reuse it only
-      // when the widget wants ≤10 default-source rows; otherwise refetch with a
-      // server-side recentLimit (0 = No Limit → the server sends everything).
+      // Fetch only this widget's section; the shared getSummary memo dedupes
+      // same-config widgets. recentLimit is sent only past the server's
+      // 10-row default so default-config widgets share one cache slot.
       var serverLimit = PolarisWidgets.serverRowLimit(config && config.rowLimit);
       var needMore = (config && config.rowLimit === "none") || serverLimit > 10;
-      if (sameAsDefault && !needMore) {
-        return Promise.resolve(((summary && summary.recentReservations) || []).slice());
-      }
-      return api.dashboard.summary({ sourceTypes: wanted, recentLimit: serverLimit })
-        .then(function (data) { return (data && data.recentReservations) || []; });
+      return PolarisWidgets.getSummary({
+        sections: ["recent"],
+        sourceTypes: wanted,
+        recentLimit: needMore ? serverLimit : null,
+      })
+        .then(function (data) { return (data && data.recentReservations) || []; })
+        .catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data) {

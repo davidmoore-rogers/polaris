@@ -3,8 +3,12 @@
  *
  * Fleet-wide aggregates backing the NOC dashboard widgets (the SolarWinds
  * wall-display recreation). Each function answers one widget's question over
- * the whole monitored fleet; the route layer (dashboard.ts /noc-summary)
- * fans them out in one Promise.all and permission-filters per section.
+ * the whole monitored fleet. The route layer (dashboard.ts /noc-summary) goes
+ * through getNocSummaryPayload(), which resolves the requested feed subset
+ * (?feeds=a,b — widgets fetch individually so each renders as soon as its own
+ * data exists), permission-filters per section, and serves every feed through
+ * a short per-feed TTL cache so N widgets / browsers / kiosk walls don't
+ * recompute the same hypertable scans.
  *
  * Scale: every query here is designed to stay flat from 100 to 2000 monitored
  * assets — groupBy / count / one windowed raw aggregate / one bounded findMany,
@@ -16,6 +20,7 @@
 
 import { prisma } from "../db.js";
 import { resolveMonitorSettings } from "./monitoringService.js";
+import { createTtlCache } from "../utils/ttlCache.js";
 
 // Asset types treated as "infrastructure" for the uptime % gauge — mirrors the
 // SolarWinds Fortinet-only uptime tile. These are the built-in network-gear
@@ -711,7 +716,7 @@ export interface FilterOptions {
  *     — custom types are always shown and aren't meaningful filter entries.
  *   - regions: distinct `region:<name>` tag values across the live fleet, the
  *     same tags the `regionTags` filter matches. Sorted.
- * Two cheap queries; safe for a dashboard:read token.
+ * Two cheap queries; safe for a read-only NOC kiosk token.
  */
 export async function getFilterOptions(): Promise<FilterOptions> {
   const [typeRows, regionRows] = await Promise.all([
@@ -732,4 +737,128 @@ export async function getFilterOptions(): Promise<FilterOptions> {
     assetTypes: BUILTIN_ASSET_TYPES.filter((t) => present.has(t)),
     regions: regionRows.map((r) => r.region).filter(Boolean),
   };
+}
+
+// ─── Per-feed payload assembly + short-TTL cache ─────────────────────────────
+
+export const NOC_FEED_NAMES = [
+  "status", "downNodes", "downInterfaces", "downIpsecTunnels",
+  "topCpu", "topMemory", "slowestResponse", "packetLoss", "diskUsage",
+  "stalePolls", "sitesWithIssues", "recentReboots", "activeAlerts",
+] as const;
+export type NocFeedName = (typeof NOC_FEED_NAMES)[number];
+
+const EMPTY_STATUS: StatusSummary = {
+  statusCounts: { total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0 },
+  uptimePercent: null,
+  activeAlertCount: 0,
+};
+
+/**
+ * Feed registry. Per feed:
+ *   gate    — which read permission covers it (asset- vs Event-sourced)
+ *   empty   — the value a denied caller gets (filter-don't-403 contract)
+ *   run     — compute the response value; L(n) resolves the caller's row cap
+ *             (?limit=N clamped by the route) against the feed's default
+ *   flatten — map the feed value onto response keys. Default is {[feed]: v};
+ *             `status` fans out to three top-level keys and `downNodes`
+ *             unwraps `.nodes`, both preserved from the pre-feeds response
+ *             shape so existing consumers (and the kiosk token) see no change.
+ */
+const NOC_FEEDS: Record<NocFeedName, {
+  gate: "assets" | "events";
+  empty: unknown;
+  run: (L: (n: number) => number | null, assetIds: string[] | null) => Promise<unknown>;
+  flatten?: (value: unknown) => Record<string, unknown>;
+}> = {
+  status: {
+    gate: "assets",
+    empty: EMPTY_STATUS,
+    run: (_L, ids) => getStatusSummary(ids),
+    flatten: (v) => {
+      const s = v as StatusSummary;
+      return { statusCounts: s.statusCounts, uptimePercent: s.uptimePercent, activeAlertCount: s.activeAlertCount };
+    },
+  },
+  downNodes: {
+    gate: "assets",
+    empty: { nodes: [], total: 0 },
+    run: (L, ids) => getDownNodes(L(100), ids),
+    flatten: (v) => ({ downNodes: (v as { nodes: DownNode[] }).nodes }),
+  },
+  downInterfaces:   { gate: "assets", empty: [], run: (L, ids) => getDownInterfaces(L(100), 240, ids) },
+  downIpsecTunnels: { gate: "assets", empty: [], run: (L, ids) => getDownIpsecTunnels(L(100), 240, ids) },
+  topCpu:           { gate: "assets", empty: [], run: (L, ids) => getHighestCpu(L(100), 60, ids) },
+  topMemory:        { gate: "assets", empty: [], run: (L, ids) => getHighestMemory(L(100), 60, ids) },
+  slowestResponse:  { gate: "assets", empty: [], run: (L, ids) => getSlowestResponse(L(100), ids) },
+  packetLoss:       { gate: "assets", empty: [], run: (L, ids) => getPacketLoss(L(100), 15, ids) },
+  diskUsage:        { gate: "assets", empty: [], run: (L, ids) => getHighestDiskUsage(L(100), ids) },
+  stalePolls:       { gate: "assets", empty: [], run: (L, ids) => getStalePolls(3, L(50), ids) },
+  sitesWithIssues:  { gate: "assets", empty: [], run: (L, ids) => getSitesWithIssues(L(25), ids) },
+  recentReboots:    { gate: "events", empty: [], run: (L, ids) => getRecentReboots(72, L(20), ids) },
+  activeAlerts:     { gate: "events", empty: [], run: (L, ids) => getRecentAlerts(L(30), ids) },
+};
+
+// 10s: below the frontend's 15s memo, so a widget's own refresh timer never
+// sees data older than ~25s, while every concurrent viewer (multiple NOC
+// walls / operator tabs) shares one computation of each hypertable scan.
+export const NOC_FEED_CACHE_TTL_MS = 10_000;
+const nocFeedCache = createTtlCache<unknown>({ ttlMs: NOC_FEED_CACHE_TTL_MS, maxEntries: 512 });
+
+/** Test hook — drop every cached feed/filter entry. */
+export function clearNocFeedCache(): void {
+  nocFeedCache.invalidate();
+}
+
+function filterCacheKey(assetTypes: string[] | null, regionNames: string[] | null): string {
+  const t = (assetTypes ?? []).slice().sort().join(",");
+  const r = (regionNames ?? []).slice().sort().join(",");
+  return t + "|" + r;
+}
+
+/**
+ * Assemble the /noc-summary response. `feeds` narrows to the named subset
+ * (unknown names are dropped silently, mirroring the source-type param
+ * convention); null = every feed (the pre-feeds full payload, byte-identical
+ * shape). Permission-denied feeds come back as their empty value, never 403.
+ * Each (feed, filter, cap) computation goes through the shared TTL cache, as
+ * does the filter→assetIds resolution.
+ */
+export async function getNocSummaryPayload(opts: {
+  feeds: string[] | null;
+  canAssets: boolean;
+  canEvents: boolean;
+  assetTypes: string[] | null;
+  regionNames: string[] | null;
+  capLimit: number | null;
+}): Promise<Record<string, unknown>> {
+  const requested: NocFeedName[] = opts.feeds === null
+    ? [...NOC_FEED_NAMES]
+    : opts.feeds.filter((f): f is NocFeedName => Object.prototype.hasOwnProperty.call(NOC_FEEDS, f));
+
+  const fKey = filterCacheKey(opts.assetTypes, opts.regionNames);
+  const allowed = (gate: "assets" | "events") => (gate === "assets" ? opts.canAssets : opts.canEvents);
+
+  // Resolve the per-widget filter to asset ids once (cached — the id set backs
+  // every feed sharing the filter). Skipped when no feed will run.
+  let assetIds: string[] | null = null;
+  if (requested.some((f) => allowed(NOC_FEEDS[f].gate))) {
+    assetIds = (await nocFeedCache.getOrCompute("ids|" + fKey, () =>
+      resolveFilteredAssetIds({ assetTypes: opts.assetTypes, regionNames: opts.regionNames }),
+    )) as string[] | null;
+  }
+
+  const L = (n: number): number | null => opts.capLimit ?? n;
+  const out: Record<string, unknown> = {};
+  await Promise.all(requested.map(async (feed) => {
+    const def = NOC_FEEDS[feed];
+    const value = allowed(def.gate)
+      ? await nocFeedCache.getOrCompute(
+          feed + "|" + (opts.capLimit ?? "") + "|" + fKey,
+          () => def.run(L, assetIds),
+        )
+      : def.empty;
+    Object.assign(out, def.flatten ? def.flatten(value) : { [feed]: value });
+  }));
+  return out;
 }

@@ -3600,6 +3600,14 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   color: #4fc3f7;
   border-bottom-color: #4fc3f7;
 }
+/* Edit-mode drag handle on each tab — the tab itself isn't draggable (the
+   active tab is mostly the rename input), so the grip is the grab target. */
+.dashboard-tab-grip {
+  cursor: grab; user-select: none; color: var(--color-text-tertiary);
+  font-size: 0.9rem; line-height: 1; padding: 2px 3px; border-radius: 4px; flex-shrink: 0;
+}
+.dashboard-tab-grip:hover { color: var(--color-text-primary); background: rgba(255,255,255,0.06); }
+.dashboard-tab-grip:active { cursor: grabbing; }
 .dashboard-tab-remove {
   background: transparent;
   border: 0;
@@ -4110,6 +4118,13 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .sitemap-pulse {
   width: 22px; height: 22px; border-radius: 50%;
   background: #ff1744; animation: sitemap-pulse-ring 2s ease-out infinite; pointer-events: none;
+}
+
+/* Count badge centered on a stacked-sites anchor dot (spiderfy explode). */
+.sitemap-stack-count {
+  width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+  color: #fff; font-family: "Roboto Mono", monospace; font-size: 10px; font-weight: 700;
+  text-shadow: 0 0 3px #000, 0 1px 2px rgba(0, 0, 0, 0.9); pointer-events: none;
 }
 
 /* Open-Meteo temperature label. */

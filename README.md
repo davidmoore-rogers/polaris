@@ -70,7 +70,7 @@ Server Settings → Maintenance shows host CPU/RAM/disk, database size with samp
 - **TOTP second factor** — RFC 6238 enrollment via QR code, single-use backup codes, admin reset for lost devices.
 - **Azure SAML SSO** — auto-provisioning, single logout, optional skip-login-page redirect.
 - **Roles** — Admin, Network Admin, Assets Admin, User, Read-Only. Network and asset surfaces are role-scoped; users own the records they create.
-- **API tokens** — long-lived bearer tokens for external callers (e.g. SIEM-driven quarantine). Per-token integration scoping is required for `assets:quarantine`; the raw token is shown once at creation and only the argon2 hash is stored.
+- **API tokens** — long-lived bearer tokens for external callers (e.g. SIEM-driven quarantine, NOC kiosks, read-only inventory consumers). Each token is bound to a role at creation and acts with exactly that role's permissions; per-token integration scoping is required when the role can push quarantine. The raw token is shown once at creation and only the argon2 hash is stored.
 
 ### Audit & operations
 - **Event log** with syslog (CEF) forwarding, SFTP/SCP archival, configurable retention.

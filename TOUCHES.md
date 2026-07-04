@@ -852,7 +852,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - Unmonitored parents are transparent — the suppression walk skips them and continues to their grandparents. A monitored ancestor must say "down" before suppression can fire.
 - recomputeDependencyTree only touches source="computed" rows for in-scope assets; out-of-scope rows and source="override" rows are never deleted.
 - Layer assignment is **physical-first** BFS from any FortiGate (layer 1). Interface + LLDP + mesh edges form the primary adjacency; controller edges are a fallback for assets the physical pass didn't reach. Controller-fallback uses simple-path detection: a 3+ node chain of unattached switches sharing one controller, with exactly two endpoints and no branching, chains correctly off the alpha-hostname endpoint. MCLAG pairs (2-node groups) and any branching/cycled component still attach as siblings to preserve co-layer behavior. Cycles, disconnected subgraphs, or chains through unmonitored intermediates may leave dependencyLayer = null. Kept-edge `detectedVia` prefers mesh > interface > lldp > controller so the audit trail reflects physical cabling when multiple signals exist on a pair.
-- **Wireless attachments override the controller signal.** A mesh-leaf AP (station-match on its root AP, from `AssetWirelessStation`) gets a `mesh` edge to the root AP and its backwards controller edge is suppressed. A FortiLink switch bridged behind a FortiAP (an AP↔switch `AssetLldpNeighbor` adjacency where the switch is NOT the AP's controller parent) has its FortiLink controller edge suppressed and depends on the AP via LLDP. Both are computed in `recomputeDependencyTree` and passed to `buildDependencyEdgesFromInputs` (`meshEdges`, `bridgeLeafSwitchIds`). The bridged-switch discriminator (`switch ≠ AP.parentSwitch`) is a heuristic — verify against real fleet data.
+- **Wireless attachments override the controller signal.** A mesh-leaf AP (station-match on its root AP, from `AssetWirelessStation`, OR `fortinetTopology.meshUplink === "mesh"` — the stamped FortiOS classification works without a root-AP station scrape) gets a `mesh` edge to the root AP and its backwards controller edge is suppressed. A FortiLink switch bridged behind a FortiAP (an AP↔switch `AssetLldpNeighbor` adjacency where the switch is NOT the AP's controller parent — or where the AP is a mesh leaf, since a mesh leaf's wired LLDP adjacency is always a switch bridged behind it, even when stale pre-fix data stamped that switch as its `parentSwitch`) has its FortiLink controller edge suppressed and depends on the AP via LLDP. Both are computed in `recomputeDependencyTree` and passed to `buildDependencyEdgesFromInputs` (`meshEdges`, `bridgeLeafSwitchIds`). The same mesh-leaf rule gates discovery stamping: `parseFortiapMonitorRow` + both detected-device fallback loops never write `parentSwitch` onto a mesh leaf. The non-mesh bridged-switch discriminator (`switch ≠ AP.parentSwitch`) is a heuristic — verify against real fleet data.
 - Reconciler runs in BFS layer order so parent's effective state is settled before children evaluate (otherwise multi-tier suppression could oscillate).
 
 **When changing this:**
@@ -1122,7 +1122,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - `src/api/middleware/permissions.ts` — `loadRoleSnapshot` rewrites `req.session.roleSnapshot` + persists via `req.session.save()` when the cached `updatedAt` is newer than the snapshot. `rankRole` / `pickHighestPrivilegeRoleId` rank roles for highest-privilege-wins group resolution.
 
 **Readers** (consult the matrix or the session snapshot to gate behavior):
-- `src/api/middleware/permissions.ts` — `requirePermission` / `hasPermission` / `requireOwnership` / `requireSessionOrTokenPermission`. All route guards funnel through here.
+- `src/api/middleware/permissions.ts` — `requirePermission` / `hasPermission` / `requireOwnership` / `ensureRoleSnapshot`. All route guards funnel through here, for sessions and role-bound bearer tokens alike.
 - Every route module under `src/api/routes/` — declares its per-route gate via `requirePermission(functionKey, level)`. Ownership-dimensioned routes (`subnets.ts`, `reservations.ts`) additionally branch on `req.permissionLevel === "fullwrite"`.
 - `src/api/routes/conflicts.ts` — `visibleEntityTypes(req)` and `canResolve(req, entityType)` consult `hasPermission(req, "discoveryConflicts", ...)` plus role NAME (`req.session.role`) for back-compat with the historical networkadmin↔reservation / assetsadmin↔asset split. Custom roles with `discoveryConflicts=write` see both entity types by default.
 - `src/app.ts` — Static-page redirect: `/users.html` / `/integrations.html` / `/server-settings.html` consult `req.session.roleSnapshot.permissions[key]` against the matching `pageRequiredPermission` entry; out-of-scope users bounce to `/`.
@@ -1599,11 +1599,11 @@ Listed alphabetically.
 
 ## services/apiTokenService.ts
 
-**What it owns:** Long-lived bearer-token CRUD for external API access; argon2id hash + tokenPrefix-based lookup; scope validation (assets:quarantine, assets:read); integrationIds enforcement for quarantine scope.
+**What it owns:** Long-lived bearer-token CRUD for external API access; argon2id hash + tokenPrefix-based lookup; role binding (each token carries a roleId whose matrix requirePermission resolves like a session snapshot); integrationIds enforcement when the bound role grants assetsQuarantine >= write; api_token.admin_equivalent warning Event on admin-equivalent bindings.
 
-**Public API:** KNOWN_SCOPES, ApiTokenScope, ApiTokenSummary, AuthenticatedToken, CreateTokenInput, CreateTokenResult, createToken, listTokens, revokeToken, deleteToken, verifyToken.
+**Public API:** ApiTokenSummary, AuthenticatedToken, CreateTokenInput, CreateTokenResult, createToken, listTokens, revokeToken, deleteToken, verifyToken.
 
-**Cross-service deps:** none.
+**Cross-service deps:** permissions.ts (normalizePermissions, isAdminEquivalentPermissions), eventLogService (logEvent via routes/events re-export).
 
 **Used by:**
 - src/api/routes/apiTokens.ts — GET /api-tokens, list all tokens
@@ -1616,12 +1616,13 @@ Listed alphabetically.
 **Invariants:**
 - Wire format: `Authorization: Bearer polaris_<32-char-base64url-tail>` (prefix stored separately for fast candidate lookup via index).
 - tokenHash is argon2id; never returned; rawToken shown ONCE at creation (POST response).
-- assets:quarantine scope requires integrationIds (≥1 FortiManager/FortiGate id); assets:read scopes may have empty integrationIds.
+- A bound role granting assetsQuarantine ≥ write requires integrationIds (≥1 FortiManager/FortiGate id); other roles may have empty integrationIds.
+- Roles bound to tokens can't be deleted (roleService counts apiTokens and 409s); role edits propagate to live tokens via the bumpRoleVersion cache on the next request.
 - verifyToken() is best-effort on lastUsedAt/lastUsedIp updates; missed bumps don't fail auth.
 - Expired tokens (expiresAt in past) and revoked tokens (revokedAt set) are silently excluded from lookup; no 401 distinction.
 
 **When changing this:**
-- Audit scope validation (validateIntegrationIds) if adding new integration types to quarantine support.
+- Audit validateIntegrationIds if adding new integration types to quarantine support.
 - Test wire format edge cases (malformed prefix, truncated token, null bearer header).
 - Verify tokenPrefix index is used in verifyToken candidate fetch to keep lookup O(indexed).
 - Check that expiresAt comparison handles null and timezone offsets correctly.
@@ -3546,9 +3547,9 @@ Listed alphabetically.
 
 **What it owns:** Fleet-wide read-only aggregates for the SolarWinds-style NOC dashboard widgets, surfaced via `GET /dashboard/noc-summary`.
 
-**Public API:** `getStatusSummary`, `getDownNodes`, `getDownInterfaces`, `getDownIpsecTunnels`, `getHighestCpu`, `getHighestMemory`, `getSlowestResponse`, `getPacketLoss`, `getHighestDiskUsage`, `getStalePolls`, `getRecentReboots`, `getRecentAlerts`, `getSitesWithIssues`, `resolveFilteredAssetIds` (+ exported result interfaces). Every feed takes a trailing `assetIds: string[] | null` arg; `resolveFilteredAssetIds({assetTypes, regionNames})` produces that set (or null = unfiltered). `getDownInterfaces` = interfaces admin-up + oper-down grouped by gate (firewall→own hostname, managed FortiSwitch/FortiAP→parent `learnedLocation`); one windowed single-pass CTE over `asset_interface_samples` (latest-per-`(asset,ifName)` + last-up timestamp) then a monitored/non-suppressed hydrate findMany. `getDownIpsecTunnels` = same shape over `asset_ipsec_tunnel_samples` (`status='down'`), carrying each tunnel's `parentInterface` (phase1-interface WAN port). The `downInterfaces` widget merges both feeds into one gate-grouped list.
+**Public API:** `getNocSummaryPayload` (the route's entry point: `NOC_FEEDS` registry over the 13 `NOC_FEED_NAMES`, per-feed permission gates + empty values + response-key flattening, every (feed, filter, cap) computation served through a shared 10s `createTtlCache` — `NOC_FEED_CACHE_TTL_MS`, `clearNocFeedCache()` test hook), plus the per-feed functions `getStatusSummary`, `getDownNodes`, `getDownInterfaces`, `getDownIpsecTunnels`, `getHighestCpu`, `getHighestMemory`, `getSlowestResponse`, `getPacketLoss`, `getHighestDiskUsage`, `getStalePolls`, `getRecentReboots`, `getRecentAlerts`, `getSitesWithIssues`, `resolveFilteredAssetIds` (+ exported result interfaces). Every feed takes a trailing `assetIds: string[] | null` arg; `resolveFilteredAssetIds({assetTypes, regionNames})` produces that set (or null = unfiltered). `getDownInterfaces` = interfaces admin-up + oper-down grouped by gate (firewall→own hostname, managed FortiSwitch/FortiAP→parent `learnedLocation`); one windowed single-pass CTE over `asset_interface_samples` (latest-per-`(asset,ifName)` + last-up timestamp) then a monitored/non-suppressed hydrate findMany. `getDownIpsecTunnels` = same shape over `asset_ipsec_tunnel_samples` (`status='down'`), carrying each tunnel's `parentInterface` (phase1-interface WAN port). The `downInterfaces` widget merges both feeds into one gate-grouped list.
 
-**Used by:** `src/api/routes/dashboard.ts` (`/dashboard/noc-summary`, all sections fanned out in one `Promise.all`; parses `?assetTypes=`/`?regionTags=` → `resolveFilteredAssetIds` → passes `assetIds` to every feed). Frontend NOC widgets read the combined payload via `PolarisWidgets.getNocSummary(opts)` (15s memoized **per filter**) in `public/js/widgets/`.
+**Used by:** `src/api/routes/dashboard.ts` (`/dashboard/noc-summary` → `getNocSummaryPayload`; the route only parses `?feeds=`/`?assetTypes=`/`?regionTags=`/`?limit=` and resolves permissions — filter resolution, feed fan-out, and the 10s per-feed cache live in the service). Frontend NOC widgets each fetch only their own feed via `PolarisWidgets.getNocSummary(opts, feeds)` (15s memoized **per (feeds, filter, limit)**) in `public/js/widgets/`, so a widget renders as soon as its own feed returns. Adding a feed = add a `NOC_FEEDS` registry entry (gate + empty + runner + optional flatten), not a route change.
 
 **Reads:** `Asset` (monitorStatus, monitored, dependencySuppressed, assetType, tags, location/learnedLocation/snmpLocation, department, lastMonitorAt, latitude/longitude); `asset_telemetry_samples` + `asset_monitor_samples` + `asset_storage_samples` + `asset_interface_samples` (down interfaces: oper/admin status latest-per-interface + last-up timestamp) + `asset_ipsec_tunnel_samples` (down tunnels: status latest-per-tunnel + parentInterface + last-up timestamp) hypertables (read-only DISTINCT-ON / groupBy / windowed `row_number()` for the rolling averages + per-volume disk used % + down interfaces + down tunnels, never write/delete); `Event` (`device.reboot` for reboots, `levelRank>=1` for active alerts). Calls `monitoringService.resolveMonitorSettings` for stale-poll cadence.
 
@@ -3556,6 +3557,8 @@ Listed alphabetically.
 - `activeAlertCount` uses the EXACT `monitorAlerts` where-clause (`monitored, monitorStatus in [warning,down], dependencySuppressed:false`) so the tile count and the alert list agree.
 - Top-N CPU/Memory and slowest-response are each the **avg of the most-recent 10 samples per asset** (windowed `row_number()<=10` then `avg`); packet-loss is a failed-probe ratio. All scan only recent (chunk-excluded) hypertable rows via a `now() - interval` predicate (CPU/Mem 1h, response 6h); names hydrated in ONE `findMany` (no per-row lookup). Never row-DELETE/UPDATE the sample tables.
 - `getStalePolls` pre-filters with `@@index([monitored, lastMonitorAt])` then resolves the exact cadence per candidate via the cached `resolveMonitorSettings` — don't reimplement the tier hierarchy; suppressed assets use 2× interval (mirrors monitorAssets).
+- Permission-denied feeds return their `empty` value WITHOUT entering the TTL cache — a denied caller must never poison (or be served from) a granted caller's cache slot. Errors are never cached either (`createTtlCache` evicts rejections).
+- The no-`?feeds=` response shape is frozen (external kiosk consumers + `tests/integration/dashboardNocToken.test.ts`): `status` flattens to the three tile keys, `downNodes` unwraps `.nodes`.
 - `getSitesWithIssues` coalesces `location > learnedLocation > snmpLocation > "(unknown)"`; the same coalesce key buckets the node detail rows.
 
 **When changing this:**
