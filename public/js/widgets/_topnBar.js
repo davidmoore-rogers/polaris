@@ -1,7 +1,8 @@
 /**
  * widgets/_topnBar.js — shared renderer for the NOC top-N metric widgets
- * (Highest CPU, Highest Memory, Slowest Response, Packet Loss). These four are
- * structurally identical: a ranked list of { id, hostname, ipAddress, value }
+ * (Highest CPU, Highest Memory, Slowest Response, Packet Loss, Highest Disk
+ * Usage, Highest Temperature). These are structurally identical: a ranked
+ * list of { id, hostname, ipAddress, value }
  * rows drawn as a name + utilization bar + value, with per-widget units, color
  * thresholds, and an optional value floor. Underscore-prefixed = internal
  * helper; it registers no widget of its own.
@@ -21,13 +22,14 @@
 
   function formatValue(value, unit) {
     if (unit === "ms") return Math.round(value) + " ms";
+    if (unit === "°C") return Math.round(value) + " °C";
     return value + "%";
   }
 
   /**
    * el       — widget body
    * rows     — [{ id, hostname, ipAddress, value }]
-   * opts     — { unit:"%"|"ms", thresholds, baseColor, emptyText, config, fillTo }
+   * opts     — { unit:"%"|"ms"|"°C", thresholds, baseColor, emptyText, config, fillTo }
    *            config: { rowLimit, threshold }
    *            fillTo: red-guarantee mode (Highest CPU/Memory/Disk, Slowest
    *            Response). The operator's Row limit governs how many rows show

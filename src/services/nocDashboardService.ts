@@ -492,6 +492,49 @@ export async function getHighestDiskUsage(limit: number | null = 100, assetIds: 
 }
 
 /**
+ * Feed 4c — highest temperature, PER SENSOR (one row per (asset, sensorName) at
+ * its latest sample's reading). Ranks the hottest hardware sensors across the
+ * fleet; each row's `detail` carries the sensor name. DISTINCT-ON latest-per-
+ * (asset,sensor) over asset_hardware_sensor_samples scoped to
+ * sensorClass='temperature' — that class is always °C (classifyHardwareSensor),
+ * so values compare directly. The 4h window comfortably contains the latest
+ * scrape at the default temperature-stream cadence even when an operator
+ * slows it, while keeping the hypertable scan chunk-excluded.
+ */
+export async function getHighestTemperature(limit: number | null = 100, assetIds: string[] | null = null, sinceMinutes = 240): Promise<TopNRow[]> {
+  const idClause = assetIds ? ` AND s."assetId" = ANY($3::text[])` : "";
+  const params: unknown[] = [String(sinceMinutes), limit];
+  if (assetIds) params.push(assetIds);
+  const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; sensorName: string; value: number }>>(
+    `SELECT "assetId", "sensorName", value FROM (
+       SELECT DISTINCT ON (s."assetId", s."sensorName")
+              s."assetId" AS "assetId", s."sensorName" AS "sensorName", s."value" AS value
+       FROM "asset_hardware_sensor_samples" s
+       WHERE s."timestamp" > now() - ($1 || ' minutes')::interval
+         AND s."sensorClass" = 'temperature' AND s."value" IS NOT NULL${idClause}
+       ORDER BY s."assetId", s."sensorName", s."timestamp" DESC
+     ) latest ORDER BY value DESC LIMIT $2`,
+    ...params,
+  );
+  if (rows.length === 0) return [];
+  // Hydrate names in ONE findMany (an asset appears once per sensor, so dedupe
+  // the id set for the lookup), then attach hostname + sensor-name detail.
+  const ids = Array.from(new Set(rows.map((r) => r.assetId)));
+  const assets = await prisma.asset.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, hostname: true, ipAddress: true },
+  });
+  const byId = new Map(assets.map((a) => [a.id, a]));
+  return rows
+    .map((r): TopNRow | null => {
+      const a = byId.get(r.assetId);
+      if (!a) return null;
+      return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: Math.round(r.value * 10) / 10, detail: r.sensorName };
+    })
+    .filter((r): r is TopNRow => r !== null);
+}
+
+/**
  * Feed 5 (data-gap Option A) — packet loss = failed-probe ratio over the
  * window. One windowed groupBy over asset_monitor_samples; no schema change.
  * (True per-probe loss% via multi-ping is a documented follow-up.)
@@ -743,7 +786,7 @@ export async function getFilterOptions(): Promise<FilterOptions> {
 
 export const NOC_FEED_NAMES = [
   "status", "downNodes", "downInterfaces", "downIpsecTunnels",
-  "topCpu", "topMemory", "slowestResponse", "packetLoss", "diskUsage",
+  "topCpu", "topMemory", "slowestResponse", "packetLoss", "diskUsage", "temperature",
   "stalePolls", "sitesWithIssues", "recentReboots", "activeAlerts",
 ] as const;
 export type NocFeedName = (typeof NOC_FEED_NAMES)[number];
@@ -793,6 +836,7 @@ const NOC_FEEDS: Record<NocFeedName, {
   slowestResponse:  { gate: "assets", empty: [], run: (L, ids) => getSlowestResponse(L(100), ids) },
   packetLoss:       { gate: "assets", empty: [], run: (L, ids) => getPacketLoss(L(100), 15, ids) },
   diskUsage:        { gate: "assets", empty: [], run: (L, ids) => getHighestDiskUsage(L(100), ids) },
+  temperature:      { gate: "assets", empty: [], run: (L, ids) => getHighestTemperature(L(100), ids) },
   stalePolls:       { gate: "assets", empty: [], run: (L, ids) => getStalePolls(3, L(50), ids) },
   sitesWithIssues:  { gate: "assets", empty: [], run: (L, ids) => getSitesWithIssues(L(25), ids) },
   recentReboots:    { gate: "events", empty: [], run: (L, ids) => getRecentReboots(72, L(20), ids) },
