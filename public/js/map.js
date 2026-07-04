@@ -17,7 +17,11 @@
   // Currently-open topology modal state. siteId drives Refresh + position
   // persistence; data is the latest /topology payload (used for endpoint
   // pivots from search results without a re-fetch).
-  var topoState = { siteId: null, hostname: null, data: null, pathOverlay: null };
+  // activeView: "flat" (default — today's whole-site render) or a floor-view
+  // key "<buildingKey>|<floorKey>" from computeFloorViews. Not persisted —
+  // the modal always opens on Flat. floorViews caches the current payload's
+  // view list for the switcher chips.
+  var topoState = { siteId: null, hostname: null, data: null, pathOverlay: null, activeView: "flat", floorViews: [], hasLocationCodes: false };
   var topoSearchDebounce = null;
   var topoSuggestState  = { open: false, items: [], index: -1 };
   var POSITION_STORAGE_PREFIX = "polaris.topology.positions:";
@@ -39,6 +43,11 @@
   // root is intentionally NOT toggleable: it anchors the column solver, and
   // hiding it would drop the whole layout back to dagre.
   var TYPE_FILTER_STORAGE_KEY = "polaris.topology.hiddenRoles";
+  // Location grouping hulls (building / floor / room / jb shapes from
+  // b:/f:/r:/jb: codes in device descriptions): per-user singleton toggle,
+  // default ON. The chip only renders when the site actually carries codes,
+  // so untagged fleets see zero UI change.
+  var SHOW_LOCATIONS_STORAGE_KEY = "polaris.topology.showLocations";
   // Toggleable roles, in chip display order. Only roles that buildTopologyElements
   // actually renders as nodes belong here (wireless clients / LLDP ghosts are
   // never drawn, and wired endpoints only appear as synthetic search-overlay
@@ -778,6 +787,8 @@
     topoState.siteId = id;
     topoState.hostname = hostname || null;
     topoState.data = null;
+    topoState.activeView = "flat";
+    topoState.floorViews = [];
 
     try {
       var data = await api.map.topology(id);
@@ -820,7 +831,9 @@
   // positions from before a column-spacing change).
   function resetTopologyLayout() {
     if (!topoState.siteId || !topoState.data) return;
-    try { localStorage.removeItem(POSITION_STORAGE_PREFIX + topoState.siteId); }
+    // Scoped to the ACTIVE view — resetting a floor view's drags leaves the
+    // Flat layout (and every other floor's) untouched.
+    try { localStorage.removeItem(_positionsStorageKey(topoState.siteId)); }
     catch (e) { /* quota / private mode — proceed with re-render anyway */ }
     renderTopologyGraph(topoState.data);
     if (typeof showToast === "function") showToast("Layout reset");
@@ -914,6 +927,26 @@
       if (desc) html += '<div class="topology-legend-desc">' + escapeHtml(desc) + '</div>';
       return html;
     }
+    // Location grouping hull shapes (building rect / floor dashed rect /
+    // room hexagon / jb dashed ellipse). Neutral swatch color — real hulls
+    // are colored per group name.
+    function locationSwatch(rowSpec) {
+      var color = "#4fc3f7";
+      var borderStyle = rowSpec.style === "dashed" ? "dashed" : "solid";
+      var base = "width:22px;height:16px;background:" + color + "22;border:2px " + borderStyle + " " + color + ";";
+      var shape;
+      if (rowSpec.shape === "hexagon") {
+        // clip-path hexagons can't show a border — approximate with the
+        // outline color as the fill so the silhouette still reads.
+        shape = '<div style="width:20px;height:17px;background:' + color +
+                ';clip-path:polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);opacity:0.75"></div>';
+      } else if (rowSpec.shape === "ellipse") {
+        shape = '<div style="' + base + 'border-radius:50%"></div>';
+      } else {
+        shape = '<div style="' + base + 'border-radius:4px"></div>';
+      }
+      return '<span class="topology-legend-swatch">' + shape + '</span>';
+    }
     var parts = [];
     parts.push('<div class="topology-legend-section"><div class="topology-legend-section-title">Nodes</div>');
     spec.nodes.forEach(function (n) { parts.push(row(nodeSwatch(n), n.label, n.desc)); });
@@ -924,6 +957,11 @@
     parts.push('<div class="topology-legend-section"><div class="topology-legend-section-title">Edges</div>');
     spec.edges.forEach(function (e) { parts.push(row(edgeSwatch(e), e.label, e.desc)); });
     parts.push('</div>');
+    if (spec.locations) {
+      parts.push('<div class="topology-legend-section"><div class="topology-legend-section-title">Location groups</div>');
+      spec.locations.forEach(function (l) { parts.push(row(locationSwatch(l), l.label, l.desc)); });
+      parts.push('</div>');
+    }
     return parts.join("");
   }
   // Header drag — pointer-events-based so it works on touch laptops too.
@@ -974,26 +1012,35 @@
   }
 
   // ── Position persistence ───────────────────────────────────────────────────
-  // localStorage-backed per-site node positions. Keyed by site id; value is
-  // a map of nodeId → {x, y}. Persisted browser-side only — operator-owned
-  // mental layout, not shared across users. Stale entries (nodes that no
-  // longer appear in the topology) are silently dropped on next save.
+  // localStorage-backed per-site node positions. Keyed by site id (the Flat
+  // view keeps the legacy bare key for back-compat; floor views append
+  // ":<viewKey>" so each view owns its manual layout); value is a map of
+  // nodeId → {x, y}. Persisted browser-side only — operator-owned mental
+  // layout, not shared across users. Stale entries (nodes that no longer
+  // appear in the topology) are silently dropped on next save.
+  function _positionsStorageKey(siteId) {
+    var suffix = topoState.activeView && topoState.activeView !== "flat" ? ":" + topoState.activeView : "";
+    return POSITION_STORAGE_PREFIX + siteId + suffix;
+  }
   function saveNodePositions(siteId) {
     if (!cyInstance || !siteId) return;
     var out = {};
     cyInstance.nodes().forEach(function (n) {
+      // Synthetic overlays (location hulls, floor portals) are derived every
+      // render — persisting them would pin stale geometry onto real node ids.
+      if (n.data("isLocGroup") || n.data("isPortal")) return;
       var p = n.position();
       if (p && typeof p.x === "number" && typeof p.y === "number") {
         out[n.id()] = { x: p.x, y: p.y };
       }
     });
-    try { localStorage.setItem(POSITION_STORAGE_PREFIX + siteId, JSON.stringify(out)); }
+    try { localStorage.setItem(_positionsStorageKey(siteId), JSON.stringify(out)); }
     catch (e) { /* quota / private mode — silently skip */ }
   }
   function loadNodePositions(siteId) {
     if (!siteId) return null;
     try {
-      var raw = localStorage.getItem(POSITION_STORAGE_PREFIX + siteId);
+      var raw = localStorage.getItem(_positionsStorageKey(siteId));
       if (!raw) return null;
       var parsed = JSON.parse(raw);
       return parsed && typeof parsed === "object" ? parsed : null;
@@ -1362,6 +1409,24 @@
     // off-path elements and adds a synthetic round-rectangle endpoint node.
     var elements = window.PolarisTopologyRender.buildTopologyElements(data);
 
+    // Does ANY device on this site carry a location code? Checked against the
+    // unfiltered element set so the Locations chip stays available even when
+    // every coded device's type is currently hidden.
+    topoState.hasLocationCodes = elements.some(function (el) {
+      var d = el && el.data;
+      return !!(d && !d.source && (d.locB || d.locF || d.locR || d.locJb));
+    });
+
+    // Floor views present in this payload (empty unless some device carries
+    // an f: code). Computed from the unfiltered set; if a refresh removed the
+    // active view's floor, fall back to Flat rather than rendering nothing.
+    topoState.floorViews = window.PolarisTopologyRender.computeFloorViews(elements);
+    var isFloorView = topoState.activeView !== "flat";
+    if (isFloorView && !topoState.floorViews.some(function (v) { return v.key === topoState.activeView; })) {
+      topoState.activeView = "flat";
+      isFloorView = false;
+    }
+
     // Device-type visibility filter: drop nodes of hidden roles (and edges
     // touching them) BEFORE the column solver runs, so the layout recomputes
     // compactly for what's actually shown instead of leaving holes where the
@@ -1383,6 +1448,14 @@
       if (d.source && d.target) return !!(visibleIds[d.source] && visibleIds[d.target]);
       return !!visibleIds[d.id];
     });
+
+    // Floor view: partition down to the active (building, floor) pair — its
+    // tagged devices + the FortiGate root + portal stubs where an edge
+    // crosses to another floor. Runs after the type filter so a hidden
+    // device type stays hidden in floor views too.
+    if (isFloorView) {
+      elements = window.PolarisTopologyRender.partitionElementsForFloor(elements, topoState.activeView);
+    }
 
     // Topology graph follows the per-user MAP theme (not the global app
     // theme) so the toolbar toggle drives both the basemap and the
@@ -1486,6 +1559,7 @@
     // (which IS the asset id); cross-site remotes + matched wireless stations
     // carry it in `assetId`; LLDP ghosts and unmatched stations have no asset.
     function _openAssetForNode(node) {
+      if (node.data("isPortal")) return; // floor portal — tap navigation, not an asset
       var role = node.data("role");
       if (role === "lldp") return; // ghost neighbor — no Polaris asset
       var assetId;
@@ -1518,6 +1592,12 @@
       if (topoState.pathOverlay) clearConnectionPathOverlay();
     });
 
+    // Floor portal tap → jump to the remote device's floor view.
+    cyInstance.on("tap", "node[isPortal]", function (evt) {
+      var target = evt.target.data("targetView");
+      if (target) _setTopologyView(target);
+    });
+
     // Hover tooltip on edges — concise: the two devices, the interface on each
     // side, and a one-line connection kind. Works for every edge type
     // (controller / interface / LLDP / mesh / wireless).
@@ -1538,11 +1618,85 @@
     });
     cyInstance.on("mouseout", "edge", function () { hideEdgeTooltip(); });
 
+    // Location grouping hulls — drawn after the layout so bounding boxes
+    // reflect final positions (the preset/dagre run + saved-position restore
+    // above are synchronous), then re-fitted whenever any real node moves
+    // (drag, path overlay snap-back). RAF-throttled: one refresh per frame no
+    // matter how many nodes a batch reposition touches. In a floor view the
+    // building/floor shapes are suppressed — the view itself IS the
+    // building+floor, so only rooms + junction boxes stay useful.
+    if (topoState.hasLocationCodes && _readShowLocations()) {
+      window.PolarisTopologyRender.renderLocationGroups(
+        cyInstance,
+        isFloorView ? { suppressKinds: ["building", "floor"] } : undefined
+      );
+    }
+    var locRefreshPending = false;
+    cyInstance.on("position", "node[!isLocGroup]", function () {
+      if (locRefreshPending) return;
+      locRefreshPending = true;
+      window.requestAnimationFrame(function () {
+        locRefreshPending = false;
+        if (cyInstance) window.PolarisTopologyRender.refreshLocationGroups(cyInstance);
+      });
+    });
+
     // Map-only screenshot button, overlaid at the top-right of the graph area.
     // (openTopology wipes #topology-graph's innerHTML and cytoscape re-mounts,
     // so it's re-added here on every render rather than living in static HTML.)
     _ensureTopologyMapShotButton();
     _renderTopologyTypeToggles(roleCounts, hiddenRoles);
+    _renderTopologyFloorViews();
+  }
+
+  // ── Floor-view switcher ─────────────────────────────────────────────────
+  // Chips at the top-left of the graph: "Flat" (whole site, default) plus one
+  // per (building, floor) pair found in the payload. Rendered only when at
+  // least one device carries an f: code — untagged fleets see no switcher.
+  function _setTopologyView(key) {
+    if (topoState.activeView === key) return;
+    // Persist any manual drags under the OUTGOING view's key before switching.
+    if (cyInstance && topoState.siteId && !topoState.pathOverlay) saveNodePositions(topoState.siteId);
+    topoState.activeView = key;
+    if (topoState.data) renderTopologyGraph(topoState.data);
+  }
+  function _renderTopologyFloorViews() {
+    var graph = document.getElementById("topology-graph");
+    if (!graph) return;
+    if (!graph.style.position) graph.style.position = "relative";
+    var wrap = document.getElementById("topology-floor-views");
+    if (!wrap) {
+      wrap = document.createElement("div");
+      wrap.id = "topology-floor-views";
+      wrap.className = "topology-floor-views";
+      graph.appendChild(wrap);
+    }
+    wrap.innerHTML = "";
+    var views = topoState.floorViews || [];
+    if (views.length === 0) { wrap.hidden = true; return; }
+    var entries = [{ key: "flat", label: "Flat" }].concat(views);
+    entries.forEach(function (v) {
+      var active = topoState.activeView === v.key;
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "topology-type-chip topology-floor-chip" + (active ? " is-active" : "");
+      chip.setAttribute("aria-pressed", active ? "true" : "false");
+      chip.title = v.key === "flat" ? "Whole site" : "Show only " + v.label;
+      chip.textContent = v.label;
+      chip.addEventListener("click", function () { _setTopologyView(v.key); });
+      wrap.appendChild(chip);
+    });
+    wrap.hidden = false;
+  }
+
+  // ── Location-hull visibility toggle ─────────────────────────────────────
+  function _readShowLocations() {
+    try { return localStorage.getItem(SHOW_LOCATIONS_STORAGE_KEY) !== "off"; }
+    catch (e) { return true; }
+  }
+  function _writeShowLocations(on) {
+    try { localStorage.setItem(SHOW_LOCATIONS_STORAGE_KEY, on ? "on" : "off"); }
+    catch (e) { /* quota / private mode — toggle still applies this session */ }
   }
 
   // ── Device-type visibility toggles ─────────────────────────────────────────
@@ -1599,6 +1753,35 @@
       });
       wrap.appendChild(chip);
     });
+    // Locations chip — toggles the building/floor/room/jb grouping hulls.
+    // Only offered when this site's devices actually carry location codes.
+    if (topoState.hasLocationCodes) {
+      var locOn = _readShowLocations();
+      var locChip = document.createElement("button");
+      locChip.type = "button";
+      locChip.className = "topology-type-chip" + (locOn ? "" : " is-off");
+      locChip.setAttribute("aria-pressed", locOn ? "true" : "false");
+      locChip.title = (locOn ? "Hide" : "Show") + " location groups (saved per user)";
+      locChip.textContent = "Locations";
+      locChip.addEventListener("click", function () {
+        var next = !_readShowLocations();
+        _writeShowLocations(next);
+        if (cyInstance) {
+          if (next) {
+            window.PolarisTopologyRender.renderLocationGroups(
+              cyInstance,
+              topoState.activeView !== "flat" ? { suppressKinds: ["building", "floor"] } : undefined
+            );
+          } else {
+            window.PolarisTopologyRender.removeLocationGroups(cyInstance);
+          }
+        }
+        locChip.className = "topology-type-chip" + (next ? "" : " is-off");
+        locChip.setAttribute("aria-pressed", next ? "true" : "false");
+        locChip.title = (next ? "Hide" : "Show") + " location groups (saved per user)";
+      });
+      wrap.appendChild(locChip);
+    }
     wrap.hidden = wrap.children.length === 0;
   }
 

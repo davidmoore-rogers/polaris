@@ -43,6 +43,28 @@
     }
   }
 
+  // Canonical grouping key for a location-code value: trim, collapse internal
+  // whitespace, lowercase. Mirrors locationGroupKey in the server's
+  // utils/locationCodes.ts (the grammar itself is server-only — nodes arrive
+  // with resolved display values; only membership comparison happens here).
+  function locKey(value) {
+    return String(value).replace(/\s+/g, " ").replace(/^ | $/g, "").toLowerCase();
+  }
+
+  // Location-code node-data stamps from a payload node's `location` object
+  // ({ building, floor, room, junctionBox } | null). locB/locF/locR/locJb are
+  // normalized grouping keys (drive the row-clustering pass + grouping hulls);
+  // loc*Name keep the operator's original casing for labels.
+  function locationData(loc) {
+    var d = {};
+    if (!loc) return d;
+    if (loc.building) { d.locB = locKey(loc.building); d.locBName = String(loc.building); }
+    if (loc.floor) { d.locF = locKey(loc.floor); d.locFName = String(loc.floor); }
+    if (loc.room) { d.locR = locKey(loc.room); d.locRName = String(loc.room); }
+    if (loc.junctionBox) { d.locJb = locKey(loc.junctionBox); d.locJbName = String(loc.junctionBox); }
+    return d;
+  }
+
   // Build the elements array Cytoscape consumes from a /topology payload.
   // The shape mirrors what desktop map.js used to construct inline; mobile
   // and desktop now both call this so a new node/edge type only needs to
@@ -53,26 +75,26 @@
 
     if (data.fortigate) {
       elements.push({
-        data: {
+        data: Object.assign({
           id: data.fortigate.id,
           label: data.fortigate.hostname || "FortiGate",
           role: "fortigate",
           nodeColor: fortinetNodeColor(data.fortigate),
           iconUrl: data.fortigate.iconUrl || null,
           hasIcon: data.fortigate.iconUrl ? 1 : 0,
-        },
+        }, locationData(data.fortigate.location)),
       });
     }
     (data.switches || []).forEach(function (s) {
       elements.push({
-        data: {
+        data: Object.assign({
           id: s.id,
           label: s.hostname || "FortiSwitch",
           role: "fortiswitch",
           nodeColor: fortinetNodeColor(s),
           iconUrl: s.iconUrl || null,
           hasIcon: s.iconUrl ? 1 : 0,
-        },
+        }, locationData(s.location)),
       });
     });
     // AP id set — used to detect wireless MESH: a leaf AP shows up in the
@@ -91,14 +113,14 @@
 
     (data.aps || []).forEach(function (a) {
       elements.push({
-        data: {
+        data: Object.assign({
           id: a.id,
           label: a.hostname || "FortiAP",
           role: "fortiap",
           nodeColor: fortinetNodeColor(a),
           iconUrl: a.iconUrl || null,
           hasIcon: a.iconUrl ? 1 : 0,
-        },
+        }, locationData(a.location)),
       });
       // Wireless stations connected to this AP. Each station becomes a
       // small diamond node hanging off the AP via a dashed-cyan "wireless"
@@ -570,6 +592,53 @@
           "line-outline-width": 2,
         },
       },
+      // Location grouping hulls (building / floor / room / jb). Drawn beneath
+      // every ordinary node AND edge via z-compound-depth: bottom (verified on
+      // the bundled Cytoscape 3.30 — the z sorter compares compound depth
+      // before the node-over-edge rule); z-index within the bottom layer
+      // stacks building < floor < room < jb. Shape / border-style / color /
+      // size are per-node bypass styles set by renderLocationGroups. events:
+      // "no" lets clicks and background-drag panning pass straight through.
+      {
+        selector: "node[isLocGroup]",
+        style: {
+          "z-compound-depth": "bottom",
+          "background-opacity": isDark ? 0.06 : 0.08,
+          "border-width": 2,
+          "border-opacity": 0.55,
+          label: "data(label)",
+          "font-size": "13px",
+          "font-weight": 600,
+          "text-valign": "top",
+          "text-halign": "center",
+          "text-margin-y": -4,
+          "text-wrap": "none",
+          events: "no",
+        },
+      },
+      // Floor-view portal stub: where an edge leaves the current floor it
+      // terminates at this small dashed node naming the remote device + its
+      // floor. The ONLY interactive synthetic node — tapping it switches to
+      // the remote floor's view (wired in map.js).
+      {
+        selector: "node[isPortal]",
+        style: {
+          shape: "round-rectangle",
+          width: 52,
+          height: 30,
+          "background-color": isDark ? "#252a35" : "#eef1f6",
+          "background-opacity": 0.9,
+          "border-width": 2,
+          "border-style": "dashed",
+          "border-color": edgeColor,
+          "font-size": "10px",
+          "font-style": "italic",
+          "text-max-width": 130,
+          "text-wrap": "ellipsis",
+          color: textColor,
+          "text-opacity": 0.85,
+        },
+      },
       {
         selector: 'node.topology-pulse',
         style: {
@@ -666,7 +735,290 @@
         { label: "AP ↔ switch",       color: "#3b82f6", style: "solid",  desc: "Wired: AP's switch uplink / switch bridged behind an AP" },
         { label: "In physical loop",  color: "#eab308", style: "solid",  desc: "Yellow halo: wired edge on a redundant/ring path" },
       ],
+      // Location grouping hulls — shapes must mirror LOC_GROUP_KINDS. Colors
+      // are per-group (hashed from the group name), so the legend shows the
+      // shape vocabulary with a neutral swatch color.
+      locations: [
+        { label: "Building",     shape: "rect",    style: "solid",  desc: "From b:/f:/r:/jb: codes in device descriptions or asset notes" },
+        { label: "Floor",        shape: "rect",    style: "dashed" },
+        { label: "Room",         shape: "hexagon", style: "solid" },
+        { label: "Junction box", shape: "ellipse", style: "dashed" },
+      ],
     };
+  }
+
+  // ── Location grouping hulls ─────────────────────────────────────────────
+  // Synthetic Cytoscape nodes drawn UNDER the graph (z-compound-depth:
+  // bottom) that enclose devices sharing a location code: building rectangle
+  // > floor dashed rounded-rectangle > room hexagon > jb dashed ellipse.
+  // Plain nodes (not compound parents — those can't render hexagons), sized
+  // to the members' model-coord bounding box, so cy.png() screenshots and
+  // pan/zoom capture them for free. Non-interactive: events pass through to
+  // the background (pan) and they're excluded from drag persistence, the
+  // solver, and search — see the [isLocGroup] guards in map.js.
+  //
+  // Nesting comes from membership subsumption (a room's members are a subset
+  // of its building's) plus padding tiers jb < room < floor < building; the
+  // hexagon/ellipse shapes get extra scale so their inscribed area still
+  // covers the members' box. Same palette values as the Leaflet map-region
+  // feature (REGION_COLOR_PALETTE in map.js — duplicated here because the
+  // shared module can't reach into map.js), color picked by a deterministic
+  // hash of the group's kind+name so a group keeps its color across renders.
+  var LOC_GROUP_PALETTE = [
+    "#4fc3f7", "#4ade80", "#f59e0b", "#f472b6", "#a78bfa",
+    "#fb923c", "#38bdf8", "#34d399", "#e879f9", "#facc15",
+    "#f87171", "#2dd4bf", "#818cf8", "#c084fc",
+  ];
+  var LOC_GROUP_KINDS = {
+    building: { pad: 60, shape: "round-rectangle", dash: "solid",  z: 1, scaleW: 1,    scaleH: 1 },
+    floor:    { pad: 45, shape: "round-rectangle", dash: "dashed", z: 2, scaleW: 1,    scaleH: 1 },
+    room:     { pad: 30, shape: "hexagon",         dash: "solid",  z: 3, scaleW: 1.35, scaleH: 1.18 },
+    jb:       { pad: 14, shape: "ellipse",         dash: "dashed", z: 4, scaleW: 1.42, scaleH: 1.42 },
+  };
+
+  function locGroupColor(kind, name) {
+    var s = kind + "|" + name;
+    var h = 0;
+    for (var i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+    return LOC_GROUP_PALETTE[Math.abs(h) % LOC_GROUP_PALETTE.length];
+  }
+
+  // Enumerate the location groups present among the VISIBLE device nodes of a
+  // mounted Cytoscape instance (hidden-role chips already applied). Scoped
+  // keys — floor = building+floor, room = building+floor+room, jb = all four
+  // — so "Floor 2" in two buildings forms two groups; missing intermediate
+  // levels use an empty segment (an r:-only room is a top-level room group).
+  // Returns [{ key, kind, name, memberIds }] ordered building → floor →
+  // room → jb so callers can add the big shapes first.
+  function computeLocationGroups(cy) {
+    var groups = {};
+    var order = [];
+    function addTo(key, kind, name, nodeId) {
+      var g = groups[key];
+      if (!g) {
+        g = { key: key, kind: kind, name: name, memberIds: [] };
+        groups[key] = g;
+        order.push(g);
+      }
+      g.memberIds.push(nodeId);
+    }
+    cy.nodes().forEach(function (n) {
+      if (n.data("isLocGroup") || n.data("isPortal")) return;
+      if (!n.visible()) return;
+      var b = n.data("locB") || "";
+      var f = n.data("locF") || "";
+      var r = n.data("locR") || "";
+      var jb = n.data("locJb") || "";
+      var id = n.id();
+      if (b) addTo("b|" + b, "building", n.data("locBName"), id);
+      if (f) addTo("f|" + b + "|" + f, "floor", n.data("locFName"), id);
+      if (r) addTo("r|" + b + "|" + f + "|" + r, "room", n.data("locRName"), id);
+      if (jb) addTo("jb|" + b + "|" + f + "|" + r + "|" + jb, "jb", n.data("locJbName"), id);
+    });
+    var kindRank = { building: 0, floor: 1, room: 2, jb: 3 };
+    order.sort(function (a, b2) { return kindRank[a.kind] - kindRank[b2.kind]; });
+    return order;
+  }
+
+  // Position + size a hull node over its members' current bounding box.
+  function _fitLocGroupNode(cy, groupNode) {
+    var memberIds = groupNode.data("memberIds") || [];
+    var coll = cy.collection();
+    memberIds.forEach(function (id) { coll = coll.union(cy.getElementById(id)); });
+    coll = coll.filter(function (n) { return n.length !== 0 && n.visible(); });
+    if (coll.length === 0) return false;
+    var bb = coll.boundingBox({ includeLabels: false, includeOverlays: false });
+    var cfg = LOC_GROUP_KINDS[groupNode.data("locKind")] || LOC_GROUP_KINDS.building;
+    var w = (bb.w + cfg.pad * 2) * cfg.scaleW;
+    var h = (bb.h + cfg.pad * 2) * cfg.scaleH;
+    groupNode.position({ x: (bb.x1 + bb.x2) / 2, y: (bb.y1 + bb.y2) / 2 });
+    groupNode.style({ width: w, height: h });
+    return true;
+  }
+
+  // Draw (or redraw) the hull nodes for the current graph. opts.suppressKinds
+  // hides whole tiers — floor views pass ["building","floor"] since the view
+  // itself IS the building+floor. Idempotent: removes previous hulls first.
+  function renderLocationGroups(cy, opts) {
+    opts = opts || {};
+    removeLocationGroups(cy);
+    var suppress = {};
+    (opts.suppressKinds || []).forEach(function (k) { suppress[k] = true; });
+    computeLocationGroups(cy).forEach(function (g) {
+      if (suppress[g.kind]) return;
+      var cfg = LOC_GROUP_KINDS[g.kind];
+      var color = locGroupColor(g.kind, g.name || "");
+      var n = cy.add({
+        group: "nodes",
+        data: {
+          id: "locgroup:" + g.key,
+          isLocGroup: 1,
+          locKind: g.kind,
+          label: g.name || "",
+          memberIds: g.memberIds,
+        },
+        selectable: false,
+        grabbable: false,
+      });
+      n.style({
+        shape: cfg.shape,
+        "border-style": cfg.dash,
+        "background-color": color,
+        "border-color": color,
+        color: color,
+        "z-index": cfg.z,
+      });
+      if (!_fitLocGroupNode(cy, n)) cy.remove(n);
+    });
+  }
+
+  function removeLocationGroups(cy) {
+    cy.remove(cy.nodes("[isLocGroup]"));
+  }
+
+  // Re-fit existing hulls to their members' current positions (drag-follow).
+  // Membership changes require a full renderLocationGroups() instead.
+  function refreshLocationGroups(cy) {
+    cy.nodes("[isLocGroup]").forEach(function (n) {
+      if (!_fitLocGroupNode(cy, n)) cy.remove(n);
+    });
+  }
+
+  // ── Floor views ─────────────────────────────────────────────────────────
+  // A floor view shows one (building, floor) pair's tagged devices plus the
+  // FortiGate root and "portal" stubs where an edge crosses to another floor.
+  // Pure element-set transforms (no Cytoscape instance) so both surfaces and
+  // the unit tests share them.
+
+  // Sort value for an f: floor label, underground-aware: signed numbers sort
+  // numerically ("-2" < "-1" < "1"), B# basement notation sorts as its
+  // negative ("B1" → -1), and non-numeric values ("Mezzanine", "Roof")
+  // return null and sort after numbered floors alphabetically.
+  function floorSortValue(name) {
+    var s = String(name == null ? "" : name).trim();
+    if (/^-?\d+(\.\d+)?$/.test(s)) return parseFloat(s);
+    var bm = /^b(\d+)$/i.exec(s);
+    if (bm) return -parseInt(bm[1], 10);
+    return null;
+  }
+  function compareFloors(a, b) {
+    var va = floorSortValue(a);
+    var vb = floorSortValue(b);
+    if (va != null && vb != null) return va - vb;
+    if (va != null) return -1; // numbered floors before named ones
+    if (vb != null) return 1;
+    return String(a).localeCompare(String(b));
+  }
+
+  // View label: "Shop — Floor 2", or "Floor 2" for f:-without-b: (the
+  // unnamed-building bucket).
+  function floorViewLabel(buildingName, floorName) {
+    var f = "Floor " + floorName;
+    return buildingName ? buildingName + " — " + f : f;
+  }
+
+  // Enumerate the floor views present in a built element set. Returns
+  // [{ key: "<bKey>|<fKey>", buildingName, floorName, label }] sorted by
+  // building name (unnamed bucket last) then underground-aware floor order.
+  // Empty array when no node carries an f: code → callers render no switcher.
+  function computeFloorViews(elements) {
+    var byKey = {};
+    var out = [];
+    (elements || []).forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.id || d.source || !d.locF) return;
+      var key = (d.locB || "") + "|" + d.locF;
+      if (byKey[key]) return;
+      byKey[key] = true;
+      out.push({
+        key: key,
+        buildingName: d.locBName || "",
+        floorName: d.locFName || d.locF,
+        label: floorViewLabel(d.locBName || "", d.locFName || d.locF),
+      });
+    });
+    out.sort(function (a, b) {
+      if (a.buildingName !== b.buildingName) {
+        if (!a.buildingName) return 1; // unnamed-building bucket last
+        if (!b.buildingName) return -1;
+        return a.buildingName.localeCompare(b.buildingName);
+      }
+      return compareFloors(a.floorName, b.floorName);
+    });
+    return out;
+  }
+
+  // Partition a built element set down to one floor view. Membership: nodes
+  // whose (locB, locF) match the view key, plus the FortiGate root ALWAYS
+  // (keeps the subgraph rooted for the column solver even when the FG is
+  // tagged to another floor). Untagged devices appear only in the Flat view.
+  // Edges with both ends in view are kept as-is (loop flags preserved — a
+  // physical ring is still a ring even when the view splits it); an edge
+  // whose far end is a floor-tagged device on ANOTHER floor is rewired to a
+  // dashed "portal" stub named for the remote device + its floor (one portal
+  // per remote device — parallel links converge), carrying targetView for
+  // tap-to-jump; an edge to an untagged device is dropped (no dead-end stubs).
+  function partitionElementsForFloor(elements, viewKey) {
+    var sep = String(viewKey || "").indexOf("|");
+    var wantB = sep >= 0 ? String(viewKey).slice(0, sep) : "";
+    var wantF = sep >= 0 ? String(viewKey).slice(sep + 1) : String(viewKey || "");
+    var nodeById = {};
+    var inView = {};
+    // True floor members (as opposed to the always-included FG root). Only a
+    // member's cross-floor edge earns a portal — the FG appears in every
+    // view, so stubbing its controller links to every other floor would just
+    // spray "→ elsewhere" noise across each view.
+    var trueMember = {};
+    (elements || []).forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.id || d.source) return;
+      nodeById[d.id] = d;
+      if ((d.locB || "") === wantB && d.locF === wantF) {
+        inView[d.id] = true;
+        trueMember[d.id] = true;
+      } else if (d.role === "fortigate") {
+        inView[d.id] = true;
+      }
+    });
+    var out = [];
+    (elements || []).forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.id || d.source) return;
+      if (inView[d.id]) out.push({ data: Object.assign({}, d) });
+    });
+    var portalAdded = {};
+    (elements || []).forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.source || !d.target) return;
+      var srcIn = !!inView[d.source];
+      var tgtIn = !!inView[d.target];
+      if (!srcIn && !tgtIn) return;
+      if (srcIn && tgtIn) { out.push({ data: Object.assign({}, d) }); return; }
+      var localId = srcIn ? d.source : d.target;
+      if (!trueMember[localId]) return; // root-included FG — no portal spray
+      var remoteId = srcIn ? d.target : d.source;
+      var remote = nodeById[remoteId];
+      if (!remote || !remote.locF) return; // untagged far end — drop, no stub
+      var portalId = "portal:" + remoteId;
+      if (!portalAdded[portalId]) {
+        portalAdded[portalId] = true;
+        out.push({
+          data: {
+            id: portalId,
+            isPortal: 1,
+            label: "→ " + floorViewLabel(remote.locBName || "", remote.locFName || remote.locF) + ": " + (remote.label || remoteId),
+            targetView: (remote.locB || "") + "|" + remote.locF,
+            remoteAssetId: remoteId,
+          },
+        });
+      }
+      var e = Object.assign({}, d);
+      e.id = "portal-" + e.id;
+      if (srcIn) e.target = portalId;
+      else e.source = portalId;
+      out.push({ data: e });
+    });
+    return out;
   }
 
   // Per-device-type weights for the Dijkstra column solver. Infrastructure
@@ -721,7 +1073,15 @@
   //      (a) Tidy-tree over ANCHORS only: a node's first anchor child in a
   //          different column continues the node's row (spine stays flat);
   //          every other anchor claims a fresh row, giving each sibling subtree
-  //          a disjoint row band. Fallback exiles get their own cursor.
+  //          a disjoint row band. Non-spine siblings sharing a b: building
+  //          code (then an f: floor code within a building) are regrouped into
+  //          adjacent bands so location hulls come out contiguous — stable,
+  //          first-appearance bucket order, keyless anchors at the tail, and a
+  //          no-op on untagged sites. NOT guaranteed: cross-subtree adjacency
+  //          (same building under different parents/columns), the spine
+  //          child's building (flat-chain wins), and room/jb adjacency beyond
+  //          what building+floor grouping induces. Fallback exiles get their
+  //          own cursor.
   //      (b) Leaf pass: each leaf stacks downward from its parent's row using a
   //          PER-COLUMN cursor, pushed down only to dodge an occupied lane or a
   //          drawn edge passing through the column. Per-column (not global)
@@ -737,6 +1097,10 @@
     var nodeIds = [];
     var adj = {}; // undirected adjacency: id -> [neighborId, ...]
     var rootId = null;
+    // Location-code grouping keys (stamped by buildTopologyElements from the
+    // payload's b:/f: codes) — drive the sibling-row clustering in pass 5a.
+    var locBById = {};
+    var locFById = {};
 
     elements.forEach(function (el) {
       var d = el && el.data;
@@ -745,6 +1109,8 @@
       roleById[d.id] = d.role || null;
       nodeIds.push(d.id);
       adj[d.id] = adj[d.id] || [];
+      if (d.locB) locBById[d.id] = d.locB;
+      if (d.locF) locFById[d.id] = d.locF;
       if (d.role === "fortigate" && !rootId) rootId = d.id;
     });
     if (!rootId) return null; // no firewall — let the caller keep dagre
@@ -977,6 +1343,52 @@
       return kids;
     }
 
+    // Regroup sibling anchors so those sharing a b: building code (then an f:
+    // floor code within a building) claim ADJACENT fresh rows — the location
+    // hulls come out as clean contiguous bands instead of interleaved ones.
+    // Stable: buckets keep the order in which their first member appeared in
+    // the height-sorted input, members keep their relative order, and keyless
+    // anchors sink to the tail in their original relative order (an all-
+    // keyless site reproduces today's layout exactly). The spine child is
+    // excluded by the caller — flat-chain placement wins over grouping.
+    // Cross-subtree adjacency is deliberately NOT attempted: same-building
+    // anchors under different parents (or different columns) stay wherever
+    // their own parent's band puts them.
+    function stableBucketBy(items, keyById) {
+      var order = [];
+      var buckets = {};
+      var tail = [];
+      items.forEach(function (it) {
+        var key = keyById[it];
+        if (!key) { tail.push(it); return; }
+        if (!buckets[key]) { buckets[key] = []; order.push(key); }
+        buckets[key].push(it);
+      });
+      var out = [];
+      order.forEach(function (k) { out.push.apply(out, buckets[k]); });
+      return out.concat(tail);
+    }
+    function regroupAnchorsByLocation(kids) {
+      if (kids.length < 2) return kids;
+      var hasAnyBuilding = kids.some(function (k) { return !!locBById[k]; });
+      if (!hasAnyBuilding) return kids;
+      // Bucket by building, then order each building's members by floor.
+      var order = [];
+      var buckets = {};
+      var tail = [];
+      kids.forEach(function (k) {
+        var key = locBById[k];
+        if (!key) { tail.push(k); return; }
+        if (!buckets[key]) { buckets[key] = []; order.push(key); }
+        buckets[key].push(k);
+      });
+      var out = [];
+      order.forEach(function (k) {
+        out.push.apply(out, stableBucketBy(buckets[k], locFById));
+      });
+      return out.concat(tail);
+    }
+
     var lane = {};
     var nextRow = 0;
     function placeAnchorSubtree(id, fallbackRegion) {
@@ -985,7 +1397,9 @@
       // The spine child — the first anchor child in a DIFFERENT column — is
       // placed first and the node inherits its row, so the chain stays flat. A
       // same-column anchor child (switch chained off a fallback switch) can't
-      // continue the row; it takes a fresh one.
+      // continue the row; it takes a fresh one. Spine selection reads the
+      // ORIGINAL height-sorted order — location grouping never changes which
+      // child holds the spine, only how the remaining siblings pack together.
       var spine = null;
       for (var ks = 0; ks < kids.length; ks++) {
         if (depth[kids[ks]] !== depth[id]) { spine = kids[ks]; break; }
@@ -999,7 +1413,11 @@
         lane[id] = nextRow;
         nextRow += Math.max(1, leafChildCount[id] || 0);
       }
-      for (var ki = 0; ki < kids.length; ki++) placeAnchorSubtree(kids[ki], fallbackRegion);
+      var rest = spine != null
+        ? kids.filter(function (k) { return k !== spine; })
+        : kids;
+      rest = regroupAnchorsByLocation(rest);
+      for (var ki = 0; ki < rest.length; ki++) placeAnchorSubtree(rest[ki], fallbackRegion);
     }
     placeAnchorSubtree(rootId, false);
     var mainRows = nextRow;
@@ -1109,5 +1527,12 @@
     topologyLegendSpec: topologyLegendSpec,
     computeTopologyColumns: computeTopologyColumns,
     topologyNodeWeight: topologyNodeWeight,
+    computeLocationGroups: computeLocationGroups,
+    renderLocationGroups: renderLocationGroups,
+    removeLocationGroups: removeLocationGroups,
+    refreshLocationGroups: refreshLocationGroups,
+    compareFloors: compareFloors,
+    computeFloorViews: computeFloorViews,
+    partitionElementsForFloor: partitionElementsForFloor,
   };
 })();

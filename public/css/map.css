@@ -275,6 +275,28 @@
   opacity: 0.6;
 }
 
+/* Floor-view switcher chips, top-left of the graph area: "Flat" + one chip
+   per (building, floor) pair found in the site's location codes. Rendered
+   only when at least one device carries an f: code. .is-active = the view
+   currently shown. */
+.topology-floor-views {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 6;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: calc(100% - 320px);
+}
+.topology-floor-views[hidden] { display: none; }
+.topology-floor-chip.is-active {
+  opacity: 1;
+  font-weight: 600;
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
 .topology-legend {
   position: absolute;
   bottom: 12px;
