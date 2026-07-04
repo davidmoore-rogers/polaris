@@ -284,6 +284,34 @@ describe("getHighestDiskUsage", () => {
   });
 });
 
+describe("getHighestTemperature", () => {
+  it("hydrates per-sensor rows with hostname + sensor-name detail, preserves SQL order, dedupes the id lookup", async () => {
+    rawUnsafe.mockResolvedValueOnce([
+      { assetId: "a", sensorName: "CPU Temp", value: 84.27 },
+      { assetId: "a", sensorName: "Intake", value: 51.9 },  // same asset, second sensor
+      { assetId: "gone", sensorName: "PS1 Temp", value: 70 },
+    ]);
+    findMany.mockResolvedValueOnce([
+      { id: "a", hostname: "fgt-plant-a", ipAddress: "10.0.0.1" },
+    ]);
+    const r = await noc.getHighestTemperature();
+    // 'gone' has no asset row → dropped; both of 'a's sensors kept, order preserved
+    expect(r.map((x) => [x.id, x.detail, x.value])).toEqual([
+      ["a", "CPU Temp", 84.3],
+      ["a", "Intake", 51.9],
+    ]);
+    // id lookup deduped to the distinct asset set
+    expect((findMany.mock.calls[0][0] as { where: { id: { in: string[] } } }).where.id.in).toEqual(["a", "gone"]);
+  });
+
+  it("returns empty without hitting findMany when there are no samples", async () => {
+    rawUnsafe.mockResolvedValueOnce([]);
+    const r = await noc.getHighestTemperature();
+    expect(r).toEqual([]);
+    expect(findMany).not.toHaveBeenCalled();
+  });
+});
+
 describe("getFilterOptions", () => {
   it("returns built-in types present (canonical order, custom dropped) and distinct region tags", async () => {
     findMany.mockResolvedValueOnce([
@@ -332,7 +360,7 @@ describe("getNocSummaryPayload", () => {
     expect(Object.keys(r).sort()).toEqual([
       "activeAlertCount", "activeAlerts", "diskUsage", "downInterfaces", "downIpsecTunnels",
       "downNodes", "packetLoss", "recentReboots", "sitesWithIssues", "slowestResponse",
-      "stalePolls", "statusCounts", "topCpu", "topMemory", "uptimePercent",
+      "stalePolls", "statusCounts", "temperature", "topCpu", "topMemory", "uptimePercent",
     ]);
   });
 
