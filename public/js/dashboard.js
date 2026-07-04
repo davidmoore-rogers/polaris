@@ -106,6 +106,7 @@
     });
 
     bootstrap();
+    maybeShowWelcomeModal();
   });
 
   // ─── Bootstrap + migration ──────────────────────────────────────────────
@@ -132,6 +133,74 @@
 
     setHeaderMode();
     renderRoot();
+  }
+
+  // ─── First-run welcome modal ────────────────────────────────────────────
+  // Greets an admin landing on the dashboard while the instance is still
+  // being stood up (no IP blocks yet, or no integrations yet) with the
+  // getting-started steps. Shows once per user per browser: the dismissal
+  // flag is stamped at show time so every close path (X, backdrop, footer
+  // buttons) counts as "seen". Non-admins and fully set-up instances never
+  // see it. Key naming follows `polaris.panellock.<username>` in app.js.
+
+  function welcomeDismissKey() { return "polaris.welcome.dismissed." + (currentUsername || "anon"); }
+
+  async function maybeShowWelcomeModal() {
+    await userReady;
+    if (!isAdmin()) return;
+    try { if (localStorage.getItem(welcomeDismissKey())) return; } catch (_) {}
+
+    var blocks, integrations;
+    try {
+      var results = await Promise.all([api.blocks.list(), api.integrations.list()]);
+      blocks = Array.isArray(results[0]) ? results[0] : (results[0] && results[0].blocks) || [];
+      integrations = Array.isArray(results[1]) ? results[1] : (results[1] && results[1].integrations) || [];
+    } catch (_) {
+      return; // can't tell whether the instance is fresh — don't nag
+    }
+    var hasBlocks = blocks.length > 0;
+    var hasIntegrations = integrations.length > 0;
+    if (hasBlocks && hasIntegrations) return;
+
+    try { localStorage.setItem(welcomeDismissKey(), new Date().toISOString()); } catch (_) {}
+
+    function stepHTML(num, done, title, desc) {
+      var badge = done
+        ? '<span style="flex:none;width:26px;height:26px;border-radius:50%;background:var(--color-success);color:#fff;display:flex;align-items:center;justify-content:center;font-size:0.85rem" aria-label="Done">&#10003;</span>'
+        : '<span style="flex:none;width:26px;height:26px;border-radius:50%;background:var(--color-surface);border:1px solid var(--color-border);color:var(--color-text-secondary);display:flex;align-items:center;justify-content:center;font-size:0.85rem">' + num + '</span>';
+      return (
+        '<div style="display:flex;gap:12px;align-items:flex-start;padding:10px 0">' +
+          badge +
+          '<div>' +
+            '<div style="font-weight:600' + (done ? ";text-decoration:line-through;color:var(--color-text-tertiary)" : "") + '">' + title + '</div>' +
+            '<div style="font-size:0.85rem;color:var(--color-text-secondary);margin-top:2px">' + desc + '</div>' +
+          '</div>' +
+        '</div>'
+      );
+    }
+
+    var bodyHTML =
+      '<p style="font-size:0.9rem;color:var(--color-text-secondary);margin-bottom:0.5rem">' +
+        'Polaris is your central registry for IP address space and network assets — a fixed reference point the rest of the infrastructure navigates by. A couple of steps get it working for you:' +
+      '</p>' +
+      stepHTML(1, hasBlocks, 'Add an IP block',
+        'On the <a href="/ipam.html">IPAM</a> page, create a top-level block for the address space you manage (e.g. <code>10.0.0.0/8</code>). Blocks are the namespaces every network and reservation lives under.') +
+      stepHTML(2, false, 'Carve out networks',
+        'Within a block, add the subnets your sites and VLANs actually use — or skip ahead and let discovery create them for you.') +
+      stepHTML(3, hasIntegrations, 'Connect your first integration',
+        'On the <a href="/integrations.html">Integrations</a> page, connect FortiManager, FortiGate, Microsoft Entra ID, Active Directory, or a Windows DHCP server. Discovery then fills in networks, reservations, and assets automatically and keeps them current.');
+
+    var footerHTML =
+      '<button class="btn btn-secondary" id="welcome-close-btn">Close</button>' +
+      (hasBlocks
+        ? '<button class="btn btn-primary" id="welcome-cta-btn" data-href="/integrations.html">Set Up an Integration</button>'
+        : '<button class="btn btn-primary" id="welcome-cta-btn" data-href="/ipam.html">Add an IP Block</button>');
+
+    openModal("Welcome to Polaris", bodyHTML, footerHTML);
+    document.getElementById("welcome-close-btn").addEventListener("click", closeModal);
+    document.getElementById("welcome-cta-btn").addEventListener("click", function (e) {
+      window.location.href = e.currentTarget.getAttribute("data-href");
+    });
   }
 
   // Normalize any stored layout to v3 (multi-dashboard). v3 passes through;
