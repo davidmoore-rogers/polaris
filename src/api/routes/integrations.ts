@@ -3872,8 +3872,26 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           where: { assetId: existingAsset.id },
           select: { sourceKind: true, inferred: true, observed: true },
         });
+        // Sweep any stale fortigate-endpoint source — a newly-deployed
+        // FortiGate is often first sighted as a DHCP client of an existing
+        // gate (endpoint source with the leased IP) before being adopted
+        // into FMG; once the fortigate-firewall source exists that sighting
+        // is a stale placeholder that would otherwise linger forever (the
+        // endpoint pathways skip infra-typed assets, so it never refreshes
+        // or clears). Parity with the FortiSwitch/FortiAP adoption sweeps.
+        // Also excluded from this cycle's projection input so the mgmt IP
+        // wins immediately rather than on the next run.
+        let fwSourcesForProjection = fwSourceRows;
+        if (fwSourceRows.some((s) => s.sourceKind === "fortigate-endpoint")) {
+          fwSourcesForProjection = fwSourceRows.filter((s) => s.sourceKind !== "fortigate-endpoint");
+          try {
+            await prisma.assetSource.deleteMany({
+              where: { assetId: existingAsset.id, sourceKind: "fortigate-endpoint" },
+            });
+          } catch { /* best-effort */ }
+        }
         const { projected: fwProjected } = projectAssetFromSources(
-          fwSourceRows.map((s) => ({
+          fwSourcesForProjection.map((s) => ({
             sourceKind: s.sourceKind,
             inferred: s.inferred,
             observed: s.observed as Record<string, unknown> | null,
@@ -3890,6 +3908,11 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           learnedLocation: memberDevice.hostname || fgHostname || existingAsset.learnedLocation,
           fortinetTopology: memberTopology,
           discoveredByIntegrationId: integrationId,
+          // Correct assetType when the asset was created via a different
+          // pathway (DHCP-client sighting, device-inventory) before FMG
+          // adoption typed it — a serial-matched member of the firewall
+          // roster IS a firewall. Mirrors the FortiSwitch/FortiAP blocks.
+          ...(existingAsset.assetType !== "firewall" ? { assetType: "firewall" } : {}),
           // Resurrection: only a live-verified read may flip a decommissioned
           // firewall back to active. An offline gate's cached CMDB is NOT
           // presence evidence (business rule #12) — leave a decommissioned

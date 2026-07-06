@@ -18,11 +18,15 @@
  *     alias map before projection so it matches the canonicalized form
  *     that the Prisma extension stamps on Asset.manufacturer (otherwise
  *     "Dell Inc." vs "Dell" produces noise drift on every cycle).
- *   - ipAddress: fortigate-endpoint wins — the FortiGate sees the live
- *     DHCP/ARP binding, so its observed.ipAddress is the freshest
- *     signal. MDM sources don't carry IP at all. Fortinet infrastructure
- *     rules below only apply to firewall/switch/AP-typed assets, which
- *     never carry a fortigate-endpoint source.
+ *   - ipAddress: infrastructure mgmtIp wins over the fortigate-endpoint
+ *     sighting. A newly-deployed FortiGate/FortiSwitch/FortiAP is often
+ *     first discovered as a DHCP client of an existing gate (a
+ *     fortigate-endpoint source with the leased IP), then adopted into
+ *     FMG — after adoption the management IP is the address Polaris must
+ *     use (monitoring probes, Open HTTPS/SSH), not the pre-adoption lease.
+ *     Plain endpoints have no infrastructure source, so for them the
+ *     fortigate-endpoint rule still wins (freshest DHCP/ARP binding; MDM
+ *     sources don't carry IP at all).
  *
  * Per-field priority order (first truthy wins). Inferred sources are
  * skipped — they're phase-1 backfill skeletons, not authoritative
@@ -117,7 +121,20 @@ function obsNumber(o: Record<string, unknown> | null, key: string): number | nul
 type FieldRule = {
   sourceKind: AssetSourceKind;
   pick: (o: Record<string, unknown> | null) => string | number | null;
+  /**
+   * Optional gate over the FULL source list: when present and false, the
+   * rule is skipped entirely. Lets a rule express "only when no
+   * authoritative source of kind X exists" — e.g. a firewall's
+   * pre-adoption fortigate-endpoint sighting must not supply
+   * learnedLocation once a fortigate-firewall source is on file.
+   */
+  applies?: (sources: AssetSourceForProjection[]) => boolean;
 };
+
+/** True when a non-inferred source of the given kind exists. */
+function hasSource(sources: AssetSourceForProjection[], kind: AssetSourceKind): boolean {
+  return sources.some((s) => s.sourceKind === kind && !s.inferred);
+}
 
 const HOSTNAME_RULES: FieldRule[] = [
   // Polaris Agent runs ON the host — it knows the configured hostname
@@ -268,26 +285,41 @@ const LEARNED_LOCATION_RULES: FieldRule[] = [
   // duplicate it; we leave learnedLocation = null for firewalls and let
   // the legacy "set when null" rule continue to work.
   { sourceKind: "ad", pick: (o) => obsString(o, "ouPath") },
-  // fortigate-endpoint learnedLocation — the FortiGate device name acts
-  // as a site label for endpoints with no AD OU (BYO laptops on guest
-  // SSIDs, contractor devices, IoT gear). Slots between AD (the
-  // operator-organized OU path) and the legacy controllerFortigate
-  // labels for switches/APs.
-  { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "learnedLocation") },
+  // Infrastructure site labels outrank the endpoint sighting — an adopted
+  // switch/AP's controllerFortigate is authoritative; a pre-adoption
+  // fortigate-endpoint sighting from some other gate must not relabel it.
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "controllerFortigate") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "controllerFortigate") },
+  // fortigate-endpoint learnedLocation — the FortiGate device name acts
+  // as a site label for endpoints with no AD OU (BYO laptops on guest
+  // SSIDs, contractor devices, IoT gear). Suppressed when a
+  // fortigate-firewall source exists: a firewall's site label is itself
+  // (its own hostname, stamped inline by the firewall sync) — the gate
+  // that happened to sight it as a DHCP client pre-adoption is not its
+  // location.
+  {
+    sourceKind: "fortigate-endpoint",
+    pick: (o) => obsString(o, "learnedLocation"),
+    applies: (sources) => !hasSource(sources, "fortigate-firewall"),
+  },
 ];
 
 const IP_ADDRESS_RULES: FieldRule[] = [
-  // Endpoint IPs: fortigate-endpoint sees the live DHCP/ARP binding —
-  // freshest signal we have. MDM sources don't carry IP. Wins over
-  // Fortinet-infrastructure mgmtIp for endpoint-typed assets, and the
-  // infrastructure rules below only apply to firewall/switch/AP-typed
-  // assets that won't have a fortigate-endpoint source on them.
-  { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "ipAddress") },
+  // Infrastructure management IP wins. A newly-deployed FortiGate/switch/AP
+  // is often first sighted as a DHCP client of an existing gate — that
+  // pre-adoption fortigate-endpoint source (with the leased IP) can coexist
+  // with the infrastructure source after FMG adoption, and the mgmt IP is
+  // the address Polaris must use once the device is managed. The discovery
+  // firewall branch also sweeps the stale endpoint source, but the priority
+  // here must not depend on that cleanup having run.
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "mgmtIp") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "mgmtIp") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "mgmtIp") },
+  // Endpoint IPs: fortigate-endpoint sees the live DHCP/ARP binding —
+  // freshest signal for plain endpoints (which have no infrastructure
+  // source, so this rule is effectively first for them). MDM sources
+  // don't carry IP at all.
+  { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "ipAddress") },
 ];
 
 // Coord resolution priority on the fortigate-firewall source. SNMP sysLocation
@@ -371,6 +403,7 @@ function projectField<T extends string | number>(
   rules: FieldRule[],
 ): { value: T | null; source: AssetSourceKind | null } {
   for (const rule of rules) {
+    if (rule.applies && !rule.applies(sources)) continue;
     const candidate = sources.find(
       (s) => s.sourceKind === rule.sourceKind && !s.inferred,
     );

@@ -254,6 +254,53 @@ describe("projectAssetFromSources — ipAddress + lat/long", () => {
     expect(projected.longitude).toBeNull();
   });
 
+  it("fortigate-endpoint DHCP/ARP binding wins for plain endpoints (no infra source)", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("intune", { deviceName: "LAPTOP-01" }),
+      src("fortigate-endpoint", { ipAddress: "10.0.200.55", learnedLocation: "CKYSMA-91G-1" }),
+    ]);
+    expect(projected.ipAddress).toBe("10.0.200.55");
+    expect(provenance.ipAddress).toBe("fortigate-endpoint");
+    expect(projected.learnedLocation).toBe("CKYSMA-91G-1");
+  });
+
+  it("infrastructure mgmtIp beats a stale pre-adoption fortigate-endpoint sighting", () => {
+    // The deployed-then-adopted scenario: a new FortiGate is first sighted
+    // as a DHCP client of an existing gate (endpoint source with the leased
+    // IP), then adopted into FMG (firewall source with the mgmt IP). The
+    // mgmt IP must win or monitoring keeps probing the pre-adoption lease.
+    const { projected, provenance } = projectAssetFromSources([
+      src("fortigate-endpoint", { ipAddress: "10.0.200.30", learnedLocation: "CKYSMA-91G-1", hostname: "JEFFERSON-201G-1" }),
+      src("fortigate-firewall", { serial: "FG2H1GT0000", mgmtIp: "10.255.250.201", hostname: "JEFFERSON-201G-1" }),
+    ]);
+    expect(projected.ipAddress).toBe("10.255.250.201");
+    expect(provenance.ipAddress).toBe("fortigate-firewall");
+    // And the sighting gate must not become the firewall's site label —
+    // a firewall's learnedLocation is its own hostname, stamped inline by
+    // the firewall sync (projection stays silent).
+    expect(projected.learnedLocation).toBeNull();
+  });
+
+  it("adopted FortiSwitch: mgmtIp + controllerFortigate beat the endpoint sighting", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("fortigate-endpoint", { ipAddress: "10.0.200.40", learnedLocation: "SOME-OTHER-GATE" }),
+      src("fortiswitch", { switchId: "SW-LAB", serial: "S124FLAB", mgmtIp: "10.255.250.60", controllerFortigate: "CKYSMA-91G-1" }),
+    ]);
+    expect(projected.ipAddress).toBe("10.255.250.60");
+    expect(provenance.ipAddress).toBe("fortiswitch");
+    expect(projected.learnedLocation).toBe("CKYSMA-91G-1");
+    expect(provenance.learnedLocation).toBe("fortiswitch");
+  });
+
+  it("infra source without a mgmtIp falls back to the endpoint sighting", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("fortigate-firewall", { serial: "FGT002" }), // no mgmtIp observed
+      src("fortigate-endpoint", { ipAddress: "10.0.200.30" }),
+    ]);
+    expect(projected.ipAddress).toBe("10.0.200.30");
+    expect(provenance.ipAddress).toBe("fortigate-endpoint");
+  });
+
   it("non-numeric latitude/longitude is treated as missing", () => {
     const { projected } = projectAssetFromSources([
       src("fortigate-firewall", {
