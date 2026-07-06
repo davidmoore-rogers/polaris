@@ -245,9 +245,11 @@ d("reservation take-over — write-level user reserves over an observed DHCP lea
     expect(okResp.body.createdBy).toBe(`${PFX}-user-reswrite`);
     expect(okResp.body.sourceType).toBe("manual");
 
-    // The observed lease row is gone (hard-deleted by releaseSupersededDhcpLeaseAt).
+    // The observed lease row is soft-released — releaseSupersededDhcpLeaseAt
+    // delegates to releaseReservation (same as the old client release+create
+    // flow), which flips status to "released" rather than deleting the row.
     const oldLease = await prisma.reservation.findUnique({ where: { id: leaseRes.id } });
-    expect(oldLease).toBeNull();
+    expect(oldLease?.status).toBe("released");
 
     // The seeded manual reservation at 10.99.1.10 (createdBy "permgate") is
     // authoritative — reserving over it is NOT a silent take-over.
