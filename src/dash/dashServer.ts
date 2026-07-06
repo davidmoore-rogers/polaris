@@ -49,6 +49,7 @@ import {
 } from "../services/dashRoleSnapshotService.js";
 import { buildHelmetOptions } from "../utils/securityHeaders.js";
 import { resolveDashBind, resolveDashPort } from "../utils/dashConfig.js";
+import { UPLOADS_DIR } from "../utils/paths.js";
 import { resolveTrustProxy } from "../utils/trustProxy.js";
 import { AppError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
@@ -203,7 +204,11 @@ export function buildDashApp(opts: BuildDashAppOptions = {}): express.Express {
   // installs load /js, /css, vendor bundles, and the logo straight from this
   // listener. Behind nginx these same files are served by the web process via
   // `location /`. index:false keeps / from serving the authenticated SPA's
-  // index.html here.
+  // index.html here. /uploads carries the operator's custom branding logo
+  // (branding.logoUrl = /uploads/<file>), which dash-boot.js applies as the
+  // page favicon — mirror the main app's unauthenticated /uploads mount so
+  // the logo also resolves when this listener is hit directly.
+  app.use("/uploads", express.static(UPLOADS_DIR));
   app.use(express.static(PUBLIC_DIR, { index: false }));
 
   app.use(errorHandler);
