@@ -4792,7 +4792,13 @@ function _renderInterfacesTable(container, si, asset) {
   // gets hidden behind a "Show N inactive interfaces" expander so a
   // 48-port switch with 6 active ports isn't a wall of zeros. Aggregate
   // members, VLAN sub-interfaces, loopbacks, etc. follow the same rule.
+  // Exception: an interface selected for monitoring (pinned in
+  // monitoredInterfaces — aggregates, member ports, anything) is never
+  // auto-hidden — the operator explicitly wants eyes on it, so it stays
+  // visible even before any traffic has been observed. Mirrors the IPsec
+  // tunnel exemption below.
   function isInactive(iface) {
+    if (monitored.has(iface.ifName)) return false;
     var hasIn  = iface.inOctets  != null && iface.inOctets  > 0;
     var hasOut = iface.outOctets != null && iface.outOctets > 0;
     return !hasIn && !hasOut;
