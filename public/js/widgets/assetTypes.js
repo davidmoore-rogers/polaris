@@ -37,7 +37,9 @@
 
     var svg = '<svg viewBox="0 0 ' + size + ' ' + size + '" width="100%" style="max-width:200px;display:block;margin:0 auto">' +
       slices.map(function (s) {
-        return '<path d="' + s.d + '" fill="' + s.color + '" stroke="var(--color-bg)" stroke-width="2" class="dash-pie-slice" data-type="' + escapeHtml(s.assetType) + '"><title>' + escapeHtml(s.label) + ' — ' + s.count + ' (' + s.pct + '%)</title></path>';
+        // Slice separator stroke matches the widget card surface
+        // (--color-bg-primary); --color-bg doesn't exist in the theme.
+        return '<path d="' + s.d + '" fill="' + s.color + '" stroke="var(--color-bg-primary)" stroke-width="2" class="dash-pie-slice" data-type="' + escapeHtml(s.assetType) + '"><title>' + escapeHtml(s.label) + ' — ' + s.count + ' (' + s.pct + '%)</title></path>';
       }).join("") +
       '</svg>';
 

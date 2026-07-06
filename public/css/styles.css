@@ -751,10 +751,15 @@ code {
   position: sticky;
   top: 0;
   z-index: 1050;
-  background: var(--color-bg, #0f1115);
+  /* Must match the body background (the surface scrolling beneath it) in
+     BOTH themes. Note: --color-bg does not exist — the theme defines
+     --color-bg-primary/-secondary/-tertiary — so a var(--color-bg, #hex)
+     here silently renders its hardcoded fallback (a near-black that clashes
+     with the Polaris navy) in every theme. */
+  background: var(--color-bg-secondary);
   padding: 1rem 0 0.85rem;
   margin-top: -1rem;
-  border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.08));
+  border-bottom: 1px solid var(--color-border);
 }
 .page-header h2 {
   font-size: 1.35rem;
@@ -1411,7 +1416,9 @@ body.sf-resizing * { user-select: none !important; }
 table thead:hover .sf-col-gear-wrap,
 .sf-col-gear-wrap.open { display: inline-flex; }
 .sf-col-gear {
-  background: var(--color-bg);
+  /* --color-bg doesn't exist (theme defines --color-bg-primary/-secondary/
+     -tertiary) — the old var(--color-bg) resolved to transparent. */
+  background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
   color: var(--color-text-secondary);
   cursor: pointer;
@@ -3648,7 +3655,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .dashboard-tab-name-input:focus {
   outline: none;
   border-color: #4fc3f7;
-  background: var(--color-bg, #0f1115);
+  background: var(--color-bg-primary); /* --color-bg doesn't exist; the #0f1115 fallback clashed with the navy theme */
 }
 
 /* Column canvas. The dashboard is a 12-col grid of COLUMNS; each column is a
@@ -3885,7 +3892,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   width: 100%;
   padding: 5px 8px;
   font-size: 0.9rem;
-  background: var(--color-bg, #0f1115);
+  background: var(--color-bg-primary); /* matches app inputs; --color-bg doesn't exist */
   color: var(--color-text-primary);
   border: 1px solid var(--color-border, rgba(255,255,255,0.10));
   border-radius: 4px;
@@ -3947,7 +3954,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   max-width: 920px;
   min-width: 420px;
   height: 100%;
-  background: var(--color-bg, #0f1115);
+  background: var(--color-bg-secondary); /* page surface; --color-bg doesn't exist */
   border-left: 1px solid var(--color-border, rgba(255,255,255,0.10));
   box-shadow: -8px 0 28px rgba(0,0,0,0.40);
   display: flex;
@@ -4070,7 +4077,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .widget-library-preview {
   width: 200px;
   height: 130px;
-  background: var(--color-bg, #0f1115);
+  background: var(--color-bg-secondary); /* page surface; --color-bg doesn't exist */
   border: 1px solid var(--color-border, rgba(255,255,255,0.06));
   border-radius: 4px;
   padding: 10px;
@@ -4177,7 +4184,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   z-index: 4000 !important;
   height: auto !important;
   max-height: none !important;
-  background: var(--color-bg, #0f1115);
+  background: var(--color-bg-secondary); /* page surface; --color-bg doesn't exist */
 }
 
 /* Overlay controls (legend bottom-left, weather/theme top-right, radar clock). */
