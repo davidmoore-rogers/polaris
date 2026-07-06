@@ -83,6 +83,14 @@ describe("getDownNodes", () => {
     expect(r.nodes.map((n) => n.site)).toEqual(["HQ", "Site-B", "(unknown)"]);
     expect(r.total).toBe(3);
   });
+
+  it("orders youngest outage first (monitorStatusChangedAt desc, nulls last)", async () => {
+    findMany.mockResolvedValueOnce([]);
+    await noc.getDownNodes();
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      orderBy: [{ monitorStatusChangedAt: { sort: "desc", nulls: "last" } }],
+    }));
+  });
 });
 
 describe("getDownInterfaces", () => {

@@ -1,7 +1,9 @@
 /**
  * widgets/downNodes.js — monitored assets currently down, grouped by site or
- * division (SolarWinds "Down Nodes" panel). Reuses the monitorAlerts row
- * markup (statusDot + dash-alert classes). Data from noc-summary downNodes[].
+ * division (SolarWinds "Down Nodes" panel), youngest outage first (the feed
+ * orders monitorStatusChangedAt desc — server-side, so the newest outages
+ * survive the cap). Reuses the monitorAlerts row markup (statusDot +
+ * dash-alert classes). Data from noc-summary downNodes[].
  */
 
 (function () {
@@ -69,7 +71,7 @@
     type: "downNodes",
     category: "Monitoring",
     label: "Down Nodes",
-    description: "Monitored assets currently down, grouped by site or division.",
+    description: "Monitored assets currently down — newest outages first, grouped by site or division.",
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
     defaultConfig: { groupBy: "site", rowLimit: 10, regionScope: "mine" },

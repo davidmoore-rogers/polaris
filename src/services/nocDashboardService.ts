@@ -147,7 +147,11 @@ function siteOf(a: { location: string | null; learnedLocation: string | null; sn
  * Feed 2 — down nodes. One indexed findMany over the (small) down subset;
  * site coalesce done in JS because Prisma groupBy can't COALESCE three
  * nullable columns. dependencySuppressed:false so a down parent's suppressed
- * children don't show as independent outages.
+ * children don't show as independent outages. Ordered youngest outage first
+ * (monitorStatusChangedAt desc) — the freshest state change is the one a NOC
+ * operator needs to react to; nulls (unknown transition time) sink to the
+ * bottom. The order matters at the cap too: when >limit nodes are down, the
+ * newest outages are the ones kept.
  */
 export async function getDownNodes(limit: number | null = 100, assetIds: string[] | null = null): Promise<{ nodes: DownNode[]; total: number }> {
   const rows = await prisma.asset.findMany({
@@ -157,7 +161,7 @@ export async function getDownNodes(limit: number | null = 100, assetIds: string[
       location: true, learnedLocation: true, snmpLocation: true,
       department: true, monitorStatus: true, monitorStatusChangedAt: true,
     },
-    orderBy: [{ monitorStatusChangedAt: { sort: "asc", nulls: "last" } }],
+    orderBy: [{ monitorStatusChangedAt: { sort: "desc", nulls: "last" } }],
     take: limit ?? undefined,
   });
   const nodes: DownNode[] = rows.map((a) => ({
