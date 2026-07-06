@@ -87,7 +87,8 @@ function timeAgo(dateStr) {
   return Math.floor(diff / 86400) + "d ago";
 }
 
-// ─── Branding (page title + header text follow the operator's app name) ─────
+// ─── Branding (title, header text, and favicon follow the operator's
+//     branding — favicon swap mirrors applyBranding in app.js) ───────────────
 async function applyDashBranding() {
   try {
     var b = await api.serverSettings.getBranding();
@@ -95,6 +96,8 @@ async function applyDashBranding() {
     document.title = name + " — Dash";
     var h = document.getElementById("dash-title");
     if (h) h.textContent = name + " Dashboard";
+    var favicon = document.querySelector('link[rel="icon"]');
+    if (favicon && b && b.logoUrl) favicon.href = b.logoUrl;
   } catch (_) {}
 }
 
