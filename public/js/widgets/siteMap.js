@@ -334,6 +334,8 @@
           expandedLayers.push(line);
           expandedLayers.push(addSiteDot(s, ll, true));
         });
+        // Re-assert down dots above the freshly-added legs/connectors.
+        downMarkers.forEach(function (m) { m.bringToFront(); });
       }
       function stackColor(sitesArr) {
         var rank = { degraded: 3, unknown: 2, dep: 1, up: 0 };
@@ -395,6 +397,10 @@
         });
         // A stack the operator had exploded stays exploded across the refresh.
         if (expandedKey) expandStack(expandedKey);
+        // Down sites paint ABOVE everything else: Leaflet stacks vector
+        // markers in add-order, so a healthy dot / stack anchor / exploded leg
+        // added later would otherwise cover a co-located red down dot.
+        downMarkers.forEach(function (m) { m.bringToFront(); });
         // Keep the reset-view bounds current with the data (without moving the
         // map — only the initial render and the ⌂ button actually fit).
         if (latlngs.length) homeBounds = L.latLngBounds(latlngs).pad(0.04);
