@@ -289,12 +289,18 @@ export interface DownIpsecTunnel {
 
 /**
  * Feed 2c — down IPsec tunnels. Phase-1 tunnels whose every phase-2 selector is
- * down (status='down'), grouped by the gate they live on, each carrying the
+ * down (status='down'), restricted to tunnels SELECTED FOR MONITORING (the
+ * asset's pinned `monitoredIpsecTunnels` list — same rationale and same SQL
+ * shape as getDownInterfaces' pin filter: the scrape samples every configured
+ * tunnel, including CMDB-synthesized rows for tunnels whose parent link is
+ * dead, so without the pin gate an unpinned expected-down tunnel shows as an
+ * outage forever), grouped by the gate they live on, each carrying the
  * parent physical interface the tunnel rides (the FortiOS phase1-interface WAN
  * port) so a NOC operator sees which uplink took the tunnel down. Same
  * shape/scale as getDownInterfaces: one windowed single-pass CTE over
- * asset_ipsec_tunnel_samples (latest-per-(asset,tunnelName) + last-up
- * timestamp) then a monitored/non-suppressed hydrate findMany. FortiGate-only
+ * asset_ipsec_tunnel_samples joined to assets on
+ * `tunnelName = ANY(monitoredIpsecTunnels)` (pin filter BEFORE the window +
+ * LIMIT), then a monitored/non-suppressed hydrate findMany. FortiGate-only
  * data; the 4h window covers the system-info scrape cadence. `partial`/`dynamic`
  * tunnels are intentionally excluded — only a fully-down tunnel is an outage.
  */
@@ -311,6 +317,7 @@ export async function getDownIpsecTunnels(limit: number | null = 100, sinceMinut
               max(s."timestamp") FILTER (WHERE s."status" = 'up')
                 OVER (PARTITION BY s."assetId", s."tunnelName") AS "lastUpAt"
        FROM "asset_ipsec_tunnel_samples" s
+       JOIN "assets" a ON a."id" = s."assetId" AND s."tunnelName" = ANY(a."monitoredIpsecTunnels")
        WHERE s."timestamp" > now() - ($1 || ' minutes')::interval${idClause}
      )
      SELECT "assetId", "tunnelName", "parentInterface", "remoteGateway", "lastUpAt"

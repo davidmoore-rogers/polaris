@@ -148,6 +148,13 @@ describe("getDownIpsecTunnels", () => {
     expect(r[0].remoteGateway).toBe("203.0.113.7");
   });
 
+  it("restricts to tunnels selected for monitoring (pin filter inside the SQL, before the LIMIT)", async () => {
+    rawUnsafe.mockResolvedValueOnce([]);
+    await noc.getDownIpsecTunnels();
+    const sql = rawUnsafe.mock.calls[0][0] as string;
+    expect(sql).toContain(`s."tunnelName" = ANY(a."monitoredIpsecTunnels")`);
+  });
+
   it("returns empty without hitting findMany when no tunnel is down", async () => {
     rawUnsafe.mockResolvedValueOnce([]);
     const r = await noc.getDownIpsecTunnels();
