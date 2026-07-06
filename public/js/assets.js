@@ -4797,6 +4797,15 @@ function _renderInterfacesTable(container, si, asset) {
     var hasOut = iface.outOctets != null && iface.outOctets > 0;
     return !hasIn && !hasOut;
   }
+  // Same rule for IPsec tunnel rows: no phase-2 traffic ever observed →
+  // hidden behind the expander with the inactive interfaces. Covers dead
+  // tunnels synthesized from CMDB (null counters) and idle down tunnels,
+  // while any tunnel actually passing traffic always shows.
+  function isInactiveTunnel(tn) {
+    var hasIn  = tn.incomingBytes != null && tn.incomingBytes > 0;
+    var hasOut = tn.outgoingBytes != null && tn.outgoingBytes > 0;
+    return !hasIn && !hasOut;
+  }
   var COLS = 11 + (showVlanCols ? 2 : 0);
   // Group LLDP neighbors by local interface so the row builder can stamp the
   // first neighbor's label inline. Most ports only ever see one neighbor; a
@@ -4993,9 +5002,16 @@ function _renderInterfacesTable(container, si, asset) {
                  : tn.status === "dynamic" ? "storage"
                  : "maintenance";
     var statusPill = '<span class="status-pill status-pill-' + pillKind + '">' + escapeHtml(tn.status) + "</span>";
-    var rowAttr = opts.collapseGroupName
-      ? ' class="iface-child" data-parent="' + escapeHtml(opts.collapseGroupName) + '"'
-      : "";
+    // Combine child + inactive classes, mirroring buildRow: a tunnel with no
+    // traffic ships hidden (inline display:none) and participates in the
+    // "Show N inactive interfaces" expander alongside regular interfaces.
+    var classes = [];
+    if (opts.collapseGroupName) classes.push("iface-child");
+    var inactive = isInactiveTunnel(tn);
+    if (inactive) classes.push("iface-inactive");
+    var rowAttr = classes.length > 0 ? ' class="' + classes.join(" ") + '"' : "";
+    if (opts.collapseGroupName) rowAttr += ' data-parent="' + escapeHtml(opts.collapseGroupName) + '"';
+    if (inactive) rowAttr += ' style="display:none"';
     // VLAN columns (when present) sit between MAC and In. IPsec tunnels
     // don't carry per-port VLAN config, so emit empty placeholders so the
     // column count stays consistent across every row in the table.
@@ -5120,9 +5136,10 @@ function _renderInterfacesTable(container, si, asset) {
     orphanTunnels.forEach(function (tn) { html += buildTunnelRow(tn, { depth: 0 }); });
   }
 
-  // Per-table inactive count drives the trailing toggle row. Excludes
-  // tunnels and section rows (those aren't in the .iface-inactive class).
-  var inactiveCount = rows.filter(isInactive).length;
+  // Per-table inactive count drives the trailing toggle row. Counts
+  // interface rows AND IPsec tunnel rows (both carry .iface-inactive when
+  // traffic-less); section header rows are never counted.
+  var inactiveCount = rows.filter(isInactive).length + tunnelsAll.filter(isInactiveTunnel).length;
   var inactiveRow = inactiveCount > 0
     ? '<tr id="iface-inactive-toggle-row"><td colspan="' + COLS + '" style="padding:0.45rem 0.6rem;text-align:center;background:transparent;border-top:1px solid var(--color-border)">' +
         '<button type="button" id="iface-inactive-toggle" style="background:none;border:none;color:var(--color-text-secondary);font-size:0.78rem;cursor:pointer;padding:0;text-decoration:underline" title="Inactive = no in/out traffic counters">' +
