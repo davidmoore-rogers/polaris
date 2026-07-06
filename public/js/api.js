@@ -840,6 +840,10 @@ const api = {
     ldapSettings: () => request("GET", "/auth/ldap/settings"),
     updateLdapSettings: (body) => request("PUT", "/auth/ldap/settings", body),
     testLdap: () => request("POST", "/auth/ldap/test"),
+    entraProxyConfig: () => request("GET", "/auth/entra-proxy/config"),
+    entraProxySettings: () => request("GET", "/auth/entra-proxy/settings"),
+    updateEntraProxySettings: (body) => request("PUT", "/auth/entra-proxy/settings", body),
+    testEntraProxy: () => request("POST", "/auth/entra-proxy/test"),
   },
 };
 

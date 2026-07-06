@@ -41,6 +41,19 @@ export const ssoEntryLimiter = makeRateLimiter({
   message: "Too many login attempts. Please try again in 15 minutes.",
 });
 
+/**
+ * Entra App Proxy header login. ALL App Proxy users arrive from the shared
+ * connector IP(s), so the strict per-IP login limiter (10/15min) would lock
+ * out the whole external population behind one address. There is no
+ * guessable-credential surface here — requests either carry trusted headers
+ * or are refused — so a generous ceiling only needs to bound a runaway loop.
+ */
+export const entraProxyLoginLimiter = makeRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  max: 60,
+  message: "Too many login attempts — retry shortly.",
+});
+
 /** Admin maintenance surfaces (backup/restore/logo) — human-driven, low cadence. */
 export const maintenanceLimiter = makeRateLimiter({
   windowMs: 5 * 60 * 1000,

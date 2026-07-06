@@ -2019,8 +2019,8 @@ model User {
   // regionTags, same union semantics. Operator-set; group-derived tags are
   // never written here.
   otherTags    String[]  @default([]) @map("other_tags")
-  authProvider String    @default("local") @map("auth_provider") // "local" | "azure" | "oidc" | "ldap"
-  azureOid     String?   @unique @map("azure_oid") // Azure AD Object ID (SAML)
+  authProvider String    @default("local") @map("auth_provider") // "local" | "azure" | "oidc" | "ldap" | "entra-proxy"
+  azureOid     String?   @unique @map("azure_oid") // Entra (Azure AD) Object ID — shared by SAML SSO and Entra App Proxy header auth
   // Stable per-provider external identifiers for SSO re-discovery. Mirror the
   // azureOid pattern (narrow nullable-unique) rather than a generic externalId
   // refactor. oidcSubject = OIDC `sub` claim; ldapUid = LDAP objectGUID (hex).

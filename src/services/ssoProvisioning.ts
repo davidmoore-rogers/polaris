@@ -1,8 +1,8 @@
 /**
  * src/services/ssoProvisioning.ts — Shared find-or-provision for SSO/LDAP users
  *
- * Both the OIDC and LDAP login flows converge here. Given a verified external
- * profile (stable id + username hint + groups), this:
+ * The OIDC, LDAP, and Entra App Proxy (header-SSO) login flows converge here.
+ * Given a verified external profile (stable id + username hint + groups), this:
  *   1. Resolves the user's IdP groups → role + tags via groupMappingService.
  *   2. Matches an existing user by the provider's stable id column, or creates
  *      one (collision-handled username, placeholder password).
@@ -14,6 +14,15 @@
  *      re-resolve region/other tags dynamically. Group-derived tags are NEVER
  *      written to the user's own regionTags/otherTags columns — those stay
  *      operator-owned and union with the group-derived set at read time.
+ *
+ * Cross-provider convergence on azureOid: entra-proxy keys on the SAME Entra
+ * object ID the Azure SAML path stores, deliberately — a user who has signed
+ * in via SAML and later arrives through App Proxy lands on the same account.
+ * The existing-user branch stamps `authProvider` to the current provider so
+ * `resolveTagScopesForUser` re-resolves the freshly-written ssoGroups under
+ * the matching group-mapping provider. A later SAML login leaves
+ * authProvider/ssoGroups untouched (findOrProvisionSamlUser doesn't write
+ * them), which stays self-consistent.
  */
 
 import { randomBytes } from "node:crypto";
@@ -28,9 +37,9 @@ const SSO_GROUPS_MAX = 256;
 const USERNAME_SAFE_RE = /[^a-z0-9._-]/g;
 
 export interface ExternalUserProfile {
-  provider: "oidc" | "ldap";
-  externalIdField: "oidcSubject" | "ldapUid";
-  externalId: string; // OIDC `sub` or LDAP objectGUID hex — stable per user
+  provider: "oidc" | "ldap" | "entra-proxy";
+  externalIdField: "oidcSubject" | "ldapUid" | "azureOid";
+  externalId: string; // OIDC `sub`, LDAP objectGUID hex, or Entra object ID — stable per user
   usernameHint: string; // preferred_username / sAMAccountName / email local-part
   displayName?: string | null;
   email?: string | null;
@@ -93,6 +102,11 @@ export async function provisionExternalUser(profile: ExternalUserProfile) {
         email: profile.email || existing.email,
         roleId,
         ssoGroups,
+        // Keep authProvider aligned with the login path that owns ssoGroups —
+        // a no-op for oidc/ldap (rows found by their own id column), but an
+        // azureOid row provisioned by SAML converts to entra-proxy here so
+        // group→tag re-resolution reads the right provider's mappings.
+        authProvider: provider,
         lastLogin: new Date(),
         ...(stampReview ? { needsRoleReview: true } : {}),
       },

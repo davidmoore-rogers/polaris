@@ -22,6 +22,9 @@ const MAPPINGS = [
   { provider: "ldap", enabled: true, groupKey: TAGSONLY_DN, roleId: null, regionTags: ["south"], otherTags: ["t1"] },
   { provider: "ldap", enabled: false, groupKey: "cn=disabled,ou=g,dc=corp,dc=local", roleId: "role-admin", regionTags: ["nope"], otherTags: [] },
   { provider: "oidc", enabled: true, groupKey: "Engineering", roleId: "role-net", regionTags: ["eu"], otherTags: [] },
+  // entra-proxy keys are stored pre-normalized (lowercased GUID), as
+  // createGroupMapping's normalizeGroupKey would persist them.
+  { provider: "entra-proxy", enabled: true, groupKey: "5f2cded1-40d9-43a4-a091-b92a80a3c7bb", roleId: "role-net", regionTags: ["hq"], otherTags: [] },
 ];
 
 const ROLES = [
@@ -60,6 +63,9 @@ describe("normalizeGroupKey", () => {
   it("trims but preserves case for OIDC/SAML", () => {
     expect(normalizeGroupKey("oidc", "  Engineering ")).toBe("Engineering");
     expect(normalizeGroupKey("saml", "Engineering")).toBe("Engineering");
+  });
+  it("lowercases + trims entra-proxy group GUIDs", () => {
+    expect(normalizeGroupKey("entra-proxy", " 5F2CDED1-40D9-43A4-A091-B92A80A3C7BB ")).toBe("5f2cded1-40d9-43a4-a091-b92a80a3c7bb");
   });
   it("returns empty for blanks / non-strings", () => {
     expect(normalizeGroupKey("ldap", "   ")).toBe("");
@@ -110,5 +116,12 @@ describe("resolveGroupsToAccess", () => {
   it("OIDC matching is exact-case", async () => {
     expect((await resolveGroupsToAccess("oidc", ["Engineering"])).roleId).toBe("role-net");
     expect((await resolveGroupsToAccess("oidc", ["engineering"])).matchedGroups).toEqual([]);
+  });
+
+  it("entra-proxy matches group GUIDs case-insensitively", async () => {
+    const r = await resolveGroupsToAccess("entra-proxy", ["5F2CDED1-40D9-43A4-A091-B92A80A3C7BB"]);
+    expect(r.roleId).toBe("role-net");
+    expect(r.regionTags).toEqual(["hq"]);
+    expect(r.matchedGroups).toEqual(["5f2cded1-40d9-43a4-a091-b92a80a3c7bb"]);
   });
 });

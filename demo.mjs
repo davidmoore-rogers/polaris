@@ -1836,6 +1836,16 @@ let LDAP_SETTINGS = {
   emailAttr: "mail",
 };
 
+let ENTRA_PROXY_SETTINGS = {
+  enabled: false,
+  trustedSourceIps: [],
+  objectIdHeader: "x-entra-object-id",
+  usernameHeader: "x-entra-upn",
+  emailHeader: "x-entra-email",
+  displayNameHeader: "x-entra-display-name",
+  groupsHeader: "x-entra-groups",
+};
+
 const TAG_COLORS = ["#4fc3f7","#4ade80","#f59e0b","#f472b6","#a78bfa","#fb923c","#38bdf8","#34d399","#e879f9","#facc15","#f87171","#2dd4bf","#818cf8","#c084fc"];
 function randomTagColor() { return TAG_COLORS[Math.floor(Math.random() * TAG_COLORS.length)]; }
 
@@ -4040,6 +4050,34 @@ async function routeAPI(method, path, params, body, res, req) {
   }
   if (path === "/api/v1/auth/oidc/config" && method === "GET") {
     return json(res, { enabled: false });
+  }
+  // Entra App Proxy header-SSO stubs. In the demo there's no real connector,
+  // so `available` is always false (no trusted source / identity headers).
+  if (path === "/api/v1/auth/entra-proxy/config" && method === "GET") {
+    return json(res, { enabled: !!ENTRA_PROXY_SETTINGS.enabled, available: false });
+  }
+  if (path === "/api/v1/auth/entra-proxy/settings" && method === "GET") {
+    return json(res, { ...ENTRA_PROXY_SETTINGS });
+  }
+  if (path === "/api/v1/auth/entra-proxy/settings" && method === "PUT") {
+    ENTRA_PROXY_SETTINGS.enabled = !!body.enabled;
+    if (Array.isArray(body.trustedSourceIps)) {
+      ENTRA_PROXY_SETTINGS.trustedSourceIps = body.trustedSourceIps.map((x) => String(x).trim()).filter(Boolean);
+    }
+    for (const k of ["objectIdHeader", "usernameHeader", "emailHeader", "displayNameHeader", "groupsHeader"]) {
+      if (body[k] !== undefined) ENTRA_PROXY_SETTINGS[k] = String(body[k]).trim().toLowerCase();
+    }
+    return json(res, { ...ENTRA_PROXY_SETTINGS });
+  }
+  if (path === "/api/v1/auth/entra-proxy/test" && method === "POST") {
+    const allowlistEmpty = ENTRA_PROXY_SETTINGS.trustedSourceIps.length === 0;
+    return json(res, {
+      ok: !allowlistEmpty,
+      message: allowlistEmpty
+        ? "No trusted source IPs configured — header login is disabled."
+        : "Demo server: no App Proxy connector in front, so this request is not trusted (expected).",
+      details: { requestIp: "127.0.0.1", trusted: false, headersPresent: [], allowlistEmpty, enabled: ENTRA_PROXY_SETTINGS.enabled },
+    });
   }
   if (path.match(/\/password$/) && method === "PUT") {
     // Find the user and check if Azure (block password reset for Azure users)

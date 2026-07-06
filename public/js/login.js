@@ -82,6 +82,25 @@ document.getElementById("btn-oidc").addEventListener("click", function () {
   window.location.href = "/api/v1/auth/oidc/login";
 });
 
+// Check Entra App Proxy config. `available` means THIS request arrived
+// through the App Proxy connector carrying identity headers — internal
+// users get false and never see the button. Normal App Proxy entry is the
+// server-side silent auto-login on protected pages; this button is the
+// fallback for the post-logout / error-redirect landing here.
+(async function () {
+  try {
+    var res = await fetch("/api/v1/auth/entra-proxy/config");
+    if (!res.ok) return;
+    var cfg = await res.json();
+    if (!cfg.enabled || !cfg.available) return;
+    document.getElementById("btn-entra-proxy").style.display = "";
+    document.getElementById("sso-section").style.display = "block";
+  } catch (_) {}
+})();
+document.getElementById("btn-entra-proxy").addEventListener("click", function () {
+  window.location.href = "/api/v1/auth/entra-proxy/login";
+});
+
 // Show "View Setup Wizard" in demo mode
 (async function () {
   try {
