@@ -323,18 +323,19 @@ else
 fi
 
 # ─── 8. Install split-role systemd units ────────────────────────────────────
-info "Installing split-role systemd units (polaris-migrate, polaris-web, polaris-monitor@, polaris-discovery, polaris.target)..."
+info "Installing split-role systemd units (polaris-migrate, polaris-web, polaris-monitor@, polaris-discovery, polaris-dash, polaris.target)..."
 cp "$APP_DIR/deploy/polaris-migrate.service"    /etc/systemd/system/polaris-migrate.service
 cp "$APP_DIR/deploy/polaris-web.service"        /etc/systemd/system/polaris-web.service
 cp "$APP_DIR/deploy/polaris-monitor@.service"   /etc/systemd/system/polaris-monitor@.service
 cp "$APP_DIR/deploy/polaris-discovery.service"  /etc/systemd/system/polaris-discovery.service
+cp "$APP_DIR/deploy/polaris-dash.service"       /etc/systemd/system/polaris-dash.service
 cp "$APP_DIR/deploy/polaris.target"             /etc/systemd/system/polaris.target
 
 # Ubuntu/Debian's PostgreSQL service is just `postgresql` (not the
 # `postgresql-15` RHEL uses); strip the RHEL-specific version suffix from
 # the shipped units' After= / Requires= lines so systemd doesn't fail to
 # resolve the dependency.
-for unit in polaris-migrate polaris-web polaris-monitor@ polaris-discovery; do
+for unit in polaris-migrate polaris-web polaris-monitor@ polaris-discovery polaris-dash; do
   sed -i -E 's/postgresql-15\.service/postgresql.service/g' "/etc/systemd/system/${unit}.service"
 done
 
@@ -382,7 +383,7 @@ info "Enabling polaris-monitor@1..@$MONITOR_REPLICAS, polaris-discovery, polaris
 for ((i=1; i<=MONITOR_REPLICAS; i++)); do
   systemctl enable "polaris-monitor@$i.service" >/dev/null
 done
-systemctl enable polaris-web.service polaris-discovery.service polaris-migrate.service polaris.target >/dev/null
+systemctl enable polaris-web.service polaris-discovery.service polaris-dash.service polaris-migrate.service polaris.target >/dev/null
 systemctl enable nginx >/dev/null
 
 info "Starting polaris.target (brings up nginx first, then polaris-web + workers)..."

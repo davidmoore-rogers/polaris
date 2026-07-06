@@ -333,9 +333,10 @@ cp "$APP_DIR/deploy/polaris-migrate.service"    /etc/systemd/system/polaris-migr
 cp "$APP_DIR/deploy/polaris-web.service"        /etc/systemd/system/polaris-web.service
 cp "$APP_DIR/deploy/polaris-monitor@.service"   /etc/systemd/system/polaris-monitor@.service
 cp "$APP_DIR/deploy/polaris-discovery.service"  /etc/systemd/system/polaris-discovery.service
+cp "$APP_DIR/deploy/polaris-dash.service"       /etc/systemd/system/polaris-dash.service
 cp "$APP_DIR/deploy/polaris.target"             /etc/systemd/system/polaris.target
 
-for unit in polaris-migrate polaris-web polaris-monitor@ polaris-discovery; do
+for unit in polaris-migrate polaris-web polaris-monitor@ polaris-discovery polaris-dash; do
   sed -i -E "s/(After=.*)postgresql-15\\.service\\s*/\\1/" "/etc/systemd/system/${unit}.service"
   sed -i "/^Requires=postgresql-15\\.service\\s*$/d"        "/etc/systemd/system/${unit}.service"
 done
@@ -378,7 +379,7 @@ fi
 for ((i=1; i<=MONITOR_REPLICAS; i++)); do
   systemctl enable "polaris-monitor@$i.service" >/dev/null
 done
-systemctl enable polaris-web.service polaris-discovery.service polaris-migrate.service polaris.target nginx >/dev/null
+systemctl enable polaris-web.service polaris-discovery.service polaris-dash.service polaris-migrate.service polaris.target nginx >/dev/null
 info "Starting polaris.target..."
 systemctl start polaris.target
 

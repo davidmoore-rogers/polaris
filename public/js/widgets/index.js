@@ -212,6 +212,10 @@
   window.PolarisWidgets.openAssetDetail = function (id) {
     if (!id) return false;
     if (typeof window.openViewModal === "function") { window.openViewModal(id); return true; }
+    // Dash wallboard (dash.html): the asset slide-over isn't loaded and there
+    // is no session — navigating would bounce the kiosk to the login page.
+    // Make the click a no-op instead.
+    if (window.POLARIS_DASH_LOCAL) return false;
     window.location.href = "/assets.html#view=asset:" + encodeURIComponent(id);
     return false;
   };

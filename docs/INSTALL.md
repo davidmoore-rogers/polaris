@@ -448,6 +448,12 @@ nssm start Polaris
 
 Browse to `http://<host>:3000` to run the setup wizard.
 
+Windows runs single-process (`POLARIS_ROLE` unset = `all`), so the Dash
+wallboard listener boots in-process and serves `http://<host>:3001/dash`
+once enabled under Server Settings → Certificates → Dash Wallboard (no
+separate service; open TCP/3001 in Windows Firewall if wallboard viewers
+are remote).
+
 ---
 
 ## The split-role deployment (web / monitor / discovery)
@@ -469,6 +475,17 @@ The roles (chosen per-process via `POLARIS_ROLE`):
 - **web** — HTTP-only on `127.0.0.1:3000` (nginx terminates TLS) + all singleton schedulers + one-shot migrations. Single instance (control plane). Owns the in-app updater.
 - **monitor** — pg-boss monitor-queue consumers. Run **N replicas**; pg-boss gives each job to exactly one worker.
 - **discovery** — pg-boss discovery-queue consumer.
+- **dash** — the Dash wallboard listener on `127.0.0.1:3001` (`POLARIS_DASH_PORT`):
+  an **unauthenticated, read-only** duplicate of the Dashboard at
+  `https://<host>/dash` for NOC wallboards/kiosks, isolated in its own process
+  so a bug in the unauthenticated surface can't touch sessions or write paths.
+  The surface ships **disabled** — an admin enables it (and picks the
+  source-IP scope: RFC1918 + loopback only, or all IPs) under Server Settings
+  → Certificates → Dash Wallboard; changes reach the dash process within ~10s.
+  It answers with the built-in `readonly` role's permissions; each viewer's
+  widget layout is saved in their own browser (localStorage). nginx's `/dash`
+  location proxies to it unconditionally, so keep the unit running even while
+  the surface is disabled (disabled = the process answers 403).
 - **migrate** — oneshot `prisma migrate deploy` at boot; the app services gate on its completion.
 
 The `all` role still exists in `src/utils/role.ts` (one process runs every
@@ -486,6 +503,7 @@ re-deploy from a fresh checkout:
 # Copy the role units + the migrate one-shot + the grouping target.
 sudo cp deploy/polaris-migrate.service deploy/polaris-web.service \
         deploy/polaris-monitor@.service deploy/polaris-discovery.service \
+        deploy/polaris-dash.service \
         deploy/polaris.target /etc/systemd/system/
 
 # Ubuntu/Debian: rewrite postgresql-15.service → postgresql.service
@@ -497,7 +515,7 @@ sudo systemctl daemon-reload
 
 # Enable the group + the monitor replicas you want (here: 2).
 sudo systemctl enable polaris-monitor@1 polaris-monitor@2
-sudo systemctl enable polaris-web polaris-discovery polaris-migrate
+sudo systemctl enable polaris-web polaris-discovery polaris-dash polaris-migrate
 sudo systemctl enable --now polaris.target     # "Start Everything"
 ```
 
@@ -521,7 +539,7 @@ shipped, so the one-time move to the split-role layout is operator-driven:
 
    ```bash
    sudo systemctl disable --now polaris.service
-   sudo systemctl enable polaris-web polaris-discovery polaris-migrate
+   sudo systemctl enable polaris-web polaris-discovery polaris-dash polaris-migrate
    sudo systemctl enable polaris-monitor@1 polaris-monitor@2
    sudo systemctl enable --now polaris.target
    ```
@@ -722,8 +740,16 @@ What it does in order:
 Server Settings → Certificates now shows the in-app nginx GUI: the
 **HTTPS Certificate** card (read-only metadata + a **Rotate certificate**
 button), an **nginx Proxy** card with the six controls (HTTPS port, HTTP/3
-toggle, TLS protocols, HSTS, Prometheus allow-list), and the **Trusted
-Certificate Authorities** card (unchanged).
+toggle, TLS protocols, HSTS, Prometheus allow-list), the **Dash Wallboard**
+card (enable toggle + source-IP scope for the unauthenticated read-only
+`/dash` surface), and the **Trusted Certificate Authorities** card (unchanged).
+
+> **Upgrade note (Dash wallboard release):** the shipped nginx config gained
+> two `/dash` location blocks (5 → 7 locations). Installs in managed mode
+> pick them up automatically on the next in-app update; installs that
+> hand-edited the config will (correctly) see the drift banner and need to
+> re-adopt managed mode for `/dash` to route. The wallboard itself stays
+> dark either way until you enable it on the Dash Wallboard card.
 
 A yellow drift banner reads "nginx config not Polaris-managed yet" until
 you click **Adopt managed mode**. Until then the controls are read-only and

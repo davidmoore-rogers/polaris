@@ -150,7 +150,7 @@ Resource groupings (route file in `src/api/routes/`):
 - **events** / **conflicts** / **search** (audit + resolution + global typeahead; scope prefixes `block:`/`b:`, `network:`/`n:`, `asset:`/`a:`, `reservation:`/`r:`, `map:`/`m:`, `tag:`/`t:` — the last matches tag substrings across blocks/subnets/assets)
 - **notifications** (`/notifications` — View-tab list + acknowledge/clear; per-route gates `notifications:read|write|fullwrite`) and **notificationRules** (`/notification-rules` — rule CRUD + `/schema` builder vocabulary + `/preview` dry-run; gated `notificationManagement`). Per-asset bundle at `GET /assets/:id/notifications` (active + matching rules). **notificationChannels** (`/notification-channels` — delivery-channel registry CRUD + `/:id/test` + `/:id/generate-vapid`; gated `notificationManagement`) and **pushSubscriptions** (`/push-subscriptions` — VAPID `/key` + per-user subscribe/unsubscribe; gated `notifications:read`). Delivery channels are managed on the Notifications → Delivery tab.
 - **map** / **mapRegions** / **allocationTemplates** (Device Map + map-region polygons + saved subnet allocations)
-- **serverSettings** (HTTPS, branding, backup/restore, capacity advisor, sample retention, queue mode, security tokens)
+- **serverSettings** (HTTPS, branding, backup/restore, capacity advisor, sample retention, queue mode, security tokens, Dash wallboard toggle at `GET/PUT /server-settings/dash` — PUT is `serverSettingsSystem=fullwrite`-gated)
 - **proxySettings** (`/server-settings/proxy` — in-app nginx GUI config + cert preflight/rotate)
 - **mibs** (`/server-settings/mibs` and `/server-settings/mibs/std`)
 - **manufacturerProfiles** / **manufacturerAliases** / **deviceIcons** (telemetry profile + alias map + topology icons)
@@ -246,6 +246,8 @@ Hybrid-join detection links AD and Entra/Intune via on-prem SID (`ad.observed.ob
 
 Vanilla JavaScript SPA served from `/public/`. No build step — plain ES modules. Multi-page layout with client-side navigation (`app.js`), light/dark theme, real-time discovery polling, bulk operations, PDF/CSV export, conflict resolution slide-over, first-run setup wizard, Device Map with edit-regions polygon mode, five-state Status pill with click-to-toggle, asset details modal (General + System + Processes + Quarantine + Events + SNMP Walk + Sources tabs, in that order — Sources last), multi-asset Compare slide-over (bulk-bar → metric picker → overlaid telemetry charts), per-user lock toggle on every modal/slide-over (locked = backdrop click won't dismiss), Server Settings (Credentials / Identification / Maintenance tabs).
 
+**Dash wallboard** (`public/dash.html`): an unauthenticated, read-only duplicate of the Dashboard at `/dash`, served by its own process (`POLARIS_ROLE=dash`, `src/dash/dashServer.ts`) for NOC wallboards/kiosks. Default-off; enable toggle + source-IP scope (RFC1918+loopback vs all) on Server Settings → Certificates → Dash Wallboard. Answers as the built-in `readonly` role (widgets the role can't read hide themselves via `PolarisWidgets.getAllowed()`); layout persists per-browser in localStorage (`polaris-dash-layout`); page flags in `dash-mode.js` (`POLARIS_DASH_LOCAL`, `__polarisApiBase=/dash/api/v1`) + slim boot `dash-boot.js` replace `app.js`. Keep dash.html's widget script list in lockstep with index.html.
+
 > Detailed UI behavior (asset modal sections, slide-over patterns, persistence keys, MIB Browse + Walk surface, Manufacturer Profiles editor, Capacity Advisor + Sample Retention cards, Device Map region polygon editor): [ARCHITECTURE.md → Frontend](ARCHITECTURE.md#frontend).
 
 Canonical UI implementations to model new work after live in [TEMPLATES.md](TEMPLATES.md) (charts, modals, slide-overs, sortable tables, etc.).
@@ -293,7 +295,7 @@ POLARIS_SNMP_GATE_WAIT_TIMEOUT_MS=30000
 
 # Process role (multi-process deployment). Unset = "all" = single process runs
 # every subsystem (default; unchanged single-process behavior). Split via:
-#   web | monitor | discovery — set per service unit / container, NOT in .env.
+#   web | monitor | discovery | dash — set per service unit / container, NOT in .env.
 # Capability gating lives in src/utils/role.ts (roleConfig); boot path branches
 # on it in src/app.ts. See "Multi-process architecture" in ARCHITECTURE.md and
 # docs/INSTALL.md. Companion vars: POLARIS_DISCOVERY_WORKERS (discovery role,
@@ -333,6 +335,20 @@ METRICS_TOKEN=
 # 0.0.0.0 only when Prometheus runs off-host.
 POLARIS_METRICS_PORT=
 POLARIS_METRICS_BIND=
+
+# Dash wallboard listener — the unauthenticated read-only /dash surface
+# (polaris-dash.service, POLARIS_ROLE=dash; also boots in-process under
+# role "all" so dev serves /dash on :3001). Disabled by default; the on/off
+# toggle + source-IP scope (RFC1918+loopback vs all IPs) live in the
+# `dashConfig` Setting (Server Settings → Certificates → Dash Wallboard) and
+# propagate to the dash process within ~10s via dashSettingsService's TTL
+# cache. Serves as the built-in readonly role (dashRoleSnapshotService stamps
+# req.roleSnapshot); layout persists per-browser in localStorage. Bind is
+# forced to 127.0.0.1 in proxy mode (nginx `location /dash` proxies to it);
+# POLARIS_DASH_BIND applies only outside proxy mode. The RFC1918 gate trusts
+# X-Forwarded-For per TRUST_PROXY — widening TRUST_PROXY weakens it.
+POLARIS_DASH_PORT=3001
+POLARIS_DASH_BIND=
 
 # Reverse-proxy (nginx) front-end — nginx terminates TLS. Polaris listens
 # HTTP-only on 127.0.0.1. Both required (fail-fast at boot). Fresh installs
@@ -400,7 +416,7 @@ Copy `.env.example` to `.env` before running.
 
 The production instance is updated via the **in-app update mechanism** in **Server Settings → Maintenance**. When pushing changes, the user applies the update through that UI rather than manually redeploying. Keep this in mind when giving deployment advice — do not suggest `git pull` or manual restart steps unless asked.
 
-Every production install runs the split-role systemd layout (`polaris.target` + `polaris-web` + `polaris-monitor@N` + `polaris-discovery` + `polaris-migrate`). The legacy single-process `polaris.service` was removed in Phase 3 — fresh installs land split-role + nginx-fronted out of the box via `deploy/setup-*.sh`, and `restartService()` in [src/services/updateService.ts](src/services/updateService.ts) only handles the split-role + Windows-NSSM paths. Local dev (`npm run dev` with `POLARIS_ROLE` unset = `all`) is still the "everything in one process" runtime behavior — that lives in `src/utils/role.ts`, not in deploy artifacts.
+Every production install runs the split-role systemd layout (`polaris.target` + `polaris-web` + `polaris-monitor@N` + `polaris-discovery` + `polaris-dash` + `polaris-migrate`). The legacy single-process `polaris.service` was removed in Phase 3 — fresh installs land split-role + nginx-fronted out of the box via `deploy/setup-*.sh`, and `restartService()` in [src/services/updateService.ts](src/services/updateService.ts) only handles the split-role + Windows-NSSM paths. Local dev (`npm run dev` with `POLARIS_ROLE` unset = `all`) is still the "everything in one process" runtime behavior — that lives in `src/utils/role.ts`, not in deploy artifacts.
 
 Before kicking `polaris.target`, the transient unit `restartService()` spawns also syncs every shipped `deploy/polaris-*.service` + `polaris.target` into `/etc/systemd/system/` (cmp-only, no-op when unchanged) and runs `systemctl daemon-reload`. The same transient unit ALSO syncs `deploy/nginx/polaris.conf` into `/etc/nginx/conf.d/polaris.conf`, validates with `nginx -t`, and reloads nginx — before the polaris.target restart so any new location blocks are live by the time Polaris comes back up. So unit-file AND nginx-config changes shipped in a Polaris update take effect on the next in-app update with zero operator intervention. **Operator unit customization must live in `<unit>.d/*.conf` drop-ins** — direct edits to the main unit file in `/etc/systemd/system/` (or to `/etc/nginx/conf.d/polaris.conf` itself) get clobbered by the sync (a `journalctl -t polaris-updater` line records each sync).
 

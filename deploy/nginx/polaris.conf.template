@@ -68,6 +68,22 @@ server {
     proxy_pass http://127.0.0.1:{{POLARIS_PORT}};
   }
 
+  # ─── Dash wallboard ───────────────────────────────────────────────────
+  # The unauthenticated read-only /dash surface, served by its own process
+  # (polaris-dash.service, POLARIS_ROLE=dash). Deliberately NO allow/deny
+  # here: the operator-facing gates (enable toggle + RFC1918-only source-IP
+  # check) live in the dash process itself, driven by the dashConfig Setting.
+  # Exact match + trailing-slash prefix so /dashboard-style paths on the main
+  # app never match. URI passes through unchanged — the dash app routes
+  # /dash/* natively.
+  location = /dash {
+    proxy_pass http://127.0.0.1:{{DASH_PORT}};
+  }
+
+  location /dash/ {
+    proxy_pass http://127.0.0.1:{{DASH_PORT}};
+  }
+
   # ─── Metrics endpoints ────────────────────────────────────────────────
   # IP-allowlisted to Prometheus (managed via Server Settings → Certificates).
   # Bearer auth (METRICS_TOKEN) gates the upstream; nginx adds IP allowlisting

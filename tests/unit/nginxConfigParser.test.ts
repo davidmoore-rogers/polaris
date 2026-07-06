@@ -11,7 +11,7 @@ import { parseNginxConfigText } from "../../src/services/nginxConfigParser.js";
 import { renderNginxConfig } from "../../src/services/nginxRenderer.js";
 import { defaultProxyConfig, type ProxyConfig } from "../../src/types/proxyConfig.js";
 
-const ENV = { serverName: "polaris.example.com", polarisPort: 3000 };
+const ENV = { serverName: "polaris.example.com", polarisPort: 3000, dashPort: 3001 };
 
 function cfg(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
   return { ...defaultProxyConfig(), ...overrides };
@@ -142,6 +142,8 @@ describe("parseNginxConfigText — missing pieces", () => {
   listen 443 ssl;
   ssl_protocols TLSv1.2 TLSv1.3;
   location / { proxy_pass http://127.0.0.1:3000; }
+  location = /dash { proxy_pass http://127.0.0.1:3001; }
+  location /dash/ { proxy_pass http://127.0.0.1:3001; }
   location = /metrics { proxy_pass http://127.0.0.1:3000/metrics; }
   location = /metrics-monitor-1 { proxy_pass http://127.0.0.1:9101/metrics; }
   location = /metrics-monitor-2 { proxy_pass http://127.0.0.1:9102/metrics; }
@@ -149,6 +151,20 @@ describe("parseNginxConfigText — missing pieces", () => {
 }`;
     const { config } = parseNginxConfigText(minimal);
     expect(config.http3Enabled).toBe(false);
+  });
+
+  it("reports drift on a pre-dash 5-location config (forces re-adoption after upgrade)", () => {
+    const preDash = `server {
+  listen 443 ssl;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  location / { proxy_pass http://127.0.0.1:3000; }
+  location = /metrics { proxy_pass http://127.0.0.1:3000/metrics; }
+  location = /metrics-monitor-1 { proxy_pass http://127.0.0.1:9101/metrics; }
+  location = /metrics-monitor-2 { proxy_pass http://127.0.0.1:9102/metrics; }
+  location = /metrics-discovery { proxy_pass http://127.0.0.1:9110/metrics; }
+}`;
+    const { drift } = parseNginxConfigText(preDash);
+    expect(drift.some((d) => d.includes("location block count is 5 (expected 7)"))).toBe(true);
   });
 
   it("defaults managedMode=false (bootstrap caller decides when to flip it)", () => {

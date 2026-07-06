@@ -114,10 +114,13 @@ export function parseNginxConfigText(rawText: string): ParseResult {
       drift.push(`unknown add_header: ${m[1]}`);
     }
   }
-  // We ship exactly 5 location blocks: / + 4 metrics. Anything else is custom.
+  // We ship exactly 7 location blocks: / + 2 dash + 4 metrics. Anything else
+  // is custom. (A pre-dash 5-location file reports drift here by design — the
+  // refuse-and-banner UX makes the operator re-adopt so the /dash locations
+  // land explicitly rather than by silent clobber.)
   const locationCount = (text.match(/^\s*location\b/gm) ?? []).length;
-  if (locationCount !== 5) {
-    drift.push(`location block count is ${locationCount} (expected 5)`);
+  if (locationCount !== 7) {
+    drift.push(`location block count is ${locationCount} (expected 7)`);
   }
 
   return { config: cfg, drift };

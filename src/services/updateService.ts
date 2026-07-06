@@ -24,6 +24,7 @@ import { prisma } from "../db.js";
 import { getAppVersion } from "../utils/version.js";
 import { renderNginxConfig } from "./nginxRenderer.js";
 import { getProxyConfig, saveProxyConfig } from "./proxyConfigService.js";
+import { resolveDashPort } from "../utils/dashConfig.js";
 
 const execAsync = promisify(exec);
 
@@ -746,6 +747,7 @@ export async function restartService() {
             config: cfg,
             serverName: deriveServerNameForRender(),
             polarisPort: derivePolarisPortForRender(),
+            dashPort: resolveDashPort(),
           });
           let driftDetected = false;
           try {
@@ -822,10 +824,15 @@ export async function restartService() {
       "set -e",
       nginxHelperSync,
       nginxSync,
-      `for f in ${APP_DIR}/deploy/polaris-web.service ${APP_DIR}/deploy/polaris-monitor@.service ${APP_DIR}/deploy/polaris-discovery.service ${APP_DIR}/deploy/polaris-migrate.service ${APP_DIR}/deploy/polaris.target; do`,
+      // install-if-missing, not just overwrite-on-change: a unit that ships
+      // for the first time in an update (e.g. polaris-dash.service) must land
+      // on upgraded hosts too — cmp-only would leave nginx proxying /dash to
+      // a port nothing listens on. polaris.target's Wants= picks a newly
+      // installed unit up on the same restart.
+      `for f in ${APP_DIR}/deploy/polaris-web.service ${APP_DIR}/deploy/polaris-monitor@.service ${APP_DIR}/deploy/polaris-discovery.service ${APP_DIR}/deploy/polaris-dash.service ${APP_DIR}/deploy/polaris-migrate.service ${APP_DIR}/deploy/polaris.target; do`,
       `  name="$(basename "$f")"`,
       `  target="/etc/systemd/system/$name"`,
-      `  if [ -f "$target" ] && ! cmp -s "$f" "$target"; then`,
+      `  if [ ! -f "$target" ] || ! cmp -s "$f" "$target"; then`,
       `    cp -f "$f" "$target"`,
       `    logger -t polaris-updater "Synced unit file: $name (operator edits to the main unit file are clobbered; use $name.d/*.conf drop-ins for customization)"`,
       `  fi`,

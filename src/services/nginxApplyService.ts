@@ -48,6 +48,7 @@ import {
 } from "./proxyConfigService.js";
 import { invalidateCache as invalidateCertInfoCache, getServerCertFingerprint } from "./certInfo.js";
 import { isProxyMode } from "../utils/proxyMode.js";
+import { resolveDashPort } from "../utils/dashConfig.js";
 import { logger } from "../utils/logger.js";
 import { AppError } from "../utils/errors.js";
 import type { ProxyConfig } from "../types/proxyConfig.js";
@@ -96,6 +97,7 @@ export async function applyProxyConfig(changes?: Partial<ProxyConfig>): Promise<
     config: cfg,
     serverName: deriveServerName(),
     polarisPort: derivePolarisPort(),
+    dashPort: resolveDashPort(),
   });
 
   stageNginxConfig(contents);

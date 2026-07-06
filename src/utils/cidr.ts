@@ -72,6 +72,29 @@ export function isPrivateIpv4(ip: string): boolean {
 }
 
 /**
+ * RFC 1918 private-range OR loopback check for source-IP gating (the Dash
+ * wallboard's app-level gate). Accepts:
+ *   - the three RFC 1918 ranges (via isPrivateIpv4)
+ *   - IPv4 loopback 127.0.0.0/8 and IPv6 loopback ::1
+ *   - IPv6-mapped IPv4 forms (`::ffff:10.0.0.1`) — Node hands these out for
+ *     v4 connections on dual-stack sockets, so they must be unwrapped before
+ *     the v4 tests.
+ * Deliberately NOT accepted: fc00::/7 (ULA) and 169.254/16 (link-local) —
+ * the operator-facing contract is "RFC 1918 + loopback", nothing broader.
+ */
+export function isPrivateOrLoopbackIp(ip: string): boolean {
+  if (!ip) return false;
+  let candidate = ip.trim();
+  if (candidate.toLowerCase().startsWith("::ffff:") && candidate.includes(".")) {
+    candidate = candidate.slice(7);
+  }
+  if (candidate === "::1") return true;
+  if (!isValidIpAddress(candidate) || candidate.includes(":")) return false;
+  if (candidate.split(".").map(Number)[0] === 127) return true;
+  return isPrivateIpv4(candidate);
+}
+
+/**
  * First IPv4 address of a FortiOS "a.b.c.d-e.f.g.h" range string (a bare IP
  * is treated as a single-address range). Null for empty / non-IPv4 input and
  * for the FortiOS "any" placeholder 0.0.0.0.
