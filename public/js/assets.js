@@ -4800,8 +4800,12 @@ function _renderInterfacesTable(container, si, asset) {
   // Same rule for IPsec tunnel rows: no phase-2 traffic ever observed →
   // hidden behind the expander with the inactive interfaces. Covers dead
   // tunnels synthesized from CMDB (null counters) and idle down tunnels,
-  // while any tunnel actually passing traffic always shows.
+  // while any tunnel actually passing traffic always shows. Exception: a
+  // tunnel selected for monitoring (pinned in monitoredIpsecTunnels) is
+  // never auto-hidden — the operator explicitly wants eyes on it, so it
+  // stays visible even before any data has been collected.
   function isInactiveTunnel(tn) {
+    if (monitoredTunnels.has(tn.tunnelName)) return false;
     var hasIn  = tn.incomingBytes != null && tn.incomingBytes > 0;
     var hasOut = tn.outgoingBytes != null && tn.outgoingBytes > 0;
     return !hasIn && !hasOut;
