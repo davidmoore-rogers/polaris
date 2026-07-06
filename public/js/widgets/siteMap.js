@@ -211,6 +211,50 @@
         });
       }
 
+      // Auto de-overlap the permanent DOWN labels: each label greedily takes
+      // the first free slot on a ladder of candidate offsets (straight up a
+      // row at a time, then nudged right/left), so clustered outages read as
+      // a stack of labels instead of a pile. Operator-dragged labels are
+      // never moved — they participate as fixed obstacles. Leader lines
+      // (updateLeaders) keep displaced labels visually tied to their dots.
+      function labelRect(p, off, w, h) {
+        // direction:"top" anchors the label's bottom-centre at point+offset.
+        var cx = p.x + off[0], bottom = p.y + off[1];
+        return { l: cx - w / 2 - 3, r: cx + w / 2 + 3, t: bottom - h - 3, b: bottom + 3 };
+      }
+      function rectsIntersect(a, b) { return a.l < b.r && a.r > b.l && a.t < b.b && a.b > b.t; }
+      function layoutDownLabels() {
+        var placed = [], entries = [];
+        downMarkers.forEach(function (m) {
+          var tt = m.getTooltip(); if (!tt) return;
+          var tEl = tt.getElement(); if (!tEl) return;
+          var p = map.latLngToContainerPoint(m.getLatLng());
+          var w = tEl.offsetWidth, h = tEl.offsetHeight;
+          if (m._siteId && draggedOffsets[m._siteId]) placed.push(labelRect(p, tt.options.offset || [0, -10], w, h));
+          else entries.push({ tt: tt, p: p, w: w, h: h });
+        });
+        if (!entries.length) { updateLeaders(); return; }
+        entries.sort(function (a, b) { return a.p.x - b.p.x || a.p.y - b.p.y; });
+        entries.forEach(function (e) {
+          var chosen = null;
+          for (var lvl = 0; lvl < 10 && !chosen; lvl++) {
+            var dy = -10 - lvl * (e.h + 4);
+            var cands = [[0, dy], [Math.round(e.w * 0.6), dy], [-Math.round(e.w * 0.6), dy]];
+            for (var i = 0; i < cands.length; i++) {
+              var r = labelRect(e.p, cands[i], e.w, e.h);
+              var hit = false;
+              for (var j = 0; j < placed.length; j++) { if (rectsIntersect(r, placed[j])) { hit = true; break; } }
+              if (!hit) { chosen = cands[i]; placed.push(r); break; }
+            }
+          }
+          if (!chosen) { chosen = [0, -10]; placed.push(labelRect(e.p, chosen, e.w, e.h)); }
+          e.tt.options.offset = chosen;
+          e.tt.update();
+        });
+        updateLeaders();
+      }
+      map.on("zoomend", layoutDownLabels);
+
       // isLeg = the dot is an exploded-stack leg: it sits at a fanned-out
       // latlng (not the site's true position) and must not bubble clicks to
       // the map, or the map-click collapse handler would fire on it.
@@ -255,7 +299,7 @@
         );
         if (down) dot.on("tooltipopen", function () { attachTooltipDrag(dot, s.id); });
         dot.addTo(markersLayer);
-        if (down) downMarkers.push(dot);
+        if (down) { dot._siteId = s.id; downMarkers.push(dot); }
         return dot;
       }
 
@@ -354,7 +398,7 @@
         // Keep the reset-view bounds current with the data (without moving the
         // map — only the initial render and the ⌂ button actually fit).
         if (latlngs.length) homeBounds = L.latLngBounds(latlngs).pad(0.04);
-        requestAnimationFrame(updateLeaders);
+        requestAnimationFrame(layoutDownLabels);
         return latlngs;
       }
       buildMarkers(data);
