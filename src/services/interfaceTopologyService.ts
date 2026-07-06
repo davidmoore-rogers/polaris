@@ -107,7 +107,7 @@ export async function inferInterfaceTopology(
     SELECT DISTINCT ON ("assetId", "ifName") "assetId", "ifName", "ifType", "ifParent"
     FROM asset_interface_samples
     WHERE "assetId" = ANY(${seedAssetIds}::text[])
-      AND "timestamp" > NOW() - INTERVAL '1 hour'
+      AND "timestamp" > (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 hour'
     ORDER BY "assetId", "ifName", "timestamp" DESC
   `;
 

@@ -222,6 +222,18 @@ describe("getPacketLoss", () => {
     expect(sql).toContain(`count(*) FILTER (WHERE NOT "success") > 0`);
     expect(sql).toContain(`count(*) FILTER (WHERE "success") > 0`);
   });
+
+  it("bounds the window with a timezone-proof now() (naive-UTC columns vs server TimeZone)", async () => {
+    // Prisma timestamp columns are naive UTC; bare now() would interpret
+    // them in the DB server's zone and silently widen/shrink the window by
+    // the UTC offset (the "50% packet loss on a healthy device" bug — the
+    // 15-min window reached ~5h back into a recovered outage).
+    rawUnsafe.mockResolvedValueOnce([]);
+    await noc.getPacketLoss();
+    const sql = rawUnsafe.mock.calls[0][0] as string;
+    expect(sql).toContain(`(now() AT TIME ZONE 'UTC')`);
+    expect(sql).not.toMatch(/[^)]now\(\) -/);
+  });
 });
 
 describe("getStalePolls", () => {

@@ -459,7 +459,7 @@ async function loadLatestInterfaces(
       "assetId", "ifName", "ifType", "operStatus", "ipAddress"
     FROM asset_interface_samples
     WHERE "assetId" = ANY(${assetIds}::text[])
-      AND "timestamp" > NOW() - INTERVAL '72 hours'
+      AND "timestamp" > (NOW() AT TIME ZONE 'UTC') - INTERVAL '72 hours'
     ORDER BY "assetId", "ifName", "timestamp" DESC
   `;
   // IPsec tunnels (fortigate only): same 72h-bounded DISTINCT ON shape so the
@@ -471,7 +471,7 @@ async function loadLatestInterfaces(
           "assetId", "tunnelName", "status", "parentInterface"
         FROM asset_ipsec_tunnel_samples
         WHERE "assetId" = ANY(${assetIds}::text[])
-          AND "timestamp" > NOW() - INTERVAL '72 hours'
+          AND "timestamp" > (NOW() AT TIME ZONE 'UTC') - INTERVAL '72 hours'
         ORDER BY "assetId", "tunnelName", "timestamp" DESC
       `
     : Promise.resolve([] as Array<{ assetId: string; tunnelName: string; status: string | null; parentInterface: string | null }>);

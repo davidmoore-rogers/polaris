@@ -118,7 +118,7 @@ async function loadLatestStorage(assetIds: string[]): Promise<Map<string, Resolv
       "assetId", "mountPath"
     FROM asset_storage_samples
     WHERE "assetId" = ANY(${assetIds}::text[])
-      AND "timestamp" > NOW() - INTERVAL '72 hours'
+      AND "timestamp" > (NOW() AT TIME ZONE 'UTC') - INTERVAL '72 hours'
     ORDER BY "assetId", "mountPath", "timestamp" DESC
   `;
   for (const r of rows) {

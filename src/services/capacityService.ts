@@ -802,7 +802,7 @@ async function measureDetailDailyBytes(): Promise<Record<string, number>> {
            FROM timescaledb_information.chunks
           WHERE hypertable_name = $1
             AND NOT is_compressed
-            AND range_end < now() - interval '24 hours'
+            AND range_end < (now() AT TIME ZONE 'UTC') - interval '24 hours'
           ORDER BY range_start DESC
           LIMIT 5`,
         name,

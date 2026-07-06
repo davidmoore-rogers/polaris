@@ -16,6 +16,18 @@
  * asset_monitor_samples) are TimescaleDB hypertables: we ONLY read them, and
  * the time-window predicate keeps each scan inside recent (chunk-excluded)
  * data.
+ *
+ * TIMEZONE RULE for raw window predicates: Prisma maps DateTime to
+ * `timestamp` WITHOUT time zone and stores UTC wall-clock values. Comparing
+ * that naive column against bare `now()` (a timestamptz) makes Postgres
+ * interpret the stored values in the SERVER's TimeZone — on a RHEL-native
+ * install that defaults to the system zone (e.g. America/Chicago), which
+ * silently shifts every "last N minutes" window by the UTC offset (a
+ * 15-minute packet-loss window becomes ~5¼ hours and counts a long-recovered
+ * outage; positive-offset zones would instead make windows match nothing).
+ * Always write `(now() AT TIME ZONE 'UTC')` — naive-UTC vs naive-UTC — in
+ * raw SQL against Prisma-written timestamp columns. Prisma-bound Date
+ * parameters are unaffected.
  */
 
 import { prisma } from "../db.js";
@@ -245,7 +257,7 @@ export async function getDownInterfaces(limit: number | null = 100, sinceMinutes
                 OVER (PARTITION BY s."assetId", s."ifName") AS "lastUpAt"
        FROM "asset_interface_samples" s
        JOIN "assets" a ON a."id" = s."assetId" AND s."ifName" = ANY(a."monitoredInterfaces")
-       WHERE s."timestamp" > now() - ($1 || ' minutes')::interval${idClause}
+       WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${idClause}
      )
      SELECT "assetId", "ifName", "ifLabel", "lastUpAt"
      FROM win
@@ -325,7 +337,7 @@ export async function getDownIpsecTunnels(limit: number | null = 100, sinceMinut
                 OVER (PARTITION BY s."assetId", s."tunnelName") AS "lastUpAt"
        FROM "asset_ipsec_tunnel_samples" s
        JOIN "assets" a ON a."id" = s."assetId" AND s."tunnelName" = ANY(a."monitoredIpsecTunnels")
-       WHERE s."timestamp" > now() - ($1 || ' minutes')::interval${idClause}
+       WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${idClause}
      )
      SELECT "assetId", "tunnelName", "parentInterface", "remoteGateway", "lastUpAt"
      FROM win
@@ -405,7 +417,7 @@ export async function getHighestCpu(limit: number | null = 100, sinceMinutes = 6
        SELECT s."assetId" AS "assetId", s."cpuPct" AS v,
               row_number() OVER (PARTITION BY s."assetId" ORDER BY s."timestamp" DESC) AS rn
        FROM "asset_telemetry_samples" s
-       WHERE s."timestamp" > now() - ($1 || ' minutes')::interval AND s."cpuPct" IS NOT NULL${idClause}
+       WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval AND s."cpuPct" IS NOT NULL${idClause}
      )
      SELECT "assetId", avg(v)::float AS value
      FROM recent WHERE rn <= 10
@@ -431,7 +443,7 @@ export async function getHighestMemory(limit: number | null = 100, sinceMinutes 
               COALESCE(s."memPct", s."memUsedBytes"::float / NULLIF(s."memTotalBytes", 0) * 100) AS v,
               row_number() OVER (PARTITION BY s."assetId" ORDER BY s."timestamp" DESC) AS rn
        FROM "asset_telemetry_samples" s
-       WHERE s."timestamp" > now() - ($1 || ' minutes')::interval
+       WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval
          AND (s."memPct" IS NOT NULL OR (s."memUsedBytes" IS NOT NULL AND s."memTotalBytes" IS NOT NULL))${idClause}
      )
      SELECT "assetId", avg(v)::float AS value
@@ -462,7 +474,7 @@ export async function getSlowestResponse(limit: number | null = 100, assetIds: s
        SELECT "assetId", "responseTimeMs",
               row_number() OVER (PARTITION BY "assetId" ORDER BY "timestamp" DESC) AS rn
        FROM "asset_monitor_samples"
-       WHERE "timestamp" > now() - ($1 || ' minutes')::interval
+       WHERE "timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval
          AND "responseTimeMs" IS NOT NULL${idClause}
      )
      SELECT "assetId", avg("responseTimeMs")::float AS avg_ms
@@ -495,7 +507,7 @@ export async function getHighestDiskUsage(limit: number | null = 100, assetIds: 
               s."assetId" AS "assetId", s."mountPath" AS "mountPath",
               s."usedBytes"::float / s."totalBytes"::float * 100 AS pct
        FROM "asset_storage_samples" s
-       WHERE s."timestamp" > now() - ($1 || ' minutes')::interval
+       WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval
          AND s."usedBytes" IS NOT NULL AND s."totalBytes" IS NOT NULL AND s."totalBytes" > 0${idClause}
        ORDER BY s."assetId", s."mountPath", s."timestamp" DESC
      ) latest ORDER BY pct DESC LIMIT $2`,
@@ -538,7 +550,7 @@ export async function getHighestTemperature(limit: number | null = 100, assetIds
        SELECT DISTINCT ON (s."assetId", s."sensorName")
               s."assetId" AS "assetId", s."sensorName" AS "sensorName", s."value" AS value
        FROM "asset_hardware_sensor_samples" s
-       WHERE s."timestamp" > now() - ($1 || ' minutes')::interval
+       WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval
          AND s."sensorClass" = 'temperature' AND s."value" IS NOT NULL${idClause}
        ORDER BY s."assetId", s."sensorName", s."timestamp" DESC
      ) latest ORDER BY value DESC LIMIT $2`,
@@ -580,7 +592,7 @@ export async function getPacketLoss(limit: number | null = 100, sinceMinutes = 1
   const rows = await prisma.$queryRawUnsafe<Array<{ assetId: string; total: bigint; failed: bigint }>>(
     `SELECT "assetId", count(*) AS total, count(*) FILTER (WHERE NOT "success") AS failed
      FROM "asset_monitor_samples"
-     WHERE "timestamp" > now() - ($1 || ' minutes')::interval${idClause}
+     WHERE "timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${idClause}
      GROUP BY "assetId"
      HAVING count(*) FILTER (WHERE NOT "success") > 0
         AND count(*) FILTER (WHERE "success") > 0
