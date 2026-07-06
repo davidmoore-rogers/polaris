@@ -509,6 +509,58 @@ describe("computeTopologyColumns", () => {
     expect(cols.island.lane).toBeGreaterThan(cols.ep.lane);
   });
 
+  it("packs first-column siblings near the spine instead of below earlier subtrees", () => {
+    // fg's spine chain (swA→swB→swC, 2 APs each) used to consume a globally
+    // disjoint row band FIRST, pushing fg's other children (swX's chain, swZ)
+    // below the entire spine subtree — first-column siblings ended up huge
+    // row distances apart. Nearest-free-slot packing keeps them just below
+    // the spine, drifting down only past genuinely occupied rows.
+    const els = [
+      node("fg", "fortigate"),
+      node("swA", "fortiswitch"),
+      node("swB", "fortiswitch"),
+      node("swC", "fortiswitch"),
+      node("swX", "fortiswitch"),
+      node("swY", "fortiswitch"),
+      node("swZ", "fortiswitch"),
+      edge("fg", "swA"),
+      edge("swA", "swB"),
+      edge("swB", "swC"),
+      edge("fg", "swX"),
+      edge("swX", "swY"),
+      edge("fg", "swZ"),
+    ];
+    const apsBySwitch: Record<string, string[]> = {
+      swA: ["aa1", "aa2"], swB: ["ab1", "ab2"], swC: ["ac1", "ac2"],
+      swX: ["ax1", "ax2"], swY: ["ay1", "ay2"], swZ: ["az1", "az2"],
+    };
+    for (const [sw, aps] of Object.entries(apsBySwitch)) {
+      for (const ap of aps) {
+        els.push(node(ap, "fortiap"));
+        els.push(edge(sw, ap));
+      }
+    }
+    const cols = computeTopologyColumns(els)!;
+    // Spine flat on row 0.
+    ["fg", "swA", "swB", "swC"].forEach((s) => expect(cols[s].lane).toBe(0));
+    // swX dodges only swA's 2-AP block (rows 1-2 in the shared leaf column —
+    // shifted one below swA because swA's continuing spine edge occupies its
+    // own row), landing at row 3 — NOT below the whole 3-switch spine subtree
+    // (the old band pass put it at row 6+ here, and hundreds down on real sites).
+    expect(cols.swX.lane).toBe(3);
+    expect(cols.swY.lane).toBe(cols.swX.lane); // swX's own chain stays flat
+    // swZ dodges swA's and swX's blocks, landing at row 6.
+    expect(cols.swZ.lane).toBe(6);
+    // AP blocks stay contiguous, each starting at its switch's own row — or
+    // one below it when the switch's spine continues (that edge crosses the
+    // leaf column at the switch's row, so the block can't use it).
+    for (const [sw, aps] of Object.entries(apsBySwitch)) {
+      const lanes = aps.map((a) => cols[a].lane).sort((x, y) => x - y);
+      expect(lanes.every((l, i) => i === 0 || l === lanes[i - 1] + 1)).toBe(true);
+      expect(lanes[0] === cols[sw].lane || lanes[0] === cols[sw].lane + 1).toBe(true);
+    }
+  });
+
   it("is deterministic across repeated calls on the same elements", () => {
     const els = [
       node("fg", "fortigate"),

@@ -1070,18 +1070,25 @@
   //   4. Disconnected nodes (no path to the firewall) drop into a rightmost
   //      orphan column so they stay visible.
   //   5. Lanes (rows) in two passes:
-  //      (a) Tidy-tree over ANCHORS only: a node's first anchor child in a
-  //          different column continues the node's row (spine stays flat);
-  //          every other anchor claims a fresh row, giving each sibling subtree
-  //          a disjoint row band. Non-spine siblings sharing a b: building
-  //          code (then an f: floor code within a building) are regrouped into
-  //          adjacent bands so location hulls come out contiguous — stable,
-  //          first-appearance bucket order, keyless anchors at the tail, and a
-  //          no-op on untagged sites. NOT guaranteed: cross-subtree adjacency
-  //          (same building under different parents/columns), the spine
-  //          child's building (flat-chain wins), and room/jb adjacency beyond
-  //          what building+floor grouping induces. Fallback exiles get their
-  //          own cursor.
+  //      (a) Nearest-free-slot packing over ANCHORS only: a node's first
+  //          anchor child in a different column continues the node's row (the
+  //          spine stays flat); every other anchor scans DOWNWARD from just
+  //          below its parent's row for the first lane where its whole
+  //          footprint fits — its own cell, the spine chain that will inherit
+  //          its lane into later columns, and each chain member's planned
+  //          leaf block one column right. Rows pack tight near the spine and
+  //          drift further down only where subtrees congest, so vertical
+  //          spread grows with chain depth instead of every subtree claiming
+  //          a globally disjoint row band. Non-spine siblings sharing a b:
+  //          building code (then an f: floor code within a building) are
+  //          regrouped so they scan consecutively and land in adjacent lanes
+  //          — stable, first-appearance bucket order, keyless anchors at the
+  //          tail, and a no-op on untagged sites. NOT guaranteed:
+  //          cross-subtree adjacency (same building under different
+  //          parents/columns), the spine child's building (flat-chain wins),
+  //          and room/jb adjacency beyond what building+floor grouping
+  //          induces. Fallback exiles scan from row 0 in their own negative
+  //          columns.
   //      (b) Leaf pass: each leaf stacks downward from its parent's row using a
   //          PER-COLUMN cursor, pushed down only to dodge an occupied lane or a
   //          drawn edge passing through the column. Per-column (not global)
@@ -1389,47 +1396,103 @@
       return out.concat(tail);
     }
 
+    // Nearest-free-slot packing. The previous pass gave every fresh-row
+    // anchor a globally disjoint row band from one monotonic cursor, so a
+    // left-column switch's later children were pushed below EVERYTHING placed
+    // before them — first-column siblings ended up enormous row distances
+    // apart on big sites. Instead, lanes are allocated per column: a
+    // fresh-row anchor scans DOWNWARD from just below its parent's row for
+    // the first lane where its whole FOOTPRINT fits — its own cell, every
+    // spine-chain descendant that will inherit its lane into later columns,
+    // and each chain member's planned leaf block (the rows its APs/endpoints
+    // stack into, one column right). Rows stay tight near the spine and only
+    // drift further down where subtrees actually congest, so vertical spread
+    // grows with how far the chains extend instead of being pre-allocated.
     var lane = {};
-    var nextRow = 0;
-    function placeAnchorSubtree(id, fallbackRegion) {
-      if (lane[id] != null) return; // safety — pred tree visits each anchor once
-      var kids = orderedAnchorChildren(id, fallbackRegion);
-      // The spine child — the first anchor child in a DIFFERENT column — is
-      // placed first and the node inherits its row, so the chain stays flat. A
-      // same-column anchor child (switch chained off a fallback switch) can't
-      // continue the row; it takes a fresh one. Spine selection reads the
-      // ORIGINAL height-sorted order — location grouping never changes which
-      // child holds the spine, only how the remaining siblings pack together.
-      var spine = null;
-      for (var ks = 0; ks < kids.length; ks++) {
-        if (depth[kids[ks]] !== depth[id]) { spine = kids[ks]; break; }
-      }
-      if (spine != null) {
-        placeAnchorSubtree(spine, fallbackRegion);
-        lane[id] = lane[spine];
-      } else {
-        // Fresh row, plus enough rows below for this anchor's own AP stack so a
-        // following same-column sibling clears it.
-        lane[id] = nextRow;
-        nextRow += Math.max(1, leafChildCount[id] || 0);
-      }
-      var rest = spine != null
-        ? kids.filter(function (k) { return k !== spine; })
-        : kids;
-      rest = regroupAnchorsByLocation(rest);
-      for (var ki = 0; ki < rest.length; ki++) placeAnchorSubtree(rest[ki], fallbackRegion);
+    var maxReservedLane = 0;
+    var reserved = {}; // col -> { lane: true } — anchor cells + planned leaf blocks
+    function cellTaken(c, L) { return !!(reserved[c] && reserved[c][L]); }
+    function reserveCell(c, L) {
+      (reserved[c] = reserved[c] || {})[L] = true;
+      if (L > maxReservedLane) maxReservedLane = L;
     }
-    placeAnchorSubtree(rootId, false);
-    var mainRows = nextRow;
+    // The spine chain: this anchor plus every descendant that inherits its
+    // row — each node's FIRST anchor child in a DIFFERENT column (the chain
+    // stays flat). A same-column anchor child (switch chained off a fallback
+    // switch) can't continue the row; it places like any other child below.
+    // Spine selection reads the ORIGINAL height-sorted order — location
+    // grouping never changes which child holds the spine, only how the
+    // remaining siblings pack together.
+    function spineChainOf(id, fallbackRegion) {
+      var chain = [id];
+      var cur = id;
+      var guard = 0;
+      while (guard++ < nodeIds.length) {
+        var kids = orderedAnchorChildren(cur, fallbackRegion);
+        var spine = null;
+        for (var i = 0; i < kids.length; i++) {
+          if (depth[kids[i]] !== depth[cur]) { spine = kids[i]; break; }
+        }
+        if (spine == null || lane[spine] != null) break;
+        chain.push(spine);
+        cur = spine;
+      }
+      return chain;
+    }
+    // A chain member's leaf block really starts one row BELOW the member when
+    // the chain continues past it — the continuing spine edge crosses the
+    // leaf column at the member's own row, so the leaf pass can't use it.
+    // Reserving the offset rows keeps the plan honest and sibling scans tight.
+    function leafBlockStart(chain, i, L) {
+      return i + 1 < chain.length ? L + 1 : L;
+    }
+    function footprintFits(chain, L) {
+      for (var i = 0; i < chain.length; i++) {
+        var m = chain[i];
+        var c = depth[m];
+        if (cellTaken(c, L)) return false;
+        var n = leafChildCount[m] || 0;
+        var b = leafBlockStart(chain, i, L);
+        for (var k = 0; k < n; k++) {
+          if (cellTaken(c + 1, b + k)) return false;
+        }
+      }
+      return true;
+    }
+    function placeAnchorSubtree(id, fallbackRegion, startLane) {
+      if (lane[id] != null) return; // safety — pred tree visits each anchor once
+      var chain = spineChainOf(id, fallbackRegion);
+      var L = startLane;
+      while (!footprintFits(chain, L)) L++;
+      for (var ci = 0; ci < chain.length; ci++) {
+        var m = chain[ci];
+        lane[m] = L;
+        reserveCell(depth[m], L);
+        var n = leafChildCount[m] || 0;
+        var b = leafBlockStart(chain, ci, L);
+        for (var k = 0; k < n; k++) reserveCell(depth[m] + 1, b + k);
+      }
+      // Non-spine children of every chain member, left-to-right so the
+      // earliest columns' children get the rows closest to the chain. Each
+      // scans downward from just below its parent's row.
+      for (var mi = 0; mi < chain.length; mi++) {
+        var member = chain[mi];
+        var kids = orderedAnchorChildren(member, fallbackRegion);
+        var next = mi + 1 < chain.length ? chain[mi + 1] : null;
+        var rest = kids.filter(function (k) { return k !== next && lane[k] == null; });
+        rest = regroupAnchorsByLocation(rest);
+        for (var ki = 0; ki < rest.length; ki++) placeAnchorSubtree(rest[ki], fallbackRegion, L + 1);
+      }
+    }
+    placeAnchorSubtree(rootId, false, 0);
 
-    // Fallback exiles (negative columns): same recursion with its own cursor
+    // Fallback exiles (negative columns): same placement scanning from row 0
     // so the exile cluster top-aligns with the root. Row numbers repeat but x
     // is negative (column -1 is always empty), so nothing overlaps spatially.
-    nextRow = 0;
     nodeIds.forEach(function (id) {
       if (isAnchor(id) && inFallbackRegion[id] &&
           !(pred[id] != null && isAnchor(pred[id]) && inFallbackRegion[pred[id]])) {
-        placeAnchorSubtree(id, true);
+        placeAnchorSubtree(id, true, 0);
       }
     });
 
@@ -1489,15 +1552,28 @@
         return orderIdx[a] - orderIdx[b];
       });
       readyParents.forEach(function (p) {
-        var cursor = lane[p]; // block starts at the parent's own row…
-        leavesByParent[p].forEach(function (leaf) {
-          if (lane[leaf] != null) return;
-          var col = depth[leaf];
-          var L = cursor;
-          while (laneBlocked(leaf, col, L)) L++; // …pushed past taken lanes / edges
-          lane[leaf] = L;
-          (occupied[col] = occupied[col] || {})[L] = true;
-          cursor = L + 1; // next leaf of THIS parent stacks immediately below
+        var pending = leavesByParent[p].filter(function (l) { return lane[l] == null; });
+        if (pending.length === 0) return;
+        // One column per placement round (a parent's leaves share a column
+        // except leaf-chain oddities — stragglers get the next wave).
+        var col = depth[pending[0]];
+        var block = pending.filter(function (l) { return depth[l] === col; });
+        // The whole block claims one CONTIGUOUS window, starting at the
+        // parent's own row and slid down past taken lanes / crossing edges.
+        // Sliding the window (rather than dodging per leaf) matters under
+        // nearest-slot packing: another chain's spine can run through this
+        // column, and per-leaf dodging would fragment the block around it.
+        var L = lane[p];
+        function windowFits(start) {
+          for (var j = 0; j < block.length; j++) {
+            if (laneBlocked(block[j], col, start + j)) return false;
+          }
+          return true;
+        }
+        while (!windowFits(L)) L++;
+        block.forEach(function (leaf, j) {
+          lane[leaf] = L + j;
+          (occupied[col] = occupied[col] || {})[L + j] = true;
           progressed = true;
         });
       });
@@ -1508,9 +1584,9 @@
     // can't share a row with a positioned node in the same column.
     var maxLane = -1;
     nodeIds.forEach(function (id) { if (lane[id] != null && lane[id] > maxLane) maxLane = lane[id]; });
-    nextRow = Math.max(mainRows, maxLane + 1);
+    var strayRow = Math.max(maxReservedLane, maxLane) + 1;
     nodeIds.forEach(function (id) {
-      if (lane[id] == null) lane[id] = nextRow++;
+      if (lane[id] == null) lane[id] = strayRow++;
     });
 
     var out = {};
