@@ -1417,12 +1417,31 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
           orderBy: [{ sensorClass: "asc" }, { sensorName: "asc" }],
         })
       : [];
-    const ipsecTunnels = latestIpsecMeta
+    // Same full-pass anchor as the interfaces query above: the fast cadence
+    // only writes PINNED tunnels, so taking the raw newest timestamp hides
+    // every unpinned tunnel from the System tab within a minute of any fast
+    // walk. Anchor to lastSystemInfoAt (the full pass writes all tunnels at
+    // that exact timestamp), clamped down when it's ahead of the newest
+    // ipsec row (e.g. the last full pass's ipsec collect failed).
+    let ipsecTimestamp = asset.lastSystemInfoAt ?? latestIpsecMeta?.timestamp ?? null;
+    if (ipsecTimestamp && latestIpsecMeta?.timestamp && ipsecTimestamp > latestIpsecMeta.timestamp) {
+      ipsecTimestamp = latestIpsecMeta.timestamp;
+    }
+    let ipsecTunnels = latestIpsecMeta && ipsecTimestamp
       ? await prisma.assetIpsecTunnelSample.findMany({
-          where: { assetId: id, timestamp: latestIpsecMeta.timestamp },
+          where: { assetId: id, timestamp: ipsecTimestamp },
           orderBy: { tunnelName: "asc" },
         })
       : [];
+    // The anchor pass may have produced zero ipsec rows (transient collect
+    // failure) while fast walks kept writing — fall back to the newest batch
+    // (pinned subset) rather than rendering an empty tunnel table.
+    if (ipsecTunnels.length === 0 && latestIpsecMeta && ipsecTimestamp?.getTime() !== latestIpsecMeta.timestamp.getTime()) {
+      ipsecTunnels = await prisma.assetIpsecTunnelSample.findMany({
+        where: { assetId: id, timestamp: latestIpsecMeta.timestamp },
+        orderBy: { tunnelName: "asc" },
+      });
+    }
 
     res.json({
       monitored: asset.monitored,

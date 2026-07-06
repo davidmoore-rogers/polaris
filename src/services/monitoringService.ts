@@ -4661,6 +4661,19 @@ async function fetchFortilinkInterfaceSet(fg: FortiGateConfig, timeoutMs?: numbe
  * with ephemeral rows that aren't pinnable for fast polling. FortiOS marks
  * them with a non-empty `parent` field pointing back at the configured
  * template tunnel; the template itself has no `parent`.
+ *
+ * CMDB-only synthesis: /monitor/vpn/ipsec only lists tunnels the IKE daemon
+ * is actively servicing — a tunnel whose parent interface is down with no IP
+ * (IKE can't even bind) drops out of the monitor response entirely, even
+ * though it's still configured. Any phase1-interface CMDB entry missing from
+ * the monitor results is appended as a synthetic row (status "down", or
+ * "dynamic" for dial-up templates; parentInterface + remote-gw from CMDB; no
+ * byte counters) so configured-but-dead tunnels keep producing samples — the
+ * System tab nests them under their (down) parent instead of silently
+ * dropping them, and the auto-monitor dead-parent exclusion sees a current
+ * parentInterface. Only runs when the monitor call succeeded (a monitor
+ * failure rejects this function before synthesis — the caller treats that as
+ * "no ipsec data", not "every tunnel down").
  */
 async function collectIpsecTunnelsFortinet(fg: FortiGateConfig, timeoutMs?: number): Promise<IpsecTunnelSample[]> {
   // Build a tunnel→{interface,type} map up front from the CMDB so each sample
@@ -4681,7 +4694,7 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig, timeoutMs?: numb
     fgRequest<any>(fg, "GET", "/api/v2/monitor/vpn/ipsec", { query: { scope: "vdom" }, timeoutMs }),
   ]);
 
-  const phase1Map = new Map<string, { iface: string | null; type: string | null }>();
+  const phase1Map = new Map<string, { iface: string | null; type: string | null; remoteGw: string | null }>();
   if (cmdbResult) {
     const cmdbArr = Array.isArray(cmdbResult?.results) ? cmdbResult.results : (Array.isArray(cmdbResult) ? cmdbResult : []);
     for (const p of cmdbArr) {
@@ -4689,7 +4702,11 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig, timeoutMs?: numb
       const name  = typeof (p as any).name      === "string" ? (p as any).name.trim()      : "";
       const iface = typeof (p as any).interface === "string" ? (p as any).interface.trim() : "";
       const type  = typeof (p as any).type      === "string" ? (p as any).type.trim().toLowerCase() : "";
-      if (name) phase1Map.set(name, { iface: iface || null, type: type || null });
+      // Static peers carry the configured gateway in `remote-gw`; dial-up
+      // templates report the 0.0.0.0 placeholder → null.
+      const rawGw = typeof (p as any)["remote-gw"] === "string" ? (p as any)["remote-gw"].trim() : "";
+      const remoteGw = rawGw && rawGw !== "0.0.0.0" ? rawGw : null;
+      if (name) phase1Map.set(name, { iface: iface || null, type: type || null, remoteGw });
     }
   }
   const arr = Array.isArray(res?.results) ? res.results : (Array.isArray(res) ? res : []);
@@ -4741,6 +4758,22 @@ async function collectIpsecTunnelsFortinet(fg: FortiGateConfig, timeoutMs?: numb
       incomingBytes:   anyBytes ? inBytes  : null,
       outgoingBytes:   anyBytes ? outBytes : null,
       proxyIdCount:    proxyArr.length || null,
+    });
+  }
+  // CMDB-only synthesis (see header): configured phase-1 tunnels the IKE
+  // daemon dropped from the monitor response (dead parent link) still get a
+  // row so they don't vanish from samples while configured.
+  const seenNames = new Set(out.map((t) => t.tunnelName));
+  for (const [name, p1] of phase1Map) {
+    if (seenNames.has(name)) continue;
+    out.push({
+      tunnelName:      name,
+      parentInterface: p1.iface,
+      remoteGateway:   p1.remoteGw,
+      status:          p1.type === "dynamic" ? "dynamic" : "down",
+      incomingBytes:   null,
+      outgoingBytes:   null,
+      proxyIdCount:    null,
     });
   }
   return out;
