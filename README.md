@@ -41,6 +41,9 @@ The graph stitches edges from three independent signals: controller-derived Fort
 
 Admins and network admins can draw named **regions** on the map. Each region's name becomes a `region:<name>` tag stamped on every enclosed FortiGate plus its managed FortiSwitches and FortiAPs, so the assets-page tag column / search / filter can act on "everything in Atlanta" without anyone maintaining the membership list by hand. Polygons render only while editing — the default map view is unchanged.
 
+### Dash wallboard
+An optional no-login, read-only duplicate of the Dashboard at `/dash` for NOC wallboards and kiosks, served by its own isolated process. Off by default; an admin enables it under Server Settings → Certificates → Dash Wallboard and chooses the source-IP scope (RFC1918 + loopback only, or all IPs). It answers with the built-in read-only role's permissions — widgets that role can't read hide themselves — and each viewer's widget layout is saved in their own browser, so a wallboard can be arranged without an account.
+
 ### MAC Quarantine
 Polaris records which FortiGate every asset has been sighted on via DHCP. From the asset details panel (or via API token from a SIEM), an operator can quarantine a device — the asset's MACs are pushed as MAC-based address-group entries to every FortiGate that sighted the device within the configured window, after which the device's status flips to `quarantined`.
 
@@ -184,7 +187,7 @@ The flow: snapshot the commit → `pg_dump` backup (last 10 kept in `backups/`) 
 
 ### Managing the service
 
-Production installs run the split-role layout (web / monitor / discovery), fronted
+Production installs run the split-role layout (web / monitor / discovery / dash), fronted
 by nginx for TLS termination — it's the **default and only supported production
 layout** on Linux. The setup scripts install it automatically; the legacy
 single-process `polaris.service` unit is no longer shipped.

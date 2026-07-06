@@ -91,6 +91,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
 # (HOME=/app/state is set when the build runs). Pre-creating keeps the
 # first build from racing on mkdir.
 
-EXPOSE 3000
+# 3000 = main app (web/all role); 3001 = Dash wallboard listener (dash/all role).
+EXPOSE 3000 3001
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
