@@ -248,7 +248,7 @@ Hybrid-join detection links AD and Entra/Intune via on-prem SID (`ad.observed.ob
 
 Vanilla JavaScript SPA served from `/public/`. No build step — plain ES modules. Multi-page layout with client-side navigation (`app.js`), light/dark theme, real-time discovery polling, bulk operations, PDF/CSV export, conflict resolution slide-over, first-run setup wizard, Device Map with edit-regions polygon mode, five-state Status pill with click-to-toggle, asset details modal (General + System + Processes + Quarantine + Events + SNMP Walk + Sources tabs, in that order — Sources last), multi-asset Compare slide-over (bulk-bar → metric picker → overlaid telemetry charts), per-user lock toggle on every modal/slide-over (locked = backdrop click won't dismiss), Server Settings (Credentials / Identification / Maintenance tabs).
 
-**Dash wallboard** (`public/dash.html`): an unauthenticated, read-only duplicate of the Dashboard at `/dash`, served by its own process (`POLARIS_ROLE=dash`, `src/dash/dashServer.ts`) for NOC wallboards/kiosks. Default-off; enable toggle + source-IP scope (RFC1918+loopback vs all) on Server Settings → Certificates → Dash Wallboard. Answers as the built-in `readonly` role (widgets the role can't read hide themselves via `PolarisWidgets.getAllowed()`); layout persists per-browser in localStorage (`polaris-dash-layout`); page flags in `dash-mode.js` (`POLARIS_DASH_LOCAL`, `__polarisApiBase=/dash/api/v1`) + slim boot `dash-boot.js` replace `app.js`. Keep dash.html's widget script list in lockstep with index.html.
+**Dash wallboard** (`public/dash.html`): an unauthenticated, read-only duplicate of the Dashboard at `/dash`, served by its own process (`POLARIS_ROLE=dash`, `src/dash/dashServer.ts`) for NOC wallboards/kiosks. Default-off; enable toggle + source-IP scope on Server Settings → **Web Server** → Dash Wallboard. `dashConfig.ipScope` is `rfc1918` (RFC1918+loopback, default) / `all` / `custom` (an operator-entered IPv4-CIDR allow-list in `allowedCidrs`). **Unauthorized source IPs are silently dropped** (socket destroyed, no HTTP response) rather than 403'd, so a scanner can't confirm the surface exists — behind nginx that manifests to the remote client as a 502. Answers as the built-in `readonly` role (widgets the role can't read hide themselves via `PolarisWidgets.getAllowed()`); layout persists per-browser in localStorage (`polaris-dash-layout`); page flags in `dash-mode.js` (`POLARIS_DASH_LOCAL`, `__polarisApiBase=/dash/api/v1`) + slim boot `dash-boot.js` replace `app.js`. Keep dash.html's widget script list in lockstep with index.html.
 
 > Detailed UI behavior (asset modal sections, slide-over patterns, persistence keys, MIB Browse + Walk surface, Manufacturer Profiles editor, Capacity Advisor + Sample Retention cards, Device Map region polygon editor): [ARCHITECTURE.md → Frontend](ARCHITECTURE.md#frontend).
 
@@ -341,8 +341,9 @@ POLARIS_METRICS_BIND=
 # Dash wallboard listener — the unauthenticated read-only /dash surface
 # (polaris-dash.service, POLARIS_ROLE=dash; also boots in-process under
 # role "all" so dev serves /dash on :3001). Disabled by default; the on/off
-# toggle + source-IP scope (RFC1918+loopback vs all IPs) live in the
-# `dashConfig` Setting (Server Settings → Certificates → Dash Wallboard) and
+# toggle + source-IP scope (rfc1918 / all / custom CIDR allow-list; unauthorized
+# sources are silently dropped) live in the
+# `dashConfig` Setting (Server Settings → Web Server → Dash Wallboard) and
 # propagate to the dash process within ~10s via dashSettingsService's TTL
 # cache. Serves as the built-in readonly role (dashRoleSnapshotService stamps
 # req.roleSnapshot); layout persists per-browser in localStorage. Bind is

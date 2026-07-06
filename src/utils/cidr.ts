@@ -183,6 +183,48 @@ export function ipInCidr(ip: string, cidr: string): boolean {
   }
 }
 
+/**
+ * Normalize a single operator-entered allow-list entry to a canonical IPv4
+ * CIDR (host bits zeroed), or null if it isn't a valid IPv4 CIDR / bare IPv4
+ * address. A bare address becomes a /32. IPv4-only — the Netmask matcher
+ * (ipMatchesAnyCidr) can't evaluate IPv6, so IPv6 entries are rejected here
+ * rather than silently stored and never matched. Used by the Dash wallboard's
+ * custom source-IP allow-list.
+ */
+export function normalizeAllowlistCidr(raw: string): string | null {
+  if (!raw) return null;
+  const s = raw.trim();
+  if (!s) return null;
+  const withPrefix = s.includes("/") ? s : `${s}/32`;
+  if (detectIpVersion(withPrefix) !== "v4") return null;
+  if (!isValidCidr(withPrefix)) return null;
+  try {
+    return normalizeCidr(withPrefix);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Return true if `ip` falls within ANY of the given IPv4 CIDRs. Strips a
+ * leading `::ffff:` (v6-mapped v4) so a dual-stack socket's client address
+ * still matches; a genuine IPv6 source never matches (IPv4-only, see
+ * normalizeAllowlistCidr). Empty/invalid inputs → false. Backs the Dash
+ * wallboard's custom source-IP gate.
+ */
+export function ipMatchesAnyCidr(ip: string, cidrs: string[]): boolean {
+  if (!ip || !Array.isArray(cidrs) || cidrs.length === 0) return false;
+  let candidate = ip.trim();
+  if (candidate.toLowerCase().startsWith("::ffff:") && candidate.includes(".")) {
+    candidate = candidate.slice(7);
+  }
+  if (candidate.includes(":")) return false;
+  for (const cidr of cidrs) {
+    if (ipInCidr(candidate, cidr)) return true;
+  }
+  return false;
+}
+
 // ─── Allocation Helpers ───────────────────────────────────────────────────────
 
 /**

@@ -3079,22 +3079,24 @@ Listed alphabetically.
 
 ## services/dashSettingsService.ts
 
-**What it owns:** Persistence of the Dash wallboard operator config — the `dashConfig` Setting row `{ enabled (default false), rfc1918Only (default true) }` — with a ~10s TTL in-process cache. The TTL is the **cross-process propagation delay**: the web process writes the row (Server Settings → Certificates → Dash Wallboard), the dash process (`POLARIS_ROLE=dash`) reads it on every request through the cache, so a toggle lands within ~10s with no restart.
+**What it owns:** Persistence of the Dash wallboard operator config — the `dashConfig` Setting row `{ enabled (default false), ipScope ("rfc1918"|"all"|"custom", default "rfc1918"), allowedCidrs (canonical IPv4 CIDRs for the custom scope) }` — with a ~10s TTL in-process cache. The TTL is the **cross-process propagation delay**: the web process writes the row (Server Settings → Web Server → Dash Wallboard), the dash process (`POLARIS_ROLE=dash`) reads it on every request through the cache, so a toggle lands within ~10s with no restart.
 
-**Public API:** `getDashSettings`, `saveDashSettings`, `invalidateDashSettingsCache`, `defaultDashSettings`, `DASH_SETTING_KEY`, `DashSettings`
+**Public API:** `getDashSettings`, `saveDashSettings`, `invalidateDashSettingsCache`, `defaultDashSettings`, `DASH_SETTING_KEY`, `DashSettings`, `DashIpScope`
 
-**Cross-service deps:** none (prisma only).
+**Cross-service deps:** `src/utils/cidr.ts` (`normalizeAllowlistCidr`), `AppError` (prisma otherwise).
 
-**Used by:** `src/dash/dashServer.ts` (per-request kill-switch + IP-scope decision), `src/api/routes/serverSettings.ts` (`GET/PUT /server-settings/dash`).
+**Used by:** `src/dash/dashServer.ts` (per-request kill-switch + `isSourceAllowed` scope decision), `src/api/routes/serverSettings.ts` (`GET/PUT /server-settings/dash`).
 
 **Invariants:**
 - `enabled` defaults FALSE — a new unauthenticated surface must never silently appear on upgrade; the operator flips it on once.
-- Parsing is tolerant: a garbage/wrong-typed row falls back per-field to the safe defaults (never throws on read).
+- Parsing is tolerant: a garbage/wrong-typed row falls back per-field to the safe defaults (never throws on read); a legacy `rfc1918Only` boolean migrates to `ipScope` (true→rfc1918, false→all). Invalid stored CIDRs are dropped on parse.
+- `saveDashSettings` validates + normalizes custom CIDRs (throws 400 on an invalid entry) and REJECTS an enabled+custom+empty list (would lock every viewer out). Disabling is the way to turn the surface off.
 - Writes invalidate the cache synchronously in the writing process; the OTHER process converges via TTL expiry — don't assume immediate cross-process visibility.
 
 **When changing this:**
-- New fields need a default + tolerant parse + merge handling, AND the Certificates-tab card (`public/js/server-settings.js` `dashCardHtml`/`handleDashSave`) + the `PUT /server-settings/dash` Zod schema updated in lockstep.
+- New fields need a default + tolerant parse + merge handling, AND the Web-Server-tab card (`public/js/server-settings.js` `dashCardHtml`/`handleDashSave`) + the `PUT /server-settings/dash` Zod schema updated in lockstep.
 - Don't lengthen the TTL casually — it's the operator-visible latency of the kill-switch.
+- The gate DROPS unauthorized sources (socket destroy in dashServer, not a 403) — keep that stealth posture in mind when touching the scope decision.
 
 ---
 

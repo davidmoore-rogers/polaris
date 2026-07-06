@@ -1,5 +1,7 @@
 /**
- * public/js/server-settings.js — Server Settings page (NTP + Certificates + Database)
+ * public/js/server-settings.js — Server Settings page (NTP + Web Server + Database).
+ * Note: the "Web Server" tab keeps the internal key `certificates` (data-tab,
+ * loadCertificates) from before it was renamed — only its label changed.
  */
 
 document.addEventListener("DOMContentLoaded", function () {
@@ -657,7 +659,7 @@ async function refreshOuiDatabase() {
   }
 }
 
-// ─── Certificates Tab ───────────────────────────────────────────────────────
+// ─── Web Server Tab (internal key "certificates") ────────────────────────────
 
 var _certsLoaded = false;
 var _certData = { trustedCAs: [], serverCerts: [] };
@@ -665,7 +667,7 @@ var _httpsSettings = { fingerprint: null, cn: null, dnsSans: [], ipSans: [], exp
 var _proxyData = null;
 var _dashSettings = null; // { enabled, rfc1918Only } | null while loading/failed
 
-// Render the Certificates tab. nginx terminates TLS — four stacked cards:
+// Render the Web Server tab (data-tab="certificates"). nginx terminates TLS — four stacked cards:
 // HTTPS Certificate (read-only metadata + Rotate button), nginx Proxy (the
 // six operator-settable directives: HTTPS port, HTTP/3, TLS protocols, HSTS,
 // Prometheus allow-list, with a Save & Apply button), Dash Wallboard (the
@@ -816,13 +818,15 @@ function renderCertsTab(container) {
   // the setting within ~10s, no restart needed. PUT is serverSettingsSystem
   // fullwrite-gated server-side.
   var d = _dashSettings; // null = load failed (endpoint gated or older server)
+  var dScope = (d && d.ipScope) || "rfc1918";
+  var dCidrs = (d && Array.isArray(d.allowedCidrs)) ? d.allowedCidrs.join(", ") : "";
   var dashCardHtml =
     '<div class="settings-card">' +
       '<h4>Dash Wallboard</h4>' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
         'A read-only, no-login duplicate of the Dashboard at <code>/dash</code> for NOC wallboards and kiosks. ' +
         'It answers with the built-in <code>readonly</code> role\'s permissions; widget layout is saved in each ' +
-        'viewer\'s browser. Changes take effect within ~10 seconds.' +
+        'viewer\'s browser. Requests from disallowed source IPs are dropped (no response). Changes take effect within ~10 seconds.' +
       '</p>' +
       (d === null
         ? '<p style="font-size:0.85rem;color:var(--color-text-secondary)">Unavailable — could not load the Dash settings.</p>'
@@ -832,10 +836,16 @@ function renderCertsTab(container) {
           '<div class="form-group">' +
             '<label>Allowed source IPs</label>' +
             '<div style="display:flex;flex-direction:column;gap:0.3rem;margin-top:0.3rem">' +
-              '<label><input type="radio" name="dash-ip-scope" value="rfc1918"' + (d.rfc1918Only ? " checked" : "") + '> Private networks only (RFC1918 + loopback)</label>' +
-              '<label><input type="radio" name="dash-ip-scope" value="all"' + (!d.rfc1918Only ? " checked" : "") + '> All source IPs</label>' +
+              '<label><input type="radio" name="dash-ip-scope" value="rfc1918"' + (dScope === "rfc1918" ? " checked" : "") + '> Private networks only (RFC1918 + loopback)</label>' +
+              '<label><input type="radio" name="dash-ip-scope" value="all"' + (dScope === "all" ? " checked" : "") + '> All source IPs</label>' +
+              '<label><input type="radio" name="dash-ip-scope" value="custom"' + (dScope === "custom" ? " checked" : "") + '> Custom networks</label>' +
             '</div>' +
-            '<div id="dash-allip-warning" style="font-size:0.78rem;color:#f59e0b;margin-top:0.3rem;' + (d.rfc1918Only ? "display:none" : "") + '">' +
+            '<div id="dash-custom-cidrs" style="margin-top:0.4rem;' + (dScope === "custom" ? "" : "display:none") + '">' +
+              '<textarea id="dash-allowed-cidrs" rows="3" placeholder="10.0.0.0/8, 192.168.10.0/24, 203.0.113.5" ' +
+                'style="width:100%;font-family:monospace">' + escapeHtml(dCidrs) + '</textarea>' +
+              '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-top:0.2rem">Comma- or newline-separated IPv4 networks (CIDR) or addresses. A bare address is treated as /32. Only these sources are served.</div>' +
+            '</div>' +
+            '<div id="dash-allip-warning" style="font-size:0.78rem;color:#f59e0b;margin-top:0.3rem;' + (dScope === "all" ? "" : "display:none") + '">' +
               'All-IPs means ANY host that can reach this server can view the wallboard (asset names, IPs, alert feeds) without logging in.' +
             '</div>' +
           '</div>' +
@@ -868,8 +878,11 @@ function renderCertsTab(container) {
   if (dashSaveBtn) dashSaveBtn.addEventListener("click", handleDashSave);
   document.querySelectorAll('input[name="dash-ip-scope"]').forEach(function (radio) {
     radio.addEventListener("change", function () {
+      if (!this.checked) return;
       var warn = document.getElementById("dash-allip-warning");
-      if (warn) warn.style.display = this.value === "all" && this.checked ? "" : "none";
+      if (warn) warn.style.display = this.value === "all" ? "" : "none";
+      var custom = document.getElementById("dash-custom-cidrs");
+      if (custom) custom.style.display = this.value === "custom" ? "" : "none";
     });
   });
 
@@ -902,15 +915,27 @@ function renderCertsTab(container) {
 
 async function handleDashSave() {
   var enabled = !!document.getElementById("dash-enabled").checked;
-  var scope = document.querySelector('input[name="dash-ip-scope"]:checked');
-  var rfc1918Only = !scope || scope.value !== "all";
-  if (enabled && !rfc1918Only &&
+  var scopeEl = document.querySelector('input[name="dash-ip-scope"]:checked');
+  var ipScope = scopeEl ? scopeEl.value : "rfc1918";
+
+  var allowedCidrs = [];
+  if (ipScope === "custom") {
+    var raw = (document.getElementById("dash-allowed-cidrs") || {}).value || "";
+    allowedCidrs = raw.split(/[\s,]+/).map(function (s) { return s.trim(); }).filter(Boolean);
+    if (enabled && allowedCidrs.length === 0) {
+      showToast("Add at least one network, or an empty list would block every viewer.", "error");
+      return;
+    }
+  }
+
+  if (enabled && ipScope === "all" &&
       !confirm("Allow ALL source IPs to view the Dash wallboard without logging in?")) {
     return;
   }
+
   try {
-    var result = await api.serverSettings.dashPut({ enabled: enabled, rfc1918Only: rfc1918Only });
-    _dashSettings = (result && result.dash) || { enabled: enabled, rfc1918Only: rfc1918Only };
+    var result = await api.serverSettings.dashPut({ enabled: enabled, ipScope: ipScope, allowedCidrs: allowedCidrs });
+    _dashSettings = (result && result.dash) || { enabled: enabled, ipScope: ipScope, allowedCidrs: allowedCidrs };
     showToast(enabled ? "Dash wallboard enabled" : "Dash wallboard disabled");
   } catch (err) {
     showToast("Failed to save Dash settings: " + (err.message || err), "error");

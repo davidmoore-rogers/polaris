@@ -450,7 +450,7 @@ Browse to `http://<host>:3000` to run the setup wizard.
 
 Windows runs single-process (`POLARIS_ROLE` unset = `all`), so the Dash
 wallboard listener boots in-process and serves `http://<host>:3001/dash`
-once enabled under Server Settings → Certificates → Dash Wallboard (no
+once enabled under Server Settings → Web Server → Dash Wallboard (no
 separate service; open TCP/3001 in Windows Firewall if wallboard viewers
 are remote).
 
@@ -480,12 +480,14 @@ The roles (chosen per-process via `POLARIS_ROLE`):
   `https://<host>/dash` for NOC wallboards/kiosks, isolated in its own process
   so a bug in the unauthenticated surface can't touch sessions or write paths.
   The surface ships **disabled** — an admin enables it (and picks the
-  source-IP scope: RFC1918 + loopback only, or all IPs) under Server Settings
-  → Certificates → Dash Wallboard; changes reach the dash process within ~10s.
-  It answers with the built-in `readonly` role's permissions; each viewer's
-  widget layout is saved in their own browser (localStorage). nginx's `/dash`
-  location proxies to it unconditionally, so keep the unit running even while
-  the surface is disabled (disabled = the process answers 403).
+  source-IP scope: RFC1918 + loopback only, all IPs, or a custom IPv4-CIDR
+  allow-list) under Server Settings → Web Server → Dash Wallboard; changes
+  reach the dash process within ~10s. Requests from disallowed source IPs are
+  **silently dropped** (the connection is reset, no response). It answers with
+  the built-in `readonly` role's permissions; each viewer's widget layout is
+  saved in their own browser (localStorage). nginx's `/dash` location proxies
+  to it unconditionally, so keep the unit running even while the surface is
+  disabled (disabled = the process answers 403).
 - **migrate** — oneshot `prisma migrate deploy` at boot; the app services gate on its completion.
 
 The `all` role still exists in `src/utils/role.ts` (one process runs every
@@ -722,7 +724,7 @@ What it does in order:
    a separate broken-Polaris problem).
 6. Installs the in-app nginx GUI helpers:
    `/usr/local/sbin/polaris-nginx-apply` (the privileged wrapper for the
-   Server Settings → Certificates GUI), `/etc/sudoers.d/polaris-nginx`
+   Server Settings → Web Server GUI), `/etc/sudoers.d/polaris-nginx`
    (narrow NOPASSWD grant on the one binary), `/etc/tmpfiles.d/polaris-nginx.conf`
    (staging dir entry), and adds the `polaris` user to the `nginx` group
    so the existing fingerprint pane can read the `0640 root:nginx` cert
@@ -737,7 +739,7 @@ What it does in order:
 
 ### After migration: the in-app nginx GUI
 
-Server Settings → Certificates now shows the in-app nginx GUI: the
+Server Settings → Web Server now shows the in-app nginx GUI: the
 **HTTPS Certificate** card (read-only metadata + a **Rotate certificate**
 button), an **nginx Proxy** card with the six controls (HTTPS port, HTTP/3
 toggle, TLS protocols, HSTS, Prometheus allow-list), the **Dash Wallboard**

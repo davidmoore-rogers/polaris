@@ -3972,7 +3972,7 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
             "Polaris doesn't know what URL to embed in the remote agent's agent.conf. " +
             "Set POLARIS_PUBLIC_URL in /opt/polaris/.env to your Polaris server's public URL " +
             "(e.g. https://polaris.example.com:3000) and restart Polaris, OR regenerate the " +
-            "HTTPS cert under Server Settings → Certificates with a CN/SAN matching the " +
+            "HTTPS cert under Server Settings → Web Server with a CN/SAN matching the " +
             "hostname remote hosts use to reach Polaris (the agent install path picks the " +
             "URL up from there automatically). Then retry the install.");
         }
