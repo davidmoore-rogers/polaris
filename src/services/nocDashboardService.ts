@@ -199,15 +199,22 @@ function gateOf(a: { assetType: string; hostname: string | null; learnedLocation
 /**
  * Feed 2b — down interfaces. Interfaces that are administratively UP but
  * operationally DOWN (a real link fault, not an operator-disabled port),
- * grouped by the gate they live on. Two queries, flat at 2000 assets:
- *   1. ONE windowed single-pass CTE over asset_interface_samples: latest sample
- *      per (asset, ifName) via row_number(), plus each interface's last "up"
- *      timestamp via a filtered window aggregate (for the "down for" duration).
- *      The time window keeps the hypertable scan inside recent (chunk-excluded)
- *      data; interface samples only exist for interface-polled assets (a
- *      network-gear subset), so the scan stays small. The 4h default window
- *      comfortably contains the latest full interface scrape at the default
- *      600s systemInfo cadence even when an operator slows it.
+ * restricted to interfaces SELECTED FOR MONITORING (the asset's pinned
+ * `monitoredInterfaces` list — the full system-info scrape samples every
+ * interface, so without the pin filter every idle unpinned port would show as
+ * an outage), grouped by the gate they live on. Two queries, flat at 2000
+ * assets:
+ *   1. ONE windowed single-pass CTE over asset_interface_samples joined to
+ *      assets on `ifName = ANY(monitoredInterfaces)` (the pin filter runs
+ *      BEFORE the window + LIMIT so pinned-down rows can't be crowded out by
+ *      unpinned noise): latest sample per (asset, ifName) via row_number(),
+ *      plus each interface's last "up" timestamp via a filtered window
+ *      aggregate (for the "down for" duration). The time window keeps the
+ *      hypertable scan inside recent (chunk-excluded) data; interface samples
+ *      only exist for interface-polled assets (a network-gear subset), so the
+ *      scan stays small. The 4h default window comfortably contains the latest
+ *      full interface scrape at the default 600s systemInfo cadence even when
+ *      an operator slows it.
  *   2. ONE findMany over the (small) set of assets that own a down interface,
  *      scoped to monitored + non-suppressed — an interface whose owning asset
  *      is unmonitored / suppressed / decommissioned drops out here (those assets
@@ -226,6 +233,7 @@ export async function getDownInterfaces(limit: number | null = 100, sinceMinutes
               max(s."timestamp") FILTER (WHERE s."operStatus" = 'up')
                 OVER (PARTITION BY s."assetId", s."ifName") AS "lastUpAt"
        FROM "asset_interface_samples" s
+       JOIN "assets" a ON a."id" = s."assetId" AND s."ifName" = ANY(a."monitoredInterfaces")
        WHERE s."timestamp" > now() - ($1 || ' minutes')::interval${idClause}
      )
      SELECT "assetId", "ifName", "ifLabel", "lastUpAt"

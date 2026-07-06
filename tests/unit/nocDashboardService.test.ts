@@ -106,6 +106,13 @@ describe("getDownInterfaces", () => {
     expect(r[1].ifLabel).toBeNull();
   });
 
+  it("restricts to interfaces selected for monitoring (pin filter inside the SQL, before the LIMIT)", async () => {
+    rawUnsafe.mockResolvedValueOnce([]);
+    await noc.getDownInterfaces();
+    const sql = rawUnsafe.mock.calls[0][0] as string;
+    expect(sql).toContain(`s."ifName" = ANY(a."monitoredInterfaces")`);
+  });
+
   it("returns empty without hitting findMany when no interface is down", async () => {
     rawUnsafe.mockResolvedValueOnce([]);
     const r = await noc.getDownInterfaces();
