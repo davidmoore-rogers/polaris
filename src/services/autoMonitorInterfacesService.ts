@@ -36,6 +36,18 @@
  * additive on BOTH fields: it never strips existing pins. This is deliberate;
  * both arrays are operator-owned and removing items on every discovery would
  * surprise anyone who pinned something by hand.
+ *
+ * Dead-parent exclusion: an IPsec tunnel whose phase-1 parent interface
+ * (`AssetIpsecTunnelSample.parentInterface`, e.g. "wan2") is currently DOWN
+ * and holds no usable IP address (null / "" / "0.0.0.0") can never establish —
+ * the underlay link is unprovisioned or unplugged, not merely flapping. Such
+ * tunnels are never auto-pinned, by ANY selection block (including byNames and
+ * byTypes+includeDownTunnels). `mergeTunnelsIntoInterfaces` stamps
+ * `parentDownNoIp` on the tunnel row and `resolvePinnedInterfaces` drops those
+ * rows up front. A parent that is down but still holds an IP does NOT trigger
+ * the exclusion — that's a real link that flapped, and `includeDownTunnels`
+ * exists precisely to watch its tunnels. Operators can still pin a dead-parent
+ * tunnel by hand on the asset (apply is additive and never strips).
  */
 
 import { prisma } from "../db.js";
@@ -96,6 +108,13 @@ export interface ResolverInterface {
   ifType: string | null;
   operStatus: string | null;
   /**
+   * Interface IP as last sampled (FortiOS REST reports "0.0.0.0" for an
+   * unaddressed port; SNMP/agent paths may leave it null). Only consulted by
+   * `mergeTunnelsIntoInterfaces` to judge a tunnel's parent link — the
+   * resolver blocks never filter on it directly.
+   */
+  ipAddress?: string | null;
+  /**
    * True only for synthetic rows produced by `mergeTunnelsIntoInterfaces` —
    * i.e. FortiOS phase1-interface IPsec tunnels surfaced from
    * asset_ipsec_tunnel_samples. Drives write-time routing: a pinned name
@@ -105,6 +124,14 @@ export interface ResolverInterface {
    * `splitPinsByProvenance` and the module header.
    */
   isIpsecTunnel?: boolean;
+  /**
+   * Set by `mergeTunnelsIntoInterfaces` on IPsec tunnel rows whose phase-1
+   * parent interface is currently down AND has no usable IP (null / "" /
+   * "0.0.0.0") — an underlay that can't carry the tunnel at all.
+   * `resolvePinnedInterfaces` excludes such rows from every selection block;
+   * see the module header ("Dead-parent exclusion").
+   */
+  parentDownNoIp?: boolean;
 }
 
 /**
@@ -191,6 +218,15 @@ export function resolvePinnedInterfaces(
 ): string[] {
   if (!selection) return [];
   if (!interfaces || interfaces.length === 0) return [];
+
+  // Dead-parent exclusion (module header): an IPsec tunnel riding a parent
+  // interface that is down with no IP can never establish, so it is invisible
+  // to EVERY block — byNames' "up/down ignored" and byTypes'
+  // includeDownTunnels both apply only to the tunnel's own state, not to a
+  // structurally dead underlay. Hand-pins on the asset are unaffected (the
+  // apply pass is additive and never strips).
+  interfaces = interfaces.filter((i) => i.parentDownNoIp !== true);
+  if (interfaces.length === 0) return [];
 
   const picked = new Set<string>();
 
@@ -283,6 +319,24 @@ export interface TunnelObservation {
   tunnelName: string;
   /** Phase-1 rollup status: "up" | "down" | "partial" | "dynamic". */
   status: string | null;
+  /**
+   * Phase-1 `interface` from the FortiOS CMDB — the underlay port the tunnel
+   * rides (e.g. "wan1"). Null/absent when the CMDB endpoint was unreachable.
+   * Used to evaluate the dead-parent exclusion against the real interface
+   * rows already in the asset's list.
+   */
+  parentInterface?: string | null;
+}
+
+/**
+ * True when a sampled interface IP gives no evidence of a usable address:
+ * never sampled (null), empty, or the FortiOS "unaddressed" placeholder
+ * 0.0.0.0 (with or without a trailing mask, e.g. "0.0.0.0 0.0.0.0").
+ */
+function hasNoUsableIp(ip: string | null | undefined): boolean {
+  if (ip == null) return true;
+  const first = ip.trim().split(/[\s/]/)[0];
+  return first === "" || first === "0.0.0.0";
 }
 
 /**
@@ -317,6 +371,13 @@ export interface TunnelObservation {
  * / dynamic all map to "up" so the "only currently-up" filter on By type /
  * By pattern keeps healthy-but-not-fully-up tunnels (dial-up server templates
  * report "dynamic" and are operational by design).
+ *
+ * Dead-parent stamping: when the tunnel's `parentInterface` resolves to a real
+ * interface row on the same asset that is down with no usable IP, the tunnel
+ * row (synthetic or collided-real) is stamped `parentDownNoIp: true` so the
+ * resolver excludes it from every block. A parent that is missing from the
+ * list, has unknown operStatus, or is down but still addressed does NOT
+ * trigger the exclusion — only positive evidence of a dead underlay does.
  */
 export function mergeTunnelsIntoInterfaces(
   interfacesByAsset: Map<string, ResolverInterface[]>,
@@ -331,6 +392,13 @@ export function mergeTunnelsIntoInterfaces(
       if (!t.tunnelName) continue;
       // SA status wins: fully-down SA → "down"; up/partial/dynamic/null → "up".
       const saOperStatus = t.status === "down" ? "down" : "up";
+      // Dead-parent check: parent row present, oper-down, and no usable IP.
+      const parent = t.parentInterface ? byName.get(t.parentInterface) : undefined;
+      const parentDead =
+        parent !== undefined &&
+        !parent.isIpsecTunnel &&
+        parent.operStatus === "down" &&
+        hasNoUsableIp(parent.ipAddress);
       const existingRow = byName.get(t.tunnelName);
       if (existingRow) {
         // Real interface row for this tunnel (e.g. always-"up" SNMP IF-MIB):
@@ -338,6 +406,7 @@ export function mergeTunnelsIntoInterfaces(
         existingRow.operStatus = saOperStatus;
         existingRow.isIpsecTunnel = true;
         if (existingRow.ifType == null) existingRow.ifType = "tunnel";
+        if (parentDead) existingRow.parentDownNoIp = true;
         continue;
       }
       const row: ResolverInterface = {
@@ -346,6 +415,7 @@ export function mergeTunnelsIntoInterfaces(
         operStatus:    saOperStatus,
         isIpsecTunnel: true,
       };
+      if (parentDead) row.parentDownNoIp = true;
       list.push(row);
       byName.set(t.tunnelName, row);
     }
@@ -383,9 +453,10 @@ async function loadLatestInterfaces(
     ifName: string;
     ifType: string | null;
     operStatus: string | null;
+    ipAddress: string | null;
   }>>`
     SELECT DISTINCT ON ("assetId", "ifName")
-      "assetId", "ifName", "ifType", "operStatus"
+      "assetId", "ifName", "ifType", "operStatus", "ipAddress"
     FROM asset_interface_samples
     WHERE "assetId" = ANY(${assetIds}::text[])
       AND "timestamp" > NOW() - INTERVAL '72 hours'
@@ -393,27 +464,28 @@ async function loadLatestInterfaces(
   `;
   // IPsec tunnels (fortigate only): same 72h-bounded DISTINCT ON shape so the
   // picker surfaces phase1-interface tunnels the REST monitor endpoint omits.
+  // parentInterface feeds the dead-parent exclusion in the merge helper.
   const tunnelsPromise = includeIpsecTunnels
-    ? prisma.$queryRaw<Array<{ assetId: string; tunnelName: string; status: string | null }>>`
+    ? prisma.$queryRaw<Array<{ assetId: string; tunnelName: string; status: string | null; parentInterface: string | null }>>`
         SELECT DISTINCT ON ("assetId", "tunnelName")
-          "assetId", "tunnelName", "status"
+          "assetId", "tunnelName", "status", "parentInterface"
         FROM asset_ipsec_tunnel_samples
         WHERE "assetId" = ANY(${assetIds}::text[])
           AND "timestamp" > NOW() - INTERVAL '72 hours'
         ORDER BY "assetId", "tunnelName", "timestamp" DESC
       `
-    : Promise.resolve([] as Array<{ assetId: string; tunnelName: string; status: string | null }>);
+    : Promise.resolve([] as Array<{ assetId: string; tunnelName: string; status: string | null; parentInterface: string | null }>);
 
   const [rows, tunnelRows] = await Promise.all([ifacesPromise, tunnelsPromise]);
   for (const r of rows) {
     if (!out.has(r.assetId)) out.set(r.assetId, []);
-    out.get(r.assetId)!.push({ ifName: r.ifName, ifType: r.ifType, operStatus: r.operStatus });
+    out.get(r.assetId)!.push({ ifName: r.ifName, ifType: r.ifType, operStatus: r.operStatus, ipAddress: r.ipAddress });
   }
   if (tunnelRows.length > 0) {
     const tunnelsByAsset = new Map<string, TunnelObservation[]>();
     for (const t of tunnelRows) {
       if (!tunnelsByAsset.has(t.assetId)) tunnelsByAsset.set(t.assetId, []);
-      tunnelsByAsset.get(t.assetId)!.push({ tunnelName: t.tunnelName, status: t.status });
+      tunnelsByAsset.get(t.assetId)!.push({ tunnelName: t.tunnelName, status: t.status, parentInterface: t.parentInterface });
     }
     mergeTunnelsIntoInterfaces(out, tunnelsByAsset);
   }

@@ -435,6 +435,102 @@ describe("mergeTunnelsIntoInterfaces", () => {
     expect(ifaces.get("a2")).toEqual([]); // a2 list created but blank name skipped
   });
 
+  describe("dead-parent exclusion (parent down + no IP)", () => {
+    // The reported scenario: Overlay-3/4 ride wan2, which is down with
+    // 0.0.0.0 — those tunnels can never establish and must not auto-pin.
+    // Overlay-1/2 ride wan1 (up, addressed) and behave as before.
+    function fleet(): ResolverInterface[] {
+      const ifaces = new Map<string, ResolverInterface[]>([
+        ["a1", [
+          { ifName: "wan1", ifType: "physical", operStatus: "up",   ipAddress: "153.66.90.176" },
+          { ifName: "wan2", ifType: "physical", operStatus: "down", ipAddress: "0.0.0.0" },
+        ]],
+      ]);
+      mergeTunnelsIntoInterfaces(ifaces, new Map([["a1", [
+        { tunnelName: "Overlay-1", status: "up",   parentInterface: "wan1" },
+        { tunnelName: "Overlay-3", status: "down", parentInterface: "wan2" },
+        { tunnelName: "Overlay-4", status: "down", parentInterface: "wan2" },
+      ]]]));
+      return ifaces.get("a1")!;
+    }
+
+    it("stamps parentDownNoIp only on tunnels whose parent is down with no IP", () => {
+      const byName = new Map(fleet().map((i) => [i.ifName, i]));
+      expect(byName.get("Overlay-1")!.parentDownNoIp).toBeUndefined();
+      expect(byName.get("Overlay-3")!.parentDownNoIp).toBe(true);
+      expect(byName.get("Overlay-4")!.parentDownNoIp).toBe(true);
+    });
+
+    it("excludes dead-parent tunnels from byTypes even with includeDownTunnels", () => {
+      const out = resolvePinnedInterfaces(
+        { byTypes: { types: ["tunnel"], onlyUp: true, includeDownTunnels: true } },
+        fleet(),
+      );
+      expect(out).toEqual(["Overlay-1"]);
+    });
+
+    it("excludes dead-parent tunnels from byNames and byPatterns", () => {
+      const list = fleet();
+      expect(resolvePinnedInterfaces({ byNames: { names: ["Overlay-3", "Overlay-1"] } }, list)).toEqual(["Overlay-1"]);
+      expect(
+        resolvePinnedInterfaces({ byPatterns: { patterns: ["Overlay-*"], regex: false, onlyUp: false } }, list),
+      ).toEqual(["Overlay-1"]);
+    });
+
+    it("does not exclude when the parent is down but still addressed (link flap)", () => {
+      const ifaces = new Map<string, ResolverInterface[]>([
+        ["a1", [{ ifName: "wan2", ifType: "physical", operStatus: "down", ipAddress: "198.51.100.7" }]],
+      ]);
+      mergeTunnelsIntoInterfaces(ifaces, new Map([["a1", [
+        { tunnelName: "Overlay-3", status: "down", parentInterface: "wan2" },
+      ]]]));
+      const list = ifaces.get("a1")!;
+      expect(list.find((i) => i.ifName === "Overlay-3")!.parentDownNoIp).toBeUndefined();
+      expect(
+        resolvePinnedInterfaces({ byTypes: { types: ["tunnel"], onlyUp: true, includeDownTunnels: true } }, list),
+      ).toEqual(["Overlay-3"]);
+    });
+
+    it("does not exclude when the parent row is missing or parentInterface is null", () => {
+      const ifaces = new Map<string, ResolverInterface[]>([["a1", []]]);
+      mergeTunnelsIntoInterfaces(ifaces, new Map([["a1", [
+        { tunnelName: "t_orphan", status: "down", parentInterface: "wan9" },
+        { tunnelName: "t_nullp",  status: "down", parentInterface: null },
+      ]]]));
+      const out = resolvePinnedInterfaces(
+        { byTypes: { types: ["tunnel"], onlyUp: false } },
+        ifaces.get("a1")!,
+      );
+      expect(out.sort()).toEqual(["t_nullp", "t_orphan"]);
+    });
+
+    it("treats a null-IP down parent as dead (transport never reports IPs but link is down)", () => {
+      const ifaces = new Map<string, ResolverInterface[]>([
+        ["a1", [{ ifName: "wan2", ifType: "physical", operStatus: "down", ipAddress: null }]],
+      ]);
+      mergeTunnelsIntoInterfaces(ifaces, new Map([["a1", [
+        { tunnelName: "Overlay-3", status: "down", parentInterface: "wan2" },
+      ]]]));
+      expect(ifaces.get("a1")!.find((i) => i.ifName === "Overlay-3")!.parentDownNoIp).toBe(true);
+    });
+
+    it("stamps the flag on a collided real IF-MIB tunnel row too", () => {
+      const ifaces = new Map<string, ResolverInterface[]>([
+        ["a1", [
+          { ifName: "wan2", ifType: "physical", operStatus: "down", ipAddress: "0.0.0.0" },
+          iface("Overlay-3", "tunnel", true), // SNMP row, lies "up"
+        ]],
+      ]);
+      mergeTunnelsIntoInterfaces(ifaces, new Map([["a1", [
+        { tunnelName: "Overlay-3", status: "down", parentInterface: "wan2" },
+      ]]]));
+      const row = ifaces.get("a1")!.find((i) => i.ifName === "Overlay-3")!;
+      expect(row.parentDownNoIp).toBe(true);
+      expect(row.isIpsecTunnel).toBe(true);
+      expect(resolvePinnedInterfaces({ byNames: { names: ["Overlay-3"] } }, ifaces.get("a1")!)).toEqual([]);
+    });
+  });
+
   it("makes synthetic tunnels resolvable by name and by type", () => {
     const ifaces = new Map<string, ResolverInterface[]>([["a1", [iface("wan1")]]]);
     mergeTunnelsIntoInterfaces(ifaces, new Map([["a1", [tn("VPN_HQ"), tn("VPN_DR", "down")]]]));
