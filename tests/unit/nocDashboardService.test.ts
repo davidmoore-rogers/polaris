@@ -190,6 +190,19 @@ describe("getHighestCpu", () => {
     expect(r.map((x) => x.id)).toEqual(["a", "b"]); // 'gone' filtered, order kept
     expect(r[0].value).toBe(91.3);
   });
+
+  it("attaches a site label (location > learnedLocation > snmpLocation > (unknown)) for Group-by-Site", async () => {
+    rawUnsafe.mockResolvedValueOnce([
+      { assetId: "a", value: 90 },
+      { assetId: "b", value: 80 },
+    ]);
+    findMany.mockResolvedValueOnce([
+      { id: "a", hostname: "host-a", ipAddress: null, location: null, learnedLocation: "fgt-plant-a", snmpLocation: null },
+      { id: "b", hostname: "host-b", ipAddress: null, location: null, learnedLocation: null, snmpLocation: null },
+    ]);
+    const r = await noc.getHighestCpu();
+    expect(r.map((x) => x.site)).toEqual(["fgt-plant-a", "(unknown)"]);
+  });
 });
 
 describe("getPacketLoss", () => {

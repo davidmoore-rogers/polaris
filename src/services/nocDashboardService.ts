@@ -363,23 +363,25 @@ export async function getDownIpsecTunnels(limit: number | null = 100, sinceMinut
   return out;
 }
 
-export interface TopNRow { id: string; hostname: string | null; ipAddress: string | null; value: number; detail?: string }
+export interface TopNRow { id: string; hostname: string | null; ipAddress: string | null; value: number; detail?: string; site?: string }
 
 // Hydrate a list of assetIds (preserving the incoming order) with display
-// names in ONE findMany — never a per-row lookup.
+// names in ONE findMany — never a per-row lookup. `site` uses the same
+// location > learnedLocation > snmpLocation coalesce as Down Nodes so the
+// top-N widgets' "Group by: Site" buckets match across widgets.
 async function hydrateNames(ordered: Array<{ assetId: string; value: number }>): Promise<TopNRow[]> {
   if (ordered.length === 0) return [];
   const ids = ordered.map((r) => r.assetId);
   const assets = await prisma.asset.findMany({
     where: { id: { in: ids } },
-    select: { id: true, hostname: true, ipAddress: true },
+    select: { id: true, hostname: true, ipAddress: true, location: true, learnedLocation: true, snmpLocation: true },
   });
   const byId = new Map(assets.map((a) => [a.id, a]));
   return ordered
-    .map((r) => {
+    .map((r): TopNRow | null => {
       const a = byId.get(r.assetId);
       if (!a) return null;
-      return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: r.value };
+      return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: r.value, site: siteOf(a) };
     })
     .filter((r): r is TopNRow => r !== null);
 }
@@ -505,14 +507,14 @@ export async function getHighestDiskUsage(limit: number | null = 100, assetIds: 
   const ids = Array.from(new Set(rows.map((r) => r.assetId)));
   const assets = await prisma.asset.findMany({
     where: { id: { in: ids } },
-    select: { id: true, hostname: true, ipAddress: true },
+    select: { id: true, hostname: true, ipAddress: true, location: true, learnedLocation: true, snmpLocation: true },
   });
   const byId = new Map(assets.map((a) => [a.id, a]));
   return rows
     .map((r): TopNRow | null => {
       const a = byId.get(r.assetId);
       if (!a) return null;
-      return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: Math.round(r.pct * 10) / 10, detail: r.mountPath };
+      return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: Math.round(r.pct * 10) / 10, detail: r.mountPath, site: siteOf(a) };
     })
     .filter((r): r is TopNRow => r !== null);
 }
@@ -548,14 +550,14 @@ export async function getHighestTemperature(limit: number | null = 100, assetIds
   const ids = Array.from(new Set(rows.map((r) => r.assetId)));
   const assets = await prisma.asset.findMany({
     where: { id: { in: ids } },
-    select: { id: true, hostname: true, ipAddress: true },
+    select: { id: true, hostname: true, ipAddress: true, location: true, learnedLocation: true, snmpLocation: true },
   });
   const byId = new Map(assets.map((a) => [a.id, a]));
   return rows
     .map((r): TopNRow | null => {
       const a = byId.get(r.assetId);
       if (!a) return null;
-      return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: Math.round(r.value * 10) / 10, detail: r.sensorName };
+      return { id: a.id, hostname: a.hostname, ipAddress: a.ipAddress, value: Math.round(r.value * 10) / 10, detail: r.sensorName, site: siteOf(a) };
     })
     .filter((r): r is TopNRow => r !== null);
 }

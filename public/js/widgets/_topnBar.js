@@ -2,10 +2,12 @@
  * widgets/_topnBar.js — shared renderer for the NOC top-N metric widgets
  * (Highest CPU, Highest Memory, Slowest Response, Packet Loss, Highest Disk
  * Usage, Highest Temperature). These are structurally identical: a ranked
- * list of { id, hostname, ipAddress, value }
+ * list of { id, hostname, ipAddress, value, detail?, site? }
  * rows drawn as a name + utilization bar + value, with per-widget units, color
- * thresholds, and an optional value floor. Underscore-prefixed = internal
- * helper; it registers no widget of its own.
+ * thresholds, an optional value floor, and an optional Group-by-Site view
+ * (gear option; buckets the ranked rows under site headers, groups ordered
+ * by their hottest row). Underscore-prefixed = internal helper; it registers
+ * no widget of its own.
  *
  * Exposes window.PolarisTopN.{ renderRows, renderConfig, pickColor }.
  */
@@ -67,12 +69,13 @@
       return;
     }
     // Percentages scale against a fixed 100; latency scales against the max in
-    // the visible set so the slowest node fills the bar.
+    // the visible set so the slowest node fills the bar. Computed over the
+    // FULL visible set (not per group) so bars stay comparable across groups.
     var scaleMax = opts.unit === "%"
       ? 100
       : (Math.max.apply(null, shown.map(function (r) { return r.value || 0; })) || 1);
 
-    el.innerHTML = shown.map(function (r) {
+    function rowHTML(r) {
       var v = r.value || 0;
       var pct = Math.min(100, Math.round((v / scaleMax) * 100));
       var color = pickColor(v, opts.thresholds, opts.baseColor);
@@ -92,7 +95,34 @@
         '<div class="util-bar-track"><div class="util-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>' +
         '<span style="font-size:0.82rem;text-align:right;color:var(--color-text-secondary)">' + label + '</span>' +
       "</" + tag + ">";
-    }).join("");
+    }
+
+    // Group by site (gear option, default off): bucket the already-ranked
+    // rows preserving first-seen order, so groups sort by their hottest row
+    // — the site with the worst offender leads. Row limit / red guarantee /
+    // threshold were all applied BEFORE grouping (grouping only changes
+    // presentation, never which rows qualify). Same group-header markup as
+    // Down Nodes / Down Interfaces, with a neutral count pill (these are
+    // rankings, not alarms).
+    if ((cfg.groupBy || "none") === "site") {
+      var groups = {};
+      var order = [];
+      shown.forEach(function (r) {
+        var k = r.site || "(unknown)";
+        if (!groups[k]) { groups[k] = []; order.push(k); }
+        groups[k].push(r);
+      });
+      el.innerHTML = order.map(function (k) {
+        var list = groups[k];
+        return '<div class="dash-alert-group-header" style="display:flex;align-items:center;gap:8px;margin:6px 0 4px;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.03em;color:var(--color-text-secondary)">' +
+          '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(k) + '</span>' +
+          '<span class="widget-pill">' + list.length + '</span>' +
+        '</div>' + list.map(rowHTML).join("");
+      }).join("");
+      return;
+    }
+
+    el.innerHTML = shown.map(rowHTML).join("");
   }
 
   /**
@@ -102,9 +132,14 @@
    */
   function renderConfig(el, config, onChange, opts) {
     opts = opts || {};
-    // Row-limit control (defaults to the 20-row NOC view) plus the optional
-    // threshold floor.
+    // Group-by (site buckets, default off) + row-limit control (defaults to
+    // the 20-row NOC view) plus the optional threshold floor.
     var html =
+      '<label>Group by</label>' +
+      '<select data-k="groupBy">' +
+        '<option value="none"' + ((config.groupBy || "none") === "none" ? " selected" : "") + '>None</option>' +
+        '<option value="site"' + (config.groupBy === "site" ? " selected" : "") + '>Site</option>' +
+      '</select>' +
       '<label>Row limit</label>' +
       '<select data-k="rowLimit">' + PolarisWidgets.rowLimitOptionsHTML(config.rowLimit == null ? 20 : config.rowLimit) + '</select>';
     if (opts.thresholdOptions) {
@@ -122,6 +157,8 @@
         var k = s.getAttribute("data-k");
         if (k === "threshold") {
           onChange("threshold", s.value === "" ? null : parseFloat(s.value));
+        } else if (k === "groupBy") {
+          onChange("groupBy", s.value);
         } else {
           onChange("rowLimit", PolarisWidgets.parseRowLimit(s.value));
         }
