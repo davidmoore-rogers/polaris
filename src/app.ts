@@ -26,6 +26,8 @@ import { isProxyMode } from "./utils/proxyMode.js";
 import { UPLOADS_DIR } from "./utils/paths.js";
 import { isAzureSsoConfiguredAsync, getSsoSettings } from "./services/azureAuthService.js";
 import { isOidcEnabled } from "./services/oidcAuthService.js";
+import { isEntraProxyLoginAvailable } from "./services/entraProxyAuthService.js";
+import { stripUntrustedEntraProxyHeaders } from "./api/middleware/entraProxyHeaders.js";
 import {
   renderMetrics,
   startHttpRequestTimer,
@@ -390,6 +392,14 @@ const loginLimiter = rateLimit({
 app.use("/api/v1/auth/login", loginLimiter);
 app.use("/api/v1/auth/azure/login", loginLimiter);
 
+// ─── Entra App Proxy identity-header strip ──────────────────────────────────
+// The App Proxy header-SSO identity headers are unsigned; requests not
+// arriving from an allowlisted connector address must never be seen carrying
+// them. Mounted before every consumer (the auto-login redirect below and the
+// /api/v1/auth/entra-proxy routes). Defense in depth — the login route
+// re-validates trust itself and never relies on stripping alone.
+app.use(stripUntrustedEntraProxyHeaders);
+
 // HTTP → HTTPS redirect lived here in pre-Phase-4 Node-HTTPS mode. After
 // Phase 4, nginx owns redirects (configured in deploy/nginx/polaris.conf
 // via the optional `listen 80;` server block operators can enable); local
@@ -459,6 +469,17 @@ const PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 } as const;
 app.use(async (req, res, next) => {
   if (!protectedPages.includes(req.path)) return next();
   if (!req.session?.userId) {
+    // Entra App Proxy silent auto-login — highest precedence: identity
+    // headers surviving the strip middleware mean this request definitively
+    // came through an allowlisted connector, and the user already passed
+    // Entra pre-authentication, so they must never see the login page. The
+    // login route re-validates trust and, on any failure, redirects to
+    // /login.html (NOT in protectedPages) so this can never loop. Inherent
+    // to seamless SSO (same as skipLoginPage): navigating to any protected
+    // page after logout re-establishes the session.
+    if (await isEntraProxyLoginAvailable(req).catch(() => false)) {
+      return res.redirect("/api/v1/auth/entra-proxy/login?next=" + encodeURIComponent(req.originalUrl));
+    }
     // Skip login page: redirect unauthenticated users straight to SSO. Honors
     // either configured provider — SAML (Azure) takes precedence, OIDC is the
     // fallback. The flag is only ever set by an SSO-authenticated admin (see

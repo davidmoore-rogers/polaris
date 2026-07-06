@@ -72,6 +72,7 @@ Server Settings → Maintenance shows host CPU/RAM/disk, database size with samp
 - **Local accounts** — argon2id-hashed passwords with strength rules and per-account temporary lockout.
 - **TOTP second factor** — RFC 6238 enrollment via QR code, single-use backup codes, admin reset for lost devices.
 - **Azure SAML SSO** — auto-provisioning, single logout, optional skip-login-page redirect.
+- **OIDC, LDAP/AD, and Entra App Proxy SSO** — OpenID Connect (Auth-Code + PKCE), LDAP/Active Directory bind login, and header-based SSO for installs published through Microsoft Entra Application Proxy (source-IP-gated, unsigned-header trust model). IdP groups map to roles + region/other tags via Group Mappings (highest-privilege wins).
 - **Roles** — Admin, Network Admin, Assets Admin, User, Read-Only. Network and asset surfaces are role-scoped; users own the records they create.
 - **API tokens** — long-lived bearer tokens for external callers (e.g. SIEM-driven quarantine, NOC kiosks, read-only inventory consumers). Each token is bound to a role at creation and acts with exactly that role's permissions; per-token integration scoping is required when the role can push quarantine. The raw token is shown once at creation and only the argon2 hash is stored.
 

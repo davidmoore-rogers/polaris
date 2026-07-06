@@ -1900,15 +1900,16 @@ Listed alphabetically.
 
 **Cross-service deps:** permissions helpers (`normalizePermissions`, admin-equivalent check, highest-privilege picker), `logEvent`, `tagNormalize` (normalize + union).
 
-**Used by:** `src/services/ssoProvisioning.ts` + `src/api/routes/auth.ts` (`resolveGroupsToAccess` at login), `src/api/routes/groupMappings.ts` (CRUD, gated on `users=fullwrite`).
+**Used by:** `src/services/ssoProvisioning.ts` + `src/api/routes/auth.ts` (`resolveGroupsToAccess` at login), `src/api/routes/groupMappings.ts` (CRUD, gated on `users=fullwrite`), `src/services/regionScopeService.ts` (live `/auth/me` re-resolution keyed on `User.authProvider`).
 
 **Invariants:**
-- `normalizeGroupKey` is applied identically on write (stored key) and read (incoming claim) so matching never diverges; LDAP keys lowercase for case-insensitive match, OIDC/SAML trim-only.
+- `normalizeGroupKey` is applied identically on write (stored key) and read (incoming claim) so matching never diverges; LDAP + entra-proxy keys lowercase for case-insensitive match (entra-proxy = Entra group object-ID GUIDs), OIDC/SAML trim-only.
 - Enabled-mappings cache invalidates on every write; highest-privilege role chosen when matched groups disagree.
 - A mapping pointing at an admin-equivalent role emits a warning Event (the audit trail for IdP→admin paths); a `roleId=null` tag-only mapping contributes tags without a role.
+- `GROUP_MAPPING_PROVIDERS` (`oidc`/`ldap`/`saml`/`entra-proxy`) is the single source of truth — `groupMappings.ts`'s `ProviderSchema` and `regionScopeService`'s lookup both key off `User.authProvider`, so a login provider's stored `authProvider` string MUST equal its `GROUP_MAPPING_PROVIDERS` entry or group tags silently never resolve.
 
 **When changing this:**
-- Changing `GROUP_MAPPING_PROVIDERS` needs a migration; `normalizeGroupKey` changes risk breaking already-stored keys.
+- Adding to `GROUP_MAPPING_PROVIDERS` is code-only (no `GroupMapping` schema migration — `provider` is a free-form string); ensure the new provider's login path stores a matching `authProvider`. `normalizeGroupKey` changes risk breaking already-stored keys.
 
 ---
 
@@ -1974,21 +1975,44 @@ Listed alphabetically.
 
 ## services/ssoProvisioning.ts
 
-**What it owns:** Shared find-or-provision for OIDC and LDAP users — resolves IdP groups to role + tags, matches or creates the Polaris user, applies the highest-privilege role, and records normalized groups in `User.ssoGroups`.
+**What it owns:** Shared find-or-provision for OIDC, LDAP, and Entra App Proxy users — resolves IdP groups to role + tags, matches or creates the Polaris user, applies the highest-privilege role, records normalized groups in `User.ssoGroups`, and stamps `authProvider` to the current provider on every login.
 
 **Public API:** `provisionExternalUser`, `ExternalUserProfile`
 
 **Cross-service deps:** `groupMappingService` (`resolveGroupsToAccess`, `normalizeGroupKey`).
 
-**Used by:** `src/services/ldapAuthService.ts` and `src/services/oidcAuthService.ts` (find-or-provision).
+**Used by:** `src/services/ldapAuthService.ts`, `src/services/oidcAuthService.ts`, and `src/services/entraProxyAuthService.ts` (find-or-provision).
 
 **Invariants:**
 - `ssoGroups` capped (anti-bloat) and normalized per provider; they do NOT write to the user's own `regionTags`/`otherTags` (those stay operator-owned and union at read time).
 - Existing user: role overridden only when groups resolve a role (a manual admin assignment survives a no-match login); new user: group-resolved role else built-in `readonly`, always flagged `needsRoleReview`.
+- Existing-user update stamps `authProvider = provider` — a no-op for oidc/ldap (matched by their own id column) but the mechanism that converges a SAML-provisioned `azureOid` row onto `entra-proxy` so `/auth/me` re-resolves its ssoGroups under the right provider. A later SAML login leaves `authProvider`/`ssoGroups` untouched.
 - Username collisions resolve via base → base-provider → provider-externalId; SSO/LDAP users get a random placeholder password hash that is never checked at login.
 
 **When changing this:**
 - Don't change the role-override rule — a no-match login must never demote an existing admin.
+- `externalIdField` is a narrow union (`oidcSubject`/`ldapUid`/`azureOid`) — entra-proxy deliberately shares `azureOid` with SAML; keep the convergence behavior intentional.
+
+---
+
+## services/entraProxyAuthService.ts
+
+**What it owns:** Entra Application Proxy header-based SSO — settings (Setting key `entraProxy`, no secrets), the fail-closed source-IP trust gate, identity-header extraction, and find-or-provision (via `ssoProvisioning`, keyed on `azureOid`). The identity headers are UNSIGNED; the source-IP allowlist is the entire security boundary.
+
+**Public API:** `getEntraProxySettings`, `updateEntraProxySettings`, `clearEntraProxySettingsCache`, `isEntraProxyEnabled`, `isTrustedEntraProxySource`, `isEntraProxyLoginAvailable`, `identityHeaderNames`, `defaultIdentityHeaderNames`, `extractEntraProxyIdentity`, `findOrProvisionEntraProxyUser`, `testEntraProxyRequest`, `EntraProxySettings`
+
+**Cross-service deps:** `ssoProvisioning.provisionExternalUser`, `utils/ipAllowlist` (`ipMatchesAllowlist`, `isValidAllowlistEntry`).
+
+**Used by:** `src/api/routes/auth.ts` (`/auth/entra-proxy/*` config, login, settings, test), `src/api/middleware/entraProxyHeaders.ts` (strip decision), `src/app.ts` (silent auto-login availability check).
+
+**Invariants:**
+- Fail closed everywhere: empty allowlist ⇒ `isEntraProxyEnabled` false, `ipMatchesAllowlist` false; trust is checked against `req.ip` (trust-proxy resolved), NEVER the raw socket (always 127.0.0.1 behind nginx).
+- Header names are lowercased + charset-validated + denylisted (never `authorization`/`cookie`/`x-forwarded-*`/`host` — so the strip middleware can't delete infra headers); object-ID is lowercased + strict-GUID-validated; array-valued identity headers are rejected; identity comes from headers only (never query/body).
+- `authProvider` stored as `"entra-proxy"` must equal the `GROUP_MAPPING_PROVIDERS` entry (group-tag re-resolution) — `azureOid` is shared with `azureAuthService` (SAML) by design.
+- The login route re-validates trust independently; the strip middleware is defense-in-depth, not the gate. All login failures redirect to `/login.html` (unprotected) so the app.ts auto-login can't loop.
+
+**When changing this:**
+- Never accept identity from an unauthenticated/untrusted path; keep the empty-allowlist and denylist checks. If you change header defaults, update `defaultIdentityHeaderNames` (the fail-closed strip set) in lockstep.
 
 ---
 

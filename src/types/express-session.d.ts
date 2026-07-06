@@ -14,7 +14,7 @@ declare module "express-session" {
     role: string;
     roleId: string;
     roleSnapshot: SessionRoleSnapshot;
-    authProvider: string;   // "local" | "azure" | "oidc" | "ldap"
+    authProvider: string;   // "local" | "azure" | "oidc" | "ldap" | "entra-proxy"
     samlRelayState: string;   // CSRF token for SAML flow
     samlNameID: string;       // SAML NameID for logout
     samlSessionIndex: string; // SAML SessionIndex for logout

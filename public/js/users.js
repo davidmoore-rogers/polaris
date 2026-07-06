@@ -145,13 +145,30 @@ async function loadUsers() {
     // Decorate each row with a stable `totpEnabledSort` string so TableSF
     // can sort the 2FA column lexically (Enabled / Not set / IdP-managed).
     _usersRaw.forEach(function (u) {
-      u.totpEnabledSort = u.authProvider === "azure"
+      u.totpEnabledSort = isIdpManaged(u)
         ? "IdP-managed"
         : (u.totpEnabled ? "Enabled" : "Not set");
     });
     renderUsersBody();
   } catch (err) {
     tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+  }
+}
+
+// A user whose identity + credentials are owned by an external IdP (SSO/LDAP);
+// Polaris shows no local password or TOTP controls for them. Every non-local
+// authProvider qualifies (azure / oidc / ldap / entra-proxy).
+function isIdpManaged(u) {
+  return !!u.authProvider && u.authProvider !== "local";
+}
+
+function idpProviderLabel(provider) {
+  switch (provider) {
+    case "azure": return "Azure";
+    case "oidc": return "OIDC";
+    case "ldap": return "LDAP";
+    case "entra-proxy": return "App Proxy";
+    default: return "SSO";
   }
 }
 
@@ -185,8 +202,8 @@ function renderUsersBody() {
     else if (roleKey === "user") roleBadge = '<span class="badge badge-user">user</span>';
     else if (roleKey === "readonly") roleBadge = '<span class="badge badge-readonly">read only</span>';
     else roleBadge = '<span class="badge" style="background:var(--color-bg-secondary);color:var(--color-text-primary);border:1px solid var(--color-border)">' + escapeHtml(roleName || "—") + '</span>';
-    var authBadge = u.authProvider === "azure"
-      ? '<span class="badge badge-reserved" title="Azure SSO">Azure</span>'
+    var authBadge = isIdpManaged(u)
+      ? '<span class="badge badge-reserved" title="' + escapeHtml(idpProviderLabel(u.authProvider)) + ' SSO">' + escapeHtml(idpProviderLabel(u.authProvider)) + '</span>'
       : '<span class="badge" style="background:var(--color-bg-secondary);color:var(--color-text-secondary)">Local</span>';
     var lastLogin = u.lastLogin
       ? '<span title="' + escapeHtml(new Date(u.lastLogin).toLocaleString()) + '">' + timeAgo(u.lastLogin) + '</span>'
@@ -202,10 +219,10 @@ function renderUsersBody() {
     if (Array.isArray(u.regionTags) && u.regionTags.length > 0) {
       regionsLabel = '<div style="margin-top:0.25rem;display:flex;flex-wrap:wrap;gap:0.25rem" title="Per-user region scope">' + regionPillsHtml(u.regionTags) + '</div>';
     }
-    var passwordBtn = u.authProvider === "azure" ? '' :
+    var passwordBtn = isIdpManaged(u) ? '' :
       '<button class="btn btn-sm btn-secondary" data-action="password" data-id="' + escapeHtml(u.id) + '" data-username="' + escapeHtml(u.username) + '">Password</button>';
     var totpCell;
-    if (u.authProvider === "azure") {
+    if (isIdpManaged(u)) {
       totpCell = '<span style="color:var(--color-text-tertiary);font-size:0.85em" title="Handled by your identity provider">IdP-managed</span>';
     } else if (u.totpEnabled) {
       totpCell = '<span class="badge" style="background:rgba(76,175,80,0.15);color:var(--color-success,#4caf50)">Enabled</span>';
@@ -561,19 +578,22 @@ async function openAuthSettingsModal() {
     api.auth.azureSettings().catch(function () { return { spEntityId: "", idpEntityId: "", idpLoginUrl: "", idpLogoutUrl: "", idpCertificate: "", wantResponseSigned: false, skipLoginPage: false, autoLogoutMinutes: 0 }; }),
     api.auth.oidcSettings().catch(function () { return { enabled: false, discoveryUrl: "", clientId: "", clientSecret: "", scopes: "openid profile email" }; }),
     api.auth.ldapSettings().catch(function () { return { enabled: false, url: "", bindDn: "", bindPassword: "", searchBase: "", searchFilter: "(sAMAccountName={{username}})", tlsVerify: true, displayNameAttr: "displayName", emailAttr: "mail" }; }),
+    api.auth.entraProxySettings().catch(function () { return { enabled: false, trustedSourceIps: [], objectIdHeader: "x-entra-object-id", usernameHeader: "x-entra-upn", emailHeader: "x-entra-email", displayNameHeader: "x-entra-display-name", groupsHeader: "x-entra-groups" }; }),
   ]);
-  var saml = results[0], oidc = results[1], ldap = results[2];
+  var saml = results[0], oidc = results[1], ldap = results[2], entraProxy = results[3];
 
   var body =
     '<div class="settings-tabs">' +
       '<button class="settings-tab' + (_authActiveTab === "saml" ? ' active' : '') + '" data-tab="saml">SAML</button>' +
       '<button class="settings-tab' + (_authActiveTab === "oidc" ? ' active' : '') + '" data-tab="oidc">OIDC</button>' +
       '<button class="settings-tab' + (_authActiveTab === "ldap" ? ' active' : '') + '" data-tab="ldap">LDAP</button>' +
+      '<button class="settings-tab' + (_authActiveTab === "entra-proxy" ? ' active' : '') + '" data-tab="entra-proxy">App Proxy</button>' +
       '<button class="settings-tab' + (_authActiveTab === "session" ? ' active' : '') + '" data-tab="session">Session</button>' +
     '</div>' +
     '<div class="settings-tab-panel' + (_authActiveTab === "saml" ? ' active' : '') + '" id="tab-saml">' + buildSamlTab(saml) + '</div>' +
     '<div class="settings-tab-panel' + (_authActiveTab === "oidc" ? ' active' : '') + '" id="tab-oidc">' + buildOidcTab(oidc) + '</div>' +
     '<div class="settings-tab-panel' + (_authActiveTab === "ldap" ? ' active' : '') + '" id="tab-ldap">' + buildLdapTab(ldap) + '</div>' +
+    '<div class="settings-tab-panel' + (_authActiveTab === "entra-proxy" ? ' active' : '') + '" id="tab-entra-proxy">' + buildEntraProxyTab(entraProxy) + '</div>' +
     '<div class="settings-tab-panel' + (_authActiveTab === "session" ? ' active' : '') + '" id="tab-session">' + buildSessionTab(saml) + '</div>';
 
   var footer =
@@ -665,6 +685,18 @@ async function openAuthSettingsModal() {
         var ld = await api.auth.testLdap();
         resultsDiv.innerHTML = (ld.ok ? "\u2705 " : "\u274c ") + escapeHtml(ld.message);
         setBox(ld.ok);
+      } else if (tab === "entra-proxy") {
+        await api.auth.updateEntraProxySettings(getEntraProxyFormData());
+        var ep = await api.auth.testEntraProxy();
+        var epDetail = "";
+        if (ep.details) {
+          epDetail = '<div style="margin-top:0.4rem;font-size:0.8rem;color:var(--color-text-secondary)">' +
+            'request IP: <code>' + escapeHtml(ep.details.requestIp || "(unknown)") + '</code> \u2014 ' +
+            (ep.details.trusted ? 'trusted' : 'not trusted') + '<br>' +
+            'identity headers on this request: ' + escapeHtml((ep.details.headersPresent || []).join(", ") || "(none)") + '</div>';
+        }
+        resultsDiv.innerHTML = (ep.ok ? "\u2705 " : "\u274c ") + escapeHtml(ep.message) + epDetail;
+        setBox(ep.ok);
       }
     } catch (err) {
       resultsDiv.innerHTML = '<span style="color:var(--color-danger)">\u274c ' + escapeHtml(err.message) + '</span>';
@@ -684,6 +716,7 @@ async function openAuthSettingsModal() {
         api.auth.updateAzureSettings(getSamlFormData()),
         api.auth.updateOidcSettings(getOidcFormData()),
         api.auth.updateLdapSettings(getLdapFormData()),
+        api.auth.updateEntraProxySettings(getEntraProxyFormData()),
       ]);
       closeModal();
       showToast("Authentication settings saved");
@@ -738,6 +771,22 @@ function getLdapFormData() {
     groupAttribute: val("f-ldap-group-attr"),
     groupBaseDn: val("f-ldap-group-base"),
     groupFilter: val("f-ldap-group-filter"),
+  };
+}
+
+function getEntraProxyFormData() {
+  var ips = val("f-entra-proxy-trusted-ips")
+    .split(/[\s,]+/)
+    .map(function (x) { return x.trim(); })
+    .filter(Boolean);
+  return {
+    enabled: document.getElementById("f-entra-proxy-enabled").checked,
+    trustedSourceIps: ips,
+    objectIdHeader: val("f-entra-proxy-objectid-header"),
+    usernameHeader: val("f-entra-proxy-username-header"),
+    emailHeader: val("f-entra-proxy-email-header"),
+    displayNameHeader: val("f-entra-proxy-displayname-header"),
+    groupsHeader: val("f-entra-proxy-groups-header"),
   };
 }
 
@@ -949,6 +998,53 @@ function buildLdapTab(s) {
     '<div id="ldap-test-results" style="display:none;margin-top:1rem;padding:0.75rem;border-radius:6px;font-size:0.85rem"></div>';
 }
 
+function buildEntraProxyTab(s) {
+  var ips = (s.trustedSourceIps || []).join("\n");
+  return '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:1rem">Sign users in from identity headers injected by <strong>Microsoft Entra Application Proxy</strong> header-based SSO. Users pre-authenticated by Entra are logged in automatically (no second sign-in).</p>' +
+    '<div style="background:rgba(234,179,8,0.10);border:1px solid rgba(234,179,8,0.35);border-radius:6px;padding:0.6rem 0.75rem;margin-bottom:1.1rem;font-size:0.8rem;color:var(--color-text-secondary)">' +
+      '⚠️ <strong>These headers are unsigned.</strong> The only thing preventing spoofing is source-IP trust — Polaris honors the identity headers <em>only</em> from the addresses below and strips them from every other request. Make sure the backend is reachable <em>only</em> through the App Proxy connector (and your nginx). Entra also silently omits the groups header when a user is in more than ~150 groups unless the app is configured with “groups assigned to the application.”' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer">' +
+        '<input type="checkbox" id="f-entra-proxy-enabled"' + (s.enabled ? ' checked' : '') + '>' +
+        '<span>Enable App Proxy header authentication</span>' +
+      '</label>' +
+    '</div>' +
+    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    '<div class="form-group">' +
+      '<label>Trusted source IPs / CIDRs</label>' +
+      '<textarea id="f-entra-proxy-trusted-ips" rows="3" style="font-family:monospace;font-size:0.8rem;resize:vertical" placeholder="10.20.30.40&#10;10.20.30.0/24">' + escapeHtml(ips) + '</textarea>' +
+      '<p class="hint">One IP or CIDR per line — the App Proxy connector host(s) <strong>as Polaris sees them</strong> (behind nginx, the address nginx forwards). Empty = header login is disabled. Use the <strong>Test</strong> button below to see this request\'s source address.</p>' +
+    '</div>' +
+    '<h4 style="font-size:0.88rem;font-weight:600;margin:1.25rem 0 0.75rem;color:var(--color-text-primary);border-bottom:1px solid var(--color-border);padding-bottom:0.4rem">Header Mapping</h4>' +
+    '<p style="font-size:0.8rem;color:var(--color-text-tertiary);margin-bottom:0.75rem">The header names you configure in the App Proxy SSO blade. Lowercase, letters/digits/hyphens only.</p>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
+      '<div class="form-group">' +
+        '<label>Object ID header *</label>' +
+        '<input type="text" id="f-entra-proxy-objectid-header" value="' + escapeHtml(s.objectIdHeader || "x-entra-object-id") + '">' +
+        '<p class="hint">Carries the Entra user object ID (GUID) — the account key.</p>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Username / UPN header *</label>' +
+        '<input type="text" id="f-entra-proxy-username-header" value="' + escapeHtml(s.usernameHeader || "x-entra-upn") + '">' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Email header</label>' +
+        '<input type="text" id="f-entra-proxy-email-header" value="' + escapeHtml(s.emailHeader || "") + '" placeholder="(optional)">' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Display name header</label>' +
+        '<input type="text" id="f-entra-proxy-displayname-header" value="' + escapeHtml(s.displayNameHeader || "") + '" placeholder="(optional)">' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Groups header</label>' +
+        '<input type="text" id="f-entra-proxy-groups-header" value="' + escapeHtml(s.groupsHeader || "") + '" placeholder="(optional)">' +
+        '<p class="hint">Comma/semicolon-separated Entra group object IDs (GUIDs). Map them to roles + tags in <strong>Group Mappings</strong> (provider “App Proxy”).</p>' +
+      '</div>' +
+    '</div>' +
+    '<div id="entra-proxy-test-results" style="display:none;margin-top:1rem;padding:0.75rem;border-radius:6px;font-size:0.85rem"></div>';
+}
+
 function buildSessionTab(s) {
   // Turning "Skip login page" ON is only permitted while the admin is signed in
   // through SSO (SAML or OIDC) — end-to-end proof that SSO works before the
@@ -1136,6 +1232,7 @@ var _GM_PROVIDERS = [
   { value: "oidc", label: "OIDC" },
   { value: "ldap", label: "LDAP" },
   { value: "saml", label: "SAML" },
+  { value: "entra-proxy", label: "App Proxy" },
 ];
 
 async function loadGroupMappings() {
@@ -1225,7 +1322,7 @@ async function openGroupMappingSlideover(id) {
       return '<option value="' + r.id + '"' + (m && m.roleId === r.id ? " selected" : "") + '>' + escapeHtml(r.name) + '</option>';
     }).join("");
 
-  var groupHint = 'For LDAP, enter the full group DN (matched case-insensitively). For OIDC/SAML, enter the group claim value exactly. <strong>Azure AD emits group object IDs (GUIDs)</strong> — use the object ID unless your IdP emits names.';
+  var groupHint = 'For LDAP, enter the full group DN (matched case-insensitively). For OIDC/SAML, enter the group claim value exactly. <strong>Azure AD emits group object IDs (GUIDs)</strong> — use the object ID unless your IdP emits names. For <strong>App Proxy</strong>, enter the Entra group object ID (GUID; matched case-insensitively) exactly as it appears in the App Proxy group header.';
 
   var body =
     '<div class="form-group">' +

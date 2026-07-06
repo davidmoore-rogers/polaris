@@ -45,9 +45,19 @@ import {
   updateOidcSettings,
   testOidcConnection,
 } from "../../services/oidcAuthService.js";
+import {
+  isEntraProxyEnabled,
+  isEntraProxyLoginAvailable,
+  isTrustedEntraProxySource,
+  extractEntraProxyIdentity,
+  findOrProvisionEntraProxyUser,
+  getEntraProxySettings,
+  updateEntraProxySettings,
+  testEntraProxyRequest,
+} from "../../services/entraProxyAuthService.js";
 import { resolveTagScopesForUser } from "../../services/regionScopeService.js";
 import { isBlockedOutboundHost } from "../../utils/netGuard.js";
-import { totpCodeLimiter, ssoEntryLimiter } from "../middleware/rateLimits.js";
+import { totpCodeLimiter, ssoEntryLimiter, entraProxyLoginLimiter } from "../middleware/rateLimits.js";
 import { logEvent } from "./events.js";
 
 const router = Router();
@@ -792,6 +802,123 @@ router.put("/ldap/settings", requireAuth, requirePermission("serverSettingsSyste
 router.post("/ldap/test", requireAuth, requirePermission("serverSettingsSystem", "write"), async (_req, res, next) => {
   try {
     res.json(await testLdapConnection());
+  } catch (err) { next(err); }
+});
+
+// ─── Entra App Proxy (header SSO) ────────────────────────────────────────────
+// Users pre-authenticated by Entra ID arrive through the App Proxy connector
+// carrying unsigned identity headers. Trust is source-IP only (see
+// entraProxyAuthService.ts); the strip middleware in app.ts removes the
+// headers from untrusted requests, and /entra-proxy/login re-validates trust
+// itself. All failures redirect to /login.html (never a protected page) so
+// the app.ts auto-login redirect can't loop.
+
+const EntraProxySettingsSchema = z.object({
+  enabled: z.boolean(),
+  trustedSourceIps: z.array(z.string().max(64)).max(64),
+  objectIdHeader: z.string().max(64),
+  usernameHeader: z.string().max(64),
+  emailHeader: z.string().max(64),
+  displayNameHeader: z.string().max(64),
+  groupsHeader: z.string().max(64),
+});
+
+// Only same-origin relative paths survive; anything else falls back to "/".
+// Blocks protocol-relative ("//evil"), backslash tricks ("/\evil"), absolute
+// URLs, and a /login.html target (which would look like a failed login).
+function safeNextPath(raw: unknown): string {
+  if (typeof raw !== "string") return "/";
+  if (!raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) return "/";
+  if (raw === "/login.html" || raw.startsWith("/login.html?")) return "/";
+  return raw;
+}
+
+// GET /api/v1/auth/entra-proxy/config — public, login page checks this.
+// `available` = THIS request could complete a header login (trusted source +
+// identity header present). Booleans only — never header values.
+router.get("/entra-proxy/config", async (req, res) => {
+  const enabled = await isEntraProxyEnabled().catch(() => false);
+  const available = enabled && (await isEntraProxyLoginAvailable(req).catch(() => false));
+  res.json({ enabled, available });
+});
+
+// GET /api/v1/auth/entra-proxy/login — read the identity headers on THIS
+// request, validate trust, provision, stamp the session. Both the login-page
+// button and the app.ts silent auto-login land here.
+router.get("/entra-proxy/login", entraProxyLoginLimiter, async (req, res) => {
+  const next = safeNextPath(req.query.next);
+  try {
+    if (!(await isEntraProxyEnabled())) {
+      return res.redirect("/login.html?error=entra_proxy_not_configured");
+    }
+    if (!(await isTrustedEntraProxySource(req.ip))) {
+      logEvent({
+        action: "auth.login.entra_proxy.untrusted",
+        resourceType: "user",
+        level: "warning",
+        message: `Entra App Proxy login refused: source ${req.ip || "unknown"} is not an allowlisted connector`,
+        details: { ip: req.ip },
+      });
+      return res.redirect("/login.html?error=entra_proxy_untrusted_source");
+    }
+    const identity = await extractEntraProxyIdentity(req);
+    if (!identity) {
+      return res.redirect("/login.html?error=entra_proxy_missing_headers");
+    }
+    const user = await findOrProvisionEntraProxyUser(identity);
+
+    await regenerateSession(req);
+    req.session.userId = user.id;
+    req.session.username = user.username;
+    req.session.roleId = user.roleId;
+    req.session.roleSnapshot = snapshotFromRole(user.role);
+    req.session.role = user.role.name;
+    req.session.authProvider = "entra-proxy";
+    req.session.mfaVerified = true; // Entra pre-auth owns MFA
+    req.session.lastActivity = Date.now();
+
+    logEvent({
+      action: "auth.login.entra_proxy",
+      resourceType: "user",
+      resourceId: user.id,
+      resourceName: user.username,
+      actor: user.username,
+      message: `Entra App Proxy SSO login: ${user.username} → role "${user.role.name}"`,
+      details: { ip: req.ip, groups: identity.groups.length, role: user.role.name },
+    });
+    res.redirect(next);
+  } catch (err: any) {
+    logEvent({
+      action: "auth.login.entra_proxy.failed",
+      resourceType: "user",
+      level: "error",
+      message: `Entra App Proxy login failed: ${err.message}`,
+      details: { ip: req.ip },
+    });
+    res.redirect(`/login.html?error=${encodeURIComponent(err.message || "entra_proxy_error")}`);
+  }
+});
+
+// GET /api/v1/auth/entra-proxy/settings — admin only (no secrets to mask)
+router.get("/entra-proxy/settings", requireAuth, requirePermission("serverSettingsSystem", "write"), async (_req, res, next) => {
+  try {
+    res.json(await getEntraProxySettings());
+  } catch (err) { next(err); }
+});
+
+// PUT /api/v1/auth/entra-proxy/settings — admin only
+router.put("/entra-proxy/settings", requireAuth, requirePermission("serverSettingsSystem", "write"), async (req, res, next) => {
+  try {
+    const input = EntraProxySettingsSchema.partial().parse(req.body ?? {});
+    res.json(await updateEntraProxySettings(input));
+  } catch (err) { next(err); }
+});
+
+// POST /api/v1/auth/entra-proxy/test — report how THIS request looks to the
+// trust gate (request IP, trusted?, which identity header NAMES are present).
+router.post("/entra-proxy/test", requireAuth, requirePermission("serverSettingsSystem", "write"), async (req, res, next) => {
+  try {
+    res.json(await testEntraProxyRequest(req));
   } catch (err) { next(err); }
 });
 

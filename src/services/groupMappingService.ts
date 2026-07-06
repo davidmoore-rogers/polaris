@@ -29,7 +29,7 @@ import {
   pickHighestPrivilegeRoleId,
 } from "../api/middleware/permissions.js";
 
-export const GROUP_MAPPING_PROVIDERS = ["oidc", "ldap", "saml"] as const;
+export const GROUP_MAPPING_PROVIDERS = ["oidc", "ldap", "saml", "entra-proxy"] as const;
 export type GroupMappingProvider = (typeof GROUP_MAPPING_PROVIDERS)[number];
 
 const GROUP_KEY_MAX_LEN = 512; // LDAP DNs can be long
@@ -89,15 +89,17 @@ function assertValidProvider(p: string): GroupMappingProvider {
 
 /**
  * Normalize a group identifier for matching. LDAP DNs are case-insensitive, so
- * we lowercase + trim them; OIDC/SAML group claim values are case-stable, so we
- * trim only. The SAME function is used on write (the stored groupKey) and on
- * read (incoming claims) so the two can never diverge. Returns "" for blanks.
+ * we lowercase + trim them; entra-proxy group keys are Entra group object-ID
+ * GUIDs, also case-insensitive, so they lowercase too. OIDC/SAML group claim
+ * values are case-stable, so we trim only. The SAME function is used on write
+ * (the stored groupKey) and on read (incoming claims) so the two can never
+ * diverge. Returns "" for blanks.
  */
 export function normalizeGroupKey(provider: string, raw: unknown): string {
   if (typeof raw !== "string") return "";
   const trimmed = raw.trim();
   if (!trimmed) return "";
-  return provider === "ldap" ? trimmed.toLowerCase() : trimmed;
+  return provider === "ldap" || provider === "entra-proxy" ? trimmed.toLowerCase() : trimmed;
 }
 
 function normalizeDescription(input: string | null | undefined): string | null {

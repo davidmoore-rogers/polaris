@@ -1045,13 +1045,50 @@ For reverse-proxy / TLS-termination-upstream topologies (nginx, Caddy, ALB), `PO
 
 `POLARIS_PUBLIC_URL` is **also required for OIDC SSO** — Polaris derives the OIDC redirect URI from it (`${POLARIS_PUBLIC_URL}/api/v1/auth/oidc/callback`). OIDC login refuses with a clear error if it's unset.
 
-## Authentication providers (OIDC / LDAP / SAML)
+## Authentication providers (OIDC / LDAP / SAML / App Proxy)
 
-Beyond local accounts, Polaris authenticates against Azure SAML, **OIDC** (OpenID Connect Authorization-Code + PKCE), or **LDAP / Active Directory** (bind). Configure under **Users → Authentication** (admin only); each tab has a **Test** button.
+Beyond local accounts, Polaris authenticates against Azure SAML, **OIDC** (OpenID Connect Authorization-Code + PKCE), **LDAP / Active Directory** (bind), or **Entra Application Proxy header SSO**. Configure under **Users → Authentication** (admin only); each tab has a **Test** button.
 
 - **OIDC:** fill in the Discovery URL, Client ID/Secret, and scopes. Copy the **Redirect URI** shown on the tab and register it in your IdP app registration. **Azure AD note:** by default Azure emits group **object IDs (GUIDs)** in the `groups` claim, not names — map those object IDs in Group Mappings, or configure Azure to emit group names. Azure also drops the claim above ~200 groups (the user then resolves to `readonly` until a smaller group set or a groups-assignment filter is configured).
 - **LDAP/AD:** set the server URL (`ldaps://…`), bind DN + password, search base/filter, and (for group mapping) the User ID Attribute (`objectGUID` on AD) + Group Attribute (`memberOf`). LDAP users sign in through the normal username/password form.
 - **Group → role + tags:** under **Users → Group Mappings**, map an IdP group to a role plus region/other tags. A user in several mapped groups gets the **highest-privilege** role; tags from all matched groups combine. **A mapping to an admin-equivalent role makes IdP group membership a path to Polaris admin** — restrict who can edit those groups in your directory accordingly.
+
+### Entra Application Proxy (header-based SSO)
+
+For deployments published to the internet through **Microsoft Entra Application Proxy** (Entra ID pre-authentication) instead of exposing Polaris directly. App Proxy authenticates each user against Entra in the cloud — including MFA and Conditional Access — then forwards their claims to Polaris as HTTP headers. Users are logged in automatically with no second sign-in.
+
+> **Security model — read this.** The identity headers App Proxy injects are **plain and unsigned**; there is no token for Polaris to cryptographically verify. Microsoft's documented protection is purely network-level: *only accept those headers from the connector.* Polaris enforces this with a **source-IP allowlist** — it honors the identity headers only when the request arrives from an allowlisted App Proxy connector address (and strips them from every other request). **The backend must be reachable only through App Proxy + your nginx**; if an attacker can reach Polaris directly from an allowlisted-looking source, they can forge identities. An empty allowlist disables header login entirely (fail closed).
+
+**On the Entra side:**
+
+1. Publish Polaris as an Application Proxy app with **Pre-authentication = Microsoft Entra ID**.
+2. Under the app's **Single sign-on → Header-based**, map claims to headers. At minimum map the user **object ID** and **UPN**; optionally email, display name, and a **groups** header. Use header names that match the Polaris config below (defaults: `x-entra-object-id`, `x-entra-upn`, `x-entra-email`, `x-entra-display-name`, `x-entra-groups`).
+3. Groups arrive as Entra group **object IDs (GUIDs)**. To avoid the **group-overage** limit (Entra silently omits the groups header when a user is in more than ~150 groups), set the app to emit only **"Groups assigned to the application."**
+
+**On the Polaris side (Users → Authentication → App Proxy):**
+
+1. Enable App Proxy header authentication.
+2. Enter the **trusted source IPs / CIDRs** — the connector host(s) *as Polaris sees them* (behind nginx, the address nginx forwards; direct-to-Polaris, the socket peer). Run **Test** to see the current request's source IP.
+3. Confirm the header names match what you configured in Entra.
+4. Map the Entra **group object IDs** to roles + tags under **Users → Group Mappings** with provider **App Proxy** (GUIDs, matched case-insensitively).
+
+Header auth **coexists** with your other login methods — internal users hitting nginx directly (not through the connector) never see the App Proxy headers and fall through to the normal login page. A user who has also signed in via Azure SAML converges onto the same Polaris account (both key on the Entra object ID).
+
+**Optional nginx hardening (defense in depth).** Polaris already ignores + strips the identity headers from non-allowlisted sources, but you can also strip them at the edge for any request that didn't come from the connector. In a hand-managed `polaris.conf` (note: editing a Polaris-managed nginx config triggers the drift banner — see the nginx section), add a `geo` block keyed on the connector IP and clear the headers when untrusted:
+
+```nginx
+geo $entra_untrusted {
+    default 1;
+    10.20.30.40 0;      # App Proxy connector host(s)
+}
+# inside the Polaris location {}:
+if ($entra_untrusted) {
+    set $strip_entra 1;
+}
+proxy_set_header x-entra-object-id    "";   # when $strip_entra — use a map for conditional set
+```
+
+Widening `TRUST_PROXY` beyond the default first-hop weakens the source-IP check (Polaris would trust a client-supplied `X-Forwarded-For`) — leave it at the default when using header auth.
 
 ### Install on a remote host
 
