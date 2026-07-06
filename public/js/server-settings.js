@@ -717,7 +717,7 @@ function renderCertsTab(container) {
         '</p>' +
         markerLine +
         '<div style="margin-top:0.8rem">' +
-          '<button class="btn-primary" id="proxy-adopt-btn">Adopt managed mode</button>' +
+          '<button class="btn btn-sm btn-primary" id="proxy-adopt-btn">Adopt managed mode</button>' +
         '</div>' +
       '</div>';
   }
@@ -752,7 +752,7 @@ function renderCertsTab(container) {
         '<div style="padding:0.4rem 0">' + expiryHtml + '</div>' +
       '</div>' +
       '<div style="margin-top:0.5rem">' +
-        '<button class="btn-secondary" id="proxy-rotate-cert-btn">Rotate certificate</button>' +
+        '<button class="btn btn-sm btn-secondary" id="proxy-rotate-cert-btn">Rotate certificate</button>' +
       '</div>' +
     '</div>';
 
@@ -802,7 +802,7 @@ function renderCertsTab(container) {
         '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-top:0.2rem">Empty list = deny all. Bearer auth still gates /metrics; this is the first defense layer.</div>' +
       '</div>' +
       '<div style="margin-top:1rem">' +
-        '<button class="btn-primary" id="proxy-apply-btn"' + disabled + '>Save &amp; Apply</button>' +
+        '<button class="btn btn-sm btn-primary" id="proxy-apply-btn"' + disabled + '>Save &amp; Apply</button>' +
         '<div id="proxy-apply-status" style="font-size:0.85rem;margin-top:0.6rem;display:none"></div>' +
         '<div id="proxy-apply-output" style="font-size:0.78rem;margin-top:0.4rem;display:none;background:var(--color-surface-alt);padding:0.6rem;border-radius:4px;white-space:pre-wrap;font-family:monospace;max-height:14rem;overflow:auto"></div>' +
       '</div>' +
