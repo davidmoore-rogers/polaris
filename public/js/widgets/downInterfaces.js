@@ -35,14 +35,22 @@
         gate: t.gate, lastUpAt: t.lastUpAt,
       };
     });
-    // Longest-down first: nulls (no observed up sample in the window) sort ahead
-    // of any timestamp, then oldest lastUpAt first — same order the feeds use.
+    // Youngest outage first (newest lastUpAt at the top): the gate groups
+    // render in this order, and the row-limit clip keeps the freshest
+    // outages when over the cap. Nulls (no observed up sample in the
+    // window — down the longest / unknown) sink to the bottom.
     return ifaces.concat(tunnels).sort(function (a, b) {
       if (!a.lastUpAt && !b.lastUpAt) return 0;
-      if (!a.lastUpAt) return -1;
-      if (!b.lastUpAt) return 1;
-      return new Date(a.lastUpAt) - new Date(b.lastUpAt);
+      if (!a.lastUpAt) return 1;
+      if (!b.lastUpAt) return -1;
+      return new Date(b.lastUpAt) - new Date(a.lastUpAt);
     });
+  }
+
+  // Alphabetical by interface/tunnel name — display order within each gate
+  // group (and for the ungrouped view).
+  function byName(a, b) {
+    return String(a.name || "").localeCompare(String(b.name || ""), undefined, { numeric: true, sensitivity: "base" });
   }
 
   function groupKey(row, groupBy) {
@@ -85,15 +93,20 @@
 
   function render(el, rows, config) {
     rows = rows || [];
+    // Overall down total on the widget header — same red pill style as the
+    // group counts. Pre-clip, so the row-limit doesn't shrink the number.
+    PolarisWidgets.setHeaderCount(el, rows.length);
     if (!rows.length) { el.innerHTML = '<p class="empty-state">No interfaces or tunnels down</p>'; return; }
     var groupBy = (config && config.groupBy) || "gate";
     var clipped = PolarisWidgets.clip(rows, config && config.rowLimit);
 
     if (groupBy === "none") {
-      el.innerHTML = clipped.map(rowHTML).join("");
+      el.innerHTML = clipped.slice().sort(byName).map(rowHTML).join("");
       return;
     }
-    // Bucket into groups preserving first-seen order; sort groups by size desc.
+    // Bucket into groups preserving first-seen order — rows arrive youngest
+    // outage first (mergeRows), so the gates render newest-outage-first.
+    // Within each gate the rows sort alphabetically by name.
     var groups = {};
     var order = [];
     clipped.forEach(function (n) {
@@ -101,13 +114,12 @@
       if (!groups[k]) { groups[k] = []; order.push(k); }
       groups[k].push(n);
     });
-    order.sort(function (a, b) { return groups[b].length - groups[a].length; });
     el.innerHTML = order.map(function (k) {
       var list = groups[k];
       return '<div class="dash-alert-group-header" style="display:flex;align-items:center;gap:8px;margin:6px 0 4px;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.03em;color:var(--color-text-secondary)">' +
         '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(k) + '</span>' +
         '<span class="widget-pill widget-pill-red">' + list.length + '</span>' +
-      '</div>' + list.map(rowHTML).join("");
+      '</div>' + list.slice().sort(byName).map(rowHTML).join("");
     }).join("");
   }
 

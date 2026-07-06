@@ -154,16 +154,23 @@ function siteOf(a: { location: string | null; learnedLocation: string | null; sn
  * newest outages are the ones kept.
  */
 export async function getDownNodes(limit: number | null = 100, assetIds: string[] | null = null): Promise<{ nodes: DownNode[]; total: number }> {
-  const rows = await prisma.asset.findMany({
-    where: { monitored: true, monitorStatus: "down", dependencySuppressed: false, ...idWhere(assetIds) },
-    select: {
-      id: true, hostname: true, ipAddress: true, assetType: true,
-      location: true, learnedLocation: true, snmpLocation: true,
-      department: true, monitorStatus: true, monitorStatusChangedAt: true,
-    },
-    orderBy: [{ monitorStatusChangedAt: { sort: "desc", nulls: "last" } }],
-    take: limit ?? undefined,
-  });
+  const where = { monitored: true, monitorStatus: "down", dependencySuppressed: false, ...idWhere(assetIds) };
+  // `total` is the TRUE down count (indexed count over the same where), not
+  // rows.length — the findMany is capped by `limit`, and the widget's header
+  // pill must show the overall number even when the list is clipped.
+  const [rows, total] = await Promise.all([
+    prisma.asset.findMany({
+      where,
+      select: {
+        id: true, hostname: true, ipAddress: true, assetType: true,
+        location: true, learnedLocation: true, snmpLocation: true,
+        department: true, monitorStatus: true, monitorStatusChangedAt: true,
+      },
+      orderBy: [{ monitorStatusChangedAt: { sort: "desc", nulls: "last" } }],
+      take: limit ?? undefined,
+    }),
+    prisma.asset.count({ where }),
+  ]);
   const nodes: DownNode[] = rows.map((a) => ({
     id: a.id,
     hostname: a.hostname,
@@ -174,7 +181,7 @@ export async function getDownNodes(limit: number | null = 100, assetIds: string[
     monitorStatus: a.monitorStatus,
     monitorStatusChangedAt: a.monitorStatusChangedAt,
   }));
-  return { nodes, total: nodes.length };
+  return { nodes, total };
 }
 
 export interface DownInterface {
@@ -846,7 +853,12 @@ const NOC_FEEDS: Record<NocFeedName, {
     gate: "assets",
     empty: { nodes: [], total: 0 },
     run: (L, ids) => getDownNodes(L(100), ids),
-    flatten: (v) => ({ downNodes: (v as { nodes: DownNode[] }).nodes }),
+    // downNodesTotal is the TRUE down count (uncapped) for the widget's
+    // header pill; downNodes[] stays the capped list (legacy key unchanged).
+    flatten: (v) => {
+      const d = v as { nodes: DownNode[]; total: number };
+      return { downNodes: d.nodes, downNodesTotal: d.total };
+    },
   },
   downInterfaces:   { gate: "assets", empty: [], run: (L, ids) => getDownInterfaces(L(100), 240, ids) },
   downIpsecTunnels: { gate: "assets", empty: [], run: (L, ids) => getDownIpsecTunnels(L(100), 240, ids) },

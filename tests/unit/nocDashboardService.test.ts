@@ -79,13 +79,25 @@ describe("getDownNodes", () => {
       { id: "b", hostname: "b", ipAddress: null, assetType: "switch", location: null, learnedLocation: "Site-B", snmpLocation: "raw", department: null, monitorStatus: "down", monitorStatusChangedAt: null },
       { id: "c", hostname: "c", ipAddress: null, assetType: "switch", location: null, learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null },
     ]);
+    count.mockResolvedValueOnce(3);
     const r = await noc.getDownNodes();
     expect(r.nodes.map((n) => n.site)).toEqual(["HQ", "Site-B", "(unknown)"]);
     expect(r.total).toBe(3);
   });
 
+  it("total is the TRUE down count, not the capped row count", async () => {
+    findMany.mockResolvedValueOnce([
+      { id: "a", hostname: "a", ipAddress: null, assetType: "switch", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null },
+    ]);
+    count.mockResolvedValueOnce(5); // 4 more down beyond the limit-capped list
+    const r = await noc.getDownNodes(1);
+    expect(r.nodes).toHaveLength(1);
+    expect(r.total).toBe(5);
+  });
+
   it("orders youngest outage first (monitorStatusChangedAt desc, nulls last)", async () => {
     findMany.mockResolvedValueOnce([]);
+    count.mockResolvedValueOnce(0);
     await noc.getDownNodes();
     expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
       orderBy: [{ monitorStatusChangedAt: { sort: "desc", nulls: "last" } }],
@@ -359,15 +371,16 @@ describe("getNocSummaryPayload", () => {
     groupBy
       .mockResolvedValueOnce([{ monitorStatus: "up", _count: { _all: 3 } }]) // status: all monitored
       .mockResolvedValueOnce([]);                                            // status: infra subset
-    count.mockResolvedValueOnce(0);
+    count.mockResolvedValue(1); // status activeAlertCount + downNodes total (concurrent)
     findMany.mockResolvedValueOnce([
       { id: "a", hostname: "fw", ipAddress: null, assetType: "firewall", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null },
     ]);
 
     const r = await noc.getNocSummaryPayload({ feeds: ["status", "downNodes"], ...grantAll() });
-    expect(Object.keys(r).sort()).toEqual(["activeAlertCount", "downNodes", "statusCounts", "uptimePercent"]);
+    expect(Object.keys(r).sort()).toEqual(["activeAlertCount", "downNodes", "downNodesTotal", "statusCounts", "uptimePercent"]);
     expect((r.statusCounts as { total: number }).total).toBe(3);
     expect((r.downNodes as Array<{ id: string }>).map((n) => n.id)).toEqual(["a"]);
+    expect(r.downNodesTotal).toBe(1);
   });
 
   it("null feeds returns the full payload shape", async () => {
@@ -381,8 +394,9 @@ describe("getNocSummaryPayload", () => {
     const r = await noc.getNocSummaryPayload({ feeds: null, ...grantAll() });
     expect(Object.keys(r).sort()).toEqual([
       "activeAlertCount", "activeAlerts", "diskUsage", "downInterfaces", "downIpsecTunnels",
-      "downNodes", "packetLoss", "recentReboots", "sitesWithIssues", "slowestResponse",
-      "stalePolls", "statusCounts", "temperature", "topCpu", "topMemory", "uptimePercent",
+      "downNodes", "downNodesTotal", "packetLoss", "recentReboots", "sitesWithIssues",
+      "slowestResponse", "stalePolls", "statusCounts", "temperature", "topCpu", "topMemory",
+      "uptimePercent",
     ]);
   });
 
@@ -392,6 +406,7 @@ describe("getNocSummaryPayload", () => {
     });
     expect(r.statusCounts).toEqual({ total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0 });
     expect(r.downNodes).toEqual([]);
+    expect(r.downNodesTotal).toBe(0);
     expect(r.activeAlerts).toEqual([]);
     expect(groupBy).not.toHaveBeenCalled();
     expect(findMany).not.toHaveBeenCalled();

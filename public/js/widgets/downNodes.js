@@ -39,8 +39,13 @@
     '</a>';
   }
 
-  function render(el, nodes, config) {
-    nodes = nodes || [];
+  // `data` is { nodes, total } — total is the server's TRUE down count
+  // (uncapped), stamped on the widget header as a red pill so the operator
+  // gets one overall number without summing the per-group pills.
+  function render(el, data, config) {
+    var nodes = (data && data.nodes) || [];
+    var total = (data && data.total != null) ? data.total : nodes.length;
+    PolarisWidgets.setHeaderCount(el, total);
     if (!nodes.length) { el.innerHTML = '<p class="empty-state">No nodes down</p>'; return; }
     var groupBy = (config && config.groupBy) || "site";
     var clipped = PolarisWidgets.clip(nodes, config && config.rowLimit);
@@ -78,7 +83,9 @@
     requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (config) {
-      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["downNodes"]).then(function (d) { return (d && d.downNodes) || []; }).catch(function () { return []; });
+      return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["downNodes"]).then(function (d) {
+        return { nodes: (d && d.downNodes) || [], total: d && d.downNodesTotal != null ? d.downNodesTotal : null };
+      }).catch(function () { return { nodes: [], total: null }; });
     },
 
     renderInstance: function (el, config, data, ctx) {
@@ -97,18 +104,20 @@
       };
       el.addEventListener("click", onClick);
       var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["downNodes"]).then(function (d) { render(el, (d && d.downNodes) || [], config); }).catch(function () {});
+        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["downNodes"]).then(function (d) {
+          render(el, { nodes: (d && d.downNodes) || [], total: d && d.downNodesTotal != null ? d.downNodesTotal : null }, config);
+        }).catch(function () {});
       }, 30000);
       ctx.onUnmount(function () { clearInterval(timer); el.removeEventListener("click", onClick); });
     },
 
     renderPreview: function (el) {
       var now = Date.now();
-      render(el, [
+      render(el, { nodes: [
         { id: "p1", hostname: "fs-aisle-3", ipAddress: "10.1.2.5", assetType: "switch", site: "Plant A", division: "Ops", monitorStatus: "down", monitorStatusChangedAt: new Date(now - 9 * 60000).toISOString() },
         { id: "p2", hostname: "fap-conf-rm", ipAddress: "10.1.2.42", assetType: "access_point", site: "Plant A", division: "Ops", monitorStatus: "down", monitorStatusChangedAt: new Date(now - 22 * 60000).toISOString() },
         { id: "p3", hostname: "rtr-wan-2", ipAddress: "10.9.0.1", assetType: "router", site: "DC West", division: "Core", monitorStatus: "down", monitorStatusChangedAt: new Date(now - 2 * 3600000).toISOString() },
-      ], { groupBy: "site", rowLimit: 5 });
+      ], total: 3 }, { groupBy: "site", rowLimit: 5 });
     },
 
     renderConfig: function (el, config, onChange) {

@@ -198,6 +198,29 @@
     return parseInt(rowLimit, 10) || 0;
   };
 
+  // Stamp (or clear) a red count pill on the widget's header title — the same
+  // widget-pill-red style the group headers use, so "Down Nodes (Firewall) [4]"
+  // reads as the overall total. `el` is the widget body; resolves the shell
+  // header via closest(). No-ops outside a dashboard shell (e.g. the widget
+  // library preview renders without the .dashboard-widget wrapper). Count of
+  // 0/null removes the pill. Re-call on every render tick — updateConfig
+  // rewrites the title's textContent, which drops the pill until the next
+  // render re-stamps it.
+  window.PolarisWidgets.setHeaderCount = function (el, count) {
+    var article = el && el.closest ? el.closest(".dashboard-widget") : null;
+    var title = article ? article.querySelector(".dashboard-widget-title") : null;
+    if (!title) return;
+    var pill = title.querySelector(".widget-header-count");
+    if (!count) { if (pill) pill.remove(); return; }
+    if (!pill) {
+      pill = document.createElement("span");
+      pill.className = "widget-pill widget-pill-red widget-header-count";
+      pill.style.marginLeft = "8px";
+      title.appendChild(pill);
+    }
+    pill.textContent = String(count);
+  };
+
   // The caller's effective region names, or [] when unrestricted. Used by the
   // Status Map (which fetches /map/sites, not /noc-summary).
   window.PolarisWidgets.myRegionNames = function () {
