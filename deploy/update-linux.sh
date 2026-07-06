@@ -52,8 +52,11 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; }
 step()  { echo -e "${CYAN}[STEP]${NC}  $*"; }
 
 # Sync shipped unit files from $APP_DIR/deploy/ into /etc/systemd/system/.
-# cmp-only-overwrite, so a no-op when nothing changed. Same shape and same
-# rationale as the in-app updater's restartService() (src/services/updateService.ts).
+# install-if-missing + overwrite-on-change: a no-op when nothing changed,
+# AND a unit shipping for the first time in an update (e.g. polaris-dash)
+# lands on upgraded hosts — cmp-only would leave nginx proxying /dash to a
+# port nothing listens on. Same shape and same rationale as the in-app
+# updater's restartService() (src/services/updateService.ts).
 # Returns 0 if it ran daemon-reload, 1 if no files needed syncing.
 # Operator customization must live in <unit>.d/*.conf drop-ins — direct
 # edits to the main unit file get clobbered here, matching the in-app path.
@@ -63,6 +66,7 @@ sync_unit_files() {
     "$APP_DIR/deploy/polaris-web.service"
     "$APP_DIR/deploy/polaris-monitor@.service"
     "$APP_DIR/deploy/polaris-discovery.service"
+    "$APP_DIR/deploy/polaris-dash.service"
     "$APP_DIR/deploy/polaris-migrate.service"
     "$APP_DIR/deploy/polaris.target"
   )
@@ -71,7 +75,7 @@ sync_unit_files() {
     local name target
     name="$(basename "$f")"
     target="/etc/systemd/system/$name"
-    if [[ -f "$target" ]] && ! cmp -s "$f" "$target"; then
+    if [[ ! -f "$target" ]] || ! cmp -s "$f" "$target"; then
       cp -f "$f" "$target"
       info "Synced unit file: $name"
       synced=$((synced + 1))

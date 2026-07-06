@@ -3053,6 +3053,47 @@ Listed alphabetically.
 
 ---
 
+## services/dashSettingsService.ts
+
+**What it owns:** Persistence of the Dash wallboard operator config — the `dashConfig` Setting row `{ enabled (default false), rfc1918Only (default true) }` — with a ~10s TTL in-process cache. The TTL is the **cross-process propagation delay**: the web process writes the row (Server Settings → Certificates → Dash Wallboard), the dash process (`POLARIS_ROLE=dash`) reads it on every request through the cache, so a toggle lands within ~10s with no restart.
+
+**Public API:** `getDashSettings`, `saveDashSettings`, `invalidateDashSettingsCache`, `defaultDashSettings`, `DASH_SETTING_KEY`, `DashSettings`
+
+**Cross-service deps:** none (prisma only).
+
+**Used by:** `src/dash/dashServer.ts` (per-request kill-switch + IP-scope decision), `src/api/routes/serverSettings.ts` (`GET/PUT /server-settings/dash`).
+
+**Invariants:**
+- `enabled` defaults FALSE — a new unauthenticated surface must never silently appear on upgrade; the operator flips it on once.
+- Parsing is tolerant: a garbage/wrong-typed row falls back per-field to the safe defaults (never throws on read).
+- Writes invalidate the cache synchronously in the writing process; the OTHER process converges via TTL expiry — don't assume immediate cross-process visibility.
+
+**When changing this:**
+- New fields need a default + tolerant parse + merge handling, AND the Certificates-tab card (`public/js/server-settings.js` `dashCardHtml`/`handleDashSave`) + the `PUT /server-settings/dash` Zod schema updated in lockstep.
+- Don't lengthen the TTL casually — it's the operator-visible latency of the kill-switch.
+
+---
+
+## services/dashRoleSnapshotService.ts
+
+**What it owns:** The Dash wallboard's permission identity: loads the seeded built-in `readonly` Role and materializes it via `snapshotFromRole()` (60s TTL cache) so `dashServer` can stamp `req.roleSnapshot` and every existing `requirePermission` / `hasPermission` / `ensureRoleSnapshot` gate resolves the anonymous caller as a readonly user with zero changes to `permissions.ts`.
+
+**Public API:** `getReadonlyRoleIdentity` (→ `{ snapshot, regionTags }`), `invalidateDashRoleSnapshotCache`, `DashRoleIdentity`
+
+**Cross-service deps:** `src/api/middleware/permissions.ts` (`snapshotFromRole`, `SessionRoleSnapshot`).
+
+**Used by:** `src/dash/dashServer.ts` (snapshot injector middleware + the synthetic `GET /dash/api/v1/auth/me`).
+
+**Invariants:**
+- The `readonly` role is `isProtected` (uneditable), so the 60s TTL is defense-in-depth, not a freshness requirement.
+- Missing `readonly` row ⇒ AppError 500 ("mis-seeded") — never a silent empty-permission fallback.
+- `resolveSnapshot()` in permissions.ts returns `req.roleSnapshot` when already set — that contract is what makes injection work; if permissions.ts ever stops short-circuiting on a pre-set `req.roleSnapshot`, the whole Dash permission model breaks.
+
+**When changing this:**
+- If Dash ever becomes role-configurable (not hardcoded `readonly`), route the choice through dashSettingsService and keep the snapshot provider injectable (dashServer's `identityProvider` test seam).
+
+---
+
 ## services/proxyConfigService.ts
 
 **What it owns:** Persistence + validation of the operator-settable `proxyConfig` (single Setting row) with a short-TTL in-process cache — httpsPort, TLS protocols, HTTP/3 toggle, HSTS, Prometheus allow-list, and `managedMode`.

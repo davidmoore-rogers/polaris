@@ -663,11 +663,14 @@ var _certsLoaded = false;
 var _certData = { trustedCAs: [], serverCerts: [] };
 var _httpsSettings = { fingerprint: null, cn: null, dnsSans: [], ipSans: [], expiresAt: null, certPath: null };
 var _proxyData = null;
+var _dashSettings = null; // { enabled, rfc1918Only } | null while loading/failed
 
-// Render the Certificates tab. nginx terminates TLS — three stacked cards:
+// Render the Certificates tab. nginx terminates TLS — four stacked cards:
 // HTTPS Certificate (read-only metadata + Rotate button), nginx Proxy (the
 // six operator-settable directives: HTTPS port, HTTP/3, TLS protocols, HSTS,
-// Prometheus allow-list, with a Save & Apply button), and Trusted CAs.
+// Prometheus allow-list, with a Save & Apply button), Dash Wallboard (the
+// unauthenticated read-only /dash surface: on/off toggle + source-IP scope),
+// and Trusted CAs.
 // A drift banner appears above the cards when proxyConfig.managedMode is
 // false (the refuse-and-banner UX for existing installs that haven't opted
 // into Polaris-managed nginx config yet). See src/api/routes/proxySettings.ts.
@@ -808,6 +811,40 @@ function renderCertsTab(container) {
       '</div>' +
     '</div>';
 
+  // Dash Wallboard card — controls the unauthenticated read-only /dash
+  // surface (own process; src/dash/dashServer.ts). The dash listener re-reads
+  // the setting within ~10s, no restart needed. PUT is serverSettingsSystem
+  // fullwrite-gated server-side.
+  var d = _dashSettings; // null = load failed (endpoint gated or older server)
+  var dashCardHtml =
+    '<div class="settings-card">' +
+      '<h4>Dash Wallboard</h4>' +
+      '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+        'A read-only, no-login duplicate of the Dashboard at <code>/dash</code> for NOC wallboards and kiosks. ' +
+        'It answers with the built-in <code>readonly</code> role\'s permissions; widget layout is saved in each ' +
+        'viewer\'s browser. Changes take effect within ~10 seconds.' +
+      '</p>' +
+      (d === null
+        ? '<p style="font-size:0.85rem;color:var(--color-text-secondary)">Unavailable — could not load the Dash settings.</p>'
+        : '<div class="form-group">' +
+            '<label><input type="checkbox" id="dash-enabled"' + (d.enabled ? " checked" : "") + '> Enable the Dash wallboard</label>' +
+          '</div>' +
+          '<div class="form-group">' +
+            '<label>Allowed source IPs</label>' +
+            '<div style="display:flex;flex-direction:column;gap:0.3rem;margin-top:0.3rem">' +
+              '<label><input type="radio" name="dash-ip-scope" value="rfc1918"' + (d.rfc1918Only ? " checked" : "") + '> Private networks only (RFC1918 + loopback)</label>' +
+              '<label><input type="radio" name="dash-ip-scope" value="all"' + (!d.rfc1918Only ? " checked" : "") + '> All source IPs</label>' +
+            '</div>' +
+            '<div id="dash-allip-warning" style="font-size:0.78rem;color:#f59e0b;margin-top:0.3rem;' + (d.rfc1918Only ? "display:none" : "") + '">' +
+              'All-IPs means ANY host that can reach this server can view the wallboard (asset names, IPs, alert feeds) without logging in.' +
+            '</div>' +
+          '</div>' +
+          '<div style="margin-top:0.5rem">' +
+            '<button class="btn btn-sm btn-primary" id="dash-save-btn">Save</button>' +
+            '<span style="font-size:0.82rem;color:var(--color-text-secondary);margin-left:0.8rem">Wallboard URL: <code>' + escapeHtml(window.location.origin) + '/dash</code></span>' +
+          '</div>') +
+    '</div>';
+
   var caCardHtml =
     '<div class="settings-card" style="display:flex;flex-direction:column">' +
       '<h4>Trusted Certificate Authorities</h4>' +
@@ -822,10 +859,19 @@ function renderCertsTab(container) {
       '</div>' +
     '</div>';
 
-  container.innerHTML = bannerHtml + certCardHtml + proxyCardHtml + caCardHtml;
+  container.innerHTML = bannerHtml + certCardHtml + proxyCardHtml + dashCardHtml + caCardHtml;
 
   var adoptBtn = document.getElementById("proxy-adopt-btn");
   if (adoptBtn) adoptBtn.addEventListener("click", handleProxyAdopt);
+
+  var dashSaveBtn = document.getElementById("dash-save-btn");
+  if (dashSaveBtn) dashSaveBtn.addEventListener("click", handleDashSave);
+  document.querySelectorAll('input[name="dash-ip-scope"]').forEach(function (radio) {
+    radio.addEventListener("change", function () {
+      var warn = document.getElementById("dash-allip-warning");
+      if (warn) warn.style.display = this.value === "all" && this.checked ? "" : "none";
+    });
+  });
 
   var rotateBtn = document.getElementById("proxy-rotate-cert-btn");
   if (rotateBtn) rotateBtn.addEventListener("click", openRotateCertModal);
@@ -852,6 +898,23 @@ function renderCertsTab(container) {
 
   var applyBtn = document.getElementById("proxy-apply-btn");
   if (applyBtn) applyBtn.addEventListener("click", handleProxyApply);
+}
+
+async function handleDashSave() {
+  var enabled = !!document.getElementById("dash-enabled").checked;
+  var scope = document.querySelector('input[name="dash-ip-scope"]:checked');
+  var rfc1918Only = !scope || scope.value !== "all";
+  if (enabled && !rfc1918Only &&
+      !confirm("Allow ALL source IPs to view the Dash wallboard without logging in?")) {
+    return;
+  }
+  try {
+    var result = await api.serverSettings.dashPut({ enabled: enabled, rfc1918Only: rfc1918Only });
+    _dashSettings = (result && result.dash) || { enabled: enabled, rfc1918Only: rfc1918Only };
+    showToast(enabled ? "Dash wallboard enabled" : "Dash wallboard disabled");
+  } catch (err) {
+    showToast("Failed to save Dash settings: " + (err.message || err), "error");
+  }
 }
 
 async function handleProxyAdopt() {
@@ -1083,6 +1146,11 @@ async function loadCertificates() {
   try {
     _proxyData = await api.serverSettings.proxyGet();
   } catch (_) { _proxyData = null; }
+
+  try {
+    var dashResp = await api.serverSettings.dashGet();
+    _dashSettings = (dashResp && dashResp.dash) || null;
+  } catch (_) { _dashSettings = null; }
 
   renderCertsTab(container);
   wireUploadArea("ca-upload-area", "ca-file-input", uploadCA);

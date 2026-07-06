@@ -19,6 +19,7 @@ import {
   parseRangeFirstIp,
   expandIpv6,
   ipToPtrName,
+  isPrivateOrLoopbackIp,
 } from "../../src/utils/cidr.js";
 
 describe("normalizeCidr", () => {
@@ -247,6 +248,33 @@ describe("isPrivateIpv4", () => {
     expect(isPrivateIpv4("")).toBe(false);
     expect(isPrivateIpv4("fd00::1")).toBe(false); // ULA is private but v6 — out of scope
     expect(isPrivateIpv4("10.0.0.256")).toBe(false); // invalid octet
+  });
+});
+
+describe("isPrivateOrLoopbackIp", () => {
+  it("accepts RFC 1918, loopback, and v6-mapped private forms", () => {
+    expect(isPrivateOrLoopbackIp("10.0.0.1")).toBe(true);
+    expect(isPrivateOrLoopbackIp("172.16.0.1")).toBe(true);
+    expect(isPrivateOrLoopbackIp("192.168.1.1")).toBe(true);
+    expect(isPrivateOrLoopbackIp("127.0.0.1")).toBe(true);
+    expect(isPrivateOrLoopbackIp("127.255.255.254")).toBe(true);
+    expect(isPrivateOrLoopbackIp("::1")).toBe(true);
+    expect(isPrivateOrLoopbackIp("::ffff:10.0.0.1")).toBe(true);
+    expect(isPrivateOrLoopbackIp("::ffff:127.0.0.1")).toBe(true);
+    expect(isPrivateOrLoopbackIp("::FFFF:192.168.5.9")).toBe(true); // case-insensitive prefix
+  });
+
+  it("rejects public, boundary-adjacent, link-local, ULA, and junk input", () => {
+    expect(isPrivateOrLoopbackIp("8.8.8.8")).toBe(false);
+    expect(isPrivateOrLoopbackIp("::ffff:8.8.8.8")).toBe(false);
+    expect(isPrivateOrLoopbackIp("172.32.0.1")).toBe(false);
+    expect(isPrivateOrLoopbackIp("172.15.0.1")).toBe(false);
+    expect(isPrivateOrLoopbackIp("169.254.10.10")).toBe(false); // link-local: deliberately out of scope
+    expect(isPrivateOrLoopbackIp("fd00::1")).toBe(false); // ULA: deliberately out of scope
+    expect(isPrivateOrLoopbackIp("fe80::1")).toBe(false);
+    expect(isPrivateOrLoopbackIp("2001:db8::1")).toBe(false);
+    expect(isPrivateOrLoopbackIp("")).toBe(false);
+    expect(isPrivateOrLoopbackIp("not-an-ip")).toBe(false);
   });
 });
 

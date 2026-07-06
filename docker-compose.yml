@@ -3,12 +3,15 @@
 # Topology:
 #   nginx    → terminates TLS on 443 (HTTP/2 + HTTP/3), path-routes to:
 #              / → polaris-web:3000
+#              /dash → polaris-dash:3001
 #              /metrics-monitor-N → polaris-monitor-N:9101
 #              /metrics-discovery → polaris-discovery:9110
 #   migrate  → one-shot `prisma migrate deploy`; everyone depends on it
 #   web      → Express + agent WS + schedulers (single instance)
 #   monitor  → pg-boss monitor consumers (N replicas; default 2)
 #   discovery → pg-boss discovery consumer
+#   dash     → unauthenticated read-only Dash wallboard listener (default
+#              OFF until enabled under Server Settings → Certificates)
 #
 # Single-process polaris.service is no longer supported as a production
 # deployment shape — every fresh install is split-role + nginx-fronted.
@@ -112,6 +115,20 @@ services:
       # polaris-discovery:9110). See docs/grafana/README.md.
       POLARIS_METRICS_PORT: "9110"
       POLARIS_METRICS_BIND: "0.0.0.0"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  dash:
+    <<: *polaris-common
+    environment:
+      POLARIS_STATE_DIR: /app/state
+      POLARIS_ROLE: dash
+      POLARIS_PROXY_CERT_PATH: /app/state/nginx/cert.pem
+      POLARIS_PUBLIC_URL:      ${POLARIS_PUBLIC_URL:-https://localhost}
+      # nginx's /dash location proxies here (polaris-dash:3001). The surface
+      # answers 403 until enabled under Server Settings → Certificates →
+      # Dash Wallboard; the RFC1918/all-IPs source gate also lives there.
     depends_on:
       migrate:
         condition: service_completed_successfully

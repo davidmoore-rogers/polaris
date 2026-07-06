@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Polaris — Dashboard</title>
+  <title>Polaris — Dash</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="icon" type="image/png" href="/logo.png">
@@ -14,11 +14,14 @@
   <link rel="stylesheet" href="/css/vendor/leaflet/MarkerCluster.Default.css">
 </head>
 <body>
+  <!-- Dash wallboard — the UNAUTHENTICATED read-only duplicate of index.html's
+       dashboard, served by the Dash listener (src/dash/dashServer.ts) at /dash.
+       No sidebar (there is no session to navigate with); layout customization
+       persists in this browser's localStorage. -->
   <div class="layout">
-    <aside class="sidebar" id="sidebar"></aside>
     <main class="main">
       <div class="page-header page-header-sticky">
-        <h2>Dashboard</h2>
+        <h2 id="dash-title">Dashboard</h2>
         <div class="page-header-actions">
           <button type="button" id="dashboard-customize" class="btn btn-primary">Customize Page</button>
           <button type="button" id="dashboard-add-widgets" class="btn btn-primary" hidden>Add Widgets</button>
@@ -30,13 +33,13 @@
       <div id="dashboard-tabs" class="dashboard-tabs" hidden></div>
       <div id="dashboard-empty-state" class="dashboard-empty">
         Click <strong>Customize Page</strong>, then <strong>Add Widgets</strong>, to build your dashboard.
+        Your layout is saved in this browser.
       </div>
       <div id="dashboard-canvas" class="dashboard-canvas" hidden></div>
     </main>
   </div>
 
-  <!-- Add-Widgets picker: translucent overlay (dashboard shows through) docking
-       a Group-By list + searchable/sortable/favoritable widget list. -->
+  <!-- Add-Widgets picker: same markup as index.html. -->
   <div class="widget-picker-overlay" id="widget-library-overlay" aria-hidden="true">
     <div class="widget-picker" role="dialog" aria-labelledby="widget-picker-title">
       <div class="widget-picker-header">
@@ -57,22 +60,16 @@
     </div>
   </div>
 
+  <!-- dash-mode.js MUST load first (sets the wallboard flags api.js reads);
+       dash-boot.js replaces app.js. No table-sf/integrations/assets/jspdf/
+       html-to-image here — the asset slide-over chain is deliberately absent
+       (widget click-throughs no-op instead). Keep the widget script list in
+       lockstep with index.html. -->
+  <script src="/js/dash-mode.js"></script>
   <script src="/js/vendor/leaflet/leaflet.js"></script>
   <script src="/js/vendor/leaflet/leaflet.markercluster.js"></script>
   <script src="/js/api.js"></script>
-  <script src="/js/app.js"></script>
-  <!-- Canonical asset-details slide-in (openViewModal in assets.js), reused
-       in-place by the Down Nodes widget. Same dependency set map.html loads to
-       reuse the same component; assets.js + integrations.js guard their
-       page-init so they stay inert off their own pages (no #assets-tbody here). -->
-  <script src="/js/vendor/jspdf.umd.min.js"></script>
-  <script src="/js/vendor/jspdf.plugin.autotable.min.js"></script>
-  <script src="/js/vendor/html-to-image.min.js"></script>
-  <script src="/js/table-sf.js"></script>
-  <script src="/js/integrations.js"></script>
-  <script src="/js/assets.js"></script>
-  <!-- Widget script list below is mirrored by dash.html (the unauthenticated
-       Dash wallboard) — keep the two lists in lockstep when adding widgets. -->
+  <script src="/js/dash-boot.js"></script>
   <script src="/js/widgets/index.js"></script>
   <!-- Shared helper before its consumers. -->
   <script src="/js/widgets/_topnBar.js"></script>

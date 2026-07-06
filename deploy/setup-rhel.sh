@@ -343,11 +343,12 @@ else
 fi
 
 # ─── 9. Install split-role systemd units + nginx-dependency drop-in ─────────
-info "Installing split-role systemd units (polaris-migrate, polaris-web, polaris-monitor@, polaris-discovery, polaris.target)..."
+info "Installing split-role systemd units (polaris-migrate, polaris-web, polaris-monitor@, polaris-discovery, polaris-dash, polaris.target)..."
 cp "$APP_DIR/deploy/polaris-migrate.service"    /etc/systemd/system/polaris-migrate.service
 cp "$APP_DIR/deploy/polaris-web.service"        /etc/systemd/system/polaris-web.service
 cp "$APP_DIR/deploy/polaris-monitor@.service"   /etc/systemd/system/polaris-monitor@.service
 cp "$APP_DIR/deploy/polaris-discovery.service"  /etc/systemd/system/polaris-discovery.service
+cp "$APP_DIR/deploy/polaris-dash.service"       /etc/systemd/system/polaris-dash.service
 cp "$APP_DIR/deploy/polaris.target"             /etc/systemd/system/polaris.target
 
 info "Installing polaris-web's Wants=nginx drop-in..."
@@ -400,6 +401,7 @@ for ((i=1; i<=MONITOR_REPLICAS; i++)); do
 done
 systemctl enable polaris-web.service >/dev/null
 systemctl enable polaris-discovery.service >/dev/null
+systemctl enable polaris-dash.service >/dev/null
 systemctl enable polaris-migrate.service >/dev/null
 systemctl enable polaris.target >/dev/null
 # Don't `--now` nginx; polaris.target's start pulls it in via the Wants= drop-in.

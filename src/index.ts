@@ -14,12 +14,12 @@ import { getRole } from "./utils/role.js";
   const role = getRole();
 
   // Only the web/all role may run the unauthenticated first-run wizard (it
-  // writes .env / DATABASE_URL and must be a single surface). A monitor or
-  // discovery process requires the DB to be configured already — if it isn't,
-  // fail clearly instead of idling or starting a second wizard. This also
-  // enforces unit ordering: worker units can't usefully start until the web
-  // node (or operator) has provisioned the host.
-  if ((role === "monitor" || role === "discovery") && state !== "configured") {
+  // writes .env / DATABASE_URL and must be a single surface). A monitor,
+  // discovery, or dash process requires the DB to be configured already — if
+  // it isn't, fail clearly instead of idling or starting a second wizard.
+  // This also enforces unit ordering: worker units can't usefully start until
+  // the web node (or operator) has provisioned the host.
+  if ((role === "monitor" || role === "discovery" || role === "dash") && state !== "configured") {
     console.error("");
     console.error(`  ERROR: POLARIS_ROLE=${role} requires DATABASE_URL to be configured already.`);
     console.error("  Run first-run setup on the web node (or set DATABASE_URL), then start this process.");

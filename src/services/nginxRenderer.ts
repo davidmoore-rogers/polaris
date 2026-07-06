@@ -36,6 +36,8 @@ export interface RenderInput {
   serverName: string;
   /** Polaris web upstream port — derived from PORT env var (default 3000). */
   polarisPort: number;
+  /** Dash wallboard upstream port — derived from POLARIS_DASH_PORT (default 3001). */
+  dashPort: number;
 }
 
 export interface RenderResult {
@@ -55,6 +57,7 @@ export function renderNginxConfig(input: RenderInput, templateOverride?: string)
     HTTPS_PORT: String(input.config.httpsPort),
     SERVER_NAME: input.serverName,
     POLARIS_PORT: String(input.polarisPort),
+    DASH_PORT: String(input.dashPort),
     SSL_PROTOCOLS_LIST: input.config.tlsProtocols.join(" "),
     QUIC_LISTENER: renderQuicListener(input.config),
     SSL_EARLY_DATA: renderSslEarlyData(input.config),

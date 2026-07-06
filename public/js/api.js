@@ -2,7 +2,10 @@
  * public/js/api.js — Thin fetch wrapper for /api/v1
  */
 
-const API_BASE = "/api/v1";
+// The Dash wallboard page (dash.html) sets window.__polarisApiBase (via
+// dash-mode.js, loaded before this file) so every request routes to its own
+// IP-gated listener at /dash/api/v1 instead of the authenticated API.
+const API_BASE = (typeof window !== "undefined" && window.__polarisApiBase) || "/api/v1";
 
 // ─── Shared HTML escaper ────────────────────────────────────────────────────
 //
@@ -628,6 +631,9 @@ const api = {
     uploadCert:  (category, file) => uploadFile("/server-settings/certificates", category, file),
     deleteCert:  (id)     => request("DELETE", `/server-settings/certificates/${id}`),
     getHttps:    ()       => request("GET", "/server-settings/https"),
+    // Dash wallboard (unauthenticated read-only /dash surface) toggle + IP scope.
+    dashGet:              ()      => request("GET",  "/server-settings/dash"),
+    dashPut:              (body)  => request("PUT",  "/server-settings/dash", body),
     // nginx GUI (proxy mode is now the only mode). Six controls + cert rotation.
     proxyGet:             ()      => request("GET",  "/server-settings/proxy"),
     proxyPut:             (body)  => request("PUT",  "/server-settings/proxy", body),

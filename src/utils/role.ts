@@ -12,6 +12,11 @@
  *                 hands each job to exactly one worker, so N replicas never
  *                 double-execute.
  *   • discovery — 1+ instance. Pure consumer of the discovery queue.
+ *   • dash      — single instance. The unauthenticated read-only Dash
+ *                 wallboard listener ONLY (src/dash/dashServer.ts) — no
+ *                 schedulers, no consumers, no migrations. Isolated so a bug
+ *                 in the unauthenticated surface can't touch sessions or
+ *                 write paths.
  *   • all       — default when POLARIS_ROLE is unset. Every capability on —
  *                 today's exact single-process behavior, so existing installs
  *                 and `npm run dev` are unaffected.
@@ -22,7 +27,7 @@
 
 import { logger } from "./logger.js";
 
-export type PolarisRole = "all" | "web" | "monitor" | "discovery";
+export type PolarisRole = "all" | "web" | "monitor" | "discovery" | "dash";
 
 export interface RoleConfig {
   role: PolarisRole;
@@ -43,9 +48,11 @@ export interface RoleConfig {
    *  buffers; without the flush tick those agent-sourced rows sit in memory
    *  and only land on graceful shutdown. */
   runsWriteBuffers: boolean;
+  /** The unauthenticated read-only Dash wallboard listener (src/dash/dashServer.ts). */
+  runsDashListener: boolean;
 }
 
-const VALID_ROLES: readonly PolarisRole[] = ["all", "web", "monitor", "discovery"];
+const VALID_ROLES: readonly PolarisRole[] = ["all", "web", "monitor", "discovery", "dash"];
 
 let cachedRole: PolarisRole | null = null;
 
@@ -92,6 +99,7 @@ export function roleConfig(role: PolarisRole = getRole()): RoleConfig {
     runsSchedulers: all || role === "web",
     runsMigrations: all || role === "web",
     runsWriteBuffers: all || role === "monitor" || role === "web",
+    runsDashListener: all || role === "dash",
   };
 }
 

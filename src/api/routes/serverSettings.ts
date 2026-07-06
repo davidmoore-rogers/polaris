@@ -32,6 +32,8 @@ import {
 import { getDnsSettings, updateDnsSettings, createResolver } from "../../services/dnsService.js";
 import type { DnsSettings } from "../../services/dnsService.js";
 import { getOuiStatus, refreshOuiDatabase, getOuiOverrides, setOuiOverride, deleteOuiOverride, lookupOuiDetailed } from "../../services/ouiService.js";
+import { getDashSettings, saveDashSettings } from "../../services/dashSettingsService.js";
+import { requirePermission } from "../middleware/permissions.js";
 import { logEvent } from "./events.js";
 import {
   normalizeCriteria,
@@ -1278,6 +1280,49 @@ router.put("/sample-retention", async (req, res, next) => {
       details: { retention: updated as any },
     });
     res.json({ retention: updated });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Dash wallboard config ──────────────────────────────────────────────────
+//
+// The unauthenticated read-only /dash surface (own process, POLARIS_ROLE=dash;
+// see src/dash/dashServer.ts). Reads ride the blanket serverSettingsSystem
+// read gate; the PUT is explicitly fullwrite-gated because it enables an
+// unauthenticated surface / widens its source-IP scope. The dash listener
+// picks a change up within ~10s via dashSettingsService's TTL cache.
+
+const DashSettingsSchema = z.object({
+  enabled: z.boolean().optional(),
+  rfc1918Only: z.boolean().optional(),
+});
+
+router.get("/dash", async (_req, res, next) => {
+  try {
+    res.json({ dash: await getDashSettings() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/dash", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
+  try {
+    const input = DashSettingsSchema.parse(req.body ?? {});
+    const before = await getDashSettings();
+    const updated = await saveDashSettings(input);
+    await logEvent({
+      level: updated.enabled && !updated.rfc1918Only ? "warning" : "info",
+      action: "dash_settings.updated",
+      resourceType: "setting",
+      resourceName: "dashConfig",
+      actor: req.session?.username,
+      message: updated.enabled
+        ? `Dash wallboard enabled (${updated.rfc1918Only ? "RFC1918 + loopback sources only" : "ALL source IPs"})`
+        : "Dash wallboard disabled",
+      details: { before: before as any, after: updated as any },
+    });
+    res.json({ dash: updated });
   } catch (err) {
     next(err);
   }

@@ -1,0 +1,34 @@
+[Unit]
+Description=Polaris — dash (unauthenticated read-only wallboard listener)
+Documentation=https://github.com/rogers-group-inc/polaris
+After=network.target postgresql-15.service polaris-migrate.service
+Requires=postgresql-15.service polaris-migrate.service
+PartOf=polaris.target
+
+[Service]
+Type=simple
+User=polaris
+Group=polaris
+WorkingDirectory=/opt/polaris
+ExecStart=/usr/bin/node dist/index.js
+# Shared env file for every role; the role itself is injected per-unit so it
+# stays OUT of .env (which is identical across processes).
+EnvironmentFile=/opt/polaris/.env
+Environment=POLARIS_ROLE=dash
+Restart=on-failure
+RestartSec=5
+
+# Binds 127.0.0.1:${POLARIS_DASH_PORT:-3001} (unprivileged; nginx proxies
+# `location /dash` to it) — no bind capability needed. The surface stays dark
+# until the operator enables it under Server Settings → Certificates.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/polaris
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polaris-dash
+
+[Install]
+WantedBy=polaris.target

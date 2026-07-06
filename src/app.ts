@@ -20,6 +20,7 @@ import { errorHandler } from "./api/middleware/errorHandler.js";
 import { csrfMiddleware } from "./api/middleware/csrf.js";
 import { logger } from "./utils/logger.js";
 import { resolveTrustProxy } from "./utils/trustProxy.js";
+import { buildHelmetOptions } from "./utils/securityHeaders.js";
 import { validateRuntimeConfiguration } from "./utils/runtimeConfig.js";
 import { isProxyMode } from "./utils/proxyMode.js";
 import { UPLOADS_DIR } from "./utils/paths.js";
@@ -309,71 +310,10 @@ function resolveSessionSecret(): string {
 const SESSION_SECRET = resolveSessionSecret();
 
 // ─── Security headers ────────────────────────────────────────────────────────
-app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        // Inline <script> blocks are DISALLOWED — all page JS is served
-        // from external files under /js. This blocks the most dangerous
-        // XSS vector (injected <script> tags that can define new functions,
-        // fetch remote code, etc).
-        scriptSrc: ["'self'"],
-        // Inline on* handler attributes are still permitted via scriptSrcAttr
-        // because many pages generate HTML with onclick="foo(...)" via
-        // innerHTML. Migrating these to addEventListener delegation is a
-        // larger follow-up; until then this keeps the feature working while
-        // still closing the bigger <script>-tag hole above.
-        scriptSrcAttr: ["'unsafe-inline'"],
-        styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-        fontSrc: ["'self'", "https://fonts.gstatic.com"],
-        // OpenStreetMap tile servers (light theme) AND CartoDB Dark Matter
-        // (dark theme) are whitelisted here so the Device Map page can render
-        // a real geographic basemap in both themes. Tiles load as <img>, not
-        // fetch, so they don't appear in connectSrc.
-        imgSrc: [
-          "'self'",
-          "data:",
-          "blob:",
-          "https://*.tile.openstreetmap.org",
-          "https://tile.openstreetmap.org",
-          "https://*.basemaps.cartocdn.com",
-          // RainViewer precipitation-radar tiles for the Site Map widget's
-          // weather overlay (loaded as <img>, served from tilecache.rainviewer.com).
-          "https://*.rainviewer.com",
-        ],
-        // The Google Fonts hosts are fetch()ed (not just <link>-loaded) by the
-        // asset-details Screenshot button: html-to-image inlines the page's
-        // webfonts (CSS from fonts.googleapis.com, woff2 from fonts.gstatic.com)
-        // into its DOM snapshot as data: URLs so the captured PNG renders in
-        // Inter/Roboto Mono. Capture degrades gracefully to fallback fonts when
-        // these hosts are unreachable (e.g. no-internet deployments).
-        connectSrc: [
-          "'self'",
-          "https://fonts.googleapis.com",
-          "https://fonts.gstatic.com",
-          // Site Map widget weather overlay: RainViewer radar frame index +
-          // Open-Meteo current-temperature lookups (both fetch()ed). Sends
-          // only approximate site lat/long; degrades gracefully when offline.
-          "https://api.rainviewer.com",
-          "https://api.open-meteo.com",
-        ],
-        frameSrc: ["'none'"],
-        objectSrc: ["'none'"],
-        baseUri: ["'self'"],
-        formAction: ["'self'", "https://login.microsoftonline.com"],
-        upgradeInsecureRequests: null,
-      },
-    },
-    // preload: true signals browser preload-list maintainers that we're OK
-    // being included. The header alone is harmless; actual inclusion still
-    // requires a separate submission to https://hstspreload.org/. Safe to
-    // leave on as long as every subdomain served from this origin is also
-    // HTTPS-only (includeSubDomains above makes that a hard requirement).
-    hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
-    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
-  })
-);
+// Shared with the Dash wallboard listener — see src/utils/securityHeaders.ts
+// for the full CSP rationale (inline-script ban, map-tile img hosts, the
+// Screenshot/weather connect-src entries).
+app.use(helmet(buildHelmetOptions()));
 
 // ─── Response compression ────────────────────────────────────────────────────
 app.use(compression());
@@ -639,10 +579,27 @@ export async function startApp(): Promise<void> {
   // so a broken deploy doesn't run workers against a mismatched schema either.
   await runSchemaSanityCheck();
 
-  // Non-HTTP roles (monitor / discovery) don't bind a port — their pg-boss
-  // workers + intervals (started at module load) keep the event loop alive.
+  // Dash wallboard listener (its own small Express app on POLARIS_DASH_PORT).
+  // Boots for the dedicated dash role AND under "all" so `npm run dev` serves
+  // /dash without extra setup. Bind failure is fatal for the pure dash role
+  // (the listener is the process's only purpose — let systemd cycle it) but
+  // only a warning under "all", where a dev port conflict must not take down
+  // the main app.
+  if (cfg.runsDashListener) {
+    try {
+      const { startDashServer } = await import("./dash/dashServer.js");
+      await startDashServer();
+    } catch (err: any) {
+      if (!cfg.runsHttp) throw err;
+      logger.warn({ err: err?.message }, "Dash wallboard listener failed to start; main app continues");
+    }
+  }
+
+  // Non-HTTP roles (monitor / discovery / dash) don't bind the main port —
+  // their pg-boss workers + intervals (or the dash listener above) keep the
+  // event loop alive.
   if (!cfg.runsHttp) {
-    logger.info({ role: cfg.role }, "Non-HTTP role — skipping Express listen; running workers only");
+    logger.info({ role: cfg.role }, "Non-HTTP role — skipping main Express listen");
     return;
   }
 

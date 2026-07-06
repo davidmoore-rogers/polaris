@@ -110,12 +110,30 @@
 
   // ─── Bootstrap + migration ──────────────────────────────────────────────
 
+  // Dash wallboard mode (dash.html, flagged by dash-mode.js): there is no
+  // session, so the layout lives in the viewer's browser instead of the
+  // per-user UserDashboard row. normalizeLayout already handles null/garbage.
+  var DASH_LOCAL_KEY = "polaris-dash-layout";
+
+  function readLocalLayout() {
+    try {
+      var raw = localStorage.getItem(DASH_LOCAL_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_err) {
+      return null;
+    }
+  }
+
   async function bootstrap() {
     var loaded;
-    try {
-      loaded = await api.me.dashboard.get();
-    } catch (_err) {
-      loaded = null;
+    if (window.POLARIS_DASH_LOCAL) {
+      loaded = readLocalLayout();
+    } else {
+      try {
+        loaded = await api.me.dashboard.get();
+      } catch (_err) {
+        loaded = null;
+      }
     }
     state.layout = normalizeLayout(loaded);
 
@@ -637,7 +655,11 @@
     state.saveTimer = null;
     state.saving = true;
     try {
-      await api.me.dashboard.put(state.layout);
+      if (window.POLARIS_DASH_LOCAL) {
+        localStorage.setItem(DASH_LOCAL_KEY, JSON.stringify(state.layout));
+      } else {
+        await api.me.dashboard.put(state.layout);
+      }
     } catch (err) {
       if (typeof showToast === "function") showToast("Failed to save dashboard: " + (err.message || err), "error");
     } finally {

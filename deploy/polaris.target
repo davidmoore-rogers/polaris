@@ -13,6 +13,10 @@ Wants=polaris-migrate.service
 Wants=polaris-web.service
 Wants=polaris-monitor@1.service
 Wants=polaris-discovery.service
+# Dash wallboard listener (unauthenticated read-only /dash; the nginx /dash
+# location proxies to it unconditionally, so the process must always run —
+# the operator toggle in Server Settings gates the surface, not the unit).
+Wants=polaris-dash.service
 After=polaris-migrate.service
 
 [Install]

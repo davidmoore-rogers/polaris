@@ -20,7 +20,7 @@ describe("getRole — env parsing", () => {
   });
 
   it("accepts the known roles (case-insensitive, trimmed)", () => {
-    for (const r of ["web", "monitor", "discovery", "all"]) {
+    for (const r of ["web", "monitor", "discovery", "dash", "all"]) {
       __resetRoleForTests();
       process.env.POLARIS_ROLE = `  ${r.toUpperCase()}  `;
       expect(getRole()).toBe(r as PolarisRole);
@@ -50,6 +50,7 @@ describe("roleConfig — capability matrix", () => {
       runsSchedulers: true,
       runsMigrations: true,
       runsWriteBuffers: true,
+      runsDashListener: true,
     });
   });
 
@@ -86,15 +87,28 @@ describe("roleConfig — capability matrix", () => {
       runsSchedulers: false,
       runsMigrations: false,
       runsWriteBuffers: false,
+      runsDashListener: false,
+    });
+  });
+
+  it("dash = the wallboard listener only", () => {
+    expect(roleConfig("dash")).toMatchObject({
+      runsDashListener: true,
+      runsHttp: false,
+      runsMonitorConsumers: false,
+      runsDiscoveryConsumers: false,
+      runsSchedulers: false,
+      runsMigrations: false,
+      runsWriteBuffers: false,
     });
   });
 
   it("pins singleton schedulers + migrations to exactly one role (web/all)", () => {
-    const rolesRunningSchedulers = (["all", "web", "monitor", "discovery"] as PolarisRole[])
+    const rolesRunningSchedulers = (["all", "web", "monitor", "discovery", "dash"] as PolarisRole[])
       .filter((r) => roleConfig(r).runsSchedulers);
     expect(rolesRunningSchedulers).toEqual(["all", "web"]);
     // migrations track schedulers (both control-plane)
-    for (const r of ["all", "web", "monitor", "discovery"] as PolarisRole[]) {
+    for (const r of ["all", "web", "monitor", "discovery", "dash"] as PolarisRole[]) {
       expect(roleConfig(r).runsMigrations).toBe(roleConfig(r).runsSchedulers);
     }
   });

@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import { renderNginxConfig } from "../../src/services/nginxRenderer.js";
 import { defaultProxyConfig, type ProxyConfig } from "../../src/types/proxyConfig.js";
 
-const ENV = { serverName: "polaris.example.com", polarisPort: 3000 };
+const ENV = { serverName: "polaris.example.com", polarisPort: 3000, dashPort: 3001 };
 
 function cfg(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
   return { ...defaultProxyConfig(), ...overrides };
@@ -64,6 +64,22 @@ describe("renderNginxConfig — defaults", () => {
     expect(contents).toMatch(/proxy_pass http:\/\/127\.0\.0\.1:9101\/metrics;/);
     expect(contents).toMatch(/proxy_pass http:\/\/127\.0\.0\.1:9102\/metrics;/);
     expect(contents).toMatch(/proxy_pass http:\/\/127\.0\.0\.1:9110\/metrics;/);
+  });
+
+  it("emits the two dash wallboard locations proxying to the dash port", () => {
+    expect(contents).toMatch(/^\s*location = \/dash \{/m);
+    expect(contents).toMatch(/^\s*location \/dash\/ \{/m);
+    // Two dash locations × one proxy_pass each.
+    expect((contents.match(/proxy_pass http:\/\/127\.0\.0\.1:3001;/g) ?? []).length).toBe(2);
+    // Deliberately NO allow/deny inside the dash locations — the IP gate is
+    // app-level (dash process). The only deny lines are the 4 metrics ones.
+    expect((contents.match(/deny all;/g) ?? []).length).toBe(4);
+  });
+
+  it("substitutes a custom dash port", () => {
+    const { contents: custom } = renderNginxConfig({ config: cfg(), ...ENV, dashPort: 4001 });
+    expect((custom.match(/proxy_pass http:\/\/127\.0\.0\.1:4001;/g) ?? []).length).toBe(2);
+    expect(custom).not.toMatch(/127\.0\.0\.1:3001/);
   });
 
   it("is sha256-deterministic across calls", () => {
