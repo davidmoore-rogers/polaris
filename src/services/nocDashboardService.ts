@@ -564,6 +564,12 @@ export async function getHighestTemperature(limit: number | null = 100, assetIds
  * Feed 5 (data-gap Option A) — packet loss = failed-probe ratio over the
  * window. One windowed groupBy over asset_monitor_samples; no schema change.
  * (True per-probe loss% via multi-ping is a documented follow-up.)
+ *
+ * Assets at 100% loss (zero successful probes in the window) are excluded —
+ * that's a hard-down node, already surfaced by the Down Nodes widget, and
+ * listing it here as "packet loss" is redundant noise. The HAVING requires
+ * at least one failure AND at least one success, so only genuinely lossy
+ * (intermittent) assets qualify.
  */
 export async function getPacketLoss(limit: number | null = 100, sinceMinutes = 15, assetIds: string[] | null = null): Promise<TopNRow[]> {
   const idClause = assetIds ? ` AND "assetId" = ANY($3::text[])` : "";
@@ -575,6 +581,7 @@ export async function getPacketLoss(limit: number | null = 100, sinceMinutes = 1
      WHERE "timestamp" > now() - ($1 || ' minutes')::interval${idClause}
      GROUP BY "assetId"
      HAVING count(*) FILTER (WHERE NOT "success") > 0
+        AND count(*) FILTER (WHERE "success") > 0
      ORDER BY (count(*) FILTER (WHERE NOT "success"))::float / count(*) DESC
      LIMIT $2`,
     ...params,

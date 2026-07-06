@@ -199,6 +199,16 @@ describe("getPacketLoss", () => {
     const r = await noc.getPacketLoss();
     expect(r[0].value).toBe(12.5); // 1/8
   });
+
+  it("excludes 100%-loss assets in the SQL (hard-down = Down Nodes, not packet loss)", async () => {
+    rawUnsafe.mockResolvedValueOnce([]);
+    await noc.getPacketLoss();
+    const sql = rawUnsafe.mock.calls[0][0] as string;
+    // At least one failure AND at least one success — a window with zero
+    // successful probes is a down node, not a lossy one.
+    expect(sql).toContain(`count(*) FILTER (WHERE NOT "success") > 0`);
+    expect(sql).toContain(`count(*) FILTER (WHERE "success") > 0`);
+  });
 });
 
 describe("getStalePolls", () => {

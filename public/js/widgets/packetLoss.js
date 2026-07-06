@@ -2,6 +2,8 @@
  * widgets/packetLoss.js — top-N monitored assets by recent probe packet loss
  * (failed-probe ratio %, computed server-side). Shares the _topnBar renderer;
  * data from noc-summary packetLoss[]. Defaults to hiding rows below 1%.
+ * Fully-down assets (100% loss — zero successful probes in the window) are
+ * excluded server-side; those belong to the Down Nodes widget.
  */
 
 (function () {
@@ -18,7 +20,7 @@
     type: "packetLoss",
     category: "Monitoring",
     label: "Packet Loss",
-    description: "Monitored assets with the highest recent probe loss (failed-probe ratio).",
+    description: "Monitored assets with the highest recent probe loss (failed-probe ratio). Fully-down assets (100% loss) are excluded — see Down Nodes.",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
     defaultConfig: { rowLimit: 1000, threshold: 1, regionScope: "mine" },
