@@ -10,11 +10,13 @@
  *
  * Access control, in middleware order (each layer is load-bearing):
  *   1. Operator kill-switch — the `dashConfig` Setting row (Server Settings →
- *      Certificates → Dash Wallboard). Disabled ⇒ 403 for everything. Read
+ *      Web Server → Dash Wallboard). Disabled ⇒ 403 for everything. Read
  *      through a ~10s TTL cache, which is also the cross-process propagation
  *      delay for a toggle (the web process writes the row).
- *   2. Source-IP gate — RFC1918 + loopback only (privateNetworkOnly), unless
- *      the operator widened it to all IPs. Only as trustworthy as the
+ *   2. Source-IP gate — `ipScope` resolves to RFC1918+loopback (default),
+ *      "all" (no gate), or "custom" (must match an allow-list CIDR). An
+ *      UNAUTHORIZED source is DROPPED (socket destroyed, no response) so a
+ *      scanner can't confirm the wallboard exists. Only as trustworthy as the
  *      `trust proxy` posture — nginx mode trusts the first hop's
  *      X-Forwarded-For; direct mode uses the socket address.
  *   3. GET/HEAD-only — every write verb 405s app-wide, which is also why no
@@ -40,8 +42,8 @@ import dashboardRouter from "../api/routes/dashboard.js";
 import reservationsRouter from "../api/routes/reservations.js";
 import mapRouter from "../api/routes/map.js";
 import { errorHandler } from "../api/middleware/errorHandler.js";
-import { privateNetworkOnly } from "../api/middleware/privateNetworkOnly.js";
 import { makeRateLimiter } from "../api/middleware/rateLimits.js";
+import { isPrivateOrLoopbackIp, ipMatchesAnyCidr } from "../utils/cidr.js";
 import { getDashSettings, type DashSettings } from "../services/dashSettingsService.js";
 import {
   getReadonlyRoleIdentity,
@@ -73,6 +75,30 @@ const API_PATH_ALLOWLIST = new Set<string>([
   "/map/sites",
 ]);
 
+/**
+ * Is this source IP allowed under the current scope? "all" → always; "custom"
+ * → matches one of the allow-list CIDRs; "rfc1918" (default) → RFC1918 or
+ * loopback. The `enabled` flag is checked separately by the caller.
+ */
+export function isSourceAllowed(ip: string, settings: DashSettings): boolean {
+  if (settings.ipScope === "all") return true;
+  if (settings.ipScope === "custom") return ipMatchesAnyCidr(ip, settings.allowedCidrs);
+  return isPrivateOrLoopbackIp(ip);
+}
+
+/**
+ * Silently drop a request from an unauthorized source: destroy the socket
+ * with no HTTP response. `req.socket` may already be gone on an aborted
+ * connection, so guard the destroy.
+ */
+function dropConnection(req: Request): void {
+  try {
+    req.socket?.destroy();
+  } catch {
+    /* connection already torn down */
+  }
+}
+
 export interface BuildDashAppOptions {
   /** Test seam — replaces the readonly-Role DB lookup. */
   identityProvider?: () => Promise<DashRoleIdentity>;
@@ -94,23 +120,34 @@ export function buildDashApp(opts: BuildDashAppOptions = {}): express.Express {
   }
 
   // ── 1+2. Operator kill-switch, then the source-IP gate ────────────────────
-  app.use((req: Request, res: Response, next: NextFunction) => {
+  // Scope resolves three ways: "all" (no gate), "rfc1918" (private + loopback
+  // only), "custom" (must match one of the operator's allow-list CIDRs).
+  //
+  // An unauthorized SOURCE IP is DROPPED, not answered: we destroy the socket
+  // with no HTTP response, so a scanner from a disallowed network gets a bare
+  // connection reset rather than a 403 that would confirm the wallboard exists.
+  // (Behind nginx the app only sees nginx's connection, so a drop surfaces to
+  // the remote client as a 502 — still no confirmation from Polaris. The
+  // operator chose app-level gating over nginx allow/deny; a true edge silent-
+  // drop would be a firewall rule.) The disabled state still returns a plain
+  // 403 so an admin configuring the toggle gets a clear message.
+  app.use((req: Request, _res: Response, next: NextFunction) => {
     settingsProvider()
       .then((settings) => {
         if (!settings.enabled) {
           next(
             new AppError(
               403,
-              "The Dash wallboard is disabled — an administrator can enable it under Server Settings → Certificates",
+              "The Dash wallboard is disabled — an administrator can enable it under Server Settings → Web Server",
             ),
           );
           return;
         }
-        if (settings.rfc1918Only) {
-          privateNetworkOnly(req, res, next);
+        if (isSourceAllowed(req.ip ?? "", settings)) {
+          next();
           return;
         }
-        next();
+        dropConnection(req);
       })
       .catch(next);
   });

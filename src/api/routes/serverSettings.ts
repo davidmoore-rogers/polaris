@@ -1295,7 +1295,10 @@ router.put("/sample-retention", async (req, res, next) => {
 
 const DashSettingsSchema = z.object({
   enabled: z.boolean().optional(),
-  rfc1918Only: z.boolean().optional(),
+  ipScope: z.enum(["rfc1918", "all", "custom"]).optional(),
+  // CIDR validation + normalization happens in saveDashSettings (shared with
+  // the parse path); here we only bound the array shape.
+  allowedCidrs: z.array(z.string()).max(200).optional(),
 });
 
 router.get("/dash", async (_req, res, next) => {
@@ -1312,13 +1315,14 @@ router.put("/dash", requirePermission("serverSettingsSystem", "fullwrite"), asyn
     const before = await getDashSettings();
     const updated = await saveDashSettings(input);
     await logEvent({
-      level: updated.enabled && !updated.rfc1918Only ? "warning" : "info",
+      // "all" is the widest posture — flag it at warning level.
+      level: updated.enabled && updated.ipScope === "all" ? "warning" : "info",
       action: "dash_settings.updated",
       resourceType: "setting",
       resourceName: "dashConfig",
       actor: req.session?.username,
       message: updated.enabled
-        ? `Dash wallboard enabled (${updated.rfc1918Only ? "RFC1918 + loopback sources only" : "ALL source IPs"})`
+        ? `Dash wallboard enabled (${describeDashScope(updated)})`
         : "Dash wallboard disabled",
       details: { before: before as any, after: updated as any },
     });
@@ -1327,6 +1331,12 @@ router.put("/dash", requirePermission("serverSettingsSystem", "fullwrite"), asyn
     next(err);
   }
 });
+
+function describeDashScope(s: { ipScope: string; allowedCidrs: string[] }): string {
+  if (s.ipScope === "all") return "ALL source IPs";
+  if (s.ipScope === "custom") return `custom source IPs: ${s.allowedCidrs.join(", ") || "(none)"}`;
+  return "RFC1918 + loopback sources only";
+}
 
 // ─── Agent OS event-log config ────────────────────────────────────────────
 //

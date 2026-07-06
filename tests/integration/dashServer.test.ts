@@ -4,9 +4,9 @@
  * The Dash wallboard listener's access-control chain, exercised via supertest
  * against buildDashApp() with injected settings/identity providers (no DB):
  *   - operator kill-switch: disabled ⇒ 403 everywhere
- *   - source-IP gate: loopback socket passes; a public X-Forwarded-For is
- *     honored (403) only under proxy-mode trust, ignored otherwise
- *   - rfc1918Only=false widens to any source
+ *   - source-IP gate: loopback socket passes; an unauthorized source is
+ *     DROPPED (socket destroyed → the request errors, no HTTP status)
+ *   - ipScope "all" widens to any source; "custom" serves only allow-list CIDRs
  *   - GET/HEAD-only: writes 405 app-wide
  *   - exact-path API allowlist: unlisted paths 404 before touching a router
  *   - synthetic /auth/me: readonly-role identity in the real /auth/me shape
@@ -47,11 +47,20 @@ function buildApp(opts: { settings?: Partial<DashSettings>; proxyMode?: boolean 
     // and X-Forwarded-For is honored for req.ip. Restored by afterEach.
     process.env.POLARIS_PROXY_CERT_PATH = "/tmp/proxy-mode-marker-file";
   }
-  const settings: DashSettings = { enabled: true, rfc1918Only: true, ...opts.settings };
+  const settings: DashSettings = { enabled: true, ipScope: "rfc1918", allowedCidrs: [], ...opts.settings };
   return buildDashApp({
     settingsProvider: async () => settings,
     identityProvider: async () => READONLY_IDENTITY,
   });
+}
+
+// A dropped source destroys the socket with no HTTP response — supertest
+// surfaces that as a rejected request (ECONNRESET / socket hang up), NOT a
+// status code. Assert the GET rejects.
+async function expectDropped(app: ReturnType<typeof buildApp>, path: string, headers: Record<string, string> = {}) {
+  let req = request(app).get(path);
+  for (const [k, v] of Object.entries(headers)) req = req.set(k, v);
+  await expect(req).rejects.toBeTruthy();
 }
 
 describe("operator kill-switch", () => {
@@ -65,18 +74,14 @@ describe("operator kill-switch", () => {
   });
 });
 
-describe("source-IP gate", () => {
+describe("source-IP gate (rfc1918 default)", () => {
   it("passes the loopback test socket through", async () => {
     const res = await request(buildApp()).get("/dash/api/v1/auth/me");
     expect(res.status).toBe(200);
   });
 
-  it("honors a public X-Forwarded-For under proxy-mode trust → 403", async () => {
-    const res = await request(buildApp({ proxyMode: true }))
-      .get("/dash/api/v1/auth/me")
-      .set("X-Forwarded-For", "203.0.113.5");
-    expect(res.status).toBe(403);
-    expect(res.body.error ?? res.text).toMatch(/private networks only/i);
+  it("DROPS a public X-Forwarded-For under proxy-mode trust (no response)", async () => {
+    await expectDropped(buildApp({ proxyMode: true }), "/dash/api/v1/auth/me", { "X-Forwarded-For": "203.0.113.5" });
   });
 
   it("honors a private X-Forwarded-For under proxy-mode trust → 200", async () => {
@@ -92,12 +97,27 @@ describe("source-IP gate", () => {
       .set("X-Forwarded-For", "203.0.113.5");
     expect(res.status).toBe(200);
   });
+});
 
-  it("serves any source when rfc1918Only is off", async () => {
-    const res = await request(buildApp({ proxyMode: true, settings: { rfc1918Only: false } }))
+describe("source-IP gate — ipScope all", () => {
+  it("serves any source when scope is 'all'", async () => {
+    const res = await request(buildApp({ proxyMode: true, settings: { ipScope: "all" } }))
       .get("/dash/api/v1/auth/me")
       .set("X-Forwarded-For", "203.0.113.5");
     expect(res.status).toBe(200);
+  });
+});
+
+describe("source-IP gate — ipScope custom", () => {
+  const customApp = () => buildApp({ proxyMode: true, settings: { ipScope: "custom", allowedCidrs: ["203.0.113.0/24"] } });
+
+  it("serves a source inside an allow-list CIDR → 200", async () => {
+    const res = await request(customApp()).get("/dash/api/v1/auth/me").set("X-Forwarded-For", "203.0.113.42");
+    expect(res.status).toBe(200);
+  });
+
+  it("DROPS a source outside every allow-list CIDR", async () => {
+    await expectDropped(customApp(), "/dash/api/v1/auth/me", { "X-Forwarded-For": "198.51.100.7" });
   });
 });
 

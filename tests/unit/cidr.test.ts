@@ -20,6 +20,8 @@ import {
   expandIpv6,
   ipToPtrName,
   isPrivateOrLoopbackIp,
+  normalizeAllowlistCidr,
+  ipMatchesAnyCidr,
 } from "../../src/utils/cidr.js";
 
 describe("normalizeCidr", () => {
@@ -275,6 +277,44 @@ describe("isPrivateOrLoopbackIp", () => {
     expect(isPrivateOrLoopbackIp("2001:db8::1")).toBe(false);
     expect(isPrivateOrLoopbackIp("")).toBe(false);
     expect(isPrivateOrLoopbackIp("not-an-ip")).toBe(false);
+  });
+});
+
+describe("normalizeAllowlistCidr", () => {
+  it("normalizes valid IPv4 CIDRs (zeroing host bits) and bare IPs to /32", () => {
+    expect(normalizeAllowlistCidr("10.0.0.0/8")).toBe("10.0.0.0/8");
+    expect(normalizeAllowlistCidr("192.168.1.50/24")).toBe("192.168.1.0/24"); // host bits zeroed
+    expect(normalizeAllowlistCidr("203.0.113.5")).toBe("203.0.113.5/32"); // bare → /32
+    expect(normalizeAllowlistCidr("  172.16.0.0/12  ")).toBe("172.16.0.0/12"); // trimmed
+  });
+
+  it("rejects invalid, IPv6, and empty entries", () => {
+    expect(normalizeAllowlistCidr("")).toBeNull();
+    expect(normalizeAllowlistCidr("not-an-ip")).toBeNull();
+    expect(normalizeAllowlistCidr("10.0.0.0/33")).toBeNull(); // bad prefix
+    expect(normalizeAllowlistCidr("10.0.0.256/24")).toBeNull(); // bad octet
+    expect(normalizeAllowlistCidr("2001:db8::/32")).toBeNull(); // IPv6 out of scope
+    expect(normalizeAllowlistCidr("::1")).toBeNull();
+  });
+});
+
+describe("ipMatchesAnyCidr", () => {
+  const list = ["10.0.0.0/8", "192.168.10.0/24", "203.0.113.5/32"];
+
+  it("matches an IP inside any listed CIDR", () => {
+    expect(ipMatchesAnyCidr("10.5.6.7", list)).toBe(true);
+    expect(ipMatchesAnyCidr("192.168.10.42", list)).toBe(true);
+    expect(ipMatchesAnyCidr("203.0.113.5", list)).toBe(true);
+    expect(ipMatchesAnyCidr("::ffff:10.1.2.3", list)).toBe(true); // v6-mapped v4
+  });
+
+  it("rejects IPs outside every CIDR, IPv6, and empty inputs", () => {
+    expect(ipMatchesAnyCidr("8.8.8.8", list)).toBe(false);
+    expect(ipMatchesAnyCidr("192.168.11.1", list)).toBe(false); // adjacent /24
+    expect(ipMatchesAnyCidr("203.0.113.6", list)).toBe(false); // adjacent /32
+    expect(ipMatchesAnyCidr("2001:db8::1", list)).toBe(false);
+    expect(ipMatchesAnyCidr("", list)).toBe(false);
+    expect(ipMatchesAnyCidr("10.0.0.1", [])).toBe(false);
   });
 });
 
