@@ -99,7 +99,26 @@
 
       // wheelPxPerZoomLevel doubled from Leaflet's 60 default so the scroll
       // wheel zooms half the distance per notch (gentler than the default).
-      var map = L.map(mapDiv, { worldCopyJump: true, center: [39.5, -95], zoom: 4, attributionControl: true, zoomControl: true, wheelPxPerZoomLevel: 120 });
+      // zoomSnap 0.25 lets fitBounds land on fractional zoom levels — with the
+      // default integer snap the initial fit rounds DOWN a whole level and can
+      // leave a huge margin between the outermost dots and the widget edge.
+      var map = L.map(mapDiv, { worldCopyJump: true, center: [39.5, -95], zoom: 4, zoomSnap: 0.25, attributionControl: true, zoomControl: true, wheelPxPerZoomLevel: 120 });
+
+      // Home/reset control under the +/− buttons: returns to the initial
+      // fit-all-sites view (bounds refreshed with the marker data each cycle).
+      var homeBounds = null;
+      function goHome() { if (homeBounds) map.fitBounds(homeBounds, { maxZoom: 10 }); }
+      var HomeControl = L.Control.extend({
+        options: { position: "topleft" },
+        onAdd: function () {
+          var div = L.DomUtil.create("div", "leaflet-bar");
+          var a = L.DomUtil.create("a", "sitemap-home", div);
+          a.href = "#"; a.title = "Reset view"; a.setAttribute("role", "button"); a.innerHTML = "⌂";
+          L.DomEvent.on(a, "click", function (e) { L.DomEvent.stop(e); goHome(); });
+          return div;
+        },
+      });
+      map.addControl(new HomeControl());
 
       // Theme-aware basemap: CARTO Dark Matter (dark) or CARTO Positron (light).
       // The .sitemap-dark class drives the basemap darkening filter (CSS), so
@@ -332,11 +351,14 @@
         });
         // A stack the operator had exploded stays exploded across the refresh.
         if (expandedKey) expandStack(expandedKey);
+        // Keep the reset-view bounds current with the data (without moving the
+        // map — only the initial render and the ⌂ button actually fit).
+        if (latlngs.length) homeBounds = L.latLngBounds(latlngs).pad(0.04);
         requestAnimationFrame(updateLeaders);
         return latlngs;
       }
-      function refit(latlngs) { if (latlngs.length) map.fitBounds(L.latLngBounds(latlngs).pad(0.12), { maxZoom: 10 }); }
-      refit(buildMarkers(data));
+      buildMarkers(data);
+      goHome();
 
       // ── Weather overlay ────────────────────────────────────────────────
       var tempEnabled = wxPref("wx-temp", true);

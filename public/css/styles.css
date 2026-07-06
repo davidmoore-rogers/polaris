@@ -4134,6 +4134,9 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   background: #ff1744; animation: sitemap-pulse-ring 2s ease-out infinite; pointer-events: none;
 }
 
+/* Home/reset-view control button under the Leaflet +/− zoom control. */
+.sitemap-body .leaflet-bar a.sitemap-home { font-size: 17px; line-height: 26px; }
+
 /* Count badge centered on a stacked-sites anchor dot (spiderfy explode). */
 .sitemap-stack-count {
   width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
