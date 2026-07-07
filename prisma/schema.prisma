@@ -561,15 +561,22 @@ model Asset {
   // Operator-owned device description. When the originating integration's
   // `syncDescriptions` toggle is on (FMG / standalone FortiGate), this field
   // is description-synced with the device — Polaris is primary: an empty
-  // Polaris value is seeded (adopted) from the device once, and a non-empty
-  // value is written back to the device, overwriting device-side edits
-  // (audited). Device-side write target depends on fortinetTopology.role:
+  // Three-way merge (newest-wins): where a baseline exists, only the side that
+  // changed since it wins — a device-side edit made after Polaris last synced
+  // flows back into Polaris (adopt); both sides changed → conflict (touch
+  // neither). With no baseline (sync just enabled) it falls back to
+  // Polaris-primary. Device-side write target depends on fortinetTopology.role:
   // fortigate → system/global `alias`, fortiswitch → managed-switch
   // `description`, fortiap → wtp `comment`. See descriptionSyncService.
   description      String?     @db.VarChar(255)
-  // Device-level description sync state: { status: "synced"|"failed",
-  // at: ISO timestamp, error?: string }. Null = never synced / sync not
-  // enabled. JSON-blob precedent: quarantineTargets.
+  // Device-level description sync state:
+  //   { status: "synced"|"failed"|"conflict", at: ISO timestamp,
+  //     value?: string|null,  // three-way-merge baseline (last agreed value;
+  //                            //   key present = baseline known, absent = none)
+  //     error?: string,        // failed-push detail
+  //     device?, polaris?      // conflicting current values (status="conflict")
+  //   }. Null = never synced / sync not enabled. JSON-blob precedent:
+  // quarantineTargets.
   descriptionSync  Json?
   tags             String[]    @default([])
   createdBy        String?
@@ -1099,12 +1106,18 @@ model AssetInterfaceOverride {
   ifName      String
   description String?  @db.VarChar(255)
   updatedBy   String?
-  // Description-sync state (null on all three = Polaris-local / never synced).
-  // syncStatus: "synced" | "failed". Transport/read errors never change these;
-  // only an actual push attempt stamps them (quarantine-verify rule).
+  // Description-sync state (null on all four = Polaris-local / never synced).
+  // syncStatus: "synced" | "failed" | "conflict". Transport/read errors never
+  // change these; only an actual push attempt stamps them (quarantine-verify
+  // rule). syncedValue is the three-way-merge baseline: the last value both
+  // sides agreed on (always the last value pushed/adopted, hence non-empty).
+  // NULL syncedValue = no merge base yet → Polaris-primary bootstrap on the
+  // next reconcile; non-NULL enables newest-wins (only the side that changed
+  // since the baseline wins; both changed → "conflict", touch neither side).
   syncStatus  String?
   lastSyncAt  DateTime?
   syncError   String?
+  syncedValue String?  @db.VarChar(255)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

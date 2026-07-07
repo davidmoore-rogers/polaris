@@ -1,15 +1,30 @@
 /**
- * src/services/descriptionSyncService.ts — Polaris-primary description sync
- * for the FortiManager / standalone FortiGate integrations, gated by the
- * per-integration `syncDescriptions` toggle (default off).
+ * src/services/descriptionSyncService.ts — description sync for the
+ * FortiManager / standalone FortiGate integrations, gated by the per-integration
+ * `syncDescriptions` toggle (default off).
  *
- * Policy (operator-specified): POLARIS IS PRIMARY.
- *   - Polaris empty + device has a value → adopt (seed) the device value into
- *     Polaris (device-level only; interface comments already fall back to the
- *     discovered description for display, so no override row is created).
- *   - Polaris has a value → it is written to the device. Device-side edits
- *     are overwritten on the next sync; every overwrite is audited with the
- *     value it replaced.
+ * Policy (operator-specified): THREE-WAY MERGE, NEWEST EDIT WINS.
+ *   A per-surface baseline (the last value both sides agreed on — the last
+ *   value pushed or adopted) is the merge base:
+ *   - No baseline yet (sync just enabled) → Polaris-primary bootstrap: a
+ *     non-empty Polaris value is pushed to the device; an empty Polaris value
+ *     adopts (seeds from) the device value. This is the historical behavior and
+ *     matches the operator's intent when they first flip the toggle.
+ *   - Baseline exists → only the side that CHANGED since the baseline wins:
+ *       · Polaris changed, device didn't → push  (Polaris edit is newer).
+ *       · device changed, Polaris didn't → adopt (device edit is newer — a
+ *         device-side edit made after the last sync flows back into Polaris).
+ *       · both changed → conflict: touch NEITHER side, stamp sync state
+ *         "conflict" (recording baseline + both current values), log a warning.
+ *         The operator resolves by editing the Polaris value, which then pushes
+ *         authoritatively and re-establishes the baseline. (We can't order two
+ *         edits when only Polaris carries a timestamp — the device doesn't
+ *         track description edit times.)
+ *   Every push/adopt is audited with the value it replaced. Baselines: device
+ *   level in the Asset.descriptionSync `value` key; interface level in
+ *   AssetInterfaceOverride.syncedValue. An operator save is unambiguously the
+ *   newest edit, so the save-time fast path always pushes (no conflict check)
+ *   and re-establishes the baseline.
  *
  * Synced surfaces and their FortiOS CMDB endpoints (all reached through the
  * shared Transport from reservationPushService, so both `useProxy` modes and
@@ -38,7 +53,8 @@
  * (coord-push posture). Transport/read errors leave sync state untouched
  * (quarantine-verify rule); only an actual failed PUT stamps
  * syncStatus="failed" + syncError. No retry queue — the per-discovery
- * reconcile pass self-heals rows whose push failed transiently.
+ * reconcile pass self-heals rows whose push failed transiently, and is also
+ * the pass that detects device-side edits (adopt / conflict).
  */
 import { prisma } from "../db.js";
 import { Prisma } from "../generated/prisma/client.js";
@@ -60,17 +76,48 @@ export function normalizeDescription(v: unknown): string | null {
   return t.length > 0 ? t : null;
 }
 
-export type DescSyncAction = "none" | "push" | "adopt";
+export type DescSyncAction = "none" | "push" | "adopt" | "conflict";
 
 /**
- * Polaris-primary decision. `polaris` / `device` are the CURRENT values on
- * each side (raw; normalized here).
+ * Sentinel: no merge base recorded yet (sync just enabled). Distinct from a
+ * known-empty baseline (`null`) so we can tell "never agreed" from "last agreed
+ * value was empty".
  */
-export function decideDescriptionSync(polaris: unknown, device: unknown): DescSyncAction {
+export const BASELINE_UNKNOWN = Symbol("baseline-unknown");
+export type Baseline = string | null | typeof BASELINE_UNKNOWN;
+
+/**
+ * Three-way merge (newest-wins) decision. `polaris` / `device` are the CURRENT
+ * values on each side; `baseline` is the last value both agreed on:
+ *   - BASELINE_UNKNOWN (default) → Polaris-primary bootstrap (push if Polaris
+ *     set, else adopt) — identical to the pre-baseline Polaris-primary rule, so
+ *     2-arg callers keep the historical behavior.
+ *   - string | null → newest-wins: the side that changed since the baseline
+ *     wins; both changed → "conflict".
+ * All inputs normalized here (trim / empty → null).
+ */
+export function decideDescriptionSync(
+  polaris: unknown,
+  device: unknown,
+  baseline: Baseline = BASELINE_UNKNOWN,
+): DescSyncAction {
   const p = normalizeDescription(polaris);
   const d = normalizeDescription(device);
-  if (p === null) return d === null ? "none" : "adopt";
-  return p === d ? "none" : "push";
+  if (p === d) return "none"; // already agree (incl. both empty)
+  // A device-side clear never overwrites/loses a Polaris value: Polaris
+  // re-asserts. (p !== d here, so d === null ⇒ p !== null.)
+  if (d === null) return "push";
+  // Polaris empty + device has a value → adopt regardless of baseline: there's
+  // nothing on the Polaris side to lose (covers the bootstrap seed too).
+  if (p === null) return "adopt";
+  // Both sides non-empty and differ.
+  if (baseline === BASELINE_UNKNOWN) return "push"; // Polaris-primary bootstrap
+  const b = normalizeDescription(baseline);
+  const polarisChanged = p !== b;
+  const deviceChanged = d !== b;
+  if (polarisChanged && deviceChanged) return "conflict"; // both diverged
+  if (polarisChanged) return "push"; // only Polaris changed → Polaris newer
+  return "adopt"; // only device changed → device newer
 }
 
 // Per-target device-side length caps. FortiOS truncates or rejects
@@ -430,7 +477,7 @@ export async function syncDescriptionsOnSave(params: {
           value,
         });
       }
-      await stampOverrideSyncState(override.id, result);
+      await stampOverrideSyncState(override.id, result, value);
       await logInterfacePushEvent(asset, params.ifName, value, result, params.actor);
       return result.ok
         ? { attempted: true, status: "synced" }
@@ -456,7 +503,7 @@ export async function syncDescriptionsOnSave(params: {
       target,
       value,
     });
-    await stampAssetSyncState(asset.id, result);
+    await stampAssetSyncState(asset.id, result, value);
     await logDevicePushEvent(asset, value, result, params.actor);
     return result.ok
       ? { attempted: true, status: "synced" }
@@ -480,23 +527,105 @@ function deviceTargetFor(
   return role === "fortiswitch" ? { kind: "managed-switch", switchId: serial } : { kind: "wtp", wtpId: serial };
 }
 
-async function stampOverrideSyncState(overrideId: string, result: DescPushResult): Promise<void> {
+// A successful push/adopt makes `agreedValue` the new merge baseline (both
+// sides now hold it). A failed push preserves the prior baseline so the next
+// reconcile still knows the last-agreed value.
+async function stampOverrideSyncState(
+  overrideId: string,
+  result: DescPushResult,
+  agreedValue: string,
+): Promise<void> {
   await prisma.assetInterfaceOverride.update({
     where: { id: overrideId },
     data: result.ok
-      ? { syncStatus: "synced", lastSyncAt: new Date(), syncError: null }
+      ? { syncStatus: "synced", lastSyncAt: new Date(), syncError: null, syncedValue: agreedValue }
       : { syncStatus: "failed", lastSyncAt: new Date(), syncError: result.error },
   }).catch(() => { /* row may have been cleared concurrently — best-effort */ });
 }
 
-async function stampAssetSyncState(assetId: string, result: DescPushResult): Promise<void> {
+async function stampAssetSyncState(
+  assetId: string,
+  result: DescPushResult,
+  agreedValue: string | null,
+): Promise<void> {
   const blob = result.ok
-    ? { status: "synced", at: new Date().toISOString() }
+    ? { status: "synced", at: new Date().toISOString(), value: agreedValue }
     : { status: "failed", at: new Date().toISOString(), error: result.error };
   await prisma.asset.update({
     where: { id: assetId },
     data: { descriptionSync: blob },
   }).catch(() => { /* asset may have been deleted concurrently — best-effort */ });
+}
+
+/**
+ * Read the device-level merge baseline out of an Asset.descriptionSync blob.
+ * Presence of the `value` key = baseline known (may be null = last-agreed
+ * empty); absence = BASELINE_UNKNOWN (never synced / pre-baseline blob).
+ */
+function readAssetBaseline(descriptionSync: unknown): Baseline {
+  if (descriptionSync && typeof descriptionSync === "object" &&
+      Object.prototype.hasOwnProperty.call(descriptionSync, "value")) {
+    return normalizeDescription((descriptionSync as { value?: unknown }).value);
+  }
+  return BASELINE_UNKNOWN;
+}
+
+// Both-sides-diverged: record a "conflict" sync state (baseline preserved so a
+// later resolution still knows the merge base), touch neither side. Write-on-
+// change — skip if already flagged for this same pair of values.
+async function stampAssetConflictState(
+  assetId: string,
+  prev: unknown,
+  values: { baseline: Baseline; device: string | null; polaris: string | null },
+): Promise<boolean> {
+  const p = prev as { status?: string; device?: string | null; polaris?: string | null } | null;
+  if (p?.status === "conflict" && p.device === values.device && p.polaris === values.polaris) {
+    return false; // already flagged for this exact divergence — no write
+  }
+  await prisma.asset.update({
+    where: { id: assetId },
+    data: {
+      descriptionSync: {
+        status: "conflict",
+        at: new Date().toISOString(),
+        value: values.baseline === BASELINE_UNKNOWN ? null : values.baseline,
+        device: values.device,
+        polaris: values.polaris,
+      },
+    },
+  }).catch(() => {});
+  return true;
+}
+
+async function stampOverrideConflictState(
+  overrideId: string,
+  prev: { syncStatus: string | null; syncError: string | null },
+  values: { device: string | null; polaris: string | null },
+): Promise<boolean> {
+  const error = `conflict: device=${JSON.stringify(values.device)} polaris=${JSON.stringify(values.polaris)}`;
+  if (prev.syncStatus === "conflict" && prev.syncError === error) return false;
+  await prisma.assetInterfaceOverride.update({
+    where: { id: overrideId },
+    data: { syncStatus: "conflict", lastSyncAt: new Date(), syncError: error },
+  }).catch(() => {});
+  return true;
+}
+
+async function logDescriptionConflictEvent(
+  asset: { id: string; hostname: string | null },
+  ctx: { scope: "device" | "interface"; deviceName: string; ifName?: string; polaris: string | null; device: string | null },
+): Promise<void> {
+  const where = ctx.scope === "interface" ? `interface ${ctx.ifName}` : "device description";
+  await logEvent({
+    action: "asset.description.conflict",
+    resourceType: "asset",
+    resourceId: asset.id,
+    resourceName: asset.hostname ?? undefined,
+    actor: "system:description-sync",
+    level: "warning",
+    message: `Description sync conflict on ${where} (${ctx.deviceName}): both Polaris and the device changed since the last sync — neither overwritten. Edit the Polaris value to resolve.`,
+    details: { scope: ctx.scope, ...(ctx.ifName ? { ifName: ctx.ifName } : {}), polarisValue: ctx.polaris, deviceValue: ctx.device },
+  });
 }
 
 async function logInterfacePushEvent(
@@ -561,6 +690,7 @@ export interface DescriptionSyncSummary {
   devices: number;
   pushed: number;
   adopted: number;
+  conflicts: number;
   failed: number;
   skippedDevices: number;
 }
@@ -574,19 +704,29 @@ interface ReconcileAsset {
   fortinetTopology: unknown;
 }
 
+interface ReconcileOverride {
+  id: string;
+  assetId: string;
+  ifName: string;
+  description: string | null;
+  syncStatus: string | null;
+  syncError: string | null;
+  syncedValue: string | null;
+}
+
 /**
  * Per-discovery reconcile: for every FortiGate this integration owns, read
  * the current device-side descriptions (one CMDB GET per surface) and run the
- * Polaris-primary decision over the device-level values + every interface
- * override. Adopts where Polaris is empty, re-pushes where the device
- * drifted from a non-empty Polaris value (this is also the retry path for
- * pushes that failed transiently at save time). DB writes happen only on
+ * three-way merge over the device-level values + every interface override:
+ * pushes where Polaris is newer, adopts where the device is newer, flags a
+ * conflict where both changed since the baseline (this is also the retry path
+ * for pushes that failed transiently at save time). DB writes happen only on
  * change. Never throws.
  */
 export async function runDescriptionSyncForIntegration(
   integration: { id: string; type: string; config: unknown; name: string },
 ): Promise<DescriptionSyncSummary> {
-  const summary: DescriptionSyncSummary = { devices: 0, pushed: 0, adopted: 0, failed: 0, skippedDevices: 0 };
+  const summary: DescriptionSyncSummary = { devices: 0, pushed: 0, adopted: 0, conflicts: 0, failed: 0, skippedDevices: 0 };
   if (!syncEnabled(integration.config)) return summary;
 
   const assets: ReconcileAsset[] = await prisma.asset.findMany({
@@ -631,10 +771,14 @@ export async function runDescriptionSyncForIntegration(
   if (groups.size === 0) return summary;
 
   const allAssetIds = assets.map((a) => a.id);
-  const overrides = await prisma.assetInterfaceOverride.findMany({
+  const overrides: ReconcileOverride[] = await prisma.assetInterfaceOverride.findMany({
     where: { assetId: { in: allAssetIds } },
+    select: {
+      id: true, assetId: true, ifName: true, description: true,
+      syncStatus: true, syncError: true, syncedValue: true,
+    },
   });
-  const overridesByAsset = new Map<string, typeof overrides>();
+  const overridesByAsset = new Map<string, ReconcileOverride[]>();
   for (const o of overrides) {
     const list = overridesByAsset.get(o.assetId) ?? [];
     list.push(o);
@@ -673,7 +817,7 @@ async function reconcileDevice(
   integration: { id: string; type: string; config: unknown; name: string },
   deviceName: string,
   group: { firewall?: ReconcileAsset; switches: ReconcileAsset[]; aps: ReconcileAsset[] },
-  overridesByAsset: Map<string, Array<{ id: string; assetId: string; ifName: string; description: string | null; syncStatus: string | null }>>,
+  overridesByAsset: Map<string, ReconcileOverride[]>,
   summary: DescriptionSyncSummary,
 ): Promise<void> {
   const transport = await buildTransportForIntegration(integration, deviceName);
@@ -765,24 +909,17 @@ async function reconcileDevice(
 
   // ── Interface-level: firewall interface overrides ──
   if (group.firewall && interfaceByName) {
+    const fwHostname = group.firewall.hostname;
     for (const o of overridesByAsset.get(group.firewall.id) ?? []) {
       if (!interfaceByName.has(o.ifName)) continue; // renamed/unknown interface
-      const polaris = normalizeDescription(o.description);
-      if (polaris === null) continue; // empty override — local clear semantics
       const device = interfaceByName.get(o.ifName) ?? null;
-      if (polaris === device) {
-        await markOverrideSyncedIfNeeded(o, summary);
-        continue;
-      }
-      const result = await pushInterfaceDescription({
-        integration, deviceName, ifName: o.ifName, value: polaris,
-        currentDeviceValue: device, transport,
-      });
-      await stampOverrideSyncState(o.id, result);
-      await logInterfacePushEvent(
-        { id: o.assetId, hostname: group.firewall.hostname }, o.ifName, polaris, result, "system:description-sync",
+      await reconcileInterfaceOverride(
+        o, device, fwHostname, deviceName,
+        (value, currentDeviceValue) => pushInterfaceDescription({
+          integration, deviceName, ifName: o.ifName, value, currentDeviceValue, transport,
+        }),
+        summary,
       );
-      if (result.ok) summary.pushed++; else summary.failed++;
     }
   }
   // ── Interface-level: switch port overrides ──
@@ -796,26 +933,17 @@ async function reconcileDevice(
           .filter((x) => typeof x?.["port-name"] === "string" && x["port-name"])
           .map((x) => [x["port-name"] as string, normalizeDescription(x.description)]),
       );
+      const switchId = String(row["switch-id"] || sw.serialNumber || "").trim();
       for (const o of overridesByAsset.get(sw.id) ?? []) {
         if (!portDesc.has(o.ifName)) continue;
-        const polaris = normalizeDescription(o.description);
-        if (polaris === null) continue;
         const device = portDesc.get(o.ifName) ?? null;
-        if (polaris === device) {
-          await markOverrideSyncedIfNeeded(o, summary);
-          continue;
-        }
-        const result = await pushSwitchPortDescription({
-          integration, deviceName,
-          switchId: String(row["switch-id"] || sw.serialNumber || "").trim(),
-          portName: o.ifName, value: polaris,
-          currentDeviceValue: device, transport,
-        });
-        await stampOverrideSyncState(o.id, result);
-        await logInterfacePushEvent(
-          { id: o.assetId, hostname: sw.hostname }, o.ifName, polaris, result, "system:description-sync",
+        await reconcileInterfaceOverride(
+          o, device, sw.hostname, deviceName,
+          (value, currentDeviceValue) => pushSwitchPortDescription({
+            integration, deviceName, switchId, portName: o.ifName, value, currentDeviceValue, transport,
+          }),
+          summary,
         );
-        if (result.ok) summary.pushed++; else summary.failed++;
       }
     }
   }
@@ -830,25 +958,34 @@ async function reconcileDeviceLevel(
   deviceValue: string | null,
   summary: DescriptionSyncSummary,
 ): Promise<void> {
-  const action = decideDescriptionSync(asset.description, deviceValue);
+  const baseline = readAssetBaseline(asset.descriptionSync);
+  const polaris = normalizeDescription(asset.description);
+  const device = normalizeDescription(deviceValue);
+  const action = decideDescriptionSync(polaris, deviceValue, baseline);
+
   if (action === "none") {
-    // Values agree (or both empty) — stamp "synced" once if the last attempt
-    // failed / never ran, so the UI reflects convergence. Write-on-change only.
-    const status = (asset.descriptionSync as { status?: string } | null)?.status;
-    if (normalizeDescription(asset.description) !== null && status !== "synced") {
+    // Values agree — stamp "synced" + record/refresh the baseline. Write-on-
+    // change: skip when already synced at this exact value.
+    const blob = asset.descriptionSync as { status?: string; value?: unknown } | null;
+    const baselineCurrent = blob != null &&
+      Object.prototype.hasOwnProperty.call(blob, "value") &&
+      normalizeDescription(blob.value) === polaris;
+    if (polaris !== null && !(blob?.status === "synced" && baselineCurrent)) {
       await prisma.asset.update({
         where: { id: asset.id },
-        data: { descriptionSync: { status: "synced", at: new Date().toISOString() } },
+        data: { descriptionSync: { status: "synced", at: new Date().toISOString(), value: polaris } },
       }).catch(() => {});
     }
     return;
   }
   if (action === "adopt") {
+    // Device edit is newer (or a bootstrap seed into an empty Polaris field):
+    // pull it into Polaris and make it the new baseline.
     await prisma.asset.update({
       where: { id: asset.id },
       data: {
-        description: deviceValue,
-        descriptionSync: { status: "synced", at: new Date().toISOString() },
+        description: device,
+        descriptionSync: { status: "synced", at: new Date().toISOString(), value: device },
       },
     }).catch(() => {});
     summary.adopted++;
@@ -859,28 +996,102 @@ async function reconcileDeviceLevel(
       resourceName: asset.hostname ?? undefined,
       actor: "system:description-sync",
       message: `Device description adopted from ${deviceName}`,
-      details: { value: deviceValue },
+      details: { value: device, ...(polaris !== null ? { replacedPolarisValue: polaris } : {}) },
     });
     return;
   }
+  if (action === "conflict") {
+    // Both sides changed since the baseline — touch neither, flag for the
+    // operator (edit the Polaris value to resolve).
+    const wrote = await stampAssetConflictState(asset.id, asset.descriptionSync, { baseline, device, polaris });
+    if (wrote) {
+      summary.conflicts++;
+      await logDescriptionConflictEvent(
+        { id: asset.id, hostname: asset.hostname },
+        { scope: "device", deviceName, polaris, device },
+      );
+    }
+    return;
+  }
   // push
-  const value = normalizeDescription(asset.description)!;
+  const value = polaris!;
   const result = await pushDeviceDescription({
     integration, deviceName, target, value,
     currentDeviceValue: deviceValue, transport,
   });
-  await stampAssetSyncState(asset.id, result);
+  await stampAssetSyncState(asset.id, result, value);
   await logDevicePushEvent({ id: asset.id, hostname: asset.hostname }, value, result, "system:description-sync");
   if (result.ok) summary.pushed++; else summary.failed++;
 }
 
+// Converged (Polaris === device): stamp "synced" + record the baseline.
+// Write-on-change — skip when already synced at this exact value.
 async function markOverrideSyncedIfNeeded(
-  o: { id: string; syncStatus: string | null },
-  _summary: DescriptionSyncSummary,
+  o: { id: string; syncStatus: string | null; syncedValue: string | null },
+  agreedValue: string,
 ): Promise<void> {
-  if (o.syncStatus === "synced") return;
+  if (o.syncStatus === "synced" && o.syncedValue === agreedValue) return;
   await prisma.assetInterfaceOverride.update({
     where: { id: o.id },
-    data: { syncStatus: "synced", lastSyncAt: new Date(), syncError: null },
+    data: { syncStatus: "synced", lastSyncAt: new Date(), syncError: null, syncedValue: agreedValue },
   }).catch(() => {});
+}
+
+/**
+ * Three-way merge for one interface/switch-port override. `push` closes over
+ * the surface-specific PUT (interface vs switch port). An empty override is a
+ * local clear (device keeps its value) — skipped. Never throws.
+ */
+async function reconcileInterfaceOverride(
+  o: ReconcileOverride,
+  device: string | null,
+  hostname: string | null,
+  deviceName: string,
+  push: (value: string, currentDeviceValue: string | null) => Promise<DescPushResult>,
+  summary: DescriptionSyncSummary,
+): Promise<void> {
+  const polaris = normalizeDescription(o.description);
+  if (polaris === null) return; // empty override — local clear semantics
+  const baseline: Baseline = o.syncedValue === null ? BASELINE_UNKNOWN : normalizeDescription(o.syncedValue);
+  const action = decideDescriptionSync(polaris, device, baseline);
+
+  if (action === "none") {
+    await markOverrideSyncedIfNeeded(o, polaris);
+    return;
+  }
+  if (action === "adopt") {
+    // Device edit is newer — pull it into the override, make it the baseline.
+    const adopted = device!.slice(0, 255); // DB column cap (VarChar 255)
+    await prisma.assetInterfaceOverride.update({
+      where: { id: o.id },
+      data: { description: adopted, syncStatus: "synced", lastSyncAt: new Date(), syncError: null, syncedValue: adopted },
+    }).catch(() => {});
+    summary.adopted++;
+    await logEvent({
+      action: "asset.interface.description.adopted",
+      resourceType: "asset",
+      resourceId: o.assetId,
+      resourceName: hostname ?? undefined,
+      actor: "system:description-sync",
+      message: `Interface comment for ${o.ifName} adopted from device`,
+      details: { ifName: o.ifName, value: adopted, replacedPolarisValue: polaris },
+    });
+    return;
+  }
+  if (action === "conflict") {
+    const wrote = await stampOverrideConflictState(o.id, o, { device, polaris });
+    if (wrote) {
+      summary.conflicts++;
+      await logDescriptionConflictEvent(
+        { id: o.assetId, hostname },
+        { scope: "interface", deviceName, ifName: o.ifName, polaris, device },
+      );
+    }
+    return;
+  }
+  // push
+  const result = await push(polaris, device);
+  await stampOverrideSyncState(o.id, result, polaris);
+  await logInterfacePushEvent({ id: o.assetId, hostname }, o.ifName, polaris, result, "system:description-sync");
+  if (result.ok) summary.pushed++; else summary.failed++;
 }

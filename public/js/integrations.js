@@ -927,9 +927,9 @@ function _readPushQuarantineToggle() {
 }
 
 // Description Sync tab body. Single master toggle (config.syncDescriptions).
-// Polaris-primary: descriptions typed in Polaris are written to the device;
-// device values are only imported where Polaris has none. `syncDescriptions`
-// is the current toggle value; `useProxy` drives the transport-mode label.
+// Newest-wins three-way merge: the side edited since the last sync wins; both
+// edited → conflict (neither overwritten). `syncDescriptions` is the current
+// toggle value; `useProxy` drives the transport-mode label.
 function descriptionSyncFormHTML(syncDescriptions, useProxy) {
   var checked = syncDescriptions === true ? "checked" : "";
   var modeLabel = (useProxy === false)
@@ -940,15 +940,15 @@ function descriptionSyncFormHTML(syncDescriptions, useProxy) {
     : "Description writes go through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials.";
   return '<section style="margin-bottom:1.5rem">' +
       '<h4 style="margin:0 0 0.25rem 0">Description Sync</h4>' +
-      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)"><strong style="color:var(--color-text-primary)">Polaris is the primary source.</strong> Descriptions set in Polaris are written to the device and overwrite what is configured there (every overwrite is audited). Device descriptions are only imported into Polaris where Polaris has none.</p>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)"><strong style="color:var(--color-text-primary)">Newest edit wins.</strong> Whichever side was edited since the last sync is pushed to the other (every change is audited). A value edited in Polaris pushes to the device; a value edited on the device after the last sync flows back into Polaris. If both sides changed before the next sync, it\'s flagged as a conflict and neither is overwritten.</p>' +
       '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<input type="checkbox" id="f-syncDescriptions" ' + checked + ' style="width:auto">' +
-        '<label for="f-syncDescriptions" style="margin:0">Sync descriptions between Polaris and devices (Polaris primary)</label>' +
+        '<label for="f-syncDescriptions" style="margin:0">Sync descriptions between Polaris and devices (newest edit wins)</label>' +
       '</div>' +
       '<ul class="hint" style="margin:0.25rem 0 0 1.2rem;padding:0">' +
         '<li><strong>Interface comments.</strong> The Interface Comments box on an asset\'s interface panel writes to the FortiGate\'s <code>system/interface</code> description (or the FortiSwitch port description via the parent controller). Clearing a comment in Polaris leaves the device value in place.</li>' +
         '<li><strong>Device descriptions.</strong> An asset\'s Description field writes to the FortiGate alias, FortiSwitch description, or FortiAP comment. An empty Polaris Description is seeded from the device on the next discovery.</li>' +
-        '<li><strong>When it runs.</strong> Immediately on save, plus a reconcile on every discovery cycle that re-pushes after transient failures and reverts device-side edits.</li>' +
+        '<li><strong>When it runs.</strong> Immediately on save (your edit is always the newest, so it pushes), plus a reconcile on every discovery cycle that re-pushes after transient failures, pulls in device-side edits, and flags conflicts.</li>' +
       '</ul>' +
     '</section>' +
     '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
@@ -967,7 +967,7 @@ function descriptionSyncFormHTML(syncDescriptions, useProxy) {
         '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
       '</ul>' +
       calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for descriptions. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.") +
-      calloutHTML("warning", "Polaris overwrites device edits", "With this toggle on, a description edited directly on a FortiGate / FortiSwitch / FortiAP is <strong>reverted to the Polaris value</strong> on the next sync whenever Polaris holds a non-empty description for it. Make Polaris the place your team edits descriptions before enabling.") +
+      calloutHTML("warning", "Newest edit wins after the first sync", "The very first sync after you enable this is <strong>Polaris-primary</strong> — a description already set in Polaris is pushed to the device (this is how your manual descriptions reach the FortiGates). After a value has synced once, the newest edit wins: edit on the device and it flows back into Polaris; edit both sides before the next sync and it\'s flagged as a conflict for you to resolve.") +
     '</section>';
 }
 

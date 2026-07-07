@@ -1,9 +1,11 @@
 /**
  * tests/unit/descriptionSyncDecide.test.ts
  *
- * Pure-function coverage for the Polaris-primary description-sync decision:
- * normalization (trim / empty → null), the decide matrix (empty Polaris
- * adopts a device value; a non-empty Polaris value always wins), and the
+ * Pure-function coverage for the three-way-merge (newest-wins) description-sync
+ * decision: normalization (trim / empty → null), the 2-arg Polaris-primary
+ * bootstrap matrix (no baseline), the 3-arg newest-wins matrix (push/adopt/
+ * conflict against a baseline), the non-destructive guards (a device clear
+ * never wipes a Polaris value; an empty Polaris side always adopts), and the
  * per-target device-side length caps.
  */
 
@@ -22,6 +24,7 @@ import {
   decideDescriptionSync,
   capDescriptionForTarget,
   DESCRIPTION_CAPS,
+  BASELINE_UNKNOWN,
 } from "../../src/services/descriptionSyncService.js";
 
 describe("normalizeDescription", () => {
@@ -40,7 +43,7 @@ describe("normalizeDescription", () => {
   });
 });
 
-describe("decideDescriptionSync (Polaris-primary matrix)", () => {
+describe("decideDescriptionSync — bootstrap (no baseline / 2-arg)", () => {
   it("both empty → none", () => {
     expect(decideDescriptionSync(null, null)).toBe("none");
     expect(decideDescriptionSync("", "  ")).toBe("none");
@@ -58,19 +61,52 @@ describe("decideDescriptionSync (Polaris-primary matrix)", () => {
     expect(decideDescriptionSync(" core switch ", "core switch")).toBe("none");
   });
 
-  it("Polaris value differs from device → push (Polaris wins)", () => {
+  it("Polaris value differs from device, no baseline → push (Polaris-primary)", () => {
+    // This is exactly the "sync just enabled after manual Polaris edits" case:
+    // Polaris wins and pushes to the device.
     expect(decideDescriptionSync("polaris says", "device says")).toBe("push");
+    expect(decideDescriptionSync("polaris says", "device says", BASELINE_UNKNOWN)).toBe("push");
   });
 
-  it("Polaris value + empty device → push (device never had one)", () => {
+  it("Polaris value + empty device → push (device clear never loses Polaris)", () => {
     expect(decideDescriptionSync("polaris says", null)).toBe("push");
     expect(decideDescriptionSync("polaris says", "  ")).toBe("push");
+    // …even with a baseline (device-side clear is treated as drift, not a win).
+    expect(decideDescriptionSync("polaris says", null, "polaris says")).toBe("push");
+  });
+});
+
+describe("decideDescriptionSync — newest-wins (three-way, with baseline)", () => {
+  it("only Polaris changed since baseline → push", () => {
+    // baseline "A", Polaris edited to "A2", device still "A".
+    expect(decideDescriptionSync("A2", "A", "A")).toBe("push");
   });
 
-  it("device edits never win once Polaris holds a value", () => {
-    // Polaris previously pushed "A"; someone edited the device to "B".
-    // Polaris-primary means the decision is push (revert), never adopt.
-    expect(decideDescriptionSync("A", "B")).toBe("push");
+  it("only device changed since baseline → adopt (device edit is newer)", () => {
+    // baseline "A", Polaris still "A", device edited to "B".
+    expect(decideDescriptionSync("A", "B", "A")).toBe("adopt");
+  });
+
+  it("both changed since baseline → conflict", () => {
+    // baseline "A", Polaris → "P", device → "D".
+    expect(decideDescriptionSync("P", "D", "A")).toBe("conflict");
+  });
+
+  it("both changed to the SAME value → none (converged, not a conflict)", () => {
+    expect(decideDescriptionSync("same", "same", "A")).toBe("none");
+  });
+
+  it("empty Polaris still adopts a device value regardless of baseline", () => {
+    expect(decideDescriptionSync(null, "device value", "old baseline")).toBe("adopt");
+  });
+
+  it("a baseline recorded as empty behaves like bootstrap for a fresh push", () => {
+    // baseline null (last agreed empty), Polaris set, device still empty → push.
+    expect(decideDescriptionSync("new polaris", null, null)).toBe("push");
+    // baseline null, device gained a value, Polaris empty → adopt.
+    expect(decideDescriptionSync(null, "new device", null)).toBe("adopt");
+    // baseline null, both gained a (different) value → conflict.
+    expect(decideDescriptionSync("P", "D", null)).toBe("conflict");
   });
 });
 

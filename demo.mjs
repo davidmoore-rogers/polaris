@@ -1507,11 +1507,13 @@ const ASSETS = [
     warrantyExpiry: "2028-01-15T00:00:00.000Z",
     purchaseOrder: "PO-2025-0005",
     notes: "Edge firewall — AWS VPN termination",
-    // Description sync (Polaris-primary): operator-owned device description,
-    // pushed to the FortiGate's system/global alias by the integration's
-    // syncDescriptions toggle. descriptionSync carries the last push state.
+    // Description sync (newest-edit-wins three-way merge): operator-owned device
+    // description, pushed to the FortiGate's system/global alias by the
+    // integration's syncDescriptions toggle. descriptionSync carries the last
+    // sync state + the `value` baseline (last value both sides agreed on) that
+    // powers newest-wins on the next reconcile.
     description: "DC1 edge firewall",
-    descriptionSync: { status: "synced", at: "2026-04-15T10:00:00.000Z" },
+    descriptionSync: { status: "synced", at: "2026-04-15T10:00:00.000Z", value: "DC1 edge firewall" },
     tags: ["firewall", "edge", "critical"],
     // Pre-pinned by the integration's Auto-Monitor Interfaces selection
     // ({mode:"names", names:["wan1","wan2"]}). Fast-cadence polling for the

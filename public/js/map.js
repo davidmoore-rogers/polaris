@@ -1689,17 +1689,41 @@
     wrap.innerHTML = "";
     var views = topoState.floorViews || [];
     if (views.length === 0) { wrap.hidden = true; return; }
-    var entries = [{ key: "flat", label: "Flat" }].concat(views);
-    entries.forEach(function (v) {
-      var active = topoState.activeView === v.key;
+    function chipEl(key, label, title) {
+      var active = topoState.activeView === key;
       var chip = document.createElement("button");
       chip.type = "button";
       chip.className = "topology-type-chip topology-floor-chip" + (active ? " is-active" : "");
       chip.setAttribute("aria-pressed", active ? "true" : "false");
-      chip.title = v.key === "flat" ? "Whole site" : "Show only " + v.label;
-      chip.textContent = v.label;
-      chip.addEventListener("click", function () { _setTopologyView(v.key); });
-      wrap.appendChild(chip);
+      chip.title = title;
+      chip.textContent = label;
+      chip.addEventListener("click", function () { _setTopologyView(key); });
+      return chip;
+    }
+    // "Flat" gets its own mini-column; then one column per building, headed
+    // by the building name, floors stacked beneath. computeFloorViews is
+    // already sorted building-then-underground-aware-floor, so grouping in
+    // encounter order preserves both. Chips inside a named building's column
+    // show only the floor name — the header carries the building.
+    var flatCol = document.createElement("div");
+    flatCol.className = "topology-floor-col";
+    flatCol.appendChild(chipEl("flat", "Flat", "Whole site"));
+    wrap.appendChild(flatCol);
+    var colsByBuilding = {};
+    views.forEach(function (v) {
+      var bKey = v.buildingName || "";
+      var col = colsByBuilding[bKey];
+      if (!col) {
+        col = document.createElement("div");
+        col.className = "topology-floor-col";
+        var hdr = document.createElement("div");
+        hdr.className = "topology-floor-col-title";
+        hdr.textContent = v.buildingName || "Floors";
+        col.appendChild(hdr);
+        colsByBuilding[bKey] = col;
+        wrap.appendChild(col);
+      }
+      col.appendChild(chipEl(v.key, v.buildingName ? v.floorName : v.label, "Show only " + v.label));
     });
     wrap.hidden = false;
   }
