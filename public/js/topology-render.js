@@ -599,6 +599,12 @@
       // stacks building < floor < room < jb. Shape / border-style / color /
       // size are per-node bypass styles set by renderLocationGroups. events:
       // "no" lets clicks and background-drag panning pass straight through.
+      // Events are ON (no `events: "no"`): hulls are the hover target for
+      // the nesting tooltip. They stay ungrabbable/unselectable, so drag
+      // gestures over them still pan the viewport, and devices/edges render
+      // above them so their own hovers/taps win — a hull only receives
+      // events on its empty interior. Tap handlers must guard [isLocGroup]
+      // (see map.js _openAssetForNode + the mobile node sheet).
       {
         selector: "node[isLocGroup]",
         style: {
@@ -607,13 +613,12 @@
           "border-width": 2,
           "border-opacity": 0.55,
           label: "data(label)",
-          "font-size": "13px",
-          "font-weight": 600,
+          "font-size": "16px",
+          "font-weight": 700,
           "text-valign": "top",
           "text-halign": "center",
-          "text-margin-y": -4,
+          "text-margin-y": -5,
           "text-wrap": "none",
-          events: "no",
         },
       },
       // Floor-view portal stub: where an edge leaves the current floor it
@@ -1027,6 +1032,29 @@
     _layoutLocationGroups(cy);
   }
 
+  // Tooltip content for a hovered hull: the hull's own label plus every
+  // ANCESTOR hull it nests inside (Cytoscape hit-testing hands the hover to
+  // the innermost shape — highest z-index — so hovering a jb inside a room
+  // inside a building yields all three). Returns [{ kind, name, color }]
+  // ordered outermost → innermost.
+  function locationGroupTooltipParts(cy, hull) {
+    var scope = hull.data("locScope") || [];
+    var kind = hull.data("locKind");
+    var rank = (LOC_GROUP_KINDS[kind] || LOC_GROUP_KINDS.building).rank;
+    var parts = [];
+    cy.nodes("[isLocGroup]").forEach(function (g) {
+      if (g.id() === hull.id()) return;
+      var gKind = g.data("locKind");
+      var gRank = (LOC_GROUP_KINDS[gKind] || LOC_GROUP_KINDS.building).rank;
+      if (gRank >= rank) return;
+      if (!_isDescendantScope(g.data("locScope") || [], scope)) return;
+      parts.push({ kind: gKind, name: g.data("label") || "", color: locGroupColor(gKind), rank: gRank });
+    });
+    parts.sort(function (a, b) { return a.rank - b.rank; });
+    parts.push({ kind: kind, name: hull.data("label") || "", color: locGroupColor(kind), rank: rank });
+    return parts;
+  }
+
   // ── Floor views ─────────────────────────────────────────────────────────
   // A floor view shows one (building, floor) pair's tagged devices plus the
   // FortiGate root and "portal" stubs where an edge crosses to another floor.
@@ -1053,11 +1081,11 @@
     return String(a).localeCompare(String(b));
   }
 
-  // View label: "Shop — Floor 2", or "Floor 2" for f:-without-b: (the
-  // unnamed-building bucket).
+  // View label: "Shop — 2" (the building name already implies the second
+  // part is a floor), or "Floor 2" for f:-without-b: (the unnamed-building
+  // bucket, where a bare "2" would be cryptic).
   function floorViewLabel(buildingName, floorName) {
-    var f = "Floor " + floorName;
-    return buildingName ? buildingName + " — " + f : f;
+    return buildingName ? buildingName + " — " + floorName : "Floor " + floorName;
   }
 
   // Enumerate the floor views present in a built element set. Returns
@@ -1763,6 +1791,7 @@
     renderLocationGroups: renderLocationGroups,
     removeLocationGroups: removeLocationGroups,
     refreshLocationGroups: refreshLocationGroups,
+    locationGroupTooltipParts: locationGroupTooltipParts,
     compareFloors: compareFloors,
     computeFloorViews: computeFloorViews,
     partitionElementsForFloor: partitionElementsForFloor,

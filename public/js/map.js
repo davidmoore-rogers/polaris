@@ -1479,9 +1479,11 @@
       // Pan stays as plain drag on background (Cytoscape default).
       boxSelectionEnabled: true,
       selectionType: "additive",
-      // Halve scroll-wheel zoom sensitivity — the default felt jumpy on
-      // typical mouse wheels (one notch was 25–30% zoom step).
-      wheelSensitivity: 0.5,
+      // Damp scroll-wheel zoom hard — the default felt jumpy on typical
+      // mouse wheels (one notch was 25–30% zoom step), and even the earlier
+      // 0.5 stepped too far on large site graphs. 0.2 ≈ one notch nudges
+      // zoom ~5%, so a flick of the wheel stays readable.
+      wheelSensitivity: 0.2,
       style: window.PolarisTopologyRender.topologyStylesheet(theme, { includeEndpointOverlay: true }),
     });
 
@@ -1550,6 +1552,7 @@
     // carry it in `assetId`; LLDP ghosts and unmatched stations have no asset.
     function _openAssetForNode(node) {
       if (node.data("isPortal")) return; // floor portal — tap navigation, not an asset
+      if (node.data("isLocGroup")) return; // location hull — hover surface only
       var role = node.data("role");
       if (role === "lldp") return; // ghost neighbor — no Polaris asset
       var assetId;
@@ -1607,6 +1610,28 @@
       moveEdgeTooltip(orig.clientX, orig.clientY);
     });
     cyInstance.on("mouseout", "edge", function () { hideEdgeTooltip(); });
+
+    // Location-hull hover tooltip: the hovered shape's label plus every
+    // shape it nests inside (hit-testing hands the hover to the innermost
+    // hull, so a jb inside a room inside a building lists all three).
+    // Reuses the edge-tooltip element/positioning helpers.
+    var LOC_KIND_LABELS = { building: "Building", floor: "Floor", room: "Room", jb: "Junction box" };
+    cyInstance.on("mouseover", "node[isLocGroup]", function (evt) {
+      var parts = window.PolarisTopologyRender.locationGroupTooltipParts(cyInstance, evt.target);
+      if (!parts.length) return;
+      var html = parts.map(function (p) {
+        return '<div><span style="color:' + p.color + ';font-size:0.76em;text-transform:uppercase;letter-spacing:0.5px">' +
+          escapeHtml(LOC_KIND_LABELS[p.kind] || p.kind) + '</span> <strong>' + escapeHtml(p.name || "") + '</strong></div>';
+      }).join("");
+      var orig = evt.originalEvent;
+      showEdgeTooltip(html, orig && typeof orig.clientX === "number" ? orig.clientX : 0,
+                            orig && typeof orig.clientY === "number" ? orig.clientY : 0);
+    });
+    cyInstance.on("mousemove", "node[isLocGroup]", function (evt) {
+      var orig = evt.originalEvent;
+      if (orig) moveEdgeTooltip(orig.clientX, orig.clientY);
+    });
+    cyInstance.on("mouseout", "node[isLocGroup]", function () { hideEdgeTooltip(); });
 
     // Location grouping hulls — drawn after the layout so bounding boxes
     // reflect final positions (the preset/dagre run + saved-position restore

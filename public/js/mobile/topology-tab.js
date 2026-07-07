@@ -259,7 +259,8 @@
       // targets crisp. Pinch-zoom + two-finger pan come for free.
       boxSelectionEnabled: false,
       autoungrabify: true, // nodes stay where the layout placed them; no manual drag
-      wheelSensitivity: 0.5,
+      // Match desktop's damped wheel zoom (mostly trackpads here).
+      wheelSensitivity: 0.2,
       layout: layoutConfig,
       // includeEndpointOverlay registers the .dimmed (display:none) and
       // synthetic-endpoint round-rectangle styles used by the connection-path
@@ -287,6 +288,7 @@
     // the no-action case (they render but have no Polaris asset linkage).
     _cy.on("tap", "node", function (evt) {
       var node = evt.target;
+      if (node.data("isLocGroup")) return; // location hull — not a device
       var role = node.data("role");
       if (role === "lldp") {
         // Still show a sheet with what we know — chassisId / mgmt IP /

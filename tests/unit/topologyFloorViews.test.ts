@@ -86,7 +86,7 @@ describe("computeFloorViews", () => {
   it("returns one view per (building, floor) pair with per-building labels", () => {
     const views = computeFloorViews(site());
     expect(views.map((v) => v.key)).toEqual(["office|1", "shop|1", "shop|2"]);
-    expect(views.map((v) => v.label)).toEqual(["Office — Floor 1", "Shop — Floor 1", "Shop — Floor 2"]);
+    expect(views.map((v) => v.label)).toEqual(["Office — 1", "Shop — 1", "Shop — 2"]);
   });
 
   it("returns empty when no node carries an f: code (no switcher rendered)", () => {
@@ -100,7 +100,7 @@ describe("computeFloorViews", () => {
       node("x", "fortiswitch", { f: "2" }),
       node("y", "fortiswitch", { b: "Shop", f: "1" }),
     ]);
-    expect(views.map((v) => v.label)).toEqual(["Shop — Floor 1", "Floor 2"]);
+    expect(views.map((v) => v.label)).toEqual(["Shop — 1", "Floor 2"]);
     expect(views[1].key).toBe("|2");
   });
 
@@ -143,7 +143,7 @@ describe("partitionElementsForFloor", () => {
     const portal = parts.find((e) => e.data.id === "portal:s2")!;
     expect(portal.data.isPortal).toBe(1);
     expect(portal.data.targetView).toBe("shop|2");
-    expect(portal.data.label).toBe("→ Shop — Floor 2: S2");
+    expect(portal.data.label).toBe("→ Shop — 2: S2");
     // The s1↔s2 edge now terminates at the portal.
     const rewired = parts.find((e) => e.data.source === "s1" && e.data.target === "portal:s2");
     expect(rewired).toBeTruthy();
