@@ -715,4 +715,38 @@ describe("computeTopologyColumns — location-code row clustering", () => {
     const els = interleavedSiblings(true);
     expect(computeTopologyColumns(els)).toEqual(computeTopologyColumns(els));
   });
+
+  it("ignores foreign pass-through edges inside a building: first leaf lands on its parent's row", () => {
+    // swW (b:warehouse) has one AP. A foreign chain's edge (swA→swB2, neither
+    // in the building) crosses the AP's column exactly at swW's row — without
+    // codes that pushes the AP down; with the building code the pass-through
+    // is ignored and the AP shares its parent's row.
+    const build = (withCode: boolean) => {
+      const els = [
+        node("fg", "fortigate"),
+        node("swA", "fortiswitch"),
+        node("swB", "fortiswitch"),
+        node("swB1", "fortiswitch"),
+        node("swB2", "fortiswitch"),
+        locNode("swW", "fortiswitch", withCode ? "warehouse" : undefined),
+        node("apW", "fortiap"),
+        edge("fg", "swA"),
+        edge("swA", "swB"),
+        edge("swA", "swB1"),
+        edge("swA", "swB2"),
+        edge("fg", "swW"),
+        edge("swW", "apW"),
+      ];
+      return computeTopologyColumns(els)!;
+    };
+    const coded = build(true);
+    // Sanity: the foreign edge swA(2,0)→swB2(4,2) crosses col 3 at lane 1 —
+    // exactly the parent's row — in both variants.
+    expect(coded.swW.lane).toBe(1);
+    expect(coded.swB2.lane).toBe(2);
+    expect(coded.apW.lane).toBe(coded.swW.lane); // same row as its parent
+    const plain = build(false);
+    expect(plain.swW.lane).toBe(1);
+    expect(plain.apW.lane).toBeGreaterThan(plain.swW.lane); // legacy dodge preserved
+  });
 });
