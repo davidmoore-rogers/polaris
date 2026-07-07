@@ -894,6 +894,98 @@
     });
   }
 
+  // Minimum clear space between two shapes at the same nesting level. Covers
+  // the group-name label rendered above each shape's top edge.
+  var LOC_GROUP_SIBLING_GAP = 36;
+
+  // Resolve overlaps between DISTINCT groups (shapes that don't nest inside
+  // one another): two buildings, two rooms in one building, a floor and a
+  // floorless room sharing a building, etc. Groups are bucketed by their
+  // nearest ancestor hull ("root" when none); within each bucket, boxes are
+  // swept top-to-bottom and a shape intruding on the one above it is pushed
+  // DOWN — by translating its member DEVICES (its own + every descendant
+  // group's), so containment and the column structure both survive — then
+  // everything re-fits and the sweep repeats until stable. Vertical pushes
+  // only: columns encode network depth and must not change.
+  function _resolveLocGroupOverlaps(cy) {
+    for (var pass = 0; pass < 8; pass++) {
+      var hulls = cy.nodes("[isLocGroup]").toArray();
+      if (hulls.length < 2) return;
+      var infos = hulls.map(function (n) {
+        var cfg = LOC_GROUP_KINDS[n.data("locKind")] || LOC_GROUP_KINDS.building;
+        var w = n.width();
+        var h = n.height();
+        var p = n.position();
+        return {
+          node: n,
+          rank: cfg.rank,
+          scope: n.data("locScope") || [],
+          box: { x1: p.x - w / 2, y1: p.y - h / 2, x2: p.x + w / 2, y2: p.y + h / 2 },
+        };
+      });
+      // Nearest ancestor (deepest-rank hull whose scope prefixes this one).
+      infos.forEach(function (it) {
+        var parent = null;
+        infos.forEach(function (cand) {
+          if (cand === it || cand.rank >= it.rank) return;
+          if (!_isDescendantScope(cand.scope, it.scope)) return;
+          if (!parent || cand.rank > parent.rank) parent = cand;
+        });
+        it.parentId = parent ? parent.node.id() : "root";
+      });
+      var buckets = {};
+      infos.forEach(function (it) {
+        (buckets[it.parentId] = buckets[it.parentId] || []).push(it);
+      });
+      var moved = false;
+      Object.keys(buckets).sort().forEach(function (bk) {
+        var sibs = buckets[bk];
+        if (sibs.length < 2) return;
+        sibs.sort(function (a, b) {
+          if (a.box.y1 !== b.box.y1) return a.box.y1 - b.box.y1;
+          if (a.box.x1 !== b.box.x1) return a.box.x1 - b.box.x1;
+          return a.node.id() < b.node.id() ? -1 : 1;
+        });
+        for (var i = 1; i < sibs.length; i++) {
+          var below = sibs[i];
+          var dy = 0;
+          for (var j = 0; j < i; j++) {
+            var above = sibs[j];
+            var xOverlap = below.box.x1 < above.box.x2 && below.box.x2 > above.box.x1;
+            if (!xOverlap) continue;
+            var need = (above.box.y2 + LOC_GROUP_SIBLING_GAP) - below.box.y1;
+            if (need > dy) dy = need;
+          }
+          if (dy <= 0.5) continue;
+          // Translate the group's member devices (its own + every descendant
+          // group's) — hulls themselves re-fit afterwards.
+          var memberIds = {};
+          (below.node.data("memberIds") || []).forEach(function (id) { memberIds[id] = true; });
+          infos.forEach(function (other) {
+            if (other.rank <= below.rank) return;
+            if (!_isDescendantScope(below.scope, other.scope)) return;
+            (other.node.data("memberIds") || []).forEach(function (id) { memberIds[id] = true; });
+          });
+          cy.batch(function () {
+            Object.keys(memberIds).forEach(function (id) {
+              var m = cy.getElementById(id);
+              if (m.length === 0) return;
+              var mp = m.position();
+              m.position({ x: mp.x, y: mp.y + dy });
+            });
+          });
+          // Update this sweep's local view of the moved box so later siblings
+          // in the same pass push against its new spot.
+          below.box.y1 += dy;
+          below.box.y2 += dy;
+          moved = true;
+        }
+      });
+      if (!moved) return;
+      _layoutLocationGroups(cy); // re-fit every shape around the moved members
+    }
+  }
+
   // Draw (or redraw) the hull nodes for the current graph. opts.suppressKinds
   // hides whole tiers — floor views pass ["building","floor"] since the view
   // itself IS the building+floor. Idempotent: removes previous hulls first.
@@ -929,6 +1021,10 @@
       });
     });
     _layoutLocationGroups(cy);
+    // Push apart shapes that don't nest inside each other. Runs at render
+    // time only — the drag-follow refresh (refreshLocationGroups) must never
+    // move devices out from under the operator's pointer mid-drag.
+    _resolveLocGroupOverlaps(cy);
   }
 
   function removeLocationGroups(cy) {
