@@ -1508,7 +1508,15 @@
     // (endpoints/wireless/ghosts/remote) on the odd column right of their
     // parent. Left-to-right here: depth → x, lane → y. Falls back to dagre
     // when there's no firewall root to anchor the solver.
-    var columns = window.PolarisTopologyRender.computeTopologyColumns(elements);
+    //
+    // Location-coded sites get the QUOTIENT layout instead: each top-level
+    // group (area/building) is laid out as its own compact box using local
+    // depth, and the boxes are shelf-packed left-to-right by inter-group
+    // depth — so a building deep in the site's chain no longer renders as a
+    // huge sparse rectangle. Same {depth, lane} grid contract; falls back to
+    // the flat solver on untagged sites (computeGroupedLayout returns null).
+    var columns = window.PolarisTopologyRender.computeGroupedLayout(elements) ||
+      window.PolarisTopologyRender.computeTopologyColumns(elements);
     if (columns) {
       var positions = {};
       Object.keys(columns).forEach(function (id) {
@@ -1646,14 +1654,52 @@
         cyInstance,
         supKinds ? { suppressKinds: supKinds } : undefined
       );
+      // Route cross-group links through the gutters between boxes.
+      window.PolarisTopologyRender.routeInterGroupEdges(cyInstance);
     }
+    // Dragging a group box moves its member devices with it; nested boxes
+    // re-fit around the moved members. The RAF drag-follow refresh is
+    // suppressed for the drag's duration (the handlers keep everything
+    // consistent themselves), then a full re-fit + re-route runs on release.
+    var hullDrag = null;
+    cyInstance.on("grab", "node[isLocGroup]", function (evt) {
+      var h = evt.target;
+      var p = h.position();
+      var members = [];
+      (h.data("memberIds") || []).forEach(function (id) {
+        var m = cyInstance.getElementById(id);
+        if (m.length === 0) return;
+        var mp = m.position();
+        members.push({ node: m, x: mp.x, y: mp.y });
+      });
+      hullDrag = { startX: p.x, startY: p.y, members: members };
+    });
+    cyInstance.on("drag", "node[isLocGroup]", function (evt) {
+      if (!hullDrag) return;
+      var p = evt.target.position();
+      var dx = p.x - hullDrag.startX;
+      var dy = p.y - hullDrag.startY;
+      cyInstance.batch(function () {
+        hullDrag.members.forEach(function (m) {
+          m.node.position({ x: m.x + dx, y: m.y + dy });
+        });
+      });
+    });
+    cyInstance.on("free", "node[isLocGroup]", function () {
+      if (!hullDrag) return;
+      hullDrag = null;
+      window.PolarisTopologyRender.refreshLocationGroups(cyInstance);
+      window.PolarisTopologyRender.routeInterGroupEdges(cyInstance);
+    });
     var locRefreshPending = false;
     cyInstance.on("position", "node[!isLocGroup]", function () {
-      if (locRefreshPending) return;
+      if (hullDrag || locRefreshPending) return;
       locRefreshPending = true;
       window.requestAnimationFrame(function () {
         locRefreshPending = false;
-        if (cyInstance) window.PolarisTopologyRender.refreshLocationGroups(cyInstance);
+        if (!cyInstance) return;
+        window.PolarisTopologyRender.refreshLocationGroups(cyInstance);
+        window.PolarisTopologyRender.routeInterGroupEdges(cyInstance);
       });
     });
 
@@ -1833,8 +1879,14 @@
               cyInstance,
               supKinds ? { suppressKinds: supKinds } : undefined
             );
+            window.PolarisTopologyRender.routeInterGroupEdges(cyInstance);
           } else {
             window.PolarisTopologyRender.removeLocationGroups(cyInstance);
+            // Routed segments reference the removed boxes — fall back to the
+            // taxi rule by clearing the per-edge style bypass.
+            cyInstance.edges("[isInterGroup]").forEach(function (e) {
+              e.removeStyle("curve-style segment-weights segment-distances edge-distances");
+            });
           }
         }
         locChip.className = "topology-type-chip" + (next ? "" : " is-off");
