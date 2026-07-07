@@ -284,7 +284,36 @@
     });
 
     markPhysicalLoops(elements);
+    markInterGroupEdges(elements);
     return elements;
+  }
+
+  // Stamp `isInterGroup: 1` + a staggered `taxiTurn` (px) on every edge whose
+  // endpoints live in DIFFERENT top-level location groups (area, else
+  // building; uncoded = its own bucket, so coded↔uncoded also counts). The
+  // stylesheet routes these orthogonally (curve-style: taxi) so long
+  // cross-box links travel the gutters between group boxes instead of
+  // slicing diagonally through them, and the per-source turn stagger keeps
+  // parallel links off each other — deterministic: outgoing edges from one
+  // node turn at 40px, 70px, 100px, … in element order.
+  function markInterGroupEdges(elements) {
+    var topKey = {};
+    elements.forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.id || d.source) return;
+      topKey[d.id] = d.locA ? "a|" + d.locA : (d.locB ? "b|" + (d.locA || "") + "|" + d.locB : "");
+    });
+    var turnCount = {};
+    elements.forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.source || !d.target) return;
+      if (!(d.source in topKey) || !(d.target in topKey)) return;
+      if (topKey[d.source] === topKey[d.target]) return;
+      d.isInterGroup = 1;
+      var k = turnCount[d.source] || 0;
+      turnCount[d.source] = k + 1;
+      d.taxiTurn = 40 + k * 30;
+    });
   }
 
   // Physical-loop detection. Stamps `inLoop: 1` on every WIRED edge that lies
@@ -591,6 +620,21 @@
         style: {
           "line-outline-color": "#eab308",
           "line-outline-width": 2,
+        },
+      },
+      // Cross-group links (stamped by markInterGroupEdges) route ORTHOGONALLY
+      // so they travel the gutters between location-group boxes instead of
+      // slicing diagonally through them. taxiTurn staggers each source's
+      // outgoing links (40/70/100…px) so parallel runs never lie on top of
+      // one another. Geometry only — color/dash still come from the edge's
+      // type rules above.
+      {
+        selector: 'edge[isInterGroup = 1]',
+        style: {
+          "curve-style": "taxi",
+          "taxi-direction": "horizontal",
+          "taxi-turn": "data(taxiTurn)",
+          "taxi-turn-min-distance": 12,
         },
       },
       // Location grouping hulls (building / floor / room / jb). Drawn beneath
