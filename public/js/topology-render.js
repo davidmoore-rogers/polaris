@@ -1054,7 +1054,11 @@
           memberIds: g.memberIds,
         },
         selectable: false,
-        grabbable: false,
+        // Grabbable: dragging a hull moves the box AND its members (the
+        // desktop drag handlers in map.js translate memberIds by the drag
+        // delta; nested boxes follow because they re-fit around members).
+        // Mobile's autoungrabify keeps them fixed there.
+        grabbable: true,
       });
       n.style({
         shape: cfg.shape,
@@ -1080,6 +1084,152 @@
   // Membership changes require a full renderLocationGroups() instead.
   function refreshLocationGroups(cy) {
     _layoutLocationGroups(cy);
+  }
+
+  // ── Obstacle-aware routing for cross-group links ────────────────────────
+  // A deterministic channel router that exploits the quotient layout's
+  // structure instead of a general-purpose router (libavoid would add a
+  // WASM vendor dep for marginal gain on this geometry): every cross-group
+  // edge is routed as an orthogonal polyline S → (cx, Sy) → (cx, cy) →
+  // (Tx, cy) → T, where cx is a vertical corridor just outside the source
+  // group's box (toward the target) and cy a horizontal corridor. Candidate
+  // corridors (direct at the target's row, above/below the target box,
+  // canvas top/bottom) are scored by how many OTHER top-level boxes the
+  // three runs would cross plus path length — the cheapest clear channel
+  // wins. Corridor usage is counted so edges sharing a channel fan out in
+  // 9px steps instead of stacking. The polyline is rendered with Cytoscape's
+  // `segments` curve style (weights/distances projected onto the S→T line);
+  // edges the router can't place (missing boxes) keep the taxi fallback.
+  var _ROUTE_MARGIN = 26;   // corridor distance outside a box edge
+  var _ROUTE_LABEL_PAD = 22; // extra clearance above a box (its floating label)
+
+  function _rectsFor(cy) {
+    // Top-level hull rects (no ancestor hull present), keyed like topKey.
+    var hulls = cy.nodes("[isLocGroup]").toArray();
+    var infos = hulls.map(function (n) {
+      var cfg = LOC_GROUP_KINDS[n.data("locKind")] || LOC_GROUP_KINDS.building;
+      var p = n.position();
+      var w = n.width();
+      var h = n.height();
+      return {
+        id: n.id(),
+        rank: cfg.rank,
+        scope: n.data("locScope") || [],
+        box: { x1: p.x - w / 2, y1: p.y - h / 2, x2: p.x + w / 2, y2: p.y + h / 2 },
+      };
+    });
+    var top = [];
+    infos.forEach(function (it) {
+      var hasAncestor = infos.some(function (o) {
+        return o !== it && o.rank < it.rank && _isDescendantScope(o.scope, it.scope);
+      });
+      if (!hasAncestor) top.push(it);
+    });
+    return top;
+  }
+
+  function _segIntersectsRect(x1, y1, x2, y2, r) {
+    // Axis-aligned segment vs rect (segments here are always H or V).
+    var lox = Math.min(x1, x2), hix = Math.max(x1, x2);
+    var loy = Math.min(y1, y2), hiy = Math.max(y1, y2);
+    return lox < r.x2 && hix > r.x1 && loy < r.y2 && hiy > r.y1;
+  }
+
+  function routeInterGroupEdges(cy) {
+    var tops = _rectsFor(cy);
+    if (tops.length === 0) return;
+    var rectById = {};
+    tops.forEach(function (t) { rectById[t.id] = t.box; });
+    function hullIdForNode(n) {
+      var a = n.data("locA");
+      var b = n.data("locB");
+      if (a) return "locgroup:a|" + a;
+      if (b) return "locgroup:b|" + (a || "") + "|" + b;
+      return null;
+    }
+    var corridorUse = {}; // rounded corridor coordinate -> count (fan-out stagger)
+    function stagger(kind, coord) {
+      var key = kind + ":" + Math.round(coord / 10) * 10;
+      var k = corridorUse[key] || 0;
+      corridorUse[key] = k + 1;
+      return coord + k * 9;
+    }
+    cy.edges("[isInterGroup]").forEach(function (e) {
+      var sN = e.source();
+      var tN = e.target();
+      var sHull = hullIdForNode(sN);
+      var tHull = hullIdForNode(tN);
+      var bs = sHull ? rectById[sHull] : null;
+      var bt = tHull ? rectById[tHull] : null;
+      var S = sN.position();
+      var T = tN.position();
+      if (!bs && !bt) { e.removeStyle("curve-style segment-weights segment-distances edge-distances"); return; }
+      // Obstacles: every top-level box except the two endpoints' own,
+      // inflated for margin + the floating label above.
+      var obstacles = tops
+        .filter(function (x) { return x.id !== sHull && x.id !== tHull; })
+        .map(function (x) {
+          return { x1: x.box.x1 - 8, y1: x.box.y1 - _ROUTE_LABEL_PAD, x2: x.box.x2 + 8, y2: x.box.y2 + 8 };
+        });
+      var goingRight = T.x >= S.x;
+      var srcBox = bs || { x1: S.x, y1: S.y, x2: S.x, y2: S.y };
+      var tgtBox = bt || { x1: T.x, y1: T.y, x2: T.x, y2: T.y };
+      var cx = goingRight ? srcBox.x2 + _ROUTE_MARGIN : srcBox.x1 - _ROUTE_MARGIN;
+      // Candidate horizontal corridors, best-first preference order.
+      var canvasTop = Math.min.apply(null, tops.map(function (x) { return x.box.y1; })) - _ROUTE_MARGIN - _ROUTE_LABEL_PAD;
+      var canvasBottom = Math.max.apply(null, tops.map(function (x) { return x.box.y2; })) + _ROUTE_MARGIN;
+      var candidates = [
+        T.y,                                          // straight into the target row
+        tgtBox.y1 - _ROUTE_MARGIN - _ROUTE_LABEL_PAD, // just above the target box
+        tgtBox.y2 + _ROUTE_MARGIN,                    // just below the target box
+        canvasTop,
+        canvasBottom,
+      ];
+      var best = null;
+      candidates.forEach(function (cy0, idx) {
+        var crossings = 0;
+        obstacles.forEach(function (r) {
+          if (_segIntersectsRect(cx, S.y, cx, cy0, r)) crossings++;   // vertical out of source
+          if (_segIntersectsRect(cx, cy0, T.x, cy0, r)) crossings++;  // horizontal corridor
+          if (_segIntersectsRect(T.x, cy0, T.x, T.y, r)) crossings++; // vertical into target
+        });
+        var len = Math.abs(S.y - cy0) + Math.abs(T.x - cx) + Math.abs(T.y - cy0);
+        var score = crossings * 100000 + len + idx; // idx = stable tie-break by preference
+        if (!best || score < best.score) best = { cy: cy0, score: score };
+      });
+      var cyPick = best.cy;
+      // Fan out edges sharing a corridor.
+      var cxS = stagger("v", cx);
+      var cyS = Math.abs(cyPick - T.y) < 0.5 ? cyPick : stagger("h", cyPick);
+      // Polyline: drop degenerate bends (e.g. corridor == target row).
+      var pts = [];
+      pts.push({ x: cxS, y: S.y });
+      if (Math.abs(cyS - S.y) > 0.5) pts.push({ x: cxS, y: cyS });
+      if (Math.abs(cyS - T.y) > 0.5) {
+        pts.push({ x: T.x, y: cyS });
+      }
+      // Project bends onto the S→T line for Cytoscape `segments` rendering.
+      var dx = T.x - S.x;
+      var dy = T.y - S.y;
+      var len2 = dx * dx + dy * dy;
+      if (len2 < 1) { e.removeStyle("curve-style segment-weights segment-distances edge-distances"); return; }
+      var norm = Math.sqrt(len2);
+      var weights = [];
+      var dists = [];
+      pts.forEach(function (p) {
+        var px = p.x - S.x;
+        var py = p.y - S.y;
+        weights.push(((px * dx + py * dy) / len2).toFixed(4));
+        // Signed perpendicular distance (positive = right of S→T direction).
+        dists.push((((py * dx - px * dy)) / norm).toFixed(1));
+      });
+      e.style({
+        "curve-style": "segments",
+        "segment-weights": weights.join(" "),
+        "segment-distances": dists.join(" "),
+        "edge-distances": "node-position",
+      });
+    });
   }
 
   // Tooltip content for a hovered hull: the hull's own label plus every
@@ -2038,6 +2188,7 @@
     renderLocationGroups: renderLocationGroups,
     removeLocationGroups: removeLocationGroups,
     refreshLocationGroups: refreshLocationGroups,
+    routeInterGroupEdges: routeInterGroupEdges,
     locationGroupTooltipParts: locationGroupTooltipParts,
     compareFloors: compareFloors,
     computeFloorViews: computeFloorViews,
