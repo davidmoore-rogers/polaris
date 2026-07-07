@@ -44,7 +44,7 @@
   // hiding it would drop the whole layout back to dagre.
   var TYPE_FILTER_STORAGE_KEY = "polaris.topology.hiddenRoles";
   // Location grouping hulls (building / floor / room / jb shapes from
-  // b:/f:/r:/jb: codes in device descriptions): per-user singleton toggle,
+  // a:/b:/f:/r:/jb: codes in device descriptions): per-user singleton toggle,
   // default ON. The chip only renders when the site actually carries codes,
   // so untagged fleets see zero UI change.
   var SHOW_LOCATIONS_STORAGE_KEY = "polaris.topology.showLocations";
@@ -1404,7 +1404,7 @@
     // every coded device's type is currently hidden.
     topoState.hasLocationCodes = elements.some(function (el) {
       var d = el && el.data;
-      return !!(d && !d.source && (d.locB || d.locF || d.locR || d.locJb));
+      return !!(d && !d.source && (d.locA || d.locB || d.locF || d.locR || d.locJb));
     });
 
     // Floor views present in this payload (empty unless some device carries
@@ -1615,7 +1615,7 @@
     // shape it nests inside (hit-testing hands the hover to the innermost
     // hull, so a jb inside a room inside a building lists all three).
     // Reuses the edge-tooltip element/positioning helpers.
-    var LOC_KIND_LABELS = { building: "Building", floor: "Floor", room: "Room", jb: "Junction box" };
+    var LOC_KIND_LABELS = { area: "Area", building: "Building", floor: "Floor", room: "Room", jb: "Junction box" };
     cyInstance.on("mouseover", "node[isLocGroup]", function (evt) {
       var parts = window.PolarisTopologyRender.locationGroupTooltipParts(cyInstance, evt.target);
       if (!parts.length) return;
@@ -1637,13 +1637,14 @@
     // reflect final positions (the preset/dagre run + saved-position restore
     // above are synchronous), then re-fitted whenever any real node moves
     // (drag, path overlay snap-back). RAF-throttled: one refresh per frame no
-    // matter how many nodes a batch reposition touches. In a floor view the
-    // building/floor shapes are suppressed — the view itself IS the
-    // building+floor, so only rooms + junction boxes stay useful.
+    // matter how many nodes a batch reposition touches. In building/floor
+    // views the enclosing tiers are suppressed — the view itself IS that
+    // scope, so only the deeper shapes stay useful.
     if (topoState.hasLocationCodes && _readShowLocations()) {
+      var supKinds = _locSuppressKinds();
       window.PolarisTopologyRender.renderLocationGroups(
         cyInstance,
-        isFloorView ? { suppressKinds: ["building", "floor"] } : undefined
+        supKinds ? { suppressKinds: supKinds } : undefined
       );
     }
     var locRefreshPending = false;
@@ -1664,10 +1665,21 @@
     _renderTopologyFloorViews();
   }
 
-  // ── Floor-view switcher ─────────────────────────────────────────────────
+  // Which hull tiers to hide for the ACTIVE view: a building view IS the
+  // area+building (keep floors/rooms/jbs); a floor view additionally IS the
+  // floor (keep rooms/jbs). Null = flat view, show everything.
+  function _locSuppressKinds() {
+    var v = topoState.activeView || "flat";
+    if (v === "flat") return null;
+    if (v.charAt(0) === "b") return ["area", "building"];
+    return ["area", "building", "floor"];
+  }
+
+  // ── Location-view switcher ──────────────────────────────────────────────
   // Chips at the top-left of the graph: "Flat" (whole site, default) plus one
-  // per (building, floor) pair found in the payload. Rendered only when at
-  // least one device carries an f: code — untagged fleets see no switcher.
+  // COLUMN per building — an "All" chip (the whole-building view) with that
+  // building's floors beneath. Rendered only when at least one device
+  // carries a b: or f: code — untagged fleets see no switcher.
   function _setTopologyView(key) {
     if (topoState.activeView === key) return;
     // Persist any manual drags under the OUTGOING view's key before switching.
@@ -1700,30 +1712,39 @@
       chip.addEventListener("click", function () { _setTopologyView(key); });
       return chip;
     }
-    // "Flat" gets its own mini-column; then one column per building, headed
-    // by the building name, floors stacked beneath. computeFloorViews is
-    // already sorted building-then-underground-aware-floor, so grouping in
-    // encounter order preserves both. Chips inside a named building's column
-    // show only the floor name — the header carries the building.
+    // "Flat" gets its own mini-column; then one column per building — the
+    // (area-prefixed) building name as the header, an "All" chip for the
+    // whole-building view, and that building's floors beneath.
+    // computeFloorViews is already sorted area → building → building-view-
+    // first → underground-aware floor, so grouping in encounter order
+    // preserves everything. Chips inside a named building's column show only
+    // the floor name — the header carries the building. Buildingless floors
+    // collect under a generic "Floors" column.
     var flatCol = document.createElement("div");
     flatCol.className = "topology-floor-col";
     flatCol.appendChild(chipEl("flat", "Flat", "Whole site"));
     wrap.appendChild(flatCol);
     var colsByBuilding = {};
     views.forEach(function (v) {
-      var bKey = v.buildingName || "";
-      var col = colsByBuilding[bKey];
+      var colKey = (v.areaName || "") + "|" + (v.buildingName || "");
+      var col = colsByBuilding[colKey];
       if (!col) {
         col = document.createElement("div");
         col.className = "topology-floor-col";
         var hdr = document.createElement("div");
         hdr.className = "topology-floor-col-title";
-        hdr.textContent = v.buildingName || "Floors";
+        hdr.textContent = v.buildingName
+          ? (v.areaName ? v.areaName + " — " + v.buildingName : v.buildingName)
+          : "Floors";
         col.appendChild(hdr);
-        colsByBuilding[bKey] = col;
+        colsByBuilding[colKey] = col;
         wrap.appendChild(col);
       }
-      col.appendChild(chipEl(v.key, v.buildingName ? v.floorName : v.label, "Show only " + v.label));
+      if (v.kind === "building") {
+        col.appendChild(chipEl(v.key, "All", "Show all of " + v.label));
+      } else {
+        col.appendChild(chipEl(v.key, v.buildingName ? v.floorName : v.label, "Show only " + v.label));
+      }
     });
     wrap.hidden = false;
   }
@@ -1807,9 +1828,10 @@
         _writeShowLocations(next);
         if (cyInstance) {
           if (next) {
+            var supKinds = _locSuppressKinds();
             window.PolarisTopologyRender.renderLocationGroups(
               cyInstance,
-              topoState.activeView !== "flat" ? { suppressKinds: ["building", "floor"] } : undefined
+              supKinds ? { suppressKinds: supKinds } : undefined
             );
           } else {
             window.PolarisTopologyRender.removeLocationGroups(cyInstance);

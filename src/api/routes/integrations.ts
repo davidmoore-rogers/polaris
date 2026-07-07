@@ -2829,7 +2829,7 @@ function buildFortiswitchObservedBlob(
     model: "FortiSwitch",
     osVersion: sw.osVersion || null,
     mgmtIp: sw.ipAddress || null,
-    // Admin description from the managed-switch CMDB — carries b:/f:/r:/jb:
+    // Admin description from the managed-switch CMDB — carries a:/b:/f:/r:/jb:
     // location codes (utils/locationCodes.ts). Sources-tab truth; the
     // projected copy lives on fortinetTopology.deviceDescription.
     description: sw.description || null,
@@ -2882,7 +2882,7 @@ function buildFortiapObservedBlob(
     mgmtIp: ap.ipAddress || null,
     baseMac: ap.baseMac || null,
     status: ap.status || null,
-    // Admin description (wtp `comment`) — carries b:/f:/r:/jb: location
+    // Admin description (wtp `comment`) — carries a:/b:/f:/r:/jb: location
     // codes. Mirrors the fortiswitch blob's `description` field.
     description: ap.description || null,
     // Controller admission state ("authorized" / "discovered" / ...) —
@@ -2915,7 +2915,7 @@ function buildFortiapObservedBlob(
 }
 
 // Device-description → Asset.notes sync for managed FortiSwitches/FortiAPs.
-// The admin description carries b:/f:/r:/jb: location codes (see
+// The admin description carries a:/b:/f:/r:/jb: location codes (see
 // utils/locationCodes.ts); it's stamped onto fortinetTopology.deviceDescription
 // unconditionally every cycle, and mirrored into Asset.notes only while the
 // notes are not operator-authored (empty, the previous cycle's synced value
@@ -4369,7 +4369,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // FG↔switch edge's switch side with the real port. Null for chained /
         // dual-homed switches (left to LLDP). See findFortiswitchUplinkPorts.
         uplinkPhysicalPort: sw.uplinkPhysicalPort ?? null,
-        // Raw admin description from the managed-switch CMDB (b:/f:/r:/jb:
+        // Raw admin description from the managed-switch CMDB (a:/b:/f:/r:/jb:
         // location codes) + the notes-sync provenance marker.
         ...swDescSync.topology,
       };
@@ -4636,7 +4636,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // (or in addition to) the wired uplink.
         meshUplink: ap.meshUplink ?? null,
         parentApSerial: ap.parentApSerial ?? null,
-        // Raw admin description from the wtp CMDB `comment` (b:/f:/r:/jb:
+        // Raw admin description from the wtp CMDB `comment` (a:/b:/f:/r:/jb:
         // location codes) + the notes-sync provenance marker.
         ...apDescSync.topology,
       };

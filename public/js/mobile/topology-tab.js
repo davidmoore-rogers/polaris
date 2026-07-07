@@ -272,7 +272,7 @@
     });
 
     // Location grouping hulls (building / floor / room / jb shapes from
-    // b:/f:/r:/jb: codes) — always on for mobile (no toggle; flat view
+    // a:/b:/f:/r:/jb: codes) — always on for mobile (no toggle; flat view
     // only in v1). Nodes are ungrabbable here so no drag-follow refresh is
     // needed; the layout is final once it stops.
     _cy.one("layoutstop", function () {

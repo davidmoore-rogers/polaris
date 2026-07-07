@@ -52,12 +52,13 @@
   }
 
   // Location-code node-data stamps from a payload node's `location` object
-  // ({ building, floor, room, junctionBox } | null). locB/locF/locR/locJb are
-  // normalized grouping keys (drive the row-clustering pass + grouping hulls);
-  // loc*Name keep the operator's original casing for labels.
+  // ({ area, building, floor, room, junctionBox } | null). locA/locB/locF/
+  // locR/locJb are normalized grouping keys (drive the row-clustering pass +
+  // grouping hulls); loc*Name keep the operator's original casing for labels.
   function locationData(loc) {
     var d = {};
     if (!loc) return d;
+    if (loc.area) { d.locA = locKey(loc.area); d.locAName = String(loc.area); }
     if (loc.building) { d.locB = locKey(loc.building); d.locBName = String(loc.building); }
     if (loc.floor) { d.locF = locKey(loc.floor); d.locFName = String(loc.floor); }
     if (loc.room) { d.locR = locKey(loc.room); d.locRName = String(loc.room); }
@@ -744,7 +745,8 @@
       // LOC_GROUP_KINDS (all levels are rounded rectangles, identified by a
       // fixed per-level color).
       locations: [
-        { label: "Building",     shape: "rect", style: "solid",  color: "#4fc3f7", desc: "From b:/f:/r:/jb: codes in device descriptions or asset notes" },
+        { label: "Area",         shape: "rect", style: "solid",  color: "#f472b6", desc: "From a:/a:/b:/f:/r:/jb: codes in device descriptions or asset notes" },
+        { label: "Building",     shape: "rect", style: "solid",  color: "#4fc3f7" },
         { label: "Floor",        shape: "rect", style: "dashed", color: "#a78bfa" },
         { label: "Room",         shape: "rect", style: "solid",  color: "#4ade80" },
         { label: "Junction box", shape: "rect", style: "dashed", color: "#f59e0b" },
@@ -770,19 +772,21 @@
   // building ⊇ floor ⊇ room ⊇ jb, boundaries never crossing.
   //
   // Every level renders as a rounded rectangle, identified by a FIXED
-  // per-level color (+ alternating solid/dashed borders): building sky-blue
-  // solid, floor violet dashed, room green solid, jb amber dashed. The
-  // colors mirror the legend's "Location groups" section — change them in
-  // lockstep. pad = gap between a shape and its content (members + nested
-  // shapes); tiers stay visually stepped, but containment no longer depends
-  // on them — the hierarchical fit guarantees it. scaleW/scaleH remain for
-  // any future non-rectangular shape (a rect inscribed in an ellipse needs
-  // axes ×√2); all 1 while everything is rectangular.
+  // per-level color (+ alternating solid/dashed borders): area rose solid,
+  // building sky-blue solid, floor violet dashed, room green solid, jb amber
+  // dashed. The colors mirror the legend's "Location groups" section —
+  // change them in lockstep. pad = gap between a shape and its content
+  // (members + nested shapes); tiers stay visually stepped, but containment
+  // no longer depends on them — the hierarchical fit guarantees it.
+  // scaleW/scaleH remain for any future non-rectangular shape (a rect
+  // inscribed in an ellipse needs axes ×√2); all 1 while everything is
+  // rectangular.
   var LOC_GROUP_KINDS = {
-    building: { rank: 0, pad: 34, color: "#4fc3f7", shape: "round-rectangle", dash: "solid",  z: 1, scaleW: 1, scaleH: 1 },
-    floor:    { rank: 1, pad: 26, color: "#a78bfa", shape: "round-rectangle", dash: "dashed", z: 2, scaleW: 1, scaleH: 1 },
-    room:     { rank: 2, pad: 18, color: "#4ade80", shape: "round-rectangle", dash: "solid",  z: 3, scaleW: 1, scaleH: 1 },
-    jb:       { rank: 3, pad: 12, color: "#f59e0b", shape: "round-rectangle", dash: "dashed", z: 4, scaleW: 1, scaleH: 1 },
+    area:     { rank: 0, pad: 42, color: "#f472b6", shape: "round-rectangle", dash: "solid",  z: 1, scaleW: 1, scaleH: 1 },
+    building: { rank: 1, pad: 34, color: "#4fc3f7", shape: "round-rectangle", dash: "solid",  z: 2, scaleW: 1, scaleH: 1 },
+    floor:    { rank: 2, pad: 26, color: "#a78bfa", shape: "round-rectangle", dash: "dashed", z: 3, scaleW: 1, scaleH: 1 },
+    room:     { rank: 3, pad: 18, color: "#4ade80", shape: "round-rectangle", dash: "solid",  z: 4, scaleW: 1, scaleH: 1 },
+    jb:       { rank: 4, pad: 12, color: "#f59e0b", shape: "round-rectangle", dash: "dashed", z: 5, scaleW: 1, scaleH: 1 },
   };
 
   function locGroupColor(kind) {
@@ -813,18 +817,20 @@
     cy.nodes().forEach(function (n) {
       if (n.data("isLocGroup") || n.data("isPortal")) return;
       if (!n.visible()) return;
+      var a = n.data("locA") || "";
       var b = n.data("locB") || "";
       var f = n.data("locF") || "";
       var r = n.data("locR") || "";
       var jb = n.data("locJb") || "";
       var id = n.id();
-      if (b) addTo("b|" + b, "building", n.data("locBName"), [b], id);
-      if (f) addTo("f|" + b + "|" + f, "floor", n.data("locFName"), [b, f], id);
-      if (r) addTo("r|" + b + "|" + f + "|" + r, "room", n.data("locRName"), [b, f, r], id);
-      if (jb) addTo("jb|" + b + "|" + f + "|" + r + "|" + jb, "jb", n.data("locJbName"), [b, f, r, jb], id);
+      if (a) addTo("a|" + a, "area", n.data("locAName"), [a], id);
+      if (b) addTo("b|" + a + "|" + b, "building", n.data("locBName"), [a, b], id);
+      if (f) addTo("f|" + a + "|" + b + "|" + f, "floor", n.data("locFName"), [a, b, f], id);
+      if (r) addTo("r|" + a + "|" + b + "|" + f + "|" + r, "room", n.data("locRName"), [a, b, f, r], id);
+      if (jb) addTo("jb|" + a + "|" + b + "|" + f + "|" + r + "|" + jb, "jb", n.data("locJbName"), [a, b, f, r, jb], id);
     });
-    var kindRank = { building: 0, floor: 1, room: 2, jb: 3 };
-    order.sort(function (a, b2) { return kindRank[a.kind] - kindRank[b2.kind]; });
+    var kindRank = { area: 0, building: 1, floor: 2, room: 3, jb: 4 };
+    order.sort(function (a2, b2) { return kindRank[a2.kind] - kindRank[b2.kind]; });
     return order;
   }
 
@@ -1081,70 +1087,125 @@
     return String(a).localeCompare(String(b));
   }
 
-  // View label: "Shop — 2" (the building name already implies the second
-  // part is a floor), or "Floor 2" for f:-without-b: (the unnamed-building
-  // bucket, where a bare "2" would be cryptic).
-  function floorViewLabel(buildingName, floorName) {
-    return buildingName ? buildingName + " — " + floorName : "Floor " + floorName;
+  // Building label: "Mine — Shop" when an area names it, else "Shop".
+  function buildingViewLabel(areaName, buildingName) {
+    return areaName ? areaName + " — " + buildingName : buildingName;
+  }
+  // Floor label: "<building label> — 2" (the building context implies the
+  // second part is a floor), or "Floor 2" for f:-without-b: (the
+  // unnamed-building bucket, where a bare "2" would be cryptic).
+  function floorViewLabel(buildingLabel, floorName) {
+    return buildingLabel ? buildingLabel + " — " + floorName : "Floor " + floorName;
   }
 
-  // Enumerate the floor views present in a built element set. Returns
-  // [{ key: "<bKey>|<fKey>", buildingName, floorName, label }] sorted by
-  // building name (unnamed bucket last) then underground-aware floor order.
-  // Empty array when no node carries an f: code → callers render no switcher.
+  // Enumerate the location views present in a built element set: one
+  // BUILDING view per b: value (even without floors) and one FLOOR view per
+  // (area, building, floor). Keys are area-scoped so "Office" in two areas
+  // stays distinct: building "b|<aKey>|<bKey>", floor "f|<aKey>|<bKey>|<fKey>".
+  // Returns a flat array of
+  //   { key, kind: "building"|"floor", areaName, buildingName, floorName?, label }
+  // sorted area → building (unnamed bucket last) → building-view-first →
+  // underground-aware floor order. Empty array when no node carries a b: or
+  // f: code → callers render no switcher.
   function computeFloorViews(elements) {
     var byKey = {};
     var out = [];
     (elements || []).forEach(function (el) {
       var d = el && el.data;
-      if (!d || !d.id || d.source || !d.locF) return;
-      var key = (d.locB || "") + "|" + d.locF;
-      if (byKey[key]) return;
-      byKey[key] = true;
-      out.push({
-        key: key,
-        buildingName: d.locBName || "",
-        floorName: d.locFName || d.locF,
-        label: floorViewLabel(d.locBName || "", d.locFName || d.locF),
-      });
-    });
-    out.sort(function (a, b) {
-      if (a.buildingName !== b.buildingName) {
-        if (!a.buildingName) return 1; // unnamed-building bucket last
-        if (!b.buildingName) return -1;
-        return a.buildingName.localeCompare(b.buildingName);
+      if (!d || !d.id || d.source) return;
+      var a = d.locA || "";
+      var b = d.locB || "";
+      var aName = d.locAName || "";
+      var bName = d.locBName || "";
+      if (b) {
+        var bKey = "b|" + a + "|" + b;
+        if (!byKey[bKey]) {
+          byKey[bKey] = true;
+          out.push({
+            key: bKey,
+            kind: "building",
+            areaName: aName,
+            buildingName: bName,
+            label: buildingViewLabel(aName, bName),
+          });
+        }
       }
-      return compareFloors(a.floorName, b.floorName);
+      if (d.locF) {
+        var fKey = "f|" + a + "|" + b + "|" + d.locF;
+        if (!byKey[fKey]) {
+          byKey[fKey] = true;
+          out.push({
+            key: fKey,
+            kind: "floor",
+            areaName: aName,
+            buildingName: bName,
+            floorName: d.locFName || d.locF,
+            label: floorViewLabel(buildingViewLabel(aName, bName), d.locFName || d.locF),
+          });
+        }
+      }
+    });
+    out.sort(function (x, y) {
+      if (x.areaName !== y.areaName) return String(x.areaName).localeCompare(String(y.areaName));
+      if (x.buildingName !== y.buildingName) {
+        if (!x.buildingName) return 1; // unnamed-building bucket last
+        if (!y.buildingName) return -1;
+        return x.buildingName.localeCompare(y.buildingName);
+      }
+      if (x.kind !== y.kind) return x.kind === "building" ? -1 : 1; // building view tops its column
+      return compareFloors(x.floorName || "", y.floorName || "");
     });
     return out;
   }
 
-  // Partition a built element set down to one floor view. Membership: nodes
-  // whose (locB, locF) match the view key, plus the FortiGate root ALWAYS
-  // (keeps the subgraph rooted for the column solver even when the FG is
-  // tagged to another floor). Untagged devices appear only in the Flat view.
-  // Edges with both ends in view are kept as-is (loop flags preserved — a
-  // physical ring is still a ring even when the view splits it); an edge
-  // whose far end is a floor-tagged device on ANOTHER floor is rewired to a
-  // dashed "portal" stub named for the remote device + its floor (one portal
-  // per remote device — parallel links converge), carrying targetView for
-  // tap-to-jump; an edge to an untagged device is dropped (no dead-end stubs).
+  // The (kind-appropriate) view key + label a node belongs to, or null when
+  // it carries no code at that level. kind "building" needs locB; "floor"
+  // needs locF.
+  function _nodeViewRef(d, kind) {
+    var a = d.locA || "";
+    var b = d.locB || "";
+    if (kind === "building") {
+      if (!b) return null;
+      return {
+        key: "b|" + a + "|" + b,
+        label: buildingViewLabel(d.locAName || "", d.locBName || ""),
+      };
+    }
+    if (!d.locF) return null;
+    return {
+      key: "f|" + a + "|" + b + "|" + d.locF,
+      label: floorViewLabel(buildingViewLabel(d.locAName || "", d.locBName || ""), d.locFName || d.locF),
+    };
+  }
+
+  // Partition a built element set down to one view — a floor view
+  // ("f|a|b|f": that floor's tagged devices) or a building view ("b|a|b":
+  // ALL of that building's tagged devices, any floor) — plus the FortiGate
+  // root ALWAYS (keeps the subgraph rooted for the column solver even when
+  // the FG is tagged elsewhere). Untagged devices appear only in the Flat
+  // view. Edges with both ends in view are kept as-is (loop flags preserved
+  // — a physical ring is still a ring even when the view splits it); an edge
+  // whose far end carries the same-level code for ANOTHER view is rewired to
+  // a dashed "portal" stub named for the remote device + its view (one
+  // portal per remote device — parallel links converge), carrying targetView
+  // for tap-to-jump; an edge to an untagged device is dropped (no dead-end
+  // stubs).
   function partitionElementsForFloor(elements, viewKey) {
-    var sep = String(viewKey || "").indexOf("|");
-    var wantB = sep >= 0 ? String(viewKey).slice(0, sep) : "";
-    var wantF = sep >= 0 ? String(viewKey).slice(sep + 1) : String(viewKey || "");
+    var key = String(viewKey || "");
+    var kind = key.charAt(0) === "b" ? "building" : "floor";
     var nodeById = {};
     var inView = {};
-    // True floor members (as opposed to the always-included FG root). Only a
-    // member's cross-floor edge earns a portal — the FG appears in every
-    // view, so stubbing its controller links to every other floor would just
-    // spray "→ elsewhere" noise across each view.
+    // True members (as opposed to the always-included FG root). Only a
+    // member's cross-view edge earns a portal — the FG appears in every
+    // view, so stubbing its controller links to every other view would just
+    // spray "→ elsewhere" noise.
     var trueMember = {};
     (elements || []).forEach(function (el) {
       var d = el && el.data;
       if (!d || !d.id || d.source) return;
       nodeById[d.id] = d;
-      if ((d.locB || "") === wantB && d.locF === wantF) {
+      var ref = _nodeViewRef(d, kind);
+      if (ref && ref.key === key) {
         inView[d.id] = true;
         trueMember[d.id] = true;
       } else if (d.role === "fortigate") {
@@ -1169,7 +1230,8 @@
       if (!trueMember[localId]) return; // root-included FG — no portal spray
       var remoteId = srcIn ? d.target : d.source;
       var remote = nodeById[remoteId];
-      if (!remote || !remote.locF) return; // untagged far end — drop, no stub
+      var remoteRef = remote ? _nodeViewRef(remote, kind) : null;
+      if (!remoteRef) return; // far end untagged at this level — drop, no stub
       var portalId = "portal:" + remoteId;
       if (!portalAdded[portalId]) {
         portalAdded[portalId] = true;
@@ -1177,8 +1239,8 @@
           data: {
             id: portalId,
             isPortal: 1,
-            label: "→ " + floorViewLabel(remote.locBName || "", remote.locFName || remote.locF) + ": " + (remote.label || remoteId),
-            targetView: (remote.locB || "") + "|" + remote.locF,
+            label: "→ " + remoteRef.label + ": " + (remote.label || remoteId),
+            targetView: remoteRef.key,
             remoteAssetId: remoteId,
           },
         });
@@ -1276,7 +1338,8 @@
     var adj = {}; // undirected adjacency: id -> [neighborId, ...]
     var rootId = null;
     // Location-code grouping keys (stamped by buildTopologyElements from the
-    // payload's b:/f: codes) — drive the sibling-row clustering in pass 5a.
+    // payload's a:/b:/f: codes) — drive the sibling-row clustering in pass 5a.
+    var locAById = {};
     var locBById = {};
     var locFById = {};
 
@@ -1287,6 +1350,7 @@
       roleById[d.id] = d.role || null;
       nodeIds.push(d.id);
       adj[d.id] = adj[d.id] || [];
+      if (d.locA) locAById[d.id] = d.locA;
       if (d.locB) locBById[d.id] = d.locB;
       if (d.locF) locFById[d.id] = d.locF;
       if (d.role === "fortigate" && !rootId) rootId = d.id;
@@ -1548,21 +1612,39 @@
     }
     function regroupAnchorsByLocation(kids) {
       if (kids.length < 2) return kids;
-      var hasAnyBuilding = kids.some(function (k) { return !!locBById[k]; });
-      if (!hasAnyBuilding) return kids;
-      // Bucket by building, then order each building's members by floor.
+      var hasAnyCode = kids.some(function (k) { return !!locAById[k] || !!locBById[k]; });
+      if (!hasAnyCode) return kids;
+      // Bucket by area, then building within an area, then floor within a
+      // building — outermost level first so each tier's members pack into
+      // adjacent bands.
       var order = [];
       var buckets = {};
       var tail = [];
       kids.forEach(function (k) {
-        var key = locBById[k];
+        // Arealess-but-building-coded anchors share one synthetic area bucket
+        // so their buildings still cluster. The tab prefix can't collide with
+        // a real key — locKey() collapses whitespace.
+        var key = locAById[k] || (locBById[k] ? "\tnoarea" : null);
         if (!key) { tail.push(k); return; }
         if (!buckets[key]) { buckets[key] = []; order.push(key); }
         buckets[key].push(k);
       });
       var out = [];
-      order.forEach(function (k) {
-        out.push.apply(out, stableBucketBy(buckets[k], locFById));
+      order.forEach(function (aKey) {
+        // Within an area bucket: sub-bucket by building, then by floor.
+        var bOrder = [];
+        var bBuckets = {};
+        var bTail = [];
+        buckets[aKey].forEach(function (k) {
+          var bKey = locBById[k];
+          if (!bKey) { bTail.push(k); return; }
+          if (!bBuckets[bKey]) { bBuckets[bKey] = []; bOrder.push(bKey); }
+          bBuckets[bKey].push(k);
+        });
+        bOrder.forEach(function (bKey) {
+          out.push.apply(out, stableBucketBy(bBuckets[bKey], locFById));
+        });
+        out.push.apply(out, bTail);
       });
       return out.concat(tail);
     }
