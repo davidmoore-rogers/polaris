@@ -1375,7 +1375,31 @@ export interface ResolvedSettingsWithProvenance {
   tier3Source:     "integration" | "manual";
   /** When a class override applies, the row id so the UI can deep-link to its edit form. */
   classOverrideId: string | null;
+  /**
+   * Per-stream polling methods AS RESOLVED WITHOUT the per-asset tier — the
+   * value an operator would get by selecting "Inherit". Snapshotted just
+   * before the asset overlay so the edit modal's Inherit option can preview
+   * the fallback even when the asset currently carries its own override
+   * (`provenance[field] === "asset"` used to leave the label stuck on the
+   * static source-default text in that case). Null value = no tier sets a
+   * method and the runtime source default applies.
+   */
+  inheritPolling: {
+    values:     Partial<Record<PollingField, string | null>>;
+    provenance: Partial<Record<PollingField, ProvenanceTier>>;
+  };
 }
+
+type PollingField =
+  | "responseTimePolling" | "cpuMemoryPolling" | "temperaturePolling"
+  | "interfacesPolling" | "lldpPolling" | "storagePolling"
+  | "processesPolling" | "eventLogPolling";
+
+const POLLING_FIELDS: PollingField[] = [
+  "responseTimePolling", "cpuMemoryPolling", "temperaturePolling",
+  "interfacesPolling", "lldpPolling", "storagePolling",
+  "processesPolling", "eventLogPolling",
+];
 
 /**
  * Resolve effective settings for one asset AND report which tier supplied each
@@ -1538,6 +1562,15 @@ export async function resolveMonitorSettingsWithProvenance(
     if (classOverride.eventLogCredentialId)        { resolved.eventLogCredentialId      = classOverride.eventLogCredentialId;      provenance.eventLogCredentialId      = "class"; }
   }
 
+  // Inherit preview: snapshot the per-stream polling methods BEFORE the
+  // asset tier overlays them, so the edit modal can label its "Inherit"
+  // option with the real fallback even when a per-asset override is active.
+  const inheritPolling: ResolvedSettingsWithProvenance["inheritPolling"] = { values: {}, provenance: {} };
+  for (const f of POLLING_FIELDS) {
+    inheritPolling.values[f] = (resolved[f] as string | null | undefined) ?? null;
+    inheritPolling.provenance[f] = provenance[f];
+  }
+
   // Per-asset (only the cadence + timeout overrides).
   if (asset.monitorIntervalSec != null) {
     resolved.intervalSeconds = asset.monitorIntervalSec;
@@ -1632,7 +1665,7 @@ export async function resolveMonitorSettingsWithProvenance(
   takeAssetMibId("lldpMibId",         asset.lldpMibId);
   takeAssetMibId("processesMibId",    asset.processesMibId);
 
-  return { resolved, provenance, tier3Source, classOverrideId };
+  return { resolved, provenance, tier3Source, classOverrideId, inheritPolling };
 }
 
 /**

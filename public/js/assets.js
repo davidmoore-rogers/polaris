@@ -2294,7 +2294,12 @@ function assetFormHTML(defaults) {
   '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
   '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Location & Ownership</p>' +
   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px">' +
-    '<div class="form-group"><label>Location</label><input type="text" id="f-location" value="' + escapeHtml(d.location || "") + '" placeholder="e.g. DC1 Rack A3">' + (d.learnedLocation ? '<p class="hint">Learned: ' + escapeHtml(d.learnedLocation) + '</p>' : '') + '</div>' +
+    // Location prefills from the SNMP sysLocation when the operator hasn't
+    // set one — visible in the field before saving; Save adopts it as the
+    // operator-set location. Provenance hint shows which value seeded it.
+    '<div class="form-group"><label>Location</label><input type="text" id="f-location" value="' + escapeHtml(d.location || d.snmpLocation || "") + '" placeholder="e.g. DC1 Rack A3">' +
+      (!d.location && d.snmpLocation ? '<p class="hint">Pre-filled from SNMP sysLocation — Save to adopt it.</p>' : '') +
+      (d.learnedLocation ? '<p class="hint">Learned: ' + escapeHtml(d.learnedLocation) + '</p>' : '') + '</div>' +
     '<div class="form-group"><label>Department</label><input type="text" id="f-department" value="' + escapeHtml(d.department || "") + '" placeholder="e.g. Infrastructure"></div>' +
     '<div class="form-group"><label>Assigned To</label><input type="text" id="f-assignedTo" value="' + escapeHtml(d.assignedTo || "") + '" placeholder="e.g. platform-team"></div>' +
     '<div class="form-group"><label>Operating System</label><input type="text" id="f-os" value="' + escapeHtml(d.os || "") + '" placeholder="e.g. RHEL 9, Windows Server 2022"></div>' +
@@ -2901,16 +2906,22 @@ async function _populateAssetMonitorTierBadges(asset) {
   setBadge("f-temperatureTimeoutMs-tier",  "temperatureTimeoutMs",  " ms");
   setBadge("f-systemInfoTimeoutMs-tier",   "systemInfoTimeoutMs",   " ms");
 
-  // Update each polling dropdown's "Inherit" option to show the actual resolved
-  // method and which tier it comes from, instead of the hardcoded source default.
-  // Only applies when the asset has no per-asset override (provenance != "asset");
-  // when the asset has its own override we don't know the next-tier fallback.
+  // Update each polling dropdown's "Inherit" option to show what selecting
+  // Inherit would actually resolve to and which tier it comes from, instead
+  // of the hardcoded source default. Prefers the server's `inheritPolling`
+  // block — the resolution WITHOUT the per-asset tier — so the preview is
+  // correct even when the asset currently carries its own override (the
+  // previous provenance!=="asset" guard left the label stuck on the static
+  // source-default text in that state, which read as "the integration option
+  // is gone" whenever an operator had set a per-asset method). Falls back to
+  // the final resolved value for pre-upgrade servers that don't send it.
   function updatePollingInheritLabel(selectId, fieldKey) {
     var sel = document.getElementById(selectId);
     if (!sel) return;
-    var prov = eff.provenance[fieldKey];
+    var hasPreview = eff.inheritPolling && eff.inheritPolling.provenance && (fieldKey in eff.inheritPolling.provenance);
+    var prov = hasPreview ? eff.inheritPolling.provenance[fieldKey] : eff.provenance[fieldKey];
     if (!prov || prov === "asset") return;
-    var resolved = eff.resolved[fieldKey];
+    var resolved = hasPreview ? eff.inheritPolling.values[fieldKey] : eff.resolved[fieldKey];
     var inheritOpt = sel.querySelector('option[value=""]');
     if (!inheritOpt) return;
     if (!resolved) {
