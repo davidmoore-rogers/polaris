@@ -927,24 +927,14 @@
       if (desc) html += '<div class="topology-legend-desc">' + escapeHtml(desc) + '</div>';
       return html;
     }
-    // Location grouping hull shapes (building rect / floor dashed rect /
-    // room hexagon / jb dashed ellipse). Neutral swatch color — real hulls
-    // are colored per group name.
+    // Location grouping hull swatches — every level is a rounded rectangle
+    // with a FIXED per-level color + solid/dashed border, mirroring
+    // LOC_GROUP_KINDS in topology-render.js.
     function locationSwatch(rowSpec) {
-      var color = "#4fc3f7";
+      var color = rowSpec.color || "#4fc3f7";
       var borderStyle = rowSpec.style === "dashed" ? "dashed" : "solid";
-      var base = "width:22px;height:16px;background:" + color + "22;border:2px " + borderStyle + " " + color + ";";
-      var shape;
-      if (rowSpec.shape === "hexagon") {
-        // clip-path hexagons can't show a border — approximate with the
-        // outline color as the fill so the silhouette still reads.
-        shape = '<div style="width:20px;height:17px;background:' + color +
-                ';clip-path:polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);opacity:0.75"></div>';
-      } else if (rowSpec.shape === "ellipse") {
-        shape = '<div style="' + base + 'border-radius:50%"></div>';
-      } else {
-        shape = '<div style="' + base + 'border-radius:4px"></div>';
-      }
+      var shape = '<div style="width:22px;height:16px;background:' + color + '22;border:2px ' +
+        borderStyle + ' ' + color + ';border-radius:4px"></div>';
       return '<span class="topology-legend-swatch">' + shape + '</span>';
     }
     var parts = [];
