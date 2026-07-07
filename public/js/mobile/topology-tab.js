@@ -233,7 +233,10 @@
     // back to dagre TB when there's no firewall root to anchor the solver.
     var DEPTH_SPACING = 110;
     var LANE_SPACING = 70;
-    var columns = window.PolarisTopologyRender.computeTopologyColumns(elements);
+    // Location-coded sites use the quotient (grouped-box) layout, matching
+    // desktop; untagged sites fall through to the flat column solver.
+    var columns = window.PolarisTopologyRender.computeGroupedLayout(elements) ||
+      window.PolarisTopologyRender.computeTopologyColumns(elements);
     var layoutConfig;
     if (columns) {
       var positions = {};

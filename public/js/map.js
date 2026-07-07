@@ -1508,7 +1508,15 @@
     // (endpoints/wireless/ghosts/remote) on the odd column right of their
     // parent. Left-to-right here: depth → x, lane → y. Falls back to dagre
     // when there's no firewall root to anchor the solver.
-    var columns = window.PolarisTopologyRender.computeTopologyColumns(elements);
+    //
+    // Location-coded sites get the QUOTIENT layout instead: each top-level
+    // group (area/building) is laid out as its own compact box using local
+    // depth, and the boxes are shelf-packed left-to-right by inter-group
+    // depth — so a building deep in the site's chain no longer renders as a
+    // huge sparse rectangle. Same {depth, lane} grid contract; falls back to
+    // the flat solver on untagged sites (computeGroupedLayout returns null).
+    var columns = window.PolarisTopologyRender.computeGroupedLayout(elements) ||
+      window.PolarisTopologyRender.computeTopologyColumns(elements);
     if (columns) {
       var positions = {};
       Object.keys(columns).forEach(function (id) {

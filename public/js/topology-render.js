@@ -1860,6 +1860,126 @@
     return out;
   }
 
+  // ── Quotient (two-level) layout for location-coded sites ─────────────────
+  // The flat solver's x is GLOBAL network depth, so a group's width is
+  // dictated by where its members happen to sit in the site-wide column
+  // sequence — a building whose chains start deep in the site renders as a
+  // huge sparse box. This layout fixes that with the classic compound-graph
+  // recipe:
+  //
+  //   1. Run the flat solver once (it encodes every ordering/clustering rule).
+  //   2. Partition nodes into TOP-LEVEL groups — the outermost location tier
+  //      each node carries (its a: area, else its b: building). Uncoded
+  //      nodes (orphans, FortiLink fallbacks, untagged infra) share one
+  //      pseudo-group so they stay clustered.
+  //   3. Compact each group's interior: rank-compress the DISTINCT global
+  //      depth/lane values its members use, so the group is exactly as wide
+  //      and tall as its own subtree — internal shape, ordering, and the
+  //      area→building→floor row clustering are preserved, the dead space
+  //      between them is not.
+  //   4. Lay out the QUOTIENT graph of group boxes: boxes are ordered into
+  //      quotient columns by each group's minimum global depth (so inter-
+  //      group flow still reads left-to-right), stacked within a column by
+  //      minimum global lane, with fixed grid gaps that clear the hull
+  //      padding. This is deterministic shelf packing — no iteration.
+  //
+  // Returns the SAME { id: { depth, lane } } contract as
+  // computeTopologyColumns (units are grid columns/lanes; the caller
+  // multiplies by its px spacing), or null when the flat solver has no
+  // FortiGate root OR no node carries a location code (caller falls back to
+  // the flat solver / dagre).
+  function computeGroupedLayout(elements) {
+    var global = computeTopologyColumns(elements);
+    if (!global) return null;
+    var GAP_X = 2; // grid columns between quotient columns (~260px)
+    var GAP_Y = 2; // grid lanes between stacked boxes (~190px)
+    var order = [];
+    var groups = {};
+    var anyCoded = false;
+    (elements || []).forEach(function (el) {
+      var d = el && el.data;
+      if (!d || !d.id || d.source) return;
+      if (!(d.id in global)) return;
+      var key = d.locA
+        ? "a|" + d.locA
+        : (d.locB ? "b|" + (d.locA || "") + "|" + d.locB : "");
+      if (key) anyCoded = true;
+      var g = groups[key];
+      if (!g) {
+        g = { key: key, members: [] };
+        groups[key] = g;
+        order.push(g);
+      }
+      g.members.push(d.id);
+    });
+    if (!anyCoded) return null; // untagged site — flat solver is the layout
+    function rankMap(values) {
+      var uniq = Object.keys(values).map(Number).sort(function (a, b) { return a - b; });
+      var m = {};
+      uniq.forEach(function (v, i) { m[v] = i; });
+      return { map: m, count: uniq.length };
+    }
+    order.forEach(function (g) {
+      var dVals = {};
+      var lVals = {};
+      var qDepth = Infinity;
+      var qLane = Infinity;
+      g.members.forEach(function (id) {
+        var p = global[id];
+        dVals[p.depth] = true;
+        lVals[p.lane] = true;
+        if (p.depth < qDepth) qDepth = p.depth;
+        if (p.lane < qLane) qLane = p.lane;
+      });
+      var dr = rankMap(dVals);
+      var lr = rankMap(lVals);
+      g.w = dr.count;
+      g.h = lr.count;
+      g.qDepth = qDepth;
+      g.qLane = qLane;
+      g.local = {};
+      g.members.forEach(function (id) {
+        var p = global[id];
+        g.local[id] = { x: dr.map[p.depth], y: lr.map[p.lane] };
+      });
+    });
+    // Height-budgeted shelf packing. Groups are placed in ascending
+    // entry-depth order (the uncoded pseudo-group's fallback exiles carry
+    // negative depths so it lands leftmost; ties break by entry lane then
+    // key), stacking down the current quotient column and wrapping to a new
+    // column when the stack would exceed the budget — the tallest group's
+    // height, so the canvas is never taller than its biggest box and small
+    // groups (single-AP buildings) tuck under each other instead of each
+    // claiming a whole column.
+    order.sort(function (a, b) {
+      if (a.qDepth !== b.qDepth) return a.qDepth - b.qDepth;
+      if (a.qLane !== b.qLane) return a.qLane - b.qLane;
+      return a.key < b.key ? -1 : 1;
+    });
+    var budget = 0;
+    order.forEach(function (g) { if (g.h > budget) budget = g.h; });
+    var positions = {};
+    var xOffset = 0;
+    var colWidth = 0;
+    var yCursor = 0;
+    order.forEach(function (g) {
+      if (yCursor > 0 && yCursor + g.h > budget) {
+        xOffset += colWidth + GAP_X;
+        colWidth = 0;
+        yCursor = 0;
+      }
+      g.members.forEach(function (id) {
+        positions[id] = {
+          depth: xOffset + g.local[id].x,
+          lane: yCursor + g.local[id].y,
+        };
+      });
+      yCursor += g.h + GAP_Y;
+      if (g.w > colWidth) colWidth = g.w;
+    });
+    return positions;
+  }
+
   window.PolarisTopologyRender = {
     HEALTH_NODE_COLORS: HEALTH_NODE_COLORS,
     fortinetNodeColor: fortinetNodeColor,
@@ -1868,6 +1988,7 @@
     topologyStylesheet: topologyStylesheet,
     topologyLegendSpec: topologyLegendSpec,
     computeTopologyColumns: computeTopologyColumns,
+    computeGroupedLayout: computeGroupedLayout,
     topologyNodeWeight: topologyNodeWeight,
     computeLocationGroups: computeLocationGroups,
     renderLocationGroups: renderLocationGroups,
