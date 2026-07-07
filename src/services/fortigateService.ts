@@ -192,7 +192,7 @@ export async function proxyQuery(
  * CMDB. Switches with zero (chained behind another switch over ISL) or more
  * than one (dual-homed, ambiguous) uplink port get uplinkPort null — the
  * FG↔switch edge label falls back to LLDP for those. The description carries
- * b:/f:/r:/jb: location codes for the Device Map (utils/locationCodes.ts).
+ * a:/b:/f:/r:/jb: location codes for the Device Map (utils/locationCodes.ts).
  * Best-effort: any failure yields an empty map.
  */
 async function fetchFortiswitchCmdbMeta(
@@ -225,7 +225,7 @@ async function fetchFortiswitchCmdbMeta(
  * Read the wireless-controller wtp CMDB and return a map of AP serial
  * (UPPERCASE) → operator-set admin description (the wtp `comment` field —
  * the managed_ap monitor endpoint doesn't carry it). Same role as the
- * managed-switch description above: b:/f:/r:/jb: location codes for the
+ * managed-switch description above: a:/b:/f:/r:/jb: location codes for the
  * Device Map. Best-effort: a 404 (older FortiOS / wireless-controller
  * disabled) or any other failure yields an empty map and never fails
  * discovery. Mirrors the FMG path's wtp CMDB roster read (Step 3d.4).

@@ -38,7 +38,7 @@ type TopologyMeta = {
   // LLDP adjacency is a switch bridged BEHIND it, not an uplink).
   meshUplink?: "ethernet" | "mesh" | null;
   // Raw admin description from the managed-switch CMDB / wtp `comment`,
-  // stamped by discovery. Carries b:/f:/r:/jb: location codes — resolved
+  // stamped by discovery. Carries a:/b:/f:/r:/jb: location codes — resolved
   // per node below via resolveEffectiveLocation (notes → Asset.description
   // → this). notesSyncedFrom is the description→notes sync provenance
   // marker (consumed by the discovery sync layer, not read here).
@@ -215,8 +215,8 @@ router.get("/sites", async (req, res, next) => {
 //     edges:     [{ source, target, label? }, ...]
 //   }
 //
-// `location` is { building, floor, room, junctionBox } (each string|null) or
-// null when the node carries no b:/f:/r:/jb: codes — resolved server-side by
+// `location` is { area, building, floor, room, junctionBox } (each
+// string|null) or null when the node carries no a:/a:/b:/f:/r:/jb: codes — resolved server-side by
 // utils/locationCodes.ts from notes → Asset.description → the device admin
 // description discovery stamped on fortinetTopology.deviceDescription. Drives
 // the topology modal's grouping hulls + floor views.
@@ -326,7 +326,7 @@ router.get("/sites/:id/topology", async (req, res, next) => {
           dependencyLayer: s.dependencyLayer,
           dependencySuppressed: s.dependencySuppressed,
           iconUrl: resolveIconUrl({ manufacturer: s.manufacturer, model: s.model, assetType: "switch" }, iconCache),
-          // Physical-location codes (b:/f:/r:/jb:) resolved from notes →
+          // Physical-location codes (a:/b:/f:/r:/jb:) resolved from notes →
           // Asset.description → device admin description. Drives the Device
           // Map's grouping hulls + floor views. Null when untagged.
           location: nodeLocation(resolveEffectiveLocation({ notes: s.notes, description: s.description, deviceDescription: t.deviceDescription })),

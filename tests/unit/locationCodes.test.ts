@@ -14,6 +14,7 @@ import {
 describe("parseLocationCodes", () => {
   it("parses all four keys with multi-word values", () => {
     expect(parseLocationCodes("b:Shop f:2 r:North Closet jb:112-305")).toEqual({
+      area: null,
       building: "Shop",
       floor: "2",
       room: "North Closet",
@@ -22,7 +23,7 @@ describe("parseLocationCodes", () => {
   });
 
   it("returns all-null for empty / null / undefined / prose-only input", () => {
-    const empty = { building: null, floor: null, room: null, junctionBox: null };
+    const empty = { area: null, building: null, floor: null, room: null, junctionBox: null };
     expect(parseLocationCodes(null)).toEqual(empty);
     expect(parseLocationCodes(undefined)).toEqual(empty);
     expect(parseLocationCodes("")).toEqual(empty);
@@ -31,6 +32,7 @@ describe("parseLocationCodes", () => {
 
   it("is case-insensitive on keys and preserves value casing", () => {
     expect(parseLocationCodes("B:Shop JB:A-1 R:MDF")).toEqual({
+      area: null,
       building: "Shop",
       floor: null,
       room: "MDF",
@@ -40,13 +42,23 @@ describe("parseLocationCodes", () => {
 
   it("only matches keys at start or after whitespace (hub:/shelf: are not tokens)", () => {
     const parsed = parseLocationCodes("hub:5 shelf:3");
-    expect(parsed).toEqual({ building: null, floor: null, room: null, junctionBox: null });
+    expect(parsed).toEqual({ area: null, building: null, floor: null, room: null, junctionBox: null });
     // ...but a real token after prose still parses
     expect(parseLocationCodes("core switch b:Office").building).toBe("Office");
   });
 
+  it("parses the a: area code and keeps it distinct from b:", () => {
+    const parsed = parseLocationCodes("a:Mine b:Shop f:2");
+    expect(parsed.area).toBe("Mine");
+    expect(parsed.building).toBe("Shop");
+    expect(parsed.floor).toBe("2");
+    // multi-word area values run to the next token like every other code
+    expect(parseLocationCodes("a:North Campus b:Lab").area).toBe("North Campus");
+  });
+
   it("does not let b: match inside jb:", () => {
     expect(parseLocationCodes("jb:12")).toEqual({
+      area: null,
       building: null,
       floor: null,
       room: null,
@@ -74,6 +86,7 @@ describe("parseLocationCodes", () => {
 
   it("treats an empty value as absent", () => {
     expect(parseLocationCodes("b: r:MDF")).toEqual({
+      area: null,
       building: null,
       floor: null,
       room: "MDF",
@@ -90,7 +103,7 @@ describe("resolveEffectiveLocation", () => {
         description: "f:2",
         notes: "jb:112-305",
       })
-    ).toEqual({ building: "Shop", floor: "2", room: "MDF", junctionBox: "112-305" });
+    ).toEqual({ area: null, building: "Shop", floor: "2", room: "MDF", junctionBox: "112-305" });
   });
 
   it("lets notes add a single key without erasing device-side codes", () => {

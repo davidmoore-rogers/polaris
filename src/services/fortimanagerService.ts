@@ -962,7 +962,7 @@ export interface DiscoveredFortiSwitch {
   // real port instead of the opaque "fortilink".
   uplinkPhysicalPort?: string | null;
   // Operator-set admin description from the managed-switch CMDB row. Carries
-  // physical-location codes (b:/f:/r:/jb: — see utils/locationCodes.ts) that
+  // physical-location codes (a:/b:/f:/r:/jb: — see utils/locationCodes.ts) that
   // drive Device Map grouping. Stamped onto fortinetTopology.deviceDescription
   // and synced into Asset.notes by the sync layer. null = CMDB read
   // unavailable or the device has no description.
@@ -2207,7 +2207,7 @@ export async function discoverDhcpSubnets(
         // Mirrors fetchFortiswitchUplinkPorts in fortigateService (direct path).
         const uplinkBySerial = new Map<string, string>();
         // Admin description from the same CMDB rows (already fetched in
-        // full) — carries b:/f:/r:/jb: location codes for the Device Map.
+        // full) — carries a:/b:/f:/r:/jb: location codes for the Device Map.
         const descriptionBySerial = new Map<string, string>();
         try {
           const cmdbPayload: JsonRpcRequest = {

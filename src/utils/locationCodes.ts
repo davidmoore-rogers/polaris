@@ -2,9 +2,11 @@
  * src/utils/locationCodes.ts
  *
  * Physical-location codes embedded in FortiSwitch/FortiAP admin descriptions
- * and/or Asset notes, e.g. "b:Shop f:2 r:North Closet jb:112-305":
+ * and/or Asset notes, e.g. "a:Mine b:Shop f:2 r:North Closet jb:112-305":
  *
- *   b:  building       f:  floor       r:  room       jb: junction box
+ *   a: area    b: building    f: floor    r: room    jb: junction box
+ *
+ * Hierarchy (outermost first): area > building > floor > room > junction box.
  *
  * Parsed server-side only — the topology endpoint resolves each node's
  * effective codes (notes → Asset.description → device description) and ships
@@ -18,15 +20,17 @@
  */
 
 export type LocationCodes = {
+  area: string | null;
   building: string | null;
   floor: string | null;
   room: string | null;
   junctionBox: string | null;
 };
 
-const EMPTY: LocationCodes = { building: null, floor: null, room: null, junctionBox: null };
+const EMPTY: LocationCodes = { area: null, building: null, floor: null, room: null, junctionBox: null };
 
 const KEY_TO_FIELD: Record<string, keyof LocationCodes> = {
+  a: "area",
   b: "building",
   f: "floor",
   r: "room",
@@ -35,9 +39,9 @@ const KEY_TO_FIELD: Record<string, keyof LocationCodes> = {
 
 // Longest keys first ("jb" before "b") so a multi-letter key is never
 // shadowed by a single-letter prefix. Matches only at ^ or after whitespace.
-const TOKEN_RE = /(?:^|\s)(jb|b|f|r):/gi;
+const TOKEN_RE = /(?:^|\s)(jb|a|b|f|r):/gi;
 
-/** Parse b:/f:/r:/jb: codes out of a free-text description. */
+/** Parse a:/b:/f:/r:/jb: codes out of a free-text description. */
 export function parseLocationCodes(raw: string | null | undefined): LocationCodes {
   if (!raw || typeof raw !== "string") return { ...EMPTY };
   const out: LocationCodes = { ...EMPTY };
@@ -90,7 +94,8 @@ export function resolveEffectiveLocation(sources: {
 
 /** True when the resolved codes carry at least one value. */
 export function hasLocationCodes(codes: LocationCodes): boolean {
-  return codes.building !== null || codes.floor !== null || codes.room !== null || codes.junctionBox !== null;
+  return codes.area !== null || codes.building !== null || codes.floor !== null ||
+    codes.room !== null || codes.junctionBox !== null;
 }
 
 /**
