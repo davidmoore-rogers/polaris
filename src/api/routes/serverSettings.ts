@@ -76,6 +76,7 @@ import { BACKUP_DIR, UPLOADS_DIR } from "../../utils/paths.js";
 import { maintenanceLimiter } from "../middleware/rateLimits.js";
 import { getAppVersion } from "../../utils/version.js";
 import { getDirectDatabaseUrl } from "../../utils/dbConnections.js";
+import { isTimescaleAvailable } from "../../services/timescaleService.js";
 
 const TAG_COLORS = ["#4fc3f7","#4ade80","#f59e0b","#f472b6","#a78bfa","#fb923c","#38bdf8","#34d399","#e879f9","#facc15","#f87171","#2dd4bf","#818cf8","#c084fc"];
 function randomTagColor() { return TAG_COLORS[Math.floor(Math.random() * TAG_COLORS.length)]; }
@@ -125,6 +126,115 @@ const APP_VERSION: string = getAppVersion();
 
 // ─── Database ──────────────────────────────────────────────────────────────
 
+interface DbTableRow { name: string; rows: bigint; size: string; sort_pages: bigint }
+
+// Public-schema ordinary tables, sized by catalog `relpages` (heap + indexes) —
+// instant, unlike the pg_*_size() helpers that stat() every relfilenode.
+// Parent-only: for a TimescaleDB hypertable the parent's own relpages are ~0
+// (the data lives in chunk relations under _timescaledb_internal), so a
+// hypertable sorts to the bottom at ~0 size. Used only as the fallback.
+const PLAIN_TABLES_SQL = `
+  SELECT
+    c.relname AS name,
+    COALESCE(s.n_live_tup, 0)::bigint AS rows,
+    pg_size_pretty(
+      (c.relpages + COALESCE(ti.relpages, 0))::bigint * current_setting('block_size')::bigint
+    ) AS size,
+    (c.relpages + COALESCE(ti.relpages, 0))::bigint AS sort_pages
+  FROM pg_class c
+  LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+  LEFT JOIN LATERAL (
+    SELECT SUM(i.relpages)::bigint AS relpages
+    FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
+    WHERE x.indrelid = c.oid
+  ) ti ON true
+  WHERE c.relkind = 'r'
+    AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+  ORDER BY sort_pages DESC
+`;
+
+// Chunk-aware variant: folds every hypertable's chunk relations — both the
+// uncompressed chunks AND the compressed chunks (attributed back to the user
+// hypertable via `compressed_hypertable_id`) — into the parent's size + row
+// count, so hypertables appear in the list at their real on-disk footprint.
+// Still catalog-only (SUM of relpages over pg_class), so it stays instant. The
+// chunk-name join to pg_class naturally drops already-dropped chunks.
+const CHUNK_AWARE_TABLES_SQL = `
+  WITH ht AS (
+    SELECT id, table_name, compressed_hypertable_id
+    FROM _timescaledb_catalog.hypertable
+  ),
+  chunk_rel AS (
+    SELECT
+      COALESCE(userht.table_name, ownerht.table_name) AS user_table,
+      -- true when ch is a compressed chunk (owned by an internal compression
+      -- hypertable that a user hypertable points at via compressed_hypertable_id)
+      (userht.id IS NOT NULL) AS is_compressed_chunk,
+      ch.schema_name AS chunk_schema,
+      ch.table_name  AS chunk_table
+    FROM _timescaledb_catalog.chunk ch
+    JOIN ht ownerht ON ownerht.id = ch.hypertable_id
+    LEFT JOIN ht userht ON userht.compressed_hypertable_id = ownerht.id
+  ),
+  chunk_class AS (
+    SELECT cr.user_table, cr.is_compressed_chunk, cls.oid, cls.relpages
+    FROM chunk_rel cr
+    JOIN pg_namespace ns ON ns.nspname = cr.chunk_schema
+    JOIN pg_class cls ON cls.relname = cr.chunk_table AND cls.relnamespace = ns.oid
+  ),
+  chunk_sizes AS (
+    SELECT
+      cc.user_table,
+      SUM(cc.relpages)::bigint AS heap_pages,
+      -- Logical rows from uncompressed chunks only: a compressed chunk's
+      -- n_live_tup is its batch count (~1 row per 1000 logical rows) and would
+      -- badly understate the total. Bytes above are counted for both.
+      COALESCE(SUM(CASE WHEN cc.is_compressed_chunk THEN 0 ELSE s.n_live_tup END), 0)::bigint AS rows,
+      COALESCE(SUM(idx.pages), 0)::bigint AS index_pages
+    FROM chunk_class cc
+    LEFT JOIN pg_stat_user_tables s ON s.relid = cc.oid
+    LEFT JOIN LATERAL (
+      SELECT SUM(i.relpages)::bigint AS pages
+      FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
+      WHERE x.indrelid = cc.oid
+    ) idx ON true
+    GROUP BY cc.user_table
+  )
+  SELECT
+    c.relname AS name,
+    (COALESCE(s.n_live_tup, 0) + COALESCE(cz.rows, 0))::bigint AS rows,
+    pg_size_pretty(
+      (c.relpages + COALESCE(ti.relpages, 0) + COALESCE(cz.heap_pages, 0) + COALESCE(cz.index_pages, 0))::bigint
+        * current_setting('block_size')::bigint
+    ) AS size,
+    (c.relpages + COALESCE(ti.relpages, 0) + COALESCE(cz.heap_pages, 0) + COALESCE(cz.index_pages, 0))::bigint AS sort_pages
+  FROM pg_class c
+  LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+  LEFT JOIN LATERAL (
+    SELECT SUM(i.relpages)::bigint AS relpages
+    FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
+    WHERE x.indrelid = c.oid
+  ) ti ON true
+  LEFT JOIN chunk_sizes cz ON cz.user_table = c.relname
+  WHERE c.relkind = 'r'
+    AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+  ORDER BY sort_pages DESC
+`;
+
+// Chunk-aware when TimescaleDB is present; falls back to parent-only sizing when
+// it isn't installed or the internal catalog shape is unreadable (version drift)
+// so the Database card never breaks.
+async function queryDatabaseTables(): Promise<DbTableRow[]> {
+  if (isTimescaleAvailable()) {
+    try {
+      return await prisma.$queryRawUnsafe<DbTableRow[]>(CHUNK_AWARE_TABLES_SQL);
+    } catch (err) {
+      logger.warn({ err }, "database_tables.chunk_aware_query_failed; falling back to parent-only sizing");
+    }
+  }
+  return prisma.$queryRawUnsafe<DbTableRow[]>(PLAIN_TABLES_SQL);
+}
+
 router.get("/database", async (_req, res, next) => {
   try {
     // Fan out every stat query in parallel. The previous serial chain ran each
@@ -145,8 +255,10 @@ router.get("/database", async (_req, res, next) => {
     //
     // Public-schema filter on the table list: pg-boss's `pgboss.*` tables
     // and TimescaleDB's `_timescaledb_internal.*` chunks would otherwise
-    // flood the operator-facing list. The chunks' sizes are already counted
-    // toward the database-size total via the catalog sum below.
+    // flood the operator-facing list. Each hypertable's chunks (uncompressed +
+    // compressed) are folded back into its parent row by queryDatabaseTables()
+    // so hypertables show their real footprint; the same chunk bytes are also
+    // counted toward the database-size total via the catalog sum below.
     const [
       versionResult,
       dbNameResult,
@@ -165,27 +277,7 @@ router.get("/database", async (_req, res, next) => {
         FROM pg_class
         WHERE relkind IN ('r', 'i', 't', 'm')
       `),
-      prisma.$queryRawUnsafe<any[]>(`
-        SELECT
-          c.relname AS name,
-          COALESCE(s.n_live_tup, 0)::integer AS rows,
-          pg_size_pretty(
-            (c.relpages + COALESCE(ti.relpages, 0))::bigint *
-              current_setting('block_size')::bigint
-          ) AS size,
-          (c.relpages + COALESCE(ti.relpages, 0))::bigint AS sort_pages
-        FROM pg_class c
-        LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
-        LEFT JOIN LATERAL (
-          SELECT SUM(i.relpages)::bigint AS relpages
-          FROM pg_index x
-          JOIN pg_class i ON i.oid = x.indexrelid
-          WHERE x.indrelid = c.oid
-        ) ti ON true
-        WHERE c.relkind = 'r'
-          AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-        ORDER BY sort_pages DESC
-      `),
+      queryDatabaseTables(),
       prisma.$queryRawUnsafe<any[]>(`
         SELECT
           (SELECT count(*)::integer FROM pg_stat_activity WHERE datname = current_database()) AS active,
