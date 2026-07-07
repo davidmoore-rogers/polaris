@@ -1709,6 +1709,43 @@
     _ensureTopologyMapShotButton();
     _renderTopologyTypeToggles(roleCounts, hiddenRoles);
     _renderTopologyFloorViews();
+    _wireCtrlPan();
+  }
+
+  // Ctrl + left-drag pans the viewport from ANYWHERE on the graph —
+  // including on top of device nodes and group boxes, which normally grab
+  // and move. Needed since hulls became draggable: a large building box can
+  // cover most of the canvas, leaving no background to drag-pan on.
+  // Intercepted on the container in capture phase so Cytoscape never sees
+  // the gesture; wired once per page load (the #topology-graph div survives
+  // openTopology's innerHTML wipe) and closes over the module-level
+  // cyInstance so it tracks re-renders. Trade-off: Ctrl+click no longer
+  // toggles node selection (shift+click / shift+drag box-select still do).
+  function _wireCtrlPan() {
+    var graph = document.getElementById("topology-graph");
+    if (!graph || graph.dataset.ctrlPanWired) return;
+    graph.dataset.ctrlPanWired = "1";
+    var panning = null;
+    graph.addEventListener("mousedown", function (e) {
+      if (!e.ctrlKey || e.button !== 0 || !cyInstance) return;
+      panning = { x: e.clientX, y: e.clientY };
+      graph.style.cursor = "grabbing";
+      e.preventDefault();
+      e.stopPropagation();
+    }, true);
+    window.addEventListener("mousemove", function (e) {
+      if (!panning || !cyInstance) return;
+      cyInstance.panBy({ x: e.clientX - panning.x, y: e.clientY - panning.y });
+      panning = { x: e.clientX, y: e.clientY };
+      e.preventDefault();
+      e.stopPropagation();
+    }, true);
+    window.addEventListener("mouseup", function (e) {
+      if (!panning) return;
+      panning = null;
+      graph.style.cursor = "";
+      e.stopPropagation();
+    }, true);
   }
 
   // Which hull tiers to hide for the ACTIVE view: a building view IS the
