@@ -2320,7 +2320,7 @@ function assetFormHTML(defaults) {
   '</div>' +
   '<div class="form-group"><label>Description</label><input type="text" id="f-description" maxlength="255" value="' + escapeHtml(d.description || "") + '" placeholder="e.g. b:Shop f:2 r:North Closet jb:112-305">' +
     '<p class="hint">Device Map grouping codes: <code>b:</code>building &nbsp;<code>f:</code>floor &nbsp;<code>r:</code>room &nbsp;<code>jb:</code>junction box — e.g. <code>b:Shop f:2 r:North Closet jb:112-305</code>. Values may contain spaces; each runs until the next code. Codes here (or in Notes, which wins) group this device into building/floor/room shapes and floor views on the topology map.</p>' +
-    '<p class="hint">On Fortinet assets with Description Sync enabled, this writes to the device (FortiGate alias / FortiSwitch description / FortiAP comment) — Polaris is primary. Leave empty to adopt the device\'s value on the next discovery.</p></div>' +
+    '<p class="hint">On Fortinet assets with Description Sync enabled, this writes to the device (FortiGate alias / FortiSwitch description / FortiAP comment) — newest edit wins: your save pushes to the device; a device-side edit made after the last sync flows back here on the next discovery. Leave empty to adopt the device\'s value.</p></div>' +
   '<div class="form-group"><label>Notes</label><textarea id="f-notes" rows="2" placeholder="Optional notes">' + escapeHtml(d.notes || "") + '</textarea>' +
     '<p class="hint">Accepts the same <code>b:</code>/<code>f:</code>/<code>r:</code>/<code>jb:</code> grouping codes — Notes override Description and the device-side value per code.</p></div>' +
   tagFieldHTML(d.tags || []);
@@ -3437,7 +3437,9 @@ async function openViewModal(id) {
       viewRow("Description", a.description
         ? a.description + (a.descriptionSync && a.descriptionSync.status === "failed"
             ? " ⚠ (device sync failed)"
-            : (a.descriptionSync && a.descriptionSync.status === "synced" ? " (synced to device)" : ""))
+            : (a.descriptionSync && a.descriptionSync.status === "conflict"
+                ? " ⚠ (sync conflict — device also edited; edit to resolve)"
+                : (a.descriptionSync && a.descriptionSync.status === "synced" ? " (synced to device)" : "")))
         : null, false, true) +
       viewRow("Notes", a.notes, false, true) +
       viewRow("Created", formatDate(a.createdAt)) +
@@ -8447,10 +8449,12 @@ function _renderIfaceCommentSource(state) {
       // so surface the per-row push status instead of the local-only copy.
       if (sync.status === "failed") {
         sourceEl.textContent = "Sync to device failed" + (sync.error ? ": " + sync.error : "") + " — retries on the next discovery cycle.";
+      } else if (sync.status === "conflict") {
+        sourceEl.textContent = "Sync conflict — this comment and the device were both edited since the last sync. Neither was overwritten; save to push your value and resolve.";
       } else if (sync.status === "synced") {
-        sourceEl.textContent = "Synced to device" + (sync.lastSyncAt ? " " + timeAgo(sync.lastSyncAt) : "") + " — Polaris is primary.";
+        sourceEl.textContent = "Synced to device" + (sync.lastSyncAt ? " " + timeAgo(sync.lastSyncAt) : "") + " — newest edit wins.";
       } else {
-        sourceEl.textContent = "Will sync to the device on save — Polaris is primary.";
+        sourceEl.textContent = "Will sync to the device on save — newest edit wins.";
       }
     } else if (state.discoveredDescription && state.discoveredDescription !== state.savedValue) {
       sourceEl.textContent = "Override active. Device reports: " + state.discoveredDescription;
