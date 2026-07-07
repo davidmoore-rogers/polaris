@@ -275,21 +275,38 @@
   opacity: 0.6;
 }
 
-/* Floor-view switcher chips, top-left of the graph area: "Flat" + one chip
-   per (building, floor) pair found in the site's location codes. Rendered
-   only when at least one device carries an f: code. .is-active = the view
-   currently shown. */
+/* Floor-view switcher, top-left of the graph area: a "Flat" chip plus one
+   COLUMN per building (building name as the column header, that building's
+   floors stacked beneath in underground-aware order). Rendered only when at
+   least one device carries an f: code. .is-active = the view currently
+   shown. */
 .topology-floor-views {
   position: absolute;
   top: 10px;
   left: 10px;
   z-index: 6;
   display: flex;
-  gap: 6px;
+  align-items: flex-start;
+  gap: 12px;
   flex-wrap: wrap;
   max-width: calc(100% - 320px);
 }
 .topology-floor-views[hidden] { display: none; }
+.topology-floor-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+}
+.topology-floor-col-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-secondary);
+  padding: 0 4px 2px;
+  white-space: nowrap;
+}
 .topology-floor-chip.is-active {
   opacity: 1;
   font-weight: 600;
