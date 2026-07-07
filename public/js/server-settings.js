@@ -2098,6 +2098,17 @@ async function loadDatabaseInfo() {
         // that comes from POLARIS_UPDATE_REPO (.env) or the install's origin.
         // Lives outside #update-status-area so it survives status re-renders.
         '<div id="update-repo-info" style="margin-top:0.75rem;font-size:0.8rem;color:var(--color-text-tertiary)"></div>' +
+        // Update train — nightly (every commit) vs release (tagged releases only).
+        '<div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
+          '<label for="update-train-select" style="display:block;font-size:0.85rem;font-weight:600;margin-bottom:0.35rem">Update train</label>' +
+          '<select id="update-train-select" style="max-width:280px">' +
+            '<option value="nightly">Nightly — latest commits</option>' +
+            '<option value="release">Release — stable releases only</option>' +
+          '</select>' +
+          '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.3rem 0 0">' +
+            'Nightly tracks every change on the update branch. Release only downloads published, tagged releases.' +
+          '</p>' +
+        '</div>' +
         '<div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
           '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none">' +
             '<input type="checkbox" id="update-backup-checkbox" style="width:15px;height:15px;flex-shrink:0">' +
@@ -2676,18 +2687,38 @@ function initUpdateControls() {
   // Show which repo updates are pulled from + where that's configured.
   loadUpdateRepoInfo();
 
-  // Load and wire the backup checkbox
+  // Load and wire the backup checkbox + update-train dropdown (one settings GET)
   var backupCheckbox = document.getElementById("update-backup-checkbox");
+  var trainSelect = document.getElementById("update-train-select");
+  api.serverSettings.getUpdateSettings().then(function (s) {
+    if (backupCheckbox) backupCheckbox.checked = !s.skipBackup;
+    if (trainSelect) trainSelect.value = s.train === "release" ? "release" : "nightly";
+  }).catch(function () {
+    if (backupCheckbox) backupCheckbox.checked = true; // default: enabled
+    if (trainSelect) trainSelect.value = "nightly";
+  });
   if (backupCheckbox) {
-    api.serverSettings.getUpdateSettings().then(function (s) {
-      backupCheckbox.checked = !s.skipBackup;
-    }).catch(function () {
-      backupCheckbox.checked = true; // default: enabled
-    });
     backupCheckbox.addEventListener("change", function () {
       api.serverSettings.setUpdateSettings({ skipBackup: !backupCheckbox.checked }).catch(function (err) {
         showToast("Failed to save setting: " + err.message, "error");
         backupCheckbox.checked = !backupCheckbox.checked; // revert
+      });
+    });
+  }
+  if (trainSelect) {
+    var _prevTrain = trainSelect.value;
+    trainSelect.addEventListener("change", function () {
+      var train = trainSelect.value;
+      api.serverSettings.setUpdateSettings({ train: train }).then(function () {
+        _prevTrain = train;
+        showToast("Update train set to " + (train === "release" ? "Release" : "Nightly"), "success");
+        // A prior check reflects the old train — clear it so the operator
+        // re-checks against the newly selected train.
+        var statusEl = document.getElementById("update-check-status");
+        if (statusEl) statusEl.innerHTML = '<span style="color:var(--color-text-tertiary)">Train changed — check for updates to compare.</span>';
+      }).catch(function (err) {
+        showToast("Failed to save setting: " + err.message, "error");
+        trainSelect.value = _prevTrain; // revert
       });
     });
   }
@@ -2800,7 +2831,11 @@ async function checkForUpdatesUI() {
     }
 
     if (result.state === "up-to-date") {
-      statusEl.innerHTML = '<span style="color:var(--color-success)">Up to date (v' + escapeHtml(result.currentVersion) + ')</span>';
+      if (result.note) {
+        statusEl.innerHTML = '<span style="color:var(--color-text-secondary)">' + escapeHtml(result.note) + '</span>';
+      } else {
+        statusEl.innerHTML = '<span style="color:var(--color-success)">Up to date (v' + escapeHtml(result.currentVersion) + ')</span>';
+      }
       btn.textContent = "Check for Updates";
       btn.disabled = false;
       return;
@@ -2846,6 +2881,9 @@ function renderUpdateAvailable(result) {
     '<div style="background:color-mix(in srgb, var(--color-primary) 10%, transparent);border:1px solid var(--color-primary);border-radius:6px;padding:1rem;margin-bottom:1rem">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<span style="color:var(--color-primary);font-weight:600;font-size:0.95rem">Update Available</span>' +
+        (result.train === "release"
+          ? '<span style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--color-text-tertiary);border:1px solid var(--color-border);border-radius:10px;padding:1px 8px">Release' + (result.releaseTag ? ' ' + escapeHtml(result.releaseTag) : '') + '</span>'
+          : '<span style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--color-text-tertiary);border:1px solid var(--color-border);border-radius:10px;padding:1px 8px">Nightly</span>') +
       '</div>' +
       '<div class="db-info-grid">' +
         '<div class="db-info-label">Current</div><div class="db-info-value">v' + escapeHtml(result.currentVersion) + ' <span class="mono" style="color:var(--color-text-tertiary)">(' + escapeHtml(result.currentCommit) + ')</span></div>' +
