@@ -735,63 +735,53 @@
         { label: "AP ↔ switch",       color: "#3b82f6", style: "solid",  desc: "Wired: AP's switch uplink / switch bridged behind an AP" },
         { label: "In physical loop",  color: "#eab308", style: "solid",  desc: "Yellow halo: wired edge on a redundant/ring path" },
       ],
-      // Location grouping hulls — shapes must mirror LOC_GROUP_KINDS. Colors
-      // are per-group (hashed from the group name), so the legend shows the
-      // shape vocabulary with a neutral swatch color.
+      // Location grouping hulls — colors + border styles must mirror
+      // LOC_GROUP_KINDS (all levels are rounded rectangles, identified by a
+      // fixed per-level color).
       locations: [
-        { label: "Building",     shape: "rect",    style: "solid",  desc: "From b:/f:/r:/jb: codes in device descriptions or asset notes" },
-        { label: "Floor",        shape: "rect",    style: "dashed" },
-        { label: "Room",         shape: "hexagon", style: "solid" },
-        { label: "Junction box", shape: "ellipse", style: "dashed" },
+        { label: "Building",     shape: "rect", style: "solid",  color: "#4fc3f7", desc: "From b:/f:/r:/jb: codes in device descriptions or asset notes" },
+        { label: "Floor",        shape: "rect", style: "dashed", color: "#a78bfa" },
+        { label: "Room",         shape: "rect", style: "solid",  color: "#4ade80" },
+        { label: "Junction box", shape: "rect", style: "dashed", color: "#f59e0b" },
       ],
     };
   }
 
   // ── Location grouping hulls ─────────────────────────────────────────────
   // Synthetic Cytoscape nodes drawn UNDER the graph (z-compound-depth:
-  // bottom) that enclose devices sharing a location code: building rectangle
-  // > floor dashed rounded-rectangle > room hexagon > jb dashed ellipse.
-  // Plain nodes (not compound parents — those can't render hexagons), sized
-  // to the members' model-coord bounding box, so cy.png() screenshots and
-  // pan/zoom capture them for free. Non-interactive: events pass through to
-  // the background (pan) and they're excluded from drag persistence, the
-  // solver, and search — see the [isLocGroup] guards in map.js.
+  // bottom) that enclose devices sharing a location code — nested rounded
+  // rectangles color-coded per level: building > floor > room > jb (see
+  // LOC_GROUP_KINDS for the fixed colors). Plain nodes (not compound
+  // parents), sized to the members' model-coord bounding box, so cy.png()
+  // screenshots and pan/zoom capture them for free. Non-interactive: events
+  // pass through to the background (pan) and they're excluded from drag
+  // persistence, the solver, and search — see the [isLocGroup] guards in
+  // map.js.
   //
   // Nesting is STRUCTURAL: shapes are fitted inside-out (jb → room → floor →
   // building), and each outer shape's content box is the union of its own
-  // members' bounds AND its descendant groups' FINAL rendered boxes —
-  // including the extra width/height the hexagon/ellipse shapes take so
-  // their inscribed area covers their content. Outer shapes therefore grow
-  // dynamically to enclose whatever nests inside them: building ⊇ floor ⊇
-  // room ⊇ jb, boundaries never crossing. (Sizing every shape independently
-  // off the shared member bbox let a scaled room hexagon poke outside its
-  // building rectangle.) Same palette values as the Leaflet map-region
-  // feature (REGION_COLOR_PALETTE in map.js — duplicated here because the
-  // shared module can't reach into map.js), color picked by a deterministic
-  // hash of the group's kind+name so a group keeps its color across renders.
-  var LOC_GROUP_PALETTE = [
-    "#4fc3f7", "#4ade80", "#f59e0b", "#f472b6", "#a78bfa",
-    "#fb923c", "#38bdf8", "#34d399", "#e879f9", "#facc15",
-    "#f87171", "#2dd4bf", "#818cf8", "#c084fc",
-  ];
-  // pad = gap between a shape and its content (members + nested shapes).
-  // Tiers stay visually stepped, but containment no longer depends on them —
-  // the hierarchical fit guarantees it. scaleW/scaleH inflate non-rectangular
-  // shapes so the content box fits INSIDE the hexagon/ellipse outline (a
-  // rect inscribed in an ellipse needs axes ×√2; the hexagon's slanted
-  // corners need ~×1.35 width / ×1.18 height).
+  // members' bounds AND its descendant groups' FINAL rendered boxes. Outer
+  // shapes therefore grow dynamically to enclose whatever nests inside them:
+  // building ⊇ floor ⊇ room ⊇ jb, boundaries never crossing.
+  //
+  // Every level renders as a rounded rectangle, identified by a FIXED
+  // per-level color (+ alternating solid/dashed borders): building sky-blue
+  // solid, floor violet dashed, room green solid, jb amber dashed. The
+  // colors mirror the legend's "Location groups" section — change them in
+  // lockstep. pad = gap between a shape and its content (members + nested
+  // shapes); tiers stay visually stepped, but containment no longer depends
+  // on them — the hierarchical fit guarantees it. scaleW/scaleH remain for
+  // any future non-rectangular shape (a rect inscribed in an ellipse needs
+  // axes ×√2); all 1 while everything is rectangular.
   var LOC_GROUP_KINDS = {
-    building: { rank: 0, pad: 34, shape: "round-rectangle", dash: "solid",  z: 1, scaleW: 1,    scaleH: 1 },
-    floor:    { rank: 1, pad: 26, shape: "round-rectangle", dash: "dashed", z: 2, scaleW: 1,    scaleH: 1 },
-    room:     { rank: 2, pad: 18, shape: "hexagon",         dash: "solid",  z: 3, scaleW: 1.35, scaleH: 1.18 },
-    jb:       { rank: 3, pad: 12, shape: "ellipse",         dash: "dashed", z: 4, scaleW: 1.42, scaleH: 1.42 },
+    building: { rank: 0, pad: 34, color: "#4fc3f7", shape: "round-rectangle", dash: "solid",  z: 1, scaleW: 1, scaleH: 1 },
+    floor:    { rank: 1, pad: 26, color: "#a78bfa", shape: "round-rectangle", dash: "dashed", z: 2, scaleW: 1, scaleH: 1 },
+    room:     { rank: 2, pad: 18, color: "#4ade80", shape: "round-rectangle", dash: "solid",  z: 3, scaleW: 1, scaleH: 1 },
+    jb:       { rank: 3, pad: 12, color: "#f59e0b", shape: "round-rectangle", dash: "dashed", z: 4, scaleW: 1, scaleH: 1 },
   };
 
-  function locGroupColor(kind, name) {
-    var s = kind + "|" + name;
-    var h = 0;
-    for (var i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
-    return LOC_GROUP_PALETTE[Math.abs(h) % LOC_GROUP_PALETTE.length];
+  function locGroupColor(kind) {
+    return (LOC_GROUP_KINDS[kind] || LOC_GROUP_KINDS.building).color;
   }
 
   // Enumerate the location groups present among the VISIBLE device nodes of a
@@ -997,7 +987,7 @@
     computeLocationGroups(cy).forEach(function (g) {
       if (suppress[g.kind]) return;
       var cfg = LOC_GROUP_KINDS[g.kind];
-      var color = locGroupColor(g.kind, g.name || "");
+      var color = locGroupColor(g.kind);
       var n = cy.add({
         group: "nodes",
         data: {
