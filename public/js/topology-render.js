@@ -1664,11 +1664,19 @@
       if (col <= Math.min(ds, dt) || col >= Math.max(ds, dt)) return null;
       return lane[s] + ((col - ds) / (dt - ds)) * (lane[t] - lane[s]);
     }
-    function laneBlocked(id, col, L) {
+    // `insideBuilding`: when the leaf being placed belongs to a b: building
+    // group, edges whose BOTH endpoints live OUTSIDE that building are
+    // ignored — they're foreign pass-throughs, and now that the grouping
+    // hulls separate buildings visually there's no point stretching a
+    // building's interior to dodge them. Edges touching any same-building
+    // node (the parent's own spine exit, in-building cross-links) are still
+    // dodged so leaves don't sit on lines that belong to the group.
+    function laneBlocked(id, col, L, insideBuilding) {
       if (occupied[col] && occupied[col][L]) return true;
       for (var e = 0; e < edgeList.length; e++) {
         var s = edgeList[e][0], t = edgeList[e][1];
         if (s === id || t === id) continue; // edges that terminate here are fine
+        if (insideBuilding && locBById[s] !== insideBuilding && locBById[t] !== insideBuilding) continue;
         var el = edgeLaneAt(s, t, col);
         if (el != null && Math.abs(el - L) < 0.45) return true;
       }
@@ -1706,10 +1714,15 @@
         // Sliding the window (rather than dodging per leaf) matters under
         // nearest-slot packing: another chain's spine can run through this
         // column, and per-leaf dodging would fragment the block around it.
+        // When the parent belongs to a building group, foreign pass-through
+        // edges don't block — the first leaf lands on the parent's own row
+        // (or one below when the parent's spine continues), keeping each
+        // building's interior compact.
+        var pBuilding = locBById[p] || null;
         var L = lane[p];
         function windowFits(start) {
           for (var j = 0; j < block.length; j++) {
-            if (laneBlocked(block[j], col, start + j)) return false;
+            if (laneBlocked(block[j], col, start + j, pBuilding)) return false;
           }
           return true;
         }
