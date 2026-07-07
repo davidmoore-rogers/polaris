@@ -757,10 +757,15 @@
   // the background (pan) and they're excluded from drag persistence, the
   // solver, and search — see the [isLocGroup] guards in map.js.
   //
-  // Nesting comes from membership subsumption (a room's members are a subset
-  // of its building's) plus padding tiers jb < room < floor < building; the
-  // hexagon/ellipse shapes get extra scale so their inscribed area still
-  // covers the members' box. Same palette values as the Leaflet map-region
+  // Nesting is STRUCTURAL: shapes are fitted inside-out (jb → room → floor →
+  // building), and each outer shape's content box is the union of its own
+  // members' bounds AND its descendant groups' FINAL rendered boxes —
+  // including the extra width/height the hexagon/ellipse shapes take so
+  // their inscribed area covers their content. Outer shapes therefore grow
+  // dynamically to enclose whatever nests inside them: building ⊇ floor ⊇
+  // room ⊇ jb, boundaries never crossing. (Sizing every shape independently
+  // off the shared member bbox let a scaled room hexagon poke outside its
+  // building rectangle.) Same palette values as the Leaflet map-region
   // feature (REGION_COLOR_PALETTE in map.js — duplicated here because the
   // shared module can't reach into map.js), color picked by a deterministic
   // hash of the group's kind+name so a group keeps its color across renders.
@@ -769,11 +774,17 @@
     "#fb923c", "#38bdf8", "#34d399", "#e879f9", "#facc15",
     "#f87171", "#2dd4bf", "#818cf8", "#c084fc",
   ];
+  // pad = gap between a shape and its content (members + nested shapes).
+  // Tiers stay visually stepped, but containment no longer depends on them —
+  // the hierarchical fit guarantees it. scaleW/scaleH inflate non-rectangular
+  // shapes so the content box fits INSIDE the hexagon/ellipse outline (a
+  // rect inscribed in an ellipse needs axes ×√2; the hexagon's slanted
+  // corners need ~×1.35 width / ×1.18 height).
   var LOC_GROUP_KINDS = {
-    building: { pad: 60, shape: "round-rectangle", dash: "solid",  z: 1, scaleW: 1,    scaleH: 1 },
-    floor:    { pad: 45, shape: "round-rectangle", dash: "dashed", z: 2, scaleW: 1,    scaleH: 1 },
-    room:     { pad: 30, shape: "hexagon",         dash: "solid",  z: 3, scaleW: 1.35, scaleH: 1.18 },
-    jb:       { pad: 14, shape: "ellipse",         dash: "dashed", z: 4, scaleW: 1.42, scaleH: 1.42 },
+    building: { rank: 0, pad: 34, shape: "round-rectangle", dash: "solid",  z: 1, scaleW: 1,    scaleH: 1 },
+    floor:    { rank: 1, pad: 26, shape: "round-rectangle", dash: "dashed", z: 2, scaleW: 1,    scaleH: 1 },
+    room:     { rank: 2, pad: 18, shape: "hexagon",         dash: "solid",  z: 3, scaleW: 1.35, scaleH: 1.18 },
+    jb:       { rank: 3, pad: 12, shape: "ellipse",         dash: "dashed", z: 4, scaleW: 1.42, scaleH: 1.42 },
   };
 
   function locGroupColor(kind, name) {
@@ -788,15 +799,17 @@
   // keys — floor = building+floor, room = building+floor+room, jb = all four
   // — so "Floor 2" in two buildings forms two groups; missing intermediate
   // levels use an empty segment (an r:-only room is a top-level room group).
-  // Returns [{ key, kind, name, memberIds }] ordered building → floor →
-  // room → jb so callers can add the big shapes first.
+  // `scope` is the key's segment array — the hierarchical fit uses prefix
+  // matching over it to find each shape's descendants. Returns
+  // [{ key, kind, name, memberIds, scope }] ordered building → floor →
+  // room → jb.
   function computeLocationGroups(cy) {
     var groups = {};
     var order = [];
-    function addTo(key, kind, name, nodeId) {
+    function addTo(key, kind, name, scope, nodeId) {
       var g = groups[key];
       if (!g) {
-        g = { key: key, kind: kind, name: name, memberIds: [] };
+        g = { key: key, kind: kind, name: name, scope: scope, memberIds: [] };
         groups[key] = g;
         order.push(g);
       }
@@ -810,30 +823,75 @@
       var r = n.data("locR") || "";
       var jb = n.data("locJb") || "";
       var id = n.id();
-      if (b) addTo("b|" + b, "building", n.data("locBName"), id);
-      if (f) addTo("f|" + b + "|" + f, "floor", n.data("locFName"), id);
-      if (r) addTo("r|" + b + "|" + f + "|" + r, "room", n.data("locRName"), id);
-      if (jb) addTo("jb|" + b + "|" + f + "|" + r + "|" + jb, "jb", n.data("locJbName"), id);
+      if (b) addTo("b|" + b, "building", n.data("locBName"), [b], id);
+      if (f) addTo("f|" + b + "|" + f, "floor", n.data("locFName"), [b, f], id);
+      if (r) addTo("r|" + b + "|" + f + "|" + r, "room", n.data("locRName"), [b, f, r], id);
+      if (jb) addTo("jb|" + b + "|" + f + "|" + r + "|" + jb, "jb", n.data("locJbName"), [b, f, r, jb], id);
     });
     var kindRank = { building: 0, floor: 1, room: 2, jb: 3 };
     order.sort(function (a, b2) { return kindRank[a.kind] - kindRank[b2.kind]; });
     return order;
   }
 
-  // Position + size a hull node over its members' current bounding box.
-  function _fitLocGroupNode(cy, groupNode) {
-    var memberIds = groupNode.data("memberIds") || [];
-    var coll = cy.collection();
-    memberIds.forEach(function (id) { coll = coll.union(cy.getElementById(id)); });
-    coll = coll.filter(function (n) { return n.length !== 0 && n.visible(); });
-    if (coll.length === 0) return false;
-    var bb = coll.boundingBox({ includeLabels: false, includeOverlays: false });
-    var cfg = LOC_GROUP_KINDS[groupNode.data("locKind")] || LOC_GROUP_KINDS.building;
-    var w = (bb.w + cfg.pad * 2) * cfg.scaleW;
-    var h = (bb.h + cfg.pad * 2) * cfg.scaleH;
-    groupNode.position({ x: (bb.x1 + bb.x2) / 2, y: (bb.y1 + bb.y2) / 2 });
-    groupNode.style({ width: w, height: h });
+  // True when `inner`'s scope nests inside `outer`'s (strict prefix match —
+  // a room in building "shop" nests inside building "shop"; a room whose
+  // building segment is "" nests inside no building).
+  function _isDescendantScope(outer, inner) {
+    if (!outer || !inner || inner.length <= outer.length) return false;
+    for (var i = 0; i < outer.length; i++) {
+      if (inner[i] !== outer[i]) return false;
+    }
     return true;
+  }
+
+  // Hierarchical fit: size + place every hull node, INNERMOST KIND FIRST
+  // (jb → room → floor → building). Each shape's content box is the union of
+  // its visible members' bounds and the FINAL boxes of already-fitted
+  // descendant shapes, then padded and inflated for the shape outline — so
+  // an outer shape always fully encloses everything nested in it, growing as
+  // large as that requires. A hull whose members are all hidden and that has
+  // no fitted descendants is removed.
+  function _layoutLocationGroups(cy) {
+    var hulls = cy.nodes("[isLocGroup]").toArray();
+    hulls.sort(function (a, b) {
+      var ra = (LOC_GROUP_KINDS[a.data("locKind")] || LOC_GROUP_KINDS.building).rank;
+      var rb = (LOC_GROUP_KINDS[b.data("locKind")] || LOC_GROUP_KINDS.building).rank;
+      return rb - ra; // deepest kind first
+    });
+    var fitted = []; // { scope, rank, box } — final rendered boxes, deepest kinds first
+    hulls.forEach(function (n) {
+      var cfg = LOC_GROUP_KINDS[n.data("locKind")] || LOC_GROUP_KINDS.building;
+      var scope = n.data("locScope") || [];
+      var coll = cy.collection();
+      (n.data("memberIds") || []).forEach(function (id) { coll = coll.union(cy.getElementById(id)); });
+      coll = coll.filter(function (m) { return m.length !== 0 && m.visible(); });
+      var box = null;
+      if (coll.length > 0) {
+        var bb = coll.boundingBox({ includeLabels: false, includeOverlays: false });
+        box = { x1: bb.x1, y1: bb.y1, x2: bb.x2, y2: bb.y2 };
+      }
+      for (var i = 0; i < fitted.length; i++) {
+        var f = fitted[i];
+        if (f.rank <= cfg.rank) continue; // only deeper kinds nest inside this one
+        if (!_isDescendantScope(scope, f.scope)) continue;
+        box = box === null
+          ? { x1: f.box.x1, y1: f.box.y1, x2: f.box.x2, y2: f.box.y2 }
+          : { x1: Math.min(box.x1, f.box.x1), y1: Math.min(box.y1, f.box.y1),
+              x2: Math.max(box.x2, f.box.x2), y2: Math.max(box.y2, f.box.y2) };
+      }
+      if (box === null) { cy.remove(n); return; }
+      var w = (box.x2 - box.x1 + cfg.pad * 2) * cfg.scaleW;
+      var h = (box.y2 - box.y1 + cfg.pad * 2) * cfg.scaleH;
+      var cx = (box.x1 + box.x2) / 2;
+      var cyy = (box.y1 + box.y2) / 2;
+      n.position({ x: cx, y: cyy });
+      n.style({ width: w, height: h });
+      fitted.push({
+        scope: scope,
+        rank: cfg.rank,
+        box: { x1: cx - w / 2, y1: cyy - h / 2, x2: cx + w / 2, y2: cyy + h / 2 },
+      });
+    });
   }
 
   // Draw (or redraw) the hull nodes for the current graph. opts.suppressKinds
@@ -854,6 +912,7 @@
           id: "locgroup:" + g.key,
           isLocGroup: 1,
           locKind: g.kind,
+          locScope: g.scope,
           label: g.name || "",
           memberIds: g.memberIds,
         },
@@ -868,8 +927,8 @@
         color: color,
         "z-index": cfg.z,
       });
-      if (!_fitLocGroupNode(cy, n)) cy.remove(n);
     });
+    _layoutLocationGroups(cy);
   }
 
   function removeLocationGroups(cy) {
@@ -879,9 +938,7 @@
   // Re-fit existing hulls to their members' current positions (drag-follow).
   // Membership changes require a full renderLocationGroups() instead.
   function refreshLocationGroups(cy) {
-    cy.nodes("[isLocGroup]").forEach(function (n) {
-      if (!_fitLocGroupNode(cy, n)) cy.remove(n);
-    });
+    _layoutLocationGroups(cy);
   }
 
   // ── Floor views ─────────────────────────────────────────────────────────

@@ -3588,7 +3588,12 @@ async function openViewModal(id) {
           '<button data-export="page" data-fmt="csv">Current page</button>' +
           '<button data-export="all" data-fmt="csv">All events for this asset</button>' +
         '</div>' +
-      '</span>';
+      '</span>' +
+      // Re-fetches the asset and re-renders the whole slide-over in place
+      // (fresh probes, discovery writes, tag/notes edits from elsewhere),
+      // preserving the active tab. Sits between Screenshot and the
+      // management-access (Open HTTPS / Open SSH) buttons.
+      '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-refresh" title="Reload this asset\'s details">Refresh</button>';
     var leftBtns = copyBtns + _managementAccessButtonsHTML(a);
     var rightBtns = '<button class="btn btn-sm btn-secondary" id="btn-asset-panel-close-btn">Close</button>' +
       (canManageAssets() ? '<button class="btn btn-sm btn-primary" id="btn-asset-panel-edit-btn">Edit</button>' : '');
@@ -3692,6 +3697,28 @@ async function openViewModal(id) {
     document.getElementById("btn-asset-copy").addEventListener("click", _copyAssetDetails);
     document.getElementById("btn-asset-screenshot").addEventListener("click", function () {
       _openScreenshotOptions(a);
+    });
+    // Refresh: re-fetch + re-render the whole slide-over, then restore the
+    // tab the operator was on (openViewModal rebuilds the DOM with General
+    // active; clicking the saved tab also re-fires _syncAssetFooterButtons
+    // via the delegated tab-bar listener).
+    document.getElementById("btn-asset-refresh").addEventListener("click", async function () {
+      var btn = this;
+      var activeTab = document.querySelector("#asset-view-tabs .page-tab.active");
+      var activeKey = activeTab ? activeTab.getAttribute("data-tab") : null;
+      btn.disabled = true;
+      btn.textContent = "Refreshing…";
+      try {
+        await openViewModal(a.id);
+        if (activeKey) {
+          var tabBtn = document.querySelector('#asset-view-tabs .page-tab[data-tab="' + activeKey + '"]');
+          if (tabBtn) tabBtn.click();
+        }
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "Refresh";
+        showToast("Refresh failed — " + (err && err.message ? err.message : "unknown error"), "error");
+      }
     });
     // Export dropdown (Events tab) — same open/close mechanics as the Events
     // page export menu. The document-level closer is registered once per
