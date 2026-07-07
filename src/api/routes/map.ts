@@ -904,33 +904,34 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     // and networkAddress port-id subtypes carry hardware identifiers, not
     // operator-readable port labels — skipped so they don't pollute the edge.
     const PORT_ID_NAME_SUBTYPES = new Set(["interfaceName", "interfaceAlias", "agentCircuitId", "local"]);
-    // Three confidence tiers (lower wins):
+    // Two confidence tiers (lower wins):
     //   1 — authoritative: the asset's own lldpLocPortTable / IF-MIB ifName
     //       lookup resolved (real port label that the asset reports for
     //       itself).
     //   2 — cross-advertised: portId in the neighbor's LLDP frame, name-form
     //       subtype (the asset doesn't have it locally but its peer just told
     //       it what the link's far end is called).
-    //   3 — synthetic: collectLldpNeighborsSnmp couldn't resolve the local
-    //       port number to a real name and fell through to `port-${num}`.
-    //       Useful as a last resort (it's at least non-empty) but should
-    //       always lose to a real label from either side. Detected by the
-    //       `port-<digits>` pattern the collector uses for the fallback.
-    type PortLabel = { value: string; conf: 1 | 2 | 3 };
+    // Synthetic `port-<digits>` values are NEVER used: that's the pattern
+    // collectLldpNeighborsSnmp falls back to when the LLDP local-port table
+    // can't resolve a name — the number is an ifIndex, not a port. Every real
+    // FortiSwitch physical interface is `port<N>` (no hyphen), so a
+    // hyphenated value is guaranteed bogus; "unknown" (→ "fortilink" label on
+    // controller edges) beats a wrong port number.
+    type PortLabel = { value: string; conf: 1 | 2 };
     const siblingLldpPort = new Map<string, PortLabel>();
-    const SYNTHETIC_FALLBACK_RE = /^port-\d+$/;
-    const writeLabel = (k: string, value: string, conf: 1 | 2 | 3) => {
+    const SYNTHETIC_FALLBACK_RE = /^port-\d+$/i;
+    const writeLabel = (k: string, value: string, conf: 1 | 2) => {
       const cur = siblingLldpPort.get(k);
       if (!cur || conf < cur.conf) siblingLldpPort.set(k, { value, conf });
     };
     for (const n of lldpRows) {
       if (!n.matchedAsset || !n.matchedAsset.id) continue;
       if (!siblingIds.has(n.matchedAsset.id)) continue;
-      if (n.localIfName) {
-        const conf: 1 | 3 = SYNTHETIC_FALLBACK_RE.test(n.localIfName) ? 3 : 1;
-        writeLabel(`${n.assetId}|${n.matchedAsset.id}`, n.localIfName, conf);
+      if (n.localIfName && !SYNTHETIC_FALLBACK_RE.test(n.localIfName)) {
+        writeLabel(`${n.assetId}|${n.matchedAsset.id}`, n.localIfName, 1);
       }
-      if (n.portId && n.portIdSubtype && PORT_ID_NAME_SUBTYPES.has(n.portIdSubtype)) {
+      if (n.portId && n.portIdSubtype && PORT_ID_NAME_SUBTYPES.has(n.portIdSubtype) &&
+          !SYNTHETIC_FALLBACK_RE.test(n.portId)) {
         writeLabel(`${n.matchedAsset.id}|${n.assetId}`, n.portId, 2);
       }
     }
@@ -1081,7 +1082,12 @@ router.get("/sites/:id/topology", async (req, res, next) => {
       lldpEdges.push({
         source: n.assetId,
         target: targetId,
-        label:  portLabel(n.localIfName, n.portId),
+        // Synthetic `port-<ifIndex>` local names (SNMP collector fallback)
+        // are not real ports — show "unknown" rather than a bogus number.
+        label:  portLabel(
+          n.localIfName && SYNTHETIC_FALLBACK_RE.test(n.localIfName) ? null : n.localIfName,
+          n.portId,
+        ),
         via:    "lldp",
         targetLabel,
         targetIsAsset,
@@ -1275,6 +1281,11 @@ router.get("/sites/:id/topology", async (req, res, next) => {
     }
     for (const n of lldpRows) {
       if (!n.matchedAsset?.id || !n.localIfName) continue;
+      // Synthetic `port-<ifIndex>` fallback names are not physical ports — a
+      // FortiSwitch physical interface is always `port<N>` (no hyphen).
+      // Treating one as a cable member would mint a phantom parallel line;
+      // skip it and let this side fall back to the CMDB trunk membership.
+      if (SYNTHETIC_FALLBACK_RE.test(n.localIfName)) continue;
       const key = switchSwitchPairKey(n.assetId, n.matchedAsset.id);
       if (!key || !pairIface.has(key)) continue; // enrich inferred pairs only
       addTo(pairLldp, key, n.assetId, membersOf(n.assetId, n.localIfName));
