@@ -2369,10 +2369,15 @@ function getAssetFormData() {
   var mon = document.getElementById("f-monitored");
   if (mon) {
     data.monitored = mon.checked;
-    // Default Credential field removed — per-stream credential pickers on each
-    // polling-method row are the right place for credentials. Clear any stale
-    // monitorCredentialId that may have been set before this change.
-    data.monitorCredentialId = null;
+    // monitorCredentialId is NOT sent from this modal. It is discovery-owned:
+    // buildClassMonitorStamp stamps the integration's per-class SNMP/SSH
+    // credential onto managed switches/APs, and the stream dispatchers use it
+    // as the asset-default credential. A previous "clear stale value" write
+    // here (`monitorCredentialId: null` on every save) silently wiped that
+    // stamp whenever an operator edited ANY field on the asset, downgrading
+    // its SNMP streams to the integration's top-level credential — usually
+    // the FortiGate's, which FortiLink switches don't answer — until the
+    // next discovery cycle restamped it.
     var ivEl = document.getElementById("f-monitorInterval");
     if (ivEl) {
       var iv = parseInt(ivEl.value, 10);
@@ -2412,16 +2417,27 @@ function getAssetFormData() {
       data.storagePolling      = polling.storagePolling;
     }
     // Per-stream credential overrides. Empty string → null (source default).
+    // A picker whose stream is on "Inherit" is left UNPOPULATED by
+    // refreshStreamCred (no options, hidden) — its .value reads "" even when
+    // the asset has a stored credential, so fall back to the data-current-id
+    // stamp rather than wiping the stored value on an unrelated save. A
+    // deliberate method change clears data-current-id first (see the change
+    // handler), so switching methods still drops a stale credential.
+    function credVal(el) {
+      if (!el) return undefined;
+      if (el.options.length === 0) return el.getAttribute("data-current-id") || null;
+      return el.value || null;
+    }
     var rtCredEl   = document.getElementById("f-responseTimeCredential");
     var telCredEl  = document.getElementById("f-cpuMemoryCredential");
     var tempCredEl = document.getElementById("f-temperatureCredential");
     var ifCredEl   = document.getElementById("f-interfacesCredential");
     var lldpCredEl = document.getElementById("f-lldpCredential");
-    data.responseTimeCredentialId = rtCredEl   ? (rtCredEl.value   || null) : undefined;
-    data.cpuMemoryCredentialId    = telCredEl  ? (telCredEl.value  || null) : undefined;
-    data.temperatureCredentialId  = tempCredEl ? (tempCredEl.value || null) : undefined;
-    data.interfacesCredentialId   = ifCredEl   ? (ifCredEl.value   || null) : undefined;
-    data.lldpCredentialId         = lldpCredEl ? (lldpCredEl.value || null) : undefined;
+    data.responseTimeCredentialId = credVal(rtCredEl);
+    data.cpuMemoryCredentialId    = credVal(telCredEl);
+    data.temperatureCredentialId  = credVal(tempCredEl);
+    data.interfacesCredentialId   = credVal(ifCredEl);
+    data.lldpCredentialId         = credVal(lldpCredEl);
     // Per-stream MIB overrides. Empty string → null (Automatic).
     var rtMibEl   = document.getElementById("f-responseTimeMib");
     var telMibEl  = document.getElementById("f-telemetryMib");
