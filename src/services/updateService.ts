@@ -136,6 +136,162 @@ export interface UpdateStatus {
   completedAt?: string;
   // When state === "disabled": human-readable hint on how to update outside the app.
   method?: string;
+  // Which update train this status reflects (nightly = branch tip, release =
+  // latest release tag). Stamped on every checkForUpdates result.
+  train?: UpdateTrain;
+  // Release train only: the release tag the status is measured against.
+  releaseTag?: string;
+  // Informational note surfaced in the UI (e.g. release train with no tags yet).
+  note?: string;
+}
+
+/**
+ * Update train selector.
+ *   - "nightly": track the tip of the update branch (every commit) — the
+ *     historical default behavior.
+ *   - "release": track the latest published release tag only, so operators on
+ *     the release train receive vetted, tagged builds instead of every commit.
+ * Persisted in the `update.train` Setting; defaults to "nightly".
+ */
+export type UpdateTrain = "nightly" | "release";
+
+export async function getUpdateTrain(): Promise<UpdateTrain> {
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: "update.train" } });
+    return row?.value === "release" ? "release" : "nightly";
+  } catch {
+    return "nightly";
+  }
+}
+
+export async function setUpdateTrain(train: UpdateTrain): Promise<void> {
+  const value: UpdateTrain = train === "release" ? "release" : "nightly";
+  await prisma.setting.upsert({
+    where: { key: "update.train" },
+    update: { value },
+    create: { key: "update.train", value },
+  });
+}
+
+/**
+ * Resolve the nightly-train comparison ref (the update branch tip): the first
+ * of origin/HEAD → origin/main → origin/master that exists. Avoids the inline
+ * `2>/dev/null || …` shell fallback chain (which doesn't behave on cmd.exe).
+ */
+async function resolveNightlyRef(): Promise<string> {
+  for (const r of ["origin/HEAD", "origin/main", "origin/master"]) {
+    try {
+      await execAsync(`git rev-parse --verify --quiet ${r}`, { cwd: APP_DIR, timeout: 10000 });
+      return r;
+    } catch {
+      // ref doesn't exist — try the next candidate
+    }
+  }
+  return "origin/HEAD";
+}
+
+/**
+ * The highest release tag by version sort, or null when none exist. A "release
+ * tag" is any tag beginning with a digit or `v`+digit (e.g. `v1.0.0`, `1.2`).
+ * The release train activates once the first such tag is published.
+ */
+async function latestReleaseTag(): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync(
+      `git tag --list --sort=-v:refname "v[0-9]*" "[0-9]*"`,
+      { cwd: APP_DIR, timeout: 10000 },
+    );
+    const tags = stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+    return tags[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when HEAD is not on a branch (e.g. checked out at a release tag). */
+async function isDetachedHead(): Promise<boolean> {
+  try {
+    const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", {
+      cwd: APP_DIR,
+      timeout: 10000,
+    });
+    return stdout.trim() === "HEAD";
+  } catch {
+    return false;
+  }
+}
+
+/** The default branch name (origin/HEAD → main → master), for returning to the
+ *  nightly train from a detached release checkout. */
+async function resolveDefaultBranch(): Promise<string> {
+  try {
+    const { stdout } = await execAsync("git rev-parse --abbrev-ref origin/HEAD", {
+      cwd: APP_DIR,
+      timeout: 10000,
+    });
+    const branch = stdout.trim().replace(/^origin\//, "");
+    if (branch && branch !== "HEAD") return branch;
+  } catch {
+    // fall through to the fixed candidates
+  }
+  for (const b of ["main", "master"]) {
+    try {
+      await execAsync(`git rev-parse --verify --quiet refs/heads/${b}`, {
+        cwd: APP_DIR,
+        timeout: 10000,
+      });
+      return b;
+    } catch {
+      // not a local branch — try next
+    }
+  }
+  return "main";
+}
+
+/**
+ * Compare the installed code (HEAD) against a target ref (a branch tip for
+ * nightly, a tag for release) and derive the version + change list. Avoids the
+ * `^{commit}` / `2>/dev/null` shell idioms that misbehave on cmd.exe.
+ */
+async function computeTargetInfo(ref: string): Promise<{
+  currentCommit: string;
+  latestCommit: string;
+  commitsBehind: number;
+  changes: string[];
+  version: string;
+}> {
+  const { stdout: localFull } = await execAsync("git rev-list -n 1 HEAD", { cwd: APP_DIR });
+  const currentCommit = localFull.trim().slice(0, 7);
+  const { stdout: remoteFull } = await execAsync(`git rev-list -n 1 ${ref}`, { cwd: APP_DIR });
+  const latestCommit = remoteFull.trim().slice(0, 7);
+
+  let commitsBehind = 0;
+  let changes: string[] = [];
+  if (currentCommit !== latestCommit) {
+    try {
+      const { stdout: behindStr } = await execAsync(`git rev-list --count HEAD..${ref}`, {
+        cwd: APP_DIR,
+      });
+      commitsBehind = parseInt(behindStr.trim(), 10) || 0;
+    } catch {}
+    try {
+      const { stdout: logStr } = await execAsync(`git log --oneline HEAD..${ref}`, {
+        cwd: APP_DIR,
+      });
+      changes = logStr.trim().split("\n").filter(Boolean);
+    } catch {}
+  }
+
+  let version = "unknown";
+  try {
+    const { stdout: pkg } = await execAsync(`git show ${ref}:package.json`, { cwd: APP_DIR });
+    const pkgVersion = JSON.parse(pkg).version || "0.9.0";
+    const [rMajor, rMinor] = pkgVersion.split(".");
+    const { stdout: count } = await execAsync(`git rev-list --count ${ref}`, { cwd: APP_DIR });
+    version = computeVersion(`${rMajor}.${rMinor}`, count.trim());
+  } catch {}
+
+  return { currentCommit, latestCommit, commitsBehind, changes, version };
 }
 
 let _status: UpdateStatus = { state: "idle" };
@@ -306,78 +462,67 @@ export async function checkForUpdates(): Promise<UpdateStatus> {
     _status = disabledStatus();
     return _status;
   }
-  _status = { state: "checking", currentVersion: readCurrentVersion() };
+  const train = await getUpdateTrain();
+  _status = { state: "checking", currentVersion: readCurrentVersion(), train };
 
   try {
     // Make sure origin points at the configured update repo (POLARIS_UPDATE_REPO)
-    // before fetching.
+    // before fetching. Fetch branches AND tags so both trains have fresh refs.
     await ensureUpdateRemote();
+    await execAsync("git fetch --all --tags --prune", { cwd: APP_DIR, timeout: 30000 });
 
-    // Fetch latest from remote
-    await execAsync("git fetch --all --prune", { cwd: APP_DIR, timeout: 30000 });
+    // Resolve the comparison target: the update branch tip (nightly) or the
+    // latest release tag (release).
+    let ref: string;
+    let releaseTag: string | undefined;
+    if (train === "release") {
+      const tag = await latestReleaseTag();
+      if (!tag) {
+        // Release train, but nothing tagged yet — report up-to-date with a note
+        // rather than an error. Activates automatically once a release is cut.
+        _status = {
+          state: "up-to-date",
+          currentVersion: readCurrentVersion(),
+          commitsBehind: 0,
+          train,
+          note:
+            "No published releases yet. The release train will offer an update " +
+            "once the first release is tagged.",
+        };
+        return _status;
+      }
+      ref = tag;
+      releaseTag = tag;
+    } else {
+      ref = await resolveNightlyRef();
+    }
 
-    // Get current commit
-    const { stdout: localHead } = await execAsync("git rev-parse --short HEAD", {
-      cwd: APP_DIR,
-    });
-    const currentCommit = localHead.trim();
+    const info = await computeTargetInfo(ref);
 
-    // Get remote HEAD commit
-    const { stdout: remoteHead } = await execAsync(
-      "git rev-parse --short origin/HEAD 2>/dev/null || git rev-parse --short origin/main 2>/dev/null || git rev-parse --short origin/master",
-      { cwd: APP_DIR }
-    );
-    const latestCommit = remoteHead.trim();
-
-    if (currentCommit === latestCommit) {
+    if (info.currentCommit === info.latestCommit) {
       _status = {
         state: "up-to-date",
         currentVersion: readCurrentVersion(),
-        currentCommit,
-        latestCommit,
+        currentCommit: info.currentCommit,
+        latestCommit: info.latestCommit,
+        latestVersion: info.version,
         commitsBehind: 0,
+        train,
+        releaseTag,
       };
       return _status;
     }
 
-    // Count commits behind
-    const { stdout: behindStr } = await execAsync(
-      `git rev-list --count HEAD..origin/HEAD 2>/dev/null || git rev-list --count HEAD..origin/main 2>/dev/null || git rev-list --count HEAD..origin/master`,
-      { cwd: APP_DIR }
-    );
-    const commitsBehind = parseInt(behindStr.trim(), 10) || 0;
-
-    // Get commit messages for changes
-    const { stdout: logStr } = await execAsync(
-      `git log --oneline HEAD..origin/HEAD 2>/dev/null || git log --oneline HEAD..origin/main 2>/dev/null || git log --oneline HEAD..origin/master`,
-      { cwd: APP_DIR }
-    );
-    const changes = logStr.trim().split("\n").filter(Boolean);
-
-    // Compute remote version: major.minor from remote package.json + remote commit count
-    let latestVersion = "unknown";
-    try {
-      const { stdout: remotePkg } = await execAsync(
-        `git show origin/HEAD:package.json 2>/dev/null || git show origin/main:package.json 2>/dev/null || git show origin/master:package.json`,
-        { cwd: APP_DIR }
-      );
-      const remotePkgVersion = JSON.parse(remotePkg).version || "0.9.0";
-      const [rMajor, rMinor] = remotePkgVersion.split(".");
-      const { stdout: remoteCount } = await execAsync(
-        `git rev-list --count origin/HEAD 2>/dev/null || git rev-list --count origin/main 2>/dev/null || git rev-list --count origin/master`,
-        { cwd: APP_DIR }
-      );
-      latestVersion = computeVersion(`${rMajor}.${rMinor}`, remoteCount.trim());
-    } catch {}
-
     _status = {
       state: "available",
       currentVersion: readCurrentVersion(),
-      latestVersion,
-      currentCommit,
-      latestCommit,
-      commitsBehind,
-      changes,
+      latestVersion: info.version,
+      currentCommit: info.currentCommit,
+      latestCommit: info.latestCommit,
+      commitsBehind: info.commitsBehind,
+      changes: info.changes,
+      train,
+      releaseTag,
     };
     return _status;
   } catch (err: any) {
@@ -385,6 +530,7 @@ export async function checkForUpdates(): Promise<UpdateStatus> {
       state: "failed",
       error: "Failed to check for updates: " + (err.message || String(err)),
       currentVersion: readCurrentVersion(),
+      train,
     };
     return _status;
   }
@@ -406,6 +552,7 @@ export async function applyUpdate(password?: string | null): Promise<void> {
   if (_applying) return;
   _applying = true;
 
+  const train = await getUpdateTrain();
   const connUrl = process.env.DATABASE_URL || "";
 
   const steps: NonNullable<UpdateStatus["steps"]> = [
@@ -553,13 +700,40 @@ export async function applyUpdate(password?: string | null): Promise<void> {
         cwd: APP_DIR,
         timeout: 10000,
       }).catch(() => {});
-      const { stdout } = await execAsync("git pull --ff-only", {
-        cwd: APP_DIR,
-        timeout: 60000,
-      });
-      setStep(1, "done", stdout.trim().split("\n").pop() || "Updated");
+      if (train === "release") {
+        // Release train: check out the latest release tag (detached HEAD).
+        // Moving HEAD in either direction is fine — an operator switching from
+        // nightly to release may be checking out an earlier tagged commit.
+        await execAsync("git fetch --all --tags --prune", {
+          cwd: APP_DIR,
+          timeout: 60000,
+        });
+        const tag = await latestReleaseTag();
+        if (!tag) {
+          failUpdate(1, "No release tags found — nothing to install on the release train.");
+          return;
+        }
+        await execAsync(`git checkout --detach ${tag}`, {
+          cwd: APP_DIR,
+          timeout: 60000,
+        });
+        setStep(1, "done", `Checked out release ${tag}`);
+      } else {
+        // Nightly train: fast-forward the current branch. If HEAD is detached
+        // (we were previously on the release train), return to the default
+        // branch first so `git pull` has an upstream to track.
+        if (await isDetachedHead()) {
+          const branch = await resolveDefaultBranch();
+          await execAsync(`git checkout ${branch}`, { cwd: APP_DIR, timeout: 30000 });
+        }
+        const { stdout } = await execAsync("git pull --ff-only", {
+          cwd: APP_DIR,
+          timeout: 60000,
+        });
+        setStep(1, "done", stdout.trim().split("\n").pop() || "Updated");
+      }
     } catch (err: any) {
-      failUpdate(1, "git pull failed: " + (err.stderr || err.message));
+      failUpdate(1, "git update failed: " + (err.stderr || err.message));
       return;
     }
 

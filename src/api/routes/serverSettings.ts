@@ -51,6 +51,8 @@ import {
   isUpdateMechanismAvailable,
   getRecentCommits,
   getUpdateRepoInfo,
+  getUpdateTrain,
+  setUpdateTrain,
   restartService,
 } from "../../services/updateService.js";
 import { getPublicUrlPort } from "../../utils/publicUrl.js";
@@ -1567,31 +1569,60 @@ router.post("/updates/dismiss", (_req, res) => {
 
 router.get("/updates/settings", async (_req, res, next) => {
   try {
-    const setting = await prisma.setting.findUnique({ where: { key: "update.skip_backup" } });
-    res.json({ skipBackup: setting?.value === true });
+    const [setting, train] = await Promise.all([
+      prisma.setting.findUnique({ where: { key: "update.skip_backup" } }),
+      getUpdateTrain(),
+    ]);
+    res.json({ skipBackup: setting?.value === true, train });
   } catch (err) {
     next(err);
   }
 });
 
+// PUT accepts either/both of { skipBackup, train } and updates only the keys
+// present, so the frontend can persist the backup checkbox and the train
+// dropdown independently without clobbering the other.
 router.put("/updates/settings", async (req, res, next) => {
   try {
-    const skipBackup = !!req.body?.skipBackup;
-    await prisma.setting.upsert({
-      where: { key: "update.skip_backup" },
-      update: { value: skipBackup },
-      create: { key: "update.skip_backup", value: skipBackup },
-    });
-    await logEvent({
-      level: skipBackup ? "warning" : "info",
-      action: "update.settings.changed",
-      resourceType: "setting",
-      resourceName: "update.skip_backup",
-      actor: req.session?.username,
-      message: `Pre-update backup ${skipBackup ? "DISABLED — updates will apply without a safety backup" : "enabled"}`,
-      details: { skipBackup },
-    });
-    res.json({ skipBackup });
+    const body = req.body || {};
+
+    if ("skipBackup" in body) {
+      const skipBackup = !!body.skipBackup;
+      await prisma.setting.upsert({
+        where: { key: "update.skip_backup" },
+        update: { value: skipBackup },
+        create: { key: "update.skip_backup", value: skipBackup },
+      });
+      await logEvent({
+        level: skipBackup ? "warning" : "info",
+        action: "update.settings.changed",
+        resourceType: "setting",
+        resourceName: "update.skip_backup",
+        actor: req.session?.username,
+        message: `Pre-update backup ${skipBackup ? "DISABLED — updates will apply without a safety backup" : "enabled"}`,
+        details: { skipBackup },
+      });
+    }
+
+    if ("train" in body) {
+      const train: "nightly" | "release" = body.train === "release" ? "release" : "nightly";
+      await setUpdateTrain(train);
+      await logEvent({
+        level: "info",
+        action: "update.settings.changed",
+        resourceType: "setting",
+        resourceName: "update.train",
+        actor: req.session?.username,
+        message: `Update train set to "${train}" (${train === "release" ? "published releases only" : "latest commits"})`,
+        details: { train },
+      });
+    }
+
+    const [setting, train] = await Promise.all([
+      prisma.setting.findUnique({ where: { key: "update.skip_backup" } }),
+      getUpdateTrain(),
+    ]);
+    res.json({ skipBackup: setting?.value === true, train });
   } catch (err) {
     next(err);
   }
