@@ -420,13 +420,23 @@ const FortinetClassMonitorSchema = z.object({
 //
 // `pullSnmpLocation` (off by default) opts the integration into pulling
 // SNMP sysLocation (OID 1.3.6.1.2.1.1.6.0) from each managed FortiGate
-// during discovery, surfacing it on `Asset.snmpLocation` and feeding the
-// geocoder fallback in syncDhcpSubnets Phase 11.5. Uses the resolved
+// during discovery, surfacing it on `Asset.snmpLocation` (General tab +
+// the asset edit modal's Location prefill). Uses the resolved
 // integration-tier monitoring SNMP credential.
 //
-// `pushGeocodedCoords` (off by default; UI-disabled when `pullSnmpLocation`
-// is off) writes the geocoded lat/lng back to the FortiGate when the SNMP
-// fallback path landed coords. FMG mode writes to BOTH the per-device
+// `useSnmpLocationCoords` (off by default; requires `pullSnmpLocation`)
+// additionally geocodes the pulled sysLocation via Nominatim and uses the
+// result as the FortiGate's map position. Geocoded coords are projection
+// tier-1 — they OVERRIDE coordinates learned from the device (FMG metavars
+// and CMDB gui-device-latitude/longitude), which is why this is a separate
+// opt-in from the pull itself. (Pre-2026-07 builds geocoded implicitly
+// whenever the pull was on; installs relying on that behavior must enable
+// this toggle after updating.) The FMG-only `addressMetavar` geocode path
+// is independent of this toggle.
+//
+// `pushGeocodedCoords` (off by default; UI-disabled when no geocode source
+// is active) writes the geocoded lat/lng back to the FortiGate when the
+// geocode path landed coords. FMG mode writes to BOTH the per-device
 // metavars (named by `latitudeMetavar` / `longitudeMetavar`, defaulting to
 // `Latitude` / `Longitude`) AND the CMDB `gui-device-latitude` /
 // `gui-device-longitude` fields. Standalone FortiGate writes CMDB only.
@@ -448,6 +458,7 @@ const FortiGateClassMonitorSchema = z.object({
   addAsMonitored:        z.boolean().optional().default(false),
   autoMonitorInterfaces: AutoMonitorInterfacesSchema,
   pullSnmpLocation:      z.boolean().optional().default(false),
+  useSnmpLocationCoords: z.boolean().optional().default(false),
   pushGeocodedCoords:    z.boolean().optional().default(false),
   latitudeMetavar:       MetavarName("Latitude"),
   longitudeMetavar:      MetavarName("Longitude"),
@@ -457,6 +468,7 @@ const FortiGateClassMonitorSchema = z.object({
   addAsMonitored: false,
   autoMonitorInterfaces: null,
   pullSnmpLocation: false,
+  useSnmpLocationCoords: false,
   pushGeocodedCoords: false,
   latitudeMetavar: "Latitude",
   longitudeMetavar: "Longitude",
@@ -3129,10 +3141,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   let switchMonitorCfg: ClassMonCfg = emptyClassCfg;
   let apMonitorCfg:     ClassMonCfg = emptyClassCfg;
   let fortigateAddAsMonitored = false;
-  // FortiGate-only: SNMP sysLocation read + geocoded-coords write-back toggles.
-  // Stashed here so the Phase 3 firewall fan-out can pull / push without
-  // re-reading the integration config per device. Both default to off.
+  // FortiGate-only: SNMP sysLocation read, sysLocation→coords geocode, and
+  // geocoded-coords write-back toggles. Stashed here so the Phase 3 firewall
+  // fan-out can pull / push without re-reading the integration config per
+  // device. All default to off.
   let pullSnmpLocation = false;
+  let useSnmpLocationCoords = false;
   let pushGeocodedCoords = false;
   // FMG metavar names used by the coord read (extractMetavarCoordsFromFmgDevice,
   // upstream in discovery) + write-back (pushCoordsToFortigate). Lat/Long default
@@ -3178,6 +3192,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     };
     fortigateAddAsMonitored = fg.addAsMonitored === true;
     pullSnmpLocation        = fg.pullSnmpLocation === true;
+    useSnmpLocationCoords   = fg.useSnmpLocationCoords === true;
     pushGeocodedCoords      = fg.pushGeocodedCoords === true;
     latitudeMetavar         = (typeof fg.latitudeMetavar === "string" && fg.latitudeMetavar.trim()) || "Latitude";
     longitudeMetavar        = (typeof fg.longitudeMetavar === "string" && fg.longitudeMetavar.trim()) || "Longitude";
@@ -3719,9 +3734,16 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           syncLog("error", `${fgHostname}: SNMP location pull threw — ${err?.message || "Unknown error"}`);
         }
       }
-      // Geocode source: address metavar wins; SNMP sysLocation is the fallback.
-      const geoString = addressMetavarValue || devSnmpLocation || "";
-      const geoSource = addressMetavarValue ? "address-metavar" : (devSnmpLocation ? "snmp" : null);
+      // Geocode source: address metavar wins; SNMP sysLocation is the
+      // fallback ONLY when the operator opted into sysLocation-derived
+      // coordinates (useSnmpLocationCoords) — the geocoded pair is
+      // projection tier-1 and would otherwise silently override coords
+      // learned from the device. With the toggle off, sysLocation is still
+      // pulled + stored for display (Asset.snmpLocation) but never drives
+      // the map pin.
+      const snmpGeoCandidate = useSnmpLocationCoords ? (devSnmpLocation || "") : "";
+      const geoString = addressMetavarValue || snmpGeoCandidate;
+      const geoSource = addressMetavarValue ? "address-metavar" : (snmpGeoCandidate ? "snmp" : null);
       if (geoString) {
         try {
           const geo = await geocode(geoString);
