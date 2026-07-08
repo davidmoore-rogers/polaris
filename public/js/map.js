@@ -509,27 +509,52 @@
     });
     // When the browser exits fullscreen via Esc / OS gesture, drop the
     // fullscreen class so the modal styling reverts cleanly.
-    document.addEventListener("fullscreenchange", function () {
+    var onFullscreenChange = function () {
       var modal = overlay && overlay.querySelector(".modal");
-      if (!document.fullscreenElement && modal) modal.classList.remove("topology-fullscreen");
+      var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+      if (!fsEl && modal) modal.classList.remove("topology-fullscreen");
       // Cytoscape needs a resize hint when the container size changes.
       if (cyInstance) { try { cyInstance.resize(); cyInstance.fit(undefined, 30); } catch (e) {} }
-    });
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", onFullscreenChange);
   }
 
-  // Toggle native browser fullscreen on the topology modal element. Falls
-  // back to a CSS-driven "occupy the whole viewport" mode when the
-  // Fullscreen API isn't available (older Safari / iframe contexts).
+  // Toggle native browser fullscreen for the topology modal. Fullscreen is
+  // requested on the DOCUMENT root, not the modal element: a native-fullscreen
+  // element paints above everything outside its own subtree, which buried the
+  // asset details slide-over (a document.body child, z-index 1050) whenever a
+  // node was opened from a fullscreened topology. With the whole document
+  // fullscreen, normal z-index stacking applies and body-parented layers
+  // (slide-overs, nested drilldowns, confirm modals, toasts) sit on top; the
+  // topology-fullscreen class makes the modal fill the viewport. Falls back to
+  // the CSS class alone when the Fullscreen API is unavailable or denied
+  // (older Safari / iframe contexts).
   function toggleFullscreenTopology() {
     var overlay = document.getElementById("topology-overlay");
     var modal = overlay && overlay.querySelector(".modal");
     if (!modal) return;
-    var nativeAvailable = !!(modal.requestFullscreen || modal.webkitRequestFullscreen);
+    var root = document.documentElement;
+    var nativeAvailable = !!(root.requestFullscreen || root.webkitRequestFullscreen);
+    var cssToggleOff = function () {
+      modal.classList.remove("topology-fullscreen");
+      if (cyInstance) { try { cyInstance.resize(); cyInstance.fit(undefined, 30); } catch (e) {} }
+    };
     if (nativeAvailable) {
-      if (document.fullscreenElement) {
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        // The fullscreenchange handler drops the class + resizes cytoscape.
         (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      } else if (modal.classList.contains("topology-fullscreen")) {
+        // A prior native request was denied and we're in CSS-only fullscreen.
+        cssToggleOff();
       } else {
-        (modal.requestFullscreen || modal.webkitRequestFullscreen).call(modal);
+        modal.classList.add("topology-fullscreen");
+        var p;
+        try { p = (root.requestFullscreen || root.webkitRequestFullscreen).call(root); } catch (e) {}
+        // Denied (e.g. no user-activation, iframe policy) → the class alone
+        // still gives the CSS viewport-filling mode.
+        if (p && typeof p.catch === "function") p.catch(function () {});
+        if (cyInstance) { try { cyInstance.resize(); cyInstance.fit(undefined, 30); } catch (e) {} }
       }
     } else {
       modal.classList.toggle("topology-fullscreen");
