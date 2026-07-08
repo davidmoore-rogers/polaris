@@ -172,8 +172,8 @@ export async function createReservation(input: CreateReservationInput) {
       : (input.hostname || input.ipAddress),
     actor: input.createdBy,
     message: input.via === "auto-allocate"
-      ? `Reservation auto-allocated for ${reservation.ipAddress} (${input.owner || "no owner"})${pushedSuffix}`
-      : `Reservation created for ${input.ipAddress || "subnet"} (${input.owner})${pushedSuffix}`,
+      ? `Reservation auto-allocated for ${reservation.ipAddress} (${reservation.owner || "no owner"})${pushedSuffix}`
+      : `Reservation created for ${input.ipAddress || "subnet"} (${reservation.owner || "no owner"})${pushedSuffix}`,
   });
   return reservation;
 }
@@ -300,13 +300,17 @@ async function createReservationFlow(input: CreateReservationInput) {
     await releaseSupersededDhcpLeaseAt(input.subnetId, input.ipAddress, input.createdBy ?? null);
   }
   const macClean = input.macAddress ? normalizeMac(input.macAddress) : null;
+  // Auto-stamp owner with the creator's username when they didn't type one —
+  // mirrors updateReservation's actor auto-stamp so a freshly created row
+  // shows who claimed the IP instead of an empty Owner cell.
+  const resolvedOwner = input.owner || input.createdBy || null;
   const reservation = await prisma.$transaction(async (tx) => {
     const res = await tx.reservation.create({
       data: {
         subnetId: input.subnetId,
         ipAddress: input.ipAddress ?? null,
         hostname: input.hostname,
-        owner: input.owner || null,
+        owner: resolvedOwner,
         projectRef: input.projectRef || null,
         expiresAt: input.expiresAt,
         notes: input.notes,
