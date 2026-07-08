@@ -58,6 +58,29 @@ d("POST /api/v1/reservations", () => {
     expect(resp.body.sourceType).toBe("manual");
   });
 
+  it("auto-stamps owner with the creator's username when owner is omitted", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.15.0.0/16", "10.15.1.0/24");
+    const resp = await agent
+      .post("/api/v1/reservations")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, ipAddress: "10.15.1.5", hostname: "host-noowner" });
+    expect(resp.status).toBe(201);
+    expect(resp.body.owner).toBe("polaris-integration-tester");
+    expect(resp.body.createdBy).toBe("polaris-integration-tester");
+  });
+
+  it("keeps an explicitly typed owner instead of auto-stamping", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.16.0.0/16", "10.16.1.0/24");
+    const resp = await agent
+      .post("/api/v1/reservations")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, ipAddress: "10.16.1.5", hostname: "host-owned", owner: "platform-team" });
+    expect(resp.status).toBe(201);
+    expect(resp.body.owner).toBe("platform-team");
+  });
+
   it("creates a full-subnet reservation and marks subnet as reserved", async () => {
     const { agent, csrf } = await authedAgent(app);
     const { subnet } = await scaffold(agent, csrf, "10.20.0.0/16", "10.20.1.0/24");
