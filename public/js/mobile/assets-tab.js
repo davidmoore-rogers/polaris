@@ -225,6 +225,8 @@
 
   function monitorDotCls(a) {
     if (!a.monitored) return "";
+    // Suppression outranks the probe state — matches desktop assetMonitorBadge.
+    if (a.dependencySuppressed) return "dep-down";
     switch (a.monitorStatus) {
       case "up":      return "up";
       case "down":    return "down";
@@ -234,6 +236,7 @@
   }
   function monitorTitle(a) {
     if (!a.monitored) return "Unmonitored";
+    if (a.dependencySuppressed)        return "Dep. Down — upstream parent is down";
     if (a.monitorStatus === "up")      return "Up — last RTT " + (a.lastResponseTimeMs != null ? a.lastResponseTimeMs + " ms" : "n/a");
     if (a.monitorStatus === "down")    return "Down";
     if (a.monitorStatus === "unknown") return "No samples yet";

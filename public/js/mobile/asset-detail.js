@@ -1500,7 +1500,8 @@
   // ─── helpers ───────────────────────────────────────────────────────────
   function monitorDotCls(asset) {
     if (!asset.monitored) return "";
-    if (asset.dependencySuppressed && asset.monitorStatus !== "down") return "dep-down";
+    // Suppression outranks the probe state — matches desktop assetMonitorBadge.
+    if (asset.dependencySuppressed) return "dep-down";
     switch (asset.monitorStatus) {
       case "up": return "up";
       case "down": return "down";
@@ -1511,7 +1512,7 @@
 
   function renderMonitorPill(asset) {
     if (!asset.monitored) return '<span class="status-pill unk">Unmonitored</span>';
-    if (asset.dependencySuppressed && asset.monitorStatus !== "down") {
+    if (asset.dependencySuppressed) {
       var layerBit = (asset.dependencyLayer != null) ? " (Layer " + asset.dependencyLayer + ")" : "";
       return '<span class="status-pill dep-down"><span class="dot dep-down"></span>Dep. Down' + layerBit + '</span>';
     }
@@ -1527,7 +1528,12 @@
   function monitorPillSubtext(asset) {
     if (!asset.monitored) return "";
     var bits = [];
-    if (asset.dependencySuppressed && asset.monitorStatus !== "down") bits.push("upstream parent down");
+    if (asset.dependencySuppressed) {
+      bits.push("upstream parent down");
+      // The pill hides the five-state label while suppressed; keep the own-probe
+      // outcome discoverable in the subtext.
+      if (asset.monitorStatus) bits.push("own probe " + asset.monitorStatus);
+    }
     if (asset.responseTimePolling) bits.push(asset.responseTimePolling);
     if (asset.lastMonitorAt) bits.push("last poll " + formatTimeAgo(asset.lastMonitorAt));
     return bits.join(" · ");

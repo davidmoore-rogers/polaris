@@ -538,6 +538,11 @@ async function fetchAssetsPage() {
       // row value is an array.
       if (!a.monitored) {
         a._monitor = ["Unmonitored"];
+      } else if (a.dependencySuppressed) {
+        // Dependency-suppressed outranks the five-state label, matching the
+        // Status pill in assetMonitorBadge: the chip is "Dep. Down" whether
+        // or not the asset's own probe is also failing.
+        a._monitor = ["Monitored", "Dep. Down"];
       } else if (a.monitorStatus === "up") {
         a._monitor = ["Monitored", "Up"];
       } else if (a.monitorStatus === "warning") {
@@ -2104,6 +2109,7 @@ function assetStatusBadge(asset) {
 //   monitored=true, status="recovering"      → blue   "Recovering"  (was down, now succeeding; below threshold)
 //   monitored=true, status="down"            → red    "Down"
 //   monitored=true, status="unknown"/null    → blue   "Pending"     (never probed — same blue treatment as "Recovering" but a different label)
+//   monitored=true, dependencySuppressed     → slate  "Dep. Down"   (upstream parent down; outranks all five states — own probe state in the tooltip)
 //
 // For admin/assetsadmin callers the pill is clickable: a single click
 // toggles monitored. The server recomputes `monitorOverride` against the
@@ -2143,13 +2149,15 @@ function assetMonitorBadge(asset) {
     return '<span class="badge badge-monitor-dep-test"' + dtTitle + '>Dependency Test</span>';
   }
   // Dependency-suppressed takes precedence over the five-state machine
-  // label. The asset's own probe may still be succeeding (redundant L3
-  // path / out-of-band management) — that's why monitorStatus AND
-  // dependencySuppressed are separate columns. Down + suppressed shows
-  // "Down" since the probe proves it; otherwise "Dep. Down" with the
-  // level in the tooltip.
-  if (asset.dependencySuppressed && s !== "down") {
+  // label: when the upstream parent is down the pill reads "Dep. Down"
+  // whether the asset's own probe is failing (the usual case) or still
+  // succeeding through a redundant L3 path / out-of-band management —
+  // that's why monitorStatus AND dependencySuppressed are separate
+  // columns. The underlying probe state goes in the tooltip so it stays
+  // discoverable.
+  if (asset.dependencySuppressed) {
     var depBits = bits.slice();
+    depBits.unshift("Own probe: " + s);
     if (asset.dependencyLayer != null) depBits.unshift("Level " + asset.dependencyLayer + " — upstream parent is down");
     else                                depBits.unshift("Upstream dependency is down");
     var depTitle = ' title="' + escapeHtml(depBits.join("\n")) + '"';

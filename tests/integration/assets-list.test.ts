@@ -7,7 +7,7 @@
  * tests/integration/events.test.ts). Covers:
  *   - pagination (limit / offset / total)
  *   - multi-value enum filters: status, assetType (CSV)
- *   - the `_monitor` synthetic filter (Monitored / Unmonitored / Down)
+ *   - the `_monitor` synthetic filter (Monitored / Unmonitored / Down / Dep. Down)
  *   - operator-aware text filters (hostname contains / not_contains; empty)
  *   - the `_server` filter spanning location + learnedLocation
  *   - sort whitelist + 400 on an unknown sortBy
@@ -181,6 +181,35 @@ d("GET /api/v1/assets — monitor filter", () => {
     expect(resp.status).toBe(200);
     // beta (down) + delta + epsilon (unmonitored) = 3.
     expect(resp.body.total).toBe(3);
+  });
+
+  it("Dep. Down returns suppressed rows; directional chips exclude them", async () => {
+    await seedAssets();
+    // Suppressed + probe-down: the common case for a child behind a down
+    // parent. Its pill reads "Dep. Down", so it must filter under that chip
+    // and NOT under "Down".
+    await prisma.asset.create({
+      data: {
+        hostname: "eta-ap", assetType: "access_point", status: "active",
+        monitored: true, monitorStatus: "down", dependencySuppressed: true,
+        lastSeen: new Date(),
+      },
+    });
+    const { agent } = await authedAgent(app);
+
+    const dep = await agent.get("/api/v1/assets?monitor=" + encodeURIComponent("Dep. Down"));
+    expect(dep.status).toBe(200);
+    expect(dep.body.total).toBe(1);
+    expect(dep.body.assets[0].hostname).toBe("eta-ap");
+
+    const down = await agent.get("/api/v1/assets?monitor=Down");
+    expect(down.status).toBe(200);
+    expect(down.body.total).toBe(1);
+    expect(down.body.assets[0].hostname).toBe("beta-sw");
+
+    // "Monitored" is direction-agnostic and still includes the suppressed row.
+    const mon = await agent.get("/api/v1/assets?monitor=Monitored");
+    expect(mon.body.total).toBe(5);
   });
 });
 

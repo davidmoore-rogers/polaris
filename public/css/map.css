@@ -569,18 +569,18 @@
 }
 #topology-edge-tooltip.visible { display: block; }
 
-/* Topology fullscreen — covers BOTH the native Fullscreen API (`:fullscreen`
-   pseudo-class on the .modal element) AND the CSS-class fallback for older
-   browsers (`.modal.topology-fullscreen`). Without these overrides, the
-   base .modal rules (max-width: min(92vw, 1360px), max-height: 85vh) and
-   the topology-layout height (80vh) keep the modal capped to its windowed
-   size even when the browser swaps to fullscreen, leaving black bars
-   around it.
+/* Topology fullscreen — the .topology-fullscreen class drives the viewport-
+   filling layout in BOTH modes: native fullscreen (requested on the document
+   root — never on the modal element, so body-parented layers like the asset
+   details slide-over keep stacking above it; see toggleFullscreenTopology in
+   map.js) and the CSS-only fallback when the Fullscreen API is unavailable
+   or denied. Without these overrides, the base .modal rules
+   (max-width: min(92vw, 1360px), max-height: 85vh) and the topology-layout
+   height (80vh) keep the modal capped to its windowed size even when the
+   browser swaps to fullscreen, leaving black bars around it.
 
    Padded with the modal-xl selector to win specificity against
    `.modal.modal-xl { width: min(92vw, 1360px); }`. */
-.modal:fullscreen,
-.modal.modal-xl:fullscreen,
 .modal.topology-fullscreen,
 .modal.modal-xl.topology-fullscreen {
   position: fixed;
@@ -591,12 +591,10 @@
   max-height: none;
   border-radius: 0;
 }
-.modal:fullscreen .modal-body,
 .modal.topology-fullscreen .modal-body {
   flex: 1 1 auto;
   min-height: 0;
 }
-.modal:fullscreen .topology-layout,
 .modal.topology-fullscreen .topology-layout {
   height: 100%;
   min-height: 0;

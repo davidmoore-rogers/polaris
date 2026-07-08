@@ -2407,7 +2407,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
  * Compact vertical tree: parents above the current asset, children below. The
  * current asset is rendered bold and unclickable; everything else is a
  * clickable hostname that pivots openViewModal to that asset. Status pip on
- * each row mirrors the Status pill priority (probe-down > dep-down > five-
+ * each row mirrors the Status pill priority (dep-test > dep-down > five-
  * state machine). */
 .dep-tree-block {
   margin: 0 0 14px 0;
