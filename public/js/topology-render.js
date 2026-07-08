@@ -30,11 +30,12 @@
 
   // Color a Fortinet-infrastructure node (FortiGate, FortiSwitch, FortiAP)
   // from its monitor health. Same priority as the asset list Status pill:
-  // confirmed-down probe wins over the dependency-suppression flag, so a
-  // suppressed-but-actually-down node still renders red.
+  // the dependency-suppression flag wins over the probe-derived health, so a
+  // suppressed node renders gray ("Dep. Down") even when its own probe is
+  // also failing — on the topology graph the down parent is the red node.
   function fortinetNodeColor(asset) {
     if (!asset || !asset.monitored) return HEALTH_NODE_COLORS.unmonitored;
-    if (asset.dependencySuppressed && asset.monitorHealth !== "down") return HEALTH_NODE_COLORS.unknown; // Dep. Down (upstream parent offline)
+    if (asset.dependencySuppressed) return HEALTH_NODE_COLORS.unknown; // Dep. Down (upstream parent offline)
     switch (asset.monitorHealth) {
       case "up":       return HEALTH_NODE_COLORS.up;
       case "degraded": return HEALTH_NODE_COLORS.degraded;

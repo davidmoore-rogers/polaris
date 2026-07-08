@@ -442,19 +442,24 @@ function buildServerFilter(
 /**
  * Translate one `_monitor` synthetic-column chip into a where fragment. Mirrors
  * the client's `_mapAsset` mapping: "Monitored"/"Unmonitored" gate on the
- * `monitored` flag; the directional chips additionally pin monitorStatus;
- * "Pending" is everything monitored that hasn't landed a directional status
- * yet. Multiple selected chips are OR-ed by the caller.
+ * `monitored` flag; "Dep. Down" is every dependency-suppressed monitored row
+ * (regardless of the underlying probe state — matches the Status pill, which
+ * gives suppression precedence over the five-state machine); the directional
+ * chips pin monitorStatus and exclude suppressed rows so a row filters under
+ * exactly the label its pill shows; "Pending" is everything monitored that
+ * hasn't landed a directional status yet. Multiple selected chips are OR-ed
+ * by the caller.
  */
 function monitorClause(v: string): Record<string, unknown> | null {
   switch (v) {
     case "Unmonitored": return { monitored: false };
     case "Monitored":   return { monitored: true };
-    case "Up":          return { monitored: true, monitorStatus: "up" };
-    case "Warning":     return { monitored: true, monitorStatus: "warning" };
-    case "Down":        return { monitored: true, monitorStatus: "down" };
-    case "Recovering":  return { monitored: true, monitorStatus: "recovering" };
-    case "Pending":     return { monitored: true, monitorStatus: { notIn: ["up", "warning", "down", "recovering"] } };
+    case "Dep. Down":   return { monitored: true, dependencySuppressed: true };
+    case "Up":          return { monitored: true, dependencySuppressed: false, monitorStatus: "up" };
+    case "Warning":     return { monitored: true, dependencySuppressed: false, monitorStatus: "warning" };
+    case "Down":        return { monitored: true, dependencySuppressed: false, monitorStatus: "down" };
+    case "Recovering":  return { monitored: true, dependencySuppressed: false, monitorStatus: "recovering" };
+    case "Pending":     return { monitored: true, dependencySuppressed: false, monitorStatus: { notIn: ["up", "warning", "down", "recovering"] } };
     default:            return null;
   }
 }

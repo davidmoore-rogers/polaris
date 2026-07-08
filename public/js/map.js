@@ -248,13 +248,15 @@
       var s = children[i]._site;
       if (!s || !s.monitored) continue;
       sawMonitored = true;
+      // Suppressed sites contribute dep-down regardless of their own probe
+      // health — matches the per-site marker and the assets-list pill.
+      if (s.dependencySuppressed) { sawDepDown = true; continue; }
       if (s.monitorHealth === "down") { worst = "down"; break; }
       if (s.monitorHealth === "degraded" && worst !== "down") worst = "degraded";
-      if (s.dependencySuppressed && s.monitorHealth !== "down") sawDepDown = true;
     }
-    // Probe-down/degraded wins over dep-down — those are real failures we
-    // observed directly. A cluster where every monitored child is healthy
-    // but some are dep-down rolls up to dep-down.
+    // Non-suppressed probe-down/degraded wins over dep-down — those are real
+    // independent failures. A cluster where every monitored child is healthy
+    // or dep-down rolls up to dep-down.
     var cls;
     if (!sawMonitored)               cls = "monitor-unmonitored";
     else if (worst !== "up")         cls = "monitor-" + worst;
@@ -330,12 +332,11 @@
 
   function monitorClass(site) {
     if (!site.monitored) return "monitor-unmonitored";
-    // Dependency suppression takes precedence over the probe-derived health
-    // when the asset's own probe is succeeding through a redundant path
-    // (suppressed but health still "up"). When the probe itself shows
-    // "down", that's the real state and we render red — see assetMonitorBadge
-    // for the matching priority on the assets list.
-    if (site.dependencySuppressed && site.monitorHealth !== "down") return "monitor-dep-down";
+    // Dependency suppression takes precedence over the probe-derived health,
+    // whether the site's own probe is failing (the usual case behind a down
+    // parent) or still succeeding through a redundant path — see
+    // assetMonitorBadge for the matching priority on the assets list.
+    if (site.dependencySuppressed) return "monitor-dep-down";
     switch (site.monitorHealth) {
       case "up":       return "monitor-up";
       case "degraded": return "monitor-degraded";
@@ -348,7 +349,7 @@
     if (!site.monitored) return "Unmonitored";
     var samples = site.monitorRecentSamples || 0;
     var failures = site.monitorRecentFailures || 0;
-    if (site.dependencySuppressed && site.monitorHealth !== "down") {
+    if (site.dependencySuppressed) {
       var layerHint = (site.dependencyLayer != null) ? " (Layer " + site.dependencyLayer + ")" : "";
       return "Dependency down — upstream parent is offline" + layerHint;
     }
