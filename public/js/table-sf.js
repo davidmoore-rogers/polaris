@@ -812,7 +812,11 @@ function setupColumnLayout(tableEl, options) {
   ths.forEach(function (th, i) {
     if (!isResizableCol(colIds[i])) return;        // utility + static-width columns get no handle
     if (th.querySelector(".sf-resize-handle")) return;
-    if (!th.style.position) th.style.position = "relative";
+    // Only force a positioning context when the th has none. Setting inline
+    // position:relative on a th whose stylesheet says position:sticky would
+    // kill the sticky header (ip-panel); sticky is itself a containing block
+    // for the absolute resize handle, so it needs no override.
+    if (getComputedStyle(th).position === "static") th.style.position = "relative";
     var handle = document.createElement("span");
     handle.className = "sf-resize-handle";
     handle.title = "Drag to resize";
@@ -913,7 +917,8 @@ function setupColumnLayout(tableEl, options) {
     for (var i = ths.length - 1; i >= 0; i--) {
       if (!hidden[colIds[i]]) {
         if (ths[i] !== gearWrap.parentNode) {
-          if (!ths[i].style.position) ths[i].style.position = "relative";
+          // Same sticky-preserving guard as the resize handles above.
+          if (getComputedStyle(ths[i]).position === "static") ths[i].style.position = "relative";
           ths[i].appendChild(gearWrap);
         }
         return;
