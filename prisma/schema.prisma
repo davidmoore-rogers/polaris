@@ -171,7 +171,16 @@ model Reservation {
   // job won't re-fire forever, until an admin explicitly un-ignores. Unlike
   // snooze, this flag is NOT cleared by discovery seeing the IP active
   // again; the operator's intent is durable across online/offline cycles.
+  // lastSeenArp is bumped by the discovery sync when the FortiGate's ARP
+  // table shows this reservation's IP bound to this reservation's MAC —
+  // minutes-fresh L2 evidence the device is alive even when it never pulls
+  // a lease (statically-configured) and firewalls ICMP. The opt-in
+  // `arpPresenceSweep` integration toggle actively primes the gate's ARP
+  // cache (fire-and-forget UDP at each reserved IP) right before the table
+  // read so quiet devices show up too; without the sweep the stamp still
+  // lands whenever ordinary traffic put the binding in the table.
   lastSeenLeased    DateTime?
+  lastSeenArp       DateTime?
   staleNotifiedAt   DateTime?
   staleSnoozedUntil DateTime?
   staleIgnored      Boolean   @default(false)

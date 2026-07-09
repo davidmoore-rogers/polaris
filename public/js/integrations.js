@@ -777,8 +777,13 @@ function calloutHTML(variant, title, bodyHtml) {
 //
 // `pushReservations` is the current toggle value; `useProxy` is the current
 // transport setting on the General tab (we read it at render time only).
-function reservationPushFormHTML(pushReservations, useProxy) {
+// `arpPresenceSweep` is the read-only ARP presence-sweep toggle rendered as
+// its own Stale Detection section at the bottom of the tab (stored in
+// integration.config.arpPresenceSweep, read on save by
+// _readArpPresenceSweepToggle()).
+function reservationPushFormHTML(pushReservations, useProxy, arpPresenceSweep) {
   var checked = pushReservations === true ? "checked" : "";
+  var arpChecked = arpPresenceSweep === true ? "checked" : "";
   var modeLabel = (useProxy === false)
     ? "Direct to each FortiGate"
     : "Proxy through FortiManager to each FortiGate";
@@ -816,7 +821,30 @@ function reservationPushFormHTML(pushReservations, useProxy) {
       '</ul>' +
       calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for DHCP reservations. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. A compromised Polaris API token could in principle modify other device-level config &mdash; interfaces, routing, other DHCP scopes &mdash; not just the reservations Polaris pushes. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.") +
       calloutHTML("tip", "Tighter scope alternative", "For tighter scope, switch to direct mode (uncheck <em>Query each FortiGate directly (bypass FortiManager proxy)</em> on the Settings tab) and configure a per-FortiGate REST API admin with <strong>Network &rarr; Custom &rarr; Configuration</strong> set to Read/Write. This scopes write access to one FortiGate's network-configuration bucket instead of every CMDB tree on every device in the ADOM.") +
+    '</section>' +
+    '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
+    '<section>' +
+      '<h4 style="margin:0 0 0.25rem 0">Stale Detection &mdash; ARP Presence Sweep</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">Improves stale-reservation detection for devices that never pull a lease (statically configured) or don\'t answer ping. Read-only on the device &mdash; nothing is written to the FortiGate.</p>' +
+      '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
+        '<input type="checkbox" id="f-arpPresenceSweep" ' + arpChecked + ' style="width:auto">' +
+        '<label for="f-arpPresenceSweep" style="margin:0">Probe reserved IPs before reading the ARP table</label>' +
+      '</div>' +
+      '<ul class="hint" style="margin:0.25rem 0 0 1.2rem;padding:0">' +
+        '<li><strong>How it works.</strong> Right before each discovery cycle reads a FortiGate\'s ARP table, Polaris sends one fire-and-forget UDP packet to every active DHCP-reservation IP on that gate\'s subnets. Delivering the packet forces the FortiGate to ARP-resolve the target, and any live device answers ARP &mdash; even when it firewalls ICMP. A resolved entry matching the reserved MAC stamps the reservation as seen, keeping it out of the stale Alerts list.</li>' +
+        '<li><strong>Reach &amp; policy.</strong> Only effective where Polaris can route to the subnet and firewall policy permits the traffic (UDP to port 33434). Where it can\'t, the sweep silently does nothing &mdash; a missing ARP entry is never treated as proof a device is gone.</li>' +
+        '<li><strong>Visibility.</strong> The sweep is a small paced packet burst per gate, per discovery cycle. If you run IDS/IPS sensors on these segments, expect it to appear as a light scan from the Polaris host and allowlist accordingly.</li>' +
+      '</ul>' +
     '</section>';
+}
+
+// Read the ARP presence-sweep toggle out of the DHCP Push tab. Returns
+// undefined when the tab didn't render (non-FMG/FortiGate types) so the
+// caller leaves the config field alone.
+function _readArpPresenceSweepToggle() {
+  var el = document.getElementById("f-arpPresenceSweep");
+  if (!el) return undefined;
+  return !!el.checked;
 }
 
 // Read the toggle's current value out of the Reservation Push tab. Returns
@@ -4311,7 +4339,7 @@ async function openCreateModal(type) {
     // helpers labels the active mode for FMG; standalone FortiGate ignores it
     // and always uses direct REST with the integration's own credentials —
     // pass true so the FMG copy doesn't render an irrelevant "direct" warning.
-    addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true) });
+    addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true, false) });
     addTabs.push({ key: "quarantine-push", label: "Quarantine Push", html: quarantinePushFormHTML(false, true) });
     // Description Sync tab (FMG + standalone FortiGate). Default off.
     addTabs.push({ key: "description-sync", label: "Description Sync", html: descriptionSyncFormHTML(false, true) });
@@ -4434,6 +4462,8 @@ async function openCreateModal(type) {
       if (isFmg || isFgt) {
         var pushToggleNew = _readPushReservationsToggle();
         if (pushToggleNew !== undefined) createConfig.pushReservations = pushToggleNew;
+        var arpSweepToggleNew = _readArpPresenceSweepToggle();
+        if (arpSweepToggleNew !== undefined) createConfig.arpPresenceSweep = arpSweepToggleNew;
         var quarantinePushToggleNew = _readPushQuarantineToggle();
         if (quarantinePushToggleNew !== undefined) createConfig.pushQuarantine = quarantinePushToggleNew;
         var syncDescriptionsNew = _readSyncDescriptionsToggle();
@@ -4721,7 +4751,7 @@ async function openEditModal(id) {
         editTabs.push({
           key: "push",
           label: "DHCP Push",
-          html: reservationPushFormHTML(config.pushReservations === true, pushUseProxy),
+          html: reservationPushFormHTML(config.pushReservations === true, pushUseProxy, config.arpPresenceSweep === true),
         });
         editTabs.push({
           key: "quarantine-push",
@@ -4854,6 +4884,8 @@ async function openEditModal(id) {
         // future integration type that doesn't expose them); leave unchanged.
         var pushToggle = _readPushReservationsToggle();
         if (pushToggle !== undefined) editConfig.pushReservations = pushToggle;
+        var arpSweepToggle = _readArpPresenceSweepToggle();
+        if (arpSweepToggle !== undefined) editConfig.arpPresenceSweep = arpSweepToggle;
         var quarantinePushToggle = _readPushQuarantineToggle();
         if (quarantinePushToggle !== undefined) editConfig.pushQuarantine = quarantinePushToggle;
         var syncDescriptionsEdit = _readSyncDescriptionsToggle();

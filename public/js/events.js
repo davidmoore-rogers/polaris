@@ -1231,6 +1231,13 @@ function getAlertsFormData() {
     var lastSeen = a.lastSeenLeased
       ? '<div><strong>Last seen leased:</strong> ' + new Date(a.lastSeenLeased).toLocaleString() + '</div>'
       : '<div><strong>Last seen leased:</strong> <span style="color:var(--color-text-tertiary)">never</span></div>';
+    // ARP presence evidence (only rendered when it ever fired): the last time
+    // discovery saw the owning FortiGate's ARP table bind this IP to the
+    // reserved MAC. A stale row showing an old ARP confirmation means the
+    // device WAS provably on the wire then and has gone quiet since.
+    var arpSeen = a.lastSeenArp
+      ? '<div><strong>Last ARP confirmation:</strong> ' + new Date(a.lastSeenArp).toLocaleString() + '</div>'
+      : '';
     // Cross-signal: when an asset correlated (by MAC/IP) the row is only stale
     // because that asset is also absent — show its lastSeen so the operator
     // sees the device is gone from every signal, not just DHCP.
@@ -1273,6 +1280,7 @@ function getAlertsFormData() {
         device +
         pushed +
         lastSeen +
+        arpSeen +
         assetSeen +
         '<div><strong>Created:</strong> ' + new Date(a.createdAt).toLocaleString() + '</div>' +
         sinceLine +
